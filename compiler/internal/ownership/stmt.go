@@ -304,7 +304,7 @@ func optionalDepthType(t types.Type) int {
 }
 
 // isBorrowedOptionalType reports whether typ is a reference to an Optional
-// (`T?&` / `T?~`) — a borrowed optional, e.g. the result of `Arc[T?].borrow` or
+// (`T?&` / `T?~`) — a borrowed optional, e.g. the result of `Ref[T?].borrow` or
 // a `Mutex[T?]` guard's `.borrow`. T0850: an if-unwrap of such a scrutinee binds
 // a non-owning view, so its binding is marked Borrowed (not Owned).
 func isBorrowedOptionalType(typ types.Type) bool {
@@ -852,7 +852,7 @@ func resolveReturnOrigin(expr ast.Expr) string {
 // Two shapes need to be caught:
 //
 //  1. Static-type borrow — `return arc.borrow` (expr type is `T&`/`T~` non-Copy).
-//     `Arc[T].borrow` and `MutexGuard[T].borrow` return `T&` post-T0381.
+//     `Ref[T].borrow` and `MutexGuard[T].borrow` return `T&` post-T0381.
 //
 //  2. Laundered borrow — `string borrowed = arc.borrow; return borrowed;`
 //     The typed local declaration decays `T&` → `T` so the expr's static type
@@ -1155,7 +1155,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	if s.Binding != "" && s.Binding != "_" {
-		// T0850: a borrowed optional scrutinee (`T?&` / `T?~`, e.g. `Arc[T?].borrow`)
+		// T0850: a borrowed optional scrutinee (`T?&` / `T?~`, e.g. `Ref[T?].borrow`)
 		// binds a non-owning view of the external owner's payload — mark it Borrowed
 		// so moving it out (into an owned var-decl / `~` arg) is rejected (T0568),
 		// preventing a double-free with the owner's drop. Owned optionals stay Owned.

@@ -2420,7 +2420,8 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 	case types.IsChannel(innerElem) || named == types.TypChannel:
 		dupedInner = c.dupChannel(innerVal)
 	case types.IsArc(innerElem):
-		dupedInner = c.dupArc(innerVal)
+		arcElem, _ := types.AsArc(innerElem)
+		dupedInner = c.dupArc(innerVal, arcElem)
 	case types.IsWeak(innerElem):
 		weakElem, _ := types.AsWeak(innerElem)
 		dupedInner = c.dupWeak(innerVal, weakElem)
@@ -2451,13 +2452,13 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 	)
 }
 
-// getOrCreateArcDrop lazily creates a per-element-type drop function for Arc[T].
-// T0155: Arc[T] atomic reference counting.
+// getOrCreateArcDrop lazily creates a per-element-type drop function for Ref[T].
+// T0155: Ref[T] atomic reference counting.
 // The drop function atomically decrements the refcount. When it reaches zero,
 // drops the inner T value (if T needs dropping) then frees the allocation.
 func (c *Compiler) getOrCreateArcDrop(elemType types.Type) *ir.Func {
 	elemName := typeArgStr(elemType)
-	funcName := "Arc[" + elemName + "].drop"
+	funcName := "Ref[" + elemName + "].drop"
 
 	if fn, ok := c.funcs[funcName]; ok {
 		if len(fn.Blocks) > 0 {
@@ -2477,7 +2478,7 @@ func (c *Compiler) getOrCreateArcDrop(elemType types.Type) *ir.Func {
 	return fn
 }
 
-// defineArcDropBody generates the body of an Arc[T] drop function.
+// defineArcDropBody generates the body of an Ref[T] drop function.
 // Null-checks, atomically decrements strong_count. When strong_count reaches 0:
 // drops inner T, then decrements weak_count. When weak_count reaches 0: frees allocation.
 // T0157: Two-stage deallocation — strong_count controls T lifetime, weak_count controls allocation.
@@ -2485,6 +2486,7 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
 	arcStructTy := arcStructType(elemLLVM)
 	thisParam := fn.Params[0]
+	atomic := c.refIsAtomic(elemType) // T0995: `confined element → non-atomic counter
 
 	entry := fn.NewBlock(".entry")
 
@@ -2498,7 +2500,7 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 	typedPtr := decrcBlk.NewBitCast(thisParam, irtypes.NewPointer(arcStructTy))
 	rcField := decrcBlk.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldStrong))
-	oldRC := c.emitAtomicAdd(decrcBlk, rcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	oldRC := c.emitRefCountAdd(decrcBlk, rcField, -1, irtypes.I64, atomic)
 	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldRC, constant.NewInt(irtypes.I64, 1))
 	dropBlk := fn.NewBlock("drop_value")
 	decrcBlk.NewCondBr(wasOne, dropBlk, doneBlk)
@@ -2508,7 +2510,7 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 	// Decrement weak_count (the +1 that represents all strong refs)
 	wcField := dropBlk.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
-	oldWC := c.emitAtomicAdd(dropBlk, wcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	oldWC := c.emitRefCountAdd(dropBlk, wcField, -1, irtypes.I64, atomic)
 	wcWasOne := dropBlk.NewICmp(enum.IPredEQ, oldWC, constant.NewInt(irtypes.I64, 1))
 	freeBlk := fn.NewBlock("free")
 	dropBlk.NewCondBr(wcWasOne, freeBlk, doneBlk)
@@ -2555,7 +2557,7 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		return blk
 	}
 
-	// T0850: Optional element (`Arc[T?]` / `Mutex[T?]`) — load the `{i1, inner}`
+	// T0850: Optional element (`Ref[T?]` / `Mutex[T?]`) — load the `{i1, inner}`
 	// optional value and delegate to emitVariantFieldDrop, whose Optional branch
 	// (emitOptionalValueDrop) drops the present inner. Without this, extractNamed
 	// returns nil for an Optional, no case below fires, and the inner heap payload
@@ -2702,10 +2704,10 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 	return blk
 }
 
-// dupArc duplicates an Arc reference (i8* → i8*) by atomically incrementing
-// the reference count. T0155: Used to prevent use-after-free when an Arc field
-// is read from a type with drop.
-func (c *Compiler) dupArc(ptr value.Value) value.Value {
+// dupArc duplicates a Ref reference (i8* → i8*) by incrementing the reference
+// count. T0155: Used to prevent use-after-free when a Ref field is read from a
+// type with drop. T0995: the increment is non-atomic when elemType is `confined.
+func (c *Compiler) dupArc(ptr value.Value, elemType types.Type) value.Value {
 	entryBlock := c.block
 	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
 	incBlock := c.newBlock("arcdup.inc")
@@ -2715,7 +2717,7 @@ func (c *Compiler) dupArc(ptr value.Value) value.Value {
 	c.block = incBlock
 	// Refcount is at offset 0 (i64)
 	rcPtr := c.block.NewBitCast(ptr, irtypes.NewPointer(irtypes.I64))
-	c.emitAtomicAdd(c.block, rcPtr, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	c.emitRefCountAdd(c.block, rcPtr, 1, irtypes.I64, c.refIsAtomic(elemType))
 	incBlock.NewBr(mergeBlock)
 
 	c.block = mergeBlock
@@ -2742,7 +2744,7 @@ func (c *Compiler) dupWeak(ptr value.Value, elemType types.Type) value.Value {
 	typedPtr := incBlock.NewBitCast(ptr, irtypes.NewPointer(arcStructTy))
 	wcField := incBlock.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
-	c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	c.emitRefCountAdd(c.block, wcField, 1, irtypes.I64, c.refIsAtomic(elemType))
 	incBlock.NewBr(mergeBlock)
 
 	c.block = mergeBlock
@@ -2798,7 +2800,7 @@ func (c *Compiler) defineWeakDropBody(fn *ir.Func, elemType types.Type) {
 	typedPtr := decrcBlk.NewBitCast(thisParam, irtypes.NewPointer(arcStructTy))
 	wcField := decrcBlk.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
-	oldWC := c.emitAtomicAdd(decrcBlk, wcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	oldWC := c.emitRefCountAdd(decrcBlk, wcField, -1, irtypes.I64, c.refIsAtomic(elemType))
 	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldWC, constant.NewInt(irtypes.I64, 1))
 	freeBlk := fn.NewBlock("free")
 	decrcBlk.NewCondBr(wasOne, freeBlk, doneBlk)
@@ -3418,8 +3420,8 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 		} else if _, isChan := types.AsChannel(fType); isChan || fNamed == types.TypChannel {
 			dup := c.dupChannel(fieldVal)
 			c.block.NewStore(dup, fieldPtr)
-		} else if _, isArc := types.AsArc(fType); isArc || fNamed == types.TypArc {
-			dup := c.dupArc(fieldVal)
+		} else if arcElem, isArc := types.AsArc(fType); isArc || fNamed == types.TypArc {
+			dup := c.dupArc(fieldVal, arcElem)
 			c.block.NewStore(dup, fieldPtr)
 		} else if _, isWeak := types.AsWeak(fType); isWeak || fNamed == types.TypWeak {
 			elemType := fType
@@ -8108,7 +8110,7 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		taskJoinElem = resolvedTaskElem
 		haveTaskJoin = true
 	case types.IsArc(elem) || innerNamed == types.TypArc:
-		// T0573: Optional[Arc[T]] field scope-exit — per-instantiation drop
+		// T0573: Optional[Ref[T]] field scope-exit — per-instantiation drop
 		// decrements the refcount, drops the payload + frees the box on last ref.
 		// Without this case, Arc fell through to the heap-user-type path (gated
 		// by !isOpaqueContainerType) and silently leaked.
@@ -8341,7 +8343,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		taskJoinElem = resolvedTaskElem
 		haveTaskJoin = true
 	case types.IsArc(elem) || innerNamed == types.TypArc:
-		// T0573: Optional[Arc[T]] field reassignment — per-instantiation drop
+		// T0573: Optional[Ref[T]] field reassignment — per-instantiation drop
 		// decrements the refcount on the old value. Without this case, dispatch
 		// fell through to the heap-user-type path (gated by !isOpaqueContainerType)
 		// and old Arc values leaked on reassignment.

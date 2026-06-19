@@ -291,7 +291,7 @@ func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 		srcType = types.Substitute(srcType, c.typeSubst)
 	}
 	// T0850: peel a SharedRef/MutRef layer so a borrowed optional (`T?&`, e.g.
-	// `Arc[T?].borrow`) is recognized as the optional-unwrap case below — its cast
+	// `Ref[T?].borrow`) is recognized as the optional-unwrap case below — its cast
 	// dups the inner into an owned copy (genOptionalCastExpr borrowSource path), so
 	// the cast local owns it and must keep its drop flag, not be treated as a view.
 	switch ref := srcType.(type) {
@@ -1180,7 +1180,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			if c.typeSubst != nil && cmpExprType != nil {
 				cmpExprType = types.Substitute(cmpExprType, c.typeSubst)
 			}
-			// T0856: A borrowed optional (`T?&`/`T?~`, e.g. `Arc[T?]`/
+			// T0856: A borrowed optional (`T?&`/`T?~`, e.g. `Ref[T?]`/
 			// `Mutex[T?].borrow` with a value/Copy payload) auto-copies to a
 			// bare optional value at the borrow site — genArcBorrow/
 			// genMutexGuardBorrow load and return the full {i1,T} struct. The
@@ -4419,7 +4419,7 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// Determine if element type needs cloning
 	_, isCh := types.AsChannel(elemType)
 	innerElem, isVec := types.AsVector(elemType)
-	_, isArc := types.AsArc(elemType)
+	arcElem, isArc := types.AsArc(elemType)
 	weakElem, isWk := types.AsWeak(elemType)
 	isChannel := !isCloneableEnum && !isDupableEnum && (isCh || named == types.TypChannel)
 	isVector := !isCloneableEnum && !isDupableEnum && (isVec || named == types.TypVector)
@@ -4473,7 +4473,11 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 		} else if isChannel {
 			cloned = c.dupChannel(elemVal)
 		} else if isArcType {
-			cloned = c.dupArc(elemVal)
+			resolvedArcElem := arcElem
+			if c.typeSubst != nil && resolvedArcElem != nil {
+				resolvedArcElem = types.Substitute(resolvedArcElem, c.typeSubst)
+			}
+			cloned = c.dupArc(elemVal, resolvedArcElem)
 		} else if isWeakType {
 			resolvedWeakElem := weakElem
 			if c.typeSubst != nil {

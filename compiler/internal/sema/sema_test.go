@@ -14697,7 +14697,7 @@ func TestLevenshteinBasic(t *testing.T) {
 	}
 }
 
-// T0850: if-unwrap of a borrowed optional (`T?&`, here `Arc[T?].borrow`) is
+// T0850: if-unwrap of a borrowed optional (`T?&`, here `Ref[T?].borrow`) is
 // accepted — sema auto-derefs the SharedRef/MutRef and binds the inner. Was
 // previously rejected with "if-unwrap requires optional type, got Circle?&".
 func TestIfUnwrapBorrowedOptional(t *testing.T) {
@@ -14706,7 +14706,7 @@ func TestIfUnwrapBorrowedOptional(t *testing.T) {
 		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
 		test() {
 			Circle? init = Circle(name: "c", radius: 1.0);
-			a := Arc[Circle?](init);
+			a := Ref[Circle?](init);
 			if x := a.borrow {
 				_ := x.radius;
 			}
@@ -14714,11 +14714,11 @@ func TestIfUnwrapBorrowedOptional(t *testing.T) {
 	`)
 }
 
-// T0155: Arc[T] constructor requires exactly 1 argument.
+// T0155: Ref[T] constructor requires exactly 1 argument.
 func TestArcConstructorOneArg(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 		}
 	`)
 }
@@ -14726,7 +14726,7 @@ func TestArcConstructorOneArg(t *testing.T) {
 func TestArcConstructorNoArgs(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[int]();
+			a := Ref[int]();
 		}
 	`)
 	expectError(t, errs, "expects exactly 1 argument")
@@ -14735,7 +14735,7 @@ func TestArcConstructorNoArgs(t *testing.T) {
 func TestArcConstructorTooManyArgs(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[int](1, 2);
+			a := Ref[int](1, 2);
 		}
 	`)
 	expectError(t, errs, "expects exactly 1 argument")
@@ -14744,7 +14744,7 @@ func TestArcConstructorTooManyArgs(t *testing.T) {
 func TestArcConstructorWrongType(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[int]("hello");
+			a := Ref[int]("hello");
 		}
 	`)
 	expectError(t, errs, "cannot assign string")
@@ -14871,7 +14871,7 @@ func TestArcNonSharableElement(t *testing.T) {
 			int x;
 		}
 		test() {
-			a := Arc[Holder](Holder(x: 1));
+			a := Ref[Holder](Holder(x: 1));
 		}
 	`)
 	expectError(t, errs, "not sharable")
@@ -14883,10 +14883,153 @@ func TestArcNonSendableElement(t *testing.T) {
 			int x;
 		}
 		test() {
-			a := Arc[Holder](Holder(x: 1));
+			a := Ref[Holder](Holder(x: 1));
 		}
 	`)
 	expectError(t, errs, "not sendable")
+}
+
+// T0995: `confined makes a Ref[T] thread-confined — it may be constructed and
+// used freely within a thread (even when T is otherwise non-sharable), but is
+// rejected at any go/channel/Task boundary.
+
+func TestConfinedRefConstructAndUseOK(t *testing.T) {
+	checkOK(t, `
+		type Holder `+"`confined"+` {
+			int x;
+		}
+		test() {
+			a := Ref[Holder](Holder(x: 1));
+			v := a.borrow.x;
+			b := a.clone();
+		}
+	`)
+}
+
+func TestConfinedRefRejectedAtGoBlock(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`confined"+` {
+			int x;
+		}
+		test() {
+			a := Ref[Holder](Holder(x: 1));
+			t := go {
+				a.borrow.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestConfinedRefRejectedAtChannel(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`confined"+` {
+			int x;
+		}
+		test() {
+			ch := channel[Ref[Holder]](capacity: 1);
+		}
+	`)
+	expectError(t, errs, "not sendable")
+}
+
+func TestDefaultRefCrossesChannel(t *testing.T) {
+	// An unmarked (atomic) Ref of a sharable element is sendable across a channel.
+	checkOK(t, `
+		type Holder `+"`sharable"+` {
+			int x;
+		}
+		test() {
+			ch := channel[Ref[Holder]](capacity: 1);
+		}
+	`)
+}
+
+func TestConfinedSharableContradictory(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad `+"`confined `sharable"+` {
+			int x;
+		}
+	`)
+	expectError(t, errs, "contradictory")
+}
+
+// `confined applies to enums too: a confined enum may back a thread-confined Ref
+// (even when otherwise non-sharable) but is rejected at goroutine boundaries.
+
+func TestConfinedEnumRefConstructAndUseOK(t *testing.T) {
+	checkOK(t, `
+		enum Color `+"`confined"+` {
+			Red,
+			Value(int v)
+		}
+		test() {
+			a := Ref[Color](Color.Red);
+			b := a.clone();
+		}
+	`)
+}
+
+func TestConfinedEnumRejectedAtChannel(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color `+"`confined"+` {
+			Red,
+			Value(int v)
+		}
+		test() {
+			ch := channel[Ref[Color]](capacity: 1);
+		}
+	`)
+	expectError(t, errs, "not sendable")
+}
+
+func TestConfinedEnumSharableContradictory(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Bad `+"`confined `sharable"+` {
+			A,
+			B
+		}
+	`)
+	expectError(t, errs, "contradictory")
+}
+
+// `confined is a type/enum-only meta — applying it elsewhere is a target error.
+func TestConfinedMetaOnFunctionRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() `+"`confined"+` { }
+	`)
+	expectError(t, errs, "`confined cannot be applied to function")
+}
+
+// A `confined element opts a Weak out of cross-goroutine sharing just like Ref —
+// rejected at a channel boundary.
+func TestConfinedWeakRejectedAtChannel(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`confined"+` {
+			int x;
+		}
+		test() {
+			ch := channel[Weak[Holder]](capacity: 1);
+		}
+	`)
+	expectError(t, errs, "not sendable")
+}
+
+// IsConfined unwraps Optional: Ref over a `confined?` optional element is still
+// accepted (the confined element need not be sharable).
+func TestConfinedRefOptionalElementOK(t *testing.T) {
+	checkOK(t, `
+		type Holder `+"`confined"+` {
+			int x;
+		}
+		test() {
+			Holder? init = Holder(x: 1);
+			a := Ref[Holder?](init);
+			if v := a.borrow {
+				_ := v.x;
+			}
+		}
+	`)
 }
 
 func TestGoBlockNonSendableCapture(t *testing.T) {
@@ -15343,7 +15486,7 @@ func TestChannelSendableElement(t *testing.T) {
 func TestArcSendableAndSharableElement(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 		}
 	`)
 }
@@ -16025,7 +16168,7 @@ func TestT0381_ArrayLitStripsBorrowRef(t *testing.T) {
 	// of `string&` or fail subsequent .push/index operations.
 	checkOK(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			x := [a.borrow];
 			_ = x.len;
 		}
@@ -16037,8 +16180,8 @@ func TestT0381_ArrayLitStripsBorrowRef(t *testing.T) {
 func TestT0381_ArrayLitStripsLaterElementRef(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[string]("hi");
-			b := Arc[string]("bye");
+			a := Ref[string]("hi");
+			b := Ref[string]("bye");
 			x := ["first", a.borrow, b.borrow];
 			_ = x.len;
 		}
@@ -16052,7 +16195,7 @@ func TestT0381_ArrayLitStripsLaterElementRef(t *testing.T) {
 func TestT0488_IfMixedNonCopyRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			cond := true;
 			string x = if cond {
 				a.borrow
@@ -16070,7 +16213,7 @@ func TestT0488_IfMixedNonCopyRejected(t *testing.T) {
 func TestT0488_IfMixedNonCopyRejected_BorrowInElse(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			cond := true;
 			string x = if cond {
 				"other"
@@ -16088,7 +16231,7 @@ func TestT0488_IfMixedNonCopyRejected_BorrowInElse(t *testing.T) {
 func TestT0488_MatchMixedNonCopyRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			k := 1;
 			string x = match k {
 				1 => a.borrow,
@@ -16106,7 +16249,7 @@ func TestT0488_MatchMixedNonCopyRejected(t *testing.T) {
 func TestT0488_IfMixedNonCopyCloneOK(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			cond := true;
 			string x = if cond {
 				a.borrow.clone()
@@ -16124,7 +16267,7 @@ func TestT0488_IfMixedNonCopyCloneOK(t *testing.T) {
 func TestT0488_IfMixedCopyOK(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			cond := true;
 			int x = if cond {
 				a.borrow
@@ -16140,7 +16283,7 @@ func TestT0488_IfMixedCopyOK(t *testing.T) {
 func TestT0488_MatchMixedCopyOK(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			k := 1;
 			int x = match k {
 				1 => a.borrow,
@@ -16158,7 +16301,7 @@ func TestT0488_MatchMixedCopyOK(t *testing.T) {
 func TestT0488_IfMixedCopyOK_BorrowInElse(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			cond := true;
 			int x = if cond {
 				0
@@ -16211,7 +16354,7 @@ func TestT0488_IfMutRefMixedCopyOK(t *testing.T) {
 func TestT0488_MatchMultiArmMixedRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			k := 1;
 			string x = match k {
 				1 => a.borrow,
@@ -16230,7 +16373,7 @@ func TestT0488_MatchMultiArmMixedRejected(t *testing.T) {
 func TestT0381_BinaryOpOnSharedRefUnwraps(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			b := a.borrow == 42;
 			_ = b;
 		}
@@ -16242,7 +16385,7 @@ func TestT0381_BinaryOpOnSharedRefUnwraps(t *testing.T) {
 func TestT0381_ArithmeticOpOnSharedRefUnwraps(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](10);
+			a := Ref[int](10);
 			x := a.borrow + 5;
 			_ = x;
 		}
@@ -16254,7 +16397,7 @@ func TestT0381_ArithmeticOpOnSharedRefUnwraps(t *testing.T) {
 func TestT0381_UnaryOpOnSharedRefUnwraps(t *testing.T) {
 	checkOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			x := -a.borrow;
 			_ = x;
 		}
@@ -16491,8 +16634,8 @@ func TestT0545_TaskVectorLiteralOK(t *testing.T) {
 func TestT0545_VectorArcCloneOK(t *testing.T) {
 	checkOK(t, `
 		test() {
-			v := Vector[Arc[int]]();
-			v.push(Arc[int](7));
+			v := Vector[Ref[int]]();
+			v.push(Ref[int](7));
 			v2 := v.clone();
 		}
 	`)
@@ -16592,7 +16735,7 @@ func TestT0545_NestedFixedArrayInVectorError(t *testing.T) {
 func TestT0545_VectorTupleArcCloneOK(t *testing.T) {
 	checkOK(t, `
 		test() {
-			v := Vector[(Arc[int], int)]();
+			v := Vector[(Ref[int], int)]();
 			v2 := v.clone();
 		}
 	`)
@@ -16765,9 +16908,9 @@ func TestT0616_VectorCloneInGenericArcOK(t *testing.T) {
 	checkOK(t, `
 		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
 		test_arc() {
-			v := Vector[Arc[int]]();
-			v.push(Arc[int](7));
-			v2 := dup[Arc[int]](v);
+			v := Vector[Ref[int]]();
+			v.push(Ref[int](7));
+			v2 := dup[Ref[int]](v);
 		}
 	`)
 }
@@ -16816,9 +16959,9 @@ func TestT0616_ThreeLevelTransitiveArcOK(t *testing.T) {
 		b[T](Vector[T] v) Vector[T] { return a[T](v); }
 		c[T](Vector[T] v) Vector[T] { return b[T](v); }
 		test_chain_arc() {
-			v := Vector[Arc[int]]();
-			v.push(Arc[int](1));
-			v2 := c[Arc[int]](v);
+			v := Vector[Ref[int]]();
+			v.push(Ref[int](1));
+			v2 := c[Ref[int]](v);
 		}
 	`)
 }
@@ -16863,7 +17006,7 @@ func TestT0616_MethodOnGenericOwnerArcOK(t *testing.T) {
 			copy() Vector[T] { return this.data.clone(); }
 		}
 		test_w() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.copy();
 		}
 	`)
@@ -16942,8 +17085,8 @@ func TestT0616_VectorCloneInferredArcOK(t *testing.T) {
 	checkOK(t, `
 		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
 		test_inferred_arc() {
-			v := Vector[Arc[int]]();
-			v.push(Arc[int](7));
+			v := Vector[Ref[int]]();
+			v.push(Ref[int](7));
 			v2 := dup(v);
 		}
 	`)
@@ -16976,8 +17119,8 @@ func TestT0616_NestedContainerInGenericBodyArcOK(t *testing.T) {
 			inner := Vector[Vector[T]]();
 		}
 		test_nested_arc() {
-			v := Vector[Arc[int]]();
-			wrap[Arc[int]](v);
+			v := Vector[Ref[int]]();
+			wrap[Ref[int]](v);
 		}
 	`)
 }
@@ -17033,7 +17176,7 @@ func TestT0616_MethodCallsGenericFreeFunctionArcOK(t *testing.T) {
 			copy_via_helper() Vector[T] { return clone_helper[T](this.data); }
 		}
 		test_method_calls_helper_arc() {
-			w := Wrapper[Arc[int]](data: [Arc[int](1)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](1)]);
 			v := w.copy_via_helper();
 		}
 	`)
@@ -17066,7 +17209,7 @@ func TestT0616_MethodInferredTypeArgArcOK(t *testing.T) {
 			copy_to[U](U _conv) Vector[T] { return this.data.clone(); }
 		}
 		test_method_infer_ok() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.copy_to(42);
 		}
 	`)
@@ -17431,7 +17574,7 @@ func TestT0627_MethodToMethodTransitiveArcOK(t *testing.T) {
 			outer_copy() Vector[T] { return this.inner_copy(); }
 		}
 		test_method_chain_arc() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.outer_copy();
 		}
 	`)
@@ -17464,7 +17607,7 @@ func TestT0627_MethodChainWithMethodTypeParamArcOK(t *testing.T) {
 			outer(int x) Vector[T] { return this.combine[int](x); }
 		}
 		test_method_param_chain() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.outer(42);
 		}
 	`)
@@ -17755,7 +17898,7 @@ func TestT0629_NamedGetterViaThisArcOK(t *testing.T) {
 			outer() Vector[T] { return this.cloned; }
 		}
 		test_named_getter_this_arc() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.outer();
 		}
 	`)
@@ -17768,7 +17911,7 @@ func TestT0629_NamedGetterConcreteArcOK(t *testing.T) {
 			get cloned Vector[T] { return this.data.clone(); }
 		}
 		test_named_getter_concrete_arc() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.cloned;
 		}
 	`)
@@ -17800,7 +17943,7 @@ func TestT0629_EnumMethodConcreteArcOK(t *testing.T) {
 			}
 		}
 		test_enum_method_concrete_arc() {
-			c := Container[Arc[int]].Holding([Arc[int](7)]);
+			c := Container[Ref[int]].Holding([Ref[int](7)]);
 			v := c.copy_inner();
 		}
 	`)
@@ -17819,7 +17962,7 @@ func TestT0629_EnumGetterConcreteArcOK(t *testing.T) {
 			}
 		}
 		test_enum_getter_concrete_arc() {
-			c := Container[Arc[int]].Holding([Arc[int](7)]);
+			c := Container[Ref[int]].Holding([Ref[int](7)]);
 			v := c.cloned;
 		}
 	`)
@@ -17882,7 +18025,7 @@ func TestT0629_NamedGetterInheritedViaThisArcOK(t *testing.T) {
 			outer() Vector[T] { return this.cloned; }
 		}
 		test_named_getter_inherited_this_arc() {
-			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			w := Wrapper[Ref[int]](data: [Ref[int](7)]);
 			v := w.outer();
 		}
 	`)
@@ -17929,7 +18072,7 @@ func TestT0629_EnumGetterViaThisArcOK(t *testing.T) {
 			outer() Vector[T] { return this.cloned; }
 		}
 		test_enum_getter_this_arc() {
-			c := Container[Arc[int]].Holding([Arc[int](7)]);
+			c := Container[Ref[int]].Holding([Ref[int](7)]);
 			v := c.outer();
 		}
 	`)
@@ -18151,10 +18294,10 @@ func TestT0482_EnumMatchWildcardHandleOK(t *testing.T) {
 // the deep predicate must skip the std Arc origin and return nil.
 func TestT0482_VectorArcFieldCloneOK(t *testing.T) {
 	checkOK(t, `
-		type Wrap { Arc[int] a; }
+		type Wrap { Ref[int] a; }
 		test() {
 			v := Vector[Wrap]();
-			v.push(Wrap(a: Arc[int](7)));
+			v.push(Wrap(a: Ref[int](7)));
 			v2 := v.clone();
 		}
 	`)

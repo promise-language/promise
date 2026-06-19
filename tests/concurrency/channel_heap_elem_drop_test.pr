@@ -55,12 +55,12 @@ chan_user_type_buffered_drop() `test {
   // 2 Box instances still buffered → pal_free'd by the element walk
 }
 
-// Channel[Arc[int]]: Arc handles left buffered at drop.
+// Channel[Ref[int]]: Arc handles left buffered at drop.
 chan_arc_buffered_drop() `test {
-  c := channel[Arc[int]](capacity: 2);
-  c.send(Arc[int](7));
-  c.send(Arc[int](8));
-  // none received — Arc[int].drop runs for each buffered handle
+  c := channel[Ref[int]](capacity: 2);
+  c.send(Ref[int](7));
+  c.send(Ref[int](8));
+  // none received — Ref[int].drop runs for each buffered handle
 }
 
 // Nested Channel[Channel[string]]: inner channel (with its own buffered
@@ -275,13 +275,13 @@ chan_generic_field_buffered_drop() `test {
   // w drops → mono ChanWrapper[string].drop → Channel[string].drop walk
 }
 
-// Arc[Channel[string]] — when the Arc refcount hits 0 its inner-drop must run
+// Ref[Channel[string]] — when the Arc refcount hits 0 its inner-drop must run
 // the channel's per-element walk. Exercises emitInnerDrop's Channel branch.
 chan_arc_wrapped_buffered_drop() `test {
   c := channel[string](capacity: 2);
   c.send(mk_str(1));
   c.send(mk_str(2));
-  a := Arc[Channel[string]](c);
+  a := Ref[Channel[string]](c);
   assert(true, "arc-wrapped channel dropped");
   // a drops → Arc inner drop → Channel[string].drop walks the 2 strings
 }
@@ -525,20 +525,20 @@ chan_string_forin_closed_empty() `test {
   // no body entered, no spurious drop of an uninitialized alloca, no leak
 }
 
-// Arc[int] element: for-in drains a channel[Arc[int]]. Each loop variable is
-// an Arc handle; the per-iteration drop must run Arc[int].drop (atomic refcount
+// Ref[int] element: for-in drains a channel[Ref[int]]. Each loop variable is
+// an Arc handle; the per-iteration drop must run Ref[int].drop (atomic refcount
 // decrement → frees the control block at 0), a distinct drop path from the
 // string/Vector/user-heap cases above. Zero leak (every handle is the last ref).
 chan_arc_forin_drained() `test {
-  c := channel[Arc[int]](capacity: 3);
-  c.send(Arc[int](7));
-  c.send(Arc[int](8));
-  c.send(Arc[int](9));
+  c := channel[Ref[int]](capacity: 3);
+  c.send(Ref[int](7));
+  c.send(Ref[int](8));
+  c.send(Ref[int](9));
   c.close();
   total := 0;
   for a in c {
     total = total + a.borrow; // a.borrow reads inner int; a dropped each iter
   }
   assert(total == 24, "forin arc sum");
-  // each Arc[int] handle dropped per-iteration (refcount 1→0) → zero leak
+  // each Ref[int] handle dropped per-iteration (refcount 1→0) → zero leak
 }

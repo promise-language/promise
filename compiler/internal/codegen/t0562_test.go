@@ -31,7 +31,7 @@ import (
 func TestT0562_OptionalNativeReceiverNoAliasClear(t *testing.T) {
 	ir := generateIR(t, `
 		caller() {
-			a := Arc[int](7);
+			a := Ref[int](7);
 			Weak[int]? opt = a.downgrade();
 		}
 		main() { caller(); }

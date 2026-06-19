@@ -20,10 +20,10 @@ dup_vec[T](Vector[T] v) Vector[T] {
 }
 
 test_generic_dup_arc() `test {
-  v := Vector[Arc[int]]();
-  v.push(Arc[int](7));
-  v.push(Arc[int](8));
-  v2 := dup_vec[Arc[int]](v);
+  v := Vector[Ref[int]]();
+  v.push(Ref[int](7));
+  v.push(Ref[int](8));
+  v2 := dup_vec[Ref[int]](v);
   assert(v2.len == 2, "generic dup arc len");
 }
 
@@ -60,9 +60,9 @@ outer_dup[T](Vector[T] v) Vector[T] {
 }
 
 test_transitive_dup_arc() `test {
-  v := Vector[Arc[int]]();
-  v.push(Arc[int](42));
-  v2 := outer_dup[Arc[int]](v);
+  v := Vector[Ref[int]]();
+  v.push(Ref[int](42));
+  v2 := outer_dup[Ref[int]](v);
   assert(v2.len == 1, "transitive dup arc len");
 }
 
@@ -120,7 +120,7 @@ test_method_on_generic_int() `test {
 }
 
 test_method_on_generic_arc() `test {
-  w := Wrapper[Arc[int]](data: [Arc[int](7), Arc[int](8)]);
+  w := Wrapper[Ref[int]](data: [Ref[int](7), Ref[int](8)]);
   w2 := w.clone();
   assert(w2.data.len == 2, "Arc element through synth clone");
 }
@@ -143,7 +143,7 @@ type Chainer[T] {
 }
 
 test_method_chain_arc() `test {
-  c := Chainer[Arc[int]](data: [Arc[int](1), Arc[int](2)]);
+  c := Chainer[Ref[int]](data: [Ref[int](1), Ref[int](2)]);
   v := c.outer_chain();
   assert(v.len == 2, "method chain arc len");
 }
@@ -166,13 +166,13 @@ type Holder[T] {
 }
 
 test_named_getter_chain_arc() `test {
-  h := Holder[Arc[int]](data: [Arc[int](1), Arc[int](2), Arc[int](3)]);
+  h := Holder[Ref[int]](data: [Ref[int](1), Ref[int](2), Ref[int](3)]);
   v := h.via_getter();
   assert(v.len == 3, "named getter chain arc len");
 }
 
 test_named_getter_concrete_arc() `test {
-  h := Holder[Arc[int]](data: [Arc[int](9)]);
+  h := Holder[Ref[int]](data: [Ref[int](9)]);
   v := h.cloned;
   assert(v.len == 1, "named getter concrete arc len");
 }
@@ -209,25 +209,25 @@ enum Box[T] {
 }
 
 test_enum_getter_arc() `test {
-  b := Box[Arc[int]].Filled([Arc[int](5), Arc[int](6)]);
+  b := Box[Ref[int]].Filled([Ref[int](5), Ref[int](6)]);
   v := b.cloned;
   assert(v.len == 2, "enum getter arc len");
 }
 
 test_enum_method_arc() `test {
-  b := Box[Arc[int]].Filled([Arc[int](7)]);
+  b := Box[Ref[int]].Filled([Ref[int](7)]);
   v := b.copy_items();
   assert(v.len == 1, "enum method arc len");
 }
 
 test_enum_getter_bare_arc() `test {
-  b := Box[Arc[int]].Bare;
+  b := Box[Ref[int]].Bare;
   v := b.cloned;
   assert(v.len == 0, "enum getter bare arc len");
 }
 
 test_enum_getter_via_this_arc() `test {
-  b := Box[Arc[int]].Filled([Arc[int](3), Arc[int](4), Arc[int](5)]);
+  b := Box[Ref[int]].Filled([Ref[int](3), Ref[int](4), Ref[int](5)]);
   v := b.outer_via_getter();
   assert(v.len == 3, "enum getter via this arc len");
 }
@@ -244,7 +244,7 @@ type ChildHolder[T] is Holder[T] {
 }
 
 test_getter_inherited_concrete_arc() `test {
-  ch := ChildHolder[Arc[int]](data: [Arc[int](1), Arc[int](2)]);
+  ch := ChildHolder[Ref[int]](data: [Ref[int](1), Ref[int](2)]);
   v := ch.cloned;
   assert(v.len == 2, "inherited getter concrete arc len");
 }
@@ -256,7 +256,7 @@ type ChildHolderViaThis[T] is Holder[T] {
 }
 
 test_getter_inherited_via_this_arc() `test {
-  ch := ChildHolderViaThis[Arc[int]](data: [Arc[int](3), Arc[int](4), Arc[int](5)]);
+  ch := ChildHolderViaThis[Ref[int]](data: [Ref[int](3), Ref[int](4), Ref[int](5)]);
   v := ch.via_inherited();
   assert(v.len == 3, "inherited getter via this arc len");
 }
@@ -275,7 +275,7 @@ type ChildMethodHolder[T] is MethodHolder[T] {
 }
 
 test_method_inherited_via_this_arc() `test {
-  cm := ChildMethodHolder[Arc[int]](data: [Arc[int](6), Arc[int](7)]);
+  cm := ChildMethodHolder[Ref[int]](data: [Ref[int](6), Ref[int](7)]);
   v := cm.via_inherited();
   assert(v.len == 2, "inherited method via this arc len");
 }
@@ -328,13 +328,13 @@ type GrandChildHolder[T] is MidHolder[T] {
 }
 
 test_grandparent_getter_concrete_arc() `test {
-  gc := GrandChildHolder[Arc[int]](data: [Arc[int](1), Arc[int](2)]);
+  gc := GrandChildHolder[Ref[int]](data: [Ref[int](1), Ref[int](2)]);
   v := gc.cloned;
   assert(v.len == 2, "transitive inherited getter concrete arc len");
 }
 
 test_grandparent_getter_via_this_arc() `test {
-  gc := GrandChildHolder[Arc[int]](data: [Arc[int](7), Arc[int](8), Arc[int](9)]);
+  gc := GrandChildHolder[Ref[int]](data: [Ref[int](7), Ref[int](8), Ref[int](9)]);
   v := gc.via_inherited();
   assert(v.len == 3, "transitive inherited getter via this arc len");
 }

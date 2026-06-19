@@ -218,24 +218,24 @@ test_t0647_map_value() `test {
 // IDENTICAL plain method compiled, ran, and was 0-leak. T0650 added the
 // ownership exemption (isUserIndexExpr), which also made
 // trackUserIndexResult's AsMutex/AsTask/AsMutexGuard branches reachable.
-take_arc_i(Arc[int] a) int {
+take_arc_i(Ref[int] a) int {
   return a.borrow;
 }
 
-// Arc[int] — operator returns an owned clone (refcount++); must be Arc-dropped
+// Ref[int] — operator returns an owned clone (refcount++); must be Arc-dropped
 // (refcount--) at statement end (temp / fn-arg) and scope exit (binding).
 type ArcBox {
-  Arc[int] a;
-  [](int i) Arc[int] {
+  Ref[int] a;
+  [](int i) Ref[int] {
     return this.a.clone();
   }
-  at(int i) Arc[int] {
+  at(int i) Ref[int] {
     return this.a.clone();
   }
 }
 
 test_t0647_arc_return() `test {
-  b := ArcBox(a: Arc[int](7));
+  b := ArcBox(a: Ref[int](7));
   assert(take_arc_i(b[0]) == 7, "operator Arc as borrow fn-arg (temp)");
   x := b[1];
   assert(x.borrow == 7, "operator Arc binding (claimed into x)");
@@ -245,7 +245,7 @@ test_t0647_arc_return() `test {
 // Weak[int] — operator returns an owned Weak from .downgrade(); must be
 // Weak-dropped.
 type WeakBox {
-  Arc[int] a;
+  Ref[int] a;
   [](int i) Weak[int] {
     return this.a.downgrade();
   }
@@ -255,7 +255,7 @@ type WeakBox {
 }
 
 test_t0647_weak_return() `test {
-  wb := WeakBox(a: Arc[int](9));
+  wb := WeakBox(a: Ref[int](9));
   if u := wb[0].upgrade() {
     assert(u.borrow == 9, "operator Weak temporary -> upgrade");
   } else {
@@ -436,12 +436,12 @@ type Src {
   at_guard(int i) MutexGuard[int]? {
     return this.held.lock();
   }
-  at_arc(int i) Arc[int]? {
-    return Arc[int](i + 100);
+  at_arc(int i) Ref[int]? {
+    return Ref[int](i + 100);
   }
 }
 
-take_arc_i_t0654(Arc[int] a) int {
+take_arc_i_t0654(Ref[int] a) int {
   return a.borrow;
 }
 

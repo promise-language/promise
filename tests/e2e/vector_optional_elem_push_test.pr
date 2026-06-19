@@ -237,8 +237,8 @@ test_push_bare_channel_into_optional_vector() `test {
 }
 
 test_push_bare_arc_into_optional_vector() `test {
-  Arc[int]?[] v = [];
-  Arc[int] a = Arc[int](5);
+  Ref[int]?[] v = [];
+  Ref[int] a = Ref[int](5);
   v.push(a);
   v.push(none);
   assert(v.len == 2, "arc + none pushed");
@@ -253,7 +253,7 @@ test_push_bare_mutex_into_optional_vector() `test {
 }
 
 test_push_bare_weak_into_optional_vector() `test {
-  Arc[int] a = Arc[int](7);
+  Ref[int] a = Ref[int](7);
   Weak[int]?[] v = [];
   Weak[int] w = a.downgrade();
   v.push(w);

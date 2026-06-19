@@ -279,21 +279,21 @@ test_t0648_owned_local_vardecl_guard() `test {
 // anything in the T0648 fix, so it is intentionally not exercised here.)
 
 type ArcRows {
-  Vector[Arc[int]] rows;
-  at(int i) Arc[int] {
+  Vector[Ref[int]] rows;
+  at(int i) Ref[int] {
     return this.rows[i];
   }
 }
 
 test_t0648_arc_element_method() `test {
-  v := ArcRows(rows: [Arc[int](7), Arc[int](9)]);
+  v := ArcRows(rows: [Ref[int](7), Ref[int](9)]);
   a := v.at(1);
   assert(a.borrow == 9, "arc element returned by value (method, bound)");
   assert(v.at(0).borrow == 7, "arc element method temporary use");
 }
 
 test_t0648_arc_element_vardecl() `test {
-  v := ArcRows(rows: [Arc[int](3), Arc[int](4)]);
+  v := ArcRows(rows: [Ref[int](3), Ref[int](4)]);
   r := v.rows[0];
   assert(r.borrow == 3, "arc direct field-index var-decl");
 }
@@ -306,8 +306,8 @@ type WeakRows {
 }
 
 test_t0648_weak_element_method() `test {
-  a0 := Arc[int](7);
-  a1 := Arc[int](9);
+  a0 := Ref[int](7);
+  a1 := Ref[int](9);
   v := WeakRows(rows: [a0.downgrade(), a1.downgrade()]);
   w := v.at(1);
   u := w.upgrade();
@@ -316,7 +316,7 @@ test_t0648_weak_element_method() `test {
 }
 
 test_t0648_weak_element_vardecl() `test {
-  a := Arc[int](3);
+  a := Ref[int](3);
   v := WeakRows(rows: [a.downgrade(), a.downgrade()]);
   r := v.rows[0];
   u := r.upgrade();

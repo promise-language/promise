@@ -1,6 +1,6 @@
-// T0157: Weak[T] — weak references to Arc[T]-managed data.
+// T0157: Weak[T] — weak references to Ref[T]-managed data.
 weak_downgrade_upgrade() `test {
-  a := Arc[int](42);
+  a := Ref[int](42);
   w := a.downgrade();
   // Upgrade while Arc still alive — should succeed
   if upgraded := w.upgrade() {
@@ -11,7 +11,7 @@ weak_downgrade_upgrade() `test {
 }
 
 weak_upgrade_same_value() `test {
-  a := Arc[int](99);
+  a := Ref[int](99);
   w := a.downgrade();
   b := a.clone();
   // Upgrade succeeds since strong refs still alive
@@ -23,7 +23,7 @@ weak_upgrade_same_value() `test {
 }
 
 weak_clone() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   w1 := a.downgrade();
   w2 := w1.clone();
   // Both should be able to upgrade
@@ -40,7 +40,7 @@ weak_clone() `test {
 }
 
 weak_multiple_downgrades() `test {
-  a := Arc[int](10);
+  a := Ref[int](10);
   w1 := a.downgrade();
   w2 := a.downgrade();
   w3 := a.downgrade();
@@ -63,7 +63,7 @@ weak_multiple_downgrades() `test {
 }
 
 weak_string() `test {
-  a := Arc[string]("hello");
+  a := Ref[string]("hello");
   w := a.downgrade();
   if upgraded := w.upgrade() {
     assert(upgraded.borrow == "hello", "string weak upgrade");
@@ -73,7 +73,7 @@ weak_string() `test {
 }
 
 weak_bool() `test {
-  a := Arc[bool](true);
+  a := Ref[bool](true);
   w := a.downgrade();
   if upgraded := w.upgrade() {
     assert(upgraded.borrow == true, "bool weak upgrade");
@@ -84,7 +84,7 @@ weak_bool() `test {
 
 // Helper: returns a Weak after the Arc goes out of scope (strong_count → 0).
 make_orphan_weak() Weak[int] {
-  a := Arc[int](42);
+  a := Ref[int](42);
   return a.downgrade();
   // Arc 'a' drops at function exit: strong_count 1→0, T dropped, weak_count 2→1.
   // Allocation survives because weak_count > 0.
@@ -102,7 +102,7 @@ weak_upgrade_after_drop() `test {
 }
 
 weak_cross_goroutine() `test(timeout: "5s") {
-  a := Arc[int](42);
+  a := Ref[int](42);
   w := a.downgrade();
   ch := channel[int]();
   go {
@@ -118,7 +118,7 @@ weak_cross_goroutine() `test(timeout: "5s") {
 
 // T0157: Cloned weak ref can independently upgrade.
 weak_clone_independent() `test {
-  a := Arc[int](55);
+  a := Ref[int](55);
   w1 := a.downgrade();
   w2 := w1.clone();
   // Both w1 and w2 can upgrade independently
@@ -134,11 +134,11 @@ weak_clone_independent() `test {
   }
 }
 
-// T0157: Arc[UserType].borrow is broken (T0272) — skipping user type weak test.
+// T0157: Ref[UserType].borrow is broken (T0272) — skipping user type weak test.
 
 // T0157: Multiple goroutines racing to upgrade the same Weak.
 weak_concurrent_upgrade() `test(timeout: "5s") {
-  a := Arc[int](100);
+  a := Ref[int](100);
   w := a.downgrade();
   ch := channel[int]();
   int i = 0;
@@ -170,7 +170,7 @@ type WeakFieldBox {
 }
 
 weak_field_no_leak() `test {
-  Arc[int] a = Arc[int](42);
+  Ref[int] a = Ref[int](42);
   Weak[int] w = a.downgrade();
   WeakFieldBox b = WeakFieldBox(value: w);
 }

@@ -721,54 +721,54 @@ t_index_strvec_some() `test {
 // the variable's binding drops it.
 // ============================================================================
 
-// --- Arc[T] ident source: the reported repro. some leaked 1 alloc at HEAD. ---
+// --- Ref[T] ident source: the reported repro. some leaked 1 alloc at HEAD. ---
 
 t_arc_some() `test {
-  Arc[int]? a = Arc[int](7);
-  Arc[int] b = Arc[int](9);
+  Ref[int]? a = Ref[int](7);
+  Ref[int] b = Ref[int](9);
   assert((a ?: b).borrow == 7, "arc some");
 }
 
 t_arc_none() `test {
-  Arc[int]? a = none;
-  Arc[int] b = Arc[int](9);
+  Ref[int]? a = none;
+  Ref[int] b = Ref[int](9);
   assert((a ?: b).borrow == 9, "arc none");
 }
 
 // temporary-optional source: a call result is never scope-tracked, so the some-path
 // inner is orphaned and the result must own + free it once.
-mk_opt_arc() Arc[int]? {
-  return Arc[int](7);
+mk_opt_arc() Ref[int]? {
+  return Ref[int](7);
 }
 
 t_arc_temp_some() `test {
-  Arc[int] b = Arc[int](9);
+  Ref[int] b = Ref[int](9);
   assert((mk_opt_arc() ?: b).borrow == 7, "arc temp some");
 }
 
 // bound form: the variable claims the handle temp; only its scope binding drops it.
 t_arc_bound() `test {
-  Arc[int]? a = Arc[int](7);
-  Arc[int] b = Arc[int](9);
+  Ref[int]? a = Ref[int](7);
+  Ref[int] b = Ref[int](9);
   x := a ?: b;
   assert(x.borrow == 7, "arc bound");
 }
 
 // borrowed-param source: the caller owns and drops both operands; the some-path
 // inner is NOT orphaned, so the orphan gate skips tracking (no double-free, no leak).
-borrowed_arc_val(Arc[int]? a, Arc[int] b) int {
+borrowed_arc_val(Ref[int]? a, Ref[int] b) int {
   return (a ?: b).borrow;
 }
 
 t_arc_borrowed_some() `test {
-  Arc[int]? a = Arc[int](7);
-  Arc[int] b = Arc[int](9);
+  Ref[int]? a = Ref[int](7);
+  Ref[int] b = Ref[int](9);
   assert(borrowed_arc_val(a, b) == 7, "arc borrowed some");
 }
 
 t_arc_borrowed_none() `test {
-  Arc[int]? a = none;
-  Arc[int] b = Arc[int](9);
+  Ref[int]? a = none;
+  Ref[int] b = Ref[int](9);
   assert(borrowed_arc_val(a, b) == 9, "arc borrowed none");
 }
 
@@ -879,47 +879,47 @@ t_mutex_borrowed_none() `test {
 }
 
 // --- Weak[T] ident source: the inline elvis result is a Weak[int]; `.upgrade()`
-// borrows it (returning Arc[int]?) and the Weak temp must be dropped after. The
-// `?: Arc[int](0)` second elvis yields the Arc whose .borrow is read. ---
+// borrows it (returning Ref[int]?) and the Weak temp must be dropped after. The
+// `?: Ref[int](0)` second elvis yields the Arc whose .borrow is read. ---
 
 t_weak_some() `test {
-  Arc[int] keep = Arc[int](7);
+  Ref[int] keep = Ref[int](7);
   Weak[int]? a = keep.downgrade();
   Weak[int] b = keep.downgrade();
-  assert(((a ?: b).upgrade() ?: Arc[int](0)).borrow == 7, "weak some");
+  assert(((a ?: b).upgrade() ?: Ref[int](0)).borrow == 7, "weak some");
 }
 
 t_weak_none() `test {
-  Arc[int] keep = Arc[int](7);
+  Ref[int] keep = Ref[int](7);
   Weak[int]? a = none;
   Weak[int] b = keep.downgrade();
-  assert(((a ?: b).upgrade() ?: Arc[int](0)).borrow == 7, "weak none");
+  assert(((a ?: b).upgrade() ?: Ref[int](0)).borrow == 7, "weak none");
 }
 
-mk_opt_weak(Arc[int] &src) Weak[int]? {
+mk_opt_weak(Ref[int] &src) Weak[int]? {
   return src.downgrade();
 }
 
 t_weak_temp_some() `test {
-  Arc[int] keep = Arc[int](7);
+  Ref[int] keep = Ref[int](7);
   Weak[int] b = keep.downgrade();
-  assert(((mk_opt_weak(keep) ?: b).upgrade() ?: Arc[int](0)).borrow == 7, "weak temp some");
+  assert(((mk_opt_weak(keep) ?: b).upgrade() ?: Ref[int](0)).borrow == 7, "weak temp some");
 }
 
 t_weak_bound() `test {
-  Arc[int] keep = Arc[int](7);
+  Ref[int] keep = Ref[int](7);
   Weak[int]? a = keep.downgrade();
   Weak[int] b = keep.downgrade();
   w := a ?: b;
-  assert((w.upgrade() ?: Arc[int](0)).borrow == 7, "weak bound");
+  assert((w.upgrade() ?: Ref[int](0)).borrow == 7, "weak bound");
 }
 
 borrowed_weak_val(Weak[int]? a, Weak[int] b) int {
-  return ((a ?: b).upgrade() ?: Arc[int](0)).borrow;
+  return ((a ?: b).upgrade() ?: Ref[int](0)).borrow;
 }
 
 t_weak_borrowed_some() `test {
-  Arc[int] keep = Arc[int](7);
+  Ref[int] keep = Ref[int](7);
   Weak[int]? a = keep.downgrade();
   Weak[int] b = keep.downgrade();
   assert(borrowed_weak_val(a, b) == 7, "weak borrowed some");

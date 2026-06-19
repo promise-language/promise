@@ -184,9 +184,9 @@ func TestT0648_OwnedLocalNestedIndexUnchanged(t *testing.T) {
 // The fix suppresses dupContainerFieldAccess across the index *target* eval
 // regardless of the element type, so it protects the Arc element branch
 // (expr.go:8793) identically to the Vector branch. `return this.rows[i]`
-// where `rows: Vector[Arc[int]]` on an owner-droppable type must dup ONLY the
+// where `rows: Vector[Ref[int]]` on an owner-droppable type must dup ONLY the
 // single indexed Arc (an `arcdup.inc` refcount bump), NOT deep-clone the
-// whole outer `Vector[Arc[int]]`. Pre-fix the `this.rows` field read consumed
+// whole outer `Vector[Ref[int]]`. Pre-fix the `this.rows` field read consumed
 // the flag and deep-cloned the entire outer container — and since Arc
 // elements are droppable, emitVectorElementCloneLoop would emit a
 // `vecclone.*` clone loop, then track-and-drop the whole clone (`vecdrop.*`)
@@ -196,8 +196,8 @@ func TestT0648_OwnedLocalNestedIndexUnchanged(t *testing.T) {
 // proof is test_t0648_arc_element_* in the e2e file.
 func TestT0648_ArcElementDupsElementNotWholeOuter(t *testing.T) {
 	ir := generateIR(t, `
-		type ArcRows { Vector[Arc[int]] rows; at(int i) Arc[int] { return this.rows[i]; } }
-		caller() { v := ArcRows(rows: [Arc[int](7), Arc[int](9)]); a := v.at(0); n := a.borrow; }
+		type ArcRows { Vector[Ref[int]] rows; at(int i) Ref[int] { return this.rows[i]; } }
+		caller() { v := ArcRows(rows: [Ref[int](7), Ref[int](9)]); a := v.at(0); n := a.borrow; }
 		main() { caller(); }
 	`)
 	body := extractFunction(ir, "ArcRows.at")
@@ -213,13 +213,13 @@ func TestT0648_ArcElementDupsElementNotWholeOuter(t *testing.T) {
 			"(expr.go:8793 branch); none found — the dupContainerFieldAccess flag "+
 			"was consumed by the `this.rows` field read (T0648 pre-fix):\n%s", body)
 	}
-	// No whole-outer deep-clone: pre-fix the whole `Vector[Arc[int]]` was
+	// No whole-outer deep-clone: pre-fix the whole `Vector[Ref[int]]` was
 	// deep-cloned; Arc elements are droppable so emitVectorElementCloneLoop
 	// emits a `vecclone.*` loop. Post-fix only the single Arc is dup'd.
 	if strings.Contains(body, "vecclone.") {
 		t.Errorf("found a whole-outer deep-clone loop (vecclone.*) in @ArcRows.at — "+
 			"the dupContainerFieldAccess flag was wrongly consumed by the `this.rows` "+
-			"field read, deep-cloning the entire outer Vector[Arc[int]] (T0648 "+
+			"field read, deep-cloning the entire outer Vector[Ref[int]] (T0648 "+
 			"pre-fix UAF, element-type-agnostic):\n%s", body)
 	}
 	// `this.rows` is borrowed by the method — never dropped in-body. A

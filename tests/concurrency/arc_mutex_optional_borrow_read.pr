@@ -1,4 +1,4 @@
-// T0856: Binding Arc[T?]/Mutex[T?].borrow (value-type payload) to a typed
+// T0856: Binding Ref[T?]/Mutex[T?].borrow (value-type payload) to a typed
 // optional var spuriously re-wrapped an already-optional value, panicking
 // codegen with an insertvalue elem-type mismatch. The `.borrow` getter returns
 // `T &` (a SharedRef-to-optional); for a value/Copy payload it auto-copies to a
@@ -13,7 +13,7 @@ type Pt {
 
 arc_optional_value_borrow_read() `test {
   int? init = 5;
-  Arc[int?] a = Arc[int?](init);
+  Ref[int?] a = Ref[int?](init);
   int? av = a.borrow; // was: insertvalue panic
   assert(av! == 5, "arc borrow read");
 }
@@ -30,7 +30,7 @@ mutex_optional_value_borrow_read() `test {
 // preserve none rather than re-wrap into a present {i1=true, {i1,T}} value.
 arc_optional_none_borrow_read() `test {
   int? init = none;
-  Arc[int?] a = Arc[int?](init);
+  Ref[int?] a = Ref[int?](init);
   int? av = a.borrow;
   got := false;
   if x := av {
@@ -55,14 +55,14 @@ mutex_optional_none_borrow_read() `test {
 // path with differently-shaped {i1,T} structs.
 arc_optional_f64_borrow_read() `test {
   f64? init = 3.5;
-  Arc[f64?] a = Arc[f64?](init);
+  Ref[f64?] a = Ref[f64?](init);
   f64? av = a.borrow;
   assert(av! == 3.5, "arc f64 borrow read");
 }
 
 arc_optional_bool_borrow_read() `test {
   bool? init = true;
-  Arc[bool?] a = Arc[bool?](init);
+  Ref[bool?] a = Ref[bool?](init);
   bool? av = a.borrow;
   assert(av! == true, "arc bool borrow read");
 }
@@ -71,7 +71,7 @@ arc_optional_bool_borrow_read() `test {
 // embeds the struct by value, the widest auto-copy case.
 arc_optional_struct_borrow_read() `test {
   Pt? init = Pt(x: 1, y: 2);
-  Arc[Pt?] a = Arc[Pt?](init);
+  Ref[Pt?] a = Ref[Pt?](init);
   Pt? av = a.borrow;
   p := av!;
   assert(p.x == 1 && p.y == 2, "arc struct borrow read");

@@ -404,6 +404,13 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	if c.hasAnnotation(d.Annotations, "not_sharable") {
 		named.SetNotSharable(true)
 	}
+	// T0995: `confined marks a type whose Ref[T]/Weak[T] is thread-confined —
+	// non-atomic counter, rejected at goroutine boundaries. Implies not_sharable
+	// for boundary purposes (a confined Ref may not cross goroutines).
+	if c.hasAnnotation(d.Annotations, "confined") {
+		named.SetConfined(true)
+		named.SetNotSharable(true)
+	}
 
 	// Detect and validate value types (all fields are `value placement).
 	// Must run after field/meta processing, before drop/new validation.
@@ -595,7 +602,7 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	}
 	// B0034: reject reference-typed fields until lifetime tracking is implemented
 	if containsRef(typ) {
-		c.errorf(fd.Pos(), "reference type %s cannot be used as a field type (stored references are not yet supported)", typ)
+		c.errorf(fd.Pos(), "reference type %s cannot be used as a field type — stored references are not supported; use Ref[T] for shared ownership", typ)
 		return
 	}
 	placement := c.resolvePlacement(fd.Annotations)
@@ -909,7 +916,7 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 			}
 			// B0034: reject reference-typed variant fields
 			if containsRef(ft) {
-				c.errorf(f.Pos(), "reference type %s cannot be used as a field type (stored references are not yet supported)", ft)
+				c.errorf(f.Pos(), "reference type %s cannot be used as a field type — stored references are not supported; use Ref[T] for shared ownership", ft)
 			}
 			fields[i] = types.NewVarField(f.Name, ft)
 		}
@@ -968,6 +975,11 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		enum.SetNotSendable(true)
 	}
 	if c.hasAnnotation(d.Annotations, "not_sharable") {
+		enum.SetNotSharable(true)
+	}
+	// T0995: `confined marks a type whose Ref[T]/Weak[T] is thread-confined.
+	if c.hasAnnotation(d.Annotations, "confined") {
+		enum.SetConfined(true)
 		enum.SetNotSharable(true)
 	}
 }

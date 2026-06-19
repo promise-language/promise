@@ -298,7 +298,7 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 // (Instance TypeArgs + user Named/Enum fields under the type-arg subst, Optional,
 // Tuple, Array; std native container origins are NOT field-recursed). Mirroring
 // the handle predicate means a refcounted container of a closure (e.g.
-// Arc[() -> int]) is conservatively rejected too — acceptable, since cloning a
+// Ref[() -> int]) is conservatively rejected too — acceptable, since cloning a
 // closure-containing container is semantically meaningless.
 //
 // Unlike the single-owner-handle predicate, recursion STOPS at any user

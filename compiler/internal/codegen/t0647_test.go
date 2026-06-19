@@ -153,10 +153,10 @@ func TestT0647_GenericUserIndexStringTempTracked(t *testing.T) {
 // The original T0647 suite only covered string/vector/heap-user/map; the
 // Arc/Weak/Mutex/Task/MutexGuard branches it mirrored from the *ast.CallExpr
 // path (T0555/T0561) had NO coverage. Arc/Weak ARE reachable (not single-owner
-// handles); a user `[](int i) Arc[int]` returning an owned clone must register
+// handles); a user `[](int i) Ref[int]` returning an owned clone must register
 // the result as a tracked stmt-temp and Arc-drop it at statement end via
-// @"Arc[int].drop" (getOrCreateArcDrop) — pre-fix the `[]` result was never
-// tracked → 1 leaked Arc cell per call. In __user.caller, @"Arc[int].drop"
+// @"Ref[int].drop" (getOrCreateArcDrop) — pre-fix the `[]` result was never
+// tracked → 1 leaked Arc cell per call. In __user.caller, @"Ref[int].drop"
 // uniquely denotes the tracked operator-return temp (the ArcBox receiver's own
 // Arc field is dropped inside @ArcBox.drop, a separate function — never inlined
 // here). The Mutex/Task/MutexGuard analogues of this branch are now reachable
@@ -166,8 +166,8 @@ func TestT0647_GenericUserIndexStringTempTracked(t *testing.T) {
 // user_index_heap_return_test.pr.
 func TestT0647_UserIndexArcHandleTracked(t *testing.T) {
 	ir := generateIR(t, `
-		type ArcBox { Arc[int] a; [](int i) Arc[int] { return this.a.clone(); } }
-		caller() { b := ArcBox(a: Arc[int](7)); n := b[0].borrow; }
+		type ArcBox { Ref[int] a; [](int i) Ref[int] { return this.a.clone(); } }
+		caller() { b := ArcBox(a: Ref[int](7)); n := b[0].borrow; }
 		main() { caller(); }
 	`)
 	body := extractFunction(ir, "__user.caller")
@@ -178,11 +178,11 @@ func TestT0647_UserIndexArcHandleTracked(t *testing.T) {
 		t.Fatalf("expected user-defined [] call @\"ArcBox.[]\" in caller:\n%s", body)
 	}
 	// AsArc branch fired: the owned operator-return Arc is tracked and dropped
-	// via @"Arc[int].drop" (getOrCreateArcDrop) in a stmt-temp cleanup block
+	// via @"Ref[int].drop" (getOrCreateArcDrop) in a stmt-temp cleanup block
 	// *after* the `[]` call. Anchor on the post-call slice: the ArcBox-ctor
-	// argument temp `Arc[int](7)` emits its own @"Arc[int].drop" in an
+	// argument temp `Ref[int](7)` emits its own @"Ref[int].drop" in an
 	// err.tmp.exec error-unwind block *before* the call (so a whole-body
-	// ordering check is unreliable); after the call, @"Arc[int].drop" uniquely
+	// ordering check is unreliable); after the call, @"Ref[int].drop" uniquely
 	// denotes the tracked operator-return temp (the receiver `b` is dropped via
 	// @ArcBox.drop — a separate function, never inlined here).
 	callIdx := strings.Index(body, `@"ArcBox.[]"`)
@@ -195,9 +195,9 @@ func TestT0647_UserIndexArcHandleTracked(t *testing.T) {
 			"for the owned Arc return (trackUserIndexResult AsArc); none found "+
 			"(pre-fix leak):\n%s", body)
 	}
-	if !strings.Contains(post, `call void @"Arc[int].drop"(`) {
+	if !strings.Contains(post, `call void @"Ref[int].drop"(`) {
 		t.Errorf("expected the tracked `[]` Arc return to be dropped via "+
-			"@\"Arc[int].drop\" (getOrCreateArcDrop) after the call; none found "+
+			"@\"Ref[int].drop\" (getOrCreateArcDrop) after the call; none found "+
 			"(pre-fix the `[]` result was never tracked → leaked Arc cell):\n%s", body)
 	}
 }

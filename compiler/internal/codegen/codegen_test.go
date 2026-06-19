@@ -2936,7 +2936,7 @@ func TestCastToBorrowTarget(t *testing.T) {
 	assertContains(t, ir, "cast.panic")
 }
 
-// T0850: an `Arc[T?]` (or `Mutex[T?]`) whose element is an Optional must drop
+// T0850: an `Ref[T?]` (or `Mutex[T?]`) whose element is an Optional must drop
 // the inner optional's heap payload when the last reference is released. The
 // Arc/Mutex inner-drop path (emitInnerDrop) dispatched on extractNamed, which is
 // nil for an Optional, so no case fired and the held value leaked. The fix adds
@@ -2946,16 +2946,16 @@ func TestArcOptionalElementInnerDrop(t *testing.T) {
 		type Box { string s; }
 		main() {
 			Box? init = Box(s: "x");
-			a := Arc[Box?](init);
+			a := Ref[Box?](init);
 			_ := a;
 		}
 	`)
-	arcDrop := extractDefine(ir, `"Arc[Box?].drop"`)
+	arcDrop := extractDefine(ir, `"Ref[Box?].drop"`)
 	assertContains(t, arcDrop, "call void @Box.drop(")
 }
 
 // T0850: an RTTI optional cast whose subject is a BORROWED optional (`T?&`,
-// here `Arc[Base?].borrow`) used to crash codegen — the non-optional RTTI path
+// here `Ref[Base?].borrow`) used to crash codegen — the non-optional RTTI path
 // fed the loaded `{i1,{i8*,i8*}}` optional to wrapOptional → insertvalue/store
 // type mismatch panic. The fix peels the SharedRef/MutRef and routes through
 // genOptionalCastExpr (borrowSource): it must no longer panic, must emit the
@@ -2968,7 +2968,7 @@ func TestBorrowedOptionalSubjectCast(t *testing.T) {
 		main() {
 			Base b = Der(name: "x");
 			Base? ob = b;
-			a := Arc[Base?](ob);
+			a := Ref[Base?](ob);
 			Der? d = a.borrow as Der;
 			if d { }
 		}
@@ -2983,7 +2983,7 @@ func TestBorrowedOptionalSubjectCast(t *testing.T) {
 	assertContains(t, extractDefine(ir, ".goroutine.main"), "heapdup.copy")
 }
 
-// T0850: a forced borrowed-optional cast (`Arc[T?].borrow as! U`) takes the
+// T0850: a forced borrowed-optional cast (`Ref[T?].borrow as! U`) takes the
 // optional-subject force path (panic on none/mismatch, return the duped inner).
 func TestBorrowedOptionalSubjectForceCast(t *testing.T) {
 	ir := generateIR(t, `
@@ -2992,7 +2992,7 @@ func TestBorrowedOptionalSubjectForceCast(t *testing.T) {
 		main() {
 			Base b = Der(name: "x");
 			Base? ob = b;
-			a := Arc[Base?](ob);
+			a := Ref[Base?](ob);
 			d := a.borrow as! Der;
 			_ := d.tag();
 		}
@@ -7051,8 +7051,8 @@ func TestFixedArrayIndexDupsArc(t *testing.T) {
 	// Arc element: dupArc emits an atomic refcount incref.
 	ir := generateIR(t, `
 		main() {
-			Arc[int][2] arr = [Arc[int](1), Arc[int](2)];
-			Arc[int] x = arr[0];
+			Ref[int][2] arr = [Ref[int](1), Ref[int](2)];
+			Ref[int] x = arr[0];
 		}
 	`)
 	assertContains(t, ir, "arridx.ok")
@@ -7066,8 +7066,8 @@ func TestFixedArrayIndexDupsWeak(t *testing.T) {
 	// Weak element: dupWeak emits the type-specific Weak clone helper.
 	ir := generateIR(t, `
 		main() {
-			Arc[int] keep0 = Arc[int](10);
-			Arc[int] keep1 = Arc[int](20);
+			Ref[int] keep0 = Ref[int](10);
+			Ref[int] keep1 = Ref[int](20);
 			Weak[int] w0 = keep0.downgrade();
 			Weak[int] w1 = keep1.downgrade();
 			Weak[int][2] arr = [w0, w1];
@@ -13013,12 +13013,12 @@ func TestT0776NonIdentForceUnwrapStringStillTracks(t *testing.T) {
 	}
 }
 
-// T0776: `((o)!).borrow` on an Arc[int]? ident source exercises the
+// T0776: `((o)!).borrow` on an Ref[int]? ident source exercises the
 // trackTempWithDrop branch of genOptionalForceUnwrap's type-aware temp tracker
 // (the path the string/vector tests above do NOT cover — those hit
 // trackStringTemp / trackVectorTempWithElemType). Without the ParenExpr peel,
 // the extracted i8* Arc handle gets registered as a NEW stmt-temp via
-// trackTempWithDrop after `unwrap.ok`, with a tmp.exec / Arc[int].drop
+// trackTempWithDrop after `unwrap.ok`, with a tmp.exec / Ref[int].drop
 // cleanup racing the source optional's own scope-drop on the same handle —
 // atomic refcount goes to zero twice → use-after-free. Mirrors
 // TestT0654_OptionalArcUnwrapConsumeTracked's discriminator (which asserts
@@ -13029,7 +13029,7 @@ func TestT0776NonIdentForceUnwrapStringStillTracks(t *testing.T) {
 func TestT0776ParenForceUnwrapArcNoTemp(t *testing.T) {
 	ir := generateIR(t, `
 		tfn() int {
-			Arc[int]? o = Arc[int](42);
+			Ref[int]? o = Ref[int](42);
 			return ((o)!).borrow;
 		}
 		main() { _ := tfn(); }
@@ -13048,8 +13048,8 @@ func TestT0776ParenForceUnwrapArcNoTemp(t *testing.T) {
 			"genOptionalForceUnwrap:\n%s", fn)
 	}
 	// The slice after `unwrap.ok.<N>:` is where genOptionalForceUnwrap would
-	// emit the spurious tmp.exec / Arc[int].drop pair if the ParenExpr peel
-	// were missing. After `unwrap.ok`, the only legitimate Arc[int].drop call
+	// emit the spurious tmp.exec / Ref[int].drop pair if the ParenExpr peel
+	// were missing. After `unwrap.ok`, the only legitimate Ref[int].drop call
 	// sites are the source optional's `optdrop.inner.*` blocks (one per
 	// return edge); those live INSIDE `optdrop.inner.*`, not `tmp.exec.*`.
 	post := fn[loc[0]:]
@@ -13064,8 +13064,8 @@ func TestT0776ParenForceUnwrapArcNoTemp(t *testing.T) {
 		if strings.HasSuffix(trimmed, ":") && !strings.HasPrefix(trimmed, "tmp.exec") {
 			inTmpExec = false
 		}
-		if inTmpExec && strings.Contains(line, `@"Arc[int].drop"`) {
-			t.Fatalf("found spurious @\"Arc[int].drop\" call in a tmp.exec "+
+		if inTmpExec && strings.Contains(line, `@"Ref[int].drop"`) {
+			t.Fatalf("found spurious @\"Ref[int].drop\" call in a tmp.exec "+
 				"block AFTER unwrap.ok — the ParenExpr peel in "+
 				"genOptionalForceUnwrap should skip temp tracking for "+
 				"`((o)!)` because the source optional already owns the Arc:\n%s", fn)
@@ -24987,9 +24987,9 @@ func TestVectorOptionalDupOnReadBranches(t *testing.T) {
 	// Arc branch — dupOptionalVectorElem → dupArc
 	ir = generateIR(t, `
 		main() {
-			Arc[int]? a = Arc[int](1);
-			Arc[int]?[] v = [a];
-			Arc[int]? x = v[0];
+			Ref[int]? a = Ref[int](1);
+			Ref[int]?[] v = [a];
+			Ref[int]? x = v[0];
 		}
 	`)
 	assertContains(t, ir, "optdup.dup")
@@ -25830,11 +25830,11 @@ func TestGoBlockVectorDropUniqueNames(t *testing.T) {
 	assertContains(t, ir, "vecdrop.idx")
 }
 
-// T0155: Arc[T] constructor allocates {i64, T} and stores refcount=1.
+// T0155: Ref[T] constructor allocates {i64, T} and stores refcount=1.
 func TestArcConstructorAllocAndRefcount(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 		}
 	`)
 	// Should allocate 24 bytes (i64 strong_count + i64 weak_count + i64 value) — T0157
@@ -25845,27 +25845,27 @@ func TestArcConstructorAllocAndRefcount(t *testing.T) {
 	assertContains(t, ir, "store i64 42")
 }
 
-// T0155: Arc[T] scope cleanup uses drop flag and calls Arc[int].drop.
+// T0155: Ref[T] scope cleanup uses drop flag and calls Ref[int].drop.
 func TestArcDropFlagAndCleanup(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 		}
 	`)
 	assertContains(t, ir, "%a.dropflag")
-	assertContains(t, ir, `call void @"Arc[int].drop"(`)
+	assertContains(t, ir, `call void @"Ref[int].drop"(`)
 }
 
-// T0155: Arc[T].drop function has correct structure: null check, atomic decrement, free.
+// T0155: Ref[T].drop function has correct structure: null check, atomic decrement, free.
 func TestArcDropFunctionBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 		}
 	`)
-	dropFn := extractFunction(ir, `"Arc[int].drop"`)
+	dropFn := extractFunction(ir, `"Ref[int].drop"`)
 	if dropFn == "" {
-		t.Fatal("expected Arc[int].drop function in IR")
+		t.Fatal("expected Ref[int].drop function in IR")
 	}
 	// Null check
 	assertContains(t, dropFn, "icmp eq")
@@ -25876,11 +25876,11 @@ func TestArcDropFunctionBody(t *testing.T) {
 	assertContains(t, dropFn, "call void @pal_free(")
 }
 
-// T0155: Arc[T].clone atomically increments refcount.
+// T0155: Ref[T].clone atomically increments refcount.
 func TestArcCloneAtomicIncrement(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			b := a.clone();
 		}
 	`)
@@ -25891,11 +25891,11 @@ func TestArcCloneAtomicIncrement(t *testing.T) {
 	assertContains(t, ir, "%b.dropflag")
 }
 
-// T0155: Arc[T] borrow getter loads value from allocation.
+// T0155: Ref[T] borrow getter loads value from allocation.
 func TestArcBorrowLoadsValue(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			int x = a.borrow;
 		}
 	`)
@@ -25907,7 +25907,7 @@ func TestArcBorrowLoadsValue(t *testing.T) {
 func TestWeakDowngradeUpgrade(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			w := a.downgrade();
 		}
 	`)
@@ -25921,7 +25921,7 @@ func TestWeakDowngradeUpgrade(t *testing.T) {
 func TestWeakDropFunctionBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			w := a.downgrade();
 		}
 	`)
@@ -25931,11 +25931,11 @@ func TestWeakDropFunctionBody(t *testing.T) {
 	assertContains(t, ir, "free:")
 }
 
-// T0157: Arc[T] drop now has two-stage deallocation with weak_count.
+// T0157: Ref[T] drop now has two-stage deallocation with weak_count.
 func TestArcDropTwoStageDeallocation(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 		}
 	`)
 	// Arc drop should have drop_value block (drops T + decrements weak_count)
@@ -25947,7 +25947,7 @@ func TestArcDropTwoStageDeallocation(t *testing.T) {
 func TestArcCloneChainFreshSSA(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			Arc[int] b = Arc[int](42).clone();
+			Ref[int] b = Ref[int](42).clone();
 		}
 	`)
 	// The clone result must be a fresh SSA value (ptrtoint+inttoptr) so stmtTemp
@@ -25960,7 +25960,7 @@ func TestArcCloneChainFreshSSA(t *testing.T) {
 func TestArcDowngradeChainFreshSSA(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			Weak[int] w = Arc[int](42).downgrade();
+			Weak[int] w = Ref[int](42).downgrade();
 		}
 	`)
 	// Downgrade must also produce a fresh SSA value for chain tracking
@@ -25972,7 +25972,7 @@ func TestArcDowngradeChainFreshSSA(t *testing.T) {
 func TestWeakCloneChainFreshSSA(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			Arc[int] a = Arc[int](99);
+			Ref[int] a = Ref[int](99);
 			Weak[int] w = a.downgrade().clone();
 		}
 	`)
@@ -25986,7 +25986,7 @@ func TestWeakCloneChainFreshSSA(t *testing.T) {
 func TestWeakCloneIR(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			w := a.downgrade();
 			w2 := w.clone();
 		}
@@ -26002,7 +26002,7 @@ func TestWeakCloneIR(t *testing.T) {
 func TestWeakUpgradeCASLoop(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			w := a.downgrade();
 			if upgraded := w.upgrade() {
 				int x = upgraded.borrow;
@@ -26017,16 +26017,16 @@ func TestWeakUpgradeCASLoop(t *testing.T) {
 	assertContains(t, ir, "cmpxchg")
 }
 
-// T0157: dupArc — reading an Arc[T] field from a droppable type increments strong refcount.
+// T0157: dupArc — reading an Ref[T] field from a droppable type increments strong refcount.
 func TestDupArcFieldFromDroppable(t *testing.T) {
 	ir := generateIR(t, `
 		type Holder {
-			Arc[int] a;
+			Ref[int] a;
 			drop(~this) {}
 		}
 		main() {
-			h := Holder(a: Arc[int](42));
-			Arc[int] copy = h.a;
+			h := Holder(a: Ref[int](42));
+			Ref[int] copy = h.a;
 		}
 	`)
 	// Should produce arcdup block for refcount increment (numeric suffix varies)
@@ -26042,7 +26042,7 @@ func TestDupWeakFieldFromDroppable(t *testing.T) {
 			drop(~this) {}
 		}
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			h := Holder(w: a.downgrade());
 			Weak[int] copy = h.w;
 		}
@@ -26306,7 +26306,7 @@ func TestT0838TaskHandlerBindingNeutralizesOwnerField(t *testing.T) {
 		`getelementptr \{ i1, i8\* \}, \{ i1, i8\* \}\* %\d+, i32 0, i32 0\s*\n\s*store i1 false`)
 }
 
-// T0367: Assigning Arc[T].borrow to a variable must clear the variable's drop
+// T0367: Assigning Ref[T].borrow to a variable must clear the variable's drop
 // flag — the borrow returns a non-owning reference, so the parent's drop owns
 // the inner value. Without the clear, both the borrow's drop and Arc.drop would
 // free the same buffer (double-free / segfault for heap T).
@@ -26314,7 +26314,7 @@ func TestArcBorrowClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			borrowed := a.borrow;
 		}
 	`)
@@ -26343,7 +26343,7 @@ func TestMutexGuardBorrowClearsDropFlag(t *testing.T) {
 // the inferred-decl variant (`borrowed := a.borrow`) still tests the
 // codegen behavior for the kept `T&` borrow type.
 
-// T0379: Reassigning Arc[T].borrow to an existing variable must clear the
+// T0379: Reassigning Ref[T].borrow to an existing variable must clear the
 // dropflag re-armed by the unconditional reset in the assignment path. After
 // the reassign-merge block, the sequence is: re-arm, store new pointer, clear
 // (T0379 fix). Without the fix, the trailing clear is missing.
@@ -26352,8 +26352,8 @@ func TestArcBorrowReassignClearsDropFlag(t *testing.T) {
 		main() {
 			v1 := [1, 2, 3];
 			v2 := [4, 5, 6];
-			a1 := Arc[int[]](v1);
-			a2 := Arc[int[]](v2);
+			a1 := Ref[int[]](v1);
+			a2 := Ref[int[]](v2);
 			borrowed := a1.borrow;
 			borrowed = a2.borrow;
 		}
@@ -26385,7 +26385,7 @@ func TestArcBorrowReassignToOwnedKeepsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			borrowed := a.borrow;
 			borrowed = [4, 5, 6];
 		}
@@ -26407,7 +26407,7 @@ func TestArcBorrowThroughIfClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			cond := true;
 			borrowed := if cond { a.borrow } else { a.borrow };
 		}
@@ -26421,7 +26421,7 @@ func TestArcBorrowThroughMatchClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			k := 1;
 			borrowed := match k { 1 => a.borrow, _ => a.borrow };
 		}
@@ -26456,7 +26456,7 @@ func TestArcBorrowThroughParensClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			borrowed := (a.borrow);
 		}
 	`)
@@ -26471,7 +26471,7 @@ func TestArcBorrowThroughMatchBlockArmsClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			k := 1;
 			borrowed := match k {
 				1 => { a.borrow },
@@ -26493,7 +26493,7 @@ func TestArcBorrowExplicitRefTypeClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			int[]& borrowed = a.borrow;
 		}
 	`)
@@ -26507,7 +26507,7 @@ func TestArcBorrowExplicitRefTypeClearsDropFlag(t *testing.T) {
 func TestArcBorrowCloneRetainsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			b := a.clone();
 		}
 	`)
@@ -26515,7 +26515,7 @@ func TestArcBorrowCloneRetainsDropFlag(t *testing.T) {
 	assertContains(t, ir, "%b.dropflag = alloca i1")
 	bad := regexp.MustCompile(`store i1 true, i1\* %b\.dropflag\s+store i1 false, i1\* %b\.dropflag`)
 	if bad.MatchString(ir) {
-		t.Errorf("expected dropflag for clone() result to stay armed; T0381 type-based check should not fire (RHS type is Arc[int], not Arc[int]&)\ngot:\n%s", ir)
+		t.Errorf("expected dropflag for clone() result to stay armed; T0381 type-based check should not fire (RHS type is Ref[int], not Ref[int]&)\ngot:\n%s", ir)
 	}
 }
 
@@ -26527,14 +26527,14 @@ func TestT0381_ChainedBorrowFieldAccess(t *testing.T) {
 	ir := generateIR(t, `
 		type Pt { int x; }
 		main() {
-			a := Arc[Pt](Pt(x: 7));
+			a := Ref[Pt](Pt(x: 7));
 			x := a.borrow.x;
 		}
 	`)
-	// The Arc[Pt] type and its drop should appear; sema/codegen lowering
+	// The Ref[Pt] type and its drop should appear; sema/codegen lowering
 	// of `.borrow.x` would fail without the SharedRef unwrap in genMemberExpr
 	// because the field 'x' is not present on the SharedRef wrapper itself.
-	assertContains(t, ir, "Arc[Pt].drop")
+	assertContains(t, ir, "Ref[Pt].drop")
 }
 
 // T0381: a `T&`-typed local that is later reassigned to an owned `T`
@@ -26546,7 +26546,7 @@ func TestT0381_BorrowLocalReassignedToOwnedDrops(t *testing.T) {
 		main() {
 			v := string[]();
 			v.push("hello");
-			a := Arc[string[]](v);
+			a := Ref[string[]](v);
 			string[]& borrowed = a.borrow;
 			borrowed = string[]();
 			borrowed.push("owned");
@@ -26659,34 +26659,34 @@ func TestMutexDropWithStringElement(t *testing.T) {
 	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
 }
 
-// T0272: Arc[T].drop calls user type's drop function + pal_free for heap user types.
+// T0272: Ref[T].drop calls user type's drop function + pal_free for heap user types.
 func TestArcDropWithUserType(t *testing.T) {
 	ir := generateIR(t, `
 		type P { int x; drop(~this) {} }
 		main() {
-			a := Arc[P](P(x: 5));
+			a := Ref[P](P(x: 5));
 		}
 	`)
-	dropFn := extractFunction(ir, `"Arc[P].drop"`)
+	dropFn := extractFunction(ir, `"Ref[P].drop"`)
 	if dropFn == "" {
-		t.Fatal("expected Arc[P].drop function in IR")
+		t.Fatal("expected Ref[P].drop function in IR")
 	}
 	// Should call user drop then pal_free for heap user type
 	assertContains(t, dropFn, "call void @P.drop(")
 	assertContains(t, dropFn, "call void @pal_free(")
 }
 
-// T0272: Arc[T].drop with user type that has no explicit drop — just pal_free.
+// T0272: Ref[T].drop with user type that has no explicit drop — just pal_free.
 func TestArcDropWithHeapUserTypeNoDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type Q { int x; int y; }
 		main() {
-			a := Arc[Q](Q(x: 1, y: 2));
+			a := Ref[Q](Q(x: 1, y: 2));
 		}
 	`)
-	dropFn := extractFunction(ir, `"Arc[Q].drop"`)
+	dropFn := extractFunction(ir, `"Ref[Q].drop"`)
 	if dropFn == "" {
-		t.Fatal("expected Arc[Q].drop function in IR")
+		t.Fatal("expected Ref[Q].drop function in IR")
 	}
 	// Heap user type without drop — should still free the instance
 	assertContains(t, dropFn, "call void @pal_free(")
@@ -26697,32 +26697,32 @@ func TestArcConstructorClaimsHeapTemp(t *testing.T) {
 	ir := generateIR(t, `
 		type R { int val; }
 		main() {
-			a := Arc[R](R(val: 42));
+			a := Ref[R](R(val: 42));
 			r := a.borrow;
 		}
 	`)
 	// The IR should NOT contain a pal_free of the R instance before the Arc drop.
 	// Specifically, the main function should not free the R instance directly —
-	// only the Arc[R].drop function should handle that.
+	// only the Ref[R].drop function should handle that.
 	mainFn := extractFunction(ir, "main")
 	if mainFn == "" {
 		t.Fatal("expected main function in IR")
 	}
 	// The heap temp for R should be claimed; no direct pal_free of the instance in main
 	// (Arc.drop handles it). Count pal_free calls in main — should only be for Arc itself.
-	dropFn := extractFunction(ir, `"Arc[R].drop"`)
+	dropFn := extractFunction(ir, `"Ref[R].drop"`)
 	if dropFn == "" {
-		t.Fatal("expected Arc[R].drop function in IR")
+		t.Fatal("expected Ref[R].drop function in IR")
 	}
 	assertContains(t, dropFn, "call void @pal_free(")
 }
 
-// T0273: Arc[Arc[T]] clears drop flag on inner variable to prevent double-drop.
+// T0273: Ref[Ref[T]] clears drop flag on inner variable to prevent double-drop.
 func TestArcConstructorClearsDropFlagOnIdent(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			inner := Arc[int](42);
-			outer := Arc[Arc[int]](inner);
+			inner := Ref[int](42);
+			outer := Ref[Ref[int]](inner);
 		}
 	`)
 	// The goroutine body should clear inner's drop flag after moving it into Arc.
@@ -26734,8 +26734,8 @@ func TestArcConstructorClearsDropFlagOnIdent(t *testing.T) {
 func TestMutexConstructorClearsDropFlagOnIdent(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](10);
-			m := Mutex[Arc[int]](a);
+			a := Ref[int](10);
+			m := Mutex[Ref[int]](a);
 		}
 	`)
 	assertContains(t, ir, "store i1 false")
@@ -26763,16 +26763,16 @@ func TestArcDropWithVectorElement(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 		}
 	`)
-	dropFn := extractFunction(ir, `"Arc[int[]].drop"`)
+	dropFn := extractFunction(ir, `"Ref[int[]].drop"`)
 	if dropFn == "" {
 		// Try alternative mangled name
-		dropFn = extractFunction(ir, `"Arc[Vector[int]].drop"`)
+		dropFn = extractFunction(ir, `"Ref[Vector[int]].drop"`)
 	}
 	if dropFn == "" {
-		t.Fatal("expected Arc[int[]].drop or Arc[Vector[int]].drop function in IR")
+		t.Fatal("expected Ref[int[]].drop or Ref[Vector[int]].drop function in IR")
 	}
 	assertContains(t, dropFn, "call void @Vector.drop(")
 }
@@ -26794,18 +26794,18 @@ func TestMutexDropWithSynthDropUserType(t *testing.T) {
 	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
 }
 
-// T0271: Lambda capturing Arc[T] uses envDropCallFn (i8* + drop fn), not envDropUserValueDrop.
+// T0271: Lambda capturing Ref[T] uses envDropCallFn (i8* + drop fn), not envDropUserValueDrop.
 func TestLambdaEnvDropArcCapture(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			f := move || -> int { return a.borrow; };
 			f();
 		}
 	`)
-	// The env drop function should call Arc[int].drop on the i8* field,
+	// The env drop function should call Ref[int].drop on the i8* field,
 	// not extract a {i8*, i8*} value struct (which would be type confusion).
-	assertContains(t, ir, `call void @"Arc[int].drop"(`)
+	assertContains(t, ir, `call void @"Ref[int].drop"(`)
 }
 
 // T0271: Lambda capturing Weak[T] uses envDropCallFn.
@@ -26818,7 +26818,7 @@ func TestLambdaEnvDropWeakCapture(t *testing.T) {
 			return false;
 		}
 		main() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			w := a.downgrade();
 			f := move || -> bool { return check(w.clone()); };
 			f();

@@ -112,7 +112,7 @@ test_close_consume_relock_close() `test {
 // MutexGuard.drop fires correctly off the explicit-close path under contention,
 // so every goroutine's increment is serialized and observed.
 test_concurrent_explicit_close() `test {
-  shared := Arc[Mutex[int]](Mutex[int](0));
+  shared := Ref[Mutex[int]](Mutex[int](0));
   done := channel[bool]();
   n := 8;
   i := 0;

@@ -13,13 +13,13 @@
 // concrete type's own method table. The fix resolves such sibling-default calls
 // through the interface during default-method-body synthesis.
 //
-// The shared `Arc[Mutex[int]]` counter lets these tests observe the byte counts
+// The shared `Ref[Mutex[int]]` counter lets these tests observe the byte counts
 // produced by the default chain even though the writer value is moved into the
 // `Writer` view (the underlying instance is otherwise unreachable afterward).
 // A minimal user Writer: only `write!` is implemented; `write_string` and
 // `write_line` come from the interface defaults.
 type CountWriter `public `doc("Test Writer that records the total bytes passed to write().") {
-  Arc[Mutex[int]] total;
+  Ref[Mutex[int]] total;
   write!(~this, u8[] ~buf) int `doc("Records buf.len into the shared counter and returns it.") {
     MutexGuard[int] g = this.total.borrow.lock();
     g.borrow = g.borrow + buf.len;
@@ -32,7 +32,7 @@ type CountWriter `public `doc("Test Writer that records the total bytes passed t
 // write(). Coercing the user type to a Writer view synthesizes write_string on
 // the concrete type; its return value comes straight from write().
 test_user_writer_write_string_default() `test {
-  Arc[Mutex[int]] counter = Arc[Mutex[int]](Mutex[int](0));
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
   CountWriter cw = CountWriter(total: counter.clone());
   Writer w = cw;
   int n = w.write_string("hello")?!;
@@ -44,7 +44,7 @@ test_user_writer_write_string_default() `test {
 // twice — the exact chain that triggered the codegen panic. Assert the full
 // "hi" + line_separator byte total landed in the underlying writer.
 test_user_writer_write_line_default_chain() `test {
-  Arc[Mutex[int]] counter = Arc[Mutex[int]](Mutex[int](0));
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
   CountWriter cw = CountWriter(total: counter.clone());
   Writer w = cw;
   w.write_line("hi")?!;
@@ -55,7 +55,7 @@ test_user_writer_write_line_default_chain() `test {
 // Mirrors the tracker reproducer shape — a `Tracked` type whose only own method
 // is `write!`, directly coerced to a `Writer` view — locking in the regression.
 type Tracked `public `doc("Tracker reproducer: Writer satisfier with only write! implemented.") {
-  Arc[Mutex[int]] log;
+  Ref[Mutex[int]] log;
   write!(~this, u8[] ~buf) int `doc("Records buf.len and returns it.") {
     MutexGuard[int] g = this.log.borrow.lock();
     g.borrow = g.borrow + buf.len;
@@ -65,7 +65,7 @@ type Tracked `public `doc("Tracker reproducer: Writer satisfier with only write!
 }
 
 test_tracked_reproducer_coercion() `test {
-  Arc[Mutex[int]] counter = Arc[Mutex[int]](Mutex[int](0));
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
   Tracked t = Tracked(log: counter.clone());
   Writer w = t;
   // Exercise both default levels on the reproducer type.
@@ -95,7 +95,7 @@ type Sink `public `structural `doc("Test interface whose emit_line default is de
 }
 
 type SinkWriter `public `doc("Sink satisfier that records total bytes written.") {
-  Arc[Mutex[int]] total;
+  Ref[Mutex[int]] total;
   emit!(~this, u8[] ~buf) int `doc("Records buf.len into the shared counter and returns it.") {
     MutexGuard[int] g = this.total.borrow.lock();
     g.borrow = g.borrow + buf.len;
@@ -105,7 +105,7 @@ type SinkWriter `public `doc("Sink satisfier that records total bytes written.")
 }
 
 test_sibling_default_declared_after_caller() `test {
-  Arc[Mutex[int]] counter = Arc[Mutex[int]](Mutex[int](0));
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
   SinkWriter sw = SinkWriter(total: counter.clone());
   Sink s = sw;
   s.emit_line("ab")?!;

@@ -3633,6 +3633,17 @@ main() {
 }
 ```
 
+**Atomicity is a transparent implementation detail.** A `Ref[T]` is reference-counted; *whether the counter is atomic is decided by the compiler, not the program.* A `Ref` that never crosses a `go`/channel/`Task` boundary uses a plain non-atomic counter; one that may be shared across goroutines uses an atomic counter. Semantics are identical either way. You can opt a type into the fast non-atomic counter explicitly by marking it `` `confined ``:
+
+```promise
+type LocalState `confined { int count; }
+
+s := Ref[LocalState](LocalState(count: 0));  // non-atomic counter
+go { s.borrow.count; };                       // error: confined Ref can't cross a goroutine
+```
+
+A `` `confined `` type's `Ref`/`Weak` is **rejected at any `go`/channel/`Task` boundary** (reusing the `` `sharable `` enforcement), which is what makes the plain counter sound. `` `confined `` and `` `sharable `` are mutually exclusive. (A later, optional whole-program analysis may infer confinement automatically; being conservative, it can only ever turn an atomic counter into a non-atomic one when the value provably stays on one thread — never a behavior change.)
+
 ---
 
 ## 18. Complete Example

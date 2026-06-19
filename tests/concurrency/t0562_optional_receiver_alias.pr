@@ -11,7 +11,7 @@
 // Optional typed decl. Pre-fix: leaks 1 allocation (the Arc cell — Arc.drop
 // never fires because the drop flag was wrongly cleared).
 test_optional_weak_decl() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   Weak[int]? opt = a.downgrade();
   assert(opt is present, "Optional[Weak] from downgrade() must be present");
 }
@@ -27,7 +27,7 @@ test_optional_mutexguard_decl() `test {
 // Optional[Weak] via reassignment (instead of typed decl). Same code path
 // through maybeClearReceiverDropFlag from the call site in genAssignStmt.
 test_optional_weak_decl_assigned() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   Weak[int]? opt = none;
   opt = a.downgrade();
   assert(opt is present, "Optional[Weak] reassign from downgrade() must be present");

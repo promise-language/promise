@@ -7,38 +7,38 @@
 // Both switches previously had no Arc/Weak/Mutex/MutexGuard cases and fell
 // through to the heap-user-type path (gated by !isOpaqueContainerType), so
 // these branches were never taken and old handles leaked.
-// --- Optional[Arc[T]] field, some at scope exit ---
+// --- Optional[Ref[T]] field, some at scope exit ---
 type T0573ArcHolder {
-  Arc[int]? a;
+  Ref[int]? a;
 }
 
 test_optional_arc_field_scope_exit() `test {
-  h := T0573ArcHolder(a: Arc[int](1));
+  h := T0573ArcHolder(a: Ref[int](1));
 }
 
 test_optional_arc_field_scope_exit_none() `test {
   h := T0573ArcHolder(a: none);
 }
 
-// --- Optional[Arc[T]] field, reassignment some → some ---
+// --- Optional[Ref[T]] field, reassignment some → some ---
 
 test_optional_arc_field_reassign_some_some() `test {
-  h := T0573ArcHolder(a: Arc[int](1));
-  h.a = Arc[int](2);
+  h := T0573ArcHolder(a: Ref[int](1));
+  h.a = Ref[int](2);
 }
 
-// --- Optional[Arc[T]] field, reassignment some → none ---
+// --- Optional[Ref[T]] field, reassignment some → none ---
 
 test_optional_arc_field_reassign_some_none() `test {
-  h := T0573ArcHolder(a: Arc[int](1));
+  h := T0573ArcHolder(a: Ref[int](1));
   h.a = none;
 }
 
-// --- Optional[Arc[T]] field, none → some assign ---
+// --- Optional[Ref[T]] field, none → some assign ---
 
 test_optional_arc_field_assign_after_none() `test {
   h := T0573ArcHolder(a: none);
-  h.a = Arc[int](42);
+  h.a = Ref[int](42);
 }
 
 // --- Optional[Weak[T]] field, some at scope exit ---
@@ -48,7 +48,7 @@ type T0573WeakHolder {
 }
 
 test_optional_weak_field_scope_exit() `test {
-  a := Arc[int](1);
+  a := Ref[int](1);
   h := T0573WeakHolder(w: a.downgrade());
 }
 
@@ -59,7 +59,7 @@ test_optional_weak_field_scope_exit_none() `test {
 // --- Optional[Weak[T]] field, reassignment some → some ---
 
 test_optional_weak_field_reassign_some_some() `test {
-  a := Arc[int](1);
+  a := Ref[int](1);
   h := T0573WeakHolder(w: a.downgrade());
   h.w = a.downgrade();
 }
@@ -67,7 +67,7 @@ test_optional_weak_field_reassign_some_some() `test {
 // --- Optional[Weak[T]] field, reassignment some → none ---
 
 test_optional_weak_field_reassign_some_none() `test {
-  a := Arc[int](1);
+  a := Ref[int](1);
   h := T0573WeakHolder(w: a.downgrade());
   h.w = none;
 }
@@ -75,7 +75,7 @@ test_optional_weak_field_reassign_some_none() `test {
 // --- Optional[Weak[T]] field, none → some assign ---
 
 test_optional_weak_field_assign_after_none() `test {
-  a := Arc[int](1);
+  a := Ref[int](1);
   h := T0573WeakHolder(w: none);
   h.w = a.downgrade();
 }
@@ -118,21 +118,21 @@ test_optional_mutex_field_assign_after_none() `test {
 // --- Mixed-field holder: Optional handles with a sibling non-Optional field ---
 
 type T0573MixedHolder {
-  Arc[int]? a;
+  Ref[int]? a;
   Weak[int]? w;
   Mutex[int]? m;
   string label;
 }
 
 test_mixed_optional_handle_fields_scope_exit() `test {
-  arc := Arc[int](10);
-  h := T0573MixedHolder(a: Arc[int](1), w: arc.downgrade(), m: Mutex[int](2), label: "hello" + "");
+  arc := Ref[int](10);
+  h := T0573MixedHolder(a: Ref[int](1), w: arc.downgrade(), m: Mutex[int](2), label: "hello" + "");
 }
 
 test_mixed_optional_handle_fields_reassign() `test {
-  arc := Arc[int](10);
-  h := T0573MixedHolder(a: Arc[int](1), w: arc.downgrade(), m: Mutex[int](2), label: "hello" + "");
-  h.a = Arc[int](3);
+  arc := Ref[int](10);
+  h := T0573MixedHolder(a: Ref[int](1), w: arc.downgrade(), m: Mutex[int](2), label: "hello" + "");
+  h.a = Ref[int](3);
   h.w = arc.downgrade();
   h.m = Mutex[int](4);
 }
@@ -141,25 +141,25 @@ test_mixed_optional_handle_fields_reassign() `test {
 //     emitOptionalValueDrop and emitOptionalFieldReassignDrop ---
 
 type T0573Box[T] {
-  Arc[T]? a;
+  Ref[T]? a;
   Weak[T]? w;
   Mutex[T]? m;
 }
 
 test_generic_optional_handle_box_int() `test {
-  arc := Arc[int](1);
-  b := T0573Box[int](a: Arc[int](1), w: arc.downgrade(), m: Mutex[int](2));
+  arc := Ref[int](1);
+  b := T0573Box[int](a: Ref[int](1), w: arc.downgrade(), m: Mutex[int](2));
 }
 
 test_generic_optional_handle_box_string() `test {
-  arc := Arc[string]("hi" + "");
-  b := T0573Box[string](a: Arc[string]("a" + ""), w: arc.downgrade(), m: Mutex[string]("m" + ""));
+  arc := Ref[string]("hi" + "");
+  b := T0573Box[string](a: Ref[string]("a" + ""), w: arc.downgrade(), m: Mutex[string]("m" + ""));
 }
 
 test_generic_optional_handle_box_reassign() `test {
-  arc := Arc[int](1);
-  b := T0573Box[int](a: Arc[int](1), w: arc.downgrade(), m: Mutex[int](2));
-  b.a = Arc[int](5);
+  arc := Ref[int](1);
+  b := T0573Box[int](a: Ref[int](1), w: arc.downgrade(), m: Mutex[int](2));
+  b.a = Ref[int](5);
   b.w = arc.downgrade();
   b.m = Mutex[int](6);
 }
@@ -168,50 +168,50 @@ test_generic_optional_handle_box_reassign() `test {
 //     still fire via the auto-injected drop.
 
 type T0573SynthHolder {
-  Arc[int]? a;
+  Ref[int]? a;
   int extra;
 }
 
 test_synth_drop_owner_optional_arc_scope_exit() `test {
-  h := T0573SynthHolder(a: Arc[int](1), extra: 7);
+  h := T0573SynthHolder(a: Ref[int](1), extra: 7);
 }
 
 test_synth_drop_owner_optional_arc_reassign() `test {
-  h := T0573SynthHolder(a: Arc[int](1), extra: 7);
-  h.a = Arc[int](2);
+  h := T0573SynthHolder(a: Ref[int](1), extra: 7);
+  h.a = Ref[int](2);
 }
 
-// --- Droppable inner element (Arc[string] / Mutex[string] / Arc[int[]] /
+// --- Droppable inner element (Ref[string] / Mutex[string] / Ref[int[]] /
 //     Mutex[int[]] in a plain non-generic holder) — exercises per-instantiation
 //     drop's own inner cleanup along the Optional field path. The string/vector
 //     inner content was only reached through the generic Box[T] in the tests
 //     above, which is a different mono path than a plain holder with a
-//     concrete Arc[string]/Mutex[int[]] field.
+//     concrete Ref[string]/Mutex[int[]] field.
 
 type T0573ArcStringHolder {
-  Arc[string]? a;
+  Ref[string]? a;
 }
 
 test_optional_arc_string_field_scope_exit() `test {
-  h := T0573ArcStringHolder(a: Arc[string]("hi" + ""));
+  h := T0573ArcStringHolder(a: Ref[string]("hi" + ""));
 }
 
 test_optional_arc_string_field_reassign() `test {
-  h := T0573ArcStringHolder(a: Arc[string]("hi" + ""));
-  h.a = Arc[string]("bye" + "");
+  h := T0573ArcStringHolder(a: Ref[string]("hi" + ""));
+  h.a = Ref[string]("bye" + "");
 }
 
 type T0573ArcVecHolder {
-  Arc[int[]]? a;
+  Ref[int[]]? a;
 }
 
 test_optional_arc_vec_field_scope_exit() `test {
-  h := T0573ArcVecHolder(a: Arc[int[]]([1, 2, 3]));
+  h := T0573ArcVecHolder(a: Ref[int[]]([1, 2, 3]));
 }
 
 test_optional_arc_vec_field_reassign() `test {
-  h := T0573ArcVecHolder(a: Arc[int[]]([1, 2, 3]));
-  h.a = Arc[int[]]([4, 5]);
+  h := T0573ArcVecHolder(a: Ref[int[]]([1, 2, 3]));
+  h.a = Ref[int[]]([4, 5]);
 }
 
 type T0573MutexStringHolder {

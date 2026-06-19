@@ -57,6 +57,12 @@ func isSendableType(typ types.Type, visited map[types.Type]bool) bool {
 		return true
 	case *types.Instance:
 		origin := t.Origin()
+		// T0995: a Ref[T]/Weak[T] with a `confined element type is thread-confined —
+		// it uses a non-atomic counter and must not cross a goroutine boundary. This
+		// is the soundness point that makes the non-atomic counter safe.
+		if (origin == types.TypArc || origin == types.TypWeak) && len(t.TypeArgs()) > 0 && isConfinedType(t.TypeArgs()[0]) {
+			return false
+		}
 		// Channel, Arc, Weak, Task are inherently sendable (internal synchronization)
 		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak || origin == types.TypTask {
 			return true
@@ -183,6 +189,12 @@ func isSharableType(typ types.Type, visited map[types.Type]bool) bool {
 		return true
 	}
 	return false
+}
+
+// isConfinedType reports whether the type's declaration is marked `confined
+// (T0995). Canonical logic lives in types.IsConfined.
+func isConfinedType(typ types.Type) bool {
+	return types.IsConfined(typ)
 }
 
 // checkGoBlockSendable walks a go block's AST and checks that all captured
@@ -428,7 +440,7 @@ func scopeContains(s *types.Scope, pos types.Pos) bool {
 }
 
 // validateSendableInstance checks sendable/sharable constraints on generic type
-// instantiation. Channel[T] requires T to be sendable. Arc[T] requires T to be
+// instantiation. Channel[T] requires T to be sendable. Ref[T] requires T to be
 // sendable and sharable.
 func (c *Checker) validateSendableInstance(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
 	named, ok := origin.(*types.Named)
@@ -441,19 +453,29 @@ func (c *Checker) validateSendableInstance(pos ast.Pos, origin types.Type, typeA
 			c.errorf(pos, "Channel element type %s is not sendable", elemType)
 		}
 	} else if named == types.TypArc {
-		if !isSendableType(elemType, make(map[types.Type]bool)) {
-			c.errorf(pos, "Arc element type %s is not sendable", elemType)
-		}
-		if !isSharableType(elemType, make(map[types.Type]bool)) {
-			c.errorf(pos, "Arc element type %s is not sharable", elemType)
+		// T0995: a `confined element type opts a Ref out of cross-goroutine sharing
+		// (and out of atomic refcounting). Such a Ref can never cross a goroutine
+		// boundary (isSendableType reports it non-sendable), so T need not be
+		// sendable or sharable — the boundary checks reject it at any go/channel/Task
+		// site instead. For non-confined T the usual constraints apply.
+		if !isConfinedType(elemType) {
+			if !isSendableType(elemType, make(map[types.Type]bool)) {
+				c.errorf(pos, "Ref element type %s is not sendable", elemType)
+			}
+			if !isSharableType(elemType, make(map[types.Type]bool)) {
+				c.errorf(pos, "Ref element type %s is not sharable", elemType)
+			}
 		}
 	} else if named == types.TypWeak {
-		// T0157: Weak[T] has same constraints as Arc[T] — T must be sendable and sharable
-		if !isSendableType(elemType, make(map[types.Type]bool)) {
-			c.errorf(pos, "Weak element type %s is not sendable", elemType)
-		}
-		if !isSharableType(elemType, make(map[types.Type]bool)) {
-			c.errorf(pos, "Weak element type %s is not sharable", elemType)
+		// T0157: Weak[T] has same constraints as Ref[T] — T must be sendable and
+		// sharable, unless `confined (mirroring Ref above).
+		if !isConfinedType(elemType) {
+			if !isSendableType(elemType, make(map[types.Type]bool)) {
+				c.errorf(pos, "Weak element type %s is not sendable", elemType)
+			}
+			if !isSharableType(elemType, make(map[types.Type]bool)) {
+				c.errorf(pos, "Weak element type %s is not sharable", elemType)
+			}
 		}
 	}
 }
@@ -495,6 +517,7 @@ func (c *Checker) validateSendableTypeDecl(d *ast.TypeDecl) {
 	hasSharable := c.hasAnnotation(d.Annotations, "sharable")
 	hasNotSendable := c.hasAnnotation(d.Annotations, "not_sendable")
 	hasNotSharable := c.hasAnnotation(d.Annotations, "not_sharable")
+	hasConfined := c.hasAnnotation(d.Annotations, "confined")
 
 	// Contradictory tags
 	if hasSendable && hasNotSendable {
@@ -502,6 +525,11 @@ func (c *Checker) validateSendableTypeDecl(d *ast.TypeDecl) {
 	}
 	if hasSharable && hasNotSharable {
 		c.errorf(d.Pos(), "type %s has contradictory `sharable and `not_sharable annotations", d.Name)
+	}
+	// T0995: `confined makes a type thread-confined (Ref/Weak use a non-atomic
+	// counter and may not cross goroutines), so it cannot also be `sharable.
+	if hasConfined && hasSharable {
+		c.errorf(d.Pos(), "type %s has contradictory `confined and `sharable annotations", d.Name)
 	}
 
 	// Validate explicit `sendable assertion on non-native types
@@ -543,12 +571,17 @@ func (c *Checker) validateSendableEnumDecl(d *ast.EnumDecl) {
 	hasSharable := c.hasAnnotation(d.Annotations, "sharable")
 	hasNotSendable := c.hasAnnotation(d.Annotations, "not_sendable")
 	hasNotSharable := c.hasAnnotation(d.Annotations, "not_sharable")
+	hasConfined := c.hasAnnotation(d.Annotations, "confined")
 
 	if hasSendable && hasNotSendable {
 		c.errorf(d.Pos(), "enum %s has contradictory `sendable and `not_sendable annotations", d.Name)
 	}
 	if hasSharable && hasNotSharable {
 		c.errorf(d.Pos(), "enum %s has contradictory `sharable and `not_sharable annotations", d.Name)
+	}
+	// T0995: `confined and `sharable are mutually exclusive (see type decl).
+	if hasConfined && hasSharable {
+		c.errorf(d.Pos(), "enum %s has contradictory `confined and `sharable annotations", d.Name)
 	}
 
 	if hasSendable {

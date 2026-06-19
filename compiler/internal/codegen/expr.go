@@ -100,7 +100,7 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0109: Also track vector-producing calls (e.g., split()) for cleanup.
 		// T0555: Track native handle (Arc/Weak/Mutex/Task) constructor/call results
 		// for cleanup at statement end — without this, expressions like
-		// `take_arc(Arc[int](99))` leak because the param is borrowed and the
+		// `take_arc(Ref[int](99))` leak because the param is borrowed and the
 		// caller has no temp tracking.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			if rt != nil {
@@ -1825,7 +1825,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			if origin == types.TypChannel {
 				return c.genChannelConstructor(e, inst)
 			}
-			// Arc constructor: Arc[T](value)
+			// Arc constructor: Ref[T](value)
 			if origin == types.TypArc {
 				return c.genArcConstructor(e, inst)
 			}
@@ -3432,7 +3432,7 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	}
 
 	// Arc .borrow getter — returns the inner T value by loading from the Arc allocation.
-	// T0155: Arc[T] atomic reference counting.
+	// T0155: Ref[T] atomic reference counting.
 	if e.Field == "borrow" {
 		if elem, ok := types.AsArc(targetType); ok {
 			resolvedElem := elem
@@ -3591,7 +3591,7 @@ func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) 
 		constant.NewInt(irtypes.I64, elemSize))
 }
 
-// arcStructType returns the LLVM struct type for Arc[T]: {i64 strong_count, i64 weak_count, T value}.
+// arcStructType returns the LLVM struct type for Ref[T]: {i64 strong_count, i64 weak_count, T value}.
 // T0157: Arc layout includes weak_count for Weak[T] support.
 func arcStructType(elemLLVM irtypes.Type) *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I64, irtypes.I64, elemLLVM)
@@ -3604,8 +3604,8 @@ const (
 	arcFieldValue  = 2 // T value
 )
 
-// genArcConstructor generates Arc[T](value) — allocates {strong_count, weak_count, T}, stores counts=1 and the value.
-// T0155: Arc[T] atomic reference counting. T0157: weak_count added.
+// genArcConstructor generates Ref[T](value) — allocates {strong_count, weak_count, T}, stores counts=1 and the value.
+// T0155: Ref[T] atomic reference counting. T0157: weak_count added.
 func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
 	elemType := inst.TypeArgs()[0]
 	if c.typeSubst != nil {
@@ -3692,7 +3692,7 @@ func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 
 // genArcBorrow generates the Arc .borrow getter — loads and returns the inner T value.
 // The Arc layout is { i64 strong_count, i64 weak_count, T value }. We GEP to field 2 and load the value.
-// T0155: Arc[T] atomic reference counting. T0157: weak_count shifted value to field 2.
+// T0155: Ref[T] atomic reference counting. T0157: weak_count shifted value to field 2.
 func (c *Compiler) genArcBorrow(e *ast.MemberExpr, elemType types.Type) value.Value {
 	arcRaw := c.genExprAutoPropagate(e.Target) // B0323
 	elemLLVM := c.resolveType(elemType)
@@ -3703,8 +3703,8 @@ func (c *Compiler) genArcBorrow(e *ast.MemberExpr, elemType types.Type) value.Va
 	return c.block.NewLoad(elemLLVM, valField)
 }
 
-// genArcMethodCall dispatches native method calls on Arc[T].
-// T0155: Arc[T] atomic reference counting. T0157: downgrade added.
+// genArcMethodCall dispatches native method calls on Ref[T].
+// T0155: Ref[T] atomic reference counting. T0157: downgrade added.
 func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
 	if c.typeSubst != nil {
 		elemType = types.Substitute(elemType, c.typeSubst)
@@ -3721,13 +3721,14 @@ func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ele
 
 	switch method {
 	case "clone":
-		// Atomically increment strong_count and return the same pointer
+		// Increment strong_count and return the same pointer (non-atomic when
+		// the element type is `confined — T0995).
 		rcPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(irtypes.I64))
-		c.emitAtomicAdd(c.block, rcPtr, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+		c.emitRefCountAdd(c.block, rcPtr, 1, irtypes.I64, c.refIsAtomic(elemType))
 		// T0499: Return a distinct SSA value so the clone result can be tracked
 		// separately from the receiver's stmtTemp. Without this, stmtTemp dedup
 		// causes the constructor intermediate to leak when used in a chain
-		// (e.g., Arc[int](42).clone()). The ptrtoint+inttoptr is a no-op at
+		// (e.g., Ref[int](42).clone()). The ptrtoint+inttoptr is a no-op at
 		// runtime — LLVM optimizes it away.
 		tmpInt := c.block.NewPtrToInt(arcRaw, c.ptrIntType())
 		return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
@@ -3747,7 +3748,7 @@ func (c *Compiler) genArcDowngrade(arcRaw value.Value, elemType types.Type) valu
 	typedPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(arcStructTy))
 	wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
-	c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	c.emitRefCountAdd(c.block, wcField, 1, irtypes.I64, c.refIsAtomic(elemType))
 	// T0499: fresh SSA value so downgrade result is tracked separately from receiver stmtTemp
 	tmpInt := c.block.NewPtrToInt(arcRaw, c.ptrIntType())
 	return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
@@ -3779,7 +3780,7 @@ func (c *Compiler) genWeakMethodCall(e *ast.CallExpr, member *ast.MemberExpr, el
 		typedPtr := c.block.NewBitCast(weakRaw, irtypes.NewPointer(arcStructTy))
 		wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
-		c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+		c.emitRefCountAdd(c.block, wcField, 1, irtypes.I64, c.refIsAtomic(elemType))
 		// T0499: fresh SSA value so clone result is tracked separately from receiver stmtTemp
 		tmpInt := c.block.NewPtrToInt(weakRaw, c.ptrIntType())
 		return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
@@ -3791,7 +3792,7 @@ func (c *Compiler) genWeakMethodCall(e *ast.CallExpr, member *ast.MemberExpr, el
 	}
 }
 
-// genWeakUpgrade generates Weak.upgrade() — CAS loop on strong_count, returns Arc[T]?.
+// genWeakUpgrade generates Weak.upgrade() — CAS loop on strong_count, returns Ref[T]?.
 // T0157: Returns {i1, i8*} optional — Some(arc_ptr) if strong_count > 0, none otherwise.
 func (c *Compiler) genWeakUpgrade(weakRaw value.Value, elemType types.Type) value.Value {
 	elemLLVM := c.resolveType(elemType)
@@ -3802,8 +3803,9 @@ func (c *Compiler) genWeakUpgrade(weakRaw value.Value, elemType types.Type) valu
 	scField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldStrong))
 
-	if c.isWasm {
-		// WASM: single-threaded, no atomics needed — simple load+compare+store
+	if c.isWasm || !c.refIsAtomic(elemType) {
+		// WASM (single-threaded) or a `confined Ref (T0995): no atomics needed —
+		// simple load+compare+store.
 		old := c.block.NewLoad(irtypes.I64, scField)
 		isZero := c.block.NewICmp(enum.IPredEQ, old, constant.NewInt(irtypes.I64, 0))
 		noneBlk := c.newBlock("weak.upgrade.none")
@@ -4712,11 +4714,11 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 			}
 			if arcElem, ok := types.AsArc(fType); ok {
 				c.dupContainerFieldAccess = false // consume the flag
-				dup := c.dupArc(val)
 				resolvedArcElem := arcElem
 				if c.typeSubst != nil {
 					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
 				}
+				dup := c.dupArc(val, resolvedArcElem)
 				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
 				return dup
 			}
@@ -4761,11 +4763,11 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				if arcElem, isArc := types.AsArc(elem); isArc {
 					c.dupContainerFieldAccess = false
 					innerArc := c.block.NewExtractValue(val, 1)
-					dup := c.dupArc(innerArc)
 					resolvedArcElem := arcElem
 					if c.typeSubst != nil {
 						resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
 					}
+					dup := c.dupArc(innerArc, resolvedArcElem)
 					c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
 					c.optionalContainerDup = dup
 					return c.block.NewInsertValue(val, dup, 1)
@@ -5262,7 +5264,7 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 // types and primitives so calling it unconditionally is safe.
 //
 // targetType is the receiver type at the call site. It supplies owner-type
-// substitution (e.g., ArcCell[int].fresh's `Arc[T]` → `Arc[int]`) so the
+// substitution (e.g., ArcCell[int].fresh's `Ref[T]` → `Ref[int]`) so the
 // per-element-type drop function looks up the concrete instantiation rather
 // than the unsubstituted TypeParam.
 func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, targetType types.Type, result value.Value) {
@@ -5274,8 +5276,8 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 		// Owner-type subst: when the getter's owner is a generic instance
 		// (e.g. ArcCell[int]), resolve the owner's TypeParams against the
 		// instance's TypeArgs before applying any further substitution.
-		// Without this, Arc[T] from ArcCell[T].fresh's signature stays as
-		// Arc[T] and getOrCreateArcDrop(T) would produce an Arc[T].drop fn
+		// Without this, Ref[T] from ArcCell[T].fresh's signature stays as
+		// Ref[T] and getOrCreateArcDrop(T) would produce an Ref[T].drop fn
 		// that doesn't know T's concrete layout/inner-drop.
 		if ownerSubst := c.buildOwnerTypeArgSubst(targetType); ownerSubst != nil && retType != nil {
 			retType = types.Substitute(retType, ownerSubst)
@@ -5304,7 +5306,7 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 			// T0663: per-element-type drop walks any un-received buffered items.
 			c.trackChannelTempWithElemType(result, chElem)
 		} else if arcElem, isArc := types.AsArc(retType); isArc {
-			// T0486: Arc[T] getter result owns a heap allocation; without
+			// T0486: Ref[T] getter result owns a heap allocation; without
 			// tracking the cloned Arc leaks at statement end. arcElem is
 			// already substituted (Substitute on Instance produces a new
 			// Instance with substituted typeArgs).
@@ -5915,9 +5917,12 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 		return c.dupChannel(argVal)
 	}
 
-	// T0508: Arc[T] — atomic strong-count increment.
-	if _, isArc := types.AsArc(resolvedElem); isArc || named == types.TypArc {
-		return c.dupArc(argVal)
+	// T0508: Ref[T] — strong-count increment (non-atomic when `confined, T0995).
+	if arcElem, isArc := types.AsArc(resolvedElem); isArc || named == types.TypArc {
+		if c.typeSubst != nil && arcElem != nil {
+			arcElem = types.Substitute(arcElem, c.typeSubst)
+		}
+		return c.dupArc(argVal, arcElem)
 	}
 
 	// T0508: Weak[T] — atomic weak-count increment.
@@ -8819,7 +8824,7 @@ func (c *Compiler) elvisResultDrop(e *ast.BinaryExpr) (*ir.Func, types.Type, boo
 }
 
 // elvisResultHandleDrop resolves the per-instantiation drop function for an elvis
-// result that is a single-owner native handle represented as a bare i8* — Arc[T],
+// result that is a single-owner native handle represented as a bare i8* — Ref[T],
 // Channel[T], Weak[T], Mutex[T], MutexGuard[T], Task[T] (T0951). These bypass
 // elvisResultDrop (which only resolves Vector/string) and trackElvisResultHeap
 // (which requires a 2-word {i8*,i8*} value struct), so the orphaned some-path
@@ -9543,11 +9548,11 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 		}
 		if arcElem, isArc := types.AsArc(elemType); isArc {
 			c.dupContainerFieldAccess = false
-			dup := c.dupArc(val)
 			resolvedArcElem := arcElem
 			if c.typeSubst != nil {
 				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
 			}
+			dup := c.dupArc(val, resolvedArcElem)
 			c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
 			return dup
 		}
@@ -9592,11 +9597,11 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 			if arcElem, isArc := types.AsArc(inner); isArc {
 				c.dupContainerFieldAccess = false
 				innerArc := c.block.NewExtractValue(val, 1)
-				dup := c.dupArc(innerArc)
 				resolvedArcElem := arcElem
 				if c.typeSubst != nil {
 					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
 				}
+				dup := c.dupArc(innerArc, resolvedArcElem)
 				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
 				c.optionalContainerDup = dup
 				return c.block.NewInsertValue(val, dup, 1)
@@ -10101,11 +10106,11 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		}
 		if arcElem, isArc := types.AsArc(elemType); isArc {
 			c.dupContainerFieldAccess = false
-			dup := c.dupArc(val)
 			resolvedArcElem := arcElem
 			if c.typeSubst != nil {
 				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
 			}
+			dup := c.dupArc(val, resolvedArcElem)
 			c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
 			return dup
 		}
@@ -11653,7 +11658,7 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		if c.typeSubst != nil {
 			srcType = types.Substitute(srcType, c.typeSubst)
 		}
-		// T0850: a borrowed optional (`T?&` — e.g. `Arc[T?].borrow` or a
+		// T0850: a borrowed optional (`T?&` — e.g. `Ref[T?].borrow` or a
 		// `Mutex[T?]` guard's `.borrow`) has srcType SharedRef/MutRef-of-Optional.
 		// genExpr auto-derefs the borrow to the loaded `{i1,{i8*,i8*}}` optional, so
 		// it must route through the optional-subject path too — otherwise the
@@ -11815,7 +11820,7 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 //     binding (force, B0293) clears it on the match path only.
 //
 // T0850: borrowSource is set when the subject is a borrowed optional (`T?&`,
-// e.g. `Arc[T?].borrow`). A borrow's inner is owned by an external owner (the
+// e.g. `Ref[T?].borrow`). A borrow's inner is owned by an external owner (the
 // Arc/Mutex payload) the cast can neither move nor neutralize, so all three
 // ownership decisions collapse to the aliasing case: dup the inner up front,
 // never neutralize the source (a borrow getter is a MemberExpr whose leaf is a

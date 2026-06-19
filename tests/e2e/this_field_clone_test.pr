@@ -1,7 +1,7 @@
 // T0411: Constructor field-init / var-decl / return / consume-arg from
 // `this.field` on a droppable owner must not silently shallow-copy.
 //
-// Auto-dup field types (string, Vector[T], Channel[T], Arc[T]) are dup'd
+// Auto-dup field types (string, Vector[T], Channel[T], Ref[T]) are dup'd
 // by codegen, so `Type(field: this.field)` produces an independent copy.
 // Non-auto-dup heap user-type fields are rejected at sema with the
 // existing B0341 "use .clone()" error (covered in unit tests).
@@ -85,14 +85,14 @@ test_t0411_clone_optional_string_field_none() `test {
   }
 }
 
-// --- Arc[T] field on a droppable owner (explicit .clone() required) ---
+// --- Ref[T] field on a droppable owner (explicit .clone() required) ---
 //
-// Arc[T] / Weak[T] are not in `isAutoDupType` — sema requires explicit
+// Ref[T] / Weak[T] are not in `isAutoDupType` — sema requires explicit
 // `.clone()` for field moves out of a droppable owner. T0411's fix doesn't
 // change that; this test confirms the explicit-clone path still works.
 
 type ArcHolder {
-  Arc[string] data;
+  Ref[string] data;
   drop(~this) {
   }
 
@@ -102,7 +102,7 @@ type ArcHolder {
 }
 
 test_t0411_clone_arc_field_via_explicit_clone() `test {
-  h := ArcHolder(data: Arc[string]("hello"));
+  h := ArcHolder(data: Ref[string]("hello"));
   h2 := h.clone();
   // Both handles refer to the same underlying value; both must be readable.
   assert(h.data.borrow == "hello", "orig value");
@@ -698,7 +698,7 @@ type _T0500WBox {
 }
 
 test_t0500_weak_field_method_clone() `test {
-  a := Arc[int](42);
+  a := Ref[int](42);
   w := _T0500WBox(_weak: a.downgrade());
   fresh := w.fresh_method();
   // Original Arc still readable; cloned Weak independently tracked.
@@ -711,11 +711,11 @@ test_t0500_weak_field_method_clone() `test {
 }
 
 type _T0500ABox {
-  Arc[int] _arc;
+  Ref[int] _arc;
   drop(~this) {
   }
 
-  clone_method() Arc[int] {
+  clone_method() Ref[int] {
     return this._arc.clone();
   }
 
@@ -727,7 +727,7 @@ type _T0500ABox {
 }
 
 test_t0500_arc_field_method_clone() `test {
-  b := _T0500ABox(_arc: Arc[int](7));
+  b := _T0500ABox(_arc: Ref[int](7));
   c := b.clone_method();
   assert(c.borrow == 7, "clone value");
   assert(b._arc.borrow == 7, "orig still readable");
@@ -736,7 +736,7 @@ test_t0500_arc_field_method_clone() `test {
 test_t0500_arc_field_downgrade_getter_arrow() `test {
   // Matches the original bug repro — getter result discarded as stmt.
   // Pre-fix: LEAK 1 (weak count never decremented).
-  b := _T0500ABox(_arc: Arc[int](11));
+  b := _T0500ABox(_arc: Ref[int](11));
   b.downgrade_arrow;
 }
 
@@ -744,7 +744,7 @@ test_t0500_arc_field_downgrade_getter_arrow_chain() `test {
   // Chain through to .upgrade() — intermediate getter is not bound to a
   // name so the move-check doesn't fire, but the dup-then-clone bug would
   // still leak via the chain.
-  b := _T0500ABox(_arc: Arc[int](11));
+  b := _T0500ABox(_arc: Ref[int](11));
   if up := b.downgrade_arrow.upgrade() {
     assert(up.borrow == 11, "arrow downgrade chain upgrade");
   } else {
@@ -753,7 +753,7 @@ test_t0500_arc_field_downgrade_getter_arrow_chain() `test {
 }
 
 test_t0500_arc_field_downgrade_method() `test {
-  b := _T0500ABox(_arc: Arc[int](13));
+  b := _T0500ABox(_arc: Ref[int](13));
   w := b.downgrade_method();
   if up := w.upgrade() {
     assert(up.borrow == 13, "method downgrade upgrade");
@@ -767,7 +767,7 @@ type _T0500UBox {
   drop(~this) {
   }
 
-  upgrade_method() Arc[int]? {
+  upgrade_method() Ref[int]? {
     return this._weak.upgrade();
   }
 }
@@ -776,7 +776,7 @@ test_t0500_weak_field_upgrade_method() `test {
   // Regression-only: pre-fix this was already balanced (weak +1 dup, weak -1
   // stmt-end; conditional strong +1 from upgrade body, -1 from caller). But
   // the dup is now suppressed; verify result is still correct.
-  a := Arc[int](19);
+  a := Ref[int](19);
   w := _T0500UBox(_weak: a.downgrade());
   up := w.upgrade_method();
   if arc := up {
@@ -797,7 +797,7 @@ type _T0500GenBox[T] {
 }
 
 test_t0500_generic_owner_weak_clone() `test {
-  a := Arc[int](23);
+  a := Ref[int](23);
   g := _T0500GenBox[int](_weak: a.downgrade());
   w := g.fresh_clone();
   if up := w.upgrade() {
@@ -825,7 +825,7 @@ test_t0500_generic_owner_weak_clone() `test {
 //      CallExpr args, the fix needs to remain effective.
 
 type _T0500AWBox {
-  Arc[int] _arc;
+  Ref[int] _arc;
   Weak[int] _weak;
   drop(~this) {
   }
@@ -833,7 +833,7 @@ type _T0500AWBox {
 
 test_t0500_external_arc_clone_var_decl() `test {
   // `local._arc.clone()` from external code as inferred var-decl RHS.
-  a := Arc[int](51);
+  a := Ref[int](51);
   b := _T0500AWBox(_arc: a.clone(), _weak: a.downgrade());
   c := b._arc.clone();
   assert(c.borrow == 51, "external arc clone");
@@ -841,7 +841,7 @@ test_t0500_external_arc_clone_var_decl() `test {
 }
 
 test_t0500_external_weak_clone_var_decl() `test {
-  a := Arc[int](53);
+  a := Ref[int](53);
   b := _T0500AWBox(_arc: a.clone(), _weak: a.downgrade());
   w := b._weak.clone();
   if up := w.upgrade() {
@@ -852,7 +852,7 @@ test_t0500_external_weak_clone_var_decl() `test {
 }
 
 test_t0500_external_arc_downgrade_var_decl() `test {
-  a := Arc[int](57);
+  a := Ref[int](57);
   b := _T0500AWBox(_arc: a.clone(), _weak: a.downgrade());
   w := b._arc.downgrade();
   if up := w.upgrade() {
@@ -863,7 +863,7 @@ test_t0500_external_arc_downgrade_var_decl() `test {
 }
 
 test_t0500_external_weak_upgrade_var_decl() `test {
-  a := Arc[int](59);
+  a := Ref[int](59);
   b := _T0500AWBox(_arc: a.clone(), _weak: a.downgrade());
   up := b._weak.upgrade();
   if c := up {
@@ -873,7 +873,7 @@ test_t0500_external_weak_upgrade_var_decl() `test {
   }
 }
 
-_t0500_consume_arc(~Arc[int] a) `public {
+_t0500_consume_arc(~Ref[int] a) `public {
   assert(a.borrow == 61, "consumed arc value");
 }
 
@@ -887,15 +887,15 @@ _t0500_consume_weak(~Weak[int] w) `public {
 
 test_t0500_external_arc_clone_consume_arg() `test {
   // `consume(local._arc.clone())` — dup flag set by maybeEnableDupForMutRefArg's
-  // setDupFlagsForFieldAccess(paramType=Arc[int]) call.
-  a := Arc[int](61);
+  // setDupFlagsForFieldAccess(paramType=Ref[int]) call.
+  a := Ref[int](61);
   b := _T0500AWBox(_arc: a.clone(), _weak: a.downgrade());
   _t0500_consume_arc(b._arc.clone());
   assert(b._arc.borrow == 61, "orig still readable after consume");
 }
 
 test_t0500_external_weak_clone_consume_arg() `test {
-  a := Arc[int](61);
+  a := Ref[int](61);
   b := _T0500AWBox(_arc: a.clone(), _weak: a.downgrade());
   _t0500_consume_weak(b._weak.clone());
   // Original is still tracking its handle.
@@ -907,7 +907,7 @@ test_t0500_external_weak_clone_consume_arg() `test {
 }
 
 type _T0500Holder {
-  Arc[int] a;
+  Ref[int] a;
   Weak[int] w;
   drop(~this) {
   }
@@ -916,7 +916,7 @@ type _T0500Holder {
 test_t0500_external_arc_clone_constructor_init() `test {
   // Constructor field-init from external field-method-call —
   // dup flag set by maybeEnableDupForConstructorArg.
-  arc := Arc[int](67);
+  arc := Ref[int](67);
   b := _T0500AWBox(_arc: arc.clone(), _weak: arc.downgrade());
   h := _T0500Holder(a: b._arc.clone(), w: b._weak.clone());
   assert(h.a.borrow == 67, "holder arc");
@@ -928,7 +928,7 @@ test_t0500_external_arc_clone_constructor_init() `test {
 }
 
 type _T0500Inner {
-  Arc[int] _arc;
+  Ref[int] _arc;
   Weak[int] _weak;
   drop(~this) {
   }
@@ -941,7 +941,7 @@ type _T0500Outer {
 
   // Nested receiver shape: `this.inner._arc.clone()` — the dup-flag
   // suppression must protect deep field-reads, not just `this.field`.
-  nested_arc_clone() Arc[int] {
+  nested_arc_clone() Ref[int] {
     return this.inner._arc.clone();
   }
 
@@ -955,14 +955,14 @@ type _T0500Outer {
 }
 
 test_t0500_nested_field_arc_clone() `test {
-  a := Arc[int](71);
+  a := Ref[int](71);
   o := _T0500Outer(inner: _T0500Inner(_arc: a.clone(), _weak: a.downgrade()));
   c := o.nested_arc_clone();
   assert(c.borrow == 71, "nested arc clone");
 }
 
 test_t0500_nested_field_weak_clone() `test {
-  a := Arc[int](73);
+  a := Ref[int](73);
   o := _T0500Outer(inner: _T0500Inner(_arc: a.clone(), _weak: a.downgrade()));
   w := o.nested_weak_clone();
   if up := w.upgrade() {
@@ -973,7 +973,7 @@ test_t0500_nested_field_weak_clone() `test {
 }
 
 test_t0500_nested_field_arc_downgrade() `test {
-  a := Arc[int](79);
+  a := Ref[int](79);
   o := _T0500Outer(inner: _T0500Inner(_arc: a.clone(), _weak: a.downgrade()));
   w := o.nested_arc_downgrade();
   if up := w.upgrade() {

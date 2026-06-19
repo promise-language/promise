@@ -192,6 +192,27 @@ func (c *Compiler) emitAtomicAdd(blk *ir.Block, ptr value.Value, val value.Value
 	return blk.NewAtomicRMW(enum.AtomicOpAdd, ptr, val, enum.AtomicOrderingMonotonic)
 }
 
+// refIsAtomic reports whether refcount operations on a Ref[T]/Weak[T] with the
+// given (already resolved, concrete) element type must be atomic. A `confined
+// element type opts into a plain non-atomic counter (T0995); everything else
+// uses atomic counting so the Ref can be shared across goroutines. Conservative:
+// when in doubt, atomic — a needless atomic is only slower, never unsound.
+func (c *Compiler) refIsAtomic(elemType types.Type) bool {
+	return !types.IsConfined(elemType)
+}
+
+// emitRefCountAdd adjusts a Ref/Weak refcount by delta. When atomic is true it
+// emits an atomic add (shared Ref); otherwise a plain load/add/store (a thread-
+// confined `confined Ref, T0995). Returns the old value, matching emitAtomicAdd.
+func (c *Compiler) emitRefCountAdd(blk *ir.Block, ptr value.Value, delta int64, typ *irtypes.IntType, atomic bool) value.Value {
+	if atomic {
+		return c.emitAtomicAdd(blk, ptr, constant.NewInt(typ, delta), typ)
+	}
+	old := blk.NewLoad(typ, ptr)
+	blk.NewStore(blk.NewAdd(old, constant.NewInt(typ, delta)), ptr)
+	return old
+}
+
 // emitAtomicAddRelease is like emitAtomicAdd but uses Release ordering on
 // non-WASM targets. The Release barrier ensures all prior stores (e.g.
 // alloc_count decrements) are visible to any thread that does an Acquire

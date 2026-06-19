@@ -1,5 +1,5 @@
 // T0850: a forced RTTI cast (`as!`) whose subject is a BORROWED optional
-// (`Arc[T?].borrow` : `Circle?&`) that holds `none` must panic with the
+// (`Ref[T?].borrow` : `Circle?&`) that holds `none` must panic with the
 // optional-is-none message — exercises the optional-subject force path's
 // `optcast.nonepanic` block reached through a reference (the sibling
 // t0850_borrowed_optcast_mismatch_panic_test.pr covers the present-but-mismatch
@@ -17,7 +17,7 @@ type Circle is Shape {
 
 main() `test(expected: """panic: cast failed: optional is none""") {
   Circle? init = none;
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   c := a.borrow as! Circle;
   print_line(c.name);
 }

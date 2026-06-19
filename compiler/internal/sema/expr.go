@@ -1072,15 +1072,15 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 		return inst
 	}
 	if origin == types.TypArc {
-		// Arc[T](value) — exactly 1 argument of type T
+		// Ref[T](value) — exactly 1 argument of type T
 		if len(e.Args) != 1 {
-			c.errorf(e.Pos(), "Arc constructor expects exactly 1 argument, got %d", len(e.Args))
+			c.errorf(e.Pos(), "Ref constructor expects exactly 1 argument, got %d", len(e.Args))
 			return inst
 		}
 		argType := c.checkExpr(e.Args[0].Value)
 		elemType := inst.TypeArgs()[0]
 		if argType != nil && !types.AssignableTo(argType, elemType) {
-			c.errorf(e.Args[0].Pos(), "cannot assign %s to parameter 'value' of type %s in constructor for Arc", argType, elemType)
+			c.errorf(e.Args[0].Pos(), "cannot assign %s to parameter 'value' of type %s in constructor for Ref", argType, elemType)
 		}
 		return inst
 	}

@@ -416,11 +416,11 @@ nonident_vector_force_unwrap() `test {
 // cover trackStringTemp / trackVectorTempWithElemType. Without the ParenExpr
 // peel, the extracted Arc handle would be registered as a stmt-temp; at
 // scope exit both the source optional and the temp would call
-// `Arc[int].drop` on the same handle → atomic refcount goes to zero twice
+// `Ref[int].drop` on the same handle → atomic refcount goes to zero twice
 // → use-after-free of the freed Arc allocation. Arc represents the i8*
 // opaque-handle class (the same gate covers Weak/Mutex/Task/Channel).
 owned_paren_arc_force_unwrap() `test {
-  Arc[int]? o = Arc[int](42);
+  Ref[int]? o = Ref[int](42);
   n := ((o)!).borrow;
   assert(n == 42, "parenthesized ident Arc force-unwrap, no double-free");
 }

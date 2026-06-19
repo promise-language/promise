@@ -970,7 +970,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		c.checkVarDeclFailable(s.Init)
 		if initType != nil {
 			c.checkNoShadow(s.Binding, s.Pos())
-			// T0850: a borrowed optional (`T?&` / `T?~`, e.g. `Arc[T?].borrow` or a
+			// T0850: a borrowed optional (`T?&` / `T?~`, e.g. `Ref[T?].borrow` or a
 			// `Mutex[T?]` guard's `.borrow`) auto-derefs — unwrap the ref so the
 			// scrutinee is treated as an optional. The inner is borrowed from the
 			// external owner (the Arc/Mutex payload), so the binding is a non-owning

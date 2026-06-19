@@ -227,7 +227,7 @@ test_virtual_getter_heap_chain() `test {
   assert(src.item.ok(), "virtual getter heap chain ok");
 }
 
-// T0486: Arc[T]/Channel[T]/Weak[T]/Mutex[T] getter results also own a heap
+// T0486: Ref[T]/Channel[T]/Weak[T]/Mutex[T] getter results also own a heap
 // allocation; before T0486 these container types fell through trackGetterResult
 // (only String/Vector/heap-user-type were dispatched) and leaked at stmt end.
 
@@ -235,7 +235,7 @@ type ABox {
   drop(~this) {
   }
 
-  get fresh Arc[int] `public => Arc[int](42);
+  get fresh Ref[int] `public => Ref[int](42);
 }
 
 type CBox {
@@ -255,7 +255,7 @@ type WBox {
   // Avoids both the chain-intermediate Arc-temp leak (T0499) and the
   // field-read-dup × clone double-increment that field-based Weak getters hit.
   get fresh Weak[int] `public {
-    Arc[int] inner = Arc[int](42);
+    Ref[int] inner = Ref[int](42);
     return inner.downgrade();
   }
 }
@@ -307,13 +307,13 @@ test_mutex_getter_expression_stmt() `test {
   assert(true, "no leak from discarded mutex getter result");
 }
 
-// Generic owner type with Arc[T] getter exercises the typeSubst path: the
-// getter's Arc[T] return type is substituted to Arc[int] under monomorphization,
+// Generic owner type with Ref[T] getter exercises the typeSubst path: the
+// getter's Ref[T] return type is substituted to Ref[int] under monomorphization,
 // and types.AsArc on the substituted Instance returns the post-subst element.
 type ArcCell[T] {
   T _value;
 
-  get fresh Arc[T] `public => Arc[T](this._value);
+  get fresh Ref[T] `public => Ref[T](this._value);
 }
 
 test_generic_arc_getter_chain() `test {
@@ -321,16 +321,16 @@ test_generic_arc_getter_chain() `test {
   assert(c.fresh.borrow == 99, "generic arc getter chain borrow");
 }
 
-// Generic Arc[T] with non-Copy T (string) — exercises owner-type substitution
+// Generic Ref[T] with non-Copy T (string) — exercises owner-type substitution
 // in trackGetterResult so getOrCreateArcDrop is called with the concrete
-// element type (string) and the generated Arc[string].drop function correctly
+// element type (string) and the generated Ref[string].drop function correctly
 // drops the inner string. Without owner-subst, getOrCreateArcDrop would be
-// called with TypeParam T and produce a wrong Arc[T].drop fn that skips inner
+// called with TypeParam T and produce a wrong Ref[T].drop fn that skips inner
 // string drop, leaking the cloned-string allocation.
 type StrCell[T] {
   T _value;
 
-  get fresh Arc[T] `public => Arc[T](this._value);
+  get fresh Ref[T] `public => Ref[T](this._value);
 }
 
 test_generic_arc_string_chain() `test {
@@ -338,14 +338,14 @@ test_generic_arc_string_chain() `test {
   assert(c.fresh.borrow == "hello", "generic arc string getter chain borrow");
 }
 
-// Virtual dispatch path: abstract base with Arc[int] getter, exercising the
+// Virtual dispatch path: abstract base with Ref[int] getter, exercising the
 // genVirtualGetterCall side of trackGetterResult.
 type ArcSource {
-  get fresh Arc[int] `public `abstract;
+  get fresh Ref[int] `public `abstract;
 }
 
 type ArcImpl is ArcSource {
-  get fresh Arc[int] `public => Arc[int](7);
+  get fresh Ref[int] `public => Ref[int](7);
 }
 
 test_virtual_arc_getter_chain() `test {
@@ -360,7 +360,7 @@ type ArcRoom {
   drop(~this) {
   }
 
-  get item Arc[int] `public => Arc[int](100);
+  get item Ref[int] `public => Ref[int](100);
 
   use_item(&this) bool `public {
     return this.item.borrow == 100;
@@ -384,18 +384,18 @@ test_arc_getter_does_not_leak_inside_method() `test {
 // rejection is a separate sema-level diagnostic mistake noted in T0501's
 // plan and is out of scope here.
 
-// Inferred form: `s := c.fresh;` with Arc[int] getter on a local owner.
+// Inferred form: `s := c.fresh;` with Ref[int] getter on a local owner.
 test_var_decl_inferred_arc_getter() `test {
   ArcCell[int] c = ArcCell[int](_value: 42);
   s := c.fresh;
   assert(s.borrow == 42, "arc var-decl inferred borrow");
 }
 
-// Typed form: `Arc[int] s = c.fresh;` — same root cause, separate codepath
+// Typed form: `Ref[int] s = c.fresh;` — same root cause, separate codepath
 // (genTypedVarDecl vs genInferredVarDecl).
 test_var_decl_typed_arc_getter() `test {
   ArcCell[int] c = ArcCell[int](_value: 42);
-  Arc[int] s = c.fresh;
+  Ref[int] s = c.fresh;
   assert(s.borrow == 42, "arc var-decl typed borrow");
 }
 
@@ -429,7 +429,7 @@ test_var_decl_inferred_virtual_arc_getter() `test {
 
 test_var_decl_typed_virtual_arc_getter() `test {
   ArcSource src = ArcImpl();
-  Arc[int] s = src.fresh;
+  Ref[int] s = src.fresh;
   assert(s.borrow == 7, "virtual arc var-decl typed borrow");
 }
 
@@ -452,7 +452,7 @@ test_var_decl_inferred_chain_target_arc_getter() `test {
 
 test_var_decl_typed_chain_target_arc_getter() `test {
   ArcOuter o = ArcOuter(_inner: ArcCell[int](_value: 77));
-  Arc[int] s = o._inner.fresh;
+  Ref[int] s = o._inner.fresh;
   assert(s.borrow == 77, "chain target arc var-decl typed borrow");
 }
 
@@ -484,7 +484,7 @@ test_var_decl_typed_mutex_getter() `test {
 // noted in T0501's plan.)
 type WCell {
   get fresh Weak[int] `public {
-    Arc[int] inner = Arc[int](42);
+    Ref[int] inner = Ref[int](42);
     return inner.downgrade();
   }
 }
@@ -712,7 +712,7 @@ enum EnumArcCell {
   A,
   B,
 
-  get fresh Arc[int] `public => Arc[int](42);
+  get fresh Ref[int] `public => Ref[int](42);
 }
 
 test_var_decl_inferred_enum_arc_getter() `test {
@@ -723,7 +723,7 @@ test_var_decl_inferred_enum_arc_getter() `test {
 
 test_var_decl_typed_enum_arc_getter() `test {
   EnumArcCell e = EnumArcCell.A;
-  Arc[int] s = e.fresh;
+  Ref[int] s = e.fresh;
   assert(s.borrow == 42, "enum arc var-decl typed borrow");
 }
 
@@ -754,7 +754,7 @@ enum GenEnumArcCell[T] {
   Some,
   None,
 
-  get fresh Arc[int] `public => Arc[int](99);
+  get fresh Ref[int] `public => Ref[int](99);
 }
 
 test_var_decl_inferred_generic_enum_arc_getter() `test {
@@ -765,7 +765,7 @@ test_var_decl_inferred_generic_enum_arc_getter() `test {
 
 test_var_decl_typed_generic_enum_arc_getter() `test {
   GenEnumArcCell[string] e = GenEnumArcCell[string].None;
-  Arc[int] s = e.fresh;
+  Ref[int] s = e.fresh;
   assert(s.borrow == 99, "generic enum arc var-decl typed borrow");
 }
 
@@ -778,7 +778,7 @@ enum EnumThisCell {
   A,
   B,
 
-  get fresh Arc[int] `public => Arc[int](55);
+  get fresh Ref[int] `public => Ref[int](55);
 
   use_fresh(&this) bool `public {
     s := this.fresh;
@@ -800,7 +800,7 @@ enum GenEnumThisCell[T] {
   Some,
   None,
 
-  get fresh Arc[int] `public => Arc[int](77);
+  get fresh Ref[int] `public => Ref[int](77);
 
   use_fresh(&this) bool `public {
     s := this.fresh;
@@ -823,7 +823,7 @@ enum EnumChainSrc {
   A,
   B,
 
-  get fresh Arc[int] `public => Arc[int](33);
+  get fresh Ref[int] `public => Ref[int](33);
 }
 
 type EnumChainOuter {

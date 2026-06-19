@@ -5,7 +5,7 @@
 // Regression watchpoints (also covered):
 //   * string[N], _Inner[N], (int, int)[N] — pre-T0389 paths that worked by
 //     "lucky" stmt-temp drop must keep working after the new array binding.
-//   * Arc[string], Arc[int] — non-tuple Arc inner drop must still dispatch.
+//   * Ref[string], Ref[int] — non-tuple Arc inner drop must still dispatch.
 //   * Map[int, string], _BoxT[int], _BoxE[int]._Some — non-tuple wrappers.
 //   * Cross-product: tuple-of-heap-user inside generic, tuple-inside-array.
 // --- Fixtures ---
@@ -67,7 +67,7 @@ case4_map_with_tuple_value() `test {
 // --- Case 5: Arc wrapping tuple-of-string ---
 
 case5_arc_with_tuple() `test {
-  Arc[(int, string)] a = Arc[(int, string)]((1, "a" + "b"));
+  Ref[(int, string)] a = Ref[(int, string)]((1, "a" + "b"));
   // borrow returns a reference into the Arc; no destructure needed —
   // the construction + scope-exit drop is what we're testing.
   assert(true, "arc constructed");
@@ -110,12 +110,12 @@ regression_int_int_array_no_drop() `test {
 }
 
 regression_arc_string() `test {
-  Arc[string] a = Arc[string]("a" + "b");
+  Ref[string] a = Ref[string]("a" + "b");
   assert(true, "arc string constructed");
 }
 
 regression_arc_int() `test {
-  Arc[int] a = Arc[int](42);
+  Ref[int] a = Ref[int](42);
   assert(true, "arc int constructed");
 }
 
@@ -270,6 +270,6 @@ mutex_with_tuple_inner() `test {
 // element. emitVariantFieldDrop's tuple branch must thread blocks correctly
 // when one of the elements is itself a heap user (which adds drop blocks).
 arc_tuple_with_inner_user() `test {
-  Arc[(int, _Inner)] a = Arc[(int, _Inner)]((1, _Inner(x: 5, s: "x" + "y")));
+  Ref[(int, _Inner)] a = Ref[(int, _Inner)]((1, _Inner(x: 5, s: "x" + "y")));
   assert(true, "constructed");
 }

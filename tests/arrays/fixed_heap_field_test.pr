@@ -258,11 +258,11 @@ test_local_tuple_array_reassign() `test {
 }
 
 test_local_arc_array_reassign() `test {
-  // Arc[T] element — exercises the AsArc branch of emitVariantFieldDrop
+  // Ref[T] element — exercises the AsArc branch of emitVariantFieldDrop
   // (getOrCreateArcDrop). Arc handles refcounted heap allocation; without
   // drop-on-overwrite the original Arc's refcount never reaches zero.
-  Arc[int][2] arr = [Arc[int](1), Arc[int](2)];
-  Arc[int] c = Arc[int](3);
+  Ref[int][2] arr = [Ref[int](1), Ref[int](2)];
+  Ref[int] c = Ref[int](3);
   arr[1] = c;
   assert(arr[1].borrow == 3, "slot 1 reassigned");
   assert(arr[0].borrow == 1, "slot 0 untouched");
@@ -543,7 +543,7 @@ test_slot_to_slot_vector() `test {
 
 test_slot_to_slot_arc() `test {
   // Arc — slot-to-slot should incref so both slots stay valid.
-  Arc[int][2] arr = [Arc[int](1), Arc[int](2)];
+  Ref[int][2] arr = [Ref[int](1), Ref[int](2)];
   arr[1] = arr[0];
   assert(arr[0].borrow == 1, "slot 0 alive");
   assert(arr[1].borrow == 1, "slot 1 alive (refcounted clone)");
@@ -754,11 +754,11 @@ test_slot_to_slot_optional_channel() `test {
 // T0597: Optional[Arc] slot-to-slot — exercises the Arc branch of the
 // container dup (atomic refcount inc).
 test_slot_to_slot_optional_arc() `test {
-  Arc[int] a0 = Arc[int](100);
-  Arc[int] a1 = Arc[int](200);
-  Arc[int]? a = a0;
-  Arc[int]? b = a1;
-  Arc[int]?[2] arr = [a, b];
+  Ref[int] a0 = Ref[int](100);
+  Ref[int] a1 = Ref[int](200);
+  Ref[int]? a = a0;
+  Ref[int]? b = a1;
+  Ref[int]?[2] arr = [a, b];
   arr[1] = arr[0];
   assert(arr[0] is present, "slot 0 preserved");
   assert(arr[1] is present, "slot 1 cloned");
@@ -766,8 +766,8 @@ test_slot_to_slot_optional_arc() `test {
 
 // Weak[T] slot-to-slot — exercises the AsWeak branch of the container dup.
 test_slot_to_slot_weak() `test {
-  Arc[int] keep0 = Arc[int](10);
-  Arc[int] keep1 = Arc[int](20);
+  Ref[int] keep0 = Ref[int](10);
+  Ref[int] keep1 = Ref[int](20);
   Weak[int] w0 = keep0.downgrade();
   Weak[int] w1 = keep1.downgrade();
   Weak[int][2] arr = [w0, w1];
@@ -836,17 +836,17 @@ test_let_then_scope_exit_channel() `test {
 
 // Arc let-then-scope-exit — must refcount-clone so x and arr[0] both stay alive.
 test_let_then_scope_exit_arc() `test {
-  Arc[int][2] arr = [Arc[int](100), Arc[int](200)];
-  Arc[int] x = arr[0];
+  Ref[int][2] arr = [Ref[int](100), Ref[int](200)];
+  Ref[int] x = arr[0];
   assert(x.borrow == 100, "x intact");
   assert(arr[0].borrow == 100, "slot 0 still alive");
 }
 
 // Arc let-then-overwrite.
 test_let_then_overwrite_arc() `test {
-  Arc[int][2] arr = [Arc[int](100), Arc[int](200)];
-  Arc[int] x = arr[0];
-  arr[0] = Arc[int](999);
+  Ref[int][2] arr = [Ref[int](100), Ref[int](200)];
+  Ref[int] x = arr[0];
+  arr[0] = Ref[int](999);
   assert(x.borrow == 100, "x preserved");
   assert(arr[0].borrow == 999, "slot 0 reassigned");
 }
@@ -950,15 +950,15 @@ test_field_arr_bare_to_optional_slot() `test {
   assert(h.data[1] is present, "field slot 1 untouched");
 }
 
-// Arc: bare Arc → Arc[int]? slot. Exercises the types.IsArc(exprType)
+// Arc: bare Arc → Ref[int]? slot. Exercises the types.IsArc(exprType)
 // disjunct of the T0599 pre-wrap claim (only string & Vector were covered by
 // the cases above). Arc is refcounted — a missed pre-wrap claim would
 // leak/double-decrement; the zero-tolerance leak policy verifies the handoff.
 test_bare_arc_to_optional_slot() `test {
-  Arc[int]? a = Arc[int](1);
-  Arc[int]? b = Arc[int](2);
-  Arc[int]?[2] arr = [a, b];
-  arr[0] = Arc[int](99);
+  Ref[int]? a = Ref[int](1);
+  Ref[int]? b = Ref[int](2);
+  Ref[int]?[2] arr = [a, b];
+  arr[0] = Ref[int](99);
   assert(arr[0] is present, "arc slot 0 present after bare assign");
   assert(arr[0]!.borrow == 99, "arc slot 0 value");
   assert(arr[1] is present, "arc slot 1 untouched");

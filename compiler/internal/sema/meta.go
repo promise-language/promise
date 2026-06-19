@@ -82,6 +82,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"sharable":     {TargetType, TargetEnum},
 	"not_sendable": {TargetType, TargetEnum},
 	"not_sharable": {TargetType, TargetEnum},
+	"confined":     {TargetType, TargetEnum},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:

@@ -28,10 +28,10 @@ var (
 	TypTask       *Named // Task[T] — concurrency handle from go expressions
 	TypChannel    *Named // Channel[T] — channel type
 	TypVector     *Named // Vector[T] — dynamic array
-	TypArc        *Named // Arc[T] — atomic reference counting
+	TypArc        *Named // Ref[T] — reference counting for shared ownership
 	TypMutex      *Named // Mutex[T] — mutual exclusion lock wrapping a value
 	TypMutexGuard *Named // MutexGuard[T] — RAII guard for Mutex[T]
-	TypWeak       *Named // Weak[T] — weak reference to Arc[T]-managed data
+	TypWeak       *Named // Weak[T] — weak reference to Ref[T]-managed data
 )
 
 // Non-native stdlib types — NOT in the Universe scope. These are regular types
@@ -92,7 +92,7 @@ func init() {
 	TypTask = defGeneric("Task", "T")
 	TypChannel = defGeneric("Channel", "T")
 	TypVector = defGeneric("Vector", "T")
-	TypArc = defGeneric("Arc", "T")
+	TypArc = defGeneric("Ref", "T")
 	TypMutex = defGeneric("Mutex", "T")
 	TypMutexGuard = defGeneric("MutexGuard", "T")
 	TypWeak = defGeneric("Weak", "T")

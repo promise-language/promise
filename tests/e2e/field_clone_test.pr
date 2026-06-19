@@ -442,17 +442,17 @@ test_opt_channel_in_tuple_field_none() `test {
 // Optional<Arc> tuple element — exercises Optional→Arc path. Pre-fix:
 // 2 allocations leaked (control block + inner _BoxDropT0506).
 type _HolderT0578j {
-  (int, Arc[_BoxDropT0506]?) pair;
+  (int, Ref[_BoxDropT0506]?) pair;
 }
 
 test_opt_arc_in_tuple_field_some() `test {
-  Arc[_BoxDropT0506] inner = Arc[_BoxDropT0506](_BoxDropT0506(n: 1));
-  Arc[_BoxDropT0506]? a = inner;
+  Ref[_BoxDropT0506] inner = Ref[_BoxDropT0506](_BoxDropT0506(n: 1));
+  Ref[_BoxDropT0506]? a = inner;
   _HolderT0578j h = _HolderT0578j(pair: (1, a));
 }
 
 test_opt_arc_in_tuple_field_none() `test {
-  Arc[_BoxDropT0506]? a = none;
+  Ref[_BoxDropT0506]? a = none;
   _HolderT0578j h = _HolderT0578j(pair: (1, a));
 }
 

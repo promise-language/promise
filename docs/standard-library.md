@@ -37,7 +37,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | Sorting | `sort.pr` | `sort(T[])` for `Ordered` types (introsort) |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
 | Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]` structural interface, `_FnIter[T]` closure-based iterator, `Generator[T]` coroutine-based iterator, duck-typed for-in |
-| Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, scheduler stats |
+| Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `ref.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, `Ref[T]` / `Weak[T]` reference-counted shared ownership, scheduler stats |
 | Time | `time.pr` | `Duration` (value type, nanosecond precision), `Instant` (monotonic clock), `sleep()` |
 | Platform | `platform.pr` | `Platform` type with `line_separator`, `path_separator`, `is_path_separator()` — compile-time `` `target `` filtering for Windows/POSIX |
 | Serialization | `encode.pr` | `Encoder`/`Decoder` (non-structural), `Encodable`/`Decodable` (structural), `DecodeError` |

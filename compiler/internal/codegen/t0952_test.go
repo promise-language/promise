@@ -65,8 +65,8 @@ func TestT0952MutexBoundNoneClearsDefaultFlag(t *testing.T) {
 func TestT0952ArcBoundNoneClearsDefaultFlag(t *testing.T) {
 	ir := generateIR(t, `
 		demo() {
-			Arc[int]? a = none;
-			Arc[int] b = Arc[int](9);
+			Ref[int]? a = none;
+			Ref[int] b = Ref[int](9);
 			m := a ?: b;
 		}
 	`)
@@ -220,8 +220,8 @@ func TestT0952InlineUnchanged(t *testing.T) {
 	ir := generateIR(t, `
 		sink(int n) { }
 		demo() {
-			Arc[int]? a = none;
-			Arc[int] b = Arc[int](9);
+			Ref[int]? a = none;
+			Ref[int] b = Ref[int](9);
 			sink((a ?: b).borrow);
 		}
 	`)

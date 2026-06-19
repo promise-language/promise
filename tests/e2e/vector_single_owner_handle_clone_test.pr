@@ -47,8 +47,8 @@ test_explicit_task_vec_type() `test(exclude: wasm) {
 // --- Refcounted handles are duplicable — clone() must NOT be gated ---
 
 test_arc_vec_clone() `test {
-  v := Vector[Arc[int]]();
-  v.push(Arc[int](7));
+  v := Vector[Ref[int]]();
+  v.push(Ref[int](7));
   v2 := v.clone();
   assert(v2.len == 1, "arc clone len");
   assert(v2[0].borrow == 7, "arc clone shares value");
@@ -67,8 +67,8 @@ test_channel_vec_clone() `test {
 // non-cloneable rule must NOT over-gate it. firstSingleOwnerHandle recurses
 // the tuple, finds Arc (refcounted, not single-owner), and returns nil.
 test_tuple_arc_vec_clone() `test {
-  v := Vector[(Arc[int], int)]();
-  v.push((Arc[int](7), 1));
+  v := Vector[(Ref[int], int)]();
+  v.push((Ref[int](7), 1));
   v2 := v.clone();
   assert(v2.len == 1, "tuple arc clone len");
   assert(v.len == 1, "tuple arc src intact");
@@ -99,7 +99,7 @@ test_optional_task_standalone() `test(exclude: wasm) {
 // handle-owning user types must still work. Zero leaks (T0067). ===
 
 type T0482Wrap {
-  Arc[int] a;
+  Ref[int] a;
 }
 
 // A user type owning only a refcounted handle (Arc) is cloneable — the deep
@@ -107,7 +107,7 @@ type T0482Wrap {
 // clone() stays valid and deep-copies independently.
 test_t0482_arc_field_vec_clone() `test {
   v := Vector[T0482Wrap]();
-  v.push(T0482Wrap(a: Arc[int](7)));
+  v.push(T0482Wrap(a: Ref[int](7)));
   v2 := v.clone();
   assert(v2.len == 1, "arc-field wrap clone len");
   assert(v2[0].a.borrow == 7, "arc-field wrap clone shares value");

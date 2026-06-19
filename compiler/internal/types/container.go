@@ -89,6 +89,23 @@ func NewArc(elem Type) *Instance {
 	return NewInstance(TypArc, []Type{elem})
 }
 
+// IsConfined reports whether typ's declaration is marked `confined (T0995). A
+// `confined type may only be wrapped in a thread-confined Ref/Weak — one that
+// uses a non-atomic counter and is rejected at goroutine boundaries.
+func IsConfined(typ Type) bool {
+	switch t := typ.(type) {
+	case *Named:
+		return t.IsConfined()
+	case *Enum:
+		return t.IsConfined()
+	case *Instance:
+		return IsConfined(t.origin)
+	case *Optional:
+		return IsConfined(t.Elem())
+	}
+	return false
+}
+
 // IsArc reports whether t is an Arc instance (Instance{TypArc, _}).
 func IsArc(t Type) bool {
 	inst, ok := t.(*Instance)

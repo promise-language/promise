@@ -1,5 +1,5 @@
 // T0850: a forced RTTI cast (`as!`) whose subject is a BORROWED optional
-// (`Arc[T?].borrow` : `Circle?&`) that is present but whose dynamic type does
+// (`Ref[T?].borrow` : `Circle?&`) that is present but whose dynamic type does
 // not match the target must panic with the type-mismatch message — exercises
 // the optional-subject cast path's optcast.mismatch block reached through a
 // reference (mirrors t0761_optcast_mismatch_panic_test.pr for the owned case).
@@ -21,7 +21,7 @@ type Other is Base {
 main() `test(expected: """panic: cast failed: as! type mismatch""") {
   Base b = Der(name: "x");
   Base? init = b;
-  Arc[Base?] a = Arc[Base?](init);
+  Ref[Base?] a = Ref[Base?](init);
   d := a.borrow as! Other;
   print_line(d.name);
 }

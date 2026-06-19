@@ -768,7 +768,7 @@ test_t0504_channel_run() `test {
 
 // 8. Arc body local.
 t0504_gen_arc() stream[int] {
-  a := Arc[string]("hi".to_string());
+  a := Ref[string]("hi".to_string());
   yield 1;
 }
 

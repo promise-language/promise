@@ -1,6 +1,6 @@
 // Mutex[T] concurrent tests — T0156
 mutex_concurrent_increment() `test {
-  shared := Arc[Mutex[int]](Mutex[int](0));
+  shared := Ref[Mutex[int]](Mutex[int](0));
   done := channel[bool]();
   n := 10;
   i := 0;
@@ -27,7 +27,7 @@ mutex_concurrent_increment() `test {
 }
 
 mutex_protect_shared_state() `test {
-  shared := Arc[Mutex[int]](Mutex[int](42));
+  shared := Ref[Mutex[int]](Mutex[int](42));
   ch := channel[int]();
   c := shared.clone();
   go {
@@ -40,7 +40,7 @@ mutex_protect_shared_state() `test {
 }
 
 mutex_write_from_goroutine() `test {
-  shared := Arc[Mutex[int]](Mutex[int](0));
+  shared := Ref[Mutex[int]](Mutex[int](0));
   done := channel[bool]();
   c := shared.clone();
   go {

@@ -1,0 +1,144 @@
+// T0995: `confined Ref[T] — a thread-confined reference using a non-atomic
+// counter. Semantics are identical to a default Ref; atomicity is invisible to
+// the program. These tests verify construct / borrow / clone / drop all behave
+// correctly (and leak-free) for a confined element type.
+type ConfinedData `confined {
+  int x;
+}
+
+confined_ref_construct_borrow() `test {
+  r := Ref[ConfinedData](ConfinedData(x: 42));
+  assert(r.borrow.x == 42, "confined borrow");
+}
+
+confined_ref_clone_shares() `test {
+  a := Ref[ConfinedData](ConfinedData(x: 7));
+  b := a.clone();
+  assert(a.borrow.x == 7, "original after clone");
+  assert(b.borrow.x == 7, "clone value");
+}
+
+confined_ref_multiple_clones() `test {
+  a := Ref[ConfinedData](ConfinedData(x: 5));
+  b := a.clone();
+  c := b.clone();
+  d := a.clone();
+  assert(a.borrow.x == 5, "a");
+  assert(b.borrow.x == 5, "b");
+  assert(c.borrow.x == 5, "c");
+  assert(d.borrow.x == 5, "d");
+}
+
+confined_ref_weak_upgrade() `test {
+  a := Ref[ConfinedData](ConfinedData(x: 99));
+  w := a.downgrade();
+  if strong := w.upgrade() {
+    assert(strong.borrow.x == 99, "confined weak upgrade borrow");
+  }
+}
+
+// Confined element with a heap-owning field — drop must free the inner value
+// exactly once when the last reference is released (leak/double-free check).
+type ConfinedHeap `confined {
+  string name;
+}
+
+confined_ref_heap_field() `test {
+  a := Ref[ConfinedHeap](ConfinedHeap(name: "hello" + ""));
+  b := a.clone();
+  assert(a.borrow.name == "hello", "confined heap original");
+  assert(b.borrow.name == "hello", "confined heap clone");
+}
+
+// Confined Ref stored as a struct field — synth drop must dispatch Ref drop.
+type ConfinedFieldBox {
+  Ref[ConfinedData] value;
+}
+
+confined_ref_as_field() `test {
+  box := ConfinedFieldBox(value: Ref[ConfinedData](ConfinedData(x: 11)));
+  assert(box.value.borrow.x == 11, "confined ref field");
+}
+
+// Confined enum element — IsConfined unwraps *Enum, so Ref[ConfinedColor] uses
+// the non-atomic counter; construct / clone / drop must still be leak-free.
+enum ConfinedColor `confined {
+  Red,
+  Num(int v),
+  Named(string label),
+}
+
+// Int payload binds out of the borrow safely (Copy payload).
+confined_enum_ref_int_payload() `test {
+  a := Ref[ConfinedColor](ConfinedColor.Num(7));
+  b := a.clone();
+  va := match a.borrow {
+    ConfinedColor.Num(v) => v,
+    _ => 0,
+  };
+  vb := match b.borrow {
+    ConfinedColor.Num(v) => v,
+    _ => 0,
+  };
+  assert(va == 7, "enum int payload a");
+  assert(vb == 7, "enum int payload b");
+}
+
+// Heap-owning variant: clone + drop must free the inner string exactly once
+// (leak/double-free check). The string is not bound out (would move from a
+// borrow — see T1003); the wildcard variant match only checks the tag.
+confined_enum_ref_heap_drop() `test {
+  a := Ref[ConfinedColor](ConfinedColor.Named("blue" + ""));
+  b := a.clone();
+  c := a.clone();
+  is_named := match a.borrow {
+    ConfinedColor.Named(_) => true,
+    _ => false,
+  };
+  assert(is_named, "confined enum named tag");
+  _ := b;
+  _ := c;
+}
+
+// Confined optional element — IsConfined unwraps Optional, so Ref[ConfinedData?]
+// is non-atomic; both some and none payloads must drop cleanly (no double-free).
+confined_ref_optional_some() `test {
+  ConfinedData? init = ConfinedData(x: 8);
+  a := Ref[ConfinedData?](init);
+  b := a.clone();
+  if v := a.borrow {
+    assert(v.x == 8, "confined optional some");
+  } else {
+    assert(false, "expected some");
+  }
+  _ := b;
+}
+
+confined_ref_optional_none() `test {
+  ConfinedData? init = none;
+  a := Ref[ConfinedData?](init);
+  b := a.clone();
+  if _ := a.borrow {
+    assert(false, "expected none");
+  } else {
+    assert(true, "none ok");
+  }
+  _ := b;
+}
+
+// Confined Weak — downgrade then drop the last strong ref; upgrade must fail
+// (returns none) and the allocation must be freed when the weak ref drops.
+confined_weak_after_strong_dropped() `test {
+  w := make_dangling_weak();
+  if _ := w.upgrade() {
+    assert(false, "upgrade should fail after last strong dropped");
+  } else {
+    assert(true, "upgrade correctly returned none");
+  }
+}
+
+make_dangling_weak() Weak[ConfinedData] {
+  a := Ref[ConfinedData](ConfinedData(x: 1));
+  w := a.downgrade();
+  return w;
+}

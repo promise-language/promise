@@ -3,13 +3,13 @@
 // by-value (no scope drop binding) and the caller had no statement-temp
 // tracking for these handle types, so each constructor expression as a
 // borrow arg leaked one or more allocations.
-take_arc(Arc[int] a) {
+take_arc(Ref[int] a) {
 }
 take_mutex(Mutex[int] m) {
 }
-take_arc_string(Arc[string] a) {
+take_arc_string(Ref[string] a) {
 }
-take_arc_move(~Arc[int] a) {
+take_arc_move(~Ref[int] a) {
 }
 
 worker_t0555() int {
@@ -20,7 +20,7 @@ take_task(Task[int] t) {
 
 // Constructor temp as borrow arg — Arc, primitive inner.
 test_arc_ctor_temp() `test {
-  take_arc(Arc[int](99));
+  take_arc(Ref[int](99));
 }
 
 // Constructor temp as borrow arg — Mutex (3 inner allocations: handle + payload box + mutex).
@@ -28,10 +28,10 @@ test_mutex_ctor_temp() `test {
   take_mutex(Mutex[int](99));
 }
 
-// Constructor temp as borrow arg — Arc[string]. String is dropped as part
+// Constructor temp as borrow arg — Ref[string]. String is dropped as part
 // of Arc.drop, so 2 allocations total (Arc cell + inner string).
 test_arc_string_ctor_temp() `test {
-  take_arc_string(Arc[string]("hello"));
+  take_arc_string(Ref[string]("hello"));
 }
 
 // go-expr returning Task as borrow arg — G struct + result buffer.
@@ -40,9 +40,9 @@ test_task_temp() `test(exclude: wasm) {
 }
 
 // Free function returning native handle — caller's stmt-temp tracking must
-// fire on the call result, not just the inner Arc[T](...) literal.
-make_arc_t0555() Arc[int] {
-  return Arc[int](42);
+// fire on the call result, not just the inner Ref[T](...) literal.
+make_arc_t0555() Ref[int] {
+  return Ref[int](42);
 }
 
 test_call_returning_arc() `test {
@@ -51,21 +51,21 @@ test_call_returning_arc() `test {
 
 // Move semantics preserved (callee consumes via ~) — no double-free.
 test_move_temp_no_double_free() `test {
-  take_arc_move(Arc[int](99));
+  take_arc_move(Ref[int](99));
 }
 
 // Variable-binding path still works — the claim site at variable
 // initialization clears the tracked temp flag, so the variable's scope drop
 // is the only drop and there is no double-free.
 test_arc_via_local() `test {
-  a := Arc[int](99);
+  a := Ref[int](99);
   take_arc(a);
 }
 
 // Discarded native handle (statement-level expression) — cleanup at
 // statement end via the registered stmt-temp drop.
 test_discarded_arc() `test {
-  Arc[int](99);
+  Ref[int](99);
 }
 
 test_discarded_mutex() `test {
@@ -85,7 +85,7 @@ take_weak(Weak[int] w) {
 }
 
 test_weak_downgrade_temp() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   take_weak(a.downgrade());
 }
 
@@ -94,7 +94,7 @@ test_weak_downgrade_temp() `test {
 // optional binding drop. Pre-fix this leaked silently because Arc.drop's
 // pal_free was idempotent enough not to crash, but the IR had a double-free.
 test_optional_arc_typed_decl() `test {
-  Arc[int]? opt = Arc[int](99);
+  Ref[int]? opt = Ref[int](99);
 }
 
 // T0555 secondary fix: typed-var-decl Optional[Task] — same pattern but for
@@ -107,8 +107,8 @@ test_optional_task_typed_decl() `test(exclude: wasm) {
 // T0555 secondary fix: reassignment to Optional[Arc] — the reassignment-path
 // pre-wrap T0111 claim must fire too.
 test_optional_arc_reassign() `test {
-  Arc[int]? opt = none;
-  opt = Arc[int](99);
+  Ref[int]? opt = none;
+  opt = Ref[int](99);
 }
 
 // T0555 secondary fix: reassignment to Optional[Task] — same for Task.
@@ -135,8 +135,8 @@ test_inferred_task_decl() `test(exclude: wasm) {
 // Plain reassignment (non-Optional) for Arc — exercises stmt.go:5141
 // assignment claim site. Old Arc must drop, new Arc temp must be claimed.
 test_plain_reassign_arc() `test {
-  a := Arc[int](1);
-  a = Arc[int](2);
+  a := Ref[int](1);
+  a = Ref[int](2);
 }
 
 // Plain reassignment for Mutex — same path, IsMutex branch.
@@ -151,13 +151,13 @@ test_plain_reassign_task() `test(exclude: wasm) {
   t = go worker_t0555();
 }
 
-// Generic free function returning Arc[T] — exercises the c.typeSubst
+// Generic free function returning Ref[T] — exercises the c.typeSubst
 // substitution in genExpr's CallExpr case. Pre-fix (or without the
 // typeSubst handling), the AsArc check would see TypeParam T and fail
 // to dispatch, leaving the call result untracked → leak in
 // caller of the generic body.
-make_arc_generic[T](~T value) Arc[T] {
-  return Arc[T](value);
+make_arc_generic[T](~T value) Ref[T] {
+  return Ref[T](value);
 }
 
 test_generic_arc_int() `test {
@@ -180,10 +180,10 @@ test_generic_mutex_int() `test {
 
 // Generic method on a user type — exercises typeSubst with monoCtx for
 // owner-type generic method bodies. Receiver borrowed (this), method
-// substitution-driven Arc[T] return.
+// substitution-driven Ref[T] return.
 type T0555Maker {
-  make[T](this, ~T value) Arc[T] {
-    return Arc[T](value);
+  make[T](this, ~T value) Ref[T] {
+    return Ref[T](value);
   }
 }
 

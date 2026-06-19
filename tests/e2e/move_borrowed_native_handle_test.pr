@@ -7,17 +7,17 @@
 //
 // This file is the runtime-correctness companion to the Go-level rejection
 // tests in compiler/internal/ownership/ownership_test.go (TestT0556_*).
-// --- Arc[T] (duppable, control case) ------------------------------------
+// --- Ref[T] (duppable, control case) ------------------------------------
 // Arc pushes from a borrowed param still work — codegen emits dupArc at the
 // call site so the caller's drop and the vector's element drop reach the
 // same Arc with refcount 2.
-push_arc(Arc[int] a) {
-  v := Vector[Arc[int]]();
+push_arc(Ref[int] a) {
+  v := Vector[Ref[int]]();
   v.push(a);
 }
 
 test_arc_param_push_ok() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   push_arc(a);
 }
 

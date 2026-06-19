@@ -1,4 +1,4 @@
-// T0358: Arc[T[]] and Mutex[T[]] inner-Vector drop must iterate elements and
+// T0358: Ref[T[]] and Mutex[T[]] inner-Vector drop must iterate elements and
 // drop heap data per element before freeing the buffer. Sibling fix to T0354
 // at the `emitInnerDrop` site (was calling `Vector.drop` on the buffer pointer
 // without iterating).
@@ -11,25 +11,25 @@ type T0358Item {
   string name;
 }
 
-// --- Site 2a: Arc[string[]] drops on last strong ref ---
+// --- Site 2a: Ref[string[]] drops on last strong ref ---
 
 test_arc_string_vec_drop() `test {
   v := string[]();
   v.push("hello" + "");
   v.push("world" + "");
-  a := Arc[string[]](v);
+  a := Ref[string[]](v);
   // Confirm Arc holds the vector. Drop fires on scope exit when refcount → 0.
   assert(a.borrow.len == 2, "arc string vec len");
 }
 
-// --- Site 2b: Arc[string[]] with multiple clones ---
+// --- Site 2b: Ref[string[]] with multiple clones ---
 
 test_arc_string_vec_drop_clones() `test {
   v := string[]();
   v.push("a" + "");
   v.push("b" + "");
   v.push("c" + "");
-  a := Arc[string[]](v);
+  a := Ref[string[]](v);
   b := a.clone();
   c := a.clone();
   assert(a.borrow.len == 3, "arc len before drops");
@@ -48,13 +48,13 @@ test_mutex_string_vec_drop() `test {
   assert(guard.borrow.len == 2, "mutex string vec len");
 }
 
-// --- Site 2d: Arc[Item[]] with user-type elements containing strings ---
+// --- Site 2d: Ref[Item[]] with user-type elements containing strings ---
 
 test_arc_user_type_vec_drop() `test {
   items := T0358Item[]();
   items.push(T0358Item(id: 1, name: "alpha" + ""));
   items.push(T0358Item(id: 2, name: "beta" + ""));
-  a := Arc[T0358Item[]](items);
+  a := Ref[T0358Item[]](items);
   assert(a.borrow.len == 2, "arc user vec len");
 }
 
@@ -77,13 +77,13 @@ test_mutex_nested_vec_drop() `test {
   assert(guard.borrow.len == 2, "mutex nested len");
 }
 
-// --- Site 2f: Arc[string[]] dropped without any borrow access (pure drop path) ---
+// --- Site 2f: Ref[string[]] dropped without any borrow access (pure drop path) ---
 
 test_arc_string_vec_no_borrow() `test {
   v := string[]();
   v.push("alpha" + "");
   v.push("beta" + "");
-  a := Arc[string[]](v);
+  a := Ref[string[]](v);
   // a goes out of scope without any read; pure Arc.drop path exercised.
 }
 

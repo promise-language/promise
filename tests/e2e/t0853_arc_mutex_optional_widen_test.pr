@@ -1,4 +1,4 @@
-// T0853: constructing a generic `Arc[T?]` / `Mutex[T?]` by passing a BARE
+// T0853: constructing a generic `Ref[T?]` / `Mutex[T?]` by passing a BARE
 // non-optional value of type `T` (or a bare `none`) used to panic in codegen —
 // the constructor stored the `T` value struct directly into the `T?` payload
 // slot without widening it to an optional (`store operands are not compatible:
@@ -17,27 +17,27 @@ type Circle is Shape {
   }
 }
 
-// Arc[Circle?] from a bare Circle — the reported repro. Read back via RTTI cast
+// Ref[Circle?] from a bare Circle — the reported repro. Read back via RTTI cast
 // to confirm the wrapped payload is a valid `Some`.
 arc_bare_value() `test {
-  Arc[Circle?] a = Arc[Circle?](Circle(name: "x", radius: 1.0));
+  Ref[Circle?] a = Ref[Circle?](Circle(name: "x", radius: 1.0));
   Circle? cc = a.borrow as Circle;
   f64 r = 0.0;
   if cc {
     r = cc.radius;
   }
-  assert(r == 1.0, "bare-value Arc[Circle?] should hold a Some(Circle)");
+  assert(r == 1.0, "bare-value Ref[Circle?] should hold a Some(Circle)");
 }
 
-// Arc[Circle?] from a bare `none` — exercises the genNoneLit targetType path.
+// Ref[Circle?] from a bare `none` — exercises the genNoneLit targetType path.
 arc_bare_none() `test {
-  Arc[Circle?] a = Arc[Circle?](none);
+  Ref[Circle?] a = Ref[Circle?](none);
   Circle? cc = a.borrow as Circle;
   bool present = false;
   if cc {
     present = true;
   }
-  assert(!present, "bare-none Arc[Circle?] should hold None");
+  assert(!present, "bare-none Ref[Circle?] should hold None");
 }
 
 // Mutex[Circle?] from a bare Circle — the analogous Mutex constructor path.
@@ -69,12 +69,12 @@ mutex_bare_none() `test {
 // Read back via if-unwrap; the typed-var bind `int? av = a.borrow` hits a
 // separate pre-existing borrow-read codegen bug (T0856), not this constructor.
 arc_mutex_bare_primitive() `test {
-  Arc[int?] a = Arc[int?](5);
+  Ref[int?] a = Ref[int?](5);
   bool arc_ok = false;
   if x := a.borrow {
     arc_ok = (x == 5);
   }
-  assert(arc_ok, "bare-int Arc[int?] should hold Some(5)");
+  assert(arc_ok, "bare-int Ref[int?] should hold Some(5)");
 
   Mutex[int?] m = Mutex[int?](7);
   MutexGuard[int?] g = m.lock();
@@ -87,12 +87,12 @@ arc_mutex_bare_primitive() `test {
 
 // Primitive bare-none for both Arc and Mutex — value-type payload zeroed slot.
 arc_mutex_bare_primitive_none() `test {
-  Arc[int?] a = Arc[int?](none);
+  Ref[int?] a = Ref[int?](none);
   bool arc_present = false;
   if x := a.borrow {
     arc_present = true;
   }
-  assert(!arc_present, "bare-none Arc[int?] should hold None");
+  assert(!arc_present, "bare-none Ref[int?] should hold None");
 
   Mutex[int?] m = Mutex[int?](none);
   MutexGuard[int?] g = m.lock();
@@ -107,13 +107,13 @@ arc_mutex_bare_primitive_none() `test {
 // (wrapReturnOptional's types.Identical short-circuit skips re-wrapping).
 arc_already_optional() `test {
   Circle? init = Circle(name: "c", radius: 9.0);
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   Circle? cc = a.borrow as Circle;
   f64 r = 0.0;
   if cc {
     r = cc.radius;
   }
-  assert(r == 9.0, "already-optional Arc[Circle?] arg should still work");
+  assert(r == 9.0, "already-optional Ref[Circle?] arg should still work");
 }
 
 // Regression guard (Mutex): an already-optional arg takes the matching-shape

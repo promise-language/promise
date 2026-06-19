@@ -28,10 +28,10 @@ test_borrow_set_vector() `test {
 }
 
 test_borrow_set_arc() `test {
-  a1 := Arc[int](10);
-  m := Mutex[Arc[int]](a1.clone());
+  a1 := Ref[int](10);
+  m := Mutex[Ref[int]](a1.clone());
   use guard := m.lock();
-  a2 := Arc[int](20);
+  a2 := Ref[int](20);
   guard.borrow = a2.clone();
   assert(guard.borrow.borrow == 20, "should be 20");
 }
@@ -110,7 +110,7 @@ test_borrow_set_clone_borrow() `test {
 // string, so the setter's drop-then-store does not alias the source's inner
 // pointer. Pins the runtime side of the rejection diagnostic in T0401.
 test_borrow_set_from_arc_borrow_clone() `test {
-  a := Arc[string]("source" + "");
+  a := Ref[string]("source" + "");
   m := Mutex[string]("dest" + "");
   use guard := m.lock();
   guard.borrow = a.borrow.clone();

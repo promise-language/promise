@@ -1,5 +1,5 @@
 // T0850: an RTTI optional cast `x as U` / `x as! U` whose subject `x` is a
-// BORROWED optional (`T?&` — e.g. `Arc[T?].borrow`, or a `Mutex[T?]` guard's
+// BORROWED optional (`T?&` — e.g. `Ref[T?].borrow`, or a `Mutex[T?]` guard's
 // `.borrow`) used to crash codegen (`wrapOptional` store/insertvalue type
 // mismatch). The fix routes a SharedRef/MutRef-of-Optional subject through the
 // optional-subject cast path, dups the inner (owned by the external Arc/Mutex
@@ -27,7 +27,7 @@ type Square is Shape {
 // `as` on a borrowed Arc optional, matching subtype → some; read back the value.
 arc_optional_cast_match() `test {
   Circle? init = Circle(name: "c", radius: 1.5);
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   Circle? cc = a.borrow as Circle;
   f64 r = 0.0;
   if cc {
@@ -43,7 +43,7 @@ arc_optional_cast_match() `test {
 // none-subject branch reached through a reference.
 arc_optional_cast_none() `test {
   Circle? init = none;
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   Circle? cc = a.borrow as Circle;
   bool present = false;
   if cc {
@@ -55,7 +55,7 @@ arc_optional_cast_none() `test {
 // `as` on a borrowed Arc optional, non-matching subtype → none.
 arc_optional_cast_mismatch() `test {
   Circle? init = Circle(name: "c", radius: 1.5);
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   Square? sq = a.borrow as Square;
   bool present = false;
   if sq {
@@ -67,7 +67,7 @@ arc_optional_cast_mismatch() `test {
 // `as!` (force) on a borrowed Arc optional, matching subtype → inner value.
 arc_optional_force_cast() `test {
   Circle? init = Circle(name: "c", radius: 2.5);
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   Circle c = a.borrow as! Circle;
   assert(c.radius == 2.5, "force cast should return the held value");
 }
@@ -88,7 +88,7 @@ mutex_guard_optional_cast() `test {
 // if-unwrap of a borrowed Arc optional (secondary T0850 fix) — binds a borrow.
 arc_optional_if_unwrap() `test {
   Circle? init = Circle(name: "c", radius: 4.5);
-  Arc[Circle?] a = Arc[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](init);
   f64 r = 0.0;
   if x := a.borrow {
     r = x.radius;
@@ -115,8 +115,8 @@ mutex_guard_if_unwrap() `test {
 // shared payload exactly once).
 arc_shared_borrowed_cast() `test {
   Circle? init = Circle(name: "s", radius: 6.5);
-  Arc[Circle?] a = Arc[Circle?](init);
-  Arc[Circle?] b = a.clone();
+  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] b = a.clone();
   Circle? cc = a.borrow as Circle;
   f64 r = 0.0;
   if cc {

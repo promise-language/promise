@@ -7,7 +7,7 @@ import (
 
 // T0654: a non-native method or user-defined `[]` operator whose return type is
 // `Optional<single-owner-native-handle>` (`Mutex[T]?`, `Task[T]?`,
-// `MutexGuard[T]?`) — and the ref-counted handles `Arc[T]?`/`Weak[T]?` — leaked
+// `MutexGuard[T]?`) — and the ref-counted handles `Ref[T]?`/`Weak[T]?` — leaked
 // the owned handle when `!`-unwrapped at a *consume/temp* site (call arg, method
 // receiver, getter receiver). genOptionalForceUnwrap's post-extract i8* temp
 // tracking only covered string/vector; the single-owner / ref-counted handle
@@ -125,13 +125,13 @@ func TestT0654_OptionalMutexGuardUnwrapTempTracked(t *testing.T) {
 }
 
 // TestT0654_OptionalArcUnwrapConsumeTracked — `take_arc_i(s.at_arc(0)!)` with
-// `at_arc(int i) Arc[int]?`. The unwrapped Arc must be a tracked stmt-temp
-// dropped via @"Arc[int].drop" at statement end. Src has no Arc field so the
-// post-unwrap @"Arc[int].drop" uniquely denotes the tracked unwrap temp.
+// `at_arc(int i) Ref[int]?`. The unwrapped Arc must be a tracked stmt-temp
+// dropped via @"Ref[int].drop" at statement end. Src has no Arc field so the
+// post-unwrap @"Ref[int].drop" uniquely denotes the tracked unwrap temp.
 func TestT0654_OptionalArcUnwrapConsumeTracked(t *testing.T) {
 	ir := generateIR(t, `
-		take_arc_i(Arc[int] a) {}
-		type Src { at_arc(int i) Arc[int]? { return Arc[int](i + 100); } }
+		take_arc_i(Ref[int] a) {}
+		type Src { at_arc(int i) Ref[int]? { return Ref[int](i + 100); } }
 		caller() { s := Src(); take_arc_i(s.at_arc(0)!); }
 		main() { caller(); }
 	`)
@@ -151,9 +151,9 @@ func TestT0654_OptionalArcUnwrapConsumeTracked(t *testing.T) {
 		t.Errorf("expected tmp.exec stmt-temp cleanup block after the unwrap "+
 			"for the owned Arc (AsArc tracking arm):\n%s", body)
 	}
-	if !strings.Contains(post, `call void @"Arc[int].drop"(`) {
+	if !strings.Contains(post, `call void @"Ref[int].drop"(`) {
 		t.Errorf("expected the tracked unwrapped Arc to be dropped via "+
-			"@\"Arc[int].drop\" (getOrCreateArcDrop) after the unwrap:\n%s", body)
+			"@\"Ref[int].drop\" (getOrCreateArcDrop) after the unwrap:\n%s", body)
 	}
 }
 

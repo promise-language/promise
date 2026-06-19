@@ -1,27 +1,27 @@
-// T0508: Vector[Arc[T]] / Vector[Weak[T]] / Vector[Mutex[T]] / Vector[Task[T]] /
+// T0508: Vector[Ref[T]] / Vector[Weak[T]] / Vector[Mutex[T]] / Vector[Task[T]] /
 // Vector[MutexGuard[T]] push must use the per-handle dup function (or move
 // semantics for single-owner handles), not the generic dupHeapValue path which
 // panics because these types are LLVM `i8*`, not the fat-pointer value struct.
-// --- Arc[T] ---
+// --- Ref[T] ---
 test_arc_push() `test {
-  a := Arc[int](42);
-  outer := Vector[Arc[int]]();
+  a := Ref[int](42);
+  outer := Vector[Ref[int]]();
   outer.push(a);
   assert(outer.len == 1, "arc push len");
 }
 
 test_arc_push_multiple() `test {
-  outer := Vector[Arc[int]]();
-  outer.push(Arc[int](1));
-  outer.push(Arc[int](2));
-  outer.push(Arc[int](3));
+  outer := Vector[Ref[int]]();
+  outer.push(Ref[int](1));
+  outer.push(Ref[int](2));
+  outer.push(Ref[int](3));
   assert(outer.len == 3, "arc push multi len");
 }
 
 test_arc_push_dup_via_filled() `test {
   // filled() pushes the same source N times — exercises the dup path.
-  a := Arc[int](7);
-  v := Vector[Arc[int]].filled(a, 3);
+  a := Ref[int](7);
+  v := Vector[Ref[int]].filled(a, 3);
   assert(v.len == 3, "arc filled len");
   // Each element shares the underlying allocation; reading via borrow reaches it.
   assert(v[0].borrow == 7, "elem 0");
@@ -29,8 +29,8 @@ test_arc_push_dup_via_filled() `test {
   assert(v[2].borrow == 7, "elem 2");
 }
 
-test_arc_push_from_param(Arc[int] a) {
-  outer := Vector[Arc[int]]();
+test_arc_push_from_param(Ref[int] a) {
+  outer := Vector[Ref[int]]();
   outer.push(a);
   assert(outer.len == 1, "arc push param len");
 }
@@ -38,14 +38,14 @@ test_arc_push_from_param(Arc[int] a) {
 // Bind the Arc to a local first — temporary native-handle arg leaks via T0555,
 // which is independent of the T0508 push fix being tested here.
 test_arc_push_param() `test {
-  arc := Arc[int](99);
+  arc := Ref[int](99);
   test_arc_push_from_param(arc);
 }
 
 // --- Weak[T] ---
 
 test_weak_push() `test {
-  a := Arc[int](42);
+  a := Ref[int](42);
   w := a.downgrade();
   outer := Vector[Weak[int]]();
   outer.push(w);
@@ -53,7 +53,7 @@ test_weak_push() `test {
 }
 
 test_weak_push_dup_via_filled() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   w := a.downgrade();
   v := Vector[Weak[int]].filled(w, 3);
   assert(v.len == 3, "weak filled len");
@@ -96,16 +96,16 @@ test_task_push() `test(exclude: wasm) {
 // maybeDupPushElement. Distinct entry point from filled().
 
 test_arc_push_from_index() `test {
-  src := Vector[Arc[int]]();
-  src.push(Arc[int](42));
-  dest := Vector[Arc[int]]();
+  src := Vector[Ref[int]]();
+  src.push(Ref[int](42));
+  dest := Vector[Ref[int]]();
   dest.push(src[0]);
   assert(dest.len == 1, "indexexpr arc push");
   assert(src.len == 1, "src not consumed");
 }
 
 test_weak_push_from_index() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   src := Vector[Weak[int]]();
   src.push(a.downgrade());
   dest := Vector[Weak[int]]();
@@ -121,18 +121,18 @@ test_weak_push_from_index() `test {
 
 enum T0508HandleEnum {
   Empty,
-  WithArc(Arc[int] a),
+  WithArc(Ref[int] a),
   WithWeak(Weak[int] w),
   WithMutex(Mutex[int] m),
   WithTask(Task[int] t),
 }
 
 test_enum_variant_arc_drop() `test {
-  h := T0508HandleEnum.WithArc(Arc[int](42));
+  h := T0508HandleEnum.WithArc(Ref[int](42));
 }
 
 test_enum_variant_weak_drop() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   h := T0508HandleEnum.WithWeak(a.downgrade());
 }
 

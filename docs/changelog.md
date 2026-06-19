@@ -19,7 +19,7 @@ Highlights of what ships in this epoch:
   (`?^`/`?`/`?!`), lambdas and closures, pattern matching, value types, and
   fixed-size arrays.
 - **Concurrency**: an M:N scheduler (goroutines, channels, `select`, tasks),
-  `Arc[T]` for shared ownership, and IO-syscall handoff.
+  `Ref[T]` for reference-counted shared ownership, and IO-syscall handoff.
 - **Standard library**: primitives, strings, containers (`Vector`, `Map`,
   `Set`), iterators, formatting/parsing, math, time, and serialization —
   auto-imported via `use std as _`.

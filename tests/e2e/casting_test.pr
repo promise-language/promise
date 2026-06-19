@@ -528,7 +528,7 @@ test_downcast_map_lit_key_from_owned_local() `test {
 
 test_downcast_arc_ctor_arg_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 5.5);
-  Arc[Circle] a = Arc[Circle](s as! Circle);
+  Ref[Circle] a = Ref[Circle](s as! Circle);
   assert(a.borrow.radius == 5.5, "arc ctor arg from cast-of-owned-local radius");
   assert(a.borrow.name == "src", "arc ctor arg from cast-of-owned-local name (UAF probe)");
 }
@@ -1014,7 +1014,7 @@ test_chained_cast_field_target() `test {
 
 test_chained_cast_owning_arg() `test {
   Shape s = Circle(name: "src", radius: 8.0);
-  Arc[Circle] a = Arc[Circle]((s as! Circle) as! Circle);
+  Ref[Circle] a = Ref[Circle]((s as! Circle) as! Circle);
   assert(a.borrow.radius == 8.0, "chained cast arc ctor-arg radius");
   assert(a.borrow.name == "src", "chained cast arc ctor-arg name (UAF probe)");
 }
@@ -1070,7 +1070,7 @@ test_chained_cast_triple_layer() `test {
   assert(a.name == "triple", "triple cast local rebind name (UAF probe)");
   // owning ctor-arg form at triple depth
   Shape s2 = Circle(name: "triple2", radius: 13.0);
-  Arc[Circle] arc = Arc[Circle](((s2 as! Circle) as! Circle) as! Circle);
+  Ref[Circle] arc = Ref[Circle](((s2 as! Circle) as! Circle) as! Circle);
   assert(arc.borrow.radius == 13.0, "triple cast arc ctor-arg radius");
   assert(arc.borrow.name == "triple2", "triple cast arc ctor-arg name (UAF probe)");
 }
@@ -1390,7 +1390,7 @@ test_t0849_owned_temp_regression() `test {
 // probe (also a UAF probe on the inherited heap `name` on the success path).
 //
 // (The Arc/Mutex ctor-arg and map-key/raise consuming sites are NOT covered here:
-// Arc[T?]/Mutex[T?] of an optional element is independently broken — T0851 —
+// Ref[T?]/Mutex[T?] of an optional element is independently broken — T0851 —
 // `raise x as T` and an optional map key are rejected by sema, so the `as` form
 // never reaches those sites. The borrowed-optional read-back `a.borrow as T`
 // panics separately — T0850.)

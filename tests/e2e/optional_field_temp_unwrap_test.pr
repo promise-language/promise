@@ -324,14 +324,14 @@ nonmember_vector() `test {
 // Binding context for these stays covered by genFieldAccess's container dup. ---
 
 type ArcHolder {
-  Arc[int]? a;
+  Ref[int]? a;
   channel[int]? c;
   drop(~this) {
   }
 }
 
 mk_arc_holder() ArcHolder {
-  return ArcHolder(a: Arc[int](5), c: channel[int](2));
+  return ArcHolder(a: Ref[int](5), c: channel[int](2));
 }
 
 arc_field_force_unwrap_temp() `test {
@@ -342,7 +342,7 @@ arc_field_force_unwrap_temp() `test {
 arc_field_handler_temp() `test {
   h := mk_arc_holder();
   assert((h.a? _ {
-    Arc[int](-1)
+    Ref[int](-1)
   }).borrow == 5, "non-diverging handler Arc field temp, no leak");
   assert((h.a? _ {
     return;
@@ -359,8 +359,8 @@ channel_field_handler_temp() `test {
 
 arc_field_handler_bind() `test {
   h := mk_arc_holder();
-  Arc[int] b = h.a? _ {
-    Arc[int](-1)
+  Ref[int] b = h.a? _ {
+    Ref[int](-1)
   };
   assert(b.borrow == 5, "handler Arc field bound to a new owner, no leak");
 }

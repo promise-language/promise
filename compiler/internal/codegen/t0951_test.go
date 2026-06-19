@@ -6,7 +6,7 @@ import (
 )
 
 // T0951: an inline (used/discarded, not bound) elvis `?:` whose result is a
-// single-owner native handle represented as a bare i8* — Arc[T], Channel[T],
+// single-owner native handle represented as a bare i8* — Ref[T], Channel[T],
 // Mutex[T], Weak[T], MutexGuard[T], Task[T] — must drop the orphaned some-path
 // handle via its native drop. These bypass both existing trackers: elvisResultDrop
 // only resolves Vector/string, and trackElvisResultHeap requires a 2-word
@@ -23,17 +23,17 @@ import (
 // the promoted scope binding instead of hardcoding 1 — otherwise the borrowed
 // none-path default is force-dropped and then double-freed by its own binding.
 
-// TestT0951ArcInlineElvisHandleTracked verifies that an inline Arc[int] elvis with
+// TestT0951ArcInlineElvisHandleTracked verifies that an inline Ref[int] elvis with
 // an owned-local source carries the per-path drop flag phi ([true, false] — owns
 // the moved inner on the some-path, borrows the default on the none-path) and is
-// dropped via @"Arc[int].drop" at statement end. Pre-fix the bare-i8* Arc result
+// dropped via @"Ref[int].drop" at statement end. Pre-fix the bare-i8* Arc result
 // matched neither tracker and leaked.
 func TestT0951ArcInlineElvisHandleTracked(t *testing.T) {
 	ir := generateIR(t, `
 		sink(int n) { }
 		demo() {
-			Arc[int]? a = Arc[int](7);
-			Arc[int] b = Arc[int](9);
+			Ref[int]? a = Ref[int](7);
+			Ref[int] b = Ref[int](9);
 			sink((a ?: b).borrow);
 		}
 	`)
@@ -44,7 +44,7 @@ func TestT0951ArcInlineElvisHandleTracked(t *testing.T) {
 	// Per-path flag: owns the some-path moved inner, borrows the none-path default.
 	assertContainsMatch(t, fn, elvisPathFlag)
 	// The orphaned some-path handle is freed exactly once via the native Arc drop.
-	assertContains(t, fn, `call void @"Arc[int].drop"`)
+	assertContains(t, fn, `call void @"Ref[int].drop"`)
 }
 
 // TestT0951ChannelInlineElvisHandleTracked locks the Channel arm of
@@ -69,18 +69,18 @@ func TestT0951ChannelInlineElvisHandleTracked(t *testing.T) {
 }
 
 // TestT0951WeakInlineElvisHandleTracked locks the Weak arm. The inline elvis result
-// is a Weak[int]; `.upgrade()` borrows it (returning Arc[int]?) so the moved-out
-// Weak temp must still be dropped via @"Weak[int].drop". The outer `?: Arc[int](0)`
+// is a Weak[int]; `.upgrade()` borrows it (returning Ref[int]?) so the moved-out
+// Weak temp must still be dropped via @"Weak[int].drop". The outer `?: Ref[int](0)`
 // is a second elvis that yields the Arc whose `.borrow` is read — its presence does
 // not affect the Weak result's per-path tracking.
 func TestT0951WeakInlineElvisHandleTracked(t *testing.T) {
 	ir := generateIR(t, `
 		sink(int n) { }
 		demo() {
-			Arc[int] keep = Arc[int](7);
+			Ref[int] keep = Ref[int](7);
 			Weak[int]? a = keep.downgrade();
 			Weak[int] b = keep.downgrade();
-			sink(((a ?: b).upgrade() ?: Arc[int](0)).borrow);
+			sink(((a ?: b).upgrade() ?: Ref[int](0)).borrow);
 		}
 	`)
 	fn := extractFunction(ir, "__user.demo")
@@ -143,12 +143,12 @@ func TestT0951TaskInlineElvisHandleTracked(t *testing.T) {
 func TestT0951BorrowedHandleElvisNotTracked(t *testing.T) {
 	ir := generateIR(t, `
 		sink(int n) { }
-		borrowed_arc(Arc[int]? a, Arc[int] b) int {
+		borrowed_arc(Ref[int]? a, Ref[int] b) int {
 			return (a ?: b).borrow;
 		}
 		demo() {
-			Arc[int]? a = Arc[int](7);
-			Arc[int] b = Arc[int](9);
+			Ref[int]? a = Ref[int](7);
+			Ref[int] b = Ref[int](9);
 			sink(borrowed_arc(a, b));
 		}
 	`)
@@ -157,7 +157,7 @@ func TestT0951BorrowedHandleElvisNotTracked(t *testing.T) {
 		t.Fatal("could not extract __user.borrowed_arc")
 	}
 	assertNotContainsMatch(t, fn, elvisPathFlag)
-	if strings.Contains(fn, `call void @"Arc[int].drop"`) {
+	if strings.Contains(fn, `call void @"Ref[int].drop"`) {
 		t.Errorf("borrowed-param handle elvis must NOT drop its result — the caller owns it (T0951)\n%s", fn)
 	}
 }

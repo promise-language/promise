@@ -12,13 +12,13 @@ import (
 // (genExpr's *ast.CallExpr and *ast.GoExpr) plus three claim-site predicates
 // in stmt.go.
 
-// TestT0555_ArcCtorTempTracked — `take_arc(Arc[int](99))` must emit a tmp.drop
-// block + call to @"Arc[int].drop". Pre-fix: nothing tracked, leak.
+// TestT0555_ArcCtorTempTracked — `take_arc(Ref[int](99))` must emit a tmp.drop
+// block + call to @"Ref[int].drop". Pre-fix: nothing tracked, leak.
 func TestT0555_ArcCtorTempTracked(t *testing.T) {
 	ir := generateIR(t, `
-		take_arc(Arc[int] a) {}
+		take_arc(Ref[int] a) {}
 		caller() {
-			take_arc(Arc[int](99));
+			take_arc(Ref[int](99));
 		}
 		main() { caller(); }
 	`)
@@ -29,8 +29,8 @@ func TestT0555_ArcCtorTempTracked(t *testing.T) {
 	if !strings.Contains(body, "tmp.drop") {
 		t.Errorf("expected tmp.drop block in caller (Arc ctor temp tracking):\n%s", body)
 	}
-	if !strings.Contains(body, `@"Arc[int].drop"`) {
-		t.Errorf("expected call to @\"Arc[int].drop\" in caller:\n%s", body)
+	if !strings.Contains(body, `@"Ref[int].drop"`) {
+		t.Errorf("expected call to @\"Ref[int].drop\" in caller:\n%s", body)
 	}
 }
 
@@ -100,12 +100,12 @@ func TestT0555_FireAndForgetGoNotTracked(t *testing.T) {
 }
 
 // TestT0555_FreeFunctionReturningArcTracked — when a free function returns
-// Arc[T], the result passed directly as a call arg must be tracked too.
+// Ref[T], the result passed directly as a call arg must be tracked too.
 // Exercises the case where rt comes from the CallExpr's return type.
 func TestT0555_FreeFunctionReturningArcTracked(t *testing.T) {
 	ir := generateIR(t, `
-		take_arc(Arc[int] a) {}
-		make_arc() Arc[int] { return Arc[int](42); }
+		take_arc(Ref[int] a) {}
+		make_arc() Ref[int] { return Ref[int](42); }
 		caller() {
 			take_arc(make_arc());
 		}
@@ -118,20 +118,20 @@ func TestT0555_FreeFunctionReturningArcTracked(t *testing.T) {
 	if !strings.Contains(body, "tmp.drop") {
 		t.Errorf("expected tmp.drop block in caller (Arc-returning call result tracking):\n%s", body)
 	}
-	if !strings.Contains(body, `@"Arc[int].drop"`) {
-		t.Errorf("expected call to @\"Arc[int].drop\" in caller:\n%s", body)
+	if !strings.Contains(body, `@"Ref[int].drop"`) {
+		t.Errorf("expected call to @\"Ref[int].drop\" in caller:\n%s", body)
 	}
 }
 
 // TestT0555_LocalBindingClaimsTemp — when the constructor temp is bound to a
 // local, the variable's scope drop owns it. Verify the IR still contains
-// Arc[int].drop (from scope cleanup) and that the tmp-drop's flag is cleared
+// Ref[int].drop (from scope cleanup) and that the tmp-drop's flag is cleared
 // by the local-binding claim site so there is no double-free.
 func TestT0555_LocalBindingClaimsTemp(t *testing.T) {
 	ir := generateIR(t, `
-		take_arc(Arc[int] a) {}
+		take_arc(Ref[int] a) {}
 		caller() {
-			a := Arc[int](99);
+			a := Ref[int](99);
 			take_arc(a);
 		}
 		main() { caller(); }
@@ -141,8 +141,8 @@ func TestT0555_LocalBindingClaimsTemp(t *testing.T) {
 		t.Fatalf("expected __user.caller in IR")
 	}
 	// The variable's scope binding handles drop.
-	if !strings.Contains(body, `@"Arc[int].drop"`) {
-		t.Errorf("expected Arc[int].drop call (scope cleanup for local) in caller:\n%s", body)
+	if !strings.Contains(body, `@"Ref[int].drop"`) {
+		t.Errorf("expected Ref[int].drop call (scope cleanup for local) in caller:\n%s", body)
 	}
 }
 
@@ -153,7 +153,7 @@ func TestT0555_WeakDowngradeTempTracked(t *testing.T) {
 	ir := generateIR(t, `
 		take_weak(Weak[int] w) {}
 		caller() {
-			a := Arc[int](7);
+			a := Ref[int](7);
 			take_weak(a.downgrade());
 		}
 		main() { caller(); }
@@ -171,7 +171,7 @@ func TestT0555_WeakDowngradeTempTracked(t *testing.T) {
 }
 
 // TestT0555_OptionalArcTypedDeclPreWrapClaim — T0555 secondary fix:
-// `Arc[int]? opt = Arc[int](99);` must clear the tracked stmt-temp BEFORE
+// `Ref[int]? opt = Ref[int](99);` must clear the tracked stmt-temp BEFORE
 // wrapOptional, otherwise both the stmt-temp drop and the optional binding
 // drop fire on the same pointer (double-free). The presence of optdrop.check
 // (the optional's binding drop) AND tmp.drop in the IR is correct only if
@@ -180,7 +180,7 @@ func TestT0555_WeakDowngradeTempTracked(t *testing.T) {
 func TestT0555_OptionalArcTypedDeclPreWrapClaim(t *testing.T) {
 	ir := generateIR(t, `
 		caller() {
-			Arc[int]? opt = Arc[int](99);
+			Ref[int]? opt = Ref[int](99);
 		}
 		main() { caller(); }
 	`)
@@ -192,24 +192,24 @@ func TestT0555_OptionalArcTypedDeclPreWrapClaim(t *testing.T) {
 	if !strings.Contains(body, "optdrop") {
 		t.Errorf("expected optdrop block (Optional binding drop) in caller:\n%s", body)
 	}
-	// Sanity: Arc[int].drop should be called from the optional drop path.
-	if !strings.Contains(body, `@"Arc[int].drop"`) {
-		t.Errorf("expected @\"Arc[int].drop\" in caller:\n%s", body)
+	// Sanity: Ref[int].drop should be called from the optional drop path.
+	if !strings.Contains(body, `@"Ref[int].drop"`) {
+		t.Errorf("expected @\"Ref[int].drop\" in caller:\n%s", body)
 	}
 }
 
 // TestT0555_GenericFunctionReturningArcTracked — exercises the c.typeSubst
 // substitution in genExpr's CallExpr case. The generic body
-// `make[T](~T v) Arc[T] { return Arc[T](v); }` records the call result
-// as Arc[TypeParam(T)] in c.info.Types[e]. Without c.typeSubst applied,
+// `make[T](~T v) Ref[T] { return Ref[T](v); }` records the call result
+// as Ref[TypeParam(T)] in c.info.Types[e]. Without c.typeSubst applied,
 // AsArc(rt) returns false (TypeParam isn't an Instance), so no temp
 // tracking → caller-side leak. With the substitution applied for the
-// `make[int]` instantiation, rt becomes Arc[int] and dispatch fires.
+// `make[int]` instantiation, rt becomes Ref[int] and dispatch fires.
 func TestT0555_GenericFunctionReturningArcTracked(t *testing.T) {
 	ir := generateIR(t, `
-		take_arc(Arc[int] a) {}
-		make_arc[T](~T value) Arc[T] {
-			return Arc[T](value);
+		take_arc(Ref[int] a) {}
+		make_arc[T](~T value) Ref[T] {
+			return Ref[T](value);
 		}
 		caller() {
 			take_arc(make_arc[int](99));
@@ -223,8 +223,8 @@ func TestT0555_GenericFunctionReturningArcTracked(t *testing.T) {
 	if !strings.Contains(body, "tmp.drop") {
 		t.Errorf("expected tmp.drop block in caller (generic Arc call result tracking via typeSubst):\n%s", body)
 	}
-	if !strings.Contains(body, `@"Arc[int].drop"`) {
-		t.Errorf("expected call to @\"Arc[int].drop\" in caller:\n%s", body)
+	if !strings.Contains(body, `@"Ref[int].drop"`) {
+		t.Errorf("expected call to @\"Ref[int].drop\" in caller:\n%s", body)
 	}
 }
 
@@ -232,10 +232,10 @@ func TestT0555_GenericFunctionReturningArcTracked(t *testing.T) {
 // a generic method on a user type. monoCtx is set for the method body.
 func TestT0555_GenericMethodReturningArcTracked(t *testing.T) {
 	ir := generateIR(t, `
-		take_arc(Arc[int] a) {}
+		take_arc(Ref[int] a) {}
 		type Maker {
-			make[T](this, ~T value) Arc[T] {
-				return Arc[T](value);
+			make[T](this, ~T value) Ref[T] {
+				return Ref[T](value);
 			}
 		}
 		caller() {
@@ -251,21 +251,21 @@ func TestT0555_GenericMethodReturningArcTracked(t *testing.T) {
 	if !strings.Contains(body, "tmp.drop") {
 		t.Errorf("expected tmp.drop block in caller (generic method Arc result tracking):\n%s", body)
 	}
-	if !strings.Contains(body, `@"Arc[int].drop"`) {
-		t.Errorf("expected call to @\"Arc[int].drop\" in caller:\n%s", body)
+	if !strings.Contains(body, `@"Ref[int].drop"`) {
+		t.Errorf("expected call to @\"Ref[int].drop\" in caller:\n%s", body)
 	}
 }
 
 // TestT0555_PlainReassignArcClaimsTemp — exercises the assignment claim
 // site at stmt.go:5141 (B0187 + T0555). When reassigning a non-Optional
-// local `a = Arc[int](2);`, the new constructor temp is tracked by
+// local `a = Ref[int](2);`, the new constructor temp is tracked by
 // genExpr, then must be claimed by the assignment so the temp's drop flag
 // is cleared and only the variable's scope drop fires.
 func TestT0555_PlainReassignArcClaimsTemp(t *testing.T) {
 	ir := generateIR(t, `
 		caller() {
-			a := Arc[int](1);
-			a = Arc[int](2);
+			a := Ref[int](1);
+			a = Ref[int](2);
 		}
 		main() { caller(); }
 	`)
@@ -273,11 +273,11 @@ func TestT0555_PlainReassignArcClaimsTemp(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected __user.caller in IR")
 	}
-	// Two Arc[int].drop call sites total: one for the reassignment-time drop
+	// Two Ref[int].drop call sites total: one for the reassignment-time drop
 	// of the old value, one for the scope-end drop of the final value.
-	count := strings.Count(body, `@"Arc[int].drop"`)
+	count := strings.Count(body, `@"Ref[int].drop"`)
 	if count < 2 {
-		t.Errorf("expected at least 2 calls to @\"Arc[int].drop\" (reassign + scope) in caller, got %d:\n%s", count, body)
+		t.Errorf("expected at least 2 calls to @\"Ref[int].drop\" (reassign + scope) in caller, got %d:\n%s", count, body)
 	}
 }
 

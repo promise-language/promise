@@ -836,7 +836,7 @@ test_t0388_member_field_push_does_not_break_instance_getter() `test {
 // early in genMemberExpr before reaching genFieldAccess, so the dup flag is
 // not consumed and the borrow path is unaffected.
 test_t0388_member_field_push_does_not_break_native_getter() `test {
-  Arc[int] a = Arc[int](42);
+  Ref[int] a = Ref[int](42);
   int[] v = int[]();
   v.push(a.borrow);
   assert(v.len == 1, "v len");

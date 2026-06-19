@@ -158,10 +158,10 @@ test_read_channel_optional_then_overwrite() `test {
 
 // Arc: exercises types.IsArc branch
 test_read_arc_optional_then_overwrite() `test {
-  Arc[int]? a = Arc[int](42);
-  Arc[int]?[] v = [a];
-  Arc[int]? x = v[0];
-  v[0] = Arc[int](99);
+  Ref[int]? a = Ref[int](42);
+  Ref[int]?[] v = [a];
+  Ref[int]? x = v[0];
+  v[0] = Ref[int](99);
   assert(x is present, "x still valid after overwrite");
 }
 

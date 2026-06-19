@@ -13,15 +13,15 @@
 // This file keeps the still-valid positive cases: refcounted handles (Arc /
 // Weak / Channel) ARE duplicable and must NOT be gated. Zero leaks (T0067).
 test_arc_clone_nonempty() `test {
-  v := Vector[Arc[int]]();
-  v.push(Arc[int](1));
-  v.push(Arc[int](2));
+  v := Vector[Ref[int]]();
+  v.push(Ref[int](1));
+  v.push(Ref[int](2));
   v2 := v.clone();
   assert(v2.len == 2, "arc clone len");
 }
 
 test_weak_clone_nonempty() `test {
-  a := Arc[int](7);
+  a := Ref[int](7);
   v := Vector[Weak[int]]();
   v.push(a.downgrade());
   v2 := v.clone();

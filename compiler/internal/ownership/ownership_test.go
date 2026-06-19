@@ -4120,7 +4120,7 @@ func TestDestructureFromFieldNLLNarrowing(t *testing.T) {
 	`)
 }
 
-// T0850: an if-unwrap of a borrowed optional (`Arc[T?].borrow`) binds a
+// T0850: an if-unwrap of a borrowed optional (`Ref[T?].borrow`) binds a
 // non-owning view (Borrowed state), so reading it is fine but moving it out
 // into an owned var-decl must be rejected — otherwise the moved-out copy and
 // the Arc payload would both free the same instance (double-free).
@@ -4130,7 +4130,7 @@ func TestIfUnwrapBorrowedOptionalReadOK(t *testing.T) {
 		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
 		test() {
 			Circle? init = Circle(name: "c", radius: 1.0);
-			a := Arc[Circle?](init);
+			a := Ref[Circle?](init);
 			if x := a.borrow {
 				_ := x.radius;
 			}
@@ -4144,7 +4144,7 @@ func TestIfUnwrapBorrowedOptionalMoveRejected(t *testing.T) {
 		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
 		test() {
 			Circle? init = Circle(name: "c", radius: 1.0);
-			a := Arc[Circle?](init);
+			a := Ref[Circle?](init);
 			if x := a.borrow {
 				Circle owned = x;
 				_ := owned.radius;
@@ -5734,16 +5734,16 @@ func TestT0556_PushMutMutexParamOK(t *testing.T) {
 	`)
 }
 
-// Arc[T] is duppable (refcount inc), so push of a borrowed Arc param is
+// Ref[T] is duppable (refcount inc), so push of a borrowed Arc param is
 // still allowed — codegen emits dupArc at the call site. Regression guard.
 func TestT0556_PushBorrowedArcParamOK(t *testing.T) {
 	ownerOK(t, `
-		take_arc_push(Arc[int] a) {
-			outer := Vector[Arc[int]]();
+		take_arc_push(Ref[int] a) {
+			outer := Vector[Ref[int]]();
 			outer.push(a);
 		}
 		test() {
-			a := Arc[int](7);
+			a := Ref[int](7);
 			take_arc_push(a);
 		}
 	`)
@@ -6135,7 +6135,7 @@ func TestT0380_ConsumeBorrowVar(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			borrowed := a.borrow;
 			consume(borrowed);
 		}
@@ -6151,7 +6151,7 @@ func TestT0380_ConsumeInlineBorrow(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			consume(a.borrow);
 		}
 	`)
@@ -6167,7 +6167,7 @@ func TestT0380_AssignBorrowToOwnedThenConsumeRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			b := "old";
 			b = a.borrow;
 			consume(b);
@@ -6183,7 +6183,7 @@ func TestT0380_AssignBorrowToOwnedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			b := "old";
 			b = a.borrow;
 		}
@@ -6196,7 +6196,7 @@ func TestT0380_AssignBorrowCloneToOwnedOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			b := "old";
 			b = a.borrow.clone();
 		}
@@ -6225,7 +6225,7 @@ func TestT0380_BorrowVarToValueParamRejected(t *testing.T) {
 		readlen(string s) int { return s.len; }
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			borrowed := a.borrow;
 			int n = readlen(borrowed);
 		}
@@ -6239,7 +6239,7 @@ func TestT0380_BorrowCloneToValueParamOK(t *testing.T) {
 		readlen(string s) int { return s.len; }
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			int n = readlen(a.borrow.clone());
 		}
 	`)
@@ -6250,7 +6250,7 @@ func TestT0380_BorrowVarReadOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			borrowed := a.borrow;
 			int n = borrowed.len;
 		}
@@ -6265,7 +6265,7 @@ func TestT0380_BorrowInVectorLit(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			borrowed := a.borrow;
 			string[] v = [borrowed];
 		}
@@ -6281,7 +6281,7 @@ func TestT0381_ExplicitRefDeclRejectsConsume(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			string& borrowed = a.borrow;
 			consume(borrowed);
 		}
@@ -6310,21 +6310,21 @@ func TestT0380_TypedDeclBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			string borrowed = a.borrow;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
 }
 
-// Copy inner types (Arc[int], Arc[bool], etc.) have no double-free risk:
+// Copy inner types (Ref[int], Ref[bool], etc.) have no double-free risk:
 // `.borrow` returns a value copy, so moves into ~T params or channel sends
 // are safe. Existing patterns like `ch.send(a.borrow)` must continue to work.
 func TestT0380_CopyInnerTypeNoReject(t *testing.T) {
 	ownerOK(t, `
 		consume(~int n) {}
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			consume(a.borrow);
 			b := a.borrow;
 			consume(b);
@@ -6352,7 +6352,7 @@ func TestT0377_ConsumeIfBorrowVarRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			cond := true;
 			borrowed := if cond { a.borrow } else { a.borrow };
 			consume(borrowed);
@@ -6367,7 +6367,7 @@ func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			k := 1;
 			borrowed := match k { 1 => a.borrow, _ => a.borrow };
 			consume(borrowed);
@@ -6384,7 +6384,7 @@ func TestT0488_MixedIfNonCopyRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			cond := true;
 			other := "owned";
 			borrowed := if cond { a.borrow } else { other };
@@ -6401,7 +6401,7 @@ func TestT0377_ConsumeParenBorrowVarRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			borrowed := (a.borrow);
 			consume(borrowed);
 		}
@@ -6416,7 +6416,7 @@ func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			k := 1;
 			borrowed := match k {
 				1 => { a.borrow },
@@ -6436,7 +6436,7 @@ func TestT0488_MixedMatchNonCopyRejected(t *testing.T) {
 		consume(~string s) {}
 		test() {
 			s := "hi";
-			a := Arc[string](s);
+			a := Ref[string](s);
 			other := "owned";
 			k := 1;
 			borrowed := match k {
@@ -6456,7 +6456,7 @@ func TestT0488_MixedMatchNonCopyRejected(t *testing.T) {
 func TestT0402_ReturnBorrowAsOwnedRejected_LocalSource(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad() string {
-			a := Arc[string]("x");
+			a := Ref[string]("x");
 			return a.borrow;
 		}
 	`)
@@ -6466,7 +6466,7 @@ func TestT0402_ReturnBorrowAsOwnedRejected_LocalSource(t *testing.T) {
 // T0402 / T0438: same rejection when the Arc comes from a parameter.
 func TestT0402_ReturnBorrowAsOwnedRejected_ParamSource(t *testing.T) {
 	errs := ownerErrs(t, `
-		bad(Arc[string] a) string {
+		bad(Ref[string] a) string {
 			return a.borrow;
 		}
 	`)
@@ -6489,7 +6489,7 @@ func TestT0402_ReturnBorrowAsOwnedRejected_MutexGuard(t *testing.T) {
 // at the borrow boundary and the original owner is unaffected.
 func TestT0402_ReturnBorrowAsOwnedOK_CopyElem(t *testing.T) {
 	ownerOK(t, `
-		ok(Arc[int] a) int {
+		ok(Ref[int] a) int {
 			return a.borrow;
 		}
 	`)
@@ -6498,7 +6498,7 @@ func TestT0402_ReturnBorrowAsOwnedOK_CopyElem(t *testing.T) {
 // T0402: explicit `.clone()` produces an owned copy — the documented fix.
 func TestT0402_ReturnBorrowCloneOK(t *testing.T) {
 	ownerOK(t, `
-		ok(Arc[string] a) string {
+		ok(Ref[string] a) string {
 			return a.borrow.clone();
 		}
 	`)
@@ -6510,7 +6510,7 @@ func TestT0402_ReturnBorrowCloneOK(t *testing.T) {
 func TestT0402_ReturnBorrowAsRefRejected_Local(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad() string& {
-			a := Arc[string]("x");
+			a := Ref[string]("x");
 			return a.borrow;
 		}
 	`)
@@ -6522,7 +6522,7 @@ func TestT0402_ReturnBorrowAsRefRejected_Local(t *testing.T) {
 // a borrow, no decay to owned).
 func TestT0402_ReturnBorrowAsRefOK_Param(t *testing.T) {
 	ownerOK(t, `
-		ok(Arc[string] a) string& {
+		ok(Ref[string] a) string& {
 			return a.borrow;
 		}
 	`)
@@ -6532,7 +6532,7 @@ func TestT0402_ReturnBorrowAsRefOK_Param(t *testing.T) {
 // borrows), sema rejects the return at the type-assignability check.
 func TestT0402_ReturnBorrowThroughIfRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		bad(Arc[string] a, bool cond) string {
+		bad(Ref[string] a, bool cond) string {
 			return if cond { a.borrow } else { a.borrow };
 		}
 	`)
@@ -6543,7 +6543,7 @@ func TestT0402_ReturnBorrowThroughIfRejected(t *testing.T) {
 // at the var-decl boundary itself for non-Copy T (no implicit decay).
 func TestT0402_ReturnBorrowThroughTypedLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		bad(Arc[string] a) string {
+		bad(Ref[string] a) string {
 			string borrowed = a.borrow;
 			return borrowed;
 		}
@@ -6555,7 +6555,7 @@ func TestT0402_ReturnBorrowThroughTypedLocalRejected(t *testing.T) {
 // then fires at the return boundary.
 func TestT0402_ReturnBorrowThroughInferredLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		bad(Arc[string] a) string {
+		bad(Ref[string] a) string {
 			borrowed := a.borrow;
 			return borrowed;
 		}
@@ -6566,7 +6566,7 @@ func TestT0402_ReturnBorrowThroughInferredLocalRejected(t *testing.T) {
 // T0402: laundering through if then through a local — return still rejected.
 func TestT0402_ReturnBorrowThroughIfLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		bad(Arc[string] a, bool cond) string {
+		bad(Ref[string] a, bool cond) string {
 			borrowed := if cond { a.borrow } else { a.borrow };
 			return borrowed;
 		}
@@ -6579,7 +6579,7 @@ func TestT0402_ReturnBorrowThroughIfLocalRejected(t *testing.T) {
 // (the documented recovery path for non-Copy borrows).
 func TestT0402_ReturnAfterCloneToOwnedOK(t *testing.T) {
 	ownerOK(t, `
-		ok(Arc[string] a) string {
+		ok(Ref[string] a) string {
 			string borrowed = a.borrow.clone();
 			borrowed = "hello";
 			return borrowed;
@@ -6615,7 +6615,7 @@ func TestT0426_LambdaReturnBorrowAsOwnedRejected_VoidOuter(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
 			bar := move || -> string {
-				a := Arc[string]("x");
+				a := Ref[string]("x");
 				return a.borrow;
 			};
 		}
@@ -6631,7 +6631,7 @@ func TestT0426_LambdaReturnBorrowAsOwnedRejected_VoidOuter(t *testing.T) {
 func TestT0426_LambdaReturnRefOK_OwnedOuter(t *testing.T) {
 	ownerOK(t, `
 		test() string {
-			a := Arc[string]("x");
+			a := Ref[string]("x");
 			f := move || -> string& {
 				return a.borrow;
 			};
@@ -6655,7 +6655,7 @@ func TestT0426_LambdaReturnRefToLambdaLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
 			f := || -> string& {
-				a := Arc[string]("x");
+				a := Ref[string]("x");
 				return a.borrow;
 			};
 		}
@@ -6670,7 +6670,7 @@ func TestT0426_LambdaInsideOwnedReturnDoesNotPolluteOuter(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad() string {
 			f := move || -> int { return 42; };
-			a := Arc[string]("x");
+			a := Ref[string]("x");
 			return a.borrow;
 		}
 	`)
@@ -6678,13 +6678,13 @@ func TestT0426_LambdaInsideOwnedReturnDoesNotPolluteOuter(t *testing.T) {
 }
 
 // T0426: nested lambdas — outer lambda returns string& from a move-captured
-// Arc[string], inner lambda returns string& from its own ref param. The
+// Ref[string], inner lambda returns string& from its own ref param. The
 // save/restore must work through nesting: the inner's signature/params are
 // pushed and popped without polluting the outer lambda's state.
 func TestT0426_NestedLambdaRefReturnsBothLevels_OK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			a := Arc[string]("x");
+			a := Ref[string]("x");
 			outer := move || -> string& {
 				inner := |string& s| -> string& { return s; };
 				return inner(a.borrow);
@@ -6704,7 +6704,7 @@ func TestT0426_NestedLambdaInnerBorrowAsOwnedRejected(t *testing.T) {
 		test() {
 			outer := move || -> int {
 				inner := move || -> string {
-					a := Arc[string]("x");
+					a := Ref[string]("x");
 					return a.borrow;
 				};
 				return 0;
@@ -6725,7 +6725,7 @@ func TestT0426_LambdaInsideMethodBorrowAsOwnedRejected(t *testing.T) {
 			int x;
 			method(&this) {
 				f := move || -> string {
-					a := Arc[string]("x");
+					a := Ref[string]("x");
 					return a.borrow;
 				};
 			}
@@ -6763,7 +6763,7 @@ func TestT0426_LambdaInsideMethodDoesNotPolluteMethodSig(t *testing.T) {
 			int x;
 			bad(&this) string {
 				f := move || -> int { return 42; };
-				a := Arc[string]("x");
+				a := Ref[string]("x");
 				return a.borrow;
 			}
 		}
@@ -6832,7 +6832,7 @@ func TestT0382_FieldAssignFromArcBorrowRejected(t *testing.T) {
 			h := Holder(v1);
 			v2 := string[]();
 			v2.push("hello" + "");
-			a := Arc[string[]](v2);
+			a := Ref[string[]](v2);
 			h.field = a.borrow;
 		}
 	`)
@@ -6857,7 +6857,7 @@ func TestT0382_FieldAssignFromMutexGuardBorrowRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot assign string[]& to string[]")
 }
 
-// T0382: Copy element types (Arc[int].borrow → int field) are independently
+// T0382: Copy element types (Ref[int].borrow → int field) are independently
 // copied through the borrow, so no double-free risk and no rejection.
 // isBorrowedExpr returns false for Copy underlying types (T0380).
 func TestT0382_FieldAssignFromArcBorrowCopyAllowed(t *testing.T) {
@@ -6865,7 +6865,7 @@ func TestT0382_FieldAssignFromArcBorrowCopyAllowed(t *testing.T) {
 		type IntHolder { int n; }
 		test() {
 			h := IntHolder(0);
-			a := Arc[int](42);
+			a := Ref[int](42);
 			h.n = a.borrow;
 		}
 	`)
@@ -6882,7 +6882,7 @@ func TestT0382_FieldAssignFromBorrowClonedAllowed(t *testing.T) {
 			h := Holder(v1);
 			v2 := string[]();
 			v2.push("hello" + "");
-			a := Arc[string[]](v2);
+			a := Ref[string[]](v2);
 			h.field = a.borrow.clone();
 		}
 	`)
@@ -6901,7 +6901,7 @@ func TestT0382_FieldAssignFromBorrowClonedAllowed(t *testing.T) {
 func TestT0438_AssignBorrowToNonCopyOwnedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			string s = a.borrow;
 		}
 	`)
@@ -6914,7 +6914,7 @@ func TestT0438_AssignBorrowToNonCopyOwnedRejected(t *testing.T) {
 func TestT0438_AssignBorrowToCopyOwnedOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			a := Arc[int](42);
+			a := Ref[int](42);
 			int n = a.borrow;
 		}
 	`)
@@ -6926,7 +6926,7 @@ func TestT0438_BorrowToValueParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		take(string s) {}
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			take(a.borrow);
 		}
 	`)
@@ -6938,7 +6938,7 @@ func TestT0438_BorrowToValueParamRejected(t *testing.T) {
 func TestT0438_BorrowCloneToOwnedOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			string s = a.borrow.clone();
 		}
 	`)
@@ -6949,7 +6949,7 @@ func TestT0438_BorrowCloneToOwnedOK(t *testing.T) {
 func TestT0438_BorrowToRefDeclOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			a := Arc[string]("hi");
+			a := Ref[string]("hi");
 			string& s = a.borrow;
 		}
 	`)
@@ -6959,7 +6959,7 @@ func TestT0438_BorrowToRefDeclOK(t *testing.T) {
 // (defense-in-depth on top of T0402's ownership-level check).
 func TestT0438_ReturnNonCopyBorrowAsOwnedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		bad(Arc[string] a) string {
+		bad(Ref[string] a) string {
 			return a.borrow;
 		}
 	`)
@@ -6970,7 +6970,7 @@ func TestT0438_ReturnNonCopyBorrowAsOwnedRejected(t *testing.T) {
 // loaded by value, the Arc retains its ownership.
 func TestT0438_ReturnCopyBorrowAsOwnedOK(t *testing.T) {
 	ownerOK(t, `
-		ok(Arc[int] a) int {
+		ok(Ref[int] a) int {
 			return a.borrow;
 		}
 	`)
@@ -6981,7 +6981,7 @@ func TestT0438_VectorBorrowToOwnedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
 			v := [1, 2, 3];
-			a := Arc[int[]](v);
+			a := Ref[int[]](v);
 			int[] x = a.borrow;
 		}
 	`)
@@ -7048,7 +7048,7 @@ func TestT0401_AssignFieldFromBorrow(t *testing.T) {
 		type Holder { string s; }
 		test() {
 			h := Holder("init" + "");
-			a := Arc[string]("hello" + "");
+			a := Ref[string]("hello" + "");
 			h.s = a.borrow;
 		}
 	`)
@@ -7062,7 +7062,7 @@ func TestT0401_AssignVectorIndexFromBorrow(t *testing.T) {
 		test() {
 			v := string[]();
 			v.push("init" + "");
-			a := Arc[string]("hello" + "");
+			a := Ref[string]("hello" + "");
 			v[0] = a.borrow;
 		}
 	`)
@@ -7107,8 +7107,8 @@ func TestT0401_AssignSetterCopyInnerOK(t *testing.T) {
 func TestT0401_TypedRefLocalReassignFromBorrowOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			a1 := Arc[string]("a" + "");
-			a2 := Arc[string]("b" + "");
+			a1 := Ref[string]("a" + "");
+			a2 := Ref[string]("b" + "");
 			string& b = a1.borrow;
 			b = a2.borrow;
 		}
@@ -7197,7 +7197,7 @@ func TestT0407_ConsumeArgFromIfBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume_string(~string s) {}
 		test() {
-			a := Arc[string]("hi" + "");
+			a := Ref[string]("hi" + "");
 			cond := true;
 			consume_string(if cond { a.borrow } else { a.borrow });
 		}
@@ -7491,8 +7491,8 @@ func TestT0568_TypedDeclBorrowedVectorParamAllowed(t *testing.T) {
 // isDroppableContainerOrString set.
 func TestT0568_TypedDeclBorrowedArcParamAllowed(t *testing.T) {
 	ownerOK(t, `
-		dup_arc(Arc[int] a) {
-			Arc[int] c = a;
+		dup_arc(Ref[int] a) {
+			Ref[int] c = a;
 		}
 		test() {}
 	`)
@@ -7802,11 +7802,11 @@ func TestT0586_CallPlainBorrowedParamVectorAllowed(t *testing.T) {
 	`)
 }
 
-// T0586/T0964: Arc[T] borrows cleanly through a plain-T call.
+// T0586/T0964: Ref[T] borrows cleanly through a plain-T call.
 func TestT0586_CallPlainBorrowedParamArcAllowed(t *testing.T) {
 	ownerOK(t, `
-		take(Arc[int] a) {}
-		forward(Arc[int] a) {
+		take(Ref[int] a) {}
+		forward(Ref[int] a) {
 			take(a);
 		}
 		test() {}
@@ -8628,10 +8628,10 @@ func TestT0589_IfLetBorrowedChannelOptionalRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot consume borrowed parameter 'c' via if-let")
 }
 
-// Arc inner: `Arc[int]?` borrowed param. Arc is droppable (refcount dec).
+// Arc inner: `Ref[int]?` borrowed param. Arc is droppable (refcount dec).
 func TestT0589_IfLetBorrowedArcOptionalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		take(Arc[int]? a) {
+		take(Ref[int]? a) {
 			if x := a {
 				_ = x;
 			}
@@ -9494,15 +9494,15 @@ func TestT0596_ParenthesisedSlotMoveRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
 }
 
-// Positive: Arc[T] / Vector[T] / Channel[T] / string slots are still
+// Positive: Ref[T] / Vector[T] / Channel[T] / string slots are still
 // duppable (codegen has the matching helpers), so they must not be
 // over-rejected. Regression guard for the type filter.
 func TestT0596_NonSingleOwnerSlotsAllowed(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			Arc[int] a0 = Arc[int](1);
-			Arc[int] a1 = Arc[int](2);
-			Arc[int][2] arr_a = [a0, a1];
+			Ref[int] a0 = Ref[int](1);
+			Ref[int] a1 = Ref[int](2);
+			Ref[int][2] arr_a = [a0, a1];
 			arr_a[1] = arr_a[0];
 
 			Vector[int] v0 = Vector[int]();

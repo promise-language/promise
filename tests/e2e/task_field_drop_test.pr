@@ -229,33 +229,33 @@ test_task_field_generic_method_consume() `test(exclude: wasm) {
 
 // --- Site 5: Arc/Mutex wrapping Task[T] (emitInnerDrop) — T0546 ---
 //
-// emitInnerDrop dispatches the inner-element drop for Arc[T].drop and
+// emitInnerDrop dispatches the inner-element drop for Ref[T].drop and
 // Mutex[T].drop. Before T0546 it had no Task case, so it fell through to
 // the user-type branch which mis-reads the i8* Task slot as a 16-byte
 // {i8*,i8*} value struct and calls pal_free on garbage (SIGSEGV/leak).
 
 test_arc_task_int() `test(exclude: wasm) {
-  a := Arc[Task[int]](go worker_t0560_int());
+  a := Ref[Task[int]](go worker_t0560_int());
   // Arc drop runs Task[int].drop on the inner G handle.
 }
 
 test_arc_task_void() `test(exclude: wasm) {
-  a := Arc[Task[void]](go worker_t0560_void());
+  a := Ref[Task[void]](go worker_t0560_void());
   // Task[void].drop skips the result drop step but still frees G.
 }
 
 test_arc_task_string() `test(exclude: wasm) {
-  a := Arc[Task[string]](go worker_t0560_string());
+  a := Ref[Task[string]](go worker_t0560_string());
   // Task[string].drop must promise_string_drop the inner result.
 }
 
 test_arc_task_vec() `test(exclude: wasm) {
-  a := Arc[Task[int[]]](go worker_t0560_vec());
+  a := Ref[Task[int[]]](go worker_t0560_vec());
   // Task[int[]].drop must Vector.drop the inner result before freeing result_ptr.
 }
 
 test_arc_task_shared() `test(exclude: wasm) {
-  a := Arc[Task[int]](go worker_t0560_int());
+  a := Ref[Task[int]](go worker_t0560_int());
   b := a.clone();
   // Two strong refs; only the last drop runs Task[int].drop (refcount 2 → 1 → 0).
 }

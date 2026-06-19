@@ -92,19 +92,19 @@ t0952_mutex_bound_some() `test {
   g.close();
 }
 
-// ── Arc[string]: heap payload — surfaces the latent double-free as a leak ───────
+// ── Ref[string]: heap payload — surfaces the latent double-free as a leak ───────
 
 t0952_arc_string_none() `test {
-  Arc[string]? a = none;
-  Arc[string] b = Arc[string]("hello");
+  Ref[string]? a = none;
+  Ref[string] b = Ref[string]("hello");
   x := a ?: b;
   assert(x.borrow == "hello", "none-path selects the default arc");
 }
 
 t0952_arc_string_some() `test {
-  Arc[string] inner = Arc[string]("world");
-  Arc[string]? a = inner;
-  Arc[string] b = Arc[string]("hello");
+  Ref[string] inner = Ref[string]("world");
+  Ref[string]? a = inner;
+  Ref[string] b = Ref[string]("hello");
   x := a ?: b;
   assert(x.borrow == "world", "some-path selects the source arc");
 }
@@ -131,7 +131,7 @@ t0952_channel_string_some() `test {
 // ── Weak[int]: double Weak.drop would corrupt the shared Arc allocation's count ──
 
 t0952_weak_none() `test {
-  Arc[int] keep = Arc[int](42);
+  Ref[int] keep = Ref[int](42);
   Weak[int]? a = none;
   Weak[int] b = keep.downgrade();
   w := a ?: b;
@@ -143,7 +143,7 @@ t0952_weak_none() `test {
 }
 
 t0952_weak_some() `test {
-  Arc[int] keep = Arc[int](42);
+  Ref[int] keep = Ref[int](42);
   Weak[int] inner = keep.downgrade();
   Weak[int]? a = inner;
   Weak[int] b = keep.downgrade();

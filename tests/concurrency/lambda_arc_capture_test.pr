@@ -1,7 +1,7 @@
 // T0271: Lambda env drop correctly handles Arc/Weak/Mutex captures.
 // These types are i8* pointers that need envDropCallFn, not envDropUserValueDrop.
 lambda_captures_arc() `test {
-  a := Arc[int](42);
+  a := Ref[int](42);
   f := move || -> int {
     return a.borrow;
   };
@@ -10,7 +10,7 @@ lambda_captures_arc() `test {
 }
 
 lambda_captures_arc_clone_before() `test {
-  a := Arc[int](10);
+  a := Ref[int](10);
   b := a.clone();
   f := move || -> int {
     return a.borrow;
@@ -21,7 +21,7 @@ lambda_captures_arc_clone_before() `test {
 }
 
 lambda_captures_weak() `test {
-  a := Arc[int](99);
+  a := Ref[int](99);
   w := a.downgrade();
   f := move || -> bool {
     if upgraded := w.upgrade() {
@@ -44,7 +44,7 @@ lambda_captures_mutex() `test {
 }
 
 lambda_captures_arc_and_weak() `test {
-  a := Arc[int](55);
+  a := Ref[int](55);
   w := a.downgrade();
   f := move || -> bool {
     if upgraded := w.upgrade() {
@@ -57,19 +57,19 @@ lambda_captures_arc_and_weak() `test {
 }
 
 lambda_captures_arc_drop_only() `test {
-  a := Arc[int](100);
+  a := Ref[int](100);
   f := move || {
   };
   f();
 }
 
 // T0426: lambda with explicit `string&` return type, borrowing from a
-// move-captured Arc[string]. Before T0426, the ownership pass used the
+// move-captured Ref[string]. Before T0426, the ownership pass used the
 // outer fn's signature inside lambda bodies, falsely rejecting this legit
 // pattern. After the fix the lambda's own signature is used and captures
 // are treated as parameter-like for return-ref checks.
 lambda_returns_string_ref() `test {
-  a := Arc[string]("hello");
+  a := Ref[string]("hello");
   f := move || -> string & {
     return a.borrow;
   };
@@ -82,7 +82,7 @@ lambda_returns_string_ref() `test {
 // signature; the save/restore in checkLambdaExpr must work through nesting
 // without polluting either level's params/curSig/returnOrigins state.
 lambda_nested_returns_string_ref() `test {
-  a := Arc[string]("nested");
+  a := Ref[string]("nested");
   outer := move || -> string & {
     inner := |string &s| -> string & {
       return s;

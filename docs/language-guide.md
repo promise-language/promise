@@ -567,7 +567,27 @@ select {
   default:
     print_line("no channel ready");
 }
+
+// Sharing a value: borrow for momentary access; Ref[T] to keep or share it.
+// Ref[T] is reference-counted shared ownership — clone() to share, drop frees
+// the inner value when the last reference goes away.
+config := Ref[Config](load_config());
+worker := config.clone();        // shares the same Config
+go { use(worker.borrow); };      // the goroutine holds its own reference
+
+// Atomicity of the Ref counter is a compiler decision, not part of the type:
+// a Ref that never crosses a go/channel/Task boundary uses a plain counter; one
+// that might be shared across goroutines uses an atomic counter. To force the
+// fast non-atomic counter, mark the element type `confined — the compiler then
+// REJECTS that Ref at any go/channel/Task boundary, which keeps it sound.
+type LocalState `confined { int count; }
+s := Ref[LocalState](LocalState(count: 0));   // non-atomic counter
+// go { s.borrow.count; };  // error: confined Ref can't cross a goroutine
 ```
+
+> **Common mistake:** trying to store a borrow (`T&`/`T~`) in a struct field.
+> Borrows live only in parameters, locals, and return values (stack-bounded).
+> To hold or share a reference inside a struct, use `Ref[T]`.
 
 ## Modules
 

@@ -1106,7 +1106,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
+	// T0952: `Mutex[int] m = a ?: b` — signal genElvis (as in genInferredVarDecl) so
+	// the none-path default's owner is neutralized; the bound variable owns the temp.
+	prevElvisBound := c.elvisResultBound
+	if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+		c.elvisResultBound = true
+	}
 	val := c.genExpr(s.Value)
+	c.elvisResultBound = prevElvisBound
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
 	c.dupTupleFieldAccess = false
@@ -1493,7 +1500,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
+	// T0952: `m := a ?: b` — when the RHS (peeling parens) is an inline elvis, signal
+	// genElvis so it neutralizes the none-path default's owner on the none block
+	// (path-conditionally). The bound variable claims the elvis result temp and takes
+	// an unconditional owning drop, so the aliased default must not drop a second time.
+	prevElvisBound := c.elvisResultBound
+	if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+		c.elvisResultBound = true
+	}
 	val := c.genExpr(s.Value)
+	c.elvisResultBound = prevElvisBound
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
 	c.dupTupleFieldAccess = false
@@ -6153,7 +6169,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.setDupFlagsForFieldAccess(rhsType)
 		}
 	}
+	// T0952: `m = a ?: b` — signal genElvis (as in genInferredVarDecl) so the
+	// none-path default's owner is neutralized; the assignment target owns the temp.
+	prevElvisBound := c.elvisResultBound
+	if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+		c.elvisResultBound = true
+	}
 	val := c.genExpr(s.Value)
+	c.elvisResultBound = prevElvisBound
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
 	c.dupTupleFieldAccess = false

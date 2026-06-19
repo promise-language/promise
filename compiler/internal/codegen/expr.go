@@ -8353,6 +8353,11 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// await operand). Used below to neutralize the none-path default's owner.
 	consumedByReceive := c.elvisResultConsumed
 	c.elvisResultConsumed = false
+	// T0952: capture+reset the bound-result signal (set by the var-decl/assignment
+	// RHS-eval sites in stmt.go). Same reasoning — a nested elvis in e.Left/e.Right
+	// is not itself the bound RHS, so it must not inherit this flag.
+	boundResult := c.elvisResultBound
+	c.elvisResultBound = false
 
 	optVal := c.genExprAutoPropagate(e.Left)
 
@@ -8423,6 +8428,22 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		// param default has no drop flag → clearDropFlag no-ops, leaving T0953's
 		// borrowed-source crash to its own fix.
 		if ident, ok := e.Right.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		} else {
+			c.claimElvisDefaultTemp(defaultVal)
+		}
+	} else if boundResult && c.elvisResultHandleDrop(e) != nil {
+		// T0952: single-owner native handle elvis bound DIRECTLY to a variable
+		// (`m := a ?: b`). The binding claims the result temp and takes an
+		// unconditional owning drop; on the none-path it aliases the default, so the
+		// default's own scope-exit drop must be neutralized here (path-conditional —
+		// none-block only) or the handle is freed twice (Mutex: SEGV; Arc/Channel:
+		// benign UAF). The inline case keeps borrow-on-none (T0951), so gate to bound.
+		// noneOwned stays false — the bound variable, not the inline temp, owns it.
+		// Peel parens on the default (symmetric with the some-path's e.Left peel) so
+		// `m := a ?: (b)` neutralizes the owned-local `b` instead of falling to the
+		// fresh-temp claim (which cannot reach a local's scope-exit drop flag).
+		if ident, ok := unwrapDestructureParens(e.Right).(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		} else {
 			c.claimElvisDefaultTemp(defaultVal)

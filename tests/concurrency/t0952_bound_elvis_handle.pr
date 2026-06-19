@@ -1,0 +1,267 @@
+// T0952: a BOUND elvis `?:` whose result is a single-owner native handle, where the
+// source optional is none (so the default is selected), must not double-free the
+// default. The bound variable claims the elvis result temp and takes an unconditional
+// owning drop; on the none-path it aliases the default, so the default's own
+// scope-exit drop has to be neutralized — otherwise the handle is freed twice.
+// Mutex.drop (pal_mutex_destroy + pal_free) is non-idempotent → SEGV; Arc/Channel
+// survive a benign use-after-free, which this fix also closes. The inline form
+// (`(a ?: b).method()`) is deliberately borrow-on-none (T0951) and is unaffected.
+//
+// All tests are zero-leak-enforced batch tests; heap payloads (string) are used where
+// the handle carries one so a latent double-free surfaces as a leak or crash.
+// ── Mutex[int]: the SEGV repro from the tracker item, all bound forms ───────────
+// Inferred decl, owned-local default, then `.lock()`/close — the exact repro.
+t0952_mutex_inferred_none_lock() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  m := a ?: b;
+  g := m.lock();
+  assert(g.borrow == 9, "none-path selects the default mutex value");
+  g.close();
+}
+
+// Inferred decl, owned-local default, no method call (plain bind + scope-exit drop).
+t0952_mutex_inferred_none_plain() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  m := a ?: b;
+}
+
+// Typed decl form.
+t0952_mutex_typed_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  Mutex[int] m = a ?: b;
+  g := m.lock();
+  assert(g.borrow == 9, "typed-decl none-path value");
+  g.close();
+}
+
+// Assignment form (re-assign an existing local).
+t0952_mutex_assign_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  Mutex[int] m = Mutex[int](1);
+  m = a ?: b;
+  g := m.lock();
+  assert(g.borrow == 9, "assignment none-path value");
+  g.close();
+}
+
+// Fresh-temp default (constructed in the none-block, claimed there).
+t0952_mutex_inferred_none_freshtemp() `test {
+  Mutex[int]? a = none;
+  m := a ?: Mutex[int](9);
+  g := m.lock();
+  assert(g.borrow == 9, "fresh-temp none-path value");
+  g.close();
+}
+
+// Parenthesized RHS — the paren-peel still routes through the bound transfer.
+t0952_mutex_inferred_none_paren() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  m := (a ?: b);
+  g := m.lock();
+  assert(g.borrow == 9, "paren none-path value");
+  g.close();
+}
+
+// Parenthesized DEFAULT operand — the none-path neutralization must peel the parens
+// to reach the owned-local `b`'s drop flag (symmetric with the some-path's e.Left
+// peel). Without the peel this falls to the fresh-temp claim, which cannot reach a
+// local's scope-exit drop flag → double-free SEGV.
+t0952_mutex_inferred_none_paren_default() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  m := a ?: (b);
+  g := m.lock();
+  assert(g.borrow == 9, "paren-default none-path value");
+  g.close();
+}
+
+// Bound-SOME control: the source is present, so the some-path inner is selected and
+// the unselected default `b` drops via its own binding (no none-block clear runs).
+t0952_mutex_bound_some() `test {
+  Mutex[int] inner = Mutex[int](7);
+  Mutex[int]? a = inner;
+  Mutex[int] b = Mutex[int](9);
+  m := a ?: b;
+  g := m.lock();
+  assert(g.borrow == 7, "some-path selects the source value");
+  g.close();
+}
+
+// ── Arc[string]: heap payload — surfaces the latent double-free as a leak ───────
+
+t0952_arc_string_none() `test {
+  Arc[string]? a = none;
+  Arc[string] b = Arc[string]("hello");
+  x := a ?: b;
+  assert(x.borrow == "hello", "none-path selects the default arc");
+}
+
+t0952_arc_string_some() `test {
+  Arc[string] inner = Arc[string]("world");
+  Arc[string]? a = inner;
+  Arc[string] b = Arc[string]("hello");
+  x := a ?: b;
+  assert(x.borrow == "world", "some-path selects the source arc");
+}
+
+// ── Channel[string]: a buffered string is freed by Channel.drop — double-free bait
+
+t0952_channel_string_none() `test {
+  Channel[string]? a = none;
+  Channel[string] b = Channel[string](1);
+  ch := a ?: b;
+  ch.send("buffered"); // owned by the channel; freed by Channel.drop at scope exit
+  ch.close();
+}
+
+t0952_channel_string_some() `test {
+  Channel[string] inner = Channel[string](1);
+  Channel[string]? a = inner;
+  Channel[string] b = Channel[string](1);
+  ch := a ?: b;
+  ch.send("buffered");
+  ch.close();
+}
+
+// ── Weak[int]: double Weak.drop would corrupt the shared Arc allocation's count ──
+
+t0952_weak_none() `test {
+  Arc[int] keep = Arc[int](42);
+  Weak[int]? a = none;
+  Weak[int] b = keep.downgrade();
+  w := a ?: b;
+  if strong := w.upgrade() {
+    assert(strong.borrow == 42, "weak upgrades to keep value (none-path)");
+  } else {
+    assert(false, "weak should be upgradeable after bound none-path");
+  }
+}
+
+t0952_weak_some() `test {
+  Arc[int] keep = Arc[int](42);
+  Weak[int] inner = keep.downgrade();
+  Weak[int]? a = inner;
+  Weak[int] b = keep.downgrade();
+  w := a ?: b;
+  if strong := w.upgrade() {
+    assert(strong.borrow == 42, "weak upgrades to keep value (some-path)");
+  } else {
+    assert(false, "weak should be upgradeable after bound some-path");
+  }
+}
+
+// ── Task[int]: double Task.drop would double-join/free the goroutine G ───────────
+
+worker_t0952() int {
+  return 7;
+}
+
+t0952_task_none() `test {
+  Task[int]? a = none;
+  Task[int] b = go worker_t0952();
+  t := a ?: b;
+  r := <-t;
+  assert(r == 7, "none-path selects the default task");
+}
+
+t0952_task_some() `test {
+  Task[int] inner = go worker_t0952();
+  Task[int]? a = inner;
+  Task[int] b = go worker_t0952();
+  t := a ?: b;
+  r := <-t;
+  assert(r == 7, "some-path selects the source task");
+}
+
+// ── MutexGuard[int]: bound guard, released exactly once via close ────────────────
+
+t0952_guard_none() `test {
+  Mutex[int] m2 = Mutex[int](5);
+  MutexGuard[int]? a = none;
+  MutexGuard[int] b = m2.lock();
+  g := a ?: b;
+  assert(g.borrow == 5, "none-path selects the default guard");
+  g.close();
+}
+
+t0952_guard_some() `test {
+  Mutex[int] m1 = Mutex[int](3);
+  Mutex[int] m2 = Mutex[int](5);
+  MutexGuard[int]? a = m1.lock();
+  MutexGuard[int] b = m2.lock();
+  g := a ?: b;
+  assert(g.borrow == 3, "some-path selects the source guard");
+  g.close();
+}
+
+// ── Generic context: exercises the typeSubst arm of elvisResultHandleDrop ────────
+
+pick_mutex_t0952[T](~T seed) {
+  Mutex[T]? a = none;
+  Mutex[T] b = Mutex[T](seed);
+  m := a ?: b;
+  g := m.lock();
+  g.close();
+}
+
+t0952_generic_context_none() `test {
+  pick_mutex_t0952(7); // Mutex[int]
+  pick_mutex_t0952("payload"); // Mutex[string] — heap payload instantiation
+}
+
+// ── State-transition coverage: the none-path drop-flag clear is PATH-CONDITIONAL ──
+// (emitted inside the elvis.none block only). These lock that the clear neither
+// leaks across re-entry nor cross-contaminates an unrelated bind.
+
+// Loop body: `b` is re-declared every iteration with a fresh drop flag re-init'd to
+// true at its decl; the none-block clears it each pass. A non-conditional clear (one
+// that permanently neutralized the flag) would double-free on iteration 2+ once the
+// re-init runs again — the alias is dropped by `m`'s binding AND `b`'s re-armed flag.
+t0952_mutex_bound_in_loop() `test {
+  for i in 0..3 {
+    Mutex[int]? a = none;
+    Mutex[int] b = Mutex[int](i);
+    m := a ?: b;
+    g := m.lock();
+    assert(g.borrow == i, "loop iteration selects the per-iter default value");
+    g.close();
+  }
+}
+
+// Nested block scope: the bound elvis lives in an inner `if` scope. Its none-path
+// clear must target the inner-scope `b`'s flag and drop exactly once at inner-scope
+// exit (not at function exit, not twice).
+t0952_mutex_bound_nested_scope() `test {
+  if true {
+    Mutex[int]? a = none;
+    Mutex[int] b = Mutex[int](9);
+    m := a ?: b;
+    g := m.lock();
+    assert(g.borrow == 9, "nested-scope none-path value");
+    g.close();
+  }
+}
+
+// Two independent binds in one function: each elvis clears a different default's flag.
+// `c.elvisResultBound` is set per-RHS and reset inside genElvis, so the second bind
+// must not inherit or mis-target the first's neutralization — both mutexes freed once.
+t0952_mutex_two_binds() `test {
+  Mutex[int]? a1 = none;
+  Mutex[int] b1 = Mutex[int](1);
+  m1 := a1 ?: b1;
+  g1 := m1.lock();
+  assert(g1.borrow == 1, "first bind selects its own default");
+  g1.close();
+
+  Mutex[int]? a2 = none;
+  Mutex[int] b2 = Mutex[int](2);
+  m2 := a2 ?: b2;
+  g2 := m2.lock();
+  assert(g2.borrow == 2, "second bind selects its own default");
+  g2.close();
+}

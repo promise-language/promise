@@ -100,7 +100,7 @@ enum Shape {
   Point,
 
   // Methods declared after variants
-  area(&this) f64 {
+  area(this) f64 {
     match this {
       Shape.Circle(r) => { return 3.14159 * r * r; },
       Shape.Rectangle(w, h) => { return w * h; },
@@ -140,13 +140,13 @@ type Counter {
   int value;
 
   // Shared borrow (read-only) — default
-  current(&this) int { return this.value; }
+  current(this) int { return this.value; }
 
   // Mutable borrow (can modify)
   increment(~this) { this.value += 1; }
 
   // Expression body shorthand
-  is_zero(&this) bool => this.value == 0;
+  is_zero(this) bool => this.value == 0;
 
   // Getter (accessed as .count, no parens)
   get count int => this.value;
@@ -363,30 +363,28 @@ if animal is Dog(name, breed) {
 ## Ownership & Borrowing
 
 ```promise
-// Three parameter modes (declared on the parameter):
-read_only(string &s) { }     // shared borrow (read)
-mutate(string ~s) { }        // mutable borrow (exclusive write)
-consume(~string s) { }       // takes ownership (moved into callee)
-borrow(string s) { }         // shared borrow — caller still owns; callee may not consume
+// Three parameter modes (the shared borrow is the unmarked default):
+read_only(string s) { }       // shared borrow (read-only) — caller keeps ownership
+mutate(string~ s) { }         // mutable borrow (~) — callee may modify; caller keeps ownership
+consume(string move s) { }    // move — callee takes ownership; caller can't use s after
 
-// At call site — NO markers. Compiler infers borrow from declaration:
-read_only(val);               // auto-borrows &val
-mutate(val);                  // auto-borrows ~val
-consume(val);                 // val is moved, cannot use after
-borrow(val);                  // val is borrowed, still valid after
+// At call site: borrows take NO marker; consuming a named binding takes `move`:
+read_only(val);               // shared borrow — val still valid
+mutate(val);                  // mutable borrow — val still valid (possibly changed)
+consume(move val);            // move — val is gone after this line
 
 // Copy types (auto-copy, no move): primitives, bool, char, pure value types
-// Move types: string, collections, heap types — plain `T` param is a borrow;
-// add `~T` to consume. Trying to move out of a plain-`T` parameter inside the
-// callee (e.g., into a struct field) is a compile-time error.
+// Move types: string, collections, heap types — a plain `T s` param is a borrow;
+// use `T move s` to consume. A borrow parameter cannot be moved out (e.g., into a
+// struct field) — that's a compile-time error.
 
-// Implicit `T& → T` and `T~ → T` decay only happens for Copy types.
-// For non-Copy types (string, vectors, heap user types), use `.clone()` for an
-// owned copy or declare the local/parameter as `T&` to keep it as a borrow.
-//   string s = arc.borrow;          // error: cannot assign string& to string
-//   string s = arc.borrow.clone();  // OK: explicit owned copy
-//   string& s = arc.borrow;         // OK: kept as borrow
-//   int n = arc.borrow;             // OK: int is Copy
+// Reference TYPES (locals and return types; default is owned):
+// (borrows can't be stored in fields — use Ref[T] to hold a reference in a struct)
+//   string  s = ref.borrow;         // error: can't store a borrow as an owned string
+//   string  s = ref.borrow.clone(); // OK: explicit owned copy
+//   string& s = ref.borrow;         // OK: kept as a shared reference
+//   int     n = ref.borrow;         // OK: int is Copy
+// Implicit `T& → T` / `T~ → T` decay only happens for Copy types.
 ```
 
 ## Resource Management
@@ -573,11 +571,11 @@ select {
 
 ## Modules
 
-**`std` is auto-imported** — no `use` needed for `print_line`, `Builder`, `Vector`, `Map`, `assert`, etc.
+**`std` is auto-imported** under `use std as _` (anonymous), which injects its names at the top level — that's why `print_line`, `Builder`, `Vector`, `Map`, `int`, `assert`, etc. work with no prefix and no `use`.
 
-**Catalog modules** require `use` and have different access rules:
-- **Types** always need the module prefix: `io.File`, `io.Dir`, `json.JsonValue`
-- **Free functions** work without prefix after `use`: `read_line()`, `path.join(...)` are both valid
+**Catalog modules** require `use`, in one of two forms:
+- **Named** (`use io;`) — **both types and functions** are accessed through the module prefix (`io.File`, `io.read_line()`). There is no special unprefixed-function path; naked `File`/`read_line()` is an error.
+- **Anonymous** (`use path as _;`) — injects the module's names at the top level, usable with no prefix (exactly how `std` is imported). Name conflicts fall back to the prefix.
 
 ```promise
 // Import a catalog module
@@ -589,19 +587,19 @@ use json;
 // Import with alias
 use json as j;
 
-// Types need module prefix — ALWAYS
+// Named import — types AND functions go through the module prefix
 io.File f = io.File.open("data.txt", readonly: true);
-io.Dir.make("/tmp/out");           // not Dir.make(...)
+io.Dir.make("/tmp/out");                 // not Dir.make(...)
+string p = path.join("/usr", "bin");     // functions need the prefix too — join(...) alone is an error
 json.JsonValue v = json.parse_value(data);
 
-// Free functions work after use
-string line = read_line();          // io.read_line — prefix optional
-string p = path.join("/usr", "bin"); // path functions
+// Anonymous import injects names at the top level (this is how std works):
+//   use path as _;  →  join("/usr", "bin")  with no prefix; on a conflict use path.join(...)
 
 // Available modules (use `promise doc <module>` to explore):
 // io      — File, Dir, BufferedReader/Writer, read_line (stdin)
 // path    — join, parent, file_name, extension, stem, normalize
-// os      — env vars, working_dir, execute (variadic), exit_process
+// os      — env vars, working_dir, execute(program, args[], env?, dir?), exit_process
 // json    — encode_string, decode_string (generic, via Encodable/Decodable)
 // math    — lerp, map_range, gcd, lcm, sign, is_even, is_odd
 // strings — join, spaces, reverse, is_blank, repeat_join
@@ -695,7 +693,7 @@ Fixed-size arrays are value types (stack-allocated, auto-copied). Distinct from 
 type Percentage {
   int value `final;
 
-  new(int value) {
+  new(~this, int value) {
     if value < 0 { this.value = 0; }
     else if value > 100 { this.value = 100; }
     else { this.value = value; }
@@ -707,7 +705,7 @@ Percentage(value: 120);   // clamped to 100
 type Port {
   int value `final;
 
-  new!(int value) {
+  new!(~this, int value) {
     if value < 1 || value > 65535 {
       raise error(message: "invalid port");
     }
@@ -764,10 +762,10 @@ main!() {
   string out = v.format();                        // compact JSON string
 }
 
-// Run a subprocess (variadic — inline args or pre-built string[])
+// Run a subprocess: execute(program, args[], env?, working_dir?) — failable
 use os;
 main!() {
-  r := os.execute("ls", "-la", "/tmp");
+  r := os.execute("ls", ["-la", "/tmp"]);   // env/dir optional; failable — auto-propagates in main!()
   print_line(r.standard_output);
 }
 
@@ -869,17 +867,18 @@ Cross-compile to a non-host OS (e.g. Linux → Windows binary) is not yet wired 
 ## Common Mistakes
 
 1. **Using `!` on failable calls** — `!` is for optional unwrap only. Use `?!` to panic on failable errors, or use bare call for propagation in `!` functions.
-2. **`&`/`~` at call site** — Don't write `func(&val)` or `func(~val)`. Just write `func(val)` — the compiler auto-borrows based on the parameter declaration.
-3. **Forgetting named args** — constructors require `Type(field: value)`, not positional.
-4. **Moving strings twice** — strings are not `Copy`. Use `&s` parameter to borrow, or read into separate variables.
+2. **Call-site markers** — borrows take no marker (`func(val)`); the only call-site marker is `move`, required when passing a named binding to a consuming (`move`) parameter: `consume(move val)`.
+3. **Named arg before positional** — once an argument is named, every later argument must be named too: `f(x: 1, 2)` is an error, but `f(1, y: 2)` is fine. Constructors, functions, and methods all use the same positional-then-named rule.
+4. **Moving strings twice** — strings are not `Copy`. Use a plain `string s` parameter (the unmarked default) to borrow, or `.clone()` for an independent owned copy.
 5. **Getter parens** — `vec.len` not `vec.len()`. Getters use property syntax.
-6. **Mutable methods** — use `~this` for methods that modify state. `&this` is read-only.
+6. **Mutable methods** — use `~this` for methods that modify state; bare `this` is read-only.
 7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use`.
 8. **`?` handler spacing is insignificant** — Whitespace around the `?` handler is optional: `expr?{...}`, `expr ?{...}`, `expr? {...}`, and `expr ? {...}` all parse identically (same for the binding forms `expr?e{...}` / `expr? e {...}`). This applies to both the error handler (on failable `!` values) and the optional handler (on `T?` values). Note the companion operators `?^` and `?!` are single tokens — no space is allowed between `?` and `^`/`!`.
 9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.
-11. **Module type prefix** — Types always need the module prefix: `io.File.open(...)` not `File.open(...)`. Free functions don't: `read_line()` works after `use io;`.
+11. **Naked catalog names** — under a named `use io;`, both types *and* functions need the `io.` prefix (`io.File`, `io.read_line()`); naked `File`/`read_line()` is an error. To use names without a prefix, import anonymously: `use io as _;`.
 12. **`;` in blocks** — All statements need `;`. The trailing `;` on the last expression before `}` is optional: both `? { "default" }` and `? { "default"; }` work.
 13. **`?!` in failable functions** — `?!` always **panics**, even inside a `!` function. For propagation, just use bare call (or `?^` for self-documenting propagation).
 14. **API discovery** — Use `promise doc <module>` to explore module APIs instead of guessing. `promise doc std` for the standard library.
 15. **`{}` is not an empty map** — use `{:}` (empty map — note the colon), `[]` (empty vector), or `Set[T]()` (sets have no literal form). A bare `{}` in value position is rejected with a guiding error.
+16. **Mixing `` `value `` and instance fields** — a type's fields must be *all* `` `value `` (a pure value type) or *all* instance; hybrid value+instance types aren't supported yet.

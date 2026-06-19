@@ -49,7 +49,7 @@ The `promise` binary serves as both compiler and package manager:
 ```
 promise build file.pr             # Compile to executable
 promise run file.pr               # Build and run
-promise test file.pr              # Run @test functions
+promise test file.pr              # Run `test functions
 promise test dir/...              # Recursive directory scan
 promise test -timeout 30s ...     # Per-test timeout (default: 60s)
 promise test -parallel 4 ...     # Run up to 4 tests in parallel (default: NumCPU)
@@ -62,7 +62,7 @@ promise exec '<code>'             # Execute inline code (failable main, ? works)
 echo '<code>' | promise           # Execute from stdin
 promise install                   # Install to ~/.promise/
 promise init                      # Create new promise.toml
-promise doc file.pr               # Generate documentation from doc() meta tags
+promise doc file.pr               # Generate documentation from `doc meta tags
 promise doc -signatures file.pr   # Compact signature-only output
 promise clean                     # Remove .promise-build/ cache
 promise add <url>                 # Add dependency (planned)
@@ -121,7 +121,7 @@ type User {
 
 testUserCreation() `test {
   User u = User(name: "Alice", age: 30);
-  assert(u.name == "Alice");
+  assert(u.name == "Alice", "name should be Alice");
 }
 ```
 
@@ -376,17 +376,22 @@ Operator precedence is fixed by the language and cannot be overridden by user-de
 
 | Precedence | Operators | Associativity |
 |-----------|-----------|---------------|
-| 1 (highest) | `.` `()` `[]` | Left |
-| 2 | Unary `-` `!` | Right (prefix) |
+| 1 (highest) | `.` `?.` `()` `[]` `[:]` · postfix `?` `?^` `?!` `!` (error handling / optional unwrap) | Left |
+| 2 | Unary prefix `-` `!` `~` `<-` | Right |
 | 3 | `*` `/` `%` | Left |
-| 4 | `+` `-` | Left |
-| 5 | `..` `..=` | Non-associative |
-| 6 | `<` `>` `<=` `>=` | Non-associative |
-| 7 | `==` `!=` | Non-associative |
-| 8 | `&&` | Left |
-| 9 | `\|\|` | Left |
-| 10 | `?.` `?:` | Left |
-| 11 (lowest) | `=` `+=` `-=` `*=` `/=` | Right |
+| 4 | `<<` `>>` | Left |
+| 5 | `+` `-` | Left |
+| 6 | `&` `^` `\|` (bitwise) | Left |
+| 7 | `..` `..=` | Non-associative |
+| 8 | `<` `>` `<=` `>=` | Non-associative |
+| 9 | `is` | Non-associative |
+| 10 | `as` `as!` | Left |
+| 11 | `==` `!=` | Non-associative |
+| 12 | `&&` | Left |
+| 13 | `\|\|` | Left |
+| 14 (lowest) | `?:` (elvis) | Right |
+
+Assignment (`=`, `+=`, `-=`, …) is a **statement**, not an expression, so it does not appear in this table.
 
 ### 5.2 The Four-Struct Model
 
@@ -631,7 +636,7 @@ Because fields are accessed through vtable getter/setter slots, an interface (a 
 type Positioned {
   f64 x;
   f64 y;
-  distanceTo(Positioned &other) f64 {
+  distanceTo(Positioned other) f64 {
     dx := this.x - other.x;
     dy := this.y - other.y;
     return math.sqrt(dx * dx + dy * dy);
@@ -702,11 +707,11 @@ type Point {
   int x `value;
   int y `value;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 
-  scale(&this, int factor) Point {
+  scale(this, int factor) Point {
     return Point(x: this.x * factor, y: this.y * factor);
   }
 }
@@ -727,9 +732,11 @@ main() {
 - Cannot have `is` parents (leaf types only)
 - Cannot have `drop()` methods (nothing to clean up)
 - Cannot have failable `new()` methods
-- Methods work normally — `this`/`&this` receive a pointer to the value struct alloca
+- Methods work normally — `this`/`~this` receive a pointer to the value struct alloca
 
 **Use cases**: coordinates (`Point`, `Vec2`), dimensions (`Size`, `Rect`), colors (`Color`), ranges, small fixed-size data.
+
+**Hybrid types** — a type that mixes `` `value `` fields with regular instance (heap) fields — fit the same four-struct model: the value struct embeds the `` `value `` fields directly *and* carries the instance pointer for the heap fields, so a method reaches every field uniformly (`` `value `` fields in the value struct, instance fields through the pointer). This is the natural consequence of treating all types through one layout rather than forking pure-value and pure-instance into separate models. Hybrid types are **not yet implemented**, however: for now a type's fields must be either **all** `` `value `` (a pure value type) or **none** (a regular instance type); mixing the two is not yet supported. Support may be added in the future.
 
 #### Primitives in the Four-Struct Model
 
@@ -811,7 +818,7 @@ type Circle is Shape {
 }
 
 type Drawable {
-  draw(Canvas &canvas) `abstract;
+  draw(Canvas canvas) `abstract;
 }
 
 type Circle is Shape, Drawable {
@@ -819,7 +826,7 @@ type Circle is Shape, Drawable {
 
   area() f64 { ... }
 
-  draw(Canvas &canvas) {
+  draw(Canvas canvas) {
     canvas.drawEllipse(this.x, this.y, this.radius);
   }
 }
@@ -927,14 +934,14 @@ type ConstProducer[T] is Producer[T] {
 Generics use **square brackets** `[]`. Constraints are expressed inline in the type parameter list.
 
 ```promise
-type map[K: Hashable + Eq, V] {
+type map[K: Hashable + Equal, V] {
   Bucket[K, V][] buckets;
 
-  get(K &key) V&? `instance { ... }
+  get(K key) V&? `instance { ... }
   set(K key, V value) `instance { ... }
 }
 
-sort[T: Ord](T[] ~list) {
+sort[T: Ordered](T[]~ list) {
   ...
 }
 ```
@@ -944,16 +951,16 @@ sort[T: Ord](T[] ~list) {
 The standard library provides these interfaces for use as generic constraints:
 
 ```promise
-type Eq {
-  ==(Self &other) bool `abstract;
-  !=(Self &other) bool { return !(this == other); }
+type Equal {
+  ==(Self other) bool `abstract;
+  !=(Self other) bool { return !(this == other); }
 }
 
-type Ord is Eq {
-  <(Self &other) bool `abstract;
-  >(Self &other) bool { return other < this; }
-  <=(Self &other) bool { return !(this > other); }
-  >=(Self &other) bool { return !(this < other); }
+type Ordered is Equal {
+  <(Self other) bool `abstract;
+  >(Self other) bool { return other < this; }
+  <=(Self other) bool { return !(this > other); }
+  >=(Self other) bool { return !(this < other); }
 }
 
 type Hashable {
@@ -961,7 +968,7 @@ type Hashable {
 }
 ```
 
-All primitive types (`int`, `f64`, `string`, `bool`, etc.) implement `Eq` and `Ord`. `string` and `int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
+All primitive types (`int`, `f64`, `string`, `bool`, etc.) implement `Equal` and `Ordered`. `string` and `int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
 
 #### Method-Level Generics
 
@@ -1047,7 +1054,7 @@ enum Shape {
   Point,
 
   // Method — called as s.area()
-  area(&this) f64 {
+  area(this) f64 {
     match this {
       Shape.Circle(r) => { return 3.14159 * r * r; },
       Shape.Rectangle(w, h) => { return w * h; },
@@ -1064,10 +1071,10 @@ enum Shape {
   }
 
   // Expression body shorthand
-  is_circle(&this) bool => !this.is_flat;
+  is_circle(this) bool => !this.is_flat;
 
   // Failable method
-  validate!(&this) string {
+  validate!(this) string {
     if this.is_flat { raise error(message: "flat shapes not allowed"); }
     return "ok";
   }
@@ -1081,7 +1088,7 @@ bool flat = s.is_flat;   // getter (property syntax)
 **Rules:**
 
 - Methods are declared after all variants, separated by commas from the last variant.
-- Methods receive `this` as the enum value (value semantics, not a pointer from the caller's perspective). The default receiver is value; `&this` (shared borrow) and `~this` (mutable borrow) are also accepted.
+- Methods receive `this` as the enum value (value semantics, not a pointer from the caller's perspective). A bare `this` is a shared borrow (by value for these value-semantic enums); `~this` is a mutable borrow.
 - Methods can call other methods on `this` (e.g., `this.rank()` or `this.label` for getters).
 - Enum methods **cannot** be `` `abstract ``, `` `native ``, `` `factory ``, `` `global ``, or `` `mono ``.
 - Enum methods support expression bodies (`=> expr;`), failable return types (`!`), default parameters, and all standard method features.
@@ -1139,16 +1146,16 @@ On generic types, `Self` resolves to the self-instantiation — `Self` inside `B
 ```promise
 type Box[T] {
   T value;
-  new(~this, T v) { this.value = v; }
+  new(~this, T move v) { this.value = v; }
 
   // Factory returning Self — monomorphizes to Box[int] for Box[int].wrap(...)
-  wrap(T v) Self `factory {
-    return Self(v: v);
+  wrap(T move v) Self `factory {
+    return Self(v: move v);
   }
 
   // Instance method returning Self
-  rewrap(T v) Self {
-    return Self(v: v);
+  rewrap(T move v) Self {
+    return Self(v: move v);
   }
 
   // Self as parameter type
@@ -1200,7 +1207,7 @@ When a type needs validation or computed initialization, define a `new` method. 
 type Percentage {
   int value `final;
 
-  new(int value) {
+  new(~this, int value) {
     if value < 0 { this.value = 0; }
     else if value > 100 { this.value = 100; }
     else { this.value = value; }
@@ -1213,11 +1220,11 @@ Percentage(value: 50)     // calls new(value:), stores 50
 
 Semantics:
 1. Compiler allocates instance (zero-initialized) and stores RTTI
-2. `new` body executes with implicit `~this` (mutable access to fresh instance)
+2. `new` body executes with an explicit `~this` (mutable borrow of the fresh instance)
 3. Instance returned as value struct
 
 Rules:
-- Receiver is implicitly `~this` — not written in the signature
+- Receiver is written explicitly as `~this` (a mutable borrow of the fresh instance)
 - Return type is implicitly `Self` — not written in the signature
 - Call site syntax is unchanged: `Type(args...)` — arguments match `new`'s parameter names (not field names)
 - When `new` is defined, the implicit constructor is gone — all construction goes through `new`
@@ -1232,7 +1239,7 @@ type Point {
   f64 y `final;
 
   // Polar constructor — param names differ from field names
-  new(f64 radius, f64 angle) {
+  new(~this, f64 radius, f64 angle) {
     this.x = radius * cos(angle);
     this.y = radius * sin(angle);
   }
@@ -1249,7 +1256,7 @@ Append `!` to make `new` failable. The caller must handle the error using standa
 type Port {
   int value `final;
 
-  new!(int value) {
+  new!(~this, int value) {
     if value < 1 || value > 65535 {
       raise InvalidArgError(msg: "invalid port number");
     }
@@ -1266,7 +1273,7 @@ A failable constructor integrates with standard error handling — auto-propagat
 ```promise
 serve!(int portNum) Server {
   Port p = Port(value: portNum);   // auto-propagates InvalidArgError on failure
-  return Server(port: p);
+  return Server(port: move p);
 }
 ```
 
@@ -1315,12 +1322,12 @@ Factories can return child types:
 type Shape `abstract {
   string color `final;
 
-  new(string color) {
+  new(~this, string move color) {
     this.color = color;
   }
 
-  circle(string color, f64 r) Self `factory {
-    return Circle(color: color, radius: r);
+  circle(string move color, f64 r) Self `factory {
+    return Circle(color: move color, radius: r);
   }
 }
 
@@ -1338,7 +1345,7 @@ type Animal {
   string name `final;
   int age;
 
-  new(string name, int age) {
+  new(~this, string move name, int age) {
     this.name = name;
     this.age = age;
   }
@@ -1347,8 +1354,8 @@ type Animal {
 type Dog is Animal {
   string breed `final;
 
-  new(string name, int age, string breed) {
-    super(name, age);       // calls Animal.new
+  new(~this, string move name, int age, string move breed) {
+    super(move name, age);  // calls Animal.new
     this.breed = breed;
   }
 }
@@ -1362,8 +1369,8 @@ When the parent has only the implicit constructor, `super(field: value, ...)` us
 type Dog is Animal {
   string breed `final;
 
-  new(string name, string breed) {
-    super(name: name, age: 0);    // field-name syntax for implicit parent constructor
+  new(~this, string move name, string move breed) {
+    super(name: move name, age: 0);    // field-name syntax for implicit parent constructor
     this.breed = breed;
   }
 }
@@ -1380,13 +1387,13 @@ This enables validation before parent construction, conditional super calls, and
 type SecureConn is Connection {
   string cert `final;
 
-  new!(string rawUrl, string cert) {
+  new!(~this, string rawUrl, string move cert) {
     // Validation before super — no this access, just params + locals
     string normalized = normalizeUrl(rawUrl);
     if !isValid(normalized) {
-      raise InvalidUrlError(url: rawUrl);
+      raise InvalidUrlError(url: rawUrl.clone());
     }
-    super(url: normalized, timeout: 30);
+    super(url: move normalized, timeout: 30);
     this.cert = cert;
   }
 }
@@ -1394,14 +1401,14 @@ type SecureConn is Connection {
 
 ```promise
 type Logger is Output {
-  new!(string target) {
+  new!(~this, string target) {
     if target == "stdout" {
       super(stream: stdout);
     } else if target == "stderr" {
       super(stream: stderr);
     } else {
       Stream f = openFile(target);
-      super(stream: f);
+      super(stream: move f);
     }
     // all branches called super — OK
   }
@@ -1451,40 +1458,83 @@ Promise uses Rust-style ownership with borrowing and lifetimes.
 ### 6.1 Core Rules
 
 1. Every value has exactly **one owner**.
-2. When the owner goes out of scope, the value is **dropped** (destructor called, memory freed).
-3. You can have **either** one mutable reference (`T~`) **or** any number of shared references (`T&`) — never both simultaneously.
+2. When the owner goes out of scope **and the value has not been moved**, the value is **dropped** — its `drop()` runs and its memory is freed (see §16.3).
+3. A value may be borrowed by **either** one mutable reference (type `T~`) **or** any number of shared references (type `T&`) at a time — never both at once. Borrows of **disjoint fields** of the same value do not conflict (a shared borrow of `v.x` and a shared borrow of `v.y` may coexist).
 4. References must not outlive their referent.
+5. A moved-from variable is invalid — it may not be read, borrowed, or moved again — **until it is reassigned**, which revives it as a fresh owner (*move resurrection*).
 
-### 6.2 Syntax
+While a value is borrowed it may not be moved, consumed, reassigned, or borrowed in a conflicting mode; the compiler reports "cannot move/use … while it is borrowed". Ownership is tracked **per control-flow path**: when a value is moved on some paths but not others, the compiler inserts a drop flag and drops it only on the paths where it still has an owner (see §16.3).
+
+Throughout this section `T&` and `T~` name the shared- and mutable-reference **types**, used for locals and return types. **Parameters and receivers** default to a shared (read-only) borrow when unmarked (`T name`); a mutable borrow reuses the `~` sigil (`T~ name`), and the keyword `move` transfers ownership. See §6.2.
+
+**Borrows are stack-only — there are no reference fields.** A borrow may live in a parameter, a local, or a return value — all bounded by the call stack, so the compiler checks them one function at a time. A borrow may **not** be stored in a struct field or otherwise escape onto the heap; holding a borrow in heap data would require threading lifetimes through types (the hardest part of a borrow checker) for little gain. To keep or share a reference *inside* a struct, use **`Ref[T]`** — a reference-counted shared-ownership handle (§17.4). The rule is one line: *borrow for momentary access; `Ref[T]` to keep or share.* Whether a `Ref`'s counter is atomic is an implementation detail, not part of the type — it is non-atomic when the value never crosses a `go`/channel/`Task` boundary and atomic when it might.
+
+### 6.2 Borrowing and Moving
+
+A parameter declares how the callee accesses its argument. There are three modes. The **shared (read-only) borrow is the unmarked default**; the two that deviate from read-only access are marked — `~` (the mutable-reference sigil) for write access, and the keyword `move` for taking ownership:
 
 ```promise
-process(string &data) {              // shared borrow — read-only, caller still owns
-  io.print_line(data);
+// shared borrow (read-only) — the default; caller keeps ownership
+char_count(string text) int {
+  return text.len;
 }
 
-modify(string ~data) {               // mutable borrow — caller still owns
-  data.append(" world");
+// mutable borrow — callee may modify the value; caller keeps ownership
+add_zero(int[]~ items) {
+  items.push(0);
 }
 
-consume(~string data) {              // takes ownership — callee owns; caller's drop flag cleared
-  // data is dropped at end of scope
-}
-
-borrow(string data) {                // plain `T` is a borrow — caller still owns
-  // data may be read but cannot be moved out of (no consuming into a field, etc.)
-  io.print_line(data);
+// move (consume) — callee takes ownership; caller may not use the argument afterward
+store(string move text) {
+  // text is dropped at end of scope, unless moved on again
 }
 
 main() {
-  string s = string("hello");
-  process(&s);          // borrow
-  modify(~s);           // mutable borrow
-  borrow(s);            // borrow — s still valid after
-  consume(s);           // move — s is no longer valid after this line
+  string name = "promise";
+  int n = char_count(name);   // shared borrow — no marker; name still valid
+  print_line("{n} {name}");
+
+  int[] xs = [1, 2];
+  add_zero(xs);               // mutable borrow — no marker; xs still valid, now [1, 2, 0]
+  print_line("{xs.len}");
+
+  store(move name);           // move — `move` marks the consume; name is gone after this line
 }
 ```
 
-Plain `T` parameters are borrows: the caller still owns the value and the callee may not move it out (into a struct field, into another `~T` callee, by-value return, or move-capture into a lambda env). To consume a value, declare the parameter as `~T`. This rule prevents double-free bugs where both the caller and the callee's transitive consumer would drop the same allocation.
+| Parameter | Access | Caller after the call |
+|-----------|--------|-----------------------|
+| `T name` | shared borrow (read-only) | still owns the value |
+| `T~ name` | mutable borrow (read + write) | still owns the value |
+| `T move name` | move / consume | value is gone |
+
+For `Copy` types (primitives, `char`, `bool`, pure value types) every mode is a by-value copy, so the distinction is irrelevant; it matters only for move types (`string`, collections, heap user types). A `move` parameter is the only way to consume an argument; a borrow parameter may read (and, if `~`, modify) the value but may **not** move it out (into a field, another `move` callee, a by-value return, or a capture). This prevents double-free bugs where both the caller and a transitive consumer would drop the same allocation.
+
+**The call site marks consumption, and nothing else.** Consuming a named binding as an argument is written `f(move x)`; borrows — shared *or* mutable — carry no marker. The asymmetry is deliberate: a borrow is transient (the value survives the call, and a mutation is observable right there), whereas a move is permanent and its "value is gone" error surfaces *later*, away from the call — the one effect worth announcing.
+
+- **`move` required** — consuming a named binding as a **call or constructor argument**: `f(move x)`, `R(field: move x)`, `Factory.make(move x)`. A constructor (and a factory method) is just a function call; the default constructor's parameters are the owned fields, so they consume.
+- **No marker** — a borrow argument (`f(x)`); a plain assignment or `return` (`a = b`, `return b`), which for a non-`Copy` value is *always* a move whose target ownership is visible right there, so a marker would only add noise; a **temporary** argument (`f(build())`, `f(x.clone())`), which has no named binding to invalidate. A redundant `move` on a temporary is rejected.
+
+Invariant: **`move` on an argument ⇔ a named, reusable binding of yours is consumed there.**
+
+#### Receivers (`this`)
+
+A method's receiver uses the same markers, written on `this`:
+
+```promise
+type Counter {
+  int value;
+  current(this) int { return this.value; }            // shared (read-only) borrow of the receiver
+  bump(~this) { this.value = this.value + 1; }        // mutable borrow — may mutate fields
+  drop(~this) { }                                     // cleanup — also a mutable borrow
+}
+```
+
+`this` is a shared borrow of the receiver; `~this` is a mutable borrow. A receiver is **never** consumed — a method may mutate `this` but may not move it away whole, even in `drop(~this)`. This is the one asymmetry with parameters, which *can* be declared `move`.
+
+#### Partial moves and captures
+
+A field may be moved out of a value individually. Moving a field leaves the other fields usable (a *partial move*); however a field whose type defines its own `drop()` may **not** be moved out of a still-live aggregate (`cannot move field … — use .clone()`). Closures follow the same rules: `Copy` values are captured by copy, while a non-`Copy` value must be captured with `move`, which transfers ownership into the closure and invalidates the outer binding (see §12).
 
 ### 6.3 Lifetimes
 
@@ -1492,45 +1542,46 @@ The compiler uses **aggressive lifetime elision** — in practice, explicit life
 
 1. Each reference parameter gets its own lifetime.
 2. If there is exactly one input reference, its lifetime is assigned to all output references.
-3. If there is a `&this` or `~this`, its lifetime is assigned to all output references.
+3. If there is a `this` or `~this` receiver, its lifetime is assigned to all output references.
 4. If multiple input lifetimes exist and none of the above rules apply, the compiler analyzes the function body to infer the relationship. Only when the body is ambiguous (e.g. conditionally returning one of multiple references) does the compiler require an explicit annotation.
 
 ```promise
 // All of these are inferred — no annotations needed:
-first(string &a, string &b) string& { return a; }  // inferred: output borrows from a
-name(&this) string& { return this.name; }           // inferred: output borrows from this
+first(string a, string b) string& { return a; }  // inferred: output borrows from a
+name(this) string& { return this.name; }          // inferred: output borrows from this
 
 // Rare case: compiler cannot determine which input the output borrows from.
-// Explicit annotation required:
-longest['a](string &'a a, string &'a b) string &'a {
-  if a.len() > b.len() { return a; }
+// Explicit annotation required — name a shared lifetime with the `lifetime meta:
+longest(string a `lifetime(x), string b `lifetime(x)) string& `lifetime(x) {
+  if a.len > b.len { return a; }
   return b;
 }
 ```
 
+**Borrows are statement- and scope-scoped, not last-use.** A borrow created and consumed within a single statement (such as the implicit borrow of a call argument) expires at the end of that statement. A borrow stored in a `T&`/`T~` binding lives until the end of that binding's scope — *not* until its last use — and keeps the value borrowed for that whole region, blocking conflicting moves or mutable borrows there. This is intentionally more conservative than Rust's non-lexical lifetimes; narrow a stored borrow by limiting its binding's scope (e.g. with an inner block).
+
 **Implicit borrow → owned decay is restricted to Copy types.** A `T&` or `T~` is implicitly assignable to a plain owned `T` only when `T` is a Copy type (primitives, value types, references themselves — anything for which `IsCopy(T)` returns true). For non-Copy `T` (string, vectors, heap user types) the decay would silently duplicate ownership of heap data the original owner still holds — a guaranteed double-free at drop time — so it is rejected at every assignment-shaped boundary:
 
 - variable declarations: `string s = a.borrow;`
-- function parameters: `consume(a.borrow)` where `consume(string s)`
 - field assignment: `obj.field = a.borrow;`
 - return statements: `return a.borrow;` from a `string`-returning function
 - joined branches (`if`, `match`, parens): when every arm produces a borrow, the joined type stays `T&` and the same boundary rules apply. When arms **mix** borrowed and owned (one arm `T&`, another `T`), the same Copy-only rule applies — silent decay is rejected for non-Copy `T` (the borrow arm's runtime value is the parent's inner pointer, so consuming the joined value as owned `T` would free a pointer the parent still holds). The fix is the same: call `.clone()` on the borrow arm, or change all arms to produce `T&`.
 
 ```promise
 // Rejected — `if` arms mix `string&` and `string`:
-inspect(Arc[string] a, bool cond) {
+inspect(Ref[string] a, bool cond) {
   string s = if cond { a.borrow } else { "owned" };
   // error: if/match arms mix borrowed and owned non-Copy 'string';
   //        call .clone() on the borrow arm or change all arms to produce 'string&'
 }
 
 // Fix (1) — clone the borrow arm:
-inspect(Arc[string] a, bool cond) {
+inspect(Ref[string] a, bool cond) {
   string s = if cond { a.borrow.clone() } else { "owned" };
 }
 
 // Fix (2) — make every arm produce a borrow (the joined type stays `string&`):
-inspect(Arc[string] a, Arc[string] b, bool cond) {
+inspect(Ref[string] a, Ref[string] b, bool cond) {
   string& s = if cond { a.borrow } else { b.borrow };
 }
 ```
@@ -1539,22 +1590,22 @@ To recover an owned value, choose one of:
 
 ```promise
 // Rejected — implicit `string& → string` decay for a non-Copy type:
-get(Arc[string] a) string {
+get(Ref[string] a) string {
   return a.borrow;          // error: cannot return string& from function returning string
 }
 
 // (1) Explicit clone — produces an owned independent copy:
-get(Arc[string] a) string {
+get(Ref[string] a) string {
   return a.borrow.clone();
 }
 
 // (2) Keep it as a borrow — declare the local/parameter/return as `T&`:
-get(Arc[string] a) string& {
+get(Ref[string] a) string& {
   return a.borrow;
 }
 
 // (3) For locals, declare with the borrow type to skip the decay:
-inspect(Arc[string] a) {
+inspect(Ref[string] a) {
   string& s = a.borrow;     // OK — no decay, no implicit allocation.
   println(s);
 }
@@ -1563,8 +1614,8 @@ inspect(Arc[string] a) {
 The Copy carve-out is sound because Copy types are loaded by value at the borrow boundary — the original owner is unaffected:
 
 ```promise
-n(Arc[int] a) int { return a.borrow; }   // OK: int is Copy.
-m(Arc[int] a) {
+n(Ref[int] a) int { return a.borrow; }   // OK: int is Copy.
+m(Ref[int] a) {
   int x = a.borrow;                       // OK: int is Copy.
 }
 ```
@@ -1619,12 +1670,12 @@ type Connection {
 Functions that can fail use `!` after the function name. Under the hood, this desugars to a result struct — a pair of `(value, error)`.
 
 ```promise
-readFile!(string &path) string {
+readFile!(string path) string {
   // On success:
   return contents;
 
   // On failure:
-  raise io.FileNotFoundError(path);
+  raise io.FileNotFoundError(path.clone());
 }
 ```
 
@@ -1675,7 +1726,7 @@ In a **non-failable function**, calling a failable function without handling is 
 main() {
   // Handle with ? — block must provide recovery value or diverge (return/panic)
   string content = readFile("data.txt") ? e {
-    io.print_line("Failed: {e.message}");
+    print_line("Failed: {e.message}");
     return;
   };
 
@@ -1713,7 +1764,7 @@ string content = readFile("data.txt") ? { "" };    // use empty string on failur
 
 // Diverge
 string content = readFile("data.txt") ? e {
-  io.print_line("Error: {e.message}");
+  print_line("Error: {e.message}");
   return;
 };
 
@@ -1751,9 +1802,9 @@ To inspect both the value and error without propagation, destructure into a tupl
 ```promise
 (content, err) := readFile("data.txt");
 if err is present {
-  io.print_line("Failed: {err.message}");
+  print_line("Failed: {err.message}");
 } else {
-  io.print_line(content);
+  print_line(content);
 }
 ```
 
@@ -1909,7 +1960,7 @@ fastAdd(int a, int b) int `inline {
 }
 
 testAddition() `test {
-  assert(fastAdd(1, 2) == 3);
+  assert(fastAdd(1, 2) == 3, "fastAdd(1,2) is 3");
 }
 ```
 
@@ -2083,7 +2134,7 @@ Functions are declared without a keyword — the name, parameter list, and optio
 ### 9.1 Free Functions
 
 ```promise
-greet(string &name) string {
+greet(string name) string {
   return "Hello, {name}!";
 }
 ```
@@ -2094,7 +2145,7 @@ Methods are defined inside the type body and correspond to the four struct level
 
 #### Value Methods (default)
 
-By default, `this` is the **value struct**, copied when the method is called. Value methods can access `` `value `` fields only.
+By default, `this` is the **value struct**, passed by value. Every method receives the value struct as `this` (see the note under Instance Methods); for a pure value type the value struct embeds the `` `value `` fields directly.
 
 ```promise
 type Point {
@@ -2111,7 +2162,7 @@ type Point {
 
 #### Instance Methods (`` `instance ``)
 
-Instance methods receive a **pointer to the instance struct**. They can access instance fields but **not** `` `value `` fields (compile error). Use `&this` for shared borrow, `~this` for mutable borrow.
+**Every method — value or instance — receives `this` as the value struct.** The value struct carries the vtable pointer plus: for an instance type, a pointer to the heap instance; for a pure value type, the `` `value `` fields embedded directly (with the instance pointer null or a shared singleton); for a hybrid type with both kinds of field, both. A method accesses **all** of the type's fields uniformly — `` `value `` fields directly in the value struct, instance fields through the instance pointer — so there is **no fundamental difference between pure-value and pure-instance types**; they work the same way. The `` `instance `` annotation marks methods on a type with heap instance state. Use `this` for shared borrow, `~this` for mutable borrow.
 
 ```promise
 type Counter {
@@ -2121,7 +2172,7 @@ type Counter {
     this.value += 1;
   }
 
-  current(&this) int `instance {
+  current(this) int `instance {
     return this.value;
   }
 }
@@ -2317,7 +2368,7 @@ sendEmail!(
 }
 ```
 
-There is no ordering constraint on required, defaulted, and optional parameters in the definition — any order is valid. The `this`/`&this`/`~this` receiver is unaffected: it is never named, never defaulted, and always implicit.
+There is no ordering constraint on required, defaulted, and optional parameters in the definition — any order is valid. The `this`/`~this` receiver is unaffected: it is never named, never defaulted, and always implicit.
 
 Parameters can carry meta annotations (see Section 8), placed after the parameter name and before any default value:
 
@@ -2527,10 +2578,10 @@ label := match status {
 
 ```promise
 match color {
-  Color.Red => io.print_line("red"),
-  Color.Green => io.print_line("green"),
-  Color.Custom(r, g, b) => io.print_line("rgb({r},{g},{b})"),
-  _ => io.print_line("other"),
+  Color.Red => print_line("red"),
+  Color.Green => print_line("green"),
+  Color.Custom(r, g, b) => print_line("rgb({r},{g},{b})"),
+  _ => print_line("other"),
 }
 ```
 
@@ -2550,9 +2601,9 @@ A type pattern without binding just checks the type:
 
 ```promise
 match animal {
-  Dog => io.print_line("it's a dog"),
-  Cat => io.print_line("it's a cat"),
-  _ => io.print_line("something else"),
+  Dog => print_line("it's a dog"),
+  Cat => print_line("it's a cat"),
+  _ => print_line("something else"),
 }
 ```
 
@@ -2685,7 +2736,7 @@ for int i = 0; i < 10; i += 1 {
 }
 ```
 
-The `for item in expr` loop works on any value whose type implements `stream[T]` — it calls `expr.iter()` to obtain an `iter[T]`, then loops calling `next()` until `none` is returned. See Section 12 for the full iteration protocol.
+The `for item in expr` loop is **structural** — it works on any value that can yield an iterator. If the value is a `Stream[T]` (the *iterable* interface — has `iter() Iterator[T]`), the loop calls `expr.iter()` to obtain the cursor; if it is already an `Iterator[T]` (has `next() T?`), it iterates directly. Either way it then loops calling `next()` until `none`. (Built-in ranges are iterated via a built-in fast path.) See Section 12 for the full iteration protocol.
 
 ---
 
@@ -2761,7 +2812,7 @@ type Stream[T] {
 }
 ```
 
-> **Status**: Only the core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) are implemented. The combinator methods listed above are the design target but are not yet implemented in the standard library.
+> **Status**: The core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) and the combinator default methods are implemented and usable on any type that satisfies them.
 
 **Key design properties:**
 
@@ -2769,7 +2820,7 @@ type Stream[T] {
 - **`Iterator[T]` is a single-pass cursor.** Once `next()` returns `none`, the iterator is exhausted. There is no `reset()`.
 - **Intermediate operations are lazy.** Calling `stream.map(fn)` does not execute `fn` — it returns a new `stream[T]` that applies `fn` on demand when iterated. Multiple intermediate operations compose into a single pass over the data.
 - **Terminal operations are eager.** Calling `stream.collect()` or `stream.count()` consumes the stream and produces a result.
-- **Constraint-dependent combinators**: `distinct()` requires `T: Eq`. `min()` and `max()` require `T: Ord`. These constraints are enforced at the call site via generic bounds.
+- **Constraint-dependent combinators**: `distinct()` requires `T: Equal`. `min()` and `max()` require `T: Ordered`. These constraints are enforced at the call site via generic bounds.
 
 ### 12.2 For-in Desugaring
 
@@ -2787,7 +2838,7 @@ for item in stream { body }
 }
 ```
 
-This uses `while ... :=` unwrap binding (see Section 10.3): the loop continues as long as `_iter.next()` returns a value, binding the unwrapped element to `item` each iteration.
+This uses `while ... :=` unwrap binding (see Section 14.1): the loop continues as long as `_iter.next()` returns a value, binding the unwrapped element to `item` each iteration.
 
 The indexed form desugars through `enumerate()`:
 
@@ -2809,41 +2860,20 @@ The `..` operator constructs a `range` value. `..` produces a half-open (exclusi
 5..=5       // single element: 5
 ```
 
-`Range` is a type that implements `Stream[int]` (lowercase `range` is sugar):
+`Range[T: Ordered]` is a small **value type** that backs the `..`/`..=` operators (lowercase `range` is sugar). It carries `start`/`end`/`inclusive` and answers two queries; **iteration is built into the language, not a method on the type**:
 
 ```promise
-type Range is Stream[int] {
-  int start;
-  int end;
-  bool inclusive;
+type Range[T: Ordered] {
+  T start `value;
+  T end `value;
+  bool inclusive `value;
 
-  iter() Iterator[int] { ... }
-
-  // Derived ranges
-  step(int n) Stream[int] { ... }
-
-  // O(1) membership test — overrides the O(n) default from Stream
-  contains(int value) bool {
-    if this.inclusive {
-      return value >= this.start && value <= this.end;
-    }
-    return value >= this.start && value < this.end;
-  }
+  contains(T value) bool { ... }   // O(1) membership test
+  get is_empty bool { ... }
 }
 ```
 
-Ranges compose naturally with stream combinators:
-
-```promise
-// Even numbers from 0 to 98
-evens := (0..100).filter((n) -> n % 2 == 0);
-
-// Every third number from 0 to 99
-thirds := (0..100).step(3);
-
-// Sum of 1 to 100
-total := (1..=100).fold(0, (acc, n) -> acc + n);
-```
+A range is **iterable** — `for x in 0..10 { … }` and `yield * 1..=3` work because the compiler lowers a range loop directly to a counting loop. But a `Range` is **not** a `Stream` and has **no `iter()` or combinator methods** (`.filter` / `.map` / `.fold`). To transform a range's values, iterate it into a collection first, then use the `Iterator` combinators (§13).
 
 ### 12.4 Generator Functions
 
@@ -2864,7 +2894,7 @@ fibonacci() stream[int] {
 // Consuming:
 for n in fibonacci() {
   if n > 100 { break; }
-  io.print_line("{n}");
+  print_line("{n}");
 }
 ```
 
@@ -2923,19 +2953,19 @@ Built-in collection types implement `Stream[T]`, supporting `for-in` iteration. 
 
 ### 12.6 Channels as Streams
 
-Because `channel[T]` implements `stream[T]`, channels receive all stream combinators:
+A `channel[T]` is iterable: `ch.iter()` returns a `stream[T]`, and from there the standard stream combinators apply (the combinators live on the stream, not the channel itself):
 
 ```promise
-ch := channel[int].new(capacity: 10);
+ch := channel[int](capacity: 10);
 go {
   for i in 0..100 { ch.send(i); }
   ch.close();
 };
 
 // Use stream combinators on channel
-evens := ch.filter((n) -> n % 2 == 0);
+evens := ch.iter().filter(|int n| -> n % 2 == 0);
 for n in evens {
-  io.print_line("{n}");
+  print_line("{n}");
 }
 ```
 
@@ -2972,7 +3002,7 @@ All collection types implement `stream[T]` (see Section 12.5), providing lazy co
 
 ```promise
 int[] numbers = [1, 2, 3, 4, 5];
-squares := numbers.map((n) -> n * n).collect();   // [1, 4, 9, 16, 25]
+squares := numbers.iter().map[int](|int n| -> n * n).collect();   // [1, 4, 9, 16, 25]
 sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
 ```
 
@@ -3024,7 +3054,7 @@ if val := v.pop() {
     print_line("{val}");                  // 16
 }
 
-assert(v.contains(9));                 // true
+assert(v.contains(9), "vector contains 9");   // true
 v[0] = 42;                            // [42, 1, 9]
 
 sub := v[1:3];                         // [1, 9]
@@ -3067,7 +3097,7 @@ scores["charlie"] = 92;
 | `clear()` | Remove all entries |
 
 ```promise
-map[string, int] m = {};
+map[string, int] m = {:};
 m["x"] = 10;
 m["y"] = 20;
 
@@ -3121,12 +3151,12 @@ When a `T?` value appears as an `if` condition, it is treated as a presence chec
 string? cc = getCC();
 
 if cc {
-  io.print_line(cc);              // cc is string here, not string?
+  print_line(cc);              // cc is string here, not string?
 }
 
 if !cc {
-  io.print_line("no value");
-  io.print_line(cc);               // ERROR: cc is known to be none here
+  print_line("no value");
+  print_line(cc);               // ERROR: cc is known to be none here
 }
 ```
 
@@ -3145,12 +3175,12 @@ if verbose is present {
   // verbose is bool here — narrowed from bool?
   if verbose { enableLogging(); }
 } else {
-  io.print_line(verbose);           // ERROR: verbose is known to be none here
+  print_line(verbose);           // ERROR: verbose is known to be none here
 }
 
 if verbose is absent {
-  io.print_line("no flag provided");
-  io.print_line(verbose);           // ERROR: verbose is known to be none here
+  print_line("no flag provided");
+  print_line(verbose);           // ERROR: verbose is known to be none here
 }
 ```
 
@@ -3186,7 +3216,7 @@ When you want to unwrap into a **new name**, use `:=` inside an `if` condition:
 User? user = find(42);
 
 if u := user {
-  io.print_line(u.name);          // u is User — unwrapped
+  print_line(u.name);          // u is User — unwrapped
 }
 ```
 
@@ -3303,11 +3333,11 @@ The standard library defines a set of structural interfaces for I/O, following t
 
 ```promise
 type Reader `structural {
-  read!(~this, u8[] ~buf) int `abstract `instance;
+  read!(~this, u8[]~ buf) int `abstract `instance;
 }
 
 type Writer `structural {
-  write!(~this, u8[] &buf) int `abstract `instance;
+  write!(~this, u8[] buf) int `abstract `instance;
 }
 
 type Closer `structural {
@@ -3336,8 +3366,8 @@ type File is ReadWriteCloser {
 
   open!(string path, string mode) File `type `native;
 
-  read!(~this, u8[] ~buf) int `instance `native;
-  write!(~this, u8[] &buf) int `instance `native;
+  read!(~this, u8[]~ buf) int `instance `native;
+  write!(~this, u8[] buf) int `instance `native;
   close!(~this) `instance `native;
   seek!(~this, int offset, int whence) int `instance `native;
 }
@@ -3350,8 +3380,8 @@ type BufferedWriter is Writer {
   Writer inner;
   u8[] buf;
 
-  write!(~this, u8[] &data) int `instance {
-    this.buf.push(data);
+  write!(~this, u8[] data) int `instance {
+    for b in data { this.buf.push(b); }
     if this.buf.len >= 4096 {
       return this.flush()?^;
     }
@@ -3359,7 +3389,7 @@ type BufferedWriter is Writer {
   }
 
   flush!(~this) int `instance {
-    n := this.inner.write(&this.buf)?^;
+    n := this.inner.write(this.buf)?^;
     this.buf = [];
     return n;
   }
@@ -3405,16 +3435,16 @@ process!(string path) {
 
 ```promise
 // In a failable function:
-writeData!(string path, u8[] &data) {
+writeData!(string path, u8[] data) {
   use f := File.open(path, "w")?^;
-  f.write(&data)?^;
+  f.write(data)?^;
   // If f.close() fails here, the error propagates (no prior error)
 }
 
 // If write fails:
-writeData!(string path, u8[] &data) {
+writeData!(string path, u8[] data) {
   use f := File.open(path, "w")?^;
-  f.write(&data)?^;  // raises an error
+  f.write(data)?^;  // raises an error
   // f.close() still called, but its error is suppressed — write's error propagates
 }
 ```
@@ -3450,9 +3480,9 @@ type TempFile {
 
 ```promise
 transfer(bool condition) {
-  Resource r = Resource.new();
+  Resource r = Resource(id: 0);
   if condition {
-    consume(r);  // r is moved — no drop needed
+    consume(move r);  // r is moved — no drop needed
   }
   // Compiler: if !moved_r { r.drop(); }
 }
@@ -3555,7 +3585,7 @@ comments := <-t3;
 
 `task[T]` is a first-class type returned by `go` expressions. It can be stored in variables, fields, and collections, passed as arguments, and returned from functions. The `<-` operator receives the result from a task, suspending the current goroutine until the task completes. Concurrency is always a **caller-side decision** — the callee does not know or care whether it runs in a goroutine.
 
-`task[T]` is a **single-owner handle** (like `Mutex[T]`/`MutexGuard[T]`): it is move-only and has no `clone()`. It may be a *direct* element of one collection (`Task[T][]` push/iterate/await/drop is supported), but a type that transitively contains a single-owner handle — including one nested inside a user-type field or enum variant (`Holder{Task[T] t}`, `enum E { Held(Task[T] t) }`) — is **non-cloneable**. Every context that would structurally (implicitly) copy such a value is a compile error: `clone()`/`filled()` on such a collection, slicing it (`v[a:b]`), pushing an indexed element of it (`dest.push(src[i])`), destructuring a handle-owning variant field in `match`, and nesting one inside another container (`Vector[Vector[Task[T]]]`, `Map[K, Task[T][]]`). Moving a freshly-constructed value (`dest.push(Holder(t: go …))`) is still allowed. Refcounted handles (`Arc[T]`, `Channel[T]`) are duplicable and unaffected.
+`task[T]` is a **single-owner handle** (like `Mutex[T]`/`MutexGuard[T]`): it is move-only and has no `clone()`. It may be a *direct* element of one collection (`Task[T][]` push/iterate/await/drop is supported), but a type that transitively contains a single-owner handle — including one nested inside a user-type field or enum variant (`Holder{Task[T] t}`, `enum E { Held(Task[T] t) }`) — is **non-cloneable**. Every context that would structurally (implicitly) copy such a value is a compile error: `clone()`/`filled()` on such a collection, slicing it (`v[a:b]`), pushing an indexed element of it (`dest.push(src[i])`), destructuring a handle-owning variant field in `match`, and nesting one inside another container (`Vector[Vector[Task[T]]]`, `Map[K, Task[T][]]`). Moving a freshly-constructed value (`dest.push(Holder(t: go …))`) is still allowed. Refcounted handles (`Ref[T]`, `Channel[T]`) are duplicable and unaffected.
 
 ### 17.3 Channels
 
@@ -3563,7 +3593,7 @@ Channels are the primary synchronization primitive for streaming data between go
 
 ```promise
 main() {
-  ch := channel[int].new(capacity: 10);
+  ch := channel[int](capacity: 10);
 
   go {
     for i in 0..100 {
@@ -3573,18 +3603,18 @@ main() {
   };
 
   for value in ch {
-    io.print_line("{value}");
+    print_line("{value}");
   }
 }
 ```
 
 The `<-` operator also works on channels: `value := <-ch;` receives the next value.
 
-Because `channel[T]` implements `stream[T]`, channels gain all stream combinators — `map`, `filter`, `fold`, etc. — for free. See Section 12.6 for details and caveats about destructive iteration.
+A `channel[T]` is iterable — `ch.iter()` returns a `stream[T]`, and from there the standard stream combinators (`map`, `filter`, `fold`, …) apply. The combinators belong to the stream, not the channel. See Section 12.6 for details and caveats about destructive iteration.
 
 ### 17.4 Ownership Across Goroutines
 
-Ownership rules apply across goroutines — data is either **moved** into the goroutine or shared via `Arc[T]` (atomic reference counting):
+Ownership rules apply across goroutines — data is either **moved** into the goroutine or shared via `Ref[T]` (reference-counted shared ownership; the counter is atomic precisely because the value crosses a goroutine boundary here):
 
 ```promise
 main() {
@@ -3595,8 +3625,8 @@ main() {
     process(data);
   };
 
-  // Shared access requires Arc
-  Arc[Config] config = Arc.new(loadConfig());
+  // Shared access requires Ref
+  Ref[Config] config = Ref[Config](loadConfig());
   go {
     serve(config.clone());
   };
@@ -3620,33 +3650,33 @@ type Todo `serializable {
     this.done = !this.done;
   }
 
-  new(int id, string title) Todo `type {
-    return Todo(id: id, title: title);   // done defaults to false
+  new(int id, string move title) Todo `type {
+    return Todo(id: id, title: move title);   // done defaults to false
   }
 }
 
 type TodoList {
   Todo[] items;
 
-  add(~this, string title, int priority = 0) `instance {
-    int id = this.items.len() + 1;
-    this.items.push(Todo.new(id, title));
+  add(~this, string move title, int priority = 0) `instance {
+    int id = this.items.len + 1;
+    this.items.push(Todo.new(id, move title));
   }
 
-  pending(&this) Todo[] `instance {
-    return this.items.filter(|t| !t.done).collect();
+  pending(this) Todo[] `instance {
+    return this.items.iter().filter(|Todo t| -> !t.done).collect();
   }
 }
 
-loadFromFile!(string &path) TodoList {
+loadFromFile!(string path) TodoList {
   string content = io.readFile(path);          // auto-propagates on error
   Todo[] items = json.decode[Todo[]](content); // auto-propagates on error
-  return TodoList(items: items);
+  return TodoList(items: move items);
 }
 
 main() {
   TodoList todos = loadFromFile("todos.json") ? err {
-    io.print_line("Starting fresh: {err.message}");
+    print_line("Starting fresh: {err.message}");
     TodoList(items: []);
   };
 
@@ -3655,7 +3685,7 @@ main() {
 
   for i, todo in todos.items {
     status := if todo.done { "done" } else { "    " };
-    io.print_line("[{status}] {todo.title}");
+    print_line("[{status}] {todo.title}");
   }
 }
 ```
@@ -3702,9 +3732,9 @@ funcDecl: IDENT '!'? typeParams? '(' params ')' typeRef? metaAnnotation* block;
 // Parameters (definition side)
 params: paramList?;
 paramList: receiverParam (',' param)* | param (',' param)*;
-receiverParam: refMod? 'this';
-param: typeRef refMod? IDENT ('=' expression)?;
-refMod: '&' | '~';
+receiverParam: '~'? 'this';                     // this (shared borrow) or ~this (mutable borrow)
+param: typeRef 'move' IDENT                      // move — transfer ownership: T move name
+     | typeRef IDENT ('=' expression)?;           // borrow — T name (shared) or T~ name (mutable); optional default
 
 // Arguments (call site)
 args: (arg (',' arg)*)?;
@@ -3744,7 +3774,7 @@ useDecl: 'use' IDENT ':=' expression ';';     // scoped resource — close() at 
 expression: primary | expression binOp expression | unaryOp expression
           | expression '.' IDENT | expression '(' args ')'
           | expression '?' IDENT? block             // error handler
-          | expression '?' | expression '!'         // propagate / unwrap
+          | expression '?' '^' | expression '?' '!' | expression '!'   // ?^ propagate / ?! panic / ! optional-unwrap
           | expression 'as' '!'? typeRef            // type cast: safe (as) or unsafe (as!)
           | goExpr | receiveExpr | rangeExpr | isExpr
           | ifExpr | matchExpr | '(' expression ')';
@@ -3761,9 +3791,10 @@ goExpr: 'go' (block | expression);    // returns task[T]
 receiveExpr: '<-' expression;          // receive from task[T] or channel[T]
 
 // Error handling (also used for optional unwrap/handler — sema disambiguates by type)
-errorPropagate: expression '?';                          // explicit propagate (failable only)
+errorPropagate: expression '?' '^';                      // ?^ — propagate error up (failable fn only)
+errorPanic: expression '?' '!';                          // ?! — panic on error
 errorHandler: expression '?' IDENT? block;               // ? e { ... } (error) or ? _ { ... } (optional)
-errorUnwrap: expression '!';                             // panic on error or none
+errorUnwrap: expression '!';                             // ! — unwrap optional (panic on none)
 resultDestructure: '(' IDENT ',' IDENT ')' ':=' expression;  // (val, err) := expr
 
 // range expressions
@@ -3797,8 +3828,6 @@ patternField: IDENT;
 // Unwrap binding in if/while conditions
 ifUnwrap: 'if' IDENT ':=' expression block ('else' block)?;
 whileUnwrap: 'while' IDENT ':=' expression block;
-
-lifetime: '\'' IDENT;
 
 // Numeric literals with optional type suffixes (lexer fragments)
 fragment INT_SUFFIX: [iu] ('8' | '16' | '32' | '64');
@@ -3843,6 +3872,3 @@ Single binary `promise` with the following internal packages:
 ## 22. Open Design Questions
 
 1. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?
-2. **Stream backpressure** — When a generator yields into a channel-backed consumer, should there be built-in backpressure beyond channel's existing capacity mechanism?
-3. **Parallel stream execution** — Should `stream[T]` have a `.parallel()` combinator that distributes work across goroutines? If so, how does ordering work?
-4. **Stream error handling** — Should `stream[T]` support `stream[T!]` where individual elements can carry errors? Or should a failing generator terminate the stream entirely?

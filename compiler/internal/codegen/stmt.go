@@ -9628,28 +9628,50 @@ func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value,
 	// Call .iter() on the stream value
 	iterResult := c.emitIterNext(streamVal, streamType, named, iterMethod, c.resolveType(iterRetType))
 
-	// Delegate to genForInCustomIter with the iterator value
-	c.genForInCustomIter(s, iterResult, iterRetType)
-
-	// B0173: Clean up the iterator instance after the loop. The .iter() call
-	// allocates a heap instance that is not tracked by statement-level cleanup
-	// (synthetic call, no AST node for maybeTrackIterTemp).
-	if c.block != nil && c.block.Term == nil {
-		iterNamed := extractNamed(iterRetType)
-		if iterNamed != nil && !iterNamed.IsValueType() {
-			if _, ok := iterResult.Type().(*irtypes.StructType); ok {
-				instancePtr := c.block.NewExtractValue(iterResult, 1)
-				if iterNamed.IsStructural() && c.iterCleanup != nil {
-					// Structural interface (e.g., Iterator[T]): use __promise_iter_cleanup
-					// which handles _FnIter layout (frees env + instance).
-					c.block.NewCall(c.iterCleanup, instancePtr)
-				} else {
-					// Concrete type (e.g., NumberIter): free the instance allocation.
-					c.block.NewCall(c.palFree, instancePtr)
-				}
+	// B0173/T0997: The .iter() call allocates a FRESH heap iterator instance that
+	// is not tracked by statement-level cleanup (synthetic call, no AST node for
+	// maybeTrackIterTemp). Register it as a scope binding — like the vector/string/
+	// channel for-in branches above — so it is dropped exactly once on EVERY exit
+	// path: normal completion, break, AND early return/raise from the loop body.
+	// (return/raise unwind via the scope-cleanup stack and bypass any post-loop
+	// inline cleanup, which would leak the iterator.) Registered BEFORE the loop so
+	// it sits below loopScopeDepth: break/continue cleanup leaves it alone, and the
+	// enclosing scope frees it once.
+	//
+	// Drop dispatches through __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr)
+	// for a structural Iterator[T] — handling BOTH the closure-based _FnIter (whose
+	// drop_fn calls iterCleanup to free the env + parent chain) AND a user-defined
+	// iterator (e.g., NumIter) whose layout is NOT _FnIter-shaped. Using iterCleanup
+	// here would misread a user iterator's fields as the _FnIter _parent pointer and
+	// recurse into garbage. A concrete iterator type uses pal_free.
+	iterNamed := extractNamed(iterRetType)
+	if iterNamed != nil && !iterNamed.IsValueType() {
+		if _, ok := iterResult.Type().(*irtypes.StructType); ok {
+			instancePtr := c.block.NewExtractValue(iterResult, 1)
+			dropFn := c.palFree
+			if iterNamed.IsStructural() && c.structuralDrop != nil {
+				dropFn = c.structuralDrop
 			}
+			tmpName := c.uniqueLocalName("__forin_iter_tmp")
+			tmpAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+			tmpAlloca.SetName(tmpName)
+			c.block.NewStore(instancePtr, tmpAlloca)
+			dropFlag := c.createEntryAlloca(irtypes.I1)
+			dropFlag.SetName(tmpName + ".dropflag")
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+			c.scopeBindings = append(c.scopeBindings, scopeBinding{
+				kind:     bindingDropString, // reuse: i8* alloca + void(i8*) drop pattern
+				alloca:   tmpAlloca,
+				valType:  iterRetType,
+				dropFlag: dropFlag,
+				dropFunc: dropFn,
+				varName:  tmpName,
+			})
 		}
 	}
+
+	// Delegate to genForInCustomIter with the iterator value
+	c.genForInCustomIter(s, iterResult, iterRetType)
 }
 
 // emitIterNext emits a call to a method on a value, using virtual dispatch

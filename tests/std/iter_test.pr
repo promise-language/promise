@@ -1191,5 +1191,220 @@ test_double_generic_map_in_variable() `test {
   assert(result[2] == 26, "third");
 }
 
+// T0997: for-in over a user-defined Stream[T] (Iterable) whose iter() returns
+// a FRESH, distinct Iterator[T] must iterate then terminate cleanly (no segfault,
+// no leak). The iter()-returned instance is dropped exactly once via RTTI dispatch.
+type T997NumIter is Iterator[int] {
+  int cur;
+  int stop;
+
+  next(~this) int? {
+    if this.cur >= this.stop {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+
+type T997Range is Stream[int] {
+  int from;
+  int to;
+
+  iter() Iterator[int] {
+    return T997NumIter(cur: this.from, stop: this.to);
+  }
+}
+
+test_stream_iter_fresh_iterator() `test {
+  int sum = 0;
+  int count = 0;
+  for x in T997Range(from: 0, to: 3) {
+    sum = sum + x;
+    count = count + 1;
+  }
+  assert(count == 3, "yields 3 values");
+  assert(sum == 3, "0+1+2=3");
+}
+
+// T0997 (criterion 2): a user Iterator[int] whose iter() returns self, driven
+// by for-in. Routes through ForInNext (the self-returning iterator path).
+type T997SelfIter is Iterator[int] {
+  int n;
+
+  next(~this) int? {
+    if this.n <= 0 {
+      return none;
+    }
+    this.n = this.n - 1;
+    return this.n + 1;
+  }
+
+  iter() Iterator[int] {
+    return this;
+  }
+}
+
+test_iterator_iter_returns_self() `test {
+  int sum = 0;
+  int count = 0;
+  for x in T997SelfIter(n: 3) {
+    sum = sum + x;
+    count = count + 1;
+  }
+  assert(count == 3, "yields 3 values");
+  assert(sum == 6, "3+2+1=6");
+}
+
+// T0997 (criterion 3): early `return` and `raise` from the loop body must still
+// drop the fresh iter()-returned iterator exactly once. These paths unwind via
+// the scope-cleanup stack and bypass the loop's normal-exit block — so the iter()
+// temp must be registered as a scope binding, not freed inline only at loop exit.
+// A leak here surfaces as a LEAK outcome under the zero-leak policy.
+t997_find_two(T997Range r) int {
+  for x in r {
+    if x == 2 {
+      return x;
+    }
+  }
+  return -1;
+}
+
+test_stream_iter_early_return_no_leak() `test {
+  // Range spans 0..100 but we return at 2 — the iterator is mid-iteration and
+  // must be dropped on the early-return path.
+  assert(t997_find_two(T997Range(from: 0, to: 100)) == 2, "found 2");
+}
+
+t997_scan_to_two!(T997Range r) int {
+  for x in r {
+    if x == 2 {
+      raise error(message: "found two");
+    }
+  }
+  return -1;
+}
+
+test_stream_iter_early_raise_no_leak() `test {
+  // The loop raises mid-iteration; the iter() temp must be dropped during error
+  // unwind (recovered here via `? e => -2`).
+  int v = t997_scan_to_two(T997Range(from: 0, to: 100))? e => -2;
+  assert(v == -2, "recovered after raise");
+}
+
+test_stream_iter_nested_in_loop_no_leak() `test {
+  // A stream for-in inside an enclosing loop allocates a FRESH iter() iterator
+  // each outer iteration. Each must be dropped per-iteration (the scope binding's
+  // drop fires at the enclosing block's scope exit, which runs every iteration) —
+  // not accumulate and leak.
+  int total = 0;
+  int outer = 0;
+  while outer < 50 {
+    for x in T997Range(from: 0, to: 4) {
+      total = total + x;
+    }
+    outer = outer + 1;
+  }
+  assert(total == 300, "50 * (0+1+2+3)");
+}
+
+// T0997 (break exit path): break unwinds via the loop-scope cleanup, but the
+// iter() temp is registered BELOW loopScopeDepth so break/continue leave it
+// alone — the enclosing scope frees it exactly once. Exercises the non-return,
+// non-completion exit while the iterator is still mid-iteration.
+test_stream_iter_break_no_leak() `test {
+  int sum = 0;
+  for x in T997Range(from: 0, to: 100) {
+    if x == 3 {
+      break;
+    }
+    sum = sum + x;
+  }
+  assert(sum == 3, "0+1+2 then break at 3");
+}
+
+// T0997 (continue path): continue branches to the update block; the iter() temp
+// must survive every continue and drop once after the loop. Range 0..5, skip
+// even values, sum the odds.
+test_stream_iter_continue_no_leak() `test {
+  int sum = 0;
+  for x in T997Range(from: 0, to: 5) {
+    if x % 2 == 0 {
+      continue;
+    }
+    sum = sum + x;
+  }
+  assert(sum == 4, "1+3");
+}
+
+// T0997 (concrete-iterator drop branch): when iter() returns a CONCRETE
+// (non-structural) iterator type rather than a structural Iterator[int], the
+// fresh instance is dropped via pal_free (no RTTI drop_fn). This is the `else`
+// branch of the dropFn selection — distinct from the T997Range/Iterator[int]
+// tests above which route through __promise_structural_drop.
+type T997ConcreteIter {
+  int cur;
+  int stop;
+
+  next(~this) int? {
+    if this.cur >= this.stop {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+
+type T997ConcreteRange {
+  int from;
+  int to;
+
+  iter() T997ConcreteIter {
+    return T997ConcreteIter(cur: this.from, stop: this.to);
+  }
+}
+
+test_stream_iter_concrete_iterator() `test {
+  int sum = 0;
+  int count = 0;
+  for x in T997ConcreteRange(from: 0, to: 4) {
+    sum = sum + x;
+    count = count + 1;
+  }
+  assert(count == 4, "yields 4 values");
+  assert(sum == 6, "0+1+2+3=6");
+}
+
+t997_concrete_find_two(T997ConcreteRange r) int {
+  for x in r {
+    if x == 2 {
+      return x;
+    }
+  }
+  return -1;
+}
+
+test_stream_iter_concrete_early_return_no_leak() `test {
+  // Concrete-iterator early-return path: the pal_free'd temp must drop on the
+  // scope-unwind exit, not only at normal loop completion.
+  assert(t997_concrete_find_two(T997ConcreteRange(from: 0, to: 100)) == 2, "found 2");
+}
+
+test_stream_iter_concrete_nested_no_leak() `test {
+  // Concrete iterator allocated fresh each outer iteration; each must pal_free
+  // once per enclosing scope exit, not accumulate.
+  int total = 0;
+  int outer = 0;
+  while outer < 50 {
+    for x in T997ConcreteRange(from: 0, to: 4) {
+      total = total + x;
+    }
+    outer = outer + 1;
+  }
+  assert(total == 300, "50 * (0+1+2+3)");
+}
+
 main() {
 }

@@ -3596,9 +3596,10 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 
 	// T0106: After close(), free the heap instance (and droppable fields).
 	// use-bound types have close() but may not have drop(). Without this, the
-	// heap instance leaks. If the type has a synthesized drop, call that (it handles
-	// field drops + pal_free). If the type has an explicit drop, call that + pal_free.
-	// Otherwise, just pal_free the instance directly.
+	// heap instance leaks. If the type has a synthesized (field-only) drop, call
+	// that (it handles field drops + pal_free). If the type has a *user-defined*
+	// drop, T0967 / §16.4 suppresses it (use takes precedence) but still reclaims
+	// fields + memory inline. Otherwise, just pal_free the instance directly.
 	if b.named != nil && !isContainerType(b.valType) && !b.named.IsValueType() {
 		instance := c.extractInstancePtr(val)
 		// Null-check before freeing
@@ -3608,19 +3609,39 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 		c.block.NewCondBr(nullCheck, freeDone, freeBlock)
 
 		c.block = freeBlock
-		if b.named.HasDrop() {
-			// Type has drop (explicit or synthesized) — call it to clean up fields + free
-			ownerName := c.resolveDropOwner(b.named)
-			mangledName := mangleMethodName(ownerName, "drop", false)
-			if dropFn, ok := c.funcs[mangledName]; ok {
-				c.block.NewCall(dropFn, instance)
+		// For a generic use-bound type, b.named is the *generic* origin (its fields
+		// reference unbound TypeParams) while b.valType carries the concrete type
+		// args. Resolve to the concrete instance so the mono drop / mono layout is
+		// used — otherwise the close-free path operates on the generic layout and
+		// silently skips droppable fields → leak. Mirrors maybeRegisterDrop.
+		resolvedTyp := b.valType
+		if c.typeSubst != nil {
+			resolvedTyp = types.Substitute(b.valType, c.typeSubst)
+		}
+		// Does this instance own droppable fields? b.named is the generic *origin*,
+		// whose NeedsSynthDrop/HasDrop flags reflect only the unsubstituted shape —
+		// a field typed `T` reports non-droppable at sema time. For a concrete
+		// generic instance the droppability is known only via monoInstNeedsSynthDrop
+		// (TypeParam fields resolving to droppables). Check all three so close-only
+		// generic types (e.g. `use b := Box[Inner](...)`) don't leak their fields.
+		needsFieldCleanup := b.named.HasDrop() || b.named.NeedsSynthDrop()
+		if !needsFieldCleanup {
+			if inst, ok := resolvedTyp.(*types.Instance); ok {
+				needsFieldCleanup = monoInstNeedsSynthDrop(inst)
 			}
-			// Explicit drop doesn't include pal_free — add it
-			if !b.named.NeedsSynthDrop() {
-				c.block.NewCall(c.palFree, instance)
-			}
+		}
+		if needsFieldCleanup {
+			// Reclaim droppable fields + the heap instance WITHOUT running any
+			// user-defined drop() body. This is correct for two distinct cases:
+			//   (a) synthesized field-cleanup drop (no user logic) — identical to
+			//       defineSynthesizedDropBody, just inlined here; and
+			//   (b) T0967 / language-design §16.4: a `use`-bound value whose type
+			//       also defines drop() — `use` takes precedence, so the user
+			//       drop() body is suppressed (close() performs all cleanup) while
+			//       owned fields + memory are still reclaimed exactly once.
+			c.emitInstanceFieldDropsAndFree(b.named, resolvedTyp, instance)
 		} else {
-			// No drop at all — just free the instance
+			// No droppable fields — just free the instance.
 			c.block.NewCall(c.palFree, instance)
 		}
 		c.block.NewBr(freeDone)
@@ -3692,6 +3713,45 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 	c.block.NewRet(c.wrapError(errVal, resultType))
 
 	c.block = contBlock
+}
+
+// emitInstanceFieldDropsAndFree drops all droppable fields of `named` for the
+// instance at `instance` (an i8*), then frees it — WITHOUT running any
+// user-defined drop() body. T0967: the use-binding close path uses this when a
+// use-bound type also defines drop(); §16.4 suppresses the user drop (use takes
+// precedence), but the instance's fields and memory must still be reclaimed
+// (zero-leak policy). Mirrors defineSynthesizedDropBody's field-drop + free
+// sequence, but operates mid-block on an already-extracted instance pointer.
+//
+// valType is the concrete value type of the binding. When it is a generic
+// instance, `named` is the generic origin whose fields are unbound TypeParams,
+// so we reconstruct the mono context (typeSubst + monoCtx) exactly as inside the
+// mono drop body — this makes emitFieldDrops resolve the concrete field types
+// and select the mono instance layout. Without it, generic fields are skipped
+// and leak.
+func (c *Compiler) emitInstanceFieldDropsAndFree(named *types.Named, valType types.Type, instance value.Value) {
+	savedSubst := c.typeSubst
+	savedCtx := c.monoCtx
+	if inst, ok := valType.(*types.Instance); ok {
+		if subst := c.buildOwnerTypeArgSubst(inst); subst != nil {
+			c.typeSubst = subst
+		}
+		c.monoCtx = &monoContext{inst: inst, origin: inst.Origin(), name: monoName(inst)}
+	}
+
+	savedThis, hadThis := c.locals["this"]
+	thisAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+	c.block.NewStore(instance, thisAlloca)
+	c.locals["this"] = thisAlloca // emitFieldDropsFor reads locals["this"]
+	c.emitFieldDrops(named)       // own + inherited fields, reverse order
+	c.block.NewCall(c.palFree, instance)
+	if hadThis {
+		c.locals["this"] = savedThis
+	} else {
+		delete(c.locals, "this")
+	}
+	c.typeSubst = savedSubst
+	c.monoCtx = savedCtx
 }
 
 // emitDropSuppressedError drops an error instance (i8*) that is being suppressed.

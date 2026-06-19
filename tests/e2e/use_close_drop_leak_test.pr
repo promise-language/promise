@@ -1,0 +1,250 @@
+// T0967: zero-leak guarantees for the `use` + close()/drop() suppression fix.
+//
+// When a `use`-bound type also defines drop(), §16.4 suppresses the user drop()
+// body — but the instance's droppable fields and heap memory MUST still be
+// reclaimed exactly once. The alloc-balance leak checker fails on EITHER a
+// double-free (the old bug ran both close() and drop()) OR a leaked field (a
+// naive over-suppression that skips field cleanup) — so these batch tests prove
+// exactly-one cleanup path runs.
+// use-bound type with a droppable string field + close() + user drop().
+type Resource {
+  string name;
+  close!(~this) {
+    // close performs the resource cleanup; the owned `name` string is reclaimed
+    // with the instance. The user drop() below is suppressed for `use` bindings.
+  }
+  drop(~this) {
+    // Suppressed when the value is `use`-bound (§16.4). If this ran in addition to
+    // close(), the string field would be double-freed.
+  }
+}
+
+test_use_close_drop_string_field_no_leak() `test {
+  use r := Resource(name: "socket-connection");
+  assert(r.name.len == 17, "string field accessible before close");
+}
+
+// Criterion 2a: `use` + close() ONLY (no drop) — close() still runs, string
+// field freed exactly once (unchanged behavior).
+type CloseOnly {
+  string tag;
+  close!(~this) {
+  }
+}
+
+test_use_close_only_no_leak() `test {
+  use c := CloseOnly(tag: "close-only-resource");
+  assert(c.tag.len == 19, "close-only string field accessible");
+}
+
+// Criterion 2b: drop() ONLY, NOT use-bound — drop() still runs at scope exit and
+// reclaims the string field (unchanged behavior).
+type DropOnly {
+  string label;
+  drop(~this) {
+  }
+}
+
+test_drop_only_not_use_bound_no_leak() `test {
+  d := DropOnly(label: "plain-drop");
+  assert(d.label.len == 10, "drop-only string field accessible");
+}
+
+// Heap user type with a droppable field, used as a generic type argument below.
+// Genuinely heap-allocating (unlike a string LITERAL, which lives in .rodata and
+// never increments the alloc counter), so it actually exercises field reclaim.
+type Heap {
+  string payload;
+  drop(~this) {
+  }
+}
+
+// Criterion 7: generic use-bound type with a user drop() and a type-param field.
+// The suppression path (§16.4) must drop the (now concrete) field exactly once.
+// For a generic origin, the field's droppability is only visible after type
+// substitution — the cleanup path must reconstruct the mono context, else the
+// concrete field is silently skipped and leaks.
+type Box[T] {
+  T item;
+  close!(~this) {
+  }
+  drop(~this) {
+  }
+}
+
+test_use_close_drop_generic_no_leak() `test {
+  use b := Box[string](item: "generic-payload");
+  assert(b.item.len == 15, "generic field accessible before close");
+}
+
+// Generic suppression path with a genuinely heap-allocating type-arg field
+// (nested heap user type that itself owns a string). Proves the §16.4 suppression
+// path reclaims the concrete field once — no leak, no double-free.
+test_use_close_drop_generic_heap_field_no_leak() `test {
+  use b := Box[Heap](item: Heap(payload: "deep-resource"));
+  assert(b.item.payload.len == 13, "generic heap field accessible");
+}
+
+// Generic suppression path with a Vector type-arg field.
+test_use_close_drop_generic_vector_field_no_leak() `test {
+  use b := Box[int[]](item: [1, 2, 3, 4, 5]);
+  assert(b.item.len == 5, "generic vector field accessible");
+}
+
+// Generic, close() ONLY (no user drop), heap type-arg field. This is the close
+// path's synthesized-cleanup case for generics: the origin reports no drop need
+// (the field is an unbound TypeParam), so the concrete field's drop is only
+// discoverable at mono time. Must reclaim it — exactly once, no leak.
+type BoxCloseOnly[T] {
+  T item;
+  close!(~this) {
+  }
+}
+
+test_use_close_only_generic_heap_field_no_leak() `test {
+  use b := BoxCloseOnly[Heap](item: Heap(payload: "close-only-deep"));
+  assert(b.item.payload.len == 15, "close-only generic heap field accessible");
+}
+
+// Multiple use-bound values with both methods in one scope — closed in reverse,
+// each field reclaimed once, no double-free across the batch.
+test_use_close_drop_multiple_no_leak() `test {
+  use a := Resource(name: "first");
+  use b := Resource(name: "second");
+  assert(a.name.len + b.name.len == 11, "both resources accessible");
+}
+
+// use-bound with both methods in a nested block — close at block exit, field
+// reclaimed once.
+test_use_close_drop_nested_block_no_leak() `test {
+  if true {
+    use r := Resource(name: "nested-resource");
+    assert(r.name.len == 15, "nested resource accessible");
+  }
+}
+
+// Criterion 1 variant: NON-failable close() + user drop(). The repro and the
+// other cases all use `close!(~this)`; this exercises the non-failable close
+// codegen branch (no result/error handling) while still proving the user drop()
+// is suppressed — a double-run would double-free the string field (leak checker
+// catches it).
+type NonFailable {
+  string handle;
+  close(~this) {
+  }
+  drop(~this) {
+  }
+}
+
+test_use_close_drop_nonfailable_no_leak() `test {
+  use n := NonFailable(handle: "non-failable-conn");
+  assert(n.handle.len == 17, "non-failable field accessible");
+}
+
+// Virtual-dispatch path: a base type WITH children gets a vtable, so close() is
+// dispatched virtually (b.closeFunc == nil) rather than directly. The §16.4
+// suppression + field reclaim must hold on that path too. A Sub child forces the
+// vtable; the use binding is on the base.
+type VBase {
+  string tag;
+  close!(~this) {
+  }
+  drop(~this) {
+  }
+}
+type VSub is VBase {
+  string extra;
+}
+
+test_use_close_drop_virtual_dispatch_no_leak() `test {
+  use b := VBase(tag: "virtual-base");
+  assert(b.tag.len == 12, "virtual base field accessible");
+}
+
+// Inherited droppable fields: a use-bound SUBTYPE with both methods whose owned
+// AND inherited string fields must each be reclaimed exactly once. The
+// suppression path drops own + inherited fields (emitFieldDrops walks both); a
+// regression that skips the inherited field would leak it.
+type SubResource is VBase {
+  string own;
+  close!(~this) {
+  }
+  drop(~this) {
+  }
+}
+
+test_use_close_drop_inherited_field_no_leak() `test {
+  use s := SubResource(tag: "inherited-tag", own: "own-field");
+  assert(s.tag.len + s.own.len == 22, "inherited + own fields accessible");
+}
+
+// Criterion 3: a type whose drop() delegates to close()-style cleanup. Because
+// `use` suppresses drop() entirely (§16.4), the delegation never fires a second
+// time — close() performs the single cleanup. A droppable string field makes a
+// double-run observable as a double-free.
+type Delegating {
+  string conn;
+  close!(~this) {
+    // performs all cleanup
+  }
+  drop(~this) {
+    // best-effort: in real code this would delegate to close() internally.
+    // Suppressed for `use` bindings, so it never double-cleans.
+  }
+}
+
+test_use_close_drop_delegating_no_leak() `test {
+  use d := Delegating(conn: "delegating-resource");
+  assert(d.conn.len == 19, "delegating field accessible");
+}
+
+// `this`-local restore path: a use-bound close+drop value used INSIDE a method
+// body. The suppression cleanup (emitInstanceFieldDropsAndFree) temporarily
+// rebinds locals["this"] to the closing instance to drop its fields, then must
+// restore the method's real `this` (the hadThis branch). If that restore were
+// broken, the `this.marker` read AFTER the use scope would observe the closed
+// resource instead of the Holder — so asserting it proves the save/restore is
+// correct, and the leak checker proves single cleanup of the in-method resource.
+type InMethodResource {
+  string name;
+  close!(~this) {
+  }
+  drop(~this) {
+  }
+}
+
+type Holder {
+  int marker;
+  run(this) int {
+    {
+      use r := InMethodResource(name: "in-method");
+      assert(r.name.len == 9, "in-method resource field accessible");
+    }
+    // Requires locals["this"] restored to Holder's `this` after the use close.
+    return this.marker;
+  }
+}
+
+test_use_close_drop_in_method_this_restore_no_leak() `test {
+  h := Holder(marker: 42);
+  assert(h.run() == 42, "this restored after in-method use-close+drop");
+}
+
+// Same `this`-restore path on a GENERIC use-bound type inside a method: the
+// cleanup reconstructs both the mono context AND saves/restores `this`. A heap
+// type-arg field makes a leak observable if the mono context is lost.
+type GenHolder {
+  int tag;
+  run(this) int {
+    {
+      use b := Box[Heap](item: Heap(payload: "method-generic"));
+      assert(b.item.payload.len == 14, "generic field accessible in method");
+    }
+    return this.tag;
+  }
+}
+
+test_use_close_drop_generic_in_method_no_leak() `test {
+  g := GenHolder(tag: 7);
+  assert(g.run() == 7, "this restored after in-method generic use-close+drop");
+}

@@ -1,0 +1,121 @@
+// T0967: a `use`-bound value whose type defines BOTH close() and drop() must run
+// close() ONLY at scope exit — drop() is suppressed (language-design §16.4: `use`
+// takes precedence). This guards against the double-cleanup hazard where close()
+// and drop() both release the same resource.
+//
+// Cleanup ordering ("close ran, drop did NOT") is only observable via output, so
+// this is a snapshot test. It exercises every scope-exit edge — fall-through,
+// return, raise, break, continue — and asserts only "close N" lines appear.
+type R {
+  int id;
+  close!(~this) {
+    print_line("close {this.id}");
+  }
+  drop(~this) {
+    print_line("drop {this.id}");
+  }
+}
+
+type Boom is error {
+}
+
+// Non-failable close() — exercises the non-failable close codegen branch (no
+// error result handling) while still suppressing the user drop().
+type NF {
+  int id;
+  close(~this) {
+    print_line("nf-close {this.id}");
+  }
+  drop(~this) {
+    print_line("nf-drop {this.id}");
+  }
+}
+
+// Base WITH a child → gets a vtable, so close() dispatches virtually
+// (b.closeFunc == nil). Suppression must hold on the virtual path too.
+type VB {
+  int id;
+  close!(~this) {
+    print_line("vb-close {this.id}");
+  }
+  drop(~this) {
+    print_line("vb-drop {this.id}");
+  }
+}
+type VS is VB {
+  int extra;
+}
+
+// use-bound subtype with both methods — own + inherited fields, virtual close.
+type SR is VB {
+  int own;
+  close!(~this) {
+    print_line("sr-close {this.id}");
+  }
+  drop(~this) {
+    print_line("sr-drop {this.id}");
+  }
+}
+
+// return edge: close() runs as the function returns.
+fn_return() int {
+  use r := R(id: 2);
+  return r.id;
+}
+
+// raise edge: close() runs as the error unwinds out of the scope.
+fn_raise!() void {
+  use r := R(id: 3);
+  raise Boom(message: "boom");
+}
+
+main() `test(expected: "close 1\nafter-block\nclose 2\nafter-return\nclose 3\nafter-raise\nclose 10\nafter-break\nclose 20\nclose 20\nafter-continue\nnf-close 100\nafter-nonfailable\nvb-close 200\nafter-virtual\nsr-close 300\nafter-inherited\n") {
+  // --- fall-through edge ---
+  {
+    use r := R(id: 1);
+  }
+  print_line("after-block");
+
+  // --- return edge ---
+  int x = fn_return();
+  print_line("after-return");
+
+  // --- raise edge ---
+  fn_raise()? e {
+  };
+  print_line("after-raise");
+
+  // --- break edge ---
+  for i in 0..3 {
+    use r := R(id: 10);
+    if i == 0 {
+      break;
+    }
+  }
+  print_line("after-break");
+
+  // --- continue edge (fires each iteration) ---
+  for i in 0..2 {
+    use r := R(id: 20);
+    continue;
+  }
+  print_line("after-continue");
+
+  // --- non-failable close() dispatch ---
+  {
+    use n := NF(id: 100);
+  }
+  print_line("after-nonfailable");
+
+  // --- virtual dispatch (base with a child) ---
+  {
+    use v := VB(id: 200);
+  }
+  print_line("after-virtual");
+
+  // --- inherited subtype (own + inherited fields, virtual close) ---
+  {
+    use s := SR(id: 300, own: 9);
+  }
+  print_line("after-inherited");
+}

@@ -406,7 +406,7 @@ consume(move val);            // move — val is gone after this line
 ## Resource Management
 
 ```promise
-// use binding: auto-calls close()/drop() at scope exit
+// use binding: auto-calls close() at scope exit (drop() is suppressed — §16.4)
 type Connection {
   int fd;
   close!(~this) { /* cleanup */ }

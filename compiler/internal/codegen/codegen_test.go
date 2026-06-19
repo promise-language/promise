@@ -2081,6 +2081,75 @@ func TestUseVarDeclFailableInitAutoPropagate(t *testing.T) {
 	assertContains(t, ir, "{ i8*, i8* }* %r")
 }
 
+func TestUseBoundBothCloseAndDropSuppressesUserDrop(t *testing.T) {
+	// T0967 / language-design §16.4: for a `use`-bound value whose type defines
+	// BOTH close() and a user drop(), only close() runs at scope exit — the user
+	// drop() body is suppressed (use takes precedence) to avoid double-cleanup.
+	// The instance is still freed (the heap memory is not user logic).
+	ir := generateIR(t, `
+		type Conn {
+			int id;
+			close!(~this) {}
+			drop(~this) {}
+		}
+		main() {
+			use c := Conn(id: 1);
+		}
+	`)
+	// close() is dispatched on the use binding's scope exit.
+	assertContains(t, ir, "call { i1, i8* } @Conn.close(")
+	// The heap instance is reclaimed via pal_free on the close-free path.
+	assertContains(t, ir, "close.free")
+	// Crucially, the user drop() is NOT called on the close path. Scope the
+	// assertion to main's body — the typeinfo drop$wrap (B0226) legitimately
+	// calls @Conn.drop, but that is RTTI dispatch, not the use/close path.
+	mainIR := extractFunc(ir, "main")
+	if mainIR == "" {
+		t.Fatal("could not extract main function from IR")
+	}
+	assertNotContains(t, mainIR, "call void @Conn.drop(")
+}
+
+func TestUseBoundCloseDropInsideMethodRestoresThis(t *testing.T) {
+	// T0967: when the use-bound close+drop value lives inside a METHOD body, the
+	// close-free suppression path (emitInstanceFieldDropsAndFree) temporarily
+	// rebinds locals["this"] to the closing instance to drop its (droppable)
+	// fields, then must restore the method's real `this`. A `string` field forces
+	// the field-drop branch; the method reads `this.marker` AFTER the use scope so
+	// the restored `this` must still point at Holder. This exercises the hadThis
+	// save/restore branch that free-function call sites never reach.
+	ir := generateIR(t, `
+		type Res {
+			string name;
+			close!(~this) {}
+			drop(~this) {}
+		}
+		type Holder {
+			int marker;
+			run(this) int {
+				{
+					use r := Res(name: "x");
+				}
+				return this.marker;
+			}
+		}
+		main() {
+			h := Holder(marker: 1);
+			x := h.run();
+		}
+	`)
+	run := extractFunc(ir, "Holder.run")
+	if run == "" {
+		t.Fatal("could not extract Holder.run from IR")
+	}
+	// close() ran on the use binding inside the method...
+	assertContains(t, run, "@Res.close(")
+	// ...and its droppable string field was reclaimed inline (suppression path),
+	assertContains(t, run, "@promise_string_drop")
+	// ...but the user Res.drop() body was NOT invoked (use takes precedence).
+	assertNotContains(t, run, "call void @Res.drop(")
+}
+
 func TestSelfGenericMultiParamCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

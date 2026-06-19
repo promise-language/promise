@@ -6245,6 +6245,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// Compound assignment on MutRef param
 			current := c.block.NewLoad(c.mutRefTypes[target.Name], ptr)
 			result := c.genCompoundOp(s.Op, c.info.Types[target], current, val)
+			// T0715: a non-native operator returns a FRESH value; drop the old
+			// heap value behind the borrowed pointer (no-op for value types/scalars/
+			// string) to preserve the zero-leak policy.
+			c.dropOldUserValueAtPtr(ptr, c.info.Types[target], result)
 			c.block.NewStore(result, ptr)
 			return
 		}
@@ -6537,6 +6541,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.block = mergeBlk
 			// New value is now owned by the local — drop flag stays at 1.
 			c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
+		} else {
+			// T0715: a non-native operator returns a FRESH value, so the old heap
+			// user-type (or enum) value at the alloca leaks unless dropped. Reuse
+			// the alias-guarded drop-old helper (no-op for value types/scalars).
+			c.dropOldUserValueAtPtr(alloca, targetType, result)
 		}
 		c.block.NewStore(result, alloca)
 
@@ -7195,14 +7204,18 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	// even outside generic context (where `c.typeSubst` is nil).
 	fieldType := c.info.Types[target]
 	result := c.genCompoundOp(op, fieldType, current, val)
-	// T0363: Drop the old field value before storing the new one. Without
-	// this, heap-allocated old values leak. Only string is wired up — no
-	// other heap-owning type has a `+` operator (the only compound op).
+	// T0363/T0715: Drop the old field value before storing the new one. Without
+	// this, heap-allocated old values leak. String uses the dedicated runtime-
+	// drop helper; a non-native operator on a heap user type (or enum) returns a
+	// fresh value, so the old one is dropped via the alias-guarded helper (no-op
+	// for value types/scalars).
 	if c.typeSubst != nil {
 		fieldType = types.Substitute(fieldType, c.typeSubst)
 	}
 	if extractNamed(fieldType) == types.TypString {
 		c.emitStringDropOldValue(current, result)
+	} else {
+		c.dropOldUserValueAtPtr(fieldPtr, fieldType, result)
 	}
 	c.block.NewStore(result, fieldPtr)
 }
@@ -7363,7 +7376,13 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, operandType types.Type, curren
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for compound assignment %s", operandType, op))
 	}
 
-	method := named.LookupMethod(binOp)
+	// Binary operator: prefer the 1-param variant so a type that also declares a
+	// prefix-unary form of the same symbol (e.g. `-`) dispatches correctly (T0883),
+	// matching genBinaryExpr.
+	method := named.LookupBinaryMethod(binOp)
+	if method == nil {
+		method = named.LookupMethod(binOp)
+	}
 	if method == nil {
 		panic(fmt.Sprintf("codegen: no method %q on type %s for compound assignment", binOp, named))
 	}
@@ -7381,7 +7400,10 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, operandType types.Type, curren
 		return c.emitNativeOp(named, binOp, current, val)
 	}
 
-	panic(fmt.Sprintf("codegen: non-native compound op %s.%s not yet implemented", named, binOp))
+	// T0715: user-defined (non-native) operator — dispatch a real method call.
+	// The result feeds the existing store/setter path; ownership tracking is
+	// deliberately omitted (same reason as the native branch above).
+	return c.genNonNativeCompoundOp(named, operandType, method, binOp, current, val)
 }
 
 // --- Increment / Decrement ---
@@ -9826,6 +9848,12 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 				} else {
 					current := c.block.NewLoad(alloca.ElemType, alloca)
 					result := c.genCompoundOp(s.UpdateOp, c.info.Types[s.UpdateTarget], current, updateVal)
+					// T0715: a non-native operator returns a FRESH value; drop the
+					// old heap user-type / droppable-enum value (alias-guarded;
+					// no-op for value types/scalars) to preserve the zero-leak policy.
+					// (The RHS operator-argument temp is NOT cleaned here — the
+					// update clause lacks statement-temp cleanup; tracked in T0988.)
+					c.dropOldUserValueAtPtr(alloca, c.info.Types[s.UpdateTarget], result)
 					c.block.NewStore(result, alloca)
 				}
 			}
@@ -10036,6 +10064,11 @@ func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, 
 	// compound ops produce values, not new allocations — only string applies.
 	if extractNamed(elemType) == types.TypString {
 		c.emitStringDropOldValue(current, result)
+	} else {
+		// T0715: a non-native operator on a heap user type (or droppable enum)
+		// returns a FRESH value, so the old element leaks unless dropped. The
+		// alias-guarded helper is a no-op for value types/scalars.
+		c.dropOldUserValueAtPtr(elemPtr, elemType, result)
 	}
 	c.block.NewStore(result, elemPtr)
 }
@@ -10227,6 +10260,11 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	// heap-allocated old values leak.
 	if extractNamed(elemType) == types.TypString {
 		c.emitStringDropOldValue(current, result)
+	} else {
+		// T0715: drop the old heap user-type / droppable-enum element (the
+		// non-native operator returns a fresh value). Alias-guarded; no-op for
+		// value types/scalars.
+		c.dropOldUserValueAtPtr(elemPtr, elemType, result)
 	}
 	c.block.NewStore(result, elemPtr)
 }
@@ -10363,6 +10401,13 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	if operandType != nil && extractNamed(operandType) == types.TypString {
 		c.emitStringDropOldValue(current, result)
 	}
+	// NOTE (T0715): compound assignment whose operand is a *user type with a
+	// non-native operator* (value or heap) is unreachable here today — such a
+	// type as a map value is mishandled by the map/mono machinery before this
+	// path runs (value type → codegen panic in Map.[]; heap type → double-free
+	// on overwrite). Tracked separately; when fixed, this path additionally
+	// needs a heap-temp claim on `current` (Map.[] returns the heap value by
+	// reference, which []= below overwrites and drops).
 
 	call := c.block.NewCall(setFn, instancePtr, keyVal, result)
 	c.propagateIfFailable(call) // T0708
@@ -10420,6 +10465,11 @@ func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType t
 	// heap-allocated old values leak.
 	if extractNamed(elemType) == types.TypString {
 		c.emitStringDropOldValue(current, result)
+	} else {
+		// T0715: drop the old heap user-type / droppable-enum element (the
+		// non-native operator returns a fresh value). Alias-guarded; no-op for
+		// value types/scalars.
+		c.dropOldUserValueAtPtr(elemPtr, elemType, result)
 	}
 	c.block.NewStore(result, elemPtr)
 }

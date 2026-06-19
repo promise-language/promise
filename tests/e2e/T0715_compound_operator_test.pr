@@ -1,0 +1,219 @@
+// T0715: a compound assignment (`+=`, `-=`, etc.) whose operator is a
+// user-defined (non-native) method previously panicked codegen. These tests
+// exercise the value-type, heap-user-type, container-element, and failable
+// operator paths, all of which now dispatch a real operator-method call.
+type Vec `doc("A pure value type with arithmetic operators, driving non-native compound assignment.") {
+  int x `value;
+  +(Vec other) Vec {
+    return Vec(x: this.x + other.x);
+  }
+  - (Vec other) Vec {
+    return Vec(x: this.x - other.x);
+  }
+  * (Vec other) Vec {
+    return Vec(x: this.x * other.x);
+  }
+  / (Vec other) Vec {
+    return Vec(x: this.x / other.x);
+  }
+}
+
+type Holder `doc("A type whose property getter/setter wrap a value-type field; the tracker repro shape.") {
+  Vec v;
+  get vec Vec {
+    return this.v;
+  }
+  set vec(Vec nv) {
+    this.v = nv;
+  }
+}
+
+type Bag `doc("A heap (non-value) user type with a plus operator; exercises the drop-old path.") {
+  int[] items;
+  +(Bag other) Bag {
+    r := Bag(items: []);
+    for x in this.items {
+      r.items.push(x);
+    }
+    for x in other.items {
+      r.items.push(x);
+    }
+    return r;
+  }
+  drop(~this) {
+  }
+}
+
+type BagHolder `doc("Holds a heap Bag field; exercises the direct-field compound drop-old path.") {
+  Bag b;
+  drop(~this) {
+  }
+}
+
+type CheckedVec `doc("A value type with a failable plus operator that raises on a negative operand.") {
+  int x `value;
+  +!(CheckedVec other) CheckedVec {
+    if other.x < 0 {
+      raise error("negative addend");
+    }
+    return CheckedVec(x: this.x + other.x);
+  }
+}
+
+// The tracker repro: compound assignment through a value-type getter/setter.
+value_type_property_compound() `test {
+  h := Holder(v: Vec(x: 10));
+  h.vec += Vec(x: 5);
+  assert(h.vec.x == 15, "property += should be 15");
+}
+
+// Value-type local with all four arithmetic compound operators.
+value_type_local_compound() `test {
+  v := Vec(x: 10);
+  v += Vec(x: 5); // 15
+  v -= Vec(x: 3); // 12
+  v *= Vec(x: 2); // 24
+  v /= Vec(x: 4); // 6
+  assert(v.x == 6, "local +=/-=/*=//= should be 6");
+}
+
+// Compound assignment through a mutable-reference (`~`) parameter: the operator
+// result is stored back through the caller's pointer (drop-old is a no-op for
+// this value type). Exercises the genAssignStmt MutRef-param compound branch.
+value_type_mutref_param_compound() `test {
+  v := Vec(x: 5);
+  bump_vec(v);
+  assert(v.x == 105, "mut-ref param += should reach the caller as 105");
+}
+
+bump_vec(Vec ~v) {
+  v += Vec(x: 100);
+}
+
+// Compound assignment in a classic for-loop UPDATE clause: the non-native
+// operator runs once per iteration. Exercises the genClassicForStmt branch.
+value_type_classic_for_update_compound() `test {
+  count := 0;
+  for v := Vec(x: 0); v.x < 10; v += Vec(x: 3) {
+    count += 1;
+  }
+  // x goes 0,3,6,9 -> 4 iterations, then 12 fails the guard.
+  assert(count == 4, "classic-for += update should run 4 iterations");
+}
+
+// Vector element compound with a value-type element.
+value_type_vector_element_compound() `test {
+  v := [Vec(x: 1), Vec(x: 2)];
+  v[0] += Vec(x: 9);
+  assert(v[0].x == 10, "vector element += should be 10");
+}
+
+// Heap user-type local compound: the operator returns a fresh Bag; the old one
+// is dropped (alias-guarded) so there is no leak (zero-tolerance policy).
+heap_user_type_compound_no_leak() `test {
+  b := Bag(items: [1, 2]);
+  b += Bag(items: [3, 4]);
+  assert(b.items.len == 4, "merged bag should have 4 items");
+}
+
+// Heap user-type as a plain struct field: the old field value is dropped before
+// the fresh operator result is stored (no leak).
+heap_user_type_field_compound_no_leak() `test {
+  h := BagHolder(b: Bag(items: [1, 2]));
+  h.b += Bag(items: [3]);
+  assert(h.b.items.len == 3, "field bag should have 3 items");
+}
+
+// Heap user-type as a VECTOR element: the old element is dropped (alias-guarded)
+// before the operator result overwrites the slot (no leak).
+heap_user_type_vector_element_compound_no_leak() `test {
+  v := [Bag(items: [1]), Bag(items: [2])];
+  v[0] += Bag(items: [9]);
+  assert(v[0].items.len == 2, "vector element bag should have 2 items");
+}
+
+// Heap user-type as a fixed-ARRAY element: same drop-old-on-overwrite path.
+heap_user_type_array_element_compound_no_leak() `test {
+  Bag[2] a = [Bag(items: [1]), Bag(items: [2])];
+  a[1] += Bag(items: [7, 8]);
+  assert(a[1].items.len == 3, "array element bag should have 3 items");
+}
+
+// Failable operator, happy path: no error raised, result computed normally.
+failable_compound_happy_path() `test {
+  r := failable_helper_ok(CheckedVec(x: 10))? e {
+    assert(false, "did not expect an error on the happy path");
+    CheckedVec(x: 0)
+  };
+  assert(r.x == 15, "failable += happy path should be 15");
+}
+
+failable_helper_ok!(CheckedVec start) CheckedVec {
+  v := start;
+  v += CheckedVec(x: 5);
+  return v;
+}
+
+// Failable operator, error path: a negative operand raises and the error
+// propagates out of the failable helper to the caller's catch.
+failable_compound_error_propagates() `test {
+  raised := false;
+  _ := failable_helper_raise()? e {
+    raised = true;
+    CheckedVec(x: 0)
+  };
+  assert(raised, "negative addend should propagate the error");
+}
+
+failable_helper_raise!() CheckedVec {
+  v := CheckedVec(x: 10);
+  v += CheckedVec(x: -1); // raises
+  return v;
+}
+
+// --- Inherited (nominal-parent) operator ------------------------------------
+// A leaf subtype with no operator of its own inherits the parent's `+`. The
+// variable is typed as the leaf (no vtable), so codegen resolves the operator
+// to the parent owner via the direct (mono-parent) dispatch branch. The parent
+// is droppable, so the old value is dropped before the result is stored.
+type OpBase `doc("A droppable base type defining a plus operator inherited by leaf subtypes.") {
+  int n;
+  +(OpBase other) OpBase {
+    return OpBase(n: this.n + other.n);
+  }
+  drop(~this) {
+  }
+}
+
+type OpLeaf is OpBase `doc("A leaf subtype that inherits OpBase's plus operator with no vtable of its own.") {
+}
+
+inherited_operator_compound_no_leak() `test {
+  d := OpLeaf(n: 5);
+  d += OpLeaf(n: 3);
+  assert(d.n == 8, "inherited operator += should be 8");
+}
+
+// --- Structural-default operator --------------------------------------------
+// A structural interface supplies a DEFAULT `+` body; a concrete type that
+// `is` it inherits the operator. Codegen synthesizes the default under the
+// concrete name and dispatches there (the structural-owner branch).
+type Summable `doc("A structural interface with a default plus operator over an abstract amount.") `structural {
+  get amount int `abstract;
+  +(Summable other) Money {
+    return Money(v: this.amount + other.amount);
+  }
+}
+
+type Money is Summable `doc("A concrete type that inherits Summable's default plus operator.") {
+  int v;
+  get amount int {
+    return this.v;
+  }
+}
+
+structural_default_operator_compound() `test {
+  m := Money(v: 4);
+  m += Money(v: 3);
+  assert(m.v == 7, "structural-default operator += should be 7");
+}

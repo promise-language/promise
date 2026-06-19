@@ -11941,6 +11941,108 @@ func TestFailableModuleGetterCompoundInFailableScopeOk(t *testing.T) {
 	}
 }
 
+// --- T0715: failable user-defined operator in a compound assignment ---------
+
+// TestFailableCompoundOpRequiresFailableScope: a compound assignment whose
+// operator method is failable must be in a failable function (codegen
+// auto-propagates the error).
+func TestFailableCompoundOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Vec {
+			int x `+"`value"+`;
+			+!(Vec other) Vec { if other.x < 0 { raise error("neg"); } return Vec(x: this.x + other.x); }
+		}
+		main() {
+			v := Vec(x: 10);
+			v += Vec(x: 5);
+		}
+	`)
+	expectError(t, errs, "failable operator in compound assignment must be in a failable function")
+}
+
+// TestFailableCompoundOpInFailableScopeOk: the same compound in a failable
+// function is valid (auto-propagates).
+func TestFailableCompoundOpInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Vec {
+			int x `+"`value"+`;
+			+!(Vec other) Vec { if other.x < 0 { raise error("neg"); } return Vec(x: this.x + other.x); }
+		}
+		main!() {
+			v := Vec(x: 10);
+			v += Vec(x: 5);
+		}
+	`)
+}
+
+// TestNonFailableCompoundOpNoError: a non-failable user-defined operator in a
+// compound assignment needs no failable scope.
+func TestNonFailableCompoundOpNoError(t *testing.T) {
+	checkOK(t, `
+		type Vec {
+			int x `+"`value"+`;
+			+(Vec other) Vec { return Vec(x: this.x + other.x); }
+		}
+		main() {
+			v := Vec(x: 10);
+			v += Vec(x: 5);
+		}
+	`)
+}
+
+// TestFailableEnumCompoundOpRequiresFailableScope: the failable-operator check
+// also applies to ENUM operands — compoundOperatorCanError resolves through the
+// *types.Enum case. (Codegen does not yet support enum compound assignment, see
+// T0989; this exercises the sema branch in isolation, which checkErrs reaches
+// without running codegen.)
+func TestFailableEnumCompoundOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Acc {
+			val(int n),
+			+!(Acc other) Acc { if other.n() < 0 { raise error("neg"); } return Acc.val(this.n() + other.n()); }
+			n(this) int { match this { val(x) => { return x; }, } }
+		}
+		main() {
+			a := Acc.val(10);
+			a += Acc.val(5);
+		}
+	`)
+	expectError(t, errs, "failable operator in compound assignment must be in a failable function")
+}
+
+// TestFailableGenericEnumCompoundOpRequiresFailableScope: same check for a
+// generic enum instance — compoundOperatorCanError resolves through the
+// *types.Instance case whose origin is an *types.Enum (T0989).
+func TestFailableGenericEnumCompoundOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		enum GAcc[T] {
+			val(T v),
+			+!(GAcc[T] other) GAcc[T] { raise error("always"); }
+		}
+		main() {
+			a := GAcc[int].val(10);
+			a += GAcc[int].val(5);
+		}
+	`)
+	expectError(t, errs, "failable operator in compound assignment must be in a failable function")
+}
+
+// TestNonFailableEnumCompoundOpNoError: a non-failable enum operator needs no
+// failable scope (the enum branch of compoundOperatorCanError returns false).
+func TestNonFailableEnumCompoundOpNoError(t *testing.T) {
+	checkOK(t, `
+		enum Acc {
+			val(int n),
+			+(Acc other) Acc { return Acc.val(this.n() + other.n()); }
+			n(this) int { match this { val(x) => { return x; }, } }
+		}
+		main() {
+			a := Acc.val(10);
+			a += Acc.val(5);
+		}
+	`)
+}
+
 func TestMonoSetterNotAllowed(t *testing.T) {
 	// T0703: `mono setters remain disallowed (symmetric with the `mono getter ban).
 	errs := checkErrs(t, "type Box[T] {\n"+

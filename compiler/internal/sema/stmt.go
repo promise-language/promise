@@ -507,7 +507,57 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 			}
 		}
 		c.checkOperator(s.Pos(), opTarget, op, valType)
+		// T0715: a failable operator returns {ok, value, err}; codegen
+		// auto-propagates the error, so the enclosing function must be failable.
+		// Symmetric with the T0708/T0709 setter/getter checks above.
+		if c.compoundOperatorCanError(opTarget, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+			c.errorf(s.Pos(), "failable operator in compound assignment must be in a failable function: mark the enclosing function with `!`")
+		}
 	}
+}
+
+// compoundOperatorCanError reports whether the binary operator method invoked by
+// a compound assignment (`+=`, `-=`, etc.) on opTarget is failable. A failable
+// operator returns {ok, value, err}; codegen auto-propagates the error, so the
+// enclosing function must be failable. Resolves through Named/Instance/Enum,
+// mirroring checkOperator's dispatch. T0715.
+func (c *Checker) compoundOperatorCanError(opTarget types.Type, op string) bool {
+	// Strip refs so the operator dispatches on the underlying type (mirrors checkOperator).
+	if sr, ok := opTarget.(*types.SharedRef); ok {
+		opTarget = sr.Elem()
+	}
+	if mr, ok := opTarget.(*types.MutRef); ok {
+		opTarget = mr.Elem()
+	}
+	switch t := opTarget.(type) {
+	case *types.Named:
+		if m := lookupBinaryOperatorMethod(t, op); m != nil {
+			return m.Sig().CanError()
+		}
+	case *types.Instance:
+		if en, ok := t.Origin().(*types.Enum); ok {
+			if m := en.LookupBinaryMethod(op); m != nil {
+				return m.Sig().CanError()
+			}
+			if m := en.LookupMethod(op); m != nil {
+				return m.Sig().CanError()
+			}
+			return false
+		}
+		if origin, ok := t.Origin().(*types.Named); ok {
+			if m := lookupBinaryOperatorMethod(origin, op); m != nil {
+				return m.Sig().CanError()
+			}
+		}
+	case *types.Enum:
+		if m := t.LookupBinaryMethod(op); m != nil {
+			return m.Sig().CanError()
+		}
+		if m := t.LookupMethod(op); m != nil {
+			return m.Sig().CanError()
+		}
+	}
+	return false
 }
 
 // checkSetterAvailable validates that assignment to a getter property

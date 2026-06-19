@@ -1265,12 +1265,21 @@ func (c *Compiler) genEnumBinaryOp(e *ast.BinaryExpr, en *types.Enum, leftType t
 // Mirrors genVirtualMethodCall but uses pre-evaluated left/right operands.
 func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 	method *types.Method, left, right value.Value) value.Value {
+	return c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, isThisReceiver(e.Left))
+}
 
-	op := e.Op.String()
+// genVirtualBinaryOpValues is the value-based core of genVirtualBinaryOp: it
+// dispatches a non-native binary operator through the vtable given pre-evaluated
+// operands. leftIsThis reports whether the left operand is the method receiver
+// (`this`). Shared by genBinaryExpr (plain `a + b`) and genNonNativeCompoundOp
+// (compound `a += b`, where neither operand is `this`), so the vtable dispatch
+// logic lives in one place (T0715).
+func (c *Compiler) genVirtualBinaryOpValues(named *types.Named, op string,
+	method *types.Method, left, right value.Value, leftIsThis bool) value.Value {
 
 	// Extract vtable and instance from left operand
 	var vtableRaw, instance value.Value
-	if isThisReceiver(e.Left) {
+	if leftIsThis {
 		instance = left
 		vtableRaw = c.loadVtablePtrFromInstance(left)
 	} else {
@@ -1313,6 +1322,67 @@ func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 	}
 	args = append(args, right)
 	return c.block.NewCall(fnTyped, args...)
+}
+
+// genNonNativeCompoundOp dispatches a user-defined (non-native) binary operator
+// invoked by a compound assignment (`+=`, `-=`, etc.) and returns the result
+// value (T0715). Both operands are plain loaded values — neither is `this` — so
+// the receiver/argument ABI is simpler than genBinaryExpr's: no `this`-receiver
+// or `this`-argument special cases. The result is NOT tracked as a statement
+// temp; every genCompoundOp caller stores it into a location that takes ownership
+// (alloca, field, setter, or container slot), so tracking here would double-free
+// (matching the native-path comment in genCompoundOp). A failable operator
+// returns {ok, value, err}; the error is auto-propagated (sema guarantees the
+// enclosing scope is failable via compoundOperatorCanError).
+func (c *Compiler) genNonNativeCompoundOp(named *types.Named, operandType types.Type,
+	method *types.Method, op string, current, val value.Value) value.Value {
+
+	var result value.Value
+	if c.needsVtable(named) {
+		// Virtual dispatch when the operand type is abstract / structural / has
+		// children. Neither operand is `this`.
+		result = c.genVirtualBinaryOpValues(named, op, method, current, val, false)
+	} else {
+		// Direct dispatch: resolve the mangled name exactly as genBinaryExpr does
+		// (mono name for generic instances, structural-default synthesis under the
+		// concrete name, mono-parent resolution for inherited operators).
+		ownerName := c.resolveMethodOwner(named, op)
+		var mangledName string
+		if ownerName != named.Obj().Name() {
+			if structParent := c.findStructuralOwner(named, op); structParent != nil {
+				concreteName := c.resolveTypeName(operandType)
+				c.ensureDefaultMethodsSynthesized(named, structParent)
+				mangledName = mangleMethodName(concreteName, op, false)
+			} else {
+				monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
+				mangledName = mangleMethodName(monoOwner, op, false)
+			}
+		} else {
+			mangledName = mangleMethodName(c.resolveTypeName(operandType), op, false)
+		}
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
+		}
+
+		var args []value.Value
+		if method.Sig().Recv() != nil {
+			if named.IsValueType() {
+				args = append(args, c.valueTypeReceiverPtr(current, operandType))
+			} else {
+				args = append(args, c.extractInstancePtr(current))
+			}
+		}
+		args = append(args, val)
+		result = c.block.NewCall(fn, args...)
+	}
+
+	if method.Sig().CanError() {
+		// Failable operator: unwrap the {ok, value, err} result, propagating the
+		// error to the (sema-guaranteed failable) enclosing scope.
+		result = c.genAutoPropagateValue(result)
+	}
+	return result
 }
 
 // genStringOp dispatches a string binary operator to the appropriate runtime intrinsic.

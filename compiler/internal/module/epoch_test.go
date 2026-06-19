@@ -114,6 +114,60 @@ func TestWriteActiveEpoch(t *testing.T) {
 	}
 }
 
+func TestActiveEpochRaw(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// Absent active file → ("", false, nil) with no latest-installed fallback,
+	// even when an epoch directory exists.
+	if err := os.MkdirAll(filepath.Join(tmp, "epochs", "2026.0"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, had, err := ActiveEpochRaw(); err != nil || had || epoch != "" {
+		t.Fatalf("absent active: got (%q, %v, %v), want (\"\", false, nil)", epoch, had, err)
+	}
+
+	// Present + non-empty → returns the trimmed value.
+	if err := WriteActiveEpoch("2026.0"); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, had, err := ActiveEpochRaw(); err != nil || !had || epoch != "2026.0" {
+		t.Fatalf("set active: got (%q, %v, %v), want (\"2026.0\", true, nil)", epoch, had, err)
+	}
+
+	// Whitespace-only file is treated as absent.
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("  \n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, had, err := ActiveEpochRaw(); err != nil || had || epoch != "" {
+		t.Fatalf("blank active: got (%q, %v, %v), want (\"\", false, nil)", epoch, had, err)
+	}
+}
+
+func TestClearActiveEpoch(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// Idempotent when the file is absent.
+	if err := ClearActiveEpoch(); err != nil {
+		t.Fatalf("clear (absent): unexpected error: %v", err)
+	}
+
+	if err := WriteActiveEpoch("2026.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearActiveEpoch(); err != nil {
+		t.Fatalf("clear (present): unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "active")); !os.IsNotExist(err) {
+		t.Fatalf("active file should be removed, stat err: %v", err)
+	}
+	// Second clear is still a no-op.
+	if err := ClearActiveEpoch(); err != nil {
+		t.Fatalf("clear (already removed): unexpected error: %v", err)
+	}
+}
+
 func TestInstalledEpochs(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)

@@ -172,7 +172,9 @@ main!() {
 
   // 3. Missing epoch → clear, actionable error.
   if !io.File.exists(target[0:target.len]) {
-    print_line("error: epoch {epoch} is not installed. run: promise update {epoch}");
+    print_line("error: epoch {epoch} is not installed.");
+    print_line("  run: promise install {epoch}   (installs it without changing your active epoch)");
+    print_line("  or set [module].epoch in promise.toml to an installed epoch");
     os.exit_process(1);
   }
 

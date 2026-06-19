@@ -68,6 +68,43 @@ func WriteActiveEpoch(epoch string) error {
 	return os.WriteFile(filepath.Join(home, "active"), []byte(epoch+"\n"), 0644)
 }
 
+// ActiveEpochRaw reads <PromiseHome>/active without the latest-installed
+// fallback that ActiveEpoch applies. Returns (epoch, true, nil) when the file
+// is present and non-empty, ("", false, nil) when it is absent or empty. Used
+// to snapshot the exact active-pointer state so presence-only installs can
+// restore it after a download path that would otherwise activate the epoch.
+func ActiveEpochRaw() (string, bool, error) {
+	home, err := PromiseHome()
+	if err != nil {
+		return "", false, err
+	}
+	data, err := os.ReadFile(filepath.Join(home, "active"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	epoch := strings.TrimSpace(string(data))
+	if epoch == "" {
+		return "", false, nil
+	}
+	return epoch, true, nil
+}
+
+// ClearActiveEpoch removes <PromiseHome>/active. It is a no-op when the file is
+// already absent.
+func ClearActiveEpoch() error {
+	home, err := PromiseHome()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(home, "active")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // WriteEpochBuildID records the build identity (the verified release asset's
 // SHA-256) for an installed epoch at <EpochDir>/build-id. For the rolling
 // "next" channel this is the only reliable identity of "the binary I'd

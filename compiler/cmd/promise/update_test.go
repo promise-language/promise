@@ -1060,6 +1060,230 @@ func TestRunUseDownloadsOnDemand(t *testing.T) {
 	}
 }
 
+// TestEnsureEpochPresentNoop: when the epoch's compiler binary already exists,
+// ensureEpochPresent is a pure no-op — no download, no touch of the active
+// pointer (T0977). Exercised directly (no subprocess) since the present path
+// never calls os.Exit.
+func TestEnsureEpochPresentNoop(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_RELEASE_URL", "http://127.0.0.1:0") // any download would fail loudly
+
+	// Stage a present epoch binary.
+	binName := "promise"
+	if runtime.GOOS == "windows" {
+		binName = "promise.exe"
+	}
+	binDir := filepath.Join(tmp, "epochs", "2025.3", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, binName), []byte("x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := module.WriteActiveEpoch("2026.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureEpochPresent("2025.3"); err != nil {
+		t.Fatalf("present epoch should be a no-op, got: %v", err)
+	}
+	// Active pointer untouched.
+	data, err := os.ReadFile(filepath.Join(tmp, "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "2026.0" {
+		t.Errorf("present-epoch no-op must not change active; got: %q", string(data))
+	}
+}
+
+// TestRunInstallEpochKeepsActive: `promise install <epoch>` on a missing epoch
+// downloads it WITHOUT touching the active pointer (presence-only; T0977). The
+// mock server 404s the tag so the download fails before the exec-install step —
+// enough to prove (a) an on-demand download was attempted and (b) the pre-set
+// active pointer is untouched (it is never written before the download path).
+func TestRunInstallEpochKeepsActive(t *testing.T) {
+	if os.Getenv("TEST_INSTALL_EPOCH") == "1" {
+		runInstall([]string{"9999.9"})
+		return
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallEpochKeepsActive")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_EPOCH=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL="+srv.URL,
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit when on-demand download fails")
+	}
+	s := string(out)
+	if !strings.Contains(s, "downloading from") {
+		t.Errorf("expected an on-demand download attempt, got: %s", s)
+	}
+	// The active pointer must be exactly as we set it — install never activates.
+	data, rerr := os.ReadFile(filepath.Join(tmp, "active"))
+	if rerr != nil {
+		t.Fatalf("active file should still exist: %v", rerr)
+	}
+	if strings.TrimSpace(string(data)) != "2026.0" {
+		t.Errorf("install <epoch> must not change active; got: %q", string(data))
+	}
+}
+
+// TestRunInstallEpochRejectsNext: `promise install next` is the same category
+// error as `use next` — "next" is a rolling release channel, not a concrete
+// epoch (T0825/T0977). It must reject (pointing at `promise update channel
+// next`) without writing the active pointer. Run in a subprocess (it exits).
+func TestRunInstallEpochRejectsNext(t *testing.T) {
+	if os.Getenv("TEST_INSTALL_NEXT_REJECT") == "1" {
+		runInstall([]string{"next"})
+		return
+	}
+
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallEpochRejectsNext")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_NEXT_REJECT=1",
+		"PROMISE_HOME="+tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for `install next`")
+	}
+	s := string(out)
+	if !strings.Contains(s, "release channel, not an epoch") {
+		t.Errorf("expected channel-not-epoch rejection, got: %s", s)
+	}
+	if !strings.Contains(s, "promise update channel next") {
+		t.Errorf("expected pointer to `update channel next`, got: %s", s)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(tmp, "active")); rerr == nil {
+		t.Errorf("install next must not write the active file, got: %q", string(data))
+	}
+}
+
+// TestRunInstallEpochPresentNoop: the full `promise install <epoch>` command on
+// an already-present epoch is a no-op that prints the success line and leaves a
+// pre-set active pointer (for a DIFFERENT epoch) untouched (T0977 acceptance:
+// "install <epoch> for an installed epoch ... leaves active unchanged"). This
+// drives the whole dispatch — runInstall's positional overload → runInstallEpoch
+// → ensureEpochPresent's already-present short-circuit — and the success Printf
+// that the download-fail tests never reach. Run in a subprocess (clean env, and
+// a 127.0.0.1:0 release URL so any accidental download would fail loudly).
+func TestRunInstallEpochPresentNoop(t *testing.T) {
+	if os.Getenv("TEST_INSTALL_PRESENT") == "1" {
+		runInstall([]string{"2025.3"})
+		return
+	}
+
+	tmp := t.TempDir()
+	binName := "promise"
+	if runtime.GOOS == "windows" {
+		binName = "promise.exe"
+	}
+	binDir := filepath.Join(tmp, "epochs", "2025.3", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, binName), []byte("x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallEpochPresentNoop")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_PRESENT=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL=http://127.0.0.1:0",
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install <present-epoch> should exit 0, got %v\n%s", err, out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "Installed epoch 2025.3") || !strings.Contains(s, "active epoch unchanged") {
+		t.Errorf("expected presence-only success line, got: %s", s)
+	}
+	if strings.Contains(s, "downloading from") {
+		t.Errorf("present epoch must not trigger a download, got: %s", s)
+	}
+	// The active pointer must still name the OTHER epoch — install never activates.
+	data, rerr := os.ReadFile(filepath.Join(tmp, "active"))
+	if rerr != nil {
+		t.Fatalf("active file should still exist: %v", rerr)
+	}
+	if strings.TrimSpace(string(data)) != "2026.0" {
+		t.Errorf("install <epoch> must not change active; got: %q", string(data))
+	}
+}
+
+// TestRunUsePresentSetsActive: `promise use <epoch>` on an already-present epoch
+// activates it WITHOUT downloading (T0977 acceptance: "use <epoch> still ... sets
+// active"). The present short-circuit in ensureEpochPresent means no network is
+// touched; the WriteActiveEpoch step then flips the active pointer from a
+// different epoch to this one. Run in a subprocess (clean env).
+func TestRunUsePresentSetsActive(t *testing.T) {
+	if os.Getenv("TEST_USE_PRESENT") == "1" {
+		runUse([]string{"2025.3"})
+		return
+	}
+
+	tmp := t.TempDir()
+	binName := "promise"
+	if runtime.GOOS == "windows" {
+		binName = "promise.exe"
+	}
+	binDir := filepath.Join(tmp, "epochs", "2025.3", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, binName), []byte("x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUsePresentSetsActive")
+	cmd.Env = append(os.Environ(),
+		"TEST_USE_PRESENT=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL=http://127.0.0.1:0",
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("use <present-epoch> should exit 0, got %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "downloading from") {
+		t.Errorf("present epoch must not trigger a download, got: %s", out)
+	}
+	// use MUST activate the requested epoch (flipping it from 2026.0 → 2025.3).
+	data, rerr := os.ReadFile(filepath.Join(tmp, "active"))
+	if rerr != nil {
+		t.Fatalf("active file should exist after use: %v", rerr)
+	}
+	if strings.TrimSpace(string(data)) != "2025.3" {
+		t.Errorf("use <epoch> must set active to that epoch; got: %q", string(data))
+	}
+}
+
 // TestDownloadAndInstallNoAsset: downloadAndInstall must fail fast (before any
 // download or exec) when the release carries no asset for the current platform.
 // This is the only downloadAndInstall path reachable without executing a real

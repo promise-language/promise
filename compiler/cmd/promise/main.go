@@ -211,6 +211,7 @@ Toolchain:
   promise update check [--json]         Report whether an update is available (no changes)
   promise update channel                Print the current update channel
   promise update channel <stable|next>  Set the channel and immediately follow it
+  promise install <epoch>               Fetch an epoch without activating it (downloads on demand)
   promise use <epoch>                   Activate a specific epoch (downloads on demand)
 
 Packages:
@@ -7975,7 +7976,30 @@ main!() {   # ! marks main failable (can return error)
 	}
 }
 
+// runInstallEpoch fetches + stages a specific epoch WITHOUT activating it
+// (presence only; mirrors rustup `toolchain install`). This is the recovery
+// path for a project pinning an epoch that is not present on disk: building a
+// pinned project needs presence, not activation, so this leaves the active
+// pointer untouched and does not perturb other unpinned projects.
+func runInstallEpoch(epoch string) {
+	if err := ensureEpochPresent(epoch); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Installed epoch %s (active epoch unchanged)\n", epoch)
+}
+
 func runInstall(args []string) {
+	// Overload: `promise install <epoch>` fetches + stages an epoch without
+	// activating it (presence-only). The no-arg bootstrap path below — which
+	// installs THIS binary's embedded epoch and activates it — is the critical
+	// installation primitive and stays byte-for-byte unchanged; the positional
+	// guard can only trigger on a single non-flag argument.
+	if len(args) == 1 && !strings.HasPrefix(args[0], "-") {
+		runInstallEpoch(args[0])
+		return
+	}
+
 	// Parse flags:
 	//   -dev                  install into epochs/dev/ instead of epochs/<epoch>/
 	//   --no-fetch-toolchain  skip the install-time host-toolchain pre-fetch
@@ -8277,7 +8301,66 @@ func runEpochs() {
 	fmt.Println()
 }
 
-// runUse sets the active epoch to the given argument.
+// ensureEpochPresent makes <epoch> present on disk WITHOUT changing the active
+// pointer. If the epoch's compiler binary already exists it is a no-op;
+// otherwise the epoch is downloaded from releases and staged into
+// epochs/<epoch>/. This is the shared install-half behind both `promise install
+// <epoch>` (presence only) and `promise use <epoch>` (presence + activate);
+// keeping it in one place makes `use` exactly `install` plus a WriteActiveEpoch.
+func ensureEpochPresent(epoch string) error {
+	// "next" is a rolling release *channel*, not a concrete epoch (T0825).
+	// Following it installs whatever YYYY.N epoch the next branch currently
+	// carries — the downloaded binary's `install` activates that real epoch, and
+	// there is no epochs/next/ install directory. Staging the literal "next"
+	// here would leave a dangling install directory at a non-existent epoch, so
+	// direct the user to the channel command instead.
+	if epoch == module.ChannelNext {
+		return fmt.Errorf("%q is a release channel, not an epoch.\n"+
+			"  To follow the next pre-release stream: promise update channel next", epoch)
+	}
+
+	epochDir, err := module.EpochDir(epoch)
+	if err != nil {
+		return err
+	}
+	binPath := filepath.Join(epochDir, "bin", "promise")
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
+	if _, err := os.Stat(binPath); err == nil {
+		return nil // already present — no-op
+	}
+
+	// Not installed — download it from releases on demand (T0825). The child
+	// `install` stages it into epochs/<epoch>/ AND writes the active pointer as
+	// a side effect. Snapshot + restore the active pointer around the download
+	// so presence-only installs never change the active epoch; `use` re-affirms
+	// its own activation afterwards via WriteActiveEpoch.
+	cfg := resolveSyncConfig()
+	fmt.Fprintf(os.Stderr, "epoch %s is not installed; downloading from %s...\n", epoch, cfg.describe())
+	release, derr := findSpecificRelease(cfg, epoch)
+	if derr != nil {
+		return derr
+	}
+	// Snapshot the active pointer BEFORE the download. If it can't be read
+	// (a genuine I/O error, not "absent"), abort here rather than risk wiping
+	// the pointer after the child install writes it — failing before the
+	// download leaves nothing to undo.
+	prevActive, hadActive, aerr := module.ActiveEpochRaw()
+	if aerr != nil {
+		return aerr
+	}
+	if derr := downloadAndInstall(release, epoch); derr != nil {
+		return derr
+	}
+	if hadActive {
+		return module.WriteActiveEpoch(prevActive)
+	}
+	return module.ClearActiveEpoch()
+}
+
+// runUse activates an epoch: makes it present (downloading on demand) and then
+// sets it as the active epoch.
 func runUse(args []string) {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: promise use <epoch>")
@@ -8285,45 +8368,9 @@ func runUse(args []string) {
 	}
 	epoch := args[0]
 
-	// "next" is a rolling release *channel*, not a concrete epoch (T0825).
-	// Following it installs whatever YYYY.N epoch the next branch currently
-	// carries — the downloaded binary's `install` activates that real epoch, and
-	// there is no epochs/next/ install directory. Activating the literal "next"
-	// here would leave a dangling active pointer at a non-existent install, so
-	// direct the user to the channel command instead.
-	if epoch == module.ChannelNext {
-		fmt.Fprintf(os.Stderr, "%q is a release channel, not an epoch.\n"+
-			"  To follow the next pre-release stream: promise update channel next\n", epoch)
-		os.Exit(1)
-	}
-
-	// Validate that the epoch is installed.
-	epochDir, err := module.EpochDir(epoch)
-	if err != nil {
+	if err := ensureEpochPresent(epoch); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
-	}
-	binPath := filepath.Join(epochDir, "bin", "promise")
-	if runtime.GOOS == "windows" {
-		binPath += ".exe"
-	}
-	if _, err := os.Stat(binPath); err != nil {
-		// Not installed — download it from releases on demand (T0825). This
-		// replaces the old "Run: promise sync" hint now that sync is gone: a
-		// specific/historical epoch is fetched here rather than by a separate
-		// command. The child `install` stages it into epochs/<epoch>/ and
-		// activates it; the WriteActiveEpoch below re-affirms the same epoch.
-		cfg := resolveSyncConfig()
-		fmt.Fprintf(os.Stderr, "epoch %s is not installed; downloading from %s...\n", epoch, cfg.describe())
-		release, derr := findSpecificRelease(cfg, epoch)
-		if derr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", derr)
-			os.Exit(1)
-		}
-		if derr := downloadAndInstall(release, epoch); derr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", derr)
-			os.Exit(1)
-		}
 	}
 
 	if err := module.WriteActiveEpoch(epoch); err != nil {

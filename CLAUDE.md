@@ -311,19 +311,19 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 
 ## Test Suite
 
-~2563 test functions across ~215 `.pr` files, organized by category:
+Tests are organized by category:
 
-| Directory | What it tests | Files |
-|-----------|--------------|-------|
-| `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums (incl. enum methods, enum fields), casting, control flow | ~67 |
-| `tests/std/` | Standard library: all primitive types, containers, iterators, math, time, formatting, parsing | ~27 |
-| `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff, batch test scheduler init | ~86 |
-| `tests/modules/` | Module system: imports, visibility, generics across modules, transitive deps, diamond deps | ~16 |
-| `tests/value_types/` | Pure value types: construction, copying, operators, methods, nested, optional | ~9 |
-| `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters | ~6 |
-| `tests/catalog/` | Catalog module integration tests | ~1 |
-| `modules/*/` | Catalog module internal tests (`*_test.pr`) | ~6 |
-| `examples/` | Runnable examples: basics, types, errors, ownership, collections, lambdas, concurrency, modules, patterns | 33 |
+| Directory | What it tests |
+|-----------|--------------|
+| `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums (incl. enum methods, enum fields), casting, control flow |
+| `tests/std/` | Standard library: all primitive types, containers, iterators, math, time, formatting, parsing |
+| `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff, batch test scheduler init |
+| `tests/modules/` | Module system: imports, visibility, generics across modules, transitive deps, diamond deps |
+| `tests/value_types/` | Pure value types: construction, copying, operators, methods, nested, optional |
+| `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters |
+| `tests/catalog/` | Catalog module integration tests |
+| `modules/*/` | Catalog module internal tests (`*_test.pr`) |
+| `examples/` | Runnable examples: basics, types, errors, ownership, collections, lambdas, concurrency, modules, patterns |
 
 ## Important Files
 

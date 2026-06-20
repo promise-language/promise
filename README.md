@@ -4,13 +4,13 @@ Statically-typed language designed for AI-agent efficiency — and written by AI
 
 **Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Open any one `.pr` file and you know exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
 
-**Written by AI agents.** The compiler, standard library, and catalog are written by AI agents — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. The high-level design calls are human and captured in decision docs; the agents implement against them. What keeps agent-written code correct at this size isn't the model being magic, it's the process around it: a work tracker with stable IDs, multi-class quality gates that reject regressions before they land, a zero-memory-leak policy, and **11,000+ tests** (~5,000 compiler + 6,000+ language) that must pass before any commit — green across Linux, macOS, Windows, and WASM. See programs agents built in Promise — each with the prompt, the generated code, an honest writeup, and a terminal recording — in the [Zoo](https://github.com/promise-language/zoo). The honest test: read the code an agent wrote and decide for yourself whether it's slop.
+**Written by AI agents.** The compiler, standard library, and catalog are written by AI agents — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. The high-level design calls are human and captured in decision docs; the agents implement against them. What keeps agent-written code correct at this size isn't the model being magic, it's the process around it: a work tracker with stable IDs, multi-class quality gates that reject regressions before they land, a zero-memory-leak policy, and **13,000+ tests** (7,200+ Promise, 5,700+ compiler in Go) that must pass before any commit — green across Linux, macOS, Windows, and WASM. See programs agents built in Promise — each with the prompt, the generated code, an honest writeup, and a terminal recording — in the [Zoo](https://github.com/promise-language/zoo). The honest test: read the code an agent wrote and decide for yourself whether it's slop.
 
 **Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
 
 **Self-contained toolchain.** The compiler is a single Go binary that bundles the standard library, catalog modules, and runtime. Install with `curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh` — a small (~15MB) download that then sets up the LLVM 22 toolchain it builds with (a one-time fetch, cached under `~/.promise`) — then keep it current with `promise update`. Promise brings its own linker (`lld`), not the system one — nothing to install but Promise itself.* (* macOS also needs the Xcode Command Line Tools for now; a bundled SDK stub is on the way.) Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
-**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `http`, `gzip`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `time`, `toml`, `yaml`.
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `http`, `gzip`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `toml`, `yaml`.
 
 ## Example
 
@@ -48,7 +48,7 @@ main() {
 
 **WARNING: Under active development, not for production use.**
 
-The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented and covered by **11,000+ tests**, green across Linux, macOS, Windows, and WASM. It's early and mostly solo-built so far — expect rough edges, and expect it to crash on you. That's exactly the feedback we want: try it, and file what breaks.
+The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented, and the full test suite is green across Linux, macOS, Windows, and WASM. It's early and mostly solo-built so far — expect rough edges, and expect it to crash on you. That's exactly the feedback we want: try it, and file what breaks.
 
 ## Building
 
@@ -148,9 +148,10 @@ promise/
 │   ├── path/                    # Path manipulation
 │   ├── math/                    # Extended math
 │   ├── strings/                 # Extended string utilities
+│   ├── time/                    # Date/time, calendar, ISO-8601
 │   ├── http/                    # HTTP client
 │   ├── gzip/                    # gzip/DEFLATE compression
-│   └── (ai, auth, cloud, markdown, mcp, msgpack, sandbox, schema, term, time, toml, yaml — planned, design only)
+│   └── (ai, auth, cloud, markdown, mcp, msgpack, sandbox, schema, term, toml, yaml — planned, design only)
 ├── tests/                       # Integration and e2e tests
 ├── examples/                    # Runnable examples
 ├── bin/                         # Build tools (compiled by ./make)

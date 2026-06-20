@@ -5221,6 +5221,58 @@ func TestElvisHeapUserResultDropFlag(t *testing.T) {
 	assertContains(t, ir, "call void @HVal.drop")
 }
 
+// T0933: `m := a ?: b` with a BORROWED-PARAMETER source. The binding's drop flag
+// must be driven by a per-branch phi — false on the some path (the inner belongs to
+// the caller-owned param `a`, not the binding) and true on the none path (the
+// binding's claimHeapTemp moves the fresh-temp default in). This overrides the
+// unconditional `store i1 true` that maybeRegisterDrop emits.
+func TestElvisBoundBorrowedParamFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type HVal { string s; }
+		f(HVal? a, HVal b) { m := a ?: b; }
+		main() { HVal? a = HVal(s: "a" + "b"); HVal c = HVal(s: "c" + "d"); f(a, c); }
+	`)
+	// The bound override phi: some=false (borrowed source), none=true. Distinct from
+	// the inline trackElvisResultHeap phi shape [ true, false ] (which is not even
+	// emitted here — the borrowed-param some path is not owned).
+	assertContainsMatch(t, ir, `phi i1 \[ false, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+	// The override store follows maybeRegisterDrop's unconditional 1.
+	assertContains(t, ir, "store i1 true, i1* %m.dropflag")
+	assertContainsMatch(t, ir, `store i1 %[0-9]+, i1\* %m\.dropflag`)
+}
+
+// T0933: `m := a ?: b` with a LOCALLY-OWNED source (`HVal? a = ...`). someOwnsInner
+// is true (the optional's scope drop flag is cleared on the some path), so the bound
+// override phi folds to [ true, true ] = constant 1 — identical to the pre-fix
+// unconditional drop, no behavior change. Guards that the fix does not weaken the
+// owned-source case.
+func TestElvisBoundLocalSourceFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type HVal { string s; }
+		main() {
+			HVal? a = HVal(s: "a" + "b");
+			HVal b = HVal(s: "c" + "d");
+			m := a ?: b;
+		}
+	`)
+	// Bound override phi: some=true (owned local), none=true. No false-some incoming.
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+	assertContainsMatch(t, ir, `store i1 %[0-9]+, i1\* %m\.dropflag`)
+}
+
+// T0933: a STRING elvis bound result is NOT a 2-word heap-user value struct, so
+// elvisResultHeapUserDrop returns nil and no per-branch override phi is emitted
+// (strings use the i8* claimStringTemp path, untouched by this fix). Negative gate.
+func TestElvisBoundStringNoFlag(t *testing.T) {
+	ir := generateIR(t, `
+		f(string? a, string b) { m := a ?: b; }
+		main() { string? a = "x"; string b = "y"; f(a, b); }
+	`)
+	// No bound override phi of either shape in the elvis merge block.
+	assertNotContainsMatch(t, ir, `phi i1 \[ false, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+	assertNotContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+}
+
 func TestOptionalStringNone(t *testing.T) {
 	ir := generateIR(t, `main() { string? x = none; }`)
 	assertContains(t, ir, "alloca { i1, i8* }")

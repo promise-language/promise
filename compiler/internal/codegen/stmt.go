@@ -1344,6 +1344,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if opt, ok := dropType.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
+	c.consumeElvisBoundOwned(s.Name, s.Value)
 	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)
@@ -1634,6 +1635,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if opt, ok := typ.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
+	c.consumeElvisBoundOwned(s.Name, s.Value)
 	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)
@@ -1697,6 +1699,30 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ, s.Value)
+}
+
+// isElvisExpr reports whether expr (peeling parens) is an elvis `?:` binary
+// expression. Used to gate the T0933 bound-flag override so a nested elvis inside
+// a call/operator RHS (`m := foo(a ?: b)`) does NOT consume it — there the call
+// owns the inner, not the binding.
+func isElvisExpr(expr ast.Expr) bool {
+	be, ok := unwrapDestructureParens(expr).(*ast.BinaryExpr)
+	return ok && be.Op == ast.BinElvis
+}
+
+// consumeElvisBoundOwned stores the per-branch drop flag computed by genElvis for a
+// bound heap-user elvis (`m := a ?: b`) into the binding's drop flag, overriding the
+// unconditional 1 that maybeRegisterDrop wrote. Gated on the RHS actually being an
+// elvis so a stale flag (e.g. from an elvis nested in a call RHS) never misfires.
+// Always clears c.elvisBoundOwned afterwards so it does not leak across statements.
+// T0933.
+func (c *Compiler) consumeElvisBoundOwned(name string, value ast.Expr) {
+	if c.elvisBoundOwned != nil && isElvisExpr(value) {
+		if flag, ok := c.dropFlags[name]; ok {
+			c.block.NewStore(c.elvisBoundOwned, flag)
+		}
+	}
+	c.elvisBoundOwned = nil
 }
 
 // unwrapDestructureParens peels any number of *ast.ParenExpr wrappers from a
@@ -6263,6 +6289,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	}
 	val := c.genExpr(s.Value)
 	c.elvisResultBound = prevElvisBound
+	// T0933: assignment does not consume the bound heap-user flag (the existing target
+	// already owns/borrows via its own binding); clear it so genElvis's phi never
+	// leaks into a later var-decl's consumeElvisBoundOwned.
+	c.elvisBoundOwned = nil
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
 	c.dupTupleFieldAccess = false

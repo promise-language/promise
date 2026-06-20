@@ -187,3 +187,121 @@ elvis_owned_param_some() `test {
   b := H(v: 7);
   owned_param(move a, b);
 }
+
+// --- T0933: BOUND elvis (`m := a ?: b`) with a borrowed-parameter source. The
+//     bound counterpart of T0931. maybeRegisterDrop gives `m` an unconditional
+//     owning drop flag; on the some path `m` would alias the caller-owned inner of
+//     `a` (a borrowed param) → double free. The fix drives the binding's drop flag
+//     from a per-branch phi: some = `someOwnsInner` (0 for a borrowed param), none =
+//     1 (a fresh-temp default is claimed into the binding). ---
+
+// borrowed source, borrowed default, SOME path (was double free)
+bind_param(H? a, H b) {
+  m := a ?: b;
+  assert(m.v == 3, "bp");
+}
+elvis_bound_param_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  bind_param(a, b);
+}
+
+// borrowed source, fresh-temp default, SOME path (was double free)
+bind_param_lit(H? a) {
+  m := a ?: H(v: 7);
+  assert(m.v == 3, "bpl");
+}
+elvis_bound_param_lit_some() `test {
+  H? a = H(v: 3);
+  bind_param_lit(a);
+}
+
+// borrowed source, fresh-temp default, NONE path — claimHeapTemp moves the default
+// into the binding (none flag stays 1); regression guard that this still frees once.
+bind_param_none(H? a) {
+  m := a ?: H(v: 7);
+  assert(m.v == 7, "bpn");
+}
+elvis_bound_param_none() `test {
+  H? a = none;
+  bind_param_none(a);
+}
+
+// typed-form binding (`H m = a ?: b`) — must behave identically to the inferred form.
+bind_param_typed(H? a, H b) {
+  H m = a ?: b;
+  assert(m.v == 3, "bpt");
+}
+elvis_bound_param_typed_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  bind_param_typed(a, b);
+}
+
+// generic monomorphized borrowed parameter, bound + SOME path (the binding `m` is
+// dropped at scope exit; `T` is unbounded so we can't read a field — leak-checking
+// alone guards the per-branch drop flag in the monomorphized `pick_bind__H`).
+pick_bind[T](T? a, T b) {
+  m := a ?: b;
+}
+elvis_bound_generic_some() `test {
+  H? a = H(v: 5);
+  b := H(v: 9);
+  pick_bind[H](a, b);
+}
+
+// guard: a LOCALLY-OWNED source bound (someOwnsInner=1) still single-frees — the
+// some flag folds to 1, identical to the pre-fix unconditional drop.
+elvis_bound_local_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  m := a ?: b;
+  assert(m.v == 3, "bl");
+}
+
+// parenthesized bound elvis (`m := (a ?: b)`) with a borrowed-param source —
+// exercises consumeElvisBoundOwned's isElvisExpr paren-peel. Without the peel the
+// per-branch flag would never be stored and the some path would double-free `a`'s
+// caller-owned inner just like the bare-form case.
+bind_param_paren(H? a, H b) {
+  m := (a ?: b);
+  assert(m.v == 3, "bpp");
+}
+elvis_bound_param_paren_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  bind_param_paren(a, b);
+}
+
+// bound, OWNER-GOVERNED optional member source (`m := bx.a ?: b`). someOwnsInner is
+// false via the member dimension (T0937) — distinct from the borrowed-param route —
+// so the bound override phi some-incoming must be 0; OptBox's synthesized drop frees
+// the inner once. Tracking `m` as owner here would double-free on the some path.
+elvis_bound_member_some() `test {
+  bx := OptBox(a: H(v: 3));
+  b := H(v: 7);
+  m := bx.a ?: b;
+  assert(m.v == 3, "bm");
+}
+
+// bound, OWNER-GOVERNED index source (`m := v[0] ?: b`). someOwnsInner is false via
+// the index dimension — the vector's drop frees the element once; the bound override
+// phi some-incoming must be 0 so `m` does not free it a second time.
+elvis_bound_index_some() `test {
+  H? e = H(v: 3);
+  H?[] v = [e];
+  b := H(v: 7);
+  m := v[0] ?: b;
+  assert(m.v == 3, "bi");
+}
+
+// bound, TEMPORARY optional source (`m := mkOpt(3) ?: b`). someOwnsInner is true via
+// the `default:` (non-ident/member/index) branch of elvisSomeInnerOrphaned — the temp
+// optional has no scope owner, so the binding owns the orphaned inner and the override
+// phi folds to [ true, true ] = constant 1 (single free). Distinct ownership route
+// from the local-ident, borrowed-param, and member/index cases above.
+elvis_bound_temp_source_some() `test {
+  b := H(v: 7);
+  m := mkOpt(3) ?: b;
+  assert(m.v == 3, "bts");
+}

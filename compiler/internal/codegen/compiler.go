@@ -375,24 +375,25 @@ type Compiler struct {
 	spawnStdinFd  *ir.Global // @__promise_spawn_stdin_fd (TLS, i32)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
-	currentGGlobal       *ir.Global // @__promise_current_g (TLS, i8*)
-	currentPGlobal       *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
-	currentMGlobal       *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
-	schedGlobal          *ir.Global // @__promise_sched (global Sched struct)
-	testPanicMsgGlobal   *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
-	testPanicTypeGlobal  *ir.Global // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
-	testDoneGlobal       *ir.Global // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
-	panicFlagGlobal      *ir.Global // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
-	panicMsgTlsGlobal    *ir.Global // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
-	panicTypeTlsGlobal   *ir.Global // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
-	panicExitBlock       *ir.Block  // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
-	coroutineReturnBlock *ir.Block  // B0353: if set, goroutine return branches here instead of ret
-	inCoroutine          bool       // true when compiling inside a go block coroutine body
-	goExprFireAndForget  bool       // true when go expr result is discarded (no <-task receiver)
-	elvisResultConsumed  bool       // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
-	elvisResultBound     bool       // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
-	coroCleanupBlk       *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk       *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
+	currentGGlobal       *ir.Global  // @__promise_current_g (TLS, i8*)
+	currentPGlobal       *ir.Global  // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	currentMGlobal       *ir.Global  // @__promise_current_m (TLS, i8*) — current M for syscall handoff
+	schedGlobal          *ir.Global  // @__promise_sched (global Sched struct)
+	testPanicMsgGlobal   *ir.Global  // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	testPanicTypeGlobal  *ir.Global  // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
+	testDoneGlobal       *ir.Global  // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
+	panicFlagGlobal      *ir.Global  // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
+	panicMsgTlsGlobal    *ir.Global  // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
+	panicTypeTlsGlobal   *ir.Global  // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
+	panicExitBlock       *ir.Block   // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
+	coroutineReturnBlock *ir.Block   // B0353: if set, goroutine return branches here instead of ret
+	inCoroutine          bool        // true when compiling inside a go block coroutine body
+	goExprFireAndForget  bool        // true when go expr result is discarded (no <-task receiver)
+	elvisResultConsumed  bool        // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
+	elvisResultBound     bool        // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
+	elvisBoundOwned      value.Value // T0933: per-branch i1 drop flag for a bound heap-user elvis (`m := a ?: b`); the var-decl path stores it into the binding's drop flag, overriding maybeRegisterDrop's unconditional 1
+	coroCleanupBlk       *ir.Block   // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk       *ir.Block   // coroutine suspend block (suspend path: coro.end + ret)
 
 	// T0668: maps each Task[T].drop func to its paired Task[T].free_after_done
 	// func so temp/binding drop sites that only know the drop func can route

@@ -8772,6 +8772,26 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		&ir.Incoming{X: someVal, Pred: someEnd},
 		&ir.Incoming{X: defaultVal, Pred: noneEnd},
 	)
+	// T0933: when this elvis result is *bound* to a local (`m := a ?: b`) and is a
+	// droppable heap user type, the binding needs a per-branch drop flag. The some
+	// path owns the moved-out inner only when the source was orphaned (someOwnsInner —
+	// false for a borrowed parameter (T0945) or a member/index source (T0937)); the
+	// none path keeps flag=1 (the binding's claimHeapTemp moves a fresh-temp default
+	// in; an owned-local/member default is the separate T0929). The var-decl path
+	// stores this into the binding's drop flag, overriding maybeRegisterDrop's
+	// unconditional 1. Built here (before the track calls add non-phi insts to the
+	// merge block) so all phis precede the stores. nil for inline/non-heap-user uses.
+	c.elvisBoundOwned = nil
+	if boundResult && c.elvisResultHeapUserDrop(e, result) != nil {
+		someFlag := int64(0)
+		if someOwnsInner {
+			someFlag = 1
+		}
+		c.elvisBoundOwned = mergeBlock.NewPhi(
+			&ir.Incoming{X: constant.NewInt(irtypes.I1, someFlag), Pred: someEnd},
+			&ir.Incoming{X: constant.NewInt(irtypes.I1, 1), Pred: noneEnd},
+		)
+	}
 	// T0935/T0945/T0936/T0937: register the inline result with a path-dependent drop
 	// flag. The some-path owns the moved-out inner only when it was actually orphaned
 	// (someOwnsInner — false for a borrowed value parameter (T0945) or a member/index
@@ -8825,6 +8845,39 @@ func (c *Compiler) claimElvisDefaultTemp(val value.Value) bool {
 	return claimed
 }
 
+// elvisResultHeapUserDrop returns the drop function for an elvis result that is a
+// 2-word {i8*, i8*} value struct representing a droppable heap user type (Map/Set or
+// a user type with a drop()), or nil for every other representation (value/copy/
+// primitive/structural/string/handle/container). Single source of truth for the
+// trackElvisResultHeap type gate and the bound-flag override in genElvis (T0933).
+func (c *Compiler) elvisResultHeapUserDrop(e *ast.BinaryExpr, result value.Value) *ir.Func {
+	if result == nil {
+		return nil
+	}
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
+		return nil // not a 2-word value struct (i8* containers go through trackElvisResultTemp)
+	}
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	named := extractNamed(rt)
+	if named == nil {
+		return nil
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return nil
+	}
+	if isContainerType(rt) || named == types.TypString {
+		return nil // keeps Map/Set; excludes handles/string (i8* containers go through trackElvisResultTemp)
+	}
+	return c.resolveDropFuncForTemp(named, rt)
+}
+
 // trackElvisResultHeap registers an inline elvis result that is a value-struct
 // container (Map/Set) or heap user type {i8*, i8*} as an owned heap drop temp with
 // a per-branch flag (someOwned on the some path where the inner is orphaned,
@@ -8844,31 +8897,10 @@ func (c *Compiler) trackElvisResultHeap(e *ast.BinaryExpr, result value.Value, s
 	if !c.tempTrackingEnabled || result == nil {
 		return
 	}
-	st, ok := result.Type().(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
-		return // not a 2-word value struct (i8* containers go through trackElvisResultTemp)
-	}
 	if c.entryBlock == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
-	rt := c.info.Types[e]
-	if c.typeSubst != nil && rt != nil {
-		rt = types.Substitute(rt, c.typeSubst)
-	}
-	if c.selfSubst != nil && rt != nil {
-		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
-	}
-	named := extractNamed(rt)
-	if named == nil {
-		return
-	}
-	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
-		return
-	}
-	if isContainerType(rt) || named == types.TypString {
-		return // keeps Map/Set; excludes handles/string (i8* containers go through trackElvisResultTemp)
-	}
-	dropFunc := c.resolveDropFuncForTemp(named, rt)
+	dropFunc := c.elvisResultHeapUserDrop(e, result)
 	if dropFunc == nil {
 		return
 	}

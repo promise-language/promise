@@ -150,6 +150,27 @@ func (g shellGit) DiffChanged(fromRef, path string) (bool, error) {
 	return false, err
 }
 
+// RemoteBranchSHA returns origin's tip for branch via `git ls-remote` (an
+// authoritative network query — no reliance on a possibly-stale local tracking
+// ref), or "" if the branch is absent on origin. `bin/release ci` compares this
+// against local HEAD because workflow_dispatch checks out this tip, not the
+// caller's local commit. Not part of cutGit — only the `ci` subcommand needs it.
+func (g shellGit) RemoteBranchSHA(branch string) (string, error) {
+	out, err := RunOutputIn(g.root, "git", "ls-remote", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return "", err
+	}
+	if out == "" {
+		return "", nil // branch not on origin
+	}
+	line, _, _ := strings.Cut(out, "\n") // first line: "<sha>\trefs/heads/<branch>"
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("unexpected `git ls-remote` output: %q", out)
+	}
+	return fields[0], nil // "<sha>\trefs/heads/<branch>"
+}
+
 // ghRun is one GitHub Actions run row (`gh run list --json …`). ghJob is one
 // per-run job (`gh run view --json jobs`).
 type ghRun struct {

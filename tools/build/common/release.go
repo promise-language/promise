@@ -93,7 +93,16 @@ subcommands:
         with --reason "<text>", which is recorded into the tag/commit message.
         --run-ci dispatches ci.yml for platforms with no run at the release SHA
         (--no-ci-wait dispatches then stops); --confirm-year confirms a
-        year-rollover epoch non-interactively.`
+        year-rollover epoch non-interactively.
+  ci [platform...] [--no-tests] [--watch] [--ref <branch>] [--force]
+        dispatch .github/workflows/ci.yml on the current branch. No platform =
+        linux-amd64 only (cheap); "all" = the whole matrix in one run; or name
+        targets (linux|darwin|windows, or canonical <os>-<arch>). workflow_dispatch
+        runs on the branch's pushed tip, so ci errors if your local HEAD is not
+        that tip — push first, or --force to dispatch on the remote tip anyway,
+        or --ref to choose a branch. --no-tests builds only (skips the suite);
+        --watch polls the dispatched run(s) to completion and exits non-zero on
+        red CI.`
 
 // RunRelease dispatches a `bin/release` subcommand.
 func RunRelease(root string, args []string) error {
@@ -120,6 +129,8 @@ func RunRelease(root string, args []string) error {
 		return runReleaseWinlink(root, rest)
 	case "cut":
 		return runReleaseCut(root, rest)
+	case "ci":
+		return runReleaseCI(root, rest)
 	case "-h", "--help", "help":
 		fmt.Println(releaseUsage)
 		return nil

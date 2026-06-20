@@ -98,17 +98,19 @@ This applies to everything Promise *fetches as a dependency*. It does **not** ap
 
 ---
 
-## 4. PR CI
+## 4. Build + test CI (manual dispatch)
 
-Runs on every push to `main`/`next` and every PR. Builds and tests per platform — it does **not** produce release artifacts.
+CI is **manual `workflow_dispatch` only** — it does *not* run on push/PR. At the repo's commit volume on a private repo where Actions minutes are metered and macOS bills 10×, per-commit CI is not feasible; per-commit correctness comes from the mandatory local `bin/verify` gate, and this workflow validates the build+test toolchain on GitHub runners (which the release pipeline depends on). It builds and tests per platform — picking a single platform or `all` to control cost — and does **not** produce release artifacts (that is `release.yml`, §5). Trigger it with **`bin/release ci`** (below) or the Actions UI.
 
 Committed at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (the authoritative copy). Essentials:
 
 ```yaml
 name: CI
 on:
-  push: { branches: [main, next] }
-  pull_request: { branches: [main, next] }
+  workflow_dispatch:                 # manual only — no push/PR trigger
+    inputs:
+      platform:  { type: choice, default: all, options: [all, linux-amd64, darwin-arm64, windows-amd64] }
+      run_tests: { type: boolean, default: true }   # false = build only (cheap toolchain check)
 jobs:
   test:
     strategy:
@@ -152,6 +154,8 @@ jobs:
         run: bin/test --wasm all
         env: { PROMISE_USE_CLANG: "${{ runner.os == 'macOS' && '1' || '' }}" }
 ```
+
+**Triggering manually (`bin/release ci`).** The convenience trigger for the dispatch above (`tools/build/common/release_ci.go`). With no platform it dispatches **`linux-amd64` only** (the cheap default); `bin/release ci all` runs the whole matrix in one run; `bin/release ci darwin` — or `linux`/`windows`, or a canonical `<os>-<arch>` — names individual targets, and multiple names fan out to one run each. `--no-tests` sets `run_tests=false` (build-only toolchain check); `--watch` polls the dispatched run(s) to completion and **exits non-zero if CI is red** (usable as a script gate — it snapshots the latest run ID first, so it follows the run *this* dispatch creates, not a stale green one already at the same commit). Because `workflow_dispatch` can only target a branch/tag ref — never an arbitrary commit — and `actions/checkout` runs at that ref's **remote tip**, `ci` dispatches on the current branch and verifies your local HEAD **is** that pushed tip, so CI tests the commit you are on; it errors if you have not pushed (`--force` dispatches on the remote tip anyway, `--ref <branch>` picks another branch). `git`/`gh` sit behind the same interface seams as `cut`, so the tests are hermetic. (`cut` dispatches the same workflow as a release-gate side effect — §6.3; `bin/release ci` is the standalone "run CI on my commit" path.)
 
 **Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). Linux installs LLVM 22 from `apt.llvm.org` and `musl-dev`. macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — same frontend/codegen, only the backend driver differs. **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang), LLVM 22 via `choco`, with VS Build Tools (MSVC + Windows SDK) preinstalled on `windows-latest`, and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
 

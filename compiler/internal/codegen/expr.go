@@ -14711,12 +14711,14 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 	return c.genReceiveTask(e, inst)
 }
 
-// unwrapTaskOptionalMemberSource peels a `<-` operand of the shape
-// `(member.field!)` or `(member.field? _ { ... })` down to the underlying
-// `*ast.MemberExpr` field access, returning nil for any other shape. Used by
-// genReceiveTask (T0806) to clear the owner's optional present flag after the
-// receive consumes (frees) the task handle extracted from the optional field.
-func unwrapTaskOptionalMemberSource(expr ast.Expr) *ast.MemberExpr {
+// unwrapTaskOptionalSource peels a `<-` operand of the shape `(src!)` or
+// `(src? _ { ... })` down to the underlying force-unwrap source expression,
+// returning nil for any other shape. The source may be a bare `*ast.IdentExpr`
+// (owned-local optional Task, T0956) or a `*ast.MemberExpr` field access
+// (optional Task field, T0806). genReceiveTask routes the result through
+// neutralizeOptionalCastSource to clear the source optional's present flag after
+// the receive consumes (frees) the task handle extracted from the optional.
+func unwrapTaskOptionalSource(expr ast.Expr) ast.Expr {
 	for {
 		p, ok := expr.(*ast.ParenExpr)
 		if !ok {
@@ -14740,8 +14742,11 @@ func unwrapTaskOptionalMemberSource(expr ast.Expr) *ast.MemberExpr {
 		}
 		inner = p.Expr
 	}
-	mem, _ := inner.(*ast.MemberExpr)
-	return mem
+	switch inner.(type) {
+	case *ast.IdentExpr, *ast.MemberExpr:
+		return inner
+	}
+	return nil
 }
 
 // genReceiveTask generates code for `<-task` — waits for goroutine G to complete, returns T.
@@ -14806,13 +14811,19 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), slotPtr)
 		}
 	}
-	// T0806: `<-(h.tsk!)` / `<-(h.tsk? _ { ... })` consumes the task extracted
-	// from an optional field on a droppable owner. The receive frees the G
-	// below; without clearing the owner's optional present flag, the owner's
-	// (synthesized) drop reloads and frees the same G → double-free → segfault.
-	// Mirrors the T0560 `<-h.field` field-null path for the optional-field shape.
-	if inner := unwrapTaskOptionalMemberSource(e.Operand); inner != nil {
-		c.neutralizeMemberOptionalField(inner)
+	// T0806/T0956: `<-(o!)` / `<-(o? _ { ... })` consumes the task extracted from
+	// a force-unwrapped optional. The receive frees the G below; without clearing
+	// the source optional's present flag, the source's scope-exit optional drop
+	// reloads and joins+frees the same G → double-free → segfault.
+	// neutralizeOptionalCastSource handles both shapes: the owned-local bare-ident
+	// `o!` (T0956 — clears the local's optional present flag, field 0) and the
+	// optional member field `h.tsk!` (T0806 — delegates to
+	// neutralizeMemberOptionalField, which carries the Mutex/Task carve-out). Only
+	// Task optionals reach genReceiveTask, so the unconditional ident-flag clear is
+	// always correct here. Borrowed-source variants are already rejected at
+	// ownership (T0953), so this codegen path only sees owned sources.
+	if inner := unwrapTaskOptionalSource(e.Operand); inner != nil {
+		c.neutralizeOptionalCastSource(inner)
 	}
 	c.claimStringTemp(gRaw)
 

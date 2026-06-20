@@ -1,0 +1,62 @@
+// T0956: Awaiting (`<-`) a force-unwrapped OWNED-LOCAL optional Task double-freed
+// the inner goroutine G. `<-(o!)` joins+frees the inner task's G, but the
+// owned-local optional `o`'s scope-exit drop still dropped the (already-freed)
+// inner task → `fatal: segmentation fault`.
+//
+// This is the bare-IDENT sibling of T0806 (which fixed the optional member-field
+// unwrap `<-(h.tsk!)`). genReceiveTask neutralizes the consumed task's owner for
+// bare-ident (T0503), member field (T0560), index slot (T0638), for-in binding
+// (T0617), and optional member field (T0806). The optional bare-ident shape
+// `<-(o!)` (operand = `ParenExpr(OptionalUnwrapExpr(IdentExpr o))`) matched none
+// of these → `o`'s optional present flag stayed set → double-free.
+//
+// Fix (compiler/internal/codegen/expr.go): unwrapTaskOptionalMemberSource is
+// generalized to unwrapTaskOptionalSource, returning the inner force-unwrap
+// source for EITHER an owned-local bare ident (T0956) OR an optional member field
+// (T0806). genReceiveTask routes it through neutralizeOptionalCastSource, which
+// clears the local's optional present flag (field 0) for the ident case and
+// delegates the member case to neutralizeMemberOptionalField (preserving the
+// Mutex/Task carve-out). Borrowed-source variants (`<-(a!)` with `Task[T]& a`)
+// never reach here — they're rejected earlier at ownership (T0953).
+//
+// All-heap handles so the zero-leak/double-free detector is live. Task `<-`
+// CONSUMES (ownership transfers). Runs on the host AND `--target wasm32-wasi`
+// (Task await works under the cooperative scheduler; zero-leak enforcement
+// applies on both), mirroring the T0806 sibling.
+use std as _;
+
+get_42_t0956() int {
+  return 42;
+}
+
+// Core repro: `<-(o!)` for an owned-local `Task[int]? o`.
+t0956_owned_optional_unwrap_await() `test {
+  Task[int]? o = go get_42_t0956();
+  assert((<-(o!)) == 42, "owned optional unwrap await");
+}
+
+// Inner-paren peel: `<-((o)!)` — the unwrap source itself is paren-wrapped, so
+// unwrapTaskOptionalSource must peel the inner ParenExpr before finding the ident.
+t0956_owned_optional_inner_paren() `test {
+  Task[int]? o = go get_42_t0956();
+  assert((<-((o)!)) == 42, "inner-paren-wrapped owned optional unwrap await");
+}
+
+// Handler form `<-(o? _ { ... })`: non-diverging handler with a fallback task.
+// Fallback is never awaited at runtime (value present), but the none-branch
+// codegen path is generated and must not leak/double-free.
+t0956_owned_optional_handler_await() `test {
+  Task[int]? o = go get_42_t0956();
+  assert((<-(o? _ {
+    go get_42_t0956()
+  })) == 42, "owned optional handler await");
+}
+
+// Two optional Task locals where only ONE is awaited — the un-awaited one must
+// still join+free exactly once at scope exit (no leak, no double-free).
+t0956_owned_optional_partial_await() `test {
+  Task[int]? awaited = go get_42_t0956();
+  Task[int]? unawaited = go get_42_t0956();
+  assert((<-(awaited!)) == 42, "partial: awaited one");
+  // `unawaited` is dropped (joined+freed) exactly once at scope exit.
+}

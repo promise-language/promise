@@ -28,7 +28,10 @@ tools/build/winlink/lib/
 
 # Build cache
 **/.DS_Store
+# Per-clone files provisioned by `workspace setup` (tracker MCP + local guidance) —
+# host/clone-specific, never committed.
 .claude/settings.local.json
+CLAUDE.local.md
 
 # Wrangler (Cloudflare CLI) local state — created by `npx wrangler` during blob publishing
 .wrangler/

@@ -6013,8 +6013,18 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	beforeLen := len(c.heapTemps)
 	c.trackHeapTemp(instancePtr, dropFunc)
 	if len(c.heapTemps) > beforeLen {
+		dropFlag := c.heapTemps[beforeLen].dropFlag
 		if innerCall := findInnerCallExpr(expr); innerCall != nil {
-			c.emitReceiverAliasCheck(innerCall, instancePtr, c.heapTemps[beforeLen].dropFlag)
+			c.emitReceiverAliasCheck(innerCall, instancePtr, dropFlag)
+		} else if origin := operatorReceiverOrigin(expr); origin != nil {
+			// T0958: operator dispatch (BinaryExpr/UnaryExpr) has no inner
+			// CallExpr, so findInnerCallExpr returns nil. An operator body of
+			// `return this` yields a result aliasing the left/unary operand;
+			// without the alias-clear the temp and the operand's scope binding
+			// both free the same instance (double-free). Mirrors the bound case
+			// (operatorReceiverOrigin → pendingThisAliasClear /
+			// maybeClearReceiverDropFlag, T0882).
+			c.emitReceiverAliasCheckForTarget(origin, instancePtr, dropFlag)
 		}
 	}
 }
@@ -6034,12 +6044,21 @@ func (c *Compiler) emitReceiverAliasCheck(e *ast.CallExpr, newTempInstancePtr va
 	if !ok {
 		return
 	}
+	c.emitReceiverAliasCheckForTarget(mem.Target, newTempInstancePtr, newTempDropFlag)
+}
 
+// emitReceiverAliasCheckForTarget emits the runtime alias-clear for a given
+// receiver-origin expression (IdentExpr loading a local, or ThisExpr). Split out
+// of emitReceiverAliasCheck (T0958) so operator dispatch — which has no CallExpr
+// callee — can reach the same clear via operatorReceiverOrigin. The new temp's
+// drop flag is cleared at runtime when its instance pointer equals the receiver's
+// instance pointer (the operand retains ownership; the temp must not double-free).
+func (c *Compiler) emitReceiverAliasCheckForTarget(target ast.Expr, newTempInstancePtr value.Value, newTempDropFlag value.Value) {
 	// T0582: peel ParenExpr so `(w).self()` and `((w)).self()` resolve to
 	// the underlying IdentExpr/ThisExpr receiver, otherwise the switch
 	// would fall through to `default: return` → no alias check → double-free
 	// on discard statements like `(w).self();`.
-	target := unwrapDestructureParens(mem.Target)
+	target = unwrapDestructureParens(target)
 
 	var recvInstPtr value.Value
 	switch t := target.(type) {
@@ -8279,14 +8298,31 @@ func operatorReceiverOrigin(e ast.Expr) ast.Expr {
 			ast.BinExclusiveRange, ast.BinInclusiveRange:
 			return nil
 		}
-		return unwrapDestructureParens(ex.Left)
+		return operatorOriginLeaf(unwrapDestructureParens(ex.Left))
 	case *ast.UnaryExpr:
 		if ex.Op == ast.UnaryReceive {
 			return nil
 		}
-		return unwrapDestructureParens(ex.Operand)
+		return operatorOriginLeaf(unwrapDestructureParens(ex.Operand))
 	}
 	return nil
+}
+
+// operatorOriginLeaf walks chained operator dispatch down to the ultimate
+// receiver leaf. T0958: for `a + b + c` (all `return this`), the outer operator's
+// left operand is itself the `a + b` BinaryExpr whose result aliases `a`; without
+// descending, operatorReceiverOrigin would return the BinaryExpr (neither Ident
+// nor This), so the alias-clear is skipped and `a`'s binding and the chained
+// result both free the same allocation → double-free. Mirrors chainOriginExpr's
+// walk through chained method calls (T0347). Returning an over-deep leaf is
+// harmless: every consumer guards the drop-flag clear with a runtime
+// pointer-equality check, so a non-aliasing chain (an intermediate operator
+// returning a fresh instance) simply fails the icmp and clears nothing.
+func operatorOriginLeaf(operand ast.Expr) ast.Expr {
+	if inner := operatorReceiverOrigin(operand); inner != nil {
+		return inner
+	}
+	return operand
 }
 
 // maybeClearReceiverDropFlag emits a runtime check: if the method call result's

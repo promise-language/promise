@@ -192,3 +192,171 @@ structural_default_op_inline() `test {
   Mag x = Mag(n: 3);
   assert((-x).v == -3, "structural default op inline");
 }
+
+// T0958: A HEAP user type whose operator consumes `this` by MOVE (`~this`) and
+// returns it yields an inline result that ALIASES the left operand's allocation
+// (no dup — the moved-in receiver is returned directly). The T0918 temp must have
+// its drop flag cleared when it aliases the operand; otherwise the temp frees the
+// allocation at statement end AND the operand's scope binding frees it again →
+// double free (SEGV at runtime; silent under leak-only detection). The value-type
+// operators above never reach this — trackHeapUserTypeResult skips value types,
+// so a heap field (`string tag`) is required to exercise the drop path.
+type HeapAcc {
+  string tag;
+  int v;
+  +(~this, HeapAcc o) HeapAcc {
+    return this;
+  }
+  - (~this) HeapAcc {
+    return this;
+  }
+}
+
+// Inline binary move-return-this with a field access: result aliases `a`, `.v`
+// reads through it, temp drops at statement end. Double-frees (SEGV) pre-fix.
+move_binary_return_this_field_inline() `test {
+  a := HeapAcc(tag: "a", v: 10);
+  b := HeapAcc(tag: "b", v: 5);
+  assert((a + b).v == 10, "move binary return-this field inline");
+}
+
+// Inline unary move-return-this with a field access.
+move_unary_return_this_field_inline() `test {
+  a := HeapAcc(tag: "a", v: 7);
+  assert((-a).v == 7, "move unary return-this field inline");
+}
+
+// Heap operator returning a FRESH instance used inline: the result does NOT alias
+// the operand (pointers differ), so the runtime alias-clear is a no-op and the
+// owned temp is still dropped (no leak, no over-suppression).
+type HeapFresh {
+  string tag;
+  int v;
+  +(HeapFresh o) HeapFresh {
+    return HeapFresh(tag: "sum", v: this.v + o.v);
+  }
+}
+
+heap_fresh_op_inline_drops_temp() `test {
+  a := HeapFresh(tag: "a", v: 4);
+  b := HeapFresh(tag: "b", v: 3);
+  assert((a + b).v == 7, "heap fresh op inline");
+}
+
+// T0958: CHAINED return-this operators (`a + b + c`). The outer operator's left
+// operand is itself the `a + b` BinaryExpr, so operatorReceiverOrigin must descend
+// through it to reach the ultimate `a` leaf — otherwise the alias-clear is skipped
+// (origin is a BinaryExpr, not Ident/This) and both `a`'s scope binding and the
+// chained result free the same allocation → double-free (SEGV). Covers both the
+// inline-temp path and the bound (`m := ...`) path. The pointer-equality guard
+// keeps mixed chains (a `-` returning a fresh instance) correct.
+type HeapChain {
+  string tag;
+  int v;
+  +(~this, HeapChain o) HeapChain {
+    return this;
+  }
+  - (~this, HeapChain o) HeapChain {
+    return HeapChain(tag: "fresh", v: this.v - o.v);
+  }
+  drop(~this) {
+  }
+}
+
+chained_return_this_inline() `test {
+  a := HeapChain(tag: "a", v: 1);
+  b := HeapChain(tag: "b", v: 2);
+  c := HeapChain(tag: "c", v: 3);
+  assert((a + b + c).v == 1, "chained return-this inline (aliases leftmost)");
+}
+
+chained_return_this_bound() `test {
+  a := HeapChain(tag: "a", v: 1);
+  b := HeapChain(tag: "b", v: 2);
+  c := HeapChain(tag: "c", v: 3);
+  m := a + b + c;
+  assert(m.v == 1, "chained return-this bound");
+}
+
+chained_mixed_fresh_then_this() `test {
+  a := HeapChain(tag: "a", v: 10);
+  b := HeapChain(tag: "b", v: 2);
+  c := HeapChain(tag: "c", v: 1);
+  // (a - b) -> fresh F; F + c -> this == F. Result aliases the F temp, not `a`.
+  assert(((a - b) + c).v == 8, "chained mixed: inner fresh, outer this");
+}
+
+chained_mixed_this_then_fresh() `test {
+  a := HeapChain(tag: "a", v: 10);
+  b := HeapChain(tag: "b", v: 2);
+  c := HeapChain(tag: "c", v: 1);
+  // (a + b) -> this == a; then `- c` -> fresh. Result is fresh; `a` freed by binding.
+  assert(((a + b) - c).v == 9, "chained mixed: inner this, outer fresh");
+}
+
+// T0958: the return-this-move double-free was only exercised through DIRECT
+// dispatch above (HeapAcc/HeapChain are concrete, non-generic). The alias-clear
+// runs on the operand origin (Ident/This) and is dispatch-agnostic, but the
+// result instancePtr that trackHeapUserTypeResult compares against is structured
+// differently per dispatch kind — so the GENERIC (typeSubst active) and VIRTUAL
+// (inherited operator) paths need their own return-this-move coverage to confirm
+// the temp's drop flag is cleared (no double-free) and nothing leaks. The T0918
+// generic/virtual tests only return FRESH instances, which can never alias.
+
+// Generic heap type (heap `tag` field → droppable; T=int alone would be a value
+// type and skipped by trackHeapUserTypeResult). Operator moves `this` and returns
+// it: the inline result aliases the operand's allocation under an active typeSubst.
+type GHeap[T] {
+  string tag;
+  T v;
+  +(~this, GHeap[T] o) GHeap[T] {
+    return this;
+  }
+  - (~this) GHeap[T] {
+    return this;
+  }
+  drop(~this) {
+  }
+}
+
+generic_binary_return_this_inline() `test {
+  a := GHeap[int](tag: "a", v: 10);
+  b := GHeap[int](tag: "b", v: 5);
+  assert((a + b).v == 10, "generic binary return-this inline");
+}
+
+generic_unary_return_this_inline() `test {
+  a := GHeap[int](tag: "a", v: 7);
+  assert((-a).v == 7, "generic unary return-this inline");
+}
+
+// Virtual/inherited return-this-move: operator declared on the heap parent, child
+// inherits it; called on a child instance used inline. Exercises the alias-clear
+// reaching the operand origin through the virtual dispatch result.
+type PHeap {
+  string tag;
+  int v;
+  +(~this, PHeap o) PHeap {
+    return this;
+  }
+  - (~this) PHeap {
+    return this;
+  }
+  drop(~this) {
+  }
+}
+type CHeap is PHeap {
+  string tag;
+  int v;
+}
+
+virtual_binary_return_this_inline() `test {
+  PHeap a = CHeap(tag: "a", v: 4);
+  PHeap b = CHeap(tag: "b", v: 1);
+  assert((a + b).v == 4, "virtual binary return-this inline");
+}
+
+virtual_unary_return_this_inline() `test {
+  PHeap a = CHeap(tag: "a", v: 6);
+  assert((-a).v == 6, "virtual unary return-this inline");
+}

@@ -1330,6 +1330,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = types.Substitute(dropType, c.typeSubst)
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
+	// T0940/T0981: a bound elvis owns its buffer only on paths where the selected
+	// operand was orphaned/neutralized — replace the unconditional owning drop with
+	// the per-path flag computed in genElvis.
+	c.consumeElvisBoundDropFlag(s.Name)
 	// T0347: Drain pending this-alias clear request set when RHS is a chain rooted
 	// at `this`. maybeRegisterDrop has now stored i1 1 into the binding's drop flag;
 	// emit a runtime alias check that clears it back to false when the result really
@@ -1344,7 +1348,6 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if opt, ok := dropType.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
-	c.consumeElvisBoundOwned(s.Name, s.Value)
 	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)
@@ -1623,6 +1626,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
+	// T0940/T0981: replace the unconditional owning drop with the bound elvis's
+	// per-path flag (see consumeElvisBoundDropFlag / matching block in genVarDecl).
+	c.consumeElvisBoundDropFlag(s.Name)
 	// T0347: Drain pending this-alias clear (see matching block in genVarDecl).
 	if req := c.pendingThisAliasClear; req != nil {
 		c.pendingThisAliasClear = nil
@@ -1635,7 +1641,6 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if opt, ok := typ.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
-	c.consumeElvisBoundOwned(s.Name, s.Value)
 	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)
@@ -1699,30 +1704,6 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ, s.Value)
-}
-
-// isElvisExpr reports whether expr (peeling parens) is an elvis `?:` binary
-// expression. Used to gate the T0933 bound-flag override so a nested elvis inside
-// a call/operator RHS (`m := foo(a ?: b)`) does NOT consume it — there the call
-// owns the inner, not the binding.
-func isElvisExpr(expr ast.Expr) bool {
-	be, ok := unwrapDestructureParens(expr).(*ast.BinaryExpr)
-	return ok && be.Op == ast.BinElvis
-}
-
-// consumeElvisBoundOwned stores the per-branch drop flag computed by genElvis for a
-// bound heap-user elvis (`m := a ?: b`) into the binding's drop flag, overriding the
-// unconditional 1 that maybeRegisterDrop wrote. Gated on the RHS actually being an
-// elvis so a stale flag (e.g. from an elvis nested in a call RHS) never misfires.
-// Always clears c.elvisBoundOwned afterwards so it does not leak across statements.
-// T0933.
-func (c *Compiler) consumeElvisBoundOwned(name string, value ast.Expr) {
-	if c.elvisBoundOwned != nil && isElvisExpr(value) {
-		if flag, ok := c.dropFlags[name]; ok {
-			c.block.NewStore(c.elvisBoundOwned, flag)
-		}
-	}
-	c.elvisBoundOwned = nil
 }
 
 // unwrapDestructureParens peels any number of *ast.ParenExpr wrappers from a
@@ -2296,6 +2277,22 @@ func extractAliasPtr(c *Compiler, v value.Value) value.Value {
 		}
 	}
 	return nil
+}
+
+// consumeElvisBoundDropFlag replaces the unconditional owning drop maybeRegisterDrop
+// just stored into a bound variable's drop flag with the per-path flag computed by a
+// bound elvis `m := a ?: b` (T0940/T0981). Called from both var-decl paths
+// immediately after maybeRegisterDrop. No-op (and resets the field) when the RHS was
+// not a bound droppable elvis. The `dropFlags` guard makes a non-droppable bound
+// result a safe no-op.
+func (c *Compiler) consumeElvisBoundDropFlag(name string) {
+	if c.elvisBoundDropFlag == nil {
+		return
+	}
+	if lhsFlag, ok := c.dropFlags[name]; ok {
+		c.block.NewStore(c.elvisBoundDropFlag, lhsFlag)
+	}
+	c.elvisBoundDropFlag = nil
 }
 
 // maybeRegisterDrop checks if a variable's type has a drop() method and, if so,
@@ -6342,10 +6339,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	}
 	val := c.genExpr(s.Value)
 	c.elvisResultBound = prevElvisBound
-	// T0933: assignment does not consume the bound heap-user flag (the existing target
-	// already owns/borrows via its own binding); clear it so genElvis's phi never
-	// leaks into a later var-decl's consumeElvisBoundOwned.
-	c.elvisBoundOwned = nil
+	// T0933/T0940/T0981: the assignment form `m = a ?: b` is owned by T1013/T1014 and
+	// does not consume the per-path bound flag (the existing target already
+	// owns/borrows via its own binding). Clear it so a set-but-unconsumed flag from
+	// this elvis cannot leak into a later var-decl binding via consumeElvisBoundDropFlag.
+	c.elvisBoundDropFlag = nil
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
 	c.dupTupleFieldAccess = false

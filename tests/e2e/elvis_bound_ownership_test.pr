@@ -1,0 +1,350 @@
+// T0940 (subsumes T0981): a BOUND elvis `m := a ?: b` whose result is a Map/Set,
+// droppable heap user type, string, vector, or single-owner native handle must give
+// the bound variable a PER-PATH owning drop — it owns the selected operand only on a
+// path where that operand was orphaned (some-path inner) or neutralized (none-path
+// owned-local / fresh-temp default), and BORROWS an operand that keeps a real owner
+// (borrowed param / container member). Pre-fix, the bound variable took an
+// unconditional owning drop, double-freeing a caller-/container-owned operand on the
+// none-path (Map/heap-user/Mutex: SEGV / invalid free) and leaking nothing — and an
+// orphaned some-path inner was untracked → leak.
+//
+// All operands here are HEAP-allocated (no `.rodata` literals) so a double-free is a
+// real second free, not a no-op on a static buffer (the masking T0936 warned about).
+// Every test asserts the expected value (proving single-free / no SEGV) and the whole
+// file runs under the zero-leak gate.
+type HeapBox {
+  int[] data;
+}
+type Holder {
+  HeapBox h;
+}
+
+// --- Map: bound none-path ---
+
+t_map_none_owned_local() `test {
+  map[string, int]? a = none;
+  map[string, int] b = map[string, int]();
+  b["k"] = 9;
+  m := a ?: b;
+  assert(m.len == 1, "map none owned-local");
+}
+
+t_map_none_fresh_temp() `test {
+  map[string, int]? a = none;
+  m := a ?: map[string, int]();
+  assert(m.len == 0, "map none fresh-temp");
+}
+
+type MapHolder {
+  map[string, int] m;
+}
+t_map_none_member_alias() `test {
+  map[string, int]? a = none;
+  MapHolder bx = MapHolder(m: map[string, int]());
+  bx.m["x"] = 1;
+  bx.m["y"] = 2;
+  m := a ?: bx.m; // default aliases bx.m (struct-owned) → m borrows
+  assert(m.len == 2, "map none member-alias");
+  assert(bx.m.len == 2, "holder map still valid");
+}
+
+map_none_param(map[string, int]? a, map[string, int] b) int {
+  m := a ?: b; // borrowed-param default → m borrows on none-path
+  return m.len;
+}
+t_map_none_borrowed_param() `test {
+  map[string, int] b = map[string, int]();
+  b["k"] = 9;
+  b["j"] = 8;
+  r := map_none_param(none, b);
+  assert(r == 2, "map none borrowed-param");
+  assert(b.len == 2, "b still valid after call");
+}
+
+// --- Map: bound some-path ---
+
+t_map_some_owned_local() `test {
+  map[string, int] av = map[string, int]();
+  av["x"] = 1;
+  av["y"] = 2;
+  av["z"] = 3;
+  map[string, int]? a = av;
+  map[string, int] b = map[string, int]();
+  b["k"] = 9;
+  m := a ?: b;
+  assert(m.len == 3, "map some owned-local");
+}
+
+map_some_param(map[string, int]? a, map[string, int] b) int {
+  m := a ?: b; // borrowed-param SOURCE on some-path → m borrows
+  return m.len;
+}
+t_map_some_borrowed_param() `test {
+  map[string, int] sv = map[string, int]();
+  sv["x"] = 1;
+  sv["y"] = 2;
+  map[string, int]? src = sv; // moves sv into src
+  map[string, int] def = map[string, int]();
+  r := map_some_param(src, def); // borrows src and def — neither is freed in callee
+  assert(r == 2, "map some borrowed-param");
+  // src and def remain owned here; each freed exactly once at scope exit (the
+  // zero-leak gate proves the callee did not also free the borrowed source).
+}
+
+// --- Set ---
+
+t_set_none_owned_local() `test {
+  Set[int]? a = none;
+  Set[int] b = Set[int]();
+  b.add(1);
+  b.add(2);
+  m := a ?: b;
+  assert(m.len == 2, "set none owned-local");
+}
+
+t_set_some_owned_local() `test {
+  Set[int] av = Set[int]();
+  av.add(1);
+  av.add(2);
+  av.add(3);
+  Set[int]? a = av;
+  Set[int] b = Set[int]();
+  b.add(9);
+  m := a ?: b;
+  assert(m.len == 3, "set some owned-local");
+}
+
+set_none_param(Set[int]? a, Set[int] b) int {
+  m := a ?: b;
+  return m.len;
+}
+t_set_none_borrowed_param() `test {
+  Set[int] b = Set[int]();
+  b.add(1);
+  b.add(2);
+  b.add(3);
+  r := set_none_param(none, b);
+  assert(r == 3, "set none borrowed-param");
+  assert(b.len == 3, "set b still valid");
+}
+
+// --- Heap user type ---
+
+t_heapuser_none_owned_local() `test {
+  HeapBox? a = none;
+  HeapBox b = HeapBox(data: []);
+  b.data.push(7);
+  m := a ?: b;
+  assert(m.data.len == 1, "heapuser none owned-local");
+}
+
+t_heapuser_none_fresh_temp() `test {
+  HeapBox? a = none;
+  m := a ?: HeapBox(data: []);
+  assert(m.data.len == 0, "heapuser none fresh-temp");
+}
+
+t_heapuser_none_member_alias() `test {
+  HeapBox? a = none;
+  Holder bx = Holder(h: HeapBox(data: []));
+  bx.h.data.push(5);
+  m := a ?: bx.h; // default aliases bx.h (struct-owned) → m borrows
+  assert(m.data.len == 1, "heapuser none member-alias");
+}
+
+heapuser_none_param(HeapBox? a, HeapBox b) int {
+  m := a ?: b;
+  return m.data.len;
+}
+t_heapuser_none_borrowed_param() `test {
+  HeapBox b = HeapBox(data: []);
+  b.data.push(1);
+  b.data.push(2);
+  r := heapuser_none_param(none, b);
+  assert(r == 2, "heapuser none borrowed-param");
+  assert(b.data.len == 2, "heapuser b still valid");
+}
+
+t_heapuser_some_owned_local() `test {
+  HeapBox av = HeapBox(data: []);
+  av.data.push(1);
+  av.data.push(2);
+  HeapBox? a = av;
+  HeapBox b = HeapBox(data: []);
+  m := a ?: b;
+  assert(m.data.len == 2, "heapuser some owned-local");
+}
+
+heapuser_some_param(HeapBox? a, HeapBox b) int {
+  m := a ?: b; // borrowed-param SOURCE on some-path → m borrows
+  return m.data.len;
+}
+t_heapuser_some_borrowed_param() `test {
+  HeapBox sv = HeapBox(data: []);
+  sv.data.push(7);
+  HeapBox? src = sv; // moves sv into src
+  HeapBox def = HeapBox(data: []);
+  r := heapuser_some_param(src, def); // borrows src and def — neither is freed in callee
+  assert(r == 1, "heapuser some borrowed-param");
+  // src and def remain owned here; freed once each at scope exit (zero-leak gate).
+}
+
+// --- string (heap via repeat) ---
+
+t_string_none_owned_local() `test {
+  string? a = none;
+  string b = "ab".repeat(3);
+  m := a ?: b;
+  assert(m.len == 6, "string none owned-local");
+}
+
+string_none_param(string? a, string b) int {
+  m := a ?: b;
+  return m.len;
+}
+t_string_none_borrowed_param() `test {
+  string b = "xy".repeat(4);
+  r := string_none_param(none, b);
+  assert(r == 8, "string none borrowed-param");
+  assert(b.len == 8, "string b still valid");
+}
+
+// --- int[] (heap via push) ---
+
+t_vec_none_owned_local() `test {
+  int[]? a = none;
+  int[] b = [];
+  b.push(1);
+  b.push(2);
+  b.push(3);
+  m := a ?: b;
+  assert(m.len == 3, "vec none owned-local");
+}
+
+vec_none_param(int[]? a, int[] b) int {
+  m := a ?: b;
+  return m.len;
+}
+t_vec_none_borrowed_param() `test {
+  int[] b = [];
+  b.push(1);
+  b.push(2);
+  r := vec_none_param(none, b);
+  assert(r == 2, "vec none borrowed-param");
+  assert(b.len == 2, "vec b still valid");
+}
+
+// --- Mutex handle (T0981 subsumption) ---
+
+t_mutex_none_owned_local() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](5);
+  m := a ?: b;
+  g := m.lock();
+  assert(g.borrow == 5, "mutex none owned-local");
+}
+
+mutex_none_param(Mutex[int]? a, Mutex[int] b) int {
+  m := a ?: b; // borrowed-param default → m borrows on none-path
+  g := m.lock();
+  return g.borrow;
+}
+t_mutex_none_borrowed_param() `test {
+  Mutex[int] b = Mutex[int](7);
+  r := mutex_none_param(none, b);
+  assert(r == 7, "mutex none borrowed-param");
+  g := b.lock();
+  assert(g.borrow == 7, "mutex b still valid");
+}
+
+// --- Member-source on some-path: the bound binding dup-clones the field, so the
+// bound variable OWNS the fresh clone (T0940 regression guard for the dup-on-read
+// path). For Vector/string fields a clone happens (binding owns it); the container
+// keeps the original — exactly one free of each.
+
+type VecBox {
+  int[]? v;
+}
+t_vec_some_member_source() `test {
+  VecBox bx = VecBox(v: none);
+  int[] inner = [];
+  inner.push(1);
+  inner.push(2);
+  bx.v = inner;
+  int[] x = (bx.v ?: [0]); // some-path: bx.v dup-cloned → x owns the clone
+  assert(x.len == 2, "vec some member-source");
+  assert(bx.v!.len == 2, "vecbox field still valid");
+}
+
+type StrBox {
+  string? s;
+}
+t_string_some_member_source() `test {
+  StrBox bx = StrBox(s: none);
+  bx.s = "ab".repeat(3);
+  string x = (bx.s ?: ""); // some-path: bx.s dup-cloned → x owns the clone
+  assert(x.len == 6, "string some member-source");
+  assert(bx.s!.len == 6, "strbox field still valid");
+}
+
+// --- Member-source on some-path, 2-word value-struct reprs (Map / heap-user): unlike
+// Vector/string, setDupFlagsForFieldAccess does NOT dup-clone these, so the bound
+// binding BORROWS the field's inner on the some-path (someOwnsInner stays false). This
+// exercises the MemberExpr arm of genElvis's boundSourceDupCloned snapshot resolving to
+// false. The holder still owns and frees the field exactly once at its own scope exit
+// (it outlives the borrow), so there is no double-free and no leak — the bound variable
+// must NOT take a second owning drop. (Companion of the Vector/string dup-clone tests
+// above, which take the OWNED path.)
+
+type MapBox {
+  map[string, int]? m;
+}
+t_map_some_member_source() `test {
+  MapBox bx = MapBox(m: none);
+  map[string, int] inner = map[string, int]();
+  inner["a"] = 1;
+  inner["b"] = 2;
+  bx.m = inner;
+  map[string, int] def = map[string, int]();
+  map[string, int] x = (bx.m ?: def); // some-path: x borrows bx.m (2-word, not cloned)
+  assert(x.len == 2, "map some member-source");
+  assert(bx.m!.len == 2, "mapbox field still valid");
+}
+
+type HBoxOpt {
+  HeapBox? hb;
+}
+t_heapuser_some_member_source() `test {
+  HBoxOpt bx = HBoxOpt(hb: none);
+  HeapBox inner = HeapBox(data: []);
+  inner.data.push(1);
+  inner.data.push(2);
+  bx.hb = inner;
+  HeapBox def = HeapBox(data: []);
+  HeapBox m = (bx.hb ?: def); // some-path: m borrows bx.hb (heap-user, not cloned)
+  assert(m.data.len == 2, "heapuser some member-source");
+  assert(bx.hb!.data.len == 2, "hboxopt field still valid");
+}
+
+// --- Mixed: borrowed-param SOURCE on some + owned-local default neutralized on none
+
+mix_heapuser(HeapBox? a, HeapBox b) int {
+  m := a ?: b;
+  return m.data.len;
+}
+t_mixed_some_param_source() `test {
+  HeapBox sv = HeapBox(data: []);
+  sv.data.push(1);
+  sv.data.push(2);
+  HeapBox? src = sv; // moves sv into src
+  HeapBox def = HeapBox(data: []);
+  r := mix_heapuser(src, def); // borrows src and def
+  assert(r == 2, "mixed some param-source");
+  // src and def remain owned here; freed once each at scope exit (zero-leak gate).
+}
+t_mixed_none() `test {
+  HeapBox def = HeapBox(data: []);
+  def.data.push(9);
+  r := mix_heapuser(none, def);
+  assert(r == 1, "mixed none");
+}

@@ -5221,31 +5221,34 @@ func TestElvisHeapUserResultDropFlag(t *testing.T) {
 	assertContains(t, ir, "call void @HVal.drop")
 }
 
-// T0933: `m := a ?: b` with a BORROWED-PARAMETER source. The binding's drop flag
-// must be driven by a per-branch phi — false on the some path (the inner belongs to
-// the caller-owned param `a`, not the binding) and true on the none path (the
-// binding's claimHeapTemp moves the fresh-temp default in). This overrides the
-// unconditional `store i1 true` that maybeRegisterDrop emits.
+// T0933/T0940: `m := a ?: b` with BORROWED-PARAMETER operands. The binding's drop
+// flag must be driven by a per-path phi — false on the some path (the inner belongs
+// to the caller-owned param `a`, not the binding) AND false on the none path (the
+// default `b` is a borrowed param whose owner is the caller, so `m` borrows it —
+// owning it would double-free the caller's buffer at scope exit, the bound none-path
+// SEGV T0940 fixes). This overrides the unconditional `store i1 true` that
+// maybeRegisterDrop emits. (T0940 generalizes T0933's heap-user-only flag and
+// corrects the none-path: it owns only when the default's owner was neutralized.)
 func TestElvisBoundBorrowedParamFlag(t *testing.T) {
 	ir := generateIR(t, `
 		type HVal { string s; }
 		f(HVal? a, HVal b) { m := a ?: b; }
 		main() { HVal? a = HVal(s: "a" + "b"); HVal c = HVal(s: "c" + "d"); f(a, c); }
 	`)
-	// The bound override phi: some=false (borrowed source), none=true. Distinct from
-	// the inline trackElvisResultHeap phi shape [ true, false ] (which is not even
-	// emitted here — the borrowed-param some path is not owned).
-	assertContainsMatch(t, ir, `phi i1 \[ false, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+	// The bound override phi borrows on both paths (both operands caller-owned).
+	assertContainsMatch(t, ir, `phi i1 \[ false, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
 	// The override store follows maybeRegisterDrop's unconditional 1.
 	assertContains(t, ir, "store i1 true, i1* %m.dropflag")
 	assertContainsMatch(t, ir, `store i1 %[0-9]+, i1\* %m\.dropflag`)
 }
 
-// T0933: `m := a ?: b` with a LOCALLY-OWNED source (`HVal? a = ...`). someOwnsInner
-// is true (the optional's scope drop flag is cleared on the some path), so the bound
-// override phi folds to [ true, true ] = constant 1 — identical to the pre-fix
-// unconditional drop, no behavior change. Guards that the fix does not weaken the
-// owned-source case.
+// T0933/T0940: `m := a ?: b` with a LOCALLY-OWNED source (`HVal? a = ...`) and an
+// owned-local default `b`. someOwnsInner is true (the optional's scope drop flag is
+// cleared on the some path); the none path neutralizes `b`'s own scope-exit drop flag
+// (T0940) so `m` owns the buffer on both paths — the override phi folds to [ true,
+// true ]. Single owner on each path: if a=None, `m` frees `b`'s buffer (b's flag
+// cleared); if a=Some, `b`'s own binding frees it (none path not taken). Guards that
+// the fix keeps the owned-source case owning without double-freeing the owned default.
 func TestElvisBoundLocalSourceFlag(t *testing.T) {
 	ir := generateIR(t, `
 		type HVal { string s; }
@@ -5260,17 +5263,25 @@ func TestElvisBoundLocalSourceFlag(t *testing.T) {
 	assertContainsMatch(t, ir, `store i1 %[0-9]+, i1\* %m\.dropflag`)
 }
 
-// T0933: a STRING elvis bound result is NOT a 2-word heap-user value struct, so
-// elvisResultHeapUserDrop returns nil and no per-branch override phi is emitted
-// (strings use the i8* claimStringTemp path, untouched by this fix). Negative gate.
-func TestElvisBoundStringNoFlag(t *testing.T) {
+// T0940: a STRING elvis bound result (i8* container) is covered by the per-path bound
+// flag too — elvisResultDrop classifies string (with Vector) as the vecOrStr arm, so
+// `m := a ?: b` with both operands borrowed params gets a phi[false, false] override of
+// maybeRegisterDrop's unconditional `store i1 true`. Pre-T0940 the string-bound case
+// kept the unconditional owning drop and freed the caller-owned default a second time
+// (`@promise_string_drop` on a borrowed buffer → UAF). The bound flag makes `m` borrow
+// on both paths, matching the Map/heap-user borrowed-param arm.
+func TestElvisBoundStringBorrowsBoth(t *testing.T) {
 	ir := generateIR(t, `
 		f(string? a, string b) { m := a ?: b; }
 		main() { string? a = "x"; string b = "y"; f(a, b); }
 	`)
-	// No bound override phi of either shape in the elvis merge block.
+	// Borrows on both paths (both operands caller-owned); never the old owning shapes.
+	assertContainsMatch(t, ir, `phi i1 \[ false, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
 	assertNotContainsMatch(t, ir, `phi i1 \[ false, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
 	assertNotContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+	// The per-path flag overrides the unconditional owning drop.
+	assertContains(t, ir, "store i1 true, i1* %m.dropflag")
+	assertContainsMatch(t, ir, `store i1 %[0-9]+, i1\* %m\.dropflag`)
 }
 
 func TestOptionalStringNone(t *testing.T) {

@@ -391,7 +391,7 @@ type Compiler struct {
 	goExprFireAndForget  bool        // true when go expr result is discarded (no <-task receiver)
 	elvisResultConsumed  bool        // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
 	elvisResultBound     bool        // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
-	elvisBoundOwned      value.Value // T0933: per-branch i1 drop flag for a bound heap-user elvis (`m := a ?: b`); the var-decl path stores it into the binding's drop flag, overriding maybeRegisterDrop's unconditional 1
+	elvisBoundDropFlag   value.Value // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
 	coroCleanupBlk       *ir.Block   // coroutine cleanup block (destroy path: coro.free + free)
 	coroSuspendBlk       *ir.Block   // coroutine suspend block (suspend path: coro.end + ret)
 

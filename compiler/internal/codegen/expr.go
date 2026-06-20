@@ -8672,6 +8672,26 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// is not itself the bound RHS, so it must not inherit this flag.
 	boundResult := c.elvisResultBound
 	c.elvisResultBound = false
+	// T0940/T0981: defensively clear any stale per-path bound flag before this elvis
+	// computes its own. Consumed by the var-decl binding in stmt.go.
+	c.elvisBoundDropFlag = nil
+
+	// T0940: in a BOUND droppable context the var-decl set dup-on-read flags
+	// (T0095/B0219/T0366/…) so genFieldAccess/genVectorIndex CLONES a member/index
+	// source's inner into a fresh buffer the binding owns. Snapshot that now — before
+	// e.Left's eval consumes (and clears) the flag — so the some-path bound flag marks
+	// ownership of the clone. elvisSomeInnerOrphaned reports a member/index source as
+	// container-owned (correct for the INLINE case, which does NOT dup); this promotes
+	// it to owned only when a clone actually happens (the dup flag is live AND the
+	// source is a field/index read).
+	boundSourceDupCloned := false
+	if boundResult {
+		switch unwrapDestructureParens(e.Left).(type) {
+		case *ast.MemberExpr, *ast.IndexExpr:
+			boundSourceDupCloned = c.dupStringFieldAccess || c.dupContainerFieldAccess ||
+				c.dupHeapUserFieldAccess || c.dupTupleFieldAccess
+		}
+	}
 
 	optVal := c.genExprAutoPropagate(e.Left)
 
@@ -8700,6 +8720,11 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// container-owned) leave the inner with an existing owner, so the result
 	// borrows it (someOwnsInner=false) and the inline result temp is never freed.
 	someOwnsInner := c.elvisSomeInnerOrphaned(e.Left)
+	if boundSourceDupCloned {
+		// The bound binding cloned the member/index field — the binding owns the fresh
+		// copy on the some-path (the container keeps the original; no flag to clear).
+		someOwnsInner = true
+	}
 	if someOwnsInner {
 		if ident, ok := unwrapDestructureParens(e.Left).(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
@@ -8720,48 +8745,29 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// A parameter/borrowed/static default keeps its existing owner (caller binding,
 	// or none for .rodata) so the result BORROWS it (noneOwned=false) — matching the
 	// ownership pass's borrow model for those operands and avoiding a double-free.
-	// Gated to the Vector[T]/T[] and string result representations trackElvisResultTemp
-	// dispatches; other droppable result types (Map/Set/heap-user) keep the prior
-	// borrow-on-none behavior — tracked separately as T0940.
 	noneOwned := false
 	if _, _, owned := c.elvisResultDrop(e); owned {
-		if ident, ok := e.Right.(*ast.IdentExpr); ok {
-			if _, has := c.dropFlags[ident.Name]; has {
-				c.clearDropFlag(ident.Name)
-				noneOwned = true
-			}
-		} else {
-			noneOwned = c.claimElvisDefaultTemp(defaultVal)
-		}
+		// Vector[T]/T[] and string results (inline + bound), unchanged semantics.
+		noneOwned = c.neutralizeElvisNoneDefault(e, defaultVal)
 	} else if consumedByReceive {
 		// T0954: result consumed by an enclosing `<-` await (Task[T] handle, not a
 		// Vector/string result elvisResultDrop tracks). The await joins+frees the
 		// selected G, so the none-path default must not be freed again by its own
-		// owner. Clear an owned-local default's drop flag / claim a fresh-temp
-		// default. noneOwned stays false (the await is the single owner). A borrowed
-		// param default has no drop flag → clearDropFlag no-ops, leaving T0953's
-		// borrowed-source crash to its own fix.
-		if ident, ok := e.Right.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		} else {
-			c.claimElvisDefaultTemp(defaultVal)
-		}
-	} else if boundResult && c.elvisResultHandleDrop(e) != nil {
-		// T0952: single-owner native handle elvis bound DIRECTLY to a variable
-		// (`m := a ?: b`). The binding claims the result temp and takes an
-		// unconditional owning drop; on the none-path it aliases the default, so the
-		// default's own scope-exit drop must be neutralized here (path-conditional —
-		// none-block only) or the handle is freed twice (Mutex: SEGV; Arc/Channel:
-		// benign UAF). The inline case keeps borrow-on-none (T0951), so gate to bound.
-		// noneOwned stays false — the bound variable, not the inline temp, owns it.
-		// Peel parens on the default (symmetric with the some-path's e.Left peel) so
-		// `m := a ?: (b)` neutralizes the owned-local `b` instead of falling to the
-		// fresh-temp claim (which cannot reach a local's scope-exit drop flag).
-		if ident, ok := unwrapDestructureParens(e.Right).(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		} else {
-			c.claimElvisDefaultTemp(defaultVal)
-		}
+		// owner — neutralize an owned-local / fresh-temp default. noneOwned stays
+		// false (the await is the single owner); a borrowed param default has no
+		// drop flag to clear, leaving T0953's borrowed-source crash to its own fix.
+		c.neutralizeElvisNoneDefault(e, defaultVal)
+	} else if boundResult && (c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil) {
+		// T0952 (single-owner native handle) + T0940 (Map/Set/heap-user type) elvis
+		// bound DIRECTLY to a variable (`m := a ?: b`). The binding takes a per-path
+		// owning drop (elvisBoundDropFlag); on the none-path it aliases the default,
+		// so an owned-local / fresh-temp default's own scope-exit drop must be
+		// neutralized here (path-conditional — none-block only) or the buffer is
+		// freed twice (Mutex/Map/heap-user: SEGV/invalid-free). A borrowed param /
+		// member / static default keeps its real owner → noneOwned stays false and
+		// the bound variable BORROWS it on the none-path. The inline (non-bound) case
+		// keeps borrow-on-none (T0951/T0937), so this is gated to boundResult.
+		noneOwned = c.neutralizeElvisNoneDefault(e, defaultVal)
 	}
 	noneEnd := c.block
 	c.block.NewBr(mergeBlock)
@@ -8772,25 +8778,29 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		&ir.Incoming{X: someVal, Pred: someEnd},
 		&ir.Incoming{X: defaultVal, Pred: noneEnd},
 	)
-	// T0933: when this elvis result is *bound* to a local (`m := a ?: b`) and is a
-	// droppable heap user type, the binding needs a per-branch drop flag. The some
-	// path owns the moved-out inner only when the source was orphaned (someOwnsInner —
-	// false for a borrowed parameter (T0945) or a member/index source (T0937)); the
-	// none path keeps flag=1 (the binding's claimHeapTemp moves a fresh-temp default
-	// in; an owned-local/member default is the separate T0929). The var-decl path
-	// stores this into the binding's drop flag, overriding maybeRegisterDrop's
-	// unconditional 1. Built here (before the track calls add non-phi insts to the
-	// merge block) so all phis precede the stores. nil for inline/non-heap-user uses.
-	c.elvisBoundOwned = nil
-	if boundResult && c.elvisResultHeapUserDrop(e, result) != nil {
-		someFlag := int64(0)
-		if someOwnsInner {
-			someFlag = 1
+	// T0933/T0940/T0981/T0952/T0936: a BOUND elvis (`m := a ?: b`) replaces the variable
+	// binding's unconditional owning drop with this per-path flag — `m` owns the
+	// buffer only on a path whose selected operand was orphaned (some-path inner) or
+	// neutralized (none-path default). Computed for every droppable result
+	// representation (Vector/string via elvisResultDrop, native handles via
+	// elvisResultHandleDrop, Map/Set/heap-user via elvisResultHeapDrop). Created here
+	// — after the result phi, before the trackElvis* phis — so all phis precede the
+	// merge block's non-phi instructions. Consumed in the var-decl path in stmt.go.
+	if boundResult {
+		_, _, vecOrStr := c.elvisResultDrop(e)
+		if vecOrStr || c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil {
+			someF, noneF := int64(0), int64(0)
+			if someOwnsInner {
+				someF = 1
+			}
+			if noneOwned {
+				noneF = 1
+			}
+			c.elvisBoundDropFlag = mergeBlock.NewPhi(
+				&ir.Incoming{X: constant.NewInt(irtypes.I1, someF), Pred: someEnd},
+				&ir.Incoming{X: constant.NewInt(irtypes.I1, noneF), Pred: noneEnd},
+			)
 		}
-		c.elvisBoundOwned = mergeBlock.NewPhi(
-			&ir.Incoming{X: constant.NewInt(irtypes.I1, someFlag), Pred: someEnd},
-			&ir.Incoming{X: constant.NewInt(irtypes.I1, 1), Pred: noneEnd},
-		)
 	}
 	// T0935/T0945/T0936/T0937: register the inline result with a path-dependent drop
 	// flag. The some-path owns the moved-out inner only when it was actually orphaned
@@ -8845,19 +8855,34 @@ func (c *Compiler) claimElvisDefaultTemp(val value.Value) bool {
 	return claimed
 }
 
-// elvisResultHeapUserDrop returns the drop function for an elvis result that is a
-// 2-word {i8*, i8*} value struct representing a droppable heap user type (Map/Set or
-// a user type with a drop()), or nil for every other representation (value/copy/
-// primitive/structural/string/handle/container). Single source of truth for the
-// trackElvisResultHeap type gate and the bound-flag override in genElvis (T0933).
-func (c *Compiler) elvisResultHeapUserDrop(e *ast.BinaryExpr, result value.Value) *ir.Func {
-	if result == nil {
-		return nil
+// neutralizeElvisNoneDefault transfers a none-path default's ownership to the elvis
+// result and reports whether it succeeded (T0936/T0940/T0981). An owned-local ident
+// default → clear its scope-exit drop flag (path-conditional: emitted in the none
+// block only, so the some-path's unselected default is still dropped by its own
+// binding). A fresh string/heap temp default (literal/call) → claim it. A borrowed
+// param / member / static default (no scope drop flag, no owned temp) → returns
+// false: the result must BORROW on the none-path so the default's real owner stays
+// the sole owner. Peels parens so `a ?: (b)` matches the owned-local `b` (symmetric
+// with the some-path's e.Left peel). Single source of truth for none-path transfer.
+func (c *Compiler) neutralizeElvisNoneDefault(e *ast.BinaryExpr, defaultVal value.Value) bool {
+	if ident, ok := unwrapDestructureParens(e.Right).(*ast.IdentExpr); ok {
+		if _, has := c.dropFlags[ident.Name]; has {
+			c.clearDropFlag(ident.Name)
+			return true
+		}
+		return false
 	}
-	st, ok := result.Type().(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
-		return nil // not a 2-word value struct (i8* containers go through trackElvisResultTemp)
-	}
+	return c.claimElvisDefaultTemp(defaultVal)
+}
+
+// elvisResultHeapDrop resolves the drop function for an elvis result represented as
+// a 2-word {i8*, i8*} value struct (Map/Set) or a droppable heap user type — the
+// representation trackElvisResultHeap handles (T0937). Returns nil for value/copy/
+// primitive/structural results, for i8* containers / native handles / string (those
+// go through elvisResultDrop / elvisResultHandleDrop / trackElvisResultTemp), and
+// for ref types. Single source of truth for the heap-droppable classification shared
+// by genElvis's bound-flag gating (T0940) and trackElvisResultHeap.
+func (c *Compiler) elvisResultHeapDrop(e *ast.BinaryExpr) *ir.Func {
 	rt := c.info.Types[e]
 	if c.typeSubst != nil && rt != nil {
 		rt = types.Substitute(rt, c.typeSubst)
@@ -8882,14 +8907,13 @@ func (c *Compiler) elvisResultHeapUserDrop(e *ast.BinaryExpr, result value.Value
 // container (Map/Set) or heap user type {i8*, i8*} as an owned heap drop temp with
 // a per-branch flag (someOwned on the some path where the inner is orphaned,
 // noneOwned on the none path). T0937 (subsumes T0924's heap-user case — same
-// representation + mechanism). Type filtering mirrors trackHeapUserTypeResult
-// exactly, so single-owner handles (Arc/Mutex/Task/...), strings, vectors,
-// value/copy/primitive/structural results are excluded; only Map/Set and droppable
-// heap user types pass. (Map/Set receive no none-ownership today — genElvis's T0936
-// none-path transfer is gated to the i8* Vector/string representations via
-// elvisResultDrop — so noneOwned is false here in practice, but it is honored for
-// symmetry with trackElvisResultTemp.) A bound use claims this temp by runtime
-// pointer identity (claimHeapTemp), neutralizing the flag.
+// representation + mechanism). Type filtering is delegated to elvisResultHeapDrop, so
+// single-owner handles (Arc/Mutex/Task/...), strings, vectors, value/copy/primitive/
+// structural results are excluded; only Map/Set and droppable heap user types pass.
+// noneOwned can now be true for a BOUND Map/Set/heap-user default whose owner was
+// neutralized (T0940) — harmless here because a bound use claims this temp by runtime
+// pointer identity (claimHeapTemp), neutralizing the flag, and the variable's own
+// per-path binding flag governs the drop instead.
 func (c *Compiler) trackElvisResultHeap(e *ast.BinaryExpr, result value.Value, someEnd, noneEnd, mergeBlock *ir.Block, someOwned, noneOwned bool) {
 	if !someOwned && !noneOwned {
 		return // borrows on both paths (owner-governed source + borrowed default)
@@ -8900,15 +8924,16 @@ func (c *Compiler) trackElvisResultHeap(e *ast.BinaryExpr, result value.Value, s
 	if c.entryBlock == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
-	dropFunc := c.elvisResultHeapUserDrop(e, result)
+	dropFunc := c.elvisResultHeapDrop(e)
 	if dropFunc == nil {
 		return
 	}
 
 	// Per-branch live flag: owned on the some path when the extracted inner is
 	// orphaned, owned on the none path when the default's owner was neutralized
-	// (T0936; not reached for Map/Set today). Created in the merge block immediately
-	// after the result phi (phis-first).
+	// (T0940 — reached for a bound Map/Set/heap-user default; a bound use claims this
+	// temp by pointer identity so the flag is then inert). Created in the merge block
+	// immediately after the result phi (phis-first).
 	someFlag := int64(0)
 	if someOwned {
 		someFlag = 1

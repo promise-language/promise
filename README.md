@@ -1,8 +1,10 @@
 # Promise Programming Language
 
-Statically-typed language designed for AI-agent efficiency. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
+Statically-typed language designed for AI-agent efficiency — and written by AI agents. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
-**Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Reading any `.pr` file tells you exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
+**Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Open any one `.pr` file and you know exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
+
+**Written by AI agents.** The compiler, standard library, and catalog are written by AI agents — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. The high-level design calls are human and captured in decision docs; the agents implement against them. What keeps agent-written code correct at this size isn't the model being magic, it's the process around it: a work tracker with stable IDs, multi-class quality gates that reject regressions before they land, a zero-memory-leak policy, and **11,000+ tests** (~5,000 compiler + 6,000+ language) that must pass before any commit — green across Linux, macOS, Windows, and WASM. See programs agents built in Promise — each with the prompt, the generated code, an honest writeup, and a terminal recording — in the [Zoo](https://github.com/promise-language/zoo). The honest test: read the code an agent wrote and decide for yourself whether it's slop.
 
 **Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
 
@@ -46,7 +48,7 @@ main() {
 
 **WARNING: Under active development, not for production use.**
 
-The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented and covered by an extensive test suite. Active development.
+The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented and covered by **11,000+ tests**, green across Linux, macOS, Windows, and WASM. It's early and mostly solo-built so far — expect rough edges, and expect it to crash on you. That's exactly the feedback we want: try it, and file what breaks.
 
 ## Building
 
@@ -146,14 +148,9 @@ promise/
 │   ├── path/                    # Path manipulation
 │   ├── math/                    # Extended math
 │   ├── strings/                 # Extended string utilities
-│   ├── time/                    # Extended time utilities
 │   ├── http/                    # HTTP client
 │   ├── gzip/                    # gzip/DEFLATE compression
-│   ├── markdown/                # Markdown parsing
-│   ├── msgpack/                 # MessagePack encode/decode
-│   ├── toml/                    # TOML parsing
-│   ├── yaml/                    # YAML parsing
-│   └── (ai, auth, cloud, mcp, sandbox, schema, term — planned, design only)
+│   └── (ai, auth, cloud, markdown, mcp, msgpack, sandbox, schema, term, time, toml, yaml — planned, design only)
 ├── tests/                       # Integration and e2e tests
 ├── examples/                    # Runnable examples
 ├── bin/                         # Build tools (compiled by ./make)
@@ -167,6 +164,8 @@ promise/
 
 ## Documentation
 
+- [Website](https://promise-lang.org) — overview, quickstart, and links
+- [Zoo](https://github.com/promise-language/zoo) — programs AI agents built in Promise (each with prompt, code, writeup, and a terminal recording)
 - [Contributing](CONTRIBUTING.md) — building the compiler, running tests & gates (start here to work on the project)
 - [Language Guide](docs/language-guide.md) — concise reference for writing Promise code
 - [Language Design](docs/language-design.md) — full language specification (types, ownership, errors, concurrency, generics)

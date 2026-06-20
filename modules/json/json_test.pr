@@ -255,34 +255,34 @@ skip_value_test() `test {
 round_trip_int_test() `test {
   string s = encode_string[int](42)?!;
   assert(s == "42", "round trip int encode");
-  int v = decode_string[int](s)?!;
+  int v = decode_string[int](move s)?!;
   assert(v == 42, "round trip int decode");
 }
 
 round_trip_bool_test() `test {
   string s = encode_string[bool](true)?!;
   assert(s == "true", "round trip bool encode");
-  bool v = decode_string[bool](s)?!;
+  bool v = decode_string[bool](move s)?!;
   assert(v == true, "round trip bool decode");
 }
 
 round_trip_string_test() `test {
   string s = encode_string[string]("hello world")?!;
   assert(s == "\"hello world\"", "round trip string encode");
-  string v = decode_string[string](s)?!;
+  string v = decode_string[string](move s)?!;
   assert(v == "hello world", "round trip string decode");
 }
 
 round_trip_f64_test() `test {
   string s = encode_string[f64](2.5)?!;
-  f64 v = decode_string[f64](s)?!;
+  f64 v = decode_string[f64](move s)?!;
   assert(v == 2.5, "round trip f64");
 }
 
 round_trip_uint_test() `test {
   string s = encode_string[uint](999u)?!;
   assert(s == "999", "round trip uint encode");
-  uint v = decode_string[uint](s)?!;
+  uint v = decode_string[uint](move s)?!;
   assert(v == 999u, "round trip uint decode");
 }
 
@@ -578,7 +578,7 @@ parse_value_empty_array_test() `test {
 
 parse_value_object_test() `test {
   string data = "\{\"a\":1,\"b\":2}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 2, "object keys"),
     _ => assert(false, "expected object"),
@@ -609,7 +609,7 @@ format_value_array_test() `test {
 round_trip_value_test() `test {
   JsonValue arr = JsonValue.Array([JsonValue.Bool(true), JsonValue.Str("x")]);
   string s = format_value(arr)?!;
-  JsonValue v = parse_value(s)?!;
+  JsonValue v = parse_value(move s)?!;
   match v {
     JsonValue.Array(items) => assert(items.len == 2, "rt array"),
     _ => assert(false, "expected array"),
@@ -619,7 +619,7 @@ round_trip_value_test() `test {
 nested_value_test() `test {
   // Nested: object containing array
   string data = "\{\"items\":[1,2],\"ok\":true}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "nested: keys");
@@ -706,7 +706,7 @@ format_value_object_test() `test {
   map[string, JsonValue] f = {
     "a": JsonValue.Number(1.0)
   };
-  JsonValue obj = JsonValue.Object(f);
+  JsonValue obj = JsonValue.Object(move f);
   string s = format_value(obj)?!;
   assert(s.contains("\"a\":1"), "format object");
 }
@@ -721,9 +721,9 @@ round_trip_object_test() `test {
   map[string, JsonValue] f = {
     "x": JsonValue.Number(1.0), "y": JsonValue.Str("two")
   };
-  JsonValue obj = JsonValue.Object(f);
+  JsonValue obj = JsonValue.Object(move f);
   string s = format_value(obj)?!;
-  JsonValue v = parse_value(s)?!;
+  JsonValue v = parse_value(move s)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "rt obj keys");
@@ -736,9 +736,9 @@ round_trip_object_test() `test {
 deep_nesting_test() `test {
   // array inside object: {"data":[1,true,"x"]}
   string data = "\{\"data\":[1,true,\"x\"]}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   string s = format_value(v)?!;
-  JsonValue v2 = parse_value(s)?!;
+  JsonValue v2 = parse_value(move s)?!;
   match v2 {
     JsonValue.Object(fields) => {
       assert(fields.contains("data"), "deep: has data key");
@@ -750,7 +750,7 @@ deep_nesting_test() `test {
 object_field_value_access_test() `test {
   // Verify we can look up values by key after parsing
   string data = "\{\"name\":\"Alice\",\"age\":30,\"active\":true}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 3, "field count");
@@ -777,7 +777,7 @@ object_field_value_access_test() `test {
 nested_object_test() `test {
   // Object containing another object
   string data = "\{\"user\":\{\"name\":\"Bob\",\"score\":42}}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(outer) => {
       assert(outer.len == 1, "outer fields");
@@ -804,12 +804,12 @@ round_trip_nested_object_test() `test {
     "x": JsonValue.Number(1.0)
   };
   map[string, JsonValue] outer = {
-    "nested": JsonValue.Object(inner),
+    "nested": JsonValue.Object(move inner),
     "flat": JsonValue.Str("hello"),
   };
-  JsonValue obj = JsonValue.Object(outer);
+  JsonValue obj = JsonValue.Object(move outer);
   string s = format_value(obj)?!;
-  JsonValue parsed = parse_value(s)?!;
+  JsonValue parsed = parse_value(move s)?!;
   match parsed {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "rt nested: field count");
@@ -823,7 +823,7 @@ round_trip_nested_object_test() `test {
 object_duplicate_key_test() `test {
   // JSON with duplicate keys — last value wins (map semantics)
   string data = "\{\"a\":1,\"a\":2}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 1, "duplicate key: single entry");
@@ -839,7 +839,7 @@ object_duplicate_key_test() `test {
 
 object_null_value_test() `test {
   string data = "\{\"x\":null}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(fields) => {
       JsonValue val = fields["x"]!;
@@ -931,7 +931,7 @@ format_value_pretty_test() `test {
   map[string, JsonValue] f = {
     "key": JsonValue.Bool(true)
   };
-  JsonValue obj = JsonValue.Object(f);
+  JsonValue obj = JsonValue.Object(move f);
   string s = format_value_pretty(obj)?!;
   assert(s.contains("\n"), "format_value_pretty has newlines");
   assert(s.contains("  \"key\""), "format_value_pretty has indented key");
@@ -1017,9 +1017,9 @@ parse_heterogeneous_array_test() `test {
 round_trip_complex_test() `test {
   // Complex structure: object with array of objects
   string data = "\{\"users\":[\{\"name\":\"A\",\"age\":1},\{\"name\":\"B\",\"age\":2}],\"count\":2}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   string s = format_value(v)?!;
-  JsonValue v2 = parse_value(s)?!;
+  JsonValue v2 = parse_value(move s)?!;
   match v2 {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "complex rt: field count");
@@ -1090,7 +1090,7 @@ parse_value_error_unterminated_string_test() `test {
 parse_value_whitespace_object_test() `test {
   // Generous whitespace
   string data = "  \{  \"a\"  :  1  ,  \"b\"  :  2  }  ";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 2, "whitespace obj: 2 fields"),
     _ => assert(false, "expected object"),
@@ -1203,7 +1203,7 @@ as_string_test() `test {
 
 as_array_test() `test {
   JsonValue[] items = [JsonValue.Number(1.0), JsonValue.Number(2.0)];
-  JsonValue[]? arr = JsonValue.Array(items).as_array();
+  JsonValue[]? arr = JsonValue.Array(move items).as_array();
   assert(arr is present, "as_array present");
   assert(arr!.len == 2, "as_array len");
 
@@ -1215,7 +1215,7 @@ as_object_test() `test {
   map[string, JsonValue] fields = {
     "a": JsonValue.Number(1.0)
   };
-  map[string, JsonValue]? obj = JsonValue.Object(fields).as_object();
+  map[string, JsonValue]? obj = JsonValue.Object(move fields).as_object();
   assert(obj is present, "as_object present");
   assert(obj!.len == 1, "as_object len");
 
@@ -1230,7 +1230,7 @@ get_method_test() `test {
     "name": JsonValue.Str("Alice"),
     "age": JsonValue.Number(30.0),
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
 
   JsonValue? name = obj.get("name");
   assert(name is present, "get name present");
@@ -1246,7 +1246,7 @@ get_method_test() `test {
 
 at_method_test() `test {
   JsonValue[] items = [JsonValue.Str("a"), JsonValue.Str("b"), JsonValue.Str("c")];
-  JsonValue arr = JsonValue.Array(items);
+  JsonValue arr = JsonValue.Array(move items);
 
   JsonValue? first = arr.at(0);
   assert(first is present, "at 0 present");
@@ -1286,7 +1286,7 @@ format_method_object_test() `test {
   map[string, JsonValue] fields = {
     "x": JsonValue.Number(1.0)
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
   string s = obj.format()?!;
   assert(s.contains("\"x\":1"), "format object method");
 }
@@ -1295,7 +1295,7 @@ format_pretty_method_test() `test {
   map[string, JsonValue] fields = {
     "key": JsonValue.Bool(true)
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
   string s = obj.format_pretty()?!;
   assert(s.contains("\n"), "format_pretty has newlines");
   assert(s.contains("  \"key\""), "format_pretty has indented key");
@@ -1305,7 +1305,7 @@ format_pretty_custom_indent_test() `test {
   map[string, JsonValue] fields = {
     "a": JsonValue.Number(1.0)
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
   string s = obj.format_pretty(indent: 4)?!;
   assert(s.contains("    \"a\""), "format_pretty 4-space indent");
 }
@@ -1317,9 +1317,9 @@ round_trip_method_test() `test {
     "items": JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]),
     "ok": JsonValue.Bool(true),
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
   string s = obj.format()?!;
-  JsonValue parsed = parse_value(s)?!;
+  JsonValue parsed = parse_value(move s)?!;
   assert(parsed.is_object, "round trip is object");
   assert(parsed.get("ok") is present, "round trip has ok");
   assert(parsed.get("items") is present, "round trip has items");
@@ -1334,9 +1334,9 @@ chained_access_test() `test {
     "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
   };
   map[string, JsonValue] root_fields = {
-    "user": JsonValue.Object(user_fields),
+    "user": JsonValue.Object(move user_fields),
   };
-  JsonValue root = JsonValue.Object(root_fields);
+  JsonValue root = JsonValue.Object(move root_fields);
 
   // Access nested value: root.get("user").get("name")
   JsonValue? user = root.get("user");
@@ -1433,7 +1433,7 @@ encode_method_nested_test() `test {
     "items": JsonValue.Array([JsonValue.Null, JsonValue.Bool(true)]),
     "count": JsonValue.Number(2.0),
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
   JsonEncoder enc = JsonEncoder();
   obj.encode(enc)?!;
   string s = enc.to_string();
@@ -1446,10 +1446,10 @@ format_pretty_round_trip_test() `test {
     "name": JsonValue.Str("Alice"),
     "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
   };
-  JsonValue obj = JsonValue.Object(fields);
+  JsonValue obj = JsonValue.Object(move fields);
   string pretty = obj.format_pretty()?!;
   // Pretty output should still be valid JSON that parses back
-  JsonValue parsed = parse_value(pretty)?!;
+  JsonValue parsed = parse_value(move pretty)?!;
   assert(parsed.is_object, "pretty rt: is object");
   assert(parsed.get("name") is present, "pretty rt: has name");
   assert(parsed.get("scores") is present, "pretty rt: has scores");
@@ -1470,7 +1470,7 @@ format_method_all_variants_test() `test {
 parsed_value_methods_test() `test {
   // Verify methods work on values from parse_value, not just constructed values
   string data = "\{\"name\":\"Bob\",\"age\":30,\"tags\":[\"a\",\"b\"],\"active\":true}";
-  JsonValue v = parse_value(data)?!;
+  JsonValue v = parse_value(move data)?!;
   assert(v.is_object, "parsed: is_object");
   assert(!v.is_array, "parsed: not is_array");
 
@@ -1506,7 +1506,7 @@ parsed_value_methods_test() `test {
 // the returned JsonValue shares heap pointers with the original, causing double-free.
 parsed_nested_get_test() `test {
   string data = "\{\"outer\":\{\"inner\":\{\"key\":\"deep\"\}\}\}";
-  JsonValue root = parse_value(data)?!;
+  JsonValue root = parse_value(move data)?!;
   if outer := root.get("outer") {
     assert(outer.is_object, "B0253: outer is object");
     if inner := outer.get("inner") {
@@ -1521,7 +1521,7 @@ parsed_nested_get_test() `test {
 // B0253: Multiple get() calls on same parsed object must not corrupt data.
 parsed_multiple_get_same_object_test() `test {
   string data = "\{\"a\":\{\"x\":1},\"b\":\{\"y\":2}}";
-  JsonValue root = parse_value(data)?!;
+  JsonValue root = parse_value(move data)?!;
   // Call get() multiple times on the same parsed object
   if a := root.get("a") {
     assert(a.is_object, "B0253: a is object");
@@ -1538,7 +1538,7 @@ parsed_multiple_get_same_object_test() `test {
 // B0253: get() + as_string() chain on parsed JSON (original bug report scenario).
 parsed_get_as_string_chain_test() `test {
   string data = "\{\"tool_input\":\{\"command\":\"hello\"\}\}";
-  JsonValue root = parse_value(data)?!;
+  JsonValue root = parse_value(move data)?!;
   if tool_input := root.get("tool_input") {
     if cmd := tool_input.get("command") {
       if s := cmd.as_string() {
@@ -1557,18 +1557,18 @@ enum_ctor_temp_in_map_literal_test() `test {
     "x": JsonValue.Number(1.0)
   };
   map[string, JsonValue] outer = {
-    "nested": JsonValue.Object(inner)
+    "nested": JsonValue.Object(move inner)
   };
-  JsonValue obj = JsonValue.Object(outer);
+  JsonValue obj = JsonValue.Object(move outer);
   string s = format_value(obj)?!;
-  JsonValue parsed = parse_value(s)?!;
+  JsonValue parsed = parse_value(move s)?!;
   assert(parsed.is_object, "round trip nested object");
 }
 
 // B0281: Enum ctor temps in vector literals must be claimed.
 enum_ctor_temp_in_vector_literal_test() `test {
   JsonValue[] items = [JsonValue.Str("a"), JsonValue.Number(1.0), JsonValue.Bool(true)];
-  JsonValue arr = JsonValue.Array(items);
+  JsonValue arr = JsonValue.Array(move items);
   string s = format_value(arr)?!;
   assert(s.contains("\"a\""), "vector with enum values");
 }

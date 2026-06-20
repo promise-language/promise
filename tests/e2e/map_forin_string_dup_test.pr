@@ -8,7 +8,7 @@ type Holder {
   drop(~this) {
   }
 
-  set(~this, ~string k, ~string v) {
+  set(~this, string move k, string move v) {
     this.data[k] = v;
   }
 
@@ -20,13 +20,13 @@ type Holder {
 // Reproduction case: pass iterated key/value to method, read back.
 test_forin_map_method_pass() `test {
   map[string, string] init = {:};
-  Holder h = Holder(data: init);
+  Holder h = Holder(data: move init);
   map[string, string] m = {:};
   m["hello"] = "world";
   m["foo"] = "bar";
 
   for key, value in m {
-    h.set(key, value);
+    h.set(move key, move value);
   }
 
   assert(h.data.len == 2, "len == 2");
@@ -95,7 +95,7 @@ test_forin_map_underscore_key() `test {
 
   string[] vals = string[]();
   for _, v in m {
-    vals.push(v);
+    vals.push(move v);
   }
   assert(vals.len == 1, "vals len == 1");
   assert(vals[0] == "hello", "vals[0] == hello");
@@ -108,7 +108,7 @@ test_forin_map_underscore_value() `test {
 
   string[] keys = string[]();
   for k, _ in m {
-    keys.push(k);
+    keys.push(move k);
   }
   assert(keys.len == 1, "keys len == 1");
   assert(keys[0] == "key1", "keys[0] == key1");
@@ -130,14 +130,14 @@ test_forin_map_tuple_binding() `test {
 // Multiple iterations: verify no corruption across iterations.
 test_forin_map_multi_entry() `test {
   map[string, string] init = {:};
-  Holder h = Holder(data: init);
+  Holder h = Holder(data: move init);
   map[string, string] m = {:};
   m["k1"] = "v1";
   m["k2"] = "v2";
   m["k3"] = "v3";
 
   for key, value in m {
-    h.set(key, value);
+    h.set(move key, move value);
   }
 
   assert(h.data.len == 3, "len == 3");

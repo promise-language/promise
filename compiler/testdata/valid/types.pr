@@ -18,11 +18,11 @@ type Named {
 }
 
 type Printable {
-  toString(&this) String `abstract;
+  toString(this) String `abstract;
 }
 
 type Serializable {
-  serialize(&this) Bytes `abstract;
+  serialize(this) Bytes `abstract;
   deserialize(Bytes data) This `abstract;
 }
 
@@ -30,11 +30,11 @@ type Widget is Printable, Serializable {
   String id;
   String label;
 
-  toString(&this) String `instance {
+  toString(this) String `instance {
     return "{this.id}: {this.label}";
   }
 
-  serialize(&this) Bytes `instance {
+  serialize(this) Bytes `instance {
     return Bytes.from(this.toString());
   }
 
@@ -47,11 +47,11 @@ type Widget is Printable, Serializable {
 type Box[T] {
   T value;
 
-  get(&this) T `instance {
+  get(this) T `instance {
     return this.value;
   }
 
-  map[U](&this, (T) -> U fn) Box[U] `instance {
+  map[U](this, (T) -> U fn) Box[U] `instance {
     return Box(value: fn(this.value));
   }
 }
@@ -79,31 +79,31 @@ type Vec2 {
   Float x;
   Float y;
 
-  +(Vec2 &a, Vec2 &b) Vec2 `static {
+  +(Vec2 a, Vec2 b) Vec2 `static {
     return Vec2(x: a.x + b.x, y: a.y + b.y);
   }
 
-  -(Vec2 &a, Vec2 &b) Vec2 `static {
+  -(Vec2 a, Vec2 b) Vec2 `static {
     return Vec2(x: a.x - b.x, y: a.y - b.y);
   }
 
-  *(Vec2 &v, Float s) Vec2 `static {
+  *(Vec2 v, Float s) Vec2 `static {
     return Vec2(x: v.x * s, y: v.y * s);
   }
 
-  ==(Vec2 &a, Vec2 &b) Bool `static {
+  ==(Vec2 a, Vec2 b) Bool `static {
     return a.x == b.x && a.y == b.y;
   }
 
-  !=(Vec2 &a, Vec2 &b) Bool `static {
+  !=(Vec2 a, Vec2 b) Bool `static {
     return a.x != b.x || a.y != b.y;
   }
 
-  <(Vec2 &a, Vec2 &b) Bool `static {
+  <(Vec2 a, Vec2 b) Bool `static {
     return a.length() < b.length();
   }
 
-  length(&this) Float `instance {
+  length(this) Float `instance {
     return this.x * this.x + this.y * this.y;
   }
 }
@@ -120,7 +120,7 @@ type Counter {
     this.count += 1;
   }
 
-  current(&this) Int `instance {
+  current(this) Int `instance {
     return this.count;
   }
 }

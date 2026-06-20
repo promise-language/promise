@@ -8,7 +8,7 @@ test_module_ctor_param_stored() `test {
   cs.push(1);
   cs.push(2);
   cs.push(3);
-  ctormod.Holder h = ctormod.Holder(codes: cs);
+  ctormod.Holder h = ctormod.Holder(codes: move cs);
   assert(h.data.len == 3, "module ctor stored vector in field");
   assert(h.data[0] == 1, "first element");
 }
@@ -17,6 +17,6 @@ test_module_ctor_param_not_stored() `test {
   int[] cs = int[]();
   cs.push(10);
   cs.push(20);
-  ctormod.Sized h = ctormod.Sized(codes: cs);
+  ctormod.Sized h = ctormod.Sized(codes: move cs);
   assert(h.n == 2, "module ctor read length only — vector dropped at scope exit");
 }

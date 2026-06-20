@@ -114,19 +114,19 @@ test_generic_result_no_match() `test {
 
 type Animal {
   string name;
-  speak(&this) string `abstract;
+  speak(this) string `abstract;
 }
 
 type Dog is Animal {
   string breed;
-  speak(&this) string {
+  speak(this) string {
     return "woof";
   }
 }
 
 type Cat is Animal {
   string color;
-  speak(&this) string {
+  speak(this) string {
     return "meow";
   }
 }
@@ -329,17 +329,17 @@ test_named_no_inheritance() `test {
 
 type Base {
   string a;
-  do_thing(&this) string `abstract;
+  do_thing(this) string `abstract;
 }
 type Middle is Base {
   string b;
-  do_thing(&this) string {
+  do_thing(this) string {
     return "mid";
   }
 }
 type Leaf is Middle {
   string c;
-  do_thing(&this) string {
+  do_thing(this) string {
     return "leaf";
   }
 }
@@ -387,7 +387,7 @@ enum Message {
 
 test_enum_user_type_field() `test {
   Payload pl = Payload(id: 42);
-  Message m = Message.Data(p: pl);
+  Message m = Message.Data(p: move pl);
   if m is Data(extracted) {
     assert(extracted.id == 42, "payload id should be 42");
   } else {

@@ -32,7 +32,7 @@ even_numbers(int limit) stream[int] {
 }
 
 // Helper to print an int vector.
-print_vec(int[] &v) {
+print_vec(int[] v) {
   print("[");
   for i in 0..v.len {
     if i > 0 {

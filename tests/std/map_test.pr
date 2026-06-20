@@ -137,7 +137,7 @@ test_for_in_kv() `test {
   for k, v in m {
     sum += v;
     count++;
-    seen_keys.push(k);
+    seen_keys.push(move k);
   }
   assert(sum == 6, "for k, v sum == 6");
   assert(count == 3, "for k, v visits 3 entries");
@@ -352,7 +352,7 @@ test_for_in_kv_int_keys() `test {
   string[] vals = [];
   for k, v in m {
     key_sum += k;
-    vals.push(v);
+    vals.push(move v);
   }
   assert(key_sum == 6, "int key sum == 6");
   assert(vals.len == 3, "3 values iterated");
@@ -981,14 +981,14 @@ test_t0440_missing_key_none() `test {
 
 // T0440: function returning Optional[heap-user-type] read from a Map —
 // validates that the wrap+propagate path doesn't double-free either.
-get_at(~Map[string, _T0440Box] m, string k) _T0440Box? {
+get_at(Map[string, _T0440Box] move m, string k) _T0440Box? {
   return m[k];
 }
 
 test_t0440_function_return() `test {
   m := map[string, _T0440Box]();
   m["k"] = _T0440Box(value: 31);
-  if t := get_at(m, "k") {
+  if t := get_at(move m, "k") {
     assert(t.value == 31, "via function return");
   }
 }
@@ -1105,7 +1105,7 @@ test_t0440_with_vector_field() `test {
   v.push(11);
   v.push(22);
   v.push(33);
-  m["k"] = _T0440VecBox(data: v);
+  m["k"] = _T0440VecBox(data: move v);
   if t := m["k"] {
     assert(t.data.len == 3, "first read vec len");
     assert(t.data[0] == 11, "first read v[0]");
@@ -1302,7 +1302,7 @@ test_t0491_member_multi_reassign_force_unwrap() `test {
 // and `isDroppableHeapUserType` would short-circuit (TypeParam is not
 // droppable), the dup flag would stay clear, and the bucket alias would
 // double-free at scope exit. Companion to test_t0410_generic_reassign.
-swap_first_from_map[T](~Map[string, T] m, string key, ~T local) T {
+swap_first_from_map[T](Map[string, T] move m, string key, T move local) T {
   local = m[key]!;
   return local;
 }
@@ -1311,7 +1311,7 @@ test_t0491_generic_reassign_force_unwrap() `test {
   m := map[string, _T0440Box]();
   m["k"] = _T0440Box(value: 77);
   init := _T0440Box(value: 1);
-  out := swap_first_from_map[_T0440Box](m, "k", init);
+  out := swap_first_from_map[_T0440Box](move m, "k", move init);
   assert(out.value == 77, "generic reassign result");
 }
 

@@ -37,8 +37,8 @@ chan_vector_buffered_drop() `test {
   a.push(2);
   b := Vector[int]();
   b.push(3);
-  c.send(a);
-  c.send(b);
+  c.send(move a);
+  c.send(move b);
   // none received — both vectors dropped via the per-element walk
 }
 
@@ -70,7 +70,7 @@ chan_nested_channel_drop() `test {
   inner := channel[string](capacity: 2);
   inner.send(mk_str(1));
   inner.send(mk_str(2));
-  outer.send(inner);
+  outer.send(move inner);
   // outer dropped with an un-received inner channel that itself holds 2
   // un-received heap strings → recursive element drop must free all 3 allocs
 }
@@ -85,7 +85,7 @@ chan_string_field_buffered_drop() `test {
   c := channel[string](capacity: 2);
   c.send(mk_str(1));
   c.send(mk_str(2));
-  h := StrChanHolder(ch: c);
+  h := StrChanHolder(ch: move c);
   // h dropped → synthesized StrChanHolder.drop → Channel[string].drop walks
   // and frees the 2 buffered heap strings
   assert(true, "field-held channel buffered drop");
@@ -221,7 +221,7 @@ chan_field_reassign_buffered_drop() `test {
   c1 := channel[string](capacity: 2);
   c1.send(mk_str(1));
   c1.send(mk_str(2));
-  cell := StrChanCell(ch: c1);
+  cell := StrChanCell(ch: move c1);
   c2 := channel[string](capacity: 2);
   c2.send(mk_str(3));
   cell.ch = c2; // old c1 (2 buffered heap strings) dropped by the reassign
@@ -236,7 +236,7 @@ chan_box_field_reassign_buffered_drop() `test {
   c1 := channel[Box](capacity: 2);
   c1.send(Box(1));
   c1.send(Box(2));
-  cell := BoxChanCell(ch: c1);
+  cell := BoxChanCell(ch: move c1);
   c2 := channel[Box](capacity: 1);
   c2.send(Box(3));
   cell.ch = c2; // old c1's 2 buffered Box instances must be freed
@@ -262,7 +262,7 @@ chan_closure_capture_buffered_drop() `test {
 // (resolvedElem substitution before getOrCreateChannelDrop).
 type ChanWrapper[T] {
   channel[T] ch;
-  new(~this, ~channel[T] ch) {
+  new(~this, channel[T] move ch) {
     this.ch = ch;
   }
 }
@@ -270,7 +270,7 @@ chan_generic_field_buffered_drop() `test {
   c := channel[string](capacity: 2);
   c.send(mk_str(1));
   c.send(mk_str(2));
-  w := ChanWrapper[string](c);
+  w := ChanWrapper[string](move c);
   assert(true, "generic channel field dropped");
   // w drops → mono ChanWrapper[string].drop → Channel[string].drop walk
 }
@@ -281,7 +281,7 @@ chan_arc_wrapped_buffered_drop() `test {
   c := channel[string](capacity: 2);
   c.send(mk_str(1));
   c.send(mk_str(2));
-  a := Ref[Channel[string]](c);
+  a := Ref[Channel[string]](move c);
   assert(true, "arc-wrapped channel dropped");
   // a drops → Arc inner drop → Channel[string].drop walks the 2 strings
 }
@@ -296,7 +296,7 @@ chan_optional_field_buffered_drop() `test {
   c := channel[string](capacity: 2);
   c.send(mk_str(1));
   c.send(mk_str(2));
-  h := OptChanHolder(ch: c);
+  h := OptChanHolder(ch: move c);
   assert(true, "optional channel field dropped");
   // h drops → synth OptChanHolder.drop → optional-inner Channel[string].drop
 }
@@ -307,7 +307,7 @@ chan_optional_field_reassign_buffered_drop() `test {
   c1 := channel[string](capacity: 2);
   c1.send(mk_str(1));
   c1.send(mk_str(2));
-  h := OptChanHolder(ch: c1);
+  h := OptChanHolder(ch: move c1);
   c2 := channel[string](capacity: 1);
   c2.send(mk_str(3));
   h.ch = c2; // old c1 (2 buffered heap strings) dropped by the optional reassign
@@ -334,8 +334,8 @@ chan_vector_forin_drained() `test {
   b := Vector[int]();
   b.push(3);
   b.push(4);
-  c.send(a);
-  c.send(b);
+  c.send(move a);
+  c.send(move b);
   c.close();
   total := 0;
   for v in c {
@@ -434,7 +434,7 @@ chan_string_forin_move() `test {
   c.close();
   dst := Vector[string]();
   for s in c {
-    dst.push(s); // moves s → drop flag cleared → loop skips drop
+    dst.push(move s); // moves s → drop flag cleared → loop skips drop
   }
   assert(dst.len == 3, "forin move count");
   assert(dst[0] == "v1", "forin move first");

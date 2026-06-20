@@ -13,7 +13,7 @@ check_point(Point p) bool {
 type Wrapper {
   int id;
 
-  get_id(&this) int {
+  get_id(this) int {
     return this.id;
   }
 }

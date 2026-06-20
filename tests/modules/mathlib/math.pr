@@ -18,7 +18,7 @@ type Vec2 `public {
   int x;
   int y;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 
@@ -27,7 +27,7 @@ type Vec2 `public {
     this.y = this.y * factor;
   }
 
-  to_string(&this) string {
+  to_string(this) string {
     return "({this.x}, {this.y})";
   }
 }
@@ -39,7 +39,7 @@ enum Color `public {
   Green,
   Blue,
 
-  name(&this) string `public {
+  name(this) string `public {
     return match this {
       Color.Red => "red",
       Color.Green => "green",
@@ -47,7 +47,7 @@ enum Color `public {
     };
   }
 
-  is_primary(&this) bool `public {
+  is_primary(this) bool `public {
     return true;
   }
 

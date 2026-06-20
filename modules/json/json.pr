@@ -19,7 +19,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
   new(~this, bool pretty = false, int indent = 2) {
     this._buf = Builder();
     this._stack = _JsonState[]();
-    this._stack.push(_JsonState.Empty);
+    this._stack.push(move _JsonState.Empty);
     this._pretty = pretty;
     this._indent = indent;
     this._depth = 0;
@@ -139,7 +139,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     this._write_comma();
     this._buf.write_string("\{");
     this._depth = this._depth + 1;
-    this._stack.push(_JsonState.Empty);
+    this._stack.push(move _JsonState.Empty);
   }
 
   end_object!(~this) `public {
@@ -165,7 +165,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     this._write_comma();
     this._buf.write_string("[");
     this._depth = this._depth + 1;
-    this._stack.push(_JsonState.Empty);
+    this._stack.push(move _JsonState.Empty);
   }
 
   end_array!(~this) `public {
@@ -226,7 +226,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
   string _data;
   int _pos;
 
-  new(~this, ~string data) {
+  new(~this, string move data) {
     this._data = data;
     this._pos = 0;
   }
@@ -441,7 +441,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     }
 
     string num_str = this._data[start: this._pos];
-    Scanner s = Scanner(s: num_str);
+    Scanner s = Scanner(s: move num_str);
     f64 result = f64.parse(s);
     return result;
   }
@@ -637,8 +637,8 @@ encode_string![T: Encodable](T value) string `public `doc("Serializes a value to
   return enc.to_string();
 }
 
-decode_string![T: Decodable](~string data) T `public `doc("Deserializes a value from a JSON string") {
-  JsonDecoder dec = JsonDecoder(data: data);
+decode_string![T: Decodable](string move data) T `public `doc("Deserializes a value from a JSON string") {
+  JsonDecoder dec = JsonDecoder(data: move data);
   return T.decode(dec);
 }
 
@@ -722,7 +722,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  as_bool(&this) bool? `public `doc("Returns the bool value if this is a Bool, or none otherwise.") {
+  as_bool(this) bool? `public `doc("Returns the bool value if this is a Bool, or none otherwise.") {
     match this {
       JsonValue.Bool(b) => {
         return b;
@@ -733,7 +733,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  as_number(&this) f64? `public `doc("Returns the f64 value if this is a Number, or none otherwise.") {
+  as_number(this) f64? `public `doc("Returns the f64 value if this is a Number, or none otherwise.") {
     match this {
       JsonValue.Number(n) => {
         return n;
@@ -744,7 +744,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  as_string(&this) string? `public `doc("Returns the string value if this is a Str, or none otherwise.") {
+  as_string(this) string? `public `doc("Returns the string value if this is a Str, or none otherwise.") {
     match this {
       JsonValue.Str(s) => {
         return s;
@@ -755,7 +755,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  as_array(&this) JsonValue[]? `public `doc("Returns the items if this is an Array, or none otherwise.") {
+  as_array(this) JsonValue[]? `public `doc("Returns the items if this is an Array, or none otherwise.") {
     match this {
       JsonValue.Array(items) => {
         return items;
@@ -766,7 +766,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  as_object(&this) map[string, JsonValue]? `public `doc("Returns the fields if this is an Object, or none otherwise.") {
+  as_object(this) map[string, JsonValue]? `public `doc("Returns the fields if this is an Object, or none otherwise.") {
     match this {
       JsonValue.Object(fields) => {
         return fields;
@@ -777,7 +777,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  get(&this, string key) JsonValue? `public `doc("Returns the value for a key if this is an Object, or none otherwise.") {
+  get(this, string key) JsonValue? `public `doc("Returns the value for a key if this is an Object, or none otherwise.") {
     match this {
       JsonValue.Object(fields) => {
         return fields[key];
@@ -788,7 +788,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  at(&this, int index) JsonValue? `public `doc("Returns the value at an index if this is an Array, or none otherwise.") {
+  at(this, int index) JsonValue? `public `doc("Returns the value at an index if this is an Array, or none otherwise.") {
     match this {
       JsonValue.Array(items) => {
         if index >= 0 && index < items.len {
@@ -802,7 +802,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  encode!(&this, Encoder ~e) `public `doc("Writes this JsonValue tree to an Encoder.") {
+  encode!(this, Encoder ~e) `public `doc("Writes this JsonValue tree to an Encoder.") {
     match this {
       JsonValue.Null => e.encode_none(),
       JsonValue.Bool(b) => e.encode_bool(b),
@@ -826,13 +826,13 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  format!(&this) string `public `doc("Formats this JsonValue tree as a compact JSON string.") {
+  format!(this) string `public `doc("Formats this JsonValue tree as a compact JSON string.") {
     JsonEncoder enc = JsonEncoder();
     this.encode(enc);
     return enc.to_string();
   }
 
-  format_pretty!(&this, int indent = 2) string `public `doc("Formats this JsonValue tree as a pretty-printed JSON string.") {
+  format_pretty!(this, int indent = 2) string `public `doc("Formats this JsonValue tree as a pretty-printed JSON string.") {
     JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
     this.encode(enc);
     return enc.to_string();
@@ -845,8 +845,8 @@ encode_value!(JsonValue v, Encoder ~e) `public `doc("Writes a JsonValue tree to 
 }
 
 // Parse a JSON string into a JsonValue tree.
-parse_value!(~string input) JsonValue `public `doc("Parses a JSON string into a JsonValue tree.") {
-  JsonDecoder dec = JsonDecoder(data: input);
+parse_value!(string move input) JsonValue `public `doc("Parses a JSON string into a JsonValue tree.") {
+  JsonDecoder dec = JsonDecoder(data: move input);
   return _parse_json_value(dec);
 }
 
@@ -882,7 +882,7 @@ _parse_json_value!(JsonDecoder ~dec) JsonValue {
   }
   if c == '"' {
     string s = dec._read_string_value();
-    return JsonValue.Str(s);
+    return JsonValue.Str(move s);
   }
   if c == '[' {
     return _parse_json_array(dec);
@@ -921,13 +921,13 @@ _parse_json_array!(JsonDecoder ~dec) JsonValue {
       }
       first = false;
       JsonValue _item = _parse_json_value(dec);
-      items.push(_item);
+      items.push(move _item);
     }
   }
   if !done {
     raise DecodeError(message: "unterminated array", field: "", position: dec._pos);
   }
-  return JsonValue.Array(items);
+  return JsonValue.Array(move items);
 }
 
 _parse_json_object!(JsonDecoder ~dec) JsonValue {
@@ -964,7 +964,7 @@ _parse_json_object!(JsonDecoder ~dec) JsonValue {
   if !done {
     raise DecodeError(message: "unterminated object", field: "", position: dec._pos);
   }
-  return JsonValue.Object(fields);
+  return JsonValue.Object(move fields);
 }
 
 _hex_digit(int v) string {

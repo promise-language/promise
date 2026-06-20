@@ -44,7 +44,7 @@ enum Either[A, B] {
   Left(A left),
   Right(B right),
 
-  is_left(&this) bool {
+  is_left(this) bool {
     match this {
       Left(_) => {
         return true;
@@ -55,7 +55,7 @@ enum Either[A, B] {
     }
   }
 
-  is_right(&this) bool => !this.is_left();
+  is_right(this) bool => !this.is_left();
 }
 
 test_generic_enum_method() `test {
@@ -74,7 +74,7 @@ enum Box[T] {
   Full(T item),
   Vacant,
 
-  unwrap_or(&this, T fallback) T {
+  unwrap_or(this, T fallback) T {
     match this {
       Full(v) => {
         return v;
@@ -108,7 +108,7 @@ enum SafeBox[T] {
   Present(T value),
   Missing,
 
-  get_value!(&this) T {
+  get_value!(this) T {
     match this {
       Present(v) => {
         return v;
@@ -139,7 +139,7 @@ enum Trio[T] {
   Second(T b),
   Third(T c),
 
-  tag_name(&this) string {
+  tag_name(this) string {
     match this {
       First(_) => {
         return "first";
@@ -168,7 +168,7 @@ enum Pair[A, B] {
   OnlySecond(B second),
   Neither,
 
-  has_first(&this) bool {
+  has_first(this) bool {
     match this {
       Both(_, _) => {
         return true;
@@ -182,7 +182,7 @@ enum Pair[A, B] {
     }
   }
 
-  has_second(&this) bool {
+  has_second(this) bool {
     match this {
       Both(_, _) => {
         return true;
@@ -196,7 +196,7 @@ enum Pair[A, B] {
     }
   }
 
-  has_both(&this) bool => this.has_first() && this.has_second();
+  has_both(this) bool => this.has_first() && this.has_second();
 }
 
 test_pair_methods() `test {
@@ -221,7 +221,7 @@ enum Tagged[T] {
   Value(T data),
   Nil,
 
-  describe(&this, string prefix = "tag") string {
+  describe(this, string prefix = "tag") string {
     match this {
       Value(_) => {
         return "{prefix}: value";
@@ -261,7 +261,7 @@ enum Status[T] {
 
   get is_err bool => !this.is_ok;
 
-  error_message(&this) string {
+  error_message(this) string {
     match this {
       Ok(_) => {
         return "";
@@ -272,7 +272,7 @@ enum Status[T] {
     }
   }
 
-  summary(&this) string {
+  summary(this) string {
     if this.is_ok {
       return "ok";
     }
@@ -299,7 +299,7 @@ enum Flag[T] {
   On(T data),
   Off,
 
-  is_on(&this) bool {
+  is_on(this) bool {
     match this {
       On(_) => {
         return true;
@@ -310,7 +310,7 @@ enum Flag[T] {
     }
   }
 
-  is_off(&this) bool => !this.is_on();
+  is_off(this) bool => !this.is_on();
 }
 
 test_generic_enum_expression_body() `test {
@@ -330,7 +330,7 @@ enum Holder[T] {
   Val(T value),
   Empty,
 
-  unwrap_or(&this, T default_val) T {
+  unwrap_or(this, T default_val) T {
     match this {
       Holder.Val(v) => {
         return _b0102_identity[T](v);

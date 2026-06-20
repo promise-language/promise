@@ -8,15 +8,15 @@ type HttpRequest {
   string body;
   int timeout;
 
-  set_method(~this, ~string m) {
+  set_method(~this, string move m) {
     this.method = m;
   }
 
-  set_url(~this, ~string u) {
+  set_url(~this, string move u) {
     this.url = u;
   }
 
-  set_body(~this, ~string b) {
+  set_body(~this, string move b) {
     this.body = b;
   }
 
@@ -24,7 +24,7 @@ type HttpRequest {
     this.timeout = t;
   }
 
-  describe(&this) string {
+  describe(this) string {
     return "{this.method} {this.url} (timeout={this.timeout}s, body={this.body})";
   }
 }

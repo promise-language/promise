@@ -104,7 +104,7 @@ confined_enum_ref_heap_drop() `test {
 // is non-atomic; both some and none payloads must drop cleanly (no double-free).
 confined_ref_optional_some() `test {
   ConfinedData? init = ConfinedData(x: 8);
-  a := Ref[ConfinedData?](init);
+  a := Ref[ConfinedData?](move init);
   b := a.clone();
   if v := a.borrow {
     assert(v.x == 8, "confined optional some");
@@ -116,7 +116,7 @@ confined_ref_optional_some() `test {
 
 confined_ref_optional_none() `test {
   ConfinedData? init = none;
-  a := Ref[ConfinedData?](init);
+  a := Ref[ConfinedData?](move init);
   b := a.clone();
   if _ := a.borrow {
     assert(false, "expected none");

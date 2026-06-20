@@ -97,6 +97,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#moveParam.
 	VisitMoveParam(ctx *MoveParamContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#legacyMoveParam.
+	VisitLegacyMoveParam(ctx *LegacyMoveParamContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#regularParam.
 	VisitRegularParam(ctx *RegularParamContext) interface{}
 

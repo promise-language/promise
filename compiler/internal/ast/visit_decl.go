@@ -562,6 +562,13 @@ func (b *Builder) VisitReceiverParam(ctx *parser.ReceiverParamContext) interface
 	}
 	if rm := ctx.RefMod(); rm != nil {
 		node.RefMod = b.visitRefMod(rm)
+		// `&this` is no longer a valid receiver: bare `this` is the shared
+		// (read-only) borrow. Keep the node well-formed (treat as bare `this`)
+		// and emit a guiding migration error.
+		if node.RefMod == RefShared {
+			b.errorf(node.pos, "`&this` is no longer a valid receiver; write bare `this` for a shared (read-only) borrow (or `~this` for a mutable borrow)")
+			node.RefMod = RefNone
+		}
 	}
 	return node
 }
@@ -584,14 +591,33 @@ func (b *Builder) VisitRegularParam(ctx *parser.RegularParamContext) interface{}
 	return node
 }
 
-// T0087: ~ prefix on parameter type means move (callee takes ownership).
+// T0998: `T move name` — the `move` keyword after the type means the callee
+// takes ownership (consumes the argument). RefMut is the consume modifier.
 func (b *Builder) VisitMoveParam(ctx *parser.MoveParamContext) interface{} {
 	node := &Param{
 		nodeBase: b.baseFromContext(ctx),
 		Type:     b.visitTypeRef(ctx.TypeRef()),
 		Name:     b.bindingText(ctx.BindingName()),
-		RefMod:   RefMut, // ~ means move/owned by callee
+		RefMod:   RefMut, // `move` means owned/consumed by callee
 	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	return node
+}
+
+// VisitLegacyMoveParam handles the removed `~T name` move-parameter spelling.
+// T0998 replaced it with `T move name`; emit a guiding migration error while
+// keeping the node well-formed so the rest of the file still type-checks.
+func (b *Builder) VisitLegacyMoveParam(ctx *parser.LegacyMoveParamContext) interface{} {
+	node := &Param{
+		nodeBase: b.baseFromContext(ctx),
+		Type:     b.visitTypeRef(ctx.TypeRef()),
+		Name:     b.bindingText(ctx.BindingName()),
+		RefMod:   RefMut,
+	}
+	b.errorf(node.pos, "the `~Type %s` move-parameter spelling is no longer valid; write `Type move %s` to transfer ownership",
+		node.Name, node.Name)
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}

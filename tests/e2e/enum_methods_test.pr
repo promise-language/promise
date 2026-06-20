@@ -2,7 +2,7 @@
 enum Color {
   Red, Green, Blue,
 
-  describe(&this) string {
+  describe(this) string {
     match this {
       Color.Red => {
         return "red";
@@ -16,7 +16,7 @@ enum Color {
     }
   }
 
-  is_warm(&this) bool {
+  is_warm(this) bool {
     match this {
       Color.Red => {
         return true;
@@ -80,7 +80,7 @@ enum Shape {
   Rectangle(f64 width, f64 height),
   Point,
 
-  area(&this) f64 {
+  area(this) f64 {
     match this {
       Shape.Circle(r) => {
         return 3.14159 * r * r;
@@ -94,7 +94,7 @@ enum Shape {
     }
   }
 
-  is_point(&this) bool {
+  is_point(this) bool {
     match this {
       Shape.Point => {
         return true;
@@ -127,7 +127,7 @@ test_data_enum_method_is_point() `test {
 enum Direction {
   North, South, East, West,
 
-  equals(&this, Direction other) bool {
+  equals(this, Direction other) bool {
     match this {
       Direction.North => {
         match other {
@@ -185,7 +185,7 @@ test_enum_method_with_params() `test {
 enum Level {
   Low, Medium, High,
 
-  rank(&this) int {
+  rank(this) int {
     match this {
       Level.Low => {
         return 1;
@@ -199,7 +199,7 @@ enum Level {
     }
   }
 
-  is_higher_than(&this, Level other) bool {
+  is_higher_than(this, Level other) bool {
     return this.rank() > other.rank();
   }
 
@@ -217,7 +217,7 @@ enum Level {
     }
   }
 
-  full_description(&this) string {
+  full_description(this) string {
     return this.label;
   }
 }
@@ -237,9 +237,9 @@ test_enum_method_calls_getter() `test {
 enum Toggle {
   On, Off,
 
-  is_on(&this) bool => this.to_int() == 1;
+  is_on(this) bool => this.to_int() == 1;
 
-  to_int(&this) int {
+  to_int(this) int {
     match this {
       Toggle.On => {
         return 1;
@@ -262,7 +262,7 @@ test_enum_expression_body() `test {
 enum Config {
   Debug, Release,
 
-  validate!(&this) string {
+  validate!(this) string {
     match this {
       Config.Debug => {
         return "debug-mode";
@@ -353,7 +353,7 @@ test_data_enum_getter() `test {
 enum Logger {
   Info, Warn,
 
-  tag(&this) string {
+  tag(this) string {
     match this {
       Logger.Info => {
         return "INFO";
@@ -376,7 +376,7 @@ test_void_enum_method() `test {
 enum Severity {
   Low, High,
 
-  format(&this, string prefix = "severity") string {
+  format(this, string prefix = "severity") string {
     match this {
       Severity.Low => {
         return "{prefix}: low";
@@ -397,7 +397,7 @@ test_enum_method_default_param() `test {
 enum Source {
   Valid, Invalid,
 
-  load!(&this) string {
+  load!(this) string {
     match this {
       Source.Valid => {
         return "data";

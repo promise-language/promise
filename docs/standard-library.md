@@ -177,7 +177,7 @@ Fully implemented with structural interfaces, duck-typed for-in, all combinators
 | `to_string()` | **Available** on all primitives via `"{this}"` | — |
 | `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` | — |
 | `Builder` | **Implemented** in `modules/std/builder.pr` (pure Promise) | — |
-| User type interpolation | **Implemented** — `"{x}"` desugars to Builder + `x.format(~builder)!` + `builder.to_string()` for types implementing `Format` | — |
+| User type interpolation | **Implemented** — `"{x}"` desugars to Builder + `x.format(builder)!` + `builder.to_string()` for types implementing `Format` | — |
 
 **Types** (in `modules/std/format.pr`):
 
@@ -203,7 +203,7 @@ Writer is byte-oriented (like Go's `io.Writer`), making it usable for files, net
 
 **How it works**: `Format` types write their string representation into a `Writer` via `write_string()`. The caller controls the buffer, and multiple format calls compose without intermediate allocations. `format()` is failable because underlying `Writer.write()` may fail (e.g., I/O error).
 
-`to_string()` is synthesized from `format()`: create a Builder (which satisfies `Writer`), call `format!(~builder) `, return `builder.to_string()`. No need for types to implement `to_string()` separately. Builder's `write()` never fails, so the `!` is safe.
+`to_string()` is synthesized from `format()`: create a Builder (which satisfies `Writer`), call `format!(builder) `, return `builder.to_string()`. No need for types to implement `to_string()` separately. Builder's `write()` never fails, so the `!` is safe.
 
 **String interpolation** `"value: {x}"` desugars to:
 ```promise
@@ -226,9 +226,9 @@ type Point {
 
     format!(Writer ~w) {
         w.write_string("(");
-        this.x.format(~w);
+        this.x.format(w);
         w.write_string(", ");
-        this.y.format(~w);
+        this.y.format(w);
         w.write_string(")");
     }
 }
@@ -247,7 +247,7 @@ print_line("point: {p}");   // point: (3, 4)
 | `Scanner` | **Done** | Wraps string, satisfies Reader, tracks position. In `modules/std/parse.pr` |
 | `scan[T]()` | **Done** | Generic convenience: `scan[int]("42")!` — wraps string in Scanner, calls `T.parse` |
 
-**The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(~writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
+**The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
 
 **Proposed types** (in `modules/std/parse.pr`):
 
@@ -259,7 +259,7 @@ type Reader `structural {
     // Default method — reads n bytes and returns as string
     read_string!(~this, int n) string {
         mut buf := u8[](capacity: n);
-        bytes_read := this.read!(~buf);
+        bytes_read := this.read!(buf);
         return string.from_bytes(buf);
     }
 
@@ -310,7 +310,7 @@ Because Scanner satisfies `Reader`, `next[T: Parse]()` simply calls `T.parse(~th
 // Parse a full string as T (wraps in a Scanner internally)
 scan![T: Parse](string s) T {
     mut r := Scanner(s: s);
-    return T.parse(~r);
+    return T.parse(r);
 }
 
 // Usage:
@@ -347,10 +347,10 @@ type Point {
 
     parse!(Reader ~r) Self `factory {
         // parse "3,4" format
-        px := int.parse!(~r);
+        px := int.parse!(r);
         comma := r.read_string!(1);
         if comma != "," { raise error(message: "expected comma"); }
-        py := int.parse!(~r);
+        py := int.parse!(r);
         return Point(x: px, y: py);
     }
 }
@@ -394,7 +394,7 @@ x := s.next![int]();
 | Direction | Value → Writer | Reader → Value |
 | Concrete wrapper | Builder (satisfies Writer) | Scanner (satisfies Reader) |
 | String helper | `w.write_string(s)` | `r.read_string(n)` |
-| Generic usage | `x.format(~writer)` | `T.parse(~reader)` |
+| Generic usage | `x.format(writer)` | `T.parse(reader)` |
 | Convenience | string interpolation | `scan[T](string)` |
 | Works with files | File satisfies Writer | File satisfies Reader |
 
@@ -896,7 +896,7 @@ exit_process(int code);
 get args string[];
 executable_path() string;
 execute!(string program, ...string arguments) ProcessResult ;
-set_env_var(string name, ~string? value);
+set_env_var(string name, string? move value);
 set_working_dir(string path) !;
 
 // Streaming process execution
@@ -1054,13 +1054,13 @@ type EmbeddedFiles `doc("Virtual read-only filesystem for compile-time embedded 
 
     get files EmbeddedFile[] `doc("List all embedded entries.") => this._entries;
 
-    read(&this, string path) string!
+    read(this, string path) string!
         `doc("Read an embedded file as a UTF-8 string. Raises if path not found.");
 
-    read_bytes(&this, string path) u8[]!
+    read_bytes(this, string path) u8[]!
         `doc("Read an embedded file as raw bytes. Raises if path not found.");
 
-    contains(&this, string path) bool
+    contains(this, string path) bool
         `doc("Check whether a path exists in the embedded tree.");
 }
 
@@ -1168,13 +1168,13 @@ Promise test files use the `test` keyword:
 ```promise
 test "sort empty vector" {
     mut v := int[]();
-    sort(~v);
+    sort(v);
     assert(v.len == 0, "empty vector should remain empty");
 }
 
 test "sort integers" {
     mut v := [3, 1, 4, 1, 5, 9, 2, 6];
-    sort(~v);
+    sort(v);
     assert(v[0] == 1, "first element should be 1");
     assert(v[7] == 9, "last element should be 9");
 }

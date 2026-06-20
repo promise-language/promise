@@ -12,38 +12,38 @@ type Plain {
 
 type Base {
   string name;
-  tag(&this) string `abstract;
+  tag(this) string `abstract;
   drop(~this) {
   }
 }
 
 type Der is Base {
   string extra;
-  tag(&this) string {
+  tag(this) string {
     return "der";
   }
 }
 
 // `~Plain?` consume param, bound force-unwrap.
-consume_force_unwrap(~Plain? o) string {
+consume_force_unwrap(Plain? move o) string {
   p := o!;
   return p.name;
 }
 
 // `~Plain?` consume param, typed-bound force-unwrap.
-consume_typed_unwrap(~Plain? o) string {
+consume_typed_unwrap(Plain? move o) string {
   Plain p = o!;
   return p.name;
 }
 
 // `~Base?` consume param, bound force cast.
-consume_force_cast(~Base? o) string {
+consume_force_cast(Base? move o) string {
   d := o as! Der;
   return d.name;
 }
 
 // `~Base?` consume param, optional (non-force) cast.
-consume_opt_cast(~Base? o) bool {
+consume_opt_cast(Base? move o) bool {
   Der? d = o as Der;
   if d {
     return true;
@@ -74,27 +74,27 @@ local_source_unwrap() string {
 consume_force_unwrap_runs() `test {
   Plain x = Plain(name: "alpha");
   Plain? o = x;
-  assert(consume_force_unwrap(o) == "alpha", "force-unwrap consume");
+  assert(consume_force_unwrap(move o) == "alpha", "force-unwrap consume");
 }
 
 consume_typed_unwrap_runs() `test {
   Plain x = Plain(name: "beta");
   Plain? o = x;
-  assert(consume_typed_unwrap(o) == "beta", "typed force-unwrap consume");
+  assert(consume_typed_unwrap(move o) == "beta", "typed force-unwrap consume");
 }
 
 consume_force_cast_runs() `test {
   Der d = Der(name: "gamma", extra: "e");
   Base b = d;
   Base? o = b;
-  assert(consume_force_cast(o) == "gamma", "force cast consume");
+  assert(consume_force_cast(move o) == "gamma", "force cast consume");
 }
 
 consume_opt_cast_runs() `test {
   Der d = Der(name: "delta", extra: "e");
   Base b = d;
   Base? o = b;
-  assert(consume_opt_cast(o), "optional cast consume");
+  assert(consume_opt_cast(move o), "optional cast consume");
 }
 
 inline_unwrap_runs() `test {

@@ -11,7 +11,7 @@
 type Box[T] {
   T? value;
 
-  set_via_method(this, ~T new_val) {
+  set_via_method(this, T move new_val) {
     this.value = new_val;
   }
 }

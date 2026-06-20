@@ -375,7 +375,7 @@ func TestDocEnumCompactWithMethods(t *testing.T) {
 			get is_null bool `+"`public"+` {
 				match this { Json.Null => { return true; }, _ => { return false; } }
 			}
-			as_string(&this) string? `+"`public"+` {
+			as_string(this) string? `+"`public"+` {
 				match this { Json.Str(s) => { return s; }, _ => { return none; } }
 			}
 		}
@@ -387,7 +387,7 @@ func TestDocEnumCompactWithMethods(t *testing.T) {
 	// Getter renders with `get`, no parens.
 	assertContainsDoc(t, out, "get is_null bool")
 	// Method renders with parens.
-	assertContainsDoc(t, out, "as_string(&this) string?")
+	assertContainsDoc(t, out, "as_string(this) string?")
 	// The getter must NOT appear in call form.
 	assertNotContainsDoc(t, out, "is_null()")
 }
@@ -421,7 +421,7 @@ func TestDocTypeSummaryGetterVsMethod(t *testing.T) {
 			int _len;
 
 			get len int `+"`public"+` { return this._len; }
-			to_string(&this) string `+"`public"+` { return "buf"; }
+			to_string(this) string `+"`public"+` { return "buf"; }
 		}
 	`, docOpts{publicOnly: true, sigOnly: true})
 
@@ -429,7 +429,7 @@ func TestDocTypeSummaryGetterVsMethod(t *testing.T) {
 	// Getter: no parens (cheap, field-like).
 	assertContainsDoc(t, out, "get len int")
 	// Method: parens (allocates) — the cost signal.
-	assertContainsDoc(t, out, "to_string(&this) string")
+	assertContainsDoc(t, out, "to_string(this) string")
 	// The getter must NOT be rendered in call form anywhere.
 	assertNotContainsDoc(t, out, "len()")
 }
@@ -441,10 +441,10 @@ func TestDocOperators(t *testing.T) {
 		type Vec2 `+"`public"+` {
 			f64 x `+"`public"+`;
 			f64 y `+"`public"+`;
-			+(Vec2 &a, Vec2 &b) Vec2 `+"`public"+` {
+			+(Vec2 a, Vec2 b) Vec2 `+"`public"+` {
 				return Vec2(x: a.x + b.x, y: a.y + b.y);
 			}
-			==(Vec2 &a, Vec2 &b) bool `+"`public"+` {
+			==(Vec2 a, Vec2 b) bool `+"`public"+` {
 				return a.x == b.x && a.y == b.y;
 			}
 		}
@@ -627,14 +627,14 @@ func TestDocReceiverRefMods(t *testing.T) {
 			mutate(~this) `+"`public"+` {
 				this.x = 1;
 			}
-			inspect(&this) int `+"`public"+` {
+			inspect(this) int `+"`public"+` {
 				return this.x;
 			}
 		}
 	`, docOpts{publicOnly: true})
 
 	assertContainsDoc(t, out, "mutate(~this)")
-	assertContainsDoc(t, out, "inspect(&this) int")
+	assertContainsDoc(t, out, "inspect(this) int")
 }
 
 // === Divider between types ===
@@ -823,12 +823,12 @@ func TestDocFieldDefaultNegative(t *testing.T) {
 
 func TestDocFuncRefParam(t *testing.T) {
 	out := docFromSource(t, `
-		inspect(int &val) int `+"`public"+` {
+		inspect(int val) int `+"`public"+` {
 			return val;
 		}
 	`, docOpts{publicOnly: true})
 
-	assertContainsDoc(t, out, "inspect(int& val) int")
+	assertContainsDoc(t, out, "inspect(int val) int")
 }
 
 // === Subscript operators shown in summary, not operators line ===
@@ -840,7 +840,7 @@ func TestDocSubscriptOps(t *testing.T) {
 			[](int idx) int `+"`public"+` {
 				return idx;
 			}
-			+(Grid &a, Grid &b) Grid `+"`public"+` {
+			+(Grid a, Grid b) Grid `+"`public"+` {
 				return a;
 			}
 		}

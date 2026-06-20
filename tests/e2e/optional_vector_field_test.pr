@@ -45,7 +45,7 @@ test_vec_field_data_integrity() `test {
   v.push(10);
   v.push(20);
   v.push(30);
-  s := HolderVec(data: v);
+  s := HolderVec(data: move v);
   if vv := s.data {
     assert(vv.len == 3, "len");
     assert(vv[0] == 10, "elem 0");
@@ -71,7 +71,7 @@ test_string_vec_field_with_elements() `test {
   sv := string[]();
   sv.push("hello");
   sv.push("world");
-  s := HolderStrVec(items: sv);
+  s := HolderStrVec(items: move sv);
   if v := s.items {
     assert(v.len == 2, "len");
     assert(v[0] == "hello", "elem 0");
@@ -96,7 +96,7 @@ test_ident_source_vec_field() `test {
   v := int[]();
   v.push(1);
   v.push(2);
-  s := HolderVec(data: v);
+  s := HolderVec(data: move v);
   if vv := s.data {
     assert(vv.len == 2, "ident source len");
   } else {
@@ -116,8 +116,8 @@ test_nested_vec_field_construct() `test {
   outer := int[][]();
   i1 := int[]();
   i1.push(7);
-  outer.push(i1);
-  h := NestedHolder(grid: outer);
+  outer.push(move i1);
+  h := NestedHolder(grid: move outer);
   if g := h.grid {
     assert(g.len == 1, "nested len");
     assert(g[0].len == 1, "inner len");
@@ -141,7 +141,7 @@ type ItemHolder {
 test_user_type_vec_field_construct() `test {
   items := Item[]();
   items.push(Item(id: 1, name: "x" + ""));
-  h := ItemHolder(items: items);
+  h := ItemHolder(items: move items);
   if v := h.items {
     assert(v.len == 1, "user vec len");
   } else {
@@ -160,7 +160,7 @@ test_generic_owner_int_vec_field_construct() `test {
   v := int[]();
   v.push(1);
   v.push(2);
-  b := GenericBox[int](data: v);
+  b := GenericBox[int](data: move v);
   if vv := b.data {
     assert(vv.len == 2, "generic int len");
   } else {
@@ -171,7 +171,7 @@ test_generic_owner_int_vec_field_construct() `test {
 test_generic_owner_string_vec_field_construct() `test {
   sv := string[]();
   sv.push("hi" + "");
-  b := GenericBox[string](data: sv);
+  b := GenericBox[string](data: move sv);
   if vv := b.data {
     assert(vv.len == 1, "generic string len");
   } else {

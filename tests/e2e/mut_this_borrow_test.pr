@@ -16,7 +16,7 @@ type Counter {
     this.bump();
   }
 
-  relabel(~this, ~string s) {
+  relabel(~this, string move s) {
     this.label = s;
   }
 }

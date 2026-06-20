@@ -33,6 +33,7 @@ type Arg struct {
 	nodeBase
 	Name  string // "" for positional
 	Value Expr
+	Move  bool // true if written `move <expr>` — consumes a named binding (§6.2)
 }
 
 // IndexExpr represents an index expression: target[index] or

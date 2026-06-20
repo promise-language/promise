@@ -92,25 +92,25 @@ mk_holder(int n) Holder {
 
 // borrowed `&owner` parameter: the caller owns the Holder; the result must be
 // independent (force-unwrap leaves the alias owned by the caller).
-ref_hu_fu(Holder &h) int {
+ref_hu_fu(Holder h) int {
   return (h.hb!).n;
 }
-ref_hu_hd(Holder &h) int {
+ref_hu_hd(Holder h) int {
   return (h.hb? _ {
     return -1;
   }).n;
 }
-ref_hu_hn(Holder &h) int {
+ref_hu_hn(Holder h) int {
   return (h.hb? _ {
     HBox(n: -1)
   }).n;
 }
-ref_s_hn(Holder &h) int {
+ref_s_hn(Holder h) int {
   return (h.s? _ {
     "z".to_upper()
   }).len;
 }
-ref_v_hn(Holder &h) int {
+ref_v_hn(Holder h) int {
   return (h.v? _ {
     ["z".to_upper()]
   }).len;

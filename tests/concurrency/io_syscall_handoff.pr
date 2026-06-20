@@ -12,7 +12,7 @@ interleaved ok""", exclude: wasm) {
   go {
     io.File.write_content(os.temp_dir + "/pr_syscall_t1", "hello from goroutine")?!;
     string data = io.File.read_content(os.temp_dir + "/pr_syscall_t1")?!;
-    ch.send(data);
+    ch.send(move data);
   };
   r := <-ch;
   if result := r {

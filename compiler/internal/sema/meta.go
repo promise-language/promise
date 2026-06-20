@@ -160,10 +160,15 @@ func extractLifetime(annotations []*ast.MetaAnnotation) string {
 	return ""
 }
 
-// isRefParam returns true if a parameter is a reference parameter,
-// either via explicit Ref modifier (&/~) or via reference type (SharedRef/MutRef).
+// isRefParam returns true if a parameter borrows its argument and so may carry a
+// `lifetime annotation (T0998). A bare `T name` is a shared borrow, and a `T~`
+// (MutRef) parameter is a mutable borrow — both are eligible. A `move`
+// parameter (RefMut modifier) takes ownership and is therefore NOT a borrow.
 func isRefParam(p *types.Param) bool {
-	if p.Ref() == types.RefShared || p.Ref() == types.RefMut {
+	if p.Ref() == types.RefMut {
+		return false // `move` parameter — owned, not a borrow
+	}
+	if p.Ref() == types.RefNone || p.Ref() == types.RefShared {
 		return true
 	}
 	switch p.Type().(type) {

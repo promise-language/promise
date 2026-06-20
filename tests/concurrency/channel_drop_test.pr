@@ -50,7 +50,7 @@ type WithChan {
 channel_drop_field() `test {
   ch := channel[int](capacity: 1);
   ch.send(7);
-  w := WithChan(ch: ch);
+  w := WithChan(ch: move ch);
   result := <-w.ch;
   if v := result {
     assert(v == 7, "expected 7");
@@ -70,7 +70,7 @@ type Outer {
 channel_drop_nested_field() `test {
   ch := channel[int](capacity: 1);
   ch.send(42);
-  o := Outer(inner: Inner(ch: ch), x: 1);
+  o := Outer(inner: Inner(ch: move ch), x: 1);
   result := <-o.inner.ch;
   if v := result {
     assert(v == 42, "expected 42");

@@ -64,7 +64,7 @@ none_recovery_on_optional_failable() `test {
   // loadf("boom") raises → recovered to none.
   string[] got = [];
   if r := recover_none("boom")?! {
-    got.push(r);
+    got.push(move r);
   }
   assert(got.len == 0, "raised call recovers to none");
 

@@ -8,7 +8,7 @@ enum Light {
   Green,
 
   // Transition to the next state.
-  next(&this) Light {
+  next(this) Light {
     return match this {
       Light.Red => Light.Green,
       Light.Green => Light.Yellow,
@@ -16,7 +16,7 @@ enum Light {
     };
   }
 
-  name(&this) string {
+  name(this) string {
     return match this {
       Light.Red => "RED",
       Light.Green => "GREEN",

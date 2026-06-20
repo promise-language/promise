@@ -368,7 +368,7 @@ _inflate_dynamic!(_BitReader ~br, u8[] ~out) {
     i = i + 1;
   }
 
-  _HuffTable code_len_tree = _HuffTable(code_lengths: code_len_lens)?^;
+  _HuffTable code_len_tree = _HuffTable(code_lengths: move code_len_lens)?^;
 
   // Decode hlit + hdist code lengths using the code-length alphabet.
   int total = hlit + hdist;
@@ -434,13 +434,13 @@ _inflate_dynamic!(_BitReader ~br, u8[] ~out) {
     j = j + 1;
   }
 
-  _HuffTable lit = _HuffTable(code_lengths: lit_lens)?^;
-  _HuffTable dist = _HuffTable(code_lengths: dist_lens)?^;
+  _HuffTable lit = _HuffTable(code_lengths: move lit_lens)?^;
+  _HuffTable dist = _HuffTable(code_lengths: move dist_lens)?^;
   _inflate_huffman_body(br, out, lit, dist)?^;
 }
 
-inflate!(~u8[] data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (RFC 1951). Raises DecompressError on malformed input.") {
-  _BitReader br = _BitReader(data: data);
+inflate!(u8[] move data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (RFC 1951). Raises DecompressError on malformed input.") {
+  _BitReader br = _BitReader(data: move data);
   u8[] out = u8[]();
   bool done = false;
   while !done {
@@ -465,7 +465,7 @@ inflate!(~u8[] data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (R
 // Maximum payload of a single DEFLATE stored block (RFC 1951 §3.2.4: LEN is u16).
 _stored_block_max() int => 65535;
 
-deflate(u8[] &data) u8[] `public `doc("Compresses raw bytes into a DEFLATE stream (RFC 1951). v1 emits stored (uncompressed) blocks only — the output is valid DEFLATE that round-trips exactly, but is not size-reduced. Real Huffman+LZ77 compression is tracked as T0462.") {
+deflate(u8[] data) u8[] `public `doc("Compresses raw bytes into a DEFLATE stream (RFC 1951). v1 emits stored (uncompressed) blocks only — the output is valid DEFLATE that round-trips exactly, but is not size-reduced. Real Huffman+LZ77 compression is tracked as T0462.") {
   _BitWriter bw = _BitWriter();
   int n = data.len;
   int max_block = _stored_block_max();

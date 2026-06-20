@@ -6,7 +6,7 @@ type Readable `structural {
 }
 
 type DataSource `structural {
-  open_source(~string name) Readable `abstract;
+  open_source(string move name) Readable `abstract;
 }
 
 type MemReadable {
@@ -17,8 +17,8 @@ type MemReadable {
 }
 
 type MemDataSource {
-  open_source(~string name) MemReadable {
-    return MemReadable(data: name);
+  open_source(string move name) MemReadable {
+    return MemReadable(data: move name);
   }
 }
 
@@ -37,12 +37,12 @@ test_direct_structural_assignment() `test {
 
 // Failable version
 type FailableDataSource `structural {
-  open_source!(~string name) Readable `abstract;
+  open_source!(string move name) Readable `abstract;
 }
 
 type FailableMemDataSource {
-  open_source!(~string name) MemReadable {
-    return MemReadable(data: name);
+  open_source!(string move name) MemReadable {
+    return MemReadable(data: move name);
   }
 }
 
@@ -66,8 +66,8 @@ test_failable_covariant_error_handler() `test {
 
 // Non-failable concrete satisfies failable interface with covariant return
 type SafeMemDataSource {
-  open_source(~string name) MemReadable {
-    return MemReadable(data: name);
+  open_source(string move name) MemReadable {
+    return MemReadable(data: move name);
   }
 }
 

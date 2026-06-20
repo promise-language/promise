@@ -305,3 +305,36 @@ func resolveRefMod(rm ast.RefModifier) types.RefMod {
 		return types.RefNone
 	}
 }
+
+// reborrowAssignable reports whether an already-borrowed reference value
+// (`T&`/`T~`) may bind to a non-reference borrow parameter of type paramType
+// (T0998). A bare parameter borrows its argument, so passing an existing
+// reference reborrows it — e.g. `f(v[i])` where indexing yields `T&` and `f`
+// takes a bare `T`. Only applies when paramType is itself not a reference type
+// (a `T~` mutable-borrow parameter still requires an exact reference match).
+func reborrowAssignable(argType, paramType types.Type) bool {
+	switch paramType.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return false
+	}
+	var elem types.Type
+	switch r := argType.(type) {
+	case *types.SharedRef:
+		elem = r.Elem()
+	case *types.MutRef:
+		elem = r.Elem()
+	default:
+		return false
+	}
+	return types.AssignableTo(elem, paramType)
+}
+
+// rejectSharedRefParam reports the removed `&` parameter form (T0998). The
+// shared (read-only) borrow is the unmarked default, so `T& name` / `T &name`
+// is redundant — a bare `T name` already borrows. Mutable-borrow parameters keep
+// the `T~ name` spelling, so only `*types.SharedRef` param types are rejected.
+func (c *Checker) rejectSharedRefParam(pos ast.Pos, name string, pt types.Type) {
+	if _, ok := pt.(*types.SharedRef); ok {
+		c.errorf(pos, "`&` is not a parameter marker; a plain `Type %s` parameter is already a shared (read-only) borrow — remove the `&`", name)
+	}
+}

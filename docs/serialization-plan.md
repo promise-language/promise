@@ -199,7 +199,7 @@ type Decoder `public
 
 - The interface is **streaming/event-based**, not tree-based. This means formats that are inherently streaming (MessagePack, Protocol Buffers) don't need to build a tree first.
 - The interface is small: ~16 methods per side. Compare with serde's 30+ — we keep it simple because Promise types have fewer representations (signed integers → `encode_int`, unsigned integers → `encode_uint`, floats → `encode_f64` — no per-width methods). Sized types (i8, u16, etc.) route through int/uint with range checking on decode.
-- `encode_value` has a default implementation that dispatches to `value.encode(~encoder)`, enabling recursive encoding of nested `Encodable` types.
+- `encode_value` has a default implementation that dispatches to `value.encode(encoder)`, enabling recursive encoding of nested `Encodable` types.
 
 ### 3.3 The `Encodable` and `Decodable` Structural Interfaces
 
@@ -400,7 +400,7 @@ type Wrapper[T] `serializable {
 }
 ```
 
-The generated `encode` method calls `this.value.encode!(~e) ` — which requires `T` to be `Encodable`. The compiler **adds an implicit constraint** `T: Encodable` (for encode) and `T: Decodable` (for decode) on the type parameters of a `serializable` generic type. This is validated at instantiation.
+The generated `encode` method calls `this.value.encode!(e) ` — which requires `T` to be `Encodable`. The compiler **adds an implicit constraint** `T: Encodable` (for encode) and `T: Decodable` (for decode) on the type parameters of a `serializable` generic type. This is validated at instantiation.
 
 For non-serializable field types, the compiler emits a clear error:
 

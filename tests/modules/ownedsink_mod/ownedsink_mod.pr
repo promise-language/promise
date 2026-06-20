@@ -3,7 +3,7 @@
 // paths: an owned `~Writer` param defined inside a *module* must be dropped at the
 // callee's exit, just like the user-file path.
 // Module free function taking an owned Writer view (defineModuleFuncs path).
-sink_in_module(~Writer w) `public `doc("Consumes an owned Writer view; drops it at module-function exit.") {
+sink_in_module(Writer move w) `public `doc("Consumes an owned Writer view; drops it at module-function exit.") {
 }
 
 // Module type with a method and a constructor taking owned/by-value Writer views
@@ -13,6 +13,6 @@ type ModConsumer `public `doc("Module type that consumes Writer views.") {
   new(~this, Writer w) `doc("By-value Writer view param of a module `new` constructor; dropped at exit.") {
     this.tag = 1;
   }
-  consume(this, ~Writer w) `doc("Owned Writer view param of a module method; dropped at exit.") {
+  consume(this, Writer move w) `doc("Owned Writer view param of a module method; dropped at exit.") {
   }
 }

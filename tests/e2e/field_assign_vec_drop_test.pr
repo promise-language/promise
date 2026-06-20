@@ -12,7 +12,7 @@ type OptHolder {
 
 type GenHolder[T] {
   T[] field;
-  set_field(~this, ~T[] val) {
+  set_field(~this, T[] move val) {
     this.field = val;
   }
 }
@@ -39,7 +39,7 @@ type SelfHolder {
 test_string_vec_field_reassign() `test {
   v1 := string[]();
   v1.push("init" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v2 := string[]();
   v2.push("hello" + "");
   h.field = v2;
@@ -51,7 +51,7 @@ test_multi_elem_string_vec_field_reassign() `test {
   v1.push("a" + "");
   v1.push("b" + "");
   v1.push("c" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v2 := string[]();
   v2.push("x" + "");
   h.field = v2;
@@ -62,7 +62,7 @@ test_multi_elem_string_vec_field_reassign() `test {
 test_repeated_field_reassign() `test {
   v1 := string[]();
   v1.push("first" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v2 := string[]();
   v2.push("second" + "");
   h.field = v2;
@@ -77,10 +77,10 @@ test_repeated_field_reassign() `test {
 test_generic_string_vec_field_reassign() `test {
   v1 := string[]();
   v1.push("init" + "");
-  h := GenHolder[string](v1);
+  h := GenHolder[string](move v1);
   v2 := string[]();
   v2.push("hello" + "");
-  h.set_field(v2);
+  h.set_field(move v2);
   assert(h.field.len == 1, "generic field has 1 element after reassign");
   assert(h.field[0] == "hello", "generic field element correct after reassign");
 }
@@ -92,7 +92,7 @@ test_generic_string_vec_field_reassign() `test {
 test_t0516_was_duped_path() `test {
   v1 := string[]();
   v1.push("init" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v := h.field;
   w := string[]();
   w.push("new" + "");
@@ -110,10 +110,10 @@ test_t0516_was_duped_path() `test {
 test_t0516_cross_instance() `test {
   va := string[]();
   va.push("a" + "");
-  h1 := Holder(va);
+  h1 := Holder(move va);
   vb := string[]();
   vb.push("b" + "");
-  h2 := Holder(vb);
+  h2 := Holder(move vb);
   v := h1.field;
   w := string[]();
   w.push("c" + "");
@@ -134,7 +134,7 @@ test_t0516_index_recv_self_reassign() `test {
   v1 := string[]();
   v1.push("init" + "");
   arr := Holder[]();
-  arr.push(Holder(v1));
+  arr.push(Holder(move v1));
   v := arr[0].field;
   w := string[]();
   w.push("new" + "");
@@ -149,10 +149,10 @@ test_t0516_index_recv_self_reassign() `test {
 test_t0516_cross_generic_instantiation() `test {
   v1 := int[]();
   v1.push(42);
-  hi := GenHolder[int](v1);
+  hi := GenHolder[int](move v1);
   v2 := string[]();
   v2.push("hello" + "");
-  hs := GenHolder[string](v2);
+  hs := GenHolder[string](move v2);
   vs := hi.field;
   w := string[]();
   w.push("new" + "");
@@ -172,7 +172,7 @@ test_t0516_cross_generic_instantiation() `test {
 test_t0540_dup_only_no_reassign() `test {
   v1 := string[]();
   v1.push("init" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v := h.field;
   assert(v[0] == "init", "dup'd vector reads element");
   assert(h.field[0] == "init", "original field still readable");
@@ -184,7 +184,7 @@ test_t0540_dup_only_multi_element() `test {
   v1.push("a" + "");
   v1.push("b" + "");
   v1.push("c" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v := h.field;
   assert(v.len == 3, "dup len");
   assert(v[0] == "a" && v[1] == "b" && v[2] == "c", "dup elements");
@@ -196,7 +196,7 @@ test_t0540_dup_only_multi_element() `test {
 test_t0540_optional_vec_field() `test {
   v1 := string[]();
   v1.push("opt" + "");
-  h := OptHolder(field: v1);
+  h := OptHolder(field: move v1);
   if v := h.field {
     assert(v[0] == "opt", "optional dup'd vector reads element");
   } else {
@@ -212,7 +212,7 @@ test_t0540_optional_vec_field() `test {
 test_t0541_branch_mutation_cond_true() `test {
   v1 := string[]();
   v1.push("init" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   cond := true;
   v := h.field;
   if cond {
@@ -232,7 +232,7 @@ test_t0541_branch_mutation_cond_true() `test {
 test_t0541_branch_mutation_cond_false() `test {
   v1 := string[]();
   v1.push("init" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   cond := false;
   v := h.field;
   if cond {
@@ -256,7 +256,7 @@ test_t0541_branch_mutation_cond_false() `test {
 test_t0540_dup_plus_reassign_still_drops_originals() `test {
   v1 := string[]();
   v1.push("orig" + "");
-  h := Holder(v1);
+  h := Holder(move v1);
   v := h.field;
   w := string[]();
   w.push("new" + "");
@@ -275,9 +275,9 @@ test_t0540_nested_vec_field_dup() `test {
   inner2 := string[]();
   inner2.push("c" + "");
   outer := string[][]();
-  outer.push(inner1);
-  outer.push(inner2);
-  h := NestedHolder(outer);
+  outer.push(move inner1);
+  outer.push(move inner2);
+  h := NestedHolder(move outer);
   v := h.field;
   assert(v.len == 2, "outer len");
   assert(v[0].len == 2 && v[1].len == 1, "inner lens");
@@ -292,9 +292,9 @@ test_t0540_heap_user_vec_field_dup() `test {
   e1 := HeapElem(name: "alice" + "");
   e2 := HeapElem(name: "bob" + "");
   v1 := HeapElem[]();
-  v1.push(e1);
-  v1.push(e2);
-  h := HeapHolder(v1);
+  v1.push(move e1);
+  v1.push(move e2);
+  h := HeapHolder(move v1);
   v := h.field;
   assert(v.len == 2, "len");
   assert(v[0].name == "alice" && v[1].name == "bob", "v elements");
@@ -308,7 +308,7 @@ test_t0540_this_field_dup_via_method() `test {
   v1 := string[]();
   v1.push("self" + "");
   v1.push("ish" + "");
-  h := SelfHolder(v1);
+  h := SelfHolder(move v1);
   v := h.read_field();
   assert(v.len == 2 && v[0] == "self" && v[1] == "ish", "v elements");
   assert(h.field[0] == "self" && h.field[1] == "ish", "h.field elements");
@@ -318,7 +318,7 @@ test_t0540_this_field_dup_via_method() `test {
 // element clone loop (the `idx < length` guard must skip the body, no crash).
 test_t0540_empty_vec_field_dup() `test {
   v1 := string[]();
-  h := Holder(v1);
+  h := Holder(move v1);
   v := h.field;
   assert(v.len == 0, "v empty");
   assert(h.field.len == 0, "h.field empty");

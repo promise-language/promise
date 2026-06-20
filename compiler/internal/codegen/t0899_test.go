@@ -92,7 +92,7 @@ func TestAssignFieldOperatorReturnThisInGenericBodyEmitsAliasClear(t *testing.T)
 	ir := generateIR(t, `
 		type GB[T] { T v; +(GB[T] o) GB[T] { return this; } drop(~this){} }
 		type GHolder[T] { GB[T] f; drop(~this){} }
-		wrap[T](~GHolder[T] h, ~T x, ~T y) { a := GB[T](v: x); b := GB[T](v: y); h.f = a + b; }
+		wrap[T](GHolder[T] move h, T move x, T move y) { a := GB[T](v: x); b := GB[T](v: y); h.f = a + b; }
 		main() { h := GHolder[int](f: GB[int](v: 0)); wrap[int](h, 5, 9); }
 	`)
 	assertContains(t, ir, "return.this.clear")
@@ -104,7 +104,7 @@ func TestAssignFieldOperatorReturnThisInGenericBodyEmitsAliasClear(t *testing.T)
 func TestAssignIndexOperatorReturnThisInGenericBodyEmitsAliasClear(t *testing.T) {
 	ir := generateIR(t, `
 		type GB[T] { T v; +(GB[T] o) GB[T] { return this; } drop(~this){} }
-		wrap[T](~T x, ~T y, ~T z) { a := GB[T](v: x); b := GB[T](v: y); v := [GB[T](v: z)]; v[0] = a + b; }
+		wrap[T](T move x, T move y, T move z) { a := GB[T](v: x); b := GB[T](v: y); v := [GB[T](v: z)]; v[0] = a + b; }
 		main() { wrap[int](5, 9, 1); }
 	`)
 	assertContains(t, ir, "return.this.clear")

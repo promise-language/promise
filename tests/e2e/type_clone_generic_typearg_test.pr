@@ -17,7 +17,7 @@ test_clone_boxt_map() `test {
   map[string, string] src = map[string, string]();
   src["a"] = "b";
   src["c"] = "d";
-  BoxT[map[string, string]] j = BoxT[map[string, string]](val: src);
+  BoxT[map[string, string]] j = BoxT[map[string, string]](val: move src);
   BoxT[map[string, string]] c = j.clone();
   assert(c.val.len == 2, "clone has 2 entries");
   assert(c.val.get_or("a", "") == "b", "clone a=b");
@@ -29,7 +29,7 @@ test_clone_boxt_map() `test {
 // literal/static bit-63 flag would otherwise mask the double-free).
 test_clone_boxt_heap_string() `test {
   string s = "a" + "b";
-  BoxT[string] j = BoxT[string](val: s);
+  BoxT[string] j = BoxT[string](val: move s);
   BoxT[string] c = j.clone();
   assert(c.val == "ab", "clone string ab");
   assert(j.val == "ab", "original string ab");
@@ -38,7 +38,7 @@ test_clone_boxt_heap_string() `test {
 // TypeArg: string[] — vector of heap strings.
 test_clone_boxt_string_vec() `test {
   string[] data = ["x", "y", "z"];
-  BoxT[string[]] j = BoxT[string[]](val: data);
+  BoxT[string[]] j = BoxT[string[]](val: move data);
   BoxT[string[]] c = j.clone();
   assert(c.val.len == 3, "clone vec len 3");
   assert(c.val[0] == "x", "clone[0]");
@@ -49,7 +49,7 @@ test_clone_boxt_string_vec() `test {
 // TypeArg: int[] — vector of copy scalars (vector itself is still heap).
 test_clone_boxt_int_vec() `test {
   int[] nums = [1, 2, 3, 4];
-  BoxT[int[]] j = BoxT[int[]](val: nums);
+  BoxT[int[]] j = BoxT[int[]](val: move nums);
   BoxT[int[]] c = j.clone();
   assert(c.val.len == 4, "clone len 4");
   assert(c.val[3] == 4, "clone[3]==4");
@@ -73,8 +73,8 @@ type Bag `clone {
 test_clone_boxt_user_clone_type() `test {
   map[string, int] m = map[string, int]();
   m["apples"] = 3;
-  Bag b = Bag(counts: m);
-  BoxT[Bag] j = BoxT[Bag](val: b);
+  Bag b = Bag(counts: move m);
+  BoxT[Bag] j = BoxT[Bag](val: move b);
   BoxT[Bag] c = j.clone();
   assert(c.val.counts.len == 1, "clone bag len 1");
   assert(c.val.counts.get_or("apples", 0) == 3, "clone apples==3");
@@ -86,7 +86,7 @@ test_clone_boxt_user_clone_type() `test {
 test_clone_boxt_map_independence() `test {
   map[string, string] src = map[string, string]();
   src["k"] = "v1";
-  BoxT[map[string, string]] j = BoxT[map[string, string]](val: src);
+  BoxT[map[string, string]] j = BoxT[map[string, string]](val: move src);
   BoxT[map[string, string]] c = j.clone();
   c.val["k"] = "mutated";
   c.val["extra"] = "new";
@@ -106,7 +106,7 @@ test_clone_pair_two_typeparams() `test {
   string[] sv = ["a", "b"];
   map[string, int] mm = map[string, int]();
   mm["z"] = 3;
-  Pair[string[], map[string, int]] j = Pair[string[], map[string, int]](first: sv, second: mm);
+  Pair[string[], map[string, int]] j = Pair[string[], map[string, int]](first: move sv, second: move mm);
   Pair[string[], map[string, int]] c = j.clone();
   assert(c.first.len == 2, "clone first len 2");
   assert(c.second.get_or("z", 0) == 3, "clone second z==3");
@@ -125,7 +125,7 @@ type Mixed[T] `clone {
 test_clone_mixed_concrete_and_typeparam() `test {
   map[string, int] m = map[string, int]();
   m["k"] = 7;
-  Mixed[map[string, int]] j = Mixed[map[string, int]](label: "ta" + "g", payload: m);
+  Mixed[map[string, int]] j = Mixed[map[string, int]](label: "ta" + "g", payload: move m);
   Mixed[map[string, int]] c = j.clone();
   assert(c.label == "tag", "clone concrete-string field intact");
   assert(c.payload.len == 1, "clone TypeParam-map field deep-copied");
@@ -150,7 +150,7 @@ type BoxT2[T] `clone {
 test_clone_optional_typeparam_some() `test {
   map[string, string] src = map[string, string]();
   src["k"] = "v1";
-  BoxT2[map[string, string]] j = BoxT2[map[string, string]](val: src);
+  BoxT2[map[string, string]] j = BoxT2[map[string, string]](val: move src);
   BoxT2[map[string, string]] c = j.clone();
   assert(c.val is present, "clone optional payload present");
   assert(j.val is present, "original optional payload present");
@@ -193,7 +193,7 @@ test_clone_nested_optional_some() `test {
   map[string, string] src = map[string, string]();
   src["k"] = "v1";
   map[string, string]? inner = src;
-  BoxT3[map[string, string]] j = BoxT3[map[string, string]](val: inner);
+  BoxT3[map[string, string]] j = BoxT3[map[string, string]](val: move inner);
   BoxT3[map[string, string]] c = j.clone();
   assert(c.val is present, "clone nested-optional outer present");
   assert(j.val is present, "original nested-optional outer present");
@@ -273,7 +273,7 @@ test_clone_tupbox_string_vec() `test {
 test_clone_tupbox_user_clone_type() `test {
   map[string, int] m = map[string, int]();
   m["apples"] = 3;
-  Bag b = Bag(counts: m);
+  Bag b = Bag(counts: move m);
   TupBox[Bag] j = TupBox[Bag](pr: (b, 9));
   TupBox[Bag] c = j.clone();
   (cb, cn) := c.pr;
@@ -402,7 +402,7 @@ test_clone_tupboxr_map_nonzero_index() `test {
 test_clone_tupboxr_user_clone() `test {
   map[string, int] m = map[string, int]();
   m["apples"] = 3;
-  Bag b = Bag(counts: m);
+  Bag b = Bag(counts: move m);
   TupBoxR[Bag] j = TupBoxR[Bag](r: (1, b));
   TupBoxR[Bag] c = j.clone();
   (cn, cb) := c.r;

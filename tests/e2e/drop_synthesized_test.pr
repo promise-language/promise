@@ -99,6 +99,6 @@ test_vector_field_synth_drop() `test {
   int[] v = int[]();
   v.push(10);
   v.push(20);
-  VecHolder h = VecHolder(items: v, tag: 99);
+  VecHolder h = VecHolder(items: move v, tag: 99);
   assert(h.tag == 99, "B0167: vector field type");
 }

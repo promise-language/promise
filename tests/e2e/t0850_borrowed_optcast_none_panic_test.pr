@@ -6,18 +6,18 @@
 // `optcast.mismatch` block; this covers the absent branch).
 type Shape {
   string name;
-  area(&this) f64 `abstract;
+  area(this) f64 `abstract;
 }
 type Circle is Shape {
   f64 radius;
-  area(&this) f64 {
+  area(this) f64 {
     return this.radius;
   }
 }
 
 main() `test(expected: """panic: cast failed: optional is none""") {
   Circle? init = none;
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   c := a.borrow as! Circle;
   print_line(c.name);
 }

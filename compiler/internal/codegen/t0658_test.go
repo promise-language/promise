@@ -98,7 +98,7 @@ func TestT0658_PushExplicitOptionalNoDoubleWrap(t *testing.T) {
 // resolvedElem / argExprType. Pre-fix this panicked in the mono'd body.
 func TestT0658_PushBareIntoGenericOptionalVector(t *testing.T) {
 	ir := generateIR(t, `
-		_push[T](~T x) int { T?[] v = []; v.push(x); return v.len; }
+		_push[T](T move x) int { T?[] v = []; v.push(x); return v.len; }
 		main() { int n = _push[int](7); }
 	`)
 	body := extractFunc(ir, `"_push[int]"`)

@@ -244,10 +244,10 @@ type ParenPtT0582 {
   int x `value;
   int y `value;
 
-  echo(&this) ParenPtT0582 {
+  echo(this) ParenPtT0582 {
     return (this);
   }
-  echo_nested(&this) ParenPtT0582 {
+  echo_nested(this) ParenPtT0582 {
     return ((this));
   }
 }

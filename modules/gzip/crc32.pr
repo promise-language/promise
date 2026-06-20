@@ -21,7 +21,7 @@ _crc32_table() u32[] {
   return t;
 }
 
-crc32(u8[] &data) u32 `public `doc("Computes the IEEE polynomial CRC32 (used by gzip and zlib) over a byte slice.") {
+crc32(u8[] data) u32 `public `doc("Computes the IEEE polynomial CRC32 (used by gzip and zlib) over a byte slice.") {
   u32[] table = _crc32_table();
   u32 crc = 0xFFFFFFFFu32;
   int i = 0;

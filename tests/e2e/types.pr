@@ -2,24 +2,24 @@ type Point {
   int x;
   int y;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 }
 
 type Animal {
   string name;
-  speak(&this) string `abstract;
+  speak(this) string `abstract;
 }
 
 type Dog is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "woof";
   }
 }
 
 type Cat is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "meow";
   }
 }

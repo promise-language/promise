@@ -88,7 +88,7 @@ test_task_field_reassign() `test(exclude: wasm) {
 
 test_task_field_reassign_same() `test(exclude: wasm) {
   t := go worker_t0560_int();
-  h := T0560SynthHolder(t: t);
+  h := T0560SynthHolder(t: move t);
   // Same-pointer guard prevents UAF; field still drops once at scope exit.
 }
 

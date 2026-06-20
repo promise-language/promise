@@ -39,7 +39,7 @@ t0668_direct_task() `test {
 t0668_task_vector_push() `test {
   Task[int][] v = [];
   task[int] t = go worker_int();
-  v.push(t);
+  v.push(move t);
   assert(v.len == 1, "task pushed into vector");
 }
 

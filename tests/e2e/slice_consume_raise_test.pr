@@ -5,20 +5,20 @@ type _SliceRaiseError is error {
   int dummy;
 }
 
-_consume(~u8[] x) int {
+_consume(u8[] move x) int {
   return x.len;
 }
 
-_slice_consume_raise!(u8[] &data) int {
+_slice_consume_raise!(u8[] data) int {
   u8[] body = data[2:6];
-  int n = _consume(body);
+  int n = _consume(move body);
   if data.len > 0 {
     raise _SliceRaiseError(message: "raise after consume", dummy: n);
   }
   return n;
 }
 
-_try_slice_consume(u8[] &data) bool {
+_try_slice_consume(u8[] data) bool {
   int _v = _slice_consume_raise(data)? e {
     return true;
   };
@@ -40,7 +40,7 @@ slice_consume_raise_no_segfault_test() `test {
 // is distinct from the SharedRef path, so both need an end-to-end test.
 _slice_consume_raise_mut!(u8[] ~data) int {
   u8[] body = data[2:6];
-  int n = _consume(body);
+  int n = _consume(move body);
   if data.len > 0 {
     raise _SliceRaiseError(message: "raise after consume (mut)", dummy: n);
   }

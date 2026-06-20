@@ -10,7 +10,7 @@ type Pair {
 type PairWithMethod {
   int x;
   int y;
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 }

@@ -8,7 +8,7 @@ type Sink {
   drop(~this) {
   }
 
-  set(~this, ~string key, ~string value) {
+  set(~this, string move key, string move value) {
     this.m[key] = value;
   }
 
@@ -19,7 +19,7 @@ type Sink {
 
 test_borrow_param_into_map() `test {
   map[string, string] init = {:};
-  sink := Sink(m: init);
+  sink := Sink(m: move init);
   sink.set("a".clone(), "hello".clone());
   sink.set("b".clone(), "world".clone());
 
@@ -37,7 +37,7 @@ test_borrow_param_into_map() `test {
 
 test_borrow_param_overwrite() `test {
   map[string, string] init = {:};
-  sink := Sink(m: init);
+  sink := Sink(m: move init);
   sink.set("key".clone(), "first".clone());
   sink.set("key".clone(), "second".clone());
 
@@ -50,7 +50,7 @@ test_borrow_param_overwrite() `test {
 
 test_borrow_from_variable() `test {
   map[string, string] init = {:};
-  sink := Sink(m: init);
+  sink := Sink(m: move init);
   string val = "from_var";
   sink.set("k".clone(), val.clone());
 
@@ -64,7 +64,7 @@ test_borrow_from_variable() `test {
 test_heap_string_into_map() `test {
   string val = "he" + "llo";
   map[string, string] init = {:};
-  sink := Sink(m: init);
+  sink := Sink(m: move init);
   sink.set("k".clone(), val.clone());
   if v := sink.get("k") {
     assert(v == "hello", "heap string stored");

@@ -585,7 +585,7 @@ type Ref[T: `entity] `public `value `clone `serializable
     get id Hash128 `instance `doc("The target entity's instance id. No fetch.");
     get is_loaded bool `instance `doc("True if get will return without a round-trip.");
 
-    get!(&this) T `instance `doc("Fetch the target entity. Cache-aware: returns immediately if already loaded.");
+    get!(this) T `instance `doc("Fetch the target entity. Cache-aware: returns immediately if already loaded.");
 }
 ```
 
@@ -644,15 +644,15 @@ has a back-reference `Inverse[Item]` on `Folder`, maintained automatically.
 type Inverse[T: `entity] `public `serializable
     `doc("Lazy collection of entities that have a Ref pointing back at this entity. Server-maintained.") {
 
-    count!(&this) int `instance `doc("Number of entities in the relation. No payloads fetched.");
+    count!(this) int `instance `doc("Number of entities in the relation. No payloads fetched.");
 
     get ids Hash128[] `instance `doc("Just the target ids — no payload fetch. Cached after first access.");
 
-    contains(&this, Hash128 id) bool `instance `doc("Membership check using the cached id list.");
+    contains(this, Hash128 id) bool `instance `doc("Membership check using the cached id list.");
 
-    iter!(&this) Iterator[T] `instance `doc("Paginated iteration. Server fetches in batches as the iterator advances.");
+    iter!(this) Iterator[T] `instance `doc("Paginated iteration. Server fetches in batches as the iterator advances.");
 
-    list!(&this) T[] `instance `doc("Eager materialization. One batched fetch.");
+    list!(this) T[] `instance `doc("Eager materialization. One batched fetch.");
 }
 ```
 

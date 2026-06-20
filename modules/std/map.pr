@@ -12,7 +12,7 @@ type Map[K: Hashable + Equal, V] `public {
   new(~this) {
     this._buckets = [Slot.Empty];
     for _ in 1..16 {
-      this._buckets.push(Slot.Empty);
+      this._buckets.push(move Slot.Empty);
     }
     this._count = 0;
   }
@@ -57,7 +57,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  []=(~K key, ~V value) {
+  []=(K move key, V move value) {
     if this._count * 4 >= this._buckets.len * 3 {
       this._rehash();
     }
@@ -69,18 +69,18 @@ type Map[K: Hashable + Equal, V] `public {
     for {
       match this._buckets[h] {
         Slot.Empty => {
-          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._buckets[h] = Slot.Used(key: move key, value: move value);
           this._count = this._count + 1;
           return;
         },
         Slot.Used(k, _) => {
           if k == key {
-            this._buckets[h] = Slot.Used(key: key, value: value);
+            this._buckets[h] = Slot.Used(key: move key, value: move value);
             return;
           }
         },
         Slot.Tombstone => {
-          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._buckets[h] = Slot.Used(key: move key, value: move value);
           this._count = this._count + 1;
           return;
         },
@@ -141,7 +141,7 @@ type Map[K: Hashable + Equal, V] `public {
     K[] result = [];
     for slot in this._buckets {
       match slot {
-        Slot.Used(k, _) => result.push(k),
+        Slot.Used(k, _) => result.push(move k),
         _ => {
         },
       }
@@ -153,7 +153,7 @@ type Map[K: Hashable + Equal, V] `public {
     V[] result = [];
     for slot in this._buckets {
       match slot {
-        Slot.Used(_, v) => result.push(v),
+        Slot.Used(_, v) => result.push(move v),
         _ => {
         },
       }
@@ -209,7 +209,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  update(~K key, ~V value) bool {
+  update(K move key, V move value) bool {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {
@@ -222,7 +222,7 @@ type Map[K: Hashable + Equal, V] `public {
         },
         Slot.Used(k, _) => {
           if k == key {
-            this._buckets[h] = Slot.Used(key: key, value: value);
+            this._buckets[h] = Slot.Used(key: move key, value: move value);
             return true;
           }
         },
@@ -249,7 +249,7 @@ type Map[K: Hashable + Equal, V] `public {
     for slot in other._buckets {
       match slot {
         Slot.Used(k, v) => {
-          this._set(k, v);
+          this._set(move k, move v);
         },
         _ => {
         },
@@ -296,13 +296,13 @@ type Map[K: Hashable + Equal, V] `public {
     int new_cap = old.len * 2;
     this._buckets = [Slot.Empty];
     for _ in 1..new_cap {
-      this._buckets.push(Slot.Empty);
+      this._buckets.push(move Slot.Empty);
     }
     this._count = 0;
     for slot in old {
       match slot {
         Slot.Used(k, v) => {
-          this._set(k, v);
+          this._set(move k, move v);
         },
         _ => {
         },
@@ -310,7 +310,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  _set(~K key, ~V value) {
+  _set(K move key, V move value) {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {
@@ -319,18 +319,18 @@ type Map[K: Hashable + Equal, V] `public {
     for {
       match this._buckets[h] {
         Slot.Empty => {
-          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._buckets[h] = Slot.Used(key: move key, value: move value);
           this._count = this._count + 1;
           return;
         },
         Slot.Used(k, _) => {
           if k == key {
-            this._buckets[h] = Slot.Used(key: key, value: value);
+            this._buckets[h] = Slot.Used(key: move key, value: move value);
             return;
           }
         },
         Slot.Tombstone => {
-          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._buckets[h] = Slot.Used(key: move key, value: move value);
           this._count = this._count + 1;
           return;
         },

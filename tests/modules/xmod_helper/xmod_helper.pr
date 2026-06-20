@@ -5,7 +5,7 @@ transform[T](T val) T `public {
 double_vec[T](T[] items) T[] `public {
   T[] result = T[]();
   for item in items {
-    result.push(item);
+    result.push(move item);
     result.push(item);
   }
   return result;
@@ -13,7 +13,7 @@ double_vec[T](T[] items) T[] `public {
 
 type HBox[T] `public {
   Vector[T] d;
-  size(&this) int `public {
+  size(this) int `public {
     return this.d.len;
   }
 }
@@ -26,7 +26,7 @@ type HBox[T] `public {
 take_box_mut[X](HBox[X] ~b) int `public {
   return b.size();
 }
-take_box_shared[X](HBox[X] &b) int `public {
+take_box_shared[X](HBox[X] b) int `public {
   return b.size();
 }
 take_owned_string[T](string ~s, T _x) int `public {

@@ -4,11 +4,11 @@
 type Box[T] {
   T value;
 
-  get(&this) T {
+  get(this) T {
     return this.value;
   }
 
-  set(~this, ~T val) {
+  set(~this, T move val) {
     this.value = val;
   }
 }
@@ -89,11 +89,11 @@ test_identity_string() `test {
 type Container[T] {
   T[] items;
 
-  count(&this) int {
+  count(this) int {
     return this.items.len;
   }
 
-  first(&this) T? {
+  first(this) T? {
     if this.items.len > 0 {
       return this.items[0];
     }
@@ -107,7 +107,7 @@ type Container[T] {
 
 test_container_int() `test {
   int[] empty_ints = [];
-  c := Container[int](items: empty_ints);
+  c := Container[int](items: move empty_ints);
   assert(c.count() == 0, "empty container");
   c.add(10);
   c.add(20);
@@ -198,7 +198,7 @@ type Echo {
   }
 }
 
-invoke_echo[T](Echo &e, T val) T {
+invoke_echo[T](Echo e, T val) T {
   return e.echo[T](val);
 }
 
@@ -217,7 +217,7 @@ type Foo {
 }
 
 type Bar {
-  delegate[T](Foo &f, T val) T {
+  delegate[T](Foo f, T val) T {
     return f.echo_val[T](val);
   }
 }
@@ -255,7 +255,7 @@ id_func[T](T val) T {
 
 type TypeWrapper[T] {
   T value;
-  wrapped(&this) T {
+  wrapped(this) T {
     return id_func[T](this.value);
   }
 }
@@ -272,7 +272,7 @@ test_type_instance_resolves_func() `test {
 type TypeMethodWrapper[T] {
   T value;
   Echo echoer;
-  echoed(&this) T {
+  echoed(this) T {
     return this.echoer.echo[T](this.value);
   }
 }
@@ -372,7 +372,7 @@ test_multiple_inner_generic_calls() `test {
 // --- Cross-resolution: method calls both func and method ---
 
 type Combiner {
-  run[T](Echo &e, T val) T {
+  run[T](Echo e, T val) T {
     T a = helper_func[T](val);
     return e.echo[T](a);
   }

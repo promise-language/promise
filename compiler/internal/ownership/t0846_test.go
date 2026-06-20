@@ -67,12 +67,12 @@ func TestT0846AutoDropOK(t *testing.T) {
 }
 
 // Guard specificity: the consume-on-close rule is scoped to MutexGuard.close.
-// A user type with its own close(&this) method is an ordinary mutable-borrow
+// A user type with its own close(this) method is an ordinary mutable-borrow
 // call — calling it (even twice) must NOT mark the receiver Moved, so reuse
 // stays legal. Pins that isConsumingNativeMethod does not over-consume.
 func TestT0846UserCloseNotConsumed(t *testing.T) {
 	ownerOK(t, `
-		type Conn { int fd; close(&this) {} drop(~this){} }
+		type Conn { int fd; close(this) {} drop(~this){} }
 		f() {
 			c := Conn(fd: 1);
 			c.close();

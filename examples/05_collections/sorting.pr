@@ -3,7 +3,7 @@
 // sort() sorts a vector in-place. Works on any type that satisfies Ordered.
 // Usage: vec = sort(vec)
 // Helper to print an int vector.
-print_int_vec(int[] &v) {
+print_int_vec(int[] v) {
   print("[");
   for i in 0..v.len {
     if i > 0 {
@@ -15,7 +15,7 @@ print_int_vec(int[] &v) {
 }
 
 // Helper to print a string vector.
-print_str_vec(string[] &v) {
+print_str_vec(string[] v) {
   print("[");
   for i in 0..v.len {
     if i > 0 {

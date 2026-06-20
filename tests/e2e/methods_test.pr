@@ -6,7 +6,7 @@ type Accumulator {
     this.total += n;
   }
 
-  get_total(&this) int {
+  get_total(this) int {
     return this.total;
   }
 
@@ -14,7 +14,7 @@ type Accumulator {
     this.total = 0;
   }
 
-  is_zero(&this) bool {
+  is_zero(this) bool {
     return this.total == 0;
   }
 }
@@ -35,11 +35,11 @@ test_accumulator() `test {
 type Greeting {
   string template;
 
-  format(&this, string name) string {
+  format(this, string name) string {
     return this.template + ", " + name + "!";
   }
 
-  word_count(&this) int {
+  word_count(this) int {
     string[] words = this.template.split(" ");
     return words.len;
   }
@@ -58,19 +58,19 @@ type Permissions {
   bool write;
   bool exec;
 
-  can_read(&this) bool {
+  can_read(this) bool {
     return this.read;
   }
-  can_write(&this) bool {
+  can_write(this) bool {
     return this.write;
   }
-  can_exec(&this) bool {
+  can_exec(this) bool {
     return this.exec;
   }
-  is_readonly(&this) bool {
+  is_readonly(this) bool {
     return this.read && !this.write;
   }
-  has_any(&this) bool {
+  has_any(this) bool {
     return this.read || this.write || this.exec;
   }
 }
@@ -96,7 +96,7 @@ type Player {
     this.score += points;
   }
 
-  is_winning(&this, int threshold) bool {
+  is_winning(this, int threshold) bool {
     return this.score >= threshold;
   }
 }
@@ -135,7 +135,7 @@ type Calculator {
     }
   }
 
-  value(&this) int {
+  value(this) int {
     return this.result;
   }
 }
@@ -162,15 +162,15 @@ type Matrix2x2 {
   int c;
   int d;
 
-  det(&this) int {
+  det(this) int {
     return this.a * this.d - this.b * this.c;
   }
 
-  trace(&this) int {
+  trace(this) int {
     return this.a + this.d;
   }
 
-  is_identity(&this) bool {
+  is_identity(this) bool {
     return this.a == 1 && this.b == 0 && this.c == 0 && this.d == 1;
   }
 }

@@ -50,7 +50,7 @@ obvious things which nobody by any chance ever observes.""";
   for token in raw {
     string w = clean_word(token);
     if w.len > 0 {
-      words.push(w);
+      words.push(move w);
     }
   }
 
@@ -83,7 +83,7 @@ obvious things which nobody by any chance ever observes.""";
   int[] top_counts = [];
   for k, v in freq {
     if top_words.len < 5 {
-      top_words.push(k);
+      top_words.push(move k);
       top_counts.push(v);
     } else {
       // Find the slot with the lowest count.

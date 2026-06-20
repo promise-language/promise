@@ -4,11 +4,11 @@ type Point {
   int x;
   int y;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 
-  scale(&this, int factor, int offset) int {
+  scale(this, int factor, int offset) int {
     return (this.x + this.y) * factor + offset;
   }
 }

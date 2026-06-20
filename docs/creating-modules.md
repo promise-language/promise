@@ -79,7 +79,7 @@ can only depend on `std` (auto-imported) — they cannot import other catalog mo
 
 **5. Full API surface** — Every public type, enum, and function with:
 - Type signatures using Promise syntax
-- `~this` / `&this` annotations (mutability contract)
+- `~this` / `this` annotations (mutability contract)
 - Failable markers (`!`, `?!`)
 - Default parameter values
 - `\`doc` annotation per declaration
@@ -311,7 +311,7 @@ type Screen `public `doc("Main terminal handle — owns raw mode and alternate s
       `doc("Write a styled string starting at pos. Clips at screen edge.");
 
   // Read-only method
-  get_cell(&this, Point[int] pos) Cell
+  get_cell(this, Point[int] pos) Cell
       `doc("Read back a cell from the buffer.");
 }
 

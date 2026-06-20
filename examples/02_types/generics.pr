@@ -6,11 +6,11 @@
 type Box[T] {
   T value;
 
-  get(&this) T {
+  get(this) T {
     return this.value;
   }
 
-  set(~this, ~T val) {
+  set(~this, T move val) {
     this.value = val;
   }
 }

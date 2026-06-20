@@ -46,7 +46,7 @@ type KeyIter {
   string[] keys;
   int pos;
 
-  next_key(&this) string? {
+  next_key(this) string? {
     if this.pos >= this.keys.len {
       return none;
     }
@@ -57,7 +57,7 @@ type KeyIter {
     this.pos += 1;
   }
 
-  current_pos(&this) int {
+  current_pos(this) int {
     return this.pos;
   }
 }
@@ -68,7 +68,7 @@ test_while_unwrap_reborrow() `test {
   while key := it.next_key() {
     // Body re-borrows `it` — this was the B0004 bug.
     int p = it.current_pos();
-    collected.push(key);
+    collected.push(move key);
     it.advance();
   }
   assert(collected.len == 3, "collected 3 keys");
@@ -83,7 +83,7 @@ test_while_unwrap_mut_reborrow() `test {
   KeyIter it = KeyIter(keys: ["x", "y"], pos: 0);
   int advances = 0;
   while key := it.next_key() {
-    // Condition: shared borrow (&this). Body: mutable borrow (~this).
+    // Condition: shared borrow (this). Body: mutable borrow (~this).
     it.advance();
     advances += 1;
   }

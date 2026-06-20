@@ -24,34 +24,34 @@ type _T0468OptHolder[T] {
 
 inherit_field_label_no_leak() `test {
   s := "hello".repeat(2);
-  h := _T0468Holder[int](data: _T0468Box[int](val: 1, label: s));
+  h := _T0468Holder[int](data: _T0468Box[int](val: 1, label: move s));
   assert(h.data.val == 1, "v");
 }
 
 inherit_field_val_heap_no_leak() `test {
   v := "v".repeat(2);
-  h := _T0468Holder[string](data: _T0468Box[string](val: v, label: "fixed"));
+  h := _T0468Holder[string](data: _T0468Box[string](val: move v, label: "fixed"));
   assert(h.data.val == "vv", "v");
 }
 
 inherit_field_both_heap_no_leak() `test {
   v := "v".repeat(2);
   s := "s".repeat(2);
-  h := _T0468Holder[string](data: _T0468Box[string](val: v, label: s));
+  h := _T0468Holder[string](data: _T0468Box[string](val: move v, label: move s));
   assert(h.data.val == "vv", "v");
   assert(h.data.label == "ss", "label");
 }
 
 inherit_local_no_leak() `test {
   s := "x".repeat(2);
-  b := _T0468Box[int](val: 7, label: s);
+  b := _T0468Box[int](val: 7, label: move s);
   assert(b.val == 7, "v");
   assert(b.label == "xx", "label");
 }
 
 inherit_optional_to_none_no_leak() `test {
   s := "x".repeat(2);
-  h := _T0468OptHolder[int](data: _T0468Box[int](val: 1, label: s));
+  h := _T0468OptHolder[int](data: _T0468Box[int](val: 1, label: move s));
   h.data = none;
   assert(!(h.data is _T0468Box[int]), "absent");
 }
@@ -59,8 +59,8 @@ inherit_optional_to_none_no_leak() `test {
 inherit_optional_to_value_no_leak() `test {
   s1 := "old".repeat(2);
   s2 := "new".repeat(2);
-  h := _T0468OptHolder[int](data: _T0468Box[int](val: 1, label: s1));
-  h.data = _T0468Box[int](val: 2, label: s2);
+  h := _T0468OptHolder[int](data: _T0468Box[int](val: 1, label: move s1));
+  h.data = _T0468Box[int](val: 2, label: move s2);
   assert(h.data is _T0468Box[int], "present");
 }
 
@@ -87,7 +87,7 @@ type _T0468ChainHolder[T] {
 inherit_chain_no_leak() `test {
   m := "m".repeat(2);
   o := "o".repeat(2);
-  h := _T0468ChainHolder[int](data: _T0468C[int](anchor: 1, mid: m, outer: o));
+  h := _T0468ChainHolder[int](data: _T0468C[int](anchor: 1, mid: move m, outer: move o));
   assert(h.data.mid == "mm", "mid");
   assert(h.data.outer == "oo", "outer");
 }
@@ -96,12 +96,12 @@ inherit_chain_no_leak() `test {
 // parameter, so the call site emits a vtable-dispatched drop (not direct).
 // The vtable for Box[T] must point to Box[T].drop — not Logger[T].drop —
 // otherwise the child's own fields leak through the dispatch.
-_T0468_receive[T](~_T0468Logger[T] l) {
+_T0468_receive[T](_T0468Logger[T] move l) {
 }
 
 inherit_virtual_dispatch_no_leak() `test {
   s := "v".repeat(2);
-  _T0468_receive[int](_T0468Box[int](val: 1, label: s));
+  _T0468_receive[int](_T0468Box[int](val: 1, label: move s));
 }
 
 // Child with no own fields — synthesis still runs but the own-field drop loop
@@ -115,7 +115,7 @@ type _T0468PlainHolder[T] {
 
 inherit_no_own_fields_no_leak() `test {
   v := "v".repeat(2);
-  h := _T0468PlainHolder[string](data: _T0468Plain[string](val: v));
+  h := _T0468PlainHolder[string](data: _T0468Plain[string](val: move v));
   assert(h.data.val == "vv", "v");
 }
 
@@ -127,9 +127,9 @@ inherit_in_vector_no_leak() `test {
   s1 := "a".repeat(2);
   s2 := "b".repeat(2);
   s3 := "c".repeat(2);
-  _T0468Box[int][] xs = [_T0468Box[int](val: 1, label: s1),
-  _T0468Box[int](val: 2, label: s2),
-  _T0468Box[int](val: 3, label: s3),
+  _T0468Box[int][] xs = [_T0468Box[int](val: 1, label: move s1),
+  _T0468Box[int](val: 2, label: move s2),
+  _T0468Box[int](val: 3, label: move s3),
   ];
   assert(xs.len == 3, "len");
   assert(xs[0].label == "aa", "0.label");
@@ -142,8 +142,8 @@ inherit_in_map_no_leak() `test {
   s1 := "x".repeat(2);
   s2 := "y".repeat(2);
   map[string, _T0468Box[int]] m = {
-    "a": _T0468Box[int](val: 1, label: s1),
-    "b": _T0468Box[int](val: 2, label: s2),
+    "a": _T0468Box[int](val: 1, label: move s1),
+    "b": _T0468Box[int](val: 2, label: move s2),
   };
   assert(m.len == 2, "len");
   assert(m.contains("a"), "a present");
@@ -172,7 +172,7 @@ type _T0468NgHolder[T] {
 inherit_non_generic_parent_no_leak() `test {
   n := "n".repeat(2);
   s := "s".repeat(2);
-  h := _T0468NgHolder[int](data: _T0468NgChild[int](note: n, extra: 7, label: s));
+  h := _T0468NgHolder[int](data: _T0468NgChild[int](note: move n, extra: 7, label: move s));
   assert(h.data.note == "nn", "note");
   assert(h.data.extra == 7, "extra");
   assert(h.data.label == "ss", "label");
@@ -189,8 +189,8 @@ type _T0468ReassignHolder[T] {
 inherit_field_reassign_no_leak() `test {
   s1 := "old".repeat(2);
   s2 := "new".repeat(2);
-  h := _T0468ReassignHolder[int](data: _T0468Box[int](val: 1, label: s1));
-  h.data = _T0468Box[int](val: 2, label: s2);
+  h := _T0468ReassignHolder[int](data: _T0468Box[int](val: 1, label: move s1));
+  h.data = _T0468Box[int](val: 2, label: move s2);
   assert(h.data.val == 2, "val");
   assert(h.data.label == "newnew", "label");
 }

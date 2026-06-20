@@ -14,7 +14,7 @@ test_forin_array_string_move_to_vector() `test {
   string[3] arr = ["hello", "world", "test"];
   string[] result = string[]();
   for elem in arr {
-    result.push(elem);
+    result.push(move elem);
   }
   assert(result.len == 3, "result length");
   assert(result[0] == "hello", "first");
@@ -26,7 +26,7 @@ test_forin_array_string_with_index() `test {
   string[2] arr = ["a", "b"];
   string[] result = string[]();
   for i, elem in arr {
-    result.push(elem);
+    result.push(move elem);
   }
   assert(result.len == 2, "result length");
   assert(result[0] == "a", "first");

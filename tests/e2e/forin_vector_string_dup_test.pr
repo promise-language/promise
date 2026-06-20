@@ -7,7 +7,7 @@ test_forin_vector_string_move_to_set() `test {
   string[] items = m.keys();
   Set[string] s = Set[string]();
   for elem in items {
-    s.add(elem);
+    s.add(move elem);
   }
   // items is dropped here — dup'd strings in the set must be independent
   assert(s.contains("hello"), "set must contain hello");
@@ -28,7 +28,7 @@ test_forin_vector_string_with_index() `test {
   string[] v = ["a", "b", "c"];
   string[] result = string[]();
   for i, elem in v {
-    result.push(elem);
+    result.push(move elem);
   }
   assert(result.len == 3, "result length");
   assert(result[0] == "a", "first");
@@ -64,7 +64,7 @@ test_forin_vector_string_keys_to_vector() `test {
   string[] items = m.keys();
   Set[string] s = Set[string]();
   for elem in items {
-    s.add(elem);
+    s.add(move elem);
   }
   assert(s.contains("hello"), "crash here without fix — use after free");
 }

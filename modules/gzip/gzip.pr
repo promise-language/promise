@@ -9,7 +9,7 @@ _FLG_FCOMMENT() int => 0x10;
 
 // Skip a NUL-terminated string in `data` starting at `pos`. Returns the index
 // of the byte right after the terminating 0x00. Raises if no NUL is found.
-_skip_cstring!(u8[] &data, int pos) int {
+_skip_cstring!(u8[] data, int pos) int {
   int i = pos;
   while i < data.len {
     if data[i] == 0u8 {
@@ -21,7 +21,7 @@ _skip_cstring!(u8[] &data, int pos) int {
 }
 
 // Read 4 bytes little-endian as u32 from `data` starting at `pos`.
-_read_u32_le!(u8[] &data, int pos) u32 {
+_read_u32_le!(u8[] data, int pos) u32 {
   if pos + 4 > data.len {
     raise DecompressError(message: "gzip stream truncated (need 4 bytes)", at_byte: pos);
   }
@@ -33,7 +33,7 @@ _read_u32_le!(u8[] &data, int pos) u32 {
 }
 
 // Read 2 bytes little-endian as u32 from `data` starting at `pos`.
-_read_u16_le!(u8[] &data, int pos) u32 {
+_read_u16_le!(u8[] data, int pos) u32 {
   if pos + 2 > data.len {
     raise DecompressError(message: "gzip stream truncated (need 2 bytes)", at_byte: pos);
   }
@@ -42,7 +42,7 @@ _read_u16_le!(u8[] &data, int pos) u32 {
   return b0 | (b1 << 8u32);
 }
 
-gunzip!(u8[] &data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (RFC 1952). Validates magic, CRC32, and uncompressed length. Raises DecompressError on any failure. Decodes only the first member of multi-member streams.") {
+gunzip!(u8[] data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (RFC 1952). Validates magic, CRC32, and uncompressed length. Raises DecompressError on any failure. Decodes only the first member of multi-member streams.") {
   if data.len < 18 {
     raise DecompressError(message: "gzip stream too short (header + trailer require 18 bytes)", at_byte: 0);
   }
@@ -90,7 +90,7 @@ gunzip!(u8[] &data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (
   u32 expected_isize = _read_u32_le(data, trailer_pos + 4)?^;
 
   u8[] body = data[pos: trailer_pos];
-  u8[] result = inflate(body)?^;
+  u8[] result = inflate(move body)?^;
 
   // ISIZE = uncompressed length mod 2^32. Compare low 32 bits.
   u32 actual_isize = (result.len as! u32);
@@ -106,7 +106,7 @@ gunzip!(u8[] &data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (
   return result;
 }
 
-gzip_encode(u8[] &data) u8[] `public `doc("Compresses bytes into a gzip-formatted stream (RFC 1952). The output is valid gzip readable by standard tools (gunzip, the gzip Go package, etc.). Currently uses stored-block DEFLATE — the output round-trips correctly but is not size-reduced. Real Huffman-based compression is tracked as T0462. Named gzip_encode rather than gzip() to avoid conflicting with the module name when imported as `use gzip;`.") {
+gzip_encode(u8[] data) u8[] `public `doc("Compresses bytes into a gzip-formatted stream (RFC 1952). The output is valid gzip readable by standard tools (gunzip, the gzip Go package, etc.). Currently uses stored-block DEFLATE — the output round-trips correctly but is not size-reduced. Real Huffman-based compression is tracked as T0462. Named gzip_encode rather than gzip() to avoid conflicting with the module name when imported as `use gzip;`.") {
   u8[] out = u8[]();
   // Fixed header: magic(2) + CM(1) + FLG(1) + MTIME(4) + XFL(1) + OS(1) = 10 bytes.
   out.push(0x1Fu8);

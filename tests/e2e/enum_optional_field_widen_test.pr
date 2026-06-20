@@ -138,7 +138,7 @@ string_none_literal() `test {
 
 vec_bare_widen() `test {
   int[] data = [1, 2, 3];
-  MaybeVec j = MaybeVec.Slot(data);
+  MaybeVec j = MaybeVec.Slot(move data);
   match j {
     MaybeVec.Slot(s) => {
       if v := s {
@@ -173,7 +173,7 @@ map_bare_widen() `test {
   map[string, int] m = {
     "a": 1, "b": 2
   };
-  MaybeMap j = MaybeMap.Slot(m);
+  MaybeMap j = MaybeMap.Slot(move m);
   match j {
     MaybeMap.Slot(s) => {
       if v := s {
@@ -318,8 +318,8 @@ optional_user_type_none() `test {
 // types (surfaced as `fatal: stack overflow` for T=map[string,int]). The
 // `~T` form is the sound construction; callers pass literals/owned locals.
 
-make_box[T](~T x) Box[T] {
-  return Box[T].Full(x);
+make_box[T](T move x) Box[T] {
+  return Box[T].Full(move x);
 }
 
 generic_fn_bare_widen_int() `test {
@@ -354,7 +354,7 @@ generic_fn_bare_widen_string() `test {
 
 generic_fn_bare_widen_vec() `test {
   int[] d = [4, 5];
-  Box[int[]] b = make_box(d);
+  Box[int[]] b = make_box(move d);
   match b {
     Box.Full(s) => {
       if v := s {
@@ -376,7 +376,7 @@ generic_fn_bare_widen_map() `test {
   map[string, int] m = {
     "a": 1, "b": 2
   };
-  Box[map[string, int]] b = make_box(m);
+  Box[map[string, int]] b = make_box(move m);
   match b {
     Box.Full(s) => {
       if v := s {
@@ -545,8 +545,8 @@ closure_optional_none() `test {
 // flag is correctly cleared. The Go IR test exercises the equivalent `T?`
 // (borrowed) shape with Copy inner type, since that avoids T0635 entirely.
 
-make_box_opt[T](~T? x) Box[T] {
-  return Box[T].Full(x);
+make_box_opt[T](T? move x) Box[T] {
+  return Box[T].Full(move x);
 }
 
 generic_fn_explicit_opt_int() `test {
@@ -569,7 +569,7 @@ generic_fn_explicit_opt_int() `test {
 // generic-fn body's typeSubst.
 generic_fn_explicit_opt_string() `test {
   string? o = "ab".to_upper();
-  Box[string] b = make_box_opt(o);
+  Box[string] b = make_box_opt(move o);
   match b {
     Box.Full(s) => {
       if v := s {
@@ -585,7 +585,7 @@ generic_fn_explicit_opt_string() `test {
 generic_fn_explicit_opt_vec() `test {
   int[] d = [4, 5, 6];
   int[]? o = d;
-  Box[int[]] b = make_box_opt(o);
+  Box[int[]] b = make_box_opt(move o);
   match b {
     Box.Full(s) => {
       if v := s {
@@ -609,7 +609,7 @@ generic_fn_explicit_opt_map() `test {
     "k": 9, "j": 8
   };
   map[string, int]? o = src;
-  Box[map[string, int]] b = make_box_opt(o);
+  Box[map[string, int]] b = make_box_opt(move o);
   match b {
     Box.Full(s) => {
       if v := s {
@@ -644,7 +644,7 @@ generic_fn_explicit_none() `test {
 // typeSubst-substituted Optional variant data path.
 generic_fn_explicit_opt_pt_user() `test {
   Pt? p_opt = Pt(x: 3, y: 4);
-  Box[Pt] b = make_box_opt(p_opt);
+  Box[Pt] b = make_box_opt(move p_opt);
   match b {
     Box.Full(s) => {
       if pt := s {
@@ -662,8 +662,8 @@ generic_fn_explicit_opt_pt_user() `test {
 
 type Wrap[T] {
   T seed;
-  mk_opt(this, ~T? o) Box[T] {
-    return Box[T].Full(o);
+  mk_opt(this, T? move o) Box[T] {
+    return Box[T].Full(move o);
   }
 }
 
@@ -686,7 +686,7 @@ generic_method_explicit_opt_int() `test {
 generic_method_explicit_opt_string() `test {
   Wrap[string] w = Wrap[string](seed: "seed");
   string? o = "xyz".to_upper();
-  Box[string] b = w.mk_opt(o);
+  Box[string] b = w.mk_opt(move o);
   match b {
     Box.Full(s) => {
       if v := s {
@@ -828,7 +828,7 @@ generic_method_none_literal_string() `test {
 // inner types (not .rodata literals). The earlier generic_fn_bare_widen_*
 // tests only use int / string-literal / int[]-literal, whose .rodata flag
 // makes drop a no-op and thus masked the borrowed-param double-free. These
-// exercise the consume path of `make_box[T](~T x)` with a heap-allocated
+// exercise the consume path of `make_box[T](T move x)` with a heap-allocated
 // string and a heap user type Pt: caller's drop flag must be cleared at the
 // move into the variant field (no double-free), and the enum drop must free
 // exactly once (0 leaks under enforcement). The fix landed via T0634 (the
@@ -837,7 +837,7 @@ generic_method_none_literal_string() `test {
 
 generic_fn_bare_widen_string_heap() `test {
   string s = "ab".to_upper();
-  Box[string] b = make_box(s);
+  Box[string] b = make_box(move s);
   match b {
     Box.Full(slot) => {
       if v := slot {
@@ -852,7 +852,7 @@ generic_fn_bare_widen_string_heap() `test {
 
 generic_fn_bare_widen_pt_user() `test {
   Pt p = Pt(x: 8, y: 9);
-  Box[Pt] b = make_box(p);
+  Box[Pt] b = make_box(move p);
   match b {
     Box.Full(slot) => {
       if pt := slot {

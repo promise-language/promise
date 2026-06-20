@@ -98,7 +98,7 @@ func TestT0561_MutexGuardLocalBindingClaimsTemp(t *testing.T) {
 // double-free). Verify caller does NOT call MutexGuard.drop on its temp.
 func TestT0561_MutexGuardMoveTempNoDoubleFree(t *testing.T) {
 	ir := generateIR(t, `
-		take_guard_move(~MutexGuard[int] g) {}
+		take_guard_move(MutexGuard[int] move g) {}
 		caller() {
 			m := Mutex[int](42);
 			take_guard_move(m.lock());

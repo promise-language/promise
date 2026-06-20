@@ -550,6 +550,20 @@ func (c *Checker) subjectIsMovableOwnedLocal(subject ast.Expr, subjectType types
 	case *types.SharedRef, *types.MutRef:
 		return false
 	}
+	// T0998: a bare `T name` or `T~ name` parameter is a borrow (its argument
+	// belongs to the caller), and the receiver `this`/`~this` is never owned —
+	// a single-owner handle cannot be moved out of any of them. Only a `move`
+	// parameter (RefMut) or a plain owned local is movable.
+	if c.curFunc != nil {
+		if c.curFunc.Recv() != nil && id.Name == "this" {
+			return false
+		}
+		for _, p := range c.curFunc.Params() {
+			if p.Name() == id.Name {
+				return p.Ref() == types.RefMut // movable only if it is a `move` parameter
+			}
+		}
+	}
 	return true
 }
 

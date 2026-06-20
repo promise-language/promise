@@ -26,7 +26,7 @@ join(string sep, ...string items) string {
 type Adder {
   int base;
 
-  addAll(&this, ...int values) int {
+  addAll(this, ...int values) int {
     int total = this.base;
     for v in values {
       total += v;

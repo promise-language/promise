@@ -17,7 +17,7 @@ test_arc_string_vec_drop() `test {
   v := string[]();
   v.push("hello" + "");
   v.push("world" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   // Confirm Arc holds the vector. Drop fires on scope exit when refcount → 0.
   assert(a.borrow.len == 2, "arc string vec len");
 }
@@ -29,7 +29,7 @@ test_arc_string_vec_drop_clones() `test {
   v.push("a" + "");
   v.push("b" + "");
   v.push("c" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   b := a.clone();
   c := a.clone();
   assert(a.borrow.len == 3, "arc len before drops");
@@ -43,7 +43,7 @@ test_mutex_string_vec_drop() `test {
   v := string[]();
   v.push("foo" + "");
   v.push("bar" + "");
-  m := Mutex[string[]](v);
+  m := Mutex[string[]](move v);
   use guard := m.lock();
   assert(guard.borrow.len == 2, "mutex string vec len");
 }
@@ -54,7 +54,7 @@ test_arc_user_type_vec_drop() `test {
   items := T0358Item[]();
   items.push(T0358Item(id: 1, name: "alpha" + ""));
   items.push(T0358Item(id: 2, name: "beta" + ""));
-  a := Ref[T0358Item[]](items);
+  a := Ref[T0358Item[]](move items);
   assert(a.borrow.len == 2, "arc user vec len");
 }
 
@@ -65,14 +65,14 @@ test_mutex_nested_vec_drop() `test {
   inner1 := int[]();
   inner1.push(1);
   inner1.push(2);
-  outer.push(inner1);
+  outer.push(move inner1);
 
   inner2 := int[]();
   inner2.push(3);
   inner2.push(4);
-  outer.push(inner2);
+  outer.push(move inner2);
 
-  m := Mutex[int[][]](outer);
+  m := Mutex[int[][]](move outer);
   use guard := m.lock();
   assert(guard.borrow.len == 2, "mutex nested len");
 }
@@ -83,7 +83,7 @@ test_arc_string_vec_no_borrow() `test {
   v := string[]();
   v.push("alpha" + "");
   v.push("beta" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   // a goes out of scope without any read; pure Arc.drop path exercised.
 }
 
@@ -93,6 +93,6 @@ test_mutex_string_vec_no_lock() `test {
   v := string[]();
   v.push("p" + "");
   v.push("q" + "");
-  m := Mutex[string[]](v);
+  m := Mutex[string[]](move v);
   // m goes out of scope without lock; pure Mutex.drop path exercised.
 }

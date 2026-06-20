@@ -6,7 +6,7 @@
 test_arc_push() `test {
   a := Ref[int](42);
   outer := Vector[Ref[int]]();
-  outer.push(a);
+  outer.push(move a);
   assert(outer.len == 1, "arc push len");
 }
 
@@ -48,7 +48,7 @@ test_weak_push() `test {
   a := Ref[int](42);
   w := a.downgrade();
   outer := Vector[Weak[int]]();
-  outer.push(w);
+  outer.push(move w);
   assert(outer.len == 1, "weak push len");
 }
 
@@ -64,7 +64,7 @@ test_weak_push_dup_via_filled() `test {
 test_mutex_push() `test {
   m := Mutex[int](42);
   outer := Vector[Mutex[int]]();
-  outer.push(m);
+  outer.push(move m);
   assert(outer.len == 1, "mutex push len");
 }
 

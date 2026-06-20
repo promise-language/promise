@@ -31,8 +31,8 @@ test_nested_vector_constructor() `test {
   inner1.push(2);
   inner2 := int[]();
   inner2.push(3);
-  v.push(inner1);
-  v.push(inner2);
+  v.push(move inner1);
+  v.push(move inner2);
   assert(v.len == 2, "outer len = 2");
   assert(v[0].len == 2, "inner0 len = 2");
   assert(v[1][0] == 3, "inner1[0] = 3");

@@ -42,16 +42,16 @@ test_self_param_non_generic() `test {
 
 type Box[T] {
   T value;
-  new(~this, ~T v) {
+  new(~this, T move v) {
     this.value = v;
   }
 
-  wrap(~T v) Self `factory {
-    return Self(v: v);
+  wrap(T move v) Self `factory {
+    return Self(v: move v);
   }
 
-  rewrap(~T v) Self {
-    return Self(v: v);
+  rewrap(T move v) Self {
+    return Self(v: move v);
   }
 
   same_as(Self other) bool {
@@ -91,17 +91,17 @@ test_self_factory_assigns_to_annotated_type() `test {
 type Pair[A, B] {
   A first;
   B second;
-  new(~this, ~A a, ~B b) {
+  new(~this, A move a, B move b) {
     this.first = a;
     this.second = b;
   }
 
-  make(~A a, ~B b) Self `factory {
-    return Self(a: a, b: b);
+  make(A move a, B move b) Self `factory {
+    return Self(a: move a, b: move b);
   }
 
-  with_first(~A a) Self {
-    return Pair[A, B](a: a, b: this.second);
+  with_first(A move a) Self {
+    return Pair[A, B](a: move a, b: this.second);
   }
 }
 
@@ -138,13 +138,13 @@ test_vector_filled_string_uses_self() `test {
 type Counter[T] {
   T value;
   int count;
-  new(~this, ~T v) {
+  new(~this, T move v) {
     this.value = v;
     this.count = 0;
   }
 
-  create(~T v) Self `factory {
-    return Self(v: v);
+  create(T move v) Self `factory {
+    return Self(v: move v);
   }
 
   inc() Self {
@@ -162,12 +162,12 @@ test_self_chained() `test {
 
 type Validated[T] {
   T value;
-  new(~this, ~T v) {
+  new(~this, T move v) {
     this.value = v;
   }
 
-  parse!(~T v) Self `factory {
-    return Self(v: v);
+  parse!(T move v) Self `factory {
+    return Self(v: move v);
   }
 }
 
@@ -185,15 +185,15 @@ test_self_failable_factory_generic_string() `test {
 
 type MaybeBox[T] {
   T value;
-  new(~this, ~T v) {
+  new(~this, T move v) {
     this.value = v;
   }
 
-  try_wrap(~T v, bool succeed) Self? `factory {
+  try_wrap(T move v, bool succeed) Self? `factory {
     if !succeed {
       return none;
     }
-    return Self(v: v);
+    return Self(v: move v);
   }
 }
 
@@ -211,7 +211,7 @@ test_self_optional_factory_none() `test {
 
 type Holder[T] {
   T value;
-  new(~this, ~T v) {
+  new(~this, T move v) {
     this.value = v;
   }
 

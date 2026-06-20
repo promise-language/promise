@@ -13,8 +13,8 @@ enum Holder {
   Empty,
 }
 
-make_resource(~string name) Resource {
-  return Resource(name: name);
+make_resource(string move name) Resource {
+  return Resource(name: move name);
 }
 
 consume(Holder h) Holder {
@@ -44,8 +44,8 @@ enum Wrapper {
   None,
 }
 
-make_info(~string label) Info {
-  return Info(label: label);
+make_info(string move label) Info {
+  return Info(label: move label);
 }
 
 test_nonident_synthdrop_enum_arg() `test {

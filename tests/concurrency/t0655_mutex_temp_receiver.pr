@@ -115,7 +115,7 @@ test_ctor_temp_heap_vec_drop() `test {
   v := string[]();
   v.push("a" + "");
   v.push("b" + "");
-  use g := Mutex[string[]](v).lock();
+  use g := Mutex[string[]](move v).lock();
   assert(g.borrow.len == 2, "ctor temp heap-vec element");
 }
 
@@ -146,8 +146,8 @@ test_ctor_temp_string_discard() `test {
 // genMutexMethodCall (expr.go) — zero coverage before this row. The string
 // instantiation makes the promoted-temp element-drop chain leak-meaningful
 // under monomorphization.
-t0655_glock[T](~T v) {
-  use g := Mutex[T](v).lock();
+t0655_glock[T](T move v) {
+  use g := Mutex[T](move v).lock();
 }
 
 test_generic_temp_lock_int() `test {

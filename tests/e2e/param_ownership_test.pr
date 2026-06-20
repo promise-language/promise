@@ -148,7 +148,7 @@ test_virtual_method_identity() `test {
 enum Wrap {
   A, B,
 
-  passthrough(&this, string s) string {
+  passthrough(this, string s) string {
     return s;
   }
 }

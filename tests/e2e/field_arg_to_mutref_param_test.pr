@@ -24,21 +24,21 @@ type GenStrHolder[T] {
   }
 }
 
-t0366_consume_string!(~string s) int {
+t0366_consume_string!(string move s) int {
   return s.len;
 }
 
-t0366_consume_vec!(~int[] v) int {
+t0366_consume_vec!(int[] move v) int {
   return v.len;
 }
 
-t0366_generic_consume_string![T](~string s) int {
+t0366_generic_consume_string![T](string move s) int {
   return s.len;
 }
 
 t0366_string_field_to_mutref() `test {
   StrHolder h = StrHolder(body: "hello world");
-  int n = t0366_consume_string(h.body)?!;
+  int n = t0366_consume_string(move h.body)?!;
   assert(n == 11, "string field to ~ param");
   // h still owns its body — owner drop must not double-free
 }
@@ -48,14 +48,14 @@ t0366_vector_field_to_mutref() `test {
   h.values.push(1);
   h.values.push(2);
   h.values.push(3);
-  int n = t0366_consume_vec(h.values)?!;
+  int n = t0366_consume_vec(move h.values)?!;
   assert(n == 3, "vector field to ~ param");
   // h still owns its values — owner drop must not double-free
 }
 
 t0366_string_field_to_generic_mutref() `test {
   StrHolder h = StrHolder(body: "abcd");
-  int n = t0366_generic_consume_string[int](h.body)?!;
+  int n = t0366_generic_consume_string[int](move h.body)?!;
   assert(n == 4, "string field to generic ~ param");
 }
 

@@ -23,7 +23,7 @@ type Set[T: Hashable + Equal] `public {
     return result;
   }
 
-  add(~T elem) {
+  add(T move elem) {
     this._map[elem] = true;
   }
 

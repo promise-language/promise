@@ -5,17 +5,17 @@
 // =============================================================================
 type Animal {
   string name;
-  speak(&this) string `abstract;
+  speak(this) string `abstract;
 }
 
 type Dog is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "woof";
   }
 }
 
 type Cat is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "meow";
   }
 }
@@ -51,14 +51,14 @@ test_parent_field_via_polymorphic_ref() `test {
 type Logger {
   string prefix;
 
-  log(&this, string msg) string {
+  log(this, string msg) string {
     return this.prefix + ": " + msg;
   }
 }
 
 type TimestampLogger is Logger {
   // Override parent's concrete method
-  log(&this, string msg) string {
+  log(this, string msg) string {
     return "[TS] " + this.prefix + ": " + msg;
   }
 }
@@ -89,9 +89,9 @@ test_concrete_override_polymorphic() `test {
 // =============================================================================
 
 type Renderable {
-  render(&this) string `abstract;
-  width(&this) int `abstract;
-  height(&this) int `abstract;
+  render(this) string `abstract;
+  width(this) int `abstract;
+  height(this) int `abstract;
 }
 
 type TextBox is Renderable {
@@ -99,15 +99,15 @@ type TextBox is Renderable {
   int w;
   int h;
 
-  render(&this) string {
+  render(this) string {
     return "TextBox(" + this.content + ")";
   }
 
-  width(&this) int {
+  width(this) int {
     return this.w;
   }
 
-  height(&this) int {
+  height(this) int {
     return this.h;
   }
 }
@@ -117,15 +117,15 @@ type ImageBox is Renderable {
   int w;
   int h;
 
-  render(&this) string {
+  render(this) string {
     return "Image(" + this.src + ")";
   }
 
-  width(&this) int {
+  width(this) int {
     return this.w;
   }
 
-  height(&this) int {
+  height(this) int {
     return this.h;
   }
 }
@@ -151,9 +151,9 @@ test_interface_polymorphism() `test {
 // =============================================================================
 
 type Formatter {
-  format(&this) string `abstract;
+  format(this) string `abstract;
 
-  display(&this) string {
+  display(this) string {
     return "[" + this.format() + "]";
   }
 }
@@ -161,7 +161,7 @@ type Formatter {
 type NumberFormatter is Formatter {
   int value;
 
-  format(&this) string {
+  format(this) string {
     return "{this.value}";
   }
 }
@@ -169,7 +169,7 @@ type NumberFormatter is Formatter {
 type StringFormatter is Formatter {
   string value;
 
-  format(&this) string {
+  format(this) string {
     return "\"" + this.value + "\"";
   }
 }
@@ -192,22 +192,22 @@ test_abstract_with_concrete_polymorphic() `test {
 // =============================================================================
 
 type Describable {
-  describe(&this) string `abstract;
+  describe(this) string `abstract;
 }
 
 type Measurable {
-  measure(&this) int `abstract;
+  measure(this) int `abstract;
 }
 
 type Widget is Describable, Measurable {
   string label;
   int size;
 
-  describe(&this) string {
+  describe(this) string {
     return "Widget:" + this.label;
   }
 
-  measure(&this) int {
+  measure(this) int {
     return this.size;
   }
 }
@@ -233,11 +233,11 @@ test_multiple_inheritance_second_parent_polymorphism() `test {
 type Button is Describable, Measurable {
   string text;
 
-  describe(&this) string {
+  describe(this) string {
     return "Button:" + this.text;
   }
 
-  measure(&this) int {
+  measure(this) int {
     return this.text.len;
   }
 }
@@ -263,17 +263,17 @@ test_multiple_children_second_interface() `test {
 // =============================================================================
 
 type Greetable {
-  name(&this) string `abstract;
+  name(this) string `abstract;
 
-  greet(&this) string {
+  greet(this) string {
     return "Hello, " + this.name();
   }
 }
 
 type Farewell {
-  name(&this) string `abstract;
+  name(this) string `abstract;
 
-  farewell(&this) string {
+  farewell(this) string {
     return "Goodbye, " + this.name();
   }
 }
@@ -281,7 +281,7 @@ type Farewell {
 type Person is Greetable, Farewell {
   string full_name;
 
-  name(&this) string {
+  name(this) string {
     return this.full_name;
   }
 }
@@ -306,7 +306,7 @@ test_multi_inherit_defaults_polymorphic() `test {
 type Base {
   string id;
 
-  get_id(&this) string {
+  get_id(this) string {
     return this.id;
   }
 }
@@ -314,7 +314,7 @@ type Base {
 type Mid is Base {
   int level;
 
-  get_level(&this) int {
+  get_level(this) int {
     return this.level;
   }
 }
@@ -322,7 +322,7 @@ type Mid is Base {
 type Derived is Mid {
   string tag;
 
-  get_tag(&this) string {
+  get_tag(this) string {
     return this.tag;
   }
 }
@@ -362,22 +362,22 @@ test_deep_chain_mid_assignability() `test {
 // =============================================================================
 
 type AbstractBase {
-  compute(&this) int `abstract;
+  compute(this) int `abstract;
 }
 
 type AbstractMid is AbstractBase {
   // Still abstract — does not implement compute
-  label(&this) string `abstract;
+  label(this) string `abstract;
 }
 
 type ConcreteLeaf is AbstractMid {
   int val;
 
-  compute(&this) int {
+  compute(this) int {
     return this.val * 2;
   }
 
-  label(&this) string {
+  label(this) string {
     return "leaf";
   }
 }
@@ -438,7 +438,7 @@ test_is_check_mid_ref() `test {
 type Box[T] {
   T value;
 
-  get(&this) T {
+  get(this) T {
     return this.value;
   }
 }
@@ -468,7 +468,7 @@ test_generic_forwarding_child() `test {
 type CountedBox[T] is Box[T] {
   int count;
 
-  get_count(&this) int {
+  get_count(this) int {
     return this.count;
   }
 }
@@ -597,7 +597,7 @@ test_fully_fixed_type_args() `test {
 type GBase[T] {
   T data;
 
-  get_data(&this) T {
+  get_data(this) T {
     return this.data;
   }
 }
@@ -646,22 +646,22 @@ test_generic_chain_fix_at_leaf() `test {
 // =============================================================================
 
 type Identifiable[T] {
-  get_id(&this) T `abstract;
+  get_id(this) T `abstract;
 }
 
 type Printable {
-  to_string(&this) string `abstract;
+  to_string(this) string `abstract;
 }
 
 type Entity[T] is Identifiable[T], Printable {
   T id;
   string name;
 
-  get_id(&this) T {
+  get_id(this) T {
     return this.id;
   }
 
-  to_string(&this) string {
+  to_string(this) string {
     return this.name;
   }
 }
@@ -688,11 +688,11 @@ type StringEntity is Identifiable[string], Printable {
   string code;
   string display;
 
-  get_id(&this) string {
+  get_id(this) string {
     return this.code;
   }
 
-  to_string(&this) string {
+  to_string(this) string {
     return this.display;
   }
 }
@@ -715,14 +715,14 @@ test_multi_inherit_different_children_same_interfaces() `test {
 // =============================================================================
 
 type Transport {
-  speed(&this) int `abstract;
-  describe(&this) string {
+  speed(this) int `abstract;
+  describe(this) string {
     return "transport";
   }
 }
 
 type LandVehicle is Transport {
-  describe(&this) string {
+  describe(this) string {
     return "land vehicle";
   }
 }
@@ -730,18 +730,18 @@ type LandVehicle is Transport {
 type SportsCar is LandVehicle {
   int top_speed;
 
-  speed(&this) int {
+  speed(this) int {
     return this.top_speed;
   }
 
   // Override describe again at third level
-  describe(&this) string {
+  describe(this) string {
     return "sports car";
   }
 }
 
 type Bicycle is LandVehicle {
-  speed(&this) int {
+  speed(this) int {
     return 25;
   }
   // Inherits describe from LandVehicle
@@ -844,7 +844,7 @@ test_generic_virtual_different_instantiations() `test {
 type Timestamped {
   int created_at;
 
-  age(&this, int now) int {
+  age(this, int now) int {
     return now - this.created_at;
   }
 }
@@ -853,7 +853,7 @@ type Event is Timestamped {
   string title;
   string location;
 
-  summary(&this) string {
+  summary(this) string {
     return this.title + " @ " + this.location;
   }
 }
@@ -875,9 +875,9 @@ test_child_adds_fields_polymorphic() `test {
 // =============================================================================
 
 type Collection[T] {
-  size(&this) int `abstract;
+  size(this) int `abstract;
 
-  is_empty(&this) bool {
+  is_empty(this) bool {
     return this.size() == 0;
   }
 }
@@ -885,7 +885,7 @@ type Collection[T] {
 type VecCollection[T] is Collection[T] {
   T[] items;
 
-  size(&this) int {
+  size(this) int {
     return this.items.len;
   }
 }
@@ -898,7 +898,7 @@ test_generic_default_method() `test {
 
 test_generic_default_method_empty() `test {
   int[] empty = [];
-  VecCollection[int] v = VecCollection[int](items: empty);
+  VecCollection[int] v = VecCollection[int](items: move empty);
   assert(v.size() == 0, "size is 0");
   assert(v.is_empty(), "default is_empty returns true");
 }
@@ -917,7 +917,7 @@ type Config {
   string name;
   int version;
 
-  info(&this) string {
+  info(this) string {
     return "{this.name} v{this.version}";
   }
 }
@@ -925,7 +925,7 @@ type Config {
 type ExtendedConfig is Config {
   bool debug;
 
-  info(&this) string {
+  info(this) string {
     if this.debug {
       return "{this.name} v{this.version} [DEBUG]";
     }
@@ -960,38 +960,38 @@ test_concrete_hierarchy_polymorphic() `test {
 // =============================================================================
 
 type Validator {
-  validate(&this, string input) bool `abstract;
-  error_msg(&this) string `abstract;
+  validate(this, string input) bool `abstract;
+  error_msg(this) string `abstract;
 }
 
 type LengthValidator is Validator {
   int min_len;
 
-  validate(&this, string input) bool {
+  validate(this, string input) bool {
     return input.len >= this.min_len;
   }
 
-  error_msg(&this) string {
+  error_msg(this) string {
     return "too short";
   }
 }
 
 type NotEmptyValidator is Validator {
-  validate(&this, string input) bool {
+  validate(this, string input) bool {
     return input.len > 0;
   }
 
-  error_msg(&this) string {
+  error_msg(this) string {
     return "cannot be empty";
   }
 }
 
 type AlwaysValid is Validator {
-  validate(&this, string input) bool {
+  validate(this, string input) bool {
     return true;
   }
 
-  error_msg(&this) string {
+  error_msg(this) string {
     return "";
   }
 }
@@ -1105,7 +1105,7 @@ test_polymorphic_multiple_dispatch() `test {
 type Stateful {
   int state;
   advance(~this) `abstract;
-  get_state(&this) int {
+  get_state(this) int {
     return this.state;
   }
 }
@@ -1150,7 +1150,7 @@ type MutCounter {
     this.count += 1;
   }
 
-  get_count(&this) int {
+  get_count(this) int {
     return this.count;
   }
 }
@@ -1241,37 +1241,37 @@ test_drop_in_loop_inherited() `test {
 // =============================================================================
 
 type Greeter {
-  greet(&this) string {
+  greet(this) string {
     return "hello from Greeter";
   }
 }
 
 type Farewell2 {
-  farewell(&this) string {
+  farewell(this) string {
     return "bye from Farewell2";
   }
 }
 
 // Child overrides second parent's default method
 type Polite is Greeter, Farewell2 {
-  farewell(&this) string {
+  farewell(this) string {
     return "goodbye from Polite";
   }
 }
 
 // Child overrides first parent's default method
 type Casual is Greeter, Farewell2 {
-  greet(&this) string {
+  greet(this) string {
     return "hey from Casual";
   }
 }
 
 // Child overrides both defaults
 type Custom is Greeter, Farewell2 {
-  greet(&this) string {
+  greet(this) string {
     return "yo";
   }
-  farewell(&this) string {
+  farewell(this) string {
     return "later";
   }
 }
@@ -1323,22 +1323,22 @@ test_inherit_default_polymorphic() `test {
 // =============================================================================
 
 type Keyed[K] {
-  get_key(&this) K `abstract;
+  get_key(this) K `abstract;
 }
 
 type Labeled2 {
-  get_label(&this) string `abstract;
+  get_label(this) string `abstract;
 }
 
 type Record[K] is Keyed[K], Labeled2 {
   K key;
   string label;
 
-  get_key(&this) K {
+  get_key(this) K {
     return this.key;
   }
 
-  get_label(&this) string {
+  get_label(this) string {
     return this.label;
   }
 }
@@ -1347,11 +1347,11 @@ type FixedRecord is Keyed[int], Labeled2 {
   int key;
   string label;
 
-  get_key(&this) int {
+  get_key(this) int {
     return this.key;
   }
 
-  get_label(&this) string {
+  get_label(this) string {
     return this.label;
   }
 }
@@ -1392,20 +1392,20 @@ test_is_fixed_vs_generic() `test {
 // =============================================================================
 
 type Shape2 {
-  area(&this) int `abstract;
+  area(this) int `abstract;
 }
 
 type Rect2 is Shape2 {
   int w;
   int h;
-  area(&this) int {
+  area(this) int {
     return this.w * this.h;
   }
 }
 
 type Circle2 is Shape2 {
   int r;
-  area(&this) int {
+  area(this) int {
     return this.r * this.r * 3;
   }
 }
@@ -1599,7 +1599,7 @@ type Metric {
   string name;
   int value;
 
-  format(&this) string {
+  format(this) string {
     return this.name + "=" + "{this.value}";
   }
 }
@@ -1607,7 +1607,7 @@ type Metric {
 type TaggedMetric is Metric {
   string tag;
 
-  format(&this) string {
+  format(this) string {
     return this.tag + ":" + this.name + "=" + "{this.value}";
   }
 }

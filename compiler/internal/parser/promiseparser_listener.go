@@ -97,6 +97,9 @@ type PromiseParserListener interface {
 	// EnterMoveParam is called when entering the moveParam production.
 	EnterMoveParam(c *MoveParamContext)
 
+	// EnterLegacyMoveParam is called when entering the legacyMoveParam production.
+	EnterLegacyMoveParam(c *LegacyMoveParamContext)
+
 	// EnterRegularParam is called when entering the regularParam production.
 	EnterRegularParam(c *RegularParamContext)
 
@@ -582,6 +585,9 @@ type PromiseParserListener interface {
 
 	// ExitMoveParam is called when exiting the moveParam production.
 	ExitMoveParam(c *MoveParamContext)
+
+	// ExitLegacyMoveParam is called when exiting the legacyMoveParam production.
+	ExitLegacyMoveParam(c *LegacyMoveParamContext)
 
 	// ExitRegularParam is called when exiting the regularParam production.
 	ExitRegularParam(c *RegularParamContext)

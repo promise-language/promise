@@ -10,7 +10,7 @@
 type _StoreIntVec {
   int[] data;
 
-  new(~this, ~int[] codes) {
+  new(~this, int[] move codes) {
     this.data = codes;
   }
 }
@@ -20,7 +20,7 @@ test_plain_intvec_param_stored() `test {
   cs.push(1);
   cs.push(2);
   cs.push(3);
-  _StoreIntVec t = _StoreIntVec(codes: cs);
+  _StoreIntVec t = _StoreIntVec(codes: move cs);
   assert(t.data.len == 3, "field length matches input");
   assert(t.data[0] == 1, "first element");
   assert(t.data[2] == 3, "third element");
@@ -43,7 +43,7 @@ test_plain_intvec_param_not_stored() `test {
   cs.push(20);
   cs.push(30);
   cs.push(40);
-  _ReadIntVecLen t = _ReadIntVecLen(codes: cs);
+  _ReadIntVecLen t = _ReadIntVecLen(codes: move cs);
   assert(t.len == 4, "captured length only");
 }
 
@@ -56,7 +56,7 @@ type _StringWithDrop {
   drop(~this) {
   }
 
-  new(~this, ~string name) {
+  new(~this, string move name) {
     this.s = name;
   }
 }
@@ -71,7 +71,7 @@ test_string_param_strdup_borrow() `test {
 type _MoveIntVec {
   int[] data;
 
-  new(~this, ~int[] codes) {
+  new(~this, int[] move codes) {
     this.data = codes;
   }
 }
@@ -80,7 +80,7 @@ test_move_intvec_param() `test {
   int[] cs = int[]();
   cs.push(7);
   cs.push(8);
-  _MoveIntVec t = _MoveIntVec(codes: cs);
+  _MoveIntVec t = _MoveIntVec(codes: move cs);
   assert(t.data.len == 2, "field length");
   assert(t.data[0] == 7, "first");
 }
@@ -91,7 +91,7 @@ test_move_intvec_param() `test {
 type _FailableCtor {
   int[] data;
 
-  new!(~this, ~int[] codes) {
+  new!(~this, int[] move codes) {
     if codes.len == 0 {
       raise error(message: "empty");
     }
@@ -102,7 +102,7 @@ type _FailableCtor {
 try_failable_ctor_success() bool {
   int[] cs = int[]();
   cs.push(1);
-  _FailableCtor t = _FailableCtor(codes: cs)? e {
+  _FailableCtor t = _FailableCtor(codes: move cs)? e {
     return false;
   };
   return t.data.len == 1;
@@ -110,7 +110,7 @@ try_failable_ctor_success() bool {
 
 try_failable_ctor_error() bool {
   int[] cs = int[]();
-  _FailableCtor t = _FailableCtor(codes: cs)? e {
+  _FailableCtor t = _FailableCtor(codes: move cs)? e {
     return e.message == "empty";
   };
   return false;
@@ -131,7 +131,7 @@ type _MixedParams {
   int[] data;
   int note_len;
 
-  new(~this, ~int[] codes, string note) {
+  new(~this, int[] move codes, string note) {
     this.data = codes;
     this.note_len = note.len;
   }
@@ -142,7 +142,7 @@ test_mixed_heap_params() `test {
   cs.push(100);
   cs.push(200);
   string note = "abc".to_string();
-  _MixedParams t = _MixedParams(codes: cs, note: note);
+  _MixedParams t = _MixedParams(codes: move cs, note: move note);
   assert(t.data.len == 2, "vector stored");
   assert(t.note_len == 3, "string length captured");
 }
@@ -153,7 +153,7 @@ type _GenericBox[T] {
   T item;
   int[] meta;
 
-  new(~this, ~T value, ~int[] meta) {
+  new(~this, T move value, int[] move meta) {
     this.item = value;
     this.meta = meta;
   }
@@ -164,7 +164,7 @@ test_generic_type_plain_heap_param() `test {
   m.push(1);
   m.push(2);
   m.push(3);
-  _GenericBox[int] b = _GenericBox[int](value: 42, meta: m);
+  _GenericBox[int] b = _GenericBox[int](value: 42, meta: move m);
   assert(b.item == 42, "generic field");
   assert(b.meta.len == 3, "meta vector stored");
 }
@@ -183,7 +183,7 @@ type _StringNoDropNoSynth {
 
 test_string_param_no_drop_no_synth() `test {
   string s = "hello".to_string();
-  _StringNoDropNoSynth x = _StringNoDropNoSynth(label: s);
+  _StringNoDropNoSynth x = _StringNoDropNoSynth(label: move s);
   assert(x.n == 5, "captured length only");
 }
 
@@ -199,7 +199,7 @@ type _ChannelHolder {
 
 test_channel_param_not_stored() `test {
   channel[int] c = channel[int](capacity: 4);
-  _ChannelHolder h = _ChannelHolder(ch: c);
+  _ChannelHolder h = _ChannelHolder(ch: move c);
   assert(h.marker == 42, "constructed");
 }
 
@@ -218,7 +218,7 @@ test_map_param_not_stored() `test {
   m["a"] = 1;
   m["b"] = 2;
   m["c"] = 3;
-  _MapHolder h = _MapHolder(m: m);
+  _MapHolder h = _MapHolder(m: move m);
   assert(h.n_entries == 3, "captured len only");
 }
 
@@ -245,6 +245,6 @@ type _Outer {
 
 test_heap_user_type_param() `test {
   _Inner inner = _Inner();
-  _Outer o = _Outer(inner: inner);
+  _Outer o = _Outer(inner: move inner);
   assert(o.marker == 2, "captured length from heap user type");
 }

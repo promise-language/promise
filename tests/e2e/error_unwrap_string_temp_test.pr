@@ -24,7 +24,7 @@ test_unwrap_string_temp_method() `test {
 }
 
 // Pattern 3: unwrap result used as call argument (temp)
-check_len(string &s) int {
+check_len(string s) int {
   return s.len;
 }
 

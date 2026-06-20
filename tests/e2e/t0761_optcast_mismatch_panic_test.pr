@@ -4,15 +4,15 @@
 // (the Go test only asserts the block exists in IR).
 type Base {
   string name;
-  tag(&this) string `abstract;
+  tag(this) string `abstract;
 }
 type Der is Base {
-  tag(&this) string {
+  tag(this) string {
     return "d";
   }
 }
 type Other is Base {
-  tag(&this) string {
+  tag(this) string {
     return "o";
   }
 }

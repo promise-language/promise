@@ -5,7 +5,7 @@ type Velocity `public {
   int vx;
   int vy;
 
-  speed(&this) int {
+  speed(this) int {
     return utils.abs(this.vx) + utils.abs(this.vy);
   }
 }

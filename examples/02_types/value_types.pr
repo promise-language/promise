@@ -7,11 +7,11 @@ type Vec2 {
   int x `value;
   int y `value;
 
-  add(&this, Vec2 &other) Vec2 {
+  add(this, Vec2 other) Vec2 {
     return Vec2(x: this.x + other.x, y: this.y + other.y);
   }
 
-  to_string(&this) string {
+  to_string(this) string {
     return "({this.x}, {this.y})";
   }
 }
@@ -21,7 +21,7 @@ type Color {
   int g `value;
   int b `value;
 
-  to_string(&this) string {
+  to_string(this) string {
     return "rgb({this.r}, {this.g}, {this.b})";
   }
 }

@@ -179,11 +179,11 @@ elvis_param_generic_some() `test {
 // a drop flag via maybeRegisterOptionalDrop), so clearDropFlag hits and the result
 // keeps ownership (some-flag stays 1). Frees once in the callee; the caller's local
 // was moved, so it does not drop. Must remain leak-free and double-free-free.
-owned_param(~H? a, H b) {
+owned_param(H? move a, H b) {
   a ?: b;
 }
 elvis_owned_param_some() `test {
   H? a = H(v: 3);
   b := H(v: 7);
-  owned_param(a, b);
+  owned_param(move a, b);
 }

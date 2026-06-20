@@ -6,7 +6,7 @@ type Canvas `public {
   int height;
 
   // Compute manhattan distance from origin to a point on the canvas.
-  origin_distance(&this, int px, int py) int `public {
+  origin_distance(this, int px, int py) int `public {
     geometry.Point2D origin = geometry.Point2D(x: 0, y: 0);
     return origin.distance_to(px, py);
   }

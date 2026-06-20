@@ -200,6 +200,12 @@ func (s *BasePromiseParserListener) EnterMoveParam(ctx *MoveParamContext) {}
 // ExitMoveParam is called when production moveParam is exited.
 func (s *BasePromiseParserListener) ExitMoveParam(ctx *MoveParamContext) {}
 
+// EnterLegacyMoveParam is called when production legacyMoveParam is entered.
+func (s *BasePromiseParserListener) EnterLegacyMoveParam(ctx *LegacyMoveParamContext) {}
+
+// ExitLegacyMoveParam is called when production legacyMoveParam is exited.
+func (s *BasePromiseParserListener) ExitLegacyMoveParam(ctx *LegacyMoveParamContext) {}
+
 // EnterRegularParam is called when production regularParam is entered.
 func (s *BasePromiseParserListener) EnterRegularParam(ctx *RegularParamContext) {}
 

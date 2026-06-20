@@ -11,13 +11,13 @@ type Resource {
   }
 }
 
-consume_resource(~Resource r) {
+consume_resource(Resource move r) {
   // r is owned by this function — dropped at scope exit
 }
 
 test_move_param_basic() `test {
   Resource r = Resource(id: 1);
-  consume_resource(r);
+  consume_resource(move r);
 }
 
 test_move_param_temp() `test {
@@ -28,13 +28,13 @@ test_move_param_temp() `test {
 // Section 2: Move semantics with strings
 // =============================================================================
 
-consume_string(~string s) {
+consume_string(string move s) {
   // s is owned — promise_string_drop called at scope exit
 }
 
 test_move_string_named() `test {
   string s = "hello" + " world";
-  consume_string(s);
+  consume_string(move s);
 }
 
 test_move_string_literal() `test {
@@ -51,14 +51,14 @@ test_move_string_interpolation() `test {
 // Section 3: Mixed move and borrow params
 // =============================================================================
 
-mixed(~string owned, string borrowed) string {
+mixed(string move owned, string borrowed) string {
   return owned + " " + borrowed;
 }
 
 test_mixed_params() `test {
   string a = "hello";
   string b = "world";
-  string result = mixed(a, b);
+  string result = mixed(move a, b);
   // b is still valid (borrowed), a was moved
   assert(result == "hello world", "mixed params");
 }
@@ -67,13 +67,13 @@ test_mixed_params() `test {
 // Section 4: Move param with return value
 // =============================================================================
 
-transform(~string s) string {
+transform(string move s) string {
   return s + "!";
 }
 
 test_move_and_return() `test {
   string s = "hi";
-  string result = transform(s);
+  string result = transform(move s);
   assert(result == "hi!", "move and return");
 }
 
@@ -81,7 +81,7 @@ test_move_and_return() `test {
 // Section 5: Move param in failable function
 // =============================================================================
 
-failable_consume!(~string s) int {
+failable_consume!(string move s) int {
   if s == "bad" {
     raise error(message: "bad input");
   }
@@ -90,14 +90,14 @@ failable_consume!(~string s) int {
 
 test_move_param_failable_success() `test {
   string s = "hello";
-  int len = failable_consume(s)?!;
+  int len = failable_consume(move s)?!;
   assert(len == 5, "failable move success");
 }
 
 test_move_param_failable_error() `test {
   string s = "bad";
   bool caught = false;
-  failable_consume(s)? e {
+  failable_consume(move s)? e {
     caught = true;
   };
   assert(caught, "failable move error caught");
@@ -107,7 +107,7 @@ test_move_param_failable_error() `test {
 // Section 6: Move param in loop
 // =============================================================================
 
-consume_in_loop(~string s) int {
+consume_in_loop(string move s) int {
   return s.len;
 }
 
@@ -116,7 +116,7 @@ test_move_param_loop() `test {
   int i = 0;
   while i < 3 {
     string s = "x" + "{i}";
-    total = total + consume_in_loop(s);
+    total = total + consume_in_loop(move s);
     i = i + 1;
   }
   assert(total == 6, "move in loop: 2+2+2");
@@ -143,12 +143,12 @@ type Counter {
   }
 }
 
-increment_and_consume(~Counter c) int {
+increment_and_consume(Counter move c) int {
   return c.value + 1;
 }
 
 test_move_user_type_with_drop() `test {
   Counter c = Counter(value: 10);
-  int result = increment_and_consume(c);
+  int result = increment_and_consume(move c);
   assert(result == 11, "move user type with drop");
 }

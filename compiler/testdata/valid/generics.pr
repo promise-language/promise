@@ -4,7 +4,7 @@
 type Container[T] {
   T value;
 
-  get(&this) T `instance {
+  get(this) T `instance {
     return this.value;
   }
 
@@ -18,7 +18,7 @@ type Pair[A, B] {
   A first;
   B second;
 
-  swap(&this) Pair[B, A] `instance {
+  swap(this) Pair[B, A] `instance {
     return Pair(first: this.second, second: this.first);
   }
 }
@@ -38,18 +38,18 @@ type SortedList[T: Comparable] {
     return;
   }
 
-  contains(&this, T item) Bool `instance {
+  contains(this, T item) Bool `instance {
     return false;
   }
 }
 
 // Multiple constraints
 type Printable {
-  toString(&this) String `abstract;
+  toString(this) String `abstract;
 }
 
 type Serializable {
-  toBytes(&this) Bytes `abstract;
+  toBytes(this) Bytes `abstract;
 }
 
 type Fancy[T: Printable + Serializable] {
@@ -72,7 +72,7 @@ identity[T](T x) T {
   return x;
 }
 
-first[A, B](Pair[A, B] &p) A {
+first[A, B](Pair[A, B] p) A {
   return p.first;
 }
 

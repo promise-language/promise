@@ -727,6 +727,17 @@ func (b *Builder) VisitArg(ctx *parser.ArgContext) interface{} {
 	node := &Arg{
 		nodeBase: b.baseFromContext(ctx),
 		Value:    b.visitExpr(ctx.Expression()),
+		Move:     ctx.MOVE() != nil,
+	}
+	// `move` before a lambda literal (`f(move || ...)`) is the lambda's
+	// move-capture keyword, not the call-site move marker — you cannot
+	// move-consume a temporary. The arg rule's optional MOVE greedily steals
+	// it from the lambda rule, so re-attach it to the lambda here.
+	if node.Move {
+		if lam, ok := node.Value.(*LambdaExpr); ok {
+			lam.Move = true
+			node.Move = false
+		}
 	}
 	if id := ctx.IDENT(); id != nil {
 		node.Name = id.GetText()

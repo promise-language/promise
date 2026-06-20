@@ -8,10 +8,10 @@ enum Resource {
   }
 }
 
-take_resource(~Resource r) {
+take_resource(Resource move r) {
 }
 
 main() `test(expected: "drop Resource\n") {
   Resource r = Resource.Handle(id: 42);
-  take_resource(r);
+  take_resource(move r);
 }

@@ -9,7 +9,7 @@ take_mutex(Mutex[int] m) {
 }
 take_arc_string(Ref[string] a) {
 }
-take_arc_move(~Ref[int] a) {
+take_arc_move(Ref[int] move a) {
 }
 
 worker_t0555() int {
@@ -156,8 +156,8 @@ test_plain_reassign_task() `test(exclude: wasm) {
 // typeSubst handling), the AsArc check would see TypeParam T and fail
 // to dispatch, leaving the call result untracked → leak in
 // caller of the generic body.
-make_arc_generic[T](~T value) Ref[T] {
-  return Ref[T](value);
+make_arc_generic[T](T move value) Ref[T] {
+  return Ref[T](move value);
 }
 
 test_generic_arc_int() `test {
@@ -170,8 +170,8 @@ test_generic_arc_string() `test {
 
 // Generic free function returning Mutex[T] — same typeSubst path,
 // IsMutex branch.
-make_mutex_generic[T](~T value) Mutex[T] {
-  return Mutex[T](value);
+make_mutex_generic[T](T move value) Mutex[T] {
+  return Mutex[T](move value);
 }
 
 test_generic_mutex_int() `test {
@@ -182,8 +182,8 @@ test_generic_mutex_int() `test {
 // owner-type generic method bodies. Receiver borrowed (this), method
 // substitution-driven Ref[T] return.
 type T0555Maker {
-  make[T](this, ~T value) Ref[T] {
-    return Ref[T](value);
+  make[T](this, T move value) Ref[T] {
+    return Ref[T](move value);
   }
 }
 

@@ -12,12 +12,12 @@ test_generic_vector() `test {
   int[] v = [];
   v.push(1);
   v.push(2);
-  Wrapper[int[]] w = Wrapper[int[]].Some(value: v);
+  Wrapper[int[]] w = Wrapper[int[]].Some(value: move v);
 }
 
 test_generic_string() `test {
   string s = "hello" + " world";
-  Wrapper[string] w = Wrapper[string].Some(value: s);
+  Wrapper[string] w = Wrapper[string].Some(value: move s);
 }
 
 test_generic_none() `test {

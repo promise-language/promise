@@ -3493,6 +3493,7 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 			c.errorf(p.Pos(), "lambda parameter %s requires a type annotation", p.Name)
 			return nil
 		}
+		c.rejectSharedRefParam(p.Pos(), p.Name, pt)
 		params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 	}
 

@@ -5,8 +5,8 @@ vec_optional() `test {
   string s = "he" + "llo";
   string? a = s;
   string? b = none;
-  v.push(a);
-  v.push(b);
+  v.push(move a);
+  v.push(move b);
   assert(v.len == 2, "len 2");
   assert(v[0] is present, "slot 0 present");
   assert(v[1] is absent, "slot 1 absent");
@@ -36,7 +36,7 @@ nested_optional_type_arg() `test {
   int? b = none;
   inner.push(a);
   inner.push(b);
-  v.push(inner);
+  v.push(move inner);
   assert(v.len == 1, "outer len");
   assert(v[0].len == 2, "inner len");
 }

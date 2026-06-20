@@ -27,6 +27,6 @@ test_box_string_synth_drop() `test {
 // Nested: Box[Box[Point]] — both levels need synth drop
 test_nested_box() `test {
   inner := Box[Point](val: Point(x: 3, y: 4));
-  outer := Box[Box[Point]](val: inner);
+  outer := Box[Box[Point]](val: move inner);
   assert(outer.val.val.x == 3, "nested x");
 }

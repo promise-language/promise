@@ -54,7 +54,7 @@ basic_no_drop() `test {
 
 basic_double_optional_present() `test {
   _T0392Box? inner = _T0392Box(n: 1);
-  h := _T0392Holder4(data: inner);
+  h := _T0392Holder4(data: move inner);
   assert(h.data is present, "double-optional present");
 }
 
@@ -134,7 +134,7 @@ none_field_no_drop() `test {
 
 double_optional_with_inner_none() `test {
   _T0392Box? inner = none;
-  h := _T0392Holder4(data: inner);
+  h := _T0392Holder4(data: move inner);
   assert(h.data is present, "outer present");
 }
 
@@ -181,7 +181,7 @@ force_unwrap_vector_optional_field() `test {
   v := int[]();
   v.push(10);
   v.push(20);
-  h := _VecHolder(data: v);
+  h := _VecHolder(data: move v);
   unwrapped := h.data!;
   assert(unwrapped.len == 2, "vec field unwrap len");
   assert(unwrapped[0] == 10, "vec elem 0");

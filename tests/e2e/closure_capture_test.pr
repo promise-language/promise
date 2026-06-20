@@ -20,7 +20,7 @@ type _T0554BoxEmptyDrop {
 // --- 1. capture user type with auto-synthesized drop ---
 test_move_capture_user_type_no_drop() `test {
   s := "hi".repeat(2);
-  b := _T0554Box(label: s);
+  b := _T0554Box(label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -31,7 +31,7 @@ test_move_capture_user_type_no_drop() `test {
 // --- 2. capture user type with explicit empty drop ---
 test_move_capture_user_type_empty_drop() `test {
   s := "ho".repeat(2);
-  b := _T0554BoxEmptyDrop(label: s);
+  b := _T0554BoxEmptyDrop(label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -42,7 +42,7 @@ test_move_capture_user_type_empty_drop() `test {
 // --- 3. call the closure multiple times — drop still runs only once ---
 test_move_capture_user_type_called_multiple_times() `test {
   s := "ab".repeat(2);
-  b := _T0554Box(label: s);
+  b := _T0554Box(label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -67,7 +67,7 @@ type _T0554Child is _T0554Logger {
 
 test_move_capture_inherited_drop() `test {
   s := "c".repeat(2);
-  b := _T0554Child(s: "fixed", label: s);
+  b := _T0554Child(s: "fixed", label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -82,7 +82,7 @@ _t0554_invoke(() -> string fn) string {
 
 test_move_capture_passed_as_arg() `test {
   s := "z".repeat(2);
-  b := _T0554Box(label: s);
+  b := _T0554Box(label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -94,8 +94,8 @@ test_move_capture_passed_as_arg() `test {
 test_move_capture_two_user_types() `test {
   s1 := "x".repeat(2);
   s2 := "y".repeat(2);
-  b1 := _T0554Box(label: s1);
-  b2 := _T0554Box(label: s2);
+  b1 := _T0554Box(label: move s1);
+  b2 := _T0554Box(label: move s2);
   f := move || -> string {
     return b1.label + b2.label;
   };
@@ -106,7 +106,7 @@ test_move_capture_two_user_types() `test {
 // --- 7. closure dropped without being called — env_drop must still run ---
 test_move_capture_never_called() `test {
   s := "n".repeat(2);
-  b := _T0554Box(label: s);
+  b := _T0554Box(label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -147,7 +147,7 @@ type _T0554GenBox[T] {
 
 test_move_capture_generic_user_type() `test {
   s := "g".repeat(2);
-  b := _T0554GenBox[int](value: 99, tag: s);
+  b := _T0554GenBox[int](value: 99, tag: move s);
   f := move || -> int {
     return b.value;
   };
@@ -164,7 +164,7 @@ type _T0554VecBox {
 
 test_move_capture_user_type_vector_field() `test {
   int[] items = [1, 2, 3];
-  b := _T0554VecBox(items: items, id: 7);
+  b := _T0554VecBox(items: move items, id: 7);
   f := move || -> int {
     return b.id + b.items.len;
   };
@@ -186,8 +186,8 @@ type _T0554Outer {
 
 test_move_capture_nested_droppable_field() `test {
   s := "n".repeat(2);
-  inner := _T0554Inner(label: s);
-  outer := _T0554Outer(inner: inner, n: 5);
+  inner := _T0554Inner(label: move s);
+  outer := _T0554Outer(inner: move inner, n: 5);
   f := move || -> int {
     return outer.n;
   };

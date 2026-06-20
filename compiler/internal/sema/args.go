@@ -212,7 +212,8 @@ func (c *Checker) resolveCallArgs(
 			paramType = types.Substitute(paramType, subst)
 		}
 		argType := c.checkExprWithHint(arg.Value, paramType)
-		if argType != nil && paramType != nil && !types.AssignableTo(argType, paramType) {
+		if argType != nil && paramType != nil && !types.AssignableTo(argType, paramType) &&
+			!(param.Ref() != types.RefMut && reborrowAssignable(argType, paramType)) {
 			c.errorf(arg.Pos(), "cannot assign %s to parameter '%s' of type %s in %s",
 				argType, param.Name(), paramType, callDesc)
 		}

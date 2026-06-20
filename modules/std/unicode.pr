@@ -137,7 +137,7 @@ is_nfd(string value) bool `public `doc("Returns true if the string is in NFD for
 
 // --- Internal: UTF-8 encoding ---
 
-_is_ascii(string &s) bool {
+_is_ascii(string s) bool {
   int i = 0;
   while i < s.len {
     if s.byte_at(i) > 127u8 {
@@ -177,7 +177,7 @@ _encode_utf8(u8[] ~buf, int cp) {
 }
 
 // Decode one UTF-8 codepoint from string at byte position pos.
-_decode_one(string &s, int pos) int {
+_decode_one(string s, int pos) int {
   int b0 = s.byte_at(pos) as! int;
   if b0 < 128 {
     return b0;

@@ -1,20 +1,20 @@
 // Ref[Ref[T]] and nested Arc/Mutex tests — T0273
 arc_nested_basic() `test {
   inner := Ref[int](42);
-  outer := Ref[Ref[int]](inner);
+  outer := Ref[Ref[int]](move inner);
   assert(outer.borrow.borrow == 42, "nested arc borrow");
 }
 
 arc_nested_triple() `test {
   a := Ref[int](7);
-  b := Ref[Ref[int]](a);
-  c := Ref[Ref[Ref[int]]](b);
+  b := Ref[Ref[int]](move a);
+  c := Ref[Ref[Ref[int]]](move b);
   assert(c.borrow.borrow.borrow == 7, "triple nested");
 }
 
 arc_nested_clone() `test {
   inner := Ref[int](99);
-  outer := Ref[Ref[int]](inner);
+  outer := Ref[Ref[int]](move inner);
   outer2 := outer.clone();
   assert(outer.borrow.borrow == 99, "original nested");
   assert(outer2.borrow.borrow == 99, "cloned nested");
@@ -22,20 +22,20 @@ arc_nested_clone() `test {
 
 arc_nested_string() `test {
   inner := Ref[string]("hello");
-  outer := Ref[Ref[string]](inner);
+  outer := Ref[Ref[string]](move inner);
   assert(outer.borrow.borrow == "hello", "nested arc string");
 }
 
 mutex_arc_cross() `test {
   a := Ref[int](10);
-  m := Mutex[Ref[int]](a);
+  m := Mutex[Ref[int]](move a);
   guard := m.lock();
   assert(guard.borrow.borrow == 10, "mutex wrapping arc");
 }
 
 arc_mutex_cross() `test {
   m := Mutex[int](5);
-  a := Ref[Mutex[int]](m);
+  a := Ref[Mutex[int]](move m);
   guard := a.borrow.lock();
   assert(guard.borrow == 5, "arc wrapping mutex");
 }
@@ -65,7 +65,7 @@ mutex_from_string_literal() `test {
 // T0273 coverage: Vector moved into Arc (claimHeapTemp for vector)
 arc_vector_moved() `test {
   v := [10, 20, 30];
-  a := Ref[int[]](v);
+  a := Ref[int[]](move v);
   assert(a.borrow.len == 3, "arc vector length");
   assert(a.borrow[1] == 20, "arc vector element");
 }
@@ -84,7 +84,7 @@ lambda_captures_mutex_guard() `test {
 // T0273 coverage: Nested Arc with clone and independent drop
 arc_nested_clone_independence() `test {
   inner := Ref[int](50);
-  outer1 := Ref[Ref[int]](inner);
+  outer1 := Ref[Ref[int]](move inner);
   outer2 := outer1.clone();
   // Both should independently refer to the same inner Arc
   assert(outer1.borrow.borrow == 50, "outer1 borrow");

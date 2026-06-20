@@ -84,6 +84,7 @@ func (e *encoder) expr(x ast.Expr) {
 		for _, a := range n.Args {
 			e.nodePos(a)
 			e.str(a.Name)
+			e.bool_(a.Move)
 			e.expr(a.Value)
 		}
 	case *ast.IndexExpr:

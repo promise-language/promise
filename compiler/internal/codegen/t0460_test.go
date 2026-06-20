@@ -21,7 +21,7 @@ func TestT0460StructuralFieldSynthDrop(t *testing.T) {
 		}
 		type Wrap {
 			W _w;
-			new(~this, ~W w) { this._w = w; }
+			new(~this, W move w) { this._w = w; }
 		}
 		main() {
 			Wrap mw = Wrap(ConcreteW(n: 0));
@@ -45,7 +45,7 @@ func TestT0460StructuralFieldExplicitDrop(t *testing.T) {
 		}
 		type Wrap {
 			W _w;
-			new(~this, ~W w) { this._w = w; }
+			new(~this, W move w) { this._w = w; }
 			drop(~this) {}
 		}
 		main() {
@@ -71,7 +71,7 @@ func TestT0460OptionalStructuralFieldSynthDrop(t *testing.T) {
 		}
 		type Wrap {
 			W? _w;
-			new(~this, ~W? w) { this._w = w; }
+			new(~this, W? move w) { this._w = w; }
 		}
 		main() {
 			W? maybe = none;

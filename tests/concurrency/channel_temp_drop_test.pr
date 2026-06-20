@@ -71,13 +71,13 @@ bound_channel() `test {
 
 // Move-into-arg: callee takes ownership; claimStringTemp at arg site
 // fires (val-identity, type-agnostic).
-take_buf(~Channel[int] c) {
+take_buf(Channel[int] move c) {
   c.close();
 }
 move_into_arg() `test {
   take_buf(fresh_buf());
 }
-take_unbuf(~Channel[int] c) {
+take_unbuf(Channel[int] move c) {
   c.close();
 }
 move_into_arg_unbuf() `test {

@@ -15,7 +15,7 @@ test_clone_typearg_map() `test {
   map[string, string] src = map[string, string]();
   src["a"] = "b";
   src["c"] = "d";
-  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(src);
+  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(move src);
   MaybeMap[map[string, string]] c = j.clone();
   // Consume the clone.
   match c {
@@ -39,7 +39,7 @@ test_clone_typearg_map() `test {
 // Droppable TypeArg: string[] (vector of heap strings).
 test_clone_typearg_string_vec() `test {
   string[] data = ["x", "y", "z"];
-  MaybeMap[string[]] j = MaybeMap[string[]].Just(data);
+  MaybeMap[string[]] j = MaybeMap[string[]].Just(move data);
   MaybeMap[string[]] c = j.clone();
   match c {
     MaybeMap.Just(v) => {
@@ -58,7 +58,7 @@ test_clone_typearg_string_vec() `test {
 // TypeArg: int[] (vector of copy scalars).
 test_clone_typearg_int_vec() `test {
   int[] nums = [1, 2, 3, 4];
-  MaybeMap[int[]] j = MaybeMap[int[]].Just(nums);
+  MaybeMap[int[]] j = MaybeMap[int[]].Just(move nums);
   MaybeMap[int[]] c = j.clone();
   match c {
     MaybeMap.Just(v) => {
@@ -111,8 +111,8 @@ type Bag `clone {
 test_clone_typearg_user_clone_type() `test {
   map[string, int] m = map[string, int]();
   m["apples"] = 3;
-  Bag b = Bag(counts: m);
-  MaybeMap[Bag] j = MaybeMap[Bag].Just(b);
+  Bag b = Bag(counts: move m);
+  MaybeMap[Bag] j = MaybeMap[Bag].Just(move b);
   MaybeMap[Bag] c = j.clone();
   match c {
     MaybeMap.Just(v) => {
@@ -150,7 +150,7 @@ test_clone_nothing_variant() `test {
 test_clone_map_independence() `test {
   map[string, string] src = map[string, string]();
   src["k"] = "v1";
-  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(src);
+  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(move src);
   MaybeMap[map[string, string]] c = j.clone();
   match c {
     MaybeMap.Just(v) => {
@@ -183,7 +183,7 @@ enum Mixed[T] `clone {
 test_clone_mixed_concrete_and_typeparam_field() `test {
   map[string, int] m = map[string, int]();
   m["k"] = 7;
-  Mixed[map[string, int]] j = Mixed[map[string, int]].Both("tag", m);
+  Mixed[map[string, int]] j = Mixed[map[string, int]].Both("tag", move m);
   Mixed[map[string, int]] c = j.clone();
   match c {
     Mixed.Both(lbl, p) => {
@@ -213,7 +213,7 @@ enum Either[L, R] `clone {
 
 test_clone_two_typeparams_both_droppable() `test {
   string[] sv = ["a", "b"];
-  Either[string[], map[string, int]] el = Either[string[], map[string, int]].Left(sv);
+  Either[string[], map[string, int]] el = Either[string[], map[string, int]].Left(move sv);
   Either[string[], map[string, int]] elc = el.clone();
   match elc {
     Either.Left(v) => assert(v.len == 2, "Left clone len 2"),
@@ -225,7 +225,7 @@ test_clone_two_typeparams_both_droppable() `test {
   }
   map[string, int] mm = map[string, int]();
   mm["z"] = 3;
-  Either[string[], map[string, int]] er = Either[string[], map[string, int]].Right(mm);
+  Either[string[], map[string, int]] er = Either[string[], map[string, int]].Right(move mm);
   Either[string[], map[string, int]] erc = er.clone();
   match erc {
     Either.Left(v) => assert(false, "expected Right"),
@@ -252,7 +252,7 @@ enum Outer[T] `clone {
 
 test_clone_nested_generic_enum() `test {
   string[] sv = ["p", "q", "r"];
-  Outer[string[]] j = Outer[string[]].Wrap(Inner[string[]].Has(sv));
+  Outer[string[]] j = Outer[string[]].Wrap(Inner[string[]].Has(move sv));
   Outer[string[]] c = j.clone();
   match c {
     Outer.Wrap(inn) => match inn {

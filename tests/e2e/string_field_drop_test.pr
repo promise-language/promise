@@ -33,13 +33,13 @@ type Wrapper {
   string data;
 }
 
-wrap(~string s) Wrapper {
-  return Wrapper(data: s);
+wrap(string move s) Wrapper {
+  return Wrapper(data: move s);
 }
 
 test_cross_function_string_field() `test {
   string data = "cross" + " func";
-  Wrapper w = wrap(data);
+  Wrapper w = wrap(move data);
   assert(w.data == "cross func", "wrapped data");
 }
 

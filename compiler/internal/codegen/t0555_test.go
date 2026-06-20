@@ -208,7 +208,7 @@ func TestT0555_OptionalArcTypedDeclPreWrapClaim(t *testing.T) {
 func TestT0555_GenericFunctionReturningArcTracked(t *testing.T) {
 	ir := generateIR(t, `
 		take_arc(Ref[int] a) {}
-		make_arc[T](~T value) Ref[T] {
+		make_arc[T](T move value) Ref[T] {
 			return Ref[T](value);
 		}
 		caller() {
@@ -234,7 +234,7 @@ func TestT0555_GenericMethodReturningArcTracked(t *testing.T) {
 	ir := generateIR(t, `
 		take_arc(Ref[int] a) {}
 		type Maker {
-			make[T](this, ~T value) Ref[T] {
+			make[T](this, T move value) Ref[T] {
 				return Ref[T](value);
 			}
 		}

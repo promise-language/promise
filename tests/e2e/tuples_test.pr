@@ -204,7 +204,7 @@ test_t0371_vector_var_tuple_string() `test {
 }
 
 // Tuple returned from a function with heap string fields.
-swap_str_t0371(~string a, ~string b)(string, string) {
+swap_str_t0371(string move a, string move b)(string, string) {
   return (b, a);
 }
 
@@ -334,14 +334,14 @@ test_t0371_tuple_with_channel() `test {
 // Move tuple variable into a function parameter. The receiving param takes
 // ownership; the source's drop flag must be cleared so its scope-exit walk
 // doesn't double-free.
-take_t0371_tuple(~(int, string) t) string {
+take_t0371_tuple((int, string) move t) string {
   (a, b) := t;
   return b;
 }
 
 test_t0371_move_into_func() `test {
   (int, string) t = (1, "a" + "b");
-  string s = take_t0371_tuple(t);
+  string s = take_t0371_tuple(move t);
   assert(s == "ab", "moved into func");
 }
 
@@ -441,7 +441,7 @@ test_t0371_pure_value_nested_tuple() `test {
 // Generic function with tuple-of-T local. Exercises emitTupleDropCall's
 // typeSubst != nil branch: the tuple type's elements get substituted at
 // monomorphization so the drop walk uses the concrete element types.
-make_then_drop_t0371[T](~T x, ~T y) {
+make_then_drop_t0371[T](T move x, T move y) {
   (T, T) t = (x, y);
 }
 
@@ -587,7 +587,7 @@ test_t0370_tuple_with_heap_user_vec() `test {
 
 // T0370: generic function reading tuple from vector — exercises typeSubst != nil
 // branch in dupTupleValue so the substituted concrete element type is used.
-read_first_t0370[T](~(string, T)[] v) string {
+read_first_t0370[T]((string, T)[] move v) string {
   t := v[0];
   (s, _) := t;
   return s;
@@ -596,7 +596,7 @@ read_first_t0370[T](~(string, T)[] v) string {
 test_t0370_generic_read_from_tuple_vec() `test {
   v := (string, int)[]();
   v.push(("a" + "b", 99));
-  s := read_first_t0370[int](v);
+  s := read_first_t0370[int](move v);
   assert(s == "ab", "generic read");
 }
 
@@ -760,7 +760,7 @@ test_t0399_repush_owned_tuple_loop() `test {
   t := ("hello".to_string(), 42);
   int i = 0;
   while i < 3 {
-    v.push(t);
+    v.push(move t);
     i = i + 1;
   }
   assert(v.len == 3, "len");

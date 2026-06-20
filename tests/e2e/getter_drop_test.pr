@@ -8,7 +8,7 @@ type Inner {
   string _name;
   drop(~this) {
   }
-  ok(&this) bool {
+  ok(this) bool {
     return true;
   }
 }
@@ -207,7 +207,7 @@ type HeapItem {
   drop(~this) {
   }
 
-  ok(&this) bool `public {
+  ok(this) bool `public {
     return true;
   }
 }
@@ -362,7 +362,7 @@ type ArcRoom {
 
   get item Ref[int] `public => Ref[int](100);
 
-  use_item(&this) bool `public {
+  use_item(this) bool `public {
     return this.item.borrow == 100;
   }
 }
@@ -654,7 +654,7 @@ type ChanRoom {
     return ch;
   }
 
-  count_items(&this) int `public {
+  count_items(this) int `public {
     int n = 0;
     for v in this.empty {
       n = n + 1;
@@ -780,7 +780,7 @@ enum EnumThisCell {
 
   get fresh Ref[int] `public => Ref[int](55);
 
-  use_fresh(&this) bool `public {
+  use_fresh(this) bool `public {
     s := this.fresh;
     return s.borrow == 55;
   }
@@ -802,7 +802,7 @@ enum GenEnumThisCell[T] {
 
   get fresh Ref[int] `public => Ref[int](77);
 
-  use_fresh(&this) bool `public {
+  use_fresh(this) bool `public {
     s := this.fresh;
     return s.borrow == 77;
   }
@@ -831,7 +831,7 @@ type EnumChainOuter {
 }
 
 test_var_decl_inferred_chain_target_enum_arc_getter() `test {
-  EnumChainOuter o = EnumChainOuter(inner: EnumChainSrc.A);
+  EnumChainOuter o = EnumChainOuter(inner: move EnumChainSrc.A);
   s := o.inner.fresh;
   assert(s.borrow == 33, "chain target enum arc var-decl inferred borrow");
 }

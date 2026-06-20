@@ -9,9 +9,9 @@ test_nested_json_object() `test {
     "a": json.JsonValue.Null,
   };
   map[string, json.JsonValue] output = {
-    "x": json.JsonValue.Object(fields: inner),
+    "x": json.JsonValue.Object(fields: move inner),
   };
-  json.JsonValue result = json.JsonValue.Object(fields: output);
+  json.JsonValue result = json.JsonValue.Object(fields: move output);
   assert(result.is_object, "result is object");
 }
 
@@ -22,9 +22,9 @@ test_nested_json_with_strings() `test {
   };
   map[string, json.JsonValue] output = {
     "name": json.JsonValue.Str(value: "Alice"),
-    "nested": json.JsonValue.Object(fields: inner),
+    "nested": json.JsonValue.Object(fields: move inner),
   };
-  json.JsonValue result = json.JsonValue.Object(fields: output);
+  json.JsonValue result = json.JsonValue.Object(fields: move output);
   assert(result.is_object, "result is object");
 }
 
@@ -34,12 +34,12 @@ test_triple_nested() `test {
     "z": json.JsonValue.Number(value: 42.0),
   };
   map[string, json.JsonValue] middle = {
-    "deep": json.JsonValue.Object(fields: deepest),
+    "deep": json.JsonValue.Object(fields: move deepest),
   };
   map[string, json.JsonValue] outer = {
-    "mid": json.JsonValue.Object(fields: middle),
+    "mid": json.JsonValue.Object(fields: move middle),
   };
-  json.JsonValue result = json.JsonValue.Object(fields: outer);
+  json.JsonValue result = json.JsonValue.Object(fields: move outer);
   assert(result.is_object, "result is object");
 }
 
@@ -48,7 +48,7 @@ test_array_variant_moved_vec() `test {
   json.JsonValue[] items = [json.JsonValue.Null,
   json.JsonValue.Bool(value: true),
   ];
-  json.JsonValue arr = json.JsonValue.Array(items: items);
+  json.JsonValue arr = json.JsonValue.Array(items: move items);
   assert(arr.is_array, "is array");
 }
 
@@ -58,9 +58,9 @@ test_nested_format() `test {
     "key": json.JsonValue.Str(value: "value"),
   };
   map[string, json.JsonValue] output = {
-    "nested": json.JsonValue.Object(fields: inner),
+    "nested": json.JsonValue.Object(fields: move inner),
   };
-  json.JsonValue result = json.JsonValue.Object(fields: output);
+  json.JsonValue result = json.JsonValue.Object(fields: move output);
   string s = result.format()?!;
   assert(s.contains("nested"), "format contains nested");
   assert(s.contains("key"), "format contains key");

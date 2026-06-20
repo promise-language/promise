@@ -10,18 +10,18 @@ type ValidationError is error {
 
 // --- Helper functions that raise errors ---
 
-find_item!(~string key) int {
+find_item!(string move key) int {
   string msg = "item not found: " + key;
-  raise NotFoundError(key: key, message: msg);
+  raise NotFoundError(key: move key, message: move msg);
 }
 
-lookup!(~string key) string {
+lookup!(string move key) string {
   string msg = "not found: " + key;
-  raise NotFoundError(key: key, message: msg);
+  raise NotFoundError(key: move key, message: move msg);
 }
 
-validate!(~string field, ~string detail) bool {
-  raise ValidationError(field: field, detail: detail, message: "validation failed");
+validate!(string move field, string move detail) bool {
+  raise ValidationError(field: move field, detail: move detail, message: "validation failed");
 }
 
 fail_base!() int {
@@ -116,8 +116,8 @@ test_typed_catch_with_else() `test {
 
 // --- Re-raise: drop flag cleared, no double-free ---
 
-rethrow!(~string key) int {
-  int v = find_item(key)? e is NotFoundError {
+rethrow!(string move key) int {
+  int v = find_item(move key)? e is NotFoundError {
     raise e;
   } else e2 {
     raise e2;

@@ -9,7 +9,7 @@ add(Int a, Int b) Int {
 }
 
 // Borrow params
-strlen(String &s) Int {
+strlen(String s) Int {
   return s.length();
 }
 
@@ -34,7 +34,7 @@ readFile!(String path) String {
 }
 
 // Multiple params with mixed modifiers
-process!(Int count, String &label, Float[] ~data, Bool verbose = false) Int {
+process!(Int count, String label, Float[] ~data, Bool verbose = false) Int {
   return count;
 }
 

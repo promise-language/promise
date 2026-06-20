@@ -24,17 +24,17 @@ type Request `public `doc("An HTTP request.") {
   map[string, string] headers;
   string body;
 
-  new_get(~string url) Self `factory `public `doc("Create a GET request.") {
-    return Request(method: Method.Get, url: url, headers: map[string, string](), body: "");
+  new_get(string move url) Self `factory `public `doc("Create a GET request.") {
+    return Request(method: move Method.Get, url: move url, headers: map[string, string](), body: "");
   }
 
-  new_post(~string url, ~string body) Self `factory `public `doc("Create a POST request with a text body.") {
+  new_post(string move url, string move body) Self `factory `public `doc("Create a POST request with a text body.") {
     map[string, string] h = map[string, string]();
     h["Content-Type"] = "text/plain";
-    return Request(method: Method.Post, url: url, headers: h, body: body);
+    return Request(method: move Method.Post, url: move url, headers: move h, body: move body);
   }
 
-  set_header(~this, ~string key, ~string value) `public `doc("Set a header on the request.") {
+  set_header(~this, string move key, string move value) `public `doc("Set a header on the request.") {
     this.headers[key] = value;
   }
 
@@ -125,7 +125,7 @@ type Request `public `doc("An HTTP request.") {
     }
 
     string body_str = string.from_bytes(body_data);
-    return Response(_status: pr.status, _headers: pr.headers.clone(), _body: body_str);
+    return Response(_status: pr.status, _headers: pr.headers.clone(), _body: move body_str);
   }
 }
 
@@ -195,23 +195,23 @@ type ServerResponse `public `doc("An HTTP response to send to the client.") {
   map[string, string] headers;
   string body;
 
-  with_status(int status, ~string body) Self `factory `public `doc("Create a response with the given status code and body.") {
-    return ServerResponse(status: status, headers: map[string, string](), body: body);
+  with_status(int status, string move body) Self `factory `public `doc("Create a response with the given status code and body.") {
+    return ServerResponse(status: status, headers: map[string, string](), body: move body);
   }
 
-  ok(~string body) Self `factory `public `doc("Create a 200 OK response.") {
-    return ServerResponse(status: 200, headers: map[string, string](), body: body);
+  ok(string move body) Self `factory `public `doc("Create a 200 OK response.") {
+    return ServerResponse(status: 200, headers: map[string, string](), body: move body);
   }
 
   not_found() Self `factory `public `doc("Create a 404 Not Found response.") {
     return ServerResponse(status: 404, headers: map[string, string](), body: "Not Found");
   }
 
-  internal_error(~string message) Self `factory `public `doc("Create a 500 Internal Server Error response.") {
-    return ServerResponse(status: 500, headers: map[string, string](), body: message);
+  internal_error(string move message) Self `factory `public `doc("Create a 500 Internal Server Error response.") {
+    return ServerResponse(status: 500, headers: map[string, string](), body: move message);
   }
 
-  set_header(~this, ~string key, ~string value) `public `doc("Set a response header.") {
+  set_header(~this, string move key, string move value) `public `doc("Set a response header.") {
     this.headers[key] = value;
   }
 }
@@ -222,18 +222,18 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
   int _port;
   channel[bool] _stop;
 
-  bind!(~string address, int port) Self `factory `public `doc("Create a server bound to the given address and port.") {
+  bind!(string move address, int port) Self `factory `public `doc("Create a server bound to the given address and port.") {
     string addr = address[0:];
     net.TcpListener listener = net.TcpListener.bind(addr, port)?^;
     int actual_port = listener.local_port;
-    return Server(_listener: listener, _address: address, _port: actual_port, _stop: channel[bool](capacity: 1));
+    return Server(_listener: move listener, _address: move address, _port: actual_port, _stop: channel[bool](capacity: 1));
   }
 
-  create_shutdown_handle(&this) ServerShutdownHandle `public `doc("Create a shutdown handle. Must be called before serve. The handle can be sent to another goroutine to stop the server.") {
+  create_shutdown_handle(this) ServerShutdownHandle `public `doc("Create a shutdown handle. Must be called before serve. The handle can be sent to another goroutine to stop the server.") {
     channel[bool] stop_ref = this._stop;
     return ServerShutdownHandle(_address: this._address[0:],
     _port: this._port,
-    _stop: stop_ref);
+    _stop: move stop_ref);
   }
 
   serve!(~this, Handler ~handler) `public `doc("Accept and handle requests serially until shutdown or listener error. Blocks.") {
@@ -266,24 +266,24 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
   get port int `public `doc("The bound port.") => this._port;
 }
 
-http_get!(~string url) Response `public `doc("Perform an HTTP GET request.") {
-  Request req = Request.new_get(url);
+http_get!(string move url) Response `public `doc("Perform an HTTP GET request.") {
+  Request req = Request.new_get(move url);
   return req.send()?^;
 }
 
-http_post!(~string url, ~string body, ~map[string, string] headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
-  Request req = Request.new_post(url, body);
+http_post!(string move url, string move body, map[string, string] move headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
+  Request req = Request.new_post(move url, move body);
   for key, value in headers {
-    req.set_header(key, value);
+    req.set_header(move key, move value);
   }
   return req.send()?^;
 }
 
-http_post_json![T: Encodable](~string url, T data) Response `public `doc("Perform an HTTP POST request with a JSON-encoded body.") {
+http_post_json![T: Encodable](string move url, T data) Response `public `doc("Perform an HTTP POST request with a JSON-encoded body.") {
   string json_body = json.encode_string[T](data)?^;
   map[string, string] h = map[string, string]();
   h["Content-Type"] = "application/json";
-  return http_post(url, json_body, h)?^;
+  return http_post(move url, move json_body, move h)?^;
 }
 
 type _Url {
@@ -327,7 +327,7 @@ _parse_url!(string url) _Url {
     raise HttpError(code: 0, message: "empty host in URL");
   }
 
-  return _Url(host: host_val, port: port_val, path: path_val);
+  return _Url(host: move host_val, port: port_val, path: move path_val);
 }
 
 _method_to_string(Method m) string {
@@ -382,7 +382,7 @@ _parse_response!(string header_text) _ParsedResponse {
     i = i + 1;
   }
 
-  return _ParsedResponse(status: status, headers: hdrs);
+  return _ParsedResponse(status: status, headers: move hdrs);
 }
 
 _parse_status_code!(string line) int {
@@ -626,10 +626,10 @@ _read_request!(net.TcpStream ~conn) ServerRequest {
     body_str = string.from_bytes(raw[body_start: end]);
   }
 
-  return _parse_request(header_text, body_str)?^;
+  return _parse_request(header_text, move body_str)?^;
 }
 
-_parse_request!(string header_text, ~string body_str) ServerRequest {
+_parse_request!(string header_text, string move body_str) ServerRequest {
   string[] lines = header_text.split("\r\n");
   if lines.len == 0 {
     raise HttpError(code: 0, message: "empty HTTP request");
@@ -682,7 +682,7 @@ _parse_request!(string header_text, ~string body_str) ServerRequest {
     i = i + 1;
   }
 
-  return ServerRequest(_method: method, _path: path_val, _query: query_val, _headers: hdrs, _body: body_str);
+  return ServerRequest(_method: move method, _path: move path_val, _query: move query_val, _headers: move hdrs, _body: move body_str);
 }
 
 _serialize_response(ServerResponse ~resp) string {
@@ -714,7 +714,7 @@ _handle_one!(net.TcpStream ~conn, Handler ~handler) {
   ServerRequest request = _read_request(conn)?^;
 
   ServerResponse resp = handler.handle(request)? e {
-    ServerResponse err_resp = ServerResponse.internal_error(e.message);
+    ServerResponse err_resp = ServerResponse.internal_error(move e.message);
     string err_str = _serialize_response(err_resp);
     u8[] err_data = err_str.bytes();
     _write_all(conn, err_data)?^;

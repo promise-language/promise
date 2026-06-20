@@ -275,7 +275,7 @@ test_http_put() `test(exclude: wasm, timeout: "10s") {
   int port = listener.local_port;
 
   go {
-    Request req = Request(method: Method.Put, url: "http://127.0.0.1:" + port.to_string() + "/res", headers: map[string, string](), body: "update");
+    Request req = Request(method: move Method.Put, url: "http://127.0.0.1:" + port.to_string() + "/res", headers: map[string, string](), body: "update");
     Response resp = req.send()?!;
     assert(resp.status == 200, "status");
   };
@@ -328,7 +328,7 @@ test_http_post_function() `test(exclude: wasm, timeout: "10s") {
 
   go {
     map[string, string] h = map[string, string]();
-    Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", h)?!;
+    Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", move h)?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body");
   };
@@ -396,7 +396,7 @@ test_http_post_with_headers() `test(exclude: wasm, timeout: "10s") {
     map[string, string] h = map[string, string]();
     h["X-Token"] = "abc";
     h["X-User"] = "alice";
-    Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", h)?!;
+    Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", move h)?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body ok");
   };

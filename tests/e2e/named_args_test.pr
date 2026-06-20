@@ -3,15 +3,15 @@ type Point {
   int x;
   int y;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 
-  scale(&this, int factor, int offset) int {
+  scale(this, int factor, int offset) int {
     return (this.x + this.y) * factor + offset;
   }
 
-  add_point(&this, int dx, int dy) Point {
+  add_point(this, int dx, int dy) Point {
     return Point(x: this.x + dx, y: this.y + dy);
   }
 }

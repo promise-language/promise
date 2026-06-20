@@ -23,14 +23,14 @@ test_arc_param_push_ok() `test {
 
 // --- Mutex[T] -----------------------------------------------------------
 
-push_mutex(~Mutex[int] m) {
+push_mutex(Mutex[int] move m) {
   v := Vector[Mutex[int]]();
-  v.push(m);
+  v.push(move m);
 }
 
 test_mutex_consume_push() `test {
   m := Mutex[int](42);
-  push_mutex(m);
+  push_mutex(move m);
 }
 
 // --- Task[T] ------------------------------------------------------------
@@ -39,25 +39,25 @@ worker_t0556() int {
   return 17;
 }
 
-push_task(~Task[int] t) {
+push_task(Task[int] move t) {
   v := Vector[Task[int]]();
-  v.push(t);
+  v.push(move t);
 }
 
 test_task_consume_push() `test(exclude: wasm) {
   t := go worker_t0556();
-  push_task(t);
+  push_task(move t);
 }
 
 // --- MutexGuard[T] ------------------------------------------------------
 
-push_guard(~MutexGuard[int] g) {
+push_guard(MutexGuard[int] move g) {
   v := Vector[MutexGuard[int]]();
-  v.push(g);
+  v.push(move g);
 }
 
 test_guard_consume_push() `test {
   m := Mutex[int](42);
   g := m.lock();
-  push_guard(g);
+  push_guard(move g);
 }

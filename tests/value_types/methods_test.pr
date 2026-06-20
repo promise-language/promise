@@ -2,11 +2,11 @@ type Point {
   int x `value;
   int y `value;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 
-  scale(&this, int factor) Point {
+  scale(this, int factor) Point {
     return Point(x: this.x * factor, y: this.y * factor);
   }
 }

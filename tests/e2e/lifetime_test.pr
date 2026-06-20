@@ -1,6 +1,6 @@
 // Tests for explicit lifetime annotations (B0033).
 // Elision rule 2: single ref param — lifetime is unambiguous.
-get_first(string &s) string & {
+get_first(string s) string & {
   return s;
 }
 
@@ -10,11 +10,11 @@ single_ref_elision() `test {
   assert(r.len == 5, "single ref elision: len");
 }
 
-// Elision rule 3: &this receiver — return borrows from this.
+// Elision rule 3: this receiver — return borrows from this.
 type Named {
   string name;
 
-  get_name(&this) string & {
+  get_name(this) string & {
     return this.name;
   }
 }
@@ -26,7 +26,7 @@ this_receiver_elision() `test {
 }
 
 // Explicit lifetime: longest pattern — both params share the same lifetime.
-longest(string &a `lifetime(x), string &b `lifetime(x)) string & `lifetime(x) {
+longest(string a `lifetime(x), string b `lifetime(x)) string & `lifetime(x) {
   if a.len > b.len {
     return a;
   }
@@ -41,7 +41,7 @@ explicit_same_lifetime() `test {
 }
 
 // Explicit lifetime: distinct lifetimes, pick one.
-pick_first(string &a `lifetime(x), string &b `lifetime(y)) string & `lifetime(x) {
+pick_first(string a `lifetime(x), string b `lifetime(y)) string & `lifetime(x) {
   return a;
 }
 

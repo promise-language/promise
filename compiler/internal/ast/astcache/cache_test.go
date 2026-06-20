@@ -64,6 +64,11 @@ func TestRoundTripExpressions(t *testing.T) {
 		makeExpr(&ast.ArrayLit{Elements: []ast.Expr{makeIdent("a")}}, pos, end),
 		makeExpr(&ast.MapLit{Entries: []*ast.MapEntry{{Key: makeIdent("a"), Value: makeIdent("b")}}}, pos, end),
 		makeExpr(&ast.EmptyBraceLit{}, pos, end), // T0866
+		// T0998: call args must round-trip the `move` marker.
+		makeExpr(&ast.CallExpr{Callee: makeIdent("f"), Args: []*ast.Arg{
+			{Value: makeIdent("x"), Move: true},
+			{Name: "y", Value: makeIdent("z"), Move: false},
+		}}, pos, end),
 	}
 
 	for _, expr := range exprs {

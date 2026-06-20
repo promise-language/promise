@@ -175,7 +175,7 @@ type Credential `public `doc("A named secret value loaded from environment or cr
 
     // Read the secret. The accessor is a method (not a getter) to keep the
     // call site loud — secrets shouldn't read like ordinary properties.
-    value(&this) string `public `instance => this._value;
+    value(this) string `public `instance => this._value;
 }
 
 type TokenProvider `structural `public `doc("Anything that can mint a valid bearer token on demand.") {
@@ -547,8 +547,8 @@ type Agent `public {
     }
 
     // Get the full conversation history (shared borrow).
-    get_history(&this) Message[]& `public `instance {
-        return &this.history;
+    get_history(this) Message[]& `public `instance {
+        return this.history;
     }
 
     // Replace history (e.g. when restoring from a session).
@@ -557,7 +557,7 @@ type Agent `public {
     }
 
     // Fork the agent — creates a copy with cloned history but shared tools/config.
-    fork(&this) Agent `public `instance;
+    fork(this) Agent `public `instance;
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -813,7 +813,7 @@ type Session `public {
     // ── Persistence ──────────────────────────────────────────────────
 
     // Save session to a file.
-    save!(&this, string path) `public `instance;
+    save!(this, string path) `public `instance;
 
     // Load a session from a file.
     load!(string path) Session `factory `public;
@@ -841,10 +841,10 @@ type Session `public {
     compact(~this, (Message[]) -> Message! summarizer)! `public `instance;
 
     // Fork the session — creates a branch with cloned history up to this point.
-    fork(&this) Session `public `instance;
+    fork(this) Session `public `instance;
 
     // Get total token count estimate for the session.
-    estimate_tokens(&this) int `public `instance;
+    estimate_tokens(this) int `public `instance;
 }
 ```
 
@@ -950,10 +950,10 @@ type UsageTracker `public {
     }
 
     // Create hooks that automatically track usage.
-    as_hooks(&this) AgentHooks `public `instance;
+    as_hooks(this) AgentHooks `public `instance;
 
     // Get a summary string.
-    summary(&this) string `public `instance;
+    summary(this) string `public `instance;
 }
 ```
 

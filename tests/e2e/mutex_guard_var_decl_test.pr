@@ -3,7 +3,7 @@
 // Without the fix, the outer call's copy-type return value masks the captured
 // guard, NLL early-drops the parent Mutex, and vec's element-drop dereferences
 // the freed Mutex -> use-after-free at scope exit.
-push_guard_count(Vector[MutexGuard[int]] ~vec, ~MutexGuard[int] g) int {
+push_guard_count(Vector[MutexGuard[int]] ~vec, MutexGuard[int] move g) int {
   vec.push(g);
   return vec.len;
 }

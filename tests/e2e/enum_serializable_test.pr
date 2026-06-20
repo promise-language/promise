@@ -88,7 +88,7 @@ round_trip_task_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   t.encode(enc)?!;
   string s = enc.to_string();
-  json.JsonDecoder dec = json.JsonDecoder(data: s);
+  json.JsonDecoder dec = json.JsonDecoder(data: move s);
   Task t2 = Task.decode(dec)?!;
   assert(t2.name == "Ship", "rt task name");
   // Verify priority round-trips

@@ -61,8 +61,8 @@ type MtxHolder {
   peek_owned(~this) int {
     return (this.mtx!).lock().borrow;
   }
-  // Borrowed &this: `.lock()` only borrows — owner stays sole owner.
-  peek_borrow(&this) int {
+  // Borrowed this: `.lock()` only borrows — owner stays sole owner.
+  peek_borrow(this) int {
     return (this.mtx!).lock().borrow;
   }
 }
@@ -78,8 +78,8 @@ type TskHolder {
   }
 }
 
-// Borrowed &owner: `.lock()` borrows — real owner (caller) keeps ownership.
-fn_borrow_mtx(MtxHolder &h) int {
+// Borrowed owner: `.lock()` borrows — real owner (caller) keeps ownership.
+fn_borrow_mtx(MtxHolder h) int {
   return (h.mtx!).lock().borrow;
 }
 
@@ -130,7 +130,7 @@ t0806_mtx_fu_borrow_this() `test {
 
 t0806_mtx_fu_borrow_owner() `test {
   h := MtxHolder(mtx: Mutex[int](8));
-  assert(fn_borrow_mtx(h) == 8, "mtx fu borrowed &owner");
+  assert(fn_borrow_mtx(h) == 8, "mtx fu borrowed owner");
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +397,7 @@ type MtxGetterHolder {
   }
 }
 
-t0806_mtx_getter_fresh_out_of_borrow(MtxGetterHolder &h) int {
+t0806_mtx_getter_fresh_out_of_borrow(MtxGetterHolder h) int {
   Mutex[int] m = h.fresh_mtx!;
   return m.lock().borrow;
 }

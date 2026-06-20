@@ -3,7 +3,7 @@ _make_reader(int[] bytes) _BitReader {
   for v in bytes {
     data.push(v as! u8);
   }
-  return _BitReader(data: data);
+  return _BitReader(data: move data);
 }
 
 bitreader_single_bits_test() `test {

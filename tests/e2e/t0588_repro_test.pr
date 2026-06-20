@@ -22,21 +22,21 @@ type _Box {
 }
 
 // 1. Pure `~_Box?` consume — function body empty. The original T0588 repro.
-_t0588_consume_box(~_Box? a) {
+_t0588_consume_box(_Box? move a) {
 }
 
 t0588_do_nothing_box() `test {
   _Box? a = _Box(n: 1);
-  _t0588_consume_box(a);
+  _t0588_consume_box(move a);
 }
 
 // 2. `~string?` consume — heap-allocated string param, body empty.
-_t0588_consume_string(~string? a) {
+_t0588_consume_string(string? move a) {
 }
 
 t0588_do_nothing_string() `test {
   string? a = (1).to_string();
-  _t0588_consume_string(a);
+  _t0588_consume_string(move a);
 }
 
 // 3. `~int[]?` consume — heap-allocated Vector param, body empty.
@@ -44,13 +44,13 @@ t0588_do_nothing_string() `test {
 // allocation path (T0062 — fully-constant literals live in .rodata and
 // their drop would skip `pal_free`, so a heap vector is required to
 // actually exercise the leak path).
-_t0588_consume_vector(~int[]? a) {
+_t0588_consume_vector(int[]? move a) {
 }
 
 t0588_do_nothing_vector() `test {
   int n = 3;
   int[]? a = [1, 2, n];
-  _t0588_consume_vector(a);
+  _t0588_consume_vector(move a);
 }
 
 // 4. Method with `~_Box?` param. defineMethodFunc shares maybeRegisterDrop
@@ -58,28 +58,28 @@ t0588_do_nothing_vector() `test {
 type _T0588Receiver {
   int dummy;
 
-  consume_box(this, ~_Box? a) {
+  consume_box(this, _Box? move a) {
   }
 }
 
 t0588_do_nothing_method() `test {
   r := _T0588Receiver(dummy: 0);
   _Box? a = _Box(n: 4);
-  r.consume_box(a);
+  r.consume_box(move a);
 }
 
 // 5. Generator with `~_Box?` param. The generator path goes through
 // generator.go and likewise calls maybeRegisterDrop. Body just yields
 // once and then returns; the param must drop at the generator's normal
 // completion (covers the "fall-off-the-end" branch).
-_t0588_consume_box_gen(~_Box? a) stream[int] {
+_t0588_consume_box_gen(_Box? move a) stream[int] {
   yield 1;
 }
 
 t0588_do_nothing_generator() `test {
   _Box? a = _Box(n: 5);
   int count = 0;
-  for v in _t0588_consume_box_gen(a) {
+  for v in _t0588_consume_box_gen(move a) {
     assert(v == 1, "generator yields 1");
     count = count + 1;
   }
@@ -88,14 +88,14 @@ t0588_do_nothing_generator() `test {
 
 // 5b. Generator early `break` — generator coroutine is destroyed before
 // the body completes, so the param drop must fire via the cleanup path.
-_t0588_consume_box_gen_break(~_Box? a) stream[int] {
+_t0588_consume_box_gen_break(_Box? move a) stream[int] {
   yield 1;
   yield 2;
 }
 
 t0588_do_nothing_generator_break() `test {
   _Box? a = _Box(n: 55);
-  for v in _t0588_consume_box_gen_break(a) {
+  for v in _t0588_consume_box_gen_break(move a) {
     assert(v == 1, "generator first yield");
     break;
   }
@@ -104,51 +104,51 @@ t0588_do_nothing_generator_break() `test {
 // 6. Failable function with `~_Box?` param. The failable path lowers
 // through a different code path but defineFunc still owns param drop
 // registration.
-_t0588_consume_box_fail!(~_Box? a) int {
+_t0588_consume_box_fail!(_Box? move a) int {
   return 6;
 }
 
 t0588_do_nothing_failable() `test {
   _Box? a = _Box(n: 6);
-  int r = _t0588_consume_box_fail(a)?!;
+  int r = _t0588_consume_box_fail(move a)?!;
   assert(r == 6, "failable returns 6");
 }
 
 // 7. Generic free function with `~T?` param instantiated with `_Box`.
 // Exercises monomorphization: the substituted param type must still
 // match the Optional shape so maybeRegisterDrop's delegation fires.
-_t0588_consume_generic[T](~T? a) {
+_t0588_consume_generic[T](T? move a) {
 }
 
 t0588_do_nothing_generic() `test {
   _Box? a = _Box(n: 7);
-  _t0588_consume_generic[_Box](a);
+  _t0588_consume_generic[_Box](move a);
 }
 
 // 8. Nested Optional: `~_Box??` consume — body empty. The outer Optional
 // owns the inner Optional which owns the heap `_Box`; the drop binding
 // must walk the nested structure.
-_t0588_consume_nested(~_Box?? a) {
+_t0588_consume_nested(_Box?? move a) {
 }
 
 t0588_do_nothing_nested() `test {
   _Box? a = _Box(n: 8);
   _Box?? b = a;
-  _t0588_consume_nested(b);
+  _t0588_consume_nested(move b);
 }
 
 // 9. `~map[K, V]?` consume — Map was specifically called out in the bug
 // description as a likely-affected heap-allocating type alongside Vector
 // and string. Exercises the same maybeRegisterDrop helper through a
 // different concrete heap type.
-_t0588_consume_map(~map[string, int]? a) {
+_t0588_consume_map(map[string, int]? move a) {
 }
 
 t0588_do_nothing_map() `test {
   map[string, int]? a = {
     "a": 1, "b": 2
   };
-  _t0588_consume_map(a);
+  _t0588_consume_map(move a);
 }
 
 // 10. Method on a generic owner type with `~T?` Optional param. Exercises
@@ -159,14 +159,14 @@ t0588_do_nothing_map() `test {
 type _T0588GenericReceiver[T] {
   T value;
 
-  consume_box(this, ~_Box? a) {
+  consume_box(this, _Box? move a) {
   }
 }
 
 t0588_do_nothing_method_on_generic_owner() `test {
   r := _T0588GenericReceiver[int](value: 0);
   _Box? a = _Box(n: 9);
-  r.consume_box(a);
+  r.consume_box(move a);
 }
 
 // 11. Generic method on a non-generic owner with `~T?` param. Exercises
@@ -175,26 +175,26 @@ t0588_do_nothing_method_on_generic_owner() `test {
 type _T0588MethodHost {
   int dummy;
 
-  consume_generic[T](this, ~T? a) {
+  consume_generic[T](this, T? move a) {
   }
 }
 
 t0588_do_nothing_generic_method() `test {
   r := _T0588MethodHost(dummy: 0);
   _Box? a = _Box(n: 10);
-  r.consume_generic[_Box](a);
+  r.consume_generic[_Box](move a);
 }
 
 // 12. Multiple `~T?` params on the same function — exercises the param
 // iteration loop in defineFunc. Every param must independently get its
 // own drop binding; a bug that registered only the first would leak the
 // rest.
-_t0588_consume_multi(~_Box? a, ~_Box? b, ~_Box? c) {
+_t0588_consume_multi(_Box? move a, _Box? move b, _Box? move c) {
 }
 
 t0588_do_nothing_multi() `test {
   _Box? a = _Box(n: 11);
   _Box? b = _Box(n: 12);
   _Box? c = _Box(n: 13);
-  _t0588_consume_multi(a, b, c);
+  _t0588_consume_multi(move a, move b, move c);
 }

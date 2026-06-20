@@ -181,7 +181,8 @@ receiverParam
 
 param
     : ELLIPSIS typeRef bindingName metaAnnotation*               # variadicParam
-    | TILDE typeRef bindingName metaAnnotation*                  # moveParam
+    | typeRef MOVE bindingName metaAnnotation*                   # moveParam
+    | TILDE typeRef bindingName metaAnnotation*                  # legacyMoveParam
     | typeRef refMod? bindingName metaAnnotation* (ASSIGN expression)?  # regularParam
     ;
 
@@ -203,7 +204,7 @@ argList
     ;
 
 arg
-    : (IDENT COLON)? expression
+    : (IDENT COLON)? MOVE? expression
     ;
 
 // ============================================================

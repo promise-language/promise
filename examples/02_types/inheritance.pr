@@ -8,16 +8,16 @@ type Animal {
   string name;
 
   // Abstract method — children must implement this.
-  speak(&this) string `abstract;
+  speak(this) string `abstract;
 
   // Concrete method — inherited by all children.
-  introduce(&this) string {
+  introduce(this) string {
     return "{this.name} says {this.speak()}";
   }
 }
 
 type Dog is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "woof!";
   }
 }
@@ -25,7 +25,7 @@ type Dog is Animal {
 type Cat is Animal {
   int lives;
 
-  speak(&this) string {
+  speak(this) string {
     return "meow!";
   }
 }
@@ -35,7 +35,7 @@ type GuideDog is Dog {
   string owner;
 
   // Override speak from Dog.
-  speak(&this) string {
+  speak(this) string {
     return "woof! (guiding {this.owner})";
   }
 }

@@ -116,7 +116,7 @@ split(string p) string[] `public `doc("Splits a path into all its components. A 
   int start = 0;
   // Handle leading separator as root component
   if Platform.is_path_separator(p[0]) {
-    parts.push(Platform.path_separator);
+    parts.push(move Platform.path_separator);
     start = 1;
     // Skip consecutive leading separators
     while start < p.len && Platform.is_path_separator(p[start]) {
@@ -164,11 +164,11 @@ normalize(string p) string `public `doc("Collapses `.`, `..`, and redundant sepa
         result.pop();
       } else if !absolute {
         // Relative path: keep leading ".."
-        result.push(part);
+        result.push(move part);
       }
       // Absolute path: ".." above root is a no-op
     } else {
-      result.push(part);
+      result.push(move part);
     }
     i = i + 1;
   }

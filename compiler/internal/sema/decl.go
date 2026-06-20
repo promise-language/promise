@@ -764,17 +764,17 @@ func isSetterOperatorName(name string) bool {
 // not move the operand into the call, so a consuming (~) operand causes a hidden
 // move and a double-free/segfault. Setters ([]=, [:]=) are EXCLUDED: they are
 // invoked from `lhs[i] = rhs`, an assignment that genuinely moves the RHS into the
-// call, so a ~ value/key parameter is correct and is relied on by the stdlib (e.g.
-// Map.[]=(~K key, ~V value)). Only the param move modifier (RefMut) is checked; the
-// receiver (e.g. ~this) is a legitimate construct and is left alone, as are Type~
-// mut-ref and & shared-ref params.
+// call, so a move value/key parameter is correct and is relied on by the stdlib
+// (e.g. Map.[]=(K move key, V move value)). Only the param move modifier (RefMut)
+// is checked; the receiver (e.g. ~this) is a legitimate construct and is left
+// alone, as are Type~ mut-ref params.
 func (c *Checker) validateNoMoveOperatorParam(md *ast.MethodDecl, sig *types.Signature, typeName string) {
 	if !isOperatorMethodName(md.Name) || isSetterOperatorName(md.Name) {
 		return
 	}
 	for _, p := range sig.Params() {
 		if p.Ref() == types.RefMut {
-			c.errorf(md.Pos(), "operator method %s.%s cannot take a move (~) parameter '%s'; operators borrow their operands — there is no call-site move syntax for 'a %s b', so a consuming operand would be a hidden move. Remove the '~' (use a borrow), or move-consume via a named ~-parameter method instead.", typeName, md.Name, p.Name(), md.Name)
+			c.errorf(md.Pos(), "operator method %s.%s cannot take a `move` parameter '%s'; operators borrow their operands — there is no call-site move syntax for 'a %s b', so a consuming operand would be a hidden move. Drop the `move` (use a borrow), or move-consume via a named `move`-parameter method instead.", typeName, md.Name, p.Name(), md.Name)
 		}
 	}
 }
@@ -836,6 +836,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			params[i] = types.NewParam(p.Name, vecType, types.RefNone)
 			params[i].SetVariadic(true)
 		} else {
+			c.rejectSharedRefParam(p.Pos(), p.Name, pt)
 			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 		}
 		if p.Default != nil {
@@ -1086,6 +1087,7 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 			params[i] = types.NewParam(p.Name, vecType, types.RefNone)
 			params[i].SetVariadic(true)
 		} else {
+			c.rejectSharedRefParam(p.Pos(), p.Name, pt)
 			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 		}
 		if p.Default != nil {
@@ -1365,6 +1367,9 @@ func isU8Vector(typ types.Type) bool {
 }
 
 func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
+	// `extern` declarations are an FFI boundary: `T&`/`T~` describe the C pointer
+	// ABI, not an ownership borrow, so the `&`-parameter removal does not apply.
+	isExtern := c.hasAnnotation(d.Annotations, "extern")
 	// Resolve parameters
 	params := make([]*types.Param, len(d.Params))
 	for i, p := range d.Params {
@@ -1379,6 +1384,9 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 			params[i] = types.NewParam(p.Name, vecType, types.RefNone)
 			params[i].SetVariadic(true)
 		} else {
+			if !isExtern {
+				c.rejectSharedRefParam(p.Pos(), p.Name, pt)
+			}
 			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 		}
 		if p.Default != nil {

@@ -90,7 +90,7 @@ test_mutex_string_multiple_writes() `test {
 // implicit decay.
 test_mutex_vector_inner() `test {
   v := [1, 2, 3];
-  m := Mutex[int[]](v);
+  m := Mutex[int[]](move v);
   {
     use guard := m.lock();
     int[] &r = guard.borrow;
@@ -164,7 +164,7 @@ test_mutex_user_type_synth_drop() `test {
 test_mutex_borrow_heap_vec() `test {
   v := string[]();
   v.push("hello" + "");
-  m := Mutex[string[]](v);
+  m := Mutex[string[]](move v);
   use guard := m.lock();
   borrowed := guard.borrow;
   assert(borrowed.len == 1, "heap vec borrow len");
@@ -173,7 +173,7 @@ test_mutex_borrow_heap_vec() `test {
 // T0367: Mutex[string] with a heap-allocated string borrowed via guard.borrow.
 test_mutex_borrow_heap_string() `test {
   s := "hello" + "";
-  m := Mutex[string](s);
+  m := Mutex[string](move s);
   use guard := m.lock();
   borrowed := guard.borrow;
   assert(borrowed.len == 5, "heap string borrow len");
@@ -184,7 +184,7 @@ test_mutex_borrow_heap_string() `test {
 test_mutex_borrow_typed_decl_heap_vec() `test {
   v := string[]();
   v.push("hello" + "");
-  m := Mutex[string[]](v);
+  m := Mutex[string[]](move v);
   use guard := m.lock();
   string[] &borrowed = guard.borrow;
   assert(borrowed.len == 1, "typed decl heap vec");
@@ -197,8 +197,8 @@ test_mutex_borrow_reassign() `test {
   v1.push("hello" + "");
   v2 := string[]();
   v2.push("world" + "");
-  m1 := Mutex[string[]](v1);
-  m2 := Mutex[string[]](v2);
+  m1 := Mutex[string[]](move v1);
+  m2 := Mutex[string[]](move v2);
   use g1 := m1.lock();
   use g2 := m2.lock();
   borrowed := g1.borrow;
@@ -213,7 +213,7 @@ test_mutex_borrow_reassign() `test {
 test_mutex_borrow_reassign_to_owned() `test {
   v := string[]();
   v.push("borrowed" + "");
-  m := Mutex[string[]](v);
+  m := Mutex[string[]](move v);
   use g := m.lock();
   borrowed := g.borrow;
   borrowed = string[]();
@@ -227,7 +227,7 @@ test_mutex_borrow_reassign_to_owned() `test {
 test_mutex_borrow_through_if() `test {
   v := string[]();
   v.push("hello" + "");
-  m := Mutex[string[]](v);
+  m := Mutex[string[]](move v);
   use g := m.lock();
   cond := true;
   borrowed := if cond {
@@ -247,11 +247,11 @@ test_mutex_borrow_index_assign_vector() `test {
   vec := string[][]();
   v1 := string[]();
   v1.push("init" + "");
-  vec.push(v1);
+  vec.push(move v1);
 
   v2 := string[]();
   v2.push("hello" + "");
-  m := Mutex[string[]](v2);
+  m := Mutex[string[]](move v2);
   use g := m.lock();
 
   vec[0] = g.borrow.clone();
@@ -267,7 +267,7 @@ test_mutex_guard_slice_assign() `test {
   s.push("a" + "");
   s.push("b" + "");
   s.push("c" + "");
-  m := Mutex[string[]](s);
+  m := Mutex[string[]](move s);
   use g := m.lock();
   v1 := string[]();
   v1.push("x" + "");

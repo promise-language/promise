@@ -1,19 +1,19 @@
 // Type casting and type check tests: is expression, polymorphism.
 type Shape {
   string name;
-  area(&this) f64 `abstract;
+  area(this) f64 `abstract;
 }
 
 type Circle is Shape {
   f64 radius;
-  area(&this) f64 {
+  area(this) f64 {
     return 3.14159 * this.radius * this.radius;
   }
 }
 
 type Square is Shape {
   f64 side;
-  area(&this) f64 {
+  area(this) f64 {
     return this.side * this.side;
   }
 }
@@ -21,7 +21,7 @@ type Square is Shape {
 type Triangle is Shape {
   f64 base;
   f64 height;
-  area(&this) f64 {
+  area(this) f64 {
     return this.base * this.height / 2.0;
   }
 }
@@ -86,19 +86,19 @@ test_parent_field_access() `test {
 
 type Vehicle {
   string make;
-  describe(&this) string `abstract;
+  describe(this) string `abstract;
 }
 
 type Car is Vehicle {
   int doors;
-  describe(&this) string {
+  describe(this) string {
     return "car";
   }
 }
 
 type Truck is Vehicle {
   int payload;
-  describe(&this) string {
+  describe(this) string {
     return "truck";
   }
 }
@@ -235,7 +235,7 @@ type ShapeFactory {
 
 type ShapeBox {
   // User-defined `[]` operator returning an owned heap user-type value.
-  [](&this, int i) Shape {
+  [](this, int i) Shape {
     return Circle(name: "from-index", radius: 6.0);
   }
 }
@@ -309,7 +309,7 @@ test_downcast_element_target_from_owned_local() `test {
 
 test_downcast_ctor_arg_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 4.0);
-  h := Holder(held: s as! Circle);
+  h := Holder(held: move s as! Circle);
   assert((h.held as! Circle).radius == 4.0, "ctor arg from cast-of-owned-local radius");
   assert(h.held.name == "src", "ctor arg from cast-of-owned-local name (UAF probe)");
 }
@@ -339,13 +339,13 @@ test_downcast_element_target_from_vector_index() `test {
 // Without clearing the subject's drop flag at the call site, the subject and the
 // new owner both drop the same allocation → double-free at scope exit.
 
-consume_circle(~Circle c) f64 {
+consume_circle(Circle move c) f64 {
   return c.radius;
 }
 
 test_downcast_tilde_param_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 2.0);
-  f64 r = consume_circle(s as! Circle);
+  f64 r = consume_circle(move s as! Circle);
   assert(r == 2.0, "~ param from cast-of-owned-local");
 }
 
@@ -355,7 +355,7 @@ enum DowncastVariant {
 
 test_downcast_enum_variant_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 6.5);
-  DowncastVariant v = DowncastVariant.Wrap(s as! Circle);
+  DowncastVariant v = DowncastVariant.Wrap(move s as! Circle);
   match v {
     Wrap(c) => {
       assert(c.radius == 6.5, "enum variant from cast-of-owned-local radius");
@@ -373,14 +373,14 @@ test_downcast_enum_variant_from_owned_local() `test {
 
 type HolderExplicit {
   Circle held;
-  new(~this, ~Circle c) {
+  new(~this, Circle move c) {
     this.held = c;
   }
 }
 
 test_downcast_explicit_new_arg_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 4.5);
-  h := HolderExplicit(c: s as! Circle);
+  h := HolderExplicit(c: move s as! Circle);
   assert(h.held.radius == 4.5, "explicit new() arg from cast-of-owned-local radius");
   assert(h.held.name == "src", "explicit new() arg from cast-of-owned-local name (UAF probe)");
 }
@@ -389,20 +389,20 @@ test_downcast_explicit_new_arg_from_owned_local() `test {
 // branch in genSuperCall.
 type AnimalBase {
   Circle avatar;
-  new(~this, ~Circle a) {
+  new(~this, Circle move a) {
     this.avatar = a;
   }
 }
 
 type Pet is AnimalBase {
-  new(~this, ~Shape s) {
-    super(a: s as! Circle);
+  new(~this, Shape move s) {
+    super(a: move s as! Circle);
   }
 }
 
 test_downcast_super_arg_explicit_parent_new() `test {
   Shape s = Circle(name: "src", radius: 7.0);
-  p := Pet(s: s);
+  p := Pet(s: move s);
   assert(p.avatar.radius == 7.0, "super-arg cast (explicit parent new) radius");
   assert(p.avatar.name == "src", "super-arg cast (explicit parent new) name (UAF probe)");
 }
@@ -414,14 +414,14 @@ type SimpleHolder {
 }
 
 type ChildHolder is SimpleHolder {
-  new(~this, ~Shape s) {
-    super(held: s as! Circle);
+  new(~this, Shape move s) {
+    super(held: move s as! Circle);
   }
 }
 
 test_downcast_super_arg_implicit_parent() `test {
   Shape s = Circle(name: "src", radius: 8.0);
-  c := ChildHolder(s: s);
+  c := ChildHolder(s: move s);
   assert(c.held.radius == 8.0, "super-arg cast (implicit parent ctor) radius");
   assert(c.held.name == "src", "super-arg cast (implicit parent ctor) name (UAF probe)");
 }
@@ -528,14 +528,14 @@ test_downcast_map_lit_key_from_owned_local() `test {
 
 test_downcast_arc_ctor_arg_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 5.5);
-  Ref[Circle] a = Ref[Circle](s as! Circle);
+  Ref[Circle] a = Ref[Circle](move s as! Circle);
   assert(a.borrow.radius == 5.5, "arc ctor arg from cast-of-owned-local radius");
   assert(a.borrow.name == "src", "arc ctor arg from cast-of-owned-local name (UAF probe)");
 }
 
 test_downcast_mutex_ctor_arg_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 6.5);
-  Mutex[Circle] m = Mutex[Circle](s as! Circle);
+  Mutex[Circle] m = Mutex[Circle](move s as! Circle);
   use g := m.lock();
   assert(g.borrow.radius == 6.5, "mutex ctor arg from cast-of-owned-local radius");
   assert(g.borrow.name == "src", "mutex ctor arg from cast-of-owned-local name (UAF probe)");
@@ -544,7 +544,7 @@ test_downcast_mutex_ctor_arg_from_owned_local() `test {
 test_downcast_channel_send_from_owned_local() `test {
   Shape s = Circle(name: "src", radius: 7.5);
   channel[Circle] ch = channel[Circle](capacity: 1);
-  ch.send(s as! Circle);
+  ch.send(move s as! Circle);
   if c := <-ch {
     assert(c.radius == 7.5, "channel send from cast-of-owned-local radius");
     assert(c.name == "src", "channel send from cast-of-owned-local name (UAF probe)");
@@ -714,8 +714,8 @@ test_optional_subject_optional_none() `test {
 // source shapes, not just local idents. Each `name` heap field surfaces leaks; the
 // borrowed-`this` cases are called twice to surface use-after-free.
 
-make_optional_shape(~string n) Shape? {
-  Shape s = Circle(name: n, radius: 4.0);
+make_optional_shape(string move n) Shape? {
+  Shape s = Circle(name: move n, radius: 4.0);
   return s;
 }
 
@@ -748,7 +748,7 @@ test_optional_subject_temp_force() `test {
 test_optional_subject_index_optional_match() `test {
   Shape?[] v = [];
   Shape s = Circle(name: "iom", radius: 5.0);
-  v.push(s);
+  v.push(move s);
   Circle? c = v[0] as Circle;
   bool present = false;
   if c {
@@ -760,7 +760,7 @@ test_optional_subject_index_optional_match() `test {
 test_optional_subject_index_optional_mismatch() `test {
   Shape?[] v = [];
   Shape s = Circle(name: "iox", radius: 5.0);
-  v.push(s);
+  v.push(move s);
   Square? sq = v[0] as Square;
   bool present = false;
   if sq {
@@ -771,20 +771,20 @@ test_optional_subject_index_optional_mismatch() `test {
 test_optional_subject_index_force() `test {
   Shape?[] v = [];
   Shape s = Circle(name: "if", radius: 5.0);
-  v.push(s);
+  v.push(move s);
   c := v[0] as! Circle;
   assert(c.name == "if", "index force name");
 }
 
-// Borrowed-`this.field` source inside a `&this` method: the caller still owns the
+// Borrowed-`this.field` source inside a `this` method: the caller still owns the
 // field, so the cast must dup. Called twice to surface use-after-free.
 type OptHolder {
   Shape? slot;
-  probe_force(&this) string {
+  probe_force(this) string {
     c := this.slot as! Circle;
     return c.name;
   }
-  probe_optional(&this) bool {
+  probe_optional(this) bool {
     Circle? c = this.slot as Circle;
     bool present = false;
     if c {
@@ -792,7 +792,7 @@ type OptHolder {
     }
     return present;
   }
-  probe_mismatch(&this) bool {
+  probe_mismatch(this) bool {
     Square? sq = this.slot as Square;
     bool present = false;
     if sq {
@@ -805,19 +805,19 @@ type OptHolder {
 }
 test_optional_subject_borrowed_this_force() `test {
   Shape s = Circle(name: "btf", radius: 6.0);
-  OptHolder h = OptHolder(slot: s);
+  OptHolder h = OptHolder(slot: move s);
   assert(h.probe_force() == "btf", "borrowed-this force 1");
   assert(h.probe_force() == "btf", "borrowed-this force 2");
 }
 test_optional_subject_borrowed_this_optional_match() `test {
   Shape s = Circle(name: "bto", radius: 6.0);
-  OptHolder h = OptHolder(slot: s);
+  OptHolder h = OptHolder(slot: move s);
   assert(h.probe_optional(), "borrowed-this opt match 1");
   assert(h.probe_optional(), "borrowed-this opt match 2");
 }
 test_optional_subject_borrowed_this_optional_mismatch() `test {
   Shape s = Circle(name: "btx", radius: 6.0);
-  OptHolder h = OptHolder(slot: s);
+  OptHolder h = OptHolder(slot: move s);
   assert(!h.probe_mismatch(), "borrowed-this opt mismatch 1");
   assert(!h.probe_mismatch(), "borrowed-this opt mismatch 2");
 }
@@ -924,7 +924,7 @@ generic_index_cast[T](T marker) Circle? {
   _ := marker;
   Shape?[] v = [];
   Shape s = Circle(name: "gic", radius: 1.0);
-  v.push(s);
+  v.push(move s);
   return v[0] as Circle;
 }
 test_optional_subject_generic_index_match() `test {
@@ -950,7 +950,7 @@ type OwnedHolder {
 }
 test_optional_subject_owned_member_optional_match() `test {
   Shape s = Circle(name: "omm", radius: 7.0);
-  OwnedHolder h = OwnedHolder(slot: s);
+  OwnedHolder h = OwnedHolder(slot: move s);
   Circle? c = h.slot as Circle;
   bool present = false;
   if c {
@@ -961,7 +961,7 @@ test_optional_subject_owned_member_optional_match() `test {
 }
 test_optional_subject_owned_member_optional_mismatch() `test {
   Shape s = Circle(name: "omx", radius: 7.0);
-  OwnedHolder h = OwnedHolder(slot: s);
+  OwnedHolder h = OwnedHolder(slot: move s);
   Square? sq = h.slot as Square;
   bool present = false;
   if sq {
@@ -971,7 +971,7 @@ test_optional_subject_owned_member_optional_mismatch() `test {
 }
 test_optional_subject_owned_member_force() `test {
   Shape s = Circle(name: "omf", radius: 7.0);
-  OwnedHolder h = OwnedHolder(slot: s);
+  OwnedHolder h = OwnedHolder(slot: move s);
   c := h.slot as! Circle;
   assert(c.name == "omf", "owned-member force name");
 }
@@ -1002,7 +1002,7 @@ test_chained_cast_local_rebind() `test {
 
 test_chained_cast_field_target() `test {
   Shape s = Circle(name: "src", radius: 6.0);
-  h := Holder(held: (s as! Circle) as! Circle);
+  h := Holder(held: move(s as! Circle) as! Circle);
   assert((h.held as! Circle).radius == 6.0, "chained cast ctor-arg field radius");
   assert(h.held.name == "src", "chained cast ctor-arg field name (UAF probe)");
   // assign-to-existing-field form
@@ -1014,7 +1014,7 @@ test_chained_cast_field_target() `test {
 
 test_chained_cast_owning_arg() `test {
   Shape s = Circle(name: "src", radius: 8.0);
-  Ref[Circle] a = Ref[Circle]((s as! Circle) as! Circle);
+  Ref[Circle] a = Ref[Circle](move(s as! Circle) as! Circle);
   assert(a.borrow.radius == 8.0, "chained cast arc ctor-arg radius");
   assert(a.borrow.name == "src", "chained cast arc ctor-arg name (UAF probe)");
 }
@@ -1070,7 +1070,7 @@ test_chained_cast_triple_layer() `test {
   assert(a.name == "triple", "triple cast local rebind name (UAF probe)");
   // owning ctor-arg form at triple depth
   Shape s2 = Circle(name: "triple2", radius: 13.0);
-  Ref[Circle] arc = Ref[Circle](((s2 as! Circle) as! Circle) as! Circle);
+  Ref[Circle] arc = Ref[Circle](move((s2 as! Circle) as! Circle) as! Circle);
   assert(arc.borrow.radius == 13.0, "triple cast arc ctor-arg radius");
   assert(arc.borrow.name == "triple2", "triple cast arc ctor-arg name (UAF probe)");
 }
@@ -1083,13 +1083,13 @@ test_chained_cast_triple_layer() `test {
 // T0754's owning-slot scope: ownership now calls tryMoveCastSubject at ReturnStmt
 // and codegen clears the cast subject's drop flag via castSubjectMovableIdent.
 // Sibling of T0747 (local rebind) / T0754 (owning slot) / T0800 (chained).
-t0783_circle_from_shape(~Shape s) Circle {
+t0783_circle_from_shape(Shape move s) Circle {
   return s as! Circle;
 }
 
 test_t0783_return_cast_param() `test {
   Shape s = Circle(name: "src", radius: 2.0);
-  Circle c = t0783_circle_from_shape(s);
+  Circle c = t0783_circle_from_shape(move s);
   assert(c.radius == 2.0, "return-cast param radius (double-free probe)");
   assert(c.name == "src", "return-cast param name (UAF probe)");
 }
@@ -1109,13 +1109,13 @@ test_t0783_return_cast_owned_local() `test {
 
 // Chained cast on the return path (T0800 sibling): the move/drop-flag-clear must
 // recurse through nested CastExpr to the innermost subject.
-t0783_chained(~Shape s) Circle {
+t0783_chained(Shape move s) Circle {
   return (s as! Circle) as! Circle;
 }
 
 test_t0783_return_cast_chained() `test {
   Shape s = Circle(name: "chain", radius: 7.0);
-  Circle c = t0783_chained(s);
+  Circle c = t0783_chained(move s);
   assert(c.radius == 7.0, "return-cast chained radius (double-free probe)");
   assert(c.name == "chain", "return-cast chained name (UAF probe)");
 }
@@ -1125,13 +1125,13 @@ test_t0783_return_cast_chained() `test {
 // and codegen (unwrapDestructureParens) must strip the leading paren before
 // reaching the cast — otherwise the move/drop-flag-clear is skipped and s
 // double-frees at scope exit.
-t0783_paren_wrapped(~Shape s) Circle {
+t0783_paren_wrapped(Shape move s) Circle {
   return (s as! Circle);
 }
 
 test_t0783_return_cast_paren_wrapped() `test {
   Shape s = Circle(name: "paren", radius: 9.0);
-  Circle c = t0783_paren_wrapped(s);
+  Circle c = t0783_paren_wrapped(move s);
   assert(c.radius == 9.0, "return paren-wrapped cast radius (double-free probe)");
   assert(c.name == "paren", "return paren-wrapped cast name (UAF probe)");
 }
@@ -1143,13 +1143,13 @@ test_t0783_return_cast_paren_wrapped() `test {
 // the runtime outcome (`drop iff !isMatch`, via consumeCastSubjectDropFlag) — a
 // success no longer double-frees (was SEGV) and a failure no longer leaks. This
 // helper drives the return path; both outcomes are exercised below.
-t0783_try_circle_optional(~Shape s) Circle? {
+t0783_try_circle_optional(Shape move s) Circle? {
   return s as Circle;
 }
 
 test_t0783_return_optional_cast_failure_no_leak() `test {
   Shape s = Square(name: "sq", side: 3.0);
-  Circle? c = t0783_try_circle_optional(s);
+  Circle? c = t0783_try_circle_optional(move s);
   bool absent = true;
   if c {
     absent = false;
@@ -1171,7 +1171,7 @@ test_t0783_return_optional_cast_failure_no_leak() `test {
 // field to read its presence without moving it (member access does not narrow).
 type T0849Box {
   Circle? c;
-  present(&this) bool {
+  present(this) bool {
     Circle? cc = this.c as Circle;
     bool p = false;
     if cc {
@@ -1186,7 +1186,7 @@ type T0849Box {
 // drop it (was a double-free / SEGV). Inner name/radius reads also probe UAF.
 test_t0849_return_optional_success() `test {
   Shape s = Circle(name: "rs", radius: 2.0);
-  Circle? c = t0783_try_circle_optional(s);
+  Circle? c = t0783_try_circle_optional(move s);
   bool present = false;
   if c {
     present = true;
@@ -1199,12 +1199,12 @@ test_t0849_return_optional_success() `test {
 // Owning slot via field-init constructor arg (`T0849Box(c: s as Circle)`).
 test_t0849_ctor_field_init_success() `test {
   Shape s = Circle(name: "cs", radius: 4.0);
-  T0849Box b = T0849Box(c: s as Circle);
+  T0849Box b = T0849Box(c: move s as Circle);
   assert(b.present(), "ctor field-init as success -> some (double-free probe)");
 }
 test_t0849_ctor_field_init_failure() `test {
   Shape s = Square(name: "sq", side: 3.0);
-  T0849Box b = T0849Box(c: s as Circle);
+  T0849Box b = T0849Box(c: move s as Circle);
   assert(!b.present(), "ctor field-init as failure -> none (leak probe)");
 }
 
@@ -1273,7 +1273,7 @@ test_t0849_vector_literal_failure() `test {
 }
 
 // Owning slot via `~` callee argument (`consume_opt_circle(s as Circle)`).
-t0849_consume_opt_circle(~Circle? c) bool {
+t0849_consume_opt_circle(Circle? move c) bool {
   bool present = false;
   if c {
     present = true;
@@ -1282,11 +1282,11 @@ t0849_consume_opt_circle(~Circle? c) bool {
 }
 test_t0849_tilde_param_success() `test {
   Shape s = Circle(name: "ps", radius: 8.0);
-  assert(t0849_consume_opt_circle(s as Circle), "~param as success -> some (double-free probe)");
+  assert(t0849_consume_opt_circle(move s as Circle), "~param as success -> some (double-free probe)");
 }
 test_t0849_tilde_param_failure() `test {
   Shape s = Square(name: "sq", side: 3.0);
-  assert(!t0849_consume_opt_circle(s as Circle), "~param as failure -> none (leak probe)");
+  assert(!t0849_consume_opt_circle(move s as Circle), "~param as failure -> none (leak probe)");
 }
 
 // Owning slot via enum-variant payload (`T0849Variant.Wrap(s as Circle)`).
@@ -1295,7 +1295,7 @@ enum T0849Variant {
 }
 test_t0849_enum_variant_success() `test {
   Shape s = Circle(name: "ns", radius: 1.5);
-  T0849Variant v = T0849Variant.Wrap(s as Circle);
+  T0849Variant v = T0849Variant.Wrap(move s as Circle);
   bool present = false;
   match v {
     Wrap(c) => {
@@ -1309,7 +1309,7 @@ test_t0849_enum_variant_success() `test {
 }
 test_t0849_enum_variant_failure() `test {
   Shape s = Square(name: "sq", side: 3.0);
-  T0849Variant v = T0849Variant.Wrap(s as Circle);
+  T0849Variant v = T0849Variant.Wrap(move s as Circle);
   bool present = false;
   match v {
     Wrap(c) => {
@@ -1361,12 +1361,12 @@ test_t0849_map_slot_failure() `test {
 // Chained / parenthesized optional cast over an owned local, and an owned-temp
 // regression (a freshly produced subject is owned by the result, must still
 // pass). The paren/chain peel must reach the innermost subject.
-t0849_return_paren(~Shape s) Circle? {
+t0849_return_paren(Shape move s) Circle? {
   return (s as Circle);
 }
 test_t0849_return_paren_success() `test {
   Shape s = Circle(name: "pps", radius: 4.5);
-  Circle? c = t0849_return_paren(s);
+  Circle? c = t0849_return_paren(move s);
   bool present = false;
   if c {
     present = true;
@@ -1398,10 +1398,10 @@ test_t0849_owned_temp_regression() `test {
 // super() into a parent field of type Circle?, parent has an explicit new().
 type T0849AnimalBase {
   Circle? avatar;
-  new(~this, ~Circle? a) {
+  new(~this, Circle? move a) {
     this.avatar = a;
   }
-  has(&this) bool {
+  has(this) bool {
     Circle? cc = this.avatar as Circle;
     bool p = false;
     if cc {
@@ -1409,7 +1409,7 @@ type T0849AnimalBase {
     }
     return p;
   }
-  avatar_name(&this) string {
+  avatar_name(this) string {
     Circle? cc = this.avatar as Circle;
     string n = "";
     if cc {
@@ -1419,26 +1419,26 @@ type T0849AnimalBase {
   }
 }
 type T0849Pet is T0849AnimalBase {
-  new(~this, ~Shape s) {
-    super(a: s as Circle);
+  new(~this, Shape move s) {
+    super(a: move s as Circle);
   }
 }
 test_t0849_super_explicit_success() `test {
   Shape s = Circle(name: "src", radius: 7.0);
-  p := T0849Pet(s: s);
+  p := T0849Pet(s: move s);
   assert(p.has(), "super (explicit parent new) as success -> some (double-free probe)");
   assert(p.avatar_name() == "src", "super (explicit) as success name (UAF probe)");
 }
 test_t0849_super_explicit_failure() `test {
   Shape s = Square(name: "sq", side: 3.0);
-  p := T0849Pet(s: s);
+  p := T0849Pet(s: move s);
   assert(!p.has(), "super (explicit parent new) as failure -> none (leak probe)");
 }
 
 // super() into a parent field of type Circle?, parent has an implicit ctor.
 type T0849SimpleHolder {
   Circle? held;
-  has(&this) bool {
+  has(this) bool {
     Circle? cc = this.held as Circle;
     bool p = false;
     if cc {
@@ -1448,18 +1448,18 @@ type T0849SimpleHolder {
   }
 }
 type T0849ChildHolder is T0849SimpleHolder {
-  new(~this, ~Shape s) {
-    super(held: s as Circle);
+  new(~this, Shape move s) {
+    super(held: move s as Circle);
   }
 }
 test_t0849_super_implicit_success() `test {
   Shape s = Circle(name: "src", radius: 8.0);
-  c := T0849ChildHolder(s: s);
+  c := T0849ChildHolder(s: move s);
   assert(c.has(), "super (implicit parent ctor) as success -> some (double-free probe)");
 }
 test_t0849_super_implicit_failure() `test {
   Shape s = Square(name: "sq", side: 3.0);
-  c := T0849ChildHolder(s: s);
+  c := T0849ChildHolder(s: move s);
   assert(!c.has(), "super (implicit parent ctor) as failure -> none (leak probe)");
 }
 
@@ -1467,7 +1467,7 @@ test_t0849_super_implicit_failure() `test {
 test_t0849_channel_send_success() `test {
   Shape s = Circle(name: "src", radius: 7.5);
   channel[Circle?] ch = channel[Circle?](capacity: 1);
-  ch.send(s as Circle);
+  ch.send(move s as Circle);
   bool present = false;
   if oc := <-ch {
     if oc {
@@ -1484,7 +1484,7 @@ test_t0849_channel_send_success() `test {
 test_t0849_channel_send_failure() `test {
   Shape s = Square(name: "sq", side: 3.0);
   channel[Circle?] ch = channel[Circle?](capacity: 1);
-  ch.send(s as Circle);
+  ch.send(move s as Circle);
   bool got = false;
   bool present = false;
   if oc := <-ch {
@@ -1556,7 +1556,7 @@ test_t0849_select_send_failure() `test {
 
 type T0849NBox {
   Circle? c;
-  present(&this) bool {
+  present(this) bool {
     Circle? cc = this.c as Circle;
     bool p = false;
     if cc {
@@ -1570,7 +1570,7 @@ type T0849NBox {
 test_t0849_lambda_nested_success() `test {
   f := || -> bool {
     Shape s = Circle(name: "ls", radius: 2.0);
-    T0849NBox b = T0849NBox(c: s as Circle);
+    T0849NBox b = T0849NBox(c: move s as Circle);
     return b.present();
   };
   assert(f(), "lambda-nested as success -> some (double-free probe)");
@@ -1578,7 +1578,7 @@ test_t0849_lambda_nested_success() `test {
 test_t0849_lambda_nested_failure() `test {
   f := || -> bool {
     Shape s = Square(name: "sq", side: 3.0);
-    T0849NBox b = T0849NBox(c: s as Circle);
+    T0849NBox b = T0849NBox(c: move s as Circle);
     return b.present();
   };
   bool r = f();
@@ -1596,7 +1596,7 @@ test_t0849_outer_cast_then_lambda() `test {
     }
     return p;
   };
-  T0849NBox b = T0849NBox(c: s as Circle);
+  T0849NBox b = T0849NBox(c: move s as Circle);
   bool a = apply(none);
   assert(b.present(), "outer cast consumed correctly (double-free probe)");
   assert(a == false, "lambda body did not pollute outer cast state");
@@ -1607,7 +1607,7 @@ test_t0849_go_block_nested_success() `test {
   channel[bool] done = channel[bool](capacity: 1);
   go {
     Shape s = Circle(name: "gs", radius: 5.0);
-    T0849NBox b = T0849NBox(c: s as Circle);
+    T0849NBox b = T0849NBox(c: move s as Circle);
     done.send(b.present());
   };
   bool got = false;

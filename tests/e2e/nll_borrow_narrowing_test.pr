@@ -6,11 +6,11 @@ type Box {
 
 // --- Helper functions ---
 
-get_ref(string &s) string & {
+get_ref(string s) string & {
   return s;
 }
 
-read_ref(string &s) int {
+read_ref(string s) int {
   return 0;
 }
 

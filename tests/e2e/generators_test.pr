@@ -255,21 +255,21 @@ test_yield_delegate_array() `test {
 }
 
 // yield* from vector
-vector_delegate(~int[] items) stream[int] {
+vector_delegate(int[] move items) stream[int] {
   yield * items;
 }
 
 test_yield_delegate_vector() `test {
   int[] v = [1, 2, 3, 4, 5];
   int sum = 0;
-  for x in vector_delegate(v) {
+  for x in vector_delegate(move v) {
     sum += x;
   }
   assert(sum == 15, "vector delegate sum should be 15");
 }
 
 // yield* from string (yields chars)
-char_delegate(~string s) stream[char] {
+char_delegate(string move s) stream[char] {
   yield * s;
 }
 
@@ -350,11 +350,11 @@ test_yield_delegate_empty_subgen() `test {
 
 // --- T0479: Generator coroutine params own heap data must be dropped ---
 
-t0479_take_string(~string s) {
+t0479_take_string(string move s) {
   // s is moved here; consumed by callee, no leak.
 }
 
-t0479_gen_owned_string(~string s) stream[int] {
+t0479_gen_owned_string(string move s) stream[int] {
   yield 1;
 }
 
@@ -362,11 +362,11 @@ t0479_gen_plain_tuple((string, int) t) stream[int] {
   yield 1;
 }
 
-t0479_gen_owned_tuple(~(string, int) t) stream[int] {
+t0479_gen_owned_tuple((string, int) move t) stream[int] {
   yield 1;
 }
 
-t0479_gen_owned_vec(~int[] xs) stream[int] {
+t0479_gen_owned_vec(int[] move xs) stream[int] {
   yield 1;
 }
 
@@ -374,23 +374,23 @@ t0479_gen_variadic(...string xs) stream[int] {
   yield 1;
 }
 
-t0479_gen_mixed(~string a, (string, int) b, int c) stream[int] {
+t0479_gen_mixed(string move a, (string, int) b, int c) stream[int] {
   yield 1;
 }
 
-t0479_gen_generic[T](~T x) stream[int] {
+t0479_gen_generic[T](T move x) stream[int] {
   yield 1;
 }
 
-t0479_gen_return_then_destroy(~string s) stream[int] {
+t0479_gen_return_then_destroy(string move s) stream[int] {
   if true {
     return;
   }
   yield 1;
 }
 
-t0479_gen_consume(~string s) stream[int] {
-  t0479_take_string(s);
+t0479_gen_consume(string move s) stream[int] {
+  t0479_take_string(move s);
   yield 1;
 }
 
@@ -429,14 +429,14 @@ test_t0479_owned_tuple_run() `test {
 
 test_t0479_owned_vec_break() `test {
   int[] data = [1, 2, 3];
-  for x in t0479_gen_owned_vec(data) {
+  for x in t0479_gen_owned_vec(move data) {
     break;
   }
 }
 
 test_t0479_owned_vec_run() `test {
   int[] data = [1, 2, 3];
-  for x in t0479_gen_owned_vec(data) {
+  for x in t0479_gen_owned_vec(move data) {
   }
 }
 
@@ -490,12 +490,12 @@ type T0479Err is error {
   string detail;
 }
 
-t0479_failable_owned!(~string s) stream[int] {
+t0479_failable_owned!(string move s) stream[int] {
   yield 1;
   yield 2;
 }
 
-t0479_failable_raise!(~string s) stream[int] {
+t0479_failable_raise!(string move s) stream[int] {
   yield 1;
   raise T0479Err(message: "boom", detail: "mid");
 }
@@ -551,7 +551,7 @@ type T0479Box {
   }
 }
 
-t0479_gen_user_type(~T0479Box b) stream[int] {
+t0479_gen_user_type(T0479Box move b) stream[int] {
   yield 1;
 }
 
@@ -590,7 +590,7 @@ test_t0479_self_method_run() `test {
 
 // --- T0479 coverage: multi-yield with break after first yield ---
 
-t0479_gen_multi_yield(~string s) stream[int] {
+t0479_gen_multi_yield(string move s) stream[int] {
   yield 10;
   yield 20;
   yield 30;
@@ -609,7 +609,7 @@ test_t0479_multi_yield_break_after_first() `test {
 
 // --- T0504: Body-local variables alive at yield point must drop on mid-flight destroy ---
 
-t0504_take_string(~string s) {
+t0504_take_string(string move s) {
 }
 
 // 1. The original repro — single string body local + break.
@@ -700,7 +700,7 @@ test_t0504_reassign_run() `test {
 // 5. Move before yield — drop flag false; no double-free on mid-flight destroy.
 t0504_gen_move_before_yield() stream[int] {
   string s = "x".to_string();
-  t0504_take_string(s);
+  t0504_take_string(move s);
   yield 1;
 }
 

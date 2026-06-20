@@ -67,7 +67,7 @@ func TestT0660_BorrowedEnumReceiverNoReceiverDrop(t *testing.T) {
 		enum Tagged `+"`clone"+` {
 			Empty,
 			Named(string s),
-			size(&this) int { match this { Empty => { return 0; }, Named(n) => { return n.len; } } }
+			size(this) int { match this { Empty => { return 0; }, Named(n) => { return n.len; } } }
 		}
 		type EnumVecRef { Tagged[] items; at(int i) Tagged& { return this.items[i]; } }
 		caller() {
@@ -111,7 +111,7 @@ func TestT0660_OwnedEnumReceiverStillDrops(t *testing.T) {
 		enum Tagged `+"`clone"+` {
 			Empty,
 			Named(string s),
-			size(&this) int { match this { Empty => { return 0; }, Named(n) => { return n.len; } } }
+			size(this) int { match this { Empty => { return 0; }, Named(n) => { return n.len; } } }
 		}
 		type EnumVecOwn { Tagged[] items; at(int i) Tagged { return this.items[i]; } }
 		caller() {
@@ -144,7 +144,7 @@ func TestT0660_BorrowedMutRefEnumReceiverNoReceiverDrop(t *testing.T) {
 		enum Tagged `+"`clone"+` {
 			Empty,
 			Named(string s),
-			size(&this) int { match this { Empty => { return 0; }, Named(n) => { return n.len; } } }
+			size(this) int { match this { Empty => { return 0; }, Named(n) => { return n.len; } } }
 		}
 		type EnumVecRef { Tagged[] items; at_mut(int i) Tagged~ { return this.items[i]; } }
 		caller() {
@@ -180,7 +180,7 @@ func TestT0660_GenericOwnerBorrowedEnumReceiverNoReceiverDrop(t *testing.T) {
 		enum GTag `+"`clone"+` {
 			Nil,
 			Val(string s),
-			size(&this) int { match this { Nil => { return 0; }, Val(n) => { return n.len; } } }
+			size(this) int { match this { Nil => { return 0; }, Val(n) => { return n.len; } } }
 		}
 		type GBox[T] { T[] d; at(int i) T& { return this.d[i]; } }
 		caller() {
@@ -295,7 +295,7 @@ func TestT0660_OwnedGenericEnumMethodReceiverStillDrops(t *testing.T) {
 		enum Tagged `+"`clone"+` {
 			Empty,
 			Named(string s),
-			scaled[U](&this, U _marker, int extra) int {
+			scaled[U](this, U _marker, int extra) int {
 				match this { Empty => { return extra; }, Named(n) => { return n.len + extra; } }
 			}
 		}

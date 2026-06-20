@@ -206,12 +206,12 @@ func TestOldFailableSyntaxRejected(t *testing.T) {
 		},
 		{
 			name: "method_return_type_bang",
-			src:  `type Foo { speak(&this) string! { return "hi"; } }`,
+			src:  `type Foo { speak(this) string! { return "hi"; } }`,
 			msg:  "use 'speak!(...)' instead of 'speak(...) !'",
 		},
 		{
 			name: "method_bare_bang",
-			src:  `type Foo { fail(&this)! { } }`,
+			src:  `type Foo { fail(this)! { } }`,
 			msg:  "use 'fail!(...)' instead of 'fail(...) !'",
 		},
 		{
@@ -410,14 +410,14 @@ func TestBuildTypeDecl(t *testing.T) {
 		},
 		{
 			name: "with_methods",
-			src:  `type Greeter { String name; greet(&this) String { return "hi"; } }`,
+			src:  `type Greeter { String name; greet(this) String { return "hi"; } }`,
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)
 				assertLen(t, td.Fields, 1)
 				assertLen(t, td.Methods, 1)
 				assertEqual(t, td.Methods[0].Name, "greet")
 				assertNotNil(t, td.Methods[0].Receiver)
-				assertEqual(t, td.Methods[0].Receiver.RefMod, RefShared)
+				assertEqual(t, td.Methods[0].Receiver.RefMod, RefNone)
 			},
 		},
 		{
@@ -439,7 +439,7 @@ func TestBuildTypeDecl(t *testing.T) {
 		},
 		{
 			name: "operator_overload",
-			src:  `type Vec { +(&this, Vec other) Vec { return this; } }`,
+			src:  `type Vec { +(this, Vec other) Vec { return this; } }`,
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)
 				assertLen(t, td.Methods, 1)
@@ -1085,7 +1085,7 @@ func TestBuildLiterals(t *testing.T) {
 		},
 		{
 			name: "this",
-			src:  `type T { f(&this) { return this; } }`,
+			src:  `type T { f(this) { return this; } }`,
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)
 				rs := td.Methods[0].Body.Stmts[0].(*ReturnStmt)
@@ -1682,7 +1682,7 @@ func TestBuildDeclDetails(t *testing.T) {
 		},
 		{
 			name: "abstract_method",
-			src:  `type Shape { area(&this) Float; }`,
+			src:  `type Shape { area(this) Float; }`,
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)
 				assertLen(t, td.Methods, 1)
@@ -1836,7 +1836,7 @@ func TestBuildDeclDetails(t *testing.T) {
 		},
 		{
 			name: "param_annotation_method",
-			src:  "type T { foo(&this, int x `doc(\"param\")) {} }",
+			src:  "type T { foo(this, int x `doc(\"param\")) {} }",
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)
 				m := td.Methods[0]
@@ -1855,7 +1855,7 @@ func TestBuildDeclDetails(t *testing.T) {
 		},
 		{
 			name: "method_type_params",
-			src:  `type T { convert[U](&this) U { return this as! U; } }`,
+			src:  `type T { convert[U](this) U { return this as! U; } }`,
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)
 				assertLen(t, td.Methods[0].TypeParams, 1)
@@ -1876,17 +1876,17 @@ func TestBuildDeclDetails(t *testing.T) {
 		{
 			name: "all_operator_overloads",
 			src: `type V {
-				+(&this, V o) V { return this; }
-				-(&this, V o) V { return this; }
-				*(&this, V o) V { return this; }
-				/(&this, V o) V { return this; }
-				%(&this, V o) V { return this; }
-				==(&this, V o) Bool { return true; }
-				!=(&this, V o) Bool { return false; }
-				<(&this, V o) Bool { return false; }
-				>(&this, V o) Bool { return false; }
-				<=(&this, V o) Bool { return false; }
-				>=(&this, V o) Bool { return false; }
+				+(this, V o) V { return this; }
+				-(this, V o) V { return this; }
+				*(this, V o) V { return this; }
+				/(this, V o) V { return this; }
+				%(this, V o) V { return this; }
+				==(this, V o) Bool { return true; }
+				!=(this, V o) Bool { return false; }
+				<(this, V o) Bool { return false; }
+				>(this, V o) Bool { return false; }
+				<=(this, V o) Bool { return false; }
+				>=(this, V o) Bool { return false; }
 			}`,
 			check: func(t *testing.T, file *File) {
 				td := file.Decls[0].(*TypeDecl)

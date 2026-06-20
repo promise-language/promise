@@ -95,7 +95,7 @@ test_optional_local_vector_nested_string() `test {
   string[] inner = [];
   inner.push("x" + "y");
   string[][] outer = [];
-  outer.push(inner);
+  outer.push(move inner);
   string[][]? a = outer;
   // Nested droppable elements: the inner string vectors (and their string
   // elements) must all be walked on the optional's scope-exit drop.

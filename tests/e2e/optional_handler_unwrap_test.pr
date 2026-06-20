@@ -354,7 +354,7 @@ type GHolder[T] {
   T? o;
   // Reads with a fresh owned recovery — exercises T0778's neutralize+track
   // inside a monomorphized method body (c.typeSubst != nil).
-  read_with(this, ~T recovery) T {
+  read_with(this, T move recovery) T {
     return (this.o)? _ {
       recovery
     };

@@ -4281,7 +4281,7 @@ func TestForInBoolNotIterable(t *testing.T) {
 // not the un-unwrapped int[]& (which produced a cascading operator error).
 func TestT0971_ForInBorrowedVectorTypeChecks(t *testing.T) {
 	info := checkOK(t, `
-		f(int[] &data) {
+		f(int[] data) {
 			total := 0;
 			for x in data { total = total + x; }
 		}
@@ -4303,7 +4303,7 @@ func TestT0971_ForInBorrowedVectorTypeChecks(t *testing.T) {
 // type-checks (it goes through the same dispatch).
 func TestT0971_ForInBorrowedStringVectorTypeChecks(t *testing.T) {
 	checkOK(t, `
-		f(string[] &data) {
+		f(string[] data) {
 			n := 0;
 			for x in data { n = n + x.len; }
 		}
@@ -4314,7 +4314,7 @@ func TestT0971_ForInBorrowedStringVectorTypeChecks(t *testing.T) {
 // mutable borrow (~) all type-check after the borrow-strip.
 func TestT0971_ForInBorrowedMapTypeChecks(t *testing.T) {
 	checkOK(t, `
-		f(map[string, int] &m) {
+		f(map[string, int] m) {
 			total := 0;
 			for k, v in m { total = total + v; }
 		}
@@ -4323,7 +4323,7 @@ func TestT0971_ForInBorrowedMapTypeChecks(t *testing.T) {
 
 func TestT0971_ForInBorrowedStringTypeChecks(t *testing.T) {
 	checkOK(t, `
-		f(string &s) {
+		f(string s) {
 			n := 0;
 			for ch in s { n = n + 1; }
 		}
@@ -4332,7 +4332,7 @@ func TestT0971_ForInBorrowedStringTypeChecks(t *testing.T) {
 
 func TestT0971_ForInBorrowedArrayTypeChecks(t *testing.T) {
 	checkOK(t, `
-		f(int[3] &a) {
+		f(int[3] a) {
 			total := 0;
 			for x in a { total = total + x; }
 		}
@@ -7410,7 +7410,7 @@ func TestSliceExprOnNonSliceable(t *testing.T) {
 
 func TestSliceExprThroughSharedRef(t *testing.T) {
 	checkOK(t, `
-		take(int[] &xs) int[] {
+		take(int[] xs) int[] {
 			return xs[1:3];
 		}
 		main() {
@@ -7696,7 +7696,7 @@ func TestDropMethodWrongReceiverShared(t *testing.T) {
 	errs := checkErrs(t, `
 		type File {
 			int fd;
-			drop(&this) {}
+			drop(this) {}
 		}
 		main() {}
 	`)
@@ -7778,7 +7778,7 @@ func TestEnumDropMethodWrongReceiver(t *testing.T) {
 	errs := checkErrs(t, `
 		enum E {
 			A,
-			drop(&this) {}
+			drop(this) {}
 		}
 		main() {}
 	`)
@@ -7989,7 +7989,7 @@ func TestDropPropagateStructuralField(t *testing.T) {
 		}
 		type Wrap {
 			W _w;
-			new(~this, ~W w) { this._w = w; }
+			new(~this, W move w) { this._w = w; }
 		}
 		main() {}
 	`)
@@ -8084,7 +8084,7 @@ func TestCopyTypeWithMutRefField(t *testing.T) {
 // B0034: reference parameters (borrows) are still valid
 func TestRefParamsStillAllowed(t *testing.T) {
 	checkOK(t, `
-		read(string& s) int { return s.len; }
+		read(string s) int { return s.len; }
 		mutate(int~ x) { x = 42; }
 		main() {}
 	`)
@@ -8850,7 +8850,7 @@ func TestParamAnnotationMethodAccepted(t *testing.T) {
 	checkOK(t, `
 		type Calc {
 			int value;
-			add(&this, int a `+"`"+`doc("operand")) int { return this.value + a; }
+			add(this, int a `+"`"+`doc("operand")) int { return this.value + a; }
 		}
 		test() {
 			Calc c = Calc(value: 1);
@@ -11225,7 +11225,7 @@ func TestVariadicMethodWithReceiver(t *testing.T) {
 		type Logger {
 			int count;
 
-			logAll(&this, ...string msgs) {
+			logAll(this, ...string msgs) {
 				this.count += msgs.len;
 			}
 		}
@@ -11661,7 +11661,7 @@ func TestGlobalMethodBasic(t *testing.T) {
 func TestGlobalMethodNoReceiver(t *testing.T) {
 	errs := checkErrs(t, "type Foo {\n"+
 		"int x;\n"+
-		"bad(&this) int `global {\n"+
+		"bad(this) int `global {\n"+
 		"return this.x;\n"+
 		"}\n"+
 		"}\n"+
@@ -11916,7 +11916,7 @@ func TestFailablePropertyIncDecThroughSharedRefRequiresFailableScope(t *testing.
 			get value int { return this.n; }
 			set value!(int v) { if v < 0 { raise error("neg"); } this.n = v; }
 		}
-		bump(Counter &c) {
+		bump(Counter c) {
 			c.value++;
 		}
 		main() {
@@ -12414,7 +12414,7 @@ func TestMonoMethodBasic(t *testing.T) {
 func TestMonoMethodNoReceiver(t *testing.T) {
 	errs := checkErrs(t, "type Box[T] {\n"+
 		"T value;\n"+
-		"bad(&this) int `mono {\n"+
+		"bad(this) int `mono {\n"+
 		"return 0;\n"+
 		"}\n"+
 		"}\n"+
@@ -13391,7 +13391,7 @@ func TestEscapedBraceWithInterpolationOK(t *testing.T) {
 func TestEnumMethodOK(t *testing.T) {
 	checkOK(t, `
 		enum Color { Red, Green, Blue,
-			describe(&this) string {
+			describe(this) string {
 				match this {
 					Color.Red => { return "red"; },
 					_ => { return "other"; },
@@ -13420,7 +13420,7 @@ func TestEnumGetterOK(t *testing.T) {
 func TestEnumMethodAbstractError(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Color { Red,
-			describe(&this) string `+"`"+`abstract;
+			describe(this) string `+"`"+`abstract;
 		}
 		test() {}
 	`)
@@ -13430,7 +13430,7 @@ func TestEnumMethodAbstractError(t *testing.T) {
 func TestEnumMethodNativeError(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Color { Red,
-			describe(&this) string `+"`"+`native;
+			describe(this) string `+"`"+`native;
 		}
 		test() {}
 	`)
@@ -13442,7 +13442,7 @@ func TestEnumMethodFactory(t *testing.T) {
 	info := checkOK(t, `
 		enum Color { Red,
 			make() Color `+"`"+`factory { return Color.Red; }
-			describe(&this) string { return "color"; }
+			describe(this) string { return "color"; }
 		}
 		test() {}
 	`)
@@ -13467,7 +13467,7 @@ func TestEnumMethodFactory(t *testing.T) {
 func TestEnumMethodMissingReturn(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Color { Red,
-			describe(&this) string {
+			describe(this) string {
 			}
 		}
 		test() {}
@@ -13506,7 +13506,7 @@ func TestEnumMethodMonoError(t *testing.T) {
 func TestEnumMethodDataEnumOK(t *testing.T) {
 	checkOK(t, `
 		enum Shape { Circle(f64 radius), Point,
-			area(&this) f64 {
+			area(this) f64 {
 				match this {
 					Shape.Circle(r) => { return 3.14 * r * r; },
 					Shape.Point => { return 0.0; },
@@ -13520,13 +13520,13 @@ func TestEnumMethodDataEnumOK(t *testing.T) {
 func TestEnumMethodExprBodyOK(t *testing.T) {
 	checkOK(t, `
 		enum Toggle { On, Off,
-			to_int(&this) int {
+			to_int(this) int {
 				match this {
 					Toggle.On => { return 1; },
 					Toggle.Off => { return 0; },
 				}
 			}
-			is_on(&this) bool => this.to_int() == 1;
+			is_on(this) bool => this.to_int() == 1;
 		}
 		test() { bool b = Toggle.On.is_on(); }
 	`)
@@ -13535,7 +13535,7 @@ func TestEnumMethodExprBodyOK(t *testing.T) {
 func TestEnumMethodFailableOK(t *testing.T) {
 	checkOK(t, `
 		enum Mode { A, B,
-			validate!(&this) string {
+			validate!(this) string {
 				match this {
 					Mode.A => { return "a"; },
 					Mode.B => { return "b"; },
@@ -13549,7 +13549,7 @@ func TestEnumMethodFailableOK(t *testing.T) {
 func TestEnumMethodVoidOK(t *testing.T) {
 	checkOK(t, `
 		enum State { On, Off,
-			log(&this) {
+			log(this) {
 				print_line("state");
 			}
 		}
@@ -13560,13 +13560,13 @@ func TestEnumMethodVoidOK(t *testing.T) {
 func TestEnumMethodCallsMethodOK(t *testing.T) {
 	checkOK(t, `
 		enum Level { Low, High,
-			rank(&this) int {
+			rank(this) int {
 				match this {
 					Level.Low => { return 1; },
 					Level.High => { return 2; },
 				}
 			}
-			is_higher(&this, Level other) bool {
+			is_higher(this, Level other) bool {
 				return this.rank() > other.rank();
 			}
 		}
@@ -13589,7 +13589,7 @@ func TestEnumGetterTypeMismatch(t *testing.T) {
 func TestEnumMethodWithDefaultParam(t *testing.T) {
 	checkOK(t, `
 		enum Color { Red, Green,
-			format(&this, string prefix = "Color") string {
+			format(this, string prefix = "Color") string {
 				return prefix;
 			}
 		}
@@ -13653,8 +13653,8 @@ func TestIsDestructureEnumWrongFieldCount(t *testing.T) {
 
 func TestIsDestructureNamedType(t *testing.T) {
 	checkOK(t, `
-		type Animal { string name; speak(&this) string `+"`"+`abstract; }
-		type Dog is Animal { string breed; speak(&this) string { return "woof"; } }
+		type Animal { string name; speak(this) string `+"`"+`abstract; }
+		type Dog is Animal { string breed; speak(this) string { return "woof"; } }
 		test() {
 			Animal a = Dog(name: "Rex", breed: "Lab");
 			if a is Dog(name, breed) {
@@ -13793,9 +13793,9 @@ func TestIsDestructureVariantPriorityOverType(t *testing.T) {
 
 func TestIsDestructureDeepInheritance(t *testing.T) {
 	checkOK(t, `
-		type A { string x; do_thing(&this) string `+"`"+`abstract; }
-		type B is A { string y; do_thing(&this) string { return "b"; } }
-		type C is B { string z; do_thing(&this) string { return "c"; } }
+		type A { string x; do_thing(this) string `+"`"+`abstract; }
+		type B is A { string y; do_thing(this) string { return "b"; } }
+		type C is B { string z; do_thing(this) string { return "c"; } }
 		test() {
 			A a = C(x: "1", y: "2", z: "3");
 			if a is C(x, y, z) {
@@ -14690,14 +14690,14 @@ func TestResolveEmbedsGlobSkipsHiddenFiles(t *testing.T) {
 func TestLifetimeAnnotationOnRefParam(t *testing.T) {
 	// Valid: `lifetime on a reference parameter.
 	checkOK(t, `
-		first(string &a `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) { return a; }
+		first(string a `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) { return a; }
 	`)
 }
 
 func TestLifetimeAnnotationOnNonRefParam(t *testing.T) {
-	// Error: `lifetime on a non-reference parameter.
+	// Error: `lifetime on a `move` (owned, non-borrow) parameter.
 	errs := checkErrs(t, `
-		bad(string a `+"`"+`lifetime(x)) string { return a; }
+		bad(string move a `+"`"+`lifetime(x)) string { return a; }
 	`)
 	expectError(t, errs, "`lifetime can only be applied to reference parameters")
 }
@@ -14705,7 +14705,7 @@ func TestLifetimeAnnotationOnNonRefParam(t *testing.T) {
 func TestLifetimeAnnotationOnNonRefReturn(t *testing.T) {
 	// Error: `lifetime on function but return type is not a reference.
 	errs := checkErrs(t, `
-		bad(string &a `+"`"+`lifetime(x)) string `+"`"+`lifetime(x) { return "hi"; }
+		bad(string a `+"`"+`lifetime(x)) string `+"`"+`lifetime(x) { return "hi"; }
 	`)
 	expectError(t, errs, "return type is not a reference")
 }
@@ -14713,7 +14713,7 @@ func TestLifetimeAnnotationOnNonRefReturn(t *testing.T) {
 func TestLifetimeUnknownName(t *testing.T) {
 	// Error: return lifetime name doesn't match any parameter lifetime.
 	errs := checkErrs(t, `
-		bad(string &a `+"`"+`lifetime(x)) string& `+"`"+`lifetime(y) { return a; }
+		bad(string a `+"`"+`lifetime(x)) string& `+"`"+`lifetime(y) { return a; }
 	`)
 	expectError(t, errs, "unknown lifetime 'y'")
 }
@@ -14721,14 +14721,14 @@ func TestLifetimeUnknownName(t *testing.T) {
 func TestLifetimeMultipleParams(t *testing.T) {
 	// Valid: multiple params with different lifetimes.
 	checkOK(t, `
-		pick(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) { return a; }
+		pick(string a `+"`"+`lifetime(x), string b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) { return a; }
 	`)
 }
 
 func TestLifetimeSameOnBothParams(t *testing.T) {
 	// Valid: same lifetime on both params (longest pattern).
 	checkOK(t, `
-		longest(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
+		longest(string a `+"`"+`lifetime(x), string b `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
 			if true { return a; }
 			return b;
 		}
@@ -14738,7 +14738,7 @@ func TestLifetimeSameOnBothParams(t *testing.T) {
 func TestLifetimeWrongParamCount(t *testing.T) {
 	// Error: `lifetime with no parameters.
 	errs := checkErrs(t, `
-		bad(string &a `+"`"+`lifetime) string& { return a; }
+		bad(string a `+"`"+`lifetime) string& { return a; }
 	`)
 	expectError(t, errs, "`lifetime requires exactly one identifier parameter")
 }
@@ -14746,7 +14746,7 @@ func TestLifetimeWrongParamCount(t *testing.T) {
 func TestLifetimeStringParam(t *testing.T) {
 	// Error: `lifetime with a string literal instead of identifier.
 	errs := checkErrs(t, `
-		bad(string &a `+"`"+`lifetime("x")) string& { return a; }
+		bad(string a `+"`"+`lifetime("x")) string& { return a; }
 	`)
 	expectError(t, errs, "`lifetime parameter must be an identifier")
 }
@@ -14757,7 +14757,7 @@ func TestLifetimeOnMethod(t *testing.T) {
 		type Pair {
 			string first;
 			string second;
-			pick(&this, string &other `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
+			pick(this, string other `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
 				return other;
 			}
 		}
@@ -14973,8 +14973,8 @@ func TestLevenshteinBasic(t *testing.T) {
 // previously rejected with "if-unwrap requires optional type, got Circle?&".
 func TestIfUnwrapBorrowedOptional(t *testing.T) {
 	checkOK(t, `
-		type Shape { string name; area(&this) f64 `+"`"+`abstract; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`"+`abstract; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		test() {
 			Circle? init = Circle(name: "c", radius: 1.0);
 			a := Ref[Circle?](init);
@@ -18725,7 +18725,7 @@ func TestT0623_BorrowedSubjectRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		worker() int { return 42; }
 		enum E { Empty, Held(Task[int] t) }
-		consume(E& e) {
+		consume(E e) {
 			match e {
 				E.Empty => assert(true, "empty"),
 				E.Held(tk) => assert(true, "held"),

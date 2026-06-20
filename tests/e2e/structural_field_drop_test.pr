@@ -5,7 +5,7 @@
 type WriterWrap `public {
   Writer _w;
 
-  new(~this, ~Writer w) {
+  new(~this, Writer move w) {
     this._w = w;
   }
 
@@ -17,7 +17,7 @@ type WriterWrap `public {
 type WriterWrapExplicit `public {
   Writer _w;
 
-  new(~this, ~Writer w) {
+  new(~this, Writer move w) {
     this._w = w;
   }
 
@@ -31,7 +31,7 @@ type WriterWrapExplicit `public {
 type WriterWrapOptional `public {
   Writer? _w;
 
-  new(~this, ~Writer? w) {
+  new(~this, Writer? move w) {
     this._w = w;
   }
 }
@@ -44,7 +44,7 @@ make_writer() Writer {
 // requires NeedsSynthDrop=true so a drop is generated.
 synth_drop_field() `test {
   Builder b = Builder();
-  WriterWrap mw = WriterWrap(b);
+  WriterWrap mw = WriterWrap(move b);
   u8[] data = u8[]();
   data.push(0x41u8);
   mw.write(data)?!;
@@ -54,7 +54,7 @@ synth_drop_field() `test {
 // even though the user supplied an empty drop body.
 explicit_drop_field() `test {
   Builder b = Builder();
-  WriterWrapExplicit mw = WriterWrapExplicit(b);
+  WriterWrapExplicit mw = WriterWrapExplicit(move b);
   // mw is dropped at scope exit — Builder must be freed too.
 }
 
@@ -63,12 +63,12 @@ explicit_drop_field() `test {
 optional_structural_field_some() `test {
   Writer? maybe = none;
   maybe = make_writer();
-  WriterWrapOptional mw = WriterWrapOptional(maybe);
+  WriterWrapOptional mw = WriterWrapOptional(move maybe);
 }
 
 optional_structural_field_none() `test {
   Writer? maybe = none;
-  WriterWrapOptional mw = WriterWrapOptional(maybe);
+  WriterWrapOptional mw = WriterWrapOptional(move maybe);
 }
 
 // Reassignment of a structural field: the old value must be dropped before the
@@ -77,13 +77,13 @@ optional_structural_field_none() `test {
 // drop path on the wrapper.
 multi_use_wrap() `test {
   Builder b1 = Builder();
-  WriterWrap w1 = WriterWrap(b1);
+  WriterWrap w1 = WriterWrap(move b1);
   u8[] data = u8[]();
   data.push(0x58u8);
   w1.write(data)?!;
 
   Builder b2 = Builder();
-  WriterWrap w2 = WriterWrap(b2);
+  WriterWrap w2 = WriterWrap(move b2);
   u8[] data2 = u8[]();
   data2.push(0x59u8);
   w2.write(data2)?!;
@@ -120,14 +120,14 @@ type Tracked `public {
 
 type SinkWrap `public {
   Sink _s;
-  new(~this, ~Sink s) {
+  new(~this, Sink move s) {
     this._s = s;
   }
 }
 
 structural_field_user_drop() `test {
   Tracked tw = Tracked();
-  SinkWrap mw = SinkWrap(tw);
+  SinkWrap mw = SinkWrap(move tw);
 }
 
 // Generic wrapper with a structural field. Exercises the `*types.Instance`
@@ -138,7 +138,7 @@ type StructuralBox[T] `public {
   Writer _w;
   T value;
 
-  new(~this, ~Writer w, ~T v) {
+  new(~this, Writer move w, T move v) {
     this._w = w;
     this.value = v;
   }
@@ -146,12 +146,12 @@ type StructuralBox[T] `public {
 
 generic_wrap_int_value() `test {
   Builder b = Builder();
-  StructuralBox[int] sb = StructuralBox[int](b, 7);
+  StructuralBox[int] sb = StructuralBox[int](move b, 7);
 }
 
 generic_wrap_string_value() `test {
   Builder b = Builder();
-  StructuralBox[string] sb = StructuralBox[string](b, "hello");
+  StructuralBox[string] sb = StructuralBox[string](move b, "hello");
 }
 
 // T0765: enum variant holding a structural-interface field. The synthesized

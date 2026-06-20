@@ -17,8 +17,8 @@ enum Holder[T] {
   Nada,
 }
 
-mk_holder[T](~T x) Holder[T] {
-  return Holder[T].Wrap(x);
+mk_holder[T](T move x) Holder[T] {
+  return Holder[T].Wrap(move x);
 }
 
 // --- copy inner (int) ---
@@ -35,7 +35,7 @@ owned_arg_int() `test {
 
 owned_arg_string() `test {
   string s = "ab".to_upper();
-  Holder[string] h = mk_holder(s);
+  Holder[string] h = mk_holder(move s);
   match h {
     Holder.Wrap(v) => assert(v == "AB", "string variant holds AB"),
     Holder.Nada => assert(false, "expected Wrap"),
@@ -46,7 +46,7 @@ owned_arg_string() `test {
 
 owned_arg_vec() `test {
   int[] d = [7, 8, 9];
-  Holder[int[]] h = mk_holder(d);
+  Holder[int[]] h = mk_holder(move d);
   match h {
     Holder.Wrap(v) => {
       assert(v.len == 3, "int[] variant len 3");
@@ -63,7 +63,7 @@ owned_arg_map() `test {
   map[string, int] m = {
     "a": 1, "b": 2
   };
-  Holder[map[string, int]] h = mk_holder(m);
+  Holder[map[string, int]] h = mk_holder(move m);
   match h {
     Holder.Wrap(v) => {
       assert(v["a"]! == 1, "map variant value a");
@@ -82,7 +82,7 @@ type Pt {
 
 owned_arg_user_type() `test {
   Pt p = Pt(x: 3, y: 4);
-  Holder[Pt] h = mk_holder(p);
+  Holder[Pt] h = mk_holder(move p);
   match h {
     Holder.Wrap(v) => {
       assert(v.x == 3, "Pt.x == 3");
@@ -94,16 +94,16 @@ owned_arg_user_type() `test {
 
 // --- owned local consumed into a generic enum ctor (no aliasing) ---
 
-mk_holder_local[T](~T x) Holder[T] {
+mk_holder_local[T](T move x) Holder[T] {
   T local = x;
-  return Holder[T].Wrap(local);
+  return Holder[T].Wrap(move local);
 }
 
 owned_arg_via_local() `test {
   map[string, int] m = {
     "k": 5
   };
-  Holder[map[string, int]] h = mk_holder_local(m);
+  Holder[map[string, int]] h = mk_holder_local(move m);
   match h {
     Holder.Wrap(v) => assert(v["k"]! == 5, "map via local holds 5"),
     Holder.Nada => assert(false, "expected Wrap"),
@@ -114,8 +114,8 @@ owned_arg_via_local() `test {
 
 type Maker[T] {
   int tag;
-  build(this, ~T x) Holder[T] {
-    return Holder[T].Wrap(x);
+  build(this, T move x) Holder[T] {
+    return Holder[T].Wrap(move x);
   }
 }
 
@@ -124,7 +124,7 @@ owned_arg_generic_method() `test {
   map[string, int] m = {
     "z": 9
   };
-  Holder[map[string, int]] h = mk.build(m);
+  Holder[map[string, int]] h = mk.build(move m);
   match h {
     Holder.Wrap(v) => assert(v["z"]! == 9, "method-built map holds 9"),
     Holder.Nada => assert(false, "expected Wrap"),

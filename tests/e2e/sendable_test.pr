@@ -113,7 +113,7 @@ test_sendable_capture_in_go() `test {
 test_sendable_enum_through_channel() `test {
   ch := channel[Color]();
   t := go {
-    ch.send(Color.Green);
+    ch.send(move Color.Green);
   };
   c := (<-ch)!;
   match c {

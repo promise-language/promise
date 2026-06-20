@@ -1,22 +1,22 @@
 // Custom types in Promise: fields, constructors, methods.
 //
 // Types are declared with the `type` keyword. Fields are listed inside braces.
-// Methods receive `this` — use `&this` for read-only, `~this` for mutation.
+// Methods receive `this` — use `this` for read-only, `~this` for mutation.
 type Point {
   f64 x;
   f64 y;
 
   // Read-only method — borrows this immutably.
-  distance_from_origin(&this) f64 {
+  distance_from_origin(this) f64 {
     return sqrt(this.x * this.x + this.y * this.y);
   }
 
   // Method that returns a new value (no mutation needed).
-  translate(&this, f64 dx, f64 dy) Point {
+  translate(this, f64 dx, f64 dy) Point {
     return Point(x: this.x + dx, y: this.y + dy);
   }
 
-  to_string(&this) string {
+  to_string(this) string {
     return "({this.x}, {this.y})";
   }
 }
@@ -60,7 +60,7 @@ after reset: 0""") {
   print_line("");
   print_line("--- Methods ---");
 
-  // Read-only method (&this) — does not consume or mutate.
+  // Read-only method (this) — does not consume or mutate.
   dist := p.distance_from_origin();
   print_line("distance: {dist}");
 

@@ -9,11 +9,11 @@ type Server `doc("HTTP server") {
 }
 
 type Endpoint {
-  handle(&this, Request req) Response `instance `inline {
+  handle(this, Request req) Response `instance `inline {
     return Response.ok();
   }
 
-  validate(&this) Bool `instance `pure {
+  validate(this) Bool `instance `pure {
     return true;
   }
 }

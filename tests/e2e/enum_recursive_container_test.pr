@@ -53,9 +53,9 @@ map_recursion() `test {
   map[int, TreeM] empty_children = map[int, TreeM]();
   map[int, TreeM] inner = {
     1: TreeM.Empty,
-    2: TreeM.Node(v: 99, children: empty_children),
+    2: TreeM.Node(v: 99, children: move empty_children),
   };
-  TreeM t = TreeM.Node(v: 42, children: inner);
+  TreeM t = TreeM.Node(v: 42, children: move inner);
   match t {
     TreeM.Node(v, _) => {
       assert(v == 42, "node value");
@@ -67,7 +67,7 @@ map_recursion() `test {
 }
 
 named_wrapper_recursion() `test {
-  TreeN t = TreeN.Wrap(w: TreeWrap(node: TreeN.Tip, depth: 0));
+  TreeN t = TreeN.Wrap(w: TreeWrap(node: move TreeN.Tip, depth: 0));
   match t {
     TreeN.Wrap(inner) => {
       assert(inner.depth == 0, "wrap depth");

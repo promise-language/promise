@@ -9,7 +9,7 @@ type _BitReader {
   int byte_pos;
   int bit_pos;
 
-  new(~this, ~u8[] data) {
+  new(~this, u8[] move data) {
     this.data = data;
     this.byte_pos = 0;
     this.bit_pos = 0;

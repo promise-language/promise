@@ -64,7 +64,7 @@ test_optval_map_some() `test {
   map[string, string] m = map[string, string]();
   m["k"] = "v";
   m["a"] = "b";
-  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(m);
+  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(move m);
   Wrap[map[string, string]] c = j.clone();
   match c {
     Wrap.OptVal(cm) => {
@@ -93,7 +93,7 @@ test_optval_map_some() `test {
 // Droppable TypeArg: map, none payload.
 test_optval_map_none() `test {
   map[string, string]? empty = none;
-  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(empty);
+  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(move empty);
   Wrap[map[string, string]] c = j.clone();
   match c {
     Wrap.OptVal(cm) => {
@@ -120,7 +120,7 @@ test_optval_map_none() `test {
 // Droppable TypeArg: string[] (vector of heap strings) wrapped in Optional.
 test_optval_string_vec_some() `test {
   string[] data = ["x", "y", "z"];
-  Wrap[string[]] j = Wrap[string[]].OptVal(data);
+  Wrap[string[]] j = Wrap[string[]].OptVal(move data);
   Wrap[string[]] c = j.clone();
   match c {
     Wrap.OptVal(cv) => {
@@ -184,7 +184,7 @@ test_vecval_map_elements() `test {
   b["two"] = 2;
   b["three"] = 3;
   map[string, int][] v = [a, b];
-  Wrap[map[string, int]] j = Wrap[map[string, int]].VecVal(v);
+  Wrap[map[string, int]] j = Wrap[map[string, int]].VecVal(move v);
   Wrap[map[string, int]] c = j.clone();
   match c {
     Wrap.VecVal(cv) => {
@@ -208,7 +208,7 @@ test_vecval_string_vec_elements() `test {
   string[] p = ["p", "q"];
   string[] r = ["r", "s", "t"];
   string[][] v = [p, r];
-  Wrap[string[]] j = Wrap[string[]].VecVal(v);
+  Wrap[string[]] j = Wrap[string[]].VecVal(move v);
   Wrap[string[]] c = j.clone();
   match c {
     Wrap.VecVal(cv) => {
@@ -233,7 +233,7 @@ test_plain_map() `test {
   map[string, string] src = map[string, string]();
   src["a"] = "b";
   src["c"] = "d";
-  Wrap[map[string, string]] j = Wrap[map[string, string]].Plain(src);
+  Wrap[map[string, string]] j = Wrap[map[string, string]].Plain(move src);
   Wrap[map[string, string]] c = j.clone();
   match c {
     Wrap.Plain(cm) => {
@@ -271,7 +271,7 @@ test_nothing_variant() `test {
 test_optval_map_mutation_independence() `test {
   map[string, string] src = map[string, string]();
   src["k"] = "v1";
-  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(src);
+  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(move src);
   Wrap[map[string, string]] c = j.clone();
   match c {
     Wrap.OptVal(cm) => {
@@ -306,7 +306,7 @@ test_optval_map_mutation_independence() `test {
 test_vecval_outer_independence() `test {
   string[] data = ["a", "b"];
   string[][] v = [data];
-  Wrap[string[]] j = Wrap[string[]].VecVal(v);
+  Wrap[string[]] j = Wrap[string[]].VecVal(move v);
   Wrap[string[]] c = j.clone();
   match c {
     Wrap.VecVal(cv) => {
@@ -337,7 +337,7 @@ test_nested_optional_some() `test {
   string[] sv = ["m", "n"];
   string[]? inner = sv;
   string[]?? outer = inner;
-  DeepOpt[string[]] j = DeepOpt[string[]].Deep(outer);
+  DeepOpt[string[]] j = DeepOpt[string[]].Deep(move outer);
   DeepOpt[string[]] c = j.clone();
   match c {
     DeepOpt.Deep(cd) => {
@@ -387,7 +387,7 @@ enum Outer2[T] `clone {
 test_nested_generic_enum_map() `test {
   map[string, string] m = map[string, string]();
   m["deep"] = "value";
-  Outer2[map[string, string]] j = Outer2[map[string, string]].Box(Inner2[map[string, string]].Has(m));
+  Outer2[map[string, string]] j = Outer2[map[string, string]].Box(Inner2[map[string, string]].Has(move m));
   Outer2[map[string, string]] c = j.clone();
   match c {
     Outer2.Box(ci) => match ci {
@@ -420,8 +420,8 @@ type Bag2 `clone {
 test_optval_user_clone_type() `test {
   map[string, int] m = map[string, int]();
   m["apples"] = 3;
-  Bag2 b = Bag2(counts: m);
-  Wrap[Bag2] j = Wrap[Bag2].OptVal(b);
+  Bag2 b = Bag2(counts: move m);
+  Wrap[Bag2] j = Wrap[Bag2].OptVal(move b);
   Wrap[Bag2] c = j.clone();
   match c {
     Wrap.OptVal(cb) => {
@@ -473,7 +473,7 @@ test_plain_string_typearg() `test {
 
 test_nested_optional_outer_none() `test {
   string[]?? outer = none;
-  DeepOpt[string[]] j = DeepOpt[string[]].Deep(outer);
+  DeepOpt[string[]] j = DeepOpt[string[]].Deep(move outer);
   DeepOpt[string[]] c = j.clone();
   match c {
     DeepOpt.Deep(cd) => {
@@ -500,7 +500,7 @@ test_nested_optional_outer_none() `test {
 test_nested_optional_inner_none() `test {
   string[]? inner = none;
   string[]?? outer = inner;
-  DeepOpt[string[]] j = DeepOpt[string[]].Deep(outer);
+  DeepOpt[string[]] j = DeepOpt[string[]].Deep(move outer);
   DeepOpt[string[]] c = j.clone();
   match c {
     DeepOpt.Deep(cd) => {
@@ -585,7 +585,7 @@ test_multi_typeparam_both_droppable() `test {
   string[] k = ["a", "b"];
   map[string, int] v = map[string, int]();
   v["x"] = 1;
-  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].Pair(k, v);
+  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].Pair(move k, move v);
   KV2[string[], map[string, int]] c = j.clone();
   match c {
     KV2.Pair(ck, cv) => {
@@ -607,7 +607,7 @@ test_multi_typeparam_both_droppable() `test {
 
 test_multi_typeparam_partial_variant() `test {
   string[] k = ["solo"];
-  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].KeyOnly(k);
+  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].KeyOnly(move k);
   KV2[string[], map[string, int]] c = j.clone();
   match c {
     KV2.KeyOnly(ck) => assert(ck[0] == "solo", "clone KeyOnly[0]=solo"),
@@ -697,7 +697,7 @@ test_tupwrap_string_vec() `test {
 test_tupwrap_user_clone() `test {
   map[string, int] mm = map[string, int]();
   mm["x"] = 1;
-  Bag2 b = Bag2(counts: mm);
+  Bag2 b = Bag2(counts: move mm);
   TupWrap[Bag2] j = TupWrap[Bag2].Pair((b, 9));
   TupWrap[Bag2] c = j.clone();
   match c {

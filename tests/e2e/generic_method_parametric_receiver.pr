@@ -24,7 +24,7 @@ type NBox[T] {
   plain() int {
     return this.d.len;
   }
-  outer(&this) int {
+  outer(this) int {
     return this.inner[int](7);
   }
 }
@@ -52,7 +52,7 @@ enum EBox[T] {
       },
     }
   }
-  outer(&this) int {
+  outer(this) int {
     return this.inner[int](7);
   }
 }
@@ -62,13 +62,13 @@ enum EBox[T] {
 fwd_named_mut[X](NBox[X] ~b) int {
   return b.inner[int](1);
 }
-fwd_named_shared[X](NBox[X] &b) int {
+fwd_named_shared[X](NBox[X] b) int {
   return b.inner[int](1);
 }
 fwd_enum_mut[X](EBox[X] ~b) int {
   return b.inner[int](1);
 }
-fwd_enum_shared[X](EBox[X] &b) int {
+fwd_enum_shared[X](EBox[X] b) int {
   return b.inner[int](1);
 }
 
@@ -77,13 +77,13 @@ fwd_enum_shared[X](EBox[X] &b) int {
 ng_named_mut(NBox[int] ~b) int {
   return b.inner[int](1);
 }
-ng_named_shared(NBox[int] &b) int {
+ng_named_shared(NBox[int] b) int {
   return b.plain();
 }
 ng_enum_mut(EBox[int] ~b) int {
   return b.inner[int](1);
 }
-ng_enum_shared(EBox[int] &b) int {
+ng_enum_shared(EBox[int] b) int {
   return b.plain();
 }
 
@@ -127,13 +127,13 @@ type GBox[T] {
 idx_named_mut(GBox[int] ~b) int {
   return b[1];
 }
-idx_named_shared(GBox[int] &b) int {
+idx_named_shared(GBox[int] b) int {
   return b[0];
 }
 getter_named_mut(GBox[int] ~b) int {
   return b.total;
 }
-getter_named_shared(GBox[int] &b) int {
+getter_named_shared(GBox[int] b) int {
   return b.total;
 }
 // Defect A on a still-parametric `~`/`&` receiver inside a *generic* fn:
@@ -141,12 +141,12 @@ getter_named_shared(GBox[int] &b) int {
 fwd_idx_generic[X](GBox[X] ~b, int i) X {
   return b[i];
 }
-fwd_getter_generic[X](GBox[X] &b) int {
+fwd_getter_generic[X](GBox[X] b) int {
   return b.total;
 }
 // String-payload getter variant — sharpens leak enforcement on the getter
 // ref-dispatch path.
-getter_string(GBox[string] &b) int {
+getter_string(GBox[string] b) int {
   return b.total;
 }
 // T0647 (fixed): user-defined non-native `[]` returning a heap type (string)
@@ -159,11 +159,11 @@ getter_string(GBox[string] &b) int {
 idx_string_mut(GBox[string] ~b) int {
   return b[1].len; // temporary-use: s[i] result dropped at stmt end
 }
-idx_string_shared(GBox[string] &b) int {
+idx_string_shared(GBox[string] b) int {
   x := b[0]; // binding: claimed into x, dropped at scope exit
   return x.len;
 }
-fwd_idx_string_generic[X](GBox[X] &b, int i) X {
+fwd_idx_string_generic[X](GBox[X] b, int i) X {
   return b[i]; // still-parametric `&` receiver inside a generic fn
 }
 

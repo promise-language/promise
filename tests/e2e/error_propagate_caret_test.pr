@@ -119,7 +119,7 @@ type _Rd {
 
 type _Wrapper {
   _Rd inner;
-  new(~this, ~_Rd r) {
+  new(~this, _Rd move r) {
     this.inner = r;
   }
   is_one!(~this) bool {

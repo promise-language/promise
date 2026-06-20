@@ -737,7 +737,7 @@ file_read_line_method() `test(exclude: wasm) {
 buffered_reader_basic() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_br", "hello world")?!;
   File f = File.open(os.temp_dir + "/pr_iot_br", readonly: true)?!;
-  BufferedReader r = BufferedReader(f, buf_size: 4);
+  BufferedReader r = BufferedReader(move f, buf_size: 4);
   u8[] buf = Vector[u8].filled(0u8, 5);
   int n1 = r.read(buf)?!;
   // Buffer is 4 bytes, so first read fills internal buf (4 bytes), copies up to 4
@@ -753,7 +753,7 @@ buffered_reader_basic() `test(exclude: wasm) {
 buffered_reader_read_line() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_brl", "one\ntwo\nthree")?!;
   File f = File.open(os.temp_dir + "/pr_iot_brl", readonly: true)?!;
-  BufferedReader r = BufferedReader(f, buf_size: 8);
+  BufferedReader r = BufferedReader(move f, buf_size: 8);
   if v := r.read_line()?! {
     assert(v == "one", "line1");
   } else {
@@ -779,7 +779,7 @@ buffered_reader_read_line() `test(exclude: wasm) {
 buffered_reader_read_line_crlf() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_brlc", "aa\r\nbb\r\n")?!;
   File f = File.open(os.temp_dir + "/pr_iot_brlc", readonly: true)?!;
-  BufferedReader r = BufferedReader(f, buf_size: 4);
+  BufferedReader r = BufferedReader(move f, buf_size: 4);
   if v := r.read_line()?! {
     assert(v == "aa", "crlf line1");
   } else {
@@ -800,7 +800,7 @@ buffered_reader_read_line_crlf() `test(exclude: wasm) {
 buffered_reader_read_byte() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_brb", "AB")?!;
   File f = File.open(os.temp_dir + "/pr_iot_brb", readonly: true)?!;
-  BufferedReader r = BufferedReader(f);
+  BufferedReader r = BufferedReader(move f);
   if b := r.read_byte()?! {
     assert(b as! int == 65, "A");
   } else {
@@ -820,7 +820,7 @@ buffered_reader_read_byte() `test(exclude: wasm) {
 
 buffered_writer_basic() `test(exclude: wasm) {
   File f = File.create(os.temp_dir + "/pr_iot_bw")?!;
-  BufferedWriter w = BufferedWriter(f, buf_size: 8);
+  BufferedWriter w = BufferedWriter(move f, buf_size: 8);
   u8[] data = u8[]();
   data.push(72u8); // H
   data.push(105u8); // i
@@ -833,7 +833,7 @@ buffered_writer_basic() `test(exclude: wasm) {
 
 buffered_writer_flush() `test(exclude: wasm) {
   File f = File.create(os.temp_dir + "/pr_iot_bwf")?!;
-  BufferedWriter w = BufferedWriter(f, buf_size: 4);
+  BufferedWriter w = BufferedWriter(move f, buf_size: 4);
   // Write more than buffer size to trigger auto-flush
   u8[] data = u8[]();
   int i = 0;
@@ -850,7 +850,7 @@ buffered_writer_flush() `test(exclude: wasm) {
 
 buffered_writer_write_string() `test(exclude: wasm) {
   File f = File.create(os.temp_dir + "/pr_iot_bws")?!;
-  BufferedWriter w = BufferedWriter(f, buf_size: 16);
+  BufferedWriter w = BufferedWriter(move f, buf_size: 16);
   w.write_string("hello ")?!;
   w.write_string("world")?!;
   w.close()?!;
@@ -872,7 +872,7 @@ file_write_line() `test(exclude: wasm) {
 
 buffered_writer_write_line() `test(exclude: wasm) {
   File f = File.create(os.temp_dir + "/pr_iot_bwl")?!;
-  BufferedWriter w = BufferedWriter(f, buf_size: 16);
+  BufferedWriter w = BufferedWriter(move f, buf_size: 16);
   w.write_line("alpha")?!;
   w.write_line("beta")?!;
   w.close()?!;

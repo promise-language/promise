@@ -323,7 +323,7 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
 		} else {
 			c.errorf(this.Pos(),
-				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `Type move`")
 		}
 		return
 	}
@@ -347,7 +347,7 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	if state, tracked := c.state[ident.Name]; tracked && state == Borrowed {
 		if c.params[ident.Name] {
 			c.errorf(ident.Pos(),
-				"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+				"cannot move borrowed parameter '%s'; declare the parameter with `move` to consume it",
 				ident.Name)
 		} else {
 			c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
@@ -685,6 +685,91 @@ func (c *Checker) findBorrowedNonAliasSafeIdentInBlock(block *ast.Block) *ast.Id
 	return nil
 }
 
+// --- Call-site `move` keyword enforcement (T0998 §6.2) ---
+
+// moveSubject peels parens, casts, and force-unwraps to reach the underlying
+// argument subject, so `move (x as T)` / `move o!` resolve to `x` / `o`.
+func moveSubject(expr ast.Expr) ast.Expr {
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.CastExpr:
+			expr = e.Expr
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		default:
+			return expr
+		}
+	}
+}
+
+// isNamedBinding reports whether expr (after peeling) is a reusable named
+// binding — a variable or a field path rooted at one — as opposed to a temporary
+// (call result, literal, index, etc.).
+func isNamedBinding(expr ast.Expr) bool {
+	_, _, ok := extractBorrowTarget(moveSubject(expr))
+	return ok
+}
+
+// isConsumableNamedBinding reports whether a `move`-less argument would actually
+// consume a named binding of a move (non-Copy) type, and therefore requires the
+// call-site `move` keyword. Borrowed / moved / use-bound / Copy / temporary
+// subjects do not (a borrowed subject is rejected separately by tryMoveConsume).
+func (c *Checker) isConsumableNamedBinding(expr ast.Expr) bool {
+	subject := moveSubject(expr)
+	switch e := subject.(type) {
+	case *ast.IdentExpr:
+		v, ok := c.info.Objects[e].(*types.Var)
+		if !ok || isCopyType(v.Type()) {
+			return false
+		}
+		state, tracked := c.state[e.Name]
+		if !tracked || state == Borrowed || state == Moved || c.pinned[e.Name] {
+			return false
+		}
+		return true
+	case *ast.MemberExpr:
+		// Partial move of a field path rooted at a named binding.
+		if _, _, ok := extractBorrowTarget(e); !ok {
+			return false
+		}
+		t := c.info.Types[subject]
+		return t != nil && !isCopyType(t)
+	}
+	return false
+}
+
+// enforceMoveMarker validates the call-site `move` keyword on a call/constructor
+// argument that lands in a consuming slot (§6.2): a consumed named binding must
+// be written `move x`, and `move` on a temporary is rejected.
+func (c *Checker) enforceMoveMarker(arg *ast.Arg) {
+	// The `move` keyword is a source-syntax requirement; skip compiler-synthesized
+	// args (clone/encode/serialize), which carry no source position (Line == 0).
+	if arg.Value == nil || arg.Value.Pos().Line == 0 {
+		return
+	}
+	if arg.Move {
+		if !isNamedBinding(arg.Value) {
+			c.errorf(arg.Value.Pos(), "`move` applies to a named binding; this argument is a temporary — remove `move`")
+		}
+		return
+	}
+	if c.isConsumableNamedBinding(arg.Value) {
+		name, path, _ := extractBorrowTarget(moveSubject(arg.Value))
+		label := borrowTargetLabel(name, path)
+		c.errorf(arg.Value.Pos(), "consuming '%s' requires `move %s`", label, label)
+	}
+}
+
+// rejectMoveMarker reports a `move` keyword on an argument bound to a borrow
+// slot, where the value is not consumed (§6.2).
+func (c *Checker) rejectMoveMarker(arg *ast.Arg) {
+	if arg.Move && arg.Value != nil && arg.Value.Pos().Line != 0 {
+		c.errorf(arg.Value.Pos(), "this parameter borrows the argument — it is not consumed; remove `move`")
+	}
+}
+
 // checkCallExpr handles function calls and constructor calls.
 // For function calls, arguments matched to value parameters trigger moves;
 // arguments matched to borrow parameters create borrows.
@@ -707,11 +792,12 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 	// instance → double-free at scope exit. Route enum-variant-constructor
 	// args through the same tryMoveConsume path used for struct constructors
 	// (and the sig==nil constructor branch below), so a borrowed parameter
-	// yields the standard `add '~'` diagnostic — matching generic/non-generic
+	// yields the standard `move`-parameter diagnostic — matching generic/non-generic
 	// struct constructors and the non-generic enum-variant constructor.
 	if c.isEnumVariantConstructorCallee(e.Callee) {
 		for _, arg := range e.Args {
 			c.checkExpr(arg.Value)
+			c.enforceMoveMarker(arg)
 			c.tryMoveConsume(arg.Value)
 			// T0754: peel `as!/as T` so the cast subject is consumed too —
 			// enum-variant payload owns the value, no per-arg drop flag.
@@ -739,6 +825,14 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			c.checkExpr(arg.Value)
 			if i < len(params) {
 				kind := paramBorrowKind(params[i])
+				// T0998: the call-site `move` marker is required exactly where the
+				// arg is consumed below (storeNative element store, or a `move`
+				// parameter), and rejected on borrow slots — mirroring the dispatch.
+				if (kind == BorrowNone && storeNative) || params[i].Ref() == types.RefMut {
+					c.enforceMoveMarker(arg)
+				} else {
+					c.rejectMoveMarker(arg)
+				}
 				if kind == BorrowNone {
 					// T0581: passing `this` as a plain (non-`~`, non-`&`) call-arg
 					// into a slot expecting the type's value-struct shape (`{i8*,i8*}`
@@ -770,7 +864,7 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 								c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
 							} else {
 								c.errorf(this.Pos(),
-									"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+									"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `Type move`")
 							}
 							continue
 						}
@@ -788,7 +882,7 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 						if ident := c.findBorrowedNonAliasSafeIdent(arg.Value); ident != nil {
 							if c.params[ident.Name] {
 								c.errorf(ident.Pos(),
-									"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+									"cannot move borrowed parameter '%s'; declare the parameter with `move` to consume it",
 									ident.Name)
 							} else {
 								c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
@@ -827,6 +921,9 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 				} else {
 					c.createBorrowWithKind(arg.Value, kind, e.Pos())
 				}
+			} else {
+				// Extra variadic args (no distinct param slot) are not consumed.
+				c.rejectMoveMarker(arg)
 			}
 		}
 		if member, ok := e.Callee.(*ast.MemberExpr); ok &&
@@ -847,6 +944,7 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 		// Constructor or unresolved call — all args are consumed.
 		for _, arg := range e.Args {
 			c.checkExpr(arg.Value)
+			c.enforceMoveMarker(arg)
 			c.tryMoveConsume(arg.Value)
 			// T0754: peel `as!/as T` so the cast subject is consumed too —
 			// constructor field-init owns the value, no per-arg drop flag.
@@ -973,10 +1071,12 @@ func (c *Checker) checkReceiverBorrow(callee ast.Expr, sig *types.Signature, pos
 	if sig.Recv() == nil {
 		return
 	}
-	// Receiver uses Ref() (grammar: receiverParam : refMod? THIS)
+	// Receiver uses Ref() (grammar: receiverParam : refMod? THIS). A bare `this`
+	// is a shared (read-only) borrow of the receiver (T0998), so an unmarked
+	// receiver (RefNone → BorrowNone) borrows shared, mirroring the old `&this`.
 	recvKind := paramBorrowKind(sig.Recv())
 	if recvKind == BorrowNone {
-		return
+		recvKind = BorrowShared
 	}
 	member, ok := callee.(*ast.MemberExpr)
 	if !ok {
@@ -1682,7 +1782,7 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 	// Tailor the remedy to the handle: a Mutex can be read in place via the
 	// borrowing `.lock()`, but a Task has no in-place read (the only operation,
 	// `<-`, consumes it) — so for a Task only the take-ownership remedy applies.
-	remedy := "take ownership with a `~this` receiver / `~` parameter"
+	remedy := "take ownership with a `~this` receiver or a `move` parameter"
 	if !types.IsTask(handleType) {
 		remedy = fmt.Sprintf("read it in place through a borrow (e.g. `(%s.%s!).lock()`), or %s", rootName, member.Field, remedy)
 	}
@@ -1738,7 +1838,7 @@ func (c *Checker) rejectAwaitNonOwnedSource(expr ast.Expr) bool {
 			kind = "parameter"
 		}
 		c.errorf(e.Pos(),
-			"cannot await borrowed task %s '%s'; `<-` consumes (joins and frees) the task, but the owner still drops it → double-free — take ownership with a `~` parameter, or await it where it is owned",
+			"cannot await borrowed task %s '%s'; `<-` consumes (joins and frees) the task, but the owner still drops it → double-free — take ownership with a `move` parameter, or await it where it is owned",
 			kind, e.Name)
 		return true
 	case *ast.BinaryExpr:
@@ -2087,7 +2187,7 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 			if c.state[name] == Borrowed {
 				if c.params[name] {
 					c.errorf(e.Pos(),
-						"cannot move-capture borrowed parameter '%s' into a lambda; add '~' to the parameter declaration to consume it",
+						"cannot move-capture borrowed parameter '%s' into a lambda; declare the parameter with `move` to consume it",
 						name)
 				} else {
 					c.errorf(e.Pos(), "cannot move-capture borrowed value '%s' into a lambda", name)

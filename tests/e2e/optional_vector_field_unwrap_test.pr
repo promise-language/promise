@@ -25,7 +25,7 @@ test_inline_optional_vector_unwrap() `test {
   v := int[]();
   v.push(1);
   v.push(2);
-  HolderVec h = HolderVec(data: v);
+  HolderVec h = HolderVec(data: move v);
   assert(h.data!.len == 2, "inline unwrap dynamic vector");
 }
 
@@ -34,7 +34,7 @@ test_inline_optional_vector_field_access() `test {
   v.push(10);
   v.push(20);
   v.push(30);
-  HolderVec h = HolderVec(data: v);
+  HolderVec h = HolderVec(data: move v);
   int len = h.data!.len;
   assert(len == 3, "inline unwrap len");
 }
@@ -43,7 +43,7 @@ test_inline_optional_vector_field_access() `test {
 test_optional_vector_field_unwrap_owner_still_valid() `test {
   v := int[]();
   v.push(42);
-  HolderVec h = HolderVec(data: v);
+  HolderVec h = HolderVec(data: move v);
   assert(h.data!.len == 1, "unwrap len");
   assert(h.data!.len == 1, "owner still valid after unwrap");
 }
@@ -53,7 +53,7 @@ test_optional_string_vector_unwrap() `test {
   sv := string[]();
   sv.push("hello");
   sv.push("world");
-  HolderStrVec h = HolderStrVec(items: sv);
+  HolderStrVec h = HolderStrVec(items: move sv);
   assert(h.items!.len == 2, "string vec unwrap");
 }
 
@@ -61,7 +61,7 @@ test_optional_string_vector_unwrap_repeat() `test {
   sv := string[]();
   sv.push("a" + "b");
   sv.push("c" + "d");
-  HolderStrVec h = HolderStrVec(items: sv);
+  HolderStrVec h = HolderStrVec(items: move sv);
   assert(h.items!.len == 2, "len 1");
   assert(h.items!.len == 2, "len 2");
 }
@@ -71,7 +71,7 @@ test_optional_string_vector_unwrap_repeat() `test {
 test_synthesized_drop_owner_vec_unwrap() `test {
   v := int[]();
   v.push(7);
-  AutoHolderVec h = AutoHolderVec(data: v, name: "x");
+  AutoHolderVec h = AutoHolderVec(data: move v, name: "x");
   assert(h.data!.len == 1, "synth drop owner unwrap");
 }
 
@@ -90,7 +90,7 @@ make_vec_failable!() int[] {
 test_field_access_then_failable_unwrap_vec() `test {
   v := int[]();
   v.push(1);
-  HolderVec h = HolderVec(data: v);
+  HolderVec h = HolderVec(data: move v);
   int[]? maybe = h.data; // sets optionalFieldVector for this stmt
   int[] result = make_vec_failable()?!; // must NOT be suppressed by leaked flag
   assert(result.len == 1, "post-flag tracking still works");
@@ -110,8 +110,8 @@ test_nested_vec_field_unwrap() `test {
   inner1 := int[]();
   inner1.push(1);
   inner1.push(2);
-  outer.push(inner1);
-  h := NestedHolder(grid: outer);
+  outer.push(move inner1);
+  h := NestedHolder(grid: move outer);
   assert(h.grid!.len == 1, "nested unwrap len");
   assert(h.grid![0].len == 2, "nested inner len");
 }
@@ -131,7 +131,7 @@ test_user_type_vec_field_unwrap() `test {
   items := Item[]();
   items.push(Item(id: 1, name: "alpha" + ""));
   items.push(Item(id: 2, name: "beta" + ""));
-  h := ItemHolder(items: items);
+  h := ItemHolder(items: move items);
   assert(h.items!.len == 2, "user vec unwrap len");
 }
 
@@ -147,14 +147,14 @@ test_generic_owner_int_vec_field_unwrap() `test {
   v := int[]();
   v.push(7);
   v.push(11);
-  b := Box[int](data: v);
+  b := Box[int](data: move v);
   assert(b.data!.len == 2, "generic owner int unwrap");
 }
 
 test_generic_owner_string_vec_field_unwrap() `test {
   sv := string[]();
   sv.push("foo" + "");
-  b := Box[string](data: sv);
+  b := Box[string](data: move sv);
   assert(b.data!.len == 1, "generic owner string vec unwrap");
 }
 
@@ -174,6 +174,6 @@ test_method_body_field_unwrap() `test {
   sv := string[]();
   sv.push("x" + "");
   sv.push("y" + "");
-  h := SelfHolder(items: sv);
+  h := SelfHolder(items: move sv);
   assert(h.count() == 2, "method body unwrap");
 }

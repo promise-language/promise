@@ -37,7 +37,7 @@ forin_owned_matches_borrowed() `test {
 
 // --- Borrowed vector via function parameter (idiomatic non-consuming pass) --
 
-sum_borrowed(int[] &data) int {
+sum_borrowed(int[] data) int {
   total := 0;
   for x in data {
     total = total + x;
@@ -57,7 +57,7 @@ forin_borrowed_param_called_twice() `test {
 // --- Borrowed string vector (non-Copy elements; clone-on-read path) ---------
 // Visiting all elements must not move/drop the borrowed buffer (zero leak).
 
-total_name_len(Box[] &boxes) int {
+total_name_len(Box[] boxes) int {
   n := 0;
   for box in boxes {
     n = n + box.name.len;
@@ -73,7 +73,7 @@ forin_borrowed_box_vector_readonly() `test {
   assert(boxes.len == 3 && boxes[1].name == "bbb", "borrowed Box[] intact");
 }
 
-sum_string_lens(string[] &data) int {
+sum_string_lens(string[] data) int {
   total := 0;
   for s in data {
     total = total + s.len;
@@ -94,7 +94,7 @@ forin_borrowed_string_vector() `test {
 // owned vector is sound (the clone is independent of the borrowed buffer). This
 // exercises the clone-then-move codegen path and must be leak/double-free free:
 // both the borrowed source `v` and the new `copies` are dropped with no overlap.
-collect_upper(string[] &data) string[] {
+collect_upper(string[] data) string[] {
   copies := string[]();
   for s in data {
     copies.push(s.to_upper());
@@ -132,7 +132,7 @@ forin_mut_borrowed_vector() `test {
 
 // --- Borrowed map (two-binding iteration) -----------------------------------
 
-sum_map_values(map[string, int] &m) int {
+sum_map_values(map[string, int] m) int {
   total := 0;
   for k, v in m {
     total = total + v;
@@ -151,7 +151,7 @@ forin_borrowed_map() `test {
 
 // --- Borrowed string (yields char) ------------------------------------------
 
-count_chars(string &s) int {
+count_chars(string s) int {
   n := 0;
   for ch in s {
     n = n + 1;
@@ -167,7 +167,7 @@ forin_borrowed_string() `test {
 
 // --- Borrowed fixed-size array ----------------------------------------------
 
-sum_array(int[3] &a) int {
+sum_array(int[3] a) int {
   total := 0;
   for x in a {
     total = total + x;
@@ -182,7 +182,7 @@ forin_borrowed_array() `test {
 
 // --- Borrowed range ---------------------------------------------------------
 
-sum_range(Range[int] &r) int {
+sum_range(Range[int] r) int {
   total := 0;
   for x in r {
     total = total + x;

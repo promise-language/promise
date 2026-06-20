@@ -53,7 +53,7 @@ test_func_arg_fail() `test {
 // ============================================================
 
 type Wrapper {
-  use_int(&this, int x) int {
+  use_int(this, int x) int {
     return x;
   }
 }

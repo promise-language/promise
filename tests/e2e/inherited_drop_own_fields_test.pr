@@ -23,35 +23,35 @@ type _T0507OptHolder {
 
 inherit_nongen_field_label() `test {
   s := "hello".repeat(2);
-  h := _T0507Holder(data: _T0507Box(s: "x", label: s));
+  h := _T0507Holder(data: _T0507Box(s: "x", label: move s));
   assert(h.data.s == "x", "s");
   assert(h.data.label == "hellohello", "label");
 }
 
 inherit_nongen_field_parent_heap() `test {
   p := "p".repeat(2);
-  h := _T0507Holder(data: _T0507Box(s: p, label: "fixed"));
+  h := _T0507Holder(data: _T0507Box(s: move p, label: "fixed"));
   assert(h.data.s == "pp", "s");
 }
 
 inherit_nongen_field_both_heap() `test {
   p := "p".repeat(2);
   s := "s".repeat(2);
-  h := _T0507Holder(data: _T0507Box(s: p, label: s));
+  h := _T0507Holder(data: _T0507Box(s: move p, label: move s));
   assert(h.data.s == "pp", "s");
   assert(h.data.label == "ss", "label");
 }
 
 inherit_nongen_local() `test {
   s := "x".repeat(2);
-  b := _T0507Box(s: "fixed", label: s);
+  b := _T0507Box(s: "fixed", label: move s);
   assert(b.s == "fixed", "s");
   assert(b.label == "xx", "label");
 }
 
 inherit_nongen_optional_to_none() `test {
   s := "x".repeat(2);
-  h := _T0507OptHolder(data: _T0507Box(s: "fixed", label: s));
+  h := _T0507OptHolder(data: _T0507Box(s: "fixed", label: move s));
   h.data = none;
   assert(!(h.data is _T0507Box), "absent");
 }
@@ -59,8 +59,8 @@ inherit_nongen_optional_to_none() `test {
 inherit_nongen_optional_to_value() `test {
   s1 := "old".repeat(2);
   s2 := "new".repeat(2);
-  h := _T0507OptHolder(data: _T0507Box(s: "fixed", label: s1));
-  h.data = _T0507Box(s: "fixed", label: s2);
+  h := _T0507OptHolder(data: _T0507Box(s: "fixed", label: move s1));
+  h.data = _T0507Box(s: "fixed", label: move s2);
   assert(h.data is _T0507Box, "present");
 }
 
@@ -88,7 +88,7 @@ inherit_nongen_chain() `test {
   a := "a".repeat(2);
   m := "m".repeat(2);
   o := "o".repeat(2);
-  h := _T0507ChainHolder(data: _T0507C(anchor: a, mid: m, outer: o));
+  h := _T0507ChainHolder(data: _T0507C(anchor: move a, mid: move m, outer: move o));
   assert(h.data.anchor == "aa", "anchor");
   assert(h.data.mid == "mm", "mid");
   assert(h.data.outer == "oo", "outer");
@@ -105,7 +105,7 @@ type _T0507PlainHolder {
 
 inherit_nongen_no_own_fields() `test {
   p := "p".repeat(2);
-  h := _T0507PlainHolder(data: _T0507Plain(s: p));
+  h := _T0507PlainHolder(data: _T0507Plain(s: move p));
   assert(h.data.s == "pp", "s");
 }
 
@@ -113,12 +113,12 @@ inherit_nongen_no_own_fields() `test {
 // the call site emits a vtable-dispatched drop (not direct). The vtable for
 // _T0507Box must point to _T0507Box.drop — not _T0507Logger.drop — otherwise
 // the child's own fields leak through the dispatch.
-_T0507_receive(~_T0507Logger l) {
+_T0507_receive(_T0507Logger move l) {
 }
 
 inherit_nongen_virtual_dispatch() `test {
   s := "v".repeat(2);
-  _T0507_receive(_T0507Box(s: "fixed", label: s));
+  _T0507_receive(_T0507Box(s: "fixed", label: move s));
 }
 
 // Vector elements are dropped via emitVectorElementDrops → emitVariantFieldDrop,
@@ -128,9 +128,9 @@ inherit_nongen_in_vector() `test {
   s1 := "a".repeat(2);
   s2 := "b".repeat(2);
   s3 := "c".repeat(2);
-  _T0507Box[] xs = [_T0507Box(s: "s1", label: s1),
-  _T0507Box(s: "s2", label: s2),
-  _T0507Box(s: "s3", label: s3),
+  _T0507Box[] xs = [_T0507Box(s: "s1", label: move s1),
+  _T0507Box(s: "s2", label: move s2),
+  _T0507Box(s: "s3", label: move s3),
   ];
   assert(xs.len == 3, "len");
   assert(xs[0].label == "aa", "0.label");
@@ -143,8 +143,8 @@ inherit_nongen_in_map() `test {
   s1 := "x".repeat(2);
   s2 := "y".repeat(2);
   map[string, _T0507Box] m = {
-    "a": _T0507Box(s: "s1", label: s1),
-    "b": _T0507Box(s: "s2", label: s2),
+    "a": _T0507Box(s: "s1", label: move s1),
+    "b": _T0507Box(s: "s2", label: move s2),
   };
   assert(m.len == 2, "len");
   assert(m.contains("a"), "a present");
@@ -160,8 +160,8 @@ type _T0507ReassignHolder {
 inherit_nongen_field_reassign() `test {
   s1 := "old".repeat(2);
   s2 := "new".repeat(2);
-  h := _T0507ReassignHolder(data: _T0507Box(s: "fixed", label: s1));
-  h.data = _T0507Box(s: "fixed", label: s2);
+  h := _T0507ReassignHolder(data: _T0507Box(s: "fixed", label: move s1));
+  h.data = _T0507Box(s: "fixed", label: move s2);
   assert(h.data.label == "newnew", "label");
 }
 
@@ -187,7 +187,7 @@ type _T0507NonGenHolder {
 inherit_nongen_generic_parent() `test {
   n := "n".repeat(2);
   l := "l".repeat(2);
-  h := _T0507NonGenHolder(data: _T0507NonGenChild(val: 7, note: n, label: l));
+  h := _T0507NonGenHolder(data: _T0507NonGenChild(val: 7, note: move n, label: move l));
   assert(h.data.val == 7, "val");
   assert(h.data.note == "nn", "note");
   assert(h.data.label == "ll", "label");
@@ -210,7 +210,7 @@ inherit_nongen_returned_value() `test {
 // captured value exactly once via env_drop, not in the lambda body.
 inherit_nongen_closure_capture() `test {
   s := "c".repeat(2);
-  b := _T0507Box(s: "fixed", label: s);
+  b := _T0507Box(s: "fixed", label: move s);
   f := move || -> string {
     return b.label.repeat(1);
   };
@@ -247,7 +247,7 @@ inherit_nongen_failable_propagation() `test {
 inherit_nongen_tuple_element() `test {
   s1 := "t".repeat(2);
   s2 := "u".repeat(2);
-  pair := (_T0507Box(s: "fixed", label: s1), _T0507Box(s: "fixed", label: s2));
+  pair := (_T0507Box(s: "fixed", label: move s1), _T0507Box(s: "fixed", label: move s2));
   (a, b) := pair;
   assert(a.label == "tt", "a.label");
   assert(b.label == "uu", "b.label");

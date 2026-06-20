@@ -3,10 +3,10 @@
 // optcast.nonepanic block at runtime (the Go test only asserts the block exists).
 type Base {
   string name;
-  tag(&this) string `abstract;
+  tag(this) string `abstract;
 }
 type Der is Base {
-  tag(&this) string {
+  tag(this) string {
     return "d";
   }
 }

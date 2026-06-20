@@ -133,7 +133,7 @@ type Wrap {
   Vec inner;
 }
 
-take_vec(~Vec v) int {
+take_vec(Vec move v) int {
   return v.x;
 }
 

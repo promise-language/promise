@@ -65,7 +65,7 @@ test_normalize_pattern() `test {
     if part == "c" {
       result.pop();
     } else {
-      result.push(part);
+      result.push(move part);
     }
     i = i + 1;
   }
@@ -628,10 +628,10 @@ test_t0387_polymorphic_subtype_vector_field() `test {
   string[] tags1 = Vector[string]();
   tags1.push("a" + "b");
   tags1.push("c" + "d");
-  shapes.push(_T0387Tagged(tags: tags1));
+  shapes.push(_T0387Tagged(tags: move tags1));
   string[] tags2 = Vector[string]();
   tags2.push("e" + "f");
-  shapes.push(_T0387Tagged(tags: tags2));
+  shapes.push(_T0387Tagged(tags: move tags2));
   _T0387Shape[] slice = shapes[0:2];
   string r0 = "{slice[0]}";
   string r1 = "{slice[1]}";
@@ -756,7 +756,7 @@ _t0388_make_int_vec() int[] {
 test_t0388_member_field_push_inner_vec() `test {
   _T0388Holder h = _T0388Holder(arr: _t0388_make_int_vec());
   int[][] v = int[][]();
-  v.push(h.arr);
+  v.push(move h.arr);
   assert(v.len == 1, "v len");
   assert(v[0].len == 2, "v[0] len");
   assert(v[0][0] == 1, "v[0][0]");
@@ -775,7 +775,7 @@ type _T0388StrHolder {
 test_t0388_member_field_push_string() `test {
   _T0388StrHolder h = _T0388StrHolder(s: "hi" + "ya");
   string[] v = string[]();
-  v.push(h.s);
+  v.push(move h.s);
   assert(v.len == 1, "v len");
   assert(v[0] == "hiya", "v[0]");
   assert(h.s == "hiya", "h.s still readable after push");
@@ -792,7 +792,7 @@ type _T0388ChanHolder {
 test_t0388_member_field_push_channel() `test(exclude: wasm) {
   _T0388ChanHolder h = _T0388ChanHolder(ch: channel[int](capacity: 2));
   channel[int][] v = channel[int][]();
-  v.push(h.ch);
+  v.push(move h.ch);
   assert(v.len == 1, "v len");
   h.ch.send(7);
   v[0].send(8);
@@ -825,7 +825,7 @@ type _T0388GetterHolder {
 test_t0388_member_field_push_does_not_break_instance_getter() `test {
   _T0388GetterHolder h = _T0388GetterHolder();
   int[][] v = int[][]();
-  v.push(h.fresh);
+  v.push(move h.fresh);
   assert(v.len == 1, "v len");
   assert(v[0].len == 2, "v[0] len");
   assert(v[0][0] == 100, "v[0][0]");

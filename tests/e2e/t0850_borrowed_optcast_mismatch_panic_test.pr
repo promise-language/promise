@@ -5,15 +5,15 @@
 // reference (mirrors t0761_optcast_mismatch_panic_test.pr for the owned case).
 type Base {
   string name;
-  tag(&this) string `abstract;
+  tag(this) string `abstract;
 }
 type Der is Base {
-  tag(&this) string {
+  tag(this) string {
     return "d";
   }
 }
 type Other is Base {
-  tag(&this) string {
+  tag(this) string {
     return "o";
   }
 }
@@ -21,7 +21,7 @@ type Other is Base {
 main() `test(expected: """panic: cast failed: as! type mismatch""") {
   Base b = Der(name: "x");
   Base? init = b;
-  Ref[Base?] a = Ref[Base?](init);
+  Ref[Base?] a = Ref[Base?](move init);
   d := a.borrow as! Other;
   print_line(d.name);
 }

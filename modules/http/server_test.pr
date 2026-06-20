@@ -26,9 +26,9 @@ type _HeaderEchoHandler {
   string echo_header;
 
   handle!(~this, ServerRequest request) ServerResponse {
-    ServerResponse resp = ServerResponse.ok(request.path);
+    ServerResponse resp = ServerResponse.ok(move request.path);
     if h := request.header(this.echo_header) {
-      resp.set_header("X-Echo", h);
+      resp.set_header("X-Echo", move h);
     }
     return resp;
   }
@@ -287,7 +287,7 @@ test_server_large_body() `test(exclude: wasm, timeout: "10s") {
 
   go {
     string large_body = "X".repeat(8000);
-    Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/big", large_body);
+    Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/big", move large_body);
     Response resp = req.send()?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body.len == 8000, "echoed large body length");
@@ -308,7 +308,7 @@ test_server_serve() `test(exclude: wasm, timeout: "10s") {
     Server server = Server.bind("127.0.0.1", 0)?!;
     port_ch.send(server.port);
     channel[bool] stop_ref = server._stop;
-    stop_ch.send(stop_ref);
+    stop_ch.send(move stop_ref);
     _OkHandler handler = _OkHandler(response_body: "served");
     server.serve(handler)?!;
   };
@@ -339,7 +339,7 @@ test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
     Server server = Server.bind("127.0.0.1", 0)?!;
     port_ch.send(server.port);
     channel[bool] stop_ref = server._stop;
-    stop_ch.send(stop_ref);
+    stop_ch.send(move stop_ref);
     _ErrorHandler handler = _ErrorHandler(error_message: "serve error");
     server.serve(handler)?!;
   };
@@ -369,7 +369,7 @@ test_server_shutdown_handle() `test(exclude: wasm, timeout: "10s") {
     Server server = Server.bind("127.0.0.1", 0)?!;
     port_ch.send(server.port);
     ServerShutdownHandle handle = server.create_shutdown_handle();
-    handle_ch.send(handle);
+    handle_ch.send(move handle);
     _OkHandler h = _OkHandler(response_body: "served");
     server.serve(h)?!;
   };
@@ -394,7 +394,7 @@ test_server_shutdown_handle_error_handler() `test(exclude: wasm, timeout: "10s")
     Server server = Server.bind("127.0.0.1", 0)?!;
     port_ch.send(server.port);
     ServerShutdownHandle handle = server.create_shutdown_handle();
-    handle_ch.send(handle);
+    handle_ch.send(move handle);
     _ErrorHandler h = _ErrorHandler(error_message: "serve error");
     server.serve(h)?!;
   };

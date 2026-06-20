@@ -22,7 +22,7 @@ test_push_string_optional_no_leak() `test {
   string s = "he" + "llo";
   string? os = s;
   string?[] v = [];
-  v.push(os);
+  v.push(move os);
   assert(v[0] is present, "pushed element present");
 }
 
@@ -81,7 +81,7 @@ test_heap_user_optional_overwrite() `test {
 test_heap_user_optional_push() `test {
   _BoxA620? ba = _BoxA620(id: 1);
   _BoxA620?[] v = [];
-  v.push(ba);
+  v.push(move ba);
   assert(v[0] is present, "pushed element present");
 }
 
@@ -107,7 +107,7 @@ test_nested_vector_optional_overwrite() `test {
 test_channel_optional_push() `test {
   channel[int]? ch = channel[int]();
   channel[int]?[] v = [];
-  v.push(ch);
+  v.push(move ch);
   assert(v[0] is present, "pushed element present");
 }
 
@@ -195,7 +195,7 @@ t_opt_vector_str_nested() `test {
   string[] inner = [];
   inner.push("x" + "y");
   string[][] v = [];
-  v.push(inner);
+  v.push(move inner);
   string[][]? a = v; // never read; dropped at scope exit
   assert(true, "no leak on scope-exit drop of string[][]?");
 }

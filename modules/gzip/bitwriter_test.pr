@@ -24,7 +24,7 @@ bitwriter_roundtrip_via_reader_test() `test {
   bw.write_bits(11, 0x7FFu32);
   bw.write_bits(5, 0x1Fu32);
   u8[] out = bw.finalize();
-  _BitReader br = _BitReader(data: out);
+  _BitReader br = _BitReader(data: move out);
   assert(br.read_bits(3)?! == 0x05u32, "3 bits");
   assert(br.read_bits(5)?! == 0x13u32, "5 bits");
   assert(br.read_bits(8)?! == 0xA5u32, "8 bits");

@@ -635,7 +635,7 @@ t0686_multi_stmt_struct_result() `test {
   task[T0686Box] x = go {
     n := 21;
     label := "v" + "al";
-    T0686Box(v: n * 2, s: label)
+    T0686Box(v: n * 2, s: move label)
   };
   b := <-x;
   assert(b.v == 42, "multi-stmt struct int field");

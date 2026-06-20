@@ -111,6 +111,7 @@ func (d *decoder) expr() ast.Expr {
 			a := &ast.Arg{}
 			d.setPosEnd(a)
 			a.Name = d.str()
+			a.Move = d.bool_()
 			a.Value = d.expr()
 			n.Args[i] = a
 		}

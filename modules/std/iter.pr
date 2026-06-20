@@ -156,7 +156,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
   collect() T[] `public `doc("Collects all elements into a Vector.") {
     T[] result = [];
     while item := this.next() {
-      result.push(item);
+      result.push(move item);
     }
     return result;
   }

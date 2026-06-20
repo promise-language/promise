@@ -2,7 +2,7 @@
 enum Color {
   Red, Green, Blue,
 
-  code(&this) int {
+  code(this) int {
     return match this {
       Red => 1,
       Green => 2,

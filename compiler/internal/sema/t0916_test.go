@@ -2,7 +2,7 @@ package sema
 
 import "testing"
 
-// T0916: an overloaded operator method with a move (~) value parameter crashes
+// T0916: an overloaded operator method with a `move` value parameter crashes
 // at runtime (operator dispatch does not move the operand the way a ~-param
 // method call does → double-free/segfault). Reject it at compile time: operators
 // borrow their operands and have no call-site move syntax.
@@ -11,9 +11,9 @@ func TestT0916_BinaryOperatorMoveParamRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		type S {
 			string s;
-			+(~S other) S { return other; }
+			+(S move other) S { return other; }
 		}
-	`), "operator method S.+ cannot take a move (~) parameter 'other'")
+	`), "operator method S.+ cannot take a `move` parameter 'other'")
 }
 
 func TestT0916_OtherBinaryOperatorMoveParamRejected(t *testing.T) {
@@ -23,9 +23,9 @@ func TestT0916_OtherBinaryOperatorMoveParamRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		type S {
 			string s;
-			-(~S other) S { return other; }
+			-(S move other) S { return other; }
 		}
-	`), "cannot take a move (~) parameter")
+	`), "cannot take a `move` parameter")
 }
 
 func TestT0916_SetterOperatorMoveParamAllowed(t *testing.T) {
@@ -35,7 +35,7 @@ func TestT0916_SetterOperatorMoveParamAllowed(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
 		type S {
 			string s;
-			[]=(int i, ~S v) { this.s = v.s; }
+			[]=(int i, S move v) { this.s = v.s; }
 		}
 	`))
 }
@@ -46,9 +46,9 @@ func TestT0916_ComparisonOperatorMoveParamRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		type S {
 			string s;
-			==(~S other) bool { return true; }
+			==(S move other) bool { return true; }
 		}
-	`), "operator method S.== cannot take a move (~) parameter 'other'")
+	`), "operator method S.== cannot take a `move` parameter 'other'")
 }
 
 func TestT0916_IndexGetterMoveParamRejected(t *testing.T) {
@@ -57,9 +57,9 @@ func TestT0916_IndexGetterMoveParamRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		type S {
 			string s;
-			[](~int i) string { return this.s; }
+			[](int move i) string { return this.s; }
 		}
-	`), "operator method S.[] cannot take a move (~) parameter 'i'")
+	`), "operator method S.[] cannot take a `move` parameter 'i'")
 }
 
 func TestT0916_SliceSetterMoveParamAllowed(t *testing.T) {
@@ -69,7 +69,7 @@ func TestT0916_SliceSetterMoveParamAllowed(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
 		type S {
 			string s;
-			[:]=(int a, int b, ~S v) { this.s = v.s; }
+			[:]=(int a, int b, S move v) { this.s = v.s; }
 		}
 	`))
 }
@@ -80,9 +80,9 @@ func TestT0916_OperatorMoveParamLaterPositionRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		type S {
 			string s;
-			[:](int a, ~int b) string { return this.s; }
+			[:](int a, int move b) string { return this.s; }
 		}
-	`), "operator method S.[:] cannot take a move (~) parameter 'b'")
+	`), "operator method S.[:] cannot take a `move` parameter 'b'")
 }
 
 func TestT0916_OperatorMutRefParamAllowed(t *testing.T) {
@@ -101,9 +101,9 @@ func TestT0916_EnumOperatorMoveParamRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		enum E {
 			a(string s),
-			+(~E other) E { return other; }
+			+(E move other) E { return other; }
 		}
-	`), "operator method E.+ cannot take a move (~) parameter 'other'")
+	`), "operator method E.+ cannot take a `move` parameter 'other'")
 }
 
 // TestT0916_IsOperatorMethodName pins the operator-vs-identifier classification
@@ -133,13 +133,13 @@ func TestT0916_NonOperatorMoveParamAllowed(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
 		type S {
 			string s;
-			take(~S other) string { return other.s; }
+			take(S move other) string { return other.s; }
 		}
 	`))
 }
 
 func TestT0916_OperatorBorrowParamAllowed(t *testing.T) {
-	// A plain borrow operand is unaffected — only the move (~) modifier is
+	// A plain borrow operand is unaffected — only the `move` modifier is
 	// rejected. (A leading &-shared-ref operand is not expressible: the parser
 	// reads a leading & as a receiver modifier, so it never reaches a param.)
 	expectNoErrors(t, checkErrs(t, `

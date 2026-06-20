@@ -163,7 +163,7 @@ func TestT0649_UserIndexOwnedControlStillStrdups(t *testing.T) {
 // @promise_string_new anywhere.
 func TestT0649_RefParamPassthroughNoStrdup(t *testing.T) {
 	ir := generateIR(t, `
-		passthrough(string& s) string& { return s; }
+		passthrough(string s) string& { return s; }
 		caller() { v := "hi" + "x"; x := passthrough(v); n := x.len; }
 		main() { caller(); }
 	`)

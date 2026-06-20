@@ -561,7 +561,7 @@ use wasi;
 main() {
     fd := open("/tmp/hello.txt")^;
     data := fd.read(1024)^;    // ok: fd is borrowed
-    consume(~fd);               // fd moved to consume()
+    consume(move fd);               // fd moved to consume()
     fd.read(1024);              // ERROR: use of moved variable 'fd'
 }
 ```
@@ -670,7 +670,7 @@ main() `target(web) {
     element := doc.create_element("div");
     element.set_attribute("class", "container");
     element.set_inner_text("Hello from Promise!");
-    doc.body().append_child(~element);
+    doc.body().append_child(move element);
 }
 ```
 

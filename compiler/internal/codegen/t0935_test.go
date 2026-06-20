@@ -105,7 +105,7 @@ const elvisPathFlag = `phi i1 \[ true, %elvis\.some\.\d+ \], \[ false, %elvis\.n
 func TestT0935GenericInlineElvisTypeSubst(t *testing.T) {
 	ir := generateIR(t, `
 		sink(int n) { }
-		inline_len[T](~T seed, T[] b) int {
+		inline_len[T](T move seed, T[] b) int {
 			T[]? opt = [seed];
 			return (opt ?: b).len;
 		}

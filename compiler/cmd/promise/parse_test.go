@@ -188,7 +188,7 @@ func TestLambdaSyntax(t *testing.T) {
 		{"move_capture", `main() { f := move |x| -> x; }`},
 		{"discard_param", `main() { f := |_| -> 0; }`},
 		{"typed_return_block", `main() { f := |Int x| -> Int { return x; }; }`},
-		{"ref_param", `main() { f := |String &s| -> s.len(); }`},
+		{"ref_param", `main() { f := |String s| -> s.len(); }`},
 		{"chained_lambdas", `main() { a.map(|x| -> x * 2).filter(|x| -> x > 0); }`},
 		{"lambda_as_arg", `main() { run(|| { io.print_line("hi"); }); }`},
 		{"nested_lambda", `main() { f := |x| -> |y| -> x + y; }`},
@@ -410,9 +410,9 @@ func TestTypeDeclarations(t *testing.T) {
 		{"inheritance", `type Dog is Animal { String name; }`},
 		{"multi_inherit", `type Foo is Bar, Baz {}`},
 		{"method_abstract", `type Shape { area() Float ` + "`abstract; }"},
-		{"method_instance", `type Foo { get(&this) Int ` + "`instance { return 0; } }"},
+		{"method_instance", `type Foo { get(this) Int ` + "`instance { return 0; } }"},
 		{"method_mut", `type Foo { set(~this, Int v) ` + "`instance { this.v = v; } }"},
-		{"operator_method", `type Vec { +(Vec &a, Vec &b) Vec ` + "`static { return Vec(); } }"},
+		{"operator_method", `type Vec { +(Vec a, Vec b) Vec ` + "`static { return Vec(); } }"},
 		{"generic_type", `type Box[T] { T value; }`},
 		{"generic_constraint", `type Sortable[T: Comparable] { T[] items; }`},
 		{"multi_constraint", `type Foo[T: A + B] {}`},
@@ -539,7 +539,7 @@ func TestOwnership(t *testing.T) {
 		name string
 		code string
 	}{
-		{"shared_borrow_param", `f(String &s) Int { return s.len(); }`},
+		{"shared_borrow_param", `f(String s) Int { return s.len(); }`},
 		{"mut_borrow_param", `f(Int[] ~a) { a[0] = 1; }`},
 		{"shared_ref_type", `main() { Shape &s = circle; }`},
 		{"mut_ref_type", `main() { Int[] ~a = arr; }`},

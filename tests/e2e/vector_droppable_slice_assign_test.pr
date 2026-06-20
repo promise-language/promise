@@ -134,12 +134,12 @@ test_t0490_inner_vec_slice_no_skip() `test {
   v_b := string[]();
   v_b.push("b" + "");
   outer := Vector[string[]]();
-  outer.push(v_a);
-  outer.push(v_b);
+  outer.push(move v_a);
+  outer.push(move v_b);
   v_c := string[]();
   v_c.push("c" + "");
   src := Vector[string[]]();
-  src.push(v_c);
+  src.push(move v_c);
   outer[0:1] = src;
   assert(outer.len == 2, "len");
 }
@@ -150,11 +150,11 @@ test_t0490_channel_slice_no_skip() `test {
   c_a := Channel[int](1);
   c_b := Channel[int](1);
   outer := Vector[Channel[int]]();
-  outer.push(c_a);
-  outer.push(c_b);
+  outer.push(move c_a);
+  outer.push(move c_b);
   c_c := Channel[int](1);
   src := Vector[Channel[int]]();
-  src.push(c_c);
+  src.push(move c_c);
   outer[0:1] = src;
   assert(outer.len == 2, "len");
 }

@@ -127,6 +127,10 @@ func (v *BasePromiseParserVisitor) VisitMoveParam(ctx *MoveParamContext) interfa
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitLegacyMoveParam(ctx *LegacyMoveParamContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitRegularParam(ctx *RegularParamContext) interface{} {
 	return v.VisitChildren(ctx)
 }

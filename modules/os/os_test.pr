@@ -127,7 +127,7 @@ test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(!windows) {
   string? orig = get_env_var("TMPDIR");
   set_env_var("TMPDIR", "/promise/tmp/dir/");
   string got = temp_dir;
-  set_env_var("TMPDIR", orig); // restore (absent -> unset)
+  set_env_var("TMPDIR", move orig); // restore (absent -> unset)
   assert(got == "/promise/tmp/dir", "temp_dir should return TMPDIR with the trailing separator stripped");
 }
 
@@ -147,9 +147,9 @@ test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(windows) {
 test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(!windows) {
   string? orig = get_env_var("TMPDIR");
   string? unset;
-  set_env_var("TMPDIR", unset);
+  set_env_var("TMPDIR", move unset);
   string got = temp_dir;
-  set_env_var("TMPDIR", orig); // restore before asserting
+  set_env_var("TMPDIR", move orig); // restore before asserting
   assert(got == "/tmp", "temp_dir should fall back to /tmp when TMPDIR is unset");
 }
 
@@ -416,7 +416,7 @@ test_execute_inherits_env() `test(exclude: wasm) `target(!windows) {
   assert(result.standard_output.starts_with("inherited_value"), "child should inherit env var");
   // Clean up
   string? absent;
-  set_env_var("PROMISE_TEST_EXEC_ENV", absent);
+  set_env_var("PROMISE_TEST_EXEC_ENV", move absent);
 }
 
 test_execute_inherits_cwd() `test(exclude: wasm) `target(!windows) {
@@ -497,7 +497,7 @@ test_set_env_var_unset() `test(exclude: wasm) {
 
   // Unset by passing absent
   string? absent;
-  set_env_var("PROMISE_TEST_SET_ENV_4", absent);
+  set_env_var("PROMISE_TEST_SET_ENV_4", move absent);
   string? val2 = get_env_var("PROMISE_TEST_SET_ENV_4");
   assert(val2 is absent, "variable should be absent after unset");
 }
@@ -505,7 +505,7 @@ test_set_env_var_unset() `test(exclude: wasm) {
 test_set_env_var_unset_nonexistent() `test(exclude: wasm) {
   // Unsetting a variable that doesn't exist should not error
   string? absent;
-  set_env_var("PROMISE_NONEXISTENT_UNSET_TEST", absent);
+  set_env_var("PROMISE_NONEXISTENT_UNSET_TEST", move absent);
   string? val = get_env_var("PROMISE_NONEXISTENT_UNSET_TEST");
   assert(val is absent, "nonexistent variable should remain absent");
 }
@@ -1113,14 +1113,14 @@ test_env_reflects_set() `test(exclude: wasm) {
   }
   // Clean up
   string? absent;
-  set_env_var("PROMISE_TEST_ENV_MAP", absent);
+  set_env_var("PROMISE_TEST_ENV_MAP", move absent);
 }
 
 test_execute_custom_env() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["MY_TEST_VAR"] = "custom_value";
-  ProcessResult result = execute("sh", ["-c", "echo $MY_TEST_VAR"], environment: custom_env)?!;
+  ProcessResult result = execute("sh", ["-c", "echo $MY_TEST_VAR"], environment: move custom_env)?!;
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_output.trim() == "custom_value", "child should see custom env var");
 }
@@ -1148,11 +1148,11 @@ test_execute_env_isolation() `test(exclude: wasm) `target(!windows) {
   set_env_var("PROMISE_TEST_ISOLATION", "parent_value");
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
-  ProcessResult result = execute("sh", ["-c", "printenv PROMISE_TEST_ISOLATION || echo absent"], environment: custom_env)?!;
+  ProcessResult result = execute("sh", ["-c", "printenv PROMISE_TEST_ISOLATION || echo absent"], environment: move custom_env)?!;
   assert(result.standard_output.trim() == "absent", "custom env should not inherit parent vars");
   // Clean up
   string? absent;
-  set_env_var("PROMISE_TEST_ISOLATION", absent);
+  set_env_var("PROMISE_TEST_ISOLATION", move absent);
 }
 
 test_execute_env_and_cwd() `test(exclude: wasm) `target(!windows) {
@@ -1160,7 +1160,7 @@ test_execute_env_and_cwd() `test(exclude: wasm) `target(!windows) {
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["COMBO_VAR"] = "combined";
   ProcessResult result = execute("sh", ["-c", "echo $COMBO_VAR $(pwd)"],
-  environment: custom_env, working_directory: "/usr")?!;
+  environment: move custom_env, working_directory: "/usr")?!;
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_output.contains("combined"), "should see custom env");
   assert(result.standard_output.contains("/usr"), "should run in /usr");
@@ -1170,7 +1170,7 @@ test_execute_empty_env() `test(exclude: wasm) `target(!windows) {
   // Empty map = nearly-empty environment (child has no PATH, etc.)
   map[string, string] empty_env = map[string, string]();
   empty_env["PATH"] = "/usr/bin:/bin";
-  ProcessResult result = execute("env", [], environment: empty_env)?!;
+  ProcessResult result = execute("env", [], environment: move empty_env)?!;
   assert(result.exit_code == 0, "env should exit with 0");
   // Should only have PATH
   assert(result.standard_output.contains("PATH="), "should have PATH");
@@ -1189,7 +1189,7 @@ test_execute_none_env_inherits() `test(exclude: wasm) `target(!windows) {
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_output.trim() == "should_see", "absent env should inherit parent vars");
   string? absent;
-  set_env_var("PROMISE_TEST_INHERIT", absent);
+  set_env_var("PROMISE_TEST_INHERIT", move absent);
 }
 
 test_execute_none_cwd_inherits() `test(exclude: wasm) `target(!windows) {
@@ -1206,7 +1206,7 @@ test_spawn_custom_env() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["SPAWN_VAR"] = "from_spawn";
-  Process p = Process.spawn("sh", ["-c", "echo $SPAWN_VAR"], environment: custom_env)?!;
+  Process p = Process.spawn("sh", ["-c", "echo $SPAWN_VAR"], environment: move custom_env)?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;

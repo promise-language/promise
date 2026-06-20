@@ -155,7 +155,7 @@ test_push_bare_heap_user_into_optional_vector() `test {
   v.push(_BxT0658(id: 1));
   v.push(none);
   _BxT0658 b = _BxT0658(id: 3);
-  v.push(b);
+  v.push(move b);
   assert(v.len == 3, "three elements pushed");
   _BxT0658? g0 = v[0];
   _BxT0658? g2 = v[2];
@@ -169,7 +169,7 @@ test_push_bare_heap_user_into_optional_vector() `test {
 test_push_bare_string_var_into_optional_vector() `test {
   string s = "he" + "llo";
   string?[] v = [];
-  v.push(s);
+  v.push(move s);
   v.push(none);
   assert(v.len == 2, "two elements pushed");
   string? g0 = v[0];
@@ -188,9 +188,9 @@ test_push_bare_nested_vector_into_optional_vector() `test {
 
 // (8) Generic path — exercises the c.typeSubst substitution of
 // resolvedElem / argExprType inside _push_opt[int].
-_push_opt_t0658[T](~T x) int {
+_push_opt_t0658[T](T move x) int {
   T?[] v = [];
-  v.push(x);
+  v.push(move x);
   return v.len;
 }
 
@@ -231,7 +231,7 @@ test_push_bare_into_generic_optional_vector() `test {
 test_push_bare_channel_into_optional_vector() `test {
   channel[int]?[] v = [];
   channel[int] c = channel[int]();
-  v.push(c);
+  v.push(move c);
   v.push(none);
   assert(v.len == 2, "channel + none pushed");
 }
@@ -239,7 +239,7 @@ test_push_bare_channel_into_optional_vector() `test {
 test_push_bare_arc_into_optional_vector() `test {
   Ref[int]?[] v = [];
   Ref[int] a = Ref[int](5);
-  v.push(a);
+  v.push(move a);
   v.push(none);
   assert(v.len == 2, "arc + none pushed");
 }
@@ -247,7 +247,7 @@ test_push_bare_arc_into_optional_vector() `test {
 test_push_bare_mutex_into_optional_vector() `test {
   Mutex[int]?[] v = [];
   Mutex[int] m = Mutex[int](5);
-  v.push(m);
+  v.push(move m);
   v.push(none);
   assert(v.len == 2, "mutex + none pushed");
 }
@@ -256,7 +256,7 @@ test_push_bare_weak_into_optional_vector() `test {
   Ref[int] a = Ref[int](7);
   Weak[int]?[] v = [];
   Weak[int] w = a.downgrade();
-  v.push(w);
+  v.push(move w);
   v.push(none);
   assert(v.len == 2, "weak + none pushed");
 }
@@ -274,7 +274,7 @@ _t0668_worker_int() int {
 test_push_bare_task_into_optional_vector() `test {
   Task[int]?[] v = [];
   task[int] t = go _t0668_worker_int();
-  v.push(t);
+  v.push(move t);
   v.push(none);
   assert(v.len == 2, "task + none pushed");
 }

@@ -27,8 +27,8 @@ type Tag `doc("Heap user type with a droppable string field, for interpolation t
   }
 }
 
-make_tag!(~string s) Tag `doc("Builds a Tag, failably — user-type-returning helper.") {
-  return Tag(label: s);
+make_tag!(string move s) Tag `doc("Builds a Tag, failably — user-type-returning helper.") {
+  return Tag(label: move s);
 }
 
 // --- int variant: regression guard against the silent-zero bug ---

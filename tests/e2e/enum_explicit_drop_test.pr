@@ -19,7 +19,7 @@ enum Resource {
   }
 }
 
-take_resource(~Resource r) {
+take_resource(Resource move r) {
 }
 
 // Basic: explicit drop fires at scope exit, LIFO order

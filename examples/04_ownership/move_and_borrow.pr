@@ -12,7 +12,7 @@ type Document {
 }
 
 // Shared borrow — reads but does not consume.
-print_doc(Document &doc) {
+print_doc(Document doc) {
   print_line("  title: {doc.title}");
   print_line("  content: {doc.content}");
 }
@@ -25,7 +25,7 @@ append_to_doc(Document ~doc, string text) {
 // Takes ownership — `~Document` consumes the value, so the caller can no
 // longer use it. A plain `Document` parameter (no `~`) would be a shared
 // borrow that leaves the caller's value valid.
-archive(~Document doc) string {
+archive(Document move doc) string {
   return "archived: {doc.title}";
 }
 
@@ -48,7 +48,7 @@ archived: Report""") {
 
   doc := Document(title: "Report", content: "Draft");
 
-  // print_doc declares &doc (shared borrow). At the call site, just
+  // print_doc declares doc (shared borrow). At the call site, just
   // pass the variable — the compiler auto-borrows. No & needed here.
   print_doc(doc);
   print_line("doc still usable after borrow");
@@ -77,7 +77,7 @@ archived: Report""") {
   print_line("--- Move ---");
 
   // archive() takes ownership — doc is moved and can't be used after.
-  result := archive(doc);
+  result := archive(move doc);
   print_line(result);
   // doc is no longer valid here.
 }

@@ -39,7 +39,7 @@ func TestT0512_NestedIfUnwrapBorrowedMatchBindingNoInnerDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type _Row { string name; }
 		enum _W { Empty, Some(_Row?? value), }
-		_drive(~_W w) {
+		_drive(_W move w) {
 			match w {
 				_W.Some(opt_opt) => {
 					if first := opt_opt {
@@ -95,7 +95,7 @@ func TestT0512_NestedWhileUnwrapBorrowedMatchBindingNoInnerDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type _Row { string name; }
 		enum _W { Empty, Some(_Row?? value), }
-		_drivew(~_W w) {
+		_drivew(_W move w) {
 			match w {
 				_W.Some(opt_opt) => {
 					while first := opt_opt {

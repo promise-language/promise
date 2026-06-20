@@ -144,7 +144,7 @@ forin_tuple_string_piece_push() `test {
   total := 0;
   for tup in v {
     (s, n) := tup;
-    strs.push(s);
+    strs.push(move s);
     total += n;
   }
   assert(strs.len == 2, "two strings moved out");

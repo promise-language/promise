@@ -10,15 +10,15 @@ type Vec2 {
   Float x;
   Float y;
 
-  +(Vec2 &a, Vec2 &b) Vec2 `static {
+  +(Vec2 a, Vec2 b) Vec2 `static {
     return Vec2(x: a.x + b.x, y: a.y + b.y);
   }
 
-  ==(Vec2 &a, Vec2 &b) Bool `static {
+  ==(Vec2 a, Vec2 b) Bool `static {
     return a.x == b.x && a.y == b.y;
   }
 
-  length(&this) Float `instance {
+  length(this) Float `instance {
     return (this.x * this.x + this.y * this.y);
   }
 }
@@ -31,7 +31,7 @@ type Dog is Animal {
   String name;
   Int age = 0;
 
-  speak(&this) String `instance {
+  speak(this) String `instance {
     return "Woof!";
   }
 }
@@ -77,7 +77,7 @@ forceRead(String path) String {
 // Ownership: borrows, moves, unsafe
 // ============================================================
 
-borrowExample(String &s) Int {
+borrowExample(String s) Int {
   return s.length();
 }
 

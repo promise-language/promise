@@ -4,7 +4,7 @@ type Pair {
   int x `value;
   int y `value;
 
-  sum(&this) int {
+  sum(this) int {
     return this.x + this.y;
   }
 }

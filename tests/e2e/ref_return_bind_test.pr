@@ -107,7 +107,7 @@ test_t0649_index_ref_bind() `test {
   assert(y.len == 1, "method& result bound to local (parity)");
 }
 
-take_str(string &v) int {
+take_str(string v) int {
   return v.len;
 }
 
@@ -170,7 +170,7 @@ test_t0649_method_vec_ref_bind() `test {
 enum Tagged `clone {
   Empty,
   Named(string s),
-  size(&this) int {
+  size(this) int {
     match this {
       Empty => {
         return 0;
@@ -222,7 +222,7 @@ test_t0649_enum_ref_bind_then_use() `test {
 pureref_idx_mut(PureRef ~s) int {
   return s.at(1).len;
 }
-pureref_idx_shared(PureRef &s) int {
+pureref_idx_shared(PureRef s) int {
   x := s.at(0);
   return x.len;
 }
@@ -278,7 +278,7 @@ test_t0649_generic_int_ref_bind() `test {
 enum GTag `clone {
   Nil,
   Val(string s),
-  size(&this) int {
+  size(this) int {
     match this {
       Nil => {
         return 0;
@@ -326,7 +326,7 @@ test_t0649_generic_enum_mutref_bind() `test {
 enum T0660Tag `clone {
   Empty,
   Named(string s),
-  size(&this) int {
+  size(this) int {
     match this {
       Empty => {
         return 0;
@@ -337,7 +337,7 @@ enum T0660Tag `clone {
     }
   }
   // site 1: generic enum method (genGenericEnumMethodCall)
-  scaled[U](&this, U _marker, int extra) int {
+  scaled[U](this, U _marker, int extra) int {
     match this {
       Empty => {
         return extra;

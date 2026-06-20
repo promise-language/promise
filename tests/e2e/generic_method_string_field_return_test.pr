@@ -5,7 +5,7 @@
 // dup, aliasing the field's allocation and double-freeing it at runtime:
 //   `fatal: invalid free (bad header magic)`.
 //
-// The Go IR tests (TestGenericMethodReturnStringFieldDups and its `&this`
+// The Go IR tests (TestGenericMethodReturnStringFieldDups and its `this`
 // sibling) pin the `strdup.copy` emission at the IR level; this file pins the
 // runtime behavior — every assertion runs under the harness's zero-tolerance
 // leak detection, so a missing dup would surface as a double-free / LEAK here.
@@ -19,7 +19,7 @@ type GBox[T] {
     return this.val;
   }
   // Borrowed receiver: the bug reported this variant double-freed identically.
-  borrow_peek(&this) T {
+  borrow_peek(this) T {
     return this.val;
   }
   // Getter form returning the field through the type parameter.
@@ -47,7 +47,7 @@ generic_method_owning_receiver() `test {
   assert(b.peek() == "generic", "owning receiver peek()");
 }
 
-// Borrowed-receiver `&this` form — failed identically before the fix.
+// Borrowed-receiver `this` form — failed identically before the fix.
 generic_method_borrowed_receiver() `test {
   b := GBox[string](val: "gen" + "eric");
   assert(b.borrow_peek() == "generic", "borrowed receiver peek()");

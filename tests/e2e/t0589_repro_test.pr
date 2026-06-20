@@ -16,7 +16,7 @@ type _Box {
 // `~T?` params, so T0589 doesn't fire. Codegen flows ownership through to
 // the if-let binding via T0585's drop-flag propagation. Inner is dropped
 // once at the binding's scope exit.
-_test_consume_iflet(~_Box? a) {
+_test_consume_iflet(_Box? move a) {
   if x := a {
     assert(x.n == 1, "consume_iflet");
   }
@@ -24,12 +24,12 @@ _test_consume_iflet(~_Box? a) {
 
 t0589_consume_iflet() `test {
   _Box? a = _Box(n: 1);
-  _test_consume_iflet(a);
+  _test_consume_iflet(move a);
 }
 
 // Carve-out: `~_Box? a` consume param with while-let. Inner drops on
 // break-out of the loop via scope cleanup.
-_test_consume_whilelet(~_Box? a) {
+_test_consume_whilelet(_Box? move a) {
   while x := a {
     assert(x.n == 2, "consume_whilelet");
     break;
@@ -38,7 +38,7 @@ _test_consume_whilelet(~_Box? a) {
 
 t0589_consume_whilelet() `test {
   _Box? a = _Box(n: 2);
-  _test_consume_whilelet(a);
+  _test_consume_whilelet(move a);
 }
 
 // Carve-out: borrowed `int?` param — int isn't droppable, predicate skips.

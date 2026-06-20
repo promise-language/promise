@@ -115,7 +115,7 @@ arc_borrow_user_type_synth_drop() `test {
 // `int[]&` so we read from the Arc-owned buffer without an implicit decay.
 arc_vector_element() `test {
   v := [10, 20, 30];
-  a := Ref[int[]](v);
+  a := Ref[int[]](move v);
   int[] &borrowed = a.borrow;
   assert(borrowed.len == 3, "vector len");
   assert(borrowed[0] == 10, "vector[0]");
@@ -128,7 +128,7 @@ arc_vector_element() `test {
 arc_borrow_heap_vec() `test {
   v := string[]();
   v.push("hello" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   borrowed := a.borrow;
   assert(borrowed.len == 1, "heap vec len");
 }
@@ -137,7 +137,7 @@ arc_borrow_heap_vec() `test {
 // without the fix (string drop's bit-63 check happens to mask it).
 arc_borrow_heap_string() `test {
   s := "hello" + "";
-  a := Ref[string](s);
+  a := Ref[string](move s);
   borrowed := a.borrow;
   assert(borrowed.len == 5, "heap string len");
 }
@@ -146,7 +146,7 @@ arc_borrow_heap_string() `test {
 arc_borrow_optional_chain() `test {
   v := string[]();
   v.push("hello" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   w := a.downgrade();
   if strong := w.upgrade() {
     borrowed := strong.borrow;
@@ -161,7 +161,7 @@ arc_borrow_optional_chain() `test {
 arc_borrow_typed_decl_heap_vec() `test {
   v := string[]();
   v.push("hello" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   string[] &borrowed = a.borrow;
   assert(borrowed.len == 1, "typed decl heap vec");
 }
@@ -176,7 +176,7 @@ arc_borrow_len[T](Ref[Vector[T]] arc) int {
 arc_borrow_in_generic_fn() `test {
   v := string[]();
   v.push("hello" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   assert(arc_borrow_len[string](a) == 1, "generic borrow len");
 }
 
@@ -188,8 +188,8 @@ arc_borrow_reassign_after_borrow() `test {
   v1.push("hello" + "");
   v2 := string[]();
   v2.push("world" + "");
-  a1 := Ref[string[]](v1);
-  a2 := Ref[string[]](v2);
+  a1 := Ref[string[]](move v1);
+  a2 := Ref[string[]](move v2);
   borrowed := a1.borrow;
   borrowed = a2.borrow;
   assert(borrowed.len == 1, "reassigned borrow len");
@@ -205,7 +205,7 @@ arc_borrow_reassign_after_owned() `test {
   owned.push("owned" + "");
   v := string[]();
   v.push("borrowed" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   owned = a.borrow.clone();
   assert(owned.len == 1, "owned reassigned to cloned borrow");
 }
@@ -215,8 +215,8 @@ arc_borrow_reassign_after_owned() `test {
 arc_borrow_reassign_heap_string() `test {
   s1 := "hello" + "";
   s2 := "world" + "";
-  a1 := Ref[string](s1);
-  a2 := Ref[string](s2);
+  a1 := Ref[string](move s1);
+  a2 := Ref[string](move s2);
   borrowed := a1.borrow;
   borrowed = a2.borrow;
   assert(borrowed.len == 5, "reassigned string borrow");
@@ -229,8 +229,8 @@ arc_borrow_reassign_alternating() `test {
   v1.push("a" + "");
   v2 := string[]();
   v2.push("b" + "");
-  a1 := Ref[string[]](v1);
-  a2 := Ref[string[]](v2);
+  a1 := Ref[string[]](move v1);
+  a2 := Ref[string[]](move v2);
   borrowed := a1.borrow;
   borrowed = a2.borrow;
   borrowed = a1.borrow;
@@ -244,7 +244,7 @@ arc_borrow_reassign_alternating() `test {
 arc_borrow_reassign_to_owned() `test {
   v := string[]();
   v.push("borrowed" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   borrowed := a.borrow;
   borrowed = string[]();
   borrowed.push("owned" + "");
@@ -260,8 +260,8 @@ arc_borrow_typed_decl_reassign() `test {
   v1.push("a" + "");
   v2 := string[]();
   v2.push("b" + "");
-  a1 := Ref[string[]](v1);
-  a2 := Ref[string[]](v2);
+  a1 := Ref[string[]](move v1);
+  a2 := Ref[string[]](move v2);
   string[] &borrowed = a1.borrow;
   borrowed = a2.borrow;
   assert(borrowed.len == 1, "typed decl + reassign");
@@ -273,7 +273,7 @@ arc_borrow_typed_decl_reassign() `test {
 arc_borrow_reassign_in_loop() `test {
   v := string[]();
   v.push("loop" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   borrowed := a.borrow;
   i := 0;
   while i < 4 {
@@ -289,7 +289,7 @@ arc_borrow_reassign_in_loop() `test {
 arc_borrow_through_if() `test {
   v := string[]();
   v.push("hello" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   cond := true;
   borrowed := if cond {
     a.borrow
@@ -304,7 +304,7 @@ arc_borrow_through_if() `test {
 arc_borrow_through_match() `test {
   v := string[]();
   v.push("hi" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   k := 1;
   borrowed := match k {
     1 => a.borrow, _ => a.borrow,
@@ -317,7 +317,7 @@ arc_borrow_through_match() `test {
 arc_borrow_through_nested_if() `test {
   v := string[]();
   v.push("nest" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   cond := true;
   cond2 := false;
   borrowed := if cond {
@@ -337,7 +337,7 @@ arc_borrow_through_nested_if() `test {
 arc_borrow_through_parens() `test {
   v := string[]();
   v.push("paren" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   borrowed := (a.borrow);
   assert(borrowed.len == 1, "paren borrow len");
 }
@@ -348,7 +348,7 @@ arc_borrow_through_parens() `test {
 arc_borrow_through_match_blocks() `test {
   v := string[]();
   v.push("blk" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   k := 1;
   borrowed := match k {
     1 => {
@@ -367,7 +367,7 @@ arc_borrow_through_match_blocks() `test {
 arc_borrow_explicit_ref_type() `test {
   v := string[]();
   v.push("hello" + "");
-  a := Ref[string[]](v);
+  a := Ref[string[]](move v);
   string[] &borrowed = a.borrow;
   assert(borrowed.len == 1, "explicit ref type borrow");
 }
@@ -377,7 +377,7 @@ arc_borrow_explicit_ref_type() `test {
 // exercise; pinned here as an explicit T0381 regression check.
 arc_borrow_chained_method() `test {
   v := [10, 20, 30];
-  a := Ref[int[]](v);
+  a := Ref[int[]](move v);
   string r = a.borrow[1].to_string();
   assert(r == "20", "chained .borrow[i].method");
 }
@@ -390,8 +390,8 @@ arc_borrow_reassign_via_explicit_ref_type() `test {
   v1.push("a" + "");
   v2 := string[]();
   v2.push("b" + "");
-  a1 := Ref[string[]](v1);
-  a2 := Ref[string[]](v2);
+  a1 := Ref[string[]](move v1);
+  a2 := Ref[string[]](move v2);
   string[] &borrowed = a1.borrow;
   borrowed = a2.borrow;
   assert(borrowed.len == 1, "explicit ref reassign");
@@ -405,11 +405,11 @@ arc_borrow_index_assign_vector() `test {
   vec := string[][]();
   v1 := string[]();
   v1.push("init" + "");
-  vec.push(v1);
+  vec.push(move v1);
 
   v2 := string[]();
   v2.push("hello" + "");
-  a := Ref[string[]](v2);
+  a := Ref[string[]](move v2);
 
   vec[0] = a.borrow.clone();
   assert(vec[0].len == 1, "vec[0] len after clone assign");
@@ -424,7 +424,7 @@ arc_borrow_index_assign_vector() `test {
 // the inner Channel.
 arc_channel_share_via_arc_clone() `test {
   ch := channel[int](capacity: 4);
-  a1 := Ref[channel[int]](ch);
+  a1 := Ref[channel[int]](move ch);
   a2 := a1.clone();
   a1.borrow.send(1);
   a2.borrow.send(2);
@@ -436,7 +436,7 @@ arc_borrow_index_assign_owned_unaffected() `test {
   vec := string[][]();
   v1 := string[]();
   v1.push("init" + "");
-  vec.push(v1);
+  vec.push(move v1);
 
   v2 := string[]();
   v2.push("hello" + "");
@@ -452,15 +452,15 @@ arc_borrow_index_assign_repeat_borrows() `test {
   vec := string[][]();
   v0 := string[]();
   v0.push("v0" + "");
-  vec.push(v0);
+  vec.push(move v0);
 
   v1 := string[]();
   v1.push("a" + "");
   v2 := string[]();
   v2.push("b" + "");
   v2.push("c" + "");
-  a1 := Ref[string[]](v1);
-  a2 := Ref[string[]](v2);
+  a1 := Ref[string[]](move v1);
+  a2 := Ref[string[]](move v2);
 
   vec[0] = a1.borrow.clone();
   vec[0] = a2.borrow.clone();
@@ -474,7 +474,7 @@ arc_borrow_index_assign_alias_safe() `test {
   vec := string[][]();
   v1 := string[]();
   v1.push("hi" + "");
-  vec.push(v1);
+  vec.push(move v1);
 
   // t dups vec[0] — independent owned copy
   t := vec[0];
@@ -502,7 +502,7 @@ arc_borrow_clone_returned_owned() `test {
   i := 0;
   while i < 50 {
     s := "hello" + i.to_string();
-    a := Ref[string](s);
+    a := Ref[string](move s);
     result := get_inner_str_clone(a);
     assert(result.starts_with("hello"), "starts with hello");
     i = i + 1;
@@ -519,7 +519,7 @@ type _ArcBorrowHolder {
 arc_borrow_into_field_via_clone() `test {
   v2 := string[]();
   v2.push("hello" + "");
-  a := Ref[string[]](v2);
+  a := Ref[string[]](move v2);
   h := _ArcBorrowHolder(a.borrow.clone());
   assert(h.field.len == 1, "clone into field via constructor");
 }
@@ -533,7 +533,7 @@ arc_borrow_slice_assign() `test {
   s.push("a" + "");
   s.push("b" + "");
   s.push("c" + "");
-  a := Ref[string[]](s);
+  a := Ref[string[]](move s);
   v1 := string[]();
   v1.push("x" + "");
   v1.push("y" + "");
@@ -548,7 +548,7 @@ arc_borrow_slice_assign() `test {
 arc_borrow_slice_assign_partial() `test {
   s := string[]();
   s.push("a" + "");
-  a := Ref[string[]](s);
+  a := Ref[string[]](move s);
   v1 := string[]();
   v1.push("x" + "");
   v1.push("y" + "");
@@ -566,8 +566,8 @@ arc_borrow_slice_assign_alternating() `test {
   s1.push("b" + "");
   s2 := string[]();
   s2.push("c" + "");
-  a := Ref[string[]](s1);
-  b := Ref[string[]](s2);
+  a := Ref[string[]](move s1);
+  b := Ref[string[]](move s2);
   v := string[]();
   v.push("x" + "");
   v.push("y" + "");
@@ -686,7 +686,7 @@ test_t0488_all_borrow_arms_local_ok() `test {
 }
 
 // T0488: same explicit `.clone()` fix at a `~T` parameter site.
-consume_string_t0488(~string s) {
+consume_string_t0488(string move s) {
   // s is owned — promise_string_drop called at scope exit.
 }
 
@@ -706,7 +706,7 @@ test_t0488_consume_mixed_arm_clone_ok() `test {
 // `string`, so a mixed `T&`/`T` if-expression as the return value would be
 // rejected without `.clone()`. The clone fix produces a fresh owned string,
 // so the Arc keeps its inner pointer intact for the caller.
-take_t0488(Ref[string] &a, bool cond) string {
+take_t0488(Ref[string] a, bool cond) string {
   return if cond {
     a.borrow.clone()
   } else {

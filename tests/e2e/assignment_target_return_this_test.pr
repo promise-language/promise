@@ -161,23 +161,23 @@ type GGHolder[T] `doc("Generic holder of a droppable GB[T] field for generic-bod
   }
 }
 
-generic_body_field[T](~GGHolder[T] h, ~T x, ~T y) `doc("Field-target assign inside a generic body.") {
-  a := GB[T](v: x);
-  b := GB[T](v: y);
+generic_body_field[T](GGHolder[T] move h, T move x, T move y) `doc("Field-target assign inside a generic body.") {
+  a := GB[T](v: move x);
+  b := GB[T](v: move y);
   h.f = a + b;
 }
 
 generic_field_in_generic_body() `test {
   h := GGHolder[int](f: GB[int](v: 0));
-  generic_body_field[int](h, 6, 4);
+  generic_body_field[int](move h, 6, 4);
   assert(true, "generic-body field assignment completes without double-free");
 }
 
 // Generic-function-body index target: `v[0] = a + b` inside a generic body.
-generic_body_index[T](~T x, ~T y, ~T z) `doc("Index-target assign inside a generic body.") {
-  a := GB[T](v: x);
-  b := GB[T](v: y);
-  v := [GB[T](v: z)];
+generic_body_index[T](T move x, T move y, T move z) `doc("Index-target assign inside a generic body.") {
+  a := GB[T](v: move x);
+  b := GB[T](v: move y);
+  v := [GB[T](v: move z)];
   v[0] = a + b;
 }
 

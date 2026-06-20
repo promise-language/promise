@@ -20,11 +20,11 @@ type Range `public {
   int lo;
   int hi;
 
-  contains(&this, int val) bool {
+  contains(this, int val) bool {
     return val >= this.lo && val <= this.hi;
   }
 
-  size(&this) int {
+  size(this) int {
     return this.hi - this.lo;
   }
 }

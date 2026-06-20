@@ -199,20 +199,20 @@ test_paren_this_virtual_method() `test {
 // ---------------- is check (RTTI) ----------------
 type Animal {
   string name;
-  speak(&this) string `abstract;
+  speak(this) string `abstract;
   am_i_dog(this) bool {
     return (this) is Dog;
   }
 }
 
 type Dog is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "Woof";
   }
 }
 
 type Cat is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "Meow";
   }
 }
@@ -278,7 +278,7 @@ test_paren_this_generic_method() `test {
 enum Color {
   Red, Green, Blue,
 
-  describe(&this) string {
+  describe(this) string {
     match this {
       Color.Red => {
         return "red";
@@ -292,7 +292,7 @@ enum Color {
     }
   }
 
-  describe_via(&this) string {
+  describe_via(this) string {
     return (this).describe();
   }
 
@@ -310,7 +310,7 @@ enum Color {
     }
   }
 
-  opposite_via(&this) Color {
+  opposite_via(this) Color {
     return (this).opposite;
   }
 }
@@ -435,7 +435,7 @@ enum GOpt[T] {
   Some(T value),
   None,
 
-  has(&this) bool {
+  has(this) bool {
     match this {
       GOpt.Some(v) => {
         return true;
@@ -445,10 +445,10 @@ enum GOpt[T] {
       },
     }
   }
-  has_via(&this) bool {
+  has_via(this) bool {
     return (this).has();
   }
-  has_via_nested(&this) bool {
+  has_via_nested(this) bool {
     return ((this)).has();
   }
 }
@@ -466,18 +466,18 @@ test_paren_this_generic_enum_method() `test {
 // through genIsResolvedType (distinct from the non-generic genIsNamedType
 // covered by the Dog/Cat test above).
 type GShape {
-  area(&this) int `abstract;
-  is_intbox(&this) bool {
+  area(this) int `abstract;
+  is_intbox(this) bool {
     return (this) is IBox[int];
   }
-  is_intbox_nested(&this) bool {
+  is_intbox_nested(this) bool {
     return ((this)) is IBox[int];
   }
 }
 
 type IBox[T] is GShape {
   T value;
-  area(&this) int {
+  area(this) int {
     return 1;
   }
 }
@@ -502,28 +502,28 @@ test_paren_this_is_generic() `test {
 // statically `CShape` and the downcast is a real RTTI query.
 type CShape {
   int sides;
-  kind(&this) string `abstract;
+  kind(this) string `abstract;
   // forced cast + inline field access (int field), bare and paren `this`.
-  csq_sides(&this) int {
+  csq_sides(this) int {
     return (this as! CSquare).sides;
   }
-  csq_sides_p(&this) int {
+  csq_sides_p(this) int {
     return ((this) as! CSquare).sides;
   }
   // forced cast + inline virtual method call (exercises reconstructed vtable).
-  csq_kind(&this) string {
+  csq_kind(this) string {
     return (this as! CSquare).kind();
   }
   // forced cast bound to a local, then method call / string-field read.
-  csq_local(&this) string {
+  csq_local(this) string {
     s := this as! CSquare;
     return s.kind();
   }
-  csq_paren_local(&this) string {
+  csq_paren_local(this) string {
     s := (this) as! CSquare;
     return s.kind();
   }
-  csq_local_field(&this) string {
+  csq_local_field(this) string {
     s := this as! CSquare;
     return s.label;
   }
@@ -532,13 +532,13 @@ type CShape {
   // genAssignStmt's drop-flag clear. The owned "init" CSquare is dropped on
   // reassignment; the new value aliases `this` and must NOT be dropped again at
   // scope exit. Missing the assign-path clear double-frees `this`'s instance.
-  csq_reassign_local(&this) string {
+  csq_reassign_local(this) string {
     CSquare local = CSquare(sides: 9, label: "init");
     local = this as! CSquare;
     return local.label;
   }
   // optional cast: presence narrowing only (no unwrap).
-  csq_is_square(&this) bool {
+  csq_is_square(this) bool {
     CSquare? o = this as CSquare;
     if o {
       return true;
@@ -549,14 +549,14 @@ type CShape {
   // handler form and read an int field. The extracted value is a borrow of
   // `this`'s instance — must NOT be tracked as an owned temp. Present case
   // returns the real `sides`; absent case takes the handler fallback (-1).
-  csq_unwrap_sides(&this) int {
+  csq_unwrap_sides(this) int {
     CSquare? o = this as CSquare;
     return (o? _ {
       return -1;
     }).sides;
   }
   // Same, but calling a virtual method on the unwrapped borrow value.
-  csq_unwrap_kind(&this) string {
+  csq_unwrap_kind(this) string {
     CSquare? o = this as CSquare;
     return (o? _ {
       return "none";
@@ -571,7 +571,7 @@ type CShape {
   // (CTriangle): phi is the fresh CSquare(sides: -1, label: "fb"+"x"),
   // which is correctly owned and dropped at scope exit. Heap label exercises
   // the leak gate; expected `sides` value tracks the present runtime.
-  csq_unwrap_sides_nondiverging(&this) int {
+  csq_unwrap_sides_nondiverging(this) int {
     CSquare? o = this as CSquare;
     return (o? _ {
       CSquare(sides: -1, label: "fb" + "x")
@@ -580,13 +580,13 @@ type CShape {
 }
 type CSquare is CShape {
   string label;
-  kind(&this) string {
+  kind(this) string {
     return "square";
   }
 }
 type CTriangle is CShape {
   string label;
-  kind(&this) string {
+  kind(this) string {
     return "triangle";
   }
 }
@@ -691,13 +691,13 @@ type StrGrid[T] {
   [](int i) T {
     return this.cells[i];
   }
-  []=(int i, ~T v) {
+  []=(int i, T move v) {
     this.cells[i] = v;
   }
   at_bare(this, int i) T {
     return this[i];
   }
-  set_bare(~this, int i, ~T v) {
+  set_bare(~this, int i, T move v) {
     this[i] = v;
   }
 }
@@ -718,7 +718,7 @@ type SliceBox {
   [:](int? lo, int? hi) int[] {
     return this.xs[lo: hi];
   }
-  [:]=(int? lo, int? hi, ~int[] v) {
+  [:]=(int? lo, int? hi, int[] move v) {
     this.xs[lo: hi] = v;
   }
   head2(this) int[] {
@@ -727,10 +727,10 @@ type SliceBox {
   head2_p(this) int[] {
     return (this)[0:2];
   }
-  replace01(~this, ~int[] v) {
+  replace01(~this, int[] move v) {
     this[0:2] = v;
   }
-  replace01_p(~this, ~int[] v) {
+  replace01_p(~this, int[] move v) {
     (this)[0:2] = v;
   }
 }

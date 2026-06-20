@@ -31,7 +31,7 @@ test_enum_number_no_drop() `test {
 // Vector variant is dropped at scope exit
 test_enum_vector_drop() `test {
   int[] items = [1, 2, 3];
-  Value v = Value.Items(items);
+  Value v = Value.Items(move items);
 }
 
 // User type variant with explicit drop

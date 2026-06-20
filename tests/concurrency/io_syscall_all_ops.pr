@@ -21,7 +21,7 @@ error_handling ok""", exclude: wasm) {
     string data = f2.read_all()?!;
     f2.close()?!;
     io.File.remove(os.temp_dir + "/pr_sc_ops1")?!;
-    ch1.send(data);
+    ch1.send(move data);
   };
   r1 := <-ch1;
   if v1 := r1 {
@@ -35,7 +35,7 @@ error_handling ok""", exclude: wasm) {
     io.File.write_content(os.temp_dir + "/pr_sc_ops2", "content ops")?!;
     string d = io.File.read_content(os.temp_dir + "/pr_sc_ops2")?!;
     io.File.remove(os.temp_dir + "/pr_sc_ops2")?!;
-    ch2.send(d);
+    ch2.send(move d);
   };
   r2 := <-ch2;
   if v2 := r2 {
@@ -52,7 +52,7 @@ error_handling ok""", exclude: wasm) {
     string rest = f.read_all()?!;
     f.close()?!;
     io.File.remove(os.temp_dir + "/pr_sc_ops3")?!;
-    ch3.send(rest);
+    ch3.send(move rest);
   };
   r3 := <-ch3;
   if v3 := r3 {
@@ -128,7 +128,7 @@ error_handling ok""", exclude: wasm) {
     io.File.read_content(os.temp_dir + "/pr_sc_ops_noexist_xyz")? e {
       msg = "caught";
     };
-    ch7.send(msg);
+    ch7.send(move msg);
   };
   r7 := <-ch7;
   if v7 := r7 {

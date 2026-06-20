@@ -11,7 +11,7 @@ type Outer {
 test_clone_map_field() `test {
   map[string, string] h = map[string, string]();
   h["a"] = "b";
-  Inner inner = Inner(headers: h);
+  Inner inner = Inner(headers: move h);
   // inner.headers requires .clone() — ownership checker rejects bare field read
   Outer outer = Outer(headers: inner.headers.clone());
   assert(outer.headers.len == 1, "outer has 1 entry");
@@ -54,7 +54,7 @@ type GenHolder[T] {
 test_clone_generic_typeparam_field() `test {
   map[string, string] src = map[string, string]();
   src["a"] = "b";
-  GenHolder[map[string, string]] h = GenHolder[map[string, string]](value: src);
+  GenHolder[map[string, string]] h = GenHolder[map[string, string]](value: move src);
   // h.value requires .clone() — ownership rejects bare field read on the
   // droppable instantiation. Cloned copy is independent.
   map[string, string] cloned = h.value.clone();
@@ -151,7 +151,7 @@ test_generic_enum_field_drop_only() `test {
 // fails this test if either gap is open.
 test_generic_enum_field_drop_named_var() `test {
   MaybeBox[_BoxDropT0506] j = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 42));
-  MaybeBoxHolder[_BoxDropT0506] c = MaybeBoxHolder[_BoxDropT0506](m: j);
+  MaybeBoxHolder[_BoxDropT0506] c = MaybeBoxHolder[_BoxDropT0506](m: move j);
   // Let c drop at scope exit — HolderL[_BoxDropT0506]'s synth drop must call
   // MaybeL[_BoxDropT0506].drop, which in turn drops the inner _BoxDropT0506.
 }
@@ -163,7 +163,7 @@ test_generic_enum_field_drop_named_var() `test {
 // owner's synth drop now also handles).
 type _MaybeBoxHolderNewT0552[T] {
   MaybeBox[T] m;
-  new(~this, ~MaybeBox[T] m) {
+  new(~this, MaybeBox[T] move m) {
     this.m = m;
   }
 }
@@ -174,7 +174,7 @@ test_generic_enum_field_drop_inline_userctor() `test {
 
 test_generic_enum_field_drop_named_var_userctor() `test {
   MaybeBox[_BoxDropT0506] j = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 2));
-  _MaybeBoxHolderNewT0552[_BoxDropT0506] c = _MaybeBoxHolderNewT0552[_BoxDropT0506](m: j);
+  _MaybeBoxHolderNewT0552[_BoxDropT0506] c = _MaybeBoxHolderNewT0552[_BoxDropT0506](m: move j);
 }
 
 // T0552: non-generic holder with non-generic enum field. The plan noted that
@@ -194,7 +194,7 @@ type _HolderPlainT0552 {
 
 test_nongen_enum_field_drop_named_var() `test {
   _MaybePlainT0552 j = _MaybePlainT0552.Just(_BoxDropT0506(n: 11));
-  _HolderPlainT0552 c = _HolderPlainT0552(m: j);
+  _HolderPlainT0552 c = _HolderPlainT0552(m: move j);
 }
 
 test_nongen_enum_field_drop_inline() `test {
@@ -219,7 +219,7 @@ type _HolderLT0572 {
 
 test_optenum_field_drop_named_var() `test {
   _MaybeLT0572 j = _MaybeLT0572.Just(_BoxDropT0506(n: 42));
-  _HolderLT0572 c = _HolderLT0572(m: j);
+  _HolderLT0572 c = _HolderLT0572(m: move j);
 }
 
 test_optenum_field_drop_inline() `test {
@@ -242,7 +242,7 @@ type _HolderGenT0572[T] {
 
 test_optenum_field_generic_named_var() `test {
   MaybeBox[_BoxDropT0506] j = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 51));
-  _HolderGenT0572[_BoxDropT0506] c = _HolderGenT0572[_BoxDropT0506](m: j);
+  _HolderGenT0572[_BoxDropT0506] c = _HolderGenT0572[_BoxDropT0506](m: move j);
 }
 
 test_optenum_field_generic_inline() `test {
@@ -271,7 +271,7 @@ type _HolderColorT0572 {
 }
 
 test_optenum_field_no_drop_needed_some() `test {
-  _HolderColorT0572 h = _HolderColorT0572(c: _ColorT0572.Red, box: _BoxDropT0506(n: 100));
+  _HolderColorT0572 h = _HolderColorT0572(c: move _ColorT0572.Red, box: _BoxDropT0506(n: 100));
 }
 
 test_optenum_field_no_drop_needed_none() `test {
@@ -508,7 +508,7 @@ type _Holder2T0552[T] {
 test_generic_enum_field_drop_two_fields() `test {
   MaybeBox[_BoxDropT0506] j1 = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 21));
   MaybeBox[_BoxDropT0506] j2 = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 22));
-  _Holder2T0552[_BoxDropT0506] c = _Holder2T0552[_BoxDropT0506](a: j1, x: 0, b: j2);
+  _Holder2T0552[_BoxDropT0506] c = _Holder2T0552[_BoxDropT0506](a: move j1, x: 0, b: move j2);
 }
 
 // T0549: plain Named field with no drop method and only primitive fields.
@@ -602,10 +602,10 @@ test_destructure_member_consume_after_last_use() `test {
   (b, n) := h.pair;
   assert(b.s == "abcd", "b.s");
   assert(n == 5, "n");
-  consume_holder_t0548(h);
+  consume_holder_t0548(move h);
 }
 
-consume_holder_t0548(~_HolderT0548 h) {
+consume_holder_t0548(_HolderT0548 move h) {
   (b2, n2) := h.pair;
   assert(b2.s == "abcd", "b2.s after consume");
   assert(n2 == 5, "n2 after consume");
@@ -642,10 +642,10 @@ test_destructure_member_paren_consume_after_last_use() `test {
   (b, n) := (h.pair);
   assert(b.s == "abcd", "b.s");
   assert(n == 5, "n");
-  consume_holder_t0570(h);
+  consume_holder_t0570(move h);
 }
 
-consume_holder_t0570(~_HolderT0570 h) {
+consume_holder_t0570(_HolderT0570 move h) {
   (b2, n2) := (h.pair);
   assert(b2.s == "abcd", "b2.s after consume");
   assert(n2 == 5, "n2 after consume");

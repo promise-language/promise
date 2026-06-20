@@ -2127,6 +2127,13 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 	if !isTypeDroppable(retType) {
 		return
 	}
+	// A borrow return (`T&`/`T~`) is never dropped by the caller, so it can never
+	// cause an aliasing double-free — and clearing an arg's drop flag here would
+	// instead leak the arg (T0998: bare borrow params are passed by value).
+	switch retType.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return
+	}
 	// Skip failable returns — the raw result is {i1, value, err_ptr}, not the value itself.
 	if sig.CanError() {
 		return
@@ -2137,13 +2144,15 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 		if i >= len(argVals) || i >= len(params) {
 			break
 		}
-		// Skip ~, &, and variadic params — ~ already clears flag, & is a borrow,
-		// variadic has separate handling.
+		// Skip move (`~`) and variadic params — `~` already clears the flag;
+		// variadic has separate handling. A `T&`/`T~` reference param is a borrow
+		// and never owns the arg.
 		p := params[i]
 		if p.Ref() == types.RefMut || p.IsVariadic() {
 			continue
 		}
-		if _, isSR := p.Type().(*types.SharedRef); isSR {
+		switch p.Type().(type) {
+		case *types.SharedRef, *types.MutRef:
 			continue
 		}
 		paramType := p.Type()
@@ -2154,6 +2163,19 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 			paramType = types.Substitute(paramType, c.typeSubst)
 		}
 		if !isTypeDroppable(paramType) {
+			continue
+		}
+		// T0998: only clear the arg's drop flag when the result could actually be
+		// a view of the arg — i.e. the param and (unwrapped) return types are
+		// related by assignment. A distinct owned value of an unrelated type that
+		// merely shares a sub-pointer (e.g. a `Ref` arg and a `Weak` return over
+		// the same control block) is NOT an alias; clearing the arg's flag would
+		// leak it. (`identity(T x) T` and upcast returns stay covered.)
+		relType := retType
+		if opt, ok := relType.(*types.Optional); ok {
+			relType = opt.Elem()
+		}
+		if !types.AssignableTo(paramType, relType) && !types.AssignableTo(relType, paramType) {
 			continue
 		}
 

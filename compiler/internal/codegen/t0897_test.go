@@ -114,7 +114,7 @@ func TestOperatorStringOperandDoesNotClone(t *testing.T) {
 // *return* type).
 func TestOperatorRefTypedOperandDoesNotClone(t *testing.T) {
 	ir := generateIR(t, `
-		type S { int v; +(S& other) S& { return other; } }
+		type S { int v; +(S other) S& { return other; } }
 		main() { a := S(v: 1); b := S(v: 2); }
 	`)
 	assertNotContains(t, extractFunction(ir, `"S.+"`), "heapdup")

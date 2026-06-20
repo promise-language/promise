@@ -20,7 +20,7 @@ func TestT0861OwnedStructuralParamDrop(t *testing.T) {
 			int n;
 			write!(u8[] ~buf) int { return this.n; }
 		}
-		sink(~W w) {}
+		sink(W move w) {}
 		main() {
 			sink(ConcreteW(n: 0));
 		}

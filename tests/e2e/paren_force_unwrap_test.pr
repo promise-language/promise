@@ -129,7 +129,7 @@ test_member_assign_paren_force_unwrap() `test {
 // initializer; opt's scope drop must be neutralized.
 test_call_arg_paren_force_unwrap() `test {
   _BoxT0577? opt = _BoxT0577(s: "call" + "arg");
-  h := _HolderT0577(b: (opt!));
+  h := _HolderT0577(b: move(opt!));
   assert(h.b.s == "callarg", "call arg");
 }
 

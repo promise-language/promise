@@ -32,13 +32,13 @@ concurrent_main_io ok""", exclude: wasm) {
     io.File.write_content(os.temp_dir + "/pr_sc_main2a", "goroutine_a")?!;
     string d = io.File.read_content(os.temp_dir + "/pr_sc_main2a")?!;
     io.File.remove(os.temp_dir + "/pr_sc_main2a")?!;
-    done.send(d);
+    done.send(move d);
   };
   go {
     io.File.write_content(os.temp_dir + "/pr_sc_main2b", "goroutine_b")?!;
     string d = io.File.read_content(os.temp_dir + "/pr_sc_main2b")?!;
     io.File.remove(os.temp_dir + "/pr_sc_main2b")?!;
-    done.send(d);
+    done.send(move d);
   };
   // Main also does IO concurrently
   io.File.write_content(os.temp_dir + "/pr_sc_main2c", "main_data")?!;

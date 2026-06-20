@@ -171,7 +171,7 @@ test_map_in_enum_variant_construct() `test {
     "name": JsonNode.Text(value: "Alice"),
     "age": JsonNode.Num(value: 30.0),
   };
-  JsonNode obj = JsonNode.Dict(fields: fields);
+  JsonNode obj = JsonNode.Dict(fields: move fields);
   match obj {
     JsonNode.Dict(f) => assert(f.len == 2, "dict len"),
     _ => assert(false, "expected Dict"),
@@ -183,7 +183,7 @@ test_map_in_enum_variant_lookup() `test {
     "x": JsonNode.Bool(value: true),
     "y": JsonNode.Null,
   };
-  JsonNode obj = JsonNode.Dict(fields: fields);
+  JsonNode obj = JsonNode.Dict(fields: move fields);
   match obj {
     JsonNode.Dict(f) => {
       match f["x"]! {
@@ -205,7 +205,7 @@ test_map_in_enum_variant_forin() `test {
     "a": JsonNode.Num(value: 1.0),
     "b": JsonNode.Text(value: "hi"),
   };
-  JsonNode obj = JsonNode.Dict(fields: fields);
+  JsonNode obj = JsonNode.Dict(fields: move fields);
   match obj {
     JsonNode.Dict(f) => {
       int nums = 0;
@@ -239,9 +239,9 @@ test_nested_map_in_enum_variant() `test {
     "active": JsonNode.Bool(value: true),
   };
   map[string, JsonNode] outer = {
-    "user": JsonNode.Dict(fields: inner),
+    "user": JsonNode.Dict(fields: move inner),
   };
-  JsonNode root = JsonNode.Dict(fields: outer);
+  JsonNode root = JsonNode.Dict(fields: move outer);
 
   match root {
     JsonNode.Dict(f) => {
@@ -268,7 +268,7 @@ test_map_in_enum_variant_values() `test {
     "a": JsonNode.Null,
     "b": JsonNode.Bool(value: false),
   };
-  JsonNode obj = JsonNode.Dict(fields: fields);
+  JsonNode obj = JsonNode.Dict(fields: move fields);
   match obj {
     JsonNode.Dict(f) => {
       JsonNode[] vals = f.values();

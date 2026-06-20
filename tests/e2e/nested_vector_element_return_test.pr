@@ -221,10 +221,10 @@ test_t0648_heap_string_binding_no_leak() `test {
     inner := string[]();
     inner.push(mk_heap_string(i));
     inner.push(mk_heap_string(i * 10));
-    outer.push(inner);
+    outer.push(move inner);
     i = i + 1;
   }
-  v := VS(rows: outer);
+  v := VS(rows: move outer);
   r := v.at(2);
   assert(r.len == 2, "heap-string extracted len");
   assert(r[0] == "v2", "heap-string extracted elem 0");
@@ -237,8 +237,8 @@ test_t0648_heap_string_temporary_no_leak() `test {
   inner.push(mk_heap_string(7));
   inner.push(mk_heap_string(8));
   inner.push(mk_heap_string(9));
-  outer.push(inner);
-  v := VS(rows: outer);
+  outer.push(move inner);
+  v := VS(rows: move outer);
   // The tracked stmt-temp for `v.at(0)` must drop all 3 heap strings.
   assert(v.at(0).len == 3, "heap-string temporary use");
 }

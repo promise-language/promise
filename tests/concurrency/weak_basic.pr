@@ -172,5 +172,5 @@ type WeakFieldBox {
 weak_field_no_leak() `test {
   Ref[int] a = Ref[int](42);
   Weak[int] w = a.downgrade();
-  WeakFieldBox b = WeakFieldBox(value: w);
+  WeakFieldBox b = WeakFieldBox(value: move w);
 }

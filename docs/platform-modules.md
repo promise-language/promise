@@ -753,7 +753,7 @@ execute!(string program, ...string args) ProcessResult `public
 
 // --- Environment mutation (implemented) ---
 
-set_env_var(string name, ~string? value) `public
+set_env_var(string name, string? move value) `public
     `doc("Sets or removes the named environment variable.
           When value is present, sets the variable. When absent, removes it.");
 

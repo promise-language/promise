@@ -626,7 +626,7 @@ func TestForInRange(t *testing.T) {
 // borrowed buffer at loop exit (the buffer is owned by the caller).
 func TestT0971_ForInBorrowedVectorNoBufferDrop(t *testing.T) {
 	ir := generateIR(t, `
-		sum(int[] &data) int {
+		sum(int[] data) int {
 			total := 0;
 			for x in data { total = total + x; }
 			return total;
@@ -651,7 +651,7 @@ func TestT0971_ForInBorrowedVectorNoBufferDrop(t *testing.T) {
 // buffer itself.
 func TestT0971_ForInBorrowedStringVectorNoBufferDrop(t *testing.T) {
 	ir := generateIR(t, `
-		total_len(string[] &data) int {
+		total_len(string[] data) int {
 			n := 0;
 			for x in data { n = n + x.len; }
 			return n;
@@ -1151,7 +1151,7 @@ func TestHeaderExternMultipleTypes(t *testing.T) {
 
 func TestExternSharedRefParam(t *testing.T) {
 	ir := generateIR(t, `
-		modify(int &x) `+"`"+`extern("test_modify");
+		modify(int& x) `+"`"+`extern("test_modify");
 		main() { }
 	`)
 	// Shared ref param should be a pointer to the value struct
@@ -1169,7 +1169,7 @@ func TestExternMutRefParam(t *testing.T) {
 
 func TestHeaderExternSharedRefParam(t *testing.T) {
 	result := compileResult(t, `
-		modify(int &x) `+"`"+`extern("test_modify");
+		modify(int& x) `+"`"+`extern("test_modify");
 		main() { }
 	`)
 
@@ -1797,7 +1797,7 @@ func TestUserTypeMethodWithParams(t *testing.T) {
 	ir := generateIR(t, `
 		type Adder {
 			int base;
-			add(&this, int n) int {
+			add(this, int n) int {
 				return this.base + n;
 			}
 		}
@@ -2952,8 +2952,8 @@ func TestFailableConditionalRaiseReturn(t *testing.T) {
 // branches to genOptionalCastExpr, which unwraps field 1 before promise_type_is.
 func TestOptionalSubjectForceCast(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		main() {
 			Base b = Der(name: "x");
 			Base? ob = b;
@@ -2970,8 +2970,8 @@ func TestOptionalSubjectForceCast(t *testing.T) {
 
 func TestOptionalSubjectOptionalCast(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		main() {
 			Base b = Der(name: "x");
 			Base? ob = b;
@@ -2996,7 +2996,7 @@ func TestCastToBorrowTarget(t *testing.T) {
 	ir := generateIR(t, `
 		type Shape { string name; }
 		type Circle is Shape { f64 radius; }
-		borrow_return(Shape &s) Circle & {
+		borrow_return(Shape s) Circle & {
 			return s as! Circle &;
 		}
 		main() { }
@@ -3032,8 +3032,8 @@ func TestArcOptionalElementInnerDrop(t *testing.T) {
 // inner (heapdup.copy) since the borrow aliases the Arc's external-owned payload.
 func TestBorrowedOptionalSubjectCast(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		main() {
 			Base b = Der(name: "x");
 			Base? ob = b;
@@ -3056,8 +3056,8 @@ func TestBorrowedOptionalSubjectCast(t *testing.T) {
 // optional-subject force path (panic on none/mismatch, return the duped inner).
 func TestBorrowedOptionalSubjectForceCast(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		main() {
 			Base b = Der(name: "x");
 			Base? ob = b;
@@ -3078,8 +3078,8 @@ func TestBorrowedOptionalSubjectForceCast(t *testing.T) {
 // dup emits a heapdup.copy block before the cast's RTTI check.
 func TestOptionalSubjectIndexCastDups(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		main() {
 			Base?[] v = [];
 			Base b = Der(name: "x");
@@ -3130,8 +3130,8 @@ func TestOptionalSubjectScalarCast(t *testing.T) {
 // on the match path. Distinct from the borrowed-`this` and ident shapes.
 func TestOptionalSubjectOwnedMemberCast(t *testing.T) {
 	src := `
-		type Base { string name; tag(&this) string ` + "`" + `abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string ` + "`" + `abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		type Holder { Base? slot; drop(~this) {} }
 		main() {
 			Base b = Der(name: "x");
@@ -3154,14 +3154,14 @@ func TestOptionalSubjectOwnedMemberCast(t *testing.T) {
 }
 
 // T0761: an Optional cast whose subject is a borrowed-`this.field` inside a
-// `&this` method. The MemberExpr arm here takes the aliasing/owned-true verdict:
+// `this` method. The MemberExpr arm here takes the aliasing/owned-true verdict:
 // the caller still owns the field, so the inner is duped (heapdup.copy) and the
 // `as` path registers it as a heap temp. Mirrors the index-source dup path but
 // through the member shape.
 func TestOptionalSubjectBorrowedThisCast(t *testing.T) {
 	src := `
-		type Base { string name; tag(&this) string ` + "`" + `abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string ` + "`" + `abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		type Holder {
 			Base? slot;
 			%s
@@ -3176,13 +3176,13 @@ func TestOptionalSubjectBorrowedThisCast(t *testing.T) {
 	// Force through borrowed this: inner is duped before the RTTI dispatch.
 	// (heapdup.copy is scoped to the probe method — stdAll clone funcs also emit it.)
 	irForce := generateIR(t, fmt.Sprintf(src,
-		`probe(&this) string { c := this.slot as! Der; return c.tag(); }`))
+		`probe(this) string { c := this.slot as! Der; return c.tag(); }`))
 	assertContains(t, extractFunction(irForce, "Holder.probe"), "heapdup.copy")
 	assertContains(t, irForce, "optcast.present")
 	// Optional through borrowed this: duped AND registered as a heap temp (result
 	// owns the duped inner; freed on present+mismatch).
 	irOpt := generateIR(t, fmt.Sprintf(src,
-		`probe(&this) bool { Der? d = this.slot as Der; if d { return true; } return false; }`))
+		`probe(this) bool { Der? d = this.slot as Der; if d { return true; } return false; }`))
 	assertContains(t, extractFunction(irOpt, "Holder.probe"), "heapdup.copy")
 	assertContains(t, irOpt, "optcast.check")
 	assertContains(t, irOpt, "optcast.some")
@@ -3195,9 +3195,9 @@ func TestOptionalSubjectBorrowedThisCast(t *testing.T) {
 // match. (The only other Go `as` test uses an ident source, which skips this block.)
 func TestOptionalSubjectTempOptionalCast(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
-		make_opt(~string n) Base? { Base s = Der(name: n); return s; }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
+		make_opt(string move n) Base? { Base s = Der(name: n); return s; }
 		main() {
 			Der? d = make_opt("x") as Der;
 			if d { }
@@ -3217,8 +3217,8 @@ func TestOptionalSubjectTempOptionalCast(t *testing.T) {
 // hits the pre-existing T0811 parameter segfault). Both `as` and `as!` paths.
 func TestOptionalSubjectGenericBodyCast(t *testing.T) {
 	src := `
-		type Base { string name; tag(&this) string ` + "`" + `abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string ` + "`" + `abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		gcast[T](T marker) %s {
 			_ := marker;
 			Base b = Der(name: "g");
@@ -3241,8 +3241,8 @@ func TestOptionalSubjectGenericBodyCast(t *testing.T) {
 	// Generic body + aliasing (index) source: the dup and heap-temp registration
 	// both run their `c.typeSubst != nil` substitution branches.
 	irIndex := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		gidx[T](T marker) Der? {
 			_ := marker;
 			Base?[] v = [];
@@ -3262,8 +3262,8 @@ func TestOptionalSubjectGenericBodyCast(t *testing.T) {
 // inner). Compiles cleanly and takes the optcast path.
 func TestOptionalSubjectParenSourceCast(t *testing.T) {
 	ir := generateIR(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; }
+		type Der is Base { tag(this) string { return "d"; } }
 		main() {
 			Base b = Der(name: "x");
 			Base? oo = b;
@@ -3726,7 +3726,7 @@ func TestAutoPropagateInMethodReceiver(t *testing.T) {
 	ir := generateIR(t, `
 		type Foo {
 			int x;
-			get_x(&this) int { return this.x; }
+			get_x(this) int { return this.x; }
 		}
 		bar!() Foo { return Foo(x: 42); }
 		wrapper!() int {
@@ -3756,7 +3756,7 @@ func TestAutoPropagateInGenericMethodReceiver(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] {
 			T val;
-			cast[U](&this, U default_val) U {
+			cast[U](this, U default_val) U {
 				return default_val;
 			}
 		}
@@ -4151,7 +4151,7 @@ func TestGenericEnumMethodRegular(t *testing.T) {
 			Full(T item),
 			Vacant,
 
-			unwrap_or(&this, T fallback) T {
+			unwrap_or(this, T fallback) T {
 				match this {
 					Full(v) => {
 						return v;
@@ -4307,7 +4307,7 @@ func TestT0639_GenericMethodViaThis(t *testing.T) {
 		type NBox[T] {
 			Vector[T] d;
 			inner[U](U _x) int { return this.d.len; }
-			outer(&this) int { return this.inner[int](7); }
+			outer(this) int { return this.inner[int](7); }
 		}
 		enum EBox[T] {
 			V(Vector[T] d),
@@ -4318,7 +4318,7 @@ func TestT0639_GenericMethodViaThis(t *testing.T) {
 					N => { return 0; },
 				}
 			}
-			outer(&this) int { return this.inner[int](7); }
+			outer(this) int { return this.inner[int](7); }
 		}
 		main() {
 			n := NBox[int](d: [1, 2, 3]);
@@ -4396,7 +4396,7 @@ func TestT0639_RefWrappedGenericInstanceOperatorGetter(t *testing.T) {
 			[](int i) T { return this.d[i]; }
 		}
 		idx_mut(GBox[int] ~b) int { return b[1]; }
-		get_shared(GBox[int] &b) int { return b.total; }
+		get_shared(GBox[int] b) int { return b.total; }
 		main() {
 			x := idx_mut(GBox[int](d: [10, 20, 30]));
 			y := get_shared(GBox[int](d: [1, 2, 3, 4]));
@@ -4589,7 +4589,7 @@ func TestGenericFuncFailable(t *testing.T) {
 // when the callee consumed the value (e.g. moved it into a struct field).
 func TestT0340_GenericFuncMutRefArgClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		consume[T](~T x) { }
+		consume[T](T move x) { }
 		main() {
 			s := "hello";
 			consume[string](s);
@@ -4604,7 +4604,7 @@ func TestT0340_GenericFuncMutRefArgClearsDropFlag(t *testing.T) {
 // explicit `[T]` at the call site). Exercises genInferredGenericCall.
 func TestT0340_InferredGenericFuncMutRefArgClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		consume[T](~T x) { }
+		consume[T](T move x) { }
 		main() {
 			s := "hello";
 			consume(s);
@@ -4620,7 +4620,7 @@ func TestT0340_InferredGenericFuncMutRefArgClearsDropFlag(t *testing.T) {
 // flag clear was missed on module-imported `~` callees.
 func TestT0340_ModuleGenericFuncMutRefArgClearsDropFlag(t *testing.T) {
 	ir := generateIRWithModule(t, "mylib",
-		"consume[T](~T x) `public { }",
+		"consume[T](T move x) `public { }",
 		`
 		use mylib "./mylib";
 		main() {
@@ -4683,7 +4683,7 @@ func TestGenericFuncCallsGenericMethod(t *testing.T) {
 		type Echo {
 			echo[T](T val) T { return val; }
 		}
-		invoke[T](Echo &e, T val) T {
+		invoke[T](Echo e, T val) T {
 			return e.echo[T](val);
 		}
 		main() {
@@ -4699,7 +4699,7 @@ func TestGenericFuncCallsGenericMethod(t *testing.T) {
 func TestGenericMethodCallsGenericMethod(t *testing.T) {
 	ir := generateIR(t, `
 		type Foo { echo[T](T val) T { return val; } }
-		type Bar { delegate[T](Foo &f, T val) T { return f.echo[T](val); } }
+		type Bar { delegate[T](Foo f, T val) T { return f.echo[T](val); } }
 		main() {
 			f := Foo();
 			b := Bar();
@@ -4767,7 +4767,7 @@ func TestGenericTypeMethodCallsFreeFunc(t *testing.T) {
 		identity[T](T val) T { return val; }
 		type Wrapper[T] {
 			T value;
-			wrapped(&this) T { return identity[T](this.value); }
+			wrapped(this) T { return identity[T](this.value); }
 		}
 		main() {
 			w := Wrapper[int](value: 77);
@@ -4801,7 +4801,7 @@ func TestGenericTypeMethodCallsGenericMethod(t *testing.T) {
 		type Wrapper[T] {
 			T value;
 			Echoer e;
-			echoed(&this) T { return this.e.echo[T](this.value); }
+			echoed(this) T { return this.e.echo[T](this.value); }
 		}
 		main() {
 			w := Wrapper[int](value: 55, e: Echoer());
@@ -4818,7 +4818,7 @@ func TestGenericMethodCallsBothFuncAndMethod(t *testing.T) {
 		helper[T](T val) T { return val; }
 		type Echoer { echo[T](T val) T { return val; } }
 		type Combiner {
-			run[T](Echoer &e, T val) T {
+			run[T](Echoer e, T val) T {
 				T a = helper[T](val);
 				return e.echo[T](a);
 			}
@@ -5088,7 +5088,7 @@ func TestElvisStrvecMemberSourceNoDropFlag(t *testing.T) {
 // trackElvisResultHeap (uncovered by the non-generic ident-source tests).
 func TestElvisMapGenericOwnedParamDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		gconsume[K: Hashable + Equal, V](~map[K, V]? a, map[K, V] b) int {
+		gconsume[K: Hashable + Equal, V](map[K, V]? move a, map[K, V] b) int {
 			return (a ?: b).len;
 		}
 		main() {
@@ -5138,7 +5138,7 @@ func TestElvisMapStructuralDefaultDropFlag(t *testing.T) {
 // tests use borrowed params, which now short-circuit at the orphan gate).
 func TestElvisStrvecGenericOwnedParamDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		gconsume[T](~T[]? a, T[] b) int {
+		gconsume[T](T[]? move a, T[] b) int {
 			return (a ?: b).len;
 		}
 		main() {
@@ -8859,7 +8859,7 @@ func TestReturnParenThisValueTypeLoads(t *testing.T) {
 		type Pt {
 			int x `+"`value"+`;
 			int y `+"`value"+`;
-			echo(&this) Pt { return (this); }
+			echo(this) Pt { return (this); }
 		}
 		main() { p := Pt(x: 3, y: 4); q := p.echo(); }
 	`)
@@ -12193,7 +12193,7 @@ func TestT0898MemberNoDropHeapFieldOverwriteDrops(t *testing.T) {
 func TestT0403VectorHeapElementCallArgDups(t *testing.T) {
 	ir := generateIR(t, `
 		type Item { int n; drop(~this) {} }
-		take(~Item b) {}
+		take(Item move b) {}
 		test() {
 			v := Item[]();
 			v.push(Item(n: 1));
@@ -13169,7 +13169,7 @@ func TestStringBorrowFieldNoDup(t *testing.T) {
 			string a;
 			string b;
 		}
-		get_ref(string & s) string & {
+		get_ref(string s) string & {
 			return s;
 		}
 		test() {
@@ -14845,7 +14845,7 @@ func TestMatchDupStringConsumedByPHI(t *testing.T) {
 }
 
 // B0253: Match on borrowed enum with clone-able enum field must deep-clone.
-// This is the pattern underlying JsonValue.get(&this): match on &this loads a
+// This is the pattern underlying JsonValue.get(this): match on this loads a
 // shallow copy of the enum value. Extracted enum fields (like JsonValue from
 // Slot.Used inside Map.[]) must be cloned, not shallow-copied, so the returned
 // value is independent of the original map storage.
@@ -14858,7 +14858,7 @@ func TestMatchDupCloneableEnumFieldOnBorrow(t *testing.T) {
 		"enum Outer {\n"+
 		"  Wrapped(Inner value),\n"+
 		"  None,\n"+
-		"  get_inner(&this) Inner? {\n"+
+		"  get_inner(this) Inner? {\n"+
 		"    match this {\n"+
 		"      Outer.Wrapped(v) => { return v; },\n"+
 		"      _ => { return none; },\n"+
@@ -14886,7 +14886,7 @@ func TestEnumTempMethodReceiverDrop(t *testing.T) {
 		"enum Holder {\n"+
 		"  Items(Inner[] list),\n"+
 		"  Nothing,\n"+
-		"  extract(&this) Inner[]? {\n"+
+		"  extract(this) Inner[]? {\n"+
 		"    match this {\n"+
 		"      Holder.Items(items) => { return items; },\n"+
 		"      _ => { return none; },\n"+
@@ -14913,7 +14913,7 @@ func TestReturnEnumFromVectorIndexClone(t *testing.T) {
 		"enum Holder {\n"+
 		"  Items(Inner[] list),\n"+
 		"  Nothing,\n"+
-		"  at(&this, int index) Inner? {\n"+
+		"  at(this, int index) Inner? {\n"+
 		"    match this {\n"+
 		"      Holder.Items(items) => {\n"+
 		"        if index >= 0 && index < items.len {\n"+
@@ -15140,7 +15140,7 @@ func TestT0371TupleClaimsEnumCtorTemp(t *testing.T) {
 // are substituted at monomorphization time and the walk uses concrete types.
 func TestT0371GenericFnTupleLocalSubstitutes(t *testing.T) {
 	ir := generateIR(t, `
-		make_then_drop[T](~T x, ~T y) {
+		make_then_drop[T](T move x, T move y) {
 			(T, T) t = (x, y);
 		}
 		main() {
@@ -15867,7 +15867,7 @@ func TestFieldAssignGenericVecDropsElements(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] {
 			T[] items;
-			update(~this, ~T[] val) { this.items = val; }
+			update(~this, T[] move val) { this.items = val; }
 		}
 		main() {
 			b := Box[string](items: string[]());
@@ -18814,7 +18814,7 @@ func TestSliceExprVector(t *testing.T) {
 func TestSliceExprThroughSharedRef(t *testing.T) {
 	// T0332: slicing a SharedRef parameter must auto-deref to the Vector's [:] method
 	ir := generateIR(t, `
-		take(int[] &xs) int[] {
+		take(int[] xs) int[] {
 			return xs[1:3];
 		}
 		main() {
@@ -19221,7 +19221,7 @@ func TestFailableGeneratorYieldDelegateUnwrap(t *testing.T) {
 // natural completion, return, and mid-flight destroy).
 func TestT0479GeneratorOwnedStringParamDrop(t *testing.T) {
 	ir := generateIR(t, `
-		gen(~string s) stream[int] {
+		gen(string move s) stream[int] {
 			yield 1;
 		}
 		main() {
@@ -19279,7 +19279,7 @@ func TestT0479GeneratorVariadicParamDrop(t *testing.T) {
 // and plain `int` parameters keep paramDrops empty.
 func TestT0479GeneratorNonDroppableParamSkipped(t *testing.T) {
 	ir := generateIR(t, `
-		gen(~int n, int m) stream[int] {
+		gen(int move n, int m) stream[int] {
 			yield n + m;
 		}
 		main() {
@@ -19664,7 +19664,7 @@ func TestVariadicMethodIR(t *testing.T) {
 		type Adder {
 			int base;
 
-			addAll(&this, ...int values) int {
+			addAll(this, ...int values) int {
 				return this.base;
 			}
 		}
@@ -19752,7 +19752,7 @@ func TestVariadicMethodParamDropAtScopeExit(t *testing.T) {
 		type Adder {
 			int base;
 
-			addAll(&this, ...int values) int {
+			addAll(this, ...int values) int {
 				return this.base;
 			}
 		}
@@ -20524,7 +20524,7 @@ func TestGenericValueTypeLayout(t *testing.T) {
 		type Pair[T] {
 			T first `+"`"+`value;
 			T second `+"`"+`value;
-			sum(&this) T { return this.first; }
+			sum(this) T { return this.first; }
 		}
 		main() {
 			p := Pair[int](first: 1, second: 2);
@@ -20708,7 +20708,7 @@ func TestGenericMethodReturnsGenericInstance(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] {
 			T val;
-			clone(&this) Box[T] { return Box[T](val: this.val); }
+			clone(this) Box[T] { return Box[T](val: this.val); }
 		}
 		main() {
 			b := Box[int](val: 5);
@@ -21245,7 +21245,7 @@ func TestFailableGetterStringResult(t *testing.T) {
 func TestGetterUserHeapResultTrackedInChain(t *testing.T) {
 	ir := generateIR(t, `
 		type Inner { string _name; drop(~this) {}
-			ok(&this) bool { return true; }
+			ok(this) bool { return true; }
 		}
 		type Outer { Inner _inner;
 			get inner Inner `+"`public"+` => Inner(_name: this._inner._name);
@@ -21398,7 +21398,7 @@ func TestVirtualGetterVectorResultPromotedInForIn(t *testing.T) {
 func TestVirtualGetterHeapResultTrackedInChain(t *testing.T) {
 	ir := generateIR(t, `
 		type Inner { string _name; drop(~this) {}
-			ok(&this) bool { return true; }
+			ok(this) bool { return true; }
 		}
 		type HeapSource {
 			get item Inner `+"`public"+` `+"`abstract"+`;
@@ -21686,7 +21686,7 @@ func TestModuleLevelGetterDistinctFromSetter(t *testing.T) {
 func TestEnumMethodDecl(t *testing.T) {
 	ir := generateIR(t, `
 		enum Color { Red, Green, Blue,
-			describe(&this) string {
+			describe(this) string {
 				match this {
 					Color.Red => { return "red"; },
 					_ => { return "other"; },
@@ -21719,7 +21719,7 @@ func TestEnumGetterDecl(t *testing.T) {
 func TestEnumMethodOnDataEnum(t *testing.T) {
 	ir := generateIR(t, `
 		enum Shape { Circle(f64 radius), Point,
-			is_point(&this) bool {
+			is_point(this) bool {
 				match this {
 					Shape.Point => { return true; },
 					_ => { return false; },
@@ -21735,13 +21735,13 @@ func TestEnumMethodOnDataEnum(t *testing.T) {
 func TestEnumMethodCallsMethod(t *testing.T) {
 	ir := generateIR(t, `
 		enum Level { Low, High,
-			rank(&this) int {
+			rank(this) int {
 				match this {
 					Level.Low => { return 1; },
 					Level.High => { return 2; },
 				}
 			}
-			gt(&this, Level other) bool {
+			gt(this, Level other) bool {
 				return this.rank() > other.rank();
 			}
 		}
@@ -21755,7 +21755,7 @@ func TestEnumMethodCallsMethod(t *testing.T) {
 func TestEnumMethodFailable(t *testing.T) {
 	ir := generateIR(t, `
 		enum Mode { A, B,
-			check!(&this) string {
+			check!(this) string {
 				match this {
 					Mode.A => { return "a"; },
 					Mode.B => { return "b"; },
@@ -21771,7 +21771,7 @@ func TestEnumMethodFailable(t *testing.T) {
 func TestEnumMethodVoid(t *testing.T) {
 	ir := generateIR(t, `
 		enum State { On, Off,
-			log(&this) { print_line("x"); }
+			log(this) { print_line("x"); }
 		}
 		main() { State.On.log(); }
 	`)
@@ -22159,8 +22159,8 @@ func TestIsDestructureEnumCodegen(t *testing.T) {
 
 func TestIsDestructureNamedTypeCodegen(t *testing.T) {
 	ir := generateIR(t, `
-		type Animal { string name; speak(&this) string `+"`"+`abstract; }
-		type Dog is Animal { string breed; speak(&this) string { return "woof"; } }
+		type Animal { string name; speak(this) string `+"`"+`abstract; }
+		type Dog is Animal { string breed; speak(this) string { return "woof"; } }
 		main() {
 			Animal a = Dog(name: "Rex", breed: "Lab");
 			if a is Dog(n, b) {
@@ -23966,8 +23966,8 @@ func TestUntypedErrorRttiDrop(t *testing.T) {
 // B0226: promise_type_is should use updated field indices (typeID at field 2).
 func TestTypeIsFieldIndicesB0226(t *testing.T) {
 	ir := generateIR(t, `
-		type Animal { string name; speak(&this) string `+"`abstract"+`; }
-		type Dog is Animal { speak(&this) string { return "woof"; } }
+		type Animal { string name; speak(this) string `+"`abstract"+`; }
+		type Dog is Animal { speak(this) string { return "woof"; } }
 		main() {
 			Animal a = Dog(name: "Rex");
 			if a is Dog { }
@@ -24344,11 +24344,11 @@ func TestGenericMethodReturnStringFieldDups(t *testing.T) {
 	assertContains(t, fn, "promise_string_new")
 }
 
-// T0746 (`&this` receiver form): the bug reported the borrowed-receiver
+// T0746 (`this` receiver form): the bug reported the borrowed-receiver
 // variant double-freed identically, so the dup-on-return must fire there too.
 func TestGenericMethodReturnStringFieldDupsBorrowedReceiver(t *testing.T) {
 	ir := generateIR(t, `
-		type GBox[T] { T val; peek(&this) T { return this.val; } }
+		type GBox[T] { T val; peek(this) T { return this.val; } }
 		main() { b := GBox[string](val: "hi"); s := b.peek(); }
 	`)
 	fn := extractFunction(ir, `"GBox[string].peek"`)
@@ -24384,7 +24384,7 @@ func TestGenericGetterReturnStringFieldDups(t *testing.T) {
 func TestGenericOwnerMutRefArgDupsStringField(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			b := Box[string](value: "hi");
 			consume(b.value);
@@ -24407,7 +24407,7 @@ func TestGenericOwnerMutRefArgDupsStringField(t *testing.T) {
 func TestGenericOwnerMutRefArgDupsVectorField(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }
-		consume(~Vector[int] v) {}
+		consume(Vector[int] move v) {}
 		test() {
 			b := Box[Vector[int]](value: [1, 2, 3]);
 			consume(b.value);
@@ -24477,7 +24477,7 @@ func TestT0522DestructureForceUnwrapNeutralizesSource(t *testing.T) {
 func TestT0522ConsumeArgOptionalStringFieldClaimsDup(t *testing.T) {
 	ir := generateIR(t, `
 		type _Holder { string? title; drop(~this) {} }
-		_consume_opt_string(~string? s) `+"`public {}"+`
+		_consume_opt_string(string? move s) `+"`public {}"+`
 		test() {
 			h := _Holder(title: "foo" + "bar");
 			_consume_opt_string(h.title);
@@ -24512,7 +24512,7 @@ func TestT0522ConsumeArgOptionalStringFieldClaimsDup(t *testing.T) {
 func TestT0522ConsumeArgOptionalVectorFieldClaimsDup(t *testing.T) {
 	ir := generateIR(t, `
 		type _Holder { Vector[int]? items; drop(~this) {} }
-		_consume_opt_vec(~Vector[int]? v) `+"`public {}"+`
+		_consume_opt_vec(Vector[int]? move v) `+"`public {}"+`
 		test() {
 			h := _Holder(items: [1, 2, 3]);
 			_consume_opt_vec(h.items);
@@ -24852,7 +24852,7 @@ func TestT0735_MapLitInCtorFieldClaimed(t *testing.T) {
 // claim path on the move-arg ABI.
 func TestT0735_MapLitMoveArgClaimed(t *testing.T) {
 	ir := generateIR(t, `
-		consume(~Map[string, int] m) int { return m.len; }
+		consume(Map[string, int] move m) int { return m.len; }
 		main() {
 			int x = consume({"a": 1});
 		}
@@ -25242,8 +25242,8 @@ func TestVectorCallExprStmtTempTracking(t *testing.T) {
 func TestMethodChainIntermediateTracked(t *testing.T) {
 	ir := generateIR(t, `
 		type Point { int x; int y;
-			sum(&this) int { return this.x + this.y; }
-			add_point(&this, int dx, int dy) Point {
+			sum(this) int { return this.x + this.y; }
+			add_point(this, int dx, int dy) Point {
 				return Point(x: this.x + dx, y: this.y + dy);
 			}
 		}
@@ -25288,7 +25288,7 @@ func TestFieldAccessOnErrorPanicResultTracked(t *testing.T) {
 func TestMethodCallOnErrorPanicResultTracked(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair { int x; int y;
-			sum(&this) int { return this.x + this.y; }
+			sum(this) int { return this.x + this.y; }
 		}
 		make_pair!() Pair { return Pair(x: 10, y: 20); }
 		test!() {
@@ -25499,7 +25499,7 @@ func TestIsPresentDropsTempOptionalEnum(t *testing.T) {
 		enum Val { Txt(string s), Num(int n) }
 		type Box {
 			Val? item;
-			get_item(&this) Val? {
+			get_item(this) Val? {
 				return this.item;
 			}
 		}
@@ -25545,7 +25545,7 @@ func TestIsPresentDropsTempOptionalString(t *testing.T) {
 	ir := generateIR(t, `
 		type Box {
 			string? name;
-			get_name(&this) string? {
+			get_name(this) string? {
 				return this.name;
 			}
 		}
@@ -25567,7 +25567,7 @@ func TestIsPresentDropsTempOptionalUserType(t *testing.T) {
 			drop(~this) {}
 		}
 		type Factory {
-			find(&this, int id) Handle? {
+			find(this, int id) Handle? {
 				if id > 0 {
 					return Handle(id: id);
 				}
@@ -27927,10 +27927,10 @@ func TestParenThisIsCheckNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type T0613Animal {
 			string name;
-			speak(&this) string `+"`abstract"+`;
+			speak(this) string `+"`abstract"+`;
 			am_i_dog(this) bool { return (this) is T0613Dog; }
 		}
-		type T0613Dog is T0613Animal { speak(&this) string { return "Woof"; } }
+		type T0613Dog is T0613Animal { speak(this) string { return "Woof"; } }
 		main() {
 			T0613Animal d = T0613Dog(name: "Rex");
 			b := d.am_i_dog();
@@ -27982,14 +27982,14 @@ func TestParenThisEnumMethodNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		enum T0613Color {
 			Red, Green, Blue,
-			describe(&this) string {
+			describe(this) string {
 				match this {
 					T0613Color.Red => { return "red"; },
 					T0613Color.Green => { return "green"; },
 					T0613Color.Blue => { return "blue"; },
 				}
 			}
-			describe_via(&this) string { return (this).describe(); }
+			describe_via(this) string { return (this).describe(); }
 			get opposite T0613Color {
 				match this {
 					T0613Color.Red => { return T0613Color.Green; },
@@ -27997,7 +27997,7 @@ func TestParenThisEnumMethodNoExtractFromPtr(t *testing.T) {
 					T0613Color.Blue => { return T0613Color.Red; },
 				}
 			}
-			opposite_via(&this) T0613Color { return (this).opposite; }
+			opposite_via(this) T0613Color { return (this).opposite; }
 		}
 		main() {
 			s := T0613Color.Red.describe_via();
@@ -28069,10 +28069,10 @@ func TestParenThisGenericEnumMethodNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		enum T0613GOpt[T] {
 			Some(T value), None,
-			has(&this) bool {
+			has(this) bool {
 				match this { T0613GOpt.Some(v) => { return true; }, T0613GOpt.None => { return false; } }
 			}
-			has_via(&this) bool { return (this).has(); }
+			has_via(this) bool { return (this).has(); }
 		}
 		main() {
 			s := T0613GOpt[int].Some(5);
@@ -28089,12 +28089,12 @@ func TestParenThisGenericEnumMethodNoExtractFromPtr(t *testing.T) {
 func TestParenThisIsGenericNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type T0613GShape {
-			area(&this) int `+"`abstract"+`;
-			is_intbox(&this) bool { return (this) is T0613IBox[int]; }
+			area(this) int `+"`abstract"+`;
+			is_intbox(this) bool { return (this) is T0613IBox[int]; }
 		}
 		type T0613IBox[T] is T0613GShape {
 			T value;
-			area(&this) int { return 1; }
+			area(this) int { return 1; }
 		}
 		main() {
 			T0613GShape s = T0613IBox[int](value: 5);
@@ -28149,11 +28149,11 @@ func TestThisCastForcedFieldNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type T0747Base {
 			int n;
-			whoami(&this) string `+"`abstract"+`;
-			as_n(&this) int { return (this as! T0747Derived).n; }
-			as_n_bare(&this) int { return ((this) as! T0747Derived).n; }
+			whoami(this) string `+"`abstract"+`;
+			as_n(this) int { return (this as! T0747Derived).n; }
+			as_n_bare(this) int { return ((this) as! T0747Derived).n; }
 		}
-		type T0747Derived is T0747Base { whoami(&this) string { return "d"; } }
+		type T0747Derived is T0747Base { whoami(this) string { return "d"; } }
 		main() { T0747Base b = T0747Derived(n: 7); _ := b.as_n(); _ := b.as_n_bare(); }
 	`)
 	assertNotContains(t, ir, "extractvalue i8*")
@@ -28174,11 +28174,11 @@ func TestThisCastForcedLocalNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type T0747LBase {
 			int n;
-			whoami(&this) string `+"`abstract"+`;
-			as_str(&this) string { d := (this) as! T0747LDerived; return d.whoami(); }
-			as_str_bare(&this) string { d := this as! T0747LDerived; return d.whoami(); }
+			whoami(this) string `+"`abstract"+`;
+			as_str(this) string { d := (this) as! T0747LDerived; return d.whoami(); }
+			as_str_bare(this) string { d := this as! T0747LDerived; return d.whoami(); }
 		}
-		type T0747LDerived is T0747LBase { whoami(&this) string { return "d"; } }
+		type T0747LDerived is T0747LBase { whoami(this) string { return "d"; } }
 		main() { T0747LBase b = T0747LDerived(n: 7); _ := b.as_str(); _ := b.as_str_bare(); }
 	`)
 	assertNotContains(t, ir, "extractvalue i8*")
@@ -28194,14 +28194,14 @@ func TestThisCastOptionalNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type T0747OBase {
 			int n;
-			whoami(&this) string `+"`abstract"+`;
-			is_der(&this) bool {
+			whoami(this) string `+"`abstract"+`;
+			is_der(this) bool {
 				T0747ODerived? o = this as T0747ODerived;
 				if o { return true; }
 				return false;
 			}
 		}
-		type T0747ODerived is T0747OBase { whoami(&this) string { return "d"; } }
+		type T0747ODerived is T0747OBase { whoami(this) string { return "d"; } }
 		main() { T0747OBase b = T0747ODerived(n: 7); _ := b.is_der(); }
 	`)
 	assertNotContains(t, ir, "extractvalue i8*")
@@ -28221,8 +28221,8 @@ func TestThisCastOptionalNoExtractFromPtr(t *testing.T) {
 // without the fix that clear is absent and the conditional drop executes.
 func TestT0783_ReturnCastClearsSubjectDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		helper(int dummy) Circle {
 			Shape s = Circle(name: "src", radius: 2.0);
 			return s as! Circle;
@@ -28242,8 +28242,8 @@ func TestT0783_ReturnCastClearsSubjectDropFlag(t *testing.T) {
 // flag is still cleared.
 func TestT0783_ReturnChainedCastClearsSubjectDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		helper(int dummy) Circle {
 			Shape s = Circle(name: "src", radius: 2.0);
 			return (s as! Circle) as! Circle;
@@ -28269,8 +28269,8 @@ func TestT0783_ReturnChainedCastClearsSubjectDropFlag(t *testing.T) {
 // unconditional `store i1 false`.
 func TestT0849_ReturnOptionalCastConditionalSubjectDrop(t *testing.T) {
 	ir := generateIR(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		helper(int dummy) Circle? {
 			Shape s = Circle(name: "src", radius: 2.0);
 			return s as Circle;
@@ -28297,8 +28297,8 @@ func TestT0849_ReturnOptionalCastConditionalSubjectDrop(t *testing.T) {
 // unconditionally (`store i1 false`) → leak on the failure path.
 func TestT0849_OwningSlotOptionalCastConditionalDrop(t *testing.T) {
 	ir := generateIR(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		type Box { Circle? c; }
 		helper(int dummy) bool {
 			Shape s = Circle(name: "src", radius: 2.0);

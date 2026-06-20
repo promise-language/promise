@@ -110,7 +110,7 @@ make_ints() int[] {
 // by the T0109 removal — but verifying anyway.
 // =========================================================================
 
-consume_vec(~int[] v) int {
+consume_vec(int[] move v) int {
   return v.len;
 }
 
@@ -550,7 +550,7 @@ t0345_ctor_multi_field_plain_arg() `test {
 type T0345FailableHolder {
   int[] data;
 
-  new!(~this, ~int[] codes) {
+  new!(~this, int[] move codes) {
     if codes.len > 100 {
       raise error(message: "too long");
     }
@@ -612,7 +612,7 @@ type T0345HasDrop {
   int[] data;
   int id;
 
-  new(~this, ~int[] data, int id) {
+  new(~this, int[] move data, int id) {
     this.data = data;
     this.id = id;
   }
@@ -653,7 +653,7 @@ t0345_discard_with_heap_fields() `test {
 type T0345ErrFailable {
   int[] data;
 
-  new!(~this, ~int[] codes) {
+  new!(~this, int[] move codes) {
     if codes.len > 100 {
       raise error(message: "too long");
     }
@@ -1242,10 +1242,10 @@ t0356_make_nested_vec() int[][] {
   inner1 := int[]();
   inner1.push(1);
   inner1.push(2);
-  v.push(inner1);
+  v.push(move inner1);
   inner2 := int[]();
   inner2.push(3);
-  v.push(inner2);
+  v.push(move inner2);
   return v;
 }
 

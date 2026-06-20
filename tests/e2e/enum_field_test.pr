@@ -202,7 +202,7 @@ test_map_data_enum_get_or() `test {
 // --- Enum as field in user type ---
 
 test_enum_field_in_struct() `test {
-  Wrapper w = Wrapper(c: Color.Green);
+  Wrapper w = Wrapper(c: move Color.Green);
   match w.c {
     Color.Green => {
     },
@@ -211,7 +211,7 @@ test_enum_field_in_struct() `test {
 }
 
 test_enum_field_modification() `test {
-  Wrapper w = Wrapper(c: Color.Red);
+  Wrapper w = Wrapper(c: move Color.Red);
   w.c = Color.Blue;
   match w.c {
     Color.Blue => {
@@ -230,7 +230,7 @@ test_data_enum_field_in_struct() `test {
 }
 
 test_data_enum_field_modification() `test {
-  ShapeHolder h = ShapeHolder(s: Shape.Point, label: "p");
+  ShapeHolder h = ShapeHolder(s: move Shape.Point, label: "p");
   h.s = Shape.Rect(w: 10.0, h: 20.0);
   match h.s {
     Shape.Rect(w, hh) => {
@@ -273,7 +273,7 @@ enum Outer {
 }
 
 test_enum_containing_enum() `test {
-  Outer o = Outer.Wrapped(inner: Color.Blue);
+  Outer o = Outer.Wrapped(inner: move Color.Blue);
   match o {
     Outer.Wrapped(c) => {
       match c {
@@ -332,7 +332,7 @@ test_forward_enum_reference() `test {
 
 test_forward_enum_in_map() `test {
   map[string, ForwardA] m = {
-    "x": ForwardA.Wrap(inner: ForwardB.Point, id: 7),
+    "x": ForwardA.Wrap(inner: move ForwardB.Point, id: 7),
   };
   ForwardA a = m["x"]!;
   match a {
@@ -404,8 +404,8 @@ test_map_enum_update() `test {
   map[string, Color] m = {
     "x": Color.Red
   };
-  assert(m.update("x", Color.Blue), "update should succeed");
-  assert(!m.update("y", Color.Green), "update non-existing should fail");
+  assert(m.update("x", move Color.Blue), "update should succeed");
+  assert(!m.update("y", move Color.Green), "update non-existing should fail");
   match m["x"]! {
     Color.Blue => {
     }, _ => assert(false, "expected Blue"),
@@ -489,7 +489,7 @@ enum _T0442OptWrapper {
 
 test_t0442_optional_user_type_in_enum_field() `test {
   _T0442EnumRow? r = _T0442EnumRow(name: "opt".to_string());
-  w := _T0442OptWrapper.Some(r);
+  w := _T0442OptWrapper.Some(move r);
   match w {
     _T0442OptWrapper.Some(opt) => {
       if row := opt {
@@ -511,7 +511,7 @@ enum _T0442TupOptWrapper {
 
 test_t0442_tuple_with_optional_user_in_enum_field() `test {
   _T0442EnumRow? r = _T0442EnumRow(name: "tup_opt".to_string());
-  p := _T0442TupOptWrapper.Both(r, 13);
+  p := _T0442TupOptWrapper.Both(move r, 13);
   match p {
     _T0442TupOptWrapper.Both(opt, n) => {
       assert(n == 13, "second int");
@@ -535,7 +535,7 @@ enum _T0442OptTupWrapper {
 
 test_t0442_optional_tuple_user_in_enum_field() `test {
   (_T0442EnumRow, int)? t = (_T0442EnumRow(name: "opt_tup".to_string()), 19);
-  w := _T0442OptTupWrapper.Some(t);
+  w := _T0442OptTupWrapper.Some(move t);
   match w {
     _T0442OptTupWrapper.Some(opt) => {
       if pair := opt {
@@ -565,7 +565,7 @@ enum _T0485OptWrapper {
 
 test_t0485_optional_user_in_enum_synth_drop() `test {
   _T0485Row? r = _T0485Row(name: "synth_drop".to_string());
-  w := _T0485OptWrapper.Some(r);
+  w := _T0485OptWrapper.Some(move r);
   // No match — synth drop must walk the Optional and drop the inner Row.
 }
 
@@ -579,13 +579,13 @@ enum _T0485ArrHolder {
 
 test_t0485_array_user_in_enum_synth_drop() `test {
   _T0485Row[3] rs = [_T0485Row(name: "x".to_string()), _T0485Row(name: "y".to_string()), _T0485Row(name: "z".to_string())];
-  h := _T0485ArrHolder.ThreeRows(rs);
+  h := _T0485ArrHolder.ThreeRows(move rs);
   // No match — synth drop must walk each array element.
 }
 
 test_t0485_array_user_in_enum_with_match() `test {
   _T0485Row[3] rs = [_T0485Row(name: "a".to_string()), _T0485Row(name: "b".to_string()), _T0485Row(name: "c".to_string())];
-  h := _T0485ArrHolder.ThreeRows(rs);
+  h := _T0485ArrHolder.ThreeRows(move rs);
   match h {
     _T0485ArrHolder.ThreeRows(arr) => {
       assert(arr[0].name == "a", "first");
@@ -606,7 +606,7 @@ enum _T0485OptTupWrapper {
 
 test_t0485_optional_tuple_user_in_enum_synth_drop() `test {
   (_T0485Row, int)? t = (_T0485Row(name: "ot".to_string()), 7);
-  w := _T0485OptTupWrapper.Some(t);
+  w := _T0485OptTupWrapper.Some(move t);
   // No match — Optional<Tuple> branch must walk the tuple and drop the Row.
 }
 
@@ -622,7 +622,7 @@ test_t0485_array_tuple_user_in_enum_synth_drop() `test {
   (_T0485Row(name: "b".to_string()), 2),
   (_T0485Row(name: "c".to_string()), 3),
   ];
-  w := _T0485ArrTup.Pairs(ps);
+  w := _T0485ArrTup.Pairs(move ps);
 }
 
 // T0485: borrow markers added by match destructure must not leak past the
@@ -630,7 +630,7 @@ test_t0485_array_tuple_user_in_enum_synth_drop() `test {
 // reassignment must drop the old inner correctly without UAF on the binding.
 test_t0485_borrow_marker_arm_scoped() `test {
   _T0485Row? r1 = _T0485Row(name: "first".to_string());
-  e := _T0485OptWrapper.Some(r1);
+  e := _T0485OptWrapper.Some(move r1);
   match e {
     _T0485OptWrapper.Some(opt) => {
       // opt is a borrowed match-binding (variant data owns inner).
@@ -665,7 +665,7 @@ enum _T0485NestedOptWrapper {
 test_t0485_nested_optional_in_enum_synth_drop() `test {
   _T0485Row? inner = _T0485Row(name: "nested".to_string());
   _T0485Row?? outer = inner;
-  w := _T0485NestedOptWrapper.Some(outer);
+  w := _T0485NestedOptWrapper.Some(move outer);
   // No match — synth drop walks Optional<Optional<Row>> and frees inner Row.
 }
 
@@ -682,7 +682,7 @@ test_t0485_optional_array_in_enum_synth_drop() `test {
   _T0485Row(name: "y".to_string()),
   _T0485Row(name: "z".to_string())];
   _T0485Row[3]? opt = rs;
-  w := _T0485OptArrWrapper.Some(opt);
+  w := _T0485OptArrWrapper.Some(move opt);
   // No match — synth drop walks Optional<[3]Row> and frees each Row.
 }
 
@@ -699,7 +699,7 @@ test_t0485_array_of_optional_in_enum_synth_drop() `test {
   _T0485Row? r2 = _T0485Row(name: "q".to_string());
   _T0485Row? r3 = _T0485Row(name: "r".to_string());
   _T0485Row?[3] rs = [r1, r2, r3];
-  h := _T0485ArrOptHolder.Multiples(rs);
+  h := _T0485ArrOptHolder.Multiples(move rs);
   // No match — synth drop walks [3]Row? and frees each Some inner.
 }
 
@@ -715,7 +715,7 @@ test_t0485_array_of_array_in_enum_synth_drop() `test {
   _T0485Row[2] row1 = [_T0485Row(name: "a".to_string()), _T0485Row(name: "b".to_string())];
   _T0485Row[2] row2 = [_T0485Row(name: "c".to_string()), _T0485Row(name: "d".to_string())];
   _T0485Row[2][2] grid = [row1, row2];
-  h := _T0485ArrArrHolder.Grid(grid);
+  h := _T0485ArrArrHolder.Grid(move grid);
   // No match — synth drop walks [2][2]Row and frees all 4 Rows.
 }
 
@@ -727,7 +727,7 @@ test_t0485_optional_array_in_enum_with_match() `test {
   _T0485Row(name: "k".to_string()),
   _T0485Row(name: "l".to_string())];
   _T0485Row[3]? opt = rs;
-  w := _T0485OptArrWrapper.Some(opt);
+  w := _T0485OptArrWrapper.Some(move opt);
   match w {
     _T0485OptArrWrapper.Some(arr_opt) => {
       // arr_opt is Optional<[3]Row>; variant data still owns the inner array.
@@ -751,7 +751,7 @@ test_t0485_optional_array_in_enum_with_match() `test {
 test_t0512_nested_optional_match() `test {
   _T0485Row? inner = _T0485Row(name: "deep".to_string());
   _T0485Row?? outer = inner;
-  w := _T0485NestedOptWrapper.Some(outer);
+  w := _T0485NestedOptWrapper.Some(move outer);
   match w {
     _T0485NestedOptWrapper.Some(opt_opt) => {
       if first := opt_opt {
@@ -770,7 +770,7 @@ test_t0512_nested_optional_match() `test {
 test_t0512_nested_optional_if_else() `test {
   _T0485Row? inner = _T0485Row(name: "deep2".to_string());
   _T0485Row?? outer = inner;
-  w := _T0485NestedOptWrapper.Some(outer);
+  w := _T0485NestedOptWrapper.Some(move outer);
   match w {
     _T0485NestedOptWrapper.Some(opt_opt) => {
       if first := opt_opt {
@@ -793,7 +793,7 @@ test_t0512_nested_optional_if_else() `test {
 test_t0512_nested_optional_while_let() `test {
   _T0485Row? inner = _T0485Row(name: "deep3".to_string());
   _T0485Row?? outer = inner;
-  w := _T0485NestedOptWrapper.Some(outer);
+  w := _T0485NestedOptWrapper.Some(move outer);
   match w {
     _T0485NestedOptWrapper.Some(opt_opt) => {
       int iters = 0;

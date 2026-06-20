@@ -111,7 +111,7 @@ func TestUseAfterMove(t *testing.T) {
 
 func TestUseAfterMoveInCall(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			consume(s);
@@ -123,7 +123,7 @@ func TestUseAfterMoveInCall(t *testing.T) {
 
 func TestDoubleMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			consume(s);
@@ -208,7 +208,7 @@ func TestAssignResurrectsAfterCall(t *testing.T) {
 func TestMoveInIfBranch(t *testing.T) {
 	// Conservative: moved in then-branch without else means possibly moved after.
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			bool b = true;
@@ -240,7 +240,7 @@ func TestMoveInBothBranchesNoUse(t *testing.T) {
 func TestMoveInLoopBody(t *testing.T) {
 	// Conservative: moved in loop body means possibly moved after.
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			while true {
@@ -487,7 +487,7 @@ func TestIsCopyType(t *testing.T) {
 
 func TestInferredVarDeclMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			consume(s);
@@ -536,7 +536,7 @@ func TestDestructureVarDeclCopy(t *testing.T) {
 
 func TestForInMoveInsideBody(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			for i in 0..3 {
@@ -562,7 +562,7 @@ func TestForInBindingOK(t *testing.T) {
 
 func TestClassicForMoveInBody(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			for int i = 0; i < 3; i += 1 {
@@ -578,7 +578,7 @@ func TestClassicForMoveInBody(t *testing.T) {
 
 func TestInfiniteLoopMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			for {
@@ -609,7 +609,7 @@ func TestMatchPatternBindingOK(t *testing.T) {
 func TestMatchMoveInOneArm(t *testing.T) {
 	errs := ownerErrs(t, `
 		enum Color { Red, Green, Blue }
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			Color c = Color.Red;
 			string s = "hi";
@@ -628,7 +628,7 @@ func TestMatchMoveInOneArm(t *testing.T) {
 
 func TestIfExprMoveInBranch(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			bool b = true;
@@ -745,7 +745,7 @@ func TestMapLitMoveValues(t *testing.T) {
 
 func TestIndexExprMovedTarget(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~int[] a) {}
+		consume(int[] move a) {}
 		test() {
 			int[] items = [1, 2, 3];
 			consume(items);
@@ -866,7 +866,7 @@ func TestCallScopedBorrowExpires(t *testing.T) {
 	// Passing a variable by shared borrow should not prevent subsequent moves.
 	// The borrow expires at the statement boundary.
 	ownerOK(t, `
-		read(string &s) {}
+		read(string s) {}
 		consume(string s) {}
 		test() {
 			string s = "a";
@@ -891,7 +891,7 @@ func TestSequentialMutBorrowsOK(t *testing.T) {
 func TestSequentialSharedThenMutOK(t *testing.T) {
 	// Shared borrow expires before mutable borrow starts.
 	ownerOK(t, `
-		read(string &s) {}
+		read(string s) {}
 		modify(string ~s) {}
 		test() {
 			string s = "a";
@@ -908,8 +908,8 @@ func TestStoredBorrowBlocksMove(t *testing.T) {
 	// borrow is promoted to variable-scoped. Moving the origin is blocked
 	// while the borrower is still alive (T0164: NLL narrows to last-use).
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -923,7 +923,7 @@ func TestStoredBorrowBlocksMove(t *testing.T) {
 func TestStoredBorrowBlocksMutBorrow(t *testing.T) {
 	// Stored shared borrow blocks a subsequent mutable borrow while borrower is alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		modify(string ~s) {}
 		test() {
 			string s = "hello";
@@ -939,7 +939,7 @@ func TestStoredMutBorrowBlocksShared(t *testing.T) {
 	// Stored mutable borrow blocks a subsequent shared borrow while borrower is alive.
 	errs := ownerErrs(t, `
 		getMut(string ~s) string~ { return s; }
-		read(string &s) {}
+		read(string s) {}
 		test() {
 			string s = "hello";
 			string ~r = getMut(s);
@@ -955,7 +955,7 @@ func TestStoredMutBorrowBlocksShared(t *testing.T) {
 func TestMoveWhileBorrowedAssign(t *testing.T) {
 	// Assigning a borrowed variable to another variable is a move while borrower is alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -971,7 +971,7 @@ func TestMoveWhileBorrowedAssign(t *testing.T) {
 func TestAssignWhileBorrowed(t *testing.T) {
 	// Cannot reassign a variable while it is borrowed by another variable (borrower alive).
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -987,8 +987,8 @@ func TestBorrowerReassignExpiresBorrow(t *testing.T) {
 	// However, if r is reassigned to a new borrow of s and r is still alive,
 	// s is still borrowed (T0164: NLL narrows to last-use of borrower).
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -1017,7 +1017,7 @@ func TestReturnRefToLocal(t *testing.T) {
 func TestReturnRefToParam(t *testing.T) {
 	// Returning a reference to a parameter is OK — the caller still owns it.
 	ownerOK(t, `
-		good(string &s) string& { return s; }
+		good(string s) string& { return s; }
 	`)
 }
 
@@ -1038,7 +1038,7 @@ func TestMethodSharedReceiverCallScoped(t *testing.T) {
 	ownerOK(t, `
 		type T {
 			int x;
-			read(&this) int { return this.x; }
+			read(this) int { return this.x; }
 		}
 		consume(T t) {}
 		test() {
@@ -1071,13 +1071,13 @@ func TestMethodReceiverStoredBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
 		type T {
 			int x;
-			getRef(&this) int& { return this.x; }
+			getRef(this) int& { return this.x; }
 		}
-		consume(~T t) {}
+		consume(T move t) {}
 		test() {
 			T t = T(x: 1);
 			int &r = t.getRef();
-			consume(t);
+			consume(move t);
 			int &r2 = r;
 		}
 	`)
@@ -1089,8 +1089,8 @@ func TestMethodReceiverStoredBorrow(t *testing.T) {
 func TestBorrowInIfBranch(t *testing.T) {
 	// Stored borrow created in then-branch persists while borrower is alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			bool b = true;
@@ -1108,8 +1108,8 @@ func TestBorrowInIfBranch(t *testing.T) {
 func TestBorrowInLoop(t *testing.T) {
 	// Stored borrow created in loop body persists while borrower is alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = "";
@@ -1127,8 +1127,8 @@ func TestBorrowInLoop(t *testing.T) {
 func TestBorrowInBothBranches(t *testing.T) {
 	// Stored borrow in both branches persists while borrower is alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			bool b = true;
@@ -1150,7 +1150,7 @@ func TestBorrowInBothBranches(t *testing.T) {
 func TestCopyTypeNoBorrowTracking(t *testing.T) {
 	// Copy types don't need borrow tracking — borrows of copy types are allowed freely.
 	ownerOK(t, `
-		read(int &x) {}
+		read(int x) {}
 		test() {
 			int x = 1;
 			read(x);
@@ -1162,7 +1162,7 @@ func TestCopyTypeNoBorrowTracking(t *testing.T) {
 func TestBorrowDoesNotMoveValue(t *testing.T) {
 	// Passing by borrow does NOT consume the value — the variable can still be used.
 	ownerOK(t, `
-		read(string &s) {}
+		read(string s) {}
 		consume(string s) {}
 		test() {
 			string s = "hello";
@@ -1178,7 +1178,7 @@ func TestBorrowDoesNotMoveValue(t *testing.T) {
 func TestBorrowParamMultipleCalls(t *testing.T) {
 	// Multiple shared borrow calls on same variable should work (borrows expire).
 	ownerOK(t, `
-		read(string &s) {}
+		read(string s) {}
 		test() {
 			string s = "hello";
 			read(s);
@@ -1206,8 +1206,8 @@ func TestMutBorrowParamDoesNotMove(t *testing.T) {
 func TestStoredBorrowInferredVarDecl(t *testing.T) {
 	// Borrow promotion works with inferred var decls; persists while borrower alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			r := getRef(s);
@@ -1469,7 +1469,7 @@ func TestUseVarCannotBeMoved(t *testing.T) {
 		type Resource {
 			close() {}
 		}
-		consume(~Resource r) {}
+		consume(Resource move r) {}
 		test() {
 			use r := Resource();
 			consume(r);
@@ -1517,7 +1517,7 @@ func TestDroppableVariableUseAfterMove(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(~Resource r) { }
+		consume(Resource move r) { }
 		test() {
 			r := Resource(id: 1);
 			consume(r);
@@ -1534,7 +1534,7 @@ func TestDroppableConditionalMoveUseAfter(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(~Resource r) { }
+		consume(Resource move r) { }
 		test(bool cond) {
 			r := Resource(id: 1);
 			if cond {
@@ -1624,7 +1624,7 @@ func TestDroppableMoveToMethodArgUseAfter(t *testing.T) {
 		}
 		type Container {
 			int id;
-			take(~Resource r) { }
+			take(Resource move r) { }
 		}
 		test() {
 			c := Container(id: 0);
@@ -1648,7 +1648,7 @@ func TestDroppableMoveToConstructorField(t *testing.T) {
 		}
 		test() {
 			r := Inner(id: 1);
-			o := Outer(inner: r);
+			o := Outer(inner: move r);
 			int x = o.inner.id;
 		}
 	`)
@@ -1692,7 +1692,7 @@ func TestDroppableReturnMoveUseAfter(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(~Resource r) { }
+		consume(Resource move r) { }
 		test() Resource {
 			r := Resource(id: 1);
 			consume(r);
@@ -1801,7 +1801,7 @@ func TestAssignTargetIndexSubExpressions(t *testing.T) {
 			consume_arr(arr);
 			arr[0] = 5;
 		}
-		consume_arr(~int[] a) { }
+		consume_arr(int[] move a) { }
 	`)
 	expectOwnerError(t, errs, "use of moved variable 'arr'")
 }
@@ -1812,7 +1812,7 @@ func TestAssignTargetMemberSubExpressions(t *testing.T) {
 		type Box {
 			int val;
 		}
-		consume(~Box b) { }
+		consume(Box move b) { }
 		test() {
 			b := Box(val: 1);
 			consume(b);
@@ -1830,7 +1830,7 @@ func TestAssignTargetSliceSubExpressions(t *testing.T) {
 			consume_arr(arr);
 			arr[0:2] = [5, 6];
 		}
-		consume_arr(~int[] a) { }
+		consume_arr(int[] move a) { }
 	`)
 	expectOwnerError(t, errs, "use of moved variable 'arr'")
 }
@@ -1843,7 +1843,7 @@ func TestAssignTargetIndexExprChecksIndex(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(~Resource r) { }
+		consume(Resource move r) { }
 		test() {
 			r := Resource(id: 0);
 			consume(r);
@@ -1985,8 +1985,8 @@ func TestWhileUnwrapBodyCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Decoder {
 			int pos;
-			next_key(&this) string? { return none; }
-			decode_string(&this) string { return ""; }
+			next_key(this) string? { return none; }
+			decode_string(this) string { return ""; }
 		}
 		test() {
 			Decoder dec = Decoder(pos: 0);
@@ -2002,7 +2002,7 @@ func TestWhileUnwrapBodyCanMutBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Iter {
 			int pos;
-			peek(&this) int? { return none; }
+			peek(this) int? { return none; }
 			advance(~this) { this.pos += 1; }
 		}
 		test() {
@@ -2019,8 +2019,8 @@ func TestWhileCondBodyCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Stream {
 			int pos;
-			has_more(&this) bool { return false; }
-			read(&this) int { return 0; }
+			has_more(this) bool { return false; }
+			read(this) int { return 0; }
 		}
 		test() {
 			Stream s = Stream(pos: 0);
@@ -2036,8 +2036,8 @@ func TestIfUnwrapBodyCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Parser {
 			int pos;
-			try_parse(&this) string? { return none; }
-			consume(&this) string { return ""; }
+			try_parse(this) string? { return none; }
+			consume(this) string { return ""; }
 		}
 		test() {
 			Parser p = Parser(pos: 0);
@@ -2053,8 +2053,8 @@ func TestForInBodyCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type DataSource {
 			int[] items;
-			get_items(&this) int[] { return this.items; }
-			log(&this) {}
+			get_items(this) int[] { return this.items; }
+			log(this) {}
 		}
 		test() {
 			DataSource ds = DataSource(items: [1, 2, 3]);
@@ -2070,8 +2070,8 @@ func TestClassicForCondBodyCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Cursor {
 			int pos;
-			has_next(&this) bool { return this.pos < 10; }
-			read(&this) int { return this.pos; }
+			has_next(this) bool { return this.pos < 10; }
+			read(this) int { return this.pos; }
 		}
 		test() {
 			Cursor cur = Cursor(pos: 0);
@@ -2090,7 +2090,7 @@ func TestIfCondBodyCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Guard {
 			int level;
-			is_ready(&this) bool { return this.level > 0; }
+			is_ready(this) bool { return this.level > 0; }
 			activate(~this) { this.level = 0; }
 		}
 		test() {
@@ -2107,8 +2107,8 @@ func TestIfUnwrapElseCanReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Source {
 			int pos;
-			try_get(&this) string? { return none; }
-			fallback(&this) string { return ""; }
+			try_get(this) string? { return none; }
+			fallback(this) string { return ""; }
 			reset(~this) { this.pos = 0; }
 		}
 		test() {
@@ -2127,8 +2127,8 @@ func TestWhileUnwrapBindingAndReBorrow(t *testing.T) {
 	ownerOK(t, `
 		type Queue {
 			int count;
-			dequeue(&this) int? { return none; }
-			size(&this) int { return this.count; }
+			dequeue(this) int? { return none; }
+			size(this) int { return this.count; }
 		}
 		test() {
 			Queue q = Queue(count: 0);
@@ -2146,8 +2146,8 @@ func TestCondMultipleCallsSameObject(t *testing.T) {
 	ownerOK(t, `
 		type Validator {
 			int x;
-			check_a(&this) bool { return true; }
-			check_b(&this) bool { return true; }
+			check_a(this) bool { return true; }
+			check_b(this) bool { return true; }
 			run(~this) {}
 		}
 		test() {
@@ -2164,7 +2164,7 @@ func TestClassicForInitBorrowDoesNotLeakToBody(t *testing.T) {
 	ownerOK(t, `
 		type Config {
 			int max;
-			get_max(&this) int { return this.max; }
+			get_max(this) int { return this.max; }
 			process(~this) {}
 		}
 		test() {
@@ -2183,7 +2183,7 @@ func TestStoredBorrowStillBlocksInWhileBody(t *testing.T) {
 	// A stored borrow blocks conflicting borrows inside a loop body
 	// while the borrower is alive (T0164: NLL narrows to last-use).
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		mutate(string ~s) {}
 		test() {
 			string s = "hello";
@@ -2201,8 +2201,8 @@ func TestStoredBorrowStillBlocksInWhileBody(t *testing.T) {
 func TestStoredBorrowStillBlocksInWhileUnwrapBody(t *testing.T) {
 	// Variable-scoped borrow persists into while-unwrap body while borrower alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -2219,8 +2219,8 @@ func TestStoredBorrowStillBlocksInWhileUnwrapBody(t *testing.T) {
 func TestStoredBorrowCreatedInLoopPersists(t *testing.T) {
 	// A stored borrow created in a while-unwrap body persists while borrower alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = "";
@@ -2238,7 +2238,7 @@ func TestStoredBorrowCreatedInLoopPersists(t *testing.T) {
 func TestStoredBorrowStillBlocksInIfBody(t *testing.T) {
 	// Variable-scoped borrow persists into if body while borrower alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		mutate(string ~s) {}
 		test() {
 			string s = "hello";
@@ -2255,8 +2255,8 @@ func TestStoredBorrowStillBlocksInIfBody(t *testing.T) {
 func TestStoredBorrowStillBlocksInForInBody(t *testing.T) {
 	// Variable-scoped borrow persists into for-in body while borrower alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -2273,8 +2273,8 @@ func TestStoredBorrowStillBlocksInForInBody(t *testing.T) {
 func TestStoredBorrowStillBlocksInClassicForBody(t *testing.T) {
 	// Variable-scoped borrow persists into classic for body while borrower alive.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -2293,7 +2293,7 @@ func TestDropOrderSafeBorrowDeclaredAfterOrigin(t *testing.T) {
 	// Borrower declared after origin — safe LIFO order.
 	// Origin is dropped last (declared first), borrower dropped first.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -2324,7 +2324,7 @@ func TestDropOrderSafeDroppableAndBorrowCoexist(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test() {
 			string s = "hello";
 			h := Handle(id: 1);
@@ -2336,7 +2336,7 @@ func TestDropOrderSafeDroppableAndBorrowCoexist(t *testing.T) {
 func TestDropOrderSafeParameterBorrows(t *testing.T) {
 	// Parameters are declared before locals — borrows from params are always safe.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test(string s) {
 			string &r = getRef(s);
 		}
@@ -2350,7 +2350,7 @@ func TestDropOrderSafeMultipleLocalsWithDropAndBorrow(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test() {
 			string s = "hello";
 			r := Resource(id: 1);
@@ -2367,7 +2367,7 @@ func TestDropOrderDeclOrderTracking(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		test(string s) {
 			a := Resource(id: 1);
 			string &r = getRef(s);
@@ -2414,7 +2414,7 @@ func TestSelectCaseChannelBorrowDoesNotLeakIntoBody(t *testing.T) {
 		type Router {
 			channel[int] ch;
 			int count;
-			get_channel(&this) channel[int] { return this.ch; }
+			get_channel(this) channel[int] { return this.ch; }
 			advance(~this) { this.count += 1; }
 		}
 		test() {
@@ -2434,7 +2434,7 @@ func TestSelectCaseSendBorrowDoesNotLeakIntoBody(t *testing.T) {
 		type Sender {
 			channel[int] ch;
 			int count;
-			get_channel(&this) channel[int] { return this.ch; }
+			get_channel(this) channel[int] { return this.ch; }
 			advance(~this) { this.count += 1; }
 		}
 		test() {
@@ -2453,7 +2453,7 @@ func TestDisjointFieldBorrowsSharedOK(t *testing.T) {
 	// Borrowing disjoint fields as shared should not conflict.
 	ownerOK(t, `
 		type Pair { string a; string b; }
-		read(string &s) {}
+		read(string s) {}
 		test() {
 			p := Pair(a: "x", b: "y");
 			read(p.a);
@@ -2479,7 +2479,7 @@ func TestDisjointFieldBorrowsMixedOK(t *testing.T) {
 	// Shared borrow of one field and mutable borrow of a different field — OK.
 	ownerOK(t, `
 		type Pair { string a; string b; }
-		read(string &s) {}
+		read(string s) {}
 		mutate(string ~s) {}
 		test() {
 			p := Pair(a: "x", b: "y");
@@ -2509,7 +2509,7 @@ func TestSameFieldStoredSharedThenMutConflict(t *testing.T) {
 	// Stored shared borrow of a field blocks a mutable borrow while borrower alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; }
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		mutate(string ~s) {}
 		test() {
 			f := Foo(x: "hi");
@@ -2525,7 +2525,7 @@ func TestWholeVariableStoredVsFieldConflict(t *testing.T) {
 	// Stored whole-variable borrow conflicts with field mutable borrow while alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; string y; }
-		getRef(Foo &f) Foo& { return f; }
+		getRef(Foo f) Foo& { return f; }
 		mutate(string ~s) {}
 		test() {
 			f := Foo(x: "a", y: "b");
@@ -2541,7 +2541,7 @@ func TestFieldStoredVsWholeVariableMutConflict(t *testing.T) {
 	// Stored field borrow then whole-variable mutable borrow — conflict while alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; string y; }
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		mutate_whole(Foo ~f) {}
 		test() {
 			f := Foo(x: "a", y: "b");
@@ -2557,7 +2557,7 @@ func TestDisjointFieldsInSameCallOK(t *testing.T) {
 	// Passing disjoint fields as borrow params in a single call — OK.
 	ownerOK(t, `
 		type Pair { string a; string b; }
-		both(string &x, string &y) {}
+		both(string x, string y) {}
 		test() {
 			p := Pair(a: "x", b: "y");
 			both(p.a, p.b);
@@ -2569,13 +2569,13 @@ func TestSameFieldInSameCallConflict(t *testing.T) {
 	// Same field as mutable + shared in one call — conflict.
 	errs := ownerErrs(t, `
 		type Foo { string x; }
-		mixed(string ~a, string &b) {}
+		mixed(string ~a, string b) {}
 		test() {
 			f := Foo(x: "hi");
 			mixed(f.x, f.x);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable because it is also borrowed as shared in the same call")
+	expectOwnerError(t, errs, "cannot borrow 'f.x' as shared — it is mutably borrowed")
 }
 
 func TestDisjointFieldsInSameCallMutOK(t *testing.T) {
@@ -2595,7 +2595,7 @@ func TestReceiverBorrowDisjointFieldOK(t *testing.T) {
 	// NOTE: receiver borrows the whole object, so a field borrow of the same object conflicts.
 	// But method call on a sub-object's field is disjoint from another field.
 	ownerOK(t, `
-		type Inner { int v; get_v(&this) int { return this.v; } }
+		type Inner { int v; get_v(this) int { return this.v; } }
 		type Outer { Inner a; Inner b; }
 		test() {
 			o := Outer(a: Inner(v: 1), b: Inner(v: 2));
@@ -2634,7 +2634,7 @@ func TestPathsOverlap(t *testing.T) {
 
 func TestMoveParamUseAfterMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) { }
+		consume(string move s) { }
 		test() {
 			string a = "hello";
 			consume(a);
@@ -2646,10 +2646,10 @@ func TestMoveParamUseAfterMove(t *testing.T) {
 
 func TestMoveParamNoError(t *testing.T) {
 	ownerOK(t, `
-		consume(~string s) { }
+		consume(string move s) { }
 		test() {
 			string a = "hello";
-			consume(a);
+			consume(move a);
 		}
 	`)
 }
@@ -2657,7 +2657,7 @@ func TestMoveParamNoError(t *testing.T) {
 func TestMoveParamBorrowStillValid(t *testing.T) {
 	// & param is borrowed — variable still valid after call
 	ownerOK(t, `
-		borrow(string &s) int { return 0; }
+		borrow(string s) int { return 0; }
 		test() {
 			string a = "hello";
 			borrow(a);
@@ -3323,7 +3323,7 @@ func TestNLLBorrowExpiredAfterLastUse(t *testing.T) {
 	// When a borrower is not used after the borrow, the borrow expires,
 	// allowing subsequent moves of the origin.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		consume(string s) {}
 		test() {
 			string s = "hello";
@@ -3337,7 +3337,7 @@ func TestNLLBorrowExpiredMutAfterLastUse(t *testing.T) {
 	// Mutable borrow expires when the borrower's last use has passed.
 	ownerOK(t, `
 		getMut(string ~s) string~ { return s; }
-		read(string &s) {}
+		read(string s) {}
 		test() {
 			string s = "hello";
 			string ~r = getMut(s);
@@ -3349,8 +3349,8 @@ func TestNLLBorrowExpiredMutAfterLastUse(t *testing.T) {
 func TestNLLBorrowExpiredBeforeMove(t *testing.T) {
 	// Borrower used only in ExprStmt — borrow expires, move allowed after.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
-		readRef(string &s) {}
+		getRef(string s) string& { return s; }
+		readRef(string s) {}
 		consume(string s) {}
 		test() {
 			string s = "hello";
@@ -3364,9 +3364,9 @@ func TestNLLBorrowExpiredBeforeMove(t *testing.T) {
 func TestNLLBorrowActiveWhenUsedAfterConflict(t *testing.T) {
 	// Borrower used after the conflict point — borrow must be active.
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		readRef(string &s) {}
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		readRef(string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -3380,7 +3380,7 @@ func TestNLLBorrowActiveWhenUsedAfterConflict(t *testing.T) {
 func TestNLLBorrowExpiredInControlFlow(t *testing.T) {
 	// Borrower not used after control flow — borrow expires.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		consume(string s) {}
 		test() {
 			string s = "hello";
@@ -3398,7 +3398,7 @@ func TestNLLBorrowExpiredMethodReceiver(t *testing.T) {
 	ownerOK(t, `
 		type T {
 			int x;
-			getRef(&this) int& { return this.x; }
+			getRef(this) int& { return this.x; }
 		}
 		consume(T t) {}
 		test() {
@@ -3413,7 +3413,7 @@ func TestNLLBorrowExpiredFieldBorrow(t *testing.T) {
 	// Field borrow expires when borrower is no longer used.
 	ownerOK(t, `
 		type Foo { string x; string y; }
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		mutate(string ~s) {}
 		test() {
 			f := Foo(x: "a", y: "b");
@@ -3426,7 +3426,7 @@ func TestNLLBorrowExpiredFieldBorrow(t *testing.T) {
 func TestNLLBorrowExpiredInferredVarDecl(t *testing.T) {
 	// Inferred ref variable — borrow expires at last use.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		consume(string s) {}
 		test() {
 			string s = "hello";
@@ -3439,7 +3439,7 @@ func TestNLLBorrowExpiredInferredVarDecl(t *testing.T) {
 func TestNLLBorrowExpiredReassigned(t *testing.T) {
 	// After borrower reassignment and no further use, borrow expires.
 	ownerOK(t, `
-		getRef(string &s) string& { return s; }
+		getRef(string s) string& { return s; }
 		consume(string s) {}
 		test() {
 			string s = "hello";
@@ -3455,16 +3455,16 @@ func TestNLLBorrowExpiredReassigned(t *testing.T) {
 func TestLifetimeElisionSingleRefParam(t *testing.T) {
 	// Elision rule 2: exactly one ref param — its lifetime covers the return.
 	ownerOK(t, `
-		first(string &a) string& { return a; }
+		first(string a) string& { return a; }
 	`)
 }
 
 func TestLifetimeElisionThisReceiver(t *testing.T) {
-	// Elision rule 3: &this receiver — always OK.
+	// Elision rule 3: this receiver — always OK.
 	ownerOK(t, `
 		type Holder {
 			string name;
-			get_name(&this) string& { return this.name; }
+			get_name(this) string& { return this.name; }
 		}
 	`)
 }
@@ -3472,7 +3472,7 @@ func TestLifetimeElisionThisReceiver(t *testing.T) {
 func TestLifetimeAmbiguousMultiRefReturn(t *testing.T) {
 	// Rule 4: two ref params, conditional return from both — ambiguous without annotation.
 	errs := ownerErrs(t, `
-		pick(string &a, string &b) string& {
+		pick(string a, string b) string& {
 			if true { return a; }
 			return b;
 		}
@@ -3483,7 +3483,7 @@ func TestLifetimeAmbiguousMultiRefReturn(t *testing.T) {
 func TestLifetimeUnambiguousMultiRefReturn(t *testing.T) {
 	// Rule 4: two ref params but always returns the same one — unambiguous.
 	ownerOK(t, `
-		first_of(string &a, string &b) string& {
+		first_of(string a, string b) string& {
 			return a;
 		}
 	`)
@@ -3492,7 +3492,7 @@ func TestLifetimeUnambiguousMultiRefReturn(t *testing.T) {
 func TestLifetimeExplicitSameLifetime(t *testing.T) {
 	// Explicit: both params share the same lifetime, return either — OK.
 	ownerOK(t, `
-		longest(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
+		longest(string a `+"`"+`lifetime(x), string b `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
 			if true { return a; }
 			return b;
 		}
@@ -3502,7 +3502,7 @@ func TestLifetimeExplicitSameLifetime(t *testing.T) {
 func TestLifetimeExplicitMismatch(t *testing.T) {
 	// Explicit: return borrows from param with different lifetime than declared.
 	errs := ownerErrs(t, `
-		pick(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) {
+		pick(string a `+"`"+`lifetime(x), string b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) {
 			return b;
 		}
 	`)
@@ -3512,7 +3512,7 @@ func TestLifetimeExplicitMismatch(t *testing.T) {
 func TestLifetimeExplicitCorrect(t *testing.T) {
 	// Explicit: return borrows from param with matching lifetime — OK.
 	ownerOK(t, `
-		pick(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) {
+		pick(string a `+"`"+`lifetime(x), string b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) {
 			return a;
 		}
 	`)
@@ -3695,7 +3695,7 @@ func TestFieldMoveNonDroppableOwnerNonCopyFieldOK(t *testing.T) {
 		enum Color { Red; Green; Blue; }
 		type Wrapper { Color c; }
 		test() {
-			Wrapper w = Wrapper(c: Color.Red);
+			Wrapper w = Wrapper(c: move Color.Red);
 			Color c = w.c;
 		}
 	`)
@@ -3709,7 +3709,7 @@ func TestFieldMoveNonDroppableFieldTypeOK(t *testing.T) {
 		enum Color { Red; Green; Blue; }
 		type Tagged { string name; Color tag; }
 		test() {
-			Tagged t = Tagged(name: "x", tag: Color.Red);
+			Tagged t = Tagged(name: "x", tag: move Color.Red);
 			Color c = t.tag;
 		}
 	`)
@@ -3981,7 +3981,7 @@ func TestDestructureFromFieldConsumeParentRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := h.pair;
@@ -3997,7 +3997,7 @@ func TestDestructureFromFieldConsumeParentRejected(t *testing.T) {
 func TestDestructureFromIndexConsumeParentRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
-		consume_vec(~Vector[(_BoxStr, int)] v) {}
+		consume_vec(Vector[(_BoxStr, int)] move v) {}
 		test() {
 			Vector[(_BoxStr, int)] arr = [];
 			arr.push((_BoxStr(s: "x"), 2));
@@ -4022,7 +4022,7 @@ func TestDestructureFromFieldParenConsumeParentRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := (h.pair);
@@ -4039,13 +4039,13 @@ func TestDestructureFromFieldParenConsumeAfterLastUseOK(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := (h.pair);
 			_ = b.s;
 			_ = n;
-			consume(h);
+			consume(move h);
 		}
 	`)
 }
@@ -4056,7 +4056,7 @@ func TestDestructureFromFieldParenConsumeAfterLastUseOK(t *testing.T) {
 func TestDestructureFromIndexParenConsumeParentRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
-		consume_vec(~Vector[(_BoxStr, int)] v) {}
+		consume_vec(Vector[(_BoxStr, int)] move v) {}
 		test() {
 			Vector[(_BoxStr, int)] arr = [];
 			arr.push((_BoxStr(s: "x"), 2));
@@ -4074,14 +4074,14 @@ func TestDestructureFromIndexParenConsumeParentRejected(t *testing.T) {
 func TestDestructureFromIndexParenConsumeAfterLastUseOK(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
-		consume_vec(~Vector[(_BoxStr, int)] v) {}
+		consume_vec(Vector[(_BoxStr, int)] move v) {}
 		test() {
 			Vector[(_BoxStr, int)] arr = [];
 			arr.push((_BoxStr(s: "x"), 2));
 			(b, n) := (arr[0]);
 			_ = b.s;
 			_ = n;
-			consume_vec(arr);
+			consume_vec(move arr);
 		}
 	`)
 }
@@ -4092,7 +4092,7 @@ func TestDestructureFromFieldDoubleParenRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := ((h.pair));
@@ -4109,13 +4109,13 @@ func TestDestructureFromFieldNLLNarrowing(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := h.pair;
 			_ = b.s;
 			_ = n;
-			consume(h);
+			consume(move h);
 		}
 	`)
 }
@@ -4126,11 +4126,11 @@ func TestDestructureFromFieldNLLNarrowing(t *testing.T) {
 // the Arc payload would both free the same instance (double-free).
 func TestIfUnwrapBorrowedOptionalReadOK(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`"+`abstract; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`"+`abstract; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		test() {
 			Circle? init = Circle(name: "c", radius: 1.0);
-			a := Ref[Circle?](init);
+			a := Ref[Circle?](move init);
 			if x := a.borrow {
 				_ := x.radius;
 			}
@@ -4140,8 +4140,8 @@ func TestIfUnwrapBorrowedOptionalReadOK(t *testing.T) {
 
 func TestIfUnwrapBorrowedOptionalMoveRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`"+`abstract; }
-		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Shape { string name; area(this) f64 `+"`"+`abstract; }
+		type Circle is Shape { f64 radius; area(this) f64 { return this.radius; } }
 		test() {
 			Circle? init = Circle(name: "c", radius: 1.0);
 			a := Ref[Circle?](init);
@@ -4161,7 +4161,7 @@ func TestDestructureFromFieldMoveLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume_box(~_BoxStr b) {}
+		consume_box(_BoxStr move b) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := h.pair;
@@ -4177,12 +4177,12 @@ func TestDestructureFromFieldMoveLocalRejected(t *testing.T) {
 func TestDestructureFromFieldAllCopyElemsOK(t *testing.T) {
 	ownerOK(t, `
 		type Holder { (int, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (1, 2));
 			(a, b) := h.pair;
 			_ = a + b;
-			consume(h);
+			consume(move h);
 		}
 	`)
 }
@@ -4193,12 +4193,12 @@ func TestDestructureFromFieldPartialCopyMixedNLL(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, n) := h.pair;
 			_ = b.s;
-			consume(h);
+			consume(move h);
 			_ = n;
 		}
 	`)
@@ -4211,7 +4211,7 @@ func TestDestructureFromFieldDiscardSlotRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
-		consume(~Holder h) {}
+		consume(Holder move h) {}
 		test() {
 			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
 			(b, _) := h.pair;
@@ -4237,7 +4237,7 @@ func TestDestructureFromThisConsumeRejected(t *testing.T) {
 				_ = n;
 			}
 		}
-		consume_holder(~Holder h) {}
+		consume_holder(Holder move h) {}
 		test() {}
 	`)
 	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
@@ -4258,7 +4258,7 @@ func TestDestructureFromThisNLLNarrowing(t *testing.T) {
 				consume_holder(this);
 			}
 		}
-		consume_holder(~Holder h) {}
+		consume_holder(Holder move h) {}
 		test() {}
 	`)
 	expectOwnerError(t, errs, "cannot consume 'this'")
@@ -4276,7 +4276,7 @@ func TestDestructureFromCallMemberMoveLocalRejected(t *testing.T) {
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
 		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
-		consume_box(~_BoxStr b) {}
+		consume_box(_BoxStr move b) {}
 		test() {
 			(b, n) := make_holder().pair;
 			consume_box(b);
@@ -4557,7 +4557,7 @@ func TestFieldMoveGenericNoDropConcreteFieldOK(t *testing.T) {
 			T v;
 		}
 		test() {
-			Holder[int] h = Holder[int](c: Color.Red, v: 7);
+			Holder[int] h = Holder[int](c: move Color.Red, v: 7);
 			Color c = h.c;
 		}
 	`)
@@ -4948,7 +4948,7 @@ func TestT0338_MoveBorrowedParamIntoConstructor(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box {
 			u8[] data;
-			new(~this, ~u8[] d) { this.data = d; }
+			new(~this, u8[] move d) { this.data = d; }
 		}
 		_take(u8[] data) int {
 			Box b = Box(d: data);
@@ -4986,7 +4986,7 @@ func TestT0338_ReturnBorrowedParamOK(t *testing.T) {
 // Passing a non-~ param to a ~ callee is rejected.
 func TestT0338_PassBorrowedToConsume(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		forward(string s) { consume(s); }
 		test() {}
 	`)
@@ -4996,7 +4996,7 @@ func TestT0338_PassBorrowedToConsume(t *testing.T) {
 // Plain `this` (non-`~`, non-`&`) cannot itself be moved into a `~` callee.
 func TestT0338_MovePlainThis(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~Box b) {}
+		consume(Box move b) {}
 		type Box {
 			int x;
 			leak(this) { consume(this); }
@@ -5011,7 +5011,7 @@ func TestT0338_MovePlainThis(t *testing.T) {
 // would double-free at the caller's scope exit.
 func TestT0569_MutThisCannotBeConsumed(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~Box b) {}
+		consume(Box move b) {}
 		type Box {
 			int x;
 			into(~this) { consume(this); }
@@ -5389,10 +5389,10 @@ func TestT0338_CopyParamMovable(t *testing.T) {
 // `&` typed param remains borrowed (existing behavior, re-confirm).
 func TestT0338_RefParamBorrowed(t *testing.T) {
 	ownerOK(t, `
-		f(&string s) int { return 1; }
+		f(string s) int { return 1; }
 		test() {
 			string a = "hi";
-			f(&a);
+			f(a);
 			int n = 1;
 		}
 	`)
@@ -5401,10 +5401,10 @@ func TestT0338_RefParamBorrowed(t *testing.T) {
 // Local owned values can still be moved — only parameters are borrowed.
 func TestT0338_LocalOwnedMovable(t *testing.T) {
 	ownerOK(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
-			consume(s);
+			consume(move s);
 		}
 	`)
 }
@@ -5414,15 +5414,15 @@ func TestT0338_MutParamConsumableInConstructor(t *testing.T) {
 	ownerOK(t, `
 		type Box {
 			u8[] data;
-			new(~this, ~u8[] d) { this.data = d; }
+			new(~this, u8[] move d) { this.data = d; }
 		}
-		_take(~u8[] data) int {
-			Box b = Box(d: data);
+		_take(u8[] move data) int {
+			Box b = Box(d: move data);
 			return 0;
 		}
 		test() {
 			u8[] v = u8[]();
-			_take(v);
+			_take(move v);
 		}
 	`)
 }
@@ -5459,9 +5459,9 @@ func TestT0338_SetterParamConsumable(t *testing.T) {
 // Variadic parameters are owned by the callee (synthesized vector).
 func TestT0338_VariadicParamOwned(t *testing.T) {
 	ownerOK(t, `
-		consume(~int[] v) {}
+		consume(int[] move v) {}
 		sum(...int nums) {
-			consume(nums);
+			consume(move nums);
 		}
 		test() {}
 	`)
@@ -5471,7 +5471,7 @@ func TestT0338_VariadicParamOwned(t *testing.T) {
 // pattern as moving into a constructor field.
 func TestT0338_LambdaMoveCaptureBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		f(string s) {
 			g := move || -> int {
 				consume(s);
@@ -5487,11 +5487,11 @@ func TestT0338_LambdaMoveCaptureBorrowedParam(t *testing.T) {
 // `move` lambda capture of an owned local is fine.
 func TestT0338_LambdaMoveCaptureOwnedLocal(t *testing.T) {
 	ownerOK(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			string s = "hi";
 			g := move || -> int {
-				consume(s);
+				consume(move s);
 				return 1;
 			};
 			int n = g();
@@ -5505,8 +5505,8 @@ func TestT0338_LambdaMoveCaptureOwnedLocal(t *testing.T) {
 // TestStoredBorrowBlocksMove). Both paths must enforce the same invariant.
 func TestT0338_ConsumeOwnedLocalWhileBorrowed(t *testing.T) {
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -5522,7 +5522,7 @@ func TestT0338_ConsumeOwnedLocalWhileBorrowed(t *testing.T) {
 // still errors. Exercises the Borrowed fixed-point branch in state.merge.
 func TestT0338_MergeBorrowedThenConsume(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		_use(string s, bool flag) {
 			if (flag) {
 				int n = s.len;
@@ -5544,7 +5544,7 @@ func TestT0338_ConstructorNamedArgBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box {
 			string s;
-			new(~this, ~string s) { this.s = s; }
+			new(~this, string move s) { this.s = s; }
 		}
 		_take(string s) {
 			Box b = Box(s: s);
@@ -5590,7 +5590,7 @@ func TestT0634_GenericEnumVariantCtorBorrowedParamRejected(t *testing.T) {
 func TestT0634_GenericEnumVariantCtorMutParamOK(t *testing.T) {
 	ownerOK(t, `
 		enum Holder[T] { Wrap(T v), Nada, }
-		mk_holder[T](~T x) Holder[T] { return Holder[T].Wrap(x); }
+		mk_holder[T](T move x) Holder[T] { return Holder[T].Wrap(move x); }
 		test() {}
 	`)
 }
@@ -5612,9 +5612,9 @@ func TestT0634_NonGenericEnumVariantCtorBorrowedParamRejected(t *testing.T) {
 func TestT0634_GenericEnumVariantCtorOwnedLocalOK(t *testing.T) {
 	ownerOK(t, `
 		enum Holder[T] { Wrap(T v), Nada, }
-		mk_holder[T](~T x) Holder[T] {
+		mk_holder[T](T move x) Holder[T] {
 			T local = x;
-			return Holder[T].Wrap(local);
+			return Holder[T].Wrap(move local);
 		}
 		test() {}
 	`)
@@ -5646,7 +5646,7 @@ func TestT0634_EnumMethodCallNotTreatedAsVariantCtor(t *testing.T) {
 	ownerOK(t, `
 		enum Tag {
 			A, B,
-			label(&this, string note) string { return note; }
+			label(this, string note) string { return note; }
 		}
 		use_method(string s) string {
 			Tag t = Tag.A;
@@ -5667,7 +5667,7 @@ func TestT0634_GenericEnumMethodCallNotTreatedAsVariantCtor(t *testing.T) {
 	ownerOK(t, `
 		enum Holder[T] {
 			Wrap(T v), Nada,
-			tag_of(&this, string s) string { return s; }
+			tag_of(this, string s) string { return s; }
 		}
 		use_it(string label) string {
 			Holder[int] h = Holder[int].Nada;
@@ -5723,13 +5723,13 @@ func TestT0556_PushBorrowedMutexGuardParamRejected(t *testing.T) {
 // (drop flag cleared), and the callee may consume it. No double-free.
 func TestT0556_PushMutMutexParamOK(t *testing.T) {
 	ownerOK(t, `
-		take_mutex_push(~Mutex[int] m) {
+		take_mutex_push(Mutex[int] move m) {
 			outer := Vector[Mutex[int]]();
-			outer.push(m);
+			outer.push(move m);
 		}
 		test() {
 			m := Mutex[int](42);
-			take_mutex_push(m);
+			take_mutex_push(move m);
 		}
 	`)
 }
@@ -5853,7 +5853,7 @@ func TestT0349_RaiseBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
 		type MyError is error {
 			string field;
-			new(~this, ~string message, ~string field) {
+			new(~this, string move message, string move field) {
 				this.message = message;
 				this.field = field;
 			}
@@ -5871,7 +5871,7 @@ func TestT0349_RaiseOwnedLocalOK(t *testing.T) {
 	ownerOK(t, `
 		type MyError is error {
 			string field;
-			new(~this, ~string message, ~string field) {
+			new(~this, string move message, string move field) {
 				this.message = message;
 				this.field = field;
 			}
@@ -5888,7 +5888,7 @@ func TestT0349_RaiseOwnedLocalOK(t *testing.T) {
 // Yielding a borrowed param is a double-free.
 func TestT0349_YieldBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Box { string s; new(~this, ~string s) { this.s = s; } }
+		type Box { string s; new(~this, string move s) { this.s = s; } }
 		gen(Box b) stream[Box] {
 			yield b;
 		}
@@ -5900,7 +5900,7 @@ func TestT0349_YieldBorrowedParam(t *testing.T) {
 // Yielding an owned local works.
 func TestT0349_YieldOwnedLocalOK(t *testing.T) {
 	ownerOK(t, `
-		type Box { string s; new(~this, ~string s) { this.s = s; } }
+		type Box { string s; new(~this, string move s) { this.s = s; } }
 		gen() stream[Box] {
 			Box b = Box(s: "hi");
 			yield b;
@@ -5954,7 +5954,7 @@ func TestT0349_DirectChannelSendOwnedLocalOK(t *testing.T) {
 		test() {
 			channel[string] ch = channel[string]();
 			string s = "hi";
-			ch.send(s);
+			ch.send(move s);
 		}
 	`)
 }
@@ -5993,8 +5993,8 @@ func TestT0351_AssignVarOwnedLocalOK(t *testing.T) {
 // Field assignment to a borrowed param double-frees.
 func TestT0351_AssignFieldBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Box { string s; new(~this, ~string s) { this.s = s; } }
-		store(~Box b, string s) {
+		type Box { string s; new(~this, string move s) { this.s = s; } }
+		store(Box move b, string s) {
 			b.s = s;
 		}
 		test() {}
@@ -6005,8 +6005,8 @@ func TestT0351_AssignFieldBorrowedParam(t *testing.T) {
 // Field assignment with ~ param works.
 func TestT0351_AssignFieldMoveParamOK(t *testing.T) {
 	ownerOK(t, `
-		type Box { string s; new(~this, ~string s) { this.s = s; } }
-		store(~Box b, ~string s) {
+		type Box { string s; new(~this, string move s) { this.s = s; } }
+		store(Box move b, string move s) {
 			b.s = s;
 		}
 		test() {}
@@ -6061,7 +6061,7 @@ func TestT0351_AssignMutexGuardBorrowBorrowedParam(t *testing.T) {
 // MutexGuard.borrow setter assigning a ~ param works.
 func TestT0351_AssignMutexGuardBorrowMoveParamOK(t *testing.T) {
 	ownerOK(t, `
-		forward(Mutex[string] m, ~string s) {
+		forward(Mutex[string] m, string move s) {
 			use g := m.lock();
 			g.borrow = s;
 		}
@@ -6132,7 +6132,7 @@ func TestT0351_CompoundAssignOwnedLocalMoves(t *testing.T) {
 // ownership-level "cannot move borrowed value" diagnostic.
 func TestT0380_ConsumeBorrowVar(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6148,7 +6148,7 @@ func TestT0380_ConsumeBorrowVar(t *testing.T) {
 // previous "cannot move out of '.borrow' getter" ownership-level check.
 func TestT0380_ConsumeInlineBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6164,7 +6164,7 @@ func TestT0380_ConsumeInlineBorrow(t *testing.T) {
 // downstream consume — that downstream check is now defense-in-depth.
 func TestT0380_AssignBorrowToOwnedThenConsumeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6196,7 +6196,7 @@ func TestT0380_AssignBorrowCloneToOwnedOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
 			s := "hi";
-			a := Ref[string](s);
+			a := Ref[string](move s);
 			b := "old";
 			b = a.borrow.clone();
 		}
@@ -6206,7 +6206,7 @@ func TestT0380_AssignBorrowCloneToOwnedOK(t *testing.T) {
 // T0438: same sema-level rejection applies for MutexGuard.borrow.
 func TestT0380_ConsumeMutexGuardBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			m := Mutex[string]("hi");
 			use guard := m.lock();
@@ -6221,16 +6221,18 @@ func TestT0380_ConsumeMutexGuardBorrow(t *testing.T) {
 // rejected at sema. Use `.clone()` to pass an owned copy, or change the
 // callee parameter to `string&`.
 func TestT0380_BorrowVarToValueParamRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+	// T0998: a bare parameter is a shared borrow, so passing an existing borrow
+	// reborrows into it — no longer rejected. (Consuming a borrow is still
+	// rejected; see the `move`-parameter cases.)
+	ownerOK(t, `
 		readlen(string s) int { return s.len; }
 		test() {
 			s := "hi";
-			a := Ref[string](s);
+			a := Ref[string](move s);
 			borrowed := a.borrow;
 			int n = readlen(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
 // T0438: cloning makes it an owned copy — accepted.
@@ -6239,7 +6241,7 @@ func TestT0380_BorrowCloneToValueParamOK(t *testing.T) {
 		readlen(string s) int { return s.len; }
 		test() {
 			s := "hi";
-			a := Ref[string](s);
+			a := Ref[string](move s);
 			int n = readlen(a.borrow.clone());
 		}
 	`)
@@ -6250,7 +6252,7 @@ func TestT0380_BorrowVarReadOK(t *testing.T) {
 	ownerOK(t, `
 		test() {
 			s := "hi";
-			a := Ref[string](s);
+			a := Ref[string](move s);
 			borrowed := a.borrow;
 			int n = borrowed.len;
 		}
@@ -6278,7 +6280,7 @@ func TestT0380_BorrowInVectorLit(t *testing.T) {
 // by sema since `string&` is not assignable to `string` for non-Copy T.
 func TestT0381_ExplicitRefDeclRejectsConsume(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6293,8 +6295,8 @@ func TestT0381_ExplicitRefDeclRejectsConsume(t *testing.T) {
 // likewise rejected at sema for non-Copy T.
 func TestT0381_GenericRefReturnRejectsConsume(t *testing.T) {
 	errs := ownerErrs(t, `
-		getRef(string &s) string& { return s; }
-		consume(~string s) {}
+		getRef(string s) string& { return s; }
+		consume(string move s) {}
 		test() {
 			string s = "hello";
 			r := getRef(s);
@@ -6322,7 +6324,7 @@ func TestT0380_TypedDeclBorrowVarRejected(t *testing.T) {
 // are safe. Existing patterns like `ch.send(a.borrow)` must continue to work.
 func TestT0380_CopyInnerTypeNoReject(t *testing.T) {
 	ownerOK(t, `
-		consume(~int n) {}
+		consume(int move n) {}
 		test() {
 			a := Ref[int](42);
 			consume(a.borrow);
@@ -6335,7 +6337,7 @@ func TestT0380_CopyInnerTypeNoReject(t *testing.T) {
 // MutexGuard with Copy inner type: same — no rejection.
 func TestT0380_MutexGuardCopyInnerNoReject(t *testing.T) {
 	ownerOK(t, `
-		consume(~int n) {}
+		consume(int move n) {}
 		test() {
 			m := Mutex[int](42);
 			use guard := m.lock();
@@ -6349,7 +6351,7 @@ func TestT0380_MutexGuardCopyInnerNoReject(t *testing.T) {
 // is rejected at sema.
 func TestT0377_ConsumeIfBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6364,7 +6366,7 @@ func TestT0377_ConsumeIfBorrowVarRejected(t *testing.T) {
 // T0377 / T0438: same for match-laundered borrows.
 func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6381,7 +6383,7 @@ func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
 // borrow inner pointer treated as owned, causing UAF on scope exit.
 func TestT0488_MixedIfNonCopyRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6398,7 +6400,7 @@ func TestT0488_MixedIfNonCopyRejected(t *testing.T) {
 // rejected by sema at the consume call.
 func TestT0377_ConsumeParenBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6413,7 +6415,7 @@ func TestT0377_ConsumeParenBorrowVarRejected(t *testing.T) {
 // are likewise rejected at the consume call.
 func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6433,7 +6435,7 @@ func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
 // for the match-expression code path in checkMatchExpr.
 func TestT0488_MixedMatchNonCopyRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
+		consume(string move s) {}
 		test() {
 			s := "hi";
 			a := Ref[string](s);
@@ -6644,7 +6646,7 @@ func TestT0426_LambdaReturnRefOK_OwnedOuter(t *testing.T) {
 func TestT0426_LambdaReturnRefToLambdaParam_OK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			f := |string& s| -> string& { return s; };
+			f := |string s| -> string& { return s; };
 		}
 	`)
 }
@@ -6686,7 +6688,7 @@ func TestT0426_NestedLambdaRefReturnsBothLevels_OK(t *testing.T) {
 		test() {
 			a := Ref[string]("x");
 			outer := move || -> string& {
-				inner := |string& s| -> string& { return s; };
+				inner := |string s| -> string& { return s; };
 				return inner(a.borrow);
 			};
 		}
@@ -6723,7 +6725,7 @@ func TestT0426_LambdaInsideMethodBorrowAsOwnedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type W {
 			int x;
-			method(&this) {
+			method(this) {
 				f := move || -> string {
 					a := Ref[string]("x");
 					return a.borrow;
@@ -6744,8 +6746,8 @@ func TestT0426_LambdaInsideOwnedMethod_RefReturnOK(t *testing.T) {
 	ownerOK(t, `
 		type W {
 			int x;
-			method(&this) string {
-				f := move |string& s| -> string& { return s; };
+			method(this) string {
+				f := move |string s| -> string& { return s; };
 				return "ok";
 			}
 		}
@@ -6761,7 +6763,7 @@ func TestT0426_LambdaInsideMethodDoesNotPolluteMethodSig(t *testing.T) {
 	errs := ownerErrs(t, `
 		type W {
 			int x;
-			bad(&this) string {
+			bad(this) string {
 				f := move || -> int { return 42; };
 				a := Ref[string]("x");
 				return a.borrow;
@@ -6782,7 +6784,7 @@ func TestT0426_LambdaInsideMethodDoesNotPolluteMethodSig(t *testing.T) {
 func TestT0426_LambdaMultipleRefParamsAmbiguous(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
-			f := |string& a, string& b, bool c| -> string& {
+			f := |string a, string b, bool c| -> string& {
 				if c { return a; }
 				return b;
 			};
@@ -6798,8 +6800,8 @@ func TestT0426_LambdaMultipleRefParamsAmbiguous(t *testing.T) {
 func TestT0426_SiblingLambdasReturnOriginsReset(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			f := |string& a| -> string& { return a; };
-			g := |string& b| -> string& { return b; };
+			f := |string a| -> string& { return a; };
+			g := |string b| -> string& { return b; };
 		}
 	`)
 }
@@ -6810,7 +6812,7 @@ func TestT0426_SiblingLambdasReturnOriginsReset(t *testing.T) {
 func TestT0426_LambdaUnderscoreParamSkipped_OK(t *testing.T) {
 	ownerOK(t, `
 		test() {
-			f := |int _, string& s| -> string& { return s; };
+			f := |int _, string s| -> string& { return s; };
 		}
 	`)
 }
@@ -6879,10 +6881,10 @@ func TestT0382_FieldAssignFromBorrowClonedAllowed(t *testing.T) {
 		test() {
 			v1 := string[]();
 			v1.push("init" + "");
-			h := Holder(v1);
+			h := Holder(move v1);
 			v2 := string[]();
 			v2.push("hello" + "");
-			a := Ref[string[]](v2);
+			a := Ref[string[]](move v2);
 			h.field = a.borrow.clone();
 		}
 	`)
@@ -6923,14 +6925,15 @@ func TestT0438_AssignBorrowToCopyOwnedOK(t *testing.T) {
 // T0438: passing a non-Copy borrow into a value-typed param is rejected at
 // the call site by the same Copy-only decay rule.
 func TestT0438_BorrowToValueParamRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+	// T0998: a bare parameter borrows its argument, so a `.borrow` result
+	// reborrows into it cleanly — the Ref retains ownership.
+	ownerOK(t, `
 		take(string s) {}
 		test() {
 			a := Ref[string]("hi");
 			take(a.borrow);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
 // T0438: `.clone()` produces an owned independent copy — the documented
@@ -6991,7 +6994,7 @@ func TestT0438_VectorBorrowToOwnedRejected(t *testing.T) {
 // T0438: `T~` (mutable borrow) decay is also Copy-only.
 func TestT0438_MutBorrowToNonCopyOwnedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		take(~string s) string& { return s; }
+		take(string move s) string& { return s; }
 		test() {
 			s := "hi";
 			r := take(s);
@@ -7195,7 +7198,7 @@ func TestT0407_AssignSetterFromIfBorrowCopyInnerOK(t *testing.T) {
 // check at the top of `tryMoveConsume` is the next line of defense.
 func TestT0407_ConsumeArgFromIfBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume_string(~string s) {}
+		consume_string(string move s) {}
 		test() {
 			a := Ref[string]("hi" + "");
 			cond := true;
@@ -7263,7 +7266,7 @@ func TestT0411_ConstructorFieldInitFromThisFieldUserTypeRejected(t *testing.T) {
 func TestT0411_FunctionConsumeArgFromThisFieldUserTypeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Inner { string label; drop(~this) {} }
-		consume(~Inner i) {}
+		consume(Inner move i) {}
 		type Outer {
 			Inner inner;
 			drop(~this) {}
@@ -7592,7 +7595,7 @@ func TestT0568_TypedDeclOptionalWrapBorrowedParamAllowed(t *testing.T) {
 func TestT0568_TypedDeclMutParamUserTypeOK(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
-		consume(~_BoxStr b) {
+		consume(_BoxStr move b) {
 			_BoxStr c = b;
 		}
 		test() {}
@@ -7833,7 +7836,7 @@ func TestT0586_CallMutParamUserTypeOK(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr b) {}
-		forward(~_BoxStr s) {
+		forward(_BoxStr move s) {
 			take(s);
 		}
 		test() {}
@@ -8014,7 +8017,7 @@ func TestT0964_PlainStringMoveOutRejected(t *testing.T) {
 		sink(string s) Box { return Box(val: s); }
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'; add '~'")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'; declare the parameter with `move`")
 }
 
 func TestT0964_PlainHeapMoveOutRejected(t *testing.T) {
@@ -8024,7 +8027,7 @@ func TestT0964_PlainHeapMoveOutRejected(t *testing.T) {
 		sink(Heavy h) Box { return Box(h: h); }
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'; add '~'")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'; declare the parameter with `move`")
 }
 
 func TestT0964_PlainVectorMoveOutRejected(t *testing.T) {
@@ -8033,7 +8036,7 @@ func TestT0964_PlainVectorMoveOutRejected(t *testing.T) {
 		sink(int[] v) Box { return Box(v: v); }
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'v'; add '~'")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'v'; declare the parameter with `move`")
 }
 
 // `~T` continues to consume: the callee may move the value out (into a field).
@@ -8042,10 +8045,10 @@ func TestT0964_MutParamConsumeMoveOut(t *testing.T) {
 	ownerOK(t, `
 		type Heavy { int x; drop(~this) {} }
 		type Box { Heavy h; }
-		sink(~Heavy h) Box { return Box(h: h); }
+		sink(Heavy move h) Box { return Box(h: move h); }
 		test() {
 			Heavy a = Heavy(x: 7);
-			Box b = sink(a);
+			Box b = sink(move a);
 		}
 	`)
 }
@@ -8055,10 +8058,10 @@ func TestT0964_MutParamConsumeMoveOut(t *testing.T) {
 func TestT0964_MutVectorParamConsumeMoveOut(t *testing.T) {
 	ownerOK(t, `
 		type VecBox { int[] v; }
-		sink(~int[] v) VecBox { return VecBox(v: v); }
+		sink(int[] move v) VecBox { return VecBox(v: move v); }
 		test() {
 			int[] a = [1, 2, 3];
-			VecBox b = sink(a);
+			VecBox b = sink(move a);
 		}
 	`)
 }
@@ -8067,7 +8070,7 @@ func TestT0964_MutVectorParamConsumeMoveOut(t *testing.T) {
 func TestT0964_MutParamConsumeUseAfterRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Heavy { int x; drop(~this) {} }
-		consume(~Heavy h) {}
+		consume(Heavy move h) {}
 		test() {
 			Heavy a = Heavy(x: 7);
 			consume(a);
@@ -8107,7 +8110,7 @@ func TestT0964_SelfAssignPlainParam(t *testing.T) {
 // limitation is fixed as a bonus (T0964).
 func TestT0964_SelfAssignRefParam(t *testing.T) {
 	ownerOK(t, `
-		combine(int[] &v) int[] { return [v.len]; }
+		combine(int[] v) int[] { return [v.len]; }
 		test() {
 			int[] v = [1, 2, 3];
 			v = combine(v);
@@ -8123,11 +8126,11 @@ func TestT0964_BorrowThenConsumeOK(t *testing.T) {
 	ownerOK(t, `
 		type Heavy { int x; drop(~this) {} }
 		read(Heavy h) int { return h.x; }
-		consume(~Heavy h) {}
+		consume(Heavy move h) {}
 		test() {
 			Heavy a = Heavy(x: 1);
 			int n = read(a);
-			consume(a);
+			consume(move a);
 		}
 	`)
 }
@@ -8151,11 +8154,11 @@ func TestT0964_DoubleBorrowSameVarInOneCall(t *testing.T) {
 func TestT0964_MixedBorrowAndMoveInOneCall(t *testing.T) {
 	ownerOK(t, `
 		type Heavy { int x; drop(~this) {} }
-		mix(Heavy a, ~Heavy b) int { return a.x + b.x; }
+		mix(Heavy a, Heavy move b) int { return a.x + b.x; }
 		test() {
 			Heavy a = Heavy(x: 3);
 			Heavy b = Heavy(x: 4);
-			int n = mix(a, b);
+			int n = mix(a, move b);
 			int k = a.x;
 		}
 	`)
@@ -8166,7 +8169,7 @@ func TestT0964_MixedBorrowAndMoveInOneCall(t *testing.T) {
 func TestT0964_MixedMovedArgUseAfterRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Heavy { int x; drop(~this) {} }
-		mix(Heavy a, ~Heavy b) int { return a.x + b.x; }
+		mix(Heavy a, Heavy move b) int { return a.x + b.x; }
 		test() {
 			Heavy a = Heavy(x: 3);
 			Heavy b = Heavy(x: 4);
@@ -8211,7 +8214,7 @@ func TestT0964_PushBorrowedPlainHeapParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'; add '~'")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'; declare the parameter with `move`")
 }
 
 // Pushing a borrowed plain Map element param is rejected for the same reason —
@@ -8224,7 +8227,7 @@ func TestT0964_PushBorrowedPlainMapParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'; add '~'")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'; declare the parameter with `move`")
 }
 
 // Pushing a borrowed plain string param is allowed — string is auto-dup, so
@@ -8785,7 +8788,7 @@ func TestT0589_IfLetOwnedLocalAllowed(t *testing.T) {
 func TestT0589_IfLetConsumeParamAllowed(t *testing.T) {
 	ownerOK(t, `
 		type _Box { int n; }
-		take(~_Box? a) {
+		take(_Box? move a) {
 			if x := a {
 				_ = x;
 			}
@@ -8966,8 +8969,8 @@ func TestT0811_AssignForceUnwrapBorrowedParamRejected(t *testing.T) {
 // Inferred var-decl via force cast: `d := o as! Der`.
 func TestT0811_InferredForceCastBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
 		take(Base? o) {
 			d := o as! Der;
 			_ = d;
@@ -8980,8 +8983,8 @@ func TestT0811_InferredForceCastBorrowedParamRejected(t *testing.T) {
 // Typed var-decl via force cast: `Der d = o as! Der`.
 func TestT0811_TypedForceCastBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
 		take(Base? o) {
 			Der d = o as! Der;
 			_ = d;
@@ -8994,8 +8997,8 @@ func TestT0811_TypedForceCastBorrowedParamRejected(t *testing.T) {
 // Typed-optional var-decl via non-force cast: `Der? d = o as Der`.
 func TestT0811_OptionalCastBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
 		take(Base? o) {
 			Der? d = o as Der;
 			_ = d;
@@ -9009,7 +9012,7 @@ func TestT0811_OptionalCastBorrowedParamRejected(t *testing.T) {
 func TestT0811_ForceUnwrapCallArgConsumeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _Box { string name; drop(~this){} }
-		g(~_Box p) { _ = p; }
+		g(_Box move p) { _ = p; }
 		take(_Box? o) {
 			g(o!);
 		}
@@ -9023,7 +9026,7 @@ func TestT0811_ForceUnwrapCallArgConsumeRejected(t *testing.T) {
 func TestT0811_ParenWrappedForceUnwrapCallArgRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _Box { string name; drop(~this){} }
-		g(~_Box p) { _ = p; }
+		g(_Box move p) { _ = p; }
 		take(_Box? o) {
 			g((o!));
 		}
@@ -9103,7 +9106,7 @@ func TestT0811_VectorForceUnwrapAllowed(t *testing.T) {
 // Carve-out: string inner into a `~string` call-arg — auto-dup-safe.
 func TestT0811_StringForceUnwrapCallArgAllowed(t *testing.T) {
 	ownerOK(t, `
-		g(~string s) { _ = s; }
+		g(string move s) { _ = s; }
 		take(string? o) {
 			g(o!);
 		}
@@ -9115,7 +9118,7 @@ func TestT0811_StringForceUnwrapCallArgAllowed(t *testing.T) {
 func TestT0811_ConsumeParamForceUnwrapAllowed(t *testing.T) {
 	ownerOK(t, `
 		type _Box { string name; drop(~this){} }
-		take(~_Box? o) string {
+		take(_Box? move o) string {
 			p := o!;
 			return p.name;
 		}
@@ -9126,9 +9129,9 @@ func TestT0811_ConsumeParamForceUnwrapAllowed(t *testing.T) {
 // Carve-out: `~Base?` consume param + force cast — allowed.
 func TestT0811_ConsumeParamForceCastAllowed(t *testing.T) {
 	ownerOK(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
-		type Der is Base { tag(&this) string { return "d"; } }
-		take(~Base? o) string {
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take(Base? move o) string {
 			d := o as! Der;
 			return d.name;
 		}
@@ -9140,8 +9143,8 @@ func TestT0811_ConsumeParamForceCastAllowed(t *testing.T) {
 // NOT be rejected. `b` is a borrowed Base param (non-optional), `b as! Der`.
 func TestT0811_NonOptionalCastViewAllowed(t *testing.T) {
 	ownerOK(t, `
-		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
-		type Der is Base { tag(&this) string { return "d"; } }
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
 		take(Base b) string {
 			d := b as! Der;
 			return d.name;
@@ -9189,7 +9192,7 @@ func TestT0811_MemberSourceForceUnwrapAllowed(t *testing.T) {
 	ownerOK(t, `
 		type _Box { string name; drop(~this){} }
 		type Holder { _Box? slot; drop(~this){} }
-		take(~Holder h) string {
+		take(Holder move h) string {
 			p := h.slot!;
 			return p.name;
 		}
@@ -9690,7 +9693,7 @@ func TestT0623_MatchBorrowedParamSubjectRejected(t *testing.T) {
 			consume(e);
 		}
 	`)
-	expectOwnerError(t, errs, "borrowed 'e'")
+	expectOwnerError(t, errs, "owned local")
 }
 
 // Generic enum instantiated at a handle type (BoxG[Task[int]]) likewise moves
@@ -9986,8 +9989,8 @@ func TestT0635_GenericMethodOwnedOptParamOK(t *testing.T) {
 		enum Box[T] { Full(T? v), Vacant, }
 		type Holder[T] {
 			T seed;
-			wrap(this, ~T? o) Box[T] {
-				return Box[T].Full(o);
+			wrap(this, T? move o) Box[T] {
+				return Box[T].Full(move o);
 			}
 		}
 		test() {}
@@ -9999,8 +10002,8 @@ func TestT0635_GenericMethodOwnedOptParamOK(t *testing.T) {
 func TestT0635_GenericFnOwnedOptParamOK(t *testing.T) {
 	ownerOK(t, `
 		enum Box[T] { Full(T? v), Vacant, }
-		make_box_opt[T](~T? x) Box[T] {
-			return Box[T].Full(x);
+		make_box_opt[T](T? move x) Box[T] {
+			return Box[T].Full(move x);
 		}
 		test() {}
 	`)
@@ -10010,8 +10013,8 @@ func TestT0635_GenericFnOwnedOptParamOK(t *testing.T) {
 func TestT0635_GenericFnOwnedBareParamOK(t *testing.T) {
 	ownerOK(t, `
 		enum Box[T] { Full(T? v), Vacant, }
-		make_box[T](~T x) Box[T] {
-			return Box[T].Full(x);
+		make_box[T](T move x) Box[T] {
+			return Box[T].Full(move x);
 		}
 		test() {}
 	`)
@@ -10024,7 +10027,7 @@ func TestT0635_OwnedLocalIntoVariantOK(t *testing.T) {
 		enum Box[T] { Full(T? v), Vacant, }
 		make_from_local() Box[string] {
 			string s = "hi".to_upper();
-			return Box[string].Full(s);
+			return Box[string].Full(move s);
 		}
 		test() {}
 	`)
@@ -10050,7 +10053,7 @@ func TestT0635_EnumMethodCallNotMisclassified(t *testing.T) {
 	ownerOK(t, `
 		enum E {
 			A, B,
-			peek(&this, string s) bool { return s.len > 0; }
+			peek(this, string s) bool { return s.len > 0; }
 		}
 		check_it(E e, string s) bool {
 			return e.peek(s);
@@ -10066,7 +10069,7 @@ func TestT0635_EnumMethodConsumeBorrowedParamStillRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		enum E {
 			A, B,
-			into(&this, ~string s) bool { return s.len > 0; }
+			into(this, string move s) bool { return s.len > 0; }
 		}
 		feed(E e, string s) bool {
 			return e.into(s);
@@ -10100,7 +10103,7 @@ func TestT0635_NonGenericVariantBorrowedParamStillRejected(t *testing.T) {
 func TestT0635_MultiArgVariantSecondBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		enum Pair[T] { Both(T? a, T? b), Empty, }
-		mk_pair[T](~T? a_owned, T? b_borrow) Pair[T] {
+		mk_pair[T](T? move a_owned, T? b_borrow) Pair[T] {
 			return Pair[T].Both(a_owned, b_borrow);
 		}
 		test() {}
@@ -10114,8 +10117,8 @@ func TestT0635_MultiArgVariantSecondBorrowedParamRejected(t *testing.T) {
 func TestT0635_MultiArgVariantAllOwnedOK(t *testing.T) {
 	ownerOK(t, `
 		enum Pair[T] { Both(T? a, T? b), Empty, }
-		mk_pair[T](~T? a_owned, ~T? b_owned) Pair[T] {
-			return Pair[T].Both(a_owned, b_owned);
+		mk_pair[T](T? move a_owned, T? move b_owned) Pair[T] {
+			return Pair[T].Both(move a_owned, move b_owned);
 		}
 		test() {}
 	`)
@@ -10196,7 +10199,7 @@ func TestT0652_VectorForInBindingAssignRejected(t *testing.T) {
 func TestT0652_VectorForInBindingConsumeArgRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker() int { return 42; }
-		take(~Task[int] t) int { return <-t; }
+		take(Task[int] move t) int { return <-t; }
 		test() {
 			Vector[Task[int]] v = [go worker(), go worker()];
 			for h in v {
@@ -10211,7 +10214,7 @@ func TestT0652_VectorForInBindingConsumeArgRejected(t *testing.T) {
 func TestT0652_VectorForInBindingReturnRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker() int { return 42; }
-		first(~Vector[Task[int]] v) Task[int] {
+		first(Vector[Task[int]] move v) Task[int] {
 			for h in v {
 				return h;
 			}
@@ -10489,7 +10492,7 @@ func TestT0652_IteratorChainAllowed(t *testing.T) {
 func TestT0971_ForInBorrowedVectorNoConsume(t *testing.T) {
 	ownerOK(t, `
 		type Box { string name; }
-		count_twice(Box[] &src) int {
+		count_twice(Box[] src) int {
 			n := 0;
 			for x in src { n = n + x.name.len; }
 			for x in src { n = n + 1; }
@@ -10504,7 +10507,7 @@ func TestT0971_ForInBorrowedVectorNoConsume(t *testing.T) {
 func TestT0971_ForInBorrowedMoveOutRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string name; }
-		drain(Box[] &src) int {
+		drain(Box[] src) int {
 			sink := Box[]();
 			for x in src { sink.push(x); }
 			return sink.len;
@@ -10518,7 +10521,7 @@ func TestT0971_ForInBorrowedMoveOutRejected(t *testing.T) {
 func TestT0971_ForInBorrowedMoveOutVarDeclRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string name; }
-		drain(Box[] &src) {
+		drain(Box[] src) {
 			for x in src {
 				Box y = x;
 				_ = y;
@@ -10561,8 +10564,8 @@ func TestT0971_ForInMutBorrowedMoveOutRejected(t *testing.T) {
 func TestT0971_ForInBorrowedConsumeArgRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string name; }
-		take(~Box b) int { return b.name.len; }
-		drain(Box[] &src) {
+		take(Box move b) int { return b.name.len; }
+		drain(Box[] src) {
 			for x in src { _ = take(x); }
 		}
 		test() {}
@@ -10573,7 +10576,7 @@ func TestT0971_ForInBorrowedConsumeArgRejected(t *testing.T) {
 // Copy elements (int) copy by value — move-out of a borrowed int[] is fine.
 func TestT0971_ForInBorrowedCopyElementMovable(t *testing.T) {
 	ownerOK(t, `
-		drain(int[] &src) int[] {
+		drain(int[] src) int[] {
 			sink := int[]();
 			for x in src { sink.push(x); }
 			return sink;
@@ -10586,9 +10589,9 @@ func TestT0971_ForInBorrowedCopyElementMovable(t *testing.T) {
 // of a borrowed string[] is sound and must be accepted.
 func TestT0971_ForInBorrowedStringElementMovable(t *testing.T) {
 	ownerOK(t, `
-		drain(string[] &src) string[] {
+		drain(string[] src) string[] {
 			sink := string[]();
-			for x in src { sink.push(x); }
+			for x in src { sink.push(move x); }
 			return sink;
 		}
 		test() {}
@@ -10617,7 +10620,7 @@ func TestT0978_ForInOwnedMoveOutRejected(t *testing.T) {
 func TestT0971_ForInBorrowedMapMoveOutRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string name; }
-		drain(map[string, Box] &src) {
+		drain(map[string, Box] src) {
 			sink := Box[]();
 			for k, v in src { sink.push(v); }
 		}
@@ -10631,7 +10634,7 @@ func TestT0971_ForInBorrowedMapMoveOutRejected(t *testing.T) {
 func TestT0971_ForInBorrowedArrayMoveOutRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string name; }
-		drain(Box[3] &src) {
+		drain(Box[3] src) {
 			sink := Box[]();
 			for x in src { sink.push(x); }
 		}
@@ -10644,12 +10647,12 @@ func TestT0971_ForInBorrowedArrayMoveOutRejected(t *testing.T) {
 // isCopyType skip must not flag these.
 func TestT0971_ForInBorrowedCopyMapArrayMovable(t *testing.T) {
 	ownerOK(t, `
-		drain_map(map[string, int] &m) int[] {
+		drain_map(map[string, int] m) int[] {
 			sink := int[]();
 			for k, v in m { sink.push(v); }
 			return sink;
 		}
-		drain_arr(int[3] &a) int[] {
+		drain_arr(int[3] a) int[] {
 			sink := int[]();
 			for x in a { sink.push(x); }
 			return sink;
@@ -10793,7 +10796,7 @@ func TestT0978_ForInOwnedMapKeyPushAllowed(t *testing.T) {
 			m := map[string, Box]();
 			m["a"] = Box(name: "a");
 			keys := string[]();
-			for k, v in m { keys.push(k); }
+			for k, v in m { keys.push(move k); }
 			_ = keys;
 		}
 	`)
@@ -10806,7 +10809,7 @@ func TestT0978_ForInOwnedStringElementMovable(t *testing.T) {
 		test() {
 			names := ["a", "b"];
 			sink := string[]();
-			for s in names { sink.push(s); }
+			for s in names { sink.push(move s); }
 			_ = sink;
 		}
 	`)
@@ -10832,7 +10835,7 @@ func TestT0978_ForInGenericTypeParamElementNotFlagged(t *testing.T) {
 	ownerOK(t, `
 		drain[T](T[] v) T[] {
 			sink := T[]();
-			for x in v { sink.push(x); }
+			for x in v { sink.push(move x); }
 			return sink;
 		}
 		test() {}
@@ -10848,7 +10851,7 @@ func TestT0978_ForInGenericTypeParamElementNotFlagged(t *testing.T) {
 func TestT0978_ForInBorrowedSingleOwnerMoveOutRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker() int { return 42; }
-		drain(Task[int][] &src) {
+		drain(Task[int][] src) {
 			sink := Task[int][]();
 			for h in src { sink.push(h); }
 		}
@@ -10931,7 +10934,7 @@ func TestT0978_ForInDestructureStringCopyPieceMovable(t *testing.T) {
 			nums := int[]();
 			for tup in v {
 				(s, n) := tup;
-				strs.push(s);
+				strs.push(move s);
 				nums.push(n);
 			}
 			_ = strs; _ = nums;
@@ -11062,13 +11065,13 @@ func TestT0978_ForInNestedDistinctBindingAliasGuardHolds(t *testing.T) {
 // owned counterparts (`~this`, owned local, `~` param) keep the field live and
 // stay accepted (T0806). The borrowing `.lock()` temp also stays accepted.
 
-// Shape 1: Mutex binding move-out of `&this`.
+// Shape 1: Mutex binding move-out of `this`.
 func TestT0837_MutexBindingMoveOutOfBorrowedThisRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type MtxHolder {
 			Mutex[int]? mtx;
 			drop(~this) {}
-			steal(&this) int {
+			steal(this) int {
 				Mutex[int] m = this.mtx!;
 				return m.lock().borrow;
 			}
@@ -11078,14 +11081,14 @@ func TestT0837_MutexBindingMoveOutOfBorrowedThisRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move single-owner handle field")
 }
 
-// Shape 2: Task consuming await `<-(this.tsk!)` out of `&this`.
+// Shape 2: Task consuming await `<-(this.tsk!)` out of `this`.
 func TestT0837_TaskAwaitOutOfBorrowedThisRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker() int { return 42; }
 		type TskHolder {
 			Task[int]? tsk;
 			drop(~this) {}
-			await_borrow(&this) int {
+			await_borrow(this) int {
 				return <-(this.tsk!);
 			}
 		}
@@ -11099,7 +11102,7 @@ func TestT0837_TaskAwaitOutOfBorrowedThisRejected(t *testing.T) {
 func TestT0837_MutexBindingMoveOutOfSharedRefParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type MtxH { Mutex[int]? mtx; drop(~this) {} }
-		steal(MtxH &h) int {
+		steal(MtxH h) int {
 			Mutex[int] m = h.mtx!;
 			return m.lock().borrow;
 		}
@@ -11113,7 +11116,7 @@ func TestT0837_TaskAwaitOutOfSharedRefParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker() int { return 42; }
 		type TskH { Task[int]? tsk; drop(~this) {} }
-		await_it(TskH &h) int {
+		await_it(TskH h) int {
 			return <-(h.tsk!);
 		}
 		test() {}
@@ -11126,7 +11129,7 @@ func TestT0837_ChainedMoveOutOfBorrowedRootRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Inner { Mutex[int]? mtx; drop(~this) {} }
 		type Outer { Inner inner; drop(~this) {} }
-		grab(Outer &o) int {
+		grab(Outer o) int {
 			Mutex[int] m = o.inner.mtx!;
 			return m.lock().borrow;
 		}
@@ -11174,14 +11177,14 @@ func TestT0837_TaskAwaitOutOfOwnedLocalAllowed(t *testing.T) {
 	`)
 }
 
-// Acceptance: the borrowing `.lock()` temp on `&this` — `.lock()` borrows, never
+// Acceptance: the borrowing `.lock()` temp on `this` — `.lock()` borrows, never
 // moves, so it must NOT be rejected.
 func TestT0837_BorrowingLockTempOnBorrowedThisAllowed(t *testing.T) {
 	ownerOK(t, `
 		type MtxHolder {
 			Mutex[int]? mtx;
 			drop(~this) {}
-			peek(&this) int {
+			peek(this) int {
 				return (this.mtx!).lock().borrow;
 			}
 		}
@@ -11208,7 +11211,7 @@ func TestT0837_ParenWrappedMemberTargetRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Inner { Mutex[int]? mtx; drop(~this) {} }
 		type Outer { Inner inner; drop(~this) {} }
-		grab(Outer &o) int {
+		grab(Outer o) int {
 			Mutex[int] m = (o.inner).mtx!;
 			return m.lock().borrow;
 		}
@@ -11227,7 +11230,7 @@ func TestT0837_GetterReturningHandleOutOfBorrowAllowed(t *testing.T) {
 			drop(~this) {}
 			get fresh_mtx Mutex[int]? { return Mutex[int](9); }
 		}
-		grab(MtxH &h) int {
+		grab(MtxH h) int {
 			Mutex[int] m = h.fresh_mtx!;
 			return m.lock().borrow;
 		}
@@ -11320,7 +11323,7 @@ func TestT0953_BorrowedChannelReceiveAllowed(t *testing.T) {
 func TestT0953_AwaitOwnedMoveParamAllowed(t *testing.T) {
 	ownerOK(t, `
 		worker() int { return 42; }
-		f(~Task[int] a) int { return <-a; }
+		f(Task[int] move a) int { return <-a; }
 		test() {}
 	`)
 }
@@ -11376,7 +11379,7 @@ func TestT0953_AwaitMemberOutOfBorrowElvisOperandRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker() int { return 42; }
 		type Holder { Task[int]? tsk; drop(~this) {} }
-		await_it(Holder &h) int {
+		await_it(Holder h) int {
 			Task[int] local = go worker();
 			return <-(h.tsk ?: local);
 		}
@@ -11679,10 +11682,10 @@ func TestT0842_MutexFieldMoveOutOfParenWrappedOwnedLocalRejected(t *testing.T) {
 // Borrowed param subject — must reject with the standard `~` affordance.
 func TestT0754_CastIntoFieldFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		helper(Shape s) {
@@ -11701,10 +11704,10 @@ func TestT0754_CastIntoFieldFromBorrowedParamRejected(t *testing.T) {
 // existing B0341 field-move check the plain `= outer.s` would hit.
 func TestT0754_CastIntoFieldFromMemberRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		type Outer { Shape s; }
@@ -11722,10 +11725,10 @@ func TestT0754_CastIntoFieldFromMemberRejected(t *testing.T) {
 // at the owning-slot store.
 func TestT0754_CastIntoFieldFromOwnedLocalMarksMoved(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		test() {
@@ -11742,10 +11745,10 @@ func TestT0754_CastIntoFieldFromOwnedLocalMarksMoved(t *testing.T) {
 // the v[i] LHS owning slot.
 func TestT0754_CastIntoElementFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		helper(Shape s) {
 			Shape[] v = [];
@@ -11763,10 +11766,10 @@ func TestT0754_CastIntoElementFromBorrowedParamRejected(t *testing.T) {
 // Constructor-arg shape — `Holder(held: s as! Circle)` likewise consumes.
 func TestT0754_CastIntoCtorArgFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		helper(Shape s) Holder {
@@ -11786,12 +11789,12 @@ func TestT0754_CastIntoCtorArgFromBorrowedParamRejected(t *testing.T) {
 // already errors with the same diagnostic; the cast wrapper must not bypass it.
 func TestT0754_CastIntoTildeParamFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
-		consume_it(~Circle c) {
+		consume_it(Circle move c) {
 			_ = c;
 		}
 		helper(Shape s) {
@@ -11810,10 +11813,10 @@ func TestT0754_CastIntoTildeParamFromBorrowedParamRejected(t *testing.T) {
 // or the borrowed instance is silently stored in the variant payload.
 func TestT0754_CastIntoEnumVariantFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		enum Wrap { Hold(Circle c) }
 		helper(Shape s) Wrap {
@@ -11833,10 +11836,10 @@ func TestT0754_CastIntoEnumVariantFromBorrowedParamRejected(t *testing.T) {
 // behavior must match the unwrapped form.
 func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenSubject(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		helper(Shape s) {
@@ -11855,10 +11858,10 @@ func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenSubject(t *testing.T) 
 // in parens, exercising the first peel loop (outer ParenExpr removal).
 func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenCast(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		helper(Shape s) {
@@ -11882,10 +11885,10 @@ func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenCast(t *testing.T) {
 // TupleLit element with cast wrapper — borrowed param must be rejected.
 func TestT0784_TupleLitElementCastFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		helper(Shape s) (int, Circle) {
 			return (1, s as! Circle);
@@ -11901,10 +11904,10 @@ func TestT0784_TupleLitElementCastFromBorrowedParamRejected(t *testing.T) {
 // ArrayLit element with cast wrapper — borrowed param must be rejected.
 func TestT0784_ArrayLitElementCastFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		helper(Shape s) Circle[] {
 			return [s as! Circle];
@@ -11920,10 +11923,10 @@ func TestT0784_ArrayLitElementCastFromBorrowedParamRejected(t *testing.T) {
 // MapLit value with cast wrapper — borrowed param must be rejected.
 func TestT0784_MapLitValueCastFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		helper(Shape s) map[string, Circle] {
 			return {"k": s as! Circle};
@@ -11952,10 +11955,10 @@ func TestT0784_RaiseCastFromBorrowedParamRejected(t *testing.T) {
 // yield with cast wrapper — borrowed param must be rejected.
 func TestT0784_YieldCastFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		gen(Shape s) stream[Circle] {
 			yield s as! Circle;
@@ -11968,10 +11971,10 @@ func TestT0784_YieldCastFromBorrowedParamRejected(t *testing.T) {
 // select-send with cast wrapper — borrowed param must be rejected.
 func TestT0784_SelectSendCastFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		helper(channel[Circle] ch, Shape s) {
 			select {
@@ -11992,10 +11995,10 @@ func TestT0784_SelectSendCastFromBorrowedParamRejected(t *testing.T) {
 // reaches tryMoveConsume at the raise site.)
 func TestT0784_YieldCastFromOwnedLocalMarksMoved(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		gen() stream[Circle] {
 			Shape s = Circle(name: "src", radius: 2.0);
@@ -12021,12 +12024,12 @@ func TestT0784_YieldCastFromOwnedLocalMarksMoved(t *testing.T) {
 // tryMoveCastSubject must not introduce a spurious error.
 func TestT0783_ReturnCastFromOwnedParamOK(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
-		helper(~Shape s) Circle { return s as! Circle; }
+		helper(Shape move s) Circle { return s as! Circle; }
 		test() {}
 	`)
 }
@@ -12034,10 +12037,10 @@ func TestT0783_ReturnCastFromOwnedParamOK(t *testing.T) {
 // Owned-local return-cast must type-check cleanly.
 func TestT0783_ReturnCastFromOwnedLocalOK(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		helper() Circle {
 			Shape s = Circle(name: "src", radius: 2.0);
@@ -12052,12 +12055,12 @@ func TestT0783_ReturnCastFromOwnedLocalOK(t *testing.T) {
 // subject without rejecting it.
 func TestT0783_ReturnChainedCastOK(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
-		helper(~Shape s) Circle { return (s as! Circle) as! Circle; }
+		helper(Shape move s) Circle { return (s as! Circle) as! Circle; }
 		test() {}
 	`)
 }
@@ -12069,12 +12072,12 @@ func TestT0783_ReturnChainedCastOK(t *testing.T) {
 // ("cannot move out of '.borrow' getter" / "cannot move borrowed parameter").
 func TestT0783_ReturnCastBorrowedParamNotRejected(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
-		helper(Shape &s) Circle & { return s as! Circle &; }
+		helper(Shape s) Circle & { return s as! Circle &; }
 		test() {}
 	`)
 }
@@ -12086,12 +12089,12 @@ func TestT0783_ReturnCastBorrowedParamNotRejected(t *testing.T) {
 // peel — between two casts — but never the outer one.)
 func TestT0783_ReturnParenWrappedCastOK(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
-		helper(~Shape s) Circle { return (s as! Circle); }
+		helper(Shape move s) Circle { return (s as! Circle); }
 		test() {}
 	`)
 }
@@ -12104,12 +12107,12 @@ func TestT0783_ReturnParenWrappedCastOK(t *testing.T) {
 // T0849 (runtime-outcome-conditioned drop).
 func TestT0783_ReturnOptionalCastOK(t *testing.T) {
 	ownerOK(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
-		helper(~Shape s) Circle? { return s as Circle; }
+		helper(Shape move s) Circle? { return s as Circle; }
 		test() {}
 	`)
 }
@@ -12166,10 +12169,10 @@ func TestT0784_RaiseParenWrappedCastFromBorrowedParamRejected(t *testing.T) {
 // recursion must reach the innermost subject `s`.
 func TestT0800_ChainedCastIntoFieldFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		helper(Shape s) {
@@ -12189,10 +12192,10 @@ func TestT0800_ChainedCastIntoFieldFromBorrowedParamRejected(t *testing.T) {
 // recursion consumes the innermost subject (not the inner CastExpr).
 func TestT0800_ChainedCastIntoFieldFromOwnedLocalMarksMoved(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		test() {
@@ -12209,10 +12212,10 @@ func TestT0800_ChainedCastIntoFieldFromOwnedLocalMarksMoved(t *testing.T) {
 // through both cast layers at the ctor-arg owning slot.
 func TestT0800_ChainedCastIntoCtorArgFromBorrowedParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Shape { string name; area(this) f64 `+"`abstract"+`; }
 		type Circle is Shape {
 			f64 radius;
-			area(&this) f64 { return this.radius; }
+			area(this) f64 { return this.radius; }
 		}
 		type Holder { Shape held; }
 		helper(Shape s) Holder {
@@ -12324,7 +12327,7 @@ func TestT0816ConsumeSourceWhileBorrowedRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type CbHolder { () -> int cb; }
 		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
-		sink(~CbHolder h) {}
+		sink(CbHolder move h) {}
 		probe() {
 			h := make_cb(5);
 			f := h.cb;
@@ -12359,7 +12362,7 @@ func TestT0816ConsumeSourceVectorWhileBorrowedRejected(t *testing.T) {
 	// closure-borrow is live is rejected (here `src` is a borrowed param, so the
 	// `~`-affordance diagnostic fires).
 	errs := ownerErrs(t, `
-		sink(~Vector[() -> int] v) {}
+		sink(Vector[() -> int] move v) {}
 		probe(Vector[() -> int] src) {
 			f := src[0];
 			sink(src);
@@ -12376,13 +12379,13 @@ func TestT0816ConsumeSourceAfterLastUseOK(t *testing.T) {
 	ownerOK(t, `
 		type CbHolder { () -> int cb; }
 		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
-		sink(~CbHolder h) {}
+		sink(CbHolder move h) {}
 		probe() {
 			h := make_cb(5);
 			f := h.cb;
 			r := f();
 			_ = r;
-			sink(h);
+			sink(move h);
 		}
 	`)
 }
@@ -12497,14 +12500,14 @@ func TestT0895ConsumeSourceAfterLastUseViaAssignOK(t *testing.T) {
 	ownerOK(t, `
 		type CbHolder { () -> int cb; }
 		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
-		sink(~CbHolder h) {}
+		sink(CbHolder move h) {}
 		probe() {
 			h := make_cb(5);
 			() -> int f = || -> 0;
 			f = h.cb;
 			r := f();
 			_ = r;
-			sink(h);
+			sink(move h);
 		}
 	`)
 }

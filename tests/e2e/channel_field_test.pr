@@ -15,7 +15,7 @@ type IntChan {
 
 test_channel_field_send_receive() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
-  s := IntChan(_ch: ch);
+  s := IntChan(_ch: move ch);
   s.emit(42);
   if v := s.receive() {
     assert(v == 42, "expected 42");
@@ -33,8 +33,8 @@ type GenericChan[T] {
     this._ch = channel[T](capacity: capacity);
   }
 
-  emit(~this, ~T value) {
-    this._ch.send(value);
+  emit(~this, T move value) {
+    this._ch.send(move value);
   }
 
   receive(~this) T? {
@@ -62,7 +62,7 @@ type MultiField {
 
 test_channel_field_with_other_fields() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
-  m := MultiField(name: "test", _ch: ch, count: 0);
+  m := MultiField(name: "test", _ch: move ch, count: 0);
   m._ch.send(77);
   if v := <-m._ch {
     assert(v == 77, "expected 77");
@@ -91,7 +91,7 @@ type StringChanHolder {
 
 test_channel_string_field_in_type() `test(exclude: wasm) {
   ch := channel[string](capacity: 1);
-  h := StringChanHolder(_ch: ch);
+  h := StringChanHolder(_ch: move ch);
   h._ch.send("world");
   if v := <-h._ch {
     assert(v == "world", "expected world");
@@ -116,7 +116,7 @@ test_multiple_opaque_fields() `test(exclude: wasm) {
   a := channel[int](capacity: 1);
   b := channel[string](capacity: 1);
   t := go compute_int();
-  m := MultiChan(_a: a, _b: b, _t: t);
+  m := MultiChan(_a: move a, _b: move b, _t: move t);
 
   m._a.send(10);
   m._b.send("hi");
@@ -143,7 +143,7 @@ type TaskHolder {
 
 test_task_field() `test(exclude: wasm) {
   t := go compute_int();
-  h := TaskHolder(_t: t);
+  h := TaskHolder(_t: move t);
   int result = <-h._t;
   assert(result == 7, "expected 7");
 }
@@ -160,7 +160,7 @@ type StringTaskHolder {
 
 test_task_string_field() `test(exclude: wasm) {
   t := go compute_string();
-  h := StringTaskHolder(_t: t);
+  h := StringTaskHolder(_t: move t);
   string result = <-h._t;
   assert(result == "done", "expected done");
 }
@@ -175,7 +175,7 @@ enum Action {
 
 test_enum_channel_field() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
-  a := Action.Send(ch: ch, value: 42);
+  a := Action.Send(ch: move ch, value: 42);
   match a {
     Action.Send(c, v) => {
       c.send(v);

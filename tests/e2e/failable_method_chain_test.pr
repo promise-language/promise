@@ -144,7 +144,7 @@ try_fail_point_x!() int {
 type Box {
   int val;
 
-  doubled(&this) int {
+  doubled(this) int {
     return this.val * 2;
   }
 }
@@ -212,7 +212,7 @@ try_counter_double!() int {
 enum Color {
   Red, Green, Blue,
 
-  code(&this) int {
+  code(this) int {
     match this {
       Color.Red => {
         return 1;

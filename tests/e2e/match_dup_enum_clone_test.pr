@@ -74,7 +74,7 @@ match_dup_map_clone() `test {
   map[string, int] m = {
     "a": 1, "b": 2
   };
-  h := MapHolder.Data(fields: m);
+  h := MapHolder.Data(fields: move m);
   match h {
     Data(f) => {
       assert(f.len == 2, "map len");
@@ -93,7 +93,7 @@ enum VecEnumHolder {
 
 match_dup_vector_of_enums() `test {
   Inner[] items = [Inner.Text(data: "x"), Inner.Number(value: 7)];
-  h := VecEnumHolder.Items(list: items);
+  h := VecEnumHolder.Items(list: move items);
   match h {
     Items(v) => {
       assert(v.len == 2, "vector len");

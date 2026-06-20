@@ -476,7 +476,7 @@ t_strvec_member_some() `test {
   string[] inner = [];
   inner.push("p" + "q");
   inner.push("r" + "s");
-  SVBox bx = SVBox(v: inner);
+  SVBox bx = SVBox(v: move inner);
   string[] b = [];
   b.push("x" + "y");
   assert((bx.v ?: b).len == 2, "strvec member some");
@@ -514,7 +514,7 @@ t_strvec_borrowed_none() `test {
 // owned `~`-param string[] elvis: the consume param HAS a local drop flag, so the
 // callee owns the inner. The some-path clears that flag (ownership → result), so
 // the inline result MUST be tracked and freed exactly once (no leak).
-consume_strvec_len(~string[]? a, string[] b) int {
+consume_strvec_len(string[]? move a, string[] b) int {
   return (a ?: b).len;
 }
 
@@ -525,7 +525,7 @@ t_strvec_consume_some() `test {
   string[]? a = av;
   string[] b = [];
   b.push("x" + "y");
-  assert(consume_strvec_len(a, b) == 2, "strvec consume some");
+  assert(consume_strvec_len(move a, b) == 2, "strvec consume some");
 }
 
 t_strvec_consume_none() `test {
@@ -545,7 +545,7 @@ t_strvec_bound_member_some() `test {
   string[] inner = [];
   inner.push("p" + "q");
   inner.push("r" + "s");
-  SVBox bx = SVBox(v: inner);
+  SVBox bx = SVBox(v: move inner);
   string[] b = [];
   b.push("x" + "y");
   string[] x = (bx.v ?: b);
@@ -574,7 +574,7 @@ t_strvec_bound_member_some() `test {
 // --- generic `~map[K,V]?` consume: orphaned some-path → result owns the inner;
 // result type resolved through typeSubst at monomorphization (value-struct path). ---
 
-gconsume_map_len[K: Hashable + Equal, V](~map[K, V]? a, map[K, V] b) int {
+gconsume_map_len[K: Hashable + Equal, V](map[K, V]? move a, map[K, V] b) int {
   return (a ?: b).len;
 }
 
@@ -585,7 +585,7 @@ t_gmap_consume_some() `test {
   map[string, int] b = {
     "z": 9
   };
-  assert(gconsume_map_len(a, b) == 2, "gmap consume some");
+  assert(gconsume_map_len(move a, b) == 2, "gmap consume some");
 }
 
 t_gmap_consume_none() `test {
@@ -597,7 +597,7 @@ t_gmap_consume_none() `test {
 
 // --- generic `~T[]?` consume: same, for the i8* container path (string[]). ---
 
-gconsume_vec_len[T](~T[]? a, T[] b) int {
+gconsume_vec_len[T](T[]? move a, T[] b) int {
   return (a ?: b).len;
 }
 
@@ -608,7 +608,7 @@ t_gvec_consume_some() `test {
   string[]? a = av;
   string[] b = [];
   b.push("x" + "y");
-  assert(gconsume_vec_len(a, b) == 2, "gvec consume some");
+  assert(gconsume_vec_len(move a, b) == 2, "gvec consume some");
 }
 
 t_gvec_consume_none() `test {
@@ -699,7 +699,7 @@ t_index_strvec_some() `test {
   string[] inner = [];
   inner.push("p" + "q");
   inner.push("r" + "s");
-  v.push(inner);
+  v.push(move inner);
   string[] b = [];
   b.push("x" + "y");
   assert((v[0] ?: b).len == 2, "index strvec some");
@@ -896,7 +896,7 @@ t_weak_none() `test {
   assert(((a ?: b).upgrade() ?: Ref[int](0)).borrow == 7, "weak none");
 }
 
-mk_opt_weak(Ref[int] &src) Weak[int]? {
+mk_opt_weak(Ref[int] src) Weak[int]? {
   return src.downgrade();
 }
 
@@ -952,7 +952,7 @@ t_guard_none() `test {
 // temporary-optional source: the guard must outlive the Mutex it locks, so the
 // helper borrows the Mutex (`&m`) rather than owning a local one (which would be
 // dropped at return, dangling the guard).
-mk_opt_guard(Mutex[int] &m) MutexGuard[int]? {
+mk_opt_guard(Mutex[int] m) MutexGuard[int]? {
   return m.lock();
 }
 

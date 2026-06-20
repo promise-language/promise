@@ -46,17 +46,17 @@ optional_string_is_type() `test {
 
 type Animal {
   string name;
-  speak(&this) string `abstract;
+  speak(this) string `abstract;
 }
 
 type Dog is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "Woof";
   }
 }
 
 type Cat is Animal {
-  speak(&this) string {
+  speak(this) string {
     return "Meow";
   }
 }

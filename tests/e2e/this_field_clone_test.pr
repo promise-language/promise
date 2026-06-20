@@ -147,7 +147,7 @@ test_t0411_owned_owner_constructor_field_init() `test {
   // already-fixed B0345/B0351 path; the T0411 fix makes it consistent for
   // ThisExpr roots too. Belt-and-braces regression check.
   cb := CloneBox(label: "hello world");
-  cb2 := CloneBox(label: cb.label);
+  cb2 := CloneBox(label: move cb.label);
   assert(cb.label == "hello world", "orig");
   assert(cb2.label == "hello world", "dup");
 }
@@ -206,7 +206,7 @@ test_t0411_return_this_vector_field() `test {
 
 // --- consume-arg `consume(this.field)` (auto-dup type) ---
 
-_consume_string(~string s) `public {
+_consume_string(string move s) `public {
   // No-op — just consume.
 }
 
@@ -242,7 +242,7 @@ type ChHolder {
 test_t0411_clone_channel_field() `test {
   c := channel[int](1);
   c.send(42);
-  h := ChHolder(ch: c);
+  h := ChHolder(ch: move c);
   // h2 must hold an independent reference (incref) to the same channel.
   // Without dup, the channel ref-count stays the same and the second close
   // would underflow.
@@ -274,7 +274,7 @@ test_t0411_explicit_clone_for_map_field() `test {
   m := map[string, string]();
   m["a"] = "1";
   m["b"] = "2";
-  h := MapHolder(headers: m);
+  h := MapHolder(headers: move m);
   h2 := h.clone();
   // Both must own independent maps with the same contents.
   if a := h2.headers["a"] {
@@ -342,7 +342,7 @@ type _T0778TPHolder[T] {
 
   // Optional-handler unwrap `return (this.opt)? _ { recovery }` — present path
   // returns the borrowed inner; the absent path returns the fresh recovery.
-  read_opt_handler(this, ~T recovery) T {
+  read_opt_handler(this, T move recovery) T {
     return (this.opt)? _ {
       recovery
     };
@@ -408,10 +408,10 @@ test_t0778_generic_typeparam_vector_optional_handler_absent() `test {
   assert(r[0] == 5000, "vector handler absent[0]");
 }
 
-// --- Explicit `&this` receiver auto-dup (T0413) ---
+// --- Explicit `this` receiver auto-dup (T0413) ---
 //
 // T0411's auto-dup fires whenever the owner has drop, regardless of
-// whether the receiver is implicit (`clone()`) or explicit (`copy(&this)`).
+// whether the receiver is implicit (`clone()`) or explicit (`copy(this)`).
 // This locks the explicit-receiver path so a future change to receiver-kind
 // handling doesn't silently regress field-init dup.
 type _T0413Box {
@@ -419,7 +419,7 @@ type _T0413Box {
   drop(~this) {
   }
 
-  copy(&this) _T0413Box {
+  copy(this) _T0413Box {
     return _T0413Box(label: this.label);
   }
 }
@@ -437,7 +437,7 @@ test_t0413_explicit_borrow_string_field() `test {
 // freeing `this.label`. Without dup, the new instance's `label` would alias
 // the freed buffer and double-free at caller drop time. `genThisExpr` takes
 // a different path when `thisRecvIsOwned=true` (T0428 Case 3A), so this is
-// a structurally distinct codegen path from `&this`.
+// a structurally distinct codegen path from `this`.
 type _T0413ConsumeBox {
   string label;
   drop(~this) {
@@ -590,7 +590,7 @@ test_t0487_optional_vector_field_block_result() `test {
   }
 }
 
-_t0487_consume_optional_vec(~int[]? v) `public {
+_t0487_consume_optional_vec(int[]? move v) `public {
   // No-op — just consume.
   if x := v {
     assert(x.len == 100, "consumed len");
@@ -600,7 +600,7 @@ _t0487_consume_optional_vec(~int[]? v) `public {
 test_t0487_optional_vector_field_consume_arg() `test {
   // `f(h.items)` with `~T?` param — the maybeEnableDupForMutRefArg path.
   h := _T0487OptVecHolder(items: _t0487_make_dynamic_vec());
-  _t0487_consume_optional_vec(h.items);
+  _t0487_consume_optional_vec(move h.items);
   // After consume, original must still own its buffer.
   if v := h.items {
     assert(v.len == 100, "orig len after consume");
@@ -625,7 +625,7 @@ type _T0487OptChHolder {
 test_t0487_clone_optional_channel_field_constructor() `test {
   c := channel[int](1);
   c.send(42);
-  h := _T0487OptChHolder(ch: c);
+  h := _T0487OptChHolder(ch: move c);
   h2 := h.clone();
   // Both must hold independent refcounts to the same channel.
   if ch := h2.ch {
@@ -651,7 +651,7 @@ type _T0487OptStrHolder {
   }
 }
 
-_t0487_consume_opt_string(~string? s) `public {
+_t0487_consume_opt_string(string? move s) `public {
   // No-op — just consume.
   if x := s {
     assert(x == "foobar", "consumed");
@@ -663,7 +663,7 @@ _t0487_consume_opt_string(~string? s) `public {
 test_t0487_optional_string_field_consume_arg() `test {
   // Heap-allocated string via concat (literal would be .rodata-flagged).
   h := _T0487OptStrHolder(title: "foo" + "bar");
-  _t0487_consume_opt_string(h.title);
+  _t0487_consume_opt_string(move h.title);
   // Original still owns its string.
   if x := h.title {
     assert(x == "foobar", "orig after consume");
@@ -873,11 +873,11 @@ test_t0500_external_weak_upgrade_var_decl() `test {
   }
 }
 
-_t0500_consume_arc(~Ref[int] a) `public {
+_t0500_consume_arc(Ref[int] move a) `public {
   assert(a.borrow == 61, "consumed arc value");
 }
 
-_t0500_consume_weak(~Weak[int] w) `public {
+_t0500_consume_weak(Weak[int] move w) `public {
   if up := w.upgrade() {
     assert(up.borrow == 61, "consumed weak upgraded");
   } else {
@@ -1071,7 +1071,7 @@ test_t0498_multi_optional_channel_field_constructor() `test {
   ca.send(11);
   cb := channel[int](1);
   cb.send(22);
-  h := _T0498ChHolder(ch_a: ca, ch_b: cb);
+  h := _T0498ChHolder(ch_a: move ca, ch_b: move cb);
   h2 := h.swap_channels();
   // The new instance's ch_a should receive cb's value (22) and ch_b should
   // receive ca's value (11). Both channels must hold valid refcounts.

@@ -54,7 +54,7 @@ test_optional_fixedarray_and_vector_coexist() `test {
 // (3) Generic + vector coexistence — exercises the typeSubst path of
 // _set_opt_arr_first[int] alongside an int?[] vector bare assign. Bug report
 // called this form out as a panic trigger.
-_set_opt_arr_first_t0615[T](~T x) bool {
+_set_opt_arr_first_t0615[T](T move x) bool {
   T? z0 = none;
   T? z1 = none;
   T?[2] a = [z0, z1];

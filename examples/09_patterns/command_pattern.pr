@@ -41,7 +41,7 @@ removed: bread
   for cmd in commands {
     match cmd {
       Command.Add(item) => {
-        items.push(item);
+        items.push(move item);
         print_line("added: {item}");
       },
       Command.Remove(item) => {

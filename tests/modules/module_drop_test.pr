@@ -43,7 +43,7 @@ test_t0406_module_method_tuple_param() `test {
 // would leak.
 test_t0468_module_inherited_drop_no_leak() `test {
   s := "label".repeat(2);
-  b := mathlib._T0468ModBox[int](val: 1, label: s);
+  b := mathlib._T0468ModBox[int](val: 1, label: move s);
   assert(b.val == 1, "val");
   assert(b.label == "labellabel", "label");
 }
@@ -59,7 +59,7 @@ test_t0468_module_inherited_drop_no_leak() `test {
 test_t0507_module_inherited_drop_no_leak() `test {
   parent_m := "marker".repeat(2);
   child_l := "child".repeat(2);
-  b := mathlib._T0507ModBox(marker: parent_m, label: child_l);
+  b := mathlib._T0507ModBox(marker: move parent_m, label: move child_l);
   assert(b.marker == "markermarker", "parent marker");
   assert(b.label == "childchild", "child label");
 }
@@ -69,7 +69,7 @@ test_t0507_module_inherited_drop_no_leak() `test {
 // defineModuleTypeMethods the string field would leak at scope exit.
 test_module_user_empty_drop_heap_field_no_leak() `test {
   s := "x".repeat(2);
-  b := mathlib._T0553ModBase(s: s);
+  b := mathlib._T0553ModBase(s: move s);
   assert(b.s == "xx", "s");
 }
 
@@ -79,7 +79,7 @@ test_module_user_empty_drop_heap_field_no_leak() `test {
 // auto-append for empty drop bodies.
 test_module_user_nonempty_drop_heap_field_no_leak() `test {
   s := "y".repeat(3);
-  b := mathlib._T0553ModBaseBody(s: s, counter: 0);
+  b := mathlib._T0553ModBaseBody(s: move s, counter: 0);
   assert(b.s == "yyy", "s");
   assert(b.counter == 0, "counter starts at 0");
 }
@@ -88,7 +88,7 @@ test_module_user_nonempty_drop_heap_field_no_leak() `test {
 // from string). Verifies the auto-append works for any droppable field type.
 test_module_user_drop_vector_field_no_leak() `test {
   int[] v = [1, 2, 3];
-  b := mathlib._T0553ModBaseVec(v: v);
+  b := mathlib._T0553ModBaseVec(v: move v);
   assert(b.v.len == 3, "vector len");
   assert(b.v[0] == 1, "vector[0]");
 }
@@ -110,6 +110,6 @@ test_t0552_cross_module_enum_field_inline() `test {
 
 test_t0552_cross_module_enum_field_named_var() `test {
   mathlib._T0552DropEnum e = mathlib._T0552DropEnum.Has(r: mathlib.Resource(id: 2));
-  _T0552CrossHolder h = _T0552CrossHolder(m: e);
+  _T0552CrossHolder h = _T0552CrossHolder(m: move e);
   assert(true, "constructed");
 }

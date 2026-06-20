@@ -17,7 +17,7 @@ make_container() Container {
   v.push(1);
   v.push(2);
   v.push(3);
-  return Container.Data(items: v);
+  return Container.Data(items: move v);
 }
 
 test_vector_variant() `test {
@@ -42,7 +42,7 @@ enum Message {
 
 make_message() Message {
   string s = "hello" + " world";
-  return Message.Text(content: s);
+  return Message.Text(content: move s);
 }
 
 test_string_variant() `test {
@@ -68,7 +68,7 @@ test_multi_droppable_fields() `test {
   int[] v = [];
   v.push(10);
   string s = "test" + "ing";
-  Multi m = Multi.Both(name: s, data: v);
+  Multi m = Multi.Both(name: move s, data: move v);
 }
 
 // --- User type with drop as variant field ---
@@ -90,5 +90,5 @@ enum Holder {
 
 test_user_type_variant() `test {
   Resource r = Resource(id: 99);
-  Holder h = Holder.Active(res: r);
+  Holder h = Holder.Active(res: move r);
 }

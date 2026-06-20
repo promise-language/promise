@@ -52,7 +52,7 @@ test_borrow_set_synth_drop() `test {
 
 test_borrow_set_channel() `test {
   ch1 := channel[int](1);
-  m := Mutex[channel[int]](ch1);
+  m := Mutex[channel[int]](move ch1);
   use guard := m.lock();
   ch2 := channel[int](2);
   guard.borrow = ch2;
@@ -82,13 +82,13 @@ test_borrow_set_compound_assign() `test {
 // The supported alternative is `g.borrow = src.borrow.clone()` to install
 // an independent owned copy.
 
-forward_move(~Mutex[string] m, ~string s) {
+forward_move(Mutex[string] move m, string move s) {
   use g := m.lock();
   g.borrow = s;
   assert(g.borrow == "moved value", "moved-in value present");
 }
 
-forward_clone(~Mutex[string] m, string s) {
+forward_clone(Mutex[string] move m, string s) {
   use g := m.lock();
   g.borrow = s.clone();
   assert(g.borrow == "cloned value", "cloned value present");
@@ -96,13 +96,13 @@ forward_clone(~Mutex[string] m, string s) {
 
 test_borrow_set_move_param() `test {
   m := Mutex[string]("init");
-  forward_move(m, "moved " + "value");
+  forward_move(move m, "moved " + "value");
 }
 
 test_borrow_set_clone_borrow() `test {
   m := Mutex[string]("init");
   string heap_str = "cloned " + "value";
-  forward_clone(m, heap_str);
+  forward_clone(move m, heap_str);
 }
 
 // T0401: the supported recovery path — `g.borrow = src.borrow.clone()` where

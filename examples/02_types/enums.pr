@@ -16,7 +16,7 @@ enum Shape {
   Triangle(f64 base, f64 height),
 
   // Methods can be defined on enums.
-  area(&this) f64 {
+  area(this) f64 {
     return match this {
       Circle(r) => 3.14159 * r * r,
       Rectangle(w, h) => w * h,
@@ -24,7 +24,7 @@ enum Shape {
     };
   }
 
-  describe(&this) string {
+  describe(this) string {
     return match this {
       Circle(r) => "circle with radius {r}",
       Rectangle(w, h) => "rectangle {w}x{h}",

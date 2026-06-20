@@ -4,7 +4,7 @@
 // MutexGuard — `take_guard(m.lock())` leaked 1 allocation per call.
 take_guard(MutexGuard[int] g) {
 }
-take_guard_move(~MutexGuard[int] g) {
+take_guard_move(MutexGuard[int] move g) {
 }
 take_two(int x, MutexGuard[int] g) {
 }

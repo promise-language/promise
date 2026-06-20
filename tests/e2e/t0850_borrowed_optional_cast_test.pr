@@ -9,17 +9,17 @@
 // a.borrow {}`), previously rejected by sema, now auto-derefs to a Borrowed view.
 type Shape {
   string name;
-  area(&this) f64 `abstract;
+  area(this) f64 `abstract;
 }
 type Circle is Shape {
   f64 radius;
-  area(&this) f64 {
+  area(this) f64 {
     return this.radius;
   }
 }
 type Square is Shape {
   f64 side;
-  area(&this) f64 {
+  area(this) f64 {
     return this.side;
   }
 }
@@ -27,7 +27,7 @@ type Square is Shape {
 // `as` on a borrowed Arc optional, matching subtype → some; read back the value.
 arc_optional_cast_match() `test {
   Circle? init = Circle(name: "c", radius: 1.5);
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   Circle? cc = a.borrow as Circle;
   f64 r = 0.0;
   if cc {
@@ -43,7 +43,7 @@ arc_optional_cast_match() `test {
 // none-subject branch reached through a reference.
 arc_optional_cast_none() `test {
   Circle? init = none;
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   Circle? cc = a.borrow as Circle;
   bool present = false;
   if cc {
@@ -55,7 +55,7 @@ arc_optional_cast_none() `test {
 // `as` on a borrowed Arc optional, non-matching subtype → none.
 arc_optional_cast_mismatch() `test {
   Circle? init = Circle(name: "c", radius: 1.5);
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   Square? sq = a.borrow as Square;
   bool present = false;
   if sq {
@@ -67,7 +67,7 @@ arc_optional_cast_mismatch() `test {
 // `as!` (force) on a borrowed Arc optional, matching subtype → inner value.
 arc_optional_force_cast() `test {
   Circle? init = Circle(name: "c", radius: 2.5);
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   Circle c = a.borrow as! Circle;
   assert(c.radius == 2.5, "force cast should return the held value");
 }
@@ -75,7 +75,7 @@ arc_optional_force_cast() `test {
 // `as` on a borrowed Mutex[T?] guard (MutRef-of-Optional) → some.
 mutex_guard_optional_cast() `test {
   Circle? init = Circle(name: "m", radius: 3.5);
-  Mutex[Circle?] m = Mutex[Circle?](init);
+  Mutex[Circle?] m = Mutex[Circle?](move init);
   MutexGuard[Circle?] g = m.lock();
   Circle? cc = g.borrow as Circle;
   f64 r = 0.0;
@@ -88,7 +88,7 @@ mutex_guard_optional_cast() `test {
 // if-unwrap of a borrowed Arc optional (secondary T0850 fix) — binds a borrow.
 arc_optional_if_unwrap() `test {
   Circle? init = Circle(name: "c", radius: 4.5);
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   f64 r = 0.0;
   if x := a.borrow {
     r = x.radius;
@@ -101,7 +101,7 @@ arc_optional_if_unwrap() `test {
 // (ownership), the sibling of the Arc/SharedRef `arc_optional_if_unwrap` above.
 mutex_guard_if_unwrap() `test {
   Circle? init = Circle(name: "m", radius: 7.5);
-  Mutex[Circle?] m = Mutex[Circle?](init);
+  Mutex[Circle?] m = Mutex[Circle?](move init);
   MutexGuard[Circle?] g = m.lock();
   f64 r = 0.0;
   if x := g.borrow {
@@ -115,7 +115,7 @@ mutex_guard_if_unwrap() `test {
 // shared payload exactly once).
 arc_shared_borrowed_cast() `test {
   Circle? init = Circle(name: "s", radius: 6.5);
-  Ref[Circle?] a = Ref[Circle?](init);
+  Ref[Circle?] a = Ref[Circle?](move init);
   Ref[Circle?] b = a.clone();
   Circle? cc = a.borrow as Circle;
   f64 r = 0.0;

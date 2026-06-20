@@ -63,7 +63,7 @@ test_t0647_string_baseline_native_no_overtrack() `test {
 sbox_idx_mut(SBox ~s) int {
   return s[1].len; // temporary-use path under a ~ receiver
 }
-sbox_idx_shared(SBox &s) int {
+sbox_idx_shared(SBox s) int {
   x := s[0]; // binding path under a & receiver
   return x.len;
 }
@@ -95,7 +95,7 @@ test_t0647_generic_string() `test {
 gbox_idx_mut[X](GBox[X] ~g, int i) X {
   return g[i];
 }
-gbox_idx_shared[X](GBox[X] &g, int i) X {
+gbox_idx_shared[X](GBox[X] g, int i) X {
   v := g[i];
   return v;
 }
@@ -193,7 +193,7 @@ type MBox {
 test_t0647_map_value() `test {
   map[string, string] mm = {:};
   mm["k"] = "v" + "1";
-  mb := MBox(m: mm);
+  mb := MBox(m: move mm);
   assert(mb["k"].len == 2, "operator map-value temporary");
   mv := mb["k"];
   assert(mv.len == 2, "operator map-value binding");

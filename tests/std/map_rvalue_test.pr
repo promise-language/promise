@@ -33,7 +33,7 @@ borrow_map_of_map(Map[string, Map[string, int]] m) int {
   return m.len;
 }
 
-consume_map(~Map[string, int] m) int {
+consume_map(Map[string, int] move m) int {
   return m.len;
 }
 
@@ -45,7 +45,7 @@ make_map_literal() Map[string, int] {
 
 type _T0735Box {
   Map[string, int] m;
-  new(~this, ~Map[string, int] m) {
+  new(~this, Map[string, int] move m) {
     this.m = m;
   }
 }

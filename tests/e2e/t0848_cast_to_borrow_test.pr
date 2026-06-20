@@ -7,24 +7,24 @@
 // double-free.
 type Shape {
   string name;
-  area(&this) f64 `abstract;
+  area(this) f64 `abstract;
 }
 type Circle is Shape {
   f64 radius;
-  area(&this) f64 {
+  area(this) f64 {
     return this.radius;
   }
 }
 type Square is Shape {
   f64 side;
-  area(&this) f64 {
+  area(this) f64 {
     return this.side;
   }
 }
 
 // `as! T&` downcast through a borrow-returning function — the exact bug repro.
 // Returns a Circle borrow from a Shape borrow, read a field off the result.
-borrow_downcast(Shape &s) Circle & {
+borrow_downcast(Shape s) Circle & {
   return s as! Circle &;
 }
 
@@ -77,7 +77,7 @@ nonforce_borrow_owned_local() `test {
 
 // None branch: a non-force borrow cast to a non-matching type yields an absent
 // optional. Exercises the cast.none/merge path for the borrow target.
-nonforce_borrow_none(Shape &s) bool {
+nonforce_borrow_none(Shape s) bool {
   Circle & ? o = s as Circle &;
   bool present = false;
   if o {

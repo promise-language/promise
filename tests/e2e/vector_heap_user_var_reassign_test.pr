@@ -94,7 +94,7 @@ test_t0410_multi_heap_fields() `test {
 }
 
 // --- 6. Generic function: vec-to-local reassignment under typeSubst. ---
-swap_first[T](~T[] v, ~T local) T {
+swap_first[T](T[] move v, T move local) T {
   local = v[0];
   return local;
 }
@@ -104,7 +104,7 @@ test_t0410_generic_reassign() `test {
   v.push(_T0410Box(label: "g" + "h"));
   v.push(_T0410Box(label: "i" + "j"));
   init := _T0410Box(label: "init" + "g");
-  out := swap_first[_T0410Box](v, init);
+  out := swap_first[_T0410Box](move v, move init);
   assert(out.label == "gh", "generic swap result");
 }
 
@@ -118,7 +118,7 @@ type _T0410CopyBox {
   drop(~this) {
   }
 
-  copy(&this) _T0410CopyBox {
+  copy(this) _T0410CopyBox {
     return _T0410CopyBox(label: this.label);
   }
 }
@@ -183,7 +183,7 @@ type _T0410GenHolder[T] {
   }
 }
 
-swap_into_holder[T](~_T0410GenHolder[T] h, ~T[] v) _T0410GenHolder[T] {
+swap_into_holder[T](_T0410GenHolder[T] move h, T[] move v) _T0410GenHolder[T] {
   h.item = v[0];
   return h;
 }
@@ -193,7 +193,7 @@ test_t0410_generic_holder_member() `test {
   v.push(_T0410Box(label: "g" + "h"));
   v.push(_T0410Box(label: "i" + "j"));
   h := _T0410GenHolder[_T0410Box](item: _T0410Box(label: "init" + "g"));
-  h = swap_into_holder[_T0410Box](h, v);
+  h = swap_into_holder[_T0410Box](move h, move v);
   assert(h.item.label == "gh", "generic holder member typeSubst");
 }
 
@@ -281,7 +281,7 @@ type _T0908GenHolder[T] {
   T item;
 }
 
-swap_no_drop_member[T](~_T0908GenHolder[T] h, ~T[] v) _T0908GenHolder[T] {
+swap_no_drop_member[T](_T0908GenHolder[T] move h, T[] move v) _T0908GenHolder[T] {
   h.item = v[0];
   return h;
 }
@@ -289,21 +289,21 @@ swap_no_drop_member[T](~_T0908GenHolder[T] h, ~T[] v) _T0908GenHolder[T] {
 test_t0908_generic_member_typesubst() `test {
   v := [_T0908NoDrop(v: 4), _T0908NoDrop(v: 5)];
   h := _T0908GenHolder[_T0908NoDrop](item: _T0908NoDrop(v: 0));
-  h = swap_no_drop_member[_T0908NoDrop](h, v);
+  h = swap_no_drop_member[_T0908NoDrop](move h, move v);
   assert(h.item.v == 4, "no-drop generic member typeSubst");
 }
 
 // Generic vector element overwrite under typeSubst: `v[0] = x` inside a generic
 // function exercises genVectorIndexAssign's no-drop drop-old branch with the
 // element type resolved through c.typeSubst.
-overwrite_first[T](~T[] v, ~T x) T[] {
+overwrite_first[T](T[] move v, T move x) T[] {
   v[0] = x;
   return v;
 }
 
 test_t0908_generic_vector_typesubst() `test {
   v := [_T0908NoDrop(v: 1), _T0908NoDrop(v: 2)];
-  v = overwrite_first[_T0908NoDrop](v, _T0908NoDrop(v: 9));
+  v = overwrite_first[_T0908NoDrop](move v, _T0908NoDrop(v: 9));
   assert(v[0].v == 9, "no-drop generic vector [0] overwritten");
   assert(v[1].v == 2, "no-drop generic vector [1] unchanged");
 }

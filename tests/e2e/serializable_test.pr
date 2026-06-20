@@ -225,7 +225,7 @@ nested_with_key_test() `test {
   string s = enc.to_string();
   assert(s.contains("\"position\":"), "nested key: uses wire name");
   assert(!s.contains("\"pos\":"), "nested key: no raw name");
-  json.JsonDecoder dec = json.JsonDecoder(data: s);
+  json.JsonDecoder dec = json.JsonDecoder(data: move s);
   Located l2 = Located.decode(dec)?!;
   assert(l2.pos.x == 3, "nested key decode: x");
   assert(l2.pos.y == 4, "nested key decode: y");
@@ -712,7 +712,7 @@ encode_string_point_test() `test {
 
 decode_string_point_test() `test {
   string data = "\{\"x\":10,\"y\":20}";
-  Point p = json.decode_string[Point](data)?!;
+  Point p = json.decode_string[Point](move data)?!;
   assert(p.x == 10, "decode_string point x");
   assert(p.y == 20, "decode_string point y");
 }
@@ -720,7 +720,7 @@ decode_string_point_test() `test {
 encode_decode_round_trip_test() `test {
   MixedFields orig = MixedFields(label: "test", count: 42, score: 3.14, active: true);
   string s = json.encode_string[MixedFields](orig)?!;
-  MixedFields copy = json.decode_string[MixedFields](s)?!;
+  MixedFields copy = json.decode_string[MixedFields](move s)?!;
   assert(copy.label == "test", "round trip label");
   assert(copy.count == 42, "round trip count");
   assert(copy.score > 3.13 && copy.score < 3.15, "round trip score");
@@ -738,7 +738,7 @@ encode_decode_optionals_test() `test {
   // present optional
   WithOptionals w1 = WithOptionals(name: "Alice", bio: "hi", level: 5);
   string s1 = json.encode_string[WithOptionals](w1)?!;
-  WithOptionals c1 = json.decode_string[WithOptionals](s1)?!;
+  WithOptionals c1 = json.decode_string[WithOptionals](move s1)?!;
   assert(c1.name == "Alice", "opt rt: name");
   assert(c1.bio is present, "opt rt: bio present");
   if b := c1.bio {
@@ -749,7 +749,7 @@ encode_decode_optionals_test() `test {
   // absent optionals
   WithOptionals w2 = WithOptionals(name: "Bob");
   string s2 = json.encode_string[WithOptionals](w2)?!;
-  WithOptionals c2 = json.decode_string[WithOptionals](s2)?!;
+  WithOptionals c2 = json.decode_string[WithOptionals](move s2)?!;
   assert(c2.name == "Bob", "opt rt absent: name");
   assert(c2.bio is absent, "opt rt absent: bio");
   assert(c2.level is absent, "opt rt absent: level");
@@ -761,7 +761,7 @@ encode_decode_nested_test() `test {
   string s = json.encode_string[Person](p)?!;
   assert(s.contains("\"name\":\"Eve\""), "nested enc: name");
   assert(s.contains("\"street\":\"123 Main\""), "nested enc: street");
-  Person p2 = json.decode_string[Person](s)?!;
+  Person p2 = json.decode_string[Person](move s)?!;
   assert(p2.name == "Eve", "nested dec: name");
   assert(p2.age == 25, "nested dec: age");
   assert(p2.address.street == "123 Main", "nested dec: street");
@@ -773,7 +773,7 @@ encode_decode_array_field_test() `test {
   TaggedItem item = TaggedItem(name: "widget", tags: ["red", "small"]);
   string s = json.encode_string[TaggedItem](item)?!;
   assert(s.contains("\"tags\":[\"red\",\"small\"]"), "array field enc");
-  TaggedItem item2 = json.decode_string[TaggedItem](s)?!;
+  TaggedItem item2 = json.decode_string[TaggedItem](move s)?!;
   assert(item2.name == "widget", "array field dec: name");
   assert(item2.tags.len == 2, "array field dec: tags len");
   assert(item2.tags[0] == "red", "array field dec: tag 0");
@@ -786,7 +786,7 @@ encode_decode_key_remap_test() `test {
   string s = json.encode_string[User](u)?!;
   assert(s.contains("\"user_name\":\"Grace\""), "key remap enc: user_name");
   assert(!s.contains("\"name\""), "key remap enc: no bare name key");
-  User u2 = json.decode_string[User](s)?!;
+  User u2 = json.decode_string[User](move s)?!;
   assert(u2.name == "Grace", "key remap dec: name");
   assert(u2.age == 28, "key remap dec: age");
 }
@@ -797,7 +797,7 @@ encode_string_pretty_round_trip_test() `test {
   string pretty = json.encode_string_pretty[Person](p)?!;
   assert(pretty.contains("\n"), "pretty rt: has newlines");
   // Pretty output should be parseable back
-  Person p2 = json.decode_string[Person](pretty)?!;
+  Person p2 = json.decode_string[Person](move pretty)?!;
   assert(p2.name == "Zoe", "pretty rt: name");
   assert(p2.address.city == "LA", "pretty rt: city");
 }
@@ -862,7 +862,7 @@ flatten_encode_test() `test {
 flatten_decode_test() `test {
   // Decode from flat JSON — keys are at the top level
   string data = "\{\"title\":\"Doc\",\"author\":\"Bob\",\"version\":3}";
-  FlatDoc doc = json.decode_string[FlatDoc](data)?!;
+  FlatDoc doc = json.decode_string[FlatDoc](move data)?!;
   assert(doc.title == "Doc", "flatten dec: title");
   assert(doc.meta.author == "Bob", "flatten dec: author");
   assert(doc.meta.version == 3, "flatten dec: version");
@@ -871,7 +871,7 @@ flatten_decode_test() `test {
 flatten_round_trip_test() `test {
   FlatDoc doc1 = FlatDoc(title: "RT", meta: Metadata(author: "Carol", version: 1));
   string s = json.encode_string[FlatDoc](doc1)?!;
-  FlatDoc doc2 = json.decode_string[FlatDoc](s)?!;
+  FlatDoc doc2 = json.decode_string[FlatDoc](move s)?!;
   assert(doc2.title == "RT", "flatten rt: title");
   assert(doc2.meta.author == "Carol", "flatten rt: author");
   assert(doc2.meta.version == 1, "flatten rt: version");
@@ -886,7 +886,7 @@ flatten_with_optional_sibling_test() `test {
   assert(s.contains("\"description\":\"Nice park\""), "flatten opt: description");
   assert(!s.contains("\"position\""), "flatten opt: no wrapper key");
 
-  Location loc2 = json.decode_string[Location](s)?!;
+  Location loc2 = json.decode_string[Location](move s)?!;
   assert(loc2.name == "Park", "flatten opt dec: name");
   assert(loc2.position.lat > 37.77, "flatten opt dec: lat");
   assert(loc2.description is present, "flatten opt dec: description present");
@@ -901,7 +901,7 @@ flatten_with_optional_subfields_test() `test {
   assert(s.contains("\"bio\":\"hi\""), "flatten opt sub: bio inlined");
   assert(s.contains("\"level\":5"), "flatten opt sub: level inlined");
 
-  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)?!;
+  WithOptionalFields w2 = json.decode_string[WithOptionalFields](move s)?!;
   assert(w2.label == "test", "flatten opt sub dec: label");
   assert(w2.inner.name == "Alice", "flatten opt sub dec: name");
   assert(w2.inner.bio is present, "flatten opt sub dec: bio present");
@@ -915,7 +915,7 @@ flatten_with_absent_optional_subfields_test() `test {
   assert(!s.contains("\"bio\""), "flatten absent: bio omitted");
   assert(!s.contains("\"level\""), "flatten absent: level omitted");
 
-  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)?!;
+  WithOptionalFields w2 = json.decode_string[WithOptionalFields](move s)?!;
   assert(w2.inner.name == "Bob", "flatten absent dec: name");
   assert(w2.inner.bio is absent, "flatten absent dec: bio absent");
   assert(w2.inner.level is absent, "flatten absent dec: level absent");
@@ -930,7 +930,7 @@ flatten_with_key_annotation_test() `test {
   assert(!s.contains("\"first_name\""), "flatten key: no raw name");
   assert(!s.contains("\"details\""), "flatten key: no wrapper");
 
-  FlatKeyed fk2 = json.decode_string[FlatKeyed](s)?!;
+  FlatKeyed fk2 = json.decode_string[FlatKeyed](move s)?!;
   assert(fk2.id == 42, "flatten key dec: id");
   assert(fk2.details.first_name == "John", "flatten key dec: first_name");
   assert(fk2.details.last_name == "Doe", "flatten key dec: last_name");
@@ -945,7 +945,7 @@ flatten_with_skip_subfield_test() `test {
   assert(!s.contains("\"secret\""), "flatten skip: hidden value absent");
   assert(!s.contains("\"info\""), "flatten skip: no wrapper");
 
-  FlatWithSkip fw2 = json.decode_string[FlatWithSkip](s)?!;
+  FlatWithSkip fw2 = json.decode_string[FlatWithSkip](move s)?!;
   assert(fw2.code == 200, "flatten skip dec: code");
   assert(fw2.info.visible == "ok", "flatten skip dec: visible");
   assert(fw2.info.hidden == "", "flatten skip dec: hidden default");
@@ -980,7 +980,7 @@ flatten_multiple_test() `test {
   assert(!s.contains("\"size\""), "multi flatten: no size wrapper");
   assert(!s.contains("\"style\""), "multi flatten: no style wrapper");
 
-  MultiFlat mf2 = json.decode_string[MultiFlat](s)?!;
+  MultiFlat mf2 = json.decode_string[MultiFlat](move s)?!;
   assert(mf2.name == "box", "multi flatten dec: name");
   assert(mf2.size.width == 100, "multi flatten dec: width");
   assert(mf2.size.height == 50, "multi flatten dec: height");

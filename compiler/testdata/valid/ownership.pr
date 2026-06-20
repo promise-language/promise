@@ -3,7 +3,7 @@
 type Resource {
   String data;
 
-  read(&this) String `instance {
+  read(this) String `instance {
     return this.data;
   }
 
@@ -13,7 +13,7 @@ type Resource {
 }
 
 // Shared borrow parameter
-readLen(String &s) Int {
+readLen(String s) Int {
   return s.length();
 }
 
@@ -28,7 +28,7 @@ clearFirst(Int[] ~arr) {
 }
 
 // Shared borrow of interface
-describeShape(Shape &s) String {
+describeShape(Shape s) String {
   return s.toString();
 }
 

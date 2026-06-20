@@ -62,7 +62,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 				c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
 			} else {
 				c.errorf(this.Pos(),
-					"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+					"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `Type move`")
 			}
 			break
 		}
@@ -191,7 +191,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 				c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
 			} else {
 				c.errorf(this.Pos(),
-					"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+					"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `Type move`")
 			}
 			return
 		}
@@ -265,7 +265,7 @@ func (c *Checker) rejectBorrowedIdentVarDecl(value ast.Expr, lhsRef ast.TypeRef)
 	}
 	if c.params[ident.Name] {
 		c.errorf(ident.Pos(),
-			"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+			"cannot move borrowed parameter '%s'; declare the parameter with `move` to consume it",
 			ident.Name)
 	} else {
 		c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
@@ -401,7 +401,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
 		} else {
 			c.errorf(this.Pos(),
-				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `Type move`")
 		}
 		return
 	}
@@ -964,7 +964,7 @@ func (c *Checker) checkReturnAmbiguity() {
 //
 // Limited to identifiers tracked as parameters (`c.params[name]`) — non-param
 // Borrowed locals (destructure-bound borrows) are caught elsewhere and the
-// affordance ("add '~' to the parameter declaration") only applies to params.
+// affordance ("declare the parameter with `move`") only applies to params.
 // The carve-outs match the bug analysis: `int?`, `bool?`, primitive Optionals,
 // value-type Optionals, and structural-interface Optionals are not droppable
 // (their inner type isn't), so the predicate skips them.
@@ -1016,7 +1016,7 @@ func (c *Checker) findBorrowedDroppableOptionalIfletSource(expr ast.Expr) *ast.I
 // type (heap/generic user type, Map, Set). Binding such an extraction takes
 // ownership of the caller-owned inner → callee binding-drop + caller drop
 // double-free (T0811). Mirrors rejectBorrowedIdentVarDecl (T0568) /
-// findBorrowedDroppableOptionalIfletSource (T0589); same "add '~'" affordance.
+// findBorrowedDroppableOptionalIfletSource (T0589); same "declare with `move`" affordance.
 //
 // Only optional-subject casts force-unwrap (`opt as! T` / `opt as T`); a cast
 // whose subject is a non-optional value keeps T0747 view semantics (codegen
@@ -1106,7 +1106,7 @@ func isForceUnwrapForm(expr ast.Expr) bool {
 func (c *Checker) rejectBorrowedOptionalUnwrapConsume(expr ast.Expr) bool {
 	if ident := c.borrowedOptionalUnwrapConsumeSubject(expr); ident != nil {
 		c.errorf(ident.Pos(),
-			"cannot consume borrowed parameter '%s' via force-unwrap/cast; add '~' to the parameter declaration to consume the Optional",
+			"cannot consume borrowed parameter '%s' via force-unwrap/cast; declare the parameter with `move` to consume the Optional",
 			ident.Name)
 		return true
 	}
@@ -1140,7 +1140,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		// (T0585's working wrap-then-iflet path).
 		if ident := c.findBorrowedDroppableOptionalIfletSource(s.Init); ident != nil {
 			c.errorf(ident.Pos(),
-				"cannot consume borrowed parameter '%s' via if-let; add '~' to the parameter declaration to consume the Optional, or wrap into a wider Optional via an intermediate local",
+				"cannot consume borrowed parameter '%s' via if-let; declare the parameter with `move` to consume the Optional, or wrap into a wider Optional via an intermediate local",
 				ident.Name)
 		}
 	} else {
@@ -1207,7 +1207,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// same predicate as if-let.
 	if ident := c.findBorrowedDroppableOptionalIfletSource(s.Value); ident != nil {
 		c.errorf(ident.Pos(),
-			"cannot consume borrowed parameter '%s' via while-let; add '~' to the parameter declaration to consume the Optional, or wrap into a wider Optional via an intermediate local",
+			"cannot consume borrowed parameter '%s' via while-let; declare the parameter with `move` to consume the Optional, or wrap into a wider Optional via an intermediate local",
 			ident.Name)
 	}
 	// Expire call-scoped borrows from the condition expression so the loop

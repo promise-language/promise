@@ -189,16 +189,16 @@ test_t0642_inferred_inherited_generic_parent() `test {
 // SharedRef receiver — covers the `case *types.SharedRef` ref-unwrap in
 // genGenericEnumMethodCall (and the analogous unwrap path through
 // extractEnum/extractNamed in genGenericMethodCall) on the inferred path.
-ref_named(Plain &p) string {
+ref_named(Plain p) string {
   return p.echo("ref_named_inferred");
 }
-ref_enum(EPlain &e) int {
+ref_enum(EPlain e) int {
   return e.echo(33);
 }
-ref_generic_named(NBox[int] &b) string {
+ref_generic_named(NBox[int] b) string {
   return b.echo("ref_gen_named");
 }
-ref_generic_enum(EBox[int] &b) int {
+ref_generic_enum(EBox[int] b) int {
   return b.echo(44);
 }
 

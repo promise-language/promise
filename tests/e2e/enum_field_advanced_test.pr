@@ -209,7 +209,7 @@ type MultiEnum {
 }
 
 test_multiple_enum_fields() `test {
-  MultiEnum me = MultiEnum(color: Color.Blue, dir: Direction.West, id: 42);
+  MultiEnum me = MultiEnum(color: move Color.Blue, dir: move Direction.West, id: 42);
   match me.color {
     Color.Blue => {
     }, _ => assert(false, "color"),
@@ -229,7 +229,7 @@ enum Tagged {
 }
 
 test_tagged_enum() `test {
-  Tagged t = Tagged.Label(text: "hello", c: Color.Blue);
+  Tagged t = Tagged.Label(text: "hello", c: move Color.Blue);
   match t {
     Tagged.Label(txt, c) => {
       assert(txt == "hello", "text");
@@ -244,7 +244,7 @@ test_tagged_enum() `test {
 
 test_tagged_in_map() `test {
   map[string, Tagged] m = {
-    "x": Tagged.Label(text: "world", c: Color.Green)
+    "x": Tagged.Label(text: "world", c: move Color.Green)
   };
   match m["x"]! {
     Tagged.Label(txt, c) => {
@@ -265,7 +265,7 @@ type Box[T] {
 }
 
 test_generic_type_with_enum() `test {
-  Box[Color] b = Box[Color](value: Color.Red);
+  Box[Color] b = Box[Color](value: move Color.Red);
   match b.value {
     Color.Red => {
     }, _ => assert(false, "box"),
@@ -325,7 +325,7 @@ type Wrapper {
 
 test_map_struct_with_enum_value() `test {
   map[string, Wrapper] m = {
-    "a": Wrapper(c: Color.Red)
+    "a": Wrapper(c: move Color.Red)
   };
   Wrapper w = m["a"]!;
   match w.c {

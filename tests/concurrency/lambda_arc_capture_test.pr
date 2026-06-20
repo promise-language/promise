@@ -84,7 +84,7 @@ lambda_returns_string_ref() `test {
 lambda_nested_returns_string_ref() `test {
   a := Ref[string]("nested");
   outer := move || -> string & {
-    inner := |string &s| -> string & {
+    inner := |string s| -> string & {
       return s;
     };
     return inner(a.borrow);

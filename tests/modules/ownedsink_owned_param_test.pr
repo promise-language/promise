@@ -15,18 +15,18 @@ type OwnedSink `doc("Writer satisfier with a heap string field to make leaks obs
 // Module free function with an owned Writer view param.
 test_module_free_owned_param() `test {
   OwnedSink s = OwnedSink(label: "mod-free");
-  ownedsink_mod.sink_in_module(s);
+  ownedsink_mod.sink_in_module(move s);
 }
 
 // Module `new` constructor with a by-value Writer view param.
 test_module_ctor_byvalue_param() `test {
   OwnedSink s = OwnedSink(label: "mod-ctor");
-  ownedsink_mod.ModConsumer c = ownedsink_mod.ModConsumer(s);
+  ownedsink_mod.ModConsumer c = ownedsink_mod.ModConsumer(move s);
 }
 
 // Module method with an owned Writer view param.
 test_module_method_owned_param() `test {
   ownedsink_mod.ModConsumer c = ownedsink_mod.ModConsumer(OwnedSink(label: "x"));
   OwnedSink s = OwnedSink(label: "mod-method");
-  c.consume(s);
+  c.consume(move s);
 }

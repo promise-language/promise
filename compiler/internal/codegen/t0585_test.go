@@ -115,7 +115,7 @@ func TestT0585_IfUnwrapOwnedLocalPropagatesDropFlag(t *testing.T) {
 func TestT0585_ConsumeParamHasDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		type _Box { int n; }
-		_consume(~_Box? a) {}
+		_consume(_Box? move a) {}
 		main() {}
 	`)
 	body := extractFunction(ir, "__user._consume")

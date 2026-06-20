@@ -10,7 +10,7 @@ type GunzipReader `public `doc("Buffered gzip-decompressing Reader. Decompresses
   u8[] _buf;
   int _pos;
 
-  new!(~this, ~u8[] compressed) `public `doc("Decompresses a complete gzip byte stream and prepares to serve the bytes. Raises DecompressError on malformed input.") {
+  new!(~this, u8[] move compressed) `public `doc("Decompresses a complete gzip byte stream and prepares to serve the bytes. Raises DecompressError on malformed input.") {
     this._buf = gunzip(compressed)?^;
     this._pos = 0;
   }

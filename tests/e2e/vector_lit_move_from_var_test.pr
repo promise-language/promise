@@ -102,7 +102,7 @@ enum _T0610Msg {
   Text(string body),
   Empty,
 
-  body_or_empty(&this) string {
+  body_or_empty(this) string {
     match this {
       _T0610Msg.Text(b) => {
         return b;
@@ -258,7 +258,7 @@ enum _T0610GBox[T] {
   Val(string tag, T payload),
   Nil,
 
-  tag_or_empty(&this) string {
+  tag_or_empty(this) string {
     match this {
       _T0610GBox.Val(t, p) => {
         return t;

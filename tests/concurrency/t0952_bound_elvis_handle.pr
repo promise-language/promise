@@ -201,9 +201,9 @@ t0952_guard_some() `test {
 
 // ── Generic context: exercises the typeSubst arm of elvisResultHandleDrop ────────
 
-pick_mutex_t0952[T](~T seed) {
+pick_mutex_t0952[T](T move seed) {
   Mutex[T]? a = none;
-  Mutex[T] b = Mutex[T](seed);
+  Mutex[T] b = Mutex[T](move seed);
   m := a ?: b;
   g := m.lock();
   g.close();

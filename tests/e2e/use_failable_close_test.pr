@@ -260,8 +260,8 @@ test_failable_init_then_failable_close() `test {
 type Handle {
   string name;
 
-  open!(~string name) Handle `factory {
-    return Handle(name: name);
+  open!(string move name) Handle `factory {
+    return Handle(name: move name);
   }
 
   close!(~this) void {

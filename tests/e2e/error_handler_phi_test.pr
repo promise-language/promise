@@ -45,7 +45,7 @@ test_handler_string_success() `test {
 
 // Method call with ? handler (specific scenario in bug report)
 type Parser {
-  parse!(&this, string s) int {
+  parse!(this, string s) int {
     if s == "ok" {
       return 100;
     }
@@ -75,7 +75,7 @@ type Result {
 }
 
 type Factory {
-  make!(&this, bool fail) Result {
+  make!(this, bool fail) Result {
     if fail {
       raise error(message: "failed");
     }

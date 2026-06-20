@@ -27,7 +27,7 @@ inflate_empty_stored_test() `test {
   raw.push(0xFF);
   raw.push(0xFF);
   u8[] data = _bytes(raw);
-  u8[] result = inflate(data)?!;
+  u8[] result = inflate(move data)?!;
   assert(result.len == 0, "empty stored block decompresses to 0 bytes");
 }
 
@@ -42,7 +42,7 @@ inflate_fixed_hello_test() `test {
   raw.push(0x07);
   raw.push(0x00);
   u8[] data = _bytes(raw);
-  u8[] result = inflate(data)?!;
+  u8[] result = inflate(move data)?!;
   string s = "hello";
   u8[] want = s.bytes();
   _assert_eq(result, want, "hello");
@@ -58,7 +58,7 @@ inflate_fixed_aaaa_test() `test {
   raw.push(0x04);
   raw.push(0x00);
   u8[] data = _bytes(raw);
-  u8[] result = inflate(data)?!;
+  u8[] result = inflate(move data)?!;
   string s = "AAAA";
   u8[] want = s.bytes();
   _assert_eq(result, want, "AAAA");
@@ -73,7 +73,7 @@ inflate_fixed_long_aaa_test() `test {
   raw.push(0x04);
   raw.push(0x00);
   u8[] data = _bytes(raw);
-  u8[] result = inflate(data)?!;
+  u8[] result = inflate(move data)?!;
   string s = "AAAAAAAAAAAAAAAAAAAA";
   u8[] want = s.bytes(); // T0331 workaround: bind temp to local
   _assert_eq(result, want, "20 As");
@@ -98,7 +98,7 @@ inflate_fixed_repeated_test() `test {
   raw.push(0x0B);
   raw.push(0x00);
   u8[] data = _bytes(raw);
-  u8[] result = inflate(data)?!;
+  u8[] result = inflate(move data)?!;
   string s = "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij";
   u8[] want = s.bytes(); // T0331 workaround: bind temp to local
   _assert_eq(result, want, "10x abcdefghij");
@@ -220,14 +220,14 @@ inflate_dynamic_huffman_test() `test {
   raw.push(0x6D);
   raw.push(0x3F);
   u8[] data = _bytes(raw);
-  u8[] result = inflate(data)?!;
+  u8[] result = inflate(move data)?!;
   string s = "Promise is a programming language designed for AI agents to generate correct, self-contained programs efficiently. The compiler is written in Go.";
   u8[] want = s.bytes();
   _assert_eq(result, want, "dynamic Huffman 145B");
 }
 
-_try_inflate(~u8[] data) bool {
-  u8[] _v = inflate(data)? e {
+_try_inflate(u8[] move data) bool {
+  u8[] _v = inflate(move data)? e {
     return true;
   };
   return false;
@@ -339,7 +339,7 @@ inflate_dynamic_code16_at_start_test() `test {
 _roundtrip(u8[] data, string label) {
   u8[] cloned = data.clone();
   u8[] compressed = deflate(cloned);
-  u8[] decoded = inflate(compressed)?!;
+  u8[] decoded = inflate(move compressed)?!;
   _assert_eq(decoded, data, label);
 }
 
@@ -354,7 +354,7 @@ deflate_empty_test() `test {
   assert(compressed[2] == 0x00u8, "LEN high = 0");
   assert(compressed[3] == 0xFFu8, "NLEN low = 0xFF");
   assert(compressed[4] == 0xFFu8, "NLEN high = 0xFF");
-  u8[] decoded = inflate(compressed)?!;
+  u8[] decoded = inflate(move compressed)?!;
   assert(decoded.len == 0, "round-trip empty → empty");
 }
 
@@ -412,7 +412,7 @@ deflate_multi_block_test() `test {
   }
   u8[] cloned = data.clone();
   u8[] compressed = deflate(cloned);
-  u8[] decoded = inflate(compressed)?!;
+  u8[] decoded = inflate(move compressed)?!;
   _assert_eq(decoded, data, "65540 bytes (two blocks)");
 }
 
@@ -429,6 +429,6 @@ deflate_large_binary_test() `test {
   }
   u8[] cloned = data.clone();
   u8[] compressed = deflate(cloned);
-  u8[] decoded = inflate(compressed)?!;
+  u8[] decoded = inflate(move compressed)?!;
   _assert_eq(decoded, data, "200000 random bytes");
 }

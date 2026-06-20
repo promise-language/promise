@@ -12113,6 +12113,59 @@ func TestFailableGetterPlainAssignNoError(t *testing.T) {
 	`)
 }
 
+// TestFailableSliceGetterCompoundRequiresFailableScope: T0714 reopens T0709 for
+// slices. A slice compound assignment (v[a:b] += x) reads the current value via
+// [:]; a failable [:] read must propagate, so a non-failable scope is rejected.
+func TestFailableSliceGetterCompoundRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Span {
+			int x;
+			[:]!(int? low, int? high) int { if this.x < 0 { raise error("neg"); } return this.x; }
+			[:]=(int? low, int? high, int v) { this.x = v; }
+		}
+		main() {
+			s := Span(x: 0);
+			s[0:1] += 5;
+		}
+	`)
+	expectError(t, errs, "failable getter read in compound assignment must be in a failable function")
+}
+
+// TestFailableSliceGetterCompoundInFailableScopeOk: the same slice compound in a
+// failable function is valid (auto-propagates). T0714.
+func TestFailableSliceGetterCompoundInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Span {
+			int x;
+			[:]!(int? low, int? high) int { if this.x < 0 { raise error("neg"); } return this.x; }
+			[:]=(int? low, int? high, int v) { this.x = v; }
+		}
+		main!() {
+			s := Span(x: 0);
+			s[0:1] += 5;
+		}
+	`)
+}
+
+// TestFailableSliceGetterCompoundGenericInstance: the same failable-getter check
+// must resolve the [:] method through a *types.Instance origin (generic type),
+// exercising the Instance branch of assignmentGetterCanError's SliceExpr case.
+// T0714.
+func TestFailableSliceGetterCompoundGenericInstance(t *testing.T) {
+	errs := checkErrs(t, `
+		type GBox[T] {
+			int x;
+			[:]!(int? low, int? high) int { if this.x < 0 { raise error("neg"); } return this.x; }
+			[:]=(int? low, int? high, int v) { this.x = v; }
+		}
+		main() {
+			b := GBox[int](x: 0);
+			b[0:1] += 5;
+		}
+	`)
+	expectError(t, errs, "failable getter read in compound assignment must be in a failable function")
+}
+
 // TestFailableSetterCompoundSingleError: a failable setter + non-failable getter
 // in a compound assignment must emit exactly one error (the setter message),
 // confirming the else-if guard against a duplicate diagnostic.

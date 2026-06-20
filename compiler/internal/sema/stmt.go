@@ -856,6 +856,35 @@ func (c *Checker) assignmentGetterCanError(s *ast.AssignStmt) bool {
 
 	case *ast.IndexExpr:
 		return c.indexGetterCanError(tgt)
+
+	case *ast.SliceExpr:
+		// T0714: a slice compound assignment (v[a:b] += x) reads the current
+		// value via [:] before applying the operator. A failable [:] read
+		// propagates, so it must be in a failable scope. Mirrors the IndexExpr
+		// resolution in assignmentSetterCanError.
+		targetType := c.info.Types[tgt.Target]
+		if ref, ok := targetType.(*types.MutRef); ok {
+			targetType = ref.Elem()
+		}
+		if ref, ok := targetType.(*types.SharedRef); ok {
+			targetType = ref.Elem()
+		}
+		var named *types.Named
+		switch t := targetType.(type) {
+		case *types.Named:
+			named = t
+		case *types.Instance:
+			if n, ok := t.Origin().(*types.Named); ok {
+				named = n
+			}
+		}
+		if named == nil {
+			return false
+		}
+		if m := named.LookupMethod("[:]"); m != nil {
+			return m.Sig().CanError()
+		}
+		return false
 	}
 	return false
 }

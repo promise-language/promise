@@ -1,0 +1,158 @@
+// T0714: a slice compound assignment (`v[a:b] += x`) previously dropped the
+// operator and the current value — it silently behaved like `v[a:b] = x`,
+// storing only the raw RHS. It now reads the current value via `[:]`, applies
+// the operator, then writes via `[:]=` (mirrors the `[]` index compound path).
+type Span `doc("A type with `[:]` getter and `[:]=` setter over a single int, driving slice compound assignment.") {
+  int x;
+  [:](int? low, int? high) int {
+    return this.x;
+  }
+  [:]=(int? low, int? high, int v) {
+    this.x = v;
+  }
+}
+
+// The tracker repro: `+=` must read-modify-write, not overwrite.
+slice_compound_add() `test {
+  s := Span(x: 10);
+  s[0:1] += 5;
+  assert(s.x == 15, "slice += should read-modify-write to 15");
+}
+
+// All arithmetic compound operators on a slice target.
+slice_compound_all_operators() `test {
+  s := Span(x: 10);
+  s[0:1] += 5; // 15
+  s[0:1] -= 3; // 12
+  s[0:1] *= 2; // 24
+  s[0:1] /= 4; // 6
+  s[0:1] %= 4; // 2
+  assert(s.x == 2, "chained slice compound operators should yield 2");
+}
+
+type Counter `doc("Holds a tick counter so a slice bound expression's evaluation count is observable.") {
+  int ticks;
+  next_bound() int {
+    this.ticks += 1;
+    return this.ticks;
+  }
+}
+
+// The slice bounds must be evaluated exactly once per compound assignment — the
+// bound is reused for both the `[:]` read and the `[:]=` write, not re-run.
+slice_compound_bounds_evaluated_once() `test {
+  s := Span(x: 100);
+  c := Counter(ticks: 0);
+  s[c.next_bound():] += 1;
+  assert(s.x == 101, "compound should read 100 then write 101");
+  assert(c.ticks == 1, "the bound expression must evaluate exactly once");
+}
+
+type Label `doc("A type with string `[:]`/`[:]=` operators, exercising the heap-string drop-old path.") {
+  string s;
+  [:](int? low, int? high) string {
+    return this.s;
+  }
+  [:]=(int? low, int? high, ~string v) {
+    this.s = v;
+  }
+}
+
+// String operand: the getter returns a heap string that is dropped before the
+// concatenated result is written — no leak (zero-tolerance policy).
+slice_compound_string_no_leak() `test {
+  l := Label(s: "ab");
+  l[0:1] += "cd";
+  assert(l.s == "abcd", "slice += on string should concatenate to 'abcd'");
+}
+
+type Money `doc("A heap-allocated (droppable) type with a `+` operator, driving the heap-operand drop-old path of slice compound assignment.") {
+  int cents;
+  +(Money other) Money {
+    return Money(cents: this.cents + other.cents);
+  }
+  drop(~this) {
+  }
+}
+
+type Account `doc("Slice operators that return and accept a heap `Money`, exercising the drop-old path for a heap user-type operand.") {
+  Money balance;
+  [:](int? low, int? high) Money {
+    return Money(cents: this.balance.cents);
+  }
+  [:]=(int? low, int? high, ~Money v) {
+    this.balance = v;
+  }
+}
+
+// Heap user-type operand: the getter returns a freshly-allocated Money that must
+// be dropped after the `+` produces the new value, otherwise it leaks. The `[:]=`
+// setter drops the previous balance. No leak (zero-tolerance policy).
+slice_compound_heap_user_type_no_leak() `test {
+  a := Account(balance: Money(cents: 10));
+  a[0:1] += Money(cents: 5);
+  assert(a.balance.cents == 15, "slice += on a heap user type should read-modify-write to 15");
+}
+
+type SelfSpan `doc("A type whose method slice-compound-assigns through `this`, exercising the this-receiver path.") {
+  int x;
+  [:](int? low, int? high) int {
+    return this.x;
+  }
+  [:]=(int? low, int? high, int v) {
+    this.x = v;
+  }
+  bump(~this) {
+    this[0:1] += 7;
+  }
+}
+
+// `this` as the slice target inside a method: the receiver is already the
+// instance pointer, so the read-modify-write must still apply the operator.
+slice_compound_this_receiver() `test {
+  s := SelfSpan(x: 1);
+  s.bump();
+  assert(s.x == 8, "this[:] += inside a method should read-modify-write to 8");
+}
+
+maybe_five!() int `doc("A failable function returning 5, used as a failable RHS of a slice compound assignment.") {
+  return 5;
+}
+
+// A failable RHS must auto-propagate before the operator is applied: the read is
+// 10, the propagated RHS is 5, the write is 15.
+slice_compound_failable_rhs!() int {
+  s := Span(x: 10);
+  s[0:1] += maybe_five()?^;
+  assert(s.x == 15, "failable RHS should propagate then add to 15");
+  return 0;
+}
+
+// Drives the failable-RHS slice compound from a batch test (a `test function
+// cannot itself be failable, so it consumes the result with `?!`).
+slice_compound_failable_rhs_runs() `test {
+  r := slice_compound_failable_rhs()?!;
+  assert(r == 0, "failable-RHS slice compound should succeed and return 0");
+}
+
+type GSpan[T] `doc("A generic type whose method slice-compound-assigns through `this`, exercising the monomorphized (typeSubst) compound path.") {
+  int x;
+  T tag;
+  [:](int? low, int? high) int {
+    return this.x;
+  }
+  [:]=(int? low, int? high, int v) {
+    this.x = v;
+  }
+  bump(~this) {
+    this[0:1] += 3;
+  }
+}
+
+// Slice compound inside a generic type's method: monomorphization must still
+// read-modify-write under the active type substitution.
+slice_compound_generic_method() `test {
+  g := GSpan[bool](x: 10, tag: true);
+  g.bump();
+  assert(g.x == 13, "generic-method this[:] += should read-modify-write to 13");
+}

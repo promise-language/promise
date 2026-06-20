@@ -4297,6 +4297,52 @@ func (c *Compiler) emitStringDropOldValue(current, result value.Value) {
 	c.block = mergeBlk
 }
 
+// emitDropOldCompoundValue drops the getter-returned `current` value of a
+// read-modify-write compound assignment after the operator result is computed,
+// for the getter-based sites ([] and [:]) where `current` is a freshly-returned
+// Value rather than a value stored at a pointer (those sites use
+// dropOldUserValueAtPtr instead). A non-`copy` getter must return a freshly
+// allocated value (returning a field would move out of borrowed `this`), so the
+// old `current` would otherwise leak. Handles string, heap user types, and
+// droppable enums; alias-guarded against `result` so a no-op operator returning
+// the same value isn't double-freed. Scalars / value types are no-ops. T0714.
+func (c *Compiler) emitDropOldCompoundValue(current, result value.Value, operandType types.Type) {
+	if operandType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		operandType = types.Substitute(operandType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		operandType = types.SubstituteSelf(operandType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if extractNamed(operandType) == types.TypString {
+		c.emitStringDropOldValue(current, result)
+		return
+	}
+	if isDroppableHeapUserType(operandType) || isHeapUserNoDropPalFree(operandType) {
+		oldInstance := c.extractInstancePtr(current)
+		newInstance := c.extractInstancePtr(result)
+		isNull := c.block.NewICmp(enum.IPredEQ, oldInstance, constant.NewNull(irtypes.I8Ptr))
+		isSame := c.block.NewICmp(enum.IPredEQ, oldInstance, newInstance)
+		skipDrop := c.block.NewOr(isNull, isSame)
+		dropBlock := c.newBlock("compound.userdrop")
+		mergeBlock := c.newBlock("compound.userdrop.done")
+		c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
+		c.block = dropBlock
+		c.emitVariantFieldDrop(current, operandType)
+		c.block.NewBr(mergeBlock)
+		c.block = mergeBlock
+		return
+	}
+	// Non-`copy` enum operand: the operator returns a fresh value, so drop the
+	// old one's variant data. Matches dropOldUserValueAtPtr's enum branch (a
+	// copy / fieldless enum emits nothing).
+	if extractEnum(operandType) != nil {
+		c.emitVariantFieldDrop(current, operandType)
+	}
+}
+
 // hasVectorStringBinding returns true if there's at least one Vector[string]
 // binding in the current scope that would trigger element drops.
 // B0189: Used to determine if a string return value needs duping.
@@ -6089,6 +6135,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	if s.Op != ast.OpAssign {
 		if idx, ok := s.Target.(*ast.IndexExpr); ok {
 			c.genCompoundIndexAssign(idx, s.Op, s.Value)
+			return
+		}
+		// T0714: a slice compound assignment (v[a:b] += x) must read-modify-write
+		// via [:] / [:]= — without this, genSliceAssign below would drop the
+		// operator and store the raw RHS.
+		if sl, ok := s.Target.(*ast.SliceExpr); ok {
+			c.genSliceCompoundAssign(sl, s.Op, s.Value)
 			return
 		}
 	}
@@ -10522,20 +10575,23 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	operandType := c.compoundElemType(targetType)
 	result := c.genCompoundOp(op, operandType, current, val)
 
-	// T0363: Map.[] returns V? and dups the inner string when constructing the
-	// optional, so `current` is a heap-allocated dup that would otherwise leak.
-	// Drop it after computing `result`. The value stored in the map is freed
-	// separately by Map.[]='s drop-old-on-overwrite logic.
-	if operandType != nil && extractNamed(operandType) == types.TypString {
-		c.emitStringDropOldValue(current, result)
-	}
+	// T0363/T0714: drop the old value `current` after computing `result`.
+	//   - Map.[] returns V? and dups the inner string, so a string `current` is a
+	//     heap dup that would otherwise leak; the value stored in the map is freed
+	//     separately by Map.[]='s drop-old-on-overwrite logic.
+	//   - A non-map user container ([]/[]= on a plain user type) returns a fresh
+	//     value from its getter (returning a field would move out of borrowed
+	//     `this`), so a heap user-type / droppable-enum `current` would also leak.
+	// emitDropOldCompoundValue is alias-guarded and a no-op for scalars/value
+	// types.
+	c.emitDropOldCompoundValue(current, result, operandType)
 	// NOTE (T0715): compound assignment whose operand is a *user type with a
-	// non-native operator* (value or heap) is unreachable here today — such a
-	// type as a map value is mishandled by the map/mono machinery before this
-	// path runs (value type → codegen panic in Map.[]; heap type → double-free
-	// on overwrite). Tracked separately; when fixed, this path additionally
-	// needs a heap-temp claim on `current` (Map.[] returns the heap value by
-	// reference, which []= below overwrites and drops).
+	// non-native operator* held as a *map value* is unreachable here today — such
+	// a type is mishandled by the map/mono machinery before this path runs (value
+	// type → codegen panic in Map.[]; heap type → double-free on overwrite).
+	// Tracked separately; if it becomes reachable, the drop above must be skipped
+	// for maps (Map.[] returns the heap value by reference, which []= below
+	// overwrites and drops — dropping `current` here would then double-free).
 
 	call := c.block.NewCall(setFn, instancePtr, keyVal, result)
 	c.propagateIfFailable(call) // T0708
@@ -10656,6 +10712,105 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 	}
 
 	call := c.block.NewCall(fn, instancePtr, low, high, val)
+	c.propagateIfFailable(call) // T0708
+}
+
+// genSliceCompoundAssign handles compound assignment to a slice target
+// (v[a:b] += x) by reading the current value via [:], applying the operator,
+// then writing via [:]=. Mirrors genMethodCompoundAssign (the [] path) for the
+// read/op/write structure and genSliceAssign for receiver-ptr resolution and
+// bound generation. T0714.
+func (c *Compiler) genSliceCompoundAssign(target *ast.SliceExpr, op ast.AssignOp, valueExpr ast.Expr) {
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	// Unwrap MutRef/SharedRef for slicing (auto-deref through borrows), matching
+	// genSliceExpr.
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot slice-compound-assign to type %s", targetType))
+	}
+	getM := named.LookupMethod("[:]")
+	if getM == nil {
+		panic(fmt.Sprintf("codegen: no [:] method on type %s", named))
+	}
+	setM := named.LookupMethod("[:]=")
+	if setM == nil {
+		panic(fmt.Sprintf("codegen: no [:]= method on type %s", named))
+	}
+	// Native slices (Vector/string) are unreachable: sema's checkOperator rejects
+	// the binary operator on those element shapes before this path runs. The guard
+	// documents that invariant.
+	if getM.IsNative() || setM.IsNative() {
+		panic(fmt.Sprintf("codegen: native slice compound assignment unsupported on type %s", named))
+	}
+
+	typeName := c.resolveTypeName(targetType)
+	getFnName := mangleMethodName(typeName, "[:]", false)
+	getFn, ok := c.funcs[getFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared [:] method %s", getFnName))
+	}
+	setFnName := mangleMethodName(typeName, "[:]=", false)
+	setFn, ok := c.funcs[setFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared [:]= method %s", setFnName))
+	}
+
+	targetVal := c.genExpr(target.Target)
+
+	var instancePtr value.Value
+	switch {
+	case isThisReceiver(target.Target):
+		// T0745: `this` (incl. paren-wrapped) is already the i8* receiver ptr.
+		instancePtr = targetVal
+	case isContainerType(targetType):
+		instancePtr = targetVal
+	default:
+		instancePtr = c.extractInstancePtr(targetVal)
+	}
+
+	// Generate bounds once — they are reused for both the [:] read and the [:]=
+	// write, so side-effecting bound expressions evaluate exactly once.
+	optIntType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
+	low := c.genSliceBound(target.Low, optIntType)
+	high := c.genSliceBound(target.High, optIntType)
+
+	// Read the current value via [:].
+	var current value.Value = c.block.NewCall(getFn, instancePtr, low, high)
+	// T0709 (reopened for slices by T0714): a failable [:] read propagates its
+	// error before the value is used.
+	if getM.Sig().CanError() {
+		current = c.genAutoPropagateValue(current)
+	}
+
+	val := c.genExpr(valueExpr)
+	if c.info.AutoPropagateExprs[valueExpr] {
+		val = c.genAutoPropagateValue(val)
+	}
+
+	operandType := getM.Sig().Result()
+	if c.typeSubst != nil {
+		operandType = types.Substitute(operandType, c.typeSubst)
+	}
+	result := c.genCompoundOp(op, operandType, current, val)
+
+	// T0363/T0714: drop the old heap-allocated value the getter returned before
+	// it is overwritten, so heap operands (string, heap user types, droppable
+	// enums) don't leak. The getter must return a fresh value (returning a field
+	// would move out of borrowed `this`), so `current` is uniquely owned here.
+	// Native vectors are excluded above, so no COW handling is needed.
+	c.emitDropOldCompoundValue(current, result, operandType)
+
+	call := c.block.NewCall(setFn, instancePtr, low, high, result)
 	c.propagateIfFailable(call) // T0708
 }
 

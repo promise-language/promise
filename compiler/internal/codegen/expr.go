@@ -3646,6 +3646,10 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	if elemIsOpt {
 		c.targetType = elemType
 	}
+	// T1003: track enum ctor temps created while evaluating the moved-in value so
+	// their statement-end drop is suppressed — the value is owned by the Arc now,
+	// dropped via the Arc's inner-drop when the last strong ref is released.
+	savedEnumTemps := len(c.enumCtorTemps)
 	val := c.genCallArgExpr(e.Args[0].Value)
 	c.targetType = savedTarget
 	c.claimHeapTemp(val)
@@ -3674,6 +3678,12 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldValue))
 	c.block.NewStore(val, valField)
+
+	// T1003: suppress statement-end drop of enum ctor temps moved into the Arc.
+	for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+	}
+	c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 
 	return arcPtr
 }
@@ -3935,6 +3945,10 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	if elemIsOpt {
 		c.targetType = elemType
 	}
+	// T1003: track enum ctor temps created while evaluating the moved-in value so
+	// their statement-end drop is suppressed — the value is owned by the Mutex now,
+	// dropped via the Mutex's inner-drop when the Mutex is dropped.
+	savedEnumTemps := len(c.enumCtorTemps)
 	val := c.genCallArgExpr(e.Args[0].Value)
 	c.targetType = savedTarget
 	c.claimHeapTemp(val)
@@ -3961,6 +3975,12 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	valField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldValue)))
 	c.block.NewStore(val, valField)
+
+	// T1003: suppress statement-end drop of enum ctor temps moved into the Mutex.
+	for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+	}
+	c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 
 	return mutexPtr
 }

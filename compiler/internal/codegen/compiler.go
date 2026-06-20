@@ -2578,6 +2578,28 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		return blk
 	}
 
+	// T1003: Enum element (`Ref[E]` / `Mutex[E]`) — the enum value is embedded
+	// directly in the container struct (field is the enum internal type, not a
+	// {vtable,instance} value). extractNamed returns nil for an enum, so none of
+	// the switch cases below fire; without this the inner enum's droppable variant
+	// fields (e.g. a string payload) leak, and the constructor's enum-ctor-temp
+	// suppression would otherwise free them early (use-after-free through .borrow).
+	if enum := extractEnum(elemType); enum != nil {
+		if c.enumInstanceHasDrop(elemType, enum) {
+			valField := blk.NewGetElementPtr(structTy, typedPtr,
+				constant.NewInt(irtypes.I32, 0), fi)
+			enumPtr := blk.NewBitCast(valField, irtypes.I8Ptr)
+			enumName := enum.Obj().Name()
+			if inst, ok := elemType.(*types.Instance); ok {
+				enumName = monoName(inst)
+			}
+			if dropFn, ok := c.funcs[mangleMethodName(enumName, "drop", false)]; ok {
+				blk.NewCall(dropFn, enumPtr)
+			}
+		}
+		return blk
+	}
+
 	switch {
 	case named != nil && isPrimitiveScalar(named):
 		// Copy type — no inner drop needed

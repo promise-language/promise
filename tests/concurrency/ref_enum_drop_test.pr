@@ -1,0 +1,199 @@
+// T1003: matching a borrowed enum (`Ref[Enum].borrow` / `Mutex[Enum]` guard) and
+// binding a non-Copy (heap) payload used to double-free / use-after-free the
+// payload. The enum value is embedded directly in the container allocation; the
+// constructor must transfer ownership of an inline enum-ctor temp into the
+// container, and the container's inner-drop must drop the embedded enum exactly
+// once when the last strong ref is released. These tests are leak-checked.
+enum Color {
+  Red, Named(string label),
+}
+enum Pair {
+  Empty, Both(string name, int age),
+}
+enum Maybe[T] {
+  None, Some(T value),
+}
+// int-only / no-payload enum: exercises the `enumInstanceHasDrop == false`
+// early-return branch in emitInnerDrop (the container must NOT synthesize an
+// inner drop call for a Copy-only enum).
+enum IntEnum {
+  Zero, Num(int v),
+}
+// enum variant carrying a non-string heap payload (Vector): exercises the
+// enum drop's emitVariantFieldDrop recursion through the container inner-drop
+// via a different drop function than `promise_string_drop`.
+enum WithVec {
+  Empty, Items(int[] xs),
+}
+// `confined enum element: drives the non-atomic refcount path in
+// defineArcDropBody (refIsAtomic == false) while still hitting the new enum
+// inner-drop for the heap payload.
+enum CData `confined {
+  Off, On(string tag),
+}
+
+// --- Ref[Enum] with a string payload, matched through .borrow directly ---
+ref_enum_match_borrow_direct() `test {
+  a := Ref[Color](Color.Named("blue" + ""));
+  r := match a.borrow {
+    Color.Named(label) => label.len,
+    _ => 0,
+  };
+  assert(r == 4, "blue len should be 4");
+}
+
+// --- Ref[Enum] matched through an aliasing local ---
+ref_enum_match_borrow_alias() `test {
+  a := Ref[Color](Color.Named("green" + ""));
+  b := a.borrow;
+  r := match b {
+    Color.Named(label) => label.len,
+    _ => 0,
+  };
+  assert(r == 5, "green len should be 5");
+}
+
+// --- multi-field variant (string + int) through .borrow ---
+ref_enum_match_multifield() `test {
+  a := Ref[Pair](Pair.Both("bob" + "", 30));
+  r := match a.borrow {
+    Pair.Both(name, age) => name.len + age,
+    _ => 0,
+  };
+  assert(r == 33, "name.len(3) + age(30) == 33");
+}
+
+// --- no-read construction: regression guard for the leak path ---
+ref_enum_noread() `test {
+  a := Ref[Color](Color.Named("teal" + ""));
+  assert(true, "constructed without reading");
+}
+
+// --- generic enum instance: exercises monoName-based inner drop (no match,
+//     since matching a borrowed generic enum is blocked by T1018) ---
+ref_generic_enum_noread() `test {
+  a := Ref[Maybe[string]](Maybe[string].Some("hi" + ""));
+  assert(true, "generic enum constructed");
+}
+
+ref_generic_enum_clone() `test {
+  a := Ref[Maybe[string]](Maybe[string].Some("world" + ""));
+  b := a.clone();
+  assert(true, "generic enum cloned");
+}
+
+// --- clone/share path: inner enum dropped exactly once when last ref released ---
+ref_enum_clone_read_through_clone() `test {
+  a := Ref[Color](Color.Named("plum" + ""));
+  b := a.clone();
+  // drop the original by shadowing scope: read through the clone after the
+  // original is still alive, then both drop at scope exit (last strong ref
+  // does the inner drop).
+  r := match b.borrow {
+    Color.Named(label) => label.len,
+    _ => 0,
+  };
+  assert(r == 4, "plum len should be 4");
+}
+
+// --- Mutex[Enum] with a string payload, matched through the guard ---
+mutex_enum_match_borrow() `test {
+  m := Mutex[Color](Color.Named("cyan" + ""));
+  use g := m.lock();
+  r := match g.borrow {
+    Color.Named(label) => label.len,
+    _ => 0,
+  };
+  assert(r == 4, "cyan len should be 4");
+}
+
+mutex_enum_noread() `test {
+  m := Mutex[Color](Color.Named("amber" + ""));
+  use g := m.lock();
+  assert(true, "mutex enum constructed");
+}
+
+// --- int-only enum (no droppable payload): the container inner-drop must take
+//     the `enumInstanceHasDrop == false` branch and emit no enum drop call ---
+ref_int_enum_match() `test {
+  a := Ref[IntEnum](IntEnum.Num(7 + 0));
+  r := match a.borrow {
+    IntEnum.Num(v) => v,
+    _ => 0,
+  };
+  assert(r == 7, "int payload 7");
+}
+
+mutex_int_enum_match() `test {
+  m := Mutex[IntEnum](IntEnum.Num(9 + 0));
+  use g := m.lock();
+  r := match g.borrow {
+    IntEnum.Num(v) => v,
+    _ => 0,
+  };
+  assert(r == 9, "int payload 9");
+}
+
+// --- Ref constructed by MOVING an enum *variable* in (not an inline ctor) ---
+//     exercises the IdentExpr/clearDropFlag ownership-transfer path rather than
+//     the enumCtorTemps suppression, confirming the inner-drop fix is path-agnostic.
+ref_enum_from_variable() `test {
+  e := Color.Named("rust" + "");
+  a := Ref[Color](move e);
+  r := match a.borrow {
+    Color.Named(label) => label.len,
+    _ => 0,
+  };
+  assert(r == 4, "rust len 4");
+}
+
+// --- Weak/downgrade two-stage drop: dropping the last strong ref while a weak
+//     ref is still alive must run the inner enum drop exactly once (alloc is
+//     freed later when the weak ref drops). Leak-checked. ---
+ref_enum_weak_downgrade() `test {
+  a := Ref[Color](Color.Named("iris" + ""));
+  w := a.downgrade();
+  r := match a.borrow {
+    Color.Named(label) => label.len,
+    _ => 0,
+  };
+  assert(r == 4, "iris len 4");
+}
+
+// --- enum variant with a Vector (non-string heap) payload through .borrow ---
+ref_enum_vec_payload() `test {
+  v := [1, 2, 3];
+  a := Ref[WithVec](WithVec.Items(move v));
+  r := match a.borrow {
+    WithVec.Items(xs) => xs.len,
+    _ => 0,
+  };
+  assert(r == 3, "vec len 3");
+}
+
+// --- `confined enum element: non-atomic refcount path + heap payload drop ---
+confined_ref_enum_match() `test {
+  a := Ref[CData](CData.On("lan" + ""));
+  r := match a.borrow {
+    CData.On(tag) => tag.len,
+    _ => 0,
+  };
+  assert(r == 3, "lan len 3");
+}
+
+// --- Mutex parity: multi-field variant and generic enum instance ---
+mutex_enum_multifield() `test {
+  m := Mutex[Pair](Pair.Both("ann" + "", 22));
+  use g := m.lock();
+  r := match g.borrow {
+    Pair.Both(name, age) => name.len + age,
+    _ => 0,
+  };
+  assert(r == 25, "ann(3) + 22 == 25");
+}
+
+mutex_generic_enum_noread() `test {
+  m := Mutex[Maybe[string]](Maybe[string].Some("zz" + ""));
+  use g := m.lock();
+  assert(true, "mutex generic enum constructed");
+}

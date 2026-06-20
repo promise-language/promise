@@ -63,7 +63,7 @@ func TestT0714_SliceCompoundHeapUserTypeDropsOld(t *testing.T) {
 		type Account {
 			Money balance;
 			[:](int? low, int? high) Money { return Money(cents: this.balance.cents); }
-			[:]=(int? low, int? high, ~Money v) { this.balance = v; }
+			[:]=(int? low, int? high, Money move v) { this.balance = v; }
 		}
 		main() {
 			a := Account(balance: Money(cents: 10));

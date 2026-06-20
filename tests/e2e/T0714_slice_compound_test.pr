@@ -53,7 +53,7 @@ type Label `doc("A type with string `[:]`/`[:]=` operators, exercising the heap-
   [:](int? low, int? high) string {
     return this.s;
   }
-  [:]=(int? low, int? high, ~string v) {
+  [:]=(int? low, int? high, string move v) {
     this.s = v;
   }
 }
@@ -80,7 +80,7 @@ type Account `doc("Slice operators that return and accept a heap `Money`, exerci
   [:](int? low, int? high) Money {
     return Money(cents: this.balance.cents);
   }
-  [:]=(int? low, int? high, ~Money v) {
+  [:]=(int? low, int? high, Money move v) {
     this.balance = v;
   }
 }

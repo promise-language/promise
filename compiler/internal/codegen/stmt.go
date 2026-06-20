@@ -168,6 +168,13 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 	}
 	// MemberExpr: field access on droppable type → dup'd by dupStringFieldAccess/dupContainerFieldAccess.
 	if member, ok := expr.(*ast.MemberExpr); ok {
+		// T1011: a narrowed enum variant field read (`if x is V { x.field }`) is
+		// dup'd by genNarrowedVariantField when the subject enum is droppable —
+		// just like a struct field. Without this, the var-decl borrow-clear below
+		// would zero the binding's drop flag while the binding owns the dup → leak.
+		if matched, droppable := c.narrowedVariantFieldDroppable(member); matched {
+			return droppable
+		}
 		targetType := c.info.Types[member.Target]
 		if c.typeSubst != nil {
 			targetType = types.Substitute(targetType, c.typeSubst)

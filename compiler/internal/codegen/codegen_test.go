@@ -28576,6 +28576,217 @@ func TestEnumNarrowVariantFieldRead(t *testing.T) {
 	assertContains(t, ir, "getelementptr")
 }
 
+// T1011: a narrowed heap (string) variant field that ESCAPES the narrowing scope
+// (here: returned) must be cloned, not aliased — otherwise the subject's synth
+// enum drop frees the payload while the returned value still points into it
+// (use-after-free / double-free). The escape-dup must emit a strdup.
+func TestEnumNarrowVariantStringFieldEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		grab() string {
+			Msg m = Msg.Text(body: "a");
+			if m is Text { return m.body; }
+			return "";
+		}
+		main() { string s = grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	if fn == "" {
+		t.Fatal("expected __user.grab in IR")
+	}
+	// dupString emits a strdup.copy block + promise_string_new at the return site.
+	assertContains(t, fn, "strdup.copy")
+	assertContains(t, fn, "promise_string_new")
+}
+
+// T1011 (no-regression): a purely in-scope read of a narrowed heap variant field
+// stays a zero-copy borrow — no dup flag is set, so genNarrowedVariantField must
+// NOT emit a strdup for the read.
+func TestEnumNarrowVariantStringFieldInScopeNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		probe() int {
+			Msg m = Msg.Text(body: "a");
+			int n = 0;
+			if m is Text { n = m.body.len; }
+			return n;
+		}
+		main() { int x = probe(); }
+	`)
+	fn := extractFunction(ir, "__user.probe")
+	if fn == "" {
+		t.Fatal("expected __user.probe in IR")
+	}
+	assertNotContains(t, fn, "strdup.copy")
+}
+
+// T1011: a narrowed heap (string) variant field escaping into a CONSTRUCTOR field
+// of a droppable type must be cloned. maybeEnableDupForConstructorArg routes the
+// narrowed-field arg through the same dup-on-escape path as a struct field
+// (narrowedVariantFieldDroppable matched=true, droppable=true).
+func TestEnumNarrowVariantStringFieldCtorEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		type Sink { string held; drop(~this) {} }
+		grab() Sink {
+			Msg m = Msg.Text(body: "a");
+			if m is Text { return Sink(held: m.body); }
+			return Sink(held: "");
+		}
+		main() { Sink s = grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	if fn == "" {
+		t.Fatal("expected __user.grab in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1011: a narrowed heap (string) variant field passed to a consuming `string move`
+// param must be cloned. maybeEnableDupForMutRefArg's narrowed-field branch sets
+// the dup-on-escape flag — the callee takes ownership, so the value must not
+// alias the subject the synth enum drop frees at scope exit.
+func TestEnumNarrowVariantStringFieldConsumingParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		take(string move s) int { return s.len; }
+		grab() int {
+			Msg m = Msg.Text(body: "a");
+			if m is Text { return take(m.body); }
+			return 0;
+		}
+		main() { int n = grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	if fn == "" {
+		t.Fatal("expected __user.grab in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1011: binding a narrowed heap (string) variant field to a new variable
+// (`b := m.body`) takes ownership, so isStringFieldDup recognizes the narrowed
+// field (its narrowedVariantFieldDroppable branch) and the binding keeps its drop
+// flag while genNarrowedVariantField clones the payload — without the clone the
+// binding's drop would double-free with the subject's synth enum drop.
+func TestEnumNarrowVariantStringFieldBoundCopyDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		grab() int {
+			Msg m = Msg.Text(body: "a");
+			int r = 0;
+			if m is Text { b := m.body; r = b.len; }
+			return r;
+		}
+		main() { int n = grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	if fn == "" {
+		t.Fatal("expected __user.grab in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1011: a GENERIC enum's narrowed heap variant field escaping the scope exercises
+// the typeSubst substitution in genNarrowedVariantField (both targetType and the
+// field type) and narrowedVariantFieldDroppable — the substituted field type is
+// `string`, so the escape must still clone.
+func TestEnumNarrowGenericVariantStringFieldEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Opt[T] { Some(T val), None }
+		grab() string {
+			Opt[string] o = Opt[string].Some(val: "a");
+			if o is Some { return o.val; }
+			return "";
+		}
+		main() { string s = grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	if fn == "" {
+		t.Fatal("expected __user.grab in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1011: a GENERIC FUNCTION body that narrows an enum and escapes a heap variant
+// field exercises the typeSubst substitution in genNarrowedVariantField — the
+// narrowing TargetType and FieldType carry the function's TypeParam, so they must
+// be substituted before dupHeapFieldForEscape runs. Monomorphized for T=string the
+// escape must clone; for T=int (non-heap) it must not. This is the path the
+// concrete-Opt[string] test above does NOT reach (there typeSubst is nil because
+// sema already resolved the field type to a concrete `string`).
+func TestEnumNarrowGenericFnBodyVariantFieldEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Opt[T] { Some(T val), None }
+		extract[T](Opt[T] o, T fallback) T {
+			if o is Some { return o.val; }
+			return fallback;
+		}
+		main() {
+			Opt[string] os = Opt[string].Some(val: "a");
+			string s = extract[string](os, "");
+			Opt[int] oi = Opt[int].Some(val: 1);
+			int n = extract[int](oi, 0);
+		}
+	`)
+	strFn := extractFunction(ir, `"extract[string]"`)
+	if strFn == "" {
+		t.Fatal(`expected "extract[string]" mono instance in IR`)
+	}
+	assertContains(t, strFn, "strdup.copy")
+	intFn := extractFunction(ir, `"extract[int]"`)
+	if intFn == "" {
+		t.Fatal(`expected "extract[int]" mono instance in IR`)
+	}
+	assertNotContains(t, intFn, "strdup.copy")
+}
+
+// T1011: binding a narrowed heap variant field inside a GENERIC function body
+// (`b := o.val`) routes through isStringFieldDup → narrowedVariantFieldDroppable
+// with typeSubst active, so the substituted TargetType resolves to a droppable
+// enum and the binding clones the payload (keeping it independent of the subject).
+func TestEnumNarrowGenericFnBodyVariantFieldBoundCopyDups(t *testing.T) {
+	ir := generateIR(t, `
+		enum Opt[T] { Some(T val), None }
+		first[T](Opt[T] o, T fallback) T {
+			if o is Some { b := o.val; return b; }
+			return fallback;
+		}
+		main() {
+			Opt[string] os = Opt[string].Some(val: "a");
+			string s = first[string](os, "");
+		}
+	`)
+	fn := extractFunction(ir, `"first[string]"`)
+	if fn == "" {
+		t.Fatal(`expected "first[string]" mono instance in IR`)
+	}
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1011 (no-regression): a non-droppable enum (no heap payload in any variant)
+// narrowed to a variant whose non-heap field escapes must NOT clone —
+// narrowedVariantFieldDroppable reports droppable=false (enumTargetDroppable is
+// false), so the consumer skips the dup. Cloning a field the synth drop never
+// frees would leak. The int field copies cleanly into the constructor.
+func TestEnumNarrowVariantNonDroppableFieldNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Flag { On(int code), Off }
+		type Box { int v; }
+		grab() Box {
+			Flag f = Flag.On(code: 3);
+			if f is On { return Box(v: f.code); }
+			return Box(v: 0);
+		}
+		main() { Box b = grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	if fn == "" {
+		t.Fatal("expected __user.grab in IR")
+	}
+	assertNotContains(t, fn, "strdup.copy")
+}
+
 // T0993: `match this { Subtype c => }` over a class hierarchy. genThisExpr
 // returns the raw i8* instance pointer; genValueMatch must normalize it into the
 // {vtable, instance} value struct before the type-pattern arm extracts the

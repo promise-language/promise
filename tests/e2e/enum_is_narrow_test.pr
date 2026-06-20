@@ -127,3 +127,200 @@ enum_generic_string_borrow() `test {
     assert(v.len == 4, "bound copy");
   }
 }
+
+// T1011: a heap-typed (string) variant field that ESCAPES the narrowing scope
+// must be cloned, not aliased — otherwise the subject's synth enum drop frees the
+// payload while the escaped value still points into it (use-after-free /
+// double-free). Covers the return, store-to-outer, constructor-field, and
+// consuming-`~`-param escape shapes. Zero-leak enforcement covers the clone's
+// cleanup; the absence of `invalid free` validates no double-free.
+return_narrowed_string(string a, string b) string {
+  Msg m = make_msg(a, b);
+  if m is Text {
+    return m.body; // escapes m's scope — must be an independent copy
+  }
+  return "";
+}
+enum_string_escape_return() `test {
+  s := return_narrowed_string("foo", "bar");
+  assert(s == "foobar", "narrowed string return is cloned");
+}
+
+enum_string_escape_store_outer() `test {
+  outer := "";
+  Msg m = make_msg("xy", "z");
+  if m is Text {
+    outer = m.body; // stored into an outer var that outlives the if-block
+  }
+  assert(outer == "xyz", "narrowed string assign-to-outer is cloned");
+}
+
+type StringSink {
+  string held;
+  drop(~this) {
+  }
+}
+take_string(string move s) StringSink {
+  return StringSink(held: move s);
+}
+enum_string_escape_ctor_and_param() `test {
+  Msg m = make_msg("pq", "r");
+  if m is Text {
+    sink := take_string(m.body); // narrowed field into a constructor field via a ~param
+    assert(sink.held == "pqr", "narrowed string into ctor field / ~param is cloned");
+  }
+}
+
+// T1011 (container limb): a heap (non-static) Vector variant field escaping the
+// narrowing scope must deep-copy its buffer — a literal vector is static and would
+// hide the alias, so build the vector on the heap first.
+enum Holder {
+  Vals(int[] data),
+  Empty,
+}
+build_ints(int n) int[] {
+  int[] v = [];
+  i := 0;
+  while i < n {
+    v.push(i);
+    i = i + 1;
+  }
+  return v;
+}
+return_narrowed_vector(int n) int[] {
+  Holder h = Holder.Vals(data: build_ints(n));
+  if h is Vals {
+    return h.data; // escapes — must be an independent buffer
+  }
+  return[];
+}
+enum_vector_escape_return() `test {
+  v := return_narrowed_vector(3);
+  assert(v.len == 3, "narrowed vector return is cloned");
+  assert(v[0] == 0, "elem 0");
+  assert(v[2] == 2, "elem 2");
+}
+
+// T1011 (no-regression): in-scope use of a heap variant field. A pure read
+// (`.len`, `==`) is a zero-copy borrow — no dup flag set, no allocation. Binding
+// it to a variable (`b := m.body`) takes ownership, so it clones — the same
+// "bound copy" as a struct field. Both stay correct and leak-free; zero-leak
+// enforcement covers the clone's cleanup.
+enum_string_inscope_read_and_bound_copy() `test {
+  Msg m = make_msg("hello", "world");
+  if m is Text {
+    assert(m.body.len == 10, "in-scope read is a zero-copy borrow");
+    b := m.body; // takes ownership — an independent clone, freed at scope exit
+    assert(b == "helloworld", "bound copy");
+  }
+}
+
+// T1011: the canonical "store into a longer-lived container" escape shapes —
+// pushing into an outer vector and inserting into an outer map. Both move the
+// narrowed heap field into storage that outlives the if-scope, so the value must
+// be cloned (the `~`-param push arg / the index-assign value), not aliased into
+// the soon-freed subject. Asserts the value survives m's drop, with zero leaks.
+enum_string_escape_push_outer_vector() `test {
+  string[] out = [];
+  Msg m = make_msg("foo", "bar");
+  if m is Text {
+    out.push(m.body); // escapes into a vector outliving the if-block
+  }
+  assert(out.len == 1, "pushed");
+  assert(out[0] == "foobar", "pushed value intact after m drops");
+}
+enum_string_escape_insert_outer_map() `test {
+  map[int, string] out = {:};
+  Msg m = make_msg("baz", "qux");
+  if m is Text {
+    out[1] = m.body; // escapes into a map outliving the if-block
+  }
+  assert(out[1]! == "bazqux", "map value intact after m drops");
+}
+
+// T1011 (generic limb): the heap-field escape must also clone through the
+// typeSubst path — a GENERIC enum (`Opt[string]`) narrowed to a variant whose
+// substituted field type is heap (string). Return + store-to-outer escape shapes;
+// the in-scope generic borrow is covered by enum_generic_string_borrow above.
+// Without the typeSubst-aware clone in genNarrowedVariantField, the escaped value
+// would alias o's payload, freed by o's synth enum drop → use-after-free.
+return_narrowed_generic(string a, string b) string {
+  Opt[string] o = make_opt(a, b);
+  if o is Some {
+    return o.val; // escapes — substituted string field must clone
+  }
+  return "";
+}
+enum_generic_string_escape_return() `test {
+  s := return_narrowed_generic("ab", "cd");
+  assert(s == "abcd", "generic narrowed string return is cloned");
+}
+enum_generic_string_escape_store_outer() `test {
+  outer := "";
+  Opt[string] o = make_opt("x", "yz");
+  if o is Some {
+    outer = o.val; // stored into an outer var that outlives the if-block
+  }
+  assert(outer == "xyz", "generic narrowed string assign-to-outer is cloned");
+}
+
+// T1011 (no-regression): a non-droppable enum (no heap payload in any variant)
+// narrowed to a variant whose non-heap field escapes must NOT be cloned —
+// narrowedVariantFieldDroppable reports droppable=false, so the consumer skips
+// the dup (cloning a field the synth drop never frees would leak). The int field
+// copies cleanly into a constructor; zero-leak enforcement confirms no spurious
+// allocation.
+enum Flag {
+  On(int code),
+  Off,
+}
+type IntBox {
+  int v;
+}
+nondroppable_box(int c) IntBox {
+  Flag f = Flag.On(code: c);
+  if f is On {
+    return IntBox(v: f.code);
+  }
+  return IntBox(v: -1);
+}
+enum_nondroppable_field_escape() `test {
+  b := nondroppable_box(9);
+  assert(b.v == 9, "non-droppable narrowed int field into ctor copies cleanly");
+}
+
+// T1011 (generic-function limb): narrowing + escaping inside a GENERIC FUNCTION
+// body — here the narrowing TargetType (`Opt[T]`) and FieldType (`T`) carry the
+// function's type parameter, so genNarrowedVariantField must substitute via
+// typeSubst when the function is monomorphized. For T=string the escaped field
+// must clone (return + bound-copy shapes); for T=int it is a plain copy. The
+// concrete-`Opt[string]` cases above never reach this path (typeSubst is nil
+// there). Zero-leak enforcement covers the clone's cleanup.
+extract_first[T](Opt[T] o, T fallback) T {
+  if o is Some {
+    return o.val; // escapes the generic body — substituted field must clone for T=string
+  }
+  return fallback;
+}
+extract_first_bound[T](Opt[T] o, T fallback) T {
+  if o is Some {
+    b := o.val; // bound copy inside generic body — isStringFieldDup w/ typeSubst
+    return b;
+  }
+  return fallback;
+}
+enum_generic_fn_string_escape() `test {
+  o := make_opt("foo", "bar");
+  s := extract_first[string](o, "");
+  assert(s == "foobar", "generic-fn narrowed string escape clones via typeSubst");
+}
+enum_generic_fn_string_bound_copy() `test {
+  o := make_opt("ba", "z");
+  s := extract_first_bound[string](o, "");
+  assert(s == "baz", "generic-fn narrowed string bound-copy clones via typeSubst");
+}
+enum_generic_fn_int_escape() `test {
+  Opt[int] o = Opt[int].Some(val: 42);
+  n := extract_first[int](o, 0);
+  assert(n == 42, "generic-fn narrowed int escape is a plain copy");
+}

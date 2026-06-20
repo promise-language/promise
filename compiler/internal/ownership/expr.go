@@ -734,6 +734,16 @@ func (c *Checker) isConsumableNamedBinding(expr ast.Expr) bool {
 		if _, _, ok := extractBorrowTarget(e); !ok {
 			return false
 		}
+		// T1011: a narrowed enum variant field (`m.body` where `m` is an enum)
+		// cannot be partial-moved — the synth enum drop frees the whole variant
+		// by tag, so moving one field out would double-free. Non-destructive
+		// narrowing reads the field through a borrow of the subject and clones
+		// it on escape (genNarrowedVariantField). It is therefore never a
+		// consumable named binding and never requires the `move` marker, matching
+		// the return/assign escape shapes (which clone via isAutoDupType too).
+		if extractEnumForMatch(c.info.Types[e.Target]) != nil {
+			return false
+		}
 		t := c.info.Types[subject]
 		return t != nil && !isCopyType(t)
 	}

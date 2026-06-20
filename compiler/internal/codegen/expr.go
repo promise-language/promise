@@ -4693,135 +4693,22 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 			}
 		}
 		ownerNamed := extractNamed(typ)
-		if c.dupStringFieldAccess {
-			if extractNamed(fType) == types.TypString && c.ownerHasOrSynthDrop(typ, ownerNamed) {
-				c.dupStringFieldAccess = false // consume the flag
-				dup := c.dupString(val)
-				c.trackStringTemp(dup)
-				return dup
-			}
-			// B0181: Handle string? optional fields — extractNamed returns nil for
-			// *types.Optional, so unwrap first to check the inner type.
-			// B0190: Track the dup as a temp AND store it in optionalStringDup so
-			// genOptionalForceUnwrap can return it directly (bypassing extractvalue
-			// which creates a different value.Value that claimStringTemp can't match).
-			if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && c.ownerHasOrSynthDrop(typ, ownerNamed) {
-				c.dupStringFieldAccess = false // consume the flag
-				innerStr := c.block.NewExtractValue(val, 1)
-				dup := c.dupString(innerStr)
-				c.trackStringTemp(dup)
-				c.optionalStringDup = dup
-				return c.block.NewInsertValue(val, dup, 1)
-			}
-		}
-		// B0219: Dup vector/channel fields from types with drop.
-		// Vector: shallow copy (allocate + memcpy). Channel: incref.
-		if c.dupContainerFieldAccess && c.ownerHasOrSynthDrop(typ, ownerNamed) {
-			if elemType, ok := types.AsVector(fType); ok {
-				c.dupContainerFieldAccess = false // consume the flag
-				elemLLVM := c.resolveType(elemType)
-				elemSize := int64(c.typeSize(elemLLVM))
-				dup := c.dupVector(val, elemSize)
-				// T0540: Deep-clone droppable elements so the dup owns independent
-				// copies. Without this, the shallow memcpy aliases element pointers
-				// between the original field and the dup, causing a double-free at
-				// scope end. No-op for primitive/copy element types.
-				c.emitVectorElementCloneLoop(dup, elemType)
-				// The dup now owns its elements independently; statement-end cleanup
-				// must drop the elements before freeing the buffer.
-				c.trackVectorTempWithElemType(dup, elemType)
-				return dup
-			}
-			if chElem, isCh := types.AsChannel(fType); isCh {
-				c.dupContainerFieldAccess = false // consume the flag
-				dup := c.dupChannel(val)
-				c.trackChannelTempWithElemType(dup, chElem) // T0663
-				return dup
-			}
-			if arcElem, ok := types.AsArc(fType); ok {
-				c.dupContainerFieldAccess = false // consume the flag
-				resolvedArcElem := arcElem
-				if c.typeSubst != nil {
-					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
-				}
-				dup := c.dupArc(val, resolvedArcElem)
-				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
-				return dup
-			}
-			if weakElem, ok := types.AsWeak(fType); ok {
-				c.dupContainerFieldAccess = false // consume the flag
-				resolvedWeakElem := weakElem
-				if c.typeSubst != nil {
-					resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
-				}
-				dup := c.dupWeak(val, resolvedWeakElem)
-				c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
-				return dup
-			}
-			// T0366: Optional[Vector|Channel|Arc|Weak] fields — dup the inner buffer
-			// so the new optional owns an independent copy. Without this, both the
-			// source's owner drop and the new variable's optional drop free the same
-			// buffer (mirrors the Optional[String] handling at lines 3635–3642).
-			// optionalContainerDup is consumed by genVarDecl (and similar sites) to
-			// claim the dup temp once the containing optional is bound to a variable.
-			if opt, ok := fType.(*types.Optional); ok {
-				elem := opt.Elem()
-				if elemType, isVec := types.AsVector(elem); isVec {
-					c.dupContainerFieldAccess = false
-					elemLLVM := c.resolveType(elemType)
-					elemSize := int64(c.typeSize(elemLLVM))
-					innerVec := c.block.NewExtractValue(val, 1)
-					dup := c.dupVector(innerVec, elemSize)
-					// T0540: Deep-clone droppable elements (mirror the bare Vector branch above).
-					c.emitVectorElementCloneLoop(dup, elemType)
-					c.trackVectorTempWithElemType(dup, elemType)
-					c.optionalContainerDup = dup
-					return c.block.NewInsertValue(val, dup, 1)
-				}
-				if chElem, isCh := types.AsChannel(elem); isCh {
-					c.dupContainerFieldAccess = false
-					innerCh := c.block.NewExtractValue(val, 1)
-					dup := c.dupChannel(innerCh)
-					c.trackChannelTempWithElemType(dup, chElem) // T0663
-					c.optionalContainerDup = dup
-					return c.block.NewInsertValue(val, dup, 1)
-				}
-				if arcElem, isArc := types.AsArc(elem); isArc {
-					c.dupContainerFieldAccess = false
-					innerArc := c.block.NewExtractValue(val, 1)
-					resolvedArcElem := arcElem
-					if c.typeSubst != nil {
-						resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
-					}
-					dup := c.dupArc(innerArc, resolvedArcElem)
-					c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
-					c.optionalContainerDup = dup
-					return c.block.NewInsertValue(val, dup, 1)
-				}
-				if weakElem, isWeak := types.AsWeak(elem); isWeak {
-					c.dupContainerFieldAccess = false
-					innerWeak := c.block.NewExtractValue(val, 1)
-					resolvedWeakElem := weakElem
-					if c.typeSubst != nil {
-						resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
-					}
-					dup := c.dupWeak(innerWeak, resolvedWeakElem)
-					c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
-					c.optionalContainerDup = dup
-					return c.block.NewInsertValue(val, dup, 1)
-				}
-			}
+		ownerDroppable := c.ownerHasOrSynthDrop(typ, ownerNamed)
+		// Dup string/container fields from a droppable owner when an escape flag is
+		// set (shared with the narrowed-enum-variant path, T1011).
+		if dup, ok := c.dupHeapFieldForEscape(val, fType, ownerDroppable); ok {
+			return dup
 		}
 		// B0190: Signal that this field access loaded a string? field from a
 		// droppable type. genOptionalForceUnwrap's result should NOT be tracked
 		// as a temp (the owner's drop handles the string's lifetime).
-		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && c.ownerHasOrSynthDrop(typ, ownerNamed) {
+		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerDroppable {
 			c.optionalFieldString = true
 		}
 		// T0354: Same for vector fields — the owner's drop frees the inner Vector
 		// via optfield.drop. Suppress unwrap-path stmt-temp tracking to avoid
 		// double-free at statement end.
-		if opt, ok := fType.(*types.Optional); ok && c.ownerHasOrSynthDrop(typ, ownerNamed) {
+		if opt, ok := fType.(*types.Optional); ok && ownerDroppable {
 			if _, isVec := types.AsVector(opt.Elem()); isVec {
 				c.optionalFieldVector = true
 			}
@@ -6238,6 +6125,16 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 	if !ok {
 		return
 	}
+	// T1011: a narrowed enum variant field arg passed to a `~` param needs the
+	// same dup-on-escape as a struct field — gate on the subject enum being
+	// droppable (the enum owner is an *types.Enum, which ownerHasOrSynthDrop below
+	// does not recognize).
+	if matched, droppable := c.narrowedVariantFieldDroppable(mem); matched {
+		if droppable {
+			c.setDupFlagsForFieldAccess(pt)
+		}
+		return
+	}
 	ownerType := c.info.Types[mem.Target]
 	if c.typeSubst != nil && ownerType != nil {
 		ownerType = types.Substitute(ownerType, c.typeSubst)
@@ -6296,6 +6193,20 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 	if !ok {
 		return
 	}
+	ft := fieldType
+	if c.typeSubst != nil {
+		ft = types.Substitute(ft, c.typeSubst)
+	}
+	// T1011: a narrowed enum variant field arg initializing a constructor field
+	// needs the same dup-on-escape as a struct field — gate on the subject enum
+	// being droppable (the enum owner is an *types.Enum, which ownerHasOrSynthDrop
+	// below does not recognize).
+	if matched, droppable := c.narrowedVariantFieldDroppable(mem); matched {
+		if droppable {
+			c.setDupFlagsForFieldAccess(ft)
+		}
+		return
+	}
 	ownerType := c.info.Types[mem.Target]
 	if c.typeSubst != nil && ownerType != nil {
 		ownerType = types.Substitute(ownerType, c.typeSubst)
@@ -6304,10 +6215,6 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 	// T0513: also accept mono-synthesized drop on generic instances.
 	if !c.ownerHasOrSynthDrop(ownerType, ownerNamed) {
 		return
-	}
-	ft := fieldType
-	if c.typeSubst != nil {
-		ft = types.Substitute(ft, c.typeSubst)
 	}
 	// T0487: covers string, Optional[string], Vector|Channel|Arc|Weak, and
 	// Optional[Vector|Channel|Arc|Weak] in one place.
@@ -11584,7 +11491,194 @@ func (c *Compiler) genNarrowedVariantField(e *ast.MemberExpr, access *sema.Varia
 	fieldType := dataType.Fields[idx]
 	fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
-	return c.block.NewLoad(fieldType, fieldPtr)
+	val := c.block.NewLoad(fieldType, fieldPtr)
+
+	// T1011: A non-destructive narrowed read is a borrow by default — an in-scope
+	// read returns the raw load (zero-copy). But when the result escapes the
+	// narrowing scope (return, var-decl, assignment, consuming arg, constructor
+	// field), the consumer site sets a dup-on-escape flag exactly as it does for a
+	// normal struct field read. Honor those flags via the shared dupHeapFieldForEscape
+	// so the escaping value is an independent copy; otherwise it aliases the subject's
+	// payload, which the subject's synth enum drop frees at scope exit → use-after-free
+	// / double-free. Gated on the subject enum being droppable (otherwise the field is
+	// never freed and a copy would leak).
+	if !c.tempTrackingEnabled {
+		return val
+	}
+	fType := access.FieldType
+	if c.typeSubst != nil {
+		fType = types.Substitute(fType, c.typeSubst)
+	}
+	if dup, ok := c.dupHeapFieldForEscape(val, fType, c.enumTargetDroppable(targetType)); ok {
+		return dup
+	}
+	return val
+}
+
+// narrowedVariantFieldDroppable reports whether a MemberExpr is a non-destructive
+// narrowed enum variant field read (`if x is V { x.field }`, T0993) and, if so,
+// whether the subject enum is droppable — in which case genNarrowedVariantField
+// dups the field for escape, just like a struct field on a droppable owner. The
+// dup-flag-setting helpers (constructor/`~`-param args) and isStringFieldDup share
+// this so all consumer sites treat a narrowed variant field identically to a
+// struct field. T1011.
+func (c *Compiler) narrowedVariantFieldDroppable(mem *ast.MemberExpr) (matched bool, droppable bool) {
+	access := c.info.NarrowedVariantField[mem]
+	if access == nil {
+		return false, false
+	}
+	targetType := access.TargetType
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	return true, c.enumTargetDroppable(targetType)
+}
+
+// enumTargetDroppable reports whether a resolved narrowing target type is a
+// droppable enum — i.e. its synth drop frees variant payload, so a heap variant
+// field escaping the narrowing scope must be cloned rather than aliased. The
+// single source for the narrowed-field droppable predicate, shared by
+// narrowedVariantFieldDroppable and genNarrowedVariantField. T1011.
+func (c *Compiler) enumTargetDroppable(targetType types.Type) bool {
+	enum := extractEnum(targetType)
+	return enum != nil && c.enumInstanceHasDrop(targetType, enum)
+}
+
+// dupHeapFieldForEscape clones a loaded heap-typed field value (string,
+// Optional[string], Vector/Channel/Arc/Weak, or Optional[those]) when the active
+// dup-on-escape flag (dupStringFieldAccess / dupContainerFieldAccess) is set and
+// the owner is droppable, tracking the clone as a statement temp so scope cleanup
+// claims it once the consumer takes ownership. Returns (clone, true) when a clone
+// was produced; (val, false) for an in-scope borrow (no flag set, or owner not
+// droppable), in which case the caller returns val unchanged. The single source of
+// truth for field-escape duplication, shared by genFieldAccess (struct fields) and
+// genNarrowedVariantField (narrowed enum variant fields, T1011) so a heap field
+// behaves identically in every consumer context. fType must already be fully
+// substituted by the caller.
+func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, ownerDroppable bool) (value.Value, bool) {
+	// String / Optional[string] — gated on dupStringFieldAccess.
+	if c.dupStringFieldAccess && ownerDroppable {
+		if extractNamed(fType) == types.TypString {
+			c.dupStringFieldAccess = false // consume the flag
+			dup := c.dupString(val)
+			c.trackStringTemp(dup)
+			return dup, true
+		}
+		// B0181: Handle string? optional fields — extractNamed returns nil for
+		// *types.Optional, so unwrap first to check the inner type.
+		// B0190: Track the dup as a temp AND store it in optionalStringDup so
+		// genOptionalForceUnwrap can return it directly (bypassing extractvalue
+		// which creates a different value.Value that claimStringTemp can't match).
+		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+			c.dupStringFieldAccess = false // consume the flag
+			innerStr := c.block.NewExtractValue(val, 1)
+			dup := c.dupString(innerStr)
+			c.trackStringTemp(dup)
+			c.optionalStringDup = dup
+			return c.block.NewInsertValue(val, dup, 1), true
+		}
+	}
+
+	// B0219: Dup vector/channel fields from types with drop.
+	// Vector: shallow copy (allocate + memcpy). Channel: incref.
+	if c.dupContainerFieldAccess && ownerDroppable {
+		if elemType, ok := types.AsVector(fType); ok {
+			c.dupContainerFieldAccess = false // consume the flag
+			elemLLVM := c.resolveType(elemType)
+			elemSize := int64(c.typeSize(elemLLVM))
+			dup := c.dupVector(val, elemSize)
+			// T0540: Deep-clone droppable elements so the dup owns independent
+			// copies. Without this, the shallow memcpy aliases element pointers
+			// between the original field and the dup, causing a double-free at
+			// scope end. No-op for primitive/copy element types.
+			c.emitVectorElementCloneLoop(dup, elemType)
+			// The dup now owns its elements independently; statement-end cleanup
+			// must drop the elements before freeing the buffer.
+			c.trackVectorTempWithElemType(dup, elemType)
+			return dup, true
+		}
+		if chElem, ok := types.AsChannel(fType); ok {
+			c.dupContainerFieldAccess = false // consume the flag
+			dup := c.dupChannel(val)
+			c.trackChannelTempWithElemType(dup, chElem) // T0663
+			return dup, true
+		}
+		if arcElem, ok := types.AsArc(fType); ok {
+			c.dupContainerFieldAccess = false // consume the flag
+			resolvedArcElem := arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			dup := c.dupArc(val, resolvedArcElem)
+			c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+			return dup, true
+		}
+		if weakElem, ok := types.AsWeak(fType); ok {
+			c.dupContainerFieldAccess = false // consume the flag
+			resolvedWeakElem := weakElem
+			if c.typeSubst != nil {
+				resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+			}
+			dup := c.dupWeak(val, resolvedWeakElem)
+			c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
+			return dup, true
+		}
+		// T0366: Optional[Vector|Channel|Arc|Weak] fields — dup the inner buffer
+		// so the new optional owns an independent copy. Without this, both the
+		// source's owner drop and the new variable's optional drop free the same
+		// buffer (mirrors the Optional[String] handling above). optionalContainerDup
+		// is consumed by genVarDecl (and similar sites) to claim the dup temp once
+		// the containing optional is bound to a variable.
+		if opt, ok := fType.(*types.Optional); ok {
+			elem := opt.Elem()
+			if elemType, isVec := types.AsVector(elem); isVec {
+				c.dupContainerFieldAccess = false
+				elemLLVM := c.resolveType(elemType)
+				elemSize := int64(c.typeSize(elemLLVM))
+				innerVec := c.block.NewExtractValue(val, 1)
+				dup := c.dupVector(innerVec, elemSize)
+				// T0540: Deep-clone droppable elements (mirror the bare Vector branch above).
+				c.emitVectorElementCloneLoop(dup, elemType)
+				c.trackVectorTempWithElemType(dup, elemType)
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1), true
+			}
+			if chElem, isCh := types.AsChannel(elem); isCh {
+				c.dupContainerFieldAccess = false
+				innerCh := c.block.NewExtractValue(val, 1)
+				dup := c.dupChannel(innerCh)
+				c.trackChannelTempWithElemType(dup, chElem) // T0663
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1), true
+			}
+			if arcElem, isArc := types.AsArc(elem); isArc {
+				c.dupContainerFieldAccess = false
+				innerArc := c.block.NewExtractValue(val, 1)
+				resolvedArcElem := arcElem
+				if c.typeSubst != nil {
+					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+				}
+				dup := c.dupArc(innerArc, resolvedArcElem)
+				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1), true
+			}
+			if weakElem, isWeak := types.AsWeak(elem); isWeak {
+				c.dupContainerFieldAccess = false
+				innerWeak := c.block.NewExtractValue(val, 1)
+				resolvedWeakElem := weakElem
+				if c.typeSubst != nil {
+					resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+				}
+				dup := c.dupWeak(innerWeak, resolvedWeakElem)
+				c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1), true
+			}
+		}
+	}
+
+	return val, false
 }
 
 // enumThisSubject converts a `this` enum receiver (an i8* pointer returned by

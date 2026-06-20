@@ -119,7 +119,7 @@ test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(windows) {
   string? orig_temp = get_env_var("TEMP");
   set_env_var("TEMP", "C:\\PromiseTempDirTest\\");
   string got = temp_dir;
-  set_env_var("TEMP", orig_temp); // restore (absent -> unset)
+  set_env_var("TEMP", move orig_temp); // restore (absent -> unset)
   assert(got == "C:\\PromiseTempDirTest", "temp_dir should return TEMP with the trailing separator stripped");
 }
 
@@ -135,12 +135,12 @@ test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(windows) {
   string? orig_temp = get_env_var("TEMP");
   string? orig_tmp = get_env_var("TMP");
   string? unset_temp;
-  set_env_var("TEMP", unset_temp);
+  set_env_var("TEMP", move unset_temp);
   string? unset_tmp;
-  set_env_var("TMP", unset_tmp);
+  set_env_var("TMP", move unset_tmp);
   string got = temp_dir;
-  set_env_var("TEMP", orig_temp); // restore both before asserting
-  set_env_var("TMP", orig_tmp);
+  set_env_var("TEMP", move orig_temp); // restore both before asserting
+  set_env_var("TMP", move orig_tmp);
   assert(got == "C:\\Windows\\Temp", "temp_dir should fall back to C:\\Windows\\Temp when TEMP and TMP are unset");
 }
 
@@ -1131,7 +1131,7 @@ test_execute_custom_env_windows() `test(exclude: wasm) `target(windows) {
   map[string, string] custom_env = env;
   custom_env["PROMISE_TEST_WIN_VAR"] = "custom_value";
   ProcessResult result = execute("cmd", ["/c", "echo %PROMISE_TEST_WIN_VAR%"],
-  environment: custom_env)?!;
+  environment: move custom_env)?!;
   assert(result.exit_code == 0, "cmd /c echo should exit 0");
   assert(result.standard_output.trim() == "custom_value", "child should see injected env var");
 }
@@ -1285,7 +1285,7 @@ test_process_spawn_custom_env_windows() `test(exclude: wasm) `target(windows) {
   map[string, string] custom_env = env;
   custom_env["PROMISE_TEST_SPAWN_WIN_VAR"] = "spawn_custom_value";
   Process p = Process.spawn("cmd", ["/c", "echo %PROMISE_TEST_SPAWN_WIN_VAR%"],
-  environment: custom_env)?!;
+  environment: move custom_env)?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;

@@ -44,41 +44,66 @@ Source (.pr)
    Binary / Library
 ```
 
-The `promise` binary serves as both compiler and package manager:
+The `promise` binary serves as both compiler and package manager. Commands are grouped by purpose. Dependency-management commands live under the `promise package` namespace; the bare toolchain verbs (`install`, `update`, `use`, `remove`) operate on the Promise toolchain itself, not on project dependencies.
 
 ```
+# Compile & run
 promise build file.pr             # Compile to executable
 promise run file.pr               # Build and run
+promise exec '<code>'             # Execute inline code (failable main, ? works)
+echo '<code>' | promise           # Execute from stdin
 promise test file.pr              # Run `test functions
 promise test dir/...              # Recursive directory scan
 promise test -timeout 30s ...     # Per-test timeout (default: 60s)
-promise test -parallel 4 ...     # Run up to 4 tests in parallel (default: NumCPU)
-promise test -stress ...          # Stress test until Ctrl+C
-promise test -stress 100 ...      # Stress test for 100 iterations
-promise test -stress 30s ...      # Stress test for 30 seconds
+promise test -parallel 4 ...      # Run up to N tests in parallel (default: NumCPU)
+promise test -stress [N|dur] ...  # Stress test (count, duration, or until Ctrl+C)
 promise check file.pr             # Type-check only
-promise ast file.pr               # Print the AST
-promise exec '<code>'             # Execute inline code (failable main, ? works)
-echo '<code>' | promise           # Execute from stdin
-promise install                   # Install to ~/.promise/
-promise init                      # Create new promise.toml
-promise doc file.pr               # Generate documentation from `doc meta tags
-promise doc -signatures file.pr   # Compact signature-only output
-promise clean                     # Remove .promise-build/ cache
-promise add <name|url> [ref]      # Add a dependency (catalog name or git URL) to promise.toml
-promise pin <url> [ref]           # Pin one remote dependency to a resolved commit SHA
-promise pkg update                # Update dependency pins to latest commits
-promise format                    # Format source code
 
-# Toolchain management (not dependencies):
-promise use <epoch>               # Activate an installed toolchain epoch
-promise remove <epoch>            # Remove an installed toolchain epoch
-promise update                    # Update the toolchain (follow channel)
-promise update check              # Report whether a toolchain update is available
-promise update channel <name>     # Get/set the update channel (stable | next)
+# Documentation & discovery
+promise                           # Concise command index (grouped)
+promise help                      # Language overview + quick start
+promise guide                     # Full language reference
+promise examples                  # Browse and run example programs
+promise doc <module>              # Document a catalog module (e.g. promise doc io)
+promise doc file.pr               # Generate documentation from `doc annotations
+promise doc -signatures file.pr   # Compact signature-only output
+promise doc                       # List all available modules
+promise targets                   # List supported compile targets
+
+# Project & dependencies
+promise init [--module]           # New app project (default), or a library module with --module
+promise package add <url> [ref]   # Add an external (git) dependency to promise.toml
+promise package remove <url>      # Remove an external dependency from promise.toml
+promise package update [url]      # Update dependency pins to latest commits
+promise package search <keyword>  # Search the catalog for available modules
+promise package pin <url> [ref]   # Resolve + lock a remote dependency to a commit
+
+# Toolchain & cache
+promise install [epoch]           # Install Promise + pre-stage its toolchain (this binary, or a named epoch)
+promise use <epoch>               # Activate an installed epoch
+promise epochs                    # List installed epochs
+promise remove <epoch>            # Remove an installed epoch
+promise update                    # Update the Promise toolchain (follow the release channel)
+promise update channel [stable|next]  # Show or set the release channel (default: stable)
+promise update check              # Report whether an update is available (no changes)
+promise doctor                    # Check the local environment (--repair also reclaims orphaned cache)
+promise clean                     # Remove the build cache
+
+# Tooling
+promise format                    # Format source code
+promise bind <format> <files>     # Generate bindings from WIT or WebIDL
+promise version                   # Print compiler version
 ```
 
 `promise.toml` is the lockfile — remote dependencies are pinned by commit hash directly in it, so there is no separate lockfile command.
+
+**First-party catalog modules are built into the compiler and require no `add` step** — they are available directly with `use <name>;` (adding one to `[require]` is a compile error), because the epoch itself pins their version. `promise package add`/`remove`/`pin` operate on dependencies recorded in `promise.toml`: **community** modules (name-addressable via the `promise-community/catalog` index) and **ad-hoc** git URLs. `promise package add <name>` resolves the epoch-appropriate, test-verified revision and pins its commit; a bare `use foo;` whose name is neither first-party nor in `[require]` is a compile error that points you to `promise package add foo`. `promise package search` is discovery across the first-party and community catalogs. See `docs/module-system.md` §9.8–§9.10 for the full cross-epoch versioning and compatibility model.
+
+`promise install` pre-stages the host LLVM toolchain into the cache as part of setup, so the first build works offline — there is no separate "fetch"/"warm" command. Re-running `promise install` (or `promise install <epoch>` for an already-installed epoch) re-asserts that the toolchain is staged; `--no-fetch-toolchain` skips the pre-stage for thin installs that fetch lazily on first compile.
+
+Cache reclamation is automatic — there is no separate `gc` command. `promise remove <epoch>` frees that epoch's exclusive blobs (blobs shared with a still-installed epoch are kept), and `promise doctor --repair` sweeps orphaned blobs and stale toolchain-view directories left behind by interrupted installs or compiler-version churn.
+
+The `ast` and `emit-ir` commands are also available for compiler debugging.
 
 ---
 
@@ -236,13 +261,13 @@ The alias is the only way to reference that module's exports in the file. Both f
 
 ### 4.3 Module Identity and Pinning
 
-Remote modules are pinned by commit hash directly in `promise.toml` — the `[require]` value is the exact commit (or tag) to check out. `promise pin <url> [ref]` resolves one remote dependency's ref (tag, branch, commit, or `HEAD`) to a full commit SHA and writes it back to `promise.toml`. To bump every declared dependency to the latest commit at once, run `promise pkg update`. The file is checked in and guarantees reproducible builds — `promise.toml` itself is the lockfile.
+Remote modules are pinned by commit hash directly in `promise.toml` — the `[require]` value is the exact commit (or tag) to check out. `promise package pin <url> [ref]` resolves one remote dependency's ref (tag, branch, commit, or `HEAD`) to a full commit SHA and writes it back to `promise.toml`. To bump every declared dependency to the latest commit at once, run `promise package update`. The file is checked in and guarantees reproducible builds — `promise.toml` itself is the lockfile.
 
 ```bash
-promise pin <url> [ref]   # pin one remote dependency to a resolved commit SHA
-promise pkg update        # update all dependency pins to latest commits
-promise clean             # clear local build cache
-promise clean --global    # clear global module + build cache
+promise package pin <url> [ref]   # pin one remote dependency to a resolved commit SHA
+promise package update            # update all dependency pins to latest commits
+promise clean                     # clear local build cache
+promise clean --global            # clear global module + build cache
 ```
 
 ### 4.4 Visibility

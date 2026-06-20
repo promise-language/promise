@@ -183,7 +183,11 @@ Epochs **may contain breaking changes.** This is by design — it's the mechanis
 
 - Breaking changes are **coordinated.** If module `http` changes its API, all catalog modules that depend on `http` are updated in the same epoch. Users see zero breakage within an epoch.
 - Breaking changes are **documented.** Each epoch has a migration guide listing what changed and how to update your code.
-- Breaking changes are **atomic.** You never see "half-migrated" state. You're either on epoch `2026.2` (old API) or `2026.3` (new API). Both work completely.
+- Breaking changes are **atomic for the first-party catalog.** You never see a "half-migrated" first-party catalog: you're either on epoch `2026.2` (old API) or `2026.3` (new API), and within an epoch everything the catalog ships works completely.
+
+This atomic guarantee applies only to modules the catalog team owns (embedded + first-party). **Community and ad-hoc modules cannot be coordinated atomically** — they live in repos the team does not control. They track epochs with `epoch-*` tags and are verified per epoch instead (§9.8–§9.10), and a source-breaking epoch can leave one without a compatible version until its author re-tags (§9.10).
+
+**Scope of "breaking."** Breaking changes are allowed to reach the **language and core type system**, not just stdlib/catalog APIs — there is no frozen cross-epoch source compatibility and no editions mechanism yet (§9.8). Such source-level breaks are expected to be **rare and deliberately costly**: each one strands every community/ad-hoc module that has not yet published a verified tag for the new epoch (§9.10). The single-compiler-per-build model (§9.8) is what makes this concrete — one compiler compiles all dependency source, so a dependency written for an older epoch only keeps working while the newer compiler still accepts its source. Editions (a compiler that retains older epochs' front-ends) remain a possible future lever to soften this; see §17.
 
 This is radically simpler than semver, where a breaking change in one package can cascade unpredictably through the dependency graph and requires each downstream maintainer to independently update.
 
@@ -868,6 +872,103 @@ warning: catalog module 'json' replaced with local path "../my-json-fork"
 ```
 
 This is the escape hatch for Section 15.4 (bleeding-edge fixes).
+
+### 9.8 Cross-Epoch Module Versioning (`epoch-*` tags)
+
+**One compiler per build.** A program is built by exactly one compiler — the one for the *project's* pinned epoch (§4.1) — and that single compiler compiles **all** of the program's source: the project's own code *and every dependency's source*, regardless of which epoch each dependency was written for. There is no per-module compiler and no frozen cross-epoch ABI; a dependency is recompiled from source by the project's compiler. (A future "editions" mechanism — a compiler that retains older epochs' front-ends — could relax this; it is deliberately **out of scope** for now. See §4.4 and §17.)
+
+Section 4 versions *first-party catalog* modules per epoch: the embedded `catalog.toml` records the exact commit each embedded/first-party module ships at for that epoch, and the epoch release gate (§4.2, §8.3) guarantees they all compile and pass their tests together. Remote and community modules live in repos the catalog team does not own, so they need a **decentralized** way to mark which commit is good for which epoch.
+
+A module repo marks this with **`epoch-YYYY.N` git tags** — the same tag convention the compiler repo uses for its own releases (§4.1). An `epoch-X` tag means **"this source was verified to compile and pass its tests under epoch X."** It is an *as-of-X source marker* — **not** a claim about any other epoch.
+
+**The governing rule — verify, never assume.** No `(module, epoch)` pair is ever *assumed* to work. A module is usable on epoch E only once its tests have been **verified to pass under E** (§9.9). This holds even when E is newer than the module's latest tag, and even when the epoch looks non-breaking: forward compatibility is never presumed, only established by running tests.
+
+**Resolution**, when a project on epoch **E** runs `promise package add <module>` (or `promise package update`):
+
+1. **Candidate:** read the module's tags and pick the largest `epoch-X` tag with `X ≤ E` (numeric comparison, §4.1). With no `epoch-*` tags, the candidate is a `stable` tag if present, else default-branch `HEAD` (with an "unversioned" warning).
+2. **Establish compatibility with E** for that candidate (§9.9) — consult the recorded verdict (community catalog) or run the module's tests under E (ad-hoc):
+   - **Verified** → dereference to a commit and **pin it** in `[require]`.
+   - **Fails / can't be verified** → step back to the next-older `epoch-*` tag and retry. If none verifies → §9.10.
+3. The build always uses the pinned commit; moving a tag upstream never changes an existing build until the project runs `promise package update`.
+
+Because the project's compiler compiles the dependency's source, an older `epoch-X` tag only *remains* usable on a newer E while E stays source-compatible with X. **Epochs may make source-breaking changes (rarely — §4.4); when one does, the module's old source stops compiling under the new compiler, its old tags fail verification, and the module must publish a fresh `epoch-E` tag with updated source.** Until it does, a project on E cannot use it (§9.10). This is the deliberate cost of letting the language evolve without a frozen cross-epoch ABI — and projects that stay on their epoch are entirely unaffected (§9.10, reproducibility).
+
+"Different code per epoch" therefore means **different commits behind different tags**. A module normally moves forward on a single history line, adding an `epoch-2026.2` tag once it verifies against `2026.2`. It only *forks* history when a source-breaking epoch forces it to keep an older line alive — then `epoch-2026.1` stays frozen at the old source while new commits target `2026.2`.
+
+**Transitive dependencies** resolve against the **project's** epoch E, never the intermediate module's — there is one global epoch per build (§9.5), so a shared transitive module resolves to a single commit (diamond dedup, §9.5, still applies).
+
+**The `next` channel is toolchain-only.** A project must pin a numeric epoch (`YYYY.N`); `epoch = "next"` is rejected. `next` (§4.3) selects which *compiler* you run, not a project epoch, so it never participates in `epoch-X ≤ E` resolution.
+
+### 9.9 Compatibility, the Community Catalog & `promise package add`
+
+Compatibility is **empirical**: a module at a given commit is *compatible with epoch E* iff, built with the epoch-E compiler, it **compiles and 100% of its `` `test `` functions pass** (a parse or type error counts as a compile failure → incompatible). This is the same gate the first-party catalog uses (§4.2), generalized — and per §9.8 it is **established by running tests, never assumed**.
+
+Three tiers, distinguished by the module's **URL** (no separate flag):
+
+| Tier | Origin | Brought in by | Versioning | Compatibility established by |
+|------|--------|---------------|-----------|------------------------------|
+| Embedded / first-party catalog | no URL, or `github.com/promise-language/*` | nothing — just `use name;` | embedded `catalog.toml`, re-pinned per epoch (§3.2, §4) | epoch release gate (§4.2) — always 100% |
+| Community | `github.com/promise-community/*`, listed in the community catalog | **`promise package add name`** → pins commit in `[require]` | `epoch-*` tags (§9.8) | community-catalog CI, recorded per epoch |
+| Ad-hoc remote | any other git URL | `promise package add <url> [ref]` → pins commit | `epoch-*` tags if present, else manual | the project's own `promise test`, run on add |
+
+**First-party catalog vs. everything else — the `add` distinction.** Embedded and first-party catalog modules are *determined by the epoch itself* (pinned in the binary's `catalog.toml`), so they need **no** `[require]` entry — `use json;` just works. Community and ad-hoc modules are **not** in the binary; they must be resolved to an epoch-appropriate commit and **pinned in `[require]`** by an explicit **`promise package add`**. A bare `use foo;` whose name is neither std/first-party nor present in `[require]` is a **compile error**:
+
+```
+error: 'foo' is not a first-party catalog module and is not in [require]
+  hint: run 'promise package add foo'   (resolves the epoch-appropriate tag and pins it)
+```
+
+This keeps `promise.toml` the single source of truth — `promise build` never silently mutates it (no hidden effects). It also reconciles `language-design.md` §2: first-party catalog = no add; community / ad-hoc = `add` + pin.
+
+**The community catalog is a single git repo, `github.com/promise-community/catalog`**, carrying two payloads:
+
+- a `name → URL` map, so community modules are *name-addressable* (`promise package add foo`, not a full URL); and
+- a **per-epoch compatibility index**: for each listed module and epoch, the last-known-good commit its CI verified to compile + pass tests under that epoch.
+
+Unlike the embedded first-party catalog (frozen in the binary, one per epoch), the community catalog is a **living** repo, fetched and cached on demand. That is a feature: a module that only achieves `epoch-2026.1` compatibility *after* `2026.1` shipped can be recorded there and become resolvable **without a compiler update**. The repo URL is a well-known constant, overridable for mirrors / air-gapped environments (§17).
+
+**Name resolution order** for `promise package add name` / `use name`:
+
+1. `[replace]` (local override, §9.7)
+2. `[require.NAME]` (project alias, §5.2)
+3. embedded first-party catalog (§3.2) — no pin needed
+4. community catalog (`github.com/promise-community/catalog`) — `add` resolves + pins
+5. otherwise: not name-addressable — must be an explicit `promise package add <url> [ref]`
+
+The embedded catalog shadows the community catalog on a name collision; an explicit URL always disambiguates.
+
+**Add flow** for a project on epoch E: resolve the candidate tag (§9.8) → establish compatibility with E → on success pin the commit in `[require]` and report it; on failure walk back tags; if none verifies → §9.10. For community modules the verdict comes from the catalog's CI index; for ad-hoc modules `promise` runs the module's tests **locally** on add and records the result in the local cache (nothing is published centrally — you are on your own).
+
+**Keeping a module up to date (module-owner side).** An owner makes their module usable on a new epoch E by: `promise use E` → `promise test`; on success, push an `epoch-E` git tag. For community-catalog modules the catalog's CI does this across all listed modules automatically and records the verdict; ad-hoc owners run it themselves (or list in the community catalog to get it). A community module **may have its own dependencies**, but its compatibility with E is transitive: if any of its deps has no E-compatible version, the module itself is incompatible with E (§9.10 applies to it too). (Contrast first-party catalog modules, which may depend only on `std` — §9.4.)
+
+### 9.10 When a Module Has No Compatible Version
+
+This case is **intrinsic** to decentralized modules and to the decision (§9.8, §4.4) that the language may make source-breaking changes without a frozen cross-epoch ABI. First-party modules avoid it because the catalog team owns them and updates them atomically in the same epoch (§4.4); a module in a repo the team does not control cannot be coordinated that way. It can't be *prevented* — only made clean and recoverable.
+
+**Detection is a pre-build verification gate, not a raw compile failure.** Because compatibility is established by the verification step (§9.9) *before* a dependency is trusted, `promise` detects "no compatible version" at resolve time and emits one actionable error — the user never sees raw compiler errors buried inside the dependency's source:
+
+```
+error: module 'foo' has no version compatible with epoch 2026.3
+  highest verified epoch: 2026.1   (tag epoch-2026.1)
+  newer tags fail to build under 2026.3
+  options:
+    - pin this project to epoch ≤ 2026.1            (trades newer language features for foo)
+    - use a fork:   promise package add github.com/you/foo-fork
+    - redirect locally while fixing:  [replace] foo = "../foo"   (§9.7)
+    - or wait for foo to publish an epoch-2026.3 tag
+```
+
+The escape hatches are those in §15.3 (author disappeared) and §15.4 (bleeding-edge fix): commit pinning, `[require]` forks, and `[replace]`.
+
+**Reproducibility makes "always build" unconditional.** A project that already builds keeps building **forever**, independent of ecosystem churn: its dependencies are pinned to commits, a fetched commit stays in the local cache even if the upstream repo is later deleted (§6.2), and its epoch's compiler remains installable indefinitely via `promise use <epoch>` (§7.2). Nothing about a *newer* epoch or a moved tag can break a project that stays on its epoch. So §9.10 only ever blocks an **upgrade** — never an existing build.
+
+**Upgrading epochs — previewable and reversible.** To move a project from epoch E to E′:
+
+1. `promise package check-upgrade <E′>` resolves every dependency against E′ and reports, *before any change*, which deps have a verified E′-compatible version and which would hit this section. This is the "well-established path": you learn the cost up front rather than discovering it mid-build.
+2. If all clear, set `[module] epoch = "E′"` and run `promise package update` (re-resolves + re-pins each dep to its E′-appropriate tag).
+3. Rollback is trivial and safe: revert `[module] epoch` to E. Commit pins in `[require]` are epoch-independent, so the previous build returns exactly.
+
+**The pre-release compatibility run is the nudge.** Before an epoch ships, the community-catalog CI runs every listed module's tags against it and publishes the matrix, surfacing "these modules don't support the next epoch yet" so authors can be nudged ahead of time — the soft analog of the catalog's atomic coordination (§4.4). It cannot force an unmaintained module to update; that residual is the honest cost of decentralization, and the right trade for keeping the language free to evolve quickly.
 
 ---
 
@@ -1651,7 +1752,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 3. **Module granularity.** Should `crypto` be one module or split into `crypto/hash`, `crypto/aes`, `crypto/tls`? The flat catalog namespace suggests coarser granularity with submodule-like organization within a single module.
 
-4. **Cross-epoch compatibility.** If project A (epoch 2026.2) uses a remote module built for epoch 2026.3, should this work? Or should remote modules target the same epoch as the project?
+4. ~~**Cross-epoch compatibility.**~~ **Resolved:** A module declares which epochs it supports with `epoch-YYYY.N` tags; a project on epoch E resolves to the largest tag `≤ E`, pinned to a commit. Compatibility is empirical (compiles + tests pass), recorded per epoch in the community catalog for listed modules and checked locally for ad-hoc ones. A project never uses a module built only for a *newer* epoch; if no version supports E, the build fails with actionable options. See §9.8–§9.10.
 
 5. **Catalog size constraint.** Is there a formal limit on catalog size (e.g., "the full API summary must fit in 200K tokens")? This would be a unique and powerful constraint for AI-first design.
 
@@ -1663,4 +1764,4 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 9. ~~**Remote module transitivity.**~~ **Resolved:** Transitive dependencies are resolved automatically by walking each module's `promise.toml`. The top-level project only declares direct deps. Conflicts (same URL, different commits) are rejected. See Section 9.5.
 
-10. **Remote module epoch range.** Should a remote module declare a range of compatible epochs (e.g., `epoch = "2026.2..2026.4"`) or just a single one? A range would reduce "epoch mismatch" warnings but add complexity.
+10. ~~**Remote module epoch range.**~~ **Resolved:** A module does *not* declare a compatible range. It marks an *as-of* floor with `epoch-YYYY.N` tags (the lower bound); the upper bound is **discovered by testing**, not declared (the author cannot predict which future epoch breaks them). This keeps authoring simple while still letting older projects pick older tags. See §9.8.

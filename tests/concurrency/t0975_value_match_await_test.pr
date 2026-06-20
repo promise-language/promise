@@ -1,0 +1,120 @@
+// T0975: awaiting (`<-`) an owned Task selected through a VALUE-match expression (a
+// `match` on a non-enum subject — int, string) must not double-free the selected
+// goroutine G. The `<-` joins+frees the selected arm's task; genValueMatch must clear
+// that arm-result owner's scope-exit drop flag path-conditionally (mirroring the enum
+// path B0242) so the await is the single owner, while the UN-selected arm's owned task
+// is still dropped exactly once (leak guard). Sibling of T0954 (elvis) / T0956.
+// All cases await owned `go` tasks → `exclude: wasm` (matches t0954_elvis_await_test).
+//
+// Every case CONSUMES the match result via `<-`: that is the path the drop-flag clear
+// makes correct (single owner = the `<-`). A value-match whose owned result is instead
+// DISCARDED as a bare statement (`match v { 0 => a, _ => b };`) leaks the selected owner
+// — a pre-existing systemic gap shared by if-expr/elvis/enum-match (the result temp is
+// never temp-dropped), tracked as T1025 and out of scope here.
+worker() int {
+  return 42;
+}
+
+// first arm selected (sel == 0) — the original repro. `<-` awaits `a` (literal-match
+// arm). The un-selected `b` must be dropped exactly once at scope exit.
+t_value_match_first_arm() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  sel := 0;
+  r := <-(match sel {
+    0 => a, _ => b,
+  });
+  assert(r == 42, "value-match first-arm owned await");
+}
+
+// default arm selected (sel == 7, no literal match) — `<-` awaits `b` (wildcard arm).
+// The UN-selected `a` must be dropped exactly once (leak guard).
+t_value_match_default_arm() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  sel := 7;
+  r := <-(match sel {
+    0 => a, _ => b,
+  });
+  assert(r == 42, "value-match default-arm owned await");
+}
+
+// string subject — exercises the native string-`==` comparison-chain arm. The match
+// selects the owned-local `a`; the un-selected `b` is dropped exactly once.
+t_value_match_string_subject() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  key := "a";
+  r := <-(match key {
+    "a" => a, _ => b,
+  });
+  assert(r == 42, "value-match string-subject owned await");
+}
+
+// string subject, default selected — the UN-selected `a` must be dropped exactly once.
+t_value_match_string_default() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  key := "z";
+  r := <-(match key {
+    "a" => a, _ => b,
+  });
+  assert(r == 42, "value-match string-subject default await");
+}
+
+// guarded name-pattern arm whose result is an owned task — `n if n > 5` selects `a`;
+// awaiting it frees `a`'s G once and the unguarded `_ => b` owner is dropped once.
+t_value_match_guard_arm() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  sel := 10;
+  r := <-(match sel {
+    n if n > 5 => a, _ => b,
+  });
+  assert(r == 42, "value-match guard-arm owned await");
+}
+
+// guard fails (sel <= 5) — `_ => b` selected; the guarded arm's owned `a` (un-selected)
+// must be dropped exactly once (leak guard for the guarded name-pattern branch).
+t_value_match_guard_fail() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  sel := 3;
+  r := <-(match sel {
+    n if n > 5 => a, _ => b,
+  });
+  assert(r == 42, "value-match guard-fail owned await");
+}
+
+// class subtype (RTTI type-pattern) arm whose result is an owned task — exercises the
+// genValueMatch TypeBindingMatchPattern arm path (a different clear site than the
+// literal/string/guard arms). `Circle c => a` is selected; `<-` frees `a` once, the
+// un-selected `_ => b` owner is dropped exactly once.
+type Shape {
+  area(this) f64 => 0.0;
+}
+type Circle is Shape {
+  f64 r;
+}
+
+t_value_match_type_pattern() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  Shape sh = Circle(r: 2.0);
+  r := <-(match sh {
+    Circle c => a, _ => b,
+  });
+  assert(r == 42, "value-match type-pattern owned await");
+}
+
+// type-pattern fails (subject is the base Shape, not Circle) — `_ => b` selected; the
+// un-selected type-pattern arm's owned `a` must be dropped exactly once (leak guard).
+t_value_match_type_pattern_default() `test(exclude: wasm) {
+  a := go worker();
+  b := go worker();
+  Shape sh = Shape();
+  r := <-(match sh {
+    Circle c => a, _ => b,
+  });
+  assert(r == 42, "value-match type-pattern default owned await");
+}

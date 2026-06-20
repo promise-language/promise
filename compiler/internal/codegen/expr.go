@@ -7148,6 +7148,12 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				armVal = c.genBlockValue(arm.Block)
 			}
 			c.claimStringTemp(armVal) // T0073
+			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
+			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
+			// in the selected arm's block, so the clear is path-conditional: the
+			// un-selected arm's owner keeps its flag and is dropped exactly once at
+			// scope exit. Mirrors genEnumMatch (B0242) for the non-enum value path.
+			c.clearMatchArmResultDropFlags(*arm)
 			armEnd := c.block
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
@@ -7206,6 +7212,12 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				armVal = c.genBlockValue(arm.Block)
 			}
 			c.claimStringTemp(armVal) // T0073
+			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
+			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
+			// in the selected arm's block, so the clear is path-conditional: the
+			// un-selected arm's owner keeps its flag and is dropped exactly once at
+			// scope exit. Mirrors genEnumMatch (B0242) for the non-enum value path.
+			c.clearMatchArmResultDropFlags(*arm)
 			armEnd := c.block
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
@@ -7252,6 +7264,12 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 					armVal = c.genBlockValue(arm.Block)
 				}
 				c.claimStringTemp(armVal) // T0073
+				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
+				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
+				// in the selected arm's block, so the clear is path-conditional: the
+				// un-selected arm's owner keeps its flag and is dropped exactly once at
+				// scope exit. Mirrors genEnumMatch (B0242) for the non-enum value path.
+				c.clearMatchArmResultDropFlags(*arm)
 				armEnd := c.block
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
@@ -7269,6 +7287,12 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 					armVal = c.genBlockValue(arm.Block)
 				}
 				c.claimStringTemp(armVal) // T0073
+				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
+				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
+				// in the selected arm's block, so the clear is path-conditional: the
+				// un-selected arm's owner keeps its flag and is dropped exactly once at
+				// scope exit. Mirrors genEnumMatch (B0242) for the non-enum value path.
+				c.clearMatchArmResultDropFlags(*arm)
 				armEnd := c.block
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)

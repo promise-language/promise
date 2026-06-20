@@ -42,6 +42,14 @@ Bare numeric literals infer as `int` or `f64`. Use suffixes for specific types.
 
 **String escapes:** `\n` `\t` `\r` `\b` `\\` `\"` `\0` `\{` (literal `{`, suppresses interpolation). Raw strings (`r"..."`) skip all escapes.
 
+**Multi-line strings:** triple-quoted `"""..."""` spans multiple lines with everything preserved verbatim — like a raw string, neither escapes nor `{...}` interpolation are processed.
+
+```promise
+string banner = """line one
+line two
+line three""";
+```
+
 **String interpolation:** `{expr}` embeds any expression's value (its `to_string`). The interpolated expression is full-featured: it may contain string literals — including ones that hold `{`, `}`, or escaped quotes (`\"`) — call functions with multiple arguments, nest further interpolations to any depth, and use the explicit error-handling forms `?^` (propagate), `?!` (panic), and `? handler { … }` (handle). A literal `{` outside interpolation must be escaped as `\{`; a literal `}` needs no escape.
 
 ```promise
@@ -160,6 +168,21 @@ c.increment();            // ~this: compiler auto-borrows mutably
 print_line("{c.count}");  // getter, no parens
 ```
 
+**Operator overloading** — name a method after the operator to make a type usable with it:
+
+```promise
+type Vec2 {
+  int x `value;
+  int y `value;
+
+  +(Vec2 other) Vec2 => Vec2(x: this.x + other.x, y: this.y + other.y);
+  -(Vec2 other) Vec2 => Vec2(x: this.x - other.x, y: this.y - other.y);
+  ==(Vec2 other) bool => this.x == other.x && this.y == other.y;
+}
+
+Vec2 sum = Vec2(x: 1, y: 2) + Vec2(x: 3, y: 4);   // (4, 6)
+```
+
 ## Functions
 
 ```promise
@@ -243,6 +266,19 @@ main() {
 | `foo() ? e is T { ... }` | Handle typed error | Anywhere |
 
 **Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. Use `?^` for explicit self-documenting propagation. `?!` always means panic.**
+
+**Auto-propagation does not cross a lambda boundary.** A bare call (or `?^`) inside a lambda body propagates to the *lambda*, not the enclosing function — and a lambda is not itself failable, so this is a compile error. Inside a lambda, handle the error locally with `?!` (panic) or `? { ... }` (recover):
+
+```promise
+process!(string path) string {
+  // WRONG: read_config inside the lambda can't auto-propagate to process!
+  // load := |string p| -> read_config(p);
+
+  // RIGHT: handle the error inside the lambda
+  load := |string p| -> string { return read_config(p) ? { "default" }; };
+  return load(path);
+}
+```
 
 **What NOT to do:**
 ```promise
@@ -341,6 +377,13 @@ match true {
   n % 3 == 0 => "fizz",
   n % 5 == 0 => "buzz",
   _ => n.to_string(),
+}
+
+// Match guards — bind the value, then refine an arm with `if <cond>`:
+match n {
+  val if val > 0 => "positive",
+  val if val < 0 => "negative",
+  _ => "zero",
 }
 
 // Type checks and casts
@@ -461,6 +504,30 @@ result := max[int](3, 7);
 identity[T](T val) T { return val; }
 wrap[T](T val) T { return identity[T](val); }
 wrap[int](42);   // works: resolves both wrap[int] and identity[int]
+```
+
+**Satisfying the std structural interfaces** — a user type participates in generic algorithms (`sort`, `map`/`Set` keys, `clone`) by defining the right methods; no `is` declaration is needed (they are `` `structural ``):
+
+| Interface | Required member | Provided for free |
+|-----------|-----------------|-------------------|
+| `Equal` | `==(Self other) bool` | `!=` |
+| `Ordered` (`is Equal`) | `<(Self other) bool` (plus `==`) | `>`, `<=`, `>=` |
+| `Hashable` | `get hash int` (a **getter**, not `hash()`) | — |
+| `Cloneable` | `clone() Self` | — |
+
+```promise
+type Money {
+  int cents;
+
+  ==(Money other) bool => this.cents == other.cents;
+  <(Money other) bool  => this.cents < other.cents;   // now Ordered → sortable
+  get hash int => this.cents;                          // now a valid map/Set key
+}
+
+Money[] xs = [Money(cents: 30), Money(cents: 10)];
+xs = sort(xs);                  // works because Money is Ordered
+Set[Money] seen = Set[Money]();
+seen.add(Money(cents: 10));     // works because Money is Hashable + Equal
 ```
 
 ## Collections (auto-imported from std)
@@ -645,6 +712,7 @@ json.JsonValue v = json.parse_value(data);
 
 ```promise
 // Test function (discovered by `promise test`)
+// assert(condition, message) — the message argument is REQUIRED
 test_addition() `test {
   assert(1 + 1 == 2, "basic addition");
 }
@@ -702,6 +770,17 @@ for n in fibonacci() {
   if n > 1000 { break; }
   print_line("{n}");
 }
+
+// yield* — delegate to another iterable (generator, range, array, or string),
+// re-yielding all of its elements in order:
+count_to(int n) stream[int] {
+  for i in 1..=n { yield i; }
+}
+
+combined() stream[int] {
+  yield * count_to(3);   // 1, 2, 3
+  yield * 4..=6;         // 4, 5, 6 (delegate to a range)
+}
 ```
 
 ## Fixed-Size Arrays
@@ -754,6 +833,17 @@ Port(value: 80)?!;        // panics on invalid
 divide!(f64 a, f64 b) f64 {
   if b == 0.0 { raise error(message: "division by zero"); }
   return a / b;
+}
+
+// Constructor inheritance — a child's new() calls the parent's new() via super()
+type Base {
+  int value;
+  new(~this, int value) { this.value = value; }
+}
+type Child is Base {
+  new(~this, int v) {
+    super(value: v);   // runs Base.new before the rest of Child.new
+  }
 }
 ```
 

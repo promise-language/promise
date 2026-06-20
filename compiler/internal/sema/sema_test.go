@@ -1126,6 +1126,56 @@ func TestAutoPropagateVoidAssignStmt(t *testing.T) {
 	`)
 }
 
+// === Auto-propagation does not cross a lambda boundary (T0996, language-guide.md) ===
+//
+// A bare failable call (or ?^) inside a lambda body targets the *lambda*, not the
+// enclosing function. A lambda is never failable, so auto-propagation/`?^` there is a
+// compile error — the body must handle the error locally with ?! or `? { }`.
+
+func TestAutoPropagateBareCallInLambdaRejected(t *testing.T) {
+	// Bare failable call inside a lambda body — even though the enclosing fn is
+	// failable, the lambda is not, so the call must be handled.
+	errs := checkErrs(t, `
+		read_config!(string p) string { return "ok"; }
+		process!(string path) string {
+			load := |string p| -> string { return read_config(p); };
+			return load(path);
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestPropagateOperatorInLambdaRejected(t *testing.T) {
+	// ?^ inside a lambda body — propagation has no failable function to target.
+	errs := checkErrs(t, `
+		read_config!(string p) string { return "ok"; }
+		process!(string path) string {
+			load := |string p| -> string { return read_config(p)?^; };
+			return load(path);
+		}
+	`)
+	expectError(t, errs, "outside of failable function")
+}
+
+func TestPanicHandlerInLambdaOK(t *testing.T) {
+	// Handling the error locally inside the lambda (?! / `? { }`) is the documented
+	// way to call a failable function from a lambda body.
+	checkOK(t, `
+		read_config!(string p) string { return "ok"; }
+		process!(string path) string {
+			load := |string p| -> string { return read_config(p) ? { "default" }; };
+			return load(path);
+		}
+	`)
+	checkOK(t, `
+		read_config!(string p) string { return "ok"; }
+		process!(string path) string {
+			load := |string p| -> string { return read_config(p)?!; };
+			return load(path);
+		}
+	`)
+}
+
 // === Auto-propagation in call arguments ===
 
 func TestAutoPropagateInFuncArg(t *testing.T) {

@@ -65,12 +65,20 @@ promise init                      # Create new promise.toml
 promise doc file.pr               # Generate documentation from `doc meta tags
 promise doc -signatures file.pr   # Compact signature-only output
 promise clean                     # Remove .promise-build/ cache
-promise add <url>                 # Add dependency (planned)
-promise remove <url>              # Remove dependency (planned)
-promise update                    # Update dependencies (planned)
+promise add <name|url> [ref]      # Add a dependency (catalog name or git URL) to promise.toml
+promise pin <url> [ref]           # Pin one remote dependency to a resolved commit SHA
+promise pkg update                # Update dependency pins to latest commits
 promise format                    # Format source code
-promise lock                      # Regenerate lockfile (planned)
+
+# Toolchain management (not dependencies):
+promise use <epoch>               # Activate an installed toolchain epoch
+promise remove <epoch>            # Remove an installed toolchain epoch
+promise update                    # Update the toolchain (follow channel)
+promise update check              # Report whether a toolchain update is available
+promise update channel <name>     # Get/set the update channel (stable | next)
 ```
+
+`promise.toml` is the lockfile — remote dependencies are pinned by commit hash directly in it, so there is no separate lockfile command.
 
 ---
 
@@ -228,12 +236,13 @@ The alias is the only way to reference that module's exports in the file. Both f
 
 ### 4.3 Module Identity and Pinning
 
-Remote modules are pinned by commit hash directly in `promise.toml` — the `[require]` value is the exact commit (or tag) to check out. `promise pin` fetches all declared remote dependencies, resolves their transitive deps, and writes the resolved commit hashes back to `promise.toml`. The file is checked in and guarantees reproducible builds.
+Remote modules are pinned by commit hash directly in `promise.toml` — the `[require]` value is the exact commit (or tag) to check out. `promise pin <url> [ref]` resolves one remote dependency's ref (tag, branch, commit, or `HEAD`) to a full commit SHA and writes it back to `promise.toml`. To bump every declared dependency to the latest commit at once, run `promise pkg update`. The file is checked in and guarantees reproducible builds — `promise.toml` itself is the lockfile.
 
 ```bash
-promise pin          # fetch + lock all dependencies
-promise clean        # clear local build cache
-promise clean --global   # clear global module + build cache
+promise pin <url> [ref]   # pin one remote dependency to a resolved commit SHA
+promise pkg update        # update all dependency pins to latest commits
+promise clean             # clear local build cache
+promise clean --global    # clear global module + build cache
 ```
 
 ### 4.4 Visibility
@@ -724,7 +733,7 @@ main() {
 }
 ```
 
-**Value struct layout**: `{ i8* _vtable, T_i* _rtti, field1, field2, ... }` — fields embedded at indices 2+, no heap allocation. The Instance struct is a global RTTI-only singleton `{ T_m* _variant }`.
+**Value struct layout**: `{ i8* _vtable, field1, field2, ... }` — fields embedded at indices 1+, no heap allocation. RTTI is accessed via the compile-time-known global `promise_rtti_<T>`, not stored in the value struct. The Instance struct is a global RTTI-only singleton `{ T_m* _variant }`.
 
 **Rules**:
 - Automatically `` `copy `` — no explicit annotation needed
@@ -2768,51 +2777,46 @@ Promise provides a unified iteration and streaming abstraction through two core 
 ### 12.1 Core Interfaces
 
 ```promise
-type Iterator[T] {
+type Iterator[T] `structural {
   next() T? `abstract;
-}
-```
 
-`Iterator[T]` is the stateful cursor. Each call to `next()` returns the next element wrapped in `T?`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system.
+  // Intermediate combinators — lazy, return a new iterator
+  map[R]((T) -> R transform) Iterator[R] { ... }
+  filter((T) -> bool predicate) Iterator[T] { ... }
+  flat_map[R]((T) -> Iterator[R] transform) Iterator[R] { ... }
+  take(int count) Iterator[T] { ... }
+  skip(int count) Iterator[T] { ... }
+  take_while((T) -> bool predicate) Iterator[T] { ... }
+  skip_while((T) -> bool predicate) Iterator[T] { ... }
+  zip[U](Iterator[U] other) Iterator[(T, U)] { ... }
+  chain(Iterator[T] other) Iterator[T] { ... }
+  enumerate() Iterator[(int, T)] { ... }
 
-```promise
-type Stream[T] {
-  iter() Iterator[T] `abstract;
-
-  // Intermediate combinators — lazy, return a new stream (planned)
-  map[R]((T) -> R transform) Stream[R] { ... }
-  filter((T) -> bool predicate) Stream[T] { ... }
-  flatMap[R]((T) -> Stream[R] transform) Stream[R] { ... }
-  take(int count) Stream[T] { ... }
-  skip(int count) Stream[T] { ... }
-  takeWhile((T) -> bool predicate) Stream[T] { ... }
-  skipWhile((T) -> bool predicate) Stream[T] { ... }
-  zip[U](Stream[U] other) Stream[(T, U)] { ... }
-  chain(Stream[T] other) Stream[T] { ... }
-  enumerate() Stream[(int, T)] { ... }
-  scan[R](R initial, (R, T) -> R accumulate) Stream[R] { ... }
-  chunk(int size) Stream[T[]] { ... }
-  distinct() Stream[T] { ... }
-
-  // Terminal operations — eager, consume the stream (planned)
+  // Terminal operations — eager, consume the iterator
   fold[R](R initial, (R, T) -> R accumulate) R { ... }
   reduce((T, T) -> T combine) T? { ... }
   collect() T[] { ... }
   count() int { ... }
   any((T) -> bool predicate) bool { ... }
   every((T) -> bool predicate) bool { ... }
-  contains(T value) bool { ... }
   first() T? { ... }
   last() T? { ... }
   find((T) -> bool predicate) T? { ... }
-  min() T? { ... }
-  max() T? { ... }
-  forEach((T) action) { ... }
-  join(string separator = "") string { ... }
+  for_each((T) -> void action) { ... }
 }
 ```
 
-> **Status**: The core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) and the combinator default methods are implemented and usable on any type that satisfies them.
+`Iterator[T]` is the stateful cursor and carries every combinator as a default method. Each call to `next()` returns the next element wrapped in `T?`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system. Any type with a `next() T?` method satisfies the structural interface and inherits all the combinators.
+
+```promise
+type Stream[T] `structural {
+  iter() Iterator[T] `abstract;
+}
+```
+
+`Stream[T]` is the reusable factory: a single abstract `iter()` that hands out a fresh `Iterator[T]` cursor. Combinators live on `Iterator[T]`, so transform a stream by chaining off `stream.iter()`.
+
+> **Status**: The core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) and all ~20 combinator default methods on `Iterator[T]` are implemented and usable on any type that satisfies them. Combinators not in the list above (`scan`, `chunk`, `distinct`, `contains`, `min`, `max`, `join`) are design targets, not yet implemented.
 
 **Key design properties:**
 
@@ -2925,7 +2929,7 @@ fetchPages(string url) stream[Page] {
 ```promise
 // ERROR — yield inside a closure
 example() stream[int] {
-  items.forEach(|item| { yield item; });  // compile error
+  items.iter().for_each(|item| { yield item; });  // compile error
 }
 
 // OK — yield in a for loop
@@ -2938,15 +2942,15 @@ The compiler transforms each `yield` point into a state in a state machine. Loca
 
 ### 12.5 Collections as Streams
 
-Built-in collection types implement `Stream[T]`, supporting `for-in` iteration. Stream combinators (planned) will give them rich functional operations for free:
+Built-in collection types implement `Stream[T]`, supporting `for-in` iteration. The combinators live on `Iterator[T]`, so reach them via `.iter().<combinator>()` — e.g. `v.iter().filter(...).collect()`:
 
 | Collection      | Stream Implementation           |
 |----------------|---------------------------------|
 | `T[]` (Vector)  | `Stream[T]` — iterates elements in order |
-| `T[N]` (array)  | `Stream[T]` — iterates elements in order (planned) |
+| `T[N]` (array)  | `Stream[T]` — iterates elements in order |
 | `map[K, V]`     | `Stream[(K, V)]` — iterates key-value pairs |
 | `channel[T]`    | `Stream[T]` — receives from channel until closed |
-| `range`         | `Stream[int]` — see Section 12.3 |
+| `range`         | iterable via a built-in counting loop — not a `Stream`; see Section 12.3 |
 | `string`        | `Stream[char]` — iterates Unicode scalar values |
 
 `map[K, V]` also provides `.keys() Stream[K]` and `.values() Stream[V]` for iterating only keys or values.
@@ -3283,7 +3287,12 @@ int result = fetch() ? e { 0; } ? _ { -1; };
 int result = fetch()?!!;
 ```
 
-The disambiguation rule: `?` and `!` on a failable expression target the error layer. On an `Optional[T]` target the optional layer. Failable is always consumed first.
+The disambiguation rule by operator:
+
+- **Error layer** (act on a failable `!` result): `?^` propagates the error to the caller · `?!` panics on error · `? e { }` handles the error with a block.
+- **Optional layer** (act on an `Optional[T]`): `!` force-unwraps (panics on `none`) · `? _ { }` handles `none` with a block · `?:` supplies a default.
+
+The failable layer is always consumed first. When a value is `int?!` (failable returning optional), an error-layer operator binds before an optional-layer one — so `fetch()?!!` reads as `?!` (panic on error) then `!` (unwrap the optional). A bare `!` or `? _ { }` applied to a plain `Optional[T]` acts on the optional layer.
 
 ### 14.4 Other Optional Operations
 
@@ -3364,7 +3373,7 @@ Because these are `` `structural ``, any type with matching method signatures sa
 type File is ReadWriteCloser {
   int fd;
 
-  open!(string path, string mode) File `type `native;
+  open!(string path, bool readonly = false) Self `factory `native;
 
   read!(~this, u8[]~ buf) int `instance `native;
   write!(~this, u8[] buf) int `instance `native;
@@ -3402,8 +3411,8 @@ A `use` binding ties a resource's lifetime to the enclosing scope. When the scop
 
 ```promise
 main!() {
-  use f := File.open("data.txt", "r")?^;
-  string data = f.readAll()?^;
+  use f := File.open("data.txt", readonly: true)?^;
+  string data = f.read_all()?^;
   // f.close() called automatically here
 }
 ```
@@ -3412,10 +3421,10 @@ main!() {
 
 ```promise
 process!(string path) {
-  use f := File.open(path, "r")?^;
+  use f := File.open(path, readonly: true)?^;
 
   if needsBackup(path) {
-    use backup := File.open(path + ".bak", "w")?^;
+    use backup := File.create(path + ".bak")?^;
     copyTo(f, backup)?^;
     // backup.close() called here
   }
@@ -3436,14 +3445,14 @@ process!(string path) {
 ```promise
 // In a failable function:
 writeData!(string path, u8[] data) {
-  use f := File.open(path, "w")?^;
+  use f := File.create(path)?^;
   f.write(data)?^;
   // If f.close() fails here, the error propagates (no prior error)
 }
 
 // If write fails:
 writeData!(string path, u8[] data) {
-  use f := File.open(path, "w")?^;
+  use f := File.create(path)?^;
   f.write(data)?^;  // raises an error
   // f.close() still called, but its error is suppressed — write's error propagates
 }

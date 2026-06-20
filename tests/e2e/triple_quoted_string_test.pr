@@ -41,3 +41,21 @@ triple_quoted_empty() `test {
   string text = """""";
   assert(text.len == 0, "triple empty len");
 }
+
+// T0996: the guide documents triple-quoted strings as verbatim — like a raw
+// string, NEITHER escape sequences NOR {...} interpolation are processed.
+triple_quoted_no_escapes() `test {
+  string text = """x\ny""";
+  // \n stays as the two chars backslash + n, not a newline
+  assert(text.len == 4, "backslash-n is two verbatim chars");
+  assert(!text.contains("\n"), "no real newline introduced");
+  assert(text == "x\\ny", "verbatim backslash preserved");
+}
+
+triple_quoted_no_interpolation() `test {
+  int y = 7;
+  string text = """value={y}""";
+  // {y} stays literal — y is NOT interpolated
+  assert(text == "value=\{y}", "braces are literal, no interpolation");
+  assert(text.len == 9, "verbatim length includes literal braces");
+}

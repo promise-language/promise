@@ -1,6 +1,0 @@
-[submodule "flow-sdk"]
-	path = flow-sdk
-	url = ssh://hfe/git/tracker_flow_sdk.git
-[submodule "flow"]
-	path = flow
-	url = https://github.com/promise-language/flow.git

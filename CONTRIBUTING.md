@@ -44,11 +44,6 @@ idempotent and fast — re-run it whenever you pull changes under `tools/` (each
 `bin/` tool embeds a hash of its source and refuses to run when stale, telling
 you to re-run `./make`).
 
-`./make` also builds the optional **flow** binaries used by the project's tracker
-automation; those live in two git submodules (`flow-sdk/`, `flow/`). Access to
-them is optional — if they can't be fetched, `./make` warns and skips them, and
-everything below still works. See [§12](#12-the-flows-automation-optional).
-
 ## 3. Build the compiler
 
 ```sh
@@ -127,7 +122,7 @@ the shared `~/.promise` cache instead of the per-clone `.promise-home/`.
 - **Commit gates** (after verify) — the leak count must not increase and the test
   count must not decrease.
 - **Periodic / platform gates** — stress, coverage, binary size, and
-  cross-platform verification, scheduled via the tracker.
+  cross-platform verification.
 
 A standing rule worth internalizing early: **zero memory leaks.** The repo has 0
 leaks and 0 `allow_leaks` tags; any leak in verify output is a regression, and
@@ -157,7 +152,6 @@ tests/           Cross-cutting integration and e2e tests
 examples/        Runnable example programs (also run as tests)
 tools/           Build tooling (a separate Go module → compiled to bin/)
 bin/             Compiled build tools + the compiler (bin/promise)
-flows/           Tracker-automation flow binaries (optional; see §12)
 docs/            Design docs and references — start at docs/index.md
 ```
 
@@ -180,28 +174,11 @@ AI agents, but equally useful to human contributors). For style specifics see
 
 ## 11. Bugs, tasks, and follow-ups
 
-Bugs and work items are tracked in the project's **tracker** (an MCP server), which
-auto-assigns stable IDs by type (`B0001` bugs, `T0001` tasks, `D0001` deferred).
-Reference those IDs from code comments and commit messages. When you hit a
-compiler bug or language limitation, file it rather than hacking around it.
-
-**Reporting from outside the core team:** the tracker is the maintainers' internal
-workflow and isn't publicly accessible. If you don't have tracker access, open a
-regular **[GitHub Issue](https://github.com/promise-language/promise/issues)**
-instead — use the bug-report or feature-request template — and a maintainer will
-triage it into the tracker. A GitHub Issue is always a fine way to report a bug or
-propose a change.
-
-## 12. The flows automation (optional)
-
-The `flows/` module and the `flow/` + `flow-sdk/` submodules implement the
-project's **tracker resolution automation** (the `do` flow that drives an item
-through plan → implement → review → coverage → commit → push → summary →
-inspect). They are **not** part of building or testing the compiler and are not
-covered by `bin/verify`. `./make` checks the submodules out automatically and
-builds `bin/flow/do`; if you lack access to the submodule hosts, the build skips
-them with a warning and the compiler workflow is unaffected. The `flows/` module
-has its own Go tests (`cd flows && go test ./...`).
+Bugs and work items are tracked on **[GitHub Issues](https://github.com/promise-language/promise/issues)**.
+Use the bug-report or feature-request template, and reference issue numbers from
+code comments and commit messages. When you hit a compiler bug or language
+limitation, file an issue rather than hacking around it — a GitHub Issue is always
+a fine way to report a bug or propose a change.
 
 ## Where to go next
 

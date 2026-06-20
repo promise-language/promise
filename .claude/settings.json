@@ -34,39 +34,5 @@
         ]
       }
     ]
-  },
-  "permissions": {
-    "allow": [
-      "Edit",
-      "Bash(*)",
-      "Glob",
-      "WebSearch",
-      "Read",
-      "mcp__tracker__list",
-      "mcp__tracker__create",
-      "mcp__tracker__update",
-      "mcp__tracker__get",
-      "mcp__tracker__search",
-      "mcp__tracker__agents",
-      "mcp__tracker__get_attachment",
-      "mcp__tracker__is_blocked",
-      "mcp__tracker__test_health_check",
-      "mcp__tracker__test_health_flaky",
-      "mcp__tracker__test_health_history",
-      "mcp__tracker__test_health_report",
-      "mcp__tracker__test_health_summary",
-      "mcp__tracker__gate_list",
-      "mcp__tracker__gate_results",
-      "mcp__tracker__gate_run"
-    ],
-    "deny": [
-      "Read(.tracker/**)",
-      "Edit(.tracker/**)",
-      "Write(.tracker/**)"
-    ],
-    "additionalDirectories": [
-      "/tmp",
-      "~/.promise"
-    ]
   }
 }

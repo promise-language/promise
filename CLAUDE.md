@@ -20,11 +20,11 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Always run `bin/verify --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). Build tools default to a local cache directory (`.promise-home/`); use `--shared` to opt into the shared `~/.promise` cache. Do not commit if verify fails.
 
-**Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/` and enables git hooks. See `docs/build-tools.md` for the full architecture. It also builds the workflow **flow** binaries (`flows/*` → `bin/flow/`, e.g. `bin/flow/do`), checking out the two flow submodules via `git submodule update --init`: `flow-sdk/` (the tracker backend) and `flow/` (the OSS flow substrate at github.com/promise-language/flow), both wired into the `flows/` module via local replaces. The flows are only rebuilt when the `flows/`, `flow-sdk/`, or `flow/` source hash changes (tracked in `bin/flow/.flows.hash`; `-force` rebuilds them anyway). The `flows/` module has its own Go tests (`cd flows && go test ./...`) and is not covered by `bin/verify`. The flows are NOT used to build the compiler or run the project's gates — they support the tracker resolution automation only.
+**Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/` and enables git hooks. See `docs/build-tools.md` for the full architecture.
 
 ```bash
 # Bootstrap (first time or after tools/ source changes):
-./make                     # compile all build tools to bin/ (+ flow binaries to bin/flow/)
+./make                     # compile all build tools to bin/
 
 # From repo root (all platforms):
 bin/build                  # generate parser + embed resources + build → bin/promise
@@ -328,7 +328,6 @@ Tests are organized by category:
 ## Important Files
 
 - `compiler/grammar/PromiseParser.g4` — grammar is the language spec
-- `docs/archive/stages.md` — implementation roadmap and architecture notes (archived; all open items migrated to the `tracker` MCP server)
 - `docs/language-design.md` — full language design proposal (types, ownership, errors, generics, modules)
 - `docs/standard-library.md` — stdlib design: module inventory, PAL extensions, implementation phases, testing strategy
 - `compiler/internal/codegen/compiler.go` — codegen entry, type layouts, scope cleanup
@@ -354,7 +353,7 @@ Tests are organized by category:
 - **Test at every level**: Significant changes need both Go unit tests (`codegen_test.go`, `sema_test.go`) AND Promise-level e2e tests (`tests/` directory, run via `promise test`). Go tests verify IR shape; Promise tests verify runtime correctness.
 - **No hidden effects**: When designing language features, avoid implicit side effects, hidden control flow, or magic behaviors. Every effect should be visible at the call site. If a function can fail, it must be marked failable (`!`). If a value is consumed, it must be moved (`~`). If a variable is mutable, it must be declared so.
 - **Self-contained by default**: Design features so that programs are understandable in isolation. Avoid global state, implicit initialization, and ambient context. A reader (human or AI) should be able to read a `.pr` file top-to-bottom and know exactly what it does without consulting external docs or hidden configuration.
-- **NEVER work around language/compiler/test-infra issues.** When implementing standard library or catalog modules and you hit a language limitation, compiler bug, codegen issue, or test infrastructure problem — **stop and file a bug in the `tracker` MCP server** (type: `bug`). Do NOT hack around the issue in module code (e.g., restructuring code to avoid a parser bug, adding redundant casts to dodge a type-checker gap, duplicating logic because a feature is missing). The language and platform are designed to fully support module implementation — if something doesn't work, that's a real bug that needs a real fix. Let the user implement the compiler/infra fix; your job is to identify and document the blocker clearly.
+- **NEVER work around language/compiler/test-infra issues.** When implementing standard library or catalog modules and you hit a language limitation, compiler bug, codegen issue, or test infrastructure problem — **stop and file a [GitHub issue](https://github.com/promise-language/promise/issues)**. Do NOT hack around the issue in module code (e.g., restructuring code to avoid a parser bug, adding redundant casts to dodge a type-checker gap, duplicating logic because a feature is missing). The language and platform are designed to fully support module implementation — if something doesn't work, that's a real bug that needs a real fix. Let the user implement the compiler/infra fix; your job is to identify and document the blocker clearly.
 
 ## Writing Promise Code
 
@@ -390,20 +389,15 @@ Tests are organized by category:
 
 ## Bug & Task Tracking
 
-**All bugs, tasks, and deferred items are managed via the `tracker` MCP server.** The tracker auto-assigns IDs by type: `B0001` for bugs, `T0001` for tasks, `D0001` for deferred items. These IDs are stable and can be referenced from code comments, commit messages, and conversations.
+Bugs and tasks are tracked on **[GitHub Issues](https://github.com/promise-language/promise/issues)**. When you hit a compiler bug, language limitation, codegen issue, or test-infrastructure problem, open an issue with a clear title, a minimal repro, any workaround, and relevant labels — rather than working around it in module code.
 
-- **Filing bugs:** Use `mcp__tracker__create` with `type: "bug"`. Include a clear title, description (what the bug is, any workaround), priority, and relevant tags.
-- **Filing tasks:** Use `type: "task"` for planned work items. Use `type: "deferred"` for items that are not yet scheduled.
-- **Tagging:** Tags must come from the canonical namespace in **[docs/tracker-tags.md](docs/tracker-tags.md)** — lowercase `kebab-case`, 2–5 per item, ≥1 subsystem/area tag (and exactly one quality/kind tag for bugs), canonical spellings only (`macos` not `darwin`, `build-tools` not `tooling`, `memory-leak` not `leak`). Consult that doc before coining a new tag.
-- **Querying:** Use `mcp__tracker__list` to filter by type, status, priority, or tag. Use `mcp__tracker__search` for free-text search.
-- **Updating:** Use `mcp__tracker__update` to change status (`open` → `in_progress` → `done`/`wontfix`), add notes, or update priority.
-- **Reference in code:** Use tracker IDs in code comments (e.g., `// B0030: workaround for optional user type in constructor`) and commit messages.
-- **`docs/archive/stages.md`** is the archived implementation roadmap. All open bugs/tasks/deferred items have been migrated to the `tracker` MCP server, which is the sole source of truth for status.
+- **Filing:** Open a GitHub issue with a descriptive title and a minimal reproducer. Include the platform when the problem is platform-specific.
+- **Reference in code:** Reference issues from code comments and commit messages (e.g., `// #123: workaround for optional user type in constructor`).
+- **`docs/archive/stages.md`** is the archived implementation roadmap.
 
 ## Conventions
 
-- **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature, file it in the `tracker` MCP server right away (type: `bug`). Include: what the bug is, any workaround, and the priority. Do not leave undocumented workarounds in the code.
-- **Working with the `flow` / `flow-sdk` submodules — read `docs/working-with-submodules.md` first.** The superproject pins each submodule by a **gitlink** (a recorded commit SHA), which is the source of truth. Three rules: (1) the moment you advance a submodule, **`git add` the gitlink** — `./make` reads the SHA from the index, so an *unstaged* committed-advance is silently reverted; (2) **push the submodule before the superproject** (a gitlink pointing at an unpushed commit is unfetchable — `push.recurseSubmodules=check`, applied by `./make`, guards this); (3) gates/CI restore to the *recorded* gitlink, development advances it explicitly. Resolve a rebase gitlink conflict by checking out the desired submodule SHA and `git add`-ing it — there are no markers to edit.
+- **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature, open a [GitHub issue](https://github.com/promise-language/promise/issues) right away. Include: what the bug is, any workaround, and the priority. Do not leave undocumented workarounds in the code.
 - Compiler errors are accumulated (not fatal on first error) and printed together
 - `extractNamed(typ)` unwraps Instance/SharedRef/MutRef to get underlying `*types.Named`
 - `needsVtable(named)` returns true if type has children or is abstract → virtual dispatch

@@ -3,7 +3,7 @@ name: stress
 description: Run bin/stress 1000 (or the number given as arguments) and compare the flaky tests agains the currently logged flaky bugs. Consider the host target. When you see flaky bugs that no longer reproduce, close them. If you see new unfiled bugs file them
 ---
 
-Run stress tests to detect flaky tests, then reconcile results against the bug tracker.
+Run stress tests to detect flaky tests, then reconcile results against the issue tracker (GitHub Issues).
 
 ## Inputs
 
@@ -34,32 +34,31 @@ Read the stress test output and extract:
   - OOM kills or system resource exhaustion
 - If leak indicators are present, file a **critical** bug with tag `memory-leak` describing the observed behavior and which tests were running.
 
-### 3. Fetch existing flaky bugs from tracker
+### 3. Fetch existing flaky issues
 
-- Call `mcp__tracker__list` with `type: "bug"`, `tag: "flaky"` to get all known flaky bugs.
-- For each, call `mcp__tracker__get` to read full details (description, notes, status).
-- Build a mapping of test file/name → tracker bug ID for cross-referencing.
+- Run `gh issue list --label flaky --state open` to get all known flaky issues.
+- For each, run `gh issue view <number>` to read full details (description, comments, state).
+- Build a mapping of test file/name → issue number for cross-referencing.
 
 ### 4. Cross-reference results against known bugs
 
 For each test in the stress report, determine which category it falls into:
 
-| Stress result | Tracker state | Action |
+| Stress result | Issue state | Action |
 |---------------|---------------|--------|
-| FLAKY | No existing bug | **File new bug** (step 5) |
-| FLAKY | Existing open bug | **Update bug** with new data point (step 6) |
-| Not in FLAKY | Existing open bug for this test | **Close bug** — no longer reproduces (step 7) |
-| HIGH VARIANCE only | No existing bug | Note in report but don't file (variance without failures isn't a bug) |
-| HIGH VARIANCE only | Existing open bug | Keep open — may still be flaky at higher iteration counts |
+| FLAKY | No existing issue | **File new issue** (step 5) |
+| FLAKY | Existing open issue | **Comment on issue** with new data point (step 6) |
+| Not in FLAKY | Existing open issue for this test | **Close issue** — no longer reproduces (step 7) |
+| HIGH VARIANCE only | No existing issue | Note in report but don't file (variance without failures isn't a bug) |
+| HIGH VARIANCE only | Existing open issue | Keep open — may still be flaky at higher iteration counts |
 
 ### 5. File new flaky bugs
 
-For each newly discovered flaky test, call `mcp__tracker__create` with:
+For each newly discovered flaky test, open a GitHub issue (`gh issue create`) with:
 
-- **type**: `bug`
 - **title**: `Flaky: <test_name> in <file>` (e.g., `Flaky: test_channel_send in stress_unbuffered.pr`)
-- **priority**: `medium` (default), escalate to `high` if pass rate < 90% or crash signal present
-- **tags**: `flaky`, plus subsystem tags inferred from the file path:
+- **priority label**: `medium` (default), escalate to `high` if pass rate < 90% or crash signal present
+- **labels**: `flaky`, plus subsystem labels inferred from the file path:
   - `tests/concurrency/` → `concurrency`, `scheduler`
   - `tests/e2e/` → the relevant feature tag
   - `modules/` → the module name
@@ -73,7 +72,7 @@ For each newly discovered flaky test, call `mcp__tracker__create` with:
 
 ### 6. Update existing flaky bugs
 
-For bugs that are still flaky, call `mcp__tracker__update` to add a note with:
+For issues that are still flaky, comment on the issue (`gh issue comment`) with:
 
 - Date and host target
 - Current pass rate vs. previously recorded rate (improving/degrading/stable)
@@ -82,10 +81,9 @@ For bugs that are still flaky, call `mcp__tracker__update` to add a note with:
 
 ### 7. Close resolved flaky bugs
 
-For bugs whose tests ran stable across all iterations, call `mcp__tracker__update` with:
+For issues whose tests ran stable across all iterations, close the issue (`gh issue close`) with:
 
-- **status**: `done`
-- **note**: `No longer reproduces after N iterations on <target>. Closing.`
+- **comment**: `No longer reproduces after N iterations on <target>. Closing.`
 
 Be conservative: only close if the test ran a meaningful number of times (check the adaptive scheduling — stable tests may have been skipped after ~20 runs). If the iteration count is low (< 50 effective runs for that test), note this but still close — it can be reopened if it recurs.
 
@@ -95,10 +93,10 @@ Give a concise summary:
 
 - **Target**: host platform
 - **Iterations**: count and duration
-- **New bugs filed**: list with tracker IDs and pass rates
-- **Bugs updated**: list with tracker IDs and trend (improving/degrading)
-- **Bugs closed**: list with tracker IDs (no longer reproduces)
-- **Still flaky**: list of known bugs that remain open
+- **New issues filed**: list with issue numbers and pass rates
+- **Issues updated**: list with issue numbers and trend (improving/degrading)
+- **Issues closed**: list with issue numbers (no longer reproduces)
+- **Still flaky**: list of known issues that remain open
 - **Stable**: total count
 
 ## Notes

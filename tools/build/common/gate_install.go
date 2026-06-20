@@ -303,11 +303,6 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 		rm.Stdout, rm.Stderr = os.Stderr, os.Stderr
 		_ = rm.Run()
 	}()
-	// Defensive: tests/examples/modules don't need the flow submodules, but init
-	// them so a future submodule-touching test isn't surprised by a bare worktree.
-	sm := exec.Command("git", "-C", srcDir, "submodule", "update", "--init")
-	sm.Stdout, sm.Stderr = os.Stderr, os.Stderr
-	_ = sm.Run() // best-effort
 	logf("checked out published sources @ %s into %s", sha, srcDir)
 
 	// ── phase: run the full suite through the INSTALLED stub (always online) ───

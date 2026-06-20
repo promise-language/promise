@@ -124,7 +124,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: false }   # see "Submodules" below — do NOT switch to recursive
       - uses: actions/setup-go@v5
         with: { go-version-file: compiler/go.mod, cache: true, cache-dependency-path: compiler/go.sum }
       # No Java/ANTLR step: the generated parser (compiler/internal/parser/*.go) is committed.
@@ -158,13 +157,6 @@ jobs:
 **Triggering manually (`bin/release ci`).** The convenience trigger for the dispatch above (`tools/build/common/release_ci.go`). With no platform it dispatches **`linux-amd64` only** (the cheap default); `bin/release ci all` runs the whole matrix in one run; `bin/release ci darwin` — or `linux`/`windows`, or a canonical `<os>-<arch>` — names individual targets, and multiple names fan out to one run each. `--no-tests` sets `run_tests=false` (build-only toolchain check); `--watch` polls the dispatched run(s) to completion and **exits non-zero if CI is red** (usable as a script gate — it snapshots the latest run ID first, so it follows the run *this* dispatch creates, not a stale green one already at the same commit). Because `workflow_dispatch` can only target a branch/tag ref — never an arbitrary commit — and `actions/checkout` runs at that ref's **remote tip**, `ci` dispatches on the current branch and verifies your local HEAD **is** that pushed tip, so CI tests the commit you are on; it errors if you have not pushed (`--force` dispatches on the remote tip anyway, `--ref <branch>` picks another branch). `git`/`gh` sit behind the same interface seams as `cut`, so the tests are hermetic. (`cut` dispatches the same workflow as a release-gate side effect — §6.3; `bin/release ci` is the standalone "run CI on my commit" path.)
 
 **Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). Linux installs LLVM 22 from `apt.llvm.org` and `musl-dev`. macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — same frontend/codegen, only the backend driver differs. **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang), LLVM 22 via `choco`, with VS Build Tools (MSVC + Windows SDK) preinstalled on `windows-latest`, and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
-
-**Submodules — intentionally not checked out.** The workflow *trigger* (`on: pull_request`) has nothing to do with submodules; submodule checkout is controlled solely by `actions/checkout`'s `submodules` input, which defaults to `false`. We keep it `false` on purpose:
-- The `flow`/`flow-sdk` submodules are **not used** to build the compiler or run the gates ([build-tools.md](build-tools.md)); they back the tracker automation only.
-- `./make` **warn-skips** the flow binaries when the submodules are absent, so the bootstrap succeeds without them.
-- `flow-sdk` is hosted on an **internal host** (`ssh://hfe/…`) that GitHub-hosted runners cannot reach — `submodules: recursive` would make checkout *fail*, not help.
-
-So: leave checkout at `submodules: false` on every job. (`flow` is public on GitHub; only `flow-sdk` is unreachable — but since neither is needed for CI, don't fetch either.)
 
 ---
 

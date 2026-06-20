@@ -32,6 +32,7 @@ tools/build/winlink/lib/
 # host/clone-specific, never committed.
 .claude/settings.local.json
 CLAUDE.local.md
+.mcp.json
 
 # Wrangler (Cloudflare CLI) local state — created by `npx wrangler` during blob publishing
 .wrangler/
@@ -44,10 +45,5 @@ CLAUDE.local.md
 # deps/, manifest-*.json). Scratch — produced in CI and by local runs, never committed.
 /dist/
 
-# flow-sdk/ (tracker backend) and flow/ (OSS flow substrate) are git submodules
-# wired into the flows module via local replaces — they are NOT gitignored. See
-# .gitmodules. The flow SOURCE under flows/ IS committed.
-
-# Per-worktree flow lease + worktree-root marker (.flow/context.json, .flow/root)
+# Transient flow lease / worktree state written by the do flow when run locally.
 .flow/
-flows/do/__debug_bin*

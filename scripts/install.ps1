@@ -3,10 +3,10 @@
 # re-invokes it. Mirrors scripts/install.sh.
 #
 # Remote install (latest stable):
-#   irm https://promise-lang.org/install.ps1 | iex
+#   irm https://github.com/promise-language/promise/releases/latest/download/install.ps1 | iex
 #
 # Remote install (pinned epoch / full variant) - download then run with parameters:
-#   $s = irm https://promise-lang.org/install.ps1
+#   $s = irm https://github.com/promise-language/promise/releases/latest/download/install.ps1
 #   & ([scriptblock]::Create($s)) -Epoch 2026.0
 #   & ([scriptblock]::Create($s)) -Full
 #
@@ -114,16 +114,16 @@ function Get-Sha256Hex {
 
 # -- resolve release tag -----------------------------------------------------
 
-# T0804: remove this PROMISE_BASE_URL override when the repo goes public.
-# When PROMISE_BASE_URL is set, download the assets directly from that base URL
-# (skipping GitHub "latest" release resolution). Used by the install gate (T0803)
-# to point at the prebuilts dist bucket while the repo is still private.
+# PROMISE_BASE_URL is a TESTING override: point the installer at an alternate flat
+# asset mirror (e.g. a staged R2/dist bucket from `bin/release publish-install`)
+# instead of GitHub releases. Unset in normal use — GitHub releases are the only
+# install source for real users.
 if ($env:PROMISE_BASE_URL) {
     $BaseUrl = $env:PROMISE_BASE_URL.TrimEnd('/')
     if ($Epoch -ne "latest") {
-        Write-Warning "-Epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)"
+        Write-Warning "-Epoch is ignored under PROMISE_BASE_URL (the mirror is unversioned)"
     }
-    Write-Host "note: using PROMISE_BASE_URL override ($BaseUrl) - skipping GitHub release resolution (T0803/T0804)"
+    Write-Host "note: using PROMISE_BASE_URL testing override ($BaseUrl)"
     Write-Host "Installing Promise (windows-${Arch}) from ${BaseUrl}..."
 } else {
     if ($Epoch -eq "latest") {
@@ -136,18 +136,14 @@ if ($env:PROMISE_BASE_URL) {
             $Tag = $null
         }
         if (-not $Tag) {
-            # T0804: remove this "not launched yet" messaging once the repo is public.
-            # While https://github.com/promise-language/promise is private, the GitHub
-            # "latest release" lookup fails (404, network error, or empty body), so a
-            # missing tag almost always means Promise has not launched publicly yet
-            # rather than a problem on the user's machine. Keep the guidance generic -
-            # any resolution failure (not just a GitHub 404) lands here.
-            Write-Host "error: could not find a published Promise release." -ForegroundColor Red
+            # `releases/latest` excludes pre-releases, so this is reached when no stable
+            # epoch has been published yet (only epoch-next pre-releases exist) or the
+            # request failed (network error / rate limit). Keep the guidance generic.
+            Write-Host "error: could not find a published stable Promise release." -ForegroundColor Red
             Write-Host ""
-            Write-Host "  You don't have access to"
-            Write-Host "  https://github.com/promise-language/promise. The project is not"
-            Write-Host "  live - nothing is wrong on your end. Please try again once the"
-            Write-Host "  launch is announced."
+            Write-Host "  See https://github.com/${GitHubRepo}/releases. If only pre-releases"
+            Write-Host "  (epoch-next) are listed, install the pre-release explicitly:"
+            Write-Host "    install.ps1 -Epoch next"
             exit 1
         }
     } else {

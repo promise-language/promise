@@ -42,11 +42,49 @@ import (
 // land after the last prebuilt publish (the stale binary would otherwise fail the
 // newer tests). Local compiler/source edits stay covered by bin/verify / bin/test.
 
-// defaultInstallBaseURL is the published dist bucket the gate fetches the install
-// script + assets from while the repo is private (T0803). Overridable via
-// PROMISE_BASE_URL. T0804: once the repo is public this points at GitHub
-// releases and the override goes away.
-const defaultInstallBaseURL = "https://prebuilts.promise-lang.org/dist"
+// installGitHubRepo is the only place Promise is published — the repo is public,
+// so the gate fetches the install script + release assets straight from GitHub
+// releases. The promise-lang.org prebuilts bucket is gone (T0804); GitHub is the
+// single source of truth.
+const installGitHubRepo = "promise-language/promise"
+
+// defaultGateChannel is the release channel the install gate validates when
+// --channel is omitted: the moving `epoch-next` pre-release, which is what
+// `bin/release cut next` publishes for validation before a stable cut.
+const defaultGateChannel = "next"
+
+// validateGateChannel accepts the three --channel forms: "next" (the moving
+// pre-release), "stable" (the latest published stable epoch), or an explicit
+// "Y.N" epoch (e.g. 2026.1).
+func validateGateChannel(channel string) error {
+	if channel == "next" || channel == "stable" {
+		return nil
+	}
+	if _, err := parseEpochStr(channel); err != nil {
+		return fmt.Errorf("--channel must be next, stable, or an epoch like 2026.1 (got %q)", channel)
+	}
+	return nil
+}
+
+// gateInstallSource maps a validated --channel to the GitHub release the gate
+// installs from: the base URL the install script + assets are fetched from, and
+// the --epoch argument handed to the installer so it pulls the binary + checksums
+// from the SAME release.
+//
+//	next   → epoch-next pre-release      (installer --epoch next)
+//	stable → latest published stable     (installer --epoch latest)
+//	<Y.N>  → that specific epoch release  (installer --epoch <Y.N>)
+func gateInstallSource(channel string) (scriptBaseURL, installerEpoch string) {
+	const repoReleases = "https://github.com/" + installGitHubRepo + "/releases"
+	switch channel {
+	case "stable":
+		// `releases/latest/download/...` is GitHub's redirect to the newest NON-
+		// pre-release; `--epoch latest` makes the installer resolve the same tag.
+		return repoReleases + "/latest/download", "latest"
+	default: // "next" or an explicit "Y.N" → the epoch-<channel> release
+		return repoReleases + "/download/epoch-" + channel, channel
+	}
+}
 
 // installPhasesFor lists the gate phases recorded in phases.json for a variant,
 // in execution order. Each maps to an `install_<variant>_<phase>_ok` ∈ {0,1}
@@ -66,34 +104,44 @@ func installPhasesFor(variant string) []string {
 // and writes the structured JSON gate envelope to stdout. Phase progress goes to
 // stderr so stdout stays clean JSON.
 func runGateInstall(root string, args []string) error {
+	const usage = "usage: bin/gate install --variant {thin|full} [--channel {next|stable|<epoch>}] [--system]"
 	variant := ""
+	channel := defaultGateChannel
 	system := false
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--variant", "-variant":
+		arg := args[i]
+		switch {
+		case arg == "--variant" || arg == "-variant":
 			if i+1 >= len(args) {
-				return fmt.Errorf("usage: bin/gate install --variant {thin|full} [--system]")
+				return fmt.Errorf("%s", usage)
 			}
 			i++
 			variant = args[i]
-		case "--variant=thin", "-variant=thin":
+		case arg == "--variant=thin" || arg == "-variant=thin":
 			variant = "thin"
-		case "--variant=full", "-variant=full":
+		case arg == "--variant=full" || arg == "-variant=full":
 			variant = "full"
-		case "--system", "-system":
+		case arg == "--channel" || arg == "-channel":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s", usage)
+			}
+			i++
+			channel = args[i]
+		case strings.HasPrefix(arg, "--channel=") || strings.HasPrefix(arg, "-channel="):
+			channel = arg[strings.IndexByte(arg, '=')+1:]
+		case arg == "--system" || arg == "-system":
 			system = true
 		default:
-			return fmt.Errorf("usage: bin/gate install --variant {thin|full} [--system]")
+			return fmt.Errorf("%s", usage)
 		}
 	}
 	if variant != "thin" && variant != "full" {
 		return fmt.Errorf("bin/gate install: --variant must be thin or full")
 	}
-
-	baseURL := strings.TrimSpace(os.Getenv("PROMISE_BASE_URL"))
-	if baseURL == "" {
-		baseURL = defaultInstallBaseURL
+	if err := validateGateChannel(channel); err != nil {
+		return fmt.Errorf("bin/gate install: %w", err)
 	}
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
 	// Scratch dir for the phase artifacts (phases.json, tests.jsonl) and — in
@@ -104,8 +152,8 @@ func runGateInstall(root string, args []string) error {
 	}
 	defer os.RemoveAll(work)
 
-	fmt.Fprintf(os.Stderr, "Running install gate (variant=%s, system=%v, base-url=%s)...\n", variant, system, baseURL)
-	phaseErr := runInstallPhases(root, work, variant, baseURL, system)
+	fmt.Fprintf(os.Stderr, "Running install gate (variant=%s, system=%v, channel=%s)...\n", variant, system, channel)
+	phaseErr := runInstallPhases(root, work, variant, channel, system)
 
 	// Aggregate the phase artifacts into the standard envelope.
 	out, err := buildInstallGateOutput(hostTarget, variant, work)
@@ -141,7 +189,7 @@ func runGateInstall(root string, args []string) error {
 // failure — so a fetch/install/sanity failure still reports the later phases as
 // not-ok rather than leaving the envelope empty. Returns the first phase error,
 // or nil if every phase passed.
-func runInstallPhases(root, work, variant, baseURL string, system bool) error {
+func runInstallPhases(root, work, variant, channel string, system bool) error {
 	phases := map[string]string{}
 	for _, p := range installPhasesFor(variant) {
 		phases[p] = "fail"
@@ -203,31 +251,38 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 	promiseBin := filepath.Join(promiseHome, "bin", promiseLeaf)
 
 	// ── phase: fetch the published install script ────────────────────────────
+	// The script + assets are GitHub release assets (the repo is public;
+	// promise-lang.org is gone — GitHub is the only source). The --channel
+	// selects which release: next / stable / an explicit epoch.
+	scriptBase, installerEpoch := gateInstallSource(channel)
 	scriptPath := filepath.Join(work, installScript)
-	logf("fetching install script from %s/%s", baseURL, installScript)
-	if err := downloadFile(baseURL+"/"+installScript, scriptPath); err != nil {
+	logf("fetching install script from %s/%s", scriptBase, installScript)
+	if err := downloadFile(scriptBase+"/"+installScript, scriptPath); err != nil {
 		logf("fetch failed: %v", err)
 		return fmt.Errorf("fetch: %w", err)
 	}
 	phases["fetch"] = "pass"
 
 	// ── phase: run the installer (the one OS-specific invocation) ─────────────
-	logf("running installer (PROMISE_BASE_URL=%s variant=%s)", baseURL, variant)
+	// The installer's --epoch points it at the SAME release the script came from
+	// (the binary .gz + SHA256SUMS live there too): next/<Y.N> use that epoch tag,
+	// stable resolves the latest published epoch.
+	logf("running installer (channel=%s epoch=%s variant=%s)", channel, installerEpoch, variant)
 	var installCmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		a := []string{"-ExecutionPolicy", "Bypass", "-File", scriptPath}
+		a := []string{"-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Epoch", installerEpoch}
 		if variant == "full" {
 			a = append(a, "-Full")
 		}
 		installCmd = exec.Command("powershell", a...)
 	} else {
-		a := []string{scriptPath}
+		a := []string{scriptPath, "--epoch", installerEpoch}
 		if variant == "full" {
 			a = append(a, "--full")
 		}
 		installCmd = exec.Command("sh", a...)
 	}
-	installCmd.Env = envWith(baseEnv, map[string]string{"PROMISE_BASE_URL": baseURL})
+	installCmd.Env = baseEnv
 	installCmd.Stdout = os.Stderr
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {

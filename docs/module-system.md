@@ -585,7 +585,7 @@ This means you can work on multiple projects targeting different epochs without 
 
 ```bash
 # Install Promise for the first time — downloads a single self-contained binary
-curl -sSf https://promise-lang.org/install.sh | sh
+curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
 
 # The binary includes everything: compiler, std, catalog, LLVM tools
 # No `promise sync` needed on first install
@@ -1202,7 +1202,7 @@ This section documents end-to-end workflows for the three primary personas inter
 
 ```bash
 # Download and install Promise (self-contained ~61MB binary)
-curl -sSf https://promise-lang.org/install.sh | sh
+curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
 
 # The install script places the binary at ~/.promise/bin/promise
 # and adds it to PATH. The binary embeds:

@@ -285,11 +285,13 @@ Notes:
 
 ---
 
-## 5a. End-to-end install gate staging (temporary, private-repo phase — T0803/T0804)
+## 5a. End-to-end install gate
 
-The end-to-end install gate (`bin/gate install --variant {thin|full}`, [gate-system.md](gate-system.md) §Class 3) validates the **real** user install path: it fetches the published install script, runs it (download → verify checksum → decompress → `promise install`), sanity-checks the install, then runs the full test suite through the freshly **installed** distribution. While the repo is private, GitHub "latest" resolution is broken (the API resolves to a `deps-llvm-*` blob release), so the gate points `PROMISE_BASE_URL` at a temporary **prebuilts dist bucket** — `https://prebuilts.promise-lang.org/dist`.
+The end-to-end install gate (`bin/gate install --variant {thin|full} [--channel {next|stable|<epoch>}]`, [gate-system.md](gate-system.md) §Class 3) validates the **real** user install path: it fetches the published install script from a GitHub release, runs it (download → verify checksum → decompress → `promise install`), sanity-checks the install, then runs the full test suite through the freshly **installed** distribution. The repo is public, so the gate installs straight from GitHub releases — `--channel` selects which: **next** (the moving `epoch-next` pre-release, default), **stable** (the latest published epoch), or an explicit **`Y.N`** epoch. This lets the same gate validate both the pre-release before a stable cut and the stable release after it. The gate never sets `PROMISE_BASE_URL` — GitHub is its only source (T0804 done; the `prebuilts.promise-lang.org` install bucket is gone). The installer **scripts** still honor `PROMISE_BASE_URL` as a manual **testing** override (point an install at a staged mirror), but it is unset for real users and unused by the gate.
 
-`bin/release publish-install` stages that bucket. For the host platform it:
+> **No longer on the install path.** The install gate now fetches from GitHub releases (above), so `bin/release publish-install` is **not** part of release validation anymore. It is retained as a manual **staging/testing** tool for an R2/dist bucket (handy for exercising the install flow against a private mirror). The former `scripts/early-access/*` installers, which served that bucket during the private-repo phase, have been removed.
+
+`bin/release publish-install` stages an R2/dist bucket. For the host platform it:
 
 1. projects the runtime manifest from the catalog (`manifest-<host>.json`),
 2. builds the **thin** and **full** compiler variants (reusing `bin/release build`'s three-phase logic). The **full** variant embeds the already-brotli `<sha>.br` blobs fetched from the dist CAS *directly* — byte-identical to the CAS asset, no gzip recompress round trip (T0807); the runtime brotli-decompresses them into the CAS at `promise install` (`decompressEmbeddedLLVM`),
@@ -308,7 +310,7 @@ bin/release publish-install --host windows-amd64 --out dist
 
 Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `prebuilts`, `""` disables upload), `--dry-run` / `--no-upload` (build + stage but skip upload). Host-only for now (cross-build gated on T0524) — the maintainer runs it on each platform, like `publish-blobs`.
 
-**T0804 removes this** when the repo goes public: once anonymous "latest" resolution works, the gate fetches straight from GitHub releases and `publish-install` + the `PROMISE_BASE_URL` override are obsolete.
+**T0804 is done:** the repo is public and the gate fetches straight from GitHub releases via `--channel`. `publish-install` + the install scripts' `PROMISE_BASE_URL` override are no longer used by the gate, but are kept as a manual R2-staging/testing path (stage a bucket, then install from it with `PROMISE_BASE_URL=<mirror> install.sh`).
 
 ---
 

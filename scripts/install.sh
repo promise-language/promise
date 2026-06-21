@@ -2,10 +2,10 @@
 # Promise language installer - for end users downloading a release binary.
 #
 # Remote install (latest stable):
-#   curl -sSf https://promise-lang.org/install.sh | sh
+#   curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
 #
 # Remote install (pinned epoch):
-#   curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
+#   curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh -s -- --epoch 2026.0
 #
 # Local install (from this repo, after building locally):
 #   bin/install.sh
@@ -89,8 +89,8 @@ resolve_latest() {
   API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
   # -f fails (empty body, nonzero exit) on any HTTP error; we deliberately drop
   # curl's -S so it does NOT print "curl: (22) ... 404" - an empty TAG is handled
-  # by the generic "not launched yet" message below, which covers a 404, a network
-  # error, or an empty body uniformly (T0804). Same intent for wget's -q.
+  # by the generic "no published stable release" message below, which covers a
+  # 404, a network error, or an empty body uniformly. Same intent for wget's -q.
   if command -v curl >/dev/null 2>&1; then
     curl -sf "$API_URL"
   elif command -v wget >/dev/null 2>&1; then
@@ -101,34 +101,30 @@ resolve_latest() {
   fi | grep '"tag_name"' | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
 }
 
-# T0804: remove this PROMISE_BASE_URL override when the repo goes public.
-# When PROMISE_BASE_URL is set, download the assets directly from that base URL
-# (skipping GitHub "latest" release resolution). Used by the install gate (T0803)
-# to point at the prebuilts dist bucket while the repo is still private.
+# PROMISE_BASE_URL is a TESTING override: point the installer at an alternate
+# flat asset mirror (e.g. a staged R2/dist bucket from `bin/release
+# publish-install`) instead of GitHub releases. Unset in normal use — GitHub
+# releases are the only install source for real users.
 if [ -n "${PROMISE_BASE_URL:-}" ]; then
   BASE_URL="${PROMISE_BASE_URL%/}"
   if [ "$EPOCH" != "latest" ]; then
-    echo "note: --epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)" >&2
+    echo "note: --epoch is ignored under PROMISE_BASE_URL (the mirror is unversioned)" >&2
   fi
-  echo "note: using PROMISE_BASE_URL override ($BASE_URL) - skipping GitHub release resolution (T0803/T0804)" >&2
+  echo "note: using PROMISE_BASE_URL testing override ($BASE_URL)" >&2
   echo "Installing Promise (${PLATFORM}-${ARCH}) from ${BASE_URL}..."
 else
   if [ "$EPOCH" = "latest" ]; then
     echo "Fetching latest release..."
     TAG=$(resolve_latest)
     if [ -z "$TAG" ]; then
-      # T0804: remove this "not launched yet" messaging once the repo is public.
-      # While https://github.com/promise-language/promise is private, the GitHub
-      # "latest release" lookup fails (404, network error, or empty body), so a
-      # missing TAG almost always means Promise has not launched publicly yet
-      # rather than a problem on the user's machine. Keep the guidance generic -
-      # any resolution failure (not just a GitHub 404) lands here.
-      echo "error: could not find a published Promise release." >&2
+      # `releases/latest` excludes pre-releases, so this is reached when no stable
+      # epoch has been published yet (only epoch-next pre-releases exist) or the
+      # request failed (network error / rate limit). Keep the guidance generic.
+      echo "error: could not find a published stable Promise release." >&2
       echo "" >&2
-      echo "  You don't have access to" >&2
-      echo "  https://github.com/promise-language/promise. The project is not" >&2
-      echo "  live - nothing is wrong on your end. Please try again once the" >&2
-      echo "  launch is announced." >&2
+      echo "  See https://github.com/${GITHUB_REPO}/releases. If only pre-releases" >&2
+      echo "  (epoch-next) are listed, install the pre-release explicitly:" >&2
+      echo "    install.sh --epoch next" >&2
       exit 1
     fi
   else

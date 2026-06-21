@@ -141,10 +141,12 @@ func TestRunGateInstallRejectsBadVariant(t *testing.T) {
 		nil,
 		{"--variant", "bogus"},
 		{"--system"},
-		{"--variant"},                    // dangling flag, no value
-		{"-variant"},                     // dash-form dangling, no value
-		{"--bogus"},                      // unknown flag
-		{"--variant", "thin", "--extra"}, // valid variant but trailing junk
+		{"--variant"},                           // dangling flag, no value
+		{"-variant"},                            // dash-form dangling, no value
+		{"--bogus"},                             // unknown flag
+		{"--variant", "thin", "--extra"},        // valid variant but trailing junk
+		{"--variant", "thin", "--channel"},      // dangling --channel, no value
+		{"--variant", "thin", "--channel", "x"}, // invalid channel value
 	}
 	for _, args := range bad {
 		if err := runGateInstall(root, args); err == nil {
@@ -384,5 +386,43 @@ func TestInstallPhasesFor(t *testing.T) {
 	}
 	if got := strings.Join(installPhasesFor("full"), ","); got != "fetch,install,sanity,test,offline" {
 		t.Errorf("full phases = %q, want fetch,install,sanity,test,offline", got)
+	}
+}
+
+func TestGateInstallSource(t *testing.T) {
+	// The gate installs from GitHub releases only (promise-lang.org is gone). Each
+	// --channel maps to a script-base URL + the installer's --epoch argument.
+	const releases = "https://github.com/promise-language/promise/releases"
+	cases := []struct {
+		channel   string
+		wantBase  string
+		wantEpoch string
+	}{
+		{"next", releases + "/download/epoch-next", "next"},
+		{"stable", releases + "/latest/download", "latest"},
+		{"2026.1", releases + "/download/epoch-2026.1", "2026.1"},
+	}
+	for _, tc := range cases {
+		base, epoch := gateInstallSource(tc.channel)
+		if base != tc.wantBase || epoch != tc.wantEpoch {
+			t.Errorf("gateInstallSource(%q) = (%q, %q), want (%q, %q)", tc.channel, base, epoch, tc.wantBase, tc.wantEpoch)
+		}
+	}
+	// The gate defaults to the moving epoch-next pre-release.
+	if defaultGateChannel != "next" {
+		t.Errorf("defaultGateChannel = %q, want next", defaultGateChannel)
+	}
+}
+
+func TestValidateGateChannel(t *testing.T) {
+	for _, ok := range []string{"next", "stable", "2026.0", "2026.12", "2027.1"} {
+		if err := validateGateChannel(ok); err != nil {
+			t.Errorf("validateGateChannel(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "latest", "2026", "v2026.1", "next-week", "2026.x"} {
+		if err := validateGateChannel(bad); err == nil {
+			t.Errorf("validateGateChannel(%q) = nil, want error", bad)
+		}
 	}
 }

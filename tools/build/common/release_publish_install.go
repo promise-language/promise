@@ -13,17 +13,16 @@ import (
 // TEMPORARY private-repo staging helper for the end-to-end install gate (T0803).
 // It builds the host's thin + full compiler variants, gzips them to the
 // published asset names, computes a (multi-host-merge-aware) SHA256SUMS over the
-// `.gz` assets, and uploads the assets + the install scripts to the prebuilts R2
-// bucket under a `dist/` prefix (the same wrangler mechanism `publish-blobs`
-// uses). The install gate then points PROMISE_BASE_URL at
-// https://prebuilts.promise-lang.org/dist.
+// `.gz` assets, and uploads the assets + the install scripts to an R2 bucket
+// under a `dist/` prefix (the same wrangler mechanism `publish-blobs` uses).
 //
-// T0804: remove this subcommand when the repo goes public — once "latest"
-// release resolution works against the public repo, the gate downloads straight
-// from GitHub releases and this dist-bucket staging path is obsolete.
+// This is a manual TESTING/staging path, not part of release validation: the
+// install gate now installs straight from GitHub releases (T0804). To test a
+// staged bucket, install from it with `PROMISE_BASE_URL=<mirror>/dist install.sh`
+// (the install scripts honor that override; see scripts/install.sh).
 
-// installDistPrefix is the R2 key prefix the dist assets live under. The gate's
-// PROMISE_BASE_URL (https://prebuilts.promise-lang.org/dist) resolves to it.
+// installDistPrefix is the R2 key prefix the dist assets live under. Installing
+// from the staged bucket points the install scripts' PROMISE_BASE_URL at it.
 const installDistPrefix = "dist"
 
 // installAssetName returns the published gzip asset name for a target+variant,

@@ -8913,6 +8913,62 @@ func TestParenDiscardReceiverEmitsAliasCheck(t *testing.T) {
 	assertContains(t, ir, "recv.alias.skip")
 }
 
+// T1029: a discarded free-function call whose result aliases an owned-local arg
+// must clear the RESULT TEMP's drop flag (discard.alias.clear), leaving the source
+// local's drop flag armed so the aliased allocation is freed once at scope exit.
+// Before the fix the source local's flag was cleared and the temp was freed at
+// statement end → the still-live local dangled (use-after-free).
+func TestDiscardedAliasArgClearsTempNotSource(t *testing.T) {
+	ir := generateIR(t, `
+		type Node { int v; }
+		ident_node(Node n) Node { return n; }
+		run() int { n := Node(v: 5); ident_node(n); return n.v; }
+		main() { x := run(); }
+	`)
+	body := extractFunction(ir, "__user.run")
+	// The result temp is cleared on the alias path.
+	assertContains(t, body, "discard.alias.clear")
+	assertContains(t, body, "discard.alias.skip")
+	// The source local's drop flag must NOT be cleared inside the discarded call —
+	// the local remains the single owner.
+	assertNotContains(t, body, "store i1 false, i1* %n.dropflag")
+}
+
+// T1029 non-regression: the assignment form `x = f(n)` transfers ownership to the
+// new variable and must keep clearing the SOURCE (alias.clear), never emitting the
+// discarded-statement temp-clear path (discard.alias.*).
+func TestAssignedAliasDoesNotUseDiscardPath(t *testing.T) {
+	ir := generateIR(t, `
+		type Node { int v; }
+		ident_node(Node n) Node { return n; }
+		run() int { n := Node(v: 5); x := ident_node(n); return x.v; }
+		main() { y := run(); }
+	`)
+	body := extractFunction(ir, "__user.run")
+	assertContains(t, body, "alias.clear")
+	assertNotContains(t, body, "discard.alias.clear")
+}
+
+// T1029: the i8* result path (vector/string) in genExpr — distinct from the
+// heap-user-type path in trackHeapUserTypeResult — must also emit the result-temp
+// clear (discard.alias.clear) for a discarded call whose i8* result aliases an
+// owned-local arg, so the source local stays the single owner.
+func TestDiscardedAliasArgClearsTempI8PtrPath(t *testing.T) {
+	ir := generateIR(t, `
+		ident_vec(int[] v) int[] { return v; }
+		ident_str(string s) string { return s; }
+		run_vec() int { xs := [1, 2]; xs.push(3); ident_vec(xs); return xs.len; }
+		run_str() int { a := "hi"; s := a + "!"; ident_str(s); return s.len; }
+		main() { x := run_vec(); y := run_str(); }
+	`)
+	vec := extractFunction(ir, "__user.run_vec")
+	assertContains(t, vec, "discard.alias.clear")
+	assertContains(t, vec, "discard.alias.skip")
+	str := extractFunction(ir, "__user.run_str")
+	assertContains(t, str, "discard.alias.clear")
+	assertContains(t, str, "discard.alias.skip")
+}
+
 // T0582: `return (this);` from a value-type method must take the value-type
 // branch of wrapThisReturnValue (bitcast i8* to value-struct pointer + load),
 // not emit a bare `ret i8* %0` against the value-struct return type.

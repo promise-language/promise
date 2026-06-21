@@ -518,6 +518,19 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 	if block == nil {
 		return nil
 	}
+	// T1029: a block value (if/match/handler arm body) is its own straight-line
+	// region nested inside the discarded expression — it is not the discarded
+	// top-level call. Clear discardedExpr so alias-arg pointers are not recorded in
+	// non-dominating branch blocks (which would produce invalid IR at the clear
+	// site). Inner ExprStmts set their own discardedExpr as usual.
+	prevDiscard := c.discardedExpr
+	prevArgPtrs := c.discardAliasArgPtrs
+	c.discardedExpr = nil
+	c.discardAliasArgPtrs = nil
+	defer func() {
+		c.discardedExpr = prevDiscard
+		c.discardAliasArgPtrs = prevArgPtrs
+	}()
 	savedScopeLen := len(c.scopeBindings)
 	var result value.Value
 	n := len(block.Stmts)
@@ -617,22 +630,28 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		if c.info.AutoPropagateExprs[s.Expr] {
 			c.genAutoPropagate(s.Expr)
 		} else {
-			// T1017: mark the top-level discarded call so its OWN return-alias check
-			// records (rather than clears) any live-local args the result may alias.
-			// Only the top-level call is special: nested calls whose results are
-			// consumed within this statement (e.g. `assert(x.unwrap_or(d) == ...)`)
-			// must keep the normal arg-flag-clear, or their aliasing returns would
-			// be double-freed. Save/restore across the (possibly nested) genExpr so
-			// a sub-expression that itself contains discarded statements keeps its
-			// own state without corrupting this statement's.
-			savedTopCall := c.discardedTopCall
-			savedAliasPtrs := c.discardAliasArgPtrs
-			c.discardedTopCall = s.Expr
+			// T1029/T1017: mark the discarded expression so a call returning a value
+			// that aliases an owned-local arg keeps the source local as the single
+			// owner (freed once at scope exit), instead of freeing the result temp at
+			// statement end while the local is still live (use-after-free).
+			// emitReturnAliasCheckSubst suppresses the source drop-flag clear and
+			// records the aliased arg pointers; the result temp's flag is cleared
+			// instead — via emitDiscardAliasClears at the tracking site (heap user
+			// types in trackHeapUserTypeResult, and the i8* stmtTemp path in genExpr's
+			// CallExpr case), plus clearDiscardedAliasTempFlag below for the top-level
+			// stmtTemp result (T1017's vector/string discard path). Each clear is a
+			// runtime pointer compare, so only temps that genuinely alias a recorded
+			// arg are neutralized. Save/restore across the (possibly nested) genExpr so
+			// a sub-expression that itself contains discarded statements keeps its own
+			// state without corrupting this statement's.
+			prevDiscard := c.discardedExpr
+			prevArgPtrs := c.discardAliasArgPtrs
+			c.discardedExpr = unwrapDestructureParens(s.Expr)
 			c.discardAliasArgPtrs = nil
 			discardedResult = c.genExpr(s.Expr)
 			recorded := c.discardAliasArgPtrs
-			c.discardedTopCall = savedTopCall
-			c.discardAliasArgPtrs = savedAliasPtrs
+			c.discardedExpr = prevDiscard
+			c.discardAliasArgPtrs = prevArgPtrs
 			c.clearDiscardedAliasTempFlag(discardedResult, recorded)
 		}
 		c.goExprFireAndForget = false
@@ -2223,17 +2242,19 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 				continue
 			}
 
-			// T1017: when THIS call is the top-level expression of a discarded
-			// statement (`sort(xs);`), clearing the live local's drop flag here
-			// would leave the result temp as the sole owner — but that temp is
-			// dropped at statement end, freeing the buffer while the local is still
-			// live (use-after-free). Instead, keep the local as the owner and record
-			// its pointer; the ExprStmt case clears the *result temp's* flag, so the
-			// aliased buffer is dropped exactly once (at scope exit, via the local).
-			// Only the top-level call is redirected — a nested call whose aliasing
-			// result is consumed within the statement keeps the normal clear below,
-			// otherwise its result would be double-freed.
-			if callExpr != nil && callExpr == c.discardedTopCall {
+			// T1029/T1017: inside a discarded statement, the source local outlives
+			// the statement and must remain the single owner of an aliased allocation.
+			// Suppress the source drop-flag clear and record the arg's instance
+			// pointer; the result temp's flag is cleared instead — via
+			// emitDiscardAliasClears at the tracking site (heap user types and the i8*
+			// stmtTemp path) and clearDiscardedAliasTempFlag for the top-level result
+			// temp — so the allocation is freed once at scope exit (after the local's
+			// later uses) rather than at statement end (use-after-free). Each clear is
+			// a runtime pointer compare, so a nested call whose aliasing result is
+			// consumed within the statement (e.g. `assert(ident(xs)[0] == ...)`) keeps
+			// the source alive while its temp, which aliases the same allocation, is
+			// neutralized — no double-free, no leak.
+			if c.discardedExpr != nil {
 				c.discardAliasArgPtrs = append(c.discardAliasArgPtrs, argPtr)
 				continue
 			}
@@ -6106,6 +6127,19 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	c.trackHeapTemp(instancePtr, dropFunc)
 	if len(c.heapTemps) > beforeLen {
 		dropFlag := c.heapTemps[beforeLen].dropFlag
+		// T1029: when a heap-user-type value produced anywhere inside the discarded
+		// statement (the outer result OR an inner sub-call result) aliases an
+		// owned-local arg whose source-clear was suppressed, clear this temp so the
+		// source local stays sole owner (freed once at scope exit). Using
+		// discardedExpr != nil (not expr == discardedExpr) covers sibling sub-calls
+		// whose result is not propagated to the discarded result — e.g.
+		// `combine(a, ident(b))` returning `a`: the `ident(b)` temp aliases `b` but
+		// is dropped by `combine`, so it must be neutralized here, not left armed.
+		// emitDiscardAliasClears only clears on a runtime pointer match, so genuinely
+		// fresh temps stay armed and are freed at statement end.
+		if c.discardedExpr != nil && len(c.discardAliasArgPtrs) > 0 {
+			c.emitDiscardAliasClears(instancePtr, dropFlag)
+		}
 		if innerCall := findInnerCallExpr(expr); innerCall != nil {
 			c.emitReceiverAliasCheck(innerCall, instancePtr, dropFlag)
 		} else if origin := operatorReceiverOrigin(expr); origin != nil {
@@ -6199,6 +6233,35 @@ func (c *Compiler) emitReceiverAliasCheckForTarget(target ast.Expr, newTempInsta
 	c.block.NewStore(constant.NewInt(irtypes.I1, 0), newTempDropFlag)
 	c.block.NewBr(skipBlk)
 	c.block = skipBlk
+}
+
+// emitDiscardAliasClears clears the result temp's drop flag at runtime when the
+// result instance pointer equals any owned-local arg pointer whose source-flag
+// clear was suppressed in the current discarded statement (T1029). This keeps the
+// source local as the single owner of an aliased allocation, so it is freed once at
+// scope exit (after the local's later uses) instead of at statement end via the
+// temp cleanup (which would dangle the still-live local). instPtr and each recorded
+// argPtr are i8* instance pointers.
+func (c *Compiler) emitDiscardAliasClears(instPtr value.Value, dropFlag value.Value) {
+	if instPtr == nil || dropFlag == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if instPtr.Type() != irtypes.I8Ptr {
+		return
+	}
+	for _, argPtr := range c.discardAliasArgPtrs {
+		if argPtr == nil || argPtr.Type() != irtypes.I8Ptr {
+			continue
+		}
+		same := c.block.NewICmp(enum.IPredEQ, instPtr, argPtr)
+		clearBlk := c.newBlock("discard.alias.clear")
+		skipBlk := c.newBlock("discard.alias.skip")
+		c.block.NewCondBr(same, clearBlk, skipBlk)
+		c.block = clearBlk
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+		c.block.NewBr(skipBlk)
+		c.block = skipBlk
+	}
 }
 
 // hasStructuralParam returns true if any parameter of sig is a structural interface (T0092).

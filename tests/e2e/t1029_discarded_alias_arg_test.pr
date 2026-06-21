@@ -1,0 +1,214 @@
+// T1029: A discarded call whose result aliases an owned-local arg must keep the
+// source local as the single owner — the aliased allocation is freed once at scope
+// exit (after the local's later uses), not at statement end while the local is
+// still live (which was a use-after-free / double-free).
+type Node {
+  int v;
+}
+type DropNode {
+  int v;
+  drop(~this) {
+  }
+}
+
+ident_node(Node n) Node {
+  return n;
+}
+ident_drop(DropNode n) DropNode {
+  return n;
+}
+fresh_node(Node n) Node {
+  return Node(v: n.v + 100);
+}
+pick_node(Node a, Node b, bool first) Node {
+  if first {
+    return a;
+  }
+  return b;
+}
+outer_node(Node n) Node {
+  return n;
+}
+deep_node(Node n) Node {
+  return ident_node(ident_node(n));
+}
+combine_first(Node a, Node b) Node {
+  return a;
+}
+combine_second(Node a, Node b) Node {
+  return b;
+}
+ident_vec(int[] v) int[] {
+  return v;
+}
+ident_str(string s) string {
+  return s;
+}
+
+type Box {
+  int b;
+  echo(this, Node n) Node {
+    return n;
+  }
+}
+
+// Core case: discarded call returning a single heap user-type value aliasing the arg.
+discarded_heap_user_type() `test {
+  Node n = Node(v: 5);
+  ident_node(n);
+  assert(n.v == 5, "heap user type alias survives");
+}
+
+// Same with an explicit drop(~this) — exercises the user drop path, not just pal_free.
+discarded_heap_user_type_with_drop() `test {
+  DropNode n = DropNode(v: 7);
+  ident_drop(n);
+  assert(n.v == 7, "drop-type alias survives");
+}
+
+// Non-aliasing: result is a fresh value; the source local must NOT be cleared and
+// the fresh result must be freed at statement end (no leak, no use-after-free).
+discarded_non_aliasing() `test {
+  Node n = Node(v: 5);
+  fresh_node(n);
+  assert(n.v == 5, "source untouched by fresh result");
+}
+
+// Conditional return — both branches; the aliased local stays owner regardless.
+discarded_conditional_first() `test {
+  Node a = Node(v: 1);
+  Node b = Node(v: 2);
+  pick_node(a, b, true);
+  assert(a.v == 1 && b.v == 2, "pick first");
+}
+
+discarded_conditional_second() `test {
+  Node a = Node(v: 1);
+  Node b = Node(v: 2);
+  pick_node(a, b, false);
+  assert(a.v == 1 && b.v == 2, "pick second");
+}
+
+// Nested discarded call: outer(inner(n)) — inner aliases n, outer returns it.
+// Only the source local n owns; both result temps must be neutralized.
+nested_discarded_call() `test {
+  Node n = Node(v: 9);
+  outer_node(ident_node(n));
+  assert(n.v == 9, "nested alias survives");
+}
+
+// Deeper nesting via a helper that itself nests.
+deep_nested_discarded_call() `test {
+  Node n = Node(v: 11);
+  deep_node(n);
+  assert(n.v == 11, "deep nested alias survives");
+}
+
+// Method-call argument: receiver returns one of its args.
+discarded_method_arg() `test {
+  Node n = Node(v: 13);
+  Box b = Box(b: 1);
+  b.echo(n);
+  assert(n.v == 13, "method arg alias survives");
+}
+
+// Heap vector (built via push, so not a static/literal buffer).
+discarded_heap_vector() `test {
+  int[] xs = [];
+  xs.push(1);
+  xs.push(2);
+  xs.push(3);
+  ident_vec(xs);
+  assert(xs.len == 3, "heap vector alias survives");
+}
+
+// Heap string (built via concatenation, so not a .rodata literal).
+discarded_heap_string() `test {
+  string a = "hello";
+  string s = a + " world";
+  ident_str(s);
+  assert(s.len == 11, "heap string alias survives");
+}
+
+// Discard inside a loop — the local is aliased every iteration but must stay alive.
+discarded_in_loop() `test {
+  Node n = Node(v: 3);
+  int i = 0;
+  while i < 5 {
+    ident_node(n);
+    i = i + 1;
+  }
+  assert(n.v == 3, "loop alias survives");
+}
+
+// Non-regression: the assignment form (`x = f(n)`) still transfers ownership to x
+// and clears n; both must reference the same value and not double-free.
+assigned_alias_transfers_ownership() `test {
+  Node n = Node(v: 17);
+  Node x = ident_node(n);
+  assert(x.v == 17, "assigned alias ok");
+}
+
+// Non-regression: a discarded call on a freshly constructed value (no surviving
+// local) must free its result at statement end (no leak).
+discarded_fresh_value() `test {
+  ident_node(Node(v: 21));
+  assert(true, "fresh discarded value freed");
+}
+
+// Sibling sub-call aliasing: `combine` returns its FIRST arg, so the `ident(b)`
+// sub-result aliases `b` but is dropped by `combine` (not propagated). Its temp
+// must be neutralized so `b` stays the single owner — otherwise both the source
+// local and the dropped temp free `b` (invalid free). Regression for the
+// outermost-only temp-clear (must clear inner sibling temps too).
+discarded_sibling_first() `test {
+  Node a = Node(v: 1);
+  Node b = Node(v: 2);
+  combine_first(a, ident_node(b));
+  assert(a.v == 1 && b.v == 2, "sibling first survives");
+}
+
+// Same, but the discarded result aliases the SECOND arg.
+discarded_sibling_second() `test {
+  Node a = Node(v: 1);
+  Node b = Node(v: 2);
+  combine_second(ident_node(a), b);
+  assert(a.v == 1 && b.v == 2, "sibling second survives");
+}
+
+// Both args are aliasing sub-calls and the result aliases neither (picks first via
+// flag, both temps + the result temp must all be neutralized against their source).
+discarded_both_siblings() `test {
+  Node a = Node(v: 1);
+  Node b = Node(v: 2);
+  pick_node(ident_node(a), ident_node(b), true);
+  assert(a.v == 1 && b.v == 2, "both siblings survive");
+}
+
+// Discarded IF-EXPRESSION: each arm calls an aliasing function. The arm bodies are
+// non-dominating block-value regions, so the discard-alias marker must NOT leak
+// into them (they take the ordinary alias path). Source locals stay alive.
+discarded_if_expr_arms() `test {
+  Node a = Node(v: 1);
+  Node b = Node(v: 2);
+  if true {
+    ident_node(a);
+  } else {
+    ident_node(b);
+  }
+  assert(a.v == 1 && b.v == 2, "if-expr arms survive");
+}
+
+// Discarded go-block: the GoExpr is the discarded statement, but its coroutine body
+// is a separate function — the discard-alias marker must NOT leak in, so an internal
+// `x = ident(m)` assignment transfers ownership normally (no double free).
+discarded_go_block_internal_alias() `test {
+  channel[int] ch = channel[int](1);
+  go {
+    Node m = Node(v: 7);
+    Node x = ident_node(m);
+    ch.send(x.v);
+  };
+  int got = (<-ch)!;
+  assert(got == 7, "go-block internal alias ok");
+}

@@ -143,6 +143,18 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		} else {
 			c.trackHeapUserTypeResult(e, result)
 		}
+		// T1029: an i8* result (string/vector/channel temp) produced anywhere inside
+		// the discarded statement that aliases an owned-local arg — clear the
+		// just-tracked result temp so the source local remains sole owner (freed once
+		// at scope exit, not at statement end while still live). Uses discardedExpr
+		// != nil (not e == discardedExpr) so sibling sub-call temps not propagated to
+		// the discarded result are neutralized too. The heap-user-type case is
+		// handled inside trackHeapUserTypeResult where the temp's SSA key is in hand.
+		if c.discardedExpr != nil && len(c.discardAliasArgPtrs) > 0 && result != nil && result.Type() == irtypes.I8Ptr {
+			if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
+				c.emitDiscardAliasClears(result, c.stmtTemps[idx].dropFlag)
+			}
+		}
 		return result
 	case *ast.MemberExpr:
 		return c.genMemberExpr(e)
@@ -10600,12 +10612,16 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedInCoroutine := c.inCoroutine                   // T0285: lambda is a separate function, not a coroutine
 	savedCoroCleanup := c.coroCleanupBlk                // T0285: save coroutine blocks
 	savedCoroSuspend := c.coroSuspendBlk                // T0285: save coroutine blocks
+	savedDiscardedExpr := c.discardedExpr               // T1029: lambda body is not the discarded statement
+	savedDiscardAliasArgPtrs := c.discardAliasArgPtrs   // T1029
 	c.goExprFireAndForget = false                       // reset for inner statements (B0109)
 	c.panicExitBlock = nil                              // T0262: lambda is a separate function
 	c.coroutineReturnBlock = nil                        // T0262: lambda is a separate function
 	c.inCoroutine = false                               // T0285: lambda is not a coroutine
 	c.coroCleanupBlk = nil                              // T0285: no coroutine infrastructure
 	c.coroSuspendBlk = nil                              // T0285: no coroutine infrastructure
+	c.discardedExpr = nil                               // T1029: inner ExprStmts set their own
+	c.discardAliasArgPtrs = nil                         // T1029
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -10748,6 +10764,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.inCoroutine = savedInCoroutine                   // T0285
 	c.coroCleanupBlk = savedCoroCleanup                // T0285
 	c.coroSuspendBlk = savedCoroSuspend                // T0285
+	c.discardedExpr = savedDiscardedExpr               // T1029
+	c.discardAliasArgPtrs = savedDiscardAliasArgPtrs   // T1029
 
 	// T0100: Track env temp for non-variable lambdas. If this lambda is
 	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the
@@ -14389,7 +14407,11 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedEnvTemps := c.envTemps                       // T0739: isolate coro-body closure env temps from the outer fn
 	savedEnvTempMap := c.envTempMap                   // T0739
 	savedBorrowedValueParams := c.borrowedValueParams // T0945
+	savedDiscardedExpr := c.discardedExpr             // T1029: coro body is not the discarded statement
+	savedDiscardAliasArgPtrs := c.discardAliasArgPtrs // T1029
 	c.goExprFireAndForget = false                     // reset for inner statements (B0109)
+	c.discardedExpr = nil                             // T1029: inner ExprStmts set their own
+	c.discardAliasArgPtrs = nil                       // T1029
 
 	// T0683: Only a non-void, awaited (`<-task`) block needs its trailing
 	// value stored into G.result_ptr. A void block has no value; a
@@ -14676,6 +14698,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
 	c.borrowedValueParams = savedBorrowedValueParams // T0945
+	c.discardedExpr = savedDiscardedExpr             // T1029
+	c.discardAliasArgPtrs = savedDiscardAliasArgPtrs // T1029
 	c.localNameCount = savedLocalNameCount           // T0261
 	c.enumCtorTemps = savedEnumCtorTemps             // B0267
 	if useGoBlockValuePath {

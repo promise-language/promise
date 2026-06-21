@@ -213,6 +213,20 @@ type Compiler struct {
 	// after maybeRegisterDrop has stored i1 1 into the new binding's drop flag.
 	pendingThisAliasClear *thisAliasClearReq
 
+	// T1029: discarded-statement aliasing. discardedExpr is the outermost expression
+	// of the current discarded ExprStmt (nil otherwise). When a call within a
+	// discarded statement returns a value aliasing an owned-local ident arg, the
+	// source local — not the result temp — must remain the single owner (it outlives
+	// the statement). emitReturnAliasCheckSubst suppresses the source drop-flag clear
+	// and records the arg's instance pointer in discardAliasArgPtrs; the result
+	// temp's flag is cleared instead at the tracking site (emitDiscardAliasClears),
+	// so the aliased allocation is freed once at scope exit rather than at statement
+	// end (use-after-free). Cleared in nested-body contexts (genLambdaExpr,
+	// genBlockValue, saveState) so only the discarded statement's own straight-line
+	// expression records pointers.
+	discardedExpr       ast.Expr
+	discardAliasArgPtrs []value.Value
+
 	// T0100: Statement-level tracking for closure env pointers.
 	// Tracks env structs from lambda expressions passed directly as function
 	// arguments (not stored in variables). Unclaimed envs are freed at statement end.
@@ -389,8 +403,6 @@ type Compiler struct {
 	coroutineReturnBlock *ir.Block     // B0353: if set, goroutine return branches here instead of ret
 	inCoroutine          bool          // true when compiling inside a go block coroutine body
 	goExprFireAndForget  bool          // true when go expr result is discarded (no <-task receiver)
-	discardedTopCall     ast.Expr      // T1017: the top-level call expression of a discarded ExprStmt (`sort(xs);`). Only that call's own return-alias check is redirected; nested calls whose results are consumed within the statement keep normal behavior to avoid double-frees.
-	discardAliasArgPtrs  []value.Value // T1017: live-local arg pointers the discarded top-level call's return value may alias (recorded by emitReturnAliasCheckSubst, consumed by the ExprStmt case)
 	elvisResultConsumed  bool          // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
 	elvisResultBound     bool          // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
 	elvisBoundDropFlag   value.Value   // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
@@ -10372,6 +10384,8 @@ type compilerState struct {
 	thisRecvIsOwned      bool            // T0428: true when current method has ~this receiver
 	currentOpValueParams map[string]bool // T0897: borrowed value params of the current operator
 	borrowedValueParams  map[string]bool // T0945: borrowed value params of the current function/method
+	discardedExpr        ast.Expr        // T1029
+	discardAliasArgPtrs  []value.Value   // T1029
 }
 
 func (c *Compiler) saveState() compilerState {
@@ -10409,7 +10423,13 @@ func (c *Compiler) saveState() compilerState {
 		thisRecvIsOwned:      c.thisRecvIsOwned,
 		currentOpValueParams: c.currentOpValueParams,
 		borrowedValueParams:  c.borrowedValueParams,
+		discardedExpr:        c.discardedExpr,       // T1029
+		discardAliasArgPtrs:  c.discardAliasArgPtrs, // T1029
 	}
+	// T1029: a nested function/coroutine body is not the discarded statement; do not
+	// inherit the outer's discarded-expr marker. restoreState brings it back.
+	c.discardedExpr = nil
+	c.discardAliasArgPtrs = nil
 	// T0262: clear coroutine-specific blocks to prevent cross-function references
 	// when saveState is used before switching c.fn to a different LLVM function.
 	c.panicExitBlock = nil
@@ -10455,6 +10475,8 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.thisRecvIsOwned = s.thisRecvIsOwned
 	c.currentOpValueParams = s.currentOpValueParams
 	c.borrowedValueParams = s.borrowedValueParams
+	c.discardedExpr = s.discardedExpr             // T1029
+	c.discardAliasArgPtrs = s.discardAliasArgPtrs // T1029
 }
 
 // findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,

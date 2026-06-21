@@ -225,7 +225,7 @@ active epoch (which compiler runs builds). The channel is persisted in
   download+verify+install machinery lives in
   [update.go](../compiler/cmd/promise/update.go) (`downloadAndInstall`), reused by `update`,
   `use`, and `install <epoch>`. (`sync` is deleted — no separate side-by-side install command.)
-- **Dependency updates moved to the package-manager namespace.** The old `promise update` behavior — updating `[require]` git-dependency pins in `promise.toml` — is now `promise pkg update [name|url]` (`runPkgUpdate`), so the bare `update` means "update the toolchain." The broader `pkg` fetch/resolve/lock surface is tracked under T0175.
+- **Dependency updates moved to the package-manager namespace.** The old `promise update` behavior — updating `[require]` git-dependency pins in `promise.toml` — is now `promise package update [url]`, so the bare `update` means "update the toolchain." The broader package fetch/resolve/lock surface is tracked under T0175.
 
 Re-running install with a newer binary replaces the installation in place and forward-updates the stub.
 

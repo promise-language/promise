@@ -1,6 +1,6 @@
 # Module System — Global Catalog with Mono-Versioning
 
-> **Status: Implemented.** All three phases are done (Phase 1: local modules + visibility; Phase 2: transitive deps + diamond dedup; Phase 3: remote git fetch + `promise pin`). This document is the authoritative design reference. See `docs/archive/stages.md` Stage 9 for implementation details.
+> **Status: Implemented.** All three phases are done (Phase 1: local modules + visibility; Phase 2: transitive deps + diamond dedup; Phase 3: remote git fetch + `promise package pin`). This document is the authoritative design reference. See `docs/archive/stages.md` Stage 9 for implementation details.
 
 This document describes the module system model: a **mono-versioned global catalog** where every module exists at exactly one version per catalog release, and all modules are guaranteed to work together.
 
@@ -291,7 +291,7 @@ warning: absolute local import path "/opt/shared/auth" is non-portable
 
 ```
 error: remote module "github.com/someone/parser" has no pin in promise.toml
-  hint: run `promise pin "github.com/someone/parser"` to add one
+  hint: run `promise package pin "github.com/someone/parser"` to add one
 ```
 
 ### 5.5 Standard Library — Just Part of the Catalog
@@ -414,12 +414,12 @@ Each entry in `[require]` maps a remote URL to a git commit hash. This is the **
 
 **Why commit hashes, not semver?** Consistency with the catalog model. The catalog pins exact commits internally; remote modules follow the same principle. A commit hash is unambiguous and immutable. Semver tags can be moved or deleted. Remote module authors can use whatever versioning scheme they like (tags, semver, etc.) — Promise resolves everything to a commit hash at pin time.
 
-**`promise pin` command** resolves human-friendly references to commit hashes:
+**`promise package pin` command** resolves human-friendly references to commit hashes:
 
 ```bash
-promise pin "github.com/someone/promise-parser"              # pin to latest commit on default branch
-promise pin "github.com/someone/promise-parser" v2.1.0        # resolve tag → commit hash, pin that
-promise pin "github.com/someone/promise-parser" a1b2c3d       # pin to exact commit
+promise package pin "github.com/someone/promise-parser"              # pin to latest commit on default branch
+promise package pin "github.com/someone/promise-parser" v2.1.0        # resolve tag → commit hash, pin that
+promise package pin "github.com/someone/promise-parser" a1b2c3d       # pin to exact commit
 ```
 
 ### 6.3 No Lockfile (for Catalog Modules)
@@ -1300,7 +1300,7 @@ main() {
 
 ```bash
 # Pin it — resolves latest commit on default branch
-promise pin "github.com/someone/promise-parser"
+promise package pin "github.com/someone/promise-parser"
 # Added to promise.toml:
 #   [require]
 #   "github.com/someone/promise-parser" = "a1b2c3d4e5f67890..."
@@ -1426,7 +1426,7 @@ main() {
 
 ```bash
 # They pin it in their promise.toml:
-promise pin "github.com/yourname/promise-csv"
+promise package pin "github.com/yourname/promise-csv"
 ```
 
 #### Iterate on the module
@@ -1437,7 +1437,7 @@ git tag v1.0.0
 git push --tags
 
 # Users update by re-pinning:
-promise pin "github.com/yourname/promise-csv" v1.0.0
+promise package pin "github.com/yourname/promise-csv" v1.0.0
 # Resolves tag → commit hash, updates promise.toml
 ```
 
@@ -1633,7 +1633,7 @@ This is the mono-versioned model in action: breaking changes are coordinated acr
 | Dependency declaration | Inferred from `use` URLs | Catalog: implicit from epoch. Remote: `[require]` in `promise.toml`. Local: on disk |
 | Version resolution | Diamond deps, per-module versions | Catalog: none (mono-versioned). Remote: no diamonds allowed |
 | Lockfile | `promise.lock` | None — epoch + commit pins in `promise.toml` |
-| Package manager | `promise add/remove/update` | `promise sync` + `promise pin` |
+| Package manager | `promise add/remove/update` | `promise package add/remove/update/pin` |
 | Remote deps | Fetched from URLs | Fetched from git repos, pinned by commit hash |
 | Visibility | Public by default | Private by default, `` `public `` to export |
 
@@ -1717,7 +1717,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - Parse `[require]` and `[replace]` sections in `promise.toml`
 - Git-based module fetching (clone at pinned commit)
 - Module caching in `~/.promise/cache/`
-- `promise pin` command for resolving tags/branches to commit hashes
+- `promise package pin` command for resolving tags/branches to commit hashes
 - Diamond dependency detection and rejection for remote modules
 - Epoch mismatch warnings
 

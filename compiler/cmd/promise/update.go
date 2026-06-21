@@ -120,7 +120,7 @@ type ghAsset struct {
 // orthogonal to the active epoch (which compiler runs builds): the channel is
 // persisted in <PromiseHome>/channel and selected with `update channel`, while
 // the active epoch is selected with `promise use`. Dependency `[require]` pin
-// updates live under `promise pkg update` (T0770).
+// updates live under `promise package update` (T0770/T1007).
 //
 // Usage:
 //

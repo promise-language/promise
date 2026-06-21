@@ -1042,3 +1042,154 @@ epoch = "2026.0"
 		t.Errorf("error = %q, want it to contain 'not found'", err.Error())
 	}
 }
+
+// --- RemoveRequire tests ---
+
+func TestRemoveRequireExistingEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require]
+"github.com/foo/bar" = "abc123"
+"github.com/baz/qux" = "def456"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveRequire(path, "github.com/foo/bar"); err != nil {
+		t.Fatalf("RemoveRequire returned error: %v", err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Require["github.com/foo/bar"]; ok {
+		t.Error("expected entry to be removed")
+	}
+	if cfg.Require["github.com/baz/qux"] != "def456" {
+		t.Errorf("Require[baz/qux] = %q, want %q", cfg.Require["github.com/baz/qux"], "def456")
+	}
+}
+
+func TestRemoveRequireNotPresent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require]
+"github.com/foo/bar" = "abc123"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Removing a URL that isn't present is a no-op.
+	if err := RemoveRequire(path, "github.com/nobody/nothing"); err != nil {
+		t.Fatalf("RemoveRequire returned error for missing entry: %v", err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Require["github.com/foo/bar"] != "abc123" {
+		t.Errorf("Require[foo/bar] = %q, want abc123 (should be unchanged)", cfg.Require["github.com/foo/bar"])
+	}
+}
+
+func TestRemoveRequireNormalizedMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require]
+"https://github.com/foo/bar.git" = "abc123"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Different URL form for the same repo — should still match via NormalizeURL.
+	if err := RemoveRequire(path, "github.com/foo/bar"); err != nil {
+		t.Fatalf("RemoveRequire returned error: %v", err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both the normalized and original form should be gone.
+	if len(cfg.Require) != 0 {
+		t.Errorf("Require should be empty after removal, got %d entries", len(cfg.Require))
+	}
+}
+
+func TestRemoveRequireLastEntryInSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require]
+"github.com/foo/bar" = "abc123"
+
+[replace]
+"github.com/foo/bar" = "../bar"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveRequire(path, "github.com/foo/bar"); err != nil {
+		t.Fatalf("RemoveRequire returned error: %v", err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Require) != 0 {
+		t.Errorf("Require should be empty, got %d entries", len(cfg.Require))
+	}
+	// [replace] section should be intact.
+	if cfg.Replace["github.com/foo/bar"] != "../bar" {
+		t.Errorf("Replace[foo/bar] = %q, want ../bar (should be preserved)", cfg.Replace["github.com/foo/bar"])
+	}
+}
+
+func TestRemoveRequireReadError(t *testing.T) {
+	err := RemoveRequire("/nonexistent/path/promise.toml", "github.com/foo/bar")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot read") {
+		t.Errorf("error = %q, want it to contain 'cannot read'", err.Error())
+	}
+}
+
+func TestRemoveRequireNoSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No [require] section at all — should be a no-op.
+	if err := RemoveRequire(path, "github.com/foo/bar"); err != nil {
+		t.Fatalf("RemoveRequire returned error when no [require] section: %v", err)
+	}
+}

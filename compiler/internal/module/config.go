@@ -335,6 +335,71 @@ func SetRequire(path, url, commitHash string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
+// RemoveRequire removes a [require] entry from the promise.toml file at path.
+// No-op (returns nil) if the entry is absent.
+func RemoveRequire(path, url string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", path, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	normalizedURL := NormalizeURL(url)
+
+	requireStart := -1
+	targetLine := -1
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[require]" {
+			requireStart = i
+			continue
+		}
+		if requireStart >= 0 {
+			if strings.HasPrefix(trimmed, "[") {
+				break
+			}
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				if key, _, err := parseTOMLLine(trimmed); err == nil {
+					if NormalizeURL(key) == normalizedURL {
+						targetLine = i
+					}
+				}
+			}
+		}
+	}
+
+	if targetLine < 0 {
+		return nil // not found, no-op
+	}
+
+	// Remove the line
+	lines = append(lines[:targetLine], lines[targetLine+1:]...)
+
+	// If [require] section is now empty, remove trailing blank line inside it
+	// (locate end again after removal)
+	sectionEnd := len(lines)
+	for i := requireStart + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
+			sectionEnd = i
+			break
+		}
+	}
+	allBlank := true
+	for i := requireStart + 1; i < sectionEnd; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			allBlank = false
+			break
+		}
+	}
+	if allBlank && sectionEnd > requireStart+1 {
+		// Remove the blank lines between [require] header and next section
+		lines = append(lines[:requireStart+1], lines[sectionEnd:]...)
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+}
+
 // SetNamedRequireCommit updates the commit field in a [require.NAME] section
 // of the promise.toml file at path. Returns an error if the section doesn't exist.
 func SetNamedRequireCommit(path, name, commitHash string) error {

@@ -119,10 +119,17 @@ func TestUsageCoversAllCommands(t *testing.T) {
 	n, _ := r.Read(buf)
 	usageOut := string(buf[:n])
 
+	// Hidden deprecated aliases (T1007): intentionally omitted from usage() output.
+	// These still dispatch for backward compatibility but are not advertised.
+	hiddenAliases := map[string]bool{"pkg": true, "add": true, "search": true, "pin": true}
+
 	// Each command must appear either as the first token on some line in the
 	// `Commands:` block (e.g. `  bind      Generate ...`) or as an inline alias
 	// (e.g. `fetch ... (alias: warm)`).
 	for cmd := range cmds {
+		if hiddenAliases[cmd] {
+			continue
+		}
 		wantPrefix := "  " + cmd + " "
 		aliasMention := "(alias: " + cmd + ")"
 		found := strings.Contains(usageOut, aliasMention)

@@ -158,10 +158,7 @@ Commands:
   emit-ir   Print LLVM IR to stdout
 
   init      Initialize a new Promise project or module (creates promise.toml)
-  add       Add a dependency by catalog name or git URL
-  search    Search the catalog for modules by keyword
-  pkg       Package-manager commands (pkg update: update dependency pins)
-  pin       Pin a remote module to a specific commit
+  package   Dependency management (add, remove, update, search, pin)
 
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
   update    Update Promise (follow channel); also: update check, update channel
@@ -215,8 +212,11 @@ Toolchain:
   promise use <epoch>                   Activate a specific epoch (downloads on demand)
 
 Packages:
-  promise pkg update              Update [require] dependency pins (all)
-  promise pkg update <name|url>   Update one dependency pin
+  promise package add <url> [ref]      Add an external dependency to promise.toml
+  promise package remove <url>         Remove a dependency from promise.toml
+  promise package update [url]         Update dependency pins to latest commits
+  promise package search <keyword>     Search the catalog for available modules
+  promise package pin <url> [ref]      Resolve a remote ref to a commit SHA and pin it
 
 Inline execution:
   promise exec 'print_line("hello")'
@@ -338,16 +338,12 @@ func main() {
 		runInit(os.Args[2:])
 	case "clean":
 		runClean(os.Args[2:])
-	case "pin":
-		runPin(os.Args[2:])
-	case "add":
-		runAdd(os.Args[2:])
-	case "search":
-		runSearch(os.Args[2:])
+	case "package":
+		runPackage(os.Args[2:])
+	case "pkg", "add", "search", "pin": // deprecated aliases — hidden from usage/help
+		runLegacyPackageAlias(cmd, os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
-	case "pkg":
-		runPkg(os.Args[2:])
 	case "install":
 		runInstall(os.Args[2:])
 	case "catalog":
@@ -6429,7 +6425,7 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 	// Look up commit pin
 	pin, ok := ml.commitPins[normalized]
 	if !ok {
-		return nil, fmt.Errorf("remote module %q has no pin in promise.toml [require] section\n  hint: add '%s = \"<commit>\"' to [require], or run 'promise pin \"%s\"'", remoteURL, remoteURL, remoteURL)
+		return nil, fmt.Errorf("remote module %q has no pin in promise.toml [require] section\n  hint: add '%s = \"<commit>\"' to [require], or run 'promise package pin \"%s\"'", remoteURL, remoteURL, remoteURL)
 	}
 
 	// Fetch/checkout via git
@@ -7498,7 +7494,7 @@ func runClean(args []string) {
 // runPin resolves a remote module ref to a full commit SHA and writes it to promise.toml.
 func runPin(args []string) {
 	if len(args) < 1 || len(args) > 2 {
-		fmt.Fprintln(os.Stderr, "usage: promise pin <url> [ref]")
+		fmt.Fprintln(os.Stderr, "usage: promise package pin <url> [ref]")
 		fmt.Fprintln(os.Stderr, "  ref: tag, branch, commit hash, or HEAD (default: HEAD)")
 		os.Exit(1)
 	}
@@ -7543,12 +7539,12 @@ func runPin(args []string) {
 	fmt.Printf("Pinned %s → %s\n", url, commitHash[:12])
 }
 
-// runAdd implements the `promise add <name-or-url> [ref]` subcommand.
+// runAdd implements the `promise package add <name|url> [ref]` subcommand.
 // If the first argument matches a catalog name, resolves to its URL.
 // Otherwise treats it as a raw git URL. Writes to promise.toml.
 func runAdd(args []string) {
 	if len(args) < 1 || len(args) > 2 {
-		fmt.Fprintln(os.Stderr, "usage: promise add <name-or-url> [ref]")
+		fmt.Fprintln(os.Stderr, "usage: promise package add <name|url> [ref]")
 		fmt.Fprintln(os.Stderr, "  name: catalog module name (e.g., json) or git URL")
 		fmt.Fprintln(os.Stderr, "  ref:  tag, branch, commit hash, or HEAD (default: HEAD)")
 		os.Exit(1)
@@ -7633,11 +7629,11 @@ func runAdd(args []string) {
 	fmt.Printf("Added %s → %s\n", label, shortCommit(commitHash))
 }
 
-// runSearch implements the `promise search <keyword>` subcommand.
+// runSearch implements the `promise package search <keyword>` subcommand.
 // Searches the embedded catalog by module name and description.
 func runSearch(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise search <keyword>")
+		fmt.Fprintln(os.Stderr, "usage: promise package search <keyword>")
 		os.Exit(1)
 	}
 
@@ -7690,35 +7686,105 @@ func runSearch(args []string) {
 	fmt.Printf("\n%d matching modules\n", len(matches))
 }
 
-// runPkg dispatches package-manager subcommands. Today it hosts `pkg update`
-// (the dependency [require]-pin updater moved out of bare `update` so that
-// `promise update` can mean toolchain self-update — T0770). Broader fetch/
-// resolve/lock work is tracked under T0175.
-func runPkg(args []string) {
+// runPackage dispatches `promise package` subcommands.
+func runPackage(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: promise pkg <subcommand>")
-		fmt.Fprintln(os.Stderr, "  update [name|url]        Update [require] dependency pins in promise.toml")
-		fmt.Fprintln(os.Stderr, "  check-upgrade <epoch>    Preview which dependencies support a target epoch")
+		fmt.Fprintln(os.Stderr, "usage: promise package <subcommand>")
+		fmt.Fprintln(os.Stderr, "  add <url> [ref]              Add a dependency")
+		fmt.Fprintln(os.Stderr, "  remove <url>                 Remove a dependency")
+		fmt.Fprintln(os.Stderr, "  update [name|url]            Update [require] dependency pins in promise.toml")
+		fmt.Fprintln(os.Stderr, "  search <keyword>             Search the catalog")
+		fmt.Fprintln(os.Stderr, "  pin <url> [ref]              Resolve + pin a dependency")
+		fmt.Fprintln(os.Stderr, "  check-upgrade <epoch>        Preview which dependencies support a target epoch")
 		os.Exit(1)
 	}
 	switch args[0] {
+	case "add":
+		runAdd(args[1:])
+	case "remove":
+		runPackageRemove(args[1:])
 	case "update":
 		runPkgUpdate(args[1:])
+	case "search":
+		runSearch(args[1:])
+	case "pin":
+		runPin(args[1:])
 	case "check-upgrade":
 		runPackageCheckUpgrade(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown pkg subcommand: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: promise pkg <update|check-upgrade>")
+		fmt.Fprintf(os.Stderr, "unknown package subcommand: %s\n", args[0])
 		os.Exit(1)
 	}
 }
 
+// runLegacyPackageAlias routes deprecated top-level aliases (pkg, add, search, pin)
+// to their `promise package` equivalents for one-release backward compatibility.
+func runLegacyPackageAlias(cmd string, args []string) {
+	switch cmd {
+	case "pkg":
+		if len(args) > 0 && args[0] == "update" {
+			runPkgUpdate(args[1:])
+		} else {
+			runPackage(args)
+		}
+	case "add":
+		runAdd(args)
+	case "search":
+		runSearch(args)
+	case "pin":
+		runPin(args)
+	}
+}
+
+// runPackageRemove implements `promise package remove <url>`.
+func runPackageRemove(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise package remove <url>")
+		os.Exit(1)
+	}
+	url := args[0]
+
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := module.FindConfig(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		fmt.Fprintln(os.Stderr, "error: no promise.toml found (run 'promise init' first)")
+		os.Exit(1)
+	}
+
+	found := false
+	for u := range cfg.Require {
+		if module.NormalizeURL(u) == module.NormalizeURL(url) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		fmt.Fprintf(os.Stderr, "error: no [require] entry matching '%s'\n", url)
+		os.Exit(1)
+	}
+
+	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
+	if err := module.RemoveRequire(tomlPath, url); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Removed %s\n", url)
+}
+
 // runPkgUpdate updates git-dependency [require]/[require.NAME] pins in
 // promise.toml. Previously the body of `promise update`; moved under
-// `promise pkg update` (T0770).
+// `promise pkg update` (T0770), now available as `promise package update`.
 func runPkgUpdate(args []string) {
 	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise pkg update [name|url]")
+		fmt.Fprintln(os.Stderr, "usage: promise package update [url]")
 		fmt.Fprintln(os.Stderr, "  With no arguments, updates all [require] entries.")
 		fmt.Fprintln(os.Stderr, "  With a name or URL, updates only that entry.")
 		os.Exit(1)

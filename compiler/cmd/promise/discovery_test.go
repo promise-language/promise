@@ -275,7 +275,7 @@ description = "Test module"
 	}
 }
 
-// --- runPkgUpdate tests (dependency [require]-pin updating, `promise pkg update`) ---
+// --- runPkgUpdate tests (dependency [require]-pin updating, `promise package update`) ---
 
 func TestUpdateNoEntries(t *testing.T) {
 	dir := t.TempDir()
@@ -558,7 +558,7 @@ func TestSearchUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit")
 	}
-	if !strings.Contains(string(out), "usage: promise search") {
+	if !strings.Contains(string(out), "usage: promise package search") {
 		t.Errorf("expected usage message, got: %s", string(out))
 	}
 }
@@ -716,7 +716,7 @@ func TestAddUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit")
 	}
-	if !strings.Contains(string(out), "usage: promise add") {
+	if !strings.Contains(string(out), "usage: promise package add") {
 		t.Errorf("expected usage message, got: %s", string(out))
 	}
 }
@@ -733,7 +733,7 @@ func TestUpdateUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit")
 	}
-	if !strings.Contains(string(out), "usage: promise pkg update") {
+	if !strings.Contains(string(out), "usage: promise package update") {
 		t.Errorf("expected usage message, got: %s", string(out))
 	}
 }

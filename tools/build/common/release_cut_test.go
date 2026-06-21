@@ -583,7 +583,7 @@ func TestGenerateReleaseNotes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateReleaseNotes: %v", err)
 	}
-	for _, want := range []string{"since epoch-2026.0", "(2 commits)", "- T0975: fix double-free", "- B0120: park_m wakeup"} {
+	for _, want := range []string{"**Install:**", "docs/installing.md", "since epoch-2026.0", "(2 commits)", "- T0975: fix double-free", "- B0120: park_m wakeup"} {
 		if !strings.Contains(notes, want) {
 			t.Fatalf("notes missing %q:\n%s", want, notes)
 		}

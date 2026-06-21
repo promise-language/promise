@@ -632,6 +632,8 @@ func generateReleaseNotes(ctx *cutContext) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
+	// Install instructions lead the notes so a reader lands on "how to get it" first.
+	b.WriteString("**Install:** https://github.com/promise-language/promise/blob/main/docs/installing.md\n\n")
 	plural := "s"
 	if len(subjects) == 1 {
 		plural = ""

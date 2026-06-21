@@ -63,6 +63,31 @@ func RunPreCommit(root string) error {
 		}
 	}
 
+	// Reject commits when running the formatter would introduce changes —
+	// otherwise unformatted code reaches origin and shows up as a spurious diff
+	// the next time someone runs bin/verify (which reformats in place). Go is
+	// checked in-process via go/format; Promise is checked by shelling out to
+	// `bin/promise format -check` (the formatter lives in the compiler binary),
+	// the same way bin/verify invokes it.
+	var unformatted []string
+
+	goFiles, err := UnformattedGoFiles(root)
+	if err != nil {
+		return fmt.Errorf("check Go formatting: %w", err)
+	}
+	unformatted = append(unformatted, goFiles...)
+
+	prFiles, err := UnformattedPromiseFiles(root)
+	if err != nil {
+		return fmt.Errorf("check Promise formatting: %w", err)
+	}
+	unformatted = append(unformatted, prFiles...)
+
+	if len(unformatted) > 0 {
+		return fmt.Errorf("unformatted files — run bin/format and re-stage:\n  %s",
+			strings.Join(unformatted, "\n  "))
+	}
+
 	return nil
 }
 

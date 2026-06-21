@@ -164,7 +164,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 7. If improvement: updates `baselines.json` in-place, stages it with the commit
 8. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
 
-**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped.
+**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes — Go is checked in-process via `go/format`, Promise by shelling out to `bin/promise format -check` (the same formatter `bin/verify` runs) — so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify.
 
 **Key files:**
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`

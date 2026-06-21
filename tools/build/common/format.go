@@ -157,3 +157,99 @@ func FormatGo(root string) error {
 func EmbedFormattedResources(root string) error {
 	return EmbedResources(root)
 }
+
+// UnformattedGoFiles returns the repo-relative paths of Go files under
+// compiler/ that gofmt would reformat, WITHOUT modifying them. It runs the
+// same go/format pass as FormatGo entirely in-process — no subprocess, no
+// exit-code inspection — and just compares the result instead of writing it.
+//
+// The pre-commit gate uses this to reject commits that contain unformatted Go.
+// Otherwise unformatted code reaches origin and shows up as a spurious diff the
+// next time someone runs bin/verify (which reformats in place). Comparison is
+// line-ending-agnostic (CRLF normalized to LF first), matching FormatGo.
+func UnformattedGoFiles(root string) ([]string, error) {
+	compilerDir := filepath.Join(root, "compiler")
+	if !Exists(compilerDir) {
+		return nil, nil // nothing to check (e.g. a test temp repo)
+	}
+
+	var unformatted []string
+	err := filepath.WalkDir(compilerDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+		out, err := format.Source(srcLF)
+		if err != nil {
+			return nil // unparseable (e.g. generated code) — skip, mirrors FormatGo
+		}
+		if !bytes.Equal(out, srcLF) {
+			rel, _ := filepath.Rel(root, path)
+			unformatted = append(unformatted, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return unformatted, nil
+}
+
+// UnformattedPromiseFiles returns the repo-relative paths of .pr files that
+// `promise format` would reformat, WITHOUT modifying them. Unlike the Go check
+// (run in-process via go/format), the Promise formatter lives in the compiler
+// binary — a separate module that the build tools can't import — so this shells
+// out to `bin/promise format -check`, exactly as bin/verify shells out to the
+// formatter. Returns nil (skips) when bin/promise has not been built yet, since
+// there is no way to check without the compiler (mirrors RunFormat).
+func UnformattedPromiseFiles(root string) ([]string, error) {
+	promiseBin := filepath.Join(root, "bin", BinaryName())
+	if !Exists(promiseBin) {
+		return nil, nil
+	}
+	prFiles, err := findPromiseFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	if len(prFiles) == 0 {
+		return nil, nil
+	}
+
+	// `promise format -check` prints each unformatted file to stdout and exits 1
+	// when any need formatting. A non-zero exit with file output is the expected
+	// "unformatted" signal, not a tool failure — so we parse stdout and only
+	// surface runErr when nothing was printed (a genuine failure, e.g. a read
+	// error the CLI reports before exiting non-zero).
+	args := append([]string{"format", "-check"}, prFiles...)
+	out, runErr := RunCaptureStdout(root, promiseBin, args...)
+	out = strings.TrimSpace(out)
+	if out == "" {
+		if runErr != nil {
+			return nil, fmt.Errorf("promise format -check: %w", runErr)
+		}
+		return nil, nil
+	}
+
+	var files []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			files = append(files, line)
+		}
+	}
+	return files, nil
+}

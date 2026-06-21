@@ -120,6 +120,64 @@ func TestRunPreCommit_AllowsNormalFile(t *testing.T) {
 	}
 }
 
+func TestRunPreCommit_RejectsUnformattedGo(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "seed2.txt")
+	// gofmt-violating Go file under compiler/ (bad indentation + spacing).
+	bad := "package main\nfunc  main(){\nx:=1\n_=x}\n"
+	full := filepath.Join(root, "compiler", "internal", "bad.go")
+	os.MkdirAll(filepath.Dir(full), 0o755)
+	os.WriteFile(full, []byte(bad), 0o644)
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error for unformatted Go file, got nil")
+	}
+}
+
+func TestRunPreCommit_AllowsFormattedGo(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "seed2.txt")
+	good := "package main\n\nfunc main() {\n\tx := 1\n\t_ = x\n}\n"
+	full := filepath.Join(root, "compiler", "internal", "good.go")
+	os.MkdirAll(filepath.Dir(full), 0o755)
+	os.WriteFile(full, []byte(good), 0o644)
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("expected no error for formatted Go file, got: %v", err)
+	}
+}
+
+func TestUnformattedGoFiles_DetectsAndSkips(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel, content string) {
+		full := filepath.Join(root, rel)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte(content), 0o644)
+	}
+	mk("compiler/a.go", "package a\n\nfunc F() {}\n")      // formatted
+	mk("compiler/b.go", "package b\nfunc  G(){}\n")        // unformatted
+	mk("compiler/vendor/c.go", "package c\nfunc  H(){}\n") // skipped (vendor)
+	mk("compiler/notes.txt", "func  not_go(){}\n")         // skipped (not .go)
+
+	got, err := UnformattedGoFiles(root)
+	if err != nil {
+		t.Fatalf("UnformattedGoFiles: %v", err)
+	}
+	if len(got) != 1 || got[0] != filepath.Join("compiler", "b.go") {
+		t.Fatalf("expected [compiler/b.go], got %v", got)
+	}
+}
+
+func TestUnformattedPromiseFiles_SkipsWithoutCompiler(t *testing.T) {
+	// No bin/promise in a temp repo → can't check Promise, must skip (not error).
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "modules"), 0o755)
+	os.WriteFile(filepath.Join(root, "modules", "x.pr"), []byte("main(){}\n"), 0o644)
+	got, err := UnformattedPromiseFiles(root)
+	if err != nil {
+		t.Fatalf("expected nil error when bin/promise absent, got: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil (skipped), got %v", got)
+	}
+}
+
 func TestIsASCII(t *testing.T) {
 	cases := []struct {
 		s    string

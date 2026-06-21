@@ -44,17 +44,20 @@ func runDoc(args []string) {
 			}
 			i++
 			outputFile = args[i]
-		case "-help", "-h":
-			printDocUsage(os.Stderr)
-			os.Exit(0)
 		default:
 			remaining = append(remaining, args[i])
 		}
 	}
 
+	// No target → list the available modules to stdout, exit 0 (T1006). This
+	// fulfills the docs/language-guide.md promise that `promise doc` discovers
+	// modules instead of erroring.
 	if len(remaining) < 1 {
-		printDocUsage(os.Stderr)
-		os.Exit(1)
+		if !listDocModules(os.Stdout) {
+			fmt.Fprintln(os.Stderr, "error: no catalog available")
+			os.Exit(1)
+		}
+		return
 	}
 
 	var w io.Writer = os.Stdout
@@ -95,28 +98,10 @@ func printDocUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -o <path>     Write output to file instead of stdout")
 	fmt.Fprintln(w)
 
-	// Dynamically list available catalog modules.
-	if len(embeddedCatalog) > 0 {
-		cat, err := module.ParseCatalog(embeddedCatalog)
-		if err == nil && len(cat.Modules) > 0 {
-			// Collect and sort module names for stable output.
-			names := make([]string, 0, len(cat.Modules))
-			for name := range cat.Modules {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-
-			fmt.Fprintln(w, "Available modules:")
-			for _, name := range names {
-				entry := cat.Modules[name]
-				if entry.Description != "" {
-					fmt.Fprintf(w, "  %-12s %s\n", name, entry.Description)
-				} else {
-					fmt.Fprintf(w, "  %s\n", name)
-				}
-			}
-			fmt.Fprintln(w)
-		}
+	// Dynamically list available catalog modules (shared with the no-arg
+	// `promise doc` discovery path).
+	if listDocModules(w) {
+		fmt.Fprintln(w)
 	}
 
 	fmt.Fprintln(w, "Examples:")
@@ -125,6 +110,37 @@ func printDocUsage(w io.Writer) {
 	fmt.Fprintln(w, "  promise doc file.pr          Document a single file")
 	fmt.Fprintln(w, "  promise doc -signatures std  Compact signatures only")
 	fmt.Fprintln(w, "  promise doc -all -o out.md io")
+}
+
+// listDocModules writes the available catalog modules (name + description) to w,
+// one per line under an "Available modules:" header. It is the body of
+// `promise doc` with no arguments (T1006) and is reused by printDocUsage.
+// Returns false when no catalog is embedded (so callers can choose an error).
+func listDocModules(w io.Writer) bool {
+	if len(embeddedCatalog) == 0 {
+		return false
+	}
+	cat, err := module.ParseCatalog(embeddedCatalog)
+	if err != nil || len(cat.Modules) == 0 {
+		return false
+	}
+	// Collect and sort module names for stable output.
+	names := make([]string, 0, len(cat.Modules))
+	for name := range cat.Modules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	fmt.Fprintln(w, "Available modules:")
+	for _, name := range names {
+		entry := cat.Modules[name]
+		if entry.Description != "" {
+			fmt.Fprintf(w, "  %-12s %s\n", name, entry.Description)
+		} else {
+			fmt.Fprintf(w, "  %s\n", name)
+		}
+	}
+	return true
 }
 
 // docModuleFrontend parses all module source files, merges them into a single AST,

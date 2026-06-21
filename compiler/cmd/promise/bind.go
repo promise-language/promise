@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,15 +25,7 @@ func bindEpoch() string {
 
 func runBind(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: promise bind <format> [options] <files...>")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "formats:")
-		fmt.Fprintln(os.Stderr, "  wit       Generate bindings from WIT definitions")
-		fmt.Fprintln(os.Stderr, "  webidl    Generate bindings from WebIDL definitions")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "examples:")
-		fmt.Fprintln(os.Stderr, "  promise bind wit path/to/api.wit -o modules/wasi/")
-		fmt.Fprintln(os.Stderr, "  promise bind webidl path/to/dom.webidl -o modules/web/")
+		printBindUsage(os.Stderr)
 		os.Exit(1)
 	}
 
@@ -46,6 +39,20 @@ func runBind(args []string) {
 		fmt.Fprintln(os.Stderr, "supported formats: wit, webidl")
 		os.Exit(1)
 	}
+}
+
+// printBindUsage writes `promise bind` usage to w. Shared between the no-format
+// usage error and the central help tree (T1006).
+func printBindUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: promise bind <format> [options] <files...>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "formats:")
+	fmt.Fprintln(w, "  wit       Generate bindings from WIT definitions")
+	fmt.Fprintln(w, "  webidl    Generate bindings from WebIDL definitions")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "examples:")
+	fmt.Fprintln(w, "  promise bind wit path/to/api.wit -o modules/wasi/")
+	fmt.Fprintln(w, "  promise bind webidl path/to/dom.webidl -o modules/web/")
 }
 
 func runBindWit(args []string) {

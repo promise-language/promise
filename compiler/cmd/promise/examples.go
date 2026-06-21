@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -42,7 +43,8 @@ func runExamples(args []string) {
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				fmt.Fprintf(os.Stderr, "unknown option: %s\n", args[i])
-				printExamplesUsage()
+				printExamplesUsage(os.Stderr)
+				helpHint(os.Stderr)
 				os.Exit(1)
 			}
 			name = args[i]
@@ -50,7 +52,7 @@ func runExamples(args []string) {
 	}
 
 	if showHelp {
-		printExamplesUsage()
+		printExamplesUsage(os.Stdout)
 		return
 	}
 
@@ -379,8 +381,8 @@ func listExampleNames(w *os.File) {
 	}
 }
 
-func printExamplesUsage() {
-	fmt.Print(`Usage: promise examples [options] [name]
+func printExamplesUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage: promise examples [options] [name]
 
 Browse and run example programs.
 

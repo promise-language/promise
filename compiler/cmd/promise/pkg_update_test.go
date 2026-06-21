@@ -12,20 +12,21 @@ import (
 // `promise package`. The old top-level verbs (pkg, add, search, pin) are kept
 // as hidden deprecated aliases for one release.
 
-// TestRunPackageNoArgs: `promise package` with no subcommand prints usage and exits 1.
+// TestRunPackageNoArgs: `promise package` is a pure group — a bare invocation
+// lists its subcommands to stdout and exits 0 (T1006).
 func TestRunPackageNoArgs(t *testing.T) {
-	if os.Getenv("TEST_PACKAGE_NO_ARGS") == "1" {
-		runPackage(nil)
-		return
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runPackage(nil)
+		})
+	})
+	if !strings.Contains(out, "Usage: promise package <subcommand>") {
+		t.Errorf("expected package subcommand listing on stdout, got: %s", out)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestRunPackageNoArgs")
-	cmd.Env = append(os.Environ(), "TEST_PACKAGE_NO_ARGS=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected non-zero exit for `package` with no subcommand")
-	}
-	if !strings.Contains(string(out), "usage: promise package") {
-		t.Errorf("expected package usage message, got: %s", string(out))
+	for _, sub := range []string{"add", "remove", "update", "search", "pin", "check-upgrade"} {
+		if !strings.Contains(out, sub) {
+			t.Errorf("package listing missing subcommand %q, got: %s", sub, out)
+		}
 	}
 }
 

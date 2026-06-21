@@ -135,96 +135,10 @@ var embeddedGuide []byte
 var embeddedExamples embed.FS
 
 // Runtime is fully codegen-emitted LLVM IR — no embedded C files needed.
-
-func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: promise <command> [options] [file.pr]
-
-Commands:
-  help      Show language overview and quick-start guide
-  guide     Print full language reference (for agents and users)
-  examples  Browse and run example programs
-  build     Compile a Promise source file to an executable
-  run       Compile and run a Promise source file
-  exec      Execute inline Promise code (auto-wraps in failable main)
-  clean     Remove build cache (-global also clears module cache)
-  
-  doc       Print documentation (file.pr or module name)
-  catalog   Catalog operations (list)
-
-  format    Format Promise source files
-  test      Discover and run test functions
-  check     Run semantic analysis (type checking)
-  ast       Print Promise AST
-  emit-ir   Print LLVM IR to stdout
-
-  init      Initialize a new Promise project or module (creates promise.toml)
-  package   Dependency management (add, remove, update, search, pin)
-
-  install   Install Promise to PROMISE_HOME (default: ~/.promise/)
-  update    Update Promise (follow channel); also: update check, update channel
-  epochs    List installed epochs
-  remove    Remove an installed epoch (reclaims its exclusive cached blobs)
-  use       Activate an epoch (downloads from releases if not installed)
-  fetch     Pre-stage the toolchain into the cache for offline builds (alias: warm)
-  gc        Reclaim cache space referenced by no installed epoch
-
-  doctor    Check the local Promise environment for issues
-  targets   List supported compile targets (e.g. -target wasm32-wasi)
-  bind      Generate Promise bindings from WIT or WebIDL definitions
-  version   Print compiler version
-
-Options (build):
-  -o <output>   Output file name (default: input file without extension)
-  -debug        Debug build (default) — instrumented allocator (scribble malloc'd / poison freed memory) for UAF / uninit-read detection
-  -release      Release build — platform-default free behavior, no debug overhead
-
-Options (doc):
-  -public         Show only public symbols (default)
-  -all            Show all symbols including private
-  -signatures     Compact mode: signatures only, no doc text
-  -o <output>     Write output to file instead of stdout
-
-Options (format):
-  -check        Check formatting without writing (exit 1 if unformatted)
-  -diff         Show diff of changes without writing
-
-Options (test):
-  -timeout <duration>   Per-test timeout (default: 60s)
-  -parallel <N>         Run up to N tests in parallel (default: number of CPUs)
-  -stress [N|duration]  Stress test mode: run repeatedly to find flaky tests
-                        N = iteration count, duration = time limit, bare = until Ctrl+C
-  -output <file>        Write stress test report to file (in addition to stdout)
-
-Options (exec):
-  -timeout <duration>   Execution timeout (default: 60s)
-
-Test discovery:
-  promise test file.pr          Run tests in a single file
-  promise test dir/             Scan directory for test files
-  promise test dir/...          Scan directory recursively for test files
-
-Toolchain:
-  promise update                        Follow the update channel: install + activate its latest
-  promise update check [--json]         Report whether an update is available (no changes)
-  promise update channel                Print the current update channel
-  promise update channel <stable|next>  Set the channel and immediately follow it
-  promise install <epoch>               Fetch an epoch without activating it (downloads on demand)
-  promise use <epoch>                   Activate a specific epoch (downloads on demand)
-
-Packages:
-  promise package add <url> [ref]      Add an external dependency to promise.toml
-  promise package remove <url>         Remove a dependency from promise.toml
-  promise package update [url]         Update dependency pins to latest commits
-  promise package search <keyword>     Search the catalog for available modules
-  promise package pin <url> [ref]      Resolve a remote ref to a commit SHA and pin it
-
-Inline execution:
-  promise exec 'print_line("hello")'
-  promise exec -timeout 30s 'print_line("hello")'
-  echo 'print_line("hello")' | promise exec
-  echo 'print_line("hello")' | promise
-`)
-}
+//
+// The CLI's command index, hierarchical help tree, and stream-routing rules
+// live in commands.go (T1006). Requested help → stdout/exit 0; usage errors →
+// stderr/exit ≠ 0 with a short pointer to `--help`.
 
 func printVersion() {
 	v := version
@@ -250,8 +164,9 @@ func main() {
 			runExec(nil)
 			return
 		}
-		usage()
-		os.Exit(1)
+		// Naked `promise` (interactive) → concise grouped command index (T1006).
+		printIndex(os.Stdout)
+		return
 	}
 
 	// Normalize all args: --flag → -flag, -flag=val → ["-flag", "val"].
@@ -263,8 +178,17 @@ func main() {
 		printVersion()
 		return
 	}
-	if cmd == "-help" {
-		printHelp()
+	// Root help flag → the command index (the root node's help). The `help`
+	// command (handled below) shows the longer overview.
+	if cmd == "-help" || cmd == "-h" {
+		printIndex(os.Stdout)
+		return
+	}
+
+	// Centralized help interception: every command/subcommand responds to
+	// -h/-help/--help, and `promise help <path...>` routes to any node — all to
+	// stdout, exit 0 (T1006).
+	if handleHelp(os.Args[1:]) {
 		return
 	}
 
@@ -292,7 +216,9 @@ func main() {
 		printVersion()
 		return
 	case "help":
-		printHelp()
+		// Help with a help flag is handled by handleHelp above; a bare
+		// `promise help` or `promise help <path...>` routes through routeHelp.
+		routeHelp(os.Args[2:])
 		return
 	case "guide":
 		runGuide(os.Args[2:])
@@ -379,7 +305,7 @@ func main() {
 			display = display[:50] + "..."
 		}
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", display)
-		usage()
+		helpHint(os.Stderr)
 		os.Exit(1)
 	}
 }
@@ -401,7 +327,8 @@ func runLegacy(args []string) {
 	}
 
 	if filename == "" {
-		usage()
+		fmt.Fprintln(os.Stderr, "error: no input file")
+		helpHint(os.Stderr)
 		os.Exit(1)
 	}
 
@@ -7389,9 +7316,11 @@ func printFileErrors(filename string, errs []error) {
 // runCatalog implements the `promise catalog` subcommand.
 func runCatalog(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: promise catalog <subcommand>")
-		fmt.Fprintln(os.Stderr, "  list    List all available catalog modules")
-		os.Exit(1)
+		// Pure group: a bare invocation lists its subcommands to stdout, exit 0
+		// (T1006).
+		node, matched, _ := findNode([]string{"catalog"})
+		printNodeHelp(os.Stdout, node, matched)
+		return
 	}
 
 	switch args[0] {
@@ -7399,6 +7328,7 @@ func runCatalog(args []string) {
 		runCatalogList()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown catalog subcommand: %s\n", args[0])
+		helpHint(os.Stderr)
 		os.Exit(1)
 	}
 }
@@ -7726,16 +7656,11 @@ func runSearch(args []string) {
 // runPackage dispatches `promise package` subcommands.
 func runPackage(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: promise package <subcommand>")
-		fmt.Fprintln(os.Stderr, "  add <url> [ref]              Add a dependency")
-		fmt.Fprintln(os.Stderr, "  remove <url>                 Remove a dependency")
-		fmt.Fprintln(os.Stderr, "  update [name|url]            Update [require] dependency pins in promise.toml")
-		fmt.Fprintln(os.Stderr, "  search <keyword>             Search the catalog")
-		fmt.Fprintln(os.Stderr, "  pin <url> [ref]              Resolve + pin a dependency")
-		fmt.Fprintln(os.Stderr, "  check-upgrade <epoch>        Preview which dependencies support a target epoch")
-		fmt.Fprintln(os.Stderr, "  check-epoch [epoch]          Verify THIS module against an epoch (owner self-check)")
-		fmt.Fprintln(os.Stderr, "  build-index <dir> <epoch>    (CI) verify catalog modules + write the compat index")
-		os.Exit(1)
+		// Pure group: a bare invocation lists its subcommands to stdout, exit 0
+		// (T1006).
+		node, matched, _ := findNode([]string{"package"})
+		printNodeHelp(os.Stdout, node, matched)
+		return
 	}
 	switch args[0] {
 	case "add":
@@ -7756,7 +7681,7 @@ func runPackage(args []string) {
 		runPackageBuildIndex(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown package subcommand: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: promise package <add|remove|update|search|pin|check-upgrade|check-epoch|build-index>")
+		helpHint(os.Stderr)
 		os.Exit(1)
 	}
 }

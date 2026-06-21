@@ -73,13 +73,14 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
 
 === Discovery Commands ===
 
+  promise                 Concise grouped command index
   promise help            This output
+  promise help <cmd>...   Help for any command or subcommand (≡ promise <cmd>... --help)
   promise guide           Full language reference (~800 lines, pipe into LLM context)
   promise examples        Browse and run example programs
   promise doc <module>    API docs for a module (e.g., promise doc io, promise doc std.vector)
+  promise doc             List all available modules
   promise doctor          Check environment health (-json, -fix, -network, -dev, -repair)
-  promise fetch           Pre-stage the toolchain into the cache for offline builds (alias: warm)
-  promise gc              Reclaim cache space unreferenced by any installed epoch (-dry-run)
   promise bind <format>   Generate bindings from WIT or WebIDL (e.g., promise bind wit api.wit)
   promise targets         List supported compile targets (e.g. -target wasm32-wasi)
   promise version         Compiler version

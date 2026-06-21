@@ -98,51 +98,85 @@ func dispatchedCommands(t *testing.T) map[string]bool {
 	return cmds
 }
 
-// TestUsageCoversAllCommands ensures every top-level subcommand dispatched in
-// main()'s `switch cmd { ... }` is documented in usage(). Prevents future
-// commands from being silently omitted (T0691).
-func TestUsageCoversAllCommands(t *testing.T) {
+// indexHiddenCommands is the set of dispatched commands intentionally omitted
+// from the concise command index (T1006): deprecated top-level aliases (T1007)
+// and the removed verbs fetch/warm/gc, which still dispatch until T1008/T1009
+// delete them.
+var indexHiddenCommands = map[string]bool{
+	"pkg": true, "add": true, "search": true, "pin": true,
+	"fetch": true, "warm": true, "gc": true,
+}
+
+// TestIndexCoversAllCommands ensures every top-level subcommand dispatched in
+// main()'s `switch cmd { ... }` appears in the concise command index, except the
+// explicitly hidden set. Prevents future commands from being silently omitted
+// (T0691, retargeted from usage() to printIndex in T1006).
+func TestIndexCoversAllCommands(t *testing.T) {
 	cmds := dispatchedCommands(t)
 
-	// Capture usage() output (writes to os.Stderr).
-	oldStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	usage()
-	w.Close()
-	os.Stderr = oldStderr
+	var buf strings.Builder
+	printIndex(&buf)
+	indexOut := buf.String()
 
-	buf := make([]byte, 64*1024)
-	n, _ := r.Read(buf)
-	usageOut := string(buf[:n])
-
-	// Hidden deprecated aliases (T1007): intentionally omitted from usage() output.
-	// These still dispatch for backward compatibility but are not advertised.
-	hiddenAliases := map[string]bool{"pkg": true, "add": true, "search": true, "pin": true}
-
-	// Each command must appear either as the first token on some line in the
-	// `Commands:` block (e.g. `  bind      Generate ...`) or as an inline alias
-	// (e.g. `fetch ... (alias: warm)`).
+	// Each visible command must appear as the first token on some line in a
+	// group block (e.g. `  bind      Generate ...`).
 	for cmd := range cmds {
-		if hiddenAliases[cmd] {
+		if indexHiddenCommands[cmd] {
 			continue
 		}
 		wantPrefix := "  " + cmd + " "
-		aliasMention := "(alias: " + cmd + ")"
-		found := strings.Contains(usageOut, aliasMention)
-		if !found {
-			for _, line := range strings.Split(usageOut, "\n") {
-				if strings.HasPrefix(line, wantPrefix) {
-					found = true
-					break
-				}
+		found := false
+		for _, line := range strings.Split(indexOut, "\n") {
+			if strings.HasPrefix(line, wantPrefix) {
+				found = true
+				break
 			}
 		}
 		if !found {
-			t.Errorf("usage() output missing entry for command %q (dispatched in main.go but not listed)", cmd)
+			t.Errorf("index missing entry for command %q (dispatched in main.go but not listed)", cmd)
+		}
+	}
+}
+
+// TestIndexOmitsRemovedVerbs guards §5: the command index must never advertise
+// fetch/warm/gc. Also a tripwire so the T1008/T1009 removals don't regress.
+func TestIndexOmitsRemovedVerbs(t *testing.T) {
+	var buf strings.Builder
+	printIndex(&buf)
+	out := buf.String()
+	for _, verb := range []string{"fetch", "warm", "gc"} {
+		wantPrefix := "  " + verb + " "
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, wantPrefix) {
+				t.Errorf("index advertises removed verb %q (line: %q)", verb, line)
+			}
+		}
+	}
+}
+
+// TestHelpTreeReachable verifies the agent-UX discoverability contract: every
+// non-hidden node and subcommand resolves via findNode and renders non-empty
+// help (T1006).
+func TestHelpTreeReachable(t *testing.T) {
+	check := func(path []string) {
+		node, matched, ok := findNode(path)
+		if !ok || len(matched) != len(path) {
+			t.Errorf("findNode(%v) did not resolve fully (matched %v)", path, matched)
+			return
+		}
+		var buf strings.Builder
+		printNodeHelp(&buf, node, matched)
+		if strings.TrimSpace(buf.String()) == "" {
+			t.Errorf("printNodeHelp(%v) produced empty output", path)
+		}
+	}
+	for _, n := range commandTree {
+		if n.hidden {
+			continue
+		}
+		check([]string{n.name})
+		for _, s := range n.subs {
+			check([]string{n.name, s.name})
 		}
 	}
 }

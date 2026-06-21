@@ -968,10 +968,17 @@ promise doc <module>         # any catalog module
 promise doc file.pr          # documentation for a source file
 promise doc .                # documentation for the project in the current dir
 promise doc <path>           # documentation for a local project directory
-promise -help                # quick start guide with examples
+promise                      # concise grouped command index
+promise help                 # quick start guide with examples
+promise help <cmd>...         # help for any command/subcommand (≡ promise <cmd>... --help)
 promise doc                  # list all available modules
 promise targets              # list supported compile targets
 ```
+
+Every command and subcommand accepts `-h`/`-help`/`--help` and prints its help
+to stdout (exit 0); `promise help <path...>` routes to any node in the tree
+(e.g. `promise help package add`). Usage errors go to stderr with a short
+pointer to `--help`.
 
 ## Compilation Targets
 

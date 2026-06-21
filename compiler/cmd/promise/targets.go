@@ -126,15 +126,21 @@ func runTargets(args []string) {
 		case "-json":
 			jsonOut = true
 		case "-h", "-help":
-			fmt.Println("usage: promise targets [-json]")
+			printTargetsUsage(os.Stdout)
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", a)
-			fmt.Fprintln(os.Stderr, "usage: promise targets [-json]")
+			printTargetsUsage(os.Stderr)
 			os.Exit(1)
 		}
 	}
 	writeTargets(os.Stdout, supportedTargets(), jsonOut)
+}
+
+// printTargetsUsage writes the `promise targets` usage line to w. Shared between
+// the in-command help/error paths and the central help tree (T1006).
+func printTargetsUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: promise targets [-json]")
 }
 
 // writeTargets renders specs to w in either text or JSON format. Split out

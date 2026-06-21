@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,13 +34,14 @@ func runGuide(args []string) {
 			section = args[i]
 		default:
 			fmt.Fprintf(os.Stderr, "unknown option: %s\n", args[i])
-			printGuideUsage()
+			printGuideUsage(os.Stderr)
+			helpHint(os.Stderr)
 			os.Exit(1)
 		}
 	}
 
 	if showHelp {
-		printGuideUsage()
+		printGuideUsage(os.Stdout)
 		return
 	}
 
@@ -186,8 +188,8 @@ func printSectionList() {
 	}
 }
 
-func printGuideUsage() {
-	fmt.Print(`Usage: promise guide [options]
+func printGuideUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage: promise guide [options]
 
 Print the Promise language reference guide.
 

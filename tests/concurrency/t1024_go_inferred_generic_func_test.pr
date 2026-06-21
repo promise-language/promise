@@ -1,0 +1,33 @@
+// T1024: `go` of a generic free-function call with INFERRED type args used to
+// panic codegen (`go expression callee *ast.IdentExpr not yet supported`).
+// The bare-ident callee resolves to a monomorphized function (`gget__int`), so
+// the plain name was absent from c.funcs and resolveGoTarget panicked. The fix
+// routes inferred-type-arg generic `go` calls through the block-style path that
+// the explicit-type-arg form already uses.
+gget[T](T v) T {
+  return v;
+}
+
+pair[A, B](A a, B b) B {
+  return b;
+}
+
+go_inferred_int() `test {
+  Task[int] o = go gget(42);
+  assert(<-o == 42, "inferred int go call");
+}
+
+go_inferred_string() `test {
+  Task[string] o = go gget("hi");
+  assert(<-o == "hi", "inferred string go call");
+}
+
+go_inferred_multi_param() `test {
+  Task[string] o = go pair(3, "x");
+  assert(<-o == "x", "inferred multi-type-param go call");
+}
+
+go_explicit_still_works() `test {
+  Task[int] o = go gget[int](7);
+  assert(<-o == 7, "explicit type-arg go call regression guard");
+}

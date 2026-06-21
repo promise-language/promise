@@ -13286,6 +13286,16 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		return c.genGoCallExprViaBlock(callExpr)
 	}
 
+	// T1024: A bare-ident callee that resolves to a generic free function with
+	// INFERRED type args has no plain entry in c.funcs (only the monomorphized
+	// `gget__int` exists), so resolveGoTarget would panic. Route it through the
+	// block-style path — the same path the explicit-type-arg form (IndexExpr
+	// callee) already takes — which builds the call via genExpr → the inferred
+	// generic-call codegen.
+	if _, ok := c.info.InferredTypeArgs[callExpr]; ok {
+		return c.genGoCallExprViaBlock(callExpr)
+	}
+
 	// 1. Resolve result type T from sema
 	callResultType := c.info.Types[callExpr]
 	isVoid := (callResultType == nil || callResultType == types.TypVoid)

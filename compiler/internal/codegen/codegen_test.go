@@ -8934,9 +8934,11 @@ func TestDiscardedAliasArgClearsTempNotSource(t *testing.T) {
 	assertNotContains(t, body, "store i1 false, i1* %n.dropflag")
 }
 
-// T1029 non-regression: the assignment form `x = f(n)` transfers ownership to the
-// new variable and must keep clearing the SOURCE (alias.clear), never emitting the
-// discarded-statement temp-clear path (discard.alias.*).
+// T1029/T1031 non-regression: the assignment form `x = f(n)` binds the result into
+// a NEW owner while the source local stays owned. Per T1031 the caller clones the
+// aliased instance into the source's storage under a runtime guard (alias.dup) so
+// both ends are independently owned — it must NEVER emit the discarded-statement
+// temp-clear path (discard.alias.*).
 func TestAssignedAliasDoesNotUseDiscardPath(t *testing.T) {
 	ir := generateIR(t, `
 		type Node { int v; }
@@ -8945,7 +8947,7 @@ func TestAssignedAliasDoesNotUseDiscardPath(t *testing.T) {
 		main() { y := run(); }
 	`)
 	body := extractFunction(ir, "__user.run")
-	assertContains(t, body, "alias.clear")
+	assertContains(t, body, "alias.dup")
 	assertNotContains(t, body, "discard.alias.clear")
 }
 
@@ -11749,10 +11751,13 @@ func TestDropParameterNotFlagged(t *testing.T) {
 }
 
 func TestReturnAliasCheck(t *testing.T) {
-	// B0345: When a function returns a non-Copy value that was passed as a
-	// non-~ argument, the return pointer may alias the argument. The caller
-	// generates a post-call comparison to clear the argument's drop flag
-	// if the return aliases it, preventing double-free.
+	// B0345/T1031: When a function returns a non-Copy value that was passed as a
+	// non-~ argument, the return pointer may alias the argument. Binding the
+	// result into a NEW owner while the source local stays owned must NOT simply
+	// transfer the source's flag (that frees the shared instance under the still-
+	// owned source — the T1031 double-free/UAF). The caller instead clones into
+	// the source's storage under a runtime alias guard, so both end up
+	// independently owned. The callee itself returns the bare alias.
 	t.Run("string_identity", func(t *testing.T) {
 		ir := generateIR(t, `
 			identity(string zparam) string {
@@ -11765,9 +11770,9 @@ func TestReturnAliasCheck(t *testing.T) {
 		`)
 		// Callee should NOT have a drop flag for its non-~ string param
 		assertNotContains(t, ir, "zparam.dropflag")
-		// Caller must emit alias check (icmp eq + conditional flag clear)
-		assertContains(t, ir, "alias.clear")
-		assertContains(t, ir, "alias.skip")
+		// Caller clones the aliased source under the runtime guard.
+		assertContains(t, ir, "alias.dup")
+		assertContains(t, ir, "strdup.copy")
 	})
 	t.Run("droppable_user_type", func(t *testing.T) {
 		ir := generateIR(t, `
@@ -11785,8 +11790,9 @@ func TestReturnAliasCheck(t *testing.T) {
 		`)
 		// Callee should NOT have a drop flag for its non-~ param
 		assertNotContains(t, ir, "zparam.dropflag")
-		// Caller must emit alias check
-		assertContains(t, ir, "alias.clear")
+		// Caller clones the aliased source under the runtime guard.
+		assertContains(t, ir, "alias.dup")
+		assertContains(t, ir, "heapdup.copy")
 	})
 }
 
@@ -24707,11 +24713,18 @@ func TestOptionalReturnAliasCheckClearsArgFlag(t *testing.T) {
 			Box? r = passthrough(a);
 		}
 	`)
-	// Caller must emit an alias check for the call result vs the arg pointer.
-	assertContains(t, ir, "alias.clear")
-	assertContains(t, ir, "alias.skip")
-	// On the alias-clear path, a's drop flag is set to false.
-	assertContains(t, ir, "store i1 false, i1* %a.dropflag")
+	// Caller must emit a runtime alias check for the call result vs the arg pointer.
+	// T1031: Optional[droppable] IS deep-cloned at the call site (dupOptionalVectorElem):
+	// when the result aliases the still-owned source, the inner Box is cloned into the
+	// source's storage so both ends are independently owned. The arg's drop flag is NOT
+	// cleared — both the source and the new binding drop their own allocation once.
+	assertContains(t, ir, "alias.dup")
+	assertContains(t, ir, "alias.cont")
+	// The inner Optional value is deep-cloned (present/absent split + heap clone).
+	assertContains(t, ir, "optdup.dup")
+	assertContains(t, ir, "heapdup.copy")
+	// The source arg's drop flag must NOT be cleared (no ownership transfer).
+	assertNotContains(t, ir, "store i1 false, i1* %a.dropflag")
 }
 
 // T0391: A nested Optional local (T??) must register a scope-exit drop binding
@@ -28903,4 +28916,128 @@ func TestMatchTypePatternThisReceiver(t *testing.T) {
 	if strings.Contains(ir, "extractvalue i8* ") {
 		t.Errorf("expected no extractvalue on i8* (this subject must be normalized)\n%s", ir)
 	}
+}
+
+// --- T1031: aliasing a borrowed-return into a new owner dups at the call site -
+
+// T1031: `Node b = ident(a)` where `ident(Node n) Node { return n; }` returns its
+// by-value borrow param aliases a's heap instance. Because a remains owned (it is
+// co-dropped at scope exit), the new owner b must receive an INDEPENDENT
+// allocation — otherwise both drop the shared instance (double-free / UAF). The
+// fix clones into the source local's storage at the call site, gated on a runtime
+// `retPtr == argPtr` alias check. The callee itself returns the bare alias (no
+// clone), so functions that relocate their param before returning (sort's COW)
+// stay untouched.
+func TestReturnBorrowParamDupsHeapUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Node { int v; drop(~this){} }
+		ident(Node n) Node { return n; }
+		run() Node {
+			Node a = Node(v: 1);
+			Node b = ident(a);
+			return b;
+		}
+	`)
+	// The callee returns the bare alias — no clone.
+	callee := extractDefine(ir, "__user.ident")
+	if callee == "" {
+		t.Fatalf("ident callee not found in IR:\n%s", ir)
+	}
+	assertNotContains(t, callee, "heapdup.copy")
+	// The caller clones into the source's storage under a runtime alias guard.
+	caller := extractDefine(ir, "__user.run")
+	if caller == "" {
+		t.Fatalf("run caller not found in IR:\n%s", ir)
+	}
+	assertContains(t, caller, "alias.dup")
+	assertContains(t, caller, "heapdup.copy")
+	assertContains(t, caller, "@pal_alloc")
+}
+
+// T1031: a returned by-value string param is deep-copied at the call site.
+func TestReturnBorrowParamDupsString(t *testing.T) {
+	ir := generateIR(t, `
+		ident(string s) string { return s; }
+		run() string {
+			string a = "x".repeat(2);
+			string b = ident(a);
+			return b;
+		}
+	`)
+	callee := extractDefine(ir, "__user.ident")
+	if callee == "" {
+		t.Fatalf("ident callee not found in IR:\n%s", ir)
+	}
+	assertNotContains(t, callee, "strdup.copy")
+	caller := extractDefine(ir, "__user.run")
+	if caller == "" {
+		t.Fatalf("run caller not found in IR:\n%s", ir)
+	}
+	assertContains(t, caller, "alias.dup")
+	assertContains(t, caller, "strdup.copy")
+}
+
+// T1031: a returned by-value vector param is deep-copied at the call site.
+func TestReturnBorrowParamDupsVector(t *testing.T) {
+	ir := generateIR(t, `
+		ident(int[] v) int[] { return v; }
+		run() int[] {
+			int[] a = [];
+			int[] b = ident(a);
+			return b;
+		}
+	`)
+	caller := extractDefine(ir, "__user.run")
+	if caller == "" {
+		t.Fatalf("run caller not found in IR:\n%s", ir)
+	}
+	assertContains(t, caller, "alias.dup")
+	assertContains(t, caller, "vecdup.copy")
+}
+
+// T1031: a moved (`move`) param is owned by the callee — the call site must NOT
+// emit the aliasing clone (the source is consumed, not co-owned).
+func TestReturnMovedParamNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Node { int v; drop(~this){} }
+		consume(Node move n) Node { return n; }
+		run() Node {
+			Node a = Node(v: 1);
+			Node b = consume(move a);
+			return b;
+		}
+	`)
+	caller := extractDefine(ir, "__user.run")
+	if caller == "" {
+		t.Fatalf("run caller not found in IR:\n%s", ir)
+	}
+	assertNotContains(t, caller, "alias.dup")
+}
+
+// T1031/T1017: a DISCARDED call whose heap-user-type result aliases a still-live
+// local takes the discard path (clearDiscardedAliasTempFlag), NOT the assignment
+// clone path. Heap user-type results are tracked as heapTemps keyed by an
+// extractvalue SSA value distinct from the freshly-extracted retPtr, so the
+// function must scan the tracked heap temps (loading each temp's stored instance
+// pointer) and clear the matching temp's flag — keeping the live local the sole
+// owner, dropped once at scope exit. This exercises the heap-temp scan branch
+// (the vector/stmtTemp discard case in TestT1017DiscardedAliasClearsResultTemp
+// returns earlier via the direct stmtTempMap lookup).
+func TestReturnBorrowParamDiscardedHeapUserTypeScansHeapTemps(t *testing.T) {
+	ir := generateIR(t, `
+		type Node { int v; drop(~this){} }
+		ident(Node n) Node { return n; }
+		run() int {
+			Node n = Node(v: 11);
+			ident(n);
+			return n.v;
+		}
+	`)
+	caller := extractDefine(ir, "__user.run")
+	if caller == "" {
+		t.Fatalf("run caller not found in IR:\n%s", ir)
+	}
+	// Discard path (not the assignment clone path).
+	assertContains(t, caller, "alias.discard.clear")
+	assertNotContains(t, caller, "alias.dup")
 }

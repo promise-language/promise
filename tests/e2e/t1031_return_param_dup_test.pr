@@ -1,0 +1,218 @@
+// T1031: Returning a by-value borrow parameter unchanged must hand the caller an
+// independent allocation, not an alias into the still-live argument. Without the
+// callee-side dup, the source local and the new owner share one heap instance;
+// last-use dropping then frees it under the still-live source (use-after-free).
+// Each case uses the source local AFTER the aliasing assignment.
+type Node {
+  int v;
+}
+
+ident_node(Node n) Node {
+  return n;
+}
+
+heap_user_type() `test {
+  Node n = Node(v: 5);
+  Node x = ident_node(n);
+  assert(x.v == 5, "x.v");
+  assert(n.v == 5, "n.v after alias");
+}
+
+type DropNode {
+  int v;
+  drop(~this) {
+  }
+}
+
+ident_drop(DropNode n) DropNode {
+  return n;
+}
+
+heap_user_type_with_drop() `test {
+  DropNode n = DropNode(v: 7);
+  DropNode x = ident_drop(n);
+  assert(x.v == 7, "x.v");
+  assert(n.v == 7, "n.v after alias");
+}
+
+type Boxed {
+  string name;
+  int[] data;
+}
+
+ident_boxed(Boxed b) Boxed {
+  return b;
+}
+
+heap_user_type_nested_field() `test {
+  int[] d = [];
+  d.push(1);
+  d.push(2);
+  Boxed b = Boxed(name: "hello", data: move d);
+  Boxed x = ident_boxed(b);
+  // Deep clone: both readable, independent storage.
+  assert(x.name == "hello", "x.name");
+  assert(b.name == "hello", "b.name after alias");
+  assert(x.data.len == 2, "x.data.len");
+  assert(b.data.len == 2, "b.data.len after alias");
+  // Mutate the clone; the source must be unaffected (independence).
+  x.data.push(3);
+  assert(x.data.len == 3, "x.data.len after push");
+  assert(b.data.len == 2, "b.data.len unchanged");
+}
+
+ident_str(string s) string {
+  return s;
+}
+
+heap_string() `test {
+  string a = "the quick brown fox";
+  string b = a + " jumps";
+  string x = ident_str(b);
+  assert(x == "the quick brown fox jumps", "x value");
+  assert(b == "the quick brown fox jumps", "b after alias");
+  assert(x.len == b.len, "lengths match");
+}
+
+type Money {
+  int cents;
+}
+
+ident_vec(Money[] v) Money[] {
+  return v;
+}
+
+heap_vector() `test {
+  Money[] v = [];
+  v.push(Money(cents: 10));
+  v.push(Money(cents: 20));
+  Money[] x = ident_vec(v);
+  assert(x.len == 2, "x.len");
+  assert(v.len == 2, "v.len after alias");
+  assert(x[0].cents == 10, "x[0]");
+  assert(v[1].cents == 20, "v[1] after alias");
+  x.push(Money(cents: 30));
+  assert(x.len == 3, "x.len after push");
+  assert(v.len == 2, "v.len unchanged");
+}
+
+identity[T](T x) T {
+  return x;
+}
+
+generic_identity() `test {
+  // T=Node — non-Copy, must dup.
+  Node n = Node(v: 9);
+  Node x = identity[Node](n);
+  assert(x.v == 9, "generic x.v");
+  assert(n.v == 9, "generic n.v after alias");
+  // T=int — Copy, no dup (and no leak/UAF either way).
+  int a = 42;
+  int b = identity[int](a);
+  assert(b == 42, "generic int b");
+  assert(a == 42, "generic int a");
+}
+
+source_dead() `test {
+  // Non-regression: source NOT used after the assignment (worked before T1031).
+  Node n = Node(v: 3);
+  Node x = ident_node(n);
+  assert(x.v == 3, "source_dead x.v");
+}
+
+discarded() `test {
+  // Non-regression of T1017/T1029: discarded aliasing call; source still used.
+  Node n = Node(v: 11);
+  ident_node(n);
+  assert(n.v == 11, "discarded n.v");
+}
+
+type OptBox {
+  int v;
+  drop(~this) {
+  }
+}
+
+ident_opt(OptBox? b) OptBox? {
+  return b;
+}
+
+optional_source_live() `test {
+  // Optional[droppable] is deep-cloned at the call site too (dupOptionalVectorElem).
+  OptBox? a = OptBox(v: 21);
+  OptBox? x = ident_opt(a);
+  assert(x!.v == 21, "opt x.v");
+  assert(a!.v == 21, "opt a.v after alias");
+}
+
+optional_none_source_live() `test {
+  // none has nothing to clone — both ends stay absent, no UAF / double-free.
+  OptBox? a = none;
+  OptBox? x = ident_opt(a);
+  int xv = -1;
+  if y := x {
+    xv = y.v;
+  }
+  int av = -1;
+  if z := a {
+    av = z.v;
+  }
+  assert(xv == -1, "opt none x");
+  assert(av == -1, "opt none a");
+}
+
+consume(Node move n) Node {
+  return n;
+}
+
+move_param_zero_copy() `test {
+  // A moved param is owned by the callee — a true move, no spurious dup.
+  Node n = Node(v: 13);
+  Node x = consume(move n);
+  assert(x.v == 13, "moved x.v");
+}
+
+self_reassign_user() `test {
+  // Source and target are the SAME variable: `n = ident(n)`. The clone is stored
+  // into n's storage, then the assignment's drop-before-overwrite frees that clone
+  // and installs the original — exactly one live allocation, no leak / double-free.
+  Node n = Node(v: 5);
+  n = ident_node(n);
+  assert(n.v == 5, "user self-reassign");
+}
+
+self_reassign_string() `test {
+  string s = "ab".repeat(3);
+  s = ident_str(s);
+  assert(s == "ababab", "string self-reassign");
+}
+
+self_reassign_vector() `test {
+  Money[] v = [];
+  v.push(Money(cents: 1));
+  v.push(Money(cents: 2));
+  v = ident_vec(v);
+  assert(v.len == 2, "vector self-reassign len");
+  assert(v[0].cents == 1, "vector self-reassign elem");
+}
+
+chained_alias_source_live() `test {
+  // Nested identity: `ident(ident(n))`. Both alias guards fire; n stays usable.
+  Node n = Node(v: 4);
+  Node x = ident_node(ident_node(n));
+  assert(x.v == 4, "chained x.v");
+  assert(n.v == 4, "chained n.v after alias");
+}
+
+takes_two(Node a, Node b) int {
+  return a.v + b.v;
+}
+
+aliased_passed_onward() `test {
+  // The new owner and the still-live source are both passed (by borrow) to another
+  // call — two independent allocations, neither freed under the other.
+  Node n = Node(v: 6);
+  Node x = ident_node(n);
+  int sum = takes_two(n, x);
+  assert(sum == 12, "sum of both live owners");
+}

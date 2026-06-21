@@ -23,10 +23,12 @@ func TestT1017DiscardedAliasClearsResultTemp(t *testing.T) {
 	assertContains(t, ir, "alias.discard.clear")
 }
 
-// T1017 guard: the assignment / reassignment path (`xs = sort(xs)`) must STILL
-// clear the argument's drop flag (the original B0345/T0998 behavior), and must
-// NOT use the discard path.
-func TestT1017AssignmentStillClearsArgFlag(t *testing.T) {
+// T1017/T1031 guard: the assignment / reassignment path (`xs = ident(xs)`) takes
+// the call-site alias path — NOT the discard path. T1031 changed the resolution
+// from clearing the argument's drop flag to cloning into the source's storage
+// under a runtime alias guard (so a result aliasing a still-owned source can't
+// double-free). For a clonable vector that means alias.dup + vecdup.copy.
+func TestT1017AssignmentUsesAliasDupNotDiscard(t *testing.T) {
 	ir := generateIR(t, `
 		type Money { int cents; }
 		ident(Money[] v) Money[] { return v; }
@@ -36,6 +38,7 @@ func TestT1017AssignmentStillClearsArgFlag(t *testing.T) {
 			print_line(xs[0].cents.to_string());
 		}
 	`)
-	assertContains(t, ir, "alias.clear")
+	assertContains(t, ir, "alias.dup")
+	assertContains(t, ir, "vecdup.copy")
 	assertNotContains(t, ir, "alias.discard")
 }

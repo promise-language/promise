@@ -2259,7 +2259,52 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 				continue
 			}
 
-			// Generate: if retPtr == argPtr { clear dropFlag }
+			// T1031: the result aliases a source local the caller still owns
+			// (e.g. `Node x = ident(n);` then `use n`). The original fix cleared
+			// the source's drop flag, transferring sole ownership to the new
+			// binding — but if the source is used after the call, freeing the
+			// shared instance under it (via the new owner's last-use/scope-exit
+			// drop) is a use-after-free. Instead, when the alias actually fires at
+			// runtime, deep-clone into the source local's own storage so both the
+			// source and the new owner hold independent allocations, each dropped
+			// exactly once. The source's drop binding reloads from its alloca at
+			// scope exit (emitDropCallDirect), so it frees the clone; the new
+			// binding owns the original result. This fires only when retPtr ==
+			// argPtr, so functions that relocate their param before returning
+			// (e.g. sort()'s copy-on-write) hand back a distinct pointer and are
+			// left untouched (no spurious clone, no leak).
+			if alloca, hasAlloca := c.locals[ident.Name]; hasAlloca {
+				same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+				dupBlock := c.newBlock("alias.dup")
+				contBlock := c.newBlock("alias.cont")
+				c.block.NewCondBr(same, dupBlock, contBlock)
+				c.block = dupBlock
+				dupVal, didDup := c.dupOwnedReturnValue(argVals[i], paramType)
+				if didDup {
+					// Independent clone produced — store it into the source local's
+					// storage so the source drops the clone and the new binding keeps
+					// the original. Both are owned and dropped exactly once.
+					c.claimStringTemp(dupVal)
+					c.claimHeapTemp(dupVal)
+					c.claimEnvTemp(dupVal)
+					c.block.NewStore(dupVal, alloca)
+				} else {
+					// No deep clone available for this shape — fall back to the
+					// original behavior: transfer sole ownership to the new binding by
+					// clearing the source's drop flag, avoiding the double-free. The
+					// common heap/string/vector/enum/tuple/channel/Arc/Weak/Optional
+					// cases are all covered by the clone path above, so this fires only
+					// for the rare droppable-but-non-clonable shape (where the
+					// source-still-live UAF would otherwise reappear, as before).
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+				}
+				c.block.NewBr(contBlock)
+				c.block = contBlock
+				continue
+			}
+
+			// Fallback (source has no addressable storage — rare): preserve the
+			// original drop-flag clear to avoid a double-free.
 			same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
 			clearBlock := c.newBlock("alias.clear")
 			skipBlock := c.newBlock("alias.skip")
@@ -2324,26 +2369,42 @@ func (c *Compiler) clearDiscardedAliasTempFlag(result value.Value, argPtrs []val
 	if retPtr == nil {
 		return
 	}
-	// The result temp may be tracked as a stmtTemp (string/vector/channel i8*)
-	// or a heapTemp (heap user-type value struct). Find its drop flag.
-	var resultFlag value.Value
+	// String/vector/channel results are tracked as stmtTemps keyed by the result
+	// value itself (an i8*), so a direct map lookup matches. Clear that flag when
+	// the result aliases a recorded live-local arg.
 	if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
-		resultFlag = c.stmtTemps[idx].dropFlag
-	} else if idx, ok := c.heapTempMap[retPtr]; ok && idx >= 0 {
-		resultFlag = c.heapTemps[idx].dropFlag
-	}
-	if resultFlag == nil {
+		resultFlag := c.stmtTemps[idx].dropFlag
+		for _, argPtr := range argPtrs {
+			same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+			clearBlock := c.newBlock("alias.discard.clear")
+			skipBlock := c.newBlock("alias.discard.skip")
+			c.block.NewCondBr(same, clearBlock, skipBlock)
+			c.block = clearBlock
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), resultFlag)
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
+		}
 		return
 	}
+	// Heap user-type results are tracked as heapTemps keyed by an extractvalue SSA
+	// value produced at track time — distinct from our freshly-extracted retPtr, so
+	// heapTempMap[retPtr] misses. Instead scan the tracked heap temps and clear any
+	// whose stored instance pointer equals a recorded live-local arg pointer at
+	// runtime: that temp is exactly the discarded result aliasing the still-owned
+	// local (which is dropped once at scope exit). A non-aliasing discarded result
+	// has a distinct pointer, matches nothing, and is freed normally at stmt end.
 	for _, argPtr := range argPtrs {
-		same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
-		clearBlock := c.newBlock("alias.discard.clear")
-		skipBlock := c.newBlock("alias.discard.skip")
-		c.block.NewCondBr(same, clearBlock, skipBlock)
-		c.block = clearBlock
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), resultFlag)
-		c.block.NewBr(skipBlock)
-		c.block = skipBlock
+		for _, temp := range c.heapTemps {
+			tracked := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+			same := c.block.NewICmp(enum.IPredEQ, tracked, argPtr)
+			clearBlock := c.newBlock("alias.discard.clear")
+			skipBlock := c.newBlock("alias.discard.skip")
+			c.block.NewCondBr(same, clearBlock, skipBlock)
+			c.block = clearBlock
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
+		}
 	}
 }
 
@@ -8363,6 +8424,48 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 // none types have no heap alias and are returned unchanged. Callers gate on
 // isRefType / ownership before invoking. `val` must already be the
 // function-ABI value (enum value, {vtable,instance} struct, or value struct).
+// dupOwnedReturnValue deep-clones a droppable value so the new owner holds an
+// allocation independent of a still-live source local (T1031). Used at the call
+// site by emitReturnAliasCheckSubst when a call's result aliases a named source
+// argument the caller still owns. Reuses the shared push-element dispatcher
+// (maybeDupPushElement: tuples, droppable enums, vectors, channels, Arc/Weak,
+// heap user types), adds the plain-string case that dispatcher omits, and handles
+// Optional[droppable] via dupOptionalVectorElem (present/absent split + inner
+// clone). The bool result reports whether an independent clone was actually
+// produced: false means the type is one we do not deep-clone (Copy/value/
+// single-owner handles, or a non-droppable Optional inner), in which case the
+// caller must fall back to transferring ownership rather than relying on a clone
+// that did not happen.
+func (c *Compiler) dupOwnedReturnValue(val value.Value, resolvedType types.Type) (value.Value, bool) {
+	if val == nil {
+		return val, false
+	}
+	if extractNamed(resolvedType) == types.TypString {
+		return c.dupString(val), true
+	}
+	// Optional[droppable] — deep-clone the inner value (when present) and rebuild the
+	// Optional, so the new owner and the still-live source hold independent inner
+	// allocations. dupOptionalVectorElem already implements the present/absent split
+	// for every droppable inner shape (string, vector, channel, Arc/Weak, heap user
+	// type, tuple). Only worth a clone when the inner is actually droppable; a
+	// non-droppable inner (Copy/value) needs no dup and is left to the caller's
+	// ownership-transfer fallback.
+	if opt, ok := resolvedType.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if isTypeDroppable(elem) {
+			return c.dupOptionalVectorElem(val, opt, elem), true
+		}
+		return val, false
+	}
+	if dup := c.maybeDupPushElement(val, resolvedType); dup != nil {
+		return dup, true
+	}
+	return val, false
+}
+
 func (c *Compiler) cloneOwnedReturnAlias(val value.Value, effType types.Type) value.Value {
 	if enumT := extractEnum(effType); enumT != nil {
 		if !c.enumInstanceHasDrop(effType, enumT) {

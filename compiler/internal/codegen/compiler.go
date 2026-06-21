@@ -2445,7 +2445,16 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 			dupedInner = c.cloneHeapElement(innerVal, innerElem, namedInner)
 		}
 	default:
-		if tup, ok := innerElem.(*types.Tuple); ok {
+		if optInner, ok := innerElem.(*types.Optional); ok {
+			// Nested Optional (e.g. T?? whose element is T?): recurse so the
+			// clone owns an independent deep copy at every level. Without this
+			// the inner Optional — and any heap value it carries — is shared
+			// with the original, causing a double free when both are dropped.
+			deeper := optInner.Elem()
+			if isTypeDroppable(deeper) {
+				dupedInner = c.dupOptionalVectorElem(innerVal, optInner, deeper)
+			}
+		} else if tup, ok := innerElem.(*types.Tuple); ok {
 			dupedInner = c.dupTupleValue(innerVal, tup)
 		}
 	}

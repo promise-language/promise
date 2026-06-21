@@ -235,9 +235,12 @@ jobs:
             PRERELEASE=""
             TITLE="Promise epoch ${GITHUB_REF_NAME#epoch-}"
           fi
+          # Notes come from the annotated tag body, which `bin/release cut` fills
+          # with the mechanical commit-history changelog for this epoch
+          # (epoch-<last>..<sha>). --notes-from-tag publishes it with the artifacts.
           gh release create "$GITHUB_REF_NAME" $PRERELEASE \
             --title "$TITLE" \
-            --notes "See docs/changelog.md for this epoch." \
+            --notes-from-tag \
             dist/bin/promise-*.gz \
             dist/SHA256SUMS \
             scripts/install.sh scripts/install.ps1 scripts/install.cmd

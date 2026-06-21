@@ -26,14 +26,15 @@ type createdTag struct {
 // fakeCutGit is an in-memory cutGit. It records every mutating call so tests can
 // assert the tag → push → bump → commit → push ordering and contents.
 type fakeCutGit struct {
-	head       string
-	branch     string
-	clean      bool
-	ancestorOK bool
-	fetchErr   error
-	tags       map[string]string // tag → sha (existence + TagSHA)
-	epochTags  []string
-	changed    map[string]bool // path → changed-vs-ref
+	head        string
+	branch      string
+	clean       bool
+	ancestorOK  bool
+	fetchErr    error
+	tags        map[string]string // tag → sha (existence + TagSHA)
+	epochTags   []string
+	resolved    map[string]string // --sha ref → full sha (ResolveSHA)
+	logSubjects []string          // commit subjects LogSubjects returns
 
 	// Injected tool-failure errors, so tests can cover the "underlying git call
 	// errored → gate hard-fails (non-overridable)" contract.
@@ -42,6 +43,8 @@ type fakeCutGit struct {
 	headErr      error
 	listEpochErr error
 	createTagErr error
+	resolveErr   error
+	logErr       error
 
 	createdTags    []createdTag
 	pushedTags     []string
@@ -54,7 +57,7 @@ func newFakeCutGit() *fakeCutGit {
 	return &fakeCutGit{
 		head: "abcdef0123456789abcdef0123456789abcdef01", branch: "main",
 		clean: true, ancestorOK: true,
-		tags: map[string]string{}, changed: map[string]bool{},
+		tags: map[string]string{}, resolved: map[string]string{},
 	}
 }
 
@@ -98,8 +101,17 @@ func (g *fakeCutGit) PushBranch(branch string) error {
 	g.pushedBranches = append(g.pushedBranches, branch)
 	return nil
 }
-func (g *fakeCutGit) DiffChanged(fromRef, path string) (bool, error) {
-	return g.changed[path], nil
+func (g *fakeCutGit) ResolveSHA(ref string) (string, error) {
+	if g.resolveErr != nil {
+		return "", g.resolveErr
+	}
+	if sha, ok := g.resolved[ref]; ok {
+		return sha, nil
+	}
+	return ref, nil // unmapped refs resolve to themselves (e.g. a literal sha)
+}
+func (g *fakeCutGit) LogSubjects(fromRef, toSHA string) ([]string, error) {
+	return g.logSubjects, g.logErr
 }
 
 // fakeCutGH is an in-memory cutGH. ci.yml runs flip from ciRunsBefore to
@@ -562,31 +574,42 @@ func TestGateEpochNextValidated(t *testing.T) {
 	}
 }
 
-func TestGateChangelog(t *testing.T) {
-	root, _ := fakeReleaseRoot(t, map[string]string{})
-	writeChangelog(t, root, "## epoch 2026.0\n\nfirst\n\n## epoch 2026.1\n\nsecond\n")
+func TestGenerateReleaseNotes(t *testing.T) {
+	// With a previous epoch: range-scoped header + a bullet per commit subject.
 	g := newFakeCutGit()
-	g.changed["docs/changelog.md"] = true
-	ctx := &cutContext{root: root, git: g, targetEpoch: epoch{2026, 1}, lastEpoch: epoch{2026, 0}, haveLast: true}
-	if res := gateChangelog(ctx); !res.passed {
-		t.Fatalf("present + changed changelog must pass: %s", res.detail)
+	g.logSubjects = []string{"T0975: fix double-free", "B0120: park_m wakeup"}
+	ctx := &cutContext{git: g, targetSHA: "deadbeef", lastEpoch: epoch{2026, 0}, haveLast: true}
+	notes, err := generateReleaseNotes(ctx)
+	if err != nil {
+		t.Fatalf("generateReleaseNotes: %v", err)
+	}
+	for _, want := range []string{"since epoch-2026.0", "(2 commits)", "- T0975: fix double-free", "- B0120: park_m wakeup"} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("notes missing %q:\n%s", want, notes)
+		}
 	}
 
-	// Section missing.
-	ctx.targetEpoch = epoch{2026, 2}
-	if res := gateChangelog(ctx); res.passed || !res.overridable {
-		t.Fatalf("missing section must fail overridably: %+v", res)
+	// First release (no previous epoch): un-scoped header.
+	g.logSubjects = []string{"initial commit"}
+	ctx.haveLast = false
+	notes, err = generateReleaseNotes(ctx)
+	if err != nil {
+		t.Fatalf("generateReleaseNotes (first): %v", err)
+	}
+	if strings.Contains(notes, "since") || !strings.Contains(notes, "(1 commit)") {
+		t.Fatalf("first-release notes = %q", notes)
 	}
 
-	// Present but unchanged vs previous epoch tag.
-	ctx.targetEpoch = epoch{2026, 1}
-	g.changed["docs/changelog.md"] = false
-	res := gateChangelog(ctx)
-	if res.passed || !res.overridable {
-		t.Fatalf("unchanged changelog must fail overridably: %+v", res)
+	// Empty range still produces a body (no crash, explicit note).
+	g.logSubjects = nil
+	if notes, err = generateReleaseNotes(ctx); err != nil || !strings.Contains(notes, "no commits") {
+		t.Fatalf("empty-range notes = %q (%v)", notes, err)
 	}
-	if !strings.Contains(res.detail, "unchanged") {
-		t.Fatalf("detail = %q", res.detail)
+
+	// A LogSubjects tool error propagates.
+	g.logErr = errors.New("git log exploded")
+	if _, err := generateReleaseNotes(ctx); err == nil {
+		t.Fatal("a LogSubjects error must propagate")
 	}
 }
 
@@ -597,14 +620,12 @@ func TestCutStableHappyPath(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
 	writeCatalogFile(t, root, "2026.1")
-	writeChangelog(t, root, "## epoch 2026.0\n\none\n\n## epoch 2026.1\n\ntwo\n")
 
 	g := newFakeCutGit()
 	g.head = sha
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "oldsha"
 	g.tags["epoch-next"] = sha
-	g.changed["docs/changelog.md"] = true
 
 	gh := greenCI(sha)
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
@@ -648,13 +669,11 @@ func TestCutStableDryRunNoMutations(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
 	writeCatalogFile(t, root, "2026.1")
-	writeChangelog(t, root, "## epoch 2026.0\n\none\n\n## epoch 2026.1\n\ntwo\n")
 
 	g := newFakeCutGit()
 	g.head = sha
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-next"] = sha
-	g.changed["docs/changelog.md"] = true
 	gh := greenCI(sha)
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
 
@@ -678,14 +697,13 @@ func TestCutStableReasonOverrideAudit(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
 	writeCatalogFile(t, root, "2026.1")
-	// Changelog section MISSING → gate 9 fails (overridable).
-	writeChangelog(t, root, "## epoch 2026.0\n\nonly\n")
 
+	// ancestorOK=false → gateReachable fails (overridable).
 	g := newFakeCutGit()
 	g.head = sha
+	g.ancestorOK = false
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-next"] = sha
-	g.changed["docs/changelog.md"] = true
 	gh := greenCI(sha)
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
 
@@ -693,7 +711,7 @@ func TestCutStableReasonOverrideAudit(t *testing.T) {
 	ctx := stableCtx(root, g, gh, uploader)
 	withYear(t, 2026)
 	if err := cutStable(ctx); err == nil {
-		t.Fatal("missing changelog must abort without --reason")
+		t.Fatal("an unreachable tag commit must abort without --reason")
 	}
 	if len(g.createdTags) != 0 {
 		t.Fatal("no tag must be created on a failed gate")
@@ -702,18 +720,18 @@ func TestCutStableReasonOverrideAudit(t *testing.T) {
 	// With --reason: proceeds, and the reason lands in the tag message.
 	g2 := newFakeCutGit()
 	g2.head = sha
+	g2.ancestorOK = false
 	g2.epochTags = []string{"epoch-2026.0"}
 	g2.tags["epoch-next"] = sha
-	g2.changed["docs/changelog.md"] = true
 	ctx2 := stableCtx(root, g2, gh, uploader)
-	ctx2.reason = "changelog tracked separately for this cut"
+	ctx2.reason = "cutting from a vendored snapshot for this release"
 	if err := cutStable(ctx2); err != nil {
-		t.Fatalf("--reason should bypass the changelog gate: %v", err)
+		t.Fatalf("--reason should bypass the overridable gate: %v", err)
 	}
 	if len(g2.createdTags) != 1 {
 		t.Fatalf("expected the cut to proceed, createdTags=%v", g2.createdTags)
 	}
-	if !strings.Contains(g2.createdTags[0].message, "changelog tracked separately") {
+	if !strings.Contains(g2.createdTags[0].message, "cutting from a vendored snapshot") {
 		t.Fatalf("tag message must record the override reason, got: %q", g2.createdTags[0].message)
 	}
 }
@@ -897,17 +915,6 @@ func writeCatalogFile(t *testing.T, root, epochStr string) {
 	}
 }
 
-func writeChangelog(t *testing.T, root, body string) {
-	t.Helper()
-	dir := filepath.Join(root, "docs")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "changelog.md"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // depsHostedFixture builds a repo root with blobs.json seeded for the
 // linux-amd64 (opt, llc) blobs the fake prebuilts.toml declares, plus a
 // stubReleaseUploader that hosts (or, when hostAll is false, is missing) the
@@ -1040,23 +1047,7 @@ func TestGateEpochRuleValid(t *testing.T) {
 	}
 }
 
-// ── changelog + catalog-sanity gate edges ─────────────────────────────────────
-
-func TestChangelogHasEpochMissingFile(t *testing.T) {
-	root := t.TempDir() // no docs/changelog.md
-	has, err := changelogHasEpoch(root, epoch{2026, 1})
-	if err != nil {
-		t.Fatalf("a missing changelog must not error: %v", err)
-	}
-	if has {
-		t.Fatal("a missing changelog must report has=false")
-	}
-	// The gate surfaces a missing file as an overridable failure.
-	res := gateChangelog(&cutContext{root: root, targetEpoch: epoch{2026, 1}})
-	if res.passed || !res.overridable {
-		t.Fatalf("missing changelog file must fail overridably: %+v", res)
-	}
-}
+// ── catalog-sanity gate edges ─────────────────────────────────────────────────
 
 func TestGateCatalogSanityUnreadable(t *testing.T) {
 	root := t.TempDir() // no catalog.toml
@@ -1261,14 +1252,12 @@ func TestCutStableYearRolloverConfirmed(t *testing.T) {
 	// already equal the rollover target here. When T0946 is fixed (cut rewrites
 	// catalog to Y.0 for a confirmed rollover), seed a non-Y.0 catalog instead.
 	writeCatalogFile(t, root, "2027.0")
-	writeChangelog(t, root, "## epoch 2026.3\n\nlast year\n\n## epoch 2027.0\n\nnew year\n")
 
 	g := newFakeCutGit()
 	g.head = sha
 	g.epochTags = []string{"epoch-2026.3"}
 	g.tags["epoch-2026.3"] = "oldsha"
 	g.tags["epoch-next"] = sha
-	g.changed["docs/changelog.md"] = true
 	gh := greenCI(sha)
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
 
@@ -1314,14 +1303,12 @@ func TestCutStableMultiYearGapProceedsWithReason(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
 	writeCatalogFile(t, root, "2026.0") // target Y.0 after the gap
-	writeChangelog(t, root, "## epoch 2026.0\n\nresumed\n")
 
 	g := newFakeCutGit()
 	g.head = sha
 	g.epochTags = []string{"epoch-2024.0"}
 	g.tags["epoch-2024.0"] = "ancient"
 	g.tags["epoch-next"] = sha
-	g.changed["docs/changelog.md"] = true
 	gh := greenCI(sha)
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
 
@@ -1414,11 +1401,9 @@ func TestRunReleaseCutDispatch(t *testing.T) {
 
 	// "stable" dispatch via the public entry — --dry-run runs every gate, mutates
 	// nothing.
-	writeChangelog(t, root, "## epoch 2026.0\n\na\n\n## epoch 2026.1\n\nb\n")
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "old"
 	g.tags["epoch-next"] = sha
-	g.changed["docs/changelog.md"] = true
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
 	withYear(t, 2026)
 	if err := runReleaseCut(root, []string{"stable", "--dry-run"}); err != nil {
@@ -1526,15 +1511,18 @@ func TestShellGitSeam(t *testing.T) {
 		t.Fatalf("ListEpochTags = %v, want both epoch-2099.0 and epoch-next", tags)
 	}
 
-	// DiffChanged: unmodified vs HEAD → false; modified → true.
-	if ch, err := g.DiffChanged("HEAD", "b.txt"); err != nil || ch {
-		t.Fatalf("DiffChanged (unmodified) = %v (%v)", ch, err)
+	// ResolveSHA peels the annotated epoch-2099.0 tag (created at `first`) to its commit.
+	if sha, err := g.ResolveSHA("epoch-2099.0"); err != nil || sha != first {
+		t.Fatalf("ResolveSHA(epoch-2099.0) = %q (%v), want %s", sha, err, first)
 	}
-	os.WriteFile(filepath.Join(work, "b.txt"), []byte("modified\n"), 0o644)
-	if ch, err := g.DiffChanged("HEAD", "b.txt"); err != nil || !ch {
-		t.Fatalf("DiffChanged (modified) = %v (%v)", ch, err)
+	// LogSubjects over first..second sees only the "second" commit; whole-history
+	// (empty fromRef) sees both, newest first.
+	if subs, err := g.LogSubjects(first, second); err != nil || len(subs) != 1 || subs[0] != "second" {
+		t.Fatalf("LogSubjects(first..second) = %v (%v), want [second]", subs, err)
 	}
-	run(work, "checkout", "--", "b.txt")
+	if subs, err := g.LogSubjects("", second); err != nil || len(subs) != 2 || subs[0] != "second" || subs[1] != "first" {
+		t.Fatalf("LogSubjects(..second) = %v (%v), want [second first]", subs, err)
+	}
 
 	// Push tags/branch + fetch against the bare remote.
 	if err := g.PushTag("epoch-2099.0", false); err != nil {

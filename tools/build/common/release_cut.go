@@ -53,7 +53,8 @@ type cutGit interface {
 	PushTag(tag string, force bool) error                 // git push [-f] origin <tag>
 	CommitFile(path, message string) error                // git add <path> && git commit -m <msg>
 	PushBranch(branch string) error                       // git push origin <branch>
-	DiffChanged(fromRef, path string) (bool, error)       // git diff --quiet <ref> -- <path>
+	ResolveSHA(ref string) (string, error)                // git rev-parse <ref>^{commit}
+	LogSubjects(fromRef, toSHA string) ([]string, error)  // git log --no-merges --pretty=%s <fromRef>..<toSHA>
 }
 
 // defaultCutGit builds the production cutGit for a repo root. Tests swap it.
@@ -138,16 +139,30 @@ func (g shellGit) CommitFile(path, message string) error {
 func (g shellGit) PushBranch(branch string) error {
 	return RunIn(g.root, "git", "push", "origin", branch)
 }
-func (g shellGit) DiffChanged(fromRef, path string) (bool, error) {
-	err := RunIn(g.root, "git", "diff", "--quiet", fromRef, "--", path)
-	if err == nil {
-		return false, nil // no diff
+func (g shellGit) ResolveSHA(ref string) (string, error) {
+	// `^{commit}` peels annotated tags / branch refs to the underlying commit so
+	// callers always get a full commit SHA regardless of what kind of ref they passed.
+	return RunOutputIn(g.root, "git", "rev-parse", ref+"^{commit}")
+}
+func (g shellGit) LogSubjects(fromRef, toSHA string) ([]string, error) {
+	// `<fromRef>..<toSHA>` when there is a previous epoch, else the whole history
+	// reachable from toSHA (first release). `--no-merges` drops merge commits;
+	// `%s` is the commit subject (first line).
+	rangeArg := toSHA
+	if fromRef != "" {
+		rangeArg = fromRef + ".." + toSHA
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 {
-		return true, nil // differences present
+	out, err := RunOutputIn(g.root, "git", "log", "--no-merges", "--pretty=format:%s", rangeArg)
+	if err != nil {
+		return nil, err
 	}
-	return false, err
+	var subjects []string
+	for _, line := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			subjects = append(subjects, s)
+		}
+	}
+	return subjects, nil
 }
 
 // RemoteBranchSHA returns origin's tip for branch via `git ls-remote` (an
@@ -357,6 +372,7 @@ type gateFn func(ctx *cutContext) gateResult
 type cutContext struct {
 	root        string
 	channel     string // "next" | "stable"
+	pinnedRef   string // --sha <ref>: pin the cut to this commit instead of HEAD
 	targetSHA   string
 	targetEpoch epoch
 	lastEpoch   epoch
@@ -585,48 +601,55 @@ func gateEpochNextValidated(ctx *cutContext) gateResult {
 	return gateResult{name: name, detail: "no successful epoch-next release.yml run at " + short(ctx.targetSHA), overridable: true}
 }
 
-// gateChangelog (stable) requires a `## epoch X.Y` section present AND changed
-// vs the previous epoch tag.
-func gateChangelog(ctx *cutContext) gateResult {
-	const name = "changelog has epoch section + changed"
-	has, err := changelogHasEpoch(ctx.root, ctx.targetEpoch)
-	if err != nil {
-		return gateResult{name: name, detail: err.Error()}
-	}
-	if !has {
-		return gateResult{name: name, detail: fmt.Sprintf("docs/changelog.md missing '## epoch %s' section", ctx.targetEpoch), overridable: true}
-	}
-	if ctx.haveLast {
-		prevTag := "epoch-" + ctx.lastEpoch.String()
-		changed, err := ctx.git.DiffChanged(prevTag, "docs/changelog.md")
+// resolveTargetSHA picks the commit a cut targets: the --sha ref when pinned
+// (origin/main keeps moving under continuous development, so a cut names the
+// commit it validated rather than whatever HEAD happens to be now), else HEAD.
+func resolveTargetSHA(ctx *cutContext) (string, error) {
+	if ctx.pinnedRef != "" {
+		sha, err := ctx.git.ResolveSHA(ctx.pinnedRef)
 		if err != nil {
-			return gateResult{name: name, detail: "diff changelog vs " + prevTag + ": " + err.Error()}
+			return "", fmt.Errorf("resolve --sha %q: %w", ctx.pinnedRef, err)
 		}
-		if !changed {
-			return gateResult{name: name, detail: "docs/changelog.md unchanged since " + prevTag, overridable: true}
-		}
+		return strings.TrimSpace(sha), nil
 	}
-	return gateResult{name: name, passed: true, detail: "has '## epoch " + ctx.targetEpoch.String() + "' and changed vs previous epoch"}
+	return ctx.git.HeadSHA()
 }
 
-// changelogHasEpoch scans docs/changelog.md for a `## epoch <Y.N>` heading.
-func changelogHasEpoch(root string, e epoch) (bool, error) {
-	f, err := os.Open(filepath.Join(root, "docs", "changelog.md"))
+// generateReleaseNotes builds the mechanical release-notes body for a cut: a
+// bulleted list of non-merge commit subjects in `epoch-<last>..<targetSHA>`,
+// newest first, embedded into the annotated tag so release.yml can publish them
+// with the artifacts (--notes-from-tag). It is deliberately dumb — no grouping,
+// no enrichment. A future "smart" step (tracker-aware titles, gate/health status)
+// can replace the body without changing callers; cutting a release must never
+// depend on that step running.
+func generateReleaseNotes(ctx *cutContext) (string, error) {
+	var fromRef string
+	if ctx.haveLast {
+		fromRef = "epoch-" + ctx.lastEpoch.String()
+	}
+	subjects, err := ctx.git.LogSubjects(fromRef, ctx.targetSHA)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
+		return "", err
 	}
-	defer f.Close()
-	want := "## epoch " + e.String()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if strings.TrimSpace(sc.Text()) == want {
-			return true, nil
-		}
+	var b strings.Builder
+	plural := "s"
+	if len(subjects) == 1 {
+		plural = ""
 	}
-	return false, sc.Err()
+	if fromRef != "" {
+		fmt.Fprintf(&b, "Changes since %s (%d commit%s):\n", fromRef, len(subjects), plural)
+	} else {
+		fmt.Fprintf(&b, "Changes (%d commit%s):\n", len(subjects), plural)
+	}
+	if len(subjects) == 0 {
+		b.WriteString("\n- (no commits since the previous epoch)\n")
+		return b.String(), nil
+	}
+	b.WriteByte('\n')
+	for _, s := range subjects {
+		fmt.Fprintf(&b, "- %s\n", s)
+	}
+	return b.String(), nil
 }
 
 // ── gate 7: three-state CI ──────────────────────────────────────────────────
@@ -824,6 +847,7 @@ func runReleaseCut(root string, args []string) error {
 	channel, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("cut", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "run all gates and print the checklist, change nothing")
+	sha := fs.String("sha", "", "pin the cut to this commit/ref instead of HEAD (origin/main keeps moving)")
 	reason := fs.String("reason", "", "override failed gate(s); recorded into the tag/commit message")
 	runCI := fs.Bool("run-ci", false, "non-interactively dispatch ci.yml for platforms with no run at this SHA")
 	noCIWait := fs.Bool("no-ci-wait", false, "with --run-ci: dispatch CI then stop (re-run `cut` once green)")
@@ -834,6 +858,7 @@ func runReleaseCut(root string, args []string) error {
 	ctx := &cutContext{
 		root:        root,
 		channel:     channel,
+		pinnedRef:   *sha,
 		dryRun:      *dryRun,
 		reason:      *reason,
 		runCI:       *runCI,
@@ -861,7 +886,7 @@ func cutNext(ctx *cutContext) error {
 	if err := ctx.git.Fetch(); err != nil {
 		return fmt.Errorf("git fetch: %w", err)
 	}
-	sha, err := ctx.git.HeadSHA()
+	sha, err := resolveTargetSHA(ctx)
 	if err != nil {
 		return err
 	}
@@ -875,16 +900,26 @@ func cutNext(ctx *cutContext) error {
 		return err
 	}
 	ctx.targetEpoch = e
+	// lastEpoch scopes the release-notes range (epoch-<last>..targetSHA).
+	last, haveLast, err := highestReleasedEpoch(ctx.git)
+	if err != nil {
+		return err
+	}
+	ctx.lastEpoch, ctx.haveLast = last, haveLast
 
 	gates := []gateFn{gateCleanTree, gateReachable, gateCatalogSanity, gateDepsHosted, gateCI}
 	if err := preflight(ctx, gates); err != nil {
 		return err
 	}
+	notes, err := generateReleaseNotes(ctx)
+	if err != nil {
+		return fmt.Errorf("generate release notes: %w", err)
+	}
 	if ctx.dryRun {
-		fmt.Fprintf(ctx.stdout, "\n[dry-run] would force-move tag epoch-next → %s and push (release.yml refreshes the pre-release).\n", short(ctx.targetSHA))
+		fmt.Fprintf(ctx.stdout, "\n[dry-run] would force-move tag epoch-next → %s and push (release.yml refreshes the pre-release).\nRelease notes:\n%s", short(ctx.targetSHA), notes)
 		return nil
 	}
-	msg := tagMessage("epoch-next pre-release at "+short(ctx.targetSHA), ctx)
+	msg := tagMessage("epoch-next pre-release at "+short(ctx.targetSHA), notes, ctx)
 	if err := ctx.git.CreateTag("epoch-next", msg, ctx.targetSHA, true); err != nil {
 		return err
 	}
@@ -901,7 +936,7 @@ func cutStable(ctx *cutContext) error {
 	if err := ctx.git.Fetch(); err != nil {
 		return fmt.Errorf("git fetch: %w", err)
 	}
-	sha, err := ctx.git.HeadSHA()
+	sha, err := resolveTargetSHA(ctx)
 	if err != nil {
 		return err
 	}
@@ -938,22 +973,26 @@ func cutStable(ctx *cutContext) error {
 
 	gates := []gateFn{
 		gateCleanTree, gateReachable, gateCatalogEpoch, gateDepsHosted,
-		gateEpochRuleValid, gateStableTagAbsent, gateCI, gateEpochNextValidated, gateChangelog,
+		gateEpochRuleValid, gateStableTagAbsent, gateCI, gateEpochNextValidated,
 	}
 	if err := preflight(ctx, gates); err != nil {
 		return err
+	}
+	notes, err := generateReleaseNotes(ctx)
+	if err != nil {
+		return fmt.Errorf("generate release notes: %w", err)
 	}
 
 	tag := "epoch-" + target.String()
 	next := epoch{Year: target.Year, N: target.N + 1}
 	if ctx.dryRun {
-		fmt.Fprintf(ctx.stdout, "\n[dry-run] would: tag %s @ %s → push → bump catalog.toml to %s → commit → push current branch\n",
-			tag, short(ctx.targetSHA), next)
+		fmt.Fprintf(ctx.stdout, "\n[dry-run] would: tag %s @ %s → push → bump catalog.toml to %s → commit → push current branch\nRelease notes:\n%s",
+			tag, short(ctx.targetSHA), next, notes)
 		return nil
 	}
 
 	// tag → push → bump catalog → commit → push.
-	msg := tagMessage("Promise "+tag, ctx)
+	msg := tagMessage("Promise "+tag, notes, ctx)
 	if err := ctx.git.CreateTag(tag, msg, ctx.targetSHA, false); err != nil {
 		return err
 	}
@@ -1018,13 +1057,18 @@ func writeCatalogEpoch(root string, e epoch) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
-// tagMessage builds an annotated-tag/commit message, embedding the override
-// reason so any bypass is auditable in git history.
-func tagMessage(title string, ctx *cutContext) string {
-	if ctx.reason == "" {
-		return title
+// tagMessage builds an annotated-tag message: the title, the auto-generated
+// release notes (published by release.yml via `gh release create --notes-from-tag`),
+// then any override reason so a bypass is auditable in git history.
+func tagMessage(title, notes string, ctx *cutContext) string {
+	msg := title
+	if n := strings.TrimRight(notes, "\n"); n != "" {
+		msg += "\n\n" + n
 	}
-	return title + "\n\nGate override reason: " + ctx.reason
+	if ctx.reason != "" {
+		msg += "\n\nGate override reason: " + ctx.reason
+	}
+	return msg
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────

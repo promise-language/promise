@@ -901,6 +901,8 @@ Because the project's compiler compiles the dependency's source, an older `epoch
 
 ### 9.9 Compatibility, the Community Catalog & `promise package add`
 
+> **See also:** [`docs/community-catalog.md`](community-catalog.md) — the catalog repo format (the `modules.toml` name→URL map and the per-epoch `index/<epoch>.json` files), the `promise package build-index` / `check-epoch` tooling, the CI workflow templates, and the module-owner onboarding runbook.
+
 Compatibility is **empirical**: a module at a given commit is *compatible with epoch E* iff, built with the epoch-E compiler, it **compiles and 100% of its `` `test `` functions pass** (a parse or type error counts as a compile failure → incompatible). This is the same gate the first-party catalog uses (§4.2), generalized — and per §9.8 it is **established by running tests, never assumed**.
 
 Three tiers, distinguished by the module's **URL** (no separate flag):
@@ -941,7 +943,7 @@ The embedded catalog shadows the community catalog on a name collision; an expli
 
 > **Implementation (ad-hoc tier).** The local verdict cache lives at `<PromiseHome>/compat/`, one small JSON file per `(url, commit, epoch)` tuple, recording whether that commit compiled and passed 100% of its tests under that epoch. A verdict is keyed by URL + commit + epoch and invalidated when the compiler build changes (a rebuilt compiler can flip a source-breaking verdict within an epoch), so repeat `add`s and the diamond-dedup common case do not re-run tests. Ad-hoc verdicts are **never** published — they are private to the machine that ran them. Verification must run under the project's epoch, so `promise package add`/`update` require this compiler's epoch to match the project's (`promise use <E>` otherwise); `promise package check-upgrade <E′>` runs the verification with the epoch-E′ compiler instead.
 
-**Keeping a module up to date (module-owner side).** An owner makes their module usable on a new epoch E by: `promise use E` → `promise test`; on success, push an `epoch-E` git tag. For community-catalog modules the catalog's CI does this across all listed modules automatically and records the verdict; ad-hoc owners run it themselves (or list in the community catalog to get it). A community module **may have its own dependencies**, but its compatibility with E is transitive: if any of its deps has no E-compatible version, the module itself is incompatible with E (§9.10 applies to it too). (Contrast first-party catalog modules, which may depend only on `std` — §9.4.)
+**Keeping a module up to date (module-owner side).** An owner makes their module usable on a new epoch E by: `promise use E` → `promise test`; on success, push an `epoch-E` git tag. The helper `promise package check-epoch [<E>]` bundles the verify step (and prints the publish hint on success) so an owner can self-check before tagging — see [`docs/community-catalog.md`](community-catalog.md) §5. For community-catalog modules the catalog's CI does this across all listed modules automatically and records the verdict; ad-hoc owners run it themselves (or list in the community catalog to get it). A community module **may have its own dependencies**, but its compatibility with E is transitive: if any of its deps has no E-compatible version, the module itself is incompatible with E (§9.10 applies to it too). (Contrast first-party catalog modules, which may depend only on `std` — §9.4.)
 
 ### 9.10 When a Module Has No Compatible Version
 

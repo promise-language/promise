@@ -1,0 +1,41 @@
+# Module-owner self-verify template — COPY THIS INTO YOUR OWN MODULE REPO.
+#
+# Verifies your module against an epoch and, on success, publishes an `epoch-<E>`
+# git tag so a project on that epoch can resolve your module (module-system.md
+# §9.9, docs/community-catalog.md §5). This is the "promise use E -> promise test
+# -> git tag epoch-E" loop as one CI job.
+name: check-epoch
+
+on:
+  workflow_dispatch:
+    inputs:
+      epoch:
+        description: "Epoch to verify + tag (e.g. 2026.1)"
+        required: true
+
+permissions:
+  contents: write # to push the epoch-<E> tag
+
+jobs:
+  verify-and-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the epoch-<E> Promise toolchain
+        run: |
+          curl -fsSL https://promise-lang.org/install.sh | sh
+          echo "$HOME/.promise/bin" >> "$GITHUB_PATH"
+          promise install "${{ inputs.epoch }}"
+
+      - name: Verify this module against the epoch
+        run: promise package check-epoch "${{ inputs.epoch }}"
+
+      - name: Publish the epoch tag
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git tag "epoch-${{ inputs.epoch }}"
+          git push origin "epoch-${{ inputs.epoch }}"

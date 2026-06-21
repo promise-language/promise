@@ -7539,6 +7539,14 @@ func runPin(args []string) {
 	fmt.Printf("Pinned %s → %s\n", url, commitHash[:12])
 }
 
+// isBareName reports whether s is a bare module name (a catalog key like "json")
+// rather than a git URL or local path. Catalog names carry no path separator,
+// scheme, or drive colon, so the absence of "/" and ":" (and not being a local
+// path) distinguishes them from `github.com/x/y`, `https://…`, and `../foo`.
+func isBareName(s string) bool {
+	return !strings.Contains(s, "/") && !strings.Contains(s, ":") && !module.IsLocalPath(s)
+}
+
 // runAdd implements the `promise package add <name|url> [ref]` subcommand.
 // If the first argument matches a catalog name, resolves to its URL.
 // Otherwise treats it as a raw git URL. Writes to promise.toml.
@@ -7581,6 +7589,7 @@ func runAdd(args []string) {
 	// Check catalog (skip if no embedded catalog — treat argument as raw URL)
 	url := nameOrURL
 	label := nameOrURL
+	resolvedByCatalog := false
 	if len(embeddedCatalog) > 0 {
 		cat, err := module.ParseCatalog(embeddedCatalog)
 		if err != nil {
@@ -7594,7 +7603,35 @@ func runAdd(args []string) {
 			}
 			url = entry.URL
 			label = fmt.Sprintf("%s (%s)", nameOrURL, url)
+			resolvedByCatalog = true
 		}
+	}
+
+	// Community catalog (§9.9 step 4): a bare NAME not found in the embedded
+	// catalog resolves through the living community catalog's per-epoch compat
+	// index. The CI-recorded verdict is trusted directly — no local test run
+	// (§9.9). An explicit URL or ref disambiguates to the ad-hoc path and bypasses
+	// this; the embedded catalog already shadowed community on a name collision.
+	if !resolvedByCatalog && explicitRef == "" && isBareName(nameOrURL) {
+		fmt.Fprintf(os.Stderr, "Resolving %s via community catalog for epoch %s...\n", nameOrURL, cfg.Epoch)
+		curl, ccommit, found, cerr := resolveCommunity(nameOrURL, cfg.Epoch)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", cerr)
+			os.Exit(1)
+		}
+		if found {
+			tomlPath := filepath.Join(cfg.Dir, "promise.toml")
+			if err := module.SetRequire(tomlPath, curl, ccommit); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Added %s (community: %s) → %s\n", nameOrURL, curl, shortCommit(ccommit))
+			return
+		}
+		// Not listed in any catalog → not name-addressable (§9.9 step 5).
+		fmt.Fprintf(os.Stderr, "error: '%s' is not a first-party or community catalog module\n", nameOrURL)
+		fmt.Fprintln(os.Stderr, "  hint: add it by git URL — promise package add <git-url> [ref]")
+		os.Exit(1)
 	}
 
 	// Verification runs under the project's epoch — use this compiler only if it
@@ -7696,6 +7733,8 @@ func runPackage(args []string) {
 		fmt.Fprintln(os.Stderr, "  search <keyword>             Search the catalog")
 		fmt.Fprintln(os.Stderr, "  pin <url> [ref]              Resolve + pin a dependency")
 		fmt.Fprintln(os.Stderr, "  check-upgrade <epoch>        Preview which dependencies support a target epoch")
+		fmt.Fprintln(os.Stderr, "  check-epoch [epoch]          Verify THIS module against an epoch (owner self-check)")
+		fmt.Fprintln(os.Stderr, "  build-index <dir> <epoch>    (CI) verify catalog modules + write the compat index")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -7711,8 +7750,13 @@ func runPackage(args []string) {
 		runPin(args[1:])
 	case "check-upgrade":
 		runPackageCheckUpgrade(args[1:])
+	case "check-epoch":
+		runPackageCheckEpoch(args[1:])
+	case "build-index":
+		runPackageBuildIndex(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown package subcommand: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, "usage: promise package <add|remove|update|search|pin|check-upgrade|check-epoch|build-index>")
 		os.Exit(1)
 	}
 }
@@ -7896,13 +7940,33 @@ func runPkgUpdate(args []string) {
 			fmt.Printf("  %s: skipped (non-git source)\n", e.label)
 			continue
 		}
-		ensureCompiler()
-		fmt.Fprintf(os.Stderr, "Checking %s...\n", e.label)
-		warn := func(msg string) { fmt.Fprintf(os.Stderr, "  %s\n", msg) }
-		newCommit, err := resolveEpochAware(compilerBin, cfg.Epoch, e.label, e.url, "", warn)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
-			continue
+
+		// Community modules (§9.9) re-resolve through the FRESH community index
+		// (authoritative, no local test run) rather than the generic epoch-tag
+		// walk-back. Falls through to the engine path if the URL is no longer
+		// listed in the community catalog.
+		var newCommit string
+		if module.ModuleTier(e.url) == module.TierCommunity {
+			fmt.Fprintf(os.Stderr, "Checking %s (community catalog)...\n", e.label)
+			c, found, cerr := resolveCommunityByURL(e.url, cfg.Epoch)
+			if cerr != nil {
+				fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, cerr)
+				continue
+			}
+			if found {
+				newCommit = c
+			}
+		}
+		if newCommit == "" {
+			ensureCompiler()
+			fmt.Fprintf(os.Stderr, "Checking %s...\n", e.label)
+			warn := func(msg string) { fmt.Fprintf(os.Stderr, "  %s\n", msg) }
+			c, err := resolveEpochAware(compilerBin, cfg.Epoch, e.label, e.url, "", warn)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
+				continue
+			}
+			newCommit = c
 		}
 
 		if newCommit == e.currentCommit {

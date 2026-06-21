@@ -1,0 +1,46 @@
+# Per-epoch compatibility matrix — the authoritative community compat record.
+#
+# Runs `promise package build-index` for the current stable epoch across every
+# module in modules.toml, then commits the updated index/<epoch>.json + matrix.md
+# back to the catalog repo. This removes the per-user local test run for listed
+# modules (docs/community-catalog.md §4).
+name: compat-matrix
+
+on:
+  push:
+    branches: [main]
+    paths: ["modules.toml"]
+  schedule:
+    - cron: "0 6 * * *" # daily — catch modules that newly publish an epoch tag
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the stable Promise toolchain
+        run: |
+          curl -fsSL https://promise-lang.org/install.sh | sh
+          echo "$HOME/.promise/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve the stable epoch
+        id: epoch
+        run: echo "epoch=$(promise version --epoch)" >> "$GITHUB_OUTPUT"
+
+      - name: Build the compatibility index
+        run: promise package build-index . "${{ steps.epoch.outputs.epoch }}"
+
+      - name: Commit the updated index + matrix
+        run: |
+          git config user.name "promise-community-bot"
+          git config user.email "bot@promise-community.org"
+          git add index/ matrix.md
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: update compat index for epoch ${{ steps.epoch.outputs.epoch }}"
+            git push
+          fi

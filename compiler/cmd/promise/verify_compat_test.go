@@ -184,6 +184,49 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 	}
 }
 
+// TestVerifyModuleCompatTransitiveNamedDepIncompatible mirrors the [require] case
+// but via a [require.NAME] entry, covering the NamedRequire arm of verifyDeps —
+// the §9.10 transitive rule must hold for named dependencies too. The dep again
+// fails cheaply (no tests), so no compiler run is needed.
+func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	// Dependency: compiles but has no tests → incompatible.
+	dep := makeWorkRepo(t)
+	os.WriteFile(filepath.Join(dep, "promise.toml"), []byte("[module]\nname = \"dep\"\nepoch = \"2026.0\"\n"), 0644)
+	os.WriteFile(filepath.Join(dep, "dep.pr"), []byte("dep_value() int `public { return 1; }\n"), 0644)
+	gitRun(t, dep, "add", ".")
+	gitRun(t, dep, "commit", "-m", "init")
+	depCommit := gitRun(t, dep, "rev-parse", "HEAD")
+
+	// Parent pins the broken dep via a NAMED [require.dep] section.
+	parent := makeWorkRepo(t)
+	os.WriteFile(filepath.Join(parent, "promise.toml"),
+		[]byte("[module]\nname = \"parent\"\nepoch = \"2026.0\"\n\n[require.dep]\nurl = \""+dep+"\"\ncommit = \""+depCommit+"\"\n"), 0644)
+	os.WriteFile(filepath.Join(parent, "parent.pr"), []byte("parent_value() int `public { return 2; }\n"), 0644)
+	os.WriteFile(filepath.Join(parent, "parent_test.pr"), []byte("ok() `test { assert(parent_value() == 2, \"ok\"); }\n"), 0644)
+	gitRun(t, parent, "add", ".")
+	gitRun(t, parent, "commit", "-m", "init")
+	parentCommit := gitRun(t, parent, "rev-parse", "HEAD")
+
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{})
+	if err != nil {
+		t.Fatalf("verifyModuleCompat: %v", err)
+	}
+	if ok {
+		t.Error("parent must be incompatible when a named-required dep is incompatible")
+	}
+	if !strings.Contains(reason, "transitive dependency") {
+		t.Errorf("reason = %q, want a transitive-dependency explanation", reason)
+	}
+}
+
 // TestProjectEpochCompilerMatchAndMismatch covers both arms of projectEpochCompiler:
 // an epoch that differs from this compiler's is rejected with a `promise use` hint;
 // a matching epoch returns the verifying binary.

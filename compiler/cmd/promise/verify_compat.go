@@ -91,33 +91,13 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
 		return false, reason, nil
 	}
-	for depURL, depCommit := range cfg.Require {
-		if depCommit == "" {
-			continue // non-git source (sha256) — not epoch-resolved here
-		}
-		depOK, depReason, derr := verifyModuleCompat(compilerBin, depURL, depCommit, epoch, visiting)
-		if derr != nil {
-			return false, "", derr
-		}
-		if !depOK {
-			reason = fmt.Sprintf("transitive dependency %s@%s is not compatible with epoch %s: %s", depURL, shortCommit(depCommit), epoch, depReason)
-			_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
-			return false, reason, nil
-		}
+	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, visiting)
+	if derr != nil {
+		return false, "", derr
 	}
-	for _, entry := range cfg.NamedRequire {
-		if entry.URL == "" || entry.Commit == "" {
-			continue
-		}
-		depOK, depReason, derr := verifyModuleCompat(compilerBin, entry.URL, entry.Commit, epoch, visiting)
-		if derr != nil {
-			return false, "", derr
-		}
-		if !depOK {
-			reason = fmt.Sprintf("transitive dependency %s@%s is not compatible with epoch %s: %s", entry.URL, shortCommit(entry.Commit), epoch, depReason)
-			_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
-			return false, reason, nil
-		}
+	if !depsOK {
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: depReason})
+		return false, depReason, nil
 	}
 
 	hasTests, herr := moduleHasTests(modDir)
@@ -141,6 +121,155 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 	}
 	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: compatible, FailReason: reason})
 	return compatible, reason, nil
+}
+
+// verifyDeps verifies every pinned transitive git dependency in cfg against
+// epoch (§9.8/§9.10 apply transitively). It returns (false, reason) for the first
+// incompatible dependency; non-git (sha256) and incomplete named entries are
+// skipped. Shared by verifyModuleCompat (remote modules) and
+// verifyLocalModuleCompat (the cwd module on `package check-epoch`) so the
+// transitive-compat rule lives in exactly one place.
+func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting map[string]bool) (ok bool, reason string, err error) {
+	for depURL, depCommit := range cfg.Require {
+		if depCommit == "" {
+			continue // non-git source (sha256) — not epoch-resolved here
+		}
+		depOK, depReason, derr := verifyModuleCompat(compilerBin, depURL, depCommit, epoch, visiting)
+		if derr != nil {
+			return false, "", derr
+		}
+		if !depOK {
+			return false, fmt.Sprintf("transitive dependency %s@%s is not compatible with epoch %s: %s", depURL, shortCommit(depCommit), epoch, depReason), nil
+		}
+	}
+	for _, entry := range cfg.NamedRequire {
+		if entry.URL == "" || entry.Commit == "" {
+			continue
+		}
+		depOK, depReason, derr := verifyModuleCompat(compilerBin, entry.URL, entry.Commit, epoch, visiting)
+		if derr != nil {
+			return false, "", derr
+		}
+		if !depOK {
+			return false, fmt.Sprintf("transitive dependency %s@%s is not compatible with epoch %s: %s", entry.URL, shortCommit(entry.Commit), epoch, depReason), nil
+		}
+	}
+	return true, "", nil
+}
+
+// verifyLocalModuleCompat establishes whether the module in the local directory
+// modDir is compatible with epoch (§9.9), the same gate as verifyModuleCompat but
+// for an on-disk module (the owner's cwd) rather than a fetched remote: its pinned
+// transitive deps are verified first, then `compilerBin test modDir` must pass
+// 100% of the module's `test` functions. Used by `promise package check-epoch`.
+func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason string, err error) {
+	cfg, perr := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
+	if perr != nil {
+		return false, fmt.Sprintf("invalid promise.toml: %v", perr), nil
+	}
+	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, map[string]bool{})
+	if derr != nil {
+		return false, "", derr
+	}
+	if !depsOK {
+		return false, depReason, nil
+	}
+
+	hasTests, herr := moduleHasTests(modDir)
+	if herr != nil {
+		return false, "", herr
+	}
+	if !hasTests {
+		return false, "module has no `test` functions (no *_test.pr) — compatibility cannot be established empirically (§9.9)", nil
+	}
+
+	cmd := exec.Command(compilerBin, "test", modDir)
+	cmd.Env = append(os.Environ(), "PROMISE_NO_EPOCH_WARN=1")
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return false, lastLines(string(out), 20), nil
+	}
+	return true, "", nil
+}
+
+// fetchCommunityCatalog refreshes + parses the community catalog's name→URL map
+// (§9.9). Returns the checkout directory (root of index/<epoch>.json) and the
+// parsed modules.toml. A catalog with no modules.toml yet yields an empty catalog
+// (not an error) so resolution cleanly falls through to the ad-hoc path.
+func fetchCommunityCatalog() (dir string, cc *module.CommunityCatalog, err error) {
+	dir, err = module.FetchCommunityCatalog(true)
+	if err != nil {
+		return "", nil, fmt.Errorf("fetching community catalog: %w", err)
+	}
+	data, rerr := os.ReadFile(filepath.Join(dir, "modules.toml"))
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return dir, &module.CommunityCatalog{Modules: map[string]*module.CommunityEntry{}}, nil
+		}
+		return "", nil, rerr
+	}
+	cc, perr := module.ParseCommunityModules(data)
+	if perr != nil {
+		return "", nil, fmt.Errorf("invalid community catalog modules.toml: %w", perr)
+	}
+	return dir, cc, nil
+}
+
+// communityIndexPin returns the verified commit recorded for module name under
+// epoch in the fetched community catalog at dir — the CI index IS the verdict for
+// community modules (§9.9, no local test run). When the module has no verified
+// entry for the epoch it returns a *module.NoCompatibleVersionError (§9.10),
+// populated with the highest epoch the module IS recorded for.
+func communityIndexPin(dir, name, epoch string) (commit string, err error) {
+	idx, ierr := module.LoadCompatIndex(dir, epoch)
+	if ierr != nil {
+		return "", ierr
+	}
+	if ie, ok := idx.Verified(name); ok {
+		return ie.Commit, nil
+	}
+	hi, hiTag := module.HighestIndexedEpoch(dir, name)
+	return "", &module.NoCompatibleVersionError{Module: name, Epoch: epoch, HighestVerifiedEpoch: hi, HighestTag: hiTag}
+}
+
+// resolveCommunity resolves a bare module NAME through the community catalog
+// (§9.9 step 4). found is false when name is not listed (caller falls through to
+// the ad-hoc URL path); when listed, it returns the entry's URL and the
+// index-verified commit, or a *module.NoCompatibleVersionError (§9.10).
+func resolveCommunity(name, epoch string) (url, commit string, found bool, err error) {
+	dir, cc, ferr := fetchCommunityCatalog()
+	if ferr != nil {
+		return "", "", false, ferr
+	}
+	entry := cc.Lookup(name)
+	if entry == nil {
+		return "", "", false, nil
+	}
+	c, cerr := communityIndexPin(dir, name, epoch)
+	if cerr != nil {
+		return entry.URL, "", true, cerr
+	}
+	return entry.URL, c, true, nil
+}
+
+// resolveCommunityByURL re-resolves an existing community [require] pin (keyed by
+// URL) through the fresh index on `pkg update`. found is false when the URL is no
+// longer listed in the community catalog (caller falls back to the generic
+// epoch-tag engine path).
+func resolveCommunityByURL(url, epoch string) (commit string, found bool, err error) {
+	dir, cc, ferr := fetchCommunityCatalog()
+	if ferr != nil {
+		return "", false, ferr
+	}
+	entry := cc.LookupByURL(url)
+	if entry == nil {
+		return "", false, nil
+	}
+	c, cerr := communityIndexPin(dir, entry.Name, epoch)
+	if cerr != nil {
+		return "", true, cerr
+	}
+	return c, true, nil
 }
 
 // resolveEpochAware picks an epoch-appropriate commit for a module and verifies it
@@ -255,6 +384,12 @@ func projectEpochCompiler(projectEpoch string) (string, error) {
 // the running compiler's own epoch, the running binary is used directly — no need
 // to locate or download a separate install.
 func epochCompilerBin(epoch string) (string, error) {
+	// In-process tests run as the test binary, not a real Promise compiler, so
+	// they redirect to a freshly built `promise` via this hook (same override the
+	// remote-module verifier uses).
+	if testVerifyCompilerBin != "" {
+		return testVerifyCompilerBin, nil
+	}
 	if myEpoch, err := module.CompilerEpoch(embeddedCatalog); err == nil && myEpoch == epoch {
 		if exe, err := os.Executable(); err == nil {
 			return exe, nil

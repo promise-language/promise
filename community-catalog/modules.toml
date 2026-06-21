@@ -1,0 +1,15 @@
+# Community module catalog — the name → URL map.
+#
+# Each [modules.NAME] entry makes a community module name-addressable, so users
+# can `promise package add NAME` instead of pasting a full git URL. Getting listed
+# is a PR adding an entry here; CI then verifies the module each epoch and records
+# the verdict in index/<epoch>.json (see docs/community-catalog.md).
+#
+# Format (every entry MUST have a url; no commit/epoch here — versioning is
+# per-epoch in the compatibility index):
+#
+#   [modules.NAME]
+#   url = "https://github.com/promise-community/NAME"
+#   description = "One-line summary"
+#
+# (No modules are listed yet — add entries below.)

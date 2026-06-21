@@ -1,0 +1,38 @@
+# Pre-release nudge (§9.10) — run the matrix against the upcoming epoch before it
+# ships, so module authors are warned that their module doesn't support it yet.
+#
+# Uses `-report`: it never fails the run (it cannot force an unmaintained module to
+# update), it only surfaces the unsupported list as a job summary.
+name: prerelease-nudge
+
+on:
+  workflow_dispatch:
+    inputs:
+      next_epoch:
+        description: "The upcoming numeric epoch (e.g. 2026.2)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the next (pre-release) Promise toolchain
+        run: |
+          curl -fsSL https://promise-lang.org/install.sh | sh
+          echo "$HOME/.promise/bin" >> "$GITHUB_PATH"
+          promise install next
+
+      - name: Report modules without support for the next epoch
+        run: |
+          promise package build-index . "${{ inputs.next_epoch }}" -report | tee report.txt
+          {
+            echo "## Modules not yet compatible with epoch ${{ inputs.next_epoch }}"
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

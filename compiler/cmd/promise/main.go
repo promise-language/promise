@@ -140,7 +140,21 @@ var embeddedExamples embed.FS
 // live in commands.go (T1006). Requested help → stdout/exit 0; usage errors →
 // stderr/exit ≠ 0 with a short pointer to `--help`.
 
-func printVersion() {
+// versionInfo is the authoritative version/identity report (T1101). commit is
+// the full git SHA the binary was built from; build is the SHA-256 of the
+// installed release asset (the rolling next-channel identity, empty off next).
+type versionInfo struct {
+	Version string `json:"version"`
+	Channel string `json:"channel"`
+	Commit  string `json:"commit,omitempty"`
+	Build   string `json:"build,omitempty"`
+}
+
+// gatherVersionInfo collects the version, update channel, git commit, and
+// (on the next channel) the installed build-id. It tolerates errors so that
+// `promise version` never fails just because the home dir is unreadable: the
+// channel defaults to stable and the build to empty (T1101).
+func gatherVersionInfo() versionInfo {
 	v := version
 	if v == "" {
 		// Fallback: use embedded catalog epoch.
@@ -150,11 +164,32 @@ func printVersion() {
 			v = "unknown"
 		}
 	}
-	if commit != "" {
-		fmt.Printf("promise version %s (commit %s)\n", v, commit)
-		return
+	channel, err := module.UpdateChannel()
+	if err != nil {
+		channel = module.ChannelStable
 	}
-	fmt.Printf("promise version %s\n", v)
+	info := versionInfo{Version: v, Channel: channel, Commit: commit}
+	// Mirror `update check`: the build identity is meaningful only on the
+	// rolling next channel, where it is ReadEpochBuildID("next") — the exact
+	// call update check compares localBuild against (T1101).
+	if channel == module.ChannelNext {
+		if b, err := module.ReadEpochBuildID(module.ChannelNext); err == nil {
+			info.Build = b
+		}
+	}
+	return info
+}
+
+func printVersion() {
+	info := gatherVersionInfo()
+	parts := []string{"channel " + info.Channel}
+	if info.Commit != "" {
+		parts = append(parts, "commit "+shortBuildID(info.Commit))
+	}
+	if info.Build != "" {
+		parts = append(parts, "build "+shortBuildID(info.Build))
+	}
+	fmt.Printf("promise version %s (%s)\n", info.Version, strings.Join(parts, ", "))
 }
 
 func main() {
@@ -211,6 +246,14 @@ func main() {
 		// -commit. Prints an empty line when the binary carries no stamp.
 		if len(os.Args) > 2 && os.Args[2] == "-commit" {
 			fmt.Println(commit)
+			return
+		}
+		// `promise version --json` emits {version, channel, commit, build} with
+		// full (non-shortened) hashes — one authoritative source for tooling
+		// (T1101). Args are normalized so --json → -json.
+		if len(os.Args) > 2 && os.Args[2] == "-json" {
+			enc := json.NewEncoder(os.Stdout)
+			_ = enc.Encode(gatherVersionInfo())
 			return
 		}
 		printVersion()

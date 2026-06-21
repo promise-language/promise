@@ -83,7 +83,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise doctor          Check environment health (-json, -fix, -network, -dev, -repair)
   promise bind <format>   Generate bindings from WIT or WebIDL (e.g., promise bind wit api.wit)
   promise targets         List supported compile targets (e.g. -target wasm32-wasi)
-  promise version         Compiler version
+  promise version         Compiler version, channel, commit, build (-json, -commit)
   promise init            Create a new project or module (writes promise.toml)
   promise build           Compile the project/file in the current directory
   promise build <dir>     Compile the project/file in <dir> (after promise init)

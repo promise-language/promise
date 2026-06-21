@@ -9962,7 +9962,29 @@ func (c *Compiler) lookupTypeLayout(typ types.Type) *TypeDeclLayout {
 }
 
 // lookupEnumLayout finds the layout for an enum, handling Instance and monoCtx.
+// unwrapRefsType strips a chain of &/~ (SharedRef/MutRef) wrappers off a type,
+// returning the underlying type. Used wherever a borrow must resolve to the same
+// layout/name as the borrowed value (T0639, T1018).
+func unwrapRefsType(typ types.Type) types.Type {
+	for {
+		if ref, ok := typ.(*types.MutRef); ok {
+			typ = ref.Elem()
+			continue
+		}
+		if ref, ok := typ.(*types.SharedRef); ok {
+			typ = ref.Elem()
+			continue
+		}
+		return typ
+	}
+}
+
 func (c *Compiler) lookupEnumLayout(typ types.Type) *TypeDeclLayout {
+	// T1018: unwrap borrows so a borrowed generic enum subject
+	// (e.g. Maybe[string]& from Ref.borrow) resolves to its monomorphized
+	// layout, not the bare generic enum layout (which has the wrong variant
+	// data layout).
+	typ = unwrapRefsType(typ)
 	if inst, ok := typ.(*types.Instance); ok {
 		return c.monoEnumLayouts[monoName(inst)]
 	}
@@ -10032,17 +10054,7 @@ func (c *Compiler) resolveTypeName(typ types.Type) string {
 	// instance (NBox[int]), not the bare generic owner (NBox). For
 	// non-generic types the unwrapped Named yields the same name; for bare
 	// instances there is no ref to strip.
-	for {
-		if ref, ok := typ.(*types.MutRef); ok {
-			typ = ref.Elem()
-			continue
-		}
-		if ref, ok := typ.(*types.SharedRef); ok {
-			typ = ref.Elem()
-			continue
-		}
-		break
-	}
+	typ = unwrapRefsType(typ)
 	if inst, ok := typ.(*types.Instance); ok {
 		return monoName(inst)
 	}

@@ -570,7 +570,9 @@ func (c *Checker) subjectIsMovableOwnedLocal(subject ast.Expr, subjectType types
 // enumVariantSubst returns the variant lookup and type-arg substitution for a
 // destructure pattern over subjectType. (T0482)
 func enumDestructureSubst(subjectType types.Type, enum *types.Enum) map[*types.TypeParam]types.Type {
-	if inst, ok := subjectType.(*types.Instance); ok {
+	// T1018: strip borrows so a borrowed generic enum subject still yields the
+	// concrete type-arg substitution for the handle-field double-free gate.
+	if inst, ok := stripRef(subjectType).(*types.Instance); ok {
 		if origin, ok := inst.Origin().(*types.Enum); ok && origin == enum {
 			return types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		}

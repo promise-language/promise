@@ -3175,7 +3175,9 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 		}
 		// T0482/T0623: a binding that copies out a variant field owning a
 		// single-owner handle double-frees unless the subject is an owned
-		// local that can be moved (then the binding takes ownership).
+		// local that can be moved (then the binding takes ownership). Pass the
+		// original (un-stripped) subjectType so the move-out gate still sees a
+		// borrow (SharedRef/MutRef) and forbids moving a handle out of it (T1018).
 		c.checkDestructureNoHandleField(p.Pos(), subject, subjectType, v, p.Bindings, enumDestructureSubst(subjectType, enum))
 
 	case *ast.EnumVariantMatchPattern:
@@ -3221,7 +3223,9 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 		// Short form: Ok(val) — check if it's a variant of the match subject enum
 		if subjectType != nil {
 			var enum *types.Enum
-			switch st := subjectType.(type) {
+			// T1018: strip borrows so the short form resolves the enum through
+			// a borrow (SharedRef/MutRef) the same way the by-value path does.
+			switch st := stripRef(subjectType).(type) {
 			case *types.Enum:
 				enum = st
 			case *types.Instance:
@@ -3236,7 +3240,9 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 							p.Name, v.NumFields(), len(p.Bindings))
 					}
 					// T0482/T0623: same handle-copy double-free / move-out gate as
-					// the qualified EnumDestructureMatchPattern form.
+					// the qualified EnumDestructureMatchPattern form. Pass the
+					// original (un-stripped) subjectType so the move-out gate still
+					// sees the borrow and forbids moving a handle out of it.
 					c.checkDestructureNoHandleField(p.Pos(), subject, subjectType, v, p.Bindings, enumDestructureSubst(subjectType, enum))
 					return
 				}
@@ -3306,6 +3312,9 @@ func (c *Checker) lookupVariantFields(variantName string, subjectType types.Type
 	var enum *types.Enum
 	var subst map[*types.TypeParam]types.Type
 
+	// T1018: strip borrows so a borrowed enum subject resolves to the enum
+	// and its concrete type args (mirrors the by-value path).
+	subjectType = stripRef(subjectType)
 	switch st := subjectType.(type) {
 	case *types.Enum:
 		enum = st
@@ -3537,9 +3546,11 @@ func (c *Checker) insertEnumDestructureBindings(p *ast.EnumDestructureMatchPatte
 		return
 	}
 
-	// Build substitution map if the subject is a generic instance of this enum
+	// Build substitution map if the subject is a generic instance of this enum.
+	// T1018: strip borrows so a borrowed generic enum subject still yields the
+	// concrete type args (otherwise payload bindings get the raw param type T).
 	var subst map[*types.TypeParam]types.Type
-	if inst, ok := subjectType.(*types.Instance); ok {
+	if inst, ok := stripRef(subjectType).(*types.Instance); ok {
 		if origin, ok := inst.Origin().(*types.Enum); ok && origin == enum {
 			subst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		}

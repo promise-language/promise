@@ -14176,6 +14176,151 @@ func TestMatchExpressionPatternRequiresWildcard(t *testing.T) {
 	expectError(t, errs, "must include a wildcard")
 }
 
+// T1018: matching a borrowed generic enum (Maybe[string]& via Ref.borrow)
+// must resolve the enum and bind the payload at its concrete type — mirroring
+// the borrowed non-generic case — not reject it with "pattern type does not
+// match subject type" / "undefined: v".
+func TestMatchBorrowedGenericEnumBindsConcreteType(t *testing.T) {
+	// `v` must bind as `string` (so `.len` resolves), not as the param `T`.
+	checkOK(t, `
+		enum Maybe[T] { None, Some(T value) }
+		test() {
+			r := Ref[Maybe[string]](Maybe[string].Some("hi"));
+			b := r.borrow;
+			n := match b {
+				Maybe.Some(v) => v.len,
+				_ => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchBorrowedGenericEnumExplicitTypeArgs(t *testing.T) {
+	// Explicit type args in the pattern (Maybe[string].Some(v)) parse and check,
+	// both by value and through a borrow.
+	checkOK(t, `
+		enum Maybe[T] { None, Some(T value) }
+		by_value() {
+			m := Maybe[string].Some("hi");
+			n := match m {
+				Maybe[string].Some(v) => v.len,
+				_ => 0,
+			};
+		}
+		through_borrow() {
+			r := Ref[Maybe[string]](Maybe[string].Some("hi"));
+			b := r.borrow;
+			n := match b {
+				Maybe[string].Some(v) => v.len,
+				_ => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchExhaustiveBorrowedEnumNoWildcard(t *testing.T) {
+	// Exhaustive match (no `_`) over a borrowed enum must compile — extractEnum
+	// must unwrap the borrow so it is not falsely treated as a non-enum subject
+	// that requires a wildcard. Covers both generic and non-generic enums.
+	checkOK(t, `
+		enum Maybe[T] { None, Some(T value) }
+		enum C { Named(string s) }
+		gen() {
+			r := Ref[Maybe[string]](Maybe[string].Some("hi"));
+			b := r.borrow;
+			n := match b {
+				Maybe.None => 0,
+				Maybe.Some(v) => v.len,
+			};
+		}
+		nongen() {
+			r := Ref[C](C.Named("hi"));
+			b := r.borrow;
+			n := match b {
+				C.Named(v) => v.len,
+			};
+		}
+	`)
+}
+
+// T1018: the bug repro is a *parameter* borrow. A plain `Maybe[string] e`
+// parameter is a shared (read-only) borrow, and a `Maybe[string] ~e` parameter
+// is a mutable borrow (MutRef). Both must resolve the generic enum and bind the
+// payload at its concrete type. Exercises the SharedRef and MutRef stripRef
+// branches in checkMatchPattern/lookupVariantFields and extractEnum.
+func TestMatchBorrowedGenericEnumParameter(t *testing.T) {
+	checkOK(t, `
+		enum Maybe[T] { None, Some(T value) }
+		check_shared(Maybe[string] e) int {
+			return match e {
+				Maybe[string].Some(v) => v.len,
+				_ => 0,
+			};
+		}
+		check_mut(Maybe[string] ~e) int {
+			return match e {
+				Maybe.Some(v) => v.len,
+				Maybe.None => 0,
+			};
+		}
+	`)
+}
+
+// T1018: the *bare* short form `Some(v)` (no enum prefix) over a borrowed
+// generic enum subject must resolve through the borrow exactly like the
+// qualified `Maybe.Some(v)` form. Exercises the stripRef branch in the
+// ShortDestructureMatchPattern case (expr.go) — distinct from the qualified
+// EnumDestructureMatchPattern path covered above.
+func TestMatchBorrowedGenericEnumBareShortForm(t *testing.T) {
+	checkOK(t, `
+		enum Maybe[T] { None, Some(T value) }
+		test() {
+			r := Ref[Maybe[string]](Maybe[string].Some("hi"));
+			b := r.borrow;
+			n := match b {
+				Some(v) => v.len,
+				None => 0,
+			};
+		}
+	`)
+}
+
+// T1018: stripping the borrow for enum/variant resolution must NOT relax the
+// T0482/T0623 move-out gate — checkDestructureNoHandleField is still passed the
+// *un-stripped* subjectType, so moving a single-owner handle (Task) out of a
+// borrowed *generic* enum stays rejected. Covers both the qualified
+// explicit-type-args form and the bare short form (the two call sites that pass
+// the original subjectType through after the T1018 stripRef change).
+func TestT1018_BorrowedGenericEnumHandleMoveOutRejected(t *testing.T) {
+	// Qualified explicit-type-args form: BoxG[int].Has(x, h).
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum BoxG[T] { Empty, Has(T v, Task[int] handle) }
+		consume(BoxG[int] e) {
+			match e {
+				BoxG.Empty => assert(true, "empty"),
+				BoxG[int].Has(x, h) => assert(true, "has"),
+			}
+		}
+	`)
+	expectError(t, errs, "cannot destructure variant Has")
+	expectError(t, errs, "owned local")
+
+	// Bare short form: Has(x, h).
+	errsShort := checkErrs(t, `
+		worker() int { return 42; }
+		enum BoxG[T] { Empty, Has(T v, Task[int] handle) }
+		consume(BoxG[int] e) {
+			match e {
+				Empty => assert(true, "empty"),
+				Has(x, h) => assert(true, "has"),
+			}
+		}
+	`)
+	expectError(t, errsShort, "cannot destructure variant Has")
+	expectError(t, errsShort, "owned local")
+}
+
 // --- Type Argument Inference Tests ---
 
 func TestInferGenericFuncFromIntArg(t *testing.T) {

@@ -143,6 +143,12 @@ func extractEnum(typ types.Type) *types.Enum {
 		if e, ok := t.Origin().(*types.Enum); ok {
 			return e
 		}
+	case *types.SharedRef:
+		// T1018: unwrap borrows so a borrowed enum subject (generic or not)
+		// is still recognized as an enum for exhaustiveness/pattern checks.
+		return extractEnum(t.Elem())
+	case *types.MutRef:
+		return extractEnum(t.Elem())
 	}
 	return nil
 }

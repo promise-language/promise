@@ -6823,8 +6823,11 @@ func (c *Compiler) enumInstanceHasDrop(subjectType types.Type, enum *types.Enum)
 	if enum.HasDrop() || enum.NeedsSynthDrop() {
 		return true
 	}
-	// Check for codegen-time mono synthesized drop (generic enums with droppable TypeParam fields)
-	if inst, ok := subjectType.(*types.Instance); ok {
+	// Check for codegen-time mono synthesized drop (generic enums with droppable TypeParam fields).
+	// T1018: strip borrows so a borrowed generic enum subject (Maybe[string]& from
+	// Ref.borrow) still detects the mono drop — otherwise destructured fields are
+	// not dup'd and the binding aliases the borrowed payload (double-free).
+	if inst, ok := unwrapRefsType(subjectType).(*types.Instance); ok {
 		mangledName := mangleMethodName(monoName(inst), "drop", false)
 		_, ok := c.funcs[mangledName]
 		return ok

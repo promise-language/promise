@@ -1,0 +1,126 @@
+// T1018: matching a borrowed *generic* enum (Maybe[string]& produced by
+// Ref[Maybe[string]].borrow) must behave like matching a borrowed non-generic
+// enum — the variant resolves, the payload binds at its concrete type, and the
+// borrowed payload is read-through (dup'd, never moved out of the borrow).
+// Builds on T1003 (the runtime double-free fix for the borrowed non-generic
+// case). Zero leaks (T0067) verifies no double-free on the borrow path.
+enum Maybe[T] {
+  None, Some(T value),
+}
+
+make_heap_string() string {
+  // Non-literal string so the dup/drop path is real (literals are .rodata).
+  return "hel" + "lo";
+}
+
+// (a) short form `Maybe.Some(v)` over a borrowed generic enum.
+test_borrowed_generic_short_form() `test {
+  r := Ref[Maybe[string]](Maybe[string].Some(make_heap_string()));
+  b := r.borrow;
+  n := match b {
+    Maybe.Some(v) => v.len,
+    Maybe.None => 0,
+  };
+  assert(n == 5, "short-form match binds borrowed payload");
+}
+
+// (b) explicit type-args form `Maybe[string].Some(v)` over a borrow.
+test_borrowed_generic_explicit_type_args() `test {
+  r := Ref[Maybe[string]](Maybe[string].Some(make_heap_string()));
+  b := r.borrow;
+  n := match b {
+    Maybe[string].Some(v) => v.len,
+    _ => 0,
+  };
+  assert(n == 5, "explicit-type-args match binds borrowed payload");
+}
+
+// (c) exhaustive (no wildcard) over a borrowed generic enum.
+test_borrowed_generic_exhaustive_no_wildcard() `test {
+  r := Ref[Maybe[string]](Maybe[string].Some(make_heap_string()));
+  b := r.borrow;
+  n := match b {
+    Maybe.None => 0,
+    Maybe.Some(v) => v.len,
+  };
+  assert(n == 5, "exhaustive no-wildcard match over borrowed generic enum");
+}
+
+// (d) with a wildcard arm.
+test_borrowed_generic_with_wildcard() `test {
+  r := Ref[Maybe[string]](Maybe[string].None);
+  b := r.borrow;
+  n := match b {
+    Maybe.Some(v) => v.len,
+    _ => -1,
+  };
+  assert(n == -1, "wildcard arm fires for None through borrow");
+}
+
+// Explicit type-args also parse and check by value (the construction-symmetric
+// form lowering to the same destructure pattern).
+test_by_value_explicit_type_args() `test {
+  m := Maybe[string].Some(make_heap_string());
+  n := match m {
+    Maybe[string].Some(v) => v.len,
+    _ => 0,
+  };
+  assert(n == 5, "by-value explicit-type-args match");
+}
+
+// Non-generic borrowed enum still works (regression guard for extractEnum).
+enum C {
+  Named(string s),
+}
+
+test_borrowed_non_generic_exhaustive() `test {
+  r := Ref[C](C.Named(make_heap_string()));
+  b := r.borrow;
+  n := match b {
+    C.Named(v) => v.len,
+  };
+  assert(n == 5, "exhaustive no-wildcard match over borrowed non-generic enum");
+}
+
+// (e) bare short form `Some(v)` (no enum prefix) over a borrowed generic enum —
+// the ShortDestructureMatchPattern path, distinct from the qualified forms above.
+test_borrowed_generic_bare_short_form() `test {
+  r := Ref[Maybe[string]](Maybe[string].Some(make_heap_string()));
+  b := r.borrow;
+  n := match b {
+    Some(v) => v.len,
+    None => 0,
+  };
+  assert(n == 5, "bare short-form match binds borrowed payload");
+}
+
+// (f) the bug-report repro: a plain `Maybe[string] e` parameter is a shared
+// (read-only) borrow. Matching it must resolve the generic enum and bind the
+// payload at its concrete type through the parameter borrow.
+check_shared_param(Maybe[string] e) int {
+  return match e {
+    Maybe[string].Some(v) => v.len,
+    _ => 0,
+  };
+}
+
+test_borrowed_generic_shared_param() `test {
+  m := Maybe[string].Some(make_heap_string());
+  assert(check_shared_param(m) == 5, "shared-borrow parameter binds borrowed payload");
+}
+
+// (g) mutable-borrow parameter (`~e`) — the MutRef path. unwrapRefsType must
+// strip the mutable borrow at codegen so the variant data layout and the mono
+// drop are still detected (no double-free). Heap payload + zero leaks (T0067)
+// verifies the dup/drop path is exercised.
+check_mut_param(Maybe[string] ~e) int {
+  return match e {
+    Maybe.Some(v) => v.len,
+    Maybe.None => 0,
+  };
+}
+
+test_borrowed_generic_mut_param() `test {
+  m := Maybe[string].Some(make_heap_string());
+  assert(check_mut_param(m) == 5, "mutable-borrow parameter binds borrowed payload");
+}

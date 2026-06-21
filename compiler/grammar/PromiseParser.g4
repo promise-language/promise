@@ -560,8 +560,8 @@ matchArm
     ;
 
 matchPattern
-    : IDENT DOT IDENT LPAREN patternFields RPAREN             # enumDestructurePattern
-    | IDENT DOT IDENT                                          # enumVariantPattern
+    : IDENT typeArgs? DOT IDENT LPAREN patternFields RPAREN   # enumDestructurePattern
+    | IDENT typeArgs? DOT IDENT                               # enumVariantPattern
     | IDENT bindingName                                        # typeBindingPattern
     | IDENT LPAREN patternFields RPAREN                        # shortDestructurePattern
     | IDENT                                                    # namePattern

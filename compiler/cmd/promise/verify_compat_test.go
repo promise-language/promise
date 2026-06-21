@@ -41,11 +41,35 @@ func writeMod(t *testing.T, dir, name string, good bool) {
 	os.WriteFile(filepath.Join(dir, name+"_test.pr"), []byte(body), 0644)
 }
 
+// shortRepoDir returns a short, unique, auto-removed directory for a local git
+// repo that a test uses as a module "remote" URL. The module cache mirrors a
+// module's URL into its own directory tree (see URLToCachePath), so a deep
+// t.TempDir() path used as the URL would be doubled into the cache and blow past
+// git's ~260-char path buffers on Windows ("Filename too long" / "$GIT_DIR too
+// big"). Rooting these repos at a short path keeps the mirrored cache path within
+// limits. Elsewhere t.TempDir() has no such limit, so it is used unchanged.
+func shortRepoDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return t.TempDir()
+	}
+	base := filepath.Join(os.Getenv("SystemDrive")+`\`, "pt")
+	if err := os.MkdirAll(base, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", base, err)
+	}
+	dir, err := os.MkdirTemp(base, "")
+	if err != nil {
+		t.Fatalf("short repo dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // makeWorkRepo initializes a non-bare git repo (usable as a local clone source)
 // and returns its path. Configured so commits succeed in CI sandboxes.
 func makeWorkRepo(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "repo")
+	dir := filepath.Join(shortRepoDir(t), "repo")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -83,9 +107,6 @@ func TestVerifyModuleCompatCacheHit(t *testing.T) {
 // cannot be verified empirically (§9.9) → incompatible, with the verdict cached.
 // No compiler run is needed (it fails before the test step), so compilerBin is bogus.
 func TestVerifyModuleCompatNoTests(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -118,9 +139,6 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 // (here, the disallowed epoch = "next") is reported as incompatible with a clean
 // reason rather than crashing — and never reaches the compiler.
 func TestVerifyModuleCompatInvalidToml(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -146,9 +164,6 @@ func TestVerifyModuleCompatInvalidToml(t *testing.T) {
 // of its pinned [require] deps is incompatible (§9.10 applies transitively). The dep
 // here fails for a cheap reason (no tests), so neither module needs a compiler run.
 func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -189,9 +204,6 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 // the §9.10 transitive rule must hold for named dependencies too. The dep again
 // fails cheaply (no tests), so no compiler run is needed.
 func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

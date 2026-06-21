@@ -26,8 +26,29 @@ func GlobalCacheDir() (string, error) {
 
 // URLToCachePath maps a normalized URL to a filesystem path under the cache directory.
 // e.g., "github.com/someone/parser" → "<cacheDir>/github.com/someone/parser"
+//
+// Characters that are legal in a URL but illegal in a Windows path component are
+// replaced with '_' (the slash separators that mark directory boundaries are kept).
+// Without this, scp-style SSH URLs ("git@github.com:user/repo") and local-path
+// sources ("C:/path/to/repo") — both of which retain a ':' after normalization —
+// produce paths like "<cacheDir>\git@github.com:user\repo" that MkdirAll rejects on
+// Windows. Plain https/github.com URLs contain no such characters, so their cache
+// path is unchanged on every platform.
 func URLToCachePath(cacheDir, normalizedURL string) string {
-	return filepath.Join(cacheDir, filepath.FromSlash(normalizedURL))
+	return filepath.Join(cacheDir, filepath.FromSlash(sanitizeURLPath(normalizedURL)))
+}
+
+// sanitizeURLPath replaces characters that are illegal in a Windows path component
+// (`<>:"|?*`) with '_', leaving '/' intact so it still separates cache directories.
+func sanitizeURLPath(normalizedURL string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '<', '>', ':', '"', '|', '?', '*':
+			return '_'
+		default:
+			return r
+		}
+	}, normalizedURL)
 }
 
 // ResolveRemoteModule ensures the repo at `url` is checked out at `commitHash`
@@ -201,7 +222,7 @@ func ensureCheckout(repoDir, checkoutDir, commitHash string) error {
 func runGitPiped(repoDir, checkoutDir, commitHash string) (string, error) {
 	// --git-dir already satisfies safe.bareRepository=explicit, but pass the
 	// trust flag too so every bare-repo op in this file is uniformly robust.
-	archiveArgs := append(append([]string{}, gitTrustBareRepo...), "--git-dir="+repoDir, "archive", "--format=tar", commitHash)
+	archiveArgs := append(append([]string{}, gitCacheConfig...), "--git-dir="+repoDir, "archive", "--format=tar", commitHash)
 	archive := exec.Command("git", archiveArgs...)
 	untar := exec.Command("tar", "xf", "-")
 	untar.Dir = checkoutDir
@@ -242,18 +263,26 @@ func requireGit() error {
 	return nil
 }
 
-// gitTrustBareRepo trusts the bare repos Promise creates in its own module
-// cache. git's safe.bareRepository=explicit hardening (≥2.38) refuses to use a
-// bare repo discovered from the cwd unless its git dir is named explicitly —
-// which breaks `git fetch` run with the bare repo as the working directory.
-// Promise owns these cache repos, so we re-allow them per-invocation. The -c is
-// scoped to this one git process (it does NOT change the user's config) and
-// overrides an injected GIT_CONFIG_PARAMETERS=...=explicit (B/T0779).
-var gitTrustBareRepo = []string{"-c", "safe.bareRepository=all"}
+// gitCacheConfig is the per-invocation `-c key=value` config prepended to every
+// git command that touches the module cache. It is scoped to the one git process
+// (it does NOT change the user's config). Two settings:
+//
+//   - safe.bareRepository=all — trusts the bare repos Promise creates in its own
+//     module cache. git's safe.bareRepository=explicit hardening (≥2.38) refuses to
+//     use a bare repo discovered from the cwd unless its git dir is named
+//     explicitly — which breaks `git fetch` run with the bare repo as the working
+//     directory. Promise owns these cache repos, so we re-allow them per-invocation.
+//     This also overrides an injected GIT_CONFIG_PARAMETERS=...=explicit (B/T0779).
+//   - core.longpaths=true — lets git create paths longer than the Windows MAX_PATH
+//     (260) limit. The cache mirrors a module's URL into a directory path, so a deep
+//     PROMISE_HOME, a long URL, or a local-filesystem source path can push a git
+//     object path past 260 chars; without this git aborts with "Filename too long".
+//     The setting is Windows-only in effect and a harmless no-op elsewhere.
+var gitCacheConfig = []string{"-c", "safe.bareRepository=all", "-c", "core.longpaths=true"}
 
 // runGit runs a git command and returns its combined output.
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append(append([]string{}, gitTrustBareRepo...), args...)...)
+	cmd := exec.Command("git", append(append([]string{}, gitCacheConfig...), args...)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

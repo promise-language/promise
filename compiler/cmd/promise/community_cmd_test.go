@@ -63,8 +63,8 @@ func makeCommunityCatalogRepo(t *testing.T, modulesTOML string, indexFiles map[s
 // headCommit).
 func makeTaggedModuleRepo(t *testing.T, name, epoch string, good bool) (string, string) {
 	t.Helper()
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	run := func(dir string, args ...string) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir

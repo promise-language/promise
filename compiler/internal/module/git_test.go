@@ -107,6 +107,12 @@ func TestURLToCachePath(t *testing.T) {
 	}{
 		{"/home/user/.promise/cache/modules", "github.com/someone/parser", "/home/user/.promise/cache/modules/github.com/someone/parser"},
 		{"/cache", "git.corp.com/team/utils", "/cache/git.corp.com/team/utils"},
+		// Colons are illegal in a Windows path component, so scp-style SSH URLs and
+		// local drive-letter paths (both keep a ':' after NormalizeURL) are sanitized
+		// to '_' — otherwise MkdirAll rejects the cache path on Windows. The '/'
+		// separators that mark cache directories are preserved.
+		{"/cache", "git@github.com:user/repo", "/cache/git@github.com_user/repo"},
+		{"/cache", "c:/Users/dev/mymod", "/cache/c_/Users/dev/mymod"},
 	}
 	for _, tt := range tests {
 		got := filepath.ToSlash(URLToCachePath(tt.cacheDir, tt.url))

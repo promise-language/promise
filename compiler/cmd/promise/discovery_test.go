@@ -205,8 +205,8 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 
 	// Create a local bare git repo to act as the "remote", carrying a verifiable
 	// module with an epoch-<E> tag so the epoch-aware resolver picks + verifies it.
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
 	run := func(dir, name string, args ...string) {
@@ -354,8 +354,8 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 
 	// Create a local bare git repo with two module commits; the newer one carries
 	// the epoch-<E> tag the resolver should re-resolve to (§9.8 step 3).
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
 	run := func(dir, name string, args ...string) {
@@ -431,8 +431,8 @@ func TestUpdateSpecificTarget(t *testing.T) {
 	epoch := compilerEpochForTest(t)
 
 	// Test updating a specific URL-keyed entry by URL
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
 	run := func(dir, name string, args ...string) {
@@ -490,8 +490,8 @@ func TestAddWithCustomRef(t *testing.T) {
 
 	// Test the len(args)==2 path with a custom ref: the ref is resolved + verified
 	// with no epoch-tag walk-back (the user pinned it).
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
 	run := func(dir, name string, args ...string) {
@@ -574,8 +574,8 @@ func TestUpdateNamedEntry(t *testing.T) {
 	epoch := compilerEpochForTest(t)
 
 	// Test updating a [require.NAME] entry when the epoch-<E> tag has moved forward
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
 	run := func(dir, name string, args ...string) {
@@ -651,8 +651,8 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 	epoch := compilerEpochForTest(t)
 
 	// Create a local bare git repo
-	bareDir := filepath.ToSlash(t.TempDir())
-	workDir := t.TempDir()
+	bareDir := filepath.ToSlash(shortRepoDir(t))
+	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
 	run := func(dir, name string, args ...string) {

@@ -617,7 +617,23 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		if c.info.AutoPropagateExprs[s.Expr] {
 			c.genAutoPropagate(s.Expr)
 		} else {
+			// T1017: mark the top-level discarded call so its OWN return-alias check
+			// records (rather than clears) any live-local args the result may alias.
+			// Only the top-level call is special: nested calls whose results are
+			// consumed within this statement (e.g. `assert(x.unwrap_or(d) == ...)`)
+			// must keep the normal arg-flag-clear, or their aliasing returns would
+			// be double-freed. Save/restore across the (possibly nested) genExpr so
+			// a sub-expression that itself contains discarded statements keeps its
+			// own state without corrupting this statement's.
+			savedTopCall := c.discardedTopCall
+			savedAliasPtrs := c.discardAliasArgPtrs
+			c.discardedTopCall = s.Expr
+			c.discardAliasArgPtrs = nil
 			discardedResult = c.genExpr(s.Expr)
+			recorded := c.discardAliasArgPtrs
+			c.discardedTopCall = savedTopCall
+			c.discardAliasArgPtrs = savedAliasPtrs
+			c.clearDiscardedAliasTempFlag(discardedResult, recorded)
 		}
 		c.goExprFireAndForget = false
 		// B0196/B0208: When a discarded expression returns an Optional with a
@@ -2116,14 +2132,14 @@ func isTypeDroppable(typ types.Type) bool {
 // Without this check, identity(v) where v is a heap string causes SIGABRT:
 // the caller has drop flags for both v and the return value s, but they point
 // to the same memory — both get freed at scope exit.
-func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value) {
-	c.emitReturnAliasCheckSubst(result, sig, args, argVals, nil)
+func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callExpr ast.Expr) {
+	c.emitReturnAliasCheckSubst(result, sig, args, argVals, nil, callExpr)
 }
 
 // emitReturnAliasCheckSubst is the generic-aware variant. T0418: callSubst maps
 // the callee's TypeParams to the call's concrete type args so droppability
 // checks see through TypeParams (e.g., T? → _Box? → droppable).
-func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callSubst map[*types.TypeParam]types.Type) {
+func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callSubst map[*types.TypeParam]types.Type, callExpr ast.Expr) {
 	if result == nil || sig == nil {
 		return
 	}
@@ -2207,6 +2223,21 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 				continue
 			}
 
+			// T1017: when THIS call is the top-level expression of a discarded
+			// statement (`sort(xs);`), clearing the live local's drop flag here
+			// would leave the result temp as the sole owner — but that temp is
+			// dropped at statement end, freeing the buffer while the local is still
+			// live (use-after-free). Instead, keep the local as the owner and record
+			// its pointer; the ExprStmt case clears the *result temp's* flag, so the
+			// aliased buffer is dropped exactly once (at scope exit, via the local).
+			// Only the top-level call is redirected — a nested call whose aliasing
+			// result is consumed within the statement keeps the normal clear below,
+			// otherwise its result would be double-freed.
+			if callExpr != nil && callExpr == c.discardedTopCall {
+				c.discardAliasArgPtrs = append(c.discardAliasArgPtrs, argPtr)
+				continue
+			}
+
 			// Generate: if retPtr == argPtr { clear dropFlag }
 			same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
 			clearBlock := c.newBlock("alias.clear")
@@ -2251,6 +2282,47 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 			c.block.NewBr(skipBlock)
 			c.block = skipBlock
 		}
+	}
+}
+
+// clearDiscardedAliasTempFlag completes the T1017 discard-path alias handling.
+// emitReturnAliasCheckSubst recorded (in argPtrs) the live-local arg pointers that
+// a discarded call's return value may alias, without clearing their drop flags.
+// Here, after the result has been tracked as a temp, emit
+// `if retPtr == argPtr { clear resultTempFlag }` for each recorded arg so the
+// aliasing result temp is not dropped (the live local remains the sole owner,
+// dropped once at scope exit). No-op when nothing was recorded.
+func (c *Compiler) clearDiscardedAliasTempFlag(result value.Value, argPtrs []value.Value) {
+	if len(argPtrs) == 0 {
+		return
+	}
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	retPtr := extractAliasPtr(c, result)
+	if retPtr == nil {
+		return
+	}
+	// The result temp may be tracked as a stmtTemp (string/vector/channel i8*)
+	// or a heapTemp (heap user-type value struct). Find its drop flag.
+	var resultFlag value.Value
+	if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
+		resultFlag = c.stmtTemps[idx].dropFlag
+	} else if idx, ok := c.heapTempMap[retPtr]; ok && idx >= 0 {
+		resultFlag = c.heapTemps[idx].dropFlag
+	}
+	if resultFlag == nil {
+		return
+	}
+	for _, argPtr := range argPtrs {
+		same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+		clearBlock := c.newBlock("alias.discard.clear")
+		skipBlock := c.newBlock("alias.discard.skip")
+		c.block.NewCondBr(same, clearBlock, skipBlock)
+		c.block = clearBlock
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), resultFlag)
+		c.block.NewBr(skipBlock)
+		c.block = skipBlock
 	}
 }
 

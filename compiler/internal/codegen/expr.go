@@ -1759,7 +1759,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					origArgVals := argVals // T0331: pre-coercion for alias check
 					argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 					result := c.genIndirectCall(closure, sig, argVals)
-					c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
+					c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
 					return result
 				}
 			}
@@ -1930,7 +1930,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			origArgVals := argVals // T0331: pre-coercion for alias check
 			argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 			result := c.genIndirectCall(closure, sig, argVals)
-			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
+			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
 			return result
 		}
 	}
@@ -1976,7 +1976,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 			result := c.genIndirectCall(closure, sig, argVals)
 			c.clearVariadicStaticFlags(variadicPTs)
-			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
+			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
 			return result
 		}
 	}
@@ -2020,7 +2020,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// B0345: If the return value aliases an argument, clear the argument's drop flag
 	// to prevent double-free. E.g., identity(v) returns v's pointer — without this,
 	// both v and the return value would be dropped at scope exit.
-	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals)
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals, e)
 
 	// T0092: Track string return values from functions with structural interface
 	// parameters. When a function takes a structural interface param and returns
@@ -2116,7 +2116,7 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 
 	result := c.block.NewCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // B0345
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals, e) // B0345
 	return result
 }
 
@@ -2225,7 +2225,7 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 
 	result := c.block.NewCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
+	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst, e) // T0331/T0418
 	return result
 }
 
@@ -2276,7 +2276,7 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 
 	result := c.block.NewCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
+	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst, e) // T0331/T0418
 	return result
 }
 
@@ -2332,7 +2332,7 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 
 	result := c.block.NewCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
+	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst, e) // T0331/T0418
 	return result
 }
 
@@ -2429,7 +2429,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined) // B0345/T0418
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined, e) // B0345/T0418
 	return result
 }
 
@@ -2541,7 +2541,7 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined) // B0345/T0418
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined, e) // B0345/T0418
 
 	// Drop temp enum receiver if it was a fresh temporary (mirrors genEnumMethodCall).
 	if tempEnumPtr != nil && c.enumInstanceHasDrop(targetType, enum) {
@@ -4841,7 +4841,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, ownerSubst) // B0345/T0418
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, ownerSubst, e) // B0345/T0418
 	return result
 }
 
@@ -5017,7 +5017,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, enumSubst) // B0345/T0418
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, enumSubst, e) // B0345/T0418
 
 	// Drop temp enum receiver if it was a fresh temporary not tracked by
 	// the enumCtorTemps mechanism. When movedDroppable caused enumCtorTemps
@@ -5322,7 +5322,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	args = append(args, argVals...)
 	result := c.block.NewCall(fnTyped, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, vtableSubst) // B0345/T0418
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, vtableSubst, e) // B0345/T0418
 	return result
 }
 

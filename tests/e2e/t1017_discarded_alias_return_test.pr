@@ -1,0 +1,77 @@
+// T1017: Discarding the return value of a function whose result aliases a live
+// local heap-vector argument must NOT free the local's buffer.
+//
+// `sort(xs);` (return discarded) used to clear xs's drop flag and then drop the
+// aliasing result temp at statement end, freeing xs's buffer while xs was still
+// live — a use-after-free that segfaulted for heap element types. The fix keeps
+// xs as the sole owner (dropped once at scope exit) and clears the result temp's
+// flag instead.
+type Money {
+  int cents;
+  < (Money other) bool => this.cents < other.cents;
+  == (Money other) bool => this.cents == other.cents;
+}
+
+// Discarded sort() on a heap user type: no crash; heap mutation flows through the
+// shared borrow, so xs is sorted in place.
+sort_discarded_heap() `test {
+  Money[] xs = [Money(cents: 30), Money(cents: 10), Money(cents: 20)];
+  sort(xs);
+  assert(xs[0].cents == 10, "in-place sort via borrow");
+  assert(xs[1].cents == 20, "in-place sort element 1");
+  assert(xs[2].cents == 30, "in-place sort element 2");
+}
+
+// The reassigning form keeps working.
+sort_reassigned_heap() `test {
+  Money[] xs = [Money(cents: 30), Money(cents: 10), Money(cents: 20)];
+  xs = sort(xs);
+  assert(xs[0].cents == 10, "sortable via Ordered");
+  assert(xs[2].cents == 30, "last element after sort");
+}
+
+// Minimal user-function variant: the fix is general, not sort-specific.
+ident(Money[] v) Money[] {
+  return v;
+}
+
+discarded_identity_alias() `test {
+  Money[] xs = [Money(cents: 1), Money(cents: 2)];
+  ident(xs);
+  assert(xs[0].cents == 1, "alias discard keeps buffer alive");
+  assert(xs[1].cents == 2, "second element still valid");
+}
+
+// int[] (static-literal element type): discard still compiles and does not crash.
+// Static buffers carry the bit-63 flag so the bogus drop was always a no-op; sort
+// returns a relocated copy, so the original is observed unchanged through discard.
+discarded_int_no_crash() `test {
+  int[] xs = [3, 1, 2];
+  sort(xs);
+  assert(xs.len == 3, "int discard does not crash");
+}
+
+// String element of the stmtTemp discard path: a discarded function whose result
+// aliases a live heap string argument must clear the *result temp's* flag, not the
+// local's — otherwise the heap string is freed while `s` is still live (double-free
+// / use-after-free). `.repeat` forces a heap (non-.rodata) buffer.
+ident_str(string s) string {
+  return s;
+}
+
+discarded_string_alias() `test {
+  string s = "ab".repeat(3);
+  ident_str(s);
+  assert(s.len == 6, "string alias discard keeps buffer alive");
+  assert(s == "ababab", "string contents intact after discard");
+}
+
+// Nested-call guard: when the discarded top-level statement is `assert(...)` and the
+// aliasing call (`ident(...)`) is a *nested* sub-expression whose result is consumed
+// within the statement, that nested call must keep the normal arg-flag-clear (the
+// result temp becomes the sole owner and is dropped once at statement end). Only the
+// top-level discarded call is redirected; redirecting the nested one would leak it.
+nested_consumed_alias() `test {
+  Money[] xs = [Money(cents: 7)];
+  assert(ident(xs)[0].cents == 7, "nested consumed aliasing result");
+}

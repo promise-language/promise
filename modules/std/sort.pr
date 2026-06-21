@@ -1,10 +1,10 @@
 // std/sort.pr — Sorting algorithms for Vector[T]
 //
-// Vector is a reference type (i8* pointer), so taking it by value and
-// modifying it through the pointer sorts in-place. Caller does: v = sort(v).
-// Sort a vector in-place using iterative quicksort with insertion sort
-// for small partitions and median-of-three pivot selection.
-sort[T: Ordered](T[] vec) T[] `public {
+// `sort` returns the sorted vector; always use the returned value: v = sort(v).
+// It is not reliably in-place: a vector backed by a `.rodata` static literal is
+// relocated by copy-on-write into a callee-local handle on the first mutation,
+// so the caller only observes the sorted order through the return value.
+sort[T: Ordered](T[] vec) T[] `public `doc("Sort a vector and return it (use v = sort(v)). Iterative quicksort with insertion sort for small partitions and median-of-three pivot selection. Requires T: Ordered.") {
   int n = vec.len;
   if n <= 1 {
     return vec;

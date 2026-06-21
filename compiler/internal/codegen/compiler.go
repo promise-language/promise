@@ -375,25 +375,27 @@ type Compiler struct {
 	spawnStdinFd  *ir.Global // @__promise_spawn_stdin_fd (TLS, i32)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
-	currentGGlobal       *ir.Global  // @__promise_current_g (TLS, i8*)
-	currentPGlobal       *ir.Global  // @__promise_current_p (TLS, i8*) — current P for local queue ops
-	currentMGlobal       *ir.Global  // @__promise_current_m (TLS, i8*) — current M for syscall handoff
-	schedGlobal          *ir.Global  // @__promise_sched (global Sched struct)
-	testPanicMsgGlobal   *ir.Global  // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
-	testPanicTypeGlobal  *ir.Global  // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
-	testDoneGlobal       *ir.Global  // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
-	panicFlagGlobal      *ir.Global  // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
-	panicMsgTlsGlobal    *ir.Global  // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
-	panicTypeTlsGlobal   *ir.Global  // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
-	panicExitBlock       *ir.Block   // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
-	coroutineReturnBlock *ir.Block   // B0353: if set, goroutine return branches here instead of ret
-	inCoroutine          bool        // true when compiling inside a go block coroutine body
-	goExprFireAndForget  bool        // true when go expr result is discarded (no <-task receiver)
-	elvisResultConsumed  bool        // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
-	elvisResultBound     bool        // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
-	elvisBoundDropFlag   value.Value // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
-	coroCleanupBlk       *ir.Block   // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk       *ir.Block   // coroutine suspend block (suspend path: coro.end + ret)
+	currentGGlobal       *ir.Global    // @__promise_current_g (TLS, i8*)
+	currentPGlobal       *ir.Global    // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	currentMGlobal       *ir.Global    // @__promise_current_m (TLS, i8*) — current M for syscall handoff
+	schedGlobal          *ir.Global    // @__promise_sched (global Sched struct)
+	testPanicMsgGlobal   *ir.Global    // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	testPanicTypeGlobal  *ir.Global    // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
+	testDoneGlobal       *ir.Global    // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
+	panicFlagGlobal      *ir.Global    // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
+	panicMsgTlsGlobal    *ir.Global    // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
+	panicTypeTlsGlobal   *ir.Global    // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
+	panicExitBlock       *ir.Block     // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
+	coroutineReturnBlock *ir.Block     // B0353: if set, goroutine return branches here instead of ret
+	inCoroutine          bool          // true when compiling inside a go block coroutine body
+	goExprFireAndForget  bool          // true when go expr result is discarded (no <-task receiver)
+	discardedTopCall     ast.Expr      // T1017: the top-level call expression of a discarded ExprStmt (`sort(xs);`). Only that call's own return-alias check is redirected; nested calls whose results are consumed within the statement keep normal behavior to avoid double-frees.
+	discardAliasArgPtrs  []value.Value // T1017: live-local arg pointers the discarded top-level call's return value may alias (recorded by emitReturnAliasCheckSubst, consumed by the ExprStmt case)
+	elvisResultConsumed  bool          // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
+	elvisResultBound     bool          // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
+	elvisBoundDropFlag   value.Value   // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
+	coroCleanupBlk       *ir.Block     // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk       *ir.Block     // coroutine suspend block (suspend path: coro.end + ret)
 
 	// T0668: maps each Task[T].drop func to its paired Task[T].free_after_done
 	// func so temp/binding drop sites that only know the drop func can route

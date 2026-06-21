@@ -180,7 +180,7 @@ type ServerRequest `public `doc("An incoming HTTP request received by the server
   get query string `public `doc("The query string (after '?'), empty if none.") => this._query;
   get body string `public `doc("The request body.") => this._body;
 
-  header(~this, string key) string? `public `doc("Get a header value by name (case-insensitive, keys stored lowercase).") {
+  header(this, string key) string? `public `doc("Get a header value by name (case-insensitive, keys stored lowercase).") {
     string lower = key.to_lower();
     string lookup = lower[0:];
     if this._headers.contains(lookup) {

@@ -45,3 +45,32 @@ test_mut_this_field_string() `test {
   c.relabel("new" + "label");
   assert(c.label == "newlabel", "label replaced");
 }
+
+// T0980: calling a `~this` method through a `~` mutable-borrow parameter must
+// compile and mutate the caller's value end-to-end. (The shared-borrow form of
+// the same call is rejected at compile time — see the Go-level sema tests.)
+via_mut_borrow(Counter ~c) {
+  c.bump();
+}
+
+test_mut_method_through_mut_borrow_param() `test {
+  Counter c = Counter(n: 10, label: "x");
+  via_mut_borrow(c);
+  assert(c.n == 11, "mutated through `~` borrow param");
+}
+
+// T0980: calling a `~this` method on an element reached through a `~` mutable
+// borrow of a Vector must compile, mutate in place, and leave no leak (the
+// shared-borrow form `Counter[] v` is rejected — see the Go-level sema tests).
+bump_first(Counter[] ~v) {
+  v[0].bump();
+}
+
+test_mut_method_through_indexed_mut_borrow() `test {
+  Counter[] v = Counter[]();
+  v.push(Counter(n: 5, label: "a"));
+  v.push(Counter(n: 7, label: "b"));
+  bump_first(v);
+  assert(v[0].n == 6, "first element mutated through `~` vector borrow");
+  assert(v[1].n == 7, "second element untouched");
+}

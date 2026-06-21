@@ -1283,6 +1283,8 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		sig = inferred
 	}
 
+	c.checkReceiverMutability(e, sig)
+
 	c.resolveCallArgs(e, sig.Params(), callDesc, nil)
 
 	if sig.CanError() {
@@ -1293,6 +1295,82 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		return sig.Result()
 	}
 	return types.TypVoid
+}
+
+// checkReceiverMutability rejects calling a `~this` (mutating, RefMut-receiver)
+// method through a place that is not mutable — i.e. a shared (read-only) borrow.
+// This is the receiver analogue of the existing `~param` argument check in
+// args.go (passing `&c` to a `~`-parameter is rejected); without it, calling a
+// `~this` method through a shared borrow silently mutates the caller's value,
+// the soundness hole the shared-borrow model exists to prevent (T0980).
+//
+// Scope is exactly RefMut receivers. Implicit-`this` (RefNone) mutators such as
+// Vector.push / Channel.send keep an interior-mutability escape hatch and are
+// intentionally left permissive (a wider design decision tracked separately).
+func (c *Checker) checkReceiverMutability(e *ast.CallExpr, sig *types.Signature) {
+	mem, ok := e.Callee.(*ast.MemberExpr)
+	if !ok {
+		return
+	}
+	if sig.Recv() == nil || sig.Recv().Ref() != types.RefMut {
+		return
+	}
+	if c.isMutablePlace(mem.Target) {
+		return
+	}
+	c.errorf(e.Pos(), "cannot call mutating method '%s' through a shared (read-only) borrow; take a `~` mutable borrow instead", mem.Field)
+}
+
+// isMutablePlace reports whether expr denotes a place the caller may mutate. It
+// returns false only when the place provably roots in a shared (read-only)
+// borrow; every other case defaults to true (conservative — an unknown place is
+// treated as mutable to minimize false positives). (T0980; reused by T0716.)
+func (c *Checker) isMutablePlace(expr ast.Expr) bool {
+	// A reference-typed value (e.g. a `T~` mutable-borrow parameter resolved to
+	// MutRef[T], or an explicit `T&` reference local) is mutable iff it is a
+	// mutable reference.
+	switch c.info.Types[expr].(type) {
+	case *types.SharedRef:
+		return false
+	case *types.MutRef:
+		return true
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		// `super` aliases the receiver `this`; treat it the same.
+		if e.Name == "super" {
+			if c.curFunc != nil && c.curFunc.Recv() != nil {
+				return c.curFunc.Recv().Ref() == types.RefMut
+			}
+			return true
+		}
+		// A borrowed parameter is read-only unless it is a `move`/`~` parameter
+		// (RefMut). An owned local (not a parameter) is mutable. checkNoShadow
+		// guarantees locals don't shadow parameters, so name lookup is sound.
+		if c.curFunc != nil {
+			for _, p := range c.curFunc.Params() {
+				if p.Name() == e.Name {
+					return p.Ref() == types.RefMut
+				}
+			}
+		}
+		return true
+	case *ast.ThisExpr:
+		// A read-only `this` receiver cannot be mutated; a `~this` receiver can.
+		if c.curFunc != nil && c.curFunc.Recv() != nil {
+			return c.curFunc.Recv().Ref() == types.RefMut
+		}
+		return true
+	case *ast.MemberExpr:
+		// A field is mutable iff the place it belongs to is.
+		return c.isMutablePlace(e.Target)
+	case *ast.IndexExpr:
+		return c.isMutablePlace(e.Target)
+	case *ast.SliceExpr:
+		return c.isMutablePlace(e.Target)
+	}
+	return true
 }
 
 // resolveNarrowedVariantField resolves a member access against the named payload

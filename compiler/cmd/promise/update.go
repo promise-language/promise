@@ -125,10 +125,24 @@ type ghAsset struct {
 // Usage:
 //
 //	promise update                        follow the channel: install its latest + activate
+//	promise update --force                reinstall even if already up to date
+//	promise update --reinstall            alias for --force
 //	promise update check [--json]         report whether an update is available (no changes)
 //	promise update channel                print the current update channel
 //	promise update channel <stable|next>  set the channel and immediately follow it
 func runUpdate(args []string) {
+	force := false
+	var rest []string
+	for _, a := range args {
+		switch a {
+		case "--force", "--reinstall":
+			force = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	args = rest
+
 	if len(args) > 0 {
 		switch args[0] {
 		case "check":
@@ -142,21 +156,26 @@ func runUpdate(args []string) {
 			// `promise use <epoch>` (which downloads on demand). This removes the old
 			// update-vs-sync target ambiguity.
 			fmt.Fprintf(os.Stderr, "promise update no longer takes an epoch argument.\n"+
-				"  promise update                        follow the update channel (install + activate latest)\n"+
+				"  promise update [--force]              follow the update channel (install + activate latest)\n"+
 				"  promise update check [--json]         report whether an update is available\n"+
 				"  promise update channel [stable|next]  show or set the update channel\n"+
 				"  promise use <epoch>                   activate a specific epoch (downloads on demand)\n")
 			os.Exit(1)
 		}
 	}
-	doUpdate()
+	doUpdate(force)
 }
 
 // doUpdate follows the persisted update channel: it resolves the channel's
 // latest release, downloads and installs it, and the child `install`
 // auto-activates the freshly installed epoch (decision #2 — otherwise a
 // `promise use <epoch>` would freeze updates forever).
-func doUpdate() {
+//
+// When force is false (the default), doUpdate short-circuits if the locally
+// installed epoch/build already matches the channel's latest — no download, no
+// reinstall. Pass force=true (via `promise update --force`) to bypass the check
+// and always reinstall.
+func doUpdate(force bool) {
 	cfg := resolveSyncConfig()
 	channel, err := module.UpdateChannel()
 	if err != nil {
@@ -178,6 +197,22 @@ func doUpdate() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if !force {
+		avail, checkErr := checkUpdateAvailable(channel, release, epoch)
+		if checkErr != nil {
+			// Fail-open: if we can't determine whether an update is available,
+			// proceed with the download rather than silently skipping it.
+			fmt.Fprintf(os.Stderr, "warning: could not determine if update is available (%v); proceeding\n", checkErr)
+		} else if !avail.available {
+			if channel == module.ChannelNext {
+				fmt.Printf("Already up to date (build %s).\n", shortBuildID(avail.localBuild))
+			} else {
+				fmt.Printf("Already up to date (epoch %s).\n", epoch)
+			}
+			return
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "updating toolchain to epoch %s...\n", epoch)
@@ -211,7 +246,7 @@ func runUpdateChannel(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("update channel set to %s\n", args[0])
-	doUpdate()
+	doUpdate(false)
 }
 
 // updateCheckResult is the report produced by `promise update check`. Build ids
@@ -255,44 +290,33 @@ func runUpdateCheck(args []string) {
 
 	res := updateCheckResult{Channel: channel, Active: active}
 
+	var release *ghRelease
+	var epoch string
 	switch channel {
 	case module.ChannelNext:
-		release, err := findNextRelease(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		_, shaURL, err := findAssets(release, platformAssetName())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		// The next channel's build identity IS the platform asset's sha256, read
-		// from the release's SHA256SUMS. Without it there is no way to tell new
-		// from current — report that rather than silently claiming "up to date".
-		if shaURL == "" {
-			fmt.Fprintf(os.Stderr, "error: the %s release has no SHA256SUMS asset; cannot determine the next build identity\n", release.TagName)
-			os.Exit(1)
-		}
-		remote, err := assetSHAFromSums(shaURL, platformAssetName())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		local, _ := module.ReadEpochBuildID("next")
-		res.Latest = "next"
-		res.LocalBuild = local
-		res.RemoteBuild = remote
-		// An unrecorded local build (empty) counts as "update available".
-		res.UpdateAvailable = remote != "" && remote != local
+		release, err = findNextRelease(cfg)
+		epoch = "next"
 	default: // stable
-		_, latest, err := findLatestStableRelease(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		res.Latest = latest
-		res.UpdateAvailable = active == "" || module.CompareEpochs(latest, active) > 0
+		release, epoch, err = findLatestStableRelease(cfg)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	avail, err := checkUpdateAvailable(channel, release, epoch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	res.UpdateAvailable = avail.available
+	if channel == module.ChannelNext {
+		res.Latest = "next"
+		res.LocalBuild = avail.localBuild
+		res.RemoteBuild = avail.remoteBuild
+	} else {
+		res.Latest = epoch
 	}
 
 	if jsonOut {
@@ -330,6 +354,48 @@ func shortBuildID(sha string) string {
 		return sha[:7]
 	}
 	return sha
+}
+
+// updateAvailability is the result of checkUpdateAvailable.
+type updateAvailability struct {
+	available   bool
+	localBuild  string // next channel only — locally recorded sha256
+	remoteBuild string // next channel only — remote sha256 from SHA256SUMS
+}
+
+// checkUpdateAvailable reports whether the remote release differs from what is
+// locally installed. It is the single source of truth for "is an update
+// needed?" used by both doUpdate and runUpdateCheck.
+//
+// Stable: compares the remote epoch tag against module.ActiveEpoch() numerically.
+// Next:   fetches SHA256SUMS from the release, compares against the locally
+//
+//	recorded build-id. Returns an error if SHA256SUMS is unavailable.
+func checkUpdateAvailable(channel string, release *ghRelease, epoch string) (updateAvailability, error) {
+	if channel == module.ChannelNext {
+		_, shaURL, err := findAssets(release, platformAssetName())
+		if err != nil {
+			return updateAvailability{}, err
+		}
+		if shaURL == "" {
+			return updateAvailability{}, fmt.Errorf("the %s release has no SHA256SUMS asset; cannot determine the next build identity", release.TagName)
+		}
+		remote, err := assetSHAFromSums(shaURL, platformAssetName())
+		if err != nil {
+			return updateAvailability{}, err
+		}
+		local, _ := module.ReadEpochBuildID("next")
+		return updateAvailability{
+			available:   remote != "" && remote != local,
+			localBuild:  local,
+			remoteBuild: remote,
+		}, nil
+	}
+	// stable
+	active, _ := module.ActiveEpoch()
+	return updateAvailability{
+		available: active == "" || module.CompareEpochs(epoch, active) > 0,
+	}, nil
 }
 
 // downloadAndInstall downloads the platform binary for a release, verifies its

@@ -3662,6 +3662,19 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 		c.dupEnumElementInPlace(fieldPtr, typ)
 		return
 	}
+
+	// T1099: Tuple variant field (e.g., enum Holder { Pair((Ref[int], int)) }).
+	// emitVariantFieldDrop walks tuple elements (B0264), so the symmetric dup must
+	// too — otherwise a tuple-bearing variant cloned in a container (Vector/Map
+	// Slot) leaves the inner Ref/Channel/string shallow-copied → double-free at
+	// drop. dupTupleValue deep-clones each droppable field; store the result back.
+	if tup, isTup := typ.(*types.Tuple); isTup {
+		if c.tupleNeedsDrop(typ) {
+			dup := c.dupTupleValue(fieldVal, tup)
+			c.block.NewStore(dup, fieldPtr)
+		}
+		return
+	}
 }
 
 // defineStringDropFunc emits an LLVM IR function that conditionally frees a

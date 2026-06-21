@@ -74,6 +74,142 @@ test_tuple_arc_vec_clone() `test {
   assert(v.len == 1, "tuple arc src intact");
 }
 
+// T1099: dropping the source vector must NOT free the cloned tuple's Ref — the
+// clone must hold an INDEPENDENT strong reference. The `.len`-only test above
+// could never catch the shallow-copy bug (refcount stays 1 → silent double-drop
+// nets alloc_count to 0 → no leak/abort). This observes ownership via a Weak:
+// after the source is consumed/dropped, the weak still upgrades because the
+// clone keeps the value alive. With the bug, the source drop frees the inner
+// Ref (refcount 0) → upgrade returns none AND the later read/clone-drop is UAF.
+consume_tuple_ref_vec(Vector[(Ref[int], int)] ~v) {
+  // v (and its tuple's Ref) drops at the end of this function.
+}
+
+test_tuple_ref_clone_independent_ownership() `test {
+  r := Ref[int](7);
+  w := r.downgrade();
+  v := Vector[(Ref[int], int)]();
+  v.push((r, 1));
+  v2 := v.clone();
+  consume_tuple_ref_vec(v); // drop the source; clone must keep the Ref alive
+  alive := false;
+  if strong := w.upgrade() {
+    alive = strong.borrow == 7;
+  }
+  assert(alive, "clone keeps independent strong ref after source drop");
+  // The value is still readable through the clone itself.
+  (cr, cn) := v2[0];
+  assert(cr.borrow == 7, "clone tuple Ref value");
+  assert(cn == 1, "clone tuple int value");
+}
+
+// T1099: enum variant carrying a tuple-of-Ref, cloned inside a Vector, must
+// deep-clone the tuple's Ref. This enum has no synthesized clone() method, so
+// Vector clone routes through dupEnumElementInPlace → emitVariantFieldDup, whose
+// tuple case (the compiler.go half of the fix) deep-clones the Ref. Without it
+// the cloned variant's Ref aliases the source → double-free at scope exit.
+enum _T1099Holder[T] {
+  _Empty, _Pair((Ref[T], int) pair),
+}
+
+test_tuple_ref_in_enum_variant_clone() `test {
+  v := Vector[_T1099Holder[int]]();
+  v.push(_T1099Holder[int]._Pair((Ref[int](9), 2)));
+  v2 := v.clone();
+  assert(v2.len == 1, "enum-tuple vec clone len");
+  match v2[0] {
+    _Pair(p) => {
+      (pr, pn) := p;
+      assert(pr.borrow == 9, "cloned variant tuple Ref value");
+      assert(pn == 2, "cloned variant tuple int value");
+    },
+    _Empty => assert(false, "expected _Pair"),
+  }
+  assert(v.len == 1, "enum-tuple vec src intact");
+}
+
+// T1099: tuple-of-Ref as a Map value (direct, not wrapped in an enum) must
+// deep-clone the Ref on Map.clone() — exercises the Map-value clone path.
+test_tuple_ref_map_value_clone() `test {
+  m := Map[int, (Ref[int], int)]();
+  m[1] = (Ref[int](5), 3);
+  m2 := m.clone();
+  assert(m2.len == 1, "tuple-ref map clone len");
+  (mr, mn) := m2[1]!;
+  assert(mr.borrow == 5, "cloned map tuple Ref value");
+  assert(mn == 3, "cloned map tuple int value");
+  assert(m.len == 1, "tuple-ref map src intact");
+}
+
+// T1099: tuple field that is a STRING (not Ref) — exercises dupTupleValue's
+// dupString branch (the Ref tests above all take the maybeDupPushElement `else`
+// branch). Without a per-element clone the cloned tuple's heap string would
+// alias the source's → double-free at scope exit. The "x"+"y" forces a heap
+// (non-literal) string so the alias would actually be freed twice.
+test_tuple_string_vec_clone() `test {
+  v := Vector[(string, int)]();
+  v.push(("he" + "llo", 1));
+  v2 := v.clone();
+  (a, b) := v2[0];
+  assert(a == "hello", "cloned tuple string value");
+  assert(b == 1, "cloned tuple int value");
+  v2.push(("world", 2)); // mutate clone only
+  assert(v2.len == 2 && v.len == 1, "clone independent of source");
+}
+
+// T1099: NESTED vector of tuple-of-Ref — Vector[Vector[(Ref,int)]].clone()
+// recurses through emitVectorElementCloneLoop (outer isVector branch → inner
+// clone loop → tuple branch → dupTupleValue → Ref dup). Proves the tuple case
+// composes with the existing nested-container recursion.
+test_nested_vec_tuple_ref_clone() `test {
+  r := Ref[int](3);
+  w := r.downgrade();
+  v := Vector[Vector[(Ref[int], int)]]();
+  inner := Vector[(Ref[int], int)]();
+  inner.push((r, 30));
+  v.push(move inner);
+  v2 := v.clone();
+  consume_nested_tuple_ref_vec(v); // drop source; clone must keep Ref alive
+  alive := false;
+  if strong := w.upgrade() {
+    alive = strong.borrow == 3;
+  }
+  assert(alive, "nested clone keeps independent strong ref after source drop");
+  (cr, cn) := v2[0][0];
+  assert(cr.borrow == 3, "nested clone tuple Ref value");
+  assert(cn == 30, "nested clone tuple int value");
+}
+
+consume_nested_tuple_ref_vec(Vector[Vector[(Ref[int], int)]] ~v) {
+  // v and its nested tuple Refs drop here.
+}
+
+// T1099 acceptance #4: slice of a tuple-of-Ref vector must deep-clone the inner
+// Ref (slice `[:]` pushes each element into a fresh vector). Source and slice
+// must own independent strong references.
+test_tuple_ref_vec_slice() `test {
+  v := Vector[(Ref[int], int)]();
+  v.push((Ref[int](1), 10));
+  v.push((Ref[int](2), 20));
+  s := v[0:1];
+  assert(s.len == 1, "slice len");
+  (a, b) := s[0];
+  assert(a.borrow == 1 && b == 10, "slice tuple value");
+  assert(v.len == 2, "slice source intact");
+}
+
+// T1099 acceptance #4: Vector.filled with a tuple-of-Ref must deep-clone the
+// Ref for each of the `count` copies — otherwise the single source value's Ref
+// is aliased `count` times → multi-free at scope exit.
+test_tuple_ref_vec_filled() `test {
+  v := Vector[(Ref[int], int)].filled((Ref[int](5), 7), 3);
+  assert(v.len == 3, "filled len");
+  (a0, b0) := v[0];
+  (a2, b2) := v[2];
+  assert(a0.borrow == 5 && b0 == 7, "filled[0] value");
+  assert(a2.borrow == 5 && b2 == 7, "filled[2] value");
+}
+
 // A vector whose elements are plain cloneable values still clones deeply.
 test_string_vec_clone_unaffected() `test {
   v := ["a", "b", "c"];

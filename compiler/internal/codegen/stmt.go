@@ -4630,6 +4630,12 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// B0290: Also detect droppable enums without clone (e.g., Slot[K,V] in Map).
 	isCloneableEnum := false
 	isDupableEnum := false
+	// T1099: Tuple element with droppable fields (e.g., (Ref[int], int)).
+	// extractNamed/extractEnum are both nil for tuples, so without this the
+	// memcpy'd element was left shallow — the Ref inside the tuple was never
+	// refcount-incremented → double-free/UAF at scope exit.
+	tup, isTuple := elemType.(*types.Tuple)
+	isDupableTuple := isTuple && c.tupleNeedsDrop(elemType)
 	if named == nil {
 		if enum := extractEnum(elemType); enum != nil {
 			_, isCloneableEnum = c.funcs[c.enumCloneFuncName(enum, elemType)]
@@ -4637,7 +4643,7 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 				isDupableEnum = c.vecElemNeedsEnumDrop(elemType)
 			}
 		}
-		if !isCloneableEnum && !isDupableEnum {
+		if !isCloneableEnum && !isDupableEnum && !isDupableTuple {
 			return // primitive/copy type — shallow memcpy is correct
 		}
 	}
@@ -4698,7 +4704,7 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	isWeakType := !isCloneableEnum && !isDupableEnum && (isWk || named == types.TypWeak)
 	isHeapUser := !isCloneableEnum && !isDupableEnum && named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
 
-	if !isChannel && !isVector && !isArcType && !isWeakType && !isHeapUser && !isCloneableEnum && !isDupableEnum {
+	if !isChannel && !isVector && !isArcType && !isWeakType && !isHeapUser && !isCloneableEnum && !isDupableEnum && !isDupableTuple {
 		return // value/copy type — shallow memcpy is correct
 	}
 
@@ -4734,6 +4740,13 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	if isDupableEnum {
 		// B0290: Droppable enum without clone — dup variant fields in place.
 		c.dupEnumElementInPlace(elemPtr, elemType)
+	} else if isDupableTuple {
+		// T1099: Tuple element — deep-clone each droppable field via the shared
+		// dupTupleValue helper (handles Ref/Channel/Weak/string/Vector/heap/enum/
+		// nested-tuple per field, leaving Copy fields as the memcpy'd value).
+		elemVal := c.block.NewLoad(elemLLVM, elemPtr)
+		cloned := c.dupTupleValue(elemVal, tup)
+		c.block.NewStore(cloned, elemPtr)
 	} else {
 		elemVal := c.block.NewLoad(elemLLVM, elemPtr)
 

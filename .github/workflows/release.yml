@@ -243,5 +243,4 @@ jobs:
             --notes-from-tag \
             dist/bin/promise-*.gz \
             dist/SHA256SUMS \
-            scripts/install.sh scripts/install.ps1 scripts/install.cmd \
-            docs/installing.md
+            scripts/install.sh scripts/install.ps1 scripts/install.cmd

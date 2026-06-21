@@ -89,6 +89,26 @@ epoch = "2026.0"
 	}
 }
 
+func TestParseConfigRejectsEpochNext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "hello"
+epoch = "next"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for epoch = \"next\"")
+	}
+	if !strings.Contains(err.Error(), "next") || !strings.Contains(err.Error(), "numeric epoch") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestFindConfig(t *testing.T) {
 	dir := t.TempDir()
 	subdir := filepath.Join(dir, "src", "pkg")

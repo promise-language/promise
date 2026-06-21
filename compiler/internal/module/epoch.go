@@ -159,6 +159,13 @@ func CompareEpochs(a, b string) int {
 	}
 }
 
+// ParseEpoch parses a "YYYY.N" epoch into its year and minor components. ok is
+// false when the string is not two dot-separated integers — used to reject
+// non-numeric epochs (e.g. "next") where a concrete project epoch is required.
+func ParseEpoch(s string) (year, minor int, ok bool) {
+	return splitEpoch(s)
+}
+
 // splitEpoch parses a "YYYY.N" epoch into its year and minor components. ok is
 // false when the string is not two dot-separated integers.
 func splitEpoch(s string) (year, minor int, ok bool) {

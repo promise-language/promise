@@ -7555,9 +7555,11 @@ func runAdd(args []string) {
 	}
 
 	nameOrURL := args[0]
-	ref := "HEAD"
+	// An explicit ref disables epoch-aware tag resolution (the user pinned it);
+	// with no ref we resolve the epoch-appropriate `epoch-*` tag (§9.8).
+	explicitRef := ""
 	if len(args) == 2 {
-		ref = args[1]
+		explicitRef = args[1]
 	}
 
 	// Find promise.toml
@@ -7573,6 +7575,10 @@ func runAdd(args []string) {
 	}
 	if cfg == nil {
 		fmt.Fprintln(os.Stderr, "error: no promise.toml found (run 'promise init' first)")
+		os.Exit(1)
+	}
+	if cfg.Epoch == "" {
+		fmt.Fprintln(os.Stderr, "error: promise.toml [module] must declare an epoch to resolve modules")
 		os.Exit(1)
 	}
 
@@ -7595,9 +7601,23 @@ func runAdd(args []string) {
 		}
 	}
 
-	// Resolve ref to full commit hash
-	fmt.Fprintf(os.Stderr, "Resolving %s @ %s...\n", label, ref)
-	commitHash, err := module.PinResolve(url, ref)
+	// Verification runs under the project's epoch — use this compiler only if it
+	// implements that epoch, otherwise direct the user to switch.
+	compilerBin, err := projectEpochCompiler(cfg.Epoch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Resolve an epoch-appropriate commit and verify it under the project epoch
+	// (§9.8/§9.9). On no compatible version this returns the §9.10 gate error.
+	if explicitRef != "" {
+		fmt.Fprintf(os.Stderr, "Resolving %s @ %s (epoch %s)...\n", label, explicitRef, cfg.Epoch)
+	} else {
+		fmt.Fprintf(os.Stderr, "Resolving %s for epoch %s...\n", label, cfg.Epoch)
+	}
+	warn := func(msg string) { fmt.Fprintf(os.Stderr, "  %s\n", msg) }
+	commitHash, err := resolveEpochAware(compilerBin, cfg.Epoch, label, url, explicitRef, warn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -7610,7 +7630,7 @@ func runAdd(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Added %s → %s\n", label, commitHash[:12])
+	fmt.Printf("Added %s → %s\n", label, shortCommit(commitHash))
 }
 
 // runSearch implements the `promise search <keyword>` subcommand.
@@ -7677,15 +7697,18 @@ func runSearch(args []string) {
 func runPkg(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: promise pkg <subcommand>")
-		fmt.Fprintln(os.Stderr, "  update [name|url]   Update [require] dependency pins in promise.toml")
+		fmt.Fprintln(os.Stderr, "  update [name|url]        Update [require] dependency pins in promise.toml")
+		fmt.Fprintln(os.Stderr, "  check-upgrade <epoch>    Preview which dependencies support a target epoch")
 		os.Exit(1)
 	}
 	switch args[0] {
 	case "update":
 		runPkgUpdate(args[1:])
+	case "check-upgrade":
+		runPackageCheckUpgrade(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown pkg subcommand: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: promise pkg update [name|url]")
+		fmt.Fprintln(os.Stderr, "usage: promise pkg <update|check-upgrade>")
 		os.Exit(1)
 	}
 }
@@ -7714,6 +7737,10 @@ func runPkgUpdate(args []string) {
 	}
 	if cfg == nil {
 		fmt.Fprintln(os.Stderr, "error: no promise.toml found (run 'promise init' first)")
+		os.Exit(1)
+	}
+	if cfg.Epoch == "" {
+		fmt.Fprintln(os.Stderr, "error: promise.toml [module] must declare an epoch to resolve modules")
 		os.Exit(1)
 	}
 
@@ -7778,6 +7805,24 @@ func runPkgUpdate(args []string) {
 		return entries[i].label < entries[j].label
 	})
 
+	// Re-resolution re-runs the epoch-aware tag pick + verification (§9.8 step 3:
+	// moving a tag upstream never changes an existing build until `update`), so it
+	// needs the project-epoch compiler. Resolved lazily on the first git entry —
+	// an update over only non-git (sha256) sources never needs it.
+	var compilerBin string
+	ensureCompiler := func() bool {
+		if compilerBin != "" {
+			return true
+		}
+		b, err := projectEpochCompiler(cfg.Epoch)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		compilerBin = b
+		return true
+	}
+
 	updated := 0
 	for _, e := range entries {
 		// Skip SHA256-only (non-git) entries — PinResolve requires a git URL
@@ -7785,8 +7830,10 @@ func runPkgUpdate(args []string) {
 			fmt.Printf("  %s: skipped (non-git source)\n", e.label)
 			continue
 		}
+		ensureCompiler()
 		fmt.Fprintf(os.Stderr, "Checking %s...\n", e.label)
-		newCommit, err := module.PinResolve(e.url, "HEAD")
+		warn := func(msg string) { fmt.Fprintf(os.Stderr, "  %s\n", msg) }
+		newCommit, err := resolveEpochAware(compilerBin, cfg.Epoch, e.label, e.url, "", warn)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
 			continue

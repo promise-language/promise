@@ -125,6 +125,14 @@ func ParseConfig(path string) (*Config, error) {
 			case "name":
 				cfg.Name = val
 			case "epoch":
+				// A project pins a numeric epoch ("YYYY.N"). "next" is a
+				// toolchain release channel (§4.3), not a project epoch — it
+				// selects which compiler you run, never participates in
+				// `epoch-X ≤ E` module resolution (§9.8). Reject it here so the
+				// gate fires at parse time with a clear message.
+				if val == ChannelNext {
+					return nil, fmt.Errorf("%s:%d: [module] epoch = \"next\" is not allowed — projects pin a numeric epoch (e.g. \"2026.1\"); \"next\" is a toolchain channel, not a project epoch", path, lineNum)
+				}
 				cfg.Epoch = val
 			default:
 				// Forward compatibility: ignore unknown keys

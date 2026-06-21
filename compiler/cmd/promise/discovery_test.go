@@ -6,7 +6,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/module"
 )
+
+// compilerEpochForTest returns the epoch this test binary's embedded catalog
+// implements — used so add/update tests pin a project epoch that matches the
+// verifying compiler (verification must run under the project epoch).
+func compilerEpochForTest(t *testing.T) string {
+	t.Helper()
+	e, err := module.CompilerEpoch(embeddedCatalog)
+	if err != nil || e == "" {
+		t.Skipf("cannot determine compiler epoch: %v", err)
+	}
+	return e
+}
 
 // testCatalogTOML is a minimal catalog fixture for testing.
 const testCatalogTOML = `[catalog]
@@ -179,14 +193,22 @@ func TestAddNoPromiseToml(t *testing.T) {
 }
 
 func TestAddCatalogResolvesToURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping verify integration test in short mode")
+	}
 	setupGitTestEnv(t)
+	bin := findPromiseBinary(t)
+	testVerifyCompilerBin = bin
+	defer func() { testVerifyCompilerBin = "" }()
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	epoch := compilerEpochForTest(t)
 
-	// Create a local bare git repo to act as the "remote"
+	// Create a local bare git repo to act as the "remote", carrying a verifiable
+	// module with an epoch-<E> tag so the epoch-aware resolver picks + verifies it.
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 
-	// Init bare repo
 	run := func(dir, name string, args ...string) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
@@ -200,12 +222,12 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"mymod\"\n"), 0644)
+	writeMod(t, workDir, "mymod", true)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "init")
-	run(workDir, "git", "push", "origin", "HEAD")
+	run(workDir, "git", "tag", "epoch-"+epoch)
+	run(workDir, "git", "push", "origin", "HEAD", "--tags")
 
-	// Get the HEAD commit hash
 	cmd := exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = workDir
 	hashBytes, err := cmd.Output()
@@ -214,9 +236,8 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 	}
 	expectedHash := strings.TrimSpace(string(hashBytes))
 
-	// Create catalog pointing to local bare repo
 	catalogTOML := `[catalog]
-epoch = "2026.0"
+epoch = "` + epoch + `"
 
 [modules.mymod]
 url = "` + bareDir + `"
@@ -224,8 +245,7 @@ commit = "` + expectedHash + `"
 description = "Test module"
 `
 
-	// Set up project dir
-	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte("[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"), 0644)
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte("[module]\nname = \"proj\"\nepoch = \""+epoch+"\"\n"), 0644)
 
 	orig, _ := os.Getwd()
 	defer os.Chdir(orig)
@@ -323,9 +343,17 @@ func TestUpdateNotFound(t *testing.T) {
 }
 
 func TestUpdateURLKeyedEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping verify integration test in short mode")
+	}
 	setupGitTestEnv(t)
+	testVerifyCompilerBin = findPromiseBinary(t)
+	defer func() { testVerifyCompilerBin = "" }()
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	epoch := compilerEpochForTest(t)
 
-	// Create a local bare git repo with two commits
+	// Create a local bare git repo with two module commits; the newer one carries
+	// the epoch-<E> tag the resolver should re-resolve to (§9.8 step 3).
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
@@ -343,22 +371,22 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
+	writeMod(t, workDir, "dep", true)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "first")
 	run(workDir, "git", "push", "origin", "HEAD")
 
-	// Get first commit hash
 	cmd := exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = workDir
 	firstHash, _ := cmd.Output()
 	oldHash := strings.TrimSpace(string(firstHash))
 
-	// Make a second commit
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v2"), 0644)
+	// Second commit — tagged epoch-<E>; update should re-resolve here.
+	os.WriteFile(filepath.Join(workDir, "extra.pr"), []byte("extra_value() int `public { return 9; }\n"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "second")
-	run(workDir, "git", "push", "origin", "HEAD")
+	run(workDir, "git", "tag", "epoch-"+epoch)
+	run(workDir, "git", "push", "origin", "HEAD", "--tags")
 
 	cmd = exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = workDir
@@ -366,7 +394,7 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 	headHash := strings.TrimSpace(string(newHash))
 
 	// Create promise.toml with URL-keyed require pinned to old commit
-	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require]\n\"" + bareDir + "\" = \"" + oldHash + "\"\n"
+	toml := "[module]\nname = \"proj\"\nepoch = \"" + epoch + "\"\n\n[require]\n\"" + bareDir + "\" = \"" + oldHash + "\"\n"
 	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
 
 	orig, _ := os.Getwd()
@@ -393,7 +421,14 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 }
 
 func TestUpdateSpecificTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping verify integration test in short mode")
+	}
 	setupGitTestEnv(t)
+	testVerifyCompilerBin = findPromiseBinary(t)
+	defer func() { testVerifyCompilerBin = "" }()
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	epoch := compilerEpochForTest(t)
 
 	// Test updating a specific URL-keyed entry by URL
 	bareDir := filepath.ToSlash(t.TempDir())
@@ -413,18 +448,20 @@ func TestUpdateSpecificTarget(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("content"), 0644)
+	writeMod(t, workDir, "dep", true)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "init")
-	run(workDir, "git", "push", "origin", "HEAD")
+	run(workDir, "git", "tag", "epoch-"+epoch)
+	run(workDir, "git", "push", "origin", "HEAD", "--tags")
 
 	cmd := exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = workDir
 	hashBytes, _ := cmd.Output()
 	headHash := strings.TrimSpace(string(hashBytes))
 
-	// Pin to HEAD already — should report "already up to date"
-	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require]\n\"" + bareDir + "\" = \"" + headHash + "\"\n"
+	// Pin to the epoch-<E> commit already — re-resolution lands on the same commit
+	// → "already up to date".
+	toml := "[module]\nname = \"proj\"\nepoch = \"" + epoch + "\"\n\n[require]\n\"" + bareDir + "\" = \"" + headHash + "\"\n"
 	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
 
 	orig, _ := os.Getwd()
@@ -442,9 +479,17 @@ func TestUpdateSpecificTarget(t *testing.T) {
 }
 
 func TestAddWithCustomRef(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping verify integration test in short mode")
+	}
 	setupGitTestEnv(t)
+	testVerifyCompilerBin = findPromiseBinary(t)
+	defer func() { testVerifyCompilerBin = "" }()
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	epoch := compilerEpochForTest(t)
 
-	// Test the len(args)==2 path with a custom ref
+	// Test the len(args)==2 path with a custom ref: the ref is resolved + verified
+	// with no epoch-tag walk-back (the user pinned it).
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
@@ -462,7 +507,7 @@ func TestAddWithCustomRef(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
+	writeMod(t, workDir, "dep", true)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "first")
 	run(workDir, "git", "tag", "v1.0")
@@ -473,25 +518,26 @@ func TestAddWithCustomRef(t *testing.T) {
 	hashBytes, _ := cmd.Output()
 	expectedHash := strings.TrimSpace(string(hashBytes))
 
-	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte("[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"), 0644)
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte("[module]\nname = \"proj\"\nepoch = \""+epoch+"\"\n"), 0644)
 
 	orig, _ := os.Getwd()
 	defer os.Chdir(orig)
 	os.Chdir(projDir)
 
-	withCatalog(nil, func() {
-		out := captureStdout(t, func() {
-			captureStderr(func() {
-				runAdd([]string{bareDir, "v1.0"})
-			})
+	// No withCatalog wrapper: a bareDir path never matches a catalog name, so it
+	// is treated as a raw URL — and runAdd needs the real embedded catalog to read
+	// this compiler's epoch for verification.
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runAdd([]string{bareDir, "v1.0"})
 		})
-		if !strings.Contains(out, "Added") {
-			t.Errorf("expected 'Added' in output, got: %s", out)
-		}
-		if !strings.Contains(out, expectedHash[:12]) {
-			t.Errorf("expected hash %s in output, got: %s", expectedHash[:12], out)
-		}
 	})
+	if !strings.Contains(out, "Added") {
+		t.Errorf("expected 'Added' in output, got: %s", out)
+	}
+	if !strings.Contains(out, expectedHash[:12]) {
+		t.Errorf("expected hash %s in output, got: %s", expectedHash[:12], out)
+	}
 
 	// Verify promise.toml
 	content, _ := os.ReadFile(filepath.Join(projDir, "promise.toml"))
@@ -518,9 +564,16 @@ func TestSearchUsageError(t *testing.T) {
 }
 
 func TestUpdateNamedEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping verify integration test in short mode")
+	}
 	setupGitTestEnv(t)
+	testVerifyCompilerBin = findPromiseBinary(t)
+	defer func() { testVerifyCompilerBin = "" }()
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	epoch := compilerEpochForTest(t)
 
-	// Test updating a [require.NAME] entry when HEAD has moved forward
+	// Test updating a [require.NAME] entry when the epoch-<E> tag has moved forward
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
@@ -538,7 +591,7 @@ func TestUpdateNamedEntry(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
+	writeMod(t, workDir, "dep", true)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "first")
 	run(workDir, "git", "push", "origin", "HEAD")
@@ -548,11 +601,12 @@ func TestUpdateNamedEntry(t *testing.T) {
 	firstHash, _ := cmd.Output()
 	oldHash := strings.TrimSpace(string(firstHash))
 
-	// Make a second commit
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v2"), 0644)
+	// Second commit — carries the epoch-<E> tag the update should re-resolve to.
+	os.WriteFile(filepath.Join(workDir, "extra.pr"), []byte("extra_value() int `public { return 9; }\n"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "second")
-	run(workDir, "git", "push", "origin", "HEAD")
+	run(workDir, "git", "tag", "epoch-"+epoch)
+	run(workDir, "git", "push", "origin", "HEAD", "--tags")
 
 	cmd = exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = workDir
@@ -560,7 +614,7 @@ func TestUpdateNamedEntry(t *testing.T) {
 	headHash := strings.TrimSpace(string(newHash))
 
 	// Create promise.toml with [require.mymod] pinned to old commit
-	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require.mymod]\nurl = \"" + bareDir + "\"\ncommit = \"" + oldHash + "\"\n"
+	toml := "[module]\nname = \"proj\"\nepoch = \"" + epoch + "\"\n\n[require.mymod]\nurl = \"" + bareDir + "\"\ncommit = \"" + oldHash + "\"\n"
 	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
 
 	orig, _ := os.Getwd()
@@ -587,7 +641,14 @@ func TestUpdateNamedEntry(t *testing.T) {
 }
 
 func TestUpdateAlreadyCurrent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping verify integration test in short mode")
+	}
 	setupGitTestEnv(t)
+	testVerifyCompilerBin = findPromiseBinary(t)
+	defer func() { testVerifyCompilerBin = "" }()
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	epoch := compilerEpochForTest(t)
 
 	// Create a local bare git repo
 	bareDir := filepath.ToSlash(t.TempDir())
@@ -607,10 +668,11 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("hello"), 0644)
+	writeMod(t, workDir, "dep", true)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "init")
-	run(workDir, "git", "push", "origin", "HEAD")
+	run(workDir, "git", "tag", "epoch-"+epoch)
+	run(workDir, "git", "push", "origin", "HEAD", "--tags")
 
 	// Get HEAD hash
 	cmd := exec.Command("git", "rev-parse", "HEAD")
@@ -621,8 +683,8 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 	}
 	headHash := strings.TrimSpace(string(hashBytes))
 
-	// Create promise.toml already pinned to HEAD
-	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require]\n\"" + bareDir + "\" = \"" + headHash + "\"\n"
+	// Create promise.toml already pinned to the epoch-<E> commit
+	toml := "[module]\nname = \"proj\"\nepoch = \"" + epoch + "\"\n\n[require]\n\"" + bareDir + "\" = \"" + headHash + "\"\n"
 	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
 
 	orig, _ := os.Getwd()

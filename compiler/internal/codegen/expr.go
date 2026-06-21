@@ -9687,7 +9687,8 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 				innerSize := int64(c.typeSize(innerLLVM))
 				innerVec := c.block.NewExtractValue(val, 1)
 				dup := c.dupVector(innerVec, innerSize)
-				c.emitVectorElementCloneLoop(dup, innerElem)
+				// T0939: dup is null on the optional's `none` path — guard the clone loop.
+				c.emitVectorElementCloneLoopNullable(dup, innerElem)
 				c.trackVectorTempWithElemType(dup, innerElem)
 				c.optionalContainerDup = dup
 				return c.block.NewInsertValue(val, dup, 1)
@@ -11662,7 +11663,8 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 				innerVec := c.block.NewExtractValue(val, 1)
 				dup := c.dupVector(innerVec, elemSize)
 				// T0540: Deep-clone droppable elements (mirror the bare Vector branch above).
-				c.emitVectorElementCloneLoop(dup, elemType)
+				// T0939: dup is null on the optional's `none` path — guard the clone loop.
+				c.emitVectorElementCloneLoopNullable(dup, elemType)
 				c.trackVectorTempWithElemType(dup, elemType)
 				c.optionalContainerDup = dup
 				return c.block.NewInsertValue(val, dup, 1), true

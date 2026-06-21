@@ -4506,6 +4506,26 @@ func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Ty
 	c.block = loopDone
 }
 
+// emitVectorElementCloneLoopNullable runs emitVectorElementCloneLoop only when
+// vecPtr is non-null. T0939: an Optional[Vector] field read on the `none` path
+// yields a null inner buffer (field 1 of a zero-initialized optional); the dup of
+// that null is null, and emitVectorElementCloneLoop dereferences vecPtr
+// (loadVectorLen) unconditionally → segfault. Callers that pass a possibly-null
+// vector (the Optional[Vector] inner-buffer dup paths) must use this wrapper.
+func (c *Compiler) emitVectorElementCloneLoopNullable(vecPtr value.Value, elemType types.Type) {
+	entryBlock := c.block
+	isNull := entryBlock.NewICmp(enum.IPredEQ, vecPtr, constant.NewNull(irtypes.I8Ptr))
+	cloneBlock := c.newBlock("veccloneopt.do")
+	mergeBlock := c.newBlock("veccloneopt.merge")
+	entryBlock.NewCondBr(isNull, mergeBlock, cloneBlock)
+
+	c.block = cloneBlock
+	c.emitVectorElementCloneLoop(vecPtr, elemType)
+	c.block.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+}
+
 // emitVectorElementCloneLoop iterates a cloned vector's elements and deep-clones
 // each non-copy element so the cloned vector owns independent copies. B0275.
 // Handles: strings (dupString), channels (dupChannel), nested vectors (dupVector +

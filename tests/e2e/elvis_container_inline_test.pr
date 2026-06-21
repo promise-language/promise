@@ -470,6 +470,12 @@ type SVBox {
   string[]? v;
 }
 
+// T0939: array-of-optional-vector field — exercises the genArrayIndex call site
+// of the null-guarded element-clone loop (see t_strvec_arr_* below).
+type AVBox {
+  string[]?[2] arr;
+}
+
 // member-source string[] elvis (droppable elements): the field owner (bx) drops
 // the inner exactly once; the inline result must NOT also free it.
 t_strvec_member_some() `test {
@@ -551,12 +557,59 @@ t_strvec_bound_member_some() `test {
   string[] x = (bx.v ?: b);
   assert(x.len == 2, "strvec bound member some");
 }
-// NB: the bound member-source NONE variant (`SVBox(v: none)` → `string[] x =
-// (bx.v ?: b)`) is intentionally NOT tested here — it triggers a pre-existing,
-// unrelated crash (T0939): the binding context eagerly dup-clones the
-// optional-container field, and the clone loop walks a `none` field's garbage
-// inner when the element type is droppable. Independent of elvis-result tracking
-// and of this fix (reproduces identically at HEAD).
+// T0939: the bound member-source NONE variant (`SVBox(v: none)` → `string[] x =
+// (bx.v ?: b)`). The binding context sets the dup-field flag, so the field read of
+// the `none` optional-container field eagerly dups the inner buffer — which is null
+// on the none path — and the droppable-element clone loop must be guarded against
+// that null inner (else it walks a garbage buffer → segfault). The plain-container
+// local binds the default `b` instead.
+t_strvec_bound_member_none() `test {
+  SVBox bx = SVBox(v: none);
+  string[] b = [];
+  b.push("x" + "y");
+  string[] x = (bx.v ?: b);
+  assert(x.len == 1, "strvec bound member none");
+}
+
+// T0939 (genArrayIndex call site): the same null-guard fix has a SECOND caller —
+// `genArrayIndex`'s Optional[Vector] element path. Indexing an array of
+// `string[]?` whose slot is `none` and binding the elvis result to a plain
+// `string[]` dups the element's inner buffer (null on the none path); the
+// droppable-element clone loop must be guarded there too (else it walks a garbage
+// buffer → crash). Covers both a field array (`bx.arr[i]`) and a local array
+// (`arr[i]`), each in none and some forms; all must be crash- and leak-free.
+t_strvec_arr_field_index_none() `test {
+  string[]? a0 = none;
+  string[]? a1 = none;
+  AVBox bx = AVBox(arr: [a0, a1]);
+  string[] b = [];
+  b.push("x" + "y");
+  string[] x = (bx.arr[0] ?: b);
+  assert(x.len == 1, "strvec arr field index none");
+}
+
+t_strvec_arr_local_none() `test {
+  string[]? a0 = none;
+  string[]? a1 = none;
+  string[]?[2] arr = [a0, a1];
+  string[] b = [];
+  b.push("x" + "y");
+  string[] x = (arr[0] ?: b);
+  assert(x.len == 1, "strvec arr local none");
+}
+
+t_strvec_arr_local_some() `test {
+  string[] inner = [];
+  inner.push("p" + "q");
+  inner.push("r" + "s");
+  string[]? a0 = inner;
+  string[]? a1 = none;
+  string[]?[2] arr = [a0, a1];
+  string[] b = [];
+  b.push("x" + "y");
+  string[] x = (arr[0] ?: b);
+  assert(x.len == 2, "strvec arr local some");
+}
 
 // ============================================================================
 // T0937 (substitution-context closure): the orphan gate added by this fix makes

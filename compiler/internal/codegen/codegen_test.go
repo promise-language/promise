@@ -16005,6 +16005,43 @@ func TestB0219OptionalVecFieldDeepDup(t *testing.T) {
 	assertContains(t, ir, "promise_string_new")
 }
 
+// T0939: binding an Optional[Vector]-with-droppable-elements field to a plain
+// container local must null-guard the element-clone loop. On the optional's `none`
+// path field 1 is null; the dup of null is null, and the unguarded clone loop
+// (loadVectorLen) would dereference it → segfault. The guard emits veccloneopt.
+// blocks that skip the loop when the dup is null.
+func TestT0939OptionalVecFieldCloneNullGuard(t *testing.T) {
+	ir := generateIR(t, `
+		type SVBox { string[]? v; drop(~this) {} }
+		main() {
+			bx := SVBox(v: none);
+			b := string[]();
+			x := bx.v ?: b;
+		}
+	`)
+	assertContains(t, ir, "veccloneopt.do")
+	assertContains(t, ir, "veccloneopt.merge")
+}
+
+// T0939 (genArrayIndex call site): the same null-guard fix also covers the
+// Optional[Vector] element path of `genArrayIndex`. Indexing an array of
+// `string[]?` and binding the elvis result to a plain `string[]` must emit the
+// veccloneopt. guard blocks for the element-clone loop (the slot's inner buffer is
+// null on the `none` path). Pins the second call site at the IR level.
+func TestT0939OptionalVecArrayIndexCloneNullGuard(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[]? a0 = none;
+			string[]? a1 = none;
+			string[]?[2] arr = [a0, a1];
+			b := string[]();
+			x := arr[0] ?: b;
+		}
+	`)
+	assertContains(t, ir, "veccloneopt.do")
+	assertContains(t, ir, "veccloneopt.merge")
+}
+
 // --- Hash getter tests ---
 
 func TestHashGetterInt(t *testing.T) {

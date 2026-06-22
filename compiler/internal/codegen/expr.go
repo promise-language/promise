@@ -13297,13 +13297,65 @@ func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
 	return c.genGoBlock(e)
 }
 
+// goArgBorrowDrop records a heap argument temporary whose ownership belongs to a
+// goroutine frame and must be dropped on the goroutine side (T1098). Only borrow
+// params are recorded — for move params the callee consumes and drops the
+// temporary at its own scope exit.
+type goArgBorrowDrop struct {
+	paramIdx int        // index into coroFn.Params holding the argument value
+	dropFunc *ir.Func   // concrete drop function (promise_string_drop, Vector[T].drop, T.drop)
+	elemType types.Type // vector element type for element drops (nil for non-vectors)
+	isStruct bool       // coro param is a value struct {vtable, instance} → drop field 1 (heap user type)
+}
+
+// emitGoArgBorrowDrops frees the heap argument temporaries owned by a goroutine
+// frame for borrow params (T1098). Emitted in the coroutine body immediately
+// after the target call returns. Returns the current block (drop loops for
+// vector elements split the control flow). Reuses emitVectorElementDropLoop by
+// pointing c.fn/c.entryBlock/c.block at the coroutine's frame for the duration.
+func (c *Compiler) emitGoArgBorrowDrops(coroFn *ir.Func, entry, cur *ir.Block, drops []goArgBorrowDrop) *ir.Block {
+	if len(drops) == 0 {
+		return cur
+	}
+	savedFn, savedBlock, savedEntry := c.fn, c.block, c.entryBlock
+	c.fn, c.entryBlock, c.block = coroFn, entry, cur
+	defer func() { c.fn, c.block, c.entryBlock = savedFn, savedBlock, savedEntry }()
+
+	for _, d := range drops {
+		param := coroFn.Params[d.paramIdx]
+		switch {
+		case d.isStruct:
+			// Heap user type passed as a value struct {vtable, instance}: drop
+			// the heap instance pointer.
+			inst := c.block.NewExtractValue(param, 1)
+			var instI8 value.Value = inst
+			if inst.Type() != irtypes.I8Ptr {
+				instI8 = c.block.NewBitCast(inst, irtypes.I8Ptr)
+			}
+			c.block.NewCall(d.dropFunc, instI8)
+		default:
+			// i8* string/vector: drop droppable elements (vectors) then free the buffer.
+			var ptr value.Value = param
+			if param.Type() != irtypes.I8Ptr {
+				ptr = c.block.NewBitCast(param, irtypes.I8Ptr)
+			}
+			if d.elemType != nil {
+				c.emitVectorElementDropLoop(ptr, d.elemType)
+			}
+			c.block.NewCall(d.dropFunc, ptr)
+		}
+	}
+	return c.block
+}
+
 // genGoCallExpr handles `go func(args...)` — the common case.
 // For non-IdentExpr callees (method calls, module calls, etc.), delegates to
 // genGoCallExprViaBlock which uses the full codegen context inside the coroutine body.
 func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	// Complex callees (method calls, module calls, generic calls, etc.)
 	// need the full codegen context — use block-style coroutine (B0113).
-	if _, ok := callExpr.Callee.(*ast.IdentExpr); !ok {
+	ident, ok := callExpr.Callee.(*ast.IdentExpr)
+	if !ok {
 		return c.genGoCallExprViaBlock(callExpr)
 	}
 
@@ -13325,15 +13377,82 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		resultLLVM = c.resolveType(callResultType)
 	}
 
+	// T1098: resolve the callee signature so we can distinguish move (consume)
+	// params from borrow params for argument-temporary ownership transfer.
+	var calleeParams []*types.Param
+	if fn := c.lookupFunc(ident.Name); fn != nil {
+		if sig, ok := fn.Type().(*types.Signature); ok {
+			calleeParams = sig.Params()
+		}
+	}
+
 	// 2. Evaluate arguments in caller scope
+	//
+	// T1098: A heap-allocated argument temporary (e.g. `s.clone()`, `Box(...)`)
+	// is created in the caller's scope but is consumed by the goroutine, which may
+	// not run until after the spawning statement completes. The caller's
+	// end-of-statement cleanup must therefore NOT free it — ownership belongs to
+	// the goroutine frame. For each argument we identify the SINGLE owned
+	// temporary that the argument value represents (its root), clear that one
+	// temporary's caller-side drop flag, and — for borrow params — record a
+	// goroutine-side drop emitted after the target call returns. Move params get
+	// no goroutine-side drop: the callee consumes and drops the temporary at its
+	// own scope exit. Intermediates the argument expression created but does NOT
+	// yield (e.g. the trim() result in `s.trim().clone()`) keep their flags and
+	// are freed by the caller — they never enter the goroutine.
 	var argVals []value.Value
 	var argLLVMTypes []irtypes.Type
 	var argTypes []types.Type
-	for _, arg := range callExpr.Args {
+	var argBorrowDrops []goArgBorrowDrop
+	for i, arg := range callExpr.Args {
+		savedHeap := len(c.heapTemps)
 		v := c.genCallArgExpr(arg.Value)
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+
+		// Identify the argument's single root owned temporary with a statically
+		// known drop. Only unambiguous roots are transferred:
+		//   - a string/vector temp whose tracked SSA value IS the argument value
+		//     (covers `s.clone()`, and `s.trim().clone()` where the trim()
+		//     intermediate correctly stays with the caller);
+		//   - a lone heap user-type temp from a direct constructor (covers
+		//     `Box(s: s.clone())` — the inner string is a claimed stmt temp, so
+		//     exactly one new heap temp remains).
+		// Conditional/polymorphic args (match/if expressions, nested
+		// constructors) yield a runtime phi over temporaries with possibly
+		// different concrete drops — no single static root — and enum-payload
+		// args are likewise left to pre-existing handling (tracked as T1106).
+		newHeap := c.heapTemps[savedHeap:]
+
+		var d goArgBorrowDrop
+		d.paramIdx = i
+		var rootFlag *ir.InstAlloca
+		if idx, ok := c.stmtTempMap[v]; ok && idx >= 0 {
+			st := c.stmtTemps[idx]
+			rootFlag, d.dropFunc, d.elemType = st.dropFlag, st.dropFunc, st.elemType
+			c.stmtTempMap[v] = -1
+		} else if len(newHeap) == 1 {
+			ht := newHeap[0]
+			rootFlag, d.dropFunc, d.elemType = ht.dropFlag, ht.dropFunc, ht.elemType
+			_, d.isStruct = v.Type().(*irtypes.StructType)
+		}
+		if rootFlag == nil || d.dropFunc == nil {
+			continue // plain ident/literal, or no single static root to transfer
+		}
+
+		// Claim the root for the goroutine frame: caller cleanup must skip it.
+		if c.block != nil && c.block.Term == nil {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), rootFlag)
+		}
+
+		// Move (consume) param: the callee owns and drops the temporary itself,
+		// so the goroutine emits no drop (that would be a double-free).
+		if i < len(calleeParams) && calleeParams[i].Ref() == types.RefMut {
+			continue
+		}
+		// Borrow param: the goroutine frame drops the temporary after the call.
+		argBorrowDrops = append(argBorrowDrops, d)
 	}
 
 	// B0163: Increment refcount for channel arguments passed to go calls.
@@ -13427,6 +13546,11 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	if !isVoid {
 		result := bodyBlk.NewCall(targetFn, callArgs...)
 
+		// T1098: drop borrow-param argument temporaries owned by this goroutine
+		// frame. Promise uses panic-via-flag (not unwinding), so the call always
+		// returns and every exit path runs this.
+		bodyBlk = c.emitGoArgBorrowDrops(coroFn, startBlk, bodyBlk, argBorrowDrops)
+
 		// T0147: Check panic flag after call — skip result store if panicked.
 		dcFlag := bodyBlk.NewLoad(irtypes.I8, c.panicFlagGlobal)
 		dcIsPanic := bodyBlk.NewICmp(enum.IPredNE, dcFlag, constant.NewInt(irtypes.I8, 0))
@@ -13454,6 +13578,9 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		bodyBlk = afterStoreBlk
 	} else {
 		bodyBlk.NewCall(targetFn, callArgs...)
+
+		// T1098: drop borrow-param argument temporaries (see non-void branch).
+		bodyBlk = c.emitGoArgBorrowDrops(coroFn, startBlk, bodyBlk, argBorrowDrops)
 
 		// T0147: Check panic flag after call.
 		dcFlag := bodyBlk.NewLoad(irtypes.I8, c.panicFlagGlobal)

@@ -1,0 +1,162 @@
+// T1098: `t := go f(expr)` task-handle form must transfer ownership of a heap
+// argument temporary (s.clone(), Box(...)) into the goroutine frame instead of
+// freeing it in the spawning scope before the goroutine runs f. Before the fix
+// this was a use-after-free (borrow params: garbage result) / double-free (move
+// params: abort). These batch tests run under the per-binary leak/double-free
+// checker, so passing simultaneously proves correctness + zero double-free +
+// zero leak.
+type Holder {
+  int n;
+}
+type Box {
+  string s;
+}
+
+consume_string(string move p) Holder {
+  return Holder(n: p.len);
+}
+borrow_string(string p) Holder {
+  return Holder(n: p.len);
+}
+consume_box(Box move b) Holder {
+  return Holder(n: b.s.len);
+}
+borrow_box(Box b) Holder {
+  return Holder(n: b.s.len);
+}
+sum_lens(string[] v) Holder {
+  total := 0;
+  for x in v {
+    total = total + x.len;
+  }
+  return Holder(n: total);
+}
+two_borrow(string a, string b) Holder {
+  return Holder(n: a.len + b.len);
+}
+move_then_borrow(string move a, string b) Holder {
+  return Holder(n: a.len + b.len);
+}
+sink_string(string p) {
+  assert(p.len == 5, "void target observed correct length");
+}
+
+go_call_string_move() `test {
+  string s = "alpha";
+  t := go consume_string(s.clone());
+  r := <-t;
+  assert(r.n == 5, "go consume_string(s.clone()) result");
+  assert(s.len == 5, "original s still owned by caller");
+}
+
+go_call_string_borrow() `test {
+  string s = "alpha";
+  t := go borrow_string(s.clone());
+  r := <-t;
+  assert(r.n == 5, "go borrow_string(s.clone()) result");
+}
+
+go_call_usertype_move() `test {
+  string s = "alpha";
+  t := go consume_box(Box(s: s.clone()));
+  r := <-t;
+  assert(r.n == 5, "go consume_box(Box(s: s.clone())) result");
+}
+
+go_call_usertype_borrow() `test {
+  string s = "alpha";
+  t := go borrow_box(Box(s: s.clone()));
+  r := <-t;
+  assert(r.n == 5, "go borrow_box(Box(s: s.clone())) result");
+}
+
+// Two distinct-length cloned strings must yield distinct lengths — guards against
+// the shared-garbage use-after-free signature (both reads hitting the same freed
+// slot) from the bug report.
+go_call_two_distinct_lengths() `test {
+  t1 := go borrow_string("abc".clone());
+  t2 := go borrow_string("123456789".clone());
+  r1 := <-t1;
+  r2 := <-t2;
+  assert(r1.n == 3, "first clone length");
+  assert(r2.n == 9, "second clone length");
+}
+
+// Method-chain argument: trim() makes an owned intermediate the caller must
+// free, clone() makes the value handed to the goroutine. Exactly one free on
+// each side — the intermediate must NOT be transferred into the goroutine
+// frame, and the goroutine's clone must NOT be freed by the caller.
+go_call_chain_arg() `test {
+  string s = "  hello  ";
+  t := go borrow_string(s.trim().clone());
+  r := <-t;
+  assert(r.n == 5, "go borrow_string(s.trim().clone()) result");
+  assert(s.len == 9, "original s (with padding) still owned by caller");
+}
+
+// Vector clone as a borrow arg: the goroutine frame owns the cloned vector and
+// must drop its string elements then free the buffer (element-drop loop on the
+// goroutine side), while the caller keeps its original vector.
+go_call_vector_borrow() `test {
+  string[] v = ["aa", "bbb"];
+  t := go sum_lens(v.clone());
+  r := <-t;
+  assert(r.n == 5, "go sum_lens(v.clone()) result");
+  assert(v.len == 2, "caller vector still owned");
+}
+
+// Controls: these worked before the fix and must stay correct.
+
+go_call_string_literal() `test {
+  t := go borrow_string("alpha"); // .rodata buffer, never freed
+  r := <-t;
+  assert(r.n == 5, "go borrow_string(literal) result");
+}
+
+go_call_borrow_of_local() `test {
+  string s = "alpha";
+  t := go borrow_string(s); // no temp created — caller keeps ownership
+  r := <-t;
+  assert(r.n == 5, "go borrow_string(s) result");
+  assert(s.len == 5, "s still usable after the borrow go-call");
+}
+
+go_call_move_of_local() `test {
+  string s = "alpha";
+  t := go consume_string(move s); // named-local move via move-tracking
+  r := <-t;
+  assert(r.n == 5, "go consume_string(move s) result");
+}
+
+// Two heap borrow temporaries in one go-call: the goroutine frame owns BOTH and
+// must drop each (exercises the multi-drop loop with distinct param indices).
+go_call_two_borrow_args() `test {
+  string s = "abc";
+  string u = "wxyz";
+  t := go two_borrow(s.clone(), u.clone());
+  r := <-t;
+  assert(r.n == 7, "two heap borrow args summed");
+  assert(s.len == 3 && u.len == 4, "both originals retained by caller");
+}
+
+// Mixed move + borrow heap temporaries: the callee consumes arg 0 (no goroutine
+// drop — double-free guard), the goroutine frame drops arg 1 (the borrow). Both
+// originals stay with the caller.
+go_call_mixed_move_borrow() `test {
+  string s = "abc";
+  string u = "wxyz";
+  t := go move_then_borrow(s.clone(), u.clone());
+  r := <-t;
+  assert(r.n == 7, "mixed move+borrow heap args summed");
+  assert(s.len == 3 && u.len == 4, "both originals retained by caller");
+}
+
+// Void-return target with a heap borrow temporary: exercises the void emit site
+// of the goroutine-side drop. The handle resolves to void; awaiting it still
+// synchronizes on completion.
+go_call_void_borrow_arg() `test {
+  string s = "alpha";
+  t := go sink_string(s.clone());
+  <-t;
+  assert(s.len == 5, "original retained after void go-call");
+}

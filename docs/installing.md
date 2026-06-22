@@ -10,14 +10,19 @@ the matching release binary, verifies its checksum, and sets up `~/.promise/`.
 curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
 ```
 
+You may need to add Promise to your `PATH` — the installer prints the exact line for your shell.
+
 ## Windows (PowerShell)
 
 ```powershell
 irm https://github.com/promise-language/promise/releases/latest/download/install.ps1 | iex
 ```
 
-That's it — `promise` is on your `PATH`. Verify with `promise version`, and keep it
-current with `promise update`.
+The Windows installer adds `promise` to your `PATH` automatically.
+
+## Verify the installation
+
+Verify with `promise version`, and keep it current with `promise update`.
 
 ## Notes
 

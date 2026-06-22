@@ -1,0 +1,109 @@
+// T1103: Storing an inline-constructed droppable enum into a container via
+// index-assignment must clear the enum-ctor temp's drop flag, otherwise the
+// temporary is dropped at statement end — recursively freeing the variant's
+// heap payload (Ref / string / tuple-with-Ref) the container now owns. Later
+// reads then return freed (use-after-free) memory.
+enum Holder[T] {
+  Empty, Pair((Ref[T], int) pair),
+}
+
+enum SHolder {
+  SEmpty, SPair((string, int) pair),
+}
+
+map_enum_ctor_ref_inline_store() `test {
+  m := Map[int, Holder[int]]();
+  m[1] = Holder[int].Pair((Ref[int](9), 2));
+  v := m[1]!;
+  match v {
+    Pair(p) => {
+      (pr, pn) := p;
+      assert(pn == 2, "pn");
+      assert(pr.borrow == 9, "borrow9");
+    },
+    Empty => assert(false, "unreachable"),
+  }
+}
+
+map_enum_ctor_string_inline_store() `test {
+  m := Map[int, SHolder]();
+  m[7] = SHolder.SPair(("hello", 4));
+  v := m[7]!;
+  match v {
+    SPair(p) => {
+      (s, n) := p;
+      assert(n == 4, "n4");
+      assert(s == "hello", "hello");
+    },
+    SEmpty => assert(false, "unreachable"),
+  }
+}
+
+map_enum_ctor_ref_if_let_read() `test {
+  m := Map[int, Holder[int]]();
+  m[3] = Holder[int].Pair((Ref[int](42), 5));
+  if v := m[3] {
+    match v {
+      Pair(p) => {
+        (pr, pn) := p;
+        assert(pn == 5, "pn5");
+        assert(pr.borrow == 42, "borrow42");
+      },
+      Empty => assert(false, "unreachable"),
+    }
+  } else {
+    assert(false, "unreachable");
+  }
+}
+
+vector_enum_ctor_ref_index_assign() `test {
+  vec := Vector[Holder[int]]();
+  vec.push(Holder[int].Empty);
+  vec[0] = Holder[int].Pair((Ref[int](11), 3));
+  match vec[0] {
+    Pair(p) => {
+      (pr, pn) := p;
+      assert(pn == 3, "pn3");
+      assert(pr.borrow == 11, "borrow11");
+    },
+    Empty => assert(false, "unreachable"),
+  }
+}
+
+// Fixed-size array index-assign routes through genArrayIndexAssign (a distinct
+// owning-slot store path from Map/Vector) — the enum-ctor temp clear must fire
+// here too, or the array slot's Ref payload is freed at statement end.
+array_enum_ctor_ref_index_assign() `test {
+  Holder[int][2] arr = [Holder[int].Empty, Holder[int].Empty];
+  arr[0] = Holder[int].Pair((Ref[int](7), 1));
+  match arr[0] {
+    Pair(p) => {
+      (pr, pn) := p;
+      assert(pn == 1, "pn1");
+      assert(pr.borrow == 7, "borrow7");
+    },
+    Empty => assert(false, "unreachable"),
+  }
+}
+
+// typeSubst path: the index-assign happens inside a monomorphized generic body,
+// so the fix's `types.Substitute(resolvedValueType, c.typeSubst)` branch runs
+// (Holder[T] → Holder[int]) before the extractEnum gate. Confirms the clear
+// fires in generic contexts, not just top-level ones.
+t1103_generic_store[T](Map[int, Holder[T]] m, int k, T move v) {
+  m[k] = Holder[T].Pair((Ref[T](move v), 99));
+}
+
+generic_index_assign_enum_ctor() `test {
+  m := Map[int, Holder[int]]();
+  t1103_generic_store[int](m, 2, 55);
+  v := m[2]!;
+  match v {
+    Pair(p) => {
+      (pr, pn) := p;
+      assert(pn == 99, "pn99");
+      assert(pr.borrow == 55, "borrow55");
+    },
+    Empty => assert(false, "unreachable"),
+  }
+}

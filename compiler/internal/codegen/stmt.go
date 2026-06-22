@@ -7223,6 +7223,25 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to container.
 			c.claimHeapTemp(val)
+			// T1103: Clear inline enum constructor temps when the RHS is an enum
+			// moved into the container (e.g. `m[k] = Holder.Pair(...)`). Without
+			// this the enum-ctor temp's drop flag stays set and the temporary is
+			// dropped at statement end — recursively freeing the variant's heap
+			// payload (Ref/string/tuple-with-Ref) the container now owns →
+			// dangling pointer (use-after-free on later reads). Mirrors the
+			// var-decl (B0267) and field-assign (B0269) clears.
+			if len(c.enumCtorTemps) > 0 {
+				resolvedValueType := c.info.Types[s.Value]
+				if c.typeSubst != nil {
+					resolvedValueType = types.Substitute(resolvedValueType, c.typeSubst)
+				}
+				if extractEnum(resolvedValueType) != nil {
+					for i := range c.enumCtorTemps {
+						c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+					}
+					c.enumCtorTemps = c.enumCtorTemps[:0]
+				}
+			}
 			// B0309: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by the container.
 			c.neutralizeForceUnwrapSource(s.Value)

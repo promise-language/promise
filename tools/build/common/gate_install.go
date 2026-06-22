@@ -508,6 +508,12 @@ func downloadFile(url, dest string) error {
 // aggregation is unit-testable without running the gate.
 func buildInstallGateOutput(hostTarget, variant, work string) (*GateOutput, error) {
 	metricPrefix := "install_" + variant
+	// Resolve symlinks so srcDir is in the same path namespace the test runner
+	// reports (macOS /var→/private/var after chdir through a symlinked $TMPDIR).
+	// work still exists here; work/src (the worktree) may already be removed.
+	if resolved, err := filepath.EvalSymlinks(work); err == nil {
+		work = resolved
+	}
 	// Relativize against srcDir (the worktree the suite ran in), not the dev
 	// repo root — the worktree lives under a random temp dir, so root-relative
 	// paths would escape root and produce unstable absolute identities (T0902).

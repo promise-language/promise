@@ -1,7 +1,9 @@
 package common
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -152,6 +154,32 @@ func TestBuildGateOutputPathOutsideBaseErrors(t *testing.T) {
 	}
 }
 
+// TestRelToBaseSymlinkNamespace is a unit test for the T1112 defense-in-depth fix
+// in relToBase: when base is a symlink, relToBase must transparently resolve it and
+// succeed rather than returning a hard error, as long as the resolved target is an
+// ancestor of file.
+func TestRelToBaseSymlinkNamespace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test skipped on Windows")
+	}
+	realBase := t.TempDir()
+	symlinkBase := filepath.Join(t.TempDir(), "symbase")
+	if err := os.Symlink(realBase, symlinkBase); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	// file is reported under the physical base (as macOS getcwd does after chdir
+	// through the symlink), but we pass the symlinked base — relToBase must
+	// transparently resolve and succeed.
+	file := filepath.Join(realBase, "tests", "e2e", "foo.pr")
+	rel, err := relToBase(symlinkBase, file)
+	if err != nil {
+		t.Fatalf("relToBase(symlink base, physical file) = %v, want nil (T1112)", err)
+	}
+	if rel != "tests/e2e/foo.pr" {
+		t.Errorf("rel = %q, want tests/e2e/foo.pr", rel)
+	}
+}
+
 // TestRelToBaseFilepathRelError: filepath.Rel returns an error when one path is
 // absolute and the other is relative (the two differ in "rootedness"). This is a
 // programming-error path (only reachable via a mismatched base/file pair), so the
@@ -163,5 +191,35 @@ func TestRelToBaseFilepathRelError(t *testing.T) {
 	_, err := relToBase("relative/base", "/absolute/file.pr")
 	if err == nil {
 		t.Fatal("relToBase(relative base, absolute file) = nil, want error")
+	}
+}
+
+// TestRelToBaseSymlinkBaseFileStillOutside is a regression test for T1112. When
+// base is a symlink that EvalSymlinks resolves to a different physical path, but
+// the file is outside both the symlinked AND the resolved base, relToBase must
+// still return a hard error. This exercises the inner-if false branch of the
+// symlink-retry logic: EvalSymlinks succeeds and cBase != base, but the retry
+// filepath.Rel still escapes, so the function falls through to the error.
+func TestRelToBaseSymlinkBaseFileStillOutside(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test skipped on Windows")
+	}
+	realBase := t.TempDir()
+	symlinkBase := filepath.Join(t.TempDir(), "symbase")
+	if err := os.Symlink(realBase, symlinkBase); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	// outsideFile lives in a completely different temp dir — outside both
+	// symlinkBase and the physical realBase that EvalSymlinks resolves it to.
+	outsideFile := filepath.Join(t.TempDir(), "outside.pr")
+	if err := os.WriteFile(outsideFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := relToBase(symlinkBase, outsideFile)
+	if err == nil {
+		t.Fatal("relToBase(symlink base, file outside even resolved base) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "is not under base") {
+		t.Errorf("error = %q, want to contain 'is not under base'", err.Error())
 	}
 }

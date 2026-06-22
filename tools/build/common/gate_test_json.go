@@ -177,12 +177,23 @@ func BuildGateOutput(base, target, metricPrefix, complete, jsonl string) (*GateO
 // relToBase returns file relative to base with forward slashes.
 // A ..‑escaping result is a hard error — it always indicates a base/cwd mismatch
 // (programming error, not a user error), so there is no silent fallback.
+// Exception: if the lexical Rel escapes but base is a symlink whose resolved
+// target is an ancestor of file, the resolved base is used transparently.
+// This handles the macOS /var→/private/var namespace split where os.MkdirTemp
+// returns the unresolved symlink path but child processes report the physical path.
 func relToBase(base, file string) (string, error) {
 	rel, err := filepath.Rel(base, file)
 	if err != nil {
 		return "", fmt.Errorf("rel(%q, %q): %w", base, file, err)
 	}
 	if strings.HasPrefix(rel, "..") {
+		// Retry with the canonical base — handles macOS /var→/private/var where
+		// the lexical Rel escapes but the physical path is under base.
+		if cBase, cerr := filepath.EvalSymlinks(base); cerr == nil && cBase != base {
+			if rel2, err2 := filepath.Rel(cBase, file); err2 == nil && !strings.HasPrefix(rel2, "..") {
+				return filepath.ToSlash(rel2), nil
+			}
+		}
 		return "", fmt.Errorf("file %q is not under base %q", file, base)
 	}
 	return filepath.ToSlash(rel), nil

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -242,6 +243,33 @@ func TestDownloadFile(t *testing.T) {
 	}
 }
 
+// TestDownloadFileCopyError: when the server returns 200 but closes the
+// connection after sending fewer bytes than Content-Length promises, io.Copy
+// returns an unexpected EOF and downloadFile must surface it as an error.
+// This covers the io.Copy error branch (the only remaining uncovered path).
+func TestDownloadFileCopyError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hijack the connection so we can send a 200 with Content-Length: 1000
+		// but close after only a handful of bytes — the client's io.Copy sees
+		// an unexpected EOF mid-stream.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+			return
+		}
+		conn, buf, _ := hj.Hijack()
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nhi")
+		_ = buf.Flush()
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "out.sh")
+	if err := downloadFile(srv.URL+"/file", dest); err == nil {
+		t.Error("downloadFile with truncated body = nil, want error")
+	}
+}
+
 // TestDownloadFileCreateFails: when the server returns 200 but the destination
 // path is in a non-existent directory, os.Create fails and downloadFile must
 // surface that error rather than silently succeeding.
@@ -374,6 +402,58 @@ func TestIsFullGitSHA(t *testing.T) {
 		if isFullGitSHA(s) {
 			t.Errorf("isFullGitSHA(%q) = true, want false", s)
 		}
+	}
+}
+
+// TestBuildInstallGateOutputSymlinkBase is a regression test for T1112: on macOS,
+// os.MkdirTemp returns a /var/... path (unresolved symlink) but after a child
+// process chdir's through it, getcwd(3) returns the physical /private/var/... path.
+// buildInstallGateOutput must resolve the symlinked work dir so srcDir matches the
+// namespace the test runner reports in JSONL file paths.
+func TestBuildInstallGateOutputSymlinkBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test skipped on Windows")
+	}
+	// realWork is the physical target; symlinkWork simulates a /var→/private/var
+	// macOS temp dir: os.MkdirTemp returns the symlinked path, but after a child
+	// process chdir's through it, getcwd(3) returns the physical realWork path.
+	realWork := t.TempDir()
+	symlinkWork := filepath.Join(t.TempDir(), "symlink-work")
+	if err := os.Symlink(realWork, symlinkWork); err != nil {
+		t.Skipf("cannot create symlink (need privilege?): %v", err)
+	}
+
+	// Create the test file under the PHYSICAL dir.
+	physicalFile := filepath.Join(realWork, "src", "tests", "e2e", "basics.pr")
+	if err := os.MkdirAll(filepath.Dir(physicalFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(physicalFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// JSONL emits the PHYSICAL path (as macOS getcwd reports after chdir through the
+	// symlink); phases.json and tests.jsonl sit in realWork (readable via symlinkWork).
+	b, _ := json.Marshal(jsonlRecord{File: physicalFile, Test: "add", Status: "pass", Elapsed: 0.01})
+	if err := os.WriteFile(filepath.Join(realWork, "tests.jsonl"), append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	phases := `{"fetch":"pass","install":"pass","sanity":"pass","test":"pass"}`
+	if err := os.WriteFile(filepath.Join(realWork, "phases.json"), []byte(phases), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Gate passes the SYMLINKED work; without the fix this would error with
+	// "file ... is not under base ..." (T1112).
+	out, err := buildInstallGateOutput("darwin-arm64", "thin", symlinkWork)
+	if err != nil {
+		t.Fatalf("buildInstallGateOutput with symlinked work = %v, want nil (T1112)", err)
+	}
+	if got := out.Metrics["install_thin_test_count"]; got != 1 {
+		t.Errorf("install_thin_test_count = %v, want 1", got)
+	}
+	if len(out.Files) != 1 || out.Files[0].File != "tests/e2e/basics.pr" {
+		t.Errorf("file group = %+v, want [{tests/e2e/basics.pr ...}]", out.Files)
 	}
 }
 

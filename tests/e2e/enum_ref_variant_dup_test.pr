@@ -1,0 +1,114 @@
+// T1109: A direct Ref/Arc/Weak variant field inside a container previously
+// panicked codegen (`interface conversion: *types.PointerType, not
+// *types.StructType`) because emitVariantFieldDup routed the bare-i8* native
+// handle into the heap-user-type dup path (dupHeapValue). The fix adds the
+// symmetric Arc/Weak/Mutex/Task branches mirroring maybeDupPushElement and the
+// existing emitVariantFieldDrop. Dup increment is balanced by the drop
+// decrement, so these must pass under leak detection.
+enum Holder {
+  Pair(Ref[int] r, int n),
+}
+
+// --- Repro (a): Ref variant field inside an enum stored in a Map ---
+
+test_enum_ref_variant_in_map() `test {
+  m := Map[int, Holder]();
+  m[1] = Holder.Pair(Ref[int](9), 2);
+  match m[1]! {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 9, "ref field deref");
+      assert(n == 2, "int field");
+    },
+  }
+}
+
+// --- Repro (b): Ref[int] directly as a Map value ---
+
+test_ref_direct_map_value() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](42);
+  assert(m[1]!.borrow == 42, "direct ref map value");
+}
+
+// --- Arc clones survive read-back (refcount stays balanced) ---
+
+test_enum_ref_variant_clone_balance() `test {
+  m := Map[int, Holder]();
+  m[5] = Holder.Pair(Ref[int](7), 11);
+  match m[5]! {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 7, "cloned ref deref");
+      assert(n == 11, "cloned int field");
+    },
+  }
+  // Overwrite the slot: old enum (and its Ref) must drop exactly once.
+  m[5] = Holder.Pair(Ref[int](8), 12);
+  match m[5]! {
+    Holder.Pair(r, _) => assert(r.borrow == 8, "overwritten ref deref"),
+  }
+}
+
+// --- Weak variant field exercises dupWeak on the variant-field dup path ---
+
+enum WeakHolder {
+  One(Weak[int] w, int n),
+}
+
+test_enum_weak_variant_in_map() `test {
+  a := Ref[int](99);
+  m := Map[int, WeakHolder]();
+  m[1] = WeakHolder.One(a.downgrade(), 3);
+  match m[1]! {
+    WeakHolder.One(w, n) => {
+      assert(n == 3, "weak holder int field");
+      if r := w.upgrade() {
+        assert(r.borrow == 99, "weak upgrade deref");
+      } else {
+        assert(false, "weak should upgrade while strong alive");
+      }
+    },
+  }
+}
+
+// --- Generic enum carrying Ref[T]/Weak[T] exercises the typeSubst sub-branches
+// of emitVariantFieldDup (the dup is synthesized in a mono context where the
+// element type must be substituted before dupArc/dupWeak). Leak-checked. ---
+
+enum Box[T] {
+  Some(Ref[T] r, int n),
+  None,
+}
+
+test_generic_ref_enum_in_map() `test {
+  m := Map[int, Box[int]]();
+  m[1] = Box[int].Some(Ref[int](9), 2);
+  match m[1]! {
+    Box.Some(r, n) => {
+      assert(r.borrow == 9, "generic ref deref");
+      assert(n == 2, "generic int field");
+    },
+    Box.None => assert(false, "should be Some"),
+  }
+}
+
+enum WBox[T] {
+  W(Weak[T] w, int n),
+  E,
+}
+
+test_generic_weak_enum_in_map() `test {
+  a := Ref[int](99);
+  m := Map[int, WBox[int]]();
+  m[1] = WBox[int].W(a.downgrade(), 3);
+  match m[1]! {
+    WBox.W(w, n) => {
+      assert(n == 3, "generic weak int field");
+      if r := w.upgrade() {
+        assert(r.borrow == 99, "generic weak upgrade");
+      } else {
+        assert(false, "generic weak should upgrade while strong alive");
+      }
+    },
+    WBox.E => assert(false, "should be W"),
+  }
+}

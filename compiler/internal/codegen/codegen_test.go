@@ -12973,6 +12973,64 @@ func TestDupEnumVariantClosureNullsSlot(t *testing.T) {
 	assertContains(t, ir, "store { i8*, i8* } zeroinitializer")
 }
 
+// T1109: A Ref/Arc[T] variant field in a container must dup via a strong-count
+// increment (arcdup.inc), NOT route into dupHeapValue — Arc's LLVM type is a
+// bare i8* (a *types.PointerType), so the heap-user-type dup path panicked with
+// "interface conversion: *types.PointerType, not *types.StructType". This guards
+// against regression to that route by confirming the variant-field dup emits the
+// Arc refcount increment.
+func TestDupEnumVariantArcRefcount(t *testing.T) {
+	ir := generateIR(t, `
+		enum Holder { Pair(Ref[int] r, int n) }
+		main() {
+			m := Map[int, Holder]();
+			m[1] = Holder.Pair(Ref[int](9), 2);
+		}
+	`)
+	// The variant-field dup for the Ref field reaches dupArc (strong-count
+	// increment) rather than panicking in dupHeapValue.
+	assertContains(t, ir, "enumdup.Pair")
+	assertContains(t, ir, "arcdup.inc")
+}
+
+// T1109: A Weak[T] variant field in a container must dup via dupWeak (atomic
+// weak-count increment, emits weakdup.inc), the symmetric sibling of the Arc
+// branch. Like Arc, Weak's LLVM value is a bare i8*, so it must NOT reach
+// dupHeapValue. Guards the weak branch of emitVariantFieldDup.
+func TestDupEnumVariantWeakRefcount(t *testing.T) {
+	ir := generateIR(t, `
+		enum WHolder { One(Weak[int] w, int n) }
+		main() {
+			a := Ref[int](99);
+			m := Map[int, WHolder]();
+			m[1] = WHolder.One(a.downgrade(), 3);
+		}
+	`)
+	assertContains(t, ir, "enumdup.One")
+	assertContains(t, ir, "weakdup.inc")
+}
+
+// T1109: A generic enum carrying Ref[T]/Weak[T] variant fields exercises the
+// type-substitution sub-branches in emitVariantFieldDup (the dup is synthesized
+// in a mono context where c.typeSubst != nil, so the element type must be
+// substituted before dupArc/dupWeak). Confirms both refcount paths fire for the
+// monomorphized Box[int] instance.
+func TestDupEnumVariantGenericArcWeakRefcount(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box[T] { Some(Ref[T] r, int n), None }
+		enum WBox[T] { W(Weak[T] w, int n), E }
+		main() {
+			a := Ref[int](7);
+			m := Map[int, Box[int]]();
+			m[1] = Box[int].Some(Ref[int](9), 2);
+			wm := Map[int, WBox[int]]();
+			wm[1] = WBox[int].W(a.downgrade(), 3);
+		}
+	`)
+	assertContains(t, ir, "arcdup.inc")
+	assertContains(t, ir, "weakdup.inc")
+}
+
 // B0216: String field reassignment drops old value before storing new.
 func TestStringFieldReassignDrop(t *testing.T) {
 	ir := generateIR(t, `

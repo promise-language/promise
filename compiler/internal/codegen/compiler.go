@@ -3638,6 +3638,40 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 			c.block.NewStore(dup, fieldPtr)
 			return
 		}
+		// T1109: Ref/Arc[T] variant field — strong-count increment (non-atomic when
+		// `confined). Native handle: LLVM value is a bare i8*, so it must NOT reach
+		// dupHeapValue (which assumes a value struct and panics on a *PointerType).
+		// Mirrors maybeDupPushElement (expr.go) and emitVariantFieldDrop's Arc branch.
+		if arcElem, isArc := types.AsArc(typ); isArc || named == types.TypArc {
+			if c.typeSubst != nil && arcElem != nil {
+				arcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			dup := c.dupArc(fieldVal, arcElem)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
+		// T1109: Weak[T] variant field — atomic weak-count increment.
+		if weakElem, isWeak := types.AsWeak(typ); isWeak {
+			if c.typeSubst != nil {
+				weakElem = types.Substitute(weakElem, c.typeSubst)
+			}
+			dup := c.dupWeak(fieldVal, weakElem)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
+		// T1109: Single-owner native handles (Mutex/MutexGuard/Task) have no dup
+		// semantics; ownership rejects double-moves so this is unreachable in valid
+		// programs. Leave the shallow slot (matches maybeDupPushElement returning nil)
+		// rather than falling into the panicking heap-user-type gate below.
+		if _, isMutex := types.AsMutex(typ); isMutex || named == types.TypMutex {
+			return
+		}
+		if _, isMG := types.AsMutexGuard(typ); isMG || named == types.TypMutexGuard {
+			return
+		}
+		if _, isTask := types.AsTask(typ); isTask || named == types.TypTask {
+			return
+		}
 		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 			// Use cloneHeapElement to try clone() first (a named function that handles
 			// recursive types safely), falling back to dupHeapValue only for non-recursive

@@ -230,9 +230,9 @@
       "updated": "2026-06-03"
     },
     "host_test_count": {
-      "value": 0,
+      "value": 7268,
       "direction": "up",
-      "updated": "2026-06-18"
+      "updated": "2026-06-22"
     },
     "host_test_failures": {
       "value": 0,

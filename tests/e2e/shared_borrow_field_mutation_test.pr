@@ -1,0 +1,60 @@
+// T0716: a direct field store through a shared (read-only) borrow is rejected at
+// compile time (see compiler/internal/sema/t0716_test.go). This file pins the
+// runtime behavior of the forms that remain *allowed*, so the rejection rule
+// doesn't accidentally break legitimate mutation:
+//   - a `~` mutable-borrow parameter may write a field,
+//   - an owned local may write a field,
+//   - self-mutation through `this` works,
+//   - a method-mediated write (property setter) still mutates.
+type Counter {
+  int n;
+
+  get value int {
+    return this.n;
+  }
+  set value(int v) {
+    this.n = v;
+  }
+
+  bump(~this) {
+    this.n = this.n + 1;
+  }
+}
+
+// `~` mutable borrow: the caller observes the field write in place.
+mutate_via_mut_borrow(Counter ~c) {
+  c.n = 42;
+}
+
+field_write_through_mut_borrow() `test {
+  Counter c = Counter(n: 1);
+  mutate_via_mut_borrow(c);
+  assert(c.n == 42, "field written through ~ borrow");
+}
+
+// Owned local: direct field store and inc/dec.
+field_write_on_owned_local() `test {
+  Counter c = Counter(n: 1);
+  c.n = 10;
+  c.n++;
+  assert(c.n == 11, "field write + inc on owned local");
+}
+
+// Self-mutation through `this` (the RefNone escape hatch) still mutates.
+mutation_through_this() `test {
+  Counter c = Counter(n: 0);
+  c.bump();
+  c.bump();
+  assert(c.n == 2, "self-mutation through this");
+}
+
+// Property setter through a shared borrow is a RefNone method call — allowed.
+setter_through_shared_borrow(Counter c) {
+  c.value = 99;
+}
+
+setter_still_mutates() `test {
+  Counter c = Counter(n: 1);
+  setter_through_shared_borrow(c);
+  assert(c.value == 99, "setter mutates through shared borrow (escape hatch)");
+}

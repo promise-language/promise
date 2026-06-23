@@ -7778,13 +7778,25 @@ func (c *Compiler) matchDupFieldSafe(fType types.Type, seen map[*types.Enum]bool
 		return true
 	}
 	if elemType, isVec := types.AsVector(fType); isVec || named == types.TypVector {
-		return !(isVec && fieldTypeNeedsDrop(elemType))
+		// T1118: a droppable-element vector is dup-safe iff its element type is —
+		// emitVariantFieldDup deep-copies it via dupVector + emitVectorElementCloneLoop.
+		// Recurse so the `seen` cycle guard rejects Vector[recursive-enum].
+		if isVec && fieldTypeNeedsDrop(elemType) {
+			return c.matchDupFieldSafe(elemType, seen)
+		}
+		return true
 	}
 	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
 		return true
 	}
-	// Heap user type — safe only via the shallow memcpy + field dup path.
-	return c.heapTypeSafeToDup(named, fType, nil)
+	// Heap user type — safe via the shallow memcpy + field dup path, or via a
+	// clone()-bearing container (Map/Set/user type). T1118: emitVariantFieldDup
+	// routes the latter through cloneHeapElement → the type's clone(), whose
+	// type-arg safety (incl. recursion through this enum, via the `seen` guard
+	// inside typeArgSafeForCloneDup → typeNeedsMatchDup) is checked by
+	// namedHasCloneFunc. Without this a Map/droppable-Set variant field made the
+	// whole enum non-dup-safe → no dup on container read-back → double-free.
+	return c.heapTypeSafeToDup(named, fType, nil) || c.namedHasCloneFunc(named, fType)
 }
 
 // typeNeedsMatchDup returns true if a resolved type needs duping when extracted

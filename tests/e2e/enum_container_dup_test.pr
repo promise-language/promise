@@ -1,0 +1,127 @@
+// T1118: An enum whose variant payload is a container (Map, or a Vector of
+// droppable elements) stored inside another Map must deep-copy the container on
+// read-back via `m[k]!` + match — otherwise the returned value aliases the
+// slot's owned buffer and both free it → `fatal: invalid free (bad header magic)`.
+enum MapHolder {
+  M(Map[int, int] inner),
+}
+
+map_enum_with_map_field() `test {
+  outer := Map[int, MapHolder]();
+  inner := Map[int, int]();
+  inner[1] = 100;
+  inner[2] = 200;
+  outer[1] = MapHolder.M(move inner);
+  v := outer[1]!;
+  match v {
+    M(m) => {
+      assert(m[1]! == 100, "map field value");
+    },
+  }
+}
+
+enum VecHolder {
+  V(string[] items),
+}
+
+map_enum_with_droppable_vector() `test {
+  outer := Map[int, VecHolder]();
+  v := Vector[string]();
+  v.push("a");
+  v.push("b");
+  outer[1] = VecHolder.V(move v);
+  got := outer[1]!;
+  match got {
+    V(items) => {
+      assert(items.len == 2, "vector field length");
+    },
+  }
+}
+
+enum IntVecHolder {
+  V(int[] nums),
+}
+
+// Vector of NON-droppable elements (int): the vector still owns a heap buffer,
+// but its elements need no per-element dup — exercises matchDupFieldSafe's
+// non-droppable-vector return path. Read-back must copy the buffer, not alias it.
+int_vec_in_map() `test {
+  outer := Map[int, IntVecHolder]();
+  v := Vector[int]();
+  v.push(10);
+  v.push(20);
+  outer[1] = IntVecHolder.V(move v);
+  got := outer[1]!;
+  match got {
+    V(nums) => {
+      assert(nums.len == 2, "int vector length");
+      assert(nums[0] == 10, "int vector elem 0");
+    },
+  }
+}
+
+enum SetHolder {
+  S(Set[int] items),
+}
+
+set_in_map() `test {
+  outer := Map[int, SetHolder]();
+  s := Set[int]();
+  s.add(1);
+  s.add(2);
+  outer[1] = SetHolder.S(move s);
+  got := outer[1]!;
+  match got {
+    S(items) => {
+      assert(items.len == 2, "set field length");
+    },
+  }
+}
+
+// A clone()-bearing user type (non-container) carried by a variant and stored in
+// a Map: read-back routes through namedHasCloneFunc → the type's clone(), so the
+// returned value owns an independent Box (the inner string is deep-copied).
+type Box `clone {
+  string label;
+}
+
+enum BoxHolder {
+  B(Box b),
+}
+
+box_in_map() `test {
+  outer := Map[int, BoxHolder]();
+  outer[1] = BoxHolder.B(Box(label: "hi"));
+  got := outer[1]!;
+  match got {
+    B(b) => {
+      assert(b.label == "hi", "box label");
+    },
+  }
+}
+
+// NOTE: A *recursive* enum (Vector- or Map-indirected) stored in an outer Map
+// and read back via `m[k]!` currently segfaults — a pre-existing bug independent
+// of T1118 (it reproduces with the T1118 expr.go change reverted). Tracked as
+// T1129; not exercised here so this suite stays green.
+
+enum NestedVecHolder {
+  V(Vector[Vector[string]] rows),
+}
+
+nested_vec_in_map() `test {
+  outer := Map[int, NestedVecHolder]();
+  rows := Vector[Vector[string]]();
+  row := Vector[string]();
+  row.push("a");
+  row.push("b");
+  rows.push(move row);
+  outer[1] = NestedVecHolder.V(move rows);
+  got := outer[1]!;
+  match got {
+    V(r) => {
+      assert(r.len == 1, "nested vector length");
+      assert(r[0].len == 2, "inner vector length");
+    },
+  }
+}

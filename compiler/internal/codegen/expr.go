@@ -7819,6 +7819,14 @@ func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 	if _, ok := types.AsChannel(resolved); ok || named == types.TypChannel {
 		return true
 	}
+	// T1117: A direct Arc/Weak element (e.g. Map[K, Ref[int]]) is safely
+	// match-dup'd by cloneResolvedValue's dupArc/dupWeak refcount increment.
+	if _, ok := types.AsArc(resolved); ok || named == types.TypArc {
+		return true
+	}
+	if _, ok := types.AsWeak(resolved); ok || named == types.TypWeak {
+		return true
+	}
 	// Heap user types: only safe to shallow-dup (memcpy + field dup) if ALL droppable
 	// fields can be independently dup'd. Specifically:
 	// - String fields → dupString creates independent copy ✓
@@ -7958,13 +7966,15 @@ func (c *Compiler) heapTypeSafeToDup(named *types.Named, resolved types.Type, se
 			continue
 		}
 
-		// T1110: Arc/Ref and Weak fields → safe to dup. They are reference-counted
-		// handles: dupArc/dupWeak bump the (strong/weak) count rather than aliasing,
-		// and dupHeapValueFields already emits those bumps for these field kinds. A
-		// Ref field carries an explicit `drop` method, so without this case the
-		// generic "nested heap user type" recursion below rejects it (drop method →
-		// not safe) and the whole containing struct is wrongly treated as un-dup'able
-		// — leaving match-destructured copies aliasing the source's Ref → double-free.
+		// T1110/T1117: Arc/Ref and Weak fields → safe to dup. They are
+		// reference-counted handles: dupArc/dupWeak bump the (strong/weak) count
+		// rather than aliasing, and dupHeapValueFields already emits those bumps
+		// for these field kinds. A Ref field carries an explicit `drop` method, so
+		// without this case the generic "nested heap user type" recursion below
+		// rejects it (drop method → not safe) and the whole containing struct is
+		// wrongly treated as un-dup'able — leaving match-destructured copies (and
+		// struct{Ref} map read-backs, T1117) aliasing the source's Ref → UAF /
+		// double-free.
 		if types.IsArc(fType) || fNamed == types.TypArc {
 			continue
 		}
@@ -8054,6 +8064,8 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 
 	_, isVec := types.AsVector(resolvedType)
 	_, isChan := types.AsChannel(resolvedType)
+	arcElem, isArc := types.AsArc(resolvedType)
+	weakElem, isWeak := types.AsWeak(resolvedType)
 
 	if named == types.TypString {
 		dupVal = c.dupString(val)
@@ -8075,6 +8087,19 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 		}
 	} else if isChan || named == types.TypChannel {
 		dupVal = c.dupChannel(val)
+	} else if isArc || named == types.TypArc {
+		// T1117: a direct Arc/Ref element — dupArc increments the strong count so
+		// the bound copy shares the allocation with a correct refcount. The bare
+		// i8* handle must not fall through to cloneHeapElement (which expects a
+		// {vtable,instance} value struct).
+		dupVal = c.dupArc(val, arcElem)
+	} else if isWeak || named == types.TypWeak {
+		// T1117: a direct Weak element — dupWeak increments the weak count.
+		welem := weakElem
+		if welem == nil {
+			welem = resolvedType
+		}
+		dupVal = c.dupWeak(val, welem)
 	} else if tup, isTup := resolvedType.(*types.Tuple); isTup {
 		// T0667: deep-clone each element so heap members become independent.
 		// cloneByType handles bit-copy elements (scalars pass through
@@ -10199,6 +10224,43 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 					c.optionalHeapDup = dup
 					return c.block.NewInsertValue(result, dup, 1)
 				}
+			}
+		}
+	}
+
+	// T1117: Dup a borrowed droppable enum element when `[]` returns
+	// `Optional[enum]` whose variant data aliases the container's stored slot.
+	// `Map[K,V].[]`'s match-destructure body returns V by alias when V is an enum
+	// that isn't safely match-dup'able or clone-bearing (typeNeedsMatchDup ==
+	// false) — e.g. an enum whose variant carries an Arc/Ref. An owning bind
+	// (`h := m[k]!`, or assignment) sets dupHeapUserFieldAccess at the bind site;
+	// without a dup here, the binding's drop walks the variant's Arc/Ref and
+	// decrements the shared refcount, corrupting the slot the Map still owns (UAF
+	// on the next read). Deep-dup the variant fields via an alloca round-trip
+	// through dupEnumElementInPlace (dupArc/dupWeak increment the refcount), then
+	// re-insert into the Optional so the bound copy owns an independent count.
+	// The inline/borrow form (`match m[k]!`) never sets the flag, so it stays
+	// aliased — balanced because it takes no owning drop. Mirrors
+	// maybeDupPushElement's B0290 alloca round-trip. Returns early like the dup
+	// branches above (the binding claims the result; not a stmt-temp).
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
+		resultType := c.info.Types[e]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		if opt, ok := resultType.(*types.Optional); ok {
+			elem := opt.Elem()
+			if c.typeSubst != nil {
+				elem = types.Substitute(elem, c.typeSubst)
+			}
+			if extractEnum(elem) != nil && c.vecElemNeedsEnumDrop(elem) && !c.typeNeedsMatchDup(elem) {
+				c.dupHeapUserFieldAccess = false // consume the flag
+				innerVal := c.block.NewExtractValue(result, 1)
+				alloca := c.createEntryAlloca(innerVal.Type())
+				c.block.NewStore(innerVal, alloca)
+				c.dupEnumElementInPlace(alloca, elem)
+				dup := c.block.NewLoad(innerVal.Type(), alloca)
+				return c.block.NewInsertValue(result, dup, 1)
 			}
 		}
 	}

@@ -1,0 +1,281 @@
+// T1117: By-value read of a Ref/Arc-bearing Map value must increment the
+// refcount so the bound copy owns an independent count. Before the fix, the
+// `Map[K,V].[]` match-destructure body returned V by alias for Ref/Arc-bearing
+// values (no refcount bump), so an owning bind (`h := m[k]!`) decremented the
+// shared count to 0 on drop and corrupted / freed the slot the Map still owns —
+// UAF on the next read (the struct form segfaulted on first access). The
+// inline/borrow form (`match m[k]!`, `m[k]!.field`) must stay aliased (no owning
+// drop) and remain balanced.
+//
+// Covers all three element shapes — direct Ref/Weak, struct{Ref}, enum{Ref} —
+// across inline read, bind-then-reread, and overwrite. Leak-checked batch tests.
+type RefBox {
+  Ref[int] r;
+  int n;
+}
+
+enum RefEnum {
+  V(Ref[int] r),
+  N,
+}
+
+// ---- direct Arc/Ref ----
+
+direct_inline_read() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](7);
+  assert(m[1]!.borrow == 7, "direct inline");
+}
+
+direct_bind_reread() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](7);
+  {
+    h := m[1]!;
+    assert(h.borrow == 7, "direct bind value");
+  }
+  // Slot must survive the bound copy's drop.
+  assert(m[1]!.borrow == 7, "direct reread after drop");
+}
+
+direct_two_binds() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](42);
+  h1 := m[1]!;
+  h2 := m[1]!;
+  assert(h1.borrow == 42, "h1");
+  assert(h2.borrow == 42, "h2");
+  assert(m[1]!.borrow == 42, "slot intact");
+}
+
+direct_overwrite() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](1);
+  m[1] = Ref[int](2);
+  assert(m[1]!.borrow == 2, "overwrite");
+}
+
+// ---- struct{Ref} ----
+
+struct_inline_read() `test {
+  m := Map[int, RefBox]();
+  m[1] = RefBox(r: Ref[int](7), n: 11);
+  assert(m[1]!.n == 11, "struct inline n");
+  assert(m[1]!.r.borrow == 7, "struct inline r");
+}
+
+struct_bind_reread() `test {
+  m := Map[int, RefBox]();
+  m[1] = RefBox(r: Ref[int](7), n: 11);
+  {
+    h := m[1]!;
+    assert(h.n == 11, "struct bind n");
+    assert(h.r.borrow == 7, "struct bind r");
+  }
+  assert(m[1]!.r.borrow == 7, "struct reread r after drop");
+  assert(m[1]!.n == 11, "struct reread n after drop");
+}
+
+struct_two_binds() `test {
+  m := Map[int, RefBox]();
+  m[1] = RefBox(r: Ref[int](9), n: 3);
+  h1 := m[1]!;
+  h2 := m[1]!;
+  assert(h1.r.borrow == 9, "struct h1");
+  assert(h2.r.borrow == 9, "struct h2");
+  assert(m[1]!.r.borrow == 9, "struct slot intact");
+}
+
+struct_overwrite() `test {
+  m := Map[int, RefBox]();
+  m[1] = RefBox(r: Ref[int](1), n: 1);
+  m[1] = RefBox(r: Ref[int](2), n: 2);
+  assert(m[1]!.r.borrow == 2, "struct overwrite r");
+  assert(m[1]!.n == 2, "struct overwrite n");
+}
+
+// ---- enum{Ref} ----
+
+enum_inline_read() `test {
+  m := Map[int, RefEnum]();
+  m[1] = RefEnum.V(Ref[int](7));
+  match m[1]! {
+    RefEnum.V(r) => {
+      assert(r.borrow == 7, "enum inline");
+    },
+    _ => {
+      assert(false, "enum inline wrong variant");
+    },
+  }
+}
+
+enum_bind_reread() `test {
+  m := Map[int, RefEnum]();
+  m[1] = RefEnum.V(Ref[int](7));
+  {
+    h := m[1]!;
+  }
+  match m[1]! {
+    RefEnum.V(r) => {
+      assert(r.borrow == 7, "enum reread after drop");
+    },
+    _ => {
+      assert(false, "enum reread wrong variant");
+    },
+  }
+}
+
+enum_two_binds() `test {
+  m := Map[int, RefEnum]();
+  m[1] = RefEnum.V(Ref[int](5));
+  h1 := m[1]!;
+  h2 := m[1]!;
+  match h1 {
+    RefEnum.V(r) => {
+      assert(r.borrow == 5, "enum h1");
+    },
+    _ => {
+      assert(false, "enum h1 variant");
+    },
+  }
+  match m[1]! {
+    RefEnum.V(r) => {
+      assert(r.borrow == 5, "enum slot intact");
+    },
+    _ => {
+      assert(false, "enum slot variant");
+    },
+  }
+}
+
+enum_overwrite() `test {
+  m := Map[int, RefEnum]();
+  m[1] = RefEnum.V(Ref[int](1));
+  m[1] = RefEnum.V(Ref[int](2));
+  match m[1]! {
+    RefEnum.V(r) => {
+      assert(r.borrow == 2, "enum overwrite");
+    },
+    _ => {
+      assert(false, "enum overwrite variant");
+    },
+  }
+}
+
+// ---- Weak ----
+
+weak_bind_reread() `test {
+  r := Ref[int](7);
+  m := Map[int, Weak[int]]();
+  m[1] = r.downgrade();
+  {
+    h := m[1]!;
+  }
+  assert(m[1]!.upgrade()!.borrow == 7, "weak reread after drop");
+}
+
+// struct{Weak} read-back — exercises the heapTypeSafeToDup Weak-field branch +
+// dupWeak inside dupHeapValueFields (the Weak analog of struct_bind_reread).
+type WeakBox {
+  Weak[int] w;
+  int n;
+}
+
+struct_weak_bind_reread() `test {
+  r := Ref[int](7);
+  m := Map[int, WeakBox]();
+  m[1] = WeakBox(w: r.downgrade(), n: 11);
+  {
+    h := m[1]!;
+    assert(h.n == 11, "weak struct bind n");
+    assert(h.w.upgrade()!.borrow == 7, "weak struct bind w");
+  }
+  assert(m[1]!.w.upgrade()!.borrow == 7, "weak struct reread after drop");
+}
+
+// ---- bind-shape coverage (typed-decl + reassignment) ----
+// The owning-bind dup must fire for every LHS shape that sets
+// dupHeapUserFieldAccess: inferred `:=` (above), an explicitly-typed decl
+// (genTypedVarDecl), and a reassignment `x = m[k]!` (genAssignStmt — which also
+// drops the prior value of x).
+
+direct_typed_decl() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](7);
+  Ref[int] h = m[1]!;
+  assert(h.borrow == 7, "typed decl value");
+  assert(m[1]!.borrow == 7, "slot intact after typed-decl drop");
+}
+
+direct_reassign() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](7);
+  m[2] = Ref[int](9);
+  Ref[int] x = m[1]!;
+  x = m[2]!; // drops old x (slot-1 copy), dups slot-2
+  assert(x.borrow == 9, "reassigned value");
+  assert(m[1]!.borrow == 7, "slot1 intact after reassign");
+  assert(m[2]!.borrow == 9, "slot2 intact after reassign");
+}
+
+struct_reassign() `test {
+  m := Map[int, RefBox]();
+  m[1] = RefBox(r: Ref[int](7), n: 1);
+  m[2] = RefBox(r: Ref[int](8), n: 2);
+  RefBox x = m[1]!;
+  x = m[2]!;
+  assert(x.r.borrow == 8, "struct reassigned");
+  assert(m[1]!.r.borrow == 7, "struct slot1 intact after reassign");
+  assert(m[2]!.r.borrow == 8, "struct slot2 intact after reassign");
+}
+
+enum_reassign() `test {
+  m := Map[int, RefEnum]();
+  m[1] = RefEnum.V(Ref[int](7));
+  m[2] = RefEnum.V(Ref[int](8));
+  RefEnum x = m[1]!;
+  x = m[2]!;
+  match x {
+    RefEnum.V(r) => {
+      assert(r.borrow == 8, "enum reassigned");
+    },
+    _ => {
+      assert(false, "enum reassign variant");
+    },
+  }
+  match m[1]! {
+    RefEnum.V(r) => {
+      assert(r.borrow == 7, "enum slot1 intact after reassign");
+    },
+    _ => {
+      assert(false, "enum slot1 variant");
+    },
+  }
+}
+
+// ---- Vector container (not just Map) ----
+// The owning-bind dup-on-read is container-general: a Vector element read by a
+// bind must also produce an independent copy. (`Vector[enum{Ref}]` bind is a
+// SEPARATE uncovered native-index path — segfaults — tracked as T1122; only the
+// direct-Arc and struct{Arc} Vector shapes are exercised here.)
+
+vector_direct_bind_reread() `test {
+  v := Vector[Ref[int]]();
+  v.push(Ref[int](7));
+  {
+    h := v[0];
+    assert(h.borrow == 7, "vec direct bind");
+  }
+  assert(v[0].borrow == 7, "vec direct reread after drop");
+}
+
+vector_struct_bind_reread() `test {
+  v := Vector[RefBox]();
+  v.push(RefBox(r: Ref[int](7), n: 11));
+  {
+    h := v[0];
+    assert(h.n == 11, "vec struct bind n");
+    assert(h.r.borrow == 7, "vec struct bind r");
+  }
+  assert(v[0].r.borrow == 7, "vec struct reread after drop");
+}

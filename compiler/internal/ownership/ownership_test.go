@@ -12611,3 +12611,335 @@ func TestT0895ReassignSourceWhileBorrowedViaAssign(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot assign to 'h' while it is borrowed")
 }
+
+// === T1113: by-value read of a container element transitively nesting a
+// single-owner native handle (Task/Mutex/MutexGuard) through a user-type field
+// or enum variant field ===
+//
+// Map's `[]` is a Promise method (non-native) that returns the slot's element by
+// value; a single-owner handle in the element is NOT duped on read (no copy
+// semantics), so `h := m[k]!` aliases the slot's owned handle → double-free / UAF
+// when the read-back copy drops. The original T1109 fix left these as silent
+// shallow copies (segfault at runtime); T1113 rejects the by-value read.
+// isUserIndexExpr would wrongly exempt Map — indexTargetIsAliasingContainer
+// suppresses that exemption for std native containers (Vector/Map).
+
+func TestT1113_MapEnumMutexReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		test() {
+			m := Map[int, MHolder]();
+			m[1] = MHolder.M(Mutex[int](5), 2);
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+func TestT1113_MapStructMutexReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type SHolder { Mutex[int] m; int n; }
+		test() {
+			m := Map[int, SHolder]();
+			m[1] = SHolder(m: Mutex[int](5), n: 2);
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+func TestT1113_MapEnumTaskReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker_t1113() int { return 42; }
+		enum THolder { T(Task[int] t, int n) }
+		test() {
+			m := Map[int, THolder]();
+			m[1] = THolder.T(go worker_t1113(), 2);
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Task[int], a single-owner native handle")
+}
+
+func TestT1113_MapStructMutexGuardReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type GHolder { MutexGuard[int] g; }
+		test(GHolder src) {
+			m := Map[int, GHolder]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains MutexGuard[int], a single-owner native handle")
+}
+
+// Typed var-decl form `T x = m[k]!` goes through tryMove as well.
+func TestT1113_MapEnumMutexTypedVarRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		test() {
+			m := Map[int, MHolder]();
+			m[1] = MHolder.M(Mutex[int](5), 2);
+			MHolder x = m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "single-owner native handle")
+}
+
+// Consuming function-arg form `f(m[k]!)` (a `move` parameter) goes through
+// tryMoveConsume. (A plain borrow parameter is sound — the by-borrow temp is
+// not dropped, so it never aliases-then-frees the slot; only consumption is
+// unsound, and the handle also cannot be moved out inside the borrow callee.)
+func TestT1113_MapEnumMutexConsumingCallArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		sink(MHolder move h) {}
+		test() {
+			m := Map[int, MHolder]();
+			m[1] = MHolder.M(Mutex[int](5), 2);
+			sink(m[1]!);
+		}
+	`)
+	expectOwnerError(t, errs, "single-owner native handle")
+}
+
+// Vector element nesting a handle (Vector `[]` is native, no `!` unwrap).
+func TestT1113_VectorEnumMutexReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		test() {
+			v := Vector[MHolder]();
+			h := v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Fixed-size array element nesting a handle.
+func TestT1113_ArrayEnumMutexReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		test(MHolder a, MHolder b) {
+			MHolder[2] arr = [a, b];
+			h := arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// --- T1113 positive regression guards: refcounted/duplicable nesting and
+// handle-free elements must still compile. ---
+//
+// These assert only that the OWNERSHIP PASS allows the read — they are not a
+// runtime-soundness guarantee. Allowing refcounted nesting is correct in
+// principle (Ref/Arc dup is a strong-count increment, not a shallow alias), but
+// the by-value BIND form `h := m[k]!` of a Ref/Arc-bearing value is currently
+// miscompiled (the bind read does not increment the strong count → UAF on the
+// next read; the struct-field form segfaults on first access). That is the
+// separate pre-existing codegen bug T1117 — these ownerOK tests stay valid
+// across its fix; the runtime regressions live in the e2e suite (match/inline
+// forms today, bind forms once T1117 lands).
+
+// Ref[Mutex] in an enum: Ref dup is a refcount increment (sound at the ownership
+// level; runtime bind-read codegen tracked as T1117). The read is allowed —
+// FirstFieldNestedSingleOwnerHandle treats Ref as opaque → nil.
+func TestT1113_MapEnumRefMutexReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		enum RHolder { R(Ref[Mutex[int]] r, int n) }
+		test() {
+			m := Map[int, RHolder]();
+			m[1] = RHolder.R(Ref[Mutex[int]](Mutex[int](5)), 2);
+			h := m[1]!;
+		}
+	`)
+}
+
+// Ref[Mutex] directly as a Map value — sound (refcount dup).
+func TestT1113_MapRefMutexValueReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			m := Map[int, Ref[Mutex[int]]]();
+			m[1] = Ref[Mutex[int]](Mutex[int](5));
+			h := m[1]!;
+		}
+	`)
+}
+
+// Channel in a struct: Channel dup is a refcount increment (sound).
+func TestT1113_MapStructChannelReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		type CHolder { Channel[int] c; int n; }
+		test() {
+			m := Map[int, CHolder]();
+			m[1] = CHolder(c: Channel[int](), n: 2);
+			h := m[1]!;
+		}
+	`)
+}
+
+// Handle-free enum read — no false positive.
+func TestT1113_MapPlainEnumReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		enum PHolder { P(int a, string b) }
+		test() {
+			m := Map[int, PHolder]();
+			m[1] = PHolder.P(1, "x");
+			h := m[1]!;
+		}
+	`)
+}
+
+// Handle-free struct read — no false positive.
+func TestT1113_MapPlainStructReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		type QHolder { int a; string b; }
+		test() {
+			m := Map[int, QHolder]();
+			m[1] = QHolder(a: 1, b: "x");
+			h := m[1]!;
+		}
+	`)
+}
+
+// A user-defined non-native `[]` returning a FRESH value that transitively
+// nests a single-owner handle stays allowed. This is the T0650 exemption
+// crossing the new T1113 nested-handle gate: the index target is a plain user
+// type (not a Vector/Map), so indexTargetIsAliasingContainer is false and the
+// isUserIndexExpr exemption survives — there is no container slot to alias (the
+// `[]` constructs a fresh MHolder owning its own Mutex). Contrast the rejected
+// Vector/Map cases above, where the read aliases internal storage. Guards
+// against a future FirstFieldNestedSingleOwnerHandle change wrongly rejecting
+// fresh-returning user operators.
+func TestT1113_UserIndexFreshEnumHandleReturnAllowed(t *testing.T) {
+	ownerOK(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		type Factory { int seed; [](int i) MHolder { return MHolder.M(Mutex[int](this.seed + i), i); } }
+		test() {
+			f := Factory(seed: 10);
+			h := f[5];
+		}
+	`)
+}
+
+// --- T1113 detection-path coverage: the gate must see a handle reached through
+// generic-instance substitution, tuples, nested arrays, and recursive types, not
+// only the simple non-generic struct/enum field. Each exercises a distinct branch
+// of firstFieldNestedSingleOwnerHandle. ---
+
+// Generic USER enum where the handle is reached ONLY via type-arg substitution
+// (variant field type is the type param `T`, instantiated to Mutex[int]). Hits
+// the Instance->Enum branch with BuildSubstMap/Substitute — distinct from the
+// non-generic enum (*types.Enum) branch the earlier tests cover.
+func TestT1113_MapGenericEnumHandleViaTypeParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Holder[T] { M(T v, int n) }
+		test() {
+			m := Map[int, Holder[Mutex[int]]]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Generic USER struct, handle reached via type-arg substitution (field type is
+// the type param). Hits the Instance->Named branch with Substitute — distinct
+// from the non-generic struct (*types.Named) branch covered earlier.
+func TestT1113_MapGenericStructHandleViaTypeParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box[T] { T v; int n; }
+		test() {
+			m := Map[int, Box[Mutex[int]]]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Tuple element nesting a handle: the map-read result `(Mutex[int], int)?`
+// unwraps Optional -> Tuple -> handle. Hits the *types.Tuple branch.
+func TestT1113_MapTupleHandleReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Map[int, (Mutex[int], int)]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Handle reached through a fixed-size ARRAY field inside a struct element. Hits
+// the *types.Array branch (recurse element type), reached from the Named field
+// walk — distinct from indexing an array directly (covered earlier), where the
+// result is already the element type.
+func TestT1113_MapArrayFieldHandleReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum MHolder { M(Mutex[int] m, int n) }
+		type AHolder { MHolder[2] arr; }
+		test() {
+			m := Map[int, AHolder]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Self-referential (recursive) struct: the field walk reaches `Node` again
+// through `Node? next` before finding the Mutex. The `seen` cycle guard must stop
+// the recursion (else infinite loop) and the walk must still find the sibling
+// Mutex field. Exercises the seen[t]==true early-return.
+func TestT1113_MapRecursiveStructHandleReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Node { Node? next; Mutex[int] m; }
+		test() {
+			m := Map[int, Node]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Diamond/shared type: the same handle-free enum `E` is referenced by two
+// fields of the struct element. The first walk records E in `seen`; the second
+// must short-circuit on seen[E] (else redundant re-walk) and the walk must still
+// reach the sibling Mutex. Exercises the *types.Enum seen-guard early return.
+func TestT1113_MapSharedEnumCycleGuardRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum E { M(int a), N }
+		type Two { E first; E second; Mutex[int] m; }
+		test() {
+			m := Map[int, Two]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Generic-instance analogue: two fields share the same generic enum origin
+// (Holder[int]). The seen guard keys on the origin *types.Enum, so the second
+// field short-circuits. Exercises the Instance->Enum seen-guard early return.
+func TestT1113_MapSharedGenericEnumCycleGuardRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Holder[T] { M(T v), Nil }
+		type Two { Holder[int] first; Holder[int] second; Mutex[int] m; }
+		test() {
+			m := Map[int, Two]();
+			h := m[1]!;
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Positive guard: a std native container reached THROUGH generic instantiation
+// stays opaque. `Holder[Mutex[int]]` instantiates the variant field `Ref[T]` to
+// `Ref[Mutex[int]]`; the Instance->Named recursion must treat Ref as opaque
+// (isStdNativeContainerNamed) and NOT recurse its Mutex type-arg — Ref's dup is
+// a refcount increment, so the read is sound and must compile. Guards the
+// std-container-opaque short-circuit on the substitution path.
+func TestT1113_MapGenericEnumRefHandleViaTypeParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		enum Holder[T] { M(Ref[T] r, int n) }
+		test() {
+			m := Map[int, Holder[Mutex[int]]]();
+			h := m[1]!;
+		}
+	`)
+}

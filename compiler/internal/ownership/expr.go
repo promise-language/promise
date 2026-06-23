@@ -1637,21 +1637,64 @@ func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
 		return false
 	}
 	typ := c.info.Types[idx]
-	if !isSingleOwnerNativeType(typ) {
+	// T0650: a user-defined non-native `[]` on a *plain user type* is an ordinary
+	// method returning a *freshly-constructed / `.lock()`-derived owned* value —
+	// there is no container slot to alias. T0647's trackUserIndexResult makes that
+	// owned return leak-safe at codegen, so it is exempt.
+	//
+	// T1113 EXCEPTION: a std native container (Vector/Map) returns the slot's
+	// element BY VALUE, aliasing internal storage. Vector's `[]` is native (so
+	// isUserIndexExpr is already false), but Map's `[]` is a Promise method —
+	// isUserIndexExpr would wrongly exempt it. A single-owner handle in the element
+	// is not duped on read (no copy semantics), so the read aliases the slot's
+	// owned pointer exactly like a native slot. Do NOT exempt aliasing containers
+	// for the handle checks below.
+	exemptUserIndex := isUserIndexExpr(c.info, idx) && !indexTargetIsAliasingContainer(c.info, idx)
+	if exemptUserIndex {
 		return false
 	}
-	// T0650: a user-defined non-native `[]` is an ordinary method returning an
-	// *owned* handle — there is no container slot to alias. T0647's
-	// trackUserIndexResult already makes the owned operator return leak-safe at
-	// codegen. Native container/array indexing resolves to a native/nil `[]`
-	// (extractNamedType→nil for arrays) and stays correctly rejected below.
-	if isUserIndexExpr(c.info, idx) {
-		return false
+	if isSingleOwnerNativeType(typ) {
+		c.errorf(idx.Pos(),
+			"cannot move %s out of indexed slot; this is a single-owner native handle with no copy/clone semantics — use a fresh constructor for the slot, or call a method that returns a borrow (e.g. `.lock()`)",
+			typ.String())
+		return true
 	}
-	c.errorf(idx.Pos(),
-		"cannot move %s out of indexed slot; this is a single-owner native handle with no copy/clone semantics — use a fresh constructor for the slot, or call a method that returns a borrow (e.g. `.lock()`)",
-		typ.String())
-	return true
+	// T1113: the index RESULT is itself an enum/struct (so isSingleOwnerNativeType
+	// is false), but it transitively OWNS a single-owner handle through a user-type
+	// field or enum variant field. A native container read produces a by-value
+	// copy whose nested handle pointer aliases the container's slot — moving the
+	// copy out and dropping it frees memory the container still references
+	// (double-free / UAF). There is no copy semantics for the handle, so reject
+	// the read. (Refcounted nesting — Ref[Mutex], Channel[Task], enum{Ref} — is
+	// excluded by FirstFieldNestedSingleOwnerHandle treating std containers as
+	// opaque, so those sound reads still compile.)
+	if off := sema.FirstFieldNestedSingleOwnerHandle(typ); off != nil {
+		c.errorf(idx.Pos(),
+			"cannot read %s out of indexed slot; it transitively contains %s, a single-owner native handle with no copy/clone semantics — indexing copies the element and would alias the container's handle (double-free at drop). Construct a fresh value for the slot, or call .remove()/.pop() to take ownership of an element.",
+			typ.String(), off.String())
+		return true
+	}
+	return false
+}
+
+// indexTargetIsAliasingContainer reports whether idx reads an element out of a
+// std native container (Vector / Map) whose `[]` returns the slot's element BY
+// VALUE, aliasing internal storage — as opposed to a plain user type's `[]`,
+// which constructs a fresh owned value (T0650). The distinction matters only for
+// the single-owner-handle gate (T1113): a handle element is not duped on read,
+// so an aliasing container's read shares the slot's owned pointer (double-free /
+// UAF), while a fresh-returning user `[]` is sound. Vector's `[]` is native (so
+// isUserIndexExpr already rejects exemption); Map's is a Promise method, so this
+// catches the Map case that isUserIndexExpr would otherwise wrongly exempt.
+func indexTargetIsAliasingContainer(info *sema.Info, idx *ast.IndexExpr) bool {
+	t := info.Types[idx.Target]
+	if _, ok := types.AsVector(t); ok {
+		return true
+	}
+	if _, _, ok := types.AsMap(t); ok {
+		return true
+	}
+	return false
 }
 
 // peelToMemberSource peels ParenExpr / OptionalUnwrapExpr wrappers off expr and

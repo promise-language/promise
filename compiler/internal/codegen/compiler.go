@@ -3405,6 +3405,43 @@ func (c *Compiler) dupHeapValueStatic(instancePtr value.Value, resolvedType type
 	return newPtr
 }
 
+// emitSingleOwnerHandleDupPanic is the T1113 defense-in-depth backstop. A
+// single-owner native handle (Task/Mutex/MutexGuard) is a bare i8* owning one
+// allocation and has NO dup semantics, so a structural-copy path that reaches one
+// must panic rather than silently shallow-copy — a shallow copy aliases the
+// source handle and double-frees / UAFs at drop (the original T1109 bug). Every
+// reachable user path is rejected earlier: the by-value container read
+// (`container[k]!` of a struct/enum nesting a handle) by the ownership pass
+// (rejectIndexExprSingleOwnerMove via FirstFieldNestedSingleOwnerHandle), and
+// .clone()/.filled() of handle-bearing aggregates by sema (validateCloneType /
+// checkContainerNotCloneable). So this is unreachable in well-formed programs; it
+// only fires if a future path slips through, converting silent corruption into a
+// clear panic (mirrors the T0559 vector / T0813 closure backstops). After the
+// panic return terminates the block, c.block is moved to a fresh (dead,
+// unreachable) block so the caller's subsequent codegen appends to valid IR.
+func (c *Compiler) emitSingleOwnerHandleDupPanic(handleName string) {
+	panicMsg := c.makeGlobalString(fmt.Sprintf(
+		"internal: cannot duplicate single-owner handle %s", handleName))
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.emitPanicReturn()
+	c.block = c.newBlock("handle.dup.unreachable")
+}
+
+// singleOwnerHandleName returns "Task"/"Mutex"/"MutexGuard" if typ is one of the
+// single-owner native handles, else "". named is typ's extractNamed result.
+func singleOwnerHandleName(typ types.Type, named *types.Named) string {
+	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		return "Mutex"
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
+		return "MutexGuard"
+	}
+	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+		return "Task"
+	}
+	return ""
+}
+
 // dupHeapValueFields walks the fields of a heap user type instance and dups
 // any droppable sub-fields (strings, vectors, channels, nested heap types).
 // B0236: Called after memcpy to fix up shared pointers in the new copy.
@@ -3476,12 +3513,13 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 			}
 			dup := c.dupWeak(fieldVal, elemType)
 			c.block.NewStore(dup, fieldPtr)
-		} else if isOpaqueContainerType(fType) {
-			// T0387: Other opaque container types (Task, Mutex, MutexGuard) lack a
-			// generic dup helper — leave the memcpy'd pointer as-is. Cloning a user
-			// type with such fields is a separate concern; leaving the field shallow
-			// at least avoids generating broken IR. The original use of dupHeapValue
-			// (B0236 match destructure) had the same limitation.
+		} else if h := singleOwnerHandleName(fType, fNamed); h != "" {
+			// T1113: The single-owner native handles (Task/Mutex/MutexGuard —
+			// Vector/Channel/Arc/Weak are handled above, and all satisfy
+			// isOpaqueContainerType) have NO dup semantics. The old T0387 no-op
+			// shallow copy aliased the source's handle and double-freed / UAF'd at
+			// drop. Panic backstop — see emitSingleOwnerHandleDupPanic.
+			c.emitSingleOwnerHandleDupPanic(h)
 		} else if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
 			// Nested heap user type — recursive dup
 			dup := c.dupHeapValue(fieldVal, fType)
@@ -3659,17 +3697,18 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 			c.block.NewStore(dup, fieldPtr)
 			return
 		}
-		// T1109: Single-owner native handles (Mutex/MutexGuard/Task) have no dup
-		// semantics; ownership rejects double-moves so this is unreachable in valid
-		// programs. Leave the shallow slot (matches maybeDupPushElement returning nil)
-		// rather than falling into the panicking heap-user-type gate below.
-		if _, isMutex := types.AsMutex(typ); isMutex || named == types.TypMutex {
-			return
-		}
-		if _, isMG := types.AsMutexGuard(typ); isMG || named == types.TypMutexGuard {
-			return
-		}
-		if _, isTask := types.AsTask(typ); isTask || named == types.TypTask {
+		// T1113: Single-owner native handles (Mutex/MutexGuard/Task) have NO dup
+		// semantics — the LLVM value is a bare i8* owning one allocation. A shallow
+		// copy (the old T1109 no-op) aliases the container's slot, so moving the
+		// read-back copy out and dropping it double-frees / UAFs the slot the
+		// container still references. The reachable user paths (`container[k]!` of an
+		// enum/struct nesting such a handle) are now rejected at the ownership pass
+		// (rejectIndexExprSingleOwnerMove via FirstFieldNestedSingleOwnerHandle), and
+		// .clone()/.filled() of handle-bearing aggregates by validateCloneType /
+		// checkContainerNotCloneable. Panic backstop — see
+		// emitSingleOwnerHandleDupPanic.
+		if h := singleOwnerHandleName(typ, named); h != "" {
+			c.emitSingleOwnerHandleDupPanic(h)
 			return
 		}
 		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {

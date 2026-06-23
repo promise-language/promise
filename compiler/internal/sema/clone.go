@@ -283,6 +283,111 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 	return nil
 }
 
+// FirstFieldNestedSingleOwnerHandle is like FirstNestedSingleOwnerHandle but is
+// purpose-built for the by-value container READ gate (T1113), where the unsound
+// surface is a single-owner handle (Task/Mutex/MutexGuard) reached ONLY through
+// a user-type field or enum variant field. It differs from
+// firstNestedSingleOwnerHandle in exactly one way: a std native container
+// origin (Ref/Weak/Channel/Vector/Map/Set/string) is treated as fully opaque —
+// its TypeArgs are NOT recursed. This is what distinguishes the unsound
+// shallow-copy surface (an enum/struct whose variant/field is a Mutex) from
+// sound refcounted nesting (Ref[Mutex], Channel[Task], enum{Ref[Mutex]}), whose
+// element dup is a refcount increment, not a shallow alias.
+//
+// firstNestedSingleOwnerHandle cannot be reused for the read gate: its
+// unconditional TypeArgs recursion flags Ref[Mutex] (a false positive — Ref's
+// dup is sound). The direct-handle container cases (Vector[Task], Map[K,Mutex])
+// are intentionally NOT flagged here either — they are already rejected by the
+// caller via isSingleOwnerNativeType on the index RESULT type, and a nested
+// container (Vector[Vector[Task]]) is gated at declaration by
+// isNestedSingleOwnerContainer / the emitVectorElementCloneLoop runtime backstop
+// (never silent corruption). Returns nil when no field/variant-nested handle
+// is present. (T1113)
+func FirstFieldNestedSingleOwnerHandle(typ types.Type) types.Type {
+	return firstFieldNestedSingleOwnerHandle(typ, nil)
+}
+
+func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) types.Type {
+	if typ == nil {
+		return nil
+	}
+	if seen == nil {
+		seen = make(map[types.Type]bool)
+	}
+	switch t := typ.(type) {
+	case *types.Instance:
+		// A direct Task/Mutex/MutexGuard read result IS reported (so callers can
+		// special-case it if desired), but the caller's isSingleOwnerNativeType
+		// branch handles those first in practice.
+		if types.IsTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+			return t
+		}
+		switch origin := t.Origin().(type) {
+		case *types.Named:
+			// Std native container (Ref/Weak/Channel/Vector/Map/Set/string):
+			// opaque. Do NOT recurse TypeArgs — Ref[Mutex] must yield nil
+			// (refcounted dup is sound). Only USER generic types recurse their
+			// fields under the type-arg substitution.
+			if isStdNativeContainerNamed(origin) || seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, f := range origin.AllFields() {
+				if off := firstFieldNestedSingleOwnerHandle(types.Substitute(f.Type(), subst), seen); off != nil {
+					return off
+				}
+			}
+		case *types.Enum:
+			if seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					if off := firstFieldNestedSingleOwnerHandle(types.Substitute(f.Type(), subst), seen); off != nil {
+						return off
+					}
+				}
+			}
+		}
+	case *types.Named:
+		if isStdNativeContainerNamed(t) || seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, f := range t.AllFields() {
+			if off := firstFieldNestedSingleOwnerHandle(f.Type(), seen); off != nil {
+				return off
+			}
+		}
+	case *types.Enum:
+		if seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, v := range t.Variants() {
+			for _, f := range v.Fields() {
+				if off := firstFieldNestedSingleOwnerHandle(f.Type(), seen); off != nil {
+					return off
+				}
+			}
+		}
+	case *types.Optional:
+		return firstFieldNestedSingleOwnerHandle(t.Elem(), seen)
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if off := firstFieldNestedSingleOwnerHandle(e, seen); off != nil {
+				return off
+			}
+		}
+	case *types.Array:
+		return firstFieldNestedSingleOwnerHandle(t.Elem(), seen)
+	}
+	return nil
+}
+
 // firstNestedClosure returns the first closure (*types.Signature) found in typ,
 // searching transitively through Instance type arguments, user-type fields, enum
 // variant fields, Optional, Tuple, and Array element types (cycle-guarded).

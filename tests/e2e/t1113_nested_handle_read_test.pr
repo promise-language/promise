@@ -1,0 +1,69 @@
+// T1113: a by-value container read (`m[k]!`) that would copy a single-owner
+// native handle (Task/Mutex/MutexGuard) nested inside an enum/struct element is
+// rejected at the ownership pass — there is no copy/clone semantics for these
+// handles, so the copy would alias the container's slot and double-free / UAF at
+// drop (the original T1109 fix left these as silent shallow copies → segfault).
+// The compile-failure assertions for that live in the Go ownership tests
+// (TestT1113_*); this file is the positive, leak-checked runtime regression:
+// REFCOUNTED nesting (Ref/Weak inside an enum stored in a Map) must still read
+// back correctly, because their element dup is a refcount increment — NOT the
+// unsound shallow alias. (The struct-field analogue is a separate pre-existing
+// segfault tracked as T1117, so it is not exercised here.) Unique type names
+// dodge the per-instance build-cache name collision tracked separately as T1115.
+enum RefHolderT1113 {
+  Carry(Ref[int] r, int n),
+}
+
+// Ref variant field inside an enum stored in a Map: read-back duplicates via a
+// strong-count increment, balanced by the drop decrement (0 leaks).
+read_ref_in_enum_in_map() `test {
+  m := Map[int, RefHolderT1113]();
+  m[1] = RefHolderT1113.Carry(Ref[int](9), 2);
+  match m[1]! {
+    RefHolderT1113.Carry(r, n) => {
+      assert(r.borrow == 9, "ref field deref");
+      assert(n == 2, "int field");
+    },
+  }
+  // Overwrite the slot: the old enum (and its Ref) must drop exactly once.
+  m[1] = RefHolderT1113.Carry(Ref[int](8), 3);
+  match m[1]! {
+    RefHolderT1113.Carry(r, _) => assert(r.borrow == 8, "overwritten ref deref"),
+  }
+}
+
+// NOTE: the struct-field analogue (`Map[K, struct{Ref}]` read-back via `m[k]!`)
+// is intentionally NOT exercised here — it hits a SEPARATE pre-existing segfault
+// in the struct-in-map Arc-field read path (`dupHeapValueFields`), tracked as
+// T1117. That bug is orthogonal to T1113 (Ref is refcounted/duplicable, not a
+// single-owner handle). The enum nesting below uses the emitVariantFieldDup path
+// and works correctly.
+
+enum WeakHolderT1113 {
+  Carry(Weak[int] w, int n),
+}
+
+// Weak variant field: read-back exercises dupWeak (atomic weak-count increment).
+read_weak_in_enum_in_map() `test {
+  keep := Ref[int](99);
+  m := Map[int, WeakHolderT1113]();
+  m[1] = WeakHolderT1113.Carry(keep.downgrade(), 3);
+  match m[1]! {
+    WeakHolderT1113.Carry(w, n) => {
+      if up := w.upgrade() {
+        assert(up.borrow == 99, "weak upgrade deref");
+      } else {
+        assert(false, "weak should still upgrade");
+      }
+      assert(n == 3, "weak holder int field");
+    },
+  }
+}
+
+// Ref directly as a Map value (no enum/struct nesting): the refcounted-duplicable
+// direct case stays allowed (contrast the rejected direct Mutex/Task value).
+read_ref_direct_map_value() `test {
+  m := Map[int, Ref[int]]();
+  m[1] = Ref[int](42);
+  assert(m[1]!.borrow == 42, "direct ref map value");
+}

@@ -1,0 +1,285 @@
+// T1119: A `match` whose subject is an owned rvalue (a function/method return,
+// a constructor, an optional unwrap of a call, or a non-native `[]`-method read
+// like `m[k]!`) of a droppable enum must drop the subject's variant payload on
+// every match exit. Arm bindings are dup'd into independent copies under the
+// droppable-enum rule, so the subject keeps full ownership and nothing else
+// would free it — pre-fix this leaked (+1 per match). Conversely, a *place*
+// subject (a local ident, a field, a native index, or an unwrap of a local) is
+// owned elsewhere and must NOT get an extra drop (would double-free). All tests
+// assert leak-cleanliness (zero-leak enforcement = the double-free proof too).
+enum Holder {
+  Pair(Ref[int] r, int n),
+}
+make() Holder {
+  return Holder.Pair(Ref[int](9), 2);
+}
+make_opt() Holder? {
+  return make();
+}
+
+// --- Owned rvalue subjects (the leak the fix closes) ---
+
+// Function-call subject.
+owned_call_subject() `test {
+  match make() {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 9, "r");
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Constructor subject (variant constructor is an owned rvalue).
+owned_constructor_subject() `test {
+  match Holder.Pair(Ref[int](5), 1) {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 5, "r");
+      assert(n == 1, "n");
+    },
+  }
+}
+
+// Optional force-unwrap of a call result: the unwrap is transparent, so the
+// owned-ness of `make_opt()` (a call) flows through `!`.
+owned_unwrap_call_subject() `test {
+  match make_opt()! {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 9, "r");
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Parenthesized owned rvalue — parens are peeled before classification.
+owned_paren_subject() `test {
+  match (make()) {
+    Holder.Pair(r, n) => {
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Non-native `[]`-method read (Map.[]) — owned copy per the T1110 container-read
+// fix. This is the exact T1119 repro form (direct `match m[k]! { ... }`).
+owned_map_index_subject() `test {
+  m := Map[int, Holder]();
+  m[1] = Holder.Pair(Ref[int](7), 3);
+  match m[1]! {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 7, "r");
+      assert(n == 3, "n");
+    },
+  }
+}
+
+// Owned rvalue subject with an early `return` out of an arm — the subject drop
+// must still fire on the early-exit path (not only the merge block).
+take_n() int {
+  match make() {
+    Holder.Pair(r, n) => {
+      return n;
+    },
+  }
+}
+owned_subject_early_return() `test {
+  assert(take_n() == 2, "n");
+}
+
+// Owned rvalue subject with early `break`/`continue` out of arms inside a loop —
+// the subject drop must fire on the loop-control exit paths too (not only the
+// merge block or `return`). One owned subject is created per iteration.
+sum_loop() int {
+  total := 0;
+  for i in 0..3 {
+    match make() {
+      Holder.Pair(r, n) => {
+        if i == 1 {
+          continue;
+        }
+        if i == 2 {
+          break;
+        }
+        total = total + n;
+      },
+    }
+  }
+  return total;
+}
+owned_subject_break_continue() `test {
+  assert(sum_loop() == 2, "loop sum");
+}
+
+// Whole-value name binding of an owned rvalue subject (catch-all arm). The
+// binding ALIASES the subject; when it is NOT moved out, the subject drop must
+// fire exactly once (leak-clean).
+owned_name_bind_subject() `test {
+  match make() {
+    h => match h {
+      Holder.Pair(r, n) => assert(n == 2, "n"),
+    },
+  }
+}
+
+// Whole-value name binding that MOVES the bound value out by returning it from
+// the arm (the value escapes to the caller). The subject drop must be suppressed
+// (its flag aliased to the binding and cleared at the move) — otherwise the
+// returned value is dropped here AND by the caller → use-after-free.
+passthru() Holder {
+  return match make() {
+    h => h,
+  };
+}
+owned_name_bind_return_move() `test {
+  v := passthru();
+  match v {
+    Holder.Pair(r, n) => {
+      assert(r.borrow == 9, "r");
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Whole-value name binding moved into a consuming (`move`) function from the arm.
+take_holder(Holder move h) int {
+  match h {
+    Holder.Pair(r, n) => {
+      return n;
+    },
+  }
+}
+owned_name_bind_move_into_call() `test {
+  total := match make() {
+    h => take_holder(move h),
+  };
+  assert(total == 2, "total");
+}
+
+// --- Place subjects (must NOT get an extra drop → no double-free) ---
+
+// Local ident — owned by the local's own scope binding.
+place_local_subject() `test {
+  v := make();
+  match v {
+    Holder.Pair(r, n) => {
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Optional force-unwrap of a LOCAL optional — `o` owns the optional and drops
+// the inner; `o!` only borrows it.
+place_unwrap_local_subject() `test {
+  o := make_opt();
+  match o! {
+    Holder.Pair(r, n) => {
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Native vector index — the vector owns the element.
+place_vector_index_subject() `test {
+  v := [make()];
+  match v[0] {
+    Holder.Pair(r, n) => {
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Field of a local struct — the struct owns the field.
+type Box {
+  Holder h;
+}
+place_field_subject() `test {
+  b := Box(make());
+  match b.h {
+    Holder.Pair(r, n) => {
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// Native fixed-array index — the array owns the element (indexDispatchesToMethod
+// returns false for `*types.Array`, so this is a place, not an owned rvalue).
+// Must NOT get an extra subject drop (would double-free the array's element).
+place_array_index_subject() `test {
+  Holder[1] arr = [make()];
+  match arr[0] {
+    Holder.Pair(r, n) => {
+      assert(n == 2, "n");
+    },
+  }
+}
+
+// --- Field-kind coverage for the owned-rvalue subject drop ---
+
+enum HStr {
+  V(Ref[int] r, string s),
+}
+make_hstr() HStr {
+  return HStr.V(Ref[int](4), "hello");
+}
+owned_subject_string_field() `test {
+  match make_hstr() {
+    V(r, s) => {
+      assert(r.borrow == 4, "r");
+      assert(s == "hello", "s");
+    },
+  }
+}
+
+enum HWeak {
+  One(Weak[int] w, int n),
+}
+owned_subject_weak_field() `test {
+  keep := Ref[int](99);
+  match HWeak.One(keep.downgrade(), 5) {
+    One(w, n) => {
+      assert(n == 5, "n");
+      assert(w.upgrade()!.borrow == 99, "upgraded");
+    },
+  }
+}
+
+type P {
+  Ref[int] r;
+  int n;
+}
+enum HStruct {
+  Pair(P p),
+}
+make_hstruct() HStruct {
+  return HStruct.Pair(P(Ref[int](6), 8));
+}
+owned_subject_nested_struct() `test {
+  match make_hstruct() {
+    Pair(p) => {
+      assert(p.r.borrow == 6, "r");
+      assert(p.n == 8, "n");
+    },
+  }
+}
+
+// A recursive, container-bearing enum is NOT shallow-dup-safe, so its `[]`-method
+// read returns an alias the container still owns. Direct-matching that read must
+// NOT add a subject drop (would double-free the map's slot). This guards the
+// enumMatchDupSafe gate on the IndexExpr-method classification.
+enum Tree {
+  Leaf(int v), Node(map[string, Tree] kids),
+}
+place_recursive_enum_map_read() `test {
+  map[string, Tree] kids = {
+    "a": Tree.Leaf(v: 1),
+  };
+  Tree root = Tree.Node(kids: move kids);
+  match root {
+    Tree.Node(m) => {
+      match m["a"]! {
+        Tree.Leaf(v) => assert(v == 1, "leaf"),
+        _ => assert(false, "exp leaf"),
+      }
+    },
+    _ => assert(false, "exp node"),
+  }
+}

@@ -1,0 +1,197 @@
+// T1110: A struct carrying a Ref, nested in an enum variant, stored in a Map,
+// double-freed during scope-exit cleanup (SIGSEGV). The container read must
+// return an independent copy (refcount bump on the Ref), not an alias of the
+// map's owned instance. These tests assert correct reads AND leak-cleanliness
+// (zero-leak enforcement covers the double-free axis automatically).
+type P {
+  Ref[int] r;
+  int n;
+}
+
+enum Holder {
+  Pair(P p),
+}
+
+// Struct-with-Ref directly as the Map value type (Change 1: heapTypeSafeToDup
+// must treat the Ref field as safe to dup).
+map_ref_struct_value() `test {
+  m := Map[int, P]();
+  m[1] = P(Ref[int](9), 2);
+  v := m[1]!;
+  assert(v.r.borrow == 9, "borrow should be 9");
+  assert(v.n == 2, "n should be 2");
+}
+
+// Enum-wrapping-struct-with-Ref as the Map value type (Change 2: droppable
+// enum without clone() must be match-dup'd via dupEnumElementInPlace).
+map_enum_struct_ref() `test {
+  m := Map[int, Holder]();
+  m[1] = Holder.Pair(P(Ref[int](9), 2));
+  v := m[1]!;
+  match v {
+    Pair(p) => assert(p.r.borrow == 9, "borrow should be 9"),
+  }
+}
+
+// Read the same key twice — both copies must be valid and independent
+// (refcount sharing keeps the Ref alive); leak-clean.
+map_enum_struct_ref_read_twice() `test {
+  m := Map[int, Holder]();
+  m[1] = Holder.Pair(P(Ref[int](42), 7));
+  v1 := m[1]!;
+  v2 := m[1]!;
+  match v1 {
+    Pair(p) => assert(p.r.borrow == 42, "v1 borrow should be 42"),
+  }
+  match v2 {
+    Pair(p) => assert(p.n == 7, "v2 n should be 7"),
+  }
+}
+
+// Store then drop without reading — the map's owned value must drop exactly once.
+map_enum_struct_ref_store_only() `test {
+  m := Map[int, Holder]();
+  m[1] = Holder.Pair(P(Ref[int](1), 2));
+  m[2] = Holder.Pair(P(Ref[int](3), 4));
+  assert(m.len == 2, "map should hold 2 entries");
+}
+
+type W {
+  Weak[int] w;
+  int n;
+}
+
+enum WHolder {
+  One(W w),
+}
+
+// Exercise the dupWeak path: a Weak-bearing struct nested in an enum variant
+// stored in a Map.
+map_enum_struct_weak() `test {
+  keep := Ref[int](99);
+  m := Map[int, WHolder]();
+  m[1] = WHolder.One(W(keep.downgrade(), 5));
+  v := m[1]!;
+  match v {
+    One(w) => {
+      assert(w.n == 5, "w.n should be 5");
+      assert(w.w.upgrade()!.borrow == 99, "upgraded borrow should be 99");
+    },
+  }
+}
+
+// --- Field-kind coverage for enumMatchDupSafe / matchDupFieldSafe ---
+// Each variant pairs a Ref-bearing struct (the dup trigger) with another field
+// kind so the shallow dup path must independently copy BOTH fields. All are
+// leak-clean (zero-leak enforcement = the double-free proof for every kind).
+
+enum HS {
+  V(P p, string s),
+}
+
+// String field branch: dupEnumElementInPlace must dup the string too, so the
+// read-back copy owns an independent string (no double-free of the .data).
+map_enum_struct_ref_with_string() `test {
+  m := Map[int, HS]();
+  m[1] = HS.V(P(Ref[int](9), 2), "hello");
+  v := m[1]!;
+  match v {
+    V(p, s) => {
+      assert(p.r.borrow == 9, "borrow should be 9");
+      assert(s == "hello", "string should be hello");
+    },
+  }
+}
+
+enum HV {
+  V(P p, int[] xs),
+}
+
+// Vector-of-non-droppable-elements branch: matchDupFieldSafe accepts the vector
+// (int has no drop), so the dup shallow-copies the buffer — independent of the
+// map's owned copy.
+map_enum_struct_ref_with_vector() `test {
+  m := Map[int, HV]();
+  m[1] = HV.V(P(Ref[int](5), 1), [10, 20, 30]);
+  v := m[1]!;
+  match v {
+    V(p, xs) => {
+      assert(p.r.borrow == 5, "borrow should be 5");
+      assert(xs[1] == 20, "xs[1] should be 20");
+    },
+  }
+}
+
+enum Box[T] {
+  Some(T v),
+}
+
+// Generic enum branch: enumMatchDupSafe must build the subst map from the
+// instance's type args (Box[P]) before inspecting the variant field type.
+map_generic_enum_struct_ref() `test {
+  m := Map[int, Box[P]]();
+  m[1] = Box[P].Some(P(Ref[int](7), 3));
+  v := m[1]!;
+  match v {
+    Some(p) => {
+      assert(p.r.borrow == 7, "borrow should be 7");
+      assert(p.n == 3, "n should be 3");
+    },
+  }
+}
+
+enum Inner {
+  I(P p),
+}
+enum Outer {
+  O(Inner i),
+}
+
+// Nested-enum branch: matchDupFieldSafe recurses through the inner enum (and its
+// `seen` set) to reach the Ref-bearing struct.
+map_nested_enum_struct_ref() `test {
+  m := Map[int, Outer]();
+  m[1] = Outer.O(Inner.I(P(Ref[int](4), 8)));
+  v := m[1]!;
+  match v {
+    O(i) => match i {
+      I(p) => assert(p.r.borrow == 4, "borrow should be 4"),
+    },
+  }
+}
+
+enum HCh {
+  V(P p, channel[int] ch),
+}
+
+// Channel field branch: matchDupFieldSafe accepts a channel field (channels are
+// reference-counted handles, dup'd by a refcount bump). The read-back copy must
+// own an independent handle — leak/double-free clean alongside the Ref dup.
+map_enum_struct_ref_with_channel() `test {
+  m := Map[int, HCh]();
+  ch := channel[int](1);
+  m[1] = HCh.V(P(Ref[int](9), 2), move ch);
+  v := m[1]!;
+  match v {
+    V(p, c) => assert(p.r.borrow == 9, "borrow should be 9"),
+  }
+}
+
+enum HT {
+  T2((Ref[int], int) t),
+}
+
+// Tuple branch: a variant carrying a (Ref, int) tuple directly — matchDupFieldSafe
+// recurses through the tuple elements.
+map_enum_tuple_ref_dup() `test {
+  m := Map[int, HT]();
+  m[1] = HT.T2((Ref[int](6), 9));
+  v := m[1]!;
+  match v {
+    T2(t) => {
+      (tr, tn) := t;
+      assert(tr.borrow == 6, "borrow should be 6");
+      assert(tn == 9, "tn should be 9");
+    },
+  }
+}

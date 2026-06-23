@@ -6823,10 +6823,99 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 		// to prevent double-frees when the enum element is later dropped
 		// (e.g., Slot[K,V] in Map._buckets).
 		enumHasDrop := c.enumInstanceHasDrop(subjectType, enum)
-		return c.genEnumMatch(e, e.Subject, subject, enum, enumLayout, enumHasDrop, subjectType)
+		// T1119: An owned-rvalue subject of a droppable enum (a function/method/
+		// constructor return, or a non-native `[]`-method read like `m[k]!`) has no
+		// other owner — its arm bindings are dup'd into independent copies (under
+		// enumHasDrop), so the subject value's variant payload would leak (and, with
+		// the T1110 container-read fix, double the leak per read) because nothing
+		// drops it. Spill it into a temp and register the same enum-drop binding a
+		// local `v := <expr>; match v` would get, so it is dropped on every match
+		// exit (merge block and early return/break/continue inside arms). A
+		// borrowed subject (`&E`/`E~`) or a place (ident/field/native index) is
+		// owned elsewhere and must NOT get this drop (would double-free).
+		var subjectDropFlag *ir.InstAlloca
+		if enumHasDrop && !isRefType(subjectType) && c.subjectIsOwnedRvalueEnum(e.Subject, subjectType) {
+			spill := c.createEntryAlloca(subject.Type())
+			c.block.NewStore(subject, spill)
+			subjVar := c.uniqueLocalName("match.subject")
+			c.maybeRegisterEnumDrop(subjVar, spill, subjectType, enum)
+			// T1119: hand the spill's drop flag to genEnumMatch so a whole-value
+			// name-binding arm (`match make() { h => ... }`) can alias it: if that
+			// arm moves the bound value out (returns/`move`s it), clearDropFlag on
+			// the binding clears THIS flag too, suppressing the subject drop —
+			// otherwise the moved-out value is dropped here AND by its new owner
+			// (use-after-free / double-decrement of the aliased payload).
+			subjectDropFlag = c.dropFlags[subjVar]
+		}
+		return c.genEnumMatch(e, e.Subject, subject, enum, enumLayout, enumHasDrop, subjectType, subjectDropFlag)
 	}
 
 	return c.genValueMatch(e, subject, subjectType)
+}
+
+// subjectIsOwnedRvalueEnum reports whether a match subject expression produces a
+// freshly-owned value (an rvalue) rather than projecting an existing place. Only
+// owned rvalues need the T1119 subject-drop: a place (IdentExpr local/param,
+// MemberExpr field, ThisExpr, native Vector/Array index) is owned by something
+// else that drops it, so dropping it here would double-free.
+//
+// Transparent borrow-preserving wrappers — parentheses and optional force-unwrap
+// (`!`) — are peeled first: `make_opt()!` is owned (root is a call) while `o!`
+// for a local `o` is a place (root is an ident).
+//
+// A call always yields an owned value. A non-native `[]`-method read (Map/Set)
+// yields an owned value ONLY when the element enum is shallow-dup-safe
+// (enumMatchDupSafe) — that is exactly when the `[]` method's internal
+// match-destructure dups the value on return (matchFieldNeedsDup, see Part B). A
+// container-bearing/recursive enum like JsonNode is NOT dup-safe, so its `[]`
+// read returns an alias the container still owns — dropping it here would
+// double-free. The classification is deliberately conservative: anything
+// uncertain returns false (a missed owned form is a pre-existing leak, never a
+// new double-free).
+func (c *Compiler) subjectIsOwnedRvalueEnum(expr ast.Expr, subjectType types.Type) bool {
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		default:
+			switch e := expr.(type) {
+			case *ast.CallExpr:
+				return true
+			case *ast.IndexExpr:
+				return c.indexDispatchesToMethod(e) && c.enumMatchDupSafe(subjectType, nil)
+			}
+			return false
+		}
+	}
+}
+
+// indexDispatchesToMethod reports whether an index expression `target[idx]`
+// dispatches to a non-native user/std `[]` method (Map, Set, or a Promise-defined
+// type) — whose return is an owned value — as opposed to native Vector/Array/
+// string indexing, which projects a place the container still owns. Mirrors the
+// dispatch logic in genIndexExpr. (T1119)
+func (c *Compiler) indexDispatchesToMethod(e *ast.IndexExpr) bool {
+	tt := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		tt = types.Substitute(tt, c.typeSubst)
+	}
+	if ref, ok := tt.(*types.MutRef); ok {
+		tt = ref.Elem()
+	}
+	if ref, ok := tt.(*types.SharedRef); ok {
+		tt = ref.Elem()
+	}
+	if _, ok := tt.(*types.Array); ok {
+		return false // native fixed-array indexing
+	}
+	named := extractNamed(tt)
+	if named == nil {
+		return false
+	}
+	m := named.LookupMethod("[]")
+	return m != nil && !m.IsNative()
 }
 
 // enumInstanceHasDrop returns true if an enum type (possibly monomorphized) has a drop function.
@@ -6848,7 +6937,7 @@ func (c *Compiler) enumInstanceHasDrop(subjectType types.Type, enum *types.Enum)
 }
 
 // genEnumMatch generates a match expression on an enum value using an LLVM switch instruction.
-func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) value.Value {
+func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type, subjectDropFlag *ir.InstAlloca) value.Value {
 	// Extract tag from subject
 	var tag value.Value
 	if layout.MaxVariantDataSize == 0 {
@@ -6921,7 +7010,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 				armBorrowedSnapshot[k] = true
 			}
 		}
-		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType)
+		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType, subjectDropFlag)
 
 		var armVal value.Value
 		if arm.Body != nil {
@@ -7331,7 +7420,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 }
 
 // bindMatchPattern binds pattern variables from a match arm into the current scope.
-func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
+func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type, subjectDropFlag *ir.InstAlloca) {
 	switch p := pat.(type) {
 	case *ast.EnumDestructureMatchPattern:
 		c.bindEnumDestructure(p.Bindings, p.Variant, subjectExpr, subject, enum, layout, enumHasDrop, subjectType)
@@ -7345,6 +7434,15 @@ func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subjectExpr ast.Expr, 
 			alloca := c.createEntryAlloca(lt)
 			c.block.NewStore(subject, alloca)
 			c.locals[p.Name] = alloca
+			// T1119: A whole-value name binding ALIASES the owned-rvalue subject
+			// (no dup). If the T1119 subject-drop is active, alias its flag onto
+			// this binding so a move of the binding (`return h` / `take(move h)`)
+			// clears the subject drop too — otherwise the value is dropped both
+			// here and by its new owner (use-after-free). When the binding is NOT
+			// moved, the flag stays set and the subject is dropped exactly once.
+			if subjectDropFlag != nil {
+				c.dropFlags[p.Name] = subjectDropFlag
+			}
 		}
 
 	case *ast.EnumVariantMatchPattern:
@@ -7597,7 +7695,96 @@ func (c *Compiler) resolveMatchFieldType(fieldType types.Type, subjectType types
 // instance pointers with enum data that will be dropped.
 func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Type, enum *types.Enum) bool {
 	resolved := c.resolveMatchFieldType(fieldType, subjectType, enum)
-	return c.typeNeedsMatchDup(resolved)
+	if c.typeNeedsMatchDup(resolved) {
+		return true
+	}
+	// T1110: A droppable enum WITHOUT a clone() method whose variant payloads are
+	// all shallow-dup-safe (e.g. `Holder.Pair(P p)` where P carries a Ref). This is
+	// checked only here — NOT in typeNeedsMatchDup — so it does not flow into the
+	// container-clone safety gate (typeArgSafeForCloneDup), which must stay
+	// conservative for recursive/container-bearing enums like JsonNode (B0289).
+	return c.enumMatchDupSafe(resolved, nil)
+}
+
+// enumMatchDupSafe reports whether a droppable enum value can be independently
+// deep-copied by cloneResolvedValue's memcpy + dupEnumElementInPlace path
+// (T1110). Eligible only when the enum has drop work AND every variant field is
+// itself shallow-dup-safe — strings, channels, Arc/Ref/Weak, primitives/value/
+// copy, vectors of non-droppable elements, heapTypeSafeToDup user types, and
+// tuples/nested enums thereof. Excludes Map/Set/clone-bearing container fields
+// and self-recursive enums, whose deep copy needs full clone() logic that this
+// shallow path cannot replicate (would leak / double-free).
+func (c *Compiler) enumMatchDupSafe(resolved types.Type, seen map[*types.Enum]bool) bool {
+	enum := extractEnum(resolved)
+	if enum == nil {
+		return false
+	}
+	if !c.vecElemNeedsEnumDrop(resolved) {
+		return false
+	}
+	if seen == nil {
+		seen = make(map[*types.Enum]bool)
+	}
+	if seen[enum] {
+		return false // self-recursive — needs real clone(), not shallow dup
+	}
+	seen[enum] = true
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := resolved.(*types.Instance); ok && len(enum.TypeParams()) > 0 {
+		subst = types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+	} else if c.typeSubst != nil {
+		subst = c.typeSubst
+	}
+	for _, v := range enum.Variants() {
+		for _, f := range v.Fields() {
+			fType := f.Type()
+			if subst != nil {
+				fType = types.Substitute(fType, subst)
+			}
+			if !c.matchDupFieldSafe(fType, seen) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// matchDupFieldSafe reports whether a single variant-field type can be dup'd by
+// emitVariantFieldDup without invoking clone()-based container copy (T1110).
+func (c *Compiler) matchDupFieldSafe(fType types.Type, seen map[*types.Enum]bool) bool {
+	if en := extractEnum(fType); en != nil {
+		return c.enumMatchDupSafe(fType, seen)
+	}
+	named := extractNamed(fType)
+	if named == nil {
+		if tup, ok := fType.(*types.Tuple); ok {
+			for _, e := range tup.Elems() {
+				if !c.matchDupFieldSafe(e, seen) {
+					return false
+				}
+			}
+			return true
+		}
+		// Non-named, non-tuple (scalar/ref/fn-ptr) — bit copy is safe.
+		return true
+	}
+	if named == types.TypString {
+		return true
+	}
+	if _, isChan := types.AsChannel(fType); isChan || named == types.TypChannel {
+		return true
+	}
+	if types.IsArc(fType) || named == types.TypArc || types.IsWeak(fType) || named == types.TypWeak {
+		return true
+	}
+	if elemType, isVec := types.AsVector(fType); isVec || named == types.TypVector {
+		return !(isVec && fieldTypeNeedsDrop(elemType))
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return true
+	}
+	// Heap user type — safe only via the shallow memcpy + field dup path.
+	return c.heapTypeSafeToDup(named, fType, nil)
 }
 
 // typeNeedsMatchDup returns true if a resolved type needs duping when extracted
@@ -7771,6 +7958,20 @@ func (c *Compiler) heapTypeSafeToDup(named *types.Named, resolved types.Type, se
 			continue
 		}
 
+		// T1110: Arc/Ref and Weak fields → safe to dup. They are reference-counted
+		// handles: dupArc/dupWeak bump the (strong/weak) count rather than aliasing,
+		// and dupHeapValueFields already emits those bumps for these field kinds. A
+		// Ref field carries an explicit `drop` method, so without this case the
+		// generic "nested heap user type" recursion below rejects it (drop method →
+		// not safe) and the whole containing struct is wrongly treated as un-dup'able
+		// — leaving match-destructured copies aliasing the source's Ref → double-free.
+		if types.IsArc(fType) || fNamed == types.TypArc {
+			continue
+		}
+		if types.IsWeak(fType) || fNamed == types.TypWeak {
+			continue
+		}
+
 		// Vector → safe only if element type is non-droppable
 		if elemType, isVec := types.AsVector(fType); isVec || fNamed == types.TypVector {
 			if isVec && fieldTypeNeedsDrop(elemType) {
@@ -7898,6 +8099,24 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 	} else if cloned, ok := c.cloneEnumValue(val, resolvedType); ok {
 		// B0244: Enum with clone — deep-copy via clone method.
 		dupVal = cloned
+	} else if extractEnum(resolvedType) != nil && c.enumMatchDupSafe(resolvedType, nil) {
+		// T1110: Droppable enum WITHOUT a clone() method whose variant payloads are
+		// all shallow-dup-safe (e.g. `Holder.Pair(P p)` where P carries a Ref).
+		// Mirror the vector element clone loop's B0290 path: spill the value, dup
+		// each droppable variant field in place (emitVariantFieldDup handles
+		// string/vector/channel/Arc/Weak/heap-user/tuple/nested-enum), then reload
+		// the now-independent copy. Without this the match binding aliases the
+		// container's variant payload → double-free.
+		//
+		// Gated on enumMatchDupSafe (same predicate as matchFieldNeedsDup, Part B
+		// hunk 1): a container-bearing/recursive enum like JsonNode is NOT
+		// shallow-dup-safe — dupEnumElementInPlace would shallow-copy its Map/Vector
+		// field and alias the buffer → double-free. Those fall through to the `else`
+		// cloneHeapElement path (their original, working behavior).
+		spill := c.createEntryAlloca(val.Type())
+		c.block.NewStore(val, spill)
+		c.dupEnumElementInPlace(c.block.NewBitCast(spill, irtypes.I8Ptr), resolvedType)
+		dupVal = c.block.NewLoad(val.Type(), spill)
 	} else {
 		// B0236/B0244: Heap user type — try clone() first (handles types with complex drops
 		// like Map, Set), fall back to shallow dup (alloc + memcpy + field dup).

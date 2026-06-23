@@ -3191,13 +3191,27 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target, buildMode st
 		if typeDeclHash == "" {
 			continue // not cacheable
 		}
-		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target, buildMode, moduleContext)
+		// T1115: fold in the DeclHashes of every user type transitively
+		// reachable from this instance's type arguments. For a container like
+		// Map[int, CollideName] the compiled IR references the element type's
+		// drop/clone symbols, but typeDeclHash is the container's own hash and
+		// monoName encodes the element by NAME only — so a same-named but
+		// different-bodied element type would otherwise collide in the cache.
+		var argDeclHashes []string
+		for _, atn := range codegen.CollectArgTypeNames(inst) {
+			if h, _ := findDeclHashInInfo(atn, mainInfo); h != "" {
+				argDeclHashes = append(argDeclHashes, h)
+			}
+		}
+		sort.Strings(argDeclHashes)
+		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, argDeclHashes, compilerHash, target, buildMode, moduleContext)
 		result[mName] = &module.CacheMeta{
-			Kind:         module.CacheKindInstance,
-			Name:         mName,
-			CacheKey:     key,
-			TypeDeclHash: typeDeclHash,
-			IRPrefix:     irPrefix,
+			Kind:          module.CacheKindInstance,
+			Name:          mName,
+			CacheKey:      key,
+			TypeDeclHash:  typeDeclHash,
+			ArgDeclHashes: argDeclHashes,
+			IRPrefix:      irPrefix,
 		}
 	}
 	return result

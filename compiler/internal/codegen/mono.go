@@ -776,6 +776,136 @@ func discoverInstances(t types.Type, result *[]*types.Instance, seen map[string]
 	}
 }
 
+// CollectArgTypeNames returns the deduplicated set of user-defined type names
+// (Named/Enum origins) transitively reachable from inst — both its concrete
+// type arguments AND its origin type's substituted fields, variant payloads,
+// and parents — recursing through the fields/parents of each reached type with
+// type-param substitution applied. These are the types whose drop/clone/method
+// symbols inst's compiled IR may reference, so their DeclHashes must participate
+// in inst's build-cache key (T1115).
+//
+// Both walks are needed: a type argument may be referenced only inside the
+// origin's method bodies (never stored in a field), and conversely the origin's
+// body may name a *concrete* user type that is not a type argument at all
+// (e.g. `type Box[T] { T v; Helper h; }` — Box[int]'s layout/IR depends on
+// Helper). Either alone would leave a collision class unguarded.
+//
+// Without this, two programs that define a type with the same NAME but a
+// different body (e.g. a droppable vs all-copy `enum CollideName`) and both
+// instantiate `Map[int, CollideName]` produce the same instance cache key; the
+// first program's cached bitcode (referencing `CollideName.drop`) is reused by
+// the second, which never emits that symbol → undefined-symbol link error or
+// silent wrong-code. The walk is cycle-safe and errs toward over-inclusion
+// (extra cache misses) rather than under-inclusion (the bug).
+func CollectArgTypeNames(inst *types.Instance) []*types.TypeName {
+	seen := make(map[*types.TypeName]bool)
+	var visit func(t types.Type)
+	visit = func(t types.Type) {
+		if t == nil {
+			return
+		}
+		switch tt := t.(type) {
+		case *types.Named:
+			obj := tt.Obj()
+			if obj == nil || seen[obj] {
+				return
+			}
+			seen[obj] = true
+			// Non-generic: field/parent types are already concrete.
+			for _, f := range tt.AllFields() {
+				visit(f.Type())
+			}
+			for _, p := range tt.Parents() {
+				if p.Named != nil {
+					visit(p.Named)
+				}
+				for _, ta := range p.TypeArgs {
+					visit(ta)
+				}
+			}
+		case *types.Enum:
+			obj := tt.Obj()
+			if obj == nil || seen[obj] {
+				return
+			}
+			seen[obj] = true
+			for _, v := range tt.Variants() {
+				for _, vf := range v.Fields() {
+					visit(vf.Type())
+				}
+			}
+		case *types.Instance:
+			origin := tt.Origin()
+			switch o := origin.(type) {
+			case *types.Named:
+				obj := o.Obj()
+				if obj != nil && !seen[obj] {
+					seen[obj] = true
+					subst := types.BuildSubstMap(o.TypeParams(), tt.TypeArgs())
+					for _, f := range o.AllFields() {
+						visit(types.Substitute(f.Type(), subst))
+					}
+					for _, p := range o.Parents() {
+						if p.Named != nil {
+							visit(p.Named)
+						}
+						for _, ta := range p.TypeArgs {
+							visit(types.Substitute(ta, subst))
+						}
+					}
+				}
+			case *types.Enum:
+				obj := o.Obj()
+				if obj != nil && !seen[obj] {
+					seen[obj] = true
+					subst := types.BuildSubstMap(o.TypeParams(), tt.TypeArgs())
+					for _, v := range o.Variants() {
+						for _, vf := range v.Fields() {
+							visit(types.Substitute(vf.Type(), subst))
+						}
+					}
+				}
+			}
+			// Visit the concrete type args directly too.
+			for _, ta := range tt.TypeArgs() {
+				visit(ta)
+			}
+		case *types.Optional:
+			visit(tt.Elem())
+		case *types.SharedRef:
+			visit(tt.Elem())
+		case *types.MutRef:
+			visit(tt.Elem())
+		case *types.Pointer:
+			visit(tt.Elem())
+		case *types.Array:
+			visit(tt.Elem())
+		case *types.Tuple:
+			for _, e := range tt.Elems() {
+				visit(e)
+			}
+		case *types.Signature:
+			for _, p := range tt.Params() {
+				visit(p.Type())
+			}
+			if tt.Result() != nil {
+				visit(tt.Result())
+			}
+		case *types.TypeParam:
+			// No concrete type to contribute; skip.
+		}
+	}
+	// Walk the whole instance: the Instance case visits the origin type's
+	// substituted fields/parents/variants (reaching both type-arg-derived and
+	// concrete user types in the body) and then its concrete type arguments.
+	visit(inst)
+	out := make([]*types.TypeName, 0, len(seen))
+	for tn := range seen {
+		out = append(out, tn)
+	}
+	return out
+}
+
 // funcInstanceContainsTypeParam reports whether a FuncInstance's TypeArgs contain
 // any unresolved TypeParams. Such instances arise when a generic function body
 // calls another generic function using the outer function's type parameter:

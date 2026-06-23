@@ -48,8 +48,9 @@ type CacheMeta struct {
 	Symbols       []string `json:"symbols,omitempty"` // sorted list of public exported symbol names
 
 	// CacheKindInstance-specific
-	TypeDeclHash string `json:"type_decl_hash,omitempty"`
-	IRPrefix     string `json:"ir_prefix,omitempty"`
+	TypeDeclHash  string   `json:"type_decl_hash,omitempty"`
+	ArgDeclHashes []string `json:"arg_decl_hashes,omitempty"` // T1115: sorted DeclHashes of user types reachable from type args
+	IRPrefix      string   `json:"ir_prefix,omitempty"`
 
 	// CacheKindBinary-specific
 	E2E              bool                `json:"e2e,omitempty"`
@@ -320,6 +321,14 @@ func FormatCacheKeyInputs(name, cacheKey string, inputs []CacheKeyInput) string 
 //   - typeDeclHash: FNV-128a hash of the TypeDecl/EnumDecl AST — covers all
 //     fields, methods, variants, and their bodies, but NOT unrelated declarations
 //     in the same file
+//   - argDeclHashes: DeclHashes of every user type transitively reachable from
+//     this instance's type ARGUMENTS (T1115). For a container like
+//     Map[int, CollideName] the instance's compiled IR references the element
+//     type's drop/clone/method symbols, but typeDeclHash is the container's own
+//     hash and monoName encodes the element by NAME only. Without these,
+//     two programs defining a same-named/different-bodied element type collide
+//     in the shared cache → undefined-symbol link errors or wrong-code. The
+//     caller passes this slice pre-sorted (so the key is order-independent).
 //   - compilerHash: fingerprint of the compiler binary for invalidating stale entries
 //   - target: LLVM target triple
 //
@@ -333,12 +342,15 @@ func FormatCacheKeyInputs(name, cacheKey string, inputs []CacheKeyInput) string 
 // references __mod_json_JsonValue.clone in cross-module builds but JsonValue.clone in
 // module-internal tests). Including moduleContext ensures these contexts get separate
 // cache entries.
-func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target, buildMode string, moduleContext []string) string {
+func InstanceCacheKey(irPrefix, monoName, typeDeclHash string, argDeclHashes []string, compilerHash, target, buildMode string, moduleContext []string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "instance\n")
 	fmt.Fprintf(h, "prefix:%s\n", irPrefix)
 	fmt.Fprintf(h, "mono:%s\n", monoName)
 	fmt.Fprintf(h, "decl:%s\n", typeDeclHash)
+	for _, ah := range argDeclHashes {
+		fmt.Fprintf(h, "argdecl:%s\n", ah)
+	}
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "target:%s\n", target)
 	fmt.Fprintf(h, "mode:%s\n", buildMode)

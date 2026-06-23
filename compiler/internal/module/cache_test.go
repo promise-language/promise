@@ -967,7 +967,7 @@ func TestPromiseHome(t *testing.T) {
 // --- InstanceCacheKey tests ---
 
 func TestInstanceCacheKeyNonEmpty(t *testing.T) {
-	key := InstanceCacheKey("", "Vector[int]", "decl123", "compiler456", "x86_64-linux-musl", "debug", nil)
+	key := InstanceCacheKey("", "Vector[int]", "decl123", nil, "compiler456", "x86_64-linux-musl", "debug", nil)
 	if key == "" {
 		t.Error("expected non-empty key")
 	}
@@ -978,48 +978,48 @@ func TestInstanceCacheKeyNonEmpty(t *testing.T) {
 }
 
 func TestInstanceCacheKeyDeterminism(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux", "debug", nil)
-	k2 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux", "debug", nil)
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", nil, "cmp", "linux", "debug", nil)
+	k2 := InstanceCacheKey("", "Vector[int]", "decl", nil, "cmp", "linux", "debug", nil)
 	if k1 != k2 {
 		t.Errorf("non-deterministic: %q != %q", k1, k2)
 	}
 }
 
 func TestInstanceCacheKeyDifferentIRPrefix(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux", "debug", nil)
-	k2 := InstanceCacheKey("mymod", "Vector[int]", "decl", "cmp", "linux", "debug", nil)
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", nil, "cmp", "linux", "debug", nil)
+	k2 := InstanceCacheKey("mymod", "Vector[int]", "decl", nil, "cmp", "linux", "debug", nil)
 	if k1 == k2 {
 		t.Error("different irPrefix should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentMonoName(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux", "debug", nil)
-	k2 := InstanceCacheKey("", "Vector[string]", "decl", "cmp", "linux", "debug", nil)
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", nil, "cmp", "linux", "debug", nil)
+	k2 := InstanceCacheKey("", "Vector[string]", "decl", nil, "cmp", "linux", "debug", nil)
 	if k1 == k2 {
 		t.Error("different monoName should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentDeclHash(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector[int]", "hash1", "cmp", "linux", "debug", nil)
-	k2 := InstanceCacheKey("", "Vector[int]", "hash2", "cmp", "linux", "debug", nil)
+	k1 := InstanceCacheKey("", "Vector[int]", "hash1", nil, "cmp", "linux", "debug", nil)
+	k2 := InstanceCacheKey("", "Vector[int]", "hash2", nil, "cmp", "linux", "debug", nil)
 	if k1 == k2 {
 		t.Error("different typeDeclHash should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentCompilerHash(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector[int]", "decl", "compiler1", "linux", "debug", nil)
-	k2 := InstanceCacheKey("", "Vector[int]", "decl", "compiler2", "linux", "debug", nil)
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", nil, "compiler1", "linux", "debug", nil)
+	k2 := InstanceCacheKey("", "Vector[int]", "decl", nil, "compiler2", "linux", "debug", nil)
 	if k1 == k2 {
 		t.Error("different compilerHash should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentTarget(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "x86_64-linux-musl", "debug", nil)
-	k2 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "aarch64-apple-macos14", "debug", nil)
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", nil, "cmp", "x86_64-linux-musl", "debug", nil)
+	k2 := InstanceCacheKey("", "Vector[int]", "decl", nil, "cmp", "aarch64-apple-macos14", "debug", nil)
 	if k1 == k2 {
 		t.Error("different target should produce different key")
 	}
@@ -1028,8 +1028,8 @@ func TestInstanceCacheKeyDifferentTarget(t *testing.T) {
 func TestInstanceCacheKeyPrefixCollisionFree(t *testing.T) {
 	// Distinct (irPrefix, monoName) pairs that share a naive concatenation must not collide.
 	// e.g., ("ab", "cdef") vs ("abc", "def") should differ.
-	k1 := InstanceCacheKey("ab", "cdef", "d", "c", "t", "debug", nil)
-	k2 := InstanceCacheKey("abc", "def", "d", "c", "t", "debug", nil)
+	k1 := InstanceCacheKey("ab", "cdef", "d", nil, "c", "t", "debug", nil)
+	k2 := InstanceCacheKey("abc", "def", "d", nil, "c", "t", "debug", nil)
 	if k1 == k2 {
 		t.Error("prefix/name boundary collision: different (irPrefix, monoName) pairs produced same key")
 	}
@@ -1037,14 +1037,14 @@ func TestInstanceCacheKeyPrefixCollisionFree(t *testing.T) {
 
 func TestInstanceCacheKeyAllDistinct(t *testing.T) {
 	// All seven parameters independently affect the key.
-	base := InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux", "debug", nil)
+	base := InstanceCacheKey("pfx", "Box[int]", "decl", nil, "cmp", "linux", "debug", nil)
 	variants := []string{
-		InstanceCacheKey("pfx2", "Box[int]", "decl", "cmp", "linux", "debug", nil),      // irPrefix differs
-		InstanceCacheKey("pfx", "Box[string]", "decl", "cmp", "linux", "debug", nil),    // monoName differs
-		InstanceCacheKey("pfx", "Box[int]", "decl2", "cmp", "linux", "debug", nil),      // typeDeclHash differs
-		InstanceCacheKey("pfx", "Box[int]", "decl", "cmp2", "linux", "debug", nil),      // compilerHash differs
-		InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "wasm32-wasi", "debug", nil), // target differs
-		InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux", "release", nil),     // buildMode differs (T0205)
+		InstanceCacheKey("pfx2", "Box[int]", "decl", nil, "cmp", "linux", "debug", nil),      // irPrefix differs
+		InstanceCacheKey("pfx", "Box[string]", "decl", nil, "cmp", "linux", "debug", nil),    // monoName differs
+		InstanceCacheKey("pfx", "Box[int]", "decl2", nil, "cmp", "linux", "debug", nil),      // typeDeclHash differs
+		InstanceCacheKey("pfx", "Box[int]", "decl", nil, "cmp2", "linux", "debug", nil),      // compilerHash differs
+		InstanceCacheKey("pfx", "Box[int]", "decl", nil, "cmp", "wasm32-wasi", "debug", nil), // target differs
+		InstanceCacheKey("pfx", "Box[int]", "decl", nil, "cmp", "linux", "release", nil),     // buildMode differs (T0205)
 	}
 	for i, k := range variants {
 		if k == base {
@@ -1060,10 +1060,45 @@ func TestInstanceCacheKeyAllDistinct(t *testing.T) {
 // that flows through to a distinct key.
 func TestInstanceCacheKeyCoverageMode(t *testing.T) {
 	mc := []string{"std"}
-	plain := InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux", "debug", mc)
-	cov := InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux", "debug+cov", mc)
+	plain := InstanceCacheKey("pfx", "Box[int]", "decl", nil, "cmp", "linux", "debug", mc)
+	cov := InstanceCacheKey("pfx", "Box[int]", "decl", nil, "cmp", "linux", "debug+cov", mc)
 	if plain == cov {
 		t.Errorf("coverage and non-coverage instance cache keys must differ, both = %q", plain)
+	}
+}
+
+// TestInstanceCacheKeyDifferentArgDeclHash locks the T1115 contract: two
+// container instances with the same (prefix, monoName, typeDeclHash, …) but
+// DIFFERENT element-type DeclHashes (e.g. Map[int, CollideName] where the
+// same-named enum has a different body) must get different keys. This is the
+// fix for the cross-program "undefined symbol: CollideName.drop" collision.
+func TestInstanceCacheKeyDifferentArgDeclHash(t *testing.T) {
+	k1 := InstanceCacheKey("", "Map[int, CollideName]", "decl", []string{"argA"}, "cmp", "linux", "debug", nil)
+	k2 := InstanceCacheKey("", "Map[int, CollideName]", "decl", []string{"argB"}, "cmp", "linux", "debug", nil)
+	if k1 == k2 {
+		t.Error("different argDeclHashes should produce different keys")
+	}
+	// Identical slices → identical keys.
+	k3 := InstanceCacheKey("", "Map[int, CollideName]", "decl", []string{"argA"}, "cmp", "linux", "debug", nil)
+	if k1 != k3 {
+		t.Errorf("identical argDeclHashes should produce identical keys: %q != %q", k1, k3)
+	}
+	// nil vs empty-but-present arg hash should differ from a populated one.
+	k4 := InstanceCacheKey("", "Map[int, CollideName]", "decl", nil, "cmp", "linux", "debug", nil)
+	if k4 == k1 {
+		t.Error("nil argDeclHashes should differ from a populated slice")
+	}
+	// The caller passes a pre-sorted slice; folding is order-sensitive, so two
+	// differently-ordered slices yield different keys (the caller guarantees sort).
+	k5 := InstanceCacheKey("", "Map[int, CollideName]", "decl", []string{"argA", "argB"}, "cmp", "linux", "debug", nil)
+	k6 := InstanceCacheKey("", "Map[int, CollideName]", "decl", []string{"argB", "argA"}, "cmp", "linux", "debug", nil)
+	if k5 == k6 {
+		t.Error("differently-ordered argDeclHashes fold differently (caller must pre-sort)")
+	}
+	// Same sorted slice is stable.
+	k7 := InstanceCacheKey("", "Map[int, CollideName]", "decl", []string{"argA", "argB"}, "cmp", "linux", "debug", nil)
+	if k5 != k7 {
+		t.Errorf("same sorted slice must be order-stable: %q != %q", k5, k7)
 	}
 }
 

@@ -2260,6 +2260,63 @@ func (c *Compiler) defineSynthesizedMonoEnumDrops(file *ast.File, instances []*t
 	}
 }
 
+// declareSynthesizedMonoEnumClones declares recursive clone stubs for monomorphized
+// enum instances that need a compiler-synthesized clone (T1129). Mirrors
+// declareSynthesizedMonoEnumDrops; gated by the shared enumNeedsSynthClone predicate.
+func (c *Compiler) declareSynthesizedMonoEnumClones(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		enum, ok := inst.Origin().(*types.Enum)
+		if !ok || !c.enumNeedsSynthClone(enum, inst) {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "clone", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, c.resolveType(inst),
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		if c.compilingModule != "" {
+			c.moduleOwnedFuncs[mangledName] = c.compilingModule
+		}
+	}
+}
+
+// defineSynthesizedMonoEnumClones generates bodies for monomorphized enum clones (T1129).
+func (c *Compiler) defineSynthesizedMonoEnumClones(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		enum, ok := inst.Origin().(*types.Enum)
+		if !ok || !c.enumNeedsSynthClone(enum, inst) {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "clone", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		// Tag as instance-owned for SplitInstanceIRs.
+		c.instanceOwnedFuncs[mangledName] = name
+		// Skip body generation for cached instances.
+		if c.cachedInstances[name] {
+			continue
+		}
+
+		layout := c.monoEnumLayouts[name]
+		if layout == nil {
+			continue
+		}
+
+		subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+		c.typeSubst = subst
+		c.monoCtx = &monoContext{inst: inst, origin: enum, name: name}
+		c.defineSynthesizedEnumCloneBody(fn, enum, layout, inst)
+		c.typeSubst = nil
+		c.monoCtx = nil
+	}
+}
+
 // declareMonoSynthesizedDefaults declares stubs for default methods from structural
 // parents that need to be synthesized for mono instances of concrete types.
 // E.g., _FnIter[int] inherits filter/take/skip from Iterator[T] — these become

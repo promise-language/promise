@@ -841,13 +841,15 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareEnumMethods(file)
 	c.declareMonoMethods(file, monoInstances)
 	c.declareMonoEnumMethods(file, monoInstances)
-	c.declareMonoSynthesizedDefaults(file, monoInstances)  // structural parent defaults
-	c.declareSynthesizedDrops(file)                        // B0158: auto-synthesized drops (non-generic)
-	c.declareSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
-	c.declareSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
-	c.declareSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
-	c.declareMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
-	c.declareInheritedDrops(file)                          // T0507: drops inherited from non-generic parents
+	c.declareMonoSynthesizedDefaults(file, monoInstances)   // structural parent defaults
+	c.declareSynthesizedDrops(file)                         // B0158: auto-synthesized drops (non-generic)
+	c.declareSynthesizedEnumDrops(file)                     // T0102: auto-synthesized enum drops (non-generic)
+	c.declareSynthesizedMonoDrops(file, monoInstances)      // B0158: auto-synthesized drops (generic)
+	c.declareSynthesizedMonoEnumDrops(file, monoInstances)  // T0102: auto-synthesized enum drops (generic)
+	c.declareSynthesizedEnumClones(file)                    // T1129: recursive enum clones (non-generic)
+	c.declareSynthesizedMonoEnumClones(file, monoInstances) // T1129: recursive enum clones (generic)
+	c.declareMonoInheritedDrops(monoInstances)              // T0468: drops inherited from generic parents
+	c.declareInheritedDrops(file)                           // T0507: drops inherited from non-generic parents
 
 	// T0862: non-generic types implementing a generic structural interface
 	// (e.g. `is Box[int]`) need their inherited default methods declared before
@@ -891,14 +893,16 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineEnumMethods(file)
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoEnumMethods(file, monoInstances)
-	c.defineMonoSynthesizedDefaults(file, monoInstances)  // structural parent defaults
-	c.defineGenericStructuralDefaults(file)               // T0862: non-generic impls of generic structural interfaces
-	c.defineSynthesizedDrops(file)                        // B0158: auto-synthesized drops (non-generic)
-	c.defineSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
-	c.defineSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
-	c.defineSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
-	c.defineMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
-	c.defineInheritedDrops(file)                          // T0507: drops inherited from non-generic parents
+	c.defineMonoSynthesizedDefaults(file, monoInstances)   // structural parent defaults
+	c.defineGenericStructuralDefaults(file)                // T0862: non-generic impls of generic structural interfaces
+	c.defineSynthesizedDrops(file)                         // B0158: auto-synthesized drops (non-generic)
+	c.defineSynthesizedEnumDrops(file)                     // T0102: auto-synthesized enum drops (non-generic)
+	c.defineSynthesizedMonoDrops(file, monoInstances)      // B0158: auto-synthesized drops (generic)
+	c.defineSynthesizedMonoEnumDrops(file, monoInstances)  // T0102: auto-synthesized enum drops (generic)
+	c.defineSynthesizedEnumClones(file)                    // T1129: recursive enum clones (non-generic)
+	c.defineSynthesizedMonoEnumClones(file, monoInstances) // T1129: recursive enum clones (generic)
+	c.defineMonoInheritedDrops(monoInstances)              // T0468: drops inherited from generic parents
+	c.defineInheritedDrops(file)                           // T0507: drops inherited from non-generic parents
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 	c.defineMonoMethodInstances(file, monoMethodInstances)
@@ -6289,12 +6293,14 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareMonoMethods(modFile, monoInstances)
 	c.declareMonoEnumMethods(modFile, monoInstances)
 	c.declareMonoSynthesizedDefaults(modFile, monoInstances)
-	c.declareSynthesizedModuleDrops(modFile, irName)          // B0158
-	c.declareSynthesizedModuleEnumDrops(modFile, irName)      // T0102
-	c.declareSynthesizedMonoDrops(modFile, monoInstances)     // B0158
-	c.declareSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
-	c.declareMonoInheritedDrops(monoInstances)                // T0468
-	c.declareInheritedModuleDrops(modFile, irName)            // T0507
+	c.declareSynthesizedModuleDrops(modFile, irName)           // B0158
+	c.declareSynthesizedModuleEnumDrops(modFile, irName)       // T0102
+	c.declareSynthesizedMonoDrops(modFile, monoInstances)      // B0158
+	c.declareSynthesizedMonoEnumDrops(modFile, monoInstances)  // T0102
+	c.declareSynthesizedModuleEnumClones(modFile, irName)      // T1129
+	c.declareSynthesizedMonoEnumClones(modFile, monoInstances) // T1129
+	c.declareMonoInheritedDrops(monoInstances)                 // T0468
+	c.declareInheritedModuleDrops(modFile, irName)             // T0507
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
@@ -6315,12 +6321,14 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineMonoMethods(modFile, monoInstances)
 	c.defineMonoEnumMethods(modFile, monoInstances)
 	c.defineMonoSynthesizedDefaults(modFile, monoInstances)
-	c.defineSynthesizedModuleDrops(modFile, irName)          // B0158
-	c.defineSynthesizedModuleEnumDrops(modFile, irName)      // T0102
-	c.defineSynthesizedMonoDrops(modFile, monoInstances)     // B0158
-	c.defineSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
-	c.defineMonoInheritedDrops(monoInstances)                // T0468
-	c.defineInheritedModuleDrops(modFile, irName)            // T0507
+	c.defineSynthesizedModuleDrops(modFile, irName)           // B0158
+	c.defineSynthesizedModuleEnumDrops(modFile, irName)       // T0102
+	c.defineSynthesizedMonoDrops(modFile, monoInstances)      // B0158
+	c.defineSynthesizedMonoEnumDrops(modFile, monoInstances)  // T0102
+	c.defineSynthesizedModuleEnumClones(modFile, irName)      // T1129
+	c.defineSynthesizedMonoEnumClones(modFile, monoInstances) // T1129
+	c.defineMonoInheritedDrops(monoInstances)                 // T0468
+	c.defineInheritedModuleDrops(modFile, irName)             // T0507
 
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
@@ -9269,6 +9277,212 @@ func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, 
 	c.coroutineReturnBlock = savedCoroReturn
 }
 
+// enumNeedsSynthClone reports whether a droppable enum requires a compiler-
+// synthesized recursive clone function (T1129). True iff the enum (a) has drop
+// work, (b) has no existing user/`clone clone() that already owns the deep copy,
+// and (c) is NOT shallow-dup-safe — i.e. its deep copy genuinely needs runtime-
+// recursive clone logic that the inline shallow dupEnumElementInPlace path cannot
+// replicate. This is exactly the recursive / Map/Set/clone-bearing-container case
+// (e.g. `Tree.Branch(Tree[] kids)` or `TreeM.Node(Map[int, TreeM])`) that the
+// `seen` cycle guard (B0289) and enumMatchDupSafe (T1110) deliberately exclude.
+// Shallow-dup-safe enums keep their existing inline path untouched. `resolved`
+// carries the concrete type args for generic instances. Single source of truth —
+// used by the non-generic, module, and mono declare/define/forward-declare paths.
+func (c *Compiler) enumNeedsSynthClone(enum *types.Enum, resolved types.Type) bool {
+	if enum == nil {
+		return false
+	}
+	// (b) An existing clone (user-defined or `clone) already owns the deep copy.
+	if enum.IsClone() || enum.LookupMethod("clone") != nil {
+		return false
+	}
+	// (a) Must have drop work — otherwise a bit copy is already correct. Generic
+	// enums report HasDrop=NeedsSynthDrop=false (TypeParam fields), so the concrete
+	// instance is checked via monoEnumInstNeedsSynthDrop.
+	hasDrop := enum.HasDrop() || enum.NeedsSynthDrop()
+	if inst, ok := resolved.(*types.Instance); ok {
+		hasDrop = hasDrop || monoEnumInstNeedsSynthDrop(inst)
+	}
+	if !hasDrop {
+		return false
+	}
+	// (c) Skip if shallow-dup-safe — that path (T1110, cloneResolvedValue's
+	// dupEnumElementInPlace branch) already produces an independent copy.
+	if c.enumMatchDupSafe(resolved, nil) {
+		return false
+	}
+	return true
+}
+
+// declareSynthesizedEnumClones declares recursive clone function stubs for
+// non-generic enums that need a compiler-synthesized clone (T1129).
+func (c *Compiler) declareSynthesizedEnumClones(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || len(enum.TypeParams()) > 0 {
+			continue // generic — handled by declareSynthesizedMonoEnumClones
+		}
+		if !c.enumNeedsSynthClone(enum, enum) {
+			continue
+		}
+		mangledName := mangleMethodName(ed.Name, "clone", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, c.resolveType(enum),
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+	}
+}
+
+// defineSynthesizedEnumClones generates bodies for synthesized enum clone functions (T1129).
+func (c *Compiler) defineSynthesizedEnumClones(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || len(enum.TypeParams()) > 0 {
+			continue
+		}
+		if !c.enumNeedsSynthClone(enum, enum) {
+			continue
+		}
+		mangledName := mangleMethodName(ed.Name, "clone", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		layout := c.enumLayouts[enum]
+		if layout == nil {
+			continue
+		}
+		c.defineSynthesizedEnumCloneBody(fn, enum, layout, enum)
+	}
+}
+
+// declareSynthesizedModuleEnumClones declares synth clone stubs for non-generic module enums (T1129).
+func (c *Compiler) declareSynthesizedModuleEnumClones(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || len(enum.TypeParams()) > 0 {
+			continue
+		}
+		if !c.enumNeedsSynthClone(enum, enum) {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, ed.Name, "clone", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, c.resolveType(enum),
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		c.moduleOwnedFuncs[mangledName] = moduleName
+		// Also register the non-prefixed name for dispatch from user code.
+		plainName := mangleMethodName(ed.Name, "clone", false)
+		if _, exists := c.funcs[plainName]; !exists {
+			c.funcs[plainName] = fn
+		}
+	}
+}
+
+// defineSynthesizedModuleEnumClones generates bodies for non-generic module enum clones (T1129).
+func (c *Compiler) defineSynthesizedModuleEnumClones(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || len(enum.TypeParams()) > 0 {
+			continue
+		}
+		if !c.enumNeedsSynthClone(enum, enum) {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, ed.Name, "clone", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		layout := c.enumLayouts[enum]
+		if layout == nil {
+			continue
+		}
+		c.defineSynthesizedEnumCloneBody(fn, enum, layout, enum)
+	}
+}
+
+// defineSynthesizedEnumCloneBody generates the body for a synthesized recursive
+// enum clone (T1129). The clone takes the enum value by i8* pointer (the enum
+// method receiver convention), makes an independent stack copy, deep-dups every
+// droppable variant field in place via dupEnumElementInPlace, and returns the
+// now-independent value. Recursion into nested container elements (Vector[Tree],
+// Map[K, TreeM]) routes through *calls* to this same registered clone (and
+// Map.clone), so depth-≥2 trees copy correctly without infinite codegen.
+func (c *Compiler) defineSynthesizedEnumCloneBody(fn *ir.Func, enum *types.Enum, layout *TypeDeclLayout, enumType types.Type) {
+	entry := fn.NewBlock(".entry")
+	savedBlock := c.block
+	savedFn := c.fn
+	savedEntry := c.entryBlock
+	savedPanicExit := c.panicExitBlock
+	savedCoroReturn := c.coroutineReturnBlock
+	c.block = entry
+	c.fn = fn
+	c.entryBlock = entry
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
+	defer func() {
+		c.block = savedBlock
+		c.fn = savedFn
+		c.entryBlock = savedEntry
+		c.panicExitBlock = savedPanicExit
+		c.coroutineReturnBlock = savedCoroReturn
+	}()
+
+	internalType, ok := layout.EnumInternalType.(*irtypes.StructType)
+	if !ok {
+		// Fieldless enum (i32) — nothing to dup, return a bit copy.
+		srcPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(layout.EnumInternalType))
+		entry.NewRet(entry.NewLoad(layout.EnumInternalType, srcPtr))
+		return
+	}
+
+	// Independent stack copy of the source enum value.
+	srcPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(internalType))
+	tmp := c.createEntryAlloca(internalType)
+	entry.NewStore(entry.NewLoad(internalType, srcPtr), tmp)
+
+	// Deep-dup the droppable variant fields in place. Nested recursive elements
+	// clone via calls to the registered clone fn (emitVectorElementCloneLoop /
+	// emitVariantFieldDup find it in c.funcs), giving runtime recursion.
+	c.dupEnumElementInPlace(c.block.NewBitCast(tmp, irtypes.I8Ptr), enumType)
+
+	c.block.NewRet(c.block.NewLoad(internalType, tmp))
+}
+
 // emitEnumVariantFieldDropsInline emits variant-field drops inline after an
 // enum's explicit drop(~this) body (T0604). This mirrors emitFieldDrops for
 // named types: switch on the tag and drop each variant's droppable fields.
@@ -9942,7 +10156,9 @@ func (c *Compiler) forwardDeclareModuleEnumClone(enum *types.Enum, plainMangledN
 			if foundEnum != enum {
 				continue
 			}
-			if !foundEnum.IsClone() {
+			// T1129: a `clone enum forward-declares its user clone; a recursive /
+			// container-bearing droppable enum forward-declares its synthesized clone.
+			if !foundEnum.IsClone() && !c.enumNeedsSynthClone(foundEnum, resolvedType) {
 				return nil
 			}
 			// Found the module — check if already declared with module prefix

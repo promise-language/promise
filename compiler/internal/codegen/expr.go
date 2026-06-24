@@ -6864,14 +6864,15 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 // for a local `o` is a place (root is an ident).
 //
 // A call always yields an owned value. A non-native `[]`-method read (Map/Set)
-// yields an owned value ONLY when the element enum is shallow-dup-safe
-// (enumMatchDupSafe) — that is exactly when the `[]` method's internal
-// match-destructure dups the value on return (matchFieldNeedsDup, see Part B). A
-// container-bearing/recursive enum like JsonNode is NOT dup-safe, so its `[]`
-// read returns an alias the container still owns — dropping it here would
-// double-free. The classification is deliberately conservative: anything
-// uncertain returns false (a missed owned form is a pre-existing leak, never a
-// new double-free).
+// yields an owned value exactly when the `[]` method's internal match-destructure
+// dups the value on return (matchFieldNeedsDup, see Part B) — i.e. when the
+// element enum is shallow-dup-safe (enumMatchDupSafe, T1110) OR has a real
+// deep-clone (typeNeedsMatchDup: a user/`clone clone, or the T1129 synthesized
+// recursive clone). A container-bearing/recursive enum WITHOUT any clone (e.g. an
+// Arc/Ref-bearing variant, T1117) is neither, so its `[]` read returns an alias
+// the container still owns — dropping it here would double-free. The
+// classification is deliberately conservative: anything uncertain returns false
+// (a missed owned form is a pre-existing leak, never a new double-free).
 func (c *Compiler) subjectIsOwnedRvalueEnum(expr ast.Expr, subjectType types.Type) bool {
 	for {
 		switch e := expr.(type) {
@@ -6884,7 +6885,12 @@ func (c *Compiler) subjectIsOwnedRvalueEnum(expr ast.Expr, subjectType types.Typ
 			case *ast.CallExpr:
 				return true
 			case *ast.IndexExpr:
-				return c.indexDispatchesToMethod(e) && c.enumMatchDupSafe(subjectType, nil)
+				// Mirror matchFieldNeedsDup: the `[]` body dups the returned value
+				// iff typeNeedsMatchDup || enumMatchDupSafe. Keeping these in lockstep
+				// is what makes the inline `match m[k]!` drop-vs-borrow decision match
+				// the actual ownership the `[]` method hands back (T1129).
+				return c.indexDispatchesToMethod(e) &&
+					(c.typeNeedsMatchDup(subjectType) || c.enumMatchDupSafe(subjectType, nil))
 			}
 			return false
 		}
@@ -6934,6 +6940,17 @@ func (c *Compiler) enumInstanceHasDrop(subjectType types.Type, enum *types.Enum)
 		return ok
 	}
 	return false
+}
+
+// enumElemNeedsDupOnRead reports whether a droppable enum element read from a
+// native Vector/Array index and bound to a variable/slot must be deep-cloned so
+// the binding owns independent variant data (T1129). Uses the full droppable
+// predicate (enumInstanceHasDrop covers HasDrop, NeedsSynthDrop, and generic
+// mono-drop instances) — vecElemNeedsEnumDrop is too narrow here, missing
+// non-generic synth-drop enums like a recursive `Tree`.
+func (c *Compiler) enumElemNeedsDupOnRead(t types.Type) bool {
+	enum := extractEnum(t)
+	return enum != nil && c.enumInstanceHasDrop(t, enum)
 }
 
 // genEnumMatch generates a match expression on an enum value using an LLVM switch instruction.
@@ -7789,14 +7806,39 @@ func (c *Compiler) matchDupFieldSafe(fType types.Type, seen map[*types.Enum]bool
 	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
 		return true
 	}
-	// Heap user type — safe via the shallow memcpy + field dup path, or via a
-	// clone()-bearing container (Map/Set/user type). T1118: emitVariantFieldDup
-	// routes the latter through cloneHeapElement → the type's clone(), whose
-	// type-arg safety (incl. recursion through this enum, via the `seen` guard
-	// inside typeArgSafeForCloneDup → typeNeedsMatchDup) is checked by
-	// namedHasCloneFunc. Without this a Map/droppable-Set variant field made the
-	// whole enum non-dup-safe → no dup on container read-back → double-free.
-	return c.heapTypeSafeToDup(named, fType, nil) || c.namedHasCloneFunc(named, fType)
+	// Heap user type — safe via the shallow memcpy + per-field dup path …
+	if c.heapTypeSafeToDup(named, fType, nil) {
+		return true
+	}
+	// … or via a clone()-bearing container (Map/Set/user type). T1118:
+	// emitVariantFieldDup routes the latter through cloneHeapElement → the type's
+	// clone(). T1129: this whole check is STRUCTURAL — `LookupMethod`/`IsClone`
+	// plus a `seen`-threaded recursion over the container's concrete type args —
+	// deliberately NOT a probe of c.funcs. The c.funcs population changes between
+	// the declare and define phases (sibling and self clone stubs appear), so a
+	// c.funcs-based answer (the old namedHasCloneFunc → typeArgSafeForCloneDup →
+	// typeNeedsMatchDup path) flipped enumNeedsSynthClone across phases — leaving
+	// a synthesized @Enum.clone declared-but-undefined (recursive enums) or
+	// spuriously synthesized (non-recursive Map-bearing enums). The structural
+	// check is phase-invariant.
+	if !named.IsClone() && named.LookupMethod("clone") == nil {
+		return false // no deep-copying clone() available → not safe
+	}
+	// A type arg that is one of the enums currently under analysis (in `seen`)
+	// marks a recursion cycle: the container's clone would need that enum's
+	// clone(), which only exists as a synthesized recursive clone — so the enum
+	// is NOT inline-dup-safe and must get one. The `seen` guard inside
+	// enumMatchDupSafe returns false for such an arg. Other args are checked for
+	// their own dup-safety so an un-duppable element (e.g. a droppable user type
+	// without a clone) still makes the container unsafe.
+	if inst, ok := fType.(*types.Instance); ok {
+		for _, arg := range inst.TypeArgs() {
+			if !c.matchDupFieldSafe(arg, seen) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // typeNeedsMatchDup returns true if a resolved type needs duping when extracted
@@ -9876,6 +9918,17 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 		return c.dupHeapValue(val, elemType)
 	}
 
+	// T1129: Droppable-enum element (extractNamed is nil for enums, so the heap-user
+	// branches above skip them). Mirrors the genVectorIndex enum branch — without
+	// this, `got := arr[i]` aliases the array slot and got's drop + the array's
+	// element walk double-free the variant data (fatal for recursive enums).
+	// cloneResolvedValue deep-clones via the synthesized/explicit/shallow path.
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled &&
+		c.enumElemNeedsDupOnRead(elemType) {
+		c.dupHeapUserFieldAccess = false // consume the flag
+		return c.cloneResolvedValue(val, elemType)
+	}
+
 	// Optional[heap-user-type] element (T0440 analogue, relaxed for arrays).
 	// The genMethodIndex gate restricts to `drop && !clone` because Map.[]'s
 	// body internally dups V via match-destructure for clone-bearing types —
@@ -10487,6 +10540,20 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		if isHeapUserNoDropPalFree(resolvedElem) {
 			c.dupHeapUserFieldAccess = false // consume the flag
 			return c.dupHeapValue(val, resolvedElem)
+		}
+		// T1129: Dup-on-read for Vector[droppable-enum] index access (extractNamed is
+		// nil for enums, so the heap-user branches above skip them). Without this,
+		// `got := v[i]` aliases v's element slot — got's drop and v's element walk both
+		// free the same variant data: a double-free that is silent for leaf enums but
+		// segfaults for recursive ones (whose drop recurses into the freed buffer).
+		// cloneResolvedValue deep-clones uniformly — recursive/container-bearing enums
+		// via their synthesized clone (T1129), shallow-dup-safe enums via
+		// dupEnumElementInPlace (T1110), clone-bearing enums via clone(). The flag is
+		// set only when the var-decl/assign site consumes the index result, so the
+		// owned clone is always moved into the binding — no orphan leak.
+		if c.enumElemNeedsDupOnRead(resolvedElem) {
+			c.dupHeapUserFieldAccess = false // consume the flag
+			return c.cloneResolvedValue(val, resolvedElem)
 		}
 	}
 

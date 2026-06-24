@@ -14196,6 +14196,10 @@ func TestMatchDupMapNotClonedNonCloneableValues(t *testing.T) {
 	// Check that the test function itself does not heap-dup the Map.
 	// The "heapdup.copy" block may legitimately appear in other monomorphized
 	// functions (e.g., EmbeddedFiles.files vector clone), so only check inside @test.
+	//
+	// T1129 note: JsonNode now has a synthesized clone, but `match obj` here has an
+	// owned *local* subject — its arm bindings BORROW the variant payload (the local's
+	// own scope binding drops it once), so no per-binding clone is emitted regardless.
 	inTestFunc := false
 	for _, line := range strings.Split(ir, "\n") {
 		if strings.HasPrefix(line, "define ") {
@@ -14204,11 +14208,8 @@ func TestMatchDupMapNotClonedNonCloneableValues(t *testing.T) {
 		if inTestFunc && strings.Contains(line, "heapdup.copy") {
 			t.Error("Map should not be heap-dup'd in test function (vector of droppable enum elements)")
 		}
-		// B0284: Map.clone() must NOT be CALLED — JsonNode has drops but no clone method,
-		// so the clone would shallow-copy JsonNode values (shared heap pointers → double-free).
-		// Note: the function definition exists from monomorphization; check for call sites only.
-		if strings.Contains(line, "Map[string, JsonNode].clone") && strings.Contains(line, "= call") {
-			t.Error("Map with non-cloneable values should not call Map.clone()")
+		if inTestFunc && strings.Contains(line, "Map[string, JsonNode].clone") && strings.Contains(line, "= call") {
+			t.Error("match of an owned local subject borrows its bindings — should not call Map.clone()")
 		}
 	}
 }
@@ -25658,16 +25659,20 @@ func TestVectorCloneLoopSkipsUnsafeMapClone(t *testing.T) {
 			map[string, JsonNode][] maps2 = maps.clone();
 		}
 	`)
-	// Vector[Map[string, JsonNode]].clone() → emitVectorElementCloneLoop →
-	// cloneHeapElement → should NOT call Map.clone() because JsonNode has drops
-	// but no `clone` (typeArgSafeForCloneDup returns false).
-	for _, line := range strings.Split(ir, "\n") {
-		if strings.Contains(line, "Map[string, JsonNode].clone") && strings.Contains(line, "= call") {
-			t.Error("B0289: cloneHeapElement should not call Map.clone() for non-cloneable type args")
-		}
+	// T1129: JsonNode (recursive, Map-bearing) now has a synthesized recursive
+	// clone, so Map[string, JsonNode] IS deep-cloneable. Vector[Map[...]].clone()
+	// → emitVectorElementCloneLoop → cloneHeapElement now correctly routes through
+	// Map[string, JsonNode].clone() (whose internal match-dup recurses via
+	// @JsonNode.clone). This supersedes the old B0289 dupHeapValue fallback, whose
+	// recursion guard shallow-copied the inner Map → double-free. jn3/jn4 runtime
+	// tests confirm this path is leak-free.
+	if extractDefine(ir, "JsonNode.clone") == "" {
+		t.Errorf("T1129: expected a synthesized @JsonNode.clone for the recursive enum:\n%s", ir)
 	}
-	// Should use dupHeapValue (alloc + memcpy) instead
-	assertContains(t, ir, "heapdup.copy")
+	if !strings.Contains(ir, "Map[string, JsonNode].clone") {
+		t.Errorf("T1129: Vector[Map[string, JsonNode]].clone() should deep-clone elements "+
+			"via Map.clone() now that JsonNode is cloneable:\n%s", ir)
+	}
 }
 
 // B0289: When vector elements are Map[string, int] (safe type args),

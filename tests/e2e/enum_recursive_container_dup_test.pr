@@ -1,0 +1,219 @@
+// T1129: Recursive enum (Vector- or Map-indirected) stored in an outer Map/Vector
+// segfaulted on read-back via `m[k]!`/`v[i]!` + match. The read-back must deep-clone
+// the recursive enum (the container retains ownership of the same value), which
+// requires a runtime-recursive synthesized clone — the inline shallow dup path
+// (excluded for recursive enums by the B0289/T1110 cycle guard) cannot do depth-≥2
+// copies correctly. This file exercises the read-back path the sibling
+// enum_recursive_container_test.pr deliberately omits. All cases must be leak-free.
+//
+// NOTE (T1131): the *module-defined* analog of this enum — a recursive container-
+// bearing enum declared in a catalog module (no `clone), stored in an outer Map and
+// read back via `m[k]!` — still segfaults on drop of the clone (the module synth-
+// clone path T1129 added is broken in separate compilation). That case is NOT
+// exercised here to keep the suite green; it is tracked as critical bug T1131.
+// JsonValue cannot stand in for it because JsonValue ships an explicit `clone.
+enum Tree {
+  Leaf(int v), Branch(Tree[] kids),
+}
+
+enum TreeM {
+  Empty, Node(int v, Map[int, TreeM] children),
+}
+
+// Generic recursive enum — exercises the monomorphized synth-clone path.
+enum GTree[T] {
+  GLeaf(T v), GBranch(GTree[T][] kids),
+}
+
+// Vector-indirected recursion in an outer Map, read back via m[k]! + match (repro).
+recursive_enum_in_map() `test {
+  outer := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 1));
+  kids.push(Tree.Leaf(v: 2));
+  outer[1] = Tree.Branch(kids: move kids);
+  got := outer[1]!;
+  match got {
+    Branch(ks) => {
+      assert(ks.len == 2, "branch should have 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Map-indirected recursion in an outer Map, read back via m[k]! + match (repro).
+recursive_map_enum_in_map() `test {
+  outer := Map[int, TreeM]();
+  children := Map[int, TreeM]();
+  children[1] = TreeM.Empty;
+  outer[1] = TreeM.Node(v: 7, children: move children);
+  got := outer[1]!;
+  match got {
+    Node(v, _) => {
+      assert(v == 7, "node value should be 7");
+    },
+    Empty => {
+      assert(false, "expected Node");
+    },
+  }
+}
+
+// Depth-2 tree read back TWICE — proves the map's stored copy stays valid after
+// the first read drops its independent clone (the depth-≥2 correctness that the
+// inline shallow path cannot give).
+recursive_enum_depth2_read_twice() `test {
+  outer := Map[int, Tree]();
+  inner_kids := Vector[Tree]();
+  inner_kids.push(Tree.Leaf(v: 10));
+  inner_kids.push(Tree.Leaf(v: 20));
+  kids := Vector[Tree]();
+  kids.push(Tree.Branch(kids: move inner_kids));
+  kids.push(Tree.Leaf(v: 30));
+  outer[1] = Tree.Branch(kids: move kids);
+
+  first := outer[1]!;
+  match first {
+    Branch(ks) => {
+      assert(ks.len == 2, "outer branch has 2 kids");
+      match ks[0] {
+        Branch(inner) => {
+          assert(inner.len == 2, "inner branch has 2 kids");
+        },
+        Leaf(_) => {
+          assert(false, "expected nested Branch");
+        },
+      }
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+
+  // Read again — the stored value must be untouched by the first read's drop.
+  second := outer[1]!;
+  match second {
+    Branch(ks) => {
+      assert(ks.len == 2, "second read: 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch on second read");
+    },
+  }
+}
+
+// Same recursive enum inside a Vector, read back via v[i]! + match.
+recursive_enum_in_vector() `test {
+  outer := Vector[Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 5));
+  outer.push(Tree.Branch(kids: move kids));
+  got := outer[0];
+  match got {
+    Branch(ks) => {
+      assert(ks.len == 1, "branch should have 1 kid");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Fixed-size array index `arr[i]` of a recursive enum must deep-clone on read —
+// exercises the genArrayIndex dup-on-read branch (the Vector cases above hit
+// genVectorIndex instead). Without it, `got` aliases the array slot and got's drop
+// + the array's element walk double-free the variant data (fatal for recursion).
+recursive_enum_in_array() `test {
+  kids1 := Vector[Tree]();
+  kids1.push(Tree.Leaf(v: 1));
+  kids1.push(Tree.Leaf(v: 2));
+  kids2 := Vector[Tree]();
+  kids2.push(Tree.Leaf(v: 3));
+  arr := [Tree.Branch(kids: move kids1), Tree.Branch(kids: move kids2)];
+  got := arr[0];
+  match got {
+    Branch(ks) => {
+      assert(ks.len == 2, "arr[0] branch should have 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Assignment (not var-decl) from a fixed-size array index: `got = arr[i]` must
+// also deep-clone (genAssignStmt bareIdxRhs path for an array RHS).
+recursive_enum_assign_from_array() `test {
+  inner := Vector[Tree]();
+  inner.push(Tree.Leaf(v: 7));
+  arr := [Tree.Branch(kids: move inner), Tree.Leaf(v: 8)];
+  got := Tree.Leaf(v: 99);
+  got = arr[0];
+  match got {
+    Branch(ks) => {
+      assert(ks.len == 1, "assigned array branch should have 1 kid");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Assignment (not var-decl) from a Vector index: `got = v[i]` must also deep-clone.
+recursive_enum_assign_from_vector() `test {
+  v := Vector[Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 1));
+  kids.push(Tree.Leaf(v: 2));
+  v.push(Tree.Branch(kids: move kids));
+  got := Tree.Leaf(v: 99);
+  got = v[0];
+  match got {
+    Branch(ks) => {
+      assert(ks.len == 2, "assigned branch should have 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Direct `match outer[k]!` (no intermediate local) — the read is an owned-rvalue
+// subject: the Map's `[]` body deep-clones the recursive enum via its synthesized
+// clone, so nothing else owns the returned value. subjectIsOwnedRvalueEnum's
+// typeNeedsMatchDup branch must give it the T1119 spill-drop, else the owned clone
+// leaks. Exercises the owned-rvalue path the `got := outer[k]!` cases above skip.
+recursive_enum_in_map_direct_match() `test {
+  outer := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 1));
+  kids.push(Tree.Leaf(v: 2));
+  outer[1] = Tree.Branch(kids: move kids);
+  match outer[1]! {
+    Branch(ks) => {
+      assert(ks.len == 2, "direct-match branch should have 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Generic recursive enum stored in an outer Map, read back via m[k]! + match.
+generic_recursive_enum_in_map() `test {
+  outer := Map[int, GTree[int]]();
+  kids := Vector[GTree[int]]();
+  kids.push(GTree[int].GLeaf(v: 1));
+  kids.push(GTree[int].GLeaf(v: 2));
+  outer[1] = GTree[int].GBranch(kids: move kids);
+  got := outer[1]!;
+  match got {
+    GBranch(ks) => {
+      assert(ks.len == 2, "gbranch should have 2 kids");
+    },
+    GLeaf(_) => {
+      assert(false, "expected GBranch");
+    },
+  }
+}

@@ -1136,6 +1136,18 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 		}
 	}
+	// T1129: bare droppable-enum element read from a native Vector/Array index
+	// (`got := v[i]`) must be deep-cloned so the binding owns independent variant
+	// data — else got's drop and the container's element walk double-free (fatal
+	// for recursive enums). Only the bare IndexExpr form needs this: the Map form
+	// (`got := m[k]!`) is owned by the `[]` method body's match-dup, and a borrowed
+	// view (`match v[i]`) takes no owning drop. genVectorIndex/genArrayIndex consume
+	// the flag via cloneResolvedValue.
+	if c.enumElemNeedsDupOnRead(resolvedExprType) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
 	// T0440: Same flag for typed `T? b = m[k]` — Optional[heap-user-type] LHS
 	// where the inner value aliases the container's bucket. Set the flag so
 	// genMethodIndex deep-clones via cloneHeapElement.
@@ -1531,6 +1543,17 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 			if _, isInnerIdx := unwrap.Expr.(*ast.IndexExpr); isInnerIdx {
 				c.dupHeapUserFieldAccess = true
 			}
+		}
+	}
+	// T1129: bare droppable-enum element read from a native Vector/Array index
+	// (`got := v[i]`) must be deep-cloned so the binding owns independent variant
+	// data — else got's drop and the container's element walk double-free (fatal
+	// for recursive enums). Only the bare IndexExpr form needs this: the Map form
+	// (`got := m[k]!`) is owned by the `[]` method body's match-dup. genVectorIndex/
+	// genArrayIndex consume the flag via cloneResolvedValue.
+	if c.enumElemNeedsDupOnRead(typ) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
 		}
 	}
 	// T0440: Same flag for inferred `b := m[k]` — Optional[heap-user-type] LHS
@@ -6458,8 +6481,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		// unwrapped `x = obj.field!`) so the heap-string / Optional[string] field
 		// is cloned on read — see the memberRhs branch below.
 		var memberRhs *ast.MemberExpr
+		bareIdxRhs := false // T1129: RHS is a bare `v[i]` (native Vector/Array), not `m[k]!`
 		if _, ok := probe.(*ast.IndexExpr); ok {
 			isIdxRhs = true
+			bareIdxRhs = true
 		} else if m, ok := probe.(*ast.MemberExpr); ok {
 			memberRhs = m
 		} else if unwrap, ok := probe.(*ast.OptionalUnwrapExpr); ok {
@@ -6508,6 +6533,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					lhsType = types.Substitute(lhsType, c.typeSubst)
 				}
 				if isDroppableHeapUserType(lhsType) || isHeapUserNoDropPalFree(lhsType) {
+					c.dupHeapUserFieldAccess = true
+				}
+				// T1129: bare droppable-enum LHS read from a native Vector/Array index
+				// (`x = v[i]`) — deep-clone so the new slot owns independent variant
+				// data (else x's drop-old/scope drop and the source's element walk
+				// double-free). The Map form (`x = m[k]!`) is owned by the `[]` body.
+				if bareIdxRhs && c.enumElemNeedsDupOnRead(lhsType) {
 					c.dupHeapUserFieldAccess = true
 				}
 				// T0412/T0489: same dup-on-read for droppable tuple LHS. Combined

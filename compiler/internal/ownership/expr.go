@@ -165,9 +165,22 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.tryMoveConsumeCastSubject(entry.Value) // T0784
 		}
 
+	case *ast.StringLit:
+		// Interpolated strings ("{x}") hold real sub-expressions in their parts;
+		// walk each so reads of moved-from variables are detected (T1135). A
+		// non-interpolated literal has only StringText/StringEscape parts and is
+		// inert. Interpolation borrows its operands to format them (codegen writes
+		// into a builder without taking ownership), so this only read-checks via
+		// checkExpr — it must NOT consume.
+		for _, part := range e.Parts {
+			if interp, ok := part.(ast.StringInterp); ok {
+				c.checkExpr(interp.Expr)
+			}
+		}
+
 	// Literals have no sub-expressions to walk.
 	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit,
-		*ast.NoneLit, *ast.CharLit, *ast.StringLit:
+		*ast.NoneLit, *ast.CharLit:
 	}
 }
 

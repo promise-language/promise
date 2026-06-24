@@ -2781,6 +2781,92 @@ func TestNLLStringInterpolation(t *testing.T) {
 	}
 }
 
+func TestMoveThenInterpolationRead(t *testing.T) {
+	// T1135: a read of a moved-from variable inside string interpolation must be
+	// detected as a use-after-move (plain move, no container involved).
+	errs := ownerErrs(t, `
+		make_heap(string a, string b) string { return a + b; }
+		test() {
+			string h = make_heap("dead", "beef");
+			string z = h;
+			string msg = "{h}";
+		}`)
+	expectOwnerError(t, errs, "use of moved variable 'h'")
+}
+
+func TestMapAssignThenInterpolationRead(t *testing.T) {
+	// T1135: the reporter's case — moving into a map then reading the moved-from
+	// variable inside interpolation must be a use-after-move error.
+	errs := ownerErrs(t, `
+		make_heap(string a, string b) string { return a + b; }
+		test() {
+			string h = make_heap("dead", "beef");
+			map[string, string] m = {:};
+			m["k"] = h;
+			string msg = "{h}";
+		}`)
+	expectOwnerError(t, errs, "use of moved variable 'h'")
+}
+
+func TestInterpolationReadNoMove(t *testing.T) {
+	// T1135 regression guard: reading a still-owned variable in interpolation
+	// (and again afterward) must NOT be flagged — the new case is read-only and
+	// must not introduce a spurious consume.
+	ownerOK(t, `
+		make_heap(string a, string b) string { return a + b; }
+		take(string s) {}
+		test() {
+			string h = make_heap("dead", "beef");
+			string msg = "{h}";
+			take(h);
+		}`)
+}
+
+func TestInterpolationReadMovedNonFirstPart(t *testing.T) {
+	// T1135: the walk must check *every* interpolation part, not just the first —
+	// a moved-from read in a later "{…}" segment of a multi-part string must
+	// still be caught.
+	errs := ownerErrs(t, `
+		make_heap(string a, string b) string { return a + b; }
+		test() {
+			string ok = make_heap("x", "y");
+			string h = make_heap("dead", "beef");
+			string z = h;
+			string msg = "{ok} and {h}";
+		}`)
+	expectOwnerError(t, errs, "use of moved variable 'h'")
+}
+
+func TestInterpolationReadMovedNestedExpr(t *testing.T) {
+	// T1135: the moved-from read can be nested inside a sub-expression of the
+	// interpolation (here a binary `+`), so checkExpr must recurse all the way
+	// down, not just inspect a top-level identifier part.
+	errs := ownerErrs(t, `
+		make_heap(string a, string b) string { return a + b; }
+		test() {
+			string h = make_heap("dead", "beef");
+			string z = h;
+			string msg = "{h + "!"}";
+		}`)
+	expectOwnerError(t, errs, "use of moved variable 'h'")
+}
+
+func TestInterpolationConsumesThroughCall(t *testing.T) {
+	// T1135: walking interpolation sub-expressions also closes the move-consume
+	// gap — a `move` that happens *inside* "{…}" must mark the variable moved, so
+	// a later use is rejected. (Before the fix, the consume was bypassed entirely.)
+	errs := ownerErrs(t, `
+		type Box { string s; drop(~this){} }
+		eat(Box move b) string { return b.s; }
+		sink(Box move b) {}
+		test() {
+			Box b = Box(s: "x");
+			string msg = "{eat(move b)}";
+			sink(move b);
+		}`)
+	expectOwnerError(t, errs, "use of moved variable 'b'")
+}
+
 func TestNLLCompoundAssignment(t *testing.T) {
 	// Variable used in compound assignment — safe to early-drop.
 	_, info := checkOwnershipWithInfo(t, `

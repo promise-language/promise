@@ -6,12 +6,12 @@
 // copies correctly. This file exercises the read-back path the sibling
 // enum_recursive_container_test.pr deliberately omits. All cases must be leak-free.
 //
-// NOTE (T1131): the *module-defined* analog of this enum — a recursive container-
-// bearing enum declared in a catalog module (no `clone), stored in an outer Map and
-// read back via `m[k]!` — still segfaults on drop of the clone (the module synth-
-// clone path T1129 added is broken in separate compilation). That case is NOT
-// exercised here to keep the suite green; it is tracked as critical bug T1131.
-// JsonValue cannot stand in for it because JsonValue ships an explicit `clone.
+// The *module-defined* analog of this enum — a recursive container-bearing enum
+// declared in a catalog module (no `clone), stored in an outer Map and read back
+// via `m[k]!` — is covered by tests/modules/module_recursive_enum_dup_test.pr
+// (fixed under T1131: the read-back dup gate is now phase-invariant so the synth
+// clone is requested even when Map[K,V].[] compiles before the module declares
+// the enum's clone).
 enum Tree {
   Leaf(int v), Branch(Tree[] kids),
 }

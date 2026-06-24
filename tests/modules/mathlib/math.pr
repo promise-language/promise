@@ -72,6 +72,27 @@ enum Shape `public {
   Point,
 }
 
+// T1131: public recursive container-bearing enum with NO `clone — exercises
+// the module synthesized-recursive-clone path. Stored in an outer Map and read
+// back via `m[k]!`, the read-back must deep-clone via the compiler-synthesized
+// recursive clone (`enumNeedsSynthClone`); the gate in typeNeedsMatchDup must
+// fire even though Map[K,V].[] (std-owned) compiles before mathlib declares
+// ModTree.clone. JsonValue cannot cover this path because it ships an explicit
+// `clone (so enumNeedsSynthClone returns false for it).
+enum ModTree `public `doc("Recursive binary-ish tree: a leaf int or a branch holding child trees.") {
+  Leaf(int v),
+  Branch(ModTree[] kids),
+}
+
+// T1131: Map-indirected recursive module enum (no `clone) — mirrors ModTree
+// but with the recursion routed through a Map field instead of a Vector, to
+// cover the Map-bearing-variant synthesized-clone path across the module
+// boundary as well.
+enum ModTreeM `public `doc("Recursive tree whose children live in a Map keyed by int.") {
+  Empty,
+  Node(int v, Map[int, ModTreeM] children),
+}
+
 // --- Public generic type ---
 
 type Pair[A, B] `public {

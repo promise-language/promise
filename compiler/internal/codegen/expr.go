@@ -7860,6 +7860,15 @@ func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 			if _, exists := c.funcs[c.enumCloneFuncName(enum, resolved)]; exists {
 				return true
 			}
+			// T1131: a recursive / container-bearing droppable module enum gets a
+			// compiler-synthesized recursive clone whose stub may not yet be in
+			// c.funcs at this compile point (cross-module order: Map[K,V].[] in std
+			// compiles before mathlib declares ModTree.clone). Use the phase-invariant
+			// structural predicate so the dup is still inserted — cloneEnumValue
+			// forward-declares the synth clone lazily.
+			if c.enumNeedsSynthClone(enum, resolved) {
+				return true
+			}
 			return enum.IsClone()
 		}
 		return false

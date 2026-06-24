@@ -1,0 +1,141 @@
+// T1131: a *module-defined* recursive container-bearing enum (no `clone),
+// stored in an outer Map and read back via `m[k]!`, must deep-clone via the
+// compiler-synthesized recursive clone. Previously the read-back returned a
+// value aliasing the Map's stored container buffer: `got` dropped first at
+// scope exit (freeing the shared buffer), then the Map's own drop double-freed
+// → fatal segfault inside ModTree.drop's vector-drop loop.
+//
+// Root cause: typeNeedsMatchDup's enum branch only requested the dup if
+// `<enum>.clone` was already in c.funcs OR enum.IsClone(). Map[K,V].[] is
+// std-owned and compiles before mathlib declares ModTree.clone, so the gate
+// said "no dup" and the read aliased. The fix consults the phase-invariant
+// `enumNeedsSynthClone` predicate so the dup is inserted; cloneEnumValue then
+// forward-declares the synth clone lazily across the module boundary.
+//
+// This is the module analog of tests/e2e/enum_recursive_container_dup_test.pr.
+// All cases must be leak-free.
+use mathlib "./mathlib";
+
+// Vector-indirected recursion: read back via m[k]! + match (the original repro).
+module_recursive_enum_in_map() `test {
+  outer := Map[int, mathlib.ModTree]();
+  kids := Vector[mathlib.ModTree]();
+  kids.push(mathlib.ModTree.Leaf(v: 1));
+  kids.push(mathlib.ModTree.Leaf(v: 2));
+  outer[1] = mathlib.ModTree.Branch(kids: move kids);
+  got := outer[1]!;
+  match got {
+    Branch(ks) => {
+      assert(ks.len == 2, "branch should have 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Depth-2 tree read back TWICE — proves the Map's stored copy stays valid after
+// the first read's independent clone is dropped.
+module_recursive_enum_depth2_read_twice() `test {
+  outer := Map[int, mathlib.ModTree]();
+  inner_kids := Vector[mathlib.ModTree]();
+  inner_kids.push(mathlib.ModTree.Leaf(v: 10));
+  inner_kids.push(mathlib.ModTree.Leaf(v: 20));
+  kids := Vector[mathlib.ModTree]();
+  kids.push(mathlib.ModTree.Branch(kids: move inner_kids));
+  kids.push(mathlib.ModTree.Leaf(v: 30));
+  outer[1] = mathlib.ModTree.Branch(kids: move kids);
+
+  first := outer[1]!;
+  match first {
+    Branch(ks) => {
+      assert(ks.len == 2, "outer branch has 2 kids");
+      match ks[0] {
+        Branch(inner) => {
+          assert(inner.len == 2, "inner branch has 2 kids");
+        },
+        Leaf(_) => {
+          assert(false, "expected nested Branch");
+        },
+      }
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+
+  // Read again — the stored value must be untouched by the first read's drop.
+  second := outer[1]!;
+  match second {
+    Branch(ks) => {
+      assert(ks.len == 2, "second read: 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch on second read");
+    },
+  }
+}
+
+// Non-container variant (Leaf) read back + dropped — the shallow case that
+// worked all along; kept as a guard that the gate change doesn't regress it.
+module_recursive_enum_leaf_read() `test {
+  outer := Map[int, mathlib.ModTree]();
+  outer[1] = mathlib.ModTree.Leaf(v: 42);
+  got := outer[1]!;
+  match got {
+    Leaf(v) => {
+      assert(v == 42, "leaf value should be 42");
+    },
+    Branch(_) => {
+      assert(false, "expected Leaf");
+    },
+  }
+}
+
+// Literal bug-report repro: read back, NO match — the cloned binding drops as a
+// whole enum at scope exit (bindingDropEnum), the exact site that segfaulted.
+// The match-based cases above drop the *payload* in an arm; this drops the whole
+// cloned enum, so it exercises a distinct drop path.
+module_recursive_enum_branch_drop_at_scope_exit() `test {
+  outer := Map[int, mathlib.ModTree]();
+  kids := Vector[mathlib.ModTree]();
+  kids.push(mathlib.ModTree.Leaf(v: 1));
+  outer[1] = mathlib.ModTree.Branch(kids: move kids);
+  got := outer[1]!;
+  assert(true, "read back ok");
+  // got drops here — must not double-free the Map's stored buffer.
+}
+
+// Whole-enum drop at scope exit for the Map-indirected variant (no match).
+module_recursive_map_enum_node_drop_at_scope_exit() `test {
+  outer := Map[int, mathlib.ModTreeM]();
+  children := Map[int, mathlib.ModTreeM]();
+  children[1] = mathlib.ModTreeM.Empty;
+  outer[1] = mathlib.ModTreeM.Node(v: 7, children: move children);
+  got := outer[1]!;
+  assert(true, "read back ok");
+}
+
+// Map-indirected recursion (ModTreeM) read back via m[k]! + match — covers the
+// Map-bearing-variant synth-clone path across the module boundary.
+//
+// The fieldless `Empty` arm is module-qualified because bare fieldless variants
+// of a module enum aren't recognized in exhaustiveness (T1133); the payload arm
+// uses the bare form because qualified destructure with a `_` wildcard does not
+// parse (T1132). Both are incidental module-match limitations, not part of the
+// T1131 fix under test.
+module_recursive_map_enum_in_map() `test {
+  outer := Map[int, mathlib.ModTreeM]();
+  children := Map[int, mathlib.ModTreeM]();
+  children[1] = mathlib.ModTreeM.Empty;
+  outer[1] = mathlib.ModTreeM.Node(v: 7, children: move children);
+  got := outer[1]!;
+  match got {
+    Node(v, _) => {
+      assert(v == 7, "node value should be 7");
+    },
+    mathlib.ModTreeM.Empty => {
+      assert(false, "expected Node");
+    },
+  }
+}

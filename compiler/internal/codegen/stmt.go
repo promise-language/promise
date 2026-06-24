@@ -1148,6 +1148,17 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
+	// T1130: Map/Set element read-back from a native Vector/Array index in a typed
+	// var decl (`Map[K,V] got = v[i]`) must be deep-cloned so the binding owns an
+	// independent Map/Set — else got's drop and the container's element walk double-
+	// free. Mirrors the inferred-var-decl and assignment sites. isMapOrSetType
+	// excludes the bare `m[k]` (Map container) form: that yields an Optional, handled
+	// by the Optional branch below / the Map.[] body's own dup.
+	if isMapOrSetType(resolvedExprType) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
 	// T0440: Same flag for typed `T? b = m[k]` — Optional[heap-user-type] LHS
 	// where the inner value aliases the container's bucket. Set the flag so
 	// genMethodIndex deep-clones via cloneHeapElement.
@@ -1552,6 +1563,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// (`got := m[k]!`) is owned by the `[]` method body's match-dup. genVectorIndex/
 	// genArrayIndex consume the flag via cloneResolvedValue.
 	if c.enumElemNeedsDupOnRead(typ) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
+	// T1130: Map/Set element read-back from a native Vector/Array index
+	// (`got := v[i]`) must be deep-cloned so the binding owns an independent
+	// Map/Set — else got's drop and the container's element walk double-free.
+	// isMapOrSetType excludes the bare `m[k]` (Map container) form: that yields an
+	// Optional, handled by the Optional branch below / the Map.[] body's own dup.
+	if isMapOrSetType(typ) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
 			c.dupHeapUserFieldAccess = true
 		}
@@ -6540,6 +6561,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				// data (else x's drop-old/scope drop and the source's element walk
 				// double-free). The Map form (`x = m[k]!`) is owned by the `[]` body.
 				if bareIdxRhs && c.enumElemNeedsDupOnRead(lhsType) {
+					c.dupHeapUserFieldAccess = true
+				}
+				// T1130: Map/Set LHS read from a native Vector/Array index
+				// (`x = v[i]`) — deep-clone so the new slot owns an independent
+				// Map/Set (else x's drop-old/scope drop and the source's element
+				// walk double-free). Plain-index RHS only — the `m[k]!` form is
+				// dup'd by the Map.[] body.
+				if bareIdxRhs && isMapOrSetType(lhsType) {
 					c.dupHeapUserFieldAccess = true
 				}
 				// T0412/T0489: same dup-on-read for droppable tuple LHS. Combined

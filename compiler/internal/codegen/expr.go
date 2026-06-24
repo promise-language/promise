@@ -9938,6 +9938,17 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 		return c.cloneResolvedValue(val, elemType)
 	}
 
+	// T1130: Map/Set element read-back from a fixed-size array. Map/Set are excluded
+	// from isDroppableHeapUserType (T0440), so the heap-user branch above skips them —
+	// but arrays have no internal match-dup, so `got := arr[i]` aliases the array slot.
+	// Deep-clone via the element's clone() so the binding owns an independent Map/Set.
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled && isMapOrSetType(elemType) {
+		if named := extractNamed(elemType); named != nil {
+			c.dupHeapUserFieldAccess = false // consume the flag
+			return c.cloneHeapElement(val, elemType, named)
+		}
+	}
+
 	// Optional[heap-user-type] element (T0440 analogue, relaxed for arrays).
 	// The genMethodIndex gate restricts to `drop && !clone` because Map.[]'s
 	// body internally dups V via match-destructure for clone-bearing types —
@@ -10563,6 +10574,20 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		if c.enumElemNeedsDupOnRead(resolvedElem) {
 			c.dupHeapUserFieldAccess = false // consume the flag
 			return c.cloneResolvedValue(val, resolvedElem)
+		}
+		// T1130: Map/Set element read-back from a Vector's native index. Map/Set are
+		// deliberately excluded from isDroppableHeapUserType (T0440, because the Map/Set
+		// container's own `[]` body dups V internally), so the heap-user branch above
+		// skips them — but here Map/Set is the ELEMENT and the Vector's native `[]` does
+		// NOT dup, so `got := v[i]` aliases the container's element. got's drop and the
+		// vector's element walk would then free the same Map/Set → double-free.
+		// cloneHeapElement deep-clones via the element's clone() (its type-arg safety
+		// gating already covers recursive/container-bearing element types).
+		if isMapOrSetType(resolvedElem) {
+			if named := extractNamed(resolvedElem); named != nil {
+				c.dupHeapUserFieldAccess = false // consume the flag
+				return c.cloneHeapElement(val, resolvedElem, named)
+			}
 		}
 	}
 

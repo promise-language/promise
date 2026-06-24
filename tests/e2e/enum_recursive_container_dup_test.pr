@@ -200,6 +200,195 @@ recursive_enum_in_map_direct_match() `test {
   }
 }
 
+// T1130: a Map element read back out of a Vector[Map[K, RecursiveEnum]] must be
+// deep-cloned. Map/Set are excluded from isDroppableHeapUserType (T0440), so the
+// generic heap-user dup-on-read branch skips them — but when Map/Set is the ELEMENT
+// of a native Vector/Array (whose `[]` does not dup), `got := v[i]` aliases the
+// container's slot → got's drop and the vector's element walk double-free the Map.
+// These cases must be leak-free and crash-free.
+
+// Exact repro: read a Map element back out of a CLONED Vector[Map[...]], index it.
+map_element_from_cloned_vector() `test {
+  inner := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 1));
+  inner[0] = Tree.Branch(kids: move kids);
+  maps := Vector[Map[int, Tree]]();
+  maps.push(move inner);
+  maps2 := maps.clone();
+  got := maps2[0];
+  match got[0]! {
+    Branch(ks) => {
+      assert(ks.len == 1, "cloned-vec map element branch should have 1 kid");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Non-cloned Vector[Map[...]] element read-back via `got := v[i]`.
+map_element_from_vector() `test {
+  inner := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 5));
+  kids.push(Tree.Leaf(v: 6));
+  inner[0] = Tree.Branch(kids: move kids);
+  maps := Vector[Map[int, Tree]]();
+  maps.push(move inner);
+  got := maps[0];
+  match got[0]! {
+    Branch(ks) => {
+      assert(ks.len == 2, "vec map element branch should have 2 kids");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+  // The container's stored map must survive got's drop — read again.
+  got2 := maps[0];
+  assert(got2.len == 1, "stored map untouched after first read");
+}
+
+// Assignment form `got = v[i]` of a Vector[Map[...]] element.
+map_element_assign_from_vector() `test {
+  inner := Map[int, Tree]();
+  inner[0] = Tree.Leaf(v: 9);
+  maps := Vector[Map[int, Tree]]();
+  maps.push(move inner);
+  got := Map[int, Tree]();
+  got = maps[0];
+  assert(got.len == 1, "assigned map element has 1 entry");
+}
+
+// Typed-var-decl form `Map[K,V] got = v[i]` of a Vector[Map[...]] element.
+// Exercises the genTypedVarDecl flag site (distinct from the `:=` and `=` forms).
+map_element_typed_decl_from_vector() `test {
+  inner := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 7));
+  inner[0] = Tree.Branch(kids: move kids);
+  maps := Vector[Map[int, Tree]]();
+  maps.push(move inner);
+  Map[int, Tree] got = maps[0];
+  match got[0]! {
+    Branch(ks) => {
+      assert(ks.len == 1, "typed-decl map element branch should have 1 kid");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+  Map[int, Tree] got2 = maps[0];
+  assert(got2.len == 1, "stored map untouched after typed-decl read");
+}
+
+// Map element read back out of a fixed-size array of maps (genArrayIndex path).
+map_element_from_array() `test {
+  m0 := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 1));
+  m0[0] = Tree.Branch(kids: move kids);
+  m1 := Map[int, Tree]();
+  m1[0] = Tree.Leaf(v: 2);
+  arr := [m0, m1];
+  got := arr[0];
+  match got[0]! {
+    Branch(ks) => {
+      assert(ks.len == 1, "array map element branch should have 1 kid");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Set element read back out of a Vector[Set[...]] (the Set arm of isMapOrSetType).
+set_element_from_vector() `test {
+  s := Set[int]();
+  s.add(1);
+  s.add(2);
+  sets := Vector[Set[int]]();
+  sets.push(move s);
+  got := sets[0];
+  assert(got.len == 2, "vec set element has 2 entries");
+  got2 := sets[0];
+  assert(got2.len == 2, "stored set untouched after first read");
+}
+
+// Set element read back out of a fixed-size array of sets (the Set arm of the
+// genArrayIndex isMapOrSetType branch — distinct from the Vector native-index path).
+set_element_from_array() `test {
+  s0 := Set[int]();
+  s0.add(1);
+  s0.add(2);
+  s1 := Set[int]();
+  s1.add(3);
+  arr := [s0, s1];
+  got := arr[0];
+  assert(got.len == 2, "array set element has 2 entries");
+  got2 := arr[0];
+  assert(got2.len == 2, "stored set untouched after first read");
+}
+
+// Assignment form `got = arr[i]` of a fixed-size-array map element — exercises
+// genAssignStmt's bareIdxRhs path with an array (not Vector) index source.
+map_element_assign_from_array() `test {
+  m0 := Map[int, Tree]();
+  m0[0] = Tree.Leaf(v: 1);
+  m1 := Map[int, Tree]();
+  m1[0] = Tree.Leaf(v: 2);
+  arr := [m0, m1];
+  got := Map[int, Tree]();
+  got = arr[0];
+  assert(got.len == 1, "assigned array map element has 1 entry");
+}
+
+// Typed-var-decl form `Map[K,V] got = arr[i]` of an array map element — exercises
+// genTypedVarDecl's flag site combined with the genArrayIndex deep-clone.
+map_element_typed_decl_from_array() `test {
+  m0 := Map[int, Tree]();
+  kids := Vector[Tree]();
+  kids.push(Tree.Leaf(v: 7));
+  m0[0] = Tree.Branch(kids: move kids);
+  m1 := Map[int, Tree]();
+  m1[0] = Tree.Leaf(v: 2);
+  arr := [m0, m1];
+  Map[int, Tree] got = arr[0];
+  match got[0]! {
+    Branch(ks) => {
+      assert(ks.len == 1, "typed-decl array map element branch should have 1 kid");
+    },
+    Leaf(_) => {
+      assert(false, "expected Branch");
+    },
+  }
+}
+
+// Exact bug shape: a Map element bearing a MAP-recursive enum (TreeM), read back
+// out of a CLONED Vector[Map[...]]. Mirrors the JsonNode/Dict repro (recursion
+// through a Map, not a Vector) — the inner enum's clone must deep-copy the nested
+// child map so got and the container's element own disjoint heap.
+map_recursive_enum_element_from_cloned_vector() `test {
+  inner := Map[int, TreeM]();
+  children := Map[int, TreeM]();
+  children[0] = TreeM.Empty;
+  inner[0] = TreeM.Node(v: 9, children: move children);
+  maps := Vector[Map[int, TreeM]]();
+  maps.push(move inner);
+  maps2 := maps.clone();
+  got := maps2[0];
+  match got[0]! {
+    Node(v, ks) => {
+      assert(v == 9, "node value preserved through cloned-vec read");
+      assert(ks.len == 1, "node child map should have 1 entry");
+    },
+    Empty => {
+      assert(false, "expected Node");
+    },
+  }
+}
+
 // Generic recursive enum stored in an outer Map, read back via m[k]! + match.
 generic_recursive_enum_in_map() `test {
   outer := Map[int, GTree[int]]();

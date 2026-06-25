@@ -302,11 +302,24 @@ func (b *Builder) VisitSelectCase(ctx *parser.SelectCaseContext) interface{} {
 		node.Binding = b.bindingText(ctx.BindingName())
 		// The receive expression is the last expression (after <- )
 		exprs := ctx.AllExpression()
+		if len(exprs) < 1 {
+			// T1136: error-recovered tree (e.g. a malformed body statement)
+			// can collapse the channel expression. Record a diagnostic
+			// instead of panicking on the missing index.
+			b.errorf(node.pos, "malformed select case: missing channel expression")
+			return node
+		}
 		node.Channel = b.visitExpr(exprs[0])
 	} else {
 		// Send case: ch.send(v)
 		node.IsSend = true
 		exprs := ctx.AllExpression()
+		if len(exprs) < 2 {
+			// T1136: see above — guard the index accesses on an
+			// error-recovered tree.
+			b.errorf(node.pos, "malformed select case: expected channel and value expressions")
+			return node
+		}
 		node.Channel = b.visitExpr(exprs[0])
 		node.SendValue = b.visitExpr(exprs[1])
 	}

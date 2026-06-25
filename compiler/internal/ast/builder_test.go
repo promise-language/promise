@@ -2711,3 +2711,55 @@ func TestT0866EmptyBraceLiteral(t *testing.T) {
 		assertLen(t, ml.Entries, 0)
 	})
 }
+
+// TestSelectCaseMalformedBodyNoPanic verifies that an error-recovered select
+// case tree (e.g. a body containing the invalid `_ = expr;` discard) yields a
+// recorded build error instead of panicking on a missing channel expression.
+// T1136.
+func TestSelectCaseMalformedBodyNoPanic(t *testing.T) {
+	build := func(src string) (*File, []error) {
+		input := antlr.NewInputStream(src)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		return Build("test.pr", p.CompilationUnit())
+	}
+
+	cases := []struct {
+		name string
+		src  string
+		want string // substring the recorded diagnostic must contain
+	}{
+		// Error recovery on the `_ = expr;` discard collapses the receive
+		// case's channel expression, so the recv guard (len(exprs) < 1) fires.
+		{"recv_discard_body", `f(channel[int] ch, int a) { select { v := <-ch: _ = a; } }`, "missing channel expression"},
+		// The send form `ch.send(a):` recovers via the bindingName alternative,
+		// so it also collapses into the recv guard.
+		{"send_discard_body", `f(channel[int] ch, int a) { select { ch.send(a): _ = a; } }`, "missing channel expression"},
+		// A send case with no send value (`ch.send():`) parses as the send
+		// alternative with a single expression, exercising the send guard
+		// (len(exprs) < 2).
+		{"send_missing_value", `f(channel[int] ch) { select { ch.send(): print_line("x"); } }`, "expected channel and value expressions"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reaching this point without panicking is part of the assertion.
+			_, errs := build(tc.src)
+			if len(errs) == 0 {
+				t.Fatalf("expected build errors for malformed select case, got none")
+			}
+			found := false
+			for _, e := range errs {
+				if strings.Contains(e.Error(), tc.want) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected a diagnostic containing %q, got: %v", tc.want, errs)
+			}
+		})
+	}
+}

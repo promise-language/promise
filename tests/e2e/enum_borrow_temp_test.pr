@@ -1,0 +1,192 @@
+// T1108: An inline enum-constructor temp (`Enum.Variant(payload)`) with a
+// droppable payload passed to a BORROW param must be dropped exactly once at the
+// caller's statement end — including its moved-in payload. Previously the temp
+// was not tracked when the payload was *moved* into the variant (ident move,
+// cast, or call-result), so a borrowed/discarded enum temp leaked its payload.
+//
+// These tests assert correct results AND (via the suite's zero-leak policy) that
+// nothing leaks and nothing double-frees / use-after-frees.
+type Holder {
+  int n;
+}
+
+enum Msg {
+  Text(string body),
+  Empty,
+}
+
+// Borrow param: does not consume the enum — caller must drop the temp.
+msg_len(Msg m) Holder {
+  return match m {
+    Msg.Text(b) => Holder(n: b.len),
+    Msg.Empty => Holder(n: 0),
+  };
+}
+
+// 1. T1108 exact repro: call-result payload (`s.clone()`) to a borrow param.
+t1108_sync_call_result_borrow() `test {
+  string s = "payload";
+  r := msg_len(Msg.Text(s.clone()));
+  assert(r.n == 7, "call-result payload result");
+}
+
+// 2. Ident-move heap payload (`move s`, heap string) to a borrow param.
+t1108_ident_move_borrow() `test {
+  string s = "pay" + "load"; // concatenation => heap (non-literal) string
+  r := msg_len(Msg.Text(move s));
+  assert(r.n == 7, "ident-move payload result");
+}
+
+type Resource {
+  string name;
+  drop(~this) {
+  }
+}
+
+enum HolderR {
+  Has(Resource r),
+  Nothing,
+}
+
+make_resource(string move name) Resource {
+  return Resource(name: move name);
+}
+
+// Borrow param that simply ignores the enum (discarded after the call).
+consume_holder(HolderR h) {
+}
+
+// 3. Discarded enum statement (B0286's own scenario): the temp is borrowed and
+//    then thrown away — its moved-in Resource must still be freed.
+t1108_discarded_enum_statement() `test {
+  consume_holder(HolderR.Has(r: make_resource("test")));
+  assert(true, "no leak");
+}
+
+enum HolderV {
+  Items(string[] list),
+  Nothing,
+  // Borrow receiver: `this` is borrowed, so a fresh enum temp receiver must be
+  // dropped at the caller's statement end.
+  count(this) int {
+    return match this {
+      HolderV.Items(items) => items.len,
+      HolderV.Nothing => 0,
+    };
+  }
+}
+
+// 4. Borrow-receiver method call on a fresh enum-constructor temp.
+t1108_borrow_receiver_method() `test {
+  string[] items = ["alice", "bob"];
+  c := HolderV.Items(move items).count();
+  assert(c == 2, "borrow-receiver method result");
+}
+
+// Move param: callee consumes and drops the enum — caller must NOT also drop it
+// (no double-free).
+take_holder(HolderR move h) int {
+  return match h {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+}
+
+// 5. Move-param no-double-free.
+t1108_move_param_no_double_free() `test {
+  n := take_holder(HolderR.Has(r: make_resource("test")));
+  assert(n == 4, "move-param consumes payload");
+}
+
+// 6. Container store no-double-free (regression guard for T1103/B0252): the enum
+//    temp's ownership transfers into the map Slot; no statement-end drop fires.
+//    The map's scope-exit drop frees the stored payload exactly once.
+t1108_container_store_no_double_free() `test {
+  map[string, Msg] m = {:};
+  m["k"] = Msg.Text("pay" + "load");
+  assert(m.len == 1, "stored one entry");
+}
+
+// borrow param that consumes an enum temp and returns a NON-enum fresh value.
+inspect_holder(HolderR h) Resource {
+  return match h {
+    HolderR.Has(r) => Resource(name: r.name + "!"),
+    HolderR.Nothing => Resource(name: "none"),
+  };
+}
+
+// move param consuming a Resource (non-enum).
+take_resource(Resource move r) int {
+  return r.name.len;
+}
+
+// 7. Nested: a move-param arg whose value is a non-enum call result, where the
+//    call BORROWS an inline enum-constructor temp. The inner HolderR.Has temp is
+//    an intermediate the move callee never receives — it must be dropped at the
+//    caller's statement end, NOT untracked by the move-param claim (else it
+//    leaks). The move-param enum claim is gated on the arg's static type being an
+//    enum; here the arg type is Resource, so the inner enum temp stays tracked.
+t1108_nested_move_arg_borrows_enum_temp() `test {
+  n := take_resource(inspect_holder(HolderR.Has(r: make_resource("test"))));
+  assert(n == 5, "nested move-arg borrows enum temp"); // "test!" => 5
+}
+
+// Cast-subject payload: an `as!` cast subject moved into an enum-constructor
+// variant. The T1108 fix removed the `movedDroppable` suppression from the cast
+// branch of genEnumVariantCallLayout, so the enum temp is now tracked
+// unconditionally — the cast subject's drop flag was cleared at the move, making
+// the enum temp the payload's sole owner.
+type Animal {
+  string name;
+  drop(~this) {
+  }
+}
+
+type Dog is Animal {
+  int legs;
+}
+
+enum Pet {
+  Owned(Animal a),
+  None,
+}
+
+// Borrow param: does not consume the enum.
+pet_name_len(Pet p) int {
+  return match p {
+    Pet.Owned(a) => a.name.len,
+    Pet.None => 0,
+  };
+}
+
+// Move param: consumes and drops the enum.
+take_pet(Pet move p) int {
+  return match p {
+    Pet.Owned(a) => a.name.len,
+    Pet.None => 0,
+  };
+}
+
+// 9. Cast-subject payload to a BORROW param: the moved-in Dog (cast to Animal)
+//    must be freed at the caller's statement end (zero-leak policy).
+t1108_cast_subject_borrow() `test {
+  d := Dog(name: "rex", legs: 4);
+  n := pet_name_len(Pet.Owned(move d as! Animal));
+  assert(n == 3, "cast-subject borrow result");
+}
+
+// 10. Cast-subject payload to a MOVE param: the callee consumes & drops the
+//     enum; the caller must NOT also drop it (no double-free).
+t1108_cast_subject_move_no_double_free() `test {
+  d := Dog(name: "fido", legs: 4);
+  n := take_pet(Pet.Owned(move d as! Animal));
+  assert(n == 4, "cast-subject move consumes payload");
+}
+
+// Scenario 8 (`go`-call with an inline enum-constructor temp) is covered by a Go
+// IR-shape test (TestEnumCtorTempGoCallNoSyncDrop in t1108_test.go) rather than a
+// runtime leak test: a droppable enum payload passed to a go-call still leaks at
+// the pre-existing T1106 behavior, so it cannot be a zero-leak `test`. The IR
+// test verifies the caller emits NO synchronous `enum.ctor.drop` for the go-call
+// path — confirming the T1108 unconditional tracking does not introduce a
+// use-after-free / double-free against the spawned goroutine.

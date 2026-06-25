@@ -5031,9 +5031,10 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	c.clearVariadicStaticFlags(variadicPTs)
 	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, enumSubst, e) // B0345/T0418
 
-	// Drop temp enum receiver if it was a fresh temporary not tracked by
-	// the enumCtorTemps mechanism. When movedDroppable caused enumCtorTemps
-	// to skip tracking (B0252), the borrow method's receiver still needs cleanup.
+	// Drop temp enum receiver if it was a fresh temporary not tracked by the
+	// enumCtorTemps mechanism (e.g. an enum returned from a call, not an inline
+	// `Enum.Variant(...)` constructor — inline constructors are tracked
+	// unconditionally per T1108 and dropped at statement end instead).
 	if tempEnumPtr != nil && c.enumInstanceHasDrop(targetType, enum) {
 		dropName := mangleMethodName(enumName, "drop", false)
 		if dropFn, ok := c.funcs[dropName]; ok {
@@ -6273,6 +6274,12 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		if isMutRefParam {
 			c.maybeEnableDupForMutRefArg(arg.Value, params[i].Type())
 		}
+		// T1108: snapshot enum-ctor temps before evaluating the arg so a move
+		// param can claim (untrack) any inline enum-constructor temp produced
+		// during this arg's evaluation — the callee consumes & drops it, so the
+		// caller's statement-end drop must not also fire (double-free). Borrow
+		// params leave the temp tracked → caller drops it at statement end.
+		savedEnumTemps := len(c.enumCtorTemps)
 		v := c.genCallArgExpr(arg.Value)
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
@@ -6307,6 +6314,25 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 			if c.optionalContainerDup != nil {
 				c.claimStringTemp(c.optionalContainerDup)
 				c.optionalContainerDup = nil
+			}
+			// T1108: claim (untrack) the inline enum-constructor temp evaluated
+			// for this move-param arg — the callee now owns and drops it. Gate on
+			// the arg's static type being an enum: only then is a tracked enum-ctor
+			// temp the value actually being moved into the callee. When the arg is
+			// a non-enum expression that merely BORROWS an enum-ctor temp in a
+			// sub-call (e.g. `take(inspect(Enum.V(x)))` where `inspect(Enum)` is a
+			// borrow param returning a non-enum), that inner temp is an
+			// intermediate the callee never receives — it must stay tracked so the
+			// caller drops it at statement end, else it leaks.
+			argEnumType := c.info.Types[arg.Value]
+			if c.typeSubst != nil {
+				argEnumType = types.Substitute(argEnumType, c.typeSubst)
+			}
+			if extractEnum(argEnumType) != nil {
+				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 			}
 		}
 		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's
@@ -6611,12 +6637,6 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewStore(constant.NewInt(irtypes.I32, int64(tag)), tagPtr)
 
-	// B0252: Track whether any field value was moved from a variable with a
-	// drop binding. If so, the enum now owns heap resources via the moved
-	// variable, and the temp must NOT be dropped at statement end — when the
-	// enum is passed by value to a function that stores it (e.g., Map.[]=),
-	// the temp drop would free resources shared with the stored copy.
-	movedDroppable := false
 	if dataType != nil && len(e.Args) > 0 {
 		dataPtr := c.block.NewGetElementPtr(internalType, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
@@ -6679,42 +6699,21 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 			c.block.NewStore(val, fieldPtr)
-			// Clear drop flag: field value is moved into the enum variant
+			// Clear drop flag: field value is moved into the enum variant.
+			// T1108: the enum-constructor temp is ALWAYS tracked for
+			// statement-end cleanup (see the tracking gate below) regardless
+			// of where the payload came from. Moving a droppable payload into
+			// the variant only needs to clear the source's own drop flag so
+			// the payload isn't double-freed; the enum temp's drop (or its
+			// consumer's drop-flag clear) is the single owner of the payload.
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-				if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
-					movedDroppable = true
-				}
 				c.clearDropFlag(ident.Name)
 			} else if castIdent := c.castSubjectMovableIdent(arg.Value); castIdent != nil {
 				// T0754: ownership moves the cast subject into the variant
 				// payload — clear the subject's drop flag so it doesn't double-
-				// free at scope exit with the enum's variant drop. Also marks
-				// movedDroppable so the enum's stmt-temp drop is skipped.
+				// free at scope exit with the enum's variant drop.
 				// T0849: for the conditional `as` form, drop iff the cast failed.
-				movedDroppable = true
 				c.consumeCastSubjectDropFlag(arg.Value, castIdent.Name)
-			} else if !movedDroppable {
-				// B0286: Function/method calls returning droppable values
-				// transfer ownership to the enum variant. Skip B0267 temp
-				// tracking to prevent double-free when the enum is passed by
-				// value to a function that stores it (e.g., Map.[]=).
-				// Only applies to real function calls (Signature callee), not
-				// type constructors (Named/Instance callee) — constructors
-				// need B0267 as the only cleanup path.
-				if ce, isCall := arg.Value.(*ast.CallExpr); isCall {
-					if calleeType := c.info.Types[ce.Callee]; calleeType != nil {
-						if _, isSig := calleeType.(*types.Signature); isSig {
-							if argType := c.info.Types[arg.Value]; argType != nil {
-								if c.typeSubst != nil {
-									argType = types.Substitute(argType, c.typeSubst)
-								}
-								if argTypeIsDroppable(argType) {
-									movedDroppable = true
-								}
-							}
-						}
-					}
-				}
 			}
 			// B0278: Claim string temp: string method results (e.g., to_upper())
 			// stored into enum variant data transfer ownership to the enum.
@@ -6742,10 +6741,13 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 
 	// B0267: Track the enum alloca for cleanup at statement end. Uses entry-block
 	// allocas so the tracking dominates all uses regardless of branch structure.
-	// B0252: Skip tracking when a variable with a drop binding was moved into the
-	// variant data — the enum now owns those resources, and dropping the temp would
-	// free resources shared with any by-value copy (e.g., stored in a Map Slot).
-	if dataType != nil && !movedDroppable && c.entryBlock != nil && c.tempTrackingEnabled {
+	// T1108: Track unconditionally (formerly gated on !movedDroppable). The enum
+	// temp is the single owner of any moved-in droppable payload until it is
+	// consumed; every consuming site (var-decl/assignment, container store,
+	// move-param arg, Arc/Mutex/channel/Vector.push, etc.) clears this temp's
+	// drop flag, so the statement-end drop fires only for borrowed/discarded
+	// temps — exactly the case that previously leaked the payload.
+	if dataType != nil && c.entryBlock != nil && c.tempTrackingEnabled {
 		enumType := c.info.Types[member.Target]
 		if c.typeSubst != nil {
 			enumType = types.Substitute(enumType, c.typeSubst)
@@ -13798,6 +13800,14 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	var argLLVMTypes []irtypes.Type
 	var argTypes []types.Type
 	var argBorrowDrops []goArgBorrowDrop
+	// T1108/T1106: snapshot enum-ctor temps so we can drop them from the
+	// caller's statement-end cleanup after the loop. The T1108 fix tracks
+	// inline enum-constructor temps unconditionally, but go-call enum-payload
+	// args are left to pre-existing handling (the goroutine may reference the
+	// payload after the spawning statement, so a synchronous statement-end drop
+	// would be a use-after-free). Confining the T1108 change to synchronous
+	// calls leaves T1106 as the tracked follow-up.
+	savedGoEnumTemps := len(c.enumCtorTemps)
 	for i, arg := range callExpr.Args {
 		savedHeap := len(c.heapTemps)
 		v := c.genCallArgExpr(arg.Value)
@@ -13848,6 +13858,11 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		// Borrow param: the goroutine frame drops the temporary after the call.
 		argBorrowDrops = append(argBorrowDrops, d)
 	}
+	// T1108/T1106: drop any inline enum-constructor temps produced for go-call
+	// args from the caller's statement-end cleanup — their ownership is handled
+	// by the pre-existing go-call path (or left to T1106), not by a synchronous
+	// statement-end drop that could free a payload the goroutine still uses.
+	c.enumCtorTemps = c.enumCtorTemps[:savedGoEnumTemps]
 
 	// B0163: Increment refcount for channel arguments passed to go calls.
 	chanTypeDC := channelStructType()

@@ -15760,10 +15760,13 @@ func TestDropGenericEnumVarWithDroppableTypeParam(t *testing.T) {
 	assertContains(t, ir, `call void @"Container[Wrapper].drop"`)
 }
 
-// B0252: When a variable with a drop binding is moved into an enum variant,
-// the enum ctor temp must NOT be tracked for statement-end cleanup — the stored
-// copy (e.g., in a Map Slot) shares heap pointers with the temp.
-func TestEnumCtorTempSkippedWhenMovedDroppable(t *testing.T) {
+// T1108: When a variable with a drop binding is moved into an enum-constructor
+// temp that is passed to a BORROW param, the moved-in payload's only owner is
+// the enum temp (the source ident's drop flag was cleared at the move). The
+// borrow callee does not consume it, so the caller MUST drop the enum temp at
+// statement end to free the payload — otherwise it leaks. (Was B0252's
+// TestEnumCtorTempSkippedWhenMovedDroppable, which encoded that leak.)
+func TestEnumCtorTempMovedDroppableBorrowDrops(t *testing.T) {
 	ir := generateIR(t, `
 		type Resource {
 			string name;
@@ -15779,17 +15782,20 @@ func TestEnumCtorTempSkippedWhenMovedDroppable(t *testing.T) {
 			consume(Holder.Has(r));
 		}
 	`)
-	// The enum should still have a synthesized drop
+	// The enum should have a synthesized drop
 	assertContains(t, ir, "define void @Holder.drop")
-	// But the enum ctor temp should NOT generate statement-end cleanup —
-	// the moved Resource means ownership transferred, no enum.ctor.drop block
-	assertNotContains(t, ir, "enum.ctor.drop")
+	// The borrowed enum ctor temp must be dropped at statement end so the
+	// moved-in Resource is freed (zero-leak policy).
+	assertContains(t, ir, "enum.ctor.drop")
 }
 
-// B0286: Non-ident expressions (e.g., function calls) returning droppable values
-// must also skip B0267 enum ctor temp tracking — the enum owns the returned
-// resources, and temp-dropping would free them under a shared by-value copy.
-func TestEnumCtorTempSkippedForNonIdentDroppableArg(t *testing.T) {
+// T1108: Non-ident expressions (e.g., function calls) returning droppable values
+// moved into an enum-constructor temp that is then passed to a BORROW param must
+// be dropped at statement end. The call result's only owner is the enum temp;
+// the borrow callee does not consume it, so skipping the drop would leak the
+// result. (Was B0286's TestEnumCtorTempSkippedForNonIdentDroppableArg — the IR
+// test that masked the leak it introduced.)
+func TestEnumCtorTempNonIdentDroppableBorrowDrops(t *testing.T) {
 	ir := generateIR(t, `
 		type Resource {
 			string name;
@@ -15808,12 +15814,13 @@ func TestEnumCtorTempSkippedForNonIdentDroppableArg(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "define void @Holder.drop")
-	assertNotContains(t, ir, "enum.ctor.drop")
+	assertContains(t, ir, "enum.ctor.drop")
 }
 
-// B0286: Enum variant with a non-ident arg of a synth-drop type (contains
-// string field) should also skip B0267 temp tracking.
-func TestEnumCtorTempSkippedForNonIdentSynthDropArg(t *testing.T) {
+// T1108: Enum variant with a non-ident arg of a synth-drop type (contains a
+// string field) passed to a BORROW param must likewise be dropped at statement
+// end. (Was B0286's TestEnumCtorTempSkippedForNonIdentSynthDropArg.)
+func TestEnumCtorTempNonIdentSynthDropBorrowDrops(t *testing.T) {
 	ir := generateIR(t, `
 		type Info {
 			string label;
@@ -15831,7 +15838,7 @@ func TestEnumCtorTempSkippedForNonIdentSynthDropArg(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "define void @Wrapper.drop")
-	assertNotContains(t, ir, "enum.ctor.drop")
+	assertContains(t, ir, "enum.ctor.drop")
 }
 
 // B0293: Enum variable reassignment must clear enumCtorTemps to prevent double-drop.

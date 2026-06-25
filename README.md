@@ -2,13 +2,28 @@
 
 Statically-typed language designed for AI-agent efficiency — and written by AI agents. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
+Promise is also a bet: that an AI agent, with limited human oversight, can build large, complex, *high-quality* software — not throwaway snippets, but systems you maintain for years — given a language built for it. This compiler is the first evidence: it was **built by AI agents**, on a single $200/month subscription. The methodology is **Autonomous Software Development**, described below.
+
 **[Install Promise](docs/installing.md)** — macOS (Apple Silicon), Linux (x86_64), or Windows (x86_64).
 
 **Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Open any one `.pr` file and you know exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
 
-**Written by AI agents.** The compiler, standard library, and catalog are written by AI agents — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. The high-level design calls are human and captured in decision docs; the agents implement against them. What keeps agent-written code correct at this size isn't the model being magic, it's the process around it: a work tracker with stable IDs, multi-class quality gates that reject regressions before they land, a zero-memory-leak policy, and **13,000+ tests** (7,200+ Promise, 5,700+ compiler in Go) that must pass before any commit — green across Linux, macOS, Windows, and WASM. See programs agents built in Promise — each with the prompt, the generated code, an honest writeup, and a terminal recording — in the [Zoo](https://github.com/promise-language/zoo). The honest test: read the code an agent wrote and decide for yourself whether it's slop.
+**Autonomous Software Development.** Humans own intent, agents own implementation. The compiler, standard library, and catalog are written by AI agents — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. The high-level design calls are human and captured in decision docs; the agents implement against them. What keeps a codebase this large correct isn't the model being magic — it's a coherent system around it: durable intent (design docs + tracked work items), a mechanical quality floor (multi-class gates, a zero-memory-leak policy, and ratcheted baselines that only let metrics improve), an automated resolution loop, and an orchestrator that coordinates the work across machines — with the human engaged by exception, kept off the critical path. **13,511 tests** (7,433 Promise, 6,078 compiler in Go, as of June 25, 2026) must pass before any commit, green across Linux, macOS, Windows, and WASM.
 
-**Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
+Building the compiler this way shows agents can build something large and real. Whether they can build genuinely complex *solutions on* Promise is the open experiment — and that's what the [Zoo](https://github.com/promise-language/zoo) tracks: programs agents built in Promise, each with the prompt, the generated code, an honest writeup, and a terminal recording. It's early, and the programs are simple. But the real test of whether an AI-built platform is slop isn't the code in any one Zoo program — it's whether agents can use the platform to build software that actually runs. The recordings let you see that for yourself.
+
+**Two deliverables.** Promise is two things, built in tandem:
+
+1. **The language and platform** — the compiler, runtime, standard library, catalog, and packaging. An early version is here today: you can install it and write against it, but it's rough — the compiler still crashes, features are missing, and the standard library is thin.
+
+2. **Autonomous Software Development on Promise** — the system that builds the compiler today (durable intent, the quality floor, the resolution loop, the orchestrator), made native to any project you build on the platform. The end state: a Zoo entry is no longer a one-shot prompt but a project built with that full system around it, where humans define the intent and the design parameters, and the system implements to match.
+
+The first you can use today; the second is what the project is building toward.
+
+<!-- TODO(reactor-public): link the "Autonomous Software Development" white paper (reactor/WHITEPAPER.md) here once the reactor repo is public. -->
+
+
+**Mono-versioned catalog.** Promise manages dependency complexity for you. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing.
 
 **Self-contained toolchain.** The compiler is a single binary that bundles the standard library, catalog modules, and runtime. [Install it](docs/installing.md) — a small (~15MB) download that then sets up the LLVM 22 toolchain it builds with (a one-time fetch, cached under `~/.promise`) — then keep it current with `promise update`. Promise brings its own linker (`lld`), not the system one — nothing to install but Promise itself.* (* macOS also needs the Xcode Command Line Tools for now; a bundled SDK stub is on the way.) Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
@@ -50,7 +65,7 @@ main() {
 
 **WARNING: Under active development, not for production use.**
 
-The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented, and the full test suite is green across Linux, macOS, Windows, and WASM. It's early and mostly solo-built so far — expect rough edges, and expect it to crash on you. That's exactly the feedback we want: try it, and file what breaks.
+The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented, and the full test suite is green across Linux, macOS, Windows, and WASM. It's early and built by one maintainer directing AI agents — expect rough edges, and expect it to crash on you. That's exactly the feedback we want: try it, and file what breaks.
 
 ## Building
 

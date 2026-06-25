@@ -3,7 +3,9 @@ package common
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 )
 
 // release_ci.go implements `bin/release ci [platform...]` — the direct trigger for
@@ -186,27 +188,62 @@ func latestCIRunID(gh cutGH) (int64, error) {
 	return maxID, nil
 }
 
+// ciWatchTimeout is the wall-clock ceiling for ci --watch. Kept separate from
+// ciPollAttempts (used by cut's watchCI) so the two ceilings can differ.
+const ciWatchTimeout = 3 * time.Hour
+
+// isCIStdoutTTY reports whether stdout is an interactive terminal — used to
+// choose between in-place \r progress and newline-per-poll fallback.
+var isCIStdoutTTY = func() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// ciNonTTYLogEvery throttles newline-per-poll output when stdout is not a TTY.
+const ciNonTTYLogEvery = 3
+
 // watchCIRuns polls until every wanted platform's job — in a run created after
 // `baseline` at `sha` — has finished, then reports. It returns an error if any
-// platform is red or the wait times out, so `ci --watch` exits non-zero on red CI
-// (usable as a script gate). Reuses the cut watch loop's tunables (ciPollInterval/
-// ciPollAttempts/sleepFn).
+// platform is red or the 3h ceiling is exceeded. On a TTY, progress is updated
+// in-place with \r; otherwise newlines are printed every ciNonTTYLogEvery polls.
 func watchCIRuns(gh cutGH, sha string, targets []string, baseline int64) error {
 	want := expandCITargets(targets)
+	start := nowFn()
+	deadline := start.Add(ciWatchTimeout)
+	tty := isCIStdoutTTY()
+
 	var status map[string]ciConclusion
-	for range ciPollAttempts {
+	poll := 0
+	wroteProgress := false
+	for nowFn().Before(deadline) {
 		s, err := ciStatusFromNewRuns(gh, sha, baseline, want)
 		if err != nil {
+			if wroteProgress {
+				fmt.Println()
+			}
 			return fmt.Errorf("ci: query CI status: %w", err)
 		}
 		status = s
-		if pending := platformsAt(want, status, ciAbsent); len(pending) != 0 {
-			fmt.Printf("  waiting on %s...\n", strings.Join(pending, ", "))
-			sleepFn(ciPollInterval)
-			continue
+		pending := platformsAt(want, status, ciAbsent)
+		if len(pending) == 0 {
+			break
 		}
-		break
+		elapsed := nowFn().Sub(start).Truncate(time.Second)
+		msg := fmt.Sprintf("  [%s] waiting on %s...", elapsed, strings.Join(pending, ", "))
+		if tty {
+			fmt.Printf("\r%-80s", msg)
+			wroteProgress = true
+		} else if poll%ciNonTTYLogEvery == 0 {
+			fmt.Println(msg)
+		}
+		poll++
+		sleepFn(ciPollInterval)
 	}
+
+	if wroteProgress {
+		fmt.Println()
+	}
+
 	if pending := platformsAt(want, status, ciAbsent); len(pending) != 0 {
 		return fmt.Errorf("ci: timed out waiting for CI; still pending: %s", strings.Join(pending, ", "))
 	}

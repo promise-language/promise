@@ -5,6 +5,7 @@ import (
 	"maps"
 	"strings"
 	"testing"
+	"time"
 )
 
 // release_ci_test.go is the hermetic suite for `bin/release ci` (the standalone
@@ -39,7 +40,10 @@ type fakeCIGH struct {
 	dispatchErr    error
 	runsBefore     []ghRun
 	runsAfter      []ghRun
+	runsBeforeErr  error                       // returned by WorkflowRuns before dispatch
+	runsAfterErr   error                       // returned by WorkflowRuns after dispatch
 	jobs           map[int64][]ghJob
+	runJobsFn      func(int64) ([]ghJob, error) // overrides jobs map when set
 	dispatchedFlag bool
 }
 
@@ -56,12 +60,33 @@ func (f *fakeCIGH) DispatchWorkflow(workflow, ref string, inputs map[string]stri
 
 func (f *fakeCIGH) WorkflowRuns(workflow string, limit int) ([]ghRun, error) {
 	if f.dispatchedFlag {
-		return f.runsAfter, nil
+		return f.runsAfter, f.runsAfterErr
 	}
-	return f.runsBefore, nil
+	return f.runsBefore, f.runsBeforeErr
 }
 
-func (f *fakeCIGH) RunJobs(id int64) ([]ghJob, error) { return f.jobs[id], nil }
+func (f *fakeCIGH) RunJobs(id int64) ([]ghJob, error) {
+	if f.runJobsFn != nil {
+		return f.runJobsFn(id)
+	}
+	return f.jobs[id], nil
+}
+
+// withCINow replaces the nowFn clock seam for the duration of t.
+func withCINow(t *testing.T, fn func() time.Time) {
+	t.Helper()
+	prev := nowFn
+	nowFn = fn
+	t.Cleanup(func() { nowFn = prev })
+}
+
+// withCITTY overrides the isCIStdoutTTY seam for the duration of t.
+func withCITTY(t *testing.T, isTTY bool) {
+	t.Helper()
+	prev := isCIStdoutTTY
+	isCIStdoutTTY = func() bool { return isTTY }
+	t.Cleanup(func() { isCIStdoutTTY = prev })
+}
 
 // withCIFakes swaps the package-level ci seams for the duration of a test.
 func withCIFakes(t *testing.T, git ciGit, gh cutGH) {
@@ -337,6 +362,155 @@ func TestReleaseCIWatchAllPlatforms(t *testing.T) {
 	withCIFakes(t, happyCIGit(), gh)
 	if err := runReleaseCI(t.TempDir(), []string{"all", "--watch"}); err != nil {
 		t.Fatalf("watch all green: %v", err)
+	}
+}
+
+// TestReleaseCIWatchTimeout: clock advances past 3h with no CI result → "timed out".
+func TestReleaseCIWatchTimeout(t *testing.T) {
+	noOpSleep(t)
+	// Each nowFn call jumps past ciWatchTimeout so the deadline check fires immediately.
+	tick := time.Now()
+	withCINow(t, func() time.Time {
+		tick = tick.Add(ciWatchTimeout + time.Second)
+		return tick
+	})
+	gh := &fakeCIGH{
+		runsAfter: []ghRun{{DatabaseID: 1, HeadSHA: ciSHA}},
+		jobs:      map[int64][]ghJob{1: {}}, // no jobs → linux-amd64 stays absent
+	}
+	withCITTY(t, false)
+	withCIFakes(t, happyCIGit(), gh)
+	err := runReleaseCI(t.TempDir(), []string{"--watch"})
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("want timed-out error, got %v", err)
+	}
+}
+
+// TestReleaseCIWatchOutputTTY: TTY path executes without error (in-place \r branch).
+func TestReleaseCIWatchOutputTTY(t *testing.T) {
+	noOpSleep(t)
+	withCITTY(t, true)
+	gh := &fakeCIGH{
+		runsAfter: []ghRun{{DatabaseID: 1, HeadSHA: ciSHA}},
+		jobs:      map[int64][]ghJob{1: {{Name: "linux-amd64", Conclusion: "success"}}},
+	}
+	withCIFakes(t, happyCIGit(), gh)
+	if err := runReleaseCI(t.TempDir(), []string{"--watch"}); err != nil {
+		t.Fatalf("TTY watch should succeed: %v", err)
+	}
+}
+
+// TestReleaseCIWatchOutputNonTTY: non-TTY path executes without error (newline branch).
+func TestReleaseCIWatchOutputNonTTY(t *testing.T) {
+	noOpSleep(t)
+	withCITTY(t, false)
+	gh := &fakeCIGH{
+		runsAfter: []ghRun{{DatabaseID: 1, HeadSHA: ciSHA}},
+		jobs:      map[int64][]ghJob{1: {{Name: "linux-amd64", Conclusion: "success"}}},
+	}
+	withCIFakes(t, happyCIGit(), gh)
+	if err := runReleaseCI(t.TempDir(), []string{"--watch"}); err != nil {
+		t.Fatalf("non-TTY watch should succeed: %v", err)
+	}
+}
+
+// TestReleaseCIWatchBaselineQueryError: WorkflowRuns fails during the pre-dispatch
+// baseline capture (latestCIRunID error path).
+func TestReleaseCIWatchBaselineQueryError(t *testing.T) {
+	gh := &fakeCIGH{runsBeforeErr: errors.New("api down")}
+	withCIFakes(t, happyCIGit(), gh)
+	err := runReleaseCI(t.TempDir(), []string{"--watch"})
+	if err == nil || !strings.Contains(err.Error(), "api down") {
+		t.Fatalf("want baseline-query error surfaced, got %v", err)
+	}
+	if len(gh.dispatched) != 0 {
+		t.Errorf("must not dispatch when baseline capture fails, got %v", gh.dispatched)
+	}
+}
+
+// TestReleaseCIWatchStatusQueryError: WorkflowRuns fails inside the watch loop
+// (ciStatusFromNewRuns error path — exercises "query CI status" error in watchCIRuns).
+func TestReleaseCIWatchStatusQueryError(t *testing.T) {
+	noOpSleep(t)
+	withCITTY(t, false)
+	gh := &fakeCIGH{
+		runsAfterErr: errors.New("gh unavailable"),
+	}
+	withCIFakes(t, happyCIGit(), gh)
+	err := runReleaseCI(t.TempDir(), []string{"--watch"})
+	if err == nil || !strings.Contains(err.Error(), "gh unavailable") {
+		t.Fatalf("want watch-loop query error surfaced, got %v", err)
+	}
+}
+
+// TestReleaseCIWatchJobsQueryError: RunJobs fails inside the watch loop
+// (the RunJobs error branch in ciStatusFromNewRuns).
+func TestReleaseCIWatchJobsQueryError(t *testing.T) {
+	noOpSleep(t)
+	withCITTY(t, false)
+	gh := &fakeCIGH{
+		runsAfter: []ghRun{{DatabaseID: 1, HeadSHA: ciSHA}},
+		runJobsFn: func(int64) ([]ghJob, error) {
+			return nil, errors.New("jobs fetch failed")
+		},
+	}
+	withCIFakes(t, happyCIGit(), gh)
+	err := runReleaseCI(t.TempDir(), []string{"--watch"})
+	if err == nil || !strings.Contains(err.Error(), "jobs fetch failed") {
+		t.Fatalf("want jobs-query error surfaced, got %v", err)
+	}
+}
+
+// TestReleaseCIWatchTTYTrailingNewline: TTY mode where the first poll returns a
+// pending platform (triggering the \r progress write and wroteProgress=true), then
+// the second poll returns success — verifying the trailing fmt.Println() executes.
+func TestReleaseCIWatchTTYTrailingNewline(t *testing.T) {
+	noOpSleep(t)
+	withCITTY(t, true)
+	var calls int
+	gh := &fakeCIGH{
+		runsAfter: []ghRun{{DatabaseID: 1, HeadSHA: ciSHA}},
+		runJobsFn: func(int64) ([]ghJob, error) {
+			calls++
+			if calls == 1 {
+				return []ghJob{{Name: "linux-amd64"}}, nil // no conclusion → absent
+			}
+			return []ghJob{{Name: "linux-amd64", Conclusion: "success"}}, nil
+		},
+	}
+	withCIFakes(t, happyCIGit(), gh)
+	if err := runReleaseCI(t.TempDir(), []string{"--watch"}); err != nil {
+		t.Fatalf("TTY trailing-newline path should succeed: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("expected at least 2 RunJobs calls (one pending, one green), got %d", calls)
+	}
+}
+
+// TestReleaseCIWatchErrorAfterTTYProgress: TTY mode where the first poll writes \r
+// progress (wroteProgress=true), then the second poll returns an error — verifying
+// that watchCIRuns prints a trailing newline before returning the error.
+func TestReleaseCIWatchErrorAfterTTYProgress(t *testing.T) {
+	noOpSleep(t)
+	withCITTY(t, true)
+	var calls int
+	gh := &fakeCIGH{
+		runsAfter: []ghRun{{DatabaseID: 1, HeadSHA: ciSHA}},
+		runJobsFn: func(int64) ([]ghJob, error) {
+			calls++
+			if calls == 1 {
+				return []ghJob{{Name: "linux-amd64"}}, nil // absent → triggers \r write
+			}
+			return nil, errors.New("transient error") // second poll errors
+		},
+	}
+	withCIFakes(t, happyCIGit(), gh)
+	err := runReleaseCI(t.TempDir(), []string{"--watch"})
+	if err == nil || !strings.Contains(err.Error(), "transient error") {
+		t.Fatalf("want transient error surfaced, got %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("expected at least 2 RunJobs calls, got %d", calls)
 	}
 }
 

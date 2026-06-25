@@ -729,12 +729,14 @@ func splitCIStatus(status map[string]ciConclusion) (failed, absent []string) {
 	return failed, absent
 }
 
-// ciPollInterval/ciPollAttempts bound the dispatch-and-watch loop; sleepFn is a
-// var so tests can no-op the wait.
+// ciPollInterval/ciPollAttempts bound the cut's dispatch-and-watch loop;
+// sleepFn/nowFn are vars so tests can no-op the wait and control the clock.
+// ci --watch uses its own ciWatchTimeout (release_ci.go) instead of ciPollAttempts.
 var (
 	ciPollInterval = 20 * time.Second
-	ciPollAttempts = 90 // ~30 min ceiling
+	ciPollAttempts = 90 // ~30 min ceiling — used by cut's watchCI only
 	sleepFn        = time.Sleep
+	nowFn          = time.Now
 )
 
 func gateCI(ctx *cutContext) gateResult {

@@ -102,7 +102,12 @@ subcommands:
         that tip — push first, or --force to dispatch on the remote tip anyway,
         or --ref to choose a branch. --no-tests builds only (skips the suite);
         --watch polls the dispatched run(s) to completion and exits non-zero on
-        red CI.`
+        red CI.
+  changes [--commit-hash <sha>]
+        list non-merge commit subjects since the last stable epoch tag (newest
+        first). Default upper bound is HEAD; --commit-hash pins to an exact SHA
+        (must be HEAD or an ancestor of HEAD). Prints a header line then one
+        subject per line — pipeable for AI summarizers before cutting.`
 
 // RunRelease dispatches a `bin/release` subcommand.
 func RunRelease(root string, args []string) error {
@@ -131,6 +136,8 @@ func RunRelease(root string, args []string) error {
 		return runReleaseCut(root, rest)
 	case "ci":
 		return runReleaseCI(root, rest)
+	case "changes":
+		return runReleaseChanges(root, rest)
 	case "-h", "--help", "help":
 		fmt.Println(releaseUsage)
 		return nil

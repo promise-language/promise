@@ -412,6 +412,32 @@ This keeps the happy path (CI already green) instant, turns the common "forgot t
 
 **Inputs.** Every gate input is reachable from `bin/release`: `git` (tree, reachability, tags, `rev-parse` for `--sha`, `log` for the release notes), `gh` (CI run + per-job conclusions by `headSha`; `deps-*` release assets via the existing `releaseUploader`; the `epoch-next` release run), and a `catalog.toml` parse. The implementation puts `git`/`gh` behind the `cutGit` / `cutGH` interfaces (the same stub pattern as `releaseUploader` / `blobFetcher`), so `release_cut_test.go` is fully hermetic — no `git`/`gh` process is spawned and the CI watch loop's sleep is stubbed.
 
+### 6.4 `bin/release changes` — release preview (T1141)
+
+A read-only convenience command for previewing what would go into the next stable release's notes before cutting:
+
+```sh
+bin/release changes                    # subjects from last stable epoch tag to HEAD
+bin/release changes --commit-hash <sha>  # same range but upper bound pinned to <sha>
+```
+
+**Behavior.** Resolves the last stable `epoch-*` tag (same logic as `cut stable`: `highestReleasedEpoch` excludes `epoch-next` and any non-numeric tags). Prints a one-line header then one commit subject per line (non-merge commits only, newest first — same `git log --no-merges --pretty=format:%s` primitive `cut` uses for release notes).
+
+```
+42 commits since epoch-2026.1
+T1141: bin/release changes subcommand
+T1139: Move-param enum-ctor temp claim over-claims intermediate borrow temps
+…
+```
+
+**`--commit-hash`**: pins the upper bound to an exact SHA; validated as HEAD-or-ancestor of HEAD (mirrors `ci --commit-hash`). Use this to preview the precise range for a SHA you intend to pass to `cut --sha <sha>`.
+
+**No prior epoch**: when no stable `epoch-*` tag exists, the range covers the entire history from the upper bound, and the header reads `N commits (no prior stable epoch)`.
+
+**AI-authored release notes workflow** (pairs with the companion `cut --notes-file` task): pipe `bin/release changes` output into an AI summarizer, then feed the summary into `bin/release cut stable --notes-file <file>` to override the mechanical bullet list with a human-readable description.
+
+This command is **read-only**: no gates, no tagging, no side effects beyond `git fetch --tags` to ensure local epoch tags are current. Implemented in `tools/build/common/release_changes.go`.
+
 ---
 
 ## 7. Open items

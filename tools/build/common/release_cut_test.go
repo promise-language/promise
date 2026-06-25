@@ -1626,3 +1626,226 @@ func TestShellGHErrors(t *testing.T) {
 		t.Fatal("RunJobs must surface a JSON parse error")
 	}
 }
+
+// ── resolveNotesBody ─────────────────────────────────────────────────────────
+
+func TestResolveNotesBodyDefault(t *testing.T) {
+	g := newFakeCutGit()
+	g.logSubjects = []string{"fix: something"}
+	ctx := &cutContext{git: g, targetSHA: "deadbeef", lastEpoch: epoch{2026, 0}, haveLast: true}
+	got, err := resolveNotesBody(ctx)
+	if err != nil {
+		t.Fatalf("resolveNotesBody (default): %v", err)
+	}
+	want, _ := generateReleaseNotes(ctx)
+	if got != want {
+		t.Fatalf("default path must equal generateReleaseNotes:\ngot:  %q\nwant: %q", got, want)
+	}
+	if !strings.Contains(got, installHeader) {
+		t.Fatalf("default notes must contain install header")
+	}
+}
+
+func TestResolveNotesBodyInline(t *testing.T) {
+	ctx := &cutContext{notesInline: "hand-written notes"}
+	got, err := resolveNotesBody(ctx)
+	if err != nil {
+		t.Fatalf("resolveNotesBody (inline): %v", err)
+	}
+	want := installHeader + "hand-written notes\n"
+	if got != want {
+		t.Fatalf("inline notes = %q, want %q", got, want)
+	}
+}
+
+func TestResolveNotesBodyFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(f, []byte("file body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &cutContext{notesFile: f}
+	got, err := resolveNotesBody(ctx)
+	if err != nil {
+		t.Fatalf("resolveNotesBody (file): %v", err)
+	}
+	want := installHeader + "file body\n"
+	if got != want {
+		t.Fatalf("file notes = %q, want %q", got, want)
+	}
+}
+
+func TestResolveNotesBodyStdin(t *testing.T) {
+	ctx := &cutContext{
+		notesFile: "-",
+		stdin:     strings.NewReader("stdin notes\n"),
+	}
+	got, err := resolveNotesBody(ctx)
+	if err != nil {
+		t.Fatalf("resolveNotesBody (stdin): %v", err)
+	}
+	want := installHeader + "stdin notes\n"
+	if got != want {
+		t.Fatalf("stdin notes = %q, want %q", got, want)
+	}
+}
+
+func TestResolveNotesBodyFileMissing(t *testing.T) {
+	ctx := &cutContext{notesFile: filepath.Join(t.TempDir(), "nonexistent.md")}
+	if _, err := resolveNotesBody(ctx); err == nil {
+		t.Fatal("a missing notes file must return an error")
+	}
+}
+
+func TestRunReleaseCutMutualExclusion(t *testing.T) {
+	err := runReleaseCut(t.TempDir(), []string{"next", "--notes-file", "f.md", "--notes", "x"})
+	if err == nil {
+		t.Fatal("--notes-file and --notes together must error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, want 'mutually exclusive'", err)
+	}
+}
+
+func TestCutNextDryRunCustomNotes(t *testing.T) {
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+	g := newFakeCutGit()
+	g.head = sha
+	out := &strings.Builder{}
+	ctx := &cutContext{
+		root: root, channel: "next", dryRun: true,
+		notesInline: "hand-written notes",
+		git: g, gh: greenCI(sha), uploader: uploader,
+		stdin: strings.NewReader(""), stdout: out,
+	}
+	if err := cutNext(ctx); err != nil {
+		t.Fatalf("cut next --dry-run with custom notes: %v", err)
+	}
+	if len(g.createdTags) != 0 || len(g.pushedTags) != 0 {
+		t.Fatal("--dry-run must not mutate")
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "hand-written notes") {
+		t.Fatalf("dry-run output must contain custom notes body, got:\n%s", printed)
+	}
+	if !strings.Contains(printed, installHeader) {
+		t.Fatalf("dry-run output must contain install header, got:\n%s", printed)
+	}
+}
+
+func TestCutStableDryRunCustomNotes(t *testing.T) {
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+
+	g := newFakeCutGit()
+	g.head = sha
+	g.epochTags = []string{"epoch-2026.0"}
+	g.tags["epoch-2026.0"] = "oldsha"
+	g.tags["epoch-next"] = sha
+	gh := greenCI(sha)
+	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
+
+	out := &strings.Builder{}
+	ctx := stableCtx(root, g, gh, uploader)
+	ctx.dryRun = true
+	ctx.notesInline = "AI-crafted summary"
+	ctx.stdout = out
+	withYear(t, 2026)
+	if err := cutStable(ctx); err != nil {
+		t.Fatalf("cut stable --dry-run with custom notes: %v", err)
+	}
+	if len(g.createdTags) != 0 || len(g.committed) != 0 {
+		t.Fatal("--dry-run must not mutate")
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "AI-crafted summary") {
+		t.Fatalf("dry-run output must contain custom notes body, got:\n%s", printed)
+	}
+	if !strings.Contains(printed, installHeader) {
+		t.Fatalf("dry-run output must contain install header, got:\n%s", printed)
+	}
+}
+
+// failReader is an io.Reader that always returns an error.
+type failReader struct{ err error }
+
+func (r *failReader) Read(p []byte) (int, error) { return 0, r.err }
+
+// TestReadNotesFileStdinError covers the io.ReadAll error branch in readNotesFile
+// (the one uncovered path in the function).
+func TestReadNotesFileStdinError(t *testing.T) {
+	ctx := &cutContext{
+		notesFile: "-",
+		stdin:     &failReader{err: errors.New("stdin pipe broken")},
+	}
+	if _, err := resolveNotesBody(ctx); err == nil {
+		t.Fatal("a stdin read error must propagate out of resolveNotesBody")
+	}
+}
+
+// TestCutNextCustomNotesInTagMessage verifies that custom notes (--notes) flow all
+// the way into the annotated tag message on a real (non-dry-run) cut next.
+func TestCutNextCustomNotesInTagMessage(t *testing.T) {
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+	g := newFakeCutGit()
+	g.head = sha
+	ctx := &cutContext{
+		root: root, channel: "next",
+		notesInline: "custom AI summary",
+		git: g, gh: greenCI(sha), uploader: uploader,
+		stdout: &strings.Builder{},
+	}
+	if err := cutNext(ctx); err != nil {
+		t.Fatalf("cut next with custom notes failed: %v", err)
+	}
+	if len(g.createdTags) != 1 {
+		t.Fatalf("expected one created tag, got %d", len(g.createdTags))
+	}
+	msg := g.createdTags[0].message
+	if !strings.Contains(msg, "custom AI summary") {
+		t.Fatalf("tag message must contain custom notes body, got: %q", msg)
+	}
+	if !strings.Contains(msg, installHeader) {
+		t.Fatalf("tag message must contain install header, got: %q", msg)
+	}
+}
+
+// TestCutStableCustomNotesInTagMessage verifies that custom notes (--notes) flow
+// all the way into the annotated tag message on a real (non-dry-run) cut stable.
+func TestCutStableCustomNotesInTagMessage(t *testing.T) {
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+
+	g := newFakeCutGit()
+	g.head = sha
+	g.epochTags = []string{"epoch-2026.0"}
+	g.tags["epoch-2026.0"] = "oldsha"
+	g.tags["epoch-next"] = sha
+
+	gh := greenCI(sha)
+	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
+
+	ctx := stableCtx(root, g, gh, uploader)
+	ctx.notesInline = "hand-crafted release summary"
+	withYear(t, 2026)
+	if err := cutStable(ctx); err != nil {
+		t.Fatalf("cut stable with custom notes failed: %v", err)
+	}
+	if len(g.createdTags) != 1 {
+		t.Fatalf("expected one created tag, got %d", len(g.createdTags))
+	}
+	msg := g.createdTags[0].message
+	if !strings.Contains(msg, "hand-crafted release summary") {
+		t.Fatalf("tag message must contain custom notes body, got: %q", msg)
+	}
+	if !strings.Contains(msg, installHeader) {
+		t.Fatalf("tag message must contain install header, got: %q", msg)
+	}
+}

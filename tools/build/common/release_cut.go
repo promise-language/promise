@@ -405,6 +405,8 @@ type cutContext struct {
 	runCI       bool
 	noCIWait    bool
 	confirmYear bool
+	notesFile   string // --notes-file <path> or "-" for stdin
+	notesInline string // --notes "<text>"
 
 	git      cutGit
 	gh       cutGH
@@ -637,6 +639,11 @@ func resolveTargetSHA(ctx *cutContext) (string, error) {
 	return ctx.git.HeadSHA()
 }
 
+// installHeader leads every release-notes body so a reader lands on "how to
+// get it" first, regardless of whether the body was auto-generated or supplied
+// by the maintainer.
+const installHeader = "**Install:** https://github.com/promise-language/promise/blob/main/docs/installing.md\n\n"
+
 // generateReleaseNotes builds the mechanical release-notes body for a cut: a
 // bulleted list of non-merge commit subjects in `epoch-<last>..<targetSHA>`,
 // newest first, embedded into the annotated tag so release.yml can publish them
@@ -654,8 +661,7 @@ func generateReleaseNotes(ctx *cutContext) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	// Install instructions lead the notes so a reader lands on "how to get it" first.
-	b.WriteString("**Install:** https://github.com/promise-language/promise/blob/main/docs/installing.md\n\n")
+	b.WriteString(installHeader)
 	plural := "s"
 	if len(subjects) == 1 {
 		plural = ""
@@ -674,6 +680,42 @@ func generateReleaseNotes(ctx *cutContext) (string, error) {
 		fmt.Fprintf(&b, "- %s\n", s)
 	}
 	return b.String(), nil
+}
+
+// resolveNotesBody returns the notes body to embed in the release tag.
+// When a custom body is supplied (--notes-file / --notes), it replaces the
+// mechanical git-log bullets but installHeader is always auto-prepended.
+// Default (no flag) falls back to generateReleaseNotes, which already includes
+// the install header.
+func resolveNotesBody(ctx *cutContext) (string, error) {
+	switch {
+	case ctx.notesFile != "":
+		b, err := readNotesFile(ctx)
+		if err != nil {
+			return "", fmt.Errorf("--notes-file: %w", err)
+		}
+		return installHeader + strings.TrimRight(b, "\n") + "\n", nil
+	case ctx.notesInline != "":
+		return installHeader + strings.TrimRight(ctx.notesInline, "\n") + "\n", nil
+	default:
+		return generateReleaseNotes(ctx)
+	}
+}
+
+// readNotesFile reads the notes body from ctx.notesFile (a path or "-" for stdin).
+func readNotesFile(ctx *cutContext) (string, error) {
+	if ctx.notesFile == "-" {
+		data, err := io.ReadAll(ctx.stdin)
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+		return string(data), nil
+	}
+	data, err := os.ReadFile(ctx.notesFile)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // ── gate 7: three-state CI ──────────────────────────────────────────────────
@@ -878,8 +920,13 @@ func runReleaseCut(root string, args []string) error {
 	runCI := fs.Bool("run-ci", false, "non-interactively dispatch ci.yml for platforms with no run at this SHA")
 	noCIWait := fs.Bool("no-ci-wait", false, "with --run-ci: dispatch CI then stop (re-run `cut` once green)")
 	confirmYear := fs.Bool("confirm-year", false, "non-interactively confirm a year-rollover epoch")
+	notesFile := fs.String("notes-file", "", "read release-notes body from a local file (- for stdin); mutually exclusive with --notes")
+	notesInline := fs.String("notes", "", "inline release-notes body; mutually exclusive with --notes-file")
 	if err := fs.Parse(rest); err != nil {
 		return err
+	}
+	if *notesFile != "" && *notesInline != "" {
+		return fmt.Errorf("cut: --notes-file and --notes are mutually exclusive")
 	}
 	ctx := &cutContext{
 		root:        root,
@@ -890,6 +937,8 @@ func runReleaseCut(root string, args []string) error {
 		runCI:       *runCI,
 		noCIWait:    *noCIWait,
 		confirmYear: *confirmYear,
+		notesFile:   *notesFile,
+		notesInline: *notesInline,
 		git:         defaultCutGit(root),
 		gh:          defaultCutGH,
 		uploader:    defaultReleaseUploader,
@@ -937,7 +986,7 @@ func cutNext(ctx *cutContext) error {
 	if err := preflight(ctx, gates); err != nil {
 		return err
 	}
-	notes, err := generateReleaseNotes(ctx)
+	notes, err := resolveNotesBody(ctx)
 	if err != nil {
 		return fmt.Errorf("generate release notes: %w", err)
 	}
@@ -1004,7 +1053,7 @@ func cutStable(ctx *cutContext) error {
 	if err := preflight(ctx, gates); err != nil {
 		return err
 	}
-	notes, err := generateReleaseNotes(ctx)
+	notes, err := resolveNotesBody(ctx)
 	if err != nil {
 		return fmt.Errorf("generate release notes: %w", err)
 	}

@@ -5835,30 +5835,35 @@ func TestT0556_PushBorrowedArcParamOK(t *testing.T) {
 	`)
 }
 
-// `return m` for a borrowed Mutex param is handled by codegen's B0345
-// alias-clear of the caller's drop flag — not by sema rejection.
-// Regression guard that T0556's call-arg rejection doesn't bleed into
-// the return path (which uses tryMove, not checkCallExpr).
-func TestT0556_ReturnBorrowedMutexParamOK(t *testing.T) {
-	ownerOK(t, `
+// T1102: `return m` for a borrowed (non-`move`) Mutex param is unsound — the
+// handle has no clone, so the caller's result aliases its still-live source
+// local and both ends drop the one handle (double-free / UAF). Formerly this
+// relied on codegen's B0345 alias-clear, which only transfers sole ownership
+// for clonable types; for a single-owner handle the surviving owner double-
+// frees. Now rejected at the return site.
+func TestT0556_ReturnBorrowedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		identity(Mutex[int] m) Mutex[int] { return m; }
 		test() {
 			m := Mutex[int](42);
 			m2 := identity(m);
 		}
 	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
 }
 
-// `n := m` for a borrowed Mutex param produces an aliased local (codegen
-// detects the missing drop flag on the RHS and skips registering one for
-// the LHS). Sema's call-arg rejection must not apply to var-decl sites.
-func TestT0556_VarDeclBorrowedMutexParamOK(t *testing.T) {
-	ownerOK(t, `
+// T1102: `n := m` aliasing a borrowed Mutex param into an owned local is
+// rejected — a single-owner handle has no clone/dup, so the alias is unsound
+// the moment it escapes (and pointless even when it does not). Same shape as
+// the typed-decl carve-outs above, via the inferred var-decl path.
+func TestT0556_VarDeclBorrowedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		alias(Mutex[int] m) {
 			n := m;
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
 }
 
 // Transparent wrappers must not let a borrowed Mutex slip past the check.
@@ -7610,39 +7615,124 @@ func TestT0568_TypedDeclBorrowedWeakParamAllowed(t *testing.T) {
 	`)
 }
 
-// T0568 carve-out coverage: MutexGuard[T] is in isVarDeclAliasSafeType's
-// codegen-safe set (locks are exclusive but the alias path still gets
-// special drop-flag handling at the var-decl site in codegen).
-func TestT0568_TypedDeclBorrowedMutexGuardParamAllowed(t *testing.T) {
-	ownerOK(t, `
+// T1102: MutexGuard[T] is a single-owner handle with no clone/dup — aliasing a
+// borrowed param into an owned local is unsound the moment it escapes, so the
+// var-decl is rejected outright (formerly a T0568 carve-out, now corrected).
+func TestT0568_TypedDeclBorrowedMutexGuardParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		dup_guard(MutexGuard[int] g) {
 			MutexGuard[int] c = g;
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
 }
 
-// T0568 carve-out coverage: Task[T] is in isVarDeclAliasSafeType's
-// codegen-safe set.
-func TestT0568_TypedDeclBorrowedTaskParamAllowed(t *testing.T) {
-	ownerOK(t, `
+// T1102: Task[T] is a single-owner handle with no clone/dup — the borrowed-param
+// alias is rejected at the var-decl (formerly a T0568 carve-out).
+func TestT0568_TypedDeclBorrowedTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		dup_task(Task[int] t) {
 			Task[int] c = t;
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
 }
 
-// T0568 carve-out coverage: Mutex[T] is in isVarDeclAliasSafeType's
-// codegen-safe set (no clone semantics, but the alias path is handled by
-// codegen's drop-flag propagation at the var-decl site).
-func TestT0568_TypedDeclBorrowedMutexParamAllowed(t *testing.T) {
-	ownerOK(t, `
+// T1102: Mutex[T] is a single-owner handle with no clone/dup — the borrowed-param
+// alias is rejected at the var-decl (formerly a T0568 carve-out).
+func TestT0568_TypedDeclBorrowedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		dup_mutex(Mutex[int] m) {
 			Mutex[int] c = m;
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
+}
+
+// T1102: returning a borrowed (non-`move`) Task[T] param as owned is rejected —
+// the handle has no clone, so the caller's result would alias its still-live
+// source local and both ends would drop the one handle (double-free / UAF).
+func TestT1102_ReturnBorrowedTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_borrow(Task[int] t) Task[int] { return t; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1102: Mutex[T] parity for the direct-return rejection.
+func TestT1102_ReturnBorrowedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_borrow(Mutex[int] m) Mutex[int] { return m; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1102: MutexGuard[T] parity for the direct-return rejection.
+func TestT1102_ReturnBorrowedMutexGuardParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_borrow(MutexGuard[int] g) MutexGuard[int] { return g; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1102: the laundered escape — `Task[int] x = t; return x;` — is rejected at
+// the var-decl site (the alias into an owned binding), before it can escape.
+func TestT1102_ReturnLaunderedBorrowedTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_borrow(Task[int] t) Task[int] {
+			Task[int] x = t;
+			return x;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
+}
+
+// T1102: a `move` Task[T] param returned as owned stays valid — the move
+// transfers the single handle's ownership to the caller's result.
+func TestT1102_ReturnMovedTaskParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		pass_move(Task[int] move t) Task[int] { return t; }
+		test() {}
+	`)
+}
+
+// T1102: returning a freshly-created task (owned local / direct `go`) stays
+// valid — there is no aliasing source local to double-free.
+func TestT1102_ReturnFreshTaskAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		get_task() Task[int] { return go worker(); }
+		make_task() Task[int] {
+			Task[int] t = go worker();
+			return t;
+		}
+		test() {}
+	`)
+}
+
+// T1102: a single-owner handle reaching the var-decl alias reject as a NON-param
+// Borrowed local (here via tuple destructuring of an owning aggregate field, the
+// same shape as TestT0568_TypedDeclDestructuredBorrowRejected) takes the
+// non-param else branch in rejectBorrowedIdentVarDecl — the
+// `singleOwnerHandleKind` check fires before isVarDeclAliasSafeType and rejects
+// with the "cannot move borrowed value" diagnostic (not the parameter form).
+func TestT1102_VarDeclDestructuredBorrowMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { (Mutex[int], int) pair; }
+		test() {
+			Holder h = Holder(pair: (Mutex[int](1), 2));
+			(b, n) := h.pair;
+			Mutex[int] c = b;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
 }
 
 // T0568 carve-out coverage: Optional wrapping of a codegen-safe type

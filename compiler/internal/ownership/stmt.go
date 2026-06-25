@@ -202,10 +202,12 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		// allocation → runtime double-free. The codegen-safe set is captured
 		// by `isVarDeclAliasSafeType` and mirrors codegen's
 		// `isDroppableContainerOrString` (string / Vector / Channel / Arc /
-		// Weak / Mutex / MutexGuard / Task plus Optional thereof): for those
-		// codegen propagates the RHS's drop flag (cleared, for a borrowed
-		// param) or auto-dups via `setDupFlagsForFieldAccess`, so the LHS
-		// does not double-drop.
+		// Weak plus Optional thereof): for those codegen propagates the RHS's
+		// drop flag (cleared, for a borrowed param) or auto-dups via
+		// `setDupFlagsForFieldAccess`, so the LHS does not double-drop.
+		// T1102: single-owner handles (Mutex / MutexGuard / Task) are NOT in
+		// the safe set — they have no clone/dup, so an escaping alias would
+		// double-free; `rejectBorrowedIdentVarDecl` rejects them outright.
 		if c.rejectBorrowedIdentVarDecl(s.Value, s.Type) {
 			return
 		}
@@ -255,6 +257,21 @@ func (c *Checker) rejectBorrowedIdentVarDecl(value ast.Expr, lhsRef ast.TypeRef)
 		return false
 	}
 	typ := c.info.Types[value]
+	// T1102: a single-owner native handle (task/Mutex/MutexGuard) has no clone/
+	// dup, so aliasing it into an owned binding is unsound the moment that
+	// binding escapes (returned, or laundered then returned). isVarDeclAliasSafeType
+	// reports these as safe (true only for the non-escaping drop case), so check
+	// for them BEFORE that early-return and reject the alias outright.
+	if k := singleOwnerHandleKind(typ); k != "" {
+		if c.params[ident.Name] {
+			c.errorf(ident.Pos(),
+				"cannot move borrowed parameter '%s'; declare the parameter with `move` to consume it",
+				ident.Name)
+		} else {
+			c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
+		}
+		return true
+	}
 	if isCopyType(typ) || isVarDeclAliasSafeType(typ) || !isDroppableType(typ) {
 		return false
 	}
@@ -326,6 +343,13 @@ func isBorrowedOptionalType(typ types.Type) bool {
 // Used by T0568 to carve out the safe shapes that the borrowed-ident reject
 // must not block. Keep in sync with codegen when new container/handle types
 // are added.
+//
+// NOTE (T1102): Mutex/MutexGuard/Task are listed here because their drop flag
+// is correctly propagated/cleared for the non-escaping drop case (and other
+// callers, e.g. `this`-arg safety and if-let paths, rely on that). They are
+// NOT safe to alias when the binding escapes (returned, or laundered then
+// returned) — single-owner handles have no clone/dup. `rejectBorrowedIdentVarDecl`
+// checks `singleOwnerHandleKind` BEFORE this function and rejects those.
 func isVarDeclAliasSafeType(typ types.Type) bool {
 	if typ == nil {
 		return false
@@ -358,6 +382,30 @@ func isVarDeclAliasSafeType(typ types.Type) bool {
 		return isVarDeclAliasSafeType(opt.Elem())
 	}
 	return false
+}
+
+// singleOwnerHandleKind returns the display name ("task"/"Mutex"/"MutexGuard")
+// when t is a single-owner native handle that has no clone/dup semantics
+// (codegen's maybeDupPushElement returns nil for these), else "". T1102: such a
+// handle borrowed by value cannot be aliased into an owned binding or returned
+// as owned — the caller still owns the one handle, so a second drop double-frees.
+// Although these appear in isVarDeclAliasSafeType (their drop flag is correctly
+// propagated/cleared for the non-escaping drop case), that safety does NOT hold
+// when the alias escapes (returned or laundered then returned): the caller's
+// result then aliases its still-live source local and both ends drop the one
+// handle. The call-arg-unsafe rationale mirrors expr.go's
+// isCallArgUnsafeBorrowedType, which already flags these for move-arg passing.
+func singleOwnerHandleKind(t types.Type) string {
+	if _, ok := types.AsTask(t); ok {
+		return "task"
+	}
+	if _, ok := types.AsMutex(t); ok {
+		return "Mutex"
+	}
+	if _, ok := types.AsMutexGuard(t); ok {
+		return "MutexGuard"
+	}
+	return ""
 }
 
 // isPointerTypeRef checks whether a type reference is a raw pointer type.
@@ -784,6 +832,21 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 		return
 	}
 	if !isRefType(c.curSig.Result()) {
+		// T1102: returning a borrowed (non-`move`) single-owner native handle
+		// parameter (task/Mutex/MutexGuard) as owned is unsound — these have no
+		// clone/dup, so the caller's result aliases its still-live source local
+		// and both ends drop the one handle (double-free / UAF). returnsBorrowAsOwned
+		// deliberately exempts parameters (it assumes "return implicitly dups for
+		// non-Copy types"), which is false for these handles — reject here first.
+		if ident, ok := s.Value.(*ast.IdentExpr); ok &&
+			c.params[ident.Name] && c.state[ident.Name] == Borrowed {
+			if k := singleOwnerHandleKind(c.info.Types[ident]); k != "" {
+				c.errorf(s.Pos(),
+					"cannot return borrowed parameter '%s' as owned; a `%s` handle has no clone and the caller still owns it — declare the parameter with `move` to transfer ownership",
+					ident.Name, k)
+				return
+			}
+		}
 		// T0402: returning a non-Copy borrow as owned is unsafe — the caller
 		// would register a drop for the inner pointer that the original Arc/
 		// Mutex still owns, leading to double-free. Reject regardless of

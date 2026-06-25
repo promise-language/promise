@@ -1,0 +1,69 @@
+// T1102: returning a borrowed (non-`move`) single-owner handle (task/Mutex/
+// MutexGuard) as owned used to segfault — the caller's result aliased its
+// still-live source local and both ends dropped the one handle (double-free).
+//
+// The ownership pass now rejects the unsound forms at compile time:
+//   pass_borrow(task[int] t) task[int] { return t; }        // direct return
+//   pass_borrow(task[int] t) task[int] { task[int] x = t; return x; } // laundered
+// Those are covered by Go ownership tests (cannot return/move borrowed param).
+//
+// These runtime tests prove the fix does NOT over-reject the valid paths and
+// that the complementary codegen alias-clear (isTypeDroppable now covers Task)
+// keeps them leak-free.
+worker() int {
+  return 42;
+}
+
+// Valid: a `move` task param transfers the single handle's ownership to the
+// caller's result — no aliasing, no double-free.
+pass_move(task[int] move t) task[int] {
+  return t;
+}
+
+t1102_move_param_return() `test {
+  task[int] t = go worker();
+  int r = <-pass_move(move t);
+  assert(r == 42, "move-param task return");
+}
+
+// Valid: a generic identity instantiated with task[int]. Ownership cannot
+// reject this at the concrete level (the param is a TypeParam, not a Task,
+// during generic checking), so codegen's return-alias check must clear the
+// source's drop flag at the call site — that path requires Task to be seen as
+// droppable (the codegen half of the T1102 fix).
+identity[T](T x) T {
+  return x;
+}
+
+t1102_generic_identity_task() `test {
+  task[int] t = go worker();
+  int r = <-identity(t);
+  assert(r == 42, "generic identity over task");
+}
+
+// Valid: returning a freshly-created task (owned local, no aliasing source).
+make_task() task[int] {
+  task[int] t = go worker();
+  return t;
+}
+
+t1102_return_fresh_task() `test {
+  int r = <-make_task();
+  assert(r == 42, "return freshly-created task");
+}
+
+// Valid: generic identity over a Mutex — the same codegen return-alias path as
+// the task case, exercising the other single-owner handle. Mutex was already
+// droppable in isTypeDroppable (only Task was missing), so this is the parity
+// guard that the alias-clear keeps the surviving owner from double-freeing the
+// one handle. Runs leak-checked, like every batch test.
+mutex_identity[T](T x) T {
+  return x;
+}
+
+t1102_generic_identity_mutex() `test {
+  m := Mutex[int](7);
+  m2 := mutex_identity(m);
+  int v = m2.lock().borrow;
+  assert(v == 7, "generic identity over mutex");
+}

@@ -2173,6 +2173,16 @@ func isTypeDroppable(typ types.Type) bool {
 	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
 		return true
 	}
+	// T1102: Task[T] is a single-owner native handle (opaque i8* G-struct ptr)
+	// with a registered drop (Task[int].drop), exactly like Mutex/MutexGuard.
+	// It was missing here, so the return-alias check (emitReturnAliasCheckSubst)
+	// returned early for task-returning calls and never cleared the source arg's
+	// drop flag — returning a borrowed task param then double-freed the handle.
+	// Must agree with the drop-registration path; keep adjacent to the other
+	// single-owner handles.
+	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+		return true
+	}
 	if isContainerType(typ) {
 		return false
 	}

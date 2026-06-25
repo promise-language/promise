@@ -27,6 +27,9 @@ type ciGit interface {
 	CurrentBranch() (string, error)
 	HeadSHA() (string, error)
 	RemoteBranchSHA(branch string) (string, error) // origin tip, "" if absent
+	IsAncestor(sha, ref string) (bool, error)      // git merge-base --is-ancestor sha ref
+	PushTagAt(tag, sha string) error               // git push origin sha:refs/tags/tag
+	DeleteRemoteTag(tag string) error              // git push origin --delete refs/tags/tag
 }
 
 // defaultCIGit/defaultCIGH are the production seams; tests swap them.
@@ -57,11 +60,16 @@ func runReleaseCI(root string, args []string) error {
 	platforms, flags := splitCIArgs(args)
 	fs := flag.NewFlagSet("ci", flag.ContinueOnError)
 	ref := fs.String("ref", "", "branch to dispatch CI on (default: current branch)")
+	commitHash := fs.String("commit-hash", "", "pin CI to this exact commit (must be HEAD or ancestor of --ref)")
 	noTests := fs.Bool("no-tests", false, "build only — skip the test suite (cheap toolchain check; macOS bills 10x)")
 	force := fs.Bool("force", false, "dispatch even if local HEAD is not the tip of the remote branch")
 	watch := fs.Bool("watch", false, "after dispatching, poll until the run(s) finish; exit non-zero if CI is red")
 	if err := fs.Parse(flags); err != nil {
 		return err
+	}
+
+	if *commitHash != "" && *force {
+		return fmt.Errorf("ci: --commit-hash and --force are mutually exclusive")
 	}
 
 	targets, err := resolveCIPlatforms(platforms)
@@ -89,23 +97,48 @@ func runReleaseCI(root string, args []string) error {
 		return fmt.Errorf("ci: resolve origin/%s: %w", branch, err)
 	}
 	if remote == "" {
-		return fmt.Errorf("ci: branch %q is not on origin — push it first (workflow_dispatch needs a pushed branch)", branch)
+		return fmt.Errorf("ci: ref %q is not on origin — push it first (workflow_dispatch requires a pushed branch or tag)", branch)
 	}
 
-	// With no explicit --ref, `ci` means "test the commit I'm on", so guard that
-	// local HEAD IS the remote tip CI would check out. --force or a foreign --ref
-	// is an explicit "dispatch on the remote tip regardless" and skips the check.
-	if *ref == "" && !*force {
-		local, lerr := git.HeadSHA()
-		if lerr != nil {
-			return fmt.Errorf("ci: head sha: %w", lerr)
+	// When --commit-hash is given, create an immutable pin tag at that commit and
+	// dispatch on the tag ref. This guarantees CI checks out exactly that commit
+	// regardless of how the branch tip moves between staged dispatch invocations.
+	// Otherwise, guard that local HEAD IS the remote tip (skipped with --force or --ref).
+	var sha, dispatchRef, pinTag string
+	if *commitHash != "" {
+		anc, aerr := git.IsAncestor(*commitHash, remote)
+		if aerr != nil {
+			return fmt.Errorf("ci: ancestry check: %w", aerr)
 		}
-		if !sameSHA(local, remote) {
-			return fmt.Errorf("ci: local HEAD %s is not the tip of origin/%s (%s)\n"+
-				"  CI dispatches on the branch ref and runs on its remote tip, not your local commit.\n"+
-				"  push first so CI tests this commit — or pass --force to dispatch on the remote tip anyway.",
-				short(local), branch, short(remote))
+		if !anc {
+			return fmt.Errorf("ci: commit %s is not reachable from origin/%s (%s)\n"+
+				"  --commit-hash must be HEAD or an ancestor of the branch tip.",
+				short(*commitHash), branch, short(remote))
 		}
+		sha = *commitHash
+		pinTag = "ci-pin-" + short(sha)
+		if perr := git.PushTagAt(pinTag, sha); perr != nil {
+			return fmt.Errorf("ci: push pin tag %s: %w", pinTag, perr)
+		}
+		dispatchRef = pinTag
+	} else {
+		// With no explicit --ref, `ci` means "test the commit I'm on", so guard that
+		// local HEAD IS the remote tip CI would check out. --force or a foreign --ref
+		// is an explicit "dispatch on the remote tip regardless" and skips the check.
+		if *ref == "" && !*force {
+			local, lerr := git.HeadSHA()
+			if lerr != nil {
+				return fmt.Errorf("ci: head sha: %w", lerr)
+			}
+			if !sameSHA(local, remote) {
+				return fmt.Errorf("ci: local HEAD %s is not the tip of origin/%s (%s)\n"+
+					"  CI dispatches on the branch ref and runs on its remote tip, not your local commit.\n"+
+					"  push first so CI tests this commit — or pass --force to dispatch on the remote tip anyway.",
+					short(local), branch, short(remote))
+			}
+		}
+		sha = remote
+		dispatchRef = branch
 	}
 
 	runTests := "true"
@@ -121,21 +154,35 @@ func runReleaseCI(root string, args []string) error {
 	if *watch {
 		b, lerr := latestCIRunID(gh)
 		if lerr != nil {
+			if pinTag != "" {
+				_ = git.DeleteRemoteTag(pinTag)
+			}
 			return fmt.Errorf("ci: list runs: %w", lerr)
 		}
 		baseline = b
 	}
 
-	fmt.Printf("Dispatching ci.yml on %s @ %s (run_tests=%s):\n", branch, short(remote), runTests)
+	fmt.Printf("Dispatching ci.yml on %s @ %s (run_tests=%s):\n", dispatchRef, short(sha), runTests)
 	for _, p := range targets {
-		if derr := gh.DispatchWorkflow("ci.yml", branch, map[string]string{"platform": p, "run_tests": runTests}); derr != nil {
+		if derr := gh.DispatchWorkflow("ci.yml", dispatchRef, map[string]string{"platform": p, "run_tests": runTests}); derr != nil {
+			if pinTag != "" {
+				_ = git.DeleteRemoteTag(pinTag)
+			}
 			return fmt.Errorf("ci: dispatch %s: %w", p, derr)
 		}
 		fmt.Printf("  • platform=%s\n", p)
 	}
 
+	// GitHub resolves the ref to a SHA at dispatch time, so the pin tag can be
+	// deleted immediately without affecting in-flight runs.
+	if pinTag != "" {
+		if derr := git.DeleteRemoteTag(pinTag); derr != nil {
+			fmt.Fprintf(os.Stderr, "ci: warning: could not delete pin tag %s: %v\n", pinTag, derr)
+		}
+	}
+
 	if *watch {
-		return watchCIRuns(gh, remote, targets, baseline)
+		return watchCIRuns(gh, sha, targets, baseline)
 	}
 	fmt.Println("Track: gh run list --workflow ci.yml")
 	return nil
@@ -326,7 +373,7 @@ func splitCIArgs(args []string) (platforms, flags []string) {
 		a := args[i]
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
-			if name := strings.TrimLeft(a, "-"); name == "ref" && i+1 < len(args) {
+			if name := strings.TrimLeft(a, "-"); (name == "ref" || name == "commit-hash") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}

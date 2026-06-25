@@ -165,25 +165,47 @@ func (g shellGit) LogSubjects(fromRef, toSHA string) ([]string, error) {
 	return subjects, nil
 }
 
-// RemoteBranchSHA returns origin's tip for branch via `git ls-remote` (an
-// authoritative network query — no reliance on a possibly-stale local tracking
-// ref), or "" if the branch is absent on origin. `bin/release ci` compares this
-// against local HEAD because workflow_dispatch checks out this tip, not the
-// caller's local commit. Not part of cutGit — only the `ci` subcommand needs it.
-func (g shellGit) RemoteBranchSHA(branch string) (string, error) {
-	out, err := RunOutputIn(g.root, "git", "ls-remote", "origin", "refs/heads/"+branch)
+// RemoteBranchSHA returns origin's tip for branch (or tag) via `git ls-remote`
+// (an authoritative network query — no reliance on a possibly-stale local
+// tracking ref), or "" if absent on origin. Prefers refs/heads over refs/tags
+// when both match. `bin/release ci` compares this against local HEAD because
+// workflow_dispatch checks out this tip, not the caller's local commit. Not part
+// of cutGit — only the `ci` subcommand needs it.
+func (g shellGit) RemoteBranchSHA(name string) (string, error) {
+	out, err := RunOutputIn(g.root, "git", "ls-remote", "origin",
+		"refs/heads/"+name, "refs/tags/"+name)
 	if err != nil {
 		return "", err
 	}
 	if out == "" {
-		return "", nil // branch not on origin
+		return "", nil
 	}
-	line, _, _ := strings.Cut(out, "\n") // first line: "<sha>\trefs/heads/<branch>"
+	// Prefer refs/heads over refs/tags when both exist.
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.HasPrefix(fields[1], "refs/heads/") {
+			return fields[0], nil
+		}
+	}
+	// Fall back to first result (a tag match).
+	line, _, _ := strings.Cut(out, "\n")
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return "", fmt.Errorf("unexpected `git ls-remote` output: %q", out)
 	}
-	return fields[0], nil // "<sha>\trefs/heads/<branch>"
+	return fields[0], nil
+}
+
+// PushTagAt pushes a lightweight tag directly to origin at sha without creating
+// a local tag — used by `ci --commit-hash` to create a pin ref for dispatch.
+func (g shellGit) PushTagAt(tag, sha string) error {
+	return RunIn(g.root, "git", "push", "origin", sha+":refs/tags/"+tag)
+}
+
+// DeleteRemoteTag deletes a tag from origin — used to clean up pin tags after
+// `ci --commit-hash` dispatches successfully.
+func (g shellGit) DeleteRemoteTag(tag string) error {
+	return RunIn(g.root, "git", "push", "origin", "--delete", "refs/tags/"+tag)
 }
 
 // ghRun is one GitHub Actions run row (`gh run list --json …`). ghJob is one

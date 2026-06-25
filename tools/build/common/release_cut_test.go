@@ -1365,6 +1365,114 @@ func TestCutNextCreateTagError(t *testing.T) {
 	}
 }
 
+// ── --sha flag (pin to exact commit/ref) ─────────────────────────────────────
+
+func TestCutNextWithShaPin(t *testing.T) {
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	pinnedSHA := "1111111111111111111111111111111111111111"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+
+	g := newFakeCutGit()
+	g.head = sha                            // current HEAD is different
+	g.resolved[pinnedSHA] = pinnedSHA       // the pinned --sha resolves to itself
+	g.ancestorOK = true                     // pinnedSHA is reachable
+	g.epochTags = []string{"epoch-2026.0"}
+	g.tags["epoch-2026.0"] = "oldsha"
+	g.tags["epoch-next"] = pinnedSHA
+
+	gh := greenCI(pinnedSHA)
+	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: pinnedSHA, HeadBranch: "epoch-next", Conclusion: "success"}}
+
+	ctx := &cutContext{
+		root: root, channel: "next", pinnedRef: pinnedSHA,
+		git: g, gh: gh, uploader: uploader, stdout: &strings.Builder{},
+	}
+	if err := cutNext(ctx); err != nil {
+		t.Fatalf("cut next with --sha pin: %v", err)
+	}
+	if len(g.createdTags) != 1 || g.createdTags[0].tag != "epoch-next" {
+		t.Fatalf("createdTags = %+v, want epoch-next", g.createdTags)
+	}
+	// Tag must be created at the PINNED sha, not HEAD
+	if g.createdTags[0].sha != pinnedSHA {
+		t.Fatalf("tagged sha = %s, want pinned SHA %s", g.createdTags[0].sha, pinnedSHA)
+	}
+}
+
+func TestCutStableWithShaPin(t *testing.T) {
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	pinnedSHA := "2222222222222222222222222222222222222222"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+
+	g := newFakeCutGit()
+	g.head = sha                            // current HEAD is different
+	g.resolved[pinnedSHA] = pinnedSHA       // the pinned --sha resolves
+	g.ancestorOK = true                     // pinnedSHA is reachable from origin/main
+	g.epochTags = []string{"epoch-2026.0"}
+	g.tags["epoch-2026.0"] = "oldsha"
+	g.tags["epoch-next"] = pinnedSHA
+
+	gh := greenCI(pinnedSHA)
+	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: pinnedSHA, HeadBranch: "epoch-next", Conclusion: "success"}}
+
+	ctx := stableCtx(root, g, gh, uploader)
+	ctx.pinnedRef = pinnedSHA  // set the --sha pin
+	withYear(t, 2026)
+	if err := cutStable(ctx); err != nil {
+		t.Fatalf("cut stable with --sha pin: %v", err)
+	}
+	if len(g.createdTags) != 1 || g.createdTags[0].tag != "epoch-2026.1" {
+		t.Fatalf("createdTags = %+v, want epoch-2026.1", g.createdTags)
+	}
+	// Tag must be created at the PINNED sha, not HEAD
+	if g.createdTags[0].sha != pinnedSHA {
+		t.Fatalf("tagged sha = %s, want pinned SHA %s", g.createdTags[0].sha, pinnedSHA)
+	}
+}
+
+func TestCutWithShaResolveError(t *testing.T) {
+	g := newFakeCutGit()
+	g.resolveErr = errors.New("invalid ref")
+	ctx := &cutContext{root: t.TempDir(), channel: "next", pinnedRef: "bad-ref", git: g, gh: &fakeCutGH{}, stdout: &strings.Builder{}}
+	if err := cutNext(ctx); err == nil || !strings.Contains(err.Error(), "invalid ref") {
+		t.Fatalf("ResolveSHA error must propagate: %v", err)
+	}
+}
+
+func TestCutWithShaRefPinning(t *testing.T) {
+	// Test that a branch/tag ref (not a raw SHA) is resolved correctly.
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+
+	g := newFakeCutGit()
+	g.head = "ffffffffffffffffffffffffffffffffffffffff" // different HEAD
+	g.resolved["release-branch"] = sha                // the branch ref resolves to this sha
+	g.ancestorOK = true                               // sha is reachable
+	g.epochTags = []string{"epoch-2026.0"}
+	g.tags["epoch-2026.0"] = "oldsha"
+	g.tags["epoch-next"] = sha
+
+	gh := greenCI(sha)
+	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
+
+	ctx := &cutContext{
+		root: root, channel: "next", pinnedRef: "release-branch",
+		git: g, gh: gh, uploader: uploader, stdout: &strings.Builder{},
+	}
+	if err := cutNext(ctx); err != nil {
+		t.Fatalf("cut next with branch ref pin: %v", err)
+	}
+	if len(g.createdTags) != 1 || g.createdTags[0].sha != sha {
+		t.Fatalf("tag must use resolved sha, got %+v", g.createdTags[0])
+	}
+}
+
 // ── runReleaseCut public dispatch (swaps the production seam vars) ─────────────
 
 func TestRunReleaseCutFlagParseError(t *testing.T) {

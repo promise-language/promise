@@ -83,34 +83,35 @@ subcommands:
         to the published asset names, compute a merge-aware SHA256SUMS, and
         upload the assets + install scripts to the prebuilts R2 bucket under
         dist/. Backs the end-to-end install gate while the repo is private.
-  cut next   [--dry-run] [--reason <text>] [--run-ci] [--no-ci-wait]
+  cut next   [--dry-run] [--reason <text>] [--sha <commit/ref>] [--run-ci] [--no-ci-wait]
              [--notes-file <path>|-] [--notes <text>]
-  cut stable [--dry-run] [--reason <text>] [--run-ci] [--no-ci-wait] [--confirm-year]
+  cut stable [--dry-run] [--reason <text>] [--sha <commit/ref>] [--run-ci] [--no-ci-wait] [--confirm-year]
              [--notes-file <path>|-] [--notes <text>]
         gated release orchestrator (T0943, docs/release-automation.md §6.3).
         cut next refreshes the moving epoch-next pre-release at HEAD; cut stable
         derives the epoch (no --epoch flag), runs every gate, then tags, pushes,
         and bumps catalog.toml — all only when every gate is green. --dry-run
-        prints the checklist and changes nothing. A gate may be bypassed only
-        with --reason "<text>", which is recorded into the tag/commit message.
-        --run-ci dispatches ci.yml for platforms with no run at the release SHA
-        (--no-ci-wait dispatches then stops); --confirm-year confirms a
-        year-rollover epoch non-interactively.
-        --notes-file <path> (or - to read from stdin) and --notes "<text>"
-        override the mechanical git-log bullets with a hand-authored or AI-
-        generated body; mutually exclusive. The install header is always
-        auto-prepended. Notes live only in the annotated tag — nothing is
+        prints the checklist and changes nothing. --sha <commit/ref> pins the cut
+        to an exact commit instead of HEAD. A gate may be bypassed only with
+        --reason "<text>", which is recorded into the tag/commit message. --run-ci
+        dispatches ci.yml for platforms with no run at the release SHA (--no-ci-wait
+        dispatches then stops); --confirm-year confirms a year-rollover epoch
+        non-interactively. --notes-file <path> (or - to read from stdin) and
+        --notes "<text>" override the mechanical git-log bullets with a hand-
+        authored or AI-generated body; mutually exclusive. The install header is
+        always auto-prepended. Notes live only in the annotated tag — nothing is
         committed. Workflow: bin/release changes | <AI summary> |
         bin/release cut stable --notes-file -
-  ci [platform...] [--no-tests] [--watch] [--ref <branch>] [--force]
+  ci [platform...] [--no-tests] [--watch] [--ref <branch>] [--commit-hash <sha>] [--force]
         dispatch .github/workflows/ci.yml on the current branch. No platform =
         linux-amd64 only (cheap); "all" = the whole matrix in one run; or name
         targets (linux|darwin|windows, or canonical <os>-<arch>). workflow_dispatch
         runs on the branch's pushed tip, so ci errors if your local HEAD is not
         that tip — push first, or --force to dispatch on the remote tip anyway,
-        or --ref to choose a branch. --no-tests builds only (skips the suite);
-        --watch polls the dispatched run(s) to completion and exits non-zero on
-        red CI.
+        or --ref to choose a branch. --commit-hash <sha> pins CI to an exact
+        commit (must be HEAD or an ancestor of --ref). --no-tests builds only
+        (skips the suite); --watch polls the dispatched run(s) to completion and
+        exits non-zero on red CI.
   changes [--commit-hash <sha>]
         list non-merge commit subjects since the last stable epoch tag (newest
         first). Default upper bound is HEAD; --commit-hash pins to an exact SHA

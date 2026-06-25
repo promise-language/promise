@@ -2823,11 +2823,26 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			// param consumes the enum by move — ownership transfers to new() and
 			// then to whatever field it stores into. Borrow params don't take
 			// ownership, so leave the temps in place for the caller's cleanup.
+			// T1139: gate the clear on the arg's static type being an enum — only
+			// then is a tracked enum-ctor temp the value actually being moved. A
+			// non-enum arg that merely BORROWS an inline Enum.V(x) temp in a
+			// sub-call leaves an intermediate the callee never receives; it must
+			// stay tracked so the caller drops it at statement end, else it leaks.
+			// Residual: an enum-typed arg produced by a call that internally
+			// borrows a *different* enum-ctor temp still over-claims that inner
+			// temp (the whole range is cleared rather than just the moved value's
+			// backing temp) — lower priority, contrived nesting.
 			if isMoveParam {
-				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				argEnumType := c.info.Types[arg.Value]
+				if c.typeSubst != nil {
+					argEnumType = types.Substitute(argEnumType, c.typeSubst)
 				}
-				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+				if extractEnum(argEnumType) != nil {
+					for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+						c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+					}
+					c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+				}
 			}
 		}
 		// B0233: Do NOT claim heap temp here. Let downstream consumers claim:
@@ -3091,10 +3106,23 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			// ctor temp's scope-exit drop must not fire. Without this, the
 			// owner's synth drop (which T0552 makes drop the enum field) and the
 			// temp drop both target the same heap allocation → double-free.
-			for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+			// T1139: gate on the arg's static type being an enum — a non-enum field
+			// arg that merely BORROWS an inline Enum.V(x) temp in a sub-call leaves
+			// an intermediate the field never owns; it must stay tracked so the
+			// caller drops it at statement end, else it leaks. Residual: an
+			// enum-typed field arg produced by a call that internally borrows a
+			// *different* enum-ctor temp still over-claims it (whole range cleared)
+			// — lower priority, contrived nesting.
+			argEnumType := c.info.Types[arg.Value]
+			if c.typeSubst != nil {
+				argEnumType = types.Substitute(argEnumType, c.typeSubst)
 			}
-			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			if extractEnum(argEnumType) != nil {
+				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			}
 		}
 
 		// Initialize omitted fields: evaluate default expression if present, otherwise zero-init.
@@ -3692,10 +3720,20 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	c.block.NewStore(val, valField)
 
 	// T1003: suppress statement-end drop of enum ctor temps moved into the Arc.
-	for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+	// T1139: gate on the moved value's static type being an enum — a non-enum
+	// arg that merely BORROWS an inline Enum.V(x) temp in a sub-call leaves an
+	// intermediate the Arc never owns; it must stay tracked so the caller drops
+	// it at statement end, else it leaks.
+	argEnumType := c.info.Types[e.Args[0].Value]
+	if c.typeSubst != nil {
+		argEnumType = types.Substitute(argEnumType, c.typeSubst)
 	}
-	c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+	if extractEnum(argEnumType) != nil {
+		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+	}
 
 	return arcPtr
 }
@@ -3989,10 +4027,20 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	c.block.NewStore(val, valField)
 
 	// T1003: suppress statement-end drop of enum ctor temps moved into the Mutex.
-	for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+	// T1139: gate on the moved value's static type being an enum — a non-enum
+	// arg that merely BORROWS an inline Enum.V(x) temp in a sub-call leaves an
+	// intermediate the Mutex never owns; it must stay tracked so the caller drops
+	// it at statement end, else it leaks.
+	argEnumType := c.info.Types[e.Args[0].Value]
+	if c.typeSubst != nil {
+		argEnumType = types.Substitute(argEnumType, c.typeSubst)
 	}
-	c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+	if extractEnum(argEnumType) != nil {
+		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+	}
 
 	return mutexPtr
 }
@@ -5632,11 +5680,21 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			// T0741: when moved (not dup'd) into the vector, clear enum ctor
 			// temps created during arg eval so the temp's synth drop doesn't
 			// also free the variant data the vector element now owns.
+			// T1139: gate on the element's static type being an enum — a non-enum
+			// element arg that merely BORROWS an inline Enum.V(x) temp in a
+			// sub-call leaves an intermediate the vector never owns; it must stay
+			// tracked so the caller drops it at statement end, else it leaks.
 			if !dupped {
-				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				argEnumType := c.info.Types[e.Args[0].Value]
+				if c.typeSubst != nil {
+					argEnumType = types.Substitute(argEnumType, c.typeSubst)
 				}
-				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+				if extractEnum(argEnumType) != nil {
+					for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+						c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+					}
+					c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+				}
 			}
 		}
 		// COW: if static (.rodata), copy to heap first (T0062)
@@ -8881,10 +8939,20 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 		c.claimEnvTemp(elemVal)    // T0741: closure env (tuple owns it now)
 		// Clear enum ctor temps created during this element's evaluation so
 		// the tuple is the unique owner of the enum's variant data.
-		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		// T1139: gate on the element's static type being an enum — a non-enum
+		// element that merely BORROWS an inline Enum.V(x) temp in a sub-call
+		// leaves an intermediate the tuple never owns; it must stay tracked so
+		// the caller drops it at statement end, else it leaks.
+		elemEnumType := c.info.Types[elem]
+		if c.typeSubst != nil {
+			elemEnumType = types.Substitute(elemEnumType, c.typeSubst)
 		}
-		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+		if extractEnum(elemEnumType) != nil {
+			for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+			}
+			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+		}
 	}
 	return agg
 }
@@ -9508,10 +9576,20 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 			// so both the temp alloca and the vector slot share inner pointers.
 			// Only clear temps added since savedEnumTemps to avoid clobbering
 			// temps from outer expressions.
-			for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+			// T1139: gate on the element's static type being an enum — a non-enum
+			// element that merely BORROWS an inline Enum.V(x) temp in a sub-call
+			// leaves an intermediate the vector never owns; it must stay tracked
+			// so the caller drops it at statement end, else it leaks.
+			elemEnumType := c.info.Types[elemExpr]
+			if c.typeSubst != nil {
+				elemEnumType = types.Substitute(elemEnumType, c.typeSubst)
 			}
-			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			if extractEnum(elemEnumType) != nil {
+				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			}
 		}
 		// T0369: When walk is suppressed, leave heap temps / string stmt-temps /
 		// enum ctor temps tracked. They self-clean at stmt end so nothing is
@@ -9699,10 +9777,20 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 		c.claimEnvTemp(val)    // T0741: closure env (array owns it now)
 		// Clear enum ctor temps created during this element's evaluation so
 		// the array is the unique owner of the enum's variant data.
-		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		// T1139: gate on the element's static type being an enum — a non-enum
+		// element that merely BORROWS an inline Enum.V(x) temp in a sub-call
+		// leaves an intermediate the array never owns; it must stay tracked so
+		// the caller drops it at statement end, else it leaks.
+		elemEnumType := c.info.Types[elemExpr]
+		if c.typeSubst != nil {
+			elemEnumType = types.Substitute(elemEnumType, c.typeSubst)
 		}
-		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+		if extractEnum(elemEnumType) != nil {
+			for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+			}
+			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+		}
 	}
 	return c.block.NewLoad(arrType, tmp)
 }
@@ -10802,10 +10890,28 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			// use-after-free / stack overflow on cleanup.
 			// Only clear temps added since savedEnumTemps to avoid clobbering
 			// temps from outer expressions (e.g., prior function arguments).
-			for i := savedEnumTemps; i < len(c.enumCtorTemps); i++ {
-				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+			// T1139: gate on either the key OR the value's static type being an
+			// enum — the snapshot covers both entry.Key and entry.Value, so clear
+			// the range only if at least one slot is enum-typed. When neither is
+			// an enum (e.g. {"k": inspect(Holder.Has(...))}), a borrow
+			// intermediate enum-ctor temp evaluated inside the entry must stay
+			// tracked so the caller drops it at statement end, else it leaks.
+			// Residual: the mixed case (enum value + non-enum key that borrows a
+			// *different* enum-ctor temp) still over-claims that inner temp — the
+			// whole range is cleared rather than just the moved value's backing
+			// temp. Lower priority, contrived nesting.
+			keyEnumType := c.info.Types[entry.Key]
+			valEnumType := c.info.Types[entry.Value]
+			if c.typeSubst != nil {
+				keyEnumType = types.Substitute(keyEnumType, c.typeSubst)
+				valEnumType = types.Substitute(valEnumType, c.typeSubst)
 			}
-			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			if extractEnum(keyEnumType) != nil || extractEnum(valEnumType) != nil {
+				for i := savedEnumTemps; i < len(c.enumCtorTemps); i++ {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			}
 		}
 	}
 

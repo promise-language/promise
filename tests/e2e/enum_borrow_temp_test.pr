@@ -190,3 +190,219 @@ t1108_cast_subject_move_no_double_free() `test {
 // test verifies the caller emits NO synchronous `enum.ctor.drop` for the go-call
 // path — confirming the T1108 unconditional tracking does not introduce a
 // use-after-free / double-free against the spawned goroutine.
+
+// ============================================================================
+// T1139: The "claim (untrack) enum-ctor temps for a move slot" pattern is shared
+// by every move-consuming codegen site (constructor, Arc/Mutex, Vector.push,
+// tuple/vector/fixed-array/map literals). It must be gated on the moved slot's
+// static type being an enum. When the slot value is a NON-enum expression that
+// internally passes an inline `Enum.Variant(...)` temp BY BORROW to a sub-call
+// (here `inspect_holder(HolderR.Has(...))`), that inner enum temp is an
+// intermediate the slot never receives — untracking it removes its statement-end
+// drop and the payload leaks. Each test below shapes a non-enum slot whose value
+// is a borrow-call over an inline `HolderR.Has(droppable)`; the suite's zero-leak
+// policy is the assertion (plus a correctness check). The regression guards at
+// the end exercise the gate's true branch (enum-typed slot) to confirm the
+// existing no-double-free behavior is preserved.
+
+type BoxR {
+  Resource r;
+}
+
+// 1. Implicit constructor field (T0552 implicit-ctor field loop) — the item's
+//    exact repro shape.
+t1139_implicit_ctor_field_borrows_enum_temp() `test {
+  b := BoxR(r: inspect_holder(HolderR.Has(r: make_resource("test"))));
+  assert(b.r.name.len == 5, "implicit ctor field"); // "test!" => 5
+}
+
+type BoxNew {
+  Resource r;
+
+  new(~this, Resource move r) {
+    this.r = r;
+  }
+}
+
+// 2. Explicit new() constructor with a move param taking the borrow-call result
+//    (T0552 explicit-ctor site).
+t1139_explicit_new_move_param_borrows_enum_temp() `test {
+  b := BoxNew(r: inspect_holder(HolderR.Has(r: make_resource("test"))));
+  assert(b.r.name.len == 5, "explicit new move param");
+}
+
+// 3. Arc (Ref[T]) construction (T1003 Arc site).
+t1139_arc_new_borrows_enum_temp() `test {
+  a := Ref[Resource](inspect_holder(HolderR.Has(r: make_resource("test"))));
+  assert(a.borrow.name.len == 5, "arc new");
+}
+
+// 4. Mutex construction (T1003 Mutex site).
+t1139_mutex_new_borrows_enum_temp() `test {
+  m := Mutex[Resource](inspect_holder(HolderR.Has(r: make_resource("test"))));
+  use guard := m.lock();
+  assert(guard.borrow.name.len == 5, "mutex new");
+}
+
+// 5. Vector.push (T0741 push site).
+t1139_vector_push_borrows_enum_temp() `test {
+  Resource[] v = Resource[]();
+  v.push(inspect_holder(HolderR.Has(r: make_resource("test"))));
+  assert(v[0].name.len == 5, "vector push");
+}
+
+// 6. Tuple literal (B0242/T0371 tuple site) — the enum temp is borrowed inside
+//    the first element; the second element is an unrelated value.
+t1139_tuple_lit_borrows_enum_temp() `test {
+  (Resource, int) t = (inspect_holder(HolderR.Has(r: make_resource("test"))), 9);
+  (r, n) := t;
+  assert(r.name.len == 5, "tuple element"); // "test!" => 5
+  assert(n == 9, "tuple int");
+}
+
+// 7. Vector literal with a drop-walked element type (B0281 vector-lit site).
+t1139_vector_lit_borrows_enum_temp() `test {
+  Resource[] v = [inspect_holder(HolderR.Has(r: make_resource("test")))];
+  assert(v[0].name.len == 5, "vector literal");
+}
+
+// 8. Fixed-array literal (genFixedArrayLit site).
+t1139_fixed_array_lit_borrows_enum_temp() `test {
+  Resource[1] a = [inspect_holder(HolderR.Has(r: make_resource("test")))];
+  assert(a[0].name.len == 5, "fixed-array literal");
+}
+
+// 9. Map literal with non-enum key AND non-enum value (B0280/B0281 map site).
+//    Neither slot is an enum, so the borrow intermediate must stay tracked.
+t1139_map_lit_borrows_enum_temp() `test {
+  map[string, Resource] m = {
+    "k": inspect_holder(HolderR.Has(r: make_resource("test")))
+  };
+  // NOTE: bind-then-unwrap rather than `m["k"]!.name` — inline force-unwrap of a
+  // map-index optional on a droppable value followed by member access segfaults
+  // (pre-existing, unrelated to T1139; tracked as T1144).
+  v := m["k"];
+  r := v!;
+  assert(r.name.len == 5, "map literal"); // "test!" => 5
+}
+
+// --- Regression guards: enum-typed slot path (the gate's true branch) still
+//     transfers ownership exactly once (no leak, no double-free). ---
+
+type EnumBox {
+  HolderR h;
+}
+
+// Enum-typed constructor field built directly from an inline enum-ctor temp:
+// ownership transfers to the field, the field's synth drop frees it once.
+t1139_enum_typed_ctor_field_no_double_free() `test {
+  b := EnumBox(h: HolderR.Has(r: make_resource("test")));
+  n := match b.h {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed ctor field"); // "test" => 4
+}
+
+// Enum-typed vector element built directly from an inline enum-ctor temp:
+// the vector owns and drops it once.
+t1139_enum_typed_vector_elem_no_double_free() `test {
+  HolderR[] v = [HolderR.Has(r: make_resource("test"))];
+  n := match v[0] {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed vector element");
+}
+
+// The remaining guards exercise the gate's TRUE branch at the OTHER modified
+// sites (explicit-new move param, Arc/Mutex, Vector.push, tuple/fixed-array
+// literals, map value). Each feeds an inline enum-ctor temp directly into the
+// enum-typed slot: the slot must claim/truncate the temp so ownership transfers
+// exactly once (a broken gate condition would leak or double-free here).
+
+type EnumBoxNew {
+  HolderR h;
+
+  new(~this, HolderR move h) {
+    this.h = h;
+  }
+}
+
+// Explicit new() move param, enum-typed (genConstructorCallMono move-param site).
+t1139_enum_typed_explicit_new_no_double_free() `test {
+  b := EnumBoxNew(h: HolderR.Has(r: make_resource("test")));
+  n := match b.h {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed explicit new");
+}
+
+// Arc (Ref[T]) construction, enum-typed (T1003 Arc site).
+t1139_enum_typed_arc_no_double_free() `test {
+  a := Ref[HolderR](HolderR.Has(r: make_resource("test")));
+  n := match a.borrow {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed arc");
+}
+
+// Mutex construction, enum-typed (T1003 Mutex site).
+t1139_enum_typed_mutex_no_double_free() `test {
+  m := Mutex[HolderR](HolderR.Has(r: make_resource("test")));
+  use guard := m.lock();
+  n := match guard.borrow {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed mutex");
+}
+
+// Vector.push, enum-typed (T0741 push site).
+t1139_enum_typed_vector_push_no_double_free() `test {
+  HolderR[] v = HolderR[]();
+  v.push(HolderR.Has(r: make_resource("test")));
+  n := match v[0] {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed vector push");
+}
+
+// Tuple literal, enum-typed first element (tuple-lit site).
+t1139_enum_typed_tuple_no_double_free() `test {
+  (HolderR, int) t = (HolderR.Has(r: make_resource("test")), 9);
+  (h, k) := t;
+  n := match h {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed tuple element");
+  assert(k == 9, "enum-typed tuple int");
+}
+
+// Fixed-array literal, enum-typed (genFixedArrayLit site).
+t1139_enum_typed_fixed_array_no_double_free() `test {
+  HolderR[1] a = [HolderR.Has(r: make_resource("test"))];
+  n := match a[0] {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed fixed array");
+}
+
+// Map literal, enum-typed VALUE (map-lit site, gate's value-enum operand).
+t1139_enum_typed_map_value_no_double_free() `test {
+  map[string, HolderR] m = {
+    "k": HolderR.Has(r: make_resource("test"))
+  };
+  v := m["k"];
+  h := v!;
+  n := match h {
+    HolderR.Has(r) => r.name.len,
+    HolderR.Nothing => 0,
+  };
+  assert(n == 4, "enum-typed map value");
+}

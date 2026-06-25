@@ -1,0 +1,104 @@
+// T1134: ownership move analysis must be divergence-aware. A move inside a
+// branch that diverges (return/raise) must not poison the variable on the
+// fall-through path, which is reached only when the diverging branch did NOT
+// run. These programs were false-positive "use of moved variable" rejections.
+// --- if/return, literal string ---
+keep_literal(bool cond) string {
+  string s = "x";
+  if cond {
+    return s;
+  }
+  // move only happens when we return
+  return s; // reachable only when cond was false → s still owned
+}
+
+// --- if/return, heap string (concatenation allocates) ---
+keep_heap(bool cond) string {
+  string s = "x" + "y"; // heap-allocated, droppable
+  if cond {
+    return s;
+  }
+  return s;
+}
+
+// --- if/return, map value (droppable container) ---
+keep_map(bool cond) map[string, int] {
+  map[string, int] m = {:};
+  m["a"] = 1;
+  if cond {
+    return m;
+  }
+  return m;
+}
+
+// --- raise terminator on the diverging branch ---
+keep_raise!(bool cond) string {
+  string s = "x" + "z";
+  if cond {
+    raise error("early out");
+  }
+  return s;
+}
+
+// --- diverging loop body: the move never reaches the post-loop return ---
+keep_loop(int[] xs) string {
+  string s = "x";
+  for x in xs {
+    return s;
+  }
+  // body always returns; post-loop only via 0 iters
+  return s;
+}
+
+// --- match arm diverges; subject still owned on the non-diverging fall-through ---
+enum Choice {
+  Early, Stay,
+}
+keep_match(Choice c) string {
+  string s = "x" + "!";
+  match c {
+    Choice.Early => {
+      return "early";
+    },
+    Choice.Stay => {
+    },
+  }
+  return s;
+}
+
+divergence_if_return() `test {
+  assert(keep_literal(false) == "x", "literal fall-through");
+  assert(keep_literal(true) == "x", "literal return-branch");
+  assert(keep_heap(false) == "xy", "heap fall-through");
+  assert(keep_heap(true) == "xy", "heap return-branch");
+}
+
+divergence_map() `test {
+  m := keep_map(false);
+  assert(m["a"]! == 1, "map fall-through value");
+  m2 := keep_map(true);
+  assert(m2["a"]! == 1, "map return-branch value");
+}
+
+divergence_raise() `test {
+  ok := keep_raise(false)? {
+    "FAILED"
+  };
+  assert(ok == "xz", "raise fall-through returns value");
+  err := keep_raise(true)? {
+    "caught"
+  };
+  assert(err == "caught", "raise branch raises");
+}
+
+divergence_loop() `test {
+  empty := int[]();
+  assert(keep_loop(empty) == "x", "empty loop returns fall-through value");
+  one := [1];
+  assert(keep_loop(one) == "x", "non-empty loop returns from body");
+}
+
+divergence_match() `test {
+  assert(keep_match(Choice.Stay) == "x!", "match fall-through value");
+  assert(keep_match(Choice.Early) == "early", "match diverging arm");
+}

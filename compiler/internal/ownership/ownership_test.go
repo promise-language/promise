@@ -13029,3 +13029,521 @@ func TestT1113_MapGenericEnumRefHandleViaTypeParamAllowed(t *testing.T) {
 		}
 	`)
 }
+
+// === T1134: divergence-aware move analysis in branch merges ===
+//
+// A move inside a branch that diverges (return/raise/break/continue) must not
+// poison the variable on the fall-through path, which is only reached when the
+// diverging branch did NOT run. These shapes were false-positive "use of moved
+// variable" rejections before the merge was made divergence-aware.
+
+// The reported repro: no-else `if` whose then-branch returns, then a fall-through
+// `return s`. Reachable only when cond was false → s still owned.
+func TestT1134_IfReturnNoElseFallThrough(t *testing.T) {
+	ownerOK(t, `
+		f(bool cond) string {
+			string s = "x";
+			if cond { return s; }
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// `raise` is also a divergent terminator.
+func TestT1134_IfRaiseNoElseFallThrough(t *testing.T) {
+	ownerOK(t, `
+		type MyError is error {
+			new(~this) {}
+		}
+		consume(string move s) {}
+		f!(bool cond) string {
+			string s = "x";
+			if cond { consume(move s); raise MyError(); }
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// Diverging loop body: a for-in whose body always returns. The move inside
+// never reaches the post-loop path (only the zero-iteration path does).
+func TestT1134_DivergingLoopBody(t *testing.T) {
+	ownerOK(t, `
+		f(int[] xs) string {
+			string s = "x";
+			for x in xs { return s; }
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// if-expression with a diverging then-branch used as a statement.
+func TestT1134_IfExprDivergingThen(t *testing.T) {
+	ownerOK(t, `
+		f(bool cond) string {
+			string s = "x";
+			int n = if cond { return s; } else { 0 };
+			_ = n;
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// match arm that diverges must not poison the subject on the fall-through.
+func TestT1134_MatchArmDiverges(t *testing.T) {
+	ownerOK(t, `
+		enum E { A, B }
+		consume(string move s) {}
+		f(E e) string {
+			string s = "x";
+			match e {
+				E.A => { consume(move s); return "from-a"; },
+				E.B => {},
+			}
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// Explicit-else equivalent must still compile (regression guard — already did).
+func TestT1134_IfReturnWithElse(t *testing.T) {
+	ownerOK(t, `
+		f(bool cond) string {
+			string s = "x";
+			if cond { return s; } else { return s; }
+		}
+		test() {}
+	`)
+}
+
+// --- Negative guards: the fix must NOT over-loosen ---
+
+// Move in a branch that FALLS THROUGH (no divergence) → still Moved after the
+// merge, so the post-if use must still be rejected.
+func TestT1134_NegMoveInNonDivergingBranch(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(bool cond) string {
+			string s = "x";
+			if cond { string x = s; }
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Move in a non-diverging else-branch → still Moved on that path; post-if use
+// rejected.
+func TestT1134_NegMoveInNonDivergingElse(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(bool cond) string {
+			string s = "x";
+			if cond { return s; } else { string x = s; }
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Soundness guard: a loop body that moves a non-loop-local var then `break`s
+// transfers the moved state to post-loop code, so the loop-divergence shortcut
+// must NOT fire — the move must still be observed after the loop. (T1134 must
+// not introduce a use-after-move false negative.)
+func TestT1134_NegLoopBreakCarriesMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f() string {
+			string s = "x";
+			for {
+				consume(move s);
+				break;
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Soundness guard: a loop body that moves then `continue`s before its divergent
+// terminator can take the continue on every iteration, so the loop completes
+// naturally and reaches post-loop code with the variable moved — the divergent
+// `return` never runs. The loop-divergence shortcut must NOT fire when a
+// continue is present, or this becomes a use-after-move false negative. (T1134)
+func TestT1134_NegLoopContinueCarriesMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				consume(move s);
+				if cond { continue; }
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// A non-diverging match arm that moves the subject still poisons the
+// fall-through.
+func TestT1134_NegMatchArmNonDivergingMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum E { A, B }
+		consume(string move s) {}
+		f(E e) string {
+			string s = "x";
+			match e {
+				E.A => { consume(s); },
+				E.B => {},
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// === T1134: additional coverage for divergence-detection helpers ===
+//
+// These exercise the structural-divergence and break/continue-detection paths
+// in diverge.go (else-if chains, infinite loops, and break/continue carried
+// through nested if/block/match) that the primary T1134 tests don't reach.
+
+// else-if chain where every arm diverges: the whole if never falls through, so
+// the trailing use stays owned. Exercises stmtDiverges' *ast.IfStmt arm (the
+// `else` of an if is itself an IfStmt) with all sub-arms diverging.
+func TestT1134_ElseIfChainAllDiverge(t *testing.T) {
+	ownerOK(t, `
+		f(bool a, bool b) string {
+			string s = "x";
+			if a { return s; } else if b { return s; } else { return s; }
+		}
+		test() {}
+	`)
+}
+
+// else-if chain where the inner if has no else → the chain can fall through, so
+// the outer then-branch's divergence still leaves s owned on the fall-through.
+// Exercises stmtDiverges' IfStmt arm returning false (inner Else == nil).
+func TestT1134_ElseIfChainCanFallThrough(t *testing.T) {
+	ownerOK(t, `
+		f(bool a, bool b) string {
+			string s = "x";
+			if a { return s; } else if b { return s; }
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// A branch whose trailing statement is an infinite loop with no break never
+// falls through, so a move inside it does not poison the fall-through. Exercises
+// stmtDiverges' *ast.InfiniteLoop arm (no-break → diverges).
+func TestT1134_InfiniteLoopBranchDiverges(t *testing.T) {
+	ownerOK(t, `
+		consume(string move s) {}
+		f(bool cond) string {
+			string s = "x";
+			if cond {
+				consume(move s);
+				for { }
+			}
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// Negative: an infinite loop WITH a break does fall through, so the branch does
+// NOT diverge and the move must still poison the fall-through. Exercises the
+// direct *ast.BreakStmt detection and InfiniteLoop's break check returning true.
+func TestT1134_NegInfiniteLoopWithBreakNoDiverge(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(bool cond) string {
+			string s = "x";
+			if cond {
+				consume(move s);
+				for { break; }
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: a break nested inside an `if` in a loop body whose trailing stmt
+// returns. The break carries the moved state to post-loop code, so the
+// loop-divergence shortcut must not fire. Exercises break detection through
+// *ast.IfStmt (then-arm).
+func TestT1134_NegLoopBreakInIf(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				if cond { consume(move s); break; }
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: break nested inside an `else` arm (then-arm has no break) of a loop
+// body that otherwise returns. Exercises break detection recursing into the
+// IfStmt's Else.
+func TestT1134_NegLoopBreakInElse(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				if cond { } else { consume(move s); break; }
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: break nested inside a bare block in a loop body that otherwise
+// returns. Exercises break detection through *ast.Block.
+func TestT1134_NegLoopBreakInBareBlock(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				{ if cond { consume(move s); break; } }
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: break nested inside a match arm in a loop body that otherwise
+// returns. Exercises break detection through a match expression's arms.
+func TestT1134_NegLoopBreakInMatch(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum E { A, B }
+		consume(string move s) {}
+		f(int[] xs, E e) string {
+			string s = "x";
+			for x in xs {
+				match e {
+					E.A => { consume(move s); break; },
+					E.B => {},
+				}
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: continue nested inside a bare block in a loop body that otherwise
+// returns. The continue lets the loop complete naturally with s moved.
+// Exercises continue detection through *ast.Block.
+func TestT1134_NegLoopContinueInBareBlock(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				{ if cond { consume(move s); continue; } }
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: continue nested inside a match arm in a loop body that otherwise
+// returns. Exercises continue detection through a match expression's arms.
+func TestT1134_NegLoopContinueInMatch(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum E { A, B }
+		consume(string move s) {}
+		f(int[] xs, E e) string {
+			string s = "x";
+			for x in xs {
+				match e {
+					E.A => { consume(move s); continue; },
+					E.B => {},
+				}
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Negative: continue nested inside an `else` arm of a loop body that otherwise
+// returns. Exercises continue detection recursing into the IfStmt's Else.
+func TestT1134_NegLoopContinueInElse(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string move s) {}
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				if cond { } else { consume(move s); continue; }
+				return "done";
+			}
+			return s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// A divergent loop body containing a no-else `if` (with no break/continue) still
+// takes the loop-divergence shortcut, leaving s owned after the loop. Exercises
+// the break/continue detection recursing past an if whose else is nil.
+func TestT1134_DivergingLoopWithPlainIf(t *testing.T) {
+	ownerOK(t, `
+		f(int[] xs, bool cond) string {
+			string s = "x";
+			for x in xs {
+				if cond { }
+				return s;
+			}
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// if-statement with an else whose body diverges (then falls through): the move
+// in the diverging else is excluded, so s stays owned via the then-state.
+// Exercises checkIfStmt's `case elseDiverges` merge arm.
+func TestT1134_IfStmtElseDivergesOnly(t *testing.T) {
+	ownerOK(t, `
+		consume(string move s) {}
+		f(bool cond) string {
+			string s = "x";
+			if cond { } else { consume(move s); return "early"; }
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// if-expression whose else diverges (then yields a value): the result state is
+// the then-state, leaving s owned. Exercises checkIfExpr's `case elseDiverges`.
+func TestT1134_IfExprElseDiverges(t *testing.T) {
+	ownerOK(t, `
+		consume(string move s) {}
+		f(bool cond) string {
+			string s = "x";
+			int n = if cond { 0 } else { consume(move s); return "early" };
+			_ = n;
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// if-expression where BOTH arms diverge: the expression yields no value and the
+// post-expression state is the pre-if baseline. Exercises checkIfExpr's
+// `case thenDiverges && elseDiverges` arm.
+func TestT1134_IfExprBothDiverge(t *testing.T) {
+	ownerOK(t, `
+		observe(int n) {}
+		f(bool cond) string {
+			string s = "x";
+			int n = if cond { return "a" } else { return "b" };
+			observe(n);
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// match expression in statement position where every arm diverges: post-match
+// code is unreachable, so the analyzer restores the pre-match baseline.
+// Exercises checkMatchExpr's `len(states) == 0` path.
+func TestT1134_MatchAllArmsDiverge(t *testing.T) {
+	ownerOK(t, `
+		enum E { A, B }
+		f(E e) string {
+			string s = "x";
+			match e {
+				E.A => { return s; },
+				E.B => { return s; },
+			}
+		}
+		test() {}
+	`)
+}
+
+// select with a diverging case and a non-diverging default: the case's move is
+// excluded; the default keeps s owned. Exercises the select-case divergence
+// skip plus the default-clause merge.
+func TestT1134_SelectCaseDivergesWithDefault(t *testing.T) {
+	ownerOK(t, `
+		consume(string move s) {}
+		f(channel[int] ch) string {
+			string s = "x";
+			select {
+				v := <-ch:
+					consume(move s);
+					return "from-case";
+				default:
+					string t = "y";
+					_ = t;
+			}
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// select with a diverging case and a non-diverging case: the diverging case's
+// move is excluded from the merge while the other case keeps s owned. Exercises
+// the select-case divergence skip without a default clause (the merge-with-
+// pre-select branch).
+//
+// NOTE: the non-diverging case bodies avoid a discard assignment (`_ = t;`)
+// because that crashes the AST builder inside a select case (T1136). They use a
+// no-op consumer call instead.
+func TestT1134_SelectCaseDivergesNoDefault(t *testing.T) {
+	ownerOK(t, `
+		consume(string move s) {}
+		observe(int n) {}
+		f(channel[int] ch, channel[int] ch2) string {
+			string s = "x";
+			select {
+				v := <-ch:
+					consume(move s);
+					return "from-case";
+				w := <-ch2:
+					observe(w!);
+			}
+			return s;
+		}
+		test() {}
+	`)
+}

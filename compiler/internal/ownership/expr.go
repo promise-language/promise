@@ -1198,8 +1198,24 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) {
 	c.checkBlock(e.Else)
 	elseState := c.state
 	elseBorrows := c.borrows
-	c.state = merge(thenState, elseState)
-	c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
+	// T1134: exclude a diverging branch's end-state from the merge so a move on
+	// a non-fall-through path does not poison post-expression state.
+	thenDiverges := blockDiverges(e.Then)
+	elseDiverges := blockDiverges(e.Else)
+	switch {
+	case thenDiverges && elseDiverges:
+		c.state = savedState
+		c.borrows = savedBorrows
+	case thenDiverges:
+		c.state = elseState
+		c.borrows = elseBorrows
+	case elseDiverges:
+		c.state = thenState
+		c.borrows = thenBorrows
+	default:
+		c.state = merge(thenState, elseState)
+		c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
+	}
 }
 
 func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
@@ -1245,8 +1261,22 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 		if arm.Block != nil {
 			c.checkBlock(arm.Block)
 		}
+		// T1134: a block arm that diverges (ends in return/raise/break/continue)
+		// never falls through to the post-match path, so exclude its end-state —
+		// including any moves it performed — from the merge across arms.
+		if arm.Block != nil && blockDiverges(arm.Block) {
+			continue
+		}
 		states = append(states, c.state)
 		borrowSets = append(borrowSets, c.borrows)
+	}
+
+	if len(states) == 0 {
+		// Every arm diverges: post-match code is unreachable. Restore the
+		// pre-match baseline as a safe state.
+		c.state = savedState
+		c.borrows = savedBorrows
+		return
 	}
 
 	resultState := states[0]

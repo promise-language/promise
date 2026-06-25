@@ -1169,14 +1169,39 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	thenState := c.state
 	thenBorrows := c.borrows
 
+	// T1134: a branch body that diverges (ends in return/raise/break/continue)
+	// never falls through to the post-if path, so its end-state — including any
+	// moves it performed — must be excluded from the merge. Otherwise a move on
+	// the diverging path falsely poisons a variable that is still owned on the
+	// fall-through path.
+	thenDiverges := blockDiverges(s.Body)
 	if s.Else != nil {
 		c.state = savedState.clone()
 		c.borrows = savedBorrows.Clone()
 		c.checkStmt(s.Else)
 		elseState := c.state
 		elseBorrows := c.borrows
-		c.state = merge(thenState, elseState)
-		c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
+		elseDiverges := stmtDiverges(s.Else)
+		switch {
+		case thenDiverges && elseDiverges:
+			// Post-if code is unreachable; fall back to the pre-if baseline.
+			c.state = savedState.clone()
+			c.borrows = savedBorrows.Clone()
+		case thenDiverges:
+			c.state = elseState
+			c.borrows = elseBorrows
+		case elseDiverges:
+			c.state = thenState
+			c.borrows = thenBorrows
+		default:
+			c.state = merge(thenState, elseState)
+			c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
+		}
+	} else if thenDiverges {
+		// No else and the then-branch diverges: the fall-through path is only
+		// reached when the branch did not run, so keep the pre-if state.
+		c.state = savedState
+		c.borrows = savedBorrows
 	} else {
 		// No else: conservative merge with pre-if state.
 		c.state = merge(savedState, thenState)
@@ -1194,8 +1219,7 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(savedState, c.state)
-	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
+	c.mergeLoopState(s.Body, savedState, savedBorrows)
 }
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
@@ -1221,8 +1245,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(savedState, c.state)
-	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
+	c.mergeLoopState(s.Body, savedState, savedBorrows)
 }
 
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
@@ -1296,8 +1319,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(savedState, c.state)
-	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
+	c.mergeLoopState(s.Body, savedState, savedBorrows)
 
 	if flaggedSingleOwner {
 		if hadPrevSingleOwner {
@@ -1387,8 +1409,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	} else if s.UpdateValue != nil {
 		c.checkExpr(s.UpdateValue)
 	}
-	c.state = merge(savedState, c.state)
-	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
+	c.mergeLoopState(s.Body, savedState, savedBorrows)
 }
 
 func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
@@ -1422,8 +1443,12 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 				c.borrows.ExpireCallScoped()
 			}
 		}
-		states = append(states, c.state)
-		borrowSets = append(borrowSets, c.borrows)
+		// T1134: a case body that diverges never falls through to the post-select
+		// path, so exclude its end-state (and any moves it performed) from the merge.
+		if !stmtsDiverge(sc.Body) {
+			states = append(states, c.state)
+			borrowSets = append(borrowSets, c.borrows)
+		}
 	}
 
 	if s.Default != nil {
@@ -1435,8 +1460,10 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 				c.borrows.ExpireCallScoped()
 			}
 		}
-		states = append(states, c.state)
-		borrowSets = append(borrowSets, c.borrows)
+		if !stmtsDiverge(s.Default) {
+			states = append(states, c.state)
+			borrowSets = append(borrowSets, c.borrows)
+		}
 	}
 
 	// Merge all branches
@@ -1464,6 +1491,23 @@ func (c *Checker) checkInfiniteLoop(s *ast.InfiniteLoop) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
+	c.mergeLoopState(s.Body, savedState, savedBorrows)
+}
+
+// mergeLoopState merges the post-body state of a loop with the pre-loop state.
+// T1134: if the loop body always exits the function (return/raise) and has no
+// `break` — e.g. `for x in xs { return s; }` — then the only way control
+// reaches code after the loop is the zero-iteration path, so the post-loop
+// state is exactly the pre-loop state. A move inside such a body never reaches
+// post-loop code and must not poison it. When a `break` is present (or the body
+// can fall through), the conservative merge is kept: a `break` transfers the
+// body's current state to post-loop code, which the merge must still cover.
+func (c *Checker) mergeLoopState(body *ast.Block, savedState StateMap, savedBorrows *BorrowSet) {
+	if loopBodyExitsFunction(body) {
+		c.state = savedState
+		c.borrows = savedBorrows
+		return
+	}
 	c.state = merge(savedState, c.state)
 	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }

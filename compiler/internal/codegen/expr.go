@@ -7026,6 +7026,13 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 	switchBlock := c.block
 	mergeBlock := c.newBlock("match.end")
 
+	// T0496: the match expression's own result type, used as the contextual target
+	// type for each arm so a bare `none` arm lowers to the right Optional shape.
+	matchResultType := c.info.Types[e]
+	if c.typeSubst != nil && matchResultType != nil {
+		matchResultType = types.Substitute(matchResultType, c.typeSubst)
+	}
+
 	var defaultTarget *ir.Block
 	var cases []*ir.Case
 	var arms []matchArmInfo
@@ -7089,12 +7096,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 		}
 		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType, subjectDropFlag)
 
-		var armVal value.Value
-		if arm.Body != nil {
-			armVal = c.genExpr(arm.Body)
-		} else if arm.Block != nil {
-			armVal = c.genBlockValue(arm.Block)
-		}
+		armVal := c.genMatchArmValue(arm, matchResultType)
 		c.claimStringTemp(armVal) // T0073: ownership transfers to match phi
 
 		// B0242: Clear drop flags for dup'd bindings consumed by the arm result.
@@ -7147,6 +7149,23 @@ type matchArmInfo struct {
 	val  value.Value
 	end  *ir.Block
 	hasV bool
+}
+
+// genMatchArmValue generates a match arm's result value with the match's result
+// type set as the contextual target type (T0496). This makes a bare `none` arm
+// lower to a zero value of the shared result type (e.g. an Optional struct)
+// rather than the `i1 0` void fallback, which would otherwise produce a
+// phi-type mismatch. Restored after the arm so it does not leak to siblings.
+func (c *Compiler) genMatchArmValue(arm *ast.MatchArm, resultType types.Type) value.Value {
+	saved := c.targetType
+	c.targetType = resultType
+	defer func() { c.targetType = saved }()
+	if arm.Body != nil {
+		return c.genExpr(arm.Body)
+	} else if arm.Block != nil {
+		return c.genBlockValue(arm.Block)
+	}
+	return nil
 }
 
 // buildMatchPhi constructs a PHI node at mergeBlock from collected match arm info.
@@ -7262,6 +7281,13 @@ func (c *Compiler) clearBlockResultDropFlags(block *ast.Block) {
 func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectType types.Type) value.Value {
 	mergeBlock := c.newBlock("match.end")
 
+	// T0496: the match expression's own result type, used as the contextual target
+	// type for each arm so a bare `none` arm lowers to the right Optional shape.
+	matchResultType := c.info.Types[e]
+	if c.typeSubst != nil && matchResultType != nil {
+		matchResultType = types.Substitute(matchResultType, c.typeSubst)
+	}
+
 	named := extractNamed(subjectType)
 
 	// T0993: normalize a `this`-style heap receiver into the value struct
@@ -7322,12 +7348,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			c.block.NewCondBr(cond, armBlock, nextBlock)
 
 			c.block = armBlock
-			var armVal value.Value
-			if arm.Body != nil {
-				armVal = c.genExpr(arm.Body)
-			} else if arm.Block != nil {
-				armVal = c.genBlockValue(arm.Block)
-			}
+			armVal := c.genMatchArmValue(arm, matchResultType)
 			c.claimStringTemp(armVal) // T0073
 			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
@@ -7386,12 +7407,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				c.block = guardArmBlock
 			}
 
-			var armVal value.Value
-			if arm.Body != nil {
-				armVal = c.genExpr(arm.Body)
-			} else if arm.Block != nil {
-				armVal = c.genBlockValue(arm.Block)
-			}
+			armVal := c.genMatchArmValue(arm, matchResultType)
 			c.claimStringTemp(armVal) // T0073
 			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
@@ -7438,12 +7454,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				c.block.NewCondBr(guardVal, armBlock, nextBlock)
 
 				c.block = armBlock
-				var armVal value.Value
-				if arm.Body != nil {
-					armVal = c.genExpr(arm.Body)
-				} else if arm.Block != nil {
-					armVal = c.genBlockValue(arm.Block)
-				}
+				armVal := c.genMatchArmValue(arm, matchResultType)
 				c.claimStringTemp(armVal) // T0073
 				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
@@ -7461,12 +7472,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				// Guard failed — continue to next arm (don't return early)
 			} else {
 				// No guard — unconditional default arm
-				var armVal value.Value
-				if arm.Body != nil {
-					armVal = c.genExpr(arm.Body)
-				} else if arm.Block != nil {
-					armVal = c.genBlockValue(arm.Block)
-				}
+				armVal := c.genMatchArmValue(arm, matchResultType)
 				c.claimStringTemp(armVal) // T0073
 				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
@@ -8459,9 +8465,22 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 
 	c.block.NewCondBr(cond, thenBlock, elseBlock)
 
+	// T0496: Propagate the if-expression's result type as the contextual target
+	// type for each arm so a bare `none` arm lowers to a zero value of the shared
+	// result type (e.g. an Optional struct) rather than the `i1 0` void fallback,
+	// which would produce a phi-type mismatch. Sema's joinBranchTypes makes both
+	// arms share the non-none branch's type, so no phi-rewrapping is needed.
+	ifResultType := c.info.Types[e]
+	if c.typeSubst != nil && ifResultType != nil {
+		ifResultType = types.Substitute(ifResultType, c.typeSubst)
+	}
+
 	// Then branch
 	c.block = thenBlock
+	savedTarget := c.targetType
+	c.targetType = ifResultType
 	thenVal := c.genBlockValue(e.Then)
+	c.targetType = savedTarget
 	c.claimStringTemp(thenVal) // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
@@ -8470,7 +8489,11 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 
 	// Else branch
 	c.block = elseBlock
+	// Re-set per-arm (not once for both): a nested expression inside the then arm
+	// can clear c.targetType, which would otherwise leak into the else `none`.
+	c.targetType = ifResultType
 	elseVal := c.genBlockValue(e.Else)
+	c.targetType = savedTarget
 	c.claimStringTemp(elseVal) // T0073
 	elseEnd := c.block
 	if c.block.Term == nil {

@@ -1,0 +1,180 @@
+// T0496: `if cond { h.opt_field } else { none }` as a block-result expression.
+//
+// When one arm reads an `Optional[Vector|Channel|Arc|Weak]` field from a
+// droppable owner and the other arm is `none`, the `none` literal used to lower
+// to a bare `i1 0` (void-optional fallback) instead of a zero value of the
+// shared Optional result type, producing a malformed phi: one incoming had the
+// Optional struct type `{ i1, ptr }` and the other was `i1`. The fix propagates
+// the if/match result type as the contextual target type for each arm so `none`
+// lowers to the correct Optional shape. Leak detection (on by default) guards
+// the none-zero / field-dup interaction against any double-free or leak.
+type Holder {
+  int[]? items;
+  drop(~this) {
+  }
+}
+
+_make_dynamic_vec() int[] {
+  v := int[]();
+  for i := 0; i < 10; i++ {
+    v.push(i);
+  }
+  return v;
+}
+
+// Exact item repro: Optional[Vector] field from a droppable owner, then arm.
+if_none_vector_then_selected() `test {
+  h := Holder(items: _make_dynamic_vec());
+  flag := true;
+  vopt := if flag {
+    h.items
+  } else {
+    none
+  };
+  if v := vopt {
+    assert(v.len == 10, "then arm forwards the field's vector");
+  } else {
+    assert(false, "then arm should be selected");
+  }
+}
+
+// `none` arm selected — must be a well-formed empty Optional.
+if_none_vector_else_selected() `test {
+  h := Holder(items: _make_dynamic_vec());
+  flag := false;
+  vopt := if flag {
+    h.items
+  } else {
+    none
+  };
+  matched := false;
+  if v := vopt {
+    matched = true;
+    assert(v.len >= 0, "unreachable");
+  }
+  assert(!matched, "none arm yields an empty optional");
+}
+
+// match equivalent: `match flag { true => h.items, _ => none }`.
+match_none_vector_then_selected() `test {
+  h := Holder(items: _make_dynamic_vec());
+  flag := true;
+  vopt := match flag {
+    true => h.items, _ => none,
+  };
+  if v := vopt {
+    assert(v.len == 10, "match true arm forwards the field's vector");
+  } else {
+    assert(false, "match true arm should be selected");
+  }
+}
+
+match_none_vector_else_selected() `test {
+  h := Holder(items: _make_dynamic_vec());
+  flag := false;
+  vopt := match flag {
+    true => h.items, _ => none,
+  };
+  matched := false;
+  if v := vopt {
+    matched = true;
+    assert(v.len >= 0, "unreachable");
+  }
+  assert(!matched, "match none arm yields an empty optional");
+}
+
+// Non-droppable payload breadth: Optional[int] confirms the zero-value shape
+// across payload types (plain scalar, no heap dup involved).
+type IntBox {
+  int? value;
+}
+
+if_none_int_payload() `test {
+  b := IntBox(value: 7);
+  flag := true;
+  iopt := if flag {
+    b.value
+  } else {
+    none
+  };
+  if v := iopt {
+    assert(v == 7, "then arm forwards the int field");
+  } else {
+    assert(false, "then arm should be selected");
+  }
+
+  jopt := if false {
+    b.value
+  } else {
+    none
+  };
+  matched := false;
+  if v := jopt {
+    matched = true;
+    assert(v == 7, "unreachable");
+  }
+  assert(!matched, "none arm yields an empty optional");
+}
+
+// Optional[string] payload — heap-droppable scalar field, distinct from vector.
+type StrBox {
+  string? name;
+}
+
+match_none_string_payload() `test {
+  s := StrBox(name: "hello");
+  iopt := match true {
+    true => s.name, _ => none,
+  };
+  if v := iopt {
+    assert(v == "hello", "match true arm forwards the string field");
+  } else {
+    assert(false, "match true arm should be selected");
+  }
+}
+
+// Enum subject — exercises genEnumMatch (the bool matches above are value
+// matches). A `_ => none` arm whose sibling reads an `int?` field must still
+// lower to the Optional zero value.
+enum Tag {
+  First, Second,
+}
+
+enum_match_none_first_selected() `test {
+  b := IntBox(value: 7);
+  opt := match Tag.First {
+    Tag.First => b.value, _ => none,
+  };
+  if v := opt {
+    assert(v == 7, "enum First arm forwards the int field");
+  } else {
+    assert(false, "enum First arm should be selected");
+  }
+}
+
+enum_match_none_else_selected() `test {
+  b := IntBox(value: 7);
+  opt := match Tag.Second {
+    Tag.First => b.value, _ => none,
+  };
+  matched := false;
+  if v := opt {
+    matched = true;
+    assert(v == 0, "unreachable");
+  }
+  assert(!matched, "enum none arm yields an empty optional");
+}
+
+// Enum subject reading a droppable Optional[Vector] field — leak guard for the
+// none-zero / field-dup interaction on the genEnumMatch path.
+enum_match_none_vector_droppable() `test {
+  h := Holder(items: _make_dynamic_vec());
+  vopt := match Tag.First {
+    Tag.First => h.items, _ => none,
+  };
+  if v := vopt {
+    assert(v.len == 10, "enum arm forwards the field's vector");
+  } else {
+    assert(false, "enum First arm should be selected");
+  }
+}

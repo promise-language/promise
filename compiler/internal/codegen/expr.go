@@ -14091,6 +14091,16 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			_, d.isStruct = v.Type().(*irtypes.StructType)
 		}
 		if rootFlag == nil || d.dropFunc == nil {
+			// T1148: a moved NAMED variable root (e.g. `go f(move x)` where x is a
+			// local/loop variable bound to a heap value) has no temporary to
+			// transfer, but its caller-side drop flag must still be cleared — the
+			// move param's callee consumes and drops it. Without this, both the
+			// caller's scope/loop teardown AND the callee free it → double free.
+			if i < len(calleeParams) && calleeParams[i].Ref() == types.RefMut {
+				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
+			}
 			continue // plain ident/literal, or no single static root to transfer
 		}
 

@@ -1,0 +1,142 @@
+// T1148: `go f(move x)` of a NAMED local/loop variable bound to a heap value
+// must transfer the free obligation to the consuming callee exactly once.
+// Before the fix the moved variable was freed twice — once by the goroutine
+// callee (move param) and once by the caller's scope/loop teardown — aborting
+// with `fatal: invalid free (bad header magic)` (or `stack overflow` when
+// handles were awaited after the loop). Default leak enforcement guards the
+// double-free regression.
+type Box {
+  string s;
+}
+
+store(string move s) Box {
+  return Box(s: move s);
+}
+
+// Consumes the moved string and returns a non-heap-retaining value, to cover
+// the `int`-return variant the report flagged as also crashing.
+length(string move s) int {
+  return s.len;
+}
+
+go_call_move_loop_var() `test {
+  string[] xs = ["aa".clone(), "bb".clone(), "cc".clone()];
+  string[] out = [];
+  for x in xs {
+    t := go store(move x);
+    Box b = <-t;
+    out.push(b.s.clone());
+  }
+  assert(out.len == 3, "loop var: count");
+  assert(out[0] == "aa", "loop var: first");
+  assert(out[1] == "bb", "loop var: second");
+  assert(out[2] == "cc", "loop var: third");
+}
+
+go_call_move_single_heap_local() `test {
+  string s = "alpha".clone();
+  t := go store(move s);
+  Box b = <-t;
+  assert(b.s == "alpha", "single heap local");
+}
+
+go_call_move_int_return() `test {
+  string[] xs = ["a".clone(), "bbb".clone(), "ccccc".clone()];
+  int[] lens = [];
+  for x in xs {
+    t := go length(move x);
+    int n = <-t;
+    lens.push(n);
+  }
+  assert(lens.len == 3, "int return: count");
+  assert(lens[0] == 1, "int return: first");
+  assert(lens[1] == 3, "int return: second");
+  assert(lens[2] == 5, "int return: third");
+}
+
+go_call_move_handles_awaited_after_loop() `test {
+  string[] xs = ["aa".clone(), "bb".clone(), "cc".clone()];
+  task[Box][] handles = [];
+  for x in xs {
+    handles.push(go store(move x));
+  }
+  string[] out = [];
+  for h in handles {
+    Box b = <-h;
+    out.push(b.s.clone());
+  }
+  assert(out.len == 3, "awaited after loop: count");
+  assert(out[0] == "aa", "awaited after loop: first");
+  assert(out[1] == "bb", "awaited after loop: second");
+  assert(out[2] == "cc", "awaited after loop: third");
+}
+
+// The fix clears the caller-side drop flag for ANY droppable type moved by name
+// into a go call, not just strings — the cases below extend drop-type coverage.
+
+unwrap(Box move b) string {
+  return b.s.clone();
+}
+
+// Heap user-type named local moved into a go call (drop type: heap user type).
+go_call_move_user_type_local() `test {
+  Box bx = Box(s: "hi".clone());
+  t := go unwrap(move bx);
+  string r = <-t;
+  assert(r == "hi", "user type local");
+}
+
+total(int[] move v) int {
+  int sum = 0;
+  for e in v {
+    sum = sum + e;
+  }
+  return sum;
+}
+
+// Vector named local moved into a go call (drop type: Vector, COW-aware).
+go_call_move_vector_local() `test {
+  int[] v = [1, 2, 3, 4];
+  t := go total(move v);
+  int n = <-t;
+  assert(n == 10, "vector local");
+}
+
+join2(string move a, string move b) string {
+  return a + b;
+}
+
+// Two move args in a single go call — each named-local root must transfer
+// independently (the fix loops over every move-param ident arg).
+go_call_move_two_args() `test {
+  string a = "x".clone();
+  string b = "y".clone();
+  t := go join2(move a, move b);
+  string r = <-t;
+  assert(r == "xy", "two move args");
+}
+
+// Conditional move of a loop var: only even iterations consume it via go; odd
+// iterations keep it. Verifies the per-iteration drop-flag re-init keeps the
+// non-move iterations sound — the moved iteration's flag is cleared, while the
+// kept iteration still drops its element. Default leak enforcement guards both.
+go_call_move_loop_var_conditional() `test {
+  string[] xs = ["aa".clone(), "bb".clone(), "cc".clone(), "dd".clone()];
+  string[] out = [];
+  int i = 0;
+  for x in xs {
+    if i % 2 == 0 {
+      t := go store(move x);
+      Box b = <-t;
+      out.push(move b.s);
+    } else {
+      out.push(x.clone());
+    }
+    i = i + 1;
+  }
+  assert(out.len == 4, "cond count");
+  assert(out[0] == "aa", "cond 0");
+  assert(out[1] == "bb", "cond 1");
+  assert(out[2] == "cc", "cond 2");
+  assert(out[3] == "dd", "cond 3");
+}

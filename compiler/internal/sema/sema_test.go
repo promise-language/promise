@@ -13540,6 +13540,44 @@ func TestEnumMethodNativeError(t *testing.T) {
 	expectError(t, errs, "cannot be native")
 }
 
+func TestEnumNewMethodRejected(t *testing.T) {
+	// T0480: a `new` method on an enum is meaningless (enums have no record
+	// constructor) and previously crashed codegen with "undefined variable".
+	errs := checkErrs(t, `
+		enum E { Foo, Bar,
+			new(int v) E { return E.Foo; }
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be named 'new'")
+}
+
+func TestEnumNewFactoryMethodRejected(t *testing.T) {
+	// T0480: the `new` reservation cannot be bypassed by tagging it `factory —
+	// even though factories are the supported static-construction path, the name
+	// `new` itself is reserved and rejected. (The error hint points users at a
+	// differently-named factory method instead.)
+	errs := checkErrs(t, `
+		enum E { Foo, Bar,
+			new(int v) E `+"`"+`factory { return E.Foo; }
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be named 'new'")
+}
+
+func TestEnumNewGetterRejected(t *testing.T) {
+	// T0480: the `new` reservation also covers a getter spelling — the name is
+	// rejected regardless of getter/setter/factory shape.
+	errs := checkErrs(t, `
+		enum E { Foo, Bar,
+			get new E { return E.Foo; }
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be named 'new'")
+}
+
 func TestEnumMethodFactory(t *testing.T) {
 	// Enum factory methods are supported (needed for serializable decode).
 	info := checkOK(t, `

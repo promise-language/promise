@@ -584,3 +584,25 @@ test_this_is_variant_fieldless() `test {
   assert(Light.Off.is_off == true, "Off.is_off");
   assert(Light.On.is_off == false, "On.is_off false");
 }
+
+// T0480: `new` is rejected on enums (enums have no record constructor) — a
+// `factory method is the supported static-construction path. This exercises the
+// documented alternative, including the tuple-by-value param from the bug repro.
+enum Made {
+  Foo, Bar,
+
+  from_tuple((string, int) t) Made `factory {
+    (name, count) := t;
+    if count > 0 {
+      return Made.Bar;
+    }
+    return Made.Foo;
+  }
+}
+
+test_enum_factory_construction() `test {
+  m := Made.from_tuple(("hello".to_string(), 1));
+  assert(m is Bar, "positive count -> Bar");
+  m2 := Made.from_tuple(("x".to_string(), 0));
+  assert(m2 is Foo, "zero count -> Foo");
+}

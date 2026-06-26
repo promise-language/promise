@@ -1009,6 +1009,14 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 		c.errorf(md.Pos(), "enum method %s.%s cannot be `mono", enumName, md.Name)
 	}
 
+	// T0480: `new` is a reserved record-constructor name for Named types; enums
+	// have no record constructor (they are built via variant constructors), so a
+	// `new` method on an enum is meaningless and would crash codegen.
+	if md.Name == "new" {
+		c.errorf(md.Pos(), "enum method %s.%s cannot be named 'new' — enums have no record constructor; "+
+			"construct a variant directly (e.g. %s.Variant) or add a `factory method", enumName, md.Name, enumName)
+	}
+
 	// Validate: generic enum methods cannot be getters or setters
 	// (parity with the Named path in defineMethod).
 	if len(sig.TypeParams()) > 0 {

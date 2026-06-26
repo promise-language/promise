@@ -36,8 +36,8 @@ import (
 //
 // Source provenance (T0854): the install gate validates the published
 // distribution against the sources it was BUILT FROM — NOT the developer's local
-// working tree. It resolves the binary's build commit via `promise version
-// --commit`, checks that SHA out into a detached worktree, and runs the suite
+// working tree. It resolves the binary's build commit via `promise version --json`
+// (T1125), checks that SHA out into a detached worktree, and runs the suite
 // there. This prevents spurious failures when bugfix-plus-regression-test commits
 // land after the last prebuilt publish (the stale binary would otherwise fail the
 // newer tests). Local compiler/source edits stay covered by bin/verify / bin/test.
@@ -319,22 +319,22 @@ func runInstallPhases(root, work, variant, channel string, system bool) error {
 
 	// ── pin sources to the published binary's build commit (T0854) ────────────
 	// The gate validates the published distribution against ITS OWN sources, not
-	// the dev's working tree. Resolve the SHA the binary was built from, check it
-	// out into a detached worktree, and run the suite there. This is the swap that
-	// makes the gate test the published bytes — it MUST precede the shared testCmd
-	// block below (used by thin/full and --system).
-	shaCmd := exec.Command(promiseBin, "version", "--commit")
-	shaCmd.Env = baseEnv // resolve the SANDBOX epoch compiler (PROMISE_HOME lives in baseEnv)
-	shaOut, shaErr := shaCmd.Output()
-	if shaErr != nil {
-		logf("warning: 'promise version --commit' failed: %v", shaErr)
+	// the dev's working tree. Resolve the SHA the binary was built from via
+	// `promise version --json` (T1125), check it out into a detached worktree,
+	// and run the suite there. This is the swap that makes the gate test the
+	// published bytes — it MUST precede the shared testCmd block below (used by
+	// thin/full and --system).
+	jsonCmd := exec.Command(promiseBin, "version", "--json")
+	jsonCmd.Env = baseEnv // resolve the SANDBOX epoch compiler (PROMISE_HOME lives in baseEnv)
+	jsonOut, jsonErr := jsonCmd.Output()
+	if jsonErr != nil {
+		logf("warning: 'promise version --json' failed: %v", jsonErr)
 	}
-	sha := strings.TrimSpace(string(shaOut))
-	// A stamped binary prints exactly the 40-char hex SHA. An unstamped build
-	// prints "" (empty `main.commit`); a binary predating `version --commit`
-	// support falls through to printVersion and prints "promise version <v>".
-	// Treat anything that isn't a bare 40-hex SHA as "no provenance" so the error
-	// is accurate rather than a confusing downstream cat-file failure.
+	sha := parseVersionCommit(jsonOut)
+	// The `commit` field of `promise version --json` is the 40-char hex git SHA
+	// the binary was built from (`-X main.commit=<GitSHAFull>`). An unstamped
+	// build emits "" (omitempty); any non-SHA value is treated as "no provenance"
+	// so the error is accurate rather than a confusing downstream cat-file failure.
 	if !isFullGitSHA(sha) {
 		logf("test: published binary has no provenance (no build commit recorded)")
 		return fmt.Errorf("test: published binary has no provenance; re-publish a build that records its commit")
@@ -440,10 +440,23 @@ func installTestFailures(jsonl []byte) int {
 	return n
 }
 
+// parseVersionCommit extracts the "commit" field from `promise version --json`
+// output (T1125). Returns the raw string; callers must validate with
+// isFullGitSHA before treating it as provenance. Malformed or empty JSON yields
+// "" — the same as an unstamped binary that omits the field entirely.
+func parseVersionCommit(jsonData []byte) string {
+	var v struct {
+		Commit string `json:"commit"`
+	}
+	_ = json.Unmarshal(bytes.TrimSpace(jsonData), &v)
+	return v.Commit
+}
+
 // isFullGitSHA reports whether s is a bare full-length (40-char) lowercase-hex
-// git commit hash — the exact form a stamped `promise version --commit` prints.
-// Anything else (empty, a "promise version ..." line from a pre-stamp binary,
-// stray output) is treated as "no provenance" by the install gate (T0854).
+// git commit hash — the form expected in the `commit` field of
+// `promise version --json`. Anything else (empty, missing field from an
+// unstamped binary, stray value) is treated as "no provenance" by the install
+// gate (T0854).
 func isFullGitSHA(s string) bool {
 	if len(s) != 40 {
 		return false

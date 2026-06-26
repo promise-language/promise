@@ -373,12 +373,41 @@ func TestInstallTestFailures(t *testing.T) {
 	}
 }
 
-// TestIsFullGitSHA: the install gate treats the binary's `version --commit`
-// output as provenance only when it is a bare 40-char lowercase-hex SHA. Anything
-// else — empty (unstamped build), a "promise version <v>" line (binary predating
-// --commit support), an uppercase or wrong-length string — must be rejected so
-// the gate fails with the accurate "no provenance" error rather than feeding junk
-// to git cat-file (T0854).
+// TestParseVersionCommit covers the JSON parsing that extracts build provenance
+// from `promise version --json` output (T1125). The gate reads the "commit"
+// field and then validates it with isFullGitSHA; malformed or missing JSON must
+// yield "" so isFullGitSHA rejects it as "no provenance".
+func TestParseVersionCommit(t *testing.T) {
+	const validSHA = "0123456789abcdef0123456789abcdef01234567"
+	cases := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{"valid SHA", []byte(`{"commit":"` + validSHA + `"}`), validSHA},
+		{"whitespace padded", []byte("  {\"commit\":\"" + validSHA + "\"}\n"), validSHA},
+		{"empty commit field", []byte(`{"commit":""}`), ""},
+		{"no commit field", []byte(`{"epoch":"2026.0","version":"2026.0-abc1234"}`), ""},
+		{"empty JSON object", []byte(`{}`), ""},
+		{"malformed JSON", []byte(`not json`), ""},
+		{"nil input", nil, ""},
+		{"empty input", []byte{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseVersionCommit(tc.input)
+			if got != tc.want {
+				t.Errorf("parseVersionCommit(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsFullGitSHA: the install gate reads the `commit` field of
+// `promise version --json` as provenance only when it is a bare 40-char
+// lowercase-hex SHA. Anything else — empty (unstamped build), an uppercase or
+// wrong-length string — must be rejected so the gate fails with the accurate
+// "no provenance" error rather than feeding junk to git cat-file (T0854).
 func TestIsFullGitSHA(t *testing.T) {
 	ok := []string{
 		"0123456789abcdef0123456789abcdef01234567",

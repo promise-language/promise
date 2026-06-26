@@ -3195,10 +3195,23 @@ func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type)
 	// ready: drop result, then free result_ptr, panic_msg, G.
 	// emitVariantFieldDrop uses c.fn/c.entryBlock/c.block; save and restore so
 	// caller state isn't disturbed (same pattern as defineArcDropBody's vector path).
+	// T1150: also neutralize the coroutine context. This plain (non-coroutine)
+	// function may be generated lazily while compiling a coroutine body. If the
+	// result type T is itself a Task[U], emitVariantFieldDrop routes to
+	// emitTaskJoinAndFree, which — seeing a stale c.inCoroutine/c.coroSuspendBlk —
+	// would emit a coro.suspend referencing the *enclosing* coroutine's cleanup
+	// block (which doesn't exist here → "use of undefined value '%cleanup'").
+	// Clearing inCoroutine routes the nested task-field drop through the legacy
+	// callable Task[U].drop (spin shell on host, coop-step pump on WASM), which is
+	// valid inside a plain function.
 	savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+	savedInCoroutine, savedCoroSuspend, savedCoroCleanup := c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk
 	c.fn = fn
 	c.entryBlock = entry
 	c.block = readyBlk
+	c.inCoroutine = false
+	c.coroSuspendBlk = nil
+	c.coroCleanupBlk = nil
 
 	gPtr := c.block.NewBitCast(thisParam, irtypes.NewPointer(gTy))
 
@@ -3266,6 +3279,7 @@ func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type)
 	doneBlk.NewRet(nil)
 
 	c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+	c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk = savedInCoroutine, savedCoroSuspend, savedCoroCleanup
 }
 
 // getTaskDeadlockMsgGlobal returns the shared private deadlock-message global

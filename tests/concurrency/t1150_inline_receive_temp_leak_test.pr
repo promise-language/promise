@@ -1,0 +1,150 @@
+// T1150: Inline-consumed task-handle receive (`<-t`) leaks the received heap
+// temporary. The task-receive codegen produces a heap result (string, heap
+// vector, heap user type) but did not register it as a droppable statement temp,
+// so consuming it inline (push arg, member access, operator) leaked. Binding it
+// to a named variable first masked the leak (the binding owned it). These tests
+// rely on the default leak detector (alloc delta == 0) to catch regressions.
+make_str() string {
+  return "hi".clone();
+}
+
+// Heap (non-.rodata) vector — built via push, NOT a static literal.
+make_heap_vec() int[] {
+  int[] v = [];
+  v.push(10);
+  v.push(20);
+  v.push(30);
+  return v;
+}
+
+type Box {
+  int x;
+  drop(~this) {
+  }
+  // user drop → goes through the {i8*,i8*} heap-temp branch
+}
+
+make_box() Box {
+  return Box(x: 42);
+}
+
+sink_box(Box move b) {
+  // Consumes the moved Box; its drop runs here exactly once.
+  assert(b.x == 42, "moved field");
+}
+
+make_void() {
+}
+
+// --- native handle results from a task, consumed inline (one branch each of
+// trackReceivedTaskResult's i8* dispatch) ---
+
+make_ref() Ref[int] {
+  return Ref[int](7);
+}
+
+make_chan() channel[int] {
+  c := channel[int](1);
+  return c;
+}
+
+make_mutex() Mutex[int] {
+  return Mutex[int](5);
+}
+
+inner_int() int {
+  return 99;
+}
+
+make_task() task[int] {
+  return go inner_int();
+}
+
+// --- string from task[string], consumed inline ---
+
+string_push_inline() `test {
+  t := go make_str();
+  string[] out = [];
+  out.push(<-t); // inline-consumed task-receive string temp
+  assert(out.len == 1, "len");
+  assert(out[0] == "hi", "val");
+}
+
+string_member_inline() `test {
+  t := go make_str();
+  int n = (<-t).len; // member access does not transfer ownership
+  assert(n == 2, "len");
+}
+
+string_operator_inline() `test {
+  t := go make_str();
+  string s = (<-t) + "!"; // operator reads operand, does not claim it
+  assert(s == "hi!", "concat");
+}
+
+// --- heap vector from task[int[]], consumed inline ---
+
+vector_member_inline() `test {
+  t := go make_heap_vec();
+  int n = (<-t).len; // heap vector received inline → temp must drop
+  assert(n == 3, "len");
+}
+
+// --- heap user type from task[Box], consumed inline ---
+
+box_member_inline() `test {
+  t := go make_box();
+  int x = (<-t).x; // member access, no ownership transfer
+  assert(x == 42, "field");
+}
+
+// Heap user type moved out of the receive directly into a `move` param: the
+// claim-on-consume site clears the tracked temp's drop flag so the value is
+// dropped exactly once (by the callee), not double-freed.
+box_move_inline() `test {
+  t := go make_box();
+  sink_box(<-t); // received Box flows straight into a move param
+}
+
+// --- native handle results received and consumed inline ---
+
+ref_borrow_inline() `test {
+  t := go make_ref();
+  int x = (<-t).borrow; // borrow reads through the received Ref; temp must drop
+  assert(x == 7, "ref borrow");
+}
+
+channel_close_inline() `test {
+  t := go make_chan();
+  (<-t).close(); // method call on the received channel; struct temp must drop
+  assert(true, "chan");
+}
+
+mutex_lock_inline() `test {
+  t := go make_mutex();
+  int x = (<-t).lock().borrow; // lock() borrows the received Mutex; temp must drop
+  assert(x == 5, "mutex");
+}
+
+task_nested_inline() `test {
+  t := go make_task();
+  int x = <-(<-t); // inner `<-t` yields a task[int] temp consumed inline
+  assert(x == 99, "nested task");
+}
+
+// --- regression guards: must stay leak-free with no double-free ---
+
+named_bind_then_move() `test {
+  t := go make_str();
+  string[] out = [];
+  string r = <-t; // bound to a name → binding owns it
+  out.push(move r); // explicit move transfers ownership
+  assert(out.len == 1, "len");
+  assert(out[0] == "hi", "val");
+}
+
+void_receive() `test {
+  t := go make_void();
+  <-t; // void receive returns nil — nothing to track
+  assert(true, "void");
+}

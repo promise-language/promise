@@ -5300,6 +5300,70 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 	}
 }
 
+// trackReceivedTaskResult registers the heap result of a task-handle receive
+// (`<-t`, `t : task[T]`) as a droppable statement temp so it is freed at
+// statement end when the value is consumed inline (e.g. `out.push(<-t)`,
+// `(<-t).len`, `(<-t) + "!"`) rather than bound to a named variable. When the
+// receive flows into a binding/move site, the existing claim-on-consume sites
+// (binding RHS, call-arg move, match-arm phi) clear the flag, so this integrates
+// with the working named-binding path without double-free risk. T1150.
+//
+// innerType is the already-substituted task element type (inst.TypeArgs()[0] in
+// genReceiveTask, where inst comes from the substituted operand type), so no
+// further typeSubst/selfSubst is applied. Mirrors trackGetterResult's dispatch;
+// the underlying track* helpers all guard on tempTrackingEnabled, a terminated
+// block, and i8*-typed results, so this is safe to call unconditionally.
+func (c *Compiler) trackReceivedTaskResult(result value.Value, innerType types.Type) {
+	if !c.tempTrackingEnabled || result == nil || innerType == nil {
+		return
+	}
+	if result.Type() == irtypes.I8Ptr {
+		named := extractNamed(innerType)
+		if named == types.TypString {
+			c.trackStringTemp(result)
+		} else if named == types.TypVector {
+			if elemType, ok := types.AsVector(innerType); ok {
+				c.trackVectorTempWithElemType(result, elemType)
+			} else {
+				c.trackVectorTemp(result)
+			}
+		} else if chElem, isCh := types.AsChannel(innerType); isCh || named == types.TypChannel {
+			c.trackChannelTempWithElemType(result, chElem)
+		} else if arcElem, isArc := types.AsArc(innerType); isArc {
+			c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
+		} else if weakElem, isWeak := types.AsWeak(innerType); isWeak {
+			c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
+		} else if mutexElem, isMutex := types.AsMutex(innerType); isMutex {
+			c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
+		} else if taskElem, isTask := types.AsTask(innerType); isTask {
+			c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+		}
+		return
+	}
+	// {i8*, i8*} value struct → heap user type. Mirror trackHeapUserTypeResult's
+	// tail filters so pure-value/copy/structural/primitive/container results are
+	// skipped (those don't own a separate heap allocation to drop here).
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
+		return
+	}
+	named := extractNamed(innerType)
+	if named == nil {
+		return
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return
+	}
+	if isContainerType(innerType) || named == types.TypString {
+		return
+	}
+	dropFunc := c.resolveDropFuncForTemp(named, innerType)
+	if dropFunc == nil {
+		return
+	}
+	c.trackHeapTemp(c.block.NewExtractValue(result, 1), dropFunc)
+}
+
 // genVirtualMethodCall emits an indirect call through the vtable.
 // Reads vtable pointer from the value struct (field 0), indexes into it
 // to get the function pointer, casts it, and calls.
@@ -15858,6 +15922,11 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	if isVoid {
 		return nil
 	}
+	// T1150: register the received heap result as a droppable statement temp so
+	// it is freed at statement end when consumed inline (no named binding owns
+	// it). c.block is loadResultBlk here — where resultVal is live and the return
+	// flows from. Claim-on-consume sites clear the flag when ownership transfers.
+	c.trackReceivedTaskResult(resultVal, innerType)
 	return resultVal
 }
 

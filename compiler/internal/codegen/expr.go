@@ -13170,6 +13170,10 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 // (ownership transfers to the unwrapped value). Field access dup is handled by
 // the dupStringFieldAccess mechanism in genTypedVarDecl/genInferredVarDecl.
 func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
+	// T1143: reset so a stale value from a prior dup-returning call can never
+	// leak into this call's tracking decision. Only set below on the plain
+	// (no-dup) path when the source is a container index.
+	c.optionalUnwrapContainerBorrow = false
 	optVal := c.genExpr(expr)
 	flag := c.block.NewExtractValue(optVal, 0)
 
@@ -13210,6 +13214,14 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	}
 	var result value.Value
 	result = c.block.NewExtractValue(optVal, 1)
+
+	// T1143: we reached the plain extractvalue path, so no dup was made (the
+	// binding/return/arg dup paths return early above). If the source is a
+	// container index (`container[k]!`), the extracted inner aliases the
+	// container's owned slot — record this so trackHeapUserTypeResult skips
+	// owned-temp registration (the container's drop frees it; tracking the
+	// alias as a temp double-frees at scope exit).
+	c.optionalUnwrapContainerBorrow = c.isContainerIndexUnwrapSource(expr)
 
 	// T0428 Case 3B: borrowed this.field! — dup the inner heap value so the new
 	// variable gets an independent copy. The caller still owns the original (we
@@ -13362,6 +13374,67 @@ func (c *Compiler) isOwnerGovernedMemberOptionalUnwrapSource(src ast.Expr) bool 
 		return false
 	}
 	return c.ownerHasOrSynthDrop(ownerType, ownerNamed)
+}
+
+// isContainerIndexUnwrapSource reports whether src (peeling ParenExpr) is a
+// Map index `m[key]` whose `[]` getter returns Optional[V] by ALIAS — i.e. its
+// match-destructure does NOT dup V (T0440). The synthesized `Map.[]` body does
+// `match this._buckets[h] { Slot.Used(k, v) => return v, ... }`; the V binding
+// is dup'd only when `enumHasDrop && matchFieldNeedsDup(V)` (bindEnumDestructure,
+// expr.go), which for a non-enum V reduces to typeNeedsMatchDup(V). So the result
+// aliases the bucket's slot exactly when typeNeedsMatchDup(V) is false (V has an
+// explicit/synth drop but no usable clone — e.g. `Resource{string; drop()}` or a
+// synth-drop struct with a droppable-element vector field). In that case the
+// inline `m[k]!` force-unwrap (reaching the plain no-dup extractvalue path)
+// borrows the slot, so it must NOT be registered as an owned statement temp —
+// the Map's drop frees it; tracking double-frees. When V is clone-bearing the
+// `[]` body dups internally, the result is owned, and tracking must stay (else a
+// leak). Set is excluded implicitly — it has no `[]`. T1143.
+func (c *Compiler) isContainerIndexUnwrapSource(src ast.Expr) bool {
+	for {
+		p, ok := src.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		src = p.Expr
+	}
+	idx, ok := src.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	t := c.info.Types[idx.Target]
+	if c.typeSubst != nil && t != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if c.selfSubst != nil && t != nil {
+		t = types.SubstituteSelf(t, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if !isMapOrSetType(t) {
+		return false
+	}
+	// Element type V = the index expression's result, peeling the Optional the
+	// `[]` getter returns. The aliasing-vs-dup decision must mirror the `[]`
+	// body's match-destructure (typeNeedsMatchDup) exactly.
+	vt := c.info.Types[idx]
+	if c.typeSubst != nil && vt != nil {
+		vt = types.Substitute(vt, c.typeSubst)
+	}
+	if c.selfSubst != nil && vt != nil {
+		vt = types.SubstituteSelf(vt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if opt, ok := vt.(*types.Optional); ok {
+		vt = opt.Elem()
+		if c.typeSubst != nil && vt != nil {
+			vt = types.Substitute(vt, c.typeSubst)
+		}
+		if c.selfSubst != nil && vt != nil {
+			vt = types.SubstituteSelf(vt, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+	}
+	if vt == nil {
+		return false
+	}
+	return !c.typeNeedsMatchDup(vt)
 }
 
 // handlerResultIsNativeHandle reports whether an optional handler's unwrapped

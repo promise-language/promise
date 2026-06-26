@@ -1,0 +1,155 @@
+// T1143: inline force-unwrap of a map-index optional on a droppable element
+// type, immediately followed by a member access (`m["k"]!.field`), must not
+// double-free. The map's `[]` getter returns the element by alias for a V with
+// an explicit `drop` and no `clone` (T0440), so the inline unwrap borrows the
+// map's slot — registering it as an owned statement temp double-freed it at
+// scope exit (SIGSEGV at 0x0). The var-binding form already worked because the
+// binding context forces a deep dup. These tests lock both sides.
+// Explicit drop, no clone — the aliasing `[]` case that crashed.
+type Resource {
+  string name;
+  drop(~this) {
+  }
+}
+make_resource() Resource {
+  return Resource(name: "test!");
+}
+
+// Synthesized-drop-only — a droppable field (string[]) but no explicit drop and
+// no clone. Its droppable-element vector makes it not shallow-dup-safe, so
+// `Map.[]` also returns it by alias (typeNeedsMatchDup is false), exercising the
+// same borrow-skip path as Resource.
+type Bag {
+  string[] items;
+}
+make_bag() Bag {
+  return Bag(items: ["a", "b", "c"]);
+}
+
+// Clone-bearing — explicit clone makes `[]` dup internally too.
+type Token {
+  string label;
+  clone(this) Token {
+    return Token(label: this.label);
+  }
+  drop(~this) {
+  }
+}
+make_token() Token {
+  return Token(label: "tok");
+}
+
+// The exact repro: inline `m["k"]!.field` chain on an explicit-drop element.
+inline_unwrap_member() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  assert(m["k"]!.name.len == 5, "inline unwrap member");
+}
+
+// Inline unwrap bound directly to a new variable (dup path).
+inline_unwrap_bind() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  r := m["k"]!;
+  assert(r.name.len == 5, "inline unwrap bind");
+}
+
+// Var-binding form: materialize the optional first, then unwrap (the known
+// working path — guard against regressing it).
+var_then_unwrap() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  v := m["k"];
+  r := v!;
+  assert(r.name.len == 5, "var then unwrap");
+}
+
+// Inline unwrap member on a synthesized-drop-only element type.
+inline_unwrap_synth_drop() `test {
+  map[string, Bag] m = {
+    "k": make_bag()
+  };
+  assert(m["k"]!.items.len == 3, "inline unwrap synth drop");
+}
+
+// Inline unwrap member on a clone-bearing element type.
+inline_unwrap_clone() `test {
+  map[string, Token] m = {
+    "k": make_token()
+  };
+  assert(m["k"]!.label.len == 3, "inline unwrap clone");
+}
+
+// Inline unwrap inside a parenthesized source: `(m["k"])!.field`.
+inline_unwrap_paren() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  assert((m["k"])!.name.len == 5, "inline unwrap paren");
+}
+
+// Inline unwrap member where the member is a getter/method (not a plain field) —
+// the borrow-skip must fire for any member kind on the aliased result.
+type Gauge {
+  string label;
+  get width int {
+    return this.label.len;
+  }
+  drop(~this) {
+  }
+}
+make_gauge() Gauge {
+  return Gauge(label: "test!");
+}
+inline_unwrap_getter_member() `test {
+  map[string, Gauge] m = {
+    "k": make_gauge()
+  };
+  assert(m["k"]!.width == 5, "inline unwrap getter member");
+}
+
+// Inline unwrap member on a non-string (int) key — exercises the same
+// aliasing-[] borrow-skip independent of the key type.
+inline_unwrap_int_key() `test {
+  map[int, Resource] m = {
+    7: make_resource()
+  };
+  assert(m[7]!.name.len == 5, "inline unwrap int key");
+}
+
+// Inline unwrap inside a monomorphized generic method body — the index target's
+// type is resolved under an active typeSubst, exercising the substitution
+// branches of isContainerIndexUnwrapSource. The map value is a concrete
+// droppable-no-clone element, so the aliasing-[] borrow-skip must still apply.
+type Holder[T] {
+  map[string, Resource] m;
+  T tag;
+  unwrapped_len(this) int {
+    return this.m["k"]!.name.len;
+  }
+}
+inline_unwrap_generic_method() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  h := Holder[int](m: move m, tag: 9);
+  assert(h.unwrapped_len() == 5, "inline unwrap generic method");
+}
+
+// Inline unwrap passed to a shared-borrow (non-consuming) parameter — the borrow
+// path must NOT register an owned temp (the map keeps and frees its slot). This
+// is the adjacent path to the fixed member-access form and guards against it
+// regressing into the consuming/return forms (which are tracked separately as a
+// known crash — see the arg-move/return sibling bug).
+inspect_resource(Resource r) int {
+  return r.name.len;
+}
+inline_unwrap_borrow_arg() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  assert(inspect_resource(m["k"]!) == 5, "inline unwrap borrow arg");
+}

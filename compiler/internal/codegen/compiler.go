@@ -184,21 +184,22 @@ type Compiler struct {
 	// T0073: Statement-level temporary tracking for heap-allocated strings.
 	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
 	// `assert(42.to_string() == "42")`) and drops them at statement end.
-	stmtTemps               []stmtTemp
-	stmtTempMap             map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
-	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
-	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
-	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
-	borrowBlockResult       bool                // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
-	matchBorrowedIdents     map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
-	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
-	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
-	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
-	optionalContainerDup    value.Value         // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
-	optionalTupleDup        value.Value         // T0397: pending dup from Map[K,(droppable,...)] index path; consumed by genOptionalForceUnwrap
-	optionalHeapDup         value.Value         // T0440: pending dup from Map[K, heap-user-type] index path; consumed by genOptionalForceUnwrap
-	optionalFieldString     bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
-	optionalFieldVector     bool                // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
+	stmtTemps                     []stmtTemp
+	stmtTempMap                   map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
+	tempTrackingEnabled           bool                // T0084: true in free functions + user method bodies
+	dupStringFieldAccess          bool                // T0095: when true, genFieldAccess dups string fields from droppable types
+	dupContainerFieldAccess       bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
+	borrowBlockResult             bool                // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
+	matchBorrowedIdents           map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
+	dupTupleFieldAccess           bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
+	dupHeapUserFieldAccess        bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
+	optionalStringDup             value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
+	optionalContainerDup          value.Value         // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
+	optionalTupleDup              value.Value         // T0397: pending dup from Map[K,(droppable,...)] index path; consumed by genOptionalForceUnwrap
+	optionalHeapDup               value.Value         // T0440: pending dup from Map[K, heap-user-type] index path; consumed by genOptionalForceUnwrap
+	optionalFieldString           bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
+	optionalFieldVector           bool                // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
+	optionalUnwrapContainerBorrow bool                // T1143: set on the plain (no-dup) path of genOptionalForceUnwrap when the source is `container[k]!` — the inner aliases the container's slot and is borrowed (no dup), so trackHeapUserTypeResult must NOT register it as an owned temp (the container's drop frees it; tracking double-frees)
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops

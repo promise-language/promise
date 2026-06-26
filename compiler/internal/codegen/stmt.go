@@ -6202,6 +6202,18 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 			!c.isBorrowedThisMemberSource(opt.Expr) {
 			return
 		}
+		// T1143: inline `container[k]!` (e.g. `m["k"]!.field`) extracts the
+		// element by alias when no dup was made — the binding/return/arg dup
+		// paths return early in genOptionalForceUnwrap. genOptionalForceUnwrap
+		// sets optionalUnwrapContainerBorrow only on that plain no-dup path. The
+		// container's drop frees the slot; registering the aliased inner as an
+		// owned temp double-frees at scope exit. Consume the flag here so it can
+		// never leak into a later unrelated call (the entry-reset in
+		// genOptionalForceUnwrap is the belt-and-suspenders guard).
+		if c.optionalUnwrapContainerBorrow {
+			c.optionalUnwrapContainerBorrow = false
+			return
+		}
 	}
 	// T0753: Same for the optional-handler unwrap (`o? _ { ... }`) on an ident
 	// source. The handler extracts the inner value as an aliasing extractvalue;

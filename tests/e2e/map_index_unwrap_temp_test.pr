@@ -141,9 +141,8 @@ inline_unwrap_generic_method() `test {
 
 // Inline unwrap passed to a shared-borrow (non-consuming) parameter — the borrow
 // path must NOT register an owned temp (the map keeps and frees its slot). This
-// is the adjacent path to the fixed member-access form and guards against it
-// regressing into the consuming/return forms (which are tracked separately as a
-// known crash — see the arg-move/return sibling bug).
+// is the adjacent path to the fixed member-access form. The consuming/return
+// forms below are the T1146 sibling bug (now fixed).
 inspect_resource(Resource r) int {
   return r.name.len;
 }
@@ -152,4 +151,185 @@ inline_unwrap_borrow_arg() `test {
     "k": make_resource()
   };
   assert(inspect_resource(m["k"]!) == 5, "inline unwrap borrow arg");
+}
+
+// T1146: inline force-unwrap of a map-index optional on a droppable-no-clone
+// element that ESCAPES into an owning sink — a move (~) param arg, a constructor
+// field-init, or a return. The aliasing `Map.[]` getter (T0440) hands back the
+// bucket slot; the owning sink dropped it while the map ALSO dropped the same slot
+// at scope exit → double-free (SIGSEGV at 0x0 / invalid free). Fixed by routing
+// these sinks through the same deep-dup the var-binding form already uses, so the
+// owning value becomes an independent copy. These tests lock all three sinks
+// across V shapes (explicit drop, synth drop, clone-bearing), key types, paren
+// sources, and a monomorphized generic method body. Run under the zero-leak gate.
+
+// Sinks for explicit-drop, no-clone Resource.
+consume_resource(Resource move r) int {
+  return r.name.len;
+}
+type ResourceHolder {
+  Resource res;
+  drop(~this) {
+  }
+}
+relay_resource() Resource {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  return m["k"]!;
+}
+
+// Move-param arg: `consume(m["k"]!)`.
+inline_unwrap_move_arg() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  assert(consume_resource(m["k"]!) == 5, "inline unwrap move arg");
+}
+
+// Constructor field-init move: `Holder(res: m["k"]!)`.
+inline_unwrap_ctor_arg() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  h := ResourceHolder(res: m["k"]!);
+  assert(h.res.name.len == 5, "inline unwrap ctor arg");
+}
+
+// Inline return: `return m["k"]!`.
+inline_unwrap_return() `test {
+  assert(relay_resource().name.len == 5, "inline unwrap return");
+}
+
+// Parenthesized source `(m["k"])!` in each owning sink.
+inline_unwrap_paren_move_arg() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  assert(consume_resource((m["k"])!) == 5, "inline unwrap paren move arg");
+}
+inline_unwrap_paren_ctor_arg() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  h := ResourceHolder(res: (m["k"])!);
+  assert(h.res.name.len == 5, "inline unwrap paren ctor arg");
+}
+relay_resource_paren() Resource {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  return (m["k"])!;
+}
+inline_unwrap_paren_return() `test {
+  assert(relay_resource_paren().name.len == 5, "inline unwrap paren return");
+}
+
+// Int-key map (`m[7]!`) in an owning sink — key-type independence.
+inline_unwrap_int_key_move_arg() `test {
+  map[int, Resource] m = {
+    7: make_resource()
+  };
+  assert(consume_resource(m[7]!) == 5, "inline unwrap int key move arg");
+}
+
+// Synth-drop-only Bag in each owning sink.
+consume_bag(Bag move b) int {
+  return b.items.len;
+}
+type BagHolder {
+  Bag bag;
+}
+relay_bag() Bag {
+  map[string, Bag] m = {
+    "k": make_bag()
+  };
+  return m["k"]!;
+}
+inline_unwrap_bag_move_arg() `test {
+  map[string, Bag] m = {
+    "k": make_bag()
+  };
+  assert(consume_bag(m["k"]!) == 3, "inline unwrap bag move arg");
+}
+inline_unwrap_bag_ctor_arg() `test {
+  map[string, Bag] m = {
+    "k": make_bag()
+  };
+  h := BagHolder(bag: m["k"]!);
+  assert(h.bag.items.len == 3, "inline unwrap bag ctor arg");
+}
+inline_unwrap_bag_return() `test {
+  assert(relay_bag().items.len == 3, "inline unwrap bag return");
+}
+
+// Clone-bearing Token in each owning sink — the `Map.[]` body dups V internally,
+// so the result is already owned; the fix must NOT over-fire a second dup (leak).
+consume_token(Token move t) int {
+  return t.label.len;
+}
+type TokenHolder {
+  Token tok;
+  drop(~this) {
+  }
+}
+relay_token() Token {
+  map[string, Token] m = {
+    "k": make_token()
+  };
+  return m["k"]!;
+}
+inline_unwrap_token_move_arg() `test {
+  map[string, Token] m = {
+    "k": make_token()
+  };
+  assert(consume_token(m["k"]!) == 3, "inline unwrap token move arg");
+}
+inline_unwrap_token_ctor_arg() `test {
+  map[string, Token] m = {
+    "k": make_token()
+  };
+  h := TokenHolder(tok: m["k"]!);
+  assert(h.tok.label.len == 3, "inline unwrap token ctor arg");
+}
+inline_unwrap_token_return() `test {
+  assert(relay_token().label.len == 3, "inline unwrap token return");
+}
+
+// Monomorphized generic-method body returning `this.m["k"]!` — exercises the
+// typeSubst resolution branches of the return-sink dup.
+type Relay[T] {
+  map[string, Resource] m;
+  T tag;
+  take(this) Resource {
+    return this.m["k"]!;
+  }
+}
+inline_unwrap_generic_return() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  r := Relay[int](m: move m, tag: 9);
+  taken := r.take();
+  assert(taken.name.len == 5, "inline unwrap generic return");
+}
+
+// Var-binding-then-move/return regression guards — the already-working path that
+// the fix mirrors. Must stay correct and leak-free.
+inline_unwrap_bind_then_move() `test {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  r := m["k"]!;
+  assert(consume_resource(move r) == 5, "inline unwrap bind then move");
+}
+relay_resource_bind() Resource {
+  map[string, Resource] m = {
+    "k": make_resource()
+  };
+  r := m["k"]!;
+  return r;
+}
+inline_unwrap_bind_then_return() `test {
+  assert(relay_resource_bind().name.len == 5, "inline unwrap bind then return");
 }

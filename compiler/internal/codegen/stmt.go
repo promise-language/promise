@@ -8238,6 +8238,16 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 				c.dupHeapUserFieldAccess = true
 			}
 		}
+		// T1146: `return m[k]!` — `!` already unwrapped the Optional, so retType is
+		// the bare element type (not Optional) and the branch above is skipped. The
+		// unwrapped element aliases the map's slot; without a dup the map's drop at
+		// function exit and the caller's drop of the returned value double-free.
+		// Mirror the var-binding form (stmt.go:1133). The returned dup is claimed by
+		// claimHeapTemp(val) below so cleanup doesn't drop it.
+		if (isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType)) &&
+			isUnwrappedContainerIndex(s.Value) {
+			c.dupHeapUserFieldAccess = true
+		}
 		val = c.genExpr(s.Value)
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false

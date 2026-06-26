@@ -6153,6 +6153,33 @@ func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
 	}
 }
 
+// isUnwrappedContainerIndex reports whether expr is `container[k]!` — an
+// OptionalUnwrapExpr whose inner (peeling ParenExpr) is an IndexExpr. When such
+// an inline unwrap escapes into an OWNING context (move-param arg, constructor
+// field-init, return), the unwrapped element aliases the container's slot, so
+// without a dup the owning sink AND the container's drop free the same instance
+// (double-free). Setting dupHeapUserFieldAccess routes it through genMethodIndex's
+// deep-dup, mirroring the var-binding form (genTypedVarDecl, stmt.go). The dup is
+// gated inside genMethodIndex on the droppable-no-clone Map shape, so enabling the
+// flag here is safe for any other shape (it is reset after genExpr; clone-bearing
+// V dups internally and never double-dups). T1146.
+func isUnwrappedContainerIndex(expr ast.Expr) bool {
+	unwrap, ok := expr.(*ast.OptionalUnwrapExpr)
+	if !ok {
+		return false
+	}
+	inner := unwrap.Expr
+	for {
+		p, ok := inner.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		inner = p.Expr
+	}
+	_, ok = inner.(*ast.IndexExpr)
+	return ok
+}
+
 // maybeEnableDupForMutRefArg sets dupStringFieldAccess or dupContainerFieldAccess
 // when an arg about to be evaluated is a field read on a droppable owner that's
 // being passed to a `~` (consuming) param. Without this, the field's inner
@@ -6171,6 +6198,13 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 		pt = types.Substitute(pt, c.typeSubst)
 	}
 	if isRefType(pt) {
+		return
+	}
+	// T1146: `consume(m[k]!)` — inline unwrap of a container index passed to a
+	// move (~) param. Dup so the callee's consume-drop and the map's slot drop
+	// don't free the same instance. Mirrors the var-binding form (stmt.go:1133).
+	if isUnwrappedContainerIndex(arg) {
+		c.dupHeapUserFieldAccess = true
 		return
 	}
 	// T0403: IndexExpr against Vector[heap-user-type] passed to ~T.
@@ -6227,6 +6261,12 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 // maybeEnableDupForMutRefArg (T0366) for the constructor field-init path.
 // T0411.
 func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types.Type) {
+	// T1146: `Holder(res: m[k]!)` — inline unwrap of a container index used to
+	// initialize an owned field. Same double-free as the move-param case.
+	if isUnwrappedContainerIndex(arg) {
+		c.dupHeapUserFieldAccess = true
+		return
+	}
 	// T0847: peel parens + single/chained casts to find a container-element
 	// IndexExpr subject, then dup-on-read for `Holder(held: v[0])` /
 	// `Holder(held: v[0] as! C)`. Each cast layer is a non-consuming view.
@@ -10392,16 +10432,23 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 	// isContainerType — fires for Map and any other type with `[]` returning
 	// `Optional[heap-user-type]`.
 	//
-	// Gated to V types with an *explicit* user-written `drop()` AND no `clone()`
-	// (T0484). `Map[K, V].[]` is a synthesized method whose body uses a match
-	// destructure (`Slot.Used(k, v) => return v;`) that already dups V internally
-	// when V is safely-dup'able (typeNeedsMatchDup → heapTypeSafeToDup walks
-	// fields) or when V has a `clone()` method. The only V shape where Map.[]'s
-	// body leaves V aliased is: explicit drop, no clone, no synth-drop. Firing
-	// the dup outside that shape produces a redundant second copy whose pointer
-	// is lost (one alloc leaks per read). Uses dupHeapValue (memcpy + sub-field
-	// dup) directly, which is null-safe internally — important because `result`'s
-	// value field is zero/null when the Optional is None.
+	// Gated to V types that `Map[K, V].[]` returns by ALIAS — i.e. NOT
+	// match-dup'able (`!typeNeedsMatchDup`). `Map[K, V].[]` is a synthesized method
+	// whose body uses a match destructure (`Slot.Used(k, v) => return v;`) that
+	// already dups V internally when V is safely-dup'able (typeNeedsMatchDup →
+	// heapTypeSafeToDup walks fields) or when V has a `clone()` method. The V shapes
+	// where Map.[]'s body leaves V aliased are exactly `!typeNeedsMatchDup`: an
+	// *explicit* `drop()` with no clone (T0484), OR a synth-drop type whose fields
+	// aren't shallow-dup-safe (e.g. a droppable-element vector field — T1146).
+	// typeNeedsMatchDup already returns true for clone-bearing V (so this is skipped
+	// for them — their body dup makes the result owned) and for shallow-dup-safe V,
+	// so `!typeNeedsMatchDup` fires precisely on the aliased shapes. Firing outside
+	// that shape would produce a redundant second copy whose pointer is lost (one
+	// alloc leaks per read), which is why the predicate must be exact. The drop
+	// origin (explicit vs synthesized) is irrelevant — what matters is whether the
+	// body aliased. Uses dupHeapValue (memcpy + sub-field dup) directly, which is
+	// null-safe internally — important because `result`'s value field is zero/null
+	// when the Optional is None.
 	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
 		resultType := c.info.Types[e]
 		if c.typeSubst != nil {
@@ -10414,8 +10461,8 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 			}
 			if isDroppableHeapUserType(elem) {
 				if named := extractNamed(elem); named != nil &&
-					named.LookupMethod("drop") != nil &&
-					named.LookupMethod("clone") == nil {
+					named.LookupMethod("clone") == nil &&
+					!c.typeNeedsMatchDup(elem) {
 					c.dupHeapUserFieldAccess = false // consume the flag
 					innerVal := c.block.NewExtractValue(result, 1)
 					dup := c.dupHeapValue(innerVal, elem)

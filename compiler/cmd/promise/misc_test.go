@@ -191,6 +191,17 @@ func TestPrintVersionFallback(t *testing.T) {
 	}
 }
 
+func TestPrintVersionUsage(t *testing.T) {
+	var buf strings.Builder
+	printVersionUsage(&buf)
+	out := buf.String()
+	for _, want := range []string{"usage: promise version", "-commit", "-json", "Examples:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printVersionUsage output missing %q", want)
+		}
+	}
+}
+
 func TestFormatSize(t *testing.T) {
 	tests := []struct {
 		bytes int64

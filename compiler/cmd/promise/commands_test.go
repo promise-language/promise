@@ -88,6 +88,7 @@ func TestHandleHelpToStdout(t *testing.T) {
 		{"help router group", []string{"help", "package"}, "Subcommands:"},
 		{"rich renderer doc", []string{"doc", "-help"}, "usage: promise doc"},
 		{"rich renderer targets", []string{"targets", "-help"}, "usage: promise targets"},
+		{"rich renderer version", []string{"version", "-help"}, "usage: promise version"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,14 +135,15 @@ func TestRouteHelpEmptyPrintsOverview(t *testing.T) {
 // TestPrintNodeHelpSynthesizedLeaf verifies a leaf without a rich renderer gets a
 // synthesized usage synopsis plus its summary.
 func TestPrintNodeHelpSynthesizedLeaf(t *testing.T) {
-	node, matched, ok := findNode([]string{"version"})
+	// Use "format" — a leaf without a rich renderer — to test the synthesized path.
+	node, matched, ok := findNode([]string{"format"})
 	if !ok {
-		t.Fatal("version node not found")
+		t.Fatal("format node not found")
 	}
 	var buf strings.Builder
 	printNodeHelp(&buf, node, matched)
 	out := buf.String()
-	if !strings.Contains(out, "Usage: promise version") {
+	if !strings.Contains(out, "Usage: promise format") {
 		t.Errorf("synthesized leaf help missing usage line, got:\n%s", out)
 	}
 	if !strings.Contains(out, node.summary) {

@@ -180,6 +180,21 @@ func gatherVersionInfo() versionInfo {
 	return info
 }
 
+func printVersionUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: promise version [-commit | -json]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Print the compiler version, update channel, and build identity.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  -commit   Print the bare build-commit SHA and exit (machine-readable)")
+	fmt.Fprintln(w, "  -json     Print version, channel, commit, and build as JSON and exit")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  promise version           Human-readable: promise version 0.4.2 (channel stable, commit abc1234)")
+	fmt.Fprintln(w, "  promise version -json     Machine-readable JSON for tooling")
+	fmt.Fprintln(w, "  promise version -commit   Bare commit SHA for install gates")
+}
+
 func printVersion() {
 	info := gatherVersionInfo()
 	parts := []string{"channel " + info.Channel}

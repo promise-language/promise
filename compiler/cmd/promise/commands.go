@@ -82,7 +82,7 @@ var commandTree = []*cmdNode{
 	// Tooling
 	{name: "format", group: "Tooling", summary: "Format Promise source files"},
 	{name: "bind", group: "Tooling", summary: "Generate Promise bindings from WIT or WebIDL definitions", help: func(w io.Writer) { printBindUsage(w) }},
-	{name: "version", group: "Tooling", summary: "Print compiler version"},
+	{name: "version", group: "Tooling", summary: "Print compiler version", help: func(w io.Writer) { printVersionUsage(w) }},
 
 	// Compiler debugging
 	{name: "ast", group: "Compiler debugging", summary: "Print Promise AST"},

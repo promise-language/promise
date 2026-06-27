@@ -99,3 +99,130 @@ go_call_enum_vector_payload_move() `test {
   t := go msg_len_move(Msg.List([1, 2, 3, 4]));
   assert(<-t == 4, "go msg_len_move(Msg.List(...)) move result");
 }
+
+// T1157: enum-outer wrapping a HEAP-USER-TYPE payload (`Wrap.One(Box(...))`). The
+// inner Box ctor leaves a heap temp claimed by the enum ctor, so before the fix
+// genGoCallExpr mis-routed to the heap-root (isStruct) branch — extracting field 1
+// of the enum value struct ([16 x i8] payload data, not a pointer) and emitting an
+// invalid `bitcast [16 x i8] to ptr` that aborted opt. Now the enum is the root and
+// the goroutine drops via the synthesized Wrap.drop, which recurses into Box.drop.
+type Box {
+  string s;
+}
+
+enum Wrap {
+  One(Box b),
+  None,
+}
+
+// Borrow param: the goroutine frame owns the enum temp and must drop the Box payload.
+wrap_len(Wrap w) int {
+  return match w {
+    Wrap.One(b) => b.s.len,
+    Wrap.None => 0,
+  };
+}
+
+// Move param: the callee consumes the by-value enum and drops the Box at scope exit.
+wrap_len_move(Wrap move w) int {
+  return match w {
+    Wrap.One(b) => b.s.len,
+    Wrap.None => 0,
+  };
+}
+
+// Two heap-user-type enum payloads in one go-call (per-arg snapshot + multi isEnum drop).
+two_wrap_len(Wrap a, Wrap b) int {
+  la := match a {
+    Wrap.One(x) => x.s.len, Wrap.None => 0,
+  };
+  lb := match b {
+    Wrap.One(x) => x.s.len, Wrap.None => 0,
+  };
+  return la + lb;
+}
+
+// Borrow param, heap-user-type payload — the crashing case before the fix.
+go_call_enum_user_payload_borrow() `test {
+  t := go wrap_len(Wrap.One(Box(s: "hello".clone())));
+  assert(<-t == 5, "go wrap_len(Wrap.One(Box(clone))) borrow result");
+}
+
+// Move param, heap-user-type payload — callee consumes/drops, no goroutine drop.
+go_call_enum_user_payload_move() `test {
+  t := go wrap_len_move(Wrap.One(Box(s: "world".clone())));
+  assert(<-t == 5, "go wrap_len_move(Wrap.One(Box(clone))) move result");
+}
+
+// Payloadless variant through the heap-user-type callee — no spurious drop.
+go_call_enum_user_empty_variant() `test {
+  t := go wrap_len(Wrap.None);
+  assert(<-t == 0, "go wrap_len(Wrap.None) result");
+}
+
+// Two heap-user-type enum payloads in one go-call: the goroutine frame drops BOTH.
+go_call_two_enum_user_payloads() `test {
+  t := go two_wrap_len(Wrap.One(Box(s: "ab".clone())), Wrap.One(Box(s: "cde".clone())));
+  assert(<-t == 5, "two heap-user-type enum payloads summed");
+}
+
+// T1157 regression guard: heap-OUTER wrapping an enum (`Holder(w: Wrap.One(...))`).
+// The outer is a heap user type, so argIsEnum is false and the arg must keep its
+// heap-root (isStruct) handling — Holder.drop recurses into the enum field's drop,
+// which recurses into Box.drop. If the gate mis-fired (treated the outer struct as
+// an enum) this would extract the wrong field / run the wrong drop fn.
+type Holder {
+  Wrap w;
+}
+
+holder_len(Holder h) int {
+  return match h.w {
+    Wrap.One(b) => b.s.len,
+    Wrap.None => 0,
+  };
+}
+
+// Mixed args in one go-call: arg0 is an enum-with-heap-payload (isEnum branch),
+// arg1 is a plain heap user type (isStruct heap-root branch). Exercises per-arg
+// routing picking different branches within a single goroutine frame snapshot.
+mixed_len(Wrap a, Box b) int {
+  la := match a {
+    Wrap.One(x) => x.s.len,
+    Wrap.None => 0,
+  };
+  return la + b.s.len;
+}
+
+// Heap-outer wrapping an enum payload — must NOT route through the isEnum branch.
+go_call_heap_outer_wrapping_enum() `test {
+  t := go holder_len(Holder(w: Wrap.One(Box(s: "hello".clone()))));
+  assert(<-t == 5, "go holder_len(Holder(Wrap.One(Box(clone)))) borrow result");
+}
+
+// Mixed enum-payload + plain-heap args in one go-call: the frame drops both roots
+// via their distinct branches (isEnum for arg0, isStruct for arg1).
+go_call_mixed_enum_and_heap_args() `test {
+  t := go mixed_len(Wrap.One(Box(s: "ab".clone())), Box(s: "cde".clone()));
+  assert(<-t == 5, "mixed enum-payload + heap-struct args summed");
+}
+
+// Generic enum with a heap-user-type payload (`Opt[Box].Has(Box(...))`). Unlike the
+// non-generic Wrap (static type *types.Enum), the arg's static type is an *Instance
+// whose Origin is an enum — exercising the second arm of the argIsEnum switch. The
+// goroutine drops via the monomorphized Opt__Box.drop, recursing into Box.drop.
+enum Opt[T] {
+  Has(T v),
+  Nil,
+}
+
+opt_box_len(Opt[Box] o) int {
+  return match o {
+    Opt.Has(b) => b.s.len,
+    Opt.Nil => 0,
+  };
+}
+
+go_call_generic_enum_user_payload() `test {
+  t := go opt_box_len(Opt[Box].Has(Box(s: "hello".clone())));
+  assert(<-t == 5, "go opt_box_len(Opt.Has(Box(clone))) generic-enum result");
+}

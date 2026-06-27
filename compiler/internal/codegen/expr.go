@@ -14158,6 +14158,23 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		newStmt := c.stmtTemps[savedStmt:]
 		newEnum := c.enumCtorTemps[savedArgEnum:]
 
+		// T1157: whether the argument's OUTER type is an enum. An inline enum-ctor
+		// arg with a heap-user-type payload (`Wrap.One(Box(...))`) leaves the inner
+		// Box temp in newHeap (already claimed by the enum ctor), so the
+		// `len(newHeap)==1` heap-root branch would mis-route to the isStruct path
+		// using the inner type's drop fn and extracting the wrong field ([16 x i8]
+		// payload data, not a pointer) → invalid IR. Routing on argIsEnum keeps the
+		// enum as the root and drops via the synthesized per-enum drop fn.
+		argIsEnum := false
+		if at := argTypes[i]; at != nil {
+			switch t := at.(type) {
+			case *types.Enum:
+				argIsEnum = true
+			case *types.Instance:
+				_, argIsEnum = t.Origin().(*types.Enum)
+			}
+		}
+
 		var d goArgBorrowDrop
 		d.paramIdx = i
 		var rootFlag *ir.InstAlloca
@@ -14165,19 +14182,27 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			st := c.stmtTemps[idx]
 			rootFlag, d.dropFunc, d.elemType = st.dropFlag, st.dropFunc, st.elemType
 			c.stmtTempMap[v] = -1
+		} else if len(newEnum) == 1 && argIsEnum {
+			// T1154/T1157: the arg's outer type is an enum and it is an inline enum
+			// constructor — the enum is the root. Drop via the synthesized per-enum
+			// drop fn, which switches on the tag and recurses into the payload drop
+			// (string/vector OR a heap-user-type payload's T.drop). Gated on
+			// argIsEnum so a nested ctor like `Box(Msg.Text(...))` (outer = heap user
+			// type) keeps its heap-root handling. Routed here regardless of newHeap: a
+			// heap-user-type payload (`Wrap.One(Box(...))`) leaves the inner Box temp
+			// in newHeap — already claimed (caller flag cleared) by the enum ctor's
+			// claimHeapTemp — so routing it to the isStruct branch (T1157) extracted
+			// the wrong field ([16 x i8] data, not a pointer) and ran the wrong
+			// (inner) drop fn → crash. The enum is passed by value into the coro
+			// frame; its drop fn takes a pointer to the value-struct layout, so the
+			// goroutine spills the param and drops.
+			et := newEnum[0]
+			rootFlag, d.dropFunc = et.dropFlag, et.dropFunc
+			d.isEnum = true
 		} else if len(newHeap) == 1 {
 			ht := newHeap[0]
 			rootFlag, d.dropFunc, d.elemType = ht.dropFlag, ht.dropFunc, ht.elemType
 			_, d.isStruct = v.Type().(*irtypes.StructType)
-		} else if len(newEnum) == 1 && len(newHeap) == 0 {
-			// T1154: the argument value IS an inline enum constructor with a
-			// droppable payload (gated on no competing heap root so nested ctors
-			// like `Box(Msg.Text(...))` keep their heap-root handling). The enum is
-			// passed by value into the coro frame; its drop fn takes a pointer to
-			// the value-struct layout, so the goroutine spills the param and drops.
-			et := newEnum[0]
-			rootFlag, d.dropFunc = et.dropFlag, et.dropFunc
-			d.isEnum = true
 		}
 		if rootFlag == nil || d.dropFunc == nil {
 			isMove := i < len(calleeParams) && calleeParams[i].Ref() == types.RefMut

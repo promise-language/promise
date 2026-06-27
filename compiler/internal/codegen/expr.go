@@ -14118,11 +14118,13 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	// inline enum-constructor temps unconditionally, but go-call enum-payload
 	// args are left to pre-existing handling (the goroutine may reference the
 	// payload after the spawning statement, so a synchronous statement-end drop
-	// would be a use-after-free). Confining the T1108 change to synchronous
-	// calls leaves T1106 as the tracked follow-up.
+	// would be a use-after-free). Removing them from caller cleanup without a
+	// goroutine-side transfer currently LEAKS the payload for borrow params —
+	// tracked as T1154 (the enum-payload analogue of the T1106 Case A transfer).
 	savedGoEnumTemps := len(c.enumCtorTemps)
 	for i, arg := range callExpr.Args {
 		savedHeap := len(c.heapTemps)
+		savedStmt := len(c.stmtTemps)
 		v := c.genCallArgExpr(arg.Value)
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
@@ -14136,11 +14138,13 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		//   - a lone heap user-type temp from a direct constructor (covers
 		//     `Box(s: s.clone())` — the inner string is a claimed stmt temp, so
 		//     exactly one new heap temp remains).
-		// Conditional/polymorphic args (match/if expressions, nested
+		// T1106: conditional/polymorphic args (match/if expressions, nested
 		// constructors) yield a runtime phi over temporaries with possibly
-		// different concrete drops — no single static root — and enum-payload
-		// args are likewise left to pre-existing handling (tracked as T1106).
+		// different concrete drops — no single static root. These are handled by
+		// the Case A / Case B branches below via runtime drop dispatch. Enum-payload
+		// args are still left to pre-existing handling (tracked as T1154).
 		newHeap := c.heapTemps[savedHeap:]
+		newStmt := c.stmtTemps[savedStmt:]
 
 		var d goArgBorrowDrop
 		d.paramIdx = i
@@ -14155,12 +14159,57 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			_, d.isStruct = v.Type().(*irtypes.StructType)
 		}
 		if rootFlag == nil || d.dropFunc == nil {
+			isMove := i < len(calleeParams) && calleeParams[i].Ref() == types.RefMut
+
+			// T1106 Case A: a heap value-struct argument whose concrete type is not
+			// statically known — a runtime phi over match/if arms (each possibly a
+			// different concrete type) or a nested constructor (multiple live heap
+			// temps). A single static dropFunc would run the WRONG concrete drop on
+			// the non-selected arm, so the goroutine-side drop dispatches at runtime
+			// through the value's typeinfo drop_fn_ptr via __promise_structural_drop.
+			// claimHeapTemp runtime-compares v's instance pointer against each tracked
+			// heap temp and clears exactly the live arm's caller flag (non-taken arms
+			// hold null; nested-ctor inner temps were already claimed into the outer
+			// at construction). Move params: the callee consumes and drops via the
+			// same structural dispatch, so no goroutine-side drop is recorded.
+			if _, ok := v.Type().(*irtypes.StructType); ok && len(newHeap) >= 1 && c.structuralDrop != nil {
+				c.claimHeapTemp(v)
+				if !isMove {
+					argBorrowDrops = append(argBorrowDrops, goArgBorrowDrop{
+						paramIdx: i, dropFunc: c.structuralDrop, isStruct: true,
+					})
+				}
+				continue
+			}
+
+			// T1106 Case B: a string/vector argument whose root is a runtime phi over
+			// multiple owned temps (`if c { s1.clone() } else { s2.clone() }`). The
+			// drop is homogeneous (all string, or same-element vector), so a single
+			// static dropFunc over the selected temp suffices. clearMatchingStmtTemps
+			// clears the live arm's caller flag by runtime comparison; intermediates
+			// (e.g. the trim() result in `s.trim().clone()`) have a different pointer
+			// and stay with the caller.
+			if _, ok := v.Type().(*irtypes.StructType); !ok && len(newStmt) >= 1 {
+				at := argTypes[i]
+				_, isVec := types.AsVector(at)
+				if at != nil && (extractNamed(at) == types.TypString || isVec) {
+					rep := newStmt[len(newStmt)-1]
+					c.clearMatchingStmtTemps(v, newStmt)
+					if !isMove {
+						argBorrowDrops = append(argBorrowDrops, goArgBorrowDrop{
+							paramIdx: i, dropFunc: rep.dropFunc, elemType: rep.elemType,
+						})
+					}
+					continue
+				}
+			}
+
 			// T1148: a moved NAMED variable root (e.g. `go f(move x)` where x is a
 			// local/loop variable bound to a heap value) has no temporary to
 			// transfer, but its caller-side drop flag must still be cleared — the
 			// move param's callee consumes and drops it. Without this, both the
 			// caller's scope/loop teardown AND the callee free it → double free.
-			if i < len(calleeParams) && calleeParams[i].Ref() == types.RefMut {
+			if isMove {
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					c.clearDropFlag(ident.Name)
 				}

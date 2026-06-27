@@ -1,0 +1,254 @@
+// T1106: `t := go f(arg)` must transfer ownership of a conditional/polymorphic
+// heap-arg root — a runtime phi over match/if arms (each possibly a different
+// concrete type) or a nested constructor (multiple live heap temps) — into the
+// goroutine frame. The selected concrete value is dropped exactly once on the
+// goroutine side via runtime structural dispatch (__promise_structural_drop
+// through the value's typeinfo drop_fn_ptr), so heterogeneous arms drop the
+// RIGHT concrete type. These batch tests run under the per-binary leak/double-free
+// checker, so passing simultaneously proves correctness + zero double-free +
+// zero leak + no use-after-free.
+type Base {
+  get name string {
+    return "base";
+  }
+}
+type Box is Base {
+  string s;
+  get name string {
+    return this.s;
+  }
+}
+type Widget is Base {
+  string w;
+  string extra;
+  get name string {
+    return this.w;
+  }
+}
+
+// Nested heap user types for the nested-constructor shape.
+type Inner {
+  string s;
+}
+type Outer {
+  Inner inner;
+}
+
+// Borrow callees READ heap fields and return owned/value data (a clone or a
+// length) — never a borrow of the argument, which the goroutine drops on return.
+borrow_name(Base b) string {
+  return b.name.clone();
+}
+borrow_name_len(Base b) int {
+  return b.name.len;
+}
+borrow_inner_name(Outer o) string {
+  return o.inner.s.clone();
+}
+borrow_str_len(string p) int {
+  return p.len;
+}
+borrow_vec_total(string[] v) int {
+  total := 0;
+  for x in v {
+    total = total + x.len;
+  }
+  return total;
+}
+
+// Move callees CONSUME the polymorphic value; the callee drops it once at its own
+// scope exit (via structural dispatch). No goroutine-side drop is recorded.
+consume_name_len(Base move b) int {
+  return b.name.len;
+}
+consume_inner_len(Outer move o) int {
+  return o.inner.s.len;
+}
+
+// Move callees for the string/vector phi shape (Case B move): the callee consumes
+// the selected clone; the caller clears the live arm's flag, no goroutine drop.
+consume_str_len(string move p) int {
+  return p.len;
+}
+consume_vec_total(string[] move v) int {
+  total := 0;
+  for x in v {
+    total = total + x.len;
+  }
+  return total;
+}
+
+// --- Wrappers select the arm at runtime so the phi survives to runtime. ---
+
+run_match_poly(bool which) string {
+  t := go borrow_name(match which {
+    true => Box(s: "boxname".clone()),
+    _ => Widget(w: "widgetname".clone(), extra: "zz".clone()),
+  });
+  return <-t;
+}
+
+run_if_poly(bool which) string {
+  t := go borrow_name(if which {
+    Box(s: "alpha".clone())
+  } else {
+    Widget(w: "beta".clone(), extra: "qq".clone())
+  });
+  return <-t;
+}
+
+run_match_homogeneous(bool which) string {
+  t := go borrow_name(match which {
+    true => Box(s: "first".clone()),
+    _ => Box(s: "secondx".clone()),
+  });
+  return <-t;
+}
+
+run_nested_ctor(bool which) string {
+  t := go borrow_inner_name(if which {
+    Outer(inner: Inner(s: "nested-a".clone()))
+  } else {
+    Outer(inner: Inner(s: "nested-bb".clone()))
+  });
+  return <-t;
+}
+
+run_move_poly(bool which) int {
+  t := go consume_name_len(match which {
+    true => Box(s: "boxname".clone()),
+    _ => Widget(w: "widgetname".clone(), extra: "zz".clone()),
+  });
+  return <-t;
+}
+
+run_move_nested(bool which) int {
+  t := go consume_inner_len(if which {
+    Outer(inner: Inner(s: "nested-a".clone()))
+  } else {
+    Outer(inner: Inner(s: "nested-bb".clone()))
+  });
+  return <-t;
+}
+
+run_str_phi(bool which) int {
+  string a = "abc";
+  string b = "wxyz";
+  t := go borrow_str_len(if which {
+    a.clone()
+  } else {
+    b.clone()
+  });
+  return <-t;
+}
+
+run_vec_phi(bool which) int {
+  string[] a = ["aa", "bb"];
+  string[] b = ["ccc", "ddd", "eee"];
+  t := go borrow_vec_total(if which {
+    a.clone()
+  } else {
+    b.clone()
+  });
+  return <-t;
+}
+
+run_move_str_phi(bool which) int {
+  string a = "abc";
+  string b = "wxyz";
+  t := go consume_str_len(if which {
+    a.clone()
+  } else {
+    b.clone()
+  });
+  return <-t;
+}
+
+run_move_vec_phi(bool which) int {
+  string[] a = ["aa", "bb"];
+  string[] b = ["ccc", "ddd", "eee"];
+  t := go consume_vec_total(if which {
+    a.clone()
+  } else {
+    b.clone()
+  });
+  return <-t;
+}
+
+// --- Tests: exercise BOTH arms of each shape (heterogeneous drop coverage). ---
+
+// 1. Match-arm, heterogeneous concrete types, borrow param reading a heap field.
+poly_match_box() `test {
+  assert(run_match_poly(true) == "boxname", "match heterogeneous: Box arm");
+}
+poly_match_widget() `test {
+  assert(run_match_poly(false) == "widgetname", "match heterogeneous: Widget arm");
+}
+
+// 2. Match-arm, homogeneous concrete types (both Box).
+poly_match_homogeneous_first() `test {
+  assert(run_match_homogeneous(true) == "first", "match homogeneous: first arm");
+}
+poly_match_homogeneous_second() `test {
+  assert(run_match_homogeneous(false) == "secondx", "match homogeneous: second arm");
+}
+
+// 3. If-expression arg over heap user types, borrow param reading heap fields.
+poly_if_box() `test {
+  assert(run_if_poly(true) == "alpha", "if-expr heterogeneous: Box arm");
+}
+poly_if_widget() `test {
+  assert(run_if_poly(false) == "beta", "if-expr heterogeneous: Widget arm");
+}
+
+// 4. Nested-constructor arg `go f(Outer(Inner(...)))`, borrow param reading the
+//    nested heap field.
+poly_nested_ctor_a() `test {
+  assert(run_nested_ctor(true) == "nested-a", "nested ctor: arm a");
+}
+poly_nested_ctor_b() `test {
+  assert(run_nested_ctor(false) == "nested-bb", "nested ctor: arm b");
+}
+
+// 5. Move-param variants: the callee consumes and drops the selected value once.
+poly_move_box() `test {
+  assert(run_move_poly(true) == 7, "move heterogeneous: Box arm length");
+}
+poly_move_widget() `test {
+  assert(run_move_poly(false) == 10, "move heterogeneous: Widget arm length");
+}
+poly_move_nested_a() `test {
+  assert(run_move_nested(true) == 8, "move nested ctor: arm a length");
+}
+poly_move_nested_b() `test {
+  assert(run_move_nested(false) == 9, "move nested ctor: arm b length");
+}
+
+// 6. String/vector phi (homogeneous static drop), borrow param.
+poly_str_phi_a() `test {
+  assert(run_str_phi(true) == 3, "string phi: clone(a) length");
+}
+poly_str_phi_b() `test {
+  assert(run_str_phi(false) == 4, "string phi: clone(b) length");
+}
+poly_vec_phi_a() `test {
+  assert(run_vec_phi(true) == 4, "vector phi: clone(a) total");
+}
+poly_vec_phi_b() `test {
+  assert(run_vec_phi(false) == 9, "vector phi: clone(b) total");
+}
+
+// 7. String/vector phi consumed by a MOVE param (Case B move): the callee owns and
+//    drops the selected clone; the caller clears that arm's flag, no goroutine drop.
+poly_move_str_phi_a() `test {
+  assert(run_move_str_phi(true) == 3, "move string phi: clone(a) length");
+}
+poly_move_str_phi_b() `test {
+  assert(run_move_str_phi(false) == 4, "move string phi: clone(b) length");
+}
+poly_move_vec_phi_a() `test {
+  assert(run_move_vec_phi(true) == 4, "move vector phi: clone(a) total");
+}
+poly_move_vec_phi_b() `test {
+  assert(run_move_vec_phi(false) == 9, "move vector phi: clone(b) total");
+}

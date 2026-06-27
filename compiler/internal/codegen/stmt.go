@@ -5815,6 +5815,33 @@ func (c *Compiler) claimHeapTemp(val value.Value) {
 	}
 }
 
+// clearMatchingStmtTemps clears the caller-side drop flag of whichever statement
+// temp (string/vector) in temps matches val at runtime (T1106). Used for go-call
+// argument transfer when the heap-string/vector root is a runtime phi over multiple
+// owned temps (`if c { s1.clone() } else { s2.clone() }`): the phi value equals
+// exactly one arm's temp pointer at runtime, so a runtime pointer comparison clears
+// that arm's flag and leaves intermediates (e.g. the trim() result in
+// `s.trim().clone()`) with the caller. Non-taken arms' temp allocas hold null and
+// never match. Mirrors claimHeapTemp's per-temp comparison loop, but on i8* directly.
+func (c *Compiler) clearMatchingStmtTemps(val value.Value, temps []stmtTemp) {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if val.Type() != irtypes.I8Ptr {
+		return
+	}
+	for _, temp := range temps {
+		tracked := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isSame := c.block.NewICmp(enum.IPredEQ, val, tracked)
+		claimBlk := c.newBlock("stmt.claim")
+		skipBlk := c.newBlock("stmt.claim.skip")
+		c.block.NewCondBr(isSame, claimBlk, skipBlk)
+		claimBlk.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+		claimBlk.NewBr(skipBlk)
+		c.block = skipBlk
+	}
+}
+
 // cleanupHeapTemps drops all unclaimed heap instance temps at statement end (T0088).
 // For each temp: check flag → null-check ptr → call drop(ptr).
 func (c *Compiler) cleanupHeapTemps() {

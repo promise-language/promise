@@ -14288,11 +14288,31 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	for i, arg := range callExpr.Args {
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 			if binding, ok := c.dropBindings[ident.Name]; ok {
-				if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
+				elemType, isCh := types.AsChannel(binding.valType)
+				if isCh || binding.named == types.TypChannel {
 					chPtr := c.block.NewBitCast(argVals[i], irtypes.NewPointer(chanTypeDC))
 					rcField := c.block.NewGetElementPtr(chanTypeDC, chPtr,
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
 					c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+
+					// T1158: balance the increment with a goroutine-side drop. The
+					// goroutine borrows the channel (a plain ident is never a `move`,
+					// which would not be an *ast.IdentExpr); without a matching
+					// decrement the refcount never reaches 0 and the channel + its
+					// buffers leak (5 allocations). Channel[T].drop's atomic refcount
+					// gates the actual free, so caller and goroutine drops are safe in
+					// any order. Resolve the element type so buffered T items drop too.
+					if elemType == nil && binding.named == types.TypChannel && c.typeSubst != nil {
+						if tp := types.TypChannel.TypeParams(); len(tp) > 0 {
+							elemType = c.typeSubst[tp[0]]
+						}
+					}
+					if c.typeSubst != nil && elemType != nil {
+						elemType = types.Substitute(elemType, c.typeSubst)
+					}
+					argBorrowDrops = append(argBorrowDrops, goArgBorrowDrop{
+						paramIdx: i, dropFunc: c.getOrCreateChannelDrop(elemType),
+					})
 				}
 			}
 		}

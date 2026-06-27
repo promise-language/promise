@@ -11646,6 +11646,55 @@ func TestChannelDropFlagInDroppableContainer(t *testing.T) {
 	assertContains(t, ir, `call void @"Channel[int].drop"(`)
 }
 
+// T1158: passing a channel as a `go f(ch)` argument increments the channel
+// refcount (B0163) AND registers a matching goroutine-side Channel[T].drop after
+// the target call returns, so the refcount returns to 0 and the channel is freed
+// (previously the increment had no balancing decrement → 5-allocation leak).
+func TestGoCallChannelArgGoroutineDrop(t *testing.T) {
+	ir := generateIR(t, `
+		ping(channel[int] out) { out.send(1); }
+		main() {
+			ch := channel[int](capacity: 1);
+			go ping(ch);
+		}
+	`)
+	// The goroutine coroutine body must contain the balancing drop. Anchor on the
+	// `define ... @.goroutine.0(` line via extractDefine — extractFunction would
+	// latch onto a `@.goroutine.0` fn-pointer reference inside @.goroutine.main
+	// and extract the MAIN coroutine instead (whose caller-side drop of `ch` would
+	// make this assertion pass for the wrong reason).
+	coroFn := extractDefine(ir, `.goroutine.0`)
+	if coroFn == "" {
+		t.Fatal("expected .goroutine.0 coroutine function in IR")
+	}
+	if got := strings.Count(coroFn, `call void @"Channel[int].drop"(`); got != 1 {
+		t.Fatalf("expected exactly 1 goroutine-side Channel[int].drop, got %d", got)
+	}
+}
+
+// T1158: two channel args to one `go f(a, b)` call must each get their own
+// goroutine-side drop — the per-arg loop appends one goArgBorrowDrop per channel,
+// so the coroutine body holds exactly two balancing Channel[int].drop calls (one
+// increment, one decrement per channel). Guards against a regression that only
+// drops the first channel and leaks the rest.
+func TestGoCallTwoChannelArgsBothDropped(t *testing.T) {
+	ir := generateIR(t, `
+		ping2(channel[int] a, channel[int] b) { a.send(1); b.send(2); }
+		main() {
+			x := channel[int](capacity: 1);
+			y := channel[int](capacity: 1);
+			go ping2(x, y);
+		}
+	`)
+	coroFn := extractDefine(ir, `.goroutine.0`)
+	if coroFn == "" {
+		t.Fatal("expected .goroutine.0 coroutine function in IR")
+	}
+	if got := strings.Count(coroFn, `call void @"Channel[int].drop"(`); got != 2 {
+		t.Fatalf("expected 2 goroutine-side Channel[int].drop calls (one per channel arg), got %d", got)
+	}
+}
+
 // Non-droppable type: no drop flag or call generated for that variable
 func TestDropNotGeneratedForNonDroppable(t *testing.T) {
 	ir := generateIR(t, `

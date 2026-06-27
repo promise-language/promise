@@ -1,0 +1,120 @@
+// T1158: passing a `channel[T]` as an argument to a `go f(ch)` call must NOT
+// leak. B0163 increments the channel refcount when a channel is handed to a
+// goroutine (both caller and goroutine then hold a reference), but the fast
+// go-call path (`genGoCallExpr`) never registered the matching goroutine-side
+// decrement — so the refcount never returned to 0 and the channel struct, ring
+// buffer, mutex, and 2 cond vars (5 allocations) leaked. The goroutine borrows
+// the channel, so a goroutine-side Channel[T].drop after the target call returns
+// balances the increment exactly; Channel[T].drop's atomic refcount gates the
+// real free, so caller and goroutine drops are safe in any order (no double
+// free / use-after-free). These batch tests run under the per-binary
+// leak/double-free checker, so passing simultaneously proves 0 leak + 0 UAF.
+ping(channel[int] out) {
+  out.send(1);
+}
+
+ping_str(channel[string] out) {
+  out.send("hello");
+}
+
+// Two channel args in one go-call — exercises the per-arg loop appending a
+// separate goroutine-side drop for each channel (both refcounts must balance).
+ping_two(channel[int] a, channel[int] b) {
+  a.send(1);
+  b.send(2);
+}
+
+// A channel arg alongside a non-channel heap (string) arg — the channel's
+// goroutine-side drop must coexist with the string borrow-drop without
+// clobbering paramIdx bookkeeping.
+ping_mixed(channel[int] out, string msg) {
+  out.send(msg.len);
+}
+
+// Fire-and-forget consumer that never reads — the goroutine holds its channel
+// reference for its whole lifetime and the caller drops independently; both
+// sides race to drop with no synchronization point.
+sink(channel[int] c) {
+  // intentionally empty: borrow only, no send/recv
+}
+
+// Generic wrapper so codegen runs with c.typeSubst active when it reaches the
+// go-call channel-arg path (T1158 substitute branch). `done` is a concrete
+// channel[int] passed to the non-generic `ping` ident → stays on the fast
+// genGoCallExpr path while typeSubst is non-nil.
+spawn_and_wait[T](T tag) bool {
+  done := channel[int](capacity: 1);
+  go ping(done);
+  return (<-done)! == 1;
+}
+
+// Synchronous (non-go) consumer — regression guard: passing a channel to a
+// plain call has never leaked and must stay that way.
+drain(channel[int] c) int {
+  v := <-c;
+  return v!;
+}
+
+// Acceptance 1: buffered channel arg → zero allocations leaked.
+go_call_channel_arg_buffered() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  go ping(done);
+  assert((<-done)! == 1, "buffered channel arg");
+}
+
+// Acceptance 1: unbuffered channel arg → zero allocations leaked.
+go_call_channel_arg_unbuffered() `test(exclude: wasm) {
+  done := channel[int]();
+  go ping(done);
+  assert((<-done)! == 1, "unbuffered channel arg");
+}
+
+// Acceptance 3: a channel with a heap (string) element exercises the buffered
+// element-drop path inside Channel[T].drop on the goroutine side.
+go_call_channel_arg_string() `test(exclude: wasm) {
+  done := channel[string](capacity: 1);
+  go ping_str(done);
+  assert((<-done)! == "hello", "string channel arg");
+}
+
+// Acceptance 2: two channel args to one go-call — every increment is balanced
+// by its own goroutine-side drop, no double-free across the pair.
+go_call_two_channel_args() `test(exclude: wasm) {
+  a := channel[int](capacity: 1);
+  b := channel[int](capacity: 1);
+  go ping_two(a, b);
+  assert((<-a)! == 1, "first channel arg");
+  assert((<-b)! == 2, "second channel arg");
+}
+
+// Acceptance 2: channel arg next to a non-channel heap arg — both borrow-drops
+// fire on the goroutine side without interfering.
+go_call_channel_and_string_arg() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  go ping_mixed(done, "hello");
+  assert((<-done)! == 5, "mixed channel + string args");
+}
+
+// Acceptance 2: pure fire-and-forget — the goroutine never consumes, so the
+// caller and the goroutine race to drop the channel. The atomic refcount must
+// gate the single real free regardless of ordering (no leak, no double-free).
+go_call_channel_fire_and_forget() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  go sink(done);
+  // No receive: `done` is dropped by the caller at scope exit while the
+  // goroutine still (briefly) holds its borrowed reference.
+}
+
+// T1158 substitute branch: go-call channel arg reached with typeSubst active
+// inside a monomorphized generic body. Two instantiations to be thorough.
+go_call_channel_arg_generic_context() `test(exclude: wasm) {
+  assert(spawn_and_wait(42), "generic int instantiation");
+  assert(spawn_and_wait("x"), "generic string instantiation");
+}
+
+// Regression guard: a channel passed to a SYNCHRONOUS call still doesn't leak.
+sync_call_channel_arg() `test {
+  done := channel[int](capacity: 1);
+  done.send(7);
+  assert(drain(done) == 7, "synchronous channel arg");
+}

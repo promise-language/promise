@@ -128,7 +128,13 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			}
 		}
 		if e.Block != nil {
+			// T1151: a var-decl inside a `go { … }` block is owned by the
+			// goroutine frame, not iteration-bounded — reset loop depth so such
+			// locals are not flagged even when the go-block is lexically in a loop.
+			savedLoopDepth := c.loopDepth
+			c.loopDepth = 0
 			c.checkBlock(e.Block)
+			c.loopDepth = savedLoopDepth
 		}
 
 	case *ast.UnsafeExpr:
@@ -2358,6 +2364,11 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	savedSig := c.curSig
 	savedParams := c.params
 	savedReturnOrigins := c.returnOrigins
+	// T1151: a var-decl inside a lambda body is owned by the closure frame, not
+	// iteration-bounded — reset loop depth so such locals are not flagged even
+	// when the lambda is lexically inside a loop.
+	savedLoopDepth := c.loopDepth
+	c.loopDepth = 0
 
 	// T0426: use the lambda's own signature for return checks. Without this,
 	// `checkReturnRefSafety` reads the outer fn's c.curSig, producing both
@@ -2402,4 +2413,5 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	c.curSig = savedSig
 	c.params = savedParams
 	c.returnOrigins = savedReturnOrigins
+	c.loopDepth = savedLoopDepth
 }

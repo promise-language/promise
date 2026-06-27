@@ -13813,3 +13813,312 @@ func TestT1147GoCallNestedLoopBindingRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "borrowed loop variable")
 }
+
+// === T1151: borrow of an owned droppable local declared inside a loop body
+// escaping into a `go` call (sibling of T1147's loop-binding shape) ===
+
+// Reject: a typed owned `string` local declared in a for-in body, borrowed into
+// a `go` call. The local's scope ends at the iteration boundary, so the borrow
+// dangles into a goroutine that may outlive it → use-after-free (the exact repro).
+func TestT1151GoCallLoopBodyLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs {
+				string y = x.clone();
+				tk := go keep(y);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: the inferred-decl form (`y := x.clone()`) — flagLoopBodyOwnedLocal
+// fires in checkInferredVarDecl too.
+func TestT1151GoCallLoopBodyLocalInferredRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs {
+				y := x.clone();
+				tk := go keep(y);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: the same shape inside a `while` body — exercises checkWhileStmt raising
+// loop depth.
+func TestT1151GoCallLoopBodyLocalWhileRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			bool go_on = true;
+			while go_on {
+				string y = "v".clone();
+				tk := go keep(y);
+				r := <-tk;
+				print_line(r);
+				go_on = false;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: the same shape inside a classic `for` body — exercises
+// checkClassicForStmt raising loop depth.
+func TestT1151GoCallLoopBodyLocalClassicForRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			for i := 0; i < 3; i = i + 1 {
+				string y = "v".clone();
+				tk := go keep(y);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: the same shape inside an infinite `for { }` loop body — exercises
+// checkInfiniteLoop raising loop depth.
+func TestT1151GoCallLoopBodyLocalInfiniteLoopRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			for {
+				string y = "v".clone();
+				tk := go keep(y);
+				r := <-tk;
+				print_line(r);
+				break;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: an owned heap-user-type local in a loop body — coverage is broader than
+// `string`; isDroppableType covers any droppable owned local.
+func TestT1151GoCallLoopBodyHeapUserLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		describe(Box b) string { return b.s.clone(); }
+		test() {
+			for i in 0..3 {
+				Box b = Box(s: "a".clone());
+				tk := go describe(b);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Accept: a Copy local (`int y = ...`) in a loop body — excluded by isCopyType,
+// passed by value into the coro frame.
+func TestT1151GoCallLoopBodyCopyLocalOK(t *testing.T) {
+	ownerOK(t, `
+		add(int n) int { return n + 1; }
+		test() {
+			for i in 0..3 {
+				int y = i;
+				tk := go add(y);
+				r := <-tk;
+			}
+		}
+	`)
+}
+
+// Accept: `move` of the loop-body local into a consuming `move` param transfers
+// ownership into the goroutine frame.
+func TestT1151GoCallLoopBodyLocalMoveOK(t *testing.T) {
+	ownerOK(t, `
+		store(string move s) string { return s; }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs {
+				string y = x.clone();
+				tk := go store(move y);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+}
+
+// Accept: cloning the loop-body local into a fresh temp at the call site — the arg
+// root is not an ident, so the borrow-escape check does not fire.
+func TestT1151GoCallLoopBodyLocalCloneTempOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs {
+				string y = x.clone();
+				tk := go keep(y.clone());
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+}
+
+// Accept: an owned droppable local declared BEFORE the loop, borrowed into a `go`
+// call inside the loop — loopDepth == 0 at its decl, so it is not flagged; its
+// function-scope lifetime is sound when awaited in scope.
+func TestT1151GoCallLocalBeforeLoopOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string y = "shared".clone();
+			for i in 0..3 {
+				tk := go keep(y);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+}
+
+// Accept: an owned local declared inside a `go { }` block that is itself inside a
+// loop, borrowed into a nested `go` — the depth-reset guard in the GoExpr case
+// prevents a false positive (the local is owned by the goroutine frame).
+func TestT1151GoBlockLocalInLoopOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			for i in 0..3 {
+				go {
+					string y = "v".clone();
+					tk := go keep(y);
+					r := <-tk;
+					print_line(r);
+				}
+			}
+		}
+	`)
+}
+
+// Accept: an owned local declared inside a lambda body that is itself inside a
+// loop — the depth-reset guard in checkLambdaExpr prevents a false positive.
+func TestT1151LambdaLocalInLoopOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			for i in 0..3 {
+				f := || {
+					string y = "v".clone();
+					tk := go keep(y);
+					r := <-tk;
+					print_line(r);
+				};
+				f();
+			}
+		}
+	`)
+}
+
+// Accept (regression guard): an owned loop-body local borrowed into a *plain*
+// (non-`go`) call is sound — the flag must not leak into ordinary calls.
+func TestT1151PlainCallLoopBodyLocalOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs {
+				string y = x.clone();
+				r := keep(y);
+				print_line(r);
+			}
+		}
+	`)
+}
+
+// Accept: a loop-body local must not stay flagged after the loop closes — the
+// enterLoopBody/exitLoopBody snapshot removes body locals at loop exit, so a
+// same-named local at function scope after the loop is sound to borrow into `go`.
+func TestT1151LocalAfterLoopNotFlaggedOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { r := keep(x); print_line(r); }
+			string y = "after".clone();
+			tk := go keep(y);
+			r := <-tk;
+			print_line(r);
+		}
+	`)
+}
+
+// Reject: an outer-loop-body local borrowed into a `go` call nested inside an
+// INNER loop. The inner loop's enterLoopBody snapshot copies the outer local
+// (already in the set) forward, so the borrow-escape still fires at the nested
+// call site — the outer local is just as iteration-bounded from the inner loop's
+// perspective. Exercises the snapshot-carries-forward path unique to T1151.
+func TestT1151GoCallOuterLoopBodyLocalInNestedLoopRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			for i in 0..2 {
+				string y = "v".clone();
+				for j in 0..2 {
+					tk := go keep(y);
+					r := <-tk;
+					print_line(r);
+				}
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Accept: an inner-loop-body local must not stay flagged after the INNER loop
+// closes while still inside the OUTER loop — the inner exitLoopBody snapshot
+// restore drops it. A plain (non-`go`) reuse of the same name after the inner
+// loop is sound, confirming the snapshot scope is the inner loop, not the outer.
+func TestT1151InnerLoopBodyLocalNotFlaggedAfterInnerLoopOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			for i in 0..2 {
+				for j in 0..2 {
+					string y = "v".clone();
+					r := keep(y);
+					print_line(r);
+				}
+			}
+		}
+	`)
+}
+
+// Reject: a loop-body local of an owned droppable ENUM (a droppable variant
+// payload) — confirms flagLoopBodyOwnedLocal's isDroppableType guard covers
+// enums, not just strings / heap user types.
+func TestT1151GoCallLoopBodyEnumLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Holder { Empty, Full(string value) }
+		describe(Holder h) string { return "x".clone(); }
+		test() {
+			for i in 0..3 {
+				Holder h = Holder.Full("a".clone());
+				tk := go describe(h);
+				r := <-tk;
+				print_line(r);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}

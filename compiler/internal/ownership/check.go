@@ -46,9 +46,11 @@ type Checker struct {
 	// a `go` call lets the borrow escape into a goroutine that can outlive the
 	// loop iteration → use-after-free. Disjoint from forInAliasBindings/
 	// forInSingleOwnerBindings (those alias container storage and are sound).
-	// T1151 (follow-up): generalize this to owned droppable locals declared
-	// *within* a loop body (`for … { string y = …; go f(y); }`), which have the
-	// same iteration-bounded scope but a different declaration shape.
+	// T1151: this set also holds owned non-copy droppable locals declared *within*
+	// a loop body (`for … { string y = …; go f(y); }`), added by the var-decl
+	// handlers via flagLoopBodyOwnedLocal when loopDepth ≥ 1 — they have the same
+	// iteration-bounded scope as a for-in binding. The whole-map snapshot taken in
+	// enterLoopBody / restored in exitLoopBody removes such body locals at loop exit.
 	forInOwnedDroppableBindings map[string]bool
 
 	// Drop ordering: tracks declaration order for LIFO drop-order validation.
@@ -67,6 +69,12 @@ type Checker struct {
 	// Lifetime analysis (B0033): tracks which parameter names appear as return
 	// origins across the function body, for ambiguity detection (rule 4).
 	returnOrigins map[string]ast.Pos
+
+	// loopDepth is the current loop-body nesting depth; loop-body var-decls of
+	// owned droppable locals at depth ≥ 1 are iteration-bounded, so borrowing
+	// them into a `go f(arg)` call is rejected like a for-in binding (T1151).
+	// Reset to 0 inside lambda / go-block bodies (those frames own their locals).
+	loopDepth int
 }
 
 // paramInitialState returns the initial ownership state for a function or
@@ -161,6 +169,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
 	savedReturnOrigins := c.returnOrigins
+	savedLoopDepth := c.loopDepth
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
@@ -174,6 +183,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
 	c.returnOrigins = nil
+	c.loopDepth = 0
 
 	consuming := d.IsSetter
 	for _, p := range sig.Params() {
@@ -200,6 +210,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.nextOrder = savedNextOrder
 	c.returnOrigins = savedReturnOrigins
 	c.varTypes = savedVarTypes
+	c.loopDepth = savedLoopDepth
 }
 
 func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
@@ -279,6 +290,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
 	savedReturnOrigins := c.returnOrigins
+	savedLoopDepth := c.loopDepth
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
@@ -292,6 +304,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
 	c.returnOrigins = nil
+	c.loopDepth = 0
 
 	if m.Sig().Recv() != nil {
 		c.state["this"] = paramInitialState(m.Sig().Recv(), false)
@@ -325,6 +338,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.nextOrder = savedNextOrder
 	c.varTypes = savedVarTypes
 	c.returnOrigins = savedReturnOrigins
+	c.loopDepth = savedLoopDepth
 }
 
 // lookupFileScope finds an object in the file-level scope.

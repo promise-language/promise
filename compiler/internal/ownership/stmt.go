@@ -225,6 +225,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
 		}
+		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 	// Raw pointer types are only allowed inside unsafe blocks.
 	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
@@ -472,6 +473,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
 		}
+		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 }
 
@@ -1272,6 +1274,42 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	}
 }
 
+// enterLoopBody raises the loop-nesting depth and snapshots the owned-droppable
+// set so loop-body-local declarations added while checking the body (via
+// flagLoopBodyOwnedLocal) are removed at loop exit — their iteration-bounded
+// scope ends with the loop. Returns the snapshot to pass to exitLoopBody. T1151.
+func (c *Checker) enterLoopBody() map[string]bool {
+	c.loopDepth++
+	snap := make(map[string]bool, len(c.forInOwnedDroppableBindings))
+	for k, v := range c.forInOwnedDroppableBindings {
+		snap[k] = v
+	}
+	return snap
+}
+
+// exitLoopBody restores the owned-droppable set to its pre-body snapshot and
+// lowers the loop-nesting depth. T1151.
+func (c *Checker) exitLoopBody(snap map[string]bool) {
+	c.forInOwnedDroppableBindings = snap
+	c.loopDepth--
+}
+
+// flagLoopBodyOwnedLocal records an owned, non-copy, droppable local declared
+// inside a loop body (loopDepth ≥ 1) as iteration-bounded, so borrowing it into
+// a `go f(arg)` call is rejected by rejectGoCallLoopBindingBorrowEscape — the
+// goroutine can outlive the iteration, leaving a dangling borrow (T1151). Only
+// the genuinely-Owned var-decl path reaches here: aliasing/borrow decls return
+// early (marked Borrowed) before this point, and Copy locals are excluded.
+func (c *Checker) flagLoopBodyOwnedLocal(name string, value ast.Expr) {
+	if c.loopDepth == 0 || name == "_" {
+		return
+	}
+	typ := c.info.Types[value]
+	if typ != nil && !isCopyType(typ) && isDroppableType(typ) {
+		c.forInOwnedDroppableBindings[name] = true
+	}
+}
+
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	c.checkExpr(s.Cond)
 	// Expire call-scoped borrows from the condition so the loop body can
@@ -1281,8 +1319,10 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	snap := c.enterLoopBody()
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
+	c.exitLoopBody(snap)
 }
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
@@ -1307,8 +1347,10 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	snap := c.enterLoopBody()
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
+	c.exitLoopBody(snap)
 }
 
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
@@ -1379,6 +1421,11 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		}
 	}
 
+	// Snapshot the owned-droppable set and raise loop depth BEFORE adding the
+	// for-in binding below, so exitLoopBody removes both the binding and any
+	// loop-body locals (added by flagLoopBodyOwnedLocal) together at loop exit.
+	snap := c.enterLoopBody()
+
 	// T1147: an OWNED (non-aliasing) non-copy droppable for-in binding — a string
 	// element (dup'd per iteration), or an owned value yielded by an iterator /
 	// Channel / generator. Its lifetime ends at the iteration boundary, so
@@ -1386,15 +1433,11 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	// may outlive the iteration → use-after-free. The `!flaggedAlias &&
 	// !flaggedSingleOwner` guard keeps this set disjoint from the aliasing sets
 	// (heap-user / single-owner bindings point into a container that outlives the
-	// loop and are sound). Save/restore for nested-loop binding-name reuse.
-	var prevOwned bool
-	var hadPrevOwned bool
-	flaggedOwned := false
+	// loop and are sound). The whole-map snapshot above subsumes per-key
+	// save/restore for nested-loop binding-name reuse.
 	if s.Binding != "_" && !flaggedAlias && !flaggedSingleOwner {
 		if bt := c.forInBindingType(s); bt != nil && !isCopyType(bt) && isDroppableType(bt) {
-			prevOwned, hadPrevOwned = c.forInOwnedDroppableBindings[s.Binding]
 			c.forInOwnedDroppableBindings[s.Binding] = true
-			flaggedOwned = true
 		}
 	}
 
@@ -1402,6 +1445,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
+	c.exitLoopBody(snap)
 
 	if flaggedSingleOwner {
 		if hadPrevSingleOwner {
@@ -1415,13 +1459,6 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			c.forInAliasBindings[s.Binding] = prevAlias
 		} else {
 			delete(c.forInAliasBindings, s.Binding)
-		}
-	}
-	if flaggedOwned {
-		if hadPrevOwned {
-			c.forInOwnedDroppableBindings[s.Binding] = prevOwned
-		} else {
-			delete(c.forInOwnedDroppableBindings, s.Binding)
 		}
 	}
 }
@@ -1505,6 +1542,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	if c.borrows != nil {
 		c.borrows.ExpireCallScoped()
 	}
+	snap := c.enterLoopBody()
 	c.checkBlock(s.Body)
 	if s.UpdateIncDec {
 		if s.UpdateTarget != nil {
@@ -1514,6 +1552,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 		c.checkExpr(s.UpdateValue)
 	}
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
+	c.exitLoopBody(snap)
 }
 
 func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
@@ -1594,8 +1633,10 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 func (c *Checker) checkInfiniteLoop(s *ast.InfiniteLoop) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	snap := c.enterLoopBody()
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
+	c.exitLoopBody(snap)
 }
 
 // mergeLoopState merges the post-body state of a loop with the pre-loop state.

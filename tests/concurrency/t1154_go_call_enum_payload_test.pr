@@ -1,0 +1,101 @@
+// T1154: `t := go f(Enum.V(heap_payload))` must transfer ownership of the inline
+// enum-constructor temporary's droppable payload into the goroutine frame instead
+// of dropping it from the caller's statement-end cleanup with no replacement
+// (which leaked the cloned payload) — for borrow params the goroutine drops via
+// the synthesized per-enum drop fn after the call; for move params the callee
+// consumes and drops. These batch tests run under the per-binary leak/double-free
+// checker, so passing simultaneously proves zero leak + zero double-free + no UAF.
+enum Msg {
+  Text(string body),
+  Count(int n),
+  List(int[] items),
+  Empty,
+}
+
+// Borrow param: the goroutine frame owns the enum temp and must drop its payload.
+msg_len(Msg m) int {
+  return match m {
+    Msg.Text(b) => b.len,
+    Msg.Count(n) => n,
+    Msg.List(items) => items.len,
+    Msg.Empty => 0,
+  };
+}
+
+// Move param: the callee consumes the by-value enum and drops it at scope exit.
+msg_len_move(Msg move m) int {
+  return match m {
+    Msg.Text(b) => b.len,
+    Msg.Count(n) => n,
+    Msg.List(items) => items.len,
+    Msg.Empty => 0,
+  };
+}
+
+// Two enum payload args in one go-call (exercises per-arg snapshot + multi-drop).
+two_msg_len(Msg a, Msg b) int {
+  la := match a {
+    Msg.Text(x) => x.len, Msg.Count(n) => n, Msg.List(items) => items.len, Msg.Empty => 0,
+  };
+  lb := match b {
+    Msg.Text(x) => x.len, Msg.Count(n) => n, Msg.List(items) => items.len, Msg.Empty => 0,
+  };
+  return la + lb;
+}
+
+// Void-return target taking a borrowed enum payload.
+sink_msg(Msg m) {
+  n := match m {
+    Msg.Text(b) => b.len, Msg.Count(n) => n, Msg.List(items) => items.len, Msg.Empty => 0,
+  };
+  assert(n == 2, "void target observed correct enum payload length");
+}
+
+// Borrow param with a droppable (string) payload — the leaking case before the fix.
+go_call_enum_payload_borrow() `test {
+  t := go msg_len(Msg.Text("hello".clone()));
+  assert(<-t == 5, "go msg_len(Msg.Text(clone)) borrow result");
+}
+
+// Move param with a droppable payload — guards the no-double-free path.
+go_call_enum_payload_move() `test {
+  t := go msg_len_move(Msg.Text("hello".clone()));
+  assert(<-t == 5, "go msg_len_move(Msg.Text(clone)) move result");
+}
+
+// Payloadless variant — no spurious drop / no regression.
+go_call_enum_empty_variant() `test {
+  t := go msg_len(Msg.Empty);
+  assert(<-t == 0, "go msg_len(Msg.Empty) result");
+}
+
+// Non-droppable (int) payload variant — no spurious drop.
+go_call_enum_int_payload() `test {
+  t := go msg_len(Msg.Count(7));
+  assert(<-t == 7, "go msg_len(Msg.Count(7)) result");
+}
+
+// Two enum borrow payloads in one go-call: the goroutine frame drops BOTH.
+go_call_two_enum_payloads() `test {
+  t := go two_msg_len(Msg.Text("ab".clone()), Msg.Text("cde".clone()));
+  assert(<-t == 5, "two enum borrow payloads summed");
+}
+
+// Void-return target with a borrowed enum payload — exercises the void emit site.
+go_call_enum_payload_void() `test {
+  t := go sink_msg(Msg.Text("hi".clone()));
+  <-t;
+}
+
+// Borrow param with a VECTOR (non-string) droppable payload — the synthesized
+// enum drop fn must drop the vector buffer, a different branch than the string one.
+go_call_enum_vector_payload_borrow() `test {
+  t := go msg_len(Msg.List([10, 20, 30]));
+  assert(<-t == 3, "go msg_len(Msg.List(...)) borrow result");
+}
+
+// Move param with a vector payload — callee consumes/drops, no goroutine drop.
+go_call_enum_vector_payload_move() `test {
+  t := go msg_len_move(Msg.List([1, 2, 3, 4]));
+  assert(<-t == 4, "go msg_len_move(Msg.List(...)) move result");
+}

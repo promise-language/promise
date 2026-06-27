@@ -14015,6 +14015,7 @@ type goArgBorrowDrop struct {
 	dropFunc *ir.Func   // concrete drop function (promise_string_drop, Vector[T].drop, T.drop)
 	elemType types.Type // vector element type for element drops (nil for non-vectors)
 	isStruct bool       // coro param is a value struct {vtable, instance} → drop field 1 (heap user type)
+	isEnum   bool       // T1154: coro param is an enum value struct; spill to alloca and pass &slot to the enum drop fn
 }
 
 // emitGoArgBorrowDrops frees the heap argument temporaries owned by a goroutine
@@ -14033,6 +14034,14 @@ func (c *Compiler) emitGoArgBorrowDrops(coroFn *ir.Func, entry, cur *ir.Block, d
 	for _, d := range drops {
 		param := coroFn.Params[d.paramIdx]
 		switch {
+		case d.isEnum:
+			// T1154: enum value passed by value into the coro frame — spill it to a
+			// frame slot so the synthesized enum drop fn (which takes a pointer to
+			// the value-struct layout and switches on the tag) can free the variant
+			// payload exactly once.
+			slot := c.createEntryAlloca(param.Type())
+			c.block.NewStore(param, slot)
+			c.block.NewCall(d.dropFunc, c.block.NewBitCast(slot, irtypes.I8Ptr))
 		case d.isStruct:
 			// Heap user type passed as a value struct {vtable, instance}: drop
 			// the heap instance pointer.
@@ -14113,18 +14122,19 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	var argLLVMTypes []irtypes.Type
 	var argTypes []types.Type
 	var argBorrowDrops []goArgBorrowDrop
-	// T1108/T1106: snapshot enum-ctor temps so we can drop them from the
-	// caller's statement-end cleanup after the loop. The T1108 fix tracks
-	// inline enum-constructor temps unconditionally, but go-call enum-payload
-	// args are left to pre-existing handling (the goroutine may reference the
-	// payload after the spawning statement, so a synchronous statement-end drop
-	// would be a use-after-free). Removing them from caller cleanup without a
-	// goroutine-side transfer currently LEAKS the payload for borrow params —
-	// tracked as T1154 (the enum-payload analogue of the T1106 Case A transfer).
+	// T1108/T1154: snapshot enum-ctor temps so we can drop them from the
+	// caller's statement-end cleanup after the loop — a synchronous statement-end
+	// drop would be a use-after-free since the goroutine may reference the payload
+	// after the spawning statement. T1154: for an inline enum-ctor arg whose
+	// payload is droppable and the param is a borrow, the goroutine frame takes
+	// ownership and drops via the synthesized enum drop fn after the call returns
+	// (see the per-arg enum branch + emitGoArgBorrowDrops). Move params are
+	// consumed and dropped by the callee.
 	savedGoEnumTemps := len(c.enumCtorTemps)
 	for i, arg := range callExpr.Args {
 		savedHeap := len(c.heapTemps)
 		savedStmt := len(c.stmtTemps)
+		savedArgEnum := len(c.enumCtorTemps)
 		v := c.genCallArgExpr(arg.Value)
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
@@ -14141,10 +14151,12 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		// T1106: conditional/polymorphic args (match/if expressions, nested
 		// constructors) yield a runtime phi over temporaries with possibly
 		// different concrete drops — no single static root. These are handled by
-		// the Case A / Case B branches below via runtime drop dispatch. Enum-payload
-		// args are still left to pre-existing handling (tracked as T1154).
+		// the Case A / Case B branches below via runtime drop dispatch. T1154: a
+		// top-level inline enum-ctor arg with a droppable payload IS a single static
+		// root: it is transferred to the goroutine frame via the enum branch below.
 		newHeap := c.heapTemps[savedHeap:]
 		newStmt := c.stmtTemps[savedStmt:]
+		newEnum := c.enumCtorTemps[savedArgEnum:]
 
 		var d goArgBorrowDrop
 		d.paramIdx = i
@@ -14157,6 +14169,15 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			ht := newHeap[0]
 			rootFlag, d.dropFunc, d.elemType = ht.dropFlag, ht.dropFunc, ht.elemType
 			_, d.isStruct = v.Type().(*irtypes.StructType)
+		} else if len(newEnum) == 1 && len(newHeap) == 0 {
+			// T1154: the argument value IS an inline enum constructor with a
+			// droppable payload (gated on no competing heap root so nested ctors
+			// like `Box(Msg.Text(...))` keep their heap-root handling). The enum is
+			// passed by value into the coro frame; its drop fn takes a pointer to
+			// the value-struct layout, so the goroutine spills the param and drops.
+			et := newEnum[0]
+			rootFlag, d.dropFunc = et.dropFlag, et.dropFunc
+			d.isEnum = true
 		}
 		if rootFlag == nil || d.dropFunc == nil {
 			isMove := i < len(calleeParams) && calleeParams[i].Ref() == types.RefMut
@@ -14230,10 +14251,11 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		// Borrow param: the goroutine frame drops the temporary after the call.
 		argBorrowDrops = append(argBorrowDrops, d)
 	}
-	// T1108/T1106: drop any inline enum-constructor temps produced for go-call
-	// args from the caller's statement-end cleanup — their ownership is handled
-	// by the pre-existing go-call path (or left to T1106), not by a synchronous
-	// statement-end drop that could free a payload the goroutine still uses.
+	// T1108/T1154: remove inline enum-constructor temps produced for go-call args
+	// from the caller's statement-end cleanup — ownership is transferred to the
+	// goroutine frame (borrow params drop via the synthesized enum drop fn after
+	// the call; move params are consumed by the callee), not freed by a
+	// synchronous statement-end drop that could race the goroutine's read.
 	c.enumCtorTemps = c.enumCtorTemps[:savedGoEnumTemps]
 
 	// B0163: Increment refcount for channel arguments passed to go calls.

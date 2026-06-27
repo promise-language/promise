@@ -1,0 +1,78 @@
+// T1147: borrowing an owned for-in loop binding (a `string` element, dup'd per
+// iteration) into a `go` call let the borrow escape into a goroutine that can
+// outlive the loop iteration → silent use-after-free when handles are awaited
+// after the loop. The compiler now REJECTS that shape at compile time (see the
+// Go ownership tests `TestT1147*` for the rejection coverage). These batch tests
+// confirm the sound rewrites the diagnostic points at — `.clone()` into a fresh
+// temp, and `move` of the owned value into a consuming `move` param — compile
+// and produce correct, deterministic output across many spawns.
+type Box {
+  string s;
+}
+
+keep(string p) Box {
+  return Box(s: p.clone());
+}
+
+store(string move s) Box {
+  return Box(s: move s);
+}
+
+// Sound rewrite #1: clone the loop binding into a fresh temp before the go call.
+// The temp is owned by the goroutine frame — no borrow of the per-iteration slot.
+go_call_clone_temp_after_loop() `test {
+  string[] xs = ["alpha".clone(), "bravo".clone(), "charlie".clone()];
+  task[Box][] ts = [];
+  for x in xs {
+    ts.push(go keep(x.clone()));
+  }
+  string[] out = [];
+  for t in ts {
+    Box b = <-t;
+    out.push(move b.s);
+  }
+  assert(out.len == 3, "clone temp: count");
+  assert(out[0] == "alpha", "clone temp: first");
+  assert(out[1] == "bravo", "clone temp: second");
+  assert(out[2] == "charlie", "clone temp: third");
+}
+
+// Sound rewrite #2: move the owned loop binding into a consuming `move` param.
+// Ownership transfers into the goroutine frame (T1148), so there is no dangling
+// borrow even when the handles are awaited after the loop.
+go_call_move_after_loop() `test {
+  string[] xs = ["aa".clone(), "bb".clone(), "cc".clone()];
+  task[Box][] ts = [];
+  for x in xs {
+    ts.push(go store(move x));
+  }
+  string[] out = [];
+  for t in ts {
+    Box b = <-t;
+    out.push(move b.s);
+  }
+  assert(out.len == 3, "move: count");
+  assert(out[0] == "aa", "move: first");
+  assert(out[1] == "bb", "move: second");
+  assert(out[2] == "cc", "move: third");
+}
+
+// Scale up the spawn count so any residual aliasing/use-after-free would surface
+// as a non-deterministic corrupted field across the many goroutines.
+go_call_clone_temp_many() `test {
+  string[] xs = [];
+  for i in 0..64 {
+    xs.push("item-{i}");
+  }
+  task[Box][] ts = [];
+  for x in xs {
+    ts.push(go keep(x.clone()));
+  }
+  int idx = 0;
+  for t in ts {
+    Box b = <-t;
+    assert(b.s == "item-{idx}", "many: element {idx}");
+    idx = idx + 1;
+  }
+  assert(idx == 64, "many: count");
+}

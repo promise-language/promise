@@ -1379,6 +1379,25 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		}
 	}
 
+	// T1147: an OWNED (non-aliasing) non-copy droppable for-in binding — a string
+	// element (dup'd per iteration), or an owned value yielded by an iterator /
+	// Channel / generator. Its lifetime ends at the iteration boundary, so
+	// borrowing it into a `go` call lets the borrow escape into a goroutine that
+	// may outlive the iteration → use-after-free. The `!flaggedAlias &&
+	// !flaggedSingleOwner` guard keeps this set disjoint from the aliasing sets
+	// (heap-user / single-owner bindings point into a container that outlives the
+	// loop and are sound). Save/restore for nested-loop binding-name reuse.
+	var prevOwned bool
+	var hadPrevOwned bool
+	flaggedOwned := false
+	if s.Binding != "_" && !flaggedAlias && !flaggedSingleOwner {
+		if bt := c.forInBindingType(s); bt != nil && !isCopyType(bt) && isDroppableType(bt) {
+			prevOwned, hadPrevOwned = c.forInOwnedDroppableBindings[s.Binding]
+			c.forInOwnedDroppableBindings[s.Binding] = true
+			flaggedOwned = true
+		}
+	}
+
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
@@ -1398,6 +1417,28 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			delete(c.forInAliasBindings, s.Binding)
 		}
 	}
+	if flaggedOwned {
+		if hadPrevOwned {
+			c.forInOwnedDroppableBindings[s.Binding] = prevOwned
+		} else {
+			delete(c.forInOwnedDroppableBindings, s.Binding)
+		}
+	}
+}
+
+// forInBindingType returns the type sema recorded for a for-in loop binding,
+// looked up from the loop body's scope (sema inserts the binding Var there in
+// checkForInStmt). Returns nil if the scope or binding is unavailable.
+func (c *Checker) forInBindingType(s *ast.ForInStmt) types.Type {
+	scope, ok := c.info.Scopes[s.Body]
+	if !ok || scope == nil {
+		return nil
+	}
+	obj := scope.Lookup(s.Binding)
+	if obj == nil {
+		return nil
+	}
+	return obj.Type()
 }
 
 // forInElementAliasesContainer reports whether a for-in element type (or a

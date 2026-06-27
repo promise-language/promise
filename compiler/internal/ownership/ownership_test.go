@@ -13637,3 +13637,179 @@ func TestT1134_SelectCaseDivergesNoDefault(t *testing.T) {
 		test() {}
 	`)
 }
+
+// === T1147: borrow of an owned for-in loop binding escaping into a `go` call ===
+
+// Reject: a `string` for-in binding is an owned per-iteration value (dup'd on
+// store). Borrowing it into a `go` call lets the borrow escape into a goroutine
+// that may outlive the iteration → use-after-free.
+func TestT1147GoCallBorrowOfLoopBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = go keep(x); }
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: the method-call arg form — the same helper walks CallExpr.Args
+// regardless of whether the callee is a free function or a method.
+func TestT1147GoCallMethodArgLoopBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Joiner { string sep; combine(this, string p) string { return this.sep + p; } }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			Joiner j = Joiner(sep: "-");
+			for x in xs { _ = go j.combine(x); }
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Accept: `move` of the loop binding into a consuming `move` param transfers
+// ownership into the goroutine frame (T1148 path) — not a borrow, not rejected.
+func TestT1147GoCallMoveLoopBindingOK(t *testing.T) {
+	ownerOK(t, `
+		store(string move s) string { return s; }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = go store(move x); }
+		}
+	`)
+}
+
+// Accept: cloning the binding into a fresh temp (T1098) — the arg root is not an
+// ident, so the loop-binding-borrow-escape check does not fire.
+func TestT1147GoCallCloneTempOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = go keep(x.clone()); }
+		}
+	`)
+}
+
+// Accept: an `int` binding is Copy — passed by value into the coro frame, no
+// dangling borrow possible.
+func TestT1147GoCallCopyBindingOK(t *testing.T) {
+	ownerOK(t, `
+		add(int n) int { return n + 1; }
+		test() {
+			int[] xs = [1, 2, 3];
+			for x in xs { _ = go add(x); }
+		}
+	`)
+}
+
+// Accept: a heap-user-type binding aliases the container's element storage (the
+// data outlives the loop in the container) — flagged in forInAliasBindings, not
+// the owned-droppable set, so the go-call check does not fire.
+func TestT1147GoCallAliasingBindingOK(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; }
+		describe(Box b) string { return b.s.clone(); }
+		test() {
+			Box[] xs = [Box(s: "a".clone()), Box(s: "b".clone())];
+			for x in xs { _ = go describe(x); }
+		}
+	`)
+}
+
+// Accept: a function-level local borrowed into a `go` call is sound (its scope
+// outlives the goroutine when awaited in scope) — only for-in loop bindings are
+// flagged, so a plain local must not be rejected.
+func TestT1147GoCallFunctionLocalBorrowOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string s = "hello".clone();
+			t := go keep(s);
+			_ = <-t;
+		}
+	`)
+}
+
+// Accept: the loop binding as a method *receiver* (not an arg) is captured and
+// auto-dup'd by the closure mechanism — sound, and the arg-walking check never
+// inspects the receiver.
+func TestT1147GoCallReceiverLoopBindingOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = go x.to_upper(); }
+		}
+	`)
+}
+
+// Reject: a parenthesized loop-binding arg — identRoot peels the ParenExpr
+// layer(s) down to the underlying ident, so the borrow-escape check still fires.
+func TestT1147GoCallParenLoopBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = go keep((x)); }
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Accept: a constructor callee has no Signature (calleeSignature returns nil),
+// so the loop-binding-borrow-escape check returns early — constructors consume
+// their args (out of scope for T1147; the nested-ctor shape is tracked by T1106).
+func TestT1147GoCallConstructorLoopBindingOK(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = go Box(s: move x); }
+		}
+	`)
+}
+
+// Accept: a container-store native (`Vector.push`) consumes its arg into storage
+// that outlives the goroutine frame — the `kind == BorrowNone && storeNative`
+// skip fires (continue) before identRoot is consulted, so the moved binding is
+// not flagged as a borrow escape.
+func TestT1147GoCallStoreNativeLoopBindingOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			string[] sink = [];
+			for x in xs { _ = go sink.push(move x); }
+		}
+	`)
+}
+
+// Accept (regression guard): an owned for-in binding borrowed into a *plain*
+// (non-`go`) call is sound — the borrow lives for the call's duration. Only the
+// `go` form escapes, so the loop-binding flag must not leak into ordinary calls.
+func TestT1147PlainCallBorrowOfLoopBindingOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs { _ = keep(x); }
+		}
+	`)
+}
+
+// Reject across nested loops: the owned-droppable flag must be set for the inner
+// binding too, and the save/restore must not lose the outer flag. Both bindings
+// are owned strings; borrowing either into a `go` call is rejected.
+func TestT1147GoCallNestedLoopBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		test() {
+			string[] xs = ["a".clone(), "b".clone()];
+			for x in xs {
+				for y in xs { _ = go keep(y); }
+				_ = go keep(x);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}

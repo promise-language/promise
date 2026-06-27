@@ -40,6 +40,17 @@ type Checker struct {
 	// forInSingleOwnerBindings set (T0652) so they keep their dedicated message.
 	forInAliasBindings map[string]bool
 
+	// T1147: for-in loop binding names that are OWNED per-iteration droppable
+	// values (string elements; owned values yielded by iterators/channels/
+	// generators) — NOT aliasing-into-a-container. Borrowing such a binding into
+	// a `go` call lets the borrow escape into a goroutine that can outlive the
+	// loop iteration → use-after-free. Disjoint from forInAliasBindings/
+	// forInSingleOwnerBindings (those alias container storage and are sound).
+	// T1151 (follow-up): generalize this to owned droppable locals declared
+	// *within* a loop body (`for … { string y = …; go f(y); }`), which have the
+	// same iteration-bounded scope but a different declaration shape.
+	forInOwnedDroppableBindings map[string]bool
+
 	// Drop ordering: tracks declaration order for LIFO drop-order validation.
 	// Variables are dropped in reverse declaration order at scope exit.
 	// If a borrower is declared before its origin, the origin is dropped first
@@ -145,6 +156,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedPinned := c.pinned
 	savedForInSingleOwner := c.forInSingleOwnerBindings
 	savedForInAlias := c.forInAliasBindings
+	savedForInOwnedDroppable := c.forInOwnedDroppableBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
@@ -157,6 +169,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.pinned = make(map[string]bool)
 	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.forInAliasBindings = make(map[string]bool)
+	c.forInOwnedDroppableBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
@@ -181,6 +194,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.pinned = savedPinned
 	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.forInAliasBindings = savedForInAlias
+	c.forInOwnedDroppableBindings = savedForInOwnedDroppable
 	c.curSig = savedSig
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
@@ -260,6 +274,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedPinned := c.pinned
 	savedForInSingleOwner := c.forInSingleOwnerBindings
 	savedForInAlias := c.forInAliasBindings
+	savedForInOwnedDroppable := c.forInOwnedDroppableBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
@@ -272,6 +287,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.pinned = make(map[string]bool)
 	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.forInAliasBindings = make(map[string]bool)
+	c.forInOwnedDroppableBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
@@ -304,6 +320,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.pinned = savedPinned
 	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.forInAliasBindings = savedForInAlias
+	c.forInOwnedDroppableBindings = savedForInOwnedDroppable
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
 	c.varTypes = savedVarTypes

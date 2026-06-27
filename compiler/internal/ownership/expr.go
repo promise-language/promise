@@ -123,6 +123,9 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 	case *ast.GoExpr:
 		if e.Expr != nil {
 			c.checkExpr(e.Expr)
+			if ce, ok := e.Expr.(*ast.CallExpr); ok {
+				c.rejectGoCallLoopBindingBorrowEscape(ce)
+			}
 		}
 		if e.Block != nil {
 			c.checkBlock(e.Block)
@@ -1108,6 +1111,61 @@ func (c *Checker) checkReceiverBorrow(callee ast.Expr, sig *types.Signature, pos
 	// member.Target is the receiver expression (the object the method is called on).
 	// Pass it directly to createBorrowWithKind which handles both IdentExpr and MemberExpr.
 	c.createBorrowWithKind(member.Target, recvKind, pos)
+}
+
+// rejectGoCallLoopBindingBorrowEscape rejects passing an owned, non-copy,
+// droppable for-in loop binding as a BORROW argument into a `go` call (T1147).
+// The spawned goroutine can outlive the loop iteration, so the borrow dangles —
+// the goroutine reads the per-iteration value after its slot is freed/reused →
+// non-deterministic use-after-free. Move/consume args (`~` params,
+// container-store natives) are NOT rejected — ownership transfers into the
+// goroutine frame, which is sound (handled by T1148/T0964). The method receiver
+// itself is untouched (captured & auto-dup'd by the closure mechanism).
+// Constructor / unresolved callees (sig == nil) consume their args and are out
+// of scope here. Mirrors option 1 of T1147 and the existing borrow-escape
+// rejections (return / channel-send / raise of borrowed values).
+func (c *Checker) rejectGoCallLoopBindingBorrowEscape(e *ast.CallExpr) {
+	sig := c.calleeSignature(e.Callee)
+	if sig == nil {
+		return
+	}
+	params := sig.Params()
+	storeNative := c.isElementStoringNativeCall(e.Callee)
+	for i, arg := range e.Args {
+		if i >= len(params) {
+			continue
+		}
+		kind := paramBorrowKind(params[i])
+		// Skip consume slots (`move` param, or container-store native) — those
+		// transfer ownership into the goroutine frame and are sound.
+		if params[i].Ref() == types.RefMut || (kind == BorrowNone && storeNative) {
+			continue
+		}
+		// Borrow slot: reject an owned droppable for-in binding root.
+		if id := identRoot(arg.Value); id != nil && c.forInOwnedDroppableBindings[id.Name] {
+			c.errorf(id.Pos(),
+				"cannot pass borrowed loop variable '%s' into a goroutine; the goroutine may outlive the loop iteration, leaving a dangling borrow — clone it with `%s.clone()`, or move an owned value into the goroutine",
+				id.Name, id.Name)
+		}
+	}
+}
+
+// identRoot peels ParenExpr layers and returns the underlying *ast.IdentExpr,
+// or nil for any other expression shape. Kept deliberately conservative (paren /
+// ident only) to match the sibling reject* helpers; cast / member roots are out
+// of scope for the T1147 loop-binding-borrow-escape check.
+func identRoot(expr ast.Expr) *ast.IdentExpr {
+	for {
+		if p, ok := expr.(*ast.ParenExpr); ok {
+			expr = p.Expr
+			continue
+		}
+		break
+	}
+	if id, ok := expr.(*ast.IdentExpr); ok {
+		return id
+	}
+	return nil
 }
 
 // calleeSignature extracts the Signature from a callee expression's type.

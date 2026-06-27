@@ -1,0 +1,130 @@
+// T1156: `go obj.method(Enum.V(heap_payload))` via the via-block path (method
+// callees, module calls, generic/inferred-type-arg calls) must drop the inline
+// enum-constructor temporary's droppable payload from the coro body. The via-block
+// path generates the whole call (incl. args) inside the coroutine via genExpr, then
+// ran cleanupStmtTemps but NOT the statement-end enum-ctor drop loop — leaking the
+// borrow-param payload. Sibling of T1154 (fast/free-function path). These batch
+// tests run under the per-binary leak/double-free checker, so passing simultaneously
+// proves zero leak + zero double-free + no UAF.
+enum Msg {
+  Text(string body),
+  Count(int n),
+  List(int[] items),
+  Empty,
+}
+
+type P {
+  int d;
+
+  // Borrow param: the coro frame owns the enum temp and must drop its payload.
+  process(this, Msg m) int {
+    return match m {
+      Msg.Text(b) => b.len,
+      Msg.Count(n) => n,
+      Msg.List(items) => items.len,
+      Msg.Empty => 0,
+    };
+  }
+
+  // Move param: the callee consumes the by-value enum and drops it at scope exit.
+  process_move(this, Msg move m) int {
+    return match m {
+      Msg.Text(b) => b.len,
+      Msg.Count(n) => n,
+      Msg.List(items) => items.len,
+      Msg.Empty => 0,
+    };
+  }
+
+  // Two enum payload args in one method go-call (per-arg snapshot + multi-drop).
+  process_two(this, Msg a, Msg b) int {
+    la := match a {
+      Msg.Text(x) => x.len, Msg.Count(n) => n, Msg.List(items) => items.len, Msg.Empty => 0,
+    };
+    lb := match b {
+      Msg.Text(x) => x.len, Msg.Count(n) => n, Msg.List(items) => items.len, Msg.Empty => 0,
+    };
+    return la + lb;
+  }
+
+  // Void-return target taking a borrowed enum payload.
+  sink(this, Msg m) {
+    n := match m {
+      Msg.Text(b) => b.len, Msg.Count(n) => n, Msg.List(items) => items.len, Msg.Empty => 0,
+    };
+    assert(n == 2, "void method target observed correct enum payload length");
+  }
+}
+
+// Generic free function — explicit/inferred type args route the go-call via-block.
+msg_len_g[T](Msg m, T extra) int {
+  return match m {
+    Msg.Text(b) => b.len,
+    Msg.Count(n) => n,
+    Msg.List(items) => items.len,
+    Msg.Empty => 0,
+  };
+}
+
+// Method callee, borrow param, string payload — the leaking case before the fix.
+go_method_enum_payload_borrow() `test {
+  p := P(d: 0);
+  t := go p.process(Msg.Text("hi".clone()));
+  assert(<-t == 2, "go p.process(Msg.Text(clone)) borrow result");
+}
+
+// Method callee, move param — callee consumes/drops, no double-free.
+go_method_enum_payload_move() `test {
+  p := P(d: 0);
+  t := go p.process_move(Msg.Text("hello".clone()));
+  assert(<-t == 5, "go p.process_move(Msg.Text(clone)) move result");
+}
+
+// Method callee, vector (non-string) droppable payload, borrow — exercises the
+// vector branch of the synthesized enum drop fn from inside the coro body.
+go_method_enum_vector_payload_borrow() `test {
+  p := P(d: 0);
+  t := go p.process(Msg.List([10, 20, 30]));
+  assert(<-t == 3, "go p.process(Msg.List(...)) borrow result");
+}
+
+// Method callee with two enum payload args — the coro frame drops BOTH.
+go_method_two_enum_payloads() `test {
+  p := P(d: 0);
+  t := go p.process_two(Msg.Text("ab".clone()), Msg.Text("cde".clone()));
+  assert(<-t == 5, "two method enum borrow payloads summed");
+}
+
+// Method callee, payloadless variant — no spurious drop.
+go_method_enum_empty_variant() `test {
+  p := P(d: 0);
+  t := go p.process(Msg.Empty);
+  assert(<-t == 0, "go p.process(Msg.Empty) result");
+}
+
+// Method callee, non-droppable (int) payload variant — no spurious drop.
+go_method_enum_int_payload() `test {
+  p := P(d: 0);
+  t := go p.process(Msg.Count(7));
+  assert(<-t == 7, "go p.process(Msg.Count(7)) result");
+}
+
+// Void-return method target with a borrowed enum payload — exercises the void emit
+// site of the via-block path.
+go_method_enum_payload_void() `test {
+  p := P(d: 0);
+  t := go p.sink(Msg.Text("hi".clone()));
+  <-t;
+}
+
+// Generic free function with INFERRED type arg carrying an enum payload arg.
+go_generic_enum_payload_inferred() `test {
+  t := go msg_len_g(Msg.Text("hello".clone()), 1);
+  assert(<-t == 5, "go msg_len_g(Msg.Text(clone), 1) inferred result");
+}
+
+// Generic free function with EXPLICIT type arg carrying an enum payload arg.
+go_generic_enum_payload_explicit() `test {
+  t := go msg_len_g[bool](Msg.Text("howdy".clone()), true);
+  assert(<-t == 5, "go msg_len_g[bool](Msg.Text(clone), true) explicit result");
+}

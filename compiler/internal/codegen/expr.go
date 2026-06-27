@@ -14752,6 +14752,25 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	// return values tracked by trackStringTemp) would be orphaned inside the coroutine.
 	c.cleanupStmtTemps()
 
+	// T1156: Drop inline enum-ctor temps produced for the call's arguments inside
+	// the coro body (via-block analogue of stmt.go's statement-end enum cleanup).
+	// Borrow params keep the flag set → dropped here exactly once; move params had
+	// the flag cleared by normal call codegen → skipped (callee consumes them).
+	if c.block != nil && c.block.Term == nil {
+		for _, et := range c.enumCtorTemps {
+			flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
+			dropBlk := c.newBlock("enum.ctor.drop")
+			skipBlk := c.newBlock("enum.ctor.skip")
+			c.block.NewCondBr(flag, dropBlk, skipBlk)
+			c.block = dropBlk
+			ptr := c.block.NewLoad(irtypes.I8Ptr, et.alloca)
+			c.block.NewCall(et.dropFunc, ptr)
+			c.block.NewBr(skipBlk)
+			c.block = skipBlk
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:0]
+	}
+
 	// B0163: Emit cleanup for captured channel drop bindings.
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, false)

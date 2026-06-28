@@ -2875,6 +2875,115 @@ func TestSuperCallParentImplicit(t *testing.T) {
 	`)
 }
 
+// T0474: super() must accept a T-typed arg in a generic Child[T] is Base[T]
+// constructor — the arg's T (child's TypeParam) must be mapped through the
+// inheritance clause to the parent's T before the assignability check.
+func TestSuperCallGenericTypeParamArg(t *testing.T) {
+	checkOK(t, `
+		type Base[T] {
+			T value;
+			new(~this, T move v) {
+				this.value = v;
+			}
+		}
+		type Child[T] is Base[T] {
+			int extra;
+			new(~this, T move v, int e) {
+				super(move v);
+				this.extra = e;
+			}
+		}
+		test() {
+			Child[int] c = Child[int](v: 5, e: 7);
+		}
+	`)
+}
+
+// T0474: same mapping must apply to the implicit-constructor super() path with
+// an optional T? parent field.
+func TestSuperCallGenericImplicitOptionalArg(t *testing.T) {
+	checkOK(t, `
+		type Base[T] {
+			T? value;
+		}
+		type Child[T] is Base[T] {
+			int tag;
+			new(~this, T? move v, int t) {
+				super(value: move v);
+				this.tag = t;
+			}
+		}
+		test() {
+			Child[int] c = Child[int](v: 3, t: 1);
+		}
+	`)
+}
+
+// T0474: with multiple/reordered child type params (`Child[A, B] is Base[B]`),
+// the substitution must map the *correct* child param (B) onto the parent's T,
+// not positionally. Covers both the explicit-new and implicit-constructor paths.
+func TestSuperCallGenericReorderedTypeParams(t *testing.T) {
+	// Explicit new(): super(b) where b: B and parent expects T (mapped from B).
+	checkOK(t, `
+		type Base[T] {
+			T value;
+			new(~this, T move v) {
+				this.value = v;
+			}
+		}
+		type Child[A, B] is Base[B] {
+			A first;
+			new(~this, A move a, B move b) {
+				super(move b);
+				this.first = a;
+			}
+		}
+		test() {
+			Child[string, int] c = Child[string, int](a: "x", b: 9);
+		}
+	`)
+	// Implicit constructor: super(value: b) where b: B and field value: T (from B).
+	checkOK(t, `
+		type Base[T] {
+			T value;
+		}
+		type Child[A, B] is Base[B] {
+			A first;
+			new(~this, A move a, B move b) {
+				super(value: move b);
+				this.first = a;
+			}
+		}
+		test() {
+			Child[int, string] c = Child[int, string](a: 7, b: "hi");
+		}
+	`)
+}
+
+// T0474: a nested/compound inheritance type arg (`Child[T] is Base[T[]]`) must be
+// resolved through Substitute, not just bare-TypeParam identity — super(v) with
+// v: T[] must match the parent's T (= T[]).
+func TestSuperCallGenericNestedTypeArg(t *testing.T) {
+	checkOK(t, `
+		type Base[T] {
+			T value;
+			new(~this, T move v) {
+				this.value = v;
+			}
+		}
+		type Child[T] is Base[T[]] {
+			int n;
+			new(~this, T[] move v, int n) {
+				super(move v);
+				this.n = n;
+			}
+		}
+		test() {
+			Child[int] c = Child[int](v: [1, 2, 3], n: 5);
+		}
+	`)
+}
+
 func TestSuperCallOutsideNew(t *testing.T) {
 	errs := checkErrs(t, `
 		type Animal {

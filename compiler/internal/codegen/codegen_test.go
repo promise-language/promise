@@ -2194,6 +2194,58 @@ func TestSuperCallCodegen(t *testing.T) {
 	assertContains(t, ir, "call void @Dog.new(")
 }
 
+// T0474: super(v) in a generic Child[T] is Base[T] constructor must target the
+// monomorphized parent constructor (Base__int.new), not the bare-name Base.new.
+func TestSuperCallGenericParentCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Base[T] {
+			T value;
+			new(~this, T move v) {
+				this.value = v;
+			}
+		}
+		type Child[T] is Base[T] {
+			int extra;
+			new(~this, T move v, int e) {
+				super(move v);
+				this.extra = e;
+			}
+		}
+		main() {
+			Child[int] c = Child[int](v: 5, e: 7);
+		}
+	`)
+	// Child[int].new should call the monomorphized parent constructor.
+	assertContains(t, ir, `call void @"Base[int].new"(`)
+	assertContains(t, ir, `call void @"Child[int].new"(`)
+}
+
+// T0474: with reordered child type params (Child[A, B] is Base[B]), super(b)
+// must name the parent constructor monomorphized on B (Base[int]), not A.
+func TestSuperCallGenericReorderedParentCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Base[T] {
+			T value;
+			new(~this, T move v) {
+				this.value = v;
+			}
+		}
+		type Child[A, B] is Base[B] {
+			A first;
+			new(~this, A move a, B move b) {
+				super(move b);
+				this.first = a;
+			}
+		}
+		main() {
+			Child[string, int] c = Child[string, int](a: "x", b: 9);
+		}
+	`)
+	// B=int → parent monomorphized as Base[int], not Base[string].
+	assertContains(t, ir, `call void @"Base[int].new"(`)
+	assertContains(t, ir, `call void @"Child[string, int].new"(`)
+}
+
 func TestSuperCallImplicitParentCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		type Animal {

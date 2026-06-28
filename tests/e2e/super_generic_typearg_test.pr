@@ -1,0 +1,166 @@
+// T0474: super() must accept T-typed (and T?-typed) args in generic
+// `Child[T] is Base[T]` constructors. The argument is typed in terms of the
+// child's type parameter, which must be mapped through the inheritance clause
+// to the parent's type parameter before the assignability check.
+// --- Explicit generic parent new() called with super(move v) ---
+type Base[T] {
+  T value;
+  new(~this, T move v) {
+    this.value = v;
+  }
+}
+
+type Child[T] is Base[T] {
+  int extra;
+  new(~this, T move v, int e) {
+    super(move v);
+    this.extra = e;
+  }
+}
+
+test_explicit_generic_parent_new() `test {
+  c := Child[int](v: 5, e: 7);
+  assert(c.value == 5, "inherited value via super");
+  assert(c.extra == 7, "own field");
+
+  s := Child[string](v: "hi", e: 3);
+  assert(s.value == "hi", "string typearg inherited value");
+  assert(s.extra == 3, "string typearg own field");
+}
+
+// --- Implicit generic parent constructor with T? via super(value: ...) ---
+
+type OptBase[T] {
+  T? value;
+}
+
+type OptChild[T] is OptBase[T] {
+  int tag;
+  new(~this, T? move v, int t) {
+    super(value: move v);
+    this.tag = t;
+  }
+}
+
+test_implicit_generic_parent_optional() `test {
+  c := OptChild[int](v: 42, t: 1);
+  if x := c.value {
+    assert(x == 42, "optional payload survives super");
+  } else {
+    assert(false, "optional payload unexpectedly none");
+  }
+  assert(c.tag == 1, "own field after optional super");
+
+  n := OptChild[int](v: none, t: 2);
+  if x := n.value {
+    assert(false, "none optional unexpectedly present");
+  } else {
+    assert(n.tag == 2, "own field with none optional");
+  }
+}
+
+// --- Concrete parent instantiation: Child is Base[int] (no child typeparam) ---
+
+type ConcreteChild is Base[int] {
+  int extra;
+  new(~this, int move v, int e) {
+    super(move v);
+    this.extra = e;
+  }
+}
+
+test_concrete_parent_instantiation() `test {
+  c := ConcreteChild(v: 9, e: 11);
+  assert(c.value == 9, "concrete parent super value");
+  assert(c.extra == 11, "concrete parent own field");
+}
+
+// --- Non-generic regression: Child is Base (no type params at all) ---
+
+type PlainBase {
+  int value;
+  new(~this, int move v) {
+    this.value = v;
+  }
+}
+
+type PlainChild is PlainBase {
+  int extra;
+  new(~this, int move v, int e) {
+    super(move v);
+    this.extra = e;
+  }
+}
+
+test_non_generic_regression() `test {
+  c := PlainChild(v: 1, e: 2);
+  assert(c.value == 1, "non-generic super value");
+  assert(c.extra == 2, "non-generic own field");
+}
+
+// --- Multiple/reordered type params: Child[A, B] is Base[B] (explicit new) ---
+// Guards that BuildSubstMap maps the *correct* child param (B) onto the parent's
+// single T, not positionally onto A.
+
+type ReChild[A, B] is Base[B] {
+  A first;
+  new(~this, A move a, B move b) {
+    super(move b);
+    this.first = a;
+  }
+}
+
+test_reordered_type_params() `test {
+  c := ReChild[string, int](a: "x", b: 9);
+  assert(c.value == 9, "B mapped to parent T");
+  assert(c.first == "x", "A own field");
+
+  d := ReChild[int, string](a: 4, b: "yo");
+  assert(d.value == "yo", "swapped: B=string mapped to parent T");
+  assert(d.first == 4, "swapped: A=int own field");
+}
+
+// --- Nested generic type arg in inheritance: NChild[T] is NBase[T[]] ---
+// Guards that Substitute resolves a *compound* inheritance type arg (Vector[T]),
+// not just a bare TypeParam.
+
+type NBase[T] {
+  T value;
+  new(~this, T move v) {
+    this.value = v;
+  }
+}
+
+type NChild[T] is NBase[T[]] {
+  int n;
+  new(~this, T[] move v, int n) {
+    super(move v);
+    this.n = n;
+  }
+}
+
+test_nested_generic_type_arg() `test {
+  c := NChild[int](v: [1, 2, 3], n: 5);
+  assert(c.value.len == 3, "nested vector typearg survives super");
+  assert(c.n == 5, "own field after nested super");
+}
+
+// --- Multiple/reordered type params via the implicit-constructor path ---
+
+type IBase[T] {
+  T value;
+}
+
+type IReChild[A, B] is IBase[B] {
+  A first;
+  new(~this, A move a, B move b) {
+    super(value: move b);
+    this.first = a;
+  }
+}
+
+test_reordered_implicit_constructor() `test {
+  c := IReChild[int, string](a: 7, b: "hello");
+  assert(c.value == "hello", "B mapped to parent field T (implicit ctor)");
+  assert(c.first == 7, "A own field (implicit ctor)");
+}

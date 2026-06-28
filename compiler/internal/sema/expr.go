@@ -1015,6 +1015,12 @@ func (c *Checker) checkSuperCall(e *ast.CallExpr) types.Type {
 	}
 	parent := parentRefs[0].Named // first parent is the concrete parent
 
+	// For a generic parent (`Child[T] is Base[T]`), map the parent's type
+	// parameters to the inheritance-clause type args so argument types written
+	// in terms of the child's type parameters match the substituted parent
+	// parameter types (T0474).
+	parentSubst := types.BuildSubstMap(parent.TypeParams(), parentRefs[0].TypeArgs)
+
 	if parent.HasNew() {
 		// Parent has explicit new() — validate args against parent's new() params
 		newMethod := parent.LookupMethod("new")
@@ -1022,10 +1028,10 @@ func (c *Checker) checkSuperCall(e *ast.CallExpr) types.Type {
 			return types.TypVoid
 		}
 		callDesc := "super() (parent " + parent.String() + " new)"
-		c.resolveCallArgs(e, newMethod.Sig().Params(), callDesc, nil)
+		c.resolveCallArgs(e, newMethod.Sig().Params(), callDesc, parentSubst)
 	} else {
 		// Parent has implicit constructor — validate named args against parent's fields
-		c.resolveImplicitConstructorArgs(e, parent, nil)
+		c.resolveImplicitConstructorArgs(e, parent, parentSubst)
 	}
 	return types.TypVoid
 }

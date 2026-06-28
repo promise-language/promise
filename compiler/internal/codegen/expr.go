@@ -2581,6 +2581,21 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 	}
 	parent := named.Parents()[0].Named
 
+	// For a generic parent (`Child[T] is Base[T]`), resolve the inheritance
+	// type args under the current substitution so we can both name the
+	// monomorphized parent constructor and coerce the args (T0474).
+	parentRef := named.Parents()[0]
+	var resolvedParentArgs []types.Type
+	if len(parentRef.TypeArgs) > 0 && len(parent.TypeParams()) > 0 {
+		resolvedParentArgs = make([]types.Type, len(parentRef.TypeArgs))
+		for i, ta := range parentRef.TypeArgs {
+			if c.typeSubst != nil {
+				ta = types.Substitute(ta, c.typeSubst)
+			}
+			resolvedParentArgs[i] = ta
+		}
+	}
+
 	// Load the this pointer
 	thisAlloca := c.locals["this"]
 	thisPtr := c.block.NewLoad(irtypes.I8Ptr, thisAlloca)
@@ -2588,6 +2603,9 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 	if parent.HasNew() {
 		// Parent has explicit new() — call ParentType.new(this, args...)
 		parentName := parent.Obj().Name()
+		if resolvedParentArgs != nil {
+			parentName = monoName(types.NewInstance(parent, resolvedParentArgs))
+		}
 		mangledName := mangleMethodName(parentName, "new", false)
 		fn, ok := c.funcs[mangledName]
 		if !ok {
@@ -2612,18 +2630,11 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 		}
 		newMethod := parent.LookupMethod("new")
 		if newMethod != nil {
-			// T0418: Build subst for parent's TypeParams from the inheritance
-			// type args (e.g., `type Foo[T] is Bar[T]` → Bar.T → resolved T).
+			// T0418/T0474: Build subst for parent's TypeParams from the resolved
+			// inheritance type args (e.g., `type Foo[T] is Bar[T]` → Bar.T → resolved T).
 			var superSubst map[*types.TypeParam]types.Type
-			if parentRef := named.Parents()[0]; len(parentRef.TypeArgs) > 0 && len(parent.TypeParams()) > 0 {
-				resolvedArgs := make([]types.Type, len(parentRef.TypeArgs))
-				for i, ta := range parentRef.TypeArgs {
-					if c.typeSubst != nil {
-						ta = types.Substitute(ta, c.typeSubst)
-					}
-					resolvedArgs[i] = ta
-				}
-				superSubst = types.BuildSubstMap(parent.TypeParams(), resolvedArgs)
+			if resolvedParentArgs != nil {
+				superSubst = types.BuildSubstMap(parent.TypeParams(), resolvedParentArgs)
 			}
 			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args, superSubst)
 		}

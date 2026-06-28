@@ -1,0 +1,222 @@
+// T1087: Optional re-wrap of borrowed Arc/Mutex value-type payload in
+// assignment/field-assign/index-assign paths.
+//
+// T0856 fixed the spurious re-wrap only in genTypedVarDecl (`int? av = a.borrow`).
+// Three parallel wrapOptional call sites in genAssignStmt never received the same
+// SharedRef/MutRef strip: plain var assignment (`av = a.borrow`), field assignment
+// (`obj.field = a.borrow`), and array/vector index assignment (`arr[i] = a.borrow`).
+// All three panicked with "insertvalue elem type mismatch" before this fix.
+type Pt {
+  int x `value;
+  int y `value;
+}
+
+type Holder {
+  int? val;
+}
+
+// ─── Plain assignment (IdentExpr target) ───────────────────────────────────
+
+arc_optional_plain_assign() `test {
+  int? init = 5;
+  Ref[int?] a = Ref[int?](init);
+  int? av = none;
+  av = a.borrow;
+  assert(av! == 5, "arc plain assign some");
+}
+
+arc_optional_plain_assign_none() `test {
+  int? init = none;
+  Ref[int?] a = Ref[int?](init);
+  int? av = 99;
+  av = a.borrow;
+  got := false;
+  if x := av {
+    got = true;
+  }
+  assert(!got, "arc plain assign none");
+}
+
+mutex_optional_plain_assign() `test {
+  int? init = 7;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  int? mv = none;
+  mv = g.borrow;
+  assert(mv! == 7, "mutex plain assign some");
+}
+
+mutex_optional_plain_assign_none() `test {
+  int? init = none;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  int? mv = 42;
+  mv = g.borrow;
+  got := false;
+  if x := mv {
+    got = true;
+  }
+  assert(!got, "mutex plain assign none");
+}
+
+// ─── Field assignment (MemberExpr target) ──────────────────────────────────
+
+arc_optional_field_assign() `test {
+  int? init = 3;
+  Ref[int?] a = Ref[int?](init);
+  h := Holder(val: none);
+  h.val = a.borrow;
+  assert(h.val! == 3, "arc field assign some");
+}
+
+arc_optional_field_assign_none() `test {
+  int? init = none;
+  Ref[int?] a = Ref[int?](init);
+  h := Holder(val: 99);
+  h.val = a.borrow;
+  got := false;
+  if x := h.val {
+    got = true;
+  }
+  assert(!got, "arc field assign none");
+}
+
+mutex_optional_field_assign() `test {
+  int? init = 4;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  h := Holder(val: none);
+  h.val = g.borrow;
+  assert(h.val! == 4, "mutex field assign some");
+}
+
+mutex_optional_field_assign_none() `test {
+  int? init = none;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  h := Holder(val: 42);
+  h.val = g.borrow;
+  got := false;
+  if x := h.val {
+    got = true;
+  }
+  assert(!got, "mutex field assign none");
+}
+
+// ─── Fixed-array index assignment (IndexExpr target) ───────────────────────
+
+arc_optional_array_assign() `test {
+  int? init = 8;
+  Ref[int?] a = Ref[int?](init);
+  int? z = none;
+  int?[2] arr = [z, z];
+  arr[0] = a.borrow;
+  assert(arr[0]! == 8, "arc array assign some");
+}
+
+arc_optional_array_assign_none() `test {
+  int? init = none;
+  Ref[int?] a = Ref[int?](init);
+  int? z = 99;
+  int?[2] arr = [z, z];
+  arr[0] = a.borrow;
+  got := false;
+  if x := arr[0] {
+    got = true;
+  }
+  assert(!got, "arc array assign none");
+}
+
+mutex_optional_array_assign() `test {
+  int? init = 9;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  int? z = none;
+  int?[2] arr = [z, z];
+  arr[0] = g.borrow;
+  assert(arr[0]! == 9, "mutex array assign some");
+}
+
+mutex_optional_array_assign_none() `test {
+  int? init = none;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  int? z = 77;
+  int?[2] arr = [z, z];
+  arr[0] = g.borrow;
+  got := false;
+  if x := arr[0] {
+    got = true;
+  }
+  assert(!got, "mutex array assign none");
+}
+
+// ─── Vector index assignment (IndexExpr target) ────────────────────────────
+
+arc_optional_vec_assign() `test {
+  int? init = 11;
+  Ref[int?] a = Ref[int?](init);
+  int? z = none;
+  vec := [z, z];
+  vec[0] = a.borrow;
+  assert(vec[0]! == 11, "arc vec assign some");
+}
+
+arc_optional_vec_assign_none() `test {
+  int? init = none;
+  Ref[int?] a = Ref[int?](init);
+  int? z = 55;
+  vec := [z, z];
+  vec[0] = a.borrow;
+  got := false;
+  if x := vec[0] {
+    got = true;
+  }
+  assert(!got, "arc vec assign none");
+}
+
+mutex_optional_vec_assign() `test {
+  int? init = 12;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  int? z = none;
+  vec := [z, z];
+  vec[0] = g.borrow;
+  assert(vec[0]! == 12, "mutex vec assign some");
+}
+
+mutex_optional_vec_assign_none() `test {
+  int? init = none;
+  Mutex[int?] m = Mutex[int?](init);
+  g := m.lock();
+  int? z = 33;
+  vec := [z, z];
+  vec[0] = g.borrow;
+  got := false;
+  if x := vec[0] {
+    got = true;
+  }
+  assert(!got, "mutex vec assign none");
+}
+
+// ─── Value-type struct payload ──────────────────────────────────────────────
+// Covers the widest auto-copy case: {i1, {int, int}} embedded-by-value optional.
+
+arc_optional_struct_plain_assign() `test {
+  Pt? init = Pt(x: 1, y: 2);
+  Ref[Pt?] a = Ref[Pt?](init);
+  Pt? pv = none;
+  pv = a.borrow;
+  p := pv!;
+  assert(p.x == 1 && p.y == 2, "arc struct plain assign");
+}
+
+mutex_optional_struct_plain_assign() `test {
+  Pt? init = Pt(x: 3, y: 4);
+  Mutex[Pt?] m = Mutex[Pt?](init);
+  g := m.lock();
+  Pt? pv = none;
+  pv = g.borrow;
+  p := pv!;
+  assert(p.x == 3 && p.y == 4, "mutex struct plain assign");
+}

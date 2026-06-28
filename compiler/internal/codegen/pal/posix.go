@@ -2406,7 +2406,10 @@ func (p *PosixPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
 func (p *PosixPAL) emitDarwinStackOverflowInit(
 	module *ir.Module, entry *ir.Block, handlerFn *ir.Func,
 ) {
-	palAlloc := lookupFunc(module, "pal_alloc")
+	// Use malloc directly — the alt stack is a one-time OS-level allocation that
+	// must work before pal_alloc is set up, and should bypass the debug allocator.
+	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr,
+		ir.NewParam("size", irtypes.I64))
 
 	// declare i32 @sigaltstack(i8*, i8*) nounwind
 	sigaltstackFn := getOrDeclareFunc(module, "sigaltstack", irtypes.I32,
@@ -2421,9 +2424,9 @@ func (p *PosixPAL) emitDarwinStackOverflowInit(
 
 	zero32 := constant.NewInt(irtypes.I32, 0)
 
-	// Allocate 65536 bytes for the alternate signal stack via malloc
+	// Allocate 65536 bytes for the alternate signal stack via libc malloc.
 	const altStackSize = 65536
-	altStack := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, altStackSize))
+	altStack := entry.NewCall(mallocFn, constant.NewInt(irtypes.I64, altStackSize))
 
 	// Build stack_t on the stack: {i8* ss_sp, i64 ss_size, i32 ss_flags}
 	// macOS layout: ss_sp(0), ss_size(8), ss_flags(16) — total 24 bytes

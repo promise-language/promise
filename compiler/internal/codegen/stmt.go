@@ -1245,19 +1245,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			if c.typeSubst != nil && cmpExprType != nil {
 				cmpExprType = types.Substitute(cmpExprType, c.typeSubst)
 			}
-			// T0856: A borrowed optional (`T?&`/`T?~`, e.g. `Ref[T?]`/
+			// T0856/T1087: A borrowed optional (`T?&`/`T?~`, e.g. `Ref[T?]`/
 			// `Mutex[T?].borrow` with a value/Copy payload) auto-copies to a
 			// bare optional value at the borrow site — genArcBorrow/
 			// genMutexGuardBorrow load and return the full {i1,T} struct. The
 			// recorded exprType is still the ref-to-optional, so strip the ref
 			// before the wrap comparison; otherwise the already-optional value
 			// is spuriously re-wrapped (insertvalue elem-type-mismatch panic).
-			switch ref := cmpExprType.(type) {
-			case *types.SharedRef:
-				cmpExprType = ref.Elem()
-			case *types.MutRef:
-				cmpExprType = ref.Elem()
-			}
+			cmpExprType = unwrapRefsType(cmpExprType)
 			if _, isNone := cmpExprType.(*types.Named); isNone && cmpExprType == types.TypNone {
 				// NoneLit already handled via targetType
 			} else if !types.Identical(cmpExprType, declType) {
@@ -6954,10 +6949,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// Wrap value in Optional if target is Optional and expr differs in shape.
 			// Using Identical (not "is exprOpt?") correctly handles T?? = T? — both
 			// are Optional but at different depths, so a wrap is still needed.
+			// T1087: strip SharedRef/MutRef before comparing — genArcBorrow/
+			// genMutexGuardBorrow auto-copy borrowed value/Copy optionals to a bare
+			// {i1,T} struct; sema records exprType as ref-to-optional, so strip
+			// before Identical to avoid spurious re-wrap (insertvalue elem-type panic).
 			if _, isOpt := targetType.(*types.Optional); isOpt {
 				if exprType == types.TypNone {
 					// none: already handled by genExpr (zeroinit)
-				} else if !types.Identical(exprType, targetType) {
+				} else if !types.Identical(unwrapRefsType(exprType), targetType) {
 					val = c.wrapOptional(val, alloca.ElemType.(*irtypes.StructType))
 				}
 			}
@@ -7132,7 +7131,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 						c.claimStringTemp(val)
 					}
 					// Use Identical (not "is exprOpt?") so T?? = T? still wraps.
-					if !types.Identical(exprType, memberType) {
+					// T1087: strip SharedRef/MutRef — same as Site 1 / T0856.
+					if !types.Identical(unwrapRefsType(exprType), memberType) {
 						optType := c.resolveType(memberType)
 						if st, ok := optType.(*irtypes.StructType); ok {
 							val = c.wrapOptional(val, st)
@@ -7294,8 +7294,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					slotType = types.Substitute(slotType, c.typeSubst)
 					exprType = types.Substitute(exprType, c.typeSubst)
 				}
+				// T1087: strip SharedRef/MutRef before Identical — same as Site 1/2 and T0856.
 				if _, isOpt := slotType.(*types.Optional); isOpt && exprType != types.TypNone &&
-					!types.Identical(exprType, slotType) {
+					!types.Identical(unwrapRefsType(exprType), slotType) {
 					// T0394/T0111/T0555 pattern: string & native-handle/container
 					// temps are tracked by direct val-identity in stmtTempMap,
 					// which fails to match once val becomes the wrapped struct —

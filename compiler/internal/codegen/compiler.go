@@ -911,6 +911,11 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	// Wrap user main() as G0 in the M:N scheduler
 	c.wrapMainWithScheduler()
 
+	// T1089: group the codegen-emitted runtime helpers into the synthetic
+	// __runtime module so SplitModuleIRs caches them like __mod_std. Must run
+	// after all runtime bodies (including wrapMainWithScheduler) are emitted.
+	c.tagRuntimeFuncs()
+
 	return &CompileResult{
 		Module:          c.module,
 		Layouts:         c.layouts,

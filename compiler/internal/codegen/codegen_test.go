@@ -10429,9 +10429,13 @@ func TestModuleSplitModuleIRs(t *testing.T) {
 	result := Compile(userFile, info, "")
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
-	// Should produce separate IRs for std, alpha, and beta.
-	if len(moduleIRs) != 3 {
-		t.Fatalf("expected 3 module IRs (std, alpha, beta), got %d", len(moduleIRs))
+	// Should produce separate IRs for std, alpha, beta, and the synthetic
+	// __runtime module (T1089: codegen-emitted runtime helpers).
+	if len(moduleIRs) != 4 {
+		t.Fatalf("expected 4 module IRs (std, alpha, beta, __runtime), got %d", len(moduleIRs))
+	}
+	if _, ok := moduleIRs[runtimeModuleName]; !ok {
+		t.Fatalf("expected %q in moduleIRs", runtimeModuleName)
 	}
 	alphaIR, ok := moduleIRs["alpha"]
 	if !ok {

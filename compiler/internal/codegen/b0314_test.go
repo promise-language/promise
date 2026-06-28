@@ -7,6 +7,9 @@ import (
 	"testing"
 )
 
+// isRuntimeFunc (the classifier used here to skip hand-written runtime helpers)
+// lives in runtime.go — shared with the T1089 __runtime module tagging pass.
+
 // B0314: Codegen must place alloca instructions in blocks that dominate all
 // uses, so `opt -O0` verification passes. Previously ~45 sites used
 // c.block.NewAlloca() which placed allocas in whatever block was current
@@ -23,21 +26,6 @@ var (
 	b0314BlockHdr = regexp.MustCompile(`^([A-Za-z_.][A-Za-z0-9_.]*):\s*(?:;.*)?$`)
 	b0314Alloca   = regexp.MustCompile(`^\s*%[^\s=]+\s*=\s*alloca\b`)
 )
-
-// isRuntimeFunc returns true for hand-written runtime IR helpers that are not
-// produced by the user-facing codegen paths B0314 fixed. These helpers have
-// their own control flow (e.g., hash functions with retry loops that do their
-// own local allocas in non-entry blocks) and are out of scope for this test.
-func isRuntimeFunc(name string) bool {
-	for _, p := range []string{
-		"promise_", "__promise_", "pal_", "llvm.", "strlen", "memcpy", "memset",
-	} {
-		if strings.HasPrefix(name, p) {
-			return true
-		}
-	}
-	return false
-}
 
 func assertAllocasDominate(t *testing.T, ir string) {
 	t.Helper()

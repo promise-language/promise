@@ -3347,11 +3347,18 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 	}
 	objFile.Close()
 
+	// T1089: debug/object builds don't need optimized machine code. Lower llc to
+	// -O0 (default is -O2) — a 3.6× faster llc with no correctness coupling, since
+	// coroutine lowering and the B0314 alloca-domination fix happen in `opt` (still
+	// -O1). WASM keeps the default (release WASM uses LTO anyway).
 	llcArgs := []string{"-mtriple=" + target, "-filetype=obj"}
 	if isWasmTarget(target) {
 		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
-	} else if !isWindowsTarget(target) {
-		llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
+	} else {
+		llcArgs = append(llcArgs, "-O0")
+		if !isWindowsTarget(target) {
+			llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
+		}
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
@@ -4436,11 +4443,15 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 		objFile.Close()
 		defer os.Remove(objFile.Name())
 
+		// T1089: debug builds use llc -O0 (see compileLLToObj for rationale).
 		llcArgs := []string{"-mtriple=" + target, "-filetype=obj"}
 		if isWasmTarget(target) {
 			llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
-		} else if !isWindowsTarget(target) {
-			llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
+		} else {
+			llcArgs = append(llcArgs, "-O0")
+			if !isWindowsTarget(target) {
+				llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
+			}
 		}
 		llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 

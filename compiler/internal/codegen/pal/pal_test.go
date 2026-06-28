@@ -2431,9 +2431,9 @@ func TestDarwinStackOverflowUseSigaction(t *testing.T) {
 	if !strings.Contains(out, "call i32 @sigaltstack(") {
 		t.Error("macOS should set up sigaltstack")
 	}
-	// SA_ONSTACK(0x0001) | SA_RESETHAND(0x0004) = 0x0005
-	if !strings.Contains(out, "i32 5") {
-		t.Error("missing SA_ONSTACK|SA_RESETHAND flags (0x0005)")
+	// SA_ONSTACK(0x0001) | SA_RESETHAND(0x0004) | SA_SIGINFO(0x0040) = 0x0045 (T1161)
+	if !strings.Contains(out, "i32 69") {
+		t.Error("missing SA_ONSTACK|SA_RESETHAND|SA_SIGINFO flags (0x0045)")
 	}
 	// Should register for both SIGSEGV(11) and SIGBUS(10)
 	if strings.Count(out, "call i32 @sigaction(i32 11,") < 1 {
@@ -2582,9 +2582,9 @@ func TestStackOverflowHandlerBody(t *testing.T) {
 	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitStackOverflowInit(module)
 	out := module.String()
 
-	// Handler function must exist with correct name
-	if !strings.Contains(out, "define void @__promise_sigsegv_handler(i32 %sig)") {
-		t.Error("missing @__promise_sigsegv_handler definition")
+	// Handler function must exist with the 3-arg SA_SIGINFO signature (T1161).
+	if !strings.Contains(out, "define void @__promise_sigsegv_handler(i32 %sig, i8* %info, i8* %ucontext)") {
+		t.Error("missing 3-arg @__promise_sigsegv_handler definition")
 	}
 	// Must have noreturn attribute (handler never returns)
 	handlerBody := out[strings.Index(out, "@__promise_sigsegv_handler"):]
@@ -2603,9 +2603,52 @@ func TestStackOverflowHandlerBody(t *testing.T) {
 	if !strings.Contains(handlerBody, "unreachable") {
 		t.Error("handler should end with unreachable")
 	}
-	// Error message global
-	if !strings.Contains(out, `@__promise_stack_overflow_msg = constant`) {
-		t.Error("missing error message global")
+	// macOS now prints the fault address like Linux — no static stack-overflow
+	// message global anymore (T1161).
+	if strings.Contains(out, `@__promise_stack_overflow_msg`) {
+		t.Error("macOS should no longer emit the static stack-overflow message global")
+	}
+}
+
+func TestDarwinHandlerSASiginfo(t *testing.T) {
+	// T1161: macOS handler should match Linux — a 3-arg SA_SIGINFO handler that
+	// reads si_addr (siginfo offset 24) and prints the fault address.
+	module := newModuleWithAlloc(&PosixPAL{target: "arm64-apple-darwin23.0.0"})
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitWrite(module)
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Handler must have 3 parameters: (i32 sig, i8* info, i8* ucontext)
+	if !strings.Contains(out, "define void @__promise_sigsegv_handler(i32 %sig, i8* %info, i8* %ucontext)") {
+		t.Error("Darwin handler should have 3 SA_SIGINFO parameters")
+	}
+	handlerBody := out[strings.Index(out, "@__promise_sigsegv_handler"):]
+	if !strings.Contains(handlerBody, "noreturn") {
+		t.Error("handler should be noreturn")
+	}
+	// Must load si_addr from siginfo at Darwin offset 24 (struct __siginfo).
+	if !strings.Contains(handlerBody, "getelementptr i8, i8* %info, i64 24") {
+		t.Error("Darwin handler should load si_addr from siginfo at offset 24")
+	}
+	// Shared address-formatting machinery.
+	if !strings.Contains(out, "@__promise_hex_digits") {
+		t.Error("missing hex digit lookup table")
+	}
+	if !strings.Contains(out, "@__promise_segfault_prefix") {
+		t.Error("missing segfault message prefix")
+	}
+	if !strings.Contains(handlerBody, "call i64 @write(i32 2,") {
+		t.Error("handler should write to stderr (fd 2)")
+	}
+	if !strings.Contains(handlerBody, "call void @_exit(i32 2)") {
+		t.Error("handler should call _exit(2)")
+	}
+	if !strings.Contains(handlerBody, "unreachable") {
+		t.Error("handler should end with unreachable")
+	}
+	// Darwin sigaction flags must include SA_SIGINFO: 0x0045 = 69.
+	if !strings.Contains(out, "i32 69") {
+		t.Error("Darwin sigaction flags should include SA_SIGINFO (0x0045 = 69)")
 	}
 }
 

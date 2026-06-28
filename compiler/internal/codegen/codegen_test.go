@@ -524,9 +524,10 @@ func TestStackOverflowHandler(t *testing.T) {
 		assertContains(t, ir, "@AddVectoredExceptionHandler")
 		assertContains(t, ir, "@ExitProcess")
 	} else if runtime.GOOS == "darwin" {
-		// macOS: 1-arg SIGSEGV handler with "fatal: stack overflow" message
-		assertContains(t, ir, `@__promise_stack_overflow_msg = constant [22 x i8]`)
-		assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig)")
+		// macOS: 3-arg SA_SIGINFO handler printing the fault address (T1161)
+		assertContains(t, ir, `@__promise_hex_digits = constant [16 x i8]`)
+		assertContains(t, ir, `@__promise_segfault_prefix = constant [31 x i8]`)
+		assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig, i8* %info, i8* %ucontext)")
 		assertContains(t, ir, "call void @_exit(i32 2)")
 		assertContains(t, ir, "call i32 @pthread_attr_setguardsize(")
 	} else {

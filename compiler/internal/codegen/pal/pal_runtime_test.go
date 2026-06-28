@@ -171,6 +171,72 @@ func TestRuntimeTailCorruptionAborts(t *testing.T) {
 	}
 }
 
+// hostSigsegvTarget returns a PosixPAL target string whose codegen decisions
+// (Darwin vs Linux handler, glibc vs musl sigaction layout) match the host the
+// test binary will actually run on. The struct layouts only depend on the OS
+// and libc, not the architecture, so a representative triple is sufficient.
+//
+// The libc is taken from `cc -dumpmachine` — the compiler's own default target
+// triple, i.e. exactly the libc it will link. This is decisive where a mere
+// loader-file check is not: a glibc host may also have the musl cross-loader
+// installed (e.g. musl-tools) without clang linking musl by default.
+func hostSigsegvTarget(cc string) string {
+	if runtime.GOOS == "darwin" {
+		return "arm64-apple-darwin23.0.0"
+	}
+	if cc != "" {
+		if out, err := exec.Command(cc, "-dumpmachine").Output(); err == nil &&
+			strings.Contains(string(out), "musl") {
+			return "x86_64-unknown-linux-musl"
+		}
+	}
+	return "x86_64-unknown-linux-gnu"
+}
+
+// TestRuntimeSigsegvHandlerPrintsFaultAddress is the end-to-end T1161 check.
+//
+// A real SIGSEGV (deliberate null-pointer write) must be caught by
+// @__promise_sigsegv_handler, which reads si_addr from siginfo_t, formats it as
+// "fatal: segmentation fault at 0x<16 hex>", writes it to stderr, and _exit(2)s.
+// This exercises the shared emitSigsegvAddrHandler end-to-end on the host:
+// Linux reads si_addr at offset 16, macOS at offset 24 — the exact-zero address
+// assertion below would fail if the offset (or the SA_SIGINFO registration that
+// delivers siginfo_t at all) were wrong. IR-shape tests can't catch an off-by-N
+// offset; only a real signal delivery can.
+func TestRuntimeSigsegvHandlerPrintsFaultAddress(t *testing.T) {
+	target := hostSigsegvTarget(findClang())
+	stdout, stderr, exit := buildAndRunDebugAlloc(t, func() *ir.Module {
+		m := ir.NewModule()
+		m.TargetTriple = ""
+		p := &PosixPAL{target: target}
+		initFn := p.EmitStackOverflowInit(m)
+
+		fn := m.NewFunc("main", irtypes.I32)
+		b := fn.NewBlock("entry")
+		b.NewCall(initFn) // pal_stack_overflow_init() installs the handler
+		// Deliberate volatile write to address 0 → SIGSEGV with si_addr == 0x0.
+		// Volatile + -O0 ensures the store is emitted, not folded to a trap.
+		st := b.NewStore(constant.NewInt(irtypes.I32, 0),
+			constant.NewNull(irtypes.NewPointer(irtypes.I32)))
+		st.Volatile = true
+		b.NewRet(constant.NewInt(irtypes.I32, 0))
+		return m
+	})
+	// Handler ends in _exit(2); the process must not die by raw signal.
+	if exit != 2 {
+		t.Errorf("expected exit code 2 (handler _exit(2)), got %d (stderr=%q stdout=%q)", exit, stderr, stdout)
+	}
+	if !strings.Contains(stderr, "fatal: segmentation fault at 0x") {
+		t.Errorf("expected fault-address message in stderr, got: %q", stderr)
+	}
+	// A null write has si_addr == 0, so the formatted address is all zeros. This
+	// is the load-bearing assertion: a wrong si_addr offset would print garbage
+	// (the next siginfo field) instead of 0x0000000000000000.
+	if !strings.Contains(stderr, "fatal: segmentation fault at 0x0000000000000000") {
+		t.Errorf("expected null fault address 0x0..0 (validates si_addr offset), got: %q", stderr)
+	}
+}
+
 // TestRuntimeAllocFreeRoundtrip: a normal alloc/free pair should not abort.
 // This guards against the validation logic having false positives.
 func TestRuntimeAllocFreeRoundtrip(t *testing.T) {

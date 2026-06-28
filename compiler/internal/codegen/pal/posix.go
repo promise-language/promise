@@ -2142,11 +2142,13 @@ func (p *PosixPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 // Registers a SIGSEGV handler (and SIGBUS on macOS) that prints
 // a diagnostic message to stderr and calls _exit(2).
 //
-// On macOS: uses sigaction(SA_ONSTACK) + sigaltstack for reliable delivery
-// even when the main stack is exhausted. Prints "fatal: stack overflow".
-// On Linux: uses sigaction(SA_SIGINFO) to get the fault address from
-// siginfo_t.si_addr, prints "fatal: segmentation fault at 0x<hex>".
-// This distinguishes null pointer dereferences from stack overflows (B0128).
+// Both macOS and Linux use sigaction(SA_SIGINFO) to get the fault address from
+// siginfo_t.si_addr and print "fatal: segmentation fault at 0x<hex>". This
+// distinguishes null/wild-pointer dereferences and heap corruption from true
+// stack overflows by the fault address (B0128, T1161). macOS reads si_addr at
+// siginfo offset 24 (struct __siginfo); Linux at offset 16 (kernel ABI).
+// macOS additionally uses sigaltstack for reliable delivery even when the main
+// stack is exhausted.
 func (p *PosixPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
 	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -2166,32 +2168,21 @@ func (p *PosixPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
 	entry := fn.NewBlock(".entry")
 
 	if isDarwin {
-		// macOS: simple 1-arg handler that prints "fatal: stack overflow\n".
-		msgStr := "fatal: stack overflow\n"
-		msgConst := constant.NewCharArrayFromString(msgStr)
-		msgGlobal := module.NewGlobal("__promise_stack_overflow_msg", msgConst.Typ)
-		msgGlobal.Init = msgConst
-		msgGlobal.Immutable = true
-
-		handlerFn := module.NewFunc("__promise_sigsegv_handler", irtypes.Void,
-			ir.NewParam("sig", irtypes.I32))
-		handlerFn.FuncAttrs = append(handlerFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrNoReturn)
-		{
-			hEntry := handlerFn.NewBlock(".entry")
-			msgPtr := hEntry.NewBitCast(msgGlobal, irtypes.I8Ptr)
-			stderr := constant.NewInt(irtypes.I32, 2)
-			hEntry.NewCall(writeFn, stderr, msgPtr, constant.NewInt(irtypes.I64, int64(len(msgStr))))
-			hEntry.NewCall(exitFn, constant.NewInt(irtypes.I32, 2))
-			hEntry.NewUnreachable()
-		}
+		// macOS: 3-arg SA_SIGINFO handler that reads si_addr (siginfo offset 24)
+		// and prints "fatal: segmentation fault at 0x<hex>\n" with the fault
+		// address — parity with Linux so the next crash distinguishes a true
+		// stack overflow (address near a stack guard) from heap corruption
+		// (wild pointer). (T1161)
+		handlerFn := p.emitSigsegvAddrHandler(module, writeFn, exitFn, 24)
 
 		// macOS: use sigaltstack + sigaction for reliable stack overflow detection.
 		// Struct layouts are stable (single libc: Apple's libSystem).
 		p.emitDarwinStackOverflowInit(module, entry, handlerFn)
 	} else {
-		// Linux: 3-arg SA_SIGINFO handler that reads si_addr and prints
-		// "fatal: segmentation fault at 0x<hex>\n" with the fault address.
-		handlerFn := p.emitLinuxSigsegvHandler(module, writeFn, exitFn)
+		// Linux: 3-arg SA_SIGINFO handler that reads si_addr (siginfo offset 16)
+		// and prints "fatal: segmentation fault at 0x<hex>\n" with the fault
+		// address.
+		handlerFn := p.emitSigsegvAddrHandler(module, writeFn, exitFn, 16)
 
 		// Setup sigaction with SA_SIGINFO.
 		p.emitLinuxStackOverflowInit(module, entry, handlerFn)
@@ -2200,15 +2191,16 @@ func (p *PosixPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitLinuxSigsegvHandler defines @__promise_sigsegv_handler(i32, i8*, i8*)
-// for Linux SA_SIGINFO. Reads si_addr from siginfo_t at offset 16 (stable
-// kernel ABI on x86_64/aarch64), converts to hex, and writes:
+// emitSigsegvAddrHandler defines @__promise_sigsegv_handler(i32, i8*, i8*)
+// for SA_SIGINFO. Reads si_addr from siginfo_t at the platform-specific byte
+// offset (Linux: 16, Darwin: 24), converts to hex, and writes:
 //
 //	"fatal: segmentation fault at 0x<16 hex digits>\n"
 //
-// Async-signal-safe: only uses write(2) and _exit(2).
-func (p *PosixPAL) emitLinuxSigsegvHandler(
-	module *ir.Module, writeFn, exitFn *ir.Func,
+// Async-signal-safe: only uses memcpy into a stack buffer, write(2), _exit(2).
+// The handler reads the info param, so callers must register it with SA_SIGINFO.
+func (p *PosixPAL) emitSigsegvAddrHandler(
+	module *ir.Module, writeFn, exitFn *ir.Func, siAddrOffset int64,
 ) *ir.Func {
 	// Hex digit lookup table
 	hexStr := "0123456789abcdef"
@@ -2249,12 +2241,14 @@ func (p *PosixPAL) emitLinuxSigsegvHandler(
 	hEntry.NewCall(memcpyFn, bufI8, prefixI8,
 		constant.NewInt(irtypes.I64, int64(len(prefixStr))))
 
-	// Load si_addr from siginfo_t at byte offset 16 (kernel ABI: stable on
-	// both x86_64 and aarch64 — si_signo(4) + si_errno(4) + si_code(4) +
-	// pad(4) then si_addr at offset 16).
+	// Load si_addr from siginfo_t at the platform-specific byte offset.
+	// Linux (offset 16, kernel ABI stable on x86_64/aarch64): si_signo(4) +
+	// si_errno(4) + si_code(4) + pad(4) then si_addr. Darwin (offset 24,
+	// struct __siginfo): si_signo(4) + si_errno(4) + si_code(4) + si_pid(4) +
+	// si_uid(4) + si_status(4) then 8-byte-aligned void* si_addr.
 	infoParam := handlerFn.Params[1]
 	addrFieldPtr := hEntry.NewGetElementPtr(irtypes.I8, infoParam,
-		constant.NewInt(irtypes.I64, 16))
+		constant.NewInt(irtypes.I64, siAddrOffset))
 	addrPtrCast := hEntry.NewBitCast(addrFieldPtr, irtypes.NewPointer(irtypes.I8Ptr))
 	siAddr := hEntry.NewLoad(irtypes.I8Ptr, addrPtrCast)
 	addrInt := hEntry.NewPtrToInt(siAddr, irtypes.I64)
@@ -2404,8 +2398,11 @@ func (p *PosixPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
 // macOS struct layouts:
 //
 //	stack_t:         {void* ss_sp, size_t ss_size, int ss_flags}  = 24 bytes
-//	struct sigaction: {void(*)(int) sa_handler, uint32_t sa_mask, int sa_flags} = 16 bytes
-//	SA_ONSTACK = 0x0001, SA_RESETHAND = 0x0004, SIGSEGV = 11, SIGBUS = 10
+//	struct sigaction: {void(*)(...) sa_handler/sa_sigaction, uint32_t sa_mask, int sa_flags} = 16 bytes
+//	SA_ONSTACK = 0x0001, SA_RESETHAND = 0x0004, SA_SIGINFO = 0x0040, SIGSEGV = 11, SIGBUS = 10
+//
+// SA_SIGINFO selects the 3-arg sa_sigaction handler (the same field as
+// sa_handler — a union at offset 0), so the handler receives siginfo_t (T1161).
 func (p *PosixPAL) emitDarwinStackOverflowInit(
 	module *ir.Module, entry *ir.Block, handlerFn *ir.Func,
 ) {
@@ -2456,9 +2453,12 @@ func (p *PosixPAL) emitDarwinStackOverflowInit(
 	// sa_mask = 0 (no signals blocked during handler)
 	saMask := entry.NewGetElementPtr(sigactTy, actAlloca, zero32, constant.NewInt(irtypes.I32, 1))
 	entry.NewStore(zero32, saMask)
-	// sa_flags = SA_ONSTACK(0x0001) | SA_RESETHAND(0x0004) = 0x0005
+	// sa_flags = SA_ONSTACK(0x0001) | SA_RESETHAND(0x0004) | SA_SIGINFO(0x0040) = 0x0045.
+	// SA_SIGINFO makes the kernel invoke the 3-arg sa_sigaction handler with a
+	// siginfo_t, so the handler can read the fault address (T1161). SA_RESETHAND
+	// is retained so a fault inside the handler falls through to default disposition.
 	saFlags := entry.NewGetElementPtr(sigactTy, actAlloca, zero32, constant.NewInt(irtypes.I32, 2))
-	entry.NewStore(constant.NewInt(irtypes.I32, 0x0005), saFlags)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0x0045), saFlags)
 
 	actPtr := entry.NewBitCast(actAlloca, irtypes.I8Ptr)
 

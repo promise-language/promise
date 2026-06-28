@@ -17676,6 +17676,84 @@ func TestT1105_GoMethodClosureResultNoTokenLoad(t *testing.T) {
 	assertContains(t, ir, "@pal_alloc")
 }
 
+// T1159: fire-and-forget `go f(...)` with a non-void heap result must DROP the
+// discarded result in the coroutine body instead of running the result-store
+// machinery (there is no receiver and result_ptr stays null). Contrast: the
+// task-handle form stores into G.result_ptr via a `store_result:` block. Guards
+// the free-function fast path (genGoCallExpr).
+func TestT1159_FastPathFireAndForgetDropsResult(t *testing.T) {
+	// Fire-and-forget: result discarded → body drops the string, no store block.
+	ffBody := defBody(t, generateIR(t, `
+		build(int x) string { return "v{x}"; }
+		main() { go build(5); }
+	`), "define i8* @.goroutine.0(")
+	assertContains(t, ffBody, "@promise_string_drop") // discarded result dropped
+	assertNotContains(t, ffBody, "store_result:")     // no result-buffer store machinery
+
+	// Task handle: result received → body stores it, no unconditional drop.
+	taskBody := defBody(t, generateIR(t, `
+		build(int x) string { return "v{x}"; }
+		main() { t := go build(5); r := <-t; }
+	`), "define i8* @.goroutine.0(")
+	assertContains(t, taskBody, "store_result:")           // result stored into G.result_ptr
+	assertNotContains(t, taskBody, "@promise_string_drop") // body does not drop — receiver owns it
+}
+
+// T1159: fire-and-forget `go obj.method(...)` (via-block path) with a non-void
+// result must NOT allocate a result buffer in the caller — the coroutine body
+// drops the discarded result via cleanupStmtTemps. Contrast: the task-handle form
+// allocates a buffer (`pal_alloc`) between `promise_g_new` and `promise_sched_enqueue`
+// and stores it into G.result_ptr. Guards the via-block path (genGoCallExprViaBlock).
+func TestT1159_ViaBlockFireAndForgetNoResultBuffer(t *testing.T) {
+	// The user's `main()` is lowered into the `.goroutine.main` coroutine, whose
+	// body holds the go-spawn site. Scope the g_new→enqueue slice to that body so
+	// it isolates the user spawn from the runtime's own main-goroutine spawn.
+	ffSpawn := goNewToEnqueue(t, defBody(t, generateIR(t, `
+		type W { make(this, int x) string { return "v{x}"; } }
+		main() { W w = W(); go w.make(5); }
+	`), "define i8* @.goroutine.main("))
+	assertNotContains(t, ffSpawn, "pal_alloc") // no result buffer between g_new and enqueue
+
+	taskSpawn := goNewToEnqueue(t, defBody(t, generateIR(t, `
+		type W { make(this, int x) string { return "v{x}"; } }
+		main() { W w = W(); t := go w.make(5); r := <-t; }
+	`), "define i8* @.goroutine.main("))
+	assertContains(t, taskSpawn, "pal_alloc") // result buffer allocated for the task
+}
+
+// defBody extracts a single function *definition* body — from the line beginning
+// with `marker` (a full `define <ret> @<name>(` prefix) up to its closing brace.
+// Matching the full define prefix avoids matching a call to the same function.
+func defBody(t *testing.T, ir, marker string) string {
+	t.Helper()
+	idx := strings.Index(ir, marker)
+	if idx < 0 {
+		t.Fatalf("expected a definition matching %q in the IR", marker)
+	}
+	body := ir[idx:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end+2]
+	}
+	return body
+}
+
+// goNewToEnqueue returns the IR slice of the spawn site — from the
+// `promise_g_new` call to the following `promise_sched_enqueue` — where the
+// via-block result buffer (if any) is allocated.
+func goNewToEnqueue(t *testing.T, ir string) string {
+	t.Helper()
+	gNew := strings.Index(ir, "@promise_g_new")
+	if gNew < 0 {
+		t.Fatal("expected a promise_g_new call in the IR")
+	}
+	rest := ir[gNew:]
+	enq := strings.Index(rest, "@promise_sched_enqueue")
+	if enq < 0 {
+		t.Fatal("expected a promise_sched_enqueue call after promise_g_new")
+	}
+	return rest[:enq]
+}
+
 func TestGoBlockVoidStillUsesSentinel(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -18199,20 +18277,33 @@ func TestGoroutineExitSkipsFreeForTask(t *testing.T) {
 }
 
 func TestFireAndForgetNonVoidNoResultBuffer(t *testing.T) {
-	// B0109: go non_void_func() as fire-and-forget (result discarded) should NOT
-	// allocate a result buffer. result_ptr stays null so goroutine_exit frees G.
-	ir := generateIR(t, `
+	// B0109 + T1159: go non_void_func() as fire-and-forget (result discarded) should
+	// NOT allocate a result buffer — result_ptr stays null so goroutine_exit frees G.
+	// T1159 further removes the now-dead runtime-null-checked store machinery for
+	// fire-and-forget (result_ptr is statically null): the body drops the discarded
+	// result instead (a no-op for a scalar `int`), so there is no store_result block.
+	ffBody := defBody(t, generateIR(t, `
 		compute() int { return 42; }
 		main() {
 			go compute();
 		}
-	`)
-	// The coroutine body should null-check result_ptr before storing
-	assertContains(t, ir, "store_result:")
-	assertContains(t, ir, "after_store:")
-	// Main function should go directly from promise_g_new to promise_sched_enqueue
-	// without storing to result_ptr field (no inttoptr sentinel, no pal_alloc between them)
-	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
+	`), "define i8* @.goroutine.0(")
+	// Fire-and-forget body no longer emits the conditional result store…
+	assertNotContains(t, ffBody, "store_result:")
+	assertNotContains(t, ffBody, "after_store:")
+	// …and the caller stores no sentinel (fire-and-forget, not a void task).
+	assertNotContains(t, ffBody, "inttoptr i64 1 to i8*")
+
+	// Contrast: the task-handle form DOES emit the store machinery (result received).
+	taskBody := defBody(t, generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			r := <-t;
+		}
+	`), "define i8* @.goroutine.0(")
+	assertContains(t, taskBody, "store_result:")
+	assertContains(t, taskBody, "after_store:")
 }
 
 func TestChannelSendCoroutineRendezvous(t *testing.T) {

@@ -158,3 +158,51 @@ test_non_void_task_still_works() `test(exclude: wasm) {
   int result = <-t;
   assert(result == 42, "non-void task returned correct result");
 }
+
+// T1159: the free-function fast path (`go f(...)`) discarded a non-void heap
+// result without dropping it — a heap struct leaked its instance, a vector its
+// backing block. The body now drops the result via emitVariantFieldDrop when
+// fire-and-forget. All leak-checked.
+type Bag {
+  int n;
+}
+
+build_bag(int x) Bag {
+  return Bag(n: x);
+}
+
+build_ints(int x) int[] {
+  return[x, x + 1, x + 2];
+}
+
+build_adder(int x)() -> int {
+  return || -> x + 1;
+}
+
+// heap struct result, discarded — used to leak the struct instance (1 alloc).
+test_ff_freefn_struct() `test(exclude: wasm) {
+  go build_bag(5);
+  sleep(Duration.from_millis(30));
+}
+
+// vector result, discarded — used to leak the backing block (1 alloc).
+test_ff_freefn_vector() `test(exclude: wasm) {
+  go build_ints(5);
+  sleep(Duration.from_millis(30));
+}
+
+// capturing-closure result, discarded — the fast path drops it via
+// emitVariantFieldDrop's closure (T0739) path, so no env-temp tracking is needed
+// (unlike the via-block method path, blocked by T1160). Leak-checked.
+test_ff_freefn_closure() `test(exclude: wasm) {
+  go build_adder(10);
+  sleep(Duration.from_millis(30));
+}
+
+// regression: the same struct-returning function received via a task handle
+// still produces the correct result (buffer freed by the handle drop).
+test_ff_freefn_struct_task_still_works() `test(exclude: wasm) {
+  t := go build_bag(7);
+  b := <-t;
+  assert(b.n == 7, "struct task result");
+}

@@ -140,3 +140,78 @@ test_go_method_call_multiple() `test(exclude: wasm) {
   r3 := <-t3;
   assert(r1 + r2 + r3 == 60, "concurrent method calls");
 }
+
+// T1159: fire-and-forget (no task handle) `go obj.method(...)` with a non-void
+// result. The via-block path used to always allocate an unfreed result buffer and
+// claim the result into it, leaking the buffer + the result's heap parts. Now the
+// caller skips the buffer for fire-and-forget and the coro body drops the
+// discarded result via cleanupStmtTemps/cleanupHeapTemps/cleanupEnvTemps. All
+// leak-checked: a regression would surface as a LEAK outcome.
+type Greeter {
+  greet(this, int x) string {
+    return "v{x}";
+  }
+}
+
+// string result, discarded — the item's primary 3-allocation repro.
+test_go_method_ff_string() `test(exclude: wasm) {
+  g := Greeter();
+  go g.greet(5);
+  sleep(Duration.from_millis(30));
+}
+
+// heap struct result, discarded (B0218 pal_free path via cleanupHeapTemps).
+test_go_method_ff_struct() `test(exclude: wasm) {
+  b := Box(n: 0);
+  go b.make(5);
+  sleep(Duration.from_millis(30));
+}
+
+// struct with a droppable string field, discarded — exercises the
+// claim-suppressed → cleanup-drops transition for a synthesized struct drop.
+test_go_method_ff_struct_string_field() `test(exclude: wasm) {
+  l := Labeled(name: "init", n: 0);
+  go l.build(7);
+  sleep(Duration.from_millis(30));
+}
+
+// struct with a droppable vector field, discarded (Vector.drop path).
+test_go_method_ff_struct_vector_field() `test(exclude: wasm) {
+  v := VecBox(xs: [0]);
+  go v.build(5);
+  sleep(Duration.from_millis(30));
+}
+
+// scalar (int) result, discarded — the result has no heap parts, so the body's
+// drop is a no-op. Exercises the buffer-skip path (caller allocates no result
+// buffer; body neither stores nor claims) for a non-void value with nothing to
+// free. A regression that mishandled scalar fire-and-forget would crash or leak G.
+test_go_method_ff_int() `test(exclude: wasm) {
+  c := Counter(value: 42);
+  go c.get_value();
+  sleep(Duration.from_millis(30));
+}
+
+// plain vector result, discarded — a method returning a bare `int[]` (not a
+// struct wrapping one) exercises emitVariantFieldDrop's Vector.drop path directly
+// on the discarded via-block result. Used to leak the backing block.
+type VecMaker {
+  make_vec(this, int x) int[] {
+    return[x, x + 1, x + 2];
+  }
+}
+
+test_go_method_ff_vector() `test(exclude: wasm) {
+  m := VecMaker();
+  go m.make_vec(5);
+  sleep(Duration.from_millis(30));
+}
+
+// NOTE (T1159/T1160): a capturing-closure fire-and-forget result via this
+// via-block path (`go a.make_adder(10)` discarded) cannot yet be leak-clean —
+// it is blocked by T1160, a *pre-existing* bug where a discarded closure-returning
+// call result is never tracked as an env temp (so cleanupEnvTemps has nothing to
+// drop). It leaks 1 allocation even in plain non-`go` statement context. A
+// fire-and-forget test for it will be added once T1160 lands. The fast-path
+// free-function closure form IS leak-clean today (it drops via emitVariantFieldDrop,
+// not env-temp tracking) — covered by goroutine_fire_and_forget.pr.

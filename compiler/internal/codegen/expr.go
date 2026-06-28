@@ -14486,24 +14486,40 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		bodyBlk.NewCondBr(dcIsPanic, goPanicExitDC, dcOkBlk)
 		bodyBlk = dcOkBlk
 
-		// Store result via G.result_ptr (set by caller before enqueue).
-		// For fire-and-forget non-void, result_ptr is null — skip store (B0109).
-		gTy := goroutineStructType()
-		currentG := bodyBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
-		gPtr := bodyBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
-		rpField := bodyBlk.NewGetElementPtr(gTy, gPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-		rpVal := bodyBlk.NewLoad(irtypes.I8Ptr, rpField)
-		rpNotNull := bodyBlk.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
-		storeResultBlk := coroFn.NewBlock("store_result")
-		afterStoreBlk := coroFn.NewBlock("after_store")
-		bodyBlk.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
+		if c.goExprFireAndForget {
+			// T1159: fire-and-forget non-void has no receiver and result_ptr is null
+			// (the caller skips the buffer at the `!c.goExprFireAndForget` gate below).
+			// Drop the discarded result here so a value-returning go-spawn doesn't leak.
+			// emitVariantFieldDrop is the canonical drop-by-type (string/struct/vector/
+			// closure/…), the same helper task drop uses on the result buffer. It operates
+			// on c.block and may create new blocks (c.newBlock) / entry allocas
+			// (c.entryBlock) — both must target coroFn's frame, not the outer caller's,
+			// so swap c.fn/c.block/c.entryBlock around it (the fast path otherwise threads
+			// blocks via the local bodyBlk without touching c.fn).
+			savedFn, savedBlock, savedEntry := c.fn, c.block, c.entryBlock
+			c.fn, c.block, c.entryBlock = coroFn, bodyBlk, startBlk
+			c.emitVariantFieldDrop(result, callResultType)
+			bodyBlk = c.block
+			c.fn, c.block, c.entryBlock = savedFn, savedBlock, savedEntry
+		} else {
+			// Store result via G.result_ptr (set by caller before enqueue).
+			gTy := goroutineStructType()
+			currentG := bodyBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+			gPtr := bodyBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
+			rpField := bodyBlk.NewGetElementPtr(gTy, gPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+			rpVal := bodyBlk.NewLoad(irtypes.I8Ptr, rpField)
+			rpNotNull := bodyBlk.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
+			storeResultBlk := coroFn.NewBlock("store_result")
+			afterStoreBlk := coroFn.NewBlock("after_store")
+			bodyBlk.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
 
-		typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
-		storeResultBlk.NewStore(result, typedRP)
-		storeResultBlk.NewBr(afterStoreBlk)
+			typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
+			storeResultBlk.NewStore(result, typedRP)
+			storeResultBlk.NewBr(afterStoreBlk)
 
-		bodyBlk = afterStoreBlk
+			bodyBlk = afterStoreBlk
+		}
 	} else {
 		bodyBlk.NewCall(targetFn, callArgs...)
 
@@ -14821,7 +14837,12 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	// Clear panic exit block after body generation
 	c.panicExitBlock = nil
 
-	if !isVoid && result != nil {
+	if !isVoid && result != nil && !savedGoExprFF {
+		// T1159: only transfer+claim the result for a task handle. For fire-and-forget
+		// the caller allocates no result buffer (G.result_ptr stays null below), so don't
+		// store/claim — cleanupStmtTemps/cleanupHeapTemps/cleanupEnvTemps below drop the
+		// discarded result instead. (Without this, the body would deref a null result_ptr
+		// and the claim would suppress the very cleanup that should free the result.)
 		// Store result via G.result_ptr (set by caller before enqueue)
 		gTy := goroutineStructType()
 		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
@@ -14967,7 +14988,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	handle := c.block.NewCall(coroFn, captureVals...)
 	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
 
-	if !isVoid || !c.goExprFireAndForget {
+	if !savedGoExprFF { // T1159: fire-and-forget allocates no result buffer (mirrors the fast path's `!c.goExprFireAndForget` gate in genGoCallExpr)
 		gTy := goroutineStructType()
 		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 		rpField := c.block.NewGetElementPtr(gTy, gPtr,

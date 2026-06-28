@@ -14707,6 +14707,10 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedStmtTemps := c.stmtTemps                     // T0594: stmtTemps must not leak from coroutine body into outer function
 	savedStmtTempMap := c.stmtTempMap                 // T0594: allocas created inside coroutine body live in a different function
 	savedEnumCtorTemps := c.enumCtorTemps             // B0267: enumCtorTemps must not leak from coroutine body into outer function
+	savedHeapTemps := c.heapTemps                     // T1105: isolate coro-body heap temps from the outer fn
+	savedHeapTempMap := c.heapTempMap                 // T1105
+	savedEnvTemps := c.envTemps                       // T1105: isolate coro-body closure env temps from the outer fn
+	savedEnvTempMap := c.envTempMap                   // T1105
 	savedBorrowedValueParams := c.borrowedValueParams // T0945
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -14724,6 +14728,10 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.stmtTemps = nil                         // T0594: fresh temp state for coroutine body
 	c.stmtTempMap = make(map[value.Value]int) // T0594
 	c.enumCtorTemps = nil                     // B0267
+	c.heapTemps = nil                         // T1105: coro-body heap temps reference coroFn allocas
+	c.heapTempMap = make(map[value.Value]int) // T1105
+	c.envTemps = nil                          // T1105
+	c.envTempMap = make(map[value.Value]int)  // T1105
 
 	// 6. Coroutine preamble
 	entry := coroFn.NewBlock(".entry")
@@ -14825,12 +14833,16 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		c.block.NewStore(result, typedRP)
 		// T0594: claim the result stmtTemp — ownership transferred to G.result_ptr.
 		c.claimStringTemp(result)
+		c.claimHeapTemp(result) // T1105: heap-struct result moved into G.result_ptr
+		c.claimEnvTemp(result)  // T1105: closure result moved into G.result_ptr
 	}
 
 	// T0594: Clean up any remaining stmtTemps from the coroutine body before restoring
 	// the outer function's context. Without this, temps created by genExpr (e.g., string
 	// return values tracked by trackStringTemp) would be orphaned inside the coroutine.
 	c.cleanupStmtTemps()
+	c.cleanupHeapTemps() // T1105: drop orphaned trailing-expr heap intermediates inside the coro
+	c.cleanupEnvTemps()  // T1105
 
 	// T1156: Drop inline enum-ctor temps produced for the call's arguments inside
 	// the coro body (via-block analogue of stmt.go's statement-end enum cleanup).
@@ -14941,6 +14953,10 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.stmtTemps = savedStmtTemps                     // T0594: restore outer function's temp state
 	c.stmtTempMap = savedStmtTempMap                 // T0594
 	c.enumCtorTemps = savedEnumCtorTemps             // B0267
+	c.heapTemps = savedHeapTemps                     // T1105
+	c.heapTempMap = savedHeapTempMap                 // T1105
+	c.envTemps = savedEnvTemps                       // T1105
+	c.envTempMap = savedEnvTempMap                   // T1105
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	for name := range capturedDroppablesVB {

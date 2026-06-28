@@ -17617,6 +17617,65 @@ func TestT0739_ClosureResultDropFreesEnv(t *testing.T) {
 	assertContains(t, ir, "@pal_alloc")
 }
 
+// T1105: `go obj.method(...)` returning a heap user type via the
+// genGoCallExprViaBlock path is the sibling of the T0686 go-block heapTemps bug.
+// The method's struct result registers a heap temp whose alloca/dropFlag belong
+// to the inner `.goroutine.N` frame; without isolation those temps leaked into
+// the outer `.goroutine.main` coroutine, where the printer serialized them as
+// `%0` — the coro.id token — producing `load i1, i1* %0` (malformed IR / stack
+// overflow). Guards the producer-side isolation of heapTemps/heapTempMap.
+func TestT1105_GoMethodStructResultNoTokenLoad(t *testing.T) {
+	ir := generateIR(t, `
+		type R { int n; }
+		type W { f(this, int x) R { return R(n: x); } }
+		main() { W w = W(); t := go w.f(5); r := <-t; }
+	`)
+	defStart := strings.Index(ir, "define i8* @.goroutine.main(")
+	if defStart < 0 {
+		t.Fatal("expected a .goroutine.main coroutine definition in the IR")
+	}
+	body := ir[defStart:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end+2]
+	}
+	assertContains(t, body, "call token @llvm.coro.id") // %0 is the token
+	assertNotContains(t, body, "i1* %0")                // no heap drop-flag load from the token
+	assertNotContains(t, body, "i8** %0")               // no heap pointer load from the token
+	// Positive guards: the via-block coroutine still exists and the caller
+	// allocates a real result buffer (the ViaBlock path stores into G.result_ptr
+	// inline, so there is no separate `store_result:` block as in the go-block form).
+	assertContains(t, ir, "define i8* @.goroutine.")
+	assertContains(t, ir, "@pal_alloc")
+}
+
+// T1105 (env sibling): `go obj.method(...)` returning a CAPTURING closure (≥1
+// capture → heap env struct) exercises the envTemps isolation added alongside
+// the heapTemps fix. Without isolating envTemps/envTempMap the closure's env
+// temp (whose alloca lives in the inner `.goroutine.N` frame) leaked into the
+// outer `.goroutine.main` coroutine, mis-serializing its coro.id token as `%0`.
+func TestT1105_GoMethodClosureResultNoTokenLoad(t *testing.T) {
+	ir := generateIR(t, `
+		type W { f(this, int x) () -> int { return || -> x + 1; } }
+		main() { W w = W(); t := go w.f(5); g := <-t; }
+	`)
+	defStart := strings.Index(ir, "define i8* @.goroutine.main(")
+	if defStart < 0 {
+		t.Fatal("expected a .goroutine.main coroutine definition in the IR")
+	}
+	body := ir[defStart:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end+2]
+	}
+	assertContains(t, body, "call token @llvm.coro.id") // %0 is the token
+	assertNotContains(t, body, "i1* %0")                // no env drop-flag load from the token
+	assertNotContains(t, body, "i8** %0")               // no env pointer load from the token
+	// Positive guards: the via-block coroutine still exists and the caller
+	// allocates a real result buffer (the ViaBlock path stores into G.result_ptr
+	// inline, so there is no separate `store_result:` block as in the go-block form).
+	assertContains(t, ir, "define i8* @.goroutine.")
+	assertContains(t, ir, "@pal_alloc")
+}
+
 func TestGoBlockVoidStillUsesSentinel(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

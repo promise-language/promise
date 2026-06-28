@@ -47,6 +47,86 @@ test_go_method_call_void_task() `test(exclude: wasm) {
   <-t;
 }
 
+// T1105: go obj.method() returning a heap user type (struct) via the ViaBlock path.
+// Previously produced malformed coro IR (token loaded as i1) / stack overflow.
+type Box {
+  int n;
+  make(this, int x) Box {
+    return Box(n: x);
+  }
+}
+
+test_go_method_call_struct_result() `test(exclude: wasm) {
+  b := Box(n: 0);
+  t := go b.make(5);
+  r := <-t;
+  assert(r.n == 5, "struct result via go method call");
+}
+
+// T1105: heap struct with a droppable (string) field — exercises the heap-temp
+// drop path inside the coroutine body (claim on transfer, drop otherwise).
+type Labeled {
+  string name;
+  int n;
+  build(this, int x) Labeled {
+    return Labeled(name: "v{x}", n: x);
+  }
+}
+
+test_go_method_call_struct_string_field() `test(exclude: wasm) {
+  l := Labeled(name: "init", n: 0);
+  t := go l.build(7);
+  r := <-t;
+  assert(r.n == 7, "struct-with-string result n");
+  assert(r.name == "v7", "struct-with-string result name");
+}
+
+// T1105: heap struct with a droppable VECTOR field — exercises a different
+// heap-temp drop function (Vector.drop) than the string case above.
+type VecBox {
+  int[] xs;
+  build(this, int x) VecBox {
+    return VecBox(xs: [x, x + 1, x + 2]);
+  }
+}
+
+test_go_method_call_struct_vector_field() `test(exclude: wasm) {
+  v := VecBox(xs: [0]);
+  t := go v.build(5);
+  r := <-t;
+  assert(r.xs.len == 3, "vec-field result len");
+  assert(r.xs[2] == 7, "vec-field result elem");
+}
+
+// T1105 (env sibling): go obj.method() returning a CAPTURING closure exercises
+// the envTemps/envTempMap isolation added alongside the heapTemps fix. The
+// closure's heap env (capturing x) is claimed into G.result_ptr, received, and
+// invoked — runtime + leak-check complement to the Go IR token-load guard.
+type Adder {
+  make_adder(this, int x)() -> int {
+    return || -> x + 1;
+  }
+}
+
+test_go_method_call_closure_result() `test(exclude: wasm) {
+  a := Adder();
+  t := go a.make_adder(10);
+  f := <-t;
+  assert(f() == 11, "closure result via go method call");
+}
+
+// T1105: two concurrent go-method struct results — confirms each coroutine's
+// heap temps stay isolated to its own frame (no cross-goroutine token aliasing).
+test_go_method_call_struct_concurrent() `test(exclude: wasm) {
+  a := Box(n: 0);
+  b := Box(n: 0);
+  t1 := go a.make(3);
+  t2 := go b.make(4);
+  r1 := <-t1;
+  r2 := <-t2;
+  assert(r1.n + r2.n == 7, "concurrent struct results");
+}
+
 // Multiple concurrent method calls on different objects
 test_go_method_call_multiple() `test(exclude: wasm) {
   a := Counter(value: 10);

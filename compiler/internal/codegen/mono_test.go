@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/promise/compiler/internal/types"
@@ -223,4 +224,100 @@ func TestCollectArgTypeNames(t *testing.T) {
 			t.Errorf("expected both Derived and Base (via parent type args) in arg type names, got %v", names)
 		}
 	})
+}
+
+// TestT0469_NoFnIterDropStubForNonIterGenerics verifies that the per-instance
+// native-drop stub that delegates to __promise_iter_cleanup is generated ONLY
+// for _FnIter[T] (whose layout {variant, {fn,env}, parent} matches what
+// iter_cleanup walks), and NOT for other native-drop generics like Vector[T].
+// A Vector instance's bytes are cap/len/buffer, not a closure+parent chain;
+// the old code emitted `define void @"Vector[int].drop"` { call iter_cleanup },
+// a latent corrupting stub that segfaulted once a field-drop site routed to the
+// mono name (T0415's first attempt on Map._buckets).
+func TestT0469_NoFnIterDropStubForNonIterGenerics(t *testing.T) {
+	// A plain Vector program: Vector[int] is instantiated and dropped at scope
+	// exit. No mono-named Vector drop stub may exist.
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			v.push(4);
+		}
+	`)
+	// The origin native drop is still present and used everywhere.
+	assertContains(t, ir, "define void @Vector.drop(")
+	// But no per-instance mono stub that reinterprets Vector bytes as a closure.
+	assertNotContainsMatch(t, ir, `define void @"Vector\[[^"]*\]\.drop"`)
+}
+
+// TestT0469_FnIterDropStubPreserved verifies the legitimate consumer is intact:
+// an iterator combinator chain materializes _FnIter[T] instances whose native
+// drop correctly maps to __promise_iter_cleanup, and those stubs must still be
+// emitted with the iter_cleanup body.
+func TestT0469_FnIterDropStubPreserved(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3, 4];
+			total := 0;
+			Iterator[int] it = v.iter();
+			for x in it { total = total + x; }
+			print_line(total.to_string());
+		}
+	`)
+	// The _FnIter[int] instance's drop stub exists and delegates to iter_cleanup.
+	stub := extractFunction(ir, `"_FnIter[int].drop"`)
+	if stub == "" {
+		t.Fatalf("_FnIter[int].drop stub not found in IR:\n%s", ir)
+	}
+	assertContains(t, stub, "call void @__promise_iter_cleanup")
+}
+
+// TestT0469_NativeGenericDropsAreTypeSpecific is the complementary guard to the
+// Vector case: Channel[T], Task[T] and Ref[T] DO use their mono-mangled drop
+// name (unlike Vector, which uses the origin native), but their bodies are
+// produced by dedicated paths (getOrCreateChannelDrop, emitTaskJoinAndFree,
+// getOrCreateArcDrop) — NEVER the FnIter stub. The pre-fix code routed every
+// native generic drop through defineFnIterDrop; had that won the
+// define-once race it would have stamped `call @__promise_iter_cleanup` onto a
+// Channel/Task/Ref instance, reinterpreting ring-buffer / refcount bytes as a
+// closure+parent chain. This locks in that none of those drops are iter-shaped.
+func TestT0469_NativeGenericDropsAreTypeSpecific(t *testing.T) {
+	// Channel + Task: a channel is dropped at scope exit; a `go` task handle is
+	// dropped without being awaited.
+	chanIR := generateIR(t, `
+		main() {
+			c := channel[int](2);
+			c.send(1);
+			c.close();
+			t := go { 99 };
+		}
+	`)
+	for _, name := range []string{`"Channel[int].drop"`, `"Task[int].drop"`} {
+		drop := extractDefine(chanIR, name)
+		if drop == "" {
+			t.Fatalf("%s definition not found in IR:\n%s", name, chanIR)
+		}
+		if strings.Contains(drop, "__promise_iter_cleanup") {
+			t.Errorf("%s must not be the corrupting FnIter stub, got:\n%s", name, drop)
+		}
+	}
+
+	// Ref[T] keeps a declared mono stub (the Arc-family exception in the declare
+	// phase) that getOrCreateArcDrop fills with a real atomic refcount decrement
+	// — again never iter_cleanup.
+	refIR := generateIR(t, `
+		make() Ref[int] { return Ref[int](0); }
+		main() {
+			r := make();
+			r2 := r.clone();
+		}
+	`)
+	refDrop := extractDefine(refIR, `"Ref[int].drop"`)
+	if refDrop == "" {
+		t.Fatalf("Ref[int].drop definition not found in IR:\n%s", refIR)
+	}
+	if strings.Contains(refDrop, "__promise_iter_cleanup") {
+		t.Errorf("Ref[int].drop must not be the FnIter stub, got:\n%s", refDrop)
+	}
+	// Sanity: it is the genuine refcounting drop (atomic decrement).
+	assertContains(t, refDrop, "atomicrmw")
 }

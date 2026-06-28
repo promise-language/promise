@@ -1716,6 +1716,15 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 				if m2 == nil || !m2.IsNative() || md.Name != "drop" {
 					continue
 				}
+				// T0469: only _FnIter and the Arc-family (whose bodies are filled
+				// lazily by getOrCreate*Drop) have per-instance native drop
+				// functions. Vector/Generator are dropped via dedicated paths
+				// (origin Vector.drop, bindingGenerator); don't declare a dead
+				// stub that would only ever corrupt memory if called.
+				if !isFnIterNativeDrop(named) && named != types.TypArc &&
+					named != types.TypWeak && named != types.TypMutex && named != types.TypMutexGuard {
+					continue
+				}
 			}
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
@@ -1824,10 +1833,14 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			// Ref[T] has its own drop logic (T0155) — skip here; body is generated
 			// lazily by getOrCreateArcDrop when the drop function is first needed.
 			if isNativeDrop {
-				if named == types.TypArc || named == types.TypWeak || named == types.TypMutex || named == types.TypMutexGuard {
-					continue
+				// T0469: only _FnIter's layout maps to __promise_iter_cleanup.
+				// Arc/Weak/Mutex/MutexGuard bodies are filled lazily by
+				// getOrCreate*Drop. All other native-drop generics are dropped
+				// via dedicated paths and have no per-instance stub (the declare
+				// phase skips them), so this loop never reaches them here.
+				if isFnIterNativeDrop(named) {
+					c.defineFnIterDrop(fn, inst)
 				}
-				c.defineFnIterDrop(fn, inst)
 				continue
 			}
 
@@ -1843,6 +1856,17 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			}()
 		}
 	}
+}
+
+// isFnIterNativeDrop reports whether a native generic drop maps to
+// __promise_iter_cleanup. Only _FnIter[T]'s layout
+// ({ i8* _variant, {fn,env} _next, i64 _parent }) matches what iter_cleanup
+// walks. Vector/Channel/Task/Generator native drops are dispatched through
+// their dedicated paths (origin Vector.drop, getOrCreateChannelDrop,
+// emitTaskJoinAndFree, bindingGenerator); reinterpreting their fields as a
+// closure+parent corrupts memory if the stub is ever called (T0469).
+func isFnIterNativeDrop(named *types.Named) bool {
+	return named.Obj().Name() == "_FnIter"
 }
 
 // defineFnIterDrop synthesizes the body for _FnIter[T].drop (T0088/T0128).

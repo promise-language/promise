@@ -2403,6 +2403,36 @@ func TestEnumMatchNameBinding(t *testing.T) {
 	assertContains(t, ir, "alloca i32")
 }
 
+// T1155: a match-arm pattern binding that reuses the scrutinee's name must be
+// scoped to the arm only. Before the fix, codegen left c.locals[scrutinee]
+// pointing at the destructured (string) alloca, so a later `match` on the same
+// name evaluated its subject against the wrong alloca and emitted garbage /
+// self-recursive control flow → runtime stack overflow. The correct IR loads the
+// enum subject from the parameter alloca (%b.addr) for BOTH matches.
+func TestEnumMatchScrutineeShadow(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Empty }
+		f(Msg b) int {
+			int la = match b { Msg.Text(b) => b.len, Msg.Empty => 0 };
+			int lb = match b { Msg.Text(s) => s.len, Msg.Empty => 0 };
+			return la + lb;
+		}
+		main() { Msg m = Msg.Text("ab"); int x = f(m); }
+	`)
+	fn := ir[strings.Index(ir, "define i64 @__user.f("):]
+	fn = fn[:strings.Index(fn, "\n}")]
+	// Both matches must load the enum subject from the param alloca %b.addr —
+	// the arm binding `Msg.Text(b)` in the first match must not leak and replace
+	// the scrutinee for the second match.
+	if got := strings.Count(fn, "load %promise_Msg_enum, %promise_Msg_enum* %b.addr"); got != 2 {
+		t.Fatalf("expected 2 loads of the enum subject from %%b.addr (one per match), got %d\n%s", got, fn)
+	}
+	// The fix must not introduce a recursive call to f.
+	if strings.Contains(fn, "call i64 @__user.f(") {
+		t.Fatalf("f must not self-recurse:\n%s", fn)
+	}
+}
+
 // B0328: Bare variant names in match-as-expression on enum subject must resolve
 // to EnumVariantMatchPattern, not NameMatchPattern (catch-all binding).
 func TestEnumMatchBareVariantNames(t *testing.T) {

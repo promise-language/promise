@@ -7198,6 +7198,29 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 				armBorrowedSnapshot[k] = true
 			}
 		}
+		// T1155: Snapshot c.locals/c.dropFlags entries that this arm's pattern
+		// bindings will shadow, so the binding is strictly arm-scoped. Without
+		// this, an arm that rebinds the scrutinee's own name (e.g.
+		// `match b { Msg.Text(b) => ... }`) leaves c.locals["b"] pointing at the
+		// destructured (wrong-typed) alloca for the rest of the function, so a
+		// later `match b` evaluates its subject against that stale alloca and
+		// emits garbage/self-recursive control flow → runtime stack overflow.
+		// Mirrors the save/restore already done for type-binding arms in
+		// genTypeMatch.
+		armBindingNames := patternBindingNames(arm.Pattern)
+		type savedLocal struct {
+			alloca   *ir.InstAlloca
+			hadLocal bool
+			dropFlag *ir.InstAlloca
+			hadDrop  bool
+		}
+		savedLocals := make(map[string]savedLocal, len(armBindingNames))
+		for _, name := range armBindingNames {
+			sl := savedLocal{}
+			sl.alloca, sl.hadLocal = c.locals[name]
+			sl.dropFlag, sl.hadDrop = c.dropFlags[name]
+			savedLocals[name] = sl
+		}
 		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType, subjectDropFlag)
 
 		armVal := c.genMatchArmValue(arm, matchResultType)
@@ -7223,6 +7246,22 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 		for k := range c.matchBorrowedIdents {
 			if !armBorrowedSnapshot[k] {
 				delete(c.matchBorrowedIdents, k)
+			}
+		}
+
+		// T1155: Restore the c.locals/c.dropFlags entries this arm's bindings
+		// shadowed, so the bindings do not leak into the enclosing block or
+		// sibling arms. Re-instate the prior entry when one existed, else delete.
+		for name, sl := range savedLocals {
+			if sl.hadLocal {
+				c.locals[name] = sl.alloca
+			} else {
+				delete(c.locals, name)
+			}
+			if sl.hadDrop {
+				c.dropFlags[name] = sl.dropFlag
+			} else {
+				delete(c.dropFlags, name)
 			}
 		}
 
@@ -7604,6 +7643,36 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 	c.block = mergeBlock
 	return buildMatchPhi(mergeBlock, arms)
+}
+
+// patternBindingNames returns the local-variable names a match-arm pattern
+// introduces (skipping `_`). Used by genEnumMatch to snapshot and restore the
+// c.locals/c.dropFlags entries those names shadow, so an arm binding that reuses
+// the scrutinee's name (e.g. `match b { Msg.Text(b) => ... }`) does not leak the
+// arm-scoped binding into the enclosing block or sibling arms (T1155).
+func patternBindingNames(pat ast.MatchPattern) []string {
+	switch p := pat.(type) {
+	case *ast.EnumDestructureMatchPattern:
+		return nonWildcardNames(p.Bindings)
+	case *ast.ShortDestructureMatchPattern:
+		return nonWildcardNames(p.Bindings)
+	case *ast.NameMatchPattern:
+		if p.Name != "_" {
+			return []string{p.Name}
+		}
+	}
+	return nil
+}
+
+// nonWildcardNames filters out `_` placeholders from a list of binding names.
+func nonWildcardNames(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if n != "_" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // bindMatchPattern binds pattern variables from a match arm into the current scope.

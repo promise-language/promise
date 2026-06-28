@@ -1,0 +1,111 @@
+// T1155: a match-arm pattern binding that reuses the scrutinee's name must be
+// scoped to the arm only — it must not leak into the enclosing block or sibling
+// arms. Before the fix, codegen left c.locals[scrutinee] pointing at the
+// destructured (wrong-typed) alloca, so a later `match` on the same name emitted
+// self-recursive control flow → runtime `fatal: stack overflow`.
+enum Msg {
+  Text(string body), Empty,
+}
+
+// Two matches on `b`; the first arm rebinds `b` to the destructured string.
+two_matches_same_name(Msg b) int {
+  la := match b {
+    Msg.Text(b) => b.len, Msg.Empty => 0,
+  };
+  // `match b` here must still see the param `b: Msg`, not the leaked string `b`.
+  lb := match b {
+    Msg.Text(s) => s.len, Msg.Empty => 0,
+  };
+  return la + lb;
+}
+
+// A NameMatchPattern catch-all that rebinds the scrutinee name, followed by a
+// later use of the original variable.
+enum Code {
+  A(int n), B(int n),
+}
+name_pattern_rebind(Code c) int {
+  first := match c {
+    Code.A(n) => n,
+    c => 99, // catch-all rebinds `c`; must not leak past the match
+  };
+  // `c` here must still be the original Code parameter.
+  second := match c {
+    Code.A(n) => n * 2, Code.B(n) => n * 3,
+  };
+  return first + second;
+}
+
+shadow_scrutinee() `test {
+  assert(two_matches_same_name(Msg.Text("ab")) == 4, "two matches, Text");
+  assert(two_matches_same_name(Msg.Empty) == 0, "two matches, Empty");
+
+  // first arm matches (n=5) -> first=5; second match: Code.A -> 5*2=10 -> 15
+  assert(name_pattern_rebind(Code.A(5)) == 15, "name pattern, A");
+  // first arm is catch-all -> first=99; second match: Code.B -> 7*3=21 -> 120
+  assert(name_pattern_rebind(Code.B(7)) == 120, "name pattern, B");
+}
+
+// Unqualified short-destructure form (`Text(b)` instead of `Msg.Text(b)`) parses
+// as a ShortDestructureMatchPattern — a distinct path in patternBindingNames that
+// must also be arm-scoped when it rebinds the scrutinee name.
+short_form_same_name(Msg b) int {
+  la := match b {
+    Text(b) => b.len, Empty => 0,
+  };
+  lb := match b {
+    Text(s) => s.len, Empty => 0,
+  };
+  return la + lb;
+}
+
+// Owned-local scrutinee (not a param): the scrutinee `m` carries a drop flag, so
+// the first arm's `Msg.Text(m)` rebind must restore BOTH c.locals["m"] and
+// c.dropFlags["m"] (the hadDrop=true restore branch). A botched restore would
+// drop the wrong alloca / leak the owned Msg.
+owned_scrutinee_same_name() int {
+  m := Msg.Text("hello");
+  la := match m {
+    Msg.Text(m) => m.len, Msg.Empty => 0,
+  };
+  lb := match m {
+    Msg.Text(s) => s.len, Msg.Empty => 0,
+  };
+  return la + lb;
+}
+
+// A `_` binding in the destructure must be filtered out (nonWildcardNames) and
+// never saved/restored — the surviving real binding still works.
+wildcard_binding(Msg b) int {
+  first := match b {
+    Msg.Text(_) => 1, Msg.Empty => 0,
+  };
+  second := match b {
+    Msg.Text(s) => s.len, Msg.Empty => 0,
+  };
+  return first + second;
+}
+
+shadow_short_and_owned() `test {
+  assert(short_form_same_name(Msg.Text("ab")) == 4, "short form, Text");
+  assert(short_form_same_name(Msg.Empty) == 0, "short form, Empty");
+  assert(owned_scrutinee_same_name() == 10, "owned scrutinee");
+  assert(wildcard_binding(Msg.Text("xyz")) == 4, "wildcard, Text");
+  assert(wildcard_binding(Msg.Empty) == 0, "wildcard, Empty");
+}
+
+// Sibling-arm isolation: one arm's binding must not be visible in a later arm.
+enum Pair {
+  Left(string s), Right(string s),
+}
+sibling_isolation(Pair p) int {
+  return match p {
+    Pair.Left(s) => s.len,
+    Pair.Right(s) => s.len + 100, // distinct `s`, no leak from the Left arm
+  };
+}
+
+shadow_siblings() `test {
+  assert(sibling_isolation(Pair.Left("abc")) == 3, "left");
+  assert(sibling_isolation(Pair.Right("ab")) == 102, "right");
+}

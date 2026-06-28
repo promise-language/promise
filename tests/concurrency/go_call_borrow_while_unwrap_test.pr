@@ -1,0 +1,92 @@
+// T1153: borrowing the binding of a `while y := opt? { … }` unwrap loop into a
+// `go` call let the borrow escape into a goroutine that can outlive the loop
+// iteration → silent use-after-free when handles are awaited after the loop.
+// Sibling of T1147 (for-in loop-*binding*) and T1151 (loop-*body local*): here
+// the borrowed root is the fresh owned per-iteration unwrap binding `y`, whose
+// slot is freed at the iteration boundary. The compiler now REJECTS that shape
+// at compile time (see the Go ownership tests `TestT1153*` for the rejection
+// coverage). These batch tests confirm the sound rewrites the diagnostic points
+// at — `.clone()` into a fresh temp, and `move` of the owned binding into a
+// consuming `move` param — compile and produce correct, deterministic output.
+type Box {
+  string s;
+}
+
+keep(string p) Box {
+  return Box(s: p.clone());
+}
+
+store(string move s) Box {
+  return Box(s: move s);
+}
+
+// A small state machine that yields decreasing string values until exhausted,
+// driving the `while y := next(...)` unwrap loop below.
+next(int n) string? {
+  if n > 0 {
+    return "v{n}".clone();
+  }
+  return none;
+}
+
+// Sound rewrite #1: clone the unwrap binding into a fresh temp at the call site.
+// The temp is owned by the goroutine frame — no borrow of the per-iteration
+// binding escapes.
+go_call_while_unwrap_clone_temp() `test {
+  task[Box][] ts = [];
+  int n = 3;
+  while y := next(n) {
+    ts.push(go keep(y.clone()));
+    n = n - 1;
+  }
+  string[] out = [];
+  for t in ts {
+    Box b = <-t;
+    out.push(move b.s);
+  }
+  assert(out.len == 3, "clone temp: count");
+  assert(out[0] == "v3", "clone temp: first");
+  assert(out[1] == "v2", "clone temp: second");
+  assert(out[2] == "v1", "clone temp: third");
+}
+
+// Sound rewrite #2: move the owned unwrap binding into a consuming `move` param.
+// Ownership transfers into the goroutine frame (T1148), so there is no dangling
+// borrow even when the handles are awaited after the loop.
+go_call_while_unwrap_move() `test {
+  task[Box][] ts = [];
+  int n = 3;
+  while y := next(n) {
+    ts.push(go store(move y));
+    n = n - 1;
+  }
+  string[] out = [];
+  for t in ts {
+    Box b = <-t;
+    out.push(move b.s);
+  }
+  assert(out.len == 3, "move: count");
+  assert(out[0] == "v3", "move: first");
+  assert(out[1] == "v2", "move: second");
+  assert(out[2] == "v1", "move: third");
+}
+
+// Scale up the spawn count so any residual aliasing/use-after-free would surface
+// as a non-deterministic corrupted field across the many goroutines.
+go_call_while_unwrap_many() `test {
+  task[Box][] ts = [];
+  int n = 64;
+  while y := next(n) {
+    ts.push(go keep(y.clone()));
+    n = n - 1;
+  }
+  // next() counts down, so the i-th spawned handle holds "v{64 - i}".
+  int idx = 0;
+  for t in ts {
+    Box b = <-t;
+    int want = 64 - idx;
+    assert(b.s == "v{want}", "many: element {idx}");
+    idx = idx + 1;
+  }
+  assert(idx == 64, "many: count");
+}

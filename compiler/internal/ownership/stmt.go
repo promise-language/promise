@@ -1348,6 +1348,22 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	snap := c.enterLoopBody()
+
+	// T1153: the while-unwrap binding is a fresh owned value produced per iteration
+	// (the unwrapped `opt.Elem()`), scoped to the loop body — its slot is freed at
+	// the iteration boundary. Borrowing it into a `go` call lets the borrow escape
+	// into a goroutine that may outlive the iteration → use-after-free. Flag it
+	// (when owned/non-copy/droppable) so rejectGoCallLoopBindingBorrowEscape rejects
+	// the go-call borrow uniformly, mirroring the for-in binding flagging (T1147).
+	// The enterLoopBody snapshot restores the set at loop exit, so no per-key
+	// save/restore is needed. No aliasing carve-out applies: the binding is a genuine
+	// fresh owned value, not an alias into a container.
+	if s.Binding != "" && s.Binding != "_" {
+		if bt := c.loopBindingType(s.Body, s.Binding); bt != nil && !isCopyType(bt) && isDroppableType(bt) {
+			c.forInOwnedDroppableBindings[s.Binding] = true
+		}
+	}
+
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
@@ -1436,7 +1452,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	// loop and are sound). The whole-map snapshot above subsumes per-key
 	// save/restore for nested-loop binding-name reuse.
 	if s.Binding != "_" && !flaggedAlias && !flaggedSingleOwner {
-		if bt := c.forInBindingType(s); bt != nil && !isCopyType(bt) && isDroppableType(bt) {
+		if bt := c.loopBindingType(s.Body, s.Binding); bt != nil && !isCopyType(bt) && isDroppableType(bt) {
 			c.forInOwnedDroppableBindings[s.Binding] = true
 		}
 	}
@@ -1463,15 +1479,16 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	}
 }
 
-// forInBindingType returns the type sema recorded for a for-in loop binding,
-// looked up from the loop body's scope (sema inserts the binding Var there in
-// checkForInStmt). Returns nil if the scope or binding is unavailable.
-func (c *Checker) forInBindingType(s *ast.ForInStmt) types.Type {
-	scope, ok := c.info.Scopes[s.Body]
+// loopBindingType returns the type sema recorded for a loop binding, looked up
+// from the loop body's scope (sema inserts the binding Var there). Shared by
+// for-in (T1147) and while-unwrap (T1153) binding flagging. Returns nil if the
+// scope or binding is unavailable.
+func (c *Checker) loopBindingType(body ast.Node, binding string) types.Type {
+	scope, ok := c.info.Scopes[body]
 	if !ok || scope == nil {
 		return nil
 	}
-	obj := scope.Lookup(s.Binding)
+	obj := scope.Lookup(binding)
 	if obj == nil {
 		return nil
 	}

@@ -14122,3 +14122,165 @@ func TestT1151GoCallLoopBodyEnumLocalRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "borrowed loop variable")
 }
+
+// === T1153: borrow of a `while x := opt? { … }` unwrap binding escaping into a
+// `go` call (sibling of T1147's for-in binding and T1151's loop-body local) ===
+
+// Reject: a `string` while-unwrap binding is a fresh owned per-iteration value
+// (the unwrapped `opt.Elem()`), freed at the iteration boundary. Borrowing it
+// into a `go` call lets the borrow escape into a goroutine that may outlive the
+// iteration → use-after-free (the exact repro).
+func TestT1153GoCallBorrowOfWhileUnwrapBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		next() string? { return "v".clone(); }
+		test() { while y := next() { _ = go keep(y); } }
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: the method-call arg form — the same helper walks CallExpr.Args
+// regardless of whether the callee is a free function or a method.
+func TestT1153GoCallMethodArgWhileUnwrapBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Joiner { string sep; combine(this, string p) string { return this.sep + p; } }
+		next() string? { return "v".clone(); }
+		test() {
+			Joiner j = Joiner(sep: "-");
+			while y := next() { _ = go j.combine(y); }
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: a parenthesized arg — identRoot peels the ParenExpr layer(s) down to
+// the underlying ident, so the borrow-escape check still fires.
+func TestT1153GoCallParenWhileUnwrapBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		next() string? { return "v".clone(); }
+		test() { while y := next() { _ = go keep((y)); } }
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Reject: a heap-user-type unwrap binding — coverage is broader than `string`;
+// isDroppableType covers any droppable owned binding.
+func TestT1153GoCallWhileUnwrapHeapUserBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		describe(Box b) string { return b.s.clone(); }
+		next() Box? { return Box(s: "a".clone()); }
+		test() { while y := next() { _ = go describe(y); } }
+	`)
+	expectOwnerError(t, errs, "borrowed loop variable")
+}
+
+// Accept: `move` of the unwrap binding into a consuming `move` param transfers
+// ownership into the goroutine frame — not a borrow, not rejected.
+func TestT1153GoCallMoveWhileUnwrapBindingOK(t *testing.T) {
+	ownerOK(t, `
+		store(string move s) string { return s; }
+		next() string? { return "v".clone(); }
+		test() { while y := next() { _ = go store(move y); } }
+	`)
+}
+
+// Accept: cloning the binding into a fresh temp at the call site — the arg root
+// is not an ident, so the borrow-escape check does not fire.
+func TestT1153GoCallWhileUnwrapCloneTempOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		next() string? { return "v".clone(); }
+		test() { while y := next() { _ = go keep(y.clone()); } }
+	`)
+}
+
+// Accept: an `int?` binding is Copy — passed by value into the coro frame, no
+// dangling borrow possible.
+func TestT1153GoCallWhileUnwrapCopyBindingOK(t *testing.T) {
+	ownerOK(t, `
+		add(int n) int { return n + 1; }
+		next() int? { return 1; }
+		test() { while y := next() { _ = go add(y); } }
+	`)
+}
+
+// Accept: the unwrap binding as a method *receiver* (not an arg) is captured and
+// auto-dup'd by the closure mechanism — sound, and the arg-walking check never
+// inspects the receiver.
+func TestT1153GoCallWhileUnwrapReceiverBindingOK(t *testing.T) {
+	ownerOK(t, `
+		next() string? { return "v".clone(); }
+		test() { while y := next() { _ = go y.to_upper(); } }
+	`)
+}
+
+// Accept (regression guard): an owned while-unwrap binding borrowed into a
+// *plain* (non-`go`) call is sound — the borrow lives for the call's duration.
+// Only the `go` form escapes, so the flag must not leak into ordinary calls.
+func TestT1153PlainCallBorrowOfWhileUnwrapBindingOK(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		next() string? { return "v".clone(); }
+		test() { while y := next() { _ = keep(y); } }
+	`)
+}
+
+// Accept (no regression): the T0589 borrowed-Optional-parameter while-let path
+// still errors with its own dedicated message — the new flagging must not
+// interfere with (or mask) that distinct diagnostic.
+func TestT1153WhileLetBorrowedParamStillRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a) {
+			while x := a {
+				_ = x;
+				break;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via while-let")
+}
+
+// Accept (restore guard): the enterLoopBody snapshot must remove the while-unwrap
+// binding from the owned-droppable set at loop exit. A same-named owned local
+// declared AFTER the loop and borrowed into a `go` call is sound (it is not a
+// loop binding) — it must NOT inherit the loop binding's flag. Regression guard
+// for the snapshot restore claimed in checkWhileUnwrapStmt.
+func TestT1153FlagRestoredAfterWhileUnwrapLoop(t *testing.T) {
+	ownerOK(t, `
+		keep(string p) string { return p.clone(); }
+		next() string? { return "v".clone(); }
+		test() {
+			while y := next() { _ = keep(y); }
+			string y = "outer".clone();
+			_ = go keep(y);
+			_ = move y;
+		}
+	`)
+}
+
+// Reject (nested): an inner while-unwrap loop's binding is flagged AND the
+// outer binding survives the inner loop's enter/exit snapshot — a `go` borrow
+// of the outer binding `y` AFTER the inner loop is still rejected. The inner
+// snapshot must restore only the inner addition, not clobber the outer entry.
+func TestT1153NestedWhileUnwrapBothBindingsRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		keep(string p) string { return p.clone(); }
+		next() string? { return "v".clone(); }
+		test() {
+			while y := next() {
+				while z := next() { _ = go keep(z); }
+				_ = go keep(y);
+			}
+		}
+	`)
+	// Both the inner (z) and the outer-after-inner (y) borrows must be rejected.
+	if len(errs) < 2 {
+		t.Fatalf("expected at least 2 borrowed-loop-variable errors, got %d: %v", len(errs), errs)
+	}
+	expectOwnerError(t, errs, "borrowed loop variable 'z'")
+	expectOwnerError(t, errs, "borrowed loop variable 'y'")
+}

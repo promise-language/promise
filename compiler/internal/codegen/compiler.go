@@ -191,6 +191,7 @@ type Compiler struct {
 	dupContainerFieldAccess       bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
 	borrowBlockResult             bool                // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
 	matchBorrowedIdents           map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
+	borrowOptionalLocals          map[string]bool     // T1085: optional locals bound from a non-owning borrow (RTTI downcast `x as T` / `T&`/`T~` RHS) — their inner aliases an external owner, so a non-diverging heap-user-type handler unwrap (`o? { ... }`) must NOT neutralize+track the merged phi (the present arm is a borrow that would double-free)
 	dupTupleFieldAccess           bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	dupHeapUserFieldAccess        bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
 	optionalStringDup             value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
@@ -5959,6 +5960,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.blockCounter = 0
 	c.enumCtorTemps = nil        // B0267: prevent cross-function alloca leak
 	c.matchBorrowedIdents = nil  // T0485: clear cross-function stale entries
+	c.borrowOptionalLocals = nil // T1085: clear cross-function stale entries
 	c.currentOpValueParams = nil // T0897: free functions are never operators
 
 	entry := fn.NewBlock(".entry")
@@ -7588,8 +7590,9 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.scopeBindings = nil
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
-	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
-	c.matchBorrowedIdents = nil // T0485: clear cross-function stale entries
+	c.enumCtorTemps = nil        // B0267: prevent cross-function alloca leak
+	c.matchBorrowedIdents = nil  // T0485: clear cross-function stale entries
+	c.borrowOptionalLocals = nil // T1085: clear cross-function stale entries
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
 	savedNamed := c.currentNamed

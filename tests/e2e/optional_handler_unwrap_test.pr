@@ -430,3 +430,338 @@ owned_paren_mutex_force_unwrap() `test {
   use g := ((o)!).lock();
   assert(g.borrow == 7, "parenthesized ident Mutex force-unwrap, no double-free");
 }
+
+// ============================================================================
+// T1085: optional-HANDLER (`o? _ { recovery }`) form on opaque i8*-backed
+// containers (Channel/Arc) and heap user types (Map/Set) used as a temporary.
+// T0778 fixed string/vector; these inner kinds had the identical recovery leak:
+//   - ident source, absent runtime: the recovery container is the merged phi's
+//     sole owner and leaked (the source's none drop is a no-op, the phi was
+//     untracked).
+//   - non-ident (call/owned-temp) source: the okVal/phi is an owned temporary
+//     the source optional never separately tracks — both runtimes leaked.
+// Fix: track the merged phi (i8* via the type-aware tracker, heap user types via
+// trackHeapValueTemp) after neutralizing the source ident's present flag.
+// ----------------------------------------------------------------------------
+
+mk_chan_opt() Channel[int]? {
+  return channel[int](capacity: 1);
+}
+mk_none_chan_opt() Channel[int]? {
+  return none;
+}
+mk_ref_opt() Ref[int]? {
+  return Ref[int](7);
+}
+mk_none_ref_opt() Ref[int]? {
+  return none;
+}
+
+mk_imap_opt() map[int, int]? {
+  m := map[int, int]();
+  m[1] = 10;
+  return m;
+}
+mk_none_imap_opt() map[int, int]? {
+  return none;
+}
+
+mk_iset_opt() Set[int]? {
+  s := Set[int]();
+  s.add(5);
+  return s;
+}
+mk_none_iset_opt() Set[int]? {
+  return none;
+}
+
+// --- ident source, ABSENT runtime: recovery is the phi's sole owner ----------
+
+ident_none_channel_handler_recovery() `test {
+  Channel[int]? c = none;
+  (c? _ {
+    channel[int](capacity: 1)
+  }).close();
+  assert(true, "absent-runtime channel recovery dropped, no leak");
+}
+
+ident_none_arc_handler_recovery() `test {
+  Ref[int]? r = none;
+  n := (r? _ {
+    Ref[int](99)
+  }).borrow;
+  assert(n == 99, "absent-runtime Arc recovery dropped, no leak");
+}
+
+ident_none_map_handler_recovery() `test {
+  map[int, int]? m = none;
+  n := (m? {
+    mk := map[int, int]();
+    mk[9] = 9;
+    mk
+  }).len;
+  assert(n == 1, "absent-runtime map recovery dropped, no leak");
+}
+
+ident_none_set_handler_recovery() `test {
+  Set[int]? s = none;
+  n := (s? {
+    sk := Set[int]();
+    sk.add(3);
+    sk
+  }).len;
+  assert(n == 1, "absent-runtime set recovery dropped, no leak");
+}
+
+// --- ident source, present runtime: phi aliases source inner, single owner ---
+
+ident_some_channel_handler() `test {
+  Channel[int]? c = channel[int](capacity: 1);
+  (c? _ {
+    channel[int](capacity: 1)
+  }).close();
+  assert(true, "present-runtime channel handler, no double-free");
+}
+
+ident_some_arc_handler() `test {
+  Ref[int]? r = Ref[int](7);
+  n := (r? _ {
+    Ref[int](99)
+  }).borrow;
+  assert(n == 7, "present-runtime Arc handler, no double-free");
+}
+
+ident_some_map_handler() `test {
+  map[int, int]? m = mk_imap_opt();
+  n := (m? {
+    mk := map[int, int]();
+    mk
+  }).len;
+  assert(n == 1, "present-runtime map handler, no double-free");
+}
+
+// --- non-ident (call/owned-temp) source: okVal/phi is an owned temporary ------
+
+call_channel_handler_temp() `test {
+  (mk_chan_opt()? _ {
+    channel[int](capacity: 1)
+  }).close();
+  assert(true, "call-source present channel temp dropped, no leak");
+}
+
+call_none_channel_handler_temp() `test {
+  (mk_none_chan_opt()? _ {
+    channel[int](capacity: 1)
+  }).close();
+  assert(true, "call-source absent channel recovery dropped, no leak");
+}
+
+call_arc_handler_temp() `test {
+  n := (mk_ref_opt()? _ {
+    Ref[int](99)
+  }).borrow;
+  assert(n == 7, "call-source present Arc temp dropped, no leak");
+}
+
+call_none_arc_handler_temp() `test {
+  n := (mk_none_ref_opt()? _ {
+    Ref[int](99)
+  }).borrow;
+  assert(n == 99, "call-source absent Arc recovery dropped, no leak");
+}
+
+call_map_handler_temp() `test {
+  n := (mk_imap_opt()? {
+    mk := map[int, int]();
+    mk
+  }).len;
+  assert(n == 1, "call-source present map temp dropped, no leak");
+}
+
+call_none_set_handler_temp() `test {
+  n := (mk_none_iset_opt()? {
+    sk := Set[int]();
+    sk.add(3);
+    sk
+  }).len;
+  assert(n == 1, "call-source absent set recovery dropped, no leak");
+}
+
+// --- call source, DIVERGING handler: only the present (okVal) path reaches use
+
+call_diverging_channel_handler() `test {
+  (mk_chan_opt()? _ {
+    return
+  }).close();
+  assert(true, "call-source diverging channel temp dropped, no leak");
+}
+
+// --- regression guards: must stay clean (no double-free) ----------------------
+
+// ident diverging: source drop owns the inner; the phi degenerates to okVal
+// aliasing the source — must NOT be tracked.
+ident_diverging_channel_handler() `test {
+  Channel[int]? c = channel[int](capacity: 1);
+  (c? _ {
+    return
+  }).close();
+  assert(true, "ident diverging channel handler, no double-free");
+}
+
+// owner-governed member, present path: the owner's drop frees the field — the
+// extracted inner must NOT be tracked (i8* handles AND heap user types).
+member_channel_handler_present() `test {
+  b := ChanBox085(f: channel[int](capacity: 1));
+  (b.f? _ {
+    channel[int](capacity: 1)
+  }).close();
+  assert(true, "member channel present, owner drop frees field");
+}
+
+member_map_handler_present() `test {
+  m := map[int, int]();
+  m[1] = 10;
+  b := MapBox085(f: move m);
+  n := (b.f? {
+    mk := map[int, int]();
+    mk
+  }).len;
+  assert(n == 1, "member map present, owner drop frees field");
+}
+
+type ChanBox085 {
+  Channel[int]? f;
+}
+type MapBox085 {
+  map[int, int]? f;
+}
+
+// ============================================================================
+// T1085: remaining opaque i8*-backed handle kinds (Mutex/Task/Weak/MutexGuard).
+// The Channel/Arc cases above cover two of the six i8* branches in the dispatch
+// type-switch; these close the rest. Each kind is exercised in BOTH dispatch
+// locations: the ident absent-runtime case hits genOptionalHandlerExpr's
+// phi-tracking branch, and the call-source case hits genExpr's non-ident,
+// non-owner-governed branch. (MutexGuard's call-source form is omitted — a
+// function returning `MutexGuard[T]?` would have to outlive the guard's borrowed
+// Mutex, which isn't constructible; the ident form covers its phi branch.)
+// ----------------------------------------------------------------------------
+
+mk_mutex_opt() Mutex[int]? {
+  return Mutex[int](7);
+}
+mk_task_opt() Task[int]? {
+  return go worker_t085();
+}
+worker_t085() int {
+  return 5;
+}
+mk_weak_opt() Weak[int]? {
+  r := Ref[int](7);
+  return r.downgrade();
+}
+
+// --- Mutex ------------------------------------------------------------------
+
+ident_none_mutex_handler() `test {
+  Mutex[int]? m = none;
+  use g := (m? _ {
+    Mutex[int](42)
+  }).lock();
+  assert(g.borrow == 42, "absent-runtime mutex recovery dropped, no leak");
+}
+
+call_mutex_handler_temp() `test {
+  use g := (mk_mutex_opt()? _ {
+    Mutex[int](99)
+  }).lock();
+  assert(g.borrow == 7, "call-source present mutex temp dropped, no leak");
+}
+
+// --- Task -------------------------------------------------------------------
+
+ident_none_task_handler() `test {
+  Task[int]? t = none;
+  n := <-(t? _ {
+    go worker_t085()
+  });
+  assert(n == 5, "absent-runtime task recovery dropped, no leak");
+}
+
+call_task_handler_temp() `test {
+  n := <-(mk_task_opt()? _ {
+    go worker_t085()
+  });
+  assert(n == 5, "call-source present task temp dropped, no leak");
+}
+
+// --- Weak -------------------------------------------------------------------
+
+ident_none_weak_handler() `test {
+  r0 := Ref[int](1);
+  Weak[int]? w = none;
+  up := (w? _ {
+    r0.downgrade()
+  }).upgrade();
+  n := up? _ {
+    Ref[int](0)
+  };
+  assert(n.borrow == 1, "absent-runtime weak recovery dropped, no leak");
+}
+
+call_weak_handler_temp() `test {
+  rk := Ref[int](7);
+  // The present-runtime weak temp from mk_weak_opt() is the okVal owner tracked
+  // by genExpr's branch; upgrade() may yield none (its strong Ref was dropped at
+  // mk_weak_opt's return) — the assertion only confirms the temp drops cleanly.
+  up := (mk_weak_opt()? _ {
+    rk.downgrade()
+  }).upgrade();
+  n := up? _ {
+    Ref[int](-1)
+  };
+  assert(n.borrow == -1 || n.borrow == 7, "call-source present weak temp dropped, no leak");
+}
+
+// --- MutexGuard (ident-only; phi branch) ------------------------------------
+
+ident_none_guard_handler() `test {
+  m2 := Mutex[int](9);
+  MutexGuard[int]? g = none;
+  v := (g? _ {
+    m2.lock()
+  }).borrow;
+  assert(v == 9, "absent-runtime guard recovery dropped, no leak");
+}
+
+// --- borrow → owned reassignment state transition ---------------------------
+// A heap user-type optional first bound from an RTTI downcast is borrow-holding;
+// reassigning it to an OWNED value must clear that mark (genAssignStmt) so the
+// later handler unwrap neutralize+tracks the now-owned inner. If the stale mark
+// survived, the owned reassigned Sub would leak (untracked phi).
+
+type Base085r {
+  int x;
+  kind(this) string {
+    return "base";
+  }
+}
+type Sub085r is Base085r {
+  int y;
+  kind(this) string {
+    return "sub";
+  }
+}
+
+borrow_then_owned_reassign(Base085r b) int {
+  Sub085r? o = b as Sub085r;
+  o = Sub085r(x: 10, y: 20);
+  return (o? _ {
+    Sub085r(x: -1, y: -1)
+  }).y;
+}
+
+reassign_borrow_to_owned_handler() `test {
+  assert(borrow_then_owned_reassign(Sub085r(x: 1, y: 2)) == 20,
+  "owned reassignment of borrow optional, tracked, no leak");
+}

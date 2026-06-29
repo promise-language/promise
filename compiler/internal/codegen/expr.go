@@ -309,6 +309,31 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 						c.trackVectorTemp(result)
 					}
 				}
+			} else if !isIdentSource && !c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) {
+				// T1085: Opaque i8*-backed container inners (Channel/Arc/Weak/
+				// Mutex/Task/MutexGuard) from a handler on a non-ident,
+				// non-owner-governed source are owned temporaries — the source
+				// optional never separately tracks the inner, so the returned
+				// okVal (diverging) or merged phi (non-diverging) is the sole
+				// owner. Mirrors genOptionalForceUnwrap's dispatch. Ident sources
+				// are handled in genOptionalHandlerExpr's T0778 block; owner-
+				// governed member sources stay untracked (the owner's drop frees
+				// the field on the present path).
+				if arcElem, isArc := types.AsArc(exprType); isArc {
+					c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
+				} else if weakElem, isWeak := types.AsWeak(exprType); isWeak {
+					c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
+				} else if mutexElem, isMutex := types.AsMutex(exprType); isMutex {
+					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
+				} else if taskElem, isTask := types.AsTask(exprType); isTask {
+					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+				} else if _, isMG := types.AsMutexGuard(exprType); isMG {
+					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+						c.trackTempWithDrop(result, dropFn)
+					}
+				} else if chElem, isCh := types.AsChannel(exprType); isCh {
+					c.trackChannelTempWithElemType(result, chElem)
+				}
 			}
 		} else {
 			c.trackHeapUserTypeResult(e, result)
@@ -13307,6 +13332,7 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	// the phi degenerates to okVal aliasing the source's inner and stays
 	// untracked, with the optional's drop binding governing the lifetime.
 	var trackPhiI8Type types.Type
+	var trackPhiHeapType types.Type
 	if !handlerDiverged && isIdentOptionalUnwrapSource(e.Expr) {
 		rt := c.info.Types[e]
 		if c.typeSubst != nil && rt != nil {
@@ -13316,8 +13342,35 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
 		}
 		named := extractNamed(rt)
-		if named == types.TypString || named == types.TypVector {
+		// T1085: Extend the T0778 recovery-leak fix beyond string/vector to the
+		// opaque i8*-backed containers (Channel/Arc/Weak/Mutex/Task/MutexGuard).
+		// isOpaqueContainerType already covers Vector and all the i8* handles.
+		// Like string/vector, the absent-runtime recovery is otherwise an
+		// untracked phi and leaks. neutralizeForceUnwrapSource is type-agnostic
+		// (clears the source ident's present flag) so the source's scope drop is
+		// a no-op on the present runtime; the merged phi becomes the sole owner,
+		// tracked at mergeBlock below via the type-aware tracker.
+		//
+		if named == types.TypString || isOpaqueContainerType(rt) {
 			trackPhiI8Type = rt
+			c.neutralizeForceUnwrapSource(e)
+		} else if named != nil && !named.IsValueType() && !named.IsCopy() &&
+			!isPrimitiveScalar(named) && !named.IsStructural() &&
+			!c.isBorrowHoldingOptionalIdentSource(e.Expr) {
+			// T1085: Heap user-type inner (e.g. Map/Set) from an OWNED optional
+			// ident source. The recovery may be a block returning a moved-out local
+			// (e.g. `o? { mk := map(); mk }`), which genBlockValue claims (its drop
+			// flag cleared in noneBlock) — so without phi-tracking the absent-runtime
+			// recovery leaks. Neutralizing the OWNED source transfers ownership of the
+			// present-arm inner to the merged phi; the phi is then the sole owner and
+			// trackHeapValueTemp drops it once at statement end.
+			//
+			// EXCLUDES borrow-holding optional sources (`CSquare? o = this as CSquare`):
+			// there the present arm aliases an external owner's instance and must NOT
+			// be dropped. Those keep trackHeapUserTypeResult's T0753 ident-skip (the
+			// present arm is governed by the external owner; a bare-constructor
+			// recovery is tracked at its own construction site).
+			trackPhiHeapType = rt
 			c.neutralizeForceUnwrapSource(e)
 		}
 	}
@@ -13348,7 +13401,31 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 				} else {
 					c.trackVectorTemp(phi)
 				}
+			} else if arcElem, isArc := types.AsArc(trackPhiI8Type); isArc {
+				// T1085: opaque container recovery now owned by the merged phi.
+				c.trackTempWithDrop(phi, c.getOrCreateArcDrop(arcElem))
+			} else if weakElem, isWeak := types.AsWeak(trackPhiI8Type); isWeak {
+				c.trackTempWithDrop(phi, c.getOrCreateWeakDrop(weakElem))
+			} else if mutexElem, isMutex := types.AsMutex(trackPhiI8Type); isMutex {
+				c.trackTempWithDrop(phi, c.getOrCreateMutexDrop(mutexElem))
+			} else if taskElem, isTask := types.AsTask(trackPhiI8Type); isTask {
+				c.trackTempWithDrop(phi, c.getOrCreateTaskDrop(taskElem))
+			} else if _, isMG := types.AsMutexGuard(trackPhiI8Type); isMG {
+				if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+					c.trackTempWithDrop(phi, dropFn)
+				}
+			} else if chElem, isCh := types.AsChannel(trackPhiI8Type); isCh {
+				c.trackChannelTempWithElemType(phi, chElem)
 			}
+		} else if trackPhiHeapType != nil {
+			// T1085: heap user-type inner (e.g. Map/Set) from an OWNED optional
+			// ident source — the merged phi owns the present-arm inner (source
+			// neutralized) and the absent-arm recovery. genExpr's
+			// trackHeapUserTypeResult skips this ident source (T0753), so the phi
+			// must be tracked here. trackHeapValueTemp re-validates (drop func
+			// present, not a container/string) and is the single authority on
+			// whether tracking actually happens.
+			c.trackHeapValueTemp(phi, trackPhiHeapType)
 		}
 		return phi
 	}
@@ -13530,6 +13607,28 @@ func isIdentOptionalUnwrapSource(expr ast.Expr) bool {
 	}
 	_, isIdent := expr.(*ast.IdentExpr)
 	return isIdent
+}
+
+// isBorrowHoldingOptionalIdentSource reports whether expr (peeling ParenExpr) is
+// an ident referring to a borrow-holding optional local — one bound from a
+// non-owning borrow (RTTI downcast `x as T` / `T&`/`T~` RHS), recorded in
+// borrowOptionalLocals at the var-decl borrow-clear sites (T1085). The present
+// arm of a non-diverging handler unwrap on such a source aliases an external
+// owner's instance, so it must NOT be neutralized + temp-tracked — the merged phi
+// would otherwise drop a value the external owner still frees (double-free).
+func (c *Compiler) isBorrowHoldingOptionalIdentSource(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	return c.borrowOptionalLocals[ident.Name]
 }
 
 // isOwnerGovernedMemberOptionalUnwrapSource reports whether src — the source of

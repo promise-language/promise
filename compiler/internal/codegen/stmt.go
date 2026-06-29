@@ -1479,12 +1479,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// doesn't double-free with the owner's drop.
 	if c.isBorrowedExpr(s.Value) {
 		c.clearDropFlag(s.Name)
+		c.markBorrowOptionalLocal(s.Name, dropType)
 	}
 	// T0747: a user-type RTTI cast of a borrow (`d := x as!/as T`) is a
 	// non-consuming view — the subject keeps ownership. Clear the LHS drop flag
 	// so the cast local doesn't double-free the aliased instance at scope exit.
 	if c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
+		c.markBorrowOptionalLocal(s.Name, dropType)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType, s.Value)
 }
@@ -1777,12 +1779,14 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// doesn't double-free with the owner's drop.
 	if c.isBorrowedExpr(s.Value) {
 		c.clearDropFlag(s.Name)
+		c.markBorrowOptionalLocal(s.Name, typ)
 	}
 	// T0747: a user-type RTTI cast of a borrow (`d := x as!/as T`) is a
 	// non-consuming view — the subject keeps ownership. Clear the LHS drop flag
 	// so the cast local doesn't double-free the aliased instance at scope exit.
 	if c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
+		c.markBorrowOptionalLocal(s.Name, typ)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ, s.Value)
 }
@@ -3697,6 +3701,26 @@ func (c *Compiler) clearDropFlag(name string) {
 	if flag, ok := c.dropFlags[name]; ok {
 		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flag)
 	}
+}
+
+// markBorrowOptionalLocal records `name` as a borrow-holding optional local when
+// `t` is an Optional type (T1085). Called at the var-decl borrow-clear sites
+// (RTTI downcast / `T&`/`T~` RHS) so a later non-diverging heap-user-type handler
+// unwrap on this ident (`o? { ... }`) can tell the present arm aliases an external
+// owner and must not be neutralized + temp-tracked (that would double-free the
+// borrow). Non-optional borrows are ignored — the gate only consults this for
+// optional-handler ident sources.
+func (c *Compiler) markBorrowOptionalLocal(name string, t types.Type) {
+	if c.typeSubst != nil && t != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if _, isOpt := t.(*types.Optional); !isOpt {
+		return
+	}
+	if c.borrowOptionalLocals == nil {
+		c.borrowOptionalLocals = make(map[string]bool)
+	}
+	c.borrowOptionalLocals[name] = true
 }
 
 // emitEarlyDrops checks if any variables should be dropped after the given statement
@@ -6197,6 +6221,46 @@ func findInnerCallExpr(expr ast.Expr) *ast.CallExpr {
 //     aliases a non-temp receiver (e.g., `c.iter()` where `c` is a local
 //     variable whose own scope binding will free the allocation). The receiver
 //     is found by peeling unwrap layers via findInnerCallExpr.
+//
+// trackHeapValueTemp registers a `{vtable, instance}` heap user-type value as an
+// owned statement temp, keyed on its instance pointer, returning that pointer and
+// the temp's drop flag (both nil if nothing was tracked — value/copy/primitive/
+// structural type, container, string, or no drop function). It holds the single
+// "is this a droppable heap user type, and if so track it" decision shared by
+// trackHeapUserTypeResult (which layers AST-shape skips and receiver-alias clears
+// on top) and the optional-handler ident-source phi path (T1085).
+func (c *Compiler) trackHeapValueTemp(result value.Value, rt types.Type) (value.Value, value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil || !c.tempTrackingEnabled {
+		return nil, nil
+	}
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
+		return nil, nil
+	}
+	named := extractNamed(rt)
+	if named == nil {
+		return nil, nil
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return nil, nil
+	}
+	if isContainerType(rt) || named == types.TypString {
+		return nil, nil
+	}
+	dropFunc := c.resolveDropFuncForTemp(named, rt)
+	if dropFunc == nil {
+		return nil, nil
+	}
+	c.claimHeapTemp(result)
+	instancePtr := c.block.NewExtractValue(result, 1)
+	beforeLen := len(c.heapTemps)
+	c.trackHeapTemp(instancePtr, dropFunc)
+	if len(c.heapTemps) > beforeLen {
+		return instancePtr, c.heapTemps[beforeLen].dropFlag
+	}
+	return nil, nil
+}
+
 func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
@@ -6269,26 +6333,8 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	if c.selfSubst != nil && rt != nil {
 		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
 	}
-	named := extractNamed(rt)
-	if named == nil {
-		return
-	}
-	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
-		return
-	}
-	if isContainerType(rt) || named == types.TypString {
-		return
-	}
-	dropFunc := c.resolveDropFuncForTemp(named, rt)
-	if dropFunc == nil {
-		return
-	}
-	c.claimHeapTemp(result)
-	instancePtr := c.block.NewExtractValue(result, 1)
-	beforeLen := len(c.heapTemps)
-	c.trackHeapTemp(instancePtr, dropFunc)
-	if len(c.heapTemps) > beforeLen {
-		dropFlag := c.heapTemps[beforeLen].dropFlag
+	instancePtr, dropFlag := c.trackHeapValueTemp(result, rt)
+	if instancePtr != nil {
 		// T1029: when a heap-user-type value produced anywhere inside the discarded
 		// statement (the outer result OR an inner sub-call result) aliases an
 		// owned-local arg whose source-clear was suppressed, clear this temp so the
@@ -6992,8 +7038,16 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// reference; the owner retains the value. Without this, both
 			// the reassigned local's drop and the owner's drop free the same
 			// inner value.
+			// T1085: a reassignment changes the optional local's borrow-holding
+			// status. Clear any stale mark first (owned reassignment makes it
+			// non-borrow again — the heap handler may then neutralize+track), then
+			// re-mark below if the new RHS is itself a borrow.
+			if c.borrowOptionalLocals != nil {
+				delete(c.borrowOptionalLocals, target.Name)
+			}
 			if c.isBorrowedExpr(s.Value) {
 				c.clearDropFlag(target.Name)
+				c.markBorrowOptionalLocal(target.Name, exprType)
 			}
 			// T0747: a user-type RTTI cast of a borrow (`target = x as!/as T`) is a
 			// non-consuming view — the subject keeps ownership. Clear the target's
@@ -7002,6 +7056,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// exit. Mirrors the same clear in genTypedVarDecl/genInferredVarDecl.
 			if c.isRttiCastBorrow(s.Value) {
 				c.clearDropFlag(target.Name)
+				c.markBorrowOptionalLocal(target.Name, exprType)
 			}
 			// T0895: `f = h.cb` reads a closure out of an owning aggregate — the
 			// local borrows the heap env (the aggregate retains sole ownership;

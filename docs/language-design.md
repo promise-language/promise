@@ -3593,7 +3593,9 @@ user := fetchUser(42)?^;
 
 ### 17.2 Explicit Concurrency with `go`
 
-`go` is an **expression** that launches a goroutine and returns a `task[T]`, where `T` is the result type of the block or call. The `<-` operator receives the result, suspending the current goroutine until it is ready.
+`go` is an **expression** that launches a goroutine. A plain `go` returns a `task[T]`, where `T` is the result type of the block or call; the failable form `go!` returns a `failable_task[T]` (§17.2.1). The `<-` operator receives the result, suspending the current goroutine until it is ready.
+
+The examples in this section spawn **non-failable** producers, so each yields a plain `task[T]`. Spawning a producer that can fail (a name ending in `!`, such as `fetchUser!`) uses `go!` and is covered in §17.2.1.
 
 ```promise
 // Fire-and-forget (task[Void] result ignored)
@@ -3601,25 +3603,150 @@ go {
   logAnalytics(event);
 };
 
-// Value-returning task
-task := go fetchUser(42);          // task : task[User!]
-user := <-task;                    // suspends until result ready
+// Value-returning task — `score` cannot fail, so `go` yields a plain task[int]
+task := go score(board);           // task : task[int]
+points := <-task;                  // suspends until result ready
 
 // Inline: launch + receive
-user := <-go fetchUser(42);        // equivalent to "await"
+points := <-go score(board);       // equivalent to "await"
 
 // Fan out, fan in — structured concurrency
-t1 := go fetchUser(id);
-t2 := go fetchPosts(id);
-t3 := go fetchComments(id);
-user := <-t1;                      // all three ran concurrently
-posts := <-t2;
-comments := <-t3;
+t1 := go score(boardA);
+t2 := go score(boardB);
+t3 := go score(boardC);
+a := <-t1;                         // all three ran concurrently
+b := <-t2;
+c := <-t3;
 ```
 
 `task[T]` is a first-class type returned by `go` expressions. It can be stored in variables, fields, and collections, passed as arguments, and returned from functions. The `<-` operator receives the result from a task, suspending the current goroutine until the task completes. Concurrency is always a **caller-side decision** — the callee does not know or care whether it runs in a goroutine.
 
 `task[T]` is a **single-owner handle** (like `Mutex[T]`/`MutexGuard[T]`): it is move-only and has no `clone()`. It may be a *direct* element of one collection (`Task[T][]` push/iterate/await/drop is supported), but a type that transitively contains a single-owner handle — including one nested inside a user-type field or enum variant (`Holder{Task[T] t}`, `enum E { Held(Task[T] t) }`) — is **non-cloneable**. Every context that would structurally (implicitly) copy such a value is a compile error: `clone()`/`filled()` on such a collection, slicing it (`v[a:b]`), pushing an indexed element of it (`dest.push(src[i])`), destructuring a handle-owning variant field in `match`, and nesting one inside another container (`Vector[Vector[Task[T]]]`, `Map[K, Task[T][]]`). Moving a freshly-constructed value (`dest.push(Holder(t: go …))`) is still allowed. Refcounted handles (`Ref[T]`, `Channel[T]`) are duplicable and unaffected.
+
+### 17.2.1 Failable Goroutines — `go!` and `failable_task[T]`
+
+A goroutine runs asynchronously, so an error it produces **cannot** flow back to the code that spawned it the way a normal failable call propagates to its caller (§7.2). Promise makes this split explicit with two spawn forms, and **which one you use is always written at the spawn site** — a goroutine's failability is never inferred.
+
+| Spawn form | Goroutine kind | Result type | Who handles an error that escapes the body |
+|---|---|---|---|
+| `go f()` · `go { … }` | non-failable | `task[T]` | the goroutine itself — its body must handle its own errors |
+| `go! f()` · `go! { … }` | failable | `failable_task[T]` | whoever **receives** the task, at the `<-` |
+
+In both forms `T` is the **success** type. There is no failable *value* type — `int!` is not a type; `!` is a producer marker (§7.1). `failable_task[T]` is a distinct handle type whose producer is fallible, exactly as a function name ending in `!` marks a fallible function. It is **not** a `task[T!]` and not a `T!` — those notations do not exist.
+
+#### Spawning
+
+`go!` marks the goroutine as failable: its body may `raise`, and an error that escapes the body is **captured into the task**, to be surfaced later at the receive.
+
+```promise
+fetchUser!(int id) User { … }       // failable producer (does I/O)
+
+t := go! fetchUser(42);             // t : failable_task[User]
+```
+
+Plain `go` is for non-failable work. Spawning a **failable** producer with plain `go` is a compile error — its error would have nowhere to go:
+
+```promise
+t := go fetchUser(42);
+//   ^ error: `fetchUser` is failable — spawn it with `go!`, or handle the
+//            error inside the goroutine (e.g. `go { fetchUser(42)?!; }`)
+```
+
+Symmetrically, `go!` on a producer that cannot fail is a compile error — the `!` would be misleading:
+
+```promise
+t := go! score(board);              // score() is not failable
+//   ^ error: `score` cannot fail; spawn it with plain `go`
+```
+
+**Block form.** The marker selects the *failability of the block's scope*, mirroring function bodies:
+
+- `go { … }` is a **non-failable scope**: a failable call inside it must be handled locally (`?!`, `? e { … }`), exactly as in a non-failable function. This is the idiom for fire-and-forget work that performs I/O.
+- `go! { … }` is a **failable scope**: a failable call inside it auto-propagates into the task (like a bare call in a failable function), and the escaping error is delivered to whoever receives the task.
+
+```promise
+// Non-failable block — handles its own error; safe to fire and forget
+go {
+  saveMetrics(snapshot)?!;          // panics in the goroutine on failure
+};
+
+// Failable block — an escaping error is captured into the task
+t := go! {
+  user := fetchUser(42);            // auto-propagates into the task
+  return enrich(user);              // T = the block's result type
+};
+```
+
+#### Receiving
+
+Receiving with `<-` is where a failable task's error surfaces. **A `<-` on a `failable_task[T]` is itself a failable operation** that yields `T` — semantically identical to calling a failable function — so it obeys the ordinary error rules of §7.2:
+
+- In a **failable function**, a bare receive auto-propagates:
+  ```promise
+  loadProfile!(int id) Profile {
+    t := go! fetchUser(id);
+    user := <-t;                     // auto-propagates the goroutine's error
+    return Profile.of(user);
+  }
+  ```
+- In a **non-failable function**, the receive must be handled, exactly like any other failable call:
+  ```promise
+  main() {
+    t := go! fetchUser(42);
+    user := (<-t)?!;                 // panic on the goroutine's error
+    // or handle it:
+    user := (<-t) ? e {
+      print_line("fetch failed: {e.message}");
+      return;
+    };
+  }
+  ```
+  An **unhandled** bare receive from a `failable_task[T]` in a non-failable function is a compile error — the same "failable call must be handled" diagnostic as any unhandled failable call.
+
+Receiving from a plain `task[T]` is unchanged: an ordinary, non-failable receive.
+
+**Operator binding — error operators apply to the receive, not the spawn.** Because the error appears at the receive, the error operators attach there. Writing one on the spawn is a compile error with a fix-it:
+
+```promise
+v := go! fetchUser(42)?!;
+//                    ^ error: apply the error operator to the receive:
+//                             `(<-go! fetchUser(42))?!`
+```
+
+So `go! f()?!`, `go! f()?^`, and `go! f() ? e { … }` are all rejected. The inline launch-await-handle form is `(<-go! f())?!` (the failable counterpart of the plain `<-go f()` await).
+
+#### Fire-and-forget must be non-failable
+
+A `failable_task[T]` carries an error that **someone must receive**. Dropping one without ever receiving it would silently swallow that error, so discarding a `failable_task[T]` is a compile error:
+
+```promise
+go! fetchUser(42);                   // result discarded
+// ^ error: a fire-and-forget goroutine must be non-failable. Handle the error
+//          inside it — `go { fetchUser(42)?!; }` — or keep and receive the task.
+```
+
+A plain `task[T]` (including `task[Void]`) may be discarded as before.
+
+> **The rule:** a goroutine's error is handled by **exactly one** party — *inside* the goroutine (making it non-failable and freely fire-and-forgettable) or *outside* by whoever receives the `failable_task[T]`. It is never silently dropped.
+
+#### `failable_task[T]` is a single-owner handle
+
+Like `task[T]`, a `failable_task[T]` is a **single-owner handle**: move-only, no `clone()`, and subject to the same non-cloneable-transitivity rules described above for `task[T]`. Its failability is part of its type, so it crosses field, collection, parameter, and return boundaries like any other type — `failable_task[int][]`, `Holder{ failable_task[int] t }`, `process(failable_task[int] t)` — and in every case must still be received (or moved to someone who will receive it) before it goes out of scope.
+
+#### Summary
+
+| Expression | Meaning |
+|---|---|
+| `go f()` — `f` non-failable | spawn → `task[T]` |
+| `go f()` — `f` failable | **compile error** → use `go!`, or handle inside the goroutine |
+| `go! f()` — `f` failable | spawn → `failable_task[T]` |
+| `go! f()` — `f` non-failable | **compile error** → use plain `go` |
+| `go { … }` | non-failable scope → `task[T]` (block handles its own errors) |
+| `go! { … }` | failable scope → `failable_task[T]` (escaping error captured) |
+| `<-t` — `t : task[T]` | non-failable receive → `T` |
+| `<-t` — `t : failable_task[T]` | **failable** receive → `T` (auto-propagate or handle per §7.2) |
+| `(<-go! f())?!` | inline launch + await + panic-on-error |
+| `go! f()` discarded | **compile error** → fire-and-forget must be non-failable |
 
 ### 17.3 Channels
 
@@ -3832,8 +3959,9 @@ forInStmt: 'for' IDENT (',' IDENT)? 'in' expression block;
 classicForStmt: 'for' varDecl ';' expression ';' expression block;
 forStmt: forInStmt | classicForStmt | 'for' block;   // infinite loop
 
-goExpr: 'go' (block | expression);    // returns task[T]
-receiveExpr: '<-' expression;          // receive from task[T] or channel[T]
+goExpr: 'go' '!'? (block | expression);   // 'go' → task[T]; 'go!' → failable_task[T] (§17.2.1)
+receiveExpr: '<-' expression;          // receive from task[T] / failable_task[T] / channel[T]
+                                       // (<- on a failable_task[T] is a failable operation)
 
 // Error handling (also used for optional unwrap/handler — sema disambiguates by type)
 errorPropagate: expression '?' '^';                      // ?^ — propagate error up (failable fn only)

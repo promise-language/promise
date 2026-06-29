@@ -9391,6 +9391,133 @@ func TestT0811_ParenWrappedForceUnwrapRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
 }
 
+// === T1073: force-unwrap of borrowed Optional param at remaining consume sites ===
+// T0811 wired the var-decl/assign/call-arg/constructor/enum-variant sites; these
+// cover the remaining tryMoveConsume sites: raise, yield, yield-delegate,
+// select-case send, and the collection-literal element/entry loops.
+
+// Array literal: `return [o!]` — the trivially-reachable repro from T1073.
+func TestT1073_ArrayLitForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? o) _Box[] { return [o!]; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Tuple literal element.
+func TestT1073_TupleLitForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? o) (_Box, int) { return (o!, 1); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Map literal value.
+func TestT1073_MapLitValueForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? o) map[int, _Box] { return {1: o!}; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Map literal key — a droppable heap user type used as a map key (Hashable +
+// `==`) consumed via force-unwrap. Covers the entry.Key reject branch, distinct
+// from the entry.Value branch above.
+func TestT1073_MapLitKeyForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box {
+			string name;
+			drop(~this){}
+			get hash int { return 7; }
+			== (_Box other) bool { return this.name == other.name; }
+		}
+		g(_Box? o) map[_Box, int] { return {o!: 1}; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Paren-wrapped force-unwrap at a collection-literal element `[(o!)]` — the
+// reject must see through ParenExpr (isForceUnwrapForm peels it).
+func TestT1073_ArrayLitParenWrappedForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? o) _Box[] { return [(o!)]; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Raise statement: `raise o!`.
+func TestT1073_RaiseForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Err is error { string msg; }
+		g!(_Err? o) int { raise o!; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Carve-out: `yield o!` from a generator is ALLOWED for a borrowed param —
+// a generator yields a *borrow* of the unwrapped inner (the for-in loop var does
+// not own/drop it and the source optional stays usable after the loop), so there
+// is no double-free. Unlike the collection-literal/raise/select-send sites, this
+// must NOT be rejected. (Confirmed at runtime: the source optional is still
+// present after the loop; see tests/e2e/optional_param_consume_test.pr.)
+func TestT1073_YieldForceUnwrapBorrowedParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? o) stream[_Box] { yield o!; }
+		test() {}
+	`)
+}
+
+// Select-case send: `case ch.send(o!)`.
+func TestT1073_SelectSendForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? o, channel[_Box] ch) {
+			select {
+				ch.send(o!):
+				default:
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Carve-out: `move` param into an array literal — consume is genuinely safe.
+func TestT1073_ArrayLitMoveParamForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		g(_Box? move o) _Box[] { return [o!]; }
+		test() {}
+	`)
+}
+
+// Carve-out: string inner into an array literal — auto-dup-safe.
+func TestT1073_ArrayLitStringForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		g(string? o) string[] { return [o!]; }
+		test() {}
+	`)
+}
+
+// Carve-out: scalar inner into a tuple literal — int isn't droppable.
+func TestT1073_TupleLitScalarForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		g(int? o) (int, int) { return (o!, 1); }
+		test() {}
+	`)
+}
+
 // === T0591: Getter var-decl from droppable owner ===
 
 func TestT0591_GetterVarDeclFromDroppableOwnerOK(t *testing.T) {

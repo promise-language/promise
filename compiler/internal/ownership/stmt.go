@@ -90,6 +90,11 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		c.checkExpr(s.Value)
 		c.tryMoveConsume(s.Value)
 		c.tryMoveConsumeCastSubject(s.Value) // T0784
+		// T1073: `raise o!` — force-unwrap of a borrowed droppable Optional
+		// param. The cast form is handled above; reject the force-unwrap shape.
+		if isForceUnwrapForm(s.Value) {
+			c.rejectBorrowedOptionalUnwrapConsume(s.Value)
+		}
 
 	case *ast.ExprStmt:
 		c.checkExpr(s.Expr)
@@ -116,11 +121,18 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		c.checkExpr(s.Value)
 		c.tryMoveConsume(s.Value)
 		c.tryMoveConsumeCastSubject(s.Value) // T0784
+		// T1073: `yield o!` is intentionally NOT rejected for borrowed params.
+		// Unlike the collection-literal/raise/select-send consume sites, a
+		// generator yields a *borrow* of the unwrapped inner — the for-in loop var
+		// does not own/drop it and the source optional stays owned and usable after
+		// the loop, so there is no double-free. Requiring `move` here would wrongly
+		// force the caller to surrender ownership it can still use.
 
 	case *ast.YieldDelegateStmt:
 		c.checkExpr(s.Value)
 		c.tryMoveConsume(s.Value)
 		c.tryMoveConsumeCastSubject(s.Value) // T0784
+		// T1073: see YieldStmt — yield* also borrows, not consumes; no reject.
 
 	case *ast.IncDecStmt:
 		c.checkExpr(s.Target)
@@ -1588,6 +1600,11 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 			c.checkExpr(sc.SendValue)
 			c.tryMoveConsume(sc.SendValue)
 			c.tryMoveConsumeCastSubject(sc.SendValue) // T0784
+			// T1073: `case ch.send(o!)` — force-unwrap of a borrowed droppable
+			// Optional param. The cast form is handled above; reject force-unwrap.
+			if isForceUnwrapForm(sc.SendValue) {
+				c.rejectBorrowedOptionalUnwrapConsume(sc.SendValue)
+			}
 		}
 		// Expire call-scoped borrows from channel/send expressions so the case
 		// body can re-borrow the same variables (B0103).

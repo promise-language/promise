@@ -4,6 +4,12 @@
 // compile time (see internal/ownership T0811 tests); these exercise the
 // genuinely-safe `~` consume paths plus the always-allowed inline/move-out
 // forms on a borrowed parameter.
+//
+// T1073 extends this to the remaining consume sites that pair tryMoveConsume
+// with tryMoveConsumeCastSubject: collection literals (array/tuple/map), raise,
+// yield, and select-case send. The borrowed forms at those sites are rejected
+// (see internal/ownership T1073 tests); these `~`/`move` runners prove the
+// genuinely-safe consume runs correctly with zero leaks / no double-free.
 type Plain {
   string name;
   drop(~this) {
@@ -112,4 +118,140 @@ move_out_runs() `test {
 
 local_source_unwrap_runs() `test {
   assert(local_source_unwrap() == "eta", "local source unwrap");
+}
+
+// === T1073: remaining consume sites ===
+
+type MyErr is error {
+  string detail;
+}
+
+// Array-literal element consume: `[o!]`.
+consume_arraylit(Plain? move o) Plain[] {
+  return[o!];
+}
+
+// Tuple-literal element consume: `(o!, n)`.
+consume_tuple(Plain? move o)(Plain, int) {
+  return (o!, 7);
+}
+
+// Map-literal value consume: `{1: o!}`.
+consume_maplit(Plain? move o) map[int, Plain] {
+  return {
+    1: o!
+  };
+}
+
+// Raise consume: `raise o!`.
+consume_raise!(MyErr? move o) int {
+  raise o!;
+}
+
+// Yield consume: `yield o!` from a generator.
+consume_yield(Plain? move o) stream[Plain] {
+  yield o!;
+}
+
+// Select-case send consume: `ch.send(o!)`.
+send_via_select(Plain? move o, channel[Plain] ch) {
+  select {
+    ch.send(o!):
+  }
+}
+
+consume_arraylit_runs() `test {
+  Plain x = Plain(name: "iota");
+  Plain? o = x;
+  Plain[] v = consume_arraylit(move o);
+  assert(v[0].name == "iota", "array-literal consume");
+}
+
+consume_tuple_runs() `test {
+  Plain x = Plain(name: "kappa");
+  Plain? o = x;
+  (p, n) := consume_tuple(move o);
+  assert(p.name == "kappa", "tuple-literal consume");
+  assert(n == 7, "tuple-literal scalar");
+}
+
+consume_maplit_runs() `test {
+  Plain x = Plain(name: "lambda");
+  Plain? o = x;
+  map[int, Plain] m = consume_maplit(move o);
+  assert(m.len == 1, "map-literal consume");
+}
+
+consume_raise_runs() `test {
+  MyErr e = MyErr(message: "boom", detail: "mu");
+  MyErr? o = e;
+  int r = consume_raise(move o)? caught {
+    99;
+  };
+  assert(r == 99, "raise consume recovered");
+}
+
+consume_yield_runs() `test {
+  Plain x = Plain(name: "nu");
+  Plain? o = x;
+  int count = 0;
+  for p in consume_yield(move o) {
+    assert(p.name == "nu", "yield consume value");
+    count = count + 1;
+  }
+  assert(count == 1, "yield consume count");
+}
+
+consume_select_send_runs() `test {
+  Plain x = Plain(name: "xi");
+  Plain? o = x;
+  ch := channel[Plain](capacity: 1);
+  send_via_select(move o, ch);
+  p := <-ch;
+  if val := p {
+    assert(val.name == "xi", "select-send consume");
+  }
+}
+
+// A droppable heap user type usable as a map key (Hashable + `==`).
+type KeyBox {
+  string name;
+  drop(~this) {
+  }
+  get hash int {
+    return 7;
+  }
+  == (KeyBox other) bool {
+    return this.name == other.name;
+  }
+}
+
+// Map-literal key consume: `{o!: 1}`.
+consume_maplit_key(KeyBox? move o) map[KeyBox, int] {
+  return {
+    o!: 1
+  };
+}
+
+// Paren-wrapped force-unwrap at an array-literal element: `[(o!)]`.
+consume_arraylit_paren(Plain? move o) Plain[] {
+  return[(o!)];
+}
+
+consume_maplit_key_runs() `test {
+  KeyBox x = KeyBox(name: "omicron");
+  KeyBox? o = x;
+  map[KeyBox, int] m = consume_maplit_key(move o);
+  assert(m.len == 1, "map-literal key consume");
+  KeyBox probe = KeyBox(name: "omicron");
+  if v := m[probe] {
+    assert(v == 1, "map-literal key lookup");
+  }
+}
+
+consume_arraylit_paren_runs() `test {
+  Plain x = Plain(name: "pi");
+  Plain? o = x;
+  Plain[] v = consume_arraylit_paren(move o);
+  assert(v[0].name == "pi", "paren-wrapped array-literal consume");
 }

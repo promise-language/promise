@@ -155,6 +155,12 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.checkExpr(elem)
 			c.tryMoveConsume(elem)
 			c.tryMoveConsumeCastSubject(elem) // T0784
+			// T1073: `(.., o!, ..)` — force-unwrap of a borrowed droppable
+			// Optional param. The cast form is handled above; reject the
+			// force-unwrap shape here.
+			if isForceUnwrapForm(elem) {
+				c.rejectBorrowedOptionalUnwrapConsume(elem)
+			}
 		}
 
 	case *ast.ArrayLit:
@@ -162,6 +168,12 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.checkExpr(elem)
 			c.tryMoveConsume(elem)
 			c.tryMoveConsumeCastSubject(elem) // T0784
+			// T1073: `[.., o!, ..]` — force-unwrap of a borrowed droppable
+			// Optional param. The cast form is handled above; reject the
+			// force-unwrap shape here.
+			if isForceUnwrapForm(elem) {
+				c.rejectBorrowedOptionalUnwrapConsume(elem)
+			}
 		}
 
 	case *ast.MapLit:
@@ -169,9 +181,18 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.checkExpr(entry.Key)
 			c.tryMoveConsume(entry.Key)
 			c.tryMoveConsumeCastSubject(entry.Key) // T0784
+			// T1073: force-unwrap of a borrowed droppable Optional param in a
+			// map key. The cast form is handled above; reject force-unwrap.
+			if isForceUnwrapForm(entry.Key) {
+				c.rejectBorrowedOptionalUnwrapConsume(entry.Key)
+			}
 			c.checkExpr(entry.Value)
 			c.tryMoveConsume(entry.Value)
 			c.tryMoveConsumeCastSubject(entry.Value) // T0784
+			// T1073: same for a map value.
+			if isForceUnwrapForm(entry.Value) {
+				c.rejectBorrowedOptionalUnwrapConsume(entry.Value)
+			}
 		}
 
 	case *ast.StringLit:

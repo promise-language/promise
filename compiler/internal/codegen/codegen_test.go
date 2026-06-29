@@ -23832,6 +23832,144 @@ func TestForceUnwrapOfHeapUserOptionalFieldNeutralizes(t *testing.T) {
 	assertContains(t, mainFn, "store i1 false")
 }
 
+// T1073: force-unwrap `o!` consumed at the collection-literal / raise / select-send
+// sites must neutralize the source optional's present flag, exactly like the
+// var-decl/assignment/call-arg sites. Otherwise both the source optional's
+// scope-exit drop and the container/error-slot/channel free the moved inner →
+// double-free (observed as a SIGSEGV). The neutralization GEPs the optional
+// param's present field (field 0 of `{ i1, { i8*, i8* } }`) and stores false.
+const t1073NeutralizeSig = "{ i1, { i8*, i8* } }* %o.addr, i32 0, i32 0"
+
+func TestT1073ArrayLitForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Box { string name; drop(~this) {} }
+		arr(T1073Box? move o) T1073Box[] { return [o!]; }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.arr")
+	if fn == "" {
+		t.Fatal("expected __user.arr in IR")
+	}
+	assertContains(t, fn, "unwrap.ok")
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
+func TestT1073TupleLitForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Box { string name; drop(~this) {} }
+		tup(T1073Box? move o) (T1073Box, int) { return (o!, 1); }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.tup")
+	if fn == "" {
+		t.Fatal("expected __user.tup in IR")
+	}
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
+func TestT1073MapLitForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Box { string name; drop(~this) {} }
+		mp(T1073Box? move o) map[int, T1073Box] { return {1: o!}; }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.mp")
+	if fn == "" {
+		t.Fatal("expected __user.mp in IR")
+	}
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
+func TestT1073RaiseForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Err is error { string d; }
+		rz!(T1073Err? move o) int { raise o!; }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.rz")
+	if fn == "" {
+		t.Fatal("expected __user.rz in IR")
+	}
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
+// T1073: a copy/scalar inner (`int?`) is NOT consumed by force-unwrap, so its
+// source optional must NOT be neutralized (it stays usable). neutralizeForceUnwrapElem
+// self-gates on typeNeedsFieldDrop, so no present-flag clear is emitted here.
+func TestT1073ArrayLitScalarForceUnwrapNoNeutralize(t *testing.T) {
+	ir := generateIR(t, `
+		arr(int? move o) int[] { return [o!]; }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.arr")
+	if fn == "" {
+		t.Fatal("expected __user.arr in IR")
+	}
+	// int? optional layout is `{ i1, i64 }`, not `{ i1, { i8*, i8* } }`; and no
+	// present-flag clear should be emitted for the (copy) source.
+	assertNotContains(t, fn, "i32 0, i32 0\n\tstore i1 false")
+}
+
+// T1073: a paren-wrapped force-unwrap `[(o!)]` must still neutralize the source.
+// Exercises the ParenExpr-peel loop in isForceUnwrapElem — codegen sees through
+// ParenExpr at genExpr but the AST-shape dispatch here must peel it too.
+func TestT1073ArrayLitParenWrappedForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Box { string name; drop(~this) {} }
+		arr(T1073Box? move o) T1073Box[] { return [(o!)]; }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.arr")
+	if fn == "" {
+		t.Fatal("expected __user.arr in IR")
+	}
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
+// T1073: force-unwrap of a droppable map *key* `{o!: 1}` must neutralize the
+// source optional (the map's drop frees keys via []=), mirroring the map-value
+// path. Exercises the entry.Key neutralize call site in genMapLit.
+func TestT1073MapLitKeyForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Key {
+			string name;
+			drop(~this) {}
+			get hash int { return 7; }
+			== (T1073Key other) bool { return this.name == other.name; }
+		}
+		mk(T1073Key? move o) map[T1073Key, int] { return {o!: 1}; }
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.mk")
+	if fn == "" {
+		t.Fatal("expected __user.mk in IR")
+	}
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
+// T1073: force-unwrap inside a collection literal in a *generic* function body —
+// `wrap[T](T? move o) T[] { return [o!]; }` instantiated with a droppable heap
+// type — must neutralize the source. Exercises the typeSubst substitution path
+// in neutralizeForceUnwrapElem (the element type is resolved through the active
+// monomorphization substitution before the typeNeedsFieldDrop gate).
+func TestT1073GenericContextForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type T1073Box { string name; drop(~this) {} }
+		wrap[T](T? move o) T[] { return [o!]; }
+		main() {
+			T1073Box b = T1073Box(name: "g");
+			T1073Box? o = b;
+			T1073Box[] v = wrap[T1073Box](move o);
+		}
+	`)
+	// The monomorphized body @"wrap[T1073Box]" must carry the present-flag clear.
+	fn := extractFunction(ir, `"wrap[T1073Box]"`)
+	if fn == "" {
+		t.Fatal("expected wrap[T1073Box] mono body in IR")
+	}
+	assertContains(t, fn, t1073NeutralizeSig)
+}
+
 // T0392: Synth drop must call pal_free for heap user types WITHOUT a drop method
 // (B0211 case). The inner has no drop function but the heap allocation must be freed.
 func TestSynthDropOptionalNoDropHeapUserField(t *testing.T) {

@@ -9159,6 +9159,11 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 		if ident := c.castSubjectMovableIdent(elem); ident != nil {
 			c.consumeCastSubjectDropFlag(elem, ident.Name)
 		}
+		// T1073: `(o!, ..)` — force-unwrap moves the inner out of the source
+		// optional into the tuple slot (which the tuple's drop frees). Neutralize
+		// the source optional's present flag so its scope-exit drop doesn't
+		// double-free the moved inner.
+		c.neutralizeForceUnwrapElem(elem)
 		// T0371: Claim heap-tracked field temps so they are not double-freed at
 		// stmt end (their ownership is now in the tuple slot). Mirrors the
 		// pattern used in genArrayLit / genMapLit. Without these claims:
@@ -9792,6 +9797,13 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 					}
 				}
 			}
+			// T1073: `[o!]` — force-unwrap moves the inner out of the source
+			// optional into the vector slot (which Vector.drop frees on the
+			// walkEnabled path, the enclosing branch). Neutralize the source
+			// optional's present flag so its scope-exit drop doesn't double-free
+			// the moved inner. Only correct under walkEnabled: when false,
+			// Vector.drop does NOT free elements, so the source must keep ownership.
+			c.neutralizeForceUnwrapElem(elemExpr)
 			// B0233: Claim heap temp — element ownership transferred to vector literal.
 			c.claimHeapTemp(val)
 			// T0366: Also claim string/vector/channel stmt-temps. trackVectorTempWithElemType
@@ -11103,6 +11115,12 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			if ident := c.castSubjectMovableIdent(entry.Key); ident != nil {
 				c.consumeCastSubjectDropFlag(entry.Key, ident.Name)
 			}
+			// T1073: `{k!: v!}` — force-unwrap of a droppable inner moves it out of
+			// the source optional into the map slot (which the map's drop frees via
+			// []=). Neutralize the source optional's present flag so its scope-exit
+			// drop doesn't double-free the moved inner.
+			c.neutralizeForceUnwrapElem(entry.Value)
+			c.neutralizeForceUnwrapElem(entry.Key)
 			// Claim heap temps: user type instances passed as map values
 			// transfer ownership to the map. Without this, the heap temp
 			// cleanup would free the instance, leaving a dangling pointer
@@ -13834,6 +13852,45 @@ func (c *Compiler) isBorrowedThisMemberSource(src ast.Expr) bool {
 		return false
 	}
 	return isThisReceiver(mem.Target) && !c.thisRecvIsOwned
+}
+
+// isForceUnwrapElem reports whether expr (peeling ParenExpr) is a bare
+// force-unwrap `o!`. Collection-literal / raise / select-send element sites use
+// this to neutralize the source optional after a force-unwrap consume (T1073) —
+// the cast form (`o as! T`) is handled separately via consumeCastSubjectDropFlag,
+// so guarding to the force-unwrap shape avoids double-neutralizing it.
+func isForceUnwrapElem(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	_, ok := expr.(*ast.OptionalUnwrapExpr)
+	return ok
+}
+
+// neutralizeForceUnwrapElem neutralizes the source optional of a force-unwrap
+// element `o!` whose unwrapped inner needs dropping. Used at the collection-literal
+// (array/tuple/map), raise, and select-send consume sites where `o!` moves the
+// inner into a container / error-slot / channel that owns and frees it. Without
+// this, the source optional's own scope-exit drop double-frees the moved inner
+// (T1073). Self-gating: a no-op unless the element is a bare force-unwrap (the
+// cast form is handled via consumeCastSubjectDropFlag) of a droppable inner
+// (copy/scalar inners aren't consumed, so their source must stay intact).
+func (c *Compiler) neutralizeForceUnwrapElem(elemExpr ast.Expr) {
+	if !isForceUnwrapElem(elemExpr) {
+		return
+	}
+	t := c.info.Types[elemExpr]
+	if c.typeSubst != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if !c.typeNeedsFieldDrop(t) {
+		return
+	}
+	c.neutralizeForceUnwrapSource(elemExpr)
 }
 
 // neutralizeForceUnwrapSource sets the present flag to false in the source

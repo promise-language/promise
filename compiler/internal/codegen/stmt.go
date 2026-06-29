@@ -8967,6 +8967,11 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 		// T0849: for the conditional `as` form, drop iff the downcast failed.
 		c.consumeCastSubjectDropFlag(s.Value, ident.Name)
 	}
+	// T1073: `raise o!` — force-unwrap moves the inner error out of the source
+	// optional into the error slot. Neutralize the source optional's present flag
+	// (before the scope cleanup below) so its drop doesn't double-free the moved
+	// inner.
+	c.neutralizeForceUnwrapElem(s.Value)
 
 	// T0962: Clean up statement temps before raising. The raise expression may
 	// create intermediate temps that are normally freed at statement end (e.g.
@@ -12530,6 +12535,11 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		if ident := c.castSubjectMovableIdent(ci.sendValueExpr); ident != nil {
 			c.consumeCastSubjectDropFlag(ci.sendValueExpr, ident.Name)
 		}
+		// T1073: `select { ch.send(o!): ... }` — force-unwrap moves the inner out
+		// of the source optional into the channel buffer (which the receiver/drop
+		// frees). Neutralize the source optional's present flag so its scope-exit
+		// drop doesn't double-free the moved inner.
+		c.neutralizeForceUnwrapElem(ci.sendValueExpr)
 		// T0799: a freshly produced send value (`select { ch.send("a" + "b"): ... }`)
 		// is a tracked statement temp. Its bits are memcpy'd into the buffer below,
 		// so ownership transfers to the channel — claim it (mirror genChannelSend's

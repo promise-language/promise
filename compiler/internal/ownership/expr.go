@@ -228,12 +228,114 @@ func (c *Checker) checkIdentUse(e *ast.IdentExpr) {
 	}
 }
 
+// unwrapGoExpr peels ParenExpr wrappers and returns the *ast.GoExpr, or nil if
+// expr is not (a paren-wrapped) `go` expression. T1152.
+func unwrapGoExpr(expr ast.Expr) *ast.GoExpr {
+	g, _ := unwrapDestructureParens(expr).(*ast.GoExpr)
+	return g
+}
+
+// goCallBorrowsOwnedLocal reports the bare-ident argument that a `go f(arg)`
+// call borrows from an owned, non-Copy, droppable, function/block-scope LOCAL —
+// the shape whose Task handle, if it escapes the local's scope, reads the local
+// after it drops (T1152). Iteration-bounded for-in bindings (T1147) and loop-body
+// locals (T1151) are deliberately EXCLUDED here: those can never be safely
+// borrowed into a `go` call (the goroutine always outlives the iteration) and are
+// rejected outright at the call site by rejectGoCallLoopBindingBorrowEscape, so
+// re-flagging them here would double-report.
+//
+// Returns nil (sound / out of scope) for: the `go { block }` form; an explicit
+// `move` arg or a `~` (RefMut) move param (value transferred into the goroutine
+// frame — T1148/T1098 territory); non-ident args (`.clone()`, constructor,
+// temporary — already sound); Copy or non-droppable args; parameters
+// (caller-owned — separate sibling gap); iteration-bounded loop bindings/locals
+// (handled by T1147/T1151); and Borrowed/Moved/untracked roots.
+func (c *Checker) goCallBorrowsOwnedLocal(g *ast.GoExpr) *ast.IdentExpr {
+	if g == nil || g.Expr == nil {
+		return nil
+	}
+	ce, ok := g.Expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	sig := c.calleeSignature(ce.Callee)
+	if sig == nil {
+		return nil
+	}
+	params := sig.Params()
+	for i, arg := range ce.Args {
+		if i >= len(params) {
+			break
+		}
+		if arg.Move || params[i].Ref() == types.RefMut {
+			continue // move into the goroutine frame — not a borrow
+		}
+		ident, ok := unwrapDestructureParens(arg.Value).(*ast.IdentExpr)
+		if !ok {
+			continue
+		}
+		if c.params[ident.Name] {
+			continue // parameter, not a local (caller-owned)
+		}
+		if c.forInOwnedDroppableBindings[ident.Name] {
+			continue // iteration-bounded — rejected by T1147/T1151 at the call site
+		}
+		if c.state[ident.Name] != Owned {
+			continue // Borrowed / Moved / untracked
+		}
+		typ := c.info.Types[arg.Value]
+		if typ == nil || isCopyType(typ) || !isDroppableType(typ) {
+			continue
+		}
+		return ident
+	}
+	return nil
+}
+
+// goHandleEscapeMsg is the borrow-escape diagnostic for a `go` task handle that
+// would outlive the local it borrows. It points at the three sound rewrites:
+// clone into the goroutine, pass an owned value with `move`, or await before the
+// local drops. T1152.
+func goHandleEscapeMsg(local string) string {
+	return "cannot let a 'go' task handle escape the scope of borrowed local '" + local +
+		"'; the goroutine may read '" + local + "' after it is dropped — clone it into the goroutine ('" +
+		local + ".clone()'), pass an owned value with 'move', or await the handle ('<-') before '" +
+		local + "' goes out of scope"
+}
+
+// rejectGoHandleEscapeExpr errors and returns true when expr lets a `go` task
+// handle borrow escape: either an inline `go f(local)` temporary, or an ident
+// bound to such a handle (tracked in goHandleBorrowedLocal). Called at the top
+// of tryMove/tryMoveConsume so every consume, store, and return site is covered
+// uniformly. T1152.
+func (c *Checker) rejectGoHandleEscapeExpr(expr ast.Expr) bool {
+	if g := unwrapGoExpr(expr); g != nil {
+		if bl := c.goCallBorrowsOwnedLocal(g); bl != nil {
+			c.errorf(bl.Pos(), "%s", goHandleEscapeMsg(bl.Name))
+			return true
+		}
+		return false
+	}
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		if local, tracked := c.goHandleBorrowedLocal[ident.Name]; tracked {
+			c.errorf(ident.Pos(), "%s", goHandleEscapeMsg(local))
+			return true
+		}
+	}
+	return false
+}
+
 // tryMove marks the variable referenced by expr as Moved, if it is a
 // non-copy variable tracked in the current state. Also checks that the
 // variable is not actively borrowed. Borrowed parameters are not moved —
 // reads stay legal — but consuming contexts (call to `~` param, etc.) must
 // use tryMoveConsume to enforce the T0338 check.
 func (c *Checker) tryMove(expr ast.Expr) {
+	// T1152: reject an escaping `go f(&local)` task handle (inline temporary or
+	// a tracked handle binding) before any other move bookkeeping.
+	if c.rejectGoHandleEscapeExpr(expr) {
+		return
+	}
 	// T0837: reject moving a single-owner native handle field out of a shared
 	// borrow before the MemberExpr branch (this helper peels paren/unwrap
 	// wrappers, so `borrowed.field!` is caught here where checkFieldMoveOwnership
@@ -316,6 +418,11 @@ func (c *Checker) tryMove(expr ast.Expr) {
 // it and will drop it at scope exit. Used at sites that genuinely consume
 // (e.g., passing to a `~` callee parameter).
 func (c *Checker) tryMoveConsume(expr ast.Expr) {
+	// T1152: reject an escaping `go f(&local)` task handle (inline temporary or
+	// a tracked handle binding) before any other move bookkeeping.
+	if c.rejectGoHandleEscapeExpr(expr) {
+		return
+	}
 	// T0407: any expression whose static type is `T&`/`T~` (non-Copy) is a
 	// non-owning reference produced by Arc.borrow, MutexGuard.borrow, or any
 	// composition through if/match/paren that preserves the borrow type.

@@ -229,6 +229,13 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		if c.rejectBorrowedOptionalUnwrapConsume(s.Value) {
 			return
 		}
+		// T1152: `Task[T] t = go f(s)` of an owned droppable local binds a
+		// handle that borrows `s`; track it Borrowed-against-`s` so an escape is
+		// rejected at the escape site while the in-scope await/drop stays valid.
+		// See checkInferredVarDecl / trackGoHandleBinding.
+		if c.trackGoHandleBinding(s.Name, s.Value, s.Pos()) {
+			return
+		}
 		c.tryMove(s.Value)
 	}
 	if s.Name != "_" {
@@ -476,6 +483,12 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	// inner of a borrowed droppable Optional parameter double-frees (callee
 	// binding-drop + caller drop). Reject before tryMove, like the if-let form.
 	if c.rejectBorrowedOptionalUnwrapConsume(s.Value) {
+		return
+	}
+	// T1152: `t := go f(s)` of an owned droppable local binds a handle that
+	// borrows `s`; track it (the in-scope await/drop stays valid; an escape is
+	// rejected at the escape site). See trackGoHandleBinding.
+	if c.trackGoHandleBinding(s.Name, s.Value, s.Pos()) {
 		return
 	}
 	c.tryMove(s.Value)
@@ -1320,6 +1333,48 @@ func (c *Checker) flagLoopBodyOwnedLocal(name string, value ast.Expr) {
 	if typ != nil && !isCopyType(typ) && isDroppableType(typ) {
 		c.forInOwnedDroppableBindings[name] = true
 	}
+}
+
+// trackGoHandleBinding handles `name := go f(local)` / `Type name = go f(local)`
+// where the `go` call borrows an owned, droppable, non-Copy function/block-scope
+// local (T1152). The resulting Task handle borrows that local: the goroutine may
+// read it after it drops, so the handle must not escape the local's scope. The
+// handle itself is genuinely OWNED (so the in-scope `<-t`/drop join the goroutine
+// normally, with codegen clearing its drop flag) — only its *escape* is unsound.
+// Mark it Owned and record it in goHandleBorrowedLocal so the escape checks in
+// tryMove/tryMoveConsume reject the handle leaving scope (returned, stored,
+// reassigned, sent on a channel) while leaving the consuming `<-t` await — which
+// reads, not consumes — accepted. Also register a shared borrow of the local so
+// it cannot be consumed while the handle is live. Returns true when the RHS was
+// such a go-handle borrow, signalling the caller to skip tryMove (and the normal
+// Owned-assignment) — the handle is sound in-scope; an escape is caught at the
+// escape site. The `_` binding skips the tracking but still returns true — the
+// discarded temporary joins the goroutine at statement end while the local is
+// alive, which is sound. A non-go-handle RHS returns false and clears any stale
+// same-name entry so a reused binding name is not mistaken for a handle.
+func (c *Checker) trackGoHandleBinding(name string, value ast.Expr, pos ast.Pos) bool {
+	if g := unwrapGoExpr(value); g != nil {
+		if bl := c.goCallBorrowsOwnedLocal(g); bl != nil {
+			if name != "_" {
+				c.state[name] = Owned
+				c.goHandleBorrowedLocal[name] = bl.Name
+				if c.borrows != nil {
+					c.borrows.Add(&Borrow{
+						Origin:   bl.Name,
+						Kind:     BorrowShared,
+						Borrower: name,
+						Pos:      pos,
+					})
+				}
+				if typ := c.info.Types[value]; typ != nil {
+					c.trackDeclOrder(name, typ)
+				}
+			}
+			return true
+		}
+	}
+	delete(c.goHandleBorrowedLocal, name)
+	return false
 }
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {

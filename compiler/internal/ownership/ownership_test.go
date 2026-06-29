@@ -96,6 +96,16 @@ func expectOwnerError(t *testing.T, errs []error, substr string) {
 	t.Errorf("expected ownership error containing %q, got %v", substr, errs)
 }
 
+func expectNoOwnerError(t *testing.T, errs []error, substr string) {
+	t.Helper()
+	for _, e := range errs {
+		if strings.Contains(e.Error(), substr) {
+			t.Errorf("expected no ownership error containing %q, but got %v", substr, errs)
+			return
+		}
+	}
+}
+
 // === Move tracking ===
 
 func TestUseAfterMove(t *testing.T) {
@@ -14410,4 +14420,291 @@ func TestT1153NestedWhileUnwrapBothBindingsRejected(t *testing.T) {
 	}
 	expectOwnerError(t, errs, "borrowed loop variable 'z'")
 	expectOwnerError(t, errs, "borrowed loop variable 'y'")
+}
+
+// === T1152: escaping `go f(&local)` task-handle borrows ===
+//
+// A `go f(arg)` of a bare-ident borrow of an owned, droppable, non-Copy
+// function/block-scope local spawns a goroutine that reads `arg` from the
+// caller's frame. If the resulting Task handle escapes the local's scope
+// (returned, stored in a longer-lived container, reassigned out, or sent on a
+// channel) the goroutine can read the local after it drops → use-after-free.
+// The sound in-scope await/drop shapes stay accepted (the handle joins the
+// goroutine while the local is still alive). Iteration-bounded for-in bindings
+// (T1147) and loop-body locals (T1151) are a sibling case handled by
+// rejectGoCallLoopBindingBorrowEscape at the call site — the last two tests here
+// pin that the unified check delegates to it (no gap, no double-report).
+
+// Inline `return go keep(s)` — the handle escapes via the return value.
+func TestT1152_ReturnInlineGoBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn() Task[Box] {
+			string s = "hello".clone();
+			return go keep(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// `t := go keep(s); return t;` — the handle is bound, then escapes via return.
+func TestT1152_ReturnBoundGoHandleRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn() Task[Box] {
+			string s = "hello".clone();
+			Task[Box] t = go keep(s);
+			return t;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// `ts.push(go keep(s))` — the inline handle escapes into a longer-lived vector.
+func TestT1152_PushInlineGoBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn() {
+			Vector[Task[Box]] ts = Vector[Task[Box]]();
+			string s = "hello".clone();
+			ts.push(go keep(s));
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// `t := go keep(s); ts.push(move t);` — bound handle escapes into a vector.
+func TestT1152_PushBoundGoHandleRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn() {
+			Vector[Task[Box]] ts = Vector[Task[Box]]();
+			string s = "hello".clone();
+			Task[Box] t = go keep(s);
+			ts.push(move t);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// `ch.send(go keep(s))` — the inline handle escapes by being sent on a channel.
+func TestT1152_ChannelSendInlineGoBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn(channel[Task[Box]] ch) {
+			string s = "hello".clone();
+			ch.send(go keep(s));
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// Reassigning a longer-lived (outer) binding from a bound handle escapes it.
+// Plain assignment routes the RHS through tryMoveConsume, where the escape check
+// runs before the "consuming requires move" requirement, so the diagnostic is
+// the go-handle escape message.
+func TestT1152_ReassignOuterFromGoHandleRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker(string p) int { return p.len; }
+		spawn(Task[int] move outer) {
+			string s = "hello".clone();
+			Task[int] t = go worker(s);
+			outer = t;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// Accept: `t := go keep(s); _ = <-t;` — the handle is awaited in scope, joining
+// the goroutine while `s` is still alive. Sound.
+func TestT1152_AwaitInScopeAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		run() {
+			string s = "hello".clone();
+			Task[Box] t = go keep(s);
+			Box b = <-t;
+		}
+		test() {}
+	`)
+}
+
+// Accept: `t := go keep(s);` with no escape — the handle drops at scope exit,
+// joining the goroutine (LIFO) before `s` drops. Sound.
+func TestT1152_DropInScopeAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker(string p) int { return p.len; }
+		run() {
+			string s = "hello".clone();
+			Task[int] t = go worker(s);
+		}
+		test() {}
+	`)
+}
+
+// Accept: cloning into the goroutine — the goroutine owns its own copy, so the
+// handle may escape freely.
+func TestT1152_CloneIntoGoroutineAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn() Task[Box] {
+			string s = "hello".clone();
+			return go keep(s.clone());
+		}
+		test() {}
+	`)
+}
+
+// Accept: moving an owned value into the goroutine (`~`/`move`) transfers it into
+// the goroutine frame, so the handle may escape freely.
+func TestT1152_MoveIntoGoroutineAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; }
+		store(string move p) Box { return Box(s: move p); }
+		spawn() Task[Box] {
+			string s = "hello".clone();
+			return go store(move s);
+		}
+		test() {}
+	`)
+}
+
+// Accept: a no-arg `go` call borrows nothing, so the handle escapes freely.
+func TestT1152_NoArgGoHandleAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		spawn() Task[int] {
+			return go worker();
+		}
+		test() {}
+	`)
+}
+
+// Accept: a Copy (int) arg is passed by value, not borrowed — handle escapes OK.
+func TestT1152_CopyArgGoHandleAllowed(t *testing.T) {
+	ownerOK(t, `
+		use_int(int n) int { return n + 1; }
+		spawn() Task[int] {
+			int n = 5;
+			return go use_int(n);
+		}
+		test() {}
+	`)
+}
+
+// Accept: a plain (non-`go`) call of a droppable local is a shared borrow that
+// ends at the call — unaffected by the go-handle escape check.
+func TestT1152_PlainCallOfLocalAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		run() {
+			string s = "hello".clone();
+			Box b = keep(s);
+		}
+		test() {}
+	`)
+}
+
+// Integration guard: a for-in loop binding borrowed into `go f(x)` whose handle
+// is pushed to a vector outliving the iteration is rejected by the sibling
+// call-site check (T1147), NOT by the T1152 handle-escape check — the latter
+// excludes iteration-bounded bindings to avoid double-reporting.
+func TestT1152_ForInBindingDeferredToLoopCheck(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn(string[] xs) {
+			Vector[Task[Box]] ts = Vector[Task[Box]]();
+			for x in xs {
+				ts.push(go keep(x));
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "into a goroutine")
+	expectNoOwnerError(t, errs, "'go' task handle escape")
+}
+
+// Integration guard: a loop-body local borrowed into `go f(y)` whose handle is
+// pushed to a vector outliving the iteration is rejected by the sibling call-site
+// check (T1151), NOT by the T1152 handle-escape check.
+func TestT1152_LoopBodyLocalDeferredToLoopCheck(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn(string[] xs) {
+			Vector[Task[Box]] ts = Vector[Task[Box]]();
+			for x in xs {
+				string y = x.clone();
+				ts.push(go keep(y));
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "into a goroutine")
+	expectNoOwnerError(t, errs, "'go' task handle escape")
+}
+
+// Reject (inferred decl form): `t := go keep(s); return t;`. The inferred-var
+// path (checkInferredVarDecl) tracks the handle just like the typed-var path, so
+// the escape via return is still caught. Pins that both decl forms route through
+// trackGoHandleBinding.
+func TestT1152_InferredHandleBindingEscapeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn() Task[Box] {
+			string s = "hello".clone();
+			t := go keep(s);
+			return t;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "'go' task handle escape")
+}
+
+// Accept: a PARAMETER (caller-owned, not a function-level local) borrowed into
+// `go f(p)` whose handle escapes via return is NOT flagged by T1152. A parameter
+// is owned by the caller's frame, so the goroutine-vs-local lifetime reasoning of
+// this check does not apply — goCallBorrowsOwnedLocal skips params (the separate
+// sibling gap noted in T1152). Pins the `c.params` continue branch.
+func TestT1152_ParamBorrowEscapeNotFlagged(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; }
+		keep(string p) Box { return Box(s: p.clone()); }
+		spawn(string p) Task[Box] {
+			return go keep(p);
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, "'go' task handle escape")
+}
+
+// Accept: the `go { block }` form (not a `go f(arg)` call) is outside the T1152
+// borrow-arg check entirely — its argument-borrow analysis only applies to the
+// CallExpr shape. A returned go-block handle is not flagged here (block captures
+// are a separate concern). Pins the not-CallExpr early-return branch of
+// goCallBorrowsOwnedLocal.
+func TestT1152_GoBlockHandleNotFlagged(t *testing.T) {
+	errs := ownerErrs(t, `
+		spawn() Task[int] {
+			return go { 42 };
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, "'go' task handle escape")
 }

@@ -1,0 +1,85 @@
+// T1152: an escaping `go f(&local)` task handle — where the goroutine borrows an
+// owned, droppable, function/block-scope local and the handle outlives that
+// local — is a use-after-free, now rejected at ownership-check time (covered by
+// the Go ownership unit tests, which can assert compile-time rejection). This
+// file proves the three SOUND rewrites the diagnostic points at compile and
+// produce deterministic output across many spawns, so the fix does not regress
+// the legitimate idioms. Default leak enforcement guards the drop paths.
+type Box {
+  string s;
+}
+
+// Borrow form: the callee only reads the borrowed string and clones it into the
+// returned Box. Sound only when the goroutine is joined before the local drops.
+keep(string p) Box {
+  return Box(s: p.clone());
+}
+
+// Move form: the callee takes ownership of the string (`move`), so nothing is
+// borrowed from the caller's frame — the handle may escape freely.
+store(string move p) Box {
+  return Box(s: move p);
+}
+
+// Sound rewrite 1 — clone into the goroutine: each spawned goroutine owns its own
+// copy of the string, so the handle escaping the local's scope (here returned
+// from a helper) reads only goroutine-owned memory.
+spawn_cloned(string src) Task[Box] {
+  string s = src.clone();
+  return go keep(s.clone());
+}
+
+go_call_clone_into_goroutine() `test {
+  Task[Box][] handles = [];
+  int i = 0;
+  while i < 50 {
+    handles.push(spawn_cloned("alpha"));
+    i = i + 1;
+  }
+  int matched = 0;
+  for h in handles {
+    Box b = <-h;
+    if b.s == "alpha" {
+      matched = matched + 1;
+    }
+  }
+  assert(matched == 50, "clone-into-goroutine: all spawns return the cloned value");
+}
+
+// Sound rewrite 2 — move an owned value into the goroutine: ownership of the
+// string transfers into the goroutine frame, so the escaping handle is sound.
+spawn_moved(string src) Task[Box] {
+  string s = src.clone();
+  return go store(move s);
+}
+
+go_call_move_into_goroutine() `test {
+  Task[Box][] handles = [];
+  int i = 0;
+  while i < 50 {
+    handles.push(spawn_moved("beta"));
+    i = i + 1;
+  }
+  int matched = 0;
+  for h in handles {
+    Box b = <-h;
+    if b.s == "beta" {
+      matched = matched + 1;
+    }
+  }
+  assert(matched == 50, "move-into-goroutine: all spawns return the moved value");
+}
+
+// Sound rewrite 3 — await in scope: borrowing a function-level local into the
+// goroutine is fine when the handle is joined (via `<-`) before that local goes
+// out of scope, so the goroutine never outlives the value it borrows. (A for-in
+// loop binding borrowed into `go` is rejected outright by T1147 regardless of the
+// await, since the goroutine can outlive the iteration — that is the sibling
+// loop-binding case, not this function-local shape.)
+go_call_await_in_scope() `test {
+  string s = "three".clone();
+  Task[Box] t = go keep(s);
+  Box b = <-t;
+  assert(b.s == "three", "await-in-scope: borrowed local stays alive for the join");
+  assert(b.s.len == 5, "await-in-scope: returned length matches");
+}

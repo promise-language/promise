@@ -1,0 +1,174 @@
+// T1162: an owner-governed member-source optional handler (`owner.field? _ { recovery }`)
+// whose result is a single-owner opaque handle (Channel/Mutex/MutexGuard/Task) must
+// free the absent-path recovery handle exactly once while leaving the present-path
+// alias to the owner's drop. The two runtimes need DIFFERENT ownership for the same
+// merged phi: present aliases the owner's field (owner drops it), absent is a fresh
+// recovery handle nobody else frees. A single compile-time track/skip can't express
+// both, so the fix registers the phi as a statement temp with a per-branch live flag
+// (cleared on the some/present edge, armed on the none/recovery edge). Opaque handles
+// can't be deep-copied (the string/vector/heap-user path dups the present value to make
+// it independent — T0775 — but Channel/Mutex/Task have no clone semantics), which is
+// why the per-branch flag is required instead of the present-arm dup used elsewhere.
+//
+// All tests are zero-leak-enforced batch tests; heap payloads (string) are used where
+// the handle carries one so a latent double-free surfaces as a leak or crash. Without
+// the fix the inline-temp absent forms leak the recovery handle.
+type ChanBox {
+  Channel[int]? f;
+}
+type ChanSBox {
+  Channel[string]? f;
+}
+type MtxBox {
+  Mutex[string]? f;
+}
+type TaskBox {
+  Task[int]? f;
+}
+type GuardBox {
+  MutexGuard[int]? f;
+}
+
+worker_t1162() int {
+  return 7;
+}
+
+// ── Channel[int]: the exact repro — inline temp, absent → fresh recovery dropped ──
+t1162_chan_inline_absent() `test {
+  b := ChanBox(f: none);
+  (b.f? _ {
+    Channel[int](1)
+  }).close();
+}
+
+// Present: the temp aliases the owner's field; the owner's drop is the sole free.
+t1162_chan_inline_present() `test {
+  b := ChanBox(f: Channel[int](1));
+  (b.f? _ {
+    Channel[int](1)
+  }).close();
+}
+
+// ── Channel[string]: heap payload — a double-free of the buffered string would leak ──
+t1162_chan_str_inline_absent() `test {
+  b := ChanSBox(f: none);
+  ch := b.f? _ {
+    Channel[string](1)
+  };
+  ch.send("buffered"); // owned by the channel; freed by Channel.drop
+  ch.close();
+}
+
+t1162_chan_str_bound_present() `test {
+  b := ChanSBox(f: Channel[string](1));
+  ch := b.f? _ {
+    Channel[string](1)
+  };
+  ch.send("buffered");
+  ch.close();
+}
+
+// ── Mutex[string]: inline temp with a heap payload — leaks 3 allocations unfixed ──
+t1162_mtx_inline_absent() `test {
+  b := MtxBox(f: none);
+  (b.f? _ {
+    Mutex[string]("payload")
+  }).lock().close();
+}
+
+t1162_mtx_bound_absent() `test {
+  b := MtxBox(f: none);
+  m := b.f? _ {
+    Mutex[string]("recovered")
+  };
+  g := m.lock();
+  assert(g.borrow == "recovered", "absent recovers the fresh mutex value");
+  g.close();
+}
+
+// Present: the bound mutex aliases the owner's field; both freed once (owner governs).
+t1162_mtx_bound_present() `test {
+  b := MtxBox(f: Mutex[string]("owned"));
+  m := b.f? _ {
+    Mutex[string]("recovered")
+  };
+  g := m.lock();
+  assert(g.borrow == "owned", "present aliases the owner's field value");
+  g.close();
+}
+
+// ── Task[int]: the `<-` await consumer joins+frees the G; must not double-free it ──
+t1162_task_await_absent() `test {
+  b := TaskBox(f: none);
+  r := <-(b.f? _ {
+    go worker_t1162()
+  });
+  assert(r == 7, "absent recovers a fresh task and awaits it");
+}
+
+t1162_task_await_present() `test {
+  b := TaskBox(f: go worker_t1162());
+  r := <-(b.f? _ {
+    go worker_t1162()
+  });
+  assert(r == 7, "present awaits the owner's task");
+}
+
+t1162_task_bound_absent() `test {
+  b := TaskBox(f: none);
+  t := b.f? _ {
+    go worker_t1162()
+  };
+  r := <-t;
+  assert(r == 7, "bound absent task joins exactly once");
+}
+
+// ── MutexGuard[int]: inline temp guard, released exactly once via close ───────────
+t1162_guard_inline_absent() `test {
+  m2 := Mutex[int](5);
+  b := GuardBox(f: none);
+  (b.f? _ {
+    m2.lock()
+  }).close();
+}
+
+t1162_guard_bound_absent() `test {
+  m2 := Mutex[int](5);
+  b := GuardBox(f: none);
+  g := b.f? _ {
+    m2.lock()
+  };
+  assert(g.borrow == 5, "absent recovers a guard on the local mutex");
+  g.close();
+}
+
+// ── Generic context: exercises the typeSubst arm of optionalHandlerHandleDrop ─────
+type MtxBoxG[T] {
+  Mutex[T]? f;
+}
+
+pick_mutex_t1162[T](T move seed) {
+  b := MtxBoxG[T](f: none);
+  m := b.f? _ {
+    Mutex[T](move seed)
+  };
+  g := m.lock();
+  g.close();
+}
+
+t1162_generic_context_absent() `test {
+  pick_mutex_t1162(7); // Mutex[int]
+  pick_mutex_t1162("payload"); // Mutex[string] — heap payload instantiation
+}
+
+// ── State coverage: the armed-on-none flag must be path-conditional, not sticky ───
+// A loop re-enters the member handler each pass; a non-conditional drop would leak the
+// owner-aliased present field or double-free across iterations.
+t1162_chan_in_loop() `test {
+  for i in 0..3 {
+    b := ChanBox(f: none);
+    (b.f? _ {
+      Channel[int](1)
+    }).close();
+  }
+}

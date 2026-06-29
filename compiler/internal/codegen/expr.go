@@ -13427,6 +13427,35 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			// whether tracking actually happens.
 			c.trackHeapValueTemp(phi, trackPhiHeapType)
 		}
+		// T1162: Owner-governed member source whose result is a single-owner opaque
+		// handle (Channel/Mutex/MutexGuard/Task). These can't be deep-copied, so the
+		// present-arm okVal aliases the owner's field (the owner's drop frees it)
+		// while the absent-arm handlerVal is a fresh recovery handle nobody else
+		// frees → leak. A single compile-time track/skip can't express both
+		// ownerships, so register the merged phi as a statement temp with a
+		// PER-BRANCH live flag: cleared (0) on the present (some) edge so the owner
+		// stays sole owner, armed (1) on the absent (none/recovery) edge so the fresh
+		// handle is dropped exactly once at statement end. Mirrors
+		// trackElvisResultTemp's per-path flag (T0937/T0951). A `<-` await consumer
+		// claims this temp via genReceiveTask's claimStringTemp(gRaw) (the await
+		// joins+frees the G), and a bound use claims it via the var-decl
+		// claimStringTemp — both neutralize the flag so the consumer/binding governs
+		// the drop. Gated to no per-field dup (srcStringDup/srcContainerDup —
+		// string/vector/Arc/Weak go through genFieldAccess's independent dup) and the
+		// non-diverging path (a diverging handler produces no surviving recovery).
+		if trackPhiI8Type == nil && srcStringDup == nil && srcContainerDup == nil &&
+			c.tempTrackingEnabled && c.block.Term == nil && phi.Type() == irtypes.I8Ptr &&
+			c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) {
+			if handleDrop := c.optionalHandlerHandleDrop(e); handleDrop != nil {
+				if _, already := c.stmtTempMap[phi]; !already {
+					flagPhi := c.block.NewPhi(
+						&ir.Incoming{X: constant.NewInt(irtypes.I1, 0), Pred: someEnd},
+						&ir.Incoming{X: constant.NewInt(irtypes.I1, 1), Pred: handlerEnd},
+					)
+					c.appendStmtTemp(phi, handleDrop, nil, flagPhi)
+				}
+			}
+		}
 		return phi
 	}
 	return okVal
@@ -13747,6 +13776,43 @@ func (c *Compiler) handlerResultIsNativeHandle(e *ast.ErrorHandlerExpr) bool {
 	}
 	_, ok := types.AsTask(rt)
 	return ok
+}
+
+// optionalHandlerHandleDrop resolves the native drop function for an optional
+// handler result that is a single-owner opaque handle represented as a bare i8*
+// — Channel[T], Mutex[T], MutexGuard[T], Task[T] (T1162). These cannot be
+// deep-copied (genOptionalHandlerExpr's !isOpaqueContainerType dup gate skips
+// them), so for an owner-governed member source the present-arm aliases the
+// owner's field while the absent-arm recovery handle is left unowned. Returns
+// nil for every other result type. rt is substituted first so element types from
+// types.As* are concrete. Mirrors elvisResultHandleDrop (T0951) but scoped to the
+// handle classes whose recovery actually leaks here — Arc[T]/Weak[T] refcount-dup
+// via genFieldAccess's srcContainerDup path and are excluded.
+func (c *Compiler) optionalHandlerHandleDrop(e *ast.ErrorHandlerExpr) *ir.Func {
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if rt == nil || isRefType(rt) {
+		return nil
+	}
+	named := extractNamed(rt)
+	if chElem, ok := types.AsChannel(rt); ok || named == types.TypChannel {
+		return c.getOrCreateChannelDrop(chElem)
+	}
+	if mutexElem, ok := types.AsMutex(rt); ok {
+		return c.getOrCreateMutexDrop(mutexElem)
+	}
+	if _, ok := types.AsMutexGuard(rt); ok || named == types.TypMutexGuard {
+		return c.funcs["MutexGuard.drop"]
+	}
+	if taskElem, ok := types.AsTask(rt); ok {
+		return c.getOrCreateTaskDrop(taskElem)
+	}
+	return nil
 }
 
 // isBorrowedThisMemberSource reports whether src (peeling ParenExpr) is a member

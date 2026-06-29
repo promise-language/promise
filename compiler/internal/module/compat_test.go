@@ -60,6 +60,97 @@ func TestLookupCompatCorruptJSON(t *testing.T) {
 	}
 }
 
+// TestCompatVerdictCompileOnlyRoundTrip verifies the CompileOnly field (added by
+// T1052) survives a SaveCompat/LookupCompat round-trip and that an incompatible
+// verdict with no CompileOnly stays false (the zero value must be stable).
+func TestCompatVerdictCompileOnlyRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	v := &CompatVerdict{
+		URL:         "https://github.com/you/notest.git",
+		Commit:      "aaabbb",
+		Epoch:       "2026.1",
+		Compatible:  true,
+		CompileOnly: true,
+		FailReason:  "module has no *_test.pr files — verified by compilation only",
+	}
+	if err := SaveCompat(v); err != nil {
+		t.Fatalf("SaveCompat: %v", err)
+	}
+
+	got, found := LookupCompat("https://github.com/you/notest.git", "aaabbb", "2026.1")
+	if !found {
+		t.Fatal("expected verdict to be found")
+	}
+	if !got.Compatible {
+		t.Error("expected Compatible=true")
+	}
+	if !got.CompileOnly {
+		t.Error("expected CompileOnly=true to survive round-trip")
+	}
+	if got.FailReason == "" {
+		t.Error("expected FailReason to carry the advisory message")
+	}
+
+	// A regular (test-verified) compatible verdict must NOT have CompileOnly set.
+	v2 := &CompatVerdict{
+		URL:        "https://github.com/you/tested.git",
+		Commit:     "cccddd",
+		Epoch:      "2026.1",
+		Compatible: true,
+	}
+	if err := SaveCompat(v2); err != nil {
+		t.Fatalf("SaveCompat v2: %v", err)
+	}
+	got2, found2 := LookupCompat("https://github.com/you/tested.git", "cccddd", "2026.1")
+	if !found2 {
+		t.Fatal("expected v2 to be found")
+	}
+	if got2.CompileOnly {
+		t.Error("a test-verified verdict must not have CompileOnly set")
+	}
+}
+
+// TestCompatVerdictBackwardCompatOldJSON verifies that a verdict JSON written
+// without the compile_only field (omitempty zero value) is read back with
+// CompileOnly=false, preserving backward compatibility with cached verdicts from
+// before T1052 was merged.
+func TestCompatVerdictBackwardCompatOldJSON(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// Hand-write a JSON verdict that lacks the compile_only key entirely
+	// (simulating a pre-T1052 cache entry).
+	dir := filepath.Join(tmp, "compat")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	url, commit, epoch := "github.com/you/oldcache", "f00df00d", "2026.1"
+	oldJSON := `{
+  "url": "github.com/you/oldcache",
+  "commit": "f00df00d",
+  "epoch": "2026.1",
+  "compatible": true,
+  "compiler_hash": "` + CompilerHash() + `"
+}`
+	path := filepath.Join(dir, compatKey(url, commit, epoch)+".json")
+	if err := os.WriteFile(path, []byte(oldJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found := LookupCompat(url, commit, epoch)
+	if !found {
+		t.Fatal("pre-T1052 verdict should still be found")
+	}
+	if !got.Compatible {
+		t.Error("expected Compatible=true from old cache entry")
+	}
+	if got.CompileOnly {
+		t.Error("old JSON without compile_only must deserialize as CompileOnly=false")
+	}
+}
+
 func TestCompatVerdictCompilerHashInvalidation(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)

@@ -37,7 +37,7 @@ func lastLines(s string, n int) string {
 
 // moduleHasTests reports whether modDir carries any `_test.pr` files — the
 // empirical compatibility gate (§9.9) is run via `promise test`, which discovers
-// “ `test “ functions in `_test.pr` files.
+// " `test " functions in `_test.pr` files.
 func moduleHasTests(modDir string) (bool, error) {
 	files, err := module.CollectModuleSources(modDir, true)
 	if err != nil {
@@ -53,8 +53,13 @@ func moduleHasTests(modDir string) (bool, error) {
 
 // verifyModuleCompat establishes whether the module at (url, commit) is compatible
 // with `epoch` per §9.9: built with the epoch's compiler it compiles and 100% of
-// its “ `test “ functions pass (a parse/type error is a compile failure →
+// its " `test " functions pass (a parse/type error is a compile failure →
 // incompatible). compilerBin is the epoch-E compiler used to run the tests.
+//
+// Modules with no `*_test.pr` files are verified by compilation only (§9.9 ad-hoc
+// tier policy): `promise emit-ir` is run on the source; if it exits 0 the module
+// is marked compatible (compile-only) and warn is called with an advisory message.
+// A module whose source fails to compile is still incompatible (§9.10).
 //
 // The verdict is cached locally (§9.9, ad-hoc tier) keyed by url@commit#epoch and
 // invalidated on a compiler-build change, so repeat adds and the diamond-dedup
@@ -62,7 +67,7 @@ func moduleHasTests(modDir string) (bool, error) {
 // against the SAME project epoch first (§9.8/§9.10 apply transitively), so a
 // failing dep surfaces as a clean gate rather than a raw compiler error buried in
 // the dependency's source.
-func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[string]bool) (ok bool, reason string, err error) {
+func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[string]bool, warn func(string)) (ok bool, reason string, err error) {
 	if v, found := module.LookupCompat(url, commit, epoch); found {
 		return v.Compatible, v.FailReason, nil
 	}
@@ -91,7 +96,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
 		return false, reason, nil
 	}
-	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, visiting)
+	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, visiting, warn)
 	if derr != nil {
 		return false, "", derr
 	}
@@ -105,11 +110,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 		return false, "", herr
 	}
 	if !hasTests {
-		// "verify, never assume" (§9.8): absent tests there is no empirical
-		// evidence of compatibility, so the candidate cannot be trusted.
-		reason = "module has no `test` functions (no *_test.pr) — compatibility cannot be established empirically (§9.9)"
-		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
-		return false, reason, nil
+		return verifyModuleCompatCompileOnly(compilerBin, url, commit, epoch, modDir, warn)
 	}
 
 	cmd := exec.Command(compilerBin, "test", modDir)
@@ -123,18 +124,50 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 	return compatible, reason, nil
 }
 
+// verifyModuleCompatCompileOnly handles the no-test path: runs `promise emit-ir`
+// on the module source to verify it compiles under the epoch. On success, records
+// a compile-only verdict and calls warn. On compile failure, records incompatible.
+// An empty module (no .pr files) is accepted vacuously with a warning.
+func verifyModuleCompatCompileOnly(compilerBin, url, commit, epoch, modDir string, warn func(string)) (ok bool, reason string, err error) {
+	srcFiles, serr := module.CollectModuleSources(modDir, false)
+	if serr != nil {
+		return false, "", serr
+	}
+	if len(srcFiles) == 0 {
+		// No .pr source files at all — accept vacuously (emit-ir would error on empty project).
+		warnMsg := fmt.Sprintf("module %q has no .pr files — treating as compatible (§9.9 vacuous pass)", url)
+		warn(warnMsg)
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
+		return true, "", nil
+	}
+	// Compile-only check: emit-ir accepts a directory, compiles all non-test .pr
+	// sources via discoverProject, does not require main(), exits 0/non-0.
+	emitCmd := exec.Command(compilerBin, "emit-ir", modDir)
+	emitCmd.Env = append(os.Environ(), "PROMISE_NO_EPOCH_WARN=1")
+	out, runErr := emitCmd.CombinedOutput()
+	if runErr != nil {
+		reason = lastLines(string(out), 20)
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
+		return false, reason, nil
+	}
+	warnMsg := fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (§9.9)", url)
+	warn(warnMsg)
+	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
+	return true, "", nil
+}
+
 // verifyDeps verifies every pinned transitive git dependency in cfg against
 // epoch (§9.8/§9.10 apply transitively). It returns (false, reason) for the first
 // incompatible dependency; non-git (sha256) and incomplete named entries are
 // skipped. Shared by verifyModuleCompat (remote modules) and
 // verifyLocalModuleCompat (the cwd module on `package check-epoch`) so the
 // transitive-compat rule lives in exactly one place.
-func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting map[string]bool) (ok bool, reason string, err error) {
+func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting map[string]bool, warn func(string)) (ok bool, reason string, err error) {
 	for depURL, depCommit := range cfg.Require {
 		if depCommit == "" {
 			continue // non-git source (sha256) — not epoch-resolved here
 		}
-		depOK, depReason, derr := verifyModuleCompat(compilerBin, depURL, depCommit, epoch, visiting)
+		depOK, depReason, derr := verifyModuleCompat(compilerBin, depURL, depCommit, epoch, visiting, warn)
 		if derr != nil {
 			return false, "", derr
 		}
@@ -146,7 +179,7 @@ func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting m
 		if entry.URL == "" || entry.Commit == "" {
 			continue
 		}
-		depOK, depReason, derr := verifyModuleCompat(compilerBin, entry.URL, entry.Commit, epoch, visiting)
+		depOK, depReason, derr := verifyModuleCompat(compilerBin, entry.URL, entry.Commit, epoch, visiting, warn)
 		if derr != nil {
 			return false, "", derr
 		}
@@ -161,13 +194,15 @@ func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting m
 // modDir is compatible with epoch (§9.9), the same gate as verifyModuleCompat but
 // for an on-disk module (the owner's cwd) rather than a fetched remote: its pinned
 // transitive deps are verified first, then `compilerBin test modDir` must pass
-// 100% of the module's `test` functions. Used by `promise package check-epoch`.
+// 100% of the module's `test` functions. Modules with no test files are verified by
+// compilation only (§9.9 ad-hoc tier policy). Used by `promise package check-epoch`.
 func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason string, err error) {
 	cfg, perr := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
 	if perr != nil {
 		return false, fmt.Sprintf("invalid promise.toml: %v", perr), nil
 	}
-	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, map[string]bool{})
+	warn := func(msg string) { fmt.Fprintln(os.Stderr, "warning:", msg) }
+	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, map[string]bool{}, warn)
 	if derr != nil {
 		return false, "", derr
 	}
@@ -180,7 +215,22 @@ func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason
 		return false, "", herr
 	}
 	if !hasTests {
-		return false, "module has no `test` functions (no *_test.pr) — compatibility cannot be established empirically (§9.9)", nil
+		srcFiles, serr := module.CollectModuleSources(modDir, false)
+		if serr != nil {
+			return false, "", serr
+		}
+		if len(srcFiles) == 0 {
+			warn(fmt.Sprintf("module %q has no .pr files — treating as compatible (§9.9 vacuous pass)", cfg.Name))
+			return true, "", nil
+		}
+		emitCmd := exec.Command(compilerBin, "emit-ir", modDir)
+		emitCmd.Env = append(os.Environ(), "PROMISE_NO_EPOCH_WARN=1")
+		out, runErr := emitCmd.CombinedOutput()
+		if runErr != nil {
+			return false, lastLines(string(out), 20), nil
+		}
+		warn(fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (§9.9)", cfg.Name))
+		return true, "", nil
 	}
 
 	cmd := exec.Command(compilerBin, "test", modDir)
@@ -290,13 +340,16 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 		if perr != nil {
 			return "", perr
 		}
-		ok, reason, verr := verifyModuleCompat(compilerBin, url, c, projectEpoch, visiting)
+		ok, reason, verr := verifyModuleCompat(compilerBin, url, c, projectEpoch, visiting, warn)
 		if verr != nil {
 			return "", verr
 		}
 		if !ok {
 			return "", fmt.Errorf("module %q at %s (%s) is not compatible with epoch %s:\n%s",
 				label, explicitRef, shortCommit(c), projectEpoch, indent(reason, "  "))
+		}
+		if reason != "" {
+			warn(reason) // compile-only advisory surfaced from cache hit
 		}
 		return c, nil
 	}
@@ -322,11 +375,14 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 			fallback = h
 			warn(fmt.Sprintf("module %q is unversioned (no epoch-* or 'stable' tags); pinning default-branch HEAD %s", label, shortCommit(h)))
 		}
-		ok, _, verr := verifyModuleCompat(compilerBin, url, fallback, projectEpoch, visiting)
+		ok, reason, verr := verifyModuleCompat(compilerBin, url, fallback, projectEpoch, visiting, warn)
 		if verr != nil {
 			return "", verr
 		}
 		if ok {
+			if reason != "" {
+				warn(reason) // compile-only advisory surfaced from cache hit
+			}
 			return fallback, nil
 		}
 		hi, hiTag := module.HighestEpoch(epochTags)
@@ -335,11 +391,14 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 
 	// Walk back through candidate tags (largest epoch first); first verified wins.
 	for _, cand := range candidates {
-		ok, _, verr := verifyModuleCompat(compilerBin, url, cand.Commit, projectEpoch, visiting)
+		ok, reason, verr := verifyModuleCompat(compilerBin, url, cand.Commit, projectEpoch, visiting, warn)
 		if verr != nil {
 			return "", verr
 		}
 		if ok {
+			if reason != "" {
+				warn(reason) // compile-only advisory surfaced from cache hit
+			}
 			return cand.Commit, nil
 		}
 		warn(fmt.Sprintf("module %q tag %s fails under epoch %s; stepping back", label, cand.Tag, projectEpoch))

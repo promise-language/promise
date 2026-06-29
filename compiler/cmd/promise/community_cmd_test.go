@@ -272,12 +272,13 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 		t.Fatalf("bad module should fail: ok=%v reason=%q err=%v", ok, reason, err)
 	}
 
-	// A module with no `_test.pr` cannot be verified empirically (§9.9).
+	// A module with no `_test.pr` is accepted compile-only (§9.9 policy change):
+	// emit-ir verifies the source compiles; a warning is printed to stderr.
 	notests := t.TempDir()
 	os.WriteFile(filepath.Join(notests, "promise.toml"), []byte("[module]\nname = \"n\"\nepoch = \"2026.0\"\n"), 0644)
 	os.WriteFile(filepath.Join(notests, "n.pr"), []byte("v() int `public { return 1; }\n"), 0644)
-	if ok, reason, _ := verifyLocalModuleCompat(bin, notests, epoch); ok || !strings.Contains(reason, "no `test` functions") {
-		t.Errorf("no-tests module: ok=%v reason=%q", ok, reason)
+	if ok, reason, err := verifyLocalModuleCompat(bin, notests, epoch); err != nil || !ok {
+		t.Errorf("no-tests module with valid source should be compile-only compatible: ok=%v reason=%q err=%v", ok, reason, err)
 	}
 }
 

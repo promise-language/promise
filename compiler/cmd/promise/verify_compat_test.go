@@ -84,11 +84,12 @@ func makeWorkRepo(t *testing.T) string {
 func TestVerifyModuleCompatCacheHit(t *testing.T) {
 	t.Setenv("PROMISE_HOME", t.TempDir())
 	url, commit, epoch := "github.com/you/cached", "abc123def456abc123def456abc123def456abcd", "2026.1"
+	noop := func(string) {}
 
 	if err := module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: true}); err != nil {
 		t.Fatal(err)
 	}
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", url, commit, epoch, map[string]bool{})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", url, commit, epoch, map[string]bool{}, noop)
 	if err != nil || !ok || reason != "" {
 		t.Fatalf("cache hit (compatible): ok=%v reason=%q err=%v", ok, reason, err)
 	}
@@ -97,19 +98,24 @@ func TestVerifyModuleCompatCacheHit(t *testing.T) {
 	if err := module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: "boom"}); err != nil {
 		t.Fatal(err)
 	}
-	ok, reason, err = verifyModuleCompat("/nonexistent/compiler", url, commit, epoch, map[string]bool{})
+	ok, reason, err = verifyModuleCompat("/nonexistent/compiler", url, commit, epoch, map[string]bool{}, noop)
 	if err != nil || ok || reason != "boom" {
 		t.Fatalf("cache hit (incompatible): ok=%v reason=%q err=%v", ok, reason, err)
 	}
 }
 
-// TestVerifyModuleCompatNoTests: a module that compiles but carries no `_test.pr`
-// cannot be verified empirically (§9.9) → incompatible, with the verdict cached.
-// No compiler run is needed (it fails before the test step), so compilerBin is bogus.
+// TestVerifyModuleCompatNoTests: a module that compiles but carries no `*_test.pr`
+// is accepted as compatible (compile-only, §9.9 policy) — the §9.9 criterion is
+// vacuously satisfied when there are no test functions. The verdict is cached with
+// CompileOnly=true and the warn callback is called with an advisory message.
 func TestVerifyModuleCompatNoTests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	bin := findPromiseBinary(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	repo := makeWorkRepo(t)
@@ -119,19 +125,102 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 	gitRun(t, repo, "commit", "-m", "init")
 	commit := gitRun(t, repo, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, commit, "2026.0", map[string]bool{})
+	var warnings []string
+	ok, reason, err := verifyModuleCompat(bin, repo, commit, "2026.0", map[string]bool{}, func(msg string) { warnings = append(warnings, msg) })
+	if err != nil {
+		t.Fatalf("verifyModuleCompat: %v", err)
+	}
+	if !ok {
+		t.Errorf("a test-less module with valid source must be compatible (compile-only), reason=%q", reason)
+	}
+	if reason != "" {
+		t.Errorf("reason should be empty on success, got %q", reason)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "no `*_test.pr` files") {
+		t.Errorf("expected a no-tests advisory warning, got %v", warnings)
+	}
+	// The compile-only verdict must be cached.
+	v, found := module.LookupCompat(repo, commit, "2026.0")
+	if !found {
+		t.Fatal("expected a cached verdict")
+	}
+	if !v.Compatible {
+		t.Errorf("cached verdict must be compatible, got %+v", v)
+	}
+	if !v.CompileOnly {
+		t.Errorf("cached verdict must have CompileOnly=true, got %+v", v)
+	}
+	if !strings.Contains(v.FailReason, "no `*_test.pr` files") {
+		t.Errorf("cached FailReason should carry the advisory message, got %q", v.FailReason)
+	}
+}
+
+// TestVerifyModuleCompatNoTestsCompileError: a module with no `*_test.pr` but
+// broken source (syntax error) must be rejected — compile-only still enforces
+// that the source compiles under the epoch (§9.9 / §9.10).
+func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	bin := findPromiseBinary(t)
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	repo := makeWorkRepo(t)
+	os.WriteFile(filepath.Join(repo, "promise.toml"), []byte("[module]\nname = \"badnotests\"\nepoch = \"2026.0\"\n"), 0644)
+	// Deliberate syntax error — no test file, so compile-only path is triggered.
+	os.WriteFile(filepath.Join(repo, "badnotests.pr"), []byte("this is not valid promise code\n"), 0644)
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "broken")
+	commit := gitRun(t, repo, "rev-parse", "HEAD")
+
+	ok, reason, err := verifyModuleCompat(bin, repo, commit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
 	if ok {
-		t.Error("a module with no test functions must be incompatible")
+		t.Error("a test-less module with broken source must be incompatible")
 	}
-	if !strings.Contains(reason, "no `test` functions") {
-		t.Errorf("reason = %q, want the no-tests explanation", reason)
+	if reason == "" {
+		t.Error("incompatible verdict must carry a reason (compile error output)")
 	}
-	// The negative verdict must be cached for repeat resolution.
+	// Must be cached as incompatible.
 	if v, found := module.LookupCompat(repo, commit, "2026.0"); !found || v.Compatible {
 		t.Errorf("expected cached incompatible verdict, got %+v found=%v", v, found)
+	}
+}
+
+// TestVerifyModuleCompatNoSourceFiles: a module with promise.toml but no .pr files
+// at all is accepted vacuously — there is nothing to compile or test (§9.9).
+func TestVerifyModuleCompatNoSourceFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	repo := makeWorkRepo(t)
+	os.WriteFile(filepath.Join(repo, "promise.toml"), []byte("[module]\nname = \"empty\"\nepoch = \"2026.0\"\n"), 0644)
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "empty")
+	commit := gitRun(t, repo, "rev-parse", "HEAD")
+
+	var warnings []string
+	// compilerBin is irrelevant — we short-circuit before running emit-ir.
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, commit, "2026.0", map[string]bool{}, func(msg string) { warnings = append(warnings, msg) })
+	if err != nil {
+		t.Fatalf("verifyModuleCompat: %v", err)
+	}
+	if !ok {
+		t.Errorf("empty module must be compatible (vacuous pass), reason=%q", reason)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "no .pr files") {
+		t.Errorf("expected a no-files advisory warning, got %v", warnings)
+	}
+	v, found := module.LookupCompat(repo, commit, "2026.0")
+	if !found || !v.Compatible || !v.CompileOnly {
+		t.Errorf("expected cached compatible+CompileOnly verdict, got %+v found=%v", v, found)
 	}
 }
 
@@ -151,7 +240,7 @@ func TestVerifyModuleCompatInvalidToml(t *testing.T) {
 	gitRun(t, repo, "commit", "-m", "init")
 	commit := gitRun(t, repo, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, commit, "2026.0", map[string]bool{})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, commit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -162,14 +251,15 @@ func TestVerifyModuleCompatInvalidToml(t *testing.T) {
 
 // TestVerifyModuleCompatTransitiveDepIncompatible: a module is incompatible when one
 // of its pinned [require] deps is incompatible (§9.10 applies transitively). The dep
-// here fails for a cheap reason (no tests), so neither module needs a compiler run.
+// has no tests, so the compile-only path is triggered for it; with a bogus compiler
+// binary that path fails → dep is incompatible → parent is incompatible.
 func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	// Dependency: compiles but has no tests → incompatible.
+	// Dependency: no tests → compile-only path; /nonexistent/compiler fails → incompatible.
 	dep := makeWorkRepo(t)
 	os.WriteFile(filepath.Join(dep, "promise.toml"), []byte("[module]\nname = \"dep\"\nepoch = \"2026.0\"\n"), 0644)
 	os.WriteFile(filepath.Join(dep, "dep.pr"), []byte("dep_value() int `public { return 1; }\n"), 0644)
@@ -187,7 +277,7 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 	gitRun(t, parent, "commit", "-m", "init")
 	parentCommit := gitRun(t, parent, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -201,15 +291,15 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 
 // TestVerifyModuleCompatTransitiveNamedDepIncompatible mirrors the [require] case
 // but via a [require.NAME] entry, covering the NamedRequire arm of verifyDeps —
-// the §9.10 transitive rule must hold for named dependencies too. The dep again
-// fails cheaply (no tests), so no compiler run is needed.
+// the §9.10 transitive rule must hold for named dependencies too. The dep has no
+// tests, so the compile-only path is triggered; the bogus compiler makes it fail.
 func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	// Dependency: compiles but has no tests → incompatible.
+	// Dependency: no tests → compile-only path; /nonexistent/compiler fails → incompatible.
 	dep := makeWorkRepo(t)
 	os.WriteFile(filepath.Join(dep, "promise.toml"), []byte("[module]\nname = \"dep\"\nepoch = \"2026.0\"\n"), 0644)
 	os.WriteFile(filepath.Join(dep, "dep.pr"), []byte("dep_value() int `public { return 1; }\n"), 0644)
@@ -227,7 +317,7 @@ func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
 	gitRun(t, parent, "commit", "-m", "init")
 	parentCommit := gitRun(t, parent, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -595,6 +685,89 @@ func TestCheckUpgradeNoDeps(t *testing.T) {
 	out := captureStdout(t, func() { runPackageCheckUpgrade([]string{"2026.2"}) })
 	if !strings.Contains(out, "No [require] dependencies") {
 		t.Errorf("expected empty-deps message, got: %s", out)
+	}
+}
+
+// TestLastLines covers the lastLines helper: the truncation path (more lines than
+// n) and the empty-lines filtering behavior. This is a pure unit test — no I/O.
+func TestLastLines(t *testing.T) {
+	// More lines than the limit — only the last n are returned.
+	in := "a\nb\nc\nd\ne"
+	got := lastLines(in, 3)
+	if got != "c\nd\ne" {
+		t.Errorf("lastLines truncation: got %q, want %q", got, "c\nd\ne")
+	}
+
+	// Fewer lines than the limit — all are returned.
+	got = lastLines("x\ny", 10)
+	if got != "x\ny" {
+		t.Errorf("lastLines no-trunc: got %q", got)
+	}
+
+	// Blank lines are filtered (lastLines uses TrimSpace != "").
+	got = lastLines("a\n\n\nb", 10)
+	if got != "a\nb" {
+		t.Errorf("lastLines blank-filter: got %q", got)
+	}
+
+	// Empty input returns empty string.
+	got = lastLines("", 5)
+	if got != "" {
+		t.Errorf("lastLines empty: got %q", got)
+	}
+}
+
+// TestVerifyLocalModuleCompatInvalidToml: an invalid promise.toml (epoch="next"
+// is disallowed) causes verifyLocalModuleCompat to return incompatible with a
+// clean "invalid promise.toml" reason — never reaching the compiler.
+func TestVerifyLocalModuleCompatInvalidToml(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"bad\"\nepoch = \"next\"\n"), 0644)
+
+	ok, reason, err := verifyLocalModuleCompat("/nonexistent/compiler", dir, "2026.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("invalid promise.toml must be incompatible")
+	}
+	if !strings.Contains(reason, "invalid promise.toml") {
+		t.Errorf("reason = %q, want 'invalid promise.toml'", reason)
+	}
+}
+
+// TestVerifyLocalModuleCompatNoSourceFiles: a module directory with promise.toml
+// but no .pr files is accepted vacuously — there is nothing to compile or test.
+// This path short-circuits before any exec.Command call, so no compiler binary
+// is required.
+func TestVerifyLocalModuleCompatNoSourceFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"empty\"\nepoch = \"2026.0\"\n"), 0644)
+
+	// Redirect stderr so the warning message doesn't pollute test output.
+	old := os.Stderr
+	devnull, _ := os.Open(os.DevNull)
+	os.Stderr = devnull
+	defer func() {
+		os.Stderr = old
+		devnull.Close()
+	}()
+
+	ok, reason, err := verifyLocalModuleCompat("/nonexistent/compiler", dir, "2026.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Errorf("empty module must be compatible (vacuous pass), reason=%q", reason)
+	}
+	if reason != "" {
+		t.Errorf("reason should be empty on success, got %q", reason)
 	}
 }
 

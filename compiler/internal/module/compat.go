@@ -8,7 +8,7 @@ import (
 )
 
 // CompatVerdict records the outcome of verifying one (url, commit, epoch) tuple:
-// whether that commit compiled and passed 100% of its “ `test “ functions under
+// whether that commit compiled and passed 100% of its " `test " functions under
 // the given epoch. It is the local, ad-hoc analog of the community catalog's
 // per-epoch compatibility index (§9.9) — never published anywhere central.
 type CompatVerdict struct {
@@ -16,8 +16,9 @@ type CompatVerdict struct {
 	Commit       string `json:"commit"`
 	Epoch        string `json:"epoch"`
 	Compatible   bool   `json:"compatible"`
-	CompilerHash string `json:"compiler_hash"`         // fingerprint of the verifying compiler
-	FailReason   string `json:"fail_reason,omitempty"` // populated when !Compatible
+	CompilerHash string `json:"compiler_hash"`          // fingerprint of the verifying compiler
+	FailReason   string `json:"fail_reason,omitempty"`  // populated when !Compatible OR a compile-only warning
+	CompileOnly  bool   `json:"compile_only,omitempty"` // compatible by compilation alone (no tests)
 }
 
 // compatCacheDir returns <PromiseHome>/compat, creating it if necessary.

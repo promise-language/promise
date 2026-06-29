@@ -1,17 +1,25 @@
 // T0899: T0892 added the receiver-alias-clear to the *variable* assignment path
 // (`m = expr`). The MemberExpr (`obj.field = expr`) and IndexExpr (`arr[i] = expr`)
-// target branches of genAssignStmt had none. Reassigning a field/element from an
-// operator/method result that returns the borrowed receiver (`return this`) aliased
-// the operand, so both the operand local and the field/element owner freed the same
-// instance at scope exit → double-free.
+// target branches of genAssignStmt had none, so the same clear was wired in for
+// field/element targets from an operator/method result that returns the borrowed
+// receiver (`return this`).
 //
-// Honesty note: on linux the aliasing double-free is silently absorbed by the
-// one-sided leak detector (it reports only positive alloc deltas), so the aliasing
-// cases below primarily guard the macOS/sanitizer abort and document intent. The
-// *fresh-value over-fire* cases are the ones the linux zero-leak gate actively
-// catches: if the alias-clear wrongly over-fires, the operand leaks (positive
-// delta, detectable). All types here have a `drop(~this)` so the separate no-drop
-// drop-old gap (T0908) does not contaminate the results.
+// T1084: that clear is now a runtime no-op. T0893 clones the `return this` result
+// in wrapThisReturnValue, so the "aliasing" cases below are NOT actually aliased at
+// runtime — each side (the operand local and the field/element) owns an independent
+// clone and drops it exactly once. There is no double-free for any leak detector to
+// absorb. The maybeClearReceiverDropFlag icmp at these assignment sites compares the
+// result instance pointer against the operand's; because the clone makes them differ,
+// it is always false and never clears a flag. These tests therefore exercise the
+// clone path, not the clear path: they verify the clone yields correct values AND
+// zero leaks (both sides drop once).
+//
+// The *fresh-value over-fire* cases still meaningfully verify the no-op clears don't
+// wrongly fire: a fresh-value RHS (`f.fresh()`) allocates a new instance, so the
+// operand must be left untouched — if the clear wrongly fired, the operand would leak
+// (positive alloc delta, caught by the linux zero-leak gate). All types here have a
+// `drop(~this)` so the separate no-drop drop-old gap (T0908) does not contaminate the
+// results.
 // Heap user type with a binary operator that returns the borrowed receiver.
 type BB `doc("Heap user type whose + operator returns the borrowed receiver.") {
   int v;
@@ -61,20 +69,29 @@ type GHolder `doc("Holds a droppable GB[int] field for generic field-target test
 }
 
 // Field target, binary operator alias: `h.f = a + b` where + returns `this`.
+// The operand `a` is borrowed by `+` (not moved), so reading `a.v` AFTER the
+// assignment must still see 11 — this is the direct check of T1084's thesis that
+// T0893's clone gives the field and the operand independent ownership. If the clone
+// regressed and the field aliased `a`, this readback would observe freed/mutated
+// memory (and one side would double-free or leak).
 field_binary_operator() `test {
   a := BB(v: 11);
   b := BB(v: 3);
   h := Holder(f: BB(v: 0));
   h.f = a + b;
   assert(h.f.v == 11, "field binary-operator assignment result");
+  assert(a.v == 11, "operand independently readable after aliasing field assign");
 }
 
 // Field target, method alias: `hd.f = d.dup()` where dup() returns `this`.
+// `dup()` borrows `this`, so `d` stays valid; reading `d.v` after confirms the
+// field's clone is independent of the operand (T1084).
 field_method_return_this() `test {
   d := DD(v: 7);
   hd := DDHolder(f: DD(v: 0));
   hd.f = d.dup();
   assert(hd.f.v == 7, "field method return-this assignment result");
+  assert(d.v == 7, "operand independently readable after aliasing field assign");
 }
 
 // Index target, binary operator alias: `v[0] = a + b`.
@@ -84,6 +101,7 @@ index_binary_operator() `test {
   v := [BB(v: 0)];
   v[0] = a + b;
   assert(v[0].v == 11, "index binary-operator assignment result");
+  assert(a.v == 11, "operand independently readable after aliasing index assign");
 }
 
 // Index target, method alias: `v[0] = d.dup()`.
@@ -92,6 +110,7 @@ index_method_return_this() `test {
   v := [DD(v: 0)];
   v[0] = d.dup();
   assert(v[0].v == 7, "index method return-this assignment result");
+  assert(d.v == 7, "operand independently readable after aliasing index assign");
 }
 
 // Self-alias field (`h.f = h.f + b`): the existing same-pointer drop-old guard in
@@ -138,6 +157,7 @@ generic_operator_field() `test {
   gh := GHolder(f: GB[int](v: 0));
   gh.f = a + b;
   assert(gh.f.v == 17, "generic operator field assignment result");
+  assert(a.v == 17, "generic operand independently readable after field assign");
 }
 
 // Generic operator, index target: `v[0] = a + b` on GB[int].
@@ -147,6 +167,7 @@ generic_operator_index() `test {
   v := [GB[int](v: 0)];
   v[0] = a + b;
   assert(v[0].v == 17, "generic operator index assignment result");
+  assert(a.v == 17, "generic operand independently readable after index assign");
 }
 
 // Generic-function-body field target: the operator-return-this assignment lives

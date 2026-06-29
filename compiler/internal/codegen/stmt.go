@@ -7259,7 +7259,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// (double-free). Mirrors the IdentExpr branch (T0892) and the two
 			// var-decl paths. The self-alias case (`h.f = h.f + b`) is handled by
 			// genMemberAssign's same-pointer drop-old guard (its non-Ident origin
-			// skips the clear); see clearOperandAliasForOwnedStore.
+			// skips the clear); see clearOperandAliasForOwnedStore. T1084: no-op
+			// given T0893's clone in wrapThisReturnValue.
 			c.clearOperandAliasForOwnedStore(s.Value, val)
 		}
 
@@ -7446,7 +7447,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// genVectorIndexAssign's same-pointer drop-old guard (its non-Ident
 			// origin skips the clear); see clearOperandAliasForOwnedStore. The
 			// Vector[string]/Map[K,string] sub-paths dup rather than alias and break
-			// before here.
+			// before here. T1084: no-op given T0893's clone in wrapThisReturnValue.
 			c.clearOperandAliasForOwnedStore(s.Value, val)
 		}
 		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
@@ -8596,8 +8597,9 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	// would otherwise hand back a value struct aliasing the receiver's heap instance —
 	// the result binding and the receiver then share the same mutable allocation, so
 	// one's scope-drop frees memory the other still reads. Clone the instance so the
-	// returned owned value is independent. The caller-side alias-clears (B0250/T0341/
-	// T0347) remain as harmless no-ops once the pointers differ.
+	// returned owned value is independent. The caller-side alias-clears
+	// (B0250/T0341/T0347/T0892/T0899/T0562/T0882/T0958) remain as harmless no-ops once
+	// the pointers differ — T1084 confirms this clone is the sole operative guard.
 	//
 	// Skip when:
 	//   - the return type is a borrow (`T&`/`T~`): the caller expects a reference into
@@ -8796,6 +8798,15 @@ func operatorOriginLeaf(operand ast.Expr) ast.Expr {
 // receiver's drop flag. This prevents double-free when a borrowing method does
 // `return this` — both the receiver and the result would otherwise own the same
 // heap allocation. B0250.
+//
+// T1084: since T0893, wrapThisReturnValue clones the `return this` result, so the
+// result instance pointer never equals the receiver's. The `same` icmp below is
+// therefore always false and this clear is a runtime no-op for every caller
+// (B0250/T0341/T0347/T0892/T0899/T0562/T0882/T0958). It is retained only as a cheap
+// backstop against the double-free *abort* — note it does NOT restore the
+// independent ownership the clone provides (clearing the flag alone leaves the value
+// aliased), so it is not a substitute for the clone. The clone in wrapThisReturnValue
+// is the operative guard; this is dead defense-in-depth kept for clarity over churn.
 func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, retType types.Type) {
 	if retType == nil {
 		return
@@ -8853,6 +8864,10 @@ func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, 
 // it into an owned slot). The downstream maybeClearReceiverDropFlag runtime icmp
 // makes a non-aliasing (fresh-value) call a no-op. T0899; shared by the
 // MemberExpr and IndexExpr branches of genAssignStmt.
+//
+// T1084: with T0893's clone in wrapThisReturnValue the result never aliases the
+// operand, so the downstream icmp is always false and this whole path is a runtime
+// no-op (see maybeClearReceiverDropFlag).
 func (c *Compiler) clearOperandAliasForOwnedStore(rhs ast.Expr, val value.Value) {
 	var aliasOrigin ast.Expr
 	if call, ok := rhs.(*ast.CallExpr); ok {

@@ -451,7 +451,7 @@ func TestResolveEpochAwareHeadFallback(t *testing.T) {
 	}
 }
 
-// TestCheckUpgradeWithDeps drives `promise pkg check-upgrade <E>` end-to-end through
+// TestCheckUpgradeWithDeps drives `promise package check-upgrade <E>` end-to-end through
 // the real compiler binary (so epochCompilerBin resolves to a true compiler): a
 // project whose only dep has a verified E-compatible version reports all-clear; a
 // project whose dep is broken hits the §9.10 gate and exits non-zero.
@@ -479,7 +479,7 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 		proj := t.TempDir()
 		toml := "[module]\nname = \"proj\"\nepoch = \"" + epoch + "\"\n\n[require]\n\"" + depURL + "\" = \"" + depCommit + "\"\n"
 		os.WriteFile(filepath.Join(proj, "promise.toml"), []byte(toml), 0644)
-		cmd := exec.Command(bin, "pkg", "check-upgrade", epoch)
+		cmd := exec.Command(bin, "package", "check-upgrade", epoch)
 		cmd.Dir = proj
 		cmd.Env = append(os.Environ(), "PROMISE_HOME="+home, "GIT_TERMINAL_PROMPT=0")
 		out, err := cmd.CombinedOutput()
@@ -494,6 +494,11 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 		}
 		if !strings.Contains(out, "compatible with epoch "+epoch) {
 			t.Errorf("expected all-compatible report, got:\n%s", out)
+		}
+		// Verify the success message uses the canonical 'promise package update'
+		// (not the deprecated 'promise pkg update') — T1033/T1007.
+		if !strings.Contains(out, "promise package update") {
+			t.Errorf("expected 'promise package update' in upgrade hint, got:\n%s", out)
 		}
 	})
 
@@ -718,6 +723,25 @@ func TestResolveEpochAwareCompatibleHappyPath(t *testing.T) {
 	}
 	if commit != head {
 		t.Errorf("resolved %s, want %s", commit, head)
+	}
+}
+
+// TestCheckUpgradeUsageError asserts that `promise package check-upgrade` with no
+// arguments exits non-zero and prints the canonical usage string (with "package",
+// not the deprecated "pkg"). This specifically covers the changed string from T1007.
+func TestCheckUpgradeUsageError(t *testing.T) {
+	if os.Getenv("TEST_CHECKUP_USAGE") == "1" {
+		runPackageCheckUpgrade(nil) // 0 args triggers usage error
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestCheckUpgradeUsageError")
+	cmd.Env = append(os.Environ(), "TEST_CHECKUP_USAGE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for missing epoch argument")
+	}
+	if !strings.Contains(string(out), "usage: promise package check-upgrade") {
+		t.Errorf("expected 'usage: promise package check-upgrade' in output, got: %s", out)
 	}
 }
 

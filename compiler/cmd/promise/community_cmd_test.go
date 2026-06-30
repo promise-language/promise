@@ -481,7 +481,7 @@ func TestCheckEpochUsage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit for too many args")
 	}
-	if !strings.Contains(out, "usage: promise pkg check-epoch") {
+	if !strings.Contains(out, "usage: promise package check-epoch") {
 		t.Errorf("expected usage text, got: %s", out)
 	}
 }
@@ -496,7 +496,7 @@ func TestBuildIndexUsage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit for missing args")
 	}
-	if !strings.Contains(out, "usage: promise pkg build-index") {
+	if !strings.Contains(out, "usage: promise package build-index") {
 		t.Errorf("expected usage text, got: %s", out)
 	}
 }

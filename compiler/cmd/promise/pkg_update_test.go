@@ -340,6 +340,69 @@ func TestRunLegacyPinAlias(t *testing.T) {
 	}
 }
 
+// TestRunPackageCheckUpgradeDispatch: `promise package check-upgrade next` routes
+// through runPackage's dispatch to runPackageCheckUpgrade and is immediately
+// rejected — covers the case "check-upgrade" branch in runPackage without requiring
+// git or a compiler binary (T1033/T1007).
+func TestRunPackageCheckUpgradeDispatch(t *testing.T) {
+	if os.Getenv("TEST_PKG_CHECKUP_DISPATCH") == "1" {
+		runPackage([]string{"check-upgrade", "next"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunPackageCheckUpgradeDispatch")
+	cmd.Env = append(os.Environ(), "TEST_PKG_CHECKUP_DISPATCH=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for check-upgrade next")
+	}
+	if !strings.Contains(string(out), "toolchain channel") {
+		t.Errorf("expected toolchain-channel rejection via check-upgrade dispatch, got: %s", string(out))
+	}
+}
+
+// TestRunPackageCheckEpochDispatch: `promise package check-epoch 2026.1` in a
+// directory without promise.toml routes through runPackage's dispatch and exits 1
+// with a clear "no promise.toml" error — covers the case "check-epoch" branch in
+// runPackage (T1033/T1007).
+func TestRunPackageCheckEpochDispatch(t *testing.T) {
+	if os.Getenv("TEST_PKG_CHECKEPOCH_DISPATCH") == "1" {
+		dir := t.TempDir()
+		if err := os.Chdir(dir); err != nil {
+			os.Exit(1)
+		}
+		runPackage([]string{"check-epoch", "2026.1"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunPackageCheckEpochDispatch")
+	cmd.Env = append(os.Environ(), "TEST_PKG_CHECKEPOCH_DISPATCH=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for check-epoch in dir without promise.toml")
+	}
+	if !strings.Contains(string(out), "no promise.toml") {
+		t.Errorf("expected 'no promise.toml' error via check-epoch dispatch, got: %s", string(out))
+	}
+}
+
+// TestRunPackageBuildIndexDispatch: `promise package build-index` with wrong arg
+// count routes through runPackage's dispatch and exits 1 with the canonical usage
+// string — covers the case "build-index" branch in runPackage (T1033/T1007).
+func TestRunPackageBuildIndexDispatch(t *testing.T) {
+	if os.Getenv("TEST_PKG_BUILDIDX_DISPATCH") == "1" {
+		runPackage([]string{"build-index"}) // too few positional args → usage error
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunPackageBuildIndexDispatch")
+	cmd.Env = append(os.Environ(), "TEST_PKG_BUILDIDX_DISPATCH=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for build-index with insufficient args")
+	}
+	if !strings.Contains(string(out), "usage: promise package build-index") {
+		t.Errorf("expected build-index usage string via dispatch, got: %s", string(out))
+	}
+}
+
 // TestRunUpdateRejectsEpochArg: `promise update` (toolchain self-update) no
 // longer takes an epoch argument (T0825) — a specific epoch is now
 // `promise use <epoch>`. A stray positional arg is a usage error that points at

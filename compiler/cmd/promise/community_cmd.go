@@ -22,7 +22,7 @@ var nowFunc = time.Now
 // `epoch-<E>` git tag). Exits non-zero on failure.
 func runPackageCheckEpoch(args []string) {
 	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise pkg check-epoch [epoch]")
+		fmt.Fprintln(os.Stderr, "usage: promise package check-epoch [epoch]")
 		fmt.Fprintln(os.Stderr, "  Verifies THIS module (cwd) against an epoch; default is this compiler's epoch.")
 		os.Exit(1)
 	}
@@ -104,7 +104,7 @@ func runPackageBuildIndex(args []string) {
 		}
 	}
 	if len(pos) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: promise pkg build-index <catalog-dir> <epoch> [-report]")
+		fmt.Fprintln(os.Stderr, "usage: promise package build-index <catalog-dir> <epoch> [-report]")
 		fmt.Fprintln(os.Stderr, "  Verifies every module in <catalog-dir>/modules.toml against <epoch>,")
 		fmt.Fprintln(os.Stderr, "  writes index/<epoch>.json, and regenerates matrix.md.")
 		os.Exit(1)

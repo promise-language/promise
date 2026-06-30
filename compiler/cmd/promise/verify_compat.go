@@ -496,7 +496,7 @@ func epochCompilerBin(epoch string) (string, error) {
 // (§9.10). Exits non-zero if any dependency would be blocked.
 func runPackageCheckUpgrade(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise pkg check-upgrade <epoch>")
+		fmt.Fprintln(os.Stderr, "usage: promise package check-upgrade <epoch>")
 		fmt.Fprintln(os.Stderr, "  Reports which dependencies have a verified version compatible with <epoch>.")
 		os.Exit(1)
 	}
@@ -576,5 +576,5 @@ func runPackageCheckUpgrade(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("All %d dependencies have a verified version compatible with epoch %s.\n", len(deps), targetEpoch)
-	fmt.Printf("To upgrade: set [module] epoch = %q, then run 'promise pkg update'.\n", targetEpoch)
+	fmt.Printf("To upgrade: set [module] epoch = %q, then run 'promise package update'.\n", targetEpoch)
 }

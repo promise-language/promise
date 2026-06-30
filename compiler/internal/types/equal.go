@@ -579,6 +579,13 @@ func identicalWithSelf(x, y Type, self, replacement *Named) bool {
 		if xn, ok := x.(*Named); ok && xn == replacement {
 			return true
 		}
+		// Generic self-reference: inside a generic type T[P...]'s body, a
+		// Self-typed interface param (e.g. Equal's `==(Self)`) is written as
+		// T[P...] — an Instance over T's own type params. Treat that
+		// self-instance as equal to the bare replacement Named. (T1163)
+		if xi, ok := x.(*Instance); ok && isSelfInstance(replacement, xi) {
+			return true
+		}
 	}
 	return Identical(x, y)
 }

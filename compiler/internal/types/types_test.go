@@ -1261,6 +1261,84 @@ func TestImplements(t *testing.T) {
 	})
 }
 
+// TestImplementsGenericSelfParam covers T1163: a generic type whose abstract-
+// interface method takes a Self-typed param writes that param as a self-instance
+// (T[P...] over its own type params), which must still match the interface's
+// Self. Equal's `==(Self other)` is the canonical case.
+func TestImplementsGenericSelfParam(t *testing.T) {
+	// Structural interface Equal { ==(Self other) bool } — the abstract method's
+	// param type is the interface Named itself (Self).
+	equal := makeNamed("Equal")
+	equal.SetStructural(true)
+	eqSig := NewSignature(nil, []*Param{NewParam("other", equal, RefNone)}, TypBool, false)
+	equal.AddMethod(NewMethod(Pos{}, "==", eqSig, PlaceInstance, true, false))
+
+	// Generic GPair[T] with `==(GPair[T] other) bool` — the param is the
+	// self-instance GPair[T] over GPair's own type param.
+	gT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	gPair := NewNamed(NewTypeName(Pos{}, "GPair", nil), []*TypeParam{gT})
+	gPairSelf := NewInstance(gPair, []Type{gT})
+	pairEqSig := NewSignature(nil, []*Param{NewParam("other", gPairSelf, RefNone)}, TypBool, false)
+	gPair.AddMethod(NewMethod(Pos{}, "==", pairEqSig, PlaceInstance, false, false))
+
+	t.Run("generic_instance_satisfies_equal", func(t *testing.T) {
+		assertTrue(t, Implements(NewInstance(gPair, []Type{TypInt}), equal),
+			"GPair[int] with ==(GPair[T]) should satisfy Equal")
+	})
+
+	t.Run("non_self_instance_does_not_satisfy", func(t *testing.T) {
+		// GBad[T] with a hardcoded ==(GBad[int]) is not genuinely Self-comparable:
+		// the param is NOT a self-instance (arg is int, not the type param), so it
+		// must not satisfy Equal.
+		bT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		gBad := NewNamed(NewTypeName(Pos{}, "GBad", nil), []*TypeParam{bT})
+		badParam := NewInstance(gBad, []Type{TypInt}) // hardcoded GBad[int], not GBad[T]
+		badSig := NewSignature(nil, []*Param{NewParam("other", badParam, RefNone)}, TypBool, false)
+		gBad.AddMethod(NewMethod(Pos{}, "==", badSig, PlaceInstance, false, false))
+		assertFalse(t, Implements(NewInstance(gBad, []Type{TypString}), equal),
+			"GBad[string] with hardcoded ==(GBad[int]) should not satisfy Equal")
+	})
+
+	// Control: a NON-generic type with `==(Self)` must still satisfy Equal via the
+	// bare-Named branch (the param is the plain Named, not a self-instance). This
+	// is the sibling path to the generic fix and guards against the fix regressing
+	// the original non-generic case.
+	t.Run("non_generic_type_satisfies_equal", func(t *testing.T) {
+		point := makeNamed("Point")
+		ptEqSig := NewSignature(nil, []*Param{NewParam("other", point, RefNone)}, TypBool, false)
+		point.AddMethod(NewMethod(Pos{}, "==", ptEqSig, PlaceInstance, false, false))
+		assertTrue(t, Implements(point, equal),
+			"non-generic Point with ==(Point) should satisfy Equal")
+	})
+
+	// Multi-type-param self-instance: GTriple[A, B] with `==(GTriple[A, B])` —
+	// exercises isSelfInstance's per-param match across more than one parameter,
+	// in order.
+	t.Run("multi_param_self_instance_satisfies", func(t *testing.T) {
+		aP := NewTypeParam(NewTypeName(Pos{}, "A", nil), nil, 0)
+		bP := NewTypeParam(NewTypeName(Pos{}, "B", nil), nil, 1)
+		gTriple := NewNamed(NewTypeName(Pos{}, "GTriple", nil), []*TypeParam{aP, bP})
+		tripleSelf := NewInstance(gTriple, []Type{aP, bP})
+		tripleSig := NewSignature(nil, []*Param{NewParam("other", tripleSelf, RefNone)}, TypBool, false)
+		gTriple.AddMethod(NewMethod(Pos{}, "==", tripleSig, PlaceInstance, false, false))
+		assertTrue(t, Implements(NewInstance(gTriple, []Type{TypInt, TypString}), equal),
+			"GTriple[int, string] with ==(GTriple[A, B]) should satisfy Equal")
+	})
+
+	// Swapped-order params: GTriple[A, B] with `==(GTriple[B, A])` is NOT a
+	// self-instance (param order differs), so it must not satisfy Equal.
+	t.Run("swapped_param_order_does_not_satisfy", func(t *testing.T) {
+		aP := NewTypeParam(NewTypeName(Pos{}, "A", nil), nil, 0)
+		bP := NewTypeParam(NewTypeName(Pos{}, "B", nil), nil, 1)
+		gSwap := NewNamed(NewTypeName(Pos{}, "GSwap", nil), []*TypeParam{aP, bP})
+		swapParam := NewInstance(gSwap, []Type{bP, aP}) // GSwap[B, A], not GSwap[A, B]
+		swapSig := NewSignature(nil, []*Param{NewParam("other", swapParam, RefNone)}, TypBool, false)
+		gSwap.AddMethod(NewMethod(Pos{}, "==", swapSig, PlaceInstance, false, false))
+		assertFalse(t, Implements(NewInstance(gSwap, []Type{TypInt, TypString}), equal),
+			"GSwap[int, string] with ==(GSwap[B, A]) should not satisfy Equal")
+	})
+}
+
 // Format
 
 func TestFormat(t *testing.T) {

@@ -1,0 +1,90 @@
+// T1163: A generic type that defines `==(Self other)` must satisfy the `Equal`
+// structural constraint when its instance is checked against a `[T: Equal]`
+// bound. Before the fix, the self-typed param `GPair[T]` (an Instance over the
+// type's own type param) was not matched against the interface's `Self`, so a
+// generic type's `==` did not count toward `Equal`. The sibling `Ordered`
+// (`<(Self)`) had the same gap. This blocked using generic value/heap types as
+// `Set[T]` / `map[K, _]` keys (both bound `T: Hashable + Equal`).
+// --- Generic heap type with `==` satisfies Equal ---
+type GPair[T: Equal] {
+  T a;
+  T b;
+  == (GPair[T] other) bool => this.a == other.a && this.b == other.b;
+}
+
+check[U: Equal](U x) bool => x == x;
+
+test_generic_heap_equal_inferred() `test {
+  GPair[int] p = GPair(a: 1, b: 2);
+  // Inferred type arg: check(GPair[int]).
+  assert(check(p), "generic heap type satisfies Equal (inferred)");
+}
+
+test_generic_heap_equal_explicit() `test {
+  GPair[int] p = GPair(a: 1, b: 2);
+  // Explicit type arg exercises the validateConstraints path.
+  assert(check[GPair[int]](p), "generic heap type satisfies Equal (explicit)");
+}
+
+// --- Generic value type with `==` satisfies Equal ---
+
+type GVPair[T: Equal] {
+  T a `value;
+  T b `value;
+  == (GVPair[T] other) bool => this.a == other.a && this.b == other.b;
+}
+
+test_generic_value_equal() `test {
+  GVPair[int] p = GVPair(a: 3, b: 4);
+  assert(check(p), "generic value type satisfies Equal");
+}
+
+// --- Generic type with `<` satisfies Ordered ---
+
+type GKey[T: Ordered] {
+  T v;
+  == (GKey[T] other) bool => this.v == other.v;
+  < (GKey[T] other) bool => this.v < other.v;
+}
+
+less[U: Ordered](U x, U y) bool => x < y;
+
+test_generic_ordered() `test {
+  GKey[int] a = GKey(v: 1);
+  GKey[int] b = GKey(v: 2);
+  assert(less(a, b), "generic type satisfies Ordered");
+  assert(!less(b, a), "Ordered comparison is correct");
+}
+
+// --- Generic Hashable + Equal type as Set / map key ---
+
+type GId[T: Hashable + Equal] {
+  T a;
+  T b;
+  == (GId[T] other) bool => this.a == other.a && this.b == other.b;
+  get hash int => this.a.hash * 31 + this.b.hash;
+}
+
+test_generic_key_in_set() `test {
+  Set[GId[int]] s = Set[GId[int]]();
+  s.add(GId(a: 1, b: 2));
+  s.add(GId(a: 1, b: 2)); // duplicate — no-op
+  s.add(GId(a: 3, b: 4));
+  assert(s.len == 2, "generic Hashable+Equal type as Set key (dedup)");
+  assert(s.contains(GId(a: 1, b: 2)), "Set contains generic key");
+  assert(!s.contains(GId(a: 9, b: 9)), "Set reports absent generic key");
+}
+
+test_generic_key_in_map() `test {
+  map[GId[int], string] m = {:};
+  m[GId(a: 1, b: 2)] = "first";
+  m[GId(a: 3, b: 4)] = "second";
+  m[GId(a: 1, b: 2)] = "updated"; // overwrite existing key
+  assert(m.len == 2, "generic Hashable+Equal type as map key");
+  GId[int] k = GId(a: 1, b: 2);
+  if val := m[k] {
+    assert(val == "updated", "map value overwritten via generic key");
+  } else {
+    assert(false, "map should contain generic key");
+  }
+}

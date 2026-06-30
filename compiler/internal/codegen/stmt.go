@@ -4733,6 +4733,54 @@ func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Ty
 	c.block = loopDone
 }
 
+// emitVectorClosureNullLoop iterates a cloned vector's bare closure elements
+// (Vector[() -> int]) and nulls each {fn, env} fat-pointer slot. T1045: a closure
+// env CANNOT be deep-cloned (the captured frame is opaque), and dupVector's shallow
+// memcpy would alias the source's env between two now-droppable owners →
+// double-free at drop (emitVectorElementDropLoop frees each element's env). Nulling
+// the cloned slot keeps the source as sole owner (dropped exactly once); the clone
+// holds an empty (uncallable) closure. Symmetric with emitVariantFieldDup's
+// Signature case for struct-field / enum-variant null-dup.
+func (c *Compiler) emitVectorClosureNullLoop(vecPtr value.Value, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+
+	// Load vector length (masked — clears static flag bit 63)
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	length := loadVectorLen(c.block, headerPtr)
+
+	// Data starts at offset vectorHeaderSize (16 bytes after buffer start)
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+
+	// Loop: for i = 0; i < len; i++ { elements[i] = {null, null}; }
+	loopHead := c.newBlock("vecclonenull.head")
+	loopBody := c.newBlock("vecclonenull.body")
+	loopDone := c.newBlock("vecclonenull.done")
+
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	idxAlloca.SetName(c.uniqueLocalName("vecclonenull.idx"))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, length)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx2)
+	c.block.NewStore(constant.NewZeroInitializer(elemLLVM), elemPtr)
+
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopDone
+}
+
 // emitVectorElementCloneLoopNullable runs emitVectorElementCloneLoop only when
 // vecPtr is non-null. T0939: an Optional[Vector] field read on the `none` path
 // yields a null inner buffer (field 1 of a zero-initialized optional); the dup of
@@ -4771,6 +4819,18 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	tup, isTuple := elemType.(*types.Tuple)
 	isDupableTuple := isTuple && c.tupleNeedsDrop(elemType)
 	if named == nil {
+		// T1045: a direct/bare closure element (Vector[() -> int]) is a
+		// *types.Signature — extractNamed/extractEnum are both nil, so without
+		// this branch the loop early-returns with dupVector's shallow memcpy
+		// intact, aliasing each closure's heap env across both vectors →
+		// double-free at drop (emitVectorElementDropLoop frees each env).
+		// Symmetric with emitVariantFieldDup's Signature case (struct-field /
+		// enum-variant null-dup): null each cloned {fn,env} slot so the source
+		// keeps sole ownership of the env, the clone holds an empty closure.
+		if _, isSig := elemType.(*types.Signature); isSig {
+			c.emitVectorClosureNullLoop(vecPtr, elemType)
+			return
+		}
 		if enum := extractEnum(elemType); enum != nil {
 			_, isCloneableEnum = c.funcs[c.enumCloneFuncName(enum, elemType)]
 			if !isCloneableEnum {

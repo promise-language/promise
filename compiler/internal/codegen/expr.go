@@ -5964,6 +5964,19 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 		return nil
 	}
 
+	// T1045: a bare closure element (Vector[() -> int]) is a *types.Signature —
+	// extractNamed/extractEnum are both nil, so without this it falls through to
+	// the `return nil` below as if it were a primitive/Copy. But the vector's
+	// element-drop loop frees each pushed closure's heap env, so a shallow copy
+	// (e.g. result.push(this[i]) in Vector.[:]) aliases the env across both
+	// vectors → double-free at drop. A closure env CANNOT be deep-cloned (the
+	// captured frame is opaque); null the {fn,env} fat pointer so the source keeps
+	// sole ownership and the clone holds an empty closure. Symmetric with
+	// emitVariantFieldDup's Signature case and emitVectorClosureNullLoop.
+	if _, isSig := resolvedElem.(*types.Signature); isSig {
+		return constant.NewZeroInitializer(argVal.Type())
+	}
+
 	named := extractNamed(resolvedElem)
 
 	// Check for droppable enum types (B0244/B0290 pattern)

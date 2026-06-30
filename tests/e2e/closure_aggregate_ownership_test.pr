@@ -433,6 +433,80 @@ slice_vector_of_struct_with_closure_is_memory_safe() `test {
   assert(i == 30, "");
 }
 
+// --- Implicit dup of a Vector of *bare* closures (T1045) ---
+//
+// A direct Vector[() -> int] element is a bare closure fat pointer {fn, env}.
+// emitVectorElementDropLoop frees each element's heap env, but on master the
+// element-clone loop (reached by a vector slice v[:]) early-returned with
+// dupVector's shallow memcpy intact — aliasing each env across both vectors →
+// double-free at drop. T1045 nulls the cloned slot in emitVectorElementCloneLoop
+// (symmetric with the struct/enum null-dup) so the source keeps sole ownership.
+slice_vector_of_bare_closure_is_memory_safe() `test {
+  i := 0;
+  while i < 30 {
+    s := "shared" + " env";
+    v := Vector[() -> int]();
+    v.push(move || -> s.len);
+    v2 := v[:]; // implicit dup: cloned bare-closure slot is nulled — no shared env
+    assert(v.len == 1, "");
+    assert(v2.len == 1, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Implicit dup of a *nested* Vector of bare closures (T1045) ---
+//
+// Slicing Vector[Vector[() -> int]] pushes each inner vector (an IndexExpr read)
+// through maybeDupPushElement's AsVector branch → dupVector + the codegen
+// element-clone loop. With Signature inner elements that loop is exactly
+// emitVectorElementCloneLoop's new bare-closure branch (distinct from the
+// maybeDupPushElement Signature branch the flat case above exercises): without it
+// the inner closures' envs would be shallow-aliased across both outer vectors →
+// double-free at drop. Guards that this nested implicit dup neither crashes nor
+// leaks (each inner env is dropped exactly once, by the source).
+slice_nested_vector_of_bare_closure_is_memory_safe() `test {
+  i := 0;
+  while i < 30 {
+    s := "shared" + " env";
+    inner := Vector[() -> int]();
+    inner.push(move || -> s.len);
+    vv := Vector[Vector[() -> int]]();
+    vv.push(move inner);
+    vv2 := vv[:]; // implicit dup: inner closures cloned via emitVectorElementCloneLoop (nulled)
+    assert(vv.len == 1, "");
+    assert(vv2.len == 1, "");
+    assert(vv[0].len == 1, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Index-read dup of an inner bare-closure vector (T1045) ---
+//
+// `got := vv[0]` reads an inner Vector[() -> int] out of the outer vector by
+// value. That index-read dup is a *distinct codegen call site* from the slice
+// path above, but it lowers through the same emitVectorElementCloneLoop →
+// emitVectorClosureNullLoop branch (verified: the IR emits the closure-null
+// loop). Without the T1045 null-dup the inner closure's env would be shallow-
+// aliased between `got` and `vv[0]` → double-free at drop. Guards that this
+// read-out entry point stays memory-safe even if the slice path were to change.
+index_read_inner_bare_closure_vector_is_memory_safe() `test {
+  i := 0;
+  while i < 30 {
+    s := "shared" + " env";
+    inner := Vector[() -> int]();
+    inner.push(move || -> s.len);
+    vv := Vector[Vector[() -> int]]();
+    vv.push(move inner);
+    got := vv[0]; // index-read dup: inner closures cloned + nulled
+    assert(got.len == 1, "");
+    assert(vv[0].len == 1, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
 // --- No-capture invoke (null env — has nothing to double-free) ---
 
 invoke_no_capture_from_vector() `test {

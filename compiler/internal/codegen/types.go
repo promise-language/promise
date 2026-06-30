@@ -295,20 +295,20 @@ func userValueType() *irtypes.StructType {
 // given the original Promise type. User-defined Named types use {i8*, i8*} (value
 // struct) to match the representation produced by genExpr. Enum types use their
 // internal representation (i32 for fieldless, {i32, [N x i8]} for data enums).
-func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) irtypes.Type {
+func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, allLayouts map[*types.Named]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) irtypes.Type {
 	// Handle Tuple types — recurse so heap user / optional / enum elements get
 	// their proper layout (value struct {i8*, i8*}, not bare i8*). (T0442)
 	if tup, ok := typ.(*types.Tuple); ok {
 		fields := make([]irtypes.Type, len(tup.Elems()))
 		for i, elem := range tup.Elems() {
-			fields[i] = llvmTypeForEnumFieldFromPromise(elem, ptrSize, enumLayouts, monoEnumLayouts)
+			fields[i] = llvmTypeForEnumFieldFromPromise(elem, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts)
 		}
 		return irtypes.NewStruct(fields...)
 	}
 	// Handle Optional types — recurse for inner type so Optional<UserType>
 	// gets {i1, {i8*, i8*}} instead of {i1, i8*}. (T0442)
 	if opt, ok := typ.(*types.Optional); ok {
-		inner := llvmTypeForEnumFieldFromPromise(opt.Elem(), ptrSize, enumLayouts, monoEnumLayouts)
+		inner := llvmTypeForEnumFieldFromPromise(opt.Elem(), ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts)
 		if _, isVoid := inner.(*irtypes.VoidType); isVoid {
 			return irtypes.I1
 		}
@@ -316,12 +316,24 @@ func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts ma
 	}
 	// Handle Array types — recurse for element type. (T0442)
 	if arr, ok := typ.(*types.Array); ok {
-		elem := llvmTypeForEnumFieldFromPromise(arr.Elem(), ptrSize, enumLayouts, monoEnumLayouts)
+		elem := llvmTypeForEnumFieldFromPromise(arr.Elem(), ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts)
 		return irtypes.NewArray(uint64(arr.Size()), elem)
 	}
 	// Handle enum types — enums used as fields in other enum variants
-	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
+	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts); lt != nil {
 		return lt
+	}
+	// Generic value-type instances — use the mono layout's embedded value struct
+	// { i8* _vtable, field1, ... } so the variant data slot matches what the
+	// value-type constructor/destructure produce, not the generic {i8*,i8*}. (T1016)
+	if inst, ok := typ.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && origin.IsValueType() {
+			if monoLayouts != nil {
+				if layout, ok := monoLayouts[monoName(inst)]; ok {
+					return layout.Value.LLVMType
+				}
+			}
+		}
 	}
 	// User-defined Named types (not primitives, string, void) → value struct
 	// Native container/handle types (Vector, Channel, Task) are opaque i8* pointers.
@@ -329,6 +341,15 @@ func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts ma
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
 			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc &&
 			n != types.TypWeak && n != types.TypMutex && n != types.TypMutexGuard {
+			// Pure value types embed their fields directly in the value struct
+			// rather than using the boxed {i8*,i8*} layout. (T1016)
+			if n.IsValueType() {
+				if allLayouts != nil {
+					if layout, ok := allLayouts[n]; ok {
+						return layout.Value.LLVMType
+					}
+				}
+			}
 			return userValueType() // {i8*, i8*}
 		}
 	}
@@ -341,7 +362,7 @@ func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts ma
 // (*types.Instance wrapping *types.Enum).
 // When existing layouts are available, returns the named struct type from the layout
 // to ensure LLVM type identity matches across the IR.
-func enumInternalTypeForField(typ types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) irtypes.Type {
+func enumInternalTypeForField(typ types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, allLayouts map[*types.Named]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) irtypes.Type {
 	switch t := typ.(type) {
 	case *types.Enum:
 		// Look up existing layout first (named struct types must match)
@@ -351,7 +372,7 @@ func enumInternalTypeForField(typ types.Type, ptrSize int, enumLayouts map[*type
 			}
 		}
 		// Fall back to computing from definition
-		return computeEnumInternalType(t, nil, ptrSize, enumLayouts, monoEnumLayouts)
+		return computeEnumInternalType(t, nil, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts)
 	case *types.Instance:
 		e, ok := t.Origin().(*types.Enum)
 		if !ok {
@@ -365,7 +386,7 @@ func enumInternalTypeForField(typ types.Type, ptrSize int, enumLayouts map[*type
 			}
 		}
 		subst := types.BuildSubstMap(e.TypeParams(), t.TypeArgs())
-		return computeEnumInternalType(e, subst, ptrSize, enumLayouts, monoEnumLayouts)
+		return computeEnumInternalType(e, subst, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts)
 	default:
 		return nil
 	}
@@ -373,7 +394,7 @@ func enumInternalTypeForField(typ types.Type, ptrSize int, enumLayouts map[*type
 
 // computeEnumInternalType computes the LLVM internal representation for an enum
 // from its definition. Used as fallback when no pre-computed layout is available.
-func computeEnumInternalType(enum *types.Enum, subst map[*types.TypeParam]types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) irtypes.Type {
+func computeEnumInternalType(enum *types.Enum, subst map[*types.TypeParam]types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, allLayouts map[*types.Named]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) irtypes.Type {
 	maxDataSize := 0
 	for _, v := range enum.Variants() {
 		if v.NumFields() > 0 {
@@ -383,7 +404,7 @@ func computeEnumInternalType(enum *types.Enum, subst map[*types.TypeParam]types.
 				if subst != nil {
 					ft = types.Substitute(ft, subst)
 				}
-				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(ft, ptrSize, enumLayouts, monoEnumLayouts))
+				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(ft, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts))
 			}
 			// Compute data size from the struct type to account for alignment padding
 			ds := llvmTypeSizeWithPtr(irtypes.NewStruct(fieldTypes...), ptrSize)
@@ -432,7 +453,7 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 		return irtypes.NewArray(uint64(arr.Size()), elem)
 	}
 	// Handle enum types — enums used as fields in user types
-	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
+	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts); lt != nil {
 		return lt
 	}
 	// Handle generic value-type instances — use the mono layout's value struct so
@@ -549,7 +570,7 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		// Fallback: compute from definition. Handles cross-module enums whose
 		// layout hasn't been computed yet (e.g. JsonValue from json module used
 		// as Map value type during std module compilation).
-		return computeEnumInternalType(enum, nil, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts)
+		return computeEnumInternalType(enum, nil, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.layouts, c.monoLayouts)
 	}
 	// User-defined Named types → value struct { vtable, instance }
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {

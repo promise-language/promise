@@ -1,0 +1,140 @@
+// T1016: A pure `value type that satisfies Hashable + Equal can be used as a
+// Set[T] / map[T, _] key, and as an enum variant field, without crashing codegen.
+// Containers lower their keys into a generic Slot enum whose variant data field
+// is the value type; the variant data slot must use the embedded value struct
+// (%promise_T_v) rather than the boxed {i8*,i8*} layout.
+type Money {
+  int cents `value;
+  == (Money other) bool => this.cents == other.cents;
+  get hash int => this.cents;
+}
+
+// Multi-field value type — wider than the 16-byte {i8*,i8*} boxed layout, so it
+// also exercises the variant data-array sizing.
+type Point3 {
+  int x `value;
+  int y `value;
+  int z `value;
+  == (Point3 other) bool => this.x == other.x && this.y == other.y && this.z == other.z;
+  get hash int => this.x * 31 + this.y * 7 + this.z;
+}
+
+enum Slot {
+  None,
+  Filled(Money m),
+}
+
+value_type_set_key() `test {
+  Set[Money] ms = Set[Money]();
+  ms.add(Money(cents: 10));
+  ms.add(Money(cents: 20));
+  ms.add(Money(cents: 10)); // duplicate — no-op
+  assert(ms.contains(Money(cents: 10)), "value money set key present");
+  assert(ms.contains(Money(cents: 20)), "second key present");
+  assert(!ms.contains(Money(cents: 99)), "absent key");
+  assert(ms.len == 2, "duplicate not double-counted");
+}
+
+value_type_map_key() `test {
+  map[Money, int] m = map[Money, int]();
+  m[Money(cents: 5)] = 100;
+  m[Money(cents: 6)] = 200;
+  m[Money(cents: 5)] = 150; // overwrite
+  assert(m[Money(cents: 5)]! == 150, "money map overwrite");
+  assert(m[Money(cents: 6)]! == 200, "money map lookup 2");
+  assert(!m.contains(Money(cents: 7)), "absent money map key");
+}
+
+multi_field_value_type_set_key() `test {
+  Set[Point3] ps = Set[Point3]();
+  ps.add(Point3(x: 1, y: 2, z: 3));
+  ps.add(Point3(x: 4, y: 5, z: 6));
+  assert(ps.contains(Point3(x: 1, y: 2, z: 3)), "point3 set key present");
+  assert(ps.contains(Point3(x: 4, y: 5, z: 6)), "second point3 present");
+  assert(!ps.contains(Point3(x: 9, y: 9, z: 9)), "absent point3");
+}
+
+non_generic_enum_value_field() `test {
+  Slot s = Slot.Filled(Money(cents: 42));
+  match s {
+    Filled(m) => assert(m.cents == 42, "enum value field payload"),
+    None => assert(false, "unexpected None"),
+  }
+}
+
+// Generic value type — its mono instance (Pair[int]) is what gets lowered into
+// the enum data field. Exercises the *types.Instance branch of
+// ensureValueTypeLayout / llvmTypeForEnumFieldFromPromise (the value-type origin
+// is generic, so the embedded value struct comes from the mono layout, not the
+// non-generic layouts map). Note: a generic value type cannot currently be used
+// as a Set/map *key* because a generic type does not satisfy the `Equal`
+// constraint (Self-typed-param structural satisfaction gap — tracked separately,
+// orthogonal to this codegen fix), so we exercise the same layout path via a
+// generic enum variant field instead.
+type Pair[T: Hashable + Equal] {
+  T a `value;
+  T b `value;
+  == (Pair[T] other) bool => this.a == other.a && this.b == other.b;
+  get hash int => this.a.hash * 31 + this.b.hash;
+}
+
+// A user-defined generic enum holding a generic value type directly (not via a
+// container). Confirms the variant data slot embeds Pair[int]'s value struct.
+enum Box[V] {
+  Empty,
+  Full(V val),
+}
+
+generic_value_type_in_generic_enum() `test {
+  Box[Pair[int]] b = Box[Pair[int]].Full(Pair(a: 5, b: 6));
+  match b {
+    Full(p) => assert(p.a == 5 && p.b == 6, "generic enum generic value payload"),
+    Empty => assert(false, "unexpected Empty"),
+  }
+}
+
+// Nested value type: a value type whose field is itself a value type. Exercises
+// the AllFields recursion in ensureValueTypeLayout — the inner Money layout must
+// be computed before the outer Wallet layout when Wallet is used as a Set key.
+type Wallet {
+  Money primary `value;
+  int id `value;
+  == (Wallet other) bool => this.primary == other.primary && this.id == other.id;
+  get hash int => this.primary.hash * 17 + this.id;
+}
+
+nested_value_type_set_key() `test {
+  Set[Wallet] ws = Set[Wallet]();
+  ws.add(Wallet(primary: Money(cents: 100), id: 1));
+  ws.add(Wallet(primary: Money(cents: 200), id: 2));
+  assert(ws.contains(Wallet(primary: Money(cents: 100), id: 1)), "nested value set key present");
+  assert(!ws.contains(Wallet(primary: Money(cents: 100), id: 9)), "absent nested value key");
+  assert(ws.len == 2, "nested value set size");
+}
+
+// Optional value-type enum field — exercises the *types.Optional recursion
+// branch of ensureValueTypeLayout and llvmTypeForEnumFieldFromPromise. The
+// variant data slot must be { i1, %promise_Money_v }, not { i1, {i8*,i8*} }.
+enum OptSlot[K] {
+  Empty,
+  Maybe(K? key),
+}
+
+optional_value_type_enum_field() `test {
+  OptSlot[Money] present = OptSlot[Money].Maybe(Money(cents: 7));
+  match present {
+    Maybe(k) => assert(k!.cents == 7, "optional value enum field present"),
+    Empty => assert(false, "unexpected Empty (present)"),
+  }
+  OptSlot[Money] absent = OptSlot[Money].Maybe(none);
+  match absent {
+    Maybe(k) => {
+      if m := k {
+        assert(false, "expected none, got value");
+      } else {
+        assert(true, "optional value enum field none");
+      }
+    },
+    Empty => assert(false, "unexpected Empty (absent)"),
+  }
+}

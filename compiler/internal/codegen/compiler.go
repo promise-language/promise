@@ -7012,6 +7012,63 @@ func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingI
 	}
 }
 
+// ensureValueTypeLayout computes the layout for a value type (and its value-type
+// field deps) on demand, registering it in c.layouts/c.monoLayouts if absent.
+// Enum variant data fields of value type need the embedded value struct, but
+// enum layouts are built before the unified type-layout pass (both the
+// non-generic enum pass and the mono-enum pass run before value-type layouts
+// are computed). Value types only ever contain value/copy fields and no parents
+// (enforced by sema), so the recursion terminates. Idempotent presence-guards
+// prevent duplicate module.NewTypeDef; the later computeAllTypeLayouts pass skips
+// anything already present. (T1016)
+func (c *Compiler) ensureValueTypeLayout(typ types.Type) {
+	switch t := typ.(type) {
+	case *types.Optional:
+		c.ensureValueTypeLayout(t.Elem())
+		return
+	case *types.Array:
+		c.ensureValueTypeLayout(t.Elem())
+		return
+	case *types.Tuple:
+		for _, elem := range t.Elems() {
+			c.ensureValueTypeLayout(elem)
+		}
+		return
+	case *types.MutRef:
+		c.ensureValueTypeLayout(t.Elem())
+		return
+	case *types.SharedRef:
+		c.ensureValueTypeLayout(t.Elem())
+		return
+	case *types.Instance:
+		origin, ok := t.Origin().(*types.Named)
+		if !ok || !origin.IsValueType() {
+			return
+		}
+		name := monoName(t)
+		if _, exists := c.monoLayouts[name]; exists {
+			return
+		}
+		subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+		// Recurse into field types first so nested value types are laid out.
+		for _, f := range origin.AllFields() {
+			c.ensureValueTypeLayout(types.Substitute(f.Type(), subst))
+		}
+		c.monoLayouts[name] = computeMonoValueTypeLayout(c.module, origin, name, subst, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+		return
+	}
+	if n := extractNamed(typ); n != nil && n.IsValueType() && len(n.TypeParams()) == 0 {
+		if _, exists := c.layouts[n]; exists {
+			return
+		}
+		// Recurse into field types first so nested value types are laid out.
+		for _, f := range n.AllFields() {
+			c.ensureValueTypeLayout(f.Type())
+		}
+		c.layouts[n] = computeValueTypeLayout(c.module, n, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+	}
+}
+
 // declareTypeMethods creates LLVM function stubs for all methods with bodies (pass 1).
 // Generic types are skipped — their methods are handled by declareMonoMethods.
 func (c *Compiler) declareTypeMethods(file *ast.File) {
@@ -10282,9 +10339,12 @@ func (c *Compiler) computeEnumLayouts(file *ast.File) {
 						compute(depName)
 					}
 				}
+				// Value-type variant fields need their embedded value-struct
+				// layout computed before this enum's data layout. (T1016)
+				c.ensureValueTypeLayout(f.Type())
 			}
 		}
-		c.enumLayouts[enum] = computeEnumLayout(c.module, enum, c.ptrSize(), c.enumLayouts)
+		c.enumLayouts[enum] = computeEnumLayout(c.module, enum, c.ptrSize(), c.enumLayouts, c.layouts, c.monoLayouts)
 		computed[name] = true
 	}
 	for _, name := range names {

@@ -1514,7 +1514,7 @@ func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name stri
 }
 
 // computeMonoEnumLayout computes a TypeDeclLayout for a monomorphic enum instance.
-func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, subst map[*types.TypeParam]types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
+func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, subst map[*types.TypeParam]types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, allLayouts map[*types.Named]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
 	variantTag := map[string]int{}
 	variantDataTypes := map[string]*irtypes.StructType{}
 	maxDataSize := 0
@@ -1528,7 +1528,7 @@ func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, sub
 				ft := types.Substitute(f.Type(), subst)
 				// Use llvmTypeForEnumFieldFromPromise so user-defined types
 				// use {i8*, i8*} (value struct) not bare i8* (instance ptr).
-				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(ft, ptrSize, enumLayouts, monoEnumLayouts))
+				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(ft, ptrSize, enumLayouts, monoEnumLayouts, allLayouts, monoLayouts))
 			}
 			dataType := irtypes.NewStruct(fieldTypes...)
 			variantDataTypes[v.Name()] = dataType
@@ -1671,9 +1671,12 @@ func (c *Compiler) computeMonoEnumLayoutsOnly(instances []*types.Instance) {
 						}
 					}
 				}
+				// Value-type variant fields need their embedded value-struct
+				// layout computed before this enum's data layout. (T1016)
+				c.ensureValueTypeLayout(ft)
 			}
 		}
-		c.monoEnumLayouts[name] = computeMonoEnumLayout(c.module, origin, name, subst, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts)
+		c.monoEnumLayouts[name] = computeMonoEnumLayout(c.module, origin, name, subst, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.layouts, c.monoLayouts)
 		computedEnums[name] = true
 	}
 	for _, name := range enumNames {

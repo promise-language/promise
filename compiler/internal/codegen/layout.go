@@ -660,7 +660,7 @@ func externCName(fd *ast.FuncDecl) string {
 // computeEnumLayout creates a TypeDeclLayout for an enum type.
 // Enums are value types: data lives in the value struct (tag + union data),
 // not heap-allocated like user types. The instance struct is empty.
-func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout) *TypeDeclLayout {
+func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, allLayouts map[*types.Named]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
 	name := enum.Obj().Name()
 
 	// Compute variant tags and per-variant data struct types
@@ -676,7 +676,7 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int, enumLay
 			for _, f := range v.Fields() {
 				// Use llvmTypeForEnumFieldFromPromise so user-defined types
 				// use {i8*, i8*} (value struct) not bare i8* (instance ptr).
-				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(f.Type(), ptrSize, enumLayouts, nil))
+				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(f.Type(), ptrSize, enumLayouts, nil, allLayouts, monoLayouts))
 			}
 			dataType := irtypes.NewStruct(fieldTypes...)
 			variantDataTypes[v.Name()] = dataType

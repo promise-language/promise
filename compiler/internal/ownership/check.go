@@ -88,6 +88,30 @@ type Checker struct {
 	// while the handle is awaited/dropped in scope and unsound only if the handle
 	// escapes, which is what this map tracks.
 	goHandleBorrowedLocal map[string]string
+
+	// T1035: the generic function / method currently being checked (exactly one
+	// is non-nil inside a body, both nil at file scope). Used to key deferred
+	// for-in-drain requirements (funcDrainReqs/methodDrainReqs) so they can be
+	// validated per concrete instantiation via the existing GenericCallEdges.
+	curFuncObj   *types.Func
+	curMethodObj *types.Method
+
+	// forInTypeParamAliasBindings maps a for-in loop binding name to the bare
+	// element *types.TypeParam it aliases. A bare-TypeParam element can't be
+	// classified copy/non-copy in the generic body (the ownership pass checks
+	// each body once with `T` unbound), so moving such a binding out is NOT
+	// rejected inline — instead a drainReq is recorded and validated at each
+	// concrete call site. Reset per-function with the same save/restore
+	// discipline as forInAliasBindings. (T1035)
+	forInTypeParamAliasBindings map[string]*types.TypeParam
+
+	// funcDrainReqs / methodDrainReqs accumulate deferred for-in-drain
+	// requirements across the whole file (NOT reset per-function — initialized
+	// once in Check). Each records that a generic body moves a for-in binding
+	// over a bare-TypeParam container element out; propagateDrainReqs validates
+	// them against concrete instantiations. (T1035)
+	funcDrainReqs   map[*types.Func][]drainReq
+	methodDrainReqs map[*types.Method][]drainReq
 }
 
 // paramInitialState returns the initial ownership state for a function or
@@ -130,11 +154,17 @@ func paramInitialState(p *types.Param, consuming bool) VarState {
 // NLL last-use analysis results for early drop insertion in codegen (B0035).
 func Check(file *ast.File, info *sema.Info) []error {
 	c := &Checker{
-		file:        file,
-		info:        info,
-		refLastUses: AnalyzeRefLastUses(file, info), // T0164: NLL borrow narrowing
+		file:            file,
+		info:            info,
+		refLastUses:     AnalyzeRefLastUses(file, info), // T0164: NLL borrow narrowing
+		funcDrainReqs:   make(map[*types.Func][]drainReq),
+		methodDrainReqs: make(map[*types.Method][]drainReq),
 	}
 	c.check()
+	// T1035: validate deferred for-in-drain requirements against concrete
+	// instantiations (appends to c.errors). Runs after the full body pass so
+	// every generic body's drainReqs are recorded first.
+	c.propagateDrainReqs()
 	// B0035: Run NLL last-use analysis after ownership check.
 	info.EarlyDrops = AnalyzeLastUses(file, info)
 	return c.errors
@@ -177,6 +207,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedPinned := c.pinned
 	savedForInSingleOwner := c.forInSingleOwnerBindings
 	savedForInAlias := c.forInAliasBindings
+	savedForInTypeParamAlias := c.forInTypeParamAliasBindings
 	savedForInOwnedDroppable := c.forInOwnedDroppableBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
@@ -184,6 +215,8 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
+	savedFuncObj := c.curFuncObj
+	savedMethodObj := c.curMethodObj
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
@@ -192,6 +225,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.pinned = make(map[string]bool)
 	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.forInAliasBindings = make(map[string]bool)
+	c.forInTypeParamAliasBindings = make(map[string]*types.TypeParam)
 	c.forInOwnedDroppableBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
@@ -199,6 +233,8 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.returnOrigins = nil
 	c.loopDepth = 0
 	c.goHandleBorrowedLocal = make(map[string]string)
+	c.curFuncObj = fn
+	c.curMethodObj = nil
 
 	consuming := d.IsSetter
 	for _, p := range sig.Params() {
@@ -219,6 +255,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.pinned = savedPinned
 	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.forInAliasBindings = savedForInAlias
+	c.forInTypeParamAliasBindings = savedForInTypeParamAlias
 	c.forInOwnedDroppableBindings = savedForInOwnedDroppable
 	c.curSig = savedSig
 	c.declOrder = savedDeclOrder
@@ -227,6 +264,8 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.varTypes = savedVarTypes
 	c.loopDepth = savedLoopDepth
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
+	c.curFuncObj = savedFuncObj
+	c.curMethodObj = savedMethodObj
 }
 
 func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
@@ -301,6 +340,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedPinned := c.pinned
 	savedForInSingleOwner := c.forInSingleOwnerBindings
 	savedForInAlias := c.forInAliasBindings
+	savedForInTypeParamAlias := c.forInTypeParamAliasBindings
 	savedForInOwnedDroppable := c.forInOwnedDroppableBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
@@ -308,6 +348,8 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
+	savedFuncObj := c.curFuncObj
+	savedMethodObj := c.curMethodObj
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
@@ -316,6 +358,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.pinned = make(map[string]bool)
 	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.forInAliasBindings = make(map[string]bool)
+	c.forInTypeParamAliasBindings = make(map[string]*types.TypeParam)
 	c.forInOwnedDroppableBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
@@ -323,6 +366,8 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = nil
 	c.loopDepth = 0
 	c.goHandleBorrowedLocal = make(map[string]string)
+	c.curFuncObj = nil
+	c.curMethodObj = m
 
 	if m.Sig().Recv() != nil {
 		c.state["this"] = paramInitialState(m.Sig().Recv(), false)
@@ -351,6 +396,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.pinned = savedPinned
 	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.forInAliasBindings = savedForInAlias
+	c.forInTypeParamAliasBindings = savedForInTypeParamAlias
 	c.forInOwnedDroppableBindings = savedForInOwnedDroppable
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
@@ -358,6 +404,8 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = savedReturnOrigins
 	c.loopDepth = savedLoopDepth
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
+	c.curFuncObj = savedFuncObj
+	c.curMethodObj = savedMethodObj
 }
 
 // lookupFileScope finds an object in the file-level scope.

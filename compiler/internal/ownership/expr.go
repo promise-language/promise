@@ -1746,6 +1746,16 @@ func (c *Checker) rejectForInSingleOwnerBindingMove(expr ast.Expr) bool {
 			ident.Name, typ.String())
 		return true
 	}
+	// T1035: moving a binding out of a native container whose element is a bare
+	// TypeParam. The verdict can't be decided in the generic body (`T` is
+	// unbound) — record a deferred drain requirement that propagateDrainReqs
+	// validates per concrete instantiation, and do NOT reject inline (Copy/string
+	// instantiations stay legal). Return false so move bookkeeping proceeds
+	// normally for the generic body.
+	if tp := c.forInTypeParamAliasBindings[ident.Name]; tp != nil {
+		c.recordDrainReq(tp, ident.Pos(), ident.Name)
+		return false
+	}
 	return false
 }
 

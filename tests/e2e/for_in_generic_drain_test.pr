@@ -1,0 +1,86 @@
+// T1035: a generic for-in drain `for x in v { sink.push(move x); }` over a bare
+// TypeParam element is now validated per concrete instantiation. Copy and string
+// instantiations stay legal (a Copy element is a value copy; a string element is
+// dup'd per iteration), so these drains compile and run leak-free. A non-Copy,
+// non-string instantiation (e.g. a heap user type with a drop) is a compile error
+// (the for-in binding aliases the container's storage → double-free) — that
+// rejection is covered by the ownership Go tests (t1035_test.go).
+//
+// These batch tests all compile into one binary and are leak-checked.
+drain[T](T[] v) T[] {
+  sink := T[]();
+  for x in v {
+    sink.push(move x);
+  }
+  return sink;
+}
+
+// --- Copy element instantiation (int) --------------------------------------
+
+drain_int_preserves_elements() `test {
+  items := int[]();
+  items.push(1);
+  items.push(2);
+  items.push(3);
+  d := drain(items);
+  assert(d.len == 3, "drained int count");
+  assert(d[0] == 1 && d[1] == 2 && d[2] == 3, "drained int values");
+}
+
+// --- String element instantiation (dup'd per iteration) --------------------
+
+drain_string_preserves_elements() `test {
+  items := string[]();
+  items.push("alpha");
+  items.push("beta");
+  d := drain(items);
+  assert(d.len == 2, "drained string count");
+  assert(d[0] == "alpha" && d[1] == "beta", "drained string values");
+}
+
+// --- Value-type (Copy) element instantiation -------------------------------
+
+type Pair {
+  int a `value;
+  int b `value;
+}
+
+drain_value_type_preserves_elements() `test {
+  items := Pair[]();
+  items.push(Pair(a: 1, b: 2));
+  items.push(Pair(a: 3, b: 4));
+  d := drain(items);
+  assert(d.len == 2, "drained pair count");
+  assert(d[0].a == 1 && d[0].b == 2, "first pair");
+  assert(d[1].a == 3 && d[1].b == 4, "second pair");
+}
+
+// --- Method drain over a generic type's own bare-TypeParam field -----------
+
+type Holder[T] {
+  T[] items;
+  drain_all(this) T[] {
+    sink := T[]();
+    for x in this.items {
+      sink.push(move x);
+    }
+    return sink;
+  }
+}
+
+drain_method_copy_instantiation() `test {
+  h := Holder[int](items: int[]());
+  h.items.push(10);
+  h.items.push(20);
+  d := h.drain_all();
+  assert(d.len == 2, "method drained count");
+  assert(d[0] == 10 && d[1] == 20, "method drained values");
+}
+
+// --- Empty container edge case ---------------------------------------------
+
+drain_empty_int() `test {
+  items := int[]();
+  d := drain(items);
+  assert(d.len == 0, "drained empty");
+}

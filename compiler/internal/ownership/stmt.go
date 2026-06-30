@@ -1455,23 +1455,31 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		c.state[s.Index] = Owned
 	}
 
+	// Element type aliased by a for-in binding over a native Vector/Array/Map-value
+	// container (nil for the `_` binding or non-aliasing iterable shapes). Computed
+	// once and shared by the single-owner (T0652), concrete-alias (T0978), and
+	// bare-TypeParam (T1035) flagging blocks below. stripRefType is an identity for
+	// owned/plain-borrow Instances and peels SharedRef/MutRef for borrowed-ref
+	// containers, so one element covers all three container forms.
+	var aliasElem types.Type
+	if s.Binding != "_" {
+		aliasElem = forInAliasingElementType(stripRefType(c.info.Types[s.Iterable]))
+	}
+
 	// T0652: for native Vector/Array/Map iteration whose element type is a
 	// single-owner native handle, mark the binding so moves (x := h, foo(h),
-	// use x := h, return h) are rejected — the binding aliases the slot.
-	// stripRefType so a *borrowed* such container (`Task[int][]&`, newly
-	// iterable since T0971) is covered too, keeping the dedicated single-owner
+	// use x := h, return h) are rejected — the binding aliases the slot. A
+	// *borrowed* such container (`Task[int][]&`, newly iterable since T0971) is
+	// covered too (aliasElem peels the ref), keeping the dedicated single-owner
 	// message (and disjoint from the T0978 alias set, which excludes these).
 	// Save/restore for nested-loop safety (e.g., `for x in v1 { for x in v2 {} }`).
 	var prevSingleOwner bool
 	var hadPrevSingleOwner bool
 	flaggedSingleOwner := false
-	if s.Binding != "_" {
-		iterType := stripRefType(c.info.Types[s.Iterable])
-		if elem := forInAliasingElementType(iterType); elem != nil && isSingleOwnerNativeType(elem) {
-			prevSingleOwner, hadPrevSingleOwner = c.forInSingleOwnerBindings[s.Binding]
-			c.forInSingleOwnerBindings[s.Binding] = true
-			flaggedSingleOwner = true
-		}
+	if aliasElem != nil && isSingleOwnerNativeType(aliasElem) {
+		prevSingleOwner, hadPrevSingleOwner = c.forInSingleOwnerBindings[s.Binding]
+		c.forInSingleOwnerBindings[s.Binding] = true
+		flaggedSingleOwner = true
 	}
 
 	// T0971/T0978: a for-in loop binding over a native Vector/Array/Map-value
@@ -1492,16 +1500,29 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	var prevAlias bool
 	var hadPrevAlias bool
 	flaggedAlias := false
-	if s.Binding != "_" {
-		elem := forInAliasingElementType(stripRefType(c.info.Types[s.Iterable]))
-		// Single-owner native handles are routed to forInSingleOwnerBindings above
-		// (T0652) for their dedicated message, so exclude them here to keep the two
-		// flag sets disjoint.
-		if forInElementAliasesContainer(elem) && !isSingleOwnerNativeType(elem) {
-			prevAlias, hadPrevAlias = c.forInAliasBindings[s.Binding]
-			c.forInAliasBindings[s.Binding] = true
-			flaggedAlias = true
-		}
+	// Single-owner native handles are routed to forInSingleOwnerBindings above
+	// (T0652) for their dedicated message, so exclude them here to keep the two
+	// flag sets disjoint.
+	if forInElementAliasesContainer(aliasElem) && !isSingleOwnerNativeType(aliasElem) {
+		prevAlias, hadPrevAlias = c.forInAliasBindings[s.Binding]
+		c.forInAliasBindings[s.Binding] = true
+		flaggedAlias = true
+	}
+
+	// T1035: a for-in over a native container whose element is a *bare TypeParam*
+	// (`T[] v` / `Map[K, T]` value) can't be classified copy/non-copy in the
+	// generic body, so forInElementAliasesContainer excludes it (avoiding
+	// over-rejection of Copy/string instantiations). Record the binding's element
+	// TypeParam so a move-out is deferred to per-instantiation validation
+	// (recordDrainReq → propagateDrainReqs) rather than rejected inline. Skip
+	// single-owner handles (their nested forms are already gated at sema/decl).
+	var prevTPAlias *types.TypeParam
+	var hadPrevTPAlias bool
+	flaggedTPAlias := false
+	if tp, ok := aliasElem.(*types.TypeParam); ok && !isSingleOwnerNativeType(aliasElem) {
+		prevTPAlias, hadPrevTPAlias = c.forInTypeParamAliasBindings[s.Binding]
+		c.forInTypeParamAliasBindings[s.Binding] = tp
+		flaggedTPAlias = true
 	}
 
 	// Snapshot the owned-droppable set and raise loop depth BEFORE adding the
@@ -1544,6 +1565,13 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			delete(c.forInAliasBindings, s.Binding)
 		}
 	}
+	if flaggedTPAlias {
+		if hadPrevTPAlias {
+			c.forInTypeParamAliasBindings[s.Binding] = prevTPAlias
+		} else {
+			delete(c.forInTypeParamAliasBindings, s.Binding)
+		}
+	}
 }
 
 // loopBindingType returns the type sema recorded for a loop binding, looked up
@@ -1573,8 +1601,11 @@ func (c *Checker) loopBindingType(body ast.Node, binding string) types.Type {
 //     string dup), verified leak/double-free-free at runtime.
 //   - bare TypeParam elements: the ownership pass checks each generic body once
 //     with `T` unbound and never re-checks monomorphized instances, so flagging
-//     `T` would over-reject legitimate Copy-`T` instantiations (concrete element
-//     types are still caught).
+//     `T` here would over-reject legitimate Copy-`T`/string-`T` instantiations.
+//     Instead the whole-binding for-in guard records the binding's element
+//     TypeParam (forInTypeParamAliasBindings) and defers a per-instantiation
+//     verdict to propagateDrainReqs, which validates the concrete substitution
+//     with concreteElementAliasesContainer below (T1035).
 //
 // Note: single-owner native handles (Mutex/MutexGuard/Task) ARE aliasing and
 // return true here; the whole-binding for-in guard additionally routes them to
@@ -1585,6 +1616,19 @@ func forInElementAliasesContainer(elem types.Type) bool {
 		return false
 	}
 	if _, isTypeParam := elem.(*types.TypeParam); isTypeParam {
+		return false
+	}
+	return concreteElementAliasesContainer(elem)
+}
+
+// concreteElementAliasesContainer is the concrete-element aliasing predicate
+// shared by the generic-body for-in guard (forInElementAliasesContainer) and the
+// deferred per-instantiation drain validator (propagateDrainReqs). A non-nil,
+// non-Copy, non-string element type aliases the container's droppable storage,
+// so moving the for-in binding out double-frees. Copy elements are value copies
+// and string elements are dup'd per iteration, so both are freely movable. (T1035)
+func concreteElementAliasesContainer(elem types.Type) bool {
+	if elem == nil {
 		return false
 	}
 	return !isCopyType(elem) && extractNamedType(elem) != types.TypString

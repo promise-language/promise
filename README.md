@@ -2,7 +2,7 @@
 
 Statically-typed language designed for AI-agent efficiency — and written by AI agents. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
-Promise is also a bet: that an AI agent, with limited human oversight, can build large, complex, *high-quality* software — not throwaway snippets, but systems you maintain for years — given a language built for it. This compiler is the first evidence: it was **built by AI agents**, on a single $200/month subscription. The methodology is **Bounded-Autonomy Software Engineering** (BASE), described below.
+Promise is also a bet: that an AI agent, with limited human oversight, can build large, complex, *high-quality* software — not throwaway snippets, but systems you maintain for years — given a language built for it. This compiler is the first evidence: it was **built by AI agents**, on a single $200/month subscription. The methodology is **Bounded-Autonomy Software Engineering** (BASE), described below — and in full in the [white paper](https://github.com/promise-language/reactor/blob/main/WHITEPAPER.md).
 
 **[Install Promise](docs/installing.md)** — macOS (Apple Silicon), Linux (x86_64), or Windows (x86_64).
 
@@ -20,7 +20,7 @@ Building the compiler this way shows agents can build something large and real. 
 
 The first you can use today; the second is what the project is building toward.
 
-<!-- TODO(reactor-public): link the "Bounded-Autonomy Software Engineering" white paper (reactor/WHITEPAPER.md) here once the reactor repo is public. -->
+The full methodology is described in the [Bounded-Autonomy Software Engineering white paper](https://github.com/promise-language/reactor/blob/main/WHITEPAPER.md).
 
 
 **Mono-versioned catalog.** Promise manages dependency complexity for you. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing.

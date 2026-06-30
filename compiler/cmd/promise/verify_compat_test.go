@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -506,6 +507,38 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 			t.Errorf("expected a §9.10 gate report, got:\n%s", out)
 		}
 	})
+
+	// T1051: a dep whose only tag targets a NEWER epoch than the project is
+	// versioned-but-incompatible — check-upgrade must hit the §9.10 gate and print
+	// the "module only targets newer epochs" line, not the unversioned fallback.
+	t.Run("only-newer-epochs", func(t *testing.T) {
+		year, minor, ok := module.ParseEpoch(epoch)
+		if !ok {
+			t.Skipf("cannot parse compiler epoch %q", epoch)
+		}
+		newer := fmt.Sprintf("%d.%d", year, minor+1)
+		work := makeWorkRepo(t)
+		writeMod(t, work, "dep", true) // good module, but only tagged for a newer epoch
+		gitRun(t, work, "add", ".")
+		gitRun(t, work, "commit", "-m", "init")
+		gitRun(t, work, "tag", "epoch-"+newer)
+		commit := gitRun(t, work, "rev-parse", "HEAD")
+
+		out, err := runCheck(t, work, commit)
+		if err == nil {
+			t.Fatalf("check-upgrade should exit non-zero when the only dep targets a newer epoch:\n%s", out)
+		}
+		if !strings.Contains(out, "module only targets newer epochs") {
+			t.Errorf("expected the OnlyNewerEpochs CLI line, got:\n%s", out)
+		}
+		if !strings.Contains(out, "epoch-"+newer) {
+			t.Errorf("expected the newer tag %q in output, got:\n%s", "epoch-"+newer, out)
+		}
+		// The versioned dep must never be reported via the unversioned/HEAD path.
+		if strings.Contains(out, "unversioned") {
+			t.Errorf("versioned dep mislabeled 'unversioned':\n%s", out)
+		}
+	})
 }
 
 // TestResolveEpochAwareWalkBack builds a repo with a passing epoch-2026.0 tag and
@@ -599,6 +632,59 @@ func TestResolveEpochAwareNoCompatible(t *testing.T) {
 	}
 	if nce.HighestVerifiedEpoch != "2026.1" {
 		t.Errorf("HighestVerifiedEpoch = %q, want 2026.1", nce.HighestVerifiedEpoch)
+	}
+}
+
+// TestResolveEpochAwareOnlyNewerEpochs builds a repo whose only tag (epoch-2026.3)
+// is a *good* module targeting a newer epoch, then asserts a project on 2026.1
+// hits the §9.10 OnlyNewerEpochs gate instead of being mislabeled "unversioned"
+// (T1051).
+func TestResolveEpochAwareOnlyNewerEpochs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	bin := findPromiseBinary(t)
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	work := filepath.Join(t.TempDir(), "onlynewer")
+	os.MkdirAll(work, 0755)
+	gitRun(t, work, "init", "--initial-branch=main")
+	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.name", "T")
+
+	writeMod(t, work, "onlynewer", true) // good module
+	gitRun(t, work, "add", ".")
+	gitRun(t, work, "commit", "-m", "good")
+	gitRun(t, work, "tag", "epoch-2026.3")
+
+	var warnings []string
+	_, err := resolveEpochAware(bin, "2026.1", "onlynewer", work, "", func(w string) {
+		warnings = append(warnings, w)
+	})
+	if err == nil {
+		t.Fatal("expected NoCompatibleVersionError, got nil")
+	}
+	nce, ok := err.(*module.NoCompatibleVersionError)
+	if !ok {
+		t.Fatalf("expected *NoCompatibleVersionError, got %T: %v", err, err)
+	}
+	if !nce.OnlyNewerEpochs {
+		t.Errorf("OnlyNewerEpochs = false, want true")
+	}
+	if nce.LowestSupportedEpoch != "2026.3" {
+		t.Errorf("LowestSupportedEpoch = %q, want 2026.3", nce.LowestSupportedEpoch)
+	}
+	if nce.LowestTag != "epoch-2026.3" {
+		t.Errorf("LowestTag = %q, want epoch-2026.3", nce.LowestTag)
+	}
+	// Core regression: the versioned module must never be warned as "unversioned".
+	for _, w := range warnings {
+		if strings.Contains(w, "unversioned") {
+			t.Errorf("unexpected 'unversioned' warning for versioned module: %q", w)
+		}
 	}
 }
 

@@ -117,22 +117,49 @@ func HighestEpoch(epochTags []EpochTag) (epoch, tag string) {
 	return epoch, tag
 }
 
+// LowestEpoch returns the smallest epoch among the given tags (numeric compare),
+// or "" when the list is empty. Used for the §9.10 "module only targets newer
+// epochs" message — the oldest epoch the module still supports.
+func LowestEpoch(epochTags []EpochTag) (epoch, tag string) {
+	for _, t := range epochTags {
+		if epoch == "" || CompareEpochs(t.Epoch, epoch) < 0 {
+			epoch, tag = t.Epoch, t.Tag
+		}
+	}
+	return epoch, tag
+}
+
 // NoCompatibleVersionError is the §9.10 gate: raised at resolve time, before any
 // unverified dependency source reaches the compiler, so a project never sees raw
 // compiler errors buried inside a dependency. Module is the URL or name as the
 // user referred to it; Epoch is the project's epoch; HighestVerifiedEpoch/
 // HighestTag describe the newest epoch the module carries a tag for (may be empty
-// when the module has no `epoch-*` tags at all).
+// when the module has no `epoch-*` tags at all). OnlyNewerEpochs marks the case
+// where the module is versioned but every epoch tag targets a newer epoch than
+// the project's — LowestSupportedEpoch/LowestTag then describe the oldest epoch
+// the module supports.
 type NoCompatibleVersionError struct {
 	Module               string
 	Epoch                string
 	HighestVerifiedEpoch string
 	HighestTag           string
+	OnlyNewerEpochs      bool
+	LowestSupportedEpoch string
+	LowestTag            string
 }
 
 func (e *NoCompatibleVersionError) Error() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "module %q has no version compatible with epoch %s\n", e.Module, e.Epoch)
+	if e.OnlyNewerEpochs {
+		fmt.Fprintf(&b, "  the module's oldest epoch tag is %s (tag %s) — it does not target %s or older\n", e.LowestSupportedEpoch, e.LowestTag, e.Epoch)
+		b.WriteString("  options:\n")
+		fmt.Fprintf(&b, "    - raise this project to epoch ≥ %s       (the module's oldest supported epoch)\n", e.LowestSupportedEpoch)
+		b.WriteString("    - use a fork:   promise package add github.com/you/fork\n")
+		b.WriteString("    - redirect locally while fixing:  [replace] " + e.Module + " = \"../...\"   (§9.7)\n")
+		fmt.Fprintf(&b, "    - or wait for the module to publish an epoch-%s tag", e.Epoch)
+		return b.String()
+	}
 	if e.HighestVerifiedEpoch != "" {
 		fmt.Fprintf(&b, "  highest verified epoch: %s   (tag %s)\n", e.HighestVerifiedEpoch, e.HighestTag)
 		fmt.Fprintf(&b, "  newer tags fail to build under %s\n", e.Epoch)

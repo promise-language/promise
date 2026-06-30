@@ -174,6 +174,47 @@ func TestHighestEpoch(t *testing.T) {
 	}
 }
 
+func TestLowestEpoch(t *testing.T) {
+	tags := []EpochTag{
+		{Epoch: "2026.1", Tag: "epoch-2026.1"},
+		{Epoch: "2026.9", Tag: "epoch-2026.9"},
+		{Epoch: "2026.10", Tag: "epoch-2026.10"},
+	}
+	e, tag := LowestEpoch(tags)
+	if e != "2026.1" || tag != "epoch-2026.1" {
+		t.Errorf("LowestEpoch = (%q, %q), want (2026.1, epoch-2026.1)", e, tag)
+	}
+	if e, tag := LowestEpoch(nil); e != "" || tag != "" {
+		t.Errorf("LowestEpoch(nil) = (%q, %q), want empty", e, tag)
+	}
+}
+
+func TestNoCompatibleVersionErrorOnlyNewer(t *testing.T) {
+	err := &NoCompatibleVersionError{
+		Module:               "github.com/you/foo",
+		Epoch:                "2026.1",
+		OnlyNewerEpochs:      true,
+		LowestSupportedEpoch: "2026.3",
+		LowestTag:            "epoch-2026.3",
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"has no version compatible with epoch 2026.1",
+		"oldest epoch tag is 2026.3 (tag epoch-2026.3)",
+		"raise this project to epoch ≥ 2026.3",
+		"use a fork:",
+		"[replace] github.com/you/foo",
+		"wait for the module to publish an epoch-2026.1 tag",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("OnlyNewer error missing %q in:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "pin this project to epoch ≤") {
+		t.Errorf("OnlyNewer error should not advise pinning to ≤:\n%s", msg)
+	}
+}
+
 func TestNoCompatibleVersionErrorFormat(t *testing.T) {
 	err := &NoCompatibleVersionError{
 		Module:               "github.com/you/foo",

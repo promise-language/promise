@@ -326,8 +326,11 @@ func resolveCommunityByURL(url, epoch string) (commit string, found bool, err er
 // under the project's epoch before returning it (§9.8/§9.9). With an explicit ref
 // the user's choice is resolved and verified with no walk-back; without one, the
 // largest `epoch-X ≤ E` tag is tried, stepping back through older tags on
-// verification failure, with a `stable`/HEAD fallback when there are no `epoch-*`
-// tags. When nothing verifies it returns a *module.NoCompatibleVersionError
+// verification failure, with a `stable`/HEAD fallback only when there are no
+// `epoch-*` tags at all. A module that carries `epoch-*` tags but whose tags are
+// all newer than the project epoch is versioned (just not for this epoch) — it
+// hits the §9.10 gate (OnlyNewerEpochs), not the unversioned `stable`/HEAD
+// fallback. When nothing verifies it returns a *module.NoCompatibleVersionError
 // (§9.10) — raised here, at resolve time, so raw dependency compiler errors never
 // reach the project build.
 //
@@ -360,9 +363,21 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 	}
 	candidates := module.Candidates(epochTags, projectEpoch)
 
+	if len(candidates) == 0 && len(epochTags) > 0 {
+		// The module IS versioned (carries epoch-* tags) but every tag targets a
+		// newer epoch than the project's — it does not support this epoch. This is
+		// the §9.10 gate, not the §9.8 unversioned fallback: pinning HEAD here would
+		// mislabel a versioned module as "unversioned".
+		lo, loTag := module.LowestEpoch(epochTags)
+		return "", &module.NoCompatibleVersionError{
+			Module: label, Epoch: projectEpoch,
+			OnlyNewerEpochs: true, LowestSupportedEpoch: lo, LowestTag: loTag,
+		}
+	}
+
 	if len(candidates) == 0 {
-		// No usable epoch-* tag (§9.8 step 1 fallback): stable tag, else HEAD with
-		// an "unversioned" warning.
+		// Truly unversioned — no epoch-* tags at all (§9.8 step 1 fallback): stable
+		// tag, else HEAD with an "unversioned" warning.
 		var fallback string
 		if stableCommit != "" {
 			fallback = stableCommit
@@ -385,8 +400,9 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 			}
 			return fallback, nil
 		}
-		hi, hiTag := module.HighestEpoch(epochTags)
-		return "", &module.NoCompatibleVersionError{Module: label, Epoch: projectEpoch, HighestVerifiedEpoch: hi, HighestTag: hiTag}
+		// Reached only when there are no epoch-* tags (the only-newer case returned
+		// above), so HighestVerifiedEpoch is empty by construction.
+		return "", &module.NoCompatibleVersionError{Module: label, Epoch: projectEpoch}
 	}
 
 	// Walk back through candidate tags (largest epoch first); first verified wins.
@@ -540,7 +556,9 @@ func runPackageCheckUpgrade(args []string) {
 			blocked++
 			if nce, ok := rerr.(*module.NoCompatibleVersionError); ok {
 				fmt.Printf("  ✗ %s — no compatible version\n", d.label)
-				if nce.HighestVerifiedEpoch != "" {
+				if nce.OnlyNewerEpochs {
+					fmt.Printf("      module only targets newer epochs (oldest: %s, tag %s)\n", nce.LowestSupportedEpoch, nce.LowestTag)
+				} else if nce.HighestVerifiedEpoch != "" {
 					fmt.Printf("      highest verified epoch: %s (%s)\n", nce.HighestVerifiedEpoch, nce.HighestTag)
 				}
 			} else {

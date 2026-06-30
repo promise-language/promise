@@ -1297,6 +1297,60 @@ func (c *Compiler) genEnumBinaryOp(e *ast.BinaryExpr, en *types.Enum, leftType t
 	return c.block.NewCall(fn, args...)
 }
 
+// genNonNativeEnumCompoundOp dispatches a user-defined enum operator invoked by a
+// compound assignment (`+=`, `-=`, etc.) where the operand type is an enum (T1015).
+// Both operands are plain loaded values — neither is `this` — so this mirrors the
+// non-`this` branch of genEnumBinaryOp combined with genNonNativeCompoundOp's
+// failable handling. The result is NOT tracked as a statement temp: every
+// genCompoundOp caller stores it into a location that takes ownership, so tracking
+// here would double-free (matching genNonNativeCompoundOp's contract). A failable
+// operator returns {ok, value, err}; the error is auto-propagated (sema guarantees
+// the enclosing scope is failable via compoundOperatorCanError).
+func (c *Compiler) genNonNativeEnumCompoundOp(en *types.Enum, operandType types.Type,
+	op string, current, val value.Value) value.Value {
+
+	// Resolve the enum's mangled name (mono name for instances, monoCtx for the
+	// origin enum inside a generic method body) — same scheme as genEnumBinaryOp.
+	enumName := en.Obj().Name()
+	if inst, ok := operandType.(*types.Instance); ok {
+		if _, ok := inst.Origin().(*types.Enum); ok {
+			enumName = monoName(inst)
+		}
+	} else if c.monoCtx != nil {
+		if origin, ok := c.monoCtx.origin.(*types.Enum); ok && en == origin {
+			enumName = c.monoCtx.name
+		}
+	}
+
+	// Binary operator: prefer the 1-param variant (T0883).
+	method := en.LookupBinaryMethod(op)
+	if method == nil {
+		method = en.LookupMethod(op)
+	}
+	if method == nil {
+		panic(fmt.Sprintf("codegen: no operator %q on enum %s for compound assignment", op, enumName))
+	}
+	mangledName := mangleMethodName(enumName, op, false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared enum operator method %s", mangledName))
+	}
+
+	// Receiver: pass an i8* pointer to the enum value (neither operand is `this`).
+	alloca := c.entryBlock.NewAlloca(current.Type())
+	alloca.SetName(c.uniqueLocalName("enum.this"))
+	c.block.NewStore(current, alloca)
+	args := []value.Value{c.block.NewBitCast(alloca, irtypes.I8Ptr)}
+	// Operand: the method expects the enum value by value.
+	args = append(args, val)
+
+	result := value.Value(c.block.NewCall(fn, args...))
+	if method.Sig().CanError() {
+		result = c.genAutoPropagateValue(result)
+	}
+	return result
+}
+
 // genVirtualBinaryOp dispatches a non-native binary operator through the vtable.
 // Used when the static type is abstract or has children requiring virtual dispatch.
 // Mirrors genVirtualMethodCall but uses pre-evaluated left/right operands.

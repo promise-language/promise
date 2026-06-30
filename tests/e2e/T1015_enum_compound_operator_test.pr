@@ -1,0 +1,183 @@
+// T1015: a compound assignment (`+=`, `-=`, etc.) whose operand TYPE is an enum
+// with a user-defined operator previously panicked codegen
+// ("cannot resolve Named type from <Enum> for compound assignment +="). The enum
+// analogue of T0715 (Named types) / T0876 (plain `a + b`). genCompoundOp now falls
+// back to the enum operator path, dispatching a real `+` method call. This also
+// makes the enum drop-old branches (dropOldUserValueAtPtr / emitDropOldCompoundValue)
+// live, so the old enum value is dropped before the operator result overwrites it
+// (zero-leak). The `+` here concatenates labels into a FRESH HEAP string, so each
+// drop-old path frees real heap memory — making leak detection meaningful.
+enum Tag `doc("An enum with a non-native `+` operator that merges labels and a droppable string payload.") {
+  Named(string name),
+  Empty,
+  +(Tag other) Tag {
+    return Tag.Named(name: this.label() + other.label());
+  }
+  label(this) string `doc("Returns the variant's label (the name for Named, `_` for Empty).") {
+    return match this {
+      Named(n) => n,
+      Empty => "_",
+    };
+  }
+  drop(~this) {
+  }
+}
+
+type Holder `doc("Holds a single Tag field, driving member-target enum compound assignment.") {
+  Tag t;
+}
+
+type Box `doc("A type with `[:]`/`[:]=` operators over a Tag field, driving slice-target enum compound assignment.") {
+  Tag t;
+  [:](int? low, int? high) Tag {
+    return Tag.Named(name: this.t.label());
+  }
+  [:]=(int? low, int? high, Tag move v) {
+    this.t = v;
+  }
+}
+
+// Member target: `h.t += enumval`. Read-modify-write through the field; the old
+// field value is dropped (heap string freed) before the merged result is stored.
+enum_member_compound() `test {
+  h := Holder(t: Tag.Named(name: "a"));
+  h.t += Tag.Named(name: "b"); // Named("a" + "b") = Named("ab")
+  assert(h.t.label() == "ab", "member += should merge to \"ab\"");
+}
+
+// Local (ident) target: `v += enumval`. Exercises dropOldUserValueAtPtr's enum
+// branch on a plain local alloca.
+enum_local_compound() `test {
+  v := Tag.Named(name: "c");
+  v += Tag.Named(name: "d"); // Named("cd")
+  assert(v.label() == "cd", "local += should merge to \"cd\"");
+}
+
+// Index target: `arr[i] += enumval`. The old vector element is dropped before the
+// merged result overwrites the slot.
+enum_index_compound() `test {
+  arr := [Tag.Named(name: "x"), Tag.Empty];
+  arr[0] += Tag.Named(name: "y"); // Named("xy")
+  assert(arr[0].label() == "xy", "index += should merge to \"xy\"");
+}
+
+// Slice target: `obj[a:b] += enumval` (T0714's slice-compound path). The `[:]`
+// getter returns a fresh Tag; the merged result is written via `[:]=`. The fresh
+// getter value is dropped (emitDropOldCompoundValue's enum branch, now live).
+enum_slice_compound() `test {
+  b := Box(t: Tag.Named(name: "p"));
+  b[0:1] += Tag.Named(name: "q"); // getter Named("p") + Named("q") = Named("pq")
+  assert(b.t.label() == "pq", "slice += should merge to \"pq\"");
+}
+
+// All five arithmetic compound operators must dispatch (here only `+` is defined,
+// so chain `+=` to confirm repeated read-modify-write with drop-old each step).
+enum_chained_compound() `test {
+  v := Tag.Named(name: "1");
+  v += Tag.Named(name: "2"); // Named("12")
+  v += Tag.Named(name: "3"); // Named("123")
+  v += Tag.Named(name: "4"); // Named("1234")
+  assert(v.label() == "1234", "chained += should merge to \"1234\"");
+}
+
+// --- Generic enum operand ---------------------------------------------------
+// A generic enum with a non-native `+` over a droppable string payload, so the
+// drop-old path frees real heap memory (leak detection is meaningful). Exercises
+// genNonNativeEnumCompoundOp's `*types.Instance` branch — the operator dispatches
+// through the MONO name (`Wrap[string].+`), and the old value drops via the mono'd
+// `Wrap[string].drop`.
+enum Wrap[T] `doc("A generic enum with a non-native `+` operator that keeps the right operand's payload.") {
+  Full(T value),
+  Empty,
+  +(Wrap[T] other) Wrap[T] {
+    return Wrap.Full(value: other.unwrap());
+  }
+  unwrap(this) T `doc("Returns the Full payload, or the Empty fallback.") {
+    return match this {
+      Full(v) => v,
+      Empty => empty_label(),
+    };
+  }
+  drop(~this) {
+  }
+}
+
+empty_label() string {
+  return "_";
+}
+
+// Member-style read-modify-write on a generic-enum local. The old `Wrap[string]`
+// (holding a heap string) drops before the merged result overwrites it.
+generic_enum_compound() `test {
+  b := Wrap[string].Full(value: "first" + "");
+  b += Wrap[string].Full(value: "second" + ""); // keeps "second"
+  assert(b.unwrap() == "second", "generic enum += should keep \"second\"");
+}
+
+// Chained compound on a generic enum: each step drops the prior heap payload.
+generic_enum_chained_compound() `test {
+  b := Wrap[string].Full(value: "a" + "");
+  b += Wrap[string].Full(value: "b" + ""); // "b"
+  b += Wrap[string].Full(value: "c" + ""); // "c"
+  assert(b.unwrap() == "c", "chained generic enum += should keep \"c\"");
+}
+
+// --- Failable enum operator -------------------------------------------------
+// A `+!` operator raises when the right operand is Empty; the error propagates
+// out of the failable helper (compound on a failable enum operator, T1015).
+enum SafeTag `doc("An enum with a failable `+!` operator that raises on an Empty operand.") {
+  Named(string name),
+  Empty,
+  +!(SafeTag other) SafeTag {
+    if other.is_empty() {
+      raise error("empty operand");
+    }
+    return SafeTag.Named(name: this.label() + other.label());
+  }
+  is_empty(this) bool `doc("Reports whether this is the Empty variant.") {
+    return match this {
+      Empty => true,
+      Named(n) => false,
+    };
+  }
+  label(this) string `doc("Returns the variant's label.") {
+    return match this {
+      Named(n) => n,
+      Empty => "_",
+    };
+  }
+  drop(~this) {
+  }
+}
+
+// Failable operator, happy path: no error, the merged result is computed.
+enum_failable_compound_ok() `test {
+  r := safe_helper_ok()? e {
+    assert(false, "did not expect an error on the happy path");
+    SafeTag.Empty
+  };
+  assert(r.label() == "mn", "failable enum += happy path should merge to \"mn\"");
+}
+
+safe_helper_ok!() SafeTag {
+  v := SafeTag.Named(name: "m");
+  v += SafeTag.Named(name: "n");
+  return v;
+}
+
+// Failable operator, error path: an Empty operand raises and the error
+// propagates out of the failable helper to the caller's catch.
+enum_failable_compound_raises() `test {
+  raised := false;
+  _ := safe_helper_raise()? e {
+    raised = true;
+    SafeTag.Empty
+  };
+  assert(raised, "Empty operand should propagate the error");
+}
+
+safe_helper_raise!() SafeTag {
+  v := SafeTag.Named(name: "m");
+  v += SafeTag.Empty; // raises
+  return v;
+}

@@ -8041,6 +8041,12 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, operandType types.Type, curren
 	}
 	named := extractNamed(operandType)
 	if named == nil {
+		// T1015: enum operand with a user-defined operator. extractNamed returns
+		// nil for enums, so dispatch via the enum-specific path (mirrors
+		// genBinaryExpr's enum fallback, T0876). Enums are never native operators.
+		if en := extractEnum(operandType); en != nil {
+			return c.genNonNativeEnumCompoundOp(en, operandType, binOp, current, val)
+		}
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for compound assignment %s", operandType, op))
 	}
 
@@ -11173,12 +11179,14 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	// types.
 	c.emitDropOldCompoundValue(current, result, operandType)
 	// NOTE (T0715): compound assignment whose operand is a *user type with a
-	// non-native operator* held as a *map value* is unreachable here today — such
-	// a type is mishandled by the map/mono machinery before this path runs (value
-	// type → codegen panic in Map.[]; heap type → double-free on overwrite).
-	// Tracked separately; if it becomes reachable, the drop above must be skipped
-	// for maps (Map.[] returns the heap value by reference, which []= below
-	// overwrites and drops — dropping `current` here would then double-free).
+	// non-native operator* held as a *map value* is mishandled by the map/mono
+	// machinery before/around this path: a value type → codegen panic in Map.[];
+	// a heap Named type → double-free on overwrite. T1015 made the *enum*-operand
+	// form reachable (it no longer panics in genCompoundOp), but it under-frees
+	// (leaks 1 allocation) — tracked as T1165. The fix lives in the map index-
+	// compound path (Map.[] returns the heap value by reference, which []= below
+	// overwrites and drops, so the drop of `current` above must be reconciled for
+	// maps), not in genCompoundOp.
 
 	call := c.block.NewCall(setFn, instancePtr, keyVal, result)
 	c.propagateIfFailable(call) // T0708

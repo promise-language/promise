@@ -7816,7 +7816,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				// pointer guard mirrors the existing Vector/Channel branches above.
 				// T0908: also cover heap user types with NO drop (isHeapUserNoDropPalFree);
 				// emitVariantFieldDrop's B0218 branch pal_frees the old no-drop instance.
-				if isDroppableHeapUserType(fieldType) || isHeapUserNoDropPalFree(fieldType) {
+				if isDroppableHeapUserType(fieldType) || isHeapUserNoDropPalFree(fieldType) || isMapOrSetType(fieldType) {
 					fieldLLVM := c.resolveType(fieldType)
 					oldVal := c.block.NewLoad(fieldLLVM, fieldPtr)
 					oldInstance := c.extractInstancePtr(oldVal)
@@ -11021,6 +11021,16 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// Safe because: Gap A (genArrayLit clearDropFlag) ensures the vector
 			// is the sole owner, and dup-on-read (genVectorIndex) ensures any
 			// local variable that read via v[i] holds an independent copy.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if isMapOrSetType(elemType) {
+			// T1167: Drop old Map/Set element before overwriting. Map/Set are 2-word
+			// {i8*,i8*} value-struct containers deliberately excluded from
+			// isDroppableHeapUserType (T0440), so the heap-user branch above skips
+			// them, leaking the old container (struct + backing buffer). Mirrors the
+			// heap-user branch (T0398) and the genMemberAssign Map/Set branch (T1167).
+			// Safe because genVectorIndex dups Map/Set on read, so any aliased local
+			// owns an independent copy.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		}

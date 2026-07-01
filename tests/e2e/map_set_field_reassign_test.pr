@@ -1,0 +1,140 @@
+// T1167: Reassigning a Map/Set field (`h.m = ownedMap`) leaks the old container
+// value because genMemberAssign's drop-old cascade had no Map/Set branch — Map/Set
+// are 2-word {i8*,i8*} value-struct containers deliberately excluded from
+// isDroppableHeapUserType (T0440). The same gap existed in genVectorIndexAssign for
+// Vector[Map/Set] element reassignment. These tests are leak-checked by the harness
+// (T0067 zero-tolerance) — any unfreed allocation fails the run.
+type MapHolder {
+  map[string, int] m;
+}
+type SetHolder {
+  Set[int] s;
+}
+type Inner {
+  map[string, int] m;
+}
+type Outer {
+  Inner inner;
+}
+
+// --- Map field reassignment: old map (struct + buckets) must be dropped ---
+map_field_reassign() `test {
+  MapHolder h = MapHolder(m: map[string, int]());
+  h.m["init"] = 100; // old map has content
+  h.m = map[string, int](); // reassign with fresh owned map — old must be dropped
+  h.m["y"] = 2;
+  assert(h.m.len == 1, "map field reassign len");
+  if val := h.m["y"] {
+    assert(val == 2, "map field reassign value");
+  } else {
+    assert(false, "map field reassign missing key");
+  }
+}
+
+// reassign a map field that already held content, several times
+map_field_reassign_repeated() `test {
+  MapHolder h = MapHolder(m: map[string, int]());
+  h.m["a"] = 1;
+  h.m = map[string, int]();
+  h.m["b"] = 2;
+  h.m = map[string, int]();
+  h.m["c"] = 3;
+  assert(h.m.len == 1, "repeated len");
+  if val := h.m["c"] {
+    assert(val == 3, "repeated value");
+  } else {
+    assert(false, "repeated missing key");
+  }
+}
+
+// --- Set field reassignment ---
+set_field_reassign() `test {
+  SetHolder h = SetHolder(s: Set[int]());
+  h.s.add(10);
+  h.s.add(20);
+  h.s = Set[int](); // reassign with fresh owned set — old must be dropped
+  h.s.add(30);
+  assert(h.s.len == 1, "set field reassign len");
+  assert(h.s.contains(30), "set field reassign value");
+}
+
+// --- Vector[Map[K,V]] element reassignment ---
+map_vector_element_reassign() `test {
+  Map[string, int][] v = [map[string, int]()];
+  v[0]["init"] = 100; // old element map has content
+  v[0] = map[string, int](); // reassign element — old map must be dropped
+  v[0]["y"] = 2;
+  assert(v[0].len == 1, "map vector element reassign len");
+  if val := v[0]["y"] {
+    assert(val == 2, "map vector element reassign value");
+  } else {
+    assert(false, "map vector element reassign missing key");
+  }
+}
+
+// --- Vector[Set[T]] element reassignment ---
+set_vector_element_reassign() `test {
+  Set[int][] v = [Set[int]()];
+  v[0].add(1);
+  v[0].add(2);
+  v[0] = Set[int](); // reassign element — old set must be dropped
+  v[0].add(3);
+  assert(v[0].len == 1, "set vector element reassign len");
+  assert(v[0].contains(3), "set vector element reassign value");
+}
+
+// --- cloned read then reassign: an explicit .clone() must stay independent when
+//     the field it was copied from is later overwritten (no double-free) ---
+map_field_clone_then_reassign() `test {
+  MapHolder h = MapHolder(m: map[string, int]());
+  h.m["x"] = 1;
+  copy := h.m.clone(); // independent copy
+  h.m = map[string, int](); // old field map dropped; `copy` unaffected
+  assert(copy.len == 1, "cloned copy survives");
+  if val := copy["x"] {
+    assert(val == 1, "cloned copy value");
+  } else {
+    assert(false, "cloned copy missing key");
+  }
+  assert(h.m.len == 0, "reassigned field is fresh");
+}
+
+// --- Deep member target: `o.inner.m = fresh` resolves fieldPtr through a member
+//     chain; genMemberAssign's Map/Set drop-old branch must still fire ---
+nested_member_reassign() `test {
+  Outer o = Outer(inner: Inner(m: map[string, int]()));
+  o.inner.m["a"] = 1;
+  o.inner.m = map[string, int](); // deep member target — old map must drop
+  o.inner.m["b"] = 2;
+  assert(o.inner.m.len == 1, "nested member len");
+}
+
+// --- Map value reassignment via the synthesized `[]=` method (distinct from the
+//     native Vector[Map] element path): `m[k] = freshInner` must drop old inner ---
+map_value_reassign() `test {
+  Map[string, Map[string, int]] m = Map[string, Map[string, int]]();
+  inner := map[string, int]();
+  inner["x"] = 1;
+  m["a"] = inner; // move inner in (old inner has content)
+  m["a"] = map[string, int](); // reassign value — old inner map must drop
+  if got := m["a"] {
+    assert(got.len == 0, "reassigned value is fresh");
+  } else {
+    assert(false, "map value reassign missing key");
+  }
+}
+
+// Map with Set values: reassign a Set-typed map value via `[]=` ---
+map_set_value_reassign() `test {
+  Map[string, Set[int]] m = Map[string, Set[int]]();
+  s := Set[int]();
+  s.add(1);
+  s.add(2);
+  m["a"] = s;
+  m["a"] = Set[int](); // reassign value — old set must drop
+  if got := m["a"] {
+    assert(got.len == 0, "reassigned set value is fresh");
+  } else {
+    assert(false, "map set value reassign missing key");
+  }
+}

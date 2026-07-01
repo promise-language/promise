@@ -550,6 +550,212 @@ t_assign_map_some_member_source() `test {
   assert(bx.m!.len == 2, "mapbox field still valid");
 }
 
-// NOTE: the member/index-TARGET counterpart (`hold.h = a ?: b`, `v[i] = a ?: b`)
-// is NOT exercised here — it double-frees on borrowed-param paths (SEGV) and is
-// tracked as T1166 (the fix explicitly scoped the flag store to IdentExpr targets).
+// ===========================================================================
+// T1166: member/index-TARGET bound elvis `hold.h = a ?: b`, `v[i] = a ?: b`.
+// A field/element is an OWNED slot with no per-path drop flag — it is dropped
+// unconditionally by the container's synthesized drop. So on a borrowed some/
+// none path the field/element cannot hold a borrow-alias; genElvis force-clones
+// the borrowed operand so the slot owns an independent copy (the caller/container
+// keeps the original). Pre-fix these double-freed the caller-owned inner → SEGV.
+// All operands are heap-allocated, so a double-free is a real second free; the
+// whole file runs under the zero-leak gate.
+// ===========================================================================
+
+// --- member target, heap-user field ---
+
+t1166_member_none_borrowed_param(HeapBox? a, HeapBox b) int {
+  Holder hold = Holder(h: HeapBox(data: []));
+  hold.h = a ?: b; // none-path aliases borrowed b → clone
+  return hold.h.data.len;
+}
+t_t1166_member_none_borrowed_param() `test {
+  HeapBox b = HeapBox(data: []);
+  b.data.push(1);
+  b.data.push(2);
+  r := t1166_member_none_borrowed_param(none, b);
+  assert(r == 2, "member none borrowed-param");
+  assert(b.data.len == 2, "b still owned by caller");
+}
+
+t1166_member_some_borrowed_param(HeapBox? a, HeapBox b) int {
+  Holder hold = Holder(h: HeapBox(data: []));
+  hold.h = a ?: b; // some-path aliases borrowed a's inner → clone
+  return hold.h.data.len;
+}
+t_t1166_member_some_borrowed_param() `test {
+  HeapBox inner = HeapBox(data: []);
+  inner.data.push(1);
+  inner.data.push(2);
+  inner.data.push(3);
+  HeapBox? a = inner; // moves inner into a
+  HeapBox b = HeapBox(data: []);
+  b.data.push(9);
+  r := t1166_member_some_borrowed_param(a, b); // borrows a and b
+  assert(r == 3, "member some borrowed-param");
+  assert(a!.data.len == 3, "a's inner still owned by caller");
+  assert(b.data.len == 1, "b still owned by caller");
+}
+
+t_t1166_member_some_owned_local() `test {
+  // regression: some owned-local source — was already passing (phi's owned path moves).
+  HeapBox inner = HeapBox(data: []);
+  inner.data.push(7);
+  HeapBox? a = inner; // owned local optional (moved from inner)
+  HeapBox b = HeapBox(data: []);
+  Holder hold = Holder(h: HeapBox(data: []));
+  hold.h = a ?: b; // some-path: a's inner orphaned → moved into field, no clone
+  assert(hold.h.data.len == 1, "member some owned-local");
+}
+
+t_t1166_member_none_owned_local_default() `test {
+  // none-path default is an owned local → moved into field (owner neutralized), no clone.
+  HeapBox? a = none;
+  HeapBox def = HeapBox(data: []);
+  def.data.push(5);
+  def.data.push(6);
+  Holder hold = Holder(h: HeapBox(data: []));
+  hold.h = a ?: def; // none-path: def moved into field
+  assert(hold.h.data.len == 2, "member none owned-local default");
+}
+
+// --- index target, heap-user element ---
+
+t1166_index_none_borrowed_param(HeapBox? a, HeapBox b) int {
+  HeapBox[] v = [];
+  v.push(HeapBox(data: []));
+  v[0] = a ?: b; // none-path aliases borrowed b → clone
+  return v[0].data.len;
+}
+t_t1166_index_none_borrowed_param() `test {
+  HeapBox b = HeapBox(data: []);
+  b.data.push(1);
+  b.data.push(2);
+  r := t1166_index_none_borrowed_param(none, b);
+  assert(r == 2, "index none borrowed-param");
+  assert(b.data.len == 2, "b still owned by caller");
+}
+
+t1166_index_some_borrowed_param(HeapBox? a, HeapBox b) int {
+  HeapBox[] v = [];
+  v.push(HeapBox(data: []));
+  v[0] = a ?: b; // some-path aliases borrowed a's inner → clone
+  return v[0].data.len;
+}
+t_t1166_index_some_borrowed_param() `test {
+  HeapBox inner = HeapBox(data: []);
+  inner.data.push(4);
+  inner.data.push(5);
+  HeapBox? a = inner; // moves inner into a
+  HeapBox b = HeapBox(data: []);
+  r := t1166_index_some_borrowed_param(a, b); // borrows a and b
+  assert(r == 2, "index some borrowed-param");
+  assert(a!.data.len == 2, "a's inner still owned by caller");
+}
+
+// --- string field variant (dupString representation) ---
+
+type StrHolder {
+  string s;
+}
+t1166_string_none_borrowed_param(string? a, string b) int {
+  StrHolder h = StrHolder(s: "");
+  h.s = a ?: b; // none-path aliases borrowed b → dupString clone
+  return h.s.len;
+}
+t_t1166_string_field_none_borrowed_param() `test {
+  string b = "hello".repeat(3); // heap-allocated (not .rodata)
+  r := t1166_string_none_borrowed_param(none, b);
+  assert(r == 15, "string field none borrowed-param");
+  assert(b.len == 15, "b still owned by caller");
+}
+
+// --- vector field variant (dupVector + element clone) ---
+
+type VecHolder {
+  int[] v;
+}
+t1166_vec_none_borrowed_param(int[]? a, int[] b) int {
+  VecHolder h = VecHolder(v: []);
+  h.v = a ?: b; // none-path aliases borrowed b → dupVector clone
+  return h.v.len;
+}
+t_t1166_vec_field_none_borrowed_param() `test {
+  int[] b = [];
+  b.push(1);
+  b.push(2);
+  b.push(3);
+  r := t1166_vec_none_borrowed_param(none, b);
+  assert(r == 3, "vec field none borrowed-param");
+  assert(b.len == 3, "b still owned by caller");
+}
+
+// --- string/vec some-path borrowed param (some-branch clone of the vecOrStr
+// representation — the none-path tests above only exercise the none-branch clone) ---
+
+t1166_string_some_borrowed_param(string? a, string b) int {
+  StrHolder h = StrHolder(s: "");
+  h.s = a ?: b; // some-path aliases borrowed a's inner → dupString clone
+  return h.s.len;
+}
+t_t1166_string_field_some_borrowed_param() `test {
+  string? a = "world".repeat(2); // heap-allocated some-inner (10 chars)
+  string b = "";
+  r := t1166_string_some_borrowed_param(a, b); // borrows a and b
+  assert(r == 10, "string field some borrowed-param");
+  assert(a!.len == 10, "a's inner still owned by caller");
+}
+
+t1166_vec_some_borrowed_param(int[]? a, int[] b) int {
+  VecHolder h = VecHolder(v: []);
+  h.v = a ?: b; // some-path aliases borrowed a's inner → dupVector clone
+  return h.v.len;
+}
+t_t1166_vec_field_some_borrowed_param() `test {
+  int[] inner = [];
+  inner.push(1);
+  inner.push(2);
+  int[]? a = inner; // moves inner into a
+  int[] b = [];
+  r := t1166_vec_some_borrowed_param(a, b); // borrows a and b
+  assert(r == 2, "vec field some borrowed-param");
+  assert(a!.len == 2, "a's inner still owned by caller");
+}
+
+// --- index target, string element (index arm × dupString representation) ---
+
+t1166_index_string_none_borrowed_param(string? a, string b) int {
+  string[] v = [];
+  v.push("");
+  v[0] = a ?: b; // none-path aliases borrowed b → dupString clone into element
+  return v[0].len;
+}
+t_t1166_index_string_none_borrowed_param() `test {
+  string b = "abc".repeat(4); // 12 chars, heap-allocated
+  r := t1166_index_string_none_borrowed_param(none, b);
+  assert(r == 12, "index string none borrowed-param");
+  assert(b.len == 12, "b still owned by caller");
+}
+
+// --- gate-false: non-droppable (int) field target. `ownsForced` is signalled by
+// the member-target assign, but forceOwnClone is false (int is neither vecOrStr nor
+// heapDrop), so genElvis must NOT force-clone — a plain scalar select, no crash. ---
+
+type IntHolder {
+  int n;
+}
+t1166_intfield_none(int? a, int b) int {
+  IntHolder h = IntHolder(n: 0);
+  h.n = a ?: b; // int result: no drop, no clone
+  return h.n;
+}
+t_t1166_intfield_none_and_some() `test {
+  assert(t1166_intfield_none(none, 7) == 7, "int field none");
+  assert(t1166_intfield_none(42, 7) == 42, "int field some");
+}
+
+// NOTE: a Map/Set FIELD variant (`h.m = a ?: b`) would exercise the same
+// elvisResultHeapDrop → cloneResolvedValue path the heap-user variants above
+// already cover, but it currently trips a SEPARATE pre-existing leak — Map/Set
+// field reassignment does not drop the old container value in genMemberAssign
+// (reproducible with a plain `h.m = ownedMap`, no elvis). Tracked as T1167; a
+// Map/Set field elvis variant should be added there once the old-value drop lands.

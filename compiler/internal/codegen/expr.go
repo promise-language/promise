@@ -9343,9 +9343,26 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// is not itself the bound RHS, so it must not inherit this flag.
 	boundResult := c.elvisResultBound
 	c.elvisResultBound = false
+	// T1166: capture+reset the force-own-clone signal (set by the member/index
+	// assignment-target RHS-eval site in stmt.go). Reset so a nested elvis in
+	// e.Left/e.Right does not inherit it, exactly like elvisResultBound.
+	ownsForced := c.elvisResultOwnsForced
+	c.elvisResultOwnsForced = false
 	// T0940/T0981: defensively clear any stale per-path bound flag before this elvis
 	// computes its own. Consumed by the var-decl binding in stmt.go.
 	c.elvisBoundDropFlag = nil
+
+	// T1166: for a member/index owned target, precompute the cloneable-droppable gate
+	// and resolved result type once. Force-clone only the representations
+	// cloneResolvedValue handles safely — Vector/string (elvisResultDrop) and
+	// Map/Set/heap-user (elvisResultHeapDrop); single-owner native handles
+	// (elvisResultHandleDrop) are not cloneable and sema rejects those operand shapes.
+	_, _, vecOrStr := c.elvisResultDrop(e)
+	forceOwnClone := ownsForced && (vecOrStr || c.elvisResultHeapDrop(e) != nil)
+	resolvedElvisType := c.info.Types[e]
+	if c.typeSubst != nil && resolvedElvisType != nil {
+		resolvedElvisType = types.Substitute(resolvedElvisType, c.typeSubst)
+	}
 
 	// T0940: in a BOUND droppable context the var-decl set dup-on-read flags
 	// (T0095/B0219/T0366/…) so genFieldAccess/genVectorIndex CLONES a member/index
@@ -9377,7 +9394,7 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 
 	// Some path: extract inner value
 	c.block = someBlock
-	someVal := c.block.NewExtractValue(optVal, 1)
+	var someVal value.Value = c.block.NewExtractValue(optVal, 1) // T1166: widened for the force-own-clone reassignment below
 	// B0194/T0111: Clear drop flag on elvis of an *owned* optional identifier.
 	// The inner value is extracted and transferred to the result — the optional's
 	// scope-exit drop should NOT also free it (double-free). Peel ParenExpr so
@@ -9400,6 +9417,16 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		if ident, ok := unwrapDestructureParens(e.Left).(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
+	}
+	// T1166: member/index owned target — a borrowed some-path inner (someOwnsInner
+	// false: borrowed param or not-yet-cloned container source) must be deep-cloned so
+	// the field/element owns an independent copy. The container's unconditional
+	// field/element drop is then balanced; the caller/container keeps the original.
+	// Marks the result owned so trackElvisResultHeap/Temp register an owned temp that
+	// the member/index assign branch claims (identical to the working owned-local case).
+	if forceOwnClone && !someOwnsInner {
+		someVal = c.cloneResolvedValue(someVal, resolvedElvisType)
+		someOwnsInner = true
 	}
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block
@@ -9439,6 +9466,14 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		// the bound variable BORROWS it on the none-path. The inline (non-bound) case
 		// keeps borrow-on-none (T0951/T0937), so this is gated to boundResult.
 		noneOwned = c.neutralizeElvisNoneDefault(e, defaultVal)
+	}
+	// T1166: member/index owned target — a borrowed none-path default (noneOwned false:
+	// borrowed param / member / static, whose owner was NOT neutralized above) must be
+	// deep-cloned so the field/element owns its copy; the default's real owner keeps the
+	// original. Symmetric with the some-path clone.
+	if forceOwnClone && !noneOwned {
+		defaultVal = c.cloneResolvedValue(defaultVal, resolvedElvisType)
+		noneOwned = true
 	}
 	noneEnd := c.block
 	c.block.NewBr(mergeBlock)

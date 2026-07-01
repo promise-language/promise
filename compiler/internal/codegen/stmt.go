@@ -6800,19 +6800,28 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	// T0952: `m = a ?: b` — signal genElvis (as in genInferredVarDecl) so the
 	// none-path default's owner is neutralized; the assignment target owns the temp.
 	prevElvisBound := c.elvisResultBound
+	prevElvisOwnsForced := c.elvisResultOwnsForced // T1166
 	if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
 		c.elvisResultBound = true
+		// T1166: a member/index target is an owned field/element with no per-slot drop
+		// flag — it cannot hold a borrow-alias. Signal genElvis to force-clone a borrowed
+		// operand so the result is unconditionally owned (see elvisResultOwnsForced).
+		switch s.Target.(type) {
+		case *ast.MemberExpr, *ast.IndexExpr:
+			c.elvisResultOwnsForced = true
+		}
 	}
 	val := c.genExpr(s.Value)
 	c.elvisResultBound = prevElvisBound
+	c.elvisResultOwnsForced = prevElvisOwnsForced // T1166
 	// T1014: the assignment form `m = a ?: b` consumes the per-path bound flag for a
 	// simple-local IdentExpr target with a drop binding (mirrors consumeElvisBoundDropFlag
 	// on the var-decl path). Capture it here and clear the field immediately so a
 	// set-but-unconsumed flag can't leak into a later var-decl binding; the IdentExpr
 	// OpAssign branch below stores it into the target's drop flag, overriding the
-	// unconditional `1` the drop-old re-arm writes. Member/index targets are not yet
-	// handled (their aliasing needs its own analysis) — the captured flag is simply
-	// discarded for them, preserving the prior clear-and-ignore behavior.
+	// unconditional `1` the drop-old re-arm writes. Member/index targets do not use this
+	// flag — T1166 handles their aliasing by force-cloning a borrowed elvis operand (see
+	// elvisResultOwnsForced above) so the field/element is unconditionally owned.
 	elvisBoundFlag := c.elvisBoundDropFlag
 	c.elvisBoundDropFlag = nil
 	c.targetType = nil

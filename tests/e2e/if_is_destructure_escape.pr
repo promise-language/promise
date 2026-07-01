@@ -140,8 +140,9 @@ code_escape() `test {
 // owning sink sets), so the escaped value is independently owned and the subject's
 // synth enum drop still frees the original exactly once. The escape cases live in
 // the "T1170 escape" section below. In-scope reads (no dup flag) stay zero-copy.
-// Out-of-scope for T1170 (tracked separately): whole fixed-array-VALUE escape
-// `return a`/`x = a` (T1173) and Optional[user-type] escape (T1174).
+// Optional[heap-user-type] escape (e.g. `Row?`) is the sibling fix T1174 — see
+// the T1174 section at the end of this file. Out-of-scope (tracked separately):
+// whole fixed-array-VALUE escape `return a`/`x = a` (T1173).
 
 enum OptBox {
   Has(string? maybe), Nothing,
@@ -378,4 +379,266 @@ vec_ret_impl() int[]? {
 }
 vec_ret_escape() `test {
   assert(vec_len(vec_ret_impl()) == 2, "opt[Vector] return escape (match)");
+}
+
+// --- T1174: Optional[heap-user-type] variant payload escaping if-is / match ---
+// Sibling to T1170 (string?/Array). An `Optional[heap-user]` variant field (e.g.
+// `Row?`) bound via `if is`/`match` is match-borrowed (matchBindingIsBorrow →
+// borrowInnerHasDrop): it aliases the subject's variant payload. In-scope reads
+// are sound (subject outlives the narrowing), but escaping the binding out of the
+// scope was a use-after-free (SIGSEGV) — the subject's synth enum drop freed the
+// payload at scope exit. The fix (dupBorrowedOptionalHeapUser) deep-clones the
+// inner heap value at each escape site so the destination owns an independent
+// copy while the subject's drop still frees the original exactly once. In-scope
+// bindings stay zero-copy (the dup is gated to explicit escape sites, not a
+// read-side flag — preserving the T0512 nested-Optional invariant).
+type T1174Row {
+  string name;
+}
+enum T1174Box {
+  Has(T1174Row? maybe), Nothing,
+}
+type T1174Wrap {
+  T1174Row? held;
+}
+
+t1174_name(T1174Row? move r) string {
+  if row := r {
+    return row.name;
+  }
+  return "none";
+}
+
+// if-is: return escape (the reported repro).
+t1174_ret_ifis_impl() T1174Row? {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "a" + "b"));
+  if b is Has(maybe) {
+    return maybe; // out aliases b's payload; b dropped at scope exit
+  }
+  return none;
+}
+t1174_ret_ifis() `test {
+  assert(t1174_name(t1174_ret_ifis_impl()) == "ab", "if-is return escape survives");
+}
+
+// if-is: store-to-escaping-outer.
+t1174_store_ifis_impl() T1174Row? {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "c" + "d"));
+  T1174Row? out = none;
+  if b is Has(maybe) {
+    out = maybe;
+  }
+  return out;
+}
+t1174_store_ifis() `test {
+  assert(t1174_name(t1174_store_ifis_impl()) == "cd", "if-is store-to-outer escape survives");
+}
+
+// match: return escape.
+t1174_ret_match_impl() T1174Row? {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "e" + "f"));
+  match b {
+    Has(maybe) => {
+      return maybe;
+    },
+    Nothing => {
+      return none;
+    },
+  }
+}
+t1174_ret_match() `test {
+  assert(t1174_name(t1174_ret_match_impl()) == "ef", "match return escape survives");
+}
+
+// match: store-to-escaping-outer.
+t1174_store_match_impl() T1174Row? {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "g" + "h"));
+  T1174Row? out = none;
+  match b {
+    Has(maybe) => {
+      out = maybe;
+    },
+    Nothing => {
+    },
+  }
+  return out;
+}
+t1174_store_match() `test {
+  assert(t1174_name(t1174_store_match_impl()) == "gh", "match store-to-outer escape survives");
+}
+
+// Consuming-arg escape (~ move param).
+t1174_consume(T1174Row? move r) string {
+  if row := r {
+    return row.name;
+  }
+  return "none";
+}
+t1174_consume_arg_impl() string {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "i" + "j"));
+  if b is Has(maybe) {
+    return t1174_consume(move maybe);
+  }
+  return "none";
+}
+t1174_consuming_arg() `test {
+  assert(t1174_consume_arg_impl() == "ij", "payload moved into consuming param");
+}
+
+// Constructor-field escape: the borrowed payload is stored into an owned field.
+// Reading an Optional[heap-user] field back out is a partial-move (rejected by
+// sema), so the assertion here is drop-safety: the wrapper's field drop and the
+// subject's synth enum drop must not free the same allocation (double-free /
+// leak). Without the constructor-arg dup this SIGSEGVs; the leak checker also
+// guards against an aliasing regression.
+t1174_ctor_field_impl() bool {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "k" + "l"));
+  bool ok = false;
+  if b is Has(maybe) {
+    T1174Wrap w = T1174Wrap(held: maybe);
+    ok = true;
+    // w and b both drop at scope exit — must be independent copies.
+  }
+  return ok;
+}
+t1174_constructor_field() `test {
+  assert(t1174_ctor_field_impl(), "payload copied into constructor field (drop-safe)");
+}
+
+// In-scope guard: no escape → zero-copy borrow, correct value, no leak. An
+// over-eager dup here would be caught by the leak checker.
+t1174_inscope() `test {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "m" + "n"));
+  if b is Has(maybe) {
+    if r := maybe {
+      assert(r.name == "mn", "in-scope Optional[heap-user] read");
+    } else {
+      assert(false, "expected some");
+    }
+  }
+  // Subject still usable after the borrow-narrowing `if`.
+  if b is Has(again) {
+    if r := again {
+      assert(r.name == "mn", "subject intact after if");
+    }
+  }
+}
+
+// Vector-push escape: `v.push(maybe)` moves the borrowed Optional[heap-user]
+// payload into a vector (sema treats the destructure binding as owned, so the
+// push type-checks). The push path is a native special-case that bypasses the
+// escape-site dups above — it must deep-clone the Optional[heap-user] element
+// itself (maybeDupPushElement's Optional branch) or the vector slot aliases the
+// subject's payload → double-free when both drop.
+t1174_push_ifis_impl() T1174Row? {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "o" + "p"));
+  T1174Row?[] v = [];
+  if b is Has(maybe) {
+    v.push(maybe);
+  }
+  T1174Row? out = none;
+  if v.len > 0 {
+    out = v[0];
+  }
+  return out;
+}
+t1174_push_ifis() `test {
+  assert(t1174_name(t1174_push_ifis_impl()) == "op", "vec push escape survives");
+}
+
+// Vector[Optional[heap-user]] slice: `v[a:b]` copies each element slot. Without
+// the same Optional[heap-user] element dup, the sliced vector's slot aliases the
+// source vector's payload → double-free at drop. (Pre-existing, independent of
+// if-is; shares maybeDupPushElement's Optional branch.)
+t1174_slice_impl() T1174Row?[] {
+  T1174Row?[] v = [];
+  v.push(T1174Row(name: "q" + "r"));
+  v.push(T1174Row(name: "s" + "t"));
+  return v[0:1];
+}
+t1174_slice() `test {
+  T1174Row?[] s = t1174_slice_impl();
+  assert(s.len == 1, "sliced length");
+  if r := s[0] {
+    assert(r.name == "qr", "sliced Optional[heap-user] element intact");
+  } else {
+    assert(false, "expected some in slice");
+  }
+}
+
+// --- T1174 coverage gaps: member/index assign targets + no-drop heap-user ---
+// The escape-site dup in genAssignStmt runs on `val` before dispatch to
+// genMemberAssign / genIndexAssign, so a member- or index-target assignment of a
+// match-borrowed Optional[heap-user] payload must be as drop-safe as the plain
+// ident-target case above. And optionalHeapDupElem admits BOTH droppable heap
+// user types (T1174Row, via isDroppableHeapUserType) AND no-drop-but-heap types
+// (via isHeapUserNoDropPalFree); the tests above only exercise the droppable
+// branch. These pin the remaining branches.
+
+// no-drop heap user type: all-scalar field → heap-allocated but no drop/synth-drop
+// (isHeapUserNoDropPalFree). Escaping `P?` must still deep-clone (pal_free path),
+// else the returned alias is freed by the subject's synth enum drop → UAF.
+type T1174P {
+  int x;
+}
+enum T1174PBox {
+  Has(T1174P? maybe), Nothing,
+}
+t1174_p_value(T1174P? move r) int {
+  if p := r {
+    return p.x;
+  }
+  return -1;
+}
+t1174_nodrop_ret_impl() T1174P? {
+  T1174PBox b = T1174PBox.Has(maybe: T1174P(x: 41 + 1));
+  if b is Has(maybe) {
+    return maybe;
+  }
+  return none;
+}
+t1174_nodrop_ret() `test {
+  assert(t1174_p_value(t1174_nodrop_ret_impl()) == 42, "no-drop heap-user return escape survives");
+}
+
+// member-target assign: `hold.h = maybe` stores the borrowed payload into an owned
+// field. genMemberAssign drops the old field value and takes the fresh clone; the
+// subject's synth enum drop still frees the original once. Drop-safety (no
+// double-free / leak) is the invariant — reading an Optional[heap-user] field back
+// out is a partial move (sema-rejected), so we assert via a scalar sibling field.
+type T1174Hold {
+  T1174Row? h;
+  int tag;
+}
+t1174_member_impl() int {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "u" + "v"));
+  T1174Hold hold = T1174Hold(h: none, tag: 0);
+  if b is Has(maybe) {
+    hold.h = maybe; // drops old `none`, takes independent clone
+    hold.tag = 7;
+  }
+  return hold.tag;
+}
+t1174_member_target() `test {
+  assert(t1174_member_impl() == 7, "member-target Optional[heap-user] assign escape drop-safe");
+}
+
+// index-target assign: `v[0] = maybe` overwrites a vector slot. genIndexAssign
+// drops the old slot value and stores the fresh clone; the sliced/read-back value
+// is an independent copy, and both the vector and subject drop exactly once.
+t1174_index_impl() T1174Row? {
+  T1174Box b = T1174Box.Has(maybe: T1174Row(name: "w" + "x"));
+  T1174Row?[] v = [];
+  v.push(none);
+  if b is Has(maybe) {
+    v[0] = maybe;
+  }
+  T1174Row? out = none;
+  if v.len > 0 {
+    out = v[0];
+  }
+  return out;
+}
+t1174_index_target() `test {
+  assert(t1174_name(t1174_index_impl()) == "wx", "index-target Optional[heap-user] assign escape survives");
 }

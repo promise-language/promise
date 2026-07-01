@@ -3104,6 +3104,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 					c.dupContainerFieldAccess = false
 					c.dupHeapUserFieldAccess = false // T0847
 					c.targetType = nil
+					// T1174: `Wrapper(held: maybe)` where maybe is a match-borrowed
+					// Optional[heap-user] binding aliases the subject's variant payload;
+					// deep-clone the inner so the new instance owns an independent copy.
+					val, _ = c.dupBorrowedOptionalHeapUser(arg.Value, val)
 				}
 			} else {
 				// T0411: Auto-dup string/container fields read from a droppable
@@ -3113,6 +3117,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				c.dupStringFieldAccess = false
 				c.dupContainerFieldAccess = false
 				c.dupHeapUserFieldAccess = false // T0847
+				// T1174: match-borrowed Optional[heap-user] binding used to
+				// initialize an owned field — deep-clone (see the optional-field
+				// branch above).
+				val, _ = c.dupBorrowedOptionalHeapUser(arg.Value, val)
 			}
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
@@ -6016,6 +6024,13 @@ func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
 	if _, isTup := resolvedElem.(*types.Tuple); isTup {
 		return c.tupleNeedsDrop(resolvedElem)
 	}
+	// T1174: Optional[heap-user-type] elements alias their inner heap payload —
+	// they must be deep-cloned on push (kept in sync with maybeDupPushElement's
+	// Optional branch). extractNamed does not see through the Optional wrapper,
+	// so without this the container/enum/user checks below all miss it.
+	if c.optionalElemNeedsHeapDup(resolvedElem) {
+		return true
+	}
 	named := extractNamed(resolvedElem)
 	if named == nil {
 		if en := extractEnum(resolvedElem); en != nil {
@@ -6081,6 +6096,20 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 	// emitVariantFieldDup's Signature case and emitVectorClosureNullLoop.
 	if _, isSig := resolvedElem.(*types.Signature); isSig {
 		return constant.NewZeroInitializer(argVal.Type())
+	}
+
+	// T1174: Optional[heap-user-type] element — deep-clone the inner heap value so
+	// each vector slot owns an independent copy. The named/enum branches below
+	// don't see through the Optional wrapper (extractNamed returns nil), so a
+	// pushed Optional[Row] would otherwise alias the source payload (a
+	// match-borrowed `if b is Has(maybe)` binding pushed into a vector, or the
+	// element read in a Vector[Row?] slice) and double-free when both the source
+	// and the vector drop. dupHeapValue is null-safe (handles the `none` slot via
+	// a phi) and dispatches through typeinfo clone_fn for polymorphic subtypes.
+	if inner, ok := c.optionalHeapDupElem(resolvedElem); ok {
+		innerVal := c.block.NewExtractValue(argVal, 1)
+		dup := c.dupHeapValue(innerVal, inner)
+		return c.block.NewInsertValue(argVal, dup, 1)
 	}
 
 	named := extractNamed(resolvedElem)
@@ -6647,6 +6676,14 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
 		c.dupHeapUserFieldAccess = false // T0403
+		// T1174: `consume(move maybe)` where maybe is a match-borrowed
+		// Optional[heap-user] binding passed to a `~` (move) param aliases the
+		// subject's variant payload; deep-clone the inner so the callee owns an
+		// independent copy and the subject's synth enum drop still frees the original
+		// exactly once. Borrow (`&`) params leave the alias intact (no escape).
+		if isMutRefParam {
+			v, _ = c.dupBorrowedOptionalHeapUser(arg.Value, v)
+		}
 		argVals = append(argVals, v)
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// T0087: For ~ (move) params, transfer ownership to callee.
@@ -12685,6 +12722,90 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 	}
 
 	return val, false
+}
+
+// dupBorrowedOptionalHeapUser deep-clones the inner heap payload of a
+// match-borrowed `Optional[heap-user-type]` ident so a value ESCAPING the `if
+// is`/`match` narrowing scope owns it independently (T1174). Such a binding
+// (T0485/T1012, see matchBindingIsBorrow) merely ALIASES the subject's variant
+// payload — the subject's synth enum drop frees the original at scope exit, so
+// an escaped alias is a use-after-free (segfault). This is the plain-ident
+// analogue of the field-access dup in dupHeapFieldForEscape and the
+// container-index dup in genMethodIndex/genVectorIndex (the `optionalHeapDup`
+// path): extract the inner value struct, deep-clone it, and re-insert it into
+// the Optional.
+//
+// Returns (dupedVal, true) when a dup was performed — the escape destination
+// (return value / assignment target / consuming `~` param / constructor field)
+// then owns the fresh inner via its normal drop machinery, and the subject's
+// synth enum drop still frees the original exactly once. Returns (val, false)
+// for any other expr/type so callers can use it as a transparent pass-through.
+//
+// Deliberately NOT routed through a read-side flag (dupHeapUserFieldAccess): that
+// flag is also set by genIfUnwrapStmt for the IN-SCOPE `if r := maybe` unwrap,
+// which must stay zero-copy (the T0512 nested-Optional invariant). Gating on an
+// explicit escape-site call keeps in-scope borrows alias-only.
+//
+// dupHeapValue is null-safe (handles the optional's `none` path via a phi) and
+// dispatches through the type's typeinfo clone_fn for polymorphic subtypes
+// (T0387); it also deep-clones droppable sub-fields (e.g. Row.name), so no
+// shallow alias leaks.
+func (c *Compiler) dupBorrowedOptionalHeapUser(expr ast.Expr, val value.Value) (value.Value, bool) {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return val, false
+	}
+	ident, ok := unwrapDestructureParens(expr).(*ast.IdentExpr)
+	if !ok {
+		return val, false
+	}
+	if c.matchBorrowedIdents == nil || !c.matchBorrowedIdents[ident.Name] {
+		return val, false
+	}
+	t := c.info.Types[ident]
+	if c.typeSubst != nil && t != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	inner, ok := c.optionalHeapDupElem(t)
+	if !ok {
+		return val, false
+	}
+	// val must be the Optional struct { i1 present, T_v value }.
+	if _, isStruct := val.Type().(*irtypes.StructType); !isStruct {
+		return val, false
+	}
+	innerVal := c.block.NewExtractValue(val, 1)
+	dup := c.dupHeapValue(innerVal, inner)
+	return c.block.NewInsertValue(val, dup, 1), true
+}
+
+// optionalHeapDupElem reports whether typ is an Optional whose element is a heap
+// user type (droppable, or no-drop-but-pal-free) — the shape whose value struct
+// merely ALIASES an inner heap instance, so it must be deep-cloned whenever a
+// copy escapes the original owner (a match-borrowed variant payload, or a
+// container element slot). Returns the resolved inner element type and true when
+// so, else (nil, false). Single recognition point shared by
+// dupBorrowedOptionalHeapUser (escape-site dup) and maybeDupPushElement /
+// pushElemNeedsDup (vector-push + slice dup) so the two stay in sync (T1174).
+func (c *Compiler) optionalHeapDupElem(typ types.Type) (types.Type, bool) {
+	opt, ok := typ.(*types.Optional)
+	if !ok {
+		return nil, false
+	}
+	inner := opt.Elem()
+	if c.typeSubst != nil {
+		inner = types.Substitute(inner, c.typeSubst)
+	}
+	if isDroppableHeapUserType(inner) || isHeapUserNoDropPalFree(inner) {
+		return inner, true
+	}
+	return nil, false
+}
+
+// optionalElemNeedsHeapDup is the boolean form of optionalHeapDupElem for callers
+// that only need the yes/no (pushElemNeedsDup). T1174.
+func (c *Compiler) optionalElemNeedsHeapDup(resolvedElem types.Type) bool {
+	_, ok := c.optionalHeapDupElem(resolvedElem)
+	return ok
 }
 
 // enumThisSubject converts a `this` enum receiver (an i8* pointer returned by

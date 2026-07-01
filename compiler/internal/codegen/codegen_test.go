@@ -22999,6 +22999,96 @@ func TestT1170OptionalPayloadEscapeDupsOnMatch(t *testing.T) {
 	assertContains(t, fn, "strdup.copy")
 }
 
+// T1174: an Optional-of-heap-user-type variant payload (`Row? maybe`) that
+// ESCAPES `if is`/`match` (return / store-to-outer / consuming arg / constructor
+// field) must be deep-cloned via dupBorrowedOptionalHeapUser — otherwise the
+// bound alias points into the subject's variant payload, which the subject's
+// synth enum drop frees at scope exit (UAF / SIGSEGV). The clone lowers to a
+// dupHeapValue `heapdup.copy` block in the escaping function.
+func TestT1174OptionalHeapUserPayloadEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Has(Row? maybe), Nothing }
+		esc() Row? {
+			Box b = Box.Has(maybe: Row(name: "a" + "b"));
+			if b is Has(maybe) { return maybe; }
+			return none;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	// Escaping the borrowed Optional[Row] payload deep-clones the inner heap value.
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1174 over-application guard: an in-scope-only Optional[heap-user] binding must
+// stay a zero-copy borrow (no dup) — the subject outlives the narrowing and its
+// synth enum drop frees the payload exactly once. The dup is gated to explicit
+// escape sites, so no `heapdup.copy` is emitted here (preserving the T0512
+// nested-Optional zero-copy invariant). An over-eager dup would also leak.
+func TestT1174OptionalHeapUserPayloadInScopeNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Has(Row? maybe), Nothing }
+		rd() int {
+			Box b = Box.Has(maybe: Row(name: "a" + "b"));
+			int out = 0;
+			if b is Has(maybe) { if r := maybe { out = r.name.len; } }
+			return out;
+		}
+		main() { x := rd(); }
+	`)
+	fn := extractFunction(ir, "__user.rd")
+	assertNotContains(t, fn, "heapdup.copy")
+}
+
+// T1174: `v.push(maybe)` moves a match-borrowed Optional[heap-user] payload into
+// a vector. Push is a native special-case that bypasses the escape-site dups, so
+// it must deep-clone the Optional[heap-user] element in maybeDupPushElement's
+// Optional branch — otherwise the vector slot aliases the subject's variant
+// payload and double-frees when both drop. The clone lowers to a dupHeapValue
+// `heapdup.copy` block. Also covers the pre-existing Vector[Row?] slice path,
+// which shares the same maybeDupPushElement branch.
+func TestT1174OptionalHeapUserPushDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Has(Row? maybe), Nothing }
+		esc() Row?[] {
+			Box b = Box.Has(maybe: Row(name: "a" + "b"));
+			Row?[] v = [];
+			if b is Has(maybe) { v.push(maybe); }
+			return v;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1174: optionalHeapDupElem admits BOTH droppable heap-user types (via
+// isDroppableHeapUserType — the Row-with-string cases above) AND no-drop-but-heap
+// user types (via isHeapUserNoDropPalFree — a heap type whose fields need no
+// drop). This pins the second branch: a `P?` payload (`type P { int x; }`, heap-
+// allocated, pal_free-only, no synth drop) escaping `if is` must still deep-clone
+// the inner via dupHeapValue, else the returned alias is freed by the subject's
+// synth enum drop at scope exit (UAF). A value type would be copied by value and
+// route past optionalHeapDupElem, so the presence of `heapdup.copy` confirms the
+// no-drop heap branch is taken.
+func TestT1174OptionalNoDropHeapUserPayloadEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type P { int x; }
+		enum Box { Has(P? maybe), Nothing }
+		esc() P? {
+			Box b = Box.Has(maybe: P(x: 42));
+			if b is Has(maybe) { return maybe; }
+			return none;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "heapdup.copy")
+}
+
 // B0007: Verify that channel recv alloca is in coro.start (entry block),
 // not in the chrecv.read block.
 func TestChannelRecvAllocaInEntryBlock(t *testing.T) {

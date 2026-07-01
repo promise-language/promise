@@ -9541,20 +9541,33 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 	// Then: extract fields and bind them
 	c.block = thenBlock
 
-	// Save previous locals that might be shadowed by bindings
+	// Save previous locals that might be shadowed by bindings.
+	// T1012: also snapshot each binding's matchBorrowedIdents membership —
+	// bindIsDestructureEnum may mark an Optional/Array payload binding as
+	// match-borrowed (T0485), and that mark must not leak past the then-block to
+	// a later same-named binding (mirrors the per-arm snapshot in genEnumMatch).
 	type savedLocal struct {
-		name string
-		val  *ir.InstAlloca
-		had  bool
+		name      string
+		val       *ir.InstAlloca
+		had       bool
+		wasBorrow bool
 	}
 	var saved []savedLocal
 	for _, b := range narrow.Bindings {
 		if b.VarName != "_" {
 			prev, had := c.locals[b.VarName]
-			saved = append(saved, savedLocal{b.VarName, prev, had})
+			wasBorrow := c.matchBorrowedIdents != nil && c.matchBorrowedIdents[b.VarName]
+			saved = append(saved, savedLocal{b.VarName, prev, had, wasBorrow})
 		}
 	}
 
+	// T1012: capture the scope-binding watermark before binding. When the enum
+	// is droppable and a heap payload is dup'd for escape safety, the dup's drop
+	// binding is appended here — BEFORE genBlock captures its own savedScopeLen —
+	// so genBlock won't clean it on the fall-through path. We clean [watermark:]
+	// ourselves at the then-block fall-through terminator below (escape paths
+	// inside the body already walk emitScopeCleanup down to 0).
+	bindWatermark := len(c.scopeBindings)
 	if narrow.IsEnum {
 		c.bindIsDestructureEnum(subject, narrow)
 	} else {
@@ -9563,18 +9576,33 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 
 	c.genBlock(s.Body)
 
-	// Restore previous locals
+	// Restore previous locals and borrow marks
 	for _, s := range saved {
 		if s.had {
 			c.locals[s.name] = s.val
 		} else {
 			delete(c.locals, s.name)
 		}
+		// T1012: restore matchBorrowedIdents to its pre-binding state.
+		if s.wasBorrow {
+			if c.matchBorrowedIdents == nil {
+				c.matchBorrowedIdents = make(map[string]bool)
+			}
+			c.matchBorrowedIdents[s.name] = true
+		} else if c.matchBorrowedIdents != nil {
+			delete(c.matchBorrowedIdents, s.name)
+		}
 	}
 
 	if c.block.Term == nil {
+		// T1012: free any dup'd destructure bindings at then-block exit
+		// (scope-accurate; zero-leak). No-op when nothing was registered.
+		if len(c.scopeBindings) > bindWatermark {
+			c.emitScopeCleanup(bindWatermark, false)
+		}
 		c.block.NewBr(mergeBlock)
 	}
+	c.scopeBindings = c.scopeBindings[:bindWatermark]
 
 	// Else branch
 	if s.Else != nil {
@@ -9589,6 +9617,21 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 }
 
 // bindIsDestructureEnum extracts enum variant data fields and binds them to local variables.
+//
+// T1012: mirrors the match path's dup-and-own semantics (bindEnumDestructure).
+// A raw GEP+load binding merely ALIASES the subject's payload — safe for an
+// in-scope read (the subject's synth enum drop frees it once) but a use-after-
+// free when a heap-typed (string/vector) binding escapes the narrowing scope
+// (return / store-to-outer / consuming arg / constructor field), since the
+// subject is dropped at scope exit. When the enum is droppable and a field
+// needs dup, deep-clone the payload and register a drop for the binding (the
+// clearDropFlag move-site machinery clears that flag on escape, so the escaped
+// value is owned by its consumer and the subject's synth drop still frees the
+// original exactly once). Value/numeric payloads stay zero-copy.
+//
+// Deliberately does NOT port the T0623 armMoves / nullSubjectHandleSlot logic:
+// `if is` narrowing is a pure borrow of the subject (the subject stays live
+// after the `if`), so the subject's variant slot must never be nulled.
 func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDestructureNarrowing) {
 	// B0112: apply type substitution for generic method bodies
 	targetType := narrow.TargetType
@@ -9599,6 +9642,18 @@ func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDes
 	dataType := enumLayout.VariantDataTypes[narrow.VariantName]
 	if dataType == nil {
 		return
+	}
+
+	// T1012: resolve the enum origin + variant (declared, pre-substitution field
+	// types) and whether the subject enum is droppable — the dup helpers below
+	// expect the declared field type + subject type + enum, exactly as the match
+	// path (bindEnumDestructure) does.
+	enum := extractEnum(targetType)
+	var variant *types.Variant
+	enumHasDrop := false
+	if enum != nil {
+		variant = enum.LookupVariant(narrow.VariantName)
+		enumHasDrop = c.enumInstanceHasDrop(targetType, enum)
 	}
 
 	internalType := enumLayout.EnumInternalType.(*irtypes.StructType)
@@ -9620,6 +9675,36 @@ func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDes
 		fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		val := c.block.NewLoad(fieldType, fieldPtr)
+
+		// T1012: dup droppable heap payloads so the binding owns an independent
+		// copy that escapes safely (match-parity via the shared helpers). Value/
+		// numeric payloads (matchFieldNeedsDup == false) stay zero-copy.
+		if enumHasDrop && variant != nil && i < variant.NumFields() {
+			declaredFieldType := variant.Fields()[i].Type()
+			resolved := c.resolveMatchFieldType(declaredFieldType, targetType, enum)
+			// T1012: a single-owner-handle payload (Task/Mutex/MutexGuard, possibly
+			// nested) is NOT dup-cloneable — cloneResolvedValue would produce an
+			// invalid copy (crash). `if is` narrowing is a pure borrow of the
+			// subject (unlike match, this path intentionally skips the T0623
+			// move-out), so keep such a field a plain non-owning alias: the subject
+			// drops the handle exactly once. matchFieldNeedsDup can report true for
+			// a handle-bearing field (the match path relies on its T0623 branch
+			// running first), so this guard must precede the dup branch.
+			if sema.FirstNestedSingleOwnerHandle(resolved) == nil &&
+				!c.suppressMatchDup && c.matchFieldNeedsDup(declaredFieldType, targetType, enum) {
+				c.dupMatchBinding(b.VarName, val, fieldType, resolved)
+				continue
+			}
+			// T0485: an Optional/Array payload binding aliases the variant data
+			// (which the synth enum drop owns). Mark it match-borrowed so a later
+			// `if x := optBinding`-style unwrap doesn't double-transfer ownership.
+			if c.matchBindingIsBorrow(resolved) {
+				if c.matchBorrowedIdents == nil {
+					c.matchBorrowedIdents = make(map[string]bool)
+				}
+				c.matchBorrowedIdents[b.VarName] = true
+			}
+		}
 
 		bindAlloca := c.createEntryAlloca(fieldType)
 		c.block.NewStore(val, bindAlloca)

@@ -1,0 +1,192 @@
+// T1012: `if x is V(field) { … }` destructure binding of a heap variant field
+// must not use-after-free when the binding escapes the narrowing scope. The
+// bound heap payload is deep-cloned so it escapes safely, while in-scope
+// bindings remain correct and numeric/value payloads stay zero-copy.
+enum Msg {
+  Text(string body), Code(int n),
+}
+enum Items {
+  List(int[] xs), Empty,
+}
+enum Pair {
+  Both(string s, int n), None,
+}
+
+// --- Return escape (the reported repro) ---
+
+return_escape_impl() string {
+  Msg m = Msg.Text(body: "a" + "b"); // m owns the heap string
+  if m is Text(body) {
+    return body;
+  }
+  // body escapes; m dropped at scope exit
+  return "";
+}
+
+return_escape() `test {
+  assert(return_escape_impl() == "ab", "returned heap payload survives");
+}
+
+// --- Store-to-outer escape ---
+
+store_to_outer() `test {
+  Msg m = Msg.Text(body: "x" + "y");
+  string out = "";
+  if m is Text(body) {
+    out = body;
+  }
+  assert(out == "xy", "stored-to-outer payload survives");
+}
+
+// --- Consuming-arg escape (~string param) ---
+
+consume(string move s) string {
+  return s + "!";
+}
+
+consuming_arg() `test {
+  Msg m = Msg.Text(body: "h" + "i");
+  string r = "";
+  if m is Text(body) {
+    r = consume(move body);
+  }
+  assert(r == "hi!", "payload moved into consuming param");
+}
+
+// --- Constructor-field escape ---
+
+type Wrapper {
+  string held;
+}
+
+constructor_field() `test {
+  Msg m = Msg.Text(body: "w" + "z");
+  string r = "";
+  if m is Text(body) {
+    Wrapper w = Wrapper(held: move body);
+    r = w.held;
+  }
+  assert(r == "wz", "payload moved into constructor field");
+}
+
+// --- Vector payload escape by return ---
+
+vec_escape_impl() int[] {
+  int[] base = [1, 2, 3];
+  Items it = Items.List(xs: move base);
+  if it is List(xs) {
+    return xs;
+  }
+  return[];
+}
+
+vec_escape() `test {
+  int[] v = vec_escape_impl();
+  assert(v.len == 3, "vector length preserved");
+  assert(v[0] == 1 && v[1] == 2 && v[2] == 3, "vector contents preserved");
+}
+
+// --- In-scope only: subject stays intact (not nulled) after the `if` ---
+
+in_scope_no_escape() `test {
+  Msg m = Msg.Text(body: "a" + "bc");
+  if m is Text(body) {
+    assert(body.len == 3, "in-scope read");
+  }
+  // Subject must still be usable after the borrow-narrowing `if`.
+  if m is Text(again) {
+    assert(again == "abc", "subject intact after if");
+  }
+}
+
+// --- Multi-field variant: per-field dup selection (heap + numeric) ---
+
+multi_field_impl() string {
+  Pair p = Pair.Both(s: "k" + "v", n: 42);
+  if p is Both(s, n) {
+    assert(n == 42, "numeric field zero-copy");
+    return s;
+  }
+  return "";
+}
+
+multi_field() `test {
+  assert(multi_field_impl() == "kv", "heap field of multi-field variant escapes");
+}
+
+// --- Numeric-only payload: no clone, correct value ---
+
+code_escape_impl() int {
+  Msg m = Msg.Code(n: 7);
+  if m is Code(n) {
+    return n;
+  }
+  return 0;
+}
+
+code_escape() `test {
+  assert(code_escape_impl() == 7, "numeric payload correct");
+}
+
+// --- Optional / fixed-array heap payloads: T0485 borrow-mark path ---
+// A variant field whose type is Optional-of-heap or fixed-Array-of-heap is
+// NOT dup'd by T1012; instead bindIsDestructureEnum marks the binding
+// match-borrowed (matchBindingIsBorrow / borrowInnerHasDrop). The binding
+// aliases the subject's payload, which is sound as long as the read stays
+// in-scope (the subject outlives the `if`). These pin that in-scope path.
+// NOTE: escaping such a binding (return / store-to-escaping-outer) is a
+// separate, still-open soundness gap shared with `match` — tracked as T1170
+// (Optional/Array variant-payload escape UAF); do NOT add escape cases here
+// until that is fixed (they would UAF).
+
+enum OptBox {
+  Has(string? maybe), Nothing,
+}
+enum ArrHolder {
+  Pair(string[2] a), Empty,
+}
+
+// Optional heap payload unwrapped in-scope (subject still alive).
+opt_payload_unwrap() `test {
+  OptBox b = OptBox.Has(maybe: "x" + "y");
+  if b is Has(maybe) {
+    if s := maybe {
+      assert(s == "xy", "unwrapped optional payload in scope");
+    } else {
+      assert(false, "expected some");
+    }
+  }
+}
+
+// Optional heap payload copied to a same-scope local, read while subject alive.
+opt_payload_store_inscope() `test {
+  OptBox b = OptBox.Has(maybe: "p" + "q");
+  string? out = none;
+  if b is Has(maybe) {
+    out = maybe;
+  }
+  // `b` (the subject) is still alive here, so the alias is valid.
+  if s := out {
+    assert(s == "pq", "optional payload readable while subject alive");
+  } else {
+    assert(false, "expected some");
+  }
+}
+
+// none-valued optional payload: elvis fallback, no unwrap.
+opt_payload_none() `test {
+  string? empty = none;
+  OptBox b = OptBox.Has(maybe: move empty);
+  if b is Has(maybe) {
+    string got = maybe ?: "fallback";
+    assert(got == "fallback", "none optional payload uses fallback");
+  }
+}
+
+// Fixed-array heap payload read in-scope.
+arr_payload_inscope() `test {
+  ArrHolder h = ArrHolder.Pair(a: ["p" + "1", "q" + "2"]);
+  if h is Pair(a) {
+    assert(a[0] == "p1" && a[1] == "q2", "fixed-array heap payload in-scope read");
+  }
+}

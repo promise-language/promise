@@ -22776,6 +22776,71 @@ func TestIsDestructureAsExprCodegen(t *testing.T) {
 	assertContains(t, ir, "icmp eq i32")
 }
 
+// T1012: `if x is V(field)` destructuring a heap payload of a DROPPABLE enum
+// must deep-clone the payload and register a drop for the binding, so an escaped
+// binding (return / store-to-outer) owns an independent copy — otherwise it
+// aliases the subject's payload and dangles when the subject is dropped (UAF).
+func TestT1012IfIsDestructureHeapFieldDupsOnDroppableEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		make() string {
+			Msg m = Msg.Text(body: "a" + "b");
+			if m is Text(body) { return body; }
+			return "";
+		}
+		main() { s := make(); }
+	`)
+	fn := extractFunction(ir, "__user.make")
+	// The heap payload is dup'd via cloneResolvedValue (string clone block).
+	assertContains(t, fn, "strdup.copy")
+	// The binding gets a drop flag registered (dropped on fall-through, cleared
+	// on move at the return site).
+	assertContains(t, fn, "body.dropflag")
+}
+
+// T1012 negative control: an int payload binding must NOT be cloned — value/
+// numeric payloads stay zero-copy (criterion #3).
+func TestT1012IfIsDestructureNumericFieldNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Text(string body), Code(int n) }
+		grab() int {
+			Msg m = Msg.Code(n: 7);
+			if m is Code(n) { return n; }
+			return 0;
+		}
+		main() { x := grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	assertContains(t, fn, "icmp eq i32") // sanity: we extracted the real function body
+	assertNotContains(t, fn, "strdup.copy")
+	assertNotContains(t, fn, "n.dropflag")
+}
+
+// T1012 (T0485 branch): an Optional-of-heap variant payload (`string? maybe`)
+// destructured via `if x is V(field)` must NOT be dup'd — it is marked
+// match-borrowed instead (the binding aliases the subject's payload, which the
+// subject's synth enum drop owns). So no clone and no per-binding drop flag are
+// emitted; only in-scope reads are sound (escape is the separate T1170 gap).
+func TestT1012IfIsDestructureOptionalPayloadBorrowNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		read() int {
+			Box b = Box.Has(maybe: "a" + "b");
+			int out = 0;
+			if b is Has(maybe) {
+				if s := maybe { out = s.len; }
+			}
+			return out;
+		}
+		main() { x := read(); }
+	`)
+	fn := extractFunction(ir, "__user.read")
+	// Optional heap payload is borrow-marked, not cloned, and no drop flag is
+	// registered for the `maybe` binding.
+	assertNotContains(t, fn, "strdup.copy")
+	assertNotContains(t, fn, "maybe.dropflag")
+}
+
 // B0007: Verify that channel recv alloca is in coro.start (entry block),
 // not in the chrecv.read block.
 func TestChannelRecvAllocaInEntryBlock(t *testing.T) {

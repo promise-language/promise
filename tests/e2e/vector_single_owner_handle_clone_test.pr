@@ -304,13 +304,14 @@ enum T0482IsHeld {
   Empty, Held(Task[int] t),
 }
 
-// `is`-destructure (vs `match`) does NOT need the T0482 B4 gate: codegen's
-// bindIsDestructureEnum/bindIsDestructureNamed do a plain non-owning load+store
-// for each bound field and register NO drop binding — only the subject drops
-// the handle (exactly once). This pins that structural-safety invariant: if a
-// future change makes `is`-destructure register drop bindings (like `match`'s
-// bindEnumDestructure dup path does) without a corresponding gate, this test
-// catches the resulting double-free / leak. Zero leaks (T0067).
+// A single-owner-handle (Task) payload of an `is`-destructure binding is NOT
+// dup-cloneable, so codegen's bindIsDestructureEnum does a plain non-owning
+// load+store and registers NO drop binding — only the subject drops the handle
+// (exactly once). T1012 made `is`-destructure dup *heap* payloads (string/vector)
+// for escape safety, but explicitly gates that on FirstNestedSingleOwnerHandle:
+// handle fields must stay a borrow. This pins that structural-safety invariant —
+// if a future change dropped that gate, cloneResolvedValue on a Task would crash
+// / double-free. Zero leaks (T0067).
 test_t0482_enum_is_destructure_handle() `test(exclude: wasm) {
   e := T0482IsHeld.Held(go worker_t0545());
   if e is Held(tk) {

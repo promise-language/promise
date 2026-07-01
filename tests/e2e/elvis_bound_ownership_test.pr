@@ -348,3 +348,208 @@ t_mixed_none() `test {
   r := mix_heapuser(none, def);
   assert(r == 1, "mixed none");
 }
+
+// ===========================================================================
+// T1014: the ASSIGNMENT counterpart `m = a ?: b`. genAssignStmt used to discard
+// the per-path bound flag genElvis produced (the some-path borrowed-param case
+// double-freed the caller-owned inner). The fix stores the phi into the target's
+// drop flag, mirroring consumeElvisBoundDropFlag on the var-decl path. All cases
+// run under the zero-leak gate; a some-path double-free would be `fatal: double
+// free`, a none-path over-drop a SEGV/invalid-free, and an under-drop a leak.
+// ===========================================================================
+
+// --- some-path, borrowed-param source (the repro): target aliases the caller-
+// owned inner; must NOT take a second owning drop at scope exit.
+heapuser_assign_some(HeapBox? a, HeapBox b) int {
+  m := HeapBox(data: []);
+  m = a ?: b; // some-path: m aliases borrowed a's inner
+  return m.data.len;
+}
+t_assign_heapuser_some_borrowed_param() `test {
+  HeapBox sv = HeapBox(data: []);
+  sv.data.push(7);
+  HeapBox? src = sv; // moves sv into src
+  HeapBox def = HeapBox(data: []);
+  r := heapuser_assign_some(src, def); // borrows src and def
+  assert(r == 1, "assign heapuser some borrowed-param");
+  // src and def remain owned here; freed once each at scope exit (zero-leak gate).
+}
+
+// --- none-path, borrowed-param default: target borrows b; no double-free, no leak.
+heapuser_assign_none(HeapBox? a, HeapBox b) int {
+  m := HeapBox(data: []);
+  m = a ?: b; // none-path: m borrows b
+  return m.data.len;
+}
+t_assign_heapuser_none_borrowed_param() `test {
+  HeapBox b = HeapBox(data: []);
+  b.data.push(1);
+  b.data.push(2);
+  r := heapuser_assign_none(none, b);
+  assert(r == 2, "assign heapuser none borrowed-param");
+  assert(b.data.len == 2, "assign heapuser b still valid");
+}
+
+// --- some-path, owned-local source: target owns the moved-out inner; the phi's
+// `1` branch must be honored (source's flag cleared) → no leak, no double-free.
+t_assign_heapuser_some_owned_local() `test {
+  HeapBox av = HeapBox(data: []);
+  av.data.push(1);
+  av.data.push(2);
+  HeapBox? a = av;
+  HeapBox b = HeapBox(data: []);
+  m := HeapBox(data: []);
+  m = a ?: b; // some-path: m owns a's moved-out inner
+  assert(m.data.len == 2, "assign heapuser some owned-local");
+}
+
+// --- Map variant (2-word value struct), exercising elvisResultHeapDrop on the
+// assignment path.
+map_assign_some(map[string, int]? a, map[string, int] b) int {
+  m := map[string, int]();
+  m = a ?: b; // some-path: m borrows a's inner
+  return m.len;
+}
+t_assign_map_some_borrowed_param() `test {
+  map[string, int] sv = map[string, int]();
+  sv["x"] = 1;
+  sv["y"] = 2;
+  map[string, int]? src = sv;
+  map[string, int] def = map[string, int]();
+  r := map_assign_some(src, def);
+  assert(r == 2, "assign map some borrowed-param");
+}
+
+map_assign_none(map[string, int]? a, map[string, int] b) int {
+  m := map[string, int]();
+  m = a ?: b; // none-path: m borrows b
+  return m.len;
+}
+t_assign_map_none_borrowed_param() `test {
+  map[string, int] b = map[string, int]();
+  b["k"] = 9;
+  b["j"] = 8;
+  r := map_assign_none(none, b);
+  assert(r == 2, "assign map none borrowed-param");
+  assert(b.len == 2, "assign map b still valid");
+}
+
+// --- Set variant.
+t_assign_set_some_owned_local() `test {
+  Set[int] av = Set[int]();
+  av.add(1);
+  av.add(2);
+  av.add(3);
+  Set[int]? a = av;
+  Set[int] b = Set[int]();
+  m := Set[int]();
+  m = a ?: b; // some-path: m owns a's moved-out inner
+  assert(m.len == 3, "assign set some owned-local");
+}
+
+// --- string variant (instance-ptr repr): the flag store must coexist with the
+// string drop-old of the target's prior value. some/none borrowed-param.
+string_assign_some(string? a, string b) int {
+  m := "init";
+  m = a ?: b; // some-path: m aliases borrowed a's inner
+  return m.len;
+}
+t_assign_string_some_borrowed_param() `test {
+  string sv = "ab".repeat(4); // heap (non-literal)
+  string? src = sv;
+  string def = "xyz".repeat(2);
+  r := string_assign_some(src, def);
+  assert(r == 8, "assign string some borrowed-param");
+}
+
+string_assign_none(string? a, string b) int {
+  m := "init";
+  m = a ?: b; // none-path: m borrows b
+  return m.len;
+}
+t_assign_string_none_borrowed_param() `test {
+  string b = "hello".repeat(2);
+  r := string_assign_none(none, b);
+  assert(r == 10, "assign string none borrowed-param");
+  assert(b.len == 10, "assign string b still valid");
+}
+
+// --- vector variant (3-word struct, COW drop-old): some/none borrowed-param.
+vec_assign_some(int[]? a, int[] b) int {
+  m := [99];
+  m = a ?: b; // some-path: m aliases borrowed a's inner
+  return m.len;
+}
+t_assign_vec_some_borrowed_param() `test {
+  int[] sv = [];
+  sv.push(1);
+  sv.push(2);
+  sv.push(3);
+  int[]? src = sv;
+  int[] def = [];
+  def.push(0);
+  r := vec_assign_some(src, def);
+  assert(r == 3, "assign vec some borrowed-param");
+}
+
+vec_assign_none(int[]? a, int[] b) int {
+  m := [99];
+  m = a ?: b; // none-path: m borrows b
+  return m.len;
+}
+t_assign_vec_none_borrowed_param() `test {
+  int[] b = [];
+  b.push(1);
+  b.push(2);
+  r := vec_assign_none(none, b);
+  assert(r == 2, "assign vec none borrowed-param");
+  assert(b.len == 2, "assign vec b still valid");
+}
+
+// --- none-path owned-local default on the assignment path: the none dimension is
+// hardcoded `1` (m owns the moved-in default b). Complements the borrowed-param
+// none tests above.
+t_assign_heapuser_none_owned_local() `test {
+  HeapBox? a = none;
+  HeapBox b = HeapBox(data: []);
+  b.data.push(1);
+  b.data.push(2);
+  m := HeapBox(data: []);
+  m = a ?: b; // none-path owned-local: m owns b (moved into elvis default)
+  assert(m.data.len == 2, "assign heapuser none owned-local");
+}
+
+// --- member-source on the some-path, assignment target: the elvis phi's
+// some-branch value flows from the source's dup-clone/borrow classification into
+// the reassigned target's drop flag. Vector/string fields are dup-cloned → target
+// OWNS the clone (phi some-branch = 1); Map/heap-user fields are not cloned →
+// target BORROWS the field's inner (phi some-branch = 0). Both must free exactly
+// once — the target on the owned path, the holder on the borrowed path.
+t_assign_vec_some_member_source() `test {
+  VecBox bx = VecBox(v: none);
+  int[] inner = [];
+  inner.push(1);
+  inner.push(2);
+  bx.v = inner;
+  int[] x = [7]; // pre-existing owned value, dropped on reassign
+  x = (bx.v ?: [0]); // some-path: bx.v dup-cloned → x owns the clone
+  assert(x.len == 2, "assign vec some member-source");
+  assert(bx.v!.len == 2, "vecbox field still valid");
+}
+t_assign_map_some_member_source() `test {
+  MapBox bx = MapBox(m: none);
+  map[string, int] inner = map[string, int]();
+  inner["a"] = 1;
+  inner["b"] = 2;
+  bx.m = inner;
+  map[string, int] def = map[string, int]();
+  map[string, int] x = map[string, int]();
+  x["z"] = 9; // pre-existing owned value, dropped on reassign
+  x = (bx.m ?: def); // some-path: x borrows bx.m (2-word, not cloned)
+  assert(x.len == 2, "assign map some member-source");
+  assert(bx.m!.len == 2, "mapbox field still valid");
+}
+
+// NOTE: the member/index-TARGET counterpart (`hold.h = a ?: b`, `v[i] = a ?: b`)
+// is NOT exercised here — it double-frees on borrowed-param paths (SEGV) and is
+// tracked as T1166 (the fix explicitly scoped the flag store to IdentExpr targets).

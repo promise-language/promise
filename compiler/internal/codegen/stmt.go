@@ -6805,10 +6805,15 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	}
 	val := c.genExpr(s.Value)
 	c.elvisResultBound = prevElvisBound
-	// T0933/T0940/T0981: the assignment form `m = a ?: b` is owned by T1013/T1014 and
-	// does not consume the per-path bound flag (the existing target already
-	// owns/borrows via its own binding). Clear it so a set-but-unconsumed flag from
-	// this elvis cannot leak into a later var-decl binding via consumeElvisBoundDropFlag.
+	// T1014: the assignment form `m = a ?: b` consumes the per-path bound flag for a
+	// simple-local IdentExpr target with a drop binding (mirrors consumeElvisBoundDropFlag
+	// on the var-decl path). Capture it here and clear the field immediately so a
+	// set-but-unconsumed flag can't leak into a later var-decl binding; the IdentExpr
+	// OpAssign branch below stores it into the target's drop flag, overriding the
+	// unconditional `1` the drop-old re-arm writes. Member/index targets are not yet
+	// handled (their aliasing needs its own analysis) — the captured flag is simply
+	// discarded for them, preserving the prior clear-and-ignore behavior.
+	elvisBoundFlag := c.elvisBoundDropFlag
 	c.elvisBoundDropFlag = nil
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
@@ -7164,6 +7169,18 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// B0312: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by this variable.
 			c.neutralizeForceUnwrapSource(s.Value)
+			// T1014: `m = a ?: b` — store the elvis's per-path bound flag into the
+			// target's drop flag, replacing the unconditional `1` the drop-old re-arm
+			// (and any borrow-clear) wrote above. On the some-path the result may alias
+			// a borrowed/caller-owned inner (flag 0), so the target must not double-free
+			// it at scope exit. Mirrors consumeElvisBoundDropFlag on the var-decl path;
+			// placed last so it overrides earlier flag writes. The none dimension shares
+			// the pre-existing T0940 owned-local/member/borrowed-param default gap.
+			if elvisBoundFlag != nil {
+				if lhsFlag, ok := c.dropFlags[target.Name]; ok {
+					c.block.NewStore(elvisBoundFlag, lhsFlag)
+				}
+			}
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result

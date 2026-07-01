@@ -1,0 +1,114 @@
+// T1165: inline force-unwrapped Map.[] read used as a droppable-enum method
+// receiver (`m[k]!.method()`) must drop the deep-cloned receiver temp — it
+// leaked 1 allocation before the freshEnumReceiverNeedsDrop fix. `+=` was a
+// red herring; the leak is the inline `m[k]!`-receiver drop, not the compound
+// path.
+enum Tag {
+  Named(string name),
+  Empty,
+  +(Tag other) Tag {
+    return Tag.Named(name: "merged");
+  }
+  label(this) string {
+    return match this {
+      Named(n) => n, Empty => "_",
+    };
+  }
+  drop(~this) {
+  }
+}
+
+// Canonical leak: m[k]!.method() with a droppable enum value.
+map_inline_read() `test {
+  m := map[string, Tag]();
+  m["k"] = Tag.Named(name: "a");
+  assert(m["k"]!.label() == "a", "inline read");
+}
+
+// Original tracker repro: combined with += (the operator path).
+map_compound_then_inline_read() `test {
+  m := map[string, Tag]();
+  m["k"] = Tag.Named(name: "a");
+  m["k"] += Tag.Empty;
+  assert(m["k"]!.label() == "merged", "map compound");
+}
+
+enum TagG {
+  Named(string name),
+  Empty,
+  get tag string {
+    return match this {
+      Named(n) => n, Empty => "_",
+    };
+  }
+  drop(~this) {
+  }
+}
+
+// Getter receiver from an inline map read: `m[k]!.getter` exercises the getter
+// site (genEnumGetterAccess) of freshEnumReceiverNeedsDrop — the deep-cloned
+// receiver temp must be dropped, else it leaks 1 allocation like the method case.
+map_inline_getter_read() `test {
+  m := map[string, TagG]();
+  m["k"] = TagG.Named(name: "a");
+  assert(m["k"]!.tag == "a", "inline getter read");
+}
+
+enum Opt[T] {
+  Some(T value),
+  None,
+  show(this) string {
+    return match this {
+      Some(v) => "some", None => "none",
+    };
+  }
+  drop(~this) {
+  }
+}
+
+// Generic enum value in a map.
+map_generic_enum_inline_read() `test {
+  m := map[string, Opt[string]]();
+  m["k"] = Opt[string].Some(value: "x");
+  assert(m["k"]!.show() == "some", "generic enum inline");
+}
+
+type Box {
+  Tag[] items;
+  [](int i) Tag {
+    return this.items[i];
+  }
+}
+
+// Direct user-defined `[]` returning an enum (owned clone).
+direct_user_index_read() `test {
+  b := Box(items: [Tag.Named(name: "z")]);
+  assert(b[0].label() == "z", "user index");
+}
+
+// Negative guards (must stay leak-free, no double-free):
+
+// Native array indexing aliases storage — the temp must NOT be dropped.
+native_index_read() `test {
+  arr := [Tag.Named(name: "n"), Tag.Empty];
+  assert(arr[0].label() == "n", "native index");
+}
+
+// Var-bound read — owned by the local, dropped at scope exit.
+var_bound_read() `test {
+  m := map[string, Tag]();
+  m["k"] = Tag.Named(name: "v");
+  x := m["k"]!;
+  assert(x.label() == "v", "var bound");
+}
+
+// Match over the unwrapped clone.
+match_inline_read() `test {
+  m := map[string, Tag]();
+  m["k"] = Tag.Named(name: "w");
+  s := match m["k"]! {
+    Named(n) => n,
+    Empty => "_",
+  };
+  assert(s == "w", "match inline");
+}

@@ -2609,7 +2609,7 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 			// the owner's payload (e.g. `ev.at(0)` shares ev.items[0]'s
 			// string); dropping the synthesized receiver temp would
 			// double-free what the owner still frees at scope exit.
-			if isFreshEnumExpr(member.Target) && !enumCtorTracked && !c.isBorrowedExpr(member.Target) {
+			if c.freshEnumReceiverNeedsDrop(member.Target) && !enumCtorTracked {
 				tempEnumPtr = ptr
 			}
 		}
@@ -5047,7 +5047,7 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 		// T0660: a borrow-return receiver (`Tagged&`/`Tagged~`) aliases the
 		// owner's payload; dropping the synthesized getter receiver temp
 		// would double-free what the owner still frees at scope exit.
-		if isFreshEnumExpr(e.Target) && !enumCtorTracked && !c.isBorrowedExpr(e.Target) {
+		if c.freshEnumReceiverNeedsDrop(e.Target) && !enumCtorTracked {
 			tempEnumPtr = ptr
 		}
 	}
@@ -5147,7 +5147,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			// T0660: a borrow-return receiver (`Tagged&`/`Tagged~`, e.g.
 			// `ev.at(0)`) likewise aliases the owner's payload — dropping it
 			// double-frees what the owner (the vector) still frees at exit.
-			if isFreshEnumExpr(member.Target) && !enumCtorTracked && !c.isBorrowedExpr(member.Target) {
+			if c.freshEnumReceiverNeedsDrop(member.Target) && !enumCtorTracked {
 				tempEnumPtr = ptr
 			}
 		}
@@ -5206,6 +5206,30 @@ func isFreshEnumExpr(expr ast.Expr) bool {
 	default:
 		return false
 	}
+}
+
+// freshEnumReceiverNeedsDrop reports whether a non-`this` enum method/getter
+// receiver expression yields a *fresh, owned* enum value whose synthesized stack
+// temp must be dropped after the call (zero-leak policy).
+//   - isFreshEnumExpr shapes (call results, deep clones, unwraps thereof),
+//     excluding borrow-return receivers (Tagged&/Tagged~) that alias the owner (T0660).
+//   - T1165: a force-/panic-unwrap (or direct read) of a user-defined *non-native*
+//     `[]` (e.g. `m[k]!` on a Map) — Map.[] returns `V?` by deep-cloning the slot,
+//     so the unwrapped enum is uniquely owned and leaks unless dropped. Native
+//     container/array indexing is excluded by isUserIndexExpr (those alias storage,
+//     so dropping the temp would double-free).
+func (c *Compiler) freshEnumReceiverNeedsDrop(expr ast.Expr) bool {
+	if isFreshEnumExpr(expr) {
+		return !c.isBorrowedExpr(expr)
+	}
+	e := unwrapDestructureParens(expr)
+	switch u := e.(type) {
+	case *ast.OptionalUnwrapExpr:
+		e = unwrapDestructureParens(u.Expr)
+	case *ast.ErrorPanicExpr:
+		e = unwrapDestructureParens(u.Expr)
+	}
+	return c.isUserIndexExpr(e) && !c.isBorrowedExpr(e)
 }
 
 // genGetterCall emits a call to a getter method (zero args beyond receiver).

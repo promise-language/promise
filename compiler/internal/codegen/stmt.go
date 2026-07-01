@@ -11178,15 +11178,14 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	// emitDropOldCompoundValue is alias-guarded and a no-op for scalars/value
 	// types.
 	c.emitDropOldCompoundValue(current, result, operandType)
-	// NOTE (T0715): compound assignment whose operand is a *user type with a
+	// NOTE (T0715): compound assignment whose operand is a *Named user type with a
 	// non-native operator* held as a *map value* is mishandled by the map/mono
 	// machinery before/around this path: a value type → codegen panic in Map.[];
-	// a heap Named type → double-free on overwrite. T1015 made the *enum*-operand
-	// form reachable (it no longer panics in genCompoundOp), but it under-frees
-	// (leaks 1 allocation) — tracked as T1165. The fix lives in the map index-
-	// compound path (Map.[] returns the heap value by reference, which []= below
-	// overwrites and drops, so the drop of `current` above must be reconciled for
-	// maps), not in genCompoundOp.
+	// a heap Named type → double-free on overwrite (both unverified/separate).
+	// The *enum*-operand form (T1165) was NOT a defect in this compound path: its
+	// observed leak came from the inline `m[k]!`-receiver drop in
+	// freshEnumReceiverNeedsDrop (expr.go), not here — that is fixed and verified
+	// leak-free.
 
 	call := c.block.NewCall(setFn, instancePtr, keyVal, result)
 	c.propagateIfFailable(call) // T0708

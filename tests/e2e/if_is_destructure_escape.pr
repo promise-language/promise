@@ -134,10 +134,14 @@ code_escape() `test {
 // match-borrowed (matchBindingIsBorrow / borrowInnerHasDrop). The binding
 // aliases the subject's payload, which is sound as long as the read stays
 // in-scope (the subject outlives the `if`). These pin that in-scope path.
-// NOTE: escaping such a binding (return / store-to-escaping-outer) is a
-// separate, still-open soundness gap shared with `match` — tracked as T1170
-// (Optional/Array variant-payload escape UAF); do NOT add escape cases here
-// until that is fixed (they would UAF).
+// T1170 (fixed): escaping such a binding (return / store-to-escaping-outer /
+// consuming arg / constructor field) now deep-clones on the read/escape side
+// (genIdentExpr / genArrayIndex, gated on matchBorrowedIdents + the dup flag the
+// owning sink sets), so the escaped value is independently owned and the subject's
+// synth enum drop still frees the original exactly once. The escape cases live in
+// the "T1170 escape" section below. In-scope reads (no dup flag) stay zero-copy.
+// Out-of-scope for T1170 (tracked separately): whole fixed-array-VALUE escape
+// `return a`/`x = a` (T1173) and Optional[user-type] escape (T1174).
 
 enum OptBox {
   Has(string? maybe), Nothing,
@@ -189,4 +193,189 @@ arr_payload_inscope() `test {
   if h is Pair(a) {
     assert(a[0] == "p1" && a[1] == "q2", "fixed-array heap payload in-scope read");
   }
+}
+
+// ============================================================================
+// T1170: ESCAPING an Optional-of-heap or fixed-array-element match-borrowed
+// payload out of the narrowing scope. The read/escape-side dup deep-clones so
+// the escaped value survives the subject's synth enum drop. Covers BOTH `if is`
+// and `match` (shared matchBorrowedIdents path). Each impl drops the subject at
+// function exit; the caller reads the escaped value AFTER, so an un-cloned alias
+// would be a use-after-free. Zero leaks are enforced by the batch-test policy.
+// ============================================================================
+
+type OptWrapper {
+  string? held;
+}
+enum VecBox {
+  Has(int[]? maybe), Nothing,
+}
+
+opt_unwrap(string? move s) string {
+  if x := s {
+    return x;
+  }
+  return "<none>";
+}
+opt_consume(string? move s) string {
+  if x := s {
+    return x + "!";
+  }
+  return "!";
+}
+vec_len(int[]? move v) int {
+  if xs := v {
+    return xs.len;
+  }
+  return -1;
+}
+
+// --- Optional[string] escape: store-to-outer, if is ---
+opt_store_is_impl() string? {
+  OptBox b = OptBox.Has(maybe: "p" + "q");
+  string? out = none;
+  if b is Has(maybe) {
+    out = maybe;
+  }
+  return out; // b dropped here; out must own an independent clone
+}
+opt_store_is() `test {
+  assert(opt_unwrap(opt_store_is_impl()) == "pq", "opt[string] store-to-outer escape (if is)");
+}
+
+// --- Optional[string] escape: return, if is ---
+opt_ret_is_impl() string? {
+  OptBox b = OptBox.Has(maybe: "p" + "q");
+  if b is Has(maybe) {
+    return maybe;
+  }
+  return none;
+}
+opt_ret_is() `test {
+  assert(opt_unwrap(opt_ret_is_impl()) == "pq", "opt[string] return escape (if is)");
+}
+
+// --- Optional[string] escape: return + store, match ---
+opt_ret_match_impl() string? {
+  OptBox b = OptBox.Has(maybe: "p" + "q");
+  match b {
+    Has(maybe) => {
+      return maybe;
+    }, Nothing => {
+      return none;
+    },
+  }
+}
+opt_ret_match() `test {
+  assert(opt_unwrap(opt_ret_match_impl()) == "pq", "opt[string] return escape (match)");
+}
+opt_store_match_impl() string? {
+  OptBox b = OptBox.Has(maybe: "p" + "q");
+  string? out = none;
+  match b {
+    Has(maybe) => {
+      out = maybe;
+    }, Nothing => {
+    },
+  }
+  return out;
+}
+opt_store_match() `test {
+  assert(opt_unwrap(opt_store_match_impl()) == "pq", "opt[string] store-to-outer escape (match)");
+}
+
+// --- Optional[string] escape: consuming (~) arg ---
+opt_consume_impl() string {
+  OptBox b = OptBox.Has(maybe: "h" + "i");
+  string r = "";
+  if b is Has(maybe) {
+    r = opt_consume(move maybe);
+  }
+  return r;
+}
+opt_consume_escape() `test {
+  assert(opt_consume_impl() == "hi!", "opt[string] moved into consuming param");
+}
+
+// --- Optional[string] escape: constructor field (escapes via returned wrapper) ---
+opt_ctor_impl() OptWrapper {
+  OptBox b = OptBox.Has(maybe: "w" + "z");
+  OptWrapper result = OptWrapper(held: none);
+  if b is Has(maybe) {
+    result = OptWrapper(held: maybe);
+  }
+  return result; // b dropped; result.held must be an independent clone
+}
+opt_ctor_escape() `test {
+  OptWrapper w = opt_ctor_impl();
+  if x := w.held {
+    assert(x == "wz", "opt[string] moved into constructor field");
+  } else {
+    assert(false, "expected some");
+  }
+}
+
+// --- fixed-array element escape: store-to-outer + return, if is ---
+arr_elem_store_impl() string {
+  ArrHolder h = ArrHolder.Pair(a: ["x" + "1", "y" + "2"]);
+  string out = "";
+  if h is Pair(a) {
+    out = a[0];
+  }
+  return out; // h dropped; out must own an independent clone of a[0]
+}
+arr_elem_store() `test {
+  assert(arr_elem_store_impl() == "x1", "string[N] element store-to-outer escape (if is)");
+}
+arr_elem_ret_impl() string {
+  ArrHolder h = ArrHolder.Pair(a: ["x" + "1", "y" + "2"]);
+  if h is Pair(a) {
+    return a[1];
+  }
+  return "";
+}
+arr_elem_ret() `test {
+  assert(arr_elem_ret_impl() == "y2", "string[N] element return escape (if is)");
+}
+
+// --- fixed-array element escape: match ---
+arr_elem_match_impl() string {
+  ArrHolder h = ArrHolder.Pair(a: ["x" + "1", "y" + "2"]);
+  string out = "";
+  match h {
+    Pair(a) => {
+      out = a[0];
+    }, Empty => {
+    },
+  }
+  return out;
+}
+arr_elem_match() `test {
+  assert(arr_elem_match_impl() == "x1", "string[N] element store-to-outer escape (match)");
+}
+
+// --- Optional[Vector] escape: store-to-outer + return ---
+vec_store_impl() int[]? {
+  VecBox b = VecBox.Has(maybe: [1, 2, 3]);
+  int[]? out = none;
+  if b is Has(maybe) {
+    out = maybe;
+  }
+  return out;
+}
+vec_store_escape() `test {
+  assert(vec_len(vec_store_impl()) == 3, "opt[Vector] store-to-outer escape");
+}
+vec_ret_impl() int[]? {
+  VecBox b = VecBox.Has(maybe: [4, 5]);
+  match b {
+    Has(maybe) => {
+      return maybe;
+    }, Nothing => {
+      return none;
+    },
+  }
+}
+vec_ret_escape() `test {
+  assert(vec_len(vec_ret_impl()) == 2, "opt[Vector] return escape (match)");
 }

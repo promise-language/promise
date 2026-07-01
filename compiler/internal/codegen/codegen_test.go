@@ -22841,6 +22841,164 @@ func TestT1012IfIsDestructureOptionalPayloadBorrowNoDup(t *testing.T) {
 	assertNotContains(t, fn, "maybe.dropflag")
 }
 
+// T1170: an Optional-of-heap variant payload (`string? maybe`) that ESCAPES the
+// narrowing scope (here via `return`) must be deep-cloned on the read/escape side
+// (genIdentExpr, gated on matchBorrowedIdents + the dup flag genReturnStmt sets),
+// so the escaped Optional owns an independent inner string and survives the
+// subject's synth enum drop. The clone lowers through dupString → `strdup.copy`.
+func TestT1170OptionalPayloadEscapeDupsOnReturn(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		esc() string? {
+			Box b = Box.Has(maybe: "a" + "b");
+			if b is Has(maybe) { return maybe; }
+			return none;
+		}
+		main() { s := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	// The escaping Optional[string] payload is cloned via dupString.
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1170 zero-copy control: an in-scope read of an Optional-of-heap payload (no
+// escape → no dup flag set) must NOT clone. This is the proof that the escape
+// dup is gated on an owning sink and in-scope borrows stay zero-copy.
+func TestT1170OptionalPayloadInScopeNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		read() int {
+			Box b = Box.Has(maybe: "a" + "b");
+			int out = 0;
+			if b is Has(maybe) {
+				if s := maybe { out = s.len; }
+			}
+			return out;
+		}
+		main() { x := read(); }
+	`)
+	fn := extractFunction(ir, "__user.read")
+	assertNotContains(t, fn, "strdup.copy")
+}
+
+// T1170: a fixed-array element of a match-borrowed payload (`a[0]` where `a`
+// binds `string[N]`) escaping to an outer local (`out = a[0]`) must be cloned on
+// read (genArrayIndex, driven by the dup flag genAssignStmt sets for a
+// borrow-marked array-index RHS), so `out` owns an independent copy that survives
+// the subject's synth enum drop.
+func TestT1170ArrayElementEscapeDupsOnStore(t *testing.T) {
+	ir := generateIR(t, `
+		enum Holder { Pair(string[2] a), Empty }
+		esc() string {
+			Holder h = Holder.Pair(a: ["x" + "1", "y" + "2"]);
+			string out = "";
+			if h is Pair(a) { out = a[0]; }
+			return out;
+		}
+		main() { s := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	// The escaping array element string is cloned via dupString.
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1172: a fixed-array-returning function whose body contains a panic-capable
+// operation (string concat) reaches the panic-cleanup return (emitPanicReturn),
+// which must emit the array zero aggregate — NOT the i64-0 default that produced
+// malformed `ret i64 0` in a `[N x T]`-returning function.
+func TestT1172ArrayReturnPanicCleanupZeroValue(t *testing.T) {
+	ir := generateIR(t, `
+		enum ArrHolder { Pair(string[2] a), Empty }
+		mk() string[2] {
+			ArrHolder h = ArrHolder.Pair(a: ["x" + "1", "y" + "2"]);
+			return ["z", "w"];
+		}
+		main() { a := mk(); }
+	`)
+	fn := extractFunction(ir, "__user.mk")
+	// The panic-cleanup path returns a zeroinitializer of the array type, never
+	// a bare i64 0.
+	assertContains(t, fn, "ret [2 x i8*] zeroinitializer")
+	assertNotContains(t, fn, "ret i64 0")
+}
+
+// T1170: an Optional-of-heap payload stored to an escaping OUTER local
+// (`out = maybe`, whole-Optional ident RHS) must be cloned on read. This
+// exercises the genAssignStmt IdentExpr-RHS branch (isVariantPayloadBorrowShape)
+// — distinct from the array-element RHS branch covered above.
+func TestT1170OptionalPayloadEscapeDupsOnStore(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		esc() string? {
+			Box b = Box.Has(maybe: "a" + "b");
+			string? out = none;
+			if b is Has(maybe) { out = maybe; }
+			return out;
+		}
+		main() { s := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1170: an Optional-of-heap payload passed to a consuming (~/move) param
+// (`consume(move maybe)`) escapes into the callee and must be cloned so the
+// subject's synth enum drop doesn't free the value the callee now owns. This
+// exercises the maybeEnableDupForMutRefArg T1170 branch.
+func TestT1170OptionalPayloadEscapeConsumingArg(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		consume(string? move s) string { if x := s { return x; } return ""; }
+		esc() string {
+			Box b = Box.Has(maybe: "a" + "b");
+			string r = "";
+			if b is Has(maybe) { r = consume(move maybe); }
+			return r;
+		}
+		main() { s := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1170: an Optional-of-heap payload used to initialize an owned constructor
+// field (`W(held: maybe)`) escapes via the returned instance and must be cloned.
+// This exercises the maybeEnableDupForConstructorArg T1170 branch.
+func TestT1170OptionalPayloadEscapeConstructorField(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		type W { string? held; }
+		esc() W {
+			Box b = Box.Has(maybe: "a" + "b");
+			W w = W(held: none);
+			if b is Has(maybe) { w = W(held: maybe); }
+			return w;
+		}
+		main() { w := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "strdup.copy")
+}
+
+// T1170: the escape dup fires uniformly for the `match` path (not just `if is`),
+// since both populate matchBorrowedIdents. A match arm returning an
+// Optional-of-heap payload must clone on read.
+func TestT1170OptionalPayloadEscapeDupsOnMatch(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box { Has(string? maybe), Nothing }
+		esc() string? {
+			Box b = Box.Has(maybe: "a" + "b");
+			match b {
+				Has(maybe) => { return maybe; },
+				Nothing => { return none; },
+			}
+		}
+		main() { s := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "strdup.copy")
+}
+
 // B0007: Verify that channel recv alloca is in coro.start (entry block),
 // not in the chrecv.read block.
 func TestChannelRecvAllocaInEntryBlock(t *testing.T) {

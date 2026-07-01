@@ -6796,6 +6796,46 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			c.setDupFlagsForFieldAccess(rhsType)
 		}
+		// T1170: RHS is a match-borrowed Optional/Array-of-heap binding (`out = maybe`)
+		// or an element of a match-borrowed array (`out = a[0]`). The binding aliases
+		// the subject enum's variant payload; without a clone the store aliases it and
+		// the subject's synth drop frees it while the LHS still references it (UAF on
+		// escape). Set the dup-on-read flag so genIdentExpr (whole Optional/container)
+		// or genArrayIndex (array element) deep-clones; the LHS then owns an independent
+		// copy claimed by the IdentExpr-target claim path below (mirrors the memberRhs
+		// case). The element form bypasses the isIdxRhs `lhsIsFixedArrayElem` gate (which
+		// protects intentional Vector slot aliasing) — a borrow-marked array element must
+		// always clone on store to an outer slot.
+		if c.matchBorrowedIdents != nil {
+			if ident, ok := probe.(*ast.IdentExpr); ok && c.matchBorrowedIdents[ident.Name] {
+				rhsType := c.info.Types[s.Value]
+				if c.typeSubst != nil && rhsType != nil {
+					rhsType = types.Substitute(rhsType, c.typeSubst)
+				}
+				// Only whole Optional/Array variant-payload bindings — bare-heap
+				// T0672 borrow bindings are already owned and must not be re-dup'd.
+				if isVariantPayloadBorrowShape(rhsType) {
+					c.setDupFlagsForFieldAccess(rhsType)
+				}
+			} else if idx, ok := probe.(*ast.IndexExpr); ok {
+				if baseIdent, ok := idx.Target.(*ast.IdentExpr); ok && c.matchBorrowedIdents[baseIdent.Name] {
+					baseType := c.info.Types[idx.Target]
+					if c.typeSubst != nil && baseType != nil {
+						baseType = types.Substitute(baseType, c.typeSubst)
+					}
+					// Only a fixed-Array base (the enum-variant `string[N]` payload
+					// shape). A Vector/container base routes through genVectorIndex/
+					// genMethodIndex, whose own dup-on-read already balances ownership.
+					if _, isArr := baseType.(*types.Array); isArr {
+						elemType := c.info.Types[idx]
+						if c.typeSubst != nil && elemType != nil {
+							elemType = types.Substitute(elemType, c.typeSubst)
+						}
+						c.setDupFlagsForFieldAccess(elemType)
+					}
+				}
+			}
+		}
 	}
 	// T0952: `m = a ?: b` — signal genElvis (as in genInferredVarDecl) so the
 	// none-path default's owner is neutralized; the assignment target owns the temp.

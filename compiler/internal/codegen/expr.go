@@ -1037,7 +1037,35 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 	}
 	// Local variable: load from alloca (checked first to shadow module-level names)
 	if alloca, ok := c.locals[e.Name]; ok {
-		return c.block.NewLoad(alloca.ElemType, alloca)
+		val := c.block.NewLoad(alloca.ElemType, alloca)
+		// T1170: a match-borrowed Optional/Array-of-heap binding (T0485) aliases the
+		// subject enum's variant payload — sound for an in-scope read (the subject
+		// outlives the narrowing scope) but a use-after-free when the binding escapes
+		// (return / store-to-outer / consuming arg / constructor field): the subject's
+		// synth enum drop frees the payload at scope exit while the escaped alias still
+		// points into it. When an owning-escape context has set a dup flag
+		// (dupStringFieldAccess/dupContainerFieldAccess), deep-clone so the escaped
+		// value is independently owned; in-scope reads (no flag set) stay zero-copy.
+		// Gated on matchBorrowedIdents membership → ordinary owned locals are untouched
+		// (their escape still moves via clearDropFlag). The read/escape-side dup covers
+		// BOTH the `if is` and `match` paths uniformly, since both populate
+		// matchBorrowedIdents. ownerDroppable=true is valid: a binding is only marked
+		// borrowed when the subject enum is droppable.
+		if c.tempTrackingEnabled && c.matchBorrowedIdents != nil && c.matchBorrowedIdents[e.Name] {
+			identType := c.info.Types[e]
+			if c.typeSubst != nil && identType != nil {
+				identType = types.Substitute(identType, c.typeSubst)
+			}
+			// Only enum-variant Optional/Array payload bindings take the escape dup
+			// (isVariantPayloadBorrowShape) — bare-heap T0672 borrow bindings are
+			// already owned copies and must not be re-dup'd (would leak).
+			if isVariantPayloadBorrowShape(identType) {
+				if dup, ok := c.dupHeapFieldForEscape(val, identType, true); ok {
+					return dup
+				}
+			}
+		}
+		return val
 	}
 	// Module-level getter accessed without prefix (same file or glob import):
 	// call the function with no args.
@@ -6313,6 +6341,28 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 	}
 }
 
+// isVariantPayloadBorrowShape reports whether a type has the shape that
+// matchBindingIsBorrow marks match-borrowed for a droppable enum variant payload:
+// Optional-of-anything or fixed-Array-of-anything. This is the gate the T1170
+// read/escape-side dup uses — it precisely selects enum-variant Optional/Array
+// payload bindings while EXCLUDING the bare-heap (string/Vector/…) bindings that
+// T0672 also places in matchBorrowedIdents (if-let / while-let / container-index /
+// tuple-destructure borrow sources). Those bare-heap bindings are already owned
+// copies produced by their source's own dup-on-read (e.g. Map's `[]` body), so
+// dup'ing them again would leak — hence they must not take the T1170 escape dup.
+func isVariantPayloadBorrowShape(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if _, ok := t.(*types.Optional); ok {
+		return true
+	}
+	if _, ok := t.(*types.Array); ok {
+		return true
+	}
+	return false
+}
+
 // setDupFlagsForFieldAccess sets dupStringFieldAccess or dupContainerFieldAccess
 // based on the resolved type shape — the four shapes that need dup at every
 // owner-droppable field-read consume site: string, Optional[string],
@@ -6391,6 +6441,16 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 	if isRefType(pt) {
 		return
 	}
+	// T1170: a match-borrowed Optional/Array-of-heap binding (`consume(move maybe)`)
+	// passed to a ~ (move) param escapes into the callee. Clone so the subject's
+	// synth enum drop doesn't free the value the callee now owns (mirrors the
+	// store/return escape paths). genIdentExpr performs the actual dup; the move-arg
+	// site claims the produced optionalStringDup/optionalContainerDup into the callee.
+	if ident, ok := arg.(*ast.IdentExpr); ok && c.matchBorrowedIdents != nil &&
+		c.matchBorrowedIdents[ident.Name] && isVariantPayloadBorrowShape(pt) {
+		c.setDupFlagsForFieldAccess(pt)
+		return
+	}
 	// T1146: `consume(m[k]!)` — inline unwrap of a container index passed to a
 	// move (~) param. Dup so the callee's consume-drop and the map's slot drop
 	// don't free the same instance. Mirrors the var-binding form (stmt.go:1133).
@@ -6452,6 +6512,20 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 // maybeEnableDupForMutRefArg (T0366) for the constructor field-init path.
 // T0411.
 func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types.Type) {
+	// T1170: a match-borrowed Optional/Array-of-heap binding (`Wrapper(held: maybe)`)
+	// initializing an owned constructor field escapes into the new instance. Clone so
+	// the subject's synth enum drop doesn't free the value the field now owns (mirrors
+	// the move-param / store / return escape paths).
+	if ident, ok := arg.(*ast.IdentExpr); ok && c.matchBorrowedIdents != nil && c.matchBorrowedIdents[ident.Name] {
+		ft := fieldType
+		if c.typeSubst != nil {
+			ft = types.Substitute(ft, c.typeSubst)
+		}
+		if isVariantPayloadBorrowShape(ft) {
+			c.setDupFlagsForFieldAccess(ft)
+		}
+		return
+	}
 	// T1146: `Holder(res: m[k]!)` — inline unwrap of a container index used to
 	// initialize an owned field. Same double-free as the move-param case.
 	if isUnwrappedContainerIndex(arg) {

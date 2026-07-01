@@ -6094,6 +6094,13 @@ func (c *Compiler) zeroValue(typ irtypes.Type) constant.Constant {
 		return constant.NewNull(t)
 	case *irtypes.StructType:
 		return constant.NewZeroInitializer(t)
+	case *irtypes.ArrayType:
+		// T1172: a fixed-array return type ([N x T]) needs a zero aggregate, not
+		// the i64-0 default — otherwise the panic-cleanup return (emitPanicReturn)
+		// emits `ret i64 0` in an array-returning function → malformed IR.
+		return constant.NewZeroInitializer(t)
+	case *irtypes.VectorType:
+		return constant.NewZeroInitializer(t)
 	default:
 		return constant.NewInt(irtypes.I64, 0)
 	}

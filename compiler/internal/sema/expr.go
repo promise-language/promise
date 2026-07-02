@@ -3042,6 +3042,24 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos) types.Type {
 	if b == nil {
 		return a
 	}
+	// T1189: unify a `none` arm with a value arm into an Optional. A bare `none`
+	// alone has type `none`; combined with a value arm of type T (or T?), the
+	// if/match expression's type is T? so both arms share one Optional shape.
+	aNone := a == types.TypNone
+	bNone := b == types.TypNone
+	if aNone && bNone {
+		return a // both arms none — degenerate, stays none
+	}
+	if aNone || bNone {
+		concrete := a
+		if aNone {
+			concrete = b
+		}
+		if _, isOpt := concrete.(*types.Optional); isOpt {
+			return concrete // none + T? → T?
+		}
+		return types.NewOptional(concrete) // none + T → T?
+	}
 	stripped := func(t types.Type) types.Type {
 		switch r := t.(type) {
 		case *types.SharedRef:

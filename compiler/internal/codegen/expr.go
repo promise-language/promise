@@ -7594,7 +7594,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 	switchBlock.NewSwitch(tag, defaultTarget, cases...)
 
 	c.block = mergeBlock
-	return buildMatchPhi(mergeBlock, arms)
+	return c.buildMatchPhi(mergeBlock, arms, matchResultType)
 }
 
 // matchArmInfo tracks a match arm's result value and final block for PHI construction.
@@ -7624,7 +7624,21 @@ func (c *Compiler) genMatchArmValue(arm *ast.MatchArm, resultType types.Type) va
 // buildMatchPhi constructs a PHI node at mergeBlock from collected match arm info.
 // Arms that branch to mergeBlock but produce no value get a null placeholder.
 // Returns nil if no arm produces a value (match used as statement).
-func buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo) value.Value {
+func (c *Compiler) buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo, resultType types.Type) value.Value {
+	// T1189: coerce each arm value to the shared Optional result shape before the
+	// void filter / valType selection, so a bare value arm sibling of a `none` arm
+	// contributes `{ i1, T }` rather than bare `T` to the merge phi. The wrapping
+	// insertvalue must be emitted in the arm's own end block (before its terminator)
+	// so it dominates the phi's incoming edge — not in mergeBlock.
+	savedBlock := c.block
+	for i := range arms {
+		if arms[i].val == nil || arms[i].end == nil {
+			continue
+		}
+		c.block = arms[i].end
+		arms[i].val = c.wrapArmValueOptional(arms[i].val, resultType)
+	}
+	c.block = savedBlock
 	// Filter out void-typed values — they cannot participate in phi nodes.
 	for i := range arms {
 		if arms[i].val != nil {
@@ -7965,7 +7979,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 				// After an unguarded wildcard/name, no more arms need checking
 				c.block = mergeBlock
-				return buildMatchPhi(mergeBlock, arms)
+				return c.buildMatchPhi(mergeBlock, arms, matchResultType)
 			}
 		}
 	}
@@ -7976,7 +7990,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 	}
 
 	c.block = mergeBlock
-	return buildMatchPhi(mergeBlock, arms)
+	return c.buildMatchPhi(mergeBlock, arms, matchResultType)
 }
 
 // patternBindingNames returns the local-variable names a match-arm pattern
@@ -9045,8 +9059,10 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	// T0496: Propagate the if-expression's result type as the contextual target
 	// type for each arm so a bare `none` arm lowers to a zero value of the shared
 	// result type (e.g. an Optional struct) rather than the `i1 0` void fallback,
-	// which would produce a phi-type mismatch. Sema's joinBranchTypes makes both
-	// arms share the non-none branch's type, so no phi-rewrapping is needed.
+	// which would produce a phi-type mismatch. T1189: sema's joinBranchTypes unifies
+	// a `none` arm with a value arm into `T?`, but a bare value arm still lowers to
+	// the inner `T`; wrapArmValueOptional (applied before the phi below) rewraps it
+	// so both incomings share the `{ i1, T }` shape.
 	ifResultType := c.info.Types[e]
 	if c.typeSubst != nil && ifResultType != nil {
 		ifResultType = types.Substitute(ifResultType, c.typeSubst)
@@ -9090,6 +9106,20 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 			elseVal = nil
 		}
 	}
+
+	// T1189: rewrap a bare inner value arm to the shared Optional shape so both
+	// phi incomings agree (a `none` arm already produced `{ i1, T }`). The
+	// insertvalue must land in each arm's own end block (before its br to merge) so
+	// it dominates the phi incoming edge — temporarily retarget c.block per arm.
+	if thenVal != nil {
+		c.block = thenEnd
+		thenVal = c.wrapArmValueOptional(thenVal, ifResultType)
+	}
+	if elseVal != nil {
+		c.block = elseEnd
+		elseVal = c.wrapArmValueOptional(elseVal, ifResultType)
+	}
+	c.block = mergeBlock
 
 	// If both branches produce values, create a phi node
 	if thenVal != nil && elseVal != nil {
@@ -9578,6 +9608,34 @@ func (c *Compiler) wrapOptional(val value.Value, optType *irtypes.StructType) va
 	agg = c.block.NewInsertValue(agg, constant.NewInt(irtypes.I1, 1), 0)
 	agg = c.block.NewInsertValue(agg, val, 1)
 	return agg
+}
+
+// wrapArmValueOptional coerces a match/if arm value to the shared Optional
+// result shape (T1189). When the arms unify to Optional[T] but this arm produced
+// the bare inner `T` value (e.g. a value arm sibling of a `none` arm), wrap it as
+// `{ i1 true, T }` so every arm — and the merge phi — shares the `{ i1, T }`
+// type. A `none` arm (already the optional zero via genNoneLit's targetType) and
+// an already-optional arm produce the struct shape and pass through unchanged.
+func (c *Compiler) wrapArmValueOptional(val value.Value, resultType types.Type) value.Value {
+	if val == nil || resultType == nil {
+		return val
+	}
+	rt := resultType
+	if c.typeSubst != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	opt, ok := rt.(*types.Optional)
+	if !ok {
+		return val
+	}
+	optLL, ok := c.resolveType(rt).(*irtypes.StructType) // void-optional resolves to i1 → skip
+	if !ok {
+		return val
+	}
+	if val.Type().Equal(c.resolveType(opt.Elem())) { // produced the bare inner T
+		return c.wrapOptional(val, optLL)
+	}
+	return val // already {i1,T} (none arm or optional-typed arm)
 }
 
 // wrapReturnOptional wraps val in an Optional struct if retType is Optional

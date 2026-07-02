@@ -178,3 +178,136 @@ enum_match_none_vector_droppable() `test {
     assert(false, "enum First arm should be selected");
   }
 }
+
+// T1189: the sibling arm is a BARE non-optional value (a fresh `D(x:..)` or scalar
+// literal), not an already-Optional field read. Sema now unifies `none` + `T` to
+// `T?` and codegen wraps the bare arm to `{ i1, T }`. Pre-fix, a `none`-first arm
+// produced a malformed `i64` phi (`opt` rejected the module) and a `none`-second
+// arm silently miscompiled the none path to `Some(zero)` → segfault. Both arm
+// orderings and both selected paths are asserted below (via `?:` elvis + field
+// read), across value-match, enum-match, and if-expr. Leak detection guards the
+// none-zero / value-arm interaction.
+type D {
+  int x;
+}
+
+_vm_a(int k) D? {
+  return match k {
+    0 => none, _ => D(x: 1),
+  };
+}
+
+_vm_b(int k) D? {
+  return match k {
+    0 => D(x: 1), _ => none,
+  };
+}
+
+value_match_bare_user_type() `test {
+  assert((_vm_a(0) ?: D(x: 42)).x == 42, "none-first: none path yields empty optional");
+  assert((_vm_a(1) ?: D(x: 42)).x == 1, "none-first: value path yields D(x:1)");
+  assert((_vm_b(0) ?: D(x: 99)).x == 1, "none-second: value path yields D(x:1)");
+  assert((_vm_b(1) ?: D(x: 99)).x == 99, "none-second: none path yields empty optional");
+}
+
+_if_pick(int k) D? {
+  return if k == 0 {
+    none
+  } else {
+    D(x: 7)
+  };
+}
+
+_if_pick_swapped(int k) D? {
+  return if k == 0 {
+    D(x: 7)
+  } else {
+    none
+  };
+}
+
+if_expr_bare_user_type() `test {
+  assert((_if_pick(0) ?: D(x: 5)).x == 5, "if none-then: none path yields empty optional");
+  assert((_if_pick(1) ?: D(x: 5)).x == 7, "if none-then: value path yields D(x:7)");
+  assert((_if_pick_swapped(0) ?: D(x: 5)).x == 7, "if none-else: value path yields D(x:7)");
+  assert((_if_pick_swapped(1) ?: D(x: 5)).x == 5, "if none-else: none path yields empty optional");
+}
+
+_em_a(Tag t) D? {
+  return match t {
+    Tag.First => none, _ => D(x: 1),
+  };
+}
+
+_em_b(Tag t) D? {
+  return match t {
+    Tag.First => D(x: 1), _ => none,
+  };
+}
+
+enum_match_bare_user_type() `test {
+  assert((_em_a(Tag.First) ?: D(x: 42)).x == 42, "enum none-first: none path empty");
+  assert((_em_a(Tag.Second) ?: D(x: 42)).x == 1, "enum none-first: value path D(x:1)");
+  assert((_em_b(Tag.First) ?: D(x: 99)).x == 1, "enum none-second: value path D(x:1)");
+  assert((_em_b(Tag.Second) ?: D(x: 99)).x == 99, "enum none-second: none path empty");
+}
+
+// Scalar inner payload — `int?` from a bare literal arm (no heap dup involved).
+_scalar_pick(int k) int? {
+  return match k {
+    0 => none, _ => 5,
+  };
+}
+
+value_match_bare_scalar() `test {
+  assert((_scalar_pick(0) ?: 100) == 100, "scalar none path yields empty optional");
+  assert((_scalar_pick(1) ?: 100) == 5, "scalar value path yields 5");
+}
+
+// T1189: the sibling of a `none` arm is itself ALREADY an Optional value (`int?`),
+// not a bare inner `int`. joinBranchTypes must unify `none + T?` to `T?` (not
+// double-wrap to `T??`) and pass the optional arm through unwrapped — so passing
+// an already-`none` optional through the value arm must stay empty, and a present
+// optional must flow through intact. Both arm orderings across match/if/enum.
+_opt_arm_match(int k, int? e) int? {
+  return match k {
+    0 => none, _ => e,
+  };
+}
+
+_opt_arm_match_swapped(int k, int? e) int? {
+  return match k {
+    0 => e, _ => none,
+  };
+}
+
+_opt_arm_if(int k, int? e) int? {
+  return if k == 0 {
+    none
+  } else {
+    e
+  };
+}
+
+_opt_arm_enum(Tag t, int? e) int? {
+  return match t {
+    Tag.First => none, _ => e,
+  };
+}
+
+none_arm_with_optional_sibling() `test {
+  // Value arm carries a present optional through unchanged.
+  assert((_opt_arm_match(1, 7) ?: 100) == 7, "match: present optional flows through value arm");
+  assert((_opt_arm_match(0, 7) ?: 100) == 100, "match: none arm yields empty optional");
+  // Value arm carries an EMPTY optional through — must stay empty (no re-wrap to Some(none)).
+  assert((_opt_arm_match(1, none) ?: 100) == 100, "match: empty optional stays empty through value arm");
+  // Swapped ordering (value arm first).
+  assert((_opt_arm_match_swapped(0, 7) ?: 100) == 7, "match swapped: present optional flows through");
+  assert((_opt_arm_match_swapped(1, 7) ?: 100) == 100, "match swapped: none arm empty");
+  // if-expr.
+  assert((_opt_arm_if(1, 7) ?: 100) == 7, "if: present optional flows through else arm");
+  assert((_opt_arm_if(1, none) ?: 100) == 100, "if: empty optional stays empty");
+  // enum-match.
+  assert((_opt_arm_enum(Tag.Second, 7) ?: 100) == 7, "enum: present optional flows through");
+  assert((_opt_arm_enum(Tag.First, 7) ?: 100) == 100, "enum: none arm empty");
+}

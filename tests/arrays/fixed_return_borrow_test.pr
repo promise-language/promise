@@ -1,0 +1,175 @@
+// T1184: A function that returns a *borrowed* (default read-only) fixed-array
+// parameter BY VALUE (`echo(string[2] a) string[2] { return a; }`) must hand back
+// an array that owns its heap elements independently — NOT one whose elements
+// alias the caller's array. Fixed arrays previously lacked the return-alias-dup
+// that strings/vectors have, so both the returned copy and the caller ended up
+// owning the same heap allocations → double-free / use-after-free. The fix
+// element-wise deep-clones a borrowed-array-param escape (dupBorrowedHeapUserPayload)
+// so the escaped array owns its elements; the caller keeps and drops its originals
+// exactly once. These tests assert zero leaks and correct values across the bound,
+// inline, heap-user-element, and passthrough-then-mutate forms.
+mk() string[2] {
+  return["a" + "1", "b" + "2"];
+}
+
+// `a` is a shared read-only borrow (default param mode); the caller keeps
+// ownership. Returning it as an owned string[2] must deep-clone the elements.
+echo(string[2] a) string[2] {
+  return a;
+}
+
+// --- bound form: the reported double-free (panicked at `r[1]` pre-fix) ---
+
+t_borrow_return_bound() `test {
+  string[2] r = mk();
+  string[2] copy = echo(r);
+  assert(copy[0] == "a1", "copy0");
+  assert(copy[1] == "b2", "copy1");
+  assert(r[0] == "a1", "r0"); // caller still owns its originals
+  assert(r[1] == "b2", "r1");
+}
+
+// --- inline form: the returned temp owns its dup'd elements and is dropped once ---
+
+t_borrow_return_inline() `test {
+  string[2] r = mk();
+  assert(echo(r)[0] == "a1", "inline0");
+  assert(r[1] == "b2", "inline1");
+}
+
+// --- passthrough then mutate the caller's array: proves the returned copy does
+// NOT alias `r` — reassigning r[0] must not corrupt the earlier-returned copy ---
+
+t_passthrough_then_mutate() `test {
+  string[2] r = mk();
+  string[2] copy = echo(r);
+  r[0] = "z" + "9"; // frees r's old element 0, installs a new one
+  assert(copy[0] == "a1", "copy independent of r after mutate");
+  assert(r[0] == "z9", "r mutated");
+}
+
+// --- heap-user-element analog (T1171 shape): borrowed Row[2] returned by value.
+// Element cleanup dispatches through the type's drop, not just a string free. ---
+
+type Row {
+  string name;
+  drop(~this) {
+  }
+}
+
+mkrows() Row[2] {
+  return[Row(name: "a" + "1"), Row(name: "b" + "2")];
+}
+
+echo_rows(Row[2] a) Row[2] {
+  return a;
+}
+
+t_borrow_return_heap_user() `test {
+  Row[2] r = mkrows();
+  Row[2] copy = echo_rows(r);
+  assert(copy[0].name == "a1", "row copy0");
+  assert(r[1].name == "b2", "row r1");
+}
+
+// --- negative/leak guard: returning an OWNED local (not a borrow) must still work
+// and must not dup (the move-out clears the local's drop flag) — zero leaks. ---
+
+t_owned_local_return() `test {
+  string[2] tmp = mk();
+  string[2] out = tmp;
+  assert(out[0] == "a1", "owned0");
+  assert(out[1] == "b2", "owned1");
+}
+
+// --- borrow-RETURN guard: a function returning a borrowed array param as a BORROW
+// (`string[2]&`) hands back an alias the caller never owns — it must NOT deep-clone
+// (a clone would be an orphaned copy the caller never frees → leak). Only OWNED
+// returns dup; this asserts the isRefType guard on the return-site dup. ---
+
+echo_ref(string[2] a) string[2] & {
+  return a;
+}
+
+t_borrow_return_ref() `test {
+  string[2] r = mk();
+  string[2] &b = echo_ref(r);
+  assert(b[0] == "a1", "ref0"); // reads through the alias
+  assert(r[1] == "b2", "ref1"); // caller still owns and drops its originals
+}
+
+// --- Vector-element array (T1173): each element clones via Vector.clone, a
+// distinct element-clone path from the plain-string dup. Both the returned copy
+// and the caller must own independent inner vectors — zero leaks, no double-free. ---
+
+mkvecs() int[][2] {
+  return[[1, 2], [3, 4]];
+}
+
+echo_vecs(int[][2] a) int[][2] {
+  return a;
+}
+
+t_borrow_return_vector_elem() `test {
+  int[][2] r = mkvecs();
+  int[][2] copy = echo_vecs(r);
+  assert(copy[0][0] == 1, "vec copy0");
+  assert(copy[1][1] == 4, "vec copy1");
+  assert(r[0][1] == 2, "vec r0"); // caller keeps its own inner vectors
+  assert(r[1][0] == 3, "vec r1");
+}
+
+// --- Optional[heap-user]-element array (T1173): the returned aggregate deep-clones
+// each present Optional's inner string so it no longer aliases the caller. ---
+
+mkopts() string?[2] {
+  string a = "a" + "1";
+  string b = "b" + "2";
+  string? oa = a;
+  string? ob = b;
+  return[oa, ob];
+}
+
+echo_opts(string?[2] a) string?[2] {
+  return a;
+}
+
+t_borrow_return_optional_elem() `test {
+  string?[2] r = mkopts();
+  string?[2] copy = echo_opts(r);
+  assert(copy[0] is present, "opt copy0 present");
+  assert(r[1] is present, "opt r1 present"); // caller's originals survive
+}
+
+// --- method form: a borrowed fixed-array VALUE param returned by value from a
+// METHOD must dup identically (borrowedValueParams is populated for methods too). ---
+
+type Echoer {
+  int id;
+  echo(string[2] a) string[2] {
+    return a;
+  }
+}
+
+t_borrow_return_method() `test {
+  Echoer e = Echoer(id: 1);
+  string[2] r = mk();
+  string[2] copy = e.echo(r);
+  assert(copy[0] == "a1", "method copy0");
+  assert(r[1] == "b2", "method r1");
+}
+
+// --- non-heap element negative: a borrowed int[2] (value/copy elements) must NOT
+// dup and must not leak — arrayElemNeedsEscapeDup is false, so the aggregate is a
+// plain bit-copy and both sides are independently owned by construction. ---
+
+echo_ints(int[2] a) int[2] {
+  return a;
+}
+
+t_borrow_return_non_heap() `test {
+  int[2] r = [1, 2];
+  int[2] copy = echo_ints(r);
+  assert(copy[0] == 1, "int copy0");
+  assert(r[1] == 2, "int r1");
+}

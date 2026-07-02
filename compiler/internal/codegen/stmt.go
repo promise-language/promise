@@ -8579,7 +8579,14 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// T1174: `return maybe` where maybe is a match-borrowed Optional[heap-user]
 		// binding aliases the subject's variant payload; deep-clone the inner so the
 		// returned value survives the scope-exit synth enum drop of the subject.
-		val, _ = c.dupBorrowedHeapUserPayload(s.Value, val)
+		// T1184: skip for borrow return types (`T[N]&`) — a borrow return hands back
+		// an alias the caller never owns or frees (same B0179 rule the field-access
+		// dup above follows), so cloning a borrowed-array param (`echo(string[2] a)
+		// string[2]& { return a; }`) into a borrow result would leak. Owning returns
+		// still dup.
+		if !isRefType(retType) {
+			val, _ = c.dupBorrowedHeapUserPayload(s.Value, val)
+		}
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 		val = c.wrapOperatorParamReturnValue(val, s.Value, retType) // T0897
 	}

@@ -103,10 +103,11 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// statement temp; a consuming binding claims it via claimStringTemp.
 		// Sound whenever the returned array is independently owned (the normal
 		// case). T1184: a function that returns a *borrowed* fixed-array param by
-		// value (`echo(string[2] a) string[2] { return a; }`) hands back elements
-		// that alias the caller — fixed arrays lack the string/vector return-alias-
-		// dup, so that pattern (already double-freeing in its bound form) is unsound
-		// here too, pending T1184's return-dup / ownership fix.
+		// value (`echo(string[2] a) string[2] { return a; }`) is now made
+		// independently owned at the return site — dupBorrowedHeapUserPayload
+		// element-wise deep-clones a borrowed-array-param escape, so the returned
+		// aggregate owns its elements and this inline temp-drop frees them exactly
+		// once (the caller keeps and drops its own originals).
 		if arr, ok := rt.(*types.Array); ok {
 			if c.tempTrackingEnabled {
 				elem := arr.Elem()
@@ -12902,26 +12903,41 @@ func (c *Compiler) dupBorrowedHeapUserPayload(expr ast.Expr, val value.Value) (v
 	if !ok {
 		return val, false
 	}
-	if c.matchBorrowedIdents == nil || !c.matchBorrowedIdents[ident.Name] {
-		return val, false
-	}
 	t := c.info.Types[ident]
 	if c.typeSubst != nil && t != nil {
 		t = types.Substitute(t, c.typeSubst)
 	}
-	if inner, ok := c.optionalHeapDupElem(t); ok {
-		// val must be the Optional struct { i1 present, T_v value }.
-		if _, isStruct := val.Type().(*irtypes.StructType); !isStruct {
-			return val, false
+	isMatchBorrowed := c.matchBorrowedIdents != nil && c.matchBorrowedIdents[ident.Name]
+	// T1184: a borrowed (default/`&`, non-`~`) fixed-array VALUE param returned or
+	// otherwise escaped by value hands back an array whose [N x T_v] elements ALIAS
+	// the caller's heap allocations (the caller keeps ownership of the borrow), so
+	// both the escaped copy and the caller would free the same elements → double-free
+	// / UAF. This is the array analog of the scalar return-implicitly-dups contract
+	// (a borrowed `string`/`Vector` param returned as owned is deep-cloned today);
+	// element-wise dup below makes the escaped array own its elements independently.
+	// Gated on the array shape so only arrays that actually alias heap dup — plain
+	// value/copy-element arrays are untouched. The Optional branch stays
+	// match-borrowed-only (a distinct, separately-tracked shape; cf. T1183).
+	_, isBorrowedArrayParam := c.borrowedArrayParamEscapeDup(ident.Name, t)
+	if !isMatchBorrowed && !isBorrowedArrayParam {
+		return val, false
+	}
+	if isMatchBorrowed {
+		if inner, ok := c.optionalHeapDupElem(t); ok {
+			// val must be the Optional struct { i1 present, T_v value }.
+			if _, isStruct := val.Type().(*irtypes.StructType); !isStruct {
+				return val, false
+			}
+			innerVal := c.block.NewExtractValue(val, 1)
+			dup := c.dupHeapValue(innerVal, inner)
+			return c.block.NewInsertValue(val, dup, 1), true
 		}
-		innerVal := c.block.NewExtractValue(val, 1)
-		dup := c.dupHeapValue(innerVal, inner)
-		return c.block.NewInsertValue(val, dup, 1), true
 	}
 	// Fixed-Array whose elements alias heap (T1171 heap-user; T1173 string /
 	// Vector / Channel / Arc / Weak / Optional[heap-user]): element-wise deep-clone
 	// the [N x T_v] aggregate so the escaped array owns independent elements; the
-	// subject's synth enum drop still frees the originals exactly once.
+	// subject's synth enum drop (match-borrowed) or the caller's bindingDropArray
+	// (borrowed array param, T1184) still frees the originals exactly once.
 	if elemT, n, ok := c.arrayElemNeedsEscapeDup(t); ok {
 		return c.dupArrayValueForEscape(val, elemT, n)
 	}
@@ -12956,6 +12972,25 @@ func (c *Compiler) optionalHeapDupElem(typ types.Type) (types.Type, bool) {
 func (c *Compiler) optionalElemNeedsHeapDup(resolvedElem types.Type) bool {
 	_, ok := c.optionalHeapDupElem(resolvedElem)
 	return ok
+}
+
+// borrowedArrayParamEscapeDup reports whether name is a borrowed (default/`&`,
+// non-`~`) value parameter of the current function whose type is a fixed array
+// whose elements alias heap — the T1184 shape. Returning/escaping such a param by
+// value hands back an aggregate whose element pointers alias the caller's heap
+// allocations; the caller keeps ownership of the borrow, so the escaped copy must
+// element-wise deep-clone them (see dupBorrowedHeapUserPayload). Reuses
+// borrowedValueParams (the single-source borrowed-param set) and
+// arrayElemNeedsEscapeDup (the single-source per-array escape predicate). Returns
+// the resolved element type and true when so, else (nil, false).
+func (c *Compiler) borrowedArrayParamEscapeDup(name string, typ types.Type) (types.Type, bool) {
+	if c.borrowedValueParams == nil || !c.borrowedValueParams[name] {
+		return nil, false
+	}
+	if elemT, _, ok := c.arrayElemNeedsEscapeDup(typ); ok {
+		return elemT, true
+	}
+	return nil, false
 }
 
 // arrayElemNeedsEscapeDup reports whether typ is a fixed Array whose element's

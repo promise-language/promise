@@ -49,6 +49,101 @@ test_optional_heap_box_array_field_with_none() `test {
   assert(h.data[1] is absent, "empty slot absent");
 }
 
+// T1182: inline `arr[i]!.field` on an Optional[heap-user] fixed array must not
+// double-free the aliased slot. The element type has a heap (string) sub-field
+// so the over-free's second drop derefs freed memory → `segmentation fault at
+// 0x0` pre-fix (unlike _BoxA whose scalar-only drop makes the over-free silent).
+type _RowS {
+  string name;
+}
+
+test_optional_string_field_box_array_inline_unwrap() `test {
+  _RowS? a0 = _RowS(name: "x" + "1");
+  _RowS? a1 = _RowS(name: "z" + "2");
+  _RowS?[2] arr = [a0, a1];
+  assert(arr[0]!.name == "x1", "elem 0");
+  assert(arr[1]!.name == "z2", "elem 1");
+}
+
+// T1182 mixed-Optional drop walk: one present + one absent slot. The array's
+// element-drop walk covers BOTH branches; the inline borrow of the present slot
+// must not double-free it (segfault pre-fix), and the none slot's drop is a
+// no-op — no over-free of the empty slot.
+test_optional_string_array_inline_unwrap_mixed_none() `test {
+  _RowS? a0 = _RowS(name: "x" + "1");
+  _RowS? a1 = none;
+  _RowS?[2] arr = [a0, a1];
+  assert(arr[0]!.name == "x1", "present slot borrow");
+  assert(arr[1] is absent, "none slot absent");
+}
+
+// T1182 repeated inline unwrap of the SAME slot — each `arr[0]!` is an
+// independent borrow of the one owned slot; must not double-count / double-free.
+test_optional_string_array_inline_unwrap_repeated_slot() `test {
+  _RowS? a0 = _RowS(name: "y" + "o");
+  _RowS? a1 = _RowS(name: "z" + "z");
+  _RowS?[2] arr = [a0, a1];
+  assert(arr[0]!.name == "yo", "first borrow");
+  assert(arr[0]!.name == "yo", "second borrow same slot");
+  assert(arr[0]!.name.len == 2, "third borrow (len)");
+}
+
+// T1182 counter-case coverage: the fix returns `true` unconditionally from
+// isContainerIndexUnwrapSource for array sources, so its safety rests on the
+// binding/return/arg contexts still taking OWNERSHIP of an independent dup (they
+// early-return in genOptionalForceUnwrap before the predicate). These heap-user
+// element type has BOTH a mutable scalar (n) and a heap sub-field (tag string),
+// so a lost dup shows up as either a mutation bleed into the slot or a
+// double-free segfault — all three contexts crash pre-fix.
+type _RowM {
+  int n;
+  string tag;
+}
+
+// bind: `_RowM r = arr[i]!` must own an independent clone — mutating the copy
+// must NOT touch the slot, and both drop cleanly at scope exit.
+test_optional_heap_array_bind_unwrap_independent() `test {
+  _RowM? a0 = _RowM(n: 1, tag: "a" + "a");
+  _RowM? a1 = _RowM(n: 2, tag: "b" + "b");
+  _RowM?[2] arr = [a0, a1];
+  _RowM r = arr[0]!;
+  r.n = 99;
+  assert(r.n == 99, "bound copy mutated");
+  assert(arr[0]!.n == 1, "slot scalar unchanged (independent dup)");
+  assert(arr[0]!.tag == "aa", "slot heap sub-field intact");
+}
+
+// return-escape: the array is OWNED inside the function and dropped at scope
+// exit; the returned unwrapped element must be an independent clone that
+// survives the owner's drop.
+_t1182_ret_arr_elem() _RowM {
+  _RowM? a0 = _RowM(n: 5, tag: "de" + "ep");
+  _RowM? a1 = _RowM(n: 6, tag: "x" + "x");
+  _RowM?[2] arr = [a0, a1];
+  return arr[0]!;
+}
+
+test_optional_heap_array_return_unwrap_escape() `test {
+  _RowM r = _t1182_ret_arr_elem();
+  assert(r.n == 5, "returned elem scalar survives owner drop");
+  assert(r.tag == "deep", "returned elem heap sub-field survives owner drop");
+}
+
+// arg-move: `callee(arr[i]!)` hands an independent clone to the callee; the
+// slot stays valid afterward (the array still owns its copy).
+_t1182_consume_row(_RowM move r) string {
+  return r.tag;
+}
+
+test_optional_heap_array_arg_unwrap_move() `test {
+  _RowM? a0 = _RowM(n: 7, tag: "yo" + "yo");
+  _RowM? a1 = _RowM(n: 8, tag: "z" + "z");
+  _RowM?[2] arr = [a0, a1];
+  string s = _t1182_consume_row(arr[0]!);
+  assert(s == "yoyo", "arg-move callee sees the clone");
+  assert(arr[0]!.tag == "yoyo", "slot still valid after arg dup");
+}
+
 type _HolderPoint {
   Point[int][2] data;
 }

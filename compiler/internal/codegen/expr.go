@@ -14357,6 +14357,26 @@ func (c *Compiler) isContainerIndexUnwrapSource(src ast.Expr) bool {
 	if c.selfSubst != nil && t != nil {
 		t = types.SubstituteSelf(t, c.selfSubst.iface, c.selfSubst.concrete)
 	}
+	// T1182: fixed-array (`arr[i]!`) and Vector (`vec[i]!`) index sources. Their
+	// native `[]` read in the plain (no-dup) unwrap path NEVER dups the element —
+	// genArrayIndex / genVectorIndex only clone when a sibling dup flag (e.g.
+	// dupHeapUserFieldAccess) is set, which happens only in binding/return/arg
+	// contexts, not the inline-temp context reaching this predicate. So the
+	// unwrap-extracted inner ALWAYS aliases the array/vector's owned slot; the
+	// container's element drop frees it, and registering it as an owned temp
+	// double-frees at scope exit (segfault for heap-user elements whose drop
+	// derefs a freed sub-field, silent over-free for strings). Unlike Map/Set
+	// (which dup clone-bearing V inside `[]`), fixed arrays/Vectors have no
+	// internal dup here, so the result is ALWAYS a borrow — return true
+	// unconditionally. (When a dup DOES occur in a binding/return/arg context,
+	// genOptionalForceUnwrap returns early via optionalHeapDup before reaching
+	// this predicate, so the flag is only ever set on the genuine borrow path.)
+	if _, isArr := t.(*types.Array); isArr {
+		return true
+	}
+	if types.IsVector(t) {
+		return true
+	}
 	if !isMapOrSetType(t) {
 		return false
 	}

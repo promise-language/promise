@@ -245,3 +245,65 @@ t_opt_vector_generic_int() `test {
   s.push(9);
   wrap_opt_vector[int](s); // T = int -> no element drop
 }
+
+// T1182: inline `vec[i]!.field` on a Vector[Optional[heap-user]] must not
+// double-free the aliased slot. genVectorIndex only dups when a sibling flag is
+// set (binding/return/arg contexts); the inline-temp force-unwrap reaches the
+// plain no-dup path, so the unwrapped inner aliases the vector's owned slot. The
+// element has a heap (string) sub-field so the over-free's second drop derefs
+// freed memory → segfault pre-fix. isContainerIndexUnwrapSource must recognise
+// the Vector source so the borrow is not tracked as an owned temp.
+type _RowS1182 {
+  string name;
+}
+
+test_optional_string_field_box_vector_inline_unwrap() `test {
+  _RowS1182? a0 = _RowS1182(name: "x" + "1");
+  _RowS1182?[] arr = [a0];
+  assert(arr[0]!.name == "x1", "vec elem 0");
+}
+
+// T1182 multi-element + repeated inline unwrap on a Vector source.
+test_optional_string_vector_inline_unwrap_multi() `test {
+  _RowS1182? a0 = _RowS1182(name: "x" + "1");
+  _RowS1182? a1 = _RowS1182(name: "z" + "2");
+  _RowS1182?[] arr = [a0, a1];
+  assert(arr[0]!.name == "x1", "vec elem 0");
+  assert(arr[1]!.name == "z2", "vec elem 1");
+  assert(arr[0]!.name.len == 2, "vec elem 0 re-borrow");
+}
+
+// T1182 counter-case coverage for the Vector branch of the fix: the
+// binding/return contexts must OWN an independent dup (they early-return in
+// genOptionalForceUnwrap before the container-borrow predicate). Element type
+// carries a mutable scalar + a heap sub-field so a lost dup surfaces as a
+// mutation bleed or a double-free segfault (crashes pre-fix).
+type _RowM1182 {
+  int n;
+  string tag;
+}
+
+// bind: mutating the bound clone must not touch the vector slot.
+test_optional_heap_vector_bind_unwrap_independent() `test {
+  _RowM1182? a0 = _RowM1182(n: 3, tag: "mm" + "nn");
+  _RowM1182?[] v = [a0];
+  _RowM1182 r = v[0]!;
+  r.n = 42;
+  assert(r.n == 42, "bound copy mutated");
+  assert(v[0]!.n == 3, "vec slot scalar unchanged (independent dup)");
+  assert(v[0]!.tag == "mmnn", "vec slot heap sub-field intact");
+}
+
+// return-escape: vector owned inside the function; returned unwrapped element
+// must survive the owner drop.
+_t1182_ret_vec_elem() _RowM1182 {
+  _RowM1182? a0 = _RowM1182(n: 9, tag: "vv" + "ee");
+  _RowM1182?[] v = [a0];
+  return v[0]!;
+}
+
+test_optional_heap_vector_return_unwrap_escape() `test {
+  _RowM1182 r = _t1182_ret_vec_elem();
+  assert(r.n == 9, "vec returned elem scalar survives owner drop");
+  assert(r.tag == "vvee", "vec returned elem heap sub-field survives owner drop");
+}

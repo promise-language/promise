@@ -1083,6 +1083,18 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 			// Only enum-variant Optional/Array payload bindings take the escape dup
 			// (isVariantPayloadBorrowShape) — bare-heap T0672 borrow bindings are
 			// already owned copies and must not be re-dup'd (would leak).
+			//
+			// A whole Array[heap-user] variant payload is deliberately NOT dup'd
+			// here: the explicit escape-site call to dupBorrowedHeapUserPayload
+			// (return / assign / constructor field / consuming arg) already
+			// element-wise deep-clones it via the same arrayElemNeedsEscapeDup predicate.
+			// Routing it through dupHeapFieldForEscape too (its T1176 array branch,
+			// reached because the escape context set dupContainerFieldAccess) would
+			// clone TWICE — the first clone is then orphaned and leaks its elements.
+			// The flag stays unconsumed for arrays but every escape context clears it
+			// immediately after genExpr, so it cannot leak into later codegen. The
+			// Optional[string]/Optional[container] shapes below are exclusive to this
+			// path (dupBorrowedHeapUserPayload only covers Optional/Array of heap-user).
 			if isVariantPayloadBorrowShape(identType) {
 				// T1178/T1173: a fixed Array (heap-user, string, or container
 				// elements) variant payload is deep-cloned at the escape SINK by

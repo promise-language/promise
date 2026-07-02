@@ -1680,3 +1680,256 @@ t1183_optcloneenum_push_intact() `test {
     },
   }
 }
+
+// ============================================================================
+// T1169: `if x is Subtype(field) { … }` destructure of a HEAP SUBTYPE field
+// (class/`is`-parent form, not the enum variant form). Sibling of T1012 — the
+// class-destructure path (bindIsDestructureNamed) had the identical raw GEP+load
+// alias shape with no dup and no drop binding. A droppable heap-typed subtype
+// field (string/vector/…) that escapes the narrowing scope aliased the subject's
+// instance field and dangled when the subject dropped → UAF/double-free.
+// ============================================================================
+type Shape {
+}
+type Named is Shape {
+  string label;
+}
+
+// --- Return escape (the reported repro) ---
+t1169_ret_impl() string {
+  Shape s = Named(label: "a" + "b"); // s owns the heap string
+  if s is Named(label) {
+    return label;
+  }
+  // label escapes; s dropped at scope exit
+  return "<none>";
+}
+t1169_ret() `test {
+  assert(t1169_ret_impl() == "ab", "returned heap subtype field survives");
+}
+
+// --- Store-to-escaping-outer ---
+t1169_store() `test {
+  Shape s = Named(label: "x" + "y");
+  string out = "";
+  if s is Named(label) {
+    out = label;
+  }
+  assert(out == "xy", "stored-to-outer subtype field survives");
+}
+
+// --- Consuming (~) arg escape ---
+t1169_consume(string move s) string {
+  return s + "!";
+}
+t1169_consume_impl() string {
+  Shape s = Named(label: "h" + "i");
+  if s is Named(label) {
+    return t1169_consume(move label);
+  }
+  return "!";
+}
+t1169_consume_test() `test {
+  assert(t1169_consume_impl() == "hi!", "subtype field moved into consuming param");
+}
+
+// --- Constructor-field escape ---
+type T1169Hold {
+  string held;
+}
+t1169_ctor_impl() T1169Hold {
+  Shape s = Named(label: "c" + "d");
+  if s is Named(label) {
+    return T1169Hold(held: label);
+  }
+  return T1169Hold(held: "BAD");
+}
+t1169_ctor() `test {
+  T1169Hold h = t1169_ctor_impl();
+  assert(h.held == "cd", "subtype field escaped into constructor field");
+}
+
+// --- In-scope read-only: no escape, subject still usable, zero leaks ---
+t1169_inscope() `test {
+  Shape s = Named(label: "re" + "ad");
+  if s is Named(label) {
+    assert(label == "read", "in-scope read of subtype field");
+  }
+  // Subject still usable after the borrow-narrowing `if`.
+  if s is Named(again) {
+    assert(again == "read", "subject intact after if");
+  }
+}
+
+// --- Vector-field subtype ---
+type VecShape {
+}
+type VecNamed is VecShape {
+  int[] xs;
+}
+t1169_vec_impl() int[] {
+  VecShape s = VecNamed(xs: [1, 2, 3]);
+  if s is VecNamed(xs) {
+    return xs;
+  }
+  return[-1];
+}
+t1169_vec() `test {
+  int[] v = t1169_vec_impl();
+  assert(v.len == 3, "vector subtype field escape survives (len)");
+  assert(v[0] == 1, "vector subtype field escape survives (elem 0)");
+  assert(v[2] == 3, "vector subtype field escape survives (elem 2)");
+}
+
+// --- Optional[heap] subtype field (T1174-style borrow-mark through named path) ---
+type OptShape {
+}
+type OptNamed is OptShape {
+  string? tag;
+}
+t1169_opt_impl() string? {
+  OptShape s = OptNamed(tag: "p" + "q");
+  if s is OptNamed(tag) {
+    return tag; // Optional[string] field escapes via return
+  }
+  return "<none>";
+}
+t1169_opt() `test {
+  assert(opt_unwrap(t1169_opt_impl()) == "pq", "opt[string] subtype field escape survives");
+}
+
+// --- Value/numeric subtype field: stays zero-copy, unaffected ---
+type NumShape {
+}
+type NumNamed is NumShape {
+  int n;
+}
+t1169_num_impl() int {
+  NumShape s = NumNamed(n: 7);
+  if s is NumNamed(n) {
+    return n;
+  }
+  return -1;
+}
+t1169_num() `test {
+  assert(t1169_num_impl() == 7, "numeric subtype field correct (zero-copy)");
+}
+
+// --- Multi-field subtype: per-field dup selection (heap + numeric) ---
+// The heap field escapes (must dup), the numeric field is read in-scope (must
+// stay zero-copy). Mirrors the enum `Pair(s, n)` multi-field case for the named
+// path — pins that the dup gate is applied per-field, not per-subtype.
+type MultiShape {
+}
+type MultiNamed is MultiShape {
+  string s;
+  int n;
+}
+t1169_multi_impl() string {
+  MultiShape sh = MultiNamed(s: "k" + "v", n: 42);
+  if sh is MultiNamed(s, n) {
+    assert(n == 42, "numeric field zero-copy");
+    return s; // heap field escapes; sh dropped at scope exit
+  }
+  return "";
+}
+t1169_multi() `test {
+  assert(t1169_multi_impl() == "kv", "multi-field subtype heap field escapes, numeric zero-copy");
+}
+
+// --- Optional[heap-user-type] subtype field (T1174-style through named path) ---
+// t1169_opt covers Optional[string]; this pins Optional-of-heap-USER-type on the
+// subtype form. matchBindingIsBorrow marks the binding match-borrowed and the
+// escape-site dup (dupBorrowedHeapUserPayload) deep-clones the inner heap value,
+// so the returned optional owns an independent copy while the subject's drop
+// frees the original once. (No leak → an aliasing regression would be caught.)
+type OuRow {
+  string name;
+}
+type OuShape {
+}
+type OuNamed is OuShape {
+  OuRow? row;
+}
+t1169_ourow_name(OuRow? move r) string {
+  if x := r {
+    return x.name;
+  }
+  return "none";
+}
+t1169_opt_user_impl() OuRow? {
+  OuShape s = OuNamed(row: OuRow(name: "e" + "f"));
+  if s is OuNamed(row) {
+    return row; // Optional[heap-user] field escapes via return
+  }
+  return none;
+}
+t1169_opt_user() `test {
+  assert(t1169_ourow_name(t1169_opt_user_impl()) == "ef", "opt[heap-user] subtype field escape survives");
+}
+
+// --- Generic subtype field via monomorphized function (c.typeSubst branch) ---
+// The subtype field type is the type parameter `T`; inside the monomorphized
+// `t1169_gesc[string]` the destructure resolves `T` → `string` through
+// c.typeSubst, so the escape dup recognizes the droppable heap field. Without the
+// substitution the field type would stay `T` and the dup gate would miss it → UAF.
+type GenShape {
+}
+type GenNamed[T] is GenShape {
+  T label;
+}
+t1169_gesc[T](GenShape move s, T fb) T {
+  if s is GenNamed[T](label) {
+    return label;
+  }
+  return fb;
+}
+t1169_generic() `test {
+  GenShape s = GenNamed[string](label: "a" + "b");
+  assert(t1169_gesc(move s, "fb") == "ab", "generic subtype heap field escape (typeSubst)");
+}
+
+// --- Generic subtype destructured as a CONCRETE instance in a plain function ---
+// Exercises the targetType.(*types.Instance) local-subst branch of
+// bindIsDestructureNamed: the narrow target is `GenNamed[string]` directly (no
+// method typeSubst), so the field type is resolved via BuildSubstMap over the
+// instance's own type args. The escaped heap field must survive the subject drop.
+t1169_concrete_inst_impl() string {
+  GenShape s = GenNamed[string](label: "c" + "d");
+  if s is GenNamed[string](label) {
+    return label;
+  }
+  return "<none>";
+}
+t1169_concrete_inst() `test {
+  assert(t1169_concrete_inst_impl() == "cd", "concrete generic-inst subtype heap field escape");
+}
+
+// --- Single-owner-handle subtype field: guard keeps it a non-owning alias ---
+// A subtype holding a Task (single-owner handle, not dup-cloneable) exercises the
+// FirstNestedSingleOwnerHandle guard: the `if is` binding of the handle must NOT
+// dup it and must NOT register a drop — the subject owns and drops the handle
+// exactly once at scope exit. We read only the sibling scalar; the handle binding
+// stays an untouched borrow. Drop-safety (no double-free / leak) is the invariant.
+// NOTE: consuming the handle (`<-job`) is a separate, pre-existing double-free
+// tracked as T1177 — not exercised here.
+worker_i() int {
+  return 21 + 21;
+}
+type HShape {
+}
+type HNamed is HShape {
+  Task[int] job;
+  int tag;
+}
+t1169_handle_impl() int {
+  HShape s = HNamed(job: go worker_i(), tag: 5);
+  int t = 0;
+  if s is HNamed(job, tag) {
+    t = tag; // read scalar; `job` left as a borrowed alias, subject drops it once
+  }
+  return t;
+}
+t1169_handle_guard() `test {
+  assert(t1169_handle_impl() == 5, "single-owner-handle subtype field left as borrow (drop-safe)");
+}

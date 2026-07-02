@@ -10112,8 +10112,9 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 		}
 	}
 
-	// T1012: capture the scope-binding watermark before binding. When the enum
-	// is droppable and a heap payload is dup'd for escape safety, the dup's drop
+	// T1012/T1169: capture the scope-binding watermark before binding. When the
+	// enum (bindIsDestructureEnum) or the named subtype (bindIsDestructureNamed)
+	// is droppable and a heap field is dup'd for escape safety, the dup's drop
 	// binding is appended here — BEFORE genBlock captures its own savedScopeLen —
 	// so genBlock won't clean it on the fall-through path. We clean [watermark:]
 	// ourselves at the then-block fall-through terminator below (escape paths
@@ -10282,6 +10283,10 @@ func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDe
 		instancePtr = c.extractInstancePtr(subject)
 	}
 
+	// T1169: whether the subject subtype is droppable — gates the escape-safe dup
+	// below (mirrors the enum path's enumHasDrop gate in bindIsDestructureEnum).
+	ownerDroppable := c.ownerHasOrSynthDrop(targetType, targetNamed)
+
 	allFields := targetNamed.AllFields()
 	for i, b := range narrow.Bindings {
 		if b.VarName == "_" {
@@ -10298,7 +10303,9 @@ func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDe
 			if !ok {
 				continue
 			}
-			// Extract field directly from the subject value struct
+			// Extract field directly from the subject value struct.
+			// Value types have only `value` fields (no heap/drop) — always
+			// zero-copy, so no dup/borrow-mark is needed here (T1169).
 			fieldVal := c.block.NewExtractValue(subject, uint64(fieldIdx))
 			bindAlloca := c.createEntryAlloca(fieldVal.Type())
 			c.block.NewStore(fieldVal, bindAlloca)
@@ -10313,6 +10320,50 @@ func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDe
 			fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 			fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+
+			// T1169: a raw GEP+load binding merely ALIASES the subject's instance
+			// field — safe for an in-scope read (the subject's drop frees it once)
+			// but a use-after-free when a droppable heap-typed (string/vector/…)
+			// binding escapes the narrowing scope (return / store-to-outer /
+			// consuming arg / constructor field), since the subject is dropped at
+			// scope exit. Mirror bindIsDestructureEnum: when the subtype is
+			// droppable and the field needs dup, deep-clone it and register a drop
+			// (clearDropFlag clears the flag at move sites, so the escaped value is
+			// owned by its consumer and the subject's drop still frees the original
+			// exactly once). Value/numeric fields (typeNeedsMatchDup == false) stay
+			// zero-copy.
+			if ownerDroppable {
+				// Resolve the field type exactly as genFieldAccess does so a generic
+				// subtype field (e.g. T on Box[string]) resolves to its concrete type.
+				resolved := field.Type()
+				if c.typeSubst != nil {
+					resolved = types.Substitute(resolved, c.typeSubst)
+				}
+				if inst, ok := targetType.(*types.Instance); ok {
+					if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+						localSubst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+						resolved = types.Substitute(resolved, localSubst)
+					}
+				}
+				// A single-owner-handle field (Task/Mutex/MutexGuard, possibly nested)
+				// is NOT dup-cloneable; `if is` is a pure borrow so the subject drops
+				// the handle exactly once — keep it a plain non-owning alias.
+				if sema.FirstNestedSingleOwnerHandle(resolved) == nil && !c.suppressMatchDup &&
+					(c.typeNeedsMatchDup(resolved) || c.enumMatchDupSafe(resolved, nil)) {
+					c.dupMatchBinding(b.VarName, fieldVal, fieldVal.Type(), resolved)
+					continue
+				}
+				// T0485/T1170/T1174: an Optional/Array field binding aliases the
+				// subject's instance field (which the subject's drop owns). Mark it
+				// match-borrowed so escape sites (dupBorrowedHeapUserPayload) dup it
+				// and a later unwrap doesn't double-transfer ownership.
+				if c.matchBindingIsBorrow(resolved) {
+					if c.matchBorrowedIdents == nil {
+						c.matchBorrowedIdents = make(map[string]bool)
+					}
+					c.matchBorrowedIdents[b.VarName] = true
+				}
+			}
 
 			bindAlloca := c.createEntryAlloca(fieldVal.Type())
 			c.block.NewStore(fieldVal, bindAlloca)

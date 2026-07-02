@@ -23440,6 +23440,67 @@ func TestT1178OptionalHeapUserPayloadStillClones(t *testing.T) {
 	assertContains(t, fn, "heapdup.copy")
 }
 
+// T1169: `if x is Subtype(field)` destructure of a HEAP SUBTYPE field (the
+// class/`is`-parent form, not the enum variant form). Sibling of T1012 — a
+// droppable heap-typed subtype field (string) that escapes the narrowing scope
+// must be deep-cloned (via cloneResolvedValue → dupString → strdup.copy) with a
+// per-binding drop flag, so it survives the subject's drop at scope exit.
+func TestT1169IfIsDestructureNamedHeapFieldDupsOnDroppableSubtype(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { }
+		type Named is Shape { string label; }
+		make() string {
+			Shape s = Named(label: "a" + "b");
+			if s is Named(label) { return label; }
+			return "";
+		}
+		main() { s := make(); }
+	`)
+	fn := extractFunction(ir, "__user.make")
+	assertContains(t, fn, "strdup.copy")
+	assertContains(t, fn, "label.dropflag")
+}
+
+// T1169 negative control: an int subtype field binding must NOT be cloned —
+// value/numeric fields stay zero-copy (the untouched value/typeNeedsMatchDup gate).
+func TestT1169IfIsDestructureNamedNumericFieldNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { }
+		type Named is Shape { int n; }
+		grab() int {
+			Shape s = Named(n: 7);
+			if s is Named(n) { return n; }
+			return 0;
+		}
+		main() { x := grab(); }
+	`)
+	fn := extractFunction(ir, "__user.grab")
+	assertContains(t, fn, "ret i64") // sanity: we extracted the real function body
+	assertNotContains(t, fn, "strdup.copy")
+	assertNotContains(t, fn, "n.dropflag")
+}
+
+// T1169: a GENERIC subtype whose field type is the type parameter `T`,
+// destructured as a concrete instance `Named[string]` in a plain function. This
+// exercises bindIsDestructureNamed's targetType.(*types.Instance) local-subst
+// branch (BuildSubstMap over the instance's own type args) — the field must
+// resolve T → string so the droppable heap field is deep-cloned on escape.
+func TestT1169IfIsDestructureNamedGenericInstanceFieldDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { }
+		type Named[T] is Shape { T label; }
+		make() string {
+			Shape s = Named[string](label: "a" + "b");
+			if s is Named[string](label) { return label; }
+			return "";
+		}
+		main() { s := make(); }
+	`)
+	fn := extractFunction(ir, "__user.make")
+	assertContains(t, fn, "strdup.copy")
+	assertContains(t, fn, "label.dropflag")
+}
+
 // B0007: Verify that channel recv alloca is in coro.start (entry block),
 // not in the chrecv.read block.
 func TestChannelRecvAllocaInEntryBlock(t *testing.T) {

@@ -889,3 +889,195 @@ t1178_deep_match() `test {
   assert(r[1].xs.len == 2, "deep variant match: cell 1 vector length independent");
   assert(r[1].xs[1] == 9, "deep variant match: cell 1 elem 1");
 }
+
+// T1179: A plain var-decl that binds a whole match-borrowed enum-variant payload
+// (a fixed Array[heap-user] or an Optional[heap-user]) to a NEW owned local must
+// deep-clone the borrowed payload exactly once — otherwise the new local's owning
+// drop and the enum's synthesized drop free the same instances → double-free/UAF
+// (previously: `fatal: segmentation fault at 0x0`).
+//
+// Covers the matrix: {if…is, match} × {typed, inferred} × {Array, Optional}.
+// Every function is leak-clean (the clone is independently owned and dropped).
+type Row {
+  string name;
+}
+
+enum Box {
+  Some(Row[2] value), Empty,
+}
+
+enum Opt {
+  Present(Row? value), Absent,
+}
+
+// ---------------------------------------------------------------------------
+// Array payload — if…is
+// ---------------------------------------------------------------------------
+
+test_if_is_array_typed() `test {
+  Box w = Box.Some(value: [Row(name: "de" + "ep"), Row(name: "x" + "y")]);
+  if w is Some(value) {
+    Row[2] copy = value;
+    assert(copy[0].name == "deep", "typed if-is copy[0]");
+    assert(copy[1].name == "xy", "typed if-is copy[1]");
+  } else {
+    assert(false, "should match Some");
+  }
+}
+
+test_if_is_array_inferred() `test {
+  Box w = Box.Some(value: [Row(name: "aa" + "bb"), Row(name: "cc" + "dd")]);
+  if w is Some(value) {
+    copy := value;
+    assert(copy[0].name == "aabb", "inferred if-is copy[0]");
+    assert(copy[1].name == "ccdd", "inferred if-is copy[1]");
+  } else {
+    assert(false, "should match Some");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Array payload — match
+// ---------------------------------------------------------------------------
+
+test_match_array_typed() `test {
+  Box w = Box.Some(value: [Row(name: "he" + "llo"), Row(name: "wor" + "ld")]);
+  match w {
+    Some(value) => {
+      Row[2] copy = value;
+      assert(copy[0].name == "hello", "typed match copy[0]");
+      assert(copy[1].name == "world", "typed match copy[1]");
+    },
+    Empty => {
+      assert(false, "should match Some");
+    },
+  }
+}
+
+test_match_array_inferred() `test {
+  Box w = Box.Some(value: [Row(name: "f" + "oo"), Row(name: "b" + "ar")]);
+  match w {
+    Some(value) => {
+      copy := value;
+      assert(copy[0].name == "foo", "inferred match copy[0]");
+      assert(copy[1].name == "bar", "inferred match copy[1]");
+    },
+    Empty => {
+      assert(false, "should match Some");
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Optional payload — if…is
+// ---------------------------------------------------------------------------
+
+test_if_is_optional_typed() `test {
+  Opt o = Opt.Present(value: Row(name: "op" + "t"));
+  if o is Present(value) {
+    Row? copy = value;
+    assert(copy!.name == "opt", "typed if-is optional copy");
+  } else {
+    assert(false, "should match Present");
+  }
+}
+
+test_if_is_optional_inferred() `test {
+  Opt o = Opt.Present(value: Row(name: "in" + "f"));
+  if o is Present(value) {
+    copy := value;
+    assert(copy!.name == "inf", "inferred if-is optional copy");
+  } else {
+    assert(false, "should match Present");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Optional payload — match
+// ---------------------------------------------------------------------------
+
+test_match_optional_typed() `test {
+  Opt o = Opt.Present(value: Row(name: "ma" + "t"));
+  match o {
+    Present(value) => {
+      Row? copy = value;
+      assert(copy!.name == "mat", "typed match optional copy");
+    },
+    Absent => {
+      assert(false, "should match Present");
+    },
+  }
+}
+
+test_match_optional_inferred() `test {
+  Opt o = Opt.Present(value: Row(name: "mi" + "n"));
+  match o {
+    Present(value) => {
+      copy := value;
+      assert(copy!.name == "min", "inferred match optional copy");
+    },
+    Absent => {
+      assert(false, "should match Present");
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Independence: mutating the clone must not corrupt the still-live enum data,
+// and every element must be independently cloned.
+// ---------------------------------------------------------------------------
+
+test_clone_is_independent() `test {
+  Box w = Box.Some(value: [Row(name: "or" + "ig0"), Row(name: "or" + "ig1")]);
+  if w is Some(value) {
+    Row[2] copy = value;
+    // Both clone elements survive with their own strings.
+    assert(copy[0].name == "orig0", "clone elem 0 survives");
+    assert(copy[1].name == "orig1", "clone elem 1 survives");
+    // The original enum payload is still readable (its own instances).
+    assert(value[0].name == "orig0", "source elem 0 intact");
+    assert(value[1].name == "orig1", "source elem 1 intact");
+  } else {
+    assert(false, "should match Some");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Marker scoping: the match-borrow marker set inside `if…is` must be reverted
+// at the end of the then-block (genIfDestructureIsStmt). If it leaked, a later
+// statement in the SAME function that reuses the binding name for a genuine
+// OWNED local would inherit the stale borrow marker — the whole-array var-decl
+// move (`moved = value`) would be wrongly deep-cloned while `value`'s drop flag
+// is cleared as if moved, leaking the original array's Row instances.
+// (Verified: without the revert this leaks 4 allocations.)
+// ---------------------------------------------------------------------------
+
+test_borrow_marker_does_not_leak_across_name_reuse() `test {
+  Box w = Box.Some(value: [Row(name: "a" + "0"), Row(name: "a" + "1")]);
+  if w is Some(value) {
+    Row[2] copy = value;
+    assert(copy[0].name == "a0", "borrowed copy inside if-is");
+  } else {
+    assert(false, "should match Some");
+  }
+  // `value` here is an unrelated OWNED local reusing the name. The move below
+  // must be a plain move (no clone) so the original is not leaked.
+  Row[2] value = [Row(name: "b" + "0"), Row(name: "b" + "1")];
+  Row[2] moved = value;
+  assert(moved[0].name == "b0", "owned move after if-is, elem 0");
+  assert(moved[1].name == "b1", "owned move after if-is, elem 1");
+}
+
+// Same guard for the Optional payload shape.
+test_optional_borrow_marker_does_not_leak_across_reuse() `test {
+  Opt o = Opt.Present(value: Row(name: "p" + "re"));
+  if o is Present(value) {
+    Row? copy = value;
+    assert(copy!.name == "pre", "borrowed optional copy inside if-is");
+  } else {
+    assert(false, "should match Present");
+  }
+  Row? value = Row(name: "ow" + "n");
+  Row? moved = value;
+  assert(moved!.name == "own", "owned optional move after if-is");
+}

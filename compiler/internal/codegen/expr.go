@@ -8072,12 +8072,7 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// variable as owned and transfer ownership, causing double-free with
 		// the synth enum drop's Optional/Array walk.
 		if enumHasDrop {
-			if c.matchBindingIsBorrow(resolved) {
-				if c.matchBorrowedIdents == nil {
-					c.matchBorrowedIdents = make(map[string]bool)
-				}
-				c.matchBorrowedIdents[binding] = true
-			}
+			c.markMatchBorrowedBinding(binding, resolved)
 		}
 	}
 }
@@ -8166,6 +8161,51 @@ func (c *Compiler) matchBindingIsBorrow(resolved types.Type) bool {
 		return c.borrowInnerHasDrop(arr.Elem())
 	}
 	return false
+}
+
+// markMatchBorrowedBinding records `name` as a match-borrowed alias when its
+// resolved type is an Optional/Array whose inner heap value stays owned by the
+// enum's variant data (matchBindingIsBorrow). Shared by the match-arm
+// (bindEnumDestructure) and if…is (bindIsDestructureEnum) destructure paths so
+// the mark is set identically in both; callers gate on enumHasDrop. A downstream
+// escape/whole-payload var-decl then clones exactly once (T0485/T1179). No-op
+// when the binding does not alias owned variant data.
+func (c *Compiler) markMatchBorrowedBinding(name string, resolved types.Type) {
+	if !c.matchBindingIsBorrow(resolved) {
+		return
+	}
+	if c.matchBorrowedIdents == nil {
+		c.matchBorrowedIdents = make(map[string]bool)
+	}
+	c.matchBorrowedIdents[name] = true
+}
+
+// cloneBorrowedWholePayloadVarDecl deep-clones a whole match-borrowed
+// Array/Optional heap-user payload when it is bound by a plain var-decl to a new
+// owned local (T1179). `if…is` / `match` bind such a payload as a shallow borrow
+// (matchBorrowedIdents) with NO drop, because its inner heap value is still owned
+// by the enum's variant data (freed once by the synth enum drop). A plain
+// var-decl (`T[N] copy = value;` / `T? copy = value;`) instead gives the new
+// local an OWNING drop — so without cloning, both the local's drop and the enum
+// synth drop would free the same instances → double-free/UAF. Clone exactly once
+// here so the local owns independent data; the source binding stays a borrow.
+// Gated on matchBorrowedIdents membership AND matchBindingIsBorrow so ordinary
+// owned-local moves are untouched. Returns val unchanged when not applicable.
+func (c *Compiler) cloneBorrowedWholePayloadVarDecl(val value.Value, valueExpr ast.Expr, resolvedType types.Type) value.Value {
+	if val == nil || resolvedType == nil {
+		return val
+	}
+	id, ok := unwrapDestructureParens(valueExpr).(*ast.IdentExpr)
+	if !ok {
+		return val
+	}
+	if c.matchBorrowedIdents == nil || !c.matchBorrowedIdents[id.Name] {
+		return val
+	}
+	if !c.matchBindingIsBorrow(resolvedType) {
+		return val
+	}
+	return c.cloneByType(val, resolvedType)
 }
 
 // borrowInnerHasDrop returns true if a type wrapped inside an Optional/Array
@@ -8685,6 +8725,27 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 			}
 		}
 		dupVal = result
+	} else if arr, isArr := resolvedType.(*types.Array); isArr {
+		// T1179: deep-clone each element so a whole fixed-Array payload becomes
+		// independent. Mirrors the Tuple case above. cloneByType handles bit-copy
+		// elements (scalar/value/copy arrays pass through unchanged via the
+		// isAutoCloneBitCopy guard), and recurses for heap-bearing elements
+		// (string/vector/enum/heap-user). Without this, a match-borrowed
+		// `T[N] copy = value;` var-decl would alias the enum's variant data →
+		// double-free when both copy's array drop and the synth enum drop fire.
+		resolvedElem := arr.Elem()
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		result := val
+		for i := int64(0); i < arr.Size(); i++ {
+			elemVal := c.block.NewExtractValue(result, uint64(i))
+			clonedElem := c.cloneByType(elemVal, resolvedElem)
+			if clonedElem != nil && clonedElem != elemVal {
+				result = c.block.NewInsertValue(result, clonedElem, uint64(i))
+			}
+		}
+		dupVal = result
 	} else if cloned, ok := c.cloneEnumValue(val, resolvedType); ok {
 		// B0244: Enum with clone — deep-copy via clone method.
 		dupVal = cloned
@@ -8790,6 +8851,15 @@ func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
 			}
 		}
 		return true
+	}
+	// T1179: a fixed Array[E] is a bit copy iff its element is — recurse so an
+	// array of a heap-bearing element (string/vector/enum/heap-user) is NOT
+	// short-circuited by cloneByType's isAutoCloneBitCopy guard (that would leave
+	// a match-borrowed whole-array var-decl aliasing the enum's variant data →
+	// double-free). A pure scalar/value/copy array stays a bit copy. Mirrors the
+	// *types.Optional and *types.Tuple recursions above.
+	if arr, isArr := t.(*types.Array); isArr {
+		return c.isAutoCloneBitCopy(arr.Elem())
 	}
 	named := extractNamed(t)
 	if named == nil {

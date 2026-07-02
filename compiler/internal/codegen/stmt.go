@@ -1199,6 +1199,12 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		val = c.genAutoPropagateValue(val)
 	}
 
+	// T1179: deep-clone a whole match-borrowed Array/Optional heap-user payload
+	// bound by this var-decl so the new local owns independent data (see
+	// cloneBorrowedWholePayloadVarDecl). resolvedExprType is the substituted RHS
+	// type — for a whole-payload binding it equals the declared Array/Optional type.
+	val = c.cloneBorrowedWholePayloadVarDecl(val, s.Value, resolvedExprType)
+
 	// T0111: Claim string temp BEFORE optional wrapping. After wrapOptional, the
 	// value identity changes and claimStringTemp can't find the tracked temp.
 	// T0555: Also claim native handle / container temps before the wrap.
@@ -1615,6 +1621,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if c.info.AutoPropagateExprs[s.Value] {
 		val = c.genAutoPropagateValue(val)
 	}
+
+	// T1179: deep-clone a whole match-borrowed Array/Optional heap-user payload
+	// bound by this var-decl so the new local owns independent data (see
+	// cloneBorrowedWholePayloadVarDecl). `typ` is the substituted RHS type.
+	val = c.cloneBorrowedWholePayloadVarDecl(val, s.Value, typ)
 
 	// Clear drop flag on RHS if it's a variable being moved into this declaration.
 	// Without this, `b := a` would leave both a and b with active drop flags → double-free.
@@ -9747,15 +9758,14 @@ func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDes
 				c.dupMatchBinding(b.VarName, val, fieldType, resolved)
 				continue
 			}
-			// T0485: an Optional/Array payload binding aliases the variant data
-			// (which the synth enum drop owns). Mark it match-borrowed so a later
-			// `if x := optBinding`-style unwrap doesn't double-transfer ownership.
-			if c.matchBindingIsBorrow(resolved) {
-				if c.matchBorrowedIdents == nil {
-					c.matchBorrowedIdents = make(map[string]bool)
-				}
-				c.matchBorrowedIdents[b.VarName] = true
-			}
+			// T0485/T1179: an Optional/Array payload binding aliases the variant
+			// data (which the synth enum drop owns). Mark it match-borrowed (via
+			// markMatchBorrowedBinding, shared with the match-arm path in
+			// bindEnumDestructure) so a later `if x := optBinding`-style unwrap
+			// doesn't double-transfer ownership and a plain var-decl of the whole
+			// payload (`T[N] copy = value;`) clones exactly once instead of taking
+			// an owning drop that would double-free with the synth enum drop.
+			c.markMatchBorrowedBinding(b.VarName, resolved)
 		}
 
 		bindAlloca := c.createEntryAlloca(fieldType)

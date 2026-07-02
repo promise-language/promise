@@ -259,6 +259,68 @@ func listHashed(dir string) (map[string]int64, error) {
 	return out, nil
 }
 
+// SweepStagingResidue removes in-flight staging temporaries left by a crashed or
+// interrupted install/fetch: non-hash entries in blobs/sha256 and archives/sha256
+// (".stage-*.tmp") and ".fetch-tmp-*" scratch dirs under the CAS root. Committed
+// entries are 64-char hex (isHexHash) and are never touched, so this is safe.
+// The caller MUST hold Store.Lock(). Returns the count removed (best-effort;
+// individual remove errors other than NotExist are returned, but the sweep
+// continues past them). quarantine/, blobs.refs, and *.lock are never touched.
+func (s *Store) SweepStagingResidue() (int, error) {
+	removed := 0
+	var firstErr error
+	// Non-hex entries in the CAS blob/archive dirs are staging residue by
+	// construction — commitBlob/commitArchive only ever produce hex-named files.
+	for _, dir := range []string{s.blobsDir(), s.archivesDir()} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, e := range entries {
+			if isHexHash(e.Name()) {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			removed++
+		}
+	}
+	// Resolver scratch dirs live directly under the CAS root (resolve.go).
+	rootEntries, err := os.ReadDir(s.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return removed, firstErr
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		return removed, firstErr
+	}
+	for _, e := range rootEntries {
+		if !strings.HasPrefix(e.Name(), ".fetch-tmp-") {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.root, e.Name())); err != nil && !os.IsNotExist(err) {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
+}
+
 // isHexHash reports whether name is a 64-char lowercase hex sha256 — the exact
 // shape of a committed CAS entry's filename. Defends GC/verify against the
 // resolver's temp residue (".stage-*", "blob-*", "out-*", "archive-*").

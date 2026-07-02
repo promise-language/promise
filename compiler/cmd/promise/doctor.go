@@ -555,6 +555,37 @@ func doctorCheckCAS(flags doctorFlags) doctorCheck {
 		return c
 	}
 
+	// --repair is the home of manual cache maintenance (T1009): after Verify has
+	// quarantined any corrupt entries (so swept counts never include them), run
+	// the union-rooted mark-and-sweep that used to live under `promise gc`, reap
+	// crashed-install staging residue, and prune stale toolchain-view dirs. The
+	// exclusive lock taken above is still held here. Union-root + fail-safe
+	// semantics live in LiveSet/Sweep and are unchanged.
+	if flags.repair {
+		if liveBlobs, liveArchives, allRefsReadable, lerr := blobstore.LiveSet(""); lerr == nil {
+			m, _ := loadEmbeddedManifest()
+			if sw, serr := store.Sweep(liveBlobs, liveArchives, allRefsReadable, m, false); serr == nil {
+				if !allRefsReadable {
+					c.Details = append(c.Details, "Kept all blobs (an epoch's blobs.refs is unreadable — fail-safe)")
+				} else if sw.BytesFreed > 0 {
+					c.Details = append(c.Details, fmt.Sprintf("Reclaimed %s (%d blobs, %d archives)", formatSize(sw.BytesFreed), sw.BlobsRemoved, sw.ArchivesRemoved))
+				}
+			} else {
+				c.Details = append(c.Details, "Cache reclamation skipped: "+serr.Error())
+			}
+		} else {
+			c.Details = append(c.Details, "Cache reclamation skipped: "+lerr.Error())
+		}
+		if n, _ := store.SweepStagingResidue(); n > 0 {
+			c.Details = append(c.Details, fmt.Sprintf("Cleared %d staging residue entries", n))
+		}
+		// Stale LLVM/CRT view dirs live outside the CAS namespace and are invisible
+		// to the sweep; drop them so they re-materialize from the (kept) CAS blobs
+		// on the next build.
+		_ = module.CleanLLVMCache()
+		_ = module.CleanCRTCache()
+	}
+
 	c.Details = append(c.Details, fmt.Sprintf("Verified %d blobs, %d archives", res.BlobsChecked, res.ArchivesChecked))
 
 	if res.BlobsChecked == 0 && res.ArchivesChecked == 0 {

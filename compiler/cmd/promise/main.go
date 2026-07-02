@@ -342,8 +342,10 @@ func main() {
 		runFetch(os.Args[2:])
 		return
 	case "gc":
-		runGC(os.Args[2:])
-		return
+		fmt.Fprintln(os.Stderr, "promise gc has been removed — cache reclamation is automatic.")
+		fmt.Fprintln(os.Stderr, "  `promise remove <epoch>` reclaims that epoch's exclusive blobs;")
+		fmt.Fprintln(os.Stderr, "  `promise doctor --repair` sweeps orphaned blobs and stale toolchain caches.")
+		os.Exit(1)
 	case "bind":
 		runBind(os.Args[2:])
 	case "doctor":
@@ -8471,9 +8473,13 @@ func runInstall(args []string) {
 	if unlock, lerr := store.Lock("install " + epoch); lerr == nil {
 		casUnlock = unlock
 	}
+	// Self-heal any staging residue a prior crashed install left behind (T1009)
+	// before staging fresh blobs — we hold the CAS lock across this window.
+	_, _ = store.SweepStagingResidue()
 	stagedBlobs := false
 	if hasEmbeddedLLVM {
 		if err := stageEmbeddedLLVMBlobs(store); err != nil {
+			_, _ = store.SweepStagingResidue()
 			if casUnlock != nil {
 				casUnlock()
 			}
@@ -8759,6 +8765,9 @@ func runRemove(args []string) {
 				fmt.Printf("Reclaimed %s of unreferenced blobs.\n", formatSize(res.BytesFreed))
 			}
 		}
+		// Self-heal any staging residue a prior crashed install left behind
+		// (T1009) — we already hold the CAS lock here.
+		_, _ = store.SweepStagingResidue()
 	}
 }
 
@@ -8809,74 +8818,6 @@ func runFetch(args []string) {
 	fmt.Printf("Host toolchain staged into the dependency cache (%d blobs).\n", blobCount)
 	fmt.Printf("  view: %s\n", viewDir)
 	fmt.Println("Offline builds with this epoch are now ready.")
-}
-
-// runGC bounds the dependency cache with union-rooted mark-and-sweep (§4.4):
-// the live set is the union of ALL installed epochs' blobs.refs, so a blob
-// shared by two epochs is never deleted while removing one. Holds the same
-// exclusive lock as install/fetch.
-func runGC(args []string) {
-	dryRun := false
-	jsonOut := false
-	for _, arg := range args {
-		switch arg {
-		case "-dry-run", "--dry-run":
-			dryRun = true
-		case "-json", "--json":
-			jsonOut = true
-		default:
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise gc [-dry-run] [-json]\n", arg)
-			os.Exit(1)
-		}
-	}
-
-	store, err := blobstore.NewStore()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot open dependency cache: %v\n", err)
-		os.Exit(1)
-	}
-	unlock, err := store.Lock("gc")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot lock dependency cache: %v\n", err)
-		os.Exit(1)
-	}
-	defer unlock()
-
-	liveBlobs, liveArchives, allRefsReadable, err := blobstore.LiveSet("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot compute live set: %v\n", err)
-		os.Exit(1)
-	}
-	m, _ := loadEmbeddedManifest()
-	res, err := store.Sweep(liveBlobs, liveArchives, allRefsReadable, m, dryRun)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: gc sweep failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	if jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(map[string]any{
-			"dry_run":           dryRun,
-			"all_refs_readable": allRefsReadable,
-			"blobs_removed":     res.BlobsRemoved,
-			"archives_removed":  res.ArchivesRemoved,
-			"bytes_freed":       res.BytesFreed,
-			"removed":           res.Removed,
-		})
-		return
-	}
-
-	if !allRefsReadable {
-		fmt.Println("Kept all blobs: an installed epoch's blobs.refs is missing or unreadable (fail-safe).")
-		return
-	}
-	verb := "Reclaimed"
-	if dryRun {
-		verb = "Would reclaim"
-	}
-	fmt.Printf("%s %s (%d blobs, %d archives).\n", verb, formatSize(res.BytesFreed), res.BlobsRemoved, res.ArchivesRemoved)
 }
 
 // dirSize computes the total size of all files under a directory.

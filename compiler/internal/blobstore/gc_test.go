@@ -368,6 +368,113 @@ func TestSweepActuallyDeletesFromDisk(t *testing.T) {
 	}
 }
 
+// SweepStagingResidue reaps crashed-install staging temporaries while leaving
+// every committed (hex-named) blob/archive and the .fetch-tmp-* nothing else.
+func TestSweepStagingResidue(t *testing.T) {
+	home, s := homeStore(t)
+	blob := seedBlob(t, s, "real-blob")
+	archive := seedArchive(t, s, "real-archive")
+	// Staging residue: non-hex temp files in the CAS dirs...
+	if err := os.WriteFile(filepath.Join(s.blobsDir(), ".stage-9.tmp"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.archivesDir(), ".stage-7.tmp"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// ...and a resolver scratch dir directly under the CAS root.
+	fetchTmp := filepath.Join(s.Root(), ".fetch-tmp-abc")
+	if err := os.MkdirAll(filepath.Join(fetchTmp, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// blobs.refs and .lock must survive untouched.
+	if err := os.WriteFile(filepath.Join(s.Root(), ".lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("SweepStagingResidue: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected 3 residue entries removed, got %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(s.blobsDir(), ".stage-9.tmp")); !os.IsNotExist(err) {
+		t.Error("blob staging residue survived the sweep")
+	}
+	if _, err := os.Stat(filepath.Join(s.archivesDir(), ".stage-7.tmp")); !os.IsNotExist(err) {
+		t.Error("archive staging residue survived the sweep")
+	}
+	if _, err := os.Stat(fetchTmp); !os.IsNotExist(err) {
+		t.Error(".fetch-tmp-* scratch dir survived the sweep")
+	}
+	if _, err := os.Stat(s.BlobPath(blob)); err != nil {
+		t.Errorf("committed blob was removed: %v", err)
+	}
+	if _, err := os.Stat(s.ArchivePath(archive)); err != nil {
+		t.Errorf("committed archive was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root(), ".lock")); err != nil {
+		t.Errorf(".lock was removed: %v", err)
+	}
+	_ = home
+}
+
+// A crash before the CAS blob/archive dirs are even created is the common
+// self-heal scenario (install error path runs SweepStagingResidue on a barely
+// initialized store): missing dirs are not an error, and the sweep is a no-op.
+func TestSweepStagingResidueMissingDirs(t *testing.T) {
+	_, s := homeStore(t)
+	// Fresh store: NewStore does not create blobs/archives dirs until a stage.
+	if _, err := os.Stat(s.blobsDir()); !os.IsNotExist(err) {
+		t.Skipf("expected blobsDir absent on a fresh store, got %v", err)
+	}
+	n, err := s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("missing CAS dirs must not be an error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 removed on an empty store, got %d", n)
+	}
+}
+
+// A residue entry that cannot be removed (read-only parent dir) is reported via
+// the returned error, and the sweep still continues past it (best-effort).
+func TestSweepStagingResidueReturnsRemoveError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	_, s := homeStore(t)
+	if err := os.MkdirAll(s.blobsDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stuck := filepath.Join(s.blobsDir(), ".stage-stuck.tmp")
+	if err := os.WriteFile(stuck, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Also leave a removable .fetch-tmp-* under the root so we prove the sweep
+	// keeps going after the un-removable entry.
+	fetchTmp := filepath.Join(s.Root(), ".fetch-tmp-keep")
+	if err := os.Mkdir(fetchTmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Freeze the blobs dir so RemoveAll of the child fails with EACCES.
+	if err := os.Chmod(s.blobsDir(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(s.blobsDir(), 0o755) })
+
+	n, err := s.SweepStagingResidue()
+	if err == nil {
+		t.Fatal("expected a remove error for the read-only residue entry")
+	}
+	if _, statErr := os.Stat(fetchTmp); !os.IsNotExist(statErr) {
+		t.Error("sweep should have continued past the error and removed .fetch-tmp-keep")
+	}
+	if n != 1 {
+		t.Errorf("expected the removable .fetch-tmp-* counted (1), got %d", n)
+	}
+}
+
 // ListBlobs ignores in-flight staging residue (non-hex names).
 func TestListBlobsIgnoresTempResidue(t *testing.T) {
 	_, s := homeStore(t)

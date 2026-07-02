@@ -739,3 +739,111 @@ func TestDoctorCheckCASRepairQuarantines(t *testing.T) {
 		t.Errorf("quarantined bytes not preserved: %v", err)
 	}
 }
+
+// writeCASEpochRefs writes epochs/<epoch>/blobs.refs so LiveSet can root the
+// union sweep on it (T1009).
+func writeCASEpochRefs(t *testing.T, home, epoch string, lines ...string) {
+	t.Helper()
+	dir := filepath.Join(home, "epochs", epoch)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "blobs.refs"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// doctor --repair folds in the union-rooted sweep + staging-residue reap that
+// used to live under `promise gc` (T1009): an orphan blob (referenced by no
+// installed epoch) and staging residue are reclaimed, while a referenced blob
+// survives. Plain doctor stays read-only.
+func TestDoctorCheckCASRepairSweepsOrphans(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+	referenced := seedCASBlob(t, home, "referenced-by-epoch", false)
+	orphan := seedCASBlob(t, home, "referenced-by-nobody", false)
+	writeCASEpochRefs(t, home, "2026.0", "blob "+referenced)
+	// Staging residue from a crashed install.
+	residue := filepath.Join(home, "cache", "blobs", "sha256", ".stage-1.tmp")
+	if err := os.WriteFile(residue, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plain doctor: read-only, nothing removed.
+	doctorCheckCAS(doctorFlags{})
+	if _, err := os.Stat(filepath.Join(home, "cache", "blobs", "sha256", orphan)); err != nil {
+		t.Fatalf("plain doctor removed the orphan blob: %v", err)
+	}
+	if _, err := os.Stat(residue); err != nil {
+		t.Fatalf("plain doctor removed staging residue: %v", err)
+	}
+
+	// Repair: orphan + residue reclaimed, referenced blob survives.
+	doctorCheckCAS(doctorFlags{repair: true})
+	if _, err := os.Stat(filepath.Join(home, "cache", "blobs", "sha256", orphan)); !os.IsNotExist(err) {
+		t.Error("repair should have swept the orphan blob")
+	}
+	if _, err := os.Stat(residue); !os.IsNotExist(err) {
+		t.Error("repair should have cleared staging residue")
+	}
+	if _, err := os.Stat(filepath.Join(home, "cache", "blobs", "sha256", referenced)); err != nil {
+		t.Errorf("repair removed an epoch-referenced blob: %v", err)
+	}
+}
+
+// containsSubstr reports whether any detail line contains sub.
+func detailsContain(details []string, sub string) bool {
+	for _, d := range details {
+		if strings.Contains(d, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// The §4.4 over-deletion fail-safe must survive the move under doctor --repair
+// (T1009): when an installed epoch's blobs.refs is unreadable, LiveSet reports
+// allRefsReadable=false and the sweep must keep EVERY blob — including one that
+// no readable epoch references — rather than wedge that epoch's offline build.
+func TestDoctorCheckCASRepairFailSafeKeepsAll(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+	orphan := seedCASBlob(t, home, "would-be-orphan", false)
+	// An installed epoch whose blobs.refs is unreadable (a directory, not a file)
+	// → ReadEpochRefs fails → allRefsReadable=false → fail-safe engages.
+	refsDir := filepath.Join(home, "epochs", "2026.0", "blobs.refs")
+	if err := os.MkdirAll(refsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := doctorCheckCAS(doctorFlags{repair: true})
+	if _, err := os.Stat(filepath.Join(home, "cache", "blobs", "sha256", orphan)); err != nil {
+		t.Errorf("fail-safe should have kept the blob despite no readable ref set: %v", err)
+	}
+	if !detailsContain(c.Details, "Kept all blobs") {
+		t.Errorf("expected a fail-safe detail line, got %v", c.Details)
+	}
+}
+
+// When the live set can't be computed at all (here: the epochs path is a plain
+// file, so InstalledEpochs errors), doctor --repair must NOT delete anything —
+// it reports the skip and leaves the orphan blob in place (T1009).
+func TestDoctorCheckCASRepairSkipsOnLiveSetError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+	orphan := seedCASBlob(t, home, "kept-because-liveset-errored", false)
+	// A regular file where the epochs directory is expected → InstalledEpochs
+	// returns "not a directory" → LiveSet propagates the error.
+	if err := os.WriteFile(filepath.Join(home, "epochs"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := doctorCheckCAS(doctorFlags{repair: true})
+	if _, err := os.Stat(filepath.Join(home, "cache", "blobs", "sha256", orphan)); err != nil {
+		t.Errorf("repair must keep blobs when the live set can't be computed: %v", err)
+	}
+	if !detailsContain(c.Details, "Cache reclamation skipped") {
+		t.Errorf("expected a skip detail line, got %v", c.Details)
+	}
+}

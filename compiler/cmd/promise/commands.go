@@ -15,7 +15,7 @@ type cmdNode struct {
 	name    string
 	summary string            // one-line description for the index and synthesized help
 	group   string            // group key (top-level nodes); drives index ordering
-	hidden  bool              // excluded from the index (deprecated aliases; fetch/warm/gc pending T1008/T1009)
+	hidden  bool              // excluded from the index (deprecated aliases; fetch/warm pending T1008, gc removed T1009)
 	subs    []*cmdNode        // subcommands
 	help    func(w io.Writer) // optional rich help renderer; nil → synthesized from summary/subs
 }
@@ -89,10 +89,11 @@ var commandTree = []*cmdNode{
 	{name: "emit-ir", group: "Compiler debugging", summary: "Print LLVM IR to stdout"},
 
 	// Hidden — registered for routing/coverage but omitted from the index.
-	// fetch/warm/gc still dispatch until T1008/T1009 remove them (§5).
+	// fetch/warm still dispatch until T1008 removes them; gc now dispatches a
+	// removal notice (T1009) but stays routable for muscle-memory redirects (§5).
 	{name: "fetch", hidden: true, summary: "(deprecated — folded into install; T1008)"},
 	{name: "warm", hidden: true, summary: "(deprecated — folded into install; T1008)"},
-	{name: "gc", hidden: true, summary: "(deprecated — folded into doctor --repair; T1009)"},
+	{name: "gc", hidden: true, summary: "(removed — cache reclamation is automatic; see doctor --repair; T1009)"},
 	{name: "pkg", hidden: true, summary: "Deprecated alias for package"},
 	{name: "add", hidden: true, summary: "Deprecated alias for package add"},
 	{name: "search", hidden: true, summary: "Deprecated alias for package search"},

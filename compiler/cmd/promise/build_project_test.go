@@ -595,3 +595,29 @@ interface Element {
 		}
 	}
 }
+
+// TestGCRemovedPrintsNotice verifies the `gc` verb no longer runs a sweep but
+// stays routable, exiting non-zero with a redirect to the mechanisms that
+// replaced it (T1009): `remove` for exclusive-blob reclamation and
+// `doctor --repair` for the full orphan sweep.
+func TestGCRemovedPrintsNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping gc removal-notice integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	cmd := exec.Command(bin, "gc")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected `promise gc` to exit non-zero, got success:\n%s", out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit code 1, got %v:\n%s", err, out)
+	}
+	output := string(out)
+	for _, want := range []string{"has been removed", "doctor --repair", "remove <epoch>"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("gc removal notice missing %q:\n%s", want, output)
+		}
+	}
+}

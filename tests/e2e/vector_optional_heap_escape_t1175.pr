@@ -1,0 +1,159 @@
+// T1175: Reading an element out of a Vector[Optional[heap-user-type]] via native
+// `[]` and letting it ESCAPE into an owning context (a consuming `~`/`move` param,
+// a return, or a constructor field) is a use-after-free — the returned Optional
+// value struct aliases the vector's element slot, so both the escape sink's
+// consume-drop and the vector's element-drop free the same inner heap instance.
+//
+// Fix: maybeEnableDupForMutRefArg / maybeEnableDupForConstructorArg now arm
+// dupHeapUserFieldAccess for Optional[heap-user] Vector elements (not just bare
+// heap-user), so genVectorIndex's T0620 branch (via dupOptionalVectorElem)
+// deep-clones the element on read. Sibling of the fixed-Array path (genArrayIndex).
+// Droppable heap-user element (owns a heap string).
+type Row {
+  string name;
+}
+
+// No-drop-but-pal-free heap-user element (field-less struct; exercises the
+// isHeapUserNoDropPalFree leg of optionalHeapDupElem).
+type Tag {
+}
+
+type Holder {
+  Row? held;
+}
+
+name_of(Row? move r) string {
+  if row := r {
+    return row.name;
+  }
+  return "none";
+}
+
+// Return escape: read v[0] and return the owned Optional; caller consumes it.
+take_first(Row?[] move v) Row? {
+  return v[0];
+}
+
+// 1. consume into a ~ param, then confirm the vector element is still readable
+//    (the read deep-cloned; it did not move/steal the slot).
+test_consume_into_move_param() `test {
+  Row?[] v = [];
+  v.push(Row(name: "q" + "r"));
+  assert(name_of(v[0]) == "qr", "consumed clone reads qr");
+  // Vector element must survive the consume.
+  if r := v[0] {
+    assert(r.name == "qr", "vector element still qr after consume");
+  } else {
+    assert(false, "element vanished");
+  }
+}
+
+// 2. return escape: a function returns v[0], the caller consumes it.
+test_return_escape() `test {
+  Row?[] v = [];
+  v.push(Row(name: "hel" + "lo"));
+  assert(name_of(take_first(move v)) == "hello", "returned element consumed as hello");
+}
+
+// 3. constructor-field escape: Holder(held: v[0]). Reading an Optional[heap-user]
+//    field back out is a partial-move (rejected by sema), so the assertion here
+//    is drop-safety: the holder's field drop and the vector element-drop must not
+//    free the same allocation. The leak checker guards against aliasing.
+test_constructor_field_escape() `test {
+  Row?[] v = [];
+  v.push(Row(name: "fie" + "ld"));
+  Holder h = Holder(held: v[0]);
+  // Vector element must survive the deep-cloned read.
+  if r := v[0] {
+    assert(r.name == "field", "vector element still field");
+  } else {
+    assert(false, "element vanished after constructor escape");
+  }
+  // h and v both drop at scope exit — independent copies, no double-free.
+}
+
+// 4. no-move soundness: bind Row? x = v[0], use x, then re-read v[0] — both see
+//    "qr" (guards the already-sound var-decl path against regression).
+test_var_decl_bind_no_move() `test {
+  Row?[] v = [];
+  v.push(Row(name: "q" + "r"));
+  Row? x = v[0];
+  assert(x!.name == "qr", "bound copy reads qr");
+  if r := v[0] {
+    assert(r.name == "qr", "re-read still qr");
+  } else {
+    assert(false, "element vanished after var-decl bind");
+  }
+}
+
+// 5. no-drop-pal-free heap-user element escaping into a ~ param.
+present(Tag? move t) bool {
+  if _ := t {
+    return true;
+  }
+  return false;
+}
+
+test_nodrop_element_escape() `test {
+  Tag?[] v = [];
+  v.push(Tag());
+  assert(present(v[0]), "tag element present after consume");
+  // Element must survive the deep-cloned read.
+  assert(present(v[0]), "tag element still present on re-read");
+}
+
+// 6. no-drop-pal-free constructor-field escape (`TagHolder(held: v[0])`) — the
+//    no-drop leg of maybeEnableDupForConstructorArg's Optional[heap-user] gate.
+type TagHolder {
+  Tag? held;
+}
+
+test_nodrop_constructor_field_escape() `test {
+  Tag?[] v = [];
+  v.push(Tag());
+  TagHolder h = TagHolder(held: v[0]);
+  // Vector element must survive the deep-cloned read into the field.
+  assert(present(v[0]), "tag element survives constructor escape");
+  // h and v both drop at scope exit — independent copies, no double-free.
+}
+
+// 7. non-zero index + siblings survive: consuming v[1] must deep-clone that exact
+//    slot and leave v[0] and v[1] both intact (guards against cloning/moving the
+//    wrong slot or disturbing neighbors).
+test_middle_index_escape_siblings_survive() `test {
+  Row?[] v = [];
+  v.push(Row(name: "aa" + "0"));
+  v.push(Row(name: "bb" + "1"));
+  v.push(Row(name: "cc" + "2"));
+  assert(name_of(v[1]) == "bb1", "consumed middle clone reads bb1");
+  // All three originals must survive the consume of the middle slot.
+  if r := v[0] {
+    assert(r.name == "aa0", "slot 0 intact");
+  } else {
+    assert(false, "slot 0 vanished");
+  }
+  if r := v[1] {
+    assert(r.name == "bb1", "slot 1 intact");
+  } else {
+    assert(false, "slot 1 vanished");
+  }
+  if r := v[2] {
+    assert(r.name == "cc2", "slot 2 intact");
+  } else {
+    assert(false, "slot 2 vanished");
+  }
+}
+
+// 8. repeated consume of the SAME slot: each read must produce a fresh independent
+//    clone, so consuming v[0] twice does not double-free and the original endures.
+test_repeated_consume_same_slot() `test {
+  Row?[] v = [];
+  v.push(Row(name: "re" + "peat"));
+  assert(name_of(v[0]) == "repeat", "first consume clone reads repeat");
+  assert(name_of(v[0]) == "repeat", "second consume clone reads repeat");
+  if r := v[0] {
+    assert(r.name == "repeat", "original survives two consumes");
+  } else {
+    assert(false, "original vanished after repeated consume");
+  }
+}

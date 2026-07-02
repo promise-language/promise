@@ -12466,6 +12466,64 @@ func TestT0403VectorHeapElementCallArgDups(t *testing.T) {
 	assertContains(t, ir, "call void @llvm.memcpy")
 }
 
+// T1175: `f(v[i])` where v is Vector[Optional[heap-user-type]] and f takes a
+// consuming `~`/`move` param must deep-clone the element's inner heap instance —
+// the returned Optional value struct aliases the vector slot, so the callee's
+// consume-drop and v's element-drop otherwise free the same inner instance (UAF).
+// maybeEnableDupForMutRefArg now arms dupHeapUserFieldAccess for Optional[heap-
+// user] Vector elements (not just bare heap-user); genVectorIndex's T0620 branch
+// (dupOptionalVectorElem) does the clone, lowering to a dupHeapValue heapdup.copy.
+// Sibling of T0403 (bare heap-user element) and genArrayIndex's fixed-Array path.
+func TestT1175VectorOptionalHeapElementCallArgDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		take(Row? move r) {}
+		test() {
+			Row?[] v = [];
+			v.push(Row(name: "a" + "b"));
+			take(v[0]);
+		}
+	`)
+	fn := extractFunction(ir, "__user.test")
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1175: `Holder(held: v[i])` — the constructor-field escape sibling. Same aliasing
+// double-free: the new field owns the Optional value struct aliasing the vector
+// slot. maybeEnableDupForConstructorArg arms the same Optional[heap-user] gate.
+func TestT1175VectorOptionalHeapElementConstructorArgDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		type Holder { Row? held; }
+		test() {
+			Row?[] v = [];
+			v.push(Row(name: "a" + "b"));
+			h := Holder(held: v[0]);
+		}
+	`)
+	fn := extractFunction(ir, "__user.test")
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1175: the no-drop-but-pal-free leg of the Optional[heap-user] gate. `Tag` is a
+// field-less heap-user type with no drop() — it's still pal_malloc'd, so an escaped
+// alias of the vector slot pal_free's the same pointer twice. optionalHeapDupElem
+// recognizes both the droppable and the no-drop-pal-free inner, so f(v[i]) into a
+// consuming param must still emit the deep-clone (dupHeapValue → heapdup.copy).
+func TestT1175VectorOptionalNoDropHeapElementCallArgDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Tag {}
+		take(Tag? move t) {}
+		test() {
+			Tag?[] v = [];
+			v.push(Tag());
+			take(v[0]);
+		}
+	`)
+	fn := extractFunction(ir, "__user.test")
+	assertContains(t, fn, "heapdup.copy")
+}
+
 // T0397: `opt := m[k]` where the map value type is a tuple with droppable fields
 // must dup the tuple's string fields so opt holds an independent copy.
 // Without the dup, opt's bindingDropTuple and the map's element walk double-free

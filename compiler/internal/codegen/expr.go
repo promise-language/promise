@@ -6514,12 +6514,18 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 	// T0403: IndexExpr against Vector[heap-user-type] passed to ~T.
 	// Use the arg expression's resolved type (works for generic callees where
 	// pt is a TypeParam pre-substitution); mirrors T0398's var-decl-site check.
+	// T1175: also arm the flag when the element is Optional[heap-user] — the
+	// returned Optional value struct aliases the vector slot's inner heap
+	// instance, so f(v[i]) into a ~ param double-frees it. genVectorIndex's
+	// T0620 branch (via dupOptionalVectorElem) already deep-clones once the flag
+	// is set; genArrayIndex handles the fixed-Array analogue directly.
 	if idx, ok := arg.(*ast.IndexExpr); ok {
 		argType := c.info.Types[idx]
 		if c.typeSubst != nil && argType != nil {
 			argType = types.Substitute(argType, c.typeSubst)
 		}
-		if isDroppableHeapUserType(argType) {
+		_, optHeap := c.optionalHeapDupElem(argType)
+		if isDroppableHeapUserType(argType) || optHeap {
 			targetType := c.info.Types[idx.Target]
 			if c.typeSubst != nil && targetType != nil {
 				targetType = types.Substitute(targetType, c.typeSubst)
@@ -6602,12 +6608,17 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 		}
 		break
 	}
+	// T1175: also arm the flag for Optional[heap-user] elements — `Holder(held:
+	// v[i])` escapes the aliased inner heap instance into the new field, so both
+	// the field's consume-drop and the vector element-drop free it. Mirrors the
+	// bare heap-user case; genVectorIndex's T0620 branch does the deep-clone.
 	if idx, ok := probe.(*ast.IndexExpr); ok {
 		argType := c.info.Types[idx]
 		if c.typeSubst != nil && argType != nil {
 			argType = types.Substitute(argType, c.typeSubst)
 		}
-		if isDroppableHeapUserType(argType) {
+		_, optHeap := c.optionalHeapDupElem(argType)
+		if isDroppableHeapUserType(argType) || optHeap {
 			targetType := c.info.Types[idx.Target]
 			if c.typeSubst != nil && targetType != nil {
 				targetType = types.Substitute(targetType, c.typeSubst)

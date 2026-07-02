@@ -96,6 +96,29 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		if rt != nil && isRefType(rt) {
 			return result
 		}
+		// T1181: A call returning a fixed-size array T[N] hands back an LLVM
+		// `[N x T]` aggregate by value. When used inline (never bound — e.g.
+		// `mk()[0]`, `take(mk())`, `mk();`) nothing owns it, so its heap-allocating
+		// elements (string/vector/heap-user) leak. Track it as an element-wise-drop
+		// statement temp; a consuming binding claims it via claimStringTemp.
+		// Sound whenever the returned array is independently owned (the normal
+		// case). T1184: a function that returns a *borrowed* fixed-array param by
+		// value (`echo(string[2] a) string[2] { return a; }`) hands back elements
+		// that alias the caller — fixed arrays lack the string/vector return-alias-
+		// dup, so that pattern (already double-freeing in its bound form) is unsound
+		// here too, pending T1184's return-dup / ownership fix.
+		if arr, ok := rt.(*types.Array); ok {
+			if c.tempTrackingEnabled {
+				elem := arr.Elem()
+				if c.typeSubst != nil {
+					elem = types.Substitute(elem, c.typeSubst)
+				}
+				if c.variantFieldNeedsDrop(elem) {
+					c.trackArrayTemp(result, arr)
+				}
+			}
+			return result
+		}
 		// T0073: Track known-safe string-producing calls (primitive to_string, string methods)
 		// T0109: Also track vector-producing calls (e.g., split()) for cleanup.
 		// T0555: Track native handle (Arc/Weak/Mutex/Task) constructor/call results

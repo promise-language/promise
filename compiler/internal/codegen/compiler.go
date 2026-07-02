@@ -544,6 +544,7 @@ type stmtTemp struct {
 	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
 	dropFunc *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
 	elemType types.Type     // T0109: vector element type for string-element drops (nil for non-vectors)
+	arrType  *types.Array   // T1181: fixed-array temp — alloca holds [N x T] storage; cleanup walks elements & drops each (dropFunc nil)
 }
 
 // heapTemp tracks a heap-allocated droppable instance from a constructor call (T0088).

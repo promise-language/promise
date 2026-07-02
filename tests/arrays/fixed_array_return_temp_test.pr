@@ -1,0 +1,153 @@
+// T1181: A function returning a fixed-size array of a heap-allocating element
+// type (string[N], Vector[T][N]) must not leak its heap elements when the
+// returned array is used INLINE as a temporary (never bound to a variable).
+// The inline-use path had no "track returned fixed-array temp → drop elements
+// at statement end" cleanup, unlike the bound path (bindingDropArray). These
+// tests assert zero leaks across index / borrow-arg / discard / bound / move.
+mk() string[2] {
+  return["a" + "1", "b" + "2"];
+}
+
+take_arr(string[2] a) bool {
+  return a[0] == "a1";
+}
+
+consume_arr(string[2] move a) bool {
+  return a[0] == "a1";
+}
+
+// Pass-through: exercises the return-claim path (result of mk() returned again).
+passthru() string[2] {
+  return mk();
+}
+
+// --- string[N] inline uses ---
+
+t_string_index() `test {
+  assert(mk()[0] == "a1", "inline index");
+}
+
+t_string_borrow_arg() `test {
+  assert(take_arr(mk()), "inline borrow arg");
+}
+
+t_string_discard() `test {
+  mk();
+  assert(true, "inline discard");
+}
+
+t_string_bound() `test {
+  string[2] r = mk();
+  assert(r[0] == "a1", "bound");
+}
+
+t_string_move() `test {
+  assert(consume_arr(mk()), "inline move arg");
+}
+
+t_string_passthru() `test {
+  assert(passthru()[1] == "b2", "passthru");
+}
+
+// --- Vector[T][N] inline uses (heap, non-.rodata elements) ---
+
+mkv() Vector[int][2] {
+  int[] a = int[]();
+  a.push(1);
+  a.push(2);
+  int[] b = int[]();
+  b.push(3);
+  return[a, b];
+}
+
+takev(Vector[int][2] a) int {
+  return a[0][0];
+}
+
+tv_index() `test {
+  assert(mkv()[0][0] == 1, "vector inline index");
+}
+
+tv_borrow_arg() `test {
+  assert(takev(mkv()) == 1, "vector inline borrow arg");
+}
+
+tv_discard() `test {
+  mkv();
+  assert(true, "vector inline discard");
+}
+
+tv_bound() `test {
+  Vector[int][2] r = mkv();
+  assert(r[1][0] == 3, "vector bound");
+}
+
+// --- heap-user-type element array (drop path via emitVariantFieldDrop, not
+// string/vector) — element cleanup must call the type's drop, not just free ---
+
+type Res {
+  string name;
+  drop(~this) {
+  }
+}
+
+mkr() Res[2] {
+  return[Res(name: "a" + "1"), Res(name: "b" + "2")];
+}
+
+tr_index() `test {
+  assert(mkr()[0].name == "a1", "heap-user inline index");
+}
+
+tr_discard() `test {
+  mkr();
+  assert(true, "heap-user inline discard");
+}
+
+// --- loop reuse: the same statement temp is created/dropped each iteration; the
+// drop flag must reset (B0172) so a freed value isn't dropped twice ---
+
+tloop_reuse() `test {
+  for i in 0..3 {
+    assert(mk()[0] == "a1", "loop iter");
+  }
+}
+
+// --- error path: when a failable callee raises, the caller's still-live inline
+// array temp (passed by borrow) must be cleaned via the error-path cleanup ---
+
+take_fail!(string[2] a) bool {
+  if a[0] == "a1" {
+    raise error(message: "boom");
+  }
+  return false;
+}
+
+t_error_path() `test {
+  bool ok = take_fail(mk())? {
+    true
+  };
+  assert(ok, "error-path cleanup");
+}
+
+// --- generic T[N] inline: the returned-array temp is tracked under an active
+// typeSubst inside the monomorphized generic body ---
+
+pair[T](T move a, T move b) T[2] {
+  return[a, b];
+}
+
+// inline (unbound) use of pair[T](...) INSIDE a generic body — exercises the
+// typeSubst substitution of the element type in trackArrayTemp / emitArrayTempDrop.
+sink[T](T move a, T move b) {
+  pair[T](move a, move b);
+}
+
+tgen_concrete() `test {
+  assert(pair[string]("a" + "1", "b" + "2")[0] == "a1", "generic concrete inline index");
+}
+
+tgen_in_generic_body() `test {
+  sink[string]("a" + "1", "b" + "2");
+  assert(true, "generic inline discard inside generic body");
+}

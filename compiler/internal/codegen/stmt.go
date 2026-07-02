@@ -1354,6 +1354,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		types.IsMutexGuard(resolvedExprType)) {
 		c.claimStringTemp(val)
 	}
+	// T1181: Claim fixed-array temp — ownership transferred to this variable's
+	// bindingDropArray; clearing the stmt-temp flag avoids a double-free.
+	if resolvedExprType != nil {
+		if _, ok := resolvedExprType.(*types.Array); ok {
+			c.claimStringTemp(val)
+		}
+	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
 	c.claimHeapTemp(val)
 	// B0267: Clear enum temps when the variable IS the enum (not a function result).
@@ -1694,6 +1701,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ) ||
 		types.IsMutex(typ) || types.IsTask(typ) || types.IsMutexGuard(typ) {
 		c.claimStringTemp(val)
+	}
+	// T1181: Claim fixed-array temp — ownership transferred to this variable's
+	// bindingDropArray; clearing the stmt-temp flag avoids a double-free.
+	if typ != nil {
+		if _, ok := typ.(*types.Array); ok {
+			c.claimStringTemp(val)
+		}
 	}
 	// B0175: Claim heap temp — ownership transferred to this variable.
 	// Without this, iterator chain results (e.g., c.take(3)) assigned via
@@ -3428,6 +3442,36 @@ func (c *Compiler) emitArrayDropCall(b scopeBinding) {
 		elemVal := c.block.NewLoad(c.resolveType(elemType), elemPtr)
 		c.emitVariantFieldDrop(elemVal, elemType)
 	}
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
+// emitArrayTempDrop emits a conditional per-element drop for a fixed-array
+// statement temp (T1181) — the result of a T[N]-returning call used inline and
+// never bound. Mirrors emitArrayDropCall but drives off a stmtTemp whose alloca
+// holds the `[N x T]` aggregate. Clears the drop flag after dropping (B0172) so a
+// temp reused across loop iterations isn't dropped twice on an already-freed value.
+func (c *Compiler) emitArrayTempDrop(temp stmtTemp) {
+	elemType := temp.arrType.Elem()
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+	dropBlock := c.newBlock("arrtmp.drop")
+	skipBlock := c.newBlock("arrtmp.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	llvmArrType := temp.alloca.ElemType
+	for i := int64(0); i < temp.arrType.Size(); i++ {
+		elemPtr := c.block.NewGetElementPtr(llvmArrType, temp.alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, i))
+		elemVal := c.block.NewLoad(c.resolveType(elemType), elemPtr)
+		c.emitVariantFieldDrop(elemVal, elemType)
+	}
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
@@ -5472,6 +5516,35 @@ func (c *Compiler) trackVectorTempWithElemType(val value.Value, elemType types.T
 	}
 }
 
+// trackArrayTemp registers a fixed-size array temporary (a call result of type
+// T[N] used inline, never bound to a variable) for element-wise cleanup at
+// statement end (T1181). Unlike trackTempWithDrop, the value is a `[N x T]` LLVM
+// aggregate, not an i8* pointer — so it is stored into a dedicated [N x T]
+// entry-block alloca and cleanupStmtTemps walks the elements via
+// emitVariantFieldDrop (mirroring bindingDropArray / emitArrayDropCall). Claim
+// (claimStringTemp) clears the drop flag when a binding takes ownership.
+func (c *Compiler) trackArrayTemp(val value.Value, arr *types.Array) {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if c.entryBlock == nil || !c.tempTrackingEnabled {
+		return
+	}
+	if _, ok := c.stmtTempMap[val]; ok {
+		return
+	}
+	llvmArrType := c.resolveType(arr)
+	alloca := c.createEntryAlloca(llvmArrType)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	c.entryBlock.NewStore(constant.NewZeroInitializer(llvmArrType), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewStore(val, alloca)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	idx := len(c.stmtTemps)
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, arrType: arr})
+	c.stmtTempMap[val] = idx
+}
+
 // trackChannelTempWithElemType registers a channel temporary for cleanup at
 // statement end. B0219: used for channel field-read dups from droppable types.
 // T0663: unlike trackVectorTempWithElemType (which patches stmtTemp.elemType so
@@ -5583,6 +5656,11 @@ func (c *Compiler) cleanupStmtTemps() {
 	}
 
 	for _, temp := range c.stmtTemps {
+		// T1181: fixed-array temp — element-wise drop, no i8* dropFunc.
+		if temp.arrType != nil {
+			c.emitArrayTempDrop(temp)
+			continue
+		}
 		// B0219: Each temp has its own drop function (string/vector/channel).
 		if temp.dropFunc == nil {
 			continue
@@ -5647,6 +5725,11 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 	}
 
 	for _, temp := range c.stmtTemps {
+		// T1181: fixed-array temp — element-wise drop, no i8* dropFunc.
+		if temp.arrType != nil {
+			c.emitArrayTempDrop(temp)
+			continue
+		}
 		// B0219: Each temp has its own drop function (string/vector/channel).
 		if temp.dropFunc == nil {
 			continue
@@ -7218,6 +7301,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				types.IsMutex(exprType) || types.IsTask(exprType) ||
 				types.IsMutexGuard(exprType)) {
 				c.claimStringTemp(val)
+			}
+			// T1181: Claim fixed-array temp — ownership transferred to the
+			// reassigned variable's bindingDropArray; avoids a double-free.
+			if exprType != nil {
+				if _, ok := exprType.(*types.Array); ok {
+					c.claimStringTemp(val)
+				}
 			}
 			// B0187: Claim heap temp — ownership transferred to reassigned variable.
 			// Without this, structural interface reassignment (e.g., iter = c.map(...))

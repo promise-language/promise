@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
@@ -1255,7 +1256,19 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			c.state[s.Binding] = Owned
 		}
 	}
+	// T1177: a single-owner handle (Task/Mutex/MutexGuard/...) bound via an
+	// `if x is V(job)` / `if s is T(job)` destructure is a *borrow* — the escape-dup
+	// logic (T1012/T1169) cannot deep-clone a single-owner handle, so it is left
+	// aliasing the subject's field, and the subject drops it exactly once at scope
+	// exit. Mark such bindings Borrowed for the then-block so any *consume* is
+	// rejected: awaiting `<-job` (joins+frees the task), moving it out, or sending
+	// it on a channel would free the handle a second time when the subject also
+	// drops it → double-free / SIGSEGV. Non-consuming use (bind-and-leave,
+	// `guard.lock()`) stays legal. The marks are then-block-local and restored
+	// afterward so an outer variable the binding shadows is unaffected.
+	restoreHandleStates := c.markDestructureHandleBindingsBorrowed(s)
 	c.checkBlock(s.Body)
+	restoreHandleStates()
 	thenState := c.state
 	thenBorrows := c.borrows
 
@@ -1296,6 +1309,44 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		// No else: conservative merge with pre-if state.
 		c.state = merge(savedState, thenState)
 		c.borrows = MergeBorrowSets(savedBorrows, thenBorrows)
+	}
+}
+
+// markDestructureHandleBindingsBorrowed marks every single-owner-handle binding
+// of an `if is`-destructure narrowing as Borrowed for the then-block and returns
+// a closure that restores the prior state entries. See the call site in
+// checkIfStmt for the rationale (T1177). Returns a no-op restore when the if has
+// no destructure narrowing or no handle bindings.
+func (c *Checker) markDestructureHandleBindingsBorrowed(s *ast.IfStmt) func() {
+	dn := c.info.IsDestructureNarrowings[s]
+	if dn == nil {
+		return func() {}
+	}
+	type savedEntry struct {
+		name    string
+		state   VarState
+		present bool
+	}
+	var saved []savedEntry
+	for _, b := range dn.Bindings {
+		if sema.FirstNestedSingleOwnerHandle(b.Type) == nil {
+			continue
+		}
+		prev, ok := c.state[b.VarName]
+		saved = append(saved, savedEntry{name: b.VarName, state: prev, present: ok})
+		c.state[b.VarName] = Borrowed
+	}
+	if saved == nil {
+		return func() {}
+	}
+	return func() {
+		for _, e := range saved {
+			if e.present {
+				c.state[e.name] = e.state
+			} else {
+				delete(c.state, e.name)
+			}
+		}
 	}
 }
 

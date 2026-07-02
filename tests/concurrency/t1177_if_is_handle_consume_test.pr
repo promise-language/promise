@@ -1,0 +1,70 @@
+// T1177: a single-owner Task[T] handle bound via an `if is`-destructure is a
+// *borrow* — the subject still owns the handle and drops it exactly once at scope
+// exit. Consuming it (await `<-job`, move-out, send) would free the same handle
+// twice → double-free / SIGSEGV, so ownership rejects the consume at compile time.
+// These tests verify the *drop-safe* side of that rule: binding a handle via
+// `if is` and leaving it untouched is legal and leak-free (the subject drops once),
+// and `match` — which consumes the subject via ownership transfer (T0623) — still
+// allows awaiting the payload.
+worker() int {
+  return 21 + 21;
+}
+
+enum HBox {
+  Has(Task[int] job), Nothing,
+}
+
+type HShape {
+}
+type HNamed is HShape {
+  Task[int] job;
+}
+
+// Non-consuming `if is` bind of an enum-variant Task payload: the subject `b`
+// owns and drops the handle exactly once at scope exit. Leak-free.
+if_is_enum_bind_noconsume_test() `test {
+  HBox b = HBox.Has(job: go worker());
+  int n = 0;
+  if b is Has(job) {
+    n = 1;
+  }
+  assert(n == 1, "then-block entered, handle bound but not consumed");
+}
+
+// Non-consuming `if is` bind of a named/subtype Task field: same drop-once shape.
+if_is_named_bind_noconsume_test() `test {
+  HShape s = HNamed(job: go worker());
+  int n = 0;
+  if s is HNamed(job) {
+    n = 1;
+  }
+  assert(n == 1, "then-block entered, named handle bound but not consumed");
+}
+
+// The borrowed mark on an `if is` handle binding is then-block-local: an outer
+// owned `job` shadowed by the destructure binding stays owned after the if, so
+// awaiting it is legal. Two distinct tasks are live — the subject `b` drops its
+// handle once at scope exit and the outer `job` is joined+freed by `<-job` once.
+// Leak-free confirms neither handle is double-freed nor leaked.
+if_is_handle_binding_shadow_outer_owned_test() `test {
+  HBox b = HBox.Has(job: go worker());
+  Task[int] job = go worker();
+  int n = 0;
+  if b is Has(job) {
+    n = 1;
+  }
+  int r = <-job;
+  assert(n == 1, "then-block entered with shadowing borrow");
+  assert(r == 42, "outer owned task awaited exactly once after shadow restore");
+}
+
+// `match` on an OWNED subject consumes the subject (ownership transfer, T0623), so
+// awaiting the moved-out handle payload is legal and frees the handle exactly once.
+match_consume_task_test() `test {
+  HBox b = HBox.Has(job: go worker());
+  int r = match b {
+    HBox.Has(job) => <-job,
+    HBox.Nothing => 0,
+  };
+  assert(r == 42, "match consumed the handle payload and awaited it");
+}

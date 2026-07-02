@@ -7727,6 +7727,128 @@ func TestT1102_ReturnFreshTaskAllowed(t *testing.T) {
 	`)
 }
 
+// T1177: awaiting a single-owner Task handle bound via an `if is`-destructure of
+// an ENUM variant (`if b is Has(job) { <-job }`) is rejected — the escape-dup
+// logic cannot clone the handle, so it aliases the subject's field which drops it
+// once at scope exit; consuming it via `<-` would join+free the same handle twice.
+func TestT1177_AwaitEnumDestructureTaskRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		enum HBox { Has(Task[int] job), Nothing }
+		test() {
+			HBox b = HBox.Has(job: go worker());
+			if b is Has(job) {
+				int r = <-job;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task value 'job'")
+}
+
+// T1177: the named/subtype `if is`-destructure path (`if s is HNamed(job)`) has
+// the same double-free shape as the enum path and is rejected identically.
+func TestT1177_AwaitNamedDestructureTaskRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		type HShape {}
+		type HNamed is HShape { Task[int] job; }
+		test() {
+			HShape s = HNamed(job: go worker());
+			if s is HNamed(job) {
+				int r = <-job;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task value 'job'")
+}
+
+// T1177: a non-await consume of the borrowed handle binding — moving it out into
+// an owned var-decl — is rejected too (the binding is Borrowed for the then-block,
+// so tryMoveConsume catches the move-out of a borrow).
+func TestT1177_MoveOutEnumDestructureTaskRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		enum HBox { Has(Task[int] job), Nothing }
+		test() {
+			HBox b = HBox.Has(job: go worker());
+			if b is Has(job) {
+				Task[int] c = job;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed")
+}
+
+// T1177: binding the handle and leaving it untouched (subject drops it exactly
+// once) is drop-safe and must stay legal — only *consuming* the borrow is rejected.
+func TestT1177_NonConsumingEnumDestructureTaskAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		enum HBox { Has(Task[int] job), Nothing }
+		test() {
+			HBox b = HBox.Has(job: go worker());
+			if b is Has(job) {
+				int n = 1;
+			}
+		}
+	`)
+}
+
+// T1177 regression guard: a `match` arm consuming a single-owner handle payload
+// out of an OWNED subject stays legal — match consumes the subject (T0623
+// ownership transfer), unlike the non-consuming `if is` borrow.
+func TestT1177_MatchConsumeTaskStillAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		enum HBox { Has(Task[int] job), Nothing }
+		test() {
+			HBox b = HBox.Has(job: go worker());
+			int r = match b {
+				HBox.Has(job) => <-job,
+				HBox.Nothing => 0,
+			};
+		}
+	`)
+}
+
+// T1177: a destructure binding whose payload is NOT a single-owner handle (here
+// an `int`) is left untouched by markDestructureHandleBindingsBorrowed — the
+// FirstNestedSingleOwnerHandle guard skips it (the `continue` path), so no
+// binding is marked and the helper returns a no-op restore. Consuming/using such
+// a value stays legal.
+func TestT1177_NonHandleDestructureBindingUnaffected(t *testing.T) {
+	ownerOK(t, `
+		enum IBox { Has(int n), Nothing }
+		test() {
+			IBox b = IBox.Has(n: 7);
+			if b is Has(n) {
+				int r = n + 1;
+			}
+		}
+	`)
+}
+
+// T1177: the borrowed-for-the-then-block mark is scoped to the destructure
+// binding and must NOT leak to an outer variable of the same name it shadows.
+// Here an owned `job` in scope is shadowed by the `if is` destructure binding;
+// after the then-block the outer `job` is restored to Owned, so awaiting it
+// (it is genuinely owned and dropped once) stays legal. Exercises the
+// present-restore branch of markDestructureHandleBindingsBorrowed's closure.
+func TestT1177_HandleBindingShadowRestoresOuterOwned(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		enum HBox { Has(Task[int] job), Nothing }
+		test() {
+			HBox b = HBox.Has(job: go worker());
+			Task[int] job = go worker();
+			if b is Has(job) {
+				int n = 1;
+			}
+			int r = <-job;
+		}
+	`)
+}
+
 // T1102: a single-owner handle reaching the var-decl alias reject as a NON-param
 // Borrowed local (here via tuple destructuring of an owning aggregate field, the
 // same shape as TestT0568_TypedDeclDestructuredBorrowRejected) takes the

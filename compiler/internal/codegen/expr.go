@@ -6062,11 +6062,13 @@ func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
 	if _, isTup := resolvedElem.(*types.Tuple); isTup {
 		return c.tupleNeedsDrop(resolvedElem)
 	}
-	// T1174: Optional[heap-user-type] elements alias their inner heap payload —
-	// they must be deep-cloned on push (kept in sync with maybeDupPushElement's
-	// Optional branch). extractNamed does not see through the Optional wrapper,
-	// so without this the container/enum/user checks below all miss it.
-	if c.optionalElemNeedsHeapDup(resolvedElem) {
+	// T1174/T1183: Optional elements whose inner value aliases heap
+	// (Optional[heap-user], Optional[string], Optional[Vector|Channel|Arc|Weak|
+	// tuple|nested-Optional]) must be deep-cloned on push (kept in sync with
+	// maybeDupPushElement's Optional branch). extractNamed does not see through
+	// the Optional wrapper, so without this the container/enum/user checks below
+	// all miss it.
+	if _, _, ok := c.optionalPushElemNeedsDup(resolvedElem); ok {
 		return true
 	}
 	named := extractNamed(resolvedElem)
@@ -6148,6 +6150,16 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 		innerVal := c.block.NewExtractValue(argVal, 1)
 		dup := c.dupHeapValue(innerVal, inner)
 		return c.block.NewInsertValue(argVal, dup, 1)
+	}
+
+	// T1183: Optional[string] / Optional[Vector|Channel|Arc|Weak|tuple|
+	// nested-Optional] element — inner ALSO aliases heap. The optionalHeapDupElem
+	// branch above only matches heap-user inners, so these fell through to the
+	// `return nil` below and aliased the source payload (whole-array escape of
+	// Optional[string][N], or Vector[Optional[string]].push). Deep-clone via
+	// dupOptionalVectorElem (present/absent split + per-inner dispatch).
+	if opt, inner, ok := c.optionalPushElemNeedsDup(resolvedElem); ok {
+		return c.dupOptionalVectorElem(argVal, opt, inner)
 	}
 
 	named := extractNamed(resolvedElem)
@@ -12967,11 +12979,28 @@ func (c *Compiler) optionalHeapDupElem(typ types.Type) (types.Type, bool) {
 	return nil, false
 }
 
-// optionalElemNeedsHeapDup is the boolean form of optionalHeapDupElem for callers
-// that only need the yes/no (pushElemNeedsDup). T1174.
-func (c *Compiler) optionalElemNeedsHeapDup(resolvedElem types.Type) bool {
-	_, ok := c.optionalHeapDupElem(resolvedElem)
-	return ok
+// optionalPushElemNeedsDup reports whether typ is an Optional whose inner value
+// aliases heap and must be deep-cloned when the Optional is pushed into a
+// container OR when a whole-array copy of an Optional[...][N] escapes its owner.
+// PUSH/ESCAPE-path recognizer: broader than optionalHeapDupElem (kept narrow for
+// the index-read/field-escape sinks that hardcode dupHeapUserFieldAccess). Also
+// matches string / Vector / Channel / Arc / Weak / droppable-tuple /
+// droppable-enum / nested-droppable-Optional inners — every shape
+// dupOptionalVectorElem can clone.
+// Recursion terminates: each level unwraps exactly one Optional. T1183.
+func (c *Compiler) optionalPushElemNeedsDup(typ types.Type) (*types.Optional, types.Type, bool) {
+	opt, ok := typ.(*types.Optional)
+	if !ok {
+		return nil, nil, false
+	}
+	inner := opt.Elem()
+	if c.typeSubst != nil {
+		inner = types.Substitute(inner, c.typeSubst)
+	}
+	if (extractNamed(inner) == types.TypString && !isRefType(inner)) || c.pushElemNeedsDup(inner) {
+		return opt, inner, true
+	}
+	return nil, nil, false
 }
 
 // borrowedArrayParamEscapeDup reports whether name is a borrowed (default/`&`,
@@ -12996,10 +13025,9 @@ func (c *Compiler) borrowedArrayParamEscapeDup(name string, typ types.Type) (typ
 // arrayElemNeedsEscapeDup reports whether typ is a fixed Array whose element's
 // value struct merely ALIASES heap — a heap-user type (droppable, or
 // no-drop-but-pal-free), string, Vector, Channel, Arc, Weak, a droppable
-// enum/tuple, or Optional[heap-user] (NOT Optional[string]/Optional[container] —
-// pushElemNeedsDup's optionalHeapDupElem only recognizes heap-user inners, so a
-// whole-array escape of Optional[string][N]/Optional[Vector][N] is still an
-// uncovered UAF, tracked as T1183). For such an array the [N x T_v]
+// enum/tuple, or an Optional whose inner aliases heap — including
+// Optional[heap-user] AND Optional[string]/Optional[container] (via
+// pushElemNeedsDup's optionalPushElemNeedsDup recognizer, T1183). For such an array the [N x T_v]
 // aggregate aliases N inner heap allocations, so a whole-array VALUE copy
 // escaping the owner (a struct field read like `return w.rows`, or a
 // match-borrowed variant payload) must be element-wise deep-cloned; the owner's

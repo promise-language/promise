@@ -1357,3 +1357,326 @@ t1173_opt_return_ifis() `test {
   assert(e0!.name == "p1", "if-is return Optional[heap-user][2] elem 0");
   assert(e1!.name == "p2", "if-is return Optional[heap-user][2] elem 1");
 }
+
+// --- T1183: whole fixed-Array-VALUE escape of a match-borrowed variant payload
+// whose element is Optional[string] / Optional[Vector] — the inner string/vector
+// aliases heap even though the element is not a heap-user type. T1173's escape
+// recognizer (arrayElemNeedsEscapeDup -> pushElemNeedsDup) only saw
+// Optional[heap-user] via optionalHeapDupElem, so Optional[string][N] /
+// Optional[Vector][N] whole-array escapes stayed aliased -> the subject's synth
+// enum drop freed the inner strings/buffers at scope exit -> UAF/double-free in
+// the caller. Fixed by optionalPushElemNeedsDup (deep-cloning the Some payload).
+// NOTE: Optional[heap-user][N] escape is covered above (t1173_opt_return_ifis). ---
+enum T1183OptStrArr {
+  Pair(string?[2] a), Empty,
+}
+
+t1183_optstr_return_ifis_impl() string?[2] {
+  string? a0 = "x" + "1";
+  string? a1 = "z" + "2";
+  T1183OptStrArr h = T1183OptStrArr.Pair(a: [a0, a1]);
+  if h is Pair(a) {
+    return a;
+  }
+  string? y0 = none;
+  string? y1 = none;
+  return[y0, y1];
+}
+t1183_optstr_return_ifis() `test {
+  string?[2] r = t1183_optstr_return_ifis_impl();
+  assert(r[0]! == "x1", "if-is return Optional[string][2] elem 0");
+  assert(r[1]! == "z2", "if-is return Optional[string][2] elem 1");
+}
+
+t1183_optstr_return_match_impl() string?[2] {
+  string? a0 = "m" + "1";
+  string? a1 = "m" + "2";
+  T1183OptStrArr h = T1183OptStrArr.Pair(a: [a0, a1]);
+  match h {
+    Pair(a) => {
+      return a;
+    },
+    Empty => {
+      string? z0 = none;
+      string? z1 = none;
+      return[z0, z1];
+    },
+  }
+}
+t1183_optstr_return_match() `test {
+  string?[2] r = t1183_optstr_return_match_impl();
+  assert(r[0]! == "m1", "match return Optional[string][2] elem 0");
+  assert(r[1]! == "m2", "match return Optional[string][2] elem 1");
+}
+
+t1183_optstr_store_ifis_impl() string?[2] {
+  string? a0 = "t" + "1";
+  string? a1 = "t" + "2";
+  T1183OptStrArr h = T1183OptStrArr.Pair(a: [a0, a1]);
+  string? s0 = none;
+  string? s1 = none;
+  string?[2] out = [s0, s1];
+  if h is Pair(a) {
+    out = a;
+  }
+  return out;
+}
+t1183_optstr_store_ifis() `test {
+  string?[2] r = t1183_optstr_store_ifis_impl();
+  assert(r[0]! == "t1", "if-is store Optional[string][2] elem 0");
+  assert(r[1]! == "t2", "if-is store Optional[string][2] elem 1");
+}
+
+// --- T1183: Optional[Vector[int]][2] whole-array escape (return + store) ---
+enum T1183OptVecArr {
+  Pair(int[]?[2] a), Empty,
+}
+
+t1183_optvec_return_ifis_impl() int[]?[2] {
+  int[]? a0 = [1, 2, 3];
+  int[]? a1 = [4, 5];
+  T1183OptVecArr h = T1183OptVecArr.Pair(a: [a0, a1]);
+  if h is Pair(a) {
+    return a;
+  }
+  int[]? z0 = none;
+  int[]? z1 = none;
+  return[z0, z1];
+}
+t1183_optvec_return_ifis() `test {
+  int[]?[2] r = t1183_optvec_return_ifis_impl();
+  int[]? e0 = r[0];
+  int[]? e1 = r[1];
+  assert(e0!.len == 3, "if-is return Optional[Vector][2] elem 0 len");
+  assert(e0![2] == 3, "if-is return Optional[Vector][2] elem 0 value");
+  assert(e1!.len == 2, "if-is return Optional[Vector][2] elem 1 len");
+  assert(e1![0] == 4, "if-is return Optional[Vector][2] elem 1 value");
+}
+
+t1183_optvec_store_match_impl() int[]?[2] {
+  int[]? a0 = [7, 8];
+  int[]? a1 = [9];
+  T1183OptVecArr h = T1183OptVecArr.Pair(a: [a0, a1]);
+  int[]? s0 = none;
+  int[]? s1 = none;
+  int[]?[2] out = [s0, s1];
+  match h {
+    Pair(a) => {
+      out = a;
+    },
+    Empty => {
+      int[]? z0 = none;
+      int[]? z1 = none;
+      out = [z0, z1];
+    },
+  }
+  return out;
+}
+t1183_optvec_store_match() `test {
+  int[]?[2] r = t1183_optvec_store_match_impl();
+  int[]? e0 = r[0];
+  int[]? e1 = r[1];
+  assert(e0!.len == 2, "match store Optional[Vector][2] elem 0 len");
+  assert(e1![0] == 9, "match store Optional[Vector][2] elem 1 value");
+}
+
+// --- T1183 push-path coverage: Vector[Optional[string]].push of an index-read
+// source aliases the source's inner string unless deep-cloned. Assert the
+// destination is correct AND the source is intact after the destination drops. ---
+t1183_optstr_push_intact() `test {
+  string?[] src = [];
+  src.push("h" + "1");
+  src.push("h" + "2");
+  {
+    string?[] dst = [];
+    dst.push(src[0]);
+    dst.push(src[1]);
+    assert(dst[0]! == "h1", "push Optional[string] dst elem 0");
+    assert(dst[1]! == "h2", "push Optional[string] dst elem 1");
+  }
+  // dst dropped above; src must still own independent strings (no UAF).
+  assert(src[0]! == "h1", "push Optional[string] src intact elem 0");
+  assert(src[1]! == "h2", "push Optional[string] src intact elem 1");
+}
+
+// --- T1183: Optional[droppable-enum][N] whole-array escape. optionalPushElemNeedsDup
+// recognizes Optional[enum] (via pushElemNeedsDup's enum branch), so the escape/push
+// paths route it into dupOptionalVectorElem. That switch originally had NO enum case
+// and silently passed the Some payload through (shallow alias) -> the subject's synth
+// enum drop freed the inner variant fields while the escaped array still pointed at
+// them -> double-free/segfault. Fixed by dupOptionalVectorElem's enum branch (clone-fn
+// or in-place variant-field dup). Covers return (if-is + match) and Vector-push. ---
+enum T1183Inner {
+  Has(string s), Nothing,
+}
+
+enum T1183OptEnumArr {
+  Pair(T1183Inner?[2] a), Empty,
+}
+
+t1183_optenum_return_ifis_impl() T1183Inner?[2] {
+  T1183Inner? a0 = T1183Inner.Has(s: "x" + "1");
+  T1183Inner? a1 = T1183Inner.Has(s: "z" + "2");
+  T1183OptEnumArr h = T1183OptEnumArr.Pair(a: [a0, a1]);
+  if h is Pair(a) {
+    return a;
+  }
+  T1183Inner? y0 = none;
+  T1183Inner? y1 = none;
+  return[y0, y1];
+}
+t1183_optenum_return_ifis() `test {
+  T1183Inner?[2] r = t1183_optenum_return_ifis_impl();
+  match r[0]! {
+    Has(s) => {
+      assert(s == "x1", "if-is return Optional[enum][2] elem 0");
+    },
+    Nothing => {
+      assert(false, "if-is return Optional[enum][2] elem 0 should be Has");
+    },
+  }
+  match r[1]! {
+    Has(s) => {
+      assert(s == "z2", "if-is return Optional[enum][2] elem 1");
+    },
+    Nothing => {
+      assert(false, "if-is return Optional[enum][2] elem 1 should be Has");
+    },
+  }
+}
+
+t1183_optenum_return_match_impl() T1183Inner?[2] {
+  T1183Inner? a0 = T1183Inner.Has(s: "m" + "1");
+  T1183Inner? a1 = T1183Inner.Has(s: "m" + "2");
+  T1183OptEnumArr h = T1183OptEnumArr.Pair(a: [a0, a1]);
+  match h {
+    Pair(a) => {
+      return a;
+    },
+    Empty => {
+      T1183Inner? z0 = none;
+      T1183Inner? z1 = none;
+      return[z0, z1];
+    },
+  }
+}
+t1183_optenum_return_match() `test {
+  T1183Inner?[2] r = t1183_optenum_return_match_impl();
+  match r[0]! {
+    Has(s) => {
+      assert(s == "m1", "match return Optional[enum][2] elem 0");
+    },
+    Nothing => {
+      assert(false, "match return Optional[enum][2] elem 0 should be Has");
+    },
+  }
+  match r[1]! {
+    Has(s) => {
+      assert(s == "m2", "match return Optional[enum][2] elem 1");
+    },
+    Nothing => {
+      assert(false, "match return Optional[enum][2] elem 1 should be Has");
+    },
+  }
+}
+
+// Vector[Optional[enum]].push of an index-read source must deep-clone the Some
+// payload so dst and src own independent enum variant fields (no UAF after dst drop).
+t1183_optenum_push_intact() `test {
+  T1183Inner?[] src = [];
+  src.push(T1183Inner.Has(s: "h" + "1"));
+  {
+    T1183Inner?[] dst = [];
+    dst.push(src[0]);
+    match dst[0]! {
+      Has(s) => {
+        assert(s == "h1", "push Optional[enum] dst elem 0");
+      },
+      Nothing => {
+        assert(false, "push Optional[enum] dst should be Has");
+      },
+    }
+  }
+  // dst dropped above; src must still own an independent enum payload.
+  match src[0]! {
+    Has(s) => {
+      assert(s == "h1", "push Optional[enum] src intact");
+    },
+    Nothing => {
+      assert(false, "push Optional[enum] src should be Has");
+    },
+  }
+}
+
+// --- T1183: Optional[cloneable-enum][N] whole-array escape exercises the OTHER
+// sub-path of dupOptionalVectorElem's enum branch: when the inner enum has a
+// synthesized clone (`clone), the Some payload is deep-copied via the clone
+// function (@T1183CloneInner.clone) rather than the in-place variant-field dup.
+// Without a clone here the escaped array would alias the subject's variant fields
+// -> double-free once the subject's synth enum drop ran. Covers return + push. ---
+enum T1183CloneInner `clone {
+  Has(string s), Nothing,
+}
+
+enum T1183OptCloneEnumArr {
+  Pair(T1183CloneInner?[2] a), Empty,
+}
+
+t1183_optcloneenum_return_ifis_impl() T1183CloneInner?[2] {
+  T1183CloneInner? a0 = T1183CloneInner.Has(s: "x" + "1");
+  T1183CloneInner? a1 = T1183CloneInner.Has(s: "z" + "2");
+  T1183OptCloneEnumArr h = T1183OptCloneEnumArr.Pair(a: [a0, a1]);
+  if h is Pair(a) {
+    return a;
+  }
+  T1183CloneInner? y0 = none;
+  T1183CloneInner? y1 = none;
+  return[y0, y1];
+}
+t1183_optcloneenum_return_ifis() `test {
+  T1183CloneInner?[2] r = t1183_optcloneenum_return_ifis_impl();
+  match r[0]! {
+    Has(s) => {
+      assert(s == "x1", "if-is return Optional[cloneable-enum][2] elem 0");
+    },
+    Nothing => {
+      assert(false, "if-is return Optional[cloneable-enum][2] elem 0 should be Has");
+    },
+  }
+  match r[1]! {
+    Has(s) => {
+      assert(s == "z2", "if-is return Optional[cloneable-enum][2] elem 1");
+    },
+    Nothing => {
+      assert(false, "if-is return Optional[cloneable-enum][2] elem 1 should be Has");
+    },
+  }
+}
+
+// Vector[Optional[cloneable-enum]].push of an index-read source must deep-clone
+// the Some payload via the clone function so dst and src stay independent.
+t1183_optcloneenum_push_intact() `test {
+  T1183CloneInner?[] src = [];
+  src.push(T1183CloneInner.Has(s: "h" + "1"));
+  {
+    T1183CloneInner?[] dst = [];
+    dst.push(src[0]);
+    match dst[0]! {
+      Has(s) => {
+        assert(s == "h1", "push Optional[cloneable-enum] dst elem 0");
+      },
+      Nothing => {
+        assert(false, "push Optional[cloneable-enum] dst should be Has");
+      },
+    }
+  }
+  // dst dropped above; src must still own an independent enum payload.
+  match src[0]! {
+    Has(s) => {
+      assert(s == "h1", "push Optional[cloneable-enum] src intact");
+    },
+    Nothing => {
+      assert(false, "push Optional[cloneable-enum] src should be Has");
+    },
+  }
+}

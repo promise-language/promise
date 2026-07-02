@@ -2469,6 +2469,22 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 			}
 		} else if tup, ok := innerElem.(*types.Tuple); ok {
 			dupedInner = c.dupTupleValue(innerVal, tup)
+		} else if en := extractEnum(innerElem); en != nil {
+			// T1183: Optional[droppable-enum] inner. optionalPushElemNeedsDup
+			// recognizes this (via pushElemNeedsDup's enum branch), so without a
+			// clone here the Some payload would fall through to the shallow
+			// pass-through below and alias the source enum's variant fields — a
+			// double-free/UAF when both drop. Mirror maybeDupPushElement's enum
+			// clone (clone-fn if available, else in-place variant-field dup).
+			if _, ok := c.funcs[c.enumCloneFuncName(en, innerElem)]; ok {
+				cloned, _ := c.cloneEnumValue(innerVal, innerElem)
+				dupedInner = cloned
+			} else if c.vecElemNeedsEnumDrop(innerElem) {
+				alloca := c.createEntryAlloca(innerVal.Type())
+				c.block.NewStore(innerVal, alloca)
+				c.dupEnumElementInPlace(alloca, innerElem)
+				dupedInner = c.block.NewLoad(innerVal.Type(), alloca)
+			}
 		}
 	}
 

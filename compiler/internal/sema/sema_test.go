@@ -9172,6 +9172,98 @@ func TestIsNarrowingEnumFieldAssignRejected(t *testing.T) {
 	expectError(t, errs, "cannot assign through a narrowed enum variant field")
 }
 
+func TestIsNarrowingEnumThisReceiver(t *testing.T) {
+	// T1005: `if this is Variant { this.field }` narrows the `this` receiver
+	// inside an enum method, keyed by the synthetic subject name "this".
+	info := checkOK(t, `
+		enum Shape {
+			Circle(f64 radius),
+			Rect(f64 w, f64 h),
+			area(this) f64 {
+				if this is Circle {
+					return this.radius;
+				}
+				return 0.0;
+			}
+		}
+		test() {}
+	`)
+	if len(info.IsNarrowings) != 1 {
+		t.Fatalf("expected 1 is-narrowing, got %d", len(info.IsNarrowings))
+	}
+	for _, n := range info.IsNarrowings {
+		if !n.IsEnum {
+			t.Errorf("expected enum narrowing")
+		}
+		if n.SubjectName != "this" {
+			t.Errorf("expected subject name 'this', got %q", n.SubjectName)
+		}
+	}
+	if len(info.NarrowedVariantField) != 1 {
+		t.Errorf("expected 1 narrowed variant field access, got %d", len(info.NarrowedVariantField))
+	}
+}
+
+func TestIsNarrowingEnumThisFieldAssignRejected(t *testing.T) {
+	// T1005: a narrowed `this` variant field is a read-only borrow — assigning
+	// through it is rejected, same as the named-variable case.
+	errs := checkErrs(t, `
+		enum Shape {
+			Circle(f64 radius),
+			Rect(f64 w, f64 h),
+			grow(this) {
+				if this is Circle {
+					this.radius = 9.0;
+				}
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot assign through a narrowed enum variant field")
+}
+
+func TestIsNarrowingClassThisNotNarrowed(t *testing.T) {
+	// T1005: `this` narrowing is deliberately enum-only. A class method on the
+	// subtype already sees `this` as that subtype, so `if this is Subtype` inside
+	// a class method must NOT record an is-narrowing — it falls back to a plain
+	// bool condition (exercises the `subjectName == "this"` early-return guard in
+	// detectIsNarrowing). Codegen emits no receiver downcast, so sema must agree.
+	info := checkOK(t, `
+		type Animal {
+			int legs;
+			describe(this) string {
+				if this is Dog {
+					return "dog";
+				}
+				return "animal";
+			}
+		}
+		type Dog is Animal {}
+		test() {}
+	`)
+	if len(info.IsNarrowings) != 0 {
+		t.Fatalf("expected no is-narrowing for class `this is Subtype`, got %d", len(info.IsNarrowings))
+	}
+	if len(info.NarrowedVariantField) != 0 {
+		t.Errorf("expected no narrowed variant field access, got %d", len(info.NarrowedVariantField))
+	}
+}
+
+func TestIsNarrowingThisOutsideMethodGuarded(t *testing.T) {
+	// T1005: `if this is Variant` in a free function (no receiver) must not be
+	// treated as an is-narrowing — detectIsNarrowing's ThisExpr branch guards on
+	// `c.curFunc.Recv() == nil` and bails to the plain-bool path, which then
+	// reports the normal "used outside of a method" error rather than crashing.
+	errs := checkErrs(t, `
+		enum Foo { A, B }
+		test() {
+			if this is A {
+			}
+		}
+	`)
+	expectError(t, errs, "'this' used outside of a method")
+}
+
 func TestIsNarrowingEnumUnnamedFieldNotExposed(t *testing.T) {
 	// A positional (unnamed) payload exposes nothing after `x.` — still requires
 	// the destructure form.

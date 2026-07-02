@@ -29817,6 +29817,36 @@ func TestEnumNarrowVariantFieldRead(t *testing.T) {
 	assertContains(t, ir, "getelementptr")
 }
 
+// T1005: `if this is Variant { this.field }` narrows the `this` receiver inside
+// an enum method. Exercises the previously-dead enumThisSubject branch in
+// genNarrowedVariantField: the i8* receiver loads to a by-value enum and the
+// variant-data field GEP is emitted. Must compile without panicking.
+func TestEnumNarrowVariantFieldReadThis(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape {
+			Circle(f64 radius),
+			Rect(f64 w, f64 h),
+			area(this) f64 {
+				if this is Circle {
+					return 3.0 * this.radius * this.radius;
+				}
+				return 0.0;
+			}
+		}
+		main() {
+			Shape s = Shape.Circle(radius: 5.0);
+			f64 out = s.area();
+		}
+	`)
+	fn := extractFunction(ir, "Shape.area")
+	if fn == "" {
+		t.Fatal("expected Shape.area in IR")
+	}
+	// The narrowed `this.radius` read lowers to a variant-data field GEP + load.
+	assertContains(t, fn, "getelementptr")
+	assertContains(t, fn, "load double")
+}
+
 // T1011: a narrowed heap (string) variant field that ESCAPES the narrowing scope
 // (here: returned) must be cloned, not aliased — otherwise the subject's synth
 // enum drop frees the payload while the returned value still points into it

@@ -324,3 +324,134 @@ enum_generic_fn_int_escape() `test {
   n := extract_first[int](o, 0);
   assert(n == 42, "generic-fn narrowed int escape is a plain copy");
 }
+
+// T1005: `if this is Variant { this.field }` narrows the `this` receiver inside
+// an enum method/getter — the same narrowing as a named variable, keyed by the
+// synthetic subject name "this". Codegen was already wired (enumThisSubject);
+// the fix was sema-only.
+enum ShapeM {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+  area(this) f64 {
+    if this is Circle {
+      return 3.0 * this.radius * this.radius;
+    }
+    if this is Rect {
+      return this.w * this.h;
+    }
+    return 0.0;
+  }
+  get kind string {
+    if this is Circle {
+      return "circle";
+    }
+    return "other";
+  }
+}
+enum_this_method_narrow() `test {
+  c := ShapeM.Circle(radius: 2.0);
+  assert(c.area() == 12.0, "this-narrowed method single field");
+  r := ShapeM.Rect(w: 3.0, h: 4.0);
+  assert(r.area() == 12.0, "this-narrowed method multi field");
+}
+enum_this_getter_narrow() `test {
+  c := ShapeM.Circle(radius: 2.0);
+  assert(c.kind == "circle", "this-narrowed getter matching variant");
+  r := ShapeM.Rect(w: 3.0, h: 4.0);
+  assert(r.kind == "other", "this-narrowed getter non-matching variant");
+}
+
+// `&&` propagation over a narrowed `this` field.
+enum NumM {
+  Val(f64 x),
+  None,
+  positive(this) bool {
+    if this is Val && this.x > 2.0 {
+      return true;
+    }
+    return false;
+  }
+}
+enum_this_and_propagation() `test {
+  a := NumM.Val(x: 3.0);
+  assert(a.positive(), "this && rhs narrowed true");
+  b := NumM.Val(x: 1.0);
+  assert(!b.positive(), "this && rhs narrowed false");
+  n := NumM.None;
+  assert(!n.positive(), "this && non-matching variant");
+}
+
+// String payload — non-destructive read through `this` is a borrow; the escaped
+// return value must clone (T1011 dup-on-escape path via the "this" subject).
+enum MsgM {
+  Text(string body),
+  Empty,
+  render(this) string {
+    if this is Text {
+      return this.body; // escapes the narrowing scope — must clone
+    }
+    return "<empty>";
+  }
+}
+enum_this_string_escape() `test {
+  m := MsgM.Text(body: "hello");
+  assert(m.render() == "hello", "this-narrowed string escape is cloned");
+  e := MsgM.Empty;
+  assert(e.render() == "<empty>", "this non-matching variant skips block");
+}
+
+// Generic enum + `this` narrowing: exercises genNarrowedVariantField with
+// c.typeSubst active AND the i8* `this` subject (enumThisSubject) together —
+// a distinct codegen path from the named-variable and non-generic `this` cases.
+// The string arm also drives the mono + this + dup-on-escape (T1011) path.
+enum BoxThis[T] {
+  Some(T val),
+  None,
+  or_else(this, T fallback) T {
+    if this is Some {
+      return this.val; // narrowed generic field; escapes → cloned when heap
+    }
+    return fallback;
+  }
+}
+enum_this_generic_int() `test {
+  a := BoxThis[int].Some(val: 7);
+  assert(a.or_else(0) == 7, "generic this-narrow int match");
+  b := BoxThis[int].None;
+  assert(b.or_else(-1) == -1, "generic this-narrow int fallback");
+}
+enum_this_generic_string_escape() `test {
+  a := BoxThis[string].Some(val: "hi");
+  assert(a.or_else("x") == "hi", "generic this-narrow string escape cloned");
+  b := BoxThis[string].None;
+  assert(b.or_else("fb") == "fb", "generic this-narrow string fallback");
+}
+
+// Non-field member (getter) accessed on a narrowed `this`: checkMemberExpr keys
+// the subject as "this" but resolveNarrowedVariantField returns !ok for a
+// getter, so it must fall through to normal member lookup rather than erroring.
+enum ShapeF {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+  get diameter f64 {
+    if this is Circle {
+      return this.radius * 2.0;
+    }
+    return 0.0;
+  }
+  describe(this) string {
+    if this is Circle {
+      f64 d = this.diameter; // non-field member on narrowed `this` — falls through
+      assert(d == 6.0, "narrowed this reaches getter");
+      return "circle";
+    }
+    return "other";
+  }
+}
+enum_this_nonfield_fallthrough() `test {
+  c := ShapeF.Circle(radius: 3.0);
+  assert(c.diameter == 6.0, "narrowed this field via getter");
+  assert(c.describe() == "circle", "non-field member on narrowed this falls through");
+  r := ShapeF.Rect(w: 2.0, h: 5.0);
+  assert(r.describe() == "other", "non-matching variant skips narrowed block");
+}

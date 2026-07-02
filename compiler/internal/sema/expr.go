@@ -1436,12 +1436,20 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		target = ref.Elem()
 	}
 
-	// T0993: non-destructive enum narrowing — `if x is Variant { x.namedField }`.
-	// When x was narrowed to a variant in the current scope, resolve the member
-	// against the variant's named payload fields. A non-field member (common enum
+	// T0993/T1005: non-destructive enum narrowing — `if x is Variant { x.field }`,
+	// including the `this` receiver inside an enum method/getter. When the subject
+	// was narrowed to a variant in the current scope, resolve the member against
+	// the variant's named payload fields. A non-field member (common enum
 	// getter/method) falls through to the normal lookup below.
-	if ident, ok := e.Target.(*ast.IdentExpr); ok {
-		if n := c.narrowedVariants[ident.Name]; n != nil {
+	var subjName string
+	switch t := e.Target.(type) {
+	case *ast.IdentExpr:
+		subjName = t.Name
+	case *ast.ThisExpr:
+		subjName = "this"
+	}
+	if subjName != "" {
+		if n := c.narrowedVariants[subjName]; n != nil {
 			if ft, ok := c.resolveNarrowedVariantField(e, n); ok {
 				return ft
 			}

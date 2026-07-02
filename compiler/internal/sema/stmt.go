@@ -1393,15 +1393,28 @@ func (c *Checker) detectIsNarrowing(cond ast.Expr) (*IsNarrowing, *ast.IsExpr, [
 	if len(pat.TypeArgs) > 0 {
 		return nil, nil, nil
 	}
-	ident, ok := isExpr.Expr.(*ast.IdentExpr)
-	if !ok {
+	// The subject may be a named variable (`if x is T`) or the `this` receiver
+	// inside an enum method/getter (`if this is Variant`, T1005).
+	var subjectType types.Type
+	var subjectName string
+	switch subj := isExpr.Expr.(type) {
+	case *ast.IdentExpr:
+		obj := c.lookup(subj.Name)
+		if obj == nil {
+			return nil, nil, nil
+		}
+		subjectType = obj.Type()
+		subjectName = subj.Name
+	case *ast.ThisExpr:
+		// Mirror checkThisExpr's receiver guard (expr.go).
+		if c.curFunc == nil || c.curFunc.Recv() == nil {
+			return nil, nil, nil
+		}
+		subjectType = c.curFunc.Recv().Type()
+		subjectName = "this"
+	default:
 		return nil, nil, nil
 	}
-	obj := c.lookup(ident.Name)
-	if obj == nil {
-		return nil, nil, nil
-	}
-	subjectType := obj.Type()
 	if subjectType == nil {
 		return nil, nil, nil
 	}
@@ -1424,13 +1437,20 @@ func (c *Checker) detectIsNarrowing(cond ast.Expr) (*IsNarrowing, *ast.IsExpr, [
 			return nil, nil, nil
 		}
 		return &IsNarrowing{
-			SubjectName: ident.Name,
+			SubjectName: subjectName,
 			IsEnum:      true,
 			Enum:        enum,
 			Variant:     v,
 			Subst:       subst,
 			TargetType:  subjectType,
 		}, isExpr, conjuncts[1:]
+	}
+
+	// `this` narrowing is deliberately enum-only (T1005): a class method on the
+	// subtype already sees `this` as that subtype, so class `this` narrowing is
+	// out of scope and would require a receiver downcast codegen doesn't emit.
+	if subjectName == "this" {
+		return nil, nil, nil
 	}
 
 	// Class subtype narrowing: `if x is Subtype`.
@@ -1457,7 +1477,7 @@ func (c *Checker) detectIsNarrowing(cond ast.Expr) (*IsNarrowing, *ast.IsExpr, [
 		return nil, nil, nil
 	}
 	return &IsNarrowing{
-		SubjectName: ident.Name,
+		SubjectName: subjectName,
 		IsEnum:      false,
 		NarrowType:  narrowNamed,
 	}, isExpr, conjuncts[1:]

@@ -6858,7 +6858,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	// subject's scope-exit synth enum drop does not free out from under it. Gated to
 	// plain assignment: a compound-op RHS is not a straight move of the alias.
 	if s.Op == ast.OpAssign {
-		val, _ = c.dupBorrowedOptionalHeapUser(s.Value, val)
+		val, _ = c.dupBorrowedHeapUserPayload(s.Value, val)
 	}
 	c.elvisResultBound = prevElvisBound
 	c.elvisResultOwnsForced = prevElvisOwnsForced // T1166
@@ -8480,7 +8480,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// T1174: `return maybe` where maybe is a match-borrowed Optional[heap-user]
 		// binding aliases the subject's variant payload; deep-clone the inner so the
 		// returned value survives the scope-exit synth enum drop of the subject.
-		val, _ = c.dupBorrowedOptionalHeapUser(s.Value, val)
+		val, _ = c.dupBorrowedHeapUserPayload(s.Value, val)
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 		val = c.wrapOperatorParamReturnValue(val, s.Value, retType) // T0897
 	}

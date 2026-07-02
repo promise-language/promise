@@ -23001,7 +23001,7 @@ func TestT1170OptionalPayloadEscapeDupsOnMatch(t *testing.T) {
 
 // T1174: an Optional-of-heap-user-type variant payload (`Row? maybe`) that
 // ESCAPES `if is`/`match` (return / store-to-outer / consuming arg / constructor
-// field) must be deep-cloned via dupBorrowedOptionalHeapUser — otherwise the
+// field) must be deep-cloned via dupBorrowedHeapUserPayload — otherwise the
 // bound alias points into the subject's variant payload, which the subject's
 // synth enum drop frees at scope exit (UAF / SIGSEGV). The clone lowers to a
 // dupHeapValue `heapdup.copy` block in the escaping function.
@@ -23087,6 +23087,89 @@ func TestT1174OptionalNoDropHeapUserPayloadEscapeDups(t *testing.T) {
 	`)
 	fn := extractFunction(ir, "__user.esc")
 	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1171: a whole fixed-Array-of-heap-user variant payload (`Row[2] value`) that
+// ESCAPES `if is`/`match` (return / store-to-outer / consuming arg / constructor
+// field) must be element-wise deep-cloned via dupBorrowedHeapUserPayload's Array
+// branch (arrayHeapDupElem) — otherwise the escaped [N x {vtable,instance}]
+// aggregate aliases the subject's variant payload, which the subject's synth enum
+// drop frees at scope exit (UAF / SIGSEGV). Each element clone lowers to a
+// dupHeapValue `heapdup.copy` block, and the aggregate is rebuilt with N
+// `insertvalue`s (one per element).
+func TestT1171ArrayHeapUserPayloadEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Some(Row[2] value), Empty }
+		esc() Row[2] {
+			Box b = Box.Some(value: [Row(name: "a" + "b"), Row(name: "c" + "d")]);
+			if b is Some(value) { return value; }
+			return [Row(name: "x"), Row(name: "y")];
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	// Escaping the borrowed Array[Row] payload deep-clones each element.
+	assertContains(t, fn, "heapdup.copy")
+	// One insertvalue per array element rebuilds the cloned aggregate at the sink.
+	if n := strings.Count(fn, "insertvalue"); n < 2 {
+		t.Fatalf("expected >= 2 insertvalue (one per array element), got %d\n%s", n, fn)
+	}
+}
+
+// T1171 over-application guard: an in-scope-only Array[heap-user] binding must
+// stay a zero-copy borrow (no dup) — the subject outlives the narrowing and its
+// synth enum drop frees each element exactly once. The dup is gated to explicit
+// escape sites, so no `heapdup.copy` is emitted here. An over-eager dup would also
+// leak.
+func TestT1171ArrayHeapUserPayloadInScopeNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Some(Row[2] value), Empty }
+		rd() int {
+			Box b = Box.Some(value: [Row(name: "a" + "b"), Row(name: "c" + "d")]);
+			int out = 0;
+			if b is Some(value) { out = value[0].name.len; }
+			return out;
+		}
+		main() { x := rd(); }
+	`)
+	fn := extractFunction(ir, "__user.rd")
+	assertNotContains(t, fn, "heapdup.copy")
+}
+
+// T1171 generic/monomorphized path: when the Array[heap-user] payload lives in a
+// GENERIC enum (`GBox[T]` with a `T[2]` variant field), the escape sink must
+// resolve the element type through c.typeSubst (T -> Row) in BOTH
+// dupBorrowedHeapUserPayload (t = Substitute(...)) and arrayHeapDupElem
+// (elem = Substitute(arr.Elem(), ...)). Without those substitutions the array
+// recognizer misses the shape and the escaped aggregate aliases the moved-in
+// subject's payload (UAF). This is the only test that exercises the typeSubst
+// branches of both helpers, so the monomorphized `gesc[Row]` must still emit the
+// per-element `heapdup.copy`.
+func TestT1171GenericArrayHeapUserPayloadEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum GBox[T] { Some(T[2] value), Empty }
+		gesc[T](GBox[T] move b, T[2] fb) T[2] {
+			if b is Some(value) { return value; }
+			return fb;
+		}
+		main() {
+			GBox[Row] b = GBox[Row].Some(value: [Row(name: "a" + "b"), Row(name: "c" + "d")]);
+			Row[2] fb = [Row(name: "x"), Row(name: "y")];
+			r := gesc(move b, fb);
+		}
+	`)
+	// Monomorphized generic funcs are emitted as @"gesc[Row]" (quoted name).
+	fn := extractFunction(ir, `"gesc[Row]"`)
+	if fn == "" {
+		t.Fatalf("monomorphized gesc[Row] not found in IR:\n%s", ir)
+	}
+	assertContains(t, fn, "heapdup.copy")
+	if n := strings.Count(fn, "insertvalue"); n < 2 {
+		t.Fatalf("expected >= 2 insertvalue (one per array element), got %d\n%s", n, fn)
+	}
 }
 
 // B0007: Verify that channel recv alloca is in coro.start (entry block),

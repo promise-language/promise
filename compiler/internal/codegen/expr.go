@@ -3107,7 +3107,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 					// T1174: `Wrapper(held: maybe)` where maybe is a match-borrowed
 					// Optional[heap-user] binding aliases the subject's variant payload;
 					// deep-clone the inner so the new instance owns an independent copy.
-					val, _ = c.dupBorrowedOptionalHeapUser(arg.Value, val)
+					val, _ = c.dupBorrowedHeapUserPayload(arg.Value, val)
 				}
 			} else {
 				// T0411: Auto-dup string/container fields read from a droppable
@@ -3120,7 +3120,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// T1174: match-borrowed Optional[heap-user] binding used to
 				// initialize an owned field — deep-clone (see the optional-field
 				// branch above).
-				val, _ = c.dupBorrowedOptionalHeapUser(arg.Value, val)
+				val, _ = c.dupBorrowedHeapUserPayload(arg.Value, val)
 			}
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
@@ -6682,7 +6682,7 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		// independent copy and the subject's synth enum drop still frees the original
 		// exactly once. Borrow (`&`) params leave the alias intact (no escape).
 		if isMutRefParam {
-			v, _ = c.dupBorrowedOptionalHeapUser(arg.Value, v)
+			v, _ = c.dupBorrowedHeapUserPayload(arg.Value, v)
 		}
 		argVals = append(argVals, v)
 		argTypes = append(argTypes, c.info.Types[arg.Value])
@@ -12724,9 +12724,10 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 	return val, false
 }
 
-// dupBorrowedOptionalHeapUser deep-clones the inner heap payload of a
-// match-borrowed `Optional[heap-user-type]` ident so a value ESCAPING the `if
-// is`/`match` narrowing scope owns it independently (T1174). Such a binding
+// dupBorrowedHeapUserPayload deep-clones the inner heap payload of a
+// match-borrowed `Optional[heap-user-type]` (T1174) or fixed
+// `Array[heap-user-type]` (T1171) ident so a value ESCAPING the `if
+// is`/`match` narrowing scope owns it independently. Such a binding
 // (T0485/T1012, see matchBindingIsBorrow) merely ALIASES the subject's variant
 // payload — the subject's synth enum drop frees the original at scope exit, so
 // an escaped alias is a use-after-free (segfault). This is the plain-ident
@@ -12750,7 +12751,7 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 // dispatches through the type's typeinfo clone_fn for polymorphic subtypes
 // (T0387); it also deep-clones droppable sub-fields (e.g. Row.name), so no
 // shallow alias leaks.
-func (c *Compiler) dupBorrowedOptionalHeapUser(expr ast.Expr, val value.Value) (value.Value, bool) {
+func (c *Compiler) dupBorrowedHeapUserPayload(expr ast.Expr, val value.Value) (value.Value, bool) {
 	if val == nil || c.block == nil || c.block.Term != nil {
 		return val, false
 	}
@@ -12765,17 +12766,31 @@ func (c *Compiler) dupBorrowedOptionalHeapUser(expr ast.Expr, val value.Value) (
 	if c.typeSubst != nil && t != nil {
 		t = types.Substitute(t, c.typeSubst)
 	}
-	inner, ok := c.optionalHeapDupElem(t)
-	if !ok {
-		return val, false
+	if inner, ok := c.optionalHeapDupElem(t); ok {
+		// val must be the Optional struct { i1 present, T_v value }.
+		if _, isStruct := val.Type().(*irtypes.StructType); !isStruct {
+			return val, false
+		}
+		innerVal := c.block.NewExtractValue(val, 1)
+		dup := c.dupHeapValue(innerVal, inner)
+		return c.block.NewInsertValue(val, dup, 1), true
 	}
-	// val must be the Optional struct { i1 present, T_v value }.
-	if _, isStruct := val.Type().(*irtypes.StructType); !isStruct {
-		return val, false
+	// Fixed-Array-of-heap-user (T1171): element-wise deep-clone the [N x T_v]
+	// aggregate so the escaped array owns independent instances; the subject's
+	// synth enum drop still frees the originals exactly once.
+	if elemT, n, ok := c.arrayHeapDupElem(t); ok {
+		if _, isArr := val.Type().(*irtypes.ArrayType); !isArr {
+			return val, false
+		}
+		out := val
+		for i := int64(0); i < n; i++ {
+			elem := c.block.NewExtractValue(out, uint64(i))
+			dup := c.dupHeapValue(elem, elemT)
+			out = c.block.NewInsertValue(out, dup, uint64(i))
+		}
+		return out, true
 	}
-	innerVal := c.block.NewExtractValue(val, 1)
-	dup := c.dupHeapValue(innerVal, inner)
-	return c.block.NewInsertValue(val, dup, 1), true
+	return val, false
 }
 
 // optionalHeapDupElem reports whether typ is an Optional whose element is a heap
@@ -12784,7 +12799,7 @@ func (c *Compiler) dupBorrowedOptionalHeapUser(expr ast.Expr, val value.Value) (
 // copy escapes the original owner (a match-borrowed variant payload, or a
 // container element slot). Returns the resolved inner element type and true when
 // so, else (nil, false). Single recognition point shared by
-// dupBorrowedOptionalHeapUser (escape-site dup) and maybeDupPushElement /
+// dupBorrowedHeapUserPayload (escape-site dup) and maybeDupPushElement /
 // pushElemNeedsDup (vector-push + slice dup) so the two stay in sync (T1174).
 func (c *Compiler) optionalHeapDupElem(typ types.Type) (types.Type, bool) {
 	opt, ok := typ.(*types.Optional)
@@ -12806,6 +12821,27 @@ func (c *Compiler) optionalHeapDupElem(typ types.Type) (types.Type, bool) {
 func (c *Compiler) optionalElemNeedsHeapDup(resolvedElem types.Type) bool {
 	_, ok := c.optionalHeapDupElem(resolvedElem)
 	return ok
+}
+
+// arrayHeapDupElem reports whether typ is a fixed Array whose element is a heap
+// user type (droppable, or no-drop-but-pal-free) — the shape whose [N x T_v]
+// aggregate merely ALIASES N inner heap instances, so it must be element-wise
+// deep-cloned whenever a copy escapes the original owner (a match-borrowed
+// variant payload). Returns the resolved element type + size, else (nil,0,false).
+// Sibling of optionalHeapDupElem (T1174); leaves string/container arrays to T1173.
+func (c *Compiler) arrayHeapDupElem(typ types.Type) (types.Type, int64, bool) {
+	arr, ok := typ.(*types.Array)
+	if !ok {
+		return nil, 0, false
+	}
+	elem := arr.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
+	}
+	if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) {
+		return elem, arr.Size(), true
+	}
+	return nil, 0, false
 }
 
 // enumThisSubject converts a `this` enum receiver (an i8* pointer returned by

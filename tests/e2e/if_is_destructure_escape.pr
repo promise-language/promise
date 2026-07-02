@@ -387,7 +387,7 @@ vec_ret_escape() `test {
 // borrowInnerHasDrop): it aliases the subject's variant payload. In-scope reads
 // are sound (subject outlives the narrowing), but escaping the binding out of the
 // scope was a use-after-free (SIGSEGV) — the subject's synth enum drop freed the
-// payload at scope exit. The fix (dupBorrowedOptionalHeapUser) deep-clones the
+// payload at scope exit. The fix (dupBorrowedHeapUserPayload) deep-clones the
 // inner heap value at each escape site so the destination owns an independent
 // copy while the subject's drop still frees the original exactly once. In-scope
 // bindings stay zero-copy (the dup is gated to explicit escape sites, not a
@@ -641,4 +641,191 @@ t1174_index_impl() T1174Row? {
 }
 t1174_index_target() `test {
   assert(t1174_name(t1174_index_impl()) == "wx", "index-target Optional[heap-user] assign escape survives");
+}
+
+// --- T1171: whole fixed-Array-of-heap-user variant payload escaping if-is / match ---
+// Sibling to T1174 (Optional[heap-user]) and T1170/T1173 (string[N]/container arrays).
+// A `Row[N]` variant field bound via `if is`/`match` is match-borrowed: the
+// [N x {vtable,instance}] aggregate merely ALIASES the subject's N inner heap
+// instances. In-scope reads are sound, but escaping the whole array out of the
+// scope was a use-after-free (SIGSEGV) — the subject's synth enum drop freed each
+// element at scope exit while the escaped copy still pointed into it. The fix
+// (dupBorrowedHeapUserPayload's Array branch → arrayHeapDupElem) element-wise
+// deep-clones the aggregate at each escape site so the destination owns
+// independent instances; the subject's drop still frees the originals once.
+// In-scope bindings stay zero-copy (gated to explicit escape sites).
+type T1171Row {
+  string name;
+}
+enum T1171Box {
+  Some(T1171Row[2] value), Empty,
+}
+type T1171Wrap {
+  T1171Row[2] rows;
+  int tag;
+}
+
+// if-is: return escape (the reported repro).
+t1171_ret_ifis_impl() T1171Row[2] {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  if w is Some(value) {
+    return value; // value aliases w's payload; w dropped at scope exit
+  }
+  return[T1171Row(name: "BAD"), T1171Row(name: "BAD2")];
+}
+t1171_ret_ifis() `test {
+  T1171Row[2] r = t1171_ret_ifis_impl();
+  assert(r[0].name == "deep", "if-is return escape survives (elem 0)");
+  assert(r[1].name == "xx", "if-is return escape survives (elem 1)");
+}
+
+// match: return escape.
+t1171_ret_match_impl() T1171Row[2] {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  match w {
+    Some(value) => {
+      return value;
+    },
+    Empty => {
+      return[T1171Row(name: "BAD"), T1171Row(name: "BAD2")];
+    },
+  }
+}
+t1171_ret_match() `test {
+  T1171Row[2] r = t1171_ret_match_impl();
+  assert(r[0].name == "deep", "match return escape survives (elem 0)");
+  assert(r[1].name == "xx", "match return escape survives (elem 1)");
+}
+
+// if-is: store-to-escaping-outer.
+t1171_store_ifis_impl() T1171Row[2] {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  T1171Row[2] out = [T1171Row(name: "D0"), T1171Row(name: "D1")];
+  if w is Some(value) {
+    out = value; // drops old default array, takes independent clone
+  }
+  return out;
+}
+t1171_store_ifis() `test {
+  T1171Row[2] r = t1171_store_ifis_impl();
+  assert(r[0].name == "deep", "if-is store-to-outer escape survives");
+}
+
+// match: store-to-escaping-outer.
+t1171_store_match_impl() T1171Row[2] {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  T1171Row[2] out = [T1171Row(name: "D0"), T1171Row(name: "D1")];
+  match w {
+    Some(value) => {
+      out = value;
+    },
+    Empty => {
+    },
+  }
+  return out;
+}
+t1171_store_match() `test {
+  T1171Row[2] r = t1171_store_match_impl();
+  assert(r[0].name == "deep", "match store-to-outer escape survives");
+}
+
+// Consuming-arg escape (~ move param): the whole array is moved into a consuming
+// param after the store escape.
+t1171_consume(T1171Row[2] move r) string {
+  return r[0].name;
+}
+t1171_consume_arg_impl() string {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  T1171Row[2] out = [T1171Row(name: "D0"), T1171Row(name: "D1")];
+  if w is Some(value) {
+    out = value;
+  }
+  return t1171_consume(move out);
+}
+t1171_consuming_arg() `test {
+  assert(t1171_consume_arg_impl() == "deep", "array moved into consuming param");
+}
+
+// Constructor-field escape: the borrowed array is stored into an owned field.
+// Reading a whole heap-user array field back out is a separate escape sink
+// (field-access-of-array, out of scope for T1171), so — as with T1174's
+// constructor-field test — the invariant here is drop-safety: the wrapper's
+// field drop and the subject's synth enum drop must not free the same
+// allocation (double-free / leak). We assert via a scalar sibling field.
+t1171_ctor_field_impl() int {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  int tag = 0;
+  if w is Some(value) {
+    T1171Wrap wr = T1171Wrap(rows: value, tag: 9); // wr and w both drop — independent copies
+    tag = wr.tag;
+  }
+  return tag;
+}
+t1171_constructor_field() `test {
+  assert(t1171_ctor_field_impl() == 9, "array copied into constructor field (drop-safe)");
+}
+
+// In-scope guard: no escape → zero-copy borrow, correct value, no leak. An
+// over-eager dup here would be caught by the leak checker.
+t1171_inscope() `test {
+  T1171Box w = T1171Box.Some(value: [T1171Row(name: "m" + "n"), T1171Row(name: "o" + "p")]);
+  if w is Some(value) {
+    assert(value[0].name == "mn", "in-scope Array[heap-user] read");
+  }
+  // Subject still usable after the borrow-narrowing `if`.
+  if w is Some(again) {
+    assert(again[1].name == "op", "subject intact after if");
+  }
+}
+
+// no-drop element parity: arrayHeapDupElem admits BOTH droppable heap-user
+// elements (T1171Row, via isDroppableHeapUserType) AND no-drop-but-heap elements
+// (via isHeapUserNoDropPalFree) — the tests above only exercise the droppable
+// branch. An all-scalar-field element type is heap-allocated but has no
+// drop/synth-drop, so it takes the pal_free clone path (the T0484-caveated one).
+// Escaping the array must still element-wise deep-clone, else the returned
+// aggregate aliases the subject's payload → freed by the subject's synth enum
+// drop → UAF. Mirror of t1174_nodrop_ret for the fixed-Array shape.
+type T1171P {
+  int x;
+}
+enum T1171PBox {
+  Has(T1171P[2] cells), Nothing,
+}
+t1171_nodrop_ret_impl() T1171P[2] {
+  T1171PBox b = T1171PBox.Has(cells: [T1171P(x: 41 + 1), T1171P(x: 7)]);
+  if b is Has(cells) {
+    return cells;
+  }
+  return[T1171P(x: -1), T1171P(x: -2)];
+}
+t1171_nodrop_ret() `test {
+  T1171P[2] r = t1171_nodrop_ret_impl();
+  assert(r[0].x == 42, "no-drop heap-user array return escape survives (elem 0)");
+  assert(r[1].x == 7, "no-drop heap-user array return escape survives (elem 1)");
+}
+
+// Generic / monomorphized context: the array-of-heap-user payload lives in a
+// GENERIC enum `GBox[T]` whose variant field type is `T[2]`. Inside the
+// monomorphized `gesc[Row]`, the escape sink resolves the element type through
+// c.typeSubst (T → Row) — both in dupBorrowedHeapUserPayload (t = Substitute(...))
+// and in arrayHeapDupElem (elem = Substitute(arr.Elem(), ...)). Without those
+// substitutions the recognizer would miss the array shape and the escaped
+// aggregate would alias the moved-in subject's payload → UAF. This is the only
+// case that exercises the typeSubst branches of both helpers.
+enum T1171GBox[T] {
+  Some(T[2] value), Empty,
+}
+t1171_gesc[T](T1171GBox[T] move b, T[2] fallback) T[2] {
+  if b is Some(value) {
+    return value;
+  }
+  return fallback;
+}
+t1171_generic() `test {
+  T1171GBox[T1171Row] b = T1171GBox[T1171Row].Some(value: [T1171Row(name: "de" + "ep"), T1171Row(name: "x" + "x")]);
+  T1171Row[2] fb = [T1171Row(name: "BAD"), T1171Row(name: "BAD2")];
+  T1171Row[2] r = t1171_gesc(move b, fb);
+  assert(r[0].name == "deep", "generic array-of-heap-user escape survives (elem 0)");
+  assert(r[1].name == "xx", "generic array-of-heap-user escape survives (elem 1)");
 }

@@ -1139,3 +1139,198 @@ test_generic_nested_push_fixed_array() `test {
   assert(arr[0][0] == 42, "generic array slot value");
   assert(arr[1].len == 0, "other generic array slot untouched");
 }
+
+// ---------------------------------------------------------------------------
+// T1176: reading a whole fixed-Array[heap-user] field out by value and letting
+// it escape (return / store-to-outer / constructor field / move-param) must
+// element-wise deep-clone. Before the fix genFieldAccess aliased the
+// [N x {vtable,instance}] aggregate and the owner's synth drop freed each
+// element at scope exit while the escaped copy still pointed in → UAF/segfault.
+// ---------------------------------------------------------------------------
+
+type _T1176Row {
+  string name;
+}
+type _T1176Wrap {
+  _T1176Row[2] rows;
+}
+
+// return-escape sink: build the owner locally, return its whole array field.
+_t1176_esc() _T1176Row[2] {
+  _T1176Wrap w = _T1176Wrap(rows: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+  return w.rows; // owner w dropped at scope exit; returned copy must be independent
+}
+
+test_t1176_return_array_field_escape() `test {
+  _T1176Row[2] r = _t1176_esc();
+  assert(r[0].name == "deep", "return: elem 0 survives owner drop");
+  assert(r[1].name == "xx", "return: elem 1 survives owner drop");
+}
+
+// store-to-outer sink: `out = w.rows` while w drops at the inner block exit.
+test_t1176_store_to_outer_array_field() `test {
+  _T1176Row[2] out = [_T1176Row(name: "a" + "a"), _T1176Row(name: "b" + "b")];
+  {
+    _T1176Wrap w = _T1176Wrap(rows: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+    out = w.rows; // drop-old of out + clone of w.rows; w freed at block exit
+  }
+  assert(out[0].name == "deep", "store: elem 0 survives owner drop");
+  assert(out[1].name == "xx", "store: elem 1 survives owner drop");
+}
+
+// constructor-field sink (owning position): sema requires `move w.rows`, so
+// ownership TRANSFERS into Outer (no clone — the owner's synth drop skips the
+// moved-out field). Balance check: no double-free, no leak of the elements.
+type _T1176Outer {
+  _T1176Row[2] held;
+}
+
+_t1176_wrap_into_outer() _T1176Outer {
+  _T1176Wrap w = _T1176Wrap(rows: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+  return _T1176Outer(held: move w.rows); // ownership moves into Outer; w's drop skips rows
+}
+
+test_t1176_constructor_field_move() `test {
+  _T1176Outer o = _t1176_wrap_into_outer();
+  assert(o.held[0].name == "deep", "ctor: moved elem 0 intact");
+  assert(o.held[1].name == "xx", "ctor: moved elem 1 intact");
+}
+
+// move-param sink (owning position): sema requires `move w.rows` — ownership
+// transfers into the callee, w is consumed. Balance check: no double-free/leak.
+_t1176_consume(_T1176Row[2] move rows) string {
+  return rows[0].name + "/" + rows[1].name;
+}
+
+test_t1176_move_param() `test {
+  _T1176Wrap w = _T1176Wrap(rows: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+  string s = _t1176_consume(move w.rows); // ownership moves into callee
+  assert(s == "deep/xx", "move-param: callee sees moved elements");
+}
+
+// no-drop-but-pal-free element parity: a heap-user type with only scalar fields
+// has no synth drop but is still pal_free'd, exercising the isHeapUserNoDropPalFree
+// branch of arrayHeapDupElem (droppable-element tests above miss it).
+type _T1176Plain {
+  int n;
+}
+type _T1176PlainWrap {
+  _T1176Plain[2] cells;
+}
+
+_t1176_esc_plain() _T1176Plain[2] {
+  _T1176PlainWrap w = _T1176PlainWrap(cells: [_T1176Plain(n: 11), _T1176Plain(n: 22)]);
+  return w.cells;
+}
+
+test_t1176_nodrop_palfree_element_escape() `test {
+  _T1176Plain[2] c = _t1176_esc_plain();
+  assert(c[0].n == 11, "nodrop: elem 0 survives owner drop");
+  assert(c[1].n == 22, "nodrop: elem 1 survives owner drop");
+}
+
+// in-scope control: reading an element of the array field WITHOUT escaping must
+// stay zero-copy and leak-clean (guards against over-eager cloning).
+test_t1176_inscope_no_overclone() `test {
+  _T1176Wrap w = _T1176Wrap(rows: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+  assert(w.rows[0].name == "deep", "in-scope read elem 0");
+  assert(w.rows[1].name == "xx", "in-scope read elem 1");
+}
+
+// Variant-payload sink parity: the T1176 fix lives in the SHARED
+// dupHeapFieldForEscape array branch, so a whole Array[heap-user] match-borrowed
+// variant payload escaping an `if is`/`match` (genIdentExpr, line ~1063) is
+// deep-cloned too — the subject enum's synth drop frees the originals at scope
+// exit while the returned copy stays valid. (Distinct from T1173, which tracks
+// the string[N]/Vector[N]-element variant payload — deliberately out of scope of
+// arrayHeapDupElem, still aliased.)
+// The subject enum is built and OWNED inside the function so it is dropped at
+// scope exit — forcing the escaped array to be an independent clone (an alias
+// would be a UAF once the returned copy is read by the caller).
+enum _T1176Holder {
+  Pair(_T1176Row[2] rows), Empty,
+}
+
+_t1176_variant_if_is() _T1176Row[2] {
+  _T1176Holder h = _T1176Holder.Pair(rows: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+  if h is Pair(rows) {
+    return rows; // aliases h's payload; h dropped at scope exit → must clone
+  }
+  return[_T1176Row(name: "z" + "z"), _T1176Row(name: "y" + "y")];
+}
+
+test_t1176_variant_payload_whole_array_escape_if_is() `test {
+  _T1176Row[2] r = _t1176_variant_if_is();
+  assert(r[0].name == "deep", "variant if-is: elem 0 survives subject drop");
+  assert(r[1].name == "xx", "variant if-is: elem 1 survives subject drop");
+}
+
+_t1176_variant_match() _T1176Row[2] {
+  _T1176Holder h = _T1176Holder.Pair(rows: [_T1176Row(name: "fo" + "o"), _T1176Row(name: "ba" + "r")]);
+  match h {
+    Pair(rows) => {
+      return rows;
+    },
+    Empty => {
+      return[_T1176Row(name: "z" + "z"), _T1176Row(name: "y" + "y")];
+    },
+  }
+}
+
+test_t1176_variant_payload_whole_array_escape_match() `test {
+  _T1176Row[2] r = _t1176_variant_match();
+  assert(r[0].name == "foo", "variant match: elem 0 survives subject drop");
+  assert(r[1].name == "bar", "variant match: elem 1 survives subject drop");
+}
+
+// Generic-field escape: the array element type is a type parameter (`T[2]`)
+// resolved to a heap-user type at mono time. This exercises the `typeSubst`
+// substitution branch of arrayHeapDupElem — the concrete-field tests above have
+// no active substitution, so the field type is already `_T1176Row[2]` and the
+// substitute path is never taken. The escaped clone must still be independent.
+type _T1176GenHolder[T] {
+  T[2] data;
+}
+
+_t1176_esc_generic() _T1176Row[2] {
+  _T1176GenHolder[_T1176Row] h = _T1176GenHolder[_T1176Row](data: [_T1176Row(name: "de" + "ep"), _T1176Row(name: "x" + "x")]);
+  return h.data; // owner h dropped at scope exit; T resolves to _T1176Row → must clone
+}
+
+test_t1176_generic_array_field_escape() `test {
+  _T1176Row[2] r = _t1176_esc_generic();
+  assert(r[0].name == "deep", "generic: elem 0 survives owner drop");
+  assert(r[1].name == "xx", "generic: elem 1 survives owner drop");
+}
+
+// Deep sub-field clone: the escaping element is a heap-user type whose own field
+// is a droppable container (Vector). A shallow per-element alias would leave the
+// clone's Vector pointing at the owner's storage — freed by the owner's synth
+// drop at scope exit (UAF) or double-freed. dupHeapValue must recurse into the
+// element's droppable sub-fields, so the returned copy owns independent vectors.
+type _T1176Cell {
+  Vector[int] xs;
+  drop(~this) {
+  }
+}
+type _T1176CellWrap {
+  _T1176Cell[2] cells;
+}
+
+_t1176_esc_deep() _T1176Cell[2] {
+  Vector[int] a = Vector[int]();
+  a.push(1);
+  a.push(2);
+  Vector[int] b = Vector[int]();
+  b.push(9);
+  _T1176CellWrap w = _T1176CellWrap(cells: [_T1176Cell(xs: move a), _T1176Cell(xs: move b)]);
+  return w.cells; // must deep-clone each _T1176Cell AND its Vector sub-field
+}
+
+test_t1176_deep_subfield_clone_escape() `test {
+  _T1176Cell[2] r = _t1176_esc_deep();
+  assert(r[0].xs.len == 2, "deep: cell 0 vector length independent");
+  assert(r[0].xs[0] == 1, "deep: cell 0 elem 0");
+  assert(r[0].xs[1] == 2, "deep: cell 0 elem 1");
+  assert(r[1].xs[0] == 9, "deep: cell 1 elem 0");
+}

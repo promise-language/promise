@@ -23172,6 +23172,115 @@ func TestT1171GenericArrayHeapUserPayloadEscapeDups(t *testing.T) {
 	}
 }
 
+// T1176: reading a whole fixed-Array[heap-user] struct field out by value and
+// returning it (`return w.rows`) must element-wise deep-clone. genFieldAccess
+// routes the array field through dupHeapFieldForEscape's array branch, which
+// extractvalue/dupHeapValue/insertvalue's each element. Before the fix the
+// [N x {vtable,instance}] aggregate was aliased and the owner's synth drop freed
+// each element at scope exit while the returned copy still pointed in (UAF).
+// The clone lowers to a per-element dupHeapValue `heapdup.copy` block.
+func TestT1176ArrayHeapUserFieldEscapeDupsOnReturn(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		type Wrap { Row[2] rows; }
+		esc() Row[2] {
+			Wrap w = Wrap(rows: [Row(name: "de" + "ep"), Row(name: "x" + "x")]);
+			return w.rows;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	// Each escaping array element is deep-cloned via dupHeapValue.
+	assertContains(t, fn, "heapdup.copy")
+	// One insertvalue per element re-assembles the cloned array aggregate
+	// ([2 x {vtable,instance}] — value structs are unnamed in the test harness).
+	if n := strings.Count(fn, "insertvalue [2 x { i8*, i8* }]"); n < 2 {
+		t.Errorf("expected >=2 insertvalue into the cloned array aggregate (one per element), got %d\n%s", n, fn)
+	}
+}
+
+// T1176: a no-drop-but-pal-free element array field parity case — a heap-user
+// type with only scalar fields has no synth drop but is still pal_free'd, so
+// arrayHeapDupElem's isHeapUserNoDropPalFree branch must still deep-clone each
+// escaping element. A value-type element would be copied by value and route
+// past arrayHeapDupElem, so the presence of `heapdup.copy` confirms the no-drop
+// heap branch is taken.
+func TestT1176ArrayNoDropHeapUserFieldEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type P { int x; }
+		type Wrap { P[2] cells; }
+		esc() P[2] {
+			Wrap w = Wrap(cells: [P(x: 11), P(x: 22)]);
+			return w.cells;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1176 over-application guard: an in-scope read of a fixed-Array[heap-user]
+// field element (no escape → no dup flag set) must NOT clone. This proves the
+// escape dup is gated on an owning sink and in-scope borrows stay zero-copy
+// (an over-eager clone would also leak).
+func TestT1176ArrayHeapUserFieldInScopeNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		type Wrap { Row[2] rows; }
+		rd() int {
+			Wrap w = Wrap(rows: [Row(name: "de" + "ep"), Row(name: "x" + "x")]);
+			return w.rows[0].name.len;
+		}
+		main() { x := rd(); }
+	`)
+	fn := extractFunction(ir, "__user.rd")
+	assertNotContains(t, fn, "heapdup.copy")
+}
+
+// T1176: escaping a generic array field whose element is a type parameter
+// (`T[2]`) from inside a GENERIC function body must also deep-clone. Because the
+// escape sits in `grab[T]`'s body, the field type is the unresolved `T[2]` and
+// mono has `typeSubst` active (T→Row) at the access — this drives
+// arrayHeapDupElem's `types.Substitute` branch, which the concrete-instance
+// cases (field type already `Row[2]`, typeSubst nil) never reach. The
+// monomorphized `grab__Row` still clones each escaping element. `h` is borrowed,
+// so its synth drop runs in the caller while the returned copy must stay valid.
+func TestT1176GenericArrayHeapUserFieldEscapeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		type Holder[T] { T[2] data; }
+		grab[T](Holder[T] h) T[2] { return h.data; }
+		main() {
+			Holder[Row] h = Holder[Row](data: [Row(name: "de" + "ep"), Row(name: "x" + "x")]);
+			r := grab[Row](h);
+		}
+	`)
+	// Mono generic funcs are emitted with a bracketed, quoted LLVM name
+	// (`@"grab[Row]"`), so the extract marker must include the quotes.
+	fn := extractFunction(ir, `"grab[Row]"`)
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1176 gate negative: escaping a value-element array field (`int[2]`) out of a
+// DROPPABLE owner must NOT clone — arrayHeapDupElem recognizes the array but its
+// element is neither a droppable heap-user nor a no-drop-pal-free type, so it
+// returns false (the `int[]`/value-array fall-through) and the field is copied
+// by value. The owner is made droppable by its sibling string field, so the
+// escape sink runs setDupFlagsForFieldAccess → arrayHeapDupElem for real; the
+// absence of `heapdup.copy` proves value arrays are left untouched.
+func TestT1176ValueArrayFieldEscapeNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type VW { int[2] a; string s; }
+		esc() int[2] {
+			VW w = VW(a: [7, 8], s: "x" + "y");
+			return w.a;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertNotContains(t, fn, "heapdup.copy")
+}
+
 // B0007: Verify that channel recv alloca is in coro.start (entry block),
 // not in the chrecv.read block.
 func TestChannelRecvAllocaInEntryBlock(t *testing.T) {

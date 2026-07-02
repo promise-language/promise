@@ -6411,6 +6411,16 @@ func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
 		c.dupContainerFieldAccess = true
 		return
 	}
+	// T1176: a whole fixed-Array[heap-user] field/binding read out by value
+	// (`return w.rows`) aliases N inner heap instances; the owner's synth drop
+	// frees them at scope exit while the escaped copy still points in (UAF).
+	// Route through dupContainerFieldAccess so dupHeapFieldForEscape element-wise
+	// deep-clones. Gated on the heap-user element shape (int[N]/value arrays are
+	// untouched — dupHeapFieldForEscape's array branch is a no-op for them).
+	if _, _, ok := c.arrayHeapDupElem(t); ok {
+		c.dupContainerFieldAccess = true
+		return
+	}
 	if opt, ok := t.(*types.Optional); ok {
 		elem := opt.Elem()
 		if extractNamed(elem) == types.TypString {
@@ -12624,6 +12634,31 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 	// B0219: Dup vector/channel fields from types with drop.
 	// Vector: shallow copy (allocate + memcpy). Channel: incref.
 	if c.dupContainerFieldAccess && ownerDroppable {
+		// T1176: whole fixed-Array[heap-user] field/binding escaping the owner —
+		// the [N x {vtable,instance}] aggregate merely ALIASES N inner heap
+		// instances, so element-wise deep-clone (each via dupHeapValue). Without
+		// this the owner's synth drop frees the elements at scope exit while the
+		// escaped copy still points into them (UAF). dupHeapValue is null-safe,
+		// dispatches through typeinfo clone_fn for polymorphic subtypes (T0387),
+		// and deep-clones droppable sub-fields (e.g. Row.name) — no shallow alias
+		// leaks. No temp tracking: every sink that sets the flag stores the value
+		// into an owned slot (return → caller bindingDropArray; assign → target
+		// bindingDropArray after drop-old; constructor → instance synth drop;
+		// move-param → callee param drop), and the subject's synth drop frees the
+		// originals exactly once — so no double-free and no leak.
+		if elemT, n, ok := c.arrayHeapDupElem(fType); ok {
+			c.dupContainerFieldAccess = false // consume the flag
+			if _, isArr := val.Type().(*irtypes.ArrayType); !isArr {
+				return val, false
+			}
+			out := val
+			for i := int64(0); i < n; i++ {
+				elem := c.block.NewExtractValue(out, uint64(i))
+				dup := c.dupHeapValue(elem, elemT)
+				out = c.block.NewInsertValue(out, dup, uint64(i))
+			}
+			return out, true
+		}
 		if elemType, ok := types.AsVector(fType); ok {
 			c.dupContainerFieldAccess = false // consume the flag
 			elemLLVM := c.resolveType(elemType)
@@ -12825,10 +12860,13 @@ func (c *Compiler) optionalElemNeedsHeapDup(resolvedElem types.Type) bool {
 
 // arrayHeapDupElem reports whether typ is a fixed Array whose element is a heap
 // user type (droppable, or no-drop-but-pal-free) — the shape whose [N x T_v]
-// aggregate merely ALIASES N inner heap instances, so it must be element-wise
-// deep-cloned whenever a copy escapes the original owner (a match-borrowed
-// variant payload). Returns the resolved element type + size, else (nil,0,false).
-// Sibling of optionalHeapDupElem (T1174); leaves string/container arrays to T1173.
+// aggregate merely ALIASES N inner heap instances, so a copy escaping the owner
+// (a struct field read like `return w.rows`, or a match-borrowed variant payload)
+// must be element-wise deep-cloned. Returns the resolved element type, the array
+// size, and true when so, else (nil, 0, false). string/container-element arrays
+// are deliberately out of scope (their own follow-up, cf. T1173). Sibling of
+// optionalHeapDupElem; single recognition point shared by dupHeapFieldForEscape
+// (field-access + variant-payload escape sinks) so the shapes stay in sync (T1176).
 func (c *Compiler) arrayHeapDupElem(typ types.Type) (types.Type, int64, bool) {
 	arr, ok := typ.(*types.Array)
 	if !ok {

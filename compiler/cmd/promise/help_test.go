@@ -100,8 +100,8 @@ func dispatchedCommands(t *testing.T) map[string]bool {
 
 // indexHiddenCommands is the set of dispatched commands intentionally omitted
 // from the concise command index (T1006): deprecated top-level aliases (T1007)
-// and the removed verbs fetch/warm (still dispatch until T1008) and gc (now
-// dispatches a removal notice; T1009).
+// and the removed verbs fetch/warm (now dispatch a removal notice; folded into
+// install; T1008) and gc (now dispatches a removal notice; T1009).
 var indexHiddenCommands = map[string]bool{
 	"pkg": true, "add": true, "search": true, "pin": true,
 	"fetch": true, "warm": true, "gc": true,

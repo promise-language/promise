@@ -18,8 +18,9 @@ import (
 
 // OfflineError is the exact §4.4 message emitted when a dependency is uncached
 // and the network is unreachable. It points at the remedies owned by T0771
-// (the -full build / `promise fetch`).
-const OfflineError = "host toolchain not cached and no network; install the -full build or run promise fetch while online"
+// (the -full build / `promise install`, which folds in toolchain pre-staging
+// per T1008).
+const OfflineError = "host toolchain not cached and no network; install the -full build or run promise install while online"
 
 // errArchiveDeclined marks the user opting out of the large upstream-archive
 // fallback at the interactive prompt. It is a deliberate choice — not a broken

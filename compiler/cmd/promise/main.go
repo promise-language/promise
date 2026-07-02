@@ -339,8 +339,10 @@ func main() {
 	case "remove":
 		runRemove(os.Args[2:])
 	case "fetch", "warm":
-		runFetch(os.Args[2:])
-		return
+		fmt.Fprintln(os.Stderr, "promise fetch (a.k.a. warm) has been removed — toolchain pre-staging is folded into promise install.")
+		fmt.Fprintln(os.Stderr, "  `promise install` warms the current epoch's toolchain (e.g. right after `promise update`);")
+		fmt.Fprintln(os.Stderr, "  `promise install <epoch>` warms that epoch's toolchain.")
+		os.Exit(1)
 	case "gc":
 		fmt.Fprintln(os.Stderr, "promise gc has been removed — cache reclamation is automatic.")
 		fmt.Fprintln(os.Stderr, "  `promise remove <epoch>` reclaims that epoch's exclusive blobs;")
@@ -8272,25 +8274,55 @@ main!() {   # ! marks main failable (can return error)
 // path for a project pinning an epoch that is not present on disk: building a
 // pinned project needs presence, not activation, so this leaves the active
 // pointer untouched and does not perturb other unpinned projects.
-func runInstallEpoch(epoch string) {
+func runInstallEpoch(epoch string, fetchToolchain bool) {
 	if err := ensureEpochPresent(epoch); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Installed epoch %s (active epoch unchanged)\n", epoch)
+	// Pre-stage the epoch's host toolchain (T1008; the drop-in for the removed
+	// `promise fetch`). --no-fetch-toolchain makes a present install a true no-op.
+	if fetchToolchain {
+		hydrateEpochToolchain(epoch)
+	}
+}
+
+// hydrateEpochToolchain pre-stages epoch E's host LLVM toolchain (T1008). LLVM
+// "views" are epoch-specific — keyed by the running binary's embedded-manifest
+// content hash (llvm_cas.go blobSetKey) — so only epoch E's own binary can build
+// E's view. For the running/active epoch we hydrate in-process; for a FOREIGN
+// epoch we dispatch to epochs/<E>/bin/promise, which sees E as ITS OWN epoch and
+// takes the in-process branch (terminal — no recursion). runInstallEpoch never
+// writes the active pointer, so this is active-pointer/PATH-safe on both sides.
+func hydrateEpochToolchain(epoch string) {
+	if myEpoch, err := module.CompilerEpoch(embeddedCatalog); err == nil && myEpoch == epoch {
+		if herr := hydrateHostToolchain(); herr != nil {
+			// Match `fetch`'s explicit offline signal: fatal, not best-effort.
+			fmt.Fprintf(os.Stderr, "error: %v\n", herr)
+			os.Exit(1)
+		}
+		return
+	}
+	// Foreign epoch — its toolchain view can only be built by its own binary.
+	bin, err := epochCompilerBin(epoch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	child := exec.Command(bin, "install", epoch)
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	child.Stdin = os.Stdin
+	if err := child.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "error: hydrating epoch %s toolchain: %v\n", epoch, err)
+		os.Exit(1)
+	}
 }
 
 func runInstall(args []string) {
-	// Overload: `promise install <epoch>` fetches + stages an epoch without
-	// activating it (presence-only). The no-arg bootstrap path below — which
-	// installs THIS binary's embedded epoch and activates it — is the critical
-	// installation primitive and stays byte-for-byte unchanged; the positional
-	// guard can only trigger on a single non-flag argument.
-	if len(args) == 1 && !strings.HasPrefix(args[0], "-") {
-		runInstallEpoch(args[0])
-		return
-	}
-
 	// Parse flags:
 	//   -dev                  install into epochs/dev/ instead of epochs/<epoch>/
 	//   --no-fetch-toolchain  skip the install-time host-toolchain pre-fetch
@@ -8303,9 +8335,12 @@ func runInstall(args []string) {
 	//                         the PROMISE_NO_MODIFY_PATH env var so the install
 	//                         scripts and the install gate can opt out without a
 	//                         flag (T0863/T0864).
+	// Flags are parsed BEFORE the positional overload so `install <epoch>
+	// --no-fetch-toolchain` threads the toolchain choice through (T1008).
 	devMode := false
 	fetchToolchain := true
 	modifyPath := os.Getenv("PROMISE_NO_MODIFY_PATH") == ""
+	epochArg := ""
 	for _, arg := range args {
 		switch arg {
 		case "-dev":
@@ -8315,9 +8350,26 @@ func runInstall(args []string) {
 		case "--no-modify-path", "-no-modify-path":
 			modifyPath = false
 		default:
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [-dev] [--no-fetch-toolchain] [--no-modify-path]\n", arg)
-			os.Exit(1)
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [<epoch>] [-dev] [--no-fetch-toolchain] [--no-modify-path]\n", arg)
+				os.Exit(1)
+			}
+			if epochArg != "" {
+				fmt.Fprintf(os.Stderr, "error: multiple epochs given (%q and %q); install one epoch at a time\n", epochArg, arg)
+				os.Exit(1)
+			}
+			epochArg = arg
 		}
+	}
+
+	// Overload: `promise install <epoch>` fetches + stages an epoch without
+	// activating it (presence-only; T0977), then pre-stages that epoch's
+	// toolchain unless --no-fetch-toolchain (T1008). The no-arg bootstrap path
+	// below — which installs THIS binary's embedded epoch and activates it — is
+	// the critical installation primitive and stays byte-for-byte unchanged.
+	if epochArg != "" {
+		runInstallEpoch(epochArg, fetchToolchain)
+		return
 	}
 
 	promiseDir, err := module.PromiseHome()
@@ -8771,28 +8823,24 @@ func runRemove(args []string) {
 	}
 }
 
-// runFetch (a.k.a. warm) pre-stages the host workflow's dependency blobs into
+// hydrateHostToolchain pre-stages the running epoch's host dependency blobs into
 // the CAS while online, so a thin binary can subsequently build offline (§4.4).
-// It is the explicit, non-best-effort counterpart to the install-time prefetch
-// (prefetchHostToolchain): on any failure — notably blobstore.OfflineError — it
-// exits non-zero, since a user who ran `promise fetch` offline needs that
-// signal. It reuses the exact materialization path a build takes, so the blobs
-// land in the shared CAS just as the install prefetch does.
-func runFetch(args []string) {
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise fetch\n", arg)
-			os.Exit(1)
-		}
-	}
-	// The user already opted in by running fetch — announce, don't re-prompt.
+// It is the internal routine behind `promise install`'s toolchain pre-staging
+// (T1008 — formerly the public `promise fetch`/`warm` command). Unlike the
+// best-effort install-time prefetch (prefetchHostToolchain), it RETURNS any
+// failure — notably blobstore.OfflineError — so callers that need the explicit
+// offline signal (the `install <epoch>` hydrate path) can surface it fatally. It
+// reuses the exact materialization path a build takes, so the blobs land in the
+// shared CAS just as the install prefetch does. Idempotent: when blobs are
+// already staged, resolveLLVMView(true) is a cheap view re-assert.
+func hydrateHostToolchain() error {
+	// The caller already opted in — announce, don't re-prompt.
 	prefetchNoPrompt = true
 	defer func() { prefetchNoPrompt = false }()
 
 	viewDir, err := resolveLLVMView(true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	if runtime.GOOS == "linux" {
 		target := "x86_64-unknown-linux-musl"
@@ -8800,14 +8848,13 @@ func runFetch(args []string) {
 			target = "aarch64-unknown-linux-musl"
 		}
 		if _, err := findMuslCRT(target); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 	}
 
 	if viewDir == "" {
 		fmt.Println("This build resolves its toolchain from PATH — nothing to pre-stage.")
-		return
+		return nil
 	}
 	blobCount := 0
 	if store, serr := blobstore.NewStore(); serr == nil {
@@ -8818,6 +8865,7 @@ func runFetch(args []string) {
 	fmt.Printf("Host toolchain staged into the dependency cache (%d blobs).\n", blobCount)
 	fmt.Printf("  view: %s\n", viewDir)
 	fmt.Println("Offline builds with this epoch are now ready.")
+	return nil
 }
 
 // dirSize computes the total size of all files under a directory.

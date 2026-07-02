@@ -89,10 +89,11 @@ var commandTree = []*cmdNode{
 	{name: "emit-ir", group: "Compiler debugging", summary: "Print LLVM IR to stdout"},
 
 	// Hidden — registered for routing/coverage but omitted from the index.
-	// fetch/warm still dispatch until T1008 removes them; gc now dispatches a
-	// removal notice (T1009) but stays routable for muscle-memory redirects (§5).
-	{name: "fetch", hidden: true, summary: "(deprecated — folded into install; T1008)"},
-	{name: "warm", hidden: true, summary: "(deprecated — folded into install; T1008)"},
+	// fetch/warm now dispatch a removal notice (folded into install; T1008) and
+	// gc likewise (removed; T1009) — both stay routable for muscle-memory
+	// redirects (§5).
+	{name: "fetch", hidden: true, summary: "(removed — folded into install; T1008)"},
+	{name: "warm", hidden: true, summary: "(removed — folded into install; T1008)"},
 	{name: "gc", hidden: true, summary: "(removed — cache reclamation is automatic; see doctor --repair; T1009)"},
 	{name: "pkg", hidden: true, summary: "Deprecated alias for package"},
 	{name: "add", hidden: true, summary: "Deprecated alias for package add"},

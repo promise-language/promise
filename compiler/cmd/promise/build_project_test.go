@@ -621,3 +621,31 @@ func TestGCRemovedPrintsNotice(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchRemovedPrintsNotice verifies the `fetch` (and its `warm` alias) verb
+// no longer pre-stages the toolchain directly but stays routable, exiting
+// non-zero with a redirect to `promise install`, which now folds in toolchain
+// pre-staging (T1008).
+func TestFetchRemovedPrintsNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping fetch removal-notice integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	for _, verb := range []string{"fetch", "warm"} {
+		cmd := exec.Command(bin, verb)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected `promise %s` to exit non-zero, got success:\n%s", verb, out)
+		}
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			t.Fatalf("expected exit code 1 for `promise %s`, got %v:\n%s", verb, err, out)
+		}
+		output := string(out)
+		for _, want := range []string{"has been removed", "promise install"} {
+			if !strings.Contains(output, want) {
+				t.Errorf("`promise %s` removal notice missing %q:\n%s", verb, want, output)
+			}
+		}
+	}
+}

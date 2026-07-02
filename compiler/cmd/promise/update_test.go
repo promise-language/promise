@@ -1175,17 +1175,20 @@ func TestRunInstallEpochRejectsNext(t *testing.T) {
 	}
 }
 
-// TestRunInstallEpochPresentNoop: the full `promise install <epoch>` command on
-// an already-present epoch is a no-op that prints the success line and leaves a
-// pre-set active pointer (for a DIFFERENT epoch) untouched (T0977 acceptance:
-// "install <epoch> for an installed epoch ... leaves active unchanged"). This
-// drives the whole dispatch — runInstall's positional overload → runInstallEpoch
-// → ensureEpochPresent's already-present short-circuit — and the success Printf
-// that the download-fail tests never reach. Run in a subprocess (clean env, and
-// a 127.0.0.1:0 release URL so any accidental download would fail loudly).
+// TestRunInstallEpochPresentNoop: `promise install <epoch> --no-fetch-toolchain`
+// on an already-present epoch is a true no-op that prints the success line and
+// leaves a pre-set active pointer (for a DIFFERENT epoch) untouched (T0977
+// acceptance: "install <epoch> for an installed epoch ... leaves active
+// unchanged"). This drives the whole dispatch — runInstall's positional overload
+// → runInstallEpoch → ensureEpochPresent's already-present short-circuit — and
+// the success Printf that the download-fail tests never reach. The
+// --no-fetch-toolchain flag is what makes it a true no-op (T1008): without it a
+// present install would hydrate the epoch's toolchain (for the foreign 2025.3
+// stub binary here, that would attempt a child exec). Run in a subprocess (clean
+// env, and a 127.0.0.1:0 release URL so any accidental download would fail loudly).
 func TestRunInstallEpochPresentNoop(t *testing.T) {
 	if os.Getenv("TEST_INSTALL_PRESENT") == "1" {
-		runInstall([]string{"2025.3"})
+		runInstall([]string{"2025.3", "--no-fetch-toolchain"})
 		return
 	}
 
@@ -1230,6 +1233,186 @@ func TestRunInstallEpochPresentNoop(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != "2026.0" {
 		t.Errorf("install <epoch> must not change active; got: %q", string(data))
+	}
+}
+
+// TestRunInstallEpochForeignHydrateDispatch: `promise install <foreign-epoch>`
+// (present, WITHOUT --no-fetch-toolchain) prints the presence-only success line
+// and then hydrates that epoch's toolchain by DISPATCHING to the epoch's own
+// binary (T1008) — LLVM views are epoch-specific, so only epoch E's binary can
+// build E's view. The running test binary's epoch is 2026.3 (embedded catalog),
+// so 2025.3 is foreign and hydrateEpochToolchain takes the child-exec branch.
+// The stub binary at epochs/2025.3/bin/promise echoes its argv, proving it was
+// invoked as `install 2025.3`. Run in a subprocess (clean env). Unix-only: the
+// stub is a /bin/sh script (Windows can't exec a shell script as a binary).
+func TestRunInstallEpochForeignHydrateDispatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub uses a /bin/sh shebang; not executable as a binary on Windows")
+	}
+	if os.Getenv("TEST_INSTALL_FOREIGN_HYDRATE") == "1" {
+		runInstall([]string{"2025.3"})
+		return
+	}
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "epochs", "2025.3", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Stub the foreign epoch's compiler: echo a marker + argv, exit 0. This is
+	// what hydrateEpochToolchain dispatches to for a foreign epoch.
+	stub := "#!/bin/sh\necho HYDRATE_DISPATCH \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "promise"), []byte(stub), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallEpochForeignHydrateDispatch")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_FOREIGN_HYDRATE=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL=http://127.0.0.1:0",
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install <foreign-present-epoch> should exit 0, got %v\n%s", err, out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "Installed epoch 2025.3") || !strings.Contains(s, "active epoch unchanged") {
+		t.Errorf("expected presence-only success line, got: %s", s)
+	}
+	// The foreign epoch's own binary must have been dispatched to build its view.
+	if !strings.Contains(s, "HYDRATE_DISPATCH install 2025.3") {
+		t.Errorf("expected child dispatch `install 2025.3` to the epoch's binary, got: %s", s)
+	}
+	if strings.Contains(s, "downloading from") {
+		t.Errorf("present epoch must not trigger a download, got: %s", s)
+	}
+	// Dispatch must not perturb the active pointer (it still names the OTHER epoch).
+	data, rerr := os.ReadFile(filepath.Join(tmp, "active"))
+	if rerr != nil {
+		t.Fatalf("active file should still exist: %v", rerr)
+	}
+	if strings.TrimSpace(string(data)) != "2026.0" {
+		t.Errorf("foreign hydrate must not change active; got: %q", string(data))
+	}
+}
+
+// TestRunInstallEpochForeignHydrateChildFails: when the foreign epoch's own
+// binary fails while building its toolchain view, `promise install <epoch>`
+// propagates the child's non-zero exit code (T1008 — hydrate is fatal, not
+// best-effort, matching the removed `fetch`'s explicit offline signal). The stub
+// exits 7; hydrateEpochToolchain must surface exactly that code via
+// os.Exit(exitErr.ExitCode()). Unix-only (shell-script stub).
+func TestRunInstallEpochForeignHydrateChildFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub uses a /bin/sh shebang; not executable as a binary on Windows")
+	}
+	if os.Getenv("TEST_INSTALL_FOREIGN_FAIL") == "1" {
+		runInstall([]string{"2025.3"})
+		return
+	}
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "epochs", "2025.3", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/bin/sh\necho 'view build failed' >&2\nexit 7\n"
+	if err := os.WriteFile(filepath.Join(binDir, "promise"), []byte(stub), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallEpochForeignHydrateChildFails")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_FOREIGN_FAIL=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL=http://127.0.0.1:0",
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected a non-zero ExitError when the child hydrate fails, got %v\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 7 {
+		t.Errorf("expected the child's exit code (7) to propagate, got %d\n%s", exitErr.ExitCode(), out)
+	}
+	if !strings.Contains(string(out), "view build failed") {
+		t.Errorf("expected the child's stderr to reach the user, got: %s", out)
+	}
+}
+
+// Note: the running-epoch hydrate branch of hydrateEpochToolchain (myEpoch ==
+// epoch → in-process hydrateHostToolchain, the former `promise fetch` body) is
+// exercised end-to-end by the real `promise install <running-epoch>` integration
+// and by manual `-full`-build runs; a unit test for it would do real LLVM view
+// staging (~5s) with environment-dependent internals, so it is intentionally not
+// duplicated here. The genuinely new T1008 logic — epoch-specific FOREIGN
+// dispatch and its exit-code propagation — is covered by the two foreign tests
+// above; the branch SELECTION (foreign vs. running) is asserted there.
+
+// TestRunInstallRejectsMultipleEpochs: `promise install <a> <b>` names two
+// epochs; install is one-epoch-at-a-time (T1008 flag/positional parsing), so it
+// must reject with a clear error and exit non-zero WITHOUT installing either.
+// Run in a subprocess (it exits).
+func TestRunInstallRejectsMultipleEpochs(t *testing.T) {
+	if os.Getenv("TEST_INSTALL_MULTI") == "1" {
+		runInstall([]string{"2025.3", "2026.1"})
+		return
+	}
+
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallRejectsMultipleEpochs")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_MULTI=1",
+		"PROMISE_HOME="+tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit for two epochs, got success:\n%s", out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "multiple epochs given") {
+		t.Errorf("expected a multiple-epochs rejection, got: %s", s)
+	}
+	if !strings.Contains(s, "2025.3") || !strings.Contains(s, "2026.1") {
+		t.Errorf("rejection should name both epochs, got: %s", s)
+	}
+	// Neither epoch may have been staged.
+	if _, serr := os.Stat(filepath.Join(tmp, "epochs", "2025.3")); serr == nil {
+		t.Errorf("2025.3 must not be installed on a parse error")
+	}
+}
+
+// TestRunInstallUnknownFlag: an unrecognized flag is rejected with the T1008
+// usage string, which now advertises the optional `[<epoch>]` positional. Run in
+// a subprocess (it exits).
+func TestRunInstallUnknownFlag(t *testing.T) {
+	if os.Getenv("TEST_INSTALL_BADFLAG") == "1" {
+		runInstall([]string{"--bogus"})
+		return
+	}
+
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunInstallUnknownFlag")
+	cmd.Env = append(os.Environ(),
+		"TEST_INSTALL_BADFLAG=1",
+		"PROMISE_HOME="+tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit for an unknown flag, got success:\n%s", out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "unknown flag: --bogus") {
+		t.Errorf("expected an unknown-flag error, got: %s", s)
+	}
+	if !strings.Contains(s, "install [<epoch>]") {
+		t.Errorf("usage string should advertise the optional <epoch> positional, got: %s", s)
 	}
 }
 

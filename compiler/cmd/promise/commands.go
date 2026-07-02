@@ -55,7 +55,7 @@ var commandTree = []*cmdNode{
 	}},
 
 	// Project & dependencies
-	{name: "init", group: "Project & dependencies", summary: "Initialize a new Promise project or module (creates promise.toml)"},
+	{name: "init", group: "Project & dependencies", summary: "Initialize a new Promise project or module (creates promise.toml)", help: func(w io.Writer) { printInitUsage(w) }},
 	{name: "package", group: "Project & dependencies", summary: "Manage project dependencies", subs: []*cmdNode{
 		{name: "add", summary: "Add an external dependency to promise.toml"},
 		{name: "remove", summary: "Remove a dependency from promise.toml"},

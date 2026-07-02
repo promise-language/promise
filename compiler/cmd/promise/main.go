@@ -8005,6 +8005,30 @@ func runPkgUpdate(args []string) {
 	fmt.Printf("\nUpdated %d of %d dependencies\n", updated, len(entries))
 }
 
+func printInitUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: promise init [--module] [dir]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Initialize a new Promise project or library module in dir (default: current directory).")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Without --module (default — application project):")
+	fmt.Fprintln(w, "  Writes promise.toml with name, epoch, and main = \"main.pr\".")
+	fmt.Fprintln(w, "  Scaffolds main.pr (failable main, demo imports) and CLAUDE.md.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "With --module (library module):")
+	fmt.Fprintln(w, "  Writes promise.toml with name and epoch (no main field).")
+	fmt.Fprintln(w, "  Scaffolds <name>.pr (public stub with doc annotation) and CLAUDE.md.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  --module  Scaffold a library module instead of an application project")
+	fmt.Fprintln(w, "  --force   Allow a non-empty target directory")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  promise init              App project in the current directory")
+	fmt.Fprintln(w, "  promise init myapp        App project in ./myapp/")
+	fmt.Fprintln(w, "  promise init --module     Library module in the current directory")
+	fmt.Fprintln(w, "  promise init --module mylib  Library module in ./mylib/")
+}
+
 func runInit(args []string) {
 	// Derive the epoch from the running compiler so a fresh scaffold always
 	// targets an epoch this toolchain can actually build (T0972).
@@ -8014,14 +8038,20 @@ func runInit(args []string) {
 		defaultEpoch = "2026.1"
 	}
 
-	// Parse --force flag and optional target directory
+	// Parse --force, --module flags and optional target directory.
 	force := false
+	isModule := false
 	targetDir := ""
 	for _, arg := range args {
-		if arg == "-force" || arg == "--force" {
+		switch arg {
+		case "-force", "--force":
 			force = true
-		} else if !strings.HasPrefix(arg, "-") && targetDir == "" {
-			targetDir = arg
+		case "-module", "--module":
+			isModule = true
+		default:
+			if !strings.HasPrefix(arg, "-") && targetDir == "" {
+				targetDir = arg
+			}
 		}
 	}
 	if targetDir == "" {
@@ -8070,23 +8100,42 @@ func runInit(args []string) {
 		os.Exit(1)
 	}
 
-	content := fmt.Sprintf("[module]\nname = %q\nepoch = %q\n", name, defaultEpoch)
-	if err := os.WriteFile(j("promise.toml"), []byte(content), 0644); err != nil {
+	var tomlContent string
+	if isModule {
+		tomlContent = fmt.Sprintf("[module]\nname = %q\nepoch = %q\n", name, defaultEpoch)
+	} else {
+		tomlContent = fmt.Sprintf("[module]\nname = %q\nepoch = %q\nmain = \"main.pr\"\n", name, defaultEpoch)
+	}
+	if err := os.WriteFile(j("promise.toml"), []byte(tomlContent), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing promise.toml: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Created promise.toml (module: %s, epoch: %s)\n", name, defaultEpoch)
 
-	// Generate main.pr if it doesn't exist
-	if _, err := os.Stat(j("main.pr")); err != nil {
-		mainContent := "use io;\n" +
-			"use os;\n" +
-			"\n" +
-			"greet(string name) string `public `doc(\"Returns a friendly greeting for the given name.\") {\n" +
-			"    return \"Hello, {name}!\";\n" +
-			"}\n" +
-			"\n" +
-			`main!() {
+	if isModule {
+		// Generate <name>.pr library stub if it doesn't exist.
+		libFile := name + ".pr"
+		if _, err := os.Stat(j(libFile)); err != nil {
+			libContent := "greeting(string name) string `public `doc(\"Returns a greeting for the given name.\") {\n" +
+				"    return \"Hello, {name}!\";\n" +
+				"}\n"
+			if err := os.WriteFile(j(libFile), []byte(libContent), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing %s: %v\n", libFile, err)
+				os.Exit(1)
+			}
+			fmt.Println("Created " + libFile)
+		}
+	} else {
+		// Generate main.pr if it doesn't exist.
+		if _, err := os.Stat(j("main.pr")); err != nil {
+			mainContent := "use io;\n" +
+				"use os;\n" +
+				"\n" +
+				"greet(string name) string `public `doc(\"Returns a friendly greeting for the given name.\") {\n" +
+				"    return \"Hello, {name}!\";\n" +
+				"}\n" +
+				"\n" +
+				`main!() {
     print_line(greet("Promise"));
 
     // Module-qualified access, auto-propagated errors (!), string interpolation
@@ -8101,16 +8150,70 @@ func runInit(args []string) {
     print_line("Safe: {safe.len} items");
 }
 `
-		if err := os.WriteFile(j("main.pr"), []byte(mainContent), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "error writing main.pr: %v\n", err)
-			os.Exit(1)
+			if err := os.WriteFile(j("main.pr"), []byte(mainContent), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing main.pr: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Created main.pr")
 		}
-		fmt.Println("Created main.pr")
 	}
 
-	// Generate CLAUDE.md if it doesn't exist
+	// Generate CLAUDE.md if it doesn't exist.
 	if _, err := os.Stat(j("CLAUDE.md")); err != nil {
-		claudeContent := `# ` + name + `
+		var claudeContent string
+		if isModule {
+			claudeContent = `# ` + name + `
+
+Promise library module. Use ` + "`promise guide`" + ` for the full language reference.
+
+## Quick Start
+
+` + "```" + `bash
+promise build                   # type-check
+promise test                    # run tests
+promise doc                     # show API docs
+` + "```" + `
+
+## Consuming This Module
+
+Add to your app's ` + "`promise.toml`" + `:
+` + "```" + `toml
+[require.` + name + `]
+url = "..."
+commit = "..."
+` + "```" + `
+
+Then import and use:
+` + "```" + `
+use ` + name + `;
+
+main!() {
+    result := ` + name + `.greeting("World");
+    print_line(result);
+}
+` + "```" + `
+
+## Module Rules
+
+- Annotate every ` + "`public`" + ` declaration with a ` + "`doc(...)`" + ` annotation so ` + "`promise doc`" + ` works
+- Import in consumer code with ` + "`use " + name + ";`" + ` — access as ` + "`" + name + ".function`" + `
+- Standard library (` + "`std`" + `) is auto-imported — ` + "`print_line`" + `, ` + "`Vector`" + `, ` + "`Map`" + `, etc. need no prefix
+
+## Available Modules
+
+| Module | Purpose | Docs |
+|--------|---------|------|
+| ` + "`io`" + ` | File I/O, buffered readers/writers, directories | ` + "`promise doc io`" + ` |
+| ` + "`os`" + ` | Environment, process execution, signals | ` + "`promise doc os`" + ` |
+| ` + "`json`" + ` | JSON encode/decode, JsonValue | ` + "`promise doc json`" + ` |
+| ` + "`path`" + ` | Path joining, dir/base/ext extraction | ` + "`promise doc path`" + ` |
+| ` + "`math`" + ` | Extended math functions | ` + "`promise doc math`" + ` |
+| ` + "`strings`" + ` | Extended string utilities | ` + "`promise doc strings`" + ` |
+| ` + "`time`" + ` | Extended time utilities | ` + "`promise doc time`" + ` |
+| ` + "`http`" + ` | HTTP client | ` + "`promise doc http`" + ` |
+`
+		} else {
+			claudeContent = `# ` + name + `
 
 Promise project. Use ` + "`promise guide`" + ` for the full language reference.
 
@@ -8153,6 +8256,7 @@ main!() {   # ! marks main failable (can return error)
 | ` + "`time`" + ` | Extended time utilities | ` + "`promise doc time`" + ` |
 | ` + "`http`" + ` | HTTP client | ` + "`promise doc http`" + ` |
 `
+		}
 		if err := os.WriteFile(j("CLAUDE.md"), []byte(claudeContent), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing CLAUDE.md: %v\n", err)
 			os.Exit(1)

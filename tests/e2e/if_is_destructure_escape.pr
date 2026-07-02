@@ -829,3 +829,63 @@ t1171_generic() `test {
   assert(r[0].name == "deep", "generic array-of-heap-user escape survives (elem 0)");
   assert(r[1].name == "xx", "generic array-of-heap-user escape survives (elem 1)");
 }
+
+// T1178: single-clone invariant for the variant-payload Array[heap-user] escape
+// with a DEEP droppable sub-field. T1176 regressed T1171 by letting BOTH the
+// read-side (dupHeapFieldForEscape array branch) AND the sink
+// (dupBorrowedHeapUserPayload) clone the escaping array — the second clone's
+// elements were never dropped → leak. A stronger leak signal than the flat
+// t1171_* rows (`string name`): each element here owns a Vector sub-field, so a
+// double-clone orphans BOTH the element instance AND its Vector buffer. The leak
+// checker flags any over-clone; the asserts confirm the SINGLE clone is a correct
+// deep copy that survives the subject enum's synth drop at scope exit. Mirror of
+// test_t1176_deep_subfield_clone_escape (struct-field) for the variant path.
+type T1178Cell {
+  Vector[int] xs;
+  drop(~this) {
+  }
+}
+enum T1178Holder {
+  Pair(T1178Cell[2] cells), Empty,
+}
+t1178_deep_ret_impl() T1178Cell[2] {
+  Vector[int] a = Vector[int]();
+  a.push(1);
+  a.push(2);
+  Vector[int] b = Vector[int]();
+  b.push(9);
+  T1178Holder h = T1178Holder.Pair(cells: [T1178Cell(xs: move a), T1178Cell(xs: move b)]);
+  if h is Pair(cells) {
+    return cells; // aliases h's payload; h dropped at scope exit → must deep-clone once
+  }
+  return[T1178Cell(xs: Vector[int]()), T1178Cell(xs: Vector[int]())];
+}
+t1178_deep_ret() `test {
+  T1178Cell[2] r = t1178_deep_ret_impl();
+  assert(r[0].xs.len == 2, "deep variant if-is: cell 0 vector length independent");
+  assert(r[0].xs[0] == 1, "deep variant if-is: cell 0 elem 0");
+  assert(r[0].xs[1] == 2, "deep variant if-is: cell 0 elem 1");
+  assert(r[1].xs[0] == 9, "deep variant if-is: cell 1 elem 0");
+}
+t1178_deep_match_impl() T1178Cell[2] {
+  Vector[int] a = Vector[int]();
+  a.push(7);
+  Vector[int] b = Vector[int]();
+  b.push(8);
+  b.push(9);
+  T1178Holder h = T1178Holder.Pair(cells: [T1178Cell(xs: move a), T1178Cell(xs: move b)]);
+  match h {
+    Pair(cells) => {
+      return cells;
+    },
+    Empty => {
+      return[T1178Cell(xs: Vector[int]()), T1178Cell(xs: Vector[int]())];
+    },
+  }
+}
+t1178_deep_match() `test {
+  T1178Cell[2] r = t1178_deep_match_impl();
+  assert(r[0].xs[0] == 7, "deep variant match: cell 0 elem 0");
+  assert(r[1].xs.len == 2, "deep variant match: cell 1 vector length independent");
+  assert(r[1].xs[1] == 9, "deep variant match: cell 1 elem 1");
+}

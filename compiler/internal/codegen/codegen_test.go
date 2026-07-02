@@ -23281,6 +23281,84 @@ func TestT1176ValueArrayFieldEscapeNoDup(t *testing.T) {
 	assertNotContains(t, fn, "heapdup.copy")
 }
 
+// T1178: a fixed-Array[heap-user] variant payload escaping an `if is` destructure
+// must be deep-cloned EXACTLY ONCE. T1176 added an arrayHeapDupElem branch to BOTH
+// setDupFlagsForFieldAccess (the sink) and dupHeapFieldForEscape (the read side).
+// For a variant payload the sink already clones via dupBorrowedHeapUserPayload, so
+// letting the read-side dupHeapFieldForEscape array branch ALSO fire produced a
+// SECOND element-wise clone whose elements were never dropped (leak). The fix skips
+// the read-side dup for the array shape (genIdentExpr gates on !arrayHeapDupElem).
+// The presence-only T1171/T1176 tests above (heapdup.copy present, >=2 insertvalue)
+// pass under BOTH single- and double-clone, so they never caught the regression —
+// this test pins the EXACT clone count: one per element (2 for a 2-elem array),
+// not two. A double-clone re-emits the array-aggregate insertvalues, so a count of
+// 4 (or any value != 2) fails here.
+func TestT1178VariantPayloadArrayEscapeSingleClone(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Some(Row[2] value), Empty }
+		esc() Row[2] {
+			Box b = Box.Some(value: [Row(name: "a" + "b"), Row(name: "c" + "d")]);
+			if b is Some(value) { return value; }
+			return [Row(name: "x"), Row(name: "y")];
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "heapdup.copy")
+	// Exactly one insertvalue per element rebuilds the SINGLE cloned aggregate.
+	// A double-clone (the T1178 regression) emits 4.
+	if n := strings.Count(fn, "insertvalue [2 x { i8*, i8* }]"); n != 2 {
+		t.Fatalf("expected exactly 2 array-aggregate insertvalue (single element-wise clone), got %d (double-clone = T1178 regression)\n%s", n, fn)
+	}
+}
+
+// T1178 (match parity): the same single-clone invariant for the `match` escape
+// path — both `if is` and `match` populate matchBorrowedIdents and route through
+// the same genIdentExpr read-side gate + dupBorrowedHeapUserPayload sink. Exactly
+// one clone per element, not two.
+func TestT1178VariantPayloadArrayEscapeMatchSingleClone(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Some(Row[2] value), Empty }
+		esc() Row[2] {
+			Box b = Box.Some(value: [Row(name: "a" + "b"), Row(name: "c" + "d")]);
+			match b {
+				Some(value) => { return value; },
+				Empty => { return [Row(name: "x"), Row(name: "y")]; },
+			}
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	assertContains(t, fn, "heapdup.copy")
+	if n := strings.Count(fn, "insertvalue [2 x { i8*, i8* }]"); n != 2 {
+		t.Fatalf("expected exactly 2 array-aggregate insertvalue (single element-wise clone), got %d (double-clone = T1178 regression)\n%s", n, fn)
+	}
+}
+
+// T1178 (non-array sibling preserved): the fix skips the read-side dup ONLY for the
+// array shape. An Optional[heap-user] variant payload (T1174) is NOT covered by
+// arrayHeapDupElem, so genIdentExpr's gate (!isArr => true) still lets
+// dupBorrowedHeapUserPayload deep-clone it on escape. Guards against the fix
+// over-reaching and suppressing the Optional[user] clone (which would be a UAF, not
+// a leak). The escaped Optional's inner heap instance is cloned exactly once.
+func TestT1178OptionalHeapUserPayloadStillClones(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		enum Box { Some(Row? maybe), Empty }
+		esc() Row? {
+			Box b = Box.Some(maybe: Row(name: "a" + "b"));
+			if b is Some(maybe) { return maybe; }
+			return none;
+		}
+		main() { r := esc(); }
+	`)
+	fn := extractFunction(ir, "__user.esc")
+	// dupBorrowedHeapUserPayload's optionalHeapDupElem branch still fires.
+	assertContains(t, fn, "heapdup.copy")
+}
+
 // B0007: Verify that channel recv alloca is in coro.start (entry block),
 // not in the chrecv.read block.
 func TestChannelRecvAllocaInEntryBlock(t *testing.T) {

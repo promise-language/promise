@@ -1060,8 +1060,22 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 			// (isVariantPayloadBorrowShape) — bare-heap T0672 borrow bindings are
 			// already owned copies and must not be re-dup'd (would leak).
 			if isVariantPayloadBorrowShape(identType) {
-				if dup, ok := c.dupHeapFieldForEscape(val, identType, true); ok {
-					return dup
+				// T1178: a fixed Array[heap-user] variant payload is deep-cloned
+				// at the escape SINK by dupBorrowedHeapUserPayload (return/store/
+				// consuming-arg/constructor-field — the T1171 path). Letting
+				// dupHeapFieldForEscape's array branch (added by T1176, gated on
+				// dupContainerFieldAccess which the sink's setDupFlagsForFieldAccess
+				// now sets for arrays) ALSO clone it here produces a second
+				// element-wise clone whose elements are never dropped → leak. The
+				// two paths must be mutually exclusive: skip the read-side dup for
+				// the array shape (dupBorrowedHeapUserPayload owns it). Other
+				// variant-payload shapes (Optional[string], Optional[container])
+				// are NOT covered by dupBorrowedHeapUserPayload and still need the
+				// read-side dup.
+				if _, _, isArr := c.arrayHeapDupElem(identType); !isArr {
+					if dup, ok := c.dupHeapFieldForEscape(val, identType, true); ok {
+						return dup
+					}
 				}
 			}
 		}

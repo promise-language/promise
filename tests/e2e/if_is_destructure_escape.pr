@@ -1081,3 +1081,279 @@ test_optional_borrow_marker_does_not_leak_across_reuse() `test {
   Row? moved = value;
   assert(moved!.name == "own", "owned optional move after if-is");
 }
+
+// ============================================================================
+// T1173: whole fixed-Array-VALUE escape of a match-borrowed variant payload
+// whose element aliases heap (string[N] / Vector[T][N]). `return a` / `x = a`
+// copy the [N x T] aggregate by value, aliasing the subject's variant payload
+// element pointers; the subject's synth enum drop frees them at scope exit → the
+// escaped copy is a UAF (string/heap) or double-free (container). The escape sink
+// (dupBorrowedHeapUserPayload → dupArrayValueForEscape) element-wise deep-clones
+// so the escaped array owns independent elements and the subject frees the
+// originals exactly once. Sibling of T1171 (Array[heap-user]) / T1174
+// (Optional[heap-user]). Covers both `if is` and `match`, all four escape sinks,
+// plus the struct-field whole-array escape (T1176 parity for string). Results are
+// bound to a local (bindingDropArray) so the aggregate frees cleanly — an inline
+// `func()[i]` use would leak the unbound array temp, which is the unrelated
+// pre-existing bug T1181, not this borrow-escape path. Zero leaks enforced by the
+// batch-test policy; an un-cloned alias would double-free / UAF.
+// ============================================================================
+
+enum T1173StrArr {
+  Pair(string[2] a), Empty,
+}
+enum T1173VecArr {
+  Two(int[][2] a), Nada,
+}
+type T1173Wrap {
+  string[2] d;
+}
+type T1173Sink {
+  string[2] held;
+}
+
+// --- string[2]: return escape, if is + match ---
+t1173_str_return_ifis_impl() string[2] {
+  T1173StrArr h = T1173StrArr.Pair(a: ["x" + "1", "y" + "2"]);
+  if h is Pair(a) {
+    return a;
+  }
+  return["", ""];
+}
+t1173_str_return_ifis() `test {
+  string[2] r = t1173_str_return_ifis_impl();
+  assert(r[0] == "x1", "if-is return string[2] elem 0");
+  assert(r[1] == "y2", "if-is return string[2] elem 1");
+}
+
+t1173_str_return_match_impl() string[2] {
+  T1173StrArr h = T1173StrArr.Pair(a: ["m" + "1", "m" + "2"]);
+  match h {
+    Pair(a) => {
+      return a;
+    },
+    Empty => {
+      return["", ""];
+    },
+  }
+}
+t1173_str_return_match() `test {
+  string[2] r = t1173_str_return_match_impl();
+  assert(r[0] == "m1", "match return string[2] elem 0");
+  assert(r[1] == "m2", "match return string[2] elem 1");
+}
+
+// --- string[2]: store-to-escaping-outer, if is + match ---
+t1173_str_store_ifis_impl() string[2] {
+  T1173StrArr h = T1173StrArr.Pair(a: ["s" + "1", "s" + "2"]);
+  string[2] out = ["z" + "0", "z" + "9"];
+  if h is Pair(a) {
+    out = a;
+  }
+  return out;
+}
+t1173_str_store_ifis() `test {
+  string[2] r = t1173_str_store_ifis_impl();
+  assert(r[0] == "s1", "if-is store string[2] elem 0");
+  assert(r[1] == "s2", "if-is store string[2] elem 1");
+}
+
+t1173_str_store_match_impl() string[2] {
+  T1173StrArr h = T1173StrArr.Pair(a: ["t" + "1", "t" + "2"]);
+  string[2] out = ["z" + "0", "z" + "9"];
+  match h {
+    Pair(a) => {
+      out = a;
+    },
+    Empty => {
+      out = ["", ""];
+    },
+  }
+  return out;
+}
+t1173_str_store_match() `test {
+  string[2] r = t1173_str_store_match_impl();
+  assert(r[0] == "t1", "match store string[2] elem 0");
+  assert(r[1] == "t2", "match store string[2] elem 1");
+}
+
+// --- string[2]: consuming (~) param escape ---
+t1173_consume(string[2] ~x) string {
+  return x[0] + x[1];
+}
+t1173_str_consume_ifis_impl() string {
+  T1173StrArr h = T1173StrArr.Pair(a: ["c" + "1", "c" + "2"]);
+  if h is Pair(a) {
+    return t1173_consume(a);
+  }
+  return "";
+}
+t1173_str_consume_ifis() `test {
+  assert(t1173_str_consume_ifis_impl() == "c1c2", "if-is consuming-param string[2]");
+}
+
+t1173_str_consume_match_impl() string {
+  T1173StrArr h = T1173StrArr.Pair(a: ["d" + "1", "d" + "2"]);
+  match h {
+    Pair(a) => {
+      return t1173_consume(a);
+    },
+    Empty => {
+      return "";
+    },
+  }
+}
+t1173_str_consume_match() `test {
+  assert(t1173_str_consume_match_impl() == "d1d2", "match consuming-param string[2]");
+}
+
+// --- string[2]: constructor field escape ---
+t1173_str_ctor_ifis_impl() string[2] {
+  T1173StrArr h = T1173StrArr.Pair(a: ["k" + "1", "k" + "2"]);
+  if h is Pair(a) {
+    T1173Sink sk = T1173Sink(held: a);
+    return sk.held;
+  }
+  return["", ""];
+}
+t1173_str_ctor_ifis() `test {
+  string[2] r = t1173_str_ctor_ifis_impl();
+  assert(r[0] == "k1", "if-is ctor-field string[2] elem 0");
+  assert(r[1] == "k2", "if-is ctor-field string[2] elem 1");
+}
+
+// --- struct-field whole-array escape (T1176 parity for string) ---
+t1173_wrap_field_impl() string[2] {
+  T1173Wrap w = T1173Wrap(d: ["f" + "1", "f" + "2"]);
+  return w.d;
+}
+t1173_wrap_field() `test {
+  string[2] r = t1173_wrap_field_impl();
+  assert(r[0] == "f1", "struct-field return string[2] elem 0");
+  assert(r[1] == "f2", "struct-field return string[2] elem 1");
+}
+
+// --- Vector[int][2]: whole-array escape (double-free case), if is + match ---
+t1173_vec_return_ifis_impl() int[][2] {
+  T1173VecArr h = T1173VecArr.Two(a: [[1, 2, 3], [4, 5]]);
+  if h is Two(a) {
+    return a;
+  }
+  int[] e = [];
+  return[e.clone(), e.clone()];
+}
+t1173_vec_return_ifis() `test {
+  int[][2] r = t1173_vec_return_ifis_impl();
+  assert(r[0].len == 3, "if-is return int[][2] len 0");
+  assert(r[0][2] == 3, "if-is return int[][2] elem 0[2]");
+  assert(r[1].len == 2, "if-is return int[][2] len 1");
+  assert(r[1][0] == 4, "if-is return int[][2] elem 1[0]");
+}
+
+t1173_vec_store_match_impl() int[][2] {
+  T1173VecArr h = T1173VecArr.Two(a: [[7, 8], [9]]);
+  int[] e = [];
+  int[][2] out = [e.clone(), e.clone()];
+  match h {
+    Two(a) => {
+      out = a;
+    },
+    Nada => {
+    },
+  }
+  return out;
+}
+t1173_vec_store_match() `test {
+  int[][2] r = t1173_vec_store_match_impl();
+  assert(r[0][1] == 8, "match store int[][2] elem 0[1]");
+  assert(r[1].len == 1, "match store int[][2] len 1");
+  assert(r[1][0] == 9, "match store int[][2] elem 1[0]");
+}
+
+// --- Vector[int][2]: remaining two sinks (consuming ~ param + constructor field)
+// and struct-field parity. The container/double-free half of T1173 is the more
+// dangerous one (an un-cloned alias frees the SAME buffer twice); string above
+// covers all four sinks, so pin the container path across the two sinks the
+// string cases exercise but the two Vector cases above (return/store) do not, plus
+// the T1176-parity whole-array struct-field escape. ---
+type T1173VecSink {
+  int[][2] held;
+}
+type T1173VecWrap {
+  int[][2] d;
+}
+
+t1173_vec_consume(int[][2] ~x) int {
+  return x[0].len + x[1][0];
+}
+t1173_vec_consume_ifis_impl() int {
+  T1173VecArr h = T1173VecArr.Two(a: [[1, 2], [30, 40]]);
+  if h is Two(a) {
+    return t1173_vec_consume(a);
+  }
+  return -1;
+}
+t1173_vec_consume_ifis() `test {
+  // x[0].len (2) + x[1][0] (30) == 32
+  assert(t1173_vec_consume_ifis_impl() == 32, "if-is consuming-param int[][2]");
+}
+
+t1173_vec_ctor_ifis_impl() int[][2] {
+  T1173VecArr h = T1173VecArr.Two(a: [[5, 6, 7], [8]]);
+  if h is Two(a) {
+    T1173VecSink sk = T1173VecSink(held: a);
+    return sk.held;
+  }
+  int[] e = [];
+  return[e.clone(), e.clone()];
+}
+t1173_vec_ctor_ifis() `test {
+  int[][2] r = t1173_vec_ctor_ifis_impl();
+  assert(r[0].len == 3, "if-is ctor-field int[][2] len 0");
+  assert(r[0][2] == 7, "if-is ctor-field int[][2] elem 0[2]");
+  assert(r[1][0] == 8, "if-is ctor-field int[][2] elem 1[0]");
+}
+
+t1173_vec_wrap_field_impl() int[][2] {
+  T1173VecWrap w = T1173VecWrap(d: [[11, 12], [13, 14, 15]]);
+  return w.d;
+}
+t1173_vec_wrap_field() `test {
+  int[][2] r = t1173_vec_wrap_field_impl();
+  assert(r[0][1] == 12, "struct-field return int[][2] elem 0[1]");
+  assert(r[1].len == 3, "struct-field return int[][2] len 1");
+  assert(r[1][2] == 15, "struct-field return int[][2] elem 1[2]");
+}
+
+// --- Optional[heap-user][2]: the third recognized element shape. The broadened
+// arrayElemNeedsEscapeDup routes Optional[heap-user] elements through
+// pushElemNeedsDup's optionalHeapDupElem (deep-cloning the Some payload), so a
+// whole-array escape of a Row?[2] variant payload owns independent instances —
+// distinct from the Optional[string]/Optional[container] element shapes still
+// uncovered as T1183. An un-cloned alias would UAF the inner heap instance. ---
+type T1173ORow {
+  string name;
+}
+enum T1173OArr {
+  Two(T1173ORow?[2] a), Nada,
+}
+t1173_opt_return_ifis_impl() T1173ORow?[2] {
+  T1173ORow? p0 = T1173ORow(name: "p" + "1");
+  T1173ORow? p1 = T1173ORow(name: "p" + "2");
+  T1173OArr h = T1173OArr.Two(a: [p0, p1]);
+  if h is Two(a) {
+    return a;
+  }
+  T1173ORow? n0 = none;
+  T1173ORow? n1 = none;
+  return[n0, n1];
+}
+t1173_opt_return_ifis() `test {
+  T1173ORow?[2] r = t1173_opt_return_ifis_impl();
+  // bind index results to locals before optional-chaining — inline `r[0]!.name`
+  // hits the unrelated unbound index-temp bug (T1181 family), not this escape path.
+  T1173ORow? e0 = r[0];
+  T1173ORow? e1 = r[1];
+  assert(e0!.name == "p1", "if-is return Optional[heap-user][2] elem 0");
+  assert(e1!.name == "p2", "if-is return Optional[heap-user][2] elem 1");
+}

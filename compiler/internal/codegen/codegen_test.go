@@ -23150,7 +23150,7 @@ func TestT1174OptionalNoDropHeapUserPayloadEscapeDups(t *testing.T) {
 // T1171: a whole fixed-Array-of-heap-user variant payload (`Row[2] value`) that
 // ESCAPES `if is`/`match` (return / store-to-outer / consuming arg / constructor
 // field) must be element-wise deep-cloned via dupBorrowedHeapUserPayload's Array
-// branch (arrayHeapDupElem) — otherwise the escaped [N x {vtable,instance}]
+// branch (arrayElemNeedsEscapeDup) — otherwise the escaped [N x {vtable,instance}]
 // aggregate aliases the subject's variant payload, which the subject's synth enum
 // drop frees at scope exit (UAF / SIGSEGV). Each element clone lowers to a
 // dupHeapValue `heapdup.copy` block, and the aggregate is rebuilt with N
@@ -23199,7 +23199,7 @@ func TestT1171ArrayHeapUserPayloadInScopeNoDup(t *testing.T) {
 // T1171 generic/monomorphized path: when the Array[heap-user] payload lives in a
 // GENERIC enum (`GBox[T]` with a `T[2]` variant field), the escape sink must
 // resolve the element type through c.typeSubst (T -> Row) in BOTH
-// dupBorrowedHeapUserPayload (t = Substitute(...)) and arrayHeapDupElem
+// dupBorrowedHeapUserPayload (t = Substitute(...)) and arrayElemNeedsEscapeDup
 // (elem = Substitute(arr.Elem(), ...)). Without those substitutions the array
 // recognizer misses the shape and the escaped aggregate aliases the moved-in
 // subject's payload (UAF). This is the only test that exercises the typeSubst
@@ -23259,9 +23259,9 @@ func TestT1176ArrayHeapUserFieldEscapeDupsOnReturn(t *testing.T) {
 
 // T1176: a no-drop-but-pal-free element array field parity case — a heap-user
 // type with only scalar fields has no synth drop but is still pal_free'd, so
-// arrayHeapDupElem's isHeapUserNoDropPalFree branch must still deep-clone each
+// arrayElemNeedsEscapeDup's isHeapUserNoDropPalFree branch must still deep-clone each
 // escaping element. A value-type element would be copied by value and route
-// past arrayHeapDupElem, so the presence of `heapdup.copy` confirms the no-drop
+// past arrayElemNeedsEscapeDup, so the presence of `heapdup.copy` confirms the no-drop
 // heap branch is taken.
 func TestT1176ArrayNoDropHeapUserFieldEscapeDups(t *testing.T) {
 	ir := generateIR(t, `
@@ -23299,7 +23299,7 @@ func TestT1176ArrayHeapUserFieldInScopeNoDup(t *testing.T) {
 // (`T[2]`) from inside a GENERIC function body must also deep-clone. Because the
 // escape sits in `grab[T]`'s body, the field type is the unresolved `T[2]` and
 // mono has `typeSubst` active (T→Row) at the access — this drives
-// arrayHeapDupElem's `types.Substitute` branch, which the concrete-instance
+// arrayElemNeedsEscapeDup's `types.Substitute` branch, which the concrete-instance
 // cases (field type already `Row[2]`, typeSubst nil) never reach. The
 // monomorphized `grab__Row` still clones each escaping element. `h` is borrowed,
 // so its synth drop runs in the caller while the returned copy must stay valid.
@@ -23320,11 +23320,11 @@ func TestT1176GenericArrayHeapUserFieldEscapeDups(t *testing.T) {
 }
 
 // T1176 gate negative: escaping a value-element array field (`int[2]`) out of a
-// DROPPABLE owner must NOT clone — arrayHeapDupElem recognizes the array but its
+// DROPPABLE owner must NOT clone — arrayElemNeedsEscapeDup recognizes the array but its
 // element is neither a droppable heap-user nor a no-drop-pal-free type, so it
 // returns false (the `int[]`/value-array fall-through) and the field is copied
 // by value. The owner is made droppable by its sibling string field, so the
-// escape sink runs setDupFlagsForFieldAccess → arrayHeapDupElem for real; the
+// escape sink runs setDupFlagsForFieldAccess → arrayElemNeedsEscapeDup for real; the
 // absence of `heapdup.copy` proves value arrays are left untouched.
 func TestT1176ValueArrayFieldEscapeNoDup(t *testing.T) {
 	ir := generateIR(t, `
@@ -23340,12 +23340,12 @@ func TestT1176ValueArrayFieldEscapeNoDup(t *testing.T) {
 }
 
 // T1178: a fixed-Array[heap-user] variant payload escaping an `if is` destructure
-// must be deep-cloned EXACTLY ONCE. T1176 added an arrayHeapDupElem branch to BOTH
+// must be deep-cloned EXACTLY ONCE. T1176 added an arrayElemNeedsEscapeDup branch to BOTH
 // setDupFlagsForFieldAccess (the sink) and dupHeapFieldForEscape (the read side).
 // For a variant payload the sink already clones via dupBorrowedHeapUserPayload, so
 // letting the read-side dupHeapFieldForEscape array branch ALSO fire produced a
 // SECOND element-wise clone whose elements were never dropped (leak). The fix skips
-// the read-side dup for the array shape (genIdentExpr gates on !arrayHeapDupElem).
+// the read-side dup for the array shape (genIdentExpr gates on !arrayElemNeedsEscapeDup).
 // The presence-only T1171/T1176 tests above (heapdup.copy present, >=2 insertvalue)
 // pass under BOTH single- and double-clone, so they never caught the regression —
 // this test pins the EXACT clone count: one per element (2 for a 2-elem array),
@@ -23397,7 +23397,7 @@ func TestT1178VariantPayloadArrayEscapeMatchSingleClone(t *testing.T) {
 
 // T1178 (non-array sibling preserved): the fix skips the read-side dup ONLY for the
 // array shape. An Optional[heap-user] variant payload (T1174) is NOT covered by
-// arrayHeapDupElem, so genIdentExpr's gate (!isArr => true) still lets
+// arrayElemNeedsEscapeDup, so genIdentExpr's gate (!isArr => true) still lets
 // dupBorrowedHeapUserPayload deep-clone it on escape. Guards against the fix
 // over-reaching and suppressing the Optional[user] clone (which would be a UAF, not
 // a leak). The escaped Optional's inner heap instance is cloned exactly once.

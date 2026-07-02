@@ -1060,19 +1060,19 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 			// (isVariantPayloadBorrowShape) — bare-heap T0672 borrow bindings are
 			// already owned copies and must not be re-dup'd (would leak).
 			if isVariantPayloadBorrowShape(identType) {
-				// T1178: a fixed Array[heap-user] variant payload is deep-cloned
-				// at the escape SINK by dupBorrowedHeapUserPayload (return/store/
-				// consuming-arg/constructor-field — the T1171 path). Letting
-				// dupHeapFieldForEscape's array branch (added by T1176, gated on
-				// dupContainerFieldAccess which the sink's setDupFlagsForFieldAccess
-				// now sets for arrays) ALSO clone it here produces a second
-				// element-wise clone whose elements are never dropped → leak. The
-				// two paths must be mutually exclusive: skip the read-side dup for
-				// the array shape (dupBorrowedHeapUserPayload owns it). Other
-				// variant-payload shapes (Optional[string], Optional[container])
-				// are NOT covered by dupBorrowedHeapUserPayload and still need the
-				// read-side dup.
-				if _, _, isArr := c.arrayHeapDupElem(identType); !isArr {
+				// T1178/T1173: a fixed Array (heap-user, string, or container
+				// elements) variant payload is deep-cloned at the escape SINK by
+				// dupBorrowedHeapUserPayload (return/store/consuming-arg/constructor
+				// -field — the T1171/T1173 path). Letting dupHeapFieldForEscape's
+				// array branch (gated on dupContainerFieldAccess which the sink's
+				// setDupFlagsForFieldAccess also sets for arrays) ALSO clone it here
+				// produces a second element-wise clone whose elements are never
+				// dropped → leak. The two paths must be mutually exclusive: skip the
+				// read-side dup for the array shape (dupBorrowedHeapUserPayload owns
+				// it). Other variant-payload shapes (Optional[string],
+				// Optional[container]) are NOT covered by dupBorrowedHeapUserPayload
+				// and still need the read-side dup.
+				if _, _, isArr := c.arrayElemNeedsEscapeDup(identType); !isArr {
 					if dup, ok := c.dupHeapFieldForEscape(val, identType, true); ok {
 						return dup
 					}
@@ -6425,13 +6425,14 @@ func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
 		c.dupContainerFieldAccess = true
 		return
 	}
-	// T1176: a whole fixed-Array[heap-user] field/binding read out by value
-	// (`return w.rows`) aliases N inner heap instances; the owner's synth drop
-	// frees them at scope exit while the escaped copy still points in (UAF).
-	// Route through dupContainerFieldAccess so dupHeapFieldForEscape element-wise
-	// deep-clones. Gated on the heap-user element shape (int[N]/value arrays are
-	// untouched — dupHeapFieldForEscape's array branch is a no-op for them).
-	if _, _, ok := c.arrayHeapDupElem(t); ok {
+	// T1176/T1173: a whole fixed-Array field/binding read out by value
+	// (`return w.rows`) aliases N inner heap allocations (heap-user instances, or
+	// string/Vector/Channel/Arc/Weak buffers); the owner's synth drop frees them
+	// at scope exit while the escaped copy still points in (UAF/double-free). Route
+	// through dupContainerFieldAccess so dupHeapFieldForEscape element-wise
+	// deep-clones. Gated on the aliasing-element shape (int[N]/value arrays are
+	// untouched — arrayElemNeedsEscapeDup returns false for them).
+	if _, _, ok := c.arrayElemNeedsEscapeDup(t); ok {
 		c.dupContainerFieldAccess = true
 		return
 	}
@@ -12729,30 +12730,19 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 	// B0219: Dup vector/channel fields from types with drop.
 	// Vector: shallow copy (allocate + memcpy). Channel: incref.
 	if c.dupContainerFieldAccess && ownerDroppable {
-		// T1176: whole fixed-Array[heap-user] field/binding escaping the owner —
-		// the [N x {vtable,instance}] aggregate merely ALIASES N inner heap
-		// instances, so element-wise deep-clone (each via dupHeapValue). Without
-		// this the owner's synth drop frees the elements at scope exit while the
-		// escaped copy still points into them (UAF). dupHeapValue is null-safe,
-		// dispatches through typeinfo clone_fn for polymorphic subtypes (T0387),
-		// and deep-clones droppable sub-fields (e.g. Row.name) — no shallow alias
-		// leaks. No temp tracking: every sink that sets the flag stores the value
-		// into an owned slot (return → caller bindingDropArray; assign → target
-		// bindingDropArray after drop-old; constructor → instance synth drop;
-		// move-param → callee param drop), and the subject's synth drop frees the
-		// originals exactly once — so no double-free and no leak.
-		if elemT, n, ok := c.arrayHeapDupElem(fType); ok {
+		// T1176/T1173: whole fixed-Array field/binding escaping the owner — the
+		// [N x T_v] aggregate merely ALIASES N inner heap allocations (heap-user
+		// instances, or string/Vector/Channel/Arc/Weak buffers), so element-wise
+		// deep-clone via dupArrayValueForEscape. Without this the owner's synth
+		// drop frees the elements at scope exit while the escaped copy still points
+		// into them (UAF for string/heap-user, double-free for containers). No temp
+		// tracking: every sink that sets the flag stores the value into an owned
+		// slot (return → caller bindingDropArray; assign → target bindingDropArray
+		// after drop-old; constructor → instance synth drop; move-param → callee
+		// param drop), and the subject's synth drop frees the originals exactly once.
+		if elemT, n, ok := c.arrayElemNeedsEscapeDup(fType); ok {
 			c.dupContainerFieldAccess = false // consume the flag
-			if _, isArr := val.Type().(*irtypes.ArrayType); !isArr {
-				return val, false
-			}
-			out := val
-			for i := int64(0); i < n; i++ {
-				elem := c.block.NewExtractValue(out, uint64(i))
-				dup := c.dupHeapValue(elem, elemT)
-				out = c.block.NewInsertValue(out, dup, uint64(i))
-			}
-			return out, true
+			return c.dupArrayValueForEscape(val, elemT, n)
 		}
 		if elemType, ok := types.AsVector(fType); ok {
 			c.dupContainerFieldAccess = false // consume the flag
@@ -12905,20 +12895,12 @@ func (c *Compiler) dupBorrowedHeapUserPayload(expr ast.Expr, val value.Value) (v
 		dup := c.dupHeapValue(innerVal, inner)
 		return c.block.NewInsertValue(val, dup, 1), true
 	}
-	// Fixed-Array-of-heap-user (T1171): element-wise deep-clone the [N x T_v]
-	// aggregate so the escaped array owns independent instances; the subject's
-	// synth enum drop still frees the originals exactly once.
-	if elemT, n, ok := c.arrayHeapDupElem(t); ok {
-		if _, isArr := val.Type().(*irtypes.ArrayType); !isArr {
-			return val, false
-		}
-		out := val
-		for i := int64(0); i < n; i++ {
-			elem := c.block.NewExtractValue(out, uint64(i))
-			dup := c.dupHeapValue(elem, elemT)
-			out = c.block.NewInsertValue(out, dup, uint64(i))
-		}
-		return out, true
+	// Fixed-Array whose elements alias heap (T1171 heap-user; T1173 string /
+	// Vector / Channel / Arc / Weak / Optional[heap-user]): element-wise deep-clone
+	// the [N x T_v] aggregate so the escaped array owns independent elements; the
+	// subject's synth enum drop still frees the originals exactly once.
+	if elemT, n, ok := c.arrayElemNeedsEscapeDup(t); ok {
+		return c.dupArrayValueForEscape(val, elemT, n)
 	}
 	return val, false
 }
@@ -12953,16 +12935,27 @@ func (c *Compiler) optionalElemNeedsHeapDup(resolvedElem types.Type) bool {
 	return ok
 }
 
-// arrayHeapDupElem reports whether typ is a fixed Array whose element is a heap
-// user type (droppable, or no-drop-but-pal-free) — the shape whose [N x T_v]
-// aggregate merely ALIASES N inner heap instances, so a copy escaping the owner
-// (a struct field read like `return w.rows`, or a match-borrowed variant payload)
-// must be element-wise deep-cloned. Returns the resolved element type, the array
-// size, and true when so, else (nil, 0, false). string/container-element arrays
-// are deliberately out of scope (their own follow-up, cf. T1173). Sibling of
+// arrayElemNeedsEscapeDup reports whether typ is a fixed Array whose element's
+// value struct merely ALIASES heap — a heap-user type (droppable, or
+// no-drop-but-pal-free), string, Vector, Channel, Arc, Weak, a droppable
+// enum/tuple, or Optional[heap-user] (NOT Optional[string]/Optional[container] —
+// pushElemNeedsDup's optionalHeapDupElem only recognizes heap-user inners, so a
+// whole-array escape of Optional[string][N]/Optional[Vector][N] is still an
+// uncovered UAF, tracked as T1183). For such an array the [N x T_v]
+// aggregate aliases N inner heap allocations, so a whole-array VALUE copy
+// escaping the owner (a struct field read like `return w.rows`, or a
+// match-borrowed variant payload) must be element-wise deep-cloned; the owner's
+// synth drop otherwise frees the elements at scope exit while the escaped copy
+// still points into them (UAF for string/heap-user, double-free for containers).
+// Returns the resolved element type, the array size, and true when so, else
+// (nil, 0, false). Element recognition reuses pushElemNeedsDup (the single-source
+// per-element deep-clone predicate, shared with vector-push) plus the bare-string
+// case that push callers handle separately (cf. dupTupleValue). Sibling of
 // optionalHeapDupElem; single recognition point shared by dupHeapFieldForEscape
-// (field-access + variant-payload escape sinks) so the shapes stay in sync (T1176).
-func (c *Compiler) arrayHeapDupElem(typ types.Type) (types.Type, int64, bool) {
+// (field-access + variant-payload escape sinks), dupBorrowedHeapUserPayload
+// (match-borrowed-ident sink), setDupFlagsForFieldAccess, and the genIdentExpr
+// read-side gate, so the shapes stay in sync (T1176/T1173).
+func (c *Compiler) arrayElemNeedsEscapeDup(typ types.Type) (types.Type, int64, bool) {
 	arr, ok := typ.(*types.Array)
 	if !ok {
 		return nil, 0, false
@@ -12971,10 +12964,52 @@ func (c *Compiler) arrayHeapDupElem(typ types.Type) (types.Type, int64, bool) {
 	if c.typeSubst != nil {
 		elem = types.Substitute(elem, c.typeSubst)
 	}
-	if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) {
+	if (extractNamed(elem) == types.TypString && !isRefType(elem)) || c.pushElemNeedsDup(elem) {
 		return elem, arr.Size(), true
 	}
 	return nil, 0, false
+}
+
+// dupArrayElemForEscape deep-clones one loaded array element whose value struct
+// aliases heap (string / Vector / Channel / Arc / Weak / heap-user / droppable
+// enum / tuple / Optional[heap-user]) so a whole-array VALUE escaping its owner owns
+// the element independently. Reuses the single-source per-element dispatchers
+// maybeDupPushElement (every heap element shape, shared with vector-push) and
+// dupString (bare string, which push callers handle separately, cf.
+// dupTupleValue). Returns elem unchanged for primitive/value/copy elements.
+// elemType must already be fully substituted by the caller. NO temp tracking —
+// see dupArrayValueForEscape. T1173.
+func (c *Compiler) dupArrayElemForEscape(elem value.Value, elemType types.Type) value.Value {
+	if extractNamed(elemType) == types.TypString && !isRefType(elemType) {
+		return c.dupString(elem)
+	}
+	if dup := c.maybeDupPushElement(elem, elemType); dup != nil {
+		return dup
+	}
+	return elem
+}
+
+// dupArrayValueForEscape element-wise deep-clones a loaded fixed-array VALUE (the
+// [N x T_elem] aggregate) whose elements alias heap, rebuilding the aggregate with
+// the clones so a whole-array escape (return / store-to-outer / consuming `~`
+// param / constructor field) owns its elements independently. The subject's synth
+// drop frees the originals exactly once, so there is NO double-free and NO leak —
+// hence no temp tracking: the clones flow into an owned sink (caller/target
+// bindingDropArray, instance synth drop, or callee param drop). Returns
+// (rebuilt, true) on success; (val, false) when val is not an array aggregate.
+// Shared by dupHeapFieldForEscape (field-access + enum-target sinks) and
+// dupBorrowedHeapUserPayload (match-borrowed-ident sink). T1176/T1173.
+func (c *Compiler) dupArrayValueForEscape(val value.Value, elemType types.Type, n int64) (value.Value, bool) {
+	if _, isArr := val.Type().(*irtypes.ArrayType); !isArr {
+		return val, false
+	}
+	out := val
+	for i := int64(0); i < n; i++ {
+		elem := c.block.NewExtractValue(out, uint64(i))
+		dup := c.dupArrayElemForEscape(elem, elemType)
+		out = c.block.NewInsertValue(out, dup, uint64(i))
+	}
+	return out, true
 }
 
 // enumThisSubject converts a `this` enum receiver (an i8* pointer returned by

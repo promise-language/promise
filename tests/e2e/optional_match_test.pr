@@ -1,0 +1,72 @@
+// T1002: `match` on an owned or borrowed optional (`T?` / `T?&`) compares the
+// present flag for the `none` arm; a catch-all (`_`/binding) covers presence.
+// Previously this panicked in codegen ("cannot compare match subject of type T?").
+type D {
+  int x;
+}
+
+// --- Owned optional, primitive payload ---
+
+optional_match_owned_none() `test {
+  int? x = none;
+  r := match x {
+    none => 1, _ => 2,
+  };
+  assert(r == 1, "owned none selects none arm");
+}
+
+optional_match_owned_present() `test {
+  int? x = 5;
+  r := match x {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "owned present selects catch-all");
+}
+
+// --- Owned optional, heap user-type payload (exercises payload/leak path) ---
+
+optional_match_heap_none() `test {
+  D? init = none;
+  r := match init {
+    none => 1, _ => 2,
+  };
+  assert(r == 1, "heap none selects none arm");
+}
+
+optional_match_heap_present() `test {
+  D? init = D(x: 7);
+  r := match init {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "heap present selects catch-all");
+}
+
+// --- Borrowed optional via Ref[T?].borrow (the item's exact repro) ---
+
+optional_match_borrowed_none() `test {
+  D? init = none;
+  a := Ref[D?](move init);
+  match a.borrow {
+    none => assert(true, "borrowed none selects none arm"),
+    _ => assert(false, "borrowed none must not select catch-all"),
+  }
+}
+
+optional_match_borrowed_present() `test {
+  D? init = D(x: 3);
+  a := Ref[D?](move init);
+  match a.borrow {
+    none => assert(false, "borrowed present must not select none arm"),
+    _ => assert(true, "borrowed present selects catch-all"),
+  }
+}
+
+// --- Match as an expression bound to a var (exercises buildMatchPhi) ---
+
+optional_match_as_expression() `test {
+  int? x = 9;
+  label := match x {
+    none => "absent", _ => "present",
+  };
+  assert(label == "present", "expression match yields present branch");
+}

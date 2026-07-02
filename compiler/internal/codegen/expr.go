@@ -7743,6 +7743,14 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 	named := extractNamed(subjectType)
 
+	// T1002: an owned or borrowed Optional subject (`T?`, or `T?&`/`T?~` from
+	// e.g. Ref[T?].borrow) is not an enum, so it reaches genValueMatch. Its only
+	// reachable literal pattern is `none` (there is no `some(x)` pattern; sema
+	// rejects any other literal/expression arm on an Optional). Detect the shape
+	// once — stripping a leading SharedRef/MutRef mirrors the T0850 if-unwrap fix
+	// — and compare the present flag (field 0) for the `none` arm below.
+	_, isOptSubject := unwrapRefsType(subjectType).(*types.Optional)
+
 	// T0993: normalize a `this`-style heap receiver into the value struct
 	// {vtable, instance} for RTTI type-pattern dispatch. genThisExpr returns the
 	// raw i8* instance pointer for heap types, but a type-pattern arm (RTTI
@@ -7773,22 +7781,38 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 	for i, arm := range e.Arms {
 		switch p := arm.Pattern.(type) {
 		case *ast.LiteralMatchPattern, *ast.ExpressionMatchPattern:
-			var patternVal value.Value
-			switch pp := p.(type) {
-			case *ast.LiteralMatchPattern:
-				patternVal = c.genExpr(pp.Value)
-			case *ast.ExpressionMatchPattern:
-				patternVal = c.genExpr(pp.Expr)
+			var cond value.Value
+
+			// T1002: `none` on an owned/borrowed Optional subject compares the
+			// present flag (field 0 of the {i1, T} struct) — none ⇔ !present.
+			// Mirrors the T0850 if-unwrap; the subject is only read (never bound
+			// or moved out, as there is no `some(x)` pattern), so no drop
+			// bookkeeping is needed. Skip the `==`-method path entirely so
+			// genNoneLit does not emit an unused zero value.
+			if lp, ok := p.(*ast.LiteralMatchPattern); ok && isOptSubject {
+				if _, isNone := lp.Value.(*ast.NoneLit); isNone {
+					flag := c.block.NewExtractValue(subject, 0)
+					cond = c.block.NewICmp(enum.IPredEQ, flag, constant.NewInt(irtypes.I1, 0))
+				}
 			}
 
-			var cond value.Value
-			if named != nil {
-				method := named.LookupMethod("==")
-				if method != nil && method.IsNative() {
-					if named == types.TypString {
-						cond = c.genStringOp("==", subject, patternVal)
-					} else {
-						cond = c.emitNativeOp(named, "==", subject, patternVal)
+			if cond == nil {
+				var patternVal value.Value
+				switch pp := p.(type) {
+				case *ast.LiteralMatchPattern:
+					patternVal = c.genExpr(pp.Value)
+				case *ast.ExpressionMatchPattern:
+					patternVal = c.genExpr(pp.Expr)
+				}
+
+				if named != nil {
+					method := named.LookupMethod("==")
+					if method != nil && method.IsNative() {
+						if named == types.TypString {
+							cond = c.genStringOp("==", subject, patternVal)
+						} else {
+							cond = c.emitNativeOp(named, "==", subject, patternVal)
+						}
 					}
 				}
 			}

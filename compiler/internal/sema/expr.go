@@ -3270,6 +3270,16 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 		}
 
 	case *ast.LiteralMatchPattern:
+		// T1002: an Optional subject only supports the `none` pattern (compared
+		// against the present flag in codegen) plus a catch-all; there is no
+		// `some(x)` pattern, so any other literal has no meaningful lowering and
+		// would panic in codegen. Turn it into a clean diagnostic.
+		if _, isNone := p.Value.(*ast.NoneLit); !isNone && subjectType != nil {
+			if _, ok := stripRef(subjectType).(*types.Optional); ok {
+				c.errorf(p.Pos(), "match on optional type %s only supports the `none` pattern and a catch-all (`_` or a binding); use `if v := opt { … }` to inspect the inner value", subjectType)
+				return
+			}
+		}
 		c.checkExpr(p.Value)
 
 	case *ast.NameMatchPattern:
@@ -3279,6 +3289,15 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 		// Always valid
 
 	case *ast.ExpressionMatchPattern:
+		// T1002: same as the literal case — an Optional subject has no
+		// value-comparison lowering (no `some(x)` pattern), so reject any
+		// expression pattern against it with the same guidance.
+		if subjectType != nil {
+			if _, ok := stripRef(subjectType).(*types.Optional); ok {
+				c.errorf(p.Pos(), "match on optional type %s only supports the `none` pattern and a catch-all (`_` or a binding); use `if v := opt { … }` to inspect the inner value", subjectType)
+				return
+			}
+		}
 		exprType := c.checkExpr(p.Expr)
 		if exprType != nil && subjectType != nil && !types.Identical(exprType, subjectType) {
 			c.errorf(p.Pos(), "match expression pattern type %s does not match subject type %s", exprType, subjectType)

@@ -1,0 +1,77 @@
+// T1180: `return v[i]` where v is Vector[Optional[heap-user]] must deep-clone the
+// heap user type out of the container slot — for BOTH inner shapes:
+//   - no-drop-but-pal-free (field-less struct: heap-allocated, not droppable)
+//   - droppable (has a string field / drop path)
+// Sibling of T1175 (index-read escape) in the RETURN escape sink. Pre-fix, the
+// return sink armed the dup flag only for the droppable inner (isDroppableHeapUserType),
+// so returning a `Tag?[]` element from a function owning the vector propagated an
+// alias that the caller and the owner both freed → `fatal: double free`. The fix
+// routes the return sink through the shared optionalHeapDupElem recognition point,
+// which covers both legs. Batch tests — must pass with zero leaks / no double-free.
+// --- no-drop-but-pal-free inner (the T1180 repro shape) ---
+type _T1180Tag {
+}
+
+_t1180_take_first_tag(_T1180Tag?[] move v) _T1180Tag? {
+  return v[0];
+}
+
+_t1180_present_tag(_T1180Tag? move t) bool {
+  if _ := t {
+    return true;
+  }
+  return false;
+}
+
+test_t1180_no_drop_inner() `test {
+  _T1180Tag?[] v = [];
+  v.push(_T1180Tag());
+  assert(_t1180_present_tag(_t1180_take_first_tag(move v)), "no-drop first present");
+}
+
+// --- droppable inner (already covered by the T0440 return branch; guard it) ---
+type _T1180Row {
+  string name;
+  drop(~this) {
+  }
+}
+
+_t1180_take_first_row(_T1180Row?[] move v) _T1180Row? {
+  return v[0];
+}
+
+_t1180_present_row(_T1180Row? move t) bool {
+  if r := t {
+    return r.name.len > 0;
+  }
+  return false;
+}
+
+test_t1180_droppable_inner() `test {
+  _T1180Row?[] v = [];
+  v.push(_T1180Row(name: "a" + "b"));
+  assert(_t1180_present_row(_t1180_take_first_row(move v)), "droppable first present");
+}
+
+// --- non-zero index: exercise the general `v[i]` path, not just [0]. ---
+_t1180_take_at_tag(_T1180Tag?[] move v, int i) _T1180Tag? {
+  return v[i];
+}
+
+test_t1180_no_drop_nonzero_index() `test {
+  _T1180Tag?[] v = [];
+  v.push(_T1180Tag());
+  v.push(_T1180Tag());
+  v.push(_T1180Tag());
+  assert(_t1180_present_tag(_t1180_take_at_tag(move v, 2)), "no-drop index 2 present");
+}
+
+// --- stored-None element: `return v[i]` where the slot holds `none`. Exercises
+// the null-safe leg of the dup (dupHeapValue on a null inner) on the return sink
+// — must not crash and must round-trip as absent. ---
+test_t1180_no_drop_none_element() `test {
+  _T1180Tag?[] v = [];
+  _T1180Tag? hole = none;
+  v.push(move hole);
+  assert(!_t1180_present_tag(_t1180_take_first_tag(move v)), "no-drop none absent");
+}

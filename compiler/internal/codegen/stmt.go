@@ -8460,18 +8460,16 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// the field — the caller needs an independent copy. Skip for borrow
 		// return types (B0179) — borrows don't own the value.
 		c.setDupFlagsForFieldAccess(retType)
-		// T0440: Signal genMethodIndex to dup heap user types out of container
-		// indices for Optional[heap-user-type] return values. Without this,
-		// `return m[k]` from a function owning m propagates an alias that
-		// becomes dangling when m drops at function exit.
-		if opt, ok := retType.(*types.Optional); ok {
-			elem := opt.Elem()
-			if c.typeSubst != nil {
-				elem = types.Substitute(elem, c.typeSubst)
-			}
-			if isDroppableHeapUserType(elem) {
-				c.dupHeapUserFieldAccess = true
-			}
+		// T0440/T1180: Signal genMethodIndex/genVectorIndex to deep-clone the heap
+		// user type out of the container slot for Optional[heap-user] return
+		// values — covers both the droppable and no-drop-but-pal-free inner
+		// shapes. Without this, `return m[k]` / `return v[i]` from a function
+		// owning the container propagates an alias that double-frees when the
+		// container drops at function exit. Routes through the shared
+		// optionalHeapDupElem recognition point so this sink stays in sync with
+		// the var-decl / assignment / mut-ref-arg escape sinks by construction.
+		if _, ok := c.optionalHeapDupElem(retType); ok {
+			c.dupHeapUserFieldAccess = true
 		}
 		// T1146: `return m[k]!` — `!` already unwrapped the Optional, so retType is
 		// the bare element type (not Optional) and the branch above is skipped. The

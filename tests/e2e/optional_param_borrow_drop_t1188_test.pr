@@ -1,0 +1,122 @@
+// T1188: A bare droppable `T` argument widened to a `T?` **borrow** parameter
+// must not orphan its heap payload. Previously the caller-side optional-widening
+// path (`coerceCallArgs`) unconditionally transferred ownership to the callee
+// (via `claimHeapTemp`/`claimStringTemp`/`clearDropFlag`), but a borrow callee
+// only reads the widened optional and never drops it — so the payload leaked.
+//
+// The fix gates the ownership transfer on the param being a `move` (`RefMut`)
+// param: borrow params leave the temp/local tracked so the caller drops it at
+// scope exit (parallel to the non-optional borrow arg `g(D(x:1))`); `move`
+// params still transfer ownership so the callee drops it (no double-free).
+//
+// Every case below must run with zero leaks and no double-free.
+type D {
+  int x;
+  drop(~this) {
+  }
+}
+
+// Borrow `T?` param — callee only reads it; caller must retain + drop.
+f0(D? o) int {
+  return 0;
+}
+
+// Borrow `string?` param.
+f2(string? s) int {
+  return 0;
+}
+
+// Borrow `int[]?` param.
+f3(int[]? v) int {
+  return 0;
+}
+
+// `move` `T?` param — callee owns and drops it; caller must NOT double-drop.
+f0m(D? move o) int {
+  return 0;
+}
+
+// `move` `string?` param.
+f2m(string? move s) int {
+  return 0;
+}
+
+// `move` `int[]?` param.
+f3m(int[]? move v) int {
+  return 0;
+}
+
+// Fresh heap-user temp widened to a borrow `T?` param (the item's repro).
+borrow_heap_temp() `test {
+  assert(f0(D(x: 1)) == 0, "owned optional borrow param — heap temp");
+}
+
+// Named bare local widened to a borrow `T?` param.
+borrow_named_local() `test {
+  d := D(x: 5);
+  assert(f0(d) == 0, "owned optional borrow param — named local");
+}
+
+// String temp widened to a borrow `string?` param.
+borrow_string_temp() `test {
+  assert(f2("hello".to_upper()) == 0, "owned optional borrow param — string temp");
+}
+
+// Vector temp widened to a borrow `int[]?` param.
+borrow_vector_temp() `test {
+  assert(f3([1, 2, 3]) == 0, "owned optional borrow param — vector temp");
+}
+
+// `move` param with a fresh temp — regression guard against double-free.
+move_heap_temp() `test {
+  assert(f0m(D(x: 2)) == 0, "owned optional move param — heap temp");
+}
+
+// `move` a fresh string temp into a `string?` move param.
+move_string_temp() `test {
+  assert(f2m("hi".to_upper()) == 0, "owned optional move param — string temp");
+}
+
+// `move` a fresh vector temp into an `int[]?` move param.
+move_vector_temp() `test {
+  assert(f3m([1, 2, 3]) == 0, "owned optional move param — vector temp");
+}
+
+// `move` a NAMED droppable local into a `T?` move param. This is the branch the
+// fresh-temp cases miss: `move d` keeps `Arg.Value` an `IdentExpr` with
+// `Arg.Move=true`, so the caller-side widening path clears the local's drop flag
+// (ownership transfer) — the callee drops it exactly once. Guards double-free.
+move_named_local() `test {
+  d := D(x: 5);
+  assert(f0m(move d) == 0, "owned optional move param — named D local");
+}
+
+// `move` a named string local into a `string?` move param (claimStringTemp path).
+move_string_named_local() `test {
+  s := "hi".to_upper();
+  assert(f2m(move s) == 0, "owned optional move param — named string local");
+}
+
+// `move` a named vector local into an `int[]?` move param.
+move_vector_named_local() `test {
+  v := [1, 2, 3];
+  assert(f3m(move v) == 0, "owned optional move param — named vector local");
+}
+
+// A bare named local passed to a BORROW `T?` param is not consumed: the caller
+// retains ownership and can still use it after the call (and drops it once).
+borrow_local_used_after() `test {
+  d := D(x: 7);
+  r := f0(d);
+  assert(r == 0, "borrow optional param does not consume local");
+  assert(d.x == 7, "local still usable after borrow optional call");
+}
+
+// Named `D?` local passed to a borrow `T?` param: `argType == paramType`, so
+// the wrap block is skipped entirely — the caller already owns + drops the
+// local. Guards against a double-free regression.
+borrow_named_optional_local() `test {
+  D? o = D(x: 3);
+  r := f0(o);
+  assert(r == 0, "named optional local — borrow param");
+}

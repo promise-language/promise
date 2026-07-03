@@ -1196,7 +1196,15 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 				} else if st, ok := lt.(*irtypes.StructType); ok {
 					// B0358: The value is moving into the optional — transfer
 					// ownership so the caller doesn't double-drop at scope exit.
-					if args != nil && i < len(args) {
+					// T1188: Only transfer ownership for a `move` (RefMut) param.
+					// The callee's prologue registers an optional drop and frees
+					// the payload at its scope exit, so the caller must release
+					// it. For a borrow param (RefNone/RefShared) the callee only
+					// reads the widened optional and never drops it, so the
+					// caller must retain the temp/local and drop it at its own
+					// scope exit — exactly like the non-optional borrow arg
+					// `g(D(x:1))`, which never claims the temp either.
+					if args != nil && i < len(args) && params[i].Ref() == types.RefMut {
 						if ident, ok := args[i].Value.(*ast.IdentExpr); ok {
 							if argTypeIsDroppable(argType) {
 								c.clearDropFlag(ident.Name)

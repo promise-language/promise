@@ -407,6 +407,7 @@ type Compiler struct {
 	goExprFireAndForget   bool        // true when go expr result is discarded (no <-task receiver)
 	elvisResultConsumed   bool        // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
 	elvisResultBound      bool        // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
+	elvisResultReturned   bool        // T0982: true when an elvis `?:` result is the return expression (escapes to the caller). Like elvisResultBound, forces none-path default neutralization for handle/heap results, but does NOT create a per-path elvisBoundDropFlag (no binding consumes it; the returned result temp is claimed by claimStringTemp/claimHeapTemp).
 	elvisBoundDropFlag    value.Value // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
 	elvisResultOwnsForced bool        // T1166: true when an elvis `?:` result is assigned to a member/index target (an owned field/element with no per-slot drop flag). genElvis clones a borrowed operand on the some/none path so the result is unconditionally owned; the container's field/element drop is then correct (no double-free of a caller/container-owned inner).
 	coroCleanupBlk        *ir.Block   // coroutine cleanup block (destroy path: coro.free + free)

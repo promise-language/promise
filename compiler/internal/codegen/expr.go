@@ -9758,6 +9758,13 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// is not itself the bound RHS, so it must not inherit this flag.
 	boundResult := c.elvisResultBound
 	c.elvisResultBound = false
+	// T0982: capture+reset the returned-result signal (set by genReturnStmt's
+	// RHS-eval site). A returned elvis escapes to the caller, so — like a bound
+	// result — a handle/heap none-path owned-local default must be neutralized here
+	// (else the function's scope-exit drop AND the caller both free it → double
+	// free/SEGV). Unlike boundResult, it does NOT create a per-path elvisBoundDropFlag.
+	returnedResult := c.elvisResultReturned
+	c.elvisResultReturned = false
 	// T1166: capture+reset the force-own-clone signal (set by the member/index
 	// assignment-target RHS-eval site in stmt.go). Reset so a nested elvis in
 	// e.Left/e.Right does not inherit it, exactly like elvisResultBound.
@@ -9858,13 +9865,26 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// while the bound variable also took an owning drop → double free / SEGV, T0983).
 	// Recurses naturally for deeper nesting (`a ?: (b ?: (c ?: d))`).
 	nestedBoundDefault := false
-	if boundResult {
+	if boundResult || returnedResult {
 		_, _, ownedRes := c.elvisResultDrop(e)
 		droppableRes := ownedRes || c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil
 		if droppableRes {
 			if be, ok := unwrapDestructureParens(e.Right).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
-				c.elvisResultBound = true
-				nestedBoundDefault = true
+				if boundResult {
+					c.elvisResultBound = true
+					nestedBoundDefault = true
+				} else {
+					// T0982: nested-elvis default in a RETURN (`return a ?: (b ?: c)`).
+					// Propagate the returned obligation into the inner elvis so IT
+					// neutralizes its own terminal owned-local default's scope-exit drop
+					// (the all-none path returns that default, which escapes to the caller;
+					// without this both the inner default's binding and the caller free it →
+					// SEGV/double-free). Unlike the bound case this threads NO per-path flag
+					// up — the escaping result temp is claimed unconditionally in
+					// genReturnStmt, so the inner's flag-clear is the whole fix. Recurses
+					// naturally for deeper nesting (`a ?: (b ?: (c ?: d))`).
+					c.elvisResultReturned = true
+				}
 			}
 		}
 	}
@@ -9907,7 +9927,7 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		// false (the await is the single owner); a borrowed param default has no
 		// drop flag to clear, leaving T0953's borrowed-source crash to its own fix.
 		c.neutralizeElvisNoneDefault(e, defaultVal)
-	} else if boundResult && (c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil) {
+	} else if (boundResult || returnedResult) && (c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil) {
 		// T0952 (single-owner native handle) + T0940 (Map/Set/heap-user type) elvis
 		// bound DIRECTLY to a variable (`m := a ?: b`). The binding takes a per-path
 		// owning drop (elvisBoundDropFlag); on the none-path it aliases the default,

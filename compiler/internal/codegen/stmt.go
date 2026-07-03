@@ -8617,7 +8617,18 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			isUnwrappedContainerIndex(s.Value) {
 			c.dupHeapUserFieldAccess = true
 		}
+		// T0982: `return a ?: b` — when the return expression (peeling parens) is an
+		// inline elvis, signal genElvis so it neutralizes a handle/heap none-path
+		// owned-local default's scope-exit drop. The returned value escapes to the
+		// caller; without this the function's own scope-exit drop of the default AND
+		// the caller both free it (Mutex SEGV / Arc UAF / Map/heap double-free).
+		// Vector/string results already neutralize unconditionally (T0936).
+		prevElvisReturned := c.elvisResultReturned
+		if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+			c.elvisResultReturned = true
+		}
 		val = c.genExpr(s.Value)
+		c.elvisResultReturned = prevElvisReturned
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
 		c.dupHeapUserFieldAccess = false

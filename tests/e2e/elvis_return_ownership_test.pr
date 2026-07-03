@@ -1,0 +1,221 @@
+// T0982: `return a ?: b` whose result is a single-owner native handle (Arc/Channel/
+// Mutex) or a droppable heap type (Map/Set/heap-user), with an owned-local none-path
+// default `b`, must transfer ownership of `b` to the escaping return value EXACTLY
+// once. The returned value escapes to the caller, who owns and drops it; pre-fix the
+// function's own scope-exit drop of `b` ALSO freed it → double free (Mutex.drop's
+// pal_mutex_destroy+pal_free is non-idempotent → SEGV; Arc a benign use-after-free;
+// Map/heap-user a real double free). The fix neutralizes the owned-local default's
+// scope-exit drop flag on the none-path only, so ownership transfers once.
+//
+// Every default here is HEAP-allocated (Mutex/Arc/Channel handles, heap Map, non-
+// `.rodata` string) so a double-free is a real second free, not a no-op on a static
+// buffer. Each test asserts the returned value (proving single-free / no SEGV) and the
+// whole file runs under the zero-leak gate (an under-drop would LEAK, an over-drop
+// SEGV/double-free).
+type Box {
+  string name;
+  drop(~this) {
+  }
+}
+
+// --- Mutex handle: none-path owned-local default (the SEGV repro) ---
+
+ret_mutex_none(int seed) Mutex[int] {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](seed);
+  return a ?: b; // none-path: returns b; b's scope-exit drop must be neutralized
+}
+t_return_mutex_none() `test {
+  Mutex[int] m = ret_mutex_none(9);
+  g := m.lock();
+  assert(g.borrow == 9, "mutex none owned-local");
+  g.close();
+}
+
+// --- Mutex handle: some-path source present, default b dropped once at scope exit ---
+
+ret_mutex_some(int seed) Mutex[int] {
+  Mutex[int] av = Mutex[int](seed);
+  Mutex[int]? a = av; // moves av into a
+  Mutex[int] b = Mutex[int](0);
+  return a ?: b; // some-path: returns a's inner; b dropped once by its own binding
+}
+t_return_mutex_some() `test {
+  Mutex[int] m = ret_mutex_some(3);
+  g := m.lock();
+  assert(g.borrow == 3, "mutex some owned-local");
+  g.close();
+}
+
+// --- Arc handle: the latent use-after-free arm ---
+
+ret_arc_none(int seed) Ref[int] {
+  Ref[int]? a = none;
+  Ref[int] b = Ref[int](seed);
+  return a ?: b;
+}
+t_return_arc_none() `test {
+  Ref[int] r = ret_arc_none(7);
+  assert(r.borrow == 7, "arc none owned-local");
+}
+
+// --- Channel handle ---
+
+ret_channel_none() Channel[int] {
+  Channel[int]? a = none;
+  Channel[int] b = Channel[int](1);
+  return a ?: b;
+}
+t_return_channel_none() `test {
+  Channel[int] ch = ret_channel_none();
+  ch.send(5);
+  int? v = <-ch;
+  assert(v! == 5, "channel none owned-local");
+  ch.close();
+}
+
+// --- Heap user type with drop: the double-free arm ---
+
+ret_box_none() Box {
+  Box? a = none;
+  Box b = Box(name: "hello".repeat(2)); // heap-allocated string (non-.rodata)
+  return a ?: b;
+}
+t_return_box_none() `test {
+  Box b = ret_box_none();
+  assert(b.name.len == 10, "heap-user none owned-local");
+}
+
+// --- Map (2-word value struct): the same gated branch ---
+
+ret_map_none() map[string, int] {
+  map[string, int]? a = none;
+  map[string, int] b = map[string, int]();
+  b["k"] = 9;
+  b["j"] = 8;
+  return a ?: b;
+}
+t_return_map_none() `test {
+  map[string, int] m = ret_map_none();
+  assert(m.len == 2, "map none owned-local");
+}
+
+// --- paren-WHOLE peel: `return (a ?: b)` (parens around the entire elvis) still routes
+// through the return signal — genReturnStmt peels the outer parens (unwrapDestructure-
+// Parens) before detecting the elvis, so the owned-local `b` is still neutralized ---
+
+ret_mutex_paren_whole(int seed) Mutex[int] {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](seed);
+  return (a ?: b);
+}
+t_return_mutex_paren_whole() `test {
+  Mutex[int] m = ret_mutex_paren_whole(11);
+  g := m.lock();
+  assert(g.borrow == 11, "mutex none paren-whole");
+  g.close();
+}
+
+// --- Set (2-word value struct, the sibling of Map through elvisResultHeapDrop) ---
+
+ret_set_none() Set[int] {
+  Set[int]? a = none;
+  Set[int] b = Set[int]();
+  b.add(3);
+  b.add(4);
+  return a ?: b;
+}
+t_return_set_none() `test {
+  Set[int] s = ret_set_none();
+  assert(s.len == 2, "set none owned-local");
+}
+
+// --- fresh-temp default (call result, not a named local) — claimed rather than
+// flag-cleared; must still transfer exactly once ---
+
+ret_mutex_fresh(int seed) Mutex[int] {
+  Mutex[int]? a = none;
+  return a ?: Mutex[int](seed); // none-path fresh temp
+}
+t_return_mutex_fresh() `test {
+  Mutex[int] m = ret_mutex_fresh(4);
+  g := m.lock();
+  assert(g.borrow == 4, "mutex none fresh-temp");
+  g.close();
+}
+
+// --- paren-default peel: `return a ?: (b)` still transfers the owned-local `b` ---
+
+ret_mutex_paren(int seed) Mutex[int] {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](seed);
+  return a ?: (b);
+}
+t_return_mutex_paren() `test {
+  Mutex[int] m = ret_mutex_paren(6);
+  g := m.lock();
+  assert(g.borrow == 6, "mutex none paren-default");
+  g.close();
+}
+
+// --- nested elvis in return: `return a ?: (b ?: c)` — all-none returns innermost `c`,
+// whose scope-exit drop must be neutralized (composes T0983's nested path with the
+// return signal) ---
+
+ret_mutex_nested(int seed) Mutex[int] {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  Mutex[int] c = Mutex[int](seed);
+  return a ?: (b ?: c);
+}
+t_return_mutex_nested() `test {
+  Mutex[int] m = ret_mutex_nested(42);
+  g := m.lock();
+  assert(g.borrow == 42, "mutex nested all-none");
+  g.close();
+}
+
+// --- nested elvis, middle source present: `return a ?: (b ?: c)` with b some → returns
+// b's inner; c dropped once at scope exit, b's inner escapes ---
+
+ret_mutex_nested_bsome(int seed) Mutex[int] {
+  Mutex[int] bv = Mutex[int](seed);
+  Mutex[int]? a = none;
+  Mutex[int]? b = bv; // moves bv into b
+  Mutex[int] c = Mutex[int](0);
+  return a ?: (b ?: c);
+}
+t_return_mutex_nested_bsome() `test {
+  Mutex[int] m = ret_mutex_nested_bsome(13);
+  g := m.lock();
+  assert(g.borrow == 13, "mutex nested b-some");
+  g.close();
+}
+
+// --- triple-nested elvis: `return a ?: (b ?: (c ?: d))` — deepest `d` neutralized ---
+
+ret_arc_triple(int seed) Ref[int] {
+  Ref[int]? a = none;
+  Ref[int]? b = none;
+  Ref[int]? c = none;
+  Ref[int] d = Ref[int](seed);
+  return a ?: (b ?: (c ?: d));
+}
+t_return_arc_triple() `test {
+  Ref[int] r = ret_arc_triple(5);
+  assert(r.borrow == 5, "arc triple all-none");
+}
+
+// --- heap-user nested elvis: exercises the elvisResultHeapDrop arm through the nested
+// return propagation (distinct representation from the native-handle arm) ---
+
+ret_box_nested() Box {
+  Box? a = none;
+  Box? b = none;
+  Box c = Box(name: "xy".repeat(3)); // heap string, 6 chars
+  return a ?: (b ?: c);
+}
+t_return_box_nested() `test {
+  Box b = ret_box_nested();
+  assert(b.name.len == 6, "heap-user nested all-none");
+}

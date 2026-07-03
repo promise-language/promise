@@ -399,6 +399,7 @@ type cutContext struct {
 	targetEpoch epoch
 	lastEpoch   epoch
 	haveLast    bool
+	yearAdvance bool // target is a confirmed/authorized year advance (Y.0); catalog legitimately still holds a prior-year dev epoch
 
 	dryRun      bool
 	reason      string
@@ -497,6 +498,16 @@ func gateCatalogEpoch(ctx *cutContext) gateResult {
 		return gateResult{name: name, detail: err.Error()}
 	}
 	if cur != ctx.targetEpoch.String() {
+		// Authorized year advance (Y.0): catalog legitimately still holds a
+		// prior-year dev epoch — no dev bump crosses the year boundary. Accept it;
+		// the post-tag bump advances catalog to Y.1 for ongoing development.
+		if ctx.yearAdvance {
+			if e, perr := parseEpochStr(cur); perr == nil && e.Year < ctx.targetEpoch.Year {
+				return gateResult{name: name, passed: true,
+					detail: fmt.Sprintf("catalog epoch %s (prior-year dev); year rollover advances to %s, post-cut bump to %d.%d",
+						cur, ctx.targetEpoch, ctx.targetEpoch.Year, ctx.targetEpoch.N+1)}
+			}
+		}
 		return gateResult{name: name, detail: fmt.Sprintf("catalog epoch is %s, expected target %s", cur, ctx.targetEpoch), overridable: true}
 	}
 	return gateResult{name: name, passed: true, detail: "catalog epoch " + cur}
@@ -1043,6 +1054,9 @@ func cutStable(ctx *cutContext) error {
 			return fmt.Errorf("year rollover %s → %s requires confirmation (--confirm-year)", last, target)
 		}
 	}
+	// A year advance (rollover or multi-year gap) is now authorized (confirmed or
+	// --reason). Mark it so gateCatalogEpoch accepts the lagging prior-year catalog.
+	ctx.yearAdvance = needYearConfirm
 
 	fmt.Fprintf(ctx.stdout, "Deriving stable epoch: last=%s target=%s (device-clock year %d)\n", lastStr(last, haveLast), target, year)
 

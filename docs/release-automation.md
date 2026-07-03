@@ -384,7 +384,7 @@ last = highest released epoch-<a.b> tag
   last.year >  Y    → refuse                # clock behind last release; never backward
 ```
 
-Invariants: no N skipping within a year; the year is always the device-clock year (no jumping to a chosen future year); a year change requires explicit confirmation; `catalog.toml`'s epoch must equal `target` or the cut refuses ("catalog epoch is X, expected target") — except a confirmed year-rollover, which rewrites it to `Y.0` as part of the release commit.
+Invariants: no N skipping within a year; the year is always the device-clock year (no jumping to a chosen future year); a year change requires explicit confirmation; `catalog.toml`'s epoch must equal `target` or the cut refuses ("catalog epoch is X, expected target") — except a confirmed year-rollover (or multi-year-gap under `--reason`), where the catalog legitimately still holds the **prior year's** dev epoch (no dev bump ever crosses the year boundary); the catalog gate accepts it, and the post-cut bump advances catalog to `Y.1` for ongoing development.
 
 **Gate catalog:**
 

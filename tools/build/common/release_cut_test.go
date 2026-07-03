@@ -1139,6 +1139,41 @@ func TestGateToolErrorsAreHardFails(t *testing.T) {
 	}
 }
 
+// TestGateCatalogEpochYearAdvance covers the year-advance exception (T0946): a
+// prior-year catalog passes when yearAdvance is set, but a same-year mismatch or
+// a catalog whose year is >= the target still fails overridably.
+func TestGateCatalogEpochYearAdvance(t *testing.T) {
+	mk := func(catalog string, target epoch, yearAdvance bool) gateResult {
+		root := t.TempDir()
+		writeCatalogFile(t, root, catalog)
+		return gateCatalogEpoch(&cutContext{root: root, targetEpoch: target, yearAdvance: yearAdvance})
+	}
+	// Exact match always passes regardless of the flag.
+	if res := mk("2027.0", epoch{2027, 0}, true); !res.passed {
+		t.Fatalf("exact match must pass: %+v", res)
+	}
+	// Prior-year dev epoch + authorized year advance → accepted.
+	res := mk("2026.4", epoch{2027, 0}, true)
+	if !res.passed {
+		t.Fatalf("prior-year catalog under year advance must pass: %+v", res)
+	}
+	if !strings.Contains(res.detail, "prior-year dev") {
+		t.Fatalf("detail should note the prior-year acceptance, got: %q", res.detail)
+	}
+	// Same prior-year catalog WITHOUT the flag → overridable fail (no exception).
+	if res := mk("2026.4", epoch{2027, 0}, false); res.passed || !res.overridable {
+		t.Fatalf("prior-year catalog without year advance must fail overridably: %+v", res)
+	}
+	// Same-year mismatch → the exception must NOT apply, even with the flag set.
+	if res := mk("2027.2", epoch{2027, 0}, true); res.passed || !res.overridable {
+		t.Fatalf("same-year mismatch must still fail overridably: %+v", res)
+	}
+	// Catalog year AHEAD of the target → never accepted by the exception.
+	if res := mk("2028.0", epoch{2027, 0}, true); res.passed || !res.overridable {
+		t.Fatalf("catalog ahead of target must still fail overridably: %+v", res)
+	}
+}
+
 func TestGateCIPerPlatformDispatchError(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	// linux + darwin already green; only windows is absent → dispatchCI takes the
@@ -1248,10 +1283,11 @@ func TestCutStableYearRolloverConfirmed(t *testing.T) {
 	noOpSleep(t)
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
-	// T0946: gateCatalogEpoch has no year-rollover exception, so catalog must
-	// already equal the rollover target here. When T0946 is fixed (cut rewrites
-	// catalog to Y.0 for a confirmed rollover), seed a non-Y.0 catalog instead.
-	writeCatalogFile(t, root, "2027.0")
+	// A confirmed year rollover: catalog legitimately still holds the prior year's
+	// dev epoch (no dev bump crosses the year boundary). gateCatalogEpoch accepts
+	// it via the year-advance exception (T0946), and the post-cut bump advances
+	// catalog to 2027.1.
+	writeCatalogFile(t, root, "2026.4")
 
 	g := newFakeCutGit()
 	g.head = sha
@@ -1273,12 +1309,17 @@ func TestCutStableYearRolloverConfirmed(t *testing.T) {
 	if got, _ := ParseEpoch(root); got != "2027.1" {
 		t.Fatalf("catalog bump after rollover = %s, want 2027.1", got)
 	}
+	// The exception — not a --reason override — satisfied the catalog gate, so the
+	// tag message must carry no "Gate override" audit line.
+	if strings.Contains(g.createdTags[0].message, "Gate override") {
+		t.Fatalf("confirmed rollover must not record a gate override; message: %q", g.createdTags[0].message)
+	}
 }
 
 func TestCutStableYearRolloverNeedsConfirmation(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
-	writeCatalogFile(t, root, "2027.0")
+	writeCatalogFile(t, root, "2026.4") // prior-year dev epoch (realistic seed)
 	g := newFakeCutGit()
 	g.head = sha
 	g.epochTags = []string{"epoch-2026.3"}
@@ -1302,7 +1343,10 @@ func TestCutStableMultiYearGapProceedsWithReason(t *testing.T) {
 	noOpSleep(t)
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	root, _, uploader := depsHostedFixture(t, true)
-	writeCatalogFile(t, root, "2026.0") // target Y.0 after the gap
+	// A prior-year dev epoch (not the Y.0 target): the year-advance exception must
+	// carry the catalog gate on the gap path too, so the cut proceeds without the
+	// catalog gate producing a second, redundant override.
+	writeCatalogFile(t, root, "2024.1")
 
 	g := newFakeCutGit()
 	g.head = sha
@@ -1323,6 +1367,11 @@ func TestCutStableMultiYearGapProceedsWithReason(t *testing.T) {
 	}
 	if !strings.Contains(g.createdTags[0].message, "multi-year hiatus") {
 		t.Fatalf("tag message must record the override reason, got: %q", g.createdTags[0].message)
+	}
+	// The reason is recorded once (for the derivation gap); the catalog gate is
+	// satisfied by the year-advance exception, not a second override.
+	if got := strings.Count(g.createdTags[0].message, "Gate override reason:"); got != 1 {
+		t.Fatalf("tag message must record exactly one override reason, got %d: %q", got, g.createdTags[0].message)
 	}
 }
 

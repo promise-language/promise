@@ -8333,10 +8333,46 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		}
 		current := c.block.NewLoad(alloca.ElemType, alloca)
 		result := c.emitUnaryOpResult(op, targetType, current, false)
-		// T0880: x++ is `x = x.++()`. A non-native operator returns a NEW value,
-		// so the old heap-owned value leaks unless dropped (zero-leak policy).
-		c.dropOldUserValueAtPtr(alloca, targetType, result)
-		c.block.NewStore(result, alloca)
+		// T0880/T0959: `x++` is `x = x.++()`. A non-native operator returns a NEW
+		// value, so the old heap-owned value leaks unless dropped (zero-leak
+		// policy) — but the old value may only be dropped when this local actually
+		// OWNS its binding. Mirror genAssignStmt's OpAssign drop-old-and-rearm:
+		// gate the drop-old behind the runtime drop flag and re-arm it after the
+		// store so the fresh result becomes owned.
+		//   - owned local  : flag=1 → drops old (T0880, unchanged).
+		//   - T&/T~ local   : flag=0 → skips drop (no double-free of the borrowed
+		//                     source) and re-arm claims the fresh result (T0959).
+		//   - borrow param  : no drop binding → skip drop entirely; the caller owns
+		//                     the original (dropping it double-frees, T0959). The
+		//                     fresh result is left untracked (residual leak T1194 —
+		//                     shared with the plain-assign path, filed separately).
+		if binding, ok := c.dropBindings[t.Name]; ok && binding.dropFlag != nil {
+			// A reference-typed local (`Counter &r = owner;`, a move) stores the
+			// same Value struct as an owned local and owns its instance (flag=1),
+			// but targetType is the reference wrapper — strip it so
+			// dropOldUserValueAtPtr recognizes the droppable underlying type
+			// instead of no-oping (which would leak the old instance). Safe under
+			// the flag gate: a genuine borrow (flag=0) skips the drop-old entirely.
+			dropType := targetType
+			switch rt := dropType.(type) {
+			case *types.MutRef:
+				dropType = rt.Elem()
+			case *types.SharedRef:
+				dropType = rt.Elem()
+			}
+			flag := c.block.NewLoad(irtypes.I1, binding.dropFlag)
+			dropBlk := c.newBlock("incdec.dropold")
+			contBlk := c.newBlock("incdec.dropold.cont")
+			c.block.NewCondBr(flag, dropBlk, contBlk)
+			c.block = dropBlk
+			c.dropOldUserValueAtPtr(alloca, dropType, result)
+			c.block.NewBr(contBlk)
+			c.block = contBlk
+			c.block.NewStore(result, alloca)
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
+		} else {
+			c.block.NewStore(result, alloca)
+		}
 	case *ast.MemberExpr:
 		// T0712: property getter/setter dispatch. genFieldPtr panics ("no field")
 		// for a property with no backing field; read via the getter, apply the op,

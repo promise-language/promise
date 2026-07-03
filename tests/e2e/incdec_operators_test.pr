@@ -84,6 +84,9 @@ type DropCounter {
   ++ () DropCounter {
     return DropCounter(n: this.n + 1);
   }
+  -- () DropCounter {
+    return DropCounter(n: this.n - 1);
+  }
 }
 
 drop_heap_type_inc_fresh_no_leak() `test {
@@ -407,4 +410,43 @@ property_failable_getter_inc_propagates() `test {
   };
   assert(caught, "failable-getter property ++ propagates the getter error");
   assert(r == -1, "handler recovers after propagated getter error");
+}
+
+// --- T0959: reference-bound local inc/dec must not double-free or leak ---
+// `DropType &r = owner;` moves ownership into the reference-typed local `r`
+// (owner is consumed). `r++` reassigns `r` to a fresh instance: the old owned
+// instance must be dropped exactly once (guarded by r's drop flag) and the
+// fresh result becomes owned via the re-armed flag — no leak, no double-free.
+// Before T0959, dropOldUserValueAtPtr no-oped on the `DropCounter&` reference
+// type, leaking the old instance.
+ref_bound_local_inc_no_leak() `test {
+  owner := DropCounter(n: 5);
+  DropCounter &r = owner;
+  r++;
+  r++;
+  assert(r.n == 7, "ref-bound local ++ x2 produces fresh value");
+}
+
+// The `--` counterpart shares the same IdentExpr drop-old-and-rearm path; a
+// distinct operator confirms the ref-stripping is not `++`-specific.
+ref_bound_local_dec_no_leak() `test {
+  owner := DropCounter(n: 5);
+  DropCounter &r = owner;
+  r--;
+  r--;
+  assert(r.n == 3, "ref-bound local -- x2 produces fresh value");
+}
+
+// A mutable-reference local (`DropType ~r = owner;`) also moves ownership into
+// `r` (owner consumed). This exercises the *MutRef* arm of the ref-stripping
+// switch in genIncDecTarget (the shared-ref `&` arm is covered above); without
+// stripping, dropOldUserValueAtPtr would no-op on the `DropCounter~` wrapper and
+// leak the old instance on every reassignment.
+mutref_bound_local_incdec_no_leak() `test {
+  owner := DropCounter(n: 5);
+  DropCounter ~r = owner;
+  r++;
+  r++;
+  r--;
+  assert(r.n == 6, "mutref-bound local ++x2 --x1 produces fresh value");
 }

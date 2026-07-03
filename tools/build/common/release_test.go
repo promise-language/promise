@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -332,6 +333,15 @@ func TestReleaseBuildValidation(t *testing.T) {
 	// Cross-target is gated (a clearly-non-host target).
 	if err := runReleaseBuild(root, []string{"--variant", "thin", "--manifest", "m", "--out", "o", "--host", "plan9-foo"}); err == nil {
 		t.Fatal("expected error for cross-target build")
+	}
+	// --release-tag is a recognized flag (T1195): passing it must not cause a
+	// flag-parse error. It fails later on the cross-target gate, not on parse.
+	err := runReleaseBuild(root, []string{"--variant", "thin", "--manifest", "m", "--out", "o", "--host", "plan9-foo", "--release-tag", "epoch-2027.0"})
+	if err == nil {
+		t.Fatal("expected error for cross-target build with --release-tag")
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("--release-tag not registered as a flag: %v", err)
 	}
 }
 

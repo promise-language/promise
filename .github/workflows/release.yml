@@ -130,6 +130,7 @@ jobs:
         run: |
           bin/release build --variant thin \
             --manifest dist/manifest-${{ matrix.host }}.json \
+            --release-tag "${{ github.ref_name }}" \
             --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
       - name: Fetch dependency blobs for full variant
         shell: bash
@@ -148,6 +149,7 @@ jobs:
           bin/release build --variant full \
             --manifest dist/manifest-${{ matrix.host }}.json \
             --blobs dist/blobs \
+            --release-tag "${{ github.ref_name }}" \
             --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
       # Publish needs the binaries + the manifest. Compressed deps are NOT attached
       # to the epoch release any more — they live in the `deps-<dep>-<version>`

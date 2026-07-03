@@ -204,7 +204,14 @@ jobs:
         # compiler, compiles tools/stub/main.pr WITH that compiler, then rebuilds
         # with the stub embedded back in (3 internal phases). The published thin
         # binary therefore already carries the stub for install-time extraction.
-        run: bin/release build --variant thin --manifest dist/manifest-${{ matrix.host }}.json --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
+        # --release-tag ${{ github.ref_name }} stamps the version from the TAG,
+        # not catalog.toml: under promote-same-hash a year-rollover tag
+        # (epoch-2027.0) points at the epoch-next-validated commit whose
+        # catalog.toml still holds the prior-year dev epoch (2026.4), so a
+        # catalog read would report the wrong version (T1195). This is a
+        # different `--tag`-family flag from `manifest`'s deliberately-omitted
+        # `--tag` (the deps-<dep>-<version> release tag, catalog-derived).
+        run: bin/release build --variant thin --manifest dist/manifest-${{ matrix.host }}.json --release-tag "${{ github.ref_name }}" --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
       - name: Fetch dependency blobs for full variant
         # Pull each manifest entry's blob source from the pre-staged
         # deps-<dep>-<version> release and brotli-decompress to dist/blobs,
@@ -213,7 +220,8 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         run: bin/release fetch-blobs --manifest dist/manifest-${{ matrix.host }}.json --out dist/blobs --keep-compressed
       - name: Assemble full variant (pre-stage host blobs)
-        run: bin/release build --variant full --manifest dist/manifest-${{ matrix.host }}.json --blobs dist/blobs --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
+        # --release-tag as above (T1195): version comes from the tag, not catalog.toml.
+        run: bin/release build --variant full --manifest dist/manifest-${{ matrix.host }}.json --blobs dist/blobs --release-tag "${{ github.ref_name }}" --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: release-bin-${{ matrix.host }}
@@ -274,7 +282,7 @@ jobs:
 
 Notes:
 - **Release notes are `--notes-from-tag`.** `bin/release cut` writes the release notes into the annotated tag body — a mechanical, bulleted list of non-merge commit subjects in `epoch-<last>..<sha>` (newest first), generated from `git log` with no manual step. `release.yml` publishes that tag body verbatim as the GitHub release notes alongside the artifacts. There is no committed changelog file to keep in sync and no editorial gate to satisfy before a cut; a future "smart" step can enrich the notes (issue-aware titles, gate/health status) without changing how a release is cut.
-- `bin/release` (T0773) is the release driver implementing the build-order. Subcommands: `blobs --host <t> --out <dir>` (collect host dependency blobs), `manifest <blobsdir> --host <t> --pack <dir> --out <m> [--tag <tag>]` (hash+size, pack hash-named upload artifacts, emit the ranked-sources manifest), `build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>]` (the 3-phase compiler+stub build), and `verify-manifest <m>... --against <dir>` (the integrity gate). `bin/build --release` remains a shortcut that produces an embed-everything (full-equivalent) binary without the stub.
+- `bin/release` (T0773) is the release driver implementing the build-order. Subcommands: `blobs --host <t> --out <dir>` (collect host dependency blobs), `manifest <blobsdir> --host <t> --pack <dir> --out <m> [--tag <tag>]` (hash+size, pack hash-named upload artifacts, emit the ranked-sources manifest), `build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>] [--release-tag <epoch-Y.N>]` (the 3-phase compiler+stub build; `--release-tag` stamps the version from the tag rather than `catalog.toml`, T1195), and `verify-manifest <m>... --against <dir>` (the integrity gate). `bin/build --release` remains a shortcut that produces an embed-everything (full-equivalent) binary without the stub.
 - The **stub** is compiled *by the just-built compiler* inside `bin/release build` (an internal phase), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is gated on cross-compilation (T0524); first releases build the host stub only.
 - **Hosting:** each manifest entry's primary `source` is a **GitHub release asset** on `github.com/promise-language/promise`, named by the blob's content `sha256` (content-addressed → an unchanged dependency reuses the same asset across releases, no re-upload). The pinned upstream vendor archive (e.g. the LLVM tarball) is a ranked fallback source. A CDN/R2 mirror ([T0523](#)) is a deferred, optional future source — ranked sources + `PROMISE_BLOB_MIRROR` make adding it non-breaking (no content hashes change).
 - **Install binaries are gzip-compressed only** (T0796). Each `promise-*` binary is published as `promise-*[.exe].gz` — no raw asset. Gzip is the universal floor: `gunzip` ships on every POSIX system, and Windows decompresses via `System.IO.Compression.GzipStream`. Brotli/zstd/xz can't bootstrap the *first* install (the decompressor lives inside the promise binary that doesn't exist yet); the brotli-11 path in §3 is for dependency blobs the already-installed compiler fetches at runtime — a different problem.

@@ -36,17 +36,18 @@ func runReleaseBuild(root string, args []string) error {
 	out := fs.String("out", "", "output binary path (required)")
 	blobsDir := fs.String("blobs", "", "host blobs dir (required for full)")
 	host := fs.String("host", CurrentBuildTarget(), "target (host-only for now; T0524)")
+	tag := fs.String("release-tag", "", "release tag (epoch-<Y.N>); stamps the version from the tag rather than catalog.toml, T1195")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return buildReleaseVariant(root, *variant, *manifestPath, *out, *blobsDir, *host)
+	return buildReleaseVariant(root, *variant, *manifestPath, *out, *blobsDir, *host, *tag)
 }
 
 // buildReleaseVariant builds the thin|full compiler variant with the runtime
 // manifest embedded (and host LLVM blobs pre-staged for full), writing the
 // finished binary + sha256 sidecar to `out`. Validation lives here so both the
 // `bin/release build` CLI and `publish-install` get identical guarantees.
-func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string) error {
+func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host, tag string) error {
 	if variant != "thin" && variant != "full" {
 		return fmt.Errorf("build: --variant must be thin or full\n%s", releaseUsage)
 	}
@@ -102,7 +103,7 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string
 		}
 	}
 
-	version, err := BuildVersion(root, true)
+	version, err := ReleaseVersion(root, tag)
 	if err != nil {
 		return fmt.Errorf("version: %w", err)
 	}

@@ -131,3 +131,72 @@ func TestBuildVersion(t *testing.T) {
 		t.Error("BuildVersion with no catalog.toml = nil, want error")
 	}
 }
+
+// TestReleaseVersion: a numeric epoch tag stamps the version from the TAG NAME,
+// overriding whatever catalog.toml holds — the year-rollover promote-same-hash
+// case (T1195). Non-epoch / epoch-next / empty / malformed refs fall back to the
+// catalog.toml epoch.
+func TestReleaseVersion(t *testing.T) {
+	dir := t.TempDir()
+	// catalog.toml holds the PRIOR-year dev epoch (the promote-same-hash state).
+	if err := os.WriteFile(filepath.Join(dir, "catalog.toml"), []byte("[catalog]\nepoch = \"2026.4\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		tag  string
+		want string
+	}{
+		// The bug: rollover tag must win over the prior-year catalog epoch.
+		{"rollover", "epoch-2027.0", "2027.0"},
+		// Same-year tag agrees with the catalog epoch.
+		{"same-year", "epoch-2026.4", "2026.4"},
+		// epoch-next → fall back to catalog (the dev epoch).
+		{"epoch-next", "epoch-next", "2026.4"},
+		// Non-epoch ref (workflow_dispatch branch) → fall back.
+		{"branch", "main", "2026.4"},
+		// Empty ref → fall back.
+		{"empty", "", "2026.4"},
+		// Malformed epoch tag → fall back rather than error.
+		{"malformed", "epoch-2027.x", "2026.4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReleaseVersion(dir, tc.tag)
+			if err != nil {
+				t.Fatalf("ReleaseVersion(%q) error: %v", tc.tag, err)
+			}
+			if got != tc.want {
+				t.Errorf("ReleaseVersion(%q) = %q, want %q", tc.tag, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEpochFromTag: the tag-name parser normalizes numeric epoch tags and
+// rejects everything else (so ReleaseVersion falls back to catalog.toml).
+func TestEpochFromTag(t *testing.T) {
+	cases := []struct {
+		tag    string
+		want   string
+		wantOK bool
+	}{
+		{"epoch-2027.0", "2027.0", true},
+		{"  epoch-2026.4  ", "2026.4", true}, // surrounding whitespace trimmed
+		{"epoch-2027.00", "2027.0", true},    // normalized via epoch.String()
+		{"epoch-next", "", false},
+		{"main", "", false},
+		{"", "", false},
+		{"epoch-", "", false},
+		{"epoch-2027", "", false},   // missing .N
+		{"epoch-2027.x", "", false}, // non-numeric N
+		{"epoch-x.0", "", false},    // non-numeric year
+	}
+	for _, tc := range cases {
+		got, ok := epochFromTag(tc.tag)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("epochFromTag(%q) = (%q, %v), want (%q, %v)", tc.tag, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}

@@ -130,7 +130,7 @@ func runReleasePublishInstall(root string, args []string) error {
 	// 2 — build the thin variant.
 	thinBin := filepath.Join(binDir, "promise-"+*host+ExeSuffix())
 	fmt.Printf("Building thin variant for %s...\n", *host)
-	if err := buildReleaseVariant(root, "thin", manifestPath, thinBin, "", *host); err != nil {
+	if err := buildReleaseVariant(root, "thin", manifestPath, thinBin, "", *host, ""); err != nil {
 		return fmt.Errorf("build thin: %w", err)
 	}
 
@@ -146,7 +146,7 @@ func runReleasePublishInstall(root string, args []string) error {
 	// 4 — build the full variant (host blobs pre-staged).
 	fullBin := filepath.Join(binDir, "promise-"+*host+"-full"+ExeSuffix())
 	fmt.Printf("Building full variant for %s...\n", *host)
-	if err := buildReleaseVariant(root, "full", manifestPath, fullBin, blobsDir, *host); err != nil {
+	if err := buildReleaseVariant(root, "full", manifestPath, fullBin, blobsDir, *host, ""); err != nil {
 		return fmt.Errorf("build full: %w", err)
 	}
 

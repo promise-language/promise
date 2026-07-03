@@ -342,3 +342,80 @@ test_replace_no_match_heap_receiver() `test {
   string r = (10 + 5).to_string().replace("zzz", "x") + "!";
   assert(r == "15!", "replace no-match on heap temp does not double-free");
 }
+
+// T0963: the no-op `return this` result must OWN independent storage — not just
+// avoid a double-free, but also not share the receiver's buffer while both are
+// live. Keep a heap receiver alive, push the padded result into a vector, then
+// read both. If the result aliased the receiver, one binding's drop would
+// corrupt the other's contents.
+test_pad_left_no_op_result_is_independent() `test {
+  string recv = 987.to_string();
+  string[] v = [];
+  v.push(recv.pad_left(2, '0')); // len >= width → no-op path returns `this`
+  assert(v[0] == "987", "padded no-op result intact");
+  assert(recv == "987", "receiver intact after pushing padded result");
+}
+
+// T0963: same independence guarantee for the pad_right no-op site (the second
+// of the three fixed `return this` sites in string.pr). Codegen must auto-clone
+// the borrowed receiver so the vector-stored result owns independent storage.
+test_pad_right_no_op_result_is_independent() `test {
+  string recv = 654.to_string();
+  string[] v = [];
+  v.push(recv.pad_right(2, '0')); // len >= width → no-op path returns `this`
+  assert(v[0] == "654", "padded no-op result intact");
+  assert(recv == "654", "receiver intact after pushing padded result");
+}
+
+// T0963: same independence guarantee for the replace empty-old site (the third
+// fixed `return this` site: `if old.len == 0 { return this; }`). The no-op
+// result and the still-live heap receiver must not share a buffer.
+test_replace_empty_old_result_is_independent() `test {
+  string recv = 321.to_string();
+  string[] v = [];
+  v.push(recv.replace("", "X")); // empty old → no-op path returns `this`
+  assert(v[0] == "321", "replace no-op result intact");
+  assert(recv == "321", "receiver intact after pushing replace result");
+}
+
+// T0963: user operator returning a borrowed string operand as an owned value
+// must clone (cloneOwnedReturnAlias / T0897 path). Push the operator result and
+// keep the operand live; both must remain intact.
+type PickSecond {
+  int z;
+  % (string other) string {
+    return other;
+  }
+}
+
+test_operator_returns_borrowed_string_operand() `test {
+  string base = 100.to_string();
+  PickSecond p = PickSecond(z: 1);
+  string[] v = [];
+  v.push(p % base);
+  assert(v[0] == "100", "operator-returned string operand intact");
+  assert(base == "100", "operand intact after operator returned it as owned");
+}
+
+// T0963: an operator returning a borrowed string operand while a Vector[string]
+// binding is live in its own body must dup exactly once. The op-param clone
+// (cloneOwnedReturnAlias) and the B0189 vector-string return guard would both
+// fire on the same `return other`, double-dup'ing and orphaning the first copy
+// (leak). The B0189 guard must skip idents already handled as operator params.
+type PickWithVec {
+  int z;
+  % (string other) string {
+    string[] scratch = [];
+    scratch.push("junk");
+    return other;
+  }
+}
+
+test_operator_returns_operand_with_live_vector() `test {
+  string base = 200.to_string();
+  PickWithVec p = PickWithVec(z: 1);
+  string[] v = [];
+  v.push(p % base);
+  assert(v[0] == "200", "operator result intact with live vector binding");
+  assert(base == "200", "operand intact after operator returned it as owned");
+}

@@ -8662,8 +8662,15 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// isRefType guard.
 	needsDup := false
 	if s.Value != nil && val != nil && extractNamed(retType) == types.TypString && !isRefType(retType) {
-		if _, ok := s.Value.(*ast.IdentExpr); ok {
-			needsDup = c.hasVectorStringBinding()
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			// T0963: an operator value param returned as an owned string was already
+			// dup'd by wrapOperatorParamReturnValue (cloneOwnedReturnAlias). Dup'ing
+			// again here would leak the first copy — the caller frees the outer dup
+			// and the inner one is orphaned. The op-param dup already yields an
+			// independent heap string, so no vector-element alias survives to protect.
+			if !c.currentOpValueParams[ident.Name] {
+				needsDup = c.hasVectorStringBinding()
+			}
 		} else if idx, ok := s.Value.(*ast.IndexExpr); ok {
 			targetType := c.info.Types[idx.Target]
 			if c.typeSubst != nil {
@@ -8867,7 +8874,23 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	if named == nil {
 		return val
 	}
-	if classify(named) != CatUnknown || named == types.TypString || named == types.TypVoid || named == types.TypNone {
+	// T0963: a borrowing string method whose body is `return this` (plain `this`,
+	// not `~this`) with an owned string return type would hand back the receiver's
+	// i8* instance pointer unchanged — the caller's owned result and the (possibly
+	// temporary) receiver then both free the same allocation (double-free), and any
+	// interleaved use corrupts the shared string. Dup the instance so the returned
+	// owned value is independent. `dupString` clears the .rodata literal flag via
+	// promise_string_new, so a literal receiver stays a no-op-drop literal. Skip for
+	// borrow return types (caller expects a reference) and `~this` receivers
+	// (genuine ownership transfer — cloning would copy needlessly and leak). Mirrors
+	// the T0893 clone for user heap types / enums, which this branch predates.
+	if named == types.TypString {
+		if !isRefType(effType) && !c.thisRecvIsOwned {
+			return c.dupString(val)
+		}
+		return val
+	}
+	if classify(named) != CatUnknown || named == types.TypVoid || named == types.TypNone {
 		return val
 	}
 
@@ -8989,7 +9012,13 @@ func (c *Compiler) cloneOwnedReturnAlias(val value.Value, effType types.Type) va
 	if named == nil {
 		return val
 	}
-	if classify(named) != CatUnknown || named == types.TypString || named == types.TypVoid || named == types.TypNone {
+	// T0963: a borrowed string operand returned as an owned value (operator-operand
+	// T0897 path) aliases the caller's still-live operand — dup it so the returned
+	// owned value frees an independent allocation.
+	if named == types.TypString {
+		return c.dupString(val)
+	}
+	if classify(named) != CatUnknown || named == types.TypVoid || named == types.TypNone {
 		return val
 	}
 	if named.IsValueType() {

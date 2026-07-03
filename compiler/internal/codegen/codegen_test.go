@@ -8859,6 +8859,29 @@ func TestReturnThisBorrowReturnDoesNotClone(t *testing.T) {
 	assertNotContains(t, extractDefine(ir, "BB.ref"), "heapdup")
 }
 
+// T0963: an operator returning a borrowed string operand as an owned value must
+// clone it (cloneOwnedReturnAlias). Operator dispatch borrows operands, so the
+// returned value would otherwise alias the caller's still-live operand — both
+// bindings would free / mutate the same string instance. The operator body must
+// dup via promise_string_new (dupString).
+func TestOperatorReturnsBorrowedStringOperandClones(t *testing.T) {
+	ir := generateIR(t, `
+		type PickSecond { int z; %(string other) string { return other; } }
+		main() { s := "x"; p := PickSecond(z: 1); r := p % s; }
+	`)
+	assertContains(t, extractDefine(ir, `"PickSecond.%"`), "call i8* @promise_string_new")
+}
+
+// T0963: an operator returning a borrow (`string&`) of its operand hands back a
+// reference into existing storage, not an owned copy — it must NOT dup.
+func TestOperatorReturnsBorrowedStringRefDoesNotClone(t *testing.T) {
+	ir := generateIR(t, `
+		type PickSecond { int z; %(string other) string& { return other; } }
+		main() { s := "x"; p := PickSecond(z: 1); r := p % s; }
+	`)
+	assertNotContains(t, extractDefine(ir, `"PickSecond.%"`), "call i8* @promise_string_new")
+}
+
 // B0250: Assigning the result of a method that returns `this` must clear the
 // receiver's drop flag to prevent double-free (both variables share the same instance).
 func TestReturnThisClearsReceiverDropFlag(t *testing.T) {

@@ -104,7 +104,7 @@ type string `native `public {
 
   replace(string old, string new_val) string {
     if old.len == 0 {
-      return this.clone();
+      return this; // T0963: codegen auto-clones a borrowed `return this` returned as owned
     }
     string result = "";
     int i = 0;
@@ -170,14 +170,14 @@ type string `native `public {
 
   pad_left(int width, char fill) string `doc("Pads the string on the left with `fill` to reach `width`. Returns unchanged if already wide enough.") {
     if this.len >= width {
-      return this.clone();
+      return this; // T0963: codegen auto-clones a borrowed `return this` returned as owned
     }
     return fill.to_string().repeat(width - this.len) + this;
   }
 
   pad_right(int width, char fill) string `doc("Pads the string on the right with `fill` to reach `width`. Returns unchanged if already wide enough.") {
     if this.len >= width {
-      return this.clone();
+      return this; // T0963: codegen auto-clones a borrowed `return this` returned as owned
     }
     return this + fill.to_string().repeat(width - this.len);
   }

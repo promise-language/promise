@@ -1,0 +1,342 @@
+// T0984: a PLAIN binary/unary/inc-dec use of a failable user-defined operator
+// (`+!`, `-!`, `++!`, …) previously emitted malformed IR — the {ok, value, err}
+// result struct was stored directly into a T-typed slot (codegen panic). Sema
+// now requires a failable enclosing scope and codegen auto-propagates the
+// result, symmetric with the T0715 compound-assignment fix. These tests exercise
+// the happy and error paths for the binary, prefix-unary, and inc/dec forms, plus
+// a heap-user-type failable operator (asserting no leak).
+type CheckedVec `doc("A value type with failable arithmetic operators that raise on a negative operand.") {
+  int x `value;
+  +!(CheckedVec other) CheckedVec {
+    if other.x < 0 {
+      raise error("negative addend");
+    }
+    return CheckedVec(x: this.x + other.x);
+  }
+  - !() CheckedVec {
+    if this.x < 0 {
+      raise error("negative negation");
+    }
+    return CheckedVec(x: -this.x);
+  }
+  ++!() CheckedVec {
+    if this.x < 0 {
+      raise error("negative increment");
+    }
+    return CheckedVec(x: this.x + 1);
+  }
+}
+
+type CheckedBag `doc("A heap (non-value) user type with a failable plus operator; exercises the no-leak drop path.") {
+  int[] items;
+  +!(CheckedBag other) CheckedBag {
+    if other.items.len == 0 {
+      raise error("empty addend");
+    }
+    r := CheckedBag(items: []);
+    for x in this.items {
+      r.items.push(x);
+    }
+    for x in other.items {
+      r.items.push(x);
+    }
+    return r;
+  }
+  drop(~this) {
+  }
+}
+
+// --- Binary form ------------------------------------------------------------
+
+// Happy path: the failable binary operator computes normally inside a failable
+// helper, caught (unused) by the caller.
+failable_binary_happy_path() `test {
+  r := binary_helper_ok(CheckedVec(x: 10))? e {
+    assert(false, "did not expect an error on the happy path");
+    CheckedVec(x: 0)
+  };
+  assert(r.x == 15, "failable + happy path should be 15");
+}
+
+binary_helper_ok!(CheckedVec start) CheckedVec {
+  c := start + CheckedVec(x: 5);
+  return c;
+}
+
+// Error path: a negative operand raises and the error propagates out of the
+// failable helper to the caller's catch.
+failable_binary_error_propagates() `test {
+  raised := false;
+  _ := binary_helper_raise()? e {
+    raised = true;
+    CheckedVec(x: 0)
+  };
+  assert(raised, "negative addend should propagate the error");
+}
+
+binary_helper_raise!() CheckedVec {
+  c := CheckedVec(x: 10) + CheckedVec(x: -1); // raises
+  return c;
+}
+
+// --- Prefix unary form ------------------------------------------------------
+
+failable_unary_happy_path() `test {
+  r := unary_helper_ok(CheckedVec(x: 10))? e {
+    assert(false, "did not expect an error on the happy path");
+    CheckedVec(x: 0)
+  };
+  assert(r.x == -10, "failable - happy path should be -10");
+}
+
+unary_helper_ok!(CheckedVec start) CheckedVec {
+  c := -start;
+  return c;
+}
+
+failable_unary_error_propagates() `test {
+  raised := false;
+  _ := unary_helper_raise()? e {
+    raised = true;
+    CheckedVec(x: 0)
+  };
+  assert(raised, "negative operand should propagate the error from -");
+}
+
+unary_helper_raise!() CheckedVec {
+  c := -CheckedVec(x: -5); // raises
+  return c;
+}
+
+// --- Inc/dec form -----------------------------------------------------------
+
+failable_incdec_happy_path() `test {
+  r := incdec_helper_ok(CheckedVec(x: 10))? e {
+    assert(false, "did not expect an error on the happy path");
+    CheckedVec(x: 0)
+  };
+  assert(r.x == 11, "failable ++ happy path should be 11");
+}
+
+incdec_helper_ok!(CheckedVec start) CheckedVec {
+  v := start;
+  v++;
+  return v;
+}
+
+failable_incdec_error_propagates() `test {
+  raised := false;
+  _ := incdec_helper_raise()? e {
+    raised = true;
+    CheckedVec(x: 0)
+  };
+  assert(raised, "negative operand should propagate the error from ++");
+}
+
+incdec_helper_raise!() CheckedVec {
+  v := CheckedVec(x: -1);
+  v++; // raises
+  return v;
+}
+
+// --- Heap user type, no leak ------------------------------------------------
+
+// A failable operator on a heap type in a plain binary expression: the inline
+// unwrapped result must be dropped at statement end (zero-leak policy).
+failable_heap_binary_no_leak() `test {
+  r := heap_helper_ok()? e {
+    assert(false, "did not expect an error");
+    CheckedBag(items: [])
+  };
+  assert(r.items.len == 4, "merged bag should have 4 items");
+}
+
+heap_helper_ok!() CheckedBag {
+  a := CheckedBag(items: [1, 2]);
+  b := CheckedBag(items: [3, 4]);
+  merged := a + b;
+  return merged;
+}
+
+// Error path on the heap type: the raised error propagates and no memory leaks.
+failable_heap_binary_error_propagates() `test {
+  raised := false;
+  _ := heap_helper_raise()? e {
+    raised = true;
+    CheckedBag(items: [])
+  };
+  assert(raised, "empty addend should propagate the error");
+}
+
+heap_helper_raise!() CheckedBag {
+  a := CheckedBag(items: [1, 2]);
+  empty := CheckedBag(items: []);
+  merged := a + empty; // raises
+  return merged;
+}
+
+// --- Enum operand form ------------------------------------------------------
+
+// Failable operators declared on an ENUM exercise the genEnumBinaryOp /
+// genEnumUnaryOp auto-propagate paths (distinct from the Named/value-type paths
+// above). LookupBinaryMethod / LookupUnaryMethod resolve the enum operator.
+enum Accumulator `doc("An enum with failable + and - operators that raise on a negative operand.") {
+  amount(int n),
+  +!(Accumulator other) Accumulator {
+    if other.value < 0 {
+      raise error("negative addend");
+    }
+    return Accumulator.amount(this.value + other.value);
+  }
+  - !() Accumulator {
+    if this.value < 0 {
+      raise error("negative negation");
+    }
+    return Accumulator.amount(-this.value);
+  }
+  get value int `doc("The wrapped integer.") {
+    match this {
+      amount(x) => {
+        return x;
+      },
+    }
+  }
+}
+
+failable_enum_binary_happy_path() `test {
+  r := enum_binary_ok()? e {
+    assert(false, "did not expect an error on the happy path");
+    Accumulator.amount(0)
+  };
+  assert(r.value == 15, "failable enum + happy path should be 15");
+}
+
+enum_binary_ok!() Accumulator {
+  c := Accumulator.amount(10) + Accumulator.amount(5);
+  return c;
+}
+
+failable_enum_binary_error_propagates() `test {
+  raised := false;
+  _ := enum_binary_raise()? e {
+    raised = true;
+    Accumulator.amount(0)
+  };
+  assert(raised, "negative addend should propagate the error from enum +");
+}
+
+enum_binary_raise!() Accumulator {
+  c := Accumulator.amount(10) + Accumulator.amount(-1); // raises
+  return c;
+}
+
+failable_enum_unary_happy_path() `test {
+  r := enum_unary_ok()? e {
+    assert(false, "did not expect an error on the happy path");
+    Accumulator.amount(0)
+  };
+  assert(r.value == -10, "failable enum - happy path should be -10");
+}
+
+enum_unary_ok!() Accumulator {
+  c := -Accumulator.amount(10);
+  return c;
+}
+
+failable_enum_unary_error_propagates() `test {
+  raised := false;
+  _ := enum_unary_raise()? e {
+    raised = true;
+    Accumulator.amount(0)
+  };
+  assert(raised, "negative operand should propagate the error from enum -");
+}
+
+enum_unary_raise!() Accumulator {
+  c := -Accumulator.amount(-5); // raises
+  return c;
+}
+
+// --- Virtual (vtable) dispatch form -----------------------------------------
+
+// A type with a child gains a vtable, so its failable operators dispatch through
+// genVirtualBinaryOp / genVirtualUnaryOp instead of the direct-call path. This
+// covers the auto-propagate insertion on the virtual dispatch branches.
+type Quantity `doc("A base type (has a child, so it gets a vtable) with failable + and - operators.") {
+  int v;
+  +!(Quantity other) Quantity {
+    if other.v < 0 {
+      raise error("negative addend");
+    }
+    return Quantity(v: this.v + other.v);
+  }
+  - !() Quantity {
+    if this.v < 0 {
+      raise error("negative negation");
+    }
+    return Quantity(v: -this.v);
+  }
+  drop(~this) {
+  }
+}
+
+type Weight is Quantity `doc("A subtype of Quantity, forcing virtual dispatch on the base's operators.") {
+}
+
+failable_virtual_binary_happy_path() `test {
+  r := virtual_binary_ok()? e {
+    assert(false, "did not expect an error on the happy path");
+    Quantity(v: 0)
+  };
+  assert(r.v == 15, "failable virtual + happy path should be 15");
+}
+
+virtual_binary_ok!() Quantity {
+  q := Quantity(v: 10);
+  c := q + Quantity(v: 5);
+  return c;
+}
+
+failable_virtual_binary_error_propagates() `test {
+  raised := false;
+  _ := virtual_binary_raise()? e {
+    raised = true;
+    Quantity(v: 0)
+  };
+  assert(raised, "negative addend should propagate the error from virtual +");
+}
+
+virtual_binary_raise!() Quantity {
+  q := Quantity(v: 10);
+  c := q + Quantity(v: -1); // raises
+  return c;
+}
+
+failable_virtual_unary_happy_path() `test {
+  r := virtual_unary_ok()? e {
+    assert(false, "did not expect an error on the happy path");
+    Quantity(v: 0)
+  };
+  assert(r.v == -10, "failable virtual - happy path should be -10");
+}
+
+virtual_unary_ok!() Quantity {
+  q := Quantity(v: 10);
+  c := -q;
+  return c;
+}
+
+failable_virtual_unary_error_propagates() `test {
+  raised := false;
+  _ := virtual_unary_raise()? e {
+    raised = true;
+    Quantity(v: 0)
+  };
+  assert(raised, "negative operand should propagate the error from virtual -");
+}
+
+virtual_unary_raise!() Quantity {
+  q := Quantity(v: -5);
+  c := -q; // raises
+  return c;
+}

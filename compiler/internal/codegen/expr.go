@@ -1299,8 +1299,14 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		}
 	}
 	args = append(args, right)
+	result := value.Value(c.block.NewCall(fn, args...))
+	if method.Sig().CanError() {
+		// T0984: failable operator returns {ok, value, err}; unwrap and propagate
+		// the error to the (sema-guaranteed failable) enclosing scope.
+		result = c.genAutoPropagateValue(result)
+	}
 	// T0918: track the heap user-type result for inline (unbound) use.
-	return c.trackOperatorResult(e, c.block.NewCall(fn, args...))
+	return c.trackOperatorResult(e, result)
 }
 
 // genEnumBinaryOp dispatches a user-defined binary operator declared on an enum
@@ -1360,7 +1366,12 @@ func (c *Compiler) genEnumBinaryOp(e *ast.BinaryExpr, en *types.Enum, leftType t
 		}
 	}
 	args = append(args, right)
-	return c.block.NewCall(fn, args...)
+	result := value.Value(c.block.NewCall(fn, args...))
+	if method.Sig().CanError() {
+		// T0984: unwrap the failable {ok, value, err} result and propagate the error.
+		result = c.genAutoPropagateValue(result)
+	}
+	return result
 }
 
 // genNonNativeEnumCompoundOp dispatches a user-defined enum operator invoked by a
@@ -1422,7 +1433,14 @@ func (c *Compiler) genNonNativeEnumCompoundOp(en *types.Enum, operandType types.
 // Mirrors genVirtualMethodCall but uses pre-evaluated left/right operands.
 func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 	method *types.Method, left, right value.Value) value.Value {
-	return c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, isThisReceiver(e.Left))
+	result := c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, isThisReceiver(e.Left))
+	if method.Sig().CanError() {
+		// T0984: unwrap the failable {ok, value, err} result and propagate the
+		// error. Done here (not in genVirtualBinaryOpValues, which is shared with
+		// genNonNativeCompoundOp's own auto-propagate) to avoid double-unwrapping.
+		result = c.genAutoPropagateValue(result)
+	}
+	return result
 }
 
 // genVirtualBinaryOpValues is the value-based core of genVirtualBinaryOp: it
@@ -1622,43 +1640,52 @@ func (c *Compiler) emitUnaryOpResult(op string, operandType types.Type, operand 
 
 	// Non-native unary operator: dispatch as a method call (T0878), mirroring
 	// genBinaryExpr's receiver handling but with no second operand.
+	var result value.Value
 	if c.needsVtable(named) {
-		return c.genVirtualUnaryOp(op, named, method, operand, isThis)
-	}
-
-	// Direct dispatch: call the concrete type's operator method. Resolve the
-	// mangled name exactly as genBinaryExpr does (mono name for generic
-	// instances, structural-default synthesis under the concrete name).
-	ownerName := c.resolveMethodOwner(named, op)
-	var mangledName string
-	if ownerName != named.Obj().Name() {
-		if structParent := c.findStructuralOwner(named, op); structParent != nil {
-			concreteName := c.resolveTypeName(operandType)
-			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodNameForMethod(concreteName, method)
-		} else {
-			monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
-			mangledName = mangleMethodNameForMethod(monoOwner, method)
-		}
+		result = c.genVirtualUnaryOp(op, named, method, operand, isThis)
 	} else {
-		mangledName = mangleMethodNameForMethod(c.resolveTypeName(operandType), method)
-	}
-	fn, ok := c.funcs[mangledName]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
+		// Direct dispatch: call the concrete type's operator method. Resolve the
+		// mangled name exactly as genBinaryExpr does (mono name for generic
+		// instances, structural-default synthesis under the concrete name).
+		ownerName := c.resolveMethodOwner(named, op)
+		var mangledName string
+		if ownerName != named.Obj().Name() {
+			if structParent := c.findStructuralOwner(named, op); structParent != nil {
+				concreteName := c.resolveTypeName(operandType)
+				c.ensureDefaultMethodsSynthesized(named, structParent)
+				mangledName = mangleMethodNameForMethod(concreteName, method)
+			} else {
+				monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
+				mangledName = mangleMethodNameForMethod(monoOwner, method)
+			}
+		} else {
+			mangledName = mangleMethodNameForMethod(c.resolveTypeName(operandType), method)
+		}
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
+		}
+
+		var args []value.Value
+		if method.Sig().Recv() != nil {
+			if isThis {
+				args = append(args, operand)
+			} else if named.IsValueType() {
+				args = append(args, c.valueTypeReceiverPtr(operand, operandType))
+			} else {
+				args = append(args, c.extractInstancePtr(operand))
+			}
+		}
+		result = c.block.NewCall(fn, args...)
 	}
 
-	var args []value.Value
-	if method.Sig().Recv() != nil {
-		if isThis {
-			args = append(args, operand)
-		} else if named.IsValueType() {
-			args = append(args, c.valueTypeReceiverPtr(operand, operandType))
-		} else {
-			args = append(args, c.extractInstancePtr(operand))
-		}
+	if method.Sig().CanError() {
+		// T0984: failable unary/inc-dec operator returns {ok, value, err}; unwrap
+		// and propagate the error to the (sema-guaranteed failable) enclosing scope.
+		// Shared by prefix `-`/`!`/`~` (genUnaryExpr) and `++`/`--` (genIncDecTarget).
+		result = c.genAutoPropagateValue(result)
 	}
-	return c.block.NewCall(fn, args...)
+	return result
 }
 
 // genEnumUnaryOp dispatches a user-defined unary operator declared on an enum
@@ -1701,7 +1728,12 @@ func (c *Compiler) genEnumUnaryOp(op string, en *types.Enum, operandType types.T
 		c.block.NewStore(operand, alloca)
 		args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
 	}
-	return c.block.NewCall(fn, args...)
+	result := value.Value(c.block.NewCall(fn, args...))
+	if method.Sig().CanError() {
+		// T0984: unwrap the failable {ok, value, err} result and propagate the error.
+		result = c.genAutoPropagateValue(result)
+	}
+	return result
 }
 
 // genVirtualUnaryOp dispatches a non-native unary operator through the vtable

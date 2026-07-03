@@ -526,7 +526,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		// T0715: a failable operator returns {ok, value, err}; codegen
 		// auto-propagates the error, so the enclosing function must be failable.
 		// Symmetric with the T0708/T0709 setter/getter checks above.
-		if c.compoundOperatorCanError(opTarget, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		if c.binaryOperatorCanError(opTarget, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
 			c.errorf(s.Pos(), "failable operator in compound assignment must be in a failable function: mark the enclosing function with `!`")
 		}
 	}
@@ -601,12 +601,13 @@ func rootIsReceiver(expr ast.Expr) bool {
 	return false
 }
 
-// compoundOperatorCanError reports whether the binary operator method invoked by
-// a compound assignment (`+=`, `-=`, etc.) on opTarget is failable. A failable
-// operator returns {ok, value, err}; codegen auto-propagates the error, so the
-// enclosing function must be failable. Resolves through Named/Instance/Enum,
-// mirroring checkOperator's dispatch. T0715.
-func (c *Checker) compoundOperatorCanError(opTarget types.Type, op string) bool {
+// binaryOperatorCanError reports whether the binary operator method invoked on
+// opTarget is failable. A failable operator returns {ok, value, err}; codegen
+// auto-propagates the error, so the enclosing function must be failable. Used
+// both by compound assignment (`+=`, `-=`, …, T0715) and plain binary
+// expressions (`a + b`, T0984). Resolves through Named/Instance/Enum, mirroring
+// checkOperator's dispatch.
+func (c *Checker) binaryOperatorCanError(opTarget types.Type, op string) bool {
 	// Strip refs so the operator dispatches on the underlying type (mirrors checkOperator).
 	if sr, ok := opTarget.(*types.SharedRef); ok {
 		opTarget = sr.Elem()
@@ -639,6 +640,45 @@ func (c *Checker) compoundOperatorCanError(opTarget types.Type, op string) bool 
 			return m.Sig().CanError()
 		}
 		if m := t.LookupMethod(op); m != nil {
+			return m.Sig().CanError()
+		}
+	}
+	return false
+}
+
+// unaryOperatorCanError reports whether the unary operator method (prefix
+// `-`/`!`/`~` or inc/dec `++`/`--`) invoked on operandType is failable. Symmetric
+// with binaryOperatorCanError: a failable operator returns {ok, value, err} and
+// codegen auto-propagates the error, so the enclosing function must be failable
+// (T0984). Resolves through Named/Instance/Enum, mirroring checkUnaryOperator's
+// dispatch.
+func (c *Checker) unaryOperatorCanError(operandType types.Type, op string) bool {
+	// Strip refs so the operator dispatches on the underlying type (mirrors checkUnaryOperator).
+	if sr, ok := operandType.(*types.SharedRef); ok {
+		operandType = sr.Elem()
+	}
+	if mr, ok := operandType.(*types.MutRef); ok {
+		operandType = mr.Elem()
+	}
+	switch t := operandType.(type) {
+	case *types.Named:
+		if m := t.LookupUnaryMethod(op); m != nil {
+			return m.Sig().CanError()
+		}
+	case *types.Instance:
+		if en, ok := t.Origin().(*types.Enum); ok {
+			if m := en.LookupUnaryMethod(op); m != nil {
+				return m.Sig().CanError()
+			}
+			return false
+		}
+		if origin, ok := t.Origin().(*types.Named); ok {
+			if m := origin.LookupUnaryMethod(op); m != nil {
+				return m.Sig().CanError()
+			}
+		}
+	case *types.Enum:
+		if m := t.LookupUnaryMethod(op); m != nil {
 			return m.Sig().CanError()
 		}
 	}

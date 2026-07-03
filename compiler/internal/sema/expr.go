@@ -606,14 +606,28 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 		return inner
 
 	case ast.BinExclusiveRange:
-		return c.checkOperator(e.Pos(), left, "..", right)
+		return c.checkOperatorFailable(e.Pos(), left, "..", right)
 	case ast.BinInclusiveRange:
-		return c.checkOperator(e.Pos(), left, "..=", right)
+		return c.checkOperatorFailable(e.Pos(), left, "..=", right)
 
 	default:
 		// Arithmetic and comparison: lookup operator method on left type
-		return c.checkOperator(e.Pos(), left, e.Op.String(), right)
+		return c.checkOperatorFailable(e.Pos(), left, e.Op.String(), right)
 	}
+}
+
+// checkOperatorFailable resolves a binary operator via checkOperator and, when the
+// operator method is failable, requires the enclosing function to be failable
+// (codegen auto-propagates the {ok, value, err} result). Symmetric with the
+// compound-assignment check in checkAssignStmt (T0984). Kept out of checkOperator
+// itself so the compound-assignment caller — which runs its own equivalent check —
+// is not double-reported.
+func (c *Checker) checkOperatorFailable(pos ast.Pos, left types.Type, op string, right types.Type) types.Type {
+	result := c.checkOperator(pos, left, op, right)
+	if c.binaryOperatorCanError(left, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
+	}
+	return result
 }
 
 // lookupBinaryOperatorMethod resolves the binary (1-param) variant of an operator
@@ -791,13 +805,13 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 
 	switch e.Op {
 	case ast.UnaryNot:
-		return c.checkUnaryOperator(e.Pos(), operand, "!")
+		return c.checkUnaryOperatorFailable(e.Pos(), operand, "!")
 
 	case ast.UnaryNeg:
-		return c.checkUnaryOperator(e.Pos(), operand, "-")
+		return c.checkUnaryOperatorFailable(e.Pos(), operand, "-")
 
 	case ast.UnaryBitwiseNot:
-		return c.checkUnaryOperator(e.Pos(), operand, "~")
+		return c.checkUnaryOperatorFailable(e.Pos(), operand, "~")
 
 	case ast.UnaryReceive:
 		// <-expr: operand should be Task[T] or Channel[T]
@@ -822,6 +836,18 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		c.errorf(e.Pos(), "unsupported unary operator")
 		return nil
 	}
+}
+
+// checkUnaryOperatorFailable resolves a prefix unary operator via
+// checkUnaryOperator and, when the operator method is failable, requires the
+// enclosing function to be failable (codegen auto-propagates the {ok, value, err}
+// result). Symmetric with checkOperatorFailable (T0984).
+func (c *Checker) checkUnaryOperatorFailable(pos ast.Pos, operand types.Type, op string) types.Type {
+	result := c.checkUnaryOperator(pos, operand, op)
+	if c.unaryOperatorCanError(operand, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
+	}
+	return result
 }
 
 func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string) types.Type {
@@ -904,6 +930,11 @@ func (c *Checker) checkIncDecOperator(pos ast.Pos, targetType types.Type, op str
 	resultType := c.checkUnaryOperator(pos, targetType, op)
 	if resultType != nil && !types.AssignableTo(resultType, targetType) {
 		c.errorf(pos, "operator %s must return %s, got %s", op, targetType, resultType)
+	}
+	// T0984: a failable operator returns {ok, value, err}; codegen auto-propagates
+	// the error, so the enclosing function must be failable.
+	if c.unaryOperatorCanError(targetType, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return resultType
 }

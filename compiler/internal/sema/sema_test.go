@@ -12839,6 +12839,198 @@ func TestNonFailableEnumCompoundOpNoError(t *testing.T) {
 	`)
 }
 
+// T0984: a PLAIN binary use of a failable operator (not compound) must also be
+// in a failable function — codegen auto-propagates the {ok, value, err} result.
+func TestFailableBinaryOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Vec {
+			int x `+"`value"+`;
+			+!(Vec other) Vec { if other.x < 0 { raise error("neg"); } return Vec(x: this.x + other.x); }
+		}
+		main() {
+			a := Vec(x: 10);
+			c := a + Vec(x: 5);
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
+// TestFailableBinaryOpInFailableScopeOk: the same plain binary in a failable
+// function is valid (auto-propagates).
+func TestFailableBinaryOpInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Vec {
+			int x `+"`value"+`;
+			+!(Vec other) Vec { if other.x < 0 { raise error("neg"); } return Vec(x: this.x + other.x); }
+		}
+		main!() {
+			a := Vec(x: 10);
+			c := a + Vec(x: 5);
+		}
+	`)
+}
+
+// TestNonFailableBinaryOpNoError: a non-failable user-defined operator in a plain
+// binary expression needs no failable scope.
+func TestNonFailableBinaryOpNoError(t *testing.T) {
+	checkOK(t, `
+		type Vec {
+			int x `+"`value"+`;
+			+(Vec other) Vec { return Vec(x: this.x + other.x); }
+		}
+		main() {
+			a := Vec(x: 10);
+			c := a + Vec(x: 5);
+		}
+	`)
+}
+
+// T0984: a prefix unary use of a failable operator must be in a failable function.
+func TestFailableUnaryOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Vec {
+			int x `+"`value"+`;
+			-!() Vec { if this.x < 0 { raise error("neg"); } return Vec(x: -this.x); }
+		}
+		main() {
+			a := Vec(x: 10);
+			c := -a;
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
+// TestFailableUnaryOpInFailableScopeOk: the same prefix unary in a failable
+// function is valid.
+func TestFailableUnaryOpInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Vec {
+			int x `+"`value"+`;
+			-!() Vec { if this.x < 0 { raise error("neg"); } return Vec(x: -this.x); }
+		}
+		main!() {
+			a := Vec(x: 10);
+			c := -a;
+		}
+	`)
+}
+
+// T0984: an inc/dec use of a failable operator must be in a failable function.
+func TestFailableIncDecOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Vec {
+			int x `+"`value"+`;
+			++!() Vec { if this.x < 0 { raise error("neg"); } return Vec(x: this.x + 1); }
+		}
+		main() {
+			a := Vec(x: 10);
+			a++;
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
+// TestFailableIncDecOpInFailableScopeOk: the same inc/dec in a failable function
+// is valid.
+func TestFailableIncDecOpInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Vec {
+			int x `+"`value"+`;
+			++!() Vec { if this.x < 0 { raise error("neg"); } return Vec(x: this.x + 1); }
+		}
+		main!() {
+			a := Vec(x: 10);
+			a++;
+		}
+	`)
+}
+
+// TestFailableEnumBinaryOpRequiresFailableScope: the plain-binary failable check
+// also applies to ENUM operands — binaryOperatorCanError resolves through the
+// *types.Enum case.
+func TestFailableEnumBinaryOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Acc {
+			val(int n),
+			+!(Acc other) Acc { if other.n() < 0 { raise error("neg"); } return Acc.val(this.n() + other.n()); }
+			n(this) int { match this { val(x) => { return x; }, } }
+		}
+		main() {
+			a := Acc.val(10);
+			c := a + Acc.val(5);
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
+// TestFailableEnumUnaryOpRequiresFailableScope: the prefix-unary failable check
+// also applies to ENUM operands — unaryOperatorCanError resolves through the
+// *types.Enum case (LookupUnaryMethod).
+func TestFailableEnumUnaryOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Acc {
+			val(int n),
+			-!() Acc { if this.n() < 0 { raise error("neg"); } return Acc.val(-this.n()); }
+			n(this) int { match this { val(x) => { return x; }, } }
+		}
+		main() {
+			a := Acc.val(10);
+			c := -a;
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
+// TestFailableEnumUnaryOpInFailableScopeOk: the same prefix-unary enum operator
+// in a failable function is valid (auto-propagates).
+func TestFailableEnumUnaryOpInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		enum Acc {
+			val(int n),
+			-!() Acc { if this.n() < 0 { raise error("neg"); } return Acc.val(-this.n()); }
+			n(this) int { match this { val(x) => { return x; }, } }
+		}
+		main!() {
+			a := Acc.val(10);
+			c := -a;
+		}
+	`)
+}
+
+// TestFailableGenericBinaryOpRequiresFailableScope: the plain-binary failable
+// check resolves through a generic instance — binaryOperatorCanError's
+// *types.Instance → *types.Named branch.
+func TestFailableGenericBinaryOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			T val;
+			+!(Box[T] other) Box[T] { if false { raise error("neg"); } return Box[T](val: this.val); }
+		}
+		main() {
+			a := Box[int](val: 1);
+			c := a + Box[int](val: 2);
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
+// TestFailableGenericUnaryOpRequiresFailableScope: the prefix-unary failable
+// check resolves through a generic instance — unaryOperatorCanError's
+// *types.Instance → *types.Named branch.
+func TestFailableGenericUnaryOpRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			T val;
+			-!() Box[T] { if false { raise error("neg"); } return Box[T](val: this.val); }
+		}
+		main() {
+			a := Box[int](val: 1);
+			c := -a;
+		}
+	`)
+	expectError(t, errs, "failable operator must be in a failable function")
+}
+
 func TestMonoSetterNotAllowed(t *testing.T) {
 	// T0703: `mono setters remain disallowed (symmetric with the `mono getter ban).
 	errs := checkErrs(t, "type Box[T] {\n"+

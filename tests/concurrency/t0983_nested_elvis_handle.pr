@@ -1,0 +1,257 @@
+// T0983: a BOUND elvis whose default operand is ITSELF an elvis
+// (`m := a ?: (b ?: c)`) must not double-free the innermost default when both
+// optionals are none. T0952 neutralizes a simple bound none-path default, but its
+// paren-peel does not reach through a nested elvis: the outer would value-identity
+// claim the inner elvis's PHI result (which claims nothing), leaving the inner
+// terminal default with its scope-exit owner while the bound variable ALSO takes an
+// owning drop → double Mutex.drop (pal_mutex_destroy + pal_free) → SEGV; Arc/Channel
+// survive a benign use-after-free. The fix propagates the bound obligation into the
+// inner elvis so it neutralizes its own terminal default and threads its per-path
+// bound flag up as the outer's none-path ownership. Recurses for deeper nesting.
+//
+// All tests are zero-leak-enforced batch tests; heap payloads (string) are used where
+// the handle carries one so a latent double-free surfaces as a leak or crash.
+// ── Mutex[int]: the SEGV repro from the tracker item ────────────────────────────
+// Outer-none + inner-none, owned-local terminal default → m aliases c.
+t0983_mutex_all_none_local() `test {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  Mutex[int] c = Mutex[int](9);
+  m := a ?: (b ?: c);
+  g := m.lock();
+  assert(g.borrow == 9, "all-none selects the innermost default");
+  g.close();
+}
+
+// Fresh-temp innermost default (constructed in the inner none-block, claimed there).
+t0983_mutex_all_none_freshtemp() `test {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  m := a ?: (b ?: Mutex[int](9));
+  g := m.lock();
+  assert(g.borrow == 9, "all-none fresh-temp innermost default");
+  g.close();
+}
+
+// Outer-some: `a` present, inner elvis never reached at runtime. The unselected inner
+// (and its terminal default `c`) must still drop via their own bindings.
+t0983_mutex_outer_some() `test {
+  Mutex[int] inner = Mutex[int](7);
+  Mutex[int]? a = inner;
+  Mutex[int]? b = none;
+  Mutex[int] c = Mutex[int](9);
+  m := a ?: (b ?: c);
+  g := m.lock();
+  assert(g.borrow == 7, "outer-some selects the source value");
+  g.close();
+}
+
+// Outer-none + inner-some: `b` present. The inner selects `b`; the unselected `c`
+// drops via its own binding, `b`'s inner is owned by `m` on this per-path flag.
+t0983_mutex_inner_some() `test {
+  Mutex[int] innerB = Mutex[int](5);
+  Mutex[int]? a = none;
+  Mutex[int]? b = innerB;
+  Mutex[int] c = Mutex[int](9);
+  m := a ?: (b ?: c);
+  g := m.lock();
+  assert(g.borrow == 5, "inner-some selects the middle optional value");
+  g.close();
+}
+
+// Typed decl form.
+t0983_mutex_typed_all_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  Mutex[int] c = Mutex[int](9);
+  Mutex[int] m = a ?: (b ?: c);
+  g := m.lock();
+  assert(g.borrow == 9, "typed-decl all-none innermost default");
+  g.close();
+}
+
+// Assignment form (re-assign an existing local).
+t0983_mutex_assign_all_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  Mutex[int] c = Mutex[int](9);
+  Mutex[int] m = Mutex[int](1);
+  m = a ?: (b ?: c);
+  g := m.lock();
+  assert(g.borrow == 9, "assignment all-none innermost default");
+  g.close();
+}
+
+// Parenthesized inner default operand — the inner neutralization must peel the parens
+// to reach owned-local `c`'s drop flag.
+t0983_mutex_paren_inner_default() `test {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  Mutex[int] c = Mutex[int](9);
+  m := a ?: (b ?: (c));
+  g := m.lock();
+  assert(g.borrow == 9, "paren inner-default all-none value");
+  g.close();
+}
+
+// ── Triple nesting: the neutralization must recurse an extra level ──────────────
+t0983_mutex_triple_all_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int]? b = none;
+  Mutex[int]? c = none;
+  Mutex[int] d = Mutex[int](11);
+  m := a ?: (b ?: (c ?: d));
+  g := m.lock();
+  assert(g.borrow == 11, "triple-nested all-none selects the deepest default");
+  g.close();
+}
+
+// Triple nesting where the MIDDLE optional is present (deepest never reached).
+t0983_mutex_triple_middle_some() `test {
+  Mutex[int] innerB = Mutex[int](6);
+  Mutex[int]? a = none;
+  Mutex[int]? b = innerB;
+  Mutex[int]? c = none;
+  Mutex[int] d = Mutex[int](11);
+  m := a ?: (b ?: (c ?: d));
+  g := m.lock();
+  assert(g.borrow == 6, "triple-nested middle-some selects the middle value");
+  g.close();
+}
+
+// ── Ref[string]: heap payload — surfaces the latent double-free as a leak ────────
+t0983_arc_string_all_none() `test {
+  Ref[string]? a = none;
+  Ref[string]? b = none;
+  Ref[string] c = Ref[string]("hello");
+  x := a ?: (b ?: c);
+  assert(x.borrow == "hello", "all-none selects the innermost arc");
+}
+
+t0983_arc_string_inner_some() `test {
+  Ref[string] innerB = Ref[string]("world");
+  Ref[string]? a = none;
+  Ref[string]? b = innerB;
+  Ref[string] c = Ref[string]("hello");
+  x := a ?: (b ?: c);
+  assert(x.borrow == "world", "inner-some selects the middle arc");
+}
+
+// ── Channel[string]: a buffered string is freed by Channel.drop — double-free bait
+t0983_channel_string_all_none() `test {
+  Channel[string]? a = none;
+  Channel[string]? b = none;
+  Channel[string] c = Channel[string](1);
+  ch := a ?: (b ?: c);
+  ch.send("buffered"); // owned by the channel; freed by Channel.drop at scope exit
+  ch.close();
+}
+
+// ── State-transition coverage: the recursion is PATH-CONDITIONAL ─────────────────
+// Loop body: `c` is re-declared every iteration with a fresh drop flag; the nested
+// none-path clears it each pass. A non-conditional clear would double-free on
+// iteration 2+ once the re-init runs again.
+t0983_mutex_nested_in_loop() `test {
+  for i in 0..3 {
+    Mutex[int]? a = none;
+    Mutex[int]? b = none;
+    Mutex[int] c = Mutex[int](i);
+    m := a ?: (b ?: c);
+    g := m.lock();
+    assert(g.borrow == i, "loop iteration selects the per-iter innermost default");
+    g.close();
+  }
+}
+
+// Nested block scope: the bound nested elvis lives in an inner `if` scope.
+t0983_mutex_nested_scope() `test {
+  if true {
+    Mutex[int]? a = none;
+    Mutex[int]? b = none;
+    Mutex[int] c = Mutex[int](9);
+    m := a ?: (b ?: c);
+    g := m.lock();
+    assert(g.borrow == 9, "nested-scope all-none value");
+    g.close();
+  }
+}
+
+// Generic context: exercises the typeSubst arm of the handle-drop resolution.
+pick_nested_mutex_t0983[T](T move seed) {
+  Mutex[T]? a = none;
+  Mutex[T]? b = none;
+  Mutex[T] c = Mutex[T](move seed);
+  m := a ?: (b ?: c);
+  g := m.lock();
+  g.close();
+}
+
+t0983_generic_context_all_none() `test {
+  pick_nested_mutex_t0983(7); // Mutex[int]
+  pick_nested_mutex_t0983("payload"); // Mutex[string] — heap payload instantiation
+}
+
+// ── elvisResultHeapDrop arm: droppable heap USER type ────────────────────────────
+// The `droppableRes` gate in the fix covers three result representations; the tests
+// above only exercise native handles (elvisResultHandleDrop). A heap user type with a
+// `drop()` routes through elvisResultHeapDrop — a DISTINCT arm that SEGVs pre-fix
+// (double free of the innermost default's instance). The string field is the
+// double-free bait: a latent second drop surfaces as a leak or invalid free.
+type T0983Box {
+  string name;
+  drop(~this) {
+  }
+}
+
+t0983_heap_user_all_none() `test {
+  T0983Box? a = none;
+  T0983Box? b = none;
+  T0983Box c = T0983Box(name: "boxed".repeat(2));
+  x := a ?: (b ?: c);
+  assert(x.name == "boxedboxed", "nested heap-user all-none selects innermost default");
+}
+
+// Heap-user inner-some: `b` present → the nested none-path runtime flag phi
+// (noneIncoming = nestedNoneFlag) governs ownership; the unselected `c` drops via its
+// own binding. Exercises the per-path (non-constant) flag for the heapDrop arm.
+t0983_heap_user_inner_some() `test {
+  T0983Box innerB = T0983Box(name: "middle".repeat(2));
+  T0983Box? a = none;
+  T0983Box? b = innerB;
+  T0983Box c = T0983Box(name: "deep".repeat(2));
+  x := a ?: (b ?: c);
+  assert(x.name == "middlemiddle", "nested heap-user inner-some selects the middle value");
+}
+
+// Map[K,V] result — also elvisResultHeapDrop; a buffered string value is double-free
+// bait for a latent second Map.drop of the innermost default.
+t0983_map_all_none() `test {
+  map[string, string]? a = none;
+  map[string, string]? b = none;
+  map[string, string] c = {
+    "k": "v".repeat(3)
+  };
+  m := a ?: (b ?: c);
+  assert(m.len == 1, "nested map all-none selects innermost default");
+}
+
+// ── ownedRes arm: string / Vector results (must-not-break) ───────────────────────
+// String and Vector route through elvisResultDrop (the ownedRes branch of the gate).
+// These already worked via the flat neutralization path pre-fix; with the fix present
+// they now flow through the nested-elvis branch instead, so these guard against the
+// fix REGRESSING the container representations. Heap payloads make a double-free visible.
+t0983_string_all_none() `test {
+  string? a = none;
+  string? b = none;
+  string c = "hello".repeat(3);
+  s := a ?: (b ?: c);
+  assert(s == "hellohellohello", "nested string all-none selects innermost default");
+}
+
+t0983_vector_all_none() `test {
+  string[]? a = none;
+  string[]? b = none;
+  string[] c = ["x".repeat(2), "y".repeat(2)];
+  v := a ?: (b ?: c);
+  assert(v.len == 2, "nested vector all-none selects innermost default");
+}

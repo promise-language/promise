@@ -9848,6 +9848,26 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 
 	// None path: evaluate default
 	c.block = noneBlock
+	// T0983: when a BOUND droppable elvis's default is itself an elvis
+	// (`m := a ?: (b ?: c)`), propagate the bound obligation into the inner elvis so
+	// IT neutralizes its own terminal default's owner (clear a local's drop flag /
+	// claim a fresh temp) and produces its own per-path bound drop flag. The outer
+	// then (a) claims the inner elvis's inline result temp and (b) inherits the inner's
+	// per-path flag as its none-path ownership — instead of value-identity claiming the
+	// inner phi, which neutralized nothing (the inner default kept its scope-exit owner
+	// while the bound variable also took an owning drop → double free / SEGV, T0983).
+	// Recurses naturally for deeper nesting (`a ?: (b ?: (c ?: d))`).
+	nestedBoundDefault := false
+	if boundResult {
+		_, _, ownedRes := c.elvisResultDrop(e)
+		droppableRes := ownedRes || c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil
+		if droppableRes {
+			if be, ok := unwrapDestructureParens(e.Right).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+				c.elvisResultBound = true
+				nestedBoundDefault = true
+			}
+		}
+	}
 	defaultVal := c.genExprAutoPropagate(e.Right)
 	// T0936: the none-path SELECTS the default. The result OWNS it (and must free it
 	// exactly once) only when we can neutralize the default's own owner here:
@@ -9859,7 +9879,24 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// or none for .rodata) so the result BORROWS it (noneOwned=false) — matching the
 	// ownership pass's borrow model for those operands and avoiding a double-free.
 	noneOwned := false
-	if _, _, owned := c.elvisResultDrop(e); owned {
+	// T0983: nested-elvis default — the inner elvis already neutralized its terminal
+	// default and set c.elvisBoundDropFlag. Capture that per-path flag (the outer's
+	// none-path ownership), reset it so the outer's own bound-flag phi below is not
+	// confused, and claim the inner elvis's inline result temp so it is not also freed
+	// at statement end. noneOwned=true records that the outer binding may own on the
+	// none-path (the exact per-path condition is the inherited flag, threaded below).
+	var nestedNoneFlag value.Value
+	if nestedBoundDefault {
+		nestedNoneFlag = c.elvisBoundDropFlag
+		c.elvisBoundDropFlag = nil
+		c.claimElvisDefaultTemp(defaultVal)
+		if nestedNoneFlag != nil {
+			noneOwned = true
+		}
+	}
+	if nestedNoneFlag != nil {
+		// Handled above — skip the flat neutralization paths below.
+	} else if _, _, owned := c.elvisResultDrop(e); owned {
 		// Vector[T]/T[] and string results (inline + bound), unchanged semantics.
 		noneOwned = c.neutralizeElvisNoneDefault(e, defaultVal)
 	} else if consumedByReceive {
@@ -9917,9 +9954,16 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 			if noneOwned {
 				noneF = 1
 			}
+			// T0983: a nested-elvis default contributes a per-path (runtime) flag, not a
+			// constant — the outer binding owns the selected value on the none-path exactly
+			// when the inner elvis's own bound flag says so.
+			var noneIncoming value.Value = constant.NewInt(irtypes.I1, noneF)
+			if nestedNoneFlag != nil {
+				noneIncoming = nestedNoneFlag
+			}
 			c.elvisBoundDropFlag = mergeBlock.NewPhi(
 				&ir.Incoming{X: constant.NewInt(irtypes.I1, someF), Pred: someEnd},
-				&ir.Incoming{X: constant.NewInt(irtypes.I1, noneF), Pred: noneEnd},
+				&ir.Incoming{X: noneIncoming, Pred: noneEnd},
 			)
 		}
 	}

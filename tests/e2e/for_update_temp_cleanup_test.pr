@@ -1,0 +1,101 @@
+// T0988: the UPDATE clause of a C-style `for init; cond; update` loop is a
+// statement boundary, but it is codegen'd inline rather than through genStmt, so
+// it historically skipped the per-statement heap-temp cleanup. Any heap
+// temporary produced by the update expression (or the RHS of a compound update)
+// leaked once per iteration. These tests exercise both the expression-only and
+// compound-update forms; the zero-leak harness turns any remaining leak into a
+// LEAK failure, so they directly gate the fix.
+type Bag {
+  int[] items;
+  drop(~this) {
+  }
+}
+
+make_bag() Bag {
+  return Bag(items: [1]);
+}
+use_bag(Bag b) int {
+  return b.items.len;
+}
+
+// Expression-only update whose RHS builds a heap temporary each iteration.
+for_update_expr_heap_temp() `test {
+  counter := 0;
+  n := 0;
+  for j := 0; counter < 3; n = use_bag(make_bag()) {
+    counter = counter + 1;
+  }
+  assert(n == 1, "n should be 1 (use_bag returns items.len)");
+}
+
+// Accumulator type with a non-native `+` operator whose RHS is a heap
+// constructor — the T0715-adjacent compound-update case.
+type Acc {
+  int total;
+  drop(~this) {
+  }
+  + (Acc other) Acc {
+    return Acc(total: this.total + other.total);
+  }
+}
+
+// Compound update `acc += Bag-like heap value` in the UPDATE clause.
+for_update_compound_heap_temp() `test {
+  counter := 0;
+  acc := Acc(total: 0);
+  for j := 0; counter < 3; acc += Acc(total: counter) {
+    counter = counter + 1;
+  }
+  // The update runs after the body, so counter is 1,2,3 at the three update
+  // evaluations => 1+2+3 = 6.
+  assert(acc.total == 6, "acc.total should be 1+2+3 == 6");
+}
+
+// Control: the SAME compound in the loop BODY was always clean (body runs
+// genStmt). Kept to guard against a regression in the body path.
+for_body_compound_heap_temp_control() `test {
+  acc := Acc(total: 0);
+  for counter := 0; counter < 3; counter = counter + 1 {
+    acc += Acc(total: counter);
+  }
+  assert(acc.total == 3, "acc.total should be 0+1+2 == 3");
+}
+
+// A string concatenation in the update clause produces an unclaimed heap string
+// temp per iteration — drained via the stmtTemps path of cleanupStmtLevelTemps.
+// Without the fix this leaks 2 allocations; kept as a distinct temp-category gate
+// (the earlier tests exercise heap user instances + vectors, not strings).
+for_update_string_heap_temp() `test {
+  counter := 0;
+  total := 0;
+  for j := 0; counter < 3; total = total + ("a" + "b").len {
+    counter = counter + 1;
+  }
+  assert(total == 6, "total should be 3 * 2 == 6");
+}
+
+// An inline enum constructor holding a heap payload, evaluated in the update
+// clause and not consumed by a variable — drained via the enumCtorTemps
+// (B0267/B0269) branch of cleanupStmtLevelTemps. Without the fix this leaks the
+// per-iteration Payload instance + its vector; this is the only test that
+// exercises the enum-constructor-temp path through the for-update boundary.
+type Payload {
+  int[] data;
+  drop(~this) {
+  }
+}
+enum Wrapped {
+  Full(Payload p),
+  Empty,
+}
+sink_wrapped(Wrapped w) int {
+  return 1;
+}
+for_update_enum_ctor_heap_temp() `test {
+  counter := 0;
+  n := 0;
+  for j := 0; counter < 3; n = sink_wrapped(Wrapped.Full(Payload(data: [counter]))) {
+    counter = counter + 1;
+  }
+  assert(n == 1, "n should be 1 (sink_wrapped returns 1)");
+}

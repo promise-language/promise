@@ -707,24 +707,35 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 	}
 	// T0073: Drop any unclaimed string temps from this statement.
 	// T0088: Drop any unclaimed heap instance temps (e.g., _FnIter in iterator chains).
-	if c.block != nil && c.block.Term == nil {
-		c.cleanupStmtTemps()
-		c.cleanupHeapTemps()
-		c.cleanupEnvTemps() // T0100
-		// B0267/B0269: Drop all inline enum constructor temps not consumed by a variable.
-		for _, et := range c.enumCtorTemps {
-			flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
-			dropBlk := c.newBlock("enum.ctor.drop")
-			skipBlk := c.newBlock("enum.ctor.skip")
-			c.block.NewCondBr(flag, dropBlk, skipBlk)
-			c.block = dropBlk
-			ptr := c.block.NewLoad(irtypes.I8Ptr, et.alloca)
-			c.block.NewCall(et.dropFunc, ptr)
-			c.block.NewBr(skipBlk)
-			c.block = skipBlk
-		}
-		c.enumCtorTemps = c.enumCtorTemps[:0]
+	c.cleanupStmtLevelTemps()
+}
+
+// cleanupStmtLevelTemps drains all statement-scoped temporaries at a statement
+// boundary: unclaimed string/vector/channel stmtTemps (T0073), heap-instance
+// temps (T0088), closure-env temps (T0100), and inline enum-constructor temps
+// (B0267/B0269). Runs only when the current block is still open. Extracted from
+// genStmt so non-genStmt statement boundaries — e.g. the C-style for-update
+// clause (T0988) — can share the exact same cleanup.
+func (c *Compiler) cleanupStmtLevelTemps() {
+	if c.block == nil || c.block.Term != nil {
+		return
 	}
+	c.cleanupStmtTemps()
+	c.cleanupHeapTemps()
+	c.cleanupEnvTemps() // T0100
+	// B0267/B0269: Drop all inline enum constructor temps not consumed by a variable.
+	for _, et := range c.enumCtorTemps {
+		flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
+		dropBlk := c.newBlock("enum.ctor.drop")
+		skipBlk := c.newBlock("enum.ctor.skip")
+		c.block.NewCondBr(flag, dropBlk, skipBlk)
+		c.block = dropBlk
+		ptr := c.block.NewLoad(irtypes.I8Ptr, et.alloca)
+		c.block.NewCall(et.dropFunc, ptr)
+		c.block.NewBr(skipBlk)
+		c.block = skipBlk
+	}
+	c.enumCtorTemps = c.enumCtorTemps[:0]
 }
 
 // genAutoPropagate generates implicit error propagation for a failable call
@@ -10905,8 +10916,8 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 					// T0715: a non-native operator returns a FRESH value; drop the
 					// old heap user-type / droppable-enum value (alias-guarded;
 					// no-op for value types/scalars) to preserve the zero-leak policy.
-					// (The RHS operator-argument temp is NOT cleaned here — the
-					// update clause lacks statement-temp cleanup; tracked in T0988.)
+					// (The RHS operator-argument temp is drained by the trailing
+					// cleanupStmtLevelTemps call below — T0988.)
 					c.dropOldUserValueAtPtr(alloca, c.info.Types[s.UpdateTarget], result)
 					c.block.NewStore(result, alloca)
 				}
@@ -10916,6 +10927,13 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 		// Expression-only update
 		c.genExpr(s.UpdateValue)
 	}
+	// T0988: the update clause is a statement boundary but is codegen'd inline
+	// here rather than via genStmt, so it must run the same statement-temp
+	// cleanup — otherwise any heap temporary produced by the update expression
+	// (or the RHS of a compound update) leaks once per iteration. The compound
+	// store-back result is not tracked as a temp (genCompoundOp deliberately
+	// omits result tracking), so this only drains the unclaimed argument temps.
+	c.cleanupStmtLevelTemps()
 	c.emitYieldCheck()
 	c.block.NewBr(headerBlock)
 

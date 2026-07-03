@@ -271,16 +271,23 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			// that would cause a double-free at scope exit. Peels ParenExpr so
 			// `(o)!` is recognized like `o!` (otherwise `((o)!).field` double-frees).
 			isIdentSource := isIdentOptionalUnwrapSource(e.Expr)
+			// T1182 gap: a container/array-index borrow (`arr[i]!` / `vec[i]!`)
+			// aliases the container's owned slot — genOptionalForceUnwrap records
+			// this in optionalUnwrapContainerBorrow (still set when we get here).
+			// Tracking the borrowed inner as a statement temp double-frees at scope
+			// exit alongside the container's element drop (fatal "invalid free" on
+			// macOS; silent over-free elsewhere). Mirrors the guard added inside
+			// genOptionalForceUnwrap and trackHeapUserTypeResult's existing check.
 			if named == types.TypString {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
-				} else if !isIdentSource {
+				} else if !isIdentSource && !c.optionalUnwrapContainerBorrow {
 					c.trackStringTemp(result)
 				}
 			} else if named == types.TypVector {
 				if c.optionalFieldVector {
 					c.optionalFieldVector = false
-				} else if !isIdentSource {
+				} else if !isIdentSource && !c.optionalUnwrapContainerBorrow {
 					if elemType, ok := types.AsVector(exprType); ok {
 						c.trackVectorTempWithElemType(result, elemType)
 					} else {
@@ -14451,8 +14458,17 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// optionalFieldString/optionalFieldVector above; native handles have no
 	// such flag, so skip via the same owner-governed member-source predicate
 	// the heap-user case uses (isOwnerGovernedMemberOptionalUnwrapSource, T0775).
+	// T1182 gap: a container/array-index borrow (`arr[i]!` / `vec[i]!`, or a
+	// clone-less Map value) also aliases the container's owned slot — recorded in
+	// optionalUnwrapContainerBorrow above. trackHeapUserTypeResult already skips
+	// owned-temp registration for it, but the string/vector/Arc/Weak/Mutex/Task/
+	// Channel tracking below is reached inline on the same no-dup path and was
+	// unguarded, so an inline `string?[N]`/`Vector?[N]` element unwrap registered
+	// the borrowed inner as a statement temp — a double free at scope exit (the
+	// container's element drop frees it too). macOS's allocator turns this into a
+	// fatal "invalid free (bad header magic)"; other allocators over-free silently.
 	if !isIdentOptionalUnwrapSource(expr) && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector &&
-		!c.isOwnerGovernedMemberOptionalUnwrapSource(expr) {
+		!c.optionalUnwrapContainerBorrow && !c.isOwnerGovernedMemberOptionalUnwrapSource(expr) {
 		if result.Type().Equal(irtypes.I8Ptr) {
 			innerType := c.info.Types[expr]
 			if opt, ok := innerType.(*types.Optional); ok {

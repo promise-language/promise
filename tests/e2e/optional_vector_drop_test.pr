@@ -307,3 +307,39 @@ test_optional_heap_vector_return_unwrap_escape() `test {
   assert(r.n == 9, "vec returned elem scalar survives owner drop");
   assert(r.tag == "vvee", "vec returned elem heap sub-field survives owner drop");
 }
+
+// T1182 string/vector gap: inline force-unwrap of a fixed-array / Vector index
+// whose element is `string?` or `Vector[T]?` borrows the container's owned slot,
+// but genOptionalForceUnwrap (and its OptionalUnwrapExpr caller) registered the
+// borrowed inner as an owned statement temp — a double free at scope exit
+// alongside the container's element drop. Detected fatally on macOS ("invalid
+// free (bad header magic)"); silent over-free on Linux/Windows. The heap-user
+// element case was fixed as T1182; these lock the string/Vector element gap.
+t1182_str_arr_inline_unwrap() `test {
+  string? a0 = "x" + "1";
+  string? a1 = "z" + "2";
+  string?[2] r = [a0, a1];
+  // Inline index + force-unwrap in a borrow (comparison) context — the pattern
+  // that double-freed. r still owns both strings and drops them at scope exit.
+  assert(r[0]! == "x1", "str arr [0] inline unwrap");
+  assert(r[1]! == "z2", "str arr [1] inline unwrap");
+  assert(r[0]! == "x1", "str arr [0] inline unwrap repeat (slot intact)");
+}
+
+t1182_vec_of_optstr_inline_unwrap() `test {
+  string? a0 = "p" + "1";
+  string?[] v = [a0];
+  assert(v[0]! == "p1", "vec[optstr] [0] inline unwrap");
+  assert(v[0]! == "p1", "vec[optstr] [0] inline unwrap repeat (slot intact)");
+}
+
+t1182_intvec_arr_inline_unwrap() `test {
+  int[]? a0 = [1, 2, 3];
+  int[]? a1 = [4, 5];
+  int[]?[2] r = [a0, a1];
+  // Element is Optional[Vector[int]] — the Vector-tracking sibling of the string
+  // path; inline `r[i]!` must borrow, not register an owned temp.
+  assert(r[0]![0] == 1, "intvec arr [0] inline unwrap");
+  assert(r[1]![1] == 5, "intvec arr [1] inline unwrap");
+  assert(r[0]!.len == 3, "intvec arr [0] slot intact after unwrap");
+}

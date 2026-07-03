@@ -7381,8 +7381,29 @@ func (c *Compiler) subjectIsOwnedRvalueEnum(expr ast.Expr, subjectType types.Typ
 				// iff typeNeedsMatchDup || enumMatchDupSafe. Keeping these in lockstep
 				// is what makes the inline `match m[k]!` drop-vs-borrow decision match
 				// the actual ownership the `[]` method hands back (T1129).
+				//
+				// T1191: a Map/Set `[]` read whose subject is itself an optional
+				// (`match m[k] { none => .., _ => .. }`) hands back an owned `V?`
+				// whose ownership is governed by the payload V, not the `V?` wrapper.
+				// Classify dup-safety on the optional's payload so `match m[k]` gets
+				// the same spill + optional-drop that `o := m[k]` / `if v := m[k]`
+				// already do — `typeNeedsMatchDup(V?)`/`enumMatchDupSafe(V?, nil)` are
+				// both false (an Optional is neither a droppable Named nor an Enum),
+				// which otherwise misclassifies the read as a borrow and leaks V.
+				// Walk past every Optional layer (nested `V??` for `Map[K, V?]`) so the
+				// classifier reaches the same bottom inner type that the drop registrar
+				// maybeRegisterOptionalDrop dispatches on (T0391) — keeping the drop-vs-
+				// borrow decision and the actual optional-drop in lockstep.
+				classifyType := unwrapRefsType(subjectType)
+				for {
+					opt, ok := classifyType.(*types.Optional)
+					if !ok {
+						break
+					}
+					classifyType = opt.Elem()
+				}
 				return c.indexDispatchesToMethod(e) &&
-					(c.typeNeedsMatchDup(subjectType) || c.enumMatchDupSafe(subjectType, nil))
+					(c.typeNeedsMatchDup(classifyType) || c.enumMatchDupSafe(classifyType, nil))
 			}
 			return false
 		}

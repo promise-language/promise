@@ -208,3 +208,102 @@ optional_match_as_expression() `test {
   };
   assert(label == "present", "expression match yields present branch");
 }
+
+// T1191: a `match` on a Map/Set `[]` index read returning an optional
+// (`match m[k] { none => .., _ => .. }`) hands back an OWNED `V?` whose
+// ownership is governed by the payload V, not the `V?` wrapper. The owned-rvalue
+// subject-drop machinery (T1187) must classify the read on the payload so the
+// inner heap value is dropped on every match exit — otherwise it leaks. Binding
+// first (`o := m[k]`) or `if v := m[k]` already work; these pin the inline form.
+
+make_d_map() Map[string, D] {
+  m := Map[string, D]();
+  m["k"] = D(x: 11);
+  return m;
+}
+
+optional_match_map_index_present() `test {
+  m := make_d_map();
+  r := match m["k"] {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "map hit rvalue optional, no leak");
+}
+
+optional_match_map_index_miss() `test {
+  m := make_d_map();
+  r := match m["nope"] {
+    none => 1, _ => 2,
+  };
+  assert(r == 1, "map miss selects none arm, no leak");
+}
+
+// --- Map-index with a droppable-string payload (real inner drop) ---
+
+type S {
+  string name;
+}
+
+make_s_map() Map[string, S] {
+  m := Map[string, S]();
+  m["k"] = S(name: "hello");
+  return m;
+}
+
+optional_match_map_index_string_payload() `test {
+  m := make_s_map();
+  r := match m["k"] {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "map hit string-payload optional, no leak");
+}
+
+// --- Move-out of the name-binding arm (must not double-free) ---
+// The whole-value name binding aliases the subject drop flag (T1187), so moving
+// the payload out clears it — exactly one owner frees the buffer.
+
+optional_match_map_index_move_out() `test {
+  m := make_s_map();
+  o := match m["k"] {
+    none => none,
+    h => h,
+  };
+  assert(o!.name == "hello", "moved-out map payload, no leak, no double-free");
+}
+
+// --- Nested optional value: Map[K, V?] → `[]` returns V?? ---
+// The `[]` read hands back a doubly-optional whose ownership is still governed by
+// the bottom payload S. The subject-drop classifier must walk past EVERY optional
+// layer (not just one) to reach S — the same bottom type the optional-drop
+// registrar dispatches on (T0391) — so the inner heap string is freed. Pins the
+// loop in subjectIsOwnedRvalueEnum; a single-layer strip would leave the classifier
+// at `S?` (non-droppable Optional), misclassify as a borrow, and leak.
+
+make_s_opt_map() Map[string, S?] {
+  m := Map[string, S?]();
+  S? s = S(name: "hello");
+  m["k"] = s;
+  return m;
+}
+
+optional_match_map_index_nested_optional() `test {
+  m := make_s_opt_map();
+  r := match m["k"] {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "nested-optional map hit, no leak");
+}
+
+// --- Parenthesized subject: `match (m[k]) { .. }` ---
+// The subject-drop classifier peels transparent wrappers (parentheses) before
+// reaching the IndexExpr, then runs the T1191 payload-driven dup classification.
+// Pins the ParenExpr peel + Map-index classification working together — the
+// parens must not hide the owned-rvalue read and reintroduce the leak.
+
+optional_match_map_index_paren() `test {
+  m := make_s_map();
+  r := match (m["k"]) {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "parenthesized map hit, no leak");
+}

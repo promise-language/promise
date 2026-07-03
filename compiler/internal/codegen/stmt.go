@@ -10902,15 +10902,26 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 		// Inc/dec update: target++ or target--
 		c.genIncDecTarget(s.UpdateTarget, s.UpdateIsInc)
 	} else if s.UpdateTarget != nil {
-		// Compound update: target op= value
-		updateVal := c.genExpr(s.UpdateValue)
-		ident, ok := s.UpdateTarget.(*ast.IdentExpr)
-		if ok {
-			alloca, ok := c.locals[ident.Name]
+		if s.UpdateOp == ast.OpAssign {
+			// T1192: a plain reassignment in the update clause must go through the
+			// full assignment path (drop-old + RHS temp claim + move/drop-flag
+			// bookkeeping). A raw store double-frees/segfaults an owned heap value
+			// and leaks strings/vectors. The sema Types/AutoPropagate maps are keyed
+			// on the original UpdateTarget/UpdateValue expr nodes, which are reused
+			// verbatim, so they resolve unchanged. genStmt also emits the
+			// per-iteration statement-temp cleanup in the update block.
+			c.genStmt(&ast.AssignStmt{
+				Target: s.UpdateTarget,
+				Op:     s.UpdateOp,
+				Value:  s.UpdateValue,
+			})
+		} else {
+			// Compound update: target op= value
+			updateVal := c.genExpr(s.UpdateValue)
+			ident, ok := s.UpdateTarget.(*ast.IdentExpr)
 			if ok {
-				if s.UpdateOp == ast.OpAssign {
-					c.block.NewStore(updateVal, alloca)
-				} else {
+				alloca, ok := c.locals[ident.Name]
+				if ok {
 					current := c.block.NewLoad(alloca.ElemType, alloca)
 					result := c.genCompoundOp(s.UpdateOp, c.info.Types[s.UpdateTarget], current, updateVal)
 					// T0715: a non-native operator returns a FRESH value; drop the

@@ -1,0 +1,118 @@
+// T1192: a plain reassignment (`b = f()`) in the UPDATE clause of a C-style
+// `for init; cond; update` loop must drop the old owned heap value and claim
+// the RHS temp. A raw store double-freed/segfaulted an owned heap value and
+// leaked strings/vectors.
+type Simple {
+  int x;
+  drop(~this) {
+  }
+}
+mk_simple() Simple {
+  return Simple(x: 9);
+}
+
+// Was: `fatal: double free` (heap int-payload).
+update_assign_heap_int() `test {
+  c := 0;
+  s := Simple(x: 0);
+  for j := 0; c < 3; s = mk_simple() {
+    c = c + 1;
+  }
+  assert(s.x == 9, "final s.x == 9");
+}
+
+type Bag {
+  int[] items;
+  drop(~this) {
+  }
+}
+mk_bag() Bag {
+  return Bag(items: [1, 2]);
+}
+
+// Was: `fatal: segmentation fault at 0x0` (heap type with a vector field).
+update_assign_heap_vector() `test {
+  c := 0;
+  b := Bag(items: [0]);
+  for j := 0; c < 3; b = mk_bag() {
+    c = c + 1;
+  }
+  assert(b.items.len == 2, "final b.items.len == 2");
+  assert(b.items[0] == 1, "b.items[0] == 1");
+}
+
+// Was: leak + wrong value (string reassignment in the update clause).
+update_assign_string() `test {
+  c := 0;
+  s := "start";
+  for j := 0; c < 3; s = "done" {
+    c = c + 1;
+  }
+  assert(s == "done", "final s == done");
+}
+
+// Control: the same reassignment in the loop BODY was already correct — lock in
+// parity so the update-clause path matches the body path.
+body_assign_heap_parity() `test {
+  b := Bag(items: [0]);
+  for c := 0; c < 3; c = c + 1 {
+    b = mk_bag();
+  }
+  assert(b.items.len == 2, "body: final b.items.len == 2");
+}
+
+type Item {
+  int x;
+  drop(~this) {
+  }
+}
+mk_item() Item {
+  return Item(x: 7);
+}
+type Holder {
+  Item it;
+  drop(~this) {
+  }
+}
+
+// Non-identifier target (field access). The old bare-store branch only handled
+// bare identifiers; routing through genStmt enables field-target reassignment,
+// which must still drop the overwritten owned field value.
+update_assign_field_target() `test {
+  c := 0;
+  h := Holder(it: Item(x: 0));
+  for j := 0; c < 3; h.it = mk_item() {
+    c = c + 1;
+  }
+  assert(h.it.x == 7, "h.it.x == 7");
+}
+
+// Non-identifier target (map index) in the update clause.
+update_assign_map_index() `test {
+  c := 0;
+  map[string, int] m = {:};
+  m["k"] = 0;
+  for j := 0; c < 3; m["k"] = 42 {
+    c = c + 1;
+  }
+  assert(m["k"]! == 42, "m[k] == 42");
+}
+
+type Pt {
+  int x `value;
+  int y `value;
+}
+mk_pt() Pt {
+  return Pt(x: 5, y: 6);
+}
+
+// Value-type struct reassignment: no drop path, must remain correct after
+// routing through the full assignment path.
+update_assign_value_type() `test {
+  c := 0;
+  p := Pt(x: 0, y: 0);
+  for j := 0; c < 3; p = mk_pt() {
+    c = c + 1;
+  }
+  assert(p.x == 5 && p.y == 6, "p == (5,6)");
+}

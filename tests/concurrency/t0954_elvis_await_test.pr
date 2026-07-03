@@ -49,11 +49,66 @@ t_some_unselected_fresh_temp_default() `test(exclude: wasm) {
 // default `(c ?: b)`; `c` is some so the inner picks `c` (a temp optional), leaving the
 // deeper owned-local `b` to be dropped by its own binding. Confirms the consume-signal
 // reset in genElvis (the nested elvis runs un-consumed) is correct on this path.
-// NOTE: the sibling case where the deeper owned-local IS selected (both `a` and `c`
-// none) double-frees `b` — tracked as T0955 (out of scope for T0954's single-level fix).
 t_nested_default_deeper_unselected() `test(exclude: wasm) {
   Task[int]? a = none;
   Task[int]? c = go get_42();
   Task[int] b = go get_42();
   assert((<-(a ?: (c ?: b))) == 42, "task await nested default deeper unselected");
+}
+
+// T0955: nested-elvis default whose deeper owned-local IS selected — `a` none, `c`
+// none, so the outer selects `(c ?: b)` and the inner selects owned-local `b`, which
+// the await joins+frees. The consume signal must thread through the outer elvis into
+// the inner (via c.elvisResultConsumed re-thread) so the inner neutralizes `b`'s
+// scope-exit drop; otherwise `b`'s G is freed by both the await and its own binding
+// → double-free (SEGV/hang).
+t_nested_default_none_none() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int]? c = none;
+  Task[int] b = go get_42();
+  assert((<-(a ?: (c ?: b))) == 42, "task await nested default none/none");
+}
+
+// T0955 leak-guard: outer some so the WHOLE nested default `(c ?: b)` is unselected.
+// The await consumes `a`; both `c` and `b` must still be dropped exactly once by
+// their own bindings (guards that threading the consume signal into an *unevaluated*
+// nested default does not strip a needed drop).
+t_nested_default_outer_some_unselected() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  Task[int]? c = none;
+  Task[int] b = go get_42();
+  assert((<-(a ?: (c ?: b))) == 42, "task await nested default outer some unselected");
+}
+
+// T0955 deeper nesting `<-(a ?: (b ?: (c ?: d)))` — all-none, so the terminal
+// owned-local `d` is selected and awaited. Confirms the consume signal re-threads at
+// every level of nesting so `d`'s G is freed exactly once.
+t_nested_default_triple_all_none() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int]? b = none;
+  Task[int]? c = none;
+  Task[int] d = go get_42();
+  assert((<-(a ?: (b ?: (c ?: d)))) == 42, "task await triple nested default all none");
+}
+
+// T0955: nested-elvis default whose deepest operand is a FRESH `go` temp (not a named
+// local) — `a` none, `c` none, so the inner selects the fresh handle temp. The consume
+// signal re-threaded into the inner must take neutralizeElvisNoneDefault's fresh-temp
+// branch (claimElvisDefaultTemp), not the owned-local (clearDropFlag) branch, so the
+// await is the only owner of the fresh G. Complements t_nested_default_none_none,
+// which covers the named-local branch.
+t_nested_default_none_none_fresh_temp() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int]? c = none;
+  assert((<-(a ?: (c ?: (go get_42())))) == 42, "task await nested default none/none fresh-temp");
+}
+
+// T0955 leak-guard for the nested fresh-temp branch: `c` some so the inner selects `c`
+// and the fresh `go` temp is UNSELECTED — it must still be dropped exactly once by its
+// own binding (guards that re-threading the consume signal into the inner does not
+// strip the fresh temp's drop on the some-path).
+t_nested_default_inner_some_fresh_temp_unselected() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int]? c = go get_42();
+  assert((<-(a ?: (c ?: (go get_42())))) == 42, "task await nested default inner some fresh-temp unselected");
 }

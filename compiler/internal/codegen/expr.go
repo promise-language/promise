@@ -9865,7 +9865,7 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// while the bound variable also took an owning drop → double free / SEGV, T0983).
 	// Recurses naturally for deeper nesting (`a ?: (b ?: (c ?: d))`).
 	nestedBoundDefault := false
-	if boundResult || returnedResult {
+	if boundResult || returnedResult || consumedByReceive {
 		_, _, ownedRes := c.elvisResultDrop(e)
 		droppableRes := ownedRes || c.elvisResultHandleDrop(e) != nil || c.elvisResultHeapDrop(e) != nil
 		if droppableRes {
@@ -9873,7 +9873,7 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 				if boundResult {
 					c.elvisResultBound = true
 					nestedBoundDefault = true
-				} else {
+				} else if returnedResult {
 					// T0982: nested-elvis default in a RETURN (`return a ?: (b ?: c)`).
 					// Propagate the returned obligation into the inner elvis so IT
 					// neutralizes its own terminal owned-local default's scope-exit drop
@@ -9884,6 +9884,16 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 					// genReturnStmt, so the inner's flag-clear is the whole fix. Recurses
 					// naturally for deeper nesting (`a ?: (b ?: (c ?: d))`).
 					c.elvisResultReturned = true
+				} else {
+					// T0955: nested-elvis default consumed by an enclosing `<-` await
+					// (`<-(a ?: (c ?: b))`). Propagate the consume signal into the inner
+					// elvis so IT neutralizes its own terminal owned-local/fresh-temp
+					// default (the await joins+frees the selected G; without this the
+					// inner default's binding frees it again → double-free/SEGV/hang).
+					// Like the returned case, threads NO per-path flag up — the await is
+					// the single owner. Recurses for deeper nesting
+					// (`<-(a ?: (b ?: (c ?: d)))`).
+					c.elvisResultConsumed = true
 				}
 			}
 		}

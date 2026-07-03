@@ -1,0 +1,163 @@
+// T0987: storing a user type that declares a non-native binary operator (e.g.
+// `+`) as a Map VALUE was broken. Two symptoms were fixed by T1016 (value-type-
+// as-map-value codegen panic; heap-type overwrite double-free). The remaining
+// defect — a compound assignment `m[k] += x` where V is a heap user type with a
+// non-native operator — SEGV'd on overwrite because Map.[] returns the stored
+// heap value ALIASED (not dup'd), and the compound path both dropped `current`
+// directly AND let Map.[]= drop the overwritten value → double free. The fix
+// suppresses the direct drop for the Map-aliased heap-user-type case (Map.[]=
+// owns that drop). These tests exercise set/get/overwrite/compound across value-
+// type, heap-user-type, and enum map values, plus escape and match regressions.
+type Vec `doc("A pure value type with a plus operator — the operator induces a vtable, exercising the value-type-as-map-value layout path (case A).") {
+  int x `value;
+  +(Vec other) Vec {
+    return Vec(x: this.x + other.x);
+  }
+}
+
+type Counter `doc("A heap (non-value) user type with a plus operator but NO drop and only scalar fields — the pal_free-only heap-user shape. Its map compound must still drop the aliased old value (regression guard for the aliasedMapHeapValue guard being too broad).") {
+  int n;
+  +(Counter other) Counter {
+    return Counter(n: this.n + other.n);
+  }
+}
+
+type Bag `doc("A heap (non-value) user type with a plus operator and a drop — the Map-aliased compound path (the remaining T0987 defect).") {
+  int[] items;
+  +(Bag other) Bag {
+    r := Bag(items: []);
+    for x in this.items {
+      r.items.push(x);
+    }
+    for x in other.items {
+      r.items.push(x);
+    }
+    return r;
+  }
+  drop(~this) {
+  }
+}
+
+type Addable `doc("Structural constraint for the vtable-inducing `+` operator, used to exercise the compound map path inside a monomorphized method body.") {
+  +(Self other) Self `abstract;
+}
+
+type Registry[V: Addable] `doc("Generic holder of a `map[string, V]` whose method does `slots[k] += delta`. Compiling this method for a concrete droppable V (Bag) exercises aliasedMapHeapValue's type-substitution branch inside a mono body.") {
+  map[string, V] slots;
+  bump(~this, string k, V move delta) Registry[V] {
+    this.slots[k] += delta;
+    return this;
+  }
+}
+
+enum Tag {
+  Named(string name),
+
+  +(Tag other) Tag {
+    return Tag.Named(this.as_name() + other.as_name());
+  }
+
+  as_name(this) string {
+    match this {
+      Named(n) => {
+        return n;
+      },
+    }
+  }
+}
+
+// Case A regression: a pure value type with a vtable-inducing operator as a map
+// value. Set, get, and compound must all work.
+value_type_map_value() `test {
+  m := map[string, Vec]();
+  m["a"] = Vec(x: 1);
+  assert(m["a"]!.x == 1, "value-type map get should be 1");
+  m["a"] += Vec(x: 4);
+  assert(m["a"]!.x == 5, "value-type map += should be 5");
+}
+
+// Case B regression: a heap user type with a plus operator, plain overwrite.
+heap_type_map_overwrite() `test {
+  m := map[string, Bag]();
+  m["a"] = Bag(items: [1]);
+  m["a"] = Bag(items: [2, 3]); // plain overwrite, drops the old Bag
+  assert(m["a"]!.items.len == 2, "overwritten bag should have 2 items");
+}
+
+// The remaining defect: compound assignment on a heap-user-type map value. This
+// SEGV'd (double free) before the fix; now runs leak-clean.
+heap_type_map_compound() `test {
+  m := map[string, Bag]();
+  m["a"] = Bag(items: [1]);
+  m["a"] += Bag(items: [2, 3]); // read (aliased), +, overwrite
+  assert(m["a"]!.items.len == 3, "compound bag should have 3 items");
+  m["a"] += Bag(items: [4]); // second compound over the fresh value
+  assert(m["a"]!.items.len == 4, "second compound bag should have 4 items");
+}
+
+// Regression: a pal_free-only heap user type (operator, but no drop / only
+// scalar fields) as a map value. The direct drop of `current` is the only path
+// that frees the aliased old instance — Map.[]='s overwrite-drop does not — so
+// this leaked when aliasedMapHeapValue over-broadly suppressed it. Must run
+// leak-clean across set + repeated compound.
+pal_free_heap_map_compound() `test {
+  m := map[string, Counter]();
+  m["a"] = Counter(n: 1);
+  m["a"] += Counter(n: 4);
+  assert(m["a"]!.n == 5, "pal-free heap compound should be 5");
+  m["a"] += Counter(n: 10);
+  assert(m["a"]!.n == 15, "second pal-free heap compound should be 15");
+}
+
+// Plain overwrite of a pal_free-only heap map value (no compound) — Map.[]=
+// owns this drop; must stay leak-clean and independent of the compound path.
+pal_free_heap_map_overwrite() `test {
+  m := map[string, Counter]();
+  m["a"] = Counter(n: 1);
+  m["a"] = Counter(n: 2);
+  assert(m["a"]!.n == 2, "overwritten pal-free heap value should be 2");
+}
+
+// The fix must not disturb the enum-as-map-value compound path (Map.[] dups the
+// enum payload, so `current` is owned and its drop is correct).
+enum_type_map_compound() `test {
+  m := map[string, Tag]();
+  m["a"] = Tag.Named("x");
+  m["a"] += Tag.Named("y");
+  assert(m["a"]!.as_name() == "xy", "enum map += should concatenate to xy");
+}
+
+// Escape: a heap-user-type value bound out of the map must outlive the map (the
+// bind path dups; the map drops its own copy). No double free at either end.
+extract_bag() Bag {
+  m := map[string, Bag]();
+  m["a"] = Bag(items: [7, 8]);
+  return m["a"]!;
+}
+
+heap_type_map_escape() `test {
+  b := extract_bag();
+  assert(b.items.len == 2, "escaped bag should still have 2 items after map drop");
+}
+
+// Mono-body regression: `slots[k] += delta` compiled inside a generic method
+// (Registry[Bag].bump). This drives aliasedMapHeapValue through the active
+// typeSubst (V -> Bag) — the "works inside monomorphized bodies too" claim that
+// is otherwise untested. Must be correct and leak-clean.
+mono_map_compound() `test {
+  r := Registry[Bag](slots: map[string, Bag]());
+  r.slots["a"] = Bag(items: [1]);
+  r2 := r.bump("a", Bag(items: [2, 3]));
+  assert(r2.slots["a"]!.items.len == 3, "mono map compound should be 3");
+}
+
+// match over a heap-user-type map value (name-binding read of the payload).
+heap_type_map_match() `test {
+  m := map[string, Bag]();
+  m["a"] = Bag(items: [9]);
+  n := match m["a"] {
+    none => 0,
+    bag => bag!.items.len,
+  };
+  assert(n == 1, "matched bag should have 1 item");
+}

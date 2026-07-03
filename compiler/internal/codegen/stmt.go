@@ -4603,6 +4603,14 @@ func (c *Compiler) emitStringDropOldValue(current, result value.Value) {
 // old `current` would otherwise leak. Handles string, heap user types, and
 // droppable enums; alias-guarded against `result` so a no-op operator returning
 // the same value isn't double-freed. Scalars / value types are no-ops. T0714.
+//
+// Caller caveat (T0987): Map.[] dups its string / enum-payload value but returns
+// a heap USER-type value ALIASED to the map's stored instance. Since Map.[]=
+// already drops the overwritten value, genMethodCompoundAssign must skip this
+// call for the Map-aliased *droppable* heap-user-type case (see
+// aliasedMapHeapValue) or the instance is freed twice. The pal_free-only shape
+// (isHeapUserNoDropPalFree) still needs this call — for it the direct drop is
+// the only thing that frees the aliased old instance.
 func (c *Compiler) emitDropOldCompoundValue(current, result value.Value, operandType types.Type) {
 	if operandType == nil {
 		return
@@ -4638,6 +4646,33 @@ func (c *Compiler) emitDropOldCompoundValue(current, result value.Value, operand
 	if extractEnum(operandType) != nil {
 		c.emitVariantFieldDrop(current, operandType)
 	}
+}
+
+// aliasedMapHeapValue reports whether a Map value type V is a *droppable* heap
+// user type whose value struct Map.[] returns ALIASED to the stored instance
+// (rather than dup'd), AND whose direct drop actually frees the instance. The
+// compound-assignment path uses this to skip the direct drop of `current`,
+// because for these types both the direct drop and Map.[]='s overwrite-drop free
+// the same instance → double free (T0987). Applies the active type/self
+// substitutions so it works inside monomorphized bodies too.
+//
+// NOTE: this deliberately excludes the pal_free-only heap-user shape
+// (isHeapUserNoDropPalFree). For those the direct drop is still required: it is
+// the path that frees the aliased old instance, and it is alias-guarded so it
+// does not double-free with Map.[]=. Suppressing it there leaks the old value
+// (regression caught by TestT0987_PalFreeHeapMapCompoundStillDrops and
+// pal_free_heap_compound).
+func (c *Compiler) aliasedMapHeapValue(valType types.Type) bool {
+	if valType == nil {
+		return false
+	}
+	if c.typeSubst != nil {
+		valType = types.Substitute(valType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		valType = types.SubstituteSelf(valType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	return isDroppableHeapUserType(valType)
 }
 
 // hasVectorStringBinding returns true if there's at least one Vector[string]
@@ -11486,15 +11521,20 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	//     `this`), so a heap user-type / droppable-enum `current` would also leak.
 	// emitDropOldCompoundValue is alias-guarded and a no-op for scalars/value
 	// types.
-	c.emitDropOldCompoundValue(current, result, operandType)
-	// NOTE (T0715): compound assignment whose operand is a *Named user type with a
-	// non-native operator* held as a *map value* is mishandled by the map/mono
-	// machinery before/around this path: a value type → codegen panic in Map.[];
-	// a heap Named type → double-free on overwrite (both unverified/separate).
-	// The *enum*-operand form (T1165) was NOT a defect in this compound path: its
-	// observed leak came from the inline `m[k]!`-receiver drop in
-	// freshEnumReceiverNeedsDrop (expr.go), not here — that is fixed and verified
-	// leak-free.
+	//
+	// T0987: unlike strings/enum-payloads (which Map.[] dups) and plain user
+	// containers (whose getter returns a fresh value), Map.[] returns a heap
+	// user-type value ALIASED to the map's stored instance — no dup. Map.[]=
+	// already drops the old stored value on overwrite, so dropping `current`
+	// here for that case would free the same instance twice (double-free /
+	// SEGV). Suppress the direct drop only for the Map-aliased heap-user-type
+	// case; strings, enums, and non-map containers still need it.
+	_, mapVal, isMap := types.AsMap(targetType)
+	if isMap && c.aliasedMapHeapValue(mapVal) {
+		// Map.[]= owns the drop of the overwritten value; do nothing here.
+	} else {
+		c.emitDropOldCompoundValue(current, result, operandType)
+	}
 
 	call := c.block.NewCall(setFn, instancePtr, keyVal, result)
 	c.propagateIfFailable(call) // T0708

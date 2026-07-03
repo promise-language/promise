@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -152,11 +153,19 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	}
 
 	if !allowFetch {
-		// No-fetch probe: only usable if every blob is already cached.
+		// No-fetch probe: only usable if every blob is already cached or can be
+		// materialized from the host-stable prebuilts cache (neither hits the
+		// network). Serving prebuilts here — ahead of Homebrew/PATH in findLLVMTool
+		// — keeps the toolchain deterministic on a machine that has built the
+		// compiler.
 		for _, e := range entries {
-			if !store.Has(e.SHA256) {
-				return "", nil
+			if store.Has(e.SHA256) {
+				continue
 			}
+			if prebuiltToolPath(strings.TrimPrefix(e.Name, llvmEntryPrefix)) != "" {
+				continue
+			}
+			return "", nil
 		}
 	}
 
@@ -171,10 +180,14 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	var needFetch []*blobstore.ManifestEntry
 	var download int64
 	for _, e := range entries {
-		if !store.Has(e.SHA256) {
-			needFetch = append(needFetch, e)
-			download += e.DownloadSize()
+		if store.Has(e.SHA256) {
+			continue
 		}
+		if prebuiltToolPath(strings.TrimPrefix(e.Name, llvmEntryPrefix)) != "" {
+			continue // satisfied locally from the prebuilts cache — no download
+		}
+		needFetch = append(needFetch, e)
+		download += e.DownloadSize()
 	}
 	if len(needFetch) > 0 && isCharDevice(os.Stderr) {
 		switch {
@@ -202,17 +215,29 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	// GC), never a half-built viewDir.
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
 		for _, e := range entries {
+			toolName := strings.TrimPrefix(e.Name, llvmEntryPrefix)
 			var blobPath string
-			if store.Has(e.SHA256) {
+			switch {
+			case store.Has(e.SHA256):
+				// Content-verified CAS blob (a prior fetch, or embedded LLVM staged
+				// by a -full build) is canonical — always prefer it.
 				blobPath = store.BlobPath(e.SHA256)
-			} else {
+			case prebuiltToolPath(toolName) != "":
+				// Otherwise reuse the LLVM toolchain bin/build / ./make already staged
+				// on this host instead of downloading it. The prebuilt is the same LLVM
+				// release the manifest names (extracted from the same upstream
+				// archive), just signed differently, so its sha differs from the CAS
+				// blob — but the view is validated by presence and materializeViewFile
+				// re-signs the copy on macOS, so a differently-signed prebuilt is fine.
+				blobPath = prebuiltToolPath(toolName)
+			default:
 				p, rerr := resolver.Resolve(e.Name)
 				if rerr != nil {
 					return rerr // surface offline / broken-release error
 				}
 				blobPath = p
 			}
-			dst := filepath.Join(tmpDir, strings.TrimPrefix(e.Name, llvmEntryPrefix))
+			dst := filepath.Join(tmpDir, toolName)
 			if err := materializeViewFile(blobPath, dst); err != nil {
 				return err
 			}
@@ -224,6 +249,128 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 
 	llvmViewDir = viewDir
 	return viewDir, nil
+}
+
+// prebuiltsCacheRoot returns the host-stable prebuilts cache that bin/build /
+// ./make populate with the LLVM toolchain (opt/llc/lld). It mirrors
+// tools/build/common.PrebuiltsCacheRoot; the compiler and build tools are
+// separate Go modules, so this small, stable path rule is duplicated rather than
+// imported. Returns "" only when the user home dir cannot be determined.
+func prebuiltsCacheRoot() string {
+	if v := strings.TrimSpace(os.Getenv("PROMISE_PREBUILTS_CACHE")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); v != "" {
+		return filepath.Join(v, "promise", "prebuilts")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Caches", "promise", "prebuilts")
+	case "windows":
+		if v := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); v != "" {
+			return filepath.Join(v, "promise", "prebuilts")
+		}
+		return filepath.Join(home, "AppData", "Local", "promise", "prebuilts")
+	default:
+		return filepath.Join(home, ".cache", "promise", "prebuilts")
+	}
+}
+
+// prebuiltToolPaths memoizes the per-process prebuilt-tool lookup so the view
+// build (which asks per tool) and the pre-fetch probes don't restat the cache.
+var (
+	prebuiltToolMu    sync.Mutex
+	prebuiltToolCache map[string]string
+)
+
+// prebuiltToolPath returns the path to a raw LLVM tool (opt/llc/lld, or the
+// .exe forms on Windows) in the host-stable prebuilts cache, or "" if it is not
+// available there. This lets a machine that has built the compiler materialize
+// the toolchain view from local disk instead of downloading it — the whole point
+// of the prebuilts cache is that these tools already live "outside promise home".
+//
+// The prebuilt is trusted the same way findLLVMTool already trusts a matching
+// LLVM on PATH/Homebrew: it is the LLVM release this compiler build was pinned to
+// (bin/build wrote tools.ok only after verifying the upstream archive sha), and
+// the copy placed into the view is re-signed on macOS.
+func prebuiltToolPath(toolName string) string {
+	if toolName == "" {
+		return ""
+	}
+	prebuiltToolMu.Lock()
+	defer prebuiltToolMu.Unlock()
+	if prebuiltToolCache == nil {
+		prebuiltToolCache = map[string]string{}
+	}
+	if p, ok := prebuiltToolCache[toolName]; ok {
+		return p
+	}
+	resolved := findPrebuiltTool(toolName)
+	prebuiltToolCache[toolName] = resolved
+	return resolved
+}
+
+func findPrebuiltTool(toolName string) string {
+	root := prebuiltsCacheRoot()
+	if root == "" {
+		return ""
+	}
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	// Any llvm-slim version dir for this target. When several are cached from
+	// different checkouts, prefer the newest — all are the pinned major and
+	// functionally interchangeable (the same trust model findLLVMTool already
+	// applies to any matching LLVM on PATH/Homebrew).
+	matches, _ := filepath.Glob(filepath.Join(root, "llvm-slim", "*", target, toolName))
+	best, bestVer := "", ""
+	for _, p := range matches {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Size() == 0 {
+			continue
+		}
+		// tools.ok is written only after bin/build fully extracts + verifies the
+		// toolchain dir, so its presence rejects a half-populated cache.
+		if _, err := os.Stat(filepath.Join(filepath.Dir(p), "tools.ok")); err != nil {
+			continue
+		}
+		// Path shape: <root>/llvm-slim/<version>/<target>/<tool>.
+		ver := filepath.Base(filepath.Dir(filepath.Dir(p)))
+		if best == "" || compareLLVMVersion(ver, bestVer) > 0 {
+			best, bestVer = p, ver
+		}
+	}
+	return best
+}
+
+// compareLLVMVersion compares dot-separated numeric version strings ("22.1.0"),
+// returning -1, 0, or 1. A non-numeric component is treated as 0 so a malformed
+// directory name never outranks a well-formed one — unlike a lexical sort, this
+// orders 22.10.0 after 22.9.0.
+func compareLLVMVersion(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var ai, bi int
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			if ai > bi {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 // publishViewDir materializes a view directory atomically: it creates a sibling

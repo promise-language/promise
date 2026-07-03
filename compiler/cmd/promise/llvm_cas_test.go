@@ -131,6 +131,112 @@ func TestDecompressEmbeddedLLVMDispatch(t *testing.T) {
 	}
 }
 
+// TestPrebuiltToolPath covers resolving an LLVM tool from the host-stable
+// prebuilts cache — the offline path that lets a machine which has built the
+// compiler materialize the toolchain view without a network download.
+func TestPrebuiltToolPath(t *testing.T) {
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	root := t.TempDir()
+	toolDir := filepath.Join(root, "llvm-slim", "22.1.0", target)
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	optPath := filepath.Join(toolDir, "opt")
+	if err := os.WriteFile(optPath, []byte("fake-opt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROMISE_PREBUILTS_CACHE", root)
+
+	reset := func() {
+		prebuiltToolMu.Lock()
+		prebuiltToolCache = nil
+		prebuiltToolMu.Unlock()
+	}
+	defer reset()
+
+	// Without the tools.ok completion marker the dir is treated as half-populated.
+	reset()
+	if got := prebuiltToolPath("opt"); got != "" {
+		t.Fatalf("expected no match before tools.ok, got %q", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(toolDir, "tools.ok"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reset()
+	if got := prebuiltToolPath("opt"); got != optPath {
+		t.Fatalf("expected %q, got %q", optPath, got)
+	}
+
+	// A tool absent from the cache, and the empty name, both resolve to "".
+	reset()
+	if got := prebuiltToolPath("llc"); got != "" {
+		t.Fatalf("expected no match for absent tool, got %q", got)
+	}
+	reset()
+	if got := prebuiltToolPath(""); got != "" {
+		t.Fatalf("expected empty for empty name, got %q", got)
+	}
+}
+
+// TestPrebuiltToolPathPrefersNewestVersion verifies that when several toolchain
+// versions are cached the newest wins by numeric (not lexical) order — 22.10.0
+// must beat 22.9.0.
+func TestPrebuiltToolPathPrefersNewestVersion(t *testing.T) {
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	root := t.TempDir()
+	var newest string
+	for _, v := range []string{"22.9.0", "22.10.0"} {
+		dir := filepath.Join(root, "llvm-slim", v, target)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "opt")
+		if err := os.WriteFile(p, []byte("opt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "tools.ok"), []byte("ok"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if v == "22.10.0" {
+			newest = p
+		}
+	}
+	t.Setenv("PROMISE_PREBUILTS_CACHE", root)
+	prebuiltToolMu.Lock()
+	prebuiltToolCache = nil
+	prebuiltToolMu.Unlock()
+	defer func() {
+		prebuiltToolMu.Lock()
+		prebuiltToolCache = nil
+		prebuiltToolMu.Unlock()
+	}()
+
+	if got := prebuiltToolPath("opt"); got != newest {
+		t.Fatalf("expected newest version %q, got %q", newest, got)
+	}
+}
+
+func TestCompareLLVMVersion(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"22.10.0", "22.9.0", 1},
+		{"22.9.0", "22.10.0", -1},
+		{"22.1.0", "22.1.0", 0},
+		{"22.1.1", "22.1.0", 1},
+		{"23.0.0", "22.99.99", 1},
+		{"22.1", "22.1.0", 0}, // missing components compare as 0
+		{"garbage", "22.0.0", -1},
+	}
+	for _, c := range cases {
+		if got := compareLLVMVersion(c.a, c.b); got != c.want {
+			t.Errorf("compareLLVMVersion(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 // TestViewComplete verifies the view-dir completeness check: it requires every
 // LLVM blob file and, when lld is present, the lld-mode aliases.
 func TestViewComplete(t *testing.T) {

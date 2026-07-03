@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func sha256hex(b []byte) string {
@@ -137,6 +138,97 @@ func TestResolveMismatchFallsThrough(t *testing.T) {
 	}
 	if badHits != 1 || goodHits != 1 {
 		t.Fatalf("expected one hit each, got bad=%d good=%d", badHits, goodHits)
+	}
+}
+
+// TestResolveStallFallsThrough covers the download stall watchdog: a source that
+// sends headers + a partial body then wedges (holds the connection open with no
+// further bytes) must not hang the build. The watchdog cancels it and fetch()
+// falls through to the next ranked source. Regression for the untimed http.Get
+// that blocked the whole test suite on a slow/half-open connection over a VPN.
+func TestResolveStallFallsThrough(t *testing.T) {
+	prev := downloadStallTimeout
+	downloadStallTimeout = 150 * time.Millisecond
+	defer func() { downloadStallTimeout = prev }()
+
+	release := make(chan struct{})
+	var stallHits, goodHits int32
+	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&stallHits, 1)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("x")) // partial body, then wedge until the test ends
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-release
+	}))
+	// Order matters: close(release) must run before stall.Close() (which waits for
+	// the in-flight handler), else the handler — blocked on <-release — deadlocks
+	// Close. Deferred LIFO runs close(release) first.
+	defer stall.Close()
+	defer close(release)
+
+	good := []byte("good bytes")
+	goodHash := sha256hex(good)
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&goodHits, 1)
+		w.Write(good)
+	}))
+	defer goodSrv.Close()
+
+	store := newTestStore(t)
+	m := mustManifest(t, ManifestEntry{
+		Name: "llvm-opt", SHA256: goodHash, Size: int64(len(good)), Kind: KindBlob,
+		Sources: []Source{{Blob: stall.URL + "/opt"}, {Blob: goodSrv.URL + "/opt"}},
+	})
+
+	p, err := Resolve(store, m, "llvm-opt")
+	if err != nil {
+		t.Fatalf("resolve should fall through past the stalled source: %v", err)
+	}
+	if got, _ := os.ReadFile(p); !bytes.Equal(got, good) {
+		t.Fatal("did not get good bytes after stall fallthrough")
+	}
+	if stallHits == 0 || goodHits == 0 {
+		t.Fatalf("expected both sources hit, got stall=%d good=%d", stallHits, goodHits)
+	}
+}
+
+// TestResolveHeaderStallFallsThrough covers the stall watchdog firing during the
+// response-header wait (before any body) — a source that accepts the connection
+// but never sends a response. This exercises the Do()-error stall branch (the
+// HTTP/2 case where ResponseHeaderTimeout does not apply). fetch() must fall
+// through to the next source rather than hang.
+func TestResolveHeaderStallFallsThrough(t *testing.T) {
+	prev := downloadStallTimeout
+	downloadStallTimeout = 150 * time.Millisecond
+	defer func() { downloadStallTimeout = prev }()
+
+	release := make(chan struct{})
+	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // never write a response until the test ends
+	}))
+	defer stall.Close()
+	defer close(release)
+
+	good := []byte("good bytes")
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(good)
+	}))
+	defer goodSrv.Close()
+
+	store := newTestStore(t)
+	m := mustManifest(t, ManifestEntry{
+		Name: "llvm-opt", SHA256: sha256hex(good), Size: int64(len(good)), Kind: KindBlob,
+		Sources: []Source{{Blob: stall.URL + "/opt"}, {Blob: goodSrv.URL + "/opt"}},
+	})
+
+	p, err := Resolve(store, m, "llvm-opt")
+	if err != nil {
+		t.Fatalf("resolve should fall through past the header-stalled source: %v", err)
+	}
+	if got, _ := os.ReadFile(p); !bytes.Equal(got, good) {
+		t.Fatal("did not get good bytes after header-stall fallthrough")
 	}
 }
 

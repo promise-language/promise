@@ -1,20 +1,55 @@
 package blobstore
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/andybalholm/brotli"
 )
+
+// downloadClient is the HTTP client for all CAS blob/archive fetches. It bounds
+// connection establishment, TLS handshake, and response-header latency so an
+// unreachable or non-responsive mirror fails promptly and fetch() falls through
+// to the next ranked source instead of hanging the build. Client.Timeout is
+// deliberately left unset: a legitimately large toolchain download over a slow
+// link must not be killed by a fixed whole-transfer cap — mid-stream stalls are
+// bounded separately by the per-read watchdog in downloadLimited (a wedged or
+// half-open socket, e.g. a dropped VPN tunnel, would otherwise block forever in
+// resp.Body.Read with no OS-level timeout).
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
+
+// downloadStallTimeout aborts a transfer that delivers no bytes for this long.
+// Chosen well above normal TCP hiccups but far below the build's patience so a
+// silently-wedged connection surfaces as an error within a minute. A var (not a
+// const) so tests can drive the stall path without waiting a real minute.
+var downloadStallTimeout = 60 * time.Second
 
 // OfflineError is the exact §4.4 message emitted when a dependency is uncached
 // and the network is unreachable. It points at the remedies owned by T0771
@@ -569,8 +604,29 @@ func loudMismatch(name, srcURL, expected, got string, bytesWasted int64) {
 // Resolver has a progress sink, label identifies the item and the wire transfer
 // is reported byte-by-byte for user feedback.
 func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label string) (string, error) {
-	resp, err := http.Get(rawURL)
+	// A stall watchdog cancels the request if the body delivers no bytes for
+	// downloadStallTimeout, converting a wedged/half-open connection into a
+	// prompt error (so fetch() can try the next source) rather than an unbounded
+	// hang. Each successful Read pushes the deadline out, so a slow-but-live
+	// transfer is never killed.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(downloadStallTimeout, func() { stalled.Store(true); cancel() })
+	defer watchdog.Stop()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
+		return "", err
+	}
+	resp, err := downloadClient.Do(req)
+	if err != nil {
+		if stalled.Load() {
+			// Watchdog fired during connect/handshake/header wait (notably HTTP/2,
+			// where ResponseHeaderTimeout does not apply) — report the stall rather
+			// than the opaque "context canceled".
+			return "", &netError{fmt.Errorf("connection stalled (no response for %s) from %s", downloadStallTimeout, rawURL)}
+		}
 		return "", &netError{err}
 	}
 	defer resp.Body.Close()
@@ -583,11 +639,11 @@ func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label st
 	}
 	defer f.Close()
 	h := sha256.New()
-	var reader io.Reader = resp.Body
+	var reader io.Reader = &stallReader{r: resp.Body, watchdog: watchdog, timeout: downloadStallTimeout}
 	if sizeLimit > 0 {
 		// Read one extra byte so an overshoot is detected rather than silently
 		// truncated.
-		reader = io.LimitReader(resp.Body, sizeLimit+1)
+		reader = io.LimitReader(reader, sizeLimit+1)
 	}
 	if r.progress != nil {
 		r.progress.Start(label, resp.ContentLength)
@@ -596,6 +652,9 @@ func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label st
 	}
 	n, err := io.Copy(io.MultiWriter(h, f), reader)
 	if err != nil {
+		if stalled.Load() {
+			return "", &netError{fmt.Errorf("download stalled (no data for %s) from %s", downloadStallTimeout, rawURL)}
+		}
 		return "", err
 	}
 	if sizeLimit > 0 && n > sizeLimit {
@@ -605,6 +664,21 @@ func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label st
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// stallReader rearms a watchdog timer before each Read so that a body which
+// stops delivering bytes (a half-open socket, a dropped VPN tunnel) trips the
+// timer and cancels the request context, unblocking the otherwise-unbounded
+// resp.Body.Read. A live transfer keeps resetting the deadline and is unaffected.
+type stallReader struct {
+	r        io.Reader
+	watchdog *time.Timer
+	timeout  time.Duration
+}
+
+func (s *stallReader) Read(b []byte) (int, error) {
+	s.watchdog.Reset(s.timeout)
+	return s.r.Read(b)
 }
 
 // progressReader forwards the byte count of each Read to a DownloadProgress sink

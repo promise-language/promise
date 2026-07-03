@@ -61,6 +61,144 @@ optional_match_borrowed_present() `test {
   }
 }
 
+// --- T1187: owned-rvalue optional subject (call return) with heap payload ---
+// A `match make_opt() { none => .., _ => .. }` rvalue has no owner; the value-
+// match path must spill it and drop the payload on every exit, or it leaks.
+
+make_present() D? {
+  return D(x: 42);
+}
+make_none() D? {
+  return none;
+}
+make_s() string? {
+  return "hello world this is a long heap string";
+}
+make_v() int[]? {
+  return[1, 2, 3];
+}
+
+optional_match_rvalue_present() `test {
+  r := match make_present() {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "rvalue heap present, no leak");
+}
+
+optional_match_rvalue_none() `test {
+  r := match make_none() {
+    none => 1, _ => 2,
+  };
+  assert(r == 1, "rvalue none, no payload");
+}
+
+optional_match_rvalue_name_read() `test {
+  r := match make_present() {
+    none => 0, h => h!.x,
+  };
+  assert(r == 42, "rvalue name-binding read, no leak");
+}
+
+optional_match_rvalue_string() `test {
+  r := match make_s() {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "rvalue string payload drop, no leak");
+}
+
+optional_match_rvalue_vector() `test {
+  r := match make_v() {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "rvalue vector payload drop, no leak");
+}
+
+optional_match_rvalue_escape() `test {
+  // The name binding aliases the subject; moving it out clears the subject drop
+  // flag so the payload is dropped exactly once by its new owner (no double-free).
+  o := match make_present() {
+    none => none, h => h,
+  };
+  if v := o {
+    assert(v.x == 42, "escaped rvalue rebinds correctly");
+  } else {
+    assert(false, "escaped rvalue must be present");
+  }
+}
+
+// --- Non-droppable payload: the maybeRegisterOptionalDrop no-op branch ---
+// An owned-rvalue `int?` subject is still an rvalue (spill path runs) but its
+// payload needs no drop, so maybeRegisterOptionalDrop registers nothing and the
+// subject drop flag stays nil (the `subjectDropFlag != nil` guard is false). No
+// drop machinery, no leak, correct value on both present and none.
+
+make_int() int? {
+  return 42;
+}
+make_int_none() int? {
+  return none;
+}
+
+optional_match_rvalue_int_present() `test {
+  r := match make_int() {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "int rvalue present, nil drop flag");
+}
+
+optional_match_rvalue_int_none() `test {
+  r := match make_int_none() {
+    none => 1, _ => 2,
+  };
+  assert(r == 1, "int rvalue none, nil drop flag");
+}
+
+optional_match_rvalue_int_name() `test {
+  // Name binding with a nil subject drop flag: no aliasing, no drop.
+  r := match make_int() {
+    none => 0, h => h! + 1,
+  };
+  assert(r == 43, "int rvalue name binding, nil drop flag");
+}
+
+// --- Method-call return rvalue (CallExpr on a method, heap payload) ---
+
+type Maker {
+  make() D? {
+    return D(x: 9);
+  }
+}
+
+optional_match_rvalue_method() `test {
+  m := Maker();
+  r := match m.make() {
+    none => 1, _ => 2,
+  };
+  assert(r == 2, "method-return rvalue heap present, no leak");
+}
+
+// --- Guard on the name-binding arm of an owned-rvalue optional ---
+// The guard reads the bound payload; the subject drop flag still fires on every
+// exit (guard true, guard false, and none), so no leak on any path.
+
+optional_match_rvalue_guard_true() `test {
+  r := match make_present() {
+    none => 0,
+    h if h!.x > 5 => 100,
+    _ => 200,
+  };
+  assert(r == 100, "guard-true name arm, no leak");
+}
+
+optional_match_rvalue_guard_false() `test {
+  r := match make_present() {
+    none => 0,
+    h if h!.x > 100 => 100,
+    _ => 200,
+  };
+  assert(r == 200, "guard-false falls through, no leak");
+}
+
 // --- Match as an expression bound to a var (exercises buildMatchPhi) ---
 
 optional_match_as_expression() `test {

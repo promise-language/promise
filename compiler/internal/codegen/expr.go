@@ -7324,7 +7324,25 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 		return c.genEnumMatch(e, e.Subject, subject, enum, enumLayout, enumHasDrop, subjectType, subjectDropFlag)
 	}
 
-	return c.genValueMatch(e, subject, subjectType)
+	// T1187: an owned-rvalue Optional subject (a call/method/constructor return of
+	// type T?) with a droppable payload has no owner — genValueMatch only reads the
+	// present flag (T1002), so the inner heap value would leak. Spill it to a temp
+	// and register the same optional-drop binding a `v := <expr>; match v` local
+	// would get, so it is dropped on every match exit. Guards mirror the T1119 enum
+	// spill: a borrowed subject (`T?&`) or a place (ident/field) is owned elsewhere
+	// and must NOT get this drop (would double-free).
+	var subjectDropFlag *ir.InstAlloca
+	if opt, ok := unwrapRefsType(subjectType).(*types.Optional); ok &&
+		!isRefType(subjectType) && c.subjectIsOwnedRvalueEnum(e.Subject, subjectType) {
+		spill := c.createEntryAlloca(subject.Type())
+		c.block.NewStore(subject, spill)
+		subjVar := c.uniqueLocalName("match.subject")
+		c.maybeRegisterOptionalDrop(subjVar, spill, opt)
+		// nil unless maybeRegisterOptionalDrop registered a drop (non-droppable
+		// inner like int? no-ops → flag stays nil → no aliasing needed).
+		subjectDropFlag = c.dropFlags[subjVar]
+	}
+	return c.genValueMatch(e, subject, subjectType, subjectDropFlag)
 }
 
 // subjectIsOwnedRvalueEnum reports whether a match subject expression produces a
@@ -7745,7 +7763,7 @@ func (c *Compiler) clearBlockResultDropFlags(block *ast.Block) {
 }
 
 // genValueMatch generates a match expression on a non-enum value using comparison chains.
-func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectType types.Type) value.Value {
+func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectType types.Type, subjectDropFlag *ir.InstAlloca) value.Value {
 	mergeBlock := c.newBlock("match.end")
 
 	// T0496: the match expression's own result type, used as the contextual target
@@ -7935,6 +7953,15 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				alloca.SetName(c.uniqueLocalName(np.Name))
 				c.block.NewStore(subject, alloca)
 				c.locals[np.Name] = alloca
+				// T1187: a whole-value name binding ALIASES the owned-rvalue optional
+				// subject (no dup). Alias its drop flag so a move-out of the binding
+				// (`o := match make() { none => none, h => h }`) clears the subject
+				// drop too — otherwise the payload is dropped here AND by its new
+				// owner. clearMatchArmResultDropFlags clears this shared flag when the
+				// bound name is the arm result and escapes (mirrors T1119 enum path).
+				if subjectDropFlag != nil {
+					c.dropFlags[np.Name] = subjectDropFlag
+				}
 			}
 
 			// If there's a guard, evaluate it and conditionally branch

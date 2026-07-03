@@ -10675,6 +10675,8 @@ func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value,
 	// here would misread a user iterator's fields as the _FnIter _parent pointer and
 	// recurse into garbage. A concrete iterator type uses pal_free.
 	iterNamed := extractNamed(iterRetType)
+	// T1000: value-type iterators are rejected in sema (checkDuckTypedForIn), so
+	// the value branch here is unreachable — the guard stays as defensive code.
 	if iterNamed != nil && !iterNamed.IsValueType() {
 		if _, ok := iterResult.Type().(*irtypes.StructType); ok {
 			instancePtr := c.block.NewExtractValue(iterResult, 1)

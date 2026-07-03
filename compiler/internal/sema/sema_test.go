@@ -1623,6 +1623,163 @@ func TestInfiniteLoop(t *testing.T) {
 	checkOK(t, `test() { for { break; } }`)
 }
 
+// T1000: a value type (all fields `value) is copied on each next() call, so its
+// iteration state never advances — reject value-type for-in iterators in sema
+// rather than emitting IR that infinite-loops / segfaults.
+func TestForInValueTypeIteratorRejected(t *testing.T) {
+	// Case 1 — direct value-type iterator (next() on the value type itself).
+	errs := checkErrs(t, `
+		type ValIter {
+			int cur `+"`value"+`;
+			int stop `+"`value"+`;
+			next(~this) int? {
+				if this.cur >= this.stop { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		test() { for x in ValIter(cur: 0, stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "cannot be a for-in iterator")
+
+	// Case 2 — value-type stream whose iter() returns a value-type iterator.
+	errs = checkErrs(t, `
+		type ValIter {
+			int cur `+"`value"+`;
+			int stop `+"`value"+`;
+			next(~this) int? {
+				if this.cur >= this.stop { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		type ValRange {
+			int stop `+"`value"+`;
+			iter() ValIter { return ValIter(cur: 0, stop: this.stop); }
+		}
+		test() { for x in ValRange(stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "iter() receiver is copied")
+
+	// Case 3 — value-type stream whose iter() returns a HEAP iterator: still
+	// rejected because the iter() receiver is copied.
+	errs = checkErrs(t, `
+		type HeapIter {
+			int cur;
+			int stop;
+			next(~this) int? {
+				if this.cur >= this.stop { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		type ValStream {
+			int stop `+"`value"+`;
+			iter() HeapIter { return HeapIter(cur: 0, stop: this.stop); }
+		}
+		test() { for x in ValStream(stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "iter() receiver is copied")
+
+	// Case 4 — heap stream whose iter() returns a value-type iterator: rejected
+	// via the returned-iterator branch.
+	errs = checkErrs(t, `
+		type ValIter {
+			int cur `+"`value"+`;
+			int stop `+"`value"+`;
+			next(~this) int? {
+				if this.cur >= this.stop { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		type HeapRange {
+			int stop;
+			iter() ValIter { return ValIter(cur: 0, stop: this.stop); }
+		}
+		test() { for x in HeapRange(stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "cannot be a for-in iterator")
+
+	// Negative control — a heap iterator with next() int? still type-checks.
+	checkOK(t, `
+		type HeapIter {
+			int cur;
+			int stop;
+			next(~this) int? {
+				if this.cur >= this.stop { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		test() { for x in HeapIter(cur: 0, stop: 3) { int y = x; } }
+	`)
+
+	// Case 5 — GENERIC direct value-type iterator. Exercises the *types.Instance
+	// branch of checkDuckTypedForIn (subst != nil) combined with IsValueType();
+	// the non-generic cases above only reach the plain *types.Named branch.
+	errs = checkErrs(t, `
+		type ValIter[T] {
+			T cur `+"`value"+`;
+			T stop `+"`value"+`;
+			next(~this) T? {
+				if this.cur >= this.stop { return none; }
+				T v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		test() { for x in ValIter[int](cur: 0, stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "cannot be a for-in iterator")
+
+	// Case 6 — GENERIC heap stream whose iter() returns a GENERIC value-type
+	// iterator. Exercises the iterSubst != nil path in the iter() branch plus
+	// the iterNamed.IsValueType() rejection.
+	errs = checkErrs(t, `
+		type ValIter[T] {
+			T cur `+"`value"+`;
+			T stop `+"`value"+`;
+			next(~this) T? {
+				if this.cur >= this.stop { return none; }
+				T v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		type HeapRange[T] {
+			T stop;
+			iter() ValIter[T] { return ValIter[T](cur: 0, stop: this.stop); }
+		}
+		test() { for x in HeapRange[int](stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "cannot be a for-in iterator")
+
+	// Case 7 — GENERIC value-type stream (its iter() receiver is copied).
+	errs = checkErrs(t, `
+		type HeapIter {
+			int cur;
+			int stop;
+			next(~this) int? {
+				if this.cur >= this.stop { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}
+		type ValStream[T] {
+			T stop `+"`value"+`;
+			iter() HeapIter { return HeapIter(cur: 0, stop: 3); }
+		}
+		test() { for x in ValStream[int](stop: 3) { int y = x; } }
+	`)
+	expectError(t, errs, "iter() receiver is copied")
+
+	// Negative control 2 — a GENERIC heap iterator still type-checks (guards
+	// against the value-type rejection over-firing on the *types.Instance path).
+	// Uses an int index so no operators are required on the unconstrained T.
+	checkOK(t, `
+		type HeapIter[T] {
+			T[] items;
+			int idx;
+			next(~this) T? {
+				if this.idx >= this.items.len { return none; }
+				T v = this.items[this.idx]; this.idx = this.idx + 1; return v;
+			}
+		}
+		test() { for x in HeapIter[int](items: [1, 2, 3], idx: 0) { int y = x; } }
+	`)
+}
+
 // --- Enum Tests ---
 
 func TestEnumVariantAccess(t *testing.T) {

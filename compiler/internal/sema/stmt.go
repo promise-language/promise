@@ -1770,6 +1770,16 @@ func (c *Checker) checkDuckTypedForIn(s *ast.ForInStmt, iterType types.Type) typ
 			retType = types.Substitute(retType, subst)
 		}
 		if opt, ok := retType.(*types.Optional); ok {
+			// T1000: a value type is copied on each next() call, so the mutation
+			// to iteration state is applied to a throwaway copy and the loop's
+			// stored iterator never advances → infinite loop / stack overflow.
+			// Reject at compile time (value types are `copy — `~this` cannot
+			// carry mutable iteration state). Still record the kind and return
+			// the element type so no generic "cannot iterate" cascade fires.
+			if named.IsValueType() {
+				c.errorf(s.Iterable.Pos(),
+					"value type %s cannot be a for-in iterator: value types are copied on each next() call, so iteration state never advances — remove the `value field annotations to make it a heap type", named.String())
+			}
 			c.info.ForInKinds[s] = ForInNext
 			return opt.Elem()
 		}
@@ -1802,6 +1812,16 @@ func (c *Checker) checkDuckTypedForIn(s *ast.ForInStmt, iterType types.Type) typ
 					nextRetType = types.Substitute(nextRetType, iterSubst)
 				}
 				if opt, ok := nextRetType.(*types.Optional); ok {
+					// T1000: reject if either the stream (whose iter() receiver
+					// is copied) or the returned iterator is a value type — in
+					// both cases iteration state cannot persist across calls.
+					if named.IsValueType() {
+						c.errorf(s.Iterable.Pos(),
+							"value type %s cannot be iterated with for-in: its iter() receiver is copied — remove the `value field annotations to make it a heap type", named.String())
+					} else if iterNamed.IsValueType() {
+						c.errorf(s.Iterable.Pos(),
+							"value type %s (returned by %s.iter()) cannot be a for-in iterator: value types are copied on each next() call, so iteration state never advances", iterNamed.String(), named.String())
+					}
 					c.info.ForInKinds[s] = ForInIter
 					return opt.Elem()
 				}

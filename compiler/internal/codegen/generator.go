@@ -246,6 +246,10 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
 			}
 		}
+		// T1194: borrow-by-default heap param reassigned to a fresh owned value
+		// inside the generator body (no-op unless reassigned). Harvested into
+		// paramDrops alongside the ~/variadic/tuple bindings below.
+		c.maybeRegisterBorrowParamReassignDrop(p.Name(), alloca, paramType, p.Ref(), body)
 		if len(c.scopeBindings) > before {
 			paramDrops = append(paramDrops, c.scopeBindings[before:]...)
 			c.scopeBindings = c.scopeBindings[:before]

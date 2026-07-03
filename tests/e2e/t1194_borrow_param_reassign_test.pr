@@ -1,0 +1,332 @@
+// T1194: Reassigning a borrow-by-default heap param (=, +=, ++/--) to a fresh
+// owned value must track it for drop at scope exit (no leak) without freeing the
+// caller-owned original (no double-free). A borrow param carries no drop binding;
+// the fix gives it a function-scoped, flag-guarded obligation that only arms when
+// the param is actually reassigned. Cross-reference: T0959.
+type Counter {
+  int n;
+  new(~this, int n) {
+    this.n = n;
+  }
+  drop(~this) {
+  }
+  ++ (this) Counter {
+    return Counter(this.n + 1);
+  }
+  -- (this) Counter {
+    return Counter(this.n - 1);
+  }
+  + (this, int k) Counter {
+    return Counter(this.n + k);
+  }
+  get value int {
+    return this.n;
+  }
+}
+
+type Box[T] {
+  T v;
+  new(~this, T move v) {
+    this.v = v;
+  }
+  drop(~this) {
+  }
+  get val T {
+    return this.v;
+  }
+}
+
+enum Payload {
+  Empty,
+  Data(int[] items),
+  ++ (this) Payload {
+    return Payload.Empty;
+  }
+}
+
+// --- borrow params reassigned via each form; caller's value stays intact ---
+
+bump_inc(Counter c) {
+  c++;
+}
+bump_dec(Counter c) {
+  c--;
+}
+bump_compound(Counter c) {
+  c += 10;
+}
+bump_assign(Counter c) {
+  c = Counter(99);
+}
+consume(Counter move c) {
+}
+
+reassign_if(Counter c, bool b) {
+  if b {
+    c = Counter(1);
+  }
+}
+reassign_for(Counter c) {
+  for i := 0; i < 3; i += 1 {
+    c++;
+  }
+}
+reassign_for_compound(Counter c) {
+  for i := 0; i < 3; c += 1 {
+    i += 1;
+  }
+}
+reassign_while(Counter c) {
+  i := 0;
+  while i < 2 {
+    c = Counter(i);
+    i += 1;
+  }
+}
+reassign_move(Counter c) {
+  c = Counter(7);
+  consume(move c);
+}
+readonly(Counter c) int {
+  return c.value;
+}
+
+reassign_select(Counter c, channel[int] ch) {
+  select {
+    v := <-ch:
+      c = Counter(v!);
+  }
+}
+
+str_reassign(string s) {
+  s = "ab".repeat(5);
+}
+vec_reassign(int[] v) {
+  v = [1, 2, 3].clone();
+}
+box_reassign(Box[int] b) {
+  b = Box[int](42);
+}
+enum_reassign(Payload p) {
+  p++;
+}
+
+test_borrow_inc() `test {
+  x := Counter(5);
+  bump_inc(x);
+  assert(x.value == 5, "inc: caller original unchanged");
+}
+
+test_borrow_dec() `test {
+  x := Counter(5);
+  bump_dec(x);
+  assert(x.value == 5, "dec: caller original unchanged");
+}
+
+test_borrow_compound() `test {
+  x := Counter(5);
+  bump_compound(x);
+  assert(x.value == 5, "compound: caller original unchanged");
+}
+
+test_borrow_assign() `test {
+  x := Counter(5);
+  bump_assign(x);
+  assert(x.value == 5, "assign: caller original unchanged");
+}
+
+test_reassign_if() `test {
+  x := Counter(5);
+  reassign_if(x, true);
+  assert(x.value == 5, "if-nested reassignment");
+}
+
+test_reassign_for() `test {
+  x := Counter(5);
+  reassign_for(x);
+  assert(x.value == 5, "for-body inc reassignment");
+}
+
+test_reassign_for_compound() `test {
+  x := Counter(5);
+  reassign_for_compound(x);
+  assert(x.value == 5, "classic-for compound update reassignment");
+}
+
+test_reassign_while() `test {
+  x := Counter(5);
+  reassign_while(x);
+  assert(x.value == 5, "while-body reassignment");
+}
+
+test_reassign_move() `test {
+  x := Counter(5);
+  reassign_move(x);
+  assert(x.value == 5, "reassign then move-out clears the armed flag");
+}
+
+test_reassign_select() `test {
+  x := Counter(5);
+  // Pre-fill a buffered channel rather than using a goroutine — select over a
+  // goroutine-fed channel does not run on the single-threaded wasm32-wasi
+  // harness, and this test only needs a value ready for the select case.
+  ch := channel[int](capacity: 1);
+  ch.send(3);
+  reassign_select(x, ch);
+  assert(x.value == 5, "select-case reassignment");
+}
+
+test_readonly_borrow() `test {
+  x := Counter(5);
+  assert(readonly(x) == 5, "read-only borrow returns value");
+  assert(x.value == 5, "read-only borrow leaves original intact");
+}
+
+test_str_reassign() `test {
+  s := "hello";
+  str_reassign(s);
+  assert(s == "hello", "heap string borrow param reassignment");
+}
+
+test_vec_reassign() `test {
+  v := [9, 8, 7];
+  vec_reassign(v);
+  assert(v[0] == 9, "heap vector borrow param reassignment");
+  assert(v.len == 3, "caller vector length unchanged");
+}
+
+test_box_reassign() `test {
+  b := Box[int](7);
+  box_reassign(b);
+  assert(b.val == 7, "generic heap borrow param reassignment (mono path)");
+}
+
+test_enum_reassign() `test {
+  p := Payload.Data([1, 2, 3]);
+  enum_reassign(p);
+  match p {
+    Payload.Data(items) => {
+      assert(items.len == 3, "caller enum payload preserved");
+    },
+    _ => assert(false, "caller enum should still be Data"),
+  }
+}
+
+// --- distinct codegen call-sites: method bodies (defineMethodFunc) and
+// generator coroutines (buildGeneratorCoroutine) each register the borrow-param
+// reassign binding independently of the free-function path exercised above. ---
+
+type Holder {
+  int z;
+  new(~this, int z) {
+    this.z = z;
+  }
+  drop(~this) {
+  }
+  bump_method(this, Counter c) {
+    c++;
+  }
+  assign_method(this, Counter c) {
+    c = Counter(42);
+  }
+}
+
+// generator body reassignment: harvested into paramDrops in the coroutine.
+gen_reassign(Counter c) stream[int] {
+  c = Counter(1);
+  yield c.value;
+  yield 2;
+}
+
+// --- walker nesting arms not reached by the plain/if/for/while/select forms
+// above: for-in body, infinite-loop body, match statement arm, nested else-if,
+// and while-unwrap body. Each reassigns the borrow param; the no-leak assert
+// confirms the walker detected it and armed a function-scoped drop. ---
+
+reassign_forin(Counter c) {
+  for i in 0..3 {
+    c = Counter(i);
+  }
+}
+reassign_infinite(Counter c) {
+  for {
+    c = Counter(1);
+    break;
+  }
+}
+reassign_match(Counter c, int n) {
+  match n {
+    0 => {
+      c = Counter(1);
+    },
+    _ => {
+    },
+  }
+}
+reassign_elif(Counter c, int n) {
+  if n == 0 {
+  } else if n == 1 {
+    c = Counter(2);
+  }
+}
+opt_below(int i) int? {
+  if i < 2 {
+    return i;
+  }
+  return none;
+}
+reassign_whileunwrap(Counter c) {
+  i := 0;
+  while v := opt_below(i) {
+    c = Counter(v);
+    i += 1;
+  }
+}
+
+test_method_reassign() `test {
+  h := Holder(1);
+  x := Counter(5);
+  h.bump_method(x);
+  h.assign_method(x);
+  assert(x.value == 5, "method-body borrow reassign leaves original intact");
+}
+
+test_generator_reassign() `test {
+  x := Counter(5);
+  total := 0;
+  for v in gen_reassign(x) {
+    total += v;
+  }
+  assert(total == 3, "generator yields 1 + 2");
+  assert(x.value == 5, "generator-body borrow reassign no leak");
+}
+
+test_reassign_forin() `test {
+  x := Counter(5);
+  reassign_forin(x);
+  assert(x.value == 5, "for-in body reassignment");
+}
+
+test_reassign_infinite() `test {
+  x := Counter(5);
+  reassign_infinite(x);
+  assert(x.value == 5, "infinite-loop body reassignment");
+}
+
+test_reassign_match() `test {
+  x := Counter(5);
+  reassign_match(x, 0);
+  assert(x.value == 5, "match statement-arm reassignment");
+}
+
+test_reassign_elif() `test {
+  x := Counter(5);
+  reassign_elif(x, 1);
+  assert(x.value == 5, "nested else-if reassignment");
+}
+
+test_reassign_whileunwrap() `test {
+  x := Counter(5);
+  reassign_whileunwrap(x);
+  assert(x.value == 5, "while-unwrap body reassignment");
+}

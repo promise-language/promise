@@ -13,10 +13,13 @@ import (
 // genAssignStmt's OpAssign path — gate drop-old behind the runtime drop flag and
 // re-arm it after the store.
 
-// Borrow-by-default heap param: `bump(Counter c) { c++; }`. The param carries NO
-// drop binding (the caller owns the original), so the old value must NOT be
-// dropped — otherwise the caller's instance is double-freed. Assert no drop-old
-// block and no unguarded drop/free of the param.
+// Borrow-by-default heap param: `bump(Counter c) { c++; }`. The caller owns the
+// original, so the old value must NOT be freed at runtime — otherwise it is
+// double-freed. Under the merged T1194 design the reassigned param DOES get a
+// drop binding, but its flag is initialized to 0 (borrowed), so the drop-old is
+// emitted behind a runtime flag gate (incdec.flagdrop) and never fires; the flag
+// is armed to 1 only after the store so the fresh result is tracked (no leak).
+// This supersedes the original T0959 "no drop machinery at all" assertion.
 func TestT0959_BorrowParamIncDecNoDropOld(t *testing.T) {
 	ir := generateIR(t, `
 		type Counter {
@@ -35,15 +38,14 @@ func TestT0959_BorrowParamIncDecNoDropOld(t *testing.T) {
 	if !strings.Contains(body, "@\"Counter.++\"(i8*") {
 		t.Fatalf("expected operator dispatch `@\"Counter.++\"(i8* ...)` in bump:\n%s", body)
 	}
-	// A borrow-by-default param has no drop binding → no drop-old at all.
-	if strings.Contains(body, "incdec.dropold") {
-		t.Fatalf("borrow-param inc/dec must NOT emit a drop-old block (would double-free caller):\n%s", body)
+	// The borrow-reassign binding initializes the drop flag to 0 (caller owns the
+	// original), guaranteeing the drop-old branch is never taken at runtime.
+	if !strings.Contains(body, "store i1 false, i1* %c.dropflag") {
+		t.Fatalf("borrow-param inc/dec must init its drop flag to 0 (borrowed original):\n%s", body)
 	}
-	if strings.Contains(body, "incdec.userdrop") {
-		t.Fatalf("borrow-param inc/dec must NOT emit a user-drop block (would double-free caller):\n%s", body)
-	}
-	if strings.Contains(body, "@Counter.drop") || strings.Contains(body, "@pal_free") {
-		t.Fatalf("borrow-param inc/dec must NOT drop/free the caller's instance:\n%s", body)
+	// The drop-old is present but gated behind the runtime flag (never fires here).
+	if !strings.Contains(body, "incdec.flagdrop") {
+		t.Fatalf("borrow-param inc/dec must gate the drop-old behind the runtime flag:\n%s", body)
 	}
 }
 
@@ -69,18 +71,19 @@ func TestT0959_OwnedLocalIncDecGuardedDropOld(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	// Drop-old is now gated on the runtime drop flag.
-	if !strings.Contains(body, "incdec.dropold") {
-		t.Fatalf("expected flag-gated drop-old block `incdec.dropold` for an owned local:\n%s", body)
+	// Drop-old is now gated on the runtime drop flag (incdec.flagdrop).
+	if !strings.Contains(body, "incdec.flagdrop") {
+		t.Fatalf("expected flag-gated drop-old block `incdec.flagdrop` for an owned local:\n%s", body)
 	}
 	// The shared dropOldUserValueAtPtr user-drop block still appears (nested under
 	// the flag-true path).
 	if !strings.Contains(body, "incdec.userdrop") {
 		t.Fatalf("expected user-drop block `incdec.userdrop` for an owned local:\n%s", body)
 	}
-	// The drop flag is re-armed after the store so the fresh result is owned.
-	if !strings.Contains(body, "incdec.dropold.cont") {
-		t.Fatalf("expected drop-old continuation block `incdec.dropold.cont`:\n%s", body)
+	// The flag-gate continuation block, after which the flag is re-armed so the
+	// fresh result is owned.
+	if !strings.Contains(body, "incdec.flagdrop.done") {
+		t.Fatalf("expected flag-gate continuation block `incdec.flagdrop.done`:\n%s", body)
 	}
 }
 
@@ -109,8 +112,8 @@ func TestT0959_RefBoundLocalIncDecStripsRefAndDropsOld(t *testing.T) {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
 	// The reference wrapper is stripped, so drop-old actually fires (guarded).
-	if !strings.Contains(body, "incdec.dropold") {
-		t.Fatalf("expected flag-gated drop-old block `incdec.dropold` for a ref-bound local:\n%s", body)
+	if !strings.Contains(body, "incdec.flagdrop") {
+		t.Fatalf("expected flag-gated drop-old block `incdec.flagdrop` for a ref-bound local:\n%s", body)
 	}
 	if !strings.Contains(body, "incdec.userdrop") {
 		t.Fatalf("expected user-drop block `incdec.userdrop` (ref stripped to underlying type):\n%s", body)
@@ -143,8 +146,8 @@ func TestT0959_MutRefBoundLocalIncDecStripsRefAndDropsOld(t *testing.T) {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
 	// The MutRef wrapper is stripped, so drop-old actually fires (guarded).
-	if !strings.Contains(body, "incdec.dropold") {
-		t.Fatalf("expected flag-gated drop-old block `incdec.dropold` for a mutref-bound local:\n%s", body)
+	if !strings.Contains(body, "incdec.flagdrop") {
+		t.Fatalf("expected flag-gated drop-old block `incdec.flagdrop` for a mutref-bound local:\n%s", body)
 	}
 	if !strings.Contains(body, "incdec.userdrop") {
 		t.Fatalf("expected user-drop block `incdec.userdrop` (MutRef stripped to underlying type):\n%s", body)

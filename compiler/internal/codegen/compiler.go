@@ -6054,6 +6054,15 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 					c.maybeRegisterDrop(p.Name(), alloca, paramType)
 				}
 			}
+
+			// T1194: a borrow-by-default heap param reassigned to a fresh owned
+			// value inside the body needs a function-scoped drop obligation (flag
+			// starts at 0 — caller owns the original). No-op unless reassigned.
+			paramType := p.Type()
+			if c.typeSubst != nil {
+				paramType = types.Substitute(paramType, c.typeSubst)
+			}
+			c.maybeRegisterBorrowParamReassignDrop(p.Name(), alloca, paramType, p.Ref(), fd.Body)
 		}
 	}
 
@@ -6578,6 +6587,10 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 						c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
 					}
 				}
+
+				// T1194: borrow-by-default heap param reassigned to a fresh owned
+				// value inside the body (no-op unless reassigned).
+				c.maybeRegisterBorrowParamReassignDrop(sp.Name(), alloca, sp.Type(), sp.Ref(), fd.Body)
 			}
 		}
 
@@ -6816,6 +6829,10 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 							c.maybeRegisterDrop(p.Name(), alloca, p.Type())
 						}
 					}
+
+					// T1194: borrow-by-default heap param reassigned to a fresh
+					// owned value inside the body (no-op unless reassigned).
+					c.maybeRegisterBorrowParamReassignDrop(p.Name(), alloca, p.Type(), p.Ref(), md.Body)
 				}
 			}
 
@@ -7790,6 +7807,14 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 					c.maybeRegisterDrop(p.Name(), alloca, paramType)
 				}
 			}
+
+			// T1194: borrow-by-default heap param reassigned to a fresh owned
+			// value inside the body (no-op unless reassigned).
+			bpType := p.Type()
+			if c.typeSubst != nil {
+				bpType = types.Substitute(bpType, c.typeSubst)
+			}
+			c.maybeRegisterBorrowParamReassignDrop(p.Name(), alloca, bpType, p.Ref(), md.Body)
 		}
 		paramIdx++
 	}

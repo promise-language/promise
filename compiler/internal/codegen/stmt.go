@@ -2545,6 +2545,301 @@ func (c *Compiler) consumeElvisBoundDropFlag(name string) {
 	c.elvisBoundDropFlag = nil
 }
 
+// maybeRegisterBorrowParamReassignDrop gives a borrow-by-default heap param a
+// function-scoped drop obligation for any value it is *reassigned* to inside the
+// body (T1194). A borrow param carries no drop binding — the caller owns the
+// original — so a plain `c = fresh()`, compound `c += k`, or `c++`/`c--` stores a
+// fresh owned value into the param slot that is otherwise never tracked and leaks
+// at scope exit (and, for the compound/inc-dec forms, the unconditional drop-old
+// in dropOldUserValueAtPtr would double-free the caller-owned original).
+//
+// The fix is narrow and flag-based: register the same binding maybeRegisterDrop
+// would for an owned local, but initialise its drop flag to 0 (borrowed original,
+// not owned). The drop machinery (emitDropCall / emitFreeCall / emitStringDropCall
+// / emitEnumDropCall) is already flag-guarded, so a flag-0 binding drops nothing
+// at scope exit and nothing on the first reassignment's drop-old — exactly the
+// borrowed-original semantics. A reassignment arms the flag to 1, so the fresh
+// value *is* dropped. Ownership analysis forbids moving a borrowed param's
+// original out, which bounds the perturbation: a flag-0 binding cannot create a
+// double-free through a move.
+//
+// Registration is gated on the param actually being reassigned in the body so
+// the (large) set of read-only borrow params is behaviourally unchanged.
+func (c *Compiler) maybeRegisterBorrowParamReassignDrop(name string, alloca *ir.InstAlloca, typ types.Type, ref types.RefMod, body *ast.Block) {
+	if name == "" || name == "_" {
+		return
+	}
+	// RefMut (~) params are owned and already handled by maybeRegisterDrop.
+	if ref == types.RefMut {
+		return
+	}
+	// Reference-typed params (T&/T~) never own the pointee.
+	switch typ.(type) {
+	case *types.MutRef, *types.SharedRef:
+		return
+	}
+	// A binding may already exist (e.g. T0322 plain-heap params of a `new`
+	// constructor, or variadic/tuple params). Don't double-register.
+	if _, ok := c.dropBindings[name]; ok {
+		return
+	}
+	if !identReassignedInBlock(body, name) {
+		return
+	}
+	c.maybeRegisterDrop(name, alloca, typ)
+	// If maybeRegisterDrop created a flag (heap/droppable type), mark the
+	// borrowed original as not-owned so nothing is dropped until a reassignment
+	// arms the flag. Value/copy/scalar/structural types get no flag → no-op.
+	if flag, ok := c.dropFlags[name]; ok {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flag)
+	}
+}
+
+// identReassignedInBlock reports whether `name` is the target of a plain/compound
+// assignment, an inc/dec, or a classic-for update anywhere in block, recursing
+// into nested control-flow blocks (T1194). It is deliberately conservative about
+// inner-scope shadowing and may over-report — that is safe: an over-reported
+// param gets a flag-0 binding that drops nothing at scope exit unless an actual
+// reassignment arms it, and ownership analysis blocks illegal moves of the
+// original. Missing an exotic nesting (e.g. a reassignment buried in a
+// block-bearing expression this walk doesn't reach) is not a regression: it
+// merely leaves the pre-existing T1194 leak/double-free unfixed there, matching
+// current behaviour (dropOldUserValueAtIdentSlot falls back to the old
+// unconditional drop when no flag exists).
+func identReassignedInBlock(block *ast.Block, name string) bool {
+	if block == nil {
+		return false
+	}
+	for _, s := range block.Stmts {
+		if stmtReassignsIdent(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtReassignsIdent(s ast.Stmt, name string) bool {
+	switch st := s.(type) {
+	case *ast.AssignStmt:
+		if identNamed(st.Target, name) {
+			return true
+		}
+		return exprReassignsIdent(st.Value, name)
+	case *ast.IncDecStmt:
+		return identNamed(st.Target, name)
+	case *ast.ExprStmt:
+		return exprReassignsIdent(st.Expr, name)
+	case *ast.TypedVarDecl:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.InferredVarDecl:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.DestructureVarDecl:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.UseVarDecl:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.ReturnStmt:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.RaiseStmt:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.YieldStmt:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.YieldDelegateStmt:
+		return exprReassignsIdent(st.Value, name)
+	case *ast.Block:
+		return identReassignedInBlock(st, name)
+	case *ast.IfStmt:
+		if exprReassignsIdent(st.Cond, name) || exprReassignsIdent(st.Init, name) {
+			return true
+		}
+		if identReassignedInBlock(st.Body, name) {
+			return true
+		}
+		return stmtReassignsIdent(st.Else, name)
+	case *ast.ForInStmt:
+		return exprReassignsIdent(st.Iterable, name) || identReassignedInBlock(st.Body, name)
+	case *ast.ClassicForStmt:
+		if exprReassignsIdent(st.InitValue, name) || exprReassignsIdent(st.Cond, name) {
+			return true
+		}
+		if st.UpdateTarget != nil && identNamed(st.UpdateTarget, name) {
+			return true
+		}
+		if exprReassignsIdent(st.UpdateValue, name) {
+			return true
+		}
+		return identReassignedInBlock(st.Body, name)
+	case *ast.InfiniteLoop:
+		return identReassignedInBlock(st.Body, name)
+	case *ast.WhileStmt:
+		return exprReassignsIdent(st.Cond, name) || identReassignedInBlock(st.Body, name)
+	case *ast.WhileUnwrapStmt:
+		if exprReassignsIdent(st.Value, name) || identReassignedInBlock(st.Body, name) {
+			return true
+		}
+		return false
+	case *ast.SelectStmt:
+		for _, cs := range st.Cases {
+			for _, cst := range cs.Body {
+				if stmtReassignsIdent(cst, name) {
+					return true
+				}
+			}
+		}
+		for _, dst := range st.Default {
+			if stmtReassignsIdent(dst, name) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// exprReassignsIdent recurses into block-bearing expressions (match/if/error-
+// handler/go/unsafe/lambda bodies) and composite expressions so a reassignment
+// statement nested inside an expression-carried block is still detected (T1194).
+func exprReassignsIdent(e ast.Expr, name string) bool {
+	switch ex := e.(type) {
+	case nil:
+		return false
+	case *ast.MatchExpr:
+		if exprReassignsIdent(ex.Subject, name) {
+			return true
+		}
+		for _, arm := range ex.Arms {
+			if exprReassignsIdent(arm.Guard, name) || exprReassignsIdent(arm.Body, name) {
+				return true
+			}
+			if identReassignedInBlock(arm.Block, name) {
+				return true
+			}
+		}
+		return false
+	case *ast.IfExpr:
+		return exprReassignsIdent(ex.Cond, name) ||
+			identReassignedInBlock(ex.Then, name) ||
+			identReassignedInBlock(ex.Else, name)
+	case *ast.ErrorHandlerExpr:
+		return exprReassignsIdent(ex.Expr, name) ||
+			identReassignedInBlock(ex.Body, name) ||
+			identReassignedInBlock(ex.ElseBody, name)
+	case *ast.GoExpr:
+		return exprReassignsIdent(ex.Expr, name) || identReassignedInBlock(ex.Block, name)
+	case *ast.UnsafeExpr:
+		return identReassignedInBlock(ex.Body, name)
+	case *ast.LambdaExpr:
+		return exprReassignsIdent(ex.ExprBody, name) || identReassignedInBlock(ex.Body, name)
+	case *ast.ParenExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.BinaryExpr:
+		return exprReassignsIdent(ex.Left, name) || exprReassignsIdent(ex.Right, name)
+	case *ast.UnaryExpr:
+		return exprReassignsIdent(ex.Operand, name)
+	case *ast.CallExpr:
+		if exprReassignsIdent(ex.Callee, name) {
+			return true
+		}
+		for _, a := range ex.Args {
+			if a != nil && exprReassignsIdent(a.Value, name) {
+				return true
+			}
+		}
+		return false
+	case *ast.IndexExpr:
+		if exprReassignsIdent(ex.Target, name) || exprReassignsIdent(ex.Index, name) {
+			return true
+		}
+		for _, x := range ex.ExtraIndices {
+			if exprReassignsIdent(x, name) {
+				return true
+			}
+		}
+		return false
+	case *ast.SliceExpr:
+		return exprReassignsIdent(ex.Target, name) ||
+			exprReassignsIdent(ex.Low, name) || exprReassignsIdent(ex.High, name)
+	case *ast.MemberExpr:
+		return exprReassignsIdent(ex.Target, name)
+	case *ast.OptionalChainExpr:
+		return exprReassignsIdent(ex.Target, name)
+	case *ast.IsExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.CastExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.ErrorPropagateExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.ErrorPanicExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.OptionalUnwrapExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.AutoCloneExpr:
+		return exprReassignsIdent(ex.Expr, name)
+	case *ast.TupleLit:
+		for _, el := range ex.Elements {
+			if exprReassignsIdent(el, name) {
+				return true
+			}
+		}
+		return false
+	case *ast.ArrayLit:
+		for _, el := range ex.Elements {
+			if exprReassignsIdent(el, name) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// identNamed reports whether e is the identifier `name`.
+func identNamed(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.IdentExpr)
+	return ok && id.Name == name
+}
+
+// dropOldUserValueAtIdentSlot is a drop-flag-aware wrapper around
+// dropOldUserValueAtPtr for the inc/dec and compound-assign IdentExpr paths
+// (T1194). When the identifier has a drop flag — an owned local, or a
+// borrow-by-default heap param that maybeRegisterBorrowParamReassignDrop gave a
+// flag-0 binding — the heap drop-old is guarded by that flag so a borrowed
+// original (flag 0) is never freed (fixing the compound/inc-dec double-free), and
+// the flag is then armed to 1 so the fresh operator result is owned and dropped
+// at scope exit (fixing the leak). Owned locals sit at flag 1, so the drop fires
+// and the re-arm is a no-op — behaviour is unchanged for them. Without a flag
+// (value types, scalars, enums with no droppable data, or a name that never got a
+// binding) it falls back to the existing unconditional alias-guarded drop.
+func (c *Compiler) dropOldUserValueAtIdentSlot(name string, ptr value.Value, valueType types.Type, newVal value.Value) {
+	// T0959: a moved ref-typed local (`Counter &r = owner;`) stores the same
+	// Value struct as an owned local and owns its instance, but valueType is the
+	// reference wrapper — strip it so dropOldUserValueAtPtr recognizes the
+	// droppable underlying type instead of no-oping (which would leak the old
+	// instance). Safe: a genuine borrow sits at flag 0 and skips the drop-old.
+	switch rt := valueType.(type) {
+	case *types.MutRef:
+		valueType = rt.Elem()
+	case *types.SharedRef:
+		valueType = rt.Elem()
+	}
+	flag, ok := c.dropFlags[name]
+	if !ok {
+		c.dropOldUserValueAtPtr(ptr, valueType, newVal)
+		return
+	}
+	flagVal := c.block.NewLoad(irtypes.I1, flag)
+	dropBlk := c.newBlock("incdec.flagdrop")
+	afterBlk := c.newBlock("incdec.flagdrop.done")
+	c.block.NewCondBr(flagVal, dropBlk, afterBlk)
+	c.block = dropBlk
+	c.dropOldUserValueAtPtr(ptr, valueType, newVal)
+	if c.block.Term == nil {
+		c.block.NewBr(afterBlk)
+	}
+	c.block = afterBlk
+	// The fresh operator result is now owned by this slot.
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), flag)
+}
+
 // maybeRegisterDrop checks if a variable's type has a drop() method and, if so,
 // registers a drop binding: allocates a drop flag (i1, initially true), resolves
 // the drop function, and appends a scopeBinding.
@@ -7412,7 +7707,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// T0715: a non-native operator returns a FRESH value, so the old heap
 			// user-type (or enum) value at the alloca leaks unless dropped. Reuse
 			// the alias-guarded drop-old helper (no-op for value types/scalars).
-			c.dropOldUserValueAtPtr(alloca, targetType, result)
+			// T1194: the flag-aware slot helper additionally guards the drop-old on
+			// the drop flag so a borrow-by-default heap param (flag 0, caller-owned
+			// original) is not double-freed, and arms the flag so the fresh result
+			// is dropped at scope exit rather than leaked.
+			c.dropOldUserValueAtIdentSlot(target.Name, alloca, targetType, result)
 		}
 		c.block.NewStore(result, alloca)
 
@@ -8333,46 +8632,18 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		}
 		current := c.block.NewLoad(alloca.ElemType, alloca)
 		result := c.emitUnaryOpResult(op, targetType, current, false)
-		// T0880/T0959: `x++` is `x = x.++()`. A non-native operator returns a NEW
-		// value, so the old heap-owned value leaks unless dropped (zero-leak
-		// policy) — but the old value may only be dropped when this local actually
-		// OWNS its binding. Mirror genAssignStmt's OpAssign drop-old-and-rearm:
-		// gate the drop-old behind the runtime drop flag and re-arm it after the
-		// store so the fresh result becomes owned.
-		//   - owned local  : flag=1 → drops old (T0880, unchanged).
-		//   - T&/T~ local   : flag=0 → skips drop (no double-free of the borrowed
-		//                     source) and re-arm claims the fresh result (T0959).
-		//   - borrow param  : no drop binding → skip drop entirely; the caller owns
-		//                     the original (dropping it double-frees, T0959). The
-		//                     fresh result is left untracked (residual leak T1194 —
-		//                     shared with the plain-assign path, filed separately).
-		if binding, ok := c.dropBindings[t.Name]; ok && binding.dropFlag != nil {
-			// A reference-typed local (`Counter &r = owner;`, a move) stores the
-			// same Value struct as an owned local and owns its instance (flag=1),
-			// but targetType is the reference wrapper — strip it so
-			// dropOldUserValueAtPtr recognizes the droppable underlying type
-			// instead of no-oping (which would leak the old instance). Safe under
-			// the flag gate: a genuine borrow (flag=0) skips the drop-old entirely.
-			dropType := targetType
-			switch rt := dropType.(type) {
-			case *types.MutRef:
-				dropType = rt.Elem()
-			case *types.SharedRef:
-				dropType = rt.Elem()
-			}
-			flag := c.block.NewLoad(irtypes.I1, binding.dropFlag)
-			dropBlk := c.newBlock("incdec.dropold")
-			contBlk := c.newBlock("incdec.dropold.cont")
-			c.block.NewCondBr(flag, dropBlk, contBlk)
-			c.block = dropBlk
-			c.dropOldUserValueAtPtr(alloca, dropType, result)
-			c.block.NewBr(contBlk)
-			c.block = contBlk
-			c.block.NewStore(result, alloca)
-			c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
-		} else {
-			c.block.NewStore(result, alloca)
-		}
+		// T0880: x++ is `x = x.++()`. A non-native operator returns a NEW value,
+		// so the old heap-owned value leaks unless dropped (zero-leak policy).
+		// T0959: the old value may only be dropped when this local actually OWNS
+		// its binding, so the drop-old is gated behind the runtime drop flag.
+		// T1194: route through the flag-aware slot helper so a borrow-by-default
+		// heap param (flag 0, caller-owned original) is not double-freed and the
+		// fresh result is tracked for drop at scope exit. The helper also strips a
+		// reference wrapper off targetType so a moved ref-typed local
+		// (`Counter &r = owner;`, flag 1) drops its owned instance instead of
+		// no-oping (which would leak it).
+		c.dropOldUserValueAtIdentSlot(t.Name, alloca, targetType, result)
+		c.block.NewStore(result, alloca)
 	case *ast.MemberExpr:
 		// T0712: property getter/setter dispatch. genFieldPtr panics ("no field")
 		// for a property with no backing field; read via the getter, apply the op,
@@ -11040,7 +11311,10 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 					// no-op for value types/scalars) to preserve the zero-leak policy.
 					// (The RHS operator-argument temp is drained by the trailing
 					// cleanupStmtLevelTemps call below — T0988.)
-					c.dropOldUserValueAtPtr(alloca, c.info.Types[s.UpdateTarget], result)
+					// T1194: flag-aware so a borrow-by-default heap param reassigned in
+					// a compound for-update is not double-freed and its fresh value is
+					// tracked for drop at scope exit.
+					c.dropOldUserValueAtIdentSlot(ident.Name, alloca, c.info.Types[s.UpdateTarget], result)
 					c.block.NewStore(result, alloca)
 				}
 			}

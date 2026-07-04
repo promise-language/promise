@@ -15768,7 +15768,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	syntheticBlock := &ast.Block{
 		Stmts: []ast.Stmt{&ast.ExprStmt{Expr: callExpr}},
 	}
-	captureNames := c.collectBlockIdents(syntheticBlock, c.locals)
+	captureNames, _ := c.collectBlockIdents(syntheticBlock, c.locals)
 
 	// 3. Load captured values in caller scope
 	var captureVals []value.Value
@@ -16177,9 +16177,14 @@ func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Ty
 }
 
 // collectBlockIdents walks an AST block and collects all IdentExpr names referenced.
-// Returns a sorted, deduplicated list of names that exist in outerLocals.
-func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) []string {
+// Returns a sorted, deduplicated list of names that exist in outerLocals, plus a
+// map from each captured name to the first *ast.IdentExpr seen for it (T0731:
+// used to resolve the capture's sema type via c.info.Types for the spawn-side
+// borrowed-heap-param dup). Names collected only through a LambdaExpr capture set
+// (which has no representative IdentExpr) are absent from the ident map.
+func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) ([]string, map[string]*ast.IdentExpr) {
 	seen := make(map[string]bool)
+	idents := make(map[string]*ast.IdentExpr)
 	var walkExpr func(e ast.Expr)
 	var walkStmt func(s ast.Stmt)
 
@@ -16191,6 +16196,9 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 		case *ast.IdentExpr:
 			if _, ok := outerLocals[e.Name]; ok {
 				seen[e.Name] = true
+				if _, recorded := idents[e.Name]; !recorded {
+					idents[e.Name] = e
+				}
 			}
 		case *ast.BinaryExpr:
 			walkExpr(e.Left)
@@ -16418,7 +16426,7 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
+	return names, idents
 }
 
 // goElemNeedsBorrowedCaptureDup reports whether a value-block trailing value
@@ -16518,7 +16526,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	}
 
 	// Collect outer variables referenced in the block
-	captureNames := c.collectBlockIdents(block, c.locals)
+	captureNames, captureIdents := c.collectBlockIdents(block, c.locals)
 
 	// Load captured values and collect their types BEFORE switching context
 	var captureVals []value.Value
@@ -16561,39 +16569,46 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		}
 	}
 
-	// T0688: when a non-void awaited value-block's trailing expression is a
-	// bare reference to a captured BORROWED heap parameter (no outer drop
-	// binding), the loaded pointer aliases the caller's stmt-temp. The caller
-	// drops the stmt-temp immediately after spawning the goroutine — long
-	// before the awaiter resumes the coroutine — so the body would read freed
-	// memory and the receiver's owned drop would double-free. Dup the
-	// borrowed value HERE (in the outer block, before the caller's stmt-temp
-	// is dropped) and pass the dup as the capture. The goroutine then owns
-	// its own copy; we add it to capturedDroppables so the existing B0354
-	// ownership-transfer machinery registers a goroutine-side drop binding
-	// (cleared by genBlockValue's clearDropFlag at the trailing ident) and
-	// the outer clearDropFlag below is a harmless no-op (no outer flag).
+	// T0731 (generalizes T0688): reading a BORROWED heap captured parameter
+	// inside an asynchronously-scheduled coroutine is NEVER safe — the caller
+	// may free the underlying buffer (e.g. a `"a"+"b"` stmt-temp) before the
+	// coroutine ever runs. T0688 only dup'd when the value-block's trailing
+	// expression was a bare ident naming the param; but the same UAF/double-free
+	// triggers when the param is aliased through a goroutine-local first
+	// (`s := if b { v } else { … }; s`), derived via an expression (`v + "!"`),
+	// or read incidentally. Rather than trace the value-block dataflow, we
+	// conservatively dup EVERY borrowed heap captured param on the value-block
+	// path: the goroutine then owns a private deep copy regardless of how the
+	// body routes the param into the trailing value. Each dup is added to
+	// capturedDroppables so the existing B0354 ownership-transfer machinery
+	// registers a goroutine-side drop binding (freeing non-escaping copies at
+	// coroutine scope exit — no leak) and the outer clearDropFlag below is a
+	// harmless no-op (borrowed params have no outer drop flag). Cost: one deep
+	// copy per borrowed heap capture even when unused — negligible versus the
+	// soundness guarantee. Excluded: channel captures (refcounted share),
+	// owned locals (already in capturedDroppables — B0354 handles them), and
+	// Copy/value/Arc/Task types (goElemNeedsBorrowedCaptureDup returns false).
 	useGoBlockValuePathOuter := !goIsVoid && !c.goExprFireAndForget
-	if useGoBlockValuePathOuter && len(block.Stmts) > 0 {
-		if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
-			if ident, ok := es.Expr.(*ast.IdentExpr); ok {
-				name := ident.Name
-				idx := -1
-				for i, n := range captureNames {
-					if n == name {
-						idx = i
-						break
-					}
-				}
-				if idx >= 0 {
-					_, hasDroppable := capturedDroppables[name]
-					_, hasChan := capturedChanTypes[name]
-					if !hasDroppable && !hasChan && goElemNeedsBorrowedCaptureDup(goElem) {
-						captureVals[idx] = c.dupBorrowedCaptureForResult(captureVals[idx], goElem)
-						capturedDroppables[name] = goElem
-					}
-				}
+	if useGoBlockValuePathOuter {
+		for idx, name := range captureNames {
+			if c.borrowedValueParams == nil || !c.borrowedValueParams[name] {
+				continue // not a borrowed value param (owned local / non-param)
 			}
+			if _, hasChan := capturedChanTypes[name]; hasChan {
+				continue // channel: shared via refcount, no dup
+			}
+			if _, hasDroppable := capturedDroppables[name]; hasDroppable {
+				continue // owned local: B0354 already transfers ownership
+			}
+			capType := c.info.Types[captureIdents[name]]
+			if c.typeSubst != nil && capType != nil {
+				capType = types.Substitute(capType, c.typeSubst) // mirror goResultType
+			}
+			if !goElemNeedsBorrowedCaptureDup(capType) {
+				continue // Copy/channel/Arc/Task/value type — no heap aliasing
+			}
+			captureVals[idx] = c.dupBorrowedCaptureForResult(captureVals[idx], capType)
+			capturedDroppables[name] = capType // goroutine now owns it → B0354 drop
 		}
 	}
 

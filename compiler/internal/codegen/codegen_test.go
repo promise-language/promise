@@ -17929,26 +17929,83 @@ func TestT0688_BareCapturedLocalNoExtraDup(t *testing.T) {
 	assertNotContains(t, mIR, "@promise_string_new(")
 }
 
-// T0688: a value-returning go-block whose trailing expression is DERIVED
-// from a borrowed param (e.g. `v + "!"`) already produces a fresh heap value
-// inside the coroutine. The spawning function must NOT dup the param — the
-// dup is only required for bare-ident trailing values where the loaded
-// pointer would alias the caller's stmt-temp.
-func TestT0688_DerivedTrailingNoDup(t *testing.T) {
+// T0731 (was TestT0688_DerivedTrailingNoDup): a value-returning go-block whose
+// trailing expression is DERIVED from a borrowed heap param (e.g. `v + "!"`)
+// reads that param ASYNCHRONOUSLY inside the coroutine — after the caller has
+// already dropped its `"a"+"b"` stmt-temp. T0688 believed this was safe (the
+// coroutine builds a fresh value), but the read of the freed buffer is a real
+// UAF; the old test only "passed" because it used a .rodata literal (`"hi"`),
+// which is never freed. T0731 generalizes the spawn-side dup to ALL borrowed
+// heap captured params on the value-block path, so the coroutine reads its own
+// private copy regardless of how the body routes the param into the result. The
+// dup IS therefore emitted here.
+func TestT0731_DerivedTrailingDups(t *testing.T) {
 	ir := generateIR(t, `
 		ngmake(string v) Task[string] {
 			return go { v + "!" };
 		}
 		main() {
-			task[string] x = ngmake("hi");
+			task[string] x = ngmake("a" + "b");
 			r := <-x;
 		}
 	`)
 	ngmakeIR := extractFunction(ir, "__user.ngmake")
-	// No spawn-side dup: the only string allocations in the coroutine flow
-	// of ngmake should be from the goroutine call path, not a pre-spawn
-	// promise_string_new of the borrowed param.
-	assertNotContains(t, ngmakeIR, "@promise_string_new(")
+	// The spawning function dups its borrowed string param via
+	// promise_string_new before passing the value to the goroutine ramp, so the
+	// coroutine's async `v + "!"` reads the owned copy, not the freed arg temp.
+	assertContains(t, ngmakeIR, "@promise_string_new(")
+	assertContains(t, ngmakeIR, "call i8* @.goroutine.")
+}
+
+// T0731: the same async-read UAF triggers when the borrowed heap param is
+// aliased through a goroutine-local before flowing to the trailing value
+// (`s := if b { v } else { … }; s`). T0688's bare-ident detection did not fire
+// (the trailing ident `s` is a coroutine-local, not a capture), so no dup was
+// emitted. The generalized fix dups the borrowed param regardless of the
+// trailing form.
+func TestT0731_AliasedTrailingDups(t *testing.T) {
+	ir := generateIR(t, `
+		ngmake(string v, bool b) Task[string] {
+			return go {
+				s := if b { v } else { "other" };
+				s
+			};
+		}
+		main() {
+			task[string] x = ngmake("a" + "b", true);
+			r := <-x;
+		}
+	`)
+	ngmakeIR := extractFunction(ir, "__user.ngmake")
+	assertContains(t, ngmakeIR, "@promise_string_new(")
+	assertContains(t, ngmakeIR, "call i8* @.goroutine.")
+}
+
+// T0731: the `c.typeSubst != nil` substitution branch of the spawn-side dup
+// loop. When a GENERIC function (`gmake[T]`) captures a borrowed `T` param in a
+// value-block, the capture's sema type resolved from `c.info.Types` is the raw
+// TypeParam `T` (sema type-checks the generic body once with T unbound). Without
+// `types.Substitute(capType, c.typeSubst)`, `goElemNeedsBorrowedCaptureDup(T)`
+// returns false (a bare TypeParam is neither string/Vector/Map/heap-user) and no
+// dup would be emitted — a UAF once T=string. The Substitute call resolves T to
+// the concrete `string`, so the monomorphized `gmake[string]` DOES dup its
+// borrowed heap param. The non-heap sibling (`t0683_mk_int[int]`, dup filtered)
+// only exercises the Substitute-then-reject side; this locks the dup-emitting
+// side.
+func TestT0731_GenericHeapParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		gmake[T](T v) Task[T] {
+			return go { s := v; s };
+		}
+		main() {
+			task[string] x = gmake[string]("a" + "b");
+			r := <-x;
+		}
+	`)
+	// The monomorphized instance is emitted as @"gmake[string]" (quoted name).
+	monoIR := extractFunction(ir, `"gmake[string]"`)
+	assertContains(t, monoIR, "@promise_string_new(")
+	assertContains(t, monoIR, "call i8* @.goroutine.")
 }
 
 // T0688: Vector[T] dispatch branch in dupBorrowedCaptureForResult. The

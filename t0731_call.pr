@@ -1,0 +1,4 @@
+module m;
+`public derive(string v) string {
+  return v + "!";
+}

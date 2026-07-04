@@ -311,10 +311,13 @@ t0688_int_param_control() `test {
   assert((<-x) == 7, "Copy-type param: no dup, no UAF");
 }
 
-// T0688: regression guard — derived trailing expression (`v + "!"`) builds
-// a fresh allocation inside the coroutine, so no spawn-side dup is needed.
-// (The fresh result is owned by the goroutine and transferred to the
-// receiver via the existing T0683 path.)
+// T0731 (was a T0688 "no dup" guard): a derived trailing expression (`v + "!"`)
+// reads the borrowed param asynchronously inside the coroutine. T0688 assumed
+// this was safe, but with a heap arg the read races the caller's stmt-temp
+// drop (a real UAF). T0731 dups the borrowed param at spawn regardless of the
+// trailing form; the derived concat now reads the owned copy. The `.rodata`
+// literal below never frees, so this call was benign pre-fix — the genuine
+// UAF form (heap arg) is t0731_derived_heap_arg below.
 t0688_ngmake_derived(string v) Task[string] {
   return go {
     v + "!"
@@ -324,7 +327,7 @@ t0688_ngmake_derived(string v) Task[string] {
 t0688_derived_trailing_param() `test {
   task[string] x = t0688_ngmake_derived("hi");
   string r = <-x;
-  assert(r == "hi!", "derived trailing skips dup");
+  assert(r == "hi!", "derived trailing reads spawn-side dup");
 }
 
 // T0688: regression guard — captured heap LOCAL with an outer drop binding
@@ -1095,4 +1098,154 @@ t0740_closure_invoked_in_coroutine() `test {
   };
   r := <-x;
   assert(r == 42, "closure invoked inside coroutine sees real captured value");
+}
+
+// ===========================================================================
+// T0731 (generalizes T0688): T0688's spawn-side dup only fired when a value
+// block's trailing expression was a BARE ident naming a captured borrowed heap
+// param. But reading a borrowed heap param inside an asynchronously-scheduled
+// coroutine is NEVER safe — the caller may free the underlying buffer (a
+// `"a"+"b"` stmt-temp) before the coroutine runs. The same UAF/double-free
+// triggers when the param is aliased through a goroutine-local first
+// (`s := if b { v } else { … }; s`), derived via an expression (`v + "!"`), or
+// read incidentally. The fix conservatively dups EVERY borrowed heap captured
+// param on the value-block path, so the goroutine owns a private deep copy
+// regardless of how the body routes the param into the trailing value.
+//
+// Each caller passes a fresh `"a"+"b"` stmt-temp so the caller's arg buffer is
+// dropped immediately after the spawning function returns — the exact freed-temp
+// window that made the async read a UAF. NO `exclude: wasm`; zero-leak on host +
+// wasm32-wasi. Before the fix: t0731_alias asserted garbage (freed buffer) and
+// t0731_derived_heap OOM'd / leaked.
+
+// (a) The core T0731 repro: the borrowed param is aliased through a
+// goroutine-local (`s := if b { v } else { "other" }; s`), which is the
+// user-reachable trigger (a direct `if` trailing is sema-typed Task[void]).
+// The if-branch loads `v` (borrowed); the trailing value is the local `s`, so
+// T0688's bare-ident detection never fired.
+t0731_alias_ngmake(string v, bool b) Task[string] {
+  return go {
+    s := if b {
+      v
+    } else {
+      "other"
+    };
+    s
+  };
+}
+
+t0731_alias_true() `test {
+  task[string] x = t0731_alias_ngmake("a" + "b", true);
+  string r = <-x;
+  assert(r == "ab", "if-branch returns captured borrowed via let alias");
+}
+
+t0731_alias_false() `test {
+  task[string] x = t0731_alias_ngmake("a" + "b", false);
+  string r = <-x;
+  assert(r == "other", "else-branch: non-escaping dup dropped, no leak");
+}
+
+t0731_alias_loop_no_leak() `test {
+  i := 0;
+  while i < 50 {
+    task[string] x = t0731_alias_ngmake("x" + "y", true);
+    string r = <-x;
+    assert(r == "xy", "alias loop iteration");
+    i = i + 1;
+  }
+}
+
+// (b) Derived trailing with a heap arg: `v + "!"` reads the borrowed param
+// asynchronously to build the result. T0688 deliberately skipped this (its
+// TestT0688_DerivedTrailingNoDup only "passed" because it used a .rodata
+// literal, which is never freed). With a heap arg the async read is a genuine
+// UAF; the fix dups `v` at spawn so the concat reads the owned copy.
+t0731_derived_ngmake(string v) Task[string] {
+  return go {
+    v + "!"
+  };
+}
+
+t0731_derived_heap_arg() `test {
+  task[string] x = t0731_derived_ngmake("a" + "b");
+  string r = <-x;
+  assert(r == "ab!", "derived trailing reads spawn-side dup, not freed temp");
+}
+
+// (c) Multi-capture: two borrowed heap params, only one flows to the result.
+// The escaping copy must be correct; the non-escaping dup must be dropped at
+// coroutine scope exit (no leak).
+t0731_multi_ngmake(string a, string b) Task[string] {
+  return go {
+    s := a;
+    s
+  };
+}
+
+t0731_multi_capture() `test {
+  task[string] x = t0731_multi_ngmake("a" + "b", "c" + "d");
+  string r = <-x;
+  assert(r == "ab", "first borrowed param escapes; second dup dropped, no leak");
+}
+
+// (d) Vector borrowed param read asynchronously via a derived `.clone()`. The
+// coroutine's clone must read the spawn-side dup, not the caller's freed arg
+// buffer — exercises the non-string (Vector) dispatch branch of the dup.
+t0731_derived_vec_ngmake(Vector[int] v) Task[Vector[int]] {
+  return go {
+    v.clone()
+  };
+}
+
+t0731_derived_vec() `test {
+  task[Vector[int]] x = t0731_derived_vec_ngmake([1, 2, 3]);
+  Vector[int] r = <-x;
+  assert(r.len == 3, "derived vec clone len");
+  assert(r[0] == 1 && r[1] == 2 && r[2] == 3, "derived vec clone elements");
+}
+
+// (e) Copy-type param aliased through a local — regression guard: no dup, no
+// UAF, correct value.
+t0731_copy_ngmake(int v) Task[int] {
+  return go {
+    n := v;
+    n
+  };
+}
+
+t0731_copy_param_alias() `test {
+  task[int] x = t0731_copy_ngmake(42);
+  assert((<-x) == 42, "Copy param aliased through local: no dup, correct value");
+}
+
+// (f) GENERIC borrowed heap param — exercises the `c.typeSubst` substitution
+// branch of the spawn-side dup loop. In the generic body the capture `v`'s sema
+// type is the raw TypeParam `T`; without `types.Substitute(capType, typeSubst)`
+// the dup gate `goElemNeedsBorrowedCaptureDup(T)` returns false and no dup fires
+// — a UAF once T=string, since the caller frees the `"a"+"b"` stmt-temp when
+// t0731_generic_ngmake returns. The Substitute resolves T→string so the
+// monomorphized instance dups its borrowed heap param. (t0683_mk_int[int] above
+// covers the Substitute-then-reject side with a non-heap T.)
+t0731_generic_ngmake[T](T v) Task[T] {
+  return go {
+    s := v;
+    s
+  };
+}
+
+t0731_generic_heap_param() `test {
+  task[string] x = t0731_generic_ngmake[string]("a" + "b");
+  string r = <-x;
+  assert(r == "ab", "generic borrowed heap param dup'd via typeSubst branch");
+}
+
+t0731_generic_heap_loop() `test {
+  i := 0;
+  while i < 30 {
+    task[string] x = t0731_generic_ngmake[string]("x" + "y");
+    string r = <-x;
+    assert(r == "xy", "generic heap param loop: non-escaping dups dropped, no leak");
+    i = i + 1;
+  }
 }

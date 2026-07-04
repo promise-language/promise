@@ -15768,7 +15768,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	syntheticBlock := &ast.Block{
 		Stmts: []ast.Stmt{&ast.ExprStmt{Expr: callExpr}},
 	}
-	captureNames, _ := c.collectBlockIdents(syntheticBlock, c.locals)
+	captureNames, captureIdents := c.collectBlockIdents(syntheticBlock, c.locals)
 
 	// 3. Load captured values in caller scope
 	var captureVals []value.Value
@@ -15805,6 +15805,39 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		if binding, ok := c.dropBindings[name]; ok {
 			capturedDroppablesVB[name] = binding.valType
 		}
+	}
+
+	// T1197: dup borrowed heap captured params (receiver + args) so the coroutine
+	// owns private copies. The captures are read inside the coroutine, which may
+	// run long after the spawning function returns and drops its borrowed-arg
+	// stmt-temps — without a spawn-side dup those reads alias freed memory (UAF /
+	// heap corruption). Borrowed value params carry no outer drop binding, so
+	// B0354's ownership-transfer never covers them; mirror T0688's value-block dup.
+	// Applies to void, non-void, and fire-and-forget alike — the async read of the
+	// captures is independent of the result type.
+	for idx, name := range captureNames {
+		if !c.borrowedValueParams[name] {
+			continue // only borrowed value params of the spawning function
+		}
+		if _, hasChan := capturedChanTypesVB[name]; hasChan {
+			continue // refcounted channel — sharing the pointer is fine
+		}
+		if _, hasDrop := capturedDroppablesVB[name]; hasDrop {
+			continue // owned local — B0354 already transfers ownership
+		}
+		ident := captureIdents[name]
+		if ident == nil {
+			continue // no representative ident (e.g. lambda-only capture)
+		}
+		capType := c.info.Types[ident]
+		if c.typeSubst != nil && capType != nil {
+			capType = types.Substitute(capType, c.typeSubst) // monomorphization
+		}
+		if !goElemNeedsBorrowedCaptureDup(capType) {
+			continue // Copy / Arc / Task / value types don't alias caller heap
+		}
+		captureVals[idx] = c.dupBorrowedCaptureForResult(captureVals[idx], capType)
+		capturedDroppablesVB[name] = capType // goroutine owns the dup → B0354 drop
 	}
 
 	// 4. Create coroutine function with captured values as parameters

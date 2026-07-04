@@ -1,0 +1,145 @@
+// T1197: `go obj.method(v)` / other via-block go-call forms (dispatched through
+// genGoCallExprViaBlock) must dup borrowed heap captured params — receiver and
+// args — at spawn time. Without the dup the coroutine async-reads a borrow that
+// the spawning function frees on return (UAF / heap corruption). Sibling of
+// T0688/T0731 (the value-block `go { ... }` path).
+type T1197Box {
+  int n;
+  derive(this, string v) string {
+    return v + "!";
+  }
+}
+
+t1197_mk_method(T1197Box b, string v) Task[string] {
+  return go b.derive(v);
+}
+
+// Method call with borrowed receiver + borrowed string arg (exact repro).
+t1197_method_recv_and_arg() `test {
+  b := T1197Box(n: 1);
+  // "a"+"b" is a heap stmt-temp freed when t1197_mk_method returns.
+  task[string] x = t1197_mk_method(b, "a" + "b");
+  string r = <-x;
+  assert(r == "ab!", "method recv+arg");
+}
+
+type T1197Sink {
+  int total;
+  emit(this, string v) {
+    assert(v == "ab", "void emit arg");
+  }
+}
+
+t1197_mk_void(T1197Sink s, string v) Task[void] {
+  return go s.emit(v);
+}
+
+// Void method call (was SIGSEGV before the fix).
+t1197_void_method_call() `test {
+  s := T1197Sink(total: 0);
+  task[void] x = t1197_mk_void(s, "a" + "b");
+  <-x;
+  assert(true, "void completed");
+}
+
+// Generic free function — IndexExpr callee via-block form; exercises typeSubst.
+t1197_identity[T](T v) T {
+  return v;
+}
+
+t1197_mk_generic(string v) Task[string] {
+  return go t1197_identity[string](v);
+}
+
+t1197_generic_call() `test {
+  task[string] x = t1197_mk_generic("a" + "b");
+  string r = <-x;
+  assert(r == "ab", "generic call");
+}
+
+type T1197VecBox {
+  int n;
+  first(this, string[] items) string {
+    return items[0];
+  }
+}
+
+t1197_mk_vec(T1197VecBox b, string[] items) Task[string] {
+  return go b.first(items);
+}
+
+// Borrowed Vector[string] arg — exercises dupVector + element clone loop.
+t1197_vector_arg() `test {
+  b := T1197VecBox(n: 1);
+  s := "a" + "b";
+  task[string] x = t1197_mk_vec(b, [s, "c"]);
+  string r = <-x;
+  assert(r == "ab", "vector arg");
+}
+
+type T1197IntBox {
+  int n;
+  plus(this, int v) int {
+    return this.n + v;
+  }
+}
+
+t1197_mk_int(T1197IntBox b, int v) Task[int] {
+  return go b.plus(v);
+}
+
+// Borrowed int arg — Copy type, no spawn-side dup (control).
+t1197_int_arg_control() `test {
+  b := T1197IntBox(n: 1);
+  task[int] x = t1197_mk_int(b, 41);
+  int r = <-x;
+  assert(r == 42, "int arg control");
+}
+
+// Generic SPAWNING function — the dup runs inside the monomorphized body with
+// c.typeSubst active, so each borrowed capture's sema type is a bare TypeParam
+// that must be substituted to the concrete type before it can be classified as
+// dup-eligible. Both the receiver (T1197GBox[string], heap user) and arg
+// (T→string) are read async and must be dup'd. Distinct from t1197_generic_call,
+// whose spawning function is non-generic (typeSubst nil there).
+type T1197GBox[T] {
+  T val;
+  pick(this, T v) T {
+    return v;
+  }
+}
+
+t1197_gmk[T](T1197GBox[T] b, T v) Task[T] {
+  return go b.pick(v);
+}
+
+t1197_generic_spawner() `test {
+  b := T1197GBox[string](val: "z");
+  task[string] x = t1197_gmk[string](b, "a" + "b");
+  string r = <-x;
+  assert(r == "ab", "generic spawner recv+arg");
+}
+
+// Generic spawner in a spawn/await loop — leak guard for the typeSubst dup path.
+t1197_generic_spawner_no_leak() `test {
+  i := 0;
+  while (i < 50) {
+    b := T1197GBox[string](val: "z");
+    task[string] x = t1197_gmk[string](b, "a" + "b");
+    string r = <-x;
+    assert(r == "ab", "generic loop iter");
+    i = i + 1;
+  }
+}
+
+// Spawn/await loop — leak guard for repeated borrowed-param dups.
+t1197_loop_no_leak() `test {
+  i := 0;
+  while (i < 50) {
+    b := T1197Box(n: i);
+    task[string] x = t1197_mk_method(b, "a" + "b");
+    string r = <-x;
+    assert(r == "ab!", "loop iter");
+    i = i + 1;
+  }
+}

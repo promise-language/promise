@@ -18123,6 +18123,115 @@ func TestT0688_CopyParamNoDup(t *testing.T) {
 	assertContains(t, ngintIR, "call i8* @.goroutine.")
 }
 
+// T1197: the via-block go-call path (`go obj.method(arg)`, dispatched through
+// genGoCallExprViaBlock rather than genGoBlock) must dup borrowed heap captured
+// params — both the receiver and the args — at spawn time. Otherwise the
+// coroutine async-reads them after the spawning function returns and drops its
+// borrowed-arg stmt-temps (UAF / heap corruption). Here `b` (borrowed Box, a
+// no-drop heap user type) and `v` (borrowed string) are both dup'd before the
+// goroutine ramp call.
+func TestT1197_ViaBlockBorrowedParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		type T1197Box {
+			int n;
+			derive(this, string v) string { return v + "!"; }
+		}
+		mk(T1197Box b, string v) Task[string] {
+			return go b.derive(v);
+		}
+		main() {
+			b := T1197Box(n: 1);
+			task[string] x = mk(b, "a" + "b");
+			r := <-x;
+		}
+	`)
+	mkIR := extractFunction(ir, "__user.mk")
+	// The borrowed string arg `v` is dup'd via promise_string_new; the borrowed
+	// heap-user receiver `b` is dup'd via a heapdup — both before the goroutine
+	// ramp call.
+	assertContains(t, mkIR, "@promise_string_new(")
+	assertContains(t, mkIR, "heapdup.copy")
+	assertContains(t, mkIR, "call i8* @.goroutine.")
+}
+
+// T1197: a borrowed Copy param (int) passed to a via-block go-call must NOT be
+// dup'd — Copy types embed their data and never alias the caller's heap.
+func TestT1197_ViaBlockCopyParamNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type T1197IntBox {
+			int n;
+			plus(this, int v) int { return this.n + v; }
+		}
+		mk(T1197IntBox b, int v) Task[int] {
+			return go b.plus(v);
+		}
+		main() {
+			b := T1197IntBox(n: 1);
+			task[int] x = mk(b, 41);
+			r := <-x;
+		}
+	`)
+	mkIR := extractFunction(ir, "__user.mk")
+	assertNotContains(t, mkIR, "@promise_string_new(")
+	assertContains(t, mkIR, "call i8* @.goroutine.")
+}
+
+// T1197: an OWNED heap local passed to a via-block go-call must not get a
+// second dup — B0354's ownership-transfer already hands the local to the
+// coroutine. An extra dup would leak the original.
+func TestT1197_ViaBlockLocalOwnedNoDoubleDup(t *testing.T) {
+	ir := generateIR(t, `
+		type T1197EchoBox {
+			int n;
+			echo(this, string v) string { return v; }
+		}
+		mk(T1197EchoBox b) Task[string] {
+			s := "x" + "y";
+			return go b.echo(s);
+		}
+		main() {
+			b := T1197EchoBox(n: 1);
+			task[string] x = mk(b);
+			r := <-x;
+		}
+	`)
+	mkIR := extractFunction(ir, "__user.mk")
+	// The owned local `s` comes from promise_string_concat and is transferred
+	// as-is; there must be no extra promise_string_new dup of it.
+	assertContains(t, mkIR, "@promise_string_concat(")
+	assertNotContains(t, mkIR, "@promise_string_new(")
+}
+
+// T1197: when the spawning function is itself generic, the borrowed-param dup
+// runs inside the monomorphized body with c.typeSubst active. The capture's
+// sema type is a bare TypeParam (T) that must be substituted to the concrete
+// type (string) before goElemNeedsBorrowedCaptureDup / dupBorrowedCaptureForResult
+// can classify it — otherwise the borrowed arg is not dup'd and the coroutine
+// UAFs. Here both the receiver `b` (GBox[string], a heap user type) and the
+// arg `v` (T→string) are dup'd inside `gmk[string]`.
+func TestT1197_ViaBlockGenericSpawnerTypeSubst(t *testing.T) {
+	ir := generateIR(t, `
+		type GBox[T] {
+			T val;
+			pick(this, T v) T { return v; }
+		}
+		gmk[T](GBox[T] b, T v) Task[T] {
+			return go b.pick(v);
+		}
+		main() {
+			b := GBox[string](val: "z");
+			task[string] x = gmk[string](b, "a" + "b");
+			r := <-x;
+		}
+	`)
+	gmkIR := extractFunction(ir, `"gmk[string]"`)
+	assertContains(t, gmkIR, "call i8* @.goroutine.")
+	// arg `v` (T substituted to string) dup'd via promise_string_new; receiver
+	// `b` (GBox[string] heap user) dup'd via heapdup — both before the ramp.
+	assertContains(t, gmkIR, "@promise_string_new(")
+	assertContains(t, gmkIR, "heapdup.copy")
+}
+
 func TestChannelSendInCoroutineSuspends(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

@@ -16602,47 +16602,53 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		}
 	}
 
-	// T0731 (generalizes T0688): reading a BORROWED heap captured parameter
-	// inside an asynchronously-scheduled coroutine is NEVER safe — the caller
-	// may free the underlying buffer (e.g. a `"a"+"b"` stmt-temp) before the
-	// coroutine ever runs. T0688 only dup'd when the value-block's trailing
-	// expression was a bare ident naming the param; but the same UAF/double-free
-	// triggers when the param is aliased through a goroutine-local first
-	// (`s := if b { v } else { … }; s`), derived via an expression (`v + "!"`),
-	// or read incidentally. Rather than trace the value-block dataflow, we
-	// conservatively dup EVERY borrowed heap captured param on the value-block
-	// path: the goroutine then owns a private deep copy regardless of how the
-	// body routes the param into the trailing value. Each dup is added to
-	// capturedDroppables so the existing B0354 ownership-transfer machinery
-	// registers a goroutine-side drop binding (freeing non-escaping copies at
-	// coroutine scope exit — no leak) and the outer clearDropFlag below is a
-	// harmless no-op (borrowed params have no outer drop flag). Cost: one deep
-	// copy per borrowed heap capture even when unused — negligible versus the
-	// soundness guarantee. Excluded: channel captures (refcounted share),
-	// owned locals (already in capturedDroppables — B0354 handles them), and
-	// Copy/value/Arc/Task types (goElemNeedsBorrowedCaptureDup returns false).
-	useGoBlockValuePathOuter := !goIsVoid && !c.goExprFireAndForget
-	if useGoBlockValuePathOuter {
-		for idx, name := range captureNames {
-			if c.borrowedValueParams == nil || !c.borrowedValueParams[name] {
-				continue // not a borrowed value param (owned local / non-param)
-			}
-			if _, hasChan := capturedChanTypes[name]; hasChan {
-				continue // channel: shared via refcount, no dup
-			}
-			if _, hasDroppable := capturedDroppables[name]; hasDroppable {
-				continue // owned local: B0354 already transfers ownership
-			}
-			capType := c.info.Types[captureIdents[name]]
-			if c.typeSubst != nil && capType != nil {
-				capType = types.Substitute(capType, c.typeSubst) // mirror goResultType
-			}
-			if !goElemNeedsBorrowedCaptureDup(capType) {
-				continue // Copy/channel/Arc/Task/value type — no heap aliasing
-			}
-			captureVals[idx] = c.dupBorrowedCaptureForResult(captureVals[idx], capType)
-			capturedDroppables[name] = capType // goroutine now owns it → B0354 drop
+	// T0731 (generalizes T0688), T1196 (extends to void/fire-and-forget):
+	// reading a BORROWED heap captured parameter inside an asynchronously-
+	// scheduled coroutine is NEVER safe — the caller may free the underlying
+	// buffer (e.g. a `"a"+"b"` stmt-temp) before the coroutine ever runs. T0688
+	// only dup'd when the value-block's trailing expression was a bare ident
+	// naming the param; but the same UAF/double-free triggers when the param is
+	// aliased through a goroutine-local first (`s := if b { v } else { … }; s`),
+	// derived via an expression (`v + "!"`), or read incidentally. Rather than
+	// trace the block dataflow, we conservatively dup EVERY borrowed heap
+	// captured param: the goroutine then owns a private deep copy regardless of
+	// how the body routes the param. This applies to ALL go-block forms — the
+	// awaited value-block path (T0731) AND the void / fire-and-forget path
+	// (T1196), where a body that hands a param-derived value off asynchronously
+	// (e.g. `go { out.send(v + "!"); }`) reads freed memory just the same. Each
+	// dup is added to capturedDroppables so the existing B0354 ownership-
+	// transfer machinery registers a goroutine-side drop binding at depth 0
+	// (alongside the captured-channel drops). On BOTH the value and void /
+	// fire-and-forget paths, a non-escaping copy is freed at coroutine scope
+	// exit by the depth-0 emitScopeCleanup below (the same site that frees
+	// captured channels); an escaping copy (e.g. the value-block trailing
+	// value moved into G.result_ptr) has its drop flag cleared at the move
+	// site, so that cleanup skips it — no leak, no double-free either way.
+	// The outer clearDropFlag below is a harmless no-op (borrowed
+	// params have no outer drop flag). Cost: one deep copy per borrowed heap
+	// capture even when unused — negligible versus the soundness guarantee.
+	// Excluded: channel captures (refcounted share), owned locals (already in
+	// capturedDroppables — B0354 handles them), and Copy/value/Arc/Task types
+	// (goElemNeedsBorrowedCaptureDup returns false).
+	for idx, name := range captureNames {
+		if c.borrowedValueParams == nil || !c.borrowedValueParams[name] {
+			continue // not a borrowed value param (owned local / non-param)
 		}
+		if _, hasChan := capturedChanTypes[name]; hasChan {
+			continue // channel: shared via refcount, no dup
+		}
+		if _, hasDroppable := capturedDroppables[name]; hasDroppable {
+			continue // owned local: B0354 already transfers ownership
+		}
+		capType := c.info.Types[captureIdents[name]]
+		if c.typeSubst != nil && capType != nil {
+			capType = types.Substitute(capType, c.typeSubst) // mirror goResultType
+		}
+		if !goElemNeedsBorrowedCaptureDup(capType) {
+			continue // Copy/channel/Arc/Task/value type — no heap aliasing
+		}
+		captureVals[idx] = c.dupBorrowedCaptureForResult(captureVals[idx], capType)
+		capturedDroppables[name] = capType // goroutine now owns it → B0354 drop
 	}
 
 	// Create coroutine function with captured values as parameters

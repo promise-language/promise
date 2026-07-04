@@ -1,0 +1,251 @@
+// T1196: a VOID / fire-and-forget `go { … };` block that reads a BORROWED heap
+// param and hands the derived value off asynchronously (e.g. via a channel)
+// async-reads that param after the caller has freed its arg stmt-temp — the
+// same UAF as T0731's value-block path, but on the `!useGoBlockValuePath`
+// branch. T1196 lifts the value-path guard so the spawn-side dup runs for ALL
+// go-block forms. Before the fix `go { out.send(v + "!"); };` segfaulted.
+// Exact repro: borrowed string param read in a void go-block.
+emit_string(string v, Channel[string] out) {
+  go {
+    out.send(v + "!");
+  };
+}
+
+t1196_void_string_param() `test {
+  out := channel[string](capacity: 1);
+  a := "a";
+  b := "b";
+  emit_string(a + b, out); // arg is a freshly-concatenated (heap) stmt-temp
+  got := <-out;
+  if v := got {
+    assert(v == "ab!", "void string go-block read owned copy");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Leak guard: spawn/recv in a tight loop. The coroutine-side dup must be freed
+// at coroutine scope exit (depth-0 emitScopeCleanup) — no leak accumulates.
+t1196_void_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[string](capacity: 1);
+    prefix := "x";
+    emit_string(prefix + "y", out);
+    got := <-out;
+    if v := got {
+      if v == "xy!" {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 void spawns delivered");
+}
+
+// Borrowed Vector[string] read in a void go-block (exercises dupVector +
+// element clone loop).
+emit_vector(string[] items, Channel[string] out) {
+  go {
+    joined := "";
+    for it in items {
+      joined = joined + it;
+    }
+    out.send(move joined);
+  };
+}
+
+t1196_void_vector_param() `test {
+  out := channel[string](capacity: 1);
+  src := ["a", "b", "c"];
+  emit_vector(src.clone(), out); // pass an owned (heap) clone as the borrowed arg
+  got := <-out;
+  if v := got {
+    assert(v == "abc", "void vector go-block read owned copy");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Borrowed no-drop heap user type read in a void go-block (exercises
+// dupHeapValue).
+type T1196Box {
+  int n;
+  string label;
+}
+
+emit_box(T1196Box b, Channel[int] out) {
+  go {
+    out.send(b.n * 2);
+  };
+}
+
+t1196_void_heap_user_param() `test {
+  out := channel[int](capacity: 1);
+  emit_box(T1196Box(n: 21, label: "x"), out); // owned heap temp as borrowed arg
+  got := <-out;
+  if v := got {
+    assert(v == 42, "void heap-user go-block read owned copy");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Borrowed DROPPABLE heap user type (a real `drop(~this)` method) read in a
+// void go-block. Unlike T1196Box (no drop), the coroutine-side dup here
+// registers a drop binding that calls the user-defined `drop()` at coroutine
+// scope exit — the fire-and-forget path with NO awaiter must still run that
+// drop (freed at the depth-0 emitScopeCleanup), so a spawn/recv loop over a
+// droppable type accumulates no leak.
+type T1196Res {
+  int n;
+  drop(~this) {
+  }
+}
+
+emit_res(T1196Res r, Channel[int] out) {
+  go {
+    out.send(r.n * 2);
+  };
+}
+
+t1196_void_droppable_user_param_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[int](capacity: 1);
+    emit_res(T1196Res(n: 21), out); // owned droppable heap temp as borrowed arg
+    got := <-out;
+    if v := got {
+      if v == 42 {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 droppable-user void spawns delivered, no leak");
+}
+
+// Control: borrowed Copy param (int) — no dup, correct value passed by copy.
+emit_int(int v, Channel[int] out) {
+  go {
+    out.send(v + 1);
+  };
+}
+
+t1196_void_int_param_control() `test {
+  out := channel[int](capacity: 1);
+  emit_int(41, out);
+  got := <-out;
+  if v := got {
+    assert(v == 42, "void int go-block passes copy");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Fire-and-forget VALUE block: the block HAS a trailing value (goIsVoid=false)
+// but the whole `go {…}` is used as a statement so its result is discarded
+// (goExprFireAndForget=true). The old guard `!goIsVoid && !goExprFireAndForget`
+// excluded this branch just as it did the void branch — T1196's lifted guard
+// dups the borrowed param here too. Before the fix this segfaulted; the
+// trailing heap value is computed but never stored (no result buffer in FF
+// mode), so the dup must be freed at coroutine scope exit — no leak.
+emit_ff_value(string v, Channel[string] out) {
+  go {
+    out.send(v + "!");
+    v + "?" // trailing heap value → goIsVoid=false; go stmt discarded → FF
+  };
+}
+
+t1196_ff_value_block_param() `test {
+  out := channel[string](capacity: 1);
+  a := "a";
+  b := "b";
+  emit_ff_value(a + b, out); // freshly-concatenated heap stmt-temp
+  got := <-out;
+  if x := got {
+    assert(x == "ab!", "ff value-block read owned copy");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Fire-and-forget value block under a loop — the discarded trailing heap value
+// plus the borrowed-param dup must both be freed each iteration, no leak.
+t1196_ff_value_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[string](capacity: 1);
+    p := "p";
+    emit_ff_value(p + "q", out);
+    got := <-out;
+    if x := got {
+      if x == "pq!" {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 ff-value spawns delivered");
+}
+
+// Void block that ALIASES the borrowed param through a goroutine-local before
+// the async send. On the value-block path T0731 handles this by dup'ing the
+// param regardless of dataflow; T1196 must give the void path the same
+// coverage — the dup is unconditional, so routing `v` through a local does not
+// reintroduce the UAF.
+emit_aliased(string v, Channel[string] out) {
+  go {
+    local := v; // alias the borrowed heap param into a goroutine-local
+    derived := local + "!";
+    out.send(move derived);
+  };
+}
+
+t1196_void_aliased_param() `test {
+  out := channel[string](capacity: 1);
+  a := "a";
+  b := "b";
+  emit_aliased(a + b, out);
+  got := <-out;
+  if x := got {
+    assert(x == "ab!", "void aliased go-block read owned copy");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// TWO borrowed heap params captured in one void block — each must be
+// independently dup'd (the dup loop iterates every borrowed heap capture).
+emit_two(string a, string b, Channel[string] out) {
+  go {
+    out.send(a + b);
+  };
+}
+
+t1196_void_two_params() `test {
+  out := channel[string](capacity: 1);
+  x := "x";
+  y := "y";
+  z := "z";
+  emit_two(x + y, y + z, out); // two distinct heap stmt-temps: "xy" + "yz"
+  got := <-out;
+  if v := got {
+    assert(v == "xyyz", "void two-param go-block read owned copies");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}

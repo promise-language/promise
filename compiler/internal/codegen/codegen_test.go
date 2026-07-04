@@ -18123,6 +18123,90 @@ func TestT0688_CopyParamNoDup(t *testing.T) {
 	assertContains(t, ngintIR, "call i8* @.goroutine.")
 }
 
+// T1196: a VOID / fire-and-forget go-block (`go { … };` with no awaiter) that
+// reads a borrowed heap param and hands the derived value off asynchronously
+// (e.g. `out.send(v + "!")`) async-reads that param after the caller has freed
+// its `"a"+"b"` arg stmt-temp — the same UAF as T0731's value-block path, but
+// on the `!useGoBlockValuePath` branch T0731 deliberately left out of scope.
+// T1196 lifts the value-path guard so the spawn-side dup runs for ALL go-block
+// forms. The dup (promise_string_new) must appear in the spawning function
+// before the goroutine ramp call even though there is no result buffer.
+func TestT1196_VoidGoBlockBorrowedParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		emit(string v, Channel[string] out) {
+			go { out.send(v + "!"); };
+		}
+		main() {
+			out := channel[string](capacity: 1);
+			emit("a" + "b", out);
+			r := <-out;
+			out.close();
+		}
+	`)
+	emitIR := extractFunction(ir, "__user.emit")
+	// The void spawn dups the borrowed string param before the goroutine ramp,
+	// so the coroutine's async `v + "!"` reads the owned copy, not the freed
+	// arg temp. The dup precedes the ramp call.
+	assertContains(t, emitIR, "@promise_string_new(")
+	assertContains(t, emitIR, "call i8* @.goroutine.")
+	newIdx := strings.Index(emitIR, "@promise_string_new(")
+	rampIdx := strings.Index(emitIR, "call i8* @.goroutine.")
+	if newIdx < 0 || rampIdx < 0 || newIdx > rampIdx {
+		t.Fatalf("expected promise_string_new before goroutine ramp in emit:\n%s", emitIR)
+	}
+}
+
+// T1196: a borrowed Copy param (int) captured in a VOID go-block must NOT be
+// dup'd — Copy types alias no heap, so the value is passed by-copy directly.
+// Regression guard mirroring TestT0688_CopyParamNoDup for the void path.
+func TestT1196_VoidGoBlockCopyParamNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		emit(int v, Channel[int] out) {
+			go { out.send(v + 1); };
+		}
+		main() {
+			out := channel[int](capacity: 1);
+			emit(41, out);
+			r := <-out;
+			out.close();
+		}
+	`)
+	emitIR := extractFunction(ir, "__user.emit")
+	assertNotContains(t, emitIR, "vecdup.copy")
+	assertNotContains(t, emitIR, "heapdup.copy")
+	assertNotContains(t, emitIR, "@promise_string_new(")
+	assertContains(t, emitIR, "call i8* @.goroutine.")
+}
+
+// T1196: a FIRE-AND-FORGET VALUE block — the block has a trailing value
+// (goIsVoid=false) but the whole `go {…}` is a discarded statement
+// (goExprFireAndForget=true). The old guard `!goIsVoid && !goExprFireAndForget`
+// excluded this branch from the dup exactly as it did the void branch. T1196's
+// lifted guard dups the borrowed string param here too, so the coroutine's
+// async `v + "!"` reads the owned copy rather than the freed arg temp. The dup
+// (promise_string_new) precedes the goroutine ramp call.
+func TestT1196_FireAndForgetValueBlockBorrowedParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		emit(string v, Channel[string] out) {
+			go { out.send(v + "!"); v + "?" };
+		}
+		main() {
+			out := channel[string](capacity: 1);
+			emit("a" + "b", out);
+			r := <-out;
+			out.close();
+		}
+	`)
+	emitIR := extractFunction(ir, "__user.emit")
+	assertContains(t, emitIR, "@promise_string_new(")
+	assertContains(t, emitIR, "call i8* @.goroutine.")
+	newIdx := strings.Index(emitIR, "@promise_string_new(")
+	rampIdx := strings.Index(emitIR, "call i8* @.goroutine.")
+	if newIdx < 0 || rampIdx < 0 || newIdx > rampIdx {
+		t.Fatalf("expected promise_string_new before goroutine ramp in emit:\n%s", emitIR)
+	}
+}
+
 // T1197: the via-block go-call path (`go obj.method(arg)`, dispatched through
 // genGoCallExprViaBlock rather than genGoBlock) must dup borrowed heap captured
 // params — both the receiver and the args — at spawn time. Otherwise the

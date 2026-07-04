@@ -435,3 +435,86 @@ func TestT0633_TupleHandleMoveOutMixedAggregateIR(t *testing.T) {
 		t.Errorf("expected `call void @\"Task[int].drop\"(` (tuple-element handle drop) in @TupHold.drop:\n%s", dropBody)
 	}
 }
+
+// TestT0675_EnumNestedInEnumMoveOutNullGuardIR — the residual T0623/T0633
+// shape the earlier tests never covered: the variant field is itself an ENUM
+// that transitively owns a single-owner handle — the exact inspector repro
+// `enum OuterHandle{Wrap(InnerHandle i)}` over `enum InnerHandle{Has(Task[int])}`.
+// firstNestedSingleOwnerHandle recurses into *types.Enum variant payloads, so
+// the outer T0623 move-out path fires. The inner-enum variant-field slot lowers
+// to the enum Value struct `%promise_InnerHandle_enum` (tag + data aggregate) —
+// a structurally DISTINCT shape from the {i8*,i8*} value-struct wrapper, the
+// [N x i8*] array, and the { i8*, i64 } tuple tested above. So:
+//   - Part 1: the moved-out slot is zero-init'd via
+//     `store %promise_InnerHandle_enum zeroinitializer` (NewZeroInitializer on
+//     the enum aggregate — a bare pointer null or c.zeroValue's i64 0 default
+//     would be a type-incompatible store). Crucially, the zeroinitializer resets
+//     the inner enum's TAG to 0 (its non-droppable NoneInner variant).
+//   - Binding owns the inner enum → its synth @InnerHandle.drop is registered
+//     for the move-out binding (guarded by %inner.dropflag).
+//   - Subject's synth @OuterHandle.drop is still wired up.
+//   - Part 2: unlike the struct-wrapper case (explicit `icmp eq i8* … null`
+//     varfield guard), the enum-in-enum safety is provided by the inner enum's
+//     OWN tag switch: @OuterHandle.drop dispatches to @InnerHandle.drop, whose
+//     tag switch sees the zeroed tag 0 and hits enum.drop.done (no field drop).
+//     That is the sound mechanism for this aggregate shape — pin it here.
+func TestT0675_EnumNestedInEnumMoveOutNullGuardIR(t *testing.T) {
+	ir := generateIR(t, `
+		worker() int { return 42; }
+		enum InnerHandle { NoneInner, Has(Task[int] t) }
+		enum OuterHandle { NoneOuter, Wrap(InnerHandle i) }
+		caller() {
+			o := OuterHandle.Wrap(InnerHandle.Has(go worker()));
+			match o {
+				OuterHandle.NoneOuter => assert(true, "e"),
+				OuterHandle.Wrap(inner) => assert(true, "w"),
+			}
+		}
+		main() { caller(); }
+	`)
+
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	// Part 1: the moved-out inner-enum slot is zero-init'd as the enum Value
+	// aggregate (resets tag to 0), NOT a bare pointer null / i64 0.
+	if !strings.Contains(body, "store %promise_InnerHandle_enum zeroinitializer") {
+		t.Errorf("expected `store %%promise_InnerHandle_enum zeroinitializer` (zero-init moved-out inner-enum slot):\n%s", body)
+	}
+	// The binding owns the inner enum — its synth drop is registered for the
+	// move-out binding (drop-flag guarded).
+	if !strings.Contains(body, "@InnerHandle.drop(") {
+		t.Errorf("expected @InnerHandle.drop (move-out binding owns the inner enum):\n%s", body)
+	}
+	if !strings.Contains(body, "%inner.dropflag") {
+		t.Errorf("expected %%inner.dropflag (drop-flag-guarded move-out binding):\n%s", body)
+	}
+	// The subject's synth enum drop is still wired up.
+	if !strings.Contains(body, "@OuterHandle.drop(") {
+		t.Errorf("expected synth @OuterHandle.drop call (subject drop runs; inner-enum slot zeroed):\n%s", body)
+	}
+
+	// Part 2: @OuterHandle.drop dispatches to @InnerHandle.drop; the zeroed
+	// tag-0 slot is skipped by InnerHandle.drop's own tag switch (its
+	// enum.drop.done arm), not by an explicit icmp-null guard in the outer drop.
+	outerDrop := extractFunction(ir, "OuterHandle.drop")
+	if outerDrop == "" {
+		t.Fatalf("expected @OuterHandle.drop in IR")
+	}
+	if !strings.Contains(outerDrop, "call void @InnerHandle.drop(") {
+		t.Errorf("expected `call void @InnerHandle.drop(` inside @OuterHandle.drop (dispatch to inner enum drop):\n%s", outerDrop)
+	}
+	innerDrop := extractFunction(ir, "InnerHandle.drop")
+	if innerDrop == "" {
+		t.Fatalf("expected @InnerHandle.drop in IR")
+	}
+	// The inner enum drop tag-switches; only the Has(Task) arm drops the handle.
+	// The zeroed tag-0 (NoneInner) falls through to the default (enum.drop.done).
+	if !strings.Contains(innerDrop, "switch i32") {
+		t.Errorf("expected a tag `switch i32` in @InnerHandle.drop (skips the zeroed tag-0 slot):\n%s", innerDrop)
+	}
+	if !strings.Contains(innerDrop, `call void @"Task[int].drop"(`) {
+		t.Errorf("expected guarded `call void @\"Task[int].drop\"(` in @InnerHandle.drop (Has arm):\n%s", innerDrop)
+	}
+}

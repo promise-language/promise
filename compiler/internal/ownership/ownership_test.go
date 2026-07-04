@@ -13161,6 +13161,40 @@ func TestT1113_ArrayEnumMutexReadRejected(t *testing.T) {
 	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
 }
 
+// T0675 Site-2 sibling pair, verbatim: the inspector's canonical repro
+// `Vector[Holder]` where `Holder { Task[int] t }` — a STRUCT wrapper nesting a
+// Task (not the Mutex-in-enum shape the tests above use), read out in BOTH
+// IndexExpr-always-dup forms the audit flagged as originally ungated:
+//   - `b := src[i]` var-decl read (codegen T0398, cloneHeapElement) — tryMove
+//   - `f(src[i])` into a `move` param (codegen T0403) — tryMoveConsume
+//
+// These pin the exact double-free surface T0556/T0586 (Borrowed-ident gates) do
+// NOT cover for an owned-local Vector source. Same predicate branch as the
+// Mutex/enum cases, but the named shape is what slipped through `bin/verify
+// --wasm` before T1113 — so keep it as an explicit regression guard.
+func TestT0675_VectorStructTaskVarDeclReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { Task[int] t; }
+		test() {
+			v := Vector[Holder]();
+			Holder b = v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Task[int], a single-owner native handle")
+}
+
+func TestT0675_VectorStructTaskConsumingCallArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { Task[int] t; }
+		sink(Holder move h) {}
+		test() {
+			v := Vector[Holder]();
+			sink(v[0]);
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Task[int], a single-owner native handle")
+}
+
 // --- T1113 positive regression guards: refcounted/duplicable nesting and
 // handle-free elements must still compile. ---
 //

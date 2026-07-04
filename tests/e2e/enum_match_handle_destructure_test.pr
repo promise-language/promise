@@ -584,3 +584,66 @@ test_match_tuple_handle_wildcard() `test(exclude: wasm) {
     TupHold.Pair(_) => assert(true, "wildcard: synth drop frees the tuple's task"),
   }
 }
+
+// --- T0675 (residual of T0623/T0633): variant field is itself an ENUM that
+// transitively owns a single-owner handle — the exact inspector repro
+// `enum O{Wrap(Inner i)}` over `enum Inner{Has(Task[int])}`. This is the
+// enum-nested-in-enum shape that T0633's struct/generic/array/tuple wrappers
+// did not cover. firstNestedSingleOwnerHandle recurses into *types.Enum
+// variant payloads, so the outer T0623 move-out path fires. The inner enum
+// variant field lowers to the enum Value struct
+// `{ i8* vtable, Inner_i* instance, i32 tag, [N x i8] data }` — a distinct
+// aggregate shape — so the moved-out outer slot is zero-init'd via
+// NewZeroInitializer, and the outer synth enum drop must null-guard the
+// extracted inner-enum instance ptr before dispatching Inner.drop. Zero leaks:
+// the binding owns the inner enum (its synth drop joins+frees the Task), the
+// outer subject's synth drop skips the zeroed slot.
+
+enum InnerHandle {
+  NoneInner,
+  Has(Task[int] t),
+}
+
+enum OuterHandle {
+  NoneOuter,
+  Wrap(InnerHandle i),
+}
+
+test_match_enum_in_enum_moves_and_awaits() `test(exclude: wasm) {
+  o := OuterHandle.Wrap(InnerHandle.Has(go worker_t0623()));
+  match o {
+    OuterHandle.NoneOuter => assert(false, "wrong arm"),
+    OuterHandle.Wrap(inner) => {
+      match inner {
+        InnerHandle.NoneInner => assert(false, "wrong inner arm"),
+        InnerHandle.Has(t) => {
+          n := <-t;
+          assert(n == 42, "task inside enum-nested-in-enum variant field");
+        },
+      }
+    },
+  }
+}
+
+test_match_enum_in_enum_drops_without_await() `test(exclude: wasm) {
+  // Inner enum moves into the outer binding, the Task is never consumed via <-.
+  // The binding's synth InnerHandle.drop joins+frees the Task once at arm end;
+  // the outer subject's synth OuterHandle.drop skips the zeroed slot. Zero leaks.
+  o := OuterHandle.Wrap(InnerHandle.Has(go worker_t0623()));
+  match o {
+    OuterHandle.NoneOuter => assert(false, "wrong arm"),
+    OuterHandle.Wrap(inner) => assert(true, "binding owns the inner enum; drops at arm end"),
+  }
+}
+
+// Wildcard `_` on the inner-enum slot: NOT a moving arm. The constructed inner
+// enum has a non-null instance ptr, so the outer synth enum drop's null-guard
+// passes through and frees it normally (InnerHandle.drop -> Task.drop).
+
+test_match_enum_in_enum_wildcard() `test(exclude: wasm) {
+  o := OuterHandle.Wrap(InnerHandle.Has(go worker_t0623()));
+  match o {
+    OuterHandle.NoneOuter => assert(false, "wrong arm"),
+    OuterHandle.Wrap(_) => assert(true, "wildcard: synth drop frees the inner enum"),
+  }
+}

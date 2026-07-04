@@ -198,6 +198,15 @@ func FirstNestedSingleOwnerHandle(typ types.Type) types.Type {
 // (Arc/Channel/Weak/Vector/string) correctly yields nil. `seen` cycle-guards
 // on the Named/Enum pointer so recursive types (Node{Node? next},
 // JsonValue) terminate. Returns non-nil only for Task/Mutex/MutexGuard.
+//
+// T0675 (audit): the closed set of implicit clone-or-move sites this predicate
+// family gates is: (1) enum match-destructure move-out — codegen zero-inits the
+// moved-out variant slot and suppresses the subject drop (T0623/T0633,
+// nullSubjectHandleSlot); and (2) the ownership by-value-read reject of a
+// container/aggregate element that transitively nests a handle — `b := src[i]`,
+// `f(src[i])`, `v[i]`, `arr[i]`, `m[k]!` (T1113, rejectIndexExprSingleOwnerMove
+// → FirstFieldNestedSingleOwnerHandle). Single-owner handles have no clone
+// semantics, so a by-value duplicate is rejected rather than deep-cloned.
 func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) types.Type {
 	if typ == nil {
 		return nil
@@ -672,7 +681,7 @@ func (c *Checker) subjectIsMovableOwnedLocal(subject ast.Expr, subjectType types
 	return true
 }
 
-// enumVariantSubst returns the variant lookup and type-arg substitution for a
+// enumDestructureSubst returns the variant lookup and type-arg substitution for a
 // destructure pattern over subjectType. (T0482)
 func enumDestructureSubst(subjectType types.Type, enum *types.Enum) map[*types.TypeParam]types.Type {
 	// T1018: strip borrows so a borrowed generic enum subject still yields the

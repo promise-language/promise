@@ -15213,6 +15213,7 @@ type goArgBorrowDrop struct {
 	elemType types.Type // vector element type for element drops (nil for non-vectors)
 	isStruct bool       // coro param is a value struct {vtable, instance} → drop field 1 (heap user type)
 	isEnum   bool       // T1154: coro param is an enum value struct; spill to alloca and pass &slot to the enum drop fn
+	capType  types.Type // T1198: dup'd borrowed-param capture — drop by type via emitVariantFieldDrop
 }
 
 // emitGoArgBorrowDrops frees the heap argument temporaries owned by a goroutine
@@ -15231,6 +15232,13 @@ func (c *Compiler) emitGoArgBorrowDrops(coroFn *ir.Func, entry, cur *ir.Block, d
 	for _, d := range drops {
 		param := coroFn.Params[d.paramIdx]
 		switch {
+		case d.capType != nil:
+			// T1198: a dup'd borrowed-param capture (see genGoCallExpr). Drop by type
+			// via the canonical drop-by-type helper, which handles string/vector/Map/
+			// Set/heap-user/polymorphic uniformly (incl. no-drop pal_free). It operates
+			// on c.block and may split blocks / create entry allocas via c.entryBlock —
+			// the frame swap above already points c.fn/c.entryBlock/c.block at coroFn.
+			c.emitVariantFieldDrop(param, d.capType)
 		case d.isEnum:
 			// T1154: enum value passed by value into the coro frame — spill it to a
 			// frame slot so the synthesized enum drop fn (which takes a pointer to
@@ -15443,6 +15451,28 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 							paramIdx: i, dropFunc: rep.dropFunc, elemType: rep.elemType,
 						})
 					}
+					continue
+				}
+			}
+
+			// T1198: a bare-ident borrowed heap value param of the spawning function
+			// (no owned temp, no drop flag) is async-read by the coroutine after the
+			// caller frees its own borrowed-arg stmt-temps → UAF. Dup it at spawn time
+			// so the goroutine owns a private copy, and record a goroutine-side drop of
+			// the dup (the caller's borrow is untouched → no double-free; the dup is
+			// freed → no leak). Sibling of T0688/T0731 (value-block) and T1197
+			// (via-block); this is the fast bare-ident free-function path. Skip moves
+			// (handled below — the callee consumes them).
+			if id, ok := arg.Value.(*ast.IdentExpr); ok && !isMove && c.borrowedValueParams[id.Name] {
+				capType := argTypes[i]
+				if c.typeSubst != nil && capType != nil {
+					capType = types.Substitute(capType, c.typeSubst) // monomorphization
+				}
+				// Channels are refcounted (B0163 loop below) — sharing the pointer is
+				// fine. Copy/Arc/Task/value types embed data and never alias caller heap.
+				if _, isCh := types.AsChannel(capType); !isCh && goElemNeedsBorrowedCaptureDup(capType) {
+					argVals[i] = c.dupBorrowedCaptureForResult(argVals[i], capType)
+					argBorrowDrops = append(argBorrowDrops, goArgBorrowDrop{paramIdx: i, capType: capType})
 					continue
 				}
 			}

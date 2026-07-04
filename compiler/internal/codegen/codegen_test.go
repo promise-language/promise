@@ -18316,6 +18316,104 @@ func TestT1197_ViaBlockGenericSpawnerTypeSubst(t *testing.T) {
 	assertContains(t, gmkIR, "heapdup.copy")
 }
 
+// T1198: the fast path `genGoCallExpr` (bare-ident free-function `go f(v)`) must
+// dup a borrowed heap value param of the spawning function — the coroutine reads
+// it after the caller frees its own borrowed-arg stmt-temps. Sibling of T1197
+// (via-block) on a distinct code path.
+func TestT1198_FastPathBorrowedStringParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		derive(string v, Channel[string] out) {
+			out.send(v + "!");
+		}
+		spawn(string v, Channel[string] out) {
+			go derive(v, out);
+		}
+		main() {
+			ch := channel[string](capacity: 1);
+			spawn("a" + "b", ch);
+			r := <-ch;
+		}
+	`)
+	spawnIR := extractFunction(ir, "__user.spawn")
+	// The borrowed string param `v` is dup'd via promise_string_new before the
+	// goroutine ramp call.
+	assertContains(t, spawnIR, "@promise_string_new(")
+	assertContains(t, spawnIR, "call i8* @.goroutine.")
+}
+
+// T1198: a borrowed Copy param (int) passed to a fast-path go-call must NOT be
+// dup'd — Copy types embed their data and never alias the caller's heap.
+func TestT1198_FastPathCopyParamNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		consume(int v, Channel[int] out) {
+			out.send(v);
+		}
+		spawn(int v, Channel[int] out) {
+			go consume(v, out);
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			spawn(41, ch);
+			r := <-ch;
+		}
+	`)
+	spawnIR := extractFunction(ir, "__user.spawn")
+	assertNotContains(t, spawnIR, "@promise_string_new(")
+	assertContains(t, spawnIR, "call i8* @.goroutine.")
+}
+
+// T1198: a borrowed channel param passed to a fast-path go-call is refcounted
+// (B0163), not dup'd — sharing the pointer is fine.
+func TestT1198_FastPathChannelParamNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		relay(Channel[int] src, Channel[int] out) {
+			v := <-src;
+			if x := v { out.send(x); }
+		}
+		spawn(Channel[int] src, Channel[int] out) {
+			go relay(src, out);
+		}
+		main() {
+			a := channel[int](capacity: 1);
+			b := channel[int](capacity: 1);
+			a.send(7);
+			spawn(a, b);
+			r := <-b;
+		}
+	`)
+	spawnIR := extractFunction(ir, "__user.spawn")
+	// Channel args are refcounted via an atomic add, never string-dup'd.
+	assertNotContains(t, spawnIR, "@promise_string_new(")
+	assertContains(t, spawnIR, "call i8* @.goroutine.")
+}
+
+// T1198: the borrowed-param dup on the fast path must survive monomorphization.
+// When the spawner is a GENERIC free function, its body is codegen'd with
+// c.typeSubst active, so genGoCallExpr must substitute the capture type before
+// the eligibility gate (mirroring the value-block/via-block paths). A concrete
+// `string` param inside a `spawn[T]` spawner still dups. This exercises the
+// `c.typeSubst != nil` branch that non-generic spawners never reach.
+func TestT1198_FastPathBorrowedParamDupsUnderMonomorphization(t *testing.T) {
+	ir := generateIR(t, `
+		derive(string v, Channel[string] out) {
+			out.send(v + "!");
+		}
+		spawn[T: Ordered](string v, Channel[string] out, T marker) {
+			go derive(v, out);
+		}
+		main() {
+			ch := channel[string](capacity: 1);
+			spawn("a" + "b", ch, 0);
+			r := <-ch;
+		}
+	`)
+	// The generic spawner is monomorphized to `spawn[int]` (quoted in IR because
+	// of the brackets). The borrowed string param `v` is still dup'd there.
+	spawnIR := extractFunction(ir, `"spawn[int]"`)
+	assertContains(t, spawnIR, "@promise_string_new(")
+	assertContains(t, spawnIR, "call i8* @.goroutine.")
+}
+
 func TestChannelSendInCoroutineSuspends(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

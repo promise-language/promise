@@ -1,0 +1,244 @@
+// T1198: the fast path `genGoCallExpr` (bare-ident free-function `go f(v)`) must
+// dup a borrowed heap value param of the spawning function. Without the dup the
+// coroutine async-reads a borrow that the spawning function's caller frees on
+// return (UAF / heap corruption). Sibling of T0688/T0731 (value-block) and T1197
+// (via-block) on a distinct code path — the most idiomatic go-call form.
+// --- string arg (exact repro from the ticket; was SIGSEGV) ---
+t1198_derive(string v, Channel[string] out) {
+  out.send(v + "!");
+}
+t1198_spawn_str(string v, Channel[string] out) {
+  go t1198_derive(v, out); // simple-ident callee → genGoCallExpr fast path
+}
+t1198_string_arg() `test {
+  ch := channel[string](capacity: 1);
+  // "a"+"b" is a heap stmt-temp freed when t1198_spawn_str returns.
+  t1198_spawn_str("a" + "b", ch);
+  r := <-ch;
+  if val := r {
+    assert(val == "ab!", "string arg");
+  } else {
+    assert(false, "string arg recv");
+  }
+}
+
+// --- Vector[string] arg — deep vector dup + element drops ---
+t1198_first(string[] items, Channel[string] out) {
+  out.send(items[0] + ""); // reads borrowed element; sends a fresh heap string
+}
+t1198_spawn_vec(string[] items, Channel[string] out) {
+  go t1198_first(items, out);
+}
+t1198_vector_arg() `test {
+  ch := channel[string](capacity: 1);
+  s := "a" + "b";
+  t1198_spawn_vec([s, "c"], ch);
+  r := <-ch;
+  if val := r {
+    assert(val == "ab", "vector arg");
+  } else {
+    assert(false, "vector arg recv");
+  }
+}
+
+// --- no-drop heap user-type arg — isStruct / pal_free via emitVariantFieldDrop ---
+type T1198Tag {
+  int id;
+}
+t1198_read_tag(T1198Tag t, Channel[int] out) {
+  out.send(t.id);
+}
+t1198_spawn_tag(T1198Tag t, Channel[int] out) {
+  go t1198_read_tag(t, out);
+}
+t1198_heap_user_arg() `test {
+  ch := channel[int](capacity: 1);
+  t1198_spawn_tag(T1198Tag(id: 7), ch);
+  r := <-ch;
+  if val := r {
+    assert(val == 7, "heap user arg");
+  } else {
+    assert(false, "heap user arg recv");
+  }
+}
+
+// --- void `go f(v)` form — the dup drop must still fire ---
+t1198_check(string v, Channel[int] out) {
+  assert(v == "ab", "void arg");
+  out.send(1);
+}
+t1198_spawn_void(string v, Channel[int] out) {
+  go t1198_check(v, out); // void call, still the fast path
+}
+t1198_void_form() `test {
+  ch := channel[int](capacity: 1);
+  t1198_spawn_void("a" + "b", ch);
+  r := <-ch;
+  if val := r {
+    assert(val == 1, "void form completed");
+  } else {
+    assert(false, "void form recv");
+  }
+}
+
+// --- fire-and-forget form (no `<-`) — dup drop fires on the FF path too ---
+t1198_ff(string v, Channel[string] out) {
+  out.send(v + ""); // reads borrowed v; new heap string is sent (send consumes)
+}
+t1198_spawn_ff(string v, Channel[string] out) {
+  go t1198_ff(v, out);
+}
+t1198_fire_and_forget() `test {
+  ch := channel[string](capacity: 1);
+  t1198_spawn_ff("a" + "b", ch); // result of go-spawn discarded
+  r := <-ch;
+  if val := r {
+    assert(val == "ab", "fire-and-forget");
+  } else {
+    assert(false, "fire-and-forget recv");
+  }
+}
+
+// --- generic spawner — the dup must survive monomorphization (c.typeSubst) ---
+t1198_gen_derive(string v, Channel[string] out) {
+  out.send(v + "!");
+}
+t1198_spawn_generic[T: Ordered](string v, Channel[string] out, T marker) {
+  go t1198_gen_derive(v, out); // fast path, but body codegen'd under typeSubst
+}
+t1198_generic_spawner() `test {
+  ch := channel[string](capacity: 1);
+  // marker forces monomorphization to spawn[int]; `v` stays a concrete borrowed
+  // heap string that must still be dup'd for the coroutine.
+  t1198_spawn_generic("a" + "b", ch, 0);
+  r := <-ch;
+  if val := r {
+    assert(val == "ab!", "generic spawner");
+  } else {
+    assert(false, "generic spawner recv");
+  }
+}
+
+// --- Copy param (int) control — must still pass with NO dup ---
+t1198_add(int v, Channel[int] out) {
+  out.send(v + 1);
+}
+t1198_spawn_int(int v, Channel[int] out) {
+  go t1198_add(v, out);
+}
+t1198_int_arg_control() `test {
+  ch := channel[int](capacity: 1);
+  t1198_spawn_int(41, ch);
+  r := <-ch;
+  if val := r {
+    assert(val == 42, "int arg control");
+  } else {
+    assert(false, "int arg recv");
+  }
+}
+
+// --- spawn/await loop — leak guard for repeated borrowed-param dups ---
+t1198_loop_no_leak() `test {
+  i := 0;
+  while (i < 50) {
+    ch := channel[string](capacity: 1);
+    t1198_spawn_str("a" + "b", ch);
+    r := <-ch;
+    if val := r {
+      assert(val == "ab!", "loop iter");
+    } else {
+      assert(false, "loop iter recv");
+    }
+    i = i + 1;
+  }
+}
+
+// --- Map[string,int] borrowed param — isMapOrSetType dup + drop branch ---
+// dupHeapValue deep-copies the _buckets vector (Slot enums via dupEnumElementInPlace),
+// distinct from the string/vector paths above; emitVariantFieldDrop drops the dup.
+t1198_map_read(map[string, int] m, Channel[int] out) {
+  if v := m["k"] {
+    out.send(v);
+  } else {
+    out.send(-1);
+  }
+}
+t1198_spawn_map(map[string, int] m, Channel[int] out) {
+  go t1198_map_read(m, out);
+}
+t1198_map_arg() `test {
+  ch := channel[int](capacity: 1);
+  map[string, int] m = {:};
+  m["a" + "b"] = 9; // heap key stored in the map
+  m["k"] = 5;
+  t1198_spawn_map(m, ch);
+  r := <-ch;
+  if val := r {
+    assert(val == 5, "map arg");
+  } else {
+    assert(false, "map recv");
+  }
+}
+
+// --- Set[string] borrowed param — isMapOrSetType (Set recurses through Map) ---
+t1198_set_read(Set[string] s, Channel[int] out) {
+  out.send(s.len);
+}
+t1198_spawn_set(Set[string] s, Channel[int] out) {
+  go t1198_set_read(s, out);
+}
+t1198_set_arg() `test {
+  ch := channel[int](capacity: 1);
+  s := Set[string]();
+  s.add("a" + "b");
+  s.add("c" + "d");
+  t1198_spawn_set(s, ch);
+  r := <-ch;
+  if val := r {
+    assert(val == 2, "set arg");
+  } else {
+    assert(false, "set recv");
+  }
+}
+
+// --- droppable heap user type (string field → real drop) — isDroppableHeapUserType
+// path, distinct from the no-drop T1198Tag above (isHeapUserNoDropPalFree). The
+// dup'd box is dropped via the type's synthesized drop fn, freeing its string. ---
+type T1198Box {
+  string name;
+}
+t1198_box_read(T1198Box b, Channel[string] out) {
+  out.send(b.name + "");
+}
+t1198_spawn_box(T1198Box b, Channel[string] out) {
+  go t1198_box_read(b, out);
+}
+t1198_droppable_user_arg() `test {
+  ch := channel[string](capacity: 1);
+  t1198_spawn_box(T1198Box(name: "a" + "b"), ch);
+  r := <-ch;
+  if val := r {
+    assert(val == "ab", "box arg");
+  } else {
+    assert(false, "box recv");
+  }
+}
+
+// --- two borrowed heap params in a single fast-path go-call — the per-arg loop
+// must dup BOTH independently and record two goArgBorrowDrops. ---
+t1198_join(string a, string b, Channel[string] out) {
+  out.send(a + b);
+}
+t1198_spawn_two(string a, string b, Channel[string] out) {
+  go t1198_join(a, b, out);
+}
+t1198_two_borrowed_args() `test {
+  ch := channel[string](capacity: 1);
+  t1198_spawn_two("a" + "b", "c" + "d", ch);
+  r := <-ch;
+  if val := r {
+    assert(val == "abcd", "two args");
+  } else {
+    assert(false, "two recv");
+  }
+}

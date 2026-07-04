@@ -285,6 +285,22 @@ func (c *Compiler) defineSchedulerGlobals() {
 	testDone.Init = constant.NewInt(irtypes.I32, 0)
 	c.testDoneGlobal = testDone
 
+	// @__promise_test_deadline = global i64 0 (T0680 Part 2)
+	// Monotonic-clock deadline (nanotime()+timeout) for the currently running
+	// WASM cooperative test; 0 = disabled. The cooperative scheduler checks it
+	// after each resumed G and stops the run when the deadline passes. Only ever
+	// non-zero inside the WASM test harness (native uses a thread watchdog).
+	testDeadline := c.module.NewGlobal("__promise_test_deadline", irtypes.I64)
+	testDeadline.Init = constant.NewInt(irtypes.I64, 0)
+	c.testDeadlineGlobal = testDeadline
+
+	// @__promise_test_timed_out = global i8 0 (T0680 Part 2)
+	// Set to 1 by the cooperative scheduler when the deadline above is reached.
+	// The WASM test main reads it after promise_sched_coop_run to render TIMEOUT.
+	testTimedOut := c.module.NewGlobal("__promise_test_timed_out", irtypes.I8)
+	testTimedOut.Init = constant.NewInt(irtypes.I8, 0)
+	c.testTimedOutGlobal = testTimedOut
+
 	// @__promise_panic_flag = [thread_local] global i8 0
 	// Set to 1 when a panic is in flight on this thread.
 	panicFlag := c.module.NewGlobal("__promise_panic_flag", irtypes.I8)
@@ -2653,10 +2669,31 @@ func (c *Compiler) defineSchedCoopStepFunc() {
 	afterReleaseBlk.NewBr(ranGBlk)
 
 	// ran_g: a G ran (done/parked/yielded) — restore the saved TLS context for
-	// re-entrant callers (null when called from coop_run's loop) and return 1.
+	// re-entrant callers (null when called from coop_run's loop). Then enforce the
+	// per-test deadline (T0680 Part 2): if a deadline is armed and the monotonic
+	// clock has passed it, signal timeout and return 2 (stop); otherwise return 1
+	// (progress). When the deadline is disabled (0 — all non-test WASM runs) the
+	// path is byte-for-byte the original `ret i8 1`.
 	ranGBlk.NewStore(savedG, c.currentGGlobal)
 	ranGBlk.NewStore(savedP, c.currentPGlobal)
-	ranGBlk.NewRet(constant.NewInt(irtypes.I8, 1))
+	deadline := ranGBlk.NewLoad(irtypes.I64, c.testDeadlineGlobal)
+	deadlineArmed := ranGBlk.NewICmp(enum.IPredNE, deadline, constant.NewInt(irtypes.I64, 0))
+	checkDeadlineBlk := fn.NewBlock("check_deadline")
+	ranReturnBlk := fn.NewBlock("ran_return")
+	timedOutBlk := fn.NewBlock("timed_out")
+	ranGBlk.NewCondBr(deadlineArmed, checkDeadlineBlk, ranReturnBlk)
+
+	// check_deadline: compare the monotonic clock against the armed deadline.
+	nowNs := c.emitWasmMonotonicNanos(checkDeadlineBlk)
+	expired := checkDeadlineBlk.NewICmp(enum.IPredSGE, nowNs, deadline)
+	checkDeadlineBlk.NewCondBr(expired, timedOutBlk, ranReturnBlk)
+
+	// timed_out: mark the flag (read by GenerateTestMain after coop_run) and stop.
+	timedOutBlk.NewStore(constant.NewInt(irtypes.I8, 1), c.testTimedOutGlobal)
+	timedOutBlk.NewRet(constant.NewInt(irtypes.I8, 2))
+
+	// ran_return: normal progress return.
+	ranReturnBlk.NewRet(constant.NewInt(irtypes.I8, 1))
 
 	c.funcs["promise_sched_coop_step"] = fn
 }
@@ -2681,10 +2718,17 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 
 	entry.NewBr(loop)
 
-	// loop: run one cooperative step. 1 = ran a G (keep going), 0 = nothing runnable.
+	// loop: run one cooperative step. 1 = ran a G (keep going), 0 = nothing
+	// runnable, 2 = per-test deadline reached (T0680 Part 2 — stop, testTimedOut
+	// already set; GenerateTestMain reads it and renders TIMEOUT).
 	stepR := loop.NewCall(c.funcs["promise_sched_coop_step"])
-	ranG := loop.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
-	loop.NewCondBr(ranG, loop, noG)
+	timedOut := loop.NewICmp(enum.IPredEQ, stepR, constant.NewInt(irtypes.I8, 2))
+	loopContinueBlk := fn.NewBlock("loop_continue")
+	loop.NewCondBr(timedOut, doneBlk, loopContinueBlk)
+
+	// loop_continue: not a timeout — keep looping while a G ran, else check main.
+	ranG := loopContinueBlk.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
+	loopContinueBlk.NewCondBr(ranG, loop, noG)
 
 	// noG: no runnable G — exit if main completed, else deadlock.
 	mdField := noG.NewGetElementPtr(schedTy, c.schedGlobal,

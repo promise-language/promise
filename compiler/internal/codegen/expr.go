@@ -17213,6 +17213,12 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		resultLLVM = c.resolveType(innerType)
 	}
 
+	// T0680 Part 2: set by the WASM non-coroutine spin below when coop_step
+	// reports a per-test deadline (stepR==2). When non-nil the result is produced
+	// by a phi merging the normal load path with a zeroinitializer from this
+	// timeout block (see the merge after loadResultBlk).
+	var taskTimeoutBlk *ir.Block
+
 	gTy := goroutineStructType()
 	gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 
@@ -17275,9 +17281,20 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 			// non-zero = ran/advanced a G (progress possible), 0 = no runnable G.
 			stepFn := c.funcs["promise_sched_coop_step"]
 			stepR := c.block.NewCall(stepFn)
-			madeProgress := c.block.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
 			coopRecheckBlk := c.newBlock("task.coop_recheck")
 			deadlockBlk := c.newBlock("task.deadlock")
+			spinProgressBlk := c.newBlock("task.progress")
+			// T0680 Part 2: stepR==2 = per-test deadline reached. Break the spin
+			// and yield a dead zeroinitializer result (the test is being torn down
+			// and its return is discarded; G is intentionally not freed — a leak,
+			// but result==2 skips the leak check). Prevents a livelock nested under
+			// this await from spinning coop_step→2 forever.
+			taskTimeoutBlk = c.newBlock("task.timed_out")
+			isTimeout := c.block.NewICmp(enum.IPredEQ, stepR, constant.NewInt(irtypes.I8, 2))
+			c.block.NewCondBr(isTimeout, taskTimeoutBlk, spinProgressBlk)
+
+			c.block = spinProgressBlk
+			madeProgress := c.block.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
 			c.block.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
 
 			// No runnable G — re-check G.done. If the awaited G is still not
@@ -17372,15 +17389,41 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	c.block.NewCall(c.palFree, gRaw)
 	nullCapturedEnvField()
 
+	// T0680 Part 2: no WASM deadline break emitted — original single-path return.
+	if taskTimeoutBlk == nil {
+		if isVoid {
+			return nil
+		}
+		// T1150: register the received heap result as a droppable statement temp so
+		// it is freed at statement end when consumed inline (no named binding owns
+		// it). c.block is loadResultBlk here — where resultVal is live and the return
+		// flows from. Claim-on-consume sites clear the flag when ownership transfers.
+		c.trackReceivedTaskResult(resultVal, innerType)
+		return resultVal
+	}
+
+	// WASM: merge the normal load path with the deadline-timeout path. The timeout
+	// block yields a zeroinitializer (the value is dead — teardown discards it) and
+	// deliberately does not free G (may still be running → tolerated teardown leak).
+	loadDoneBlk := c.block
+	mergeBlk := c.newBlock("task.recv_merge")
+	loadDoneBlk.NewBr(mergeBlk)
+
+	c.block = taskTimeoutBlk
+	nullCapturedEnvField()
+	c.block.NewBr(mergeBlk)
+
+	c.block = mergeBlk
 	if isVoid {
 		return nil
 	}
-	// T1150: register the received heap result as a droppable statement temp so
-	// it is freed at statement end when consumed inline (no named binding owns
-	// it). c.block is loadResultBlk here — where resultVal is live and the return
-	// flows from. Claim-on-consume sites clear the flag when ownership transfers.
-	c.trackReceivedTaskResult(resultVal, innerType)
-	return resultVal
+	resultPhi := mergeBlk.NewPhi(
+		ir.NewIncoming(resultVal, loadDoneBlk),
+		ir.NewIncoming(constant.NewZeroInitializer(resultLLVM), taskTimeoutBlk),
+	)
+	// T1150 (see above): register the merged result as a droppable statement temp.
+	c.trackReceivedTaskResult(resultPhi, innerType)
+	return resultPhi
 }
 
 // genReceiveChannel generates code for `<-channel[T]` — returns T? (optional).

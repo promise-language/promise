@@ -100,6 +100,11 @@ const _promiseEnvImpl = {
     // process.exit never returns, but tell the WASM runtime we're done.
     throw new Error("promise_env.exit");
   },
+  // T0680: monotonic clock source for wasm32-web. Returns nanoseconds as a
+  // BigInt (i64) — process.hrtime.bigint() is a monotonic high-resolution
+  // counter. Without this the IR import would fall through the Proxy stub to
+  // () => 0, freezing all WASM time at 0.
+  monotonic_nanos: () => process.hrtime.bigint(),
 };
 
 const importObject = {

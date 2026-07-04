@@ -398,6 +398,8 @@ type Compiler struct {
 	testPanicMsgGlobal    *ir.Global  // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
 	testPanicTypeGlobal   *ir.Global  // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
 	testDoneGlobal        *ir.Global  // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
+	testDeadlineGlobal    *ir.Global  // @__promise_test_deadline (non-TLS, i64) — WASM cooperative test deadline; 0 = disabled (T0680)
+	testTimedOutGlobal    *ir.Global  // @__promise_test_timed_out (non-TLS, i8) — set to 1 by coop scheduler on deadline (T0680)
 	panicFlagGlobal       *ir.Global  // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
 	panicMsgTlsGlobal     *ir.Global  // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
 	panicTypeTlsGlobal    *ir.Global  // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
@@ -1229,16 +1231,34 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			entry.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
 			entry.NewStore(constant.NewInt(irtypes.I8, 0), c.testPanicTypeGlobal)
 
+			// T0680 Part 2: arm the per-test deadline for the cooperative scheduler.
+			// timeoutNs is a compile-time constant; >0 stores nanotime()+timeout
+			// (reusing the t0 start capture above), 0 disables in-binary enforcement
+			// (the outer process backstop still applies). Always clear the flag.
+			if timeoutNs > 0 {
+				deadline := entry.NewAdd(t0, constant.NewInt(irtypes.I64, timeoutNs))
+				entry.NewStore(deadline, c.testDeadlineGlobal)
+			} else {
+				entry.NewStore(constant.NewInt(irtypes.I64, 0), c.testDeadlineGlobal)
+			}
+			entry.NewStore(constant.NewInt(irtypes.I8, 0), c.testTimedOutGlobal)
+
 			// Create G0, enqueue, run cooperative scheduler
 			handle := entry.NewCall(coroFn)
 			g0 := entry.NewCall(c.funcs["promise_g_new"], handle)
 			entry.NewCall(c.funcs["promise_sched_enqueue"], g0)
 			entry.NewCall(c.funcs["promise_sched_coop_run"])
 
-			// Determine result from panic msg: null=pass(0), non-null=fail(1)
+			// Determine result: timeout(2) > panic-fail(1) > pass(0). testTimedOut is
+			// set by promise_sched_coop_step when the armed deadline is reached; the
+			// leak/print/counter paths below already special-case result==2 (T0680).
+			entry.NewStore(constant.NewInt(irtypes.I64, 0), c.testDeadlineGlobal) // disarm
+			timedOut := entry.NewLoad(irtypes.I8, c.testTimedOutGlobal)
+			isTimedOut := entry.NewICmp(enum.IPredNE, timedOut, constant.NewInt(irtypes.I8, 0))
 			panicMsg := entry.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
 			hasPanic := entry.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
-			result = entry.NewSelect(hasPanic, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+			failResult := entry.NewSelect(hasPanic, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+			result = entry.NewSelect(isTimedOut, constant.NewInt(irtypes.I32, 2), failResult)
 		} else {
 			// Native: run test in a thread via promise_test_run
 			fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
@@ -3135,10 +3155,19 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 		// a G (progress possible), 0 = no runnable G.
 		stepFn := c.funcs["promise_sched_coop_step"]
 		stepR := spinBlk.NewCall(stepFn)
-		madeProgress := spinBlk.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
 		coopRecheckBlk := fn.NewBlock("task.drop.coop_recheck")
 		deadlockBlk := fn.NewBlock("task.drop.deadlock")
-		spinBlk.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
+		spinProgressBlk := fn.NewBlock("task.drop.progress")
+		// T0680 Part 2: stepR==2 = per-test deadline reached. Stop spinning and go
+		// straight to done, skipping Task[T].free_after_done — the awaited G may
+		// still be running (a leak), but a timed-out test (result==2) skips the
+		// leak check, so this cannot surface a false LEAK. Prevents a livelock
+		// nested under this drop-join from spinning coop_step→2 forever.
+		isTimeout := spinBlk.NewICmp(enum.IPredEQ, stepR, constant.NewInt(irtypes.I8, 2))
+		spinBlk.NewCondBr(isTimeout, doneBlk, spinProgressBlk)
+
+		madeProgress := spinProgressBlk.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
+		spinProgressBlk.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
 
 		// No runnable G — re-check G.done. If the awaited G is still not done it
 		// can never complete (nothing left to run) → genuine deadlock.

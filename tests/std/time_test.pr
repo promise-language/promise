@@ -136,9 +136,26 @@ test_duration_format() `test {
 
 // --- Instant ---
 
-test_instant_now() `test(exclude: wasm) {
+// T0680 Part 1: no longer excludes wasm — the WASM monotonic clock
+// (wasi clock_time_get / web promise_env.monotonic_nanos) now returns a real
+// nonzero value instead of the old hardcoded 0.
+test_instant_now() `test {
   Instant t = Instant.now();
   assert(t.nanos > 0, "now returns positive nanos");
+}
+
+// T0680 Part 1: the monotonic clock must be non-decreasing across two captures
+// with work in between — proves it is a real clock, not frozen at 0. Runs on all
+// targets including wasm32-wasi (resolution-independent: no strict elapsed bound).
+test_instant_monotonic_nondecreasing() `test {
+  Instant a = Instant.now();
+  int x = 0;
+  while x < 10000 {
+    x = x + 1;
+  }
+  Instant b = Instant.now();
+  assert(a.nanos > 0, "first capture nonzero");
+  assert(b.nanos >= a.nanos, "monotonic non-decreasing");
 }
 
 test_instant_elapsed() `test {

@@ -542,6 +542,61 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 	entry.NewRet(nil)
 }
 
+// wasmClockMonotonic is the WASI clockid for the monotonic clock
+// (CLOCK_MONOTONIC) passed to clock_time_get.
+const wasmClockMonotonic = 1
+
+// getOrDeclareWasmImport declares (once) a WASM host-import function with the
+// given import module/name and returns it. Unlike getOrDeclareFunc it also tags
+// the declaration with the wasm-import-module/wasm-import-name attributes so the
+// linker resolves it against the host (WASI / the Node harness). Dedups by name.
+func (c *Compiler) getOrDeclareWasmImport(name, importMod, importName string, retType irtypes.Type, params ...*ir.Param) *ir.Func {
+	for _, fn := range c.module.Funcs {
+		if fn.Name() == name {
+			return fn
+		}
+	}
+	fn := c.module.NewFunc(name, retType, params...)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind,
+		ir.AttrPair{Key: "wasm-import-module", Value: importMod},
+		ir.AttrPair{Key: "wasm-import-name", Value: importName})
+	return fn
+}
+
+// emitWasmMonotonicNanos emits a read of the monotonic clock (nanoseconds) into
+// blk and returns the resulting i64 value. This replaces the old hardcoded
+// `ret i64 0` that froze all WASM time at 0 (T0680 Part 1).
+//
+//   - wasm32-wasi: imports wasi_snapshot_preview1.clock_time_get with
+//     CLOCKID_MONOTONIC (1); writes into a stack i64 out-param and loads it.
+//     The errno is ignored — on the (non-existent in practice) failure path the
+//     out-param simply keeps whatever it held, degrading to 0.
+//   - wasm32-web: imports promise_env.monotonic_nanos() → i64, supplied by the
+//     Node harness (process.hrtime.bigint). A host that omits this import must
+//     provide an i64-returning stub — the harness Proxy's generic `() => 0`
+//     stub returns a JS number, which traps on an i64 import under BigInt mode,
+//     so unlike the i32 web-binding stubs this one cannot silently no-op.
+func (c *Compiler) emitWasmMonotonicNanos(blk *ir.Block) value.Value {
+	if c.isWasmWeb {
+		monoFn := c.getOrDeclareWasmImport("promise_env.monotonic_nanos",
+			"promise_env", "monotonic_nanos", irtypes.I64)
+		return blk.NewCall(monoFn)
+	}
+
+	clockTimeGet := c.getOrDeclareWasmImport("clock_time_get",
+		"wasi_snapshot_preview1", "clock_time_get", irtypes.I32,
+		ir.NewParam("clockid", irtypes.I32),
+		ir.NewParam("precision", irtypes.I64),
+		ir.NewParam("out", irtypes.NewPointer(irtypes.I64)))
+	out := blk.NewAlloca(irtypes.I64)
+	blk.NewStore(constant.NewInt(irtypes.I64, 0), out)
+	blk.NewCall(clockTimeGet,
+		constant.NewInt(irtypes.I32, wasmClockMonotonic),
+		constant.NewInt(irtypes.I64, 1000), // precision hint: 1µs
+		out)
+	return blk.NewLoad(irtypes.I64, out)
+}
+
 // defineNanotimeFunc defines .promise_nanotime_raw() → i64 for the test runner.
 // Returns raw i64 nanoseconds (not Promise int value struct).
 // Uses a dot-prefixed name to avoid collision with the extern promise_nanotime.
@@ -556,7 +611,7 @@ func (c *Compiler) defineNanotimeFunc() *ir.Func {
 	entry := fn.NewBlock(".entry")
 
 	if c.isWasm {
-		entry.NewRet(constant.NewInt(irtypes.I64, 0))
+		entry.NewRet(c.emitWasmMonotonicNanos(entry))
 		return fn
 	}
 
@@ -619,7 +674,7 @@ func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
 	}
 
 	if c.isWasm {
-		packNanosToSret(entry, constant.NewInt(irtypes.I64, 0))
+		packNanosToSret(entry, c.emitWasmMonotonicNanos(entry))
 		return
 	}
 

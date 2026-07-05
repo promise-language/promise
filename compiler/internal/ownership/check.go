@@ -105,6 +105,15 @@ type Checker struct {
 	// discipline as forInAliasBindings. (T1035)
 	forInTypeParamAliasBindings map[string]*types.TypeParam
 
+	// guardMutexRoot maps a local MutexGuard variable name to the name of the
+	// local Mutex it borrows (the receiver root of its `.lock()` call, or the
+	// root inherited through a guard-to-guard alias `g2 := g`). Used at
+	// container-store sites (T0665) to reject storing a guard into a container
+	// declared before its Mutex: the container outlives the Mutex, so the
+	// guard's scope-exit drop would unlock an already-destroyed Mutex (UAF).
+	// Reset per-function with the same discipline as declOrder/varTypes.
+	guardMutexRoot map[string]string
+
 	// funcDrainReqs / methodDrainReqs accumulate deferred for-in-drain
 	// requirements across the whole file (NOT reset per-function — initialized
 	// once in Check). Each records that a generic body moves a for-in binding
@@ -215,6 +224,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
+	savedGuardMutexRoot := c.guardMutexRoot
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
 
@@ -233,6 +243,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.returnOrigins = nil
 	c.loopDepth = 0
 	c.goHandleBorrowedLocal = make(map[string]string)
+	c.guardMutexRoot = make(map[string]string)
 	c.curFuncObj = fn
 	c.curMethodObj = nil
 
@@ -264,6 +275,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.varTypes = savedVarTypes
 	c.loopDepth = savedLoopDepth
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
+	c.guardMutexRoot = savedGuardMutexRoot
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
 }
@@ -348,6 +360,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
+	savedGuardMutexRoot := c.guardMutexRoot
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
 
@@ -366,6 +379,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = nil
 	c.loopDepth = 0
 	c.goHandleBorrowedLocal = make(map[string]string)
+	c.guardMutexRoot = make(map[string]string)
 	c.curFuncObj = nil
 	c.curMethodObj = m
 
@@ -404,6 +418,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = savedReturnOrigins
 	c.loopDepth = savedLoopDepth
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
+	c.guardMutexRoot = savedGuardMutexRoot
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
 }

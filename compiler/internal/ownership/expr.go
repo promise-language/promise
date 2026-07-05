@@ -1030,6 +1030,32 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 						}
 					}
 					if storeNative {
+						// T0665: storing a MutexGuard into a container declared
+						// before the local that owns its source Mutex means the
+						// container outlives that Mutex — the guard's scope-exit drop
+						// would unlock an already-destroyed Mutex (UAF; the repro
+						// segfaults at 0x0). Reject. The Mutex owner is the root of
+						// the `.lock()` receiver chain (the Mutex local itself, or a
+						// struct/vector local owning it). Guards with no tracked-local
+						// provenance (Mutex reached via a param or `this`) are
+						// conservatively allowed — the Mutex outlives the function, so
+						// the container-store order stays valid (T0557's pattern).
+						if types.IsMutexGuard(peelOptional(c.info.Types[arg.Value])) {
+							if mem, ok := e.Callee.(*ast.MemberExpr); ok {
+								if container, ok := mem.Target.(*ast.IdentExpr); ok {
+									if cOrder, tracked := c.declOrder[container.Name]; tracked {
+										if mroot := c.guardMutexExprRoot(arg.Value); mroot != "" {
+											if mOrder, ok := c.declOrder[mroot]; ok && cOrder < mOrder {
+												c.errorf(arg.Value.Pos(),
+													"cannot store a MutexGuard into '%s': the container is declared before '%s' (which owns the guard's Mutex) and outlives it — the guard's drop would unlock an already-destroyed Mutex. Declare the container after '%s', or use a scoped `use guard := m.lock()` binding.",
+													container.Name, mroot, mroot)
+												continue
+											}
+										}
+									}
+								}
+							}
+						}
 						// T0556/T0586: a container-store native method (Vector.push)
 						// consumes or dups its element. Reject moving a borrowed
 						// non-Copy, non-auto-dup, droppable value into the store site
@@ -1223,6 +1249,25 @@ func (c *Checker) isElementStoringNativeCall(callee ast.Expr) bool {
 		return false
 	}
 	return member.Field == "push" && types.IsVector(c.info.Types[member.Target])
+}
+
+// guardMutexExprRoot returns the name of the local that owns the Mutex a pushed
+// MutexGuard argument borrows, or "" when it cannot be resolved to a tracked
+// local. Handles a temporary `v.push(m.lock())` / `v.push(h.m.lock())` (the
+// root of the lock-call receiver chain) and a guard variable `v.push(move g)`
+// (its recorded guardMutexRoot, which also transitively covers guard-to-guard
+// aliases). A receiver rooted at `this` (or any untracked root) yields "" —
+// the Mutex outlives the method, so the store is safe. T0665.
+func (c *Checker) guardMutexExprRoot(expr ast.Expr) string {
+	switch e := unwrapDestructureParens(expr).(type) {
+	case *ast.IdentExpr:
+		return c.guardMutexRoot[e.Name]
+	case *ast.CallExpr: // m.lock() / h.m.lock() — receiver must be a Mutex
+		if mem, ok := e.Callee.(*ast.MemberExpr); ok && types.IsMutex(c.info.Types[mem.Target]) {
+			return destructureBorrowRoot(mem.Target)
+		}
+	}
+	return ""
 }
 
 // checkReceiverBorrow creates a borrow for method calls with &this or ~this receivers.

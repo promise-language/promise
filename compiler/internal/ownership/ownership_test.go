@@ -14864,3 +14864,244 @@ func TestT1152_GoBlockHandleNotFlagged(t *testing.T) {
 	`)
 	expectNoOwnerError(t, errs, "'go' task handle escape")
 }
+
+// --- T0665: MutexGuard container-store escape (ordering-aware rejection) ---
+//
+// Pushing a MutexGuard into a container declared BEFORE its source Mutex means
+// the container outlives the Mutex; the guard's scope-exit drop then unlocks an
+// already-destroyed Mutex → UAF (the repro segfaults at 0x0). The ownership
+// pass rejects the unsafe ordering. Container-after-Mutex order is sound
+// (matches T0557's Vector[MutexGuard] pattern) and must stay accepted.
+
+const t0665ContainerEscapeMsg = "cannot store a MutexGuard into"
+
+// Reject: `v.push(move g)` where the vector is declared before the Mutex
+// (the exact repro, case D).
+func TestT0665_GuardVarPushBeforeMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			MutexGuard[int][] v = [];
+			m := Mutex[int](5);
+			g := m.lock();
+			v.push(move g);
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: `v.push(m.lock())` (temporary guard, case C) — vector before Mutex.
+func TestT0665_GuardTempPushBeforeMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			v := Vector[MutexGuard[int]]();
+			m := Mutex[int](5);
+			v.push(m.lock());
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: optional-element vector `MutexGuard[int]?[]` — same ordering hazard.
+func TestT0665_GuardPushOptionalBeforeMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			MutexGuard[int]?[] v = [];
+			m := Mutex[int](5);
+			g := m.lock();
+			v.push(move g);
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: guard-to-guard alias `g2 := g` inherits g's Mutex provenance, so
+// pushing g2 is still caught when the vector precedes the Mutex.
+func TestT0665_GuardAliasPushBeforeMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			MutexGuard[int][] v = [];
+			m := Mutex[int](5);
+			g := m.lock();
+			g2 := g;
+			v.push(move g2);
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: typed-var-decl form of the guard binding (exercises the
+// checkTypedVarDecl recordGuardMutexRoot call site).
+func TestT0665_GuardTypedVarDeclBeforeMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			MutexGuard[int][] v = [];
+			Mutex[int] m = Mutex[int](5);
+			MutexGuard[int] g = m.lock();
+			v.push(move g);
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept: Mutex declared before the vector (LIFO-safe) — `move g` form.
+func TestT0665_GuardVarPushAfterMutexAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[int](5);
+			MutexGuard[int][] v = [];
+			g := m.lock();
+			v.push(move g);
+		}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept: Mutex before vector — temporary `v.push(m.lock())` form.
+func TestT0665_GuardTempPushAfterMutexAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[int](5);
+			v := Vector[MutexGuard[int]]();
+			v.push(m.lock());
+		}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept: optional-element vector in the safe order.
+func TestT0665_GuardPushOptionalAfterMutexAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[int](5);
+			MutexGuard[int]?[] v = [];
+			g := m.lock();
+			v.push(move g);
+			v.push(none);
+		}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept: a guard whose Mutex is a parameter (not a visible local) has no
+// local provenance — conservatively allowed. The container-after-guard-param
+// order is the T0557 pattern; must not be flagged.
+func TestT0665_GuardParamMutexPushAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		store(Mutex[int]& m) {
+			v := Vector[MutexGuard[int]]();
+			v.push(m.lock());
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: the Mutex is reached through a field — `h.m.lock()`. The guard's
+// owner is the root local `h`; the vector is declared before `h`, so it
+// outlives the Holder (and its Mutex) → the guard's drop unlocks a freed Mutex.
+// (Without root-of-receiver resolution this compiled and segfaulted at 0x0.)
+func TestT0665_GuardFieldMutexTempPushBeforeOwnerRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { Mutex[int] m; }
+		test() {
+			MutexGuard[int][] v = [];
+			h := Holder(m: Mutex[int](5));
+			v.push(h.m.lock());
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: field-rooted guard bound to a variable then pushed — the recorded
+// provenance is the root owner `h`, declared after the vector.
+func TestT0665_GuardFieldMutexVarPushBeforeOwnerRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { Mutex[int] m; }
+		test() {
+			MutexGuard[int][] v = [];
+			h := Holder(m: Mutex[int](5));
+			g := h.m.lock();
+			v.push(move g);
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept: field-rooted guard in the safe order — the Holder (owning the Mutex)
+// is declared before the vector, so the vector drops first while the Mutex is
+// still alive.
+func TestT0665_GuardFieldMutexPushAfterOwnerAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { Mutex[int] m; }
+		test() {
+			h := Holder(m: Mutex[int](5));
+			MutexGuard[int][] v = [];
+			v.push(h.m.lock());
+		}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject: the Mutex is reached through an index — `arr[0].lock()`. The guard's
+// owner is the root local `arr` (resolved via destructureBorrowRoot); the vector
+// is declared before `arr`, so it outlives the array (and its Mutex). Exercises
+// the index-rooted provenance path documented on recordGuardMutexRoot.
+func TestT0665_GuardIndexMutexTempPushBeforeOwnerRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			MutexGuard[int][] v = [];
+			arr := [Mutex[int](5)];
+			v.push(arr[0].lock());
+		}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept: index-rooted guard in the safe order — the array owning the Mutex is
+// declared before the vector, so the vector drops first while the Mutex lives.
+func TestT0665_GuardIndexMutexPushAfterOwnerAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			arr := [Mutex[int](5)];
+			MutexGuard[int][] v = [];
+			v.push(arr[0].lock());
+		}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Reject inside a METHOD body: the guard→Mutex provenance and declOrder are
+// reset/tracked per method (checkMethodBody save/restore of guardMutexRoot), so
+// the unsafe container-before-Mutex order must be caught here too — not only in
+// free functions. Guards against a regression that reset the map only for funcs.
+func TestT0665_GuardPushBeforeMutexInMethodRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W { int id;
+			run(~this) {
+				MutexGuard[int][] v = [];
+				m := Mutex[int](5);
+				g := m.lock();
+				v.push(move g);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0665ContainerEscapeMsg)
+}
+
+// Accept inside a METHOD body: safe Mutex-before-container order stays allowed,
+// confirming the per-method tracking does not over-reject.
+func TestT0665_GuardPushAfterMutexInMethodAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W { int id;
+			run(~this) {
+				m := Mutex[int](5);
+				MutexGuard[int][] v = [];
+				g := m.lock();
+				v.push(move g);
+			}
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
+}

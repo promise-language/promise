@@ -1,0 +1,68 @@
+// T0665: pushing a MutexGuard into a container is sound ONLY when the container
+// drops before its source Mutex — i.e. (LIFO) the Mutex is declared FIRST, so
+// its drop runs AFTER the container's element-walking drop. The unsafe order
+// (container declared before the Mutex) is rejected at compile time by the
+// ownership pass; those negative cases live in the Go ownership tests
+// (TestT0665_* in compiler/internal/ownership/ownership_test.go).
+//
+// This file is the runtime positive control for the accepted safe order: every
+// case below must run and be LEAK-CLEAN (the harness enforces zero leaks). A
+// guard's drop unlocks its Mutex, so a mis-ordered drop would segfault — these
+// tests confirm the safe order both compiles AND executes correctly.
+use std as _;
+
+// Safe order, `move g` form: Mutex first, then the vector.
+test_guard_push_move_after_mutex() `test {
+  m := Mutex[int](5);
+  MutexGuard[int][] v = [];
+  g := m.lock();
+  v.push(move g);
+  assert(v.len == 1, "one guard pushed");
+}
+
+// Safe order, temporary `v.push(m.lock())` form.
+test_guard_push_temp_after_mutex() `test {
+  m := Mutex[int](7);
+  v := Vector[MutexGuard[int]]();
+  v.push(m.lock());
+  assert(v.len == 1, "one guard temp pushed");
+}
+
+// Safe order, guard-to-guard alias `g2 := g` then push.
+test_guard_push_alias_after_mutex() `test {
+  m := Mutex[int](9);
+  MutexGuard[int][] v = [];
+  g := m.lock();
+  g2 := g;
+  v.push(move g2);
+  assert(v.len == 1, "aliased guard pushed");
+}
+
+// Safe order, optional-element vector with a trailing `none`.
+test_guard_push_optional_after_mutex() `test {
+  m := Mutex[int](11);
+  MutexGuard[int]?[] v = [];
+  g := m.lock();
+  v.push(move g);
+  v.push(none);
+  assert(v.len == 2, "guard + none pushed");
+}
+
+// Safe order, Mutex reached through a struct field: the Holder (owning the
+// Mutex) is declared before the vector, so the vector's element-walking drop
+// runs while the Mutex is still alive. The unsafe order (vector before the
+// Holder) is a compile error — see TestT0665_GuardFieldMutex* in the Go tests.
+// NOTE: the guard is bound to a variable first (`g := h.m.lock(); push move g`).
+// The temporary form `v.push(h.m.lock())` currently double-frees the unclaimed
+// member-rooted lock temp and segfaults — a codegen temp-claim bug (T0658
+// family) tracked as T1203, independent of this ownership ordering fix.
+type GuardHolder {
+  Mutex[int] m;
+}
+test_guard_push_field_mutex_after_owner() `test {
+  h := GuardHolder(m: Mutex[int](13));
+  MutexGuard[int][] v = [];
+  g := h.m.lock();
+  v.push(move g);
+  assert(v.len == 1, "field-rooted guard pushed");
+}

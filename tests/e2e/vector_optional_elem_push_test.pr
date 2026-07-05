@@ -204,15 +204,18 @@ test_push_bare_into_generic_optional_vector() `test {
 // / Weak / Task / Mutex / MutexGuard, because their stmtTempMap tracking is
 // by val-identity and is lost once the value is wrapped into the {i1,T}
 // aggregate. String + Vector are covered by tests (6),(7); these close the
-// remaining reachable branches (IsChannel/IsArc/IsMutex/IsWeak). All four
-// share the exact same `||` chain / claimStringTemp call as the IsTask
+// remaining reachable branches (IsChannel/IsArc/IsMutex/IsWeak/IsMutexGuard).
+// They share the exact same `||` chain / claimStringTemp call as the IsTask
 // branch, so the Task path is covered transitively. A regression in any one
 // claim would surface here as a leak (zero-leak is enforced by the test
 // harness), not a failed assertion.
 //
-// IsMutexGuard is intentionally NOT covered: pushing a MutexGuard into any
-// vector segfaults at runtime — a pre-existing single-owner-native-handle
-// escape bug independent of T0658, filed as T0665.
+// IsMutexGuard: T0665 (the container-store escape) is now rejected at compile
+// time whenever the container is declared BEFORE its Mutex (the container
+// outlives the Mutex → the guard's drop unlocks a freed Mutex → UAF/segfault).
+// The safe LIFO order (Mutex declared first, so it drops after the container)
+// is sound and exercised by test_push_bare_guard_into_optional_vector below —
+// which also covers the previously-uncoverable IsMutexGuard claim branch.
 //
 // IsTask: pushing an un-awaited Task into a container dropped without being
 // awaited previously deadlocked the single-threaded WASM scheduler (T0668 —
@@ -250,6 +253,21 @@ test_push_bare_mutex_into_optional_vector() `test {
   v.push(move m);
   v.push(none);
   assert(v.len == 2, "mutex + none pushed");
+}
+
+// T0665: a MutexGuard pushed into MutexGuard[int]?[] in the SAFE order — the
+// Mutex is declared first, so LIFO drop order puts the vector's drop (which
+// walks its elements and unlocks the guard) BEFORE the Mutex's drop. Covers
+// the IsMutexGuard claim-before-wrap branch that was previously uncoverable
+// (pushing a guard used to segfault regardless of order). The unsafe order
+// (vector before Mutex) is now a compile error — see the ownership tests.
+test_push_bare_guard_into_optional_vector() `test {
+  m := Mutex[int](5);
+  MutexGuard[int]?[] v = [];
+  g := m.lock();
+  v.push(move g);
+  v.push(none);
+  assert(v.len == 2, "guard + none pushed");
 }
 
 test_push_bare_weak_into_optional_vector() `test {

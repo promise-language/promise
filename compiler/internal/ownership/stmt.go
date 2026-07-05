@@ -245,6 +245,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
 		}
+		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 	// Raw pointer types are only allowed inside unsafe blocks.
@@ -338,6 +339,50 @@ func optionalDepthType(t types.Type) int {
 		}
 		n++
 		t = opt.Elem()
+	}
+}
+
+// peelOptional strips leading *types.Optional layers, returning the innermost
+// non-Optional type (or the input unchanged when it is not Optional, and nil
+// for nil). T0665.
+func peelOptional(t types.Type) types.Type {
+	for {
+		opt, ok := t.(*types.Optional)
+		if !ok {
+			return t
+		}
+		t = opt.Elem()
+	}
+}
+
+// recordGuardMutexRoot links a newly-bound owned MutexGuard local to the local
+// that owns the Mutex it borrows: the root of the `.lock()` receiver chain
+// (`m` in `g := m.lock()`, `h` in `g := h.m.lock()`, `arr` in
+// `g := arr[i].lock()`), or (for a guard-to-guard alias `g2 := g`) the root
+// inherited from the source guard. Called from the owned-binding path of the
+// var-decl checks. The recorded provenance lets a later container-store site
+// reject storing the guard into a container declared before that owner (T0665)
+// — see guardMutexExprRoot / the push-site check in checkCallExpr.
+func (c *Checker) recordGuardMutexRoot(name string, rhs ast.Expr) {
+	if name == "_" || c.guardMutexRoot == nil || rhs == nil {
+		return
+	}
+	if !types.IsMutexGuard(peelOptional(c.info.Types[rhs])) {
+		return
+	}
+	switch e := unwrapDestructureParens(rhs).(type) {
+	case *ast.CallExpr: // g := m.lock() / g := h.m.lock() / g := arr[i].lock()
+		if mem, ok := e.Callee.(*ast.MemberExpr); ok && types.IsMutex(c.info.Types[mem.Target]) {
+			if root := destructureBorrowRoot(mem.Target); root != "" {
+				if _, tracked := c.declOrder[root]; tracked {
+					c.guardMutexRoot[name] = root
+				}
+			}
+		}
+	case *ast.IdentExpr: // g2 := g — inherit the source guard's Mutex root
+		if root, ok := c.guardMutexRoot[e.Name]; ok {
+			c.guardMutexRoot[name] = root
+		}
 	}
 }
 
@@ -499,6 +544,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
 		}
+		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 }

@@ -459,6 +459,10 @@ func (v *BasePromiseParserVisitor) VisitIndexExpr(ctx *IndexExprContext) interfa
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitTypeInstMemberExpr(ctx *TypeInstMemberExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitOptionalChainExpr(ctx *OptionalChainExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }

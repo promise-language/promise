@@ -485,6 +485,9 @@ expression
     // Non-left-recursive: generic constructor call with optional type args (e.g. Vector[string?]())
     | IDENT typeArgs LPAREN args RPAREN                        # typeInstCallExpr
 
+    // Non-left-recursive: generic enum variant path with optional type args (e.g. E[string?].V)
+    | IDENT typeArgs DOT IDENT                                 # typeInstMemberExpr
+
     // Primary atoms (not left-recursive — always highest precedence)
     | primary                                                  # primaryExpr
     ;

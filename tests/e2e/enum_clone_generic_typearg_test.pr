@@ -269,3 +269,65 @@ test_clone_nested_generic_enum() `test {
     Outer.Bare => assert(false, "expected Wrap"),
   }
 }
+
+// T1204: enum variant path with a trailing-`?` (Optional) outermost type arg —
+// `E[string?].V(...)`. Before the fix the parser misread `?].` as a bare `?`
+// error-op. This is the enum-variant mirror of the type-level ArrBox[string?]
+// case (type_clone_generic_typearg_test.pr:test_clone_arrbox_optional_string).
+// Exercises the Optional-TypeArg clone path (some + none) through the enum synth.
+enum Maybe1[T] `clone {
+  V(T x),
+  Nope,
+}
+
+test_clone_typearg_optional_string_some() `test {
+  string? y = "hi";
+  Maybe1[string?] j = Maybe1[string?].V(move y);
+  Maybe1[string?] c = j.clone();
+  match c {
+    Maybe1.V(v) => assert(v! == "hi", "clone optional some=hi"),
+    Maybe1.Nope => assert(false, "expected V (clone)"),
+  }
+  match j {
+    Maybe1.V(v) => assert(v! == "hi", "original optional some=hi"),
+    Maybe1.Nope => assert(false, "expected V (original)"),
+  }
+}
+
+test_clone_typearg_optional_string_none() `test {
+  string? y = none;
+  Maybe1[string?] j = Maybe1[string?].V(move y);
+  Maybe1[string?] c = j.clone();
+  match c {
+    Maybe1.V(v) => assert(v is absent, "clone optional none passed through"),
+    Maybe1.Nope => assert(false, "expected V (clone)"),
+  }
+  match j {
+    Maybe1.V(v) => assert(v is absent, "original optional none"),
+    Maybe1.Nope => assert(false, "expected V (original)"),
+  }
+}
+
+// T1204 (multi-type-arg mirror): the parse fix must also hold when the
+// trailing-`?` arg is the LAST of several type args — `Pair1[int, string?].V`.
+// Here the `?` arg lands in the IndexExpr's ExtraIndices tail, so this drives
+// the whole pipeline (parse → sema → codegen → clone) through the multi-arg
+// `?].Variant` boundary that the single-arg tests above never touch.
+enum Pair1[A, B] `clone {
+  V(A a, B b),
+  Nope,
+}
+
+test_typearg_optional_last_of_many() `test {
+  string? y = "hi";
+  Pair1[int, string?] j = Pair1[int, string?].V(7, move y);
+  Pair1[int, string?] c = j.clone();
+  match c {
+    Pair1.V(a, b) => assert(a == 7 && b! == "hi", "clone multi-arg some"),
+    Pair1.Nope => assert(false, "expected V (clone multi)"),
+  }
+  match j {
+    Pair1.V(a, b) => assert(a == 7 && b! == "hi", "original multi-arg some"),
+    Pair1.Nope => assert(false, "expected V (original multi)"),
+  }
+}

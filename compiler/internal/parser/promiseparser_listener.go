@@ -346,6 +346,9 @@ type PromiseParserListener interface {
 	// EnterIndexExpr is called when entering the indexExpr production.
 	EnterIndexExpr(c *IndexExprContext)
 
+	// EnterTypeInstMemberExpr is called when entering the typeInstMemberExpr production.
+	EnterTypeInstMemberExpr(c *TypeInstMemberExprContext)
+
 	// EnterOptionalChainExpr is called when entering the optionalChainExpr production.
 	EnterOptionalChainExpr(c *OptionalChainExprContext)
 
@@ -834,6 +837,9 @@ type PromiseParserListener interface {
 
 	// ExitIndexExpr is called when exiting the indexExpr production.
 	ExitIndexExpr(c *IndexExprContext)
+
+	// ExitTypeInstMemberExpr is called when exiting the typeInstMemberExpr production.
+	ExitTypeInstMemberExpr(c *TypeInstMemberExprContext)
 
 	// ExitOptionalChainExpr is called when exiting the optionalChainExpr production.
 	ExitOptionalChainExpr(c *OptionalChainExprContext)

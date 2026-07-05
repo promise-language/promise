@@ -390,6 +390,126 @@ func TestValidErrorOpsStillParse(t *testing.T) {
 	}
 }
 
+// TestBuildTypeInstMemberExpr guards T1204: a generic enum variant path whose
+// outermost type arg ends in `?` (e.g. `E[string?].V`) must parse via the
+// non-left-recursive typeInstMemberExpr rule instead of being misread as a bare
+// `?` error-op. The resulting node shape must be MemberExpr{Target: IndexExpr}
+// — identical to the plain `E[int].V` and `arr[i].field` parses so sema resolves
+// them uniformly.
+func TestBuildTypeInstMemberExpr(t *testing.T) {
+	// The regression: trailing-`?` type arg on an enum variant path. Must build
+	// without the bare-`?` diagnostic.
+	t.Run("optional_typearg_no_bare_question", func(t *testing.T) {
+		if errs := buildErrs(t, `f() { x := E[string?].V; }`); len(errs) > 0 {
+			t.Fatalf("expected no build errors for `E[string?].V`, got: %v", errs)
+		}
+	})
+
+	// Shape check: MemberExpr over an IndexExpr, with the `?` arg lowered to a
+	// TypeRefExpr wrapping an OptionalTypeRef.
+	t.Run("optional_typearg_shape", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := E[string?].V; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		me := vd.Value.(*MemberExpr)
+		assertEqual(t, me.Field, "V")
+		ix := me.Target.(*IndexExpr)
+		assertEqual(t, ix.Target.(*IdentExpr).Name, "E")
+		tre := ix.Index.(*TypeRefExpr)
+		if _, ok := tre.Ref.(*OptionalTypeRef); !ok {
+			t.Fatalf("expected Index to be TypeRefExpr{OptionalTypeRef}, got %T", tre.Ref)
+		}
+	})
+
+	// Regression guard: a plain-identifier type arg (`E[int].V`) yields the same
+	// MemberExpr{IndexExpr} shape but with an IdentExpr index — the exact shape
+	// the index-path parse produced before this rule existed.
+	t.Run("plain_typearg_same_shape", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := E[int].V; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		me := vd.Value.(*MemberExpr)
+		assertEqual(t, me.Field, "V")
+		ix := me.Target.(*IndexExpr)
+		assertEqual(t, ix.Target.(*IdentExpr).Name, "E")
+		assertEqual(t, ix.Index.(*IdentExpr).Name, "int")
+	})
+
+	// Regression guard: value-level index+member (`arr[i].field`) must keep
+	// parsing as MemberExpr over IndexExpr — the shared node shape must not shift.
+	t.Run("value_index_member_unchanged", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := arr[i].field; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		me := vd.Value.(*MemberExpr)
+		assertEqual(t, me.Field, "field")
+		ix := me.Target.(*IndexExpr)
+		assertEqual(t, ix.Target.(*IdentExpr).Name, "arr")
+		assertEqual(t, ix.Index.(*IdentExpr).Name, "i")
+	})
+
+	// Regression guard: a numeric index (`arr[0].field`) is not a typeRef, so it
+	// must fall through to the primary+index path, still producing the same shape.
+	t.Run("numeric_index_member_unchanged", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := arr[0].field; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		me := vd.Value.(*MemberExpr)
+		assertEqual(t, me.Field, "field")
+		ix := me.Target.(*IndexExpr)
+		assertEqual(t, ix.Target.(*IdentExpr).Name, "arr")
+		_ = ix.Index.(*IntLit)
+	})
+
+	// Multi-type-arg variant path (`E[int, string?].V`) — the trailing-`?` arg
+	// lives in ExtraIndices, not Index. Every single-arg subtest leaves
+	// ExtraIndices empty, so this is the only guard that the `indices[1:]` tail
+	// is populated and that the `?]` boundary is handled when it is NOT the sole
+	// arg (the extra-index slot still lowers to a TypeRefExpr{OptionalTypeRef}).
+	t.Run("multi_typearg_extra_indices", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := E[int, string?].V; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		me := vd.Value.(*MemberExpr)
+		assertEqual(t, me.Field, "V")
+		ix := me.Target.(*IndexExpr)
+		assertEqual(t, ix.Target.(*IdentExpr).Name, "E")
+		assertEqual(t, ix.Index.(*IdentExpr).Name, "int")
+		if len(ix.ExtraIndices) != 1 {
+			t.Fatalf("expected 1 extra index, got %d", len(ix.ExtraIndices))
+		}
+		tre := ix.ExtraIndices[0].(*TypeRefExpr)
+		if _, ok := tre.Ref.(*OptionalTypeRef); !ok {
+			t.Fatalf("expected ExtraIndices[0] to be TypeRefExpr{OptionalTypeRef}, got %T", tre.Ref)
+		}
+	})
+
+	// The exact bug repro is a *construction*: `E[string?].V(y)`. The member
+	// path is the callee, so the whole thing must build as CallExpr over the
+	// MemberExpr{IndexExpr} — confirming the postfix `(args)` still layers on
+	// top of the new non-left-recursive rule (and, again, no bare-`?` error).
+	t.Run("optional_typearg_call_form", func(t *testing.T) {
+		if errs := buildErrs(t, `f() { x := E[string?].V(y); }`); len(errs) > 0 {
+			t.Fatalf("expected no build errors for `E[string?].V(y)`, got: %v", errs)
+		}
+		file := parseAndBuild(t, `f() { x := E[string?].V(y); }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		call := vd.Value.(*CallExpr)
+		if len(call.Args) != 1 {
+			t.Fatalf("expected 1 call arg, got %d", len(call.Args))
+		}
+		me := call.Callee.(*MemberExpr)
+		assertEqual(t, me.Field, "V")
+		ix := me.Target.(*IndexExpr)
+		assertEqual(t, ix.Target.(*IdentExpr).Name, "E")
+		tre := ix.Index.(*TypeRefExpr)
+		if _, ok := tre.Ref.(*OptionalTypeRef); !ok {
+			t.Fatalf("expected Index to be TypeRefExpr{OptionalTypeRef}, got %T", tre.Ref)
+		}
+	})
+}
+
 // TestBuildTypeDecl verifies type declaration AST structure.
 func TestBuildTypeDecl(t *testing.T) {
 	tests := []struct {

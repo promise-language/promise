@@ -346,6 +346,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#indexExpr.
 	VisitIndexExpr(ctx *IndexExprContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#typeInstMemberExpr.
+	VisitTypeInstMemberExpr(ctx *TypeInstMemberExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#optionalChainExpr.
 	VisitOptionalChainExpr(ctx *OptionalChainExprContext) interface{}
 

@@ -666,6 +666,26 @@ func (b *Builder) VisitTypeInstCallExpr(ctx *parser.TypeInstCallExprContext) int
 	}
 }
 
+func (b *Builder) VisitTypeInstMemberExpr(ctx *parser.TypeInstMemberExprContext) interface{} {
+	tac := ctx.TypeArgs().(*parser.TypeArgsContext)
+	refs := tac.AllTypeRef()
+	indices := make([]Expr, len(refs))
+	for i, tr := range refs {
+		indices[i] = typeRefAsIndexExpr(b.visitTypeRef(tr))
+	}
+	target := &IndexExpr{
+		nodeBase:     b.baseFromContext(ctx),
+		Target:       &IdentExpr{nodeBase: b.baseFromContext(ctx), Name: ctx.IDENT(0).GetText()},
+		Index:        indices[0],
+		ExtraIndices: indices[1:],
+	}
+	return &MemberExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Target:   target,
+		Field:    ctx.IDENT(1).GetText(),
+	}
+}
+
 // typeRefAsIndexExpr maps a TypeRef to its expression-equivalent form so the
 // IndexExpr inside a typeInstCallExpr behaves identically to the original
 // left-recursive `expression LBRACKET expression RBRACKET` parse (which always

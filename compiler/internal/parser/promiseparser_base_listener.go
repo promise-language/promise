@@ -698,6 +698,12 @@ func (s *BasePromiseParserListener) EnterIndexExpr(ctx *IndexExprContext) {}
 // ExitIndexExpr is called when production indexExpr is exited.
 func (s *BasePromiseParserListener) ExitIndexExpr(ctx *IndexExprContext) {}
 
+// EnterTypeInstMemberExpr is called when production typeInstMemberExpr is entered.
+func (s *BasePromiseParserListener) EnterTypeInstMemberExpr(ctx *TypeInstMemberExprContext) {}
+
+// ExitTypeInstMemberExpr is called when production typeInstMemberExpr is exited.
+func (s *BasePromiseParserListener) ExitTypeInstMemberExpr(ctx *TypeInstMemberExprContext) {}
+
 // EnterOptionalChainExpr is called when production optionalChainExpr is entered.
 func (s *BasePromiseParserListener) EnterOptionalChainExpr(ctx *OptionalChainExprContext) {}
 

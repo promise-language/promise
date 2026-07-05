@@ -7,6 +7,12 @@ import (
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
+// cloneInstanceOpDesc is the OpDesc tag for a deferred `clone-generic
+// instantiation requirement recorded by validateCloneInstance when a field /
+// variant field's substituted type still contains a TypeParam inside a generic
+// body (T1201). Used for dedup and the propagateCloneReqs re-validation edge.
+const cloneInstanceOpDesc = "`clone type instantiation"
+
 // isCloneableField returns true if a field type can be cloned:
 // either it's a copy type (bitwise copy) or it has a clone() method.
 func isCloneableField(typ types.Type) bool {
@@ -169,24 +175,35 @@ func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs
 		// gate, leaking the shared heap payload at drop (mirrors codegen's
 		// mergeParentSubst). (T0666)
 		c.mergeParentSubstSema(t, subst)
+		deferred := false
 		for _, f := range t.AllFields() {
 			if !types.ContainsTypeParam(f.Type()) {
 				continue // concrete field already checked by validateCloneType
 			}
 			concrete := types.Substitute(f.Type(), subst)
 			if types.ContainsTypeParam(concrete) {
-				continue // still generic (nested generic body) — deferred
+				deferred = true // still generic (nested generic body) — deferred
+				continue
 			}
 			if !isAutoCloneTypeArg(concrete) {
 				c.errorf(pos, "cannot instantiate `clone type %s: type argument makes field '%s' have type %s which is not cloneable (must be `copy or have a clone() method)",
 					t.Obj().Name(), f.Name(), concrete)
 			}
 		}
+		if deferred {
+			// T1201: a `clone generic instantiated over a still-unbound TypeParam
+			// field inside another generic body — defer the T0666 cloneability
+			// check to the concrete call edge (mirrors
+			// validateSingleOwnerContainerInstance/T0616). recordCloneReq is a
+			// no-op outside a generic body.
+			c.recordCloneReq(types.NewInstance(t, typeArgs), pos, cloneInstanceOpDesc)
+		}
 	case *types.Enum:
 		if !t.IsClone() || len(t.TypeParams()) == 0 {
 			return
 		}
 		subst := types.BuildSubstMap(t.TypeParams(), typeArgs)
+		deferred := false
 		for _, v := range t.Variants() {
 			for _, f := range v.Fields() {
 				if !types.ContainsTypeParam(f.Type()) {
@@ -194,6 +211,7 @@ func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs
 				}
 				concrete := types.Substitute(f.Type(), subst)
 				if types.ContainsTypeParam(concrete) {
+					deferred = true
 					continue
 				}
 				if !isAutoCloneTypeArg(concrete) {
@@ -201,6 +219,10 @@ func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs
 						t.Obj().Name(), v.Name(), concrete)
 				}
 			}
+		}
+		if deferred {
+			// T1201: same deferral as the Named branch for a generic enum body.
+			c.recordCloneReq(types.NewInstance(t, typeArgs), pos, cloneInstanceOpDesc)
 		}
 	}
 }
@@ -937,6 +959,18 @@ func (c *Checker) propagateCloneReqs() {
 							c.errorf(edge.CallPos,
 								"cannot instantiate generic with %s: it contains a closure field (%s), but %s (at %s) would duplicate the closure environment, which cannot be cloned",
 								substituted, sig, req.OpDesc, req.Pos)
+						}
+					}
+					// T1201: a `clone generic whose TypeParam field is now bound to
+					// a concrete non-cloneable arg — re-run the T0666 instantiation
+					// check at the call site. validateCloneInstance self-gates on
+					// IsClone(), so container/handle requirements (Vector, Task,
+					// etc.) fall through harmlessly.
+					if inst, ok := substituted.(*types.Instance); ok {
+						key := edge.CallPos.String() + "|cloneinst|" + substituted.String()
+						if !emitted[key] {
+							emitted[key] = true
+							c.validateCloneInstance(edge.CallPos, inst.Origin(), inst.TypeArgs())
 						}
 					}
 					continue

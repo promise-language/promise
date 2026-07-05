@@ -1,0 +1,81 @@
+// T1201: a `clone generic (Box[T]) instantiated with an UNBOUND TypeParam
+// INSIDE another generic body (outer[T]) escaped the T0666 direct-site
+// cloneability check — validateCloneInstance deferred (the substituted field
+// still held a TypeParam) and no site re-ran the predicate. Instantiating the
+// outer generic with a non-cloneable concrete arg then let codegen's AutoClone
+// path bit-copy the field and double-free the shared heap payload at drop. The
+// fix records the deferred requirement on the enclosing generic and re-validates
+// it at the concrete call edge (see internal/sema/t1201_test.go — the bad
+// program is now a clean compile error, so it has no runtime artifact).
+//
+// This runtime test pins the CONVERSE: when the nested `clone generic is
+// instantiated inside a generic body with a CLONEABLE arg, the deep-clone path
+// must still run through the generic indirection AND stay leak-free. The clone
+// happens inside the generic body where the source `b` also drops — so if the
+// clone shared `b`'s heap payload it would double-free once `b` drops in the
+// body and again when the returned clone drops in the caller. Assertions run at
+// the concrete level (where T's fields are visible). Guards against the fix
+// over-rejecting valid nested cloneable-arg shapes.
+// A `clone user type owning a HEAP string (built by concatenation, not a
+// .rodata literal — a literal's static bit-63 flag would mask a double-free).
+type Owned `clone {
+  string s;
+}
+
+type Box[T] `clone {
+  T val;
+}
+
+enum Wrap[T] `clone {
+  Plain(T val), Nothing,
+}
+
+heap_str() string {
+  string b = "abc";
+  return b + "-" + b + "-defghij";
+}
+
+// Box[T] deep-cloned inside a generic body; source `b` drops in the body, the
+// clone `c` is returned and drops in the caller.
+clone_box_in_body[T](T move v) Box[T] {
+  Box[T] b = Box[T](val: move v);
+  Box[T] c = b.clone();
+  return c;
+}
+
+test_nested_box_clone_cloneable_arg() `test {
+  Box[Owned] c = clone_box_in_body[Owned](Owned(s: heap_str()));
+  assert(c.val.s == "abc-abc-defghij", "nested box deep-clone value");
+}
+
+// Enum-branch analogue through Wrap[T] inside a generic body.
+clone_wrap_in_body[T](T move v) Wrap[T] {
+  Wrap[T] w = Wrap[T].Plain(move v);
+  Wrap[T] c = w.clone();
+  return c;
+}
+
+test_nested_wrap_clone_cloneable_arg() `test {
+  Wrap[Owned] c = clone_wrap_in_body[Owned](Owned(s: heap_str()));
+  match c {
+    Wrap.Plain(inner) => assert(inner.s == "abc-abc-defghij", "nested wrap deep-clone value"),
+    Wrap.Nothing => assert(false, "clone nothing"),
+  }
+}
+
+// Transitive chain: inner[T] instantiates Box[T]; mid[U] calls inner[U]. The
+// fix's fixed-point propagation must not reject the cloneable Owned arg here.
+inner_chain[T](T move v) Box[T] {
+  Box[T] b = Box[T](val: move v);
+  Box[T] c = b.clone();
+  return c;
+}
+
+mid_chain[U](U move v) Box[U] {
+  return inner_chain[U](move v);
+}
+
+test_nested_transitive_clone_cloneable_arg() `test {
+  Box[Owned] c = mid_chain[Owned](Owned(s: heap_str()));
+  assert(c.val.s == "abc-abc-defghij", "nested transitive deep-clone value");
+}

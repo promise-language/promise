@@ -1,0 +1,122 @@
+// T0666: a `clone generic type/enum instantiated with a non-`clone / no-clone()
+// heap enum (e.g. `enum Heapy { Word(string s), Empty }`) is now a clean compile
+// error at the instantiation site (see internal/sema/t0666_test.go) — the
+// AutoClone path previously bit-copied the enum and double-freed the shared heap
+// string at drop. This runtime test pins the CONVERSE: a `clone generic over a
+// *cloneable* heap enum (one carrying its own `clone semantics) must still deep-
+// clone correctly and stay leak-free. It guards against the fix over-rejecting
+// valid cloneable-TypeArg instantiations. Both `j` and `c` are kept live to
+// scope exit so both drop paths run (the double-free/leak repro). 0 leaks.
+// A `clone enum with heap variant data — cloneable because it is `clone.
+enum CloneHeapy `clone {
+  Word(string s), Empty,
+}
+
+type Box[T] `clone {
+  T val;
+}
+enum Wrap[T] `clone {
+  Plain(T val), Nothing,
+}
+
+// Build a HEAP string (concatenation, not a .rodata literal — a literal's
+// static bit-63 flag would mask the double-free).
+heap_str() string {
+  string b = "abc";
+  return b + "-" + b + "-defghij";
+}
+
+// Type-level: Box[CloneHeapy] deep-clones the enum variant's heap string.
+test_box_cloneable_enum() `test {
+  Box[CloneHeapy] j = Box[CloneHeapy](val: CloneHeapy.Word(heap_str()));
+  Box[CloneHeapy] c = j.clone();
+  match c.val {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "clone word"),
+    CloneHeapy.Empty => assert(false, "clone empty"),
+  }
+  match j.val {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "orig word"),
+    CloneHeapy.Empty => assert(false, "orig empty"),
+  }
+}
+
+// Enum-level: Wrap[CloneHeapy] deep-clones through the outer clone enum too.
+test_wrap_cloneable_enum() `test {
+  Wrap[CloneHeapy] j = Wrap[CloneHeapy].Plain(CloneHeapy.Word(heap_str()));
+  Wrap[CloneHeapy] c = j.clone();
+  match c {
+    Wrap.Plain(inner) => match inner {
+      CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "clone inner word"),
+      CloneHeapy.Empty => assert(false, "clone inner empty"),
+    },
+    Wrap.Nothing => assert(false, "clone nothing"),
+  }
+  match j {
+    Wrap.Plain(inner) => match inner {
+      CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "orig inner word"),
+      CloneHeapy.Empty => assert(false, "orig inner empty"),
+    },
+    Wrap.Nothing => assert(false, "orig nothing"),
+  }
+}
+
+// The Empty (fieldless) variant path must also clone + drop cleanly.
+test_box_cloneable_enum_empty() `test {
+  Box[CloneHeapy] j = Box[CloneHeapy](val: CloneHeapy.Empty);
+  Box[CloneHeapy] c = j.clone();
+  match c.val {
+    CloneHeapy.Word(s) => assert(false, "clone should be empty"),
+    CloneHeapy.Empty => assert(true, "clone empty ok"),
+  }
+}
+
+// Vector element path (T0607): a `clone type with a T[] field instantiated with
+// the *non-*`clone Heapy is still allowed (Vector has a native clone(), and its
+// element clone routes through the enum's structural element dup) — distinct
+// from the rejected bare `T val` field. Confirms the fix's scope is exactly the
+// bare-TypeParam-field shape.
+enum PlainHeapy {
+  Word(string s), Empty,
+}
+type VecBox[T] `clone {
+  T[] items;
+}
+
+test_vecbox_plain_heapy() `test {
+  string[] payload = [heap_str()];
+  PlainHeapy[] items = [PlainHeapy.Word(payload[0])];
+  VecBox[PlainHeapy] j = VecBox[PlainHeapy](items: move items);
+  VecBox[PlainHeapy] c = j.clone();
+  assert(c.items.len == 1, "clone vec len 1");
+  match c.items[0] {
+    PlainHeapy.Word(s) => assert(s == "abc-abc-defghij", "clone vec word"),
+    PlainHeapy.Empty => assert(false, "clone vec empty"),
+  }
+  assert(j.items.len == 1, "orig vec len 1");
+}
+
+// Tuple-field converse (T0667 shape): a `clone type with a `(T, int)` field is
+// allowed when T is the *cloneable* CloneHeapy, and must deep-clone the tuple's
+// heap member — guards against the fix over-rejecting the cloneable tuple arm of
+// isAutoCloneTypeArg, and confirms the tuple deep-clone drops both copies with 0
+// leaks (the non-`clone Heapy version is rejected at compile time in Go tests).
+type TupBox[T] `clone {
+  (T, int) pr;
+}
+
+test_tupbox_cloneable_enum() `test {
+  TupBox[CloneHeapy] j = TupBox[CloneHeapy](pr: (CloneHeapy.Word(heap_str()), 7));
+  TupBox[CloneHeapy] c = j.clone();
+  (ce, cn) := c.pr;
+  assert(cn == 7, "clone tuple int");
+  match ce {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "clone tuple word"),
+    CloneHeapy.Empty => assert(false, "clone tuple empty"),
+  }
+  (je, jn) := j.pr;
+  assert(jn == 7, "orig tuple int");
+  match je {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "orig tuple word"),
+    CloneHeapy.Empty => assert(false, "orig tuple empty"),
+  }
+}

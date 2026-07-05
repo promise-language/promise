@@ -113,6 +113,98 @@ func (c *Checker) validateCloneTypes(file *ast.File) {
 	}
 }
 
+// isAutoCloneTypeArg reports whether a concrete type substituted into a
+// TypeParam-containing field of a `clone generic can be deep-cloned by codegen's
+// AutoClone path (genAutoCloneExpr → cloneByType). It differs from
+// isCloneableField in one way: isCloneableField models the CONCRETE-field synth
+// (synthesizeCloneMethod: a field is cloned via a bitwise copy or a direct
+// clone() method), whereas the AutoClone path — the ONLY path a TypeParam field
+// takes — ALSO deep-clones structurally through Optional/Tuple/Array
+// (T0605/T0607/T0662/T0667): a `(T,int)` / `[N]T` / `T?` field is cloneable when
+// its element(s) are, even though a tuple/array has no clone() method of its own.
+// Leaf cloneability (copy, a clone() method, a cloneable native container)
+// delegates to isCloneableField. Reusing isCloneableField directly would falsely
+// reject the T0667 tuple / T0662 array TypeArg shapes. (T0666)
+func isAutoCloneTypeArg(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Optional:
+		return isAutoCloneTypeArg(t.Elem())
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if !isAutoCloneTypeArg(e) {
+				return false
+			}
+		}
+		return true
+	case *types.Array:
+		return isAutoCloneTypeArg(t.Elem())
+	}
+	return isCloneableField(typ)
+}
+
+// validateCloneInstance enforces at each generic instantiation site that a
+// `clone type/enum instantiated with concrete type args keeps all fields
+// cloneable. isCloneableField optimistically returns true for a bare
+// *types.TypeParam ("validated at instantiation", above) — this realizes that
+// deferral: once T is bound, every field / variant-field whose declared type
+// contains a TypeParam is re-checked with the substitution applied. A
+// non-cloneable concrete arg (a non-`clone/non-`copy type/enum with heap data
+// and no clone() method, e.g. Box[Heapy]) is rejected here, mirroring the
+// concrete-field diagnostics of validateCloneType/validateCloneEnum. Without
+// this, codegen's AutoClone path (genAutoCloneExpr → cloneByType →
+// isAutoCloneBitCopy) bit-copies the field and double-frees the shared heap
+// payload at drop. (T0666)
+func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
+	switch t := origin.(type) {
+	case *types.Named:
+		if !t.IsClone() || len(t.TypeParams()) == 0 {
+			return
+		}
+		subst := types.BuildSubstMap(t.TypeParams(), typeArgs)
+		// AllFields() includes fields inherited from a generic parent whose
+		// declared type references the PARENT's type params (a distinct
+		// *TypeParam object). Merge the parent-arg substitution so an inherited
+		// bare-TypeParam field (`Sub[T] is Base[T] { T val; }`, Sub[Heapy]) is
+		// re-checked too — without this it stays "still generic" and slips the
+		// gate, leaking the shared heap payload at drop (mirrors codegen's
+		// mergeParentSubst). (T0666)
+		c.mergeParentSubstSema(t, subst)
+		for _, f := range t.AllFields() {
+			if !types.ContainsTypeParam(f.Type()) {
+				continue // concrete field already checked by validateCloneType
+			}
+			concrete := types.Substitute(f.Type(), subst)
+			if types.ContainsTypeParam(concrete) {
+				continue // still generic (nested generic body) — deferred
+			}
+			if !isAutoCloneTypeArg(concrete) {
+				c.errorf(pos, "cannot instantiate `clone type %s: type argument makes field '%s' have type %s which is not cloneable (must be `copy or have a clone() method)",
+					t.Obj().Name(), f.Name(), concrete)
+			}
+		}
+	case *types.Enum:
+		if !t.IsClone() || len(t.TypeParams()) == 0 {
+			return
+		}
+		subst := types.BuildSubstMap(t.TypeParams(), typeArgs)
+		for _, v := range t.Variants() {
+			for _, f := range v.Fields() {
+				if !types.ContainsTypeParam(f.Type()) {
+					continue
+				}
+				concrete := types.Substitute(f.Type(), subst)
+				if types.ContainsTypeParam(concrete) {
+					continue
+				}
+				if !isAutoCloneTypeArg(concrete) {
+					c.errorf(pos, "cannot instantiate `clone enum %s: type argument makes variant %s field type %s which is not cloneable (must be `copy or have a clone() method)",
+						t.Obj().Name(), v.Name(), concrete)
+				}
+			}
+		}
+	}
+}
+
 // firstSingleOwnerHandle returns the first single-owner native handle
 // (Task[T], Mutex[T], MutexGuard[T]) found in typ, searching transitively
 // through Instance type arguments, Optional, Tuple, and Array element types.

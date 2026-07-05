@@ -272,7 +272,12 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		if mem, ok := e.Callee.(*ast.MemberExpr); ok {
-			if id, ok := mem.Target.(*ast.IdentExpr); ok && id.Name == name {
+			// T1203: match the root variable of the receiver's member/index
+			// chain, not just a bare-ident receiver. A member-rooted lock like
+			// `h.m.lock()` produces a guard that borrows `h.m`, which is owned
+			// by `h` — dropping `h` early would free the Mutex the stored guard
+			// still points at. `m.lock()` (bare local) roots at "m" as before.
+			if memberChainRootName(mem.Target) == name {
 				if isBackRefCarrier(a.info.Types[e]) {
 					return true
 				}
@@ -371,6 +376,31 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 		return false
 	}
 	return false
+}
+
+// memberChainRootName returns the name of the root variable of a member/index
+// access chain — `h.m` → "h", `arr[i].m` → "arr", `(h.m)` → "h" — or "" if the
+// chain is not rooted at a bare variable (e.g. rooted at a call result or
+// `this`). Used by exprBackRefCapturesVar to detect member-rooted back-ref
+// carriers (`h.m.lock()`) whose parent-owner variable must outlive the guard.
+// T1203.
+func memberChainRootName(expr ast.Expr) string {
+	for {
+		switch e := expr.(type) {
+		case *ast.IdentExpr:
+			return e.Name
+		case *ast.MemberExpr:
+			expr = e.Target
+		case *ast.OptionalChainExpr:
+			expr = e.Target
+		case *ast.IndexExpr:
+			expr = e.Target
+		case *ast.ParenExpr:
+			expr = e.Expr
+		default:
+			return ""
+		}
+	}
 }
 
 // initMayAliasReceiver reports whether a var-decl initializer may produce a heap

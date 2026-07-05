@@ -52,3 +52,64 @@ test_push_guard_wrapped_in_parens() `test {
   outer.push((m.lock()));
   assert(outer.len == 1, "guard pushed through parens");
 }
+
+// --- T1203: member-rooted lock temp push ---
+// `h.m.lock()` produces a guard borrowing `h.m`, owned by `h`. Before the fix,
+// NLL early-drop only recognized bare-ident receivers (`m.lock()`), so it freed
+// `h` after its last syntactic use in the push statement while the stored guard
+// still pointed at the now-freed Mutex → use-after-free at drop (SIGSEGV). The
+// walker now matches the member/index chain root of the lock receiver.
+
+type T1203Holder {
+  Mutex[int] m;
+}
+
+test_push_field_mutex_lock_temp() `test {
+  h := T1203Holder(m: Mutex[int](5));
+  MutexGuard[int][] v = [];
+  v.push(h.m.lock());
+  // sentinel after push — without the fix NLL early-dropped h here.
+  assert(v.len == 1, "field-mutex guard pushed");
+}
+
+test_push_field_mutex_lock_temp_no_trailing_use() `test {
+  // No later use of h — scope-exit LIFO must still drop v (and its guard
+  // element) before h.
+  h := T1203Holder(m: Mutex[int](8));
+  MutexGuard[int][] v = [];
+  v.push(h.m.lock());
+}
+
+test_push_field_mutex_lock_temp_parens() `test {
+  // Member-rooted lock through redundant parens.
+  h := T1203Holder(m: Mutex[int](13));
+  MutexGuard[int][] v = [];
+  v.push((h.m.lock()));
+  assert(v.len == 1, "field-mutex guard pushed through parens");
+}
+
+type T1203Inner {
+  Mutex[int] m;
+}
+type T1203Outer {
+  T1203Inner inner;
+}
+
+test_push_nested_member_mutex_lock_temp() `test {
+  // Multi-hop member chain `o.inner.m.lock()` roots at `o` — the whole chain
+  // must be walked to the root, not just the immediate receiver.
+  o := T1203Outer(inner: T1203Inner(m: Mutex[int](7)));
+  MutexGuard[int][] v = [];
+  v.push(o.inner.m.lock());
+  assert(v.len == 1, "nested member-rooted guard pushed");
+}
+
+test_push_index_rooted_mutex_lock_temp() `test {
+  // Index-rooted receiver `hs[0].m.lock()` roots at `hs` — exercises the
+  // IndexExpr branch of the chain-root walk.
+  T1203Holder[] hs = [];
+  hs.push(T1203Holder(m: Mutex[int](9)));
+  MutexGuard[int][] v = [];
+  v.push(hs[0].m.lock());
+  assert(v.len == 1, "index-rooted guard pushed");
+}

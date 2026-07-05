@@ -3374,20 +3374,70 @@ func TestExprBackRefCapturesVar_WrongReceiver(t *testing.T) {
 	}
 }
 
-// TestExprBackRefCapturesVar_NonIdentReceiver verifies that a method call
-// whose receiver is not a simple IdentExpr (e.g. `something.field.lock()`)
-// does not trigger the direct-match path, but recursion still works.
-func TestExprBackRefCapturesVar_NonIdentReceiver(t *testing.T) {
+// TestExprBackRefCapturesVar_MemberRootedReceiver verifies that a back-ref
+// carrier call whose receiver is member/index-rooted (e.g. `x.field.lock()`,
+// `arr[i].m.lock()`) is attributed to the ROOT variable of the chain — the
+// owner whose early drop would free the borrowed Mutex. T1203.
+func TestExprBackRefCapturesVar_MemberRootedReceiver(t *testing.T) {
 	a := &lastUseAnalyzer{info: &sema.Info{Types: map[ast.Expr]types.Type{}}}
-	// x.field.lock() — receiver is MemberExpr, not IdentExpr.
+
+	// x.field.lock() — receiver is MemberExpr rooted at "x".
 	inner := &ast.MemberExpr{Target: &ast.IdentExpr{Name: "x"}, Field: "field"}
 	mem := &ast.MemberExpr{Target: inner, Field: "lock"}
 	call := &ast.CallExpr{Callee: mem}
 	a.info.Types[call] = types.NewMutexGuard(types.TypInt)
-	// Direct-match path requires IdentExpr receiver, so "x" is not matched here.
-	// (Future work: recursive descent into MemberExpr targets if needed — see T0564 scope note.)
-	if a.exprBackRefCapturesVar(call, "x") {
-		t.Error("non-IdentExpr receiver should not trigger direct match for 'x'")
+	if !a.exprBackRefCapturesVar(call, "x") {
+		t.Error("member-rooted receiver x.field.lock() must be attributed to root 'x'")
+	}
+	// The intermediate field name is not a variable in scope — must not match.
+	if a.exprBackRefCapturesVar(call, "field") {
+		t.Error("intermediate field 'field' is not the chain root and must not match")
+	}
+
+	// arr[i].m.lock() — index-rooted at "arr".
+	idxInner := &ast.MemberExpr{
+		Target: &ast.IndexExpr{Target: &ast.IdentExpr{Name: "arr"}, Index: &ast.IdentExpr{Name: "i"}},
+		Field:  "m",
+	}
+	idxMem := &ast.MemberExpr{Target: idxInner, Field: "lock"}
+	idxCall := &ast.CallExpr{Callee: idxMem}
+	a.info.Types[idxCall] = types.NewMutexGuard(types.TypInt)
+	if !a.exprBackRefCapturesVar(idxCall, "arr") {
+		t.Error("index-rooted receiver arr[i].m.lock() must be attributed to root 'arr'")
+	}
+
+	// (h.m).lock() — receiver rooted through a redundant ParenExpr at "h".
+	parenInner := &ast.ParenExpr{Expr: &ast.MemberExpr{Target: &ast.IdentExpr{Name: "h"}, Field: "m"}}
+	parenMem := &ast.MemberExpr{Target: parenInner, Field: "lock"}
+	parenCall := &ast.CallExpr{Callee: parenMem}
+	a.info.Types[parenCall] = types.NewMutexGuard(types.TypInt)
+	if !a.exprBackRefCapturesVar(parenCall, "h") {
+		t.Error("paren-rooted receiver (h.m).lock() must be attributed to root 'h'")
+	}
+
+	// h?.m.lock() — receiver rooted through an OptionalChainExpr at "h".
+	optInner := &ast.MemberExpr{
+		Target: &ast.OptionalChainExpr{Target: &ast.IdentExpr{Name: "h"}, Field: "m"},
+		Field:  "lock",
+	}
+	optCall := &ast.CallExpr{Callee: optInner}
+	a.info.Types[optCall] = types.NewMutexGuard(types.TypInt)
+	if !a.exprBackRefCapturesVar(optCall, "h") {
+		t.Error("optional-chain-rooted receiver h?.m.lock() must be attributed to root 'h'")
+	}
+
+	// f().m.lock() — receiver rooted at a CALL result, not a bare variable.
+	// memberChainRootName returns "" (default branch), so no local variable's
+	// lifetime is extended by this carrier.
+	callRootInner := &ast.MemberExpr{
+		Target: &ast.CallExpr{Callee: &ast.IdentExpr{Name: "f"}},
+		Field:  "m",
+	}
+	callRootMem := &ast.MemberExpr{Target: callRootInner, Field: "lock"}
+	callRootCall := &ast.CallExpr{Callee: callRootMem}
+	a.info.Types[callRootCall] = types.NewMutexGuard(types.TypInt)
+	if a.exprBackRefCapturesVar(callRootCall, "f") {
+		t.Error("call-rooted receiver f().m.lock() has no bare-var root and must not match 'f'")
 	}
 }
 

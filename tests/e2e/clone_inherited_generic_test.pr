@@ -1,0 +1,79 @@
+// T1202: Cloning a `clone type that INHERITS a bare-TypeParam field from a
+// generic `clone parent must deep-clone (and later drop) the inherited heap
+// field. Previously monoInstNeedsSynthDrop missed the parent-substituted
+// inherited field → no synth drop → the inherited heap payload leaked.
+enum CloneHeapy `clone {
+  Word(string s),
+  Empty,
+}
+
+type Base[T] `clone {
+  T val;
+}
+type Sub[T] is Base[T] `clone {
+}
+
+// Multi-level inheritance chain.
+type A[T] `clone {
+  T item;
+}
+type B[T] is A[T] `clone {
+}
+type C[T] is B[T] `clone {
+}
+
+// Reordered + renamed type params across the inheritance boundary. Flipped's Y
+// feeds Pair's A (the droppable slot), X feeds Pair's B. This guards the fix
+// against a naive positional parent-arg copy: mergeParentSubst must resolve
+// each parent arg through the child's subst, not assume an identity mapping.
+type Pair[A, B] `clone {
+  A first;
+  B second;
+}
+type Flipped[X, Y] is Pair[Y, X] `clone {
+}
+
+heap_str() string {
+  string b = "abc";
+  return b + "-" + b + "-defghij";
+}
+
+check_inherited() `test {
+  Sub[CloneHeapy] j = Sub[CloneHeapy](val: CloneHeapy.Word(heap_str()));
+  Sub[CloneHeapy] c = j.clone();
+  match c.val {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "c"),
+    CloneHeapy.Empty => assert(false, "ce"),
+  }
+  match j.val {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "j"),
+    CloneHeapy.Empty => assert(false, "je"),
+  }
+}
+
+check_multilevel() `test {
+  C[CloneHeapy] j = C[CloneHeapy](item: CloneHeapy.Word(heap_str()));
+  C[CloneHeapy] c = j.clone();
+  match c.item {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "mc"),
+    CloneHeapy.Empty => assert(false, "mce"),
+  }
+  match j.item {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "mj"),
+    CloneHeapy.Empty => assert(false, "mje"),
+  }
+}
+
+check_reordered_params() `test {
+  Flipped[int, CloneHeapy] j = Flipped[int, CloneHeapy](first: CloneHeapy.Word(heap_str()), second: 7);
+  Flipped[int, CloneHeapy] c = j.clone();
+  assert(c.second == 7, "rs");
+  match c.first {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "rc"),
+    CloneHeapy.Empty => assert(false, "rce"),
+  }
+  match j.first {
+    CloneHeapy.Word(s) => assert(s == "abc-abc-defghij", "rj"),
+    CloneHeapy.Empty => assert(false, "rje"),
+  }
+}

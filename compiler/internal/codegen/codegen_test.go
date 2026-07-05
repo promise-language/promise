@@ -14914,6 +14914,42 @@ func TestGenericTypeCloneDroppableTypeArg(t *testing.T) {
 	}
 }
 
+// T1202: Cloning a generic `clone TYPE that INHERITS a bare-TypeParam field
+// from a generic `clone parent (`Sub[T] is Base[T]`, `Base[T]` has `T val`)
+// must synthesize a drop for the child instance. The gate
+// monoInstNeedsSynthDrop built its subst only from the child's own TypeParams,
+// so AllFields()'s inherited `val` (typed in Base's T) stayed unresolved →
+// gate returned false → no Sub[..].drop emitted → the inherited heap field
+// leaked. The fix merges parent substitutions (mergeParentSubst) in the gate.
+// Assert both: the clone body deep-clones the inherited field, AND a
+// Sub[CloneHeapy].drop function is emitted (guards the gate against silently
+// dropping the synth-drop again).
+func TestT1202InheritedGenericCloneFieldDrop(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum CloneHeapy `clone {\n"+
+		"  Word(string s),\n"+
+		"  Empty,\n"+
+		"}\n"+
+		"type Base[T] `clone {\n"+
+		"  T val;\n"+
+		"}\n"+
+		"type Sub[T] is Base[T] `clone {\n"+
+		"}\n"+
+		"test() {\n"+
+		"  Sub[CloneHeapy] j = Sub[CloneHeapy](val: CloneHeapy.Word(\"abc\"));\n"+
+		"  Sub[CloneHeapy] c = j.clone();\n"+
+		"}\n")
+	// The inherited field must be deep-cloned via CloneHeapy.clone.
+	if !strings.Contains(ir, `@CloneHeapy.clone(`) {
+		t.Errorf("T1202: Sub[CloneHeapy].clone() must deep-clone the inherited `val` field via CloneHeapy.clone; got shallow alias")
+	}
+	// A synth drop for the child instance must be emitted, else the inherited
+	// heap field leaks (bare pal_free at scope exit).
+	if !strings.Contains(ir, `define void @"Sub[CloneHeapy].drop"`) {
+		t.Errorf("T1202: Sub[CloneHeapy].drop must be emitted so the inherited droppable `val` field is reclaimed; monoInstNeedsSynthDrop missed the parent-substituted field")
+	}
+}
+
 // T0667: a generic `clone enum whose variant field is a TUPLE carrying the
 // TypeParam (`(T, int) pr`) with a droppable TypeArg (map[K,V]) must deep-copy
 // the tuple's heap member. types.ContainsTypeParam recurses into *types.Tuple

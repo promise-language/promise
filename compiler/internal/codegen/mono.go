@@ -1907,6 +1907,14 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 	// extended to tuples whose elements substitute to droppables; T0389 widens
 	// the gate to fields that *contain* a TypeParam anywhere (e.g. (T, int)).
 	subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	// T1202: AllFields() includes fields inherited from a generic parent whose
+	// declared types reference the PARENT's TypeParam (e.g. `Sub[T] is Base[T]`
+	// inherits `T val` typed in Base's T). BuildSubstMap only maps the child's
+	// own TypeParams, so an inherited TypeParam field stays unresolved and its
+	// concrete droppability is missed — the instance gets no synth drop and its
+	// inherited heap field leaks. mergeParentSubst adds the parent-arg mappings
+	// (consistent with the define/declare drop-body siblings below).
+	mergeParentSubst(named, subst)
 	for _, f := range named.AllFields() {
 		if !types.ContainsTypeParam(f.Type()) {
 			continue // sema already saw the concrete type

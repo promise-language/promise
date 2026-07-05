@@ -15155,3 +15155,93 @@ func TestT0665_GuardPushAfterMutexInMethodAllowed(t *testing.T) {
 	`)
 	expectNoOwnerError(t, errs, t0665ContainerEscapeMsg)
 }
+
+// T0603: substring of the guard-escape-via-ref-param diagnostic.
+const t0603RefParamEscapeMsg = "parameter that outlives"
+
+// Reject: a temporary guard `vec.push(m.lock())` where `m` is a LOCAL Mutex and
+// `vec` is a `~`-marked container parameter that escapes the function. After the
+// function returns, the caller's `vec` holds a guard back-pointing into the freed
+// local `m` → UAF at `vec.drop`.
+func TestT0603_RefParamContainerLocalGuardTemp(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec) {
+			m := Mutex[int](1);
+			vec.push(m.lock());
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// Reject: guard-variable form `g := m.lock(); vec.push(move g)` — same escape.
+func TestT0603_RefParamContainerLocalGuardVar(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec) {
+			m := Mutex[int](1);
+			g := m.lock();
+			vec.push(move g);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// Accept: the T0564 helper shape — the guard is a `move`-param, so its Mutex
+// lives in (and outlives via) the caller. Must stay legal.
+func TestT0603_RefParamContainerGuardFromParamAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		push_guard(Vector[MutexGuard[int]] ~vec, MutexGuard[int] move g) {
+			vec.push(move g);
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// Accept: the Mutex is a `&`-borrowed param (outlives the function via caller),
+// so pushing its guard into the `~vec` container is safe.
+func TestT0603_RefParamContainerGuardFromBorrowedMutexAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec, Mutex[int]& m) {
+			vec.push(m.lock());
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// Accept: a `~vec` container of a plain droppable (non-guard) element — pushing a
+// local is fine. Proves the push-scoped guard check didn't perturb non-guard
+// ref-param pushes.
+func TestT0603_RefParamContainerNonGuardElementAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int id; drop(~this) {} }
+		f(Vector[Box] ~vec) {
+			b := Box(id: 1);
+			vec.push(move b);
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// Accept: a method pushing `this.m.lock()` into a `~vec` container parameter.
+// The guard's Mutex is rooted at `this` (not a local of the method), so
+// guardMutexExprRoot yields "this" — untracked in declOrder, so the reject
+// condition's `tracked` guard is false and the store is allowed. `this` (and its
+// Mutex field) outlives the method call, so the guard escaping inside the caller's
+// `vec` still back-points into a live Mutex. This exercises the tracked==false
+// side of the new push-scoped check, distinct from the params[mroot]==true side
+// covered by TestT0603_RefParamContainerGuardFromBorrowedMutexAllowed.
+func TestT0603_RefParamContainerThisRootedGuardAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W { Mutex[int] m;
+			collect(~this, Vector[MutexGuard[int]] ~vec) {
+				vec.push(this.m.lock());
+			}
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}

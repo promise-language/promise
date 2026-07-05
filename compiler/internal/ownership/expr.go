@@ -983,6 +983,37 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 		storeNative := c.isElementStoringNativeCall(e.Callee)
 		for i, arg := range e.Args {
 			c.checkExpr(arg.Value)
+			// T0603: a MutexGuard whose parent Mutex is a LOCAL of this function must
+			// not be stored into a container that escapes the function — a `~`/`&`-marked
+			// container parameter (whose ident type is a *MutRef/*SharedRef). The local
+			// Mutex drops at function exit; the caller's container then holds a guard with
+			// a back-pointer into the freed Mutex → UAF at the container's drop (segfault
+			// at 0x0). This complements the same-function ordering check below (T0665),
+			// which only fires for a bare (owned/plain-borrow) Vector target: a ref-param
+			// container's type is a ref wrapper, so IsVector is false and storeNative is
+			// not set, and that ordering check never runs. Guards reached through a param
+			// or `this` (mroot resolves to a parameter, or is unresolved) are allowed —
+			// the Mutex outlives the function, matching T0665/T0557's policy and keeping
+			// the T0564 `push_guard_count(Vector~vec, MutexGuard move g)` helper legal.
+			// Conservative gap (T1205): if the guard's Mutex is itself a `~`(move)-param
+			// of this function it also dies at exit (UAF), but c.params[mroot]==true
+			// allows it — detecting the param's ref-kind needs the param object, not just
+			// the name. Likewise this push-scoped check does not cover Set.add/Map._set.
+			if member, ok := e.Callee.(*ast.MemberExpr); ok && member.Field == "push" {
+				if types.IsMutexGuard(peelOptional(c.info.Types[arg.Value])) {
+					if container, ok := member.Target.(*ast.IdentExpr); ok &&
+						isRefType(c.info.Types[member.Target]) {
+						if mroot := c.guardMutexExprRoot(arg.Value); mroot != "" {
+							if _, tracked := c.declOrder[mroot]; tracked && !c.params[mroot] {
+								c.errorf(arg.Value.Pos(),
+									"cannot store a MutexGuard into '%s': the container is a `~`/`&` parameter that outlives '%s' (a local Mutex of this function) — after the function returns, the guard's drop would unlock an already-destroyed Mutex. Share the Mutex via `Arc[Mutex[T]]` (so the guard points to a refcounted allocation), or keep the guard's use scoped inside this function with `use guard := %s.lock()`.",
+									container.Name, mroot, mroot)
+								continue
+							}
+						}
+					}
+				}
+			}
 			if i < len(params) {
 				kind := paramBorrowKind(params[i])
 				// T0998: the call-site `move` marker is required exactly where the

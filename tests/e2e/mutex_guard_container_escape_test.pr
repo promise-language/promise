@@ -66,3 +66,24 @@ test_guard_push_field_mutex_after_owner() `test {
   v.push(move g);
   assert(v.len == 1, "field-rooted guard pushed");
 }
+
+// T0603 boundary: pushing a guard into a `~`-marked container PARAMETER (which
+// escapes to the caller) is accepted ONLY when the guard's parent Mutex outlives
+// the callee — i.e. the Mutex is NOT a local of the pushing function. Here the
+// guard `g` arrives as a `move`-param and its parent Mutex `m` lives in the
+// caller (`test_guard_push_into_ref_param`), so the guard escaping inside `vec`
+// still back-points into a live Mutex. This is the accepted side of the T0603
+// boundary; the rejected side — a LOCAL Mutex whose guard escapes via `~vec` —
+// is a compile error covered by TestT0603_RefParamContainerLocalGuard* in the Go
+// ownership tests.
+push_guard_into_ref_param(Vector[MutexGuard[int]] ~vec, MutexGuard[int] move g) {
+  vec.push(g);
+}
+test_guard_push_into_ref_param() `test {
+  m := Mutex[int](17);
+  v := Vector[MutexGuard[int]]();
+  push_guard_into_ref_param(v, m.lock());
+  assert(v.len == 1, "guard pushed into `~`-param container");
+  // `v`'s element-drop unlocks the guard while `m` (the caller-owned Mutex) is
+  // still alive; `m` drops afterward (LIFO). No UAF, leak-clean.
+}

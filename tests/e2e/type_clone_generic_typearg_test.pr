@@ -447,3 +447,119 @@ test_clone_tupboxr_int_scalar() `test {
   assert(jn == 5, "original first 5");
   assert(ji == 99, "original second 99");
 }
+
+// T0662: a fixed-array field `T[N]` carrying the TypeParam. ContainsTypeParam
+// recurses into *types.Array so the synth emits AutoCloneExpr, but before the
+// fix isAutoCloneBitCopy classified every array as a bit-copy (non-named
+// fallthrough) and cloneResolvedValue had no *types.Array arm → the element
+// heap pointers (string buffers, map/vector allocations, heap-user instances)
+// were shallow-aliased → double-free segfault when both `j` and `c` drop. The
+// fix adds a *types.Array recursion to isAutoCloneBitCopy + a per-element
+// extract/cloneByType/insert arm to cloneResolvedValue (exactly parallel to
+// the T0667 tuple gap). Both `j` and `c` kept live to scope exit (double-free
+// repro); mutation-independence asserts a true deep copy. 0 leaks. Covers the
+// same family as the enum-level `ArrWrap[T]` shapes in
+// enum_clone_optional_typeparam_typearg_test.pr.
+type ArrBox[T] `clone {
+  T[2] pair;
+}
+
+// Droppable TypeArg: map[K,V] — the exact T0662 type-level repro.
+test_clone_arrbox_map() `test {
+  map[string, string] m1 = map[string, string]();
+  m1["a"] = "b";
+  map[string, string] m2 = map[string, string]();
+  m2["c"] = "d";
+  ArrBox[map[string, string]] j = ArrBox[map[string, string]](pair: [m1, m2]);
+  ArrBox[map[string, string]] c = j.clone();
+  assert(c.pair[0].len == 1, "clone array[0] map len 1");
+  assert(c.pair[0].get_or("a", "") == "b", "clone[0] a=b");
+  assert(c.pair[1].get_or("c", "") == "d", "clone[1] c=d");
+  assert(j.pair[0].len == 1, "original array[0] map len 1 (independent)");
+  assert(j.pair[1].get_or("c", "") == "d", "original[1] c=d");
+}
+
+// Droppable TypeArg: string[] (vector of heap strings) as each array element.
+test_clone_arrbox_string_vec() `test {
+  string[] a = ["p", "q"];
+  string[] b = ["r", "s", "t"];
+  ArrBox[string[]] j = ArrBox[string[]](pair: [a, b]);
+  ArrBox[string[]] c = j.clone();
+  assert(c.pair[0].len == 2, "clone[0] vec len 2");
+  assert(c.pair[0][0] == "p", "clone[0][0]=p");
+  assert(c.pair[1][2] == "t", "clone[1][2]=t");
+  assert(j.pair[0][0] == "p", "original[0][0]=p (independent)");
+  assert(j.pair[1].len == 3, "original[1] vec len 3");
+}
+
+// User `clone type (Bag, defined above) as the droppable array element.
+test_clone_arrbox_user_clone_type() `test {
+  map[string, int] m1 = map[string, int]();
+  m1["apples"] = 3;
+  map[string, int] m2 = map[string, int]();
+  m2["pears"] = 5;
+  Bag b1 = Bag(counts: move m1);
+  Bag b2 = Bag(counts: move m2);
+  ArrBox[Bag] j = ArrBox[Bag](pair: [b1, b2]);
+  ArrBox[Bag] c = j.clone();
+  assert(c.pair[0].counts.get_or("apples", 0) == 3, "clone[0] apples==3");
+  assert(c.pair[1].counts.get_or("pears", 0) == 5, "clone[1] pears==5");
+  assert(j.pair[0].counts.len == 1, "original[0] bag len 1 (independent)");
+}
+
+// Copy TypeArg: int — pure scalar array, must stay a correct bit copy
+// (isAutoCloneBitCopy still returns true: the element is bit-copy).
+test_clone_arrbox_int() `test {
+  ArrBox[int] j = ArrBox[int](pair: [42, 7]);
+  ArrBox[int] c = j.clone();
+  assert(c.pair[0] == 42, "clone[0] 42");
+  assert(c.pair[1] == 7, "clone[1] 7");
+  assert(j.pair[0] == 42, "original[0] 42");
+  assert(j.pair[1] == 7, "original[1] 7");
+}
+
+// Mutating the clone's array element must not affect the original (deep copy).
+test_clone_arrbox_map_independence() `test {
+  map[string, string] m1 = map[string, string]();
+  m1["k"] = "v1";
+  map[string, string] m2 = map[string, string]();
+  m2["z"] = "w";
+  ArrBox[map[string, string]] j = ArrBox[map[string, string]](pair: [m1, m2]);
+  ArrBox[map[string, string]] c = j.clone();
+  c.pair[0]["k"] = "mutated";
+  c.pair[0]["extra"] = "new";
+  assert(c.pair[0].len == 2, "clone[0] mutated to 2 entries");
+  assert(j.pair[0].len == 1, "original[0] unaffected: still 1 entry");
+  assert(j.pair[0].get_or("k", "") == "v1", "original[0] value untouched");
+}
+
+// Droppable TypeArg: plain heap `string` element — exercises the
+// cloneResolvedValue array arm delegating each element to cloneByType's direct
+// dupString path (distinct from the `string[]` case above, which recurses
+// through dupVector). Both kept live to scope exit (double-free repro).
+test_clone_arrbox_string() `test {
+  ArrBox[string] j = ArrBox[string](pair: ["hello", "world"]);
+  ArrBox[string] c = j.clone();
+  assert(c.pair[0] == "hello", "clone[0]=hello");
+  assert(c.pair[1] == "world", "clone[1]=world");
+  assert(j.pair[0] == "hello", "original[0]=hello (independent buffer)");
+  assert(j.pair[1] == "world", "original[1]=world");
+}
+
+// Optional TypeArg with a heap payload: `string?[2]`. Exercises the array arm
+// nesting cloneByType's Optional branch (none-check + deep-clone-of-payload +
+// rewrap) per element, and the isAutoCloneBitCopy *types.Array → *types.Optional
+// recursion (heap payload → NOT bit copy). One some, one none element; both
+// kept live to scope exit.
+test_clone_arrbox_optional_string() `test {
+  string? x = "yes";
+  string? y = none;
+  ArrBox[string?] j = ArrBox[string?](pair: [x, y]);
+  ArrBox[string?] c = j.clone();
+  assert(c.pair[0] is present, "clone[0] present");
+  assert(c.pair[0]! == "yes", "clone[0]=yes");
+  assert(c.pair[1] is absent, "clone[1] none passed through");
+  assert(j.pair[0] is present, "original[0] present (independent)");
+  assert(j.pair[0]! == "yes", "original[0]=yes");
+  assert(j.pair[1] is absent, "original[1] none");
+}

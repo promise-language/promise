@@ -15187,6 +15187,107 @@ func TestGenericTypeCloneTupleHeapMemberNonZeroIndex(t *testing.T) {
 	}
 }
 
+// T0662: a fixed-array field `T[N]` (`*types.Array`) instantiated with a
+// droppable element must be deep-cloned per element, not bit-copied. Before the
+// fix isAutoCloneBitCopy classified every array as a bit copy (non-named
+// fallthrough) and cloneResolvedValue had no *types.Array arm, so the synth
+// AutoClone emitted a bare aggregate copy that aliased each element's heap
+// pointer → double-free. Asserts the mono clone body emits a per-element clone
+// loop: it calls Map[..].clone AND re-inserts the cloned element via
+// `insertvalue` (the cloneResolvedValue array arm's extract/clone/insert).
+// Runtime counterpart: e2e test_clone_arrbox_map / test_clone_arrbox_map_independence.
+func TestGenericTypeCloneArrayHeapElement(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type ArrBox[T] `clone {\n"+
+		"  T[2] pair;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] m1 = map[string, string]();\n"+
+		"  map[string, string] m2 = map[string, string]();\n"+
+		"  ArrBox[map[string, string]] j = ArrBox[map[string, string]](pair: [m1, m2]);\n"+
+		"  ArrBox[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	sawInsertValue := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `ArrBox[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+		if strings.Contains(strings.TrimSpace(line), "insertvalue") {
+			sawInsertValue = true
+		}
+	}
+	if !inClone {
+		t.Fatalf("T0662: ArrBox[Map[string, string]].clone define not found in IR")
+	}
+	if !sawMapClone {
+		t.Errorf("T0662: ArrBox[Map[string, string]].clone() must call Map[string, string].clone to deep-copy the fixed-array `T[N]` field's heap elements; got a bare aggregate bit copy (isAutoCloneBitCopy array gap / no cloneResolvedValue *types.Array arm)")
+	}
+	if !sawInsertValue {
+		t.Errorf("T0662: ArrBox[Map[string, string]].clone() must re-insert each cloned element via `insertvalue` (the cloneResolvedValue array extract/clone/insert loop); got no per-element insert")
+	}
+}
+
+// T0662 (zero-regression guard): a PURE SCALAR fixed-array field (`T[N]` with
+// T=int → `int[2]`) must stay a plain bit copy — the isAutoCloneBitCopy array
+// recursion returns true when the element is bit-copy, so cloneByType
+// short-circuits without per-element clone machinery. Asserts the mono clone
+// body contains NO nested `.clone` call and NO `autoclone.` block. Mirrors
+// TestGenericTypeCloneScalarTupleStaysBitCopy for the array arm.
+func TestGenericTypeCloneScalarArrayStaysBitCopy(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type ArrBox[T] `clone {\n"+
+		"  T[2] pair;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  ArrBox[int] j = ArrBox[int](pair: [42, 7]);\n"+
+		"  ArrBox[int] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawNestedClone := false
+	sawAutoCloneBlock := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `ArrBox[int].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, "call ") && strings.Contains(line, `.clone"`) {
+			sawNestedClone = true
+		}
+		if strings.Contains(line, "autoclone.") {
+			sawAutoCloneBlock = true
+		}
+	}
+	if !inClone {
+		t.Fatalf("T0662: ArrBox[int].clone define not found in IR")
+	}
+	if sawNestedClone {
+		t.Errorf("T0662: ArrBox[int].clone() must NOT emit a nested `.clone` call for a pure scalar `int[2]` array field — the scalar array must stay a bit copy (isAutoCloneBitCopy array recursion → true → cloneByType short-circuit)")
+	}
+	if sawAutoCloneBlock {
+		t.Errorf("T0662: ArrBox[int].clone() must NOT emit an autoclone.* block for a pure scalar `int[2]` array field — got deep-clone machinery where a bit copy is required (regression in the isAutoCloneBitCopy array recursion)")
+	}
+}
+
 // T0672: Destructuring a struct field of tuple type with an
 // Optional[aggregate] element (`(map[K,V]?, int) pr`) then unwrapping the
 // destructured local via if-let must NOT give the unwrapped binding an owning

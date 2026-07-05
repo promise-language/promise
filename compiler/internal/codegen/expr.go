@@ -8911,18 +8911,23 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 		}
 		dupVal = result
 	} else if arr, isArr := resolvedType.(*types.Array); isArr {
-		// T1179: deep-clone each element so a whole fixed-Array payload becomes
-		// independent. Mirrors the Tuple case above. cloneByType handles bit-copy
-		// elements (scalar/value/copy arrays pass through unchanged via the
-		// isAutoCloneBitCopy guard), and recurses for heap-bearing elements
-		// (string/vector/enum/heap-user). Without this, a match-borrowed
-		// `T[N] copy = value;` var-decl would alias the enum's variant data →
-		// double-free when both copy's array drop and the synth enum drop fire.
+		// T1179/T0662: deep-clone each element so a whole fixed-Array payload
+		// becomes independent. Mirrors the Tuple case above. cloneByType handles
+		// bit-copy elements (scalar/value/copy arrays pass through unchanged via
+		// the isAutoCloneBitCopy guard), Optional elements (none-check), and
+		// recurses for heap-bearing elements (string/vector/channel/enum/
+		// heap-user/tuple/nested-array). A bare aggregate copy would alias the
+		// element heap pointers (string buffers, vector/map allocations, heap-user
+		// instances, enum variant data) → double-free when both original and clone
+		// drop (or a match-borrowed `T[N] copy = value;` var-decl aliases the
+		// enum's variant data). Covers T0605 (type `[N]T` field) and T0607 (enum
+		// `[N]T` variant field) shapes uniformly since both lower through
+		// cloneByType→cloneResolvedValue.
+		result := val
 		resolvedElem := arr.Elem()
 		if c.typeSubst != nil {
 			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 		}
-		result := val
 		for i := int64(0); i < arr.Size(); i++ {
 			elemVal := c.block.NewExtractValue(result, uint64(i))
 			clonedElem := c.cloneByType(elemVal, resolvedElem)
@@ -9037,11 +9042,13 @@ func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
 		}
 		return true
 	}
-	// T1179: a fixed Array[E] is a bit copy iff its element is — recurse so an
-	// array of a heap-bearing element (string/vector/enum/heap-user) is NOT
-	// short-circuited by cloneByType's isAutoCloneBitCopy guard (that would leave
-	// a match-borrowed whole-array var-decl aliasing the enum's variant data →
-	// double-free). A pure scalar/value/copy array stays a bit copy. Mirrors the
+	// T1179/T0662: a fixed array `[N]T` is a bit copy iff its element is —
+	// recurse so an array of a heap-bearing element (string/vector/map/enum/
+	// heap-user) is NOT short-circuited by cloneByType's isAutoCloneBitCopy guard
+	// (that would alias the element heap pointers → double-free when both original
+	// and clone drop, or leave a match-borrowed whole-array var-decl aliasing the
+	// enum's variant data). A pure scalar/value/copy array stays a bit copy
+	// (preserves the prior non-named fallthrough behavior). Mirrors the
 	// *types.Optional and *types.Tuple recursions above.
 	if arr, isArr := t.(*types.Array); isArr {
 		return c.isAutoCloneBitCopy(arr.Elem())

@@ -11,10 +11,16 @@
 // and the clone are kept live to scope exit and consumed via match so both
 // drop paths run (the double-free repro). Zero allow_leaks.
 //
-// NOTE: a fixed-array `T[N]` variant field is a separate, pre-existing
-// codegen gap (cloneResolvedValue has no *types.Array case — affects the
-// T0605 type-level path too); tracked as T0662, intentionally not covered
-// here.
+// T0662 (FIXED, covered below): a fixed-array `T[N]` variant field with a
+// droppable element used to double-free — ContainsTypeParam recurses into
+// *types.Array so the synth emitted AutoClone, but isAutoCloneBitCopy treated
+// every array as a bit copy (non-named fallthrough) and cloneResolvedValue had
+// no *types.Array case. The fix added a *types.Array recursion to
+// isAutoCloneBitCopy + a per-element extract/cloneByType/insert arm to
+// cloneResolvedValue (exactly parallel to the T0667 tuple gap; affects the
+// T0605 type-level path too). Covered by the `enum ArrWrap[T]` tests at the end
+// of this file and by the type-level `ArrBox[T]` shapes in
+// tests/e2e/type_clone_generic_typearg_test.pr.
 //
 // NOTE: instantiating with a TypeArg that is a *non-`clone enum with heap
 // variant data and no clone() method* (e.g. `enum H { Word(string s) }`)
@@ -790,3 +796,129 @@ test_tupkv_empty() `test {
     _ => assert(false, "original should be Empty"),
   }
 }
+
+// ---- T0662: fixed-array variant field carrying the TypeParam (`T[2] pair`).
+// The synth emits AutoClone for the ContainsTypeParam array field; the fix
+// (isAutoCloneBitCopy *types.Array recursion + cloneResolvedValue *types.Array
+// per-element arm) deep-clones each array element's heap data so the clone and
+// the original own independent copies. Both kept live + match-consumed (the
+// double-free repro). Parallel to the T0605 type-level `ArrBox[T]` shapes. ----
+
+enum ArrWrap[T] `clone {
+  ArrVal(T[2] pair),
+  Nope,
+}
+
+// Exact T0662 enum-level bug repro: droppable string[] TypeArg, match-consume both.
+test_arrwrap_string_vec() `test {
+  string[] a = ["p", "q"];
+  string[] b = ["r", "s"];
+  ArrWrap[string[]] j = ArrWrap[string[]].ArrVal([a, b]);
+  ArrWrap[string[]] c = j.clone();
+  match c {
+    ArrWrap.ArrVal(cp) => {
+      assert(cp[0][0] == "p", "clone[0][0]=p");
+      assert(cp[1][1] == "s", "clone[1][1]=s");
+    },
+    _ => assert(false, "clone should be ArrVal"),
+  }
+  match j {
+    ArrWrap.ArrVal(jp) => {
+      assert(jp[0][0] == "p", "original[0][0]=p (independent)");
+      assert(jp[1].len == 2, "original[1] len 2");
+    },
+    _ => assert(false, "original should be ArrVal"),
+  }
+}
+
+// Droppable TypeArg: map[K,V] as each array element.
+test_arrwrap_map() `test {
+  map[string, int] m1 = map[string, int]();
+  m1["x"] = 1;
+  map[string, int] m2 = map[string, int]();
+  m2["y"] = 2;
+  ArrWrap[map[string, int]] j = ArrWrap[map[string, int]].ArrVal([m1, m2]);
+  ArrWrap[map[string, int]] c = j.clone();
+  match c {
+    ArrWrap.ArrVal(cp) => {
+      assert(cp[0].get_or("x", 0) == 1, "clone[0] x=1");
+      assert(cp[1].get_or("y", 0) == 2, "clone[1] y=2");
+    },
+    _ => assert(false, "clone should be ArrVal"),
+  }
+  match j {
+    ArrWrap.ArrVal(jp) => {
+      assert(jp[0].len == 1, "original[0] map len 1 (independent)");
+      assert(jp[1].get_or("y", 0) == 2, "original[1] y=2");
+    },
+    _ => assert(false, "original should be ArrVal"),
+  }
+}
+
+// User `clone type (Bag2, defined above) as the droppable array element.
+test_arrwrap_user_clone() `test {
+  map[string, int] mm1 = map[string, int]();
+  mm1["apples"] = 3;
+  map[string, int] mm2 = map[string, int]();
+  mm2["pears"] = 5;
+  Bag2 b1 = Bag2(counts: move mm1);
+  Bag2 b2 = Bag2(counts: move mm2);
+  ArrWrap[Bag2] j = ArrWrap[Bag2].ArrVal([b1, b2]);
+  ArrWrap[Bag2] c = j.clone();
+  match c {
+    ArrWrap.ArrVal(cp) => {
+      assert(cp[0].counts.get_or("apples", 0) == 3, "clone[0] apples==3");
+      assert(cp[1].counts.get_or("pears", 0) == 5, "clone[1] pears==5");
+    },
+    _ => assert(false, "clone should be ArrVal"),
+  }
+  match j {
+    ArrWrap.ArrVal(jp) => {
+      assert(jp[0].counts.len == 1, "original[0] bag len 1 (independent)");
+    },
+    _ => assert(false, "original should be ArrVal"),
+  }
+}
+
+// Copy TypeArg: int — pure scalar array, must stay a correct bit copy.
+test_arrwrap_int() `test {
+  ArrWrap[int] j = ArrWrap[int].ArrVal([42, 7]);
+  ArrWrap[int] c = j.clone();
+  match c {
+    ArrWrap.ArrVal(cp) => {
+      assert(cp[0] == 42, "clone[0] 42");
+      assert(cp[1] == 7, "clone[1] 7");
+    },
+    _ => assert(false, "clone should be ArrVal"),
+  }
+  match j {
+    ArrWrap.ArrVal(jp) => {
+      assert(jp[0] == 42, "original[0] 42");
+    },
+    _ => assert(false, "original should be ArrVal"),
+  }
+}
+
+// Fieldless variant of a generic clone enum instantiated with a droppable
+// TypeArg — must clone cleanly with no leak.
+test_arrwrap_nope_variant() `test {
+  ArrWrap[map[string, string]] j = ArrWrap[map[string, string]].Nope;
+  ArrWrap[map[string, string]] c = j.clone();
+  match c {
+    ArrWrap.Nope => assert(true, "clone Nope"),
+    _ => assert(false, "clone should be Nope"),
+  }
+  match j {
+    ArrWrap.Nope => assert(true, "original Nope"),
+    _ => assert(false, "original should be Nope"),
+  }
+}
+
+// NOTE: the enum mirror of the Optional-array-element case
+// (`ArrWrap[string?].ArrVal([...])`) cannot be authored here — a generic enum
+// variant path with a trailing-`?` type arg trips a pre-existing parser bug
+// (T1204: `E[string?].V(...)` misread as a bare `?`). The Optional-array-element
+// clone path lowers through the identical cloneResolvedValue array arm →
+// cloneByType Optional branch regardless of container, and is covered by the
+// type-level `test_clone_arrbox_optional_string` in
+// tests/e2e/type_clone_generic_typearg_test.pr.

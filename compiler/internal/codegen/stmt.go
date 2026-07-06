@@ -9331,6 +9331,20 @@ func (c *Compiler) cloneOwnedReturnAlias(val value.Value, effType types.Type) va
 	if named.IsValueType() {
 		return val
 	}
+	// T1193: Vector/Channel/Arc/Weak are native i8* handles (isContainerType),
+	// not the {vtable,instance} value struct dupHeapValue expects — routing them
+	// there panics (interface conversion PointerType→StructType). Dispatch the
+	// native-handle family through the shared push-element dispatcher, which dups
+	// each correctly (dupVector/dupChannel/dupArc/dupWeak; single-owner
+	// Task/Mutex/MutexGuard have no dup and return nil → left as-is). Plain heap
+	// user types — and Map/Set, which are Promise value structs — keep the
+	// well-tested dupHeapValue path (T0893). string is already handled above.
+	if isContainerType(effType) {
+		if dup := c.maybeDupPushElement(val, effType); dup != nil {
+			return dup
+		}
+		return val
+	}
 	return c.dupHeapValue(val, effType)
 }
 

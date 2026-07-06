@@ -1,0 +1,158 @@
+// T1193: a user-defined operator whose body returns a whole borrowed native
+// *handle* operand (Vector/Channel) as an owned value used to crash the compiler
+// with a codegen panic — cloneOwnedReturnAlias fell through to dupHeapValue,
+// which assumes the {vtable,instance} user value struct and panics on the bare
+// i8* native handle. The fix routes the native-handle family through
+// maybeDupPushElement so each is duped correctly (vectors deep-copy their
+// buffer, channels bump the refcount), and the returned owned value no longer
+// aliases the caller's still-live operand → no double-free / no leak.
+//
+// This is the native-handle twin of T0897 (user-type operand double-free).
+type SVec {
+  int z;
+  % (int[] other) int[] {
+    return other;
+  }
+}
+
+// Vector operand escaping into a nested vector — before the fix this panicked
+// the compiler; the returned vector must be an independent copy so both it and
+// the still-live `base` free their own buffer.
+operator_return_vector_operand() `test {
+  x := SVec(z: 1);
+  int[] base = [10, 20];
+  int[][] v = [];
+  v.push(x % base);
+  assert(v[0][0] == 10, "v0 == 10");
+  assert(v[0][1] == 20, "v1 == 20");
+  assert(base[0] == 10, "base still live");
+  assert(base.len == 2, "base len == 2");
+}
+
+// Reversed read order — the clone must survive independently of `base`.
+operator_return_vector_operand_reversed() `test {
+  x := SVec(z: 1);
+  int[] base = [1, 2, 3];
+  r := x % base;
+  assert(base.len == 3, "base still live");
+  assert(r.len == 3, "r independent copy");
+  r.push(4);
+  assert(r.len == 4, "r mutated independently");
+  assert(base.len == 3, "base unaffected by r mutation");
+}
+
+type SChan {
+  int z;
+  % (channel[int] other) channel[int] {
+    return other;
+  }
+}
+
+// Channel operand escaping — the returned handle bumps the refcount rather than
+// panicking, so both the result and the live operand drop cleanly.
+operator_return_channel_operand() `test {
+  x := SChan(z: 1);
+  c := channel[int](capacity: 1);
+  r := x % c;
+  r.send(42);
+  if got := <-c {
+    assert(got == 42, "channel shared, got 42");
+  } else {
+    assert(false, "channel receive failed");
+  }
+}
+
+type SMap {
+  int z;
+  % (map[string, int] other) map[string, int] {
+    return other;
+  }
+}
+
+// Map operand — Map is a Promise value struct (not a bare handle) and already
+// worked through dupHeapValue; guard that it still deep-copies correctly.
+operator_return_map_operand() `test {
+  x := SMap(z: 1);
+  map[string, int] m = {:};
+  m["a"] = 1;
+  m["b"] = 2;
+  r := x % m;
+  if v := r["a"] {
+    assert(v == 1, "r[a] == 1");
+  } else {
+    assert(false, "r[a] missing");
+  }
+  if v := r["b"] {
+    assert(v == 2, "r[b] == 2");
+  } else {
+    assert(false, "r[b] missing");
+  }
+  if v := m["a"] {
+    assert(v == 1, "m still live");
+  } else {
+    assert(false, "m[a] missing");
+  }
+}
+
+type SRef {
+  int z;
+  % (Ref[int] other) Ref[int] {
+    return other;
+  }
+}
+
+// Ref[T] (Arc) operand — a native i8* handle like Vector/Channel, so it hits the
+// same new dispatch branch. Returning it bumps the strong refcount; both the
+// result and the still-live operand share the inner value and drop cleanly (leak
+// enforcement guards the refcount balance).
+operator_return_ref_operand() `test {
+  x := SRef(z: 1);
+  a := Ref[int](5);
+  r := x % a;
+  assert(r.borrow == 5, "r shares inner 5");
+  assert(a.borrow == 5, "a still live");
+}
+
+type SWeak {
+  int z;
+  % (Weak[int] other) Weak[int] {
+    return other;
+  }
+}
+
+// Weak[T] operand — the last native-handle family member; returning it bumps the
+// weak refcount. The returned weak upgrades to the live strong ref.
+operator_return_weak_operand() `test {
+  x := SWeak(z: 1);
+  a := Ref[int](5);
+  Weak[int]? ow = a.downgrade();
+  if w := ow {
+    r := x % w;
+    if up := r.upgrade() {
+      assert(up.borrow == 5, "upgraded to 5");
+    } else {
+      assert(false, "upgrade failed");
+    }
+  } else {
+    assert(false, "downgrade failed");
+  }
+}
+
+type SSet {
+  int z;
+  % (Set[int] other) Set[int] {
+    return other;
+  }
+}
+
+// Set operand — like Map, a Promise value struct; guard the dupHeapValue path.
+operator_return_set_operand() `test {
+  x := SSet(z: 1);
+  s := Set[int]();
+  s.add(7);
+  s.add(9);
+  r := x % s;
+  assert(r.contains(7), "r contains 7");
+  assert(r.contains(9), "r contains 9");
+  assert(s.contains(7), "s still live");
+}

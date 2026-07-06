@@ -9924,8 +9924,9 @@ func TestTestMainFourWayCountersAndTimeoutContext(t *testing.T) {
 	assertContains(t, ir, "skip_leak_check_myTest")
 	// Timeout counter alloca and update
 	assertContains(t, ir, "after_timeout_ctx_myTest")
-	// Timeout context: prints "  timeout: exceeded " prefix
+	// Timeout context: prints "  timeout: exceeded <dur> limit\n" using compile-time duration (T1199)
 	assertContains(t, ir, `c"  timeout: exceeded "`)
+	assertContains(t, ir, `c"0ns"`) // timeoutNs==0 → formatDurationNs(0) == "0ns"
 	assertContains(t, ir, `c" limit\0A"`)
 	// FAIL context: panic check only on result==1 (not on timeout/leak)
 	assertContains(t, ir, "check_panic_myTest")
@@ -30774,4 +30775,97 @@ func TestReturnBorrowParamDiscardedHeapUserTypeScansHeapTemps(t *testing.T) {
 	// Discard path (not the assignment clone path).
 	assertContains(t, caller, "alias.discard.clear")
 	assertNotContains(t, caller, "alias.dup")
+}
+
+// TestFormatDurationNs verifies the compile-time duration formatter used for
+// TIMEOUT context messages (T1199).
+func TestFormatDurationNs(t *testing.T) {
+	cases := []struct {
+		ns   int64
+		want string
+	}{
+		{0, "0ns"},
+		{1, "1ns"},
+		{999, "999ns"},
+		{-1, "-1ns"},
+		{-1_000_000_000, "-1s"},
+		{1_000, "1us"},
+		{1_500, "1.5us"},
+		{999_999, "999.9us"},
+		{1_000_000, "1ms"},
+		{1_500_000, "1.5ms"},
+		{999_999_999, "999.9ms"},
+		{1_000_000_000, "1s"},
+		{2_000_000_000, "2s"},
+		{1_500_000_000, "1.5s"},
+		{500_000_000, "500ms"},
+		{10_000_000, "10ms"},
+		{100_000, "100us"},
+	}
+	for _, tc := range cases {
+		got := formatDurationNs(tc.ns)
+		if got != tc.want {
+			t.Errorf("formatDurationNs(%d) = %q, want %q", tc.ns, got, tc.want)
+		}
+	}
+}
+
+// TestTimeoutContextEmitsFormattedDuration verifies that GenerateTestMain emits
+// a compile-time-formatted duration string (e.g. "2s", "500ms") in the TIMEOUT
+// context block rather than a bare integer (T1199).
+func TestTimeoutContextEmitsFormattedDuration(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	// 2s timeout = 2_000_000_000 ns → "2s"
+	result.GenerateTestMain(info.Tests, map[string]int64{"myTest": 2_000_000_000})
+	ir := result.Module.String()
+	// Must contain the compile-time-formatted duration string global (T1199)
+	assertContains(t, ir, `@.str.timeout_dur_myTest = private constant [2 x i8] c"2s"`)
+	// The print_timeout_ctx block must reference the duration global, not sdiv
+	assertContains(t, ir, "print_timeout_ctx_myTest")
+	assertContains(t, ir, ".str.timeout_dur_myTest")
+	// No runtime sdiv in the context print block — check within the context block
+	ctxIdx := strings.Index(ir, "print_timeout_ctx_myTest:")
+	afterIdx := strings.Index(ir[ctxIdx:], "after_timeout_ctx_myTest")
+	ctxBlock := ir[ctxIdx : ctxIdx+afterIdx]
+	if strings.Contains(ctxBlock, "sdiv") {
+		t.Errorf("print_timeout_ctx block should not contain sdiv:\n%s", ctxBlock)
+	}
+
+	// Sub-second: 500ms = 500_000_000 ns → "500ms"
+	result2 := compileResult(t, `
+		fastTest() `+"`test"+` { }
+	`)
+	info2, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`fastTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result2.GenerateTestMain(info2.Tests, map[string]int64{"fastTest": 500_000_000})
+	ir2 := result2.Module.String()
+	assertContains(t, ir2, `@.str.timeout_dur_fastTest = private constant [5 x i8] c"500ms"`)
+	ctxIdx2 := strings.Index(ir2, "print_timeout_ctx_fastTest:")
+	afterIdx2 := strings.Index(ir2[ctxIdx2:], "after_timeout_ctx_fastTest")
+	ctxBlock2 := ir2[ctxIdx2 : ctxIdx2+afterIdx2]
+	if strings.Contains(ctxBlock2, "sdiv") {
+		t.Errorf("print_timeout_ctx block should not contain sdiv:\n%s", ctxBlock2)
+	}
 }

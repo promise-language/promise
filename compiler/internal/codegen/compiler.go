@@ -20,6 +20,39 @@ import (
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
+// formatDurationNs formats a nanosecond duration as a human-readable string
+// matching Duration.to_string() semantics: "Xns", "Xus"/"X.Yus", "Xms"/"X.Yms", "Xs"/"X.Ys".
+func formatDurationNs(ns int64) string {
+	if ns < 0 {
+		return "-" + formatDurationNs(-ns)
+	}
+	if ns < 1_000 {
+		return fmt.Sprintf("%dns", ns)
+	}
+	if ns < 1_000_000 {
+		us := ns / 1_000
+		frac := (ns % 1_000) / 100
+		if frac == 0 {
+			return fmt.Sprintf("%dus", us)
+		}
+		return fmt.Sprintf("%d.%dus", us, frac)
+	}
+	if ns < 1_000_000_000 {
+		ms := ns / 1_000_000
+		frac := (ns % 1_000_000) / 100_000
+		if frac == 0 {
+			return fmt.Sprintf("%dms", ms)
+		}
+		return fmt.Sprintf("%d.%dms", ms, frac)
+	}
+	s := ns / 1_000_000_000
+	frac := (ns % 1_000_000_000) / 100_000_000
+	if frac == 0 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%d.%ds", s, frac)
+}
+
 // rawFuncAttr is a function attribute emitted as a bare keyword (no quotes).
 // This is needed for attributes like "presplitcoroutine" which LLVM only
 // recognizes as enum-style keywords, not as quoted string attributes.
@@ -1179,6 +1212,13 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		}
 		timeoutConst := constant.NewInt(irtypes.I64, timeoutNs)
 
+		// Compile-time-formatted timeout duration string for TIMEOUT context message (T1199).
+		timeoutDurStr := formatDurationNs(timeoutNs)
+		timeoutDurData := constant.NewCharArrayFromString(timeoutDurStr)
+		timeoutDurGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.timeout_dur_%s", nameStr), timeoutDurData)
+		timeoutDurGlobal.Immutable = true
+		timeoutDurGlobal.Linkage = enum.LinkagePrivate
+
 		// T0689: snapshot start counter and set memory limit before each test.
 		// Only emitted when accounting is enabled (the helper symbol is only
 		// declared by pal.EmitMemoryLimitHelpers in that case).
@@ -1462,18 +1502,14 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			printTimeoutCtxBlk := mainFn.NewBlock(fmt.Sprintf("print_timeout_ctx_%s", nameStr))
 			entry.NewCondBr(isOrigTimeout, printTimeoutCtxBlk, afterTimeoutCtxBlk)
 
-			// Print "  timeout: exceeded <N>s limit\n"
-			// Compute timeout in seconds from compile-time constant
+			// Print "  timeout: exceeded <dur> limit\n" using compile-time-formatted duration (T1199)
 			stdout := constant.NewInt(irtypes.I32, 1)
 			toIndentPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutIndentGlobal.ContentType, timeoutIndentGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toIndentPtr, constant.NewInt(irtypes.I64, 20))
-			// Convert timeout nanoseconds to seconds for display
-			timeoutSec := printTimeoutCtxBlk.NewSDiv(timeoutConst, constant.NewInt(irtypes.I64, 1_000_000_000))
-			timeoutSecStr := printTimeoutCtxBlk.NewCall(c.funcs["promise_int_to_string"], timeoutSec)
-			secDataPtr, secDataLen := c.extractStringDataLenFromInstance(printTimeoutCtxBlk, timeoutSecStr)
-			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, secDataPtr, secDataLen)
-			printTimeoutCtxBlk.NewCall(c.palFree, timeoutSecStr)
+			toDurPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutDurGlobal.ContentType, timeoutDurGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toDurPtr, constant.NewInt(irtypes.I64, int64(len(timeoutDurStr))))
 			toSuffixPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutSuffixGlobal.ContentType, timeoutSuffixGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toSuffixPtr, constant.NewInt(irtypes.I64, 7))

@@ -1,0 +1,38 @@
+// T1149: spawning a failable function directly with `go work()` is rejected by
+// sema (a goroutine's error cannot be propagated). The supported idiom is to
+// handle the error *inside* the goroutine via the block form. This test
+// exercises that idiom and asserts it runs cleanly without leaking.
+work!(int x) int {
+  if x < 0 {
+    raise error(message: "negative");
+  }
+  return x * 2;
+}
+
+// Block form with `?!` — the goroutine handles failability internally and
+// sends a plain result over a channel.
+test_go_block_spawns_failable_with_panic() `test(exclude: wasm) {
+  ch := channel[int](capacity: 1);
+  go {
+    n := work(21)?!;
+    ch.send(n);
+  };
+  if v := <-ch {
+    assert(v == 42, "goroutine computed 42");
+  }
+}
+
+// Block form with an `else`-style error handler that sends a sentinel.
+test_go_block_spawns_failable_with_handler() `test(exclude: wasm) {
+  ch := channel[int](capacity: 1);
+  go {
+    n := work(-1)? e {
+      ch.send(-1);
+      return;
+    };
+    ch.send(n);
+  };
+  if v := <-ch {
+    assert(v == -1, "error handler sent sentinel");
+  }
+}

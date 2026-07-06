@@ -16181,6 +16181,56 @@ func TestGoExprNonSendableArg(t *testing.T) {
 	expectError(t, errs, "non-sendable argument")
 }
 
+func TestGoExprFailableCallRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		work!() int { return 1; }
+		test() {
+			t := go work();
+		}
+	`)
+	expectError(t, errs, "cannot spawn a failable call")
+}
+
+func TestGoExprFailableCallInFailableFnRejected(t *testing.T) {
+	// Failability must be rejected even when the spawning function is itself
+	// failable (auto-propagation must not hide it).
+	errs := checkErrs(t, `
+		work!() int { return 1; }
+		test!() {
+			t := go work();
+		}
+	`)
+	expectError(t, errs, "cannot spawn a failable call")
+}
+
+func TestGoExprNonCallOperandRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		work!() int { return 1; }
+		test() {
+			t := go work()?!;
+		}
+	`)
+	expectError(t, errs, "operand of `go` must be")
+}
+
+func TestGoExprNonFailableCallStillOK(t *testing.T) {
+	checkOK(t, `
+		compute() int { return 1; }
+		test() {
+			t := go compute();
+		}
+	`)
+}
+
+func TestGoExprBlockFailableStillOK(t *testing.T) {
+	checkOK(t, `
+		work!() int { return 1; }
+		test() {
+			t := go { work()?!; };
+		}
+	`)
+}
+
 func TestSendableWithOptionalField(t *testing.T) {
 	// Optional of sendable type is sendable
 	checkOK(t, `

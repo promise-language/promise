@@ -3783,6 +3783,18 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 	var innerType types.Type
 	if e.Expr != nil {
 		innerType = c.checkExpr(e.Expr)
+		// The operand of `go` must be a plain call: a goroutine runs
+		// asynchronously, so any error it produces cannot be propagated back to
+		// the spawning function. Reject non-call operands (e.g. `go work()?!`,
+		// `go x + 1`) and failable calls (`go work()` where `work!()`) with a
+		// clear diagnostic, steering users to the block form (T1149).
+		if _, ok := e.Expr.(*ast.CallExpr); !ok {
+			c.errorf(e.Expr.Pos(), "the operand of `go` must be a function or method call, or a block")
+			c.hintf(e.Expr.Pos(), "to spawn a computation that uses operators like `?!`, wrap it in a block: go { work()?!; }")
+		} else if c.info.FailableExprs[e.Expr] {
+			c.errorf(e.Expr.Pos(), "cannot spawn a failable call with `go`: a goroutine runs asynchronously, so its error cannot be propagated")
+			c.hintf(e.Expr.Pos(), "handle the error inside the goroutine: go { work()?!; } or go { work() else { ... } }")
+		}
 		// Expression form: check argument types are sendable
 		c.checkGoExprSendable(e.Expr)
 	} else if e.Block != nil {

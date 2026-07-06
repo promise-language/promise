@@ -15380,7 +15380,10 @@ func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
 	if e.Expr != nil {
 		callExpr, ok := e.Expr.(*ast.CallExpr)
 		if !ok {
-			panic(fmt.Sprintf("codegen: go expression with non-call expr %T not supported", e.Expr))
+			// Unreachable: sema rejects non-call `go` operands (T1149). This
+			// guards the sema/codegen contract — reaching it means a check was
+			// skipped upstream.
+			panic(fmt.Sprintf("codegen: internal error: go operand should be a call after sema, got %T", e.Expr))
 		}
 		return c.genGoCallExpr(callExpr)
 	}

@@ -311,3 +311,110 @@ none_arm_with_optional_sibling() `test {
   assert((_opt_arm_enum(Tag.Second, 7) ?: 100) == 7, "enum: present optional flows through");
   assert((_opt_arm_enum(Tag.First, 7) ?: 100) == 100, "enum: none arm empty");
 }
+
+// T1190: a `match`/`if` whose arms are ALL bare `none` (no value-arm sibling to
+// unify against) has expression type `none`. Binding it to an inferred local and
+// then using that local in a typed Optional context (return, typed var-decl,
+// typed assignment) used to panic in codegen — the none-typed value lowered to a
+// bare `i1`/`i64` that mismatched the concrete `{ i1, T }` store slot. The empty
+// optional must round-trip through every binding/consumption site.
+_both_none_match(int k) int? {
+  x := match k {
+    0 => none, _ => none,
+  };
+  return x;
+}
+
+_both_none_if(int k) int? {
+  x := if k == 0 {
+    none
+  } else {
+    none
+  };
+  return x;
+}
+
+_both_none_string(int k) string? {
+  x := match k {
+    0 => none, _ => none,
+  };
+  return x;
+}
+
+_direct_none_local() int? {
+  x := none;
+  return x;
+}
+
+_both_none_typed_decl(int k) int? {
+  x := match k {
+    0 => none, _ => none,
+  };
+  int? y = x;
+  return y;
+}
+
+_both_none_typed_assign(int k) int? {
+  x := match k {
+    0 => none, _ => none,
+  };
+  int? z = 3;
+  z = x;
+  return z;
+}
+
+// All-none local passed as a call argument that expects `T?` — a distinct
+// consumption site from return/var-decl/assign (call-arg coercion, not
+// coerceNoneToOptional). Confirms the none-typed local flows into a typed
+// Optional parameter as an empty optional with no i1→{i1,T} mismatch.
+_takes_opt(int? o) int {
+  return o ?: 5;
+}
+
+_both_none_as_arg(int k) int {
+  x := match k {
+    0 => none, _ => none,
+  };
+  return _takes_opt(x);
+}
+
+// Generic consumption: an all-none match bound in a monomorphized function that
+// returns `T?` exercises coerceNoneToOptional's typeSubst branch — the target
+// Optional shape is only known after substitution. Both a bare inner scalar
+// (`int`) and a heap-droppable payload (`string`) instantiation are asserted,
+// through both the return path and a typed var-decl.
+_gen_both_none[T](int k) T? {
+  x := match k {
+    0 => none, _ => none,
+  };
+  return x;
+}
+
+_gen_both_none_typed_decl[T](int k) T? {
+  x := match k {
+    0 => none, _ => none,
+  };
+  T? y = x;
+  return y;
+}
+
+both_none_arms() `test {
+  // Inferred-local return path (the originally-reported crash).
+  assert((_both_none_match(0) ?: 5) == 5, "both-none match round-trips as empty optional");
+  assert((_both_none_match(9) ?: 5) == 5, "both-none match empty on default arm too");
+  assert((_both_none_if(0) ?: 5) == 5, "both-none if round-trips as empty optional");
+  // Distinct heap-droppable payload type.
+  assert((_both_none_string(0) ?: "def") == "def", "both-none match string empty optional");
+  // Direct `x := none` inferred local.
+  assert((_direct_none_local() ?: 7) == 7, "direct none local round-trips empty");
+  // Typed var-decl (`int? y = x`) from a none-typed local.
+  assert((_both_none_typed_decl(0) ?: 11) == 11, "none local through typed var-decl stays empty");
+  // Typed assignment (`z = x`) from a none-typed local.
+  assert((_both_none_typed_assign(0) ?: 13) == 13, "none local through typed assign stays empty");
+  // Call-argument consumption site.
+  assert(_both_none_as_arg(0) == 5, "none local passed as int? arg stays empty");
+  // Generic (monomorphized) return + typed-decl — typeSubst coercion branch.
+  assert((_gen_both_none[int](0) ?: 21) == 21, "generic int both-none empty via return");
+  assert((_gen_both_none[string](0) ?: "gd") == "gd", "generic string both-none empty via return");
+  assert((_gen_both_none_typed_decl[int](0) ?: 23) == 23, "generic int both-none empty via typed decl");
+}

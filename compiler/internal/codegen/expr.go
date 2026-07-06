@@ -9922,6 +9922,26 @@ func (c *Compiler) wrapArmValueOptional(val value.Value, resultType types.Type) 
 	return val // already {i1,T} (none arm or optional-typed arm)
 }
 
+// coerceNoneToOptional coerces a none-typed value (the i1 void-optional bound
+// from a bare `none` / all-`none` match-if) to the concrete Optional[T] zero
+// expected at a consumption site. A bare `none` LITERAL already produced the
+// target struct via targetType, so a val already matching passes through. T1190.
+func (c *Compiler) coerceNoneToOptional(val value.Value, exprType, targetType types.Type) value.Value {
+	if val == nil || targetType == nil {
+		return val
+	}
+	if c.typeSubst != nil && exprType != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	if exprType != types.TypNone {
+		return val
+	}
+	if st, ok := c.resolveType(targetType).(*irtypes.StructType); ok && !val.Type().Equal(st) {
+		return c.zeroValue(st)
+	}
+	return val
+}
+
 // wrapReturnOptional wraps val in an Optional struct if retType is Optional
 // but the expression type is a non-optional, non-none value.
 func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType types.Type) value.Value {
@@ -9935,9 +9955,10 @@ func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType ty
 	if c.typeSubst != nil {
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
-	// NoneLit already produces the correct zero value via targetType
+	// NoneLit already produces the correct zero value via targetType; a
+	// none-typed variable-read is coerced to the concrete Optional zero. T1190.
 	if exprType == types.TypNone {
-		return val
+		return c.coerceNoneToOptional(val, exprType, retType)
 	}
 	// Same shape — no wrapping needed. Use Identical (not "is exprOpt?") so
 	// returning T? from a T??-returning function still wraps.

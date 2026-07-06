@@ -497,6 +497,14 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		typ = types.SubstituteSelf(typ, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
+	// T1190: a none-typed value is the empty optional — lower it to the
+	// void-optional `i1` (matching resolveType(Optional[void]) and genNoneLit's
+	// fallback), never `void`. This keeps a none-typed local's alloca, the
+	// all-`none` match/if merge phi, and genNoneLit's zero value all `i1 0`.
+	if typ == types.TypNone {
+		return irtypes.I1
+	}
+
 	// Unwrap MutRef/SharedRef — borrows have the same LLVM representation as the inner type
 	if ref, ok := typ.(*types.MutRef); ok {
 		return c.resolveType(ref.Elem())

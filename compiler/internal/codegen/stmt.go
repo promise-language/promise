@@ -1400,6 +1400,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0100: Claim env temp — the variable's scope binding handles env free.
 	c.claimEnvTemp(val)
 
+	// T1190: a none-typed RHS bound to a typed Optional local must be coerced to
+	// the concrete Optional[T] zero before the store (avoids an i1→{i1,T} mismatch).
+	val = c.coerceNoneToOptional(val, exprType, declType)
+
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	// Use declared type if available, otherwise fall back to expression type
@@ -7558,7 +7562,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// before Identical to avoid spurious re-wrap (insertvalue elem-type panic).
 			if _, isOpt := targetType.(*types.Optional); isOpt {
 				if exprType == types.TypNone {
-					// none: already handled by genExpr (zeroinit)
+					// T1190: a none-typed RHS (bare `none` / all-`none` match-if) coerces
+					// to the concrete Optional[T] zero (avoids an i1→{i1,T} mismatch).
+					val = c.coerceNoneToOptional(val, exprType, targetType)
 				} else if !types.Identical(unwrapRefsType(exprType), targetType) {
 					val = c.wrapOptional(val, alloca.ElemType.(*irtypes.StructType))
 				}

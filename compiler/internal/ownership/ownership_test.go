@@ -15414,3 +15414,120 @@ func TestT1205_RefUserTypeParamMethodAllowed(t *testing.T) {
 	`)
 	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
 }
+
+// T1207 — the caller side of the hidden-lock escape. A helper `push_g` takes a
+// borrowed Mutex and a `~vec` container of MutexGuard, and locks the Mutex inside
+// (`vec.push(m.lock())`) — the callee-side store is soundly allowed by T1205's
+// borrowed-Mutex-param rule. The bug was purely a caller-side NLL drop-ordering
+// hazard (`m` early-dropped at its last use `push_g(v, m)`, before `v`'s
+// scope-exit guard drop). The fix is a lifetime EXTENSION in lastuse.go, not a
+// rejection, so the whole program must still compile with NO ownership diagnostic
+// on either the callee or the caller. Runtime UAF coverage lives in the e2e test
+// tests/e2e/mutex_guard_container_escape_test.pr; drop-order IR coverage in
+// TestT1207HiddenLockEscapeNoEarlyDrop (codegen).
+func TestT1207_HiddenLockEscapeCallerAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		push_g(Vector[MutexGuard[int]] ~vec, Mutex[int] m) {
+			vec.push(m.lock());
+		}
+		test() {
+			m := Mutex[int](17);
+			v := Vector[MutexGuard[int]]();
+			push_g(v, m);
+			int n = v.len;
+		}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+	expectNoOwnerError(t, errs, "use of moved variable")
+}
+
+// T1207 — member-rooted escaping Mutex arg (`push_g(v, h.m)`). The Mutex is a
+// struct FIELD, so the suppression must recognize the arg via its member-chain
+// root (`memberChainRootName(h.m) == "h"`) and defer `h`'s drop past `v`. Still a
+// pure lifetime extension → compiles clean. (Runtime UAF regression:
+// tests/e2e/mutex_guard_container_escape_test.pr::test_hidden_lock_escape_member_rooted_mutex.)
+func TestT1207_MemberRootedMutexArgAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { Mutex[int] m; }
+		push_g(Vector[MutexGuard[int]] ~vec, Mutex[int] m) {
+			vec.push(m.lock());
+		}
+		test() {
+			h := Holder(m: Mutex[int](17));
+			v := Vector[MutexGuard[int]]();
+			push_g(v, h.m);
+			int n = v.len;
+		}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+	expectNoOwnerError(t, errs, "use of moved variable")
+}
+
+// T1207 negative — the suppression is TARGETED. When the escaping `~vec` param
+// holds a non-guard element (`Vector[int]`), `typeHasMutexGuardElem` returns false
+// and `callMayEscapeMutexGuardFromMutexArg` returns false — no lifetime extension,
+// no diagnostic (the guard can't escape, so nothing to protect). Exercises the
+// container-scan false path; over-suppression would only ever defer a harmless
+// drop, but this pins the intended narrow shape. Compiles clean either way.
+func TestT1207_NonGuardContainerNoSuppression(t *testing.T) {
+	errs := ownerErrs(t, `
+		push_i(Vector[int] ~vec, Mutex[int] m) {
+			vec.push(0);
+		}
+		test() {
+			m := Mutex[int](17);
+			v := Vector[int]();
+			push_i(v, m);
+			int n = v.len;
+		}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+	expectNoOwnerError(t, errs, "use of moved variable")
+}
+
+// T1207 negative — a Mutex arg passed to a helper with NO container parameter at
+// all. `callMayEscapeMutexGuardFromMutexArg` finds the Mutex arg but no escaping
+// guard-container param, so it returns false via the final loop-exit path, and
+// `paramIsEscapingGuardContainer` takes its BorrowNone/non-ref early return for the
+// plain `Mutex` param. No suppression, no diagnostic.
+func TestT1207_MutexArgNoContainerParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		sink(Mutex[int] m) {
+			int x = 0;
+		}
+		test() {
+			m := Mutex[int](17);
+			sink(m);
+			int n = 5;
+		}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+	expectNoOwnerError(t, errs, "use of moved variable")
+}
+
+// T1207 targeting — the suppression must be scoped to the Mutex arg alone, not to
+// every argument of a guard-container call. Here `push_g` still takes the escaping
+// `~vec` guard container, but the analyzed variable at the call is an UNRELATED
+// droppable `string s` (its last syntactic use is `push_g(v, m, s)`). For `name ==
+// "s"`, `callMayEscapeMutexGuardFromMutexArg` finds no Mutex-typed `s` arg, so
+// `passedAsMutex` stays false and it returns via the early
+// `if !passedAsMutex { return false }` path — `s` is NOT lifetime-extended
+// (over-suppression would needlessly pin unrelated resources alive). `m` IS still
+// deferred (its own analysis takes the fire path). Compiles clean either way; this
+// pins the narrow, mutex-only shape of the suppression.
+func TestT1207_UnrelatedArgNotSuppressed(t *testing.T) {
+	errs := ownerErrs(t, `
+		push_g(Vector[MutexGuard[int]] ~vec, Mutex[int] m, string s) {
+			vec.push(m.lock());
+		}
+		test() {
+			m := Mutex[int](17);
+			v := Vector[MutexGuard[int]]();
+			s := "x";
+			push_g(v, m, s);
+			int n = v.len;
+		}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+	expectNoOwnerError(t, errs, "use of moved variable")
+}

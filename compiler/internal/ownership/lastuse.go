@@ -283,6 +283,18 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 				}
 			}
 		}
+		// T1207: hidden-lock escape. Passing the Mutex `name` as a plain-borrow
+		// argument to a helper that also takes a `~`/`&` container-of-MutexGuard
+		// parameter lets the callee lock `name` and store the guard into that
+		// escaping container (e.g. `push_g(Vector[MutexGuard[T]] ~vec, Mutex[T] m)`
+		// doing `vec.push(m.lock())`). The stored guard back-points into `name`'s
+		// Mutex and the caller's container drops after `name` at scope exit — so
+		// early-dropping `name` at this call (its last syntactic use) would unlock
+		// an already-freed Mutex (UAF). This is the callee-hidden analogue of the
+		// visible `outer.push(m.lock())` case handled above (T0557).
+		if a.callMayEscapeMutexGuardFromMutexArg(e, name) {
+			return true
+		}
 		if a.exprBackRefCapturesVar(e.Callee, name) {
 			return true
 		}
@@ -374,6 +386,82 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 			}
 		}
 		return false
+	}
+	return false
+}
+
+// callMayEscapeMutexGuardFromMutexArg reports whether the call `e` may lock the
+// Mutex variable `name` (passed as an argument) and store the resulting
+// MutexGuard into an escaping `~`/`&` container argument that outlives `name` in
+// the caller. When true, `name` must not be early-dropped at this call: the
+// callee-stored guard back-points into `name`'s Mutex, and the caller's container
+// drops after `name` at scope exit (double-free / use-after-free otherwise).
+//
+// Conservative and sound: suppressing an early drop only defers `name`'s drop to
+// scope exit, where the container is already dead, so exactly one drop still runs
+// in the safe order. It fires on a signature shape (a Mutex[T] arg alongside an
+// escaping MutexGuard-container param), not on whether the callee actually stores
+// a guard — matching the visible-lock policy that already keeps `m` alive across
+// `outer.push(m.lock())`. T1207.
+func (a *lastUseAnalyzer) callMayEscapeMutexGuardFromMutexArg(e *ast.CallExpr, name string) bool {
+	// `name` must be passed as a Mutex[T] argument (bare ident `m`, or a
+	// member-rooted `h.m` whose owning root is `name`).
+	passedAsMutex := false
+	for _, arg := range e.Args {
+		if memberChainRootName(arg.Value) == name && types.IsMutex(peelOptional(a.info.Types[arg.Value])) {
+			passedAsMutex = true
+			break
+		}
+	}
+	if !passedAsMutex {
+		return false
+	}
+	// The callee signature must expose an escaping container-of-MutexGuard
+	// parameter into which the callee could push a guard locked from `name`.
+	sig, _ := a.info.Types[e.Callee].(*types.Signature)
+	if sig == nil {
+		return false
+	}
+	for _, p := range sig.Params() {
+		if paramIsEscapingGuardContainer(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// paramIsEscapingGuardContainer reports whether a parameter is an escaping
+// (`~`/`&`, i.e. ref-typed) container whose element type is MutexGuard[T] (or
+// Optional thereof). A store into such a parameter is visible to the caller after
+// the callee returns, so a guard pushed into it outlives the callee. T1207.
+func paramIsEscapingGuardContainer(p *types.Param) bool {
+	if paramBorrowKind(p) == BorrowNone && !isRefType(p.Type()) {
+		return false
+	}
+	return typeHasMutexGuardElem(p.Type())
+}
+
+// typeHasMutexGuardElem reports whether typ is a generic container (Vector, Map,
+// Array, …) — possibly behind a `~`/`&` ref wrapper — one of whose type arguments
+// is a MutexGuard[T] (peeling an Optional element). Checking all type arguments
+// covers Vector[MutexGuard], Map[K, MutexGuard], and future container shapes
+// uniformly. T1207.
+func typeHasMutexGuardElem(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.SharedRef:
+		return typeHasMutexGuardElem(t.Elem())
+	case *types.MutRef:
+		return typeHasMutexGuardElem(t.Elem())
+	case *types.Instance:
+		for _, ta := range t.TypeArgs() {
+			if types.IsMutexGuard(peelOptional(ta)) {
+				return true
+			}
+		}
+	case *types.Array:
+		if elem, _, ok := types.AsArray(t); ok {
+			return types.IsMutexGuard(peelOptional(elem))
+		}
 	}
 	return false
 }

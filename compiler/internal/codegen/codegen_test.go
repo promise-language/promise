@@ -9125,6 +9125,33 @@ func TestReturnThisAliasNoEarlyDrop(t *testing.T) {
 	assertContains(t, ir, "%m.dropflag")
 }
 
+// T1207: a borrowed Mutex arg passed to a helper that locks it and escapes the
+// guard into a `~`-container param must NOT be NLL-early-dropped at the call.
+// The callee stores `m.lock()`'s guard into `~vec`, so the caller's `v` (dropped
+// at scope exit, after `m`) holds a guard back-pointing into `m`'s Mutex. An
+// early `Mutex[int].drop(m)` right after `push_g(v, m)` — signalled by a
+// force-clear `store i1 false, i1* %m.dropflag` in the straight-line body —
+// would free the Mutex handle before `v`'s element drop unlocks it (UAF). The
+// hidden-lock suppression in lastuse.go must remove that early clear, deferring
+// `m`'s single flag-guarded drop to scope exit (safe LIFO: guard → vec → m).
+func TestT1207HiddenLockEscapeNoEarlyDrop(t *testing.T) {
+	ir := generateIR(t, `
+		push_g(Vector[MutexGuard[int]] ~vec, Mutex[int] m) { vec.push(m.lock()); }
+		main() {
+			m := Mutex[int](17);
+			v := Vector[MutexGuard[int]]();
+			push_g(v, m);
+			int n = v.len;
+		}
+	`)
+	// No NLL early drop of `m`: the force-clear that precedes an emitted early
+	// drop must be absent (present without the fix — verified against T1207 repro).
+	assertNotContains(t, ir, "store i1 false, i1* %m.dropflag")
+	// `m` still has its flag-guarded scope-exit drop (exactly one free, no leak).
+	assertContains(t, ir, "%m.dropflag")
+	assertContains(t, ir, `call void @"Mutex[int].drop"`)
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {

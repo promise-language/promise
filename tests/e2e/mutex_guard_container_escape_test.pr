@@ -87,3 +87,46 @@ test_guard_push_into_ref_param() `test {
   // `v`'s element-drop unlocks the guard while `m` (the caller-owned Mutex) is
   // still alive; `m` drops afterward (LIFO). No UAF, leak-clean.
 }
+
+// T1207: the callee-hidden analogue of the case above. The lock happens INSIDE
+// the callee (`vec.push(m.lock())`) on a BORROWED Mutex param, and the guard
+// escapes via the `~vec` container. `m`'s last syntactic use in the caller is
+// the `push_g(v, m)` call, so NLL would early-drop `m` right after it — before
+// `v`'s guard-element drop unlocks the (now-freed) Mutex → UAF. The fix defers
+// `m`'s drop to scope exit (after `v`), restoring the safe LIFO order.
+push_g(Vector[MutexGuard[int]] ~vec, Mutex[int] m) {
+  vec.push(m.lock());
+}
+test_hidden_lock_escape_into_ref_vec_param() `test {
+  m := Mutex[int](17);
+  v := Vector[MutexGuard[int]]();
+  push_g(v, m);
+  assert(v.len == 1, "guard hidden-locked + pushed into `~`-vec param");
+}
+
+// T1207 store-family variant: the same hidden-lock escape through a `~`-Map
+// param (`mp[k] = m.lock()`). Covers the Map store path the issue calls out.
+put_g(Map[int, MutexGuard[int]] ~mp, Mutex[int] m) {
+  mp[1] = m.lock();
+}
+test_hidden_lock_escape_into_ref_map_param() `test {
+  m := Mutex[int](19);
+  mp := Map[int, MutexGuard[int]]();
+  put_g(mp, m);
+  assert(mp.len == 1, "guard hidden-locked + stored into `~`-map param");
+}
+
+// T1207 member-rooted variant: the escaping Mutex arg is a struct FIELD (`h.m`),
+// not a bare local. `h`'s last syntactic use is `push_g(v, h.m)`, so NLL would
+// early-drop the whole `h` (freeing `h.m`'s Mutex) before `v`'s guard element
+// unlocks it → UAF. Exercises the member-chain arg path of the suppression
+// (`memberChainRootName(h.m) == "h"`), deferring `h`'s drop to scope exit.
+type T1207Holder {
+  Mutex[int] m;
+}
+test_hidden_lock_escape_member_rooted_mutex() `test {
+  h := T1207Holder(m: Mutex[int](23));
+  v := Vector[MutexGuard[int]]();
+  push_g(v, h.m);
+  assert(v.len == 1, "guard hidden-locked from a struct-field Mutex + pushed into `~`-vec param");
+}

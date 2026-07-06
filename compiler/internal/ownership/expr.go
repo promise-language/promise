@@ -995,23 +995,21 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			// or `this` (mroot resolves to a parameter, or is unresolved) are allowed —
 			// the Mutex outlives the function, matching T0665/T0557's policy and keeping
 			// the T0564 `push_guard_count(Vector~vec, MutexGuard move g)` helper legal.
-			// Conservative gap (T1205): if the guard's Mutex is itself a `~`(move)-param
-			// of this function it also dies at exit (UAF), but c.params[mroot]==true
-			// allows it — detecting the param's ref-kind needs the param object, not just
-			// the name. Likewise this push-scoped check does not cover Set.add/Map._set.
-			if member, ok := e.Callee.(*ast.MemberExpr); ok && member.Field == "push" {
-				if types.IsMutexGuard(peelOptional(c.info.Types[arg.Value])) {
-					if container, ok := member.Target.(*ast.IdentExpr); ok &&
-						isRefType(c.info.Types[member.Target]) {
-						if mroot := c.guardMutexExprRoot(arg.Value); mroot != "" {
-							if _, tracked := c.declOrder[mroot]; tracked && !c.params[mroot] {
-								c.errorf(arg.Value.Pos(),
-									"cannot store a MutexGuard into '%s': the container is a `~`/`&` parameter that outlives '%s' (a local Mutex of this function) — after the function returns, the guard's drop would unlock an already-destroyed Mutex. Share the Mutex via `Arc[Mutex[T]]` (so the guard points to a refcounted allocation), or keep the guard's use scoped inside this function with `use guard := %s.lock()`.",
-									container.Name, mroot, mroot)
-								continue
-							}
-						}
-					}
+			// T1205 extends the coverage: a move (`T move name`, RefMut) parameter
+			// Mutex root (owned by and dropped at callee exit, same hazard as a
+			// local) and the Map._set store path are now handled via
+			// guardStoreEscapesLocalMutex / isEscapingContainerStore. A borrow
+			// parameter Mutex (`&`/`~`) stays allowed — the Mutex lives in the caller.
+			// The `map[k] = guard` index-set surface syntax lowers to an AssignStmt
+			// and is caught in checkAssignStmt. Set.add is covered defensively but
+			// remains unreachable by construction — Set[MutexGuard[T]] fails the
+			// `T: Hashable + Equal` constraint in sema.
+			if member, ok := e.Callee.(*ast.MemberExpr); ok &&
+				c.isEscapingContainerStore(member.Field, c.info.Types[member.Target]) {
+				if mroot, escapes := c.guardStoreEscapesLocalMutex(member.Target, arg.Value); escapes {
+					container := member.Target.(*ast.IdentExpr).Name
+					c.errorf(arg.Value.Pos(), "%s", guardEscapeMsg(container, mroot, c.paramIsMove(mroot)))
+					continue
 				}
 			}
 			if i < len(params) {
@@ -1299,6 +1297,98 @@ func (c *Checker) guardMutexExprRoot(expr ast.Expr) string {
 		}
 	}
 	return ""
+}
+
+// paramIsMove reports whether the named parameter of the current function is a
+// move (`T move name`) parameter — RefMut, owned by the callee and dropped at
+// callee exit, the same lifetime hazard as a local. A `T& name` (shared) or
+// `T~ name` (mutable-reference, RefNone) borrow parameter does NOT own its
+// argument — the Mutex lives in and outlives via the caller — so those are not
+// moves. The receiver `this` is deliberately excluded: a `~this`-rooted guard
+// store is governed by T0603's existing "guards through `this` are allowed"
+// policy (see TestT0603_RefParamContainerThisRootedGuardAllowed), which must not
+// regress — `destructureBorrowRoot(this.m)` yields "this" and a `~this`
+// receiver is RefMut, so without this exclusion the confirmed-allowed case
+// would be rejected. T1205.
+func (c *Checker) paramIsMove(name string) bool {
+	if c.curSig == nil || name == "this" {
+		return false
+	}
+	for _, p := range c.curSig.Params() {
+		if p.Name() == name {
+			return p.Ref() == types.RefMut
+		}
+	}
+	return false
+}
+
+// guardStoreEscapesLocalMutex reports the Mutex root when storing the MutexGuard
+// produced by valueExpr into containerExpr would let the guard outlive the Mutex
+// it locks. Fires when: valueExpr is a MutexGuard, containerExpr is a ref-typed
+// ident (a `~`/`&` container parameter that outlives the function), and the
+// guard's Mutex root is either a tracked non-param local OR a move (`T move name`,
+// RefMut) parameter of this function — both drop at function exit, stranding the
+// escaped guard's back-pointer (UAF at the caller's container drop). A borrow
+// parameter (shared `&`, mutable-reference `~`) or a `this`-rooted Mutex outlives
+// the function via the caller and is allowed. T0603 / T1205.
+func (c *Checker) guardStoreEscapesLocalMutex(containerExpr, valueExpr ast.Expr) (mroot string, ok bool) {
+	if !types.IsMutexGuard(peelOptional(c.info.Types[valueExpr])) {
+		return "", false
+	}
+	container, isIdent := containerExpr.(*ast.IdentExpr)
+	if !isIdent || !isRefType(c.info.Types[container]) {
+		return "", false
+	}
+	root := c.guardMutexExprRoot(valueExpr)
+	if root == "" {
+		return "", false
+	}
+	if _, tracked := c.declOrder[root]; !tracked {
+		return "", false
+	}
+	if !c.params[root] || c.paramIsMove(root) { // local, or move-param Mutex
+		return root, true
+	}
+	return "", false
+}
+
+// isEscapingContainerStore reports whether calling method `field` on a ref-typed
+// container stores its value argument into that container: Vector.push, Map._set,
+// or Set.add. (Set.add is currently unreachable for a MutexGuard element — Set[T]
+// requires T: Hashable + Equal, which MutexGuard does not satisfy — but is
+// included for symmetry/future-proofing.) T1205.
+func (c *Checker) isEscapingContainerStore(field string, containerType types.Type) bool {
+	if !isRefType(containerType) {
+		return false
+	}
+	named := extractNamedType(containerType)
+	if named == nil || named.Obj() == nil {
+		return false
+	}
+	switch named.Obj().Name() {
+	case "Vector":
+		return field == "push"
+	case "Map":
+		return field == "_set"
+	case "Set":
+		return field == "add"
+	}
+	return false
+}
+
+// guardEscapeMsg builds the T0603 / T1205 guard-escape diagnostic. The
+// parenthetical distinguishes a local Mutex from a move-param Mutex while
+// preserving the "parameter that outlives" substring the tests key on.
+func guardEscapeMsg(container, mroot string, moveParam bool) string {
+	origin := "a local Mutex of this function"
+	if moveParam {
+		origin = "a `move` parameter Mutex, owned by and dropped at the end of this function"
+	}
+	return fmt.Sprintf("cannot store a MutexGuard into '%s': the container is a `~`/`&` "+
+		"parameter that outlives '%s' (%s) — after the function returns, the guard's drop "+
+		"would unlock an already-destroyed Mutex. Share the Mutex via `Arc[Mutex[T]]`, or "+
+		"keep the guard's use scoped inside this function with `use guard := %s.lock()`.",
+		container, mroot, origin, mroot)
 }
 
 // checkReceiverBorrow creates a borrow for method calls with &this or ~this receivers.

@@ -15245,3 +15245,172 @@ func TestT0603_RefParamContainerThisRootedGuardAllowed(t *testing.T) {
 	`)
 	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
 }
+
+// T1205 — Gap 1: the guard's parent Mutex is a move (`T move name`) parameter of
+// the same function. A move param is owned by the callee and dropped at callee
+// exit — the same lifetime hazard as a local Mutex — so pushing its guard into a
+// `~vec` container that escapes must be rejected. T0603 allowed it because
+// c.params["m"]==true masked the move param; paramIsMove now distinguishes it.
+func TestT1205_MoveParamMutexGuardPushRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec, Mutex[int] move m) {
+			vec.push(m.lock());
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — Gap 1, guard-variable form: `move m` param + `g := m.lock(); vec.push(move g)`.
+func TestT1205_MoveParamMutexGuardVarPushRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec, Mutex[int] move m) {
+			g := m.lock();
+			vec.push(move g);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — Gap 1 control: a plain (shared-borrow) Mutex param outlives the
+// function via the caller, so pushing its guard into `~vec` stays allowed. The
+// move-param detection must not over-fire on borrow params.
+func TestT1205_SharedBorrowParamMutexGuardPushAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec, Mutex[int] m) {
+			vec.push(m.lock());
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — Gap 1 control: a `T~ name` mutable-reference (borrow) Mutex param is
+// NOT a move — the caller owns the Mutex, which outlives this function — so
+// pushing its guard into `~vec` stays allowed. Proves paramIsMove treats the
+// mutable-borrow `~` (RefNone at the param) distinctly from a `move` param.
+func TestT1205_MutRefParamMutexGuardPushAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Vector[MutexGuard[int]] ~vec, Mutex[int] ~m) {
+			vec.push(m.lock());
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — Gap 2b: `mp._set(k, m.lock())` (Map's element-store method) with a
+// local Mutex — the push-scoped T0603 check missed this store path.
+func TestT1205_MapSetMethodLocalGuardRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Map[int, MutexGuard[int]] ~mp) {
+			m := Mutex[int](1);
+			mp._set(1, m.lock());
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — Gap 2c: `mp[k] = m.lock()` (index-assignment surface syntax) with a
+// local Mutex. This lowers to an AssignStmt, a different code path from the
+// method-call form.
+func TestT1205_MapIndexAssignLocalGuardRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Map[int, MutexGuard[int]] ~mp) {
+			m := Mutex[int](1);
+			mp[1] = m.lock();
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — Gap 1 × Gap 2c: index-assign of a guard rooted at a move (`T move name`)
+// param Mutex into a `~`-Map param.
+func TestT1205_MapSetMoveParamGuardRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Map[int, MutexGuard[int]] ~mp, Mutex[int] move m) {
+			mp[1] = m.lock();
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — control for the Map path: a plain (shared-borrow) Mutex param outlives
+// the function, so storing its guard into a `~`-Map param stays allowed.
+func TestT1205_MapGuardFromParamAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Map[int, MutexGuard[int]] ~mp, Mutex[int] m) {
+			mp[1] = m.lock();
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — the `~this`-rooted policy from T0603 is preserved on the Map path: a
+// `~this` receiver Mutex is excluded from the move-param check, so storing its
+// guard into a `~`-Map param remains allowed.
+func TestT1205_MapGuardFromThisRootedAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W { Mutex[int] m;
+			collect(~this, Map[int, MutexGuard[int]] ~mp) {
+				mp[1] = this.m.lock();
+			}
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — control: a *local* (owned, non-ref) Map is not an escaping container.
+// Both the Map and the local Mutex drop together at scope exit, so index-assigning
+// a local-Mutex guard into a local Map is safe and stays allowed. Exercises the
+// non-ref-container early-out of guardStoreEscapesLocalMutex reached via the
+// index-assignment (AssignStmt) path.
+func TestT1205_LocalMapIndexAssignGuardAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		f() {
+			mp := Map[int, MutexGuard[int]]();
+			m := Mutex[int](1);
+			mp[1] = m.lock();
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — control: `Set.add` on a `~`-Set param is recognized as a container
+// store (isEscapingContainerStore's Set arm), but a non-guard element never
+// triggers the guard-escape check, so it stays allowed. Guards the Set predicate
+// arm against misfiring on ordinary elements.
+func TestT1205_RefSetAddNonGuardAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		f(Set[int] ~s) {
+			s.add(1);
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}
+
+// T1205 — control: a method call with a value argument on a `~`-param user type
+// (not Vector/Map/Set) is not a container store — isEscapingContainerStore falls
+// through to its default, so nothing is rejected. Confirms the guard-escape check
+// is scoped to the container natives and does not over-fire on arbitrary ref-param
+// method calls that happen to take an argument.
+func TestT1205_RefUserTypeParamMethodAllowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W { int x;
+			ping(~this, int n) {}
+		}
+		f(W ~w) {
+			w.ping(5);
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
+}

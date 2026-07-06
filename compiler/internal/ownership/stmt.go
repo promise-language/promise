@@ -810,6 +810,20 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		// because the caller still drops the original. tryMoveConsume rejects them
 		// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
 		c.tryMoveConsume(s.Value)
+		// T1205: `container[k] = m.lock()` stores a MutexGuard into an indexable
+		// container. When the container is a `~`/`&` parameter that outlives a local
+		// (or `~`(move)-param) Mutex, the guard's drop unlocks an already-destroyed
+		// Mutex (UAF). The `mp._set(k, g)` method-call form is caught in
+		// checkCallExpr; this covers the index-assignment surface syntax that lowers
+		// to the same store. No `continue` — falling through to the resurrection
+		// logic is harmless after the error is recorded.
+		if idx, ok := s.Target.(*ast.IndexExpr); ok {
+			if mroot, escapes := c.guardStoreEscapesLocalMutex(idx.Target, s.Value); escapes {
+				if container, ok := idx.Target.(*ast.IdentExpr); ok {
+					c.errorf(s.Value.Pos(), "%s", guardEscapeMsg(container.Name, mroot, c.paramIsMove(mroot)))
+				}
+			}
+		}
 		// T0811: `p = o!` / `p = o as! T` — reassigning a slot from the unwrapped
 		// inner of a borrowed droppable Optional parameter double-frees. The
 		// carve-out (isVarDeclAliasSafeType) keeps string/vector field stores

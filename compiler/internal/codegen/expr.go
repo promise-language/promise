@@ -5798,6 +5798,101 @@ func (c *Compiler) resolveTypeParam(tp *types.TypeParam) types.Type {
 	return c.typeSubst[tp]
 }
 
+// getOrEmitOptContainsEqFn returns a comparison function (ABI: i32(i8*,i8*,i64))
+// for Optional scalar element types in vector.contains. Instead of memcmp, the
+// generated function compares the i1 presence flag and then (if both are Some)
+// the inner scalar value using icmp/fcmp — completely ignoring the struct's
+// padding bytes (bytes 1..7 of {i1, i64}, bytes 1..3 of {i1, i32}, etc.).
+//
+// Why this matters: LLVM O1 decomposes `store { i1, T } zeroinitializer` into
+// per-field stores covering only the defined fields. The 1..7 padding bytes get
+// no explicit store and remain uninitialized stack memory. O1 then replaces
+// promise_vector_contains's memcmp with a single `icmp ne i128`, comparing all
+// 16 bytes of the slot. When push and contains are in different functions (e.g.
+// the cross-function generic test), their independent O1 contexts produce
+// different stack garbage in those padding bytes → icmp finds inequality even
+// when the logical Optional values are equal.
+//
+// Returns constant.NewNull(irtypes.I8Ptr) for non-scalar inner types (heap
+// types, strings, nested Optional, value-type structs), which fall back to the
+// existing memcmp path. The function is cached in c.funcs by name to avoid
+// duplicate definitions.
+func (c *Compiler) getOrEmitOptContainsEqFn(optLLVM irtypes.Type) value.Value {
+	st, ok := optLLVM.(*irtypes.StructType)
+	if !ok || len(st.Fields) < 2 {
+		return constant.NewNull(irtypes.I8Ptr)
+	}
+	innerLLVM := st.Fields[1]
+
+	// Only scalar inner types: fall back to memcmp for complex types (pointers,
+	// structs, nested Optional, strings) where identity/equality semantics differ.
+	var isFloat bool
+	switch innerLLVM.(type) {
+	case *irtypes.IntType:
+		isFloat = false
+	case *irtypes.FloatType:
+		isFloat = true
+	default:
+		return constant.NewNull(irtypes.I8Ptr)
+	}
+
+	fnName := "__promise_opt_eq_" + innerLLVM.String()
+	if fn, exists := c.funcs[fnName]; exists {
+		return c.block.NewBitCast(fn, irtypes.I8Ptr)
+	}
+
+	// Emit: i32 fnName(i8* a, i8* b, i64 _ksz)
+	// Returns 1 if equal (same presence + same inner value), 0 otherwise.
+	aParam := ir.NewParam("a", irtypes.I8Ptr)
+	bParam := ir.NewParam("b", irtypes.I8Ptr)
+	kszParam := ir.NewParam("_ksz", irtypes.I64)
+	fn := c.module.NewFunc(fnName, irtypes.I32, aParam, bParam, kszParam)
+	c.funcs[fnName] = fn
+
+	i32zero := constant.NewInt(irtypes.I32, 0)
+	i32one := constant.NewInt(irtypes.I32, 1)
+	gepOuter := constant.NewInt(irtypes.I32, 0)
+	gep0 := constant.NewInt(irtypes.I32, 0)
+	gep1 := constant.NewInt(irtypes.I32, 1)
+
+	entry := fn.NewBlock(".entry")
+	flagsMatch := fn.NewBlock("flags.match")
+	compareInner := fn.NewBlock("compare.inner")
+	retTrue := fn.NewBlock("ret.true")
+	retFalse := fn.NewBlock("ret.false")
+
+	// entry: cast i8* → {i1,T}*, load flags, branch on equality
+	ap := entry.NewBitCast(aParam, irtypes.NewPointer(st))
+	bp := entry.NewBitCast(bParam, irtypes.NewPointer(st))
+	aFlagPtr := entry.NewGetElementPtr(st, ap, gepOuter, gep0)
+	bFlagPtr := entry.NewGetElementPtr(st, bp, gepOuter, gep0)
+	aFlag := entry.NewLoad(irtypes.I1, aFlagPtr)
+	bFlag := entry.NewLoad(irtypes.I1, bFlagPtr)
+	flagsEq := entry.NewICmp(enum.IPredEQ, aFlag, bFlag)
+	entry.NewCondBr(flagsEq, flagsMatch, retFalse)
+
+	// flags.match: flags are equal; if a_flag=false → both None → equal
+	flagsMatch.NewCondBr(aFlag, compareInner, retTrue)
+
+	// compare.inner: both Some — compare the inner scalar value
+	aValPtr := compareInner.NewGetElementPtr(st, ap, gepOuter, gep1)
+	bValPtr := compareInner.NewGetElementPtr(st, bp, gepOuter, gep1)
+	aVal := compareInner.NewLoad(innerLLVM, aValPtr)
+	bVal := compareInner.NewLoad(innerLLVM, bValPtr)
+	var valsEq value.Value
+	if isFloat {
+		valsEq = compareInner.NewFCmp(enum.FPredOEQ, aVal, bVal)
+	} else {
+		valsEq = compareInner.NewICmp(enum.IPredEQ, aVal, bVal)
+	}
+	compareInner.NewCondBr(valsEq, retTrue, retFalse)
+
+	retTrue.NewRet(i32one)
+	retFalse.NewRet(i32zero)
+
+	return c.block.NewBitCast(fn, irtypes.I8Ptr)
+}
+
 func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
 	// T0595: capture the receiver slot once. `receiverSlot` is non-nil only for an
 	// arr[i]/vov[i] receiver; the push/pop/remove store-back below writes through
@@ -6006,7 +6101,25 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
-		c.block.NewStore(argVal, argAlloca)
+		// T0661: For Optional element types {i1, T}, use field stores to preserve
+		// the zeroinit padding bytes (7 bytes between i1 and T for i64 alignment).
+		// A full struct store of a value built by insertvalue-from-undef carries
+		// undefined padding that overwrites zeroinit. Must mirror the contains-side
+		// field stores so memcmp agrees in all cases (inline and cross-function).
+		if elemIsOpt {
+			if st, ok := elemLLVM.(*irtypes.StructType); ok {
+				zero32 := constant.NewInt(irtypes.I32, 0)
+				one32 := constant.NewInt(irtypes.I32, 1)
+				i1Val := c.block.NewExtractValue(argVal, 0)
+				innerVal := c.block.NewExtractValue(argVal, 1)
+				f0Ptr := c.block.NewGetElementPtr(st, argAlloca, zero32, zero32)
+				f1Ptr := c.block.NewGetElementPtr(st, argAlloca, zero32, one32)
+				c.block.NewStore(i1Val, f0Ptr)
+				c.block.NewStore(innerVal, f1Ptr)
+			}
+		} else {
+			c.block.NewStore(argVal, argAlloca)
+		}
 		argPtr := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
 		newSlice := c.block.NewCall(c.funcs["promise_vector_push"],
 			cowSlice, argPtr, constant.NewInt(irtypes.I64, elemSize))
@@ -6047,15 +6160,80 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return phi
 
 	case "contains":
+		// T0661: Mirror the T0658 push-case Optional-wrapping for the contains
+		// path. When the resolved element type is Optional and the argument is a
+		// bare (non-optional) value, genCallArgExpr returns the raw scalar while
+		// argAlloca is {i1,T}* — the store panics. Fix: resolve elemType, detect
+		// Optional, set c.targetType so genNoneLit emits a zero {i1,T} struct for
+		// `v.contains(none)`, then wrap a bare scalar via wrapOptional. contains is
+		// read-only so no claimStringTemp/claimHeapTemp/enumCtorTemps dance needed.
+		resolvedContainsElem := elemType
+		if c.typeSubst != nil {
+			resolvedContainsElem = types.Substitute(resolvedContainsElem, c.typeSubst)
+		}
+		_, containsElemIsOpt := resolvedContainsElem.(*types.Optional)
+
+		savedContainsTarget := c.targetType
+		if containsElemIsOpt {
+			c.targetType = resolvedContainsElem
+		}
 		argVal := c.genCallArgExpr(e.Args[0].Value)
+		c.targetType = savedContainsTarget
+
+		if containsElemIsOpt {
+			argExprType := c.info.Types[e.Args[0].Value]
+			if c.typeSubst != nil && argExprType != nil {
+				argExprType = types.Substitute(argExprType, c.typeSubst)
+			}
+			if argExprType != types.TypNone && !types.Identical(argExprType, resolvedContainsElem) {
+				if st, ok := elemLLVM.(*irtypes.StructType); ok {
+					argVal = c.wrapOptional(argVal, st)
+				}
+			}
+		}
+
 		argAlloca := c.createEntryAlloca(elemLLVM)
-		// Zero-initialize before store to clear padding bytes for memcmp correctness
+		// Zero-initialize first to clear ALL bytes including struct padding.
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
-		c.block.NewStore(argVal, argAlloca)
+		// T0661: For Optional element types {i1, T}, store each field individually
+		// instead of using a full struct store. A full struct store of a value
+		// produced by insertvalue-from-undef carries undefined padding bytes (the
+		// 7 bytes between i1 and i64 for alignment) that overwrite the zeroinit.
+		// When push and contains execute in different functions, their separate
+		// LLVM optimization contexts may produce different undefined padding,
+		// causing memcmp to report inequality even when the logical values match.
+		// Field stores leave the zeroinit padding untouched, guaranteeing that
+		// both the vector element (from push) and the search argument have
+		// identical zero padding for all supported element types.
+		if containsElemIsOpt {
+			if st, ok := elemLLVM.(*irtypes.StructType); ok {
+				zero32 := constant.NewInt(irtypes.I32, 0)
+				one32 := constant.NewInt(irtypes.I32, 1)
+				i1Val := c.block.NewExtractValue(argVal, 0)
+				innerVal := c.block.NewExtractValue(argVal, 1)
+				f0Ptr := c.block.NewGetElementPtr(st, argAlloca, zero32, zero32)
+				f1Ptr := c.block.NewGetElementPtr(st, argAlloca, zero32, one32)
+				c.block.NewStore(i1Val, f0Ptr)
+				c.block.NewStore(innerVal, f1Ptr)
+			}
+		} else {
+			c.block.NewStore(argVal, argAlloca)
+		}
 		argPtr := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
-		// Use string equality for string elements
+		// Select the element comparison function:
+		// • Optional elements: field-by-field comparison (ignores padding bytes)
+		// • string elements: content equality via __promise_eq_string
+		// • all others: memcmp (eq_fn = null)
 		var eqFn value.Value
-		if extractNamed(elemType) == types.TypString {
+		if containsElemIsOpt {
+			// T0661: Use a custom Optional equality function that compares the i1
+			// presence flag and inner scalar value directly, bypassing memcmp.
+			// memcmp fails cross-function on WASM because O1 decomposes
+			// `store zeroinitializer` into per-field stores, leaving the 7 padding
+			// bytes between i1 and i64 uninitialized — different stack frames
+			// produce different garbage in those bytes → false inequality.
+			eqFn = c.getOrEmitOptContainsEqFn(elemLLVM)
+		} else if extractNamed(elemType) == types.TypString {
 			eqFn = c.block.NewBitCast(c.funcs["__promise_eq_string"], irtypes.I8Ptr)
 		} else {
 			eqFn = constant.NewNull(irtypes.I8Ptr)

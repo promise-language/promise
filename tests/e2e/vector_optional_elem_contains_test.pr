@@ -1,0 +1,106 @@
+// T0661: contains with a bare (non-optional) value into a Vector[T?] / T?[].
+//
+// Pre-fix, genVectorMethodCall's `contains` case generated the argument with
+// genCallArgExpr and stored the raw scalar straight into the {i1, T} element
+// alloca, panicking "store operands are not compatible: src=i64; dst={ i1, i64 }*".
+// `v.contains(none)` panicked similarly because c.targetType was never set so
+// genNoneLit returned the i1 0 "void optional fallback" instead of a zero
+// {i1,T} struct. This is the contains-side analog of T0658 (the push fix).
+// (1) Primary repro — bare int literal into int?[].
+test_contains_bare_int_into_optional_vector() `test {
+  int?[] v = [];
+  v.push(1);
+  v.push(2);
+  assert(v.contains(1), "contains 1");
+  assert(v.contains(2), "contains 2");
+  assert(!v.contains(3), "does not contain 3");
+}
+
+// (2) `v.contains(none)` — c.targetType makes genNoneLit emit a zero {i1,T}.
+test_contains_none_into_optional_vector() `test {
+  int?[] v = [];
+  v.push(none);
+  v.push(1);
+  assert(v.contains(none), "contains none");
+  assert(v.contains(1), "contains 1");
+}
+
+// (3) Bare value not in vector returns false.
+test_contains_bare_not_found_returns_false() `test {
+  int?[] v = [];
+  v.push(1);
+  v.push(2);
+  assert(!v.contains(99), "does not contain 99");
+  assert(!v.contains(none), "does not contain none");
+}
+
+// (4) Regression guard — already-typed int? arg must NOT double-wrap
+// (skipped via the !types.Identical predicate). This was the only working
+// case pre-fix; the new wrap predicate must preserve it.
+test_contains_explicit_optional_still_works() `test {
+  int? x = 5;
+  int? y = none;
+  int?[] v = [];
+  v.push(x);
+  v.push(y);
+  assert(v.contains(x), "contains x");
+  assert(v.contains(y), "contains none via y");
+}
+
+// (5) Other bare value-type element types: f64?, bool?, char?.
+test_contains_bare_f64_into_optional_vector() `test {
+  f64?[] v = [];
+  v.push(3.5);
+  v.push(none);
+  assert(v.contains(3.5), "contains 3.5");
+  assert(v.contains(none), "contains none");
+  assert(!v.contains(1.0), "does not contain 1.0");
+}
+
+test_contains_bare_bool_into_optional_vector() `test {
+  bool?[] v = [];
+  v.push(true);
+  v.push(none);
+  assert(v.contains(true), "contains true");
+  assert(!v.contains(false), "does not contain false");
+  assert(v.contains(none), "contains none");
+}
+
+test_contains_bare_char_into_optional_vector() `test {
+  char?[] v = [];
+  v.push('x');
+  v.push(none);
+  assert(v.contains('x'), "contains 'x'");
+  assert(!v.contains('y'), "does not contain 'y'");
+}
+
+// (6) Generic path — exercises the c.typeSubst substitution of
+// resolvedElem / argExprType inside the monomorphized body.
+_check_opt_t0661[T](T move x, T?[] v) bool {
+  return v.contains(x);
+}
+
+test_contains_bare_into_generic_optional_vector() `test {
+  int?[] v = [];
+  v.push(7);
+  v.push(none);
+  assert(_check_opt_t0661[int](7, v), "generic int: contains 7");
+  assert(!_check_opt_t0661[int](99, v), "generic int: does not contain 99");
+}
+
+// (7) Confirm that the T0658 push fix covers the filled path: Vector.filled
+// is implemented in Promise as a loop calling push, so the T0658 push fix
+// already applies. We exercise the same path by pushing bare int values
+// into int?[] in a loop — the same code path filled() uses internally.
+test_filled_bare_into_optional_vector_via_push_loop() `test {
+  int?[] v = [];
+  int i = 0;
+  int value = 42;
+  while i < 3 {
+    v.push(value);
+    i = i + 1;
+  }
+  assert(v.len == 3, "three elements pushed via loop");
+  assert(v.contains(42), "loop-filled vector contains 42");
+  assert(!v.contains(99), "loop-filled vector does not contain 99");
+}

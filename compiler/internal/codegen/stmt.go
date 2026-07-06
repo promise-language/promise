@@ -516,6 +516,7 @@ func isStringBorrowExpr(expr ast.Expr) bool {
 
 func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 	if block == nil {
+		c.blockValueOwnedResult = false // T1107
 		return nil
 	}
 	// T1029: a block value (if/match/handler arm body) is its own straight-line
@@ -532,6 +533,11 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.discardAliasArgPtrs = prevArgPtrs
 	}()
 	savedScopeLen := len(c.scopeBindings)
+	// T1107: track whether this block yields an owned heap value moved out of the
+	// block scope, so genIfExpr / genMatchArmValue can register the merge phi as an
+	// owned stmt temp. Reset here; set authoritatively at the normal-result path
+	// below (stays false for borrow / auto-propagate / value results).
+	blockOwned := false
 	var result value.Value
 	n := len(block.Stmts)
 	for i, stmt := range block.Stmts {
@@ -574,7 +580,20 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					// moved out of the block scope. Without this, scope cleanup would
 					// free the string while the outer scope still holds the pointer.
 					if ident, ok := es.Expr.(*ast.IdentExpr); ok {
+						// T1107: an owned-local ident moved out (had a live drop flag)
+						// transfers ownership to the block's caller.
+						if _, has := c.dropFlags[ident.Name]; has {
+							blockOwned = true
+						}
 						c.clearDropFlag(ident.Name)
+					}
+					// T1107: a live tracked stmt temp (clone()/call result, or a
+					// nested if/match phi tracked by trackMergeResultTemp) as the block
+					// result is an owned heap value the caller now owns.
+					if result != nil {
+						if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
+							blockOwned = true
+						}
 					}
 					// T0095: Claim string dup temps from block result expressions.
 					// Without this, a dup from e.g. `e.message` would be freed at
@@ -603,6 +622,16 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 			// both branches when the block is used as an expression.
 			if ifS, ok := stmt.(*ast.IfStmt); ok {
 				result = c.genIfStmtValue(ifS)
+				// T1206: a value-producing if in statement position registers its owned
+				// i8* phi as a tracked temp (genIfStmtValue → trackMergeResultTemp). When
+				// it does, the block yields an owned heap value moved out to the block's
+				// caller — mirror the ExprStmt path's blockOwned handling so genIfExpr /
+				// genMatchArmValue register the enclosing merge phi as owned too.
+				if result != nil {
+					if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
+						blockOwned = true
+					}
+				}
 				break
 			}
 		}
@@ -613,6 +642,7 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.emitCloseErrCheck(cap)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
+	c.blockValueOwnedResult = blockOwned // T1107
 	return result
 }
 
@@ -9804,7 +9834,8 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	// Then branch — capture value
 	c.block = thenBlock
 	thenVal := c.genBlockValue(s.Body)
-	c.claimStringTemp(thenVal) // T0073
+	thenOwned := c.blockValueOwnedResult // T1206: genBlockValue recorded ownership
+	c.claimStringTemp(thenVal)           // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -9813,11 +9844,20 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	// Else branch — capture value
 	c.block = elseBlock
 	var elseVal value.Value
+	elseOwned := false // T1206
 	switch e := s.Else.(type) {
 	case *ast.Block:
 		elseVal = c.genBlockValue(e)
+		elseOwned = c.blockValueOwnedResult
 	case *ast.IfStmt:
 		elseVal = c.genIfStmtValue(e)
+		// A recursive else-if returns a tracked owned temp when it transfers
+		// ownership; detect it before claimStringTemp neutralizes the flag.
+		if elseVal != nil {
+			if idx, ok := c.stmtTempMap[elseVal]; ok && idx >= 0 {
+				elseOwned = true
+			}
+		}
 	default:
 		c.genStmt(s.Else)
 	}
@@ -9855,9 +9895,62 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 		}
 	}
 	if len(incomings) > 0 {
-		return mergeBlock.NewPhi(incomings...)
+		phi := mergeBlock.NewPhi(incomings...)
+		// T1206: register an owned i8* phi as a statement temp (mirrors genIfExpr's
+		// trackMergeResultTemp) so a value-producing `if` in STATEMENT position —
+		// reached when it is the last statement of a value block, e.g. nested inside
+		// an outer `if a { if b { local } else { "x".clone() } } else { ... }` — frees
+		// its selected owned result exactly once. Without this, genIfStmtValue (the
+		// pre-T1107 lowering path) bypassed the ownership machinery entirely and the
+		// selected clone/owned-local leaked. A bound/return consumer claims the phi.
+		resultType := c.ifStmtValueResultType(s)
+		c.trackMergeResultTemp(phi, resultType, []matchArmInfo{
+			{end: thenEnd, owned: thenOwned},
+			{end: elseEnd, owned: elseOwned},
+		})
+		return phi
 	}
 
+	return nil
+}
+
+// ifStmtValueResultType resolves the sema result type of a value-producing
+// if-statement from its branch bodies' last-expression types (T1206). Used to
+// pick the owned-i8*-result drop function in trackMergeResultTemp. Prefers the
+// then-branch, then a Block else-branch, then recurses into an else-if chain —
+// so a shape where BOTH the then-body's last statement and the else are
+// themselves value-ifs (no direct ExprStmt to read the type from) still resolves
+// its owned-i8* result and gets a statement-end drop instead of leaking.
+func (c *Compiler) ifStmtValueResultType(s *ast.IfStmt) types.Type {
+	if t := c.blockResultType(s.Body); t != nil {
+		return t
+	}
+	switch e := s.Else.(type) {
+	case *ast.Block:
+		return c.blockResultType(e)
+	case *ast.IfStmt:
+		return c.ifStmtValueResultType(e)
+	}
+	return nil
+}
+
+// blockResultType returns the substituted sema type of a block's result value —
+// the last statement's expression when it is an ExprStmt, or (recursively) the
+// result type of a trailing value-producing if-statement, else nil (T1206).
+func (c *Compiler) blockResultType(block *ast.Block) types.Type {
+	if block == nil || len(block.Stmts) == 0 {
+		return nil
+	}
+	switch s := block.Stmts[len(block.Stmts)-1].(type) {
+	case *ast.ExprStmt:
+		t := c.info.Types[s.Expr]
+		if c.typeSubst != nil && t != nil {
+			t = types.Substitute(t, c.typeSubst)
+		}
+		return t
+	case *ast.IfStmt:
+		return c.ifStmtValueResultType(s)
+	}
 	return nil
 }
 

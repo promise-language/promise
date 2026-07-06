@@ -1,0 +1,169 @@
+// T1107: an owned match/if-expression result whose arms yield a native handle
+// (Ref/Arc, Weak, Channel, Mutex, Task) — not just string/Vector — passed to a
+// borrow param must be freed exactly once at the caller's statement end. Exercises
+// the non-string/Vector branches of ownedI8PtrResultDrop (AsArc / AsWeak /
+// AsChannel / AsMutex / AsTask). Zero-leak policy: the test runner FAILs any of
+// these with a leak.
+use std as _;
+
+type Holder {
+  int n;
+}
+
+// Each borrows its handle (plain param = shared read-only borrow); the caller
+// retains ownership of the selected arm's handle and must drop it.
+borrow_ref(Ref[int] a) Holder {
+  return Holder(n: a.borrow);
+}
+borrow_weak(Weak[int] w) Holder {
+  return Holder(n: 2);
+}
+borrow_chan(channel[int] ch) Holder {
+  return Holder(n: 5);
+}
+borrow_mutex(Mutex[int] m) Holder {
+  return Holder(n: 1);
+}
+borrow_task(task[int] t) Holder {
+  return Holder(n: 42);
+}
+
+compute(int x) int {
+  return x * 2;
+}
+
+// Ref[int] arms → owned Arc handle result, freed via the per-instantiation
+// Arc.drop (getOrCreateArcDrop path).
+ref_match_borrow() `test {
+  cond := true;
+  r := borrow_ref(match cond {
+    true => Ref[int](7), _ => Ref[int](9),
+  });
+  assert(r.n == 7, "ref match borrow true arm");
+
+  cond2 := false;
+  r2 := borrow_ref(match cond2 {
+    true => Ref[int](7), _ => Ref[int](9),
+  });
+  assert(r2.n == 9, "ref match borrow false arm");
+}
+
+ref_if_borrow() `test {
+  cond := false;
+  r := borrow_ref(if cond {
+    Ref[int](7)
+  } else {
+    Ref[int](9)
+  });
+  assert(r.n == 9, "ref if borrow else");
+}
+
+// Weak[int] arms (arc.downgrade()) → owned Weak handle result, freed via the
+// per-instantiation Weak.drop (ownedI8PtrResultDrop's AsWeak branch — the only
+// native-handle branch not otherwise reached). Each `downgrade()` bumps the weak
+// count; the selected arm's Weak must be dropped exactly once at statement end,
+// and the unselected arm's temporary Weak dropped too — else the backing Ref
+// never frees (its weak count never returns to zero) and the test LEAKs.
+weak_match_borrow() `test {
+  a := Ref[int](7);
+  b := Ref[int](9);
+  cond := true;
+  r := borrow_weak(match cond {
+    true => a.downgrade(), _ => b.downgrade(),
+  });
+  assert(r.n == 2, "weak match borrow true arm");
+
+  cond2 := false;
+  r2 := borrow_weak(match cond2 {
+    true => a.downgrade(), _ => b.downgrade(),
+  });
+  assert(r2.n == 2, "weak match borrow false arm");
+}
+
+weak_if_borrow() `test {
+  a := Ref[int](7);
+  b := Ref[int](9);
+  cond := false;
+  r := borrow_weak(if cond {
+    a.downgrade()
+  } else {
+    b.downgrade()
+  });
+  assert(r.n == 2, "weak if borrow else");
+}
+
+// channel[int] arms → owned Channel handle result, freed via the per-elem
+// Channel.drop (getOrCreateChannelDrop path).
+channel_match_borrow() `test {
+  cond := true;
+  r := borrow_chan(match cond {
+    true => channel[int](1), _ => channel[int](2),
+  });
+  assert(r.n == 5, "channel match borrow");
+}
+
+// Mutex[int] arms → owned Mutex handle result, freed via the per-inner
+// Mutex.drop (getOrCreateMutexDrop path).
+mutex_match_borrow() `test {
+  cond := true;
+  r := borrow_mutex(match cond {
+    true => Mutex[int](7), _ => Mutex[int](9),
+  });
+  assert(r.n == 1, "mutex match borrow");
+}
+
+mutex_if_borrow() `test {
+  cond := true;
+  r := borrow_mutex(if cond {
+    Mutex[int](7)
+  } else {
+    Mutex[int](9)
+  });
+  assert(r.n == 1, "mutex if borrow then");
+}
+
+// task[int] arms → owned Task handle result. Borrowed (not awaited), so the
+// caller drops the selected task at statement end (getOrCreateTaskDrop path).
+task_match_borrow() `test {
+  cond := true;
+  r := borrow_task(match cond {
+    true => go compute(3), _ => go compute(5),
+  });
+  assert(r.n == 42, "task match borrow");
+}
+
+// T1106/T1107 interaction: a match/if owned result passed DIRECTLY as a `go`-call
+// argument must NOT be registered as a caller statement-end temp
+// (suppressMergeResultTemp) — the go-arg machinery transfers ownership into the
+// goroutine frame. A caller drop would race the goroutine's async read. No leak,
+// no double-free, no crash.
+go_match_owned_arg() `test {
+  done := channel[bool](1);
+  cond := true;
+  go proc_str(match cond {
+    true => "abcdef".clone(), _ => "xy".clone(),
+  }, done);
+  _ := <-done;
+  assert(true, "go match owned arg: no leak/crash");
+
+  cond2 := false;
+  done2 := channel[bool](1);
+  go proc_str(if cond2 {
+    "abcdef".clone()
+  } else {
+    "xy".clone()
+  }, done2);
+  _ := <-done2;
+  assert(true, "go if owned arg: no leak/crash");
+}
+
+proc_str(string p, channel[bool] done) {
+  assert(p.len == 6 || p.len == 2, "proc_str len");
+  done.send(true);
+}
+
+// NOTE: the nested-conditional owned-local go-arg where the inner match/if is a
+// MIXED-ownership shape (owned-local ident + fresh clone) selecting the clone arm
+// was a residual gap in the T1107 fix (leaked 1 allocation, reproducible fully
+// synchronously) — tracked and fixed as T1206. It is covered by
+// tests/e2e/t1206_nested_mixed_borrow_temp.pr (see `go_arg_nested`).

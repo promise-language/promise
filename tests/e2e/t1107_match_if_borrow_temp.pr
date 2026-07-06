@@ -1,0 +1,169 @@
+// T1107: an owned match/if-expression result (all-owned arms) passed to a borrow
+// param — or discarded — must be freed exactly once at the caller's statement end.
+// Previously the phi result was never registered as an owned statement temp, so
+// the selected clone leaked. A bound / returned result still claims the phi (no
+// double free). Mirrors the elvis `?:` result-temp precedent (T0935/T0936).
+type Holder {
+  int n;
+}
+
+// Borrows its string argument — the caller retains ownership, so an owned
+// argument temp must be freed by the caller.
+borrow_len(string p) Holder {
+  return Holder(n: p.len);
+}
+
+// Borrows its vector argument.
+borrow_vlen(int[] v) Holder {
+  return Holder(n: v.len);
+}
+
+// The repro: match with both arms cloning → unconditionally owned string result
+// passed to a borrow param.
+match_string_borrow() `test {
+  cond := true;
+  r := borrow_len(match cond {
+    true => "abcdef".clone(), _ => "xy".clone(),
+  });
+  assert(r.n == 6, "match string borrow true arm");
+
+  cond2 := false;
+  r2 := borrow_len(match cond2 {
+    true => "abcdef".clone(), _ => "xy".clone(),
+  });
+  assert(r2.n == 2, "match string borrow false arm");
+}
+
+// Vector[int] arms → owned vector result passed to a borrow param.
+match_vector_borrow() `test {
+  cond := true;
+  r := borrow_vlen(match cond {
+    true => [1, 2, 3].clone(), _ => [9].clone(),
+  });
+  assert(r.n == 3, "match vector borrow");
+}
+
+// `if` expression with all-owned string arms → borrow param, both selections.
+if_string_borrow() `test {
+  cond := true;
+  r := borrow_len(if cond {
+    "abcdef".clone()
+  } else {
+    "xy".clone()
+  });
+  assert(r.n == 6, "if string borrow then");
+
+  cond2 := false;
+  r2 := borrow_len(if cond2 {
+    "abcdef".clone()
+  } else {
+    "xy".clone()
+  });
+  assert(r2.n == 2, "if string borrow else");
+}
+
+// Mixed arms: one arm clones (owned temp), the other returns an owned local ident
+// (its scope drop flag is cleared into the phi). Selecting either arm must free
+// exactly once with no double free.
+mixed_owned_arms() `test {
+  local := "owned-local".clone();
+  cond := true;
+  r := borrow_len(match cond {
+    true => "abcdef".clone(), _ => local,
+  });
+  assert(r.n == 6, "mixed selecting clone arm");
+}
+
+mixed_owned_arms_other() `test {
+  local := "owned-local".clone();
+  cond := false;
+  r := borrow_len(match cond {
+    true => "abcdef".clone(), _ => local,
+  });
+  assert(r.n == 11, "mixed selecting local arm");
+}
+
+// A bound direct result claims the phi — no double free, no leak.
+bind_both_owned() `test {
+  cond := true;
+  s := match cond {
+    true => "abcdef".clone(), _ => "xy".clone(),
+  };
+  assert(s.len == 6, "bound match result");
+}
+
+bind_if_both_owned() `test {
+  cond := false;
+  s := if cond {
+    "abcdef".clone()
+  } else {
+    "xy".clone()
+  };
+  assert(s.len == 2, "bound if result");
+}
+
+// Returning a match result from an owned-string-returning function — the return
+// claims the phi (no leak, no double free).
+pick(bool cond) string {
+  return match cond {
+    true => "abcdef".clone(), _ => "xy".clone(),
+  };
+}
+
+return_match_result() `test {
+  s := pick(true);
+  assert(s.len == 6, "returned match result");
+  t := pick(false);
+  assert(t.len == 2, "returned match result false");
+}
+
+// Nested match/if arms — the outer result is still an owned string.
+nested_match_if_borrow() `test {
+  a := true;
+  b := false;
+  r := borrow_len(match a {
+    true => if b {
+      "xy".clone()
+    } else {
+      "abcdef".clone()
+    },
+    _ => "zzz".clone(),
+  });
+  assert(r.n == 6, "nested match/if borrow");
+}
+
+// A discarded match-expression statement (result used nowhere) must free the
+// selected clone.
+discarded_match_stmt() `test {
+  cond := true;
+  match cond {
+    true => "abcdef".clone(), _ => "xy".clone(),
+  };
+  assert(true, "discarded match statement");
+}
+
+// Block-form match arms (braces) — genBlockValue claims the arm result internally,
+// so ownership is tracked via the blockValueOwnedResult flag, not the stmt-temp map.
+match_block_arms_borrow() `test {
+  cond := true;
+  r := borrow_len(match cond {
+    true => {
+      "abcdef".clone()
+    },
+    _ => {
+      "xy".clone()
+    },
+  });
+  assert(r.n == 6, "match block-arm borrow");
+}
+
+// A discarded `if`-expression statement with owned arms must also free the clone.
+discarded_if_stmt() `test {
+  cond := false;
+  if cond {
+    "abcdef".clone()
+  } else {
+    "xy".clone()
+  };
+  assert(true, "discarded if statement");
+}

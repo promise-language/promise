@@ -7802,7 +7802,8 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType, subjectDropFlag)
 
 		armVal := c.genMatchArmValue(arm, matchResultType)
-		c.claimStringTemp(armVal) // T0073: ownership transfers to match phi
+		armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
+		c.claimStringTemp(armVal)                              // T0073: ownership transfers to match phi
 
 		// B0242: Clear drop flags for dup'd bindings consumed by the arm result.
 		// When the arm body returns a dup'd binding's value (directly or via a
@@ -7848,7 +7849,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 			c.block.NewBr(mergeBlock)
 		}
 
-		arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+		arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
 	}
 
 	if defaultTarget == nil {
@@ -7867,9 +7868,10 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 
 // matchArmInfo tracks a match arm's result value and final block for PHI construction.
 type matchArmInfo struct {
-	val  value.Value
-	end  *ir.Block
-	hasV bool
+	val   value.Value
+	end   *ir.Block
+	hasV  bool
+	owned bool // T1107: arm transferred an owned i8* value into the phi
 }
 
 // genMatchArmValue generates a match arm's result value with the match's result
@@ -7958,7 +7960,9 @@ func (c *Compiler) buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo, resu
 		incomings = append(incomings, &ir.Incoming{X: v, Pred: a.end})
 	}
 	if len(incomings) > 0 {
-		return mergeBlock.NewPhi(incomings...)
+		phi := mergeBlock.NewPhi(incomings...)
+		c.trackMergeResultTemp(phi, resultType, arms) // T1107
+		return phi
 	}
 	return nil
 }
@@ -7976,29 +7980,30 @@ func (c *Compiler) clearMatchArmResultDropFlags(arm ast.MatchArm) {
 	}
 }
 
-// clearResultDropFlags recursively clears drop flags for identifiers in an
-// expression that will be consumed as a scope result (match arm, if branch, etc.).
+// clearResultDropFlags clears the drop flag for a DIRECT owned-local ident that
+// is a scope result (match arm / if branch), transferring its ownership to the
+// enclosing merge phi so the arm-scope cleanup does not double-free it.
+//
+// T1206: this deliberately does NOT recurse into a nested if/match sub-expression.
+// Since T1107, every nested if/match already self-manages its own result-position
+// idents: genBlockValue / genIfExpr / genMatchArmValue clear each owned-local's
+// drop flag PATH-CONDITIONALLY inside the branch that actually selects it, and
+// register the nested phi as a tracked owned temp. Recursing here would instead
+// emit an UNCONDITIONAL `store i1 false` for that ident in the OUTER merge block —
+// orphaning the local on the path where the nested conditional selected its other
+// (freshly-cloned) arm and never moved that local. The B0242 case
+// (`match … => if v>0 { k } else { "other" }`) stays correct because the inner if
+// clears `k` in its then-block regardless. For a bare owned-local ident arm
+// (`=> local`) the direct IdentExpr case below still runs, which is required.
 func (c *Compiler) clearResultDropFlags(expr ast.Expr) {
 	if expr == nil {
 		return
 	}
-	switch e := expr.(type) {
-	case *ast.IdentExpr:
+	if e, ok := expr.(*ast.IdentExpr); ok {
 		c.clearDropFlag(e.Name)
-	case *ast.IfExpr:
-		// Both branches may produce a result
-		c.clearBlockResultDropFlags(e.Then)
-		if e.Else != nil {
-			c.clearBlockResultDropFlags(e.Else)
-		}
-	case *ast.MatchExpr:
-		// Each arm may produce a result
-		for _, arm := range e.Arms {
-			c.clearMatchArmResultDropFlags(*arm)
-		}
 	}
-	// For other expression types (calls, binary ops, etc.), the consumption
-	// happens at inner call sites which already clear drop flags.
+	// Nested if/match sub-expressions self-manage their result idents (see above);
+	// calls/binary ops clear at their own inner sites.
 }
 
 // clearBlockResultDropFlags clears drop flags for identifiers in the last
@@ -8010,6 +8015,198 @@ func (c *Compiler) clearBlockResultDropFlags(block *ast.Block) {
 	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
 		c.clearResultDropFlags(es.Expr)
 	}
+}
+
+// exprResultTransfersOwnership reports whether an EXPRESSION-form match-arm /
+// if-branch result transfers ownership of an owned i8*-represented heap value
+// (string, Vector[T], native handle) into the merge phi (T1107). True when either
+// (a) the arm value is a live tracked statement temp (a clone()/call result, or a
+// nested if/match phi already registered by trackMergeResultTemp — its drop flag
+// is about to be claimed into the phi), or (b) the result expression is an
+// owned-local ident whose scope drop flag is live (about to be cleared by
+// clearMatchArmResultDropFlags). False for a borrowed param / field / .rodata
+// literal alias — the real owner keeps it, so the phi must borrow. Must be called
+// BEFORE claimStringTemp / clearMatchArmResultDropFlags neutralize those flags.
+// BLOCK-form arms are handled by the c.blockValueOwnedResult flag instead (their
+// result temp is already claimed inside genBlockValue by the time we get here).
+func (c *Compiler) exprResultTransfersOwnership(val value.Value, body ast.Expr) bool {
+	if val != nil {
+		if idx, ok := c.stmtTempMap[val]; ok && idx >= 0 {
+			return true
+		}
+	}
+	return c.resultTransfersOwnedFlag(body)
+}
+
+// matchArmTransfersOwnership reports whether a match arm transfers ownership of an
+// owned i8* value into the phi (T1107). Parallels clearMatchArmResultDropFlags. A
+// block arm consults blockValueOwnedResult (set by genBlockValue); an expression
+// arm inspects the live stmt temp / owned-local ident directly.
+func (c *Compiler) matchArmTransfersOwnership(arm ast.MatchArm, armVal value.Value) bool {
+	if arm.Block != nil {
+		return c.blockValueOwnedResult
+	}
+	return c.exprResultTransfersOwnership(armVal, arm.Body)
+}
+
+// resultTransfersOwnedFlag reports whether an expression used as a scope result
+// (match arm / if branch) is an owned-local ident (or nested match/if thereof)
+// whose scope drop flag is live — i.e. clearResultDropFlags would clear a real
+// flag, transferring ownership to the enclosing merge phi (T1107). Mirrors
+// clearResultDropFlags's structure exactly so the ownership bit and the flag clear
+// stay in agreement. A match-borrowed ident (no owned drop binding) does not
+// transfer ownership.
+func (c *Compiler) resultTransfersOwnedFlag(expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if c.matchBorrowedIdents != nil && c.matchBorrowedIdents[e.Name] {
+			return false
+		}
+		_, has := c.dropFlags[e.Name]
+		return has
+	case *ast.IfExpr:
+		return c.blockResultTransfersOwnedFlag(e.Then) ||
+			(e.Else != nil && c.blockResultTransfersOwnedFlag(e.Else))
+	case *ast.MatchExpr:
+		for _, arm := range e.Arms {
+			if c.matchArmResultTransfersOwnedFlag(*arm) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchArmResultTransfersOwnedFlag is the match-arm variant of
+// resultTransfersOwnedFlag (parallels clearMatchArmResultDropFlags).
+func (c *Compiler) matchArmResultTransfersOwnedFlag(arm ast.MatchArm) bool {
+	if arm.Body != nil {
+		return c.resultTransfersOwnedFlag(arm.Body)
+	}
+	return c.blockResultTransfersOwnedFlag(arm.Block)
+}
+
+// blockResultTransfersOwnedFlag is the block variant of resultTransfersOwnedFlag
+// (parallels clearBlockResultDropFlags).
+func (c *Compiler) blockResultTransfersOwnedFlag(block *ast.Block) bool {
+	if block == nil || len(block.Stmts) == 0 {
+		return false
+	}
+	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+		return c.resultTransfersOwnedFlag(es.Expr)
+	}
+	return false
+}
+
+// ownedI8PtrResultDrop resolves the drop function (and vector element type, if any)
+// for a match/if expression result represented as a bare i8* owned heap value
+// (T1107): string → promise_string_drop, Vector[T] → Vector.drop (+elem), and the
+// single-owner native handles Arc/Weak/Mutex/MutexGuard/Task/Channel → their
+// per-instantiation drop. Returns (nil, nil) for every other result type (value
+// structs, heap user types, refs) — those are not i8* and are handled elsewhere.
+// rt must already be substituted (typeSubst applied by the caller).
+func (c *Compiler) ownedI8PtrResultDrop(rt types.Type) (*ir.Func, types.Type) {
+	if rt == nil {
+		return nil, nil
+	}
+	named := extractNamed(rt)
+	if named == types.TypString {
+		return c.funcs["promise_string_drop"], nil
+	}
+	if elemType, ok := types.AsVector(rt); ok {
+		return c.funcs["Vector.drop"], elemType
+	}
+	if arcElem, ok := types.AsArc(rt); ok {
+		return c.getOrCreateArcDrop(arcElem), nil
+	}
+	if weakElem, ok := types.AsWeak(rt); ok {
+		return c.getOrCreateWeakDrop(weakElem), nil
+	}
+	if mutexElem, ok := types.AsMutex(rt); ok {
+		return c.getOrCreateMutexDrop(mutexElem), nil
+	}
+	if taskElem, ok := types.AsTask(rt); ok {
+		return c.getOrCreateTaskDrop(taskElem), nil
+	}
+	if _, ok := types.AsMutexGuard(rt); ok || named == types.TypMutexGuard {
+		return c.funcs["MutexGuard.drop"], nil
+	}
+	if chElem, ok := types.AsChannel(rt); ok && chElem != nil {
+		return c.getOrCreateChannelDrop(chElem), nil
+	}
+	return nil, nil
+}
+
+// trackMergeResultTemp registers a match/if expression phi result as an owned
+// statement temp with a per-path ownership flag (T1107), so an owned i8* result
+// (string, Vector[T], native handle) passed to a borrow parameter or discarded is
+// freed exactly once at the caller's statement end. Mirrors trackElvisResultTemp:
+// a parallel i1 phi over the same predecessors as the value phi, each incoming a
+// compile-time 1 iff that arm transferred an owned value (matchArmInfo.owned),
+// else 0. A consuming binding/return claims the phi by value identity, zeroing the
+// flag alloca — no double free. Value-struct / heap-user-type results (phi not
+// i8*) are skipped by the type guard, preserving their existing self-cleaning
+// heapTemps behavior. Free-function-only via the tempTrackingEnabled gate.
+func (c *Compiler) trackMergeResultTemp(result value.Value, resultType types.Type, arms []matchArmInfo) {
+	if !c.tempTrackingEnabled || result == nil || result.Type() != irtypes.I8Ptr {
+		return
+	}
+	// T1106/T1107: a match/if phi feeding a `go`-call argument is transferred into
+	// the goroutine frame by the go-arg machinery — a caller statement-end drop here
+	// would race the goroutine's async read (a use-after-free / double-free).
+	if c.suppressMergeResultTemp {
+		return
+	}
+	if c.entryBlock == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if resultType != nil && isRefType(resultType) {
+		return
+	}
+	if _, ok := c.stmtTempMap[result]; ok {
+		return
+	}
+	anyOwned := false
+	for _, a := range arms {
+		if a.owned {
+			anyOwned = true
+			break
+		}
+	}
+	if !anyOwned {
+		return
+	}
+	dropFn, elemType := c.ownedI8PtrResultDrop(resultType)
+	if dropFn == nil {
+		return
+	}
+	// Per-path ownership flag phi over the exact same predecessors the value phi
+	// used (arms that branch to mergeBlock), so the two phis stay consistent. Both
+	// sit at the top of mergeBlock (phis-first); appendStmtTemp's stores follow.
+	mergeBlock := c.block
+	var incomings []*ir.Incoming
+	for _, a := range arms {
+		if a.end == nil || a.end.Term == nil {
+			continue
+		}
+		br, ok := a.end.Term.(*ir.TermBr)
+		if !ok || br.Target != mergeBlock {
+			continue
+		}
+		flag := int64(0)
+		if a.owned {
+			flag = 1
+		}
+		incomings = append(incomings, &ir.Incoming{X: constant.NewInt(irtypes.I1, flag), Pred: a.end})
+	}
+	if len(incomings) == 0 {
+		return
+	}
+	flagPhi := mergeBlock.NewPhi(incomings...)
+	c.appendStmtTemp(result, dropFn, elemType, flagPhi)
 }
 
 // genValueMatch generates a match expression on a non-enum value using comparison chains.
@@ -8108,7 +8305,8 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 			c.block = armBlock
 			armVal := c.genMatchArmValue(arm, matchResultType)
-			c.claimStringTemp(armVal) // T0073
+			armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
+			c.claimStringTemp(armVal)                              // T0073
 			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 			// in the selected arm's block, so the clear is path-conditional: the
@@ -8119,7 +8317,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
 			}
-			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
 
 			c.block = nextBlock
 
@@ -8167,7 +8365,8 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			}
 
 			armVal := c.genMatchArmValue(arm, matchResultType)
-			c.claimStringTemp(armVal) // T0073
+			armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
+			c.claimStringTemp(armVal)                              // T0073
 			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 			// in the selected arm's block, so the clear is path-conditional: the
@@ -8178,7 +8377,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
 			}
-			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
 
 			// Restore any shadowed binding so later arms / merge don't see it.
 			if p.Binding != "_" {
@@ -8223,7 +8422,8 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 				c.block = armBlock
 				armVal := c.genMatchArmValue(arm, matchResultType)
-				c.claimStringTemp(armVal) // T0073
+				armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
+				c.claimStringTemp(armVal)                              // T0073
 				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 				// in the selected arm's block, so the clear is path-conditional: the
@@ -8234,14 +8434,15 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
 				}
-				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
 
 				c.block = nextBlock
 				// Guard failed — continue to next arm (don't return early)
 			} else {
 				// No guard — unconditional default arm
 				armVal := c.genMatchArmValue(arm, matchResultType)
-				c.claimStringTemp(armVal) // T0073
+				armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
+				c.claimStringTemp(armVal)                              // T0073
 				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 				// in the selected arm's block, so the clear is path-conditional: the
@@ -8252,7 +8453,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
 				}
-				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
 
 				// After an unguarded wildcard/name, no more arms need checking
 				c.block = mergeBlock
@@ -9358,7 +9559,8 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	c.targetType = ifResultType
 	thenVal := c.genBlockValue(e.Then)
 	c.targetType = savedTarget
-	c.claimStringTemp(thenVal) // T0073
+	thenOwned := c.blockValueOwnedResult // T1107: genBlockValue recorded ownership
+	c.claimStringTemp(thenVal)           // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -9371,7 +9573,8 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	c.targetType = ifResultType
 	elseVal := c.genBlockValue(e.Else)
 	c.targetType = savedTarget
-	c.claimStringTemp(elseVal) // T0073
+	elseOwned := c.blockValueOwnedResult // T1107: genBlockValue recorded ownership
+	c.claimStringTemp(elseVal)           // T0073
 	elseEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -9411,6 +9614,14 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 			&ir.Incoming{X: thenVal, Pred: thenEnd},
 			&ir.Incoming{X: elseVal, Pred: elseEnd},
 		)
+		// T1107: register an owned i8* phi (string/vector/native handle) as a
+		// statement temp so a borrow/discard consumer frees it exactly once. Reuses
+		// the match path via two synthetic arm records (only .end and .owned are
+		// consulted). A bound/return consumer claims the phi and neutralizes the flag.
+		c.trackMergeResultTemp(phi, ifResultType, []matchArmInfo{
+			{end: thenEnd, owned: thenOwned},
+			{end: elseEnd, owned: elseOwned},
+		})
 		return phi
 	}
 
@@ -15549,7 +15760,12 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		savedHeap := len(c.heapTemps)
 		savedStmt := len(c.stmtTemps)
 		savedArgEnum := len(c.enumCtorTemps)
+		// T1106/T1107: don't register a top-level match/if phi arg as a caller stmt
+		// temp — the go-arg machinery below transfers it into the goroutine frame.
+		savedSuppress := c.suppressMergeResultTemp
+		c.suppressMergeResultTemp = true
 		v := c.genCallArgExpr(arg.Value)
+		c.suppressMergeResultTemp = savedSuppress
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
 		argTypes = append(argTypes, c.info.Types[arg.Value])

@@ -1,0 +1,336 @@
+// T1206: residual gap in T1107. An outer match/if whose selected arm is itself a
+// nested mixed-ownership conditional (one owned-local ident + one fresh `clone()`
+// temp — BOTH inner arms owned) leaked 1 allocation when the nested conditional
+// selected the clone arm and the outer result was passed to a borrow parameter (or
+// discarded). Two root causes were fixed:
+//   1. clearResultDropFlags recursed into the nested conditional and emitted an
+//      UNCONDITIONAL drop-flag clear for the owned-local in the outer merge block,
+//      orphaning the local on the path where the nested conditional cloned instead
+//      (the local was never actually moved). Since T1107 the nested conditional
+//      already clears its result idents path-conditionally, so the recursion is
+//      removed.
+//   2. A value-producing `if` in STATEMENT position (nested as a block's last
+//      statement, e.g. `if a { if b { local } else { "x".clone() } } else {...}`)
+//      was lowered by genIfStmtValue, the pre-T1107 path that never registered its
+//      owned phi as a stmt temp — so its selected owned result leaked. It now
+//      mirrors genIfExpr's trackMergeResultTemp registration.
+// Every function here previously LEAKED (or, for the owned-local selections, must
+// stay leak-free with no double free). See also T1208 for the distinct borrowed
+// inner-arm use-after-free (out of scope here).
+type Holder {
+  int n;
+}
+
+borrow_len(string p) Holder {
+  return Holder(n: p.len);
+}
+
+borrow_vlen(int[] v) Holder {
+  return Holder(n: v.len);
+}
+
+// The documented repro: outer match wraps a mixed inner `if`; the nested `if`
+// selects the fresh-clone arm. The owned-local (`local`) must be freed exactly once
+// at scope end and the selected clone freed once at statement end.
+match_if_clone_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  r := borrow_len(match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 5, "match wraps if, clone arm");
+}
+
+// Same shape, nested `if` selects the owned-local arm.
+match_if_local_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := true;
+  r := borrow_len(match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 5, "match wraps if, local arm");
+}
+
+// Outer match wraps a mixed inner match; nested match selects the fresh-clone arm.
+match_match_clone_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  r := borrow_len(match a {
+    true => match b {
+      true => local, _ => "world".clone(),
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 5, "match wraps match, clone arm");
+}
+
+// Outer match wraps a mixed inner match; nested match selects the owned-local arm.
+match_match_local_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := true;
+  r := borrow_len(match a {
+    true => match b {
+      true => local, _ => "world".clone(),
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 5, "match wraps match, local arm");
+}
+
+// Outer selects the OTHER arm — the nested conditional is not evaluated at all; the
+// owned-local must still be freed exactly once.
+match_other_arm() `test {
+  local := "hello".clone();
+  a := false;
+  b := false;
+  r := borrow_len(match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 2, "outer other arm");
+}
+
+// Outer `if` wraps a mixed inner `if` (the inner if is in STATEMENT position →
+// genIfStmtValue). Clone arm selected.
+if_if_clone_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  r := borrow_len(if a {
+    if b {
+      local
+    } else {
+      "world".clone()
+    }
+  } else {
+    "zz".clone()
+  });
+  assert(r.n == 5, "if wraps if, clone arm");
+}
+
+// Outer `if` wraps a mixed inner `if`; inner selects the owned-local arm.
+if_if_local_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := true;
+  r := borrow_len(if a {
+    if b {
+      local
+    } else {
+      "world".clone()
+    }
+  } else {
+    "zz".clone()
+  });
+  assert(r.n == 5, "if wraps if, local arm");
+}
+
+// Outer `if` wraps a mixed inner `match`. Clone arm selected.
+if_match_clone_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  r := borrow_len(if a {
+    match b {
+      true => local, _ => "world".clone(),
+    }
+  } else {
+    "zz".clone()
+  });
+  assert(r.n == 5, "if wraps match, clone arm");
+}
+
+// All-clone inner `if` in statement position (base T1107 shape reached via
+// genIfStmtValue) — must not leak the selected clone.
+if_if_all_clone() `test {
+  a := true;
+  b := false;
+  r := borrow_len(if a {
+    if b {
+      "hi".clone()
+    } else {
+      "world".clone()
+    }
+  } else {
+    "zz".clone()
+  });
+  assert(r.n == 5, "if wraps if, all clone");
+}
+
+// Vector[int] element instead of string (Vector.drop path).
+match_if_vector() `test {
+  local := [1, 2, 3].clone();
+  a := true;
+  b := false;
+  r := borrow_vlen(match a {
+    true => if b {
+      local
+    } else {
+      [9, 9, 9, 9].clone()
+    },
+    _ => [0].clone(),
+  });
+  assert(r.n == 4, "match wraps if, vector clone arm");
+}
+
+// Three-level nesting: match wraps if wraps match; the deepest arm clones.
+deep_nested() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  d := false;
+  r := borrow_len(match a {
+    true => if b {
+      local
+    } else {
+      match d {
+        true => "x".clone(), _ => "world".clone(),
+      }
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 5, "three-level nested clone arm");
+}
+
+// Bound consumer claims the phi — no double free, no leak (clone arm).
+bound_clone_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  s := match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  };
+  assert(s.len == 5, "bound clone arm");
+}
+
+// Bound consumer, owned-local arm.
+bound_local_arm() `test {
+  local := "hello".clone();
+  a := true;
+  b := true;
+  s := match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  };
+  assert(s.len == 5, "bound local arm");
+}
+
+// Return position — the return claims the phi.
+pick(bool a, bool b) string {
+  local := "hello".clone();
+  return match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  };
+}
+
+return_nested() `test {
+  x := pick(true, false);
+  assert(x.len == 5, "returned clone arm");
+  y := pick(true, true);
+  assert(y.len == 5, "returned local arm");
+  z := pick(false, false);
+  assert(z.len == 2, "returned other arm");
+}
+
+// Discarded statement — the selected clone (and the unselected owned-local) must
+// each be freed exactly once.
+discarded_nested() `test {
+  local := "hello".clone();
+  a := true;
+  b := false;
+  match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  };
+  assert(true, "discarded nested statement");
+}
+
+// Statement-position value-`if` whose result type can only be resolved by
+// recursing through the branch shape: the then-body's LAST statement is itself a
+// nested value-if (not a direct expression statement) AND the else is an else-if
+// chain (an if-statement, not a block). ifStmtValueResultType must recurse into
+// both to resolve the owned-string result type; otherwise trackMergeResultTemp
+// silently skips registration and the selected clone leaks. (Found while reviewing
+// T1206 — a residual gap of the same family.)
+resolve_type_recursively() `test {
+  a := true;
+  b := false;
+  c := true;
+  d := false;
+  r := borrow_len(match a {
+    true => {
+      y := 1;
+      if b {
+        z := 2;
+        if d {
+          "hi".clone()
+        } else {
+          "world".clone()
+        }
+      } else if c {
+        "zz".clone()
+      } else {
+        "qq".clone()
+      }
+    },
+    _ => "other".clone(),
+  });
+  assert(r.n == 2, "recursive result-type resolution, else-if clone arm");
+}
+
+// `go`-call argument: the outer match result is transferred into the goroutine by
+// the T1106 go-arg machinery (trackMergeResultTemp suppressed). The owned-local
+// must still be freed exactly once at the caller — the orphaning clear that this
+// bug removed was independent of the suppression path.
+go_arg_nested() `test {
+  ch := channel[int](1);
+  local := "hello".clone();
+  a := true;
+  b := false;
+  go borrow_len(match a {
+    true => if b {
+      local
+    } else {
+      "world".clone()
+    },
+    _ => "zz".clone(),
+  });
+  ch.send(1);
+  _ := <-ch;
+}

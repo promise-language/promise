@@ -121,6 +121,17 @@ func expectNoErrors(t *testing.T, errs []error) {
 	}
 }
 
+// expectNoErrorContaining fails if any error contains substr.
+func expectNoErrorContaining(t *testing.T, errs []error, substr string) {
+	t.Helper()
+	for _, e := range errs {
+		if strings.Contains(e.Error(), substr) {
+			t.Errorf("did not expect error containing %q, got %v", substr, errs)
+			return
+		}
+	}
+}
+
 func assertType(t *testing.T, info *Info, typ types.Type, expected string) {
 	t.Helper()
 	if typ == nil {
@@ -19830,4 +19841,88 @@ func TestT0628_EnumNestedOptionalTupleRejected(t *testing.T) {
 	errs := checkErrs(t, `enum E { V((E?, int) x) } main() {}`)
 	expectError(t, errs, "recursive enum E")
 	expectError(t, errs, "field 'x'")
+}
+
+// TestT1168_BrokenFieldNoCascade: a field whose declared type fails to resolve
+// (`set` has no lowercase shorthand) must not cascade into misleading
+// "no field or method" errors at each member-access site. The primary
+// diagnostic (undefined type) is preserved.
+func TestT1168_BrokenFieldNoCascade(t *testing.T) {
+	errs := checkErrs(t, `
+		type SetHolder { set[int] s; }
+		main() {
+			SetHolder h = SetHolder();
+			h.s.add(10);
+			h.s = SetHolder();
+		}
+	`)
+	expectError(t, errs, "undefined type: set")
+	expectNoErrorContaining(t, errs, "no field or method s")
+}
+
+// TestT1168_BrokenFieldGenericOwnerNoCascade: same suppression on the generic
+// (Instance) member-resolution path.
+func TestT1168_BrokenFieldGenericOwnerNoCascade(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { set[int] s; T val; }
+		main() {
+			Box[int] b = Box[int](val: 1);
+			b.s.add(10);
+		}
+	`)
+	expectError(t, errs, "undefined type: set")
+	expectNoErrorContaining(t, errs, "no field or method s")
+}
+
+// TestT1168_BrokenFieldOptionalChainNoCascade: same suppression on the
+// optional-chaining member path (`x?.field`) for a non-generic owner.
+func TestT1168_BrokenFieldOptionalChainNoCascade(t *testing.T) {
+	errs := checkErrs(t, `
+		type H { set[int] s; }
+		main() {
+			H? h = H();
+			x := h?.s;
+		}
+	`)
+	expectError(t, errs, "undefined type: set")
+	expectNoErrorContaining(t, errs, "no field or method s")
+}
+
+// TestT1168_GenuinelyMissingFieldStillErrors: the suppression is scoped to
+// broken-typed fields only — a genuinely absent field still reports.
+func TestT1168_GenuinelyMissingFieldStillErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		main() {
+			Foo f = Foo(x: 1);
+			f.nope;
+		}
+	`)
+	expectError(t, errs, "no field or method nope")
+}
+
+// TestT1168_GenuinelyMissingFieldGenericOwnerStillErrors: the suppression must
+// not swallow a genuinely-missing field on the generic (Instance) member path.
+func TestT1168_GenuinelyMissingFieldGenericOwnerStillErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T val; }
+		main() {
+			Box[int] b = Box[int](val: 1);
+			b.nope;
+		}
+	`)
+	expectError(t, errs, "no field or method nope")
+}
+
+// TestT1168_GenuinelyMissingFieldOptionalChainStillErrors: the suppression must
+// not swallow a genuinely-missing field on the optional-chain member path.
+func TestT1168_GenuinelyMissingFieldOptionalChainStillErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		main() {
+			Foo? f = Foo(x: 1);
+			y := f?.nope;
+		}
+	`)
+	expectError(t, errs, "no field or method nope")
 }

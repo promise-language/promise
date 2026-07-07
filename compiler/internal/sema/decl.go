@@ -598,6 +598,11 @@ func containsRef(typ types.Type) bool {
 func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	typ := c.resolveType(fd.Type)
 	if typ == nil {
+		// T1168: the field's declared type failed to resolve (resolveType already
+		// emitted the diagnostic). Record the field name so subsequent member
+		// accesses are suppressed rather than cascading into misleading
+		// "type X has no field or method <name>" errors.
+		c.recordBrokenField(named, fd.Name)
 		return
 	}
 	// B0034: reject reference-typed fields until lifetime tracking is implemented

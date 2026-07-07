@@ -12,33 +12,53 @@ type Checker struct {
 	file               *ast.File
 	info               *Info
 	errors             []error
-	isUniverseProvider bool                    // auto-detected: true when this file provides universe type implementations (std module)
-	globScope          *types.Scope            // glob-import scope (child of Universe, parent of fileScope)
-	fileScope          *types.Scope            // file-level scope (child of globScope, holds user declarations)
-	scope              *types.Scope            // current scope during traversal
-	curFunc            *types.Signature        // current function being checked (for return/raise)
-	curFuncObj         *types.Func             // current function object (for clone-requirement recording, T0616)
-	curMethodObj       *types.Method           // current method object (for clone-requirement recording, T0616)
-	curType            *types.Named            // current type being defined/checked (for Self resolution)
-	inNewBody          bool                    // true when checking a new() constructor body
-	inFactoryBody      bool                    // true when checking a `factory method body
-	factoryLocals      map[string]bool         // variables initialized from constructor calls in factory body
-	inLoop             int                     // nesting depth of loop constructs
-	lambdaDepth        int                     // nesting depth of lambdas (0 = not in lambda)
-	lambdaCaptures     map[string]*CapturedVar // current lambda's captured vars (by name)
-	lambdaScope        *types.Scope            // scope at lambda definition site (capture boundary)
-	lambdaMove         bool                    // true if current lambda uses `move` keyword
-	typeHint           types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
-	sliceTypeAllowed   bool                    // T0685: bare `T[]` (SliceTypeExpr) is a type ref, not a value — only legitimate as a CallExpr.Callee (`int[]()`) or MemberExpr.Target (`int[].filled(...)`); snapshot/cleared at checkExpr entry like typeHint, granted by the two trusted call sites
-	inUnaryNeg         bool                    // true when checking operand of unary negation (for signed suffix range check)
-	inGenerator        bool                    // true when checking a generator function body
-	generatorElemType  types.Type              // T from stream[T] or Iterator[T] return type
-	yieldFound         bool                    // true if at least one yield seen in current generator func
-	modules            []*types.Module         // all modules from use declarations
-	moduleScopes       map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
-	target             TargetInfo              // compile target for `target(cond)` filtering (zero = no filtering)
-	pendingNarrowings  []NarrowedVar           // post-divergence narrowings to apply before next statement
-	narrowedVariants   map[string]*IsNarrowing // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
+	isUniverseProvider bool                             // auto-detected: true when this file provides universe type implementations (std module)
+	globScope          *types.Scope                     // glob-import scope (child of Universe, parent of fileScope)
+	fileScope          *types.Scope                     // file-level scope (child of globScope, holds user declarations)
+	scope              *types.Scope                     // current scope during traversal
+	curFunc            *types.Signature                 // current function being checked (for return/raise)
+	curFuncObj         *types.Func                      // current function object (for clone-requirement recording, T0616)
+	curMethodObj       *types.Method                    // current method object (for clone-requirement recording, T0616)
+	curType            *types.Named                     // current type being defined/checked (for Self resolution)
+	inNewBody          bool                             // true when checking a new() constructor body
+	inFactoryBody      bool                             // true when checking a `factory method body
+	factoryLocals      map[string]bool                  // variables initialized from constructor calls in factory body
+	inLoop             int                              // nesting depth of loop constructs
+	lambdaDepth        int                              // nesting depth of lambdas (0 = not in lambda)
+	lambdaCaptures     map[string]*CapturedVar          // current lambda's captured vars (by name)
+	lambdaScope        *types.Scope                     // scope at lambda definition site (capture boundary)
+	lambdaMove         bool                             // true if current lambda uses `move` keyword
+	typeHint           types.Type                       // expected type for numeric literal adaptation (propagated through arithmetic)
+	sliceTypeAllowed   bool                             // T0685: bare `T[]` (SliceTypeExpr) is a type ref, not a value — only legitimate as a CallExpr.Callee (`int[]()`) or MemberExpr.Target (`int[].filled(...)`); snapshot/cleared at checkExpr entry like typeHint, granted by the two trusted call sites
+	inUnaryNeg         bool                             // true when checking operand of unary negation (for signed suffix range check)
+	inGenerator        bool                             // true when checking a generator function body
+	generatorElemType  types.Type                       // T from stream[T] or Iterator[T] return type
+	yieldFound         bool                             // true if at least one yield seen in current generator func
+	modules            []*types.Module                  // all modules from use declarations
+	moduleScopes       map[string]*types.Scope          // pre-loaded module scopes (catalog name or path → scope)
+	target             TargetInfo                       // compile target for `target(cond)` filtering (zero = no filtering)
+	pendingNarrowings  []NarrowedVar                    // post-divergence narrowings to apply before next statement
+	narrowedVariants   map[string]*IsNarrowing          // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
+	brokenFields       map[*types.Named]map[string]bool // T1168: fields whose declared type failed to resolve; member accesses to them are suppressed instead of cascading into "no field or method" errors
+}
+
+// recordBrokenField notes that named.name had an unresolvable declared type (an
+// error was already emitted). Member accesses to it are then suppressed by
+// isBrokenField rather than emitting a misleading "no field or method" error.
+func (c *Checker) recordBrokenField(named *types.Named, name string) {
+	if c.brokenFields == nil {
+		c.brokenFields = make(map[*types.Named]map[string]bool)
+	}
+	if c.brokenFields[named] == nil {
+		c.brokenFields[named] = make(map[string]bool)
+	}
+	c.brokenFields[named][name] = true
+}
+
+// isBrokenField reports whether named.name was recorded as having an
+// unresolvable declared type.
+func (c *Checker) isBrokenField(named *types.Named, name string) bool {
+	return c.brokenFields[named] != nil && c.brokenFields[named][name]
 }
 
 // selfType returns the current type as Self would resolve:

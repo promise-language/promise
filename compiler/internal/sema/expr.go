@@ -1562,6 +1562,11 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			}
 			return types.Substitute(m.Sig(), parentSubst)
 		}
+		// T1168: suppress the cascade when the field exists but its declared type
+		// was unresolvable — the type error was already reported.
+		if c.isBrokenField(t, e.Field) {
+			return nil
+		}
 		c.errorf(e.Pos(), "type %s has no field or method %s", t, e.Field)
 		return nil
 
@@ -1782,6 +1787,11 @@ func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.
 				})
 			}
 			return types.Substitute(m.Sig(), subst)
+		}
+		// T1168: suppress the cascade when the field exists but its declared type
+		// was unresolvable — the type error was already reported.
+		if c.isBrokenField(origin, name) {
+			return nil
 		}
 		c.errorf(pos, "type %s has no field or method %s", inst, name)
 		return nil
@@ -2695,6 +2705,11 @@ func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
 			return types.NewOptional(m.Sig())
+		}
+		// T1168: suppress the cascade when the field exists but its declared type
+		// was unresolvable — the type error was already reported.
+		if c.isBrokenField(t, e.Field) {
+			return nil
 		}
 		c.errorf(e.Pos(), "type %s has no field or method %s", t, e.Field)
 		return nil

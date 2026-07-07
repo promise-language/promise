@@ -259,13 +259,26 @@ func listHashed(dir string) (map[string]int64, error) {
 	return out, nil
 }
 
+// stagingLockName is the sentinel file a live Resolver flocks inside its
+// .fetch-tmp-* staging dir for the dir's whole lifetime. SweepStagingResidue
+// probes this lock and skips any staging dir a live resolver still owns, so a
+// concurrent `doctor --repair` (or another install's start-of-run sweep) cannot
+// delete an actively-prefetching resolver's dir between its per-blob CAS locks
+// (T1186). The OS releases the flock on process death, so a crashed resolver's
+// dir is still reaped.
+const stagingLockName = ".lock"
+
 // SweepStagingResidue removes in-flight staging temporaries left by a crashed or
 // interrupted install/fetch: non-hash entries in blobs/sha256 and archives/sha256
 // (".stage-*.tmp") and ".fetch-tmp-*" scratch dirs under the CAS root. Committed
 // entries are 64-char hex (isHexHash) and are never touched, so this is safe.
-// The caller MUST hold Store.Lock(). Returns the count removed (best-effort;
-// individual remove errors other than NotExist are returned, but the sweep
-// continues past them). quarantine/, blobs.refs, and *.lock are never touched.
+// A ".fetch-tmp-*" dir whose stagingLockName sentinel is currently flocked by a
+// live cross-process Resolver is skipped (T1186); every other staging dir —
+// including pre-T1186 dirs with no sentinel, and dirs left by a crashed resolver
+// — is reaped. The caller MUST hold Store.Lock(). Returns the count removed
+// (best-effort; individual remove errors other than NotExist are returned, but
+// the sweep continues past them). quarantine/, blobs.refs, and *.lock are never
+// touched.
 func (s *Store) SweepStagingResidue() (int, error) {
 	removed := 0
 	var firstErr error
@@ -310,7 +323,20 @@ func (s *Store) SweepStagingResidue() (int, error) {
 		if !strings.HasPrefix(e.Name(), ".fetch-tmp-") {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(s.root, e.Name())); err != nil && !os.IsNotExist(err) {
+		dirPath := filepath.Join(s.root, e.Name())
+		// A live resolver holds an exclusive flock on the dir's sentinel for its
+		// whole lifetime (T1186). tryLock creates the sentinel if absent (so
+		// pre-T1186 and crashed-resolver dirs, having no live holder, are still
+		// reaped) and reports contention without blocking. If it errors (unusual),
+		// fall through to attempt removal — conservative, matching prior behavior.
+		fl := newFileLock(filepath.Join(dirPath, stagingLockName))
+		locked, lerr := fl.tryLock()
+		if lerr == nil && !locked {
+			fl.unlock() // release the opened handle; a live resolver owns this dir — skip it
+			continue
+		}
+		fl.unlock() // release before RemoveAll (Windows can't delete an open file)
+		if err := os.RemoveAll(dirPath); err != nil && !os.IsNotExist(err) {
 			if firstErr == nil {
 				firstErr = err
 			}

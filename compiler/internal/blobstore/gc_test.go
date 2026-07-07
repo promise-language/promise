@@ -475,6 +475,165 @@ func TestSweepStagingResidueReturnsRemoveError(t *testing.T) {
 	}
 }
 
+// A live cross-process Resolver holds an exclusive flock on its staging dir's
+// .lock sentinel (T1186). SweepStagingResidue must skip that dir — not count it,
+// not delete it — so a concurrent doctor --repair cannot pull the dir out from
+// under an actively-prefetching resolver. Once the lock is released, the same
+// sweep reaps it normally.
+func TestSweepStagingResidueSkipsLockedStagingDir(t *testing.T) {
+	_, s := homeStore(t)
+	blob := seedBlob(t, s, "committed-blob") // must survive both sweeps
+
+	// A live resolver's staging dir: holds an exclusive flock on its sentinel.
+	live := filepath.Join(s.Root(), ".fetch-tmp-live")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held := newFileLock(filepath.Join(live, stagingLockName))
+	if ok, err := held.tryLock(); err != nil || !ok {
+		t.Fatalf("tryLock on live staging dir: ok=%v err=%v", ok, err)
+	}
+
+	n, err := s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("SweepStagingResidue: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("locked staging dir must not be counted, got %d removed", n)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("locked staging dir was deleted: %v", err)
+	}
+	if _, err := os.Stat(s.BlobPath(blob)); err != nil {
+		t.Errorf("committed blob removed: %v", err)
+	}
+
+	// Resolver done: release the flock, then the dir is ordinary residue.
+	if err := held.unlock(); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	n, err = s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("SweepStagingResidue (after unlock): %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected the now-unlocked staging dir removed (1), got %d", n)
+	}
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Error("unlocked staging dir survived the sweep")
+	}
+	if _, err := os.Stat(s.BlobPath(blob)); err != nil {
+		t.Errorf("committed blob removed by second sweep: %v", err)
+	}
+}
+
+// A .fetch-tmp-* dir with no .lock sentinel is the pre-T1186 / crashed-resolver
+// shape: no live holder, so it must still be reaped (the OS-released-on-death
+// guarantee routes crash recovery through this path). tryLock creates the
+// sentinel, acquires it uncontended, and the dir is removed.
+func TestSweepStagingResidueRemovesUnlockedStagingDir(t *testing.T) {
+	_, s := homeStore(t)
+	stale := filepath.Join(s.Root(), ".fetch-tmp-crashed")
+	if err := os.MkdirAll(filepath.Join(stale, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("SweepStagingResidue: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 unlocked staging dir removed, got %d", n)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("unlocked (crashed-resolver) staging dir survived the sweep")
+	}
+}
+
+// End-to-end T1186: a resolver's live staging dir (created by ensureTmp) carries
+// a flocked .lock sentinel that a concurrent SweepStagingResidue leaves intact,
+// keeping r.tmpDir valid for the resolver's next Resolve; Close then releases the
+// lock and removes the dir, leaking nothing.
+func TestResolverStagingDirSurvivesConcurrentSweep(t *testing.T) {
+	_, s := homeStore(t)
+	if err := os.MkdirAll(s.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := NewResolver(s, &Manifest{})
+	defer r.Close()
+	if err := r.ensureTmp(); err != nil {
+		t.Fatalf("ensureTmp: %v", err)
+	}
+	if r.tmpDir == "" {
+		t.Fatal("ensureTmp did not set tmpDir")
+	}
+	if _, err := os.Stat(filepath.Join(r.tmpDir, stagingLockName)); err != nil {
+		t.Errorf("staging .lock sentinel missing: %v", err)
+	}
+
+	// ensureTmp is idempotent: the dir + flock persist across the resolver's many
+	// per-blob Resolve calls (the exact lifetime the T1186 race exploited). A
+	// second call must reuse the same dir and lock handle, not re-flock.
+	dir0, lock0 := r.tmpDir, r.tmpLock
+	if err := r.ensureTmp(); err != nil {
+		t.Fatalf("ensureTmp (second call): %v", err)
+	}
+	if r.tmpDir != dir0 || r.tmpLock != lock0 {
+		t.Error("second ensureTmp did not reuse the existing staging dir/lock")
+	}
+
+	n, err := s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("SweepStagingResidue: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("concurrent sweep must skip the live resolver dir, got %d removed", n)
+	}
+	if _, err := os.Stat(r.tmpDir); err != nil {
+		t.Errorf("live resolver staging dir was deleted by concurrent sweep: %v", err)
+	}
+
+	saved := r.tmpDir
+	r.Close()
+	if _, err := os.Stat(saved); !os.IsNotExist(err) {
+		t.Error("Close left the staging dir behind")
+	}
+	if r.tmpDir != "" || r.tmpLock != nil {
+		t.Error("Close did not reset tmpDir/tmpLock")
+	}
+}
+
+// A .fetch-tmp-* entry that is a regular FILE (not a dir) can never be a live
+// resolver's staging dir. Probing its sentinel path opens <file>/.lock, which
+// fails with ENOTDIR — the "unusual" tryLock-errors branch (T1186). The sweep
+// must fall through conservatively and still reap the entry, exactly as pre-
+// T1186 removal did. Guards the lock-probe against regressing into a skip.
+func TestSweepStagingResidueReapsPrefixedFile(t *testing.T) {
+	_, s := homeStore(t)
+	blob := seedBlob(t, s, "committed-blob") // must survive the sweep
+	if err := os.MkdirAll(s.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A plain file (not a dir) carrying the staging prefix. Opening its .lock
+	// sentinel path => ENOTDIR => tryLock returns a non-nil error.
+	stray := filepath.Join(s.Root(), ".fetch-tmp-strayfile")
+	if err := os.WriteFile(stray, []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.SweepStagingResidue()
+	if err != nil {
+		t.Fatalf("SweepStagingResidue: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected the prefixed file reaped (1), got %d", n)
+	}
+	if _, err := os.Stat(stray); !os.IsNotExist(err) {
+		t.Error("prefixed regular file survived the sweep")
+	}
+	if _, err := os.Stat(s.BlobPath(blob)); err != nil {
+		t.Errorf("committed blob removed: %v", err)
+	}
+}
+
 // ListBlobs ignores in-flight staging residue (non-hex names).
 func TestListBlobsIgnoresTempResidue(t *testing.T) {
 	_, s := homeStore(t)

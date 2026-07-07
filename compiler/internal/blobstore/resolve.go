@@ -84,6 +84,12 @@ type Resolver struct {
 
 	tmpDir string // staging dir on the CAS filesystem (rename is atomic)
 
+	// tmpLock is an exclusive flock on <tmpDir>/.lock, held for the whole Resolver
+	// lifetime. SweepStagingResidue probes it and skips a live resolver's staging
+	// dir, so a concurrent doctor --repair cannot delete tmpDir in the gap between
+	// this resolver's per-blob CAS locks (T1186).
+	tmpLock *fileLock
+
 	// progress, when non-nil, receives streaming network-download events for user
 	// feedback (set via SetProgress; nil = silent). Only the wire transfer is
 	// reported — local decompression and archive extraction are not.
@@ -177,13 +183,28 @@ func (r *Resolver) ensureTmp() error {
 	if err != nil {
 		return err
 	}
+	// Mark the dir alive by flocking its sentinel for the resolver's lifetime, so
+	// SweepStagingResidue skips it while we prefetch (T1186). We run under the CAS
+	// exclusive lock here, so nothing contends — a non-blocking tryLock suffices.
+	fl := newFileLock(filepath.Join(td, stagingLockName))
+	if _, err := fl.tryLock(); err != nil {
+		os.RemoveAll(td)
+		return err
+	}
 	r.tmpDir = td
+	r.tmpLock = fl
 	return nil
 }
 
 // Close removes the Resolver's per-pass staging dir. Always defer it after
 // NewResolver. Committed CAS blobs/archives live outside tmpDir and survive.
 func (r *Resolver) Close() {
+	// Release the flock before RemoveAll so Windows can delete the now-closed
+	// sentinel file (T1186).
+	if r.tmpLock != nil {
+		r.tmpLock.unlock()
+		r.tmpLock = nil
+	}
 	if r.tmpDir != "" {
 		os.RemoveAll(r.tmpDir)
 		r.tmpDir = ""

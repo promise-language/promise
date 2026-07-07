@@ -1,0 +1,259 @@
+// T1211: residual gap in the T1209 bug class. T1209 fixed the bound-to-local
+// double-free for i8*-shaped owned results (string/Vector), but the fix relied on
+// trackMergeResultTemp, which only tracks i8* phis — so VALUE-STRUCT results (a heap
+// user type with `drop`, and `Map[K,V]`) were skipped by the type guard. For those
+// types the merge phi never got a per-path ownership flag, captureLiveTempFlag
+// returned nil, and the binding's drop flag stayed unconditionally armed → on the
+// borrowed arm the bound local dropped a caller-owned value → double-free (segfault).
+//
+// trackMergeResultStructFlag now records a per-path i1 flag ([owned:1, borrowed:0])
+// for these non-i8* merges, and captureLiveTempFlag/applyBoundMergeFlag thread it into
+// the binding's drop flag exactly like the string/Vector path. This file covers what
+// the T1209 file (string + Vector) deliberately omitted: a `string`-field user type
+// and a `map` bound mixed conditional. Each helper binds the mixed conditional and the
+// caller reads the borrowed source AFTER the call to prove it survives; zero-tolerance
+// leak enforcement covers the owned path (fresh heap value dropped exactly once).
+type Res {
+  string tag;
+  drop(~this) {
+  }
+}
+
+type Holder {
+  Res inner;
+}
+
+// --- heap-user-type, inferred `:=`, outer IF, borrowed `else` arm (the exact repro) ---
+consume_res_if(bool b, Res param) {
+  s := if b {
+    Res(tag: "own".clone())
+  } else {
+    param
+  };
+  assert(s.tag.len == 3 || s.tag.len == param.tag.len, "res if alias");
+}
+bound_res_if_borrow() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_if(false, r); // borrowed path -> must NOT drop the borrowed param
+  assert(r.tag.len == 8, "res if param survives");
+}
+
+// --- heap-user-type, typed `Res s = if …` binding ---
+consume_res_typed(bool b, Res param) {
+  Res s = if b {
+    Res(tag: "own".clone())
+  } else {
+    param
+  };
+  assert(s.tag.len == 3 || s.tag.len == param.tag.len, "res typed alias");
+}
+bound_res_typed_borrow() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_typed(false, r);
+  assert(r.tag.len == 8, "res typed param survives");
+}
+
+// --- heap-user-type, outer MATCH, borrowed `_` arm ---
+consume_res_match(int k, Res param) {
+  s := match k {
+    1 => Res(tag: "own".clone()), _ => param,
+  };
+  assert(s.tag.len == 3 || s.tag.len == param.tag.len, "res match alias");
+}
+bound_res_match_borrow() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_match(0, r);
+  assert(r.tag.len == 8, "res match param survives");
+}
+
+// --- borrowed FIELD inner arm (a struct field, not just a param) ---
+consume_res_field(bool b, Holder h) {
+  s := if b {
+    Res(tag: "own".clone())
+  } else {
+    h.inner
+  };
+  assert(s.tag.len == 3 || s.tag.len == h.inner.tag.len, "res field alias");
+}
+bound_res_field_borrow() `test {
+  hd := Holder(inner: Res(tag: "fieldval".clone()));
+  consume_res_field(false, hd);
+  assert(hd.inner.tag.len == 8, "res field survives");
+}
+
+// --- outer-nested: outer MATCH selecting an arm whose body is a nested MIXED
+// heap-user-type conditional, bound to a local ---
+consume_res_nested(bool a, bool b, Res param) {
+  s := match a {
+    true => if b {
+      Res(tag: "own".clone())
+    } else {
+      param
+    }, _ => Res(tag: "zz".clone()),
+  };
+  assert(s.tag.len == 3 || s.tag.len == 2 || s.tag.len == param.tag.len, "res nested alias");
+}
+bound_res_nested_borrow() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_nested(true, false, r); // outer true -> inner false -> borrowed param
+  assert(r.tag.len == 8, "res nested param survives");
+}
+// Owned-selection paths of the SAME nested merge — the composed per-path flag must
+// arm the drop exactly once (leak enforcement), not stay conditionally off (leak).
+bound_res_nested_inner_owned() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_nested(true, true, r); // outer true -> inner true -> owned Res(own), drop once
+  assert(r.tag.len == 8, "res nested inner-owned param survives");
+}
+bound_res_nested_outer_owned() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_nested(false, false, r); // outer `_` -> owned Res(zz), drop once
+  assert(r.tag.len == 8, "res nested outer-owned param survives");
+}
+
+// --- heap-user-type owned-path regression: b == true selects the fresh Res ---
+consume_res_owned_path(bool b, Res param) {
+  s := if b {
+    Res(tag: "owned".clone())
+  } else {
+    param
+  };
+  assert(s.tag.len == 5 || s.tag.len == param.tag.len, "res owned path value");
+}
+bound_res_owned_path() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_owned_path(true, r); // selects the fresh Res — drop it once, no leak
+  assert(r.tag.len == 8, "res owned-path param survives");
+}
+
+// --- Map[int, int] variant, borrowed `else` arm (Map.drop path) ---
+consume_map_if(bool b, map[int, int] param) {
+  s := if b {
+    {
+      1: 2
+    }.clone()
+  } else {
+    param
+  };
+  assert(s.len == 1 || s.len == param.len, "map if alias");
+}
+bound_map_if_borrow() `test {
+  m := {
+    10: 20, 30: 40
+  };
+  consume_map_if(false, m); // borrowed path -> segfault before the fix
+  assert(m.len == 2, "map if param survives");
+}
+
+// --- Map[int, int], outer MATCH, borrowed `_` arm ---
+consume_map_match(int k, map[int, int] param) {
+  s := match k {
+    1 => {
+      1: 2
+    }.clone(), _ => param,
+  };
+  assert(s.len == 1 || s.len == param.len, "map match alias");
+}
+bound_map_match_borrow() `test {
+  m := {
+    10: 20, 30: 40
+  };
+  consume_map_match(0, m);
+  assert(m.len == 2, "map match param survives");
+}
+
+// --- recursive `else if`: an inner value-if (statement position) with an else-if
+// chain, nested inside an outer if-expression's block, bound to a local. The inner
+// chain's middle arm is a fresh owned Res; the final arm is the borrowed param. Both
+// the owned (middle) and borrowed (final) selections must be tracked per-path so the
+// binding drops the middle Res exactly once (no leak) and never drops the param (no
+// double-free). Exercises genIfStmtValue's recursive `case *ast.IfStmt` branch. ---
+consume_res_nested_elseif(bool outer, int k, Res param) {
+  s := if outer {
+    if k == 0 {
+      Res(tag: "zero".clone())
+    } else if k == 1 {
+      Res(tag: "one".clone())
+    } else {
+      param
+    }
+  } else {
+    Res(tag: "outer".clone())
+  };
+  assert(s.tag.len == 4 || s.tag.len == 3 || s.tag.len == 5 || s.tag.len == param.tag.len, "nested elseif alias");
+}
+bound_res_nested_elseif_borrow() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_nested_elseif(true, 9, r); // inner final else -> borrowed param
+  assert(r.tag.len == 8, "nested elseif param survives borrowed");
+}
+bound_res_nested_elseif_middle_owned() `test {
+  r := Res(tag: "abcdheap".clone());
+  consume_res_nested_elseif(true, 1, r); // inner middle arm -> owned Res(one) -> drop once
+  assert(r.tag.len == 8, "nested elseif param survives owned");
+}
+
+// --- Set[int] variant: a THIRD value-struct heap container beyond Res/Map, proving
+// the fix is type-general (Set.drop path), borrowed `else` arm survives ---
+consume_set_if(bool b, Set[int] param) {
+  s := if b {
+    fresh := Set[int]();
+    fresh.add(1);
+    fresh
+  } else {
+    param
+  };
+  assert(s.len == 1 || s.len == param.len, "set if alias");
+}
+bound_set_if_borrow() `test {
+  m := Set[int]();
+  m.add(5);
+  m.add(6);
+  consume_set_if(false, m); // borrowed path -> must NOT drop the borrowed param
+  assert(m.len == 2, "set if param survives");
+}
+bound_set_if_owned() `test {
+  m := Set[int]();
+  m.add(5);
+  m.add(6);
+  consume_set_if(true, m); // owned path -> fresh Set dropped exactly once, no leak
+  assert(m.len == 2, "set if owned-path param survives");
+}
+
+// --- Map, typed `map[int,int] s = if …` binding (parallels consume_res_typed) ---
+consume_map_typed(bool b, map[int, int] param) {
+  map[int, int] s = if b {
+    {
+      1: 2
+    }.clone()
+  } else {
+    param
+  };
+  assert(s.len == 1 || s.len == param.len, "map typed alias");
+}
+bound_map_typed_borrow() `test {
+  m := {
+    10: 20, 30: 40
+  };
+  consume_map_typed(false, m);
+  assert(m.len == 2, "map typed param survives");
+}
+
+// --- Map owned-path regression: b == true selects the fresh clone ---
+consume_map_owned_path(bool b, map[int, int] param) {
+  s := if b {
+    {
+      1: 2
+    }.clone()
+  } else {
+    param
+  };
+  assert(s.len == 1 || s.len == param.len, "map owned path value");
+}
+bound_map_owned_path() `test {
+  m := {
+    10: 20, 30: 40
+  };
+  consume_map_owned_path(true, m); // selects the fresh clone — drop it once, no leak
+  assert(m.len == 2, "map owned-path param survives");
+}

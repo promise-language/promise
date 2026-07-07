@@ -8035,6 +8035,12 @@ func (c *Compiler) exprResultTransfersOwnership(val value.Value, body ast.Expr) 
 		if idx, ok := c.stmtTempMap[val]; ok && idx >= 0 {
 			return true
 		}
+		// T1211: a fresh owned heap value struct (heap-user-type / Map constructor or
+		// clone) transfers ownership into the merge phi, but is tracked as a heapTemp
+		// (not a stmtTemp), so the check above misses it.
+		if c.resultIsFreshOwnedHeapTemp(val) {
+			return true
+		}
 	}
 	return c.resultTransfersOwnedFlag(body)
 }
@@ -8071,6 +8077,11 @@ func (c *Compiler) captureLiveTempFlag(val value.Value) value.Value {
 	}
 	if idx, ok := c.stmtTempMap[val]; ok && idx >= 0 && c.stmtTemps[idx].perPathFlag {
 		return c.block.NewLoad(irtypes.I1, c.stmtTemps[idx].dropFlag)
+	}
+	// T1211: value-struct / heap-user-type / Map merge results carry their per-path
+	// ownership flag in a parallel alloca (they are not i8*, so never in stmtTempMap).
+	if alloca, ok := c.mergeBoundStructFlag[val]; ok {
+		return c.block.NewLoad(irtypes.I1, alloca)
 	}
 	return nil
 }
@@ -8177,7 +8188,15 @@ func (c *Compiler) ownedI8PtrResultDrop(rt types.Type) (*ir.Func, types.Type) {
 // i8*) are skipped by the type guard, preserving their existing self-cleaning
 // heapTemps behavior. Free-function-only via the tempTrackingEnabled gate.
 func (c *Compiler) trackMergeResultTemp(result value.Value, resultType types.Type, arms []matchArmInfo) {
-	if !c.tempTrackingEnabled || result == nil || result.Type() != irtypes.I8Ptr {
+	if !c.tempTrackingEnabled || result == nil {
+		return
+	}
+	if result.Type() != irtypes.I8Ptr {
+		// T1211: value-struct / heap-user-type / Map merge results are not i8*, so
+		// they never enter the stmtTemp drop machinery below. Instead record a
+		// per-path ownership flag so a bound local's drop flag can be conditioned on
+		// it (applyBoundMergeFlag), preventing a borrowed-path double-free.
+		c.trackMergeResultStructFlag(result, resultType, arms)
 		return
 	}
 	// T1106/T1107: a match/if phi feeding a `go`-call argument is transferred into
@@ -8245,6 +8264,122 @@ func (c *Compiler) trackMergeResultTemp(result value.Value, resultType types.Typ
 	}
 	flagPhi := mergeBlock.NewPhi(incomings...)
 	c.appendStmtTemp(result, dropFn, elemType, flagPhi)
+}
+
+// trackMergeResultStructFlag records a per-path ownership flag for a match/if merge
+// phi whose result is a value struct — a heap user type (`{i8*,i8*}`), a Map, or any
+// other droppable non-i8* result (T1211). Unlike the i8* path (trackMergeResultTemp),
+// no statement-end drop obligation is attached: the arm-level heapTemp still
+// self-cleans on the discard/return path, and a binding consumer gets its own
+// bindingDrop. The ONLY problem this fixes is that maybeRegisterDrop arms the bound
+// local's drop flag UNCONDITIONALLY; captureLiveTempFlag reads this flag and
+// applyBoundMergeFlag stores it into the binding's drop flag, so a borrowed arm's
+// value (a caller-owned param/field) is not dropped by the binding (no double-free).
+// The flag phi mirrors the value phi's predecessors: 1 on arms that transferred an
+// owned value (matchArmInfo.owned / .ownedFlag), 0 on borrowed arms. Stored in an
+// entry i1 alloca so captureLiveTempFlag can reload it from any dominated block.
+func (c *Compiler) trackMergeResultStructFlag(result value.Value, resultType types.Type, arms []matchArmInfo) {
+	if c.suppressMergeResultTemp || c.entryBlock == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if resultType != nil && isRefType(resultType) {
+		return
+	}
+	if _, ok := c.mergeBoundStructFlag[result]; ok {
+		return
+	}
+	anyOwned := false
+	for _, a := range arms {
+		if a.owned || a.ownedFlag != nil {
+			anyOwned = true
+			break
+		}
+	}
+	if !anyOwned {
+		return
+	}
+	mergeBlock := c.block
+	var incomings []*ir.Incoming
+	for _, a := range arms {
+		if a.end == nil || a.end.Term == nil {
+			continue
+		}
+		br, ok := a.end.Term.(*ir.TermBr)
+		if !ok || br.Target != mergeBlock {
+			continue
+		}
+		var flagVal value.Value
+		if a.ownedFlag != nil {
+			flagVal = a.ownedFlag
+		} else {
+			flag := int64(0)
+			if a.owned {
+				flag = 1
+			}
+			flagVal = constant.NewInt(irtypes.I1, flag)
+		}
+		incomings = append(incomings, &ir.Incoming{X: flagVal, Pred: a.end})
+	}
+	if len(incomings) == 0 {
+		return
+	}
+	flagPhi := mergeBlock.NewPhi(incomings...)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewStore(flagPhi, dropFlag)
+	if c.mergeBoundStructFlag == nil {
+		c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca)
+	}
+	c.mergeBoundStructFlag[result] = dropFlag
+}
+
+// resultIsFreshOwnedHeapTemp reports (at compile time) whether a match/if arm result
+// value is a freshly-constructed owned heap value struct — i.e. its instance pointer
+// (field 1 of the `{i8*,i8*}` value struct) is a currently-live, unclaimed heapTemp
+// (T1211). Used to set the arm's `owned` bit for value-struct merge phis: a heap
+// constructor / `.clone()` result transfers ownership into the phi, whereas a borrowed
+// param/field arm does not. Emits no IR — it inspects existing SSA.
+//
+// Two shapes produce an owned heap value struct:
+//   - a constructor builds the struct via `insertvalue ..., instPtr, 1`, and the
+//     inserted instPtr is itself the heapTemp key (checked via the insertvalue chain);
+//   - a method call (e.g. `.clone()`) returns the struct directly, and field 1 is
+//     tracked as a separate `extractvalue(result, 1)` heapTemp key (checked by scanning
+//     the live heapTemp keys for that extractvalue).
+func (c *Compiler) resultIsFreshOwnedHeapTemp(val value.Value) bool {
+	if val == nil {
+		return false
+	}
+	// Constructor shape: field 1 is the inserted instance pointer.
+	cur := val
+	for {
+		iv, ok := cur.(*ir.InstInsertValue)
+		if !ok {
+			break
+		}
+		if len(iv.Indices) == 1 && iv.Indices[0] == 1 {
+			elem := iv.Elem
+			if bc, ok := elem.(*ir.InstBitCast); ok {
+				elem = bc.From
+			}
+			if idx, tracked := c.heapTempMap[elem]; tracked && idx >= 0 {
+				return true
+			}
+			break
+		}
+		cur = iv.X
+	}
+	// Call-result shape: field 1 was tracked as extractvalue(val, 1).
+	for k, idx := range c.heapTempMap {
+		if idx < 0 {
+			continue
+		}
+		if ev, ok := k.(*ir.InstExtractValue); ok && ev.X == val &&
+			len(ev.Indices) == 1 && ev.Indices[0] == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // genValueMatch generates a match expression on a non-enum value using comparison chains.

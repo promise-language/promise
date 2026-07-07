@@ -218,25 +218,26 @@ type Compiler struct {
 	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
 	// `assert(42.to_string() == "42")`) and drops them at statement end.
 	stmtTemps                     []stmtTemp
-	stmtTempMap                   map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
-	tempTrackingEnabled           bool                // T0084: true in free functions + user method bodies
-	dupStringFieldAccess          bool                // T0095: when true, genFieldAccess dups string fields from droppable types
-	dupContainerFieldAccess       bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
-	borrowBlockResult             bool                // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
-	blockValueOwnedResult         bool                // T1107: set by genBlockValue when its last-expr result is an owned heap temp moved out of the block (a claimed string/vector/handle temp, or an owned-local ident whose drop flag it cleared) — read immediately after by genIfExpr / genMatchArmValue to register the merge phi as an owned stmt temp
-	blockValueOwnedFlag           value.Value         // T1208: live per-path i1 ownership flag captured by genBlockValue when its last-expr result was a nested tracked temp (an if/match phi with its own per-path flag phi), loaded BEFORE claimStringTemp neutralized it — read alongside blockValueOwnedResult so trackMergeResultTemp threads the real per-path flag instead of the whole-arm constant (nil → fall back to the blockValueOwnedResult constant)
-	suppressMergeResultTemp       bool                // T1107: when true, trackMergeResultTemp skips registering the match/if phi as a caller stmt temp — set while evaluating a `go`-call argument, where ownership transfer of a conditional heap root into the goroutine frame is handled by the T1106 go-arg machinery (a caller statement-end drop would race the goroutine's async read)
-	matchBorrowedIdents           map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
-	borrowOptionalLocals          map[string]bool     // T1085: optional locals bound from a non-owning borrow (RTTI downcast `x as T` / `T&`/`T~` RHS) — their inner aliases an external owner, so a non-diverging heap-user-type handler unwrap (`o? { ... }`) must NOT neutralize+track the merged phi (the present arm is a borrow that would double-free)
-	dupTupleFieldAccess           bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
-	dupHeapUserFieldAccess        bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
-	optionalStringDup             value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
-	optionalContainerDup          value.Value         // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
-	optionalTupleDup              value.Value         // T0397: pending dup from Map[K,(droppable,...)] index path; consumed by genOptionalForceUnwrap
-	optionalHeapDup               value.Value         // T0440: pending dup from Map[K, heap-user-type] index path; consumed by genOptionalForceUnwrap
-	optionalFieldString           bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
-	optionalFieldVector           bool                // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
-	optionalUnwrapContainerBorrow bool                // T1143: set on the plain (no-dup) path of genOptionalForceUnwrap when the source is `container[k]!` — the inner aliases the container's slot and is borrowed (no dup), so trackHeapUserTypeResult must NOT register it as an owned temp (the container's drop frees it; tracking double-frees)
+	stmtTempMap                   map[value.Value]int            // SSA value → index in stmtTemps (-1 = claimed)
+	mergeBoundStructFlag          map[value.Value]*ir.InstAlloca // T1211: value-struct/heap-user-type/Map match/if merge phi → i1 alloca holding its PER-PATH ownership flag (1 on owned-arm paths, 0 on borrowed-arm paths). These results are not i8*, so they never enter stmtTempMap; this parallel map lets captureLiveTempFlag thread the per-path bit into a bound local's drop flag (applyBoundMergeFlag), preventing a borrowed-path double-free. No drop obligation is attached (the arm-level heapTemp still self-cleans on the discard path)
+	tempTrackingEnabled           bool                           // T0084: true in free functions + user method bodies
+	dupStringFieldAccess          bool                           // T0095: when true, genFieldAccess dups string fields from droppable types
+	dupContainerFieldAccess       bool                           // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
+	borrowBlockResult             bool                           // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
+	blockValueOwnedResult         bool                           // T1107: set by genBlockValue when its last-expr result is an owned heap temp moved out of the block (a claimed string/vector/handle temp, or an owned-local ident whose drop flag it cleared) — read immediately after by genIfExpr / genMatchArmValue to register the merge phi as an owned stmt temp
+	blockValueOwnedFlag           value.Value                    // T1208: live per-path i1 ownership flag captured by genBlockValue when its last-expr result was a nested tracked temp (an if/match phi with its own per-path flag phi), loaded BEFORE claimStringTemp neutralized it — read alongside blockValueOwnedResult so trackMergeResultTemp threads the real per-path flag instead of the whole-arm constant (nil → fall back to the blockValueOwnedResult constant)
+	suppressMergeResultTemp       bool                           // T1107: when true, trackMergeResultTemp skips registering the match/if phi as a caller stmt temp — set while evaluating a `go`-call argument, where ownership transfer of a conditional heap root into the goroutine frame is handled by the T1106 go-arg machinery (a caller statement-end drop would race the goroutine's async read)
+	matchBorrowedIdents           map[string]bool                // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
+	borrowOptionalLocals          map[string]bool                // T1085: optional locals bound from a non-owning borrow (RTTI downcast `x as T` / `T&`/`T~` RHS) — their inner aliases an external owner, so a non-diverging heap-user-type handler unwrap (`o? { ... }`) must NOT neutralize+track the merged phi (the present arm is a borrow that would double-free)
+	dupTupleFieldAccess           bool                           // T0370: when true, genVectorIndex dups droppable tuple elements on read
+	dupHeapUserFieldAccess        bool                           // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
+	optionalStringDup             value.Value                    // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
+	optionalContainerDup          value.Value                    // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
+	optionalTupleDup              value.Value                    // T0397: pending dup from Map[K,(droppable,...)] index path; consumed by genOptionalForceUnwrap
+	optionalHeapDup               value.Value                    // T0440: pending dup from Map[K, heap-user-type] index path; consumed by genOptionalForceUnwrap
+	optionalFieldString           bool                           // B0190: set by genFieldAccess when loading a string? field from a droppable type
+	optionalFieldVector           bool                           // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
+	optionalUnwrapContainerBorrow bool                           // T1143: set on the plain (no-dup) path of genOptionalForceUnwrap when the source is `container[k]!` — the inner aliases the container's slot and is borrowed (no dup), so trackHeapUserTypeResult must NOT register it as an owned temp (the container's drop frees it; tracking double-frees)
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops
@@ -795,32 +796,33 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		monoTypeIDs:         make(map[string]int32),
 		monoValueTypeRTTI:   make(map[string]*ir.Global),
 
-		typeIDs:            make(map[*types.Named]int32),
-		nextTypeID:         1, // 0 reserved for "no type info"
-		typeInfoGlobals:    make(map[*types.Named]*ir.Global),
-		typeCloneFns:       make(map[*types.Named]*ir.Func),
-		monoTypeCloneFns:   make(map[string]*ir.Func),
-		hasChildren:        make(map[*types.Named]bool),
-		vtableGlobals:      make(map[*types.Named]*ir.Global),
-		viewVtables:        make(map[viewVtableKey]*ir.Global),
-		valueTypeRTTI:      make(map[*types.Named]*ir.Global),
-		dropFlags:          make(map[string]*ir.InstAlloca),
-		forInHandleSlotPtr: make(map[string]*ir.InstAlloca),
-		dropBindings:       make(map[string]scopeBinding),
-		stmtTempMap:        make(map[value.Value]int),
-		heapTempMap:        make(map[value.Value]int),
-		envTempMap:         make(map[value.Value]int),
-		thunks:             make(map[string]*ir.Func),
-		taskFreeAfterDone:  make(map[*ir.Func]*ir.Func), // T0668
-		file:               file,
-		moduleFuncs:        make(map[string]*ir.Func),
-		moduleExterns:      make(map[string]*ExternFunc),
-		moduleOwnedFuncs:   make(map[string]string),
-		moduleCanonical:    make(map[string]string),
-		instanceOwnedFuncs: make(map[string]string),
-		spiralInstances:    make(map[string]bool),
-		cstrGlobals:        make(map[string]*ir.Global),
-		fileNameGlobals:    make(map[string]*ir.Global),
+		typeIDs:              make(map[*types.Named]int32),
+		nextTypeID:           1, // 0 reserved for "no type info"
+		typeInfoGlobals:      make(map[*types.Named]*ir.Global),
+		typeCloneFns:         make(map[*types.Named]*ir.Func),
+		monoTypeCloneFns:     make(map[string]*ir.Func),
+		hasChildren:          make(map[*types.Named]bool),
+		vtableGlobals:        make(map[*types.Named]*ir.Global),
+		viewVtables:          make(map[viewVtableKey]*ir.Global),
+		valueTypeRTTI:        make(map[*types.Named]*ir.Global),
+		dropFlags:            make(map[string]*ir.InstAlloca),
+		forInHandleSlotPtr:   make(map[string]*ir.InstAlloca),
+		dropBindings:         make(map[string]scopeBinding),
+		stmtTempMap:          make(map[value.Value]int),
+		mergeBoundStructFlag: make(map[value.Value]*ir.InstAlloca), // T1211
+		heapTempMap:          make(map[value.Value]int),
+		envTempMap:           make(map[value.Value]int),
+		thunks:               make(map[string]*ir.Func),
+		taskFreeAfterDone:    make(map[*ir.Func]*ir.Func), // T0668
+		file:                 file,
+		moduleFuncs:          make(map[string]*ir.Func),
+		moduleExterns:        make(map[string]*ExternFunc),
+		moduleOwnedFuncs:     make(map[string]string),
+		moduleCanonical:      make(map[string]string),
+		instanceOwnedFuncs:   make(map[string]string),
+		spiralInstances:      make(map[string]bool),
+		cstrGlobals:          make(map[string]*ir.Global),
+		fileNameGlobals:      make(map[string]*ir.Global),
 	}
 
 	// Apply options
@@ -10887,6 +10889,7 @@ type compilerState struct {
 	lambdaWritebacks     []lambdaWriteback
 	stmtTemps            []stmtTemp
 	stmtTempMap          map[value.Value]int
+	mergeBoundStructFlag map[value.Value]*ir.InstAlloca // T1211
 	heapTemps            []heapTemp
 	heapTempMap          map[value.Value]int
 	envTemps             []envTemp
@@ -10926,6 +10929,7 @@ func (c *Compiler) saveState() compilerState {
 		lambdaWritebacks:     c.lambdaWritebacks,
 		stmtTemps:            c.stmtTemps,
 		stmtTempMap:          c.stmtTempMap,
+		mergeBoundStructFlag: c.mergeBoundStructFlag, // T1211
 		heapTemps:            c.heapTemps,
 		heapTempMap:          c.heapTempMap,
 		envTemps:             c.envTemps,
@@ -10967,6 +10971,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.dropBindings = s.dropBindings
 	c.stmtTemps = s.stmtTemps
 	c.stmtTempMap = s.stmtTempMap
+	c.mergeBoundStructFlag = s.mergeBoundStructFlag // T1211
 	c.heapTemps = s.heapTemps
 	c.heapTempMap = s.heapTempMap
 	c.envTemps = s.envTemps

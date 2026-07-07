@@ -603,6 +603,19 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 							// claimStringTemp zeroes it, so a nested mixed owned/borrowed
 							// conditional threads the real per-path bit to the enclosing phi.
 							blockOwnedFlag = c.captureLiveTempFlag(result)
+						} else if c.resultIsFreshOwnedHeapTemp(result) {
+							// T1211: a fresh owned heap value struct (heap-user-type / Map
+							// constructor or clone) moved out of the block transfers
+							// ownership to the block's caller, but is tracked as a heapTemp
+							// (not a stmtTemp) so the stmtTempMap check above misses it.
+							blockOwned = true
+						} else {
+							// T1211: a nested value-struct merge result carries its per-path
+							// ownership flag in mergeBoundStructFlag — thread it up.
+							blockOwnedFlag = c.captureLiveTempFlag(result)
+							if blockOwnedFlag != nil {
+								blockOwned = true
+							}
 						}
 					}
 					// T0095: Claim string dup temps from block result expressions.
@@ -643,6 +656,16 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 						// T1208: no claimStringTemp on this path, so the temp's per-path
 						// flag is still live — capture it for the enclosing merge phi.
 						blockOwnedFlag = c.captureLiveTempFlag(result)
+					} else if c.resultIsFreshOwnedHeapTemp(result) {
+						// T1211: fresh owned heap value struct (heap-user-type / Map)
+						// moved out of a value-producing if in statement position.
+						blockOwned = true
+					} else {
+						// T1211: nested value-struct merge result — thread its per-path flag.
+						blockOwnedFlag = c.captureLiveTempFlag(result)
+						if blockOwnedFlag != nil {
+							blockOwned = true
+						}
 					}
 				}
 				break
@@ -6132,6 +6155,7 @@ func (c *Compiler) cleanupStmtTemps() {
 	if c.block == nil || c.block.Term != nil {
 		c.stmtTemps = c.stmtTemps[:0]
 		c.stmtTempMap = make(map[value.Value]int)
+		c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca) // T1211
 		return
 	}
 
@@ -6189,6 +6213,7 @@ func (c *Compiler) cleanupStmtTemps() {
 
 	c.stmtTemps = c.stmtTemps[:0]
 	c.stmtTempMap = make(map[value.Value]int)
+	c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca) // T1211
 }
 
 // emitStmtTempCleanupForErrorPath emits cleanup IR for statement-level
@@ -9977,6 +10002,19 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 			if idx, ok := c.stmtTempMap[elseVal]; ok && idx >= 0 {
 				elseOwned = true
 				elseOwnedFlag = c.captureLiveTempFlag(elseVal) // T1208
+			} else if c.resultIsFreshOwnedHeapTemp(elseVal) {
+				// T1211: a recursive else-if whose selected arm is a fresh owned heap
+				// value struct (heap-user-type / Map) transfers ownership up — tracked
+				// as a heapTemp, so the stmtTempMap check above misses it.
+				elseOwned = true
+			} else if flag := c.captureLiveTempFlag(elseVal); flag != nil {
+				// T1211: a recursive else-if that is itself a mixed owned/borrowed
+				// value-struct merge carries its per-path flag in mergeBoundStructFlag;
+				// thread it up so the enclosing merge's flag phi (and thus the bound
+				// local's drop flag) stays conditional — otherwise the owned inner arm
+				// leaks (constant 0) or a borrowed inner arm double-frees (constant 1).
+				elseOwned = true
+				elseOwnedFlag = flag
 			}
 		}
 	default:

@@ -1266,6 +1266,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// Without this, the post-wrap claim site (which uses the wrapped struct)
 	// cannot locate the tracked i8* temp, so the stmt-temp drop AND the
 	// optional binding drop both fire → double-free.
+	var mergeWrapFlag value.Value // T1210
 	if declType != nil {
 		if _, isOpt := declType.(*types.Optional); isOpt {
 			if exprType != nil {
@@ -1274,6 +1275,17 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 					types.IsArc(exprType) || types.IsWeak(exprType) ||
 					types.IsMutex(exprType) || types.IsTask(exprType) ||
 					types.IsMutexGuard(exprType) {
+					// T1210: an Optional-wrapped mixed owned/borrowed match/if result
+					// owns its inner value only on the paths that selected an owned
+					// arm. Capture the merge temp's live per-path flag BEFORE this
+					// claim (and wrapOptional below) neutralize/rebind it; re-applied
+					// to the wrapped Optional's drop flag after
+					// maybeRegisterOptionalDrop. Elvis RHS is handled separately; the
+					// member optional handler (ErrorHandlerExpr) is excluded — see
+					// isMixedMergeBindingRHS (shared with T1209's plain-binding fix).
+					if c.elvisBoundDropFlag == nil && isMixedMergeBindingRHS(s.Value) {
+						mergeWrapFlag = c.captureLiveTempFlag(val)
+					}
 					c.claimStringTemp(val)
 				}
 			}
@@ -1493,6 +1505,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if opt, ok := dropType.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
+	// T1210: override the wrapped Optional's unconditional inner drop with the merge
+	// temp's per-path ownership flag (0 on the borrowed arm's path, 1 on the owned
+	// arm's path). No-op when the RHS was not a mixed owned/borrowed merge
+	// (mergeWrapFlag nil).
+	c.applyBoundMergeFlag(s.Name, mergeWrapFlag)
 	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)

@@ -1,0 +1,179 @@
+// T1210: binding a mixed owned/borrowed match/if result to a TYPED Optional local
+// (`T? s = if …`) must NOT drop the borrowed arm's value at the binding's scope end.
+// The merge result is Optional-wrapped into the binding via maybeRegisterOptionalDrop
+// (a different drop mechanism than T1209's plain dropFlags path), which armed the
+// wrapped Optional's inner drop UNCONDITIONALLY — so on the borrowed path `s` aliased
+// a caller-owned param/field and freed it at scope end → double-free (and the mirror-
+// image leak on the owned path if the flag were forced the other way). Each helper
+// binds the mixed conditional into a `string? s` and the caller reads the borrowed
+// source AFTER the call to prove it survives; zero-tolerance leak enforcement covers
+// the owned path (clone dropped exactly once).
+//
+// The plain-binding shape (`s := if …` / `string s = …`) is covered by T1209.
+// Heap-user-type and `Map[K,V]` Optional-wrapped results are ALSO out of scope: they
+// are not in the T0111 i8*-handle pre-wrap-claim set, so a user-droppable-type or
+// `map?` bound mixed conditional is tracked separately (T1211). This file exercises the
+// reachable string inner type (vector borrow arms are rejected by sema's mixed-ownership
+// rule, so string is the practically reachable inner type).
+type Box {
+  string label;
+}
+
+// --- inferred-then-wrapped typed decl, outer IF, borrowed `else` arm (exact repro) ---
+consume_if(string param) {
+  b := false;
+  string? s = if b {
+    "x".clone()
+  } else {
+    param
+  };
+  assert(s!.len == param.len, "if alias");
+}
+optwrap_if_borrow() `test {
+  p := "abcdheap".clone();
+  consume_if(p);
+  assert(p.len == 8, "if param survives");
+}
+
+// --- outer MATCH, borrowed `_` arm ---
+consume_match(int k, string param) {
+  string? s = match k {
+    1 => "x".clone(), _ => param,
+  };
+  assert(s!.len == param.len, "match alias");
+}
+optwrap_match_borrow() `test {
+  p := "abcdheap".clone();
+  consume_match(0, p);
+  assert(p.len == 8, "match param survives");
+}
+
+// --- borrowed FIELD inner arm (a struct field, not just a param) ---
+consume_field(bool b, Box box) {
+  string? s = if b {
+    "x".clone()
+  } else {
+    box.label
+  };
+  assert(s!.len == box.label.len, "field alias");
+}
+optwrap_field_borrow() `test {
+  bx := Box(label: "fieldval".clone());
+  consume_field(false, bx);
+  assert(bx.label.len == 8, "field survives");
+}
+
+// --- outer-nested: outer MATCH selecting an arm whose body is a nested MIXED
+// conditional, bound to a typed Optional local ---
+consume_nested(bool a, bool b, string param) {
+  string? s = match a {
+    true => if b {
+      "x".clone()
+    } else {
+      param
+    }, _ => "zz".clone(),
+  };
+  assert(s!.len == param.len || s!.len == 2, "nested alias");
+}
+optwrap_nested_borrow() `test {
+  p := "abcdheap".clone();
+  consume_nested(true, false, p); // outer true -> inner false -> borrowed param
+  assert(p.len == 8, "nested param survives");
+}
+
+// --- owned-path regression: b == true selects the clone() arm ---
+consume_owned_path(bool b, string param) {
+  string? s = if b {
+    "owned".clone()
+  } else {
+    param
+  };
+  assert(s!.len == 5 || s!.len == param.len, "owned path value");
+}
+optwrap_owned_path() `test {
+  p := "abcdheap".clone();
+  consume_owned_path(true, p); // selects the clone — must drop it once, no leak
+  assert(p.len == 8, "owned-path param survives");
+}
+
+// --- both-arms-owned regression: no borrowed arm at all, still no double-free/leak ---
+consume_both_owned(bool b) {
+  string? s = if b {
+    "aaa".clone()
+  } else {
+    "bb".clone()
+  };
+  assert(s!.len == 3 || s!.len == 2, "both-owned value");
+}
+optwrap_both_owned() `test {
+  consume_both_owned(true);
+  consume_both_owned(false);
+}
+
+// --- paren-wrapped RHS: isMixedMergeBindingRHS must unwrap the ParenExpr on the
+// wrap-path capture too, else the borrowed arm double-frees ---
+consume_paren(bool b, string param) {
+  string? s = (if b {
+    "x".clone()
+  } else {
+    param
+  });
+  assert(s!.len == param.len || s!.len == 1, "paren alias");
+}
+optwrap_paren_borrow() `test {
+  p := "abcdheap".clone();
+  consume_paren(false, p); // borrowed else arm
+  assert(p.len == 8, "paren param survives");
+}
+optwrap_paren_owned() `test {
+  p := "abcdheap".clone();
+  consume_paren(true, p); // owned then arm — clone dropped exactly once, no leak
+  assert(p.len == 8, "paren owned param survives");
+}
+
+// --- reassignment sibling: `s = if …` into an already-declared `string?` local goes
+// through genAssign (T1209's assign fix), which wraps the string into the Optional and
+// must apply the per-path flag over the drop-old re-arm. Proves the wrap-on-reassign
+// shape neither double-frees the borrowed arm nor leaks the owned arm ---
+consume_reassign(bool b, string param) {
+  string? s = none;
+  s = if b {
+    "x".clone()
+  } else {
+    param
+  };
+  assert(s!.len == param.len || s!.len == 1, "reassign alias");
+}
+optwrap_reassign_borrow() `test {
+  p := "abcdheap".clone();
+  consume_reassign(false, p);
+  assert(p.len == 8, "reassign param survives");
+}
+optwrap_reassign_owned() `test {
+  p := "abcdheap".clone();
+  consume_reassign(true, p);
+  assert(p.len == 8, "reassign owned param survives");
+}
+
+// --- negative regression (ErrorHandlerExpr on the wrap path): a member optional handler
+// bound to a typed Optional MOVES the present value out of the field, so the wrapped
+// binding owns it unconditionally. isMixedMergeBindingRHS excludes ErrorHandlerExpr, so
+// the T1210 override is a no-op — the sole drop must fire exactly once (no leak on the
+// present path, no double-free) ---
+type Holder {
+  string? f;
+}
+consume_memopt(Holder h) {
+  string? s = h.f? _ {
+    "recovered".clone()
+  };
+  assert(s!.len >= 1, "memopt present");
+}
+optwrap_memopt_present() `test {
+  hx := Holder(f: "present!".clone());
+  consume_memopt(hx); // value moved out of the field, dropped once
+}
+optwrap_memopt_recovered() `test {
+  hy := Holder(f: none);
+  consume_memopt(hy); // recovery clone dropped once
+}

@@ -7839,6 +7839,153 @@ func TestT1102_ReturnFreshTaskAllowed(t *testing.T) {
 	`)
 }
 
+// T1138: returning a borrowed (non-`move`) Optional-wrapped single-owner handle
+// param (`Mutex[int]? m` → `Mutex[int]?`) is unsound — dupOptionalVectorElem has
+// no clone for these and shares the one handle, so the source local and the
+// caller's result both drop it. The bare form is caught by T1102; T1138 makes the
+// direct-return check see through Optional layers.
+func TestT1138_ReturnBorrowedOptionalMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_opt(Mutex[int]? m) Mutex[int]? { return m; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1138: Task[T]? parity for the Optional-wrapped direct-return rejection.
+func TestT1138_ReturnBorrowedOptionalTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_opt(Task[int]? t) Task[int]? { return t; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1138: MutexGuard[T]? parity for the Optional-wrapped direct-return rejection.
+func TestT1138_ReturnBorrowedOptionalMutexGuardParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_opt(MutexGuard[int]? g) MutexGuard[int]? { return g; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1138: deeper result wrap — returning a `Mutex[int]?` param as `Mutex[int]??`
+// still aliases the one handle, so it is rejected. The direct-return path has no
+// result-wrap coercion subtlety: returning a borrowed handle param as owned is
+// always unsound regardless of result-wrap depth.
+func TestT1138_ReturnBorrowedOptionalMutexDeeperResultRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		direct_wrap(Mutex[int]? m) Mutex[int]?? { return m; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1138: deeper-param same-depth return — `Mutex[int]?? m` returned as
+// `Mutex[int]??` peels both layers and rejects.
+func TestT1138_ReturnBorrowedDoubleOptionalMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_opt(Mutex[int]?? m) Mutex[int]?? { return m; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return borrowed parameter")
+}
+
+// T1138: the laundered escape — `Mutex[int]? x = m; return x;` — is rejected at
+// the var-decl site (the alias into an owned binding), before it can escape.
+func TestT1138_LaunderedOptionalMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_opt(Mutex[int]? m) Mutex[int]? {
+			Mutex[int]? x = m;
+			return x;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
+}
+
+// T1138: Task[T]? parity for the laundered escape.
+func TestT1138_LaunderedOptionalTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		pass_opt(Task[int]? t) Task[int]? {
+			Task[int]? x = t;
+			return x;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
+}
+
+// T1138: the BARE-handle wrap-coerce launder `Mutex[int]? x = m; return x;` (RHS
+// depth 0 → LHS depth 1) must stay rejected. The reorder that lets the wrap-depth
+// carve-out run before the single-owner reject must NOT exempt a bare handle: it
+// has no clone, and when the wrapped result flows into a call arg (e.g.
+// `v.push(launder(mm))`) the caller-side alias check does not fire, so the one
+// handle is double-freed (segfault). Old T1102 rejected this at the var-decl; the
+// carve-out is gated on `singleOwnerHandleKind(typ) == ""` to preserve that.
+func TestT1138_LaunderedBareMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		launder(Mutex[int] m) Mutex[int]? {
+			Mutex[int]? x = m;
+			return x;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
+}
+
+// T1138: Task[T] bare-handle wrap-coerce launder parity.
+func TestT1138_LaunderedBareTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		launder(Task[int] t) Task[int]? {
+			Task[int]? x = t;
+			return x;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter")
+}
+
+// T1138 (negative): the non-escaping Some-wrap coercion `Mutex[int]?? x = m`
+// (LHS wrap depth 2 > RHS wrap depth 1, RHS already Optional) materializes a fresh
+// wrapped value rather than aliasing the source handle — it must stay valid. The
+// wrap-depth carve-out runs BEFORE the single-owner reject (and is NOT gated out,
+// since the RHS is already Optional, not a bare handle) so this is not
+// misclassified as an alias.
+func TestT1138_WrapCoerceOptionalMutexAllowed(t *testing.T) {
+	ownerOK(t, `
+		f(Mutex[int]? m) {
+			Mutex[int]?? x = m;
+		}
+		test() {}
+	`)
+}
+
+// T1138 (negative): a `move` Optional-wrapped handle param returned as owned
+// stays valid — the move transfers the single handle's ownership to the result.
+func TestT1138_ReturnMovedOptionalMutexParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		pass_move(Mutex[int]? move m) Mutex[int]? { return m; }
+		test() {}
+	`)
+}
+
+// T1138 (negative): a `move` Optional-wrapped handle param laundered through an
+// owned local before return stays valid — `move` makes the param Owned, so the
+// var-decl `x = m` is a real move (not a borrow-alias). The single-owner reject in
+// rejectBorrowedIdentVarDecl is gated on Borrowed state (stmt.go:278), so it must
+// NOT fire here — guards the state-gate against regression from the T1138 reorder.
+func TestT1138_MoveLaunderedOptionalMutexParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		pass_move(Mutex[int]? move m) Mutex[int]? {
+			Mutex[int]? x = m;
+			return x;
+		}
+		test() {}
+	`)
+}
+
 // T1177: awaiting a single-owner Task handle bound via an `if is`-destructure of
 // an ENUM variant (`if b is Has(job) { <-job }`) is rejected — the escape-dup
 // logic cannot clone the handle, so it aliases the subject's field which drops it

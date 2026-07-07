@@ -279,12 +279,40 @@ func (c *Checker) rejectBorrowedIdentVarDecl(value ast.Expr, lhsRef ast.TypeRef)
 		return false
 	}
 	typ := c.info.Types[value]
-	// T1102: a single-owner native handle (task/Mutex/MutexGuard) has no clone/
-	// dup, so aliasing it into an owned binding is unsound the moment that
-	// binding escapes (returned, or laundered then returned). isVarDeclAliasSafeType
+	// T1138/T0568: a Some-wrap coercion — the LHS adds Optional layers over the
+	// RHS type — materializes a fresh wrapped value rather than aliasing the
+	// source, so it is not a move. Must run BEFORE the single-owner check so the
+	// legitimate `Mutex[int]?? x = optMutex` (LHS depth > RHS depth, RHS already
+	// Optional) is not misclassified as an alias. (The direct-return path has no
+	// such subtlety.)
+	//
+	// EXCEPTION — a BARE single-owner handle (`singleOwnerHandleKind(typ) != ""`,
+	// i.e. RHS depth 0) wrap-coerced into an Optional local is NOT exempt: the
+	// handle has no clone, and the caller-side return-alias check only clears the
+	// source drop flag when the result is bound directly to a local — when the
+	// wrapped result instead flows into a call argument (`v.push(launder(mm))`) it
+	// aliases the one handle and double-frees (segfault). The direct `v.push(mm)`
+	// form is already rejected as consuming a borrow; the wrap-coerce launder
+	// `Mutex[int]? x = m; return x;` must be rejected too (old T1102 behavior —
+	// the reorder must not open this hole). So exclude bare handles from the
+	// carve-out and let them fall through to the singleOwnerHandleKindDeep reject.
+	//
+	// NOTE (T1212, T1138 follow-up): the DEEPER wrap-coerce-then-return shape
+	// `Mutex[int]?? x = m;` (RHS already Optional, so carved out here) still
+	// escapes an aliased single-owner handle when returned — the carve-out
+	// legitimately makes `x` owned, so neither the var-decl nor the return check
+	// fires. Catching it needs handle-provenance tracking on the wrapped owned
+	// local (outer Optional owned, inner handle borrowed).
+	if optionalDepthTypeRef(lhsRef) > optionalDepthType(typ) && singleOwnerHandleKind(typ) == "" {
+		return false
+	}
+	// T1102/T1138: a single-owner native handle (task/Mutex/MutexGuard), possibly
+	// wrapped in Optional layers (Mutex[int]?, task[int]??, …), has no clone/dup,
+	// so aliasing it into an owned binding is unsound the moment that binding
+	// escapes (returned, or laundered then returned). isVarDeclAliasSafeType
 	// reports these as safe (true only for the non-escaping drop case), so check
 	// for them BEFORE that early-return and reject the alias outright.
-	if k := singleOwnerHandleKind(typ); k != "" {
+	if k := singleOwnerHandleKindDeep(typ); k != "" {
 		if c.params[ident.Name] {
 			c.errorf(ident.Pos(),
 				"cannot move borrowed parameter '%s'; declare the parameter with `move` to consume it",
@@ -295,11 +323,6 @@ func (c *Checker) rejectBorrowedIdentVarDecl(value ast.Expr, lhsRef ast.TypeRef)
 		return true
 	}
 	if isCopyType(typ) || isVarDeclAliasSafeType(typ) || !isDroppableType(typ) {
-		return false
-	}
-	// Skip when the LHS adds Optional wrap layers — that's a coercion, not
-	// an alias, and codegen materializes a wrapped value.
-	if optionalDepthTypeRef(lhsRef) > optionalDepthType(typ) {
 		return false
 	}
 	if c.params[ident.Name] {
@@ -472,6 +495,15 @@ func singleOwnerHandleKind(t types.Type) string {
 		return "MutexGuard"
 	}
 	return ""
+}
+
+// singleOwnerHandleKindDeep is singleOwnerHandleKind after peeling any leading
+// Optional layers: an Optional-wrapped single-owner handle (Mutex[int]?,
+// task[int]??, …) is exactly as unsafe to alias or return as the bare handle —
+// dupOptionalVectorElem (codegen) has no clone for these and shares the one
+// handle, so both the source local and the caller's result drop it. T1138.
+func singleOwnerHandleKindDeep(t types.Type) string {
+	return singleOwnerHandleKind(peelOptional(t))
 }
 
 // isPointerTypeRef checks whether a type reference is a raw pointer type.
@@ -920,15 +952,18 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 		return
 	}
 	if !isRefType(c.curSig.Result()) {
-		// T1102: returning a borrowed (non-`move`) single-owner native handle
-		// parameter (task/Mutex/MutexGuard) as owned is unsound — these have no
-		// clone/dup, so the caller's result aliases its still-live source local
+		// T1102/T1138: returning a borrowed (non-`move`) single-owner native
+		// handle parameter (task/Mutex/MutexGuard), possibly wrapped in Optional
+		// layers (Mutex[int]?, task[int]??, …), as owned is unsound — these have
+		// no clone/dup, so the caller's result aliases its still-live source local
 		// and both ends drop the one handle (double-free / UAF). returnsBorrowAsOwned
 		// deliberately exempts parameters (it assumes "return implicitly dups for
 		// non-Copy types"), which is false for these handles — reject here first.
+		// The direct-return path has no result-wrap coercion subtlety: returning a
+		// borrowed handle param as owned is always unsound, so peel and reject.
 		if ident, ok := s.Value.(*ast.IdentExpr); ok &&
 			c.params[ident.Name] && c.state[ident.Name] == Borrowed {
-			if k := singleOwnerHandleKind(c.info.Types[ident]); k != "" {
+			if k := singleOwnerHandleKindDeep(c.info.Types[ident]); k != "" {
 				c.errorf(s.Pos(),
 					"cannot return borrowed parameter '%s' as owned; a `%s` handle has no clone and the caller still owns it — declare the parameter with `move` to transfer ownership",
 					ident.Name, k)

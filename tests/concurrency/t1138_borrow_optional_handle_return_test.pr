@@ -1,0 +1,80 @@
+// T1138: returning a borrowed (non-`move`) Optional-wrapped single-owner handle
+// (Mutex[int]?/task[int]?) as owned used to segfault — dupOptionalVectorElem has
+// no clone for these and shared the one handle, so the source local and the
+// caller's result both dropped it (double-free). Sibling gap to T1102, which
+// only matched BARE handles.
+//
+// The ownership pass now rejects the unsound forms at compile time (the T1138
+// fix makes the rejection see through Optional layers):
+//   pass_opt(Mutex[int]? m) Mutex[int]? { return m; }            // direct return
+//   pass_opt(Mutex[int]? m) Mutex[int]? { Mutex[int]? x = m; return x; } // laundered
+// Those are covered by Go ownership tests (cannot return/move borrowed param).
+//
+// Two related shapes remain broken and OUT OF SCOPE for T1138 — both route
+// through the same unfixable dupOptionalVectorElem codegen path when ownership
+// cannot see the handle: `Mutex[int]?? x = m; return x;` / consuming the wrapped
+// value (T1212), and a generic fn returning an Optional-wrapped handle param
+// (T1213). Do NOT add runtime tests for those until they are fixed.
+//
+// These runtime tests prove the T1138 fix does NOT over-reject the valid paths
+// and that they stay leak-free.
+worker() int {
+  return 42;
+}
+
+// Valid: a `move` Optional-wrapped task param transfers the single handle's
+// ownership to the caller's result — no aliasing, no double-free.
+pass_move_opt(task[int]? move t) task[int]? {
+  return t;
+}
+
+t1138_move_optional_task_return() `test {
+  task[int]? t = go worker();
+  task[int]? r = pass_move_opt(move t);
+  int v = <-r!;
+  assert(v == 42, "move optional-task return");
+}
+
+// Valid: a `move` Optional-wrapped Mutex param — parity for the other handle.
+pass_move_mutex(Mutex[int]? move m) Mutex[int]? {
+  return m;
+}
+
+t1138_move_optional_mutex_return() `test {
+  Mutex[int]? m = Mutex[int](7);
+  Mutex[int]? r = pass_move_mutex(move m);
+  int v = r!.lock().borrow;
+  assert(v == 7, "move optional-mutex return");
+}
+
+// Valid: the non-escaping Some-wrap coercion `Mutex[int]?? x = m` materializes a
+// fresh outer Optional wrapper rather than aliasing the source handle, and its
+// drop does not recurse into the borrowed inner — the wrap-depth carve-out runs
+// before the single-owner reject, so this stays valid and leak-free.
+wrap_coerce(Mutex[int]? m) {
+  Mutex[int]?? x = m;
+}
+
+t1138_wrap_coerce_optional_mutex() `test {
+  Mutex[int]? m = Mutex[int](9);
+  wrap_coerce(m);
+  int v = m!.lock().borrow;
+  assert(v == 9, "source mutex still usable after wrap-coerce borrow");
+}
+
+// Valid: a `move` Optional-wrapped handle laundered through an owned local before
+// return — `move` makes the param owned, so the var-decl `x = m` is a real move
+// (not the rejected borrow-alias), and the single handle transfers cleanly to the
+// caller's result. The reject is gated on Borrowed state, so this fragile combo
+// (launder + optional + handle) must stay valid and leak-free.
+pass_move_launder(Mutex[int]? move m) Mutex[int]? {
+  Mutex[int]? x = m;
+  return x;
+}
+
+t1138_move_launder_optional_mutex() `test {
+  Mutex[int]? m = Mutex[int](11);
+  Mutex[int]? r = pass_move_launder(move m);
+  int v = r!.lock().borrow;
+  assert(v == 11, "move-launder optional-mutex return");
+}

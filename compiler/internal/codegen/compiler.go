@@ -224,6 +224,7 @@ type Compiler struct {
 	dupContainerFieldAccess       bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
 	borrowBlockResult             bool                // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
 	blockValueOwnedResult         bool                // T1107: set by genBlockValue when its last-expr result is an owned heap temp moved out of the block (a claimed string/vector/handle temp, or an owned-local ident whose drop flag it cleared) — read immediately after by genIfExpr / genMatchArmValue to register the merge phi as an owned stmt temp
+	blockValueOwnedFlag           value.Value         // T1208: live per-path i1 ownership flag captured by genBlockValue when its last-expr result was a nested tracked temp (an if/match phi with its own per-path flag phi), loaded BEFORE claimStringTemp neutralized it — read alongside blockValueOwnedResult so trackMergeResultTemp threads the real per-path flag instead of the whole-arm constant (nil → fall back to the blockValueOwnedResult constant)
 	suppressMergeResultTemp       bool                // T1107: when true, trackMergeResultTemp skips registering the match/if phi as a caller stmt temp — set while evaluating a `go`-call argument, where ownership transfer of a conditional heap root into the goroutine frame is handled by the T1106 go-arg machinery (a caller statement-end drop would race the goroutine's async read)
 	matchBorrowedIdents           map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
 	borrowOptionalLocals          map[string]bool     // T1085: optional locals bound from a non-owning borrow (RTTI downcast `x as T` / `T&`/`T~` RHS) — their inner aliases an external owner, so a non-diverging heap-user-type handler unwrap (`o? { ... }`) must NOT neutralize+track the merged phi (the present arm is a borrow that would double-free)
@@ -578,11 +579,12 @@ type scopeBinding struct {
 // Entry-block allocas are initialized to null/false so branch-produced temps
 // have defined values on all paths.
 type stmtTemp struct {
-	alloca   *ir.InstAlloca // entry-block i8* alloca, initialized to null
-	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
-	dropFunc *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
-	elemType types.Type     // T0109: vector element type for string-element drops (nil for non-vectors)
-	arrType  *types.Array   // T1181: fixed-array temp — alloca holds [N x T] storage; cleanup walks elements & drops each (dropFunc nil)
+	alloca      *ir.InstAlloca // entry-block i8* alloca, initialized to null
+	dropFlag    *ir.InstAlloca // entry-block i1, initialized to false
+	dropFunc    *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
+	elemType    types.Type     // T0109: vector element type for string-element drops (nil for non-vectors)
+	arrType     *types.Array   // T1181: fixed-array temp — alloca holds [N x T] storage; cleanup walks elements & drops each (dropFunc nil)
+	perPathFlag bool           // T1208: dropFlag holds a genuine PER-PATH i1 (a flagPhi from an elvis/merge result — owned on one path, borrowed on another), not a compile-time constant. When true, an enclosing merge phi must thread this temp's live flag rather than a whole-arm constant, else it would drop a borrowed value on the borrowed path (use-after-free)
 }
 
 // heapTemp tracks a heap-allocated droppable instance from a constructor call (T0088).

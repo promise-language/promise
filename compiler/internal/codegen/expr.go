@@ -7802,8 +7802,8 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType, subjectDropFlag)
 
 		armVal := c.genMatchArmValue(arm, matchResultType)
-		armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
-		c.claimStringTemp(armVal)                              // T0073: ownership transfers to match phi
+		armOwned, armOwnedFlag := c.matchArmTransfersOwnership(*arm, armVal) // T1107/T1208: before claim
+		c.claimStringTemp(armVal)                                            // T0073: ownership transfers to match phi
 
 		// B0242: Clear drop flags for dup'd bindings consumed by the arm result.
 		// When the arm body returns a dup'd binding's value (directly or via a
@@ -7849,7 +7849,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 			c.block.NewBr(mergeBlock)
 		}
 
-		arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
+		arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned, ownedFlag: armOwnedFlag})
 	}
 
 	if defaultTarget == nil {
@@ -7868,10 +7868,11 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 
 // matchArmInfo tracks a match arm's result value and final block for PHI construction.
 type matchArmInfo struct {
-	val   value.Value
-	end   *ir.Block
-	hasV  bool
-	owned bool // T1107: arm transferred an owned i8* value into the phi
+	val       value.Value
+	end       *ir.Block
+	hasV      bool
+	owned     bool        // T1107: arm transferred an owned i8* value into the phi (drives the anyOwned gate)
+	ownedFlag value.Value // T1208: live per-path i1 ownership flag when the arm value is a nested tracked phi (nil → use the `owned` constant)
 }
 
 // genMatchArmValue generates a match arm's result value with the match's result
@@ -8039,14 +8040,39 @@ func (c *Compiler) exprResultTransfersOwnership(val value.Value, body ast.Expr) 
 }
 
 // matchArmTransfersOwnership reports whether a match arm transfers ownership of an
-// owned i8* value into the phi (T1107). Parallels clearMatchArmResultDropFlags. A
-// block arm consults blockValueOwnedResult (set by genBlockValue); an expression
-// arm inspects the live stmt temp / owned-local ident directly.
-func (c *Compiler) matchArmTransfersOwnership(arm ast.MatchArm, armVal value.Value) bool {
+// owned i8* value into the phi (T1107) and, when the arm value is a nested tracked
+// phi, the live per-path i1 ownership flag (T1208). Parallels
+// clearMatchArmResultDropFlags. A block arm consults blockValueOwnedResult /
+// blockValueOwnedFlag (set by genBlockValue); an expression arm inspects the live
+// stmt temp / owned-local ident directly. Must be called BEFORE claimStringTemp
+// neutralizes the temp's flag alloca.
+func (c *Compiler) matchArmTransfersOwnership(arm ast.MatchArm, armVal value.Value) (bool, value.Value) {
 	if arm.Block != nil {
-		return c.blockValueOwnedResult
+		return c.blockValueOwnedResult, c.blockValueOwnedFlag
 	}
-	return c.exprResultTransfersOwnership(armVal, arm.Body)
+	return c.exprResultTransfersOwnership(armVal, arm.Body), c.captureLiveTempFlag(armVal)
+}
+
+// captureLiveTempFlag loads a live tracked stmt temp's per-path drop flag in the
+// current block (T1208), but ONLY when the temp's flag is genuinely PER-PATH — a
+// flagPhi from a nested if/match/elvis result that is owned on one inner path and
+// borrowed on another (stmtTemp.perPathFlag). For such a value the enclosing merge
+// phi must thread this runtime flag; a whole-arm constant would drop the value on the
+// borrowed inner path (use-after-free). Returns nil for every other value — ordinary
+// clone()/handle temps (whose flag is a compile-time constant, so the caller's
+// constant `owned` bit is already correct — this also covers a FAILABLE clone whose
+// unwrapped result is itself a phi but whose flag is still constant), owned-local
+// idents, borrows, and .rodata literals — leaving their existing IR (and the constant
+// flag-phi incoming) unchanged. MUST be called before claimStringTemp stores a
+// constant 0 into the temp's flag alloca (which would destroy the per-path info).
+func (c *Compiler) captureLiveTempFlag(val value.Value) value.Value {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return nil
+	}
+	if idx, ok := c.stmtTempMap[val]; ok && idx >= 0 && c.stmtTemps[idx].perPathFlag {
+		return c.block.NewLoad(irtypes.I1, c.stmtTemps[idx].dropFlag)
+	}
+	return nil
 }
 
 // resultTransfersOwnedFlag reports whether an expression used as a scope result
@@ -8196,11 +8222,23 @@ func (c *Compiler) trackMergeResultTemp(result value.Value, resultType types.Typ
 		if !ok || br.Target != mergeBlock {
 			continue
 		}
-		flag := int64(0)
-		if a.owned {
-			flag = 1
+		// T1208: when the arm value was a nested tracked phi, use its live per-path
+		// ownership flag (loaded in the arm block before claimStringTemp neutralized
+		// it) instead of a whole-arm constant. A nested mixed owned/borrowed
+		// conditional yields owned on one inner path and borrowed on the other; the
+		// constant would drop the borrowed value (use-after-free). The load sits in the
+		// arm's body block, which dominates a.end, so it legally dominates this edge.
+		var flagVal value.Value
+		if a.ownedFlag != nil {
+			flagVal = a.ownedFlag
+		} else {
+			flag := int64(0)
+			if a.owned {
+				flag = 1
+			}
+			flagVal = constant.NewInt(irtypes.I1, flag)
 		}
-		incomings = append(incomings, &ir.Incoming{X: constant.NewInt(irtypes.I1, flag), Pred: a.end})
+		incomings = append(incomings, &ir.Incoming{X: flagVal, Pred: a.end})
 	}
 	if len(incomings) == 0 {
 		return
@@ -8305,8 +8343,8 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 			c.block = armBlock
 			armVal := c.genMatchArmValue(arm, matchResultType)
-			armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
-			c.claimStringTemp(armVal)                              // T0073
+			armOwned, armOwnedFlag := c.matchArmTransfersOwnership(*arm, armVal) // T1107/T1208: before claim
+			c.claimStringTemp(armVal)                                            // T0073
 			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 			// in the selected arm's block, so the clear is path-conditional: the
@@ -8317,7 +8355,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
 			}
-			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned, ownedFlag: armOwnedFlag})
 
 			c.block = nextBlock
 
@@ -8365,8 +8403,8 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			}
 
 			armVal := c.genMatchArmValue(arm, matchResultType)
-			armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
-			c.claimStringTemp(armVal)                              // T0073
+			armOwned, armOwnedFlag := c.matchArmTransfersOwnership(*arm, armVal) // T1107/T1208: before claim
+			c.claimStringTemp(armVal)                                            // T0073
 			// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 			// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 			// in the selected arm's block, so the clear is path-conditional: the
@@ -8377,7 +8415,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
 			}
-			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned, ownedFlag: armOwnedFlag})
 
 			// Restore any shadowed binding so later arms / merge don't see it.
 			if p.Binding != "_" {
@@ -8422,8 +8460,8 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 				c.block = armBlock
 				armVal := c.genMatchArmValue(arm, matchResultType)
-				armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
-				c.claimStringTemp(armVal)                              // T0073
+				armOwned, armOwnedFlag := c.matchArmTransfersOwnership(*arm, armVal) // T1107/T1208: before claim
+				c.claimStringTemp(armVal)                                            // T0073
 				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 				// in the selected arm's block, so the clear is path-conditional: the
@@ -8434,15 +8472,15 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
 				}
-				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
+				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned, ownedFlag: armOwnedFlag})
 
 				c.block = nextBlock
 				// Guard failed — continue to next arm (don't return early)
 			} else {
 				// No guard — unconditional default arm
 				armVal := c.genMatchArmValue(arm, matchResultType)
-				armOwned := c.matchArmTransfersOwnership(*arm, armVal) // T1107: before claim
-				c.claimStringTemp(armVal)                              // T0073
+				armOwned, armOwnedFlag := c.matchArmTransfersOwnership(*arm, armVal) // T1107/T1208: before claim
+				c.claimStringTemp(armVal)                                            // T0073
 				// T0975: clear drop flags for an owned arm-result ident (e.g. a task)
 				// consumed by the match PHI and forwarded to a consuming `<-`. Emitted
 				// in the selected arm's block, so the clear is path-conditional: the
@@ -8453,7 +8491,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
 				}
-				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned})
+				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil, owned: armOwned, ownedFlag: armOwnedFlag})
 
 				// After an unguarded wildcard/name, no more arms need checking
 				c.block = mergeBlock
@@ -9559,8 +9597,9 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	c.targetType = ifResultType
 	thenVal := c.genBlockValue(e.Then)
 	c.targetType = savedTarget
-	thenOwned := c.blockValueOwnedResult // T1107: genBlockValue recorded ownership
-	c.claimStringTemp(thenVal)           // T0073
+	thenOwned := c.blockValueOwnedResult   // T1107: genBlockValue recorded ownership
+	thenOwnedFlag := c.blockValueOwnedFlag // T1208: live per-path flag (nested tracked temp)
+	c.claimStringTemp(thenVal)             // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -9573,8 +9612,9 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	c.targetType = ifResultType
 	elseVal := c.genBlockValue(e.Else)
 	c.targetType = savedTarget
-	elseOwned := c.blockValueOwnedResult // T1107: genBlockValue recorded ownership
-	c.claimStringTemp(elseVal)           // T0073
+	elseOwned := c.blockValueOwnedResult   // T1107: genBlockValue recorded ownership
+	elseOwnedFlag := c.blockValueOwnedFlag // T1208: live per-path flag (nested tracked temp)
+	c.claimStringTemp(elseVal)             // T0073
 	elseEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -9619,8 +9659,8 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 		// the match path via two synthetic arm records (only .end and .owned are
 		// consulted). A bound/return consumer claims the phi and neutralizes the flag.
 		c.trackMergeResultTemp(phi, ifResultType, []matchArmInfo{
-			{end: thenEnd, owned: thenOwned},
-			{end: elseEnd, owned: elseOwned},
+			{end: thenEnd, owned: thenOwned, ownedFlag: thenOwnedFlag},
+			{end: elseEnd, owned: elseOwned, ownedFlag: elseOwnedFlag},
 		})
 		return phi
 	}

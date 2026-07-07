@@ -538,6 +538,12 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 	// owned stmt temp. Reset here; set authoritatively at the normal-result path
 	// below (stays false for borrow / auto-propagate / value results).
 	blockOwned := false
+	// T1208: live per-path i1 ownership flag when the block result is a nested tracked
+	// temp (an if/match phi with its own per-path flag phi). Captured before
+	// claimStringTemp neutralizes it; threaded to the enclosing merge phi so a nested
+	// mixed owned/borrowed conditional does not drop a borrowed value. nil for
+	// owned-local idents (whole-arm transfer → constant is correct) and borrows.
+	var blockOwnedFlag value.Value
 	var result value.Value
 	n := len(block.Stmts)
 	for i, stmt := range block.Stmts {
@@ -593,6 +599,10 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					if result != nil {
 						if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
 							blockOwned = true
+							// T1208: capture the temp's live per-path flag before
+							// claimStringTemp zeroes it, so a nested mixed owned/borrowed
+							// conditional threads the real per-path bit to the enclosing phi.
+							blockOwnedFlag = c.captureLiveTempFlag(result)
 						}
 					}
 					// T0095: Claim string dup temps from block result expressions.
@@ -630,6 +640,9 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 				if result != nil {
 					if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
 						blockOwned = true
+						// T1208: no claimStringTemp on this path, so the temp's per-path
+						// flag is still live — capture it for the enclosing merge phi.
+						blockOwnedFlag = c.captureLiveTempFlag(result)
 					}
 				}
 				break
@@ -642,7 +655,8 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.emitCloseErrCheck(cap)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
-	c.blockValueOwnedResult = blockOwned // T1107
+	c.blockValueOwnedResult = blockOwned   // T1107
+	c.blockValueOwnedFlag = blockOwnedFlag // T1208
 	return result
 }
 
@@ -5989,8 +6003,14 @@ func (c *Compiler) appendStmtTemp(val value.Value, dropFn *ir.Func, elemType typ
 	c.block.NewStore(val, alloca)
 	c.block.NewStore(liveFlag, dropFlag)
 
+	// T1208: a non-constant liveFlag is a genuine per-path flag (an elvis/merge-result
+	// flagPhi). Record it so an enclosing conditional threads this temp's live flag
+	// instead of a whole-arm constant (which would drop a borrowed value on the
+	// borrowed path). Ordinary temps (constant 1) keep perPathFlag=false.
+	_, isConst := liveFlag.(constant.Constant)
+
 	idx := len(c.stmtTemps)
-	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFn, elemType: elemType})
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFn, elemType: elemType, perPathFlag: !isConst})
 	c.stmtTempMap[val] = idx
 }
 
@@ -9834,8 +9854,9 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	// Then branch — capture value
 	c.block = thenBlock
 	thenVal := c.genBlockValue(s.Body)
-	thenOwned := c.blockValueOwnedResult // T1206: genBlockValue recorded ownership
-	c.claimStringTemp(thenVal)           // T0073
+	thenOwned := c.blockValueOwnedResult   // T1206: genBlockValue recorded ownership
+	thenOwnedFlag := c.blockValueOwnedFlag // T1208: live per-path flag (nested tracked temp)
+	c.claimStringTemp(thenVal)             // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -9845,10 +9866,12 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	c.block = elseBlock
 	var elseVal value.Value
 	elseOwned := false // T1206
+	var elseOwnedFlag value.Value
 	switch e := s.Else.(type) {
 	case *ast.Block:
 		elseVal = c.genBlockValue(e)
 		elseOwned = c.blockValueOwnedResult
+		elseOwnedFlag = c.blockValueOwnedFlag // T1208
 	case *ast.IfStmt:
 		elseVal = c.genIfStmtValue(e)
 		// A recursive else-if returns a tracked owned temp when it transfers
@@ -9856,6 +9879,7 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 		if elseVal != nil {
 			if idx, ok := c.stmtTempMap[elseVal]; ok && idx >= 0 {
 				elseOwned = true
+				elseOwnedFlag = c.captureLiveTempFlag(elseVal) // T1208
 			}
 		}
 	default:
@@ -9905,8 +9929,8 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 		// selected clone/owned-local leaked. A bound/return consumer claims the phi.
 		resultType := c.ifStmtValueResultType(s)
 		c.trackMergeResultTemp(phi, resultType, []matchArmInfo{
-			{end: thenEnd, owned: thenOwned},
-			{end: elseEnd, owned: elseOwned},
+			{end: thenEnd, owned: thenOwned, ownedFlag: thenOwnedFlag},
+			{end: elseEnd, owned: elseOwned, ownedFlag: elseOwnedFlag},
 		})
 		return phi
 	}

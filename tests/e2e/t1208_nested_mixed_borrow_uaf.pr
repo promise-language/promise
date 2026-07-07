@@ -1,0 +1,307 @@
+// T1208: use-after-free distinct from T1206. When an OUTER match/if selects an arm
+// whose body is a nested MIXED owned/borrowed conditional — one OWNED inner arm
+// (clone()/owned-local) and one BORROWED inner arm (a borrowed param/field) — and the
+// outer result is passed to a BORROW parameter, selecting the BORROWED inner path
+// used to FREE the borrowed value (use-after-free), plus a double-free at the real
+// owner's scope end.
+//
+// Root cause: the outer merge's per-path ownership flag used the arm's whole-arm
+// CONSTANT owned bit (the nested phi is a tracked owned temp), destroying the inner
+// phi's genuine per-path flag ([owned:1, borrowed:0]). The fix threads the inner
+// temp's live per-path drop flag (captured before claimStringTemp neutralizes it)
+// into the outer flag phi, so the borrowed inner path does NOT drop the borrowed
+// value. Every test reads the borrowed source AFTER the borrow-consuming statement
+// (a UAF would read freed memory) and relies on zero-tolerance leak enforcement (a
+// double-free / missed-drop would surface as a leak or crash).
+type Holder {
+  int n;
+}
+
+type Box {
+  string s;
+}
+
+borrow_len(string p) Holder {
+  return Holder(n: p.len);
+}
+
+borrow_vlen(int[] v) Holder {
+  return Holder(n: v.len);
+}
+
+// Outer MATCH + inner IF, BORROWED inner arm selected (b == false → `param`). The
+// borrowed `param` must survive; its owner (the caller's clone) is freed exactly once.
+mm_match_if_borrowed(string param) {
+  a := true;
+  b := false;
+  r := borrow_len(match a {
+    true => if b {
+      "x".clone()
+    } else {
+      param
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == param.len, "match+if borrowed arm: param survives");
+  assert(param.len == 8, "match+if borrowed arm: param intact");
+}
+
+match_if_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  mm_match_if_borrowed(p);
+  assert(p.len == 8, "caller string intact after borrow");
+}
+
+// Outer IF + inner IF, borrowed inner arm.
+mm_if_if_borrowed(string param) {
+  b := false;
+  r := borrow_len(if true {
+    if b {
+      "x".clone()
+    } else {
+      param
+    }
+  } else {
+    "zz".clone()
+  });
+  assert(r.n == param.len, "if+if borrowed arm: param survives");
+}
+
+if_if_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  mm_if_if_borrowed(p);
+  assert(p.len == 8, "caller string intact after if+if borrow");
+}
+
+// Outer MATCH + inner MATCH, borrowed inner arm.
+mm_match_match_borrowed(string param) {
+  a := true;
+  b := false;
+  r := borrow_len(match a {
+    true => match b {
+      true => "x".clone(), _ => param,
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == param.len, "match+match borrowed arm: param survives");
+}
+
+match_match_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  mm_match_match_borrowed(p);
+  assert(p.len == 8, "caller string intact after match+match borrow");
+}
+
+// Borrowed FIELD inner arm (not a param). The local Box owns the string; the inner
+// arm borrows `box.s`. A UAF would free box.s and box's scope-end drop double-frees.
+match_if_borrowed_field() `test {
+  box := Box(s: "abcdheap".clone());
+  a := true;
+  b := false;
+  r := borrow_len(match a {
+    true => if b {
+      "x".clone()
+    } else {
+      box.s
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == box.s.len, "borrowed field arm: box.s survives");
+  assert(box.s.len == 8, "borrowed field arm: box.s intact");
+}
+
+// OWNED inner path selected (b == true → the clone) — regression guard for the owned
+// side: still no leak, correct value, and `param` (unselected) survives.
+mm_match_if_owned(string param) {
+  a := true;
+  b := true;
+  r := borrow_len(match a {
+    true => if b {
+      "xyz".clone()
+    } else {
+      param
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 3, "match+if owned arm: clone selected");
+  assert(param.len == 8, "match+if owned arm: unselected param intact");
+}
+
+match_if_owned_arm() `test {
+  p := "abcdheap".clone();
+  mm_match_if_owned(p);
+  assert(p.len == 8, "caller string intact after owned-arm select");
+}
+
+// Outer selects the OTHER (non-nested) arm — the nested mixed conditional is not
+// evaluated; the borrowed `param` is untouched, the clone in the other arm freed once.
+mm_match_other_arm(string param) {
+  a := false;
+  b := false;
+  r := borrow_len(match a {
+    true => if b {
+      "x".clone()
+    } else {
+      param
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == 2, "other arm: zz clone selected");
+  assert(param.len == 8, "other arm: param untouched");
+}
+
+match_other_arm_borrowed() `test {
+  p := "abcdheap".clone();
+  mm_match_other_arm(p);
+  assert(p.len == 8, "caller string intact after other-arm select");
+}
+
+// Vector[int] element variant (Vector.drop path) with a borrowed inner arm.
+mm_vector_borrowed(int[] param) {
+  a := true;
+  b := false;
+  r := borrow_vlen(match a {
+    true => if b {
+      [9, 9].clone()
+    } else {
+      param
+    },
+    _ => [0].clone(),
+  });
+  assert(r.n == param.len, "vector borrowed arm: param survives");
+  assert(param.len == 4, "vector borrowed arm: param intact");
+}
+
+match_if_borrowed_vector() `test {
+  v := [1, 2, 3, 4].clone();
+  mm_vector_borrowed(v);
+  assert(v.len == 4, "caller vector intact after borrow");
+}
+
+// Outer REAL ENUM match (genEnumMatch path, distinct from the bool `genValueMatch`
+// path above) + inner mixed if, borrowed inner arm. The enum arm is a block whose
+// result is the nested if temp; genBlockValue threads its per-path flag.
+enum Choice {
+  A, B,
+}
+
+mm_enum_outer(string param, Choice c) {
+  b := false;
+  r := borrow_len(match c {
+    A => if b {
+      "x".clone()
+    } else {
+      param
+    },
+    B => "zz".clone(),
+  });
+  assert(r.n == param.len, "enum outer borrowed arm: param survives");
+  assert(param.len == 8, "enum outer borrowed arm: param intact");
+}
+
+enum_outer_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  mm_enum_outer(p, Choice.A);
+  assert(p.len == 8, "caller string intact after enum-outer borrow");
+}
+
+// Outer ENUM selects the OTHER arm (B) — nested mixed conditional not evaluated; the
+// clone in the B arm is freed once, the borrowed param is untouched.
+mm_enum_other(string param, Choice c) {
+  b := false;
+  r := borrow_len(match c {
+    A => if b {
+      "x".clone()
+    } else {
+      param
+    },
+    B => "zz".clone(),
+  });
+  assert(r.n == 2, "enum other arm: zz clone selected");
+  assert(param.len == 8, "enum other arm: param untouched");
+}
+
+enum_outer_other_arm() `test {
+  p := "abcdheap".clone();
+  mm_enum_other(p, Choice.B);
+  assert(p.len == 8, "caller string intact after enum-outer other-arm select");
+}
+
+// DEPTH-3 nesting: outer match -> middle if -> inner match with the borrowed arm.
+// The per-path flag must thread through TWO merge levels; the constant-flag bug at
+// any level would free `param` on the borrowed path.
+mm_depth3_borrowed(string param) {
+  a := true;
+  b := true;
+  d := false;
+  r := borrow_len(match a {
+    true => if b {
+      match d {
+        true => "q".clone(), _ => param,
+      }
+    } else {
+      "yy".clone()
+    },
+    _ => "zz".clone(),
+  });
+  assert(r.n == param.len, "depth3 borrowed arm: param survives");
+  assert(param.len == 8, "depth3 borrowed arm: param intact");
+}
+
+depth3_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  mm_depth3_borrowed(p);
+  assert(p.len == 8, "caller string intact after depth3 borrow");
+}
+
+// NOTE: the bound-to-local consumer (`s := match a { ... borrowed arm ... }`) is a
+// SEPARATE pre-existing double-free (tracked as T1209): the binding creates an
+// unconditional drop for `s` that ignores the per-path flag and frees the borrowed
+// value on the borrowed path. It is out of scope for T1208 (borrow-param / discard /
+// return-of-borrow-call consumers) and deliberately omitted here.
+
+// Return position — the return claims the phi. On the borrowed path the returned
+// value aliases `param`; the caller passes a borrow, so no ownership is transferred.
+pick_borrowed(string param, bool b) Holder {
+  a := true;
+  return borrow_len(match a {
+    true => if b {
+      "x".clone()
+    } else {
+      param
+    },
+    _ => "zz".clone(),
+  });
+}
+
+return_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  h1 := pick_borrowed(p, false);
+  assert(h1.n == 8, "return borrowed arm: length from param");
+  assert(p.len == 8, "return borrowed arm: param survives");
+  h2 := pick_borrowed(p, true);
+  assert(h2.n == 1, "return owned arm: length from clone");
+  assert(p.len == 8, "return owned arm: param survives");
+}
+
+// Discarded statement — the borrowed value on the borrowed path must not be freed;
+// the unselected clone in the other arm is not evaluated.
+discarded_borrowed(string param) {
+  a := true;
+  b := false;
+  borrow_len(match a {
+    true => if b {
+      "x".clone()
+    } else {
+      param
+    },
+    _ => "zz".clone(),
+  });
+  assert(param.len == 8, "discarded borrowed arm: param survives");
+}
+
+discarded_borrowed_arm() `test {
+  p := "abcdheap".clone();
+  discarded_borrowed(p);
+  assert(p.len == 8, "caller string intact after discarded borrow");
+}

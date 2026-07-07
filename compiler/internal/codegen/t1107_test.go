@@ -146,6 +146,40 @@ func TestMatchOwnedMutexResultTrackedForBorrow(t *testing.T) {
 	assertContains(t, fn, `call void @"Mutex[int].drop"`)
 }
 
+// MutexGuard arms → owned guard result to a borrow param, freed via MutexGuard.drop
+// (ownedI8PtrResultDrop's AsMutexGuard / TypMutexGuard branch). m.lock() yields an
+// owned guard temp; the selected guard is released at the caller's statement end.
+func TestMatchOwnedMutexGuardResultTrackedForBorrow(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { int n; }
+		borrow_guard(MutexGuard[int] g) Holder { return Holder(n: g.borrow); }
+		run(bool c) {
+			m := Mutex[int](7);
+			r := borrow_guard(match c { true => m.lock(), _ => m.lock() });
+		}
+	`)
+	fn := extractFunction(ir, "__user.run")
+	assertContains(t, fn, "phi i1 [ true,")
+	assertContains(t, fn, "call void @MutexGuard.drop")
+}
+
+// Task arms (`go compute(...)` → owned Task temp) → owned Task handle result to a
+// borrow param, freed via the per-instantiation Task.drop (ownedI8PtrResultDrop's
+// AsTask branch). Borrowed (not awaited), so the caller drops the selected task.
+func TestMatchOwnedTaskResultTrackedForBorrow(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { int n; }
+		borrow_task(task[int] t) Holder { return Holder(n: 42); }
+		compute(int x) int { return x * 2; }
+		run(bool c) {
+			r := borrow_task(match c { true => go compute(3), _ => go compute(5) });
+		}
+	`)
+	fn := extractFunction(ir, "__user.run")
+	assertContains(t, fn, "phi i1 [ true,")
+	assertContains(t, fn, `call void @"Task[int].drop"`)
+}
+
 // Recursion coverage: an OUTER match arm whose body is itself a match whose leaf is
 // an owned-local ident, evaluated as a `go`-call argument. Under
 // suppressMergeResultTemp the inner match phi is NOT registered as a stmt temp, so

@@ -27,6 +27,9 @@ borrow_mutex(Mutex[int] m) Holder {
 borrow_task(task[int] t) Holder {
   return Holder(n: 42);
 }
+borrow_guard(MutexGuard[int] g) Holder {
+  return Holder(n: g.borrow);
+}
 
 compute(int x) int {
   return x * 2;
@@ -130,6 +133,29 @@ task_match_borrow() `test {
     true => go compute(3), _ => go compute(5),
   });
   assert(r.n == 42, "task match borrow");
+}
+
+// MutexGuard[int] arms (m.lock() → owned guard temp) → owned guard result, freed
+// via MutexGuard.drop (ownedI8PtrResultDrop's AsMutexGuard branch). The selected
+// guard is released at the caller's statement end.
+guard_match_borrow() `test {
+  m := Mutex[int](7);
+  cond := true;
+  r := borrow_guard(match cond {
+    true => m.lock(), _ => m.lock(),
+  });
+  assert(r.n == 7, "guard match borrow");
+}
+
+guard_if_borrow() `test {
+  m := Mutex[int](5);
+  cond := false;
+  r := borrow_guard(if cond {
+    m.lock()
+  } else {
+    m.lock()
+  });
+  assert(r.n == 5, "guard if borrow else");
 }
 
 // T1106/T1107 interaction: a match/if owned result passed DIRECTLY as a `go`-call

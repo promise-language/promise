@@ -1,0 +1,175 @@
+// T1209: binding a mixed owned/borrowed match/if result to a LOCAL (`s := …`, a
+// typed decl, or an assignment to an existing droppable local) must NOT drop the
+// borrowed arm's value at the binding's scope end. The merge temp carries a per-path
+// ownership flag ([owned:1, borrowed:0]); before the fix the binding armed its drop
+// flag UNCONDITIONALLY, so on the borrowed path `s` aliased a caller-owned param/field
+// and freed it at scope end → double-free (and the mirror-image leak on the owned
+// path if the flag were forced the other way). Each helper binds the mixed conditional
+// and the caller reads the borrowed source AFTER the call to prove it survives; zero-
+// tolerance leak enforcement covers the owned path (clone dropped exactly once).
+//
+// The Optional-wrapped shape (`T? s = if …`) is deliberately out of scope here — it
+// uses a different drop mechanism (maybeRegisterOptionalDrop) and is tracked as T1210.
+// Heap-user-type and `Map[K,V]` results are ALSO out of scope: trackMergeResultTemp
+// only tracks i8*-shaped owned results (string/Vector/native handle), so a
+// user-droppable-type or `map` bound mixed conditional still double-frees on the
+// borrowed path — tracked as T1211. This file therefore only exercises string + Vector.
+type Box {
+  string label;
+}
+
+// --- inferred `:=` binding, outer IF, borrowed `else` arm (the exact repro) ---
+consume_if(string param) {
+  b := false;
+  s := if b {
+    "x".clone()
+  } else {
+    param
+  };
+  assert(s.len == param.len, "if alias");
+}
+bound_if_borrow() `test {
+  p := "abcdheap".clone();
+  consume_if(p);
+  assert(p.len == 8, "if param survives");
+}
+
+// --- paren-wrapped RHS: `s := (if …)` exercises isMixedMergeBindingRHS's ParenExpr
+// unwrap at runtime (a bare parse-level wrapper must not hide the mixed merge temp) ---
+consume_paren(string param) {
+  b := false;
+  s := (if b {
+    "x".clone()
+  } else {
+    param
+  });
+  assert(s.len == param.len, "paren alias");
+}
+bound_paren_borrow() `test {
+  p := "abcdheap".clone();
+  consume_paren(p);
+  assert(p.len == 8, "paren param survives");
+}
+
+// --- typed `string s = if …` binding ---
+consume_typed(string param) {
+  b := false;
+  string s = if b {
+    "x".clone()
+  } else {
+    param
+  };
+  assert(s.len == param.len, "typed alias");
+}
+bound_typed_borrow() `test {
+  p := "abcdheap".clone();
+  consume_typed(p);
+  assert(p.len == 8, "typed param survives");
+}
+
+// --- outer MATCH, borrowed `_` arm ---
+consume_match(int k, string param) {
+  s := match k {
+    1 => "x".clone(), _ => param,
+  };
+  assert(s.len == param.len, "match alias");
+}
+bound_match_borrow() `test {
+  p := "abcdheap".clone();
+  consume_match(0, p);
+  assert(p.len == 8, "match param survives");
+}
+
+// --- Vector[int] variant (Vector.drop path) ---
+consume_vec(bool b, int[] param) {
+  s := if b {
+    [1, 2, 3].clone()
+  } else {
+    param
+  };
+  assert(s.len == param.len, "vec alias");
+}
+bound_vec_borrow() `test {
+  v := [10, 20, 30, 40];
+  consume_vec(false, v);
+  assert(v.len == 4, "vec param survives");
+}
+
+// --- assignment to an existing droppable local (drop-old + borrowed re-arm) ---
+consume_assign(bool b, string param) {
+  s := "seed".clone();
+  s = if b {
+    "x".clone()
+  } else {
+    param
+  };
+  assert(s.len == param.len, "assign alias");
+}
+bound_assign_borrow() `test {
+  p := "abcdheap".clone();
+  consume_assign(false, p);
+  assert(p.len == 8, "assign param survives");
+}
+
+// --- borrowed FIELD inner arm (a struct field, not just a param) ---
+consume_field(bool b, Box box) {
+  s := if b {
+    "x".clone()
+  } else {
+    box.label
+  };
+  assert(s.len == box.label.len, "field alias");
+}
+bound_field_borrow() `test {
+  bx := Box(label: "fieldval".clone());
+  consume_field(false, bx);
+  assert(bx.label.len == 8, "field survives");
+}
+
+// --- outer-nested: outer MATCH selecting an arm whose body is a nested MIXED
+// conditional, bound to a local ---
+consume_nested(bool a, bool b, string param) {
+  s := match a {
+    true => if b {
+      "x".clone()
+    } else {
+      param
+    }, _ => "zz".clone(),
+  };
+  assert(s.len == param.len || s.len == 2, "nested alias");
+}
+bound_nested_borrow() `test {
+  p := "abcdheap".clone();
+  consume_nested(true, false, p); // outer true -> inner false -> borrowed param
+  assert(p.len == 8, "nested param survives");
+}
+
+// --- owned-path regression: b == true selects the clone() arm ---
+consume_owned_path(bool b, string param) {
+  s := if b {
+    "owned".clone()
+  } else {
+    param
+  };
+  assert(s.len == 5 || s.len == param.len, "owned path value");
+}
+bound_owned_path() `test {
+  p := "abcdheap".clone();
+  consume_owned_path(true, p); // selects the clone — must drop it once, no leak
+  assert(p.len == 8, "owned-path param survives");
+}
+
+// --- both-arms-owned regression: no borrowed arm at all, still no double-free/leak ---
+consume_both_owned(bool b) {
+  local := "loc".clone();
+  s := if b {
+    local
+  } else {
+    "w".clone()
+  };
+  assert(s.len == 3 || s.len == 1, "both-owned value");
+}
+bound_both_owned() `test {
+  consume_both_owned(true);
+  consume_both_owned(false);
+}

@@ -1395,6 +1395,18 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 	}
 
+	// T1209: capture a mixed owned/borrowed match/if result's live per-path flag
+	// before the claims below neutralize it; applied after maybeRegisterDrop to
+	// replace the unconditional owning drop. Skipped for an elvis RHS (handled by
+	// consumeElvisBoundDropFlag), for an Optional-wrap (maybeRegisterOptionalDrop, a
+	// different mechanism — out of scope, T1210), and for any non-match/if perPathFlag
+	// temp — e.g. the member optional handler `owner.field? _ {}` (T1162), whose
+	// binding MOVES the value out of the field (applying the stale flag would leak).
+	// See isMixedMergeBindingRHS.
+	var mergeBoundFlag value.Value
+	if c.elvisBoundDropFlag == nil && !willWrap && isMixedMergeBindingRHS(s.Value) {
+		mergeBoundFlag = c.captureLiveTempFlag(val)
+	}
 	// T0073: Claim string temp — ownership transferred to this variable.
 	// B0204: Use resolvedExprType (substituted) so that generic T=string is handled.
 	if resolvedExprType != nil && extractNamed(resolvedExprType) == types.TypString {
@@ -1466,6 +1478,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// operand was orphaned/neutralized — replace the unconditional owning drop with
 	// the per-path flag computed in genElvis.
 	c.consumeElvisBoundDropFlag(s.Name)
+	c.applyBoundMergeFlag(s.Name, mergeBoundFlag) // T1209
 	// T0347: Drain pending this-alias clear request set when RHS is a chain rooted
 	// at `this`. maybeRegisterDrop has now stored i1 1 into the binding's drop flag;
 	// emit a runtime alias check that clears it back to false when the result really
@@ -1740,6 +1753,19 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		}
 	}
 
+	// T1209: a mixed owned/borrowed match/if result bound to this local owns its
+	// value only on the paths that selected an owned arm. Capture the merge temp's
+	// live per-path flag before the claims below neutralize it; applied after
+	// maybeRegisterDrop to replace the unconditional owning drop. Skipped for an
+	// elvis RHS (handled by consumeElvisBoundDropFlag) and for any non-match/if
+	// perPathFlag temp — e.g. the member optional handler `owner.field? _ {}` (T1162),
+	// whose binding MOVES the present value out of the field so the binding owns it
+	// unconditionally (applying the stale present=borrowed flag would leak). See
+	// isMixedMergeBindingRHS.
+	var mergeBoundFlag value.Value
+	if c.elvisBoundDropFlag == nil && isMixedMergeBindingRHS(s.Value) {
+		mergeBoundFlag = c.captureLiveTempFlag(val)
+	}
 	// T0073: Claim string temp — ownership transferred to this variable.
 	if extractNamed(typ) == types.TypString {
 		c.claimStringTemp(val)
@@ -1796,6 +1822,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// T0940/T0981: replace the unconditional owning drop with the bound elvis's
 	// per-path flag (see consumeElvisBoundDropFlag / matching block in genVarDecl).
 	c.consumeElvisBoundDropFlag(s.Name)
+	c.applyBoundMergeFlag(s.Name, mergeBoundFlag) // T1209
 	// T0347: Drain pending this-alias clear (see matching block in genVarDecl).
 	if req := c.pendingThisAliasClear; req != nil {
 		c.pendingThisAliasClear = nil
@@ -2591,6 +2618,47 @@ func (c *Compiler) consumeElvisBoundDropFlag(name string) {
 		c.block.NewStore(c.elvisBoundDropFlag, lhsFlag)
 	}
 	c.elvisBoundDropFlag = nil
+}
+
+// applyBoundMergeFlag replaces the unconditional owning drop that maybeRegisterDrop
+// just stored into a bound/reassigned local's drop flag with the PER-PATH ownership
+// flag of a mixed owned/borrowed match/if result (T1209). `flag` is the live flag
+// captured by captureLiveTempFlag BEFORE claimStringTemp neutralized the merge temp:
+// 1 on paths that selected an owned arm, 0 on paths that selected a borrowed
+// (param/field) arm. Without this the binding drops a borrowed value on the borrowed
+// path (double-free / use-after-free). No-op when flag is nil (RHS was not a per-path
+// merge temp) or the binding has no i1 drop flag (value/scalar/structural types).
+func (c *Compiler) applyBoundMergeFlag(name string, flag value.Value) {
+	if flag == nil {
+		return
+	}
+	if lhsFlag, ok := c.dropFlags[name]; ok {
+		c.block.NewStore(flag, lhsFlag)
+	}
+}
+
+// isMixedMergeBindingRHS reports whether a bound RHS expression is a `match`/`if`
+// whose result may be a mixed owned/borrowed merge temp (T1209). Only these
+// constructs keep a BORROWED arm (a borrowed param/field) ALIASED through the
+// binding, so only they need the merge temp's per-path flag threaded into the
+// binding's drop flag. Other perPathFlag temps must be excluded — notably the
+// member optional handler `owner.field? _ { recovery }` (ErrorHandlerExpr, T1162),
+// whose binding MOVES the present value out of the owner's field, so the binding
+// owns it unconditionally and applying the (stale, present=borrowed) per-path flag
+// would suppress the sole drop → leak. Parens are unwrapped.
+func isMixedMergeBindingRHS(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	switch expr.(type) {
+	case *ast.IfExpr, *ast.MatchExpr:
+		return true
+	}
+	return false
 }
 
 // maybeRegisterBorrowParamReassignDrop gives a borrow-by-default heap param a
@@ -7361,6 +7429,17 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	// elvisResultOwnsForced above) so the field/element is unconditionally owned.
 	elvisBoundFlag := c.elvisBoundDropFlag
 	c.elvisBoundDropFlag = nil
+	// T1209: capture a mixed owned/borrowed match/if result's live per-path flag
+	// before the claims below neutralize it; stored into the target's drop flag at
+	// the elvis store site so it overrides the drop-old re-arm (`store i1 true`).
+	// Skipped for an elvis RHS (elvisBoundFlag, already nil'd into the local) and for
+	// any non-match/if perPathFlag temp — e.g. the member optional handler
+	// `owner.field? _ {}` (T1162), whose binding MOVES the value out of the field so
+	// applying the stale present=borrowed flag would leak. See isMixedMergeBindingRHS.
+	var mergeBoundFlag value.Value
+	if elvisBoundFlag == nil && isMixedMergeBindingRHS(s.Value) {
+		mergeBoundFlag = c.captureLiveTempFlag(val)
+	}
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
 	c.dupTupleFieldAccess = false
@@ -7736,6 +7815,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					c.block.NewStore(elvisBoundFlag, lhsFlag)
 				}
 			}
+			c.applyBoundMergeFlag(target.Name, mergeBoundFlag) // T1209
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result

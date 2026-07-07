@@ -2424,9 +2424,6 @@ func isDroppableType(typ types.Type) bool {
 			if n.HasDrop() || n.NeedsSynthDrop() {
 				return true
 			}
-			if instanceHasDroppableField(t) {
-				return true
-			}
 			return !n.IsValueType() && !n.IsStructural() && !isCopyType(n)
 		}
 		if e, ok := t.Origin().(*types.Enum); ok {

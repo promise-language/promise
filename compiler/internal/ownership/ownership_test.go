@@ -5087,6 +5087,68 @@ func TestFieldMoveGenericEnumInstanceOriginHasDropError(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move field 'e'")
 }
 
+// T0566: isDroppableType's Tuple branch iterates all elements and hits the final
+// `return false` when no element is droppable. Exercises the not-yet-covered
+// non-droppable exit of the Tuple case (existing tests only cover Tuples WITH
+// droppable elements). Fieldless enums (Color) are non-copy AND non-droppable
+// (no HasDrop, no NeedsSynthDrop, no variant fields) — so isCopyType rejects
+// the early-out at line 2584 while isDroppableType returns false for each element,
+// reaching the final `return false` at line 2446. Moving a (Color, Color) field
+// from a droppable owner must be allowed.
+func TestFieldMoveTupleAllNonDroppableElementsOK(t *testing.T) {
+	ownerOK(t, `
+		enum Color { Red, Green, Blue }
+		type Container {
+			(Color, Color) pair;
+			drop(~this) {}
+		}
+		test() {
+			Container c = Container(pair: (Color.Red, Color.Green));
+			(Color, Color) p = c.pair;
+		}
+	`)
+}
+
+// T0566: instanceHasDroppableField exits early via the named.IsCopy() guard
+// when isDroppableOwner is called with a Copy-origin generic instance
+// (GenCopy[_Plain]). isCopyType does not handle *types.Instance so the usual
+// Copy-field short-circuit upstream (isCopyType(fieldType)) does not fire;
+// instead isDroppableOwner reaches instanceHasDroppableField, which returns
+// false via the IsCopy guard. Moving _Plain from such an owner must be allowed.
+func TestFieldMoveGenericCopyOriginInstanceOwnerOK(t *testing.T) {
+	ownerOK(t, `
+		type _Plain { int n; }
+		type GenCopy[T] `+"`copy"+`{ T v; }
+		test() {
+			GenCopy[_Plain] g = GenCopy[_Plain](v: _Plain(n: 1));
+			_Plain p = g.v;
+		}
+	`)
+}
+
+// T0566: enumInstanceHasDroppableField exits early via the enum.IsCopy() guard
+// when the field type is a Copy-origin generic enum instance (CopyMaybe[int]).
+// isCopyType does not handle *types.Instance so CopyMaybe[int] is not caught
+// upstream; isDroppableType reaches enumInstanceHasDroppableField, which returns
+// false via the IsCopy guard. Moving a Copy-enum field from a droppable owner
+// must be allowed.
+func TestFieldMoveCopyEnumInstanceFieldOK(t *testing.T) {
+	ownerOK(t, `
+		enum CopyMaybe[T] `+"`copy"+`{
+			Just(T val);
+			Nothing;
+		}
+		type Outer {
+			CopyMaybe[int] m;
+			drop(~this) {}
+		}
+		test() {
+			Outer o = Outer(m: CopyMaybe[int].Just(7));
+			CopyMaybe[int] x = o.m;
+		}
+	`)
+}
+
 // === T0338: borrowed parameter cannot be moved ===
 
 // Bug repro: moving a non-~ param into a constructor field is rejected.

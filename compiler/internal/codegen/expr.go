@@ -4964,6 +4964,16 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		if inst, ok := typ.(*types.Instance); ok {
 			if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
 				localSubst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				// T1215: An inherited generic field (e.g. `T? value` inherited
+				// from `Box[T]` into `Counter[T] is Box[T]`) carries the PARENT's
+				// type param (Box.T), which the child-only subst above does not
+				// cover — so the field type stayed an unresolved TypeParam, the
+				// escape dup was skipped, and the unwrapped binding aliased the
+				// field. The owner's drop and the binding's drop then double-freed
+				// the heap value ("fatal: invalid free (bad header magic)" on
+				// macOS). Merge the inherited type-param mappings so the parent's
+				// param resolves transitively (Box.T → Counter.T → string).
+				mergeParentSubst(origin, localSubst)
 				fType = types.Substitute(fType, localSubst)
 			}
 		}
@@ -6777,30 +6787,16 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 		c.dupHeapUserFieldAccess = true
 		return
 	}
-	// T0403: IndexExpr against Vector[heap-user-type] passed to ~T.
-	// Use the arg expression's resolved type (works for generic callees where
-	// pt is a TypeParam pre-substitution); mirrors T0398's var-decl-site check.
-	// T1175: also arm the flag when the element is Optional[heap-user] — the
-	// returned Optional value struct aliases the vector slot's inner heap
-	// instance, so f(v[i]) into a ~ param double-frees it. genVectorIndex's
-	// T0620 branch (via dupOptionalVectorElem) already deep-clones once the flag
-	// is set; genArrayIndex handles the fixed-Array analogue directly.
-	if idx, ok := arg.(*ast.IndexExpr); ok {
-		argType := c.info.Types[idx]
-		if c.typeSubst != nil && argType != nil {
-			argType = types.Substitute(argType, c.typeSubst)
-		}
-		_, optHeap := c.optionalHeapDupElem(argType)
-		if isDroppableHeapUserType(argType) || optHeap {
-			targetType := c.info.Types[idx.Target]
-			if c.typeSubst != nil && targetType != nil {
-				targetType = types.Substitute(targetType, c.typeSubst)
-			}
-			if _, isVec := types.AsVector(targetType); isVec {
-				c.dupHeapUserFieldAccess = true
-				return
-			}
-		}
+	// T0403/T1175/T1215: IndexExpr against a Vector passed to a `~` param.
+	// `f(v[i])` returns a value that aliases the vector's element buffer — the
+	// callee's consume-drop and v's element drop then free the same allocation.
+	// Arm the matching dup-on-read (heap-user, Optional[heap-user], droppable-enum,
+	// string, or container element) so genVectorIndex/genArrayIndex produce an
+	// owned copy. T1215 added the string/container element arms (previously only
+	// heap-user/enum were handled, so a `string[]`/`Vector[...][]` element double-
+	// freed). Peels parens + non-consuming casts (mirrors the constructor path).
+	if c.armDupForVectorIndexArg(arg) {
+		return
 	}
 	mem, ok := arg.(*ast.MemberExpr)
 	if !ok {
@@ -6830,6 +6826,59 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 	c.setDupFlagsForFieldAccess(pt)
 }
 
+// armDupForVectorIndexArg arms the appropriate dup-on-read flag when `arg`
+// (peeling parens + non-consuming casts) is a Vector index `v[i]` whose element
+// is a heap type that would otherwise ALIAS the vector's element buffer when the
+// value escapes into an owning sink — a constructor field-init, a `~` (move)
+// param, or an enum variant payload. Without the dup both the owning sink's drop
+// and the vector's element drop free the same allocation (double-free at scope
+// exit → "fatal: invalid free (bad header magic)" on macOS, silent over-free
+// elsewhere). genVectorIndex consumes the matching flag (B0204 string / T0383
+// container / T0398 heap-user / T1129 enum) to produce an independent copy.
+// Returns true if a flag was armed. Before T1215 only the heap-user/enum element
+// shapes were handled here (T0847), so a `string[]`/`Vector[...][]` element read
+// into an owned field, move param, or enum payload aliased the source and
+// double-freed. T1215.
+func (c *Compiler) armDupForVectorIndexArg(arg ast.Expr) bool {
+	probe := arg
+	for {
+		if p, ok := probe.(*ast.ParenExpr); ok {
+			probe = p.Expr
+			continue
+		}
+		if cast, ok := probe.(*ast.CastExpr); ok {
+			probe = cast.Expr
+			continue
+		}
+		break
+	}
+	idx, ok := probe.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	targetType := c.info.Types[idx.Target]
+	if c.typeSubst != nil && targetType != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if _, isVec := types.AsVector(targetType); !isVec {
+		return false
+	}
+	argType := c.info.Types[idx]
+	if c.typeSubst != nil && argType != nil {
+		argType = types.Substitute(argType, c.typeSubst)
+	}
+	// Heap-user / Optional[heap-user] / droppable-enum element → deep clone.
+	_, optHeap := c.optionalHeapDupElem(argType)
+	if isDroppableHeapUserType(argType) || optHeap || c.enumElemNeedsDupOnRead(argType) {
+		c.dupHeapUserFieldAccess = true
+		return true
+	}
+	// string / Optional[string] / Vector|Channel|Arc|Weak element → string/container dup.
+	savedStr, savedCont := c.dupStringFieldAccess, c.dupContainerFieldAccess
+	c.setDupFlagsForFieldAccess(argType)
+	return c.dupStringFieldAccess != savedStr || c.dupContainerFieldAccess != savedCont
+}
+
 // maybeEnableDupForConstructorArg sets dupStringFieldAccess or
 // dupContainerFieldAccess when a constructor field-init arg is a field read
 // on a droppable owner. Without this, the field's inner buffer is shared
@@ -6857,43 +6906,14 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 		c.dupHeapUserFieldAccess = true
 		return
 	}
-	// T0847: peel parens + single/chained casts to find a container-element
-	// IndexExpr subject, then dup-on-read for `Holder(held: v[0])` /
-	// `Holder(held: v[0] as! C)`. Each cast layer is a non-consuming view.
-	// Mirrors the IndexExpr branch of maybeEnableDupForMutRefArg (T0403) and
-	// the assignment path's cast peel in genAssignStmt.
-	probe := arg
-	for {
-		if p, ok := probe.(*ast.ParenExpr); ok {
-			probe = p.Expr
-			continue
-		}
-		if cast, ok := probe.(*ast.CastExpr); ok {
-			probe = cast.Expr
-			continue
-		}
-		break
-	}
-	// T1175: also arm the flag for Optional[heap-user] elements — `Holder(held:
-	// v[i])` escapes the aliased inner heap instance into the new field, so both
-	// the field's consume-drop and the vector element-drop free it. Mirrors the
-	// bare heap-user case; genVectorIndex's T0620 branch does the deep-clone.
-	if idx, ok := probe.(*ast.IndexExpr); ok {
-		argType := c.info.Types[idx]
-		if c.typeSubst != nil && argType != nil {
-			argType = types.Substitute(argType, c.typeSubst)
-		}
-		_, optHeap := c.optionalHeapDupElem(argType)
-		if isDroppableHeapUserType(argType) || optHeap {
-			targetType := c.info.Types[idx.Target]
-			if c.typeSubst != nil && targetType != nil {
-				targetType = types.Substitute(targetType, c.typeSubst)
-			}
-			if _, isVec := types.AsVector(targetType); isVec {
-				c.dupHeapUserFieldAccess = true
-				return
-			}
-		}
+	// T0847/T1175/T1215: peel parens + non-consuming casts to find a container-
+	// element IndexExpr subject, then dup-on-read for `Holder(held: v[0])` /
+	// `Holder(s: strings[0])` / `Holder(held: v[0] as! C)`. Covers heap-user,
+	// Optional[heap-user], droppable-enum, string, and container element shapes
+	// (T1215 added the string/container arms, which previously aliased the
+	// vector's element buffer → double-free). Mirrors maybeEnableDupForMutRefArg.
+	if c.armDupForVectorIndexArg(arg) {
+		return
 	}
 	mem, ok := arg.(*ast.MemberExpr)
 	if !ok {
@@ -7378,7 +7398,14 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 				} else {
 					savedTarget := c.targetType
 					c.targetType = vfType
+					// T1215: dup-on-read a heap element read out of a Vector into
+					// this variant payload (`Word(v[i])`) — else the payload aliases
+					// the vector's element buffer and both drops double-free.
+					c.maybeEnableDupForConstructorArg(arg.Value, vfType)
 					preWrapVal = c.genCallArgExpr(arg.Value)
+					c.dupStringFieldAccess = false
+					c.dupContainerFieldAccess = false
+					c.dupHeapUserFieldAccess = false
 					c.targetType = savedTarget
 					val = preWrapVal
 					exprType := c.info.Types[arg.Value]
@@ -7394,7 +7421,15 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 					}
 				}
 			} else {
+				// T1215: dup-on-read a heap element read out of a Vector into
+				// this variant payload (`Word(payload[i])`) — else the payload
+				// aliases the vector's element buffer and both drops double-free
+				// at scope exit ("fatal: invalid free (bad header magic)").
+				c.maybeEnableDupForConstructorArg(arg.Value, vfType)
 				val = c.genCallArgExpr(arg.Value)
+				c.dupStringFieldAccess = false
+				c.dupContainerFieldAccess = false
+				c.dupHeapUserFieldAccess = false
 				preWrapVal = val
 			}
 			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
@@ -10984,7 +11019,16 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 
 	for i, elemExpr := range e.Elements {
 		savedEnumTemps := len(c.enumCtorTemps)
+		// T1215: a Vector index element (`[payload[i]]`) read into this literal
+		// aliases the source vector's element buffer — dup-on-read so the new
+		// vector owns an independent copy, else both vectors' element drops free
+		// the same allocation ("fatal: invalid free (bad header magic)"). No-op
+		// for non-index elements (armDupForVectorIndexArg only arms for `v[i]`).
+		c.armDupForVectorIndexArg(elemExpr)
 		val := c.genCallArgExpr(elemExpr)
+		c.dupStringFieldAccess = false
+		c.dupContainerFieldAccess = false
+		c.dupHeapUserFieldAccess = false
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
 			constant.NewInt(irtypes.I64, int64(i)))
 		c.block.NewStore(val, elemPtr)

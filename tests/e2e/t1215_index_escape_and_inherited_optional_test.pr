@@ -1,0 +1,88 @@
+// T1215: two double-free (macOS "invalid free (bad header magic)") families, both
+// from a heap value that ALIASES an owner's buffer instead of being copied when it
+// escapes into an owning sink:
+//
+//   (a) A Vector-index element (`v[i]`) read into an owning position — a type
+//       constructor field, an enum variant payload, a vector literal, or a `move`
+//       param — was not dup-on-read'd, so both the sink's drop and the source
+//       vector's element drop freed the same allocation. Fixed by arming the
+//       dup-on-read flag (armDupForVectorIndexArg) at each of those sinks.
+//
+//   (b) An INHERITED generic optional field (`T? value` inherited from `Box[T]`
+//       into `Counter[T] is Box[T]`) carried the PARENT's type param, which the
+//       child-only substitution missed — the field type stayed an unresolved
+//       TypeParam, the escape dup was skipped, and unwrapping (`c.value!`) aliased
+//       the field. Fixed by merging inherited type-param mappings in genFieldAccess.
+//
+// All cases keep the source live to scope exit so both drop paths run. 0 leaks.
+heap_str() string {
+  string b = "abc";
+  return b + "-" + b + "-defghij";
+}
+
+enum Word {
+  Text(string s), Empty,
+}
+
+type Held {
+  string s;
+}
+
+// (a) string element out of a `string[]` into an enum variant payload.
+test_index_into_enum_payload() `test {
+  string[] payload = [heap_str()];
+  Word[] words = [Word.Text(payload[0])];
+  match words[0] {
+    Word.Text(s) => assert(s == "abc-abc-defghij", "enum payload copy"),
+    Word.Empty => assert(false, "should be text"),
+  }
+  assert(payload[0] == "abc-abc-defghij", "source still intact");
+}
+
+// (a) string element out of a `string[]` into a type constructor field.
+test_index_into_constructor_field() `test {
+  string[] payload = [heap_str()];
+  Held h = Held(s: payload[0]);
+  assert(h.s == "abc-abc-defghij", "ctor field copy");
+  assert(payload[0] == "abc-abc-defghij", "source still intact");
+}
+
+// (a) string element out of a `string[]` into another vector literal.
+test_index_into_vector_literal() `test {
+  string[] payload = [heap_str()];
+  string[] copies = [payload[0]];
+  assert(copies[0] == "abc-abc-defghij", "vector-literal element copy");
+  assert(payload[0] == "abc-abc-defghij", "source still intact");
+}
+
+// (a) string element out of a `string[]` passed to a `move` (consuming) param.
+consume_string(string move s) {
+  assert(s == "abc-abc-defghij", "moved-in copy");
+}
+
+test_index_into_move_param() `test {
+  string[] payload = [heap_str()];
+  consume_string(payload[0]);
+  assert(payload[0] == "abc-abc-defghij", "source still intact");
+}
+
+// (b) inherited generic optional field: construct, reassign, unwrap-read.
+type Box[T] {
+  T? value;
+}
+type Counter[T] is Box[T] {
+  int count;
+}
+
+test_inherited_optional_unwrap() `test {
+  c := Counter[string](value: heap_str(), count: 0);
+  s := c.value!;
+  assert(s == "abc-abc-defghij", "inherited unwrap copy");
+}
+
+test_inherited_optional_reassign_unwrap() `test {
+  c := Counter[string](value: "first", count: 0);
+  c.value = (7).to_string();
+  s := c.value!;
+  assert(s == "7", "inherited reassign+unwrap");
+}

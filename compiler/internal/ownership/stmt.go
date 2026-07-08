@@ -248,6 +248,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
+		c.recordLaunderedHandleReq(s.Name, s.Value, s.Pos()) // T1214
 	}
 	// Raw pointer types are only allowed inside unsafe blocks.
 	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
@@ -581,6 +582,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		}
 		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
+		c.recordLaunderedHandleReq(s.Name, s.Value, s.Pos()) // T1214
 	}
 }
 
@@ -989,7 +991,9 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 			// return-alias flag clearing. Defer the verdict to each concrete call
 			// site via GenericCallEdges (propagateReturnHandleReqs).
 			// NOTE: the launder-inside-body form (`T y = x; return y;`) leaves y
-			// Owned (tryMove), so it is not reached here — tracked as T1214.
+			// Owned/non-param, so it is not reached here — it double-frees at the
+			// owned alias's scope-exit drop regardless of return, so it is recorded
+			// at the launder BINDING site instead (recordLaunderedHandleReq, T1214).
 			if pt := c.info.Types[ident]; types.ContainsTypeParam(pt) {
 				c.recordReturnHandleReq(pt, s.Pos(), ident.Name)
 			}

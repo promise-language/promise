@@ -1,0 +1,73 @@
+// T1214: the LAUNDER-inside-body form of T1213 — a generic function that aliases
+// its borrowed (non-`move`) param into an owned local (`T y = x`) before using
+// it. Instantiated with an Optional-wrapped single-owner handle (`Mutex[int]?`,
+// `task[int]?`), the owned alias double-frees the caller's live handle at its
+// scope-exit drop (or when consumed), INDEPENDENT of whether it is returned —
+// codegen routes the Optional-wrapped handle through dupOptionalVectorElem, which
+// has no clone for single-owner handles.
+//
+// The ownership pass now rejects the unsound Optional-wrapped instantiations at
+// compile time — recorded at the launder BINDING site and validated per concrete
+// instantiation via GenericCallEdges. Those forms no longer compile, so they are
+// covered by the Go ownership tests (TestT1214_*). These runtime tests prove the
+// fix does NOT over-reject the still-valid launder forms and that they stay
+// leak-free:
+//   - BARE-handle launder over Mutex/task (safe via codegen's return-alias clear), and
+//   - `move`-param launder over an Optional-wrapped Mutex (ownership transfers).
+worker() int {
+  return 7;
+}
+
+// Launder the param through an intermediate local, then return it.
+launder_identity[T](T x) T {
+  T y = x;
+  return y;
+}
+
+// Launder the param but discard it, returning a plain int — the alias's
+// scope-exit drop is the double-free risk, so this exercises the non-return path.
+launder_discard[T](T x) int {
+  T y = x;
+  return 1;
+}
+
+// Valid: bare-handle launder over Mutex — the Optional wrapping is the sole delta
+// that makes T1214 crash; the bare form is fixed by codegen's return-alias clear.
+t1214_launder_bare_mutex() `test {
+  Mutex[int] m = Mutex[int](7);
+  Mutex[int] m2 = launder_identity(m);
+  int v = m2.lock().borrow;
+  assert(v == 7, "bare-handle launder over mutex");
+}
+
+// Valid: bare-handle launder over task — parity with the Mutex case.
+t1214_launder_bare_task() `test {
+  task[int] t = go worker();
+  int r = <-launder_identity(t);
+  assert(r == 7, "bare-handle launder over task");
+}
+
+// Valid: bare-handle launder-and-discard — the borrowed source stays owned by the
+// caller and remains usable after the call; no double-free.
+t1214_launder_discard_bare_mutex() `test {
+  Mutex[int] m = Mutex[int](7);
+  int r = launder_discard(m);
+  assert(r == 1, "bare-handle launder-and-discard returns int");
+  int v = m.lock().borrow;
+  assert(v == 7, "source mutex still usable after launder-and-discard");
+}
+
+// Valid: `move`-param launder over an Optional-wrapped Mutex — the move transfers
+// the single handle's ownership to the caller's result, so there is no aliasing
+// and no double-free.
+move_launder_identity[T](T move x) T {
+  T y = x;
+  return y;
+}
+
+t1214_launder_move_optional_mutex() `test {
+  Mutex[int]? m = Mutex[int](7);
+  Mutex[int]? m2 = move_launder_identity(move m);
+  int v = m2!.lock().borrow;
+  assert(v == 7, "move-param launder over optional mutex");
+}

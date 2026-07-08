@@ -17,8 +17,9 @@ import (
 // (same mechanism as the T1035 for-in-drain reqs). (T1213)
 type returnHandleReq struct {
 	ParamType types.Type // the returned param's TypeParam type (substituted at call site)
-	Pos       ast.Pos    // location of the `return x` inside the generic body
-	Binding   string     // the returned parameter name (for the error message)
+	Pos       ast.Pos    // location of the `return x` / launder inside the generic body
+	Binding   string     // the source parameter name (for the error message)
+	Laundered bool       // T1214: recorded at a launder binding (`T y = x`), not a direct return
 }
 
 // optionalWrappedSingleOwnerHandle returns the handle kind when t is a
@@ -34,14 +35,52 @@ func optionalWrappedSingleOwnerHandle(t types.Type) string {
 	return singleOwnerHandleKind(peelOptional(t))
 }
 
-// recordReturnHandleReq appends a deferred return-handle requirement to the
-// generic function or method currently being checked. No-op when not inside a
-// generic body. Deduped on (Pos, Binding, ParamType). (T1213)
+// recordLaunderedHandleReq records a deferred handle requirement when `value`
+// aliases ("launders") a borrowed (non-`move`) parameter of still-generic
+// TypeParam type into a fresh owned binding `dest` (`T y = x`, `y := x`, or the
+// assignment `y = x`). Concretely such a launder is already rejected outright
+// ("cannot move borrowed parameter"), but the generic body is checked once with
+// `T` unbound, so no inline reject fires. At each concrete instantiation with an
+// Optional-wrapped single-owner handle, the owned alias double-frees the caller's
+// live handle at its scope-exit drop (or when consumed) — independent of whether
+// it is later returned. Defer the verdict to each concrete call site via the same
+// GenericCallEdges machinery as the direct-return T1213 case. Bare handles
+// (depth 0) and non-handle types are made safe / are freely copyable, so
+// propagateReturnHandleReqs skips them. (T1214)
+func (c *Checker) recordLaunderedHandleReq(dest string, value ast.Expr, pos ast.Pos) {
+	if dest == "_" {
+		return
+	}
+	src, ok := value.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	if !c.params[src.Name] || c.state[src.Name] != Borrowed {
+		return
+	}
+	pt := c.info.Types[src]
+	if !types.ContainsTypeParam(pt) {
+		return
+	}
+	c.recordReturnHandleReq2(pt, pos, src.Name, true)
+}
+
+// recordReturnHandleReq appends a deferred return-handle requirement for the
+// direct-return T1213 shape (`return x`). See recordReturnHandleReq2.
 func (c *Checker) recordReturnHandleReq(pt types.Type, pos ast.Pos, binding string) {
+	c.recordReturnHandleReq2(pt, pos, binding, false)
+}
+
+// recordReturnHandleReq2 appends a deferred return-handle requirement to the
+// generic function or method currently being checked. No-op when not inside a
+// generic body. Deduped on (Pos, Binding, ParamType). `laundered` distinguishes
+// the launder-binding shape (T1214) from the direct return (T1213) for the error
+// message. (T1213/T1214)
+func (c *Checker) recordReturnHandleReq2(pt types.Type, pos ast.Pos, binding string, laundered bool) {
 	if pt == nil {
 		return
 	}
-	req := returnHandleReq{ParamType: pt, Pos: pos, Binding: binding}
+	req := returnHandleReq{ParamType: pt, Pos: pos, Binding: binding, Laundered: laundered}
 	if c.curMethodObj != nil {
 		for _, r := range c.methodReturnHandleReqs[c.curMethodObj] {
 			if r.Pos == pos && r.Binding == binding && types.Identical(r.ParamType, pt) {
@@ -94,7 +133,7 @@ func (c *Checker) propagateReturnHandleReqs() {
 					// Still generic — forward onto the caller so the eventual
 					// concrete call site triggers validation.
 					if c.addReturnHandleReq(edge.CallerFunc, edge.CallerMethod,
-						returnHandleReq{ParamType: substituted, Pos: req.Pos, Binding: req.Binding}) {
+						returnHandleReq{ParamType: substituted, Pos: req.Pos, Binding: req.Binding, Laundered: req.Laundered}) {
 						changed = true
 					}
 					continue
@@ -111,6 +150,15 @@ func (c *Checker) propagateReturnHandleReqs() {
 					continue
 				}
 				emitted[key] = true
+				if req.Laundered {
+					// T1214: the param was aliased into an owned local (`T y = x`).
+					// The owned alias double-frees the caller's live handle at its
+					// scope-exit drop (or when consumed), independent of return.
+					c.errorf(edge.CallPos,
+						"cannot instantiate generic with %s: the parameter '%s' is aliased into an owned local (at %s), but a `%s` handle has no clone and the caller still owns it — the alias double-frees the caller's live value. Declare the parameter with `move` to transfer ownership",
+						substituted, req.Binding, req.Pos, k)
+					continue
+				}
 				c.errorf(edge.CallPos,
 					"cannot instantiate generic with %s: the parameter '%s' is returned as owned (at %s), but a `%s` handle has no clone and the caller still owns it — returning it aliases the caller's live value and double-frees. Declare the parameter with `move` to transfer ownership",
 					substituted, req.Binding, req.Pos, k)

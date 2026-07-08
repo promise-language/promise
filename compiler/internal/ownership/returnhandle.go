@@ -37,20 +37,20 @@ func optionalWrappedSingleOwnerHandle(t types.Type) string {
 
 // recordLaunderedHandleReq records a deferred handle requirement when `value`
 // aliases ("launders") a borrowed (non-`move`) parameter of still-generic
-// TypeParam type into a fresh owned binding `dest` (`T y = x`, `y := x`, or the
-// assignment `y = x`). Concretely such a launder is already rejected outright
-// ("cannot move borrowed parameter"), but the generic body is checked once with
-// `T` unbound, so no inline reject fires. At each concrete instantiation with an
-// Optional-wrapped single-owner handle, the owned alias double-frees the caller's
-// live handle at its scope-exit drop (or when consumed) — independent of whether
-// it is later returned. Defer the verdict to each concrete call site via the same
+// TypeParam type into a fresh binding (`T y = x`, `y := x`, or a `_` discard).
+// Concretely such a launder is already rejected outright ("cannot move borrowed
+// parameter"), but the generic body is checked once with `T` unbound, so no
+// inline reject fires. At each concrete instantiation with an Optional-wrapped
+// single-owner handle, the owned alias double-frees the caller's live handle at
+// its scope-exit drop (or when consumed) — independent of whether it is later
+// returned. Defer the verdict to each concrete call site via the same
 // GenericCallEdges machinery as the direct-return T1213 case. Bare handles
 // (depth 0) and non-handle types are made safe / are freely copyable, so
-// propagateReturnHandleReqs skips them. (T1214)
-func (c *Checker) recordLaunderedHandleReq(dest string, value ast.Expr, pos ast.Pos) {
-	if dest == "_" {
-		return
-	}
+// propagateReturnHandleReqs skips them. Applies equally to a `_` discard
+// binding: codegen still materializes a droppable owned temp for the discard,
+// so the alias double-frees at scope exit exactly as for a named local.
+// (T1214/T1216)
+func (c *Checker) recordLaunderedHandleReq(value ast.Expr, pos ast.Pos) {
 	src, ok := value.(*ast.IdentExpr)
 	if !ok {
 		return

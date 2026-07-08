@@ -248,8 +248,8 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
-		c.recordLaunderedHandleReq(s.Name, s.Value, s.Pos()) // T1214
 	}
+	c.recordLaunderedHandleReq(s.Value, s.Pos()) // T1214/T1216: also for `_` discard
 	// Raw pointer types are only allowed inside unsafe blocks.
 	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
 		c.errorf(s.Pos(), "raw pointer type used outside of unsafe block")
@@ -582,8 +582,8 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		}
 		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
-		c.recordLaunderedHandleReq(s.Name, s.Value, s.Pos()) // T1214
 	}
+	c.recordLaunderedHandleReq(s.Value, s.Pos()) // T1214/T1216: also for `_` discard
 }
 
 func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {

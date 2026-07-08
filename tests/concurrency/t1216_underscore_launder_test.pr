@@ -1,0 +1,73 @@
+// T1216: the UNDERSCORE-DISCARD launder form of T1214 — a generic function that
+// aliases its borrowed (non-`move`) param into a `_` discard binding
+// (`T _ = x` or `_ := x`). T1214 fixed the NAMED launder (`T y = x`) but its
+// recorder call sites lived inside `if s.Name != "_"`, so a `_` discard slipped
+// through and double-freed the caller's live handle at scope exit when
+// instantiated with an Optional-wrapped single-owner handle (`Mutex[int]?`,
+// `task[int]?`).
+//
+// The ownership pass now rejects the unsound Optional-wrapped instantiations at
+// compile time — recorded at the discard BINDING site and validated per concrete
+// instantiation via GenericCallEdges. Those forms no longer compile, so they are
+// covered by the Go ownership tests (TestT1216_*). These runtime tests prove the
+// fix does NOT over-reject the still-valid discard forms and that they stay
+// leak-free:
+//   - BARE-handle `_` discard over Mutex/task (safe via codegen's return-alias clear), and
+//   - `move`-param `_` discard over an Optional-wrapped Mutex (ownership transfers).
+worker() int {
+  return 7;
+}
+
+// Launder the param into a typed `_` discard, returning a plain int — the
+// discard temp's scope-exit drop is the double-free risk this exercises.
+discard_typed[T](T x) int {
+  T _ = x;
+  return 1;
+}
+
+// Launder the param into an inferred `_` discard.
+discard_inferred[T](T x) int {
+  _ := x;
+  return 1;
+}
+
+// Valid: bare-handle typed `_` discard over Mutex — the borrowed source stays
+// owned by the caller and remains usable after the call; no double-free.
+t1216_discard_typed_bare_mutex() `test {
+  Mutex[int] m = Mutex[int](7);
+  int r = discard_typed(m);
+  assert(r == 1, "bare-handle typed discard returns int");
+  int v = m.lock().borrow;
+  assert(v == 7, "source mutex still usable after typed discard");
+}
+
+// Valid: bare-handle inferred `_` discard over Mutex — parity with the typed form.
+t1216_discard_inferred_bare_mutex() `test {
+  Mutex[int] m = Mutex[int](7);
+  int r = discard_inferred(m);
+  assert(r == 1, "bare-handle inferred discard returns int");
+  int v = m.lock().borrow;
+  assert(v == 7, "source mutex still usable after inferred discard");
+}
+
+// Valid: bare-handle `_` discard over task — the source task stays owned and is
+// still awaitable after the call.
+t1216_discard_bare_task() `test {
+  task[int] t = go worker();
+  int r = discard_typed(t);
+  assert(r == 1, "bare-handle discard over task returns int");
+  int v = <-t;
+  assert(v == 7, "source task still awaitable after discard");
+}
+
+// Valid: `move`-param `_` discard over an Optional-wrapped Mutex — the move
+// transfers the single handle's ownership into the discard temp, which drops it
+// once; no aliasing, no double-free.
+discard_move[T](T move x) {
+  T _ = x;
+}
+
+t1216_discard_move_optional_mutex() `test {
+  Mutex[int]? m = Mutex[int](7);
+  discard_move(move m);
+}

@@ -16242,6 +16242,45 @@ func TestGoExprBlockFailableStillOK(t *testing.T) {
 	`)
 }
 
+func TestGoExprFailableMethodCallRejected(t *testing.T) {
+	// A failable *method* call (not just a free function) must be rejected too —
+	// FailableExprs is keyed on the CallExpr regardless of callee shape (T1149).
+	errs := checkErrs(t, `
+		type W {
+			work!(this) int { return 1; }
+		}
+		test() {
+			w := W();
+			t := go w.work();
+		}
+	`)
+	expectError(t, errs, "cannot spawn a failable call")
+}
+
+func TestGoExprPropagateOperandRejected(t *testing.T) {
+	// `?^` (propagate) binds tighter than `go`, so the operand is an
+	// ErrorPropagateExpr, not a CallExpr — must hit the non-call rejection (T1149).
+	errs := checkErrs(t, `
+		work!() int { return 1; }
+		test!() {
+			t := go work()?^;
+		}
+	`)
+	expectError(t, errs, "operand of `go` must be")
+}
+
+func TestGoExprArithmeticOperandRejected(t *testing.T) {
+	// A non-call, non-error operand (a binary expression) is also rejected —
+	// the operand of `go` must be a call or a block (T1149).
+	errs := checkErrs(t, `
+		compute() int { return 1; }
+		test() {
+			t := go compute() + 1;
+		}
+	`)
+	expectError(t, errs, "operand of `go` must be")
+}
+
 func TestSendableWithOptionalField(t *testing.T) {
 	// Optional of sendable type is sendable
 	checkOK(t, `

@@ -624,7 +624,7 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 // is not double-reported.
 func (c *Checker) checkOperatorFailable(pos ast.Pos, left types.Type, op string, right types.Type) types.Type {
 	result := c.checkOperator(pos, left, op, right)
-	if c.binaryOperatorCanError(left, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+	if c.binaryOperatorCanError(left, op) && !c.canPropagateError() {
 		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return result
@@ -844,7 +844,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 // result). Symmetric with checkOperatorFailable (T0984).
 func (c *Checker) checkUnaryOperatorFailable(pos ast.Pos, operand types.Type, op string) types.Type {
 	result := c.checkUnaryOperator(pos, operand, op)
-	if c.unaryOperatorCanError(operand, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+	if c.unaryOperatorCanError(operand, op) && !c.canPropagateError() {
 		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return result
@@ -933,7 +933,7 @@ func (c *Checker) checkIncDecOperator(pos ast.Pos, targetType types.Type, op str
 	}
 	// T0984: a failable operator returns {ok, value, err}; codegen auto-propagates
 	// the error, so the enclosing function must be failable.
-	if c.unaryOperatorCanError(targetType, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+	if c.unaryOperatorCanError(targetType, op) && !c.canPropagateError() {
 		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return resultType
@@ -2907,7 +2907,7 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 
 func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
-	if c.curFunc == nil || !c.curFunc.CanError() {
+	if !c.canPropagateError() {
 		c.errorf(e.Pos(), "error propagation (?^) used outside of failable function")
 	}
 	if !c.info.FailableExprs[e.Expr] {
@@ -2930,7 +2930,7 @@ func (c *Checker) checkOptionalUnwrapExpr(e *ast.OptionalUnwrapExpr) types.Type 
 	inner := c.checkExpr(e.Expr)
 	if c.info.FailableExprs[e.Expr] {
 		c.errorf(e.Pos(), "use ?! to panic on failable error (! is for optional unwrap)")
-		if c.curFunc != nil && c.curFunc.CanError() {
+		if c.canPropagateError() {
 			c.hintf(e.Pos(), "in a failable function, bare call() auto-propagates errors — no operator needed")
 		}
 	}
@@ -2979,7 +2979,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 		// Typed handlers in non-failable functions need else or ! to be exhaustive.
 		// Without them, non-matching errors have nowhere to go.
 		isExhaustive := e.ElseBody != nil || e.PanicOnNomatch
-		if !isExhaustive && (c.curFunc == nil || !c.curFunc.CanError()) {
+		if !isExhaustive && !c.canPropagateError() {
 			c.errorf(e.Pos(), "typed error handler in non-failable function; add 'else { }', '!' suffix, or make function failable")
 		}
 		// Generic typed handler: resolve via typeRef (e.g., DataError[string])
@@ -3701,10 +3701,14 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 	c.lambdaScope = c.scope // scope at lambda definition site
 	c.lambdaMove = e.Move
 
-	// Type-check body
+	// Type-check body. A lambda body is governed by its own signature, so it
+	// is not the enclosing `go {}` non-failable scope (T1217); reset the
+	// override alongside the curFunc swap so the two contexts stay independent.
 	saved := c.curFunc
 	c.curFunc = sig
-	defer func() { c.curFunc = saved }()
+	savedNFS := c.nonFailableScope
+	c.nonFailableScope = false
+	defer func() { c.curFunc = saved; c.nonFailableScope = savedNFS }()
 
 	if e.Body != nil {
 		c.openScope(e.Body, "lambda")
@@ -3814,7 +3818,10 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		c.checkGoExprSendable(e.Expr)
 	} else if e.Block != nil {
 		c.openScope(e.Block, "go")
+		savedNFS := c.nonFailableScope
+		c.nonFailableScope = true // §17.2.1: plain `go {}` is a non-failable scope (T1217)
 		c.checkBlock(e.Block)
+		c.nonFailableScope = savedNFS
 		c.closeScope()
 		// Block form: infer T from last expression statement
 		if len(e.Block.Stmts) > 0 {

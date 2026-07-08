@@ -36,6 +36,32 @@ test_go_block_return_in_error_handler_with_captures() `test(exclude: wasm) {
   }
 }
 
+// T1217: a plain `go {}` block is a non-failable scope even when the *enclosing*
+// function is failable (`!`). A failable call inside it must be handled locally
+// (`?!`); pre-fix, sema wrongly let a bare call auto-propagate / `raise` escape,
+// panicking codegen. This confirms the handled-locally path compiles and runs
+// correctly with a failable enclosing fn.
+work_ret!() int {
+  return 7;
+}
+
+run_spawn_in_failable!() int {
+  ch := channel[int](capacity: 1);
+  go {
+    n := work_ret()?!;
+    ch.send(n);
+  };
+  if v := <-ch {
+    return v;
+  }
+  return -1;
+}
+
+test_go_block_in_failable_fn_local_handling() `test(exclude: wasm) {
+  r := run_spawn_in_failable()?!;
+  assert(r == 7, "go block in failable fn handled failable call locally");
+}
+
 // Return in nested block inside error handler.
 test_go_block_return_in_error_handler_nested() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);

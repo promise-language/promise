@@ -40,6 +40,18 @@ type Checker struct {
 	pendingNarrowings  []NarrowedVar                    // post-divergence narrowings to apply before next statement
 	narrowedVariants   map[string]*IsNarrowing          // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
 	brokenFields       map[*types.Named]map[string]bool // T1168: fields whose declared type failed to resolve; member accesses to them are suppressed instead of cascading into "no field or method" errors
+	nonFailableScope   bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (§17.2.1); errors cannot propagate/raise regardless of the enclosing fn
+}
+
+// canPropagateError reports whether the current context can auto-propagate or
+// raise an error to an enclosing failable function. It is false inside a
+// non-failable scope such as a plain `go {}` block body, even when the
+// enclosing function is failable (T1217).
+func (c *Checker) canPropagateError() bool {
+	if c.nonFailableScope {
+		return false
+	}
+	return c.curFunc != nil && c.curFunc.CanError()
 }
 
 // recordBrokenField notes that named.name had an unresolvable declared type (an

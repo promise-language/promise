@@ -251,7 +251,7 @@ func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
 	if !c.info.FailableExprs[expr] {
 		return
 	}
-	if c.curFunc != nil && c.curFunc.CanError() {
+	if c.canPropagateError() {
 		c.info.AutoPropagateExprs[expr] = true
 	} else {
 		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
@@ -266,7 +266,7 @@ func (c *Checker) checkSubExprFailable(expr ast.Expr) {
 	if !c.info.FailableExprs[expr] {
 		return
 	}
-	if c.curFunc != nil && c.curFunc.CanError() {
+	if c.canPropagateError() {
 		c.info.AutoPropagateExprs[expr] = true
 	} else {
 		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
@@ -482,10 +482,10 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	// T0708: A failable setter / []= / [:]= silently dropped its error before;
 	// reject the assignment unless the enclosing function is failable, in which
 	// case codegen auto-propagates the call result via propagateIfFailable.
-	if c.assignmentSetterCanError(s) && (c.curFunc == nil || !c.curFunc.CanError()) {
+	if c.assignmentSetterCanError(s) && !c.canPropagateError() {
 		c.errorf(s.Pos(), "failable setter assignment must be in a failable function: mark the enclosing function with `!`")
 	} else if s.Op != ast.OpAssign && c.assignmentGetterCanError(s) &&
-		(c.curFunc == nil || !c.curFunc.CanError()) {
+		!c.canPropagateError() {
 		// T0709: a compound assignment reads the current value via a getter; a
 		// failable read getter propagates, so require a failable scope. The
 		// else-if guards against a duplicate diagnostic when the setter also errors.
@@ -526,7 +526,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		// T0715: a failable operator returns {ok, value, err}; codegen
 		// auto-propagates the error, so the enclosing function must be failable.
 		// Symmetric with the T0708/T0709 setter/getter checks above.
-		if c.binaryOperatorCanError(opTarget, op) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		if c.binaryOperatorCanError(opTarget, op) && !c.canPropagateError() {
 			c.errorf(s.Pos(), "failable operator in compound assignment must be in a failable function: mark the enclosing function with `!`")
 		}
 	}
@@ -1078,7 +1078,7 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 }
 
 func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
-	if c.curFunc == nil || !c.curFunc.CanError() {
+	if !c.canPropagateError() {
 		c.errorf(s.Pos(), "raise outside of failable function")
 	}
 	valType := c.checkExpr(s.Value)
@@ -1105,7 +1105,7 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 		return
 	}
 	// The expression is a failable call used as a statement (no ?^, ?!, or handler).
-	if c.curFunc != nil && c.curFunc.CanError() {
+	if c.canPropagateError() {
 		// Auto-propagate: codegen will emit tag-check + early return.
 		c.info.AutoPropagateExprs[s.Expr] = true
 	} else {
@@ -1945,7 +1945,7 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 	c.checkIncDecOperator(s.Pos(), targetType, op)
 
 	// T0709: inc/dec reads the current value via [] — a failable getter propagates.
-	if c.indexGetterCanError(s.Target) && (c.curFunc == nil || !c.curFunc.CanError()) {
+	if c.indexGetterCanError(s.Target) && !c.canPropagateError() {
 		c.errorf(s.Pos(), "failable index read in inc/dec must be in a failable function: mark the enclosing function with `!`")
 	}
 
@@ -1961,7 +1961,7 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 		// T0712: inc/dec on a property reads via the getter and writes via the
 		// setter. If either accessor is failable, the read/write propagates, so
 		// require a failable enclosing function (previously a hard codegen panic).
-		if c.incDecPropertyCanError(tgt) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		if c.incDecPropertyCanError(tgt) && !c.canPropagateError() {
 			c.errorf(s.Pos(), "failable property inc/dec must be in a failable function: mark the enclosing function with `!`")
 		}
 	case *ast.IndexExpr:

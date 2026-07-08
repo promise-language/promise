@@ -121,6 +121,15 @@ type Checker struct {
 	// them against concrete instantiations. (T1035)
 	funcDrainReqs   map[*types.Func][]drainReq
 	methodDrainReqs map[*types.Method][]drainReq
+
+	// funcReturnHandleReqs / methodReturnHandleReqs accumulate deferred
+	// return-borrowed-handle requirements across the whole file (NOT reset
+	// per-function — initialized once in Check). Each records that a generic body
+	// directly returns a borrowed param whose type is still a TypeParam;
+	// propagateReturnHandleReqs validates them against concrete instantiations,
+	// rejecting Optional-wrapped single-owner handles. (T1213)
+	funcReturnHandleReqs   map[*types.Func][]returnHandleReq
+	methodReturnHandleReqs map[*types.Method][]returnHandleReq
 }
 
 // paramInitialState returns the initial ownership state for a function or
@@ -163,17 +172,23 @@ func paramInitialState(p *types.Param, consuming bool) VarState {
 // NLL last-use analysis results for early drop insertion in codegen (B0035).
 func Check(file *ast.File, info *sema.Info) []error {
 	c := &Checker{
-		file:            file,
-		info:            info,
-		refLastUses:     AnalyzeRefLastUses(file, info), // T0164: NLL borrow narrowing
-		funcDrainReqs:   make(map[*types.Func][]drainReq),
-		methodDrainReqs: make(map[*types.Method][]drainReq),
+		file:                   file,
+		info:                   info,
+		refLastUses:            AnalyzeRefLastUses(file, info), // T0164: NLL borrow narrowing
+		funcDrainReqs:          make(map[*types.Func][]drainReq),
+		methodDrainReqs:        make(map[*types.Method][]drainReq),
+		funcReturnHandleReqs:   make(map[*types.Func][]returnHandleReq),
+		methodReturnHandleReqs: make(map[*types.Method][]returnHandleReq),
 	}
 	c.check()
 	// T1035: validate deferred for-in-drain requirements against concrete
 	// instantiations (appends to c.errors). Runs after the full body pass so
 	// every generic body's drainReqs are recorded first.
 	c.propagateDrainReqs()
+	// T1213: validate deferred return-borrowed-handle requirements against
+	// concrete instantiations. Also runs after the full body pass so every
+	// generic body's returnHandleReqs are recorded first.
+	c.propagateReturnHandleReqs()
 	// B0035: Run NLL last-use analysis after ownership check.
 	info.EarlyDrops = AnalyzeLastUses(file, info)
 	return c.errors

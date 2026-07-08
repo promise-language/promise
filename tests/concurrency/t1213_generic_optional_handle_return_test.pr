@@ -1,0 +1,52 @@
+// T1213: a generic function/method that returns its borrowed (non-`move`) param,
+// instantiated with an Optional-wrapped single-owner handle (`Mutex[int]?`,
+// `task[int]?`), used to segfault — codegen routes the Optional-wrapped handle
+// through dupOptionalVectorElem, which has no clone for single-owner handles, so
+// it aliases the one handle and both the source local and the caller's result
+// drop it (double-free).
+//
+// The ownership pass now rejects the unsound Optional-wrapped instantiations at
+// compile time (deferred per-instantiation validation via GenericCallEdges);
+// those forms no longer compile, so they are covered by the Go ownership tests
+// (TestT1213_*). These runtime tests prove the fix does NOT over-reject the
+// still-valid forms and that they stay leak-free:
+//   - the BARE-handle generic identity (safe via codegen's return-alias clear), and
+//   - the `move`-param generic identity (ownership transfers to the result).
+worker() int {
+  return 7;
+}
+
+identity[T](T x) T {
+  return x;
+}
+
+// Valid: bare-handle generic identity over Mutex — the Optional wrapping is the
+// sole delta that made T1213 crash; the bare form is fixed by codegen's
+// return-alias flag clearing.
+t1213_generic_identity_bare_mutex() `test {
+  Mutex[int] m = Mutex[int](7);
+  Mutex[int] m2 = identity(m);
+  int v = m2.lock().borrow;
+  assert(v == 7, "bare-handle generic identity over mutex");
+}
+
+// Valid: bare-handle generic identity over task — parity with the Mutex case.
+t1213_generic_identity_bare_task() `test {
+  task[int] t = go worker();
+  int r = <-identity(t);
+  assert(r == 7, "bare-handle generic identity over task");
+}
+
+// Valid: `move`-param generic identity over an Optional-wrapped Mutex — the move
+// transfers the single handle's ownership to the caller's result, so there is no
+// aliasing and no double-free.
+move_identity[T](T move x) T {
+  return x;
+}
+
+t1213_generic_move_optional_mutex() `test {
+  Mutex[int]? m = Mutex[int](7);
+  Mutex[int]? m2 = move_identity(move m);
+  int v = m2!.lock().borrow;
+  assert(v == 7, "move-param generic identity over optional mutex");
+}

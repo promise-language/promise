@@ -969,6 +969,20 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 					ident.Name, k)
 				return
 			}
+			// T1213: a borrowed handle param whose type is still a TypeParam is
+			// invisible to the concrete reject above (singleOwnerHandleKindDeep
+			// returns "" for a TypeParam, so this falls through — no early return
+			// conflict). Whether returning it is unsound depends on the
+			// instantiation: an Optional-wrapped single-owner handle aliases the
+			// caller's live value and double-frees (dupOptionalVectorElem shares
+			// the one handle), while a bare handle is made safe by codegen's
+			// return-alias flag clearing. Defer the verdict to each concrete call
+			// site via GenericCallEdges (propagateReturnHandleReqs).
+			// NOTE: the launder-inside-body form (`T y = x; return y;`) leaves y
+			// Owned (tryMove), so it is not reached here — tracked as T1214.
+			if pt := c.info.Types[ident]; types.ContainsTypeParam(pt) {
+				c.recordReturnHandleReq(pt, s.Pos(), ident.Name)
+			}
 		}
 		// T0402: returning a non-Copy borrow as owned is unsafe — the caller
 		// would register a drop for the inner pointer that the original Arc/

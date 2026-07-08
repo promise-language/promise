@@ -4489,6 +4489,67 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 	c.block.NewStore(val, valField)
 }
 
+// emitWasmChannelWaitPump emits the WASM non-coroutine channel-wait body (T1200).
+//
+// On single-threaded WASM pal_cond_wait and pal_mutex_lock/unlock are no-ops, so
+// a plain (non-coroutine) function's channel wait — the classic
+// `wait_body: cond_wait; br recheck` loop — busy-spins forever without ever
+// yielding to the cooperative scheduler. This happens whenever a channel
+// blocking op runs inside a function that is NOT itself a coroutine, e.g. a named
+// top-level function spawned via `go worker(c)`: the goroutine coroutine just
+// calls the single, non-coroutine `@__user.worker`, whose send/recv takes this
+// thread-blocking branch. The partner G never runs (livelock, zero progress) and
+// the per-test deadline (checked in promise_sched_coop_step's ran_g) never fires
+// because coop_step is never re-entered.
+//
+// Fix: pump one cooperative step instead of the no-op wait, exactly mirroring the
+// Task-receive (genReceiveTask) and Task-drop (defineTaskDropBody) WASM spins
+// (T0668/T0687). promise_sched_coop_step returns i8:
+//
+//	2 = per-test deadline reached → clean early-return from this (non-coroutine)
+//	    function, unwinding so the outer coop_step/coop_run regains control and
+//	    renders TIMEOUT. The op is abandoned (result discarded, drops skipped —
+//	    the test is being torn down; a timed-out test result==2 skips the leak
+//	    check, matching the Task-spin "G intentionally not freed" precedent).
+//	non-zero = a G ran (progress possible) → re-evaluate the wait condition.
+//	0 = no runnable G and the condition is still unmet → nothing can ever change
+//	    it → genuine deadlock → terminal message + exit(2) (same as coop_run).
+//
+// Must be called with c.block == the wait-body block. On progress it branches to
+// recheck; the caller resumes building at recheck (which re-tests the condition).
+func (c *Compiler) emitWasmChannelWaitPump(recheck *ir.Block) {
+	stepR := c.block.NewCall(c.funcs["promise_sched_coop_step"])
+	isTimeout := c.block.NewICmp(enum.IPredEQ, stepR, constant.NewInt(irtypes.I8, 2))
+	timeoutBlk := c.newBlock("chwait.timeout")
+	progressBlk := c.newBlock("chwait.progress")
+	c.block.NewCondBr(isTimeout, timeoutBlk, progressBlk)
+
+	// timeout: clean early-return from the non-coroutine function (panicExitBlock
+	// is nil here — a plain function, not a coroutine body — so a ret is valid).
+	c.block = timeoutBlk
+	if _, isVoid := c.fn.Sig.RetType.(*irtypes.VoidType); isVoid {
+		c.block.NewRet(nil)
+	} else {
+		c.block.NewRet(c.zeroValue(c.fn.Sig.RetType))
+	}
+
+	// progress vs deadlock
+	c.block = progressBlk
+	deadlockBlk := c.newBlock("chwait.deadlock")
+	madeProgress := c.block.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
+	c.block.NewCondBr(madeProgress, recheck, deadlockBlk)
+
+	// deadlock: no runnable G and condition unmet — terminal (mirrors coop_run).
+	c.block = deadlockBlk
+	dlMsg := c.getTaskDeadlockMsgGlobal()
+	dlMsgPtr := c.block.NewGetElementPtr(dlMsg.ContentType, dlMsg,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), dlMsgPtr,
+		constant.NewInt(irtypes.I64, 45))
+	c.block.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
+	c.block.NewUnreachable()
+}
+
 // genChannelSend generates code for ch.send(value).
 // lock → wait-if-full → memcpy to buffer → signal → rendezvous wait if unbuffered → unlock
 func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr value.Value, chanType *irtypes.StructType, elemLLVM irtypes.Type, elemSize int64) value.Value {
@@ -4572,6 +4633,16 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		// On resume: re-lock and check closed, then retry
 		c.block = resumeBlk
 		c.block.NewCall(c.palMutexLock, mtx)
+		closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
+		isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
+		c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
+	} else if c.isWasm {
+		// T1200: pump the cooperative scheduler instead of the no-op cond_wait, then
+		// re-check the closed flag (as the cond_wait path does) before re-testing full.
+		c.block = waitFullBodyBlock
+		wfRecheck := c.newBlock("send.waitfull.recheck")
+		c.emitWasmChannelWaitPump(wfRecheck)
+		c.block = wfRecheck
 		closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
 		isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
 		c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
@@ -4701,6 +4772,12 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		c.block = rvResumeBlk
 		c.block.NewCall(c.palMutexLock, mtx)
 		c.block.NewBr(rendezvousExitBlock)
+	} else if c.isWasm {
+		// T1200: pump the cooperative scheduler instead of the no-op cond_wait so a
+		// non-coroutine sender (e.g. a named fn spawned via `go`) yields to its
+		// receiver; on progress recheck the rendezvous condition.
+		c.block = rendezvousWaitBlock
+		c.emitWasmChannelWaitPump(rendezvousCheckBlock)
 	} else {
 		// Thread-blocking mode rendezvous: cond_wait
 		c.block = rendezvousWaitBlock
@@ -18149,6 +18226,11 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 		c.block = resumeBlk
 		c.block.NewCall(c.palMutexLock, mtx)
 		c.block.NewBr(waitBlock)
+	} else if c.isWasm {
+		// T1200: pump the cooperative scheduler instead of the no-op cond_wait so a
+		// non-coroutine receiver yields to its sender; on progress recheck emptiness.
+		c.block = waitBodyBlock
+		c.emitWasmChannelWaitPump(waitBlock)
 	} else {
 		// Thread-blocking mode: cond_wait, loop
 		c.block = waitBodyBlock

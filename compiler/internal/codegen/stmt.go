@@ -12995,6 +12995,12 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 		c.block = resumeBlk
 		c.block.NewCall(c.palMutexLock, mtx)
 		c.block.NewBr(recvWaitBlock)
+	} else if c.isWasm {
+		// T1200: pump the cooperative scheduler instead of the no-op cond_wait so a
+		// non-coroutine `for v in channel` receiver yields to its sender; on progress
+		// recheck emptiness. Same fix as the `<-c` receive in genReceiveChannel.
+		c.block = recvWaitBodyBlock
+		c.emitWasmChannelWaitPump(recvWaitBlock)
 	} else {
 		// Thread-blocking mode: cond_wait, loop
 		c.block = recvWaitBodyBlock
@@ -13047,6 +13053,17 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
 	c.block.NewCall(c.funcs["promise_waiter_wake_one"], sendHeadPtr, sendTailPtr, notFull)
+
+	// Wake a rendezvous-parked sender (T0312): count is now decremented, so an
+	// unbuffered sender's rendezvous wait may be complete. genReceiveChannel wakes
+	// rv_waiters here too; `for v in ch` omitted it, so a `go`-spawned coroutine
+	// sender over an unbuffered channel parked on rv_waiters was never woken and
+	// deadlocked (host and WASM). Mirror the `<-c` wake to fix it.
+	rvWakeHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersHead)))
+	rvWakeTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersTail)))
+	c.block.NewCall(c.funcs["promise_waiter_wake_one"], rvWakeHeadPtr, rvWakeTailPtr, notFull)
 
 	// Unlock
 	c.block.NewCall(c.palMutexUnlock, mtx)

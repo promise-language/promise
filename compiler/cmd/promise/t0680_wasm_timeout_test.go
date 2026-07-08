@@ -100,3 +100,112 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 			"enforcement likely regressed to the process backstop", elapsed)
 	}
 }
+
+// TestT1200_WasmChannelLivelockReportsTimeoutInBinary — the T0680 spawn-loop case
+// works because every iteration completes a goroutine, which unwinds to the
+// cooperative scheduler where the per-test deadline is checked. A livelock driven
+// by an UNBUFFERED-CHANNEL rendezvous between two persistent goroutines did NOT
+// (T1200): the sender is a named function spawned via `go`, so its `send` runs in
+// the single, non-coroutine `@__user.worker`, whose rendezvous wait took the
+// thread-blocking branch — a no-op `pal_cond_wait` busy-spin on single-threaded
+// WASM. It never yielded to the scheduler, so coop_step (and its deadline check)
+// never ran, and the run fell through to the 31s process backstop.
+//
+// The fix pumps promise_sched_coop_step in the WASM non-coroutine channel-wait
+// path, so the sender yields, the receiver runs, and coop_step's T0680 deadline
+// check fires. This test asserts the in-binary per-test TIMEOUT (not the backstop)
+// for two variants: a pure channel rendezvous and a mixed channel+task loop.
+func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
+	promiseBin := locatePromiseBin(t)
+	requireWasmtime(t)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "channel_rendezvous",
+			body: "worker(channel[int] c) { int i = 0; while true { c.send(i); i = i + 1; } }\n" +
+				"test_livelock() `test(timeout: \"1s\") {\n" +
+				"  channel[int] c = channel[int]();\n" +
+				"  go worker(c);\n" +
+				"  int got = 0;\n" +
+				"  while true { int? _v = <-c; got = got + 1; }\n" +
+				"}\n",
+		},
+		{
+			name: "mixed_channel_and_task",
+			body: "trivial() int { return 1; }\n" +
+				"worker(channel[int] c) { int i = 0; while true { c.send(i); i = i + 1; } }\n" +
+				"test_livelock() `test(timeout: \"1s\") {\n" +
+				"  channel[int] c = channel[int]();\n" +
+				"  go worker(c);\n" +
+				"  int n = 0;\n" +
+				"  while true {\n" +
+				"    task[int] t = go trivial();\n" +
+				"    int? r = <-t;\n" +
+				"    int? _v = <-c;\n" +
+				"    n = n + 1;\n" +
+				"  }\n" +
+				"}\n",
+		},
+		{
+			// Non-coroutine `for v in ch` receiver: the receive-empty wait is in the
+			// plain @__user.consume, so its cooperative pump (not the coroutine park)
+			// must observe the per-test deadline. Sender is the coroutine test body.
+			name: "channel_forin_receiver",
+			body: "consume(channel[int] c) { for _v in c { } }\n" +
+				"test_livelock() `test(timeout: \"1s\") {\n" +
+				"  channel[int] c = channel[int]();\n" +
+				"  go consume(c);\n" +
+				"  int i = 0;\n" +
+				"  while true { c.send(i); i = i + 1; }\n" +
+				"}\n",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "t1200_wasm_timeout_")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(dir)
+
+			// Unique tag defeats the per-source test-binary cache.
+			unique := fmt.Sprintf("t1200-wasm-%s-%d-%d", tc.name, os.Getpid(), time.Now().UnixNano())
+			src := "// " + unique + "\n" + tc.body
+			file := filepath.Join(dir, "livelock_test.pr")
+			if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			start := time.Now()
+			cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
+			output, runErr := cmd.CombinedOutput()
+			elapsed := time.Since(start)
+			combined := string(output)
+
+			if runErr == nil {
+				t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
+			}
+
+			tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_livelock`)
+			if !tre.MatchString(combined) {
+				t.Errorf("expected in-binary per-test TIMEOUT line for test_livelock; got:\n%s", combined)
+			}
+			if !strings.Contains(combined, "1 timed out") {
+				t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
+			}
+			if strings.Contains(combined, "tests exceeded") {
+				t.Errorf("run hit the process-level backstop instead of the in-binary "+
+					"deadline — T1200 channel-livelock enforcement regressed; got:\n%s", combined)
+			}
+			if elapsed > 20*time.Second {
+				t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
+					"enforcement likely regressed to the process backstop", elapsed)
+			}
+		})
+	}
+}

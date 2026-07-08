@@ -1,0 +1,115 @@
+// T1200: channel blocking ops inside a NON-coroutine function spawned via
+// `go worker(...)` must cooperatively progress on WASM (the plain @__user.worker
+// pumps promise_sched_coop_step instead of the no-op pal_cond_wait busy-spin).
+// Before the fix these livelocked with zero progress on wasm32-wasi. All three
+// non-coroutine wait sites are exercised: unbuffered send rendezvous, buffered
+// wait-full, and recv wait-empty.
+t1200_producer(channel[int] c) {
+  int i = 0;
+  while i < 500 {
+    c.send(i);
+    i = i + 1;
+  }
+}
+
+go_named_fn_unbuffered_rendezvous() `test {
+  channel[int] c = channel[int]();
+  go t1200_producer(c);
+  int total = 0;
+  for j in 0..500 {
+    r := <-c;
+    if v := r {
+      total += v;
+    }
+  }
+  assert(total == 124750, "unbuffered rendezvous sum 0..499");
+}
+
+t1200_buf_producer(channel[int] c) {
+  int i = 0;
+  while i < 500 {
+    c.send(i);
+    i = i + 1;
+  }
+}
+
+go_named_fn_buffered_waitfull() `test {
+  channel[int] c = channel[int](capacity: 2);
+  go t1200_buf_producer(c);
+  int total = 0;
+  for j in 0..500 {
+    r := <-c;
+    if v := r {
+      total += v;
+    }
+  }
+  assert(total == 124750, "buffered wait-full sum 0..499");
+}
+
+t1200_consumer(channel[int] inp, channel[int] outp) {
+  int total = 0;
+  for k in 0..500 {
+    r := <-inp;
+    if v := r {
+      total += v;
+    }
+  }
+  outp.send(total);
+}
+
+go_named_fn_recv_waitempty() `test {
+  channel[int] inp = channel[int]();
+  channel[int] outp = channel[int]();
+  go t1200_consumer(inp, outp);
+  for j in 0..500 {
+    inp.send(j);
+  }
+  r := <-outp;
+  if v := r {
+    assert(v == 124750, "consumer recv sum 0..499");
+  }
+}
+
+// T1200: `for v in ch` must wake a rendezvous-parked coroutine sender. The read
+// path of `for-in` over a channel omitted the T0312 rv_waiters wake that `<-c`
+// has, so an unbuffered `go { ch.send(...) }` sender parked on rv_waiters was
+// never woken and the loop deadlocked on every platform. Coroutine sender +
+// for-in receiver over an unbuffered channel exercises exactly that wake.
+forin_channel_coroutine_sender() `test {
+  channel[int] c = channel[int]();
+  go {
+    int i = 0;
+    while i < 500 {
+      c.send(i);
+      i = i + 1;
+    }
+    c.close();
+  };
+  int total = 0;
+  for v in c {
+    total += v;
+  }
+  assert(total == 124750, "for-in coroutine-sender rendezvous sum 0..499");
+}
+
+// T1200: the same non-coroutine WASM cooperative-pump fix must also cover the
+// `for v in ch` receive-empty wait, driven here by a plain `go`-spawned named
+// function sender. Finite correctness on host and wasm.
+t1200_forin_producer(channel[int] c) {
+  int i = 0;
+  while i < 500 {
+    c.send(i);
+    i = i + 1;
+  }
+  c.close();
+}
+
+forin_channel_named_fn_sender() `test {
+  channel[int] c = channel[int]();
+  go t1200_forin_producer(c);
+  int total = 0;
+  for v in c {
+    total += v;
+  }
+  assert(total == 124750, "for-in named-fn-sender sum 0..499");
+}

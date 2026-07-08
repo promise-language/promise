@@ -89,6 +89,16 @@ type Checker struct {
 	// escapes, which is what this map tracks.
 	goHandleBorrowedLocal map[string]string
 
+	// T1212: locals produced by a Some-wrap coercion of a BORROWED single-owner
+	// handle (`Mutex[int]?? x = m` with m: Mutex[int]? borrowed). The outer
+	// Optional is genuinely Owned (in-scope drop is sound — codegen clears the
+	// inner alias's drop flag), but the inner handle is still borrowed, so an
+	// ESCAPE (return/store/call-arg/send) aliases the caller's live handle and
+	// double-frees (dupOptionalVectorElem has no clone). Sibling of
+	// goHandleBorrowedLocal — same escape-only rejection model. Maps local name →
+	// {source binding, handle kind} for the diagnostic.
+	wrapCoercedHandleLocal map[string]wrapCoercedHandle
+
 	// T1035: the generic function / method currently being checked (exactly one
 	// is non-nil inside a body, both nil at file scope). Used to key deferred
 	// for-in-drain requirements (funcDrainReqs/methodDrainReqs) so they can be
@@ -131,6 +141,11 @@ type Checker struct {
 	funcReturnHandleReqs   map[*types.Func][]returnHandleReq
 	methodReturnHandleReqs map[*types.Method][]returnHandleReq
 }
+
+// wrapCoercedHandle records the provenance of a T1212 wrap-coerced borrowed
+// single-owner handle local: `source` is the borrowed binding it aliases, and
+// `kind` is its handle display name ("task"/"Mutex"/"MutexGuard").
+type wrapCoercedHandle struct{ source, kind string }
 
 // paramInitialState returns the initial ownership state for a function or
 // method parameter. Non-`~` non-`&` non-Copy parameters (and plain `this`
@@ -239,6 +254,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
+	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
@@ -258,6 +274,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.returnOrigins = nil
 	c.loopDepth = 0
 	c.goHandleBorrowedLocal = make(map[string]string)
+	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.curFuncObj = fn
 	c.curMethodObj = nil
@@ -290,6 +307,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.varTypes = savedVarTypes
 	c.loopDepth = savedLoopDepth
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
+	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
@@ -375,6 +393,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
+	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
@@ -394,6 +413,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = nil
 	c.loopDepth = 0
 	c.goHandleBorrowedLocal = make(map[string]string)
+	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.curFuncObj = nil
 	c.curMethodObj = m
@@ -433,6 +453,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = savedReturnOrigins
 	c.loopDepth = savedLoopDepth
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
+	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj

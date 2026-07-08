@@ -241,6 +241,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
+		c.recordWrapCoercedBorrowedHandle(s.Name, s.Value, s.Type) // T1212
 		c.promoteCallBorrows(s.Name, s.Value)
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
@@ -298,11 +299,13 @@ func (c *Checker) rejectBorrowedIdentVarDecl(value ast.Expr, lhsRef ast.TypeRef)
 	// carve-out and let them fall through to the singleOwnerHandleKindDeep reject.
 	//
 	// NOTE (T1212, T1138 follow-up): the DEEPER wrap-coerce-then-return shape
-	// `Mutex[int]?? x = m;` (RHS already Optional, so carved out here) still
-	// escapes an aliased single-owner handle when returned — the carve-out
-	// legitimately makes `x` owned, so neither the var-decl nor the return check
-	// fires. Catching it needs handle-provenance tracking on the wrapped owned
-	// local (outer Optional owned, inner handle borrowed).
+	// `Mutex[int]?? x = m;` (RHS already Optional, so carved out here) makes `x`
+	// legitimately Owned, so neither the var-decl nor the return check fires here
+	// — but the inner handle it wraps is still borrowed, so an ESCAPE (return,
+	// store, call-arg, send) aliases the caller's live handle and double-frees.
+	// That shape is now tracked by recordWrapCoercedBorrowedHandle (at the
+	// var-decl site) and rejected at the escape site by
+	// rejectWrapCoercedHandleEscapeExpr — the in-scope drop stays valid.
 	if optionalDepthTypeRef(lhsRef) > optionalDepthType(typ) && singleOwnerHandleKind(typ) == "" {
 		return false
 	}
@@ -910,6 +913,13 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 					c.state[ident.Name] = Owned
 				}
 			}
+			// T1212: reassigning the local clears any stale wrap-coerced-handle
+			// provenance — the old borrowed-inner alias is dropped (sound), and the
+			// new value governs safety on its own. An unsafe borrowed wrap-coerce
+			// RHS is already rejected by the tryMoveConsume above (the assignment
+			// path has no var-decl carve-out), so it never reaches a clean escape;
+			// untracking here only removes the false positive on a fresh OWNED RHS.
+			delete(c.wrapCoercedHandleLocal, ident.Name)
 			// T0895: register the shared borrow of the source aggregate *after*
 			// ExpireBorrower above so it is not immediately expired. Protects the
 			// source from being moved/consumed/reassigned while the borrowing
@@ -1535,6 +1545,32 @@ func (c *Checker) trackGoHandleBinding(name string, value ast.Expr, pos ast.Pos)
 	}
 	delete(c.goHandleBorrowedLocal, name)
 	return false
+}
+
+// recordWrapCoercedBorrowedHandle records `Type name = ident` when it is a
+// Some-wrap coercion (LHS Optional depth > RHS depth) of a BORROWED single-
+// owner handle. The resulting local is Owned but carries a borrowed inner
+// handle (the outer Optional is a fresh materialized value, but the wrapped
+// handle still aliases the caller's live value — it has no clone/dup), so
+// rejectWrapCoercedHandleEscapeExpr then rejects it leaving scope. A
+// non-matching RHS clears any stale same-name entry (reused binding name).
+// T1212.
+func (c *Checker) recordWrapCoercedBorrowedHandle(name string, value ast.Expr, lhsRef ast.TypeRef) {
+	if name == "_" {
+		return
+	}
+	if ident, ok := value.(*ast.IdentExpr); ok {
+		if c.state[ident.Name] == Borrowed {
+			typ := c.info.Types[value]
+			if optionalDepthTypeRef(lhsRef) > optionalDepthType(typ) {
+				if k := singleOwnerHandleKindDeep(typ); k != "" {
+					c.wrapCoercedHandleLocal[name] = wrapCoercedHandle{source: ident.Name, kind: k}
+					return
+				}
+			}
+		}
+	}
+	delete(c.wrapCoercedHandleLocal, name)
 }
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {

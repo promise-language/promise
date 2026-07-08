@@ -10,11 +10,12 @@
 //   pass_opt(Mutex[int]? m) Mutex[int]? { Mutex[int]? x = m; return x; } // laundered
 // Those are covered by Go ownership tests (cannot return/move borrowed param).
 //
-// Two related shapes remain broken and OUT OF SCOPE for T1138 — both route
-// through the same unfixable dupOptionalVectorElem codegen path when ownership
-// cannot see the handle: `Mutex[int]?? x = m; return x;` / consuming the wrapped
-// value (T1212), and a generic fn returning an Optional-wrapped handle param
-// (T1213). Do NOT add runtime tests for those until they are fixed.
+// Two related shapes were OUT OF SCOPE for T1138 — both routed through the same
+// unfixable dupOptionalVectorElem codegen path when ownership could not see the
+// handle: `Mutex[int]?? x = m; return x;` / consuming the wrapped value (T1212,
+// now rejected — see t1212_test.go), and a generic fn returning an
+// Optional-wrapped handle param (T1213, now rejected). Both are handled by the
+// ownership pass rather than a codegen fix.
 //
 // These runtime tests prove the T1138 fix does NOT over-reject the valid paths
 // and that they stay leak-free.

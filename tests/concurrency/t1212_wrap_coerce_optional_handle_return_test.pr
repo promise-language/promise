@@ -1,0 +1,57 @@
+// T1212: the Some-wrap coercion `Mutex[int]?? x = m` (m borrowed) is legitimately
+// allowed (it materializes a fresh outer Optional), but ESCAPING the owned local
+// `x` (return/store/send) aliases the caller's live single-owner handle and
+// double-frees — dupOptionalVectorElem has no clone. The ownership pass now
+// rejects those escapes (see t1212_test.go). These runtime tests prove the fix
+// does NOT over-reject the sound shapes and that they stay leak-free.
+//
+// NOTE: access uses a step-unwrap (`r!` to a local, then `!.lock()`) rather than
+// the chained `r!!.lock()`, which segfaults on an independent codegen bug (T1215).
+worker() int {
+  return 42;
+}
+
+// Valid: the RHS handle is OWNED (a fresh local), so `x = m` is a real move and
+// the single handle transfers cleanly to the caller's result — no aliasing, no
+// double-free. The reject is strictly gated on Borrowed state.
+owned_wrap_coerce_mutex() Mutex[int]?? {
+  Mutex[int]? m = Mutex[int](9);
+  Mutex[int]?? x = m;
+  return x;
+}
+
+t1212_owned_wrap_coerce_mutex_return() `test {
+  Mutex[int]?? r = owned_wrap_coerce_mutex();
+  Mutex[int]? inner = r!;
+  int v = inner!.lock().borrow;
+  assert(v == 9, "owned wrap-coerce optional-mutex return");
+}
+
+// Valid: a `move` param makes `m` owned, so the wrap-coerce launder + return is a
+// real move — the single handle transfers to the caller cleanly.
+move_wrap_coerce_task(task[int]? move t) task[int]?? {
+  task[int]?? x = t;
+  return x;
+}
+
+t1212_move_wrap_coerce_task_return() `test {
+  task[int]? t = go worker();
+  task[int]?? r = move_wrap_coerce_task(move t);
+  task[int]? inner = r!;
+  int v = <-inner!;
+  assert(v == 42, "move wrap-coerce optional-task return");
+}
+
+// Valid: the non-escaping in-scope drop of a borrowed wrap-coerce — the outer
+// Optional's drop does not recurse into the borrowed inner handle, so the source
+// stays usable and nothing double-frees.
+drop_wrap_coerce(Mutex[int]? m) {
+  Mutex[int]?? x = m;
+}
+
+t1212_drop_wrap_coerce_borrowed_mutex() `test {
+  Mutex[int]? m = Mutex[int](13);
+  drop_wrap_coerce(m);
+  int v = m!.lock().borrow;
+  assert(v == 13, "source mutex still usable after wrap-coerce drop");
+}

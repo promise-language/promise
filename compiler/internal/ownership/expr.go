@@ -325,6 +325,30 @@ func (c *Checker) rejectGoHandleEscapeExpr(expr ast.Expr) bool {
 	return false
 }
 
+// wrapCoercedHandleEscapeMsg is the borrow-escape diagnostic for a T1212
+// wrap-coerced Optional local whose inner single-owner handle is still borrowed.
+func wrapCoercedHandleEscapeMsg(local string, h wrapCoercedHandle) string {
+	return "cannot let '" + local + "' escape; it wrap-coerces the borrowed single-owner `" +
+		h.kind + "` handle '" + h.source + "' into an Optional, which has no clone — the caller " +
+		"still owns the handle, so returning or storing it aliases the caller's live value and " +
+		"double-frees. Declare the parameter '" + h.source + "' with `move` to transfer ownership"
+}
+
+// rejectWrapCoercedHandleEscapeExpr errors and returns true when expr lets a
+// T1212 wrap-coerced borrowed handle local (tracked in wrapCoercedHandleLocal)
+// escape. Called at the top of tryMove/tryMoveConsume so every consume, store,
+// and return site is covered uniformly (the in-scope drop, which does not route
+// through tryMove, stays valid). T1212.
+func (c *Checker) rejectWrapCoercedHandleEscapeExpr(expr ast.Expr) bool {
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		if h, tracked := c.wrapCoercedHandleLocal[ident.Name]; tracked {
+			c.errorf(ident.Pos(), "%s", wrapCoercedHandleEscapeMsg(ident.Name, h))
+			return true
+		}
+	}
+	return false
+}
+
 // tryMove marks the variable referenced by expr as Moved, if it is a
 // non-copy variable tracked in the current state. Also checks that the
 // variable is not actively borrowed. Borrowed parameters are not moved —
@@ -334,6 +358,10 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	// T1152: reject an escaping `go f(&local)` task handle (inline temporary or
 	// a tracked handle binding) before any other move bookkeeping.
 	if c.rejectGoHandleEscapeExpr(expr) {
+		return
+	}
+	// T1212: reject an escaping wrap-coerced borrowed single-owner handle local.
+	if c.rejectWrapCoercedHandleEscapeExpr(expr) {
 		return
 	}
 	// T0837: reject moving a single-owner native handle field out of a shared
@@ -421,6 +449,10 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	// T1152: reject an escaping `go f(&local)` task handle (inline temporary or
 	// a tracked handle binding) before any other move bookkeeping.
 	if c.rejectGoHandleEscapeExpr(expr) {
+		return
+	}
+	// T1212: reject an escaping wrap-coerced borrowed single-owner handle local.
+	if c.rejectWrapCoercedHandleEscapeExpr(expr) {
 		return
 	}
 	// T0407: any expression whose static type is `T&`/`T~` (non-Copy) is a

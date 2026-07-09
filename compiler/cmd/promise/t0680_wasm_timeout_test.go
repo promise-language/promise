@@ -209,3 +209,79 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 		})
 	}
 }
+
+// TestT1218_WasmMutexLivelockReportsTimeoutInBinary — sibling of the T1200
+// channel case, one primitive over. A livelock where a NON-coroutine function
+// (a named fn spawned via `go`) contends a held Mutex[T].lock() did NOT report
+// the in-binary per-test TIMEOUT (T1218): the contested-lock wait runs in the
+// single, non-coroutine `@__user.grab`, whose `cond_wait; recheck-held` loop took
+// the thread-blocking branch — a no-op `pal_cond_wait` busy-spin on
+// single-threaded WASM. It never yielded to the scheduler, so coop_step (and its
+// T0680 deadline check) never ran, and the run fell through to the process
+// backstop.
+//
+// The fix pumps promise_sched_coop_step in the WASM non-coroutine mutex-lock
+// path, so the waiter yields to the scheduler and coop_step's per-test deadline
+// check fires. This test asserts the in-binary per-test TIMEOUT (not the
+// backstop): the test-body coroutine holds the mutex forever while making
+// infinite scheduler progress (awaiting fresh goroutines in a loop — a bare
+// `while true {}` holder would never yield on single-threaded WASM, since there
+// is no sysmon to set G.preempt), and a NON-coroutine `grab` spawned via `go`
+// contends the held lock. Without the fix, `grab`'s contested-lock branch is the
+// no-op `pal_cond_wait` busy-spin: once `grab` is resumed it never returns to the
+// scheduler, so the outer coop_run loop is stuck and the run falls through to the
+// process backstop. With the fix, `grab` pumps coop_step, everything keeps
+// progressing, and the deadline fires in-binary.
+func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
+	promiseBin := locatePromiseBin(t)
+	requireWasmtime(t)
+
+	dir, err := os.MkdirTemp("", "t1218_wasm_timeout_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Unique tag defeats the per-source test-binary cache.
+	unique := fmt.Sprintf("t1218-wasm-mutex-%d-%d", os.Getpid(), time.Now().UnixNano())
+	src := "// " + unique + "\n" +
+		"trivial() int { return 1; }\n" +
+		"grab(Ref[Mutex[int]] c) { use guard := c.borrow.lock(); guard.borrow += 1; }\n" +
+		"test_mtx() `test(timeout: \"1s\") {\n" +
+		"  shared := Ref[Mutex[int]](Mutex[int](0));\n" +
+		"  c := shared.clone();\n" +
+		"  use held := shared.borrow.lock();\n" +
+		"  go grab(c);\n" +
+		"  while true { task[int] t = go trivial(); int? r = <-t; }\n" +
+		"}\n"
+	file := filepath.Join(dir, "mutex_livelock_test.pr")
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
+	output, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	combined := string(output)
+
+	if runErr == nil {
+		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
+	}
+
+	tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_mtx`)
+	if !tre.MatchString(combined) {
+		t.Errorf("expected in-binary per-test TIMEOUT line for test_mtx; got:\n%s", combined)
+	}
+	if !strings.Contains(combined, "1 timed out") {
+		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
+	}
+	if strings.Contains(combined, "tests exceeded") {
+		t.Errorf("run hit the process-level backstop instead of the in-binary "+
+			"deadline — T1218 mutex-livelock enforcement regressed; got:\n%s", combined)
+	}
+	if elapsed > 20*time.Second {
+		t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
+			"enforcement likely regressed to the process backstop", elapsed)
+	}
+}

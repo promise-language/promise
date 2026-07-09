@@ -13000,7 +13000,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 		// non-coroutine `for v in channel` receiver yields to its sender; on progress
 		// recheck emptiness. Same fix as the `<-c` receive in genReceiveChannel.
 		c.block = recvWaitBodyBlock
-		c.emitWasmChannelWaitPump(recvWaitBlock)
+		c.emitWasmCoopWaitPump(recvWaitBlock)
 	} else {
 		// Thread-blocking mode: cond_wait, loop
 		c.block = recvWaitBodyBlock

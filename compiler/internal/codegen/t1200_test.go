@@ -95,7 +95,7 @@ func TestT1200_WasmNonCoroutineForInChannelWaitPumpsCoopStep(t *testing.T) {
 // `worker(...) int` spawned via `go`), the pump's per-test-deadline (coop_step==2)
 // early-return must emit a *typed zero* return matching the function signature,
 // not a `ret void` — otherwise the IR verifier rejects it. Locks the non-void
-// branch of emitWasmChannelWaitPump's timeout block.
+// branch of emitWasmCoopWaitPump's timeout block.
 func TestT1200_WasmNonVoidChannelWaitReturnsTypedZero(t *testing.T) {
 	src := `
 		worker(channel[int] c) int { c.send(0); return 5; }

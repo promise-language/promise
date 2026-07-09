@@ -1,0 +1,122 @@
+// T1218 — a contended Mutex[T].lock() inside a NON-coroutine function (a named
+// top-level function spawned via `go grab(...)`, compiled once as the plain
+// `@__user.grab`) must make real progress under contention on every target. On
+// single-threaded WASM the fix pumps the cooperative scheduler instead of the
+// no-op `pal_cond_wait`, so the waiter yields to the holder G, which releases,
+// and the waiter then acquires. These run on both host and `--wasm` and must be
+// leak-free. Sibling of the T1200 channel fix.
+// grab locks the shared mutex, increments the guarded value, then signals done.
+// Spawned as a plain (non-coroutine) function via `go grab(...)` so its `lock()`
+// exercises the non-coroutine contested-lock wait path.
+grab(Ref[Mutex[int]] move c, channel[bool] done) {
+  use guard := c.borrow.lock();
+  guard.borrow += 1;
+  done.send(true);
+}
+
+// Several named-function grabbers contend the same held mutex. The main path
+// releases by scope exit; each grabber must acquire, increment, and signal —
+// proving the contested-lock wait makes progress (does not livelock) on host and
+// WASM alike.
+t1218_named_fn_mutex_contention() `test {
+  shared := Ref[Mutex[int]](Mutex[int](0));
+  n := 8;
+  done := channel[bool](capacity: n);
+  i := 0;
+  while i < n {
+    c := shared.clone();
+    go grab(move c, done);
+    i += 1;
+  }
+  i = 0;
+  while i < n {
+    <-done;
+    i += 1;
+  }
+  use guard := shared.borrow.lock();
+  assert(guard.borrow == 8, "8 named-fn grabbers each +1 = 8");
+}
+
+// Forces genuine contention so the waiter actually *waits then acquires* (not
+// just "no deadlock"). The holder coroutine parks (`<-release`) while STILL
+// holding the lock, so the non-coroutine grabber spawned afterwards finds
+// held==1 and must block: on WASM it pumps the cooperative scheduler, which
+// resumes the holder to release; on host it blocks in the real pal_cond_wait
+// until the holder signals. Either way the grabber then re-checks held==0 and
+// acquires — exercising the pump's progress→recheck→acquire path (the in-binary
+// TIMEOUT test only covers the deadline branch). The grabber increments after
+// the holder set 42, so the guarded value ends at 43.
+t1218_waiter_blocks_until_holder_releases() `test {
+  shared := Ref[Mutex[int]](Mutex[int](0));
+  ready := channel[bool](capacity: 1);
+  release := channel[bool](capacity: 1);
+  done := channel[bool](capacity: 1);
+  holder := shared.clone();
+  go {
+    use guard := holder.borrow.lock();
+    guard.borrow = 42;
+    ready.send(true); // announce: holding the lock now
+    <-release; // park WHILE still holding — forces the grabber to wait
+  }; // guard drops here → releases the lock
+  <-ready; // holder is now holding and parked
+  grabber := shared.clone();
+  go grab(move grabber, done); // contends the held lock (held==1 → wait path)
+  release.send(true); // let the holder finish and release
+  <-done; // grabber acquired, incremented, signalled
+  use guard := shared.borrow.lock();
+  assert(guard.borrow == 43, "holder set 42, contended grabber +1 = 43");
+}
+
+// The holder is a coroutine (inline `go {}` block) that acquires first and holds
+// briefly; a named-function grabber contends. Confirms the coroutine holder
+// releasing (via guard drop at block exit) wakes the non-coroutine waiter on
+// WASM through the released `held` flag observed by the pump's recheck.
+t1218_coroutine_holder_named_waiter() `test {
+  shared := Ref[Mutex[int]](Mutex[int](0));
+  ready := channel[bool](capacity: 1);
+  done := channel[bool](capacity: 1);
+  holder := shared.clone();
+  go {
+    use guard := holder.borrow.lock();
+    guard.borrow = 41;
+    ready.send(true);
+  };
+  <-ready;
+  grabber := shared.clone();
+  go grab(move grabber, done);
+  <-done;
+  use guard := shared.borrow.lock();
+  assert(guard.borrow == 42, "coroutine holder set 41, named grabber +1 = 42");
+}
+
+// grab_read is a NON-void non-coroutine grabber: it contends the held lock, then
+// RETURNS the guarded value it observed. This exercises the non-void arm of the
+// mutex-lock wait pump (the `ret <typed> 0` timeout arm is IR-verified by
+// TestT1218_WasmNonVoidMutexLockReturnsTypedZero; here we prove the *acquire*
+// path of a non-void contending fn returns the correct value at runtime, not a
+// stray zero). Spawned as a plain fn via `go` so its lock() is the non-coroutine
+// contested-lock path on WASM.
+grab_read(Ref[Mutex[int]] move c) int {
+  use guard := c.borrow.lock();
+  return guard.borrow;
+}
+
+// A coroutine holder acquires and sets 77, then releases; a non-void grabber
+// contends, acquires, and returns what it read. Awaiting the task must yield 77 —
+// confirming the pump's progress→recheck→acquire path threads a real return value
+// out of a non-void contended lock on host and WASM alike.
+t1218_non_void_grabber_returns_guarded_value() `test {
+  shared := Ref[Mutex[int]](Mutex[int](0));
+  ready := channel[bool](capacity: 1);
+  holder := shared.clone();
+  go {
+    use guard := holder.borrow.lock();
+    guard.borrow = 77;
+    ready.send(true);
+  };
+  <-ready;
+  grabber := shared.clone();
+  task[int] t = go grab_read(move grabber);
+  int r = <-t;
+  assert(r == 77, "non-void grabber acquired the released lock and read 77");
+}

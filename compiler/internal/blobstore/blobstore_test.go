@@ -327,6 +327,7 @@ func TestResolveArchiveCoalescing(t *testing.T) {
 	)
 
 	r := NewResolver(store, m)
+	defer r.Close()
 	for _, name := range []string{"llvm-opt", "llvm-llc", "llvm-lld"} {
 		p, err := r.Resolve(name)
 		if err != nil {

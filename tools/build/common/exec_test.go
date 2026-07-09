@@ -3,7 +3,12 @@ package common
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -13,8 +18,91 @@ type erroringWriter struct{}
 
 func (erroringWriter) Write([]byte) (int, error) { return 0, errors.New("forced fwd error") }
 
+// teeStubSource is a tiny cross-platform program used as the subprocess in the
+// RunTee* tests. It replaces the `echo`/`sh -c` sample commands, which are not
+// executables on a bare Windows PATH — PowerShell has no `sh`/`echo` on PATH, so
+// the shell forms failed `bin/test` on windows-amd64 with `exec: "sh":
+// executable file not found` (T1225). Args are processed left to right: `-line X`
+// prints X and a newline, `-raw X` prints X with no newline, `-exit N` sets the
+// exit code (applied after all output).
+const teeStubSource = `package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+)
+
+func main() {
+	code := 0
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-line":
+			if i+1 < len(args) {
+				fmt.Print(args[i+1] + "\n")
+				i++
+			}
+		case "-raw":
+			if i+1 < len(args) {
+				fmt.Print(args[i+1])
+				i++
+			}
+		case "-exit":
+			if i+1 < len(args) {
+				code, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		}
+	}
+	os.Exit(code)
+}
+`
+
+// teeStubName is the base name (sans exe suffix) of the compiled tee stub. The
+// RunTee* "wraps command name" tests assert the error mentions it.
+const teeStubName = "teestub"
+
+var (
+	teeStubOnce sync.Once
+	teeStubPath string
+	teeStubErr  error
+)
+
+// teeStub compiles teeStubSource to a host-native executable and returns its
+// path. The compile is cached so it happens once per test binary. The temp dir
+// is intentionally not removed — the executable must outlive this call so the
+// tests can exec it; the OS reclaims the temp dir after the run.
+func teeStub(t *testing.T) string {
+	t.Helper()
+	teeStubOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "teestub-")
+		if err != nil {
+			teeStubErr = err
+			return
+		}
+		src := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(src, []byte(teeStubSource), 0o644); err != nil {
+			teeStubErr = err
+			return
+		}
+		exe := filepath.Join(dir, teeStubName+ExeSuffix())
+		cmd := exec.Command("go", "build", "-o", exe, src)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			teeStubErr = fmt.Errorf("go build tee stub: %w", err)
+			return
+		}
+		teeStubPath = exe
+	})
+	if teeStubErr != nil {
+		t.Fatalf("build tee stub: %v", teeStubErr)
+	}
+	return teeStubPath
+}
+
 func TestRunTee_CapturesOutput(t *testing.T) {
-	out, err := RunTee("", "echo", "hello tee")
+	out, err := RunTee("", teeStub(t), "-line", "hello tee")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +113,7 @@ func TestRunTee_CapturesOutput(t *testing.T) {
 
 func TestRunTee_ErrorReturnsCaptured(t *testing.T) {
 	// Command that prints then exits non-zero — partial output should be returned.
-	out, err := RunTee("", "sh", "-c", "echo partial; exit 1")
+	out, err := RunTee("", teeStub(t), "-line", "partial", "-exit", "1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -35,11 +123,11 @@ func TestRunTee_ErrorReturnsCaptured(t *testing.T) {
 }
 
 func TestRunTee_ErrorWrapsCommandName(t *testing.T) {
-	_, err := RunTee("", "sh", "-c", "exit 2")
+	_, err := RunTee("", teeStub(t), "-exit", "2")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "sh") {
+	if !strings.Contains(err.Error(), teeStubName) {
 		t.Errorf("error %q does not mention command name", err.Error())
 	}
 }
@@ -50,7 +138,7 @@ func TestRunTee_ErrorWrapsCommandName(t *testing.T) {
 func TestRunTeeFiltered_DropsFilteredLines(t *testing.T) {
 	var fwd bytes.Buffer
 	keep := func(line string) bool { return !strings.HasPrefix(line, "drop:") }
-	out, err := runTeeFilteredTo(&fwd, "", "sh", keep, "-c", "echo drop:a; echo keep:b; echo drop:c")
+	out, err := runTeeFilteredTo(&fwd, "", teeStub(t), keep, "-line", "drop:a", "-line", "keep:b", "-line", "drop:c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +156,7 @@ func TestRunTeeFiltered_DropsFilteredLines(t *testing.T) {
 func TestRunTeeFiltered_FlushesPartialLine(t *testing.T) {
 	var fwd bytes.Buffer
 	keep := func(line string) bool { return !strings.HasPrefix(line, "drop:") }
-	out, err := runTeeFilteredTo(&fwd, "", "sh", keep, "-c", "printf 'drop:a\\nkeep:b'")
+	out, err := runTeeFilteredTo(&fwd, "", teeStub(t), keep, "-line", "drop:a", "-raw", "keep:b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +173,7 @@ func TestRunTeeFiltered_FlushesPartialLine(t *testing.T) {
 func TestRunTeeFiltered_ErrorReturnsCaptured(t *testing.T) {
 	var fwd bytes.Buffer
 	keep := func(string) bool { return true }
-	out, err := runTeeFilteredTo(&fwd, "", "sh", keep, "-c", "echo partial; exit 1")
+	out, err := runTeeFilteredTo(&fwd, "", teeStub(t), keep, "-line", "partial", "-exit", "1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -99,7 +187,7 @@ func TestRunTeeFiltered_ErrorReturnsCaptured(t *testing.T) {
 // buffer still receives the bytes regardless.
 func TestRunTeeFiltered_FwdWriteErrorMidLine(t *testing.T) {
 	keep := func(string) bool { return true }
-	out, err := runTeeFilteredTo(erroringWriter{}, "", "sh", keep, "-c", "echo line1")
+	out, err := runTeeFilteredTo(erroringWriter{}, "", teeStub(t), keep, "-line", "line1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -117,7 +205,7 @@ func TestRunTeeFiltered_FwdWriteErrorMidLine(t *testing.T) {
 // path that touches fwd.
 func TestRunTeeFiltered_FlushFwdWriteError(t *testing.T) {
 	keep := func(string) bool { return true }
-	out, err := runTeeFilteredTo(erroringWriter{}, "", "sh", keep, "-c", "printf 'partial'")
+	out, err := runTeeFilteredTo(erroringWriter{}, "", teeStub(t), keep, "-raw", "partial")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -137,7 +225,7 @@ func TestRunTeeFiltered_FlushFwdWriteError(t *testing.T) {
 // captured-stdout return value confirms the writer chain is wired up.
 func TestRunTeeStderrFiltered_DelegatesAndCaptures(t *testing.T) {
 	keep := func(string) bool { return true }
-	out, err := RunTeeStderrFiltered("", "sh", keep, "-c", "echo via-public-wrapper")
+	out, err := RunTeeStderrFiltered("", teeStub(t), keep, "-line", "via-public-wrapper")
 	if err != nil {
 		t.Fatal(err)
 	}

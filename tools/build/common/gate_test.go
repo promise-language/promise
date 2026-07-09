@@ -505,7 +505,7 @@ func TestParseCoverageTotal_NoMatch(t *testing.T) {
 
 // TestRunTeeStderr_CapturesOutput verifies that RunTeeStderr captures stdout.
 func TestRunTeeStderr_CapturesOutput(t *testing.T) {
-	out, err := RunTeeStderr("", "echo", "hello tee stderr")
+	out, err := RunTeeStderr("", teeStub(t), "-line", "hello tee stderr")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestRunTeeStderr_CapturesOutput(t *testing.T) {
 
 // TestRunTeeStderr_ErrorReturnsCaptured verifies partial output is returned on error.
 func TestRunTeeStderr_ErrorReturnsCaptured(t *testing.T) {
-	out, err := RunTeeStderr("", "sh", "-c", "echo partial; exit 1")
+	out, err := RunTeeStderr("", teeStub(t), "-line", "partial", "-exit", "1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -527,11 +527,11 @@ func TestRunTeeStderr_ErrorReturnsCaptured(t *testing.T) {
 
 // TestRunTeeStderr_ErrorWrapsCommandName verifies the error message includes the command.
 func TestRunTeeStderr_ErrorWrapsCommandName(t *testing.T) {
-	_, err := RunTeeStderr("", "sh", "-c", "exit 2")
+	_, err := RunTeeStderr("", teeStub(t), "-exit", "2")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "sh") {
+	if !strings.Contains(err.Error(), teeStubName) {
 		t.Errorf("error %q does not mention command name", err.Error())
 	}
 }

@@ -1,9 +1,12 @@
 package common
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -175,14 +178,14 @@ func TestEnsureWinlinkLibsSeedsSlimCache(t *testing.T) {
 	// The slim blob is a stub llvm-dlltool: it parses `-l <out>` and writes a
 	// minimal ar archive there, so runReleaseWinlink produces a real .lib.
 	cat := &BlobsCatalog{Schema: BlobsCatalogSchema}
-	raw := []byte(dllToolStub)
+	raw := dllToolStub(t)
 	br := brotliBytes(t, raw)
 	sha := sha256Hex(raw)
 	if err := cat.Upsert(BlobEntry{
 		Dependency:       "llvm",
 		Version:          "22.1.0",
 		Target:           target,
-		Name:             "llvm-dlltool",
+		Name:             "llvm-dlltool" + ExeSuffix(),
 		SHA256:           sha,
 		Size:             int64(len(raw)),
 		Compression:      compressionBrotli,
@@ -215,11 +218,70 @@ func TestEnsureWinlinkLibsSeedsSlimCache(t *testing.T) {
 	}
 }
 
-// dllToolStub is a shell stub standing in for llvm-dlltool: it parses `-l <out>`
-// and writes a minimal ar archive there so runReleaseWinlink produces a real
-// .lib without a system LLVM. The marker after the magic lets a test prove
-// *this* binary (not a fetched one) ran.
-const dllToolStub = "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -l) out=\"$2\"; shift 2;;\n    *) shift;;\n  esac\ndone\nprintf '!<arch>\\nSLIM' > \"$out\"\n"
+// dllToolStubSource is a tiny Go program standing in for llvm-dlltool: it parses
+// `-l <out>` and writes a minimal ar archive there so runReleaseWinlink produces
+// a real .lib without a system LLVM. The "SLIM" marker after the magic lets a
+// test prove *this* binary (not a fetched one) ran. It is compiled to a real
+// host-native executable rather than shipped as a `#!/bin/sh` script because
+// Windows cannot fork/exec a shell script — the script form failed the winlink
+// cache tests on the windows-amd64 runner with "This version of %1 is not
+// compatible with the version of Windows you're running" (T1225).
+const dllToolStubSource = `package main
+
+import "os"
+
+func main() {
+	args := os.Args[1:]
+	out := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-l" && i+1 < len(args) {
+			out = args[i+1]
+		}
+	}
+	if out != "" {
+		os.WriteFile(out, []byte("!<arch>\nSLIM"), 0o644)
+	}
+}
+`
+
+var (
+	dllToolStubOnce  sync.Once
+	dllToolStubBytes []byte
+	dllToolStubErr   error
+)
+
+// dllToolStub compiles dllToolStubSource to a host-native executable and returns
+// its bytes, ready to be written to a file named "llvm-dlltool"+ExeSuffix(). The
+// compile is cached so it happens once per test binary regardless of how many
+// tests use the stub. Callers must chmod the written file executable (0o755).
+func dllToolStub(t *testing.T) []byte {
+	t.Helper()
+	dllToolStubOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "dlltoolstub-")
+		if err != nil {
+			dllToolStubErr = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		src := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(src, []byte(dllToolStubSource), 0o644); err != nil {
+			dllToolStubErr = err
+			return
+		}
+		exe := filepath.Join(dir, "dlltool"+ExeSuffix())
+		cmd := exec.Command("go", "build", "-o", exe, src)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			dllToolStubErr = fmt.Errorf("go build stub: %w", err)
+			return
+		}
+		dllToolStubBytes, dllToolStubErr = os.ReadFile(exe)
+	})
+	if dllToolStubErr != nil {
+		t.Fatalf("build llvm-dlltool stub: %v", dllToolStubErr)
+	}
+	return dllToolStubBytes
+}
 
 // writeHostLLVMPrebuilts writes a prebuilts.toml whose [binaries.llvm] resolves
 // SlimLLVMCacheDir for the host. When withTarget is true it also adds a
@@ -233,10 +295,14 @@ func writeHostLLVMPrebuilts(t *testing.T, root, target string, withTarget bool) 
 	}
 	toml := "schema = 1\n[binaries.llvm]\nversion = \"22.1.0\"\nbundle_dir = \"compiler/cmd/promise/resources/llvm\"\n"
 	if withTarget {
+		// out carries the host exe suffix so the materialized tool name matches
+		// what resolveWinlinkDllTool probes for (llvm-dlltool.exe on Windows) —
+		// mirroring the real prebuilts.toml windows-amd64 target entry.
+		dllTool := "llvm-dlltool" + ExeSuffix()
 		toml += "[binaries.llvm.targets." + target + "]\n" +
 			"url = \"https://example.test/LLVM.tar.xz\"\n" +
 			"sha256 = \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0\"\n" +
-			"files = [\n  { src = \"bin/llvm-dlltool\", out = \"llvm-dlltool\", build_only = true },\n]\n"
+			"files = [\n  { src = \"bin/" + dllTool + "\", out = \"" + dllTool + "\", build_only = true },\n]\n"
 	}
 	if err := os.WriteFile(filepath.Join(toolsBuild, "prebuilts.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatal(err)
@@ -263,7 +329,7 @@ func TestEnsureWinlinkLibsUsesSlimCacheTool(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "llvm-dlltool"+ExeSuffix()), []byte(dllToolStub), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "llvm-dlltool"+ExeSuffix()), dllToolStub(t), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -308,7 +374,7 @@ func TestEnsureWinlinkLibsRegeneratesWhenDefStale(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "llvm-dlltool"+ExeSuffix()), []byte(dllToolStub), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "llvm-dlltool"+ExeSuffix()), dllToolStub(t), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

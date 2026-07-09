@@ -3,6 +3,7 @@ package blobstore
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -440,6 +441,14 @@ func TestSweepStagingResidueMissingDirs(t *testing.T) {
 // A residue entry that cannot be removed (read-only parent dir) is reported via
 // the returned error, and the sweep still continues past it (best-effort).
 func TestSweepStagingResidueReturnsRemoveError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Freezing the parent dir with chmod 0o500 does not block child removal on
+		// Windows — the read-only directory attribute is not a write-permission
+		// gate there, so RemoveAll succeeds and no error is produced. This test
+		// exercises the Unix permission model; skip it where that model is absent
+		// (T1225).
+		t.Skip("read-only parent dir does not block child removal on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory write permissions")
 	}

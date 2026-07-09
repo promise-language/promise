@@ -435,12 +435,7 @@ func TestPublishBlobsUploadAssetError(t *testing.T) {
 // = genuine no-op). Without the fix it would propagate the error and abort
 // the whole publish-blobs run, leaving R2 out of sync.
 func TestGhCLIUploaderAlreadyExists(t *testing.T) {
-	dir := t.TempDir()
-	script := "#!/bin/sh\necho 'asset under the same name already exists: [sha.br]' >&2\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	writeFakeGH(t, "#!/bin/sh\necho 'asset under the same name already exists: [sha.br]' >&2\nexit 1\n")
 	if err := (ghCLIUploader{}).UploadAsset("some-tag", "/tmp/sha.br"); err != nil {
 		t.Fatalf("UploadAsset must return nil for 'already exists', got: %v", err)
 	}
@@ -454,19 +449,14 @@ func TestGhCLIUploaderAlreadyExists(t *testing.T) {
 func TestPublishBlobsGHAlreadyExistsStillMirrorsR2(t *testing.T) {
 	// Fake gh: view exits 0 with empty output (so ListAssets returns no assets
 	// → blob enters the upload path), upload exits 1 with "already exists".
-	dir := t.TempDir()
-	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = \"release\" ]; then\n" +
-		"  case \"$2\" in\n" +
-		"    view)   echo \"\"; exit 0;;\n" +
-		"    upload) echo \"asset under the same name already exists\" >&2; exit 1;;\n" +
-		"  esac\n" +
-		"fi\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	writeFakeGH(t, "#!/bin/sh\n"+
+		"if [ \"$1\" = \"release\" ]; then\n"+
+		"  case \"$2\" in\n"+
+		"    view)   echo \"\"; exit 0;;\n"+
+		"    upload) echo \"asset under the same name already exists\" >&2; exit 1;;\n"+
+		"  esac\n"+
+		"fi\n"+
+		"exit 0\n")
 
 	prev := defaultReleaseUploader
 	defaultReleaseUploader = &ghCLIUploader{}
@@ -492,11 +482,7 @@ func TestPublishBlobsGHAlreadyExistsStillMirrorsR2(t *testing.T) {
 // TestGhCLIUploaderSuccess exercises the success path of ghCLIUploader.UploadAsset:
 // when `gh release upload` exits 0 the function must return nil.
 func TestGhCLIUploaderSuccess(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	writeFakeGH(t, "#!/bin/sh\nexit 0\n")
 	if err := (ghCLIUploader{}).UploadAsset("some-tag", "/tmp/sha.br"); err != nil {
 		t.Fatalf("UploadAsset must return nil on success, got: %v", err)
 	}
@@ -507,12 +493,7 @@ func TestGhCLIUploaderSuccess(t *testing.T) {
 // (e.g. a network failure), UploadAsset must propagate the error so the caller
 // notices the partial publish.
 func TestGhCLIUploaderRealError(t *testing.T) {
-	dir := t.TempDir()
-	script := "#!/bin/sh\necho 'network timeout' >&2\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	writeFakeGH(t, "#!/bin/sh\necho 'network timeout' >&2\nexit 1\n")
 	err := (ghCLIUploader{}).UploadAsset("some-tag", "/tmp/sha.br")
 	if err == nil {
 		t.Fatal("UploadAsset must return an error for a real gh failure")

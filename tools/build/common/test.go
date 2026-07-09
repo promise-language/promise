@@ -49,22 +49,27 @@ func RunTest(root string, args []string) error {
 		}
 	}
 
-	compilerDir := filepath.Join(root, "compiler")
-
 	// Build first
 	fmt.Println("Building...")
 	if err := RunBuild(root, nil); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
 
-	// Go tests
+	// Go tests — the compiler and tools/build modules. CI runs `bin/test`, not
+	// `bin/verify`, so bin/test must cover the tools/build suite too; otherwise a
+	// tools/ regression (e.g. a Windows-only test break) sails through CI while
+	// only verify catches it locally. Flows are deliberately NOT run here: they
+	// need a flow-sdk workspace that CI does not set up (bin/verify runs them
+	// locally where that workspace exists).
 	if suite == "go" || suite == "all" {
-		fmt.Println("\nRunning go tests...")
-		// -timeout 30m: the codegen package runs a full LLVM compile+link per
-		// test and exceeds Go's default 10m per-package limit on slow runners
-		// (e.g. the GitHub windows-amd64 runner). 30m gives ample headroom.
-		if err := RunIn(compilerDir, "go", "test", "-timeout", "30m", "./..."); err != nil {
-			return fmt.Errorf("go tests: %w", err)
+		fmt.Println("\nRunning go tests (compiler)...")
+		if err := RunGoTests(root); err != nil {
+			return fmt.Errorf("go tests (compiler): %w", err)
+		}
+
+		fmt.Println("\nRunning go tests (tools)...")
+		if err := RunToolsGoTests(root); err != nil {
+			return fmt.Errorf("go tests (tools): %w", err)
 		}
 	}
 

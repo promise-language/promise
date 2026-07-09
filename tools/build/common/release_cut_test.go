@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1706,13 +1707,24 @@ func TestShellGitSeam(t *testing.T) {
 }
 
 // writeFakeGH drops a fake `gh` shell script onto PATH for the duration of a test.
+// writeFakeGH drops a shell-script `gh` stub into a fresh temp dir and prepends
+// that dir to PATH so shellGH/ghCLIUploader exec it instead of a real gh. The
+// mechanism — an extensionless shell script resolved as `gh` by exec.LookPath —
+// is Unix-only: Windows resolves executables by PATHEXT extension, so a bare
+// `gh` script can never stand in for the tool there (LookPath skips it and falls
+// through to a real gh.exe, or fails). Tests that rely on it are skipped on
+// Windows; the shellGH JSON/arg logic they cover is platform-independent and
+// stays exercised on the Linux/macOS runners (T1225).
 func writeFakeGH(t *testing.T, script string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh shell-script stub is not executable as `gh` on Windows")
+	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestShellGHParse(t *testing.T) {

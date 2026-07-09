@@ -2625,13 +2625,19 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	}
 
 	// Generate arguments
-	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
-	origArgVals := argVals // B0345: save pre-coercion values
 	// T0418: Combine owner-type subst (Box[int].T → int + parents) with
 	// method-level subst (transform[string].T → string).
+	// T1223: compute the subst BEFORE evaluating args and route arg-gen through
+	// genGenericCallArgs so genCallArgsWithMutRef sees CONCRETE param types. Without
+	// this, a `T move` param (e.g. Set[string].add(T move elem)) reaches
+	// maybeEnableDupForMutRefArg as the unsubstituted TypeParam `T`, so the field-read
+	// dup that every move sink arms (T0366) is skipped — `out.add(this.label)` then
+	// stores an alias of the owner's inner buffer into the set → UAF when the owner drops.
 	ownerSubst := c.buildOwnerTypeArgSubst(targetType)
 	methodSubst := c.buildInferredCallSubst(method.Sig().TypeParams(), typeArgs)
 	combined := mergeSubstMaps(ownerSubst, methodSubst)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), combined)
+	origArgVals := argVals // B0345: save pre-coercion values
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)
 
@@ -2732,10 +2738,11 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 		}
 	}
 
-	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
-	origArgVals := argVals // B0345
 	// T0418/T0636: owner-enum subst (Box[int].T → int) merged with the
 	// method-level subst (transform[string].U → string).
+	// T1223: compute the subst BEFORE evaluating args and route arg-gen through
+	// genGenericCallArgs so genCallArgsWithMutRef sees CONCRETE param types (a raw
+	// `T move` param would otherwise skip the field-read dup every move sink arms).
 	var ownerSubst map[*types.TypeParam]types.Type
 	if inst, ok := targetType.(*types.Instance); ok {
 		if origin, ok := inst.Origin().(*types.Enum); ok && len(origin.TypeParams()) > 0 {
@@ -2744,6 +2751,8 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 	}
 	methodSubst := c.buildInferredCallSubst(method.Sig().TypeParams(), typeArgs)
 	combined := mergeSubstMaps(ownerSubst, methodSubst)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), combined)
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)
 
@@ -5248,11 +5257,17 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 			c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
 		}
 	}
-	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
-	origArgVals := argVals // B0345
 	// T0418: Build owner-type subst (e.g., Box[int].T → int) so generic
 	// methods on a generic instance see TypeParam-typed params resolved.
+	// T1223: compute the subst BEFORE evaluating args and route arg-gen through
+	// genGenericCallArgs so genCallArgsWithMutRef sees CONCRETE param types. Without
+	// this, a `T move` param (e.g. Set[string].add(T move elem)) reaches
+	// maybeEnableDupForMutRefArg as the unsubstituted TypeParam `T`, so the field-read
+	// dup that every move sink arms (T0366) is skipped — `out.add(this.label)` then
+	// stores an alias of the owner's inner buffer into the set → UAF when the owner drops.
 	ownerSubst := c.buildOwnerTypeArgSubst(targetType)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), ownerSubst)
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, ownerSubst)
 	args = append(args, argVals...)
 
@@ -5419,16 +5434,19 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			}
 		}
 	}
-	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
-	origArgVals := argVals // B0345
 	// T0418: Build owner-enum subst so generic methods on a generic enum
 	// instance see TypeParam-typed params resolved.
+	// T1223: compute the subst BEFORE evaluating args and route arg-gen through
+	// genGenericCallArgs so genCallArgsWithMutRef sees CONCRETE param types (a raw
+	// `T move` param would otherwise skip the field-read dup every move sink arms).
 	var enumSubst map[*types.TypeParam]types.Type
 	if inst, ok := targetType.(*types.Instance); ok {
 		if origin, ok := inst.Origin().(*types.Enum); ok && len(origin.TypeParams()) > 0 {
 			enumSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		}
 	}
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), enumSubst)
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, enumSubst)
 	args = append(args, argVals...)
 
@@ -5820,10 +5838,13 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	if method.Sig().Recv() != nil {
 		args = append(args, instance)
 	}
-	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
-	origArgVals := argVals // B0345
 	// T0418: vtableSubst (with parent subst merged) covers both the static
 	// type's TypeParams and inherited parent-type TypeParams.
+	// T1223: route arg-gen through genGenericCallArgs so genCallArgsWithMutRef sees
+	// CONCRETE param types (a raw `T move` param would otherwise skip the field-read
+	// dup every move sink arms).
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), vtableSubst)
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, vtableSubst)
 	args = append(args, argVals...)
 	result := c.block.NewCall(fnTyped, args...)

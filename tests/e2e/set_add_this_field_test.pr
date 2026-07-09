@@ -1,0 +1,187 @@
+// T1223: `Set.add(this.field)` / move-param-into-inner-key-store bypassed the
+// dup that every `~`/move sink arms (T0366), so the stored key aliased the
+// owner's inner heap buffer → UAF segfault at 0x0 when the owner dropped.
+// Sibling of T1221 (Channel.send(this.field)). Uses heap strings (via
+// to_upper()) so the owner's drop actually frees the buffer — a string literal
+// would carry the bit-63 no-free flag and mask the defect.
+type HeapBox {
+  int n;
+  string label;
+
+  add_it(this, Set[string] out) {
+    out.add(this.label);
+  }
+}
+
+set_add_this_field() `test {
+  s := Set[string]();
+  {
+    base := "hel";
+    h := HeapBox(n: 1, label: (base + "lo").to_upper()); // heap string "HELLO"
+    h.add_it(s);
+  }
+  // h drops here — must NOT free the string the set now owns
+  assert(s.contains("HELLO"), "set element preserved after owner drop");
+}
+
+// A user-defined generic `T move` method that stores the arg into an owned
+// container field — confirms the fix is general, not Set-specific, and exercises
+// the Vector dup limb (dupContainerFieldAccess).
+
+type Sink[T] {
+  T[] items;
+
+  push_move(this, T move x) {
+    this.items.push(move x);
+  }
+}
+
+type LabelSource {
+  string label;
+
+  feed(this, Sink[string] out) {
+    out.push_move(this.label);
+  }
+}
+
+generic_move_method_this_field() `test {
+  sink := Sink[string](items: string[]());
+  {
+    base := "wor";
+    src := LabelSource(label: (base + "ld").to_upper()); // heap string "WORLD"
+    src.feed(sink);
+  }
+  // src drops here — must NOT free the string the sink now owns
+  assert(sink.items.len == 1, "one element pushed");
+  assert(sink.items[0] == "WORLD", "vector element preserved after owner drop");
+}
+
+// ---------------------------------------------------------------------------
+// The T1223 fix routes arg-gen through genGenericCallArgs in FIVE dispatch
+// paths in expr.go. The two tests above exercise genMethodCall (a non-generic
+// method on a generic instance). The tests below cover the other four paths so
+// each `T move`/heap-field-into-inner-store site is armed with the field-read
+// dup, not just the Set.add shape. Every case follows the same UAF trap: a
+// droppable owner (heap `string` field via to_upper()) feeds `this.label` into
+// a sink that OUTLIVES it; if the stored key aliases the owner's buffer, the
+// owner's drop frees it and the post-drop read segfaults at 0x0.
+
+// NOTE: every case below routes the moved field into `Set.add` (the inner
+// MAP-KEY store `this._map[elem] = true`), NOT `Vector.push`. That distinction
+// is load-bearing: the Vector.push sink is already safe on the pristine tree, so
+// only the map-key store actually reproduces the UAF and thus distinguishes the
+// fixed from the unfixed compiler. `[..: Hashable + Equal]` satisfies Set's key
+// constraint on the otherwise-unbound generic param.
+
+// Path: genGenericMethodCall — a GENERIC method (its own `[U]` type param) with
+// a `U move` param, on a non-generic owner. Without the fix, U reaches
+// maybeEnableDupForMutRefArg unsubstituted, so the field-read dup is skipped.
+type Relay {
+  relay[U: Hashable + Equal](this, Set[U] out, U move x) {
+    out.add(move x);
+  }
+}
+type RelayOwner {
+  string label;
+  feed(this, Relay r, Set[string] out) {
+    r.relay(out, this.label);
+  }
+}
+generic_method_move_this_field() `test {
+  s := Set[string]();
+  r := Relay();
+  {
+    base := "al";
+    o := RelayOwner(label: (base + "pha").to_upper()); // heap string "ALPHA"
+    o.feed(r, s);
+  }
+  // o drops here — must NOT free the string the set now owns
+  assert(s.contains("ALPHA"), "generic-method sink preserved after owner drop");
+}
+
+// Path: genEnumMethodCall — a NON-generic method on a generic ENUM, with a
+// `T move` param resolved via the owner-enum subst.
+enum Basket[T: Hashable + Equal] {
+  Empty,
+  Filled,
+
+  collect(this, Set[T] out, T move x) {
+    out.add(move x);
+  }
+}
+type BasketOwner {
+  string label;
+  feed(this, Basket[string] b, Set[string] out) {
+    b.collect(out, this.label);
+  }
+}
+enum_method_move_this_field() `test {
+  s := Set[string]();
+  b := Basket[string].Empty;
+  {
+    base := "be";
+    o := BasketOwner(label: (base + "ta").to_upper()); // heap string "BETA"
+    o.feed(b, s);
+  }
+  // o drops here — must NOT free the string the set now owns
+  assert(s.contains("BETA"), "enum-method sink preserved after owner drop");
+}
+
+// Path: genGenericEnumMethodCall — a GENERIC method (its own `[U]` type param)
+// on a generic ENUM, with a `U move` param resolved via the merged owner-enum
+// + method subst.
+enum Vault[T: Hashable + Equal] {
+  Open,
+  Closed,
+
+  stash[U: Hashable + Equal](this, Set[U] out, U move x) {
+    out.add(move x);
+  }
+}
+type VaultOwner {
+  string label;
+  feed(this, Vault[string] v, Set[string] out) {
+    v.stash(out, this.label);
+  }
+}
+generic_enum_method_move_this_field() `test {
+  s := Set[string]();
+  v := Vault[string].Open;
+  {
+    base := "gam";
+    o := VaultOwner(label: (base + "ma").to_upper()); // heap string "GAMMA"
+    o.feed(v, s);
+  }
+  // o drops here — must NOT free the string the set now owns
+  assert(s.contains("GAMMA"), "generic-enum-method sink preserved after owner drop");
+}
+
+// Path: genVirtualMethodCall — a `T move` param on a method dispatched through a
+// vtable (static type is the generic base `Keeper[string]`, runtime type is the
+// child). The param T is resolved via the vtable subst; without the fix the
+// field-read dup is skipped and the stored key aliases the owner's buffer.
+type Keeper[T: Hashable + Equal] {
+  Set[T] kept;
+
+  keep(this, T move x) {
+    this.kept.add(move x);
+  }
+}
+type LoudKeeper[T: Hashable + Equal] is Keeper[T] {
+}
+type KeeperOwner {
+  string label;
+  feed(this, Keeper[string] k) {
+    k.keep(this.label);
+  }
+}
+virtual_method_move_this_field() `test {
+  child := LoudKeeper[string](kept: Set[string]());
+  {
+    base := "de";
+    o := KeeperOwner(label: (base + "lta").to_upper()); // heap string "DELTA"
+    o.feed(child); // LoudKeeper passed as Keeper[string] param → virtual dispatch
+  }
+  // o drops here — must NOT free the string the keeper now owns
+  assert(child.kept.contains("DELTA"), "virtual-dispatch sink preserved after owner drop");
+}

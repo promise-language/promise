@@ -6959,6 +6959,14 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 			c.optionalUnwrapContainerBorrow = false
 			return
 		}
+		// T1215: nested-Optional double-force (`r!!` with `r: T??`). After peeling
+		// the force layers the source bottoms out in an owned ident / owner-governed
+		// member whose recursive drop frees the innermost heap instance; the
+		// extracted inner is an alias, so tracking it as an owned temp double-frees
+		// (segfault) at scope exit alongside the owner's nested-optional drop.
+		if c.isNestedOwnerGovernedUnwrapSource(opt.Expr) {
+			return
+		}
 	}
 	// T0753: Same for the optional-handler unwrap (`o? _ { ... }`) on an ident
 	// source. The handler extracts the inner value as an aliasing extractvalue;

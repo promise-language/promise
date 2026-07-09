@@ -1,0 +1,104 @@
+// T1215: a nested-Optional double force-unwrap (`r!!` where `r: T??`) used inline
+// as a method receiver / field access must not double-free the extracted inner.
+// The outermost owner keeps a recursive nested-optional drop that already frees
+// the innermost allocation at scope exit; pre-fix the inline `!!` also tracked the
+// extracted inner as an owned statement temp → double-free (segfault for native
+// handles like Mutex whose drop releases OS resources; plain double-free for
+// strings/vectors/heap-user-types). Single owner must remain — zero leaks.
+// The reported crash: `Mutex[int]??` → `r!!.lock().borrow` (segfault at 0x0).
+double_force_mutex_receiver() `test {
+  Mutex[int]? inner = Mutex[int](5);
+  Mutex[int]?? r = inner;
+  int v = r!!.lock().borrow;
+  assert(v == 5, "double force mutex");
+}
+
+// Triple nesting: `Mutex[int]???` → `c!!!.lock().borrow`.
+triple_force_mutex_receiver() `test {
+  Mutex[int]? a = Mutex[int](7);
+  Mutex[int]?? b = a;
+  Mutex[int]??? c = b;
+  int v = c!!!.lock().borrow;
+  assert(v == 7, "triple force mutex");
+}
+
+// Force `as!` chain: `(r as! Mutex[int]?)!.lock().borrow` — the outer force's
+// source is a force-cast of the ident, still owner-governed.
+force_cast_chain_mutex_receiver() `test {
+  Mutex[int]? inner = Mutex[int](9);
+  Mutex[int]?? r = inner;
+  int v = (r as! Mutex[int]?)!.lock().borrow;
+  assert(v == 9, "force-cast chain mutex");
+}
+
+// Heap string: `string??` → `r!!.len`.
+double_force_string_field() `test {
+  string? inner = "hello".clone();
+  string?? r = inner;
+  int n = r!!.len;
+  assert(n == 5, "double force string len");
+}
+
+// Heap vector: `int[]??` → `r!!.len`.
+double_force_vector_field() `test {
+  int[]? inner = [1, 2, 3];
+  int[]?? r = inner;
+  int n = r!!.len;
+  assert(n == 3, "double force vector len");
+}
+
+// Heap user type with a `drop`: `Res??` → `r!!.name.len`.
+type Res {
+  string name;
+  drop(~this) {
+  }
+}
+
+double_force_heap_user_type_field() `test {
+  Res? inner = Res(name: "widget".clone());
+  Res?? r = inner;
+  int n = r!!.name.len;
+  assert(n == 6, "double force user-type field");
+}
+
+// Transfer regression guard: binding the force to a local neutralizes the owner's
+// drop, so the bound local owns the handle and drops it exactly once (no leak, no
+// double-free).
+bound_double_force_transfers_ownership() `test {
+  Mutex[int]? inner = Mutex[int](11);
+  Mutex[int]?? r = inner;
+  Mutex[int] g = r!!;
+  int v = g.lock().borrow;
+  assert(v == 11, "bound double force transfer");
+}
+
+// Owner-governed MEMBER source: the outer force's base is `h.m` (field of a type
+// with a drop), not a plain ident — exercises the member branch of the guard. The
+// Holder's drop recursively frees the nested-optional field, so the inline `!!`
+// must not also drop the extracted inner. No leak, no double-free.
+type Holder {
+  Mutex[int]?? m;
+  drop(~this) {
+  }
+}
+
+member_source_double_force_receiver() `test {
+  Mutex[int]? inner = Mutex[int](15);
+  Holder h = Holder(m: move inner);
+  int v = h.m!!.lock().borrow;
+  assert(v == 15, "member-source double force");
+}
+
+// Fall-through guard: a call result returning `Mutex[int]??` is NOT owner-governed
+// — nothing else drops it, so the inline double-force legitimately transfers and
+// drops the handle exactly once. The guard must NOT over-fire here (that would
+// leak the handle). Leak enforcement makes this a real assertion.
+make_nested_mutex() Mutex[int]?? {
+  Mutex[int]? inner = Mutex[int](19);
+  return inner;
+}
+
+call_result_double_force_transfers() `test {
+  int v = make_nested_mutex()!!.lock().borrow;
+  assert(v == 19, "call-result double force transfer");
+}

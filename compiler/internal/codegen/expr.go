@@ -278,16 +278,21 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			// exit alongside the container's element drop (fatal "invalid free" on
 			// macOS; silent over-free elsewhere). Mirrors the guard added inside
 			// genOptionalForceUnwrap and trackHeapUserTypeResult's existing check.
+			// T1215: a nested-Optional double-force (`r!!` with `r: T??`) resolves,
+			// after peeling force layers, to an owned ident / owner-governed member
+			// whose (recursive) drop governs the extracted inner — treat it like an
+			// ident source so the string/vector inner is not double-freed at scope exit.
+			nestedOwnerGoverned := c.isNestedOwnerGovernedUnwrapSource(e.Expr)
 			if named == types.TypString {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
-				} else if !isIdentSource && !c.optionalUnwrapContainerBorrow {
+				} else if !isIdentSource && !c.optionalUnwrapContainerBorrow && !nestedOwnerGoverned {
 					c.trackStringTemp(result)
 				}
 			} else if named == types.TypVector {
 				if c.optionalFieldVector {
 					c.optionalFieldVector = false
-				} else if !isIdentSource && !c.optionalUnwrapContainerBorrow {
+				} else if !isIdentSource && !c.optionalUnwrapContainerBorrow && !nestedOwnerGoverned {
 					if elemType, ok := types.AsVector(exprType); ok {
 						c.trackVectorTempWithElemType(result, elemType)
 					} else {
@@ -15257,7 +15262,8 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// container's element drop frees it too). macOS's allocator turns this into a
 	// fatal "invalid free (bad header magic)"; other allocators over-free silently.
 	if !isIdentOptionalUnwrapSource(expr) && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector &&
-		!c.optionalUnwrapContainerBorrow && !c.isOwnerGovernedMemberOptionalUnwrapSource(expr) {
+		!c.optionalUnwrapContainerBorrow && !c.isOwnerGovernedMemberOptionalUnwrapSource(expr) &&
+		!c.isNestedOwnerGovernedUnwrapSource(expr) {
 		if result.Type().Equal(irtypes.I8Ptr) {
 			innerType := c.info.Types[expr]
 			if opt, ok := innerType.(*types.Optional); ok {
@@ -15375,6 +15381,48 @@ func (c *Compiler) isOwnerGovernedMemberOptionalUnwrapSource(src ast.Expr) bool 
 		return false
 	}
 	return c.ownerHasOrSynthDrop(ownerType, ownerNamed)
+}
+
+// isNestedOwnerGovernedUnwrapSource reports whether src — the source of an
+// optional unwrap — is itself an optional unwrap (`inner!` / `inner as! T`)
+// chain that ultimately bottoms out in an owned ident or owner-governed member.
+// This is the nested-Optional double-force shape `r!!` where `r: T??`: the
+// outermost owner's (recursive) drop binding governs the innermost inner
+// allocation, so the extracted inner is an ALIAS, not a transferred owner.
+// Registering it as an owned statement temp double-frees at scope exit — the
+// owner's nested-optional drop frees it too (fatal segfault / invalid free for
+// native handles like Mutex/Task/MutexGuard whose drop releases OS resources).
+// Peels ParenExpr and one-or-more nested force-unwrap layers (OptionalUnwrapExpr
+// and force `as!` CastExpr), then reuses the same owner-governed checks the
+// single-level guard uses (isIdentOptionalUnwrapSource /
+// isOwnerGovernedMemberOptionalUnwrapSource). Only fires for a genuinely nested
+// unwrap (at least one force layer peeled) so it never overlaps the single-level
+// ident/member guards. A base that is NOT owner-governed (call/borrow result)
+// falls through to the normal owned-temp tracking. T1215.
+func (c *Compiler) isNestedOwnerGovernedUnwrapSource(src ast.Expr) bool {
+	peeled := false
+	for {
+		switch s := src.(type) {
+		case *ast.ParenExpr:
+			src = s.Expr
+			continue
+		case *ast.OptionalUnwrapExpr:
+			src = s.Expr
+			peeled = true
+			continue
+		case *ast.CastExpr:
+			if s.Force {
+				src = s.Expr
+				peeled = true
+				continue
+			}
+		}
+		break
+	}
+	if !peeled {
+		return false
+	}
+	return isIdentOptionalUnwrapSource(src) || c.isOwnerGovernedMemberOptionalUnwrapSource(src)
 }
 
 // isContainerIndexUnwrapSource reports whether src (peeling ParenExpr) is a

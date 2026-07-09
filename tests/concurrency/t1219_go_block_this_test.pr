@@ -1,0 +1,303 @@
+// T1219: referencing `this` inside a plain `go { }` block within a method used
+// to panic codegen ("'this' used but not in method context") — the block is
+// compiled into a separate coroutine that did not inherit the method's `this`.
+// The fix threads a PRIVATE SNAPSHOT of the receiver into the coroutine (a
+// goroutine can outlive the receiver's owner, so it must never alias `this`):
+//   - heap receiver  → deep-copied (dupHeapValue), owned + dropped by the goroutine
+//   - value receiver → copied by value into the coroutine frame (Copy, no drop)
+//   - scalar receiver → already Copy
+// Each test spawns on a TEMPORARY / owned receiver that is freed before the
+// goroutine runs (the main flow blocks on `<-out` after the receiver's owner is
+// gone), so the goroutine provably observes the snapshot, not a freed alias.
+// --- Borrowed heap receiver ---------------------------------------------------
+type T1219HeapBorrow {
+  int n;
+  string label;
+  // Borrowed `this`: the caller owns the receiver. A temporary receiver is
+  // freed at the call's statement end, before the goroutine runs.
+  spawn(this, Channel[int] out) {
+    go {
+      out.send(this.n * 2);
+    };
+  }
+  // Also read a heap (string) field: dupHeapValue deep-copies it, so the
+  // goroutine reads its own copy even after the original is freed.
+  spawn_label(this, Channel[string] out) {
+    go {
+      out.send(this.label + "!");
+    };
+  }
+}
+
+t1219_heap_borrow_int_field() `test {
+  out := channel[int](capacity: 1);
+  T1219HeapBorrow(n: 21, label: "x").spawn(out); // temp receiver freed after call
+  got := <-out;
+  if v := got {
+    assert(v == 42, "go-block read snapshot of borrowed heap receiver int field");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+t1219_heap_borrow_string_field() `test {
+  out := channel[string](capacity: 1);
+  T1219HeapBorrow(n: 1, label: "hello").spawn_label(out);
+  got := <-out;
+  if v := got {
+    assert(v == "hello!", "go-block deep-copied borrowed heap receiver string field");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Leak guard: the goroutine's private snapshot (including its cloned string
+// field) must be freed at coroutine scope exit — no leak accumulates.
+t1219_heap_borrow_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[int](capacity: 1);
+    T1219HeapBorrow(n: 21, label: "y").spawn(out);
+    got := <-out;
+    if v := got {
+      if v == 42 {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 borrowed-heap-this spawns delivered, no leak");
+}
+
+// --- Owned (~this) receiver ---------------------------------------------------
+
+type T1219Owned {
+  int n;
+  string label;
+  // Consuming receiver: the method owns `this` and drops it at method exit,
+  // which happens before the goroutine runs. The snapshot must be independent.
+  // The block reads both a scalar and a DERIVED (cloned) heap value — sending a
+  // fresh concatenation, not the raw borrowed field (see T1221 for the separate
+  // consuming-`this.field` ownership gap that pattern would hit).
+  spawn(~this, Channel[string] out) {
+    go {
+      out.send(this.label + "!");
+    };
+  }
+}
+
+t1219_owned_this() `test {
+  out := channel[string](capacity: 1);
+  c := T1219Owned(n: 7, label: "owned");
+  c.spawn(out); // moves c into spawn; spawn drops it before goroutine runs
+  got := <-out;
+  if v := got {
+    assert(v == "owned!", "go-block read snapshot of consumed ~this receiver");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+t1219_owned_this_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[string](capacity: 1);
+    c := T1219Owned(n: 7, label: "z");
+    c.spawn(out);
+    got := <-out;
+    if v := got {
+      if v == "z!" {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 owned-this spawns delivered, no leak");
+}
+
+// --- Droppable heap receiver (user drop) --------------------------------------
+
+type T1219Res {
+  int n;
+  drop(~this) {
+  }
+  spawn(this, Channel[int] out) {
+    go {
+      out.send(this.n + 1);
+    };
+  }
+}
+
+t1219_droppable_this_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[int](capacity: 1);
+    T1219Res(n: 41).spawn(out); // temp droppable receiver
+    got := <-out;
+    if v := got {
+      if v == 42 {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 droppable-this spawns delivered, snapshot drop runs, no leak");
+}
+
+// --- Value-type receiver ------------------------------------------------------
+
+type T1219Point {
+  int x `value;
+  int y `value;
+  sum_into(this, Channel[int] out) {
+    go {
+      out.send(this.x + this.y);
+    };
+  }
+}
+
+t1219_value_type_this() `test {
+  out := channel[int](capacity: 1);
+  p := T1219Point(x: 3, y: 4);
+  p.sum_into(out);
+  got := <-out;
+  if v := got {
+    assert(v == 7, "go-block read snapshot of value-type receiver");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// --- Generic owner type -------------------------------------------------------
+
+type T1219Box[T] {
+  T value;
+  send_value(this, Channel[T] out) {
+    go {
+      out.send(this.value);
+    };
+  }
+}
+
+t1219_generic_owner_this() `test {
+  out := channel[int](capacity: 1);
+  b := T1219Box[int](value: 99);
+  b.send_value(out);
+  got := <-out;
+  if v := got {
+    assert(v == 99, "go-block read snapshot of generic-owner receiver");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// --- Generic method on a non-generic owner ------------------------------------
+
+type T1219GenM {
+  int base;
+  // A generic METHOD on a NON-generic owner: monomorphized as `emit__int`, but
+  // the owner `T1219GenM` is not generic — so `this` resolves via the active
+  // typeSubst (currentNamedType's `typeSubst != nil` branch, monoCtx.inst nil),
+  // distinct from the generic-OWNER path above.
+  emit[T](this, Channel[int] out, T v) {
+    go {
+      out.send(this.base + 1);
+    };
+  }
+}
+
+t1219_generic_method_non_generic_owner() `test {
+  out := channel[int](capacity: 1);
+  T1219GenM(base: 41).emit[int](out, 7);
+  got := <-out;
+  if v := got {
+    assert(v == 42, "go-block read snapshot of generic-method / non-generic-owner receiver");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+t1219_generic_method_non_generic_owner_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[int](capacity: 1);
+    T1219GenM(base: 41).emit[int](out, i);
+    got := <-out;
+    if v := got {
+      if v == 42 {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 generic-method-this spawns delivered, no leak");
+}
+
+// --- `this` alongside other captured locals (capture ordering) ----------------
+
+type T1219Mixed {
+  int base;
+  combine(this, Channel[int] out) {
+    // Two outer locals plus `this` — captureNames is sorted, so "this" sits
+    // between "a" and "s"; each must map to the right coroutine parameter.
+    a := 10;
+    s := 100;
+    go {
+      out.send(a + this.base + s);
+    };
+  }
+}
+
+t1219_this_with_other_captures() `test {
+  out := channel[int](capacity: 1);
+  T1219Mixed(base: 5).combine(out);
+  got := <-out;
+  if v := got {
+    assert(v == 115, "go-block captured this + other locals in correct slots");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// --- `this` referenced through a nested lambda inside the go block ------------
+
+type T1219Nested {
+  int n `value;
+  run(this, Channel[int] out) {
+    // The lambda captures `this` (value-type receiver → Copy, no `move`
+    // needed). Sema records LambdaCaptures["this"]; collectBlockIdents' lambda
+    // path threads `this` into the coroutine arg pack. The new ThisExpr walk
+    // and the lambda-capture path must not double-capture or miss `this`.
+    go {
+      f := || -> this.n * 3;
+      out.send(f());
+    };
+  }
+}
+
+t1219_this_via_nested_lambda() `test {
+  out := channel[int](capacity: 1);
+  T1219Nested(n: 4).run(out);
+  got := <-out;
+  if v := got {
+    assert(v == 12, "go-block nested lambda read this snapshot");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}

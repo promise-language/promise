@@ -18481,6 +18481,125 @@ func TestT1197_ViaBlockGenericSpawnerTypeSubst(t *testing.T) {
 	assertContains(t, gmkIR, "heapdup.copy")
 }
 
+// T1219: `this` referenced inside a plain `go { }` block within a method used to
+// panic codegen ("'this' used but not in method context") — the coroutine body
+// did not inherit the method's `this`. The fix threads a private SNAPSHOT of the
+// receiver into the coroutine arg pack. For a HEAP receiver the snapshot is a
+// deep copy: the coroutine takes a `{ i8*, i8* }` value-struct param and the
+// spawning method emits a heapdup before the goroutine ramp call, so the async
+// body owns an independent instance (dropped at coroutine scope exit).
+func TestT1219_GoBlockThisHeapReceiverSnapshot(t *testing.T) {
+	ir := generateIR(t, `
+		type T1219C {
+			int n;
+			spawn(this, Channel[int] out) {
+				go { out.send(this.n); };
+			}
+		}
+		main() {
+			c := T1219C(n: 5);
+			d := channel[int](capacity: 1);
+			c.spawn(d);
+			r := <-d;
+			d.close();
+		}
+	`)
+	// The coroutine takes `this` as a value-struct capture param.
+	assertContains(t, ir, "%this.cap")
+	assertContains(t, ir, "{ i8*, i8* } %this.cap")
+	// The spawning method deep-copies the receiver before the goroutine ramp.
+	spawnIR := extractFunction(ir, "T1219C.spawn")
+	assertContains(t, spawnIR, "heapdup.copy")
+	assertContains(t, spawnIR, "call i8* @.goroutine.")
+	dupIdx := strings.Index(spawnIR, "heapdup.copy")
+	rampIdx := strings.Index(spawnIR, "call i8* @.goroutine.")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected receiver heapdup before goroutine ramp in spawn:\n%s", spawnIR)
+	}
+}
+
+// T1219: a VALUE-TYPE receiver captured by a `go { }` block is copied by value
+// into the coroutine frame (Copy — no heap, no dup). The coroutine takes the
+// value struct itself (`%promise_..._v`) as the capture param, and the spawning
+// method emits no heapdup for the receiver.
+func TestT1219_GoBlockThisValueReceiverByValue(t *testing.T) {
+	ir := generateIR(t, `
+		type T1219P {
+			int x `+"`"+`value;
+			int y `+"`"+`value;
+			sum(this, Channel[int] out) {
+				go { out.send(this.x + this.y); };
+			}
+		}
+		main() {
+			p := T1219P(x: 3, y: 4);
+			d := channel[int](capacity: 1);
+			p.sum(d);
+			r := <-d;
+			d.close();
+		}
+	`)
+	// The coroutine takes the value struct by value (not a heap dup).
+	assertContains(t, ir, "%this.cap")
+	sumIR := extractFunction(ir, "T1219P.sum")
+	assertContains(t, sumIR, "call i8* @.goroutine.")
+	assertNotContains(t, sumIR, "heapdup.copy")
+}
+
+// T1219: a GENERIC-owner method (`T1219Box[int].get_it`) referencing `this` in a
+// `go { }` block resolves the receiver type via the mono instance (currentNamedType
+// → monoCtx.inst), deep-copies the concrete `Box[int]` snapshot, and threads it
+// into the coroutine — exercising the generic-owner path of the fix.
+func TestT1219_GoBlockThisGenericOwner(t *testing.T) {
+	ir := generateIR(t, `
+		type T1219Box[T] {
+			T value;
+			send_it(this, Channel[T] out) {
+				go { out.send(this.value); };
+			}
+		}
+		main() {
+			b := T1219Box[int](value: 9);
+			d := channel[int](capacity: 1);
+			b.send_it(d);
+			r := <-d;
+			d.close();
+		}
+	`)
+	sendIR := extractFunction(ir, `"T1219Box[int].send_it"`)
+	assertContains(t, sendIR, "heapdup.copy")
+	assertContains(t, sendIR, "call i8* @.goroutine.")
+}
+
+// T1219: a GENERIC METHOD on a NON-GENERIC owner (`T1219GenM.emit[int]`)
+// referencing `this` in a `go { }` block resolves the receiver type via the
+// active typeSubst (currentNamedType → the `typeSubst != nil` branch, since
+// monoCtx.inst is nil for a non-generic owner). The concrete owner is unchanged
+// by the substitution, but the branch must be taken — otherwise the receiver
+// type would resolve incorrectly. Exercises the generic-method path distinct
+// from the generic-owner path above.
+func TestT1219_GoBlockThisGenericMethodNonGenericOwner(t *testing.T) {
+	ir := generateIR(t, `
+		type T1219GenM {
+			int base;
+			emit[T](this, Channel[int] out, T v) {
+				go { out.send(this.base + 1); };
+			}
+		}
+		main() {
+			m := T1219GenM(base: 41);
+			d := channel[int](capacity: 1);
+			m.emit[int](d, 7);
+			r := <-d;
+			d.close();
+		}
+	`)
+	// The monomorphized generic method still deep-copies the heap receiver.
+	emitIR := extractFunction(ir, `"T1219GenM.emit[int]"`)
+	assertContains(t, emitIR, "heapdup.copy")
+	assertContains(t, emitIR, "call i8* @.goroutine.")
+}
+
 // T1198: the fast path `genGoCallExpr` (bare-ident free-function `go f(v)`) must
 // dup a borrowed heap value param of the spawning function — the coroutine reads
 // it after the caller frees its own borrowed-arg stmt-temps. Sibling of T1197

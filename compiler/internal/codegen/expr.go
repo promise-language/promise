@@ -5101,6 +5101,25 @@ func (c *Compiler) genThisExpr() value.Value {
 	return c.block.NewLoad(alloca.ElemType, alloca)
 }
 
+// currentNamedType returns the concrete receiver type of the method currently
+// being compiled, resolving generic type parameters. Prefers the mono instance
+// (generic-owner method bodies) so `Box[int]` resolves rather than the unbound
+// `Box[T]`; otherwise substitutes any active typeSubst into the owner Named.
+// Returns nil outside a method context. Used by genGoBlock (T1219) to snapshot
+// `this` for a `go { }` block capture.
+func (c *Compiler) currentNamedType() types.Type {
+	if c.monoCtx != nil && c.monoCtx.inst != nil {
+		return c.monoCtx.inst
+	}
+	if c.currentNamed == nil {
+		return nil
+	}
+	if c.typeSubst != nil {
+		return types.Substitute(c.currentNamed, c.typeSubst)
+	}
+	return c.currentNamed
+}
+
 // --- Method calls ---
 
 // genMethodCall generates a method call on a user type instance.
@@ -16995,6 +17014,16 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 					idents[e.Name] = e
 				}
 			}
+		case *ast.ThisExpr:
+			// T1219: `this` referenced inside a `go { }` block within a method.
+			// The block is compiled into a separate coroutine that does not
+			// inherit the method's `this`; thread the receiver into the arg pack
+			// (marked via the "this" outer local) so genThisExpr resolves it.
+			// No representative IdentExpr is recorded — genGoBlock builds the
+			// capture value directly (a private snapshot, not the live receiver).
+			if _, ok := outerLocals["this"]; ok {
+				seen["this"] = true
+			}
 		case *ast.BinaryExpr:
 			walkExpr(e.Left)
 			walkExpr(e.Right)
@@ -17298,6 +17327,62 @@ func (c *Compiler) dupBorrowedCaptureForResult(val value.Value, goElem types.Typ
 	return val
 }
 
+// goThisSnapshot records how a `this` captured by a `go { }` block (T1219) is
+// set up on the coroutine side. nil means the default capture path (a plain
+// scalar load — primitive-scalar receivers are Copy) is already safe.
+type goThisSnapshot struct {
+	isValueType  bool       // value-type receiver → copy value struct, no drop
+	resolvedType types.Type // concrete receiver type (drop dispatch, heap only)
+}
+
+// snapshotThisForGoBlock builds a private snapshot of the method receiver for a
+// `go { }` block capture (T1219). A goroutine can outlive the receiver's owner,
+// so the coroutine must never alias `this`: heap receivers are deep-copied
+// (dupHeapValue, like the T1196 borrowed-param dup) and owned+dropped by the
+// goroutine; value-type receivers are copied by value into the coroutine frame
+// (Copy, no heap, no drop); primitive-scalar receivers are already Copy so the
+// default load suffices. Returns the capture value, its LLVM type, and the
+// coroutine-side setup metadata (nil for the primitive-scalar / default path).
+// Runs in the enclosing method's codegen context (before the coroutine switch).
+func (c *Compiler) snapshotThisForGoBlock() (value.Value, irtypes.Type, *goThisSnapshot) {
+	thisAlloca := c.locals["this"]
+	resolvedType := c.currentNamedType()
+	named := extractNamed(resolvedType)
+
+	// Primitive-scalar receiver: `this` is the scalar value itself (Copy) — the
+	// default load is a safe self-contained snapshot, no coroutine-side setup.
+	if named == nil || isPrimitiveScalar(named) {
+		val := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
+		return val, thisAlloca.ElemType, nil
+	}
+
+	layout := c.lookupTypeLayout(resolvedType)
+	if layout == nil || layout.Value == nil {
+		panic(fmt.Sprintf("codegen: no layout for `this` receiver %s in go block", resolvedType))
+	}
+
+	if named.IsValueType() {
+		// Value type: `this` is an i8* to the caller's value struct on the method
+		// frame — copy it by value into the coroutine frame (Copy, no drop).
+		thisI8 := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
+		vsType := layout.Value.LLVMType
+		typedPtr := c.block.NewBitCast(thisI8, irtypes.NewPointer(vsType))
+		vstruct := c.block.NewLoad(vsType, typedPtr)
+		return vstruct, vsType, &goThisSnapshot{isValueType: true, resolvedType: resolvedType}
+	}
+
+	// Heap type: `this` is an i8* instance pointer. Reconstruct the
+	// `{vtable, instance}` value struct and deep-copy it (dupHeapValue), so the
+	// goroutine owns a private instance it drops at scope exit.
+	thisI8 := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
+	vtable := c.loadVtablePtrFromInstance(thisI8)
+	vsType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	vstruct := c.block.NewInsertValue(constant.NewZeroInitializer(vsType), vtable, 0)
+	vstruct = c.block.NewInsertValue(vstruct, thisI8, 1)
+	dupVS := c.dupHeapValue(vstruct, resolvedType)
+	return dupVS, vsType, &goThisSnapshot{isValueType: false, resolvedType: resolvedType}
+}
+
 // genGoBlock handles `go { block }` — wraps the block in a void function and spawns it.
 // Captures outer local variables referenced in the block and passes them through the arg pack.
 func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
@@ -17326,7 +17411,17 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	// Load captured values and collect their types BEFORE switching context
 	var captureVals []value.Value
 	var captureLLVMTypes []irtypes.Type
+	var thisSnapshot *goThisSnapshot // T1219: coro-side setup for a captured `this`
 	for _, name := range captureNames {
+		if name == "this" {
+			// T1219: capture a private snapshot of the receiver — a goroutine can
+			// outlive the receiver's owner, so it must never alias `this`.
+			snapVal, snapType, snap := c.snapshotThisForGoBlock()
+			captureVals = append(captureVals, snapVal)
+			captureLLVMTypes = append(captureLLVMTypes, snapType)
+			thisSnapshot = snap
+			continue
+		}
 		alloca := c.locals[name]
 		elemType := alloca.ElemType
 		val := c.block.NewLoad(elemType, alloca)
@@ -17529,7 +17624,32 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
 
 	// Store captured params into allocas (after coro.begin → part of frame)
+	var thisValAlloca *ir.InstAlloca // T1219: value-struct alloca backing a captured `this`
 	for i, name := range captureNames {
+		if thisSnapshot != nil && name == "this" {
+			// T1219: the captured param is a value struct (heap: {vtable,instance};
+			// value type: the full value struct). Store it in a frame alloca, then
+			// derive the i8* `this` that genThisExpr/field access expect:
+			//   heap type  → instance pointer (value struct field 1)
+			//   value type → address of the value struct in the coroutine frame
+			// The value-struct alloca backs the goroutine's private-copy drop.
+			valAlloca := startBlk.NewAlloca(captureLLVMTypes[i])
+			valAlloca.SetName(c.uniqueLocalName("this.val.addr"))
+			startBlk.NewStore(coroFn.Params[i], valAlloca)
+
+			i8Alloca := startBlk.NewAlloca(irtypes.I8Ptr)
+			i8Alloca.SetName(c.uniqueLocalName("this.addr"))
+			var thisI8 value.Value
+			if thisSnapshot.isValueType {
+				thisI8 = startBlk.NewBitCast(valAlloca, irtypes.I8Ptr)
+			} else {
+				thisI8 = startBlk.NewExtractValue(coroFn.Params[i], 1)
+			}
+			startBlk.NewStore(thisI8, i8Alloca)
+			c.locals["this"] = i8Alloca
+			thisValAlloca = valAlloca
+			continue
+		}
 		alloca := startBlk.NewAlloca(captureLLVMTypes[i])
 		alloca.SetName(c.uniqueLocalName(name + ".addr"))
 		startBlk.NewStore(coroFn.Params[i], alloca)
@@ -17541,6 +17661,14 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	// Set both entryBlock and block to startBlk so allocas and stores land in the right place.
 	c.entryBlock = startBlk
 	c.block = startBlk
+
+	// T1219: register the drop for the goroutine's private heap snapshot of `this`
+	// so it is freed at coroutine scope exit (value-type snapshots are Copy — no
+	// drop). Mirrors the borrowed-capture dup ownership transfer (T1196/B0354).
+	if thisSnapshot != nil && !thisSnapshot.isValueType && thisValAlloca != nil {
+		c.maybeRegisterDrop("this", thisValAlloca, thisSnapshot.resolvedType)
+	}
+
 	for _, name := range captureNames {
 		if chanValType, ok := capturedChanTypes[name]; ok {
 			alloca := c.locals[name]

@@ -1,0 +1,178 @@
+// T1221: Consuming a heap field of a borrowed receiver into a channel
+// (out.send(this.field)) memcpy'd the raw value into the channel buffer with
+// no clone. The buffered pointer aliased the receiver's inner buffer, so
+// dropping the receiver before the value was received freed a value the channel
+// still owned → use-after-free / double-free. The fix arms the same dup-on-read
+// the general `~`/move-param call path uses. These tests use HEAP fields (built
+// via to_upper()/clone, not string literals) so the owner's drop actually frees
+// the buffer — a literal-string field carries the bit-63 no-free flag and would
+// mask the bug.
+// --- string field, borrowed `this` receiver ---
+type StrHolder {
+  int n;
+  string label;
+  send_it(this, Channel[string] out) {
+    out.send(this.label);
+  }
+}
+send_this_string_field() `test {
+  ch := Channel[string](1);
+  {
+    base := "hel";
+    h := StrHolder(n: 1, label: (base + "lo").to_upper());
+    h.send_it(ch);
+    // h and its label buffer dropped here at scope exit
+  }
+  got := <-ch;
+  assert(got! == "HELLO", "this.label preserved after owner drop");
+}
+
+// --- string field, consuming `~this` receiver ---
+type StrHolderMove {
+  int n;
+  string label;
+  send_it(~this, Channel[string] out) {
+    out.send(this.label);
+  }
+}
+send_move_this_string_field() `test {
+  ch := Channel[string](1);
+  {
+    base := "wor";
+    h := StrHolderMove(n: 2, label: (base + "ld").to_upper());
+    h.send_it(ch);
+  }
+  got := <-ch;
+  assert(got! == "WORLD", "~this.label preserved after owner consumed");
+}
+
+// --- Vector[T] field ---
+type VecHolder {
+  int n;
+  string[] items;
+  send_it(this, Channel[string[]] out) {
+    out.send(this.items);
+  }
+}
+send_this_vector_field() `test {
+  ch := Channel[string[]](1);
+  {
+    v := ["a".to_upper(), "b".to_upper()];
+    h := VecHolder(n: 3, items: move v);
+    h.send_it(ch);
+  }
+  got := <-ch;
+  received := got!;
+  assert(received.len == 2, "vector length preserved");
+  assert(received[0] == "A", "vector[0] preserved");
+  assert(received[1] == "B", "vector[1] preserved");
+}
+
+// --- Optional[string] field ---
+type OptHolder {
+  int n;
+  string? label;
+  send_it(this, Channel[string?] out) {
+    out.send(this.label);
+  }
+}
+send_this_optional_string_field() `test {
+  ch := Channel[string?](1);
+  {
+    base := "opt";
+    h := OptHolder(n: 4, label: (base + "ional").to_upper());
+    h.send_it(ch);
+  }
+  got := <-ch;
+  inner := got!;
+  assert(inner! == "OPTIONAL", "Optional[string] this.label preserved after owner drop");
+}
+
+// --- Optional[Vector] field (optionalContainerDup claim path) ---
+type OptVecHolder {
+  int n;
+  int[]? nums;
+  send_it(this, Channel[int[]?] out) {
+    out.send(this.nums);
+  }
+}
+send_this_optional_vector_field() `test {
+  ch := Channel[int[]?](1);
+  {
+    v := [10, 20, 30];
+    h := OptVecHolder(n: 5, nums: move v);
+    h.send_it(ch);
+    // h and its Optional's inner vector buffer dropped here at scope exit
+  }
+  got := <-ch;
+  outer := got!;
+  inner := outer!;
+  assert(inner.len == 3, "Optional[Vector] this.nums length preserved after owner drop");
+  assert(inner[1] == 20, "Optional[Vector] this.nums element preserved");
+}
+
+// --- Optional[Vector] field, consuming `~this` receiver ---
+type OptVecHolderMove {
+  int n;
+  int[]? nums;
+  send_it(~this, Channel[int[]?] out) {
+    out.send(this.nums);
+  }
+}
+send_move_this_optional_vector_field() `test {
+  ch := Channel[int[]?](1);
+  {
+    v := [7, 8];
+    h := OptVecHolderMove(n: 6, nums: move v);
+    h.send_it(ch);
+  }
+  got := <-ch;
+  outer := got!;
+  inner := outer!;
+  assert(inner.len == 2, "~this Optional[Vector] length preserved after owner consumed");
+  assert(inner[0] == 7, "~this Optional[Vector] element preserved");
+}
+
+// --- match-borrowed Optional[heap-user] payload into send (dupBorrowedHeapUserPayload) ---
+// `out.send(move p)` where p is a match-borrow of an enum variant's Optional[Inner]
+// field aliases the subject enum's inner Inner instance; without the escape-dup the
+// subject's synth drop frees the instance the channel still owns → UAF. The general
+// `~`/move-param clone path is armed for the send sink the same way (T1174 parity).
+type MBInner {
+  string s;
+}
+enum MBWrap {
+  Wrap(MBInner? payload), Empty,
+}
+send_from_match(MBWrap e, Channel[MBInner?] out) {
+  match e {
+    MBWrap.Wrap(p) => {
+      out.send(move p);
+    },
+    MBWrap.Empty => {
+    },
+  }
+}
+send_match_borrowed_optional_heapuser() `test {
+  ch := Channel[MBInner?](1);
+  {
+    base := "en";
+    inner := MBInner(s: (base + "um").to_upper());
+    e := MBWrap.Wrap(payload: move inner);
+    send_from_match(e, ch);
+    // e (and its inner MBInner buffer) dropped here at scope exit
+  }
+  got := <-ch;
+  outer := got!;
+  assert(outer!.s == "ENUM", "match-borrowed Optional[heap-user] payload preserved after subject drop");
+}
+
+// --- plain owned local into send still moves cleanly (no dup regression) ---
+send_plain_local_string() `test {
+  ch := Channel[string](1);
+  base := "loc";
+  s := (base + "al").to_upper();
+  ch.send(move s);
+  got := <-ch;
+  assert(got! == "LOCAL", "plain owned local moved into channel");
+}

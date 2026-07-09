@@ -117,7 +117,7 @@ func TestBlobsCatalogValidate(t *testing.T) {
 	good := BlobsCatalog{Schema: 1, Blobs: []BlobEntry{
 		testBlobEntry("llvm", "23.1.0", "linux-amd64", "opt"),
 		testBlobEntry("llvm", "23.1.0", "darwin-arm64", "opt"),
-		testBlobEntry("llvm", "22.1.0", "linux-amd64", "opt"),  // multi-version
+		testBlobEntry("llvm", "22.1.0", "linux-amd64", "opt"), // multi-version
 		{Dependency: "musl", Version: "1.2.5", Target: "linux-amd64", Name: "crt1.o",
 			SHA256: "abc", Size: 100, Compression: "none"}, // uncompressed is valid
 	}}

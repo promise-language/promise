@@ -1424,9 +1424,9 @@ func TestCutNextWithShaPin(t *testing.T) {
 	writeCatalogFile(t, root, "2026.1")
 
 	g := newFakeCutGit()
-	g.head = sha                            // current HEAD is different
-	g.resolved[pinnedSHA] = pinnedSHA       // the pinned --sha resolves to itself
-	g.ancestorOK = true                     // pinnedSHA is reachable
+	g.head = sha                      // current HEAD is different
+	g.resolved[pinnedSHA] = pinnedSHA // the pinned --sha resolves to itself
+	g.ancestorOK = true               // pinnedSHA is reachable
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "oldsha"
 	g.tags["epoch-next"] = pinnedSHA
@@ -1458,9 +1458,9 @@ func TestCutStableWithShaPin(t *testing.T) {
 	writeCatalogFile(t, root, "2026.1")
 
 	g := newFakeCutGit()
-	g.head = sha                            // current HEAD is different
-	g.resolved[pinnedSHA] = pinnedSHA       // the pinned --sha resolves
-	g.ancestorOK = true                     // pinnedSHA is reachable from origin/main
+	g.head = sha                      // current HEAD is different
+	g.resolved[pinnedSHA] = pinnedSHA // the pinned --sha resolves
+	g.ancestorOK = true               // pinnedSHA is reachable from origin/main
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "oldsha"
 	g.tags["epoch-next"] = pinnedSHA
@@ -1469,7 +1469,7 @@ func TestCutStableWithShaPin(t *testing.T) {
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: pinnedSHA, HeadBranch: "epoch-next", Conclusion: "success"}}
 
 	ctx := stableCtx(root, g, gh, uploader)
-	ctx.pinnedRef = pinnedSHA  // set the --sha pin
+	ctx.pinnedRef = pinnedSHA // set the --sha pin
 	withYear(t, 2026)
 	if err := cutStable(ctx); err != nil {
 		t.Fatalf("cut stable with --sha pin: %v", err)
@@ -1501,8 +1501,8 @@ func TestCutWithShaRefPinning(t *testing.T) {
 
 	g := newFakeCutGit()
 	g.head = "ffffffffffffffffffffffffffffffffffffffff" // different HEAD
-	g.resolved["release-branch"] = sha                // the branch ref resolves to this sha
-	g.ancestorOK = true                               // sha is reachable
+	g.resolved["release-branch"] = sha                  // the branch ref resolves to this sha
+	g.ancestorOK = true                                 // sha is reachable
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "oldsha"
 	g.tags["epoch-next"] = sha
@@ -1873,7 +1873,7 @@ func TestCutNextDryRunCustomNotes(t *testing.T) {
 	ctx := &cutContext{
 		root: root, channel: "next", dryRun: true,
 		notesInline: "hand-written notes",
-		git: g, gh: greenCI(sha), uploader: uploader,
+		git:         g, gh: greenCI(sha), uploader: uploader,
 		stdin: strings.NewReader(""), stdout: out,
 	}
 	if err := cutNext(ctx); err != nil {
@@ -1954,7 +1954,7 @@ func TestCutNextCustomNotesInTagMessage(t *testing.T) {
 	ctx := &cutContext{
 		root: root, channel: "next",
 		notesInline: "custom AI summary",
-		git: g, gh: greenCI(sha), uploader: uploader,
+		git:         g, gh: greenCI(sha), uploader: uploader,
 		stdout: &strings.Builder{},
 	}
 	if err := cutNext(ctx); err != nil {

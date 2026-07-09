@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -103,12 +104,32 @@ func RunTest(root string, args []string) error {
 	return nil
 }
 
-// RunGoTests runs only Go unit tests. Used by verify.
+// RunGoTests runs only compiler Go unit tests. Used by verify.
 func RunGoTests(root string) error {
 	compilerDir := filepath.Join(root, "compiler")
 	// -timeout 30m: see RunTests — the codegen package exceeds Go's default
 	// 10m per-package limit on slow runners (GitHub windows-amd64).
 	return RunIn(compilerDir, "go", "test", "-timeout", "30m", "./...")
+}
+
+// RunToolsGoTests runs Go unit tests for the tools/build module.
+func RunToolsGoTests(root string) error {
+	toolsDir := filepath.Join(root, "tools", "build")
+	return RunIn(toolsDir, "go", "test", "-timeout", "30m", "./...")
+}
+
+// RunFlowsGoTests runs Go unit tests for the flows module.
+// Returns (skipped=true, nil) when flows/go.mod or flow-sdk/go.mod is absent.
+func RunFlowsGoTests(root string) (skipped bool, err error) {
+	if !Exists(filepath.Join(root, "flows", "go.mod")) {
+		return true, nil
+	}
+	if !Exists(filepath.Join(root, "flow-sdk", "go.mod")) {
+		fmt.Fprintf(os.Stderr, "warning: skipping flows tests — flow-sdk/ not present (run ./make to fetch)\n")
+		return true, nil
+	}
+	flowsDir := filepath.Join(root, "flows")
+	return false, RunIn(flowsDir, "go", "test", "-timeout", "30m", "./...")
 }
 
 // RunPromiseTests runs Promise tests for the given target (empty = host).
@@ -147,4 +168,3 @@ func RunPromiseTestsJSON(root, target string) (string, error) {
 	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
 	return RunCaptureStdout(root, promiseBin, args...)
 }
-

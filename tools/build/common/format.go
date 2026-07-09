@@ -99,56 +99,73 @@ func FormatPromiseFiles(root, promiseBin string) error {
 	return RunIn(root, promiseBin, fmtArgs...)
 }
 
-// FormatGo formats all Go files under compiler/ using go/format.Source().
-// On Windows, it preserves original line endings to avoid spurious diffs
-// when git is configured with core.autocrlf=true.
+// goFileDirs returns the directories to scan for Go source files.
+// flows/ is included only when flows/go.mod is present (feature branch).
+func goFileDirs(root string) []string {
+	dirs := []string{
+		filepath.Join(root, "compiler"),
+		filepath.Join(root, "tools", "build"),
+	}
+	if Exists(filepath.Join(root, "flows", "go.mod")) {
+		dirs = append(dirs, filepath.Join(root, "flows"))
+	}
+	return dirs
+}
+
+// FormatGo formats all Go files under compiler/, tools/build/, and flows/ (when present)
+// using go/format.Source(). On Windows, it preserves original line endings to avoid
+// spurious diffs when git is configured with core.autocrlf=true.
 func FormatGo(root string) error {
-	compilerDir := filepath.Join(root, "compiler")
-	return filepath.WalkDir(compilerDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
-				return filepath.SkipDir
+	for _, dir := range goFileDirs(root) {
+		if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
 			}
-			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".go") {
-			return nil
-		}
+			if d.IsDir() {
+				name := d.Name()
+				if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(d.Name(), ".go") {
+				return nil
+			}
 
-		src, err := os.ReadFile(path)
-		if err != nil {
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			// Normalize CRLF→LF before formatting so comparison is line-ending-agnostic.
+			hasCRLF := bytes.Contains(src, []byte("\r\n"))
+			srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+
+			out, err := format.Source(srcLF)
+			if err != nil {
+				// Skip files that don't parse (e.g., generated code with build tags)
+				return nil
+			}
+
+			if bytes.Equal(out, srcLF) {
+				return nil // already formatted
+			}
+
+			// If original had CRLF, restore CRLF in output so git doesn't see a diff.
+			if hasCRLF {
+				out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
+			}
+
+			perm := os.FileMode(0644)
+			if fi, e := os.Stat(path); e == nil {
+				perm = fi.Mode().Perm()
+			}
+			return os.WriteFile(path, out, perm)
+		}); err != nil {
 			return err
 		}
-
-		// Normalize CRLF→LF before formatting so comparison is line-ending-agnostic.
-		hasCRLF := bytes.Contains(src, []byte("\r\n"))
-		srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
-
-		out, err := format.Source(srcLF)
-		if err != nil {
-			// Skip files that don't parse (e.g., generated code with build tags)
-			return nil
-		}
-
-		if bytes.Equal(out, srcLF) {
-			return nil // already formatted
-		}
-
-		// If original had CRLF, restore CRLF in output so git doesn't see a diff.
-		if hasCRLF {
-			out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
-		}
-
-		perm := os.FileMode(0644)
-		if fi, e := os.Stat(path); e == nil {
-			perm = fi.Mode().Perm()
-		}
-		return os.WriteFile(path, out, perm)
-	})
+	}
+	return nil
 }
 
 // EmbedFormattedResources re-embeds resources after formatting so the next
@@ -159,53 +176,54 @@ func EmbedFormattedResources(root string) error {
 }
 
 // UnformattedGoFiles returns the repo-relative paths of Go files under
-// compiler/ that gofmt would reformat, WITHOUT modifying them. It runs the
-// same go/format pass as FormatGo entirely in-process — no subprocess, no
-// exit-code inspection — and just compares the result instead of writing it.
+// compiler/, tools/build/, and flows/ (when present) that gofmt would reformat,
+// WITHOUT modifying them. It runs the same go/format pass as FormatGo entirely
+// in-process — no subprocess, no exit-code inspection — and just compares the
+// result instead of writing it.
 //
 // The pre-commit gate uses this to reject commits that contain unformatted Go.
 // Otherwise unformatted code reaches origin and shows up as a spurious diff the
 // next time someone runs bin/verify (which reformats in place). Comparison is
 // line-ending-agnostic (CRLF normalized to LF first), matching FormatGo.
 func UnformattedGoFiles(root string) ([]string, error) {
-	compilerDir := filepath.Join(root, "compiler")
-	if !Exists(compilerDir) {
-		return nil, nil // nothing to check (e.g. a test temp repo)
-	}
-
 	var unformatted []string
-	err := filepath.WalkDir(compilerDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	for _, dir := range goFileDirs(root) {
+		if !Exists(dir) {
+			continue // skip missing dirs (e.g. a test temp repo without all dirs)
 		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
-				return filepath.SkipDir
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(d.Name(), ".go") {
+				return nil
+			}
+
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+			out, err := format.Source(srcLF)
+			if err != nil {
+				return nil // unparseable (e.g. generated code) — skip, mirrors FormatGo
+			}
+			if !bytes.Equal(out, srcLF) {
+				rel, _ := filepath.Rel(root, path)
+				unformatted = append(unformatted, rel)
 			}
 			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".go") {
-			return nil
-		}
-
-		src, err := os.ReadFile(path)
+		})
 		if err != nil {
-			return err
+			return nil, err
 		}
-		srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
-		out, err := format.Source(srcLF)
-		if err != nil {
-			return nil // unparseable (e.g. generated code) — skip, mirrors FormatGo
-		}
-		if !bytes.Equal(out, srcLF) {
-			rel, _ := filepath.Rel(root, path)
-			unformatted = append(unformatted, rel)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	return unformatted, nil
 }

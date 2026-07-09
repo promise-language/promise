@@ -715,6 +715,10 @@ func TestInManagedRepo(t *testing.T) {
 		t.Errorf("expected a subdir of the repo to be managed")
 	}
 	// A fresh non-git temp dir outside the project tree is exempt.
+	// Reset TMPDIR before calling t.TempDir() because bin/verify sets it to
+	// .promise-home/tmp/ (inside the repo), which would make t.TempDir() return
+	// a path that inManagedRepo() correctly identifies as inside the repo.
+	t.Setenv("TMPDIR", "")
 	if tmp := t.TempDir(); inManagedRepo(tmp) {
 		t.Errorf("expected non-repo temp dir %q to be exempt", tmp)
 	}

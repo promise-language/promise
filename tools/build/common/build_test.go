@@ -109,10 +109,10 @@ func TestBuildRuntimeManifestFromCatalog_PopulatesWithCatalogHit(t *testing.T) {
 	cat := &BlobsCatalog{Schema: BlobsCatalogSchema, Blobs: []BlobEntry{
 		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "opt",
 			SHA256: "1111111111111111111111111111111111111111111111111111111111111111",
-			Size: 10, Compression: compressionBrotli, CompressedSize: 5},
+			Size:   10, Compression: compressionBrotli, CompressedSize: 5},
 		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "llc",
 			SHA256: "2222222222222222222222222222222222222222222222222222222222222222",
-			Size: 20, Compression: compressionBrotli, CompressedSize: 8},
+			Size:   20, Compression: compressionBrotli, CompressedSize: 8},
 	}}
 	if err := WriteBlobsCatalog(root, cat); err != nil {
 		t.Fatal(err)
@@ -230,10 +230,10 @@ files = [
 	cat := &BlobsCatalog{Schema: BlobsCatalogSchema, Blobs: []BlobEntry{
 		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "opt",
 			SHA256: "1111111111111111111111111111111111111111111111111111111111111111",
-			Size: 10, Compression: compressionBrotli, CompressedSize: 5},
+			Size:   10, Compression: compressionBrotli, CompressedSize: 5},
 		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "llc",
 			SHA256: "2222222222222222222222222222222222222222222222222222222222222222",
-			Size: 20, Compression: compressionBrotli, CompressedSize: 8},
+			Size:   20, Compression: compressionBrotli, CompressedSize: 8},
 	}}
 	if err := WriteBlobsCatalog(root, cat); err != nil {
 		t.Fatal(err)

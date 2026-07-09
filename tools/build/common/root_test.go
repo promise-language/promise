@@ -44,7 +44,11 @@ func TestFindCatalogRoot_ExactDir(t *testing.T) {
 }
 
 func TestFindCatalogRoot_NotFound(t *testing.T) {
-	// A temp directory with no catalog.toml anywhere above it.
+	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
+	// When bin/verify sets TMPDIR to the repo-internal .promise-home/tmp,
+	// t.TempDir() lands inside the repo and findCatalogRoot would walk up
+	// and find the real catalog.toml.
+	t.Setenv("TMPDIR", "")
 	dir := t.TempDir()
 
 	_, ok := findCatalogRoot(dir)

@@ -26,10 +26,12 @@ func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
 // TestRunVerify_PushFlagIsValid verifies that --push is accepted by the arg
 // validation switch and does not produce a usage error.
 // --shared is included to skip SetupLocalCache env-var side effects.
+// --lock-timeout=100ms prevents blocking on the global ~/.promise/verify.lock
+// when the test runs inside an outer bin/verify (which holds the lock).
 // The pipeline will fail in a temp dir (no source code), but the error must
 // not be the usage-validation error.
 func TestRunVerify_PushFlagIsValid(t *testing.T) {
-	err := RunVerify(t.TempDir(), []string{"--shared", "--push"})
+	err := RunVerify(t.TempDir(), []string{"--shared", "--push", "--lock-timeout=100ms"})
 	if err != nil && strings.HasPrefix(err.Error(), "usage:") {
 		t.Errorf("--push treated as unknown flag, got usage error: %v", err)
 	}
@@ -37,12 +39,16 @@ func TestRunVerify_PushFlagIsValid(t *testing.T) {
 
 // TestRunVerify_AllKnownFlagsAreValid checks that every documented flag
 // individually passes arg validation.
+// --lock-timeout=100ms prevents blocking on the global ~/.promise/verify.lock
+// when the test runs inside an outer bin/verify (which holds the lock).
 func TestRunVerify_AllKnownFlagsAreValid(t *testing.T) {
 	for _, flag := range []string{"--local", "--shared", "--wasm", "--wasm-web", "--clean", "--push"} {
 		// Always pair with --shared to avoid SetupLocalCache env-var side effects.
-		args := []string{"--shared", flag}
+		// Always add --lock-timeout=100ms to avoid blocking when the global lock
+		// is held by an outer bin/verify run (e.g. the one running these tests).
+		args := []string{"--shared", "--lock-timeout=100ms", flag}
 		if flag == "--shared" {
-			args = []string{"--shared"}
+			args = []string{"--shared", "--lock-timeout=100ms"}
 		}
 		err := RunVerify(t.TempDir(), args)
 		if err != nil && strings.HasPrefix(err.Error(), "usage:") {
@@ -76,10 +82,12 @@ func TestAcquireVerifyLock_WritesRepoDir(t *testing.T) {
 }
 
 // TestRunVerify_LockTimeoutFlagIsValid confirms --lock-timeout with a duration
-// value passes arg validation (NormalizeArgs splits --lock-timeout=10m into two
+// value passes arg validation (NormalizeArgs splits --lock-timeout=100ms into two
 // tokens). The pipeline fails later in a temp dir, but never with a usage error.
+// Using 100ms (not a large value) so the test doesn't block when the global lock
+// is held by an outer bin/verify run.
 func TestRunVerify_LockTimeoutFlagIsValid(t *testing.T) {
-	err := RunVerify(t.TempDir(), []string{"--shared", "--lock-timeout=10m"})
+	err := RunVerify(t.TempDir(), []string{"--shared", "--lock-timeout=100ms"})
 	if err != nil && strings.HasPrefix(err.Error(), "usage:") {
 		t.Errorf("--lock-timeout treated as unknown flag, got usage error: %v", err)
 	}

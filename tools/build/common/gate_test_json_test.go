@@ -24,7 +24,7 @@ func TestBuildGateOutputGroupsAndRelativizes(t *testing.T) {
 		jsonlLine(root, "tests/std/bool_test.pr", "test_and", "pass"),
 		jsonlLine(root, "tests/std/bool_test.pr", "test_or", "fail"),
 		jsonlLine(root, "tests/e2e/hello.pr", "main", "pass"),
-		"", // blank line tolerated
+		"",                // blank line tolerated
 		`{not valid json`, // malformed line skipped
 	}, "\n")
 
@@ -124,11 +124,11 @@ func TestBuildGateOutputZeroMetricsPresent(t *testing.T) {
 func TestParseTestJSONLSkipsIncompleteRecords(t *testing.T) {
 	jsonl := strings.Join([]string{
 		`{"file":"a.pr","test":"ok","status":"pass","elapsed":0.01}`,
-		`{"file":"a.pr","test":"no_status","elapsed":0.02}`,    // missing status → dropped
-		`{"file":"a.pr","status":"pass","elapsed":0.03}`,       // missing test → dropped
-		`{"file":"a.pr","test":"","status":"pass"}`,            // empty test → dropped
-		`{"file":"a.pr","test":"empty_status","status":""}`,    // empty status → dropped
-		`{"elapsed":0.04}`,                                     // neither → dropped
+		`{"file":"a.pr","test":"no_status","elapsed":0.02}`, // missing status → dropped
+		`{"file":"a.pr","status":"pass","elapsed":0.03}`,    // missing test → dropped
+		`{"file":"a.pr","test":"","status":"pass"}`,         // empty test → dropped
+		`{"file":"a.pr","test":"empty_status","status":""}`, // empty status → dropped
+		`{"elapsed":0.04}`, // neither → dropped
 		`{"file":"a.pr","test":"also_ok","status":"fail"}`,
 	}, "\n")
 	recs := ParseTestJSONL(jsonl)

@@ -66,6 +66,11 @@ func TestGitSHAFull(t *testing.T) {
 // built without git provenance as "no provenance" rather than feeding a sentinel
 // to git cat-file (T0854).
 func TestGitSHAFull_NotARepo(t *testing.T) {
+	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
+	// When bin/verify sets TMPDIR to the repo-internal .promise-home/tmp,
+	// t.TempDir() lands inside the repo and GitSHAFull would find the repo's
+	// .git by walking up the directory tree.
+	t.Setenv("TMPDIR", "")
 	dir := t.TempDir() // empty, no `git init`
 	if got := GitSHAFull(dir); got != "" {
 		t.Errorf("GitSHAFull(non-repo) = %q, want \"\"", got)
@@ -93,6 +98,10 @@ func TestGitSHA(t *testing.T) {
 }
 
 func TestGitSHA_NotARepo(t *testing.T) {
+	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
+	// Same issue as TestGitSHAFull_NotARepo — when TMPDIR points inside the
+	// repo, GitSHA finds the repo's .git by walking up.
+	t.Setenv("TMPDIR", "")
 	if got := GitSHA(t.TempDir()); got != "unknown" {
 		t.Errorf("GitSHA(non-repo) = %q, want \"unknown\"", got)
 	}

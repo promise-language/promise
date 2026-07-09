@@ -144,11 +144,33 @@ func RunVerify(root string, args []string) error {
 
 	// 5. (Cache clearing now happens up front via Clean.)
 
-	// 6. Go tests
+	// 6. Go tests (compiler)
 	var failures []string
 	fmt.Println("Running go tests...")
 	if err := RunGoTests(root); err != nil {
 		failures = append(failures, "go tests")
+	}
+	if Interrupted() {
+		return errInterrupted
+	}
+
+	// 6b. Tools Go tests
+	fmt.Println("Running tools go tests...")
+	if err := RunToolsGoTests(root); err != nil {
+		failures = append(failures, "tools go tests")
+	}
+	if Interrupted() {
+		return errInterrupted
+	}
+
+	// 6c. Flows Go tests (skipped when flows/go.mod or flow-sdk/go.mod absent)
+	flowsModPresent := Exists(filepath.Join(root, "flows", "go.mod"))
+	if flowsModPresent {
+		fmt.Println("Running flows go tests...")
+	}
+	flowsSkipped, flowsGoErr := RunFlowsGoTests(root)
+	if !flowsSkipped && flowsGoErr != nil {
+		failures = append(failures, "flows go tests")
 	}
 	if Interrupted() {
 		return errInterrupted
@@ -211,10 +233,19 @@ func RunVerify(root string, args []string) error {
 	fmt.Println("  Verify Summary")
 	fmt.Println("----------------------------------------------------")
 	fmt.Printf("  Host target:  %s\n", hostTarget)
-	if slices.Contains(failures, "promise tests (host)") || slices.Contains(failures, "go tests") {
+	if slices.Contains(failures, "promise tests (host)") || slices.Contains(failures, "go tests") || slices.Contains(failures, "tools go tests") {
 		fmt.Printf("  Host tests:   FAILED (%s)\n", hostElapsed.Round(time.Millisecond))
 	} else {
 		fmt.Printf("  Host tests:   passed (%s)\n", hostElapsed.Round(time.Millisecond))
+	}
+	if flowsSkipped && !flowsModPresent {
+		fmt.Printf("  Flows tests:  skipped (flows/ absent)\n")
+	} else if flowsSkipped {
+		fmt.Printf("  Flows tests:  skipped (SDK absent)\n")
+	} else if slices.Contains(failures, "flows go tests") {
+		fmt.Printf("  Flows tests:  FAILED\n")
+	} else {
+		fmt.Printf("  Flows tests:  passed\n")
 	}
 	if wasm {
 		if slices.Contains(failures, "promise tests (wasm32-wasi)") {

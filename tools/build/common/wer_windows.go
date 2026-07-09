@@ -8,9 +8,9 @@ import (
 )
 
 var (
-	kernel32WER          = syscall.NewLazyDLL("kernel32.dll")
-	procSetErrorMode     = kernel32WER.NewProc("SetErrorMode")
-	procSetConsoleCtrl   = kernel32WER.NewProc("SetConsoleCtrlHandler")
+	kernel32WER        = syscall.NewLazyDLL("kernel32.dll")
+	procSetErrorMode   = kernel32WER.NewProc("SetErrorMode")
+	procSetConsoleCtrl = kernel32WER.NewProc("SetConsoleCtrlHandler")
 )
 
 // interrupted is set to 1 by the ctrl handler when the user presses Ctrl+C

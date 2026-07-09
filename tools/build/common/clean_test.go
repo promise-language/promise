@@ -186,8 +186,10 @@ func TestCleanLocked_RemoveAllError(t *testing.T) {
 	}
 }
 
-// TestRunClean_EndToEnd verifies that RunClean succeeds for the --local case,
-// covering the full call path including the lock acquisition and `return Clean`.
+// TestRunClean_EndToEnd verifies that cleanLocked succeeds for the --local
+// case. We call cleanLocked directly (bypassing lock acquisition) to avoid
+// blocking on the global verify lock when this test runs inside bin/verify —
+// the lock behaviour is already covered by TestClean_AcquiresVerifyLock.
 func TestRunClean_EndToEnd(t *testing.T) {
 	root := t.TempDir()
 	compilerDir := filepath.Join(root, "compiler")
@@ -197,20 +199,22 @@ func TestRunClean_EndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(compilerDir, "go.mod"), []byte("module testmod\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunClean(root, []string{"--local", "--quiet"}); err != nil {
-		t.Fatalf("RunClean: %v", err)
+	if err := cleanLocked(root, CleanOptions{Quiet: true}); err != nil {
+		t.Fatalf("cleanLocked: %v", err)
 	}
 }
 
-// TestClean_RemovesLocalHome verifies that Clean wipes the entire .promise-home
-// directory tree, not just tmp/. We create a minimal compiler/go.mod alongside
-// so that `go clean -testcache` can run.
+// TestClean_RemovesLocalHome verifies that cleanLocked wipes the entire
+// .promise-home directory tree, not just tmp/. We call cleanLocked directly
+// (bypassing lock acquisition) to avoid blocking on the global verify lock
+// when this test runs inside bin/verify — the lock behaviour is already
+// covered by TestClean_AcquiresVerifyLock.
 func TestClean_RemovesLocalHome(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, ".promise-home")
 
 	// Populate a fake home with both tmp/ and cache/ subdirs to prove that
-	// Clean nukes everything under the home (not just tmp).
+	// cleanLocked nukes everything under the home (not just tmp).
 	for _, sub := range []string{"tmp", "cache/llvm", "cache/build", "tmp/foo"} {
 		if err := os.MkdirAll(filepath.Join(home, sub), 0o755); err != nil {
 			t.Fatal(err)
@@ -229,8 +233,8 @@ func TestClean_RemovesLocalHome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Clean(root, CleanOptions{Quiet: true}); err != nil {
-		t.Fatalf("Clean: %v", err)
+	if err := cleanLocked(root, CleanOptions{Quiet: true}); err != nil {
+		t.Fatalf("cleanLocked: %v", err)
 	}
 
 	if _, err := os.Stat(home); !os.IsNotExist(err) {

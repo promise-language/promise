@@ -139,6 +139,11 @@ func TestFindTrackerBaseURL_WalkUp(t *testing.T) {
 }
 
 func TestFindTrackerBaseURL_NotFound(t *testing.T) {
+	// Clear TMPDIR so t.TempDir() uses /tmp (the system default) rather than
+	// .promise-home/tmp. When TMPDIR is set to .promise-home/tmp by
+	// SetupLocalCache (during bin/verify), t.TempDir() lands inside the repo
+	// tree, and findTrackerBaseURL would walk up and find the real .mcp.json.
+	t.Setenv("TMPDIR", "")
 	dir := t.TempDir()
 	_, err := findTrackerBaseURL(dir)
 	if err == nil {
@@ -229,6 +234,9 @@ func TestAuditExceptions_TrackerUnreachable(t *testing.T) {
 }
 
 func TestAuditExceptions_NoMcpJSON(t *testing.T) {
+	// Clear TMPDIR so t.TempDir() uses /tmp (the system default) rather than
+	// .promise-home/tmp — same reasoning as TestFindTrackerBaseURL_NotFound.
+	t.Setenv("TMPDIR", "")
 	dir := t.TempDir()
 	err := AuditExceptions(dir)
 	if err == nil {

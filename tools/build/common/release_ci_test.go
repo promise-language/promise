@@ -66,8 +66,8 @@ type fakeCIGH struct {
 	dispatchErr    error
 	runsBefore     []ghRun
 	runsAfter      []ghRun
-	runsBeforeErr  error                       // returned by WorkflowRuns before dispatch
-	runsAfterErr   error                       // returned by WorkflowRuns after dispatch
+	runsBeforeErr  error // returned by WorkflowRuns before dispatch
+	runsAfterErr   error // returned by WorkflowRuns after dispatch
 	jobs           map[int64][]ghJob
 	runJobsFn      func(int64) ([]ghJob, error) // overrides jobs map when set
 	dispatchedFlag bool

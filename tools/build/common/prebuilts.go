@@ -170,12 +170,12 @@ func CurrentBuildTarget() string {
 // PROMISE_HOME to a repo-local .promise-home/ to isolate per-arena state, but
 // re-downloading 1+ GB LLVM tarballs on every override is expensive. Resolution:
 //
-//   1. $PROMISE_PREBUILTS_CACHE if set (escape hatch for CI / sandboxes).
-//   2. $XDG_CACHE_HOME/promise/prebuilts if XDG_CACHE_HOME is set.
-//   3. Per-OS default:
-//      - linux:   ~/.cache/promise/prebuilts
-//      - darwin:  ~/Library/Caches/promise/prebuilts
-//      - windows: %LOCALAPPDATA%\promise\prebuilts (or ~/AppData/Local/...)
+//  1. $PROMISE_PREBUILTS_CACHE if set (escape hatch for CI / sandboxes).
+//  2. $XDG_CACHE_HOME/promise/prebuilts if XDG_CACHE_HOME is set.
+//  3. Per-OS default:
+//     - linux:   ~/.cache/promise/prebuilts
+//     - darwin:  ~/Library/Caches/promise/prebuilts
+//     - windows: %LOCALAPPDATA%\promise\prebuilts (or ~/AppData/Local/...)
 //
 // All builds on a given host share the same cache regardless of which arena
 // they ran in. SHA256 verification + atomic-rename writes (FetchPrebuilt) make

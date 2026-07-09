@@ -164,6 +164,70 @@ func TestUnformattedGoFiles_DetectsAndSkips(t *testing.T) {
 	}
 }
 
+// TestGoFileDirs_ExcludesFlowsWhenAbsent verifies that goFileDirs returns only
+// compiler/ and tools/build/ when flows/go.mod is absent (the common case on
+// main without the flows branch checked out).
+func TestGoFileDirs_ExcludesFlowsWhenAbsent(t *testing.T) {
+	root := t.TempDir()
+	dirs := goFileDirs(root)
+	for _, d := range dirs {
+		if filepath.Base(d) == "flows" {
+			t.Errorf("goFileDirs: unexpected flows/ entry when flows/go.mod absent: %v", dirs)
+		}
+	}
+	if len(dirs) != 2 {
+		t.Errorf("goFileDirs: expected 2 dirs (compiler, tools/build), got %d: %v", len(dirs), dirs)
+	}
+}
+
+// TestGoFileDirs_IncludesFlowsWhenPresent verifies that goFileDirs appends
+// flows/ when flows/go.mod exists — the flows formatting path added by T0743.
+func TestGoFileDirs_IncludesFlowsWhenPresent(t *testing.T) {
+	root := t.TempDir()
+	flowsDir := filepath.Join(root, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(flowsDir, "go.mod"), []byte("module example.com/flows\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := goFileDirs(root)
+	found := false
+	for _, d := range dirs {
+		if d == flowsDir {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("goFileDirs: expected flows/ in dirs when flows/go.mod present, got %v", dirs)
+	}
+	if len(dirs) != 3 {
+		t.Errorf("goFileDirs: expected 3 dirs (compiler, tools/build, flows), got %d: %v", len(dirs), dirs)
+	}
+}
+
+// TestUnformattedGoFiles_IncludesFlowsDir verifies that UnformattedGoFiles
+// scans flows/ for unformatted Go files when flows/go.mod is present. This
+// exercises the T0743 path where flows code is covered by the format check.
+func TestUnformattedGoFiles_IncludesFlowsDir(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel, content string) {
+		full := filepath.Join(root, rel)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte(content), 0o644)
+	}
+	mk("flows/go.mod", "module example.com/flows\n\ngo 1.21\n")
+	mk("flows/do/main.go", "package do\nfunc  BadlyFormatted(){}\n") // unformatted
+
+	got, err := UnformattedGoFiles(root)
+	if err != nil {
+		t.Fatalf("UnformattedGoFiles: %v", err)
+	}
+	if len(got) != 1 || got[0] != filepath.Join("flows", "do", "main.go") {
+		t.Fatalf("expected [flows/do/main.go], got %v", got)
+	}
+}
+
 func TestUnformattedPromiseFiles_SkipsWithoutCompiler(t *testing.T) {
 	// No bin/promise in a temp repo → can't check Promise, must skip (not error).
 	root := t.TempDir()

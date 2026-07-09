@@ -1,0 +1,61 @@
+// T1224: Moving an inline force-unwrap of an Optional single-owner handle
+// directly into an owning sink (`consume(move r!)`) must transfer ownership
+// exactly once. Previously the force-unwrap moved the inner handle out and the
+// callee's move param dropped it, but the source optional's present flag was
+// left set — so scope-exit re-dropped the same freed handle → double-free /
+// segfault at 0x0. Fixed by neutralizing the force-unwrap source in the
+// move-param arg path (mirrors the constructor arg paths). Sibling of T1215
+// (borrow receiver) / T1138 / T1212.
+consume_mutex(Mutex[int] move m) {
+}
+
+type Sink {
+  consume(this, Mutex[int] move m) {
+  }
+}
+
+type Holder {
+  Mutex[int]? mtx;
+}
+
+single_force_move_into_sink() `test {
+  Mutex[int]? r = Mutex[int](5);
+  consume_mutex(move r!);
+}
+
+double_force_move_into_sink() `test {
+  Mutex[int]? inner = Mutex[int](5);
+  Mutex[int]?? r = inner;
+  consume_mutex(move r!!);
+}
+
+method_force_move_into_sink() `test {
+  Sink s = Sink();
+  Mutex[int]? r = Mutex[int](5);
+  s.consume(move r!);
+}
+
+bind_to_local_control() `test {
+  Mutex[int]? inner = Mutex[int](5);
+  Mutex[int]?? r = inner;
+  Mutex[int] g = r!!;
+  consume_mutex(move g);
+}
+
+// Member-field force source (`move owner.field!`): the neutralize must clear the
+// owner's optional-field present flag so the owner's synth drop skips the field
+// instead of re-freeing the handle the sink already dropped. Distinct branch
+// (neutralizeMemberOptionalField) from the ident sources above — also segfaulted
+// pre-fix.
+member_force_move_into_sink() `test {
+  Holder h = Holder(mtx: Mutex[int](5));
+  consume_mutex(move h.mtx!);
+}
+
+// `as!` optional→concrete force-cast source (`move r as! Mutex[int]`): routes
+// through the CastExpr(Force) branch of neutralizeForceUnwrapSource. Also
+// segfaulted pre-fix; equivalent ownership transfer to `move r!`.
+cast_force_move_into_sink() `test {
+  Mutex[int]? r = Mutex[int](9);
+  consume_mutex(move r as! Mutex[int]);
+}

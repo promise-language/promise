@@ -7178,6 +7178,14 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
 				c.consumeCastSubjectDropFlag(arg.Value, ident.Name)
 			}
+			// T1224: `consume(move r!)` where r is an Optional single-owner handle —
+			// the force-unwrap moves the inner out and the callee's move param drops
+			// it, so the source optional's present flag must be cleared or its
+			// scope-exit drop double-frees the same handle → segfault. Mirrors the
+			// neutralizeForceUnwrapSource call in every constructor arg path (B0301).
+			// Self-gating: no-ops unless arg.Value is a force-unwrap / force-cast /
+			// optional error-handler, so plain-ident/temp/literal moves are unaffected.
+			c.neutralizeForceUnwrapSource(arg.Value)
 			c.claimStringTemp(v)
 			c.claimHeapTemp(v) // B0201: prevent double-free for vector literals passed to ~ params
 			// T0522: When the arg is a field-access dup wrapped in an Optional

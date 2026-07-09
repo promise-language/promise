@@ -285,3 +285,80 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 			"enforcement likely regressed to the process backstop", elapsed)
 	}
 }
+
+// TestT1220_WasmSelectLivelockReportsTimeoutInBinary — sibling of T1200/T1218,
+// one primitive over (`select`). A blocking `select` (no `default`) inside a
+// NON-coroutine function (a named fn spawned via `go`) over two never-ready
+// channels did NOT report the in-binary per-test TIMEOUT (T1220): the select ran
+// in the single, non-coroutine `@__user.worker`, whose after-try branch (when no
+// case is ready) silently fell through to the merge block on WASM instead of
+// waiting. Before the fix the select no-oped and `worker` returned immediately,
+// so the run neither timed out nor blocked as intended.
+//
+// The fix pumps promise_sched_coop_step in the WASM non-coroutine blocking-select
+// path, so `worker` yields to the scheduler and coop_step's per-test deadline
+// check fires. This test asserts the in-binary per-test TIMEOUT (not the
+// backstop): the test-body coroutine makes infinite scheduler progress (awaiting
+// fresh goroutines in a loop) while a NON-coroutine `worker` spawned via `go`
+// blocks on a `select` over two channels the test never sends on. With the fix,
+// `worker` parks in the coop pump, everything keeps progressing, and the deadline
+// fires in-binary.
+func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
+	promiseBin := locatePromiseBin(t)
+	requireWasmtime(t)
+
+	dir, err := os.MkdirTemp("", "t1220_wasm_timeout_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Unique tag defeats the per-source test-binary cache.
+	unique := fmt.Sprintf("t1220-wasm-select-%d-%d", os.Getpid(), time.Now().UnixNano())
+	src := "// " + unique + "\n" +
+		"trivial() int { return 1; }\n" +
+		"worker(channel[int] a, channel[int] b) {\n" +
+		"  select {\n" +
+		"    v := <-a:\n" +
+		"      if _u := v { }\n" +
+		"    v := <-b:\n" +
+		"      if _u := v { }\n" +
+		"  }\n" +
+		"}\n" +
+		"test_sel() `test(timeout: \"1s\") {\n" +
+		"  channel[int] a = channel[int]();\n" +
+		"  channel[int] b = channel[int]();\n" +
+		"  go worker(a, b);\n" +
+		"  while true { task[int] t = go trivial(); int? r = <-t; }\n" +
+		"}\n"
+	file := filepath.Join(dir, "select_livelock_test.pr")
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
+	output, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	combined := string(output)
+
+	if runErr == nil {
+		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
+	}
+
+	tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_sel`)
+	if !tre.MatchString(combined) {
+		t.Errorf("expected in-binary per-test TIMEOUT line for test_sel; got:\n%s", combined)
+	}
+	if !strings.Contains(combined, "1 timed out") {
+		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
+	}
+	if strings.Contains(combined, "tests exceeded") {
+		t.Errorf("run hit the process-level backstop instead of the in-binary "+
+			"deadline — T1220 select-livelock enforcement regressed; got:\n%s", combined)
+	}
+	if elapsed > 20*time.Second {
+		t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
+			"enforcement likely regressed to the process backstop", elapsed)
+	}
+}

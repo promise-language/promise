@@ -1,0 +1,131 @@
+// T1220: a blocking `select` (no `default`) inside a NON-coroutine function
+// spawned via `go worker(...)` must cooperatively progress on WASM (the plain
+// @__user.worker pumps promise_sched_coop_step instead of silently falling
+// through to the merge block having matched nothing). Before the fix the select
+// no-oped immediately on wasm32-wasi; on host it poll-retried (B0045). Both
+// targets now block until a case becomes ready. Sibling of T1200/T1218.
+t1220_select_worker(channel[int] a, channel[int] b, channel[int] out) {
+  select {
+    v := <-a:
+      if val := v {
+        out.send(val);
+      }
+    v := <-b:
+      if val := v {
+        out.send(val);
+      }
+  }
+}
+
+// The worker's select is already waiting (both a and b empty) when the test
+// body sends on b — the select must block until then, then match the b case.
+select_blocking_named_fn_second_case() `test {
+  channel[int] a = channel[int]();
+  channel[int] b = channel[int]();
+  channel[int] out = channel[int]();
+  go t1220_select_worker(a, b, out);
+  b.send(55);
+  int result = 0;
+  r := <-out;
+  if v := r {
+    result = v;
+  }
+  assert(result == 55, "blocking select in named fn should match the b case");
+}
+
+// Same worker, first case fires — confirms both branches of the try-chain are
+// exercised through the WASM coop-wait path.
+select_blocking_named_fn_first_case() `test {
+  channel[int] a = channel[int]();
+  channel[int] b = channel[int]();
+  channel[int] out = channel[int]();
+  go t1220_select_worker(a, b, out);
+  a.send(42);
+  int result = 0;
+  r := <-out;
+  if v := r {
+    result = v;
+  }
+  assert(result == 42, "blocking select in named fn should match the a case");
+}
+
+// Loop form: the worker services many rounds, blocking on each empty select.
+t1220_select_loop_worker(channel[int] a, channel[int] b, channel[int] out) {
+  for i in 0..500 {
+    select {
+      v := <-a:
+        if val := v {
+          out.send(val);
+        }
+      v := <-b:
+        if val := v {
+          out.send(val);
+        }
+    }
+  }
+}
+
+select_blocking_named_fn_loop() `test {
+  channel[int] a = channel[int]();
+  channel[int] b = channel[int]();
+  channel[int] out = channel[int]();
+  go t1220_select_loop_worker(a, b, out);
+  int total = 0;
+  for j in 0..500 {
+    if j % 2 == 0 {
+      a.send(j);
+    } else {
+      b.send(j);
+    }
+    r := <-out;
+    if v := r {
+      total += v;
+    }
+  }
+  assert(total == 124750, "blocking select loop sum 0..499");
+}
+
+// Non-void worker: the named fn returns the value matched by the blocking
+// select. Exercises the non-void function's coop-wait path at runtime (the
+// worker parks in the pump until a case is ready, then continues to the normal
+// return — not the timeout early-return the IR test locks). Matching the a case
+// returns the a value; matching b negates it, so the sign proves which case fired.
+t1220_select_return_worker(channel[int] a, channel[int] b) int {
+  select {
+    v := <-a:
+      if val := v {
+        return val;
+      }
+    v := <-b:
+      if val := v {
+        return -val;
+      }
+  }
+  return 0;
+}
+
+select_blocking_named_fn_nonvoid_a() `test {
+  channel[int] a = channel[int]();
+  channel[int] b = channel[int]();
+  task[int] t = go t1220_select_return_worker(a, b);
+  a.send(7);
+  int result = 0;
+  int? r = <-t;
+  if v := r {
+    result = v;
+  }
+  assert(result == 7, "non-void blocking select should return the matched a value");
+}
+
+select_blocking_named_fn_nonvoid_b() `test {
+  channel[int] a = channel[int]();
+  channel[int] b = channel[int]();
+  task[int] t = go t1220_select_return_worker(a, b);
+  b.send(9);
+  int result = 0;
+  int? r = <-t;
+  if v := r {
+    result = v;
+  }
+  assert(result == -9, "non-void blocking select should return the matched b value (negated)");
+}

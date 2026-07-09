@@ -13537,7 +13537,10 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		// Non-coroutine context (e.g., batch tests): poll-retry fallback (B0045)
 		afterTryBlk = c.newBlock("select.poll")
 	} else {
-		afterTryBlk = mergeBlk
+		// T1220: WASM non-coroutine — pump the cooperative scheduler instead of
+		// silently falling through to mergeBlk (mirrors the B0045 poll fallback,
+		// but pal_usleep can't pump the single-threaded coop scheduler).
+		afterTryBlk = c.newBlock("select.wasm.wait")
 	}
 
 	// Generate try-check chain
@@ -14060,6 +14063,18 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		unlockAll()
 		c.block.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
 		c.block.NewBr(lockStartBlk)
+	}
+
+	// T1220: WASM non-coroutine blocking select — pump the cooperative scheduler
+	// instead of silently falling through to mergeBlk (sibling of T1200/T1218).
+	// pal_usleep can't pump the single-threaded coop scheduler, so use
+	// emitWasmCoopWaitPump: on progress re-lock + re-test every case, on
+	// coop_step==2 emit a signature-correct early-return (per-test deadline),
+	// on coop_step==0 take the terminal deadlock exit(2).
+	if s.Default == nil && !c.inCoroutine && c.isWasm {
+		c.block = afterTryBlk
+		unlockAll()
+		c.emitWasmCoopWaitPump(lockStartBlk)
 	}
 
 	c.block = mergeBlk

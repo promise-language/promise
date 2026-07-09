@@ -1,4 +1,4 @@
-# Promise Programming Language — Design Proposal
+# Promise Programming Language — Design
 
 ## 1. Overview
 

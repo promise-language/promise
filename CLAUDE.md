@@ -328,7 +328,7 @@ Tests are organized by category:
 ## Important Files
 
 - `compiler/grammar/PromiseParser.g4` — grammar is the language spec
-- `docs/language-design.md` — full language design proposal (types, ownership, errors, generics, modules)
+- `docs/language-design.md` — full language design (types, ownership, errors, generics, modules)
 - `docs/standard-library.md` — stdlib design: module inventory, PAL extensions, implementation phases, testing strategy
 - `compiler/internal/codegen/compiler.go` — codegen entry, type layouts, scope cleanup
 - `compiler/internal/codegen/sched.go` — M:N scheduler: GMP structs, sched_loop, park/wake, steal, shutdown

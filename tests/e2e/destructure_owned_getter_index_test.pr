@@ -1,0 +1,207 @@
+// T1241: Destructuring an owned tuple out of a getter or a user-defined
+// non-native `[]` operator must free the fresh owned tuple's heap fields
+// (strings, vectors, closure envs). Previously srcOwned=false for all
+// Index/Member sources orphaned those fields → leak. Native container index
+// and plain struct field reads still alias parent/container storage (borrow)
+// and must NOT get drop bindings (regression guards below).
+type Box {
+  string s;
+
+  // User non-native [] returning a fresh owned (string, int) tuple.
+  [](int i)(string, int) {
+    return (this.s + "!", i);
+  }
+
+  // Getter returning a fresh owned (string, int) tuple.
+  get pair(string, int) {
+    return (this.s + "?", 5);
+  }
+}
+
+destructure_user_index() `test {
+  b := Box(s: "hi");
+  (x, n) := b[0];
+  assert(x == "hi!", "user index string field");
+  assert(n == 0, "user index int field");
+}
+
+destructure_getter() `test {
+  b := Box(s: "hi");
+  (x, n) := b.pair;
+  assert(x == "hi?", "getter string field");
+  assert(n == 5, "getter int field");
+}
+
+// Two-string variants exercise the {i8*,i8*} two-string tuple path through the
+// Index (user `[]`) and Member (getter) arms.
+type StrBox {
+  string s;
+
+  // User non-native [] returning a fresh owned (string, string) tuple.
+  [](int i)(string, string) {
+    return (this.s + "a", this.s + "b");
+  }
+
+  // Getter returning a fresh owned (string, string) tuple.
+  get two(string, string) {
+    return (this.s + "x", this.s + "y");
+  }
+}
+
+destructure_user_index_two_strings() `test {
+  b := StrBox(s: "z");
+  (a, c) := b[0];
+  assert(a == "za", "user index first string");
+  assert(c == "zb", "user index second string");
+}
+
+destructure_getter_two_strings() `test {
+  b := StrBox(s: "z");
+  (a, c) := b.two;
+  assert(a == "zx", "getter first string");
+  assert(c == "zy", "getter second string");
+}
+
+// Regression guard: native container index tuple destructure aliases the
+// vector's element storage — must remain a borrow (no drop bindings), no leak.
+destructure_native_index() `test {
+  v := [("keep", 1), ("more", 2)];
+  (s, k) := v[0];
+  assert(s == "keep", "native index string alias");
+  assert(k == 1, "native index int alias");
+}
+
+type Pair {
+  string first;
+  int second;
+}
+
+// Regression guard: plain struct field read is a borrow, not an owned return.
+destructure_plain_field() `test {
+  p := Pair(first: "held", second: 9);
+  assert(p.first == "held", "plain field string");
+  assert(p.second == 9, "plain field int");
+}
+
+// A HEAP vector element (non-constant → not rodata) in an owned tuple exercises
+// the maybeRegisterDrop vector arm. A constant literal like [1,2,3] would be a
+// static rodata vector (T0062) and would NOT leak even without the fix, so the
+// element is computed from a field to force a heap allocation.
+type VBox {
+  string s;
+
+  // User non-native [] returning a fresh owned (heap-vector, int) tuple.
+  [](int i)(int[], int) {
+    return ([i, i + 1, i + 2], i);
+  }
+
+  // Getter returning a fresh owned (heap-vector, int) tuple.
+  get vec(int[], int) {
+    n := this.s.len;
+    return ([n, n + 1, n + 2], 9);
+  }
+}
+
+destructure_user_index_vector() `test {
+  b := VBox(s: "x");
+  (v, n) := b[7];
+  assert(v.len == 3, "user index vector len");
+  assert(v[0] == 7, "user index vector heap elem");
+  assert(n == 7, "user index int");
+}
+
+destructure_getter_vector() `test {
+  b := VBox(s: "xy");
+  (v, k) := b.vec;
+  assert(v.len == 3, "getter vector len");
+  assert(v[0] == 2, "getter vector heap elem (s.len)");
+  assert(k == 9, "getter int");
+}
+
+// A closure element (`*types.Signature`) in an owned tuple exercises the T1233
+// maybeRegisterEnvFree arm — the destructured local owns the closure's heap env
+// and must free it exactly once. The closure CAPTURES (`move`) so the env is
+// heap-allocated (a non-capturing closure has a null env → no leak to catch).
+type FBox {
+  int base;
+
+  get pair(() -> int, int) {
+    b := this.base;
+    return (move || -> b + 1, 5);
+  }
+
+  [](int i)(() -> int, int) {
+    b := this.base;
+    idx := i;
+    return (move || -> b + idx, i);
+  }
+}
+
+destructure_getter_closure() `test {
+  fb := FBox(base: 10);
+  (f, n) := fb.pair;
+  assert(f() == 11, "getter closure call");
+  assert(n == 5, "getter closure int");
+}
+
+destructure_user_index_closure() `test {
+  fb := FBox(base: 10);
+  (f, n) := fb[3];
+  assert(f() == 13, "user index closure call");
+  assert(n == 3, "user index closure int");
+}
+
+// Discarded (`_`) heap element from an owned source: the T0481 synthetic drop
+// binding must still free the orphaned string/env even though its local is
+// unnamed. Without the srcOwned fix the discard slot got no drop binding → leak.
+destructure_getter_discard() `test {
+  b := Box(s: "hi");
+  (_, n) := b.pair;
+  assert(n == 5, "getter discard int");
+}
+
+destructure_user_index_discard() `test {
+  b := Box(s: "hi");
+  (_, n) := b[2];
+  assert(n == 2, "user index discard int");
+}
+
+destructure_getter_closure_discard() `test {
+  fb := FBox(base: 10);
+  (_, n) := fb.pair;
+  assert(n == 5, "getter closure discard int");
+}
+
+// Parenthesized owned source — unwrapDestructureParens must peel the parens so
+// `(b.pair)` / `(b[4])` take the SAME owned path as the bare form (T0570 peel on
+// the owned side). Without peeling srcOwned would misclassify and leak.
+destructure_getter_parens() `test {
+  b := Box(s: "hi");
+  (x, n) := (b.pair);
+  assert(x == "hi?", "paren getter string");
+  assert(n == 5, "paren getter int");
+}
+
+destructure_user_index_parens() `test {
+  b := Box(s: "hi");
+  (x, n) := (b[4]);
+  assert(x == "hi!", "paren user index string");
+  assert(n == 4, "paren user index int");
+}
+
+// Getter on an ENUM (isGetterCallExpr's enum.LookupGetter arm). The string is
+// built by concatenation to force a heap allocation (a bare "tag" literal would
+// be rodata and never leak).
+enum Wrap {
+  Val(int value),
+  get labeled(string, int) {
+    return ("t" + "ag", 7);
+  }
+}
+
+destructure_enum_getter() `test {
+  w := Wrap.Val(value: 3);
+  (s, n) := w.labeled;
+  assert(s == "tag", "enum getter heap string");
+  assert(n == 7, "enum getter int");
+}

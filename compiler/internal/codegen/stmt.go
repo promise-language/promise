@@ -2074,7 +2074,14 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		_, hasBinding := c.dropBindings[src.Name]
 		srcOwned = hasBinding
 	case *ast.IndexExpr, *ast.MemberExpr:
-		srcOwned = false
+		// T1241: Owned-return shapes behind Index/Member syntax produce a FRESH
+		// owned tuple whose heap fields (strings, vectors, closure envs) the
+		// destructured locals must free — a getter returning a tuple by value
+		// (isGetterCallExpr) and a user-defined non-native `[]` returning a tuple
+		// (isUserIndexExpr). A native container/array index or plain struct-field
+		// read instead aliases storage the container/parent owns (borrow →
+		// srcOwned=false). Mirrors tupleArgIsCallerOwnedTemp on the arg path.
+		srcOwned = c.tupleArgIsCallerOwnedTemp(src)
 	}
 	for i, name := range s.Names {
 		elemPromiseType := tup.Elems()[i]

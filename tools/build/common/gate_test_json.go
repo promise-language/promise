@@ -174,23 +174,53 @@ func BuildGateOutput(base, target, metricPrefix, complete, jsonl string) (*GateO
 	}, nil
 }
 
+// canonPath resolves symlinks and OS-native name aliases (e.g. Windows 8.3 short
+// names like RUNNER~1 → runneradmin) in the longest existing prefix of p,
+// appending any non-existent tail unchanged. It returns p unchanged when nothing
+// resolves. This lets two forms of the same path — one keeping a short/symlinked
+// prefix, one normalized — be compared in a single namespace even when the leaf
+// (a test file, or an already-removed worktree src/) no longer exists on disk.
+func canonPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	dir, rest := p, ""
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir { // reached volume root; nothing resolved
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+	}
+}
+
 // relToBase returns file relative to base with forward slashes.
 // A ..‑escaping result is a hard error — it always indicates a base/cwd mismatch
 // (programming error, not a user error), so there is no silent fallback.
-// Exception: if the lexical Rel escapes but base is a symlink whose resolved
-// target is an ancestor of file, the resolved base is used transparently.
-// This handles the macOS /var→/private/var namespace split where os.MkdirTemp
-// returns the unresolved symlink path but child processes report the physical path.
+// Exception: if the lexical Rel escapes but base and file name the same directory
+// through different forms of the same path, both are canonicalized and the check
+// retried. This covers the macOS /var→/private/var symlink namespace split (base
+// symlinked, file physical) and the Windows 8.3 short-name split (base normalized
+// to runneradmin, file keeping RUNNER~1 inherited from %TEMP%), where os.MkdirTemp
+// returns one form but child processes / other code report the other.
 func relToBase(base, file string) (string, error) {
 	rel, err := filepath.Rel(base, file)
 	if err != nil {
 		return "", fmt.Errorf("rel(%q, %q): %w", base, file, err)
 	}
 	if strings.HasPrefix(rel, "..") {
-		// Retry with the canonical base — handles macOS /var→/private/var where
-		// the lexical Rel escapes but the physical path is under base.
-		if cBase, cerr := filepath.EvalSymlinks(base); cerr == nil && cBase != base {
-			if rel2, err2 := filepath.Rel(cBase, file); err2 == nil && !strings.HasPrefix(rel2, "..") {
+		// The lexical Rel escaped. This happens when base and file name the same
+		// directory in different forms: a symlinked vs physical prefix (macOS
+		// /var→/private/var, T1112) or a Windows 8.3 short vs long name
+		// (RUNNER~1 vs runneradmin, T1243). Canonicalize BOTH to one namespace
+		// and retry before declaring the file genuinely outside base.
+		cBase, cFile := canonPath(base), canonPath(file)
+		if cBase != base || cFile != file {
+			if rel2, err2 := filepath.Rel(cBase, cFile); err2 == nil && !strings.HasPrefix(rel2, "..") {
 				return filepath.ToSlash(rel2), nil
 			}
 		}

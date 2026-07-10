@@ -223,3 +223,86 @@ func TestRelToBaseSymlinkBaseFileStillOutside(t *testing.T) {
 		t.Errorf("error = %q, want to contain 'is not under base'", err.Error())
 	}
 }
+
+// TestRelToBaseFileFormDiffersFromBase is a regression test for T1243. When the
+// file path names the same directory as base through a different form (a symlink
+// alias here, an 8.3 short name like RUNNER~1 on Windows CI), relToBase must
+// canonicalize both sides and succeed — even when the leaf does not exist on disk
+// (the reported test file, or an already-removed worktree src/).
+func TestRelToBaseFileFormDiffersFromBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink-based reproduction skipped on Windows")
+	}
+	real := t.TempDir()
+	real, _ = filepath.EvalSymlinks(real) // canonical long form == base
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	// base is canonical; file is expressed through the symlink alias and its
+	// leaf does not exist — mirrors Windows base=runneradmin, file=RUNNER~1.
+	file := filepath.Join(link, "tests", "e2e", "basics.pr")
+	rel, err := relToBase(real, file)
+	if err != nil {
+		t.Fatalf("relToBase = %v, want nil (T1243)", err)
+	}
+	if rel != "tests/e2e/basics.pr" {
+		t.Errorf("rel = %q, want tests/e2e/basics.pr", rel)
+	}
+}
+
+// TestCanonPathLongestExistingPrefix verifies canonPath resolves the longest
+// existing prefix (a symlinked dir here) and appends the non-existent tail
+// unchanged — the mechanism underpinning the T1243 fix.
+func TestCanonPathLongestExistingPrefix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink-based reproduction skipped on Windows")
+	}
+	real := t.TempDir()
+	real, _ = filepath.EvalSymlinks(real)
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	got := canonPath(filepath.Join(link, "no", "such", "leaf.pr"))
+	want := filepath.Join(real, "no", "such", "leaf.pr")
+	if got != want {
+		t.Errorf("canonPath = %q, want %q", got, want)
+	}
+}
+
+// TestBuildGateOutputFileFormDiffersFromBase is the end-to-end T1243 regression:
+// it drives the fix through BuildGateOutput's actual file-grouping call site (not
+// the relToBase helper in isolation). base is the canonical long form; the JSONL
+// records report their files through a symlink alias with non-existent leaves —
+// mirroring Windows CI where base=runneradmin but the runner reports RUNNER~1
+// paths. BuildGateOutput must relativize both records and group them, not error.
+func TestBuildGateOutputFileFormDiffersFromBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink-based reproduction skipped on Windows")
+	}
+	real := t.TempDir()
+	real, _ = filepath.EvalSymlinks(real) // canonical long form == base
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	jsonl := strings.Join([]string{
+		jsonlLine(link, "tests/std/bool_test.pr", "test_and", "pass"),
+		jsonlLine(link, "tests/e2e/hello.pr", "main", "pass"),
+	}, "\n")
+
+	out, err := BuildGateOutput(real, "linux-amd64", "host", "promise-tests", jsonl)
+	if err != nil {
+		t.Fatalf("BuildGateOutput = %v, want nil (T1243)", err)
+	}
+	if len(out.Files) != 2 {
+		t.Fatalf("want 2 file groups, got %d: %+v", len(out.Files), out.Files)
+	}
+	if out.Files[0].File != "tests/std/bool_test.pr" {
+		t.Errorf("file[0] = %q, want tests/std/bool_test.pr", out.Files[0].File)
+	}
+	if out.Files[1].File != "tests/e2e/hello.pr" {
+		t.Errorf("file[1] = %q, want tests/e2e/hello.pr", out.Files[1].File)
+	}
+}

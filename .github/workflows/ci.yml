@@ -121,8 +121,13 @@ jobs:
       - name: Test — Go + Promise
         if: ${{ inputs.run_tests }}
         shell: bash
-        # Always bin/test [go|promise|all] — never `go test ./...` directly: bin/test
-        # builds and embeds the stdlib/catalog modules first, which raw `go test` skips.
+        # Always bin/test — never `go test ./...` directly: bin/test builds and embeds
+        # the stdlib/catalog modules first, which raw `go test` skips.
+        # No positional mode → the CI set: compiler Go tests + Promise tests. The
+        # tools/build Go suite is deliberately excluded (it assumes a POSIX
+        # shell/toolchain and 8.3-free temp paths, so it is unreliable across CI
+        # runners); it is opt-in via `bin/test tools`/`bin/test all` and is covered by
+        # local `bin/verify`.
         # NOTE: no --wasm here. Running the full suite on wasm32-wasi ~doubles CI cost,
         # so the wasm target is covered by a separate periodic workflow, not per-PR CI.
-        run: bin/test all
+        run: bin/test

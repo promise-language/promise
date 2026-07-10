@@ -29,9 +29,11 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 # From repo root (all platforms):
 bin/build                  # generate parser + embed resources + build → bin/promise
 bin/build --release        # release build with embedded LLVM tools
-bin/test                   # build + run all tests (go + promise)
-bin/test go                # Go unit tests only
+bin/test                   # build + run the CI set: compiler Go + Promise (skips tools)
+bin/test go                # compiler Go unit tests only
 bin/test promise           # Promise tests only
+bin/test tools             # tools/build Go tests only (opt-in; unreliable on some CI runners)
+bin/test all               # go + promise + tools
 bin/test --wasm            # include wasm32-wasi target (wasmtime)
 bin/test --wasm-web        # include wasm32-web target (Node.js harness)
 bin/test --clean           # clear caches first

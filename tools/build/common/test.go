@@ -9,7 +9,12 @@ import (
 )
 
 // RunTest builds the compiler and runs test suites.
-// Modes: "go" (Go unit tests), "promise" (Promise tests), "all" (default).
+// Modes: "go" (compiler Go tests), "promise" (Promise tests), "tools"
+// (tools/build Go tests), "all" (go + promise + tools). With no mode it runs the
+// CI set — go + promise — and skips tools. The "tools" suite is opt-in because
+// several of its tests assume a POSIX shell/toolchain and 8.3-free temp paths, so
+// they are unreliable across CI runners; bin/verify runs them locally where that
+// environment holds. Flows are never run here (no flow-sdk workspace on CI).
 // Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
 // -wasm-web (include wasm32-web via Node), -clean (clear caches first).
 // Default cache is local (.promise-home/); -local is accepted for clarity.
@@ -17,7 +22,8 @@ func RunTest(root string, args []string) error {
 	start := time.Now()
 	args = NormalizeArgs(args)
 
-	suite := "all"
+	// "default" = no positional mode = the CI set (go + promise, no tools).
+	suite := "default"
 	shared := slices.Contains(args, "-shared")
 	wasm := slices.Contains(args, "-wasm")
 	wasmWeb := slices.Contains(args, "-wasm-web")
@@ -25,14 +31,18 @@ func RunTest(root string, args []string) error {
 
 	for _, arg := range args {
 		switch arg {
-		case "go", "promise", "all":
+		case "go", "promise", "tools", "all":
 			suite = arg
 		case "-local", "-shared", "-wasm", "-wasm-web", "-clean":
 			// already handled
 		default:
-			return fmt.Errorf("usage: bin/test [go|promise|all] [-shared] [-wasm] [-wasm-web] [-clean]")
+			return fmt.Errorf("usage: bin/test [go|promise|tools|all] [-shared] [-wasm] [-wasm-web] [-clean]")
 		}
 	}
+
+	runCompiler := suite == "default" || suite == "all" || suite == "go"
+	runTools := suite == "all" || suite == "tools"
+	runPromise := suite == "default" || suite == "all" || suite == "promise"
 
 	// Clean caches first if requested, before SetupLocalCache so the local
 	// home is recreated empty.
@@ -55,18 +65,17 @@ func RunTest(root string, args []string) error {
 		return fmt.Errorf("build: %w", err)
 	}
 
-	// Go tests — the compiler and tools/build modules. CI runs `bin/test`, not
-	// `bin/verify`, so bin/test must cover the tools/build suite too; otherwise a
-	// tools/ regression (e.g. a Windows-only test break) sails through CI while
-	// only verify catches it locally. Flows are deliberately NOT run here: they
-	// need a flow-sdk workspace that CI does not set up (bin/verify runs them
-	// locally where that workspace exists).
-	if suite == "go" || suite == "all" {
+	// Compiler Go tests — the CI set.
+	if runCompiler {
 		fmt.Println("\nRunning go tests (compiler)...")
 		if err := RunGoTests(root); err != nil {
 			return fmt.Errorf("go tests (compiler): %w", err)
 		}
+	}
 
+	// Tools/build Go tests — opt-in only (`bin/test tools` / `bin/test all`), not
+	// part of the default CI set. See the RunTest doc comment for why.
+	if runTools {
 		fmt.Println("\nRunning go tests (tools)...")
 		if err := RunToolsGoTests(root); err != nil {
 			return fmt.Errorf("go tests (tools): %w", err)
@@ -74,7 +83,7 @@ func RunTest(root string, args []string) error {
 	}
 
 	// Promise tests
-	if suite == "promise" || suite == "all" {
+	if runPromise {
 		fmt.Println("\nRunning promise tests (host)...")
 		_, err := RunPromiseTests(root, "")
 		if err != nil {

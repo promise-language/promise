@@ -843,3 +843,128 @@ discard_transferred_borrowed_closure_param() `test {
   }
   assert(i == 30, "");
 }
+
+// --- closure read out of a map value (T1247) ---
+//
+// A Map's user-defined `[]` returns the stored element BY VALUE — its `V?` result
+// aliases internal storage. A closure element is not duped on read (closures aren't
+// Cloneable), so the returned fat pointer {fn, env} aliases the map's stored env.
+// Before T1247 the read was treated as an OWNED fresh closure (isUserIndexExpr
+// exempted ALL user `[]`), registering an owning env-free binding for the local
+// that double-frees against the map's own drop → segfault. The fix keeps the borrow
+// treatment for std aliasing containers (Map/Vector) via
+// indexTargetIsAliasingContainer, so the map remains sole owner and frees the env
+// exactly once. Each loops 30x so a per-iteration env leak surfaces (zero-leak).
+//
+// Contrast: CbIndexBox's `[]` (above, owned_closure_from_user_index) builds a FRESH
+// closure per call and genuinely owns it — a non-aliasing user `[]`, still exempt.
+
+// Read a capturing closure back out of a map literal and invoke it.
+local_closure_into_map() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    f := move || -> x + 1;
+    map[string, () -> int] m = {
+      "k": f
+    };
+    g := m["k"]!; // aliases the map's stored env — borrow, not owned
+    assert(g() == 6, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Same, built via index-assign (`m["k"] = ...`) rather than a map literal.
+map_read_call_closure() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    map[string, () -> int] m = map[string, () -> int]();
+    m["k"] = move || -> x + 1;
+    cb := m["k"]!; // aliases the map's stored env — borrow, not owned
+    assert(cb() == 6, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Control: non-capturing closure (null env) read out of a map — no env to free,
+// so this worked before T1247 too; guards against a regression on the null path.
+zero_cb() int {
+  return 0;
+}
+map_read_noncapture_closure() `test {
+  i := 0;
+  while i < 30 {
+    map[string, () -> int] m = map[string, () -> int]();
+    m["k"] = zero_cb;
+    cb := m["k"]!;
+    assert(cb() == 0, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Control: a capturing closure read out of a VECTOR (native `[]`) — isUserIndexExpr
+// is already false for Vector, so it was always a borrow; kept to pin the invariant.
+vec_read_capture_closure() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    v := [move || -> x + 1];
+    cb := v[0]; // aliases the vector's stored env — borrow, not owned
+    assert(cb() == 6, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Store-and-drop with no read-out: the map owns the env and deep-drops it once.
+map_construct_drop_closure() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    f := move || -> x + 1;
+    map[string, () -> int] m = {
+      "k": f
+    };
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Generic context (T1247): reading a capturing closure out of a map inside a
+// monomorphized generic function. The map target type `map[string, () -> T]`
+// carries a type param that is substituted at codegen, so this exercises the
+// `c.typeSubst != nil` substitution branch of indexTargetIsAliasingContainer that
+// the non-generic cases above never reach. Still an aliasing borrow: the map
+// remains sole owner of the env and frees it exactly once.
+read_map_cb_generic[T](T move val) T {
+  m := map[string, () -> T]();
+  m["k"] = move || -> val;
+  cb := m["k"]!; // aliases the map's stored env — borrow, not owned
+  return cb();
+}
+
+// int instantiation: Copy capture, null-ish cleanup — pins the generic borrow.
+map_read_closure_generic_int() `test {
+  i := 0;
+  while i < 30 {
+    assert(read_map_cb_generic[int](7) == 7, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// string instantiation: the env holds a heap string that the map's env drop must
+// free exactly once through the substituted (`() -> string`) path (zero-leak).
+map_read_closure_generic_string() `test {
+  i := 0;
+  while i < 30 {
+    s := "hello world this is a heap string";
+    assert(read_map_cb_generic[string](move s) == "hello world this is a heap string", "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}

@@ -484,10 +484,49 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 		return false
 	}
 	// Owned-return shapes: the local owns a fresh closure, keep its binding.
-	if c.isGetterCallExpr(e) || c.isUserIndexExpr(e) {
+	if c.isGetterCallExpr(e) {
+		return false
+	}
+	// A user-defined non-native `[]` normally returns a FRESH owned value (a
+	// freshly-built closure / a duped string or heap result), so it is exempt —
+	// the local legitimately owns it.
+	//
+	// EXCEPTION (T1247): a std aliasing container (Map — Vector's `[]` is native,
+	// so isUserIndexExpr is already false for it) returns the slot's element BY
+	// VALUE, aliasing internal storage. A closure element is not duped on read
+	// (closures aren't Cloneable), so the returned fat pointer `{fn, env}` aliases
+	// the container's stored env. Treating that as an owned return would register
+	// an owning env-free binding that double-frees against the container's own
+	// drop. Keep the borrow treatment for aliasing containers. Mirrors the
+	// ownership-side isUserIndexExpr && !indexTargetIsAliasingContainer gate (T1113).
+	if c.isUserIndexExpr(e) && !c.indexTargetIsAliasingContainer(e) {
 		return false
 	}
 	return true
+}
+
+// indexTargetIsAliasingContainer reports whether e is an IndexExpr whose target is
+// a std aliasing container (Map or Vector) — one whose `[]` returns the stored
+// element by value, aliasing internal storage, rather than a freshly-constructed
+// owned value. Used by isClosureAggregateBorrow to keep borrow treatment for a
+// closure read out of such a container (T1247). Mirrors the ownership-side
+// indexTargetIsAliasingContainer.
+func (c *Compiler) indexTargetIsAliasingContainer(e ast.Expr) bool {
+	idx, ok := e.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	t := c.info.Types[idx.Target]
+	if c.typeSubst != nil && t != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if _, ok := types.AsVector(t); ok {
+		return true
+	}
+	if _, _, ok := types.AsMap(t); ok {
+		return true
+	}
+	return false
 }
 
 // isStringBorrowExpr returns true if the expression borrows an existing value

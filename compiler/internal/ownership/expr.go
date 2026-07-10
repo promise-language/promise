@@ -2046,7 +2046,14 @@ func closureAggregateBorrowSource(info *sema.Info, expr ast.Expr) ast.Expr {
 			}
 		}
 	}
-	if idx, ok := e.(*ast.IndexExpr); ok && isUserIndexExpr(info, idx) {
+	// A user-defined non-native `[]` normally returns a FRESH owned closure, so
+	// the local owns it — not a borrow. EXCEPTION (T1247): a std aliasing container
+	// (Map) returns the stored element by value, aliasing internal storage; a
+	// closure element is not duped on read (closures aren't Cloneable), so the read
+	// aliases the container's env. Mark the local Borrowed so escapes (returning it,
+	// re-storing into a longer-lived aggregate) are rejected — mirrors the T1113
+	// carve-out in rejectIndexExprSingleOwnerMove and the codegen borrow treatment.
+	if idx, ok := e.(*ast.IndexExpr); ok && isUserIndexExpr(info, idx) && !indexTargetIsAliasingContainer(info, idx) {
 		return nil
 	}
 	return e

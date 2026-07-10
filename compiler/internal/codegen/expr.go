@@ -1909,6 +1909,32 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		// Handle mod.func() / mod.Type() — qualified call to imported module
 		if ident, ok := member.Target.(*ast.IdentExpr); ok {
 			if modName := c.resolveModuleName(ident); modName != "" {
+				// T1251: A module-level getter whose return type is a function type
+				// (`get adder() -> int`) — the trailing `()` invokes the *returned
+				// closure*, not the getter. Sema records the member in ModuleGetters
+				// and types `lib.adder()` as the closure's result. Evaluate the getter
+				// (genMemberExpr → genModuleGetterCall materializes the {fn,env} fat
+				// pointer and tracks its env for cleanup) then dispatch indirectly.
+				// Without this the default arm treats `()` as the getter's own call and
+				// returns the closure struct where its result value is expected.
+				if c.info.ModuleGetters[member] {
+					calleeType := c.info.Types[e.Callee]
+					if c.typeSubst != nil {
+						calleeType = types.Substitute(calleeType, c.typeSubst)
+					}
+					if sig, ok := calleeType.(*types.Signature); ok {
+						closure := c.genExpr(e.Callee)
+						var argVals []value.Value
+						for _, arg := range e.Args {
+							argVals = append(argVals, c.genCallArgExpr(arg.Value))
+						}
+						origArgVals := argVals // T0331: pre-coercion for alias check
+						argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
+						result := c.genIndirectCall(closure, sig, argVals)
+						c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
+						return result
+					}
+				}
 				calleeType := c.info.Types[e.Callee]
 				switch calleeType.(type) {
 				case *types.Named, *types.Instance:

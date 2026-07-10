@@ -119,3 +119,68 @@ test_getter_function_reassign() `test {
   f = propmod.plain_fn;
   assert(f() == 7, "non-capturing after reassign");
 }
+
+// T1251: DIRECT-CALL form — `propmod.adder()` invokes the *returned* closure
+// (a getter is accessed without parens; the `()` calls the closure it yields).
+// This previously panicked in codegen (the `()` was treated as the getter's own
+// call, producing the closure struct where its int result was expected). The
+// capturing env is materialized and freed inline (leak check enforces this).
+test_getter_function_direct_call_capturing() `test {
+  assert(propmod.adder() == 42, "adder() should be 42");
+}
+
+// T1251: same direct-call form for the NON-capturing getter (env field is null).
+test_getter_function_direct_call_plain() `test {
+  assert(propmod.plain_fn() == 7, "plain_fn() should be 7");
+}
+
+// T1251: direct-call result assigned to an int — used to panic with
+// `store { i8*, i8* } into i64*`.
+test_getter_function_direct_call_assign() `test {
+  int x = propmod.adder();
+  assert(x == 42, "assigned adder() should be 42");
+}
+
+// T1251: bare direct-call discard — the closure env allocated by the getter must
+// still be freed even though the int result is unused (leak check enforces this).
+test_getter_function_direct_call_discard() `test {
+  propmod.adder();
+}
+
+// T1251: direct-call in a loop — each call allocates a fresh capturing env that
+// must be freed at statement end (leak check enforces no accumulation).
+test_getter_function_direct_call_loop() `test {
+  int total = 0;
+  for i in 0..100 {
+    total = total + propmod.adder();
+  }
+  assert(total == 4200, "100 * 42");
+}
+
+// T1251: direct call passing an argument to the returned closure — exercises the
+// argument-coercion arm (`coerceIndirectCallArgs`) of the indirect dispatch.
+test_getter_function_direct_call_with_arg() `test {
+  assert(propmod.scaler(5) == 50, "scaler(5) should be 50");
+  int total = 0;
+  for i in 0..10 {
+    total = total + propmod.scaler(i);
+  }
+  assert(total == 450, "sum of 10*i for i in 0..10");
+}
+
+// T1251: direct call issued from inside a generic (monomorphized) function body —
+// exercises the `c.typeSubst != nil` substitution arm of the direct-call path,
+// which the top-level call sites above never reach.
+call_getter_in_generic[T](T dummy) int {
+  return propmod.adder();
+}
+
+call_scaler_in_generic[T](T dummy, int n) int {
+  return propmod.scaler(n);
+}
+
+test_getter_function_direct_call_in_generic() `test {
+  assert(call_getter_in_generic[int](0) == 42, "generic-context adder() should be 42");
+  assert(call_getter_in_generic[bool](true) == 42, "second monomorphization should be 42");
+  assert(call_scaler_in_generic[int](0, 7) == 70, "generic-context scaler(7) should be 70");
+}

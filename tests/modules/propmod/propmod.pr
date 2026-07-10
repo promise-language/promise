@@ -66,3 +66,10 @@ get adder() -> int `public `doc("Returns a closure capturing a local.") {
 get plain_fn() -> int `public `doc("Returns a non-capturing closure.") {
   return || -> 7;
 }
+
+// Getter returning a CAPTURING closure that takes an argument — exercises the
+// argument-coercion arm of the T1251 direct-call path (`propmod.scaler(x)`).
+get scaler(int) -> int `public `doc("Returns a closure that scales its argument.") {
+  factor := 10;
+  return move |int x| -> x * factor;
+}

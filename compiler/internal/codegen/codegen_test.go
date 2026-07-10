@@ -5814,6 +5814,75 @@ func TestLambdaEnvTempClaimedForVariable(t *testing.T) {
 	assertContains(t, ir, "env.claim")
 }
 
+// T1239: a map literal whose value is a capturing closure must claim the
+// closure's env temp. Map.[]= takes ~V value by move, so the map's drop owns the
+// heap env; without the claim, statement-end cleanupEnvTemps double-frees it →
+// segfault. genMapLit must emit env.claim blocks for the moved value (mirroring
+// genArrayLit, T0741). This locks in the IR shape so a refactor can't drop it.
+func TestMapLiteralClosureValueClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		do_it() {
+			x := 5;
+			m := { "k": move || -> x + 1 };
+		}
+		main() { do_it(); }
+	`)
+	// The capturing closure allocates a heap env; the map literal's []= move must
+	// claim it (an env.claim block emitted to clear the temp's drop flag) so the
+	// statement-end cleanup does not free what the map's drop now owns. Scope the
+	// check to @do_it — env.claim appears throughout stdlib, so a whole-IR check
+	// would not discriminate. Two env.claim blocks are expected: one from binding
+	// the map to `m` (compares the map's instance ptr — never matches, a no-op at
+	// runtime) and one from genMapLit's move claim against the closure env (the
+	// fix). Without the fix only the binding claim exists → env temp survives →
+	// double-free at statement-end cleanupEnvTemps.
+	body := extractFunction(ir, "__user.do_it")
+	if body == "" {
+		t.Fatal("could not extract @__user.do_it from IR")
+	}
+	claimBlocks := regexp.MustCompile(`(?m)^env\.claim\.\d+:`).FindAllString(body, -1)
+	if len(claimBlocks) < 2 {
+		t.Errorf("expected >= 2 env.claim blocks in @__user.do_it (binding claim + "+
+			"genMapLit move claim), got %d:\n%s", len(claimBlocks), body)
+	}
+}
+
+// T1239 multi-entry: a map literal with two capturing closures must claim BOTH
+// env temps — genMapLit loops over entries and calls claimEnvTemp(valVal) per
+// iteration. The second call sees two tracked env temps and emits two compare
+// blocks (one per temp), producing more env.claim blocks than the single-entry
+// case. Without the fix the second env temp is not claimed → double-free at
+// statement-end cleanupEnvTemps when the second closure is evaluated.
+func TestMapLiteralTwoClosureValuesClaimBothEnvTemps(t *testing.T) {
+	ir := generateIR(t, `
+		do_two() {
+			x := 5;
+			y := 10;
+			m := {
+				"a": move || -> x + 1,
+				"b": move || -> y + 2
+			};
+		}
+		main() { do_two(); }
+	`)
+	body := extractFunction(ir, "__user.do_two")
+	if body == "" {
+		t.Fatal("could not extract @__user.do_two from IR")
+	}
+	// For two capturing closures the loop produces:
+	//   entry 1: claimEnvTemp(val1) with 1 envTemp in slice  → 1 env.claim block
+	//   entry 2: claimEnvTemp(val2) with 2 envTemps in slice → 2 env.claim blocks
+	//   binding: claimEnvTemp(mapVal) with 2 envTemps        → 2 env.claim blocks
+	// Total ≥ 5 (exactly 5 for this pattern). A single-entry map produces 2.
+	// We check ≥ 4 so the assertion is tight but not brittle to minor IR changes.
+	claimBlocks := regexp.MustCompile(`(?m)^env\.claim\.\d+:`).FindAllString(body, -1)
+	if len(claimBlocks) < 4 {
+		t.Errorf("expected >= 4 env.claim blocks in @__user.do_two "+
+			"(two closures × their env temp loop iterations), got %d:\n%s",
+			len(claimBlocks), body)
+	}
+}
+
 // T0812: reading a closure out of an owning aggregate (struct/optional field,
 // container element) borrows the aggregate's heap env — the local must NOT get an
 // owning env-free binding, otherwise both the local and the aggregate's drop free

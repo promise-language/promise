@@ -12616,6 +12616,14 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			// element path (T0366).
 			c.claimStringTemp(valVal)
 			c.claimStringTemp(keyVal)
+			// T1239: also claim the closure env temp. Map.[]= takes ~V value by
+			// move, so the map's drop owns the closure's heap env. Without this
+			// the statement-end cleanupEnvTemps double-frees it → segfault.
+			// Mirrors genArrayLit (T0741). The key claim is defensive (a closure
+			// can't be Hashable, so not a valid map key today) but costs nothing —
+			// claimEnvTemp is a no-op for non-closure values.
+			c.claimEnvTemp(valVal)
+			c.claimEnvTemp(keyVal)
 			// B0281: Clear enum ctor temps created during this entry's evaluation.
 			// Map.[]= copies the enum value by LLVM value into the map's Slot.
 			// Both the temp alloca and the Slot share the same inner pointers

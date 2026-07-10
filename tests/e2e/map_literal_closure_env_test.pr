@@ -1,0 +1,49 @@
+// T1239: a map literal whose value is a capturing closure must claim the
+// closure's heap env temp. Map.[]= takes ~V value by move, so the map's drop
+// owns the env; without claiming, statement-end cleanupEnvTemps double-frees it
+// → segfault. See genMapLit in compiler/internal/codegen/expr.go.
+make_adder(int x)() -> int {
+  return move || -> x + 1;
+}
+
+// Repro A — inline capturing lambda literal as a map value.
+probe_map_literal_capturing_lambda() `test {
+  x := 5;
+  m := {
+    "k": move || -> x + 1
+  };
+  assert(m["k"]!() == 6, "capturing lambda literal in map value");
+}
+
+// Repro B — closure-returning call result as a map value.
+probe_closure_into_map_literal() `test {
+  m := {
+    "k": make_adder(5)
+  };
+  assert(m["k"]!() == 6, "closure-returning call result in map value");
+}
+
+// Multi-entry: two capturing lambda literals as map values.
+// genMapLit loops and calls claimEnvTemp(valVal) per entry; this tests
+// that the second closure's env temp is also claimed (single-entry tests
+// cannot catch a per-entry claim that only fires on iteration > 0).
+probe_map_two_capturing_lambdas() `test {
+  x := 5;
+  y := 10;
+  m := {
+    "a": move || -> x + 1,
+    "b": move || -> y + 2
+  };
+  assert(m["a"]!() == 6, "first entry closure value");
+  assert(m["b"]!() == 12, "second entry closure value");
+}
+
+// Multi-entry: two closure-returning call results as map values.
+probe_map_two_closure_results() `test {
+  m := {
+    "a": make_adder(3),
+    "b": make_adder(7)
+  };
+  assert(m["a"]!() == 4, "first closure result in map");
+  assert(m["b"]!() == 8, "second closure result in map");
+}

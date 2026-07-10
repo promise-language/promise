@@ -1,0 +1,96 @@
+// T1226: Overwriting a closure-typed struct FIELD or vector ELEMENT must drop
+// the old closure's heap env (its captured values), else it leaks (macOS) or
+// reads a freed env at scope-exit drop and crashes (Linux). The drop-old blocks
+// in genMemberAssign / genVectorIndexAssign gained a *types.Signature branch
+// (null/same-pointer guarded), paired with claimEnvTemp on the RHS so the new
+// env is not freed at statement end.
+type H {
+  () -> int cb;
+}
+
+// 1. Struct-field overwrite: capturing closure replaced by another capturing
+//    closure. The old env (captures x) must be dropped, the new one survives.
+field_overwrite() `test {
+  x := 5;
+  h := H(cb: || -> x);
+  h.cb = || -> x + 1;
+  assert(h.cb() == 6, "field_overwrite");
+}
+
+// 2. Vector-element overwrite (the repro).
+element_overwrite() `test {
+  x := 5;
+  v := [|| -> x];
+  v[0] = || -> x + 1;
+  assert(v[0]() == 6, "element_overwrite");
+}
+
+// 3. Capturing -> no-capture field overwrite: old env dropped, new env is null
+//    (the null-env guard must not double-free / must skip the new-side claim).
+field_capture_to_null() `test {
+  x := 7;
+  h := H(cb: || -> x);
+  h.cb = || -> 42;
+  assert(h.cb() == 42, "field_capture_to_null");
+}
+
+// 4. No-capture -> capturing field overwrite: old env is null (guard skips the
+//    old-side drop), new env survives.
+field_null_to_capture() `test {
+  x := 7;
+  h := H(cb: || -> 42);
+  h.cb = || -> x;
+  assert(h.cb() == 7, "field_null_to_capture");
+}
+
+// 5. Double-overwrite of the same field: each intermediate env must be dropped,
+//    exactly the last survives.
+field_double_overwrite() `test {
+  x := 3;
+  h := H(cb: || -> x);
+  h.cb = || -> x + 1;
+  h.cb = || -> x + 2;
+  assert(h.cb() == 5, "field_double_overwrite");
+}
+
+// 6. Multi-element vector overwrite: overwrite several capturing elements.
+element_multi_overwrite() `test {
+  x := 10;
+  v := [|| -> x, || -> x, || -> x];
+  v[0] = || -> x + 1;
+  v[1] = || -> x + 2;
+  v[2] = || -> x + 3;
+  assert(v[0]() == 11, "e0");
+  assert(v[1]() == 12, "e1");
+  assert(v[2]() == 13, "e2");
+}
+
+// 7. Vector element no-capture -> capturing: old env is null (the isNull guard
+//    skips the old-side drop), new env survives. Mirror of field_null_to_capture.
+element_null_to_capture() `test {
+  x := 7;
+  v := [|| -> 42];
+  v[0] = || -> x;
+  assert(v[0]() == 7, "element_null_to_capture");
+}
+
+// 8. Vector element capturing -> no-capture: old env dropped, new env is null.
+//    Mirror of field_capture_to_null.
+element_capture_to_null() `test {
+  x := 7;
+  v := [|| -> x];
+  v[0] = || -> 42;
+  assert(v[0]() == 42, "element_capture_to_null");
+}
+
+// 9. Self-alias vector element assignment (old env == new env): the isSame guard
+//    must skip the drop entirely — else the surviving env is freed while still
+//    referenced. (The struct-field mirror `h.cb = h.cb` is rejected by ownership:
+//    a move-only closure cannot be moved out of a field, so only the vector path
+//    can reach this case.)
+element_self_alias() `test {
+  x := 5;
+  v := [|| -> x];
+  v[0] = v[0];
+  assert(v[0]() == 5, "element_self_alias");
+}

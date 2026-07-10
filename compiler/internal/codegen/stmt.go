@@ -8023,6 +8023,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to field.
 			c.claimHeapTemp(val)
+			// T1226: Claim closure env temp — ownership transferred to field.
+			// Without this, a capturing-closure RHS's env is freed at statement
+			// end (cleanupEnvTemps) while the field still references it →
+			// use-after-free at the owner's scope-exit drop.
+			c.claimEnvTemp(val)
 			// B0312: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by this field.
 			c.neutralizeForceUnwrapSource(s.Value)
@@ -8164,6 +8169,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to container.
 			c.claimHeapTemp(val)
+			// T1226: Claim closure env temp — ownership transferred to container
+			// element. Without this, a capturing-closure RHS's env is freed at
+			// statement end while the element still references it → use-after-free.
+			c.claimEnvTemp(val)
 			// T1103: Clear inline enum constructor temps when the RHS is an enum
 			// moved into the container (e.g. `m[k] = Holder.Pair(...)`). Without
 			// this the enum-ctor temp's drop flag stays set and the temporary is
@@ -8540,6 +8549,32 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					fieldLLVM := c.resolveType(fieldType)
 					oldVal := c.block.NewLoad(fieldLLVM, fieldPtr)
 					c.emitVariantFieldDrop(oldVal, fieldType)
+				}
+				// T1226: Closure-typed field reassignment drop. Overwriting a
+				// closure field must drop the old closure's heap env (its captured
+				// values), else it leaks. emitVariantFieldDrop's Signature case
+				// (T0739) null-checks the env ptr and deep-drops via
+				// emitEnvDropOrFree. Skip when old env == new env (self-alias) and
+				// when the old env is null (no-capture closure). Paired with
+				// claimEnvTemp on the RHS in genAssignStmt so the new env's temp is
+				// not freed at statement end (it's now owned by the field).
+				if _, isSig := fieldType.(*types.Signature); isSig {
+					fieldLLVM := c.resolveType(fieldType)
+					oldVal := c.block.NewLoad(fieldLLVM, fieldPtr)
+					if st, ok := oldVal.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
+						oldEnv := c.block.NewExtractValue(oldVal, 1)
+						newEnv := c.block.NewExtractValue(val, 1)
+						isNull := c.block.NewICmp(enum.IPredEQ, oldEnv, constant.NewNull(irtypes.I8Ptr))
+						isSame := c.block.NewICmp(enum.IPredEQ, oldEnv, newEnv)
+						skipDrop := c.block.NewOr(isNull, isSame)
+						dropBlock := c.newBlock("field.closuredrop")
+						mergeBlock := c.newBlock("field.closuredrop.done")
+						c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
+						c.block = dropBlock
+						c.emitVariantFieldDrop(oldVal, fieldType)
+						c.block.NewBr(mergeBlock)
+						c.block = mergeBlock
+					}
 				}
 			}
 		}
@@ -12039,6 +12074,28 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// owns an independent copy.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if _, isSig := elemType.(*types.Signature); isSig {
+			// T1226: Drop old closure element before overwriting. A capturing
+			// closure element owns a heap env struct; overwriting via v[i] = newFn
+			// leaks the old env. emitVariantFieldDrop's Signature case (T0739)
+			// null-checks the env ptr and deep-drops it. Skip when old env == new
+			// env (self-alias). Mirrors the genMemberAssign closure branch and is
+			// paired with claimEnvTemp on the RHS in genAssignStmt.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			if st, ok := oldVal.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
+				oldEnv := c.block.NewExtractValue(oldVal, 1)
+				newEnv := c.block.NewExtractValue(val, 1)
+				isNull := c.block.NewICmp(enum.IPredEQ, oldEnv, constant.NewNull(irtypes.I8Ptr))
+				isSame := c.block.NewICmp(enum.IPredEQ, oldEnv, newEnv)
+				skipDrop := c.block.NewOr(isNull, isSame)
+				dropBlock := c.newBlock("elem.closuredrop")
+				mergeBlock := c.newBlock("elem.closuredrop.done")
+				c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
+				c.block = dropBlock
+				c.emitVariantFieldDrop(oldVal, elemType)
+				c.block.NewBr(mergeBlock)
+				c.block = mergeBlock
+			}
 		}
 		c.block.NewStore(val, elemPtr)
 		// T0909: When RHS is a method/operator whose body is `return this`,

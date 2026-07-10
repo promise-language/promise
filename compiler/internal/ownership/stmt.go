@@ -699,6 +699,32 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 			}
 		}
 		return
+	case *ast.TupleLit:
+		// T1248: A tuple LITERAL source whose element reads a closure out of an
+		// aliasing aggregate (`(cb, n) := (m["k"]!, 7)`) copies that element's fat
+		// pointer `{fn, env}` by value — the aggregate (here the map) retains sole
+		// ownership of the heap env, so codegen registers no owning env-free binding
+		// for the destructured local. Mark such a local Borrowed (and register a
+		// shared borrow on the aggregate's root) so escapes — returning it, or
+		// re-storing it into a longer-lived aggregate — are rejected, mirroring the
+		// var-decl `f := m["k"]!` path (stmt.go ~181). checkExpr(s.Value) above
+		// already ran tryMoveConsume over every element, so owned elements are
+		// handled; here we only need to set per-name states.
+		tl := destructureSrc.(*ast.TupleLit)
+		for i, name := range s.Names {
+			if name == "_" {
+				continue
+			}
+			if i < len(tl.Elements) {
+				if src := closureAggregateBorrowSource(c.info, tl.Elements[i]); src != nil {
+					c.state[name] = Borrowed
+					c.registerClosureAggregateBorrow(name, src, s.Pos())
+					continue
+				}
+			}
+			c.state[name] = Owned
+		}
+		return
 	default:
 		c.tryMove(s.Value)
 	}

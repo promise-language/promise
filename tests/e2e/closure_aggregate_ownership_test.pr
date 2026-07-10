@@ -968,3 +968,94 @@ map_read_closure_generic_string() `test {
   }
   assert(i == 30, "");
 }
+
+// --- closure read out of an aliasing aggregate into a tuple destructure (T1248) ---
+//
+// The tuple analogue of T1247. A tuple LITERAL whose element reads a capturing
+// closure out of an aliasing aggregate (`(cb, n) := (m["k"]!, 7)`) copies the
+// stored fat pointer {fn, env} by value — the element aliases the aggregate's env
+// (closures aren't Cloneable, no dup on read). Before T1248, isTupleAggregateBorrow
+// treated the destructured local as an OWNED fresh closure (isUserIndexExpr exempted
+// all user `[]`) and registered an owning env-free binding → the local freed the env
+// at scope exit while the aggregate's drop freed it again → double free / segfault.
+// The fix passes the tuple element to isClosureAggregateBorrow (post-T1247 gates the
+// user-`[]` exemption on !indexTargetIsAliasingContainer) so the aggregate stays sole
+// owner. Each loops 30x so a per-iteration env leak surfaces (zero-leak enforced).
+
+// Read a capturing closure out of a MAP value into a tuple destructure.
+tuple_destructure_map_read_closure() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    map[string, () -> int] m = map[string, () -> int]();
+    m["k"] = move || -> x + 1;
+    (cb, n) := (m["k"]!, 7); // cb aliases the map's stored env — borrow, not owned
+    assert(cb() == 6, "");
+    assert(n == 7, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Read a capturing closure out of a VECTOR element into a tuple destructure.
+tuple_destructure_vector_read_closure() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    v := [move || -> x + 1];
+    (cb, n) := (v[0], 7); // cb aliases the vector's stored env — borrow, not owned
+    assert(cb() == 6, "");
+    assert(n == 7, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Control: a tuple destructure whose closure element is a FRESH OWNED closure (a
+// getter build, not an aliasing read) must keep the owning env-free binding so the
+// fresh env is freed exactly once by the destructured local (zero-leak, no crash).
+tuple_destructure_owned_getter_closure() `test {
+  i := 0;
+  while i < 30 {
+    fac := CbFactory(base: 0);
+    (cb, n) := (fac.build, 7); // getter returns a fresh OWNED closure; cb frees its env
+    assert(cb() == 7, ""); // "factory".len
+    assert(n == 7, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Discarding the aliasing closure element with `_` while binding the int element:
+// the discarded slot registers no owning env-free binding, so the map stays sole
+// owner and frees the env once at scope exit (zero-leak, no double free).
+tuple_destructure_underscore_discards_closure() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    map[string, () -> int] m = map[string, () -> int]();
+    m["k"] = move || -> x + 1;
+    (_, n) := (m["k"]!, 7); // closure element discarded; map keeps ownership
+    assert(n == 7, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Two aliasing closures read out of the same map into one tuple destructure: both
+// elements alias distinct stored envs — both must be Borrowed (no owning free), so
+// the map's drop frees each env exactly once (zero-leak, no double free).
+tuple_destructure_two_aliasing_closures() `test {
+  i := 0;
+  while i < 30 {
+    x := 5;
+    map[string, () -> int] m = map[string, () -> int]();
+    m["a"] = move || -> x + 1;
+    m["b"] = move || -> x + 2;
+    (ca, cb) := (m["a"]!, m["b"]!); // both alias the map's stored envs — borrows
+    assert(ca() == 6, "");
+    assert(cb() == 7, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}

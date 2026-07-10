@@ -2126,7 +2126,19 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 				// bindingFreeEnv directly. nil valueExpr => isClosureAggregateBorrow
 				// won't suppress it; the source tuple's drop flag is cleared just
 				// below so the env is owned exactly once.
-				c.maybeRegisterEnvFree(bindKey, alloca, elemPromiseType, nil)
+				//
+				// T1248: EXCEPTION for a tuple LITERAL source whose element reads
+				// a closure out of an aliasing aggregate (`(m["k"]!, 7)` — a map
+				// `[]` returns the stored fat pointer by value; closures aren't
+				// Cloneable, so the element aliases the map's env). Pass that
+				// element expression so isClosureAggregateBorrow suppresses the
+				// owning env-free binding — otherwise this local frees the env at
+				// scope exit while the map's drop frees it again (double free).
+				var envValueExpr ast.Expr
+				if tupLit, ok := unwrappedSrc.(*ast.TupleLit); ok && i < len(tupLit.Elements) {
+					envValueExpr = tupLit.Elements[i]
+				}
+				c.maybeRegisterEnvFree(bindKey, alloca, elemPromiseType, envValueExpr)
 			} else {
 				c.maybeRegisterDrop(bindKey, alloca, elemPromiseType)
 			}

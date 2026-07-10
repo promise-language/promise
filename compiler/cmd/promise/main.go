@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/antlr4-go/antlr/v4"
@@ -3336,9 +3338,11 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 	bcFile.Close()
 	defer os.Remove(bcFile.Name())
 
-	optCmd := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
-	optCmd.Stderr = os.Stderr
-	if err := optCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
 		os.Exit(1)
 	}
@@ -3366,9 +3370,11 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
-	llcCmd := runLLVMCmd(llcPath, llcArgs...)
-	llcCmd.Stderr = os.Stderr
-	if err := llcCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(llcPath, llcArgs...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error running llc on %s: %v\n", prefix, err)
 		os.Exit(1)
 	}
@@ -3399,9 +3405,11 @@ func compileLLToBC(irText, prefix, optPath, optLevel string) string {
 	}
 	bcFile.Close()
 
-	optCmd := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
-	optCmd.Stderr = os.Stderr
-	if err := optCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
 		os.Exit(1)
 	}
@@ -3704,6 +3712,73 @@ func runLLVMCmd(toolPath string, args ...string) *exec.Cmd {
 		cmd.Env = env
 	}
 	return cmd
+}
+
+// isTransientSpawnErrorOn reports whether err is a transient CreateProcess/fork
+// failure worth retrying (the child never started). Gated to Windows because the
+// errno values are Windows-specific — errno 8 is ENOEXEC on POSIX, so matching it
+// there would misclassify a genuine "bad executable" failure as retryable. On a
+// memory-constrained Windows CI runner, parallel test compiles fork many LLVM
+// processes (opt → llc → lld-link) and can push the system past its commit limit;
+// Windows then rejects CreateProcess before the child starts (T1249).
+func isTransientSpawnErrorOn(err error, goos string) bool {
+	if err == nil || goos != "windows" {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case 8, // ERROR_NOT_ENOUGH_MEMORY
+			1450, // ERROR_NO_SYSTEM_RESOURCES
+			1455: // ERROR_COMMITMENT_LIMIT (paging file too small)
+			return true
+		}
+	}
+	// Message-form fallback (localized/wrapped errors that lose the errno).
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not enough memory resources") ||
+		strings.Contains(msg, "insufficient system resources") ||
+		strings.Contains(msg, "paging file is too small")
+}
+
+// isTransientSpawnError reports whether err is a transient spawn failure on the
+// current host (see isTransientSpawnErrorOn).
+func isTransientSpawnError(err error) bool {
+	return isTransientSpawnErrorOn(err, runtime.GOOS)
+}
+
+// Test seams (T1249): overridable so runResilient's retry loop can be exercised
+// on non-Windows hosts, where isTransientSpawnError is Windows-gated and never
+// reports a transient failure. Production defaults are the real classifier and a
+// 300ms backoff base; tests inject a synthetic classifier and a tiny backoff.
+var (
+	isTransientSpawn  = isTransientSpawnError
+	spawnRetryBackoff = 300 * time.Millisecond
+)
+
+// runResilient runs a build-time tool command, retrying transient CreateProcess
+// spawn failures (Windows commit-limit exhaustion under parallel test compiles,
+// T1249). build must return a freshly-constructed *exec.Cmd on each call, since an
+// exec.Cmd can only be Run once. Non-transient failures return immediately. Up to
+// 6 attempts with escalating backoff (300ms × attempt) so concurrent LLVM
+// processes can drain and the commit charge fall.
+//
+// Only build-time tool spawns (opt/llc/linkers/wasm-tools) are wrapped. Program-run
+// spawns (execRunBinary, test-binary runs, `install` subprocess) are deliberately
+// NOT wrapped: retrying a process that already started would double its side effects.
+func runResilient(build func() *exec.Cmd) error {
+	const maxAttempts = 6
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = build().Run()
+		if err == nil || !isTransientSpawn(err) {
+			return err
+		}
+		if attempt < maxAttempts {
+			time.Sleep(time.Duration(attempt) * spawnRetryBackoff)
+		}
+	}
+	return err
 }
 
 // llvmToolVersion returns the major version of an LLVM tool, or 0 if it cannot be determined.
@@ -4422,9 +4497,11 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 	defer os.Remove(bcFile.Name())
 
 	tOpt := time.Now()
-	optCmd := runLLVMCmd(optPath, optLevel, llFile, "-o", bcFile.Name())
-	optCmd.Stderr = os.Stderr
-	if err := optCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(optPath, optLevel, llFile, "-o", bcFile.Name())
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt: %v\n", err)
 		os.Exit(1)
 	}
@@ -4459,9 +4536,11 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 		}
 		llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
-		llcCmd := runLLVMCmd(llcPath, llcArgs...)
-		llcCmd.Stderr = os.Stderr
-		if err := llcCmd.Run(); err != nil {
+		if err := runResilient(func() *exec.Cmd {
+			c := runLLVMCmd(llcPath, llcArgs...)
+			c.Stderr = os.Stderr
+			return c
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
 			os.Exit(1)
 		}
@@ -4525,9 +4604,11 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 			"-function-sections", "-relocation-model=pic",
 			bcOrObjFile, "-o", nativeObj.Name(),
 		}
-		llcCmd := runLLVMCmd(llcPath, llcArgs...)
-		llcCmd.Stderr = os.Stderr
-		if err := llcCmd.Run(); err != nil {
+		if err := runResilient(func() *exec.Cmd {
+			c := runLLVMCmd(llcPath, llcArgs...)
+			c.Stderr = os.Stderr
+			return c
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "error running llc for PROMISE_LD linker: %v\n", err)
 			os.Exit(1)
 		}
@@ -4538,18 +4619,20 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 	if !useLTO {
 		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
 	}
-	var linkCmd *exec.Cmd
-	if isLLD {
-		if useLTO {
-			linkArgs = append([]string{"--lto-O1"}, linkArgs...)
-		}
-		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
-	} else {
-		linkCmd = exec.Command(linkerPath, linkArgs...)
-		detachFromConsole(linkCmd)
+	if isLLD && useLTO {
+		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
 	}
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		var c *exec.Cmd
+		if isLLD {
+			c = runLLVMCmd(linkerPath, linkArgs...)
+		} else {
+			c = exec.Command(linkerPath, linkArgs...)
+			detachFromConsole(c)
+		}
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		linkerName := "ld"
 		if isLLD {
 			linkerName = "ld64.lld"
@@ -4647,9 +4730,11 @@ func componentWrap(coreWasm, outputFile, adaptPath string) {
 		args = append(args, "--adapt", adapter)
 	}
 
-	cmd := exec.Command(wasmToolsPath, args...)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := exec.Command(wasmToolsPath, args...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error wrapping component (wasm-tools): %v\n", err)
 		os.Exit(1)
 	}
@@ -4712,9 +4797,11 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	checkLLVMToolVersion(lldPath)
 
 	linkArgs := buildWasmLinkArgs(objFiles, target, outputFile, useLTO)
-	linkCmd := runLLVMCmd(lldPath, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(lldPath, linkArgs...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)
 		os.Exit(1)
 	}
@@ -4819,9 +4906,11 @@ func linkLinux(objFile, target, outputFile string, useLTO bool) {
 	} else {
 		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile, useLTO)
 	}
-	linkCmd := runLLVMCmd(lldPath, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(lldPath, linkArgs...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
 		os.Exit(1)
 	}
@@ -4862,18 +4951,20 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) 
 		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
 	}
 
-	var linkCmd *exec.Cmd
-	if isLLD {
-		if useLTO {
-			linkArgs = append([]string{"--lto-O1"}, linkArgs...)
-		}
-		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
-	} else {
-		linkCmd = exec.Command(linkerPath, linkArgs...)
-		detachFromConsole(linkCmd)
+	if isLLD && useLTO {
+		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
 	}
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		var c *exec.Cmd
+		if isLLD {
+			c = runLLVMCmd(linkerPath, linkArgs...)
+		} else {
+			c = exec.Command(linkerPath, linkArgs...)
+			detachFromConsole(c)
+		}
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		linkerName := "ld"
 		if isLLD {
 			linkerName = "ld64.lld"
@@ -4952,9 +5043,11 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
 		linkArgs = append(linkArgs, crt.crtendS, crt.crtn)
 	}
 
-	linkCmd := runLLVMCmd(lldPath, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(lldPath, linkArgs...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
 		os.Exit(1)
 	}
@@ -5111,9 +5204,11 @@ func linkWindows(objFile, target, outputFile string) {
 	checkLLVMToolVersion(lldPath)
 
 	linkArgs := buildWindowsLinkArgs(target, []string{objFile}, outputFile)
-	linkCmd := runLLVMCmd(lldPath, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(lldPath, linkArgs...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (lld-link): %v\n", err)
 		os.Exit(1)
 	}
@@ -5129,9 +5224,11 @@ func linkWindowsMulti(objFiles []string, target, outputFile string) {
 	checkLLVMToolVersion(lldPath)
 
 	linkArgs := buildWindowsLinkArgs(target, objFiles, outputFile)
-	linkCmd := runLLVMCmd(lldPath, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := runLLVMCmd(lldPath, linkArgs...)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (lld-link): %v\n", err)
 		os.Exit(1)
 	}
@@ -5146,10 +5243,12 @@ func compileAndLinkClang(llFile, target, outputFile string) {
 	clang := findClang()
 	checkClangVersion(clang)
 	tOptLink := time.Now()
-	linkCmd := exec.Command(clang, linkArgs...)
-	detachFromConsole(linkCmd)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
+	if err := runResilient(func() *exec.Cmd {
+		c := exec.Command(clang, linkArgs...)
+		detachFromConsole(c)
+		c.Stderr = os.Stderr
+		return c
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (clang): %v\n", err)
 		os.Exit(1)
 	}

@@ -371,6 +371,30 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackChannelTempWithElemType(result, chElem)
 				}
 			}
+		} else if _, isSig := exprType.(*types.Signature); isSig && result != nil {
+			// T1235: an error-handler result of function type is an owned closure
+			// whose heap env must be freed when the result is discarded. The result
+			// is the ok-value closure (diverging handler) or a phi of ok/recovery
+			// closures — both own a fresh env. Track field 1 (env ptr) as an env
+			// temp so cleanupEnvTemps frees it; a binding claims it via claimEnvTemp
+			// (var-decl RHS), so the bound path stays single-free. Ref-typed results
+			// already returned early above. Guard ident / owner-governed
+			// optional-handler sources whose source optional's own drop owns the env
+			// (double-free) — mirrors the i8* string/vector branches.
+			if !isIdentOptionalUnwrapSource(e.Expr) &&
+				!c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) {
+				// A non-diverging handler whose recovery body is itself a capturing
+				// closure already registered that recovery env as its own env temp
+				// inside genBlockValue (which claims string/heap block results but
+				// NOT env temps). On the recovery path the phi env aliases that temp,
+				// so tracking the phi below would double-free (segfault) at statement
+				// end. Claim the handler temp first (runtime pointer match) so the phi
+				// env temp added below is the single owner; on the ok path the handler
+				// env temp is null (handler block never ran) → the claim is a no-op.
+				c.claimEnvTemp(result)
+				envPtr := c.block.NewExtractValue(result, 1)
+				c.trackEnvTemp(envPtr)
+			}
 		} else {
 			c.trackHeapUserTypeResult(e, result)
 		}

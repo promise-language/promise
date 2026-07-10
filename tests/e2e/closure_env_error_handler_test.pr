@@ -1,0 +1,221 @@
+// T1235: A `? { }` error-handler expression whose result is a closure (function
+// type) must free the closure's heap env when the result is discarded. genExpr's
+// ErrorHandlerExpr case now env-tracks field 1 of the fat-pointer result (the
+// ok-value closure for a diverging handler, or a phi of ok/recovery closures for
+// a non-diverging handler) so cleanupEnvTemps frees it at statement end. A
+// binding claims the temp via claimEnvTemp (single free on the bound path).
+// Ident / owner-governed optional-handler sources are guarded so the source
+// optional's own drop is not raced (double-free) — mirrors the i8* string/vector
+// branches. Sibling of T1160 (`?!`/`?^`/plain-call discard) and T1240 (module
+// getter returning a function type).
+make_adder_failable!(int x)() -> int {
+  return move || -> x + 1;
+}
+
+// 1. Diverging handler, result discarded — the item's repro. The ok-value
+//    closure owns a fresh env that must be freed at statement end (was LEAK).
+probe_error_handler_discard() `test {
+  make_adder_failable(5)? {
+    return;
+  };
+}
+
+// 2. Non-diverging handler recovers with a fresh closure. The discarded result
+//    is a phi of the ok closure and the recovery closure; both incomings own a
+//    fresh env and must be freed when discarded.
+probe_nondiverging_recovery() `test {
+  make_adder_failable(5)? {
+    move || -> 100
+  };
+}
+
+// 3. Bound and called — the var-decl RHS claims the env temp (claimEnvTemp), so
+//    ownership transfers to the binding and the env is freed exactly once at
+//    scope exit (no double-free with the discard tracking).
+probe_bound_and_called() `test {
+  () -> int f = make_adder_failable(5)? {
+    return;
+  };
+  assert(f() == 6, "");
+}
+
+// 4. Bound from a non-diverging recovery, then called (phi both-incomings env
+//    ownership transfers to the binding).
+probe_bound_recovery_called() `test {
+  () -> int f = make_adder_failable(5)? {
+    move || -> 42
+  };
+  assert(f() == 6, "");
+}
+
+// 5. Method returning a closure through a handler, discarded.
+type Adder {
+  int base;
+  make!(this)() -> int {
+    b := this.base;
+    return move || -> b + 1;
+  }
+}
+
+probe_method_handler_discard() `test {
+  a := Adder(base: 10);
+  a.make()? {
+    return;
+  };
+}
+
+// 5b. Non-diverging recovery whose body is a *capturing* closure. genBlockValue
+//     claims string/heap block results but NOT env temps, so the recovery closure
+//     env is left as its own tracked temp; on the recovery path it aliases the phi
+//     env. The discard tracking claims that handler temp first (runtime pointer
+//     match) so the phi env is the single owner — otherwise a double-free segfaults
+//     at statement end. `maybe_fail(true)` forces the recovery path to execute.
+maybe_fail!(bool b)() -> int {
+  if b {
+    raise error("boom");
+  }
+  return move || -> 1;
+}
+
+probe_capturing_recovery_discard() `test {
+  z := 7;
+  maybe_fail(true)? {
+    move || -> z + 100
+  };
+}
+
+probe_capturing_recovery_bound() `test {
+  z := 7;
+  () -> int f = maybe_fail(true)? {
+    move || -> z + 100
+  };
+  assert(f() == 107, "");
+}
+
+// 5c. Typed handler with an else body — both the match arm and the else arm
+//     (the phi's noMatchVal incoming) return capturing closures. claimEnvTemp
+//     runtime-matches against every tracked env temp, so whichever arm executes,
+//     its recovery env is claimed before the phi env is tracked (single free).
+type HandlerErr is error {
+}
+
+maybe_fail_typed!(int mode)() -> int {
+  if mode == 1 {
+    raise HandlerErr(message: "typed");
+  }
+  if mode == 2 {
+    raise error("other");
+  }
+  return move || -> 1;
+}
+
+probe_typed_match_arm_discard() `test {
+  z := 5;
+  maybe_fail_typed(1)? e is HandlerErr {
+    move || -> z + 1
+  } else {
+    move || -> z + 2
+  };
+}
+
+probe_typed_else_arm_discard() `test {
+  z := 5;
+  maybe_fail_typed(2)? e is HandlerErr {
+    move || -> z + 1
+  } else {
+    move || -> z + 2
+  };
+}
+
+// 6. Optional-handler ident source (`o? { }`): the source optional `o` owns the
+//    env via its scope drop binding. The extracted closure is a borrow — the
+//    ident-source guard prevents env-tracking the result so it is not double-
+//    freed with o's drop. Bound and called to exercise the borrow path.
+probe_optional_handler_ident() `test {
+  (() -> int)? o = move || -> 7;
+  f := o? {
+    return;
+  };
+  assert(f() == 7, "");
+}
+
+// 7. Optional-handler owner-governed member source (`holder.field? { }`): the
+//    holder's synthesized drop owns the optional closure field's env. The
+//    isOwnerGovernedMemberOptionalUnwrapSource guard prevents env-tracking the
+//    unwrap result so it is not double-freed with the holder's drop (mirrors the
+//    ident guard in §6, and the i8* string/vector member branches). Exercises the
+//    second guard clause of the T1235 isSig branch — with the guard removed this
+//    double-frees the field env at statement end vs. the holder's drop.
+type ClosureHolder {
+  (() -> int)? handler;
+}
+
+probe_optional_handler_member_discard() `test {
+  h := ClosureHolder(handler: move || -> 9);
+  h.handler? {
+    return;
+  };
+}
+
+probe_optional_handler_member_bound() `test {
+  h := ClosureHolder(handler: move || -> 9);
+  f := h.handler? {
+    return;
+  };
+  assert(f() == 9, "");
+}
+
+// 8. Non-diverging handler whose recovery arm is a *named function reference*
+//    (null/thunk env), not a capturing closure. genBlockValue registers NO env
+//    temp for the recovery arm, so claimEnvTemp is a no-op and the phi env — the
+//    ok-value capturing closure on the ok path, or the recovery thunk's null env
+//    on the failed path — is tracked as the sole owner. The ok-path discard here
+//    owns a fresh capturing env (`base` captured) that must be freed (was LEAK).
+const_seven() int {
+  return 7;
+}
+
+give_fn_capturing!(bool b, int base)() -> int {
+  if b {
+    raise error("boom");
+  }
+  return move || -> base + 1;
+}
+
+probe_named_ref_recovery_ok_discard() `test {
+  give_fn_capturing(false, 5)? {
+    const_seven
+  };
+}
+
+probe_named_ref_recovery_failed_bound() `test {
+  f := give_fn_capturing(true, 5)? {
+    const_seven
+  };
+  assert(f() == 7, "");
+}
+
+// 9. Generic function whose return type is a type parameter substituted to a
+//    function type at the call site. The handler-result type resolves to a
+//    Signature only after c.typeSubst substitution (expr.go ~320), so this
+//    exercises the isSig classification on the post-substitution path. The
+//    discarded closure captures `y`, so its fresh env must be freed (was LEAK);
+//    the bound variant transfers ownership to the binding (single free).
+passthrough![T](T move v) T {
+  return v;
+}
+
+probe_generic_typeparam_handler_discard() `test {
+  y := 9;
+  passthrough[() -> int](move || -> y + 1)? {
+    return;
+  };
+}
+
+probe_generic_typeparam_bound() `test {
+  y := 9;
+  () -> int f = passthrough[() -> int](move || -> y + 1)? {
+    return;
+  };
+  assert(f() == 10, "");
+}

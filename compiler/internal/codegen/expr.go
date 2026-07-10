@@ -7198,6 +7198,7 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 			c.neutralizeForceUnwrapSource(arg.Value)
 			c.claimStringTemp(v)
 			c.claimHeapTemp(v) // B0201: prevent double-free for vector literals passed to ~ params
+			c.claimEnvTemp(v)  // T1237: closure env ownership transfers to the callee's move param
 			// T0522: When the arg is a field-access dup wrapped in an Optional
 			// struct, claimStringTemp/claimHeapTemp can't match — `v` is the
 			// outer struct, but the inner dup pointer is tracked separately via
@@ -11255,7 +11256,8 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 					c.vecElemNeedsEnumDrop(elem) ||
 					c.vecElemNeedsUserTypeDrop(elem) ||
 					c.tupleNeedsDrop(elem) ||
-					c.vecElemNeedsOptionalDrop(elem) {
+					c.vecElemNeedsOptionalDrop(elem) ||
+					isSignatureElem(elem) { // T1237: closure element moved into vector
 					c.clearDropFlag(ident.Name)
 				}
 			}

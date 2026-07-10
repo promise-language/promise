@@ -1,0 +1,192 @@
+// T1237: A capturing closure moved OUT of a `move` parameter must be freed
+// exactly once. The `move` param now owns its heap env (like a closure local),
+// so moving it into a local/field/container/return transfers ownership and the
+// caller no longer double-frees the env.
+// --- repro 1: move param -> local ---
+consume_to_local(() -> int move f) {
+  g := f;
+  assert(g() == 6, "closure moved to local should still work");
+}
+
+move_param_to_local() `test {
+  x := 5;
+  consume_to_local(move || -> x + 1);
+}
+
+// --- repro 2: move param -> field (method with ~this) ---
+zero2() int {
+  return 0;
+}
+
+type Holder2 {
+  () -> int cb;
+  set(~this, () -> int move f) {
+    this.cb = f;
+  }
+}
+
+move_param_to_field_method() `test {
+  x := 5;
+  s := Holder2(cb: zero2);
+  s.set(move || -> x + 1);
+  assert(s.cb() == 6, "closure moved to field via ~this should work");
+}
+
+// --- repro 3: move param -> field (free fn taking S~) ---
+zero3() int {
+  return 0;
+}
+
+type Holder3 {
+  () -> int cb;
+}
+
+setit3(Holder3 ~s, () -> int move f) {
+  s.cb = f;
+}
+
+move_param_to_field_freefn() `test {
+  x := 5;
+  s := Holder3(cb: zero3);
+  setit3(s, move || -> x + 1);
+  assert(s.cb() == 6, "closure moved to field via S~ free fn should work");
+}
+
+// --- repro 4: move param -> container ---
+consume_to_vector(() -> int move f) {
+  v := [f];
+  assert(v[0]() == 6, "closure moved into vector should work");
+}
+
+move_param_to_vector() `test {
+  x := 5;
+  consume_to_vector(move || -> x + 1);
+}
+
+// --- control: dropped-only param (no move-out) ---
+consume_drop(() -> int move f) {
+}
+
+move_param_dropped_only() `test {
+  x := 5;
+  consume_drop(move || -> x + 1);
+}
+
+// --- control: returned param ---
+consume_return(() -> int move f)() -> int {
+  return f;
+}
+
+move_param_returned() `test {
+  x := 5;
+  g := consume_return(move || -> x + 1);
+  assert(g() == 6, "returned closure should work");
+}
+
+// --- control: closure *variable* passed to move param (leak guard) ---
+consume_var(() -> int move f) {
+  g := f;
+  assert(g() == 6, "closure variable arg should transfer without leak");
+}
+
+move_param_variable_arg() `test {
+  x := 5;
+  f := move || -> x + 1;
+  consume_var(move f);
+}
+
+// --- control: local-origin closure into vector literal ---
+local_closure_into_vector() `test {
+  x := 5;
+  f := move || -> x + 1;
+  v := [f];
+  assert(v[0]() == 6, "local closure moved into vector should work");
+}
+
+// --- repro 5: move param -> another move param (chained transfer) ---
+// The relay's param owns the env; passing `move f` to sink transfers ownership
+// via claimEnvTemp at the call site (param-origin source, unlike the
+// local-origin `move_param_variable_arg` above), so neither frame double-frees.
+sink_closure(() -> int move g) {
+  assert(g() == 6, "chained-through closure should still work");
+}
+relay_closure(() -> int move f) {
+  sink_closure(move f);
+}
+move_param_chained() `test {
+  x := 5;
+  relay_closure(move || -> x + 1);
+}
+
+// --- repro 6: conditional move-out (dynamic drop flag) ---
+// The param env is moved to a local only when `take` is true; the env binding's
+// drop flag must be cleared dynamically so exactly one frame frees the env on
+// each path.
+cond_consume(() -> int move f, bool take) {
+  if take {
+    g := f;
+    assert(g() == 6, "conditionally-moved closure should work");
+  }
+}
+move_param_conditional_taken() `test {
+  x := 5;
+  cond_consume(move || -> x + 1, true);
+}
+move_param_conditional_not_taken() `test {
+  x := 5;
+  cond_consume(move || -> x + 1, false);
+}
+
+// --- repro 7: move param -> tuple literal ---
+tup_consume(() -> int move f) {
+  t := (f, 1);
+  (g, n) := t;
+  assert(g() == 6, "closure moved into tuple should work");
+  assert(n == 1, "tuple int survives");
+}
+move_param_to_tuple() `test {
+  x := 5;
+  tup_consume(move || -> x + 1);
+}
+
+// --- repro 8: method move param -> local (defineMethodFunc, non-field) ---
+type UseIt {
+  int v;
+  run(this, () -> int move f) int {
+    g := f;
+    return g();
+  }
+}
+method_move_param_to_local() `test {
+  x := 5;
+  u := UseIt(v: 0);
+  assert(u.run(move || -> x + 1) == 6, "method move param -> local should work");
+}
+
+// --- repro 9: method move param -> return (defineMethodFunc return path) ---
+type PassIt {
+  int v;
+  pass(this, () -> int move f)() -> int {
+    return f;
+  }
+}
+method_move_param_returned() `test {
+  x := 5;
+  p := PassIt(v: 0);
+  g := p.pass(move || -> x + 1);
+  assert(g() == 6, "method move param returned should work");
+}
+
+// --- repro 10: move param -> map value (store + drop; ownership transfer) ---
+// Storing a moved-in closure into a map value transfers ownership; the map's
+// drop frees the env exactly once. (Reading it back out is tracked separately
+// under T1247, which is an independent map-index-read alias bug.)
+map_sink(() -> int move f) {
+  map[string, () -> int] m = {
+    "k": f
+  };
+}
+move_param_into_map() `test {
+  x := 5;
+  map_sink(move || -> x + 1);
+}

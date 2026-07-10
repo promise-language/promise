@@ -6116,6 +6116,13 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
 				c.maybeRegisterStructuralParamFree(p.Name(), alloca, paramType) // T0861
+				// T1237: a closure-typed `move` param owns its heap env — register an
+				// owning bindingFreeEnv (like a closure local) so it is freed at scope
+				// exit. Moving the closure out (into a local/field/container/return)
+				// clears this binding's drop flag, transferring ownership. The caller
+				// transfers ownership by claiming the env temp / clearing the source
+				// var's flag at the call site (genCallArgsWithMutRef).
+				c.maybeRegisterEnvFree(p.Name(), alloca, paramType, nil)
 			}
 
 			// B0191: Register drop binding for variadic parameters.
@@ -7823,6 +7830,13 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
 				c.maybeRegisterStructuralParamFree(p.Name(), alloca, paramType) // T0861
+				// T1237: a closure-typed `move` param owns its heap env — register an
+				// owning bindingFreeEnv (like a closure local) so it is freed at scope
+				// exit. Moving the closure out (into a local/field/container/return)
+				// clears this binding's drop flag, transferring ownership. The caller
+				// transfers ownership by claiming the env temp / clearing the source
+				// var's flag at the call site (genCallArgsWithMutRef).
+				c.maybeRegisterEnvFree(p.Name(), alloca, paramType, nil)
 			}
 
 			// B0191: Register drop binding for variadic parameters.

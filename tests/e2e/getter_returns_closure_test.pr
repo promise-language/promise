@@ -1,0 +1,118 @@
+// T1252: instance analogue of T1251 — a type's getter returning a function type
+// (`get adder() -> int`). The direct-call form `l.adder()` invokes the *returned*
+// closure (a getter is accessed without parens; the `()` calls the closure it
+// yields). This previously panicked in codegen with `no method adder on type Lib`
+// because a getter is not a method. The owned closure env must be freed at the
+// call site (leak check enforces this).
+type Lib {
+  // Capturing closure — the env holds `b`, which must be freed after each call.
+  get adder() -> int {
+    b := 41;
+    return move || -> b + 1;
+  }
+  // Closure taking an argument — exercises coerceIndirectCallArgs.
+  get scaler(int) -> int {
+    factor := 10;
+    return move |int n| -> n * factor;
+  }
+}
+
+// T1252: direct-call form — the panic repro.
+direct_call() `test {
+  l := Lib();
+  assert(l.adder() == 42, "l.adder() should be 42");
+}
+
+// T1252: direct call passing an argument to the returned closure.
+with_arg() `test {
+  l := Lib();
+  assert(l.scaler(5) == 50, "l.scaler(5) should be 50");
+}
+
+// T1252: bare direct-call discard in a loop — each call allocates a fresh
+// capturing env that must be freed at statement end (leak check enforces no
+// accumulation across 100 iterations).
+discard_and_loop() `test {
+  l := Lib();
+  l.adder();
+  int total = 0;
+  for i in 0..100 {
+    total = total + l.adder();
+  }
+  assert(total == 4200, "100 * 42");
+}
+
+// T1252: direct-call result assigned to an int — guards against the
+// `store { i8*, i8* } into i64*` shape error.
+assigned() `test {
+  l := Lib();
+  int x = l.adder();
+  assert(x == 42, "assigned l.adder() should be 42");
+}
+
+// T1252: direct call issued from inside a generic (monomorphized) function body —
+// exercises the `c.typeSubst != nil` substitution arm of the dispatch path.
+call_in_generic[T](T dummy) int {
+  l := Lib();
+  return l.adder();
+}
+
+in_generic() `test {
+  assert(call_in_generic[int](0) == 42, "generic-context adder() should be 42");
+  assert(call_in_generic[bool](true) == 42, "second monomorphization should be 42");
+}
+
+// T1252: virtual dispatch — `Base b = Derived(); b.adder()` reaches
+// genVirtualGetterCall.
+type Base {
+  get adder() -> int {
+    return move || -> 1;
+  }
+}
+
+type Derived is Base {
+  get adder() -> int {
+    b := 41;
+    return move || -> b + 1;
+  }
+}
+
+virtual_dispatch() `test {
+  Base b = Derived();
+  assert(b.adder() == 42, "virtual b.adder() should be 42");
+  Base b2 = Base();
+  assert(b2.adder() == 1, "base b2.adder() should be 1");
+}
+
+// T1252: the workaround forms must still pass (regression guard).
+workarounds() `test {
+  l := Lib();
+  f := l.adder;
+  assert(f() == 42, "bound-first f() should be 42");
+  assert((l.adder)() == 42, "parenthesized (l.adder)() should be 42");
+}
+
+// T1252: bare getter access discarded WITHOUT invoking the returned closure —
+// the owned env is never called yet still must be freed. This is the pure
+// discard path of trackGetterResult's Signature branch (distinct from the
+// invoke-then-free path in discard_and_loop); leak check enforces no
+// accumulation across 50 iterations.
+bare_discard() `test {
+  l := Lib();
+  for i in 0..50 {
+    l.adder;
+  }
+  assert(true, "no leak across 50 discarded getter closures");
+}
+
+// T1252: pass the getter-returned closure directly as a call argument —
+// ownership transfers to the callee (claimEnvTemp releases the temp so the
+// single free happens exactly once), rather than being freed at the call site.
+apply(() -> int f) int {
+  return f();
+}
+
+pass_as_arg() `test {
+  l := Lib();
+  assert(apply(l.adder) == 42, "getter closure passed as arg should be 42");
+}

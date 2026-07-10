@@ -2346,6 +2346,17 @@ func (c *Compiler) genModuleGetterCall(e *ast.MemberExpr, moduleName, propName s
 	if typ := c.info.Types[e]; typ != nil && extractNamed(typ) == types.TypString {
 		c.trackStringTemp(result)
 	}
+	// T1240: A getter returning a function type (`get adder() -> int`) yields an
+	// owned closure whose heap env must be freed. Track its env (field 1 of the
+	// fat pointer) as an env temp so cleanupEnvTemps frees it when the result is
+	// discarded; if it's bound to a variable, claimEnvTemp releases the temp and
+	// maybeRegisterEnvFree takes over ownership (single free either way).
+	if typ := c.info.Types[e]; typ != nil {
+		if _, isSig := typ.(*types.Signature); isSig {
+			envPtr := c.block.NewExtractValue(result, 1)
+			c.trackEnvTemp(envPtr)
+		}
+	}
 	return result
 }
 
@@ -3665,12 +3676,16 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	}
 
 	// Module-level getter: mod.property → call getter function with no args.
-	// Guard: only intercept when sema resolved this as a getter (non-Signature type).
-	// A Signature type means it's a function reference (e.g., auto f = mod.func),
-	// which should NOT be called implicitly.
-	if ident, ok := e.Target.(*ast.IdentExpr); ok {
-		if modName := c.resolveModuleName(ident); modName != "" {
-			if _, isSig := c.info.Types[e].(*types.Signature); !isSig {
+	// Guard: only intercept when sema actually resolved this member as a getter
+	// (recorded in info.ModuleGetters). Keying on sema's resolution rather than
+	// the result type's shape is required because a getter whose return type is
+	// itself a function type (`get adder() -> int`) has a Signature result type
+	// — the old "result is a Signature ⇒ function reference" heuristic
+	// misclassified it, fell through to the type-based path, and panicked on the
+	// module target's nil type (T1240).
+	if _, isGetter := c.info.ModuleGetters[e]; isGetter {
+		if ident, ok := e.Target.(*ast.IdentExpr); ok {
+			if modName := c.resolveModuleName(ident); modName != "" {
 				return c.genModuleGetterCall(e, modName, e.Field)
 			}
 		}

@@ -37,3 +37,32 @@ get empty_value string? `public `doc("Returns none.") {
 add(int a, int b) int `public `doc("Adds two integers.") {
   return a + b;
 }
+
+// A small value-carrying type for the struct-getter coverage below.
+type Pt `public `doc("A 2D point.") {
+  int x;
+  int y;
+}
+
+// Getter returning a vector — must still bind correctly (T1240 regression).
+get nums int[] `public `doc("Returns a vector of ints.") {
+  return[1, 2, 3];
+}
+
+// Getter returning a user struct — must still bind correctly (T1240 regression).
+get origin Pt `public `doc("Returns a point.") {
+  return Pt(x: 4, y: 5);
+}
+
+// Getter whose return type is itself a function type, built from a CAPTURING
+// closure. Reading it (`propmod.adder`) used to panic codegen: the Signature
+// result type was misclassified as a function reference (T1240).
+get adder() -> int `public `doc("Returns a closure capturing a local.") {
+  base := 41;
+  return move || -> base + 1;
+}
+
+// Function-typed getter built from a NON-capturing closure (T1240 regression).
+get plain_fn() -> int `public `doc("Returns a non-capturing closure.") {
+  return || -> 7;
+}

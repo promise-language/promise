@@ -246,6 +246,15 @@ type Info struct {
 	// Codegen emits a variant-data GEP+load. T0993.
 	NarrowedVariantField map[*ast.MemberExpr]*VariantFieldAccess
 
+	// ModuleGetters records module-qualified member accesses (`mod.property`)
+	// that resolve to a module-level getter, so codegen calls the getter
+	// function with no args. Keyed on sema's actual resolution rather than the
+	// shape of the result type — a getter whose return type is itself a
+	// function type (`get adder() -> int`) also has a Signature result type, so
+	// the old "result is a Signature ⇒ function reference" heuristic
+	// misclassified it and codegen panicked (T1240).
+	ModuleGetters map[*ast.MemberExpr]bool
+
 	// FailableExprs records expressions whose evaluation can produce an error
 	// (failable function/method calls, failable constructor calls). Used by
 	// error operators (?, !, ? handler) to validate their inner expression.

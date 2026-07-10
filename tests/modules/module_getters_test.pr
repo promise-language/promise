@@ -59,3 +59,63 @@ test_optional_getter_absent() `test {
   string? val = propmod.empty_value;
   assert(val is absent, "empty_value should be absent");
 }
+
+// T1240: getter returning a vector — must still bind and read correctly.
+test_getter_vector() `test {
+  int[] v = propmod.nums;
+  assert(v.len == 3, "nums should have 3 elements");
+  assert(v[0] == 1 && v[2] == 3, "nums contents");
+}
+
+// T1240: getter returning a user struct — must still bind correctly.
+test_getter_struct() `test {
+  p := propmod.origin;
+  assert(p.x == 4 && p.y == 5, "origin should be (4, 5)");
+}
+
+// T1240: getter whose return type is a function type, built from a CAPTURING
+// closure — bind-and-call. This used to panic codegen.
+test_getter_function_capturing() `test {
+  f := propmod.adder;
+  assert(f() == 42, "adder() should be 42");
+}
+
+// T1240: same getter, result DISCARDED — the owned closure env must be freed
+// (leak check enforces this).
+test_getter_function_capturing_discard() `test {
+  propmod.adder;
+}
+
+// T1240: function-typed getter built from a NON-capturing closure — bind-and-call.
+test_getter_function_plain() `test {
+  f := propmod.plain_fn;
+  assert(f() == 7, "plain_fn() should be 7");
+}
+
+// T1240: non-capturing function-typed getter, result DISCARDED.
+test_getter_function_plain_discard() `test {
+  propmod.plain_fn;
+}
+
+// T1240: repeatedly reading + calling a capturing function-typed getter in a
+// loop. Each read allocates a fresh closure env that must be freed at the end
+// of every iteration — stresses the env-temp ownership path (leak check
+// enforces no accumulation across 100 iterations).
+test_getter_function_loop() `test {
+  int total = 0;
+  for i in 0..100 {
+    f := propmod.adder;
+    total = total + f();
+  }
+  assert(total == 4200, "100 * 42");
+}
+
+// T1240: reassigning a function-typed variable that holds a getter's owned
+// closure. The old capturing env must be freed at the reassignment before the
+// new (non-capturing) closure is stored — single free of each env.
+test_getter_function_reassign() `test {
+  f := propmod.adder;
+  assert(f() == 42, "capturing first");
+  f = propmod.plain_fn;
+  assert(f() == 7, "non-capturing after reassign");
+}

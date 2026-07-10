@@ -3875,6 +3875,11 @@ func (c *Checker) resolveModuleMember(e *ast.MemberExpr, mod *types.Module) type
 	if fn, ok := obj.(*types.Func); ok && fn.IsGetter() {
 		sig, ok := fn.Type().(*types.Signature)
 		if ok && sig != nil {
+			// Record the getter resolution so codegen calls the getter function
+			// rather than inferring from the result type — a getter returning a
+			// function type has a Signature result and would otherwise be
+			// misclassified as a function reference (T1240).
+			c.info.ModuleGetters[e] = true
 			if sig.CanError() {
 				c.info.FailableExprs[e] = true
 			}

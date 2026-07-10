@@ -391,6 +391,12 @@ func (c *Compiler) isGetterCallExpr(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
+	// Module-level getter (mod.property) — returns a fresh owned value, not a
+	// borrow. Recognized via sema's resolution so a getter returning a function
+	// type is also handled (its local owns the closure env) (T1240).
+	if c.info.ModuleGetters[member] {
+		return true
+	}
 	targetType := c.info.Types[member.Target]
 	if c.typeSubst != nil && targetType != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)

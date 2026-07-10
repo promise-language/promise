@@ -1,0 +1,187 @@
+// T1253: instance getter whose return type is a function type
+// (`get adder() -> int` on a user type). This is the instance-path analog of
+// T1251 (module-level getters). Two gaps were closed in codegen:
+//   1. Direct call `l.adder()` used to panic ("no method adder on type Lib") —
+//      the trailing `()` fell through to genMethodCall instead of invoking the
+//      closure the getter yields. Now dispatched indirectly through the fat
+//      pointer, mirroring the module-getter direct-call path.
+//   2. Parenthesized `(l.adder)()` (and bare discard `l.adder();`) leaked the
+//      capturing closure env — the getter's malloc'd env was never registered
+//      as an env temp. trackGetterResult now tracks the fat pointer's env.
+// Every test below relies on the zero-tolerance leak check to enforce that the
+// materialized closure env is freed exactly once.
+type Lib {
+  int dummy;
+  // Getter returning a CAPTURING closure (env is heap-allocated).
+  get adder() -> int `doc("Returns a closure capturing a local.") {
+    int base = 41;
+    return move || -> base + 1;
+  }
+  // Getter returning a NON-capturing closure (env field is null).
+  get plain_fn() -> int `doc("Returns a non-capturing closure.") {
+    return || -> 7;
+  }
+  // Getter returning a closure that scales its argument — exercises the
+  // argument-coercion arm of the indirect dispatch.
+  get scaler(int) -> int `doc("Returns a closure that scales its argument.") {
+    int factor = 10;
+    return move |int x| -> x * factor;
+  }
+  // Getter returning a closure whose RESULT is itself a heap value (string).
+  // A direct call must free two allocations: the closure env AND the returned
+  // string. Exercises the env-temp track alongside the returned heap-value track.
+  get greeter(int) -> string `doc("Returns a closure producing a heap string.") {
+    string prefix = "hi-";
+    return move |int n| -> prefix + n.to_string();
+  }
+}
+
+// Direct-call whose returned closure yields a heap string, result discarded —
+// both the closure env and the produced string must be freed (leak check).
+test_instance_getter_heap_result_discard() `test {
+  l := Lib(dummy: 0);
+  l.greeter(5);
+}
+
+// Same, but the produced string is bound and asserted — result must be correct
+// and the closure env freed exactly once.
+test_instance_getter_heap_result_use() `test {
+  l := Lib(dummy: 0);
+  s := l.greeter(5);
+  assert(s == "hi-5", "greeter(5) should be hi-5");
+}
+
+// Parenthesized form yielding a heap string — env freed, string returned.
+test_instance_getter_heap_result_paren() `test {
+  l := Lib(dummy: 0);
+  s := (l.greeter)(5);
+  assert(s == "hi-5", "(l.greeter)(5) should be hi-5");
+}
+
+// Loop form — each iteration allocates a fresh env and a fresh string; both must
+// be freed every iteration (no accumulation across 50 iterations).
+test_instance_getter_heap_result_loop() `test {
+  l := Lib(dummy: 0);
+  for i in 0..50 {
+    l.greeter(i);
+  }
+}
+
+// Reference form — `f := l.adder; f()`. This already worked pre-fix; kept as a
+// baseline and to confirm it stays leak-free.
+test_instance_getter_reference() `test {
+  l := Lib(dummy: 0);
+  f := l.adder;
+  assert(f() == 42, "adder() should be 42");
+}
+
+// Parenthesized form — `(l.adder)()`. Used to LEAK the capturing env.
+test_instance_getter_paren_call() `test {
+  l := Lib(dummy: 0);
+  assert((l.adder)() == 42, "(l.adder)() should be 42");
+}
+
+// Direct-call form — `l.adder()`. Used to PANIC "no method adder on type Lib".
+test_instance_getter_direct_call() `test {
+  l := Lib(dummy: 0);
+  assert(l.adder() == 42, "l.adder() should be 42");
+}
+
+// Direct-call on the non-capturing getter (env field is null).
+test_instance_getter_direct_call_plain() `test {
+  l := Lib(dummy: 0);
+  assert(l.plain_fn() == 7, "l.plain_fn() should be 7");
+}
+
+// Direct-call result assigned to an int — exercises the fat-pointer→scalar
+// store path (must not store {i8*,i8*} into i64*).
+test_instance_getter_direct_call_assign() `test {
+  l := Lib(dummy: 0);
+  int x = l.adder();
+  assert(x == 42, "assigned l.adder() should be 42");
+}
+
+// Bare direct-call discard — the closure env must be freed even though the int
+// result is unused.
+test_instance_getter_direct_call_discard() `test {
+  l := Lib(dummy: 0);
+  l.adder();
+}
+
+// Bare parenthesized/access discard — reading the getter without calling it must
+// still free the owned closure env.
+test_instance_getter_access_discard() `test {
+  l := Lib(dummy: 0);
+  l.adder;
+}
+
+// Direct-call in a loop — each call allocates a fresh capturing env that must be
+// freed at statement end (no accumulation across 100 iterations).
+test_instance_getter_direct_call_loop() `test {
+  l := Lib(dummy: 0);
+  int total = 0;
+  for i in 0..100 {
+    total = total + l.adder();
+  }
+  assert(total == 4200, "100 * 42");
+}
+
+// Direct-call passing an argument to the returned closure — exercises
+// coerceIndirectCallArgs on the instance path.
+test_instance_getter_direct_call_with_arg() `test {
+  l := Lib(dummy: 0);
+  assert(l.scaler(5) == 50, "l.scaler(5) should be 50");
+  int total = 0;
+  for i in 0..10 {
+    total = total + l.scaler(i);
+  }
+  assert(total == 450, "sum of 10*i for i in 0..10");
+}
+
+// Generic owner type: `Box[T]` with a getter returning a function type. Two
+// monomorphizations exercise the `c.typeSubst` signature-resolution arm of the
+// direct-call path.
+type Box[T] {
+  T val;
+  get make() -> int `doc("Returns a closure capturing a local.") {
+    int base = 41;
+    return move || -> base + 1;
+  }
+}
+
+test_instance_getter_generic_owner() `test {
+  bi := Box[int](val: 7);
+  assert(bi.make() == 42, "Box[int].make() should be 42");
+  assert((bi.make)() == 42, "(Box[int].make)() should be 42");
+  fi := bi.make;
+  assert(fi() == 42, "reference Box[int].make() should be 42");
+
+  bb := Box[bool](val: true);
+  assert(bb.make() == 42, "Box[bool].make() should be 42");
+  bb.make();
+}
+
+// Virtual dispatch: getter declared on a base type and inherited by a child.
+// Calling it through both the concrete and the base-typed variable exercises
+// genVirtualGetterCall → trackGetterResult.
+type Base {
+  int seed;
+  get maker() -> int `doc("Returns a closure capturing a local.") {
+    int base = 41;
+    return move || -> base + 1;
+  }
+}
+
+type Child is Base {
+  int tag;
+}
+
+test_instance_getter_virtual_dispatch() `test {
+  c := Child(seed: 0, tag: 1);
+  assert(c.maker() == 42, "concrete Child.maker() should be 42");
+  assert((c.maker)() == 42, "(Child.maker)() should be 42");
+
+  Base b = Child(seed: 0, tag: 1);
+  assert(b.maker() == 42, "base-typed maker() should be 42");
+  b.maker();
+}

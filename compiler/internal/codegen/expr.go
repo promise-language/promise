@@ -2001,9 +2001,14 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				}
 			}
 		}
-		// Function-typed field call: this._next() where _next is a () -> T? field.
-		// Check if the member name is a field (not a method) on the target type,
-		// and the field type is a Signature — treat as indirect call through the field.
+		// Function-typed field or getter call: `this._next()` where _next is a
+		// () -> T? field, or `l.adder()` where adder is a getter whose return type
+		// is a function type (T1253). In both cases the trailing `()` invokes the
+		// closure the member yields, not a method — dispatch indirectly through the
+		// fat pointer. Without the getter arm the `()` falls through to
+		// genMethodCall and panics with "no method adder on type Lib". genExpr
+		// routes the getter to genGetterCall, which materializes the {fn,env} fat
+		// pointer and (T1253) tracks its env for cleanup at statement end.
 		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
 			memberTargetType := c.info.Types[member.Target]
 			if c.typeSubst != nil {
@@ -2013,16 +2018,27 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				memberTargetType = types.SubstituteSelf(memberTargetType, c.selfSubst.iface, c.selfSubst.concrete)
 			}
 			if named := extractNamed(memberTargetType); named != nil {
-				if named.LookupField(member.Field) != nil {
-					closure := c.genExpr(e.Callee) // genMemberExpr loads the field
+				isField := named.LookupField(member.Field) != nil
+				isGetter := !isField && named.LookupGetter(member.Field) != nil
+				if isField || isGetter {
+					// Resolve the signature under the active mono subst so the
+					// indirect dispatch sees concrete param/result types when the
+					// owner is a generic instance (matches the T1251 module path).
+					resolvedSig := sig
+					if c.typeSubst != nil {
+						if s, ok := types.Substitute(sig, c.typeSubst).(*types.Signature); ok {
+							resolvedSig = s
+						}
+					}
+					closure := c.genExpr(e.Callee) // field load, or getter call
 					var argVals []value.Value
 					for _, arg := range e.Args {
 						argVals = append(argVals, c.genCallArgExpr(arg.Value))
 					}
 					origArgVals := argVals // T0331: pre-coercion for alias check
-					argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
-					result := c.genIndirectCall(closure, sig, argVals)
-					c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
+					argVals = c.coerceIndirectCallArgs(resolvedSig, e.Args, argVals)
+					result := c.genIndirectCall(closure, resolvedSig, argVals)
+					c.emitReturnAliasCheck(result, resolvedSig, e.Args, origArgVals, e) // T0331
 					return result
 				}
 			}
@@ -5717,6 +5733,20 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, targetType types.Type, result value.Value) {
 	if !c.tempTrackingEnabled || result == nil {
 		return
+	}
+	// T1253: An instance getter whose return type is a function type
+	// (`get adder() -> int`) yields an owned closure whose heap env must be
+	// freed. Track its env (field 1 of the {fn,env} fat pointer) as an env temp
+	// so cleanupEnvTemps frees it when the result is discarded (e.g. `(l.adder)()`
+	// or `l.adder();`); if it's bound to a variable, claimEnvTemp releases the
+	// temp and maybeRegisterEnvFree takes over ownership (single free either way).
+	// Mirrors the module-getter arm in genModuleGetterCall (T1240).
+	if typ := c.info.Types[e]; typ != nil {
+		if _, isSig := typ.(*types.Signature); isSig {
+			envPtr := c.block.NewExtractValue(result, 1)
+			c.trackEnvTemp(envPtr)
+			return
+		}
 	}
 	if result.Type() == irtypes.I8Ptr {
 		retType := getter.Sig().Result()

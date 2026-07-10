@@ -2407,22 +2407,30 @@ func (c *Compiler) genModuleGetterCall(e *ast.MemberExpr, moduleName, propName s
 		panic(fmt.Sprintf("codegen: undefined module getter %s.%s", moduleName, propName))
 	}
 	result := c.block.NewCall(fn)
-	// T0137: Track module getter results as string temps so they're cleaned up
-	// when used as temporaries (not assigned to a variable).
-	if typ := c.info.Types[e]; typ != nil && extractNamed(typ) == types.TypString {
-		c.trackStringTemp(result)
+	retType := c.info.Types[e]
+	if c.typeSubst != nil && retType != nil {
+		retType = types.Substitute(retType, c.typeSubst)
+	}
+	if c.selfSubst != nil && retType != nil {
+		retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 	// T1240: A getter returning a function type (`get adder() -> int`) yields an
 	// owned closure whose heap env must be freed. Track its env (field 1 of the
 	// fat pointer) as an env temp so cleanupEnvTemps frees it when the result is
 	// discarded; if it's bound to a variable, claimEnvTemp releases the temp and
 	// maybeRegisterEnvFree takes over ownership (single free either way).
-	if typ := c.info.Types[e]; typ != nil {
-		if _, isSig := typ.(*types.Signature); isSig {
-			envPtr := c.block.NewExtractValue(result, 1)
-			c.trackEnvTemp(envPtr)
-		}
+	if _, isSig := retType.(*types.Signature); isSig {
+		envPtr := c.block.NewExtractValue(result, 1)
+		c.trackEnvTemp(envPtr)
+		return result
 	}
+	// T0137/T0486/T1250: track every heap-owning result kind (string, vector,
+	// channel, Arc/Weak/Mutex/Task, heap user type) so a discarded temporary is
+	// freed at statement end; the binding/assignment path claims it (claimStringTemp
+	// / claimHeapTemp) so a single owner frees it either way. Shares the dispatch
+	// with the instance-getter path (trackGetterResult) — the guards in the tracked
+	// helpers make it a no-op for value/copy/static-container results.
+	c.trackGetterResultByType(e, retType, result)
 	return result
 }
 
@@ -5748,23 +5756,38 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 			return
 		}
 	}
+	retType := getter.Sig().Result()
+	// Owner-type subst: when the getter's owner is a generic instance
+	// (e.g. ArcCell[int]), resolve the owner's TypeParams against the
+	// instance's TypeArgs before applying any further substitution.
+	// Without this, Ref[T] from ArcCell[T].fresh's signature stays as
+	// Ref[T] and getOrCreateArcDrop(T) would produce an Ref[T].drop fn
+	// that doesn't know T's concrete layout/inner-drop.
+	if ownerSubst := c.buildOwnerTypeArgSubst(targetType); ownerSubst != nil && retType != nil {
+		retType = types.Substitute(retType, ownerSubst)
+	}
+	if c.typeSubst != nil && retType != nil {
+		retType = types.Substitute(retType, c.typeSubst)
+	}
+	if c.selfSubst != nil && retType != nil {
+		retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	c.trackGetterResultByType(e, retType, result)
+}
+
+// trackGetterResultByType registers a getter result value for statement-end
+// cleanup based on its (already substitution-resolved) result type, covering
+// every heap-owning result kind that is passed by value: string, vector,
+// channel, Arc/Weak/Mutex/Task, and heap user type. Callers must handle
+// Signature (closure-env) results themselves before calling. Shared by
+// trackGetterResult (instance getters) and genModuleGetterCall (module getters)
+// so both free discarded temporaries of every kind identically — without this,
+// a module getter returning a heap vector/channel/Arc used as a bare temporary
+// leaked (only its heap-user-type case was covered by the original T1250 fix).
+// The binding/assignment path claims the temp (claimStringTemp for stmtTemps,
+// claimHeapTemp for heap-user-type instances), so a single owner frees it.
+func (c *Compiler) trackGetterResultByType(e *ast.MemberExpr, retType types.Type, result value.Value) {
 	if result.Type() == irtypes.I8Ptr {
-		retType := getter.Sig().Result()
-		// Owner-type subst: when the getter's owner is a generic instance
-		// (e.g. ArcCell[int]), resolve the owner's TypeParams against the
-		// instance's TypeArgs before applying any further substitution.
-		// Without this, Ref[T] from ArcCell[T].fresh's signature stays as
-		// Ref[T] and getOrCreateArcDrop(T) would produce an Ref[T].drop fn
-		// that doesn't know T's concrete layout/inner-drop.
-		if ownerSubst := c.buildOwnerTypeArgSubst(targetType); ownerSubst != nil && retType != nil {
-			retType = types.Substitute(retType, ownerSubst)
-		}
-		if c.typeSubst != nil && retType != nil {
-			retType = types.Substitute(retType, c.typeSubst)
-		}
-		if c.selfSubst != nil && retType != nil {
-			retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
-		}
 		if retType == nil {
 			return
 		}

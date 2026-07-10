@@ -73,6 +73,83 @@ test_getter_struct() `test {
   assert(p.x == 4 && p.y == 5, "origin should be (4, 5)");
 }
 
+// T1250: getter returning a heap user type used as a BARE TEMPORARY (result not
+// bound to a variable). The owned instance allocation must be freed at statement
+// end — this leaked before the fix (leak check enforces this).
+test_getter_struct_temp() `test {
+  assert(propmod.origin.x == 4, "origin.x should be 4");
+}
+
+// T1250: bare-discard form — the heap instance the getter allocates must be freed
+// even though nothing reads it (leak check enforces this).
+test_getter_struct_discard() `test {
+  propmod.origin;
+}
+
+// T1250: temporary heap-user-type getter result read in a loop — each iteration
+// allocates a fresh instance that must be freed at statement end (leak check
+// enforces no accumulation across 100 iterations).
+test_getter_struct_temp_loop() `test {
+  int total = 0;
+  for i in 0..100 {
+    total = total + propmod.origin.x;
+  }
+  assert(total == 400, "100 * 4");
+}
+
+// T1250: module getter returning a HEAP-built vector used as a bare temporary
+// (result not bound). The vector's heap buffer must be freed at statement end.
+// Before the shared getter-result tracking, the module-getter path only handled
+// heap user types, so this leaked (leak check enforces this).
+test_getter_dynvec_temp() `test {
+  assert(propmod.built_nums.len == 3, "built_nums should have 3 elements");
+}
+
+// T1250: bare-discard form of the heap-vector getter — buffer must be freed even
+// though nothing reads it.
+test_getter_dynvec_discard() `test {
+  propmod.built_nums;
+}
+
+// T1250: module getter returning a buffered channel used as a bare temporary.
+// The channel's heap allocation (and any buffered item) must be freed at
+// statement end. Before the shared getter-result tracking this leaked.
+test_getter_channel_temp() `test {
+  if v := <-propmod.numbers {
+    assert(v == 99, "channel should yield 99");
+  }
+}
+
+// T1250: bare-discard form of the channel getter — the channel and its one
+// buffered item must be freed even though nothing receives from it.
+test_getter_channel_discard() `test {
+  propmod.numbers;
+}
+
+// T0137/T1250: module getter returning a HEAP string used as a bare temporary
+// (result not bound). The heap-allocated buffer must be freed at statement end —
+// exercises the string arm of the shared getter-result tracking on the module
+// path (leak check enforces this).
+test_getter_string_temp() `test {
+  assert(propmod.built_greeting.len == 15, "built_greeting should be 15 chars");
+}
+
+// T0137/T1250: bare-discard form of the heap-string getter — buffer must be freed
+// even though nothing reads it.
+test_getter_string_discard() `test {
+  propmod.built_greeting;
+}
+
+// T0137/T1250: heap-string getter result read in a loop — each iteration allocates
+// a fresh string that must be freed at statement end (no accumulation over 100).
+test_getter_string_temp_loop() `test {
+  int total = 0;
+  for i in 0..100 {
+    total = total + propmod.built_greeting.len;
+  }
+  assert(total == 1500, "100 * 15");
+}
+
 // T1240: getter whose return type is a function type, built from a CAPTURING
 // closure — bind-and-call. This used to panic codegen.
 test_getter_function_capturing() `test {

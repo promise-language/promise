@@ -54,6 +54,33 @@ get origin Pt `public `doc("Returns a point.") {
   return Pt(x: 4, y: 5);
 }
 
+// Getter returning a HEAP string (concatenation, not a .rodata literal) — used
+// as a bare temporary this exercises the string arm of the shared getter-result
+// tracking on the module-getter path (T0137/T1250). A literal string would carry
+// the .rodata flag and free to a no-op, so the concatenation forces a real malloc.
+get built_greeting string `public `doc("Returns a heap-built greeting string.") {
+  return "hello " + "from " + "heap";
+}
+
+// Getter returning a HEAP vector (built dynamically, not a static literal) —
+// used as a bare temporary this leaked before T1250 (the module-getter path
+// only tracked heap user types, not vectors/channels). Regression guard.
+get built_nums int[] `public `doc("Returns a heap-built vector of ints.") {
+  v := [10];
+  v.push(20);
+  v.push(30);
+  return v;
+}
+
+// Getter returning a buffered channel — used as a bare temporary this leaked
+// before T1250 (module-getter path did not track channel results). Regression
+// guard for the Channel arm of the shared getter-result tracking.
+get numbers channel[int] `public `doc("Returns a buffered channel with one value.") {
+  c := channel[int](2);
+  c.send(99);
+  return c;
+}
+
 // Getter whose return type is itself a function type, built from a CAPTURING
 // closure. Reading it (`propmod.adder`) used to panic codegen: the Signature
 // result type was misclassified as a function reference (T1240).

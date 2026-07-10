@@ -1,0 +1,85 @@
+// T1232: A user-defined generic type/enum instantiated with a function type as a
+// type argument (Box[() -> int], Pair[int, () -> int], EBox[() -> int]) claims
+// the closure's heap env at construction but the monomorphized drop function
+// never freed it — 1 allocation leaked per stored capturing closure. The fix
+// classifies a TypeParam that resolves to a *types.Signature as droppable so the
+// instance's drop function is synthesized and the env is freed. Leak enforcement
+// (a leak = test failure) guards the fix.
+make_adder(int x)() -> int {
+  return move || -> x + 1;
+}
+
+type CBox[T] {
+  T v;
+}
+type Pair[A, B] {
+  A a;
+  B b;
+}
+enum EBox[T] {
+  Some(T v), None,
+}
+// Generic subtype inheriting the closure-typed field from a generic parent.
+type SubBox[T] is CBox[T] {
+}
+
+// Capturing closure stored in a generic named-type field.
+probe_generic_named() `test {
+  b := CBox[() -> int](v: make_adder(6));
+  assert(b.v() == 7, "generic named closure field");
+}
+
+// Capturing closure in the second slot of a two-param generic type; a non-closure
+// value in the first slot exercises the mixed field walk.
+probe_generic_pair() `test {
+  p := Pair[int, () -> int](a: 1, b: make_adder(6));
+  assert(p.a == 1, "pair non-closure slot");
+  assert(p.b() == 7, "pair closure slot");
+}
+
+// Capturing closure carried by a generic enum variant payload; the drop is
+// synthesized on the enum instance and dispatched through the variant tag.
+probe_generic_enum() `test {
+  e := EBox[() -> int].Some(v: make_adder(6));
+  match e {
+    EBox[() -> int].Some(v) => assert(v() == 7, "enum closure payload"),
+    EBox[() -> int].None => assert(false, "unexpected None"),
+  }
+}
+
+// A NON-capturing closure has a null env; the synth drop is still generated
+// (Signature classifies as droppable) but the field drop must null-check and
+// skip the free — no crash, no over-free, no leak.
+probe_generic_named_noncapture() `test {
+  b := CBox[() -> int](v: || -> 42);
+  assert(b.v() == 42, "non-capturing closure field");
+}
+
+// Inherited generic closure field: SubBox[() -> int] is CBox[() -> int]. The
+// droppable field lives on the generic parent, so monoInstNeedsSynthDrop must
+// resolve the parent's TypeParam (mergeParentSubst) to reach the Signature.
+probe_generic_inherited() `test {
+  s := SubBox[() -> int](v: make_adder(6));
+  assert(s.v() == 7, "inherited generic closure field");
+}
+
+// Closure nested inside a TUPLE type argument (CBox[(int, () -> int)]): the box
+// retains the tuple through scope exit, so its synth drop must walk the tuple
+// and free the closure env — reaches the Signature branch via tuple recursion.
+probe_generic_tuple_typearg() `test {
+  b := CBox[(int, () -> int)](v: (1, make_adder(6)));
+  assert(true, "box owns tuple-with-closure through drop");
+}
+
+// Same tuple-in-type-arg reach for a generic enum variant payload.
+probe_generic_enum_tuple_typearg() `test {
+  e := EBox[(int, () -> int)].Some(v: (2, make_adder(6)));
+  match e {
+    EBox[(int, () -> int)].Some(v) => {
+      (n, f) := v;
+      assert(n == 2, "enum tuple slot0");
+      assert(f() == 7, "enum tuple closure slot");
+    },
+    EBox[(int, () -> int)].None => assert(false, "unexpected None"),
+  }
+}

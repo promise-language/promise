@@ -1950,6 +1950,16 @@ func monoTypeHasDroppable(typ types.Type) bool {
 	if opt, ok := typ.(*types.Optional); ok {
 		return monoTypeHasDroppable(opt.Elem())
 	}
+	// T1232: A closure (function value) field owns a heap env struct (+ captured
+	// values) that must be deep-dropped. When a TypeParam resolves to a
+	// *types.Signature (e.g. Box[() -> int]), the synth-drop gate must classify it
+	// as droppable so the instance's drop function is generated — the field walk
+	// (emitFuncFieldEnvFree / emitVariantFieldDrop's Signature case) then frees the
+	// env. Matches variantFieldNeedsDrop's unconditional Signature case: a
+	// no-capture closure has a null env, which the field drop null-checks and skips.
+	if _, ok := typ.(*types.Signature); ok {
+		return true
+	}
 	if fNamed := extractNamed(typ); fNamed != nil {
 		if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel ||
 			fNamed == types.TypMutex || fNamed == types.TypMutexGuard {

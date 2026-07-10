@@ -585,6 +585,7 @@ type stmtTemp struct {
 	dropFunc    *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
 	elemType    types.Type     // T0109: vector element type for string-element drops (nil for non-vectors)
 	arrType     *types.Array   // T1181: fixed-array temp — alloca holds [N x T] storage; cleanup walks elements & drops each (dropFunc nil)
+	tupleType   *types.Tuple   // T1233: tuple temp — alloca holds the tuple aggregate; cleanup walks fields via emitVariantFieldDrop & drops each droppable one (dropFunc nil)
 	perPathFlag bool           // T1208: dropFlag holds a genuine PER-PATH i1 (a flagPhi from an elvis/merge result — owned on one path, borrowed on another), not a compile-time constant. When true, an enclosing merge phi must thread this temp's live flag rather than a whole-arm constant, else it would drop a borrowed value on the borrowed path (use-after-free)
 }
 
@@ -6127,19 +6128,13 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
 			}
 
-			// T0406: Plain tuple-by-value params with droppable fields. Tuple
-			// construction at the call site clears source drop flags (the
-			// tuple takes ownership of its elements); without a callee-side
-			// drop binding, the heap data is orphaned. Treat as ~ for cleanup.
-			if p.Ref() != types.RefMut && !p.IsVariadic() {
-				paramType := p.Type()
-				if c.typeSubst != nil {
-					paramType = types.Substitute(paramType, c.typeSubst)
-				}
-				if _, isTuple := paramType.(*types.Tuple); isTuple {
-					c.maybeRegisterDrop(p.Name(), alloca, paramType)
-				}
-			}
+			// T1233: A plain (non-`move`) tuple-by-value param BORROWS — the
+			// ownership checker permits the caller to reuse the tuple after the
+			// call, so a callee-side drop here would double-free (a hard crash for
+			// a closure env, silent UB for strings/vectors). The caller owns the
+			// tuple: an owned tuple variable via its own bindingDropTuple, a tuple
+			// literal/temp via a caller-side statement temp (registerTupleStmtTemp
+			// in genCallArgsWithMutRef). Supersedes T0406's callee-drop.
 
 			// T1194: a borrow-by-default heap param reassigned to a fresh owned
 			// value inside the body needs a function-scoped drop obligation (flag
@@ -6666,13 +6661,8 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
 				}
 
-				// T0406: Plain tuple-by-value params with droppable fields.
-				// See defineFunc for rationale.
-				if sp.Ref() != types.RefMut && !sp.IsVariadic() {
-					if _, isTuple := sp.Type().(*types.Tuple); isTuple {
-						c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
-					}
-				}
+				// T1233: plain tuple-by-value params borrow — the caller owns and
+				// drops the tuple (see defineFunc). Supersedes T0406's callee-drop.
 
 				// T1194: borrow-by-default heap param reassigned to a fresh owned
 				// value inside the body (no-op unless reassigned).
@@ -6906,15 +6896,10 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 						}
 					}
 
-					// T0406: Plain tuple-by-value params with droppable fields.
-					// See defineFunc for rationale. Guarded with md.Name != "new"
-					// to avoid double-registering on Named-receiver `new` methods
-					// where T0322 already handles tuple params.
-					if md.Name != "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
-						if _, isTuple := p.Type().(*types.Tuple); isTuple {
-							c.maybeRegisterDrop(p.Name(), alloca, p.Type())
-						}
-					}
+					// T1233: plain tuple-by-value params borrow — the caller owns
+					// and drops the tuple (see defineFunc). Supersedes T0406's
+					// callee-drop. (`new` constructor params keep their T0322/T0135
+					// clear-and-drop semantics above.)
 
 					// T1194: borrow-by-default heap param reassigned to a fresh
 					// owned value inside the body (no-op unless reassigned).
@@ -7880,19 +7865,10 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 				}
 			}
 
-			// T0406: Plain tuple-by-value params with droppable fields.
-			// See defineFunc for rationale. Guarded with md.Name != "new"
-			// to avoid double-registering on Named-receiver `new` methods
-			// where T0322 already handles tuple params.
-			if md.Name != "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
-				paramType := p.Type()
-				if c.typeSubst != nil {
-					paramType = types.Substitute(paramType, c.typeSubst)
-				}
-				if _, isTuple := paramType.(*types.Tuple); isTuple {
-					c.maybeRegisterDrop(p.Name(), alloca, paramType)
-				}
-			}
+			// T1233: plain tuple-by-value params borrow — the caller owns and
+			// drops the tuple (see defineFunc). Supersedes T0406's callee-drop.
+			// (`new` constructor params keep their T0322/T0135 clear-and-drop
+			// semantics above.)
 
 			// T1194: borrow-by-default heap param reassigned to a fresh owned
 			// value inside the body (no-op unless reassigned).

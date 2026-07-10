@@ -1014,3 +1014,361 @@ test_t0481_discard_tuple_literal_source() `test {
   (_, n) := ("literal".to_string(), 17);
   assert(n == 17, "literal-source destructure with discard");
 }
+
+// ===========================================================================
+// T1233: A tuple holding heap-owning fields (a capturing closure, a heap
+// string, a vector) passed by value to a PLAIN (borrow) tuple param must be
+// owned by the CALLER — the callee borrows it. Before the fix a plain tuple
+// param registered a callee-side drop (T0406) while the ownership checker still
+// let the caller reuse/own the tuple, so the two co-owned it: a double-free
+// (hard crash for a closure env, silent UB for strings/vectors). Also, a
+// capturing closure destructured out of an owned tuple never got an env-free
+// binding, leaking its heap env. These tests lock in single-free + zero-leak.
+// ===========================================================================
+
+_t1233_make_adder(int x)() -> int {
+  return move || -> x + 1;
+}
+_t1233_make_str_pair()(string, int) {
+  return ("t1233" + " heap", 1);
+}
+_t1233_make_vec_pair()(int[], int) {
+  return ([1, 2, 3], 1);
+}
+_t1233_take_closure_tuple((() -> int, int) t) {
+}
+_t1233_take_str_tuple((string, int) t) {
+}
+_t1233_take_vec_tuple((int[], int) t) {
+}
+
+// (a) Destructure a closure out of an owned tuple — the env must be freed once
+// via the destructured local's bindingFreeEnv (was a leak).
+_t1233_destructure_closure() `test {
+  (() -> int, int) t = (_t1233_make_adder(6), 1);
+  (g, n) := t;
+  assert(g() == 7, "destructured closure returns x+1");
+  assert(n == 1, "int element kept");
+}
+
+// (d) Pass an owned closure-tuple VARIABLE to a plain param — the callee
+// borrows, the caller's own drop frees it once (was a double-free crash).
+_t1233_pass_closure_var() `test {
+  (() -> int, int) t = (_t1233_make_adder(6), 1);
+  _t1233_take_closure_tuple(t);
+}
+
+// (e) Reuse an owned closure-tuple after passing it to a borrow param — the
+// ownership model permits reuse; a callee-drop would have crashed on the 2nd
+// pass (env already freed).
+_t1233_reuse_closure_var() `test {
+  (() -> int, int) t = (_t1233_make_adder(6), 1);
+  _t1233_take_closure_tuple(t);
+  _t1233_take_closure_tuple(t);
+}
+
+// (f) Pass a closure-tuple LITERAL to a plain param — no owning caller variable,
+// so a caller-side statement temp frees the env once after the call returns.
+_t1233_pass_closure_literal() `test {
+  _t1233_take_closure_tuple((_t1233_make_adder(6), 1));
+}
+
+// A borrowed closure-tuple param destructured INSIDE the callee must NOT get an
+// owning env-free — the caller owns the tuple. Proves Stage 1 fires only for
+// genuinely-owned sources.
+_t1233_destructure_borrowed((() -> int, int) t) {
+  (g, n) := t;
+  assert(g() == 7, "borrowed destructure reads closure");
+  assert(n == 1, "int kept");
+}
+_t1233_borrowed_destructure_no_double_free() `test {
+  (() -> int, int) t = (_t1233_make_adder(6), 1);
+  _t1233_destructure_borrowed(t);
+}
+
+// A closure-tuple moved into a `move` (consume) param — the callee owns and
+// drops it exactly once (the RefMut path keeps callee-drop).
+_t1233_consume_closure_tuple((() -> int, int) move t) {
+  (g, n) := t;
+  assert(g() == 7, "consumed closure reads");
+  assert(n == 1, "int kept");
+}
+_t1233_move_consume() `test {
+  (() -> int, int) t = (_t1233_make_adder(6), 1);
+  _t1233_consume_closure_tuple(move t);
+}
+
+// String analogs of d/e/f — previously a silent double-free (glibc-tolerated);
+// now provably single-free under the borrow model.
+_t1233_str_reuse_var() `test {
+  (string, int) t = _t1233_make_str_pair();
+  _t1233_take_str_tuple(t);
+  _t1233_take_str_tuple(t);
+}
+_t1233_str_literal() `test {
+  _t1233_take_str_tuple(("t1233" + " lit", 1));
+}
+_t1233_str_call_result() `test {
+  _t1233_take_str_tuple(_t1233_make_str_pair());
+}
+
+// Vector analogs of d/e/f.
+_t1233_vec_reuse_var() `test {
+  (int[], int) t = _t1233_make_vec_pair();
+  _t1233_take_vec_tuple(t);
+  _t1233_take_vec_tuple(t);
+}
+_t1233_vec_literal() `test {
+  _t1233_take_vec_tuple(([9, 8, 7], 1));
+}
+
+// Loop with a fresh droppable tuple literal each iteration — the caller temp's
+// drop flag must be reset after each drop so a reused temp isn't double-freed.
+_t1233_loop_literal() `test {
+  for i in 0..3 {
+    _t1233_take_str_tuple(("iter" + " str", i));
+  }
+  assert(true, "loop of droppable tuple literals — no double-free");
+}
+
+// Nested tuple containing a closure-tuple, passed as a literal.
+_t1233_take_nested(((() -> int, int), int) t) {
+}
+_t1233_nested_literal() `test {
+  _t1233_take_nested(((_t1233_make_adder(6), 1), 2));
+}
+
+// Bare droppable-tuple expression statements (discarded) — genTupleLit claims
+// each element into the aggregate, so the discarded aggregate must be dropped
+// field-wise at statement end (was a leak).
+_t1233_bare_str_literal() `test {
+  ("bare" + " str", 1);
+  assert(true, "bare tuple literal statement — no leak");
+}
+_t1233_bare_call_result() `test {
+  _t1233_make_str_pair();
+  assert(true, "bare tuple-returning call statement — no leak");
+}
+_t1233_bare_closure_literal() `test {
+  (_t1233_make_adder(6), 1);
+  assert(true, "bare closure-tuple literal statement — no leak");
+}
+
+// Bare-DISCARD of a BORROWED tuple (mirror of the arg-passing borrow cases): a
+// discarded struct-field read (`h.t;`) and a discarded owned-variable statement
+// (`v;`) are borrows — dropDiscardedTuple's tupleArgIsCallerOwnedTemp returns
+// false, so NO caller temp is registered. A stray drop here would double-free
+// against the holder's field drop / the variable's own bindingDropTuple. The
+// owner stays live and usable afterward. Exercises dropDiscardedTuple's borrow
+// early-return arm, which the bare-literal discards above do not reach.
+_t1233_bare_field_discard_borrow() `test {
+  h := _T1233Holder(t: ("c" + "d", 2));
+  h.t;
+  (s, n) := h.t;
+  assert(s == "cd", "holder still owns the tuple field after bare discard");
+  assert(n == 2, "int element intact");
+}
+_t1233_bare_ident_discard_borrow() `test {
+  (string, int) v = ("e" + "f", 3);
+  v;
+  (s, n) := v;
+  assert(s == "ef", "variable still owns the tuple after bare discard");
+  assert(n == 3, "int element intact");
+}
+
+// A generator's by-value tuple param is copied into its coroutine frame and read
+// LAZILY during iteration — a lifetime that outlives the call statement. A tuple
+// TEMP (literal / call result with heap fields) passed to a generator must NOT be
+// dropped at statement end (a use-after-free — the generator reads freed heap
+// during iteration); it gets a SCOPE-level owned drop instead. These tests read
+// the tuple's HEAP fields (string concat, closure call) across iteration so a
+// premature free manifests (corrupted length → OOM, or a freed env). Regression
+// guards: the modified generator test read only the int field and missed this.
+_t1233_gen_str((string, int) t) stream[string] {
+  (s, n) := t;
+  for i in 0..n {
+    yield s + "!";
+  }
+}
+_t1233_gen_closure((() -> int, int) t) stream[int] {
+  (g, n) := t;
+  for i in 0..n {
+    yield g();
+  }
+}
+
+// (g1) String-tuple LITERAL with a heap concat, passed to a generator, read each
+// iteration. Statement-end drop would free the string before iteration → UAF.
+_t1233_gen_string_literal() `test {
+  out := [""];
+  for x in _t1233_gen_str(("t1233" + " heap", 3)) {
+    out.push(move x);
+  }
+  assert(out.len == 4, "3 yields + initial");
+  assert(out[1] == "t1233 heap!", "heap string valid during iteration");
+  assert(out[3] == "t1233 heap!", "still valid on last iteration");
+}
+
+// (g2) String-tuple CALL RESULT passed to a generator — same lifetime hazard.
+_t1233_gen_string_call() `test {
+  out := [""];
+  for x in _t1233_gen_str(_t1233_make_str_pair()) {
+    out.push(move x);
+  }
+  assert(out[1] == "t1233 heap!", "call-result heap string valid during iteration");
+}
+
+// (g3) Closure-tuple LITERAL passed to a generator, invoked each iteration. The
+// heap env must survive until the stream is exhausted (scope-level drop), not be
+// freed at statement end.
+_t1233_gen_closure_literal() `test {
+  sum := 0;
+  for x in _t1233_gen_closure((_t1233_make_adder(6), 3)) {
+    sum += x;
+  }
+  assert(sum == 21, "3 * (6+1)");
+}
+
+// (g4) Owned closure-tuple VARIABLE passed to a generator — a borrow: the caller's
+// own scope-level drop keeps it alive; the generator must not also drop (would be
+// a double-free crash for the env). The variable stays usable afterward.
+_t1233_gen_closure_var() `test {
+  (() -> int, int) t = (_t1233_make_adder(6), 2);
+  sum := 0;
+  for x in _t1233_gen_closure(t) {
+    sum += x;
+  }
+  (g, n) := t;
+  assert(sum == 14, "2 * 7");
+  assert(g() == 7, "variable still usable after generator borrow");
+}
+
+// An owned tuple is also produced (as a FRESH value the caller must free) by a
+// getter and by a user-defined non-native `[]` operator. Passing such a result
+// directly to a plain (borrow) tuple param is a caller temp — not a borrow like
+// a plain field read or a native container index — so the caller drops it once
+// after the call. Without the owned-return exemption in
+// tupleArgIsCallerOwnedTemp these leak (the callee no longer drops, T1233).
+type _T1233Box {
+  string s;
+  // user-defined index returns a fresh owned tuple
+  [](int i)(string, int) {
+    return (this.s + "!", i);
+  }
+  // getter returns a fresh owned tuple
+  get pair(string, int) {
+    return (this.s + "?", 5);
+  }
+  // method returning a two-string tuple (LLVM {i8*,i8*})
+  ss(int i)(string, string) {
+    return (this.s + "a", this.s + "b");
+  }
+}
+_t1233_take_si((string, int) t) {
+}
+_t1233_take_ss((string, string) t) {
+}
+_t1233_user_index_owned_arg() `test {
+  b := _T1233Box(s: "hi");
+  _t1233_take_si(b[0]);
+}
+_t1233_getter_owned_arg() `test {
+  b := _T1233Box(s: "hi");
+  _t1233_take_si(b.pair);
+}
+// Two-string tuple result has LLVM type {i8*,i8*} — the same shape as a heap
+// user-type value struct. Confirms the caller tuple temp does not double-free
+// against any stray heap-value tracking of the operator/getter result.
+_t1233_two_string_owned_arg() `test {
+  b := _T1233Box(s: "hi");
+  _t1233_take_ss(b.ss(0));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage completion for the tupleArgIsCallerOwnedTemp BORROW branches and the
+// error-path temp cleanup arm. The tests above only exercised the OWNED-temp
+// branches (literal/call default, user `[]`, getter). These lock in the mirror
+// cases where the tuple is a genuine BORROW (no caller temp → the container /
+// owner frees it once) plus the failable error path.
+// ---------------------------------------------------------------------------
+
+// A native container index (`v[i]`) of a tuple aliases storage the vector owns —
+// isUserIndexExpr is false, so tupleArgIsCallerOwnedTemp returns false and NO
+// caller temp is registered. A stray caller drop here would double-free against
+// the vector's element walk. Passing (no double-free) + the vector still owning
+// the live element afterward proves the borrow path.
+_t1233_native_index_borrow() `test {
+  (string, int)[] v = [("a" + "b", 1)];
+  _t1233_take_si(v[0]);
+  (s, n) := v[0];
+  assert(s == "ab", "vector still owns the indexed tuple element");
+  assert(n == 1, "int element intact");
+}
+
+// A plain struct field read (`h.t`) of a tuple is a borrow — isGetterCallExpr is
+// false, so no caller temp. A stray caller drop would double-free against the
+// holder's field drop. The holder still owns the field after the call.
+type _T1233Holder {
+  (string, int) t;
+}
+_t1233_field_read_borrow() `test {
+  h := _T1233Holder(t: ("c" + "d", 2));
+  _t1233_take_si(h.t);
+  (s, n) := h.t;
+  assert(s == "cd", "holder still owns the tuple field");
+  assert(n == 2, "int element intact");
+}
+
+// A droppable tuple-literal temp passed to a FAILABLE callee that raises: on the
+// error-propagation path the caller must still drop the temp exactly once
+// (emitStmtTempCleanupForErrorPath's tuple arm, not just cleanupStmtTemps). The
+// non-error path is covered by the cases above; this exercises the error arm so
+// the heap string in the arg isn't leaked when the call unwinds.
+_t1233_take_si_fail!((string, int) t) int {
+  raise error(message: "t1233 boom");
+}
+_t1233_prop_through!() int {
+  return _t1233_take_si_fail(("err" + " path", 1));
+}
+_t1233_error_path_temp_drop() `test {
+  _t1233_prop_through()? e {
+    assert(e.message == "t1233 boom", "error propagated through failable tuple-arg call");
+    return;
+  };
+  assert(false, "failable call should have raised");
+}
+
+// ---------------------------------------------------------------------------
+// Monomorphized (generic) tuple temps. Inside a generic body the tuple type is
+// `(T, int)` with a TypeParam field; registerTupleStmtTemp / emitTupleTempDrop /
+// dropDiscardedTuple all run with c.typeSubst active, so the tuple type must be
+// substituted (T → the concrete droppable type) before the field-wise drop walk.
+// The non-generic cases above never exercise that substitution branch. These
+// instantiate the same generic with two different heap element types so the
+// per-instance drop walk (string vs vector) is monomorphized and leak-checked.
+// ---------------------------------------------------------------------------
+_t1233_gwrap[T]((T, int) t) {
+}
+// generic caller: builds a `(T, int)` tuple LITERAL temp (the T field a fresh
+// droppable value from the maker), passed to a borrow param → caller drops it
+// once at statement end (registerTupleStmtTemp under typeSubst; emitTupleTempDrop
+// substitutes T → the concrete droppable type before the field-wise walk).
+_t1233_gpass[T](() -> T make) {
+  _t1233_gwrap[T]((make(), 1));
+}
+_t1233_gmake[T](() -> T make)(T, int) {
+  return (make(), 1);
+}
+// generic bare-discard: a discarded call returning `(T, int)` → dropDiscardedTuple
+// registers it under typeSubst; freed field-wise at statement end.
+_t1233_gdiscard[T](() -> T make) {
+  _t1233_gmake[T](make);
+}
+_t1233_generic_tuple_temp() `test {
+  _t1233_gpass[string](|| -> "g" + "en"); // T = string (heap element)
+  _t1233_gpass[int[]](|| -> [1, 2, 3]); // T = int[] (heap vector element)
+}
+_t1233_generic_bare_discard() `test {
+  _t1233_gdiscard[string](|| -> "dis" + "card"); // T = string
+  _t1233_gdiscard[int[]](|| -> [4, 5, 6]); // T = int[]
+}

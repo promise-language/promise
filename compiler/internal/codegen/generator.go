@@ -241,10 +241,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 			// B0191-equivalent: variadic vector storage.
 			c.maybeRegisterDrop(p.Name(), alloca, paramType)
 		default:
-			if _, isTuple := paramType.(*types.Tuple); isTuple {
-				// T0406-equivalent: plain tuple-by-value with droppable fields.
-				c.maybeRegisterDrop(p.Name(), alloca, paramType)
-			}
+			// T1233: plain tuple-by-value params borrow — the caller owns and
+			// drops the tuple (see defineFunc). Supersedes T0406's callee-drop.
 		}
 		// T1194: borrow-by-default heap param reassigned to a fresh owned value
 		// inside the generator body (no-op unless reassigned). Harvested into

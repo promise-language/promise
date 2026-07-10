@@ -20465,8 +20465,15 @@ func TestT0479GeneratorOwnedStringParamDrop(t *testing.T) {
 	assertContains(t, ir, "strdrop.call")
 }
 
-// T0479: Plain tuple-by-value param with droppable fields must be dropped.
-// Mirrors T0406 (regular function tuple-by-value drop) inside a generator.
+// T1233: A plain tuple-by-value param BORROWS — the callee (here a generator)
+// does NOT drop it (superseding T0406's callee-drop, which double-freed when the
+// caller also owned the tuple). For a GENERATOR the param is copied into the
+// coroutine frame and read lazily during iteration (a lifetime that outlives the
+// call statement), so the caller drops the tuple-literal temp via a SCOPE-level
+// owned drop (a synthetic `_gentuparg` local with a bindingDropTuple → the
+// `tupdrop` block), NOT a statement-end temp — a statement-end drop would free
+// the string before the generator reads it (use-after-free). This test verifies
+// the caller-side scope drop and that the generator body has no callee-side drop.
 func TestT0479GeneratorPlainTupleParamDrop(t *testing.T) {
 	ir := generateIR(t, `
 		gen((string, int) t) stream[int] {
@@ -20478,9 +20485,178 @@ func TestT0479GeneratorPlainTupleParamDrop(t *testing.T) {
 			}
 		}
 	`)
-	// Tuple-by-value drop walks fields; the string field's drop should fire.
-	assertContains(t, ir, "%t.dropflag = alloca i1")
+	// Caller-side scope-level tuple drop: the field-wise drop block walks the
+	// tuple and the string field's drop fires there (not inside the generator).
+	assertContains(t, ir, "tupdrop.exec")
+	assertContains(t, ir, "_gentuparg")
 	assertContains(t, ir, "call void @promise_string_drop(")
+	// The generator no longer registers a callee-side tuple drop flag.
+	genBody := ir[strings.Index(ir, "@__user.gen("):]
+	if idx := strings.Index(genBody, "\ndefine "); idx >= 0 {
+		genBody = genBody[:idx]
+	}
+	if strings.Contains(genBody, "t.dropflag") {
+		t.Errorf("plain tuple param should borrow, but generator body registers a tuple drop flag:\n%s", genBody)
+	}
+}
+
+// T1233: A plain (non-generator) function's tuple-by-value param BORROWS — its
+// body registers NO callee-side tuple drop flag (superseding T0406's callee-drop
+// that double-freed when the caller also owned the tuple). When the arg is a
+// tuple-literal TEMP with a heap field, the CALLER frees it field-wise at
+// statement end via the `tuptmp.drop` block (registerTupleStmtTemp). This test
+// verifies both halves: caller-side temp drop present, callee-side drop absent.
+func TestT1233PlainTupleParamBorrowsCallerDropsTemp(t *testing.T) {
+	ir := generateIR(t, `
+		take((string, int) t) {}
+		caller() {
+			take(("a" + "b", 1));
+		}
+	`)
+	// Caller drops the tuple-literal temp field-wise at statement end; the heap
+	// string field's drop fires there.
+	assertContains(t, ir, "tuptmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	// The callee `take` borrows — no tuple drop flag registered in its body.
+	takeBody := ir[strings.Index(ir, "@__user.take("):]
+	if idx := strings.Index(takeBody, "\ndefine "); idx >= 0 {
+		takeBody = takeBody[:idx]
+	}
+	if strings.Contains(takeBody, "t.dropflag") {
+		t.Errorf("plain tuple param should borrow, but callee body registers a tuple drop flag:\n%s", takeBody)
+	}
+}
+
+// T1233: The caller-side tuple-temp drop must also fire inside a MONOMORPHIZED
+// generic body. There the tuple type is `(T, int)` with a TypeParam field, so
+// registerTupleStmtTemp / emitTupleTempDrop run with c.typeSubst active and must
+// substitute T → the concrete droppable type before the field-wise drop walk
+// (the substitution branch the non-generic tests above never reach). This builds
+// a `(T, int)` literal temp (T from a maker closure) passed to a borrow param and
+// instantiates T=string, asserting the drop block appears in the specialized
+// instance with the concrete string field's drop.
+func TestT1233GenericTupleTempDropMonomorphized(t *testing.T) {
+	ir := generateIR(t, `
+		gwrap[T]((T, int) t) {}
+		gpass[T](() -> T make) {
+			gwrap[T]((make(), 1));
+		}
+		main() {
+			gpass[string](|| -> "a" + "b");
+		}
+	`)
+	// The specialized gpass[string] instance must field-wise drop its tuple temp.
+	assertContains(t, ir, "gpass[string]")
+	assertContains(t, ir, "tuptmp.drop")
+	// The substituted string field's drop fires in the monomorphized body.
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
+// T1233: tupleArgIsCallerOwnedTemp classifies a tuple arg as an owned TEMP the
+// caller must drop, or a BORROW owned elsewhere. A getter returning a tuple by
+// value produces a FRESH owned tuple (MemberExpr + isGetterCallExpr) → the caller
+// registers a temp drop; a plain struct field read (MemberExpr, not a getter)
+// BORROWS → no caller temp. This test keeps each callee's only droppable tuple
+// arg on that one branch, so `tuptmp.drop` presence/absence pins the decision.
+func TestT1233GetterOwnedVsFieldReadBorrow(t *testing.T) {
+	// Getter-returned tuple → owned temp → caller drops it (tuptmp.drop present).
+	getterIR := generateIR(t, `
+		type Box {
+			string s;
+			get pair(string, int) { return (this.s + "!", 5); }
+		}
+		take((string, int) t) {}
+		caller() {
+			b := Box(s: "hi");
+			take(b.pair);
+		}
+	`)
+	assertContains(t, getterIR, "tuptmp.drop")
+
+	// Plain field read → borrow → the holder owns/drops the field, so the call
+	// site registers NO caller tuple temp (no tuptmp.drop anywhere in the module).
+	fieldIR := generateIR(t, `
+		type Holder { (string, int) t; }
+		take((string, int) t) {}
+		caller() {
+			h := Holder(t: ("c" + "d", 2));
+			take(h.t);
+		}
+	`)
+	assertNotContains(t, fieldIR, "tuptmp.drop")
+
+	// User-defined non-native `[]` returns a FRESH owned tuple (IndexExpr +
+	// isUserIndexExpr) → owned temp → caller drops it (tuptmp.drop present).
+	userIndexIR := generateIR(t, `
+		type Box {
+			string s;
+			[](int i)(string, int) { return (this.s + "!", i); }
+		}
+		take((string, int) t) {}
+		caller() {
+			b := Box(s: "hi");
+			take(b[0]);
+		}
+	`)
+	assertContains(t, userIndexIR, "tuptmp.drop")
+
+	// An owned tuple VARIABLE passed to a borrow param is a borrow at the call
+	// site (IdentExpr → false): it drops via its own bindingDropTuple, not a
+	// caller statement temp — so no `tuptmp.drop` is registered for the arg.
+	identIR := generateIR(t, `
+		take((string, int) t) {}
+		caller() {
+			(string, int) v = ("e" + "f", 3);
+			take(v);
+		}
+	`)
+	assertNotContains(t, identIR, "tuptmp.drop")
+}
+
+// T1233: A bare discarded tuple-literal statement (dropDiscardedTuple) — the
+// aggregate has no owning caller variable, so genTupleLit's claimed heap fields
+// would orphan. The caller registers a statement temp so the field-wise drop
+// fires at statement end. This exercises dropDiscardedTuple's happy path (the
+// caller-owned-temp branch + registerTupleStmtTemp) that the arg-passing tests
+// don't reach.
+func TestT1233BareDiscardedTupleLiteralDrops(t *testing.T) {
+	ir := generateIR(t, `
+		caller() {
+			("a" + "b", 1);
+		}
+	`)
+	assertContains(t, ir, "tuptmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
+// T1233 (Stage 1 — the original leak in the bug's repro): a capturing closure
+// destructured OUT of an owned tuple takes ownership of its heap env, but
+// maybeRegisterDrop no-ops on *types.Signature (extractNamed returns nil), so
+// nothing freed the env → 1 allocation leaked per closure. genDestructureVarDecl
+// now routes signature-typed destructured locals through maybeRegisterEnvFree,
+// giving the destructured closure a bindingFreeEnv (the `env.free`/deep-drop-or-
+// pal_free arm). The source tuple's own drop flag is cleared right after the
+// destructure so its field walk does NOT also free the moved-out env (a would-be
+// double free). This Go test pins that IR shape; the sibling Promise leak test
+// `_t1233_destructure_closure` proves the runtime single-free. Every OTHER arm of
+// the fix already had a Go IR test — this closes the destructure-arm gap.
+func TestT1233DestructuredClosureFromTupleFreesEnv(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x)() -> int { return move || -> x + 1; }
+		caller() {
+			(() -> int, int) t = (make_adder(6), 1);
+			(g, n) := t;
+			g();
+		}
+	`)
+	// The destructured closure `g` gets a bindingFreeEnv: null-check then either
+	// call the per-closure env-drop fn (deep) or pal_free (shallow).
+	assertContains(t, ir, "env.free")
+	assertContains(t, ir, "env.shallow_free")
+	assertContains(t, ir, "call void @pal_free(")
+	// The source tuple's drop flag is cleared after the destructure so its
+	// scope-exit field walk does not double-free the moved-out env.
+	assertContains(t, ir, "store i1 false, i1* %t.dropflag")
 }
 
 // T0479: Variadic generator param (vector storage) must be dropped at coroutine end.

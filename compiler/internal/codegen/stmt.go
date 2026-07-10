@@ -729,6 +729,9 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		// B0211: When a discarded expression returns a heap-allocated user type
 		// (e.g., bare constructor call like `Foo(x: 1);`), free the instance.
 		c.dropDiscardedHeapType(s.Expr, discardedResult)
+		// T1233: When a discarded expression is a droppable tuple temp (e.g.
+		// `(make_str(), 1);`), field-wise drop it at statement end.
+		c.dropDiscardedTuple(s.Expr, discardedResult)
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:
@@ -2077,7 +2080,17 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		// drop binding) — otherwise destructured locals would double-free with
 		// the container's element walk (e.g., for tup in vec { (a, b) := tup }).
 		if srcOwned {
-			c.maybeRegisterDrop(bindKey, alloca, elemPromiseType)
+			if _, isSig := elemPromiseType.(*types.Signature); isSig {
+				// T1233: a closure destructured out of an owned tuple takes
+				// ownership of its heap env, but maybeRegisterDrop no-ops on
+				// *types.Signature (extractNamed returns nil). Register the
+				// bindingFreeEnv directly. nil valueExpr => isClosureAggregateBorrow
+				// won't suppress it; the source tuple's drop flag is cleared just
+				// below so the env is owned exactly once.
+				c.maybeRegisterEnvFree(bindKey, alloca, elemPromiseType, nil)
+			} else {
+				c.maybeRegisterDrop(bindKey, alloca, elemPromiseType)
+			}
 		}
 	}
 	// T0371: Source tuple transferred field ownership to the destructured
@@ -4890,6 +4903,34 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 	c.block = skipBlock
 }
 
+// dropDiscardedTuple handles T1233: when an ExprStmt discards a droppable tuple
+// TEMP (a tuple literal or tuple-returning call whose heap fields would otherwise
+// orphan — e.g. `(make_str(), 1);`), register a caller tuple stmtTemp so the
+// field-wise drop fires at statement end. genTupleLit claims each element temp
+// INTO the aggregate, so without this the discarded aggregate's heap fields leak.
+// Borrowed/owned-variable sources (an ident with its own bindingDropTuple, or a
+// container/field read) are excluded by tupleArgIsCallerOwnedTemp.
+func (c *Compiler) dropDiscardedTuple(expr ast.Expr, result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	exprType := c.info.Types[expr]
+	if exprType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	tup, ok := exprType.(*types.Tuple)
+	if !ok || !c.tupleNeedsDrop(tup) {
+		return
+	}
+	if !c.tupleArgIsCallerOwnedTemp(expr) {
+		return
+	}
+	c.registerTupleStmtTemp(result, tup)
+}
+
 // dropDiscardedHeapType handles B0211: when an ExprStmt discards a heap-allocated
 // user type constructor result (e.g., `Foo(x: 1);`), the instance leaks.
 // Only handles constructor calls — method/getter returns may share instance
@@ -6050,6 +6091,79 @@ func (c *Compiler) trackArrayTemp(val value.Value, arr *types.Array) {
 	c.stmtTempMap[val] = idx
 }
 
+// registerTupleStmtTemp registers a droppable tuple temporary (a tuple literal
+// or tuple-returning call result with no owning caller variable) for field-wise
+// cleanup at statement end (T1233). The plan mirror of trackArrayTemp: the value
+// is a tuple LLVM aggregate, not an i8* pointer, so it is stored into a dedicated
+// alloca and cleanupStmtTemps walks the fields via emitVariantFieldDrop (the same
+// walk emitTupleDropCall / bindingDropTuple use). Used where a plain (borrow)
+// tuple param — which no longer drops its arg (T1233 superseded T0406's
+// callee-drop) — receives a tuple temp, and for a discarded bare tuple statement.
+// Not registered in stmtTempMap: these temps are always borrowed-by-callee /
+// discarded, never transferred into a downstream binding, so no claim is needed.
+func (c *Compiler) registerTupleStmtTemp(val value.Value, tup *types.Tuple) {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if c.entryBlock == nil || !c.tempTrackingEnabled {
+		return
+	}
+	llvmType := val.Type()
+	alloca := c.createEntryAlloca(llvmType)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	c.entryBlock.NewStore(constant.NewZeroInitializer(llvmType), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewStore(val, alloca)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, tupleType: tup})
+}
+
+// emitTupleTempDrop emits a conditional field-wise drop for a tuple statement
+// temp (T1233). Mirrors emitArrayTempDrop: loads the tuple aggregate and walks
+// its droppable fields via emitVariantFieldDrop, clearing the flag afterward so a
+// temp reused across loop iterations isn't dropped twice.
+func (c *Compiler) emitTupleTempDrop(temp stmtTemp) {
+	typ := types.Type(temp.tupleType)
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+	dropBlock := c.newBlock("tuptmp.drop")
+	skipBlock := c.newBlock("tuptmp.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	tupVal := c.block.NewLoad(temp.alloca.ElemType, temp.alloca)
+	c.emitVariantFieldDrop(tupVal, typ)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
+// tupleArgIsCallerOwnedTemp reports whether a tuple value produced by expr is a
+// TEMPORARY the caller must drop (a literal or call result with no owning caller
+// variable) rather than a borrow. An IdentExpr (an owned tuple variable drops via
+// its own bindingDropTuple; a borrowed variable is owned elsewhere) and a plain
+// container/field read (borrow) are NOT caller temps. Owned-return shapes ARE
+// caller temps even behind Index/Member syntax: a getter returning a tuple by
+// value (isGetterCallExpr) and a user-defined non-native `[]` returning a tuple
+// (isUserIndexExpr) each produce a FRESH owned tuple the caller must free — a
+// native container/array index instead aliases storage the container owns.
+// Mirrors the owned-return exemptions in isClosureAggregateBorrow. T1233.
+func (c *Compiler) tupleArgIsCallerOwnedTemp(expr ast.Expr) bool {
+	e := unwrapDestructureParens(expr)
+	switch e.(type) {
+	case *ast.IndexExpr:
+		return c.isUserIndexExpr(e) // user `[]` returns owned; native index borrows
+	case *ast.MemberExpr:
+		return c.isGetterCallExpr(e) // getter returns owned; plain field read borrows
+	case *ast.IdentExpr:
+		return false
+	}
+	return true
+}
+
 // trackChannelTempWithElemType registers a channel temporary for cleanup at
 // statement end. B0219: used for channel field-read dups from droppable types.
 // T0663: unlike trackVectorTempWithElemType (which patches stmtTemp.elemType so
@@ -6173,6 +6287,11 @@ func (c *Compiler) cleanupStmtTemps() {
 			c.emitArrayTempDrop(temp)
 			continue
 		}
+		// T1233: tuple temp — field-wise drop via emitVariantFieldDrop, no i8* dropFunc.
+		if temp.tupleType != nil {
+			c.emitTupleTempDrop(temp)
+			continue
+		}
 		// B0219: Each temp has its own drop function (string/vector/channel).
 		if temp.dropFunc == nil {
 			continue
@@ -6241,6 +6360,11 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 		// T1181: fixed-array temp — element-wise drop, no i8* dropFunc.
 		if temp.arrType != nil {
 			c.emitArrayTempDrop(temp)
+			continue
+		}
+		// T1233: tuple temp — field-wise drop via emitVariantFieldDrop, no i8* dropFunc.
+		if temp.tupleType != nil {
+			c.emitTupleTempDrop(temp)
 			continue
 		}
 		// B0219: Each temp has its own drop function (string/vector/channel).

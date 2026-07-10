@@ -2172,7 +2172,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	var argTypes []types.Type
 	var variadicPTs []variadicPassthrough // B0203
 	if calleeSig != nil {
-		argVals, argTypes, variadicPTs = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
+		argVals, argTypes, variadicPTs = c.genCallArgsWithMutRef(e.Args, calleeSig.Params(), calleeSig.Result())
 	} else {
 		for _, arg := range e.Args {
 			argVals = append(argVals, c.genCallArgExpr(arg.Value))
@@ -2300,7 +2300,7 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	var argTypes []types.Type
 	var variadicPTs []variadicPassthrough // B0203
 	if calleeSig != nil {
-		argVals, argTypes, variadicPTs = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
+		argVals, argTypes, variadicPTs = c.genCallArgsWithMutRef(e.Args, calleeSig.Params(), calleeSig.Result())
 	} else {
 		for _, arg := range e.Args {
 			argVals = append(argVals, c.genCallArgExpr(arg.Value))
@@ -2372,6 +2372,7 @@ func (c *Compiler) genGenericCallArgs(args []*ast.Arg, sig *types.Signature, sub
 		return argVals, argTypes, nil
 	}
 	params := sig.Params()
+	result := sig.Result()
 	if len(subst) > 0 {
 		params = make([]*types.Param, len(sig.Params()))
 		for i, p := range sig.Params() {
@@ -2379,8 +2380,11 @@ func (c *Compiler) genGenericCallArgs(args []*ast.Arg, sig *types.Signature, sub
 			np.SetVariadic(p.IsVariadic())
 			params[i] = np
 		}
+		result = types.Substitute(result, subst)
 	}
-	return c.genCallArgsWithMutRef(args, params)
+	// T1233: pass the (substituted) result so genCallArgsWithMutRef can detect a
+	// generator callee — its stream[T] param lifetime outlives the call statement.
+	return c.genCallArgsWithMutRef(args, params, result)
 }
 
 // genGenericFuncCall generates a call to a monomorphic generic function instance.
@@ -7109,10 +7113,16 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 // For MutRef params, passes the address of the caller's storage instead of the value.
 // When the arg needs no coercion and is a simple lvalue, passes the alloca directly.
 // Otherwise, evaluates the value, stores in a temp alloca, and passes the temp.
-func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param) ([]value.Value, []types.Type, []variadicPassthrough) {
+func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param, calleeResult types.Type) ([]value.Value, []types.Type, []variadicPassthrough) {
 	var argVals []value.Value
 	var argTypes []types.Type
 	var variadicPTs []variadicPassthrough // B0203: passthrough vectors needing len restored after call
+	// T1233: a generator call returns a stream[T]; its by-value params are copied
+	// into the coroutine frame and read LAZILY during iteration, which outlives
+	// this call statement. A caller-side statement temp (dropped at statement end)
+	// would free a tuple arg's heap fields before the generator reads them (UAF).
+	// For such args we instead register a SCOPE-level owned drop (see below).
+	_, calleeIsGenerator := types.AsStream(calleeResult)
 	for i, arg := range args {
 		if i < len(params) {
 			if _, isMutRef := params[i].Type().(*types.MutRef); isMutRef {
@@ -7220,6 +7230,37 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
 				}
 				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			}
+		}
+		// T1233: A plain (borrow) tuple-by-value param no longer drops its arg
+		// (the callee-side T0406 drop was removed — a plain tuple param borrows).
+		// When the arg is a tuple TEMP (literal / call result — no owning caller
+		// variable), the caller must drop it after the call returns, else its heap
+		// fields (closure envs, strings, vectors) leak. An owned tuple variable
+		// keeps its own bindingDropTuple and a borrowed source is owned elsewhere —
+		// neither needs a caller temp (see tupleArgIsCallerOwnedTemp).
+		if i < len(params) && !isMutRefParam && !params[i].IsVariadic() {
+			paramType := params[i].Type()
+			if c.typeSubst != nil {
+				paramType = types.Substitute(paramType, c.typeSubst)
+			}
+			if tup, isTuple := paramType.(*types.Tuple); isTuple && c.tupleNeedsDrop(tup) && c.tupleArgIsCallerOwnedTemp(arg.Value) {
+				if calleeIsGenerator {
+					// T1233: the generator borrows its param but reads it lazily
+					// (frame outlives this statement), so a statement-end drop is
+					// too early → UAF. Give the temp a SCOPE-level owned drop (a
+					// synthetic owned local) — the same lifetime an owned tuple
+					// variable gets, which the borrow model already handles: the
+					// tuple stays alive until the enclosing scope exits (after the
+					// for-in loop consuming the stream), then drops exactly once.
+					name := c.uniqueLocalName("_gentuparg")
+					argAlloca := c.createEntryAlloca(v.Type())
+					argAlloca.SetName(name)
+					c.block.NewStore(v, argAlloca)
+					c.maybeRegisterDrop(name, argAlloca, tup)
+				} else {
+					c.registerTupleStmtTemp(v, tup)
+				}
 			}
 		}
 		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's

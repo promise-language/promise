@@ -2478,6 +2478,14 @@ func (c *Compiler) dupChannel(ptr value.Value) value.Value {
 // through. No temp tracking — the variable's Optional drop binding owns cleanup.
 // T0620: Prevents double-free between variable's Optional drop and vector's
 // element drop loop (enabled by Gap B fix).
+// isSignatureElem reports whether t is a closure (function value) type. Used to
+// route Optional[closure] inners to the null-the-fat-pointer path (T1227) instead
+// of the shallow default that would alias the captured env.
+func isSignatureElem(t types.Type) bool {
+	_, ok := t.(*types.Signature)
+	return ok
+}
+
 func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional, innerElem types.Type) value.Value {
 	optLLVM := optVal.Type()
 
@@ -2498,6 +2506,13 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 	var dupedInner value.Value
 	named := extractNamed(innerElem)
 	switch {
+	case isSignatureElem(innerElem):
+		// T1227: a closure inner (Optional[() -> int]) cannot be deep-cloned — the
+		// captured frame is opaque. Mirror maybeDupPushElement's T1045 case: null
+		// the {fn,env} fat pointer so the source keeps sole ownership of the env and
+		// the "clone" holds an empty closure. Without this the default fell through
+		// to a shallow `dupedInner = innerVal` that aliases the env → double-free.
+		dupedInner = constant.NewZeroInitializer(innerVal.Type())
 	case named == types.TypString:
 		dupedInner = c.dupString(innerVal)
 	case types.IsVector(innerElem):

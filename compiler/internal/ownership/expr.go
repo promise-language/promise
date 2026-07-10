@@ -2647,6 +2647,20 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 	if isAutoDupType(fieldType) {
 		return
 	}
+	// T1227: a closure (function value) field owns a heap-allocated env struct
+	// freed by the owner's synthesized drop. Reading it out in a consuming
+	// context (return, `~`/move sink, owning-slot store) hands back an alias of
+	// that env while the owner still frees it → double-free. Closures are
+	// move-only single-owner values with no clone (isDroppableType returns false
+	// for Signature, so the gate below would otherwise let this slip through the
+	// same way `return this.cb` did). Reject with a closure-specific remedy: the
+	// caller should return a freshly-built lambda instead of aliasing a stored one.
+	if isClosureFieldType(fieldType) {
+		c.errorf(e.Pos(),
+			"cannot move closure field '%s' out of '%s' — closures are move-only single-owner values with no clone; return a freshly-built lambda instead",
+			e.Field, ownerType)
+		return
+	}
 	// Only error if the field type itself is droppable — non-droppable
 	// non-Copy types (fieldless enums, etc.) have value semantics and
 	// are safe to shallow-copy without causing double-free.
@@ -2655,6 +2669,22 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 	}
 	c.errorf(e.Pos(), "cannot move field '%s' out of '%s' — use .clone() to create an independent copy",
 		e.Field, ownerType)
+}
+
+// isClosureFieldType reports whether t is a closure (function value) type,
+// peeling any leading Optional layers (an `Optional[() -> int]` field is exactly
+// as unsafe to move out as the bare closure). Used by checkFieldMoveOwnership to
+// reject consuming a closure field out of its owner (T1227).
+func isClosureFieldType(t types.Type) bool {
+	for {
+		opt, ok := t.(*types.Optional)
+		if !ok {
+			break
+		}
+		t = opt.Elem()
+	}
+	_, ok := t.(*types.Signature)
+	return ok
 }
 
 // --- Lambda expressions ---

@@ -751,3 +751,95 @@ owned_closure_from_user_index() `test {
   }
   assert(i == 30, "");
 }
+
+// --- borrowed-closure-param return (T1227, Repro B) ---
+//
+// `identity(f)` receives a closure by a plain (non-`~`) param and returns it,
+// handing back an *alias* of the caller's env. On master the caller ended up with
+// an owning env-free binding for BOTH the source `g` and the result `f`, so the
+// single heap env was freed twice → `fatal: invalid free (bad header magic)`.
+// The fix teaches isTypeDroppable to recognize a `*types.Signature` as a
+// single-owner/move-only value, so emitReturnAliasCheckSubst clears the borrowed
+// param's env-free flag when the result aliases it — one owner, freed once. The
+// heap-capturing form loops 30x so a per-iteration leak surfaces (zero-leak).
+
+mk_adder(int x)() -> int {
+  return move || -> x + 1;
+}
+// env captures x by move
+
+identity_closure(() -> int f)() -> int {
+  return f;
+}
+// borrowed param handed back
+
+transfer_borrowed_closure_param() `test {
+  i := 0;
+  while i < 30 {
+    g := mk_adder(1);
+    f := identity_closure(g); // result aliases g's env; g's flag is cleared
+    assert(f() == 2, ""); // 1 + 1 — invoking through the transferred alias
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Heap-capturing variant: the env owns a captured string, so a double free of the
+// env would also double-free the captured string. Confirms the deep env is owned
+// by exactly one local after the borrowed-param return.
+mk_heap_closure()() -> int {
+  s := "cap" + "tured"; // heap string captured by move
+  return move || -> s.len;
+}
+
+transfer_borrowed_heap_closure_param() `test {
+  i := 0;
+  while i < 30 {
+    g := mk_heap_closure();
+    f := identity_closure(g); // result aliases g's heap env; g's flag is cleared
+    assert(f() == 8, ""); // "captured".len
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Optional-closure variant: `identity_opt` returns a borrowed `(() -> int)?` param,
+// aliasing the caller's optional env. The return-alias check now routes the
+// Optional[closure] through dupOptionalVectorElem, whose T1227 signature case nulls
+// the {fn,env} fat pointer so the source keeps sole ownership (rather than the old
+// shallow alias → double-free/segfault). The env owns a captured string so a double
+// free would also double-free "captured"; the 30x loop surfaces any per-iteration leak.
+mk_opt_heap_closure()(() -> int)? {
+  s := "cap" + "tured"; // heap string captured by move
+  return move || -> s.len;
+}
+
+identity_opt_closure((() -> int)? f)(() -> int)? {
+  return f;
+}
+
+transfer_borrowed_optional_heap_closure_param() `test {
+  i := 0;
+  while i < 30 {
+    g := mk_opt_heap_closure();
+    f := identity_opt_closure(g); // result aliases g's optional heap env
+    assert(f!() == 8, ""); // "captured".len through the transferred alias
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Discarded-result variant: `identity_closure(g);` hands the borrowed closure back
+// but the caller never binds the result. The source `g` remains the sole owner and
+// frees the heap env exactly once — no double-free (the return-alias check does not
+// strand the env) and no leak (30x loop surfaces a per-iteration leak). Locks in the
+// discard invariant the item flags as fragile until closure results are temp-tracked.
+discard_transferred_borrowed_closure_param() `test {
+  i := 0;
+  while i < 30 {
+    g := mk_heap_closure();
+    identity_closure(g); // result discarded — g stays sole owner
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}

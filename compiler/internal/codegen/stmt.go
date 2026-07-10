@@ -2298,6 +2298,14 @@ func isTypeDroppable(typ types.Type) bool {
 	if opt, ok := typ.(*types.Optional); ok {
 		return isTypeDroppable(opt.Elem())
 	}
+	// T1227: a closure value (function value) owns a heap-allocated env struct
+	// freed by a bindingFreeEnv at scope exit — it is single-owner/move-only,
+	// exactly like the native handles above. Recognizing it here lets the
+	// return-alias machinery (emitReturnAliasCheckSubst) clear a borrowed closure
+	// param's env-free flag when a call hands the same closure back (`identity(g)`).
+	if _, ok := typ.(*types.Signature); ok {
+		return true
+	}
 	named := extractNamed(typ)
 	if named == nil {
 		return false

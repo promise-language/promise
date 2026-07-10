@@ -373,6 +373,17 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 		c.checkLambdaCapture(e, obj)
 	}
 
+	// A function whose signature failed to resolve (e.g. an undefined param or
+	// return type) keeps a typed-nil *Signature in its Func object. The
+	// underlying error was already reported during the define pass; returning
+	// the typed-nil here would let it flow into type comparisons and crash
+	// (T1231). Report nil so callers treat it as an unknown/error type.
+	if fn, ok := obj.(*types.Func); ok {
+		if sig, ok := fn.Type().(*types.Signature); ok && sig == nil {
+			return nil
+		}
+	}
+
 	return obj.Type()
 }
 

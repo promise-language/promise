@@ -167,5 +167,16 @@ test_function_field_complex_lambda() `test {
   assert(a.apply(0, 0) == 0, "zero stays zero");
 }
 
+// --- Named function reference as a signature-typed constructor arg (T1231) ---
+inc_by_one(int n) int {
+  return n + 1;
+}
+
+test_function_field_named_func_ref() `test {
+  t := Transform(forward: inc_by_one, backward: inc_by_one);
+  assert(t.forward(10) == 11, "named func ref as forward field");
+  assert(t.round_trip(5) == 7, "named func ref round trip");
+}
+
 main() {
 }

@@ -328,6 +328,33 @@ func TestIndexFuncWithUnresolvedParamType(t *testing.T) {
 	expectError(t, errs, "undefined type: option")
 }
 
+// T1231: passing a named-function reference whose signature failed to resolve
+// (undefined param type) as a signature-typed constructor arg must not crash
+// sema — the typed-nil *Signature previously reached identicalSignatures and
+// dereferenced nil. The underlying "undefined type" error should surface.
+func TestConstructorArgFuncRefUnresolvedSignature(t *testing.T) {
+	errs := checkErrs(t, `
+		inc(n int) int { return n + 1; }
+		type G { (int) -> int f; }
+		m() { g := G(f: inc); }
+	`)
+	expectError(t, errs, "undefined type: n")
+}
+
+// T1231: the return-type sibling of the case above — a named-function reference
+// whose signature failed to resolve because of an undefined *return* type must
+// likewise not crash sema when passed as a signature-typed constructor arg. The
+// field's signature is well-formed here, so the typed-nil arg signature is the
+// only thing that would reach identicalSignatures.
+func TestConstructorArgFuncRefUnresolvedReturnType(t *testing.T) {
+	errs := checkErrs(t, `
+		mk() foo { return 0; }
+		type G { () -> int f; }
+		m() { g := G(f: mk); }
+	`)
+	expectError(t, errs, "undefined type: foo")
+}
+
 func TestResolveGenericInstantiation(t *testing.T) {
 	checkOK(t, `
 		type Box[T] { T value; }

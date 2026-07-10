@@ -1408,3 +1408,23 @@ func TestPos(t *testing.T) {
 		assertFalse(t, p.IsValid(), "zero Pos should be invalid")
 	})
 }
+
+// T1231: a function whose signature failed to resolve keeps a typed-nil
+// *Signature. Identical/AssignableTo must handle it without dereferencing nil.
+func TestIdenticalTypedNilSignature(t *testing.T) {
+	var nilSig *Signature // typed-nil
+	realSig := NewSignature(nil, []*Param{NewParam("x", TypInt, RefNone)}, TypInt, false)
+
+	if Identical(nilSig, realSig) {
+		t.Error("typed-nil signature should not be identical to a real signature")
+	}
+	if Identical(realSig, nilSig) {
+		t.Error("real signature should not be identical to a typed-nil signature")
+	}
+	if !Identical(nilSig, nilSig) {
+		t.Error("typed-nil signature should be identical to itself")
+	}
+	if AssignableTo(nilSig, realSig) {
+		t.Error("typed-nil signature should not be assignable to a real signature")
+	}
+}

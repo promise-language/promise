@@ -26,6 +26,12 @@ func Identical(x, y Type) bool {
 		if !ok {
 			return false
 		}
+		// Guard against typed-nil *Signature values (e.g. a function whose
+		// signature failed to resolve): a nil pointer is identical only to
+		// another nil pointer, never structurally compared (T1231).
+		if xt == nil || yt == nil {
+			return xt == yt
+		}
 		return identicalSignatures(xt, yt)
 
 	case *Tuple:

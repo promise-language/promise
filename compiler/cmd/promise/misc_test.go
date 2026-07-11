@@ -39,8 +39,8 @@ func TestPrintVersionWithLdflags(t *testing.T) {
 }
 
 func TestPrintVersionWithCommit(t *testing.T) {
-	// When version and commit are set, printVersion appends a shortened,
-	// explicitly-labeled "commit <sha7>" after the channel (T1101).
+	// On stable channel, commit SHA is suppressed even when the binary was built
+	// with one — epoch version string is the stable identity (T1127).
 	t.Setenv("PROMISE_HOME", t.TempDir())
 	oldV, oldC := version, commit
 	version = "2026.0"
@@ -48,7 +48,7 @@ func TestPrintVersionWithCommit(t *testing.T) {
 	defer func() { version = oldV; commit = oldC }()
 
 	output := captureStdout(t, printVersion)
-	want := "promise version 2026.0 (channel stable, commit 0123456)\n"
+	want := "promise version 2026.0 (channel stable)\n"
 	if output != want {
 		t.Fatalf("expected %q, got %q", want, output)
 	}

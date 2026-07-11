@@ -192,7 +192,7 @@ func printVersionUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -json     Print version, channel, commit, and build as JSON and exit")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
-	fmt.Fprintln(w, "  promise version           Human-readable: promise version 0.4.2 (channel stable, commit abc1234)")
+	fmt.Fprintln(w, "  promise version           Human-readable: promise version 0.4.2 (channel stable)")
 	fmt.Fprintln(w, "  promise version -json     Machine-readable JSON for tooling")
 	fmt.Fprintln(w, "  promise version -commit   Bare commit SHA for install gates")
 }
@@ -200,7 +200,7 @@ func printVersionUsage(w io.Writer) {
 func printVersion() {
 	info := gatherVersionInfo()
 	parts := []string{"channel " + info.Channel}
-	if info.Commit != "" {
+	if info.Commit != "" && info.Channel == module.ChannelNext {
 		parts = append(parts, "commit "+shortBuildID(info.Commit))
 	}
 	if info.Build != "" {

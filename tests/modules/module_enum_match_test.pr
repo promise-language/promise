@@ -105,3 +105,25 @@ test_qualified_destructure_computation() `test {
   };
   assert(perimeter == 26, "got " + perimeter.to_string());
 }
+
+// ── Module-qualified destructure with `_` wildcard binding (T1132) ──────────
+
+test_qualified_destructure_wildcard() `test {
+  mathlib.Shape s = mathlib.Shape.Circle(radius: 5);
+  bool is_circle = match s {
+    mathlib.Shape.Circle(_) => true,
+    mathlib.Shape.Rect(w, h) => false,
+    mathlib.Shape.Point => false,
+  };
+  assert(is_circle, "should be Circle");
+}
+
+test_qualified_destructure_wildcard_field() `test {
+  mathlib.Shape s = mathlib.Shape.Rect(w: 3, h: 4);
+  int w_only = match s {
+    mathlib.Shape.Circle(_) => 0,
+    mathlib.Shape.Rect(w, _) => w,
+    mathlib.Shape.Point => 0,
+  };
+  assert(w_only == 3, "got " + w_only.to_string());
+}

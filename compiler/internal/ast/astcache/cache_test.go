@@ -671,6 +671,67 @@ func wrapExprInFile(e ast.Expr) *ast.File {
 	return f
 }
 
+// TestRoundTripModuleQualifiedEnumPattern verifies that the Module field of
+// module-qualified enum match patterns survives encode/decode (T1132). Before
+// the astcache learned about Module, a cache round-trip silently dropped it,
+// turning `mod.Enum.Variant` patterns into unqualified `Enum.Variant` ones and
+// producing spurious "undefined: Enum" errors on cache hits.
+func TestRoundTripModuleQualifiedEnumPattern(t *testing.T) {
+	pos := ast.Pos{File: "test.pr", Line: 1, Column: 0}
+	end := ast.Pos{File: "test.pr", Line: 1, Column: 20}
+
+	destr := &ast.EnumDestructureMatchPattern{
+		Module:   "mathlib",
+		Enum:     "Shape",
+		Variant:  "Rect",
+		Bindings: []string{"w", "_"},
+	}
+	destr.SetPosEnd(pos, end)
+	variant := &ast.EnumVariantMatchPattern{
+		Module:  "mathlib",
+		Enum:    "Color",
+		Variant: "Red",
+	}
+	variant.SetPosEnd(pos, end)
+
+	armBody := &ast.IntLit{Raw: "1"}
+	armBody.SetPosEnd(pos, end)
+	arm1 := &ast.MatchArm{Pattern: destr, Body: armBody}
+	arm1.SetPosEnd(pos, end)
+	arm2 := &ast.MatchArm{Pattern: variant, Body: armBody}
+	arm2.SetPosEnd(pos, end)
+
+	subject := &ast.IdentExpr{Name: "s"}
+	subject.SetPosEnd(pos, end)
+	m := &ast.MatchExpr{Subject: subject, Arms: []*ast.MatchArm{arm1, arm2}}
+	m.SetPosEnd(pos, end)
+	es := &ast.ExprStmt{Expr: m}
+	es.SetPosEnd(pos, end)
+
+	f := wrapStmtInFile(es)
+	encoded := Encode(f)
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	fd := decoded.Decls[0].(*ast.FuncDecl)
+	got := fd.Body.Stmts[0].(*ast.ExprStmt).Expr.(*ast.MatchExpr)
+	gotDestr := got.Arms[0].Pattern.(*ast.EnumDestructureMatchPattern)
+	if gotDestr.Module != "mathlib" || gotDestr.Enum != "Shape" || gotDestr.Variant != "Rect" {
+		t.Fatalf("destructure pattern round-trip lost fields: %+v", gotDestr)
+	}
+	gotVariant := got.Arms[1].Pattern.(*ast.EnumVariantMatchPattern)
+	if gotVariant.Module != "mathlib" || gotVariant.Enum != "Color" || gotVariant.Variant != "Red" {
+		t.Fatalf("variant pattern round-trip lost fields: %+v", gotVariant)
+	}
+
+	reencoded := Encode(decoded)
+	if !bytes.Equal(encoded, reencoded) {
+		t.Fatal("round-trip mismatch for module-qualified enum patterns")
+	}
+}
+
 func wrapStmtInFile(s ast.Stmt) *ast.File {
 	body := &ast.Block{Stmts: []ast.Stmt{s}}
 	body.SetPosEnd(ast.Pos{File: "test.pr", Line: 1, Column: 0}, ast.Pos{File: "test.pr", Line: 1, Column: 20})

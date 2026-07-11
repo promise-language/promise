@@ -4,10 +4,11 @@ import "github.com/promise-language/promise/compiler/internal/parser"
 
 func (b *Builder) VisitEnumDestructurePattern(ctx *parser.EnumDestructurePatternContext) interface{} {
 	idents := ctx.AllIDENT()
-	node := &EnumDestructureMatchPattern{
-		nodeBase: b.baseFromContext(ctx),
-		Enum:     idents[0].GetText(),
-		Variant:  idents[1].GetText(),
+	node := &EnumDestructureMatchPattern{nodeBase: b.baseFromContext(ctx)}
+	if len(idents) == 3 { // mod.Enum.Variant(...)
+		node.Module, node.Enum, node.Variant = idents[0].GetText(), idents[1].GetText(), idents[2].GetText()
+	} else { // Enum.Variant(...)
+		node.Enum, node.Variant = idents[0].GetText(), idents[1].GetText()
 	}
 	if pf := ctx.PatternFields(); pf != nil {
 		node.Bindings = b.visitPatternFields(pf)
@@ -17,11 +18,13 @@ func (b *Builder) VisitEnumDestructurePattern(ctx *parser.EnumDestructurePattern
 
 func (b *Builder) VisitEnumVariantPattern(ctx *parser.EnumVariantPatternContext) interface{} {
 	idents := ctx.AllIDENT()
-	return &EnumVariantMatchPattern{
-		nodeBase: b.baseFromContext(ctx),
-		Enum:     idents[0].GetText(),
-		Variant:  idents[1].GetText(),
+	node := &EnumVariantMatchPattern{nodeBase: b.baseFromContext(ctx)}
+	if len(idents) == 3 { // mod.Enum.Variant
+		node.Module, node.Enum, node.Variant = idents[0].GetText(), idents[1].GetText(), idents[2].GetText()
+	} else { // Enum.Variant
+		node.Enum, node.Variant = idents[0].GetText(), idents[1].GetText()
 	}
+	return node
 }
 
 func (b *Builder) VisitTypeBindingPattern(ctx *parser.TypeBindingPatternContext) interface{} {

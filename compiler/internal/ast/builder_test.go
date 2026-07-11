@@ -1403,6 +1403,69 @@ func TestBuildMatchPatterns(t *testing.T) {
 			},
 		},
 		{
+			name: "qualified_enum_destructure_wildcard",
+			src:  `f() { match c { mathlib.Shape.Circle(_) => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				ed := me.Arms[0].Pattern.(*EnumDestructureMatchPattern)
+				assertEqual(t, ed.Module, "mathlib")
+				assertEqual(t, ed.Enum, "Shape")
+				assertEqual(t, ed.Variant, "Circle")
+				assertLen(t, ed.Bindings, 1)
+				assertEqual(t, ed.Bindings[0], "_")
+			},
+		},
+		{
+			// Qualified + generic enum destructure: the optional (IDENT DOT) module
+			// prefix coexists with typeArgs (T1132). The type-arg IDENT (`int`) lives
+			// in a nested typeRef context, so AllIDENT() must still yield exactly the
+			// three top-level idents (mod, Enum, Variant) — not four — or the builder
+			// would misassign Module/Enum/Variant.
+			name: "qualified_generic_enum_destructure",
+			src:  `f() { match b { mathlib.Box[int].Some(v) => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				ed := me.Arms[0].Pattern.(*EnumDestructureMatchPattern)
+				assertEqual(t, ed.Module, "mathlib")
+				assertEqual(t, ed.Enum, "Box")
+				assertEqual(t, ed.Variant, "Some")
+				assertLen(t, ed.Bindings, 1)
+				assertEqual(t, ed.Bindings[0], "v")
+			},
+		},
+		{
+			// Qualified + generic fieldless variant: same typeArgs coexistence check
+			// for the enumVariantPattern alternative (no payload parens).
+			name: "qualified_generic_enum_variant",
+			src:  `f() { match b { mathlib.Box[int].None => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				ev := me.Arms[0].Pattern.(*EnumVariantMatchPattern)
+				assertEqual(t, ev.Module, "mathlib")
+				assertEqual(t, ev.Enum, "Box")
+				assertEqual(t, ev.Variant, "None")
+			},
+		},
+		{
+			name: "qualified_enum_variant_fieldless",
+			src:  `f() { match c { mathlib.Shape.Point => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				ev := me.Arms[0].Pattern.(*EnumVariantMatchPattern)
+				assertEqual(t, ev.Module, "mathlib")
+				assertEqual(t, ev.Enum, "Shape")
+				assertEqual(t, ev.Variant, "Point")
+			},
+		},
+		{
 			name: "short_destructure",
 			src:  `f() { match r { Ok(val) => consume(val), Err(e) => handle(e), } }`,
 			check: func(t *testing.T, file *File) {

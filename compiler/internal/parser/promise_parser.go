@@ -76,7 +76,7 @@ func promiseparserParserInit() {
 	}
 	staticData.PredictionContextCache = antlr.NewPredictionContextCache()
 	staticData.serializedATN = []int32{
-		4, 1, 87, 1335, 2, 0, 7, 0, 2, 1, 7, 1, 2, 2, 7, 2, 2, 3, 7, 3, 2, 4, 7,
+		4, 1, 87, 1343, 2, 0, 7, 0, 2, 1, 7, 1, 2, 2, 7, 2, 2, 3, 7, 3, 2, 4, 7,
 		4, 2, 5, 7, 5, 2, 6, 7, 6, 2, 7, 7, 7, 2, 8, 7, 8, 2, 9, 7, 9, 2, 10, 7,
 		10, 2, 11, 7, 11, 2, 12, 7, 12, 2, 13, 7, 13, 2, 14, 7, 14, 2, 15, 7, 15,
 		2, 16, 7, 16, 2, 17, 7, 17, 2, 18, 7, 18, 2, 19, 7, 19, 2, 20, 7, 20, 2,
@@ -213,25 +213,26 @@ func promiseparserParserInit() {
 		5, 71, 1250, 8, 71, 10, 71, 12, 71, 1253, 9, 71, 1, 71, 3, 71, 1256, 8,
 		71, 1, 71, 1, 71, 1, 72, 1, 72, 1, 72, 3, 72, 1263, 8, 72, 1, 72, 1, 72,
 		1, 72, 3, 72, 1268, 8, 72, 1, 73, 1, 73, 3, 73, 1272, 8, 73, 1, 73, 1,
-		73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 3, 73, 1282, 8, 73, 1, 73,
-		1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1,
-		73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 3, 73, 1303, 8, 73,
-		1, 74, 1, 74, 3, 74, 1307, 8, 74, 1, 74, 1, 74, 1, 74, 1, 74, 1, 74, 1,
-		74, 3, 74, 1315, 8, 74, 3, 74, 1317, 8, 74, 1, 75, 1, 75, 1, 75, 5, 75,
-		1322, 8, 75, 10, 75, 12, 75, 1325, 9, 75, 1, 76, 1, 76, 1, 76, 3, 76, 1330,
-		8, 76, 1, 77, 1, 77, 1, 77, 1, 77, 0, 2, 70, 128, 78, 0, 2, 4, 6, 8, 10,
-		12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46,
-		48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82,
-		84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114,
-		116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144,
-		146, 148, 150, 152, 154, 0, 11, 2, 0, 73, 73, 80, 80, 2, 0, 84, 85, 87,
-		87, 1, 0, 69, 70, 2, 0, 43, 47, 60, 60, 1, 0, 41, 42, 1, 0, 65, 67, 1,
-		0, 32, 33, 1, 0, 63, 64, 3, 0, 40, 40, 69, 69, 71, 71, 2, 0, 36, 37, 61,
-		62, 1, 0, 34, 35, 1531, 0, 159, 1, 0, 0, 0, 2, 182, 1, 0, 0, 0, 4, 189,
-		1, 0, 0, 0, 6, 191, 1, 0, 0, 0, 8, 203, 1, 0, 0, 0, 10, 205, 1, 0, 0, 0,
-		12, 207, 1, 0, 0, 0, 14, 230, 1, 0, 0, 0, 16, 239, 1, 0, 0, 0, 18, 250,
-		1, 0, 0, 0, 20, 255, 1, 0, 0, 0, 22, 267, 1, 0, 0, 0, 24, 269, 1, 0, 0,
-		0, 26, 324, 1, 0, 0, 0, 28, 356, 1, 0, 0, 0, 30, 391, 1, 0, 0, 0, 32, 398,
+		73, 3, 73, 1276, 8, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73,
+		1, 73, 3, 73, 1286, 8, 73, 1, 73, 1, 73, 3, 73, 1290, 8, 73, 1, 73, 1,
+		73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73,
+		1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 1, 73, 3, 73, 1311, 8, 73, 1,
+		74, 1, 74, 3, 74, 1315, 8, 74, 1, 74, 1, 74, 1, 74, 1, 74, 1, 74, 1, 74,
+		3, 74, 1323, 8, 74, 3, 74, 1325, 8, 74, 1, 75, 1, 75, 1, 75, 5, 75, 1330,
+		8, 75, 10, 75, 12, 75, 1333, 9, 75, 1, 76, 1, 76, 1, 76, 3, 76, 1338, 8,
+		76, 1, 77, 1, 77, 1, 77, 1, 77, 0, 2, 70, 128, 78, 0, 2, 4, 6, 8, 10, 12,
+		14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48,
+		50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84,
+		86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116,
+		118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146,
+		148, 150, 152, 154, 0, 11, 2, 0, 73, 73, 80, 80, 2, 0, 84, 85, 87, 87,
+		1, 0, 69, 70, 2, 0, 43, 47, 60, 60, 1, 0, 41, 42, 1, 0, 65, 67, 1, 0, 32,
+		33, 1, 0, 63, 64, 3, 0, 40, 40, 69, 69, 71, 71, 2, 0, 36, 37, 61, 62, 1,
+		0, 34, 35, 1541, 0, 159, 1, 0, 0, 0, 2, 182, 1, 0, 0, 0, 4, 189, 1, 0,
+		0, 0, 6, 191, 1, 0, 0, 0, 8, 203, 1, 0, 0, 0, 10, 205, 1, 0, 0, 0, 12,
+		207, 1, 0, 0, 0, 14, 230, 1, 0, 0, 0, 16, 239, 1, 0, 0, 0, 18, 250, 1,
+		0, 0, 0, 20, 255, 1, 0, 0, 0, 22, 267, 1, 0, 0, 0, 24, 269, 1, 0, 0, 0,
+		26, 324, 1, 0, 0, 0, 28, 356, 1, 0, 0, 0, 30, 391, 1, 0, 0, 0, 32, 398,
 		1, 0, 0, 0, 34, 437, 1, 0, 0, 0, 36, 439, 1, 0, 0, 0, 38, 471, 1, 0, 0,
 		0, 40, 491, 1, 0, 0, 0, 42, 496, 1, 0, 0, 0, 44, 539, 1, 0, 0, 0, 46, 546,
 		1, 0, 0, 0, 48, 549, 1, 0, 0, 0, 50, 567, 1, 0, 0, 0, 52, 570, 1, 0, 0,
@@ -248,9 +249,9 @@ func promiseparserParserInit() {
 		122, 920, 1, 0, 0, 0, 124, 958, 1, 0, 0, 0, 126, 960, 1, 0, 0, 0, 128,
 		990, 1, 0, 0, 0, 130, 1174, 1, 0, 0, 0, 132, 1176, 1, 0, 0, 0, 134, 1218,
 		1, 0, 0, 0, 136, 1220, 1, 0, 0, 0, 138, 1235, 1, 0, 0, 0, 140, 1237, 1,
-		0, 0, 0, 142, 1243, 1, 0, 0, 0, 144, 1259, 1, 0, 0, 0, 146, 1302, 1, 0,
-		0, 0, 148, 1316, 1, 0, 0, 0, 150, 1318, 1, 0, 0, 0, 152, 1326, 1, 0, 0,
-		0, 154, 1331, 1, 0, 0, 0, 156, 158, 3, 2, 1, 0, 157, 156, 1, 0, 0, 0, 158,
+		0, 0, 0, 142, 1243, 1, 0, 0, 0, 144, 1259, 1, 0, 0, 0, 146, 1310, 1, 0,
+		0, 0, 148, 1324, 1, 0, 0, 0, 150, 1326, 1, 0, 0, 0, 152, 1334, 1, 0, 0,
+		0, 154, 1339, 1, 0, 0, 0, 156, 158, 3, 2, 1, 0, 157, 156, 1, 0, 0, 0, 158,
 		161, 1, 0, 0, 0, 159, 157, 1, 0, 0, 0, 159, 160, 1, 0, 0, 0, 160, 165,
 		1, 0, 0, 0, 161, 159, 1, 0, 0, 0, 162, 164, 3, 4, 2, 0, 163, 162, 1, 0,
 		0, 0, 164, 167, 1, 0, 0, 0, 165, 163, 1, 0, 0, 0, 165, 166, 1, 0, 0, 0,
@@ -687,46 +688,50 @@ func promiseparserParserInit() {
 		3, 128, 64, 0, 1262, 1260, 1, 0, 0, 0, 1262, 1263, 1, 0, 0, 0, 1263, 1264,
 		1, 0, 0, 0, 1264, 1267, 5, 31, 0, 0, 1265, 1268, 3, 78, 39, 0, 1266, 1268,
 		3, 128, 64, 0, 1267, 1265, 1, 0, 0, 0, 1267, 1266, 1, 0, 0, 0, 1268, 145,
-		1, 0, 0, 0, 1269, 1271, 5, 80, 0, 0, 1270, 1272, 3, 74, 37, 0, 1271, 1270,
-		1, 0, 0, 0, 1271, 1272, 1, 0, 0, 0, 1272, 1273, 1, 0, 0, 0, 1273, 1274,
-		5, 57, 0, 0, 1274, 1275, 5, 80, 0, 0, 1275, 1276, 5, 51, 0, 0, 1276, 1277,
-		3, 150, 75, 0, 1277, 1278, 5, 52, 0, 0, 1278, 1303, 1, 0, 0, 0, 1279, 1281,
-		5, 80, 0, 0, 1280, 1282, 3, 74, 37, 0, 1281, 1280, 1, 0, 0, 0, 1281, 1282,
-		1, 0, 0, 0, 1282, 1283, 1, 0, 0, 0, 1283, 1284, 5, 57, 0, 0, 1284, 1303,
-		5, 80, 0, 0, 1285, 1286, 5, 80, 0, 0, 1286, 1303, 3, 6, 3, 0, 1287, 1288,
-		5, 80, 0, 0, 1288, 1289, 5, 51, 0, 0, 1289, 1290, 3, 150, 75, 0, 1290,
-		1291, 5, 52, 0, 0, 1291, 1303, 1, 0, 0, 0, 1292, 1303, 5, 80, 0, 0, 1293,
-		1303, 5, 75, 0, 0, 1294, 1303, 5, 74, 0, 0, 1295, 1303, 5, 79, 0, 0, 1296,
-		1303, 5, 22, 0, 0, 1297, 1303, 5, 23, 0, 0, 1298, 1303, 5, 21, 0, 0, 1299,
-		1303, 3, 8, 4, 0, 1300, 1303, 5, 73, 0, 0, 1301, 1303, 3, 128, 64, 0, 1302,
-		1269, 1, 0, 0, 0, 1302, 1279, 1, 0, 0, 0, 1302, 1285, 1, 0, 0, 0, 1302,
-		1287, 1, 0, 0, 0, 1302, 1292, 1, 0, 0, 0, 1302, 1293, 1, 0, 0, 0, 1302,
-		1294, 1, 0, 0, 0, 1302, 1295, 1, 0, 0, 0, 1302, 1296, 1, 0, 0, 0, 1302,
-		1297, 1, 0, 0, 0, 1302, 1298, 1, 0, 0, 0, 1302, 1299, 1, 0, 0, 0, 1302,
-		1300, 1, 0, 0, 0, 1302, 1301, 1, 0, 0, 0, 1303, 147, 1, 0, 0, 0, 1304,
-		1306, 5, 80, 0, 0, 1305, 1307, 3, 74, 37, 0, 1306, 1305, 1, 0, 0, 0, 1306,
-		1307, 1, 0, 0, 0, 1307, 1308, 1, 0, 0, 0, 1308, 1309, 5, 51, 0, 0, 1309,
-		1310, 3, 150, 75, 0, 1310, 1311, 5, 52, 0, 0, 1311, 1317, 1, 0, 0, 0, 1312,
-		1314, 5, 80, 0, 0, 1313, 1315, 3, 74, 37, 0, 1314, 1313, 1, 0, 0, 0, 1314,
-		1315, 1, 0, 0, 0, 1315, 1317, 1, 0, 0, 0, 1316, 1304, 1, 0, 0, 0, 1316,
-		1312, 1, 0, 0, 0, 1317, 149, 1, 0, 0, 0, 1318, 1323, 3, 6, 3, 0, 1319,
-		1320, 5, 56, 0, 0, 1320, 1322, 3, 6, 3, 0, 1321, 1319, 1, 0, 0, 0, 1322,
-		1325, 1, 0, 0, 0, 1323, 1321, 1, 0, 0, 0, 1323, 1324, 1, 0, 0, 0, 1324,
-		151, 1, 0, 0, 0, 1325, 1323, 1, 0, 0, 0, 1326, 1329, 5, 11, 0, 0, 1327,
-		1330, 3, 78, 39, 0, 1328, 1330, 3, 128, 64, 0, 1329, 1327, 1, 0, 0, 0,
-		1329, 1328, 1, 0, 0, 0, 1330, 153, 1, 0, 0, 0, 1331, 1332, 5, 18, 0, 0,
-		1332, 1333, 3, 78, 39, 0, 1333, 155, 1, 0, 0, 0, 155, 159, 165, 174, 182,
-		189, 197, 203, 210, 213, 218, 225, 236, 245, 253, 260, 267, 274, 279, 286,
-		292, 297, 302, 306, 312, 317, 322, 324, 333, 338, 344, 349, 354, 356, 368,
-		373, 384, 389, 391, 398, 437, 442, 447, 457, 461, 466, 478, 483, 488, 496,
-		501, 507, 512, 517, 521, 527, 532, 537, 539, 543, 546, 549, 556, 564, 567,
-		570, 580, 589, 598, 603, 609, 614, 616, 621, 628, 633, 636, 646, 653, 660,
-		667, 671, 679, 685, 694, 711, 713, 724, 734, 741, 748, 768, 778, 783, 798,
-		805, 820, 850, 857, 862, 868, 883, 896, 906, 918, 925, 929, 943, 955, 958,
-		965, 990, 1043, 1051, 1055, 1064, 1069, 1071, 1076, 1080, 1084, 1102, 1105,
-		1107, 1131, 1142, 1146, 1148, 1160, 1164, 1166, 1174, 1181, 1185, 1190,
-		1194, 1198, 1204, 1209, 1213, 1218, 1225, 1230, 1235, 1251, 1255, 1262,
-		1267, 1271, 1281, 1302, 1306, 1314, 1316, 1323, 1329,
+		1, 0, 0, 0, 1269, 1270, 5, 80, 0, 0, 1270, 1272, 5, 57, 0, 0, 1271, 1269,
+		1, 0, 0, 0, 1271, 1272, 1, 0, 0, 0, 1272, 1273, 1, 0, 0, 0, 1273, 1275,
+		5, 80, 0, 0, 1274, 1276, 3, 74, 37, 0, 1275, 1274, 1, 0, 0, 0, 1275, 1276,
+		1, 0, 0, 0, 1276, 1277, 1, 0, 0, 0, 1277, 1278, 5, 57, 0, 0, 1278, 1279,
+		5, 80, 0, 0, 1279, 1280, 5, 51, 0, 0, 1280, 1281, 3, 150, 75, 0, 1281,
+		1282, 5, 52, 0, 0, 1282, 1311, 1, 0, 0, 0, 1283, 1284, 5, 80, 0, 0, 1284,
+		1286, 5, 57, 0, 0, 1285, 1283, 1, 0, 0, 0, 1285, 1286, 1, 0, 0, 0, 1286,
+		1287, 1, 0, 0, 0, 1287, 1289, 5, 80, 0, 0, 1288, 1290, 3, 74, 37, 0, 1289,
+		1288, 1, 0, 0, 0, 1289, 1290, 1, 0, 0, 0, 1290, 1291, 1, 0, 0, 0, 1291,
+		1292, 5, 57, 0, 0, 1292, 1311, 5, 80, 0, 0, 1293, 1294, 5, 80, 0, 0, 1294,
+		1311, 3, 6, 3, 0, 1295, 1296, 5, 80, 0, 0, 1296, 1297, 5, 51, 0, 0, 1297,
+		1298, 3, 150, 75, 0, 1298, 1299, 5, 52, 0, 0, 1299, 1311, 1, 0, 0, 0, 1300,
+		1311, 5, 80, 0, 0, 1301, 1311, 5, 75, 0, 0, 1302, 1311, 5, 74, 0, 0, 1303,
+		1311, 5, 79, 0, 0, 1304, 1311, 5, 22, 0, 0, 1305, 1311, 5, 23, 0, 0, 1306,
+		1311, 5, 21, 0, 0, 1307, 1311, 3, 8, 4, 0, 1308, 1311, 5, 73, 0, 0, 1309,
+		1311, 3, 128, 64, 0, 1310, 1271, 1, 0, 0, 0, 1310, 1285, 1, 0, 0, 0, 1310,
+		1293, 1, 0, 0, 0, 1310, 1295, 1, 0, 0, 0, 1310, 1300, 1, 0, 0, 0, 1310,
+		1301, 1, 0, 0, 0, 1310, 1302, 1, 0, 0, 0, 1310, 1303, 1, 0, 0, 0, 1310,
+		1304, 1, 0, 0, 0, 1310, 1305, 1, 0, 0, 0, 1310, 1306, 1, 0, 0, 0, 1310,
+		1307, 1, 0, 0, 0, 1310, 1308, 1, 0, 0, 0, 1310, 1309, 1, 0, 0, 0, 1311,
+		147, 1, 0, 0, 0, 1312, 1314, 5, 80, 0, 0, 1313, 1315, 3, 74, 37, 0, 1314,
+		1313, 1, 0, 0, 0, 1314, 1315, 1, 0, 0, 0, 1315, 1316, 1, 0, 0, 0, 1316,
+		1317, 5, 51, 0, 0, 1317, 1318, 3, 150, 75, 0, 1318, 1319, 5, 52, 0, 0,
+		1319, 1325, 1, 0, 0, 0, 1320, 1322, 5, 80, 0, 0, 1321, 1323, 3, 74, 37,
+		0, 1322, 1321, 1, 0, 0, 0, 1322, 1323, 1, 0, 0, 0, 1323, 1325, 1, 0, 0,
+		0, 1324, 1312, 1, 0, 0, 0, 1324, 1320, 1, 0, 0, 0, 1325, 149, 1, 0, 0,
+		0, 1326, 1331, 3, 6, 3, 0, 1327, 1328, 5, 56, 0, 0, 1328, 1330, 3, 6, 3,
+		0, 1329, 1327, 1, 0, 0, 0, 1330, 1333, 1, 0, 0, 0, 1331, 1329, 1, 0, 0,
+		0, 1331, 1332, 1, 0, 0, 0, 1332, 151, 1, 0, 0, 0, 1333, 1331, 1, 0, 0,
+		0, 1334, 1337, 5, 11, 0, 0, 1335, 1338, 3, 78, 39, 0, 1336, 1338, 3, 128,
+		64, 0, 1337, 1335, 1, 0, 0, 0, 1337, 1336, 1, 0, 0, 0, 1338, 153, 1, 0,
+		0, 0, 1339, 1340, 5, 18, 0, 0, 1340, 1341, 3, 78, 39, 0, 1341, 155, 1,
+		0, 0, 0, 157, 159, 165, 174, 182, 189, 197, 203, 210, 213, 218, 225, 236,
+		245, 253, 260, 267, 274, 279, 286, 292, 297, 302, 306, 312, 317, 322, 324,
+		333, 338, 344, 349, 354, 356, 368, 373, 384, 389, 391, 398, 437, 442, 447,
+		457, 461, 466, 478, 483, 488, 496, 501, 507, 512, 517, 521, 527, 532, 537,
+		539, 543, 546, 549, 556, 564, 567, 570, 580, 589, 598, 603, 609, 614, 616,
+		621, 628, 633, 636, 646, 653, 660, 667, 671, 679, 685, 694, 711, 713, 724,
+		734, 741, 748, 768, 778, 783, 798, 805, 820, 850, 857, 862, 868, 883, 896,
+		906, 918, 925, 929, 943, 955, 958, 965, 990, 1043, 1051, 1055, 1064, 1069,
+		1071, 1076, 1080, 1084, 1102, 1105, 1107, 1131, 1142, 1146, 1148, 1160,
+		1164, 1166, 1174, 1181, 1185, 1190, 1194, 1198, 1204, 1209, 1213, 1218,
+		1225, 1230, 1235, 1251, 1255, 1262, 1267, 1271, 1275, 1285, 1289, 1310,
+		1314, 1322, 1324, 1331, 1337,
 	}
 	deserializer := antlr.NewATNDeserializer(nil)
 	staticData.atn = deserializer.Deserialize(staticData.serializedATN)
@@ -24469,8 +24474,12 @@ func (s *EnumVariantPatternContext) IDENT(i int) antlr.TerminalNode {
 	return s.GetToken(PromiseParserIDENT, i)
 }
 
-func (s *EnumVariantPatternContext) DOT() antlr.TerminalNode {
-	return s.GetToken(PromiseParserDOT, 0)
+func (s *EnumVariantPatternContext) AllDOT() []antlr.TerminalNode {
+	return s.GetTokens(PromiseParserDOT)
+}
+
+func (s *EnumVariantPatternContext) DOT(i int) antlr.TerminalNode {
+	return s.GetToken(PromiseParserDOT, i)
 }
 
 func (s *EnumVariantPatternContext) TypeArgs() ITypeArgsContext {
@@ -24997,8 +25006,12 @@ func (s *EnumDestructurePatternContext) IDENT(i int) antlr.TerminalNode {
 	return s.GetToken(PromiseParserIDENT, i)
 }
 
-func (s *EnumDestructurePatternContext) DOT() antlr.TerminalNode {
-	return s.GetToken(PromiseParserDOT, 0)
+func (s *EnumDestructurePatternContext) AllDOT() []antlr.TerminalNode {
+	return s.GetTokens(PromiseParserDOT)
+}
+
+func (s *EnumDestructurePatternContext) DOT(i int) antlr.TerminalNode {
+	return s.GetToken(PromiseParserDOT, i)
 }
 
 func (s *EnumDestructurePatternContext) LPAREN() antlr.TerminalNode {
@@ -25112,25 +25125,49 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 	p.EnterRule(localctx, 146, PromiseParserRULE_matchPattern)
 	var _la int
 
-	p.SetState(1302)
+	p.SetState(1310)
 	p.GetErrorHandler().Sync(p)
 	if p.HasError() {
 		goto errorExit
 	}
 
-	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 149, p.GetParserRuleContext()) {
+	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 151, p.GetParserRuleContext()) {
 	case 1:
 		localctx = NewEnumDestructurePatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 1)
+		p.SetState(1271)
+		p.GetErrorHandler().Sync(p)
+
+		if p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 147, p.GetParserRuleContext()) == 1 {
+			{
+				p.SetState(1269)
+				p.Match(PromiseParserIDENT)
+				if p.HasError() {
+					// Recognition error - abort rule
+					goto errorExit
+				}
+			}
+			{
+				p.SetState(1270)
+				p.Match(PromiseParserDOT)
+				if p.HasError() {
+					// Recognition error - abort rule
+					goto errorExit
+				}
+			}
+
+		} else if p.HasError() { // JIM
+			goto errorExit
+		}
 		{
-			p.SetState(1269)
+			p.SetState(1273)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
 				goto errorExit
 			}
 		}
-		p.SetState(1271)
+		p.SetState(1275)
 		p.GetErrorHandler().Sync(p)
 		if p.HasError() {
 			goto errorExit
@@ -25139,13 +25176,13 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 
 		if _la == PromiseParserLBRACKET {
 			{
-				p.SetState(1270)
+				p.SetState(1274)
 				p.TypeArgs()
 			}
 
 		}
 		{
-			p.SetState(1273)
+			p.SetState(1277)
 			p.Match(PromiseParserDOT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25153,7 +25190,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1274)
+			p.SetState(1278)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25161,7 +25198,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1275)
+			p.SetState(1279)
 			p.Match(PromiseParserLPAREN)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25169,11 +25206,11 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1276)
+			p.SetState(1280)
 			p.PatternFields()
 		}
 		{
-			p.SetState(1277)
+			p.SetState(1281)
 			p.Match(PromiseParserRPAREN)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25184,15 +25221,39 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 	case 2:
 		localctx = NewEnumVariantPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 2)
+		p.SetState(1285)
+		p.GetErrorHandler().Sync(p)
+
+		if p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 149, p.GetParserRuleContext()) == 1 {
+			{
+				p.SetState(1283)
+				p.Match(PromiseParserIDENT)
+				if p.HasError() {
+					// Recognition error - abort rule
+					goto errorExit
+				}
+			}
+			{
+				p.SetState(1284)
+				p.Match(PromiseParserDOT)
+				if p.HasError() {
+					// Recognition error - abort rule
+					goto errorExit
+				}
+			}
+
+		} else if p.HasError() { // JIM
+			goto errorExit
+		}
 		{
-			p.SetState(1279)
+			p.SetState(1287)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
 				goto errorExit
 			}
 		}
-		p.SetState(1281)
+		p.SetState(1289)
 		p.GetErrorHandler().Sync(p)
 		if p.HasError() {
 			goto errorExit
@@ -25201,13 +25262,13 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 
 		if _la == PromiseParserLBRACKET {
 			{
-				p.SetState(1280)
+				p.SetState(1288)
 				p.TypeArgs()
 			}
 
 		}
 		{
-			p.SetState(1283)
+			p.SetState(1291)
 			p.Match(PromiseParserDOT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25215,7 +25276,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1284)
+			p.SetState(1292)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25227,7 +25288,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewTypeBindingPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 3)
 		{
-			p.SetState(1285)
+			p.SetState(1293)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25235,7 +25296,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1286)
+			p.SetState(1294)
 			p.BindingName()
 		}
 
@@ -25243,7 +25304,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewShortDestructurePatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 4)
 		{
-			p.SetState(1287)
+			p.SetState(1295)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25251,7 +25312,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1288)
+			p.SetState(1296)
 			p.Match(PromiseParserLPAREN)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25259,11 +25320,11 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 			}
 		}
 		{
-			p.SetState(1289)
+			p.SetState(1297)
 			p.PatternFields()
 		}
 		{
-			p.SetState(1290)
+			p.SetState(1298)
 			p.Match(PromiseParserRPAREN)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25275,7 +25336,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewNamePatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 5)
 		{
-			p.SetState(1292)
+			p.SetState(1300)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25287,7 +25348,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewIntLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 6)
 		{
-			p.SetState(1293)
+			p.SetState(1301)
 			p.Match(PromiseParserINT_LITERAL)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25299,7 +25360,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewFloatLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 7)
 		{
-			p.SetState(1294)
+			p.SetState(1302)
 			p.Match(PromiseParserFLOAT_LITERAL)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25311,7 +25372,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewCharLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 8)
 		{
-			p.SetState(1295)
+			p.SetState(1303)
 			p.Match(PromiseParserCHAR_LITERAL)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25323,7 +25384,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewTrueLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 9)
 		{
-			p.SetState(1296)
+			p.SetState(1304)
 			p.Match(PromiseParserTRUE)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25335,7 +25396,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewFalseLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 10)
 		{
-			p.SetState(1297)
+			p.SetState(1305)
 			p.Match(PromiseParserFALSE)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25347,7 +25408,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewNoneLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 11)
 		{
-			p.SetState(1298)
+			p.SetState(1306)
 			p.Match(PromiseParserNONE)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25359,7 +25420,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewStringLiteralPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 12)
 		{
-			p.SetState(1299)
+			p.SetState(1307)
 			p.StringLiteral()
 		}
 
@@ -25367,7 +25428,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewWildcardPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 13)
 		{
-			p.SetState(1300)
+			p.SetState(1308)
 			p.Match(PromiseParserUNDERSCORE)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25379,7 +25440,7 @@ func (p *PromiseParser) MatchPattern() (localctx IMatchPatternContext) {
 		localctx = NewExpressionPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 14)
 		{
-			p.SetState(1301)
+			p.SetState(1309)
 			p.expression(0)
 		}
 
@@ -25603,25 +25664,25 @@ func (p *PromiseParser) Pattern() (localctx IPatternContext) {
 	p.EnterRule(localctx, 148, PromiseParserRULE_pattern)
 	var _la int
 
-	p.SetState(1316)
+	p.SetState(1324)
 	p.GetErrorHandler().Sync(p)
 	if p.HasError() {
 		goto errorExit
 	}
 
-	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 152, p.GetParserRuleContext()) {
+	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 154, p.GetParserRuleContext()) {
 	case 1:
 		localctx = NewDestructureIsPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 1)
 		{
-			p.SetState(1304)
+			p.SetState(1312)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
 				goto errorExit
 			}
 		}
-		p.SetState(1306)
+		p.SetState(1314)
 		p.GetErrorHandler().Sync(p)
 		if p.HasError() {
 			goto errorExit
@@ -25630,13 +25691,13 @@ func (p *PromiseParser) Pattern() (localctx IPatternContext) {
 
 		if _la == PromiseParserLBRACKET {
 			{
-				p.SetState(1305)
+				p.SetState(1313)
 				p.TypeArgs()
 			}
 
 		}
 		{
-			p.SetState(1308)
+			p.SetState(1316)
 			p.Match(PromiseParserLPAREN)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25644,11 +25705,11 @@ func (p *PromiseParser) Pattern() (localctx IPatternContext) {
 			}
 		}
 		{
-			p.SetState(1309)
+			p.SetState(1317)
 			p.PatternFields()
 		}
 		{
-			p.SetState(1310)
+			p.SetState(1318)
 			p.Match(PromiseParserRPAREN)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25660,19 +25721,19 @@ func (p *PromiseParser) Pattern() (localctx IPatternContext) {
 		localctx = NewIdentIsPatternContext(p, localctx)
 		p.EnterOuterAlt(localctx, 2)
 		{
-			p.SetState(1312)
+			p.SetState(1320)
 			p.Match(PromiseParserIDENT)
 			if p.HasError() {
 				// Recognition error - abort rule
 				goto errorExit
 			}
 		}
-		p.SetState(1314)
+		p.SetState(1322)
 		p.GetErrorHandler().Sync(p)
 
-		if p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 151, p.GetParserRuleContext()) == 1 {
+		if p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 153, p.GetParserRuleContext()) == 1 {
 			{
-				p.SetState(1313)
+				p.SetState(1321)
 				p.TypeArgs()
 			}
 
@@ -25832,10 +25893,10 @@ func (p *PromiseParser) PatternFields() (localctx IPatternFieldsContext) {
 
 	p.EnterOuterAlt(localctx, 1)
 	{
-		p.SetState(1318)
+		p.SetState(1326)
 		p.BindingName()
 	}
-	p.SetState(1323)
+	p.SetState(1331)
 	p.GetErrorHandler().Sync(p)
 	if p.HasError() {
 		goto errorExit
@@ -25844,7 +25905,7 @@ func (p *PromiseParser) PatternFields() (localctx IPatternFieldsContext) {
 
 	for _la == PromiseParserCOMMA {
 		{
-			p.SetState(1319)
+			p.SetState(1327)
 			p.Match(PromiseParserCOMMA)
 			if p.HasError() {
 				// Recognition error - abort rule
@@ -25852,11 +25913,11 @@ func (p *PromiseParser) PatternFields() (localctx IPatternFieldsContext) {
 			}
 		}
 		{
-			p.SetState(1320)
+			p.SetState(1328)
 			p.BindingName()
 		}
 
-		p.SetState(1325)
+		p.SetState(1333)
 		p.GetErrorHandler().Sync(p)
 		if p.HasError() {
 			goto errorExit
@@ -25996,29 +26057,29 @@ func (p *PromiseParser) GoExpr() (localctx IGoExprContext) {
 	p.EnterRule(localctx, 152, PromiseParserRULE_goExpr)
 	p.EnterOuterAlt(localctx, 1)
 	{
-		p.SetState(1326)
+		p.SetState(1334)
 		p.Match(PromiseParserGO)
 		if p.HasError() {
 			// Recognition error - abort rule
 			goto errorExit
 		}
 	}
-	p.SetState(1329)
+	p.SetState(1337)
 	p.GetErrorHandler().Sync(p)
 	if p.HasError() {
 		goto errorExit
 	}
 
-	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 154, p.GetParserRuleContext()) {
+	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 156, p.GetParserRuleContext()) {
 	case 1:
 		{
-			p.SetState(1327)
+			p.SetState(1335)
 			p.Block()
 		}
 
 	case 2:
 		{
-			p.SetState(1328)
+			p.SetState(1336)
 			p.expression(0)
 		}
 
@@ -26141,7 +26202,7 @@ func (p *PromiseParser) UnsafeBlock() (localctx IUnsafeBlockContext) {
 	p.EnterRule(localctx, 154, PromiseParserRULE_unsafeBlock)
 	p.EnterOuterAlt(localctx, 1)
 	{
-		p.SetState(1331)
+		p.SetState(1339)
 		p.Match(PromiseParserUNSAFE)
 		if p.HasError() {
 			// Recognition error - abort rule
@@ -26149,7 +26210,7 @@ func (p *PromiseParser) UnsafeBlock() (localctx IUnsafeBlockContext) {
 		}
 	}
 	{
-		p.SetState(1332)
+		p.SetState(1340)
 		p.Block()
 	}
 

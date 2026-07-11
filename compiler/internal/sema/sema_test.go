@@ -17160,7 +17160,7 @@ func TestModuleQualifiedEnumMatchUndefinedVariant(t *testing.T) {
 			};
 		}
 	`, moduleScopes)
-	expectError(t, errs, "has no variant or method Purple")
+	expectError(t, errs, "has no variant Purple")
 }
 
 func TestModuleQualifiedEnumMatchNotAnEnum(t *testing.T) {
@@ -17178,11 +17178,11 @@ func TestModuleQualifiedEnumMatchNotAnEnum(t *testing.T) {
 			};
 		}
 	`, moduleScopes)
-	// ExpressionMatchPattern not rewritten because User is not an enum
-	// Falls through to expression type checking
-	if len(errs) == 0 {
-		t.Fatal("expected errors for non-enum type in match pattern")
-	}
+	// T1132: the qualified variant pattern now parses directly into an
+	// EnumVariantMatchPattern (Module=models), so resolveEnumForPattern reaches
+	// the "not an enum type" diagnostic rather than falling through to generic
+	// expression type checking.
+	expectError(t, errs, "User is not an enum type")
 }
 
 func TestModuleQualifiedEnumDestructureBindingCount(t *testing.T) {
@@ -17220,6 +17220,106 @@ func TestModuleQualifiedEnumMatchWithWildcard(t *testing.T) {
 		}
 	`, moduleScopes)
 	expectNoErrors(t, errs)
+}
+
+// T1132: a qualified destructure pattern naming a type that does not exist in
+// the module resolves through resolveEnumForPattern's "has no type" branch.
+// This path is only reachable because the grammar now parses `mod.T.V(_)`
+// directly into an EnumDestructureMatchPattern instead of an expression.
+func TestModuleQualifiedEnumMatchUndefinedEnum(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Red;
+			match c {
+				mymod.Nope.Circle(_) => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "module 'mymod' has no type 'Nope'")
+}
+
+// T1132: a qualified pattern whose leading identifier is not an imported module
+// reaches resolveEnumForPattern's "undefined" branch (the module lookup fails).
+func TestModuleQualifiedEnumMatchUndefinedModule(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Red;
+			match c {
+				nomod.Color.Red => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "undefined: nomod")
+}
+
+// T1132: a qualified DESTRUCTURE pattern (with payload parens) over a
+// module-qualified named type that is not an enum reaches the "not an enum
+// type" branch — the destructure companion to TestModuleQualifiedEnumMatchNotAnEnum.
+func TestModuleQualifiedEnumDestructureNotAnEnum(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		test() {
+			int x = 1;
+			match x {
+				models.User.Foo(y) => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "User is not an enum type")
+}
+
+// T1132: a qualified pattern whose leading identifier resolves to a non-module
+// object (here a local variable) reaches resolveEnumForPattern's "not a module"
+// branch.
+func TestModuleQualifiedEnumMatchLeadingNotAModule(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			int foo = 1;
+			mymod.Color c = mymod.Color.Red;
+			match c {
+				foo.Color.Red => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "foo is not a module")
+}
+
+// T1132: a qualified pattern naming a module member that exists but is not a
+// type (here a function) reaches resolveEnumForPattern's "not a type" branch.
+func TestModuleQualifiedEnumMatchMemberNotAType(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		test() {
+			int x = 1;
+			match x {
+				models.create_user.Foo(y) => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "create_user is not a type")
 }
 
 // T0156: MutexGuard cannot be constructed directly.

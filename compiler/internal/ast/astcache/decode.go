@@ -596,6 +596,7 @@ func (d *decoder) matchPattern() ast.MatchPattern {
 	case tagEnumDestructureMatchPattern:
 		n := &ast.EnumDestructureMatchPattern{}
 		d.setPosEnd(n)
+		n.Module = d.str()
 		n.Enum = d.str()
 		n.Variant = d.str()
 		n.Bindings = d.strSlice()
@@ -603,6 +604,7 @@ func (d *decoder) matchPattern() ast.MatchPattern {
 	case tagEnumVariantMatchPattern:
 		n := &ast.EnumVariantMatchPattern{}
 		d.setPosEnd(n)
+		n.Module = d.str()
 		n.Enum = d.str()
 		n.Variant = d.str()
 		return n

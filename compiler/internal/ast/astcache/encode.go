@@ -473,12 +473,14 @@ func (e *encoder) matchPattern(p ast.MatchPattern) {
 	case *ast.EnumDestructureMatchPattern:
 		e.u8(tagEnumDestructureMatchPattern)
 		e.nodePos(n)
+		e.str(n.Module)
 		e.str(n.Enum)
 		e.str(n.Variant)
 		e.strSlice(n.Bindings)
 	case *ast.EnumVariantMatchPattern:
 		e.u8(tagEnumVariantMatchPattern)
 		e.nodePos(n)
+		e.str(n.Module)
 		e.str(n.Enum)
 		e.str(n.Variant)
 	case *ast.TypeBindingMatchPattern:

@@ -12907,10 +12907,22 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 	}
 
-	// Create anonymous function
-	lambdaName := fmt.Sprintf(".lambda.%d", c.lambdaCounter)
+	// Create anonymous function. T1254: qualify the name with the enclosing
+	// compilation unit's owner (instance/module) so lambdas created inside
+	// monomorphized instance or module bodies get globally-unique names. This
+	// lets each per-instance/per-module .bc keep external linkage without
+	// colliding with identically-numbered lambdas baked into other cached .bc
+	// files at link time.
+	lambdaName := fmt.Sprintf(".lambda.%s%d", c.enclosingUnitPrefix(), c.lambdaCounter)
 	c.lambdaCounter++
 	fn := c.module.NewFunc(lambdaName, retType, params...)
+	// T1254: route the lambda into the same compilation unit (.bc) as the
+	// function that creates it. Without this, a lambda born inside a
+	// monomorphized instance / module method body lands in the main IR while
+	// its creating body lands in a cached instance/module .bc — and when that
+	// .bc is served from cache (body generation skipped), the lambda is never
+	// re-emitted, producing an undefined-symbol link error.
+	c.adoptEnclosingCompilationUnit(fn)
 
 	// Build env struct type and capture values from the enclosing scope BEFORE switching context
 	var envStructType *irtypes.StructType
@@ -12987,6 +12999,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedDropBindings := c.dropBindings         // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
+	savedEnvOwnedCaptures := c.lambdaEnvOwnedCaptures // T1254
 	savedGoExprFF2 := c.goExprFireAndForget
 	savedStmtTemps := c.stmtTemps                       // T0073
 	savedStmtTempMap := c.stmtTempMap                   // T0073
@@ -13036,6 +13049,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.tempTrackingEnabled = true              // B0259: enable temp tracking in lambda bodies
 	c.loopScopeDepth = 0
 	c.lambdaWritebacks = nil
+	c.lambdaEnvOwnedCaptures = nil // T1254: fresh per-lambda; populated in capture loop below
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry
@@ -13072,6 +13086,15 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 				// NOT scopeBindings — the env drop function handles final cleanup, and
 				// scope-exit drop would free a value that's been written back to the env.
 				c.maybeRegisterCapturedOptionalStructuralDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
+				// T1254: record captures the env drop function will free, so a
+				// `return <capture>` clones instead of handing back the raw pointer
+				// (which env_drop would then double-free).
+				if c.analyzeEnvCaptureDrop(cv).action != envDropNone {
+					if c.lambdaEnvOwnedCaptures == nil {
+						c.lambdaEnvOwnedCaptures = make(map[string]bool)
+					}
+					c.lambdaEnvOwnedCaptures[cv.Obj.Name()] = true
+				}
 			}
 		}
 	}
@@ -13093,6 +13116,9 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	} else if e.ExprBody != nil {
 		val := c.genExpr(e.ExprBody)
 		if val != nil && c.block.Term == nil {
+			// T1254: `move || -> a` returning an env-owned droppable capture must
+			// hand back an independent clone; env_drop frees the retained copy.
+			val = c.maybeDupReturnedEnvCapture(val, e.ExprBody, sig.Result())
 			// B0259: Clean up string/heap/env temps from the expression.
 			// Claim the return value first so it's not freed.
 			c.claimStringTemp(val)
@@ -13138,6 +13164,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.dropBindings = savedDropBindings         // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
+	c.lambdaEnvOwnedCaptures = savedEnvOwnedCaptures // T1254
 	c.goExprFireAndForget = savedGoExprFF2
 	c.borrowedValueParams = savedBorrowedValueParams   // T0945
 	c.stmtTemps = savedStmtTemps                       // T0073
@@ -13291,6 +13318,49 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 //
 // Handles: strings, vectors, channels, heap user types (with/without drop),
 // and closure captures (frees inner env). Skips `this` captures (borrowed, not owned).
+
+// adoptEnclosingCompilationUnit tags a newly-created helper function (lambda or
+// env-drop) with the same instance/module ownership as the function currently
+// being generated (c.fn). This ensures the helper travels into the same split .bc
+// as its creator instead of the main IR (T1254). When the creator's body lives in
+// a per-instance or per-module .bc that can be served from cache (body generation
+// skipped), the helper must be self-contained in that same .bc — otherwise it is
+// never emitted on a cache hit → undefined symbol at link. The helper keeps
+// external linkage but its name is owner-qualified (see enclosingUnitPrefix) so
+// copies baked into separately-cached objects cannot collide at link time.
+func (c *Compiler) adoptEnclosingCompilationUnit(fn *ir.Func) {
+	if c.fn == nil {
+		return
+	}
+	encl := c.fn.Name()
+	if owner, ok := c.instanceOwnedFuncs[encl]; ok {
+		c.instanceOwnedFuncs[fn.Name()] = owner
+	}
+	if owner, ok := c.moduleOwnedFuncs[encl]; ok {
+		c.moduleOwnedFuncs[fn.Name()] = owner
+	}
+}
+
+// enclosingUnitPrefix returns a name qualifier ("<owner>.") identifying the
+// per-instance or per-module compilation unit that owns the function currently
+// being generated (c.fn), or "" when it is plain main-IR code. Used to give
+// helper functions (lambdas) globally-unique names so their bodies, once routed
+// into an owner's cached .bc, cannot collide with identically-numbered helpers
+// from other cached objects (T1254).
+func (c *Compiler) enclosingUnitPrefix() string {
+	if c.fn == nil {
+		return ""
+	}
+	encl := c.fn.Name()
+	if owner, ok := c.instanceOwnedFuncs[encl]; ok {
+		return owner + "."
+	}
+	if owner, ok := c.moduleOwnedFuncs[encl]; ok {
+		return owner + "."
+	}
+	return ""
+}
+
 func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.StructType, captures []*sema.CapturedVar) *ir.Func {
 	// Analyze each capture to determine drop action
 	actions := make([]envFieldDrop, len(captures))
@@ -13307,6 +13377,8 @@ func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.Stru
 
 	dropFnName := lambdaName + ".env_drop"
 	dropFn := c.module.NewFunc(dropFnName, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
+	// T1254: keep the env-drop helper in the same .bc as its lambda/creator.
+	c.adoptEnclosingCompilationUnit(dropFn)
 
 	curBlock := dropFn.NewBlock(".entry")
 	typedPtr := curBlock.NewBitCast(dropFn.Params[0], irtypes.NewPointer(envStructType))

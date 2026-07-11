@@ -1,0 +1,42 @@
+// T1254: exercise the MODULE-owned branch of the lambda-adoption fix. Closures
+// created inside `closuremod`'s function bodies must be routed into that module's
+// split .bc and given module-qualified names (`.lambda.closuremod_*.N`) so their
+// bodies survive a warm-cache build and never collide with identically-numbered
+// lambdas baked into other cached objects. This complements
+// tests/e2e/closure_env_generic_helper_test.pr, which covers the instance-owned
+// branch (generic type operator/method bodies).
+use closuremod "./closuremod";
+
+// Plain module function, non-droppable (int) capture — module-owned lambda, no env_drop.
+test_module_closure_int_capture() `test {
+  f := closuremod.make_adder(10);
+  assert(f() == 11, "module closure captures base + 1");
+  g := closuremod.make_adder(41);
+  assert(g() == 42, "second module closure instance is independent");
+}
+
+// Plain module function, DROPPABLE (string) capture — forces a module-owned
+// `.env_drop` helper; the loop's leak check enforces the captured string is freed.
+test_module_closure_string_capture() `test {
+  f := closuremod.make_greeter("ada");
+  assert(f() == "hi ada", "module closure returns captured string");
+
+  int total = 0;
+  for i in 0..50 {
+    g := closuremod.make_greeter("x");
+    s := g();
+    total = total + s.len;
+  }
+  assert(total == 50 * 4, "50 * len(\"hi x\") with no env/string leak");
+}
+
+// Generic module function monomorphized to two type args — each FuncInstance body
+// owns its own module-qualified lambda; the droppable [string] arg also owns an
+// env_drop helper. Distinct instances must not collide at link.
+test_module_generic_closure_factory() `test {
+  fi := closuremod.make_holder[int](7);
+  assert(fi() == 7, "generic module closure ([int])");
+
+  fs := closuremod.make_holder[string]("kept");
+  assert(fs() == "kept", "generic module closure ([string], droppable capture)");
+}

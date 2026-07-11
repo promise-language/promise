@@ -9400,6 +9400,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 		val = c.wrapOperatorParamReturnValue(val, s.Value, retType) // T0897
+		val = c.maybeDupReturnedEnvCapture(val, s.Value, retType)   // T1254
 	}
 
 	// B0189: Dup return value if it's a string that might be borrowed from a
@@ -9745,6 +9746,40 @@ func (c *Compiler) dupOwnedReturnValue(val value.Value, resolvedType types.Type)
 		return dup, true
 	}
 	return val, false
+}
+
+// maybeDupReturnedEnvCapture clones the return value when a lambda body hands
+// back one of its env-owned move captures directly, e.g. `move || -> a` where
+// `a` is a captured droppable string/vector/heap value (T1254). The env struct
+// retains the captured value for repeat calls and the env drop function frees
+// it when the closure is dropped, so returning the raw captured pointer lets the
+// caller AND env_drop free the same allocation (double-free / use-after-free).
+// Cloning gives the caller an independent value; the env keeps and later frees
+// its own copy. Only fires for captures recorded in lambdaEnvOwnedCaptures
+// (those env_drop actually frees) and never for borrow return types (`T&`/`T~`),
+// which hand back an alias the caller does not own.
+func (c *Compiler) maybeDupReturnedEnvCapture(val value.Value, expr ast.Expr, retType types.Type) value.Value {
+	if val == nil || retType == nil || len(c.lambdaEnvOwnedCaptures) == 0 {
+		return val
+	}
+	if isRefType(retType) {
+		return val
+	}
+	ident, ok := unwrapDestructureParens(expr).(*ast.IdentExpr)
+	if !ok || !c.lambdaEnvOwnedCaptures[ident.Name] {
+		return val
+	}
+	resolved := retType
+	if c.typeSubst != nil {
+		resolved = types.Substitute(resolved, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		resolved = types.SubstituteSelf(resolved, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if dup, done := c.dupOwnedReturnValue(val, resolved); done {
+		return dup
+	}
+	return val
 }
 
 func (c *Compiler) cloneOwnedReturnAlias(val value.Value, effType types.Type) value.Value {

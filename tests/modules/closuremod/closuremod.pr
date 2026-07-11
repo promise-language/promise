@@ -1,0 +1,19 @@
+// T1254: closures created *inside a module function body* must have their lambda
+// (and any env_drop helper) routed into — and named after — that module's
+// compilation unit (the `moduleOwnedFuncs` branch of adoptEnclosingCompilationUnit /
+// enclosingUnitPrefix). The std iterator closures only exercise the *instance*-owned
+// branch; a plain module function creating a closure is the module-owned branch.
+make_adder(int base)() -> int `public `doc("Return a closure that adds base plus one — captures a non-droppable int (no env_drop).") {
+  b := base + 1;
+  return move || -> b;
+}
+
+make_greeter(string name)() -> string `public `doc("Return a closure capturing a droppable string built inside the module body — forces a module-owned env_drop helper.") {
+  msg := "hi " + name;
+  return move || -> msg;
+}
+
+make_holder[T](T value)() -> T `public `doc("Generic module function returning a closure that captures its type parameter — exercises the module-owned branch for a monomorphized FuncInstance body.") {
+  v := value;
+  return move || -> v;
+}

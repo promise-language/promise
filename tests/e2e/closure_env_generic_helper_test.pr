@@ -1,0 +1,147 @@
+// T1254: a capturing closure created inside a *monomorphized* instance/module
+// body (a generic user-defined operator or a generic method) must have its lambda
+// (and its .env_drop helper) routed into the SAME per-instance .bc as the body
+// that creates it, and given a globally-unique, owner-qualified name.
+//
+// Before the fix the lambda was emitted as a top-level `.lambda.NNN` in the MAIN
+// IR while its creating body lived in a cached per-instance .bc. Two failure
+// faces resulted:
+//   - isolation: on a WARM cache the instance body (and thus the lambda) is not
+//     regenerated, so the main IR no longer defines `.lambda.NNN` and the cached
+//     .bc references an undefined symbol → link error.
+//   - batch: the global lambda counter meant the number baked into one cached
+//     .bc could collide with an unrelated lambda of the same number from another
+//     cached object → wrong closure called → silent miscompile / panic.
+//
+// Multiple distinct generic types below exercise the cross-.bc collision face
+// (the old numbering would clash across their per-instance .bc files).
+type ABox[T] {
+  T v;
+  // Generic user-defined operator whose body constructs a capturing closure.
+  ^ (this, ABox[T] o)() -> T {
+    a := this.v;
+    return move || -> a;
+  }
+}
+
+type BBox[T] {
+  T v;
+  // Generic (non-operator) method whose body constructs a capturing closure.
+  make(this)() -> T {
+    b := this.v;
+    return move || -> b;
+  }
+}
+
+// A non-generic type whose user-defined operator ALSO returns a closure. Before
+// the fix this was the collision partner: the generic operator's global-counter
+// lambda number could clash with this one across their compilation units,
+// returning the wrong closure. Non-capturing on purpose — the collision face is
+// not limited to capturing closures (see tracker note on T1254).
+type NBox {
+  int w;
+  ^ (this, NBox o)() -> int {
+    return || -> 7;
+  }
+}
+
+// Droppable-capture variants: when the captured value is a heap type (string,
+// vector) the lambda needs a synthesized `.env_drop` helper. That helper must be
+// adopted into the same per-instance .bc and owner-qualified alongside the lambda
+// (genEnvDropFunc's adoptEnclosingCompilationUnit call site) — otherwise a warm
+// build references an undefined `.lambda.NNN.env_drop` symbol, or its number
+// collides across cached objects. The int/bool probes above never generate an
+// env_drop (Copy captures need no drop), so these cover that helper site.
+type SBox[T] {
+  T v;
+  ^ (this, SBox[T] o)() -> T {
+    a := this.v;
+    return move || -> a;
+  }
+}
+
+type VBox[T] {
+  T v;
+  make(this)() -> T {
+    b := this.v;
+    return move || -> b;
+  }
+}
+
+// Non-capturing generic operator closure sharing a batch with the non-generic
+// operator closure above — exercises the owner-qualified naming that keeps the
+// two lambdas from colliding at link time.
+probe_noncapturing_operator_collision() `test {
+  a := NBox(w: 1);
+  b := NBox(w: 2);
+  () -> int fn = a ^ b;
+  assert(fn() == 7, "non-generic operator closure returns 7");
+}
+
+// Both shapes, both monomorphized to [int], in one batch binary.
+probe_generic_operator_and_method() `test {
+  a := ABox[int](v: 11);
+  a2 := ABox[int](v: 22);
+  () -> int fa = a ^ a2;
+  assert(fa() == 11, "generic operator capturing closure returns this.v");
+
+  b := BBox[int](v: 99);
+  () -> int fb = b.make();
+  assert(fb() == 99, "generic method capturing closure returns this.v");
+}
+
+// A second monomorphization of the same generic types with a different type arg,
+// so distinct per-instance .bc files each carry their own owner-qualified lambda.
+probe_second_monomorphization() `test {
+  a := ABox[bool](v: true);
+  a2 := ABox[bool](v: false);
+  () -> bool fa = a ^ a2;
+  assert(fa() == true, "generic operator closure ([bool] instance)");
+
+  b := BBox[bool](v: false);
+  () -> bool fb = b.make();
+  assert(fb() == false, "generic method closure ([bool] instance)");
+}
+
+// Invoke-and-discard in a loop: each call allocates a fresh capturing env that
+// must be freed at statement end. Leak check enforces no accumulation.
+probe_discard_loop() `test {
+  a := ABox[int](v: 7);
+  a2 := ABox[int](v: 0);
+  int total = 0;
+  for i in 0..100 {
+    () -> int f = a ^ a2;
+    total = total + f();
+  }
+  assert(total == 700, "100 * 7 with no env leak");
+}
+
+// Generic operator + generic method whose capturing closures hold DROPPABLE
+// values (string, vector) — forces owner-qualified `.env_drop` helpers to be
+// synthesized and adopted into each per-instance .bc.
+probe_generic_operator_droppable_capture() `test {
+  a := SBox[string](v: "hi");
+  a2 := SBox[string](v: "unused");
+  () -> string f = a ^ a2;
+  assert(f() == "hi", "generic operator closure returns captured string");
+
+  b := VBox[int[]](v: [1, 2, 3]);
+  () -> int[] fb = b.make();
+  v := fb();
+  assert(v.len == 3 && v[0] == 1 && v[2] == 3, "generic method closure returns captured vector");
+}
+
+// Loop over a droppable-capture generic operator: each result owns a captured
+// heap string that must be freed at statement end. Leak check enforces that the
+// adopted `.env_drop` helper actually runs (no env/string accumulation).
+probe_droppable_env_drop_loop() `test {
+  a := SBox[string](v: "loopval");
+  a2 := SBox[string](v: "unused");
+  int total = 0;
+  for i in 0..50 {
+    () -> string f = a ^ a2;
+    s := f();
+    total = total + s.len;
+  }
+  assert(total == 50 * 7, "50 * len(\"loopval\") with no env/string leak");
+}

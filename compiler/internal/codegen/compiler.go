@@ -156,6 +156,16 @@ type Compiler struct {
 	// back to the env struct before return so mutations persist across calls.
 	lambdaWritebacks []lambdaWriteback
 
+	// T1254: names of move-captured variables in the lambda body currently being
+	// generated whose value is owned by the env struct and freed by the env drop
+	// function (droppable heap captures: string/vector/heap-user/etc.). Returning
+	// such a capture must hand back an independent clone — the env retains its own
+	// copy (for repeat calls) and env_drop frees it, so returning the raw captured
+	// pointer would double-free (caller frees the returned value + env_drop frees
+	// the same allocation). Populated per-lambda in genLambdaExpr; saved/restored
+	// so nested lambdas see only their own captures.
+	lambdaEnvOwnedCaptures map[string]bool
+
 	// Thunks for named function references used as first-class values.
 	// Maps original function name to a wrapper with env-first ABI.
 	thunks map[string]*ir.Func

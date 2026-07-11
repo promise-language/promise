@@ -541,13 +541,17 @@ func TestRunReleaseWinlinkMkdirFails(t *testing.T) {
 	}
 	writeTestDef(t, defDir, "kernel32", "kernel32.dll", "ExitProcess")
 
-	// Point at a directory that doesn't exist and whose parent is read-only.
-	// On POSIX systems, trying to mkdir under a read-only parent fails.
-	readOnlyDir := filepath.Join(root, "readonly")
-	if err := os.Mkdir(readOnlyDir, 0o555); err != nil {
+	// Point --out at a path whose parent is a regular file, not a directory.
+	// os.MkdirAll fails on every platform when a path component is an existing
+	// file (POSIX ENOTDIR / Windows "not a directory"). This is portable —
+	// unlike a read-only parent directory, which Windows ignores for
+	// subdirectory creation, so the read-only approach never triggered the
+	// error path on windows-amd64.
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	outDir := filepath.Join(readOnlyDir, "nested")
+	outDir := filepath.Join(blocker, "nested")
 
 	err := runReleaseWinlink(root, []string{
 		"--def-dir", defDir,
@@ -559,9 +563,6 @@ func TestRunReleaseWinlinkMkdirFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "mkdir") {
 		t.Errorf("error should mention mkdir, got: %v", err)
 	}
-
-	// Cleanup: restore permissions so TempDir cleanup succeeds
-	os.Chmod(readOnlyDir, 0o755)
 }
 
 // TestRunReleaseWinlinkGlobFails covers the glob error path in runReleaseWinlink

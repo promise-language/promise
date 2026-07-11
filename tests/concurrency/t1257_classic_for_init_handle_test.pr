@@ -1,0 +1,185 @@
+// T1257: a single-owner native handle (task/Mutex/MutexGuard) DECLARED IN THE
+// CLASSIC-FOR INIT clause and consumed in the loop CONDITION used to crash at
+// runtime — segfault (no rebind) or hang (rebind-in-body double-join) — because
+// genClassicForStmt hand-rolled the init declaration and bypassed the ownership
+// bookkeeping the normal var-decl codegen performs: it never claimed the RHS
+// statement-temp (leaving its drop flag armed → a stray double-drop of the owned
+// handle landed inside the loop body) and never registered a flag-guarded scope
+// drop for the init variable (so the condition's consuming `<-t` had no flag to
+// clear, and a never-consumed owned init value leaked). The fix delegates the
+// init clause to genTypedVarDecl/genInferredVarDecl. These runtime tests prove
+// the crash/hang are gone and every path stays leak-free.
+worker() int {
+  return 42;
+}
+
+identity[T](T x) T {
+  return x;
+}
+
+// 1) Segfault form: task declared in init, received in the condition, gated to a
+//    single iteration (no rebind). Used to null-deref on the loop-exit drop.
+t1257_init_cond_recv_single() `test {
+  int seen = 0;
+  for task[int] t = go worker(); seen < 1 && <-t == 42; seen = seen + 1 {
+    seen = seen + 100;
+  }
+  assert(seen >= 1, "single-iteration init handle received in condition");
+}
+
+// 2) Hang form: task declared in init, reassigned to a fresh handle in the body
+//    each iteration, received in the condition. Used to double-join at loop exit.
+t1257_init_cond_recv_rebind() `test {
+  int seen = 0;
+  for task[int] t = go worker(); <-t == 42 && seen < 3; seen = seen + 1 {
+    t = go worker();
+  }
+  assert(seen == 3, "rebind-per-iteration init handle received in condition");
+}
+
+// 3) T1137 alias variant: consuming through the generic-identity alias in the
+//    condition. Proves the fix is NOT alias-specific — plain `<-t` above already
+//    reproduced, so the alias path must also stay sound and leak-free.
+//
+//    The handle is rebound to a fresh task in the body each iteration. That
+//    top-level rebind is REQUIRED: T1256 soundly rejects reusing a single-owner
+//    handle consumed through a generic-return alias in the loop condition WITHOUT
+//    an intervening fresh rebind (the alias moves the handle out, so the loop
+//    back-edge would re-consume a moved value — a UAF the static ownership pass
+//    cannot see is gated away by any runtime short-circuit). The fresh rebind
+//    shields the candidate (per the T1255/T1256 fresh-rebind heuristic), making
+//    this a valid program that still exercises the alias-in-condition codegen the
+//    T1257 fix repairs.
+t1257_init_cond_recv_alias() `test {
+  int seen = 0;
+  for task[int] t = go worker(); <-identity(t) == 42 && seen < 3; seen = seen + 1 {
+    t = go worker();
+  }
+  assert(seen == 3, "init handle received via generic-identity alias in condition (rebind per iteration)");
+}
+
+// 4) MutexGuard (the other single-owner-handle kind) declared in init, borrowed
+//    in the condition, dropped at loop exit (unlocking the mutex). The init guard
+//    now gets a proper flag-guarded scope drop instead of being leaked/mis-scoped.
+t1257_init_cond_mutex_guard() `test {
+  Mutex[int] m = Mutex[int](5);
+  int seen = 0;
+  for MutexGuard[int] g = m.lock(); g.borrow == 5 && seen < 1; seen = seen + 1 {
+    seen = seen + 100;
+  }
+  assert(seen >= 1, "MutexGuard declared in init, borrowed in condition");
+}
+
+// 5) Early `return` inside a loop with a live init handle — the init handle must
+//    be dropped exactly once on the return unwind (no leak, no double-drop).
+t1257_init_handle_early_return_helper() int {
+  int seen = 0;
+  for task[int] t = go worker(); <-t == 42 && seen < 5; seen = seen + 1 {
+    t = go worker();
+    if (seen == 1) {
+      return seen;
+    }
+  }
+  return seen;
+}
+
+t1257_init_handle_early_return() `test {
+  int r = t1257_init_handle_early_return_helper();
+  assert(r == 1, "early return with live init handle drops exactly once");
+}
+
+// 5b) Early `break` inside such a loop with a live init handle — dropped once at
+//     the break edge; the init handle from the final live iteration is released.
+t1257_init_handle_break() `test {
+  int seen = 0;
+  for task[int] t = go worker(); <-t == 42 && seen < 5; seen = seen + 1 {
+    t = go worker();
+    if (seen == 2) {
+      break;
+    }
+  }
+  assert(seen == 2, "break with live init handle stays leak-free");
+}
+
+// 5c) `continue` inside such a loop with a live init handle — the continue edge
+//     jumps to the update/condition, re-consuming the rebound handle. Complements
+//     the break/return unwind-edge tests: the skipped-iteration path must stay
+//     leak-free and the rebound handle must still be consumed each iteration.
+t1257_init_handle_continue() `test {
+  int seen = 0;
+  int hits = 0;
+  for task[int] t = go worker(); <-t == 42 && seen < 4; seen = seen + 1 {
+    t = go worker();
+    if (seen == 1) {
+      continue;
+    }
+    hits = hits + 1;
+  }
+  assert(seen == 4, "continue with live init handle: iterations");
+  assert(hits == 3, "continue with live init handle: skipped one body");
+}
+
+// 5d) Inferred (`:=`) init in the segfault shape — exercises the fix's
+//     genInferredVarDecl branch AT RUNTIME (the typed cases above only cover
+//     genTypedVarDecl; the inferred branch was otherwise only checked at IR
+//     level). Same crash scenario: init handle received in the condition, gated
+//     to a single iteration, no rebind → used to null-deref on the loop-exit drop.
+t1257_init_cond_recv_single_inferred() `test {
+  int seen = 0;
+  for t := go worker(); seen < 1 && <-t == 42; seen = seen + 1 {
+    seen = seen + 100;
+  }
+  assert(seen >= 1, "inferred-init handle received in condition (single iteration)");
+}
+
+// 5e) Inferred (`:=`) init in the hang shape — rebind-per-iteration, received in
+//     the condition. Confirms the inferred branch is also free of the double-join.
+t1257_init_cond_recv_rebind_inferred() `test {
+  int seen = 0;
+  for t := go worker(); <-t == 42 && seen < 3; seen = seen + 1 {
+    t = go worker();
+  }
+  assert(seen == 3, "inferred-init handle received in condition (rebind per iteration)");
+}
+
+// 6) Non-consumed owned init value: an owned Vector declared in init and never
+//    moved must be dropped once at loop exit (guards the latent-leak fix — the
+//    old hand-rolled path registered no drop binding at all).
+t1257_init_owned_vector_not_consumed() `test {
+  int sum = 0;
+  for Vector[int] v = [1, 2, 3]; sum < 10; sum = sum + 1 {
+    sum = sum + v.len;
+  }
+  assert(sum >= 10, "owned vector in init dropped once, no leak");
+}
+
+// 6b) Value-type init (`int i = 0`) sanity — the common scalar case must still
+//     work through the delegated var-decl path.
+t1257_init_value_type_scalar() `test {
+  int total = 0;
+  for int i = 0; i < 4; i = i + 1 {
+    total = total + i;
+  }
+  assert(total == 6, "value-type scalar init");
+}
+
+// 7) Zero-iteration init-temp leak. The init clause is codegen'd inline (not via
+//    genStmt), so it must run the same statement-temp cleanup genStmt performs
+//    after every statement. Here `makeVec()` returns an owned heap Vector that
+//    `.len` discards — an unclaimed init-RHS statement temp. With the condition
+//    false on first evaluation the loop runs zero iterations and never reaches the
+//    update block, where the deferred cleanup used to live → the Vector leaked.
+//    The init clause now drains its own statement temps.
+t1257_init_makevec_helper() int[] {
+  int[] v = [1, 2, 3];
+  v.push(4);
+  return v;
+}
+
+t1257_init_temp_zero_iterations() `test {
+  int ran = 0;
+  for int n = t1257_init_makevec_helper().len; false; n = n + 1 {
+    ran = ran + 1;
+  }
+  assert(ran == 0, "zero-iteration loop: body never runs, init temp not leaked");
+}

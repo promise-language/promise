@@ -13880,15 +13880,33 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 // --- Classic for loop ---
 
 func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
-	// Init: declare the loop variable
+	// Init: declare the loop variable.
+	// T1257: delegate to the normal var-decl codegen (same technique T1192 uses
+	// for the update clause) instead of hand-rolling the store. The hand-rolled
+	// path bypassed claimStringTemp (leaving the RHS statement-temp drop flag
+	// armed → stray double-drop of an owned handle inside the loop body ⇒
+	// segfault/hang) and maybeRegisterDrop (no flag-guarded scope drop → a value
+	// consumed in the re-evaluated condition had no flag to clear, and a
+	// never-consumed owned init value leaked). The sema Types/AutoPropagate maps
+	// are keyed on the reused InitValue expr node and InitName/InitType by value,
+	// so a reconstructed decl node resolves identically.
 	if s.InitValue != nil {
-		typ := c.info.Types[s.InitValue]
-		lt := c.resolveType(typ)
-		alloca := c.createEntryAlloca(lt)
-		alloca.SetName(c.uniqueLocalName(s.InitName))
-		val := c.genExpr(s.InitValue)
-		c.block.NewStore(val, alloca)
-		c.locals[s.InitName] = alloca
+		if s.InitType != nil {
+			c.genTypedVarDecl(&ast.TypedVarDecl{Type: s.InitType, Name: s.InitName, Value: s.InitValue})
+		} else {
+			c.genInferredVarDecl(&ast.InferredVarDecl{Name: s.InitName, Value: s.InitValue})
+		}
+		// T1257: the init clause is a statement boundary but is codegen'd inline
+		// here rather than via genStmt, so it must run the same statement-temp
+		// cleanup genStmt performs after every statement. Without this, an
+		// unclaimed init-RHS temp (e.g. `for int n = makeVec().len; ...` — the
+		// owned Vector is discarded by `.len`) is drained by the trailing
+		// cleanupStmtLevelTemps in the update block instead. A zero-iteration loop
+		// never reaches the update block, so that temp leaks. Draining it here
+		// (right after the decl, exactly as genStmt would) fixes the leak; the
+		// init var's own value is already claimed into its scope-drop binding, so
+		// this only frees genuinely-unclaimed intermediates.
+		c.cleanupStmtLevelTemps()
 	}
 
 	headerBlock := c.newBlock("for.header")

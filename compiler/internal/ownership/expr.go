@@ -226,6 +226,15 @@ func (c *Checker) checkIdentUse(e *ast.IdentExpr) {
 	if c.state[e.Name] == Moved {
 		c.errorf(e.Pos(), "use of moved variable '%s'", e.Name)
 	}
+	// T1137: a use of a local that was passed as a bare single-owner handle to a
+	// prior (possibly generic) call flips its pending reuse candidates. Recording
+	// happens after the call's arg loop, so the arg's own use in that call is not
+	// seen here; only genuinely later uses reach this flip.
+	if cands, ok := c.pendingAliasLocals[e.Name]; ok {
+		for _, cand := range cands {
+			cand.reused = true
+		}
+	}
 }
 
 // unwrapGoExpr peels ParenExpr wrappers and returns the *ast.GoExpr, or nil if
@@ -1173,6 +1182,11 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 				c.rejectMoveMarker(arg)
 			}
 		}
+		// T1137: record bare single-owner-handle args passed by borrow so a later
+		// reuse of the source local after a generic call that returns the arg is
+		// rejected (propagateReturnHandleReqs). Placed after the arg loop so an
+		// arg's own use in this call is not counted as a reuse.
+		c.recordAliasHandleReuseCandidates(e, sig)
 		if member, ok := e.Callee.(*ast.MemberExpr); ok &&
 			isConsumingNativeMethod(c.info.Types[member.Target], member.Field) {
 			// T0846: close(~this) on a MutexGuard unlocks AND pal_free's the guard

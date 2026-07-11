@@ -1,0 +1,62 @@
+// T1137: a generic function/method that returns its borrowed (non-`move`) param,
+// instantiated over a BARE single-owner handle (task/Mutex/MutexGuard), makes the
+// call result an alias of the caller's source local. A SINGLE use of the result
+// is sound (codegen clears the source's drop flag), but REUSING the source local
+// after the aliasing call is a use-after-free — the handle was already consumed.
+//
+// The reuse-after-alias forms are now rejected at compile time by the ownership
+// pass (covered by internal/ownership/t1137_test.go). These runtime tests prove
+// the fix does NOT over-reject the still-valid paths and that they stay
+// leak-free: single use of the result, reusing a NON-returned param, and
+// reusing the source after reassigning it to a fresh handle.
+worker() int {
+  return 42;
+}
+
+identity[T](T x) T {
+  return x;
+}
+
+// Valid: single use of the aliased result — the deliberately-supported form.
+t1137_single_use_task() `test {
+  task[int] t = go worker();
+  int r = <-identity(t);
+  assert(r == 42, "single-use generic identity over task");
+}
+
+// Valid: pick_first returns `a`; reusing the NON-returned param `t2` is sound —
+// t2 was never aliased into the result. Precision guard (t1 would be rejected).
+pick_first[T](T a, T b) T {
+  return a;
+}
+
+t1137_pick_first_reuse_non_returned() `test {
+  task[int] t1 = go worker();
+  task[int] t2 = go worker();
+  int r = <-pick_first(t1, t2);
+  int r2 = <-t2;
+  assert(r == 42, "pick_first returned param");
+  assert(r2 == 42, "reuse non-returned param");
+}
+
+// Valid: reassigning the source to a FRESH handle before the later use — the
+// later `<-t` awaits the new handle, not the consumed one.
+t1137_reassign_then_use() `test {
+  task[int] t = go worker();
+  int r = <-identity(t);
+  t = go worker();
+  int r2 = <-t;
+  assert(r == 42, "aliased result");
+  assert(r2 == 42, "reassigned fresh handle");
+}
+
+// Valid: single use of the aliased result over a Mutex handle — the non-task
+// single-owner-handle kind. The source `m` is aliased into `m2` and never
+// reused; `m2` is locked once and dropped. Confirms the Mutex path stays
+// leak-free at runtime (the Go tests only assert compile-time acceptance).
+t1137_single_use_mutex() `test {
+  Mutex[int] m = Mutex[int](5);
+  Mutex[int] m2 = identity(m);
+  use g := m2.lock();
+  assert(g.borrow == 5, "single-use generic identity over Mutex");
+}

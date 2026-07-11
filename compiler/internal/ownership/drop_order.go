@@ -13,6 +13,14 @@ func (c *Checker) trackDeclOrder(name string, typ types.Type) {
 	c.declOrder[name] = c.nextOrder
 	c.varTypes[name] = typ
 	c.nextOrder++
+	// T1137: a fresh binding of this name (a new var decl, use/destructure
+	// binding, or a shadowing decl in a disjoint scope) means later uses refer to
+	// the NEW variable, not the previously-aliased one. Drop its pending
+	// reuse candidates so `<-t` over a re-declared `t` is not mis-flagged as a
+	// reuse of an earlier aliased handle — mirrors the reassignment carve-out in
+	// checkAssignStmt. Candidates already flipped `reused` before this rebind stay
+	// recorded in aliasHandleReuses, so genuine same-scope reuse is still caught.
+	delete(c.pendingAliasLocals, name)
 }
 
 // hasDropMethod returns true if the given type has a drop(~this) method.

@@ -140,6 +140,20 @@ type Checker struct {
 	// rejecting Optional-wrapped single-owner handles. (T1213)
 	funcReturnHandleReqs   map[*types.Func][]returnHandleReq
 	methodReturnHandleReqs map[*types.Method][]returnHandleReq
+
+	// T1137: bare single-owner-handle args passed by borrow to a (possibly
+	// generic) call that may return them. Keyed by call position (matches the
+	// sema GenericCallEdge.CallPos). Each candidate's `reused` is flipped true
+	// when its source local is used again after the call, within the same body;
+	// propagateReturnHandleReqs then rejects only the reuse-after-alias case for
+	// a callee whose returnHandleReq.Binding names that exact param. Persistent
+	// across the whole file (init once in Check) — call positions are unique.
+	aliasHandleReuses map[ast.Pos][]*aliasHandleReuse
+	// pendingAliasLocals maps a caller-side local name to its live reuse
+	// candidates for the current function body; the entries are the SAME
+	// pointers stored in aliasHandleReuses (flipping `reused` here mutates
+	// both). Reset per function/method body.
+	pendingAliasLocals map[string][]*aliasHandleReuse
 }
 
 // wrapCoercedHandle records the provenance of a T1212 wrap-coerced borrowed
@@ -194,6 +208,7 @@ func Check(file *ast.File, info *sema.Info) []error {
 		methodDrainReqs:        make(map[*types.Method][]drainReq),
 		funcReturnHandleReqs:   make(map[*types.Func][]returnHandleReq),
 		methodReturnHandleReqs: make(map[*types.Method][]returnHandleReq),
+		aliasHandleReuses:      make(map[ast.Pos][]*aliasHandleReuse), // T1137
 	}
 	c.check()
 	// T1035: validate deferred for-in-drain requirements against concrete
@@ -276,6 +291,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.goHandleBorrowedLocal = make(map[string]string)
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
+	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.curFuncObj = fn
 	c.curMethodObj = nil
 
@@ -415,6 +431,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.goHandleBorrowedLocal = make(map[string]string)
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
+	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.curFuncObj = nil
 	c.curMethodObj = m
 

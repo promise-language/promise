@@ -948,6 +948,10 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 			// path has no var-decl carve-out), so it never reaches a clean escape;
 			// untracking here only removes the false positive on a fresh OWNED RHS.
 			delete(c.wrapCoercedHandleLocal, ident.Name)
+			// T1137: reassigning the local binds a FRESH handle, so a later use is
+			// not a reuse of the previously-aliased one. Drop its pending reuse
+			// candidates (`t = go worker(); <-t` after an aliasing call is sound).
+			delete(c.pendingAliasLocals, ident.Name)
 			// T0895: register the shared borrow of the source aggregate *after*
 			// ExpireBorrower above so it is not immediately expired. Protects the
 			// source from being moved/consumed/reassigned while the borrowing

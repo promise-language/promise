@@ -22,6 +22,64 @@ type returnHandleReq struct {
 	Laundered bool       // T1214: recorded at a launder binding (`T y = x`), not a direct return
 }
 
+// aliasHandleReuse records a caller-side single-owner handle local passed by
+// borrow as an argument to a (possibly generic) call that may return that
+// param. T1137: for a BARE (depth-0) handle the callee's return aliases the
+// source local; codegen's return-alias flag clear makes a SINGLE use of the
+// result sound, but reusing the source local after the call is a
+// use-after-free (the handle was already consumed by the first await). The
+// verdict is deferred to propagateReturnHandleReqs, which fires only when the
+// callee's returnHandleReq.Binding names this exact param (calleeParam) AND the
+// source was reused. Matching on calleeParam ties the reused local to the
+// specific returned param — `pick_first(t1,t2)` returning `a` rejects reusing
+// t1 but allows reusing t2.
+type aliasHandleReuse struct {
+	calleeParam string // callee param name receiving this arg (matches returnHandleReq.Binding)
+	localName   string // caller-side local passed as that arg
+	kind        string // "task"/"Mutex"/"MutexGuard"
+	reused      bool   // set when localName is used again after the call
+}
+
+// recordAliasHandleReuseCandidates records, for each BARE single-owner-handle
+// argument passed by borrow into a call, a reuse candidate keyed by the call
+// position. If the callee turns out to return that exact param (a
+// returnHandleReq whose Binding matches the candidate's calleeParam) and the
+// caller reuses the source local after the call, propagateReturnHandleReqs
+// converts the resulting UAF into a compile error. Recording is harmless for
+// concrete callees and for callees that don't return the arg: they carry no
+// matching returnHandleReq, so the post-pass never fires. Only bare (depth-0)
+// handles are recorded — Optional-wrapped and non-handle types are handled by
+// the existing T1213/T1214 rejections. Move/consuming params (`~`, RefMut,
+// variadic, explicit call-site `move`) are skipped: they consume the arg, so a
+// later use is already rejected as a moved-variable use. T1137.
+func (c *Checker) recordAliasHandleReuseCandidates(e *ast.CallExpr, sig *types.Signature) {
+	params := sig.Params()
+	for i, arg := range e.Args {
+		if i >= len(params) {
+			break
+		}
+		p := params[i]
+		if arg.Move || paramBorrowKind(p) == BorrowMut || p.Ref() == types.RefMut || p.IsVariadic() {
+			continue // consumed — a later use is already a moved-variable error
+		}
+		id, ok := arg.Value.(*ast.IdentExpr)
+		if !ok {
+			continue
+		}
+		if _, tracked := c.state[id.Name]; !tracked {
+			continue
+		}
+		t := c.info.Types[id]
+		k := singleOwnerHandleKind(t)
+		if k == "" || optionalDepthType(t) != 0 {
+			continue // not a BARE (depth-0) single-owner handle
+		}
+		cand := &aliasHandleReuse{calleeParam: p.Name(), localName: id.Name, kind: k}
+		c.aliasHandleReuses[e.Pos()] = append(c.aliasHandleReuses[e.Pos()], cand)
+		c.pendingAliasLocals[id.Name] = append(c.pendingAliasLocals[id.Name], cand)
+	}
+}
+
 // optionalWrappedSingleOwnerHandle returns the handle kind when t is a
 // single-owner handle wrapped in >=1 Optional layer (Mutex[int]?, task[int]??),
 // else "". A BARE handle (depth 0) is intentionally excluded: codegen's
@@ -140,9 +198,40 @@ func (c *Checker) propagateReturnHandleReqs() {
 				}
 				k := optionalWrappedSingleOwnerHandle(substituted)
 				if k == "" {
-					// Bare handle (codegen return-alias clears the source flag),
-					// or a freely-returnable type (int/string/Vector/heap user
-					// type) — no double-free.
+					// T1137: a depth-0 BARE single-owner handle. A single use of
+					// the result is made safe by codegen's return-alias flag clear;
+					// reusing the source local after the aliasing call is a UAF (the
+					// handle was already consumed by that clear). Emit ONLY when the
+					// caller reuses the source local matched to the specific returned
+					// param (calleeParam == req.Binding gives the pick_first
+					// precision). A freely-returnable type (int/string/Vector/heap
+					// user type) has bareK == "" and is skipped entirely.
+					//
+					// Restricted to the DIRECT-return shape (`return x`, !Laundered):
+					// only that path routes through codegen's source-drop-flag clear,
+					// which is what consumes the source and makes a later reuse a UAF.
+					// The LAUNDER shape (`T y = x; …`) is T1214's domain — its
+					// bare-handle instantiations do NOT consume the source (the
+					// discard/launder form returns without aliasing it into the
+					// caller's result, so the source stays owned and reuse is sound —
+					// t1214_launder_discard_bare_mutex, t1216_discard_*_bare_mutex),
+					// and its genuinely-unsound Optional-wrapped forms are already
+					// rejected by the k != "" branch below.
+					if bareK := singleOwnerHandleKind(substituted); bareK != "" && !req.Laundered {
+						for _, cand := range c.aliasHandleReuses[edge.CallPos] {
+							if cand.calleeParam != req.Binding || !cand.reused {
+								continue
+							}
+							key := edge.CallPos.String() + "|reuse|" + cand.localName
+							if emitted[key] {
+								continue
+							}
+							emitted[key] = true
+							c.errorf(edge.CallPos,
+								"cannot reuse %s handle '%s' after '%s' returns it as owned (at %s): the aliasing call consumed the handle and a `%s` handle has no clone — use the result exactly once, or declare the parameter with `move` to transfer ownership",
+								bareK, cand.localName, req.Binding, req.Pos, bareK)
+						}
+					}
 					continue
 				}
 				key := edge.CallPos.String() + "|" + req.Binding + "|" + substituted.String()

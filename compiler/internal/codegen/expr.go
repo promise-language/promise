@@ -1948,6 +1948,32 @@ func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 
 // --- Call expressions ---
 
+// genFunctionMemberIndirectCall dispatches `member(...)` indirectly through the
+// fat pointer the callee (a function-typed field or getter) yields, resolving the
+// signature under the active mono subst. Shared by the Named (T1253) and enum
+// (T1258) direct-call arms of genCallExpr.
+func (c *Compiler) genFunctionMemberIndirectCall(e *ast.CallExpr, sig *types.Signature) value.Value {
+	// Resolve the signature under the active mono subst so the indirect dispatch
+	// sees concrete param/result types when the owner is a generic instance
+	// (matches the T1251 module path).
+	resolvedSig := sig
+	if c.typeSubst != nil {
+		if s, ok := types.Substitute(sig, c.typeSubst).(*types.Signature); ok {
+			resolvedSig = s
+		}
+	}
+	closure := c.genExpr(e.Callee) // field load, or getter call
+	var argVals []value.Value
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+	}
+	origArgVals := argVals // T0331: pre-coercion for alias check
+	argVals = c.coerceIndirectCallArgs(resolvedSig, e.Args, argVals)
+	result := c.genIndirectCall(closure, resolvedSig, argVals)
+	c.emitReturnAliasCheck(result, resolvedSig, e.Args, origArgVals, e) // T0331
+	return result
+}
+
 func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Handle super() calls in constructor bodies
 	if ident, ok := e.Callee.(*ast.IdentExpr); ok && ident.Name == "super" {
@@ -2047,25 +2073,19 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				isField := named.LookupField(member.Field) != nil
 				isGetter := !isField && named.LookupGetter(member.Field) != nil
 				if isField || isGetter {
-					// Resolve the signature under the active mono subst so the
-					// indirect dispatch sees concrete param/result types when the
-					// owner is a generic instance (matches the T1251 module path).
-					resolvedSig := sig
-					if c.typeSubst != nil {
-						if s, ok := types.Substitute(sig, c.typeSubst).(*types.Signature); ok {
-							resolvedSig = s
-						}
-					}
-					closure := c.genExpr(e.Callee) // field load, or getter call
-					var argVals []value.Value
-					for _, arg := range e.Args {
-						argVals = append(argVals, c.genCallArgExpr(arg.Value))
-					}
-					origArgVals := argVals // T0331: pre-coercion for alias check
-					argVals = c.coerceIndirectCallArgs(resolvedSig, e.Args, argVals)
-					result := c.genIndirectCall(closure, resolvedSig, argVals)
-					c.emitReturnAliasCheck(result, resolvedSig, e.Args, origArgVals, e) // T0331
-					return result
+					return c.genFunctionMemberIndirectCall(e, sig)
+				}
+			} else if enum := extractEnum(memberTargetType); enum != nil {
+				// T1258: enum analog of T1253 — an enum getter whose return type is
+				// a function type, invoked directly (`e.adder()`). extractNamed is
+				// nil for *types.Enum / enum *types.Instance, so this arm dispatches
+				// the trailing () indirectly through the getter's fat pointer instead
+				// of falling through to genMethodCall (which panics). genExpr(e.Callee)
+				// routes to genEnumGetterAccess, which materializes the {fn,env}
+				// pointer and tracks the env for cleanup. Enums have no fields-by-name,
+				// so only the getter case applies.
+				if enum.LookupGetter(member.Field) != nil {
+					return c.genFunctionMemberIndirectCall(e, sig)
 				}
 			}
 		}

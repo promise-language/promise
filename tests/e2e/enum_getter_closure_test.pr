@@ -10,11 +10,13 @@
 // Every test relies on the zero-tolerance leak check to enforce that the
 // materialized closure env is freed exactly once.
 //
-// NOTE: these tests exercise the getter *reference* form (`f := e.adder; f()`),
-// which is what T1096 makes ownership-legal. The *direct*-call form `e.adder()`
-// hits a separate, pre-existing codegen gap (the enum analog of T1253 gap #1) and
-// is tracked independently as T1258 — do not add direct-call cases here until that
-// bug is fixed.
+// T1258 additionally restored the *direct*-call form `e.adder()` (the enum analog
+// of the T1253 struct gap): the trailing `()` used to fall through to
+// genMethodCall and panic ("cannot resolve type for method call on *types.Enum"),
+// because extractNamed is nil for *types.Enum / enum *types.Instance. It now
+// dispatches indirectly through the getter's fat pointer. The direct-call,
+// discard, loop, generic-enum, borrowed-receiver, and closure-argument forms are
+// exercised below.
 enum E {
   A, B,
   // Getter returning a CAPTURING closure (env is heap-allocated).
@@ -22,6 +24,56 @@ enum E {
     int base = 41;
     return move || -> base + 1;
   }
+  // Getter returning a closure that scales its argument — exercises the
+  // argument-coercion arm of the direct-call indirect dispatch (T1258).
+  get scaler(int) -> int `doc("Returns a closure that scales its argument.") {
+    int factor = 10;
+    return move |int x| -> x * factor;
+  }
+}
+
+// T1258: direct call `e.adder()` — used to panic in codegen.
+test_enum_getter_direct_call() `test {
+  e := E.A;
+  assert(e.adder() == 42, "e.adder() should be 42");
+}
+
+// Direct-call result assigned to an int — exercises the fat-pointer→scalar store
+// path (must not store {i8*,i8*} into i64*).
+test_enum_getter_direct_call_assign() `test {
+  e := E.B;
+  int x = e.adder();
+  assert(x == 42, "assigned e.adder() should be 42");
+}
+
+// Bare direct-call discard — the closure env must be freed even though the int
+// result is unused.
+test_enum_getter_direct_call_discard() `test {
+  e := E.A;
+  e.adder();
+}
+
+// Direct-call in a loop — each call allocates a fresh capturing env that must be
+// freed at statement end (no accumulation across 100 iterations).
+test_enum_getter_direct_call_loop() `test {
+  e := E.A;
+  int total = 0;
+  for i in 0..100 {
+    total = total + e.adder();
+  }
+  assert(total == 4200, "100 * 42");
+}
+
+// Direct-call passing an argument to the returned closure — exercises
+// coerceIndirectCallArgs on the enum path.
+test_enum_getter_direct_call_with_arg() `test {
+  e := E.B;
+  assert(e.scaler(5) == 50, "e.scaler(5) should be 50");
+  int total = 0;
+  for i in 0..10 {
+    total = total + e.scaler(i);
+  }
+  assert(total == 450, "sum of 10*i for i in 0..10");
 }
 
 // The exact repro: return the enum getter's closure from a helper, then invoke.
@@ -77,6 +129,27 @@ test_generic_enum_getter_closure_bind_invoke() `test {
   assert(f() == 42, "b.maker bound should be 42");
 }
 
+// T1258: direct call on a generic-enum getter — exercises the *types.Instance
+// origin extractEnum arm on the direct-call path (c.typeSubst is nil here because
+// the caller is non-generic; the receiver type is already the concrete Box[int]).
+test_generic_enum_getter_direct_call() `test {
+  b := Box[int].Empty;
+  assert(b.maker() == 42, "Box[int].maker() should be 42");
+}
+
+// Direct call on a generic-enum getter from INSIDE a generic function body — here
+// c.typeSubst is non-nil, so the memberTargetType `Box[T]` is substituted to the
+// concrete instance before extractEnum, and the helper's signature-resolution
+// branch runs. Distinct from the case above, whose caller is non-generic.
+call_maker_direct[T](Box[T] b)(int) `doc("Directly calls b.maker() inside a generic body.") {
+  return b.maker();
+}
+
+test_generic_enum_getter_direct_call_in_generic_body() `test {
+  b := Box[int].Empty;
+  assert(call_maker_direct(b) == 42, "generic-body direct maker() should be 42");
+}
+
 // Getter reached through a SHARED BORROW of the enum (`a.borrow.adder`, where
 // `a.borrow` has type `E&`). This exercises the SharedRef-unwrapping arm of
 // extractEnumOrigin: the receiver type is `*types.SharedRef` around the enum, so
@@ -94,6 +167,13 @@ test_enum_getter_closure_via_borrow_returned() `test {
   a := Ref[E](E.A);
   f := use_arc_adder(a);
   assert(f() == 42, "adder() via Ref borrow should be 42");
+}
+
+// T1258: direct call through a shared borrow (`a.borrow.adder()`) — covers the
+// SharedRef-unwrap arm of extractEnum on the direct-call path.
+test_enum_getter_direct_call_via_borrow() `test {
+  a := Ref[E](E.A);
+  assert(a.borrow.adder() == 42, "a.borrow.adder() should be 42");
 }
 
 // Same borrowed-receiver shape, dropped without invocation — the leak check

@@ -172,6 +172,17 @@ func (c *Checker) matchesEnumQualified(module, name string, enum *types.Enum) bo
 		obj = mod.Scope().Lookup(name)
 	} else {
 		obj = c.lookup(name)
+		if obj == nil {
+			// B0328 rewrites a bare fieldless variant (`Empty =>`) to an
+			// unqualified EnumVariantMatchPattern carrying the subject enum's
+			// name but no module. When that enum is defined in another module
+			// it isn't in local scope, so the name lookup fails. The rewrite
+			// only fires when the variant belongs to the subject enum, so a
+			// name match against the subject enum is authoritative here — this
+			// mirrors the ShortDestructureMatchPattern path (Node(v,_)) which
+			// already resolves directly against the subject enum. (T1133)
+			return name == enum.Obj().Name()
+		}
 	}
 	if obj == nil {
 		return false

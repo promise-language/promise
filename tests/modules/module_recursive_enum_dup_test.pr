@@ -119,11 +119,9 @@ module_recursive_map_enum_node_drop_at_scope_exit() `test {
 // Map-indirected recursion (ModTreeM) read back via m[k]! + match — covers the
 // Map-bearing-variant synth-clone path across the module boundary.
 //
-// The fieldless `Empty` arm is module-qualified because bare fieldless variants
-// of a module enum aren't recognized in exhaustiveness (T1133); the payload arm
-// uses the bare form because qualified destructure with a `_` wildcard does not
-// parse (T1132). Both are incidental module-match limitations, not part of the
-// T1131 fix under test.
+// Both arms use the bare (unqualified) variant form: bare fieldless variants of
+// a module enum are now recognized in exhaustiveness (T1133), matching the bare
+// payload path.
 module_recursive_map_enum_in_map() `test {
   outer := Map[int, mathlib.ModTreeM]();
   children := Map[int, mathlib.ModTreeM]();
@@ -134,7 +132,7 @@ module_recursive_map_enum_in_map() `test {
     Node(v, _) => {
       assert(v == 7, "node value should be 7");
     },
-    mathlib.ModTreeM.Empty => {
+    Empty => {
       assert(false, "expected Node");
     },
   }

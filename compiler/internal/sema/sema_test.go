@@ -17102,6 +17102,50 @@ func TestModuleQualifiedEnumMatchNonExhaustive(t *testing.T) {
 	expectError(t, errs, "match is not exhaustive")
 }
 
+// T1133: bare (unqualified) variant patterns over a module-qualified enum
+// subject must be recognized in exhaustiveness. Both the bare payload variant
+// (Circle(radius)) and — the actual bug — the bare fieldless variant (Point)
+// must count as covered, so no "not exhaustive" error is reported.
+func TestModuleQualifiedEnumBareVariantMatchExhaustive(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Shape s = mymod.Shape.Point;
+			int r = match s {
+				Circle(radius) => radius,
+				Rect(w, h) => w + h,
+				Point => 0,
+			};
+		}
+	`, moduleScopes)
+	expectNoErrors(t, errs)
+}
+
+// T1133 (regression guard): the bare-fieldless recognition must be precise to
+// its own variant — it must NOT mark the whole module enum as covered. With the
+// bare fieldless `Point` arm omitted, exhaustiveness must still report the
+// missing variant, proving the fix's `name == enum` short-circuit only covers
+// the specific bare variant present, not the enum as a whole.
+func TestModuleQualifiedEnumBareVariantMatchNonExhaustive(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Shape s = mymod.Shape.Point;
+			int r = match s {
+				Circle(radius) => radius,
+				Rect(w, h) => w + h,
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "match is not exhaustive: missing variant Shape.Point")
+}
+
 func TestModuleQualifiedEnumMatchUndefinedVariant(t *testing.T) {
 	modScope := makeModuleScopeWithEnum(t)
 	moduleScopes := map[string]*types.Scope{"mymod": modScope}

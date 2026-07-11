@@ -1,0 +1,43 @@
+// T1133: a *bare* fieldless variant pattern (`Empty =>`) of a module-qualified
+// enum must be recognized in match exhaustiveness, just like a bare payload
+// variant (`Node(v, _) =>`) already is.
+//
+// Before the fix, sema rewrote the bare `Empty` arm to an unqualified
+// EnumVariantMatchPattern carrying no module; exhaustiveness then tried to
+// resolve `ModTreeM` via local scope, failed (the enum lives in mathlib), and
+// reported `match is not exhaustive: missing variant ModTreeM.Empty` even
+// though the `Empty` arm was present. Bare payload variants worked because they
+// resolve directly against the subject enum. The fix makes bare-fieldless
+// variants resolve the same way.
+use mathlib "./mathlib";
+
+// Bare fieldless + bare payload arms over a module-qualified enum subject.
+module_bare_fieldless_variant_match() `test {
+  outer := Map[int, mathlib.ModTreeM]();
+  outer[1] = mathlib.ModTreeM.Node(v: 7, children: Map[int, mathlib.ModTreeM]());
+  got := outer[1]!;
+  match got {
+    Node(v, _) => {
+      assert(v == 7, "node value should be 7");
+    },
+    Empty => {
+      assert(false, "expected Node");
+    },
+  }
+}
+
+// The Empty arm actually taken — proves the bare fieldless arm dispatches
+// correctly at runtime, not just that it satisfies exhaustiveness.
+module_bare_fieldless_variant_taken() `test {
+  outer := Map[int, mathlib.ModTreeM]();
+  outer[1] = mathlib.ModTreeM.Empty;
+  got := outer[1]!;
+  match got {
+    Node(_, _) => {
+      assert(false, "expected Empty");
+    },
+    Empty => {
+      assert(true, "empty arm taken");
+    },
+  }
+}

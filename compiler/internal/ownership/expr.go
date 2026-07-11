@@ -1798,6 +1798,26 @@ func extractEnumForMatch(typ types.Type) *types.Enum {
 	return nil
 }
 
+// extractEnumOrigin unwraps SharedRef/MutRef/Instance to the underlying *types.Enum,
+// or returns a bare *types.Enum directly. Mirrors codegen's extractEnum
+// (codegen/types.go) so the enum-getter exclusion in closureAggregateBorrowSource
+// stays in lockstep with codegen's isGetterCallExpr (T1096).
+func extractEnumOrigin(typ types.Type) *types.Enum {
+	switch t := typ.(type) {
+	case *types.Enum:
+		return t
+	case *types.Instance:
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e
+		}
+	case *types.SharedRef:
+		return extractEnumOrigin(t.Elem())
+	case *types.MutRef:
+		return extractEnumOrigin(t.Elem())
+	}
+	return nil
+}
+
 // isEnumVariantConstructorCallee reports whether callee is the callee of an
 // enum-variant constructor call of the form `EnumType[Args].Variant(arg…)`.
 // Both generic and non-generic enums are covered: the member Target's recorded
@@ -2038,8 +2058,9 @@ func isUserIndexExpr(info *sema.Info, idx *ast.IndexExpr) bool {
 // The type gate (closure-typed result) is explicit here — codegen gets it for
 // free via maybeRegisterEnvFree's *types.Signature check; without it, non-closure
 // field reads (strings, vectors) would be misclassified. Owned-return shapes —
-// a getter returning a closure, or a user-defined non-native `[]` — are excluded
-// (the local owns a fresh closure and keeps its owning binding). A plain
+// a getter (on a struct, an enum, or a module — T1096) returning a closure, or a
+// user-defined non-native `[]` — are excluded (the local owns a fresh closure and
+// keeps its owning binding). A plain
 // *ast.IdentExpr source falls through to nil: a local move transfers ownership.
 //
 // Exposing the peeled access (rather than just a bool) lets callers recover the
@@ -2075,8 +2096,25 @@ func closureAggregateBorrowSource(info *sema.Info, expr ast.Expr) ast.Expr {
 	}
 	// Owned-return shapes: the local owns a fresh closure, keep its binding.
 	if mem, ok := e.(*ast.MemberExpr); ok {
-		if n := extractNamedType(info.Types[mem.Target]); n != nil {
+		// Module-qualified getter (`mod.property`) returns a fresh OWNED value, so
+		// the local owns the closure env (not a borrow). Mirror codegen's
+		// isGetterCallExpr ModuleGetters arm (T1240, codegen/stmt.go) — the third
+		// getter kind alongside struct (Named) and enum getters — to keep ownership
+		// and codegen in lockstep (T1096).
+		if info.ModuleGetters[mem] {
+			return nil
+		}
+		targetType := info.Types[mem.Target]
+		if n := extractNamedType(targetType); n != nil {
 			if n.LookupGetter(mem.Field) != nil {
+				return nil
+			}
+		} else if en := extractEnumOrigin(targetType); en != nil {
+			// T1096: an enum getter also yields a fresh OWNED closure, so the local
+			// owns it (not a borrow). Mirror codegen's isGetterCallExpr enum arm
+			// (extractEnum(...).LookupGetter, codegen/stmt.go) to keep ownership and
+			// codegen in lockstep.
+			if en.LookupGetter(mem.Field) != nil {
 				return nil
 			}
 		}

@@ -17,3 +17,11 @@ make_holder[T](T value)() -> T `public `doc("Generic module function returning a
   v := value;
   return move || -> v;
 }
+
+// T1096: a module getter whose return type is a function type. Exercises the
+// ModuleGetters arm of ownership's closureAggregateBorrowSource (mirroring codegen's
+// isGetterCallExpr). Consumed by tests/modules/module_getter_closure_test.pr.
+get adder_getter() -> int `public `doc("Return a closure that adds one to a captured local (base + 1).") {
+  int base = 41;
+  return move || -> base + 1;
+}

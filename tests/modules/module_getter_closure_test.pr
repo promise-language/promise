@@ -1,0 +1,43 @@
+// T1096: a MODULE-qualified getter whose return type is a function type
+// (`get adder_getter() -> int` in closuremod). This is the module-getter analog of
+// the enum/struct getter cases (tests/e2e/enum_getter_closure_test.pr,
+// tests/e2e/instance_getter_function_test.pr).
+//
+// The ownership pass's closureAggregateBorrowSource excludes owned-return getters
+// from the closure-borrow classification by mirroring codegen's isGetterCallExpr,
+// which recognizes three getter kinds: struct (Named), enum, and module
+// (ModuleGetters). Ownership originally mirrored only the struct arm; the enum and
+// module arms were missing, so a module getter's fresh OWNED closure was falsely
+// treated as a borrow and a returned local was rejected at compile time —
+// diverging from codegen (which frees the env correctly). With the module-getter
+// arm restored, the local owns the closure and may be returned/bound/dropped.
+//
+// The zero-tolerance leak check enforces that the materialized closure env is freed
+// exactly once. The direct-call form `closuremod.adder_getter()` is a separate,
+// pre-existing codegen gap (module analog of T1258/T1253) and is intentionally not
+// exercised here — only the getter *reference* form (`f := mod.getter; f()`).
+use closuremod "./closuremod";
+
+// The exact repro: return the module getter's closure from a helper, then invoke.
+get_module_adder()(() -> int) `doc("Return the closure yielded by closuremod.adder_getter.") {
+  f := closuremod.adder_getter;
+  return f;
+}
+
+test_module_getter_closure_returned() `test {
+  f := get_module_adder();
+  assert(f() == 42, "returned module getter closure should be 42");
+}
+
+// Bind-and-invoke in the same scope.
+test_module_getter_closure_bind_invoke() `test {
+  f := closuremod.adder_getter;
+  assert(f() == 42, "bound module getter closure should be 42");
+}
+
+// A capturing closure returned and dropped WITHOUT invocation — the leak check
+// confirms the heap env is freed exactly once even though it is never called.
+test_module_getter_closure_dropped_uninvoked() `test {
+  f := get_module_adder();
+  // f is not invoked; it must still be freed at scope exit.
+}

@@ -1637,6 +1637,12 @@ func (c *Checker) recordWrapCoercedBorrowedHandle(name string, value ast.Expr, l
 }
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
+	// T1256: push the aliasLoopFrame BEFORE checking the condition. The
+	// condition is re-evaluated every iteration, so a bare single-owner handle
+	// aliased into a generic call there is reused across the back-edge — a
+	// silent UAF unless recordAliasHandleReuseCandidates sees loopDepth>0 and
+	// lands the candidate on this frame (raised by enterLoopBody).
+	snap := c.enterLoopBody(s.Body)
 	c.checkExpr(s.Cond)
 	// Expire call-scoped borrows from the condition so the loop body can
 	// re-borrow the same variables.
@@ -1645,13 +1651,17 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
-	snap := c.enterLoopBody(s.Body)
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 }
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
+	// T1256: push the aliasLoopFrame BEFORE checking the unwrapped value. Like
+	// the while condition, the value expression is re-evaluated every iteration,
+	// so a bare single-owner handle aliased into a generic call there is reused
+	// across the back-edge (silent UAF) unless its candidate lands on this frame.
+	snap := c.enterLoopBody(s.Body)
 	c.checkExpr(s.Value)
 	// T0589: same shape as if-let — `while x := a { … }` consumes the inner
 	// heap value of a borrowed Optional parameter on each loop iteration.
@@ -1673,7 +1683,6 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
-	snap := c.enterLoopBody(s.Body)
 
 	// T1153: the while-unwrap binding is a fresh owned value produced per iteration
 	// (the unwrapped `opt.Elem()`), scoped to the loop body — its slot is freed at
@@ -1921,6 +1930,12 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	// T1256: push the aliasLoopFrame AFTER the once-eval init (so the init's
+	// single alias is not misread as back-edge reuse) but BEFORE the condition,
+	// which is re-evaluated every iteration and can alias a bare single-owner
+	// handle into a generic call across the back-edge (silent UAF). The UPDATE
+	// clause below is already inside the frame.
+	snap := c.enterLoopBody(s.Body)
 	if s.Cond != nil {
 		c.checkExpr(s.Cond)
 	}
@@ -1929,7 +1944,6 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	if c.borrows != nil {
 		c.borrows.ExpireCallScoped()
 	}
-	snap := c.enterLoopBody(s.Body)
 	c.checkBlock(s.Body)
 	if s.UpdateIncDec {
 		if s.UpdateTarget != nil {

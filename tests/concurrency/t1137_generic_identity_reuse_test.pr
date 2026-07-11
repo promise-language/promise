@@ -17,6 +17,15 @@ identity[T](T x) T {
   return x;
 }
 
+// Wraps a positive int as a present Optional (for while-unwrap tests); a
+// non-positive value yields the empty case, ending the loop.
+some_positive(int v) int? {
+  if (v > 0) {
+    return v;
+  }
+  return none;
+}
+
 // Valid: single use of the aliased result — the deliberately-supported form.
 t1137_single_use_task() `test {
   task[int] t = go worker();
@@ -99,4 +108,54 @@ t1255_loop_declared_in_body_ok() `test {
     last = <-identity(t);
   }
   assert(last == 42, "handle declared in loop body");
+}
+
+// T1256 (residual to T1255): once-eval loop positions must NOT be flagged. The
+// for-in ITERABLE is evaluated exactly once before the first iteration, so
+// aliasing the handle there is a single sound use — the ownership pass leaves it
+// outside the loop frame. The receive joins the aliased task exactly once, so
+// this stays valid and leak-free.
+t1256_forin_iterable_alias_once_ok() `test {
+  task[int] t = go worker();
+  int sum = 0;
+  for x in[<-identity(t)] {
+    sum = sum + x;
+  }
+  assert(sum == 42, "for-in iterable aliased once (once-eval, outside frame)");
+}
+
+// T1256: a fresh handle rebound at the top of each body iteration dominates the
+// back-edge, so aliasing it in the NEXT iteration's while CONDITION is sound. The
+// freshBound shield covers the condition alias. Must stay valid and leak-free.
+t1256_while_cond_fresh_rebind_ok() `test {
+  task[int] t = go worker();
+  int i = 0;
+  while (<-identity(t) == 42 && i < 3) {
+    i = i + 1;
+    t = go worker();
+  }
+  assert(i == 3, "condition alias with fresh handle reassigned each iteration");
+}
+
+// NOTE: a classic-for CONDITION runtime test (`for task[int] t = go worker();
+// <-identity(t) == 42 && ...; ...`) is deliberately omitted here: a single-owner
+// handle *declared in the classic-for init* and consumed in the condition
+// segfaults/deadlocks at runtime — a distinct codegen bug (T1257), not a
+// T1256 ownership issue. The while-equivalent (handle declared before the loop)
+// works and is covered by t1256_while_cond_fresh_rebind_ok above.
+
+// T1256: fresh-rebind shield for the while-unwrap VALUE position. The unwrapped
+// value re-aliases t each iteration, but the body rebinds t to a fresh handle
+// that dominates the back-edge, so every alias joins a distinct task once.
+t1256_while_unwrap_value_fresh_rebind_ok() `test {
+  task[int] t = go worker();
+  int n = 0;
+  while v := some_positive(<-identity(t)) {
+    n = n + 1;
+    t = go worker();
+    if (n >= 3) {
+      break;
+    }
+  }
+  assert(n == 3, "while-unwrap value alias with fresh handle each iteration");
 }

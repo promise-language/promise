@@ -6926,6 +6926,36 @@ func (c *Compiler) claimEnvTemp(val value.Value) {
 	}
 }
 
+// trackClosureOperatorResult registers the heap env of a closure returned by a
+// user-defined operator (binary or unary) as a statement-scoped env temp, so a
+// discarded operator result (`a + b;`, `-a;`) frees its env instead of leaking
+// (T1229). Mirrors the direct-tracking pattern used for getter results (T1240/
+// T1253) and error-handler results (T1235) rather than the defunct alias-filter.
+//
+// Soundness: an operator's `this` and argument are borrowed (sema rejects
+// `move` operands outright — there is no call-site move syntax for `a + b`), so
+// a returned `() -> …` closure is always a fresh, owned {fn,env} fat pointer.
+// A closure aliasing a borrowed operand would require a move-out-of-borrow,
+// which the ownership pass rejects, and an operand cannot itself be a moved-in
+// closure. The defensive claimEnvTemp (runtime pointer match) is therefore
+// unreachable today; it is kept purely to future-proof the sole-owner invariant
+// — if operators ever gain move operands, it neutralizes any already-tracked
+// aliasing temp before we register the result as sole owner (never a double
+// free). The bound path stays single-free because a var-decl RHS already claims
+// the value and hands ownership to the local's bindingFreeEnv.
+func (c *Compiler) trackClosureOperatorResult(result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 {
+		return
+	}
+	c.claimEnvTemp(result) // neutralize an aliasing moved-arg closure temp
+	envPtr := c.block.NewExtractValue(result, 1)
+	c.trackEnvTemp(envPtr)
+}
+
 // claimAllEnvTemps claims all active (unclaimed) env temps. Called when
 // maybeTrackIterTemp registers a heap temp — the callee stored our closure env
 // in the returned instance (e.g., _FnIter), so its cleanup handles the env.

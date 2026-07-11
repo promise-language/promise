@@ -1,0 +1,125 @@
+// T1229: A user-defined operator (binary or unary) that returns a closure hands
+// back a fresh owned {fn,env} fat pointer. When the operator result is discarded
+// (`a + b;`, `-a;`) genExpr now env-tracks field 1 (the heap env) via
+// trackClosureOperatorResult so cleanupEnvTemps frees it at statement end —
+// previously it leaked (T1160's `default: return true` never tracked operator
+// shapes). A binding claims the temp via claimEnvTemp (var-decl RHS), so the
+// bound path stays single-free. Sibling of T1235 (`? e {}` handler), T1240
+// (module getter) and T1253 (instance getter) returning function types.
+// Binary operator returning a fresh capturing closure.
+type Box {
+  int v;
+
+  +(this, Box o)() -> int {
+    n := this.v + o.v;
+    return move || -> n;
+  }
+}
+
+// 1. Discarded binary operator result — the item's Repro A (was LEAK: 1 alloc).
+probe_binary_discard() `test {
+  a := Box(v: 1);
+  b := Box(v: 2);
+  a + b;
+}
+
+// 2. Bound and called — the var-decl RHS claims the env temp so ownership
+//    transfers to the binding (single free, no double-free with the discard
+//    tracking).
+probe_binary_bound_and_called() `test {
+  a := Box(v: 1);
+  b := Box(v: 2);
+  () -> int f = a + b;
+  assert(f() == 3, "");
+}
+
+// 3. Binary operator used inline inside a larger expression: `(a + b)()` consumes
+//    the closure immediately. claimEnvTemp on consume keeps it single-free.
+probe_binary_inline_call() `test {
+  a := Box(v: 4);
+  b := Box(v: 5);
+  assert((a + b)() == 9, "");
+}
+
+// Unary operator returning a fresh capturing closure.
+type Neg {
+  int v;
+
+  -()() -> int {
+    n := -this.v;
+    return move || -> n;
+  }
+}
+
+// 4. Discarded unary operator result (was LEAK: 1 alloc).
+probe_unary_discard() `test {
+  n := Neg(v: 7);
+  -n;
+}
+
+// 5. Bound and called unary operator (single free).
+probe_unary_bound_and_called() `test {
+  n := Neg(v: 7);
+  () -> int f = -n;
+  assert(f() == -7, "");
+}
+
+// Generic operator coverage (the BinaryExpr isSig classification through the
+// c.typeSubst / c.selfSubst substitution guards in genExpr) is intentionally
+// NOT tested here: a *generic* user-defined operator returning a closure is
+// currently miscompiled (the operator body's lambda collides with / is stripped
+// relative to other operator lambdas in the same compilation unit — undefined
+// symbol in isolation, order-dependent segfault in a batch). That is a separate,
+// pre-existing monomorphization bug (T1254), not part of T1229's env-cleanup
+// change. Placing such a case in the shared suite batch causes order-dependent
+// crashes, so it is deferred until T1254 is fixed. The non-generic binary and
+// unary cases above fully cover T1229's env-tracking of a discarded operator
+// closure result.
+
+// 8. Unary operator used inline inside a larger expression: `(-n)()` consumes the
+//    closure immediately. Mirror of probe_binary_inline_call (#3) for the unary
+//    path — without the fix this leaks the env just like the binary form, since
+//    the inline call site claims the temp so it stays single-free.
+probe_unary_inline_call() `test {
+  n := Neg(v: 3);
+  assert((-n)() == -3, "");
+}
+
+// 9. Operator result passed directly as a moved function argument. The argument
+//    consume claims the env temp (claimEnvTemp) so ownership transfers to the
+//    callee's parameter — freed exactly once there, no double-free with the
+//    discard tracking that registered the fresh operator result.
+consume_closure(() -> int move f) int {
+  return f();
+}
+
+probe_binary_arg_consume() `test {
+  a := Box(v: 1);
+  b := Box(v: 2);
+  assert(consume_closure(a + b) == 3, "");
+}
+
+// 10. Operator returning a *non-capturing* closure (`|| -> 5`, null/thunk env).
+//     trackClosureOperatorResult still env-tracks field 1, but the env pointer is
+//     null, so bindingFreeEnv's null-check makes the discard a no-op — exercises
+//     the null-env branch of trackEnvTemp with no leak and no crash.
+type Const {
+  int v;
+
+  / (this, Const o)() -> int {
+    return || -> 5;
+  }
+}
+
+probe_noncapturing_operator_discard() `test {
+  a := Const(v: 1);
+  b := Const(v: 2);
+  a / b;
+}
+
+probe_noncapturing_operator_bound() `test {
+  a := Const(v: 1);
+  b := Const(v: 2);
+  () -> int f = a / b;
+  assert(f() == 5, "");
+}

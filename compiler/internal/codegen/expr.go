@@ -59,7 +59,7 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0659: Defensive — borrow returns are never owned temps. Today only
 		// string-concat hits I8Ptr here, but a future T&-returning user `+`
 		// would; mirror the T0649 CallExpr guard.
-		if result != nil && result.Type() == irtypes.I8Ptr {
+		if result != nil {
 			rt := c.info.Types[e]
 			if c.typeSubst != nil && rt != nil {
 				rt = types.Substitute(rt, c.typeSubst)
@@ -70,11 +70,37 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			if rt != nil && isRefType(rt) {
 				return result
 			}
-			c.trackStringTemp(result)
+			if result.Type() == irtypes.I8Ptr {
+				c.trackStringTemp(result)
+			} else if _, isSig := rt.(*types.Signature); isSig {
+				// T1229: a user-defined operator returning a closure hands back a
+				// fresh owned {fn,env} fat pointer; free its env when discarded.
+				c.trackClosureOperatorResult(result)
+			}
 		}
 		return result
 	case *ast.UnaryExpr:
-		return c.genUnaryExpr(e)
+		result := c.genUnaryExpr(e)
+		// T1229: a user-defined unary operator (`-a`) returning a closure hands
+		// back a fresh owned {fn,env} fat pointer whose env must be freed when the
+		// result is discarded. Non-operator unary results (`!b`→i1, numeric `-x`)
+		// are never Signatures, so this is a no-op for them.
+		if result != nil {
+			rt := c.info.Types[e]
+			if c.typeSubst != nil && rt != nil {
+				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if c.selfSubst != nil && rt != nil {
+				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			if rt != nil && isRefType(rt) {
+				return result
+			}
+			if _, isSig := rt.(*types.Signature); isSig {
+				c.trackClosureOperatorResult(result)
+			}
+		}
+		return result
 	case *ast.CallExpr:
 		result := c.genCallExpr(e)
 		c.emitPanicCheck() // T0147: detect panic flag after every call expression

@@ -60,3 +60,43 @@ t1137_single_use_mutex() `test {
   use g := m2.lock();
   assert(g.borrow == 5, "single-use generic identity over Mutex");
 }
+
+// T1255 (Fix A): mutually-exclusive branches each alias the handle once. Only
+// one branch runs, so there is no reuse-after-alias — the flow-insensitive
+// textual heuristic used to over-reject the else-branch `<-t`. Now valid.
+t1255_branch_reuse_ok() `test {
+  bool cond = true;
+  task[int] t = go worker();
+  int r = 0;
+  if (cond) {
+    r = <-identity(t);
+  } else {
+    r = <-t;
+  }
+  assert(r == 42, "mutually-exclusive branch alias");
+}
+
+// T1255 (Fix B precision): reassign a FRESH handle at the top of each iteration,
+// then alias it once. The top-level rebind dominates the loop back-edge, so each
+// iteration consumes its own handle — no cross-iteration reuse. Must stay valid
+// and leak-free.
+t1255_loop_reassign_per_iteration_ok() `test {
+  task[int] t = go worker();
+  int last = 0;
+  for i in 0..3 {
+    t = go worker();
+    last = <-identity(t);
+  }
+  assert(last == 42, "fresh handle reassigned each iteration");
+}
+
+// T1255 (Fix B precision): a handle declared INSIDE the loop body is a fresh
+// binding each iteration — aliasing it once per iteration is sound.
+t1255_loop_declared_in_body_ok() `test {
+  int last = 0;
+  for i in 0..3 {
+    task[int] t = go worker();
+    last = <-identity(t);
+  }
+  assert(last == 42, "handle declared in loop body");
+}

@@ -152,8 +152,22 @@ type Checker struct {
 	// pendingAliasLocals maps a caller-side local name to its live reuse
 	// candidates for the current function body; the entries are the SAME
 	// pointers stored in aliasHandleReuses (flipping `reused` here mutates
-	// both). Reset per function/method body.
+	// both). Reset per function/method body. T1255 scopes this map across
+	// mutually-exclusive branches (clone before an alternative, union at the
+	// merge) so a use in one branch cannot flip a candidate recorded in a
+	// sibling branch, while a fall-through use still flips candidates from any
+	// alternative.
 	pendingAliasLocals map[string][]*aliasHandleReuse
+
+	// loopFrames is a stack of per-loop-body frames used to detect loop-back-edge
+	// reuse of an aliased single-owner handle (T1255). A candidate recorded inside
+	// a loop body is flagged `reused` at loop exit unless its source local is
+	// freshly rebound at the top level of that body (a dominating rebind yields a
+	// fresh handle each iteration). This catches the silent-UAF loop case that the
+	// flow-insensitive textual flip in checkIdentUse misses (the only textual use
+	// of the source is the call arg itself, which is not a "later use"). Reset per
+	// function/method body.
+	loopFrames []*aliasLoopFrame
 }
 
 // wrapCoercedHandle records the provenance of a T1212 wrap-coerced borrowed
@@ -292,6 +306,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
+	c.loopFrames = nil                                          // T1255
 	c.curFuncObj = fn
 	c.curMethodObj = nil
 
@@ -432,6 +447,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
+	c.loopFrames = nil                                          // T1255
 	c.curFuncObj = nil
 	c.curMethodObj = m
 

@@ -1398,6 +1398,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	savedPending := clonePending(c.pendingAliasLocals) // T1255
 	if s.Binding != "" && s.Binding != "_" {
 		// T0850: a borrowed optional scrutinee (`T?&` / `T?~`, e.g. `Ref[T?].borrow`)
 		// binds a non-owning view of the external owner's payload — mark it Borrowed
@@ -1424,6 +1425,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	restoreHandleStates()
 	thenState := c.state
 	thenBorrows := c.borrows
+	thenPending := c.pendingAliasLocals // T1255
 
 	// T1134: a branch body that diverges (ends in return/raise/break/continue)
 	// never falls through to the post-if path, so its end-state — including any
@@ -1434,34 +1436,42 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	if s.Else != nil {
 		c.state = savedState.clone()
 		c.borrows = savedBorrows.Clone()
+		c.pendingAliasLocals = clonePending(savedPending) // T1255: else sees pre-if pending
 		c.checkStmt(s.Else)
 		elseState := c.state
 		elseBorrows := c.borrows
+		elsePending := c.pendingAliasLocals // T1255
 		elseDiverges := stmtDiverges(s.Else)
 		switch {
 		case thenDiverges && elseDiverges:
 			// Post-if code is unreachable; fall back to the pre-if baseline.
 			c.state = savedState.clone()
 			c.borrows = savedBorrows.Clone()
+			c.pendingAliasLocals = savedPending
 		case thenDiverges:
 			c.state = elseState
 			c.borrows = elseBorrows
+			c.pendingAliasLocals = elsePending
 		case elseDiverges:
 			c.state = thenState
 			c.borrows = thenBorrows
+			c.pendingAliasLocals = thenPending
 		default:
 			c.state = merge(thenState, elseState)
 			c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
+			c.pendingAliasLocals = mergePending(thenPending, elsePending)
 		}
 	} else if thenDiverges {
 		// No else and the then-branch diverges: the fall-through path is only
 		// reached when the branch did not run, so keep the pre-if state.
 		c.state = savedState
 		c.borrows = savedBorrows
+		c.pendingAliasLocals = savedPending // T1255
 	} else {
 		// No else: conservative merge with pre-if state.
 		c.state = merge(savedState, thenState)
 		c.borrows = MergeBorrowSets(savedBorrows, thenBorrows)
+		c.pendingAliasLocals = mergePending(savedPending, thenPending) // T1255
 	}
 }
 
@@ -1507,8 +1517,13 @@ func (c *Checker) markDestructureHandleBindingsBorrowed(s *ast.IfStmt) func() {
 // set so loop-body-local declarations added while checking the body (via
 // flagLoopBodyOwnedLocal) are removed at loop exit — their iteration-bounded
 // scope ends with the loop. Returns the snapshot to pass to exitLoopBody. T1151.
-func (c *Checker) enterLoopBody() map[string]bool {
+//
+// T1255: it also pushes an aliasLoopFrame carrying the set of source-local names
+// freshly rebound at the top level of the body, so alias-handle reuse candidates
+// recorded inside the body can be evaluated for loop-back-edge reuse at exit.
+func (c *Checker) enterLoopBody(body *ast.Block) map[string]bool {
 	c.loopDepth++
+	c.loopFrames = append(c.loopFrames, &aliasLoopFrame{freshBound: loopFreshBoundNames(body)})
 	snap := make(map[string]bool, len(c.forInOwnedDroppableBindings))
 	for k, v := range c.forInOwnedDroppableBindings {
 		snap[k] = v
@@ -1518,7 +1533,21 @@ func (c *Checker) enterLoopBody() map[string]bool {
 
 // exitLoopBody restores the owned-droppable set to its pre-body snapshot and
 // lowers the loop-nesting depth. T1151.
+//
+// T1255: it also pops the aliasLoopFrame and flags every recorded reuse
+// candidate whose source local was NOT freshly rebound at the top level of the
+// body — that candidate's handle is re-consumed across the loop back-edge (a
+// use-after-free / double-free) with no intervening fresh handle.
 func (c *Checker) exitLoopBody(snap map[string]bool) {
+	if n := len(c.loopFrames); n > 0 {
+		frame := c.loopFrames[n-1]
+		c.loopFrames = c.loopFrames[:n-1]
+		for _, cand := range frame.candidates {
+			if !frame.freshBound[cand.localName] {
+				cand.reused = true
+			}
+		}
+	}
 	c.forInOwnedDroppableBindings = snap
 	c.loopDepth--
 }
@@ -1616,7 +1645,7 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
-	snap := c.enterLoopBody()
+	snap := c.enterLoopBody(s.Body)
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
@@ -1644,7 +1673,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
-	snap := c.enterLoopBody()
+	snap := c.enterLoopBody(s.Body)
 
 	// T1153: the while-unwrap binding is a fresh owned value produced per iteration
 	// (the unwrapped `opt.Elem()`), scoped to the loop body — its slot is freed at
@@ -1758,7 +1787,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	// Snapshot the owned-droppable set and raise loop depth BEFORE adding the
 	// for-in binding below, so exitLoopBody removes both the binding and any
 	// loop-body locals (added by flagLoopBodyOwnedLocal) together at loop exit.
-	snap := c.enterLoopBody()
+	snap := c.enterLoopBody(s.Body)
 
 	// T1147: an OWNED (non-aliasing) non-copy droppable for-in binding — a string
 	// element (dup'd per iteration), or an owned value yielded by an iterator /
@@ -1900,7 +1929,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	if c.borrows != nil {
 		c.borrows.ExpireCallScoped()
 	}
-	snap := c.enterLoopBody()
+	snap := c.enterLoopBody(s.Body)
 	c.checkBlock(s.Body)
 	if s.UpdateIncDec {
 		if s.UpdateTarget != nil {
@@ -1917,13 +1946,16 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 	// Each case channel expression is checked; at most one case executes.
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	savedPending := clonePending(c.pendingAliasLocals) // T1255
 
 	var states []StateMap
 	var borrowSets []*BorrowSet
+	var pendings []map[string][]*aliasHandleReuse // T1255
 
 	for _, sc := range s.Cases {
 		c.state = savedState.clone()
 		c.borrows = savedBorrows.Clone()
+		c.pendingAliasLocals = clonePending(savedPending) // T1255: each case sees pre-select pending
 		c.checkExpr(sc.Channel)
 		if sc.IsSend && sc.SendValue != nil {
 			c.checkExpr(sc.SendValue)
@@ -1954,12 +1986,14 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 		if !stmtsDiverge(sc.Body) {
 			states = append(states, c.state)
 			borrowSets = append(borrowSets, c.borrows)
+			pendings = append(pendings, c.pendingAliasLocals) // T1255
 		}
 	}
 
 	if s.Default != nil {
 		c.state = savedState.clone()
 		c.borrows = savedBorrows.Clone()
+		c.pendingAliasLocals = clonePending(savedPending) // T1255
 		for _, stmt := range s.Default {
 			c.checkStmt(stmt)
 			if c.borrows != nil {
@@ -1969,7 +2003,21 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 		if !stmtsDiverge(s.Default) {
 			states = append(states, c.state)
 			borrowSets = append(borrowSets, c.borrows)
+			pendings = append(pendings, c.pendingAliasLocals) // T1255
 		}
+	}
+
+	// T1255: union pending candidates across the (non-diverging) alternatives so a
+	// post-select fall-through use flips a candidate recorded in any case, while a
+	// use inside one case cannot flip a sibling case's candidate.
+	if len(pendings) > 0 {
+		mergedPending := pendings[0]
+		for i := 1; i < len(pendings); i++ {
+			mergedPending = mergePending(mergedPending, pendings[i])
+		}
+		c.pendingAliasLocals = mergePending(savedPending, mergedPending)
+	} else {
+		c.pendingAliasLocals = savedPending
 	}
 
 	// Merge all branches
@@ -1996,7 +2044,7 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 func (c *Checker) checkInfiniteLoop(s *ast.InfiniteLoop) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
-	snap := c.enterLoopBody()
+	snap := c.enterLoopBody(s.Body)
 	c.checkBlock(s.Body)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)

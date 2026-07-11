@@ -40,6 +40,117 @@ type aliasHandleReuse struct {
 	reused      bool   // set when localName is used again after the call
 }
 
+// aliasLoopFrame records the alias-handle reuse candidates registered inside a
+// single loop body, plus the set of source-local names freshly rebound at the
+// top level of that body. At loop exit, any candidate whose source local is NOT
+// in freshBound is a loop-back-edge reuse — the source handle is re-consumed on
+// the next iteration with no intervening fresh handle — and is flagged `reused`.
+// A top-level rebind (var-decl or plain `=`) dominates the back-edge and yields
+// a fresh handle each iteration, so it shields the candidate. (T1255)
+type aliasLoopFrame struct {
+	candidates []*aliasHandleReuse
+	freshBound map[string]bool
+}
+
+// loopFreshBoundNames collects the names freshly rebound at the TOP LEVEL of a
+// loop body — var-decls (`T x = …`, `x := …`, `use x := …`, destructure) and
+// plain assignments (`x = …`) — that DOMINATE the loop back-edge, i.e. execute
+// on every iteration before control returns to the top of the body. Such a
+// rebind guarantees a fresh handle each iteration, so it shields an alias-reuse
+// candidate on that name from the back-edge-reuse flag.
+//
+// A rebind is dominating only if no earlier top-level statement can `continue`
+// (targeting THIS loop) and thereby skip it: a `continue` jumps straight to the
+// back-edge, bypassing every statement after it. So the scan stops treating
+// rebinds as fresh once it passes a statement that may continue — a rebind at or
+// after such a barrier can be skipped, leaving a stale (already-consumed) handle
+// for the next iteration's alias (silent UAF otherwise; see the continue-skip
+// case in T1255). break/return/raise exit the loop or function and create no
+// skipping back-edge, so they are not barriers.
+//
+// Conservative in both directions of safety: a rebind nested inside an inner
+// block/branch, or one sitting after a continue barrier, is excluded — a missed
+// rebind flags a valid program (a false positive), never masks a UAF. (T1255)
+func loopFreshBoundNames(body *ast.Block) map[string]bool {
+	fresh := make(map[string]bool)
+	if body == nil {
+		return fresh
+	}
+	add := func(name string) {
+		if name != "" && name != "_" {
+			fresh[name] = true
+		}
+	}
+	sawContinueBarrier := false
+	for _, stmt := range body.Stmts {
+		if !sawContinueBarrier {
+			switch s := stmt.(type) {
+			case *ast.TypedVarDecl:
+				add(s.Name)
+			case *ast.InferredVarDecl:
+				add(s.Name)
+			case *ast.UseVarDecl:
+				add(s.Name)
+			case *ast.DestructureVarDecl:
+				for _, n := range s.Names {
+					add(n)
+				}
+			case *ast.AssignStmt:
+				if s.Op == ast.OpAssign {
+					if id, ok := s.Target.(*ast.IdentExpr); ok {
+						add(id.Name)
+					}
+				}
+			}
+		}
+		// A rebind statement (var-decl/assign) never carries a continue, and a
+		// continue-bearing control-flow statement is never a rebind, so the
+		// order of the add above vs. this barrier check is immaterial per stmt.
+		if !sawContinueBarrier && stmtHasContinueOwnership(stmt) {
+			sawContinueBarrier = true
+		}
+	}
+	return fresh
+}
+
+// clonePending copies a pendingAliasLocals map and each of its slices. The
+// candidate POINTERS are shared, so flipping `reused` through any copy still
+// mutates the canonical candidate stored in aliasHandleReuses. Used to give each
+// mutually-exclusive branch its own view of pending candidates. (T1255)
+func clonePending(m map[string][]*aliasHandleReuse) map[string][]*aliasHandleReuse {
+	out := make(map[string][]*aliasHandleReuse, len(m))
+	for k, v := range m {
+		cp := make([]*aliasHandleReuse, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out
+}
+
+// mergePending unions two pendingAliasLocals maps per name, deduping shared
+// candidate pointers. A candidate pending on EITHER path stays pending after the
+// merge, so a post-branch fall-through use flips it (biased-safe). (T1255)
+func mergePending(a, b map[string][]*aliasHandleReuse) map[string][]*aliasHandleReuse {
+	out := clonePending(a)
+	for k, vs := range b {
+		existing := out[k]
+		for _, cand := range vs {
+			found := false
+			for _, e := range existing {
+				if e == cand {
+					found = true
+					break
+				}
+			}
+			if !found {
+				existing = append(existing, cand)
+			}
+		}
+		out[k] = existing
+	}
+	return out
+}
+
 // recordAliasHandleReuseCandidates records, for each BARE single-owner-handle
 // argument passed by borrow into a call, a reuse candidate keyed by the call
 // position. If the callee turns out to return that exact param (a
@@ -77,6 +188,15 @@ func (c *Checker) recordAliasHandleReuseCandidates(e *ast.CallExpr, sig *types.S
 		cand := &aliasHandleReuse{calleeParam: p.Name(), localName: id.Name, kind: k}
 		c.aliasHandleReuses[e.Pos()] = append(c.aliasHandleReuses[e.Pos()], cand)
 		c.pendingAliasLocals[id.Name] = append(c.pendingAliasLocals[id.Name], cand)
+		// T1255: inside a loop body, register the candidate on the innermost loop
+		// frame so a loop-back-edge reuse (no dominating top-level rebind of the
+		// source) is flagged at loop exit even when there is no textual later use
+		// — the only textual use of the source is the call arg itself, which the
+		// checkIdentUse flip does not count as a "later use".
+		if c.loopDepth > 0 && len(c.loopFrames) > 0 {
+			frame := c.loopFrames[len(c.loopFrames)-1]
+			frame.candidates = append(frame.candidates, cand)
+		}
 	}
 }
 

@@ -1594,14 +1594,18 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) {
 	c.checkExpr(e.Cond)
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	savedPending := clonePending(c.pendingAliasLocals) // T1255
 	c.checkBlock(e.Then)
 	thenState := c.state
 	thenBorrows := c.borrows
+	thenPending := c.pendingAliasLocals // T1255
 	c.state = savedState.clone()
 	c.borrows = savedBorrows.Clone()
+	c.pendingAliasLocals = clonePending(savedPending) // T1255: else sees pre-if pending
 	c.checkBlock(e.Else)
 	elseState := c.state
 	elseBorrows := c.borrows
+	elsePending := c.pendingAliasLocals // T1255
 	// T1134: exclude a diverging branch's end-state from the merge so a move on
 	// a non-fall-through path does not poison post-expression state.
 	thenDiverges := blockDiverges(e.Then)
@@ -1610,15 +1614,19 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) {
 	case thenDiverges && elseDiverges:
 		c.state = savedState
 		c.borrows = savedBorrows
+		c.pendingAliasLocals = savedPending
 	case thenDiverges:
 		c.state = elseState
 		c.borrows = elseBorrows
+		c.pendingAliasLocals = elsePending
 	case elseDiverges:
 		c.state = thenState
 		c.borrows = thenBorrows
+		c.pendingAliasLocals = thenPending
 	default:
 		c.state = merge(thenState, elseState)
 		c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
+		c.pendingAliasLocals = mergePending(thenPending, elsePending)
 	}
 }
 
@@ -1632,12 +1640,15 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	savedPending := clonePending(c.pendingAliasLocals) // T1255
 	var states []StateMap
 	var borrowSets []*BorrowSet
+	var pendings []map[string][]*aliasHandleReuse // T1255
 
 	for _, arm := range e.Arms {
 		c.state = savedState.clone()
 		c.borrows = savedBorrows.Clone()
+		c.pendingAliasLocals = clonePending(savedPending) // T1255: each arm sees pre-match pending
 		c.registerPatternBindings(arm.Pattern)
 		// T0623: a destructure arm binding (non-`_`) a variant field whose
 		// resolved type transitively owns a single-owner handle takes ownership
@@ -1673,6 +1684,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 		}
 		states = append(states, c.state)
 		borrowSets = append(borrowSets, c.borrows)
+		pendings = append(pendings, c.pendingAliasLocals) // T1255
 	}
 
 	if len(states) == 0 {
@@ -1680,6 +1692,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 		// pre-match baseline as a safe state.
 		c.state = savedState
 		c.borrows = savedBorrows
+		c.pendingAliasLocals = savedPending // T1255
 		return
 	}
 
@@ -1691,6 +1704,14 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 	}
 	c.state = resultState
 	c.borrows = resultBorrows
+	// T1255: union pending candidates across the non-diverging arms so a
+	// post-match fall-through use flips a candidate recorded in any arm, while a
+	// use inside one arm cannot flip a sibling arm's candidate.
+	resultPending := pendings[0]
+	for i := 1; i < len(pendings); i++ {
+		resultPending = mergePending(resultPending, pendings[i])
+	}
+	c.pendingAliasLocals = resultPending
 }
 
 // armMovesSubject reports whether a match arm's destructure pattern binds out

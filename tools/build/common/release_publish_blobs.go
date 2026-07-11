@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 )
@@ -442,6 +443,37 @@ type blobFetcher interface {
 // with an HTTP fallback for non-deps-release URLs.
 var defaultBlobFetcher blobFetcher = &ghCLIFetcher{}
 
+// blobFetchAttempts/blobFetchBackoff bound the retry of a transient
+// `gh release download`. GitHub API/network blips (dial timeouts, connection
+// resets) regularly fail an otherwise-healthy CI release — the epoch-2026.3
+// linux build died on a single `dial tcp api.github.com:443: i/o timeout` while
+// pulling the LLVM blobs. `actions/checkout` retries for exactly this reason;
+// this makes the blob download equally resilient. Backoff is linear:
+// blobFetchBackoff * attempt#. sleepFn (release_cut.go) is stubbed in tests.
+var (
+	blobFetchAttempts = 4
+	blobFetchBackoff  = 3 * time.Second
+)
+
+// retryTransient runs fn up to attempts times, sleeping backoff*attempt between
+// tries, and returns nil on the first success. If every attempt fails it returns
+// the last error wrapped with what/attempt count. Used to absorb transient
+// GitHub network failures when downloading release blobs.
+func retryTransient(what string, attempts int, backoff time.Duration, fn func() error) error {
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if attempt < attempts {
+			fmt.Fprintf(os.Stderr, "%s failed (attempt %d/%d): %v; retrying in %s\n",
+				what, attempt, attempts, err, backoff*time.Duration(attempt))
+			sleepFn(backoff * time.Duration(attempt))
+		}
+	}
+	return fmt.Errorf("%s (after %d attempts): %w", what, attempts, err)
+}
+
 type ghCLIFetcher struct{}
 
 func (ghCLIFetcher) FetchAsset(tag, asset, dst string) error {
@@ -450,11 +482,16 @@ func (ghCLIFetcher) FetchAsset(tag, asset, dst string) error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		cmd := exec.Command("gh", "release", "download", tag, "-p", asset, "-D", dir, "--clobber")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("gh release download %s %s: %w", tag, asset, err)
+		// A fresh *exec.Cmd is built per attempt (exec.Cmd is single-use).
+		err := retryTransient(fmt.Sprintf("gh release download %s %s", tag, asset),
+			blobFetchAttempts, blobFetchBackoff, func() error {
+				cmd := exec.Command("gh", "release", "download", tag, "-p", asset, "-D", dir, "--clobber")
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				return cmd.Run()
+			})
+		if err != nil {
+			return err
 		}
 		// `gh` writes <dir>/<asset>; rename to dst if they differ.
 		downloaded := filepath.Join(dir, asset)

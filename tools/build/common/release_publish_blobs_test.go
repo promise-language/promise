@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ── publish-blobs ───────────────────────────────────────────────────────────
@@ -1294,6 +1295,84 @@ func TestGhCLIFetcherHTTPFallback(t *testing.T) {
 	}
 	if string(got) != "HTTP_BYTES" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestRetryTransientSucceedsAfterFailures pins the core resilience win: a couple
+// of transient failures (the GitHub dial-timeout / connection-reset blips that
+// killed the epoch-2026.3 linux release) are absorbed, and the first success
+// ends the loop. sleepFn is stubbed so the backoff doesn't actually wait.
+func TestRetryTransientSucceedsAfterFailures(t *testing.T) {
+	prev := sleepFn
+	var slept int
+	sleepFn = func(time.Duration) { slept++ }
+	t.Cleanup(func() { sleepFn = prev })
+
+	calls := 0
+	err := retryTransient("download x", 4, time.Millisecond, func() error {
+		calls++
+		if calls < 3 {
+			return fmt.Errorf("boom %d", calls)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected success on 3rd attempt, got %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("fn called %d times, want 3", calls)
+	}
+	if slept != 2 {
+		t.Fatalf("slept %d times, want 2 (once between each of the 3 attempts)", slept)
+	}
+}
+
+// TestRetryTransientExhausts verifies that when every attempt fails, the last
+// cause surfaces wrapped with the attempt count, fn is called exactly `attempts`
+// times (no off-by-one, no infinite loop), and there is no trailing sleep after
+// the final failure.
+func TestRetryTransientExhausts(t *testing.T) {
+	prev := sleepFn
+	var slept int
+	sleepFn = func(time.Duration) { slept++ }
+	t.Cleanup(func() { sleepFn = prev })
+
+	calls := 0
+	err := retryTransient("download y", 3, time.Millisecond, func() error {
+		calls++
+		return fmt.Errorf("still down")
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	if calls != 3 {
+		t.Fatalf("fn called %d times, want 3", calls)
+	}
+	if slept != 2 {
+		t.Fatalf("slept %d times, want 2 (no sleep after the final failure)", slept)
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") || !strings.Contains(err.Error(), "still down") {
+		t.Fatalf("error should carry the attempt count and last cause, got: %v", err)
+	}
+}
+
+// TestRetryTransientFirstTry pins the happy path: a first-attempt success makes
+// no retry and no sleep — the resilience wrapper must be zero-cost when healthy.
+func TestRetryTransientFirstTry(t *testing.T) {
+	prev := sleepFn
+	var slept int
+	sleepFn = func(time.Duration) { slept++ }
+	t.Cleanup(func() { sleepFn = prev })
+
+	calls := 0
+	if err := retryTransient("download z", 4, time.Millisecond, func() error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || slept != 0 {
+		t.Fatalf("calls=%d slept=%d, want calls=1 slept=0", calls, slept)
 	}
 }
 

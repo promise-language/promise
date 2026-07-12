@@ -7461,6 +7461,17 @@ func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, t
 	if c.isClosureAggregateBorrow(valueExpr) {
 		return
 	}
+	// T1259: `h := g` where g is a closure variant-field binding from a match on a
+	// droppable enum (bindEnumDestructure marked it in matchBorrowedIdents). The
+	// binding aliases the enum's heap env, which the enum's own drop frees — the
+	// local must borrow, not own, else scope exit double-frees the env against that
+	// drop (SEGV). A plain IdentExpr source is not caught by isClosureAggregateBorrow
+	// (which only peels field/index reads), so consult the borrow set here. Placed
+	// after the field/index borrow check so ordinary owned-closure moves are
+	// unaffected — only match-borrowed closure idents are suppressed.
+	if id, ok := valueExpr.(*ast.IdentExpr); ok && c.matchBorrowedIdents != nil && c.matchBorrowedIdents[id.Name] {
+		return
+	}
 	dropFlag := c.createEntryAlloca(irtypes.I1)
 	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)

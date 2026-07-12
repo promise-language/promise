@@ -1,0 +1,155 @@
+// T1259: reading an enum whose variant carries a closure field out of a by-value
+// container (Vector/Map), destructuring the variant, and invoking the closure must
+// keep the closure env intact (no deep-copy zeroing it, no double-free). Sibling of
+// T1230 (struct closure field) on the enum path.
+enum Cb {
+  Call(() -> int f), Empty,
+}
+
+// From a Vector.
+enum_closure_from_vector() `test {
+  x := 9;
+  v := [Cb.Call(f: || -> x)];
+  r := 0;
+  match v[0] {
+    Cb.Call(g) => {
+      h := g;
+      r = h();
+    },
+    Cb.Empty => {
+      r = 1;
+    },
+  }
+  assert(r == 9, "enum-closure invoked from a vector element");
+}
+
+// From a Map.
+enum_closure_from_map() `test {
+  x := 9;
+  m := Map[int, Cb]();
+  m[0] = Cb.Call(f: || -> x);
+  e := m[0]!;
+  r := 0;
+  match e {
+    Cb.Call(g) => {
+      h := g;
+      r = h();
+    },
+    Cb.Empty => {
+      r = 1;
+    },
+  }
+  assert(r == 9, "enum-closure invoked from a map value");
+}
+
+// Invoke the destructured closure directly (no intermediate `h := g`).
+enum_closure_direct_invoke() `test {
+  x := 7;
+  v := [Cb.Call(f: || -> x + 1)];
+  r := 0;
+  match v[0] {
+    Cb.Call(g) => {
+      r = g();
+    },
+    Cb.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 8, "destructured enum-closure invoked directly");
+}
+
+// Read the same element twice — the container retains sole ownership of the env,
+// so a second read still invokes correctly.
+enum_closure_double_read() `test {
+  x := 3;
+  m := Map[int, Cb]();
+  m[0] = Cb.Call(f: || -> x * 10);
+  a := 0;
+  match m[0]! {
+    Cb.Call(g) => {
+      a = g();
+    },
+    Cb.Empty => {
+      a = -1;
+    },
+  }
+  b := 0;
+  match m[0]! {
+    Cb.Call(g) => {
+      b = g();
+    },
+    Cb.Empty => {
+      b = -1;
+    },
+  }
+  assert(a == 30 && b == 30, "enum-closure read twice from a map");
+}
+
+// A variant carrying BOTH a plain field and a closure field. Only the closure
+// binding is marked match-borrowed (per-binding discrimination in
+// bindEnumDestructure) — the `int` binding is an ordinary value, and the closure
+// still invokes with its env intact.
+enum Both {
+  Pair(int n, () -> int f), None,
+}
+enum_closure_multi_field_variant() `test {
+  x := 5;
+  v := [Both.Pair(n: 2, f: || -> x)];
+  r := 0;
+  match v[0] {
+    Both.Pair(n, g) => {
+      h := g;
+      r = n + h();
+    },
+    Both.None => {
+      r = -1;
+    },
+  }
+  assert(r == 7, "multi-field variant: plain field plus enum-closure from a vector");
+}
+
+// The closure is reached through a struct-typed variant field (recursion inside
+// FirstFieldNestedClosure / matchDupFieldSafe), not as a direct closure field.
+// The by-value container read must still keep the nested env intact.
+type ClosureHolder {
+  () -> int cb;
+}
+enum Wrapped {
+  Wrap(ClosureHolder w), None,
+}
+enum_closure_nested_in_struct_field() `test {
+  x := 4;
+  m := Map[int, Wrapped]();
+  m[0] = Wrapped.Wrap(w: ClosureHolder(cb: || -> x * 2));
+  e := m[0]!;
+  r := 0;
+  match e {
+    Wrapped.Wrap(w) => {
+      r = w.cb();
+    },
+    Wrapped.None => {
+      r = -1;
+    },
+  }
+  assert(r == 8, "closure nested in a struct-typed variant field from a map");
+}
+
+// The closure captures a non-copy value (a moved string) so the env carries an
+// owned heap capture. The by-value read must not deep-copy (which would corrupt
+// the env), and the enum's own drop must free the env — and its string — exactly
+// once (no leak, no double-free).
+enum_closure_moved_capture() `test {
+  s := "abcdef";
+  v := [Cb.Call(f: move || -> s.len)];
+  r := 0;
+  match v[0] {
+    Cb.Call(g) => {
+      h := g;
+      r = h();
+    },
+    Cb.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 6, "enum-closure with a moved string capture from a vector");
+}

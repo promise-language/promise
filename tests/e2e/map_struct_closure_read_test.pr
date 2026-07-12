@@ -146,3 +146,181 @@ probe_map_struct_closure_loop_reads() `test {
   }
   assert(total == 300, "100 borrows, one owner, no leak");
 }
+
+// ---------------------------------------------------------------------------
+// T1260: sibling of T1230. A struct whose field is a *value-copying container*
+// (Vector/Map/Set) of closures. FirstFieldNestedClosure previously treated every
+// std native container as opaque (no TypeArgs recursion), so a struct holding
+// `Vector[() -> int]` was judged dup-safe and the Map read deep-copied it via
+// dupHeapValueFields — the per-element closure clone can't deep-copy the env
+// (T0813 zeroes the slot) → null {fn,env} fat pointer → SEGV on invoke. The fix
+// recurses TypeArgs of value-copying containers (isValueCopyingContainerNamed),
+// so the struct is judged un-dup-safe → the Map read is a BORROW (env intact,
+// map sole owner, single drop) — while genuinely refcounted handles (Ref/Weak)
+// stay opaque and dup-safe.
+type FnV {
+  (() -> int)[] fns;
+}
+
+// Primary repro — Vector-of-closures field, read back, element invoked.
+probe_map_struct_vecclosure() `test {
+  x := 6;
+  m := Map[int, FnV]();
+  m[0] = FnV(fns: [|| -> x]);
+  b := m[0]!;
+  assert(b.fns[0]() == 6, "vec of closures");
+}
+
+// Inline read form: `m[0]!.fns[0]()`.
+probe_map_struct_vecclosure_inline() `test {
+  x := 9;
+  m := Map[int, FnV]();
+  m[0] = FnV(fns: [|| -> x]);
+  assert(m[0]!.fns[0]() == 9, "vec of closures inline");
+}
+
+// Multi-element vector capturing different values — every element's env must
+// survive the borrow (not just element 0).
+probe_map_struct_vecclosure_multi() `test {
+  a := 1;
+  b := 2;
+  c := 3;
+  m := Map[int, FnV]();
+  m[0] = FnV(fns: [|| -> a, || -> b, || -> c]);
+  v := m[0]!;
+  assert(v.fns[0]() == 1, "elem 0 env");
+  assert(v.fns[1]() == 2, "elem 1 env");
+  assert(v.fns[2]() == 3, "elem 2 env");
+}
+
+// Map-of-closures field variant — exercises the TypVmap value-copying origin.
+type FnMap {
+  map[int, () -> int] fns;
+}
+probe_map_struct_mapclosure() `test {
+  x := 12;
+  m := Map[int, FnMap]();
+  fns := Map[int, () -> int]();
+  fns[0] = || -> x;
+  m[0] = FnMap(fns: move fns);
+  b := m[0]!;
+  assert(b.fns[0]!() == 12, "map of closures");
+}
+
+// Loop-reads leak guard: 100 reads of a vec-of-closures struct → one owner, no
+// leak (mirrors probe_map_struct_closure_loop_reads for the container path).
+probe_map_struct_vecclosure_loop_reads() `test {
+  x := 4;
+  m := Map[int, FnV]();
+  m[0] = FnV(fns: [|| -> x]);
+  total := 0;
+  i := 0;
+  while i < 100 {
+    v := m[0]!;
+    total = total + v.fns[0]();
+    i = i + 1;
+  }
+  assert(total == 400, "100 vec-closure borrows, one owner, no leak");
+}
+
+// Regression guard for the isValueCopyingContainerNamed boundary: a struct whose
+// field is a value-copying container of a NON-closure element (`Vector[int]`)
+// must still be an OWNED deep copy on read — recursing TypeArgs reaches `int`
+// (no closure) → nil → dup-safe. Mutating the copy's vector must not affect the
+// map's stored value. (Pins that the fix's TypeArgs recursion does not
+// over-reject ordinary value-copying containers.)
+type IntVecBox {
+  int[] xs;
+}
+probe_map_struct_intvec_owned_copy() `test {
+  m := Map[int, IntVecBox]();
+  m[0] = IntVecBox(xs: [1, 2, 3]);
+  b := m[0]!;
+  b.xs.push(4);
+  assert(b.xs.len == 4, "owned copy mutated");
+  again := m[0]!;
+  assert(again.xs.len == 3, "map value unchanged (owned copy, not alias)");
+}
+
+// Regression guard for the topLevel=true branch: a BARE top-level container of
+// closures read directly (`vv[0]`, not through a struct field) must STAY an owned
+// value (T1045 null-dup path), NOT be flipped to a borrow. FirstFieldNestedClosure
+// (the non-deep entry used by ownership/stmt borrow-suppression) returns nil for a
+// value-copying container at top level, so the read keeps its owned path. Flipping
+// it to a borrow would leak the duped container. This pins that the T1260 fix's
+// TypeArgs recursion only fires for FIELD-nested containers, not bare reads.
+probe_bare_vec_of_closures() `test {
+  x := 5;
+  vv := Vector[() -> int]();
+  vv.push(|| -> x);
+  f := vv[0];
+  assert(f() == 5, "bare container-of-closures read stays owned");
+}
+
+// Leak guard for the bare-container owned path: 100 direct reads must not leak.
+probe_bare_vec_of_closures_loop() `test {
+  x := 4;
+  vv := Vector[() -> int]();
+  vv.push(|| -> x);
+  total := 0;
+  i := 0;
+  while i < 100 {
+    f := vv[0];
+    total = total + f();
+    i = i + 1;
+  }
+  assert(total == 400, "100 bare-container reads, one owner, no leak");
+}
+
+// Doubly-nested value-copying container as a struct field:
+// `Vector[Vector[() -> int]]`. Exercises firstFieldNestedClosure recursing through
+// two container levels before reaching the closure — the struct must be judged
+// un-dup-safe (borrow), env intact on invoke.
+type NestVec {
+  (() -> int)[][] grid;
+}
+probe_map_struct_nested_vecclosure() `test {
+  x := 3;
+  m := Map[int, NestVec]();
+  m[0] = NestVec(grid: [[|| -> x]]);
+  b := m[0]!;
+  assert(b.grid[0][0]() == 3, "nested vec-of-vec of closures");
+}
+
+// Generic struct whose type-arg-typed field is a value-copying container:
+// `GBox[() -> int]` → field `Vector[() -> int]`. Exercises the Instance→Named
+// field recursion under the type-arg subst reaching a container-of-closures — the
+// closure is inside the substituted field, not a direct field, so this pins the
+// subst path of firstFieldNestedClosure through a container.
+type GBox[T] {
+  T[] items;
+}
+probe_map_generic_container_closure() `test {
+  x := 15;
+  m := Map[int, GBox[() -> int]]();
+  m[0] = GBox[() -> int](items: [|| -> x]);
+  b := m[0]!;
+  assert(b.items[0]() == 15, "generic container-of-closures field");
+}
+
+// Set branch of isValueCopyingContainerNamed: a struct field `Set[int]`
+// (non-closure element) must still be an OWNED deep copy on read — the recursion
+// classifies Set as value-copying and recurses to `int` (no closure) → nil →
+// dup-safe. Mutating the copy's set must not affect the map's stored value.
+// (Exercises the Set arm; a Set of closures is not constructible — closures are
+// not Hashable — so the Set→closure return is unreachable from source, same as
+// Ref-of-closure.)
+type SetBox {
+  Set[int] xs;
+}
+probe_map_struct_setbox_owned_copy() `test {
+  s := Set[int]();
+  s.add(1);
+  m := Map[int, SetBox]();
+  m[0] = SetBox(xs: move s);
+  b := m[0]!;
+  b.xs.add(2);
+  assert(b.xs.len == 2, "owned copy mutated");
+  again := m[0]!;
+  assert(again.xs.len == 1, "map value unchanged (owned copy, not alias)");
+}

@@ -78,3 +78,75 @@ func TestT1230_StructClosureMapReassignNoDup(t *testing.T) {
 	}
 	assertNotContains(t, fn, "heapdup.copy")
 }
+
+// T1260: a struct whose field is a VALUE-COPYING container of closures
+// (`FnV { (() -> int)[] fns; }`) must ALSO be treated as un-dup-safe. The prior
+// FirstFieldNestedClosure treated every std container as opaque, so the inner
+// Vector[() -> int] was not seen and the Map read deep-copied the struct — the
+// per-element closure clone zeroes the env (T0813) → null {fn,env} → SEGV on
+// invoke. The fix recurses TypeArgs of value-copying containers, so the `[]`
+// read is a borrow (no heapdup.copy) and the vector's closure envs stay intact.
+func TestT1260_StructVecClosureMapReadNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type FnV { (() -> int)[] fns; }
+		probe() {
+			x := 6;
+			m := Map[int, FnV]();
+			m[0] = FnV(fns: [|| -> x]);
+			b := m[0]!;
+			y := b.fns[0]();
+		}
+		main() { probe(); }
+	`)
+	fn := extractDefine(ir, `"Map[int, FnV].[]"`)
+	if fn == "" {
+		t.Fatalf("Map[int, FnV].[] not found in IR")
+	}
+	// A deep-copy would clone the inner vector and zero each closure's env slot.
+	assertNotContains(t, fn, "heapdup.copy")
+}
+
+// Control for T1260: a struct with a value-copying container of a NON-closure
+// element (`IntBox { int[] xs; }`) stays dup-safe, so the `[]` read still
+// deep-copies it (heapdup.copy). Guards the fix's TypeArgs recursion against
+// over-suppressing the dup for ordinary value-copying containers.
+func TestT1260_StructIntVecMapReadDups(t *testing.T) {
+	ir := generateIR(t, `
+		type IntBox { int[] xs; }
+		probe() {
+			m := Map[int, IntBox]();
+			m[0] = IntBox(xs: [1, 2, 3]);
+			b := m[0]!;
+		}
+		main() { probe(); }
+	`)
+	fn := extractDefine(ir, `"Map[int, IntBox].[]"`)
+	if fn == "" {
+		t.Fatalf("Map[int, IntBox].[] not found in IR")
+	}
+	assertContains(t, fn, "heapdup.copy")
+}
+
+// T1260: a struct whose field is a MAP of closures (`FnM { map[int, () -> int] fns; }`)
+// must also be un-dup-safe. Exercises the TypMap arm of isValueCopyingContainerNamed
+// (distinct from the Vector arm in TestT1260_StructVecClosureMapReadNoDup) — the Map
+// read is a borrow (no heapdup.copy), so the closure envs in the nested map survive.
+func TestT1260_StructMapClosureMapReadNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type FnM { map[int, () -> int] fns; }
+		probe() {
+			x := 6;
+			fns := Map[int, () -> int]();
+			fns[0] = || -> x;
+			m := Map[int, FnM]();
+			m[0] = FnM(fns: move fns);
+			b := m[0]!;
+		}
+		main() { probe(); }
+	`)
+	fn := extractDefine(ir, `"Map[int, FnM].[]"`)
+	if fn == "" {
+		t.Fatalf("Map[int, FnM].[] not found in IR")
+	}
+	assertNotContains(t, fn, "heapdup.copy")
+}

@@ -9711,7 +9711,12 @@ func (c *Compiler) heapTypeSafeToDup(named *types.Named, resolved types.Type, se
 		// SEGV when the caller invokes it. Treat it as un-dup-safe so the read
 		// returns a shallow alias with the env intact; ownership marks the local
 		// Borrowed (closureAggregateBorrowSource / FirstFieldNestedClosure).
-		if sema.FirstFieldNestedClosure(fType) != nil {
+		//
+		// Deep variant (T1260): fType is a FIELD, so a value-copying container of
+		// closures (`Vector[() -> int]`) must ALSO count — its element deep-copy
+		// zeroes the env just like a bare struct-of-closure. (A bare top-level
+		// container read keeps its own null-dup path via FirstFieldNestedClosure.)
+		if sema.FirstFieldNestedClosureDeep(fType) != nil {
 			return false
 		}
 		fNamed := extractNamed(fType)

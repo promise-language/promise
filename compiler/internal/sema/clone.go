@@ -287,6 +287,24 @@ func isStdNativeContainerNamed(n *types.Named) bool {
 	return false
 }
 
+// isValueCopyingContainerNamed reports whether n is a std native container whose
+// clone()/dup DEEP-copies its elements (Vector, Map, Set) — as opposed to the
+// refcounted / single-owner handles (Ref/Weak/Channel/Task/Mutex/string) that
+// dup by a refcount bump or a move. This distinction matters for the closure
+// dup-safety predicate (firstFieldNestedClosure, T1260): a value-copying
+// container of closures is just as unsound to shallow-copy as a bare
+// struct-of-closure, because the element deep-copy would zero the closure env.
+// (T1260)
+func isValueCopyingContainerNamed(n *types.Named) bool {
+	if n == types.TypVector || n == types.TypMap {
+		return true
+	}
+	if obj := n.Obj(); obj != nil && obj.Name() == "Set" {
+		return true
+	}
+	return false
+}
+
 // FirstNestedSingleOwnerHandle is the exported entry point for cross-package
 // use (codegen / ownership) of the deep single-owner-handle predicate. (T0623)
 func FirstNestedSingleOwnerHandle(typ types.Type) types.Type {
@@ -630,10 +648,29 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 // clone() method (a hand-written clone can rebuild the closure). Returns nil when
 // no field/variant-nested closure is present. (T1230)
 func FirstFieldNestedClosure(typ types.Type) *types.Signature {
-	return firstFieldNestedClosure(typ, nil)
+	return firstFieldNestedClosure(typ, nil, true)
 }
 
-func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signature {
+// FirstFieldNestedClosureDeep is like FirstFieldNestedClosure but treats `typ` as
+// if it were a struct/enum FIELD (nested), so a value-copying container
+// (Vector/Map/Set) of closures at the TOP of `typ` is recursed into rather than
+// treated as opaque. heapTypeSafeToDup uses this per field: a field
+// `Vector[() -> int]` must make the containing struct un-dup-safe (its deep-copy
+// would zero the closure env → SEGV, T1260), whereas a BARE top-level container
+// read (`vv[0]` → Vector[() -> int]) has its own owned null-dup path (T1045) and
+// must stay dup-owned, so FirstFieldNestedClosure keeps it opaque. (T1260)
+func FirstFieldNestedClosureDeep(typ types.Type) *types.Signature {
+	return firstFieldNestedClosure(typ, nil, false)
+}
+
+// firstFieldNestedClosure walks `typ` for a closure reached through struct/enum
+// fields, Optional/Tuple/Array elements, or (when not at top level) value-copying
+// container TypeArgs. `topLevel` is true only for the outermost queried type: a
+// value-copying container at top level is treated as opaque (its own null-dup
+// path owns the read), while the same container reached via a field is recursed
+// into (a struct-field deep-copy would zero the closure env). All recursive calls
+// descend into fields/elements, so they pass topLevel=false. (T1260)
+func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel bool) *types.Signature {
 	if typ == nil {
 		return nil
 	}
@@ -646,8 +683,31 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Si
 	case *types.Instance:
 		switch origin := t.Origin().(type) {
 		case *types.Named:
-			// Std native container: opaque. Do NOT recurse TypeArgs — Ref[()->int]
-			// must yield nil (refcounted dup is sound). A clone()-bearing user type
+			// Value-copying container (Vector/Map/Set): its clone()/dup DEEP-copies
+			// elements, so a closure element WOULD be unsoundly cloned (its env
+			// zeroed → null fat pointer → SEGV on invoke). When reached via a struct/
+			// enum FIELD (topLevel=false), recurse into TypeArgs so a struct holding
+			// `Vector[() -> int]` is judged un-dup-safe (read as a borrow), matching
+			// the direct `.clone()` sema rejection. At TOP LEVEL, keep it opaque: a
+			// bare container read has its own owned null-dup path (T1045) and must not
+			// be flipped to a borrow (that would leak the duped container). This is
+			// the distinction from the original blanket opacity: only genuinely
+			// refcounted/single-owner handles (Ref/Weak/Channel/Task/Mutex/string)
+			// stay opaque at every level. (T1260)
+			if isValueCopyingContainerNamed(origin) {
+				if topLevel {
+					return nil
+				}
+				for _, ta := range t.TypeArgs() {
+					if sig := firstFieldNestedClosure(ta, seen, false); sig != nil {
+						return sig
+					}
+				}
+				return nil
+			}
+			// Refcounted/single-owner-handle std native container: opaque. Do NOT
+			// recurse TypeArgs — Ref[()->int] must yield nil (refcounted dup is a
+			// count bump, not a shallow env alias). A clone()-bearing user type
 			// stops recursion (its clone rebuilds the closure).
 			if isStdNativeContainerNamed(origin) || origin.LookupMethod("clone") != nil || seen[origin] {
 				return nil
@@ -655,7 +715,7 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Si
 			seen[origin] = true
 			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
 			for _, f := range origin.AllFields() {
-				if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+				if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen, false); sig != nil {
 					return sig
 				}
 			}
@@ -667,7 +727,7 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Si
 			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
 			for _, v := range origin.Variants() {
 				for _, f := range v.Fields() {
-					if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+					if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen, false); sig != nil {
 						return sig
 					}
 				}
@@ -679,7 +739,7 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Si
 		}
 		seen[t] = true
 		for _, f := range t.AllFields() {
-			if sig := firstFieldNestedClosure(f.Type(), seen); sig != nil {
+			if sig := firstFieldNestedClosure(f.Type(), seen, false); sig != nil {
 				return sig
 			}
 		}
@@ -690,21 +750,21 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Si
 		seen[t] = true
 		for _, v := range t.Variants() {
 			for _, f := range v.Fields() {
-				if sig := firstFieldNestedClosure(f.Type(), seen); sig != nil {
+				if sig := firstFieldNestedClosure(f.Type(), seen, false); sig != nil {
 					return sig
 				}
 			}
 		}
 	case *types.Optional:
-		return firstFieldNestedClosure(t.Elem(), seen)
+		return firstFieldNestedClosure(t.Elem(), seen, false)
 	case *types.Tuple:
 		for _, e := range t.Elems() {
-			if sig := firstFieldNestedClosure(e, seen); sig != nil {
+			if sig := firstFieldNestedClosure(e, seen, false); sig != nil {
 				return sig
 			}
 		}
 	case *types.Array:
-		return firstFieldNestedClosure(t.Elem(), seen)
+		return firstFieldNestedClosure(t.Elem(), seen, false)
 	}
 	return nil
 }

@@ -58,7 +58,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	isFailable := sig.CanError()
 
 	// 1. Create coroutine function: [this +] params + i8* yield_slot [+ i8* error_slot] → i8*
-	coroName := fmt.Sprintf(".generator.%d", c.generatorCounter)
+	coroName := coroRampName("generator", c.coroEnclosingQualifier(fn), c.generatorCounter) // T1222: qualify by enclosing to keep symbol unique across split units
 	c.generatorCounter++
 
 	var coroParams []*ir.Param
@@ -76,6 +76,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("noinline"))
+	c.attributeCoroToEnclosing(coroName, fn) // T1222: same split unit as spawner
 
 	// 2. Save compiler state
 	savedFn := c.fn

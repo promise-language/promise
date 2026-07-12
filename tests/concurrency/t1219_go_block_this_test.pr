@@ -301,3 +301,59 @@ t1219_this_via_nested_lambda() `test {
   }
   out.close();
 }
+
+// --- T1222: generic-owner ramp attribution across multiple instances ----------
+// A `go { }` capturing `this` inside a generic type's method compiles to a
+// synthesized `.goroutine.N` ramp. The ramp must be attributed to the SAME split
+// unit as its enclosing instance method, or it is orphaned in the main IR while
+// the method body lands in the instance `.bc`. A later compile serving the
+// instance `.bc` from cache then links `.goroutine.N` against the wrong (or
+// missing) body → undefined-symbol link error or UAF/SIGSEGV. Exercising two
+// distinct instantiations (int + heap-string) forces two separate instance `.bc`
+// files, each of which must be self-contained (carry its own ramp).
+
+type T1222Box[T] {
+  T value;
+  send_value(this, Channel[T] out) {
+    go {
+      out.send(this.value);
+    };
+  }
+}
+
+t1222_generic_owner_int() `test {
+  out := channel[int](capacity: 1);
+  T1222Box[int](value: 7).send_value(out);
+  got := <-out;
+  if v := got {
+    assert(v == 7, "generic-owner int ramp read wrong snapshot (T1222)");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Heap-string instantiation: a corrupted ramp/frame surfaces as garbage-pointer
+// reads inside promise_string_concat (the batched-UAF manifestation in the
+// report). The go block concatenates a heap-string field to force that path.
+type T1222StrBox[T] {
+  T value;
+  string label;
+  emit(this, Channel[string] out) {
+    go {
+      out.send(this.label + "!");
+    };
+  }
+}
+
+t1222_generic_owner_string() `test {
+  out := channel[string](capacity: 1);
+  T1222StrBox[int](value: 3, label: "hi").emit(out);
+  got := <-out;
+  if v := got {
+    assert(v == "hi!", "generic-owner string ramp corrupted receiver frame (T1222)");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}

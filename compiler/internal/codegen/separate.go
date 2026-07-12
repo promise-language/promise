@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"fmt"
+
 	"github.com/promise-language/promise/compiler/internal/sema"
 
 	"github.com/llir/llvm/ir"
@@ -29,6 +31,86 @@ func (r *CompileResult) ModuleNames() []string {
 		}
 	}
 	return names
+}
+
+// coroRampName builds the symbol name for a synthesized coroutine ramp
+// (`.goroutine.N` / `.generator.N`) spawned inside `enclosing`, qualifying the
+// global counter `n` with the enclosing function's own (deterministic, mangled)
+// name. The `kind` is "goroutine" or "generator".
+//
+// Qualifying by enclosing name is what makes T1222 safe. The ramp is attributed to
+// the same split unit as `enclosing` (see attributeCoroToEnclosing), so a cross-
+// program cached instance `.bc` carries its ramp definition. But the counter `n`
+// alone is a whole-program sequence: a consuming program that skip-serves that
+// cached instance does NOT advance its counter for the skipped body, so one of its
+// own unrelated ramps can reuse the same number → `duplicate symbol .goroutine.N`
+// at link time (two external definitions in two linked units). Prefixing with the
+// enclosing name gives ramps from different enclosing functions disjoint symbols,
+// while ramps from the SAME enclosing function only ever exist in a single cached
+// unit that is linked once. (The program-entry `.goroutine.main`, created in
+// sched.go, is a distinct non-numbered coroutine and is unaffected.)
+func coroRampName(kind, enclosing string, n int) string {
+	if enclosing == "" {
+		return fmt.Sprintf(".%s.%d", kind, n)
+	}
+	return fmt.Sprintf(".%s.%s.%d", kind, enclosing, n)
+}
+
+// coroEnclosingQualifier returns the enclosing function's (deterministic, mangled)
+// name to embed in a synthesized coroutine ramp symbol — but ONLY when that function
+// is owned by a module/instance split unit. Those are the units that get compiled to
+// a `.bc`/`.o` and cached under a content-independent key shared across programs
+// (see InstanceCacheKey), so a bare `.goroutine.N` counter in them can collide with
+// an unrelated ramp a consuming program numbers with the same value (T1222 duplicate
+// symbol). For plain main-code spawners (in neither map) it returns "", leaving the
+// bare `.goroutine.N` name: those ramps only ever live in the per-program main IR,
+// which is linked exactly once, so the counter cannot collide. Returning "" for the
+// common case also keeps the ramp names stable for existing tests.
+func (c *Compiler) coroEnclosingQualifier(enclosing *ir.Func) string {
+	if enclosing == nil {
+		return ""
+	}
+	name := enclosing.Name()
+	if _, ok := c.instanceOwnedFuncs[name]; ok {
+		return name
+	}
+	if _, ok := c.moduleOwnedFuncs[name]; ok {
+		return name
+	}
+	return ""
+}
+
+// attributeCoroToEnclosing attributes a synthesized numbered coroutine ramp
+// (`.goroutine.N` / `.generator.N`) to the same ownership unit as the `enclosing`
+// function that spawns it. Without this, a ramp created via `c.module.NewFunc` is
+// unowned: when its enclosing function is an instance/module-owned generic method,
+// `SplitModuleIRs`/`InstanceIRs` route the method body into the instance/module
+// `.bc` but leave the ramp definition in main IR. A later compile that serves the
+// instance `.bc` from cache then references the ramp by a symbol whose body is not
+// present in that unit → undefined-symbol link error (isolated) or wrong-body
+// UAF/SIGSEGV (batched). T1222. See coroRampName for why the ramp symbol is
+// additionally qualified by the enclosing name to avoid the dual duplicate-symbol
+// failure mode.
+//
+// The enclosing function is `c.fn` at a go-block site (the ramp is built inside the
+// method body) but the factory `fn` parameter at a generator site (the ramp is
+// built while emitting the method itself, before `c.fn` is switched to the ramp).
+//
+// instanceOwnedFuncs is checked first because instance ownership takes precedence
+// over module ownership in saveAndStripNonOwned. When the enclosing function is
+// plain main code or a synthesized structural default (in neither map), this is a
+// no-op and the ramp correctly stays in main — the same unit as its enclosing
+// function. Nested ramps propagate naturally: when a ramp body is compiled, its
+// enclosing function is the now-registered outer ramp.
+func (c *Compiler) attributeCoroToEnclosing(coroName string, enclosing *ir.Func) {
+	if enclosing == nil {
+		return
+	}
+	if owner, ok := c.instanceOwnedFuncs[enclosing.Name()]; ok {
+		c.instanceOwnedFuncs[coroName] = owner
+	} else if owner, ok := c.moduleOwnedFuncs[enclosing.Name()]; ok {
+		c.moduleOwnedFuncs[coroName] = owner
+	}
 }
 
 // SplitModuleIRs produces separate IR text for each module and the main file.

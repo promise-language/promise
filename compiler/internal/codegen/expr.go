@@ -16709,7 +16709,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	}
 
 	// 4. Create coroutine wrapper function
-	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
+	coroName := coroRampName("goroutine", c.coroEnclosingQualifier(c.fn), c.goCounter) // T1222: qualify by enclosing to keep symbol unique across split units
 	c.goCounter++
 
 	var coroParams []*ir.Param
@@ -16718,6 +16718,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	}
 	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
+	c.attributeCoroToEnclosing(coroName, c.fn) // T1222: same split unit as spawner
 
 	// 5. Build coroutine body
 	entry := coroFn.NewBlock(".entry")
@@ -17024,7 +17025,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	}
 
 	// 4. Create coroutine function with captured values as parameters
-	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
+	coroName := coroRampName("goroutine", c.coroEnclosingQualifier(c.fn), c.goCounter) // T1222: qualify by enclosing to keep symbol unique across split units
 	c.goCounter++
 	var coroParams []*ir.Param
 	for i, name := range captureNames {
@@ -17032,6 +17033,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	}
 	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
+	c.attributeCoroToEnclosing(coroName, c.fn) // T1222: same split unit as spawner
 
 	// 5. Save and switch context
 	savedFn := c.fn
@@ -17350,7 +17352,20 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 // void return + sret pointer for struct returns, which is incompatible with
 // the coroutine body's direct call + store pattern (B0046).
 func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Type, argTypes []types.Type, resultLLVM irtypes.Type, isVoid bool) *ir.Func {
-	wrapName := fmt.Sprintf(".go_extern_wrap.%s.%d", ext.PromiseName, c.goCounter)
+	// T1222: the go-block ramp is attributed to (and lands in) the same split unit
+	// as its enclosing function. The ramp calls this wrapper, so the wrapper must be
+	// co-located too — otherwise a `go extern()` inside a generic instance method
+	// leaves the wrapper orphaned in main IR while the ramp goes to the instance
+	// `.bc` → cross-program undefined-symbol at link. c.fn is still the enclosing
+	// function here (genGoExternWrapper is called before the ramp is built and before
+	// saveState switches c.fn), so qualify + attribute exactly like coroRampName.
+	enclQual := c.coroEnclosingQualifier(c.fn)
+	var wrapName string
+	if enclQual == "" {
+		wrapName = fmt.Sprintf(".go_extern_wrap.%s.%d", ext.PromiseName, c.goCounter)
+	} else {
+		wrapName = fmt.Sprintf(".go_extern_wrap.%s.%s.%d", ext.PromiseName, enclQual, c.goCounter)
+	}
 
 	var params []*ir.Param
 	for i, ty := range argLLVMTypes {
@@ -17362,6 +17377,7 @@ func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Ty
 		retType = resultLLVM
 	}
 	wrapFn := c.module.NewFunc(wrapName, retType, params...)
+	c.attributeCoroToEnclosing(wrapName, c.fn) // T1222: same split unit as the ramp that calls it
 
 	saved := c.saveState()
 	defer c.restoreState(saved)
@@ -17911,7 +17927,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	}
 
 	// Create coroutine function with captured values as parameters
-	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
+	coroName := coroRampName("goroutine", c.coroEnclosingQualifier(c.fn), c.goCounter) // T1222: qualify by enclosing to keep symbol unique across split units
 	c.goCounter++
 	var coroParams []*ir.Param
 	for i, name := range captureNames {
@@ -17919,6 +17935,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	}
 	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
+	c.attributeCoroToEnclosing(coroName, c.fn) // T1222: same split unit as spawner
 
 	// Save and switch context
 	savedFn := c.fn

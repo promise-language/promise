@@ -184,7 +184,11 @@ func extractFunction(ir, name string) string {
 // `.goroutine.main()` whose name also appears as a call operand inside @main —
 // where extractFunction can latch onto the reference and extract @main instead.
 func extractDefine(ir, name string) string {
+	// LLVM quotes symbol names containing special characters (e.g.
+	// `@".goroutine.Box[int].send_value.0"`), so accept both the bare and quoted
+	// forms of the needle.
 	needle := "@" + name + "("
+	quotedNeedle := "@\"" + name + "\"("
 	for idx := 0; ; {
 		d := strings.Index(ir[idx:], "define")
 		if d < 0 {
@@ -195,7 +199,8 @@ func extractDefine(ir, name string) string {
 		if nl < 0 {
 			return ""
 		}
-		if strings.Contains(ir[d:d+nl], needle) {
+		line := ir[d : d+nl]
+		if strings.Contains(line, needle) || strings.Contains(line, quotedNeedle) {
 			rest := ir[d:]
 			end := strings.Index(rest, "\n}\n")
 			if end < 0 {
@@ -18637,7 +18642,10 @@ func TestT1219_GoBlockThisGenericOwner(t *testing.T) {
 	`)
 	sendIR := extractFunction(ir, `"T1219Box[int].send_it"`)
 	assertContains(t, sendIR, "heapdup.copy")
-	assertContains(t, sendIR, "call i8* @.goroutine.")
+	// T1222: the ramp spawned inside a generic (instance-owned) method is qualified
+	// by the enclosing name so it can't collide across split units. The qualified
+	// symbol contains `[`/`.`, so LLVM emits it quoted.
+	assertContains(t, sendIR, `call i8* @".goroutine.T1219Box[int].send_it.`)
 }
 
 // T1219: a GENERIC METHOD on a NON-GENERIC owner (`T1219GenM.emit[int]`)
@@ -20286,9 +20294,15 @@ func TestYieldDelegateStream(t *testing.T) {
 	assertContains(t, ir, "yieldstar.check")
 	assertContains(t, ir, "yieldstar.yield")
 	assertContains(t, ir, "yieldstar.exit")
-	// Two generator coroutines: inner and outer
-	assertContains(t, ir, ".generator.0")
-	assertContains(t, ir, ".generator.1")
+	// Two generator coroutines: inner and outer. These are top-level (unowned)
+	// functions, so their ramps keep bare `.generator.<n>` names (T1222 qualifies
+	// only module/instance-owned ramps — e.g. std's Random generators become
+	// `.generator.__mod_std_Random.ints.0`). Count the bare user generator defines
+	// rather than hardcoding the numbers, which shift with the std generator count.
+	userGenDefs := regexp.MustCompile(`define [^\n]*@\.generator\.\d+\(`).FindAllString(ir, -1)
+	if len(userGenDefs) != 2 {
+		t.Fatalf("expected 2 bare user generator coroutine defines (inner, outer), got %d:\n%v", len(userGenDefs), userGenDefs)
+	}
 }
 
 func TestYieldDelegateRange(t *testing.T) {

@@ -1,0 +1,148 @@
+// T1230: storing a heap struct that holds a capturing closure FIELD into a Map,
+// then reading it back and calling the closure. The Map's `[]` returns the element
+// by value; a closure-nesting aggregate cannot be deep-cloned on read (the captured
+// env frame is opaque), so the read is a BORROW — the local aliases the map's stored
+// instance/env, and the map retains sole ownership (single drop). Judging the struct
+// dup-safe previously routed `return v` through dupHeapValueFields, which zeroes the
+// closure slot (T0813) → null {fn,env} fat pointer → SEGV at 0x0 on invoke.
+// See heapTypeSafeToDup (codegen/expr.go), isClosureAggregateBorrow (codegen/stmt.go),
+// closureAggregateBorrowSource (ownership/expr.go), FirstFieldNestedClosure (sema).
+type Fn {
+  () -> int f;
+}
+type FnStr {
+  () -> int f;
+  string s;
+}
+type Outer {
+  Fn inner;
+}
+
+// Repro A — inline read + call: `m[0]!.f()`.
+probe_map_struct_closure_inline() `test {
+  x := 5;
+  m := Map[int, Fn]();
+  m[0] = Fn(f: || -> x);
+  assert(m[0]!.f() == 5, "inline read+call");
+}
+
+// Repro B — bind to local, then call: `fn := m[0]!; fn.f()`.
+probe_map_struct_closure_bind() `test {
+  x := 5;
+  m := Map[int, Fn]();
+  m[0] = Fn(f: || -> x);
+  fn := m[0]!;
+  assert(fn.f() == 5, "bind-then-call");
+}
+
+// Typed var-decl form: `Fn fn = m[0]!`.
+probe_map_struct_closure_typed_bind() `test {
+  x := 8;
+  m := Map[int, Fn]();
+  m[0] = Fn(f: || -> x);
+  Fn fn = m[0]!;
+  assert(fn.f() == 8, "typed bind");
+}
+
+// Struct nesting the closure two levels deep.
+probe_map_struct_closure_nested() `test {
+  x := 7;
+  m := Map[int, Outer]();
+  m[0] = Outer(inner: Fn(f: || -> x));
+  o := m[0]!;
+  assert(o.inner.f() == 7, "nested bind");
+  assert(m[0]!.inner.f() == 7, "nested inline");
+}
+
+// Closure struct that ALSO owns a droppable non-closure (string) field — the borrow
+// must not double-free the string, and the map's own drop frees it exactly once.
+probe_map_struct_closure_with_droppable() `test {
+  x := 3;
+  m := Map[int, FnStr]();
+  m[0] = FnStr(f: || -> x, s: "hello");
+  fn := m[0]!;
+  assert(fn.f() == 3, "call closure field");
+  assert(fn.s == "hello", "read string field");
+}
+
+// Multiple independent reads of the same slot — each is a fresh borrow; the map is
+// dropped once at scope exit.
+probe_map_struct_closure_multi_read() `test {
+  x := 2;
+  m := Map[int, Fn]();
+  m[0] = Fn(f: || -> x);
+  a := m[0]!;
+  b := m[0]!;
+  assert(a.f() + b.f() == 4, "two reads, one owner");
+}
+
+// Regression guard: a plain (non-closure) heap struct read out of a map is an OWNED
+// deep copy — mutating the copy's vector must not affect the map's stored value.
+type VecBox {
+  int[] xs;
+}
+probe_map_plain_struct_owned_copy() `test {
+  m := Map[int, VecBox]();
+  m[0] = VecBox(xs: [1, 2, 3]);
+  b := m[0]!;
+  b.xs.push(4);
+  assert(b.xs.len == 4, "copy mutated");
+  again := m[0]!;
+  assert(again.xs.len == 3, "map value unchanged (owned copy, not alias)");
+}
+
+// Assignment (re-assign) form: `fn = m[k]!` into an already-bound local. Exercises
+// the genAssignStmt borrow-suppression arm (distinct from the var-decl arms above) —
+// without it the reassign deep-copies the closure-nesting struct, zeroing the env →
+// SEGV on the following invoke.
+type Fn2 {
+  () -> int f;
+}
+probe_map_struct_closure_reassign() `test {
+  x := 4;
+  m := Map[int, Fn2]();
+  m[0] = Fn2(f: || -> x);
+  fn := Fn2(f: || -> 0);
+  fn = m[0]!;
+  assert(fn.f() == 4, "reassigned borrow calls the map's env");
+}
+
+// Generic struct nesting a closure field (`Box[int]` value). Exercises the
+// Instance->Named substitution branch of FirstFieldNestedClosure — the closure is
+// reached through a substituted, non-container generic type's field.
+type Box[T] {
+  T v;
+  () -> int f;
+}
+probe_map_generic_struct_closure() `test {
+  x := 11;
+  m := Map[int, Box[int]]();
+  m[0] = Box[int](v: 1, f: || -> x);
+  b := m[0]!;
+  assert(b.f() == 11, "generic struct closure field");
+  assert(b.v == 1, "generic struct value field");
+}
+
+// Control from the bug report: the same closure-nesting struct read out of a VECTOR
+// (not a map) was already correct. Guards the fix against regressing the vector path.
+probe_vector_struct_closure_control() `test {
+  x := 5;
+  v := [Fn2(f: || -> x)];
+  assert(v[0].f() == 5, "vector element closure call");
+}
+
+// The borrow's drop is suppressed on EVERY read: 100 reads in a loop must not leak
+// (the map stays sole owner and frees the env exactly once at scope exit).
+probe_map_struct_closure_loop_reads() `test {
+  x := 3;
+  m := Map[int, Fn2]();
+  m[0] = Fn2(f: || -> x);
+  total := 0;
+  i := 0;
+  while i < 100 {
+    fn := m[0]!;
+    total = total + fn.f();
+    i = i + 1;
+  }
+  assert(total == 300, "100 borrows, one owner, no leak");
+}

@@ -469,6 +469,22 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 	if expr == nil {
 		return false
 	}
+	// Type gate (T1230): the read's result must transitively nest a closure —
+	// either a direct closure field (*types.Signature) or an aggregate whose
+	// field/variant is a closure (`Fn { () -> int f; }`). FirstFieldNestedClosure
+	// treats refcounted std containers (Ref/Weak/...) as opaque, so sound
+	// refcounted nesting is not misclassified. Without this gate the shape checks
+	// below also match non-closure field/element reads (strings, vectors), which
+	// must be deep-cloned, not borrowed. The direct-Signature callers
+	// (maybeRegisterEnvFree) are unaffected: FirstFieldNestedClosure(Signature)
+	// returns the signature itself.
+	rt := c.info.Types[expr]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if sema.FirstFieldNestedClosure(rt) == nil {
+		return false
+	}
 	e := unwrapDestructureParens(expr)
 	// Peel a force-unwrap of an optional closure field: `h.cb!` or `h.cb as! (...)`.
 	if unwrap, ok := e.(*ast.OptionalUnwrapExpr); ok {
@@ -1297,6 +1313,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
+	// T1230: a closure-nesting aggregate read from an aliasing container (`Fn fn = m[k]!`
+	// on a `Fn{()->int}` value) is a borrow — the env can't be deep-cloned. Suppress
+	// the dup-on-read set above so the local aliases the container's instance with the
+	// env intact; the owning drop is cleared after maybeRegisterDrop below.
+	if c.isClosureAggregateBorrow(s.Value) {
+		c.dupHeapUserFieldAccess = false
+	}
 	// T0952: `Mutex[int] m = a ?: b` — signal genElvis (as in genInferredVarDecl) so
 	// the none-path default's owner is neutralized; the bound variable owns the temp.
 	prevElvisBound := c.elvisResultBound
@@ -1661,6 +1684,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		c.clearDropFlag(s.Name)
 		c.markBorrowOptionalLocal(s.Name, dropType)
 	}
+	// T1230: `Fn fn = m[k]!` reads a closure-nesting struct out of an aliasing
+	// container — a borrow (env can't be deep-cloned; dup suppressed above). Clear
+	// the local's owning drop flag so scope exit doesn't free the container's shared
+	// instance/env. Mirrors the genInferredVarDecl clear.
+	if c.isClosureAggregateBorrow(s.Value) {
+		c.clearDropFlag(s.Name)
+	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType, s.Value)
 }
 
@@ -1759,6 +1789,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) {
 			c.dupHeapUserFieldAccess = true
 		}
+	}
+	// T1230: a closure-nesting aggregate read from an aliasing container (`fn := m[k]!`
+	// on a `Fn{()->int}` value) is a borrow — the env can't be deep-cloned. Suppress
+	// the dup-on-read set above so the local aliases the container's instance with the
+	// env intact; the owning drop is cleared after maybeRegisterDrop below.
+	if c.isClosureAggregateBorrow(s.Value) {
+		c.dupHeapUserFieldAccess = false
 	}
 	// T0952: `m := a ?: b` — when the RHS (peeling parens) is an inline elvis, signal
 	// genElvis so it neutralizes the none-path default's owner on the none block
@@ -1986,6 +2023,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 		c.markBorrowOptionalLocal(s.Name, typ)
+	}
+	// T1230: `fn := m[k]!` on a `Fn{()->int}` value reads a closure-nesting struct
+	// out of an aliasing container. The env can't be deep-cloned, so the read is a
+	// borrow — the local aliases the container's stored instance (env intact, dup
+	// suppressed above). Clear the local's owning drop flag so scope exit doesn't
+	// free the shared instance/env out from under the container's own drop
+	// (double-free / UAF). Ownership marks the local Borrowed so escapes are
+	// rejected. Placed after maybeRegisterDrop so the drop flag exists to clear.
+	if c.isClosureAggregateBorrow(s.Value) {
+		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ, s.Value)
 }
@@ -7670,6 +7717,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 		}
 	}
+	// T1230: a closure-nesting aggregate read from an aliasing container (`f = m[k]!`
+	// on a `Fn{()->int}` value) is a borrow — the env can't be deep-cloned. Suppress
+	// the dup-on-read set above so the local aliases the container's instance with the
+	// env intact; the owning drop is cleared below via isClosureAggregateBorrow.
+	if s.Op == ast.OpAssign && c.isClosureAggregateBorrow(s.Value) {
+		c.dupHeapUserFieldAccess = false
+	}
 	// T0952: `m = a ?: b` — signal genElvis (as in genInferredVarDecl) so the
 	// none-path default's owner is neutralized; the assignment target owns the temp.
 	prevElvisBound := c.elvisResultBound
@@ -8034,10 +8088,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// runs for dropBindings entries, whereas closures register a
 			// bindingFreeEnv in scopeBindings) so scope-exit env-free doesn't
 			// double-free against the aggregate's drop. Mirrors
-			// maybeRegisterEnvFree's var-decl suppression; gated on a Signature
-			// target since isClosureAggregateBorrow alone also matches
-			// string/vector field reads.
-			if _, isSig := targetType.(*types.Signature); isSig && c.isClosureAggregateBorrow(s.Value) {
+			// maybeRegisterEnvFree's var-decl suppression. isClosureAggregateBorrow
+			// is now self-gated on FirstFieldNestedClosure, so it fires for a direct
+			// closure target (T0895) AND a struct/enum aggregate nesting a closure
+			// read from an aliasing container (`f = m[k]!` on a `Fn{()->int}` value,
+			// T1230) — the local aliases the container's instance (env intact), so
+			// its owning drop must be suppressed against the container's own drop.
+			if c.isClosureAggregateBorrow(s.Value) {
 				c.clearDropFlag(target.Name)
 			}
 			// T0073: Claim string temp — ownership transferred to this variable.

@@ -2074,8 +2074,14 @@ func closureAggregateBorrowSource(info *sema.Info, expr ast.Expr) ast.Expr {
 	if expr == nil {
 		return nil
 	}
-	// Type gate: only closure-typed reads alias a heap env.
-	if _, isSig := info.Types[expr].(*types.Signature); !isSig {
+	// Type gate: only reads that transitively nest a closure alias a heap env —
+	// a direct closure field (*types.Signature) or an aggregate whose field/variant
+	// is a closure (`Fn { () -> int f; }`, T1230). FirstFieldNestedClosure treats
+	// refcounted std containers (Ref/Weak/...) as opaque, so sound refcounted nesting
+	// (Ref[() -> int]) is not misclassified; it returns the signature itself for a
+	// direct closure, so both shapes pass. Kept in lockstep with codegen's
+	// isClosureAggregateBorrow, whose gate uses the same predicate.
+	if sema.FirstFieldNestedClosure(info.Types[expr]) == nil {
 		return nil
 	}
 	e := unwrapDestructureParens(expr)

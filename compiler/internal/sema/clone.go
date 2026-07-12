@@ -616,6 +616,99 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 	return nil
 }
 
+// FirstFieldNestedClosure is the exported entry point for the by-value container
+// READ gate (T1230). It is to firstNestedClosure what
+// FirstFieldNestedSingleOwnerHandle is to firstNestedSingleOwnerHandle: it finds
+// a closure (*types.Signature) reached ONLY through a user-type field, enum
+// variant field, Optional/Tuple/Array — treating a std native container origin
+// (Ref/Weak/Channel/Vector/Map/Set/string) as fully opaque (its TypeArgs are NOT
+// recursed). This is what distinguishes the unsound shallow-copy surface (a
+// struct/enum whose field is a closure, e.g. `Fn { () -> int f; }`) from sound
+// refcounted nesting (`Ref[() -> int]`), whose element dup is a refcount
+// increment, not a shallow alias of the fat pointer's env. Like
+// firstNestedClosure, recursion STOPS at any user type/enum that provides its own
+// clone() method (a hand-written clone can rebuild the closure). Returns nil when
+// no field/variant-nested closure is present. (T1230)
+func FirstFieldNestedClosure(typ types.Type) *types.Signature {
+	return firstFieldNestedClosure(typ, nil)
+}
+
+func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signature {
+	if typ == nil {
+		return nil
+	}
+	if seen == nil {
+		seen = make(map[types.Type]bool)
+	}
+	switch t := typ.(type) {
+	case *types.Signature:
+		return t
+	case *types.Instance:
+		switch origin := t.Origin().(type) {
+		case *types.Named:
+			// Std native container: opaque. Do NOT recurse TypeArgs — Ref[()->int]
+			// must yield nil (refcounted dup is sound). A clone()-bearing user type
+			// stops recursion (its clone rebuilds the closure).
+			if isStdNativeContainerNamed(origin) || origin.LookupMethod("clone") != nil || seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, f := range origin.AllFields() {
+				if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+					return sig
+				}
+			}
+		case *types.Enum:
+			if origin.LookupMethod("clone") != nil || seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+						return sig
+					}
+				}
+			}
+		}
+	case *types.Named:
+		if isStdNativeContainerNamed(t) || t.LookupMethod("clone") != nil || seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, f := range t.AllFields() {
+			if sig := firstFieldNestedClosure(f.Type(), seen); sig != nil {
+				return sig
+			}
+		}
+	case *types.Enum:
+		if t.LookupMethod("clone") != nil || seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, v := range t.Variants() {
+			for _, f := range v.Fields() {
+				if sig := firstFieldNestedClosure(f.Type(), seen); sig != nil {
+					return sig
+				}
+			}
+		}
+	case *types.Optional:
+		return firstFieldNestedClosure(t.Elem(), seen)
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if sig := firstFieldNestedClosure(e, seen); sig != nil {
+				return sig
+			}
+		}
+	case *types.Array:
+		return firstFieldNestedClosure(t.Elem(), seen)
+	}
+	return nil
+}
+
 // isNestedSingleOwnerContainer reports whether typ is itself a *container*
 // (Vector / Map / Set instance, or a fixed-size Array) that transitively
 // contains a single-owner handle. Such a container, used as another

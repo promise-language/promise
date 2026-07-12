@@ -9701,6 +9701,19 @@ func (c *Compiler) heapTypeSafeToDup(named *types.Named, resolved types.Type, se
 		if subst != nil {
 			fType = types.Substitute(fType, subst)
 		}
+		// T1230: a field that transitively nests a closure (*types.Signature)
+		// through user-type/enum/Optional/Tuple/Array — but NOT through a
+		// refcounted std container (Ref/Weak/...) — is NOT dup-safe. The closure
+		// env (captured frame) is opaque and cannot be deep-cloned, so
+		// dupHeapValueFields zeroes the cloned slot (T0813), producing a null
+		// {fn,env} fat pointer. Judging such a struct dup-safe makes the aliasing
+		// container read path (Map[K,V].[] `return v`) dup-and-zero the closure →
+		// SEGV when the caller invokes it. Treat it as un-dup-safe so the read
+		// returns a shallow alias with the env intact; ownership marks the local
+		// Borrowed (closureAggregateBorrowSource / FirstFieldNestedClosure).
+		if sema.FirstFieldNestedClosure(fType) != nil {
+			return false
+		}
 		fNamed := extractNamed(fType)
 		if fNamed == nil {
 			continue

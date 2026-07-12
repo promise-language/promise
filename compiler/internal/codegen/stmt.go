@@ -482,7 +482,13 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 	if c.typeSubst != nil && rt != nil {
 		rt = types.Substitute(rt, c.typeSubst)
 	}
-	if sema.FirstFieldNestedClosure(rt) == nil {
+	// T1262: use the Deep variant (mirrors ownership closureAggregateBorrowSource
+	// exactly) so a BARE value-copying container of closures read from an aliasing
+	// container (`b := m[0]!`, result `Vector[() -> int]`) is treated as a borrow —
+	// its `[]` now leaves the value aliased (typeNeedsMatchDup returns false), so no
+	// owning env-free/drop binding must be registered. Refcounted nesting stays
+	// opaque (FirstFieldNestedClosureDeep keeps Ref/Weak/... opaque).
+	if sema.FirstFieldNestedClosureDeep(rt) == nil {
 		return false
 	}
 	e := unwrapDestructureParens(expr)
@@ -504,6 +510,21 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 		// struct/optional closure field, or container element — aliasing read
 	default:
 		return false
+	}
+	// T1262: the Deep type gate also admits a BARE value-copying container of
+	// closures as the read's RESULT (`b := m[0]!` → Vector[() -> int]) — a shape the
+	// shallow FirstFieldNestedClosure rejects (returns nil; a struct/enum holding
+	// such a container instead yields non-nil there, so this guard skips it). For a
+	// bare container result the read is a borrow ONLY when it aliases the container's
+	// storage: an aliasing user `[]` (Map) now leaves V aliased (typeNeedsMatchDup(V)
+	// is false). A NATIVE Vector index read (`vv[0]` on Vector[Vector[...]]) produces
+	// its OWN owned null-dup (T1045) and a struct/enum field read is owned — both
+	// keep their owning binding, else the owned dup leaks. Restrict to the aliasing
+	// user-container index. (T1263 tracks the native/field siblings.)
+	if sema.FirstFieldNestedClosure(rt) == nil {
+		if _, ok := e.(*ast.IndexExpr); !ok || !c.isUserIndexExpr(e) || !c.indexTargetIsAliasingContainer(e) {
+			return false
+		}
 	}
 	// Owned-return shapes: the local owns a fresh closure, keep its binding.
 	if c.isGetterCallExpr(e) {

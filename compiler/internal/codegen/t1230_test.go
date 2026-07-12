@@ -150,3 +150,53 @@ func TestT1260_StructMapClosureMapReadNoDup(t *testing.T) {
 	}
 	assertNotContains(t, fn, "heapdup.copy")
 }
+
+// T1262: a BARE value-copying container of closures as the Map VALUE itself
+// (`Map[int, (() -> int)[]]`, not a struct field). The `[]` deep-copied the value
+// via dupVector's element-clone path, which zeroes each closure element's opaque
+// env (the vecclonenull loop, T0813) → null {fn,env} → SEGV on invoke. The fix
+// guards typeNeedsMatchDup with FirstFieldNestedClosureDeep so the value stays
+// aliased — the `[]` body emits NEITHER a vector element-clone-null loop nor a
+// deep-copy; the read is a borrow with envs intact.
+func TestT1262_BareVecClosureMapReadNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		probe() {
+			x := 7;
+			m := Map[int, (() -> int)[]]();
+			m[0] = [|| -> x];
+			b := m[0]!;
+			y := b[0]();
+		}
+		main() { probe(); }
+	`)
+	fn := extractDefine(ir, `"Map[int, Vector[() -> int]].[]"`)
+	if fn == "" {
+		t.Fatalf("Map[int, Vector[() -> int]].[] not found in IR")
+	}
+	// The env-zeroing loop (dupVector's closure element clone) must not be emitted.
+	assertNotContains(t, fn, "vecclonenull")
+	// Nor a struct deep-copy.
+	assertNotContains(t, fn, "heapdup.copy")
+}
+
+// Control for T1262: a bare NON-closure vector as the Map value
+// (`Map[int, int[]]`) stays dup-safe, so the `[]` read still deep-copies the
+// vector (a vecdup element loop / buffer copy). Guards the fix against
+// over-suppressing the dup for ordinary value-copying containers. Reading the
+// element out and mutating it must not alias the map's stored vector.
+func TestT1262_BareIntVecMapReadDups(t *testing.T) {
+	ir := generateIR(t, `
+		probe() {
+			m := Map[int, int[]]();
+			m[0] = [1, 2, 3];
+			b := m[0]!;
+		}
+		main() { probe(); }
+	`)
+	fn := extractDefine(ir, `"Map[int, Vector[int]].[]"`)
+	if fn == "" {
+		t.Fatalf("Map[int, Vector[int]].[] not found in IR")
+	}
+	// A non-closure vector value is duped on read (dupVector inlines a buffer copy).
+	assertContains(t, fn, "vecdup.copy")
+}

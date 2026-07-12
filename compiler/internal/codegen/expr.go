@@ -9536,6 +9536,20 @@ func (c *Compiler) matchDupFieldSafe(fType types.Type, seen map[*types.Enum]bool
 // NOT safe: types with explicit drops (Map, Set, custom drop) — their drop logic
 // cannot be replicated by memcpy, unless they have a clone() method.
 func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
+	// T1262: a value-copying container (Vector/Map/Set) that transitively nests a
+	// closure is NOT match-dup-safe — dupVector's element-clone path zeroes each
+	// closure element's opaque env (T0813) → null {fn,env} → SEGV on invoke. Leave
+	// such a value ALIASED (no null-dup) so the read from an aliasing container
+	// (Map[K, Vector[() -> int]].[]) is a true borrow. FirstFieldNestedClosureDeep
+	// treats the top container as a FIELD (recurses TypeArgs) while keeping
+	// refcounted handles (Ref/Weak/...) opaque, so Map[K, Ref[...]] is unaffected.
+	// Kept in lockstep with the two borrow gates (ownership
+	// closureAggregateBorrowSource, codegen isClosureAggregateBorrow), which use the
+	// same Deep predicate — and, via `!typeNeedsMatchDup`, with
+	// isContainerIndexUnwrapSource/mapIndexReadAliasesStorage.
+	if sema.FirstFieldNestedClosureDeep(resolved) != nil {
+		return false
+	}
 	named := extractNamed(resolved)
 	if named == nil {
 		// B0244: Check for enum types — clone if clone method exists in c.funcs

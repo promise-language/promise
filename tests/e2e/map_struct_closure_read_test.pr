@@ -324,3 +324,98 @@ probe_map_struct_setbox_owned_copy() `test {
   again := m[0]!;
   assert(again.xs.len == 1, "map value unchanged (owned copy, not alias)");
 }
+
+// ---------------------------------------------------------------------------
+// T1262: sibling of T1260. A *BARE* value-copying container of closures — e.g.
+// `Vector[() -> int]` stored directly as a Map value — read back and an element
+// invoked. Here the container-of-closures is the Map's value type itself (not a
+// struct field). Map's `[]` deep-copied the value via dupVector's element-clone
+// path, which zeroes each closure element's opaque env (T0813) → null {fn,env} →
+// SEGV on invoke. The fix guards typeNeedsMatchDup with FirstFieldNestedClosureDeep
+// so the value stays ALIASED (no null-dup) and the read is a true BORROW (env
+// intact, map sole owner, single drop) — the two borrow gates
+// (closureAggregateBorrowSource, isClosureAggregateBorrow) use the same Deep
+// predicate to suppress the owning env-free/drop binding, staying in lockstep.
+
+// Primary repro — Map value IS a Vector-of-closures; bind then invoke.
+probe_bare_vec_closure_map() `test {
+  x := 7;
+  m := Map[int, (() -> int)[]]();
+  m[0] = [|| -> x];
+  b := m[0]!;
+  assert(b[0]() == 7, "bare vec of closures from map");
+}
+
+// Multi-element vector of closures with distinct captures — every env survives.
+probe_bare_vec_closure_map_multi() `test {
+  a := 10;
+  b := 20;
+  c := 30;
+  m := Map[int, (() -> int)[]]();
+  m[0] = [|| -> a, || -> b, || -> c];
+  v := m[0]!;
+  assert(v[0]() == 10, "elem 0 env");
+  assert(v[1]() == 20, "elem 1 env");
+  assert(v[2]() == 30, "elem 2 env");
+}
+
+// Inline read form: `m[0]![0]()`.
+probe_bare_vec_closure_map_inline() `test {
+  x := 8;
+  m := Map[int, (() -> int)[]]();
+  m[0] = [|| -> x];
+  assert(m[0]![0]() == 8, "bare vec of closures inline");
+}
+
+// Loop-reads leak guard: 100 reads → one owner (the map), no leak. The borrow's
+// env-free/drop binding must be suppressed on every read.
+probe_bare_vec_closure_map_loop_reads() `test {
+  x := 3;
+  m := Map[int, (() -> int)[]]();
+  m[0] = [|| -> x];
+  total := 0;
+  i := 0;
+  while i < 100 {
+    v := m[0]!;
+    total = total + v[0]();
+    i = i + 1;
+  }
+  assert(total == 300, "100 bare-vec-closure borrows, one owner, no leak");
+}
+
+// Nested value-copying container as the Map value: `Map[int, map[int, () -> int]]`
+// — the value is itself a map-of-closures, read back and the inner closure invoked.
+probe_bare_map_closure_map() `test {
+  x := 14;
+  m := Map[int, map[int, () -> int]]();
+  m[0] = {
+    0: || -> x
+  };
+  b := m[0]!;
+  assert(b[0]!() == 14, "bare map of closures from map");
+}
+
+// Regression: refcounted value (`Map[int, Ref[int]]`) must STILL dup on read (the
+// borrow gate must NOT fire) — FirstFieldNestedClosureDeep keeps Ref opaque, so
+// typeNeedsMatchDup stays true and the read is an owned refcount-increment copy.
+probe_bare_map_ref_still_dups() `test {
+  m := Map[int, Ref[int]]();
+  m[0] = Ref[int](42);
+  b := m[0]!;
+  assert(b.borrow == 42, "ref value read");
+  again := m[0]!;
+  assert(again.borrow == 42, "second ref read (refcount dup, not env-zeroing)");
+}
+
+// Regression: non-closure vector value (`Map[int, int[]]`) must STILL deep-copy on
+// read (mutation isolation) — the Deep guard reaches `int` (no closure) → nil →
+// typeNeedsMatchDup stays true. Pushing to the read copy leaves the map unchanged.
+probe_bare_intvec_map_owned_copy() `test {
+  m := Map[int, int[]]();
+  m[0] = [1, 2, 3];
+  b := m[0]!;
+  b.push(4);
+  assert(b.len == 4, "owned copy mutated");
+  again := m[0]!;
+  assert(again.len == 3, "map value unchanged (owned copy, not alias)");
+}

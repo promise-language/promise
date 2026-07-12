@@ -2081,7 +2081,15 @@ func closureAggregateBorrowSource(info *sema.Info, expr ast.Expr) ast.Expr {
 	// (Ref[() -> int]) is not misclassified; it returns the signature itself for a
 	// direct closure, so both shapes pass. Kept in lockstep with codegen's
 	// isClosureAggregateBorrow, whose gate uses the same predicate.
-	if sema.FirstFieldNestedClosure(info.Types[expr]) == nil {
+	//
+	// T1262: use the Deep variant so a BARE value-copying container of closures read
+	// from an aliasing container (`b := m[0]!`, result `Vector[() -> int]`) also
+	// passes — its `[]` now leaves the value aliased (typeNeedsMatchDup returns false
+	// for it), so the local must be marked Borrowed to suppress the owning env-free/
+	// drop binding. The isUserIndexExpr && !indexTargetIsAliasingContainer exclusion
+	// below still scopes the borrow to aliasing containers; refcounted nesting stays
+	// opaque (FirstFieldNestedClosureDeep keeps Ref/Weak/... opaque).
+	if sema.FirstFieldNestedClosureDeep(info.Types[expr]) == nil {
 		return nil
 	}
 	e := unwrapDestructureParens(expr)
@@ -2099,6 +2107,22 @@ func closureAggregateBorrowSource(info *sema.Info, expr ast.Expr) ast.Expr {
 		// struct/optional closure field, or container element — aliasing read
 	default:
 		return nil
+	}
+	// T1262: the Deep type gate also admits a BARE value-copying container of
+	// closures as the read's RESULT (`b := m[0]!` → Vector[() -> int]) — a shape the
+	// shallow FirstFieldNestedClosure rejects (returns nil; a struct/enum holding
+	// such a container yields non-nil there, so this guard skips it). For a bare
+	// container result the read is a borrow ONLY when it aliases the container's
+	// storage: an aliasing user `[]` (Map) leaves the value aliased. A NATIVE Vector
+	// index read produces its OWN owned null-dup (T1045) and a struct/enum field read
+	// is owned — both keep their owning binding, so restrict to the aliasing
+	// user-container index. Mirrors codegen isClosureAggregateBorrow exactly. (T1263
+	// tracks the native/field siblings.)
+	if sema.FirstFieldNestedClosure(info.Types[expr]) == nil {
+		idx, ok := e.(*ast.IndexExpr)
+		if !ok || !isUserIndexExpr(info, idx) || !indexTargetIsAliasingContainer(info, idx) {
+			return nil
+		}
 	}
 	// Owned-return shapes: the local owns a fresh closure, keep its binding.
 	if mem, ok := e.(*ast.MemberExpr); ok {

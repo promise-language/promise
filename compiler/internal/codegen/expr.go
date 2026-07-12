@@ -16957,7 +16957,21 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	// 3. Load captured values in caller scope
 	var captureVals []value.Value
 	var captureLLVMTypes []irtypes.Type
+	var thisSnapshot *goThisSnapshot // T1261: coro-side setup for a captured `this` (sibling of T1219's genGoBlock)
 	for _, name := range captureNames {
+		if name == "this" {
+			// T1261: capture a private snapshot of the receiver — the coroutine can
+			// outlive the spawning method's borrowed receiver temp, so it must never
+			// alias `this` (else re-derefing `this.field` inside the coro is a UAF).
+			// Mirrors genGoBlock's T1219 handling; runs in the enclosing method's
+			// context (before the saveState/context switch), where c.locals["this"],
+			// c.monoCtx, c.currentNamed and c.typeSubst are still valid.
+			snapVal, snapType, snap := c.snapshotThisForGoBlock()
+			captureVals = append(captureVals, snapVal)
+			captureLLVMTypes = append(captureLLVMTypes, snapType)
+			thisSnapshot = snap
+			continue
+		}
 		alloca := c.locals[name]
 		elemType := alloca.ElemType
 		val := c.block.NewLoad(elemType, alloca)
@@ -17113,7 +17127,33 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
 
 	// Store captured params into allocas (after coro.begin → part of frame)
+	var thisValAlloca *ir.InstAlloca // T1261: value-struct alloca backing a captured `this`
 	for i, name := range captureNames {
+		if thisSnapshot != nil && name == "this" {
+			// T1261: the captured param is a value struct (heap: {vtable,instance};
+			// value type: the full value struct). Store it in a frame alloca, then
+			// derive the i8* `this` that field access expects:
+			//   heap type  → instance pointer (value struct field 1)
+			//   value type → address of the value struct in the coroutine frame
+			// The value-struct alloca backs the goroutine's private-copy drop.
+			// Mirrors genGoBlock's T1219 site (expr.go).
+			valAlloca := startBlk.NewAlloca(captureLLVMTypes[i])
+			valAlloca.SetName(c.uniqueLocalName("this.val.addr"))
+			startBlk.NewStore(coroFn.Params[i], valAlloca)
+
+			i8Alloca := startBlk.NewAlloca(irtypes.I8Ptr)
+			i8Alloca.SetName(c.uniqueLocalName("this.addr"))
+			var thisI8 value.Value
+			if thisSnapshot.isValueType {
+				thisI8 = startBlk.NewBitCast(valAlloca, irtypes.I8Ptr)
+			} else {
+				thisI8 = startBlk.NewExtractValue(coroFn.Params[i], 1)
+			}
+			startBlk.NewStore(thisI8, i8Alloca)
+			c.locals["this"] = i8Alloca
+			thisValAlloca = valAlloca
+			continue
+		}
 		alloca := startBlk.NewAlloca(captureLLVMTypes[i])
 		alloca.SetName(c.uniqueLocalName(name + ".addr"))
 		startBlk.NewStore(coroFn.Params[i], alloca)
@@ -17123,6 +17163,14 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	// B0163: Register drop bindings for captured channel variables inside the goroutine.
 	c.entryBlock = startBlk
 	c.block = startBlk
+
+	// T1261: register the drop for the goroutine's private heap snapshot of `this`
+	// so it is freed at coroutine scope exit (value-type snapshots are Copy — no
+	// drop). Mirrors genGoBlock's T1219 site.
+	if thisSnapshot != nil && !thisSnapshot.isValueType && thisValAlloca != nil {
+		c.maybeRegisterDrop("this", thisValAlloca, thisSnapshot.resolvedType)
+	}
+
 	for _, name := range captureNames {
 		if chanValType, ok := capturedChanTypesVB[name]; ok {
 			alloca := c.locals[name]

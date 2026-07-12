@@ -18677,6 +18677,97 @@ func TestT1219_GoBlockThisGenericMethodNonGenericOwner(t *testing.T) {
 	assertContains(t, emitIR, "call i8* @.goroutine.")
 }
 
+// T1261: a `go` expression whose operand is a METHOD/COMPLEX call capturing
+// `this` (routed through genGoCallExprViaBlock — the CALL form, distinct from
+// T1219's block form) used to load the borrowed `this` pointer and re-deref
+// `this.field` inside the coroutine → UAF/garbage read. The fix mirrors T1219:
+// the spawning method deep-copies the heap receiver (heapdup) before the ramp,
+// the coroutine takes `this` as a `{ i8*, i8* }` value-struct capture param, and
+// the coro body sets up the `this.val.addr`/`this.addr` snapshot allocas.
+func TestT1261_GoCallThisHeapReceiverSnapshot(t *testing.T) {
+	ir := generateIR(t, `
+		type T1261C {
+			int n;
+			spawn(this, Channel[int] out) {
+				go out.send(this.n);
+			}
+		}
+		main() {
+			c := T1261C(n: 5);
+			d := channel[int](capacity: 1);
+			c.spawn(d);
+			r := <-d;
+			d.close();
+		}
+	`)
+	// The coroutine takes `this` as a value-struct capture param.
+	assertContains(t, ir, "%this.cap")
+	assertContains(t, ir, "{ i8*, i8* } %this.cap")
+	// The coro body materializes the snapshot allocas (not a bare load of a
+	// borrowed `this`).
+	assertContains(t, ir, "%this.val.addr")
+	assertContains(t, ir, "%this.addr")
+	// The spawning method deep-copies the receiver before the goroutine ramp.
+	spawnIR := extractFunction(ir, "T1261C.spawn")
+	assertContains(t, spawnIR, "heapdup.copy")
+	assertContains(t, spawnIR, "call i8* @.goroutine.")
+	dupIdx := strings.Index(spawnIR, "heapdup.copy")
+	rampIdx := strings.Index(spawnIR, "call i8* @.goroutine.")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected receiver heapdup before goroutine ramp in spawn:\n%s", spawnIR)
+	}
+}
+
+// T1261: a VALUE-TYPE receiver captured by the `go`-CALL form is copied by value
+// into the coroutine frame (Copy — no heap dup), mirroring T1219's value path.
+func TestT1261_GoCallThisValueReceiverByValue(t *testing.T) {
+	ir := generateIR(t, `
+		type T1261P {
+			int x `+"`"+`value;
+			int y `+"`"+`value;
+			sum(this, Channel[int] out) {
+				go out.send(this.x + this.y);
+			}
+		}
+		main() {
+			p := T1261P(x: 3, y: 4);
+			d := channel[int](capacity: 1);
+			p.sum(d);
+			r := <-d;
+			d.close();
+		}
+	`)
+	assertContains(t, ir, "%this.cap")
+	assertContains(t, ir, "%this.val.addr")
+	sumIR := extractFunction(ir, "T1261P.sum")
+	assertContains(t, sumIR, "call i8* @.goroutine.")
+	assertNotContains(t, sumIR, "heapdup.copy")
+}
+
+// T1261: a GENERIC-owner method referencing `this` in a `go`-CALL resolves the
+// receiver type via the mono instance, deep-copies the concrete snapshot, and
+// threads it into the coroutine — the mono path of the call-form fix.
+func TestT1261_GoCallThisGenericOwner(t *testing.T) {
+	ir := generateIR(t, `
+		type T1261Box[T] {
+			T value;
+			send_it(this, Channel[T] out) {
+				go out.send(this.value);
+			}
+		}
+		main() {
+			b := T1261Box[int](value: 9);
+			d := channel[int](capacity: 1);
+			b.send_it(d);
+			r := <-d;
+			d.close();
+		}
+	`)
+	sendIR := extractFunction(ir, `"T1261Box[int].send_it"`)
+	assertContains(t, sendIR, "heapdup.copy")
+	assertContains(t, sendIR, `call i8* @".goroutine.T1261Box[int].send_it.`)
+}
+
 // T1198: the fast path `genGoCallExpr` (bare-ident free-function `go f(v)`) must
 // dup a borrowed heap value param of the spawning function — the coroutine reads
 // it after the caller frees its own borrowed-arg stmt-temps. Sibling of T1197

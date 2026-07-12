@@ -1,0 +1,184 @@
+// T1261: a `go` expression whose operand is a METHOD/COMPLEX call capturing
+// `this` (routed through genGoCallExprViaBlock) used to capture the borrowed
+// `this` pointer and re-deref `this.field` inside the coroutine — which runs
+// after the spawning method returns and its borrowed receiver temp is gone →
+// deterministic use-after-free / garbage read. The fix mirrors the sibling
+// `go { }` block form (T1219): a PRIVATE SNAPSHOT of the receiver is threaded
+// into the coroutine:
+//   - heap receiver  → deep-copied (dupHeapValue), owned + dropped by the goroutine
+//   - value receiver → copied by value into the coroutine frame (Copy, no drop)
+//   - scalar receiver → already Copy
+// The call form is `go recv.method(this.field)` (method-call callee), distinct
+// from the fast path `go free_func(out, this.field)` which was already correct
+// (it evaluates `this.field` as a spawn-scope argument). Each test spawns on a
+// TEMPORARY receiver freed before the goroutine runs (the main flow blocks on
+// `<-out` after the receiver's owner is gone), so the goroutine provably
+// observes the snapshot, not a freed alias.
+// --- Borrowed heap receiver ---------------------------------------------------
+type T1261HeapBorrow {
+  int n;
+  string label;
+  // `go out.send(this.n * 2)` — method-call callee → genGoCallExprViaBlock.
+  // The temporary receiver is freed at the call's statement end, before the
+  // goroutine runs; without the snapshot the coro re-derefs a dangling `this`.
+  send_int(this, Channel[int] out) {
+    go out.send(this.n * 2);
+  }
+  // Read a heap (string) field: dupHeapValue must deep-copy it so the goroutine
+  // reads its own copy after the original is freed.
+  send_label(this, Channel[string] out) {
+    go out.send(this.label);
+  }
+}
+
+t1261_heap_borrow_int_field() `test {
+  out := channel[int](capacity: 1);
+  T1261HeapBorrow(n: 21, label: "x").send_int(out); // temp receiver freed after call
+  if v := <-out {
+    assert(v == 42, "go-call read snapshot of borrowed heap receiver int field");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+t1261_heap_borrow_string_field() `test {
+  out := channel[string](capacity: 1);
+  T1261HeapBorrow(n: 1, label: "hello world heap string").send_label(out);
+  if v := <-out {
+    assert(v == "hello world heap string", "go-call deep-copied borrowed heap receiver string field");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Leak guard: the goroutine's private snapshot (including its cloned string
+// field) must be freed at coroutine scope exit — no leak accumulates.
+t1261_heap_borrow_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[string](capacity: 1);
+    T1261HeapBorrow(n: 7, label: "loop iteration heap string value").send_label(out);
+    if v := <-out {
+      if v == "loop iteration heap string value" {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 borrowed-heap-this go-call spawns delivered, no leak");
+}
+
+// --- Value-type receiver ------------------------------------------------------
+type T1261Value {
+  int x `value;
+  int y `value;
+  send_sum(this, Channel[int] out) {
+    go out.send(this.x + this.y);
+  }
+}
+
+t1261_value_receiver() `test {
+  out := channel[int](capacity: 1);
+  T1261Value(x: 10, y: 20).send_sum(out); // value-struct copy path
+  if v := <-out {
+    assert(v == 30, "go-call copied value-type receiver by value");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// --- Generic owner (mono path) ------------------------------------------------
+type T1261Box[T] {
+  T value;
+  send_value(this, Channel[T] out) {
+    go out.send(this.value);
+  }
+}
+
+t1261_generic_owner_int() `test {
+  out := channel[int](capacity: 1);
+  T1261Box[int](value: 7).send_value(out);
+  if v := <-out {
+    assert(v == 7, "generic-owner int go-call read wrong snapshot");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+type T1261StrBox[T] {
+  T value;
+  string label;
+  emit(this, Channel[string] out) {
+    go out.send(this.label);
+  }
+}
+
+t1261_generic_owner_string() `test {
+  out := channel[string](capacity: 1);
+  T1261StrBox[int](value: 3, label: "generic heap string field").emit(out);
+  if v := <-out {
+    assert(v == "generic heap string field", "generic-owner string go-call corrupted receiver frame");
+  } else {
+    assert(false, "recv failed");
+  }
+  out.close();
+}
+
+// Leak guard for the MONO drop path: the generic owner's snapshot is registered
+// for drop with the mono-resolved receiver type (maybeRegisterDrop on
+// thisValAlloca). Running once can't surface a missing/duplicated free — repeat
+// the deep-copied heap-field spawn and confirm no allocations accumulate.
+t1261_generic_owner_string_loop_no_leak() `test {
+  count := 0;
+  i := 0;
+  while i < 30 {
+    out := channel[string](capacity: 1);
+    T1261StrBox[int](value: i, label: "generic mono heap string snapshot").emit(out);
+    if v := <-out {
+      if v == "generic mono heap string snapshot" {
+        count = count + 1;
+      }
+    }
+    out.close();
+    i = i + 1;
+  }
+  assert(count == 30, "all 30 generic-owner heap-this go-call snapshots delivered, no leak");
+}
+
+// Concurrent snapshot isolation: spawn many goroutines from DISTINCT temporary
+// receivers into a shared buffered channel BEFORE draining any. Each goroutine
+// must observe its own private snapshot (this.n*2), never a freed alias or a
+// neighbor's frame. Draining last maximizes the window where every spawning
+// receiver temp is already gone while its coroutine is still pending.
+t1261_concurrent_snapshot_isolation() `test {
+  n := 50;
+  out := channel[int](capacity: n);
+  i := 0;
+  while i < n {
+    // Each temp receiver carries a unique value; its coro reads this.n*2.
+    T1261HeapBorrow(n: i, label: "iso").send_int(out);
+    i = i + 1;
+  }
+  // Drain: the multiset of received values must equal {2*0, 2*1, ... 2*(n-1)}.
+  sum := 0;
+  seen := 0;
+  while seen < n {
+    if v := <-out {
+      sum = sum + v;
+      seen = seen + 1;
+    } else {
+      assert(false, "recv failed before draining all spawns");
+      seen = n;
+    }
+  }
+  // Sum of 2*k for k in [0,n) = 2 * n*(n-1)/2 = n*(n-1). A corrupted/aliased
+  // snapshot would skew this deterministic total.
+  assert(sum == n * (n - 1), "every concurrent go-call snapshot read its own receiver");
+  out.close();
+}

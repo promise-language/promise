@@ -16,3 +16,28 @@ test_closure_capturing_int() `test {
   double := || -> x * 2;
   assert(double() == 50, "closure capturing result of module func");
 }
+
+// T1160: a module-qualified call returning a fresh capturing closure. The callee
+// is a MemberExpr whose target is a module name, not a value — the alias filter
+// resolves it as a free function (no receiver to alias) and the discarded result's
+// heap env is freed at statement end. Leak enforcement is the assertion.
+test_discarded_module_closure_result() `test {
+  mathlib.make_adder(10);
+}
+
+test_bound_module_closure_result() `test {
+  f := mathlib.make_adder(5);
+  assert(f() == 6, "closure returned by module function");
+}
+
+// The module-GETTER counterpart of the two tests above (a bare `mathlib.adder`
+// MemberExpr, reaching the alias filter's getter arm with a module target) is
+// blocked on T1240 — see the note in mathlib/math.pr.
+
+// The mirror case: a module TYPE's method handing back its borrowed `cb` field.
+// Freeing that result here would double-free the env `box`'s drop owns.
+test_module_type_aliasing_closure_result_is_not_freed() `test {
+  box := mathlib.CallbackBox(cb: mathlib.make_adder(6));
+  box.get_cb();
+  assert(box.cb() == 7, "borrowed closure field survives the discarded getter");
+}

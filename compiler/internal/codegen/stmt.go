@@ -1153,13 +1153,7 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 // auto-propagate form inside string interpolation (T0966). Borrow returns
 // (`T&`/`T~`) are never owned temps and are skipped.
 func (c *Compiler) trackUnwrappedFailableTemp(expr ast.Expr, result value.Value) {
-	exprType := c.info.Types[expr]
-	if c.typeSubst != nil && exprType != nil {
-		exprType = types.Substitute(exprType, c.typeSubst)
-	}
-	if c.selfSubst != nil && exprType != nil {
-		exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
-	}
+	exprType := c.resolvedExprType(expr)
 	if exprType != nil && isRefType(exprType) {
 		return
 	}
@@ -7148,13 +7142,7 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 		return
 	}
 	// Check if the result type is a structural interface (e.g., Iterator[T])
-	resultType := c.info.Types[e]
-	if c.typeSubst != nil {
-		resultType = types.Substitute(resultType, c.typeSubst)
-	}
-	if c.selfSubst != nil {
-		resultType = types.SubstituteSelf(resultType, c.selfSubst.iface, c.selfSubst.concrete)
-	}
+	resultType := c.resolvedExprType(e)
 	resultNamed := extractNamed(resultType)
 	if resultNamed == nil || !resultNamed.IsStructural() {
 		return
@@ -7208,6 +7196,249 @@ func findInnerCallExpr(expr ast.Expr) *ast.CallExpr {
 			return nil
 		}
 	}
+}
+
+// resolvedExprType returns sema's type for e with the active generic and Self
+// substitutions applied.
+func (c *Compiler) resolvedExprType(e ast.Expr) types.Type {
+	t := c.info.Types[e]
+	if t == nil {
+		return nil
+	}
+	if c.typeSubst != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		t = types.SubstituteSelf(t, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	return t
+}
+
+// closureResultMayAliasCallInput reports whether a call/getter whose result is a
+// closure might hand back a closure it does not own — i.e. one reachable from an
+// argument or from the receiver's fields (T1227). Conservative: any closure
+// mentioned anywhere in an argument type or (transitively) in the receiver type
+// suppresses tracking, so the worst case is the pre-existing leak (T1160), never
+// a double free. Narrow or delete once T1227 makes such returns a move/error.
+func (c *Compiler) closureResultMayAliasCallInput(expr ast.Expr) bool {
+	// Peel the failable-unwrap layers, which only extract the success value of the
+	// inner call — ownership of the closure is the inner call's. OptionalUnwrapExpr
+	// and ErrorHandlerExpr are deliberately NOT peeled: their sources can be
+	// owner-governed aggregates, so they fall through to the conservative default.
+peel:
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.ErrorPanicExpr:
+			expr = e.Expr
+		case *ast.ErrorPropagateExpr:
+			expr = e.Expr
+		case *ast.AutoCloneExpr:
+			expr = e.Expr
+		default:
+			break peel
+		}
+	}
+	var receiver ast.Expr
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		// An indirect call through a closure VALUE (`f()`, `o!()`, `(g)()`) may hand
+		// back a closure its own env owns — the env's drop fn frees that nested env,
+		// so freeing the result as a temp double-frees. Only a statically-known
+		// function/method callee is analyzable by the arg/receiver checks below.
+		if c.isClosureValueCallee(e.Callee) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if c.typeMentionsSignature(c.resolvedExprType(arg.Value), map[*types.TypeName]bool{}) {
+				return true
+			}
+		}
+		// An explicit type-argument list (`mk[int](…)`, `box.transform[string](…)`)
+		// wraps the real callee in an IndexExpr — peel it so a generic method's
+		// receiver still reaches the alias check below.
+		callee := e.Callee
+		if idx, ok := callee.(*ast.IndexExpr); ok && c.isGenericInstantiation(idx) {
+			callee = idx.Target
+		}
+		if mem, ok := callee.(*ast.MemberExpr); ok {
+			receiver = mem.Target
+		}
+	case *ast.MemberExpr: // getter
+		receiver = e.Target
+	default:
+		// Operator results and other shapes: keep today's behavior (no tracking).
+		return true
+	}
+	if receiver == nil {
+		return false
+	}
+	// `mod.make_adder(x)` — the "receiver" names a module, not a value, so the
+	// call is a free function with no receiver to alias.
+	if ident, ok := receiver.(*ast.IdentExpr); ok && c.resolveModuleName(ident) != "" {
+		return false
+	}
+	rt := c.resolvedExprType(receiver)
+	if rt == nil {
+		return true
+	}
+	// Virtual dispatch: the receiver's runtime type is any type in its subtree, so an
+	// override can hand back a field the static receiver type does not even have — a
+	// `VBase`-typed receiver whose runtime type is a `VDerived` holding a closure
+	// field dispatches to `VDerived.get_cb` returning `this.cb`, an alias the
+	// receiver still owns. Walk the whole subtree, not just `rt`. A structural
+	// receiver's implementers are open-ended (any type can satisfy it), so it stays
+	// unconditionally conservative.
+	if named := extractNamed(rt); named != nil {
+		if named.IsStructural() {
+			return true
+		}
+		if c.needsVtable(named) {
+			return c.namedSubtreeMentionsSignature(named)
+		}
+	}
+	return c.typeMentionsSignature(rt, map[*types.TypeName]bool{})
+}
+
+// namedSubtreeMentionsSignature reports whether `root` — or any type that inherits
+// from it, transitively — holds a closure anywhere in its fields, i.e. whether a
+// vtable dispatch on a `root`-typed receiver could land on an override handing back
+// a closure the receiver owns rather than a fresh one (T1160/T1227).
+func (c *Compiler) namedSubtreeMentionsSignature(root *types.Named) bool {
+	visited := map[*types.Named]bool{}
+	var walk func(n *types.Named) bool
+	walk = func(n *types.Named) bool {
+		if visited[n] {
+			return false
+		}
+		visited[n] = true
+		if c.typeMentionsSignature(n, map[*types.TypeName]bool{}) {
+			return true
+		}
+		for _, child := range c.directChildren[n] {
+			if walk(child) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(root)
+}
+
+// isClosureValueCallee reports whether a call's callee denotes a closure *value*
+// (local, param, capture, or any expression producing a fat pointer) rather than a
+// statically-known function or method declaration. genCallExpr dispatches exactly
+// these through genIndirectCall. The callee's env is opaque here, so a closure it
+// returns may be one the env owns (`f := move || -> h; f();`) rather than a fresh one.
+func (c *Compiler) isClosureValueCallee(callee ast.Expr) bool {
+	for {
+		p, ok := callee.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		callee = p.Expr
+	}
+	if _, isSig := c.resolvedExprType(callee).(*types.Signature); !isSig {
+		return false
+	}
+	switch ce := callee.(type) {
+	case *ast.IdentExpr:
+		// A declared free function is analyzable; a var/param/capture holding a
+		// closure is not. A missing object resolves conservatively to "value".
+		_, isFunc := c.info.Objects[ce].(*types.Func)
+		return !isFunc
+	case *ast.MemberExpr:
+		// Method, module-qualified function, or closure-typed field. A field call
+		// aliases the receiver's env and is caught by the receiver check.
+		return false
+	case *ast.IndexExpr:
+		// `mk[int](…)` / `box.transform[string](…)`: an explicit type-argument list
+		// on a statically-known generic function or method, not a subscript. Only a
+		// value subscript (`fns[0](x)`) is a real closure value.
+		return !c.isGenericInstantiation(ce)
+	}
+	// `o!()`, `make()()` — a fat pointer materialized from an expression.
+	return true
+}
+
+// isGenericInstantiation reports whether an IndexExpr in callee position is a
+// type-argument list on a generic function/method (`mk[int]`, `box.transform[T]`)
+// rather than a value subscript yielding a callable (`fns[0]`, `h.fns[0]`).
+// Mirrors the gate genCallExpr uses to route to genGenericFuncCall (T0674).
+func (c *Compiler) isGenericInstantiation(idx *ast.IndexExpr) bool {
+	sig, ok := c.resolvedExprType(idx.Target).(*types.Signature)
+	return ok && len(sig.TypeParams()) > 0
+}
+
+// typeMentionsSignature reports whether t is, or transitively contains, a
+// function type. `seen` guards against recursive type definitions.
+func (c *Compiler) typeMentionsSignature(t types.Type, seen map[*types.TypeName]bool) bool {
+	switch tt := t.(type) {
+	case nil:
+		return false
+	case *types.Signature:
+		return true
+	case *types.Optional:
+		return c.typeMentionsSignature(tt.Elem(), seen)
+	case *types.SharedRef:
+		return c.typeMentionsSignature(tt.Elem(), seen)
+	case *types.MutRef:
+		return c.typeMentionsSignature(tt.Elem(), seen)
+	case *types.Array:
+		return c.typeMentionsSignature(tt.Elem(), seen)
+	case *types.Tuple:
+		for _, el := range tt.Elems() {
+			if c.typeMentionsSignature(el, seen) {
+				return true
+			}
+		}
+		return false
+	}
+	if elem, ok := types.AsVector(t); ok {
+		return c.typeMentionsSignature(elem, seen)
+	}
+	if k, v, ok := types.AsMap(t); ok {
+		return c.typeMentionsSignature(k, seen) || c.typeMentionsSignature(v, seen)
+	}
+	if inst, ok := t.(*types.Instance); ok {
+		for _, ta := range inst.TypeArgs() {
+			if c.typeMentionsSignature(ta, seen) {
+				return true
+			}
+		}
+		return c.typeMentionsSignature(inst.Origin(), seen)
+	}
+	if enum, ok := t.(*types.Enum); ok {
+		if seen[enum.Obj()] {
+			return false
+		}
+		seen[enum.Obj()] = true
+		for _, variant := range enum.Variants() {
+			for _, f := range variant.Fields() {
+				if c.typeMentionsSignature(f.Type(), seen) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if named, ok := t.(*types.Named); ok {
+		if seen[named.Obj()] {
+			return false
+		}
+		seen[named.Obj()] = true
+		// AllFields, not Fields: a method/getter returning a closure field inherited
+		// from a parent (`type Child is Base` handing back `Base.cb`) aliases the
+		// receiver's env just as much, and Fields() covers only own fields.
+		for _, f := range named.AllFields() {
+			if c.typeMentionsSignature(f.Type(), seen) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // trackHeapUserTypeResult tracks an expression result that is a heap-allocated
@@ -7343,12 +7574,19 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 			return
 		}
 	}
-	rt := c.info.Types[expr]
-	if c.typeSubst != nil && rt != nil {
-		rt = types.Substitute(rt, c.typeSubst)
-	}
-	if c.selfSubst != nil && rt != nil {
-		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	rt := c.resolvedExprType(expr)
+	// T1160: a call/getter returning a closure hands back a {i8*, i8*} fat pointer
+	// (fn_ptr + heap env). extractNamed(*types.Signature) is nil, so the heap-value
+	// path below never registers it — a discarded or inline-consumed result leaked
+	// the env. Track the env ptr; consuming sinks claim it via claimEnvTemp,
+	// otherwise cleanupEnvTemps frees it through the canonical B0221/T0739 path
+	// (load env field-0 drop fn, else pal_free). Skip calls that may hand back a
+	// closure they do not own (T1227) — freeing those double-frees the real owner.
+	if _, isSig := rt.(*types.Signature); isSig {
+		if !c.closureResultMayAliasCallInput(expr) {
+			c.trackEnvTemp(c.block.NewExtractValue(result, 1))
+		}
+		return
 	}
 	instancePtr, dropFlag := c.trackHeapValueTemp(result, rt)
 	if instancePtr != nil {
@@ -8385,10 +8623,12 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to field.
 			c.claimHeapTemp(val)
-			// T1226: Claim closure env temp — ownership transferred to field.
-			// Without this, a capturing-closure RHS's env is freed at statement
-			// end (cleanupEnvTemps) while the field still references it →
-			// use-after-free at the owner's scope-exit drop.
+			// T1226: Claim closure env temp — ownership transferred to the field
+			// (directly, or through a setter property that stores it). Without this,
+			// a capturing-closure RHS's env is freed at statement end
+			// (cleanupEnvTemps) while the field still references it →
+			// use-after-free at the owner's scope-exit drop. T1160 widened the
+			// trigger to closure-returning call results. No-op for non-closure values.
 			c.claimEnvTemp(val)
 			// B0312: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by this field.
@@ -8531,9 +8771,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to container.
 			c.claimHeapTemp(val)
-			// T1226: Claim closure env temp — ownership transferred to container
-			// element. Without this, a capturing-closure RHS's env is freed at
-			// statement end while the element still references it → use-after-free.
+			// T1226: Claim closure env temp — ownership transferred to the container
+			// element (native vector/map/array slot, or a user `[]=` that stores it).
+			// Without this, a capturing-closure RHS's env is freed at statement end
+			// while the element still references it → use-after-free. T1160 widened
+			// the trigger to closure-returning call results. No-op for non-closures.
 			c.claimEnvTemp(val)
 			// T1103: Clear inline enum constructor temps when the RHS is an enum
 			// moved into the container (e.g. `m[k] = Holder.Pair(...)`). Without

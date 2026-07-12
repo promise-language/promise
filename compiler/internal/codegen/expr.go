@@ -1223,13 +1223,7 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 // locals (e.g. the default operand of `optional ?: owned_local`), and tracking
 // those would double-free at statement end.
 func (c *Compiler) trackOperatorResult(e ast.Expr, result value.Value) value.Value {
-	rt := c.info.Types[e]
-	if c.typeSubst != nil && rt != nil {
-		rt = types.Substitute(rt, c.typeSubst)
-	}
-	if c.selfSubst != nil && rt != nil {
-		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
-	}
+	rt := c.resolvedExprType(e)
 	if rt != nil && isRefType(rt) {
 		return result
 	}
@@ -5795,10 +5789,19 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 	// or `l.adder();`); if it's bound to a variable, claimEnvTemp releases the
 	// temp and maybeRegisterEnvFree takes over ownership (single free either way).
 	// Mirrors the module-getter arm in genModuleGetterCall (T1240).
+	//
+	// T1160: a getter can also hand back a closure it does NOT own — `get callback()
+	// -> int { return this.cb; }` returns an alias of the receiver's field, whose env
+	// the receiver's drop frees. Tracking that env here would free it twice. The
+	// shared alias filter suppresses tracking for those receivers; the cost is the
+	// pre-existing leak for a genuinely-fresh closure returned by such a type (T1229),
+	// never a double free.
 	if typ := c.info.Types[e]; typ != nil {
 		if _, isSig := typ.(*types.Signature); isSig {
-			envPtr := c.block.NewExtractValue(result, 1)
-			c.trackEnvTemp(envPtr)
+			if !c.closureResultMayAliasCallInput(e) {
+				envPtr := c.block.NewExtractValue(result, 1)
+				c.trackEnvTemp(envPtr)
+			}
 			return
 		}
 	}
@@ -12865,7 +12868,9 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			// the statement-end cleanupEnvTemps double-frees it → segfault.
 			// Mirrors genArrayLit (T0741). The key claim is defensive (a closure
 			// can't be Hashable, so not a valid map key today) but costs nothing —
-			// claimEnvTemp is a no-op for non-closure values.
+			// claimEnvTemp is a no-op for non-closure values. A capturing lambda
+			// literal value has always hit this; T1160 widened the trigger to
+			// closure-returning call results.
 			c.claimEnvTemp(valVal)
 			c.claimEnvTemp(keyVal)
 			// B0281: Clear enum ctor temps created during this entry's evaluation.

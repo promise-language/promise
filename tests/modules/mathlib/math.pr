@@ -225,3 +225,28 @@ type _T0553ModBaseVec `public {
   drop(~this) {
   }
 }
+
+// T1160: a module-qualified call (`mathlib.make_adder(5)`) reaches the closure
+// call-result tracker with a MemberExpr callee whose "receiver" names a module,
+// not a value. The alias filter must recognize that and still track the fresh env.
+make_adder(int x)() -> int `public {
+  return move || -> x + 1;
+}
+
+// NOTE (T1240): a module-level GETTER returning a closure (`get adder() -> int`)
+// would reach the alias filter's getter arm with a module — not a value — as its
+// target, the one combination the free-function call above does not exercise. It
+// cannot be tested yet: any reference to such a getter panics codegen
+// ("cannot resolve type for member access on <nil>"), because genMemberExpr's
+// module-getter intercept decides "getter vs function reference" by asking whether
+// the member's result type is a Signature. Pre-existing, unrelated to T1160. Add
+// the test here once T1240 lands.
+
+// A module type whose method hands back its own borrowed closure field — the
+// alias filter must suppress tracking here (the holder's drop owns the env).
+type CallbackBox `public {
+  () -> int cb;
+  get_cb(this)() -> int `public {
+    return this.cb;
+  }
+}

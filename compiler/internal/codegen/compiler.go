@@ -189,11 +189,12 @@ type Compiler struct {
 	monoTypeCloneFns map[string]*ir.Func
 
 	// VTable state
-	hasChildren               map[*types.Named]bool        // true if any type declares `is ThisType`
-	vtableGlobals             map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
-	viewVtables               map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
-	valueTypeRTTI             map[*types.Named]*ir.Global  // value type → global RTTI instance (field 1 of value struct)
-	interpBuilderWriterVtable *ir.Global                   // lazy: Builder→Writer vtable for string interpolation
+	hasChildren               map[*types.Named]bool           // true if any type declares `is ThisType`
+	directChildren            map[*types.Named][]*types.Named // T1160: parent → types that declare `is Parent` (generic children included, unlike hasChildren)
+	vtableGlobals             map[*types.Named]*ir.Global     // type → @promise_vtable_TypeName
+	viewVtables               map[viewVtableKey]*ir.Global    // (concrete, view) → view-specific vtable
+	valueTypeRTTI             map[*types.Named]*ir.Global     // value type → global RTTI instance (field 1 of value struct)
+	interpBuilderWriterVtable *ir.Global                      // lazy: Builder→Writer vtable for string interpolation
 
 	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
 	scopeBindings  []scopeBinding
@@ -813,6 +814,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		typeCloneFns:         make(map[*types.Named]*ir.Func),
 		monoTypeCloneFns:     make(map[string]*ir.Func),
 		hasChildren:          make(map[*types.Named]bool),
+		directChildren:       make(map[*types.Named][]*types.Named),
 		vtableGlobals:        make(map[*types.Named]*ir.Global),
 		viewVtables:          make(map[viewVtableKey]*ir.Global),
 		valueTypeRTTI:        make(map[*types.Named]*ir.Global),
@@ -11146,6 +11148,13 @@ func (c *Compiler) computeVtableInfo(file *ast.File) {
 		named := c.lookupNamedType(td.Name)
 		if named == nil {
 			continue
+		}
+		// T1160: record the inheritance edges of generic types too. hasChildren
+		// deliberately skips them (a generic type is never itself a vtable receiver),
+		// but a generic child of a concrete parent IS a possible runtime type of that
+		// parent, so namedSubtreeMentionsSignature must be able to reach it.
+		for _, pr := range named.Parents() {
+			c.directChildren[pr.Named] = append(c.directChildren[pr.Named], named)
 		}
 		if len(named.TypeParams()) > 0 {
 			continue

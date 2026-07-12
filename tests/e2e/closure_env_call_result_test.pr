@@ -1,0 +1,1347 @@
+// T1160: a call/getter whose result type is a function type hands back a
+// {fn_ptr, env_ptr} fat pointer. The result was never registered as a temp
+// (extractNamed on a *types.Signature is nil), so a discarded or inline-consumed
+// result leaked the callee's heap env. trackHeapUserTypeResult now registers the
+// env ptr as an env temp; consuming sinks claim it, cleanupEnvTemps frees the
+// rest. Leak enforcement is the assertion for the discard cases.
+type Adder {
+  int base;
+  make_adder(this, int x)() -> int {
+    return move || -> x + 1;
+  }
+}
+
+make_adder_free(int x)() -> int {
+  return move || -> x + 1;
+}
+
+make_noncapturing()() -> int {
+  return || -> 9;
+}
+
+wrap(int x)() -> int {
+  return make_adder_free(x);
+}
+
+// The receiver-alias types below hand back a closure they own. T1227 makes
+// `return this.cb` (a move out of a closure FIELD) a sema error, so the alias is
+// expressed the way the language still allows it: the closure lives in a container
+// field and the method hands back the element. The receiver keeps owning it — its
+// drop frees the env — so the call result must not be tracked as a temp.
+// `cb` stays a plain closure field: the ownership-transfer tests below assign into
+// it, and it keeps the receiver's field walk finding a bare `() -> int` too.
+type CallbackHolder {
+  () -> int cb;
+  (() -> int)[] cbs;
+  get_cb(this)() -> int {
+    return this.cbs[0];
+  }
+}
+
+identity(() -> int f)() -> int {
+  return f;
+}
+
+// A closure field reached through inheritance: the alias filter must see `cb` on
+// the parent when the receiver is `DerivedHolder`, otherwise the borrowed env is
+// freed as a temp and the owner's drop double-frees it.
+type BaseHolder {
+  (() -> int)[] cbs;
+}
+
+type DerivedHolder is BaseHolder {
+  get_cb(this)() -> int {
+    return this.cbs[0];
+  }
+}
+
+// The mirror image: the receiver's STATIC type holds no closure, but it has
+// children, so the call dispatches virtually and may land on an override handing
+// back the concrete type's closure field. The alias filter must treat every
+// vtable-dispatched receiver as opaque (needsVtable), not just structural/abstract
+// ones — otherwise the borrowed env is freed here and double-freed at `d`'s drop.
+type VirtualBase {
+  int n;
+  get_cb(this)() -> int {
+    return move || -> 1;
+  }
+}
+
+type VirtualDerived is VirtualBase {
+  (() -> int)[] cbs;
+  get_cb(this)() -> int {
+    return this.cbs[0];
+  }
+}
+
+discard_via_base(VirtualBase b) {
+  b.get_cb();
+}
+
+// An explicit type-argument list wraps the callee in an IndexExpr
+// (`make_generic[int]` parses as `IndexExpr{make_generic, int}`), which reads like
+// a value subscript yielding a callable. Both the callee classification and the
+// receiver extraction have to peel it: the free function must still be recognized
+// as statically known (else its result leaks), and the generic method's receiver
+// must still reach the alias check (else the borrowed `cb` is freed twice).
+make_generic[T](T v, int x)() -> int {
+  return move || -> x + 1;
+}
+
+type GenericHolder {
+  (() -> int)[] cbs;
+  get_cb[T](this, T v)() -> int {
+    return this.cbs[0];
+  }
+}
+
+// 1. The item's repro: a method result discarded at statement end.
+discard_method_closure_result() `test {
+  a := Adder(base: 0);
+  a.make_adder(10);
+}
+
+// 2. Free-function form of the same discard.
+discard_free_closure_result() `test {
+  make_adder_free(10);
+}
+
+// 2b. The same discard through an explicit type-argument list. Inferred type args
+//     (`make_generic(1, 10)`) leave the callee an IdentExpr and were always
+//     tracked; the explicit form must not be mistaken for a closure-value call.
+discard_generic_closure_result() `test {
+  make_generic[int](1, 10);
+  make_generic(1, 10);
+}
+
+// 2c. …and the receiver of an explicitly-instantiated generic METHOD must still be
+//     checked for aliasing: `get_cb` hands back the borrowed `cb`, which the
+//     holder's drop frees.
+discard_generic_method_aliasing_result_is_not_freed() `test {
+  h := GenericHolder(cbs: [make_adder_free(6)]);
+  h.get_cb[int](0);
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 3. Inline-consumed result: called immediately, never bound. Also leaked.
+inline_closure_result() `test {
+  assert(make_adder_free(5)() == 6, "");
+}
+
+// 4. Bound result: the var's bindingFreeEnv owns the env; the new env temp must
+//    be claimed at the var decl, not freed twice.
+bound_closure_result() `test {
+  f := make_adder_free(5);
+  assert(f() == 6, "");
+}
+
+// 5. A call result returned straight back out of another function stays owned by
+//    the eventual binding.
+return_closure_result() `test {
+  f := wrap(5);
+  assert(f() == 6, "");
+}
+
+// 6. Field sink: `h.cb = <call result>` transfers ownership to the field, so
+//    genAssignStmt claims the env temp (previously segfaulted for a lambda RHS).
+//    The overwritten `cb` is non-capturing (null env) — overwriting a capturing
+//    one leaks the old env, tracked separately as T1226.
+closure_result_into_field() `test {
+  h := CallbackHolder(cb: || -> 0, cbs: [|| -> 0]);
+  h.cb = make_adder_free(5);
+  assert(h.cb() == 6, "");
+}
+
+// 6b. Setter-property sink: `h.cb = <closure>` dispatches through `set cb` and
+//     never reaches the field-store path. The claim therefore lives in
+//     genAssignStmt (beside claimStringTemp/claimHeapTemp), not in
+//     genMemberAssign — otherwise the setter stores the env and statement-end
+//     cleanup frees it (segfault for a call result; `invalid free` for a lambda
+//     literal, which was already tracked before T1160).
+//     A setter needs a paired getter, and a getter cannot hand back a closure FIELD
+//     (T1227), so the slot lives in a container the getter can alias.
+type SetterHolder {
+  (() -> int)[] slots;
+  get cb() -> int {
+    return this.slots[0];
+  }
+  set cb(() -> int f) {
+    this.slots[0] = f;
+  }
+  run(this) int {
+    return this.slots[0]();
+  }
+}
+
+closure_result_into_setter() `test {
+  h := SetterHolder(slots: [|| -> 0]);
+  h.cb = make_adder_free(5);
+  assert(h.run() == 6, "");
+}
+
+lambda_into_setter() `test {
+  x := 5;
+  h := SetterHolder(slots: [|| -> 0]);
+  h.cb = move || -> x + 1;
+  assert(h.run() == 6, "");
+}
+
+// 7. Container element sinks: genIndexAssign claims the env temp.
+closure_result_into_vector_element() `test {
+  v := [|| -> 0];
+  v[0] = make_adder_free(5);
+  assert(v[0]() == 6, "");
+}
+
+closure_result_into_map_value() `test {
+  m := Map[string, () -> int]();
+  m["k"] = make_adder_free(5);
+  assert(m["k"]!() == 6, "");
+}
+
+// 8. Ownership-transfer sinks that already claim lambda-literal env temps must
+//    transparently claim call-result env temps too.
+closure_result_as_arg() `test {
+  assert(identity(make_adder_free(5))() == 6, "");
+}
+
+closure_result_in_constructor() `test {
+  h := CallbackHolder(cb: make_adder_free(5), cbs: [|| -> 0]);
+  assert(h.cb() == 6, "");
+}
+
+closure_result_in_vector_literal() `test {
+  v := [make_adder_free(5)];
+  assert(v[0]() == 6, "");
+}
+
+// 9. Calls that may hand back a closure they do not own must NOT be tracked —
+//    freeing the result would double-free the real owner. The closures here must
+//    CAPTURE: a non-capturing closure has a null env, so the drop is a no-op and
+//    the test would pass even if the alias filter were broken. T1227 closed the
+//    direct route (`return this.cb` is now a sema error); the container-element
+//    route below is what remains, so the filter still carries the classification.
+discard_aliasing_result_is_not_freed() `test {
+  h := CallbackHolder(cb: || -> 0, cbs: [make_adder_free(6)]);
+  h.get_cb();
+  g := make_adder_free(2);
+  identity(g);
+  assert(h.cbs[0]() == 7, "");
+  assert(g() == 3, "");
+}
+
+// The same alias, reached through inheritance: `DerivedHolder` declares no fields
+// of its own, so a filter that only walks own fields would treat the borrowed
+// `cb` as a fresh closure, free it here, and double-free at `d`'s drop.
+discard_inherited_aliasing_result_is_not_freed() `test {
+  d := DerivedHolder(cbs: [make_adder_free(6)]);
+  d.get_cb();
+  assert(d.cbs[0]() == 7, "");
+}
+
+// A `VirtualBase`-typed receiver whose runtime type is `VirtualDerived`: the
+// override returns the borrowed `cb`, so tracking the result as a temp frees an
+// env `d`'s drop frees again (segfault).
+discard_virtual_aliasing_result_is_not_freed() `test {
+  d := VirtualDerived(n: 1, cbs: [make_adder_free(6)]);
+  discard_via_base(d);
+  assert(d.cbs[0]() == 7, "");
+}
+
+// 10. A non-capturing closure result has a null env — the tracked temp's
+//     null-check makes the drop a no-op.
+discard_noncapturing_closure_result() `test {
+  make_noncapturing();
+  f := make_noncapturing();
+  assert(f() == 9, "");
+}
+
+// 12. An indirect call through a closure VALUE (`f()`, `(f)()`, a closure param)
+//     must NOT have its result tracked: the callee's env may own the closure it
+//     hands back, and the env's drop frees it. Tracking double-freed it
+//     (`fatal: invalid free`). The trade-off is that an indirect callee returning
+//     a genuinely fresh closure keeps leaking — the same conservative bargain the
+//     T1227 alias filter makes, and no worse than before this fix.
+returns_captured_closure_is_not_freed() `test {
+  h := make_adder_free(1);
+  f := move || -> h;
+  f();
+  assert(true, "");
+}
+
+returns_captured_closure_inline_is_not_freed() `test {
+  h := make_adder_free(1);
+  f := move || -> h;
+  assert(f()() == 2, "");
+}
+
+returns_captured_closure_via_paren_is_not_freed() `test {
+  h := make_adder_free(1);
+  f := move || -> h;
+  (f)();
+  assert(true, "");
+}
+
+// The discriminating case for the generic-instantiation peel: `fns[0]` is a value
+// subscript yielding a callable, NOT a type-argument list, so the callee stays a
+// closure value and its result must not be freed.
+returns_captured_closure_via_subscript_is_not_freed() `test {
+  h := make_adder_free(1);
+  fns := [move || -> h];
+  fns[0]();
+  assert(fns[0]()() == 2, "");
+}
+
+// The same indirect call reached through a closure-typed parameter — `f` is a
+// borrowed param, so its env (and the closure it returns) belongs to the caller.
+call_through_closure_param(() -> () -> int f) {
+  f();
+}
+
+returns_captured_closure_via_param_is_not_freed() `test {
+  h := make_adder_free(1);
+  g := move || -> h;
+  call_through_closure_param(g);
+  assert(g()() == 2, "");
+}
+
+// 11. The failable-unwrap layers (`?!`, `?^`) only extract the inner call's
+//     success value, so the closure they yield is owned exactly like a plain call
+//     result and must be tracked through them.
+make_adder_failable!(int x)() -> int {
+  return move || -> x + 1;
+}
+
+propagate_helper!() {
+  g := make_adder_failable(5)?^;
+  assert(g() == 6, "");
+  make_adder_failable(5)?^;
+}
+
+discard_failable_closure_result() `test {
+  make_adder_failable(10)?!;
+}
+
+bound_failable_closure_result() `test {
+  f := make_adder_failable(5)?!;
+  assert(f() == 6, "");
+}
+
+inline_failable_closure_result() `test {
+  assert(make_adder_failable(5)?!() == 6, "");
+}
+
+propagated_failable_closure_result() `test {
+  propagate_helper()?!;
+}
+
+// 13. Getters. `trackGetterResult` hands a MemberExpr (not a CallExpr) to
+//     `trackHeapUserTypeResult`, so the alias filter's getter arm carries the
+//     whole classification: the receiver is the getter's target.
+type ClosureMaker {
+  int base;
+  get adder() -> int {
+    b := this.base;
+    return move || -> b + 1;
+  }
+}
+
+discard_getter_closure_result() `test {
+  m := ClosureMaker(base: 1);
+  m.adder;
+}
+
+bound_getter_closure_result() `test {
+  m := ClosureMaker(base: 1);
+  f := m.adder;
+  assert(f() == 2, "");
+}
+
+// A getter handing back the receiver's borrowed field: the receiver mentions a
+// closure, so the result must not be freed here (`h`'s drop owns it).
+type GetterHolder {
+  (() -> int)[] cbs;
+  get callback() -> int {
+    return this.cbs[0];
+  }
+}
+
+discard_getter_aliasing_result_is_not_freed() `test {
+  h := GetterHolder(cbs: [make_adder_free(6)]);
+  h.callback;
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 14. A parenthesized discard still reaches the CallExpr through the filter's
+//     peel loop, so the fresh env is freed rather than leaked.
+discard_paren_wrapped_closure_result() `test {
+  (make_adder_free(5));
+}
+
+// 15. A callee that is itself a CALL (`maker()()`) produces the fat pointer from
+//     an expression, so the inner call's result is classified as a closure-value
+//     callee and its result is left alone — the outer closure's env owns the
+//     inner one, and its env drop fn frees it. Tracking the inner result here
+//     would double-free. The outer `maker()` result IS a fresh call result and is
+//     freed at statement end, so the whole statement is leak-clean.
+maker()() -> () -> int {
+  h := make_adder_free(1);
+  return move || -> h;
+}
+
+returns_captured_closure_via_call_callee_is_not_freed() `test {
+  maker()();
+  assert(true, "");
+}
+
+// 16. `typeMentionsSignature` must see a closure nested inside an argument's
+//     container/optional/array/enum type, not just a bare `() -> int` argument.
+//     Each callee below hands back the caller-owned closure it was passed; if the
+//     filter missed the shape, the result would be tracked and freed here while
+//     the caller's own drop frees it again (`fatal: invalid free`).
+first_of_vector((() -> int)[] v)() -> int {
+  return v[0];
+}
+
+aliasing_vector_arg_result_is_not_freed() `test {
+  fns := [make_adder_free(6)];
+  first_of_vector(fns);
+  assert(fns[0]() == 7, "");
+}
+
+pick_of_map(map[string, () -> int] m)() -> int {
+  return m["k"]!;
+}
+
+aliasing_map_arg_result_is_not_freed() `test {
+  m := Map[string, () -> int]();
+  m["k"] = make_adder_free(6);
+  pick_of_map(m);
+  assert(m["k"]!() == 7, "");
+}
+
+unwrap_optional((() -> int)? o)() -> int {
+  return o!;
+}
+
+aliasing_optional_arg_result_is_not_freed() `test {
+  (() -> int)? o = make_adder_free(6);
+  unwrap_optional(o);
+  assert(o!() == 7, "");
+}
+
+first_of_array((() -> int)[2] a)() -> int {
+  return a[0];
+}
+
+aliasing_array_arg_result_is_not_freed() `test {
+  (() -> int)[2] arr = [make_adder_free(6), make_adder_free(1)];
+  first_of_array(arr);
+  assert(arr[0]() == 7, "");
+}
+
+enum ClosureSlot {
+  Cb(() -> int f),
+  Empty,
+}
+
+unslot(ClosureSlot s)() -> int {
+  match s {
+    ClosureSlot.Cb(f) => {
+      return f;
+    },
+    ClosureSlot.Empty => {
+      return || -> 0;
+    },
+  }
+}
+
+aliasing_enum_arg_result_is_not_freed() `test {
+  s := ClosureSlot.Cb(f: make_adder_free(6));
+  unslot(s);
+  match s {
+    ClosureSlot.Cb(f) => assert(f() == 7, ""),
+    ClosureSlot.Empty => assert(false, ""),
+  }
+}
+
+// The receiver's closure can be nested too — `cbs` is a vector of closures, so
+// the walk over the receiver's fields has to descend into the element type.
+type VectorHolder {
+  (() -> int)[] cbs;
+  first(this)() -> int {
+    return this.cbs[0];
+  }
+}
+
+discard_nested_container_aliasing_result_is_not_freed() `test {
+  h := VectorHolder(cbs: [make_adder_free(6)]);
+  h.first();
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 17. Self-referential types: the walk's `seen` set must terminate, and having
+//     terminated it must report "no closure here" so the FRESH result below is
+//     still freed. A missing guard would hang or overflow the compiler; a guard
+//     that returned `true` on revisit would leak.
+type LinkedNode {
+  int v;
+  LinkedNode? next;
+  make_adder(this)() -> int {
+    n := this.v;
+    return move || -> n + 1;
+  }
+}
+
+recursive_receiver_fresh_result_is_freed() `test {
+  n := LinkedNode(v: 5, next: none);
+  n.make_adder();
+  assert(n.v == 5, "");
+}
+
+enum RecursiveTree {
+  Leaf,
+  Branch(RecursiveTree[] children),
+}
+
+make_adder_from_tree(RecursiveTree t, int x)() -> int {
+  return move || -> x + 1;
+}
+
+recursive_enum_arg_fresh_result_is_freed() `test {
+  t := RecursiveTree.Leaf;
+  make_adder_from_tree(t, 5);
+}
+
+// 18. A generic instance whose TYPE ARGS hold no closure, but whose ORIGIN declares
+//     one: the walk must descend past the type args into the origin's own fields.
+type OriginHolder[T] {
+  T key;
+  (() -> int)[] cbs;
+}
+
+from_origin(OriginHolder[int] b)() -> int {
+  return b.cbs[0];
+}
+
+aliasing_instance_origin_arg_result_is_not_freed() `test {
+  b := OriginHolder[int](key: 1, cbs: [make_adder_free(6)]);
+  from_origin(b);
+  assert(b.cbs[0]() == 7, "");
+}
+
+// 19. A parenthesized function NAME in callee position. Without the paren peel in
+//     the closure-value-callee check, `(make_adder_free)` reads as an opaque fat
+//     pointer, the call is misclassified as indirect, and the fresh env leaks.
+//     (`(f)()` for a real closure value is covered above and must stay untracked.)
+discard_paren_wrapped_callee_result() `test {
+  (make_adder_free)(5);
+}
+
+// 20. A structural-interface receiver. It has no Named fields to walk at all, so
+//     the alias filter's `IsStructural()` arm — not the field walk — is what stops
+//     the borrowed `cb` from being freed here. The concrete `CbImpl` still owns it.
+type HasCb `structural {
+  get_cb()() -> int `abstract;
+}
+
+type CbImpl is HasCb {
+  (() -> int)[] cbs;
+  get_cb(this)() -> int {
+    return this.cbs[0];
+  }
+}
+
+discard_via_structural(HasCb h) {
+  h.get_cb();
+}
+
+structural_receiver_aliasing_result_is_not_freed() `test {
+  c := CbImpl(cbs: [make_adder_free(6)]);
+  discard_via_structural(c);
+  assert(c.cbs[0]() == 7, "");
+}
+
+// 21. A receiver reached through a borrow: the receiver's own type is
+//     `SharedRef(CallbackHolder)` / `MutRef(CallbackHolder)`, so `typeMentionsSignature`
+//     has to unwrap the ref before it can find `cb`. Missing either arm frees the
+//     borrowed env here while the owner's drop frees it again.
+shared_ref_receiver_aliasing_result_is_not_freed() `test {
+  h := CallbackHolder(cb: || -> 0, cbs: [make_adder_free(6)]);
+  CallbackHolder &r = h;
+  r.get_cb();
+  assert(r.cbs[0]() == 7, "");
+}
+
+discard_via_mut_ref(CallbackHolder ~h) {
+  h.get_cb();
+}
+
+mut_ref_receiver_aliasing_result_is_not_freed() `test {
+  h := CallbackHolder(cb: || -> 0, cbs: [make_adder_free(6)]);
+  discard_via_mut_ref(h);
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 22. The discard happens INSIDE a generic body, where the argument's and the
+//     result's types are both bare `TypeParam`s. `resolvedExprType` must apply the
+//     active `typeSubst` before the filter inspects them: with `T = () -> int`, `v`
+//     is the caller's closure and `generic_identity` hands it straight back. Without
+//     the substitution the arg reads as a `TypeParam` (no signature), the borrowed
+//     env is registered as a temp, and `g`'s scope-exit drop double-frees it.
+generic_identity[T](T f) T {
+  return f;
+}
+
+make_fresh()() -> int {
+  return move || -> 42;
+}
+
+discard_aliased_in_generic_body[T](T v) {
+  generic_identity[T](v);
+}
+
+discard_fresh_in_generic_body[T](T v) {
+  make_fresh();
+}
+
+generic_body_aliasing_result_is_not_freed() `test {
+  g := make_adder_free(6);
+  discard_aliased_in_generic_body[() -> int](g);
+  assert(g() == 7, "");
+}
+
+generic_body_fresh_result_is_freed() `test {
+  discard_fresh_in_generic_body[int](1);
+}
+
+// 23. A generic method on a generic type: `monoCtx` and `typeSubst` are both active
+//     while the discarded call is generated. The closure is fresh, so it is freed.
+type GenericMaker[T] {
+  T tag;
+  int base;
+  mk[U](this, U u)() -> int {
+    b := this.base;
+    return move || -> b + 1;
+  }
+}
+
+generic_method_fresh_result_is_freed() `test {
+  m := GenericMaker[string](tag: "a", base: 5);
+  m.mk[int](1);
+  f := m.mk[int](1);
+  assert(f() == 6, "");
+}
+
+// 24. A native container method taking the call result by value: `push` owns the
+//     closure afterwards, so the arg-move claim must consume the env temp (freeing
+//     it at statement end would leave the vector holding a dangling env).
+closure_result_into_native_push() `test {
+  v := [|| -> 0];
+  v.push(make_adder_free(5));
+  assert(v[1]() == 6, "");
+}
+
+// 25. Discards inside loop and branch bodies: the env temp is registered and
+//     cleaned at each statement end, not accumulated to the enclosing scope. A
+//     per-iteration leak would show up as N allocations, not 1.
+discard_closure_result_in_loop() `test {
+  for i in 0..3 {
+    make_adder_free(i);
+  }
+  j := 0;
+  while j < 3 {
+    make_adder_free(j);
+    j = j + 1;
+  }
+}
+
+discard_closure_result_in_branch() `test {
+  if true {
+    make_adder_free(1);
+  } else {
+    make_adder_free(2);
+  }
+}
+
+// 26. The mirror of the alias tests (#9, #16, #18): the callee takes an aggregate
+//     that holds NO closure, so it cannot be handing one of its elements back — the
+//     fresh result stays tracked and is freed. Each arm of `typeMentionsSignature`
+//     has to reach its `return false` tail; an arm that over-reports "contains a
+//     closure" would silently leak here rather than double-free, which is why the
+//     alias tests alone cannot catch it. Leak enforcement is the assertion.
+type PlainBox[T] {
+  T v;
+}
+
+mk_from_tuple((int, string) t, int x)() -> int {
+  return move || -> x + 1;
+}
+
+mk_from_instance(PlainBox[int] b, int x)() -> int {
+  return move || -> x + 1;
+}
+
+mk_from_vector(int[] v, int x)() -> int {
+  return move || -> x + 1;
+}
+
+mk_from_map(map[string, int] m, int x)() -> int {
+  return move || -> x + 1;
+}
+
+mk_from_optional(int? o, int x)() -> int {
+  return move || -> x + 1;
+}
+
+mk_from_array(int[2] a, int x)() -> int {
+  return move || -> x + 1;
+}
+
+closure_free_tuple_arg_fresh_result_is_freed() `test {
+  mk_from_tuple((1, "a"), 5);
+}
+
+closure_free_instance_arg_fresh_result_is_freed() `test {
+  b := PlainBox[int](v: 1);
+  mk_from_instance(b, 5);
+}
+
+closure_free_vector_arg_fresh_result_is_freed() `test {
+  mk_from_vector([1, 2], 5);
+}
+
+closure_free_map_arg_fresh_result_is_freed() `test {
+  m := Map[string, int]();
+  m["a"] = 1;
+  mk_from_map(m, 5);
+}
+
+closure_free_optional_arg_fresh_result_is_freed() `test {
+  int? o = 1;
+  mk_from_optional(o, 5);
+}
+
+closure_free_array_arg_fresh_result_is_freed() `test {
+  int[2] a = [1, 2];
+  mk_from_array(a, 5);
+}
+
+// 27. The receiver is itself a temporary — a constructor call or another call's
+//     result. Both the receiver's heap temp and the closure's env temp are
+//     registered by the same statement, and both must be freed exactly once. A
+//     receiver-alias clear that mistook the env temp for the receiver would leave
+//     one leaked or double-freed.
+make_maker() ClosureMaker {
+  return ClosureMaker(base: 1);
+}
+
+temp_receiver_method_result_is_freed() `test {
+  Adder(base: 0).make_adder(10);
+}
+
+temp_receiver_getter_result_is_freed() `test {
+  make_maker().adder;
+}
+
+// 28. The discard happens inside a lambda body, where the env temp's alloca lands
+//     in the lambda's own entry block rather than the enclosing function's. Calling
+//     it twice turns a per-call leak into 2 allocations, not 1.
+discard_closure_result_inside_lambda() `test {
+  f := || {
+    make_adder_free(5);
+  };
+  f();
+  f();
+}
+
+// 29. The discarded closure captures a string, so its env struct carries a non-null
+//     field-0 drop fn. cleanupEnvTemps must call that drop fn (freeing the captured
+//     string) rather than `pal_free`-ing the env alone — otherwise the capture leaks
+//     and the count is 1, not 0.
+make_greeter(string move s)() -> string {
+  return move || -> s + "!";
+}
+
+discard_string_capturing_closure_result() `test {
+  make_greeter("hi");
+}
+
+bound_string_capturing_closure_result() `test {
+  g := make_greeter("hi");
+  assert(g() == "hi!", "");
+}
+
+// 30. Reading a closure out of a vector as a bare statement borrows the vector's
+//     env — it is an IndexExpr, not a call, so nothing should be tracked. Freeing it
+//     here would double-free at the vector's drop.
+discard_vector_element_closure_is_not_freed() `test {
+  v := [make_adder_free(6)];
+  v[0];
+  assert(v[0]() == 7, "");
+}
+
+// 31. Reassigning an existing closure local from a call result. This is the
+//     IdentExpr arm of genAssignStmt, not the field/element arms: its claimEnvTemp
+//     predates T1160 (it existed for lambda-literal RHS) but no test ever fed it a
+//     call result. Without the claim, statement-end cleanup frees the env `f` now
+//     owns and `f()` reads freed memory. The overwritten closure is non-capturing,
+//     so no old env leaks here (overwriting a capturing one is T1226).
+reassigned_local_claims_closure_result() `test {
+  f := || -> 0;
+  f = make_adder_free(5);
+  assert(f() == 6, "");
+}
+
+// 32. The same reassignment into an OPTIONAL local. The value is
+//     `{present, {fn, env}}`, so claimEnvTemp cannot match the env pointer directly
+//     — it recurses into the nested fat pointer (T0814). Only the var-decl form was
+//     covered before; the plain-assign form reaches the same claim from a different
+//     caller.
+reassigned_optional_local_claims_closure_result() `test {
+  (() -> int)? o = none;
+  o = make_adder_free(5);
+  assert(o!() == 6, "");
+}
+
+// 33. The discarded closure captures another CLOSURE, so its env's field-0 drop fn
+//     recurses into the inner env. cleanupEnvTemps must go through that drop fn, not
+//     `pal_free` — otherwise the inner env leaks and the count is 1, not 0. Calling
+//     it twice would show 2 leaked allocations, pinning the drop as per-statement.
+make_nested_adder()() -> int {
+  inner := make_adder_free(5);
+  return move || -> inner();
+}
+
+discard_nested_env_closure_result() `test {
+  make_nested_adder();
+  make_nested_adder();
+}
+
+bound_nested_env_closure_result() `test {
+  g := make_nested_adder();
+  assert(g() == 6, "");
+}
+
+// 34. The call result is produced inside a LAMBDA body and returned from it, so the
+//     env temp is registered against the lambda's own block and must be claimed by
+//     the lambda's return — not freed at the lambda's statement end. (#28 covers the
+//     discard-inside-a-lambda case; this covers the escape-from-a-lambda case.)
+closure_result_returned_from_lambda() `test {
+  mk := || -> make_adder_free(5);
+  g := mk();
+  assert(g() == 6, "");
+}
+
+// 35. A `this` receiver. `resolvedExprType(ThisExpr)` is the owning type, so the
+//     alias filter classifies the call exactly as it does for a named receiver:
+//     `Counter` holds no closure, so its fresh result is freed (leak enforcement is
+//     the assertion), while `SelfHolder` hands back its borrowed `cb` and must be
+//     left alone. Only external receivers were covered before.
+type Counter {
+  int base;
+  make_adder(this)() -> int {
+    n := this.base;
+    return move || -> n + 1;
+  }
+  discard_twice(this) {
+    this.make_adder();
+    this.make_adder();
+  }
+}
+
+this_receiver_fresh_result_is_freed() `test {
+  c := Counter(base: 5);
+  c.discard_twice();
+}
+
+type SelfHolder {
+  (() -> int)[] cbs;
+  get_cb(this)() -> int {
+    return this.cbs[0];
+  }
+  get callback() -> int {
+    return this.cbs[0];
+  }
+  discard_own_cb(this) {
+    this.get_cb();
+    this.callback;
+  }
+}
+
+this_receiver_aliasing_result_is_not_freed() `test {
+  h := SelfHolder(cbs: [make_adder_free(6)]);
+  h.discard_own_cb();
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 36. A discard inside a match arm body. The arm is its own block, so the env temp's
+//     drop must be emitted there rather than deferred to the enclosing scope, where
+//     the arm's block no longer dominates the alloca's use.
+enum Which {
+  First,
+  Second,
+}
+
+discard_closure_result_in_match_arm() `test {
+  w := Which.First;
+  match w {
+    Which.First => {
+      make_adder_free(1);
+    },
+    Which.Second => {
+      make_adder_free(2);
+    },
+  }
+}
+
+// 37. Map-literal sink (T1239). `[]=` moves the fat pointer into the map's Slot, so
+//     the map's drop owns the env — genMapLit has to claim the temp beside its
+//     existing claimHeapTemp/claimStringTemp pair. The capturing-lambda form
+//     segfaulted long before T1160; the call-result form only became reachable once
+//     T1160 started registering call results, which is what surfaced the missing
+//     claim. Both are the same double free.
+closure_result_into_map_literal() `test {
+  m := {
+    "k": make_adder_free(5)
+  };
+  assert(m["k"]!() == 6, "");
+}
+
+map_literal_capturing_lambda_env_is_claimed() `test {
+  x := 5;
+  m := {
+    "k": move || -> x + 1
+  };
+  assert(m["k"]!() == 6, "");
+}
+
+// A multi-entry literal registers two env temps in the same statement; claiming one
+// must not clear the other's drop flag, and neither may survive to statement end.
+multi_entry_map_literal_claims_each_env() `test {
+  m := {
+    "a": make_adder_free(1), "b": make_adder_free(5)
+  };
+  assert(m["a"]!() == 2, "");
+  assert(m["b"]!() == 6, "");
+}
+
+// The same two-temps-per-statement shape for the vector-literal sink, which claims
+// via genArrayLit's T0741 path. Only a single-element literal was covered above.
+multi_element_vector_literal_claims_each_env() `test {
+  v := [make_adder_free(1), make_adder_free(5)];
+  assert(v[0]() == 2, "");
+  assert(v[1]() == 6, "");
+}
+
+// 38. A branching expression whose arms each mint a fresh closure. The bound value is
+//     a phi of two env pointers, only one of which was allocated at runtime — the
+//     binding's claim has to neutralize both tracked temps (each arm registers its
+//     own), or the untaken arm's temp is freed at statement end with a garbage
+//     pointer and the taken arm's env leaks.
+if_expr_closure_result_is_claimed() `test {
+  f := if true {
+    make_adder_free(5)
+  } else {
+    make_adder_free(1)
+  };
+  assert(f() == 6, "");
+}
+
+match_expr_closure_result_is_claimed() `test {
+  w := Which.First;
+  f := match w {
+    Which.First => make_adder_free(5),
+    Which.Second => make_adder_free(1),
+  };
+  assert(f() == 6, "");
+}
+
+// 39. A `value`-type receiver. Its Value struct embeds the fields directly and it has
+//     no instance pointer, so `extractNamed` on the receiver reaches a Named whose
+//     AllFields walk must still run — the type holds no closure, so the fresh result
+//     is freed. Only heap receivers were covered.
+type ValueMaker {
+  int base `value;
+  mk(this)() -> int {
+    b := this.base;
+    return move || -> b + 1;
+  }
+}
+
+value_type_receiver_fresh_result_is_freed() `test {
+  m := ValueMaker(base: 1);
+  m.mk();
+  f := m.mk();
+  assert(f() == 2, "");
+}
+
+// 40. The receiver is a force-unwrapped optional, so `resolvedExprType` sees the
+//     unwrapped `ClosureMaker`/`Adder`, not an `Optional`. A filter that read the
+//     Optional without unwrapping would find no fields to walk — harmless here, but
+//     it would free the borrowed env in the mirror case below.
+optional_unwrapped_receiver_fresh_result_is_freed() `test {
+  ClosureMaker? m = ClosureMaker(base: 1);
+  m!.adder;
+  Adder? a = Adder(base: 0);
+  a!.make_adder(10);
+}
+
+// 41. The mirror: the unwrapped receiver DOES hold a closure, so the borrowed `cb`
+//     handed back must not be freed here.
+optional_unwrapped_receiver_aliasing_result_is_not_freed() `test {
+  CallbackHolder? h = CallbackHolder(cb: || -> 0, cbs: [make_adder_free(6)]);
+  h!.get_cb();
+  assert(h!.cbs[0]() == 7, "");
+}
+
+// 42. A borrowed receiver whose type holds NO closure. The alias tests above pin
+//     that `typeMentionsSignature` unwraps `SharedRef`/`MutRef` to *find* a closure
+//     field; these pin the other direction — the unwrap must also reach the Named's
+//     empty field list and report "fresh", or the result is silently left untracked
+//     and leaks. A ref arm hard-coded to `true` passes every alias test and fails
+//     only here.
+shared_ref_receiver_fresh_result_is_freed() `test {
+  m := ClosureMaker(base: 1);
+  ClosureMaker &r = m;
+  r.adder;
+}
+
+discard_fresh_via_mut_ref(ClosureMaker ~m) {
+  m.adder;
+}
+
+mut_ref_receiver_fresh_result_is_freed() `test {
+  m := ClosureMaker(base: 1);
+  discard_fresh_via_mut_ref(m);
+}
+
+// 43. An optional-typed closure sink. The value is `{present, {fn, env}}`, so every
+//     claim has to recurse into the nested fat pointer (T0814) rather than match the
+//     env pointer directly. Test #32 covers the plain-assign local; these cover the
+//     three sinks a call result reaches through an *optional* widening: an argument,
+//     a constructor field, and a field assignment.
+type OptHolder {
+  (() -> int)? cb;
+}
+
+takes_optional_closure((() -> int)? o) int {
+  return o!();
+}
+
+closure_result_widened_to_optional_arg() `test {
+  assert(takes_optional_closure(make_adder_free(5)) == 6, "");
+}
+
+closure_result_into_optional_field_ctor() `test {
+  h := OptHolder(cb: make_adder_free(5));
+  assert(h.cb!() == 6, "");
+}
+
+closure_result_into_optional_field_assign() `test {
+  h := OptHolder(cb: none);
+  h.cb = make_adder_free(5);
+  assert(h.cb!() == 6, "");
+}
+
+// 44. A user-defined `[]=` is a method call, not a native element store — the env
+//     temp is claimed by genAssignStmt's index arm before the setter body runs, so
+//     the setter's own field store owns the env. The paired `[]` getter borrows the
+//     receiver's element; discarding it is an IndexExpr, a shape the filter leaves
+//     untracked, so nothing frees the env the vector still holds.
+type Slots {
+  (() -> int)[] items;
+  [](this, int i)() -> int {
+    return this.items[i];
+  }
+  []=(this, int i, () -> int move f) {
+    this.items[i] = f;
+  }
+}
+
+closure_result_into_user_index_setter() `test {
+  s := Slots(items: [|| -> 0]);
+  s[0] = make_adder_free(5);
+  assert(s[0]() == 6, "");
+}
+
+discard_user_index_getter_result_is_not_freed() `test {
+  s := Slots(items: [make_adder_free(6)]);
+  s[0];
+  assert(s[0]() == 7, "");
+}
+
+// 45. A default method on a structural interface. Its body is generated once per
+//     concrete type with `selfSubst` active, so `resolvedExprType(this)` has to
+//     substitute `Self` before the filter inspects the receiver. Without it the
+//     receiver reads as the structural interface, whose `IsStructural()` arm
+//     suppresses tracking, and the fresh env leaks (twice here, once per call). The
+//     mirror — the concrete type's closure field reached through the interface's
+//     abstract getter — must stay untracked. Every other receiver test runs with
+//     `selfSubst` unset.
+type FreshMaker `structural {
+  get base int `abstract;
+  mk(this)() -> int {
+    b := this.base;
+    return move || -> b + 1;
+  }
+  discard_fresh(this) {
+    this.mk();
+  }
+}
+
+type FreshImpl is FreshMaker {
+  int n;
+  get base int {
+    return this.n;
+  }
+}
+
+structural_default_method_fresh_result_is_freed() `test {
+  i := FreshImpl(n: 1);
+  i.discard_fresh();
+  i.discard_fresh();
+}
+
+type CbInterface `structural {
+  get cb() -> int `abstract;
+  discard_own_cb(this) {
+    this.cb;
+  }
+}
+
+type CbConcrete is CbInterface {
+  (() -> int)[] fs;
+  get cb() -> int {
+    return this.fs[0];
+  }
+}
+
+structural_default_method_aliasing_result_is_not_freed() `test {
+  c := CbConcrete(fs: [make_adder_free(6)]);
+  c.discard_own_cb();
+  assert(c.fs[0]() == 7, "");
+}
+
+// 46. An ENUM receiver. `extractNamed` yields nil for an enum, so the
+//     `IsStructural()`/`needsVtable` guard is skipped entirely and the whole
+//     classification falls to `typeMentionsSignature`'s enum arm — walking the
+//     variants' fields. Every other receiver test passes a Named. `Choice` holds no
+//     closure, so the fresh result is freed (leak enforcement is the assertion);
+//     `EnumSlot` hands back the closure its `Cb` variant owns and must be left alone.
+//     The enum arm is exercised as an ARGUMENT by #16, never as a receiver.
+enum Choice {
+  Left,
+  Right,
+  make_adder(this, int x)() -> int {
+    return move || -> x + 1;
+  }
+}
+
+enum_receiver_fresh_result_is_freed() `test {
+  c := Choice.Left;
+  c.make_adder(5);
+}
+
+enum EnumSlot {
+  Cb(() -> int f),
+  Empty,
+  get_cb(this)() -> int {
+    match this {
+      EnumSlot.Cb(f) => {
+        return f;
+      },
+      EnumSlot.Empty => {
+        return || -> 0;
+      },
+    }
+  }
+}
+
+enum_receiver_aliasing_result_is_not_freed() `test {
+  s := EnumSlot.Cb(f: make_adder_free(6));
+  s.get_cb();
+  match s {
+    EnumSlot.Cb(f) => assert(f() == 7, ""),
+    EnumSlot.Empty => assert(false, ""),
+  }
+}
+
+// 47. A self-referential GENERIC type. #17's `LinkedNode` is non-generic, so its
+//     `seen` guard trips on the Named arm directly; here the cycle runs through the
+//     Instance arm (`GenericNode[int]` → origin `GenericNode` → field `GenericNode[T]?`
+//     → Instance again), which does not itself add to `seen` and relies on the origin
+//     Named's guard to break the loop. Without that, the compiler hangs. Having
+//     terminated, the walk must still report "no closure": `GenericNode` holds none,
+//     so the fresh result is freed rather than silently leaked.
+type GenericNode[T] {
+  T v;
+  GenericNode[T]? next;
+  make_adder(this, int x)() -> int {
+    return move || -> x + 1;
+  }
+}
+
+recursive_generic_receiver_fresh_result_is_freed() `test {
+  n := GenericNode[int](v: 5, next: none);
+  n.make_adder(1);
+}
+
+// The mirror: the same recursive generic shape, but the origin declares a closure
+// field. The walk must find `cb` past the cycle and suppress tracking — freeing the
+// borrowed env here would double-free at `h`'s drop.
+type GenericCbNode[T] {
+  T v;
+  GenericCbNode[T]? next;
+  (() -> int)[] cbs;
+  get_cb(this)() -> int {
+    return this.cbs[0];
+  }
+}
+
+recursive_generic_receiver_aliasing_result_is_not_freed() `test {
+  h := GenericCbNode[int](v: 1, next: none, cbs: [make_adder_free(6)]);
+  h.get_cb();
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 48. A `move` closure parameter. It does not actually transfer env ownership today:
+//     the callee registers no env-free binding, so the caller's env temp survives the
+//     call and statement-end cleanup frees it — exactly once, for a call result and a
+//     lambda literal alike. That single-free invariant is what these pin. (Moving the
+//     closure back out of the parameter — `H(cb: move f)` — segfaults; that is T1237.)
+//     Should T1237 give the parameter ownership, the claim moves to the call site and
+//     these must stay leak-clean either way.
+takes_moved_closure(() -> int move f) int {
+  return f();
+}
+
+closure_result_into_move_param() `test {
+  assert(takes_moved_closure(make_adder_free(5)) == 6, "");
+}
+
+lambda_into_move_param() `test {
+  x := 5;
+  assert(takes_moved_closure(move || -> x + 1) == 6, "");
+}
+
+// 49. `this.cb = <call result>` inside a method. Every other field sink (#6, #43)
+//     assigns through an external receiver; here the MemberExpr target is `this`, so
+//     the claim has to fire on the mut-this store path as well.
+type SelfAssign {
+  () -> int cb;
+  install(~this) {
+    this.cb = make_adder_free(5);
+  }
+}
+
+closure_result_into_this_field() `test {
+  h := SelfAssign(cb: || -> 0);
+  h.install();
+  assert(h.cb() == 6, "");
+}
+
+// 50. Captures that need a real env drop fn beyond the string case (#29) and the
+//     nested-closure case (#33): a droppable user type and a heap vector. Freeing the
+//     env with a bare `pal_free` would leak the capture; each is discarded twice so a
+//     per-statement leak shows up as 2 allocations, not 1.
+type Held {
+  int id;
+  drop(~this) {
+  }
+}
+
+make_held_closure()() -> int {
+  h := Held(id: 7);
+  return move || -> h.id;
+}
+
+discard_droppable_capture_closure_result() `test {
+  make_held_closure();
+  make_held_closure();
+}
+
+bound_droppable_capture_closure_result() `test {
+  g := make_held_closure();
+  assert(g() == 7, "");
+}
+
+make_vector_closure()() -> int {
+  v := [1, 2, 3];
+  return move || -> v[1];
+}
+
+discard_vector_capture_closure_result() `test {
+  make_vector_closure();
+  make_vector_closure();
+}
+
+bound_vector_capture_closure_result() `test {
+  g := make_vector_closure();
+  assert(g() == 2, "");
+}
+
+// 51. Non-fallthrough scope exits. The discards above all reach the end of their
+//     block; these leave through an early `return` and through a `raise` unwind, both
+//     of which emit their own cleanup sequence. A cleanup wired only to the
+//     block-end path leaks here.
+discard_then_return(bool early) int {
+  if early {
+    make_adder_free(1);
+    return 1;
+  }
+  make_adder_free(2);
+  return 0;
+}
+
+discard_before_return_is_freed() `test {
+  assert(discard_then_return(true) == 1, "");
+  assert(discard_then_return(false) == 0, "");
+}
+
+type UnwindError is error {
+  int code;
+}
+
+discard_then_raise!(bool fail) {
+  make_adder_free(1);
+  if fail {
+    raise UnwindError(code: 1, message: "boom");
+  }
+}
+
+discard_before_raise_is_freed() `test {
+  discard_then_raise(true)? => assert(true, "");
+  discard_then_raise(false)?!;
+}
+
+// 52. A bare nested block. Its own scope opens and closes without a statement
+//     boundary of its own, so the env temp must still be cleaned at the inner
+//     statement's end rather than deferred to the enclosing function scope.
+discard_closure_result_in_nested_block() `test {
+  {
+    make_adder_free(5);
+  }
+}
+
+// 53. A failable function whose body returns another call's closure result straight
+//     back out (`wrap` in #5 is the non-failable form). The inner result must be
+//     claimed by the `return`, not freed at the callee's statement end, or the caller
+//     binds a dangling env.
+wrap_failable!(int x)() -> int {
+  return make_adder_free(x);
+}
+
+returned_failable_closure_result() `test {
+  f := wrap_failable(5)?!;
+  assert(f() == 6, "");
+}
+
+// 54. An error-handler expression (`? =>`) whose success value is a closure. The
+//     alias filter deliberately leaves ErrorHandlerExpr unpeeled, so the result is
+//     never tracked and the binding is its sole owner — freed exactly once at scope
+//     exit. (Discarding that result instead still leaks; that residual is T1235/T1229.)
+error_handler_closure_result_is_owned_by_binding() `test {
+  f := make_adder_failable(5)? => make_noncapturing();
+  assert(f() == 6, "");
+}

@@ -5888,6 +5888,651 @@ func TestMapLiteralTwoClosureValuesClaimBothEnvTemps(t *testing.T) {
 	}
 }
 
+// T1160: a call returning a closure hands back a {fn_ptr, env_ptr} fat pointer.
+// When the result is discarded, the env ptr must be registered as an env temp so
+// cleanupEnvTemps frees the callee's heap env at statement end.
+func TestClosureCallResultTrackedAsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return || -> x + 1; }
+		do_it() { make_adder(10); }
+		main() { do_it(); }
+	`)
+	body := extractFunction(ir, "__user.do_it")
+	assertContains(t, body, "env.tmp.drop")
+	assertContains(t, body, "env.tmp.exec")
+}
+
+// T1160: binding the call result transfers ownership to the variable's
+// bindingFreeEnv — the env temp is claimed, not freed twice.
+func TestClosureCallResultClaimedWhenBound(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return || -> x + 1; }
+		do_it() { f := make_adder(10); }
+		main() { do_it(); }
+	`)
+	body := extractFunction(ir, "__user.do_it")
+	assertContains(t, body, "env.claim")
+	assertContains(t, body, "env.free")
+}
+
+// T1160: the failable-unwrap layers (`?!`, `?^`) only extract the inner call's
+// success value, so a discarded closure result must still be tracked through them.
+func TestClosureFailableCallResultTrackedAsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder!(int x) () -> int { return || -> x + 1; }
+		do_it() { make_adder(10)?!; }
+		main() { do_it(); }
+	`)
+	body := extractFunction(ir, "__user.do_it")
+	assertContains(t, body, "env.tmp.drop")
+	assertContains(t, body, "env.tmp.exec")
+}
+
+// T1160/T1227: a call that may hand back a closure it does not own (closure-typed
+// argument, or a receiver whose type transitively holds a closure field) must NOT
+// be tracked — freeing the result would double-free the real owner.
+func TestClosureCallResultAliasNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { () -> int cb; get_cb(this) () -> int { return this.cb; } }
+		type Base { () -> int cb; }
+		type Derived is Base { get_cb(this) () -> int { return this.cb; } }
+		type VBase { int n; get_cb(this) () -> int { return || -> 1; } }
+		type VDerived is VBase { () -> int cb; get_cb(this) () -> int { return this.cb; } }
+		identity(() -> int f) () -> int { return f; }
+		via_arg(() -> int g) { identity(g); }
+		via_receiver(Holder h) { h.get_cb(); }
+		via_inherited_receiver(Derived d) { d.get_cb(); }
+		via_virtual_receiver(VBase b) { b.get_cb(); }
+		main() {}
+	`)
+	// via_inherited_receiver: Derived declares no fields of its own, so the alias
+	// filter must walk the parent chain (AllFields) to see Base.cb — otherwise the
+	// borrowed env is freed here and double-freed by the owner's drop.
+	//
+	// via_virtual_receiver: VBase holds no closure at all, but it has children, so
+	// the call dispatches through the vtable and can land on VDerived.get_cb, which
+	// hands back a borrowed field. Every vtable-dispatched receiver is opaque here,
+	// not just the structural/abstract ones.
+	for _, fn := range []string{
+		"__user.via_arg",
+		"__user.via_receiver",
+		"__user.via_inherited_receiver",
+		"__user.via_virtual_receiver",
+	} {
+		body := extractFunction(ir, fn)
+		assertContains(t, body, "define") // guard: the body was actually found
+		assertNotContains(t, body, "env.tmp.drop")
+	}
+}
+
+// T1160: an explicit type-argument list parses the callee as an IndexExpr
+// (`make_generic[int]` → `IndexExpr{make_generic, int}`), which looks like a value
+// subscript yielding a callable. The free function must still be recognized as a
+// statically-known callee (its result is tracked), while the generic method's
+// receiver must still reach the alias check (its result is NOT tracked).
+func TestClosureGenericCallResultTracking(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { () -> int cb; get_cb[T](this, T v) () -> int { return this.cb; } }
+		make_generic[T](T v, int x) () -> int { return || -> x + 1; }
+		fresh() { make_generic[int](1, 10); }
+		aliased(Holder h) { h.get_cb[int](0); }
+		main() { fresh(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.fresh"), "env.tmp.drop")
+	aliased := extractFunction(ir, "__user.aliased")
+	assertContains(t, aliased, "define") // guard: the body was actually found
+	assertNotContains(t, aliased, "env.tmp.drop")
+}
+
+// T1160: an indirect call through a closure VALUE (not a declared function) may
+// hand back a closure the callee's env owns — the env's drop frees it, so tracking
+// the result as a temp double-frees (`fatal: invalid free`). `call_it`'s only
+// tracking candidate is `f()`, so its body must register no env temp at all.
+func TestClosureValueCalleeResultNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		call_it(() -> () -> int f) { f(); }
+		main() {}
+	`)
+	body := extractFunction(ir, "__user.call_it")
+	assertContains(t, body, "define") // guard: the body was actually found
+	assertNotContains(t, body, "env.tmp.drop")
+}
+
+// T1160: storing a closure call result into a field transfers ownership to the
+// field — genAssignStmt claims the env temp (it previously segfaulted for a
+// lambda-literal RHS, and would double-free a tracked call result). The
+// overwritten field holds a named-function reference (null env, no env temp of
+// its own), so the only claim in the body is the call result's.
+func TestClosureResultIntoFieldClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { () -> int cb; }
+		zero() int { return 0; }
+		make_adder(int x) () -> int { return || -> x + 1; }
+		do_it() { h := Holder(cb: zero); h.cb = make_adder(5); }
+		main() { do_it(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.claim")
+}
+
+// T1160: a setter property never reaches the field-store path — genMemberAssign
+// dispatches to the setter call and returns. The claim therefore lives in
+// genAssignStmt alongside claimStringTemp/claimHeapTemp, otherwise the setter
+// stores the env and statement-end cleanup frees it out from under the field.
+func TestClosureResultIntoSetterClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			() -> int slot;
+			get cb () -> int { return this.slot; }
+			set cb(() -> int f) { this.slot = f; }
+		}
+		zero() int { return 0; }
+		make_adder(int x) () -> int { return || -> x + 1; }
+		do_it() { h := Holder(slot: zero); h.cb = make_adder(5); }
+		main() { do_it(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.claim")
+}
+
+// T1160: storing a closure call result into a container element likewise claims
+// the env temp.
+func TestClosureResultIntoElementClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		zero() int { return 0; }
+		make_adder(int x) () -> int { return || -> x + 1; }
+		do_it() { v := [zero]; v[0] = make_adder(5); }
+		main() { do_it(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.claim")
+}
+
+// T1160: a getter reaches trackHeapUserTypeResult as a MemberExpr, not a CallExpr,
+// so the alias filter's getter arm carries the whole classification on its own: the
+// receiver is the getter's target. A getter minting a fresh closure is tracked; one
+// handing back the receiver's borrowed field is not.
+func TestClosureGetterResultTracking(t *testing.T) {
+	ir := generateIR(t, `
+		type Maker { int base; get adder () -> int { b := this.base; return move || -> b + 1; } }
+		type Holder { () -> int cb; get callback () -> int { return this.cb; } }
+		fresh() { m := Maker(base: 1); m.adder; }
+		aliased(Holder h) { h.callback; }
+		main() { fresh(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.fresh"), "env.tmp.drop")
+	aliased := extractFunction(ir, "__user.aliased")
+	assertContains(t, aliased, "define") // guard: the body was actually found
+	assertNotContains(t, aliased, "env.tmp.drop")
+}
+
+// T1229/T1160: a user-defined operator returning a closure never reaches the
+// T1160 alias filter — genExpr's BinaryExpr/UnaryExpr arms hand the result to
+// trackClosureOperatorResult directly, which tracks it unconditionally. That is
+// sound because an operator's `this` and operand are borrowed (there is no
+// call-site move syntax for `a + b`), so the returned closure is always a fresh,
+// owned {fn,env} pair — never an alias of an operand. Pins that the discarded
+// result is freed rather than leaked; tests/e2e/closure_env_operator_test.pr
+// enforces the same at runtime via the zero-leak check.
+func TestClosureOperatorResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int v; +(this, Box o) () -> int { n := this.v + o.v; return move || -> n; } }
+		discard(Box a, Box b) { a + b; }
+		main() {}
+	`)
+	body := extractFunction(ir, "__user.discard")
+	assertContains(t, body, "define") // guard: the body was actually found
+	assertContains(t, body, "env.tmp.drop")
+}
+
+// T1160: typeMentionsSignature must see a closure nested inside an argument's or a
+// receiver's container/optional/array/enum/generic-instance type, not only a bare
+// `() -> int`. Each callee here hands back the caller-owned closure it was given, so
+// a missed shape would register the borrowed env as a temp and free it while the
+// caller's drop frees it again (`fatal: invalid free` at runtime). `OriginBox[int]`
+// is the case where the type args are closure-free and only the origin's own fields
+// hold one.
+func TestClosureCallResultNestedAliasNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T v; }
+		type OriginBox[T] { T key; () -> int cb; }
+		enum Slot { Cb(() -> int f), Empty, }
+		type VectorHolder { (() -> int)[] cbs; first(this) () -> int { return this.cbs[0]; } }
+		from_vector((() -> int)[] v) () -> int { return v[0]; }
+		from_map(map[string, () -> int] m) () -> int { return m["k"]!; }
+		from_optional((() -> int)? o) () -> int { return o!; }
+		from_array((() -> int)[2] a) () -> int { return a[0]; }
+		from_instance(Box[() -> int] b) () -> int { return b.v; }
+		from_instance_origin(OriginBox[int] b) () -> int { return b.cb; }
+		from_enum(Slot s) () -> int {
+			match s {
+				Slot.Cb(f) => { return f; },
+				Slot.Empty => { return || -> 0; },
+			}
+		}
+		via_vector((() -> int)[] v) { from_vector(v); }
+		via_map(map[string, () -> int] m) { from_map(m); }
+		via_optional((() -> int)? o) { from_optional(o); }
+		via_array((() -> int)[2] a) { from_array(a); }
+		via_instance(Box[() -> int] b) { from_instance(b); }
+		via_instance_origin(OriginBox[int] b) { from_instance_origin(b); }
+		via_enum(Slot s) { from_enum(s); }
+		via_nested_receiver(VectorHolder h) { h.first(); }
+		main() {}
+	`)
+	for _, fn := range []string{
+		"__user.via_vector",
+		"__user.via_map",
+		"__user.via_optional",
+		"__user.via_array",
+		"__user.via_instance",
+		"__user.via_instance_origin",
+		"__user.via_enum",
+		"__user.via_nested_receiver",
+	} {
+		body := extractFunction(ir, fn)
+		assertContains(t, body, "define") // guard: the body was actually found
+		assertNotContains(t, body, "env.tmp.drop")
+	}
+}
+
+// T1160: self-referential types must terminate the field walk (the `seen` set) AND,
+// having terminated, report "no closure here" so a genuinely fresh result is still
+// freed. Without the guard this program hangs the compiler; with a guard that
+// reported `true` on revisit, both results would go untracked and leak.
+func TestClosureCallResultRecursiveTypeGuard(t *testing.T) {
+	ir := generateIR(t, `
+		type Node { int v; Node? next; mk(this) () -> int { n := this.v; return move || -> n + 1; } }
+		enum Tree { Leaf, Branch(Tree[] children), }
+		mk_from_tree(Tree t, int x) () -> int { return move || -> x + 1; }
+		via_node(Node n) { n.mk(); }
+		via_tree(Tree t) { mk_from_tree(t, 5); }
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "__user.via_node"), "env.tmp.drop")
+	assertContains(t, extractFunction(ir, "__user.via_tree"), "env.tmp.drop")
+}
+
+// T1160: a callee that is neither an ident, a member, nor a generic instantiation —
+// here a force-unwrapped optional closure — materializes its fat pointer from an
+// expression, so isClosureValueCallee falls through to its terminal `return true`.
+// The callee's env may own the closure it hands back, so the result is left alone.
+func TestClosureUnwrappedOptionalCalleeResultNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		call_optional((() -> () -> int)? o) { o!(); }
+		main() {}
+	`)
+	body := extractFunction(ir, "__user.call_optional")
+	assertContains(t, body, "define") // guard: the body was actually found
+	assertNotContains(t, body, "env.tmp.drop")
+}
+
+// T1160: a parenthesized function NAME in callee position. Without the paren peel,
+// `(make_adder)` reads as an opaque fat pointer, the call is misclassified as
+// indirect, and the fresh env leaks. `(f)()` for a real closure value must still be
+// left untracked — covered by the e2e file.
+func TestClosureParenWrappedCalleeResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		do_it() { (make_adder)(5); }
+		main() { do_it(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.tmp.drop")
+}
+
+// T1160: a receiver reached through a borrow has type SharedRef(T)/MutRef(T), so
+// typeMentionsSignature must unwrap the ref before it can find the closure field.
+// Dropping either arm frees the borrowed env here and the owner's drop frees it
+// again — `fatal: invalid free` / segfault, not a silent leak.
+func TestClosureRefReceiverAliasNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { () -> int cb; get_cb(this) () -> int { return this.cb; } }
+		via_shared(Holder h) { Holder& r = h; r.get_cb(); }
+		via_mut(Holder~ h) { h.get_cb(); }
+		main() {}
+	`)
+	for _, fn := range []string{"__user.via_shared", "__user.via_mut"} {
+		body := extractFunction(ir, fn)
+		assertContains(t, body, "define") // guard: the body was actually found
+		assertNotContains(t, body, "env.tmp.drop")
+	}
+}
+
+// T1160: a structural-interface receiver has no Named fields to walk, so the
+// IsStructural arm — not the field walk — is what suppresses tracking. Today
+// needsVtable also covers it (an abstract structural type always dispatches
+// virtually), so this pins the shape rather than the arm in isolation.
+func TestClosureStructuralReceiverAliasNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type HasCb `+"`"+`structural { get_cb() () -> int `+"`"+`abstract; }
+		type CbImpl is HasCb { () -> int cb; get_cb(this) () -> int { return this.cb; } }
+		via_structural(HasCb h) { h.get_cb(); }
+		main() {}
+	`)
+	body := extractFunction(ir, "__user.via_structural")
+	assertContains(t, body, "define") // guard: the body was actually found
+	assertNotContains(t, body, "env.tmp.drop")
+}
+
+// T1160: typeMentionsSignature's *types.Tuple arm. The callee reads the caller's
+// closure out of the tuple and hands it back, so tracking the result would free an
+// env the tuple owns. Runtime coverage is blocked by T1233 (a tuple holding a
+// capturing closure never drops the env at all), so this pins the arm at IR level.
+func TestClosureTupleArgAliasNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		first_of_tuple((() -> int, int) t) () -> int { (f, n) := t; return f; }
+		via_tuple((() -> int, int) t) { first_of_tuple(t); }
+		main() {}
+	`)
+	body := extractFunction(ir, "__user.via_tuple")
+	assertContains(t, body, "define") // guard: the body was actually found
+	assertNotContains(t, body, "env.tmp.drop")
+}
+
+// T1160: a receiver that is a generic INSTANCE whose closure lives in a type
+// argument (`CBox[() -> int]`), not in the origin's own fields. The walk must
+// descend into TypeArgs before concluding the receiver holds no closure. Runtime
+// coverage is blocked by T1232 (such an instance never drops the env), so this
+// pins the arm at IR level.
+func TestClosureGenericInstanceReceiverAliasNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type CBox[T] { T v; get_v(this) T { return this.v; } }
+		via_generic_instance(CBox[() -> int] b) { b.get_v(); }
+		main() { }
+	`)
+	body := extractFunction(ir, "__user.via_generic_instance")
+	assertContains(t, body, "define") // guard: the body was actually found
+	assertNotContains(t, body, "env.tmp.drop")
+}
+
+// T1160: the filter's ErrorPropagateExpr peel arm. `?^` yields the inner call's
+// success value, so a discarded closure it produced is owned here and must be
+// freed; the sibling `?!` arm is pinned by TestClosureFailableCallResultTrackedAsEnvTemp.
+// Without the peel, `?^` lands in `default: return true` and the env leaks.
+func TestClosurePropagatedFailableCallResultTrackedAsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder!(int x) () -> int { return || -> x + 1; }
+		via_propagate!() { make_adder(10)?^; }
+		main() { via_propagate()?!; }
+	`)
+	body := extractFunction(ir, "__user.via_propagate")
+	assertContains(t, body, "env.tmp.drop")
+	assertContains(t, body, "env.tmp.exec")
+}
+
+// T1160: typeMentionsSignature's *types.Tuple arm must fall through to `return
+// false` when no element is a closure. The tuple arg here is closure-free, so the
+// callee cannot be handing back one of its elements — the fresh result stays
+// tracked. A tuple arm that reported `true` unconditionally would leak instead
+// (the conservative-filter failure mode), which no double-free test would catch.
+func TestClosureFreeTupleArgResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		mk_from_tuple((int, string) t, int x) () -> int { return move || -> x + 1; }
+		fresh() { mk_from_tuple((1, "a"), 10); }
+		main() { fresh(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.fresh"), "env.tmp.drop")
+}
+
+// T1160: a `this` receiver. resolvedExprType(ThisExpr) yields the owning type, so
+// the alias filter classifies a self-call exactly as it does a named receiver:
+// Counter holds no closure (fresh result, tracked), Holder hands back its borrowed
+// `cb` (not tracked). Every other receiver test passes the receiver in from outside.
+func TestClosureThisReceiverResultTracking(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int base;
+			mk(this) () -> int { n := this.base; return move || -> n + 1; }
+			fresh(this) { this.mk(); }
+		}
+		type Holder {
+			() -> int cb;
+			get_cb(this) () -> int { return this.cb; }
+			get callback () -> int { return this.cb; }
+			aliased(this) { this.get_cb(); }
+			aliased_getter(this) { this.callback; }
+		}
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "Counter.fresh"), "env.tmp.drop")
+	for _, fn := range []string{"Holder.aliased", "Holder.aliased_getter"} {
+		body := extractFunction(ir, fn)
+		assertContains(t, body, "define") // guard: the body was actually found
+		assertNotContains(t, body, "env.tmp.drop")
+	}
+}
+
+// T1160: reassigning an existing closure local from a call result. genAssignStmt's
+// IdentExpr arm has claimed env temps since the lambda-literal days, but only a
+// lambda literal ever reached it — a call result now can too, and without the claim
+// statement-end cleanup frees the env the variable owns. The optional-typed target
+// exercises claimEnvTemp's nested-fat-pointer recursion (T0814) from the plain-assign
+// caller rather than the var-decl one.
+func TestClosureResultReassignedToLocalClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		to_local() { f := || -> 0; f = make_adder(5); }
+		to_optional() { (() -> int)? o = none; o = make_adder(5); }
+		main() { to_local(); to_optional(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.to_local"), "env.claim")
+	assertContains(t, extractFunction(ir, "__user.to_optional"), "env.claim")
+}
+
+// T1239: a map literal moves its value into the map's Slot via `[]=`, so the map's
+// drop owns the closure env. genMapLit claimed heap and string temps but never env
+// temps, so statement-end cleanupEnvTemps freed the env the map still held —
+// segfault. A capturing lambda literal has hit this since env temps existed; T1160
+// widened it to closure-returning call results by tracking them at all. Both forms
+// must emit the claim; genArrayLit's element path (T0741) is the model.
+func TestClosureIntoMapLiteralClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		from_call() { m := { "k": make_adder(5) }; }
+		from_lambda() { x := 5; m := { "k": move || -> x + 1 }; }
+		main() { from_call(); from_lambda(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.from_call"), "env.claim")
+	assertContains(t, extractFunction(ir, "__user.from_lambda"), "env.claim")
+}
+
+// T1160: a tuple literal moves its element into the tuple (genTupleLit's T0741
+// claim), so statement-end cleanup must not free the env. The claim predates
+// T1160 but only a lambda literal ever reached it; a tracked call result now does
+// too. Runtime coverage is blocked by T1233 (a tuple holding a capturing closure
+// never drops the env), so this pins the claim at IR level — once T1233 lands the
+// e2e file gets the leak-checked version.
+func TestClosureIntoTupleLiteralClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		from_call() { t := (make_adder(5), 1); }
+		main() { from_call(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.from_call"), "env.claim")
+}
+
+// T1160: the `false` tail of typeMentionsSignature's SharedRef/MutRef arms. The
+// alias tests pin that a borrowed receiver holding a closure suppresses tracking;
+// this pins the other direction — a borrowed receiver with no closure field must
+// still unwrap to the Named and conclude "fresh", or the result silently leaks. A
+// ref arm that reported `true` unconditionally would pass every alias test.
+func TestClosureRefReceiverFreshResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Maker { int base; mk(this) () -> int { b := this.base; return move || -> b + 1; } }
+		via_shared(Maker m) { Maker& r = m; r.mk(); }
+		via_mut(Maker~ m) { m.mk(); }
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "__user.via_shared"), "env.tmp.drop")
+	assertContains(t, extractFunction(ir, "__user.via_mut"), "env.tmp.drop")
+}
+
+// T1160: a default method on a structural interface is generated once per concrete
+// type with `selfSubst` active, so `resolvedExprType(this)` must substitute `Self`
+// before the alias filter inspects the receiver. Without the substitution the
+// receiver reads as the structural interface, whose `IsStructural()` arm suppresses
+// tracking — the fresh result would leak in `Impl.discard_fresh`. The mirror case
+// (the concrete type's closure field handed back through the interface's getter)
+// must stay untracked.
+func TestClosureStructuralDefaultMethodResultTracking(t *testing.T) {
+	ir := generateIR(t, `
+		type Maker `+"`"+`structural {
+			get base int `+"`"+`abstract;
+			mk(this) () -> int { b := this.base; return move || -> b + 1; }
+			discard_fresh(this) { this.mk(); }
+		}
+		type Impl is Maker { int n; get base int { return this.n; } }
+		type Holder `+"`"+`structural {
+			get cb () -> int `+"`"+`abstract;
+			discard_own(this) { this.cb; }
+		}
+		type CbImpl is Holder { () -> int f; get cb () -> int { return this.f; } }
+		main() { i := Impl(n: 1); i.discard_fresh(); c := CbImpl(f: || -> 1); c.discard_own(); }
+	`)
+	// extractDefine, not extractFunction: both names appear as call operands inside
+	// @main, which precedes their definitions in the IR.
+	assertContains(t, extractDefine(ir, "Impl.discard_fresh"), "env.tmp.drop")
+	aliased := extractDefine(ir, "CbImpl.discard_own")
+	assertContains(t, aliased, "define") // guard: the body was actually found
+	assertNotContains(t, aliased, "env.tmp.drop")
+}
+
+// T1160: a user-defined `[]=` is a method call, not a native element store, so the
+// env temp is claimed by genAssignStmt's index arm before the setter runs. The
+// paired `[]` getter borrows the receiver's element and is an IndexExpr — a shape
+// the alias filter leaves untracked via its `default` arm, so the borrowed env is
+// never freed here.
+func TestClosureUserIndexSetterClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		type Slots {
+			(() -> int)[] items;
+			[](this, int i) () -> int { return this.items[i]; }
+			[]=(this, int i, () -> int move f) { this.items[i] = f; }
+		}
+		zero() int { return 0; }
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		do_it() { s := Slots(items: [zero]); s[0] = make_adder(5); }
+		discard_getter(Slots s) { s[0]; }
+		main() { do_it(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.claim")
+	getter := extractFunction(ir, "__user.discard_getter")
+	assertContains(t, getter, "define") // guard: the body was actually found
+	assertNotContains(t, getter, "env.tmp.drop")
+}
+
+// T1160: a paren wrapped around the whole CALL (`(make_adder(5));`) must still free
+// the fresh env. Today genExpr recurses straight through ParenExpr (expr.go), so the
+// tracker only ever sees the inner CallExpr and the alias filter's own ParenExpr peel
+// arm never runs — verified by deleting that arm, which leaves this test passing.
+// The test therefore pins the user-visible behavior, not the arm; if paren handling
+// ever moves into the tracker, the peel arm becomes load-bearing and this test starts
+// guarding it. TestClosureParenWrappedCalleeResultTracked covers the other paren
+// (`(make_adder)(5)`), which isClosureValueCallee genuinely does peel.
+func TestClosureParenWrappedCallResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		do_it() { (make_adder(5)); }
+		main() { do_it(); }
+	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.tmp.drop")
+}
+
+// T1160: an ENUM receiver. extractNamed yields nil for an enum, so the
+// IsStructural/needsVtable guard never runs and the whole classification falls to
+// typeMentionsSignature's enum arm, walking the variants' fields. Every other
+// receiver test passes a Named. `Choice` holds no closure (fresh result, tracked);
+// `Slot` hands back the closure its `Cb` variant owns (not tracked). The enum arm is
+// exercised as an argument by TestClosureCallResultNestedAliasNotTracked, never as a
+// receiver — an arm that ignored enum receivers would leak the fresh result, and one
+// that reported "no closure" would double-free the borrowed one.
+func TestClosureEnumReceiverResultTracking(t *testing.T) {
+	ir := generateIR(t, `
+		enum Choice {
+			Left,
+			Right,
+			mk(this, int x) () -> int { return move || -> x + 1; }
+		}
+		enum Slot {
+			Cb(() -> int f),
+			Empty,
+			get_cb(this) () -> int {
+				match this { Slot.Cb(f) => { return f; }, Slot.Empty => { return || -> 0; }, }
+			}
+		}
+		fresh(Choice c) { c.mk(5); }
+		aliased(Slot s) { s.get_cb(); }
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "__user.fresh"), "env.tmp.drop")
+	aliased := extractFunction(ir, "__user.aliased")
+	assertContains(t, aliased, "define") // guard: the body was actually found
+	assertNotContains(t, aliased, "env.tmp.drop")
+}
+
+// T1160: a self-referential GENERIC type. TestClosureCallResultRecursiveTypeGuard's
+// `Node` is non-generic, so its cycle trips the `seen` guard on the Named arm
+// directly. Here the cycle runs through the Instance arm (`GNode[int]` → origin
+// `GNode` → field `GNode[T]?` → Instance again), which adds nothing to `seen` itself
+// and depends on the origin Named's guard to break the loop — without it the compiler
+// hangs. Having terminated, the walk must still report "no closure" so the fresh
+// result is tracked; the mirror type's `cb` must still be found past the cycle so the
+// borrowed result is not.
+func TestClosureRecursiveGenericReceiverGuard(t *testing.T) {
+	ir := generateIR(t, `
+		type GNode[T] {
+			T v;
+			GNode[T]? next;
+			mk(this, int x) () -> int { return move || -> x + 1; }
+		}
+		type GCbNode[T] {
+			T v;
+			GCbNode[T]? next;
+			() -> int cb;
+			get_cb(this) () -> int { return this.cb; }
+		}
+		fresh(GNode[int] n) { n.mk(1); }
+		aliased(GCbNode[int] h) { h.get_cb(); }
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "__user.fresh"), "env.tmp.drop")
+	aliased := extractFunction(ir, "__user.aliased")
+	assertContains(t, aliased, "define") // guard: the body was actually found
+	assertNotContains(t, aliased, "env.tmp.drop")
+}
+
+// The MemberExpr target is `this`, not an external receiver — the claim has to fire
+// on the mut-this field store too, or statement-end cleanup frees the env the field
+// now owns.
+func TestClosureResultIntoThisFieldClaimsEnvTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		type SelfAssign {
+			() -> int cb;
+			install(~this) { this.cb = make_adder(5); }
+		}
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "SelfAssign.install"), "env.claim")
+}
+
+// A discard leaving its scope through an early `return` or a `raise` unwind must be
+// cleaned on those exit edges, not only on block fallthrough.
+func TestClosureCallResultDroppedOnReturnAndRaisePaths(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) () -> int { return move || -> x + 1; }
+		type Unwind is error { int code; }
+		early(bool b) int {
+			if b { make_adder(1); return 1; }
+			return 0;
+		}
+		unwinding!(bool b) {
+			make_adder(1);
+			if b { raise Unwind(code: 1, message: "boom"); }
+		}
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "__user.early"), "env.tmp.drop")
+	assertContains(t, extractFunction(ir, "__user.unwinding"), "env.tmp.drop")
+}
+
 // T0812: reading a closure out of an owning aggregate (struct/optional field,
 // container element) borrows the aggregate's heap env — the local must NOT get an
 // owning env-free binding, otherwise both the local and the aggregate's drop free

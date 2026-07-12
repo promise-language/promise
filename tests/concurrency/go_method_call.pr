@@ -207,11 +207,16 @@ test_go_method_ff_vector() `test(exclude: wasm) {
   sleep(Duration.from_millis(30));
 }
 
-// NOTE (T1159/T1160): a capturing-closure fire-and-forget result via this
-// via-block path (`go a.make_adder(10)` discarded) cannot yet be leak-clean —
-// it is blocked by T1160, a *pre-existing* bug where a discarded closure-returning
-// call result is never tracked as an env temp (so cleanupEnvTemps has nothing to
-// drop). It leaks 1 allocation even in plain non-`go` statement context. A
-// fire-and-forget test for it will be added once T1160 lands. The fast-path
-// free-function closure form IS leak-clean today (it drops via emitVariantFieldDrop,
-// not env-temp tracking) — covered by goroutine_fire_and_forget.pr.
+// T1159 + T1160: a capturing-closure fire-and-forget result through the via-block
+// path (`go a.make_adder(10)` discarded). The via-block drops the result via
+// cleanupEnvTemps, which only sees the closure because T1160 makes a
+// closure-returning call result register its env pointer as an env temp. This
+// leaked 1 allocation before T1160 — and leaked in plain non-`go` statement context
+// too, which is why the test waited on that fix. The free-function form takes the
+// fast path instead (dropping via emitVariantFieldDrop, not env-temp tracking) and
+// is covered by goroutine_fire_and_forget.pr. Leak-checked.
+test_go_method_ff_closure() `test(exclude: wasm) {
+  a := Adder();
+  go a.make_adder(10);
+  sleep(Duration.from_millis(30));
+}

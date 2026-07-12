@@ -193,10 +193,32 @@ test_ff_freefn_vector() `test(exclude: wasm) {
 
 // capturing-closure result, discarded — the fast path drops it via
 // emitVariantFieldDrop's closure (T0739) path, so no env-temp tracking is needed
-// (unlike the via-block method path, blocked by T1160). Leak-checked.
+// (unlike the via-block method path, which relies on the env-temp tracking T1160
+// added — see go_method_call.pr's test_go_method_ff_closure). Leak-checked.
 test_ff_freefn_closure() `test(exclude: wasm) {
   go build_adder(10);
   sleep(Duration.from_millis(30));
+}
+
+// T1160: the discard happens INSIDE the goroutine body, so the env temp's alloca is
+// created in the coroutine's entry block and must be spilled into the coroutine
+// frame before the initial suspend. cleanupEnvTemps then runs on the goroutine's
+// stack, not the spawner's. Leak-checked.
+test_ff_go_block_discards_closure_result() `test(exclude: wasm) {
+  go {
+    build_adder(10);
+  };
+  sleep(Duration.from_millis(30));
+}
+
+// T1105 + T1160: the counterpart of the fire-and-forget discards — the closure leaves
+// the goroutine through a task handle instead of being dropped. The spawn claims the
+// env temp into `G.result_ptr` (T1105) and the awaiting binding takes ownership, so
+// the env is freed exactly once, at `f`'s scope exit. Leak-checked.
+test_go_closure_result_via_task_handle() `test(exclude: wasm) {
+  t := go build_adder(5);
+  f := <-t;
+  assert(f() == 6, "closure survives the task handle");
 }
 
 // regression: the same struct-returning function received via a task handle

@@ -34,7 +34,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()` |
 | Path (module) | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG (xoshiro256**) |
-| Sorting | `sort.pr` | `sort(T[])` for `Ordered` types (introsort) |
+| Sorting | `sort.pr` | `sort(T[] move)` for `Ordered` types (consumes and returns; iterative quicksort) |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
 | Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]` structural interface, `_FnIter[T]` closure-based iterator, `Generator[T]` coroutine-based iterator, duck-typed for-in |
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `ref.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, `Ref[T]` / `Weak[T]` reference-counted shared ownership, scheduler stats |
@@ -608,8 +608,8 @@ type Set[T: Hashable + Equal] {
 #### 1b. `modules/std/sort.pr` — Sorting
 
 ```promise
-// Sort a vector in-place using natural ordering
-sort[T: Ordered](T[] ~vec);
+// Sort a vector in place and return it (consumes its argument): v = sort(move v)
+sort[T: Ordered](T[] move vec) T[];
 
 // Sort with custom comparator
 sort_by[T](T[] ~vec, |T, T| bool less_than);
@@ -1168,13 +1168,13 @@ Promise test files use the `test` keyword:
 ```promise
 test "sort empty vector" {
     mut v := int[]();
-    sort(v);
+    v = sort(move v);
     assert(v.len == 0, "empty vector should remain empty");
 }
 
 test "sort integers" {
     mut v := [3, 1, 4, 1, 5, 9, 2, 6];
-    sort(v);
+    v = sort(move v);
     assert(v[0] == 1, "first element should be 1");
     assert(v[7] == 9, "last element should be 9");
 }

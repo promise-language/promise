@@ -15740,3 +15740,32 @@ func TestT1207_UnrelatedArgNotSuppressed(t *testing.T) {
 	expectNoOwnerError(t, errs, t0603RefParamEscapeMsg)
 	expectNoOwnerError(t, errs, "use of moved variable")
 }
+
+// T1268: `sort` consumes its argument (`T[] move vec`). Deriving a value from a
+// *borrowed* parameter via `sort` and moving that result into an owned struct field
+// used to double-free the caller's buffer (sort returned an aliasing handle under a
+// borrow signature). The consuming signature turns the unsound shape into a
+// compile-time rejection: `xs` is a borrowed parameter, so passing it to `sort`
+// (which now wants `move`) is refused at the call site.
+func TestT1268SortBorrowMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type C { string[] xs; }
+		mk(string[] xs) C {
+			string[] s = sort(xs);
+			return C(xs: move s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'xs'")
+}
+
+// T1268: the sound shape — a *consuming* param passed to `sort`, then moved into an
+// owned field — must be accepted (single owner throughout).
+func TestT1268SortMoveParamAccepted(t *testing.T) {
+	ownerOK(t, `
+		type C { string[] xs; }
+		mk(string[] move xs) C {
+			string[] s = sort(move xs);
+			return C(xs: move s);
+		}
+	`)
+}

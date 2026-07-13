@@ -1,0 +1,122 @@
+// T1268: `sort()` consumes its argument (`T[] move vec`) and returns the sorted
+// vector as the sole owner — safe to move into an owned struct field.
+//
+// Before the fix, `sort` took an unmarked borrow (`T[] vec`) but returned a handle
+// aliasing the caller's buffer; moving that result into a struct field created two
+// owners of one allocation → `fatal: invalid free` at scope exit. Making the param
+// consuming (`move`) makes ownership single and every shape below sound; the unsound
+// shape (borrow param + sort + move into field) is now a compile error — see the Go
+// ownership test TestT1268SortBorrowMoveRejected.
+type Box {
+  string[] xs;
+}
+
+// Shape #2: consuming param → sort → move into struct field (heap elements).
+mk_moved(string[] move xs) Box {
+  string[] s = sort(move xs);
+  return Box(xs: move s);
+}
+
+t1268_move_param_into_field() `test {
+  string[] v = ["b", "a", "c"];
+  Box b = mk_moved(move v);
+  assert(b.xs.len == 3, "field vector length");
+  assert(b.xs[0] == "a" && b.xs[1] == "b" && b.xs[2] == "c", "field vector sorted");
+}
+
+// Shape #3: borrowed param → sort a *clone* → move into field. Cloning breaks the
+// alias: the clone is owned, sort consumes it, and the caller's borrow is untouched.
+mk_cloned(string[] xs) Box {
+  string[] s = sort[string](xs.clone());
+  return Box(xs: move s);
+}
+
+t1268_clone_into_field() `test {
+  string[] v = ["b", "a", "c"];
+  Box b = mk_cloned(v);
+  assert(b.xs[0] == "a" && b.xs[2] == "c", "cloned-then-sorted into field");
+  assert(v[0] == "b", "original borrow untouched by clone+sort");
+}
+
+// Shape #6: sort(owned local) → move into field, inside a function.
+mk_local() Box {
+  string[] local = ["z", "m", "a"];
+  string[] s = sort(move local);
+  return Box(xs: move s);
+}
+
+t1268_local_into_field_in_func() `test {
+  Box b = mk_local();
+  assert(b.xs[0] == "a" && b.xs[1] == "m" && b.xs[2] == "z", "local sorted into field");
+}
+
+// Shape #7: sort(owned local) → move into field, inline.
+t1268_local_into_field_inline() `test {
+  string[] local = ["3", "1", "2"];
+  string[] s = sort(move local);
+  Box b = Box(xs: move s);
+  assert(b.xs[0] == "1" && b.xs[2] == "3", "inline sorted into field");
+}
+
+// Self-assign form for value elements (int[]) and heap elements (string[]).
+t1268_self_assign_int() `test {
+  int[] v = [5, 3, 8, 1, 9, 2];
+  v = sort(move v);
+  assert(v[0] == 1 && v[5] == 9, "int self-assign sorted");
+}
+
+t1268_self_assign_string() `test {
+  string[] v = ["banana", "apple", "cherry"];
+  v = sort(move v);
+  assert(v[0] == "apple" && v[2] == "cherry", "string self-assign sorted");
+}
+
+// Shape #4: consuming param → sort → return the vector directly (no struct). The
+// returned handle is the sole owner and flows straight out; sound with `move`.
+ret_direct(string[] move xs) string[] {
+  return sort(move xs);
+}
+
+t1268_return_direct() `test {
+  string[] v = ["b", "a", "c"];
+  string[] r = ret_direct(move v);
+  assert(r[0] == "a" && r[1] == "b" && r[2] == "c", "returned directly, sorted");
+}
+
+// Discarded sort result must be dropped, not leaked: `sort` consumes its arg and the
+// unused return value is a fresh sole owner that the scope-exit drop must reclaim.
+t1268_discard_result_int() `test {
+  int[] v = [3, 1, 2];
+  sort(move v);
+  assert(true, "discarded int sort result dropped, no leak");
+}
+
+t1268_discard_result_string() `test {
+  string[] v = ["c", "a", "b"];
+  sort(move v);
+  assert(true, "discarded heap sort result dropped, no leak");
+}
+
+// Commit.record-style factory: multiple `move` params + sort + move into field.
+type Entry {
+  int rank;
+  < (Entry other) bool => this.rank < other.rank;
+  == (Entry other) bool => this.rank == other.rank;
+}
+type Commit {
+  string message;
+  Entry[] files;
+}
+
+record(string move message, Entry[] move files) Commit {
+  Entry[] sorted = sort(move files);
+  return Commit(message: move message, files: move sorted);
+}
+
+t1268_factory_shape() `test {
+  string msg = "commit";
+  Entry[] files = [Entry(rank: 3), Entry(rank: 1), Entry(rank: 2)];
+  Commit c = record(move msg, move files);
+  assert(c.message == "commit", "factory message");
+  assert(c.files[0].rank == 1 && c.files[2].rank == 3, "factory files sorted");
+}

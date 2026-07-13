@@ -1,10 +1,9 @@
 // std/sort.pr — Sorting algorithms for Vector[T]
 //
-// `sort` returns the sorted vector; always use the returned value: v = sort(v).
-// It is not reliably in-place: a vector backed by a `.rodata` static literal is
-// relocated by copy-on-write into a callee-local handle on the first mutation,
-// so the caller only observes the sorted order through the return value.
-sort[T: Ordered](T[] vec) T[] `public `doc("Sort a vector and return it (use v = sort(v)). Iterative quicksort with insertion sort for small partitions and median-of-three pivot selection. Requires T: Ordered.") {
+// `sort` sorts a vector in place and returns it. It *consumes* its argument, so
+// use the returned value: v = sort(move v). Because ownership passes into `sort`,
+// the returned handle is the sole owner — safe to store or move into a field.
+sort[T: Ordered](T[] move vec) T[] `public `doc("Sort a vector in place and return it. Consumes its argument — use v = sort(move v). Iterative quicksort with insertion sort for small partitions and median-of-three pivot selection. Requires T: Ordered.") {
   int n = vec.len;
   if n <= 1 {
     return vec;

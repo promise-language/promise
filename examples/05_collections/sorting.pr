@@ -1,7 +1,8 @@
 // Sorting in Promise.
 //
-// sort() sorts a vector in-place. Works on any type that satisfies Ordered.
-// Usage: vec = sort(vec)
+// sort() sorts a vector in place and returns it. Works on any type that
+// satisfies Ordered. It consumes its argument.
+// Usage: vec = sort(move vec)
 // Helper to print an int vector.
 print_int_vec(int[] v) {
   print("[");
@@ -42,7 +43,7 @@ after:  [apple, banana, cherry, date]
   int[] nums = [5, 3, 8, 1, 9, 2];
   print("before: ");
   print_int_vec(nums);
-  nums = sort[int](nums);
+  nums = sort[int](move nums);
   print("after:  ");
   print_int_vec(nums);
 
@@ -53,7 +54,7 @@ after:  [apple, banana, cherry, date]
   string[] words = ["banana", "apple", "cherry", "date"];
   print("before: ");
   print_str_vec(words);
-  words = sort[string](words);
+  words = sort[string](move words);
   print("after:  ");
   print_str_vec(words);
 
@@ -62,6 +63,6 @@ after:  [apple, banana, cherry, date]
   print_line("--- Already Sorted ---");
 
   int[] sorted = [1, 2, 3, 4, 5];
-  sorted = sort[int](sorted);
+  sorted = sort[int](move sorted);
   print_int_vec(sorted);
 }

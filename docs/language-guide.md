@@ -525,7 +525,7 @@ type Money {
 }
 
 Money[] xs = [Money(cents: 30), Money(cents: 10)];
-xs = sort(xs);                  // works because Money is Ordered
+xs = sort(move xs);             // works because Money is Ordered (sort consumes xs)
 Set[Money] seen = Set[Money]();
 seen.add(Money(cents: 10));     // works because Money is Hashable + Equal
 ```

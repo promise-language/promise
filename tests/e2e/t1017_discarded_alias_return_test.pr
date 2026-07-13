@@ -12,20 +12,19 @@ type Money {
   == (Money other) bool => this.cents == other.cents;
 }
 
-// Discarded sort() on a heap user type: no crash; heap mutation flows through the
-// shared borrow, so xs is sorted in place.
-sort_discarded_heap() `test {
+// sort() on a heap user type: consumes and returns the sorted vector (T1268).
+sort_reassigned_heap_full() `test {
   Money[] xs = [Money(cents: 30), Money(cents: 10), Money(cents: 20)];
-  sort(xs);
-  assert(xs[0].cents == 10, "in-place sort via borrow");
+  xs = sort(move xs);
+  assert(xs[0].cents == 10, "in-place sort via consume");
   assert(xs[1].cents == 20, "in-place sort element 1");
   assert(xs[2].cents == 30, "in-place sort element 2");
 }
 
-// The reassigning form keeps working.
+// The reassigning form.
 sort_reassigned_heap() `test {
   Money[] xs = [Money(cents: 30), Money(cents: 10), Money(cents: 20)];
-  xs = sort(xs);
+  xs = sort(move xs);
   assert(xs[0].cents == 10, "sortable via Ordered");
   assert(xs[2].cents == 30, "last element after sort");
 }
@@ -42,13 +41,13 @@ discarded_identity_alias() `test {
   assert(xs[1].cents == 2, "second element still valid");
 }
 
-// int[] (static-literal element type): discard still compiles and does not crash.
-// Static buffers carry the bit-63 flag so the bogus drop was always a no-op; sort
-// returns a relocated copy, so the original is observed unchanged through discard.
-discarded_int_no_crash() `test {
+// int[] (static-literal element type): sort consumes the static-literal vector and
+// returns the sorted (heap-relocated) vector; no crash.
+sorted_int_no_crash() `test {
   int[] xs = [3, 1, 2];
-  sort(xs);
-  assert(xs.len == 3, "int discard does not crash");
+  xs = sort(move xs);
+  assert(xs.len == 3, "int sort does not crash");
+  assert(xs[0] == 1 && xs[2] == 3, "int sorted");
 }
 
 // String element of the stmtTemp discard path: a discarded function whose result

@@ -116,13 +116,13 @@ copy_passthrough() `test {
   assert(flag == true, "bool retained");
 }
 
-// --- `x = f(x)` self-assign where the RHS call borrows x ---
-// Plain `T[]` param (sort returns a fresh handle) — the transient call-scoped
-// borrow on `v` must not block reassigning `v`.
+// --- `x = f(x)` self-assign where the RHS call consumes x ---
+// `sort` consumes its argument (`T[] move vec`) and returns the sorted vector;
+// the `move` on `v` transfers ownership and reassigning `v` re-binds it.
 self_assign_plain() `test {
   int[] v = [3, 1, 2];
-  v = sort(v);
-  assert(v.len == 3 && v[0] == 1 && v[1] == 2 && v[2] == 3, "v = sort(v)");
+  v = sort(move v);
+  assert(v.len == 3 && v[0] == 1 && v[1] == 2 && v[2] == 3, "v = sort(move v)");
 }
 
 // Explicit `T&` param on the RHS — same transient-borrow-does-not-block rule.

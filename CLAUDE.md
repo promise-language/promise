@@ -289,7 +289,7 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 | I/O (std) | `io.pr` | `Reader`/`Writer`/`Closer` structural interfaces, `println`, `print_int`, `print_f64`, `print_bool` |
 | Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]`, `_FnIter[T]`, `Generator[T]`, duck-typed for-in |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
-| Sorting | `sort.pr` | `sort(T[])` for `Ordered` types |
+| Sorting | `sort.pr` | `sort(T[] move)` for `Ordered` types (consumes and returns) |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr`, `clone.pr` | `Equal`, `Ordered`, `Hashable`, `Cloneable` structural types |
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `arc.pr` | `Channel[T]`/`channel[T]` send/close, `Task[T]`/`task[T]` handle, `Arc[T]` atomic ref-counted sharing, scheduler stats |
 | Time | `time.pr` | `Duration` (value type), `Instant`, `sleep()` |

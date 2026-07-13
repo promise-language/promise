@@ -219,7 +219,7 @@ test_sort_user_type() `test {
   Priority(level: 2),
   Priority(level: 4),
   ];
-  tasks = sort[Priority](tasks);
+  tasks = sort[Priority](move tasks);
   assert(tasks[0].level == 1, "sorted[0] = 1");
   assert(tasks[1].level == 2, "sorted[1] = 2");
   assert(tasks[2].level == 3, "sorted[2] = 3");
@@ -233,7 +233,7 @@ test_sort_user_type_duplicates() `test {
   Priority(level: 2),
   Priority(level: 1),
   ];
-  tasks = sort[Priority](tasks);
+  tasks = sort[Priority](move tasks);
   assert(tasks[0].level == 1, "first is 1");
   assert(tasks[1].level == 1, "second is 1");
   assert(tasks[2].level == 2, "third is 2");
@@ -242,13 +242,13 @@ test_sort_user_type_duplicates() `test {
 
 test_sort_user_type_single() `test {
   Priority[] tasks = [Priority(level: 42)];
-  tasks = sort[Priority](tasks);
+  tasks = sort[Priority](move tasks);
   assert(tasks[0].level == 42, "single element unchanged");
 }
 
 test_sort_user_type_empty() `test {
   Priority[] tasks = [];
-  tasks = sort[Priority](tasks);
+  tasks = sort[Priority](move tasks);
   assert(tasks.len == 0, "empty sort stays empty");
 }
 

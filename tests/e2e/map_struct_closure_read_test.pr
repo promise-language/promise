@@ -419,3 +419,171 @@ probe_bare_intvec_map_owned_copy() `test {
   again := m[0]!;
   assert(again.len == 3, "map value unchanged (owned copy, not alias)");
 }
+
+// ============================================================================
+// T1263: two structural siblings that SEGV through DIFFERENT codegen paths than
+// the aliasing-container `[]` above — the native container element read
+// (genVectorIndex) and the struct-field direct read (genFieldAccess). A
+// value-copying container of closures read via either path was deep-copied,
+// zeroing each closure element's opaque env (T0813) → null {fn,env} → SEGV. The
+// fix guards both dup-decision points with FirstFieldNestedClosureDeep so the
+// read stays ALIASED (borrow), envs intact; the borrow gates suppress the owning
+// drop binding and reject escapes. See genVectorIndex / dupHeapFieldForEscape
+// (codegen/expr.go), isClosureAggregateBorrow (stmt.go),
+// closureAggregateBorrowSource (ownership/expr.go).
+
+type H {
+  (() -> int)[] fns;
+}
+
+// Native container element read: `w := vv[0]` on Vector[Vector[() -> int]].
+probe_native_vec_of_vec_closure() `test {
+  x := 7;
+  vv := Vector[Vector[() -> int]]();
+  vv.push([|| -> x]);
+  w := vv[0];
+  assert(w[0]() == 7, "native vec-of-vec closure read");
+}
+
+// Struct field direct read: `f := h.fns` on H { (() -> int)[] fns; }.
+probe_struct_field_vecclosure_direct() `test {
+  x := 7;
+  h := H(fns: [|| -> x]);
+  f := h.fns;
+  assert(f[0]() == 7, "struct field vec-of-closures direct read");
+}
+
+// Multi-element captures — every env survives both reads.
+probe_native_vec_of_vec_closure_multi() `test {
+  a := 1;
+  b := 2;
+  c := 3;
+  vv := Vector[Vector[() -> int]]();
+  vv.push([|| -> a, || -> b, || -> c]);
+  w := vv[0];
+  assert(w[0]() == 1, "native cap a");
+  assert(w[1]() == 2, "native cap b");
+  assert(w[2]() == 3, "native cap c");
+}
+
+probe_struct_field_vecclosure_multi() `test {
+  a := 4;
+  b := 5;
+  c := 6;
+  h := H(fns: [|| -> a, || -> b, || -> c]);
+  f := h.fns;
+  assert(f[0]() == 4, "field cap a");
+  assert(f[1]() == 5, "field cap b");
+  assert(f[2]() == 6, "field cap c");
+}
+
+// Inline read forms: `vv[0][0]()` and `h.fns[0]()`.
+probe_native_vec_of_vec_closure_inline() `test {
+  x := 8;
+  vv := Vector[Vector[() -> int]]();
+  vv.push([|| -> x]);
+  assert(vv[0][0]() == 8, "native inline");
+}
+
+probe_struct_field_vecclosure_inline() `test {
+  x := 9;
+  h := H(fns: [|| -> x]);
+  assert(h.fns[0]() == 9, "struct field inline");
+}
+
+// Loop-read leak guard: 100 reads, one owner (the struct), no leak. The owning
+// drop binding must be suppressed on every read.
+probe_struct_field_vecclosure_loop_reads() `test {
+  x := 3;
+  h := H(fns: [|| -> x]);
+  total := 0;
+  i := 0;
+  while i < 100 {
+    f := h.fns;
+    total = total + f[0]();
+    i = i + 1;
+  }
+  assert(total == 300, "100 struct-field-closure borrows, one owner, no leak");
+}
+
+// Native loop-read leak guard.
+probe_native_vec_of_vec_closure_loop_reads() `test {
+  x := 5;
+  vv := Vector[Vector[() -> int]]();
+  vv.push([|| -> x]);
+  total := 0;
+  i := 0;
+  while i < 100 {
+    w := vv[0];
+    total = total + w[0]();
+    i = i + 1;
+  }
+  assert(total == 500, "100 native-vec-of-vec-closure borrows, one owner, no leak");
+}
+
+// Regression: a non-closure struct field vector (`int[]`) must STILL deep-copy on
+// read (mutation isolation) — the Deep guard reaches `int` (no closure) → nil.
+// Pushing to the read copy leaves the struct field unchanged.
+type IB {
+  int[] xs;
+}
+probe_struct_field_intvec_owned_copy() `test {
+  h := IB(xs: [1, 2, 3]);
+  f := h.xs;
+  f.push(4);
+  assert(f.len == 4, "owned copy mutated");
+  again := h.xs;
+  assert(again.len == 3, "struct field unchanged (owned copy, not alias)");
+}
+
+// Regression: a non-closure native inner vector (`Vector[int[]]`) must STILL
+// deep-copy on read — mutation isolation preserved.
+probe_native_vec_of_intvec_owned_copy() `test {
+  vv := Vector[int[]]();
+  vv.push([1, 2, 3]);
+  w := vv[0];
+  w.push(4);
+  assert(w.len == 4, "owned copy mutated");
+  again := vv[0];
+  assert(again.len == 3, "outer vector element unchanged (owned copy, not alias)");
+}
+
+// Regression: a user-defined NON-aliasing `[]` returning a bare value-copying
+// container of closures hands back a FRESH owned value (only native Vector/Map
+// index reads alias storage the owner frees). The read must stay OWNED — reading
+// in a loop must not leak (each fresh vector is dropped once). Guards the fix
+// against over-borrowing user-container index results.
+type ClosureBox {
+  int n;
+  [](int i)(() -> int)[] {
+    v := this.n;
+    return[move || -> v];
+  }
+}
+probe_user_nonaliasing_index_closure_owned() `test {
+  b := ClosureBox(n: 42);
+  w := b[0];
+  assert(w[0]() == 42, "user non-aliasing [] returns fresh owned closure vector");
+  total := 0;
+  i := 0;
+  while i < 50 {
+    v := b[0];
+    total = total + v[0]();
+    i = i + 1;
+  }
+  assert(total == 2100, "50 fresh owned closure-vector reads, no leak");
+}
+
+// Regression: a native inner vector of a REFCOUNTED handle (`Vector[Vector[Ref[int]]]`)
+// must STILL dup on read — FirstFieldNestedClosureDeep keeps Ref opaque, so the
+// element clone is a refcount increment, not env-zeroing.
+probe_native_vec_of_vec_ref_still_dups() `test {
+  vv := Vector[Vector[Ref[int]]]();
+  inner := Vector[Ref[int]]();
+  inner.push(Ref[int](42));
+  vv.push(move inner);
+  w := vv[0];
+  assert(w[0].borrow == 42, "ref element read");
+  again := vv[0];
+  assert(again[0].borrow == 42, "second ref read (refcount dup, not env-zeroing)");
+}

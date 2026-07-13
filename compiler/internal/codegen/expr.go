@@ -12645,6 +12645,22 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 	// (Not borrow-gated — triggered by dupContainerFieldAccess flag set at the
 	// var-decl AST site, not by a borrow type on the RHS. Remains active post-T0438.)
 	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
+		// T1263: a vector element that is itself a value-copying container transitively
+		// nesting a closure must NOT be duped — dupVector's element-clone loop zeroes each
+		// closure's opaque env (T0813) → null {fn,env} → SEGV on invoke. Leave it ALIASED
+		// (a borrow of the outer vector, env intact); the borrow gates
+		// (isClosureAggregateBorrow / closureAggregateBorrowSource) suppress the owning
+		// drop binding and reject escapes, keeping this in lockstep. FirstFieldNestedClosureDeep
+		// treats a top-level container as a FIELD (recurses TypeArgs) yet keeps Ref/Weak/…
+		// opaque, so Vector[Ref[…]] / Vector[int] are unaffected.
+		resolvedContainerElem := elemType
+		if c.typeSubst != nil {
+			resolvedContainerElem = types.Substitute(elemType, c.typeSubst)
+		}
+		if sema.FirstFieldNestedClosureDeep(resolvedContainerElem) != nil {
+			c.dupContainerFieldAccess = false // consume the flag
+			return val
+		}
 		if innerElem, isVec := types.AsVector(elemType); isVec {
 			c.dupContainerFieldAccess = false // consume the flag
 			innerLLVM := c.resolveType(innerElem)
@@ -14172,6 +14188,15 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 	// B0219: Dup vector/channel fields from types with drop.
 	// Vector: shallow copy (allocate + memcpy). Channel: incref.
 	if c.dupContainerFieldAccess && ownerDroppable {
+		// T1263: a value-copying container FIELD transitively nesting a closure cannot be
+		// deep-copied (dupVector's element-clone loop zeroes the closure env → SEGV). Leave
+		// it ALIASED — the read is a borrow of the owner; the borrow gates suppress the
+		// owning drop binding and reject escapes. Mirrors the genVectorIndex guard and
+		// T1262's typeNeedsMatchDup(false). Non-closure fields (int[]) keep deep-copying.
+		if sema.FirstFieldNestedClosureDeep(fType) != nil {
+			c.dupContainerFieldAccess = false // consume the flag
+			return val, false
+		}
 		// T1176/T1173: whole fixed-Array field/binding escaping the owner — the
 		// [N x T_v] aggregate merely ALIASES N inner heap allocations (heap-user
 		// instances, or string/Vector/Channel/Arc/Weak buffers), so element-wise

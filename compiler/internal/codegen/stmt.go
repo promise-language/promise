@@ -511,18 +511,22 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 	default:
 		return false
 	}
-	// T1262: the Deep type gate also admits a BARE value-copying container of
-	// closures as the read's RESULT (`b := m[0]!` → Vector[() -> int]) — a shape the
-	// shallow FirstFieldNestedClosure rejects (returns nil; a struct/enum holding
-	// such a container instead yields non-nil there, so this guard skips it). For a
-	// bare container result the read is a borrow ONLY when it aliases the container's
-	// storage: an aliasing user `[]` (Map) now leaves V aliased (typeNeedsMatchDup(V)
-	// is false). A NATIVE Vector index read (`vv[0]` on Vector[Vector[...]]) produces
-	// its OWN owned null-dup (T1045) and a struct/enum field read is owned — both
-	// keep their owning binding, else the owned dup leaks. Restrict to the aliasing
-	// user-container index. (T1263 tracks the native/field siblings.)
+	// T1262/T1263: the Deep type gate also admits a BARE value-copying container of
+	// closures as the read's RESULT (`m[0]!`, `vv[0]`, `h.fns` → Vector[() -> int]) — a
+	// shape the shallow FirstFieldNestedClosure rejects (nil). For a bare container the
+	// read is a borrow only when it ALIASES storage the owner frees at scope exit:
+	//   - an aliasing container index — native Vector (vv[0], T1263) or user Map (m[0]!, T1262)
+	//   - a struct/enum field read (h.fns, T1263); getters return fresh owned values (excluded below)
+	// A user non-aliasing `[]` returns a fresh OWNED value (indexTargetIsAliasingContainer false).
 	if sema.FirstFieldNestedClosure(rt) == nil {
-		if _, ok := e.(*ast.IndexExpr); !ok || !c.isUserIndexExpr(e) || !c.indexTargetIsAliasingContainer(e) {
+		switch e.(type) {
+		case *ast.IndexExpr:
+			if !c.indexTargetIsAliasingContainer(e) {
+				return false
+			}
+		case *ast.MemberExpr:
+			// struct/enum field — getters excluded by isGetterCallExpr below
+		default:
 			return false
 		}
 	}

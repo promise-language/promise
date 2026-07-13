@@ -372,6 +372,42 @@ discard_getter_aliasing_result_is_not_freed() `test {
   assert(h.cbs[0]() == 7, "");
 }
 
+// 13b. Failable getter (`get foo! () -> int`) discarded with `?!` / `?^`. The
+//      outer genExpr(ErrorPanicExpr) calls trackUnwrappedFailableTemp with the
+//      extracted {fn,env} value; inside closureResultMayAliasCallInput the peel
+//      loop strips the failable wrapper, leaving the getter MemberExpr, whose
+//      Target is the receiver (the alias-filter's MemberExpr arm). T1227 ensures
+//      all getter results are fresh, so the env is registered and freed here.
+type FailableMaker {
+  int base;
+  get adder!() -> int {
+    b := this.base;
+    return move || -> b + 1;
+  }
+}
+
+failable_propagate_helper!() {
+  m := FailableMaker(base: 41);
+  g := m.adder?^;
+  assert(g() == 42, "propagated failable getter closure should be 42");
+  m.adder?^;
+}
+
+discard_failable_getter_closure_result() `test {
+  m := FailableMaker(base: 41);
+  m.adder?!;
+}
+
+bound_failable_getter_closure_result() `test {
+  m := FailableMaker(base: 41);
+  f := m.adder?!;
+  assert(f() == 42, "");
+}
+
+propagated_failable_getter_closure_result() `test {
+  failable_propagate_helper()?!;
+}
+
 // 14. A parenthesized discard still reaches the CallExpr through the filter's
 //     peel loop, so the fresh env is freed rather than leaked.
 discard_paren_wrapped_closure_result() `test {

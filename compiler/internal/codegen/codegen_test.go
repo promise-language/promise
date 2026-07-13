@@ -6063,6 +6063,24 @@ func TestClosureGetterResultTracking(t *testing.T) {
 	assertNotContains(t, aliased, "env.tmp.drop")
 }
 
+// T1242: a failable getter discarded with `?!` (or `?^`) reaches
+// closureResultMayAliasCallInput's MemberExpr arm. The outer genExpr(ErrorPanicExpr)
+// calls trackUnwrappedFailableTemp with the extracted {fn,env} fat pointer; inside
+// closureResultMayAliasCallInput the peel loop strips the ErrorPanicExpr, landing on
+// the MemberExpr whose Target is the alias receiver.  T1227 ensures fresh getter
+// results (no borrowed field returned), so the receiver has no closure field and the
+// filter returns false — the env is registered and freed at statement end.
+func TestClosureFailableGetterResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Maker { int base; get adder! () -> int { b := this.base; return move || -> b + 1; } }
+		discard_failable() { m := Maker(base: 1); m.adder?!; }
+		propagate_failable!() { m := Maker(base: 1); m.adder?^; }
+		main() {}
+	`)
+	assertContains(t, extractFunction(ir, "__user.discard_failable"), "env.tmp.drop")
+	assertContains(t, extractFunction(ir, "__user.propagate_failable"), "env.tmp.drop")
+}
+
 // T1229/T1160: a user-defined operator returning a closure never reaches the
 // T1160 alias filter — genExpr's BinaryExpr/UnaryExpr arms hand the result to
 // trackClosureOperatorResult directly, which tracks it unconditionally. That is
@@ -6174,6 +6192,23 @@ func TestClosureParenWrappedCalleeResultTracked(t *testing.T) {
 		do_it() { (make_adder)(5); }
 		main() { do_it(); }
 	`)
+	assertContains(t, extractFunction(ir, "__user.do_it"), "env.tmp.drop")
+}
+
+// T1242: a module-qualified call result (`mod.make_adder(x)`) reaches the alias filter
+// with receiver = module IdentExpr. resolveModuleName fires → return false (no aliasing),
+// so the fresh env is tracked. This covers the module-receiver `return false` branch,
+// which is unreachable via a non-module call since those either set receiver=nil (free fn)
+// or receiver=value IdentExpr (method callee target).
+func TestClosureModuleQualifiedCallResultTracked(t *testing.T) {
+	ir := generateIRWithModule(t, "factory",
+		`make_adder(int x) () -> int `+"`public"+` { return move || -> x + 1; }`,
+		`
+		use factory "./factory";
+		do_it() { factory.make_adder(5); }
+		main() { do_it(); }
+		`,
+	)
 	assertContains(t, extractFunction(ir, "__user.do_it"), "env.tmp.drop")
 }
 

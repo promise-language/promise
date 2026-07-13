@@ -7214,27 +7214,30 @@ func (c *Compiler) resolvedExprType(e ast.Expr) types.Type {
 	return t
 }
 
-// closureResultMayAliasCallInput reports whether a call/getter whose result is a
-// closure might hand back a closure it does not own — i.e. one reachable from an
-// argument or from the receiver's fields (T1227). Conservative: any closure
-// mentioned anywhere in an argument type or (transitively) in the receiver type
-// suppresses tracking, so the worst case is the pre-existing leak (T1160), never
-// a double free. Narrow or delete once T1227 makes such returns a move/error.
+// closureResultMayAliasCallInput reports whether a call result that is a closure
+// might hand back a closure it does not own — i.e. one reachable from an argument
+// or from the receiver's fields. Conservative: any closure mentioned anywhere in
+// an argument type or (transitively) in the receiver type suppresses tracking, so
+// the worst case is a pre-existing leak (T1160), never a double free.
+// T1227 made returning a borrowed closure FIELD a compile error, so the receiver
+// field walk and needsVtable check are now dead in the real pipeline (ownership
+// rejects those patterns before codegen); they remain as defense-in-depth for IR
+// generated outside the ownership pass (e.g. Go unit tests via generateIR).
+// Not called from trackGetterResult: T1227 guarantees all getter results are fresh.
 func (c *Compiler) closureResultMayAliasCallInput(expr ast.Expr) bool {
 	// Peel the failable-unwrap layers, which only extract the success value of the
-	// inner call — ownership of the closure is the inner call's. OptionalUnwrapExpr
-	// and ErrorHandlerExpr are deliberately NOT peeled: their sources can be
-	// owner-governed aggregates, so they fall through to the conservative default.
+	// inner call — ownership of the closure is the inner call's.
+	// Not peeled: OptionalUnwrapExpr and ErrorHandlerExpr (owner-governed sources
+	// fall through to the conservative default); ParenExpr (genExpr recurses straight
+	// through parens before any tracking call, so no caller ever passes one here);
+	// AutoCloneExpr (only synthesized in clone bodies by sema, and Signature types are
+	// non-Cloneable per T0813, so a Signature-typed AutoCloneExpr cannot exist).
 peel:
 	for {
 		switch e := expr.(type) {
-		case *ast.ParenExpr:
-			expr = e.Expr
 		case *ast.ErrorPanicExpr:
 			expr = e.Expr
 		case *ast.ErrorPropagateExpr:
-			expr = e.Expr
-		case *ast.AutoCloneExpr:
 			expr = e.Expr
 		default:
 			break peel

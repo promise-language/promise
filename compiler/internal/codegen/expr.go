@@ -5782,7 +5782,7 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 	if !c.tempTrackingEnabled || result == nil {
 		return
 	}
-	// T1253: An instance getter whose return type is a function type
+	// T1253/T1160: An instance getter whose return type is a function type
 	// (`get adder() -> int`) yields an owned closure whose heap env must be
 	// freed. Track its env (field 1 of the {fn,env} fat pointer) as an env temp
 	// so cleanupEnvTemps frees it when the result is discarded (e.g. `(l.adder)()`

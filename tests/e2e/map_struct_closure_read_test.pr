@@ -587,3 +587,64 @@ probe_native_vec_of_vec_ref_still_dups() `test {
   again := vv[0];
   assert(again[0].borrow == 42, "second ref read (refcount dup, not env-zeroing)");
 }
+
+// ============================================================================
+// T1265: the store-native-push escape shape. A Borrowed value-copying container of
+// closures could escape by being auto-moved (implicit last use) into Vector.push's
+// by-value native consuming param — codegen's element auto-dup at the push site
+// cannot dup a closure vector (zeroes the env), so both the owner and the pushed-into
+// vector freed the same env → double-free/SEGV. Ownership now rejects that move (see
+// isCallArgUnsafeBorrowedType, ownership/expr.go; Go tests t1265_test.go). These
+// probes pin that the LEGITIMATE runtime paths the fix must NOT over-reject still run
+// clean: reading-and-invoking a borrow, and pushing a FRESH owned closure vector.
+
+// Pushing a fresh owned closure vector transfers sole ownership to the outer vector;
+// the env is freed exactly once at scope exit — no double free, no leak.
+probe_push_fresh_owned_closure_vec() `test {
+  x := 7;
+  vv := Vector[Vector[() -> int]]();
+  vv.push([|| -> x]);
+  assert(vv[0][0]() == 7, "fresh owned closure vector pushed and invoked");
+}
+
+// Loop-push leak guard: 100 fresh owned closure vectors pushed, each freed once at
+// scope exit with the outer vector.
+probe_push_fresh_owned_closure_vec_loop() `test {
+  total := 0;
+  vv := Vector[Vector[() -> int]]();
+  i := 0;
+  while i < 100 {
+    v := i;
+    vv.push([move || -> v]);
+    i = i + 1;
+  }
+  j := 0;
+  while j < 100 {
+    total = total + vv[j][0]();
+    j = j + 1;
+  }
+  assert(total == 4950, "100 fresh owned closure vectors pushed, no leak");
+}
+
+// Read-and-invoke a bare-vec-of-closures borrow from a map WITHOUT pushing — the map
+// remains sole owner; freed once. (The push variant is a compile error, covered by
+// the Go ownership tests.)
+probe_borrow_read_invoke_no_push() `test {
+  x := 7;
+  m := Map[int, (() -> int)[]]();
+  m[0] = [|| -> x];
+  b := m[0]!;
+  assert(b[0]() == 7, "borrow read-and-invoke, map sole owner");
+}
+
+// Map-container shape of the fresh-owned-push guard: pushing a fresh owned
+// map-of-closures transfers sole ownership to the outer vector; the env is freed
+// exactly once at scope exit. Runtime companion to TestT1265OwnedClosureMapPushAccepted.
+probe_push_fresh_owned_closure_map() `test {
+  x := 9;
+  vv := Vector[map[int, () -> int]]();
+  vv.push( {
+    0: move || -> x
+  });
+  assert(vv[0][0]!() == 9, "fresh owned closure map pushed and invoked");
+}

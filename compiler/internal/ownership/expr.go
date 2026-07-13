@@ -811,6 +811,17 @@ func isCallArgUnsafeBorrowedType(t types.Type) bool {
 	if _, ok := types.AsTask(t); ok {
 		return true
 	}
+	// T1265: a value-copying container of closures (Vector/Map/Set nesting a
+	// closure) is flagged var-decl-alias-safe, so the T0586 branch below skips
+	// it — but codegen's element auto-dup at the push/store site cannot dup a
+	// closure (dupVector zeroes the env → SEGV), and even a correct dup would
+	// re-store an alias the owner still frees → double-free. The Deep
+	// closure-nesting gate re-includes exactly these un-dup-safe closure
+	// aggregates so a Borrowed one is rejected, matching the index-assign /
+	// return / explicit-move escape shapes (T1230/T1262/T1263).
+	if sema.FirstFieldNestedClosureDeep(t) != nil {
+		return true
+	}
 	// T0586 broader rule — plain heap user types, Map, Set, generic user
 	// types with droppable fields. Same predicate shape as T0568's var-decl
 	// reject; carves out auto-dup containers (string, Vector, Channel, Arc,

@@ -15713,6 +15713,28 @@ func isIdentOptionalUnwrapSource(expr ast.Expr) bool {
 	return isIdent
 }
 
+// isBorrowingPlaceExpr reports whether expr (peeling ParenExpr) is a place
+// expression that, when discarded as a bare statement, only borrows the value it
+// designates rather than producing an owned temp: a local/field read (`o`,
+// `obj.f`) or an index read (`arr[i]`). The storage behind the place owns the
+// value and frees it (variable binding / owner drop / container drop), so a
+// discarded-result drop path (T1234) must skip these to avoid a double-free.
+// A `move` out of a place is a MoveExpr — not matched here — so it still drops.
+func isBorrowingPlaceExpr(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	switch expr.(type) {
+	case *ast.IdentExpr, *ast.MemberExpr, *ast.IndexExpr:
+		return true
+	}
+	return false
+}
+
 // isBorrowHoldingOptionalIdentSource reports whether expr (peeling ParenExpr) is
 // an ident referring to a borrow-holding optional local — one bound from a
 // non-owning borrow (RTTI downcast `x as T` / `T&`/`T~` RHS), recorded in

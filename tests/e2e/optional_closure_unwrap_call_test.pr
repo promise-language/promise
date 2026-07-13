@@ -55,3 +55,128 @@ direct_invoke_paren_no_unwrap() `test {
   f := move || -> s.len;
   assert((f)() == 8, "(f)()");
 }
+
+// T1234: a call returning an optional closure `(() -> int)?` whose result is
+// discarded as a bare statement leaked its heap env struct — the result type is
+// Optional(Signature) and dropDiscardedOptional had no `*types.Signature` inner
+// arm, so the env was never dropped. These lock in the leak fix + no-double-free.
+make_maybe(int x)(() -> int)? {
+  return move || -> x + 1;
+}
+make_none()(() -> int)? {
+  return none;
+}
+wrap_input((() -> int) move f)(() -> int)? {
+  return f;
+}
+
+// Discarded capturing optional closure — was LEAK, now dropped once.
+t1234_discard_capturing() `test {
+  make_maybe(5);
+}
+
+// Discarded `none` result — tag branch skips the whole drop block.
+t1234_discard_none() `test {
+  make_none();
+}
+
+// Discarding a bare bound optional-closure local (`o;`) is a *borrow*, not an
+// owned temp — the variable's own binding drops the env at scope exit. The
+// discard-drop path must skip place expressions, else it double-frees. Captureless
+// here (null env) and capturing below both exercise the place-expr skip.
+t1234_discard_captureless() `test {
+  (() -> int)? o = || -> 42;
+  o;
+}
+
+// Regression guard: discard a bound *capturing* optional-closure local, then use
+// it. Before the place-expr skip this double-freed (bare discard) / used-after-free
+// (o!() below reads the freed env → segfault). Now the binding is sole owner.
+t1234_discard_bound_capturing_then_use() `test {
+  o := make_maybe(5);
+  o;
+  assert(o!() == 6, "capturing local usable after discard stmt");
+}
+
+// Discarded call whose result env aliases a moved-in argument — dropped exactly
+// once (the moved arg's drop flag is already cleared), no double-free.
+t1234_discard_moved_alias() `test {
+  x := 7;
+  wrap_input(move || -> x + 1);
+}
+
+// Bound result still drops correctly at scope exit and unwraps to the right value.
+t1234_bound_still_correct() `test {
+  o := make_maybe(5);
+  assert(o!() == 6, "bound make_maybe unwrap");
+}
+
+// Discarded call returning a *captureless* optional closure — tag is set but the
+// env pointer is null. Exercises the Signature arm's `isNull == true` branch
+// (env-free skip), which the capturing/none discards above never reach.
+make_maybe_captureless()(() -> int)? {
+  return || -> 99;
+}
+t1234_discard_captureless_call() `test {
+  make_maybe_captureless();
+}
+
+// A discarded optional-closure *field* read (`h.f;`) is a MemberExpr place — a
+// borrow, not an owned temp. isBorrowingPlaceExpr must skip it so the field's
+// owner drop stays the sole free; else this double-frees the env. Reusing the
+// field afterward confirms the value survived the discard.
+type ClosureHolder {
+  (() -> int)? f;
+}
+t1234_discard_member_place() `test {
+  h := ClosureHolder(f: move || -> 21);
+  h.f;
+  assert(h.f!() == 21, "member usable after discard stmt");
+}
+
+// A discarded optional-closure *index* read (`v[0];`) is an IndexExpr place —
+// same borrow-not-own reasoning; the vector's element drop is the sole free.
+t1234_discard_index_place() `test {
+  (() -> int)?[] v = [];
+  v.push(move || -> 33);
+  v[0];
+  assert(v[0]!() == 33, "index usable after discard stmt");
+}
+
+// Parenthesized bound optional-closure local (`(o);`) — isBorrowingPlaceExpr
+// peels the ParenExpr down to the IdentExpr and skips it as a borrow.
+t1234_discard_paren_place() `test {
+  o := make_maybe(5);
+  (o);
+  assert(o!() == 6, "paren local usable after discard stmt");
+}
+
+// Discarded optional-closure call whose closure captures a *droppable* value
+// (a string). Exercises emitEnvDropOrFree's `env.deep_drop` runtime branch: the
+// synthesized env drop fn must drop the captured string AND free the env struct.
+// The earlier discards capture only an int (no droppable captures → the
+// `env.shallow_free` branch), so this is the only case that frees a captured
+// heap value on discard. Without the Signature arm this leaks 2 allocations
+// (env struct + captured string).
+make_maybe_str(string move s)(() -> int)? {
+  return move || -> s.len;
+}
+t1234_discard_capturing_droppable() `test {
+  make_maybe_str("cap" + "tured");
+}
+
+// Discarded optional-closure call inside a monomorphized generic function.
+// c.typeSubst is active here, so dropDiscardedOptional must run
+// types.Substitute over the `(() -> T)?` elem (T -> int) before the Signature
+// arm's isSig check fires — otherwise the concrete signature is never
+// recognized and the env leaks in the mono body.
+identity_maybe[T]((() -> T) move f)(() -> T)? {
+  return f;
+}
+run_discard[T]((() -> T) move f) {
+  identity_maybe[T](move f);
+}
+t1234_discard_in_generic_mono() `test {
+  x := 3;
+  run_discard[int](move || -> x + 1);
+}

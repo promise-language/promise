@@ -13943,6 +13943,44 @@ func TestUnwrapLocalOptionalClosure(t *testing.T) {
 	assertContains(t, ir, "closure.env.free")
 }
 
+// T1234: a discarded call returning an optional closure `(() -> int)?` must drop
+// its heap env. The result type is Optional(Signature); dropDiscardedOptional's
+// Signature arm branches on the has-value tag, extracts the env pointer, and
+// deep-drops it (env.deep_drop) when present. Without this the env leaked.
+func TestDiscardOptionalClosureCallDropsEnv(t *testing.T) {
+	ir := generateIR(t, `
+		make_maybe(int x)(() -> int)? {
+			return move || -> x + 1;
+		}
+		main() {
+			make_maybe(5);
+		}
+	`)
+	// The Signature arm fires: tag branch + presence-guarded env free.
+	assertContains(t, ir, "discard.drop")
+	assertContains(t, ir, "discard.env.free")
+	// The env is deep-dropped (captured value + struct freed), not merely leaked.
+	assertContains(t, ir, "env.deep_drop")
+}
+
+// T1234: discarding a *place* expression that reads an optional closure (`o;`) is
+// a borrow — the binding owns and drops the env at scope exit. isBorrowingPlaceExpr
+// must skip the discard-drop path here, else the env is freed twice. Verify no
+// discard-drop blocks are emitted for the bare ident discard (the value is still
+// dropped once, via its ordinary scope-exit binding drop).
+func TestDiscardBoundOptionalClosurePlaceSkipsDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(() -> int)? o = || -> 42;
+			o;
+		}
+	`)
+	// discard.env.free is unique to dropDiscardedOptional's Signature arm; the only
+	// optional-closure discard here is the bare `o;` place, so its absence proves the
+	// place-skip fired (the env is still freed once via o's scope-exit binding drop).
+	assertNotContains(t, ir, "discard.env.free")
+}
+
 // T0741/T0813: dup-ing a closure-containing enum aggregate must NOT shallow-copy
 // the closure env (that would alias one env between two droppable owners →
 // double-free). emitVariantFieldDup's Signature case nulls the cloned variant's

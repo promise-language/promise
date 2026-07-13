@@ -4969,11 +4969,49 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 	if !ok {
 		return
 	}
+	// T1234: only drop a discarded optional that is an owned statement temp. A
+	// discarded *place* expression (bare `o;`, `obj.f;`, `arr[i];`) merely reads
+	// (borrows) the inner value — the place's own binding/owner drops it, so
+	// dropping it here double-frees (segfault for a capturing closure env whose
+	// binding also frees it; use-after-free if the local is used again). A `move`
+	// out of a place is a MoveExpr, not a bare place, so it still drops here (and
+	// the move site clears the source's drop flag). Mirrors trackHeapUserTypeResult's
+	// ident/member-source skips and dropDiscardedHeapType's CallExpr-only guard.
+	if isBorrowingPlaceExpr(expr) {
+		return
+	}
 	elem := opt.Elem()
 	if c.typeSubst != nil {
 		elem = types.Substitute(elem, c.typeSubst)
 	}
 	innerNamed := extractNamed(elem)
+
+	// T1234: Optional closure `(() -> T)?`. The inner value is a closure fat
+	// pointer {fn_ptr, env_ptr}; extractNamed on a function type is nil, so the
+	// dropFunc switch below never fires and the heap env leaks on discard. Mirror
+	// dropDiscardedAutoPropagate's signature arm: when the tag is set, extract the
+	// env pointer and drop-or-free it (presence-guarded — a captureless closure
+	// has a null env; a `none` result skips the whole block via the tag branch).
+	if _, isSig := elem.(*types.Signature); isSig {
+		tag := c.block.NewExtractValue(result, 0)
+		dropBlock := c.newBlock("discard.drop")
+		skipBlock := c.newBlock("discard.skip")
+		c.block.NewCondBr(tag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		innerClosure := c.block.NewExtractValue(result, 1)
+		envPtr := c.block.NewExtractValue(innerClosure, 1)
+		isNull := c.block.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+		freeBlock := c.newBlock("discard.env.free")
+		c.block.NewCondBr(isNull, skipBlock, freeBlock)
+
+		c.block = freeBlock
+		c.emitEnvDropOrFree(envPtr)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+		return
+	}
 
 	// Resolve the drop function for the inner type.
 	var dropFunc *ir.Func

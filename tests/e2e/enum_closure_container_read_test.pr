@@ -1,7 +1,27 @@
-// T1259: reading an enum whose variant carries a closure field out of a by-value
-// container (Vector/Map), destructuring the variant, and invoking the closure must
-// keep the closure env intact (no deep-copy zeroing it, no double-free). Sibling of
-// T1230 (struct closure field) on the enum path.
+// T1259/T1264: an enum variant that carries a closure — either a DIRECT closure
+// field (`E.Cb(() -> int f)`, T1259) or a *value-copying container of closures*
+// (`E.Fns(Vector[() -> int] fs)`, T1264) — stored into a by-value container
+// (Map/Vector), read back, destructured, and the closure invoked.
+//
+// The enum's `[]` read from an aliasing Map deep-copies the value; a closure
+// nested in a variant field cannot be deep-cloned (the captured env frame is
+// opaque, T0813), so dupVector's element-clone path zeroes each closure's env →
+// null {fn,env} fat pointer → SEGV at 0x0 on invoke. The fix widens
+// matchDupFieldSafe to consult FirstFieldNestedClosureDeep (single source of
+// truth with typeNeedsMatchDup and the two borrow gates), so the enum stays
+// dup-un-safe → the Map read leaves the variant data ALIASED (env intact, map
+// sole owner, single drop). The destructured container binding is marked
+// match-borrowed so a downstream `hs := gs` var-decl borrows instead of
+// registering an owning Vector/env-free drop (which would double-free the shared
+// env against the enum's own drop). Refcounted handles (Ref/Weak) stay opaque, so
+// `E.R(Ref[() -> int] r)` still dups correctly.
+// See matchDupFieldSafe / bindEnumDestructure (codegen/expr.go),
+// identBorrowsMatchBorrowedClosure / maybeRegisterEnvFree (codegen/stmt.go),
+// FirstFieldNestedClosureDeep (sema/clone.go).
+// ===========================================================================
+// T1259: DIRECT closure variant field — read from a by-value container,
+// destructured, invoked. Keeps the closure env intact (no deep-copy zeroing it,
+// no double-free). Sibling of T1230 (struct closure field) on the enum path.
 enum Cb {
   Call(() -> int f), Empty,
 }
@@ -152,4 +172,341 @@ enum_closure_moved_capture() `test {
     },
   }
   assert(r == 6, "enum-closure with a moved string capture from a vector");
+}
+
+// ===========================================================================
+// T1264: value-copying container of closures in a variant field.
+enum E {
+  Fns(Vector[() -> int] fs), Empty,
+}
+enum ECb {
+  Cb(() -> int f), None,
+}
+
+// Primary repro (direct closure variant) — closure variant field read from a Map,
+// destructured, invoked.
+direct_closure_variant_from_map() `test {
+  x := 5;
+  m := Map[int, ECb]();
+  m[0] = ECb.Cb(f: || -> x);
+  e := m[0]!;
+  r := 0;
+  match e {
+    ECb.Cb(g) => {
+      r = g();
+    },
+    ECb.None => {
+      r = -1;
+    },
+  }
+  assert(r == 5, "direct closure enum variant from map");
+}
+
+// `hs := gs` intermediate on the direct-closure binding — the re-bound local must
+// borrow (not own the env) so the map's drop frees it exactly once.
+direct_closure_variant_rebind() `test {
+  x := 9;
+  m := Map[int, ECb]();
+  m[0] = ECb.Cb(f: || -> x);
+  e := m[0]!;
+  r := 0;
+  match e {
+    ECb.Cb(g) => {
+      h := g;
+      r = h();
+    },
+    ECb.None => {
+      r = -1;
+    },
+  }
+  assert(r == 9, "direct closure rebind borrows");
+}
+
+// Primary repro — Vector-of-closures variant read from a Map, destructured,
+// re-bound (`hs := gs`), elements invoked.
+vec_of_closures_variant_from_map() `test {
+  x := 5;
+  m := Map[int, E]();
+  m[0] = E.Fns(fs: [|| -> x, || -> x + 1]);
+  e := m[0]!;
+  r := 0;
+  match e {
+    E.Fns(gs) => {
+      hs := gs;
+      r = hs[0]() + hs[1]();
+    },
+    E.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 11, "vector-of-closures enum variant from map");
+}
+
+// Direct invoke on the match binding (no intermediate) — the destructured `gs`
+// aliases the enum's variant data; invoking through it must find a live env.
+vec_of_closures_variant_direct_invoke() `test {
+  x := 3;
+  m := Map[int, E]();
+  m[0] = E.Fns(fs: [|| -> x, || -> x * 2]);
+  e := m[0]!;
+  r := 0;
+  match e {
+    E.Fns(gs) => {
+      r = gs[0]() + gs[1]();
+    },
+    E.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 9, "invoke directly on match binding");
+}
+
+// Transitive `js := hs := gs` — the borrow mark must propagate through both
+// re-binds so neither local registers an owning container drop.
+vec_of_closures_variant_transitive_rebind() `test {
+  x := 4;
+  m := Map[int, E]();
+  m[0] = E.Fns(fs: [|| -> x]);
+  e := m[0]!;
+  r := 0;
+  match e {
+    E.Fns(gs) => {
+      hs := gs;
+      js := hs;
+      r = js[0]();
+    },
+    E.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 4, "transitive rebind propagates borrow");
+}
+
+// Typed var-decl re-bind form: `Vector[() -> int] hs = gs`. Exercises the
+// genTypedVarDecl gate (distinct from the inferred `hs := gs` arm above).
+vec_of_closures_variant_typed_rebind() `test {
+  x := 6;
+  m := Map[int, E]();
+  m[0] = E.Fns(fs: [|| -> x]);
+  e := m[0]!;
+  r := 0;
+  match e {
+    E.Fns(gs) => {
+      Vector[() -> int] hs = gs;
+      r = hs[0]();
+    },
+    E.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 6, "typed var-decl rebind borrows");
+}
+
+// Read the enum out of a VECTOR (not a Map) — the same aliasing-read borrow path.
+vec_of_closures_variant_from_vector() `test {
+  x := 8;
+  v := [E.Fns(fs: [|| -> x])];
+  e := v[0];
+  r := 0;
+  match e {
+    E.Fns(gs) => {
+      r = gs[0]();
+    },
+    E.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 8, "vector-of-closures enum variant from vector");
+}
+
+// Double-read of the same Map slot — each read is a fresh borrow; the map keeps
+// sole ownership and frees the shared env exactly once at scope exit (proves no
+// double-free / no leak).
+vec_of_closures_variant_double_read() `test {
+  x := 5;
+  m := Map[int, E]();
+  m[0] = E.Fns(fs: [|| -> x]);
+  a := m[0]!;
+  b := m[0]!;
+  r := 0;
+  match a {
+    E.Fns(gs) => {
+      r = r + gs[0]();
+    },
+    E.Empty => {
+    },
+  }
+  match b {
+    E.Fns(gs) => {
+      r = r + gs[0]();
+    },
+    E.Empty => {
+    },
+  }
+  assert(r == 10, "two reads, one owner");
+}
+
+// Loop-reads leak guard: 100 reads → one owner, no leak. The borrow's
+// container/env-free drop binding must be suppressed on every read.
+vec_of_closures_variant_loop_reads() `test {
+  x := 3;
+  m := Map[int, E]();
+  m[0] = E.Fns(fs: [|| -> x]);
+  total := 0;
+  i := 0;
+  while i < 100 {
+    e := m[0]!;
+    match e {
+      E.Fns(gs) => {
+        hs := gs;
+        total = total + hs[0]();
+      },
+      E.Empty => {
+      },
+    }
+    i = i + 1;
+  }
+  assert(total == 300, "100 borrows, one owner, no leak");
+}
+
+// move-captured HEAP (string) closure — exercises real env-drop (the env owns a
+// heap string) against the zero-leak policy. The map's own drop must free the
+// captured string exactly once; the borrow must not double-free it.
+enum ES {
+  Fns(Vector[() -> string] fs), Empty,
+}
+vec_of_string_closures_variant_from_map() `test {
+  s := "hello";
+  m := Map[int, ES]();
+  m[0] = ES.Fns(fs: [move || -> s]);
+  e := m[0]!;
+  r := "";
+  match e {
+    ES.Fns(gs) => {
+      hs := gs;
+      r = hs[0]();
+    },
+    ES.Empty => {
+      r = "none";
+    },
+  }
+  assert(r == "hello", "move-captured heap closure env survives borrow");
+}
+
+// Map-of-closures variant field (TypVmap value-copying origin) — the variant
+// carries `map[int, () -> int]`, read back, inner closure invoked.
+enum EM {
+  Fns(map[int, () -> int] fns), Empty,
+}
+map_of_closures_variant_from_map() `test {
+  x := 12;
+  fns := Map[int, () -> int]();
+  fns[0] = || -> x;
+  m := Map[int, EM]();
+  m[0] = EM.Fns(fns: move fns);
+  e := m[0]!;
+  r := 0;
+  match e {
+    EM.Fns(gs) => {
+      r = gs[0]!();
+    },
+    EM.Empty => {
+      r = -1;
+    },
+  }
+  assert(r == 12, "map-of-closures enum variant from map");
+}
+
+// ---------------------------------------------------------------------------
+// Regression guards — the Deep predicate must NOT over-suppress.
+
+// Refcounted handle in the variant (`E.R(Ref[int] r)`): FirstFieldNestedClosureDeep
+// keeps Ref opaque, so the enum stays dup-safe and the read is an owned
+// refcount-increment copy — the borrow gate must NOT fire. (A Ref of a closure is
+// not constructible — closures are not sendable/sharable — so Ref[int] exercises
+// the same opaque-handle path.)
+enum ER {
+  R(Ref[int] r), None,
+}
+ref_variant_still_dups() `test {
+  m := Map[int, ER]();
+  m[0] = ER.R(r: Ref[int](42));
+  e := m[0]!;
+  r := 0;
+  match e {
+    ER.R(rc) => {
+      r = rc.borrow;
+    },
+    ER.None => {
+      r = -1;
+    },
+  }
+  assert(r == 42, "ref variant stays dup-safe");
+  again := m[0]!;
+  match again {
+    ER.R(rc) => {
+      assert(rc.borrow == 42, "second ref read (refcount dup)");
+    },
+    ER.None => {
+    },
+  }
+}
+
+// Generic enum + generic enclosing helper: `Box[T].Fns(Vector[() -> T] fs)` read
+// from a `Map[int, Box[int]]` inside a monomorphized `read_box[int]` body. The
+// re-bind `hs := gs` is processed with `c.typeSubst` active, so
+// identBorrowsMatchBorrowedClosure must substitute `Vector[() -> T]` → concrete
+// `Vector[() -> int]` before the Deep predicate — otherwise the borrow gate mis-
+// fires (leak / double-free) or the enum dups and zeroes the env (SEGV). Exercises
+// the typeSubst branch that no non-generic case above reaches.
+enum Box[T] {
+  Fns(Vector[() -> T] fs), Empty,
+}
+read_box[T](Map[int, Box[T]] m, int key, T fallback) T {
+  e := m[key]!;
+  r := fallback;
+  match e {
+    Box[T].Fns(gs) => {
+      hs := gs;
+      r = hs[0]();
+    },
+    Box[T].Empty => {
+    },
+  }
+  return r;
+}
+generic_enum_closure_container_from_map() `test {
+  x := 7;
+  m := Map[int, Box[int]]();
+  m[0] = Box[int].Fns(fs: [|| -> x]);
+  assert(read_box[int](m, 0, 0) == 7, "generic enum + generic fn closure container");
+}
+
+// Non-closure container in the variant (`E.Words(Vector[string] ws)`): the Deep
+// predicate reaches `string` (no closure) → nil → the enum still dups, so the read
+// is an OWNED deep copy. Mutating the copy must not affect the map's stored value.
+enum EW {
+  Words(Vector[string] ws), Empty,
+}
+words_variant_owned_copy() `test {
+  m := Map[int, EW]();
+  m[0] = EW.Words(ws: ["a", "b", "c"]);
+  e := m[0]!;
+  match e {
+    EW.Words(ws) => {
+      hs := ws;
+      hs.push("d");
+      assert(hs.len == 4, "owned copy mutated");
+    },
+    EW.Empty => {
+    },
+  }
+  again := m[0]!;
+  match again {
+    EW.Words(ws) => {
+      assert(ws.len == 3, "map value unchanged (owned copy)");
+    },
+    EW.Empty => {
+    },
+  }
 }

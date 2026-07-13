@@ -548,6 +548,50 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 	return true
 }
 
+// identBorrowsMatchBorrowedClosure reports whether a var-decl `hs := gs` re-binds
+// an ident (`gs`) recorded in matchBorrowedIdents as a match-borrowed alias whose
+// type transitively nests a closure — either a DIRECT closure (`E.Cb(() -> int f)`,
+// T1259) or a value-copying container of closures (`E.Fns(Vector[() -> int] fs)`,
+// T1264). Such a binding is a borrow: the shared env is owned by the enum's variant
+// data (freed by the enum's own drop), so the new local must NOT register an owning
+// container/env-free drop — that would double-free. isClosureAggregateBorrow does
+// not peel ident sources, so a re-bound match-borrowed ident needs this dedicated
+// gate (used by the var-decl arms for the container path and by maybeRegisterEnvFree
+// for the Signature path). The Deep predicate keeps refcounted handles opaque, so
+// `hs := gs` off a `Ref[...]` binding is unaffected.
+func (c *Compiler) identBorrowsMatchBorrowedClosure(valueExpr ast.Expr, typ types.Type) bool {
+	id, ok := unwrapDestructureParens(valueExpr).(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	if c.matchBorrowedIdents == nil || !c.matchBorrowedIdents[id.Name] {
+		return false
+	}
+	rt := typ
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	return sema.FirstFieldNestedClosureDeep(rt) != nil
+}
+
+// markMatchBorrowedRebind handles a var-decl `hs := gs` whose source `gs` is a
+// match-borrowed alias of a closure nested in an enum variant (T1259 direct
+// closure / T1264 value-copying container of closures). The new local borrows —
+// clear its owning container/env-free drop (a no-op via the i1 flag) so the
+// shared buffer/envs are freed exactly once (by the enum's own drop), and
+// propagate the borrow mark so a further `js := hs` also borrows. Shared by
+// genTypedVarDecl and genInferredVarDecl so the two arms stay in lockstep.
+func (c *Compiler) markMatchBorrowedRebind(name string, valueExpr ast.Expr, typ types.Type) {
+	if !c.identBorrowsMatchBorrowedClosure(valueExpr, typ) {
+		return
+	}
+	c.clearDropFlag(name)
+	if c.matchBorrowedIdents == nil {
+		c.matchBorrowedIdents = make(map[string]bool)
+	}
+	c.matchBorrowedIdents[name] = true
+}
+
 // indexTargetIsAliasingContainer reports whether e is an IndexExpr whose target is
 // a std aliasing container (Map or Vector) — one whose `[]` returns the stored
 // element by value, aliasing internal storage, rather than a freshly-constructed
@@ -1712,6 +1756,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if c.isClosureAggregateBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
+	// T1259/T1264: `hs := gs` where `gs` is a match-borrowed alias of a closure
+	// nested in an enum variant (direct closure field or value-copying container of
+	// closures). The new local borrows — see markMatchBorrowedRebind.
+	c.markMatchBorrowedRebind(s.Name, s.Value, dropType)
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType, s.Value)
 }
 
@@ -2055,6 +2103,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if c.isClosureAggregateBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
+	// T1259/T1264: `hs := gs` where `gs` is a match-borrowed alias of a closure
+	// nested in an enum variant (direct closure field or value-copying container of
+	// closures). The new local borrows — see markMatchBorrowedRebind.
+	c.markMatchBorrowedRebind(s.Name, s.Value, typ)
 	c.maybeRegisterEnvFree(s.Name, alloca, typ, s.Value)
 }
 
@@ -7461,15 +7513,14 @@ func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, t
 	if c.isClosureAggregateBorrow(valueExpr) {
 		return
 	}
-	// T1259: `h := g` where g is a closure variant-field binding from a match on a
-	// droppable enum (bindEnumDestructure marked it in matchBorrowedIdents). The
-	// binding aliases the enum's heap env, which the enum's own drop frees — the
-	// local must borrow, not own, else scope exit double-frees the env against that
-	// drop (SEGV). A plain IdentExpr source is not caught by isClosureAggregateBorrow
-	// (which only peels field/index reads), so consult the borrow set here. Placed
-	// after the field/index borrow check so ordinary owned-closure moves are
-	// unaffected — only match-borrowed closure idents are suppressed.
-	if id, ok := valueExpr.(*ast.IdentExpr); ok && c.matchBorrowedIdents != nil && c.matchBorrowedIdents[id.Name] {
+	// T1259: `h := g` where `g` is a match-borrowed closure alias destructured from
+	// an enum variant (`E.Cb(() -> int f)`) whose env the enum's own drop frees. The
+	// re-bound local borrows — registering an owning env-free here would double-free
+	// the shared env against the enum's drop. isClosureAggregateBorrow does not peel
+	// ident sources, so consult the shared match-borrow gate (single source of truth
+	// with the container var-decl arms). typ is Signature-gated above, so the Deep
+	// predicate inside always holds for a genuine closure ident.
+	if c.identBorrowsMatchBorrowedClosure(valueExpr, typ) {
 		return
 	}
 	dropFlag := c.createEntryAlloca(irtypes.I1)

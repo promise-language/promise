@@ -9217,19 +9217,16 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// the synth enum drop's Optional/Array walk.
 		if enumHasDrop {
 			c.markMatchBorrowedBinding(binding, resolved)
-			// T1259: a closure-typed variant field (`E.Cb(() -> int f)`) aliases the
-			// enum's heap env — which the enum's drop frees (the container element
-			// walk, the T1119 spilled subject, or the owning source local). A closure
-			// cannot be dup'd (not Cloneable), so matchFieldNeedsDup returned false and
-			// the binding above is a shallow copy of the fat pointer, NOT an owner.
-			// Mark it match-borrowed so a downstream `h := g` var-decl (maybeRegisterEnvFree)
-			// suppresses the owning env-free binding — otherwise both `h` and the enum's
-			// drop free the same env (double-free → SEGV). Sibling of the T1230 struct-
-			// field borrow (isClosureAggregateBorrow); the enum destructure reaches the
-			// binding through this path instead of a field read. FirstFieldNestedClosure
-			// returns the signature for a direct closure and keeps refcounted handles
-			// (Ref/Weak/...) opaque, so sound refcounted nesting is not misclassified.
-			if sema.FirstFieldNestedClosure(resolved) != nil {
+			// T1259/T1264: a DIRECT closure field OR a value-copying container of
+			// closures aliases the enum's heap env (freed by the enum's own drop);
+			// the env can't be deep-cloned, so the binding is a borrow — else a
+			// downstream `hs := gs` var-decl would register an owning Vector/env-free
+			// drop for `hs` and double-free the shared env against the enum's drop.
+			// markMatchBorrowedBinding only covers Optional/Array; the Deep predicate
+			// catches the container case (shallow FirstFieldNestedClosure treats a
+			// top-level Vector/Map/Set as opaque) while keeping refcounted handles
+			// opaque. Arm-scoped: armBorrowedSnapshot reverts it at arm exit.
+			if sema.FirstFieldNestedClosureDeep(resolved) != nil {
 				if c.matchBorrowedIdents == nil {
 					c.matchBorrowedIdents = make(map[string]bool)
 				}
@@ -9472,25 +9469,19 @@ func (c *Compiler) enumMatchDupSafe(resolved types.Type, seen map[*types.Enum]bo
 // matchDupFieldSafe reports whether a single variant-field type can be dup'd by
 // emitVariantFieldDup without invoking clone()-based container copy (T1110).
 func (c *Compiler) matchDupFieldSafe(fType types.Type, seen map[*types.Enum]bool) bool {
-	// T1259: a DIRECT closure-typed variant field (`E.Cb(() -> int f)`) is NOT
-	// shallow-dup-safe. The dupEnumElementInPlace path routes it through
-	// emitVariantFieldDup, whose *types.Signature case NULLS the cloned closure slot
-	// (the captured env is opaque and can't be deep-copied, T0813). So a "dup" of a
-	// closure-nesting enum hands back an uncallable `{fn, null}` fat pointer → SEGV
-	// on invoke (the map half of this bug: `Map.[]`'s internal match-destructure dups
-	// V=E). Report un-safe so enumMatchDupSafe(E) is false, matchFieldNeedsDup(E) is
-	// false, and the read stays an ALIAS (borrow) with the env intact — the container
-	// keeps sole ownership.
-	//
-	// NOTE: this only covers a DIRECT closure variant field. A closure nested inside a
-	// value-copying container variant field (`E.Fns(Vector[() -> int] fs)`) is NOT
-	// caught here — fType is the Vector, and the Vector branch below returns dup-safe
-	// because fieldTypeNeedsDrop(*types.Signature) is false (closures aren't Named/enum,
-	// so it can't see the env). Fixing that needs both this dup gate AND a borrow marker
-	// on the container-typed binding's var-decl re-read (the Signature-only
-	// maybeRegisterEnvFree path here does not apply to a Vector local) — the enum sibling
-	// of T1262, tracked as T1264.
-	if _, ok := fType.(*types.Signature); ok {
+	// T1259/T1264: a variant field that transitively nests a closure — through a
+	// DIRECT closure field (*types.Signature) OR a value-copying container
+	// (Vector/Map/Set of closures) — is NOT dup-safe. emitVariantFieldDup /
+	// dupVector's element-clone path zeroes each closure's opaque env (T0813) →
+	// null {fn,env} → SEGV on invoke. Consult the same FirstFieldNestedClosureDeep
+	// predicate as typeNeedsMatchDup and the two borrow gates
+	// (isClosureAggregateBorrow, ownership closureAggregateBorrowSource) — single
+	// source of truth. The Deep variant treats fType as a nested field so a
+	// top-level container-of-closures is recursed into; refcounted handles
+	// (Ref/Weak/Channel/...) stay opaque there, so Map[K, Ref[() -> int]] etc. are
+	// not over-suppressed. FirstFieldNestedClosureDeep(Signature) returns the
+	// signature itself, subsuming the direct-closure case.
+	if sema.FirstFieldNestedClosureDeep(fType) != nil {
 		return false
 	}
 	if en := extractEnum(fType); en != nil {

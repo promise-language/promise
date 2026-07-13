@@ -1,0 +1,229 @@
+// T1269: A function that takes a BORROWED heap param (bare `T[]`/`string`/`map`,
+// passed by value; T0998) and returns a handle aliasing it produces a double-free
+// when the result is moved into owned storage or discarded — the caller's binding
+// and the escaped/temp owner both run the destructor on one allocation. The
+// return-alias safety net (emitReturnAliasCheckSubst) only guarded owned-local
+// args with a drop flag; a borrowed param has none. The fix clones the RESULT iff
+// it aliases a borrow at runtime, leaving the caller's borrow the sole owner.
+//
+// Every assertion below would crash (`fatal: invalid free` / SEGV) or leak without
+// the fix. Leak enforcement (zero-tolerance) covers the over-clone direction.
+type Money {
+  int cents;
+}
+
+type Bag {
+  Money[] items;
+}
+
+type StrBox {
+  string s;
+}
+
+type MapBox {
+  map[int, int] m;
+}
+
+// Borrow param, returns an aliasing handle.
+ident_vec(Money[] v) Money[] {
+  return v;
+}
+
+ident_str(string v) string {
+  return v;
+}
+
+ident_map(map[int, int] m) map[int, int] {
+  return m;
+}
+
+// Fresh-value control: returns an independent vector, never an alias of the param.
+fresh_vec(Money[] xs) Money[] {
+  return[Money(cents: 42)];
+}
+
+// --- Move the borrow-aliasing result into owned storage (the item's repro). ---
+
+mk_bag(Money[] xs) Bag {
+  Money[] s = ident_vec(xs);
+  return Bag(items: move s);
+}
+
+move_into_owned_storage() `test {
+  Money[] v = [Money(cents: 5), Money(cents: 7)];
+  Bag b = mk_bag(v);
+  // Both owners hold correct, independent data.
+  assert(b.items.len == 2, "bag len");
+  assert(v.len == 2, "caller len");
+  assert(b.items[0].cents == 5, "bag[0]");
+  assert(b.items[1].cents == 7, "bag[1]");
+  assert(v[0].cents == 5, "caller[0]");
+  // Mutate the caller's vector — the struct's copy must be unaffected, proving
+  // the two are independent allocations (a shared buffer would alias here).
+  v.push(Money(cents: 9));
+  assert(v.len == 3, "caller len after push");
+  assert(b.items.len == 2, "bag len unaffected by caller push");
+}
+
+// --- Fresh-value control: the clone must NOT fire; result is already distinct. ---
+
+mk_fresh(Money[] xs) Bag {
+  Money[] s = fresh_vec(xs);
+  return Bag(items: move s);
+}
+
+fresh_value_control() `test {
+  Money[] v = [Money(cents: 1)];
+  Bag b = mk_fresh(v);
+  assert(b.items.len == 1, "fresh bag len");
+  assert(b.items[0].cents == 42, "fresh bag value");
+  // Caller's vector is untouched and still owns its own buffer.
+  assert(v.len == 1, "caller len after fresh");
+  assert(v[0].cents == 1, "caller value after fresh");
+}
+
+// --- Discard variant: `ident(xs).len` — the temp result aliases the borrow. ---
+
+probe_len(Money[] xs) int {
+  return ident_vec(xs).len;
+}
+
+discard_variant() `test {
+  Money[] v = [Money(cents: 1), Money(cents: 2), Money(cents: 3)];
+  int n = probe_len(v);
+  assert(n == 3, "probed len");
+  // The caller's vector survives the discarded aliasing temp.
+  assert(v.len == 3, "caller len after discard");
+  assert(v[0].cents == 1, "caller[0] after discard");
+  assert(v[2].cents == 3, "caller[2] after discard");
+}
+
+// --- Direct passthrough: bind the aliasing result at the caller, use both. ---
+
+passthrough(Money[] xs) Money[] {
+  return ident_vec(xs);
+}
+
+direct_passthrough() `test {
+  Money[] v = [Money(cents: 3), Money(cents: 4)];
+  Money[] r = passthrough(v);
+  assert(r.len == 2, "passthrough len");
+  assert(v.len == 2, "caller len after passthrough");
+  assert(r[0].cents == 3, "passthrough[0]");
+  assert(v[1].cents == 4, "caller[1] after passthrough");
+  r.push(Money(cents: 5));
+  assert(r.len == 3, "passthrough len after push");
+  assert(v.len == 2, "caller len unaffected by passthrough push");
+}
+
+// --- String element/return variant — exercises dupOwnedReturnValue's string arm.
+//     Use a heap string (runtime concat), not a .rodata literal, so a real
+//     double-free would occur without the clone. ---
+
+mk_strbox(string x) StrBox {
+  string s = ident_str(x);
+  return StrBox(s: move s);
+}
+
+string_borrow_alias() `test {
+  string original = "hello world " + "heap allocated";
+  StrBox sb = mk_strbox(original);
+  assert(sb.s == "hello world heap allocated", "strbox value");
+  // The caller's heap string is independent and intact.
+  assert(original == "hello world heap allocated", "caller string intact");
+}
+
+// --- Plain heap-user-type variant — the result is a bare heap `Node` value
+//     (not a container), so the clone routes through dupOwnedReturnValue's
+//     maybeDupPushElement→dupHeapValue arm rather than the vector/map arm.
+//     Verified to SEGV without the fix (borrow param + owned result aliasing it,
+//     moved into a struct field → double-free of the shared instance). ---
+
+type Node {
+  Money[] data;
+}
+
+type Holder {
+  Node n;
+}
+
+ident_node(Node n) Node {
+  return n;
+}
+
+mk_holder(Node n) Holder {
+  Node s = ident_node(n);
+  return Holder(n: move s);
+}
+
+heap_user_type_borrow_alias() `test {
+  Node original = Node(data: [Money(cents: 1), Money(cents: 2)]);
+  Holder h = mk_holder(original);
+  assert(original.data.len == 2, "caller node intact");
+  assert(h.n.data.len == 2, "holder node len");
+  // Mutate the caller's node's vector — the struct's copy must be independent.
+  original.data.push(Money(cents: 3));
+  assert(original.data.len == 3, "caller node after push");
+  assert(h.n.data.len == 2, "holder node unaffected by caller push");
+}
+
+// --- Two borrowed params, result aliases EITHER — exercises the multi-arg OR
+//     that combines each borrow arg's `retPtr == argPtr` check into one guard
+//     (a single-param call needs no OR). `pick` returns whichever borrow the
+//     branch selected; both callers' buffers must stay sole-owned. ---
+
+pick(Money[] a, Money[] b, bool which) Money[] {
+  if which {
+    return a;
+  }
+  return b;
+}
+
+mk_pick(Money[] x, Money[] y, bool which) Bag {
+  Money[] s = pick(x, y, which);
+  return Bag(items: move s);
+}
+
+two_borrow_params_alias_either() `test {
+  Money[] p = [Money(cents: 1), Money(cents: 2)];
+  Money[] q = [Money(cents: 3)];
+  // Select the first borrow.
+  Bag b1 = mk_pick(p, q, true);
+  assert(b1.items.len == 2, "picked p len");
+  assert(p.len == 2, "p intact");
+  assert(q.len == 1, "q intact");
+  p.push(Money(cents: 9));
+  assert(p.len == 3, "p after push");
+  assert(b1.items.len == 2, "bag unaffected by p push");
+  // Select the second borrow — the OR's other disjunct.
+  Money[] r = [Money(cents: 4), Money(cents: 5), Money(cents: 6)];
+  Money[] t = [Money(cents: 7)];
+  Bag b2 = mk_pick(r, t, false);
+  assert(b2.items.len == 1, "picked t len");
+  assert(r.len == 3, "r intact");
+  assert(t.len == 1, "t intact");
+  t.push(Money(cents: 8));
+  assert(t.len == 2, "t after push");
+  assert(b2.items.len == 1, "bag2 unaffected by t push");
+}
+
+// --- Map variant — exercises dupOwnedReturnValue's heap-user-type clone arm. ---
+
+mk_mapbox(map[int, int] src) MapBox {
+  map[int, int] s = ident_map(src);
+  return MapBox(m: move s);
+}
+
+map_borrow_alias() `test {
+  map[int, int] m = map[int, int]();
+  m[1] = 10;
+  m[2] = 20;
+  MapBox mb = mk_mapbox(m);
+  assert(mb.m.len == 2, "mapbox len");
+  assert(mb.m[1]! == 10, "mapbox[1]");
+  assert(mb.m[2]! == 20, "mapbox[2]");
+  // The caller's map is independent — mutating it does not touch the struct copy.
+  m[3] = 30;
+  assert(m.len == 3, "caller map len after insert");
+  assert(mb.m.len == 2, "mapbox len unaffected by caller insert");
+}

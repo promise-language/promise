@@ -2558,20 +2558,26 @@ func isTypeDroppable(typ types.Type) bool {
 // Without this check, identity(v) where v is a heap string causes SIGABRT:
 // the caller has drop flags for both v and the return value s, but they point
 // to the same memory — both get freed at scope exit.
-func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callExpr ast.Expr) {
-	c.emitReturnAliasCheckSubst(result, sig, args, argVals, nil, callExpr)
+func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callExpr ast.Expr) value.Value {
+	return c.emitReturnAliasCheckSubst(result, sig, args, argVals, nil, callExpr)
 }
 
 // emitReturnAliasCheckSubst is the generic-aware variant. T0418: callSubst maps
 // the callee's TypeParams to the call's concrete type args so droppability
 // checks see through TypeParams (e.g., T? → _Box? → droppable).
-func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callSubst map[*types.TypeParam]types.Type, callExpr ast.Expr) {
+//
+// Returns the possibly-cloned result. T1269: when an arg is a borrowed param
+// (no drop flag) and the owned result aliases it at runtime, the result is
+// deep-cloned so the caller's borrow stays the sole owner of its buffer and the
+// escaping owned result frees an independent allocation. In every other path the
+// returned value is the unchanged input result.
+func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callSubst map[*types.TypeParam]types.Type, callExpr ast.Expr) value.Value {
 	if result == nil || sig == nil {
-		return
+		return result
 	}
 	retType := sig.Result()
 	if retType == nil {
-		return
+		return result
 	}
 	if callSubst != nil {
 		retType = types.Substitute(retType, callSubst)
@@ -2581,19 +2587,23 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 	}
 	// Only check for non-Copy return types that could alias.
 	if !isTypeDroppable(retType) {
-		return
+		return result
 	}
 	// A borrow return (`T&`/`T~`) is never dropped by the caller, so it can never
 	// cause an aliasing double-free — and clearing an arg's drop flag here would
 	// instead leak the arg (T0998: bare borrow params are passed by value).
 	switch retType.(type) {
 	case *types.SharedRef, *types.MutRef:
-		return
+		return result
 	}
 	// Skip failable returns — the raw result is {i1, value, err_ptr}, not the value itself.
 	if sig.CanError() {
-		return
+		return result
 	}
+
+	// T1269: arg pointers of borrowed (drop-flag-less) params the owned result may
+	// alias. Collected in the loop; the single guarded clone is emitted afterward.
+	var borrowAliasPtrs []value.Value
 
 	params := sig.Params()
 	for i, arg := range args {
@@ -2646,6 +2656,16 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 		if isIdent {
 			dropFlag, ok := c.dropFlags[ident.Name]
 			if !ok {
+				// T1269: the ident has no drop flag → it is a borrowed param (bare
+				// `T[]`/heap param, passed by value; T0998). The callee does not own
+				// the arg's buffer, but an owned result aliasing it that escapes into
+				// owned storage (`return C(xs: move s)`) or is discarded
+				// (`ident(xs).len`) would be freed by BOTH the caller's binding and
+				// the escaped/temp owner → double-free. Owned-source paths (drop
+				// flag present) are handled below; here we record the arg pointer and
+				// clone the RESULT after the loop iff it actually aliases at runtime,
+				// leaving the borrow owned solely by the caller.
+				borrowAliasPtrs = append(borrowAliasPtrs, argPtr)
 				continue
 			}
 
@@ -2756,6 +2776,59 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 			c.block = skipBlock
 		}
 	}
+
+	// T1269: a borrowed-param arg the owned result may alias. Deep-clone the result
+	// so the caller's borrow keeps sole ownership of its buffer and the escaping /
+	// discarded owned result frees an independent allocation. The clone fires ONLY
+	// when retPtr == argPtr at runtime, so a function that returns a fresh value
+	// (retPtr != argPtr) is untouched — no spurious clone, no leak, just pointer
+	// compares. Unlike the T1031 owned-local path (which clones into the SOURCE's
+	// storage and keeps the original as the binding), here the borrow must never be
+	// touched, so we clone the RESULT and hand that back — uniform for both the
+	// move-into-owned-storage and discard escape shapes.
+	if len(borrowAliasPtrs) > 0 && c.block != nil && c.block.Term == nil {
+		if retPtr := extractAliasPtr(c, result); retPtr != nil {
+			var aliases value.Value
+			for _, ap := range borrowAliasPtrs {
+				cmp := c.block.NewICmp(enum.IPredEQ, retPtr, ap)
+				if aliases == nil {
+					aliases = cmp
+				} else {
+					aliases = c.block.NewOr(aliases, cmp)
+				}
+			}
+			entryBlock := c.block
+			cloneBlock := c.newBlock("alias.borrow.clone")
+			contBlock := c.newBlock("alias.borrow.cont")
+			entryBlock.NewCondBr(aliases, cloneBlock, contBlock)
+
+			c.block = cloneBlock
+			dup, didDup := c.dupOwnedReturnValue(result, retType)
+			// dupOwnedReturnValue may split the block (null-check diamonds); the phi
+			// incoming for the clone path must use the block it actually left us in.
+			cloneEnd := c.block
+			cloneEnd.NewBr(contBlock)
+
+			c.block = contBlock
+			if didDup {
+				// The clone is NOT claimed as a temp: the dup helpers do not register
+				// temps, and `result` is only tracked downstream at the binding /
+				// discard site. Returning the phi lets that single tracking free the
+				// clone exactly once; the original borrow-aliasing value is discarded
+				// on the clone path and never tracked, so the caller's borrow remains
+				// the sole owner of the original buffer.
+				result = c.block.NewPhi(
+					ir.NewIncoming(result, entryBlock),
+					ir.NewIncoming(dup, cloneEnd),
+				)
+			}
+			// !didDup: no deep clone available for this droppable-but-non-clonable
+			// shape — fall through with the original result (current behavior, no
+			// regression versus today which also does nothing there).
+		}
+	}
+
+	return result
 }
 
 // clearDiscardedAliasTempFlag completes the T1017 discard-path alias handling.

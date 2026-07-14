@@ -141,6 +141,31 @@ test_generic_enum_field_drop_only() `test {
   // and drop the inner _BoxDropT0506 without crashing or leaking.
 }
 
+// T1270: generic enum used directly as a by-value parameter (the OWNER path in
+// ownership's isDroppableOwner, distinct from the FIELD-in-holder shape above).
+// The original bug moved `o.val` out of a droppable `Maybe[_Res]`, which slipped
+// past the ownership check and double-freed at scope exit (now rejected at
+// compile time — see TestFieldMoveGenericEnumOwner* in the ownership unit tests).
+// This runtime test exercises the LEGAL analog: read a primitive field of the
+// payload via `is`-narrowing without moving the droppable payload out, and let
+// the enum drop normally. Confirms no leak/double-free on that path.
+peek_maybebox(MaybeBox[_BoxDropT0506] o) int {
+  if o is Just {
+    return o.val.n;
+  }
+  return -1;
+}
+
+test_generic_enum_owner_is_narrow_peek_some() `test {
+  MaybeBox[_BoxDropT0506] m = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 7));
+  assert(peek_maybebox(m) == 7, "should read payload n");
+}
+
+test_generic_enum_owner_is_narrow_peek_nothing() `test {
+  MaybeBox[_BoxDropT0506] m = MaybeBox[_BoxDropT0506].Nothing;
+  assert(peek_maybebox(m) == -1, "Nothing returns -1");
+}
+
 // T0552: same shape as T0506's inline test, but with named-variable
 // construction. The inline form happens to drop the construction temp
 // (since the move into the field doesn't clear that temp's flag), masking

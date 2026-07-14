@@ -2541,7 +2541,12 @@ func isAutoDupType(typ types.Type) bool {
 
 // isDroppableOwner returns true if the type has drop semantics (explicit or synthesized).
 // extractNamedType handles Named, Instance, SharedRef, MutRef; the Enum case
-// covers enums directly (extractNamedType does not unwrap Enum).
+// covers enums directly (extractNamedType does not unwrap Enum). Generic enum
+// instantiations (Instance with *types.Enum origin) are handled via the
+// origin-dispatch branch, mirroring isDroppableType — extractNamedType does not
+// unwrap Enum-origin instances and instanceHasDroppableField only covers Named
+// origins, so without this branch a droppable generic-enum owner (e.g.
+// Maybe[_Res]) would be missed and a field move out of it not rejected (T1270).
 func isDroppableOwner(typ types.Type) bool {
 	if n := extractNamedType(typ); n != nil {
 		if n.HasDrop() || n.NeedsSynthDrop() {
@@ -2549,6 +2554,12 @@ func isDroppableOwner(typ types.Type) bool {
 		}
 	}
 	if inst, ok := typ.(*types.Instance); ok {
+		if e, ok := inst.Origin().(*types.Enum); ok {
+			if e.HasDrop() || e.NeedsSynthDrop() {
+				return true
+			}
+			return enumInstanceHasDroppableField(inst)
+		}
 		if instanceHasDroppableField(inst) {
 			return true
 		}

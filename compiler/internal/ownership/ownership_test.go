@@ -5087,6 +5087,67 @@ func TestFieldMoveGenericEnumInstanceOriginHasDropError(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move field 'e'")
 }
 
+// T1270: isDroppableOwner missed *types.Instance with *types.Enum origin, so a
+// field move OUT of a generic-enum owner (Maybe[_Res]) whose payload substitutes
+// to an explicit-drop type was not rejected — the returned value aliased the
+// enum payload and the synth enum drop double-freed it at scope exit. This
+// exercises the OWNER path (isDroppableOwner), distinct from the FIELD path
+// (isDroppableType) covered above.
+func TestFieldMoveGenericEnumOwnerExplicitDropError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Res { int id; drop(~this) {} }
+		enum Maybe[T] { Some(T val); None; }
+		extract(Maybe[_Res] o) _Res {
+			if o is Some { return o.val; }
+			return _Res(id: 0);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'val'")
+}
+
+// T1270: same owner path but the payload substitutes to a synth-drop heap user
+// type (string field, no explicit drop) — verifies the
+// NeedsSynthDrop/enumInstanceHasDroppableField half of the fix.
+func TestFieldMoveGenericEnumOwnerSynthDropError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Res { string s; }
+		enum Maybe[T] { Some(T val); None; }
+		extract(Maybe[_Res] o) _Res {
+			if o is Some { return o.val; }
+			return _Res(s: "");
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'val'")
+}
+
+// T1270 (no over-rejection): a Copy-enum owner must still allow moving its
+// payload out — enumInstanceHasDroppableField returns false via the IsCopy guard,
+// so isDroppableOwner reports non-droppable and the move is permitted.
+func TestFieldMoveGenericCopyEnumOwnerOK(t *testing.T) {
+	ownerOK(t, `
+		type _Res { int id; drop(~this) {} }
+		enum CopyMaybe[T] `+"`copy"+` { Some(T val); None; }
+		extract(CopyMaybe[_Res] o) _Res {
+			if o is Some { return o.val; }
+			return _Res(id: 0);
+		}
+	`)
+}
+
+// T1270 (no over-rejection): a generic-enum owner whose payload substitutes to a
+// plain non-droppable type (a fieldless enum — non-copy, non-droppable) must
+// still allow moving the payload out.
+func TestFieldMoveGenericEnumOwnerNonDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		enum Maybe[T] { Some(T val); None; }
+		extract(Maybe[Color] o) Color {
+			if o is Some { return o.val; }
+			return Color.Red;
+		}
+	`)
+}
+
 // T0566: isDroppableType's Tuple branch iterates all elements and hits the final
 // `return false` when no element is droppable. Exercises the not-yet-covered
 // non-droppable exit of the Tuple case (existing tests only cover Tuples WITH

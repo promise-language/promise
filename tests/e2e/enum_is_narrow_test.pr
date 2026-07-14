@@ -455,3 +455,41 @@ enum_this_nonfield_fallthrough() `test {
   r := ShapeF.Rect(w: 2.0, h: 5.0);
   assert(r.describe() == "other", "non-matching variant skips narrowed block");
 }
+
+// T1093: Channel variant field escaping the narrowing scope must be dup'd
+// (reference-count incremented), not aliased — the enum's synth drop would
+// close the channel while the escaped copy still references it. Channel is in
+// isAutoDupType so codegen calls dupChannel (incref) on escape, identical to
+// the string/vector cases in T1011.
+enum LiveCh {
+  Active(channel[int] ch),
+  Dead,
+}
+
+return_narrowed_channel() channel[int] {
+  LiveCh e = LiveCh.Active(ch: channel[int](1)); // buffered — send doesn't block
+  if e is Active {
+    return e.ch; // escapes — dupChannel increfs before e drops at function exit
+  }
+  return channel[int](1);
+}
+
+enum_channel_escape_return() `test {
+  ch := return_narrowed_channel();
+  ch.send(42); // non-blocking: buffered channel
+  n := <-ch;
+  assert(n! == 42, "channel narrowed escape — value survives enum drop");
+  ch.close();
+}
+
+enum_channel_escape_store_outer() `test {
+  outer := channel[int](1); // buffered
+  LiveCh e = LiveCh.Active(ch: channel[int](1));
+  if e is Active {
+    outer = e.ch; // dup'd (incref) into outer; old outer channel is dropped
+  }
+  outer.send(7);
+  v := <-outer;
+  assert(v! == 7, "channel assign-to-outer is dup'd");
+  outer.close();
+}

@@ -1,0 +1,65 @@
+// T1276: A primitive scalar coerced to a structural interface is heap-boxed as
+// { i8* typeinfo, scalar }. The box must survive escape and be pal_free'd on drop
+// without "invalid free" or leaks. Primitives never drop, so the box carries a shared
+// null-drop typeinfo header (@promise_typeinfo_novalue).
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+// Returns a primitive boxed as a structural interface (escaping box).
+show_int(int n) Showable {
+  return n;
+}
+show_bool(bool b) Showable {
+  return b;
+}
+
+test_returned_primitive_int_survives_frame() `test {
+  Showable s = show_int(42);
+  int[] junk = [9, 8, 7, 6, 5];
+  assert(s.to_string() == "42", "boxed int survives returned frame");
+  assert(junk.len == 5, "intervening allocation intact");
+}
+
+test_primitive_bool_box_drop() `test {
+  Showable s = show_bool(true);
+  assert(s.to_string() == "true", "boxed bool method + drop");
+}
+
+// Local box drop path for a primitive.
+test_local_primitive_box() `test {
+  Showable s = 7;
+  assert(s.to_string() == "7", "local primitive box");
+}
+
+// Move a primitive box into a callee that consumes (frees) it.
+describe(Showable move s) string {
+  return s.to_string();
+}
+test_primitive_move_arg() `test {
+  assert(describe(99) == "99", "moved primitive box freed by callee");
+}
+
+// Reassignment: the old primitive box must be dropped (freed) before the new box is
+// claimed — no leak of the old, no double-free. Covers both a literal RHS (non-call,
+// claimed-owned-box gate) and a call RHS (escaping return box).
+test_primitive_reassign_drops_old_box() `test {
+  Showable s = 1;
+  assert(s.to_string() == "1", "initial primitive box");
+  s = 2;
+  assert(s.to_string() == "2", "reassigned from literal");
+  s = show_int(3);
+  assert(s.to_string() == "3", "reassigned from call");
+}
+
+// Loop stability: box + drop a primitive each iteration.
+test_primitive_loop_box_drop() `test {
+  int count = 0;
+  for i in 0..50 {
+    Showable s = i;
+    if s.to_string().len > 0 {
+      count = count + 1;
+    }
+  }
+  assert(count == 50, "primitive boxes freed each iteration");
+}

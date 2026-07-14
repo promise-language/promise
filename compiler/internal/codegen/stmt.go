@@ -1602,6 +1602,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
 	c.claimHeapTemp(val)
+	// T1276: capture whether a fresh owned box was claimed (value/primitive coerced
+	// to a structural interface) so maybeRegisterStructuralFree registers the free
+	// even when the RHS shape (e.g. an identifier copy) isn't a call.
+	claimedOwnedBox := c.lastClaimedDropFunc != nil
 	// B0267: Clear enum temps when the variable IS the enum (not a function result).
 	if len(c.enumCtorTemps) > 0 && extractEnum(resolvedExprType) != nil {
 		for i := range c.enumCtorTemps {
@@ -1674,7 +1678,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
-	c.maybeRegisterStructuralFree(s.Name, alloca, dropType, s.Value)
+	c.maybeRegisterStructuralFree(s.Name, alloca, dropType, s.Value, claimedOwnedBox)
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
 	// dups the string, so the variable owns the copy (not a borrow).
@@ -1993,6 +1997,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Without this, iterator chain results (e.g., c.take(3)) assigned via
 	// auto-typed declarations are freed at statement end, causing use-after-free.
 	c.claimHeapTemp(val)
+	// T1276: capture whether a fresh owned box was claimed (see genVarDecl).
+	claimedOwnedBox := c.lastClaimedDropFunc != nil
 	// B0267: Clear enum temps when the variable IS the enum (not a function result).
 	if len(c.enumCtorTemps) > 0 && extractEnum(typ) != nil {
 		for i := range c.enumCtorTemps {
@@ -2034,7 +2040,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// so its drop doesn't double-free the inner value now owned by this variable.
 	c.neutralizeForceUnwrapSource(s.Value)
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
-	c.maybeRegisterStructuralFree(s.Name, alloca, typ, s.Value)
+	c.maybeRegisterStructuralFree(s.Name, alloca, typ, s.Value, claimedOwnedBox)
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// The container/struct still owns the value — freeing it here would cause use-after-free.
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
@@ -3733,7 +3739,13 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 // borrow from a concrete variable). This method is called only when the RHS is NOT a
 // simple identifier, meaning the value comes from a fresh allocation (e.g., vec.iter(),
 // iter.map(f)) and the variable owns the backing instance.
-func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAlloca, typ types.Type, rhs ast.Expr) {
+// claimedOwnedBox (T1276): true when claimHeapTemp just claimed a fresh owned heap
+// box for this binding (e.g. a value/primitive type coerced to a structural interface
+// via `Sink s = counterValue;`). Such a box has no CallExpr RHS to key off, but the
+// variable genuinely owns it and must free it at scope exit — so we register the free
+// binding regardless of RHS shape. A borrow of an already-structural value claims
+// nothing, so this stays false and the RHS-shape gate below preserves borrow semantics.
+func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAlloca, typ types.Type, rhs ast.Expr, claimedOwnedBox bool) {
 	// Only for structural interface types without an existing drop binding.
 	if _, hasBinding := c.dropBindings[varName]; hasBinding {
 		return
@@ -3774,7 +3786,12 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
 		// owned heap allocation — register the free binding below
 	default:
-		return
+		// T1276: a claimed fresh box (value/primitive → structural coercion of a
+		// non-call RHS, e.g. an identifier copy) is owned even though its RHS shape
+		// isn't a call — register the free. Otherwise it's a borrow: skip.
+		if !claimedOwnedBox {
+			return
+		}
 	}
 	// Must be a struct alloca ({i8* vtable, i8* instance}) to extract instance ptr.
 	if _, ok := alloca.ElemType.(*irtypes.StructType); !ok {

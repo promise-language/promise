@@ -9387,8 +9387,13 @@ func TestPrimitiveIntToStructuralView(t *testing.T) {
 	assertContains(t, ir, "@promise_vtable_int_as_Showable")
 	// Adapter thunk: int methods take i64 receiver, vtable passes i8*
 	assertContains(t, ir, "int.to_string$view_adapt")
-	// Boxing: alloca for scalar + insertvalue to build {i8*, i8*}
+	// Boxing: insertvalue to build the {i8*, i8*} view struct
 	assertContains(t, ir, "insertvalue { i8*, i8* }")
+	// T1276: the primitive box is HEAP-allocated { i8* typeinfo, scalar } (not a
+	// stack alloca) so the escaping interface fat pointer stays valid; field 0
+	// carries the shared null-drop typeinfo header.
+	assertContains(t, ir, "@promise_typeinfo_novalue")
+	assertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_novalue to i8*)")
 }
 
 func TestPrimitiveBoolToStructuralView(t *testing.T) {
@@ -9459,7 +9464,7 @@ func TestMultiplePrimitivesToStructuralView(t *testing.T) {
 
 func TestPrimitiveViewAdapterLoadsScalarFromPointer(t *testing.T) {
 	// The adapter thunk receives i8* (interface convention) and must
-	// bitcast + load to get the scalar value for the concrete method
+	// bitcast + GEP + load to get the scalar value for the concrete method.
 	ir := generateIR(t, `
 		type Showable `+"`"+`structural {
 			to_string() string `+"`"+`abstract;
@@ -9468,8 +9473,10 @@ func TestPrimitiveViewAdapterLoadsScalarFromPointer(t *testing.T) {
 		main() { display(42); }
 	`)
 	assertContains(t, ir, "int.to_string$view_adapt")
-	// Adapter should bitcast i8* to i64* and load the scalar
-	assertContains(t, ir, "bitcast i8* %this to i64*")
+	// T1276: the box is { i8* typeinfo, i64 scalar } — the adapter bitcasts i8* to
+	// the box struct and loads the scalar from field 1 (not offset 0).
+	assertContains(t, ir, "bitcast i8* %this to { i8*, i64 }*")
+	assertContains(t, ir, "getelementptr { i8*, i64 }, { i8*, i64 }* %0, i32 0, i32 1")
 	assertContains(t, ir, "load i64, i64*")
 }
 
@@ -9485,6 +9492,33 @@ func TestPrimitiveToFailableStructuralView(t *testing.T) {
 	`)
 	assertContains(t, ir, "@promise_vtable_int_as_Converter")
 	assertContains(t, ir, "int.to_string$view_adapt")
+}
+
+func TestValueTypeToStructuralViewHeapBoxes(t *testing.T) {
+	// T1276: a pure value type coerced to a structural interface must be boxed on
+	// the HEAP (pal_alloc), not a stack alloca, so the interface can escape its
+	// defining frame (return) without dangling. Field 0 of the box is overwritten
+	// with the concrete typeinfo pointer so __promise_structural_drop reads a null
+	// drop_fn and pal_free's the box.
+	ir := generateIR(t, `
+		type Sink `+"`"+`structural {
+			emit(~this, int x) int `+"`"+`abstract;
+		}
+		type Counter {
+			int fd `+"`"+`value;
+			emit(~this, int x) int { return this.fd + x; }
+		}
+		make_sink(int fd) Sink { return Counter(fd: fd); }
+		main() { Sink s = make_sink(7); s.emit(1); }
+	`)
+	assertContains(t, ir, "@promise_vtable_Counter_as_Sink")
+	// Heap box: pal_alloc of the value struct, then typeinfo stored into field 0.
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "@promise_typeinfo_Counter")
+	// No stack alloca of the Counter value struct for the box — it must be heap.
+	// (The value struct is the named type %promise_Counter_v, so a reverted
+	// stack box would emit `alloca %promise_Counter_v`; assert that's absent.)
+	assertNotContains(t, ir, "alloca %promise_Counter_v")
 }
 
 func TestPrimitiveMixedWithUserTypeToStructuralView(t *testing.T) {

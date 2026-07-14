@@ -1,0 +1,151 @@
+// T1276: A pure value type (or primitive) coerced to a structural interface must be
+// HEAP-boxed, not stack-boxed, so the interface fat pointer can escape its defining
+// frame (return / longer-lived binding) without dangling — and the box's drop must
+// pal_free a heap address (not abort with "invalid free"). Every test asserts zero
+// leaks (the harness enforces it) so the box-free path is exercised on all edges.
+type Sink `structural {
+  emit!(~this, int x) int `abstract;
+}
+
+type Counter {
+  int _fd `value;
+  emit!(~this, int x) int {
+    return this._fd + x;
+  }
+}
+
+// A value box with multiple fields — checks field offsets survive the box[0]=typeinfo
+// repurposing (field 0 of the value struct is the otherwise-dead vtable slot).
+type Pair {
+  int a `value;
+  int b `value;
+  emit!(~this, int x) int {
+    return this.a * 100 + this.b * 10 + x;
+  }
+}
+
+make_sink(int fd) Sink {
+  return Counter(_fd: fd); // value type boxed as interface, then RETURNED
+}
+
+// A GENERIC value type coerced to a structural interface and returned. Exercises the
+// monomorphized value-struct heap-box path (box[0] typeinfo repurposing for the
+// concrete `Wrap[int]` instance) on the escape edge.
+type Emitter `structural {
+  emit(~this) int `abstract;
+}
+type Wrap[T] {
+  T v `value;
+  emit(~this) int {
+    return 1;
+  }
+}
+make_emitter() Emitter {
+  return Wrap[int](v: 7); // generic value type boxed as interface, then RETURNED
+}
+test_generic_value_box_escapes_frame() `test {
+  Emitter e = make_emitter();
+  int[] junk = [1, 2, 3, 4];
+  assert(e.emit() == 1, "generic value box survives the returned frame");
+  assert(junk.len == 4, "intervening allocation intact");
+}
+
+// The exact repro: return, then reuse the returned frame with an intervening
+// allocation, then call a method on the (previously dangling) box.
+test_return_then_reuse_frame() `test {
+  Sink s = make_sink(7);
+  int[] junk = [1, 2, 3, 4, 5, 6, 7, 8];
+  assert(s.emit(99)?! == 106, "boxed value must survive the returned frame");
+  assert(junk.len == 8, "intervening allocation intact");
+}
+
+// Plain local binding drops the box at scope exit (the "invalid free" path).
+test_plain_local_drop() `test {
+  Sink s = Counter(_fd: 5);
+  assert(s.emit(1)?! == 6, "plain local box");
+}
+
+// Copy-into-owned-box: a value-type identifier coerced to a structural interface
+// creates a fresh owned box that must be freed (no leak).
+test_copy_into_owned_box() `test {
+  Counter c = Counter(_fd: 3);
+  Sink s = c;
+  assert(s.emit(2)?! == 5, "copied value box");
+}
+
+emit_borrow(Sink ~s, int x) int {
+  return s.emit(x)?!;
+}
+// Boxed value passed as a mutable borrow — caller keeps ownership, frees at stmt end.
+test_borrow_arg() `test {
+  assert(emit_borrow(Counter(_fd: 10), 5) == 15, "borrowed box");
+}
+
+emit_move(Sink move s, int x) int {
+  return s.emit(x)?!;
+}
+// Boxed value passed as a move — ownership transfers to the callee, which frees it.
+test_move_arg() `test {
+  assert(emit_move(Counter(_fd: 20), 5) == 25, "moved box");
+}
+
+// Multi-field value box: verifies field reads are correct after box[0] repurposing.
+test_multi_field_box() `test {
+  Sink s = Pair(a: 1, b: 2);
+  assert(s.emit(3)?! == 123, "multi-field box fields intact");
+}
+
+// The box's field 0 is repurposed to the concrete typeinfo pointer, so an RTTI `is`
+// check reads a valid header and resolves correctly (harmless repurposing).
+test_is_check_reads_typeinfo() `test {
+  Sink s = make_sink(7);
+  assert(s is Counter, "is-check reads the repurposed typeinfo header");
+  assert(s.emit(1)?! == 8, "box still usable after is-check");
+}
+
+// Loop that boxes/drops each iteration — leak-count stability under the enforced
+// zero-leak policy.
+test_loop_box_drop_stability() `test {
+  int total = 0;
+  for i in 0..100 {
+    Sink s = Counter(_fd: i);
+    total = total + s.emit(1)?!;
+  }
+  assert(total == 4950 + 100, "loop boxes freed each iteration");
+}
+
+// Reassignment: the old box must be dropped (freed) before the new box is claimed —
+// no leak of the old, no double-free.
+test_reassign_drops_old_box() `test {
+  Sink s = make_sink(1);
+  assert(s.emit(0)?! == 1, "initial box");
+  s = make_sink(5);
+  assert(s.emit(0)?! == 5, "reassigned from call");
+  s = Counter(_fd: 9);
+  assert(s.emit(0)?! == 9, "reassigned from value literal");
+}
+
+// T1273 regression shape: a private pure value type returned as a structural
+// interface, with two sequential method calls. The original bug clobbered the box
+// between calls (dangling stack slot reused), corrupting the second call's fields.
+// (Named ByteSink, not Writer/Reader, to avoid colliding with the stdlib interfaces.)
+type ByteSink `structural {
+  write!(~this, int b) int `abstract;
+}
+type FdSink {
+  int _fd `value;
+  write!(~this, int b) int {
+    return this._fd * 1000 + b;
+  }
+}
+open_writer(int fd) ByteSink {
+  return FdSink(_fd: fd);
+}
+test_returned_writer_two_calls() `test {
+  ByteSink w = open_writer(2);
+  int junk_a = 111;
+  int junk_b = 222;
+  assert(w.write(65)?! == 2065, "first write reads fd=2");
+  assert(w.write(10)?! == 2010, "second write must still read fd=2, not garbage");
+  assert(junk_a + junk_b == 333, "stack neighbors intact");
+}

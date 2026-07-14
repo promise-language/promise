@@ -495,11 +495,12 @@ type Compiler struct {
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
-	genResume      *ir.Func // @__promise_gen_resume(i8*) → void [noinline]
-	genDone        *ir.Func // @__promise_gen_done(i8*) → i1 [noinline]
-	genDestroy     *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
-	iterCleanup    *ir.Func // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
-	structuralDrop *ir.Func // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
+	genResume       *ir.Func   // @__promise_gen_resume(i8*) → void [noinline]
+	genDone         *ir.Func   // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy      *ir.Func   // @__promise_gen_destroy(i8*) → void [noinline]
+	iterCleanup     *ir.Func   // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
+	structuralDrop  *ir.Func   // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
+	noValueTypeInfo *ir.Global // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
 
 	// Target triple and platform flags
 	target                string     // LLVM target triple
@@ -10560,6 +10561,29 @@ func (c *Compiler) lookupVtableGlobal(typ types.Type) *ir.Global {
 		return c.vtableGlobals[n]
 	}
 	return nil
+}
+
+// getNoValueTypeInfo returns a shared immutable typeinfo global with a null
+// drop_fn, used as the RTTI header for heap-boxed primitive scalars coerced to a
+// structural interface (T1276). Primitives never drop, so __promise_structural_drop
+// reads drop_fn (field 1) == null and falls through to pal_free(box). Emitted once
+// on the main module; module/instance IRs reference it as an extern declaration.
+func (c *Compiler) getNoValueTypeInfo() *ir.Global {
+	if c.noValueTypeInfo != nil {
+		return c.noValueTypeInfo
+	}
+	// Layout mirrors a no-parent typeinfo: { vtable, drop_fn, clone_fn, typeID, numParents }.
+	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+	init := constant.NewStruct(structType,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0))
+	g := c.module.NewGlobalDef("promise_typeinfo_novalue", init)
+	g.Immutable = true
+	c.noValueTypeInfo = g
+	return g
 }
 
 // lookupTypeInfoGlobal finds the typeinfo global for a type, handling Instance and monoCtx.

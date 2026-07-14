@@ -883,10 +883,14 @@ func (c *Compiler) emitViewMethodAdapter(
 	// Forward receiver
 	if concreteSig.Recv() != nil {
 		if isPrimitiveScalar(concreteType) {
-			// Primitive receiver: load scalar from i8* pointer
+			// T1276: The primitive box is { i8* typeinfo, scalarT } (heap-allocated by
+			// boxForStructuralView), so load the scalar receiver from field 1.
 			scalarType := llvmNamedType(concreteType)
-			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(scalarType))
-			scalar := c.block.NewLoad(scalarType, typedPtr)
+			boxType := irtypes.NewStruct(irtypes.I8Ptr, scalarType)
+			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(boxType))
+			scalarField := c.block.NewGetElementPtr(boxType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			scalar := c.block.NewLoad(scalarType, scalarField)
 			args = append(args, scalar)
 		} else {
 			args = append(args, params[paramIdx])
@@ -1092,9 +1096,25 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	return c.block.NewInsertValue(val, vtablePtr, 0)
 }
 
+// isMaterializedViewPtr reports whether val is a pointer to a two-field view struct
+// ({i8*, i8*}). This is the shape genCallArgsWithMutRef produces for a `~` (MutRef)
+// param — it already coerced the arg into a view and stored it in a temp alloca, then
+// passes the temp pointer. coerceCallArgs then runs a second coercion pass over the
+// same argVals; without this guard the box helpers would re-box that pointer (T1276).
+// Distinct from a string/opaque i8* (pointer to i8, not to a 2-field struct).
+func isMaterializedViewPtr(val value.Value) bool {
+	pt, ok := val.Type().(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+	st, ok := pt.ElemType.(*irtypes.StructType)
+	return ok && len(st.Fields) == 2 &&
+		st.Fields[0].Equal(irtypes.I8Ptr) && st.Fields[1].Equal(irtypes.I8Ptr)
+}
+
 // boxForStructuralView boxes a primitive or string value into a structural interface
 // view ({i8*, i8*}) when the target is a structural interface.
-// For primitives: stack-allocates the scalar and creates {vtable, &scalar}.
+// For primitives: heap-allocates a { typeinfo, scalar } box and creates {vtable, box}.
 // For string: creates {vtable, string_ptr} (string is already i8*).
 func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
 	// Only box when target is a structural interface
@@ -1105,6 +1125,10 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 	if fromNamed == types.TypVoid || fromNamed == types.TypNone {
 		return val
 	}
+	// T1276: already-materialized `~`-param view — don't re-box.
+	if isMaterializedViewPtr(val) {
+		return val
+	}
 
 	// Get view vtable for concrete → structural interface
 	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
@@ -1113,11 +1137,25 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 	// Create the instance pointer
 	var instancePtr value.Value
 	if isPrimitiveScalar(fromNamed) {
-		// Alloca the scalar on stack, store, bitcast to i8*
+		// T1276: Heap-allocate a box { i8* typeinfo, scalarT } (not a stack alloca)
+		// so the interface fat pointer can escape its defining frame safely. Field 0
+		// carries a shared null-drop typeinfo header so __promise_structural_drop
+		// pal_free's the box (primitives never drop); the scalar receiver lives in
+		// field 1 (see emitViewMethodAdapter). The malloc is tracked as an owned heap
+		// temp so the correct owner frees it exactly once.
 		scalarType := llvmNamedType(fromNamed)
-		alloca := c.entryBlock.NewAlloca(scalarType)
-		c.block.NewStore(val, alloca)
-		instancePtr = c.block.NewBitCast(alloca, irtypes.I8Ptr)
+		boxType := irtypes.NewStruct(irtypes.I8Ptr, scalarType)
+		size := constant.NewInt(irtypes.I64, int64(c.typeSize(boxType)))
+		raw := c.block.NewCall(c.palAlloc, size)
+		typed := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
+		tiField := c.block.NewGetElementPtr(boxType, typed,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewStore(constant.NewBitCast(c.getNoValueTypeInfo(), irtypes.I8Ptr), tiField)
+		scalarField := c.block.NewGetElementPtr(boxType, typed,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		c.block.NewStore(val, scalarField)
+		c.trackHeapTemp(raw, c.palFree)
+		instancePtr = raw
 	} else {
 		// String and other i8* types: already an i8* pointer
 		instancePtr = val
@@ -1132,24 +1170,60 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 
 // boxValueTypeForStructuralView boxes a pure value type into a structural interface
 // view ({i8*, i8*}). Value types have wider value structs (e.g., {vtable, x, y})
-// that don't fit in the standard {i8*, i8*} layout. The fix: stack-allocate the value
-// struct, store it, and create a view with {structural_vtable, &alloca_as_i8*}.
+// that don't fit in the standard {i8*, i8*} layout.
+//
+// T1276: The box must be HEAP-allocated (not a stack alloca) because the resulting
+// interface fat pointer can escape its defining frame (return, store into a longer-
+// lived location). A stack box would dangle (use-after-return) and its drop would
+// pal_free a stack address ("invalid free"). We mirror the heap-user-type convention:
+// pal_alloc the value struct, then overwrite field 0 (the otherwise-dead value-struct
+// vtable slot — method dispatch uses the view vtable in the fat pointer, and value-type
+// methods only read fields at index >= 1) with the concrete typeinfo pointer so
+// __promise_structural_drop dispatches correctly: value types have a null drop_fn, so
+// it falls through to pal_free(box). The malloc is registered as an owned heap temp so
+// the correct owner frees it exactly once (transfers to the caller on return/binding,
+// freed at statement end for borrow args).
 func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+	// T1276: already-materialized `~`-param view (pointer to {i8*, i8*}) — the arg was
+	// boxed and stored into a temp by genCallArgsWithMutRef; the second coerceCallArgs
+	// pass must not re-box it.
+	if isMaterializedViewPtr(val) {
+		return val
+	}
 	// Get view vtable for value type → structural interface
 	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 
-	// Stack-allocate the value type struct and store the value
+	// Heap-allocate the value type struct and store the value.
 	valType := val.Type()
-	alloca := c.createEntryAlloca(valType)
-	c.block.NewStore(val, alloca)
-	instancePtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+	size := constant.NewInt(irtypes.I64, int64(c.typeSize(valType)))
+	raw := c.block.NewCall(c.palAlloc, size)
+	typed := c.block.NewBitCast(raw, irtypes.NewPointer(valType))
+	c.block.NewStore(val, typed)
+
+	// Repurpose field 0 (value-struct vtable slot) as the RTTI typeinfo header so
+	// __promise_structural_drop reads a null drop_fn and pal_free's the wrapper.
+	// Prefer the concrete typeinfo (also makes `is` checks on the box resolve), but
+	// fall back to the shared null-drop header — value types never drop, so pal_free is
+	// always correct and we must never leave the value's own vtable in field 0 (that
+	// would make the drop path misread a bogus drop_fn).
+	var tiPtr constant.Constant = constant.NewBitCast(c.getNoValueTypeInfo(), irtypes.I8Ptr)
+	if ti := c.lookupTypeInfoGlobal(fromType); ti != nil {
+		tiPtr = constant.NewBitCast(ti, irtypes.I8Ptr)
+	}
+	field0 := c.block.NewGetElementPtr(valType, typed,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(tiPtr, field0)
+
+	// Register the heap box as an owned temp (freed via pal_free by whichever owner
+	// keeps it — the tracked drop func is pal_free, dispatched via RTTI at drop sites).
+	c.trackHeapTemp(raw, c.palFree)
 
 	// Construct the view struct: { vtable_ptr, instance_ptr }
 	viewType := userValueType()
 	result := constant.NewZeroInitializer(viewType)
 	tmp := c.block.NewInsertValue(result, vtablePtr, 0)
-	return c.block.NewInsertValue(tmp, instancePtr, 1)
+	return c.block.NewInsertValue(tmp, raw, 1)
 }
 
 // coerceCallArgs applies optional wrapping (T→T?) and view coercion to each
@@ -1221,6 +1295,16 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 
 		// View coercion (structural interface vtable swap, or boxing for primitives/string)
 		v = c.coerceToView(v, argTypes[i], params[i].Type())
+
+		// T1276: A value/primitive coerced into a fresh structural-interface box for a
+		// `move` (RefMut, plain type) param transfers ownership to the callee, which
+		// frees the box via its maybeRegisterStructuralParamFree binding. Claim the box
+		// so the caller's statement-end cleanup doesn't also free it (double free). `~`
+		// (MutRef-typed) params arrive already materialized (coerceToView returns the
+		// arg unchanged) so v == argVals[i] and nothing is claimed — the callee borrows.
+		if v != argVals[i] && params[i].Ref() == types.RefMut {
+			c.claimHeapTemp(v)
+		}
 
 		if v != argVals[i] && !coerced {
 			// Lazily copy so we don't allocate when no coercion is needed

@@ -1,0 +1,237 @@
+// T1267: bare failable call in a `match` expression arm must auto-propagate,
+// identically to a block arm or any other bare call site. Two manifestations:
+//   A — void position: the error was silently swallowed (no branch on ok-flag).
+//   B — value position: the raw error-union leaked into the arm slot → codegen panic.
+// These tests exercise the trigger matrix rows #1–#8 plus success/heap/enum paths.
+boom!() {
+  raise error(message: "bang");
+}
+boom_val!() int {
+  raise error(message: "bang");
+}
+boom_str!() string {
+  raise error(message: "bang");
+}
+
+ok_val!() int {
+  return 42;
+}
+ok_str!() string {
+  return "ok";
+}
+
+// ---- Void position (manifestation A) ----
+
+// Row #1: bare call in an expression arm.
+void_bare!(string c) {
+  match c {
+    "a" => boom(),
+    _ => {
+    },
+  }
+}
+
+// Row #2: explicit ?^ in an expression arm.
+void_propagate!(string c) {
+  match c {
+    "a" => boom()?^,
+    _ => {
+    },
+  }
+}
+
+// Row #3: bare call in a block arm.
+void_block!(string c) {
+  match c {
+    "a" => {
+      boom();
+    },
+    _ => {
+    },
+  }
+}
+
+// Row #4: ?^ in a block arm.
+void_block_propagate!(string c) {
+  match c {
+    "a" => {
+      boom()?^;
+    },
+    _ => {
+    },
+  }
+}
+
+// Row #5: raise in a block arm.
+void_block_raise!(string c) {
+  match c {
+    "a" => {
+      raise error(message: "bang");
+    },
+    _ => {
+    },
+  }
+}
+
+// ---- Value position (manifestation B) ----
+
+// Row #6: value expr arm consumed by return.
+val_return!(string c) int {
+  return match c {
+    "a" => boom_val(),
+    _ => 0,
+  };
+}
+
+// Row #7: value expr arm consumed by a typed declaration.
+val_decl!(string c) int {
+  int v = match c {
+    "a" => boom_val(),
+    _ => 0,
+  };
+  return v;
+}
+
+// Row #8: value expr arm with explicit ?^.
+val_propagate!(string c) int {
+  return match c {
+    "a" => boom_val()?^,
+    _ => 0,
+  };
+}
+
+// Success path: a value-failable arm that succeeds yields the unwrapped value.
+val_success!(string c) int {
+  return match c {
+    "a" => ok_val(),
+    _ => 0,
+  };
+}
+
+// Heap (string) value-failable arm — success and failure — to guard leak-freedom
+// through the merge phi (zero-leak policy).
+str_arm!(string c) string {
+  return match c {
+    "a" => boom_str(),
+    "b" => ok_str(),
+    _ => "default",
+  };
+}
+
+// Enum subject — cover the genEnumMatch path, not just string/value match.
+enum Color {
+  Red, Green, Blue,
+}
+
+enum_arm!(Color c) int {
+  return match c {
+    Color.Red => boom_val(),
+    Color.Green => ok_val(),
+    _ => 0,
+  };
+}
+
+// ---- Tests ----
+
+void_swallow_fixed() `test {
+  // Row #1: the error must propagate (was silently swallowed before T1267).
+  bool caught = false;
+  void_bare("a")? e {
+    caught = true;
+  };
+  assert(caught, "row #1: bare void expr-arm call must propagate");
+
+  // Non-error path returns normally.
+  bool ok = true;
+  void_bare("x")? e {
+    ok = false;
+  };
+  assert(ok, "row #1: non-matching subject must not raise");
+}
+
+void_equivalents() `test {
+  // Rows #2–#5 all behave like #1: propagate on "a", succeed otherwise.
+  bool c2 = false;
+  void_propagate("a")? e {
+    c2 = true;
+  };
+  assert(c2, "row #2: ?^ expr arm must propagate");
+
+  bool c3 = false;
+  void_block("a")? e {
+    c3 = true;
+  };
+  assert(c3, "row #3: bare block arm must propagate");
+
+  bool c4 = false;
+  void_block_propagate("a")? e {
+    c4 = true;
+  };
+  assert(c4, "row #4: ?^ block arm must propagate");
+
+  bool c5 = false;
+  void_block_raise("a")? e {
+    c5 = true;
+  };
+  assert(c5, "row #5: raise block arm must propagate");
+}
+
+value_position_fixed() `test {
+  // Rows #6, #7, #8: value expr arm compiles and propagates on error.
+  bool c6 = false;
+  val_return("a")? e {
+    c6 = true;
+  };
+  assert(c6, "row #6: value expr arm (return) must propagate");
+
+  bool c7 = false;
+  val_decl("a")? e {
+    c7 = true;
+  };
+  assert(c7, "row #7: value expr arm (decl) must propagate");
+
+  bool c8 = false;
+  val_propagate("a")? e {
+    c8 = true;
+  };
+  assert(c8, "row #8: value ?^ arm must propagate");
+}
+
+value_success_paths() `test {
+  // Non-matching subject: success value flows through.
+  int r6 = val_return("x")?!;
+  assert(r6 == 0, "row #6: non-matching returns default 0");
+
+  // Matching subject on a succeeding failable arm yields the unwrapped value.
+  int rs = val_success("a")?!;
+  assert(rs == 42, "success arm yields unwrapped value");
+}
+
+heap_arm_leak_free() `test {
+  // String arm: failure propagates, success and default flow through — no leaks.
+  bool cf = false;
+  str_arm("a")? e {
+    cf = true;
+  };
+  assert(cf, "string arm failure must propagate");
+
+  string s_ok = str_arm("b")?!;
+  assert(s_ok == "ok", "string arm success yields unwrapped value");
+
+  string s_def = str_arm("z")?!;
+  assert(s_def == "default", "string arm default value");
+}
+
+enum_subject_arm() `test {
+  bool cr = false;
+  enum_arm(Color.Red)? e {
+    cr = true;
+  };
+  assert(cr, "enum arm failable call must propagate");
+
+  int g = enum_arm(Color.Green)?!;
+  assert(g == 42, "enum arm success yields unwrapped value");
+
+  int b = enum_arm(Color.Blue)?!;
+  assert(b == 0, "enum arm default value");
+}

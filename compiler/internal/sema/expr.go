@@ -3201,6 +3201,13 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 		var armType types.Type
 		if arm.Body != nil {
 			armType = c.checkExpr(arm.Body)
+			// T1267: a bare failable call as an expression arm must be subjected
+			// to the same failable-handling check as any other bare call site —
+			// auto-propagate in a failable function, or error otherwise. Block
+			// arms already route through checkBlock's statement path. No-op for
+			// ?^/?! arms (those are ErrorPropagate/ErrorPanic nodes, not bare
+			// failable calls).
+			c.checkSubExprFailable(arm.Body)
 		} else if arm.Block != nil {
 			c.checkBlock(arm.Block)
 			// B0126: extract block result type from the last expression

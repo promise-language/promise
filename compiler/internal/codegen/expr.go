@@ -8295,6 +8295,20 @@ func (c *Compiler) genMatchArmValue(arm *ast.MatchArm, resultType types.Type) va
 	c.targetType = resultType
 	defer func() { c.targetType = saved }()
 	if arm.Body != nil {
+		// T1267: a bare failable call in an expression arm auto-propagates like
+		// any other bare call site. genExpr yields the raw error-union; the arm
+		// is the context that branches on the ok-flag (propagating on error) and
+		// yields the unwrapped success value. Track the unwrapped heap value as a
+		// stmt temp so the merge phi's claimStringTemp/ownership machinery frees
+		// it — mirroring the explicit `?^` (ErrorPropagateExpr) arm path.
+		if c.info.AutoPropagateExprs[arm.Body] {
+			result := c.genExpr(arm.Body)
+			unwrapped := c.genAutoPropagateValue(result)
+			if unwrapped != nil {
+				c.trackUnwrappedFailableTemp(arm.Body, unwrapped)
+			}
+			return unwrapped
+		}
 		return c.genExpr(arm.Body)
 	} else if arm.Block != nil {
 		return c.genBlockValue(arm.Block)

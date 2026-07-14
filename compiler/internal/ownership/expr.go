@@ -2261,6 +2261,9 @@ func indexTargetIsAliasingContainer(info *sema.Info, idx *ast.IndexExpr) bool {
 	if _, _, ok := types.AsMap(t); ok {
 		return true
 	}
+	if _, _, ok := types.AsArray(t); ok {
+		return true // T1266: a fixed-array index aliases the array's owned storage
+	}
 	return false
 }
 

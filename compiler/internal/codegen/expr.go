@@ -12031,6 +12031,22 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 
 	// Container element: Vector / Channel / Arc / Weak (T0383 analogue)
 	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
+		// T1266: a fixed-array element that is itself a value-copying container transitively
+		// nesting a closure must NOT be duped — dupVector's element-clone loop zeroes each
+		// closure's opaque env (T0813) → null {fn,env} → SEGV on invoke. Leave it ALIASED
+		// (a borrow of the array's owned storage, env intact); the borrow gates
+		// (isClosureAggregateBorrow / closureAggregateBorrowSource) suppress the owning drop
+		// binding and reject escapes, keeping this in lockstep. Mirrors the genVectorIndex
+		// T1263 guard; FirstFieldNestedClosureDeep keeps Ref/Weak/… opaque, so Ref[…][] /
+		// int[] elements keep deep-copying.
+		resolvedContainerElem := elemType
+		if c.typeSubst != nil {
+			resolvedContainerElem = types.Substitute(elemType, c.typeSubst)
+		}
+		if sema.FirstFieldNestedClosureDeep(resolvedContainerElem) != nil {
+			c.dupContainerFieldAccess = false // consume the flag
+			return val
+		}
 		if innerElem, isVec := types.AsVector(elemType); isVec {
 			c.dupContainerFieldAccess = false // consume the flag
 			innerLLVM := c.resolveType(innerElem)

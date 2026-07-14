@@ -1,0 +1,55 @@
+// T1266: reading an element of a fixed-size array whose elements are value-copying
+// containers of closures (`(() -> int)[][N]`) previously SEGV'd at 0x0 on invoke —
+// genArrayIndex deep-copied the inner container and dupVector's element-clone loop
+// zeroed each closure's opaque env (T0813) → null {fn,env}. The fix leaves the
+// element ALIASED (a borrow of the array's owned storage, envs intact); the borrow
+// gates suppress the owning drop and reject escapes, so no leak / no double-free.
+//
+// Third structural sibling of T1262 (aliasing-container `[]`) and T1263 (native
+// genVectorIndex / struct-field genFieldAccess).
+array_of_vec_closure_read() `test {
+  x := 7;
+  (() -> int)[][1] arr = [[|| -> x]];
+  w := arr[0];
+  assert(w[0]() == 7, "fixed-array element vec-of-closures read");
+}
+
+array_of_vec_closure_read_captured() `test {
+  x := 5;
+  (() -> int)[][1] arr = [[move || -> x + 1]];
+  w := arr[0];
+  assert(w[0]() == 6, "heap-capturing closure read from fixed array");
+}
+
+array_of_vec_closure_two_slots() `test {
+  a := 3;
+  b := 5;
+  (() -> int)[][2] arr = [[|| -> a], [|| -> b]];
+  w0 := arr[0];
+  w1 := arr[1];
+  assert(w0[0]() == 3, "slot 0");
+  assert(w1[0]() == 5, "slot 1");
+  // Invoke each slot repeatedly to confirm the aliased env survives.
+  assert(w0[0]() + w1[0]() == 8, "both slots, multiple invoke");
+}
+
+// Generic/monomorphized path: the fixed-array element read runs under an active type
+// substitution (the array element `(() -> T)[]` resolves to `(() -> int)[]`). The guard
+// must still fire in the mono instance so the aliased env survives invoke — no SEGV,
+// no leak (the array remains sole owner and drops the inner vector/envs once).
+read_generic_array[T]((() -> T)[][1] arr) T {
+  w := arr[0];
+  return w[0]();
+}
+
+array_of_vec_closure_read_generic() `test {
+  x := 42;
+  (() -> int)[][1] a = [[|| -> x]];
+  assert(read_generic_array[int](a) == 42, "generic-param fixed-array vec-of-closures read");
+}
+
+array_of_vec_closure_read_generic_captured() `test {
+  y := 11;
+  (() -> int)[][1] a = [[move || -> y + 1]];
+  assert(read_generic_array[int](a) == 12, "generic-param heap-capturing closure read");
+}

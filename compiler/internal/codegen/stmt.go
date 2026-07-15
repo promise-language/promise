@@ -3734,14 +3734,21 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 }
 
 // isFreshOwnedStructuralRHS reports whether rhs produces a freshly-allocated
-// owned value with no surviving owner (a call/operator result), as opposed to a
-// borrow/alias (IdentExpr, MemberExpr). A structural result type can only come
-// from a user method/operator, which returns an owned value; identifiers and
-// member accesses are borrows. Used to decide whether an unwrapped
-// structural-interface binding must free its box at scope exit. T1288.
+// owned value with no surviving owner (a call/operator/getter/user-index
+// result), as opposed to a borrow/alias (IdentExpr, field-access MemberExpr,
+// native container index). A structural result type from a call/operator can
+// only come from a user method, which returns an owned value; a getter *call*
+// and a user-defined non-native `[]` operator likewise return fresh owned
+// values, while a plain field access and native indexing are borrows. Used to
+// decide whether an unwrapped structural-interface binding must free its box at
+// scope exit. T1288.
 // B0272: unwraps error-handling wrappers (!, ^, ? {}, force-unwrap) first so a
 // failable structural return still counts as a fresh owned allocation.
-func isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
+// T1289: also recognizes IndexExpr (user-defined `[]`) and getter-call
+// MemberExpr as fresh-owned — both were previously missed and leaked their box;
+// consulting sema (isUserIndexExpr / isGetterCallExpr) distinguishes them from
+// borrows, and !isBorrowedExpr excludes borrow-returning (`T&`) operators/getters.
+func (c *Compiler) isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
 	innerRHS := rhs
 	for {
 		switch e := innerRHS.(type) {
@@ -3763,6 +3770,14 @@ func isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
 	switch innerRHS.(type) {
 	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
 		return true
+	case *ast.IndexExpr:
+		// T1289: a user-defined non-native `[]` returns a fresh owned value; a
+		// borrow-returning operator (`T&`) aliases container storage — skip it.
+		return c.isUserIndexExpr(innerRHS) && !c.isBorrowedExpr(innerRHS)
+	case *ast.MemberExpr:
+		// T1289: a getter *call* is fresh-owned (free it); a field *borrow* is not
+		// (freeing double-frees). A borrow-returning getter (`T&`) is also an alias.
+		return c.isGetterCallExpr(innerRHS) && !c.isBorrowedExpr(innerRHS)
 	default:
 		return false
 	}
@@ -3797,7 +3812,7 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	// allocations that must be freed here). Other RHS expressions — identifiers
 	// (borrow from existing variable), literals (value types, no heap alloc),
 	// member access (borrow) — should NOT get a free binding.
-	if !isFreshOwnedStructuralRHS(rhs) {
+	if !c.isFreshOwnedStructuralRHS(rhs) {
 		// T1276: a claimed fresh box (value/primitive → structural coercion of a
 		// non-call RHS, e.g. an identifier copy) is owned even though its RHS shape
 		// isn't a call — register the free. Otherwise it's a borrow: skip.
@@ -11694,11 +11709,13 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		// innerHasDrop). Without a drop, the boxed heap instance leaks. Register an
 		// RTTI-dispatched structural free (routes the instance ptr through
 		// __promise_structural_drop) so it's freed at scope exit. Gated to
-		// fresh-owned-temp sources — an IdentExpr/MemberExpr source keeps its own
-		// owner which drops the box, so registering here would double-free.
+		// fresh-owned-temp sources — an IdentExpr/field-borrow MemberExpr source
+		// keeps its own owner which drops the box, so registering here would
+		// double-free. T1289: a getter-call MemberExpr and a user-defined `[]`
+		// IndexExpr are now correctly recognized as fresh-owned by the helper.
 		if _, already := c.dropBindings[s.Binding]; !already {
 			if en := extractNamed(elemType); en != nil && en.IsStructural() && !en.IsValueType() {
-				if isFreshOwnedStructuralRHS(s.Init) {
+				if c.isFreshOwnedStructuralRHS(s.Init) {
 					c.maybeRegisterStructuralParamFree(s.Binding, alloca, elemType)
 				}
 			}
@@ -11931,12 +11948,14 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		// from an owned optional temp (call/operator result) is skipped by
 		// maybeRegisterDrop and gets no ownership transfer, so the box leaks.
 		// Register an RTTI-dispatched structural free, gated to fresh-owned-temp
-		// sources so an IdentExpr/MemberExpr source (which keeps its own owner) is
-		// not double-freed. The binding is above unwrapScopeLen, so the
-		// per-iteration emitScopeCleanup frees it each iteration.
+		// sources so an IdentExpr/field-borrow MemberExpr source (which keeps its
+		// own owner) is not double-freed. T1289: a getter-call MemberExpr and a
+		// user-defined `[]` IndexExpr are now correctly recognized as fresh-owned.
+		// The binding is above unwrapScopeLen, so the per-iteration
+		// emitScopeCleanup frees it each iteration.
 		if _, already := c.dropBindings[s.Binding]; !already {
 			if en := extractNamed(elemType); en != nil && en.IsStructural() && !en.IsValueType() {
-				if isFreshOwnedStructuralRHS(s.Value) {
+				if c.isFreshOwnedStructuralRHS(s.Value) {
 					c.maybeRegisterStructuralParamFree(s.Binding, alloca, elemType)
 				}
 			}

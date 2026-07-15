@@ -1,0 +1,89 @@
+// T1289: Optional-unwrap binding leaks a structural-interface box when the
+// source is a user-defined `[]` operator (`if x := r[i]`) or a getter
+// (`if x := r.slot`). Both return a fresh owned box with no surviving owner, so
+// the unwrap binding must free it at scope exit. A plain field-access source is
+// a borrow and must NOT be freed (double-free). Zero-leak enforcement makes
+// these fail on regression (LEAK outcome).
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+show(int n) Showable {
+  return Widget(id: n);
+}
+
+type Reg {
+  int base;
+  [](int i) Showable? {
+    return show(this.base + i);
+  }
+  get slot Showable? {
+    return show(this.base);
+  }
+}
+
+type Holder {
+  Showable? item;
+}
+
+// if-let over a user-defined `[]` operator source — box must be freed.
+idx_unwrap() `test {
+  Reg r = Reg(base: 10);
+  if x := r[5] {
+    assert(x.to_string() == "w15", "index unwrap value");
+  }
+}
+
+// if-let over a getter-call source — box must be freed.
+get_unwrap() `test {
+  Reg r = Reg(base: 20);
+  if x := r.slot {
+    assert(x.to_string() == "w20", "getter unwrap value");
+  }
+}
+
+// while-let over a user-defined `[]` operator source — each box freed per iter.
+idx_while_unwrap() `test {
+  Reg r = Reg(base: 100);
+  int i = 0;
+  int seen = 0;
+  while x := r[i] {
+    assert(x.to_string() == "w" + (100 + i).to_string(), "while index value");
+    seen = seen + 1;
+    i = i + 1;
+    if i >= 3 {
+      break;
+    }
+  }
+  assert(seen == 3, "iterated three times");
+}
+
+// while-let over a getter-call source — each box freed per iteration.
+get_while_unwrap() `test {
+  Reg r = Reg(base: 5);
+  int seen = 0;
+  while x := r.slot {
+    assert(x.to_string() == "w5", "while getter value");
+    seen = seen + 1;
+    if seen >= 3 {
+      break;
+    }
+  }
+  assert(seen == 3, "getter iterated three times");
+}
+
+// Negative guard: a plain field-access source is a borrow — the holder owns and
+// drops the box. The unwrap binding must not double-free.
+field_unwrap() `test {
+  Holder h = Holder(item: show(9));
+  if x := h.item {
+    assert(x.to_string() == "w9", "field unwrap value");
+  }
+}

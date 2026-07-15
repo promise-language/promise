@@ -1,5 +1,5 @@
 [catalog]
-epoch = "2026.4"
+epoch = "2026.5"
 
 [modules.std]
 description = "Standard library (auto-imported into every file)"

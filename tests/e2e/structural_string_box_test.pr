@@ -1,0 +1,139 @@
+// T1280: A string coerced to a structural interface is heap-boxed as
+// { i8* typeinfo, i8* string_ptr } holding an OWNED deep clone. The box must survive
+// escape (return/binding, moved param, struct/enum field) and drop cleanly without a
+// segfault ("field 0 misread as typeinfo") or leaks. Field 0 carries a dedicated
+// typeinfo (@promise_typeinfo_stringbox) whose drop_fn (@__promise_string_box_drop)
+// drops the cloned string via promise_string_drop then frees the box.
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+// Returns a string boxed as a structural interface (escaping box).
+show_str(string s) Showable {
+  return s;
+}
+
+// The exact repro: returned literal boxed as Showable, bound to a local, survives an
+// intervening allocation, method reads correct value, drops cleanly at scope exit.
+test_returned_literal_string_survives_frame() `test {
+  Showable s = show_str("hi");
+  int[] junk = [9, 8, 7, 6, 5];
+  assert(s.to_string() == "hi", "boxed string survives returned frame");
+  assert(junk.len == 5, "intervening allocation intact");
+}
+
+// Returned HEAP string (concatenation, not a rodata literal): exercises the clone/escape
+// fix and the non-literal branch of promise_string_drop (must actually free, no leak).
+test_returned_heap_string_box_drop() `test {
+  string a = "foo";
+  string b = "bar";
+  Showable s = show_str(a + b);
+  assert(s.to_string() == "foobar", "boxed heap string method + drop");
+}
+
+// Local box drop path for a string literal.
+test_local_string_box() `test {
+  Showable s = "local";
+  assert(s.to_string() == "local", "local string box");
+}
+
+// Local-to-local move: the box moves out of `a` into `b`; `a`'s drop flag must be cleared
+// so only `b` frees the box at scope exit — no double free, no leak of the moved box.
+test_string_box_local_move() `test {
+  Showable a = show_str("deep");
+  Showable b = a;
+  assert(b.to_string() == "deep", "box moved through a second local");
+}
+
+// Move a string box into a callee that consumes (frees) it — moved-param free path.
+describe(Showable move s) string {
+  return s.to_string();
+}
+test_string_move_arg() `test {
+  assert(describe(show_str("moved")) == "moved", "moved string box freed by callee");
+  assert(describe("direct") == "direct", "moved string literal box freed by callee");
+}
+
+// Reassignment: the old string box must be dropped (freed) before the new box is
+// claimed — no leak of the old, no double-free. Covers both a literal RHS and a call RHS.
+test_string_reassign_drops_old_box() `test {
+  Showable s = "one";
+  assert(s.to_string() == "one", "initial string box");
+  s = "two";
+  assert(s.to_string() == "two", "reassigned from literal");
+  s = show_str("three");
+  assert(s.to_string() == "three", "reassigned from call");
+}
+
+// Loop stability: box + drop a string each iteration (no-leak assertion).
+test_string_loop_box_drop() `test {
+  int count = 0;
+  for i in 0..50 {
+    Showable s = show_str(i.to_string());
+    if s.to_string().len > 0 {
+      count = count + 1;
+    }
+  }
+  assert(count == 50, "string boxes freed each iteration");
+}
+
+// Empty string boxed and dropped.
+test_empty_string_box() `test {
+  Showable s = show_str("");
+  assert(s.to_string() == "", "empty string box");
+  assert(s.to_string().len == 0, "empty string box length");
+}
+
+// Struct-field escape: a string box stored in a struct field must drop with the struct
+// (the RTTI drop site the fix's comment claims works uniformly). No leak, correct read.
+type StrHolder {
+  Showable item;
+}
+test_string_box_in_struct_field() `test {
+  StrHolder h = StrHolder(item: show_str("field"));
+  assert(h.item.to_string() == "field", "boxed string survives in a struct field");
+}
+
+// Enum-field escape: a string box carried in an enum variant payload must drop when the
+// enum drops (the enum-field RTTI drop site). No leak, correct read after match.
+enum StrWrap {
+  One(Showable s), Two,
+}
+test_string_box_in_enum_field() `test {
+  StrWrap w = StrWrap.One(show_str("variant"));
+  match w {
+    StrWrap.One(s) => assert(s.to_string() == "variant", "boxed string in an enum field"),
+    StrWrap.Two => assert(false, "unreachable"),
+  }
+}
+
+enum BoxCmd {
+  First(int n),
+  Second,
+}
+
+// Regression for the cleanupHeapTemps double-free (found via T1280 verify):
+// print_line(Format) heap-boxes its string argument as a statement-end temp. Inside a
+// match in a loop, the box temp alloca/drop-flag are function-entry allocas that persist
+// across iterations and are only refreshed by the *taken* arm. cleanupHeapTemps used to
+// drop the temp without resetting its flag, so after arm First boxes+drops (flag stays
+// true), a later iteration taking arm Second would re-drop arm First's stale (freed)
+// pointer via the shared post-match cleanup → double free / segfault. Dispatching both
+// arms (in either order) across iterations must not crash and must not leak.
+test_match_arm_box_no_double_free() `test {
+  BoxCmd[] cmds = [BoxCmd.First(1), BoxCmd.Second, BoxCmd.First(2), BoxCmd.Second];
+  int hits = 0;
+  for cmd in cmds {
+    match cmd {
+      BoxCmd.First(n) => {
+        print_line("first: {n}");
+        hits = hits + 1;
+      },
+      BoxCmd.Second => {
+        print_line("second");
+        hits = hits + 1;
+      },
+    }
+  }
+  assert(hits == 4, "all arms dispatched without a double-free crash");
+}

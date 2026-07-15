@@ -792,7 +792,11 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// or primitive scalar receiver vs i8* receiver).
 			// If so, generate an adapter thunk with the interface's signature.
 			concreteMethod := c.lookupMethodForMethod(concrete, m)
-			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete))
+			// T1280: a string concrete always needs an adapter — the receiver behind the
+			// view is now the heap box { i8* typeinfo, i8* string_ptr }, so the raw
+			// string.method (which expects the string ptr as `this`) cannot be used
+			// directly; the adapter loads field 1 from the box first.
+			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete) || concrete == types.TypString)
 			if needsAdapter {
 				adapter := c.emitViewMethodAdapter(concrete, concreteMethod, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
@@ -892,6 +896,15 @@ func (c *Compiler) emitViewMethodAdapter(
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			scalar := c.block.NewLoad(scalarType, scalarField)
 			args = append(args, scalar)
+		} else if concreteType == types.TypString {
+			// T1280: The string box is { i8* typeinfo, i8* string_ptr } (heap-allocated by
+			// boxForStructuralView), so load the string pointer receiver from field 1.
+			boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(boxType))
+			strField := c.block.NewGetElementPtr(boxType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			strPtr := c.block.NewLoad(irtypes.I8Ptr, strField)
+			args = append(args, strPtr)
 		} else {
 			args = append(args, params[paramIdx])
 		}
@@ -1115,7 +1128,9 @@ func isMaterializedViewPtr(val value.Value) bool {
 // boxForStructuralView boxes a primitive or string value into a structural interface
 // view ({i8*, i8*}) when the target is a structural interface.
 // For primitives: heap-allocates a { typeinfo, scalar } box and creates {vtable, box}.
-// For string: creates {vtable, string_ptr} (string is already i8*).
+// For string (T1280): heap-allocates a { typeinfo, string_ptr } box holding an owned
+// deep clone and creates {vtable, box}, so the box drops cleanly on escape.
+// For opaque containers: creates {vtable, i8*} directly (the raw pointer).
 func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
 	// Only box when target is a structural interface
 	if !toNamed.IsStructural() {
@@ -1156,8 +1171,31 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		c.block.NewStore(val, scalarField)
 		c.trackHeapTemp(raw, c.palFree)
 		instancePtr = raw
+	} else if fromNamed == types.TypString {
+		// T1280: Heap-box the string as { i8* typeinfo, i8* string_ptr }. Field 1 is an
+		// OWNED deep clone (dupString) so the box owns its payload independently of the
+		// caller's string temp — no aliasing, no use-after-return dangle. Field 0 carries
+		// a dedicated typeinfo (@promise_typeinfo_stringbox) whose drop_fn
+		// (@__promise_string_box_drop) drops the cloned string via promise_string_drop
+		// (honoring the rodata literal flag), then pal_free's the box. That real drop_fn
+		// makes every RTTI drop site (local free, moved-param free, struct/enum-field
+		// drop) work uniformly through __promise_structural_drop. The malloc is tracked as
+		// an owned heap temp so exactly one owner frees it.
+		cloned := c.dupString(val)
+		boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+		size := constant.NewInt(irtypes.I64, int64(c.typeSize(boxType)))
+		raw := c.block.NewCall(c.palAlloc, size)
+		typed := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
+		tiField := c.block.NewGetElementPtr(boxType, typed,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewStore(constant.NewBitCast(c.getStringBoxTypeInfo(), irtypes.I8Ptr), tiField)
+		strField := c.block.NewGetElementPtr(boxType, typed,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		c.block.NewStore(cloned, strField)
+		c.trackHeapTemp(raw, c.getStringBoxDrop())
+		instancePtr = raw
 	} else {
-		// String and other i8* types: already an i8* pointer
+		// Other i8* types (opaque containers): already an i8* pointer
 		instancePtr = val
 	}
 

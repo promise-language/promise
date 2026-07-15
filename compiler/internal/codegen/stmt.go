@@ -7003,6 +7003,15 @@ func (c *Compiler) cleanupHeapTemps() {
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
+		// B0270/T1280: Reset the drop flag after dropping so a stale temp isn't
+		// re-dropped on a later loop iteration or in a sibling match arm. The temp
+		// alloca/flag are function-entry allocas that persist across iterations and
+		// are only refreshed by the box-creation code in the *taken* branch. If arm A
+		// registers+drops a box here (leaving flag=true) and a later iteration takes
+		// arm B instead, this same emitted cleanup would re-load arm A's stale (freed)
+		// pointer with flag still true → double free. emitHeapTempCleanupForErrorPath
+		// already does this; cleanupHeapTemps was missing it.
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
 		c.block.NewBr(skipBlock)
 
 		c.block = skipBlock

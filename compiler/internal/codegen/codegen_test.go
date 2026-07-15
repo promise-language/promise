@@ -9428,8 +9428,13 @@ func TestStringToStructuralView(t *testing.T) {
 		display(Showable s) string { return s.to_string(); }
 		main() { display("hello"); }
 	`)
-	// String is i8* — no scalar alloca needed, but still needs view vtable
 	assertContains(t, ir, "@promise_vtable_string_as_Showable")
+	// T1280: a string coerced to a structural interface is heap-boxed as
+	// { i8* typeinfo, i8* string_ptr }, carries a dedicated typeinfo whose drop_fn
+	// frees the cloned string + box, and dispatches through an adapter thunk.
+	assertContains(t, ir, "string.to_string$view_adapt")
+	assertContains(t, ir, "@promise_typeinfo_stringbox")
+	assertContains(t, ir, "@__promise_string_box_drop")
 }
 
 func TestPrimitiveCharToStructuralView(t *testing.T) {
@@ -9478,6 +9483,60 @@ func TestPrimitiveViewAdapterLoadsScalarFromPointer(t *testing.T) {
 	assertContains(t, ir, "bitcast i8* %this to { i8*, i64 }*")
 	assertContains(t, ir, "getelementptr { i8*, i64 }, { i8*, i64 }* %0, i32 0, i32 1")
 	assertContains(t, ir, "load i64, i64*")
+}
+
+func TestStringViewAdapterLoadsPointerFromBox(t *testing.T) {
+	// T1280: the string box is { i8* typeinfo, i8* string_ptr } — the adapter thunk
+	// receives the box as i8* (interface convention) and must bitcast + GEP + load
+	// field 1 to recover the string pointer receiver for the concrete method.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display("hi"); }
+	`)
+	assertContains(t, ir, "string.to_string$view_adapt")
+	assertContains(t, ir, "bitcast i8* %this to { i8*, i8* }*")
+	assertContains(t, ir, "getelementptr { i8*, i8* }, { i8*, i8* }* %0, i32 0, i32 1")
+}
+
+func TestReturnedStringBoxHasStringBoxTypeInfo(t *testing.T) {
+	// T1280: when a string is boxed and RETURNED (escaping), the box's field 0 must be
+	// the stringbox typeinfo so __promise_structural_drop finds a non-null drop_fn
+	// (@__promise_string_box_drop) and frees the cloned string + box instead of
+	// misreading the string instance's _variant pointer as a typeinfo header.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		show_str(string s) Showable { return s; }
+		main() { Showable a = show_str("hi"); }
+	`)
+	// The typeinfo global exists and carries the box drop wrapper as its drop_fn.
+	assertContains(t, ir, "@promise_typeinfo_stringbox")
+	assertContains(t, ir, "@__promise_string_box_drop")
+	// The box stores the stringbox typeinfo into field 0.
+	assertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_stringbox to i8*)")
+}
+
+func TestStringBoxInStructFieldUsesStringBoxDrop(t *testing.T) {
+	// T1280: a string boxed as a structural interface and stored into a struct field must
+	// still carry the stringbox typeinfo, so when the struct drops, the enclosing type's
+	// field-drop routes the boxed string through __promise_structural_drop → the box
+	// drop_fn (frees the cloned string + box). Confirms the RTTI drop site is uniform for
+	// the struct-field escape path (not just return/local), matching the runtime e2e test.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		show_str(string s) Showable { return s; }
+		type Holder { Showable item; }
+		main() { Holder h = Holder(item: show_str("x")); }
+	`)
+	assertContains(t, ir, "@promise_typeinfo_stringbox")
+	assertContains(t, ir, "@__promise_string_box_drop")
+	assertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_stringbox to i8*)")
 }
 
 func TestPrimitiveToFailableStructuralView(t *testing.T) {

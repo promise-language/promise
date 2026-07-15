@@ -495,12 +495,14 @@ type Compiler struct {
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
-	genResume       *ir.Func   // @__promise_gen_resume(i8*) → void [noinline]
-	genDone         *ir.Func   // @__promise_gen_done(i8*) → i1 [noinline]
-	genDestroy      *ir.Func   // @__promise_gen_destroy(i8*) → void [noinline]
-	iterCleanup     *ir.Func   // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
-	structuralDrop  *ir.Func   // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
-	noValueTypeInfo *ir.Global // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
+	genResume         *ir.Func   // @__promise_gen_resume(i8*) → void [noinline]
+	genDone           *ir.Func   // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy        *ir.Func   // @__promise_gen_destroy(i8*) → void [noinline]
+	iterCleanup       *ir.Func   // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
+	structuralDrop    *ir.Func   // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
+	noValueTypeInfo   *ir.Global // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
+	stringBoxTypeInfo *ir.Global // @promise_typeinfo_stringbox: typeinfo whose drop_fn frees the cloned string + box (T1280)
+	stringBoxDrop     *ir.Func   // @__promise_string_box_drop(i8*): drops the boxed string clone then frees the box (T1280)
 
 	// Target triple and platform flags
 	target                string     // LLVM target triple
@@ -10583,6 +10585,58 @@ func (c *Compiler) getNoValueTypeInfo() *ir.Global {
 	g := c.module.NewGlobalDef("promise_typeinfo_novalue", init)
 	g.Immutable = true
 	c.noValueTypeInfo = g
+	return g
+}
+
+// getStringBoxDrop returns @__promise_string_box_drop, emitting it once. The wrapper
+// takes the string box (i8* to { i8* typeinfo, i8* string_ptr }), loads field 1 (the
+// owned string clone), drops it via promise_string_drop (honoring the rodata literal
+// flag), then pal_free's the box. This is the drop_fn carried by the string box's
+// typeinfo header so __promise_structural_drop dispatches it at every RTTI drop site
+// (T1280). Emitted lazily so promise_string_drop and pal_free are already defined;
+// referenced as an extern in split module/instance IRs.
+func (c *Compiler) getStringBoxDrop() *ir.Func {
+	if c.stringBoxDrop != nil {
+		return c.stringBoxDrop
+	}
+	boxParam := ir.NewParam("box", irtypes.I8Ptr)
+	fn := c.module.NewFunc("__promise_string_box_drop", irtypes.Void, boxParam)
+	entry := fn.NewBlock(".entry")
+
+	boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	typed := entry.NewBitCast(boxParam, irtypes.NewPointer(boxType))
+	strField := entry.NewGetElementPtr(boxType, typed,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	strPtr := entry.NewLoad(irtypes.I8Ptr, strField)
+	entry.NewCall(c.funcs["promise_string_drop"], strPtr)
+	entry.NewCall(c.palFree, boxParam)
+	entry.NewRet(nil)
+
+	c.stringBoxDrop = fn
+	return fn
+}
+
+// getStringBoxTypeInfo returns a shared immutable typeinfo global whose drop_fn (field 1)
+// points to @__promise_string_box_drop, used as the RTTI header for heap-boxed strings
+// coerced to a structural interface (T1280). __promise_structural_drop reads the
+// non-null drop_fn and dispatches the wrapper, which frees the cloned string then the
+// box. Emitted once on the main module; module/instance IRs reference it as an extern.
+func (c *Compiler) getStringBoxTypeInfo() *ir.Global {
+	if c.stringBoxTypeInfo != nil {
+		return c.stringBoxTypeInfo
+	}
+	dropFn := c.getStringBoxDrop()
+	// Layout mirrors a no-parent typeinfo: { vtable, drop_fn, clone_fn, typeID, numParents }.
+	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+	init := constant.NewStruct(structType,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewBitCast(dropFn, irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0))
+	g := c.module.NewGlobalDef("promise_typeinfo_stringbox", init)
+	g.Immutable = true
+	c.stringBoxTypeInfo = g
 	return g
 }
 

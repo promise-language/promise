@@ -1,0 +1,236 @@
+// T1284: A Vector whose element type is a structural interface must drop its
+// heap-boxed elements at vector drop (routing each element's instance ptr through
+// __promise_structural_drop), and must DEEP-CLONE those boxes on clone/slice/push
+// so the copy owns an independent box (else the now-active element drop double-
+// frees). Covers user-type boxes, string boxes (T1280), primitive boxes, and
+// value-type boxes.
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+type Pt {
+  int x `value;
+  int y `value;
+  to_string() string {
+    return this.x.to_string();
+  }
+}
+
+// A `copy heap type (bitwise-copyable, but NOT a pure value type) boxed behind the
+// interface: its concrete typeinfo must still carry a clone_fn so structural clone/
+// slice deep-copies the box (else the structural-aware element drop double-frees).
+type Tag `copy {
+  int id;
+  to_string() string {
+    return "t" + this.id.to_string();
+  }
+}
+
+// Box a raw string / primitive / value type into the interface via return-position
+// coercion (the push-site coercion is a separate, pre-existing blocker — T1285).
+show_str(string s) Showable {
+  return s;
+}
+show_int(int n) Showable {
+  return n;
+}
+show_pt(int a, int b) Showable {
+  return Pt(x: a, y: b);
+}
+show_tag(int n) Showable {
+  return Tag(id: n);
+}
+
+// --- Drop: no leak (element instances are freed via __promise_structural_drop) ---
+
+vector_user_box_drop() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  assert(v.len == 2, "user box len");
+}
+
+vector_string_box_drop() `test {
+  Showable[] v = [];
+  v.push(show_str("a"));
+  v.push(show_str("b"));
+  assert(v.len == 2, "string box len");
+}
+
+vector_primitive_box_drop() `test {
+  Showable[] v = [];
+  v.push(show_int(1));
+  v.push(show_int(2));
+  assert(v.len == 2, "primitive box len");
+}
+
+vector_value_box_drop() `test {
+  Showable[] v = [];
+  v.push(show_pt(1, 2));
+  v.push(show_pt(3, 4));
+  assert(v.len == 2, "value box len");
+}
+
+vector_copy_box_drop() `test {
+  Showable[] v = [];
+  v.push(show_tag(1));
+  v.push(show_tag(2));
+  assert(v.len == 2, "copy box len");
+}
+
+vector_heterogeneous_drop() `test {
+  Showable[] v = [];
+  v.push(show_str("a"));
+  v.push(Widget(id: 9));
+  v.push(show_int(7));
+  assert(v.len == 3, "hetero len");
+}
+
+// --- Clone: independent boxes (no double-free, no leak) ---
+
+vector_user_box_clone() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  Showable[] c = v.clone();
+  assert(c.len == 2, "user clone len");
+}
+
+vector_string_box_clone() `test {
+  Showable[] v = [];
+  v.push(show_str("a"));
+  v.push(show_str("b"));
+  Showable[] c = v.clone();
+  assert(c.len == 2, "string clone len");
+}
+
+vector_primitive_box_clone() `test {
+  Showable[] v = [];
+  v.push(show_int(1));
+  v.push(show_int(2));
+  Showable[] c = v.clone();
+  assert(c.len == 2, "primitive clone len");
+}
+
+vector_value_box_clone() `test {
+  Showable[] v = [];
+  v.push(show_pt(1, 2));
+  v.push(show_pt(3, 4));
+  Showable[] c = v.clone();
+  assert(c.len == 2, "value clone len");
+}
+
+vector_copy_box_clone() `test {
+  Showable[] v = [];
+  v.push(show_tag(1));
+  v.push(show_tag(2));
+  Showable[] c = v.clone();
+  assert(c.len == 2, "copy clone len");
+}
+
+// --- Slice: element boxes are deep-cloned (via result.push(this[i])) ---
+
+vector_user_box_slice() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  v.push(Widget(id: 3));
+  Showable[] s = v[0:2];
+  assert(s.len == 2, "user slice len");
+}
+
+vector_string_box_slice() `test {
+  Showable[] v = [];
+  v.push(show_str("a"));
+  v.push(show_str("b"));
+  v.push(show_str("c"));
+  Showable[] s = v[0:2];
+  assert(s.len == 2, "string slice len");
+}
+
+// --- Iterate: reads observe the correct boxed values ---
+
+vector_iterate() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  string acc = "";
+  for x in v {
+    acc = acc + x.to_string();
+  }
+  assert(acc == "w1w2", acc);
+}
+
+// --- Element-removal drop sites: removed/consumed boxes still free cleanly ---
+
+// remove() drops the removed boxed element (the structural-aware element path
+// must free the box, not leak it).
+vector_remove_drop() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  v.push(Widget(id: 3));
+  v.remove(1);
+  assert(v.len == 2, "remove len");
+}
+
+// pop() moves the box out into an Optional local; the remaining vector still owns
+// the rest, and the moved-out box drops with the optional at scope end (no leak,
+// no double-free). NOTE: unwrapping the optional via `if x := v.pop()` currently
+// leaks (T1288 — if-let unwrap of a structural optional); this stores the optional
+// without unwrapping, which drops cleanly and still exercises the vector pop path.
+vector_pop_drop() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(show_str("a"));
+  Showable? last = v.pop();
+  assert(v.len == 1, "pop len");
+}
+
+// --- Nesting: a Vector[structural] as a struct field drops elements on struct drop ---
+
+type Holder {
+  Showable[] items;
+}
+
+vector_in_struct_field_drop() `test {
+  Holder h = Holder(items: []);
+  h.items.push(Widget(id: 1));
+  h.items.push(show_str("a"));
+  h.items.push(show_int(7));
+  assert(h.items.len == 3, "nested len");
+}
+
+// --- Clone independence: mutating the original after clone doesn't disturb the copy ---
+
+vector_clone_independent_mutation() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  Showable[] c = v.clone();
+  v.push(Widget(id: 2));
+  v.push(show_str("z"));
+  assert(v.len == 3, "orig len");
+  assert(c.len == 1, "clone len");
+}
+
+// --- Empty structural vector: clone + drop of a zero-element vector is a no-op, no leak ---
+
+vector_empty_clone_drop() `test {
+  Showable[] v = [];
+  Showable[] c = v.clone();
+  assert(v.len == 0, "empty len");
+  assert(c.len == 0, "empty clone len");
+}
+
+// NOTE: index-assignment overwrite of a structural element
+// (`Showable[] v; ...; v[0] = Widget(...)`) currently LEAKS the overwritten box —
+// genVectorIndexAssign's drop-old chain has no structural branch. Tracked
+// separately as T1287; a regression test lives with that fix (a leaking test
+// cannot be added here without failing the suite).

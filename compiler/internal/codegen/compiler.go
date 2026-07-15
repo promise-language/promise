@@ -495,14 +495,18 @@ type Compiler struct {
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
-	genResume         *ir.Func   // @__promise_gen_resume(i8*) → void [noinline]
-	genDone           *ir.Func   // @__promise_gen_done(i8*) → i1 [noinline]
-	genDestroy        *ir.Func   // @__promise_gen_destroy(i8*) → void [noinline]
-	iterCleanup       *ir.Func   // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
-	structuralDrop    *ir.Func   // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
-	noValueTypeInfo   *ir.Global // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
-	stringBoxTypeInfo *ir.Global // @promise_typeinfo_stringbox: typeinfo whose drop_fn frees the cloned string + box (T1280)
-	stringBoxDrop     *ir.Func   // @__promise_string_box_drop(i8*): drops the boxed string clone then frees the box (T1280)
+	genResume         *ir.Func             // @__promise_gen_resume(i8*) → void [noinline]
+	genDone           *ir.Func             // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy        *ir.Func             // @__promise_gen_destroy(i8*) → void [noinline]
+	iterCleanup       *ir.Func             // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
+	structuralDrop    *ir.Func             // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
+	structuralClone   *ir.Func             // @__promise_structural_clone(i8*) → i8* (T1284: RTTI-based deep clone for structural iface instances)
+	noValueTypeInfo   *ir.Global           // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
+	stringBoxTypeInfo *ir.Global           // @promise_typeinfo_stringbox: typeinfo whose drop_fn frees the cloned string + box (T1280)
+	stringBoxDrop     *ir.Func             // @__promise_string_box_drop(i8*): drops the boxed string clone then frees the box (T1280)
+	stringBoxClone    *ir.Func             // @__promise_string_box_clone(i8*)→i8*: deep-copies a boxed string for structural clone/slice (T1284)
+	flatBoxTypeInfos  map[int64]*ir.Global // per-size null-drop typeinfo carrying a flat malloc+memcpy clone_fn for primitive/value structural boxes (T1284)
+	flatBoxClones     map[int64]*ir.Func   // per-size @__promise_flat_box_clone_<size>(i8*)→i8* (T1284)
 
 	// Target triple and platform flags
 	target                string     // LLVM target triple
@@ -10616,6 +10620,107 @@ func (c *Compiler) getStringBoxDrop() *ir.Func {
 	return fn
 }
 
+// getStringBoxClone returns @__promise_string_box_clone, emitting it once. The
+// clone takes a string box (i8* to { i8* typeinfo, i8* string_ptr }), allocates a
+// fresh box, copies the typeinfo header, deep-copies the owned string via
+// dupString, and returns the new box. This is the clone_fn carried by the string
+// box's typeinfo header (field 2) so __promise_structural_clone deep-copies a
+// boxed string when a Vector[structural] holding it is cloned/sliced (T1284) —
+// without it the shallow view copy aliases the box and the structural-aware
+// element drop double-frees. Emitted lazily so dupString/palAlloc are defined.
+func (c *Compiler) getStringBoxClone() *ir.Func {
+	if c.stringBoxClone != nil {
+		return c.stringBoxClone
+	}
+	boxParam := ir.NewParam("box", irtypes.I8Ptr)
+	fn := c.module.NewFunc("__promise_string_box_clone", irtypes.I8Ptr, boxParam)
+
+	// dupString creates its own basic blocks and advances c.block; emit the whole
+	// body through c.block (save/restore the caller's cursor and fn context).
+	savedBlock, savedFn, savedEntry := c.block, c.fn, c.entryBlock
+	c.fn = fn
+	c.block = fn.NewBlock(".entry")
+	c.entryBlock = c.block
+
+	boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	size := constant.NewInt(irtypes.I64, int64(c.typeSize(boxType)))
+	raw := c.block.NewCall(c.palAlloc, size)
+	newTyped := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
+	oldTyped := c.block.NewBitCast(boxParam, irtypes.NewPointer(boxType))
+
+	// Copy typeinfo header (field 0)
+	oldTiField := c.block.NewGetElementPtr(boxType, oldTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	ti := c.block.NewLoad(irtypes.I8Ptr, oldTiField)
+	newTiField := c.block.NewGetElementPtr(boxType, newTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(ti, newTiField)
+
+	// Deep-copy the owned string (field 1)
+	oldStrField := c.block.NewGetElementPtr(boxType, oldTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	oldStr := c.block.NewLoad(irtypes.I8Ptr, oldStrField)
+	clonedStr := c.dupString(oldStr)
+	newStrField := c.block.NewGetElementPtr(boxType, newTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(clonedStr, newStrField)
+
+	c.block.NewRet(raw)
+	c.block, c.fn, c.entryBlock = savedBlock, savedFn, savedEntry
+	c.stringBoxClone = fn
+	return fn
+}
+
+// getFlatBoxClone returns a size-specialized @__promise_flat_box_clone_<size>
+// (i8*)→i8* that malloc's `size` bytes and memcpy's the source box into it. Used
+// as the clone_fn for primitive and value-type structural boxes — both are "flat"
+// (the boxed payload is Copy, with no droppable sub-fields), so a byte copy is a
+// correct deep copy. T1284.
+func (c *Compiler) getFlatBoxClone(size int64) *ir.Func {
+	if c.flatBoxClones == nil {
+		c.flatBoxClones = map[int64]*ir.Func{}
+	}
+	if fn, ok := c.flatBoxClones[size]; ok {
+		return fn
+	}
+	boxParam := ir.NewParam("box", irtypes.I8Ptr)
+	fn := c.module.NewFunc(fmt.Sprintf("__promise_flat_box_clone_%d", size), irtypes.I8Ptr, boxParam)
+	entry := fn.NewBlock(".entry")
+	sizeVal := constant.NewInt(irtypes.I64, size)
+	raw := entry.NewCall(c.palAlloc, sizeVal)
+	entry.NewCall(c.funcs["llvm.memcpy"], raw, boxParam, sizeVal, constant.False)
+	entry.NewRet(raw)
+	c.flatBoxClones[size] = fn
+	return fn
+}
+
+// getFlatBoxTypeInfo returns a per-size immutable typeinfo header (typeID 0, no
+// parents, null drop_fn so __promise_structural_drop pal_free's the box) whose
+// clone_fn (field 2) is a flat malloc+memcpy clone. Carried by primitive/value
+// structural boxes so structural clone/slice produces an independently-owned box
+// instead of aliasing the source (which the structural-aware element drop would
+// then double-free). Mirrors getNoValueTypeInfo but adds the clone_fn. T1284.
+func (c *Compiler) getFlatBoxTypeInfo(size int64) *ir.Global {
+	if c.flatBoxTypeInfos == nil {
+		c.flatBoxTypeInfos = map[int64]*ir.Global{}
+	}
+	if g, ok := c.flatBoxTypeInfos[size]; ok {
+		return g
+	}
+	cloneFn := c.getFlatBoxClone(size)
+	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+	init := constant.NewStruct(structType,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewBitCast(cloneFn, irtypes.I8Ptr),
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0))
+	g := c.module.NewGlobalDef(fmt.Sprintf("promise_typeinfo_flatbox_%d", size), init)
+	g.Immutable = true
+	c.flatBoxTypeInfos[size] = g
+	return g
+}
+
 // getStringBoxTypeInfo returns a shared immutable typeinfo global whose drop_fn (field 1)
 // points to @__promise_string_box_drop, used as the RTTI header for heap-boxed strings
 // coerced to a structural interface (T1280). __promise_structural_drop reads the
@@ -10626,12 +10731,13 @@ func (c *Compiler) getStringBoxTypeInfo() *ir.Global {
 		return c.stringBoxTypeInfo
 	}
 	dropFn := c.getStringBoxDrop()
+	cloneFn := c.getStringBoxClone() // T1284: field 2 clone_fn for structural clone/slice
 	// Layout mirrors a no-parent typeinfo: { vtable, drop_fn, clone_fn, typeID, numParents }.
 	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
 	init := constant.NewStruct(structType,
 		constant.NewNull(irtypes.I8Ptr),
 		constant.NewBitCast(dropFn, irtypes.I8Ptr),
-		constant.NewNull(irtypes.I8Ptr),
+		constant.NewBitCast(cloneFn, irtypes.I8Ptr),
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewInt(irtypes.I32, 0))
 	g := c.module.NewGlobalDef("promise_typeinfo_stringbox", init)
@@ -11657,5 +11763,51 @@ func (c *Compiler) declareCoroIntrinsics() {
 		// No drop: just free the instance
 		freeBlk.NewCall(c.palFree, inst)
 		freeBlk.NewRet(nil)
+	}
+
+	// T1284: Generic RTTI-based deep clone for structural interface instances.
+	// Mirror of __promise_structural_drop: dispatch through the typeinfo
+	// clone_fn_ptr (field 2) to produce an independently-owned copy of the boxed
+	// concrete instance. Returns the input unchanged when clone_fn is null (no
+	// eligible clone) — callers must ensure every reachable box carries a real
+	// clone_fn so this fallback is never a silent shallow alias.
+	c.structuralClone = c.module.NewFunc("__promise_structural_clone", irtypes.I8Ptr,
+		ir.NewParam("inst", irtypes.I8Ptr))
+	{
+		entry := c.structuralClone.NewBlock(".entry")
+		inst := c.structuralClone.Params[0]
+
+		isNullInst := entry.NewICmp(enum.IPredEQ, inst, constant.NewNull(irtypes.I8Ptr))
+		nullBlk := c.structuralClone.NewBlock("clone.null")
+		liveBlk := c.structuralClone.NewBlock("clone.live")
+		entry.NewCondBr(isNullInst, nullBlk, liveBlk)
+
+		nullBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+
+		// Load variant/typeinfo pointer from instance field 0
+		instanceType := irtypes.NewStruct(irtypes.I8Ptr)
+		typedInst := liveBlk.NewBitCast(inst, irtypes.NewPointer(instanceType))
+		variantField := liveBlk.NewGetElementPtr(instanceType, typedInst,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		variantPtr := liveBlk.NewLoad(irtypes.I8Ptr, variantField)
+
+		// Load clone_fn_ptr from typeinfo field 2
+		typeinfoType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
+		typedInfo := liveBlk.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+		cloneFnField := liveBlk.NewGetElementPtr(typeinfoType, typedInfo,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+		cloneFn := liveBlk.NewLoad(irtypes.I8Ptr, cloneFnField)
+
+		isNull := liveBlk.NewICmp(enum.IPredEQ, cloneFn, constant.NewNull(irtypes.I8Ptr))
+		callBlk := c.structuralClone.NewBlock("clone.call")
+		shallowBlk := c.structuralClone.NewBlock("clone.shallow")
+		liveBlk.NewCondBr(isNull, shallowBlk, callBlk)
+
+		cloneFnType := irtypes.NewFunc(irtypes.I8Ptr, irtypes.I8Ptr)
+		typedFn := callBlk.NewBitCast(cloneFn, irtypes.NewPointer(cloneFnType))
+		cloned := callBlk.NewCall(typedFn, inst)
+		callBlk.NewRet(cloned)
+
+		shallowBlk.NewRet(inst)
 	}
 }

@@ -6797,6 +6797,14 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 		return nil
 	}
 
+	// T1284: structural-interface element — the {vtable, instance} view boxes a
+	// heap instance; deep-clone it via RTTI so each vector slot owns an
+	// independent box (else result.push(this[i]) in Vector.[:] aliases the source
+	// box and the structural-aware element drop double-frees).
+	if named.IsStructural() && !named.IsValueType() {
+		return c.cloneStructuralView(argVal)
+	}
+
 	// Heap user type with drop: clone via clone method or dupHeapValue fallback
 	if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 		return c.cloneHeapElement(argVal, resolvedElem, named)

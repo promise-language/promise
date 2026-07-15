@@ -9391,9 +9391,13 @@ func TestPrimitiveIntToStructuralView(t *testing.T) {
 	assertContains(t, ir, "insertvalue { i8*, i8* }")
 	// T1276: the primitive box is HEAP-allocated { i8* typeinfo, scalar } (not a
 	// stack alloca) so the escaping interface fat pointer stays valid; field 0
-	// carries the shared null-drop typeinfo header.
-	assertContains(t, ir, "@promise_typeinfo_novalue")
-	assertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_novalue to i8*)")
+	// carries a null-drop typeinfo header.
+	// T1284: the header is a per-size flat-box typeinfo whose clone_fn (field 2) is
+	// a flat malloc+memcpy clone — so a Vector[Showable] holding this box clones/
+	// slices to an independently-owned box (drop_fn stays null → pal_free on drop).
+	assertContains(t, ir, "@promise_typeinfo_flatbox_16")
+	assertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_flatbox_16 to i8*)")
+	assertContains(t, ir, "@__promise_flat_box_clone_16")
 }
 
 func TestPrimitiveBoolToStructuralView(t *testing.T) {
@@ -9537,6 +9541,33 @@ func TestStringBoxInStructFieldUsesStringBoxDrop(t *testing.T) {
 	assertContains(t, ir, "@promise_typeinfo_stringbox")
 	assertContains(t, ir, "@__promise_string_box_drop")
 	assertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_stringbox to i8*)")
+}
+
+func TestVectorStructuralElementDropAndClone(t *testing.T) {
+	// T1284: a Vector[structural-interface] must (a) drop each heap-boxed element
+	// through __promise_structural_drop at vector drop, and (b) deep-clone the boxed
+	// instances on clone via __promise_structural_clone (RTTI dispatch on the
+	// instance typeinfo's clone_fn) so the clone owns independent boxes — otherwise
+	// the now-active element drop double-frees the aliased boxes.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		type Widget {
+			int id;
+			to_string() string { return this.id.to_string(); }
+		}
+		main() {
+			Showable[] v = [];
+			v.push(Widget(id: 1));
+			Showable[] c = v.clone();
+		}
+	`)
+	// The RTTI structural drop/clone helpers are emitted and referenced.
+	assertContains(t, ir, "@__promise_structural_drop")
+	assertContains(t, ir, "@__promise_structural_clone")
+	// The clone helper dispatches through the typeinfo clone_fn (field 2).
+	assertContains(t, ir, "call i8* @__promise_structural_clone")
 }
 
 func TestPrimitiveToFailableStructuralView(t *testing.T) {

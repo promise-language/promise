@@ -196,9 +196,49 @@ func (c *Compiler) resolveTypeInfoCloneFn(named *types.Named) constant.Constant 
 // IR symbol prefix (e.g. "Shape" or "Box__int"). layout/subst are nil for non-generic
 // owners — looked up via lookupTypeLayout in that case.
 func (c *Compiler) maybeSynthesizeCloneFn(named *types.Named, owner types.Type, globalName string, layout *TypeDeclLayout, subst map[*types.TypeParam]types.Type) {
-	// Eligibility: only concrete heap user types. Abstract/value/copy/structural
-	// types are skipped — none can reach dupHeapValue's polymorphic path.
-	if named.IsAbstract() || named.IsValueType() || named.IsCopy() || named.IsStructural() {
+	// T1284: Value types can be heap-boxed behind a structural interface
+	// (boxValueTypeForStructuralView). When such a box lives in a Vector[structural]
+	// that is cloned/sliced, __promise_structural_clone dispatches through the box
+	// typeinfo's clone_fn — which is the concrete value type's typeinfo. Register a
+	// flat malloc+memcpy clone sized to the value struct (value types are Copy with
+	// no droppable sub-fields, so a byte copy is a correct deep copy) so the cloned
+	// vector owns an independent box instead of aliasing → double-free at drop.
+	if named.IsValueType() && !named.IsAbstract() && !named.IsStructural() {
+		if owner == named && len(named.TypeParams()) > 0 {
+			return // generic origin — mono instances handle clone
+		}
+		if owner == named {
+			if _, exists := c.typeCloneFns[named]; exists {
+				return
+			}
+		} else if _, exists := c.monoTypeCloneFns[globalName]; exists {
+			return
+		}
+		vlayout := layout
+		if vlayout == nil {
+			vlayout = c.lookupTypeLayout(owner)
+		}
+		if vlayout == nil || vlayout.Value == nil || vlayout.Value.LLVMType == nil {
+			return
+		}
+		flatClone := c.getFlatBoxClone(int64(c.typeSize(vlayout.Value.LLVMType)))
+		if owner == named {
+			c.typeCloneFns[named] = flatClone
+		} else {
+			c.monoTypeCloneFns[globalName] = flatClone
+		}
+		return
+	}
+
+	// Eligibility: concrete heap user types. Abstract/value/structural types are
+	// skipped — none can reach dupHeapValue's polymorphic path. Copy heap types
+	// are NOT skipped: T1284 boxes them behind a structural interface, and a
+	// Vector[structural] holding such a box dispatches clone through the concrete
+	// typeinfo's clone_fn. Without a real clone_fn __promise_structural_clone falls
+	// back to a shallow alias → the now-active element drop double-frees. Their
+	// instance clone is a plain malloc+memcpy (copy types have no droppable fields,
+	// so dupHeapValueFields is a no-op) — a correct deep copy.
+	if named.IsAbstract() || named.IsValueType() || named.IsStructural() {
 		return
 	}
 	if isPrimitiveScalar(named) {
@@ -1160,12 +1200,15 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		// temp so the correct owner frees it exactly once.
 		scalarType := llvmNamedType(fromNamed)
 		boxType := irtypes.NewStruct(irtypes.I8Ptr, scalarType)
-		size := constant.NewInt(irtypes.I64, int64(c.typeSize(boxType)))
+		boxSize := int64(c.typeSize(boxType))
+		size := constant.NewInt(irtypes.I64, boxSize)
 		raw := c.block.NewCall(c.palAlloc, size)
 		typed := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
 		tiField := c.block.NewGetElementPtr(boxType, typed,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		c.block.NewStore(constant.NewBitCast(c.getNoValueTypeInfo(), irtypes.I8Ptr), tiField)
+		// T1284: flat-box typeinfo carries a size-specialized clone_fn so structural
+		// clone/slice deep-copies the box (null drop_fn keeps pal_free-on-drop).
+		c.block.NewStore(constant.NewBitCast(c.getFlatBoxTypeInfo(boxSize), irtypes.I8Ptr), tiField)
 		scalarField := c.block.NewGetElementPtr(boxType, typed,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		c.block.NewStore(val, scalarField)
@@ -1241,11 +1284,14 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 
 	// Repurpose field 0 (value-struct vtable slot) as the RTTI typeinfo header so
 	// __promise_structural_drop reads a null drop_fn and pal_free's the wrapper.
-	// Prefer the concrete typeinfo (also makes `is` checks on the box resolve), but
-	// fall back to the shared null-drop header — value types never drop, so pal_free is
-	// always correct and we must never leave the value's own vtable in field 0 (that
-	// would make the drop path misread a bogus drop_fn).
-	var tiPtr constant.Constant = constant.NewBitCast(c.getNoValueTypeInfo(), irtypes.I8Ptr)
+	// Prefer the concrete typeinfo (also makes `is` checks on the box resolve, and —
+	// T1284 — carries the value type's flat clone_fn so structural clone/slice deep-
+	// copies the box). Fall back to a per-size flat-box typeinfo (null drop_fn →
+	// pal_free; flat clone_fn → deep copy) — value types never drop and a byte copy
+	// is a correct deep copy, so this is always safe; we must never leave the value's
+	// own vtable in field 0 (that would make the drop path misread a bogus drop_fn).
+	var tiPtr constant.Constant = constant.NewBitCast(
+		c.getFlatBoxTypeInfo(int64(c.typeSize(valType))), irtypes.I8Ptr)
 	if ti := c.lookupTypeInfoGlobal(fromType); ti != nil {
 		tiPtr = constant.NewBitCast(ti, irtypes.I8Ptr)
 	}

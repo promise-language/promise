@@ -5548,7 +5548,7 @@ func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.
 	// emitVariantFieldDrop's Signature case frees.
 	_, isSig := elemType.(*types.Signature)
 	if extractNamed(elemType) != types.TypString && !isSig {
-		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) && !c.tupleNeedsDrop(elemType) && !c.vecElemNeedsOptionalDrop(elemType) {
+		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) && !c.tupleNeedsDrop(elemType) && !c.vecElemNeedsOptionalDrop(elemType) && !c.vecElemNeedsStructuralDrop(elemType) {
 			return
 		}
 	}
@@ -5811,8 +5811,14 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	isArcType := !isCloneableEnum && !isDupableEnum && (isArc || named == types.TypArc)
 	isWeakType := !isCloneableEnum && !isDupableEnum && (isWk || named == types.TypWeak)
 	isHeapUser := !isCloneableEnum && !isDupableEnum && named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
+	// T1284: structural-interface element — its {vtable, instance} view boxes a
+	// heap instance; deep-clone the instance through __promise_structural_clone
+	// (RTTI dispatch) so the cloned vector owns an independent box. Without this
+	// the shallow memcpy aliases the box across both vectors → double-free once
+	// the element drop loop (now structural-aware) frees each.
+	isStructuralElem := named != nil && named.IsStructural() && !named.IsValueType()
 
-	if !isChannel && !isVector && !isArcType && !isWeakType && !isHeapUser && !isCloneableEnum && !isDupableEnum && !isDupableTuple {
+	if !isChannel && !isVector && !isArcType && !isWeakType && !isHeapUser && !isStructuralElem && !isCloneableEnum && !isDupableEnum && !isDupableTuple {
 		return // value/copy type — shallow memcpy is correct
 	}
 
@@ -5886,6 +5892,11 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 			} else {
 				cloned = c.dupVector(elemVal, 0)
 			}
+		} else if isStructuralElem {
+			// T1284: deep-clone the boxed instance via RTTI clone dispatch, then
+			// rebuild the {vtable, instance} view with the same view vtable and the
+			// freshly-cloned instance pointer.
+			cloned = c.cloneStructuralView(elemVal)
 		} else {
 			// Heap user type: try clone() method, fall back to dupHeapValue
 			cloned = c.cloneHeapElement(elemVal, elemType, named)
@@ -5991,6 +6002,35 @@ func (c *Compiler) vecElemNeedsUserTypeDrop(elemType types.Type) bool {
 		return true
 	}
 	return false
+}
+
+// cloneStructuralView deep-clones a structural-interface element value (a
+// {vtable, instance} fat view): it clones the boxed heap instance through
+// __promise_structural_clone (RTTI dispatch on the instance typeinfo's
+// clone_fn_ptr) and rebuilds the view with the same view vtable and the fresh
+// instance pointer. Shared by the vector element clone loop and the push-element
+// dup path so every structural-vector duplication owns an independent box. T1284.
+func (c *Compiler) cloneStructuralView(view value.Value) value.Value {
+	instancePtr := c.extractInstancePtr(view)
+	clonedInst := c.block.NewCall(c.structuralClone, instancePtr)
+	vtablePtr := c.extractVtablePtr(view)
+	valType := view.Type().(*irtypes.StructType)
+	tmp := c.block.NewInsertValue(constant.NewZeroInitializer(valType), vtablePtr, 0)
+	return c.block.NewInsertValue(tmp, clonedInst, 1)
+}
+
+// vecElemNeedsStructuralDrop returns true if a vector element type is a
+// non-value-type structural interface. Its runtime value is a fat view
+// {vtable, instance} whose instance is a heap box (heap user instance / heap
+// string box); the element drop loop must route it through
+// __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr → concrete drop, else
+// pal_free) rather than treating the view as trivially droppable. T1284.
+func (c *Compiler) vecElemNeedsStructuralDrop(elemType types.Type) bool {
+	named := extractNamed(elemType)
+	if named == nil {
+		return false
+	}
+	return named.IsStructural() && !named.IsValueType()
 }
 
 // vecElemNeedsOptionalDrop returns true if a vector element type is Optional[T]

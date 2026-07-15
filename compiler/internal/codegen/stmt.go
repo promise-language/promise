@@ -3733,6 +3733,41 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	c.dropBindings[varName] = binding
 }
 
+// isFreshOwnedStructuralRHS reports whether rhs produces a freshly-allocated
+// owned value with no surviving owner (a call/operator result), as opposed to a
+// borrow/alias (IdentExpr, MemberExpr). A structural result type can only come
+// from a user method/operator, which returns an owned value; identifiers and
+// member accesses are borrows. Used to decide whether an unwrapped
+// structural-interface binding must free its box at scope exit. T1288.
+// B0272: unwraps error-handling wrappers (!, ^, ? {}, force-unwrap) first so a
+// failable structural return still counts as a fresh owned allocation.
+func isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
+	innerRHS := rhs
+	for {
+		switch e := innerRHS.(type) {
+		case *ast.ErrorPanicExpr:
+			innerRHS = e.Expr
+			continue
+		case *ast.OptionalUnwrapExpr:
+			innerRHS = e.Expr
+			continue
+		case *ast.ErrorPropagateExpr:
+			innerRHS = e.Expr
+			continue
+		case *ast.ErrorHandlerExpr:
+			innerRHS = e.Expr
+			continue
+		}
+		break
+	}
+	switch innerRHS.(type) {
+	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
+		return true
+	default:
+		return false
+	}
+}
+
 // maybeRegisterStructuralFree registers a bindingFree for structural interface variables
 // whose backing instance is heap-allocated from a call/constructor (T0127).
 // Structural types are excluded from maybeRegisterDrop (their instance ptr could be a
@@ -3762,30 +3797,7 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	// allocations that must be freed here). Other RHS expressions — identifiers
 	// (borrow from existing variable), literals (value types, no heap alloc),
 	// member access (borrow) — should NOT get a free binding.
-	// B0272: Unwrap error-handling wrappers (!, ^, ? {}) to find the inner call expression.
-	// Without this, failable structural interface returns leak their backing instance.
-	innerRHS := rhs
-	for {
-		switch e := innerRHS.(type) {
-		case *ast.ErrorPanicExpr:
-			innerRHS = e.Expr
-			continue
-		case *ast.OptionalUnwrapExpr:
-			innerRHS = e.Expr
-			continue
-		case *ast.ErrorPropagateExpr:
-			innerRHS = e.Expr
-			continue
-		case *ast.ErrorHandlerExpr:
-			innerRHS = e.Expr
-			continue
-		}
-		break
-	}
-	switch innerRHS.(type) {
-	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
-		// owned heap allocation — register the free binding below
-	default:
+	if !isFreshOwnedStructuralRHS(rhs) {
 		// T1276: a claimed fresh box (value/primitive → structural coercion of a
 		// non-call RHS, e.g. an identifier copy) is owned even though its RHS shape
 		// isn't a call — register the free. Otherwise it's a borrow: skip.
@@ -11674,6 +11686,23 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 				c.clearDropFlag(ident.Name)
 			}
 		}
+
+		// T1288: A non-value structural-interface inner unwrapped from an OWNED
+		// optional TEMP (call/operator result — no surviving owner) is skipped by
+		// maybeRegisterDrop (structural views aren't dropped there) and gets no
+		// ownership transfer (that only fires for IdentExpr sources with
+		// innerHasDrop). Without a drop, the boxed heap instance leaks. Register an
+		// RTTI-dispatched structural free (routes the instance ptr through
+		// __promise_structural_drop) so it's freed at scope exit. Gated to
+		// fresh-owned-temp sources — an IdentExpr/MemberExpr source keeps its own
+		// owner which drops the box, so registering here would double-free.
+		if _, already := c.dropBindings[s.Binding]; !already {
+			if en := extractNamed(elemType); en != nil && en.IsStructural() && !en.IsValueType() {
+				if isFreshOwnedStructuralRHS(s.Init) {
+					c.maybeRegisterStructuralParamFree(s.Binding, alloca, elemType)
+				}
+			}
+		}
 	}
 
 	// T0512: A match-borrowed source means the unwrapped binding still
@@ -11895,6 +11924,21 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 					}
 				}
 				c.clearDropFlag(ident.Name)
+			}
+		}
+
+		// T1288: Mirror of the if-let fix — a non-value structural inner unwrapped
+		// from an owned optional temp (call/operator result) is skipped by
+		// maybeRegisterDrop and gets no ownership transfer, so the box leaks.
+		// Register an RTTI-dispatched structural free, gated to fresh-owned-temp
+		// sources so an IdentExpr/MemberExpr source (which keeps its own owner) is
+		// not double-freed. The binding is above unwrapScopeLen, so the
+		// per-iteration emitScopeCleanup frees it each iteration.
+		if _, already := c.dropBindings[s.Binding]; !already {
+			if en := extractNamed(elemType); en != nil && en.IsStructural() && !en.IsValueType() {
+				if isFreshOwnedStructuralRHS(s.Value) {
+					c.maybeRegisterStructuralParamFree(s.Binding, alloca, elemType)
+				}
 			}
 		}
 	}

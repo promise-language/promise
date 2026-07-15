@@ -1,0 +1,123 @@
+// T1288: Unwrapping an Optional[structural-interface] via an if-let/while-let
+// binding must free the unwrapped {vtable, instance} box at scope exit. Before
+// the fix the unwrap binding was treated as trivially droppable and the heap
+// box leaked. These tests assert correct values AND leak-freedom (leak
+// enforcement is automatic — any leak fails the test).
+//
+// Note: the vector cases below fully drain the vector so it is empty at
+// Vector.drop time. This keeps these tests isolated to the unwrap-binding drop
+// site (T1288); the separate Vector[structural].drop element-drop leak is
+// tracked under T1284.
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+show(int n) Showable {
+  return Widget(id: n);
+}
+
+mkbox(int n) Showable? {
+  Showable s = show(n);
+  return s;
+}
+
+// The repro: if-let unwrap of a structural optional from a call temp.
+box_if_unwrap() `test {
+  if x := mkbox(3) {
+    assert(x.to_string() == "w3", "if-let unwrap value");
+  }
+}
+
+// Contrast: storing the optional WITHOUT ever unwrapping already drops cleanly.
+// `last` drops at scope exit via its Optional-of-structural drop binding — this
+// must remain leak-free (leak enforcement covers it).
+box_store_no_unwrap() `test {
+  Showable? last = mkbox(5);
+  assert(true, "stored optional drops at scope exit");
+}
+
+// IdentExpr source: the stored local keeps its own optional-drop owner, so the
+// unwrap binding must NOT register a second drop (would double-free / crash).
+box_if_unwrap_local() `test {
+  Showable? opt = mkbox(7);
+  if x := opt {
+    assert(x.to_string() == "w7", "if-let unwrap local ident value");
+  }
+}
+
+// if-let unwrap of Vector[structural].pop() — Widget box. Single element, so the
+// vector is empty at drop (isolates the unwrap-binding drop from T1284).
+pop_widget_unwrap() `test {
+  Showable[] v = [];
+  v.push(show(2));
+  if x := v.pop() {
+    assert(x.to_string() == "w2", "pop widget unwrap value");
+  }
+}
+
+type Reg {
+  int base;
+  +(int n) Showable? {
+    return show(this.base + n);
+  }
+}
+
+// A binary-operator source (`r + 5`) is a fresh owned temp just like a call —
+// isFreshOwnedStructuralRHS accepts BinaryExpr, so the unwrap binding gets its
+// RTTI-dispatched structural free. Covers the BinaryExpr acceptance branch at
+// the unwrap-binding drop site (the call form is exercised above).
+binop_if_unwrap() `test {
+  Reg r = Reg(base: 30);
+  if x := r + 5 {
+    assert(x.to_string() == "w35", "binop unwrap value");
+  }
+}
+
+type Named `structural {
+  name() string `abstract;
+}
+
+type Person {
+  string label;
+  name() string {
+    return this.label;
+  }
+}
+
+mkperson(string s) Named {
+  return Person(label: s.clone());
+}
+
+// if-let unwrap of a structural box carrying a heap string field — the RTTI drop
+// of the box must free both the box and the cloned string. Single element so the
+// vector is empty at drop.
+pop_str_unwrap() `test {
+  Named[] v = [];
+  v.push(mkperson("bob"));
+  if x := v.pop() {
+    assert(x.name() == "bob", "pop string unwrap value");
+  }
+}
+
+// while-let mirror: drain a Vector[structural] via while x := v.pop(). The
+// vector is fully drained (empty at drop), so each popped box must be freed by
+// the while-let unwrap-binding drop.
+while_pop_unwrap() `test {
+  Showable[] v = [];
+  v.push(show(1));
+  v.push(show(2));
+  v.push(show(3));
+  int count = 0;
+  while x := v.pop() {
+    assert(x.to_string().starts_with("w"), "while-let unwrap value");
+    count = count + 1;
+  }
+  assert(count == 3, "while-let drained all elements");
+}

@@ -6881,6 +6881,95 @@ func (c *Compiler) indexTargetIsArrayOrVector(e *ast.IndexExpr) bool {
 	return extractNamed(t) == types.TypVector && c.typeSubst != nil
 }
 
+// optionalPayloadReceiverSlot handles a Vector-method receiver of the form
+// `place!` (an OptionalUnwrapExpr over an addressable place holding an
+// Optional[Vector[T]]). It returns the loaded inner-Vector pointer plus a
+// pointer to the optional's PAYLOAD field (struct index 1) — the slot a
+// relocating method (push/pop/remove) writes the grown pointer back into.
+// Emits the `!` presence-check panic (mirrors genOptionalForceUnwrap). Returns
+// ok=false for any non-addressable / non-Optional[Vector] shape so the caller
+// falls back to the rvalue path (read method receivers like `v[0]!.contains(x)`
+// / `v[0]!.clone()` also take this path — slot is simply unused; the `.len`
+// getter is dispatched elsewhere and never reaches here). T1295.
+func (c *Compiler) optionalPayloadReceiverSlot(target ast.Expr) (slicePtr, slot value.Value, ok bool) {
+	unwrap, isUnwrap := target.(*ast.OptionalUnwrapExpr)
+	if !isUnwrap {
+		return nil, nil, false
+	}
+	inner := unwrap.Expr
+	for {
+		if p, isParen := inner.(*ast.ParenExpr); isParen {
+			inner = p.Expr
+			continue
+		}
+		break
+	}
+
+	// The unwrapped place must hold an Optional[Vector[...]] (payload lowers to i8*).
+	innerType := c.info.Types[inner]
+	if c.typeSubst != nil {
+		innerType = types.Substitute(innerType, c.typeSubst)
+	}
+	optType, isOpt := innerType.(*types.Optional)
+	if !isOpt {
+		return nil, nil, false
+	}
+	if !types.IsVector(optType.Elem()) {
+		return nil, nil, false
+	}
+
+	// Address the optional's in-memory storage for each addressable place kind.
+	var optPtr value.Value
+	switch e := inner.(type) {
+	case *ast.IdentExpr:
+		if ptr, has := c.mutRefPtrs[e.Name]; has {
+			optPtr = ptr
+		} else if alloca, has := c.locals[e.Name]; has {
+			optPtr = alloca
+		} else {
+			return nil, nil, false
+		}
+	case *ast.MemberExpr:
+		// Only a plain owned field is addressable — a getter call or a
+		// borrow-returning member is not (mirrors the T1289 guards).
+		if c.isGetterCallExpr(inner) || c.isBorrowedExpr(inner) {
+			return nil, nil, false
+		}
+		optPtr = c.genFieldPtr(e)
+	case *ast.IndexExpr:
+		if !c.indexTargetIsArrayOrVector(e) {
+			return nil, nil, false
+		}
+		optPtr = c.genIndexSlotPtr(e)
+	default:
+		return nil, nil, false
+	}
+
+	optLLVM, structOk := c.resolveType(optType).(*irtypes.StructType)
+	if !structOk {
+		return nil, nil, false
+	}
+
+	// `!` presence check (identical to genOptionalForceUnwrap).
+	flagPtr := c.block.NewGetElementPtr(optLLVM, optPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	flag := c.block.NewLoad(irtypes.I1, flagPtr)
+	okBlock := c.newBlock("unwrap.ok")
+	panicBlock := c.newBlock("unwrap.panic")
+	c.block.NewCondBr(flag, okBlock, panicBlock)
+
+	c.block = panicBlock
+	panicMsg := c.makeGlobalString("unwrap failed: optional is none")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.emitPanicReturn()
+
+	c.block = okBlock
+	payloadPtr := c.block.NewGetElementPtr(optLLVM, optPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	slicePtr = c.block.NewLoad(irtypes.I8Ptr, payloadPtr)
+	return slicePtr, payloadPtr, true
+}
+
 // evalVectorReceiver evaluates a Vector method-call receiver. For an arr[i] /
 // vov[i] receiver it computes the element slot pointer EXACTLY ONCE, returning
 // both the loaded inner-Vector pointer (slicePtr) and that slot pointer (T0595).
@@ -6890,6 +6979,13 @@ func (c *Compiler) indexTargetIsArrayOrVector(e *ast.IndexExpr) bool {
 // (use-after-free on the real slot + leak). For non-index receivers it falls back
 // to genExprAutoPropagate and returns a nil slot (store-back recomputes as before).
 func (c *Compiler) evalVectorReceiver(target ast.Expr) (slicePtr, slot value.Value) {
+	// T1295: `place!.push/pop/remove` on an addressable Optional[Vector[T]] place.
+	// Capture the optional's payload field as the write-back slot so a relocating
+	// method stores the grown pointer straight into it (else the write-back is
+	// dropped and the fresh COW/realloc buffer leaks).
+	if sp, slotPtr, ok := c.optionalPayloadReceiverSlot(target); ok {
+		return sp, slotPtr
+	}
 	if idxExpr, ok := target.(*ast.IndexExpr); ok && c.indexTargetIsArrayOrVector(idxExpr) {
 		// T0648: suppress whole-container field dup while evaluating the outer
 		// target (matches the genVectorIndex/genArrayIndex read path this replaces);

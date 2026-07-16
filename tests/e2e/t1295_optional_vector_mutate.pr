@@ -1,0 +1,90 @@
+// T1295: Mutating an inner container through a mutable optional-unwrap place
+// (`place!.push/pop`) on an Optional[Vector[T]] must write the grown pointer
+// back into the optional's payload — else the mutation is lost and the fresh
+// COW/realloc buffer leaks. Covers all addressable optional places.
+type Holder {
+  int[]? f;
+}
+
+// The repro: vector element `v[i]!` unwrap, mutating push.
+vector_element_push() `test {
+  int[]?[] v = [];
+  int[]? a = [1, 2];
+  v.push(move a);
+  v[0]!.push(7);
+  assert(v[0]!.len == 3, "grew");
+  assert(v[0]![2] == 7, "pushed value");
+}
+
+// Local-variable optional place `a!` unwrap, mutating push.
+local_var_push() `test {
+  int[]? a = [1, 2];
+  a!.push(9);
+  assert(a!.len == 3, "grew local");
+  assert(a![2] == 9, "pushed local value");
+}
+
+// Struct-field optional place `h.f!` unwrap, mutating push.
+field_push() `test {
+  h := Holder(f: [1, 2]);
+  h.f!.push(5);
+  assert(h.f!.len == 3, "field grew");
+  assert(h.f![2] == 5, "pushed field value");
+}
+
+// Relocating shrink path: `v[i]!.pop()` — value + len correct, no leak.
+vector_element_pop() `test {
+  int[]?[] v = [];
+  int[]? a = [1, 2, 3];
+  v.push(move a);
+  x := v[0]!.pop();
+  assert(x! == 3, "popped value");
+  assert(v[0]!.len == 2, "shrunk");
+}
+
+// Control: read-through the unwrap needs no write-back (must stay clean).
+read_through_len() `test {
+  int[]?[] v = [];
+  int[]? a = [1, 2];
+  v.push(move a);
+  assert(v[0]!.len == 2, "read");
+}
+
+// Control: plain Vector[Vector[T]] mutate-inner (no optional) still works.
+non_optional_nested_push() `test {
+  int[][] v = [];
+  int[] a = [1, 2];
+  v.push(move a);
+  v[0].push(7);
+  assert(v[0].len == 3, "plain nested grew");
+}
+
+// Parenthesized place `(a)!` — exercises the ParenExpr unwrap loop.
+paren_place_push() `test {
+  int[]? a = [1, 2];
+  (a)!.push(9);
+  assert(a!.len == 3, "paren grew");
+  assert(a![2] == 9, "paren pushed value");
+}
+
+// Relocating in-place shrink: `v[i]!.remove(idx)` (returns void) — the shifted
+// buffer must be written back through the payload slot with no leak.
+vector_element_remove() `test {
+  int[]?[] v = [];
+  int[]? a = [1, 2, 3];
+  v.push(move a);
+  v[0]!.remove(0);
+  assert(v[0]!.len == 2, "shrunk after remove");
+  assert(v[0]![0] == 2, "remaining first element");
+}
+
+// Repeated mutation through the same unwrap place — every relocation must
+// persist through the payload slot, none may leak.
+sequential_push() `test {
+  int[]? a = [1];
+  a!.push(2);
+  a!.push(3);
+  a!.push(4);
+  assert(a!.len == 4, "sequential grew");
+  assert(a![3] == 4, "last pushed value");
+}

@@ -1,0 +1,7 @@
+// T1295: mutating through a `place!` unwrap on a `none` Optional[Vector[T]]
+// emits the presence-check panic (the panic branch is a fresh emission inside
+// optionalPayloadReceiverSlot, not a reuse of genOptionalForceUnwrap).
+main() `test(expected: """panic: unwrap failed: optional is none""") {
+  int[]? a = none;
+  a!.push(1);
+}

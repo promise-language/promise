@@ -1,0 +1,188 @@
+// T1287: Overwriting an element of a Vector[structural-interface] via `v[i] = x`
+// must drop the previously-stored box (routing the old {vtable, instance} view's
+// heap instance through __promise_structural_drop) before storing the new box —
+// else the overwritten box leaks. Sibling of T1284 (element drop loop / clone loop).
+// Covers user-type boxes, string boxes, primitive boxes, and value-type boxes, plus
+// an aliased-read-then-overwrite case guarding against a use-after-free regression
+// (reads of v[i] deep-clone the box, so dropping the old box must not disturb them).
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+type Pt {
+  int x `value;
+  int y `value;
+  to_string() string {
+    return this.x.to_string();
+  }
+}
+
+type Holder {
+  Showable item;
+}
+
+show_str(string s) Showable {
+  return s;
+}
+show_int(int n) Showable {
+  return n;
+}
+show_pt(int a, int b) Showable {
+  return Pt(x: a, y: b);
+}
+
+// Consumes (moves) its structural argument, so passing `v[i]` here must
+// deep-clone the box (else the callee's consume-drop and v's element walk
+// free the same box → double-free).
+consume(Showable move s) string {
+  return s.to_string();
+}
+
+// --- Overwrite drop: no leak (the old element box is freed before storing) ---
+
+vector_index_assign_user_box() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  v[0] = Widget(id: 9); // old Widget(id:1) box must be freed
+  assert(v.len == 2, "user box len");
+}
+
+vector_index_assign_string_box() `test {
+  Showable[] v = [];
+  v.push(show_str("a"));
+  v.push(show_str("b"));
+  v[0] = show_str("z"); // old string box must be freed
+  assert(v.len == 2, "string box len");
+}
+
+vector_index_assign_primitive_box() `test {
+  Showable[] v = [];
+  v.push(show_int(1));
+  v.push(show_int(2));
+  v[0] = show_int(9); // old primitive box must be freed
+  assert(v.len == 2, "primitive box len");
+}
+
+vector_index_assign_value_box() `test {
+  Showable[] v = [];
+  v.push(show_pt(1, 2));
+  v.push(show_pt(3, 4));
+  v[0] = show_pt(9, 9); // old value box must be freed
+  assert(v.len == 2, "value box len");
+}
+
+// Overwrite a box of one kind with a box of another kind (heterogeneous).
+vector_index_assign_heterogeneous() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(show_str("a"));
+  v[0] = show_int(7); // old Widget box must be freed
+  v[1] = Widget(id: 3); // old string box must be freed
+  assert(v.len == 2, "hetero len");
+}
+
+// --- Aliased read then overwrite: dropping the old box must not disturb the clone ---
+
+vector_index_assign_aliased_read() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  x := v[0]; // independent clone (dup-on-read, T1284)
+  v[0] = Widget(id: 9); // dropping old box must not disturb x
+  assert(x.to_string() == "w1", "aliased read");
+  assert(v.len == 2, "len");
+}
+
+// Overwrite reads back the new box correctly.
+vector_index_assign_reads_new() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  v[0] = Widget(id: 9);
+  y := v[0];
+  assert(y.to_string() == "w9", "reads new box");
+  assert(v.len == 2, "len");
+}
+
+// --- RHS aliasing: `a[i] = b[j]` and the swap idiom must deep-clone the box ---
+
+// The classic swap-through-a-temp idiom (as used by in-place sorts) must clone the
+// read box and move the temp back without leaking or double-freeing.
+vector_index_assign_swap_idiom() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  v.push(Widget(id: 3));
+  t := v[0];
+  v[0] = v[2]; // clone v[2] into v[0]; drop old v[0]
+  v[2] = t; // move t (owned clone) into v[2]; drop old v[2]
+  assert(v[0].to_string() == "w3", "v0");
+  assert(v[2].to_string() == "w1", "v2");
+  assert(v.len == 3, "len");
+}
+
+// --- Escape sinks: reading `v[i]` into an owning sink must deep-clone the box ---
+// These exercise the dup-on-read arming at every escape site (var-decl, constructor
+// field-init, move-param arg, vector-literal element) — each stores the box into an
+// owner whose drop would otherwise double-free with v's element walk (T1284).
+
+// Typed var-decl `Showable x = v[i]` (genTypedVarDecl structural branch).
+vector_index_read_typed_var() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  Showable x = v[0]; // deep-clone: x owns an independent box
+  assert(x.to_string() == "w1", "typed var");
+  assert(v.len == 2, "len");
+}
+
+// Constructor field-init `Holder(item: v[i])` (armDupForVectorIndexArg ctor path).
+vector_index_read_ctor_field() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 3));
+  Holder h = Holder(item: v[0]); // deep-clone into the field
+  assert(h.item.to_string() == "w3", "ctor field");
+  assert(v.len == 1, "len");
+}
+
+// Move-param arg `consume(v[i])` (armDupForVectorIndexArg `~`-param path).
+vector_index_read_move_arg() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 5));
+  string r = consume(v[0]); // deep-clone: callee consumes an owned box
+  assert(r == "w5", "move arg");
+  assert(v.len == 1, "len");
+}
+
+// Vector-literal element `[v[0], v[1]]` (armDupForVectorIndexArg literal path).
+vector_index_read_vector_literal() `test {
+  Showable[] v = [];
+  v.push(Widget(id: 1));
+  v.push(Widget(id: 2));
+  Showable[] w = [v[0], v[1]]; // each element deep-cloned into the new vector
+  assert(w.len == 2, "wlen");
+  assert(w[0].to_string() == "w1", "w0");
+  assert(v.len == 2, "vlen");
+}
+
+// Cross-vector element move `a[i] = b[j]` must clone b[j]'s box so b stays valid.
+vector_index_assign_cross_vector() `test {
+  Showable[] a = [];
+  a.push(Widget(id: 1));
+  Showable[] b = [];
+  b.push(Widget(id: 2));
+  b.push(Widget(id: 3));
+  a[0] = b[1]; // clone b[1] into a[0]; drop old a[0]
+  assert(a[0].to_string() == "w3", "a0");
+  assert(b[1].to_string() == "w3", "b1 still valid");
+  assert(a.len == 1, "alen");
+  assert(b.len == 2, "blen");
+}

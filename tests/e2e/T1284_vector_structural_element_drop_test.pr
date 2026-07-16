@@ -230,7 +230,6 @@ vector_empty_clone_drop() `test {
 }
 
 // NOTE: index-assignment overwrite of a structural element
-// (`Showable[] v; ...; v[0] = Widget(...)`) currently LEAKS the overwritten box —
-// genVectorIndexAssign's drop-old chain has no structural branch. Tracked
-// separately as T1287; a regression test lives with that fix (a leaking test
-// cannot be added here without failing the suite).
+// (`Showable[] v; ...; v[0] = Widget(...)`) is covered by T1287 — the overwrite
+// drop-old and the matching dup-on-read (so aliased reads / `a[i] = b[j]` don't
+// double-free) live in tests/e2e/T1287_vector_structural_index_assign_test.pr.

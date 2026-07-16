@@ -1367,6 +1367,17 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
+	// T1287: bare structural-interface element read from a native Vector index
+	// (`Showable x = v[i]`) must deep-clone the {vtable, instance} box so the binding
+	// owns an independent box — else x aliases the vector's element and dropping the old
+	// box on overwrite (genVectorIndexAssign, T1287) or the vector's element walk (T1284)
+	// leaves x dangling (UAF) / double-frees. genVectorIndex consumes the flag via
+	// cloneStructuralView. Mirrors the inferred-var-decl site.
+	if isNonValueStructuralType(resolvedExprType) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
 	// T0440: Same flag for typed `T? b = m[k]` — Optional[heap-user-type] LHS
 	// where the inner value aliases the container's bucket. Set the flag so
 	// genMethodIndex deep-clones via cloneHeapElement.
@@ -1849,6 +1860,18 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// isMapOrSetType excludes the bare `m[k]` (Map container) form: that yields an
 	// Optional, handled by the Optional branch below / the Map.[] body's own dup.
 	if isMapOrSetType(typ) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
+	// T1287: bare structural-interface element read from a native Vector index
+	// (`x := v[i]`) must deep-clone the {vtable, instance} box so the binding owns an
+	// independent box — else x aliases the vector's element and dropping the old box on
+	// overwrite (genVectorIndexAssign, T1287) or the vector's element walk (T1284)
+	// leaves x dangling (UAF) / double-frees. genVectorIndex consumes the flag via
+	// cloneStructuralView. Only the bare IndexExpr form needs this (the Optional
+	// element form is handled by the branch below, T1291).
+	if isNonValueStructuralType(typ) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
 			c.dupHeapUserFieldAccess = true
 		}
@@ -8235,6 +8258,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if bareIdxRhs && isMapOrSetType(lhsType) {
 					c.dupHeapUserFieldAccess = true
 				}
+				// T1287: bare structural-interface LHS read from a native Vector index
+				// (`a[i] = b[j]`) — deep-clone the {vtable, instance} box so the
+				// destination slot owns an independent box (else b[j]'s box aliases into
+				// a[i]; a's drop-old and b's element walk (T1284) free the same box →
+				// double-free). genVectorIndex consumes the flag via cloneStructuralView.
+				if bareIdxRhs && isNonValueStructuralType(lhsType) {
+					c.dupHeapUserFieldAccess = true
+				}
 				// T0412/T0489: same dup-on-read for droppable tuple LHS. Combined
 				// with the drop-old branches in genMemberAssign / genVectorIndexAssign /
 				// IdentExpr's bindingDropTuple, preserves the no-alias invariant for
@@ -13059,6 +13090,17 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// heap-user branch (T0398) and the genMemberAssign Map/Set branch (T1167).
 			// Safe because genVectorIndex dups Map/Set on read, so any aliased local
 			// owns an independent copy.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if c.vecElemNeedsStructuralDrop(elemType) {
+			// T1287: Drop the old structural-interface element box before overwriting.
+			// The old {vtable, instance} view boxes a heap instance (heap user / string /
+			// primitive / value box) that emitVariantFieldDrop's structural branch (T0765)
+			// routes through __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr →
+			// concrete drop, else pal_free). Without this branch the overwritten box leaks.
+			// Safe because reads of v[i] into a local deep-clone the box (cloneStructuralView
+			// dup-on-read, T1284) — no live alias to the freed box. Mirrors the vector
+			// element drop loop (T1284) and the T1291/T1292 structural drop routing.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		} else if _, isSig := elemType.(*types.Signature); isSig {

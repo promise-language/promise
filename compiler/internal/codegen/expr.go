@@ -7306,6 +7306,14 @@ func (c *Compiler) armDupForVectorIndexArg(arg ast.Expr) bool {
 		c.dupHeapUserFieldAccess = true
 		return true
 	}
+	// T1287: structural-interface element → deep clone the {vtable, instance} box.
+	// Without this, `a[i] = b[j]` (or a constructor/`~`-param escape) stores b[j]'s
+	// box aliased into the sink; a's and b's element drop loops (T1284) then free the
+	// same box → double-free. genVectorIndex consumes the flag via cloneStructuralView.
+	if isNonValueStructuralType(argType) {
+		c.dupHeapUserFieldAccess = true
+		return true
+	}
 	// string / Optional[string] / Vector|Channel|Arc|Weak element → string/container dup.
 	savedStr, savedCont := c.dupStringFieldAccess, c.dupContainerFieldAccess
 	c.setDupFlagsForFieldAccess(argType)
@@ -12803,6 +12811,22 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 				c.dupHeapUserFieldAccess = false // consume the flag
 				return c.cloneHeapElement(val, resolvedElem, named)
 			}
+		}
+		// T1287: bare structural-interface element read (`x := v[i]`). The native `[]`
+		// returns the {vtable, instance} view aliasing the vector's element box; without
+		// a clone, x's box and the vector's element walk (T1284) drop the same instance,
+		// and dropping the old box on overwrite (`v[i] = w`, genVectorIndexAssign T1287)
+		// leaves x dangling (UAF). cloneStructuralView deep-clones the box via
+		// __promise_structural_clone (RTTI). Track the cloned instance as a heap temp so
+		// the var-decl claims it (claimHeapTemp) and registers an RTTI free binding
+		// (maybeRegisterStructuralFree) — mirrors the heap-user (T0398) / enum (T1129)
+		// dup-on-read branches above.
+		if isNonValueStructuralType(resolvedElem) {
+			c.dupHeapUserFieldAccess = false // consume the flag
+			dup := c.cloneStructuralView(val)
+			instPtr := c.extractInstancePtr(dup)
+			c.trackHeapTemp(instPtr, c.palFree)
+			return dup
 		}
 	}
 

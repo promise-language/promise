@@ -7822,6 +7822,90 @@ func (c *Compiler) trackHeapValueTemp(result value.Value, rt types.Type) (value.
 	return nil, nil
 }
 
+// isIteratorAdapterName reports whether name is one of the built-in iterator /
+// generator adapter type names whose boxes are managed by the iter-cleanup path
+// (recursive `_FnIter` parent chain) rather than plain RTTI structural drop.
+// T1294: a free function returning such an adapter must NOT be routed through
+// structuralDrop — its non-standard-RTTI `_FnIter`-shaped box would be
+// double-dropped / crash.
+func isIteratorAdapterName(name string) bool {
+	switch name {
+	case "Iterator", "_FnIter", "Stream", "Generator":
+		return true
+	}
+	return false
+}
+
+// argMayAliasStructuralReturn reports whether a call argument could be returned
+// as an alias by the callee (e.g. `pass_through(Sink s) Sink { return s; }`, or a
+// container arg whose element/field is returned by view). It is true when the arg
+// (peeling parens) has a heap reference type — a named type that is NOT a value
+// type, NOT copy, and NOT a primitive scalar. Scalars, value types, and copy types
+// carry no heap box for the return to alias, so they can never be the source of an
+// alias-based double-free.
+//
+// This is deliberately over-approximating: it does NOT restrict to lvalue args.
+// A FRESH heap temp argument (e.g. `pass_through(mk(1))`) is itself temp-tracked
+// for drop at statement end, so if the callee returns it by alias, the outer
+// result and the inner temp are the SAME box — tracking the outer as fresh-owned
+// too would drop it twice (T1294 double-free / segfault). Codegen cannot tell from
+// the call shape whether the callee returns the arg or a fresh construction, so it
+// conservatively treats any heap-typed arg as a possible alias source and declines
+// to track — preferring a leak over a crash. (A precise fix needs sema return-alias
+// analysis; tracked as T1305, which supersedes this heuristic.) T1294.
+func (c *Compiler) argMayAliasStructuralReturn(a ast.Expr) bool {
+	a = unwrapDestructureParens(a)
+	named := extractNamed(c.resolvedExprType(a))
+	if named == nil {
+		return false
+	}
+	return !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named)
+}
+
+// isFreshOwnedStructuralCall reports whether expr is a plain free-function
+// CallExpr whose non-value structural-interface return is a freshly-constructed
+// OWNED box (must be freed at statement end) rather than a borrowed alias of the
+// receiver or of an argument (must NOT be freed). T1294: a discarded/inline
+// structural result from such a call — `show(1);` or `show(3).to_string()` —
+// otherwise leaks its heap box, because trackHeapUserTypeResult only tracks
+// unwrap/handler/getter sources.
+//
+// The classification admits ONLY the provably-fresh, non-aliasing shape:
+//   - !isBorrowedExpr: excludes borrow-returning (`T&`/`T~`) calls.
+//   - callee is NOT a MemberExpr: excludes method calls that can hand back `this`
+//     (`c.get_self()`) or an iterator adapter over the receiver (`v.iter()`),
+//     whose box the receiver / iter-cleanup already frees.
+//   - return type is not an iterator/generator adapter: excludes free-function
+//     generator returns whose non-standard-RTTI box would be double-dropped.
+//   - no argument is a heap reference the return could alias: excludes both
+//     `pass_through(c)` (returns its param, aliasing the caller's still-owned
+//     local) and `pass_through(mk(1))` (returns its param, aliasing a fresh temp
+//     that is ITSELF temp-tracked — tracking the outer too would double-free the
+//     same box; T1294 segfault). Because codegen cannot tell a returned-arg alias
+//     from a fresh construction, any heap-typed arg conservatively disqualifies the
+//     call — leaking a genuinely-fresh return rather than risking a double-free.
+func (c *Compiler) isFreshOwnedStructuralCall(expr ast.Expr, rt types.Type) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if c.isBorrowedExpr(expr) {
+		return false
+	}
+	if _, isMember := call.Callee.(*ast.MemberExpr); isMember {
+		return false
+	}
+	if rtNamed := extractNamed(rt); rtNamed != nil && isIteratorAdapterName(rtNamed.Obj().Name()) {
+		return false
+	}
+	for _, a := range call.Args {
+		if c.argMayAliasStructuralReturn(a.Value) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
@@ -7937,6 +8021,17 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 		// call returning a borrowed structural view (e.g. `c.iter()` handing back `this`)
 		// is still NOT tracked — it is neither an unwrap/handler nor a getter member.
 		if isUnwrap || isHandler || c.isStructuralGetterMemberSource(expr) {
+			c.trackHeapTemp(c.block.NewExtractValue(result, 1), c.structuralDrop)
+			return
+		}
+		// T1294: a plain free-function call returning a freshly-constructed non-value
+		// structural view (`show(1);` discarded, or `show(3).to_string()` inline) owns
+		// its heap box — nothing else frees it. isFreshOwnedStructuralCall admits only
+		// the provably-fresh, non-aliasing shape (excludes method `this`/iter-adapter
+		// returns and owned-arg passthrough), so routing the extracted instance ptr
+		// through RTTI drop dispatch frees it exactly once at statement end. A later
+		// binding that claims this temp clears it via claimHeapTemp — no double-free.
+		if c.isFreshOwnedStructuralCall(expr, rt) {
 			c.trackHeapTemp(c.block.NewExtractValue(result, 1), c.structuralDrop)
 		}
 		return

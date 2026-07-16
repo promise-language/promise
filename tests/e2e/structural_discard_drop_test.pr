@@ -1,0 +1,101 @@
+// T1294: a discarded / inline-consumed expression statement whose value is a
+// non-value structural-interface (`{vtable, instance}` fat view) returned by a
+// fresh-constructing FREE-FUNCTION call must free its boxed heap instance at
+// statement end (routed through __promise_structural_drop). Aliasing shapes —
+// a method returning `this`, an iterator adapter over the receiver, and an
+// owned-arg passthrough — must NOT be tracked (their owner frees the box), so
+// these tests double as no-double-free / no-segfault regression guards.
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+show(int n) Showable {
+  return Widget(id: n);
+}
+
+type Sink `structural {
+  emit(int n) `abstract;
+}
+
+type Counter {
+  int total;
+  emit(int n) {
+    this.total = this.total + n;
+  }
+  get_self() Sink {
+    return this;
+  }
+}
+
+pass_through(Sink s) Sink {
+  return s;
+}
+
+mk_sink(int n) Sink {
+  return Counter(total: n);
+}
+
+apply(() -> Sink fn) Sink {
+  return fn();
+}
+
+// Discarded fresh-owned free-function structural return — must free the box.
+discard_call() `test {
+  show(1);
+  assert(true, "ok");
+}
+
+// Inline receiver on a fresh-owned free-function structural return — the inner
+// `show(3)` temp is owned and must be freed once at statement end.
+inline_use() `test {
+  show(3).to_string();
+  assert(true, "ok");
+}
+
+// Method returning `this` (a borrowed view of the receiver) — must NOT be
+// tracked; the receiver's own drop frees the box (no double-free / segfault).
+discard_self() `test {
+  c := Counter(total: 5);
+  c.get_self();
+  assert(true, "ok");
+}
+
+// Iterator adapter over the receiver — freed by iter-cleanup, not structuralDrop.
+discard_iter() `test {
+  v := [1, 2, 3];
+  v.iter();
+  assert(true, "ok");
+}
+
+// Free function returning its owned structural argument — aliases the caller's
+// still-owned `s`; must NOT be tracked (owner frees it once).
+discard_passthrough() `test {
+  s := Counter(total: 7);
+  pass_through(s);
+  assert(true, "ok");
+}
+
+// Free function returning its structural argument, where the argument is itself
+// a FRESH temp (`pass_through(mk_sink(1))`). The inner `mk_sink(1)` temp owns and
+// frees the box exactly once; the outer call aliases that same box and must NOT be
+// tracked — otherwise the box is dropped twice (double-free / segfault regression).
+discard_passthrough_fresh() `test {
+  pass_through(mk_sink(1));
+  assert(true, "ok");
+}
+
+// Free function whose only argument is a lambda that constructs the returned box
+// inline (`apply(|| -> mk_sink(1))`). The result is fresh-owned — a function-typed
+// argument carries no heap box to alias — so it must be freed once at statement end
+// (no leak, no double-free).
+discard_lambda_arg() `test {
+  apply(|| -> mk_sink(1));
+  assert(true, "ok");
+}

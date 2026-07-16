@@ -1,0 +1,92 @@
+// T1302: a borrow-returning getter/method that unwraps an Optional field via `!`
+// must NOT deep-clone the inner value. The caller borrows the aliased inner and
+// never frees it; the owner's drop still frees the original field. Before the fix
+// the T0428 Case 3B dup ran on the borrow-return path, leaking the cloned box +
+// its heap string ("2 allocations not freed").
+type Res {
+  string name;
+  int tag;
+  drop(~this) {
+  }
+  get n string {
+    return this.name;
+  }
+  get t int {
+    return this.tag;
+  }
+  bump(~this) {
+    this.tag = this.tag + 1;
+  }
+}
+type Box {
+  Res? _v;
+  get val Res & {
+    return this._v!;
+  }
+}
+type Holder {
+  Res? _v;
+  borrow() Res & {
+    return this._v!;
+  }
+}
+// Mutable-ref (`T~`) return path — the MutRef branch of isRefType, the other
+// half of the fix's `isRefType(retType)` guard.
+type MBox {
+  Res? _v;
+  get val Res ~ {
+    return this._v!;
+  }
+}
+// Generic owner — exercises the `c.typeSubst` substitution the fix guards inside
+// genOptionalForceUnwrap (before the fix this leaked 4 allocations).
+type GBox[T] {
+  T? _v;
+  get val T ~ {
+    return this._v!;
+  }
+}
+
+borrow_getter_ctor_init() `test {
+  Box b = Box(_v: Res(name: "x".repeat(2), tag: 1));
+  Res &got = b.val;
+  assert(got.n == "xx", "ctor-init borrow getter");
+}
+
+borrow_getter_after_none_assign() `test {
+  Box b = Box(_v: none);
+  b._v = Res(name: "y".repeat(2), tag: 1);
+  Res &got = b.val;
+  assert(got.n == "yy", "post-none-assign borrow getter");
+}
+
+borrow_method_returns_ref() `test {
+  Holder h = Holder(_v: Res(name: "z".repeat(3), tag: 1));
+  Res &got = h.borrow();
+  assert(got.n == "zzz", "method returning T& via this.field!");
+}
+
+// `T~` (MutRef) return — second branch of the fix's isRefType guard.
+mutref_getter_read() `test {
+  MBox b = MBox(_v: Res(name: "x".repeat(2), tag: 1));
+  Res ~got = b.val;
+  assert(got.n == "xx", "mutref getter read");
+}
+
+// Mutation through the borrow must be visible on the owner's field — proves the
+// unwrap aliases the field rather than deep-copying it. Before the fix the dup
+// made an independent copy, so this assertion failed.
+mutref_mutation_visible() `test {
+  MBox b = MBox(_v: Res(name: "x".repeat(2), tag: 1));
+  Res ~got = b.val;
+  got.bump();
+  Res ~got2 = b.val;
+  assert(got2.t == 2, "mutation through borrow visible on owner field");
+}
+
+// Generic owner: the unwrapped inner type is substituted via c.typeSubst.
+generic_borrow_getter() `test {
+  GBox[Res] g = GBox[Res](_v: Res(name: "z".repeat(4), tag: 9));
+  Res ~got = g.val;
+  assert(got.n == "zzzz", "generic borrow getter");
+}

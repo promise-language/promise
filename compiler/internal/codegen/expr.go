@@ -15919,7 +15919,7 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// can't clear the present flag on a borrowed receiver), so both the caller's
 	// synth drop and the new variable get independent copies to free.
 	if member, ok := expr.(*ast.MemberExpr); ok {
-		if isThisReceiver(member.Target) && !c.thisRecvIsOwned {
+		if isThisReceiver(member.Target) && !c.thisRecvIsOwned && !c.returningBorrowedUnwrap {
 			innerType := c.info.Types[expr]
 			if c.typeSubst != nil {
 				innerType = types.Substitute(innerType, c.typeSubst)

@@ -10179,7 +10179,16 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
 			c.elvisResultReturned = true
 		}
+		// T1302: a borrow-typed return (`T&`/`T~`) that force-unwraps a
+		// `this.field!` Optional must NOT dup the inner (genOptionalForceUnwrap's
+		// T0428 Case 3B) — the caller borrows the aliased inner and never frees it,
+		// while the owner's drop still frees the original, so the dup would leak.
+		prevReturningBorrowedUnwrap := c.returningBorrowedUnwrap
+		if retType != nil && isRefType(retType) {
+			c.returningBorrowedUnwrap = true
+		}
 		val = c.genExpr(s.Value)
+		c.returningBorrowedUnwrap = prevReturningBorrowedUnwrap
 		c.elvisResultReturned = prevElvisReturned
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false

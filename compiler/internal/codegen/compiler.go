@@ -249,6 +249,7 @@ type Compiler struct {
 	optionalFieldString           bool                           // B0190: set by genFieldAccess when loading a string? field from a droppable type
 	optionalFieldVector           bool                           // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
 	optionalUnwrapContainerBorrow bool                           // T1143: set on the plain (no-dup) path of genOptionalForceUnwrap when the source is `container[k]!` — the inner aliases the container's slot and is borrowed (no dup), so trackHeapUserTypeResult must NOT register it as an owned temp (the container's drop frees it; tracking double-frees)
+	returningBorrowedUnwrap       bool                           // T1302: set by genReturnStmt while evaluating a borrow-typed (`T&`/`T~`) return whose value force-unwraps a `this.field!` Optional — suppresses genOptionalForceUnwrap's T0428 Case 3B dup (the caller borrows the aliased inner and never frees it, so the dup would leak)
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops

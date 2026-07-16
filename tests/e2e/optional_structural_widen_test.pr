@@ -150,11 +150,63 @@ widen_memberassign_heap() `test {
   assert(h.s!.emit(40) == 42, "member assign heap");
 }
 
-// NOTE: overwriting an ALREADY-populated Sink? member field (`h.s = Heavy(...)`
-// when h.s is set) currently leaks the old box — the member-assign path drops
-// the old value as a plain optional, not via __promise_structural_drop. Tracked
-// as T1300 (critical). The overwrite tests are added here once that is fixed;
-// the vector-index and map overwrite variants below already drop correctly.
+// T1300: overwriting an ALREADY-populated Sink? member field (`h.s = Counter(...)`
+// when h.s is set) must drop the old box via __promise_structural_drop, not as a
+// plain optional. emitOptionalFieldReassignDrop gained a structural branch that
+// routes the old {vtable, instance} view box through the RTTI structural-drop.
+// Both the value-box (1 alloc) and heap-box (box + inner instance/string) cases
+// must stay leak-free, and repeated overwrites must free each prior box once.
+
+widen_memberassign_overwrite_value() `test {
+  OptHolder h = OptHolder(s: Counter(base: 1));
+  h.s = Counter(base: 2);
+  assert(h.s!.emit(0) == 2, "member overwrite value (old box dropped)");
+}
+
+widen_memberassign_overwrite_heap() `test {
+  OptHolder h = OptHolder(s: Heavy(tag: "first"));
+  h.s = Heavy(tag: "second");
+  assert(h.s!.emit(0) == 6, "member overwrite heap (old box + inner dropped)");
+}
+
+// Repeated overwrite of the same field must free each prior box exactly once,
+// and starting from a `none` slot (no old box) must not leak or double-free.
+widen_memberassign_overwrite_repeat_heap() `test {
+  OptHolder h = OptHolder(s: none);
+  h.s = Heavy(tag: "one"); // none -> box: nothing to drop
+  h.s = Heavy(tag: "two"); // box -> box: drop first
+  h.s = Heavy(tag: "three"); // box -> box: drop second
+  assert(h.s!.emit(0) == 5, "member overwrite repeat heap");
+}
+
+// Overwriting a populated box with `none` must also drop the old box — the RHS is
+// `none` (not a widening concrete), so this exercises emitOptionalFieldReassignDrop's
+// structural branch on the plain-reassign path rather than the T1298 widen path.
+widen_memberassign_overwrite_to_none() `test {
+  OptHolder h = OptHolder(s: Heavy(tag: "gone"));
+  h.s = none; // heap-box -> none: old box + inner must be dropped
+  assert(true, "member overwrite to none (old box dropped)");
+}
+
+// Overwriting with a value that is ALREADY the interface type (a moved `Sink`, not a
+// widening concrete) must still drop the old box — the drop-old is independent of how
+// the new RHS is produced.
+widen_memberassign_overwrite_iface_value() `test {
+  Sink v = Heavy(tag: "second");
+  OptHolder h = OptHolder(s: Heavy(tag: "first"));
+  h.s = v;
+  assert(h.s!.emit(0) == 6, "member overwrite with interface-typed value");
+}
+
+// Overwriting across concrete kinds (value-box <-> heap-box) must drop whichever box
+// shape currently occupies the slot — the structural drop dispatches via RTTI, so it
+// frees a value box and a heap box (plus its inner instance/string) equally.
+widen_memberassign_overwrite_mixed() `test {
+  OptHolder h = OptHolder(s: Counter(base: 1));
+  h.s = Heavy(tag: "abc"); // value-box -> heap-box: drop old value box
+  h.s = Counter(base: 5); // heap-box -> value-box: drop old heap box + inner
+  assert(h.s!.emit(0) == 5, "member overwrite mixed value/heap boxes");
+}
 
 // --- vector index-assign (v[i] = concrete) for Sink?[] ---
 // v[i] = concrete on a Sink?[] routes through the isVec branch of genAssignStmt's

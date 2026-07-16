@@ -8676,6 +8676,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 	var taskJoinElem types.Type
 	haveTaskJoin := false
 	needsFreeOnly := false
+	isStructuralInner := false
 
 	switch {
 	case innerNamed == types.TypString:
@@ -8783,6 +8784,15 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		// T0573: Optional[MutexGuard] field reassignment — MutexGuard.drop is a
 		// single T-independent symbol (T0156).
 		dropFunc = c.funcs["MutexGuard.drop"]
+	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
+		// T1300: Optional[StructuralInterface] member field reassignment — the old
+		// slot holds a {vtable, instance} view box. Drop it through
+		// __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr → concrete drop,
+		// else pal_free), mirroring the scope-exit path (emitOptionalValueDrop,
+		// T0460) and the vector/map overwrite drops (T1287/T1292). Without it the
+		// overwritten view box leaks (value-box case: 1 alloc; heap-box case: box +
+		// inner instance/string).
+		isStructuralInner = true
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):
@@ -8807,7 +8817,12 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		return // value type or primitive — no cleanup needed
 	}
 
-	if dropFunc == nil && !needsFreeOnly {
+	if dropFunc == nil && !needsFreeOnly && !isStructuralInner {
+		return
+	}
+	// T1300: structural inner requires the structural-drop runtime; skip if absent
+	// (mirrors emitOptionalValueDrop's nil guard).
+	if isStructuralInner && c.structuralDrop == nil {
 		return
 	}
 
@@ -8844,7 +8859,20 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 	c.block = dropBlock
 	innerVal := c.block.NewExtractValue(oldOpt, 1)
 
-	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
+	if isStructuralInner {
+		// T1300: old slot holds a {vtable, instance} view box — drop through RTTI.
+		instancePtr := c.extractInstancePtr(innerVal)
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("field.optdrop.struct.exec")
+		afterBlock := c.newBlock("field.optdrop.struct.done")
+		c.block.NewCondBr(nullCheck, afterBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(c.structuralDrop, instancePtr)
+		c.block.NewBr(afterBlock)
+
+		c.block = afterBlock
+	} else if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
 		types.IsTask(elem) || innerNamed == types.TypTask ||
 		types.IsArc(elem) || innerNamed == types.TypArc ||
 		types.IsWeak(elem) || innerNamed == types.TypWeak ||

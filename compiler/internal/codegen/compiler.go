@@ -2551,6 +2551,12 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 	case types.IsWeak(innerElem):
 		weakElem, _ := types.AsWeak(innerElem)
 		dupedInner = c.dupWeak(innerVal, weakElem)
+	case named != nil && named.IsStructural() && !named.IsValueType():
+		// T1291: structural-interface inner — the {vtable, instance} view boxes a
+		// heap instance; deep-clone it via RTTI (__promise_structural_clone) so the
+		// cloned optional owns an independent box. Without this the shallow alias is
+		// double-freed once the structural-aware element drop frees each box.
+		dupedInner = c.cloneStructuralView(innerVal)
 	case isDroppableHeapUserType(innerElem) || isHeapUserNoDropPalFree(innerElem):
 		if namedInner := extractNamed(innerElem); namedInner != nil {
 			dupedInner = c.cloneHeapElement(innerVal, innerElem, namedInner)

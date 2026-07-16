@@ -1370,12 +1370,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0440: Same flag for typed `T? b = m[k]` — Optional[heap-user-type] LHS
 	// where the inner value aliases the container's bucket. Set the flag so
 	// genMethodIndex deep-clones via cloneHeapElement.
+	// T1291: also fire for an Optional[structural] inner (`Showable? z = v[i]`) —
+	// its element drop is now active, so the aliased read must clone the box.
 	if opt, ok := resolvedExprType.(*types.Optional); ok {
 		elem := opt.Elem()
 		if c.typeSubst != nil {
 			elem = types.Substitute(elem, c.typeSubst)
 		}
-		if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) {
+		if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) || isNonValueStructuralType(elem) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
@@ -1860,7 +1862,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 			elem = types.Substitute(elem, c.typeSubst)
 		}
 		// T0903: include no-drop heap user inner (analog of the bare-type branch).
-		if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) {
+		// T1291: include a non-value structural inner (`x := v[i]` where the element
+		// is `Showable?`) — its element drop is now active, so the aliased read must
+		// clone the box else x's optional drop and the vector's element walk double-free.
+		if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) || isNonValueStructuralType(elem) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
@@ -5674,6 +5679,54 @@ func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Ty
 	c.block = loopDone
 }
 
+// emitVectorOptionalDupLoop iterates a cloned vector's Optional[droppable]
+// elements and deep-clones each present inner via dupOptionalVectorElem, so the
+// cloned vector owns independent inner allocations instead of aliasing the
+// source's heap boxes (which the now-active element drop loop would double-free /
+// UAF). dupOptionalVectorElem builds its own present/absent split, so the store
+// and loop back-edge use c.block after the call (its merge block). T1291.
+func (c *Compiler) emitVectorOptionalDupLoop(vecPtr value.Value, elemType types.Type, opt *types.Optional, inner types.Type) {
+	elemLLVM := c.resolveType(elemType)
+
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	length := loadVectorLen(c.block, headerPtr)
+
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+
+	loopHead := c.newBlock("vecdup_opt.head")
+	loopBody := c.newBlock("vecdup_opt.body")
+	loopDone := c.newBlock("vecdup_opt.done")
+
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	idxAlloca.SetName(c.uniqueLocalName("vecdup_opt.idx"))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, length)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx2)
+	elemVal := c.block.NewLoad(elemLLVM, elemPtr)
+	duped := c.dupOptionalVectorElem(elemVal, opt, inner)
+	// dupOptionalVectorElem advances c.block to its merge block; store and loop
+	// back-edge must be emitted there. loopBody dominates that merge (it's the entry
+	// to the present/absent diamond), so elemPtr (a loopBody GEP) and idxAlloca (an
+	// entry-block alloca) both still dominate — valid across the split.
+	c.block.NewStore(duped, elemPtr)
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopDone
+}
+
 // emitVectorClosureNullLoop iterates a cloned vector's bare closure elements
 // (Vector[() -> int]) and nulls each {fn, env} fat-pointer slot. T1045: a closure
 // env CANNOT be deep-cloned (the captured frame is opaque), and dupVector's shallow
@@ -5770,6 +5823,18 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 		// keeps sole ownership of the env, the clone holds an empty closure.
 		if _, isSig := elemType.(*types.Signature); isSig {
 			c.emitVectorClosureNullLoop(vecPtr, elemType)
+			return
+		}
+		// T1291: Optional[droppable] element — extractNamed/extractEnum are both
+		// nil for an Optional, so without this the loop early-returns leaving the
+		// shallow memcpy intact, aliasing each present inner's heap allocation
+		// across both vectors → double-free / UAF once the (now-active) element
+		// drop loop frees each. Deep-clone the present inner via
+		// dupOptionalVectorElem (present/absent split + per-inner dispatch, incl.
+		// the structural case added for T1291). Covers Optional[structural] (the
+		// T1291 crash) plus pre-existing Optional[string]/[vector]/[heap-user].
+		if opt, inner, ok := c.optionalPushElemNeedsDup(elemType); ok {
+			c.emitVectorOptionalDupLoop(vecPtr, elemType, opt, inner)
 			return
 		}
 		if enum := extractEnum(elemType); enum != nil {
@@ -6046,6 +6111,17 @@ func (c *Compiler) cloneStructuralView(view value.Value) value.Value {
 	return c.block.NewInsertValue(tmp, clonedInst, 1)
 }
 
+// isNonValueStructuralType reports whether t resolves to a non-value structural
+// interface. Its runtime value is a fat view {vtable, instance} whose instance is
+// a heap box (heap user instance / boxed value type / heap string box) that must
+// be deep-cloned on read (__promise_structural_clone) and dropped via RTTI
+// (__promise_structural_drop). Shared by the vector element drop gate and the
+// Optional[structural] dup-on-read gates. T1284/T1291.
+func isNonValueStructuralType(t types.Type) bool {
+	named := extractNamed(t)
+	return named != nil && named.IsStructural() && !named.IsValueType()
+}
+
 // vecElemNeedsStructuralDrop returns true if a vector element type is a
 // non-value-type structural interface. Its runtime value is a fat view
 // {vtable, instance} whose instance is a heap box (heap user instance / heap
@@ -6053,11 +6129,7 @@ func (c *Compiler) cloneStructuralView(view value.Value) value.Value {
 // __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr → concrete drop, else
 // pal_free) rather than treating the view as trivially droppable. T1284.
 func (c *Compiler) vecElemNeedsStructuralDrop(elemType types.Type) bool {
-	named := extractNamed(elemType)
-	if named == nil {
-		return false
-	}
-	return named.IsStructural() && !named.IsValueType()
+	return isNonValueStructuralType(elemType)
 }
 
 // vecElemNeedsOptionalDrop returns true if a vector element type is Optional[T]
@@ -6136,6 +6208,8 @@ func (c *Compiler) typeNeedsFieldDrop(typ types.Type) bool {
 		// instance box must be dropped via __promise_structural_drop. Classify it as
 		// droppable so a tuple/array carrying a structural field (e.g. the
 		// `(K, Showable)` elements of `Map.entries()`'s result vector) drops each box.
+		// T1291: same routing also covers Optional[structural] vector elements (via
+		// vecElemNeedsOptionalDrop → here); without it those boxed instances leak.
 		if named.IsStructural() && !named.IsValueType() {
 			return true
 		}
@@ -8208,7 +8282,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if _, isTup := inner.(*types.Tuple); isTup && c.tupleNeedsDrop(inner) {
 						c.dupTupleFieldAccess = true
 					}
-					if isDroppableHeapUserType(inner) || isHeapUserNoDropPalFree(inner) {
+					// T1291: also clone an Optional[structural] inner on reassignment
+					// (`z = v[i]`) — its element drop is now active, so the aliased read
+					// must own an independent box else the two drops double-free.
+					if isDroppableHeapUserType(inner) || isHeapUserNoDropPalFree(inner) || isNonValueStructuralType(inner) {
 						c.dupHeapUserFieldAccess = true
 					}
 				}

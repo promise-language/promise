@@ -12808,7 +12808,13 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 					flagConsumed = true
 				}
 			} else if c.dupHeapUserFieldAccess {
-				if isDroppableHeapUserType(innerElem) || isHeapUserNoDropPalFree(innerElem) {
+				// T1291: a non-value structural inner boxes a heap instance (not
+				// matched by isDroppableHeapUserType, which excludes structural). Its
+				// element drop is now active (T1291), so an aliased read into an owning
+				// Optional local would double-free — deep-clone the box on read via
+				// dupOptionalVectorElem's structural case.
+				if isDroppableHeapUserType(innerElem) || isHeapUserNoDropPalFree(innerElem) ||
+					isNonValueStructuralType(innerElem) {
 					c.dupHeapUserFieldAccess = false
 					flagConsumed = true
 				}
@@ -14503,7 +14509,10 @@ func (c *Compiler) optionalPushElemNeedsDup(typ types.Type) (*types.Optional, ty
 	if c.typeSubst != nil {
 		inner = types.Substitute(inner, c.typeSubst)
 	}
-	if (extractNamed(inner) == types.TypString && !isRefType(inner)) || c.pushElemNeedsDup(inner) {
+	// T1291: a non-value structural interface inner boxes a heap instance that
+	// must be deep-cloned via __promise_structural_clone (dupOptionalVectorElem's
+	// structural case) — pushElemNeedsDup excludes structural, so recognize it here.
+	if (extractNamed(inner) == types.TypString && !isRefType(inner)) || c.pushElemNeedsDup(inner) || isNonValueStructuralType(inner) {
 		return opt, inner, true
 	}
 	return nil, nil, false

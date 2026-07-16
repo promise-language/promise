@@ -1,0 +1,151 @@
+// T1291: A Vector whose element type is an *optional* structural interface
+// (`Vector[Showable?]`) must drop its present heap-boxed elements at vector drop —
+// unwrapping the Some tag and routing each inner instance ptr through
+// __promise_structural_drop — and must DEEP-CLONE those boxes on clone/slice so the
+// copy owns an independent box (else the now-active element drop double-frees).
+// Follow-up sibling of T1283/T1284 (non-optional structural element drop/clone).
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+show(int n) Showable {
+  return Widget(id: n);
+}
+
+// --- Drop: no leak (present element boxes freed via __promise_structural_drop) ---
+
+// The exact reported repro: pushing two boxed `Showable?` elements must not leak.
+no_unwrap() `test {
+  Showable?[] v = [];
+  v.push(show(1));
+  v.push(show(2));
+  assert(v.len == 2, "two");
+}
+
+// Mixed present / absent elements: absent slots have no box to free, present slots
+// route through __promise_structural_drop.
+mixed_present_absent_drop() `test {
+  Showable?[] v = [];
+  v.push(show(1));
+  Showable? gap = none;
+  v.push(move gap);
+  v.push(show(3));
+  assert(v.len == 3, "three");
+}
+
+// --- Clone: independent boxes (no double-free, values preserved) ---
+
+clone_independent_boxes() `test {
+  Showable?[] v = [];
+  v.push(show(1));
+  Showable? gap = none;
+  v.push(move gap);
+  v.push(show(3));
+
+  Showable?[] c = v.clone();
+  assert(v.len == 3, "orig len");
+  assert(c.len == 3, "clone len");
+  assert(c[0]!.to_string() == "w1", "clone[0]");
+  assert(c[2]!.to_string() == "w3", "clone[2]");
+}
+
+// --- Slice: element boxes are deep-cloned (independent, no leak) ---
+
+slice_independent_boxes() `test {
+  Showable?[] v = [];
+  v.push(show(1));
+  v.push(show(2));
+  v.push(show(3));
+
+  Showable?[] s = v[0:2];
+  assert(s.len == 2, "slice len");
+  assert(s[0]!.to_string() == "w1", "slice[0]");
+  assert(s[1]!.to_string() == "w2", "slice[1]");
+}
+
+// --- Read-out into an owning Optional local: the box must be deep-cloned ---
+// Enabling the element drop (above) means an aliased read into a `Showable?` local
+// (which takes its own optional drop) would double-free with the vector's element
+// walk. genVectorIndex must dup-on-read the present box so the local owns it.
+
+inferred_read_independent() `test {
+  Showable?[] v = [];
+  v.push(show(1));
+  v.push(show(2));
+
+  x := v[0]; // inferred `Showable?` local — owns an independent box
+  v.remove(0); // free the source slot; x must survive
+  assert(x!.to_string() == "w1", "x independent of source");
+  assert(v.len == 1, "source shrank");
+}
+
+typed_read_independent() `test {
+  Showable?[] v = [];
+  v.push(show(7));
+
+  Showable? z = v[0]; // typed `Showable?` local — owns an independent box
+  assert(z!.to_string() == "w7", "z");
+  assert(v.len == 1, "source retained");
+}
+
+reassign_read_independent() `test {
+  Showable?[] v = [];
+  v.push(show(3));
+  v.push(show(4));
+
+  Showable? z = none;
+  z = v[0]; // reassignment from an index read — owns an independent box
+  assert(z!.to_string() == "w3", "z");
+  assert(v[1]!.to_string() == "w4", "source[1] intact");
+}
+
+// --- Regression guard for the companion Optional-inner clone UAF (T1291 plan) ---
+// Optional[string] elements must be deep-cloned on clone(): mutating the clone
+// (remove) must not free the original's inner string box (a shallow alias would
+// UAF the original read).
+optional_string_clone_independent() `test {
+  string?[] v = [];
+  string? a = "alpha";
+  string? b = "beta";
+  v.push(move a);
+  v.push(move b);
+
+  string?[] c = v.clone();
+  c.remove(0);
+  assert(v.len == 2, "orig retained");
+  assert(v[0]! == "alpha", "orig[0] intact");
+  assert(c.len == 1, "clone shrank");
+}
+
+// --- Reroute regression: Optional[heap-user] clone (pre-existing double-free) ---
+// T1291 made emitVectorOptionalDupLoop the clone path for ALL Optional[droppable]
+// vector elements, not only the structural case. That reroute also fixed a
+// pre-existing `Vector[Optional[heap-user]].clone()` double-free (the old shallow
+// memcpy aliased each present box across both vectors). Guard the non-structural
+// dispatch of the new loop: cloning must produce independent boxes so mutating the
+// clone (remove) leaves the original intact and both drop cleanly.
+type OptBox {
+  int v;
+}
+
+optional_heapuser_clone_independent() `test {
+  OptBox?[] v = [];
+  v.push(OptBox(v: 1));
+  OptBox? gap = none;
+  v.push(move gap);
+  v.push(OptBox(v: 3));
+
+  OptBox?[] c = v.clone();
+  c.remove(0);
+  assert(v.len == 3, "orig retained");
+  assert(v[0]!.v == 1, "orig[0] intact");
+  assert(v[2]!.v == 3, "orig[2] intact");
+  assert(c.len == 2, "clone shrank");
+}

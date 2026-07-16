@@ -9570,6 +9570,60 @@ func TestVectorStructuralElementDropAndClone(t *testing.T) {
 	assertContains(t, ir, "call i8* @__promise_structural_clone")
 }
 
+func TestVectorOptionalStructuralElementDropAndClone(t *testing.T) {
+	// T1291: a Vector[structural-interface?] (Optional-wrapped structural element)
+	// must (a) drop each present heap-boxed element through __promise_structural_drop
+	// at vector drop — the drop gate (typeNeedsFieldDrop) now recognizes a non-value
+	// structural inner — and (b) deep-clone each present box on clone via
+	// __promise_structural_clone so the clone owns independent boxes, otherwise the
+	// now-active element drop double-frees the aliased boxes.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		type Widget {
+			int id;
+			to_string() string { return this.id.to_string(); }
+		}
+		show(int n) Showable { return Widget(id: n); }
+		main() {
+			Showable?[] v = [];
+			v.push(show(1));
+			Showable?[] c = v.clone();
+		}
+	`)
+	// The RTTI structural drop/clone helpers are emitted and referenced for the
+	// Optional-wrapped structural element.
+	assertContains(t, ir, "@__promise_structural_drop")
+	assertContains(t, ir, "@__promise_structural_clone")
+	assertContains(t, ir, "call i8* @__promise_structural_clone")
+}
+
+func TestVectorOptionalStructuralElementReadDupsBox(t *testing.T) {
+	// T1291: reading an element out of a Vector[structural?] into an owning
+	// Optional local (`z := v[i]`) must deep-clone the present box on read. The
+	// element drop is now active, so an aliased read would double-free with the
+	// vector's element walk. genVectorIndex must consume the dup-on-read flag and
+	// route the present inner through __promise_structural_clone.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		type Widget {
+			int id;
+			to_string() string { return this.id.to_string(); }
+		}
+		show(int n) Showable { return Widget(id: n); }
+		main() {
+			Showable?[] v = [];
+			v.push(show(1));
+			z := v[0];
+		}
+	`)
+	// The index read deep-clones the boxed instance rather than aliasing it.
+	assertContains(t, ir, "call i8* @__promise_structural_clone")
+}
+
 func TestPrimitiveToFailableStructuralView(t *testing.T) {
 	// Primitive method is non-failable, interface method is failable
 	// → adapter wraps result as success

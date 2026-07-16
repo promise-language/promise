@@ -2755,6 +2755,12 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 		return
 	}
 	if types.ContainsTypeParam(fieldType) {
+		// The enclosing generic method/getter body is ownership-checked once
+		// with the owner's type params unbound, so the field type here still
+		// contains a TypeParam. A blanket allow would miss droppable
+		// instantiations (T1301) — defer to a per-instantiation check that
+		// applies the concrete verdict to each recorded concrete instance.
+		c.checkGenericFieldMove(e, fieldType)
 		return
 	}
 	ownerType := c.info.Types[e.Target]
@@ -2782,8 +2788,21 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 			return
 		}
 	}
-	if isAutoDupType(fieldType) {
-		return
+	if msg := fieldMoveVerdict(fieldType, e.Field, ownerType.String()); msg != "" {
+		c.errorf(e.Pos(), "%s", msg)
+	}
+}
+
+// fieldMoveVerdict decides whether moving a field named `field` of type ft out
+// of an owner displayed as ownerName should be rejected, returning the error
+// message (or "" to allow). Shared by the concrete path in
+// checkFieldMoveOwnership and the per-instantiation generic path in
+// checkGenericFieldMove so both apply identical rules: auto-dup and structural
+// views are allowed, closures and plain drop-bearing heap-user fields are
+// rejected (T1301).
+func fieldMoveVerdict(ft types.Type, field, ownerName string) string {
+	if isAutoDupType(ft) {
+		return ""
 	}
 	// T1227: a closure (function value) field owns a heap-allocated env struct
 	// freed by the owner's synthesized drop. Reading it out in a consuming
@@ -2793,20 +2812,60 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 	// for Signature, so the gate below would otherwise let this slip through the
 	// same way `return this.cb` did). Reject with a closure-specific remedy: the
 	// caller should return a freshly-built lambda instead of aliasing a stored one.
-	if isClosureFieldType(fieldType) {
-		c.errorf(e.Pos(),
+	if isClosureFieldType(ft) {
+		return fmt.Sprintf(
 			"cannot move closure field '%s' out of '%s' — closures are move-only single-owner values with no clone; return a freshly-built lambda instead",
-			e.Field, ownerType)
-		return
+			field, ownerName)
 	}
 	// Only error if the field type itself is droppable — non-droppable
-	// non-Copy types (fieldless enums, etc.) have value semantics and
-	// are safe to shallow-copy without causing double-free.
-	if !isDroppableType(fieldType) {
+	// non-Copy types (fieldless enums, structural views, etc.) have value
+	// semantics and are safe to shallow-copy without causing double-free.
+	if !isDroppableType(ft) {
+		return ""
+	}
+	return fmt.Sprintf("cannot move field '%s' out of '%s' — use .clone() to create an independent copy",
+		field, ownerName)
+}
+
+// checkGenericFieldMove handles a field-escape whose field type still contains a
+// TypeParam (the generic method/getter body is checked once with the owner's
+// type params unbound). It consults every recorded concrete instantiation of the
+// enclosing owner type and applies the concrete field-move verdict to the
+// substituted field type, so Box[Res].val (droppable heap-user field) is
+// rejected while Box[int] (Copy) and Slot[Sink] (structural view) stay allowed.
+// Mirrors instanceHasDroppableField's substitution shape. T1301.
+func (c *Checker) checkGenericFieldMove(e *ast.MemberExpr, fieldType types.Type) {
+	owner := extractNamedType(c.info.Types[e.Target])
+	if owner == nil || len(owner.TypeParams()) == 0 {
 		return
 	}
-	c.errorf(e.Pos(), "cannot move field '%s' out of '%s' — use .clone() to create an independent copy",
-		e.Field, ownerType)
+	// Getter-call targets return owned values — no field move involved (T0591);
+	// the same carve-out the concrete path applies.
+	if owner.LookupGetter(e.Field) != nil {
+		return
+	}
+	for _, inst := range c.info.Instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || named != owner {
+			continue
+		}
+		allConcrete := true
+		for _, ta := range inst.TypeArgs() {
+			if types.ContainsTypeParam(ta) {
+				allConcrete = false
+				break
+			}
+		}
+		if !allConcrete {
+			continue
+		}
+		subst := types.BuildSubstMap(owner.TypeParams(), inst.TypeArgs())
+		sft := types.Substitute(fieldType, subst)
+		if msg := fieldMoveVerdict(sft, e.Field, inst.String()); msg != "" {
+			c.errorf(e.Pos(), "%s", msg)
+			return // one diagnostic per offending body is enough
+		}
+	}
 }
 
 // isClosureFieldType reports whether t is a closure (function value) type,

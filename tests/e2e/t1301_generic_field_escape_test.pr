@@ -1,0 +1,68 @@
+// T1301: Returning a droppable generic type-param field (`V?`/`V`) out of a
+// droppable owner used to double-free when the concrete V was a drop-bearing
+// heap-user type — the generic method/getter body is ownership-checked once
+// with V unbound, so the field-move check bailed on `ContainsTypeParam` and let
+// the alias through. The fix rejects the offending instantiation at compile
+// time (see ownership/t1301_test.go). These runtime tests pin the two shapes
+// that must STAY allowed after that change, and confirm they run leak-free.
+type _T1301Box[V] {
+  V? _v;
+  get val V? {
+    return this._v;
+  }
+}
+
+// A Copy instantiation copies on read — the getter may return the field
+// directly with no double-free. The T1301 per-instantiation check must not
+// over-reject it.
+copy_instantiation_getter_no_leak() `test {
+  _T1301Box[int] b = _T1301Box[int](_v: none);
+  b._v = 42;
+  assert(b.val! == 42, "copy getter");
+  b._v = 7;
+  assert(b.val! == 7, "copy getter reassigned");
+}
+
+// A structural-interface field holds a view box `{vtable, instance}` that
+// codegen auto-clones on field-escape (T1299). isDroppableType is false for a
+// structural view, so the field-move verdict allows it — the T1301 change must
+// not regress this. Uses a heap-allocating concrete impl to exercise cleanup.
+type _T1301Sink `structural {
+  total(this) int `abstract;
+}
+type _T1301Bag {
+  int[] items;
+  total(this) int {
+    int sum = 0;
+    for x in this.items {
+      sum = sum + x;
+    }
+    return sum;
+  }
+}
+type _T1301Slot[V] {
+  V? _v;
+  get view V? {
+    return this._v;
+  }
+}
+
+structural_view_escape_no_leak() `test {
+  int[] xs = [];
+  xs.push(3);
+  xs.push(4);
+  _T1301Slot[_T1301Sink] s = _T1301Slot[_T1301Sink](_v: _T1301Bag(items: move xs));
+  _T1301Sink got = s.view!;
+  assert(got.total() == 7, "structural view escape");
+}
+
+// When only Copy instantiations exist, the generic getter body must still
+// compile even though its field type carries an unbound V.
+copy_only_multiple_instantiations() `test {
+  _T1301Box[int] a = _T1301Box[int](_v: none);
+  _T1301Box[bool] c = _T1301Box[bool](_v: none);
+  a._v = 5;
+  c._v = true;
+  assert(a.val! == 5, "int");
+  assert(c.val!, "bool");
+}

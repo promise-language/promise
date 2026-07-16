@@ -516,7 +516,7 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 	// shape the shallow FirstFieldNestedClosure rejects (nil). For a bare container the
 	// read is a borrow only when it ALIASES storage the owner frees at scope exit:
 	//   - an aliasing container index — native Vector (vv[0], T1263) or user Map (m[0]!, T1262)
-	//   - a struct/enum field read (h.fns, T1263); getters return fresh owned values (excluded below)
+	//   - a struct/enum field read (h.fns, T1263); getters are classified below via the shared alias filter
 	// A user non-aliasing `[]` returns a fresh OWNED value (indexTargetIsAliasingContainer false).
 	if sema.FirstFieldNestedClosure(rt) == nil {
 		switch e.(type) {
@@ -525,14 +525,22 @@ func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
 				return false
 			}
 		case *ast.MemberExpr:
-			// struct/enum field — getters excluded by isGetterCallExpr below
+			// struct/enum field — getters classified below via the shared alias filter
 		default:
 			return false
 		}
 	}
-	// Owned-return shapes: the local owns a fresh closure, keep its binding.
+	// A getter's result is fresh only when T1227's "no direct field return" guarantee
+	// applies. A getter CAN legally hand back a borrowed CONTAINER ELEMENT (e.g.
+	// `get cb() -> int { return this.slots[0]; }`), which is not fresh — the receiver
+	// still owns the element and frees it at scope exit. closureResultMayAliasCallInput
+	// already carries this exact classification (it drives whether the getter's temp is
+	// tracked at all); reuse it here instead of assuming every getter is owned, or a
+	// var-decl binding of an aliasing getter result double-frees against the receiver's
+	// drop (T1290-class bug — the discard case was already correct, only the bound case
+	// defaulted to "owned").
 	if c.isGetterCallExpr(e) {
-		return false
+		return c.closureResultMayAliasCallInput(e)
 	}
 	// A user-defined non-native `[]` normally returns a FRESH owned value (a
 	// freshly-built closure / a duped string or heap result), so it is exempt —
@@ -7974,6 +7982,7 @@ func findInnerCallExpr(expr ast.Expr) *ast.CallExpr {
 func (c *Compiler) resolvedExprType(e ast.Expr) types.Type {
 	t := c.info.Types[e]
 	if t == nil {
+		// Defensive: sema Types map may be absent for synthesized AST nodes.
 		return nil
 	}
 	if c.typeSubst != nil {
@@ -7994,7 +8003,11 @@ func (c *Compiler) resolvedExprType(e ast.Expr) types.Type {
 // field walk and needsVtable check are now dead in the real pipeline (ownership
 // rejects those patterns before codegen); they remain as defense-in-depth for IR
 // generated outside the ownership pass (e.g. Go unit tests via generateIR).
-// Not called from trackGetterResult: T1227 guarantees all getter results are fresh.
+// Also called from trackGetterResult (to decide whether a getter's closure temp is
+// tracked at all) and isClosureAggregateBorrow (to decide whether a var-decl binding
+// of a getter result owns the closure) — T1227 only bars a getter from returning a
+// closure FIELD directly; a borrowed container ELEMENT is still a legal getter
+// result, so getter results are not unconditionally fresh.
 func (c *Compiler) closureResultMayAliasCallInput(expr ast.Expr) bool {
 	// Peel the failable-unwrap layers, which only extract the success value of the
 	// inner call — ownership of the closure is the inner call's.
@@ -8114,6 +8127,7 @@ func (c *Compiler) isClosureValueCallee(callee ast.Expr) bool {
 		callee = p.Expr
 	}
 	if _, isSig := c.resolvedExprType(callee).(*types.Signature); !isSig {
+		// Defensive: callee is non-Signature (e.g. nil or non-function type); not a closure callee.
 		return false
 	}
 	switch ce := callee.(type) {
@@ -8150,6 +8164,7 @@ func (c *Compiler) isGenericInstantiation(idx *ast.IndexExpr) bool {
 func (c *Compiler) typeMentionsSignature(t types.Type, seen map[*types.TypeName]bool) bool {
 	switch tt := t.(type) {
 	case nil:
+		// Defensive: nil type in a field/variant slot; treat as no closure.
 		return false
 	case *types.Signature:
 		return true

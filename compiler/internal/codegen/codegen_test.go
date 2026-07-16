@@ -6195,23 +6195,6 @@ func TestClosureParenWrappedCalleeResultTracked(t *testing.T) {
 	assertContains(t, extractFunction(ir, "__user.do_it"), "env.tmp.drop")
 }
 
-// T1242: a module-qualified call result (`mod.make_adder(x)`) reaches the alias filter
-// with receiver = module IdentExpr. resolveModuleName fires → return false (no aliasing),
-// so the fresh env is tracked. This covers the module-receiver `return false` branch,
-// which is unreachable via a non-module call since those either set receiver=nil (free fn)
-// or receiver=value IdentExpr (method callee target).
-func TestClosureModuleQualifiedCallResultTracked(t *testing.T) {
-	ir := generateIRWithModule(t, "factory",
-		`make_adder(int x) () -> int `+"`public"+` { return move || -> x + 1; }`,
-		`
-		use factory "./factory";
-		do_it() { factory.make_adder(5); }
-		main() { do_it(); }
-		`,
-	)
-	assertContains(t, extractFunction(ir, "__user.do_it"), "env.tmp.drop")
-}
-
 // T1160: a receiver reached through a borrow has type SharedRef(T)/MutRef(T), so
 // typeMentionsSignature must unwrap the ref before it can find the closure field.
 // Dropping either arm frees the borrowed env here and the owner's drop frees it
@@ -6566,6 +6549,24 @@ func TestClosureCallResultDroppedOnReturnAndRaisePaths(t *testing.T) {
 	`)
 	assertContains(t, extractFunction(ir, "__user.early"), "env.tmp.drop")
 	assertContains(t, extractFunction(ir, "__user.unwinding"), "env.tmp.drop")
+}
+
+// T1160: a module-qualified call (`mod.make_adder(5)`) has a MemberExpr callee
+// whose "receiver" names a module, not a value type. closureResultMayAliasCallInput
+// must recognize the module-name ident (via resolveModuleName) and return false so
+// the fresh closure env IS tracked and freed at statement end. The e2e counterpart
+// (tests/modules/module_closures_test.pr test_discarded_module_closure_result) tests
+// the same thing at runtime + leak-detection; this Go unit test pins the IR shape to
+// cover the module-receiver branch in the Go coverage profile.
+func TestClosureModuleQualifiedCallResultTracked(t *testing.T) {
+	ir := generateIRWithModule(t, "cblib",
+		`make_adder(int x) () -> int `+"`"+`public { return move || -> x + 1; }`,
+		`use cblib "./cblib";
+		 discard_fresh() { cblib.make_adder(5); }
+		 main() {}`,
+	)
+	// Module receiver → resolveModuleName hit → return false → result is tracked.
+	assertContains(t, extractFunction(ir, "__user.discard_fresh"), "env.tmp.drop")
 }
 
 // T0812: reading a closure out of an owning aggregate (struct/optional field,

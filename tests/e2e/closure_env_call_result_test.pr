@@ -115,7 +115,7 @@ discard_generic_closure_result() `test {
 }
 
 // 2c. …and the receiver of an explicitly-instantiated generic METHOD must still be
-//     checked for aliasing: `get_cb` hands back the borrowed `cb`, which the
+//     checked for aliasing: `get_cb` hands back the borrowed `cbs[0]`, which the
 //     holder's drop frees.
 discard_generic_method_aliasing_result_is_not_freed() `test {
   h := GenericHolder(cbs: [make_adder_free(6)]);
@@ -186,6 +186,19 @@ lambda_into_setter() `test {
   assert(h.run() == 6, "");
 }
 
+// 6c. SetterHolder.cb GETTER — returns `this.slots[0]` (a container element).
+//     `closureResultMayAliasCallInput` is conservative (SetterHolder has a closure
+//     field via its slots vector, so the receiver type mentions a Signature), so an
+//     unbound getter call is NOT tracked as a temp — discarding it would leak.
+//     Binding it to a local is safe: `f` owns the borrowed element env; since the
+//     getter returns a reference into the vector, it must not be freed here.
+//     This exercises the `SetterHolder.cb` getter body (previously uncovered).
+setter_holder_getter_bound() `test {
+  h := SetterHolder(slots: [make_adder_free(5)]);
+  f := h.cb;
+  assert(f() == 6, "");
+}
+
 // 7. Container element sinks: genIndexAssign claims the env temp.
 closure_result_into_vector_element() `test {
   v := [|| -> 0];
@@ -231,8 +244,9 @@ discard_aliasing_result_is_not_freed() `test {
 }
 
 // The same alias, reached through inheritance: `DerivedHolder` declares no fields
-// of its own, so a filter that only walks own fields would treat the borrowed
-// `cb` as a fresh closure, free it here, and double-free at `d`'s drop.
+// of its own, so a filter that only walks own fields (Fields()) would treat the
+// borrowed `cbs[0]` as a fresh closure, free it here, and double-free at `d`'s
+// drop. AllFields() is what makes the check descend into BaseHolder.cbs.
 discard_inherited_aliasing_result_is_not_freed() `test {
   d := DerivedHolder(cbs: [make_adder_free(6)]);
   d.get_cb();
@@ -240,12 +254,23 @@ discard_inherited_aliasing_result_is_not_freed() `test {
 }
 
 // A `VirtualBase`-typed receiver whose runtime type is `VirtualDerived`: the
-// override returns the borrowed `cb`, so tracking the result as a temp frees an
-// env `d`'s drop frees again (segfault).
+// override returns the borrowed `cbs[0]`, so tracking the result as a temp frees
+// an env `d`'s drop frees again (segfault). needsVtable fires for the base type.
 discard_virtual_aliasing_result_is_not_freed() `test {
   d := VirtualDerived(n: 1, cbs: [make_adder_free(6)]);
   discard_via_base(d);
   assert(d.cbs[0]() == 7, "");
+}
+
+// 9b. A concrete `VirtualBase` (no override) — runtime type matches static type,
+//     so the base's own `get_cb` runs. It returns a fresh closure (`move || -> 1`)
+//     that the caller owns, so the temp must be freed. Exercises `VirtualBase.get_cb`
+//     body (previously uncovered — only the override path was tested above).
+discard_direct_virtual_base_result_is_freed() `test {
+  b := VirtualBase(n: 1);
+  b.get_cb();
+  f := b.get_cb();
+  assert(f() == 1, "");
 }
 
 // 10. A non-capturing closure result has a null env — the tracked temp's
@@ -357,8 +382,10 @@ bound_getter_closure_result() `test {
   assert(f() == 2, "");
 }
 
-// A getter handing back the receiver's borrowed field: the receiver mentions a
-// closure, so the result must not be freed here (`h`'s drop owns it).
+// A getter handing back the receiver's borrowed container element: the receiver
+// mentions a closure (via cbs), so the result must not be freed here (`h`'s drop
+// owns the element). Tests the `case *ast.MemberExpr` getter arm of
+// closureResultMayAliasCallInput.
 type GetterHolder {
   (() -> int)[] cbs;
   get callback() -> int {
@@ -551,6 +578,8 @@ recursive_enum_arg_fresh_result_is_freed() `test {
 
 // 18. A generic instance whose TYPE ARGS hold no closure, but whose ORIGIN declares
 //     one: the walk must descend past the type args into the origin's own fields.
+//     The arg check fires on `b: OriginHolder[int]` because typeMentionsSignature
+//     descends into the origin's cbs field despite `int` type arg being closure-free.
 type OriginHolder[T] {
   T key;
   (() -> int)[] cbs;
@@ -1224,8 +1253,8 @@ recursive_generic_receiver_fresh_result_is_freed() `test {
 }
 
 // The mirror: the same recursive generic shape, but the origin declares a closure
-// field. The walk must find `cb` past the cycle and suppress tracking — freeing the
-// borrowed env here would double-free at `h`'s drop.
+// field. The walk must find `cbs` past the cycle and suppress tracking — freeing
+// the borrowed env here would double-free at `h`'s drop.
 type GenericCbNode[T] {
   T v;
   GenericCbNode[T]? next;

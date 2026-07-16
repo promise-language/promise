@@ -3354,6 +3354,22 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// branch above).
 				val, _ = c.dupBorrowedHeapUserPayload(arg.Value, val)
 			}
+			// T1279: A pure value type / primitive / string used to initialize a
+			// structural-interface field must be view-boxed. The box is an owned heap
+			// temp; the claimHeapTemp(val) in the store branch below transfers ownership
+			// to the constructed instance, whose synthesized drop frees the box via
+			// __promise_structural_drop. Placed before maybeWrapOptional so an optional
+			// structural field (`Sink? s`) would box-then-wrap (that widening is
+			// currently sema-blocked — T1298). No-op when no boxing is needed.
+			ctorArgType := c.info.Types[arg.Value]
+			if c.typeSubst != nil && ctorArgType != nil {
+				ctorArgType = types.Substitute(ctorArgType, c.typeSubst)
+			}
+			ctorFieldType := fieldTypeMap[arg.Name]
+			if c.typeSubst != nil {
+				ctorFieldType = types.Substitute(ctorFieldType, c.typeSubst)
+			}
+			val = c.coerceToView(val, ctorArgType, ctorFieldType)
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
@@ -6288,6 +6304,20 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		argVal := c.genCallArgExpr(e.Args[0].Value)
 		c.dupContainerFieldAccess = false
 		c.targetType = savedTarget
+
+		// T1279: A pure value type / primitive / string pushed into a
+		// Vector[structural-interface] must be view-boxed (heap box + {vtable, box}) —
+		// the raw value struct / scalar doesn't fit the {i8*, i8*} element slot. The box
+		// is registered as an owned heap temp; claimHeapTemp(argVal) below transfers
+		// ownership to the vector, and Vector.drop's element drop frees it via
+		// __promise_structural_drop (T1284). No-op when no boxing is needed.
+		// Placed before the elemIsOpt wrap so a Vector[structural?] element would
+		// box-then-wrap (that widening is currently sema-blocked — T1298).
+		pushArgType := c.info.Types[e.Args[0].Value]
+		if c.typeSubst != nil && pushArgType != nil {
+			pushArgType = types.Substitute(pushArgType, c.typeSubst)
+		}
+		argVal = c.coerceToView(argVal, pushArgType, resolvedElem)
 
 		// T0658: Wrap a bare RHS into the Optional element struct when the
 		// vector element type is Optional but the pushed expr is not (e.g.

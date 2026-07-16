@@ -1,0 +1,132 @@
+// T1279: A pure value type / primitive / string that satisfies a structural
+// interface must be view-boxed when it escapes into a longer-lived slot — a
+// constructor field store or a Vector.push argument. These sites previously
+// stored the raw value struct / scalar into the {i8*, i8*} interface slot and
+// panicked in codegen ("store operands are not compatible"). Verify correct
+// virtual dispatch through the box and no leak (the harness fails on any leak).
+//
+// Note: optional-structural targets (`Sink? s = Counter(...)`) are blocked at
+// the sema layer (T1298 — implicit widening to Optional-of-structural is not
+// yet accepted), so they are not covered here. The T1279 codegen fix already
+// orders box-then-wrap defensively for when that sema gap is closed.
+type Sink `structural {
+  emit(this, int x) int `abstract;
+}
+
+type Counter {
+  int _fd `value;
+  emit(this, int x) int {
+    return this._fd + x;
+  }
+}
+
+type Holder {
+  Sink s;
+}
+
+// --- value type into a constructor field ---
+
+value_into_ctor_field() `test {
+  Holder h = Holder(s: Counter(_fd: 5));
+  assert(h.s.emit(10) == 15, "value type dispatch through boxed ctor field");
+}
+
+// --- value type into a Vector[Sink] via push ---
+
+value_into_vector_push() `test {
+  Sink[] v = [];
+  v.push(Counter(_fd: 1));
+  v.push(Counter(_fd: 2));
+  v.push(Counter(_fd: 3));
+  assert(v[0].emit(100) == 101, "boxed vector element 0 dispatch");
+  assert(v[1].emit(100) == 102, "boxed vector element 1 dispatch");
+  assert(v[2].emit(100) == 103, "boxed vector element 2 dispatch");
+}
+
+// --- primitive int into both positions (structural interface over a native method) ---
+
+type Stringy `structural {
+  to_string(this) string `abstract;
+}
+
+type StringyHolder {
+  Stringy s;
+}
+
+primitive_into_ctor_field() `test {
+  StringyHolder h = StringyHolder(s: 42);
+  assert(h.s.to_string() == "42", "primitive int boxed into structural ctor field");
+}
+
+primitive_into_vector_push() `test {
+  Stringy[] v = [];
+  v.push(7);
+  v.push(8);
+  assert(v[0].to_string() == "7", "primitive int boxed into vector element 0");
+  assert(v[1].to_string() == "8", "primitive int boxed into vector element 1");
+}
+
+// --- string into both positions (exercises boxForStructuralView string path) ---
+
+string_into_ctor_field() `test {
+  StringyHolder h = StringyHolder(s: "hello");
+  assert(h.s.to_string() == "hello", "string boxed into structural ctor field");
+}
+
+string_into_vector_push() `test {
+  Stringy[] v = [];
+  v.push("a");
+  v.push("bc");
+  assert(v[0].to_string() == "a", "string boxed into vector element 0");
+  assert(v[1].to_string() == "bc", "string boxed into vector element 1");
+}
+
+// --- generic constructor field whose type parameter resolves to a structural
+// interface. Exercises the types.Substitute(ctorArgType/ctorFieldType) branches
+// in genConstructorCallMono that the non-generic Holder above does not (there
+// c.typeSubst is nil). The field type `S` is substituted to the structural
+// interface before coerceToView boxes the value/primitive/string. ---
+
+type GBox[S] {
+  S s;
+}
+
+value_into_generic_ctor_field() `test {
+  GBox[Sink] h = GBox[Sink](s: Counter(_fd: 5));
+  assert(h.s.emit(10) == 15, "value type boxed into generic structural ctor field");
+}
+
+primitive_into_generic_ctor_field() `test {
+  GBox[Stringy] h = GBox[Stringy](s: 42);
+  assert(h.s.to_string() == "42", "primitive boxed into generic structural ctor field");
+}
+
+string_into_generic_ctor_field() `test {
+  GBox[Stringy] h = GBox[Stringy](s: "hi");
+  assert(h.s.to_string() == "hi", "string boxed into generic structural ctor field");
+}
+
+// --- heap (non-value) user type through the same two sites. coerceToView now
+// runs on EVERY constructor arg and Vector.push arg, so a heap user type (whose
+// value is already a {i8*, i8*} view) must flow through unchanged — regression
+// guard for the vtable-swap / passthrough branches of coerceToView. No leak. ---
+
+type HeapCounter {
+  int base;
+  emit(this, int x) int {
+    return this.base + x;
+  }
+}
+
+heap_user_into_ctor_field() `test {
+  Holder h = Holder(s: HeapCounter(base: 3));
+  assert(h.s.emit(10) == 13, "heap user type into structural ctor field");
+}
+
+heap_user_into_vector_push() `test {
+  Sink[] v = [];
+  v.push(HeapCounter(base: 2));
+  v.push(HeapCounter(base: 4));
+  assert(v[0].emit(10) == 12, "heap user type pushed into structural vector element 0");
+  assert(v[1].emit(10) == 14, "heap user type pushed into structural vector element 1");
+}

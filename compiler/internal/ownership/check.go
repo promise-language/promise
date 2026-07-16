@@ -210,11 +210,11 @@ func paramInitialState(p *types.Param, consuming bool) VarState {
 	return Borrowed
 }
 
-// Check performs ownership analysis on the given file using sema results.
-// Returns any ownership errors found. Also populates info.EarlyDrops with
-// NLL last-use analysis results for early drop insertion in codegen (B0035).
-func Check(file *ast.File, info *sema.Info) []error {
-	c := &Checker{
+// newChecker builds a Checker with all persistent (non-per-function) maps
+// initialized. Shared by Check and the T1303 cross-module pass, which builds a
+// sub-checker over an imported module's file.
+func newChecker(file *ast.File, info *sema.Info) *Checker {
+	return &Checker{
 		file:                   file,
 		info:                   info,
 		refLastUses:            AnalyzeRefLastUses(file, info), // T0164: NLL borrow narrowing
@@ -224,6 +224,13 @@ func Check(file *ast.File, info *sema.Info) []error {
 		methodReturnHandleReqs: make(map[*types.Method][]returnHandleReq),
 		aliasHandleReuses:      make(map[ast.Pos][]*aliasHandleReuse), // T1137
 	}
+}
+
+// Check performs ownership analysis on the given file using sema results.
+// Returns any ownership errors found. Also populates info.EarlyDrops with
+// NLL last-use analysis results for early drop insertion in codegen (B0035).
+func Check(file *ast.File, info *sema.Info) []error {
+	c := newChecker(file, info)
 	c.check()
 	// T1035: validate deferred for-in-drain requirements against concrete
 	// instantiations (appends to c.errors). Runs after the full body pass so
@@ -233,6 +240,11 @@ func Check(file *ast.File, info *sema.Info) []error {
 	// concrete instantiations. Also runs after the full body pass so every
 	// generic body's returnHandleReqs are recorded first.
 	c.propagateReturnHandleReqs()
+	// T1303: re-check imported generic module type bodies against this unit's
+	// concrete instantiations so a field-escape that double-frees for a
+	// drop-bearing instantiation (visible only here, not in the module unit)
+	// is rejected.
+	c.checkImportedGenericBodies()
 	// B0035: Run NLL last-use analysis after ownership check.
 	info.EarlyDrops = AnalyzeLastUses(file, info)
 	return c.errors

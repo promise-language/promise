@@ -36,6 +36,27 @@ fresh_return() Sink {
   return Widget(id: 10);
 }
 
+// T1308: method sibling of pass_through — an owned structural param returned by
+// value from a METHOD aliases the caller's arg box.
+type Factory {
+  int seed;
+  make(Sink s) Sink {
+    return s;
+  }
+  make_fresh(int n) Sink {
+    return Widget(id: n);
+  }
+  // Two owned structural args; returns the SECOND one. The runtime pointer
+  // compare must alias `r` with `b` (not `a`) so only `b` loses its free flag.
+  pick_second(Sink a, Sink b) Sink {
+    return b;
+  }
+}
+
+pick_first(Sink a, Sink b) Sink {
+  return a;
+}
+
 // Exact repro: r aliases s's box; without the fix both drop it → double free.
 binding_passthrough() `test {
   s := Counter(total: 5);
@@ -88,4 +109,80 @@ binding_multi_arg_passthrough() `test {
   r.emit(1);
   s.emit(2);
   assert(true, "multi-arg passthrough: no double free");
+}
+
+// T1308 exact repro: r aliases s's box through a method call; without the fix
+// both drop it → double free.
+method_binding_passthrough() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  r := f.make(s);
+  r.emit(1);
+  assert(true, "no double free via method");
+}
+
+// T1308: source read after the aliasing method binding — s must stay the owner.
+method_binding_use_source() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  r := f.make(s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "method source still usable");
+}
+
+// T1308: a method returning a fresh Widget → distinct pointer, r owns and frees
+// it, no alias with any caller argument, no leak, no double free.
+method_binding_fresh_return() `test {
+  f := Factory(seed: 1);
+  r := f.make_fresh(9);
+  r.emit(3);
+  assert(true, "method fresh return freed independently");
+}
+
+// T1304/T1308: TYPED var decl path (`Sink r = ...`, not `r := ...`). The alias
+// clear is duplicated in genTypedVarDecl; only the inferred path was exercised
+// above. Free-function form.
+typed_binding_passthrough() `test {
+  s := Counter(total: 5);
+  Sink r = pass_through(s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "typed decl: no double free, source still usable");
+}
+
+// T1308: TYPED var decl path through a method call.
+typed_method_binding_passthrough() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  Sink r = f.make(s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "typed method decl: no double free, source usable");
+}
+
+// T1304: multiple owned structural args; the free function returns the FIRST.
+// Only `a` must lose its free flag; `b` stays sole owner of its own box.
+multi_arg_return_first() `test {
+  a := Counter(total: 1);
+  b := Counter(total: 2);
+  r := pick_first(a, b);
+  r.emit(1);
+  a.emit(1);
+  b.emit(1);
+  assert(true, "multi-arg return-first: a aliased, b independent");
+}
+
+// T1308: multiple owned structural args through a METHOD; returns the SECOND.
+// Only `b` must lose its free flag; `a` stays sole owner. Verifies the runtime
+// pointer compare selects the correct arg, not merely the first in call.Args.
+multi_arg_method_return_second() `test {
+  f := Factory(seed: 1);
+  a := Counter(total: 1);
+  b := Counter(total: 2);
+  r := f.pick_second(a, b);
+  r.emit(1);
+  a.emit(1);
+  b.emit(1);
+  assert(true, "multi-arg method return-second: b aliased, a independent");
 }

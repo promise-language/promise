@@ -11027,13 +11027,20 @@ func (c *Compiler) maybeClearBindingDropFlagOnThisAlias(val value.Value, binding
 // discard `pass_through(s);` case correctly leaves `s` as sole owner). This
 // mirrors the `this` analog but keys off a call ARGUMENT instead of the receiver.
 //
-// For each free-function-call argument that is a live owned local (has both a
-// drop flag and an alloca), emit a runtime guard: if the result's instance ptr
+// For each function- or method-call argument that is a live owned local (has both
+// a drop flag and an alloca), emit a runtime guard: if the result's instance ptr
 // equals the arg's instance ptr AND the arg still owns its box (drop flag live),
 // clear the binding's structural-free flag — leaving `s` sole owner. The pointer
 // compare keeps a fresh-constructing return (`return Widget(...)`, distinct ptr)
 // freeing independently (no spurious clear); the drop-flag gate keeps a moved arg
 // (`pass_through(move s)`, flag already cleared) owned by `r` (no leak).
+//
+// T1308: the call receiver is deliberately excluded — for a method call it is not
+// in `call.Args` (it is the MemberExpr Target), and its return-alias path is
+// handled elsewhere (maybeClearReceiverDropFlag / wrapThisReturnValue). The
+// arg-alias guard and the receiver-alias guard are independent runtime pointer
+// compares; both may be emitted for one method call, and each fires only on a
+// genuine pointer match.
 func (c *Compiler) maybeClearStructuralBindingAliasArg(val value.Value, rhs ast.Expr, bindingFlag value.Value) {
 	if bindingFlag == nil || c.block == nil || c.block.Term != nil {
 		return
@@ -11069,11 +11076,15 @@ func (c *Compiler) maybeClearStructuralBindingAliasArg(val value.Value, rhs ast.
 	if !ok {
 		return
 	}
-	// Restrict to free-function calls: method-receiver aliases are already covered
-	// by maybeClearReceiverDropFlag / the this-alias path.
-	if _, isMethod := call.Callee.(*ast.MemberExpr); isMethod {
-		return
-	}
+	// T1308: method calls are handled too, not just free-function calls. For a
+	// MemberExpr callee, `call.Args` holds ONLY the parenthesized value arguments —
+	// the receiver is `call.Callee.(*ast.MemberExpr).Target` and is never in
+	// `call.Args`. So the arg loop below iterates exactly the method's owned value
+	// args (e.g. `Sink s` in `f.make(s)`) and emits the same alias guard against
+	// each. The receiver-vs-return alias (`return this` builders, `f` aliasing the
+	// result) is a SEPARATE, independent concern already handled elsewhere by
+	// maybeClearReceiverDropFlag / wrapThisReturnValue's clone (T0893/T1084), so it
+	// needs no code here.
 
 	retInst := c.block.NewExtractValue(val, 1)
 

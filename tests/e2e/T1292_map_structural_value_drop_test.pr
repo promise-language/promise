@@ -1,0 +1,235 @@
+// T1292: Map[K, structural-interface] must drop its stored value boxes.
+//
+// A `Map` whose value type is a non-value structural interface stores each value
+// as a heap-boxed {vtable, instance} view inside `Slot[K, V].Used`. Before the fix,
+// `Slot[int, Showable]` never got a synthesized drop (monoTypeHasDroppable excluded
+// structural interfaces), so `Map.drop` called plain `Vector.drop` and every boxed
+// value leaked. Enabling the drop then exposed a read-side aliasing double-free:
+// the match-binding / clone / dup predicates treated the structural view as a bit
+// copy, so `clone`/`_rehash`/`remove`/`pop`/`[]`/`entries`/`values` shallow-copied
+// the box → both owners freed it → SIGSEGV. Sibling of the Vector element-drop fix
+// (T1283/T1284) for the Map value slot.
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+type Widget {
+  int id;
+  to_string() string {
+    return "w" + this.id.to_string();
+  }
+}
+
+show(int n) Showable {
+  return Widget(id: n);
+}
+
+// Baseline: a single boxed value is dropped when the map is dropped (the repro).
+map_baseline() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  assert(m.len == 1, "one entry");
+}
+
+// Overwrite: the drop-old path (vector index-assign) must free the replaced box.
+map_overwrite() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m[1] = show(2);
+  assert(m.len == 1, "still one entry");
+  assert(m[1]!.to_string() == "w2", "overwritten value");
+}
+
+// Rehash: 40 inserts trigger a rehash that moves every box to new buckets.
+map_rehash() `test {
+  m := Map[int, Showable]();
+  i := 0;
+  while i < 40 {
+    m[i] = show(i);
+    i = i + 1;
+  }
+  assert(m.len == 40, "forty entries");
+  assert(m[39]!.to_string() == "w39", "last value present");
+  assert(m[0]!.to_string() == "w0", "first value present");
+}
+
+// remove drops the box; pop moves it out and hands back an owned box.
+map_remove_and_pop() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m[2] = show(2);
+  m.remove(1);
+  assert(m.len == 1, "one removed");
+  v := m.pop(2)!;
+  assert(v.to_string() == "w2", "popped value");
+  assert(m.len == 0, "empty after pop");
+}
+
+// clone deep-copies each box; original and clone must be independent.
+map_clone() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m2 := m.clone();
+  assert(m2.len == 1, "clone has entry");
+  assert(m2[1]!.to_string() == "w1", "clone value");
+  assert(m[1]!.to_string() == "w1", "original value intact");
+}
+
+// values() / entries() build vectors of owned boxes (and tuples of them).
+map_values_and_entries() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m[2] = show(2);
+  vs := m.values();
+  assert(vs.len == 2, "two values");
+  es := m.entries();
+  assert(es.len == 2, "two entries");
+  (k, v) := es[0];
+  assert(v.to_string().starts_with("w"), "entry value renders");
+}
+
+// get_or returns the default (an owned box) on a miss.
+map_get_or() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  v := m.get_or(2, show(99));
+  assert(v.to_string() == "w99", "default value");
+}
+
+// update overwrites an existing key, dropping the old box.
+map_update() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  ok := m.update(1, show(5));
+  assert(ok, "update succeeded");
+  assert(m[1]!.to_string() == "w5", "updated value");
+}
+
+// merge moves boxes from one map into another.
+map_merge() `test {
+  a := Map[int, Showable]();
+  a[1] = show(1);
+  b := Map[int, Showable]();
+  b[2] = show(2);
+  a.merge(b);
+  assert(a.len == 2, "merged");
+  assert(a[2]!.to_string() == "w2", "merged value");
+}
+
+// clear drops every box and leaves an empty map.
+map_clear() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m[2] = show(2);
+  m.clear();
+  assert(m.len == 0, "cleared");
+}
+
+// for k, v in m iterates without leaking the per-iteration cloned boxes.
+map_for_in() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m[2] = show(2);
+  count := 0;
+  for k, v in m {
+    count = count + 1;
+  }
+  assert(count == 2, "iterated all entries");
+}
+
+// if-let over a map index binds a fresh owned clone that must be freed at scope
+// exit (Map.[] deep-clones V now that V is a structural interface).
+map_if_let() `test {
+  m := Map[int, Showable]();
+  m[5] = show(5);
+  if v := m[5] {
+    assert(v.to_string() == "w5", "if-let value");
+  }
+  // A second independent if-let clone in the same scope.
+  if a := m[5] {
+    assert(a.to_string() == "w5", "second if-let clone");
+  }
+}
+
+// An optional-handler on a map index likewise yields an owned clone.
+map_handler() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  s := m[1]? {
+    return;
+  };
+  assert(s.to_string() == "w1", "handler value");
+}
+
+// while-let draining via pop moves each box out and hands back an owned box.
+map_while_let_pop() `test {
+  m := Map[int, Showable]();
+  m[1] = show(1);
+  m[2] = show(2);
+  n := 0;
+  while kv := m.pop(1) {
+    n = n + 1;
+    if n > 5 {
+      return;
+    }
+  }
+  assert(m.len == 1, "one entry left");
+}
+
+// An empty map drops cleanly (no boxes to free).
+map_empty() `test {
+  m := Map[int, Showable]();
+  assert(m.len == 0, "empty");
+}
+
+// A concrete type whose box itself owns a heap resource (a string field). The
+// RTTI structural drop must dispatch to the concrete drop_fn, which recursively
+// frees the inner string — not just the {vtable, instance} box shell.
+type Labeled {
+  string name;
+  int id;
+  to_string() string {
+    return this.name;
+  }
+}
+
+mk(string move s, int n) Showable {
+  return Labeled(name: move s, id: n);
+}
+
+// String keys (heap) and heap-backed structural values coexist; overwrite frees
+// both the replaced box and its inner string.
+map_string_key_heap_value() `test {
+  m := Map[string, Showable]();
+  m["alpha"] = mk("first-value-here", 1);
+  m["beta"] = mk("second-value-here", 2);
+  assert(m.len == 2, "two entries");
+  assert(m["alpha"]!.to_string() == "first-value-here", "alpha value");
+  m["alpha"] = mk("overwritten-alpha", 3);
+  assert(m["alpha"]!.to_string() == "overwritten-alpha", "overwritten value");
+}
+
+// A discarded force-unwrap statement `m[k]!;` produces an owned cloned box that
+// trackHeapUserTypeResult must free (no binding to carry the drop).
+map_discarded_unwrap() `test {
+  m := Map[int, Showable]();
+  m[1] = mk("some-heap-string", 1);
+  m[1]!;
+  assert(m.len == 1, "still one entry");
+}
+
+// Rehash + clone with heap-backed boxes: 40 inserts move every box (each owning a
+// string) to new buckets; clone deep-copies box and inner string independently.
+map_rehash_and_clone_heap_boxes() `test {
+  m := Map[int, Showable]();
+  i := 0;
+  while i < 40 {
+    m[i] = mk("value-number-" + i.to_string(), i);
+    i = i + 1;
+  }
+  assert(m.len == 40, "forty entries");
+  assert(m[17]!.to_string() == "value-number-17", "middle value present");
+  m2 := m.clone();
+  m.clear();
+  assert(m2[17]!.to_string() == "value-number-17", "clone independent of cleared original");
+}

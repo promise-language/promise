@@ -6132,6 +6132,13 @@ func (c *Compiler) typeNeedsFieldDrop(typ types.Type) bool {
 		if types.IsMutexGuard(typ) || named == types.TypMutexGuard {
 			return true
 		}
+		// T1292: A non-value structural interface field is a heap-boxed view whose
+		// instance box must be dropped via __promise_structural_drop. Classify it as
+		// droppable so a tuple/array carrying a structural field (e.g. the
+		// `(K, Showable)` elements of `Map.entries()`'s result vector) drops each box.
+		if named.IsStructural() && !named.IsValueType() {
+			return true
+		}
 		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 			return true
 		}
@@ -7795,6 +7802,24 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	if _, isSig := rt.(*types.Signature); isSig {
 		if !c.closureResultMayAliasCallInput(expr) {
 			c.trackEnvTemp(c.block.NewExtractValue(result, 1))
+		}
+		return
+	}
+	// T1292: An owned non-value structural-interface temporary produced by a
+	// container-index force-unwrap or handler — e.g. `m[k]!` when V is a structural
+	// interface. `Map.[]` now deep-clones V internally (typeNeedsMatchDup(V) is
+	// true), so the unwrapped view owns an independent heap box that must be freed
+	// at statement end via RTTI drop dispatch (__promise_structural_drop honors the
+	// concrete drop_fn). This is deliberately restricted to unwrap/handler sources:
+	// the borrow guards above already returned for aliasing unwrap cases, so only a
+	// genuine owned clone reaches here. A plain call returning a structural view
+	// (e.g. `c.iter()` returning borrowed `this`) is NOT tracked — dropping a
+	// borrowed/non-standard-RTTI view would double-free or crash.
+	if rtNamed := extractNamed(rt); rtNamed != nil && rtNamed.IsStructural() && !rtNamed.IsValueType() && c.structuralDrop != nil {
+		_, isUnwrap := expr.(*ast.OptionalUnwrapExpr)
+		_, isHandler := expr.(*ast.ErrorHandlerExpr)
+		if isUnwrap || isHandler {
+			c.trackHeapTemp(c.block.NewExtractValue(result, 1), c.structuralDrop)
 		}
 		return
 	}

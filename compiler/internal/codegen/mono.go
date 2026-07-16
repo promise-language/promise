@@ -1968,6 +1968,16 @@ func monoTypeHasDroppable(typ types.Type) bool {
 		if fNamed.HasDrop() {
 			return true
 		}
+		// T1292: A non-value structural interface value is a heap-boxed view
+		// ({vtable, instance}) whose instance box must be freed via
+		// __promise_structural_drop. Classify it as droppable so a generic enum/
+		// struct carrying a structural-interface field (e.g. Slot[K, Showable]
+		// inside Map[K, Showable]) gets a synth drop and its element-drop loop
+		// routes each box through the RTTI drop. Sibling of the Vector element-drop
+		// fix (T1283/T1284).
+		if fNamed.IsStructural() && !fNamed.IsValueType() {
+			return true
+		}
 		if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
 			return true
 		}

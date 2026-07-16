@@ -3861,6 +3861,15 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 			c.emitSingleOwnerHandleDupPanic(h)
 			return
 		}
+		// T1292: A non-value structural interface variant field is a heap-boxed view
+		// ({vtable, instance}). A shallow copy would alias the box between two now-
+		// droppable owners → double-free at drop. Deep-clone the box via
+		// cloneStructuralView (T1284), mirroring maybeDupPushElement's structural arm.
+		if named.IsStructural() && !named.IsValueType() {
+			dup := c.cloneStructuralView(fieldVal)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
 		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 			// Use cloneHeapElement to try clone() first (a named function that handles
 			// recursive types safely), falling back to dupHeapValue only for non-recursive

@@ -9644,6 +9644,14 @@ func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 	if _, ok := types.AsWeak(resolved); ok || named == types.TypWeak {
 		return true
 	}
+	// T1292: A non-value structural interface value is a heap-boxed view whose box
+	// must be deep-cloned (cloneStructuralView) when extracted from a droppable enum
+	// (e.g. Slot[K, Showable] inside Map[K, Showable]) — otherwise the match binding
+	// aliases the container's box → double-free. Must precede the IsStructural bail-
+	// out below (which would leave the box shallow-aliased).
+	if named.IsStructural() && !named.IsValueType() {
+		return true
+	}
 	// Heap user types: only safe to shallow-dup (memcpy + field dup) if ALL droppable
 	// fields can be independently dup'd. Specifically:
 	// - String fields → dupString creates independent copy ✓
@@ -9935,6 +9943,12 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 			welem = resolvedType
 		}
 		dupVal = c.dupWeak(val, welem)
+	} else if named != nil && named.IsStructural() && !named.IsValueType() {
+		// T1292: A non-value structural interface value is a heap-boxed view
+		// ({vtable, instance}). Deep-clone the box via cloneStructuralView (T1284)
+		// so the bound copy owns an independent box — the enum/heap-user else below
+		// assumes a heap-user value struct and would misread the view.
+		dupVal = c.cloneStructuralView(val)
 	} else if tup, isTup := resolvedType.(*types.Tuple); isTup {
 		// T0667: deep-clone each element so heap members become independent.
 		// cloneByType handles bit-copy elements (scalars pass through
@@ -10017,6 +10031,17 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 	bindAlloca := c.createEntryAlloca(llvmType)
 	c.locals[name] = bindAlloca
 	c.block.NewStore(dupVal, bindAlloca)
+
+	// T1292: A non-value structural interface binding is a freshly cloned, owned
+	// heap box ({vtable, instance}). maybeRegisterDrop deliberately excludes
+	// structural types, so it must be dropped via the RTTI-dispatched structural
+	// free (honoring the concrete drop_fn). The drop flag is cleared at move sites
+	// (so `result[k] = v` in Map.clone/_rehash doesn't double-free) and the box is
+	// dropped at arm exit otherwise.
+	if named := extractNamed(resolvedType); named != nil && named.IsStructural() && !named.IsValueType() {
+		c.maybeRegisterStructuralParamFree(name, bindAlloca, resolvedType)
+		return
+	}
 
 	// B0242: Register dup'd bindings for scope cleanup with a drop flag.
 	// The drop flag starts true; clearDropFlag sets it to false at move sites
@@ -10119,6 +10144,13 @@ func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
 		// Non-named: scalars (int/float/bool/char), refs, function pointers,
 		// scalar tuples — bitwise copy is correct (no shared heap).
 		return true
+	}
+	// T1292: A non-value structural interface value is a heap-boxed view whose box
+	// AutoClone must deep-copy (cloneStructuralView) — NOT bit-copy (that would alias
+	// the box → double-free). Route to cloneResolvedValue's structural arm. Must
+	// precede the IsStructural() bit-copy classification below.
+	if named.IsStructural() && !named.IsValueType() {
+		return false
 	}
 	return named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural()
 }

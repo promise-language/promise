@@ -1,0 +1,218 @@
+// T1299: A getter/method/index-operator that returns a non-value structural-
+// interface field BY VALUE (`get val V? { return this._v; }`) must deep-clone the
+// `{vtable, instance}` view box on field-escape — else the returned view aliases the
+// owner's field box, and the owner's synth drop (T1284) plus the caller's drop free
+// the same box (double-free / segfault). Sibling of T1287 (vector-element clone on
+// read): the fix routes the field-escape through setDupFlagsForFieldAccess +
+// dupHeapFieldForEscape (bare structural and Optional[structural]) so the accessor
+// body clones via __promise_structural_clone, and the caller tracks/claims the owned
+// clone via __promise_structural_drop.
+//
+// Zero-leak enforcement (the suite fails on any alloc delta) validates the
+// clone/claim balance — no allow_leaks.
+type Sink `structural {
+  emit(this, int x) int `abstract;
+}
+
+// A pure-value-type structural payload (box has a null drop_fn → pal_free).
+type Counter {
+  int base `value;
+  emit(this, int x) int {
+    return this.base + x;
+  }
+}
+
+// A drop-bearing concrete structural payload (box's drop_fn runs the real drop).
+type Res {
+  int base;
+  drop(~this) {
+  }
+  emit(this, int x) int {
+    return this.base + x;
+  }
+}
+
+// Generic container: field type is seen as `Sink?` / `Sink` after mono subst.
+type Slot[V] {
+  V? _v;
+  [](int i) V? {
+    return this._v;
+  }
+  []=(int i, V move value) {
+    this._v = value;
+  }
+  get val V? {
+    return this._v;
+  }
+  // A plain named method returning the field by value — like the getter/index
+  // accessors, its body must deep-clone the escaping structural view.
+  peek() V? {
+    return this._v;
+  }
+}
+
+// Non-optional structural field variant.
+type SlotN[V] {
+  V _v;
+  get val V {
+    return this._v;
+  }
+}
+
+// Direct-field container: a public structural-optional field read inline
+// (`h.v!`) is owner-governed and must stay aliased — NOT cloned/tracked like a
+// getter return. Control that the getter-vs-field distinction holds (the false
+// branch of isStructuralGetterMemberSource).
+type Holder {
+  Sink? v;
+}
+
+// Concrete (non-generic) container with the same accessor shapes.
+type Box {
+  Sink? _v;
+  [](int i) Sink? {
+    return this._v;
+  }
+  []=(int i, Sink move value) {
+    this._v = value;
+  }
+  get val Sink? {
+    return this._v;
+  }
+  fresh() Sink {
+    return Counter(base: 100);
+  }
+}
+
+// --- Generic Slot[V], V = Sink (value-type payload widened to the interface) ---
+
+// Tracker repro: inline index-unwrap receiver.
+generic_index_inline() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 5);
+  assert(s[0]!.emit(2) == 7, "generic index inline");
+}
+
+// Inline getter-unwrap receiver.
+generic_getter_inline() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 5);
+  assert(s.val!.emit(3) == 8, "generic getter inline");
+}
+
+// Bind the index-unwrap to a local, then use it.
+generic_index_bind() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 10);
+  Sink got = s[0]!;
+  assert(got.emit(1) == 11, "generic index bind");
+}
+
+// Bind the getter-unwrap to a local, then use it.
+generic_getter_bind() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 10);
+  Sink got = s.val!;
+  assert(got.emit(4) == 14, "generic getter bind");
+}
+
+// Pre-widened value stored, then read back (the exact tracker case).
+generic_prewidened() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  Sink pre = Counter(base: 5);
+  s[0] = pre;
+  assert(s[0]!.emit(2) == 7, "generic prewidened");
+}
+
+// Parenthesized getter-unwrap receiver (`(s.val)!`): the ParenExpr wrapper must be
+// peeled so the getter-member source is still recognized and the caller clone tracked.
+generic_paren_getter_inline() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 5);
+  assert((s.val)!.emit(2) == 7, "generic paren getter inline");
+}
+
+// Plain named method returning the field by value, used inline.
+generic_method_inline() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 9);
+  assert(s.peek()!.emit(1) == 10, "generic method inline");
+}
+
+// Plain named method returning the field by value, bound to a local.
+generic_method_bind() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Counter(base: 9);
+  Sink got = s.peek()!;
+  assert(got.emit(2) == 11, "generic method bind");
+}
+
+// Plain method returning a drop-bearing structural subtype (RTTI drop on the clone).
+generic_method_drop() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Res(base: 40);
+  Sink got = s.peek()!;
+  assert(got.emit(2) == 42, "generic method drop");
+}
+
+// --- Non-optional structural field (`V _v; get val V`) ---
+
+generic_nonopt_inline() `test {
+  SlotN[Sink] s = SlotN[Sink](_v: Counter(base: 20));
+  assert(s.val.emit(2) == 22, "generic nonopt inline");
+}
+
+generic_nonopt_bind() `test {
+  SlotN[Sink] s = SlotN[Sink](_v: Counter(base: 20));
+  Sink got = s.val;
+  assert(got.emit(5) == 25, "generic nonopt bind");
+}
+
+// --- Drop-bearing concrete subtype (RTTI drop dispatch on the cloned box) ---
+
+generic_drop_getter_inline() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Res(base: 40);
+  assert(s.val!.emit(2) == 42, "drop getter inline");
+}
+
+generic_drop_getter_bind() `test {
+  Slot[Sink] s = Slot[Sink](_v: none);
+  s[0] = Res(base: 40);
+  Sink got = s.val!;
+  assert(got.emit(3) == 43, "drop getter bind");
+}
+
+// --- Concrete (non-generic) Box ---
+
+concrete_index_inline() `test {
+  Box b = Box(_v: Counter(base: 30));
+  assert(b[0]!.emit(2) == 32, "concrete index inline");
+}
+
+concrete_getter_inline() `test {
+  Box b = Box(_v: Counter(base: 30));
+  assert(b.val!.emit(4) == 34, "concrete getter inline");
+}
+
+concrete_getter_bind() `test {
+  Box b = Box(_v: Counter(base: 30));
+  Sink got = b.val!;
+  assert(got.emit(3) == 33, "concrete getter bind");
+}
+
+// --- Control: returning a FRESH structural value (not a field) still balances ---
+
+control_fresh_value() `test {
+  Box b = Box(_v: none);
+  Sink got = b.fresh();
+  assert(got.emit(1) == 101, "fresh structural value");
+}
+
+// Control: a DIRECT public structural-optional field unwrap (`h.v!`) is
+// owner-governed — it must NOT be cloned/tracked as a getter return, and must not
+// double-free or leak.
+control_direct_field_inline() `test {
+  Holder h = Holder(v: Counter(base: 5));
+  assert(h.v!.emit(2) == 7, "direct field inline");
+}

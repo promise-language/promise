@@ -7845,8 +7845,16 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 		// frees it. Skip temp-tracking (mirrors the ident skip) — tracking would
 		// double-free at scope exit. EXCLUDE borrowed-`this`: genOptionalForceUnwrap
 		// (T0428 Case 3B) makes an INDEPENDENT dup there, which DOES need tracking.
+		// T1299: EXCLUDE a structural getter source (`owner.getter!` where the getter
+		// returns a non-value structural). The getter body deep-clones the field view
+		// on escape, so the unwrapped box is an OWNED clone (not an owner-governed
+		// alias); it must reach the structural-owned tracking below, exactly like the
+		// index-operator case (`owner[i]!`, whose IndexExpr source already bypasses this
+		// member guard). Direct field reads (`owner.field!`) still skip — the escape
+		// there is unflagged and stays aliased.
 		if c.isOwnerGovernedMemberOptionalUnwrapSource(opt.Expr) &&
-			!c.isBorrowedThisMemberSource(opt.Expr) {
+			!c.isBorrowedThisMemberSource(opt.Expr) &&
+			!c.isStructuralGetterMemberSource(opt.Expr) {
 			return
 		}
 		// T1143: inline `container[k]!` (e.g. `m["k"]!.field`) extracts the
@@ -7922,7 +7930,13 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	if rtNamed := extractNamed(rt); rtNamed != nil && rtNamed.IsStructural() && !rtNamed.IsValueType() && c.structuralDrop != nil {
 		_, isUnwrap := expr.(*ast.OptionalUnwrapExpr)
 		_, isHandler := expr.(*ast.ErrorHandlerExpr)
-		if isUnwrap || isHandler {
+		// T1299: a getter (or its force-unwrap) returning a non-value structural hands
+		// back an OWNED clone — the accessor body deep-cloned the field view on escape.
+		// Track it via RTTI drop dispatch so an inline use (`owner.getter.emit(x)`,
+		// `owner.getter!.emit(x)`) frees the box exactly once at statement end. A plain
+		// call returning a borrowed structural view (e.g. `c.iter()` handing back `this`)
+		// is still NOT tracked — it is neither an unwrap/handler nor a getter member.
+		if isUnwrap || isHandler || c.isStructuralGetterMemberSource(expr) {
 			c.trackHeapTemp(c.block.NewExtractValue(result, 1), c.structuralDrop)
 		}
 		return

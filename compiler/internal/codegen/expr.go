@@ -7166,11 +7166,14 @@ func isVariantPayloadBorrowShape(t types.Type) bool {
 	return false
 }
 
-// setDupFlagsForFieldAccess sets dupStringFieldAccess or dupContainerFieldAccess
-// based on the resolved type shape — the four shapes that need dup at every
-// owner-droppable field-read consume site: string, Optional[string],
-// Vector|Channel|Arc|Weak, and Optional[Vector|Channel|Arc|Weak]. Borrow types
-// are skipped (they don't own the value). Caller is responsible for the
+// setDupFlagsForFieldAccess sets dupStringFieldAccess, dupContainerFieldAccess,
+// or dupHeapUserFieldAccess based on the resolved type shape — the shapes that
+// need dup at every owner-droppable field-read consume site: string,
+// Optional[string], Vector|Channel|Arc|Weak, and Optional[Vector|Channel|Arc|Weak]
+// (dupContainer/dupString), plus non-value structural interfaces bare or under
+// Optional (dupHeapUserFieldAccess — the {vtable, instance} view boxes a heap
+// instance deep-cloned via __promise_structural_clone, T1299). Borrow types are
+// skipped (they don't own the value). Caller is responsible for the
 // owner-droppable gate (where applicable) and for clearing the flags after the
 // dependent codegen runs. T0487.
 func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
@@ -7183,6 +7186,18 @@ func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
 	}
 	if types.IsVector(t) || types.IsChannel(t) || types.IsArc(t) || types.IsWeak(t) {
 		c.dupContainerFieldAccess = true
+		return
+	}
+	// T1299: a non-value structural-interface field read out by value
+	// (`[](int i) V? { return this._v; }`, `get val V { return this._v; }`) returns
+	// the {vtable, instance} view aliasing the owner's box. The owner's synth drop
+	// (T1284) and the escape sink's drop would free the same box (double-free).
+	// Route through dupHeapUserFieldAccess (a structural view is a boxed heap
+	// instance, not a container) so dupHeapFieldForEscape deep-clones the box via
+	// __promise_structural_clone — the SAME flag genVectorIndex uses for structural
+	// element reads (T1287/T1291), so a vector-index escape source is not disturbed.
+	if isNonValueStructuralType(t) {
+		c.dupHeapUserFieldAccess = true
 		return
 	}
 	// T1176/T1173: a whole fixed-Array field/binding read out by value
@@ -7204,6 +7219,16 @@ func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
 		}
 		if types.IsVector(elem) || types.IsChannel(elem) || types.IsArc(elem) || types.IsWeak(elem) {
 			c.dupContainerFieldAccess = true
+			return
+		}
+		// T1299: Optional[structural] field read (`[](int i) V? { return this._v; }`).
+		// The inner {vtable, instance} view aliases the owner's box — clone it so the
+		// escaped optional owns an independent box. Uses dupHeapUserFieldAccess (the
+		// structural view is a boxed heap instance), matching genVectorIndex's
+		// Optional[structural] read path (T1291) so a vector-index escape source is
+		// not disturbed.
+		if isNonValueStructuralType(elem) {
+			c.dupHeapUserFieldAccess = true
 		}
 	}
 }
@@ -14585,6 +14610,35 @@ func (c *Compiler) dupHeapFieldForEscape(val value.Value, fType types.Type, owne
 		}
 	}
 
+	// T1299: a non-value structural-interface field (bare or Optional) escaping a
+	// droppable owner (`get val V? { return this._v; }`, `[](int i) V?`). The
+	// {vtable, instance} view aliases the owner's box; the owner's synth drop (T1284)
+	// and the escape sink's drop would free the same box (double-free / segfault).
+	// Deep-clone via __promise_structural_clone so the sink owns an independent box,
+	// tracked as a heap temp dropped through structuralDrop (RTTI: value-type boxes
+	// have a null drop_fn → pal_free; drop-bearing subtypes run their real drop).
+	// claimHeapTemp (B0233) peels the {i1, {vtable, instance}} optional and matches
+	// the inner instance pointer at runtime, so the escape site claims the clone;
+	// unclaimed inline temps drop exactly once. Gated on dupHeapUserFieldAccess (a
+	// structural view is a boxed heap instance, not a container) — the same flag
+	// genVectorIndex uses for structural element reads, so the two escape sources
+	// (field/getter vs vector-index) stay in lockstep without colliding.
+	if c.dupHeapUserFieldAccess && ownerDroppable {
+		if isNonValueStructuralType(fType) {
+			c.dupHeapUserFieldAccess = false // consume the flag
+			dup := c.cloneStructuralView(val)
+			c.trackHeapTemp(c.extractInstancePtr(dup), c.structuralDrop)
+			return dup, true
+		}
+		if opt, ok := fType.(*types.Optional); ok && isNonValueStructuralType(opt.Elem()) {
+			c.dupHeapUserFieldAccess = false // consume the flag
+			inner := c.block.NewExtractValue(val, 1)
+			dup := c.cloneStructuralView(inner)
+			c.trackHeapTemp(c.extractInstancePtr(dup), c.structuralDrop)
+			return c.block.NewInsertValue(val, dup, 1), true
+		}
+	}
+
 	return val, false
 }
 
@@ -16065,6 +16119,49 @@ func (c *Compiler) isOwnerGovernedMemberOptionalUnwrapSource(src ast.Expr) bool 
 		return false
 	}
 	return c.ownerHasOrSynthDrop(ownerType, ownerNamed)
+}
+
+// isStructuralGetterMemberSource reports whether src (peeling ParenExpr) is a
+// member access `owner.getter` that resolves to a GETTER whose result (unwrapping
+// one Optional layer) is a non-value structural interface. Unlike a direct field
+// read, a getter returns its structural view by VALUE: the accessor body deep-
+// clones the `{vtable, instance}` box on field-escape (T1299), so the caller owns
+// an independent box that must be tracked and dropped once — the owner's drop
+// frees only its own field, not this returned clone. This lets trackHeapUserTypeResult
+// treat a structural getter unwrap like the index-operator case (which is already
+// owned because an IndexExpr isn't a MemberExpr), rather than as an owner-governed
+// alias. T1299.
+func (c *Compiler) isStructuralGetterMemberSource(src ast.Expr) bool {
+	for {
+		p, ok := src.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		src = p.Expr
+	}
+	mem, ok := src.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	ownerType := c.info.Types[mem.Target]
+	if c.typeSubst != nil && ownerType != nil {
+		ownerType = types.Substitute(ownerType, c.typeSubst)
+	}
+	if c.selfSubst != nil && ownerType != nil {
+		ownerType = types.SubstituteSelf(ownerType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	ownerNamed := extractNamed(ownerType)
+	if ownerNamed == nil || ownerNamed.LookupGetter(mem.Field) == nil {
+		return false
+	}
+	rt := c.resolvedExprType(mem)
+	if opt, ok := rt.(*types.Optional); ok {
+		rt = opt.Elem()
+		if c.typeSubst != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+	}
+	return isNonValueStructuralType(rt)
 }
 
 // isNestedOwnerGovernedUnwrapSource reports whether src — the source of an

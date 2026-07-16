@@ -1699,6 +1699,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	c.neutralizeForceUnwrapSource(s.Value)
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
 	c.maybeRegisterStructuralFree(s.Name, alloca, dropType, s.Value, claimedOwnedBox)
+	// T1304: `r := pass_through(s)` where the callee returns an owned structural
+	// param by value aliases the caller's still-owned arg box; clear r's structural
+	// free flag on a runtime alias match so s stays the sole owner.
+	if isStructuralTarget {
+		if flag, ok := c.dropFlags[s.Name]; ok {
+			c.maybeClearStructuralBindingAliasArg(val, s.Value, flag)
+		}
+	}
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
 	// dups the string, so the variable owns the copy (not a borrow).
@@ -2076,6 +2084,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.neutralizeForceUnwrapSource(s.Value)
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
 	c.maybeRegisterStructuralFree(s.Name, alloca, typ, s.Value, claimedOwnedBox)
+	// T1304: see genVarDecl — clear r's structural free flag when it aliases a
+	// still-owned call argument (owned structural param returned by value).
+	if isStructuralTarget {
+		if flag, ok := c.dropFlags[s.Name]; ok {
+			c.maybeClearStructuralBindingAliasArg(val, s.Value, flag)
+		}
+	}
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// The container/struct still owns the value — freeing it here would cause use-after-free.
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
@@ -10993,6 +11008,113 @@ func (c *Compiler) maybeClearBindingDropFlagOnThisAlias(val value.Value, binding
 	clearBlk.NewBr(skipBlk)
 
 	c.block = skipBlk
+}
+
+// maybeClearStructuralBindingAliasArg is the structural sibling of
+// maybeClearBindingDropFlagOnThisAlias (T0347). It handles `r := pass_through(s)`
+// where `pass_through(Sink s) Sink { return s; }` returns an owned
+// structural-interface param BY VALUE. The concrete→structural coercion at the
+// call site is a borrow, not a move, so the caller's `s` remains the sole owner
+// of the heap box; but the binding path's maybeRegisterStructuralFree treats the
+// CallExpr RHS as fresh-owned (isFreshOwnedStructuralRHS) and registers a
+// structural free for `r` over the SAME box → two owners, one box → double free
+// at scope exit. T1304.
+//
+// The general return-alias machinery (emitReturnAliasCheckSubst) deliberately
+// skips structural returns (isTypeDroppable excludes IsStructural types), and it
+// runs at call time — before the compiler knows the result will be bound — so the
+// clear must happen here, at the binding site, and only for the binding case (the
+// discard `pass_through(s);` case correctly leaves `s` as sole owner). This
+// mirrors the `this` analog but keys off a call ARGUMENT instead of the receiver.
+//
+// For each free-function-call argument that is a live owned local (has both a
+// drop flag and an alloca), emit a runtime guard: if the result's instance ptr
+// equals the arg's instance ptr AND the arg still owns its box (drop flag live),
+// clear the binding's structural-free flag — leaving `s` sole owner. The pointer
+// compare keeps a fresh-constructing return (`return Widget(...)`, distinct ptr)
+// freeing independently (no spurious clear); the drop-flag gate keeps a moved arg
+// (`pass_through(move s)`, flag already cleared) owned by `r` (no leak).
+func (c *Compiler) maybeClearStructuralBindingAliasArg(val value.Value, rhs ast.Expr, bindingFlag value.Value) {
+	if bindingFlag == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	// val must be exactly {i8*, i8*} to extract the instance pointer at field 1.
+	if !isUserValueStructType(val.Type()) {
+		return
+	}
+	// Peel error/optional/paren wrappers to reach the underlying call (same shape
+	// as isFreshOwnedStructuralRHS).
+	inner := rhs
+	for {
+		switch e := inner.(type) {
+		case *ast.ErrorPanicExpr:
+			inner = e.Expr
+			continue
+		case *ast.OptionalUnwrapExpr:
+			inner = e.Expr
+			continue
+		case *ast.ErrorPropagateExpr:
+			inner = e.Expr
+			continue
+		case *ast.ErrorHandlerExpr:
+			inner = e.Expr
+			continue
+		case *ast.ParenExpr:
+			inner = e.Expr
+			continue
+		}
+		break
+	}
+	call, ok := inner.(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	// Restrict to free-function calls: method-receiver aliases are already covered
+	// by maybeClearReceiverDropFlag / the this-alias path.
+	if _, isMethod := call.Callee.(*ast.MemberExpr); isMethod {
+		return
+	}
+
+	retInst := c.block.NewExtractValue(val, 1)
+
+	for _, arg := range call.Args {
+		// Peel parens off the argument expression to reach a bare identifier.
+		av := arg.Value
+		for {
+			if p, isParen := av.(*ast.ParenExpr); isParen {
+				av = p.Expr
+				continue
+			}
+			break
+		}
+		ident, isIdent := av.(*ast.IdentExpr)
+		if !isIdent {
+			continue
+		}
+		argFlag, hasFlag := c.dropFlags[ident.Name]
+		if !hasFlag {
+			continue
+		}
+		argAlloca, hasLocal := c.locals[ident.Name]
+		if !hasLocal {
+			continue
+		}
+		argVal := c.block.NewLoad(argAlloca.ElemType, argAlloca)
+		argInst := extractAliasPtr(c, argVal)
+		if argInst == nil {
+			continue
+		}
+		same := c.block.NewICmp(enum.IPredEQ, retInst, argInst)
+		flagLive := c.block.NewLoad(irtypes.I1, argFlag)
+		cond := c.block.NewAnd(same, flagLive)
+
+		clearBlk := c.newBlock("struct.arg.alias.clear")
+		skipBlk := c.newBlock("struct.arg.alias.skip")
+		c.block.NewCondBr(cond, clearBlk, skipBlk)
+		clearBlk.NewStore(constant.False, bindingFlag)
+		clearBlk.NewBr(skipBlk)
+		c.block = skipBlk
+	}
 }
 
 // --- Raise ---

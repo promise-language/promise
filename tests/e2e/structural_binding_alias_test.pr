@@ -1,0 +1,91 @@
+// T1304: `r := pass_through(s)` where a free function returns an owned
+// structural-interface param by value aliases the caller's still-owned arg box.
+// Both `r` and `s` must not double-free the shared box, yet a genuinely fresh
+// structural return must still be freed independently (no leak).
+type Sink `structural {
+  emit(int n) `abstract;
+}
+
+type Counter {
+  int total;
+  emit(int n) {
+    this.total = this.total + n;
+  }
+}
+
+type Widget {
+  int id;
+  emit(int n) {
+    this.id = this.id + n;
+  }
+}
+
+pass_through(Sink s) Sink {
+  return s;
+}
+
+pass_through_fail!(Sink s) Sink {
+  return s;
+}
+
+pass_through2(int x, Sink s) Sink {
+  return s;
+}
+
+fresh_return() Sink {
+  return Widget(id: 10);
+}
+
+// Exact repro: r aliases s's box; without the fix both drop it → double free.
+binding_passthrough() `test {
+  s := Counter(total: 5);
+  r := pass_through(s);
+  r.emit(1);
+  assert(true, "no double free");
+}
+
+// The source is still read after the aliasing binding — s must stay the owner.
+binding_passthrough_use_source() `test {
+  s := Counter(total: 5);
+  r := pass_through(s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "source still usable");
+}
+
+// The callee constructs a fresh Widget: distinct pointer → r owns and frees it,
+// no alias with any caller argument, no leak, no double free.
+binding_fresh_return() `test {
+  r := fresh_return();
+  r.emit(3);
+  assert(true, "fresh return freed independently");
+}
+
+// Discard path (guards the binding fix from leaking into the discard case): the
+// statement result is not bound, s remains sole owner and frees once.
+discard_passthrough() `test {
+  s := Counter(total: 5);
+  pass_through(s);
+  s.emit(1);
+  assert(true, "discard leaves s owner");
+}
+
+// Failable passthrough bound with `?!`: the ErrorPanicExpr wrapper is peeled to
+// the call, so r's alias with s is still cleared — s stays sole owner.
+binding_failable_passthrough() `test {
+  s := Counter(total: 5);
+  r := pass_through_fail(s)?!;
+  r.emit(1);
+  s.emit(2);
+  assert(true, "failable passthrough: no double free");
+}
+
+// Multi-arg passthrough: the leading literal arg is skipped, the owned structural
+// arg s is recognized as the alias source. Both r and s must not double-free.
+binding_multi_arg_passthrough() `test {
+  s := Counter(total: 5);
+  r := pass_through2(9, s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "multi-arg passthrough: no double free");
+}

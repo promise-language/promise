@@ -1502,6 +1502,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			if _, isNone := cmpExprType.(*types.Named); isNone && cmpExprType == types.TypNone {
 				// NoneLit already handled via targetType
 			} else if !types.Identical(cmpExprType, declType) {
+				// T1298: box/view-coerce the RHS into the Optional's ELEMENT type
+				// BEFORE wrapping, so a concrete → structural-interface or child →
+				// parent RHS (e.g. `Sink? s = Counter(...)`) becomes a proper view
+				// before it is insertvalue'd into the {i8*, i8*} optional payload.
+				// The trailing coerceToView below runs against the Optional target
+				// and is a no-op.
+				val = c.coerceToOptionalElem(val, cmpExprType, declType)
 				val = c.wrapOptional(val, lt.(*irtypes.StructType))
 				willWrap = true
 			}
@@ -8693,6 +8700,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					// to the concrete Optional[T] zero (avoids an i1→{i1,T} mismatch).
 					val = c.coerceNoneToOptional(val, exprType, targetType)
 				} else if !types.Identical(unwrapRefsType(exprType), targetType) {
+					// T1298: box/view-coerce into the Optional's element type before
+					// wrapping (the coerceToView above ran against the Optional target
+					// and was a no-op for a concrete → structural-interface RHS).
+					val = c.coerceToOptionalElem(val, exprType, targetType)
 					val = c.wrapOptional(val, alloca.ElemType.(*irtypes.StructType))
 				}
 			}
@@ -8907,6 +8918,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if !types.Identical(unwrapRefsType(exprType), memberType) {
 						optType := c.resolveType(memberType)
 						if st, ok := optType.(*irtypes.StructType); ok {
+							// T1298: box/view-coerce into the Optional field's element
+							// type before wrapping, e.g. `h.s = Counter(...)` where s is
+							// a structural-interface Optional field.
+							val = c.coerceToOptionalElem(val, exprType, memberType)
 							val = c.wrapOptional(val, st)
 						}
 					}
@@ -9092,7 +9107,47 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					}
 					optType := c.resolveType(slotType)
 					if st, ok := optType.(*irtypes.StructType); ok {
+						// T1298: box/view-coerce into the Optional slot's element type
+						// before wrapping, e.g. `arr[i] = Counter(...)` where the slot
+						// is a structural-interface Optional.
+						val = c.coerceToOptionalElem(val, exprType, slotType)
 						val = c.wrapOptional(val, st)
+					}
+				}
+			}
+			// T1298: view-coerce a widening RHS (concrete → structural interface, or
+			// child → parent) into the []= setter's VALUE param type before the store,
+			// for the map / user-defined non-native `[]=` path. The native
+			// vector/array slot is handled by the isArr||isVec block above;
+			// genMethodIndexAssign passes val straight to the setter with NO argument
+			// coercion, so without this a widened value would be stored raw and later
+			// read back through a bogus vtable → segfault. Coercing here (in the
+			// caller's context) rather than inside genMethodIndexAssign keeps the box
+			// as this statement's `val`, so the claimHeapTemp(val) below transfers the
+			// box's ownership to the container (freed once via the container's V drop →
+			// __promise_structural_drop). No-op when the value already matches.
+			if !isArr && !isVec {
+				if named := extractNamed(idxTargetType); named != nil {
+					if m := named.LookupMethod("[]="); m != nil && !m.IsNative() {
+						sigParams := m.Sig().Params()
+						if len(sigParams) >= 1 {
+							valParamType := sigParams[len(sigParams)-1].Type()
+							if inst, ok := idxTargetType.(*types.Instance); ok {
+								if origin, ok := inst.Origin().(*types.Named); ok {
+									valParamType = types.Substitute(valParamType,
+										types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs()))
+								}
+							}
+							exprType := c.info.Types[s.Value]
+							if c.typeSubst != nil {
+								valParamType = types.Substitute(valParamType, c.typeSubst)
+								if exprType != nil {
+									exprType = types.Substitute(exprType, c.typeSubst)
+								}
+							}
+							val = c.coerceToView(val, exprType, valParamType)
+							val = c.coerceToOptionalElem(val, exprType, valParamType)
+						}
 					}
 				}
 			}
@@ -10266,6 +10321,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			if c.info.FailableExprs[s.Value] && val != nil && val.Type().Equal(resultType) {
 				c.block.NewRet(val)
 			} else {
+				// T1298: box/view-coerce into the Optional return type's element
+				// BEFORE the optional wrap, so `return Counter(...)` from a `Sink?`-
+				// returning function boxes to the structural view first (the trailing
+				// coerceToView runs against the Optional target and is a no-op).
+				val = c.coerceReturnToOptionalElem(val, s.Value, retType)
 				// Wrap value in Optional if return type is Optional but expr is not
 				val = c.wrapReturnOptional(val, s.Value, retType)
 				// Coerce value struct vtable when returning through a parent type
@@ -10287,6 +10347,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if s.Value == nil {
 		c.block.NewRet(nil)
 	} else {
+		// T1298: box/view-coerce into the Optional return type's element BEFORE the
+		// optional wrap (see the failable branch above).
+		val = c.coerceReturnToOptionalElem(val, s.Value, retType)
 		// Wrap value in Optional if return type is Optional but expr is not
 		val = c.wrapReturnOptional(val, s.Value, retType)
 		// Coerce value struct vtable when returning through a parent type

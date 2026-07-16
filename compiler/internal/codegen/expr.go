@@ -3359,8 +3359,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			// temp; the claimHeapTemp(val) in the store branch below transfers ownership
 			// to the constructed instance, whose synthesized drop frees the box via
 			// __promise_structural_drop. Placed before maybeWrapOptional so an optional
-			// structural field (`Sink? s`) would box-then-wrap (that widening is
-			// currently sema-blocked — T1298). No-op when no boxing is needed.
+			// structural field (`Sink? s`) boxes-then-wraps (T1298). No-op when no
+			// boxing is needed.
 			ctorArgType := c.info.Types[arg.Value]
 			if c.typeSubst != nil && ctorArgType != nil {
 				ctorArgType = types.Substitute(ctorArgType, c.typeSubst)
@@ -3369,7 +3369,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if c.typeSubst != nil {
 				ctorFieldType = types.Substitute(ctorFieldType, c.typeSubst)
 			}
+			// Bare structural-interface field: box directly (no-op for an Optional
+			// field, since extractNamed doesn't peel Optional).
 			val = c.coerceToView(val, ctorArgType, ctorFieldType)
+			// T1298: Optional structural-interface field (`Sink? s`): box into the
+			// element view before maybeWrapOptional wraps it (no-op otherwise).
+			val = c.coerceToOptionalElem(val, ctorArgType, ctorFieldType)
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
@@ -3509,6 +3514,18 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 			if defExpr, ok := c.info.FieldDefaults[f]; ok {
 				val := c.genExpr(defExpr)
+				// T1279/T1298: view-box a concrete default value into a structural-
+				// interface field (bare or Optional) before the optional wrap.
+				defArgType := c.info.Types[defExpr]
+				defFieldType := f.Type()
+				if c.typeSubst != nil {
+					if defArgType != nil {
+						defArgType = types.Substitute(defArgType, c.typeSubst)
+					}
+					defFieldType = types.Substitute(defFieldType, c.typeSubst)
+				}
+				val = c.coerceToView(val, defArgType, defFieldType)
+				val = c.coerceToOptionalElem(val, defArgType, defFieldType)
 				preWrapVal := val // T0353: needed for optional-wrapped stmtTemp claim
 				val = maybeWrapOptional(val, defExpr, f.Name(), fieldIdx)
 				c.block.NewStore(val, fieldPtr)
@@ -6311,13 +6328,18 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// is registered as an owned heap temp; claimHeapTemp(argVal) below transfers
 		// ownership to the vector, and Vector.drop's element drop frees it via
 		// __promise_structural_drop (T1284). No-op when no boxing is needed.
-		// Placed before the elemIsOpt wrap so a Vector[structural?] element would
-		// box-then-wrap (that widening is currently sema-blocked — T1298).
+		// Placed before the elemIsOpt wrap so a Vector[structural?] element
+		// boxes-then-wraps (T1298).
 		pushArgType := c.info.Types[e.Args[0].Value]
 		if c.typeSubst != nil && pushArgType != nil {
 			pushArgType = types.Substitute(pushArgType, c.typeSubst)
 		}
+		// Bare structural element: box directly (no-op for an Optional element,
+		// since extractNamed doesn't peel Optional).
 		argVal = c.coerceToView(argVal, pushArgType, resolvedElem)
+		// T1298: Optional structural element (`Sink?[]`): box into the element view
+		// before the elemIsOpt wrap below (no-op otherwise).
+		argVal = c.coerceToOptionalElem(argVal, pushArgType, resolvedElem)
 
 		// T0658: Wrap a bare RHS into the Optional element struct when the
 		// vector element type is Optional but the pushed expr is not (e.g.
@@ -11016,6 +11038,30 @@ func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType ty
 		return c.wrapOptional(val, st)
 	}
 	return val
+}
+
+// coerceReturnToOptionalElem view-coerces/boxes a return value into the ELEMENT
+// type of an Optional return type before wrapReturnOptional wraps it, so a
+// concrete → structural-interface or child → parent return (e.g. `return
+// Counter(...)` from a `Sink?`-returning function) becomes a proper view under
+// the optional (T1298). Computes the source type exactly as the trailing
+// coerceToView site does (typeSubst + selfSubst applied) so it stays in sync.
+// No-op when retType isn't Optional or no coercion is needed.
+func (c *Compiler) coerceReturnToOptionalElem(val value.Value, expr ast.Expr, retType types.Type) value.Value {
+	if retType == nil {
+		return val
+	}
+	if _, isOpt := retType.(*types.Optional); !isOpt {
+		return val
+	}
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	return c.coerceToOptionalElem(val, exprType, retType)
 }
 
 func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {

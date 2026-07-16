@@ -1149,6 +1149,22 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	return c.block.NewInsertValue(val, vtablePtr, 0)
 }
 
+// coerceToOptionalElem view-coerces/boxes val into the ELEMENT type of an
+// Optional target before an optional wrap, so a subtype or structural-interface
+// RHS gets its proper view (vtable swap / heap box) under the optional (T1298).
+// extractNamed does not unwrap Optional, so a plain coerceToView against a `T?`
+// target is a no-op and the concrete value would be insertvalue'd raw into the
+// {i8*, i8*} optional payload → IR type mismatch. This unwraps one Optional
+// layer and coerces to its element first. No-op when toType isn't Optional or no
+// coercion is needed; the callers still run their existing (now no-op on
+// Optional) coerceToView after wrapping, so ordering is the only change.
+func (c *Compiler) coerceToOptionalElem(val value.Value, fromType, toType types.Type) value.Value {
+	if opt, ok := toType.(*types.Optional); ok {
+		return c.coerceToView(val, fromType, opt.Elem())
+	}
+	return val
+}
+
 // isMaterializedViewPtr reports whether val is a pointer to a two-field view struct
 // ({i8*, i8*}). This is the shape genCallArgsWithMutRef produces for a `~` (MutRef)
 // param — it already coerced the arg into a view and stored it in a temp alloca, then
@@ -1352,6 +1368,15 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 					// none → T?: produce zeroinitializer
 					v = c.zeroValue(lt)
 				} else if st, ok := lt.(*irtypes.StructType); ok {
+					// T1298: box a concrete → structural-interface / child → parent
+					// arg into the Optional param's ELEMENT view BEFORE the ownership
+					// claim and wrap, so the `move` (RefMut) claimHeapTemp(v) below
+					// claims the box (freed exactly once by the callee's optional-param
+					// drop; for a borrow param the caller's stmt-end cleanup frees the
+					// tracked box). extractNamed doesn't peel Optional, so the trailing
+					// coerceToView(v, argType, paramType) is a no-op for the Optional
+					// param. No-op when no boxing is needed.
+					v = c.coerceToOptionalElem(v, argType, paramType)
 					// B0358: The value is moving into the optional — transfer
 					// ownership so the caller doesn't double-drop at scope exit.
 					// T1188: Only transfer ownership for a `move` (RefMut) param.

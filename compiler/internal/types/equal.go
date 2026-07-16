@@ -144,9 +144,16 @@ func AssignableTo(x, y Type) bool {
 
 	// Rule 2: T is assignable to T? (optional wrapping). The element match also
 	// allows the bare-Named/self-Instance interchangeability (Rules 4c/4d) so a
-	// generic method returning `T[P...]?` can `return this` (T0906).
+	// generic method returning `T[P...]?` can `return this` (T0906), and the
+	// subtype/structural widenings (Rules 4/4b/9) so a concrete type or child
+	// widens into an Optional-of-interface / Optional-of-parent, e.g.
+	// `Sink? s = Counter(...)` or `Animal? a = Dog()` (T1298). subtypeWidens is
+	// deliberately narrower than a full AssignableTo(x, opt.elem): it excludes
+	// ref decay (`T&`/`T~` → `T?`), which codegen's optional view-box path does
+	// not handle. x being *Optional/none falls through subtypeWidens (returns
+	// false) and is handled by Rules 1/3.
 	if opt, ok := y.(*Optional); ok {
-		if Identical(x, opt.elem) || selfInstanceInterchangeable(x, opt.elem) {
+		if Identical(x, opt.elem) || subtypeWidens(x, opt.elem) {
 			return true
 		}
 	}
@@ -158,45 +165,12 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
-	// Rule 4: child type assignable to parent (inheritance)
-	if xn, ok := x.(*Named); ok {
-		if yn, ok := y.(*Named); ok {
-			if isChild(xn, yn) {
-				return true
-			}
-		}
-		// Named child assignable to Instance parent via generic inheritance.
-		// e.g., Doubler is assignable to Transformer[int] when Doubler is Transformer[int].
-		if yi, ok := y.(*Instance); ok {
-			if isNamedChildOfInstance(xn, yi) {
-				return true
-			}
-		}
-	}
-
-	// Rule 4b: Instance child assignable to Instance parent via generic inheritance.
-	// e.g., Range[int] is assignable to Stream[int] when Range is Stream[T].
-	if xi, ok := x.(*Instance); ok {
-		if yi, ok := y.(*Instance); ok {
-			if isInstanceChild(xi, yi) {
-				return true
-			}
-		}
-		// Instance child assignable to non-generic Named parent
-		if yn, ok := y.(*Named); ok {
-			xo, _ := xi.Origin().(*Named)
-			if xo != nil && isChild(xo, yn) {
-				return true
-			}
-		}
-	}
-
-	// Rule 4c/4d: a bare generic Named/Enum is interchangeable with its own
-	// self-instance. Inside a generic type T[P...]'s (or enum E[P...]'s) method
-	// body, `this` is typed as the bare Named/Enum, while parameters declared
-	// T[P...] are Instances whose type args are exactly the own type params —
-	// these denote the same type. (T0874/T0876)
-	if selfInstanceInterchangeable(x, y) {
+	// Rules 4/4b/4c/4d/9: subtype and structural-interface widening —
+	// child→parent inheritance (Named/Instance), bare-Named/self-Instance
+	// interchangeability, and concrete→structural-interface satisfaction.
+	// Consolidated into subtypeWidens so the Optional-element check in Rule 2
+	// applies the exact same set of widenings (single source of truth, T1298).
+	if subtypeWidens(x, y) {
 		return true
 	}
 
@@ -250,10 +224,54 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
-	// Rule 9: structural interface satisfaction (meta-tag gated)
-	// T is assignable to Interface if the interface is marked `structural
-	// and T has concrete implementations for all of its abstract methods.
-	// Without `structural, explicit `is is required.
+	return false
+}
+
+// subtypeWidens reports whether a value of type x widens to type y purely by
+// subtype relationship — inheritance (child→parent, including generic-instance
+// inheritance and Instance↔Named parents), bare-Named/self-Instance
+// interchangeability, or structural-interface satisfaction. It deliberately
+// EXCLUDES reference coercions/decay and optional wrapping. This is the exact
+// set of widenings that codegen's view-box path (coerceToView) can realize, so
+// AssignableTo's Optional-element check (Rule 2) can reuse it to unlock
+// `Sink? = Counter(...)` / `Animal? = Dog()` without also permitting ref-decay
+// into an optional, which codegen does not box (T1298). It is the single source
+// of truth for Rules 4/4b/4c/4d/9.
+func subtypeWidens(x, y Type) bool {
+	// Rule 4: Named child → Named/Instance parent (inheritance)
+	if xn, ok := x.(*Named); ok {
+		if yn, ok := y.(*Named); ok && isChild(xn, yn) {
+			return true
+		}
+		// Named child assignable to Instance parent via generic inheritance,
+		// e.g. Doubler is Transformer[int] when Doubler is Transformer[int].
+		if yi, ok := y.(*Instance); ok && isNamedChildOfInstance(xn, yi) {
+			return true
+		}
+	}
+
+	// Rule 4b: Instance child → Instance/Named parent via generic inheritance,
+	// e.g. Range[int] is Stream[int] when Range[T] is Stream[T].
+	if xi, ok := x.(*Instance); ok {
+		if yi, ok := y.(*Instance); ok && isInstanceChild(xi, yi) {
+			return true
+		}
+		if yn, ok := y.(*Named); ok {
+			if xo, _ := xi.Origin().(*Named); xo != nil && isChild(xo, yn) {
+				return true
+			}
+		}
+	}
+
+	// Rule 4c/4d: a bare generic Named/Enum is interchangeable with its own
+	// self-instance (this ↔ T[P...] inside a generic body). (T0874/T0876)
+	if selfInstanceInterchangeable(x, y) {
+		return true
+	}
+
+	// Rule 9: structural interface satisfaction (meta-tag gated). x is
+	// assignable to a `structural interface if it implements all of the
+	// interface's abstract methods. Without `structural, explicit `is required.
 	if yn, ok := y.(*Named); ok && yn.IsAbstract() && yn.IsStructural() {
 		if Implements(x, yn) {
 			return true

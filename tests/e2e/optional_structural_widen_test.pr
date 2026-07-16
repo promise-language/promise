@@ -1,0 +1,279 @@
+// T1298: a concrete type that satisfies a `structural interface (or a child of a
+// class) can be implicitly widened to Optional-of-that-interface/parent (`S?`) in
+// every assignment position — var-decl, assignment, constructor field, constructor
+// default, return, call argument, and `S?[]` push. Covers both a `value concrete
+// type (Counter) and a heap concrete type (Heavy) so the value-box and heap-box
+// codegen paths are both exercised. All tests are leak-checked (zero-leak policy):
+// the boxes must be freed via __promise_structural_drop.
+type Sink `structural {
+  emit(this, int x) int `abstract;
+}
+
+// `value concrete implementer — boxed via boxValueTypeForStructuralView.
+type Counter {
+  int base `value;
+  emit(this, int x) int {
+    return this.base + x;
+  }
+}
+
+// Heap concrete implementer (has an owned string field + synthesized drop) —
+// boxed via coerceToView's user-value path; the box owns the concrete instance.
+type Heavy {
+  string tag;
+  emit(this, int x) int {
+    return x + this.tag.len;
+  }
+}
+
+type OptHolder {
+  Sink? s;
+}
+
+// A constructor default value that widens a concrete into an optional field.
+type DefaultHolder {
+  Sink? s = Counter(base: 100);
+}
+
+// --- var-decl ---
+
+widen_vardecl_value() `test {
+  Sink? a = Counter(base: 5);
+  assert(a!.emit(7) == 12, "value var-decl");
+}
+
+widen_vardecl_heap() `test {
+  Sink? a = Heavy(tag: "ab");
+  assert(a!.emit(40) == 42, "heap var-decl");
+}
+
+// --- assignment (incl. none-then-assign) ---
+
+widen_assign_value() `test {
+  Sink? b = none;
+  b = Counter(base: 8);
+  assert(b!.emit(12) == 20, "value assign");
+}
+
+widen_assign_heap() `test {
+  Sink? b = none;
+  b = Heavy(tag: "xyz");
+  assert(b!.emit(50) == 53, "heap assign");
+}
+
+// --- constructor field ---
+
+widen_ctorfield_value() `test {
+  OptHolder h = OptHolder(s: Counter(base: 7));
+  assert(h.s!.emit(10) == 17, "value ctor field");
+}
+
+widen_ctorfield_heap() `test {
+  OptHolder h = OptHolder(s: Heavy(tag: "hi"));
+  assert(h.s!.emit(20) == 22, "heap ctor field");
+}
+
+// --- constructor default value ---
+
+widen_ctordefault_value() `test {
+  DefaultHolder d = DefaultHolder();
+  assert(d.s!.emit(1) == 101, "value ctor default");
+}
+
+// --- return ---
+
+make_counter() Sink? {
+  return Counter(base: 5);
+}
+make_heavy() Sink? {
+  return Heavy(tag: "q");
+}
+
+widen_return_value() `test {
+  assert(make_counter()!.emit(50) == 55, "value return");
+}
+
+widen_return_heap() `test {
+  assert(make_heavy()!.emit(9) == 10, "heap return");
+}
+
+// --- call argument (borrow + move) ---
+
+use_sink(Sink? s) int {
+  return s!.emit(4);
+}
+consume_sink(Sink? move s) int {
+  return s!.emit(6);
+}
+
+widen_callarg_value() `test {
+  assert(use_sink(Counter(base: 3)) == 7, "value call arg borrow");
+}
+
+widen_callarg_heap() `test {
+  assert(use_sink(Heavy(tag: "zz")) == 6, "heap call arg borrow");
+}
+
+widen_callarg_move_value() `test {
+  assert(consume_sink(Counter(base: 3)) == 9, "value call arg move");
+}
+
+// --- Vector push (S?[]) ---
+
+widen_vecpush_value() `test {
+  Sink?[] v = [];
+  v.push(Counter(base: 10));
+  assert(v[0]!.emit(20) == 30, "value vec push");
+}
+
+widen_vecpush_heap() `test {
+  Sink?[] v = [];
+  v.push(Heavy(tag: "abcd"));
+  assert(v[0]!.emit(3) == 7, "heap vec push");
+}
+
+// --- member-field assignment (h.s = concrete, distinct from ctor field) ---
+// Post-construction assignment to an Optional structural-interface member routes
+// through genAssignStmt's MemberExpr-LHS optional path (stmt.go:8918), a separate
+// site from the constructor-field store — box-then-wrap must apply here too, and
+// overwriting an existing box must drop the old one (no leak).
+
+widen_memberassign_value() `test {
+  OptHolder h = OptHolder(s: none);
+  h.s = Counter(base: 3);
+  assert(h.s!.emit(4) == 7, "member assign value");
+}
+
+widen_memberassign_heap() `test {
+  OptHolder h = OptHolder(s: none);
+  h.s = Heavy(tag: "ab");
+  assert(h.s!.emit(40) == 42, "member assign heap");
+}
+
+// NOTE: overwriting an ALREADY-populated Sink? member field (`h.s = Heavy(...)`
+// when h.s is set) currently leaks the old box — the member-assign path drops
+// the old value as a plain optional, not via __promise_structural_drop. Tracked
+// as T1300 (critical). The overwrite tests are added here once that is fixed;
+// the vector-index and map overwrite variants below already drop correctly.
+
+// --- vector index-assign (v[i] = concrete) for Sink?[] ---
+// v[i] = concrete on a Sink?[] routes through the isVec branch of genAssignStmt's
+// index-LHS optional path (stmt.go:9113) — a different site from v.push. The RHS
+// must box into the element view before the {i1, {i8*,i8*}} wrap, and overwriting
+// a populated slot must drop the old box.
+
+widen_vecindex_value() `test {
+  Sink?[] v = [];
+  v.push(none);
+  v[0] = Counter(base: 10);
+  assert(v[0]!.emit(5) == 15, "vec index assign value");
+}
+
+widen_vecindex_heap() `test {
+  Sink?[] v = [];
+  v.push(none);
+  v[0] = Heavy(tag: "xy");
+  assert(v[0]!.emit(1) == 3, "vec index assign heap");
+}
+
+widen_vecindex_overwrite_heap() `test {
+  Sink?[] v = [];
+  v.push(Heavy(tag: "first"));
+  v[0] = Heavy(tag: "second");
+  assert(v[0]!.emit(0) == 6, "vec index overwrite heap (old box dropped)");
+}
+
+// --- std map index-assign (m[k] = concrete) ---
+// The map `[]=` setter target is `V?`, so a concrete → structural widening at the
+// assign site only became reachable once T1298 broadened sema; genMethodIndexAssign
+// now view-coerces the value into the setter's V param before the store. Both the
+// value-box and heap-box paths, plus drop-on-overwrite, must stay leak-free.
+
+widen_map_value() `test {
+  map[string, Sink] m = {:};
+  m["a"] = Counter(base: 5);
+  assert(m["a"]!.emit(1) == 6, "map value widen");
+}
+
+widen_map_heap() `test {
+  map[string, Sink] m = {:};
+  m["h"] = Heavy(tag: "xyz");
+  assert(m["h"]!.emit(0) == 3, "map heap widen");
+}
+
+widen_map_overwrite_heap() `test {
+  map[string, Sink] m = {:};
+  m["k"] = Heavy(tag: "first");
+  m["k"] = Heavy(tag: "second");
+  assert(m["k"]!.emit(0) == 6, "map overwrite heap (old box dropped)");
+}
+
+// --- class inheritance sibling fix (Animal? = Dog()) ---
+
+type Animal {
+  speak(this) int `abstract;
+}
+type Dog is Animal {
+  speak(this) int {
+    return 1;
+  }
+}
+type Cat is Animal {
+  speak(this) int {
+    return 2;
+  }
+}
+type Zoo {
+  Animal? pet;
+}
+
+make_dog() Animal? {
+  return Dog();
+}
+
+widen_inherit_vardecl() `test {
+  Animal? a = Dog();
+  assert(a!.speak() == 1, "inherit var-decl");
+}
+
+widen_inherit_ctorfield() `test {
+  Zoo z = Zoo(pet: Cat());
+  assert(z.pet!.speak() == 2, "inherit ctor field");
+}
+
+widen_inherit_return() `test {
+  assert(make_dog()!.speak() == 1, "inherit return");
+}
+
+widen_inherit_vecpush() `test {
+  Animal?[] v = [];
+  v.push(Dog());
+  v.push(Cat());
+  assert(v[0]!.speak() == 1, "inherit vec push dog");
+  assert(v[1]!.speak() == 2, "inherit vec push cat");
+}
+
+widen_inherit_map() `test {
+  map[string, Animal] m = {:};
+  m["d"] = Dog();
+  m["c"] = Cat();
+  assert(m["d"]!.speak() == 1, "inherit map dog");
+  assert(m["c"]!.speak() == 2, "inherit map cat");
+}
+
+widen_inherit_memberassign() `test {
+  Zoo z = Zoo(pet: none);
+  z.pet = Dog();
+  assert(z.pet!.speak() == 1, "inherit member assign dog");
+  z.pet = Cat();
+  assert(z.pet!.speak() == 2, "inherit member assign cat (old dropped)");
+}
+
+widen_inherit_vecindex() `test {
+  Animal?[] v = [];
+  v.push(none);
+  v[0] = Dog();
+  assert(v[0]!.speak() == 1, "inherit vec index dog");
+  v[0] = Cat();
+  assert(v[0]!.speak() == 2, "inherit vec index cat (old dropped)");
+}

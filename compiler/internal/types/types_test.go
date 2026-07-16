@@ -1096,6 +1096,18 @@ func TestAssignableTo(t *testing.T) {
 			true,
 		},
 
+		// T1298: subtype widening through an Optional target — a child widens to
+		// Optional-of-parent (Rule 2 now applies subtypeWidens to the element).
+		{"dog_to_optional_animal", dog, NewOptional(animal), true},
+		{"puppy_to_optional_animal", puppy, NewOptional(animal), true},
+		{"animal_to_optional_dog", animal, NewOptional(dog), false},
+		// Deliberate narrowing: a NON-Copy ref does NOT decay-and-widen into an
+		// Optional-of-parent (subtypeWidens excludes refs; Rule 8b needs Copy).
+		// Codegen's optional view-box path does not box a borrow, so this must
+		// stay rejected.
+		{"shared_ref_dog_to_optional_animal", NewSharedRef(dog), NewOptional(animal), false},
+		{"mut_ref_dog_to_optional_animal", NewMutRef(dog), NewOptional(animal), false},
+
 		// Rule 4c (T0874): a bare generic Named is interchangeable with its own
 		// self-instance (GBox[T] whose args are GBox's own type params).
 		{"named_to_self_instance", gBox, gBoxSelf, true},

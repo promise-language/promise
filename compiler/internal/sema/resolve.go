@@ -347,3 +347,16 @@ func (c *Checker) rejectSharedRefParam(pos ast.Pos, name string, pt types.Type) 
 		c.errorf(pos, "`&` is not a parameter marker; a plain `Type %s` parameter is already a shared (read-only) borrow — remove the `&`", name)
 	}
 }
+
+// rejectStreamParam rejects a generator (`stream[T]`) value as a parameter type
+// (T1314). A stream value is a raw coroutine {handle, slot} produced by a
+// generator factory; it can only be consumed inline by for-in or `yield *`. A
+// parameter is a stored binding, and an unconsumed stream parameter leaks its
+// coroutine frame + yield slot (nothing registers a generator cleanup for it).
+// Storing generator values ("first-class generators") is a deferred feature —
+// same stance as T1313's rejection of binding a stream to a local.
+func (c *Checker) rejectStreamParam(pos ast.Pos, name string, pt types.Type) {
+	if _, ok := types.AsStream(pt); ok {
+		c.errorf(pos, "a generator (`stream[T]`) value cannot be a function parameter; consume it at the call site with a for-in loop (`for x in <generator> { ... }`), or collect its values into a vector (`T[]`) and pass that")
+	}
+}

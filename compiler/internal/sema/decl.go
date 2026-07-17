@@ -844,6 +844,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 		if pt == nil {
 			return nil
 		}
+		c.rejectStreamParam(p.Pos(), p.Name, pt)
 		if p.IsVariadic {
 			vecType := types.NewVector(pt)
 			c.recordInstance(vecType)
@@ -1109,6 +1110,7 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 		if pt == nil {
 			return nil
 		}
+		c.rejectStreamParam(p.Pos(), p.Name, pt)
 		if p.IsVariadic {
 			vecType := types.NewVector(pt)
 			c.recordInstance(vecType)
@@ -1405,6 +1407,7 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 		if pt == nil {
 			return nil
 		}
+		c.rejectStreamParam(p.Pos(), p.Name, pt)
 		if p.IsVariadic {
 			// Variadic param: declared as ...T, stored as T[] internally
 			vecType := types.NewVector(pt)

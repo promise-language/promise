@@ -49,8 +49,10 @@ func TestT1313RejectTypedBind(t *testing.T) {
 }
 
 func TestT1313RejectReassignment(t *testing.T) {
-	// A stream-typed parameter is the only way to obtain a stream lvalue after
-	// this change; reassigning it must also be rejected.
+	// Under T1314, a `stream[int]` parameter is itself rejected, so the
+	// reassignment form below now fails at the parameter declaration. The
+	// `checkAssignStmt` `rejectStoredGenerator` guard remains as defense-in-depth
+	// but is no longer reachable via a stream parameter.
 	errs := checkErrs(t, `
 		gen(int n) stream[int] {
 			int i = 0;
@@ -61,7 +63,7 @@ func TestT1313RejectReassignment(t *testing.T) {
 		}
 		main() {}
 	`)
-	expectError(t, errs, t1313StoreMsg)
+	expectError(t, errs, t1314ParamMsg)
 }
 
 func TestT1313RejectTypedDiscardBind(t *testing.T) {

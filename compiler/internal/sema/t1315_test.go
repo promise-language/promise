@@ -180,9 +180,12 @@ func TestT1315GeneratorReturnTypeAccepted(t *testing.T) {
 	`)
 }
 
-func TestT1315StreamParameterConsumeAccepted(t *testing.T) {
-	// A `stream[int]` parameter consumed inline by for-in is the intended use.
-	checkOK(t, t1315Gen+`
+func TestT1315StreamParameterRejected(t *testing.T) {
+	// T1314 (landed after T1315): a `stream[int]` parameter is now rejected in
+	// sema — a parameter is a stored binding, and an unconsumed stream param
+	// leaks its coroutine frame + yield slot. A generator must be consumed at the
+	// call site (for-in) or collected into a vector, not taken as a parameter.
+	errs := checkErrs(t, t1315Gen+`
 		consume(stream[int] s) int {
 			int total = 0;
 			for x in s { total = total + x; }
@@ -190,6 +193,7 @@ func TestT1315StreamParameterConsumeAccepted(t *testing.T) {
 		}
 		main() {}
 	`)
+	expectError(t, errs, t1314ParamMsg)
 }
 
 func TestT1315InlineForInAccepted(t *testing.T) {

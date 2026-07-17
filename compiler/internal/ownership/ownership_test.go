@@ -6184,7 +6184,12 @@ func TestT0349_YieldOwnedLocalOK(t *testing.T) {
 }
 
 // `yield* g` consumes the inner generator (iterates to exhaustion, then drops).
-// Yielding a borrowed-param generator is a double-free.
+// Yielding a borrowed-param generator would be a double-free — but under T1314 a
+// `stream[T]` parameter is itself rejected in sema, so this dangerous construct
+// can no longer be declared. The rejection now fires at the parameter
+// declaration (before ownership analysis runs), which subsumes the old
+// borrowed-param double-free guard for this path. The ownership-level `yield*`
+// borrow check (stmt.go) remains as defense-in-depth for other stream lvalues.
 func TestT0349_YieldDelegateBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
 		outer(stream[int] s) stream[int] {
@@ -6192,7 +6197,7 @@ func TestT0349_YieldDelegateBorrowedParam(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+	expectOwnerError(t, errs, "cannot be a function parameter")
 }
 
 // select-case channel send transfers ownership to the receiver — borrowed

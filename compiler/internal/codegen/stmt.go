@@ -7489,10 +7489,19 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	// Other structural types use structuralDrop (B0270: RTTI-based, works for any type).
 	_, isIter := types.AsIterator(resultType)
 	_, isStream := types.AsStream(resultType)
+	before := len(c.heapTemps)
 	if (isIter || isStream) && c.iterCleanup != nil {
 		c.trackHeapTemp(instancePtr, c.iterCleanup)
 	} else if c.structuralDrop != nil {
 		c.trackHeapTemp(instancePtr, c.structuralDrop)
+	}
+	// T1310: if the just-tracked temp aliases a live owned structural arg
+	// (owned-arg passthrough, `f.make(s);` returning `s` by value), clear the
+	// temp's drop flag so the caller's arg stays sole owner and we don't double
+	// free the same box at scope exit. Fresh-constructing returns have a distinct
+	// instance ptr → no spurious clear.
+	if len(c.heapTemps) > before {
+		c.maybeClearStructuralTempAliasArg(e, instancePtr, c.heapTemps[len(c.heapTemps)-1].dropFlag)
 	}
 }
 
@@ -11123,6 +11132,78 @@ func (c *Compiler) maybeClearStructuralBindingAliasArg(val value.Value, rhs ast.
 		skipBlk := c.newBlock("struct.arg.alias.skip")
 		c.block.NewCondBr(cond, clearBlk, skipBlk)
 		clearBlk.NewStore(constant.False, bindingFlag)
+		clearBlk.NewBr(skipBlk)
+		c.block = skipBlk
+	}
+}
+
+// maybeClearStructuralTempAliasArg is the discard/inline-use sibling of
+// maybeClearStructuralBindingAliasArg (T1304). It handles the case where the
+// result of a structural-interface-returning call is NOT bound to a variable —
+// `f.make(s);` as a bare statement, or an inline use `f.make(s).emit(1);`. On
+// this path maybeTrackIterTemp registers the result's instance ptr as an owned
+// heap temp (via structuralDrop) that is freed at statement end. But when the
+// callee returns an owned structural param BY VALUE (`make(Sink s) Sink { return
+// s; }`), the concrete→structural coercion is a borrow: the caller's `s` remains
+// the sole owner of the heap box. The tracked temp then frees the SAME box `s`
+// drops at scope exit → double free. T1310.
+//
+// Unlike the binding sibling this admits a MemberExpr (method) callee: the temp
+// is only ever created for method-call results (maybeTrackIterTemp is called from
+// the method-call branch of genExpr's CallExpr case), and for a MemberExpr callee
+// call.Args holds exactly the value arguments — the receiver is Callee.Target and
+// never appears in Args, so scanning Args reaches only the passed-through owned
+// arg, not the receiver. The receiver-vs-return alias remains a separate concern
+// already handled by the claimHeapTemp receiver path.
+//
+// For each argument that is a live owned local (drop flag + alloca), emit a
+// runtime guard: if the tracked temp's instance ptr equals the arg's instance ptr
+// AND the arg still owns its box (drop flag live), clear the TEMP's drop flag so
+// the arg stays sole owner. The pointer compare keeps a fresh-constructing return
+// (`return Counter(...)`, distinct ptr) freeing independently; the drop-flag gate
+// mirrors the T1304/T1308 shape and fails closed.
+func (c *Compiler) maybeClearStructuralTempAliasArg(call *ast.CallExpr, tempInstPtr value.Value, tempDropFlag value.Value) {
+	if call == nil || tempDropFlag == nil || tempInstPtr == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if tempInstPtr.Type() != irtypes.I8Ptr {
+		return
+	}
+	for _, arg := range call.Args {
+		// Peel parens off the argument expression to reach a bare identifier.
+		av := arg.Value
+		for {
+			if p, isParen := av.(*ast.ParenExpr); isParen {
+				av = p.Expr
+				continue
+			}
+			break
+		}
+		ident, isIdent := av.(*ast.IdentExpr)
+		if !isIdent {
+			continue
+		}
+		argFlag, hasFlag := c.dropFlags[ident.Name]
+		if !hasFlag {
+			continue
+		}
+		argAlloca, hasLocal := c.locals[ident.Name]
+		if !hasLocal {
+			continue
+		}
+		argVal := c.block.NewLoad(argAlloca.ElemType, argAlloca)
+		argInst := extractAliasPtr(c, argVal)
+		if argInst == nil || argInst.Type() != irtypes.I8Ptr {
+			continue
+		}
+		same := c.block.NewICmp(enum.IPredEQ, tempInstPtr, argInst)
+		flagLive := c.block.NewLoad(irtypes.I1, argFlag)
+		cond := c.block.NewAnd(same, flagLive)
+
+		clearBlk := c.newBlock("struct.tmp.alias.clear")
+		skipBlk := c.newBlock("struct.tmp.alias.skip")
+		c.block.NewCondBr(cond, clearBlk, skipBlk)
+		clearBlk.NewStore(constant.False, tempDropFlag)
 		clearBlk.NewBr(skipBlk)
 		c.block = skipBlk
 	}

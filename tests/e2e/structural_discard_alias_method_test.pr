@@ -1,0 +1,117 @@
+// T1310: `f.make(s);` where a METHOD returns an owned structural-interface param
+// by value and the result is UNBOUND (discard or inline-use). The result view
+// aliases the caller's still-owned arg box; without the fix the tracked temp
+// frees the box at statement end AND `s` frees it at scope exit → double free.
+// A genuinely fresh method return must still be freed independently (no leak).
+type Sink `structural {
+  emit(int n) `abstract;
+}
+
+type Counter {
+  int total;
+  emit(int n) {
+    this.total = this.total + n;
+  }
+}
+
+type Factory {
+  int seed;
+  // Returns the owned structural param by value — a borrowing passthrough.
+  make(Sink s) Sink {
+    return s;
+  }
+  // Constructs a fresh instance — distinct box, freed independently.
+  make_fresh(int n) Sink {
+    return Counter(total: n);
+  }
+  // Two owned structural params, returns only the SECOND. The result temp
+  // aliases b's box; a stays sole owner of its own box. The per-arg guard loop
+  // must emit a guard for each arg but only the one matching the returned ptr
+  // clears at runtime.
+  pick_second(Sink a, Sink b) Sink {
+    return b;
+  }
+  // Generic method (unused type param) that returns the owned structural param
+  // by value — reaches the same temp-tracking helper via the generic-method
+  // codegen branch.
+  wrap[T](Sink s) Sink {
+    return s;
+  }
+}
+
+// Free-function passthrough (T1294 discard path) — must remain correct after the
+// method path is added.
+pass_through(Sink s) Sink {
+  return s;
+}
+
+// Exact repro: the discarded method result aliases s's box; s stays sole owner.
+method_discard_passthrough() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  f.make(s);
+  s.emit(1);
+  assert(true, "method discard: no double free");
+}
+
+// Inline-use form: the unbound result is used inline, then s is read again — s
+// must remain the sole owner of the box.
+method_inline_use_passthrough() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  f.make(s).emit(1);
+  s.emit(1);
+  assert(true, "method inline use: no double free");
+}
+
+// Fresh method return: distinct pointer → the temp owns and frees it, no alias
+// with any caller argument, no leak, no double free.
+method_discard_fresh_return() `test {
+  f := Factory(seed: 1);
+  f.make_fresh(9);
+  assert(true, "fresh method return freed independently");
+}
+
+// Regression guard: the free-function discard path (T1294) stays correct once the
+// method path is added — s remains sole owner and frees once.
+function_discard_passthrough() `test {
+  s := Counter(total: 5);
+  pass_through(s);
+  s.emit(1);
+  assert(true, "function discard leaves s owner");
+}
+
+// Two owned structural args, only the second returned by value and discarded.
+// The per-arg guard must free each box exactly once: `a` keeps ownership (its
+// ptr never matches the returned temp), `b` stays sole owner (its guard clears
+// the temp). No double free, no leak.
+method_discard_two_args() `test {
+  f := Factory(seed: 1);
+  a := Counter(total: 1);
+  b := Counter(total: 2);
+  f.pick_second(a, b);
+  a.emit(10);
+  b.emit(20);
+  assert(true, "two structural args: each freed once");
+}
+
+// Paren-wrapped argument `f.make((s));` — the guard must peel the ParenExpr to
+// reach the owned local `s` and clear the temp so `s` stays sole owner.
+method_discard_paren_arg() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  f.make((s));
+  s.emit(1);
+  assert(true, "paren-wrapped arg discard: no double free");
+}
+
+// Generic-method passthrough discard `f.wrap[int](s);` — a distinct codegen
+// branch (generic method call) that reaches the same temp-tracking helper and
+// must emit the arg-alias guard so `s` remains sole owner.
+method_discard_generic() `test {
+  f := Factory(seed: 1);
+  s := Counter(total: 5);
+  f.wrap[int](s);
+  s.emit(1);
+  assert(true, "generic method discard: no double free");
+}

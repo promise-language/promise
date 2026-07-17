@@ -179,6 +179,16 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 		if !emptyLitHandled {
 			valType := c.checkExprWithHint(s.Value, declType)
+			// T1313: a generator (`stream[T]`) value cannot be stored in a variable.
+			if c.rejectStoredGenerator(s.Pos(), valType) {
+				// Still insert the binding so later references don't cascade
+				// into "undefined" errors; the decl error already fails compile.
+				if s.Name != "_" {
+					c.checkNoShadow(s.Name, s.Pos())
+					c.insert(types.NewVar(tpos(s.Pos()), s.Name, declType))
+				}
+				return
+			}
 			if valType != nil && !types.AssignableTo(valType, declType) {
 				c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)
 			}
@@ -205,6 +215,24 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 }
 
+// rejectStoredGenerator rejects binding a generator (`stream[T]`) value to a
+// variable. A stream value is a raw coroutine {handle, slot} produced by a
+// generator factory; it has no combinators and can only be consumed inline by
+// for-in or yield*. Storing it ("first-class generator variables") is a
+// deferred feature (docs/archive/stages.md) and previously segfaulted (T1313:
+// codegen routed the {handle, slot} value through structural-drop, calling a
+// garbage vtable pointer). Reject cleanly instead.
+func (c *Checker) rejectStoredGenerator(pos ast.Pos, valType types.Type) bool {
+	if valType == nil {
+		return false
+	}
+	if _, ok := types.AsStream(valType); ok {
+		c.errorf(pos, "a generator value cannot be stored in a variable; consume it directly with a for-in loop (`for x in <generator> { ... }`) or delegate with `yield *`")
+		return true
+	}
+	return false
+}
+
 func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	valType := c.checkExpr(s.Value)
 	if valType == nil {
@@ -218,6 +246,17 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	// use the expression as a statement (`<-task;` / `foo();`) instead.
 	if types.Identical(valType, types.TypVoid) {
 		c.errorf(s.Pos(), "cannot bind void to variable '%s': expression produces no value; use it as a statement instead", s.Name)
+		return
+	}
+
+	// T1313: a generator (`stream[T]`) value cannot be stored in a variable.
+	if c.rejectStoredGenerator(s.Pos(), valType) {
+		// Still insert the binding so later references don't cascade into
+		// "undefined" errors; the decl error already fails the compile.
+		if s.Name != "_" {
+			c.checkNoShadow(s.Name, s.Pos())
+			c.insert(types.NewVar(tpos(s.Pos()), s.Name, valType))
+		}
 		return
 	}
 
@@ -430,6 +469,11 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	valType := c.checkExprWithHint(s.Value, targetType)
 
 	if targetType == nil || valType == nil {
+		return
+	}
+
+	// T1313: a generator (`stream[T]`) value cannot be stored in a variable.
+	if c.rejectStoredGenerator(s.Pos(), valType) {
 		return
 	}
 

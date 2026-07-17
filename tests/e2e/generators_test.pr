@@ -1218,5 +1218,16 @@ test_t1306_discarded_owned_arg_generator_no_leak() `test {
   assert(true, "owned-arg discard ok");
 }
 
+// T1313: binding a generator value to a variable is now rejected in sema (it
+// previously segfaulted). This locks in that the working inline-consume path is
+// undisturbed by that rejection and does not leak (T0067 enforces no leak).
+test_t1313_inline_consume_still_works() `test {
+  int sum = 0;
+  for x in count_to(3) {
+    sum = sum + x;
+  }
+  assert(sum == 3, "0+1+2 == 3");
+}
+
 main() {
 }

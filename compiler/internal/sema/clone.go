@@ -265,6 +265,55 @@ func firstSingleOwnerHandle(typ types.Type) types.Type {
 	return nil
 }
 
+// firstStream returns the first generator Stream (`stream[T]`) type found in
+// typ — as the type itself or nested within an Optional/Tuple/Array — or nil.
+// A stream value is a raw coroutine {handle, slot} pair with no vtable and no
+// valid structural-drop path; storing it anywhere that later drops it segfaults
+// (T1315, sibling of T1313). It is therefore a non-storable type.
+//
+// Recursion deliberately does NOT descend into a non-stream *types.Instance's
+// type arguments: every nested generic annotation is independently validated
+// through resolveInstance -> rejectStreamTypeArg, so recursing here would
+// double-report. A stream only ever surfaces at a check as a *direct* type
+// (value-flow: literal element / constructor arg) or a *direct* type argument
+// (annotation), plus the non-generic Optional/Tuple/Array wrappers that are not
+// routed through resolveInstance. *types.TypeParam -> nil: generic bodies are
+// checked with unbound params, so a Stream only surfaces at concrete
+// instantiation (mirrors firstSingleOwnerHandle).
+func firstStream(typ types.Type) types.Type {
+	switch t := typ.(type) {
+	case *types.Instance:
+		if _, ok := types.AsStream(t); ok {
+			return t
+		}
+	case *types.Optional:
+		return firstStream(t.Elem())
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if s := firstStream(e); s != nil {
+				return s
+			}
+		}
+	case *types.Array:
+		return firstStream(t.Elem())
+	}
+	return nil
+}
+
+// rejectStreamTypeArg rejects a generic/container instance whose type arguments
+// contain a generator Stream (`stream[T]`) — e.g. stream[int][], Box[stream[int]],
+// stream[int]?, map[K, stream[int]]. A stream is non-storable (T1315). Called
+// beside validateSingleOwnerContainerInstance at every generic-instantiation
+// site so both explicit annotations and inferred constructor args are covered.
+func (c *Checker) rejectStreamTypeArg(pos ast.Pos, typeArgs []types.Type) {
+	for _, ta := range typeArgs {
+		if s := firstStream(ta); s != nil {
+			c.errorf(pos, "a generator value cannot be stored: %s used as a type argument to a container or generic type; consume it directly with a for-in loop or delegate with `yield *`", s)
+			return
+		}
+	}
+}
+
 // isStdNativeContainerNamed reports whether n is one of the std native
 // container / single-owner-handle origin types (Vector, Map, Set, Arc,
 // Channel, Weak, Task, Mutex, MutexGuard, string). firstNestedSingleOwnerHandle

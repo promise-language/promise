@@ -1229,5 +1229,21 @@ test_t1313_inline_consume_still_works() `test {
   assert(sum == 3, "0+1+2 == 3");
 }
 
+// T1315: storing a generator `stream[T]` value in a container element, struct
+// field, or map value previously segfaulted (the raw {handle, slot} pair routed
+// through structural-drop and called a garbage vtable). All such storage forms
+// are now rejected in sema (see compiler/internal/sema/t1315_test.go). The
+// principled alternative — collect the generator's yields into a container by
+// consuming it inline with for-in — must still work and not leak (T0067).
+test_t1315_collect_generator_into_vector() `test {
+  int[] collected = [];
+  for x in count_to(4) {
+    collected.push(x);
+  }
+  assert(collected.len == 4, "collected 0..3");
+  assert(collected[0] == 0, "first is 0");
+  assert(collected[3] == 3, "last is 3");
+}
+
 main() {
 }

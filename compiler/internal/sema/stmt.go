@@ -149,6 +149,26 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		declType = types.NewMutRef(declType)
 	}
 
+	// T1315: a generator Stream (`stream[T]`) is non-storable — reject it as an
+	// annotated variable type. This covers the forms T1313's value-flow check
+	// does not reach: an uninitialized stream var (`stream[int] s;`) and an
+	// Optional/Tuple/Array-of-stream var (`stream[int]? s`). The common
+	// `stream[int] s = gen(3)` form (a directly stream-typed initializer) is
+	// deliberately left to T1313's rejectStoredGenerator so its diagnostic is
+	// not duplicated or overridden. Container-of-stream annotations are already
+	// rejected at resolveInstance.
+	if str := firstStream(declType); str != nil {
+		_, isDirectStream := types.AsStream(declType)
+		if !isDirectStream || s.Value == nil {
+			c.errorf(s.Pos(), "a generator value cannot be stored: %s used as a variable type; consume it directly with a for-in loop or delegate with `yield *`", str)
+			if s.Name != "_" {
+				c.checkNoShadow(s.Name, s.Pos())
+				c.insert(types.NewVar(tpos(s.Pos()), s.Name, declType))
+			}
+			return
+		}
+	}
+
 	// Uninitialized declaration: `T? x;` defaults to none
 	if s.Value == nil {
 		if _, ok := declType.(*types.Optional); !ok {

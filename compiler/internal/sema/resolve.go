@@ -87,6 +87,9 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		if elem == nil {
 			return nil
 		}
+		// T1315: `stream[int][]` — the vector sugar bypasses resolveInstance, so
+		// reject a non-storable generator Stream element here.
+		c.rejectStreamTypeArg(r.Pos(), []types.Type{elem})
 		inst := types.NewVector(elem)
 		c.recordInstance(inst)
 		return inst
@@ -96,6 +99,8 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		if elem == nil {
 			return nil
 		}
+		// T1315: `stream[int][N]` — reject a non-storable generator Stream element.
+		c.rejectStreamTypeArg(r.Pos(), []types.Type{elem})
 		size, err := strconv.ParseInt(r.Size, 10, 64)
 		if err != nil {
 			c.errorf(r.Pos(), "invalid array size: %s", r.Size)
@@ -176,6 +181,7 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 	c.validateSendableInstance(r.Pos(), typ, typeArgs)
 	c.validateSingleOwnerContainerInstance(r.Pos(), typ, typeArgs)
+	c.rejectStreamTypeArg(r.Pos(), typeArgs)
 	c.validateCloneInstance(r.Pos(), typ, typeArgs)
 
 	inst := types.NewInstance(typ, typeArgs)
@@ -261,6 +267,7 @@ func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 	c.validateSendableInstance(r.Pos(), typ, typeArgs)
 	c.validateSingleOwnerContainerInstance(r.Pos(), typ, typeArgs)
+	c.rejectStreamTypeArg(r.Pos(), typeArgs)
 	c.validateCloneInstance(r.Pos(), typ, typeArgs)
 	inst := types.NewInstance(typ, typeArgs)
 	c.recordInstance(inst)

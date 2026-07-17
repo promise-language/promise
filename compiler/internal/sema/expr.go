@@ -467,6 +467,15 @@ func (c *Checker) checkTupleLit(e *ast.TupleLit) types.Type {
 		if elems[i] == nil {
 			return nil
 		}
+		// T1315: a generator Stream (`stream[T]`) element value is non-storable —
+		// `(gen(3), 1)` builds a droppable tuple aggregate holding a raw
+		// {handle, slot} pair, which segfaults on structural-drop. A tuple literal
+		// is a value-flow site (NewTuple, no resolveInstance), so check each
+		// element here, mirroring checkArrayLit/checkMapLit.
+		if s := firstStream(elems[i]); s != nil {
+			c.errorf(el.Pos(), "a generator value cannot be stored: %s used as a tuple element; consume it directly with a for-in loop or delegate with `yield *`", s)
+			return nil
+		}
 	}
 	return types.NewTuple(elems)
 }
@@ -507,6 +516,15 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 	// single-owner handle (e.g. [[go f()]] → Vector[Vector[Task]]) forces the
 	// outer container to duplicate the handle on push/clone/realloc — unsound.
 	c.reportContainerSingleOwnerNesting(e.Pos(), elemType)
+
+	// T1315: a generator Stream (`stream[T]`) element value is non-storable —
+	// `[gen(3)]` would place a raw {handle, slot} pair into a droppable vector
+	// and segfault on structural-drop. checkArrayLit builds the Vector via
+	// NewVector directly, bypassing resolveInstance, so check the element here.
+	if s := firstStream(elemType); s != nil {
+		c.errorf(e.Pos(), "a generator value cannot be stored: %s used as a vector/array element; consume it directly with a for-in loop or delegate with `yield *`", s)
+		return nil
+	}
 
 	// If hint is a fixed-size array type, produce Array instead of Vector
 	if arr, ok := hint.(*types.Array); ok {
@@ -554,6 +572,17 @@ func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
 	// handle inside another container (e.g. Map[int, Vector[Task]]).
 	c.reportContainerSingleOwnerNesting(e.Pos(), keyType)
 	c.reportContainerSingleOwnerNesting(e.Pos(), valType)
+
+	// T1315: a generator Stream (`stream[T]`) key/value value is non-storable —
+	// NewMap bypasses resolveInstance, so check the element types here.
+	if s := firstStream(keyType); s != nil {
+		c.errorf(e.Pos(), "a generator value cannot be stored: %s used as a map key; consume it directly with a for-in loop or delegate with `yield *`", s)
+		return nil
+	}
+	if s := firstStream(valType); s != nil {
+		c.errorf(e.Pos(), "a generator value cannot be stored: %s used as a map value; consume it directly with a for-in loop or delegate with `yield *`", s)
+		return nil
+	}
 
 	inst := types.NewMap(keyType, valType)
 	c.recordInstance(inst)
@@ -2328,6 +2357,7 @@ func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tpar
 	c.validateConstraints(e.Pos(), origin, typeArgs)
 	c.validateSendableInstance(e.Pos(), origin, typeArgs)
 	c.validateSingleOwnerContainerInstance(e.Pos(), origin, typeArgs)
+	c.rejectStreamTypeArg(e.Pos(), typeArgs)
 	inst := types.NewInstance(origin, typeArgs)
 	c.recordInstance(inst)
 	return inst

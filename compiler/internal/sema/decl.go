@@ -610,6 +610,15 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 		c.errorf(fd.Pos(), "reference type %s cannot be used as a field type — stored references are not supported; use Ref[T] for shared ownership", typ)
 		return
 	}
+	// T1315: a generator Stream (`stream[T]`) is non-storable — its raw
+	// {handle, slot} value has no vtable and would segfault on structural-drop.
+	// Catches a bare `stream[int] s` field or an Optional/Tuple/Array of stream;
+	// container-of-stream field types are already rejected at resolveInstance.
+	if s := firstStream(typ); s != nil {
+		c.errorf(fd.Pos(), "a generator value cannot be stored: %s used as a field type; consume it directly with a for-in loop or delegate with `yield *`", s)
+		c.recordBrokenField(named, fd.Name)
+		return
+	}
 	placement := c.resolvePlacement(fd.Annotations)
 	isRaw := c.hasAnnotation(fd.Annotations, "raw")
 	hasDef := fd.Default != nil
@@ -923,6 +932,12 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 			// B0034: reject reference-typed variant fields
 			if containsRef(ft) {
 				c.errorf(f.Pos(), "reference type %s cannot be used as a field type — stored references are not supported; use Ref[T] for shared ownership", ft)
+			}
+			// T1315: a generator Stream (`stream[T]`) is non-storable; reject it
+			// as an enum variant field type (container-of-stream is caught at
+			// resolveInstance).
+			if s := firstStream(ft); s != nil {
+				c.errorf(f.Pos(), "a generator value cannot be stored: %s used as a field type; consume it directly with a for-in loop or delegate with `yield *`", s)
 			}
 			fields[i] = types.NewVarField(f.Name, ft)
 		}

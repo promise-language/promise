@@ -4629,6 +4629,15 @@ func (c *Compiler) clearDropFlag(name string) {
 	}
 }
 
+// hasDropFlag reports whether `name` has an active drop flag — i.e. it is an owned
+// droppable binding (owned var / move-param), not a borrow (borrow params have no
+// drop flag). Used by T1282 to decide whether a string→structural box at a move
+// position takes ownership of the source pointer (owned) or clones it (borrowed).
+func (c *Compiler) hasDropFlag(name string) bool {
+	_, ok := c.dropFlags[name]
+	return ok
+}
+
 // markBorrowOptionalLocal records `name` as a borrow-holding optional local when
 // `t` is an Optional type (T1085). Called at the var-decl borrow-clear sites
 // (RTTI downcast / `T&`/`T~` RHS) so a later non-diverging heap-user-type handler
@@ -10510,6 +10519,32 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 	}
 
+	// T1282: Decide whether a string→structural box at this return move-site should
+	// take ownership of the source pointer (owned source) or clone it (borrowed). This
+	// MUST be computed before the flag-clear (below) and claimStringTemp (further down),
+	// which both mutate the state we read. Owned sources — an owned var / move-param
+	// (has a drop flag) or an owned frame temp (in stmtTempMap) — take the pointer, since
+	// the move-site releases the source. Borrowed sources (literal, borrow param, field
+	// borrow) match neither and stay on the clone path.
+	retBoxSrcOwned := false
+	if s.Value != nil {
+		// Peel Optional so `Showable?` returns take the same owned/borrowed decision
+		// as a plain `Showable` return — the actual box is built inside
+		// coerceReturnToOptionalElem (T1298), which also reads c.boxSrcOwned.
+		structTarget := retType
+		if opt, isOpt := retType.(*types.Optional); isOpt {
+			structTarget = opt.Elem()
+		}
+		if named := extractNamed(structTarget); named != nil && named.IsStructural() {
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				// Only owned if the move-site actually clears the flag (!needsDup).
+				retBoxSrcOwned = !needsDup && c.hasDropFlag(ident.Name)
+			} else if _, tracked := c.stmtTempMap[val]; tracked {
+				retBoxSrcOwned = true
+			}
+		}
+	}
+
 	// Clear drop flag for returned variable (it's being moved out, not dropped).
 	// B0205: When the return value was dup'd (B0189), the original variable must
 	// still be dropped at scope exit — the caller receives the dup, not the original.
@@ -10581,7 +10616,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 				// BEFORE the optional wrap, so `return Counter(...)` from a `Sink?`-
 				// returning function boxes to the structural view first (the trailing
 				// coerceToView runs against the Optional target and is a no-op).
+				// T1282: an owned move source boxed into an Optional structural element
+				// is built here, so the clone-vs-move decision must apply at this call.
+				c.boxSrcOwned = retBoxSrcOwned
 				val = c.coerceReturnToOptionalElem(val, s.Value, retType)
+				c.boxSrcOwned = false
 				// Wrap value in Optional if return type is Optional but expr is not
 				val = c.wrapReturnOptional(val, s.Value, retType)
 				// Coerce value struct vtable when returning through a parent type
@@ -10593,7 +10632,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 					if c.selfSubst != nil {
 						exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
 					}
+					c.boxSrcOwned = retBoxSrcOwned // T1282
 					val = c.coerceToView(val, exprType, retType)
+					c.boxSrcOwned = false
 				}
 				c.block.NewRet(c.wrapOk(val, resultType))
 			}
@@ -10605,7 +10646,10 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	} else {
 		// T1298: box/view-coerce into the Optional return type's element BEFORE the
 		// optional wrap (see the failable branch above).
+		// T1282: apply the owned/borrowed box decision here too (see failable branch).
+		c.boxSrcOwned = retBoxSrcOwned
 		val = c.coerceReturnToOptionalElem(val, s.Value, retType)
+		c.boxSrcOwned = false
 		// Wrap value in Optional if return type is Optional but expr is not
 		val = c.wrapReturnOptional(val, s.Value, retType)
 		// Coerce value struct vtable when returning through a parent type
@@ -10617,7 +10661,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			if c.selfSubst != nil {
 				exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
 			}
+			c.boxSrcOwned = retBoxSrcOwned // T1282
 			val = c.coerceToView(val, exprType, retType)
+			c.boxSrcOwned = false
 		}
 		c.block.NewRet(val)
 	}

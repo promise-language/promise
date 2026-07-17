@@ -107,6 +107,173 @@ test_string_box_in_enum_field() `test {
   }
 }
 
+// T1282: A string boxed to a structural interface at a MOVE position (return of an
+// owned move-param / owned var, an owned frame temp, or a `move`-param call arg) must
+// take ownership of the source pointer instead of cloning it. At a move site the
+// ownership pass clears the source's drop flag; cloning would orphan the original heap
+// string (leak 1 allocation). Borrowed sources (literal, borrow param) keep cloning.
+
+// return of a `string move` param boxed to a structural interface (the item repro).
+show_owned(string move s) Showable {
+  return s;
+}
+test_owned_moveparam_box() `test {
+  string a = "foo";
+  string b = "bar";
+  Showable s = show_owned(a + b); // a+b (heap) moved into s, then boxed + returned
+  assert(s.to_string() == "foobar", "owned moved string box");
+}
+
+// return of an owned string local boxed to a structural interface.
+show_owned_local() Showable {
+  string x = "hello";
+  string y = "world";
+  string joined = x + y;
+  return joined; // owned local, moved out via return
+}
+test_owned_local_box() `test {
+  Showable s = show_owned_local();
+  assert(s.to_string() == "helloworld", "owned local string box");
+}
+
+// return of an owned temp (concatenation escaping directly via return).
+show_owned_temp(string a, string b) Showable {
+  return a + b; // owned frame temp, moved out via return
+}
+test_owned_temp_box() `test {
+  Showable s = show_owned_temp("ab", "cd");
+  assert(s.to_string() == "abcd", "owned temp string box");
+}
+
+// move-param call arg: box a string into a `Showable move` param.
+take_owned(Showable move s) string {
+  return s.to_string();
+}
+test_moveparam_callarg_box() `test {
+  // owned temp as the boxed source
+  assert(take_owned("xy" + "zw") == "xyzw", "owned temp boxed to move param");
+  // owned named binding moved explicitly into the move param
+  string c = "pq" + "rs";
+  assert(take_owned(move c) == "pqrs", "owned var moved + boxed to move param");
+}
+
+// Regression guard: borrow-param return must STAY on the clone path (caller owns the
+// borrowed source; the box owns an independent clone) — leak-free.
+show_borrow(string s) Showable {
+  return s;
+}
+test_borrowparam_box_still_clones() `test {
+  string a = "bo" + "rr"; // owned in the caller
+  Showable s = show_borrow(a);
+  assert(s.to_string() == "borr", "borrow param stays clone-based");
+  assert(a == "borr", "borrowed source still owned by caller after box");
+}
+
+// Regression guard: literal return stays clone-based, leak-free.
+test_literal_return_box_still_clones() `test {
+  Showable s = show_borrow("lit");
+  assert(s.to_string() == "lit", "literal box stays clone-based");
+}
+
+// T1282 (optional-return sub-case): boxing into an OPTIONAL structural return
+// (`Showable?`) routes through coerceReturnToOptionalElem, not the trailing
+// coerceToView, so the owned/borrowed box decision must apply there too.
+
+// owned `string move` param boxed into an optional structural return.
+show_opt_owned(string move s) Showable? {
+  return s;
+}
+test_opt_owned_moveparam_box() `test {
+  string a = "foo";
+  string b = "bar";
+  Showable? s = show_opt_owned(a + b); // owned temp moved in, boxed into Optional
+  assert(s!.to_string() == "foobar", "owned moved string box into optional");
+}
+
+// owned local boxed into an optional structural return.
+show_opt_local() Showable? {
+  string x = "aa";
+  string y = "bb";
+  return x + y;
+}
+test_opt_owned_local_box() `test {
+  Showable? s = show_opt_local();
+  assert(s!.to_string() == "aabb", "owned local string box into optional");
+}
+
+// Regression guard: borrow param boxed into an optional return STAYS clone-based.
+show_opt_borrow(string s) Showable? {
+  return s;
+}
+test_opt_borrowparam_box_still_clones() `test {
+  string a = "bo" + "rr"; // owned in the caller
+  Showable? s = show_opt_borrow(a);
+  assert(s!.to_string() == "borr", "opt borrow param stays clone-based");
+  assert(a == "borr", "borrowed source still owned by caller after opt box");
+}
+
+// T1282 (optional-param call-arg sub-case): boxing a string into an OPTIONAL
+// structural `move` PARAM (`Showable? move`) routes through coerceToOptionalElem in
+// coerceCallArgs, not the trailing coerceToView, so the owned/borrowed box decision
+// must apply there too. Without it the owned source leaks (box clones + orphaned original).
+take_opt_owned(Showable? move s) string {
+  return s!.to_string();
+}
+test_opt_moveparam_callarg_box() `test {
+  // owned temp as the boxed source
+  assert(take_opt_owned("mn" + "op") == "mnop", "owned temp boxed to optional move param");
+  // owned named binding moved explicitly into the optional move param
+  string c = "qr" + "st";
+  assert(take_opt_owned(move c) == "qrst", "owned var moved + boxed to optional move param");
+}
+
+// Regression guard: a borrow-param optional (`Showable?`) box STAYS clone-based — the
+// caller keeps ownership of the source, the box owns an independent clone. Leak-free.
+take_opt_borrow(Showable? s) string {
+  return s!.to_string();
+}
+test_opt_borrowparam_callarg_box() `test {
+  string a = "uv" + "wx"; // owned in the caller
+  assert(take_opt_borrow(a) == "uvwx", "owned var boxed to optional borrow param");
+  assert(a == "uvwx", "borrowed source still owned by caller after opt-param box");
+}
+
+// T1282 (failable-return sub-case): the box clone-vs-move decision is computed once
+// (retBoxSrcOwned) and applied in BOTH the failable and non-failable return branches of
+// genReturnStmt. A failable function returning a boxed owned string exercises the
+// failable branch (wrapOk-wrapped result) — owned sources must still move, not clone.
+show_fail!(string move s) Showable {
+  return s;
+}
+test_owned_moveparam_box_failable() `test {
+  string a = "foo";
+  string b = "bar";
+  Showable s = show_fail(a + b)?!; // owned temp moved in, boxed + returned through failable
+  assert(s.to_string() == "foobar", "owned moved string box, failable return");
+}
+
+// failable + optional structural return: owned source moved through coerceReturnToOptionalElem.
+show_fail_opt!(string move s) Showable? {
+  return s;
+}
+test_owned_moveparam_box_failable_opt() `test {
+  string a = "foo";
+  string b = "bar";
+  Showable? s = show_fail_opt(a + b)?!;
+  assert(s!.to_string() == "foobar", "owned moved string box, failable optional return");
+}
+
+// Regression guard: failable borrow-param return STAYS clone-based (caller keeps the source).
+show_fail_borrow!(string s) Showable {
+  return s;
+}
+test_borrowparam_box_failable_clones() `test {
+  string a = "bo" + "rr"; // owned in the caller
+  Showable s = show_fail_borrow(a)?!;
+  assert(s.to_string() == "borr", "borrow param failable stays clone-based");
+  assert(a == "borr", "borrowed source still owned by caller after failable box");
+}
+
 enum BoxCmd {
   First(int n),
   Second,

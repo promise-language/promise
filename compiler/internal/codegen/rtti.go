@@ -1240,7 +1240,19 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		// makes every RTTI drop site (local free, moved-param free, struct/enum-field
 		// drop) work uniformly through __promise_structural_drop. The malloc is tracked as
 		// an owned heap temp so exactly one owner frees it.
-		cloned := c.dupString(val)
+		//
+		// T1282: clone vs. move. For a *borrowed* source (literal, borrow param, field
+		// borrow) the caller still owns/drops the original, so the box must own an
+		// independent clone. For an *owned* source boxed at a move position (return of an
+		// owned var / move-param, or an owned frame temp), the move-site already cleared
+		// the source's drop flag — cloning would orphan the original heap string (leak).
+		// So the box takes the exact same pointer; the box's drop frees it once.
+		var stored value.Value
+		if c.boxSrcOwned {
+			stored = val // owned move: box takes the original pointer (no clone)
+		} else {
+			stored = c.dupString(val) // borrowed source: box owns an independent clone (T1280)
+		}
 		boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 		size := constant.NewInt(irtypes.I64, int64(c.typeSize(boxType)))
 		raw := c.block.NewCall(c.palAlloc, size)
@@ -1250,7 +1262,7 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		c.block.NewStore(constant.NewBitCast(c.getStringBoxTypeInfo(), irtypes.I8Ptr), tiField)
 		strField := c.block.NewGetElementPtr(boxType, typed,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		c.block.NewStore(cloned, strField)
+		c.block.NewStore(stored, strField)
 		c.trackHeapTemp(raw, c.getStringBoxDrop())
 		instancePtr = raw
 	} else {
@@ -1376,7 +1388,13 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 					// tracked box). extractNamed doesn't peel Optional, so the trailing
 					// coerceToView(v, argType, paramType) is a no-op for the Optional
 					// param. No-op when no boxing is needed.
+					// T1282: mirror the non-optional path — a `move` (RefMut) param owns its
+					// source (flag already cleared by genCallArgs, and claimed below for RefMut),
+					// so a string→structural box inside the optional element takes the pointer.
+					prevOwned := c.boxSrcOwned
+					c.boxSrcOwned = params[i].Ref() == types.RefMut
 					v = c.coerceToOptionalElem(v, argType, paramType)
+					c.boxSrcOwned = prevOwned
 					// B0358: The value is moving into the optional — transfer
 					// ownership so the caller doesn't double-drop at scope exit.
 					// T1188: Only transfer ownership for a `move` (RefMut) param.
@@ -1403,7 +1421,13 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 		}
 
 		// View coercion (structural interface vtable swap, or boxing for primitives/string)
+		// T1282: a `move` (RefMut) param receives an owned source — the move-site (genCallArgs)
+		// already cleared the source's drop flag — so a string→structural box must take the
+		// original pointer (no clone) to avoid orphaning it. Borrow params keep the clone.
+		prevOwned := c.boxSrcOwned
+		c.boxSrcOwned = params[i].Ref() == types.RefMut
 		v = c.coerceToView(v, argTypes[i], params[i].Type())
+		c.boxSrcOwned = prevOwned
 
 		// T1276: A value/primitive coerced into a fresh structural-interface box for a
 		// `move` (RefMut, plain type) param transfers ownership to the callee, which

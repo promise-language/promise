@@ -3369,12 +3369,46 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if c.typeSubst != nil {
 				ctorFieldType = types.Substitute(ctorFieldType, c.typeSubst)
 			}
+			// T1316: clone-vs-move for a string→structural-interface field box (sibling
+			// of T1282 at the return / move-param sites). When the field is a structural
+			// interface (bare or Optional) and the source is an owned string — a `move`d
+			// named var whose drop flag is cleared at the owning-slot store below, or an
+			// owned frame temp — the box must TAKE the source pointer (no dupString clone),
+			// else the released original heap string is orphaned (leak). Borrowed sources
+			// (borrow param, literal) match neither and stay on the clone path. MUST be
+			// computed before the coerce calls (which reassign val) and the store-branch
+			// flag clear (both mutate the state read here).
+			ctorBoxSrcOwned := false
+			if extractNamed(ctorArgType) == types.TypString {
+				structTarget := ctorFieldType
+				if opt, isOpt := ctorFieldType.(*types.Optional); isOpt {
+					structTarget = opt.Elem() // peel so `Showable?` decides like `Showable`
+				}
+				if sn := extractNamed(structTarget); sn != nil && sn.IsStructural() {
+					if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+						ctorBoxSrcOwned = c.hasDropFlag(ident.Name) // owned var / move-param
+					} else if _, tracked := c.stmtTempMap[val]; tracked {
+						ctorBoxSrcOwned = true // owned frame temp — claimed below
+					}
+				}
+			}
+			srcStr := val // pre-box string pointer, for the owned-temp claim below
 			// Bare structural-interface field: box directly (no-op for an Optional
 			// field, since extractNamed doesn't peel Optional).
+			c.boxSrcOwned = ctorBoxSrcOwned
 			val = c.coerceToView(val, ctorArgType, ctorFieldType)
 			// T1298: Optional structural-interface field (`Sink? s`): box into the
 			// element view before maybeWrapOptional wraps it (no-op otherwise).
 			val = c.coerceToOptionalElem(val, ctorArgType, ctorFieldType)
+			c.boxSrcOwned = false
+			// T1316: an owned frame temp handed to the box must be claimed so
+			// statement-end cleanup doesn't double-free the pointer the box (→ the
+			// instance's synth drop) now owns. Named idents instead have their drop
+			// flag cleared at the owning-slot store below, so this is a no-op for them
+			// (srcStr isn't in stmtTempMap).
+			if ctorBoxSrcOwned {
+				c.claimStringTemp(srcStr)
+			}
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)

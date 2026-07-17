@@ -274,6 +274,103 @@ test_borrowparam_box_failable_clones() `test {
   assert(a == "borr", "borrowed source still owned by caller after failable box");
 }
 
+// T1316: An owned named string moved into a structural-interface STRUCT FIELD
+// (`Type(field: move s)`) must take ownership of the source pointer rather than
+// clone it. The constructor field-init path boxes the string via a SEPARATE
+// coerceToView / coerceToOptionalElem call (genConstructorCallMono) that never set
+// c.boxSrcOwned, so the box cloned while the owning-slot store cleared the source's
+// drop flag → the original heap string was orphaned (leak 1 allocation). Sibling of
+// T1282 at the constructor field-init coercion site.
+
+type Holder {
+  Showable item;
+}
+type OptHolder {
+  Showable? item;
+}
+
+// The item repro: owned var moved into a bare structural field. Was LEAK.
+test_field_move_var() `test {
+  string a = "he" + "llo"; // owned heap string in the caller
+  Holder h = Holder(item: move a); // moved into the structural field
+  assert(h.item.to_string() == "hello", "owned var moved into structural field");
+}
+
+// Owned var moved into an OPTIONAL structural field (coerceToOptionalElem path). Was LEAK.
+test_field_move_var_optional() `test {
+  string a = "wor" + "ld";
+  OptHolder h = OptHolder(item: move a);
+  assert(h.item!.to_string() == "world", "owned var moved into optional structural field");
+}
+
+// Owned frame temp into a structural field: now takes the pointer (no redundant clone),
+// leak-free (previously a wasteful clone, freed at statement end).
+test_field_owned_temp() `test {
+  Holder h = Holder(item: "a" + "b");
+  assert(h.item.to_string() == "ab", "owned temp into structural field");
+}
+
+// Owned var moved into a structural field alongside a plain field, surviving an
+// intervening allocation before the read — exercises the box + struct drop together.
+type LabeledHolder {
+  string label;
+  Showable item;
+}
+test_field_move_var_mixed() `test {
+  string a = "gr" + "eeting";
+  LabeledHolder h = LabeledHolder(label: "tag", item: move a);
+  int[] junk = [3, 2, 1];
+  assert(h.item.to_string() == "greeting", "moved var in a structural field survives frame");
+  assert(h.label == "tag", "plain string field intact");
+  assert(junk.len == 3, "intervening allocation intact");
+}
+
+// Pure rodata literal into a structural field: a borrowed source — NOT a drop-flag
+// ident and NOT a tracked frame temp — so ctorBoxSrcOwned stays false, the box clones,
+// and nothing is claimed. Guards against the fix over-claiming a non-owned source.
+test_field_literal() `test {
+  Holder h = Holder(item: "lit");
+  assert(h.item.to_string() == "lit", "literal into structural field clones, no claim");
+}
+
+// Literal into an OPTIONAL structural field: same borrowed-clone path through
+// coerceToOptionalElem (ctorBoxSrcOwned false).
+test_field_literal_optional() `test {
+  OptHolder h = OptHolder(item: "lit2");
+  assert(h.item!.to_string() == "lit2", "literal into optional structural field");
+}
+
+// Owned frame temp into an OPTIONAL structural field: exercises the claim path
+// (claimStringTemp) combined with coerceToOptionalElem — the temp is taken (no clone),
+// and claimed so statement-end cleanup doesn't double-free the boxed pointer.
+test_field_owned_temp_optional() `test {
+  OptHolder h = OptHolder(item: "x" + "y");
+  assert(h.item!.to_string() == "xy", "owned temp into optional structural field");
+}
+
+// Rebind the moved var's name afterward: the move cleared a's drop flag, so the new
+// binding to the same name must not resurrect a stale flag → no double-free at scope exit.
+test_field_move_var_rebind() `test {
+  string a = "fo" + "o";
+  Holder h = Holder(item: move a);
+  string a2 = "ba" + "r";
+  assert(h.item.to_string() == "foo", "moved box reads right after rebinding the name");
+  assert(a2 == "bar", "rebound name intact");
+}
+
+// Generic owner whose concrete field type resolves to a structural interface: the box
+// runs inside genConstructorCallMono with c.typeSubst active (ctorFieldType is the
+// substituted `Showable`). Confirms the move-vs-clone decision reads the substituted
+// field type correctly.
+type GenBox[T] {
+  T item;
+}
+test_field_move_var_generic_owner() `test {
+  string a = "ge" + "neric";
+  GenBox[Showable] b = GenBox[Showable](item: move a);
+  assert(b.item.to_string() == "generic", "moved string into a generic structural field");
+}
+
 enum BoxCmd {
   First(int n),
   Second,

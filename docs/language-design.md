@@ -2377,9 +2377,14 @@ The following abbreviations are **universally preferred exceptions** to the full
 | `pos` | `position` |
 | `prev` | `previous` |
 | `src` | `source` |
+| `stderr` | `standard error` |
+| `stdin` | `standard input` |
+| `stdout` | `standard output` |
 | `var` | `variable` |
 
 These abbreviations are so universally recognized that the abbreviated form is more readable than the full word. When a mapping is defined here, the abbreviation is the canonical form — code review should flag uses of the full word.
+
+`stdin`/`stdout`/`stderr` are the standard-stream names; they abbreviate two-word forms and are the canonical identifiers wherever a standard stream (the process's own, or a subprocess's) is referenced — e.g. `os.ProcessResult.stdout`/`.stderr`, `os.Process.take_stdin()`/`take_stdout()`/`take_stderr()`, and the `std` `stdin`/`stdout`/`stderr` getters.
 
 Human-readable prose (doc strings, error messages, comments) is not subject to this rule — only identifiers (type names, field names, function/method names, parameter names, getter/setter names).
 

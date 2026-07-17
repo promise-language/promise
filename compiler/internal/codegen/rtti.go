@@ -1338,6 +1338,65 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 	return c.block.NewInsertValue(tmp, raw, 1)
 }
 
+// boxValueTypeForStructuralViewHeap boxes a pure value type into a structural
+// interface view ({i8*, i8*}) using a HEAP allocation instead of a stack alloca.
+// Required when the resulting interface value escapes the current frame (T1320):
+// the stack-alloca form (boxValueTypeForStructuralView) dangles once the callee
+// returns, corrupting field reads and later triggering `fatal: invalid free`.
+//
+// The heap box reuses the value struct's layout {slot0, fields...} but overwrites
+// slot 0 (the value struct's vestigial embedded vtable, never dereferenced by a
+// value type's own methods since value types cannot be subclassed) with the
+// concrete type's typeinfo pointer. That makes the box drop-compatible with
+// __promise_structural_drop, which reads slot 0 as a typeinfo pointer and, seeing
+// a null drop_fn_ptr (pure value types have no drop), frees the box via pal_free.
+// Method dispatch is unaffected: value-type methods read their fields at index 1+.
+func (c *Compiler) boxValueTypeForStructuralViewHeap(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
+
+	// Heap-allocate a box the size of the value struct.
+	valType := val.Type()
+	boxPtrType := irtypes.NewPointer(valType)
+	sizePtr := c.block.NewGetElementPtr(valType, constant.NewNull(boxPtrType),
+		constant.NewInt(irtypes.I32, 1))
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
+	rawPtr := c.block.NewCall(c.palAlloc, size)
+	boxPtr := c.block.NewBitCast(rawPtr, boxPtrType)
+	c.block.NewStore(val, boxPtr)
+
+	// Overwrite slot 0 with the typeinfo pointer so structural drop frees the box.
+	slot0 := c.block.NewGetElementPtr(valType, boxPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	if tiGlobal := c.lookupTypeInfoGlobal(fromType); tiGlobal != nil {
+		c.block.NewStore(constant.NewBitCast(tiGlobal, irtypes.I8Ptr), slot0)
+	}
+
+	// Construct the view struct: { vtable_ptr, box_ptr }.
+	viewType := userValueType()
+	result := constant.NewZeroInitializer(viewType)
+	tmp := c.block.NewInsertValue(result, vtablePtr, 0)
+	return c.block.NewInsertValue(tmp, rawPtr, 1)
+}
+
+// coerceReturnToView is coerceToView for the return path. It differs only for the
+// pure value type → structural interface case, where the boxed value escapes to
+// the caller and so must be heap-allocated (T1320) rather than stack-allocated.
+func (c *Compiler) coerceReturnToView(val value.Value, fromType, toType types.Type) value.Value {
+	fromNamed := extractNamed(fromType)
+	toNamed := extractNamed(toType)
+	if fromNamed != nil && toNamed != nil && fromNamed != toNamed &&
+		c.isUserValueType(fromType) && c.isUserValueType(toType) &&
+		fromNamed.IsValueType() && toNamed.IsStructural() {
+		return c.boxValueTypeForStructuralViewHeap(val, fromNamed, toNamed, fromType)
+	}
+	return c.coerceToView(val, fromType, toType)
+}
+
 // coerceCallArgs applies optional wrapping (T→T?) and view coercion to each
 // argument whose type differs from the parameter type.
 // args is the AST argument list (may be nil); used to clear drop flags when

@@ -47,6 +47,16 @@ func (c *Compiler) definePALBodies() {
 		c.definePrintStringBody(fn)
 	}
 
+	// Standard-stream byte I/O — declared by extern from std/io.pr (T1273).
+	// These back the stdin/stdout/stderr getters over the fd-parameterized PAL
+	// primitives; the `if ok` guard means they cost nothing when std isn't present.
+	if fn, ok := irFuncByName["promise_write_bytes"]; ok {
+		c.defineWriteBytesBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_read_bytes"]; ok {
+		c.defineReadBytesBody(fn)
+	}
+
 	// Panic functions
 	if fn, ok := irFuncByName["promise_panic"]; ok {
 		c.definePanicBody(fn)
@@ -154,6 +164,44 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
 
 	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
+	entry.NewRet(nil)
+}
+
+// defineWriteBytesBody adds a body to promise_write_bytes(int fd, u8[] ~buf) int.
+// ABI: void @promise_write_bytes(i8* sret, i8* fd, i8* buf). Writes buf.len bytes
+// from the vector to the given fd via pal_write and returns the byte count
+// (negative = -errno). Backs the stdout/stderr getters (T1273).
+func (c *Compiler) defineWriteBytesBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[1]), irtypes.I32)
+	dataPtr, dataLen := extractVectorDataLen(entry, fn.Params[2])
+
+	c.emitEnterSyscall(entry)
+	n := entry.NewCall(c.palWrite, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	c.storeIntResult(entry, sret, n)
+	entry.NewRet(nil)
+}
+
+// defineReadBytesBody adds a body to promise_read_bytes(int fd, u8[] ~buf) int.
+// ABI: void @promise_read_bytes(i8* sret, i8* fd, i8* buf). Reads up to buf.len
+// bytes from the given fd into the vector via pal_file_read and returns the byte
+// count (0 = EOF, negative = -errno). Backs the stdin getter (T1273).
+func (c *Compiler) defineReadBytesBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[1]), irtypes.I32)
+	dataPtr, dataLen := extractVectorDataLen(entry, fn.Params[2])
+
+	c.emitEnterSyscall(entry)
+	n := entry.NewCall(c.palFileRead, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	c.storeIntResult(entry, sret, n)
 	entry.NewRet(nil)
 }
 

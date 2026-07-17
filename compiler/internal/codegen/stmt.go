@@ -3853,9 +3853,19 @@ func (c *Compiler) isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
 		}
 		break
 	}
-	switch innerRHS.(type) {
+	switch e := innerRHS.(type) {
 	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
 		return true
+	case *ast.IdentExpr:
+		// T1273: a bare-identifier module getter (e.g. `stdout`) returns a fresh
+		// owned value, just like a call — free its box at scope exit. A plain local
+		// identifier is a borrow of an existing structural variable and must NOT be
+		// freed here.
+		if _, isLocal := c.locals[e.Name]; isLocal {
+			return false
+		}
+		obj := c.lookupFunc(e.Name)
+		return obj != nil && obj.IsGetter()
 	case *ast.IndexExpr:
 		// T1289: a user-defined non-native `[]` returns a fresh owned value; a
 		// borrow-returning operator (`T&`) aliases container storage — skip it.
@@ -3863,6 +3873,8 @@ func (c *Compiler) isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
 	case *ast.MemberExpr:
 		// T1289: a getter *call* is fresh-owned (free it); a field *borrow* is not
 		// (freeing double-frees). A borrow-returning getter (`T&`) is also an alias.
+		// This also covers module-level getters (`mod.getter`), which construct a
+		// fresh value (T1273).
 		return c.isGetterCallExpr(innerRHS) && !c.isBorrowedExpr(innerRHS)
 	default:
 		return false
@@ -10632,8 +10644,12 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 					if c.selfSubst != nil {
 						exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
 					}
-					c.boxSrcOwned = retBoxSrcOwned // T1282
-					val = c.coerceToView(val, exprType, retType)
+					// T1282: apply the owned/borrowed box decision; T1320:
+					// coerceReturnToView heap-allocates a value-type box that
+					// escapes to the caller, then delegates to coerceToView (which
+					// reads boxSrcOwned).
+					c.boxSrcOwned = retBoxSrcOwned
+					val = c.coerceReturnToView(val, exprType, retType)
 					c.boxSrcOwned = false
 				}
 				c.block.NewRet(c.wrapOk(val, resultType))
@@ -10661,8 +10677,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			if c.selfSubst != nil {
 				exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
 			}
-			c.boxSrcOwned = retBoxSrcOwned // T1282
-			val = c.coerceToView(val, exprType, retType)
+			// T1282: apply the owned/borrowed box decision; T1320:
+			// coerceReturnToView heap-allocates a value-type box that escapes to the
+			// caller, then delegates to coerceToView (which reads boxSrcOwned).
+			c.boxSrcOwned = retBoxSrcOwned
+			val = c.coerceReturnToView(val, exprType, retType)
 			c.boxSrcOwned = false
 		}
 		c.block.NewRet(val)

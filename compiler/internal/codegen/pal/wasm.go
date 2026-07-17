@@ -72,6 +72,66 @@ func (p *WasmPAL) EmitWrite(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitFileRead declares WASI fd_read and defines @pal_file_read.
+// Mirrors EmitWrite: builds an iovec {i8*, i32} on the stack and calls fd_read
+// with a single iovec. WASI fd_read returns an errno (0 = success) and writes the
+// number of bytes read into *nread. Signature: @pal_file_read(i32 %fd, i8* %buf,
+// i64 %len) → i64. Returns the byte count (0 = EOF) on success, or -errno on error
+// — matching the POSIX pal_file_read contract that backs the stdin getter (T1273).
+// Real files still cannot be opened on WASM (fd_open is stubbed), but the
+// preopened stdin descriptor (fd 0) reads correctly under wasmtime.
+func (p *WasmPAL) EmitFileRead(module *ir.Module) *ir.Func {
+	// iovec struct type: {i8*, i32} (buffer pointer + buffer capacity)
+	iovecType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
+
+	// declare i32 @fd_read(i32, {i8*, i32}*, i32, i32*)
+	fdRead := getOrDeclareFunc(module, "fd_read", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("iovs", irtypes.NewPointer(iovecType)),
+		ir.NewParam("iovs_len", irtypes.I32),
+		ir.NewParam("nread", irtypes.NewPointer(irtypes.I32)))
+	fdRead.FuncAttrs = append(fdRead.FuncAttrs,
+		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
+		ir.AttrPair{Key: "wasm-import-name", Value: "fd_read"})
+
+	// define i64 @pal_file_read(i32 %fd, i8* %buf, i64 %len)
+	fn := module.NewFunc("pal_file_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Alloca iovec {i8*, i32} on the stack, fill in buffer pointer + capacity.
+	iov := entry.NewAlloca(iovecType)
+	bufPtr := entry.NewGetElementPtr(iovecType, iov,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(fn.Params[1], bufPtr)
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	lenPtr := entry.NewGetElementPtr(iovecType, iov,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(len32, lenPtr)
+
+	// Alloca i32 for nread, call fd_read(fd, &iov, 1, &nread).
+	nreadPtr := entry.NewAlloca(irtypes.I32)
+	errno := entry.NewCall(fdRead, fn.Params[0], iov,
+		constant.NewInt(irtypes.I32, 1), nreadPtr)
+
+	// On errno != 0, return -errno; otherwise return nread (0 = EOF).
+	isErr := entry.NewICmp(enum.IPredNE, errno, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	errno64 := errBlk.NewZExt(errno, irtypes.I64)
+	errBlk.NewRet(errBlk.NewSub(constant.NewInt(irtypes.I64, 0), errno64))
+
+	nread := okBlk.NewLoad(irtypes.I32, nreadPtr)
+	okBlk.NewRet(okBlk.NewZExt(nread, irtypes.I64))
+
+	return fn
+}
+
 // EmitExit declares WASI proc_exit and defines @pal_exit as a noreturn wrapper.
 // Signature: @pal_exit(i32 %code) → void [noreturn]
 func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
@@ -646,7 +706,6 @@ func emitWasmReallocDebug(module *ir.Module, memoryLimitAccounting bool, webTarg
 
 // WASM file I/O stubs — no file system access (Phase D).
 func (p *WasmPAL) EmitFileOpen(module *ir.Module) *ir.Func     { return emitStubFileOpen(module) }
-func (p *WasmPAL) EmitFileRead(module *ir.Module) *ir.Func     { return emitStubFileRead(module) }
 func (p *WasmPAL) EmitFileWrite(module *ir.Module) *ir.Func    { return emitStubFileWrite(module) }
 func (p *WasmPAL) EmitFileClose(module *ir.Module) *ir.Func    { return emitStubFileClose(module) }
 func (p *WasmPAL) EmitPipeRead(module *ir.Module) *ir.Func     { return emitStubPipeRead(module) }

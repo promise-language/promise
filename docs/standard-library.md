@@ -30,7 +30,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_string()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice/`filled`/`clone`/`format`/`to_string`), `Map[K,V]` / `map[K,V]` (open-addressing, rehash, `clone`/`format`/`to_string`), `Set[T]` (`clone`/`format`/`to_string`) |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Format` structural interface, `Builder` (string building, satisfies `Writer`), `Parse` structural interface, `Scanner` (string parsing, satisfies `Reader`), `scan[T]()` |
-| I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `print(Format)`, `print_line(Format)` |
+| I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `print(Format)`, `print_line(Format)`, `stdin` (Reader) / `stdout` / `stderr` (Writer) standard-stream getters |
 | I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()` |
 | Path (module) | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG (xoshiro256**) |
@@ -478,7 +478,7 @@ EmitKill(module *ir.Module) *ir.Func          // i32 pid, i32 signal → i32 (0 
 
 `execute()` in `modules/os/os.pr` reads stdout and stderr concurrently using `go _os_read_pipe(stderr_fd)` while the main goroutine reads stdout. This prevents deadlock when a child writes >64KB to stderr.
 
-`Process.spawn()` creates stdin+stdout+stderr pipes. Pipe handles are obtained via `take_standard_input()` (returns `ProcessInput`, satisfies `Writer`), `take_standard_output()`/`take_standard_error()` (returns `ProcessOutput`, satisfies `Reader`). The streaming pipe read/write/close bridges reuse existing `pal_file_read`/`pal_file_write`/`pal_file_close` PAL functions (pipes are just fds).
+`Process.spawn()` creates stdin+stdout+stderr pipes. Pipe handles are obtained via `take_stdin()` (returns `ProcessInput`, satisfies `Writer`), `take_stdout()`/`take_stderr()` (returns `ProcessOutput`, satisfies `Reader`). The streaming pipe read/write/close bridges reuse existing `pal_file_read`/`pal_file_write`/`pal_file_close` PAL functions (pipes are just fds).
 
 ### 3.5 Math (No PAL Needed)
 
@@ -885,8 +885,8 @@ type OsError is error `public { int code; }
 
 type ProcessResult `public {
     int exit_code;
-    string standard_output;
-    string standard_error;
+    string stdout;
+    string stderr;
 }
 
 // One-shot execution
@@ -904,9 +904,9 @@ type ProcessInput `public { ... }   // satisfies Writer: write, write_string, wr
 type ProcessOutput `public { ... }  // satisfies Reader: read, read_all, close, drop
 type Process `public {
     spawn!(string program, ...string arguments) Self `factory;
-    take_standard_input!(~this) ProcessInput ;
-    take_standard_output!(~this) ProcessOutput ;
-    take_standard_error!(~this) ProcessOutput ;
+    take_stdin!(~this) ProcessInput ;
+    take_stdout!(~this) ProcessOutput ;
+    take_stderr!(~this) ProcessOutput ;
     wait!(~this) int ; // closes stdin, returns exit code (cached)
     kill!(~this); // SIGKILL
     get id int;                    // pid

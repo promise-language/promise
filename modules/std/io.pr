@@ -35,8 +35,50 @@ type Closer `structural `public `doc("Structural interface for resources that ne
   close!(~this) `abstract `doc("Releases the underlying resource.");
 }
 
-// Low-level C binding (prefixed with _ by convention)
+// Low-level C bindings (prefixed with _ by convention)
 _print_string(string s) `extern("promise_print_string");
+_write_bytes(int fd, u8[] ~buf) int `extern("promise_write_bytes");
+_read_bytes(int fd, u8[] ~buf) int `extern("promise_read_bytes");
+
+// Private pure value types backing the standard-stream getters (T1273).
+// Value types are load-bearing here: no drop, no close, no allocation, copyable —
+// so each getter hands back a fresh handle and the process's fd 0/1/2 can never be
+// closed or double-closed by user code. Neither type satisfies Closer.
+type _InputStream `doc("A handle on a read-only file descriptor. Satisfies Reader.") {
+  int _fd `value;
+
+  read!(~this, u8[] ~buf) int `doc("Reads up to buf.len bytes from the descriptor into buf. Returns the number of bytes read (0 = EOF).") {
+    int n = _read_bytes(this._fd, buf);
+    if n < 0 {
+      raise error("read failed");
+    }
+    return n;
+  }
+}
+
+type _OutputStream `doc("A handle on a write-only file descriptor. Satisfies Writer.") {
+  int _fd `value;
+
+  write!(~this, u8[] ~buf) int `doc("Writes bytes from buf to the descriptor. Returns the number of bytes written.") {
+    int n = _write_bytes(this._fd, buf);
+    if n < 0 {
+      raise error("write failed");
+    }
+    return n;
+  }
+}
+
+get stdin Reader `public `doc("The process's standard input stream.") {
+  return _InputStream(_fd: 0);
+}
+
+get stdout Writer `public `doc("The process's standard output stream.") {
+  return _OutputStream(_fd: 1);
+}
+
+get stderr Writer `public `doc("The process's standard error stream. Diagnostics belong here, not on standard output.") {
+  return _OutputStream(_fd: 2);
+}
 
 // Public API
 print(Format f) `public `doc("Prints a formatted value to stdout without a trailing newline.") {

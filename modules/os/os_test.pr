@@ -190,7 +190,7 @@ test_executable_path_is_stable() `test(exclude: wasm) {
 test_execute_echo() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["hello"])?!;
   assert(result.exit_code == 0, "echo should exit with 0");
-  assert(result.standard_output.starts_with("hello"), "stdout should contain hello");
+  assert(result.stdout.starts_with("hello"), "stdout should contain hello");
 }
 
 test_execute_exit_code() `test(exclude: wasm) `target(!windows) {
@@ -203,7 +203,7 @@ test_execute_echo_windows() `test(exclude: wasm) `target(windows) {
   // and the emitArgvToCmdline over-quoting regression.
   ProcessResult result = execute("cmd", ["/c", "echo hello"])?!;
   assert(result.exit_code == 0, "cmd /c echo should exit 0");
-  assert(result.standard_output.starts_with("hello"), "stdout should contain hello");
+  assert(result.stdout.starts_with("hello"), "stdout should contain hello");
 }
 
 test_execute_exit_code_windows() `test(exclude: wasm) `target(windows) {
@@ -214,20 +214,20 @@ test_execute_exit_code_windows() `test(exclude: wasm) `target(windows) {
 test_execute_true() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("true", [])?!;
   assert(result.exit_code == 0, "true should exit with 0");
-  assert(result.standard_output.len == 0, "true should produce no stdout");
-  assert(result.standard_error.len == 0, "true should produce no stderr");
+  assert(result.stdout.len == 0, "true should produce no stdout");
+  assert(result.stderr.len == 0, "true should produce no stderr");
 }
 
 test_execute_captures_stdout() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("printf", ["one two three"])?!;
-  assert(result.standard_output == "one two three", "stdout should match printf output");
+  assert(result.stdout == "one two three", "stdout should match printf output");
 }
 
 test_execute_captures_stderr() `test(exclude: wasm) `target(!windows) {
   // sh -c 'echo err >&2' writes to stderr
   ProcessResult result = execute("sh", ["-c", "echo err >&2"])?!;
   assert(result.exit_code == 0, "sh should exit with 0");
-  assert(result.standard_error.starts_with("err"), "stderr should contain err");
+  assert(result.stderr.starts_with("err"), "stderr should contain err");
 }
 
 // exec_replace replaces the process image on success (never returns), so a batch
@@ -245,7 +245,7 @@ test_exec_replace_missing_raises() `test(exclude: wasm) {
 
 test_execute_multiple_args() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["a", "b", "c"])?!;
-  assert(result.standard_output.starts_with("a b c"), "echo should join arguments with spaces");
+  assert(result.stdout.starts_with("a b c"), "echo should join arguments with spaces");
 }
 
 test_execute_empty_args() `test(exclude: wasm) `target(!windows) {
@@ -257,8 +257,8 @@ test_execute_process_result_fields() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["test"])?!;
   // Verify all fields are accessible
   int code = result.exit_code;
-  string out = result.standard_output;
-  string err = result.standard_error;
+  string out = result.stdout;
+  string err = result.stderr;
   assert(code == 0, "exit code should be 0");
   assert(out.len > 0, "stdout should be non-empty");
 }
@@ -288,7 +288,7 @@ test_execute_args_with_spaces() `test(exclude: wasm) `target(!windows) {
   // Verify arguments containing spaces are passed through correctly
   ProcessResult result = execute("printf", ["%s|%s", "hello world", "foo bar"])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
-  assert(result.standard_output == "hello world|foo bar", "arguments with spaces should be preserved");
+  assert(result.stdout == "hello world|foo bar", "arguments with spaces should be preserved");
 }
 
 test_execute_specific_exit_code() `test(exclude: wasm) `target(!windows) {
@@ -300,14 +300,14 @@ test_execute_stdout_and_stderr_together() `test(exclude: wasm) `target(!windows)
   // Command that writes to both stdout and stderr
   ProcessResult result = execute("sh", ["-c", "echo out; echo err >&2"])?!;
   assert(result.exit_code == 0, "should exit with 0");
-  assert(result.standard_output.starts_with("out"), "stdout should contain out");
-  assert(result.standard_error.starts_with("err"), "stderr should contain err");
+  assert(result.stdout.starts_with("out"), "stdout should contain out");
+  assert(result.stderr.starts_with("err"), "stderr should contain err");
 }
 
 test_execute_multiline_stdout() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("printf", ["line1\nline2\nline3"])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
-  assert(result.standard_output == "line1\nline2\nline3", "multiline output should be preserved");
+  assert(result.stdout == "line1\nline2\nline3", "multiline output should be preserved");
 }
 
 test_execute_large_output() `test(exclude: wasm) `target(!windows) {
@@ -315,19 +315,19 @@ test_execute_large_output() `test(exclude: wasm) `target(!windows) {
   // seq 1 1000 produces ~3893 bytes; seq 1 2000 produces ~8893 bytes.
   ProcessResult result = execute("sh", ["-c", "seq 1 2000"])?!;
   assert(result.exit_code == 0, "seq should exit with 0");
-  assert(result.standard_output.len > 4096, "output should exceed initial 4096-byte buffer");
-  assert(result.standard_output.starts_with("1\n2\n3\n"), "output should start with first numbers");
-  assert(result.standard_output.ends_with("2000\n"), "output should end with last number");
+  assert(result.stdout.len > 4096, "output should exceed initial 4096-byte buffer");
+  assert(result.stdout.starts_with("1\n2\n3\n"), "output should start with first numbers");
+  assert(result.stdout.ends_with("2000\n"), "output should end with last number");
 }
 
 test_execute_large_stderr() `test(exclude: wasm) `target(!windows) {
   // Generate >4KB on stderr to exercise the goroutine read path.
   ProcessResult result = execute("sh", ["-c", "seq 1 2000 >&2"])?!;
   assert(result.exit_code == 0, "seq to stderr should exit with 0");
-  assert(result.standard_error.len > 4096, "stderr should exceed 4096 bytes");
-  assert(result.standard_error.starts_with("1\n2\n3\n"), "stderr should start with first numbers");
-  assert(result.standard_error.ends_with("2000\n"), "stderr should end with last number");
-  assert(result.standard_output.len == 0, "stdout should be empty");
+  assert(result.stderr.len > 4096, "stderr should exceed 4096 bytes");
+  assert(result.stderr.starts_with("1\n2\n3\n"), "stderr should start with first numbers");
+  assert(result.stderr.ends_with("2000\n"), "stderr should end with last number");
+  assert(result.stdout.len == 0, "stdout should be empty");
 }
 
 test_execute_large_stdout_and_stderr() `test(exclude: wasm) `target(!windows) {
@@ -337,75 +337,75 @@ test_execute_large_stdout_and_stderr() `test(exclude: wasm) `target(!windows) {
   // reader isn't draining it, the child stalls and the test hangs.
   ProcessResult result = execute("sh", ["-c", "seq 1 10000; seq 1 10000 >&2"])?!;
   assert(result.exit_code == 0, "should exit with 0");
-  assert(result.standard_output.len > 40000, "stdout should be large");
-  assert(result.standard_error.len > 40000, "stderr should be large");
-  assert(result.standard_output.starts_with("1\n"), "stdout should start correctly");
-  assert(result.standard_error.starts_with("1\n"), "stderr should start correctly");
-  assert(result.standard_output.ends_with("10000\n"), "stdout should end correctly");
-  assert(result.standard_error.ends_with("10000\n"), "stderr should end correctly");
+  assert(result.stdout.len > 40000, "stdout should be large");
+  assert(result.stderr.len > 40000, "stderr should be large");
+  assert(result.stdout.starts_with("1\n"), "stdout should start correctly");
+  assert(result.stderr.starts_with("1\n"), "stderr should start correctly");
+  assert(result.stdout.ends_with("10000\n"), "stdout should end correctly");
+  assert(result.stderr.ends_with("10000\n"), "stderr should end correctly");
 }
 
 test_execute_only_stderr() `test(exclude: wasm) `target(!windows) {
   // No stdout, only stderr — goroutine reads empty stdout while main thread gets content.
   ProcessResult result = execute("sh", ["-c", "echo error_only >&2"])?!;
   assert(result.exit_code == 0, "should exit with 0");
-  assert(result.standard_output.len == 0, "stdout should be empty");
-  assert(result.standard_error.starts_with("error_only"), "stderr should have content");
+  assert(result.stdout.len == 0, "stdout should be empty");
+  assert(result.stderr.starts_with("error_only"), "stderr should have content");
 }
 
 test_execute_empty_string_args() `test(exclude: wasm) `target(!windows) {
   // Empty strings should be passed as distinct argv entries
   ProcessResult result = execute("printf", ["%s|%s|%s", "", "mid", ""])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
-  assert(result.standard_output == "|mid|", "empty string args should produce empty segments");
+  assert(result.stdout == "|mid|", "empty string args should produce empty segments");
 }
 
 test_execute_special_characters() `test(exclude: wasm) `target(!windows) {
   // Tabs, quotes, and backslashes in arguments
   ProcessResult result = execute("printf", ["%s", "tab\there \"quote\" back\\slash"])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
-  assert(result.standard_output.contains("\t"), "tab should be preserved");
-  assert(result.standard_output.contains("\""), "quotes should be preserved");
-  assert(result.standard_output.contains("\\"), "backslash should be preserved");
+  assert(result.stdout.contains("\t"), "tab should be preserved");
+  assert(result.stdout.contains("\""), "quotes should be preserved");
+  assert(result.stdout.contains("\\"), "backslash should be preserved");
 }
 
 test_execute_sequential_calls() `test(exclude: wasm) `target(!windows) {
   // Verify TLS globals are properly reset between sequential execute calls
   ProcessResult r1 = execute("printf", ["first"])?!;
-  assert(r1.standard_output == "first", "first call stdout should be 'first'");
+  assert(r1.stdout == "first", "first call stdout should be 'first'");
 
   ProcessResult r2 = execute("printf", ["second"])?!;
-  assert(r2.standard_output == "second", "second call stdout should be 'second'");
+  assert(r2.stdout == "second", "second call stdout should be 'second'");
 
   ProcessResult r3 = execute("true", [])?!;
-  assert(r3.standard_output.len == 0, "third call stdout should be empty");
+  assert(r3.stdout.len == 0, "third call stdout should be empty");
 }
 
 test_execute_fail_with_stderr() `test(exclude: wasm) `target(!windows) {
   // Command that writes to stderr and exits non-zero
   ProcessResult result = execute("sh", ["-c", "echo failure >&2; exit 1"])?!;
   assert(result.exit_code == 1, "should exit with 1");
-  assert(result.standard_error.starts_with("failure"), "stderr should contain failure message");
+  assert(result.stderr.starts_with("failure"), "stderr should contain failure message");
 }
 
 test_execute_exact_echo_output() `test(exclude: wasm) `target(!windows) {
   // echo appends a trailing newline — verify exact output
   ProcessResult result = execute("echo", ["hello"])?!;
-  assert(result.standard_output == "hello\n", "echo output should be exactly 'hello\\n'");
+  assert(result.stdout == "hello\n", "echo output should be exactly 'hello\\n'");
 }
 
 test_execute_many_args() `test(exclude: wasm) `target(!windows) {
   // Stress the argv construction with many arguments
   ProcessResult result = execute("echo", ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])?!;
   assert(result.exit_code == 0, "echo should exit with 0");
-  assert(result.standard_output.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
+  assert(result.stdout.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
 }
 
 test_execute_multiple_args_windows() `test(exclude: wasm) `target(windows) {
   // Pre-fix, emitArgvToCmdline over-quoted every arg, breaking `cmd /c`.
   ProcessResult result = execute("cmd", ["/c", "echo", "a", "b", "c"])?!;
   assert(result.exit_code == 0, "cmd /c echo should exit 0");
-  assert(result.standard_output.starts_with("a b c"), "args joined with spaces");
+  assert(result.stdout.starts_with("a b c"), "args joined with spaces");
 }
 
 test_execute_inherits_env() `test(exclude: wasm) `target(!windows) {
@@ -413,7 +413,7 @@ test_execute_inherits_env() `test(exclude: wasm) `target(!windows) {
   set_env_var("PROMISE_TEST_EXEC_ENV", "inherited_value");
   ProcessResult result = execute("sh", ["-c", "echo $PROMISE_TEST_EXEC_ENV"])?!;
   assert(result.exit_code == 0, "sh should exit with 0");
-  assert(result.standard_output.starts_with("inherited_value"), "child should inherit env var");
+  assert(result.stdout.starts_with("inherited_value"), "child should inherit env var");
   // Clean up
   string? absent;
   set_env_var("PROMISE_TEST_EXEC_ENV", move absent);
@@ -425,7 +425,7 @@ test_execute_inherits_cwd() `test(exclude: wasm) `target(!windows) {
   set_working_dir("/usr")?!;
   ProcessResult result = execute("sh", ["-c", "pwd"])?!;
   assert(result.exit_code == 0, "sh should exit with 0");
-  assert(result.standard_output.starts_with("/usr"), "child should inherit working directory");
+  assert(result.stdout.starts_with("/usr"), "child should inherit working directory");
   set_working_dir(original)?!;
 }
 
@@ -443,7 +443,7 @@ test_execute_custom_cwd_windows() `test(exclude: wasm) `target(windows) {
   // Spawns with lpCurrentDirectory set; `cd` with no args prints the current directory.
   ProcessResult result = execute("cmd", ["/c", "cd"], working_directory: "C:\\Windows")?!;
   assert(result.exit_code == 0, "cmd /c cd should exit 0");
-  assert(result.standard_output.trim() == "C:\\Windows", "child should run in C:\\Windows");
+  assert(result.stdout.trim() == "C:\\Windows", "child should run in C:\\Windows");
 }
 
 test_set_env_var_new() `test(exclude: wasm) {
@@ -565,7 +565,7 @@ test_set_working_dir_preserves_env() `test(exclude: wasm) `target(windows) {
 
 test_process_spawn_and_wait() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["hello"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "echo should exit with 0");
@@ -574,8 +574,8 @@ test_process_spawn_and_wait() `test(exclude: wasm) `target(!windows) {
 
 test_process_stdin_write() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   stdin.write_string("hello from stdin")?!;
   stdin.close()?!;
@@ -588,7 +588,7 @@ test_process_stdin_write() `test(exclude: wasm) `target(!windows) {
 
 test_process_streaming_read() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("sh", ["-c", "seq 1 100"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   string total = "";
   u8[] buf = u8[].filled(0u8, 4096);
@@ -608,7 +608,7 @@ test_process_streaming_read() `test(exclude: wasm) `target(!windows) {
 
 test_process_stderr() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("sh", ["-c", "echo err >&2"])?!;
-  ProcessOutput stderr = p.take_standard_error()?!;
+  ProcessOutput stderr = p.take_stderr()?!;
   string err = stderr.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "stderr echo should exit with 0");
@@ -650,8 +650,8 @@ test_process_drop_cleanup() `test(exclude: wasm) `target(!windows) {
 
 test_process_large_bidirectional() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   string data = "x".repeat(8192);
   stdin.write_string(data)?!;
@@ -665,8 +665,8 @@ test_process_large_bidirectional() `test(exclude: wasm) `target(!windows) {
 
 test_process_close_stdin_eof() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("wc", ["-l"])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   stdin.write_string("line1\nline2\nline3\n")?!;
   stdin.close()?!;
@@ -679,10 +679,10 @@ test_process_close_stdin_eof() `test(exclude: wasm) `target(!windows) {
 
 test_process_take_already_taken() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   bool got_error = false;
-  p.take_standard_output()? _ {
+  p.take_stdout()? _ {
     got_error = true;
   };
   assert(got_error, "taking stdout twice should raise error");
@@ -692,8 +692,8 @@ test_process_take_already_taken() `test(exclude: wasm) `target(!windows) {
 test_process_writer_interface() `test(exclude: wasm) `target(!windows) {
   // Verify ProcessInput write_line works end-to-end
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   stdin.write_line("hello")?!;
   stdin.write_line("world")?!;
@@ -708,7 +708,7 @@ test_process_writer_interface() `test(exclude: wasm) `target(!windows) {
 
 test_process_close_stdin_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
+  ProcessInput stdin = p.take_stdin()?!;
   stdin.close()?!;
   stdin.close()?!; // should not error — safe to call multiple times
   p.wait()?!;
@@ -716,7 +716,7 @@ test_process_close_stdin_twice() `test(exclude: wasm) `target(!windows) {
 
 test_process_close_stdout_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["hi"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   stdout.close()?!;
   stdout.close()?!; // should not error
   p.wait()?!;
@@ -724,7 +724,7 @@ test_process_close_stdout_twice() `test(exclude: wasm) `target(!windows) {
 
 test_process_write_after_close() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
+  ProcessInput stdin = p.take_stdin()?!;
   stdin.close()?!;
 
   bool got_error = false;
@@ -737,11 +737,11 @@ test_process_write_after_close() `test(exclude: wasm) `target(!windows) {
 
 test_process_take_stdin_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
+  ProcessInput stdin = p.take_stdin()?!;
   stdin.close()?!;
 
   bool got_error = false;
-  p.take_standard_input()? _ {
+  p.take_stdin()? _ {
     got_error = true;
   };
   assert(got_error, "taking stdin twice should raise error");
@@ -750,10 +750,10 @@ test_process_take_stdin_twice() `test(exclude: wasm) `target(!windows) {
 
 test_process_take_stderr_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
-  ProcessOutput stderr = p.take_standard_error()?!;
+  ProcessOutput stderr = p.take_stderr()?!;
 
   bool got_error = false;
-  p.take_standard_error()? _ {
+  p.take_stderr()? _ {
     got_error = true;
   };
   assert(got_error, "taking stderr twice should raise error");
@@ -763,7 +763,7 @@ test_process_take_stderr_twice() `test(exclude: wasm) `target(!windows) {
 test_process_spawn_variadic() `test(exclude: wasm) `target(!windows) {
   // Variadic inline args (not string[])
   Process p = Process.spawn("echo", ["one", "two", "three"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "echo should exit with 0");
@@ -778,8 +778,8 @@ test_process_nonzero_exit() `test(exclude: wasm) `target(!windows) {
 
 test_process_multiple_writes() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   stdin.write_string("chunk1-")?!;
   stdin.write_string("chunk2-")?!;
@@ -801,7 +801,7 @@ test_process_spawn_nonexistent() `test(exclude: wasm) `target(!windows) {
 
 test_process_empty_output() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "true should exit with 0");
@@ -809,7 +809,7 @@ test_process_empty_output() `test(exclude: wasm) `target(!windows) {
 }
 
 _drop_process_input!(Process ~p) {
-  ProcessInput stdin = p.take_standard_input();
+  ProcessInput stdin = p.take_stdin();
   stdin.write_string("auto-close");
   // stdin goes out of scope without explicit close — drop should handle it
 }
@@ -817,7 +817,7 @@ _drop_process_input!(Process ~p) {
 test_process_input_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   _drop_process_input(p)?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "cat should exit with 0");
@@ -827,7 +827,7 @@ test_process_input_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
 test_process_wait_auto_closes_stdin() `test(exclude: wasm) `target(!windows) {
   // Don't take stdin — wait() should close it automatically
   Process p = Process.spawn("cat", [])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   // cat waits for stdin EOF; wait() closes stdin, so cat exits
   int code = p.wait()?!;
   string out = stdout.read_all()?!;
@@ -838,12 +838,12 @@ test_process_wait_auto_closes_stdin() `test(exclude: wasm) `target(!windows) {
 test_process_sequential_spawns() `test(exclude: wasm) `target(!windows) {
   // Verify TLS globals reset between sequential Process.spawn calls
   Process p1 = Process.spawn("echo", ["first"])?!;
-  ProcessOutput stdout1 = p1.take_standard_output()?!;
+  ProcessOutput stdout1 = p1.take_stdout()?!;
   string out1 = stdout1.read_all()?!;
   p1.wait()?!;
 
   Process p2 = Process.spawn("echo", ["second"])?!;
-  ProcessOutput stdout2 = p2.take_standard_output()?!;
+  ProcessOutput stdout2 = p2.take_stdout()?!;
   string out2 = stdout2.read_all()?!;
   p2.wait()?!;
 
@@ -854,8 +854,8 @@ test_process_sequential_spawns() `test(exclude: wasm) `target(!windows) {
 test_process_stdout_and_stderr_concurrent() `test(exclude: wasm) `target(!windows) {
   // Read both stdout and stderr from the same process
   Process p = Process.spawn("sh", ["-c", "echo out; echo err >&2"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
-  ProcessOutput stderr = p.take_standard_error()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
+  ProcessOutput stderr = p.take_stderr()?!;
 
   string out = stdout.read_all()?!;
   string err = stderr.read_all()?!;
@@ -877,8 +877,8 @@ _read_from_reader!(Reader ~r) string {
 
 test_process_input_structural_writer() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   _write_to_writer(stdin)?!;
   stdin.close()?!;
@@ -891,7 +891,7 @@ test_process_input_structural_writer() `test(exclude: wasm) `target(!windows) {
 
 test_process_output_structural_reader() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["from_reader"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   string out = _read_from_reader(stdout)?!;
   int code = p.wait()?!;
@@ -1082,7 +1082,7 @@ test_process_id_stable() `test(exclude: wasm) `target(!windows) {
 
 test_process_output_read_after_close() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["hi"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   stdout.close()?!;
   // Read on closed pipe should return 0 (EOF), not error
   u8[] buf = u8[].filled(0u8, 64);
@@ -1092,7 +1092,7 @@ test_process_output_read_after_close() `test(exclude: wasm) `target(!windows) {
 }
 
 _drop_process_output!(Process ~p) {
-  ProcessOutput stdout = p.take_standard_output();
+  ProcessOutput stdout = p.take_stdout();
   // stdout goes out of scope without explicit close — drop should handle it
 }
 
@@ -1122,7 +1122,7 @@ test_execute_custom_env() `test(exclude: wasm) `target(!windows) {
   custom_env["MY_TEST_VAR"] = "custom_value";
   ProcessResult result = execute("sh", ["-c", "echo $MY_TEST_VAR"], environment: move custom_env)?!;
   assert(result.exit_code == 0, "sh should exit with 0");
-  assert(result.standard_output.trim() == "custom_value", "child should see custom env var");
+  assert(result.stdout.trim() == "custom_value", "child should see custom env var");
 }
 
 test_execute_custom_env_windows() `test(exclude: wasm) `target(windows) {
@@ -1133,13 +1133,13 @@ test_execute_custom_env_windows() `test(exclude: wasm) `target(windows) {
   ProcessResult result = execute("cmd", ["/c", "echo %PROMISE_TEST_WIN_VAR%"],
   environment: move custom_env)?!;
   assert(result.exit_code == 0, "cmd /c echo should exit 0");
-  assert(result.standard_output.trim() == "custom_value", "child should see injected env var");
+  assert(result.stdout.trim() == "custom_value", "child should see injected env var");
 }
 
 test_execute_custom_cwd() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("pwd", [], working_directory: "/usr")?!;
   assert(result.exit_code == 0, "pwd should exit with 0");
-  assert(result.standard_output.trim() == "/usr", "child should run in /usr");
+  assert(result.stdout.trim() == "/usr", "child should run in /usr");
 }
 
 test_execute_env_isolation() `test(exclude: wasm) `target(!windows) {
@@ -1149,7 +1149,7 @@ test_execute_env_isolation() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   ProcessResult result = execute("sh", ["-c", "printenv PROMISE_TEST_ISOLATION || echo absent"], environment: move custom_env)?!;
-  assert(result.standard_output.trim() == "absent", "custom env should not inherit parent vars");
+  assert(result.stdout.trim() == "absent", "custom env should not inherit parent vars");
   // Clean up
   string? absent;
   set_env_var("PROMISE_TEST_ISOLATION", move absent);
@@ -1162,8 +1162,8 @@ test_execute_env_and_cwd() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("sh", ["-c", "echo $COMBO_VAR $(pwd)"],
   environment: move custom_env, working_directory: "/usr")?!;
   assert(result.exit_code == 0, "sh should exit with 0");
-  assert(result.standard_output.contains("combined"), "should see custom env");
-  assert(result.standard_output.contains("/usr"), "should run in /usr");
+  assert(result.stdout.contains("combined"), "should see custom env");
+  assert(result.stdout.contains("/usr"), "should run in /usr");
 }
 
 test_execute_empty_env() `test(exclude: wasm) `target(!windows) {
@@ -1173,7 +1173,7 @@ test_execute_empty_env() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("env", [], environment: move empty_env)?!;
   assert(result.exit_code == 0, "env should exit with 0");
   // Should only have PATH
-  assert(result.standard_output.contains("PATH="), "should have PATH");
+  assert(result.stdout.contains("PATH="), "should have PATH");
 }
 
 test_execute_invalid_cwd() `test(exclude: wasm) `target(!windows) {
@@ -1187,7 +1187,7 @@ test_execute_none_env_inherits() `test(exclude: wasm) `target(!windows) {
   set_env_var("PROMISE_TEST_INHERIT", "should_see");
   ProcessResult result = execute("sh", ["-c", "echo $PROMISE_TEST_INHERIT"])?!;
   assert(result.exit_code == 0, "sh should exit with 0");
-  assert(result.standard_output.trim() == "should_see", "absent env should inherit parent vars");
+  assert(result.stdout.trim() == "should_see", "absent env should inherit parent vars");
   string? absent;
   set_env_var("PROMISE_TEST_INHERIT", move absent);
 }
@@ -1198,7 +1198,7 @@ test_execute_none_cwd_inherits() `test(exclude: wasm) `target(!windows) {
   set_working_dir("/usr")?!;
   ProcessResult result = execute("pwd", [])?!;
   assert(result.exit_code == 0, "pwd should exit with 0");
-  assert(result.standard_output.trim() == "/usr", "absent cwd should inherit parent cwd");
+  assert(result.stdout.trim() == "/usr", "absent cwd should inherit parent cwd");
   set_working_dir(original)?!;
 }
 
@@ -1207,7 +1207,7 @@ test_spawn_custom_env() `test(exclude: wasm) `target(!windows) {
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["SPAWN_VAR"] = "from_spawn";
   Process p = Process.spawn("sh", ["-c", "echo $SPAWN_VAR"], environment: move custom_env)?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "sh should exit with 0");
@@ -1216,7 +1216,7 @@ test_spawn_custom_env() `test(exclude: wasm) `target(!windows) {
 
 test_spawn_custom_cwd() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("pwd", [], working_directory: "/usr")?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "pwd should exit with 0");
@@ -1231,7 +1231,7 @@ test_process_output_read_byte() `test(exclude: wasm) `target(!windows) {
   // read_byte() is a non-failable default method on Reader — must be called via Reader type.
   // Returns u8? (present with value, or absent at EOF).
   Process p = Process.spawn("printf", ["AB"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   u8? b1 = _read_one_byte(stdout);
   u8? b2 = _read_one_byte(stdout);
   int code = p.wait()?!;
@@ -1249,7 +1249,7 @@ test_process_output_read_byte() `test(exclude: wasm) `target(!windows) {
 test_process_spawn_echo_windows() `test(exclude: wasm) `target(windows) {
   // Guards pal_spawn_streaming_env success path on Windows (was a -1 stub pre PR #1).
   Process p = Process.spawn("cmd", ["/c", "echo hello"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "cmd /c echo should exit 0");
@@ -1262,8 +1262,8 @@ test_process_spawn_stdin_windows() `test(exclude: wasm) `target(windows) {
   // these through UCRT _write/_close aborts the process. `sort` reads all of
   // stdin, sorts the lines, and echoes them back, so it round-trips stdin→stdout.
   Process p = Process.spawn("sort", [])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   stdin.write_string("hello from stdin")?!; // WriteFile on the HANDLE
   stdin.close()?!; // CloseHandle on the HANDLE — the crash site
@@ -1286,7 +1286,7 @@ test_process_spawn_custom_env_windows() `test(exclude: wasm) `target(windows) {
   custom_env["PROMISE_TEST_SPAWN_WIN_VAR"] = "spawn_custom_value";
   Process p = Process.spawn("cmd", ["/c", "echo %PROMISE_TEST_SPAWN_WIN_VAR%"],
   environment: move custom_env)?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "cmd /c echo should exit 0");
@@ -1296,7 +1296,7 @@ test_process_spawn_custom_env_windows() `test(exclude: wasm) `target(windows) {
 test_process_spawn_custom_cwd_windows() `test(exclude: wasm) `target(windows) {
   // Guards lpCurrentDirectory in EmitSpawnStreamingEnv.
   Process p = Process.spawn("cmd", ["/c", "cd"], working_directory: "C:\\Windows")?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
   assert(code == 0, "cmd /c cd should exit 0");
@@ -1317,8 +1317,8 @@ test_process_stdin_write_windows() `test(exclude: wasm) `target(windows) {
   // (pal_pipe_write/pal_pipe_close via WriteFile/CloseHandle, not UCRT _write/_close).
   // findstr "^" matches every input line and echoes it to stdout.
   Process p = Process.spawn("findstr", ["^"])?!;
-  ProcessInput stdin = p.take_standard_input()?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessInput stdin = p.take_stdin()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   stdin.write_line("hello from stdin")?!;
   stdin.close()?!;
@@ -1333,7 +1333,7 @@ test_process_streaming_read_windows() `test(exclude: wasm) `target(windows) {
   // T0900: exercises incremental pipe READ on Windows (pal_pipe_read via ReadFile,
   // not UCRT _read), including the ERROR_BROKEN_PIPE → EOF mapping at child exit.
   Process p = Process.spawn("cmd", ["/c", "for /L %i in (1,1,100) do @echo %i"])?!;
-  ProcessOutput stdout = p.take_standard_output()?!;
+  ProcessOutput stdout = p.take_stdout()?!;
 
   Builder b = Builder();
   u8[] buf = u8[].filled(0u8, 4096);

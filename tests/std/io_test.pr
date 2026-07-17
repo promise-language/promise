@@ -1,4 +1,5 @@
 // Tests for std/io.pr — Reader, Writer, Closer interfaces
+use std as stdmod; // T1273: qualified alias to reach std getters via `mod.getter`
 // --- Writer.write_line ---
 test_write_line() `test {
   Builder b = Builder();
@@ -152,6 +153,52 @@ test_reader_structural_read_byte() `test {
     got3 = true;
   }
   assert(!got3, "EOF returns absent");
+}
+
+// --- Standard-stream getters (T1273): stdin / stdout / stderr ---
+// The getters return the private value types boxed into the Reader/Writer
+// structural interfaces. This exercises the value->structural conversion at
+// runtime without touching a real descriptor (no I/O, so no output noise and
+// nothing to observe — the point is that the boxing runs and is leak-clean).
+test_standard_stream_getters_bind() `test `doc("T1273: stdin/stdout/stderr getters box value types into Reader/Writer views") {
+  Reader r = stdin;
+  Writer o = stdout;
+  Writer e = stderr;
+  // A fresh handle each call — the getters take no arguments and allocate nothing.
+  Writer e2 = stderr;
+  assert(true, "standard-stream getters bind to interface views without panic");
+}
+
+// T1273: re-binding a structural-interface local from another local is a BORROW,
+// not a fresh owned value. The second binding must NOT register its own free
+// (that would double-free the single heap box). Exercises the IdentExpr-is-local
+// arm of maybeRegisterStructuralFree — the getter box is freed exactly once.
+test_standard_stream_local_rebind() `test `doc("T1273: re-binding a stream local is a borrow, freed once") {
+  Writer o = stdout;
+  Writer alias = o; // borrow of o's box — no second free binding
+  assert(true, "structural local rebind is a borrow, not a double free");
+}
+
+// T1273: reaching a std getter through a qualified module alias (`mod.getter`,
+// a MemberExpr) still yields a fresh owned box that must be freed here. Exercises
+// the MemberExpr ModuleGetters arm of maybeRegisterStructuralFree — leak-clean.
+test_standard_stream_qualified_getter() `test `doc("T1273: qualified module-getter access boxes and frees leak-clean") {
+  Writer o = stdmod.stdout;
+  Reader r = stdmod.stdin;
+  assert(true, "qualified std getter binds and frees without leaking");
+}
+
+// T1273: end-to-end runtime coverage of the READ path (stdin.read -> _read_bytes
+// -> pal_file_read). The test harness runs each binary with fd 0 wired to the
+// null device (runTestBinary uses CombinedOutput with a nil Stdin), so the read
+// returns 0 (EOF) immediately and deterministically — never blocks. This is the
+// only test that actually EXECUTES promise_read_bytes; the getter is bound to a
+// local first so its heap box is freed exactly once (avoids the T1272 temp leak).
+test_standard_stream_stdin_read_eof() `test `doc("T1273: stdin.read over pal_file_read returns EOF when fd 0 is /dev/null") {
+  Reader r = stdin;
+  u8[] buf = Vector[u8].filled(0u8, 16);
+  int n = r.read(buf)?!;
+  assert(n == 0, "no input on fd 0 in the harness -> read returns 0 (EOF)");
 }
 
 // --- MutRef indexing regression (vector indexing through ~ parameter) ---

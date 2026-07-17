@@ -1,0 +1,81 @@
+// Regression tests for boxing a pure value type into a structural interface
+// when the boxed interface ESCAPES the current frame (T1320), plus the leak-free
+// drop of a getter-returned structural interface local.
+//
+// Before the fix, returning a value type as a structural interface stored the
+// value in a callee-stack alloca and handed back a dangling pointer — garbage
+// field reads and, at scope-exit drop, `fatal: invalid free (bad header magic)`.
+// The fix heap-allocates the box on the return path and makes it drop-compatible
+// with __promise_structural_drop (leak-free).
+type Counter `structural {
+  value(~this) int `abstract;
+}
+
+type Fixed {
+  int n `value;
+  value(~this) int {
+    return this.n;
+  }
+}
+
+make_counter(int n) Counter {
+  return Fixed(n: n);
+}
+
+get seven Counter {
+  return Fixed(n: 7);
+}
+
+// A value type returned boxed as a structural interface reads back correctly and
+// frees cleanly (no dangling pointer, no invalid free).
+test_value_type_structural_return_via_function() `test {
+  Counter c = make_counter(42);
+  assert(c.value() == 42, "value survives the return");
+}
+
+// The boxed value-type interface, bound to a local, is dropped leak-free.
+test_value_type_structural_return_bound_unused() `test {
+  Counter c = make_counter(99);
+  assert(true, "bound interface local drops without leaking");
+}
+
+// A getter (bare-identifier module-level getter) returning a boxed value type is
+// leak-free when its result is bound to a local.
+test_value_type_structural_getter() `test {
+  Counter c = seven;
+  assert(c.value() == 7, "getter-returned value type reads back and frees");
+}
+
+// Repeated getter calls each hand back a fresh, independently-freed handle.
+test_value_type_structural_getter_repeated() `test {
+  Counter a = seven;
+  Counter b = seven;
+  assert(a.value() == 7, "a");
+  assert(b.value() == 7, "b");
+}
+
+// An INSTANCE getter that returns a structural-interface field is a BORROW, not a
+// fresh owned value — the owning container (Boxed) still drops the field. Binding
+// its result to a local must NOT register an owning free (that would double-free
+// the aliased instance → segfault). Only module-level getters (no receiver, always
+// fresh) get a free binding; instance/enum getters fall through as borrows.
+type Speaker `structural {
+  say(~this) int `abstract;
+}
+type Heapy {
+  string _tag;
+  say(~this) int {
+    return this._tag.len;
+  }
+}
+type Boxed {
+  Speaker _s;
+  get inner Speaker `doc("borrows the held speaker — an alias, not a fresh value") {
+    return this._s;
+  }
+}
+test_instance_getter_structural_field_is_borrow() `test {
+  Boxed b = Boxed(_s: Heapy(_tag: "hi"));
+  Speaker s = b.inner; // alias of b._s — must not be freed by this local
+  assert(s.say() == 2, "borrowed field reads back; container retains ownership");
+}

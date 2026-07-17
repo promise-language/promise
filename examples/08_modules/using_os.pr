@@ -21,5 +21,5 @@ echo output: hello from promise""") {
 
   // Run a command and capture its output.
   os.ProcessResult r = os.execute("echo", ["hello from promise"])?!;
-  print_line("echo output: {r.standard_output.trim()}");
+  print_line("echo output: {r.stdout.trim()}");
 }

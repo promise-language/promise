@@ -739,8 +739,8 @@ get executable_path string `public
 type ProcessResult `public `doc("The result of executing a subprocess.
       Contains the exit code and captured standard output and standard error.") {
     int exit_code;
-    string standard_output;
-    string standard_error;
+    string stdout;
+    string stderr;
 }
 
 execute!(string program, ...string args) ProcessResult `public

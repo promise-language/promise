@@ -110,8 +110,8 @@ type OsError is error `public `doc("An operating system error.") {
 
 type ProcessResult `public `doc("The result of executing a subprocess. Contains the exit code and captured standard output and standard error.") {
   int exit_code;
-  string standard_output;
-  string standard_error;
+  string stdout;
+  string stderr;
 }
 
 type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies the Writer structural interface. Auto-closes on drop.") {
@@ -203,7 +203,7 @@ type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe.
   }
 }
 
-type Process `public `doc("A running subprocess with piped stdin, stdout, and stderr. Created via Process.spawn(). Pipe handles are obtained via take_standard_input(), take_standard_output(), and take_standard_error(), which transfer ownership of the pipe out of the Process. The Process must be waited on (or dropped) to avoid zombie processes.") {
+type Process `public `doc("A running subprocess with piped stdin, stdout, and stderr. Created via Process.spawn(). Pipe handles are obtained via take_stdin(), take_stdout(), and take_stderr(), which transfer ownership of the pipe out of the Process. The Process must be waited on (or dropped) to avoid zombie processes.") {
   int _pid;
   int _stdin_fd;
   int _stdout_fd;
@@ -235,7 +235,7 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
     return Process(_pid: pid, _stdin_fd: stdin_fd, _stdout_fd: stdout_fd, _stderr_fd: stderr_fd, _exit_code: 0, _waited: false);
   }
 
-  take_standard_input!(~this) ProcessInput `public `doc("Transfers ownership of the stdin pipe out of the Process. Returns a ProcessInput handle that satisfies the Writer structural interface. Raises an error if the stdin pipe has already been taken or closed.") {
+  take_stdin!(~this) ProcessInput `public `doc("Transfers ownership of the stdin pipe out of the Process. Returns a ProcessInput handle that satisfies the Writer structural interface. Raises an error if the stdin pipe has already been taken or closed.") {
     if this._stdin_fd < 0 {
       raise OsError(code: 9, message: "stdin pipe already taken or closed");
     }
@@ -244,7 +244,7 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
     return ProcessInput(_fd: fd);
   }
 
-  take_standard_output!(~this) ProcessOutput `public `doc("Transfers ownership of the stdout pipe out of the Process. Returns a ProcessOutput handle that satisfies the Reader structural interface. Raises an error if the stdout pipe has already been taken or closed.") {
+  take_stdout!(~this) ProcessOutput `public `doc("Transfers ownership of the stdout pipe out of the Process. Returns a ProcessOutput handle that satisfies the Reader structural interface. Raises an error if the stdout pipe has already been taken or closed.") {
     if this._stdout_fd < 0 {
       raise OsError(code: 9, message: "stdout pipe already taken or closed");
     }
@@ -253,7 +253,7 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
     return ProcessOutput(_fd: fd);
   }
 
-  take_standard_error!(~this) ProcessOutput `public `doc("Transfers ownership of the stderr pipe out of the Process. Returns a ProcessOutput handle that satisfies the Reader structural interface. Raises an error if the stderr pipe has already been taken or closed.") {
+  take_stderr!(~this) ProcessOutput `public `doc("Transfers ownership of the stderr pipe out of the Process. Returns a ProcessOutput handle that satisfies the Reader structural interface. Raises an error if the stderr pipe has already been taken or closed.") {
     if this._stderr_fd < 0 {
       raise OsError(code: 9, message: "stderr pipe already taken or closed");
     }
@@ -410,7 +410,7 @@ execute!(string program, string[] args, map[string, string]? move environment, s
   string stderr = <-stderr_task;
 
   int exit_code = _os_wait_pid(pid);
-  return ProcessResult(exit_code: exit_code, standard_output: move stdout, standard_error: move stderr);
+  return ProcessResult(exit_code: exit_code, stdout: move stdout, stderr: move stderr);
 }
 
 get env map[string, string] `public `doc("Returns all environment variables as a map from variable name to value. Each entry is parsed from the process environment.") {

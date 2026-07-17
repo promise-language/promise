@@ -1,0 +1,13 @@
+// T1273 — runtime coverage for the std `stdout` getter.
+//
+// A batch test cannot observe its own standard streams (the runner merges the
+// test binary's stdout+stderr), so the full getter -> value->structural boxing
+// -> interface dispatch -> _write_bytes -> pal_write(fd 1) path is exercised
+// here as a snapshot test whose captured stdout is compared against `expected`.
+// Only stdout is written (deterministic; stderr separation is pinned by the Go
+// IR tests, since CombinedOutput would otherwise interleave the two fds).
+main!() `test(expected: """line one
+line two""") {
+  stdout.write_line("line one")?^;
+  stdout.write_string("line two")?^;
+}

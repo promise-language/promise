@@ -25,6 +25,10 @@ name := "Alice";       // inferred as string
 print("no newline");
 print_line("with newline");
 print_line("interpolation: {x} + {name}");
+
+// Standard streams: stdin (Reader), stdout / stderr (Writer)
+stderr.write_line("diagnostic — goes to fd 2, not stdout");
+stdout.write_line("data — same as print_line, but as a Writer handle");
 ```
 
 ## Primitive Types
@@ -892,7 +896,7 @@ main!() {
 use os;
 main!() {
   r := os.execute("ls", ["-la", "/tmp"]);   // env/dir optional; failable — auto-propagates in main!()
-  print_line(r.standard_output);
+  print_line(r.stdout);
 }
 
 // File I/O with manual open/close

@@ -278,6 +278,21 @@ type Compiler struct {
 	discardedExpr       ast.Expr
 	discardAliasArgPtrs []value.Value
 
+	// T1311: instance pointers of a structural-returning call's owned args, recorded
+	// by emitReturnAliasCheckSubst (which bails early for structural returns before
+	// the normal arg-alias loop) and consumed by maybeTrackIterTemp to clear the
+	// aliasing result temp's flag. Short-lived per-call handoff: set immediately
+	// before the call returns to genCallExpr, consumed right after in
+	// maybeTrackIterTemp — not part of saveState. emitReturnAliasCheckSubst resets
+	// it at entry, but not every dispatch path passes through there before reaching
+	// maybeTrackIterTemp (container-method dispatch early-returns from genMethodCall),
+	// so the reset alone does not guarantee freshness. pendingStructuralArgAliasCall
+	// pins the ptrs to the exact CallExpr that recorded them: maybeTrackIterTemp only
+	// consumes them when its own call `e` matches, so a stale value from an earlier
+	// free-function structural discard can never be applied to an unrelated later call.
+	pendingStructuralArgAliasPtrs []value.Value
+	pendingStructuralArgAliasCall ast.Expr
+
 	// T0100: Statement-level tracking for closure env pointers.
 	// Tracks env structs from lambda expressions passed directly as function
 	// arguments (not stored in variables). Unclaimed envs are freed at statement end.

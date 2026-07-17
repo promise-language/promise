@@ -24,6 +24,13 @@ type Factory {
   make_fresh(int n) Sink {
     return Counter(total: n);
   }
+  // T1311: takes an owned structural arg but returns a FRESH box. The result temp
+  // and the fresh-temp arg have distinct instance ptrs → the fresh-temp guard is
+  // emitted but never fires; both boxes free independently.
+  make_fresh_from(Sink s) Sink {
+    s.emit(1);
+    return Counter(total: 42);
+  }
   // Two owned structural params, returns only the SECOND. The result temp
   // aliases b's box; a stays sole owner of its own box. The per-arg guard loop
   // must emit a guard for each arg but only the one matching the returned ptr
@@ -114,4 +121,53 @@ method_discard_generic() `test {
   f.wrap[int](s);
   s.emit(1);
   assert(true, "generic method discard: no double free");
+}
+
+// T1311: exact repro — the arg is a FRESH rvalue-temp (`Counter(total:5)`, a
+// CallExpr, not a named local) and the method returns it by value, discarded.
+// T1310's ident-only scan misses this; the result temp and the fresh arg temp
+// alias the SAME box → double free without the fix. Only the result temp's flag
+// is cleared, leaving the arg temp sole owner.
+method_discard_freshtmp() `test {
+  f := Factory(seed: 1);
+  f.make(Counter(total: 5));
+  assert(true, "fresh-temp method discard: no double free");
+}
+
+// T1311: inline-use of the fresh-temp passthrough result — same aliasing, the
+// result temp is neutralized so the fresh arg temp frees the box exactly once.
+method_inline_freshtmp() `test {
+  f := Factory(seed: 1);
+  f.make(Counter(total: 5)).emit(1);
+  assert(true, "fresh-temp method inline use: no double free");
+}
+
+// T1311: an owned structural fresh-temp arg is present, but the method returns a
+// FRESH box. The result temp and the arg temp have distinct ptrs at runtime → the
+// guard never fires; both boxes free independently. No leak, no double free.
+method_discard_freshtmp_fresh_return() `test {
+  f := Factory(seed: 1);
+  f.make_fresh_from(Counter(total: 5));
+  assert(true, "fresh-temp arg + fresh return: both freed once");
+}
+
+// T1311: TWO fresh rvalue-temp structural args, only the SECOND returned by value
+// and discarded. Both arg ptrs are recorded, so the fresh-temp guard loop emits a
+// guard per arg; at runtime only the second's ptr matches the result temp and
+// clears it, while the first arg temp remains sole owner of its own box. Exercises
+// the per-arg loop with more than one recorded ptr. No double free, no leak.
+method_discard_freshtmp_two_args() `test {
+  f := Factory(seed: 1);
+  f.pick_second(Counter(total: 1), Counter(total: 2));
+  assert(true, "two fresh-temp args: each freed once");
+}
+
+// T1311: generic-method fresh-temp passthrough discard `f.wrap[int](Counter(...));`
+// — the fresh rvalue-temp reaches the temp-tracking helper via the generic-method
+// codegen branch (distinct from the non-generic path). The result temp is cleared
+// so the fresh arg temp frees the box exactly once. No double free, no leak.
+method_discard_freshtmp_generic() `test {
+  f := Factory(seed: 1);
+  f.wrap[int](Counter(total: 5));
+  assert(true, "generic fresh-temp method discard: no double free");
 }

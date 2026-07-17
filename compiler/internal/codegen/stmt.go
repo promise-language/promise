@@ -2644,6 +2644,38 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 	if c.typeSubst != nil {
 		retType = types.Substitute(retType, c.typeSubst)
 	}
+	// T1311: reset the structural-arg handoff on every call (structural or not) so a
+	// stale value from a prior structural call whose result maybeTrackIterTemp never
+	// consumed cannot leak into this call.
+	c.pendingStructuralArgAliasPtrs = nil
+	c.pendingStructuralArgAliasCall = nil
+	// T1311: structural-interface returns are excluded from isTypeDroppable (they are
+	// borrow views, not owned), so the arg-alias loop below never runs for them and
+	// the function returns early. But a method returning an owned structural param by
+	// value (`make(Sink s) Sink { return s; }`) hands back a view aliasing the arg's
+	// box. When that result is a discarded temp, maybeTrackIterTemp registers it for
+	// __promise_structural_drop over the SAME box as the (fresh rvalue-temp or named-
+	// local) arg → double free (T1311). Record each owned arg's instance ptr so
+	// maybeTrackIterTemp can clear the RESULT temp's flag on a runtime alias match,
+	// leaving the arg the sole owner. The runtime ptr compare makes recording all
+	// heap-typed args safe: two distinct live boxes never share an address, so an
+	// unrelated arg can never spuriously match. Only the result temp is cleared —
+	// unlike clearDiscardedAliasTempFlag, which clears ALL matching heap temps and is
+	// safe only when the keeper is a non-temp local (a fresh arg temp is itself a heap
+	// temp, so clearing every match would leave nobody freeing the box → leak).
+	if rn := extractNamed(retType); rn != nil && rn.IsStructural() && !rn.IsValueType() {
+		for i := range args {
+			if i >= len(argVals) {
+				break
+			}
+			if p := extractAliasPtr(c, argVals[i]); p != nil && p.Type() == irtypes.I8Ptr {
+				c.pendingStructuralArgAliasPtrs = append(c.pendingStructuralArgAliasPtrs, p)
+			}
+		}
+		if len(c.pendingStructuralArgAliasPtrs) > 0 {
+			c.pendingStructuralArgAliasCall = callExpr
+		}
+	}
 	// Only check for non-Copy return types that could alias.
 	if !isTypeDroppable(retType) {
 		return result
@@ -7503,6 +7535,35 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	if len(c.heapTemps) > before {
 		c.maybeClearStructuralTempAliasArg(e, instancePtr, c.heapTemps[len(c.heapTemps)-1].dropFlag)
 	}
+	// T1311: also clear the result temp when it aliases a FRESH rvalue-temp
+	// structural arg (e.g. `f.make(Counter(total:5));`). maybeClearStructuralTempAliasArg
+	// only covers named-local (IdentExpr) args; the fresh-temp arg's instance ptr was
+	// recorded by emitReturnAliasCheckSubst in pendingStructuralArgAliasPtrs. Clears
+	// ONLY the result temp — the arg temp remains the sole owner and frees the box
+	// once. Scoped to the discard/inline-in-discard context so the binding path
+	// (T1304/T1308) is untouched. Fresh-return-with-arg-present (`return Counter(...)`)
+	// is safe: the runtime ptr compare never fires, so both boxes free independently.
+	// The pendingStructuralArgAliasCall == e check pins the recorded ptrs to THIS
+	// call: a stale value left by an earlier free-function structural discard (which
+	// records but never reaches maybeTrackIterTemp, and whose dispatch may not re-enter
+	// emitReturnAliasCheckSubst before this call) can never be applied here.
+	if c.discardedExpr != nil && len(c.pendingStructuralArgAliasPtrs) > 0 &&
+		c.pendingStructuralArgAliasCall == ast.Expr(e) &&
+		len(c.heapTemps) > before && instancePtr.Type() == irtypes.I8Ptr &&
+		c.block != nil && c.block.Term == nil {
+		resultFlag := c.heapTemps[len(c.heapTemps)-1].dropFlag
+		for _, argPtr := range c.pendingStructuralArgAliasPtrs {
+			same := c.block.NewICmp(enum.IPredEQ, instancePtr, argPtr)
+			clearBlk := c.newBlock("struct.tmp.freshalias.clear")
+			skipBlk := c.newBlock("struct.tmp.freshalias.skip")
+			c.block.NewCondBr(same, clearBlk, skipBlk)
+			clearBlk.NewStore(constant.False, resultFlag)
+			clearBlk.NewBr(skipBlk)
+			c.block = skipBlk
+		}
+	}
+	c.pendingStructuralArgAliasPtrs = nil
+	c.pendingStructuralArgAliasCall = nil
 }
 
 // isTrackedStringCall returns true if the call expression produces a NEW

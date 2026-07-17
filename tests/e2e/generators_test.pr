@@ -1167,5 +1167,56 @@ test_t0504_mixed_kinds_run() `test {
   assert(sum == 60, "sum should be 60");
 }
 
+// T1306: a discarded generator factory call must free its yield slot and
+// coroutine frame — never iterated, so no for-in cleanup runs. Leak enforcement
+// (T0067) is the assertion.
+test_t1306_discarded_generator_no_leak() `test {
+  count_to(3);
+  assert(true, "discard ok");
+}
+
+test_t1306_discarded_generator_repeated() `test {
+  count_to(3);
+  count_to(5);
+  assert(true, "multiple discards ok");
+}
+
+// T1306: failable-generator discard exercises the 3-field {handle, slot, errslot}
+// cleanup shape.
+test_t1306_discarded_failable_generator_no_leak() `test {
+  t0479_failable_owned("x".to_string())?!;
+  assert(true, "failable discard ok");
+}
+
+// T1306: a discarded generator whose element type is a type parameter, discarded
+// inside a MONOMORPHIZED generic function body — exercises the typeSubst branch of
+// dropDiscardedGenerator (stream[T] substituted to a concrete stream at codegen).
+// Both instantiations must free the box with no leak.
+t1306_gen_of[T](T move x, int n) stream[T] {
+  int i = 0;
+  while i < n {
+    yield x;
+    i = i + 1;
+  }
+}
+
+t1306_discard_in_generic[T](T move x) {
+  t1306_gen_of[T](move x, 2);
+}
+
+test_t1306_discarded_generic_generator_no_leak() `test {
+  t1306_discard_in_generic[int](7);
+  t1306_discard_in_generic[bool](true);
+  assert(true, "generic discard ok");
+}
+
+// T1306: an inline-discarded generator produced directly by an owned-argument
+// factory (never bound, never iterated) — the yield slot + coroutine frame are the
+// only allocations, so leak enforcement (T0067) confirms cleanup.
+test_t1306_discarded_owned_arg_generator_no_leak() `test {
+  t0479_gen_owned_string("hello".to_string());
+  assert(true, "owned-arg discard ok");
+}
+
 main() {
 }

@@ -865,6 +865,10 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		// T1233: When a discarded expression is a droppable tuple temp (e.g.
 		// `(make_str(), 1);`), field-wise drop it at statement end.
 		c.dropDiscardedTuple(s.Expr, discardedResult)
+		// T1306: free a discarded generator factory result (raw {handle, slot}
+		// coroutine value) — genDestroy(handle) + palFree(slot), matching
+		// consumed-generator cleanup.
+		c.dropDiscardedGenerator(s.Expr, discardedResult)
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:
@@ -5351,6 +5355,55 @@ func (c *Compiler) dropDiscardedTuple(expr ast.Expr, result value.Value) {
 		return
 	}
 	c.registerTupleStmtTemp(result, tup)
+}
+
+// dropDiscardedGenerator handles T1306: when an ExprStmt discards a generator
+// factory call result (e.g. `gen(3);`), the raw {handle, slot} coroutine value
+// leaks its yield slot and coroutine frame — nothing routes it through any
+// cleanup path. Emit the same generator-native cleanup as a consumed generator's
+// bindingGenerator (emitGeneratorCleanup): destroy the coroutine handle and free
+// the yield slot (+ error slot for the failable {handle, slot, errslot} shape).
+//
+// NOT __promise_iter_cleanup / __promise_structural_drop: a generator instance has
+// a distinct layout from _FnIter (T0088), so those would crash. Every stream[T]
+// value is freshly produced by a generator factory (a stream[T]-returning function
+// MUST contain yield — sema-enforced), so it is always owned and never an alias:
+// unconditionally freeing it at statement end is sound.
+func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil && exprType != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	if exprType == nil {
+		return
+	}
+	if _, ok := types.AsStream(exprType); !ok {
+		return
+	}
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || (len(st.Fields) != 2 && len(st.Fields) != 3) {
+		return
+	}
+	handle := c.block.NewExtractValue(result, 0)
+	slot := c.block.NewExtractValue(result, 1)
+	isNull := c.block.NewICmp(enum.IPredEQ, handle, constant.NewNull(irtypes.I8Ptr))
+	cleanBlk := c.newBlock("discard.gen.cleanup")
+	doneBlk := c.newBlock("discard.gen.done")
+	c.block.NewCondBr(isNull, doneBlk, cleanBlk)
+
+	c.block = cleanBlk
+	c.block.NewCall(c.genDestroy, handle)
+	c.block.NewCall(c.palFree, slot)
+	if len(st.Fields) == 3 { // failable generator: also free the error slot (B0023)
+		errSlot := c.block.NewExtractValue(result, 2)
+		c.block.NewCall(c.palFree, errSlot)
+	}
+	c.block.NewBr(doneBlk)
+
+	c.block = doneBlk
 }
 
 // dropDiscardedHeapType handles B0211: when an ExprStmt discards a heap-allocated

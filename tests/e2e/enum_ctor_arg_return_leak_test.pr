@@ -1,0 +1,205 @@
+// T1317: An inline enum-constructor temp with a droppable payload, passed by value
+// into a call that is the direct operand of a `return`, leaked the payload. The
+// arg temp's move-clear fired in the caller but the return path skipped the
+// statement-end drain, so nothing dropped the heap string. `"h".to_upper()` forces
+// a heap-allocated string (a bare literal would be .rodata and hide the leak).
+enum Payload {
+  Full(string s), Empty,
+}
+
+take(Payload p, int y) int {
+  match p {
+    Payload.Full(s) => {
+      return s.len + y;
+    },
+    Payload.Empty => {
+      return y;
+    },
+  }
+}
+
+// The bug: enum-ctor call is the direct operand of `return`.
+ret_literal() int {
+  return take(Payload.Full("h".to_upper()), 3);
+}
+
+// The returned enum ctor is moved out to the caller (must not double-free).
+make_full() Payload {
+  return Payload.Full("x".to_upper());
+}
+
+// Discarded call — was already clean; guards against a regression.
+discarded() {
+  take(Payload.Full("h".to_upper()), 3);
+}
+
+// Enum bound to a local first — was already clean.
+via_local() int {
+  Payload p = Payload.Full("h".to_upper());
+  return take(p, 3);
+}
+
+// Nested in another expression — was already clean.
+nested() bool {
+  return take(Payload.Full("h".to_upper()), 3) == 4;
+}
+
+// Empty (fieldless) variant arg returned directly — no payload, still exercises
+// the drain path without a heap allocation.
+ret_empty() int {
+  return take(Payload.Empty, 7);
+}
+
+// `return match ...` whose arms ARE enum constructors and whose result type is
+// the enum — the arm ctor temps are the phi'd result, moved OUT to the caller.
+// Exercises the MatchExpr branch of returnValueMovesOutEnumCtor.
+make_via_match(int n) Payload {
+  return match n {
+    0 => Payload.Full("m".to_upper()),
+    _ => Payload.Empty,
+  };
+}
+
+// `return if ...` whose arms ARE enum constructors — the IfExpr move-out branch.
+make_via_if(bool b) Payload {
+  return if b {
+    Payload.Full("i".to_upper())
+  } else {
+    Payload.Empty
+  };
+}
+
+// Bare fieldless variant returned directly (`return Payload.Empty`) — the
+// MemberExpr (non-call) true branch of isEnumConstructorExpr; no payload to drop.
+ret_bare_empty() Payload {
+  return Payload.Empty;
+}
+
+// A call whose result type IS an enum but where the enum-ctor is a by-value arg —
+// must still DRAIN the arg temp (not mistake it for the moved-out result). g
+// returns a fresh enum built from its borrow param, so the arg temp is orphaned.
+relay(Payload p) Payload {
+  return match p {
+    Payload.Full(s) => Payload.Full(s.repeat(2)),
+    Payload.Empty => Payload.Empty,
+  };
+}
+ret_call_returning_enum() Payload {
+  return relay(Payload.Full("r".to_upper()));
+}
+
+// Generic enum: drain path (by-value arg into a returned call) in mono context.
+enum Opt[T] {
+  Some(T v), None,
+}
+opt_len(Opt[string] o) int {
+  return match o {
+    Opt.Some(v) => v.len,
+    Opt.None => 0,
+  };
+}
+ret_generic_arg() int {
+  return opt_len(Opt[string].Some("g".to_upper()));
+}
+
+// Generic enum: move-out path (the ctor IS the return value) in mono context.
+make_generic() Opt[string] {
+  return Opt[string].Some("h".to_upper());
+}
+
+test_make_via_match() `test {
+  p := make_via_match(0);
+  match p {
+    Payload.Full(s) => {
+      assert(s.len == 1, "match arm ctor");
+    },
+    Payload.Empty => {
+      assert(false, "unexpected Empty");
+    },
+  }
+}
+
+test_make_via_if() `test {
+  p := make_via_if(true);
+  match p {
+    Payload.Full(s) => {
+      assert(s.len == 1, "if arm ctor");
+    },
+    Payload.Empty => {
+      assert(false, "unexpected Empty");
+    },
+  }
+}
+
+test_ret_bare_empty() `test {
+  p := ret_bare_empty();
+  match p {
+    Payload.Full(s) => {
+      assert(false, "unexpected Full");
+    },
+    Payload.Empty => {
+      assert(true, "empty");
+    },
+  }
+}
+
+test_call_returning_enum_drains_arg() `test {
+  p := ret_call_returning_enum();
+  match p {
+    Payload.Full(s) => {
+      assert(s.len == 2, "relayed RR");
+    },
+    Payload.Empty => {
+      assert(false, "unexpected Empty");
+    },
+  }
+}
+
+test_generic_arg_drains() `test {
+  assert(ret_generic_arg() == 1, "generic by-value arg");
+}
+
+test_generic_ctor_moved_out() `test {
+  o := make_generic();
+  match o {
+    Opt.Some(v) => {
+      assert(v.len == 1, "generic move-out");
+    },
+    Opt.None => {
+      assert(false, "unexpected None");
+    },
+  }
+}
+
+test_return_call_arg() `test {
+  assert(ret_literal() == 4, "1(len of H) + 3");
+}
+
+test_returned_ctor_moved_out() `test {
+  p := make_full();
+  match p {
+    Payload.Full(s) => {
+      assert(s.len == 1, "len X");
+    },
+    Payload.Empty => {
+      assert(false, "unexpected Empty");
+    },
+  }
+}
+
+test_discarded_still_clean() `test {
+  discarded();
+  assert(true, "no leak");
+}
+
+test_via_local_still_clean() `test {
+  assert(via_local() == 4, "via local");
+}
+
+test_nested_still_clean() `test {
+  assert(nested(), "nested equality");
+}
+
+test_empty_variant_arg() `test {
+  assert(ret_empty() == 7, "empty variant");
+}

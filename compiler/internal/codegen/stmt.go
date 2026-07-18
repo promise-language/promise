@@ -931,6 +931,17 @@ func (c *Compiler) cleanupStmtLevelTemps() {
 	c.cleanupHeapTemps()
 	c.cleanupEnvTemps() // T0100
 	// B0267/B0269: Drop all inline enum constructor temps not consumed by a variable.
+	c.drainEnumCtorTemps()
+}
+
+// drainEnumCtorTemps emits a flag-guarded drop for every tracked inline
+// enum-constructor temp, then clears the list. Each temp's drop flag was set at
+// construction and cleared at any move site that consumed it (var binding, moved
+// call arg), so only temps still owned here are actually freed. Shared by the
+// statement-boundary drain (cleanupStmtLevelTemps, B0267/B0269) and the
+// return-path drain (genReturnStmt, T1317). The caller must ensure c.block is
+// open (non-nil, no terminator).
+func (c *Compiler) drainEnumCtorTemps() {
 	for _, et := range c.enumCtorTemps {
 		flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
 		dropBlk := c.newBlock("enum.ctor.drop")
@@ -10358,6 +10369,79 @@ func (c *Compiler) dropOldUserValueAtPtr(ptr value.Value, valueType types.Type, 
 
 // --- Return ---
 
+// isEnumConstructorExpr reports whether expr (after peeling parens) is directly an
+// enum variant constructor — either a data-carrying call `E.Variant(args)` or a
+// fieldless value `E.Variant`. Used by genReturnStmt (T1317) to distinguish a
+// returned enum-ctor temp (moved out to the caller) from a by-value enum-ctor
+// argument of a call being returned (owned here, must be drained).
+func (c *Compiler) isEnumConstructorExpr(expr ast.Expr) bool {
+	expr = unwrapDestructureParens(expr)
+	var member *ast.MemberExpr
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		m, ok := e.Callee.(*ast.MemberExpr)
+		if !ok {
+			return false
+		}
+		member = m
+	case *ast.MemberExpr:
+		member = e
+	default:
+		return false
+	}
+	targetType := c.info.Types[member.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
+		if _, isVariant := enumLayout.VariantTag[member.Field]; isVariant {
+			return true
+		}
+	}
+	// Generic enum in mono context: target is bare *types.Enum; consult the
+	// expression's (substituted) result type layout instead.
+	if _, ok := targetType.(*types.Enum); ok {
+		resultType := c.info.Types[expr]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		if enumLayout := c.lookupEnumLayout(resultType); enumLayout != nil {
+			if _, isVariant := enumLayout.VariantTag[member.Field]; isVariant {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// returnValueMovesOutEnumCtor reports whether the enum-ctor temps tracked while
+// evaluating a return expression are the value being moved OUT to the caller
+// (flags must be cleared, no drop here) versus by-value call arguments left owned
+// here (must be drained). T1317. Two move-out shapes:
+//   - the return expression is ITSELF an enum constructor (`return E.Variant(...)`)
+//   - the return expression is a branch (`return match s {...}` / `return if c {...}`)
+//     whose arm values are enum constructors and whose result type is that enum —
+//     the arm ctor temps are the phi'd result, moved out to the caller.
+//
+// A call (`return f(E.Variant(...))`) is NEITHER: its result is a distinct value
+// and the ctor is a by-value argument the callee borrows/dups (B0232), so the temp
+// stays owned here and must be drained — even when f itself returns an enum.
+func (c *Compiler) returnValueMovesOutEnumCtor(expr ast.Expr) bool {
+	expr = unwrapDestructureParens(expr)
+	if c.isEnumConstructorExpr(expr) {
+		return true
+	}
+	switch expr.(type) {
+	case *ast.MatchExpr, *ast.IfExpr:
+		resultType := c.info.Types[expr]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		return extractEnum(resultType) != nil
+	}
+	return false
+}
+
 func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// Generator return: bare return means "stop producing values"
 	if c.inGenerator {
@@ -10609,10 +10693,31 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.claimStringTemp(c.optionalContainerDup)
 		c.optionalContainerDup = nil
 	}
+	// T1317: An inline enum-constructor temp built while evaluating the return
+	// expression as a by-value(-borrow) call argument (e.g.
+	// `return f(Payload.Full(heapStr))`) is owned by the caller — the callee dups
+	// the payload (B0232) and nothing else drops the original. The statement-end
+	// drain (cleanupStmtLevelTemps) frees such a temp for a discarded call, but the
+	// return path never reaches it, so the payload leaks. Clear the flag first when
+	// the return expression is ITSELF an enum constructor (`return Payload.Full(...)`)
+	// — that temp is moved out to the caller (mirrors the B0267 var-decl / T1103
+	// container clears) — then drain the rest. A structural check (not the value's
+	// type) is required so `return g(Payload.Full(...))` where g *returns* an enum
+	// still drains the by-value arg temp rather than mistaking it for the result.
+	// The moved-out shapes are a direct constructor or a branch (match/if) whose
+	// arm values ARE the returned enum — see returnValueMovesOutEnumCtor.
+	if len(c.enumCtorTemps) > 0 && s.Value != nil && c.returnValueMovesOutEnumCtor(s.Value) {
+		for i := range c.enumCtorTemps {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:0]
+	}
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()
 		c.cleanupHeapTemps()
 		c.cleanupEnvTemps()
+		// T1317: drop orphaned inline enum-constructor arg temps (see above).
+		c.drainEnumCtorTemps()
 	}
 	// Emit cleanup for all active scope bindings before returning
 	var closeCap *closeErrCapture

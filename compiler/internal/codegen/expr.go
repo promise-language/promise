@@ -1184,11 +1184,29 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 	if fn, ok := c.funcs[e.Name]; ok {
 		if obj := c.lookupFunc(e.Name); obj != nil && obj.IsGetter() {
 			result := c.block.NewCall(fn)
-			// T0137: Track getter results as string temps so they're cleaned up
-			// when used as temporaries (not assigned to a variable).
-			if typ := c.info.Types[e]; typ != nil && extractNamed(typ) == types.TypString {
-				c.trackStringTemp(result)
+			// T0137/T1321: track every heap-owning result kind (string, vector,
+			// channel, Arc/Weak/Mutex/Task, structural box, heap user type) so a
+			// bare module getter used as a discarded temporary or temp method
+			// receiver is freed at statement end — mirroring the qualified
+			// `mod.prop` path (genModuleGetterCall). Module getters take no
+			// receiver and always construct fresh owned values, so tracking is
+			// never an alias/double-free hazard. The binding/assignment path
+			// claims the temp (claimStringTemp / claimHeapTemp) so a single owner
+			// frees it either way.
+			retType := c.info.Types[e]
+			if c.typeSubst != nil && retType != nil {
+				retType = types.Substitute(retType, c.typeSubst)
 			}
+			if c.selfSubst != nil && retType != nil {
+				retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			// T1240: a getter returning a function type yields an owned closure
+			// whose heap env must be freed; track its env (field 1) as an env temp.
+			if _, isSig := retType.(*types.Signature); isSig {
+				c.trackEnvTemp(c.block.NewExtractValue(result, 1))
+				return result
+			}
+			c.trackGetterResultByType(e, retType, result)
 			return result
 		}
 		if _, isSig := c.info.Types[e].(*types.Signature); isSig {
@@ -5902,7 +5920,7 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 // leaked (only its heap-user-type case was covered by the original T1250 fix).
 // The binding/assignment path claims the temp (claimStringTemp for stmtTemps,
 // claimHeapTemp for heap-user-type instances), so a single owner frees it.
-func (c *Compiler) trackGetterResultByType(e *ast.MemberExpr, retType types.Type, result value.Value) {
+func (c *Compiler) trackGetterResultByType(e ast.Expr, retType types.Type, result value.Value) {
 	if result.Type() == irtypes.I8Ptr {
 		if retType == nil {
 			return
@@ -16196,6 +16214,43 @@ func (c *Compiler) isStructuralGetterMemberSource(src ast.Expr) bool {
 		}
 	}
 	return isNonValueStructuralType(rt)
+}
+
+// isModuleGetterExpr reports whether expr is a module-level getter access —
+// either a bare `*ast.IdentExpr` resolving to a module-level getter (same-file
+// or glob import) or a qualified `mod.prop` member recorded in
+// c.info.ModuleGetters. Module getters take no receiver and always construct
+// fresh, owned values (no mutable globals), so their non-value structural-box
+// result is a genuine owned temp — safe to track for statement-end RTTI drop
+// without any alias/double-free hazard, exactly like the instance-getter branch
+// gated by isStructuralGetterMemberSource. T1321.
+func (c *Compiler) isModuleGetterExpr(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		// Not a local / mut-ref borrow — a genuine module-level name.
+		if _, isLocal := c.locals[e.Name]; isLocal {
+			return false
+		}
+		if c.mutRefPtrs != nil {
+			if _, isMutRef := c.mutRefPtrs[e.Name]; isMutRef {
+				return false
+			}
+		}
+		if obj := c.lookupFunc(e.Name); obj != nil && obj.IsGetter() {
+			return true
+		}
+		return false
+	case *ast.MemberExpr:
+		return c.info.ModuleGetters[e]
+	}
+	return false
 }
 
 // isNestedOwnerGovernedUnwrapSource reports whether src — the source of an

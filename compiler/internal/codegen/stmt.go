@@ -8179,7 +8179,14 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 		// `owner.getter!.emit(x)`) frees the box exactly once at statement end. A plain
 		// call returning a borrowed structural view (e.g. `c.iter()` handing back `this`)
 		// is still NOT tracked — it is neither an unwrap/handler nor a getter member.
-		if isUnwrap || isHandler || c.isStructuralGetterMemberSource(expr) {
+		// T1321: a bare module getter (`stderr`, `heap_seven`) or qualified
+		// module getter (`mod.prop`) of non-value structural type also hands back
+		// a fresh, owned heap box — nothing else frees it. Module getters take no
+		// receiver and construct fresh values, so tracking the box for statement-
+		// end RTTI drop is never an alias/double-free hazard (mirrors the fresh-
+		// owned instance-getter branch). A binding that claims this temp clears it
+		// via claimHeapTemp — single owner either way.
+		if isUnwrap || isHandler || c.isStructuralGetterMemberSource(expr) || c.isModuleGetterExpr(expr) {
 			c.trackHeapTemp(c.block.NewExtractValue(result, 1), c.structuralDrop)
 			return
 		}

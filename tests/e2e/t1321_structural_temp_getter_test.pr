@@ -1,0 +1,166 @@
+// T1321: a temporary structural-interface method receiver produced by a bare
+// module getter (or discarded module-getter result) must be freed at statement
+// end. Before the fix, `heap_seven.value()` / `stderr.write_line(...)` leaked
+// the getter's freshly-constructed heap box because the temporary was never
+// registered for statement-end drop. All tests are leak-enforced batch tests —
+// the harness fails on any leaked allocation.
+// --- Heap concrete backing (leak is NOT value-type-specific) ---
+type Counter `structural {
+  value(~this) int `abstract;
+}
+
+type HeapFixed {
+  int n;
+  string label;
+  value(~this) int {
+    return this.n;
+  }
+}
+
+make_heap(int n) Counter {
+  return HeapFixed(n: n, label: "fixed");
+}
+
+get heap_seven Counter {
+  return HeapFixed(n: 7, label: "seven");
+}
+
+// --- Value-type backing boxed to a structural (proves generality) ---
+type Valued `structural {
+  amount(~this) int `abstract;
+}
+
+type ValFixed {
+  int v `value;
+  amount(~this) int {
+    return this.v;
+  }
+}
+
+get val_nine Valued {
+  return ValFixed(v: 9);
+}
+
+// --- Bare module getter as a temporary method receiver ---
+temp_getter_call() `test {
+  assert(heap_seven.value() == 7, "bare module getter receiver (heap)");
+  assert(val_nine.amount() == 9, "bare module getter receiver (value-backed)");
+}
+
+// --- Bare module getter as a discarded expression statement ---
+temp_getter_discard() `test {
+  heap_seven;
+  val_nine;
+  assert(true, "discarded module getter must not leak");
+}
+
+// --- Bound-local control (already leak-clean via maybeRegisterStructuralFree) ---
+temp_getter_bound() `test {
+  Counter c = heap_seven;
+  assert(c.value() == 7, "bound module getter");
+  Valued v = val_nine;
+  assert(v.amount() == 9, "bound value-backed getter");
+}
+
+// --- Flagship: std standard-stream getters (the documented target call site) ---
+// stderr/stdout are `get ... Writer` module getters returning a value-type
+// _OutputStream boxed as the structural Writer. The box is heap-allocated on the
+// getter return path (T1320); as an unbound temp receiver it must be freed at
+// statement end. Writing to fd 2 (stderr) keeps the harness's stdout parsing clean.
+stream_getter_receiver() `test {
+  stderr.write_line("T1321: temp stderr receiver")?!;
+}
+
+// --- Regression control: call-result receiver (already worked pre-fix) ---
+temp_call_result() `test {
+  assert(make_heap(42).value() == 42, "call-result receiver");
+}
+
+// --- Instance-getter regression controls (already worked pre-fix) ---
+type Holder {
+  int seed;
+  get view Counter {
+    return HeapFixed(n: this.seed, label: "view");
+  }
+}
+
+instance_getter_call() `test {
+  h := Holder(seed: 5);
+  assert(h.view.value() == 5, "instance-getter receiver");
+}
+
+instance_getter_discard() `test {
+  h := Holder(seed: 5);
+  h.view;
+  assert(true, "discarded instance getter must not leak");
+}
+
+instance_getter_bound() `test {
+  h := Holder(seed: 5);
+  Counter c = h.view;
+  assert(c.value() == 5, "bound instance getter");
+}
+
+// --- Non-structural heap kinds via a bare module getter (trackGetterResultByType) ---
+// The fix generalized the bare-module-getter path (genIdentExpr) from string-only
+// (T0137) to every heap-owning result kind. Each of these leaked pre-fix.
+
+// Heap vector (non-constant elements force a heap alloc, not a `.rodata` static).
+get heap_vec int[] {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  v.push(3);
+  return v;
+}
+
+module_getter_vector_discard() `test {
+  heap_vec;
+  assert(true, "discarded heap-vector module getter must not leak");
+}
+
+module_getter_vector_receiver() `test {
+  assert(heap_vec.len == 3, "heap-vector module getter as temp receiver");
+}
+
+// Channel getter — its heap G/buffer allocations must be freed at statement end.
+get fresh_chan channel[int] {
+  channel[int] c = channel[int](1);
+  return c;
+}
+
+module_getter_channel_discard() `test {
+  fresh_chan;
+  assert(true, "discarded channel module getter must not leak");
+}
+
+// Heap string getter used as a temp receiver (mirrors the flagship stderr case).
+get shout string {
+  return "temp string receiver".to_upper();
+}
+
+module_getter_string_receiver() `test {
+  assert(shout.len == 20, "heap-string module getter as temp receiver");
+}
+
+// Closure getter — the Signature (T1240) branch: the owned heap env must be freed.
+get boxed_adder(int) -> int {
+  int base = 10;
+  return |int x| -> base + x;
+}
+
+module_getter_closure_discard() `test {
+  boxed_adder;
+  assert(true, "discarded closure module getter must not leak its env");
+}
+
+module_getter_closure_bound() `test {
+  (int) -> int f = boxed_adder;
+  assert(f(5) == 15, "bound closure module getter still works");
+}
+
+// --- Parenthesized module getter as a temp receiver (isModuleGetterExpr ParenExpr) ---
+paren_module_getter_receiver() `test {
+  assert((heap_seven).value() == 7, "paren-wrapped module getter receiver (heap)");
+  assert((val_nine).amount() == 9, "paren-wrapped module getter receiver (value-backed)");
+}

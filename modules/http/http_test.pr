@@ -5,8 +5,32 @@ _serve_once!(net.TcpListener ~listener, string response) string {
   string request = string.from_bytes(buf[0:n]);
   u8[] resp_data = response.bytes();
   _write_all(conn, resp_data)?^;
-  conn.close()?^;
+  _graceful_close(conn);
   return request;
+}
+
+// T1322: exercise _graceful_close's drain loop when the peer still has unread
+// bytes buffered on the server socket. Existing tests only hit the n==0-immediately
+// path (peer has nothing pending), so the n>0 drain branch was uncovered. This
+// also confirms the lingering close does not leak or panic on pending data.
+test_graceful_close_drains_pending() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    // Send bytes the server will never read, then close so the drain reaches EOF.
+    u8[] extra = "leftover unread request bytes that the server must drain".bytes();
+    client.write(extra)?!;
+    client.close()?!;
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  // Deliberately do NOT read the pending bytes: _graceful_close must drain them
+  // (n>0 branch) and reach EOF (n==0) without leaking or panicking.
+  _graceful_close(conn);
+  listener.close()?!;
+  sleep(Duration.from_millis(50));
 }
 
 test_url_basic() `test(exclude: wasm) {

@@ -358,6 +358,30 @@ _write_all!(net.TcpStream ~stream, u8[] ~data) {
   }
 }
 
+// _graceful_close performs a lingering close: send FIN on the write half, drain
+// any remaining inbound bytes, then close. This forces the kernel to do an
+// orderly close (FIN) instead of an abortive close (RST) that would race ahead
+// of the response the client is still reading — preventing intermittent
+// "connection reset by peer" on loopback under load (T1322).
+_graceful_close(net.TcpStream ~conn) {
+  conn.shutdown(write: true)? e {
+    // Peer may have already gone; still attempt to drain + close.
+  };
+  u8[] drain = u8[].filled(0, 1024);
+  bool draining = true;
+  while draining {
+    int n = conn.read(drain)? e {
+      // reset/error while draining is harmless; recover with 0 to end the loop
+      0;
+    };
+    if n == 0 {
+      draining = false;
+    }
+  }
+  conn.close()? e {
+  };
+}
+
 _parse_response!(string header_text) _ParsedResponse {
   string[] lines = header_text.split("\r\n");
 
@@ -718,12 +742,12 @@ _handle_one!(net.TcpStream ~conn, Handler ~handler) {
     string err_str = _serialize_response(err_resp);
     u8[] err_data = err_str.bytes();
     _write_all(conn, err_data)?^;
-    conn.close()?^;
+    _graceful_close(conn);
     return;
   };
 
   string resp_str = _serialize_response(resp);
   u8[] resp_data = resp_str.bytes();
   _write_all(conn, resp_data)?^;
-  conn.close()?^;
+  _graceful_close(conn);
 }

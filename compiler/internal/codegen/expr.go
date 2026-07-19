@@ -13580,6 +13580,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedCoroSuspend := c.coroSuspendBlk                // T0285: save coroutine blocks
 	savedDiscardedExpr := c.discardedExpr               // T1029: lambda body is not the discarded statement
 	savedDiscardAliasArgPtrs := c.discardAliasArgPtrs   // T1029
+	savedBlockTempFloors := c.resetBlockTempFloors()    // T1329: fresh function → floors from 0
 	c.goExprFireAndForget = false                       // reset for inner statements (B0109)
 	c.panicExitBlock = nil                              // T0262: lambda is a separate function
 	c.coroutineReturnBlock = nil                        // T0262: lambda is a separate function
@@ -13737,6 +13738,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.envTemps = savedEnvTemps                         // T0100
 	c.envTempMap = savedEnvTempMap                     // T0100
 	c.enumCtorTemps = savedEnumCtorTemps               // B0267
+	c.restoreBlockTempFloors(savedBlockTempFloors)     // T1329
 	c.tempTrackingEnabled = savedTempTracking          // T0073
 	c.localNameCount = savedLocalNameCount             // T0261
 	c.panicExitBlock = savedPanicExitBlock             // T0262
@@ -17819,6 +17821,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedEnvTemps := c.envTemps                       // T1105: isolate coro-body closure env temps from the outer fn
 	savedEnvTempMap := c.envTempMap                   // T1105
 	savedBorrowedValueParams := c.borrowedValueParams // T0945
+	savedBlockTempFloors := c.resetBlockTempFloors()  // T1329: fresh function → floors from 0
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
@@ -18103,6 +18106,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.heapTempMap = savedHeapTempMap                 // T1105
 	c.envTemps = savedEnvTemps                       // T1105
 	c.envTempMap = savedEnvTempMap                   // T1105
+	c.restoreBlockTempFloors(savedBlockTempFloors)   // T1329
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	for name := range capturedDroppablesVB {
@@ -18760,6 +18764,11 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.goExprFireAndForget = false                     // reset for inner statements (B0109)
 	c.discardedExpr = nil                             // T1029: inner ExprStmts set their own
 	c.discardAliasArgPtrs = nil                       // T1029
+	// T1329: save the block-value temp floors; reset to 0 only on the value path
+	// (below), where the coro body's temp arrays are reset fresh. Restored at the
+	// end. Kept off the aligned save block above so its length doesn't widen the
+	// gofmt comment columns.
+	savedBlockTempFloors := [4]int{c.blockTempFloorStmt, c.blockTempFloorHeap, c.blockTempFloorEnv, c.blockTempFloorEnum}
 
 	// T0683: Only a non-void, awaited (`<-task`) block needs its trailing
 	// value stored into G.result_ptr. A void block has no value; a
@@ -18785,6 +18794,11 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.enumCtorTemps = nil       // B0267
 	c.borrowedValueParams = nil // T0945: coroutine body has no user value params
 	if useGoBlockValuePath {
+		// T1329: fresh function → statement boundaries drain from 0, not the outer
+		// block-value floor. Only on this path (temp arrays are reset fresh here);
+		// the void path shares the outer temp state and stays unchanged. Restored
+		// unconditionally below (a no-op when this branch didn't run).
+		c.blockTempFloorStmt, c.blockTempFloorHeap, c.blockTempFloorEnv, c.blockTempFloorEnum = 0, 0, 0, 0
 		// T0683/T0594: fresh temp state for the coroutine body so its temps
 		// (which reference coroFn allocas) cannot leak into the outer fn.
 		c.stmtTemps = nil
@@ -19091,6 +19105,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		c.envTemps = savedEnvTemps       // T0739: restore outer fn closure env temp state
 		c.envTempMap = savedEnvTempMap   // T0739
 	}
+	c.restoreBlockTempFloors(savedBlockTempFloors) // T1329 (no-op on the void path)
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	// Ownership has been transferred to the goroutine.

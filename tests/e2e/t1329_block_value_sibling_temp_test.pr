@@ -1,0 +1,388 @@
+// T1329: A block-value body (if/match arm, `?` handler) used as a NON-LAST call
+// argument, whose body has a LEADING (non-last) statement, must not drain the
+// enclosing call's SIBLING heap temps at that statement's boundary. The old
+// statement-boundary drain emptied the whole temp array, freeing the sibling
+// mid-body → use-after-free when the enclosing call re-read it after the merge.
+//
+// This is the general (leading-statement) form of T1325 and affects if/match
+// bodies too, not just `?` handlers. All tests run under leak enforcement — the
+// sibling temp must be dropped exactly once (at statement end).
+make_s() string {
+  return "abc".to_upper();
+}
+// "ABC", len 3
+make_vec() int[] {
+  return[1, 2, 3];
+}
+combine(string s, int n) int {
+  return s.len + n;
+}
+combine2(string a, string b, int n) int {
+  return a.len + b.len + n;
+}
+use_vec(int[] v, int n) int {
+  return v.len + n;
+}
+apply((() -> int) f, int n) int {
+  return f() + n;
+}
+may_fail!(int x) int {
+  if x < 0 {
+    raise error(message: "neg");
+  }
+  return x;
+}
+
+enum E {
+  V(string s), None,
+}
+use_e(E e, int n) int {
+  match e {
+    V(s) => {
+      return s.len + n;
+    }, None => {
+      return n;
+    },
+  }
+}
+mk4() string {
+  return "abcd".to_upper();
+}
+// "ABCD", len 4
+
+// if-expression arm with a leading statement as a non-last call arg.
+t1329_if_leading_stmt() `test {
+  int r = combine(make_s(), if true {
+    int d = 7;
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 110, "if arm: 3 + (7+100)");
+}
+
+// match arm with a leading statement.
+t1329_match_leading_stmt() `test {
+  int k = 1;
+  int r = combine(make_s(), match k {
+    1 => {
+      int d = 7;
+      d + 100
+    }, _ => {
+      0
+    },
+  });
+  assert(r == 110, "match arm: 3 + (7+100)");
+}
+
+// `?` error-handler multi-statement body (recover-and-continue) — the T1325 general case.
+t1329_handler_leading_stmt() `test {
+  int r = combine(make_s(), may_fail(-1)? e {
+    int d = 7;
+    d + 100
+  });
+  assert(r == 110, "handler: 3 + (7+100)");
+}
+
+// Multiple sibling temps + multiple leading statements.
+t1329_multiple_siblings() `test {
+  int r = combine2(make_s(), make_s(), if true {
+    int a = 1;
+    int b = 2;
+    a + b + 100
+  } else {
+    0
+  });
+  assert(r == 109, "two siblings: 3 + 3 + (1+2+100)");
+}
+
+// Nested block values: an if inside a match arm, each with a leading statement.
+t1329_nested_block_values() `test {
+  int k = 2;
+  int r = combine(make_s(), match k {
+    2 => {
+      int d = 5;
+      if true {
+        int e = 1;
+        e + 200
+      } else {
+        0
+      }
+    },
+    _ => {
+      0
+    },
+  });
+  assert(r == 204, "nested: 3 + (1+200)");
+}
+
+// Heap-user-type (Vector) sibling — exercises the heapTemps floor.
+t1329_heap_sibling() `test {
+  int r = use_vec(make_vec(), if true {
+    int d = 4;
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 107, "vector sibling: 3 + (4+100)");
+}
+
+// Closure-env sibling — exercises the envTemps floor.
+t1329_env_sibling() `test {
+  string cap = make_s();
+  int r = apply(move || -> int {
+    return cap.len;
+  }, if true {
+    int d = 4;
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 107, "env sibling: 3 + (4+100)");
+}
+
+// Inline enum-constructor sibling with a droppable payload — exercises the
+// enumCtorTemps floor.
+t1329_enum_ctor_sibling() `test {
+  int r = use_e(E.V(mk4()), if true {
+    int d = 4;
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 108, "enum ctor sibling: 4 + (4+100)");
+}
+
+// Divergence via a match arm's `return` while the sibling arm reaches the merge
+// (Piece 2: the sibling prefix is rebuilt so it still drops on the non-diverging
+// runtime path). Covers BOTH runtime paths for leak enforcement.
+diverge_helper!(int k) int {
+  return combine(make_s(), match k {
+    0 => {
+      int z = 1;
+      return 999
+    }, _ => {
+      100
+    },
+  });
+}
+t1329_match_arm_divergence() `test {
+  int a = diverge_helper(0)?!; // arm diverges → 999
+  assert(a == 999, "diverging arm returns 999");
+  int b = diverge_helper(5)?!; // sibling arm reaches merge → 3 + 100
+  assert(b == 103, "non-diverging path: 3 + 100");
+}
+
+// Match-arm `return` divergence with a HEAP-user-type (Box) sibling — the string
+// case above only exercises the stmtTemps prefix rebuild; this exercises the
+// heapTemps branch of the divergence prefix rebuild in genBlockValue's deferred
+// restore. Box is dropped on both the diverging (return) and non-diverging paths.
+diverge_heap_helper!(int k) int {
+  return use_box(make_box(), match k {
+    0 => {
+      int z = 1;
+      return 999
+    }, _ => {
+      100
+    },
+  });
+}
+t1329_match_arm_divergence_heap() `test {
+  int a = diverge_heap_helper(0)?!; // arm diverges → 999
+  assert(a == 999, "heap diverging arm returns 999");
+  int b = diverge_heap_helper(5)?!; // sibling arm reaches merge → 3 + 100
+  assert(b == 103, "heap non-diverging path: 3 + 100");
+}
+
+// Match-arm `return` divergence with a closure-ENV sibling — exercises the
+// envTemps branch of the divergence prefix rebuild.
+diverge_env_helper!(int k) int {
+  string cap = make_s();
+  return apply(move || -> int {
+    return cap.len;
+  }, match k {
+    0 => {
+      int z = 1;
+      return 999
+    }, _ => {
+      100
+    },
+  });
+}
+t1329_match_arm_divergence_env() `test {
+  int a = diverge_env_helper(0)?!; // arm diverges → 999
+  assert(a == 999, "env diverging arm returns 999");
+  int b = diverge_env_helper(5)?!; // sibling arm reaches merge → 3 + 100
+  assert(b == 103, "env non-diverging path: 3 + 100");
+}
+
+// Match-arm `return` divergence with an inline enum-constructor sibling (droppable
+// payload) — exercises the enumCtorTemps branch of the divergence prefix rebuild.
+diverge_enum_helper!(int k) int {
+  return use_e(E.V(mk4()), match k {
+    0 => {
+      int z = 1;
+      return 999
+    }, _ => {
+      100
+    },
+  });
+}
+t1329_match_arm_divergence_enum() `test {
+  int a = diverge_enum_helper(0)?!; // arm diverges → 999
+  assert(a == 999, "enum diverging arm returns 999");
+  int b = diverge_enum_helper(5)?!; // sibling arm reaches merge → 4 + 100
+  assert(b == 104, "enum non-diverging path: 4 + 100");
+}
+
+// Divergence via a `?` handler body ending in `return` while the success path
+// reaches the merge (the already-working T1325 whole-call-diverges path — a
+// regression guard). Covers both runtime paths.
+handler_return_helper!(int x) int {
+  return combine(make_s(), may_fail(x)? e {
+    int z = 1;
+    return 555
+  });
+}
+t1329_handler_return_divergence() `test {
+  int a = handler_return_helper(-1)?!; // error → handler returns 555
+  assert(a == 555, "handler returns 555 on error");
+  int b = handler_return_helper(5)?!; // success → 3 + 5
+  assert(b == 8, "success path: 3 + 5");
+}
+
+// Divergence via a `?` handler body ending in `raise` while the success path
+// reaches the merge. Covers both runtime paths.
+handler_raise_helper!(int x) int {
+  return combine(make_s(), may_fail(x)? e {
+    int z = 1;
+    raise error(message: "rethrow")
+  });
+}
+t1329_handler_raise_divergence() `test {
+  int ok = handler_raise_helper(5)?!; // success → 3 + 5
+  assert(ok == 8, "success path: 3 + 5");
+  bool caught = false;
+  int bad = handler_raise_helper(-1)? e {
+    caught = true;
+    0
+  }; // error → handler re-raises
+  assert(caught, "handler re-raise is caught by outer handler");
+}
+
+// A heap-user-type (droppable) sibling with the leading statement being a nested
+// control-flow STATEMENT (if / if-unwrap / while / match), not a plain var decl.
+// These reach a mid-body cleanup via genIfStmt/genIfStmt(if-unwrap)'s own merge
+// heap/env drains — which must be floor-aware too, else the sibling Box is freed
+// mid-body and use_box re-reads freed memory (segfault). Regression guard.
+type Box {
+  string s;
+  drop(~this) {
+  }
+}
+make_box() Box {
+  return Box(s: "abc".to_upper());
+}
+// "ABC", len 3
+use_box(Box b, int n) int {
+  return b.s.len + n;
+}
+opt_pos(int k) int? {
+  if k > 0 {
+    return k;
+  }
+  return none;
+}
+
+// Nested if-STATEMENT as the leading statement — heap sibling.
+t1329_nested_if_stmt_heap_sibling() `test {
+  int r = use_box(make_box(), if true {
+    int d = 4;
+    if 1 > 0 {
+      d = d + 1;
+    }
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 108, "nested if-stmt: 3 + (5+100)");
+}
+
+// Nested if-unwrap (`if v := opt`) as the leading statement — heap sibling.
+t1329_nested_if_unwrap_heap_sibling() `test {
+  int r = use_box(make_box(), if true {
+    int d = 4;
+    if v := opt_pos(3) {
+      d = d + v;
+    }
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 110, "nested if-unwrap: 3 + (4+3+100)");
+}
+
+// Nested while-STATEMENT as the leading statement — heap sibling.
+t1329_nested_while_heap_sibling() `test {
+  int r = use_box(make_box(), if true {
+    int d = 4;
+    int i = 0;
+    while i < 2 {
+      d = d + 1;
+      i = i + 1;
+    }
+    d + 100
+  } else {
+    0
+  });
+  assert(r == 109, "nested while: 3 + (6+100)");
+}
+
+// A lambda defined inside the block-value body (with a heap sibling) whose own
+// body materializes a lambda-local heap temp inside a nested if. The nested-func
+// floor reset must let the lambda's if-merge drain its LOCAL temp (floor 0 inside
+// the lambda) while the OUTER Box sibling survives to the enclosing merge.
+apply_fn((() -> int) f) int {
+  return f();
+}
+t1329_lambda_body_nested_if_local_temp() `test {
+  int r = use_box(make_box(), if true {
+    int d = 4;
+    int q = apply_fn(|| -> int {
+      int acc = 0;
+      if 1 > 0 {
+        use_box(make_box(), 5); // lambda-local Box temp, dropped at the if-merge
+        acc = 1;
+      }
+      return acc + 50;
+    });
+    d + q + 100
+  } else {
+    0
+  });
+  assert(r == 158, "lambda body local temp: 3 + (4+51+100)");
+}
+
+// A `go` block defined inside the block-value body (with a heap sibling) whose own
+// body materializes a coroutine-local heap temp inside a nested if. This exercises
+// the SEPARATE coroutine floor-reset path (genGoBlock value path), distinct from
+// the lambda path above: the go body's statement boundaries must drain from 0
+// (drop its local Box) while the OUTER Box sibling survives to the enclosing merge.
+t1329_go_body_nested_if_local_temp() `test(exclude: wasm) {
+  int r = use_box(make_box(), if true {
+    int d = 4;
+    t := go {
+      int acc = 0;
+      if 1 > 0 {
+        use_box(make_box(), 5); // coroutine-local Box temp, dropped at the if-merge
+        acc = 1;
+      }
+      acc + 50
+    };
+    int q = <-t;
+    d + q + 100
+  } else {
+    0
+  });
+  assert(r == 158, "go body local temp: 3 + (4+51+100)");
+}

@@ -665,6 +665,56 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.discardedExpr = prevDiscard
 		c.discardAliasArgPtrs = prevArgPtrs
 	}()
+	// T1329: a block-value body (if/match arm, `?` handler) is used as a non-last
+	// argument to an enclosing call whose earlier arguments may have materialized
+	// sibling temps that are still tracked with live drop flags. A LEADING (non-last)
+	// statement in this body reaches a statement boundary (cleanupStmtLevelTemps)
+	// mid-body — without a barrier that would drain the WHOLE tracking array,
+	// freeing the enclosing expression's siblings, which it then re-reads after the
+	// merge → use-after-free. Snapshot the current tracking depths as a floor so
+	// intermediate drains only touch temps created within the body. Also snapshot
+	// the sibling prefix so it can be rebuilt if the body diverges (return/raise),
+	// where genReturnStmt/genRaiseStmt drain the FULL array (dropping the prefix on
+	// that runtime path — correct) and truncate below the floor.
+	savedFloorStmt, savedFloorHeap := c.blockTempFloorStmt, c.blockTempFloorHeap
+	savedFloorEnv, savedFloorEnum := c.blockTempFloorEnv, c.blockTempFloorEnum
+	floorStmt, floorHeap := len(c.stmtTemps), len(c.heapTemps)
+	floorEnv, floorEnum := len(c.envTemps), len(c.enumCtorTemps)
+	prefixStmt := append([]stmtTemp(nil), c.stmtTemps...)
+	prefixHeap := append([]heapTemp(nil), c.heapTemps...)
+	prefixEnv := append([]envTemp(nil), c.envTemps...)
+	prefixEnum := append([]enumCtorTemp(nil), c.enumCtorTemps...)
+	prefixStmtMap := copyTempMap(c.stmtTempMap)
+	prefixHeapMap := copyTempMap(c.heapTempMap)
+	prefixEnvMap := copyTempMap(c.envTempMap)
+	c.blockTempFloorStmt, c.blockTempFloorHeap = floorStmt, floorHeap
+	c.blockTempFloorEnv, c.blockTempFloorEnum = floorEnv, floorEnum
+	defer func() {
+		c.blockTempFloorStmt, c.blockTempFloorHeap = savedFloorStmt, savedFloorHeap
+		c.blockTempFloorEnv, c.blockTempFloorEnum = savedFloorEnv, savedFloorEnum
+		// If the body diverged, the divergent path already dropped the prefix (and
+		// reset each drop flag to 0), truncating the array below the floor. Rebuild
+		// the prefix tracking so a SIBLING arm and the enclosing statement still emit
+		// their own flag-guarded drops on the non-diverging runtime path. Drop flags
+		// are runtime allocas the divergent path zeroed, so the re-emitted drops are
+		// no-ops there → no double free (B0198's flag-guarded idempotence). On the
+		// non-divergent path the floor kept the prefix intact → these are no-ops.
+		if len(c.stmtTemps) < floorStmt {
+			c.stmtTemps = prefixStmt
+			c.stmtTempMap = prefixStmtMap
+		}
+		if len(c.heapTemps) < floorHeap {
+			c.heapTemps = prefixHeap
+			c.heapTempMap = prefixHeapMap
+		}
+		if len(c.envTemps) < floorEnv {
+			c.envTemps = prefixEnv
+			c.envTempMap = prefixEnvMap
+		}
+		if len(c.enumCtorTemps) < floorEnum {
+			c.enumCtorTemps = prefixEnum
+		}
+	}()
 	savedScopeLen := len(c.scopeBindings)
 	// T1107: track whether this block yields an owned heap value moved out of the
 	// block scope, so genIfExpr / genMatchArmValue can register the merge phi as an
@@ -927,11 +977,14 @@ func (c *Compiler) cleanupStmtLevelTemps() {
 	if c.block == nil || c.block.Term != nil {
 		return
 	}
-	c.cleanupStmtTemps()
-	c.cleanupHeapTemps()
-	c.cleanupEnvTemps() // T0100
+	// T1329: inside a block-value body the floors are non-zero, protecting the
+	// enclosing expression's sibling temps (materialized before the body) from a
+	// leading statement's mid-body drain. 0 elsewhere → full drain.
+	c.cleanupStmtTempsFrom(c.blockTempFloorStmt)
+	c.cleanupHeapTempsFrom(c.blockTempFloorHeap)
+	c.cleanupEnvTempsFrom(c.blockTempFloorEnv) // T0100
 	// B0267/B0269: Drop all inline enum constructor temps not consumed by a variable.
-	c.drainEnumCtorTemps()
+	c.drainEnumCtorTempsFrom(c.blockTempFloorEnum)
 }
 
 // drainEnumCtorTemps emits a flag-guarded drop for every tracked inline
@@ -942,7 +995,13 @@ func (c *Compiler) cleanupStmtLevelTemps() {
 // return-path drain (genReturnStmt, T1317). The caller must ensure c.block is
 // open (non-nil, no terminator).
 func (c *Compiler) drainEnumCtorTemps() {
-	for _, et := range c.enumCtorTemps {
+	c.drainEnumCtorTempsFrom(0)
+}
+
+// drainEnumCtorTempsFrom drops inline enum-constructor temps at or above index
+// `floor`, leaving the prefix [0:floor) intact (T1329 — see cleanupStmtTempsFrom).
+func (c *Compiler) drainEnumCtorTempsFrom(floor int) {
+	for _, et := range c.enumCtorTemps[floor:] {
 		flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
 		dropBlk := c.newBlock("enum.ctor.drop")
 		skipBlk := c.newBlock("enum.ctor.skip")
@@ -953,7 +1012,7 @@ func (c *Compiler) drainEnumCtorTemps() {
 		c.block.NewBr(skipBlk)
 		c.block = skipBlk
 	}
-	c.enumCtorTemps = c.enumCtorTemps[:0]
+	c.enumCtorTemps = c.enumCtorTemps[:floor]
 }
 
 // genAutoPropagate generates implicit error propagation for a failable call
@@ -6894,6 +6953,14 @@ func (c *Compiler) claimStringTemp(val value.Value) {
 // cleanupStmtTemps drops all unclaimed string/vector/channel temps at statement end (T0073).
 // For each temp: check flag → null-check ptr → call temp-specific drop function.
 func (c *Compiler) cleanupStmtTemps() {
+	c.cleanupStmtTempsFrom(0)
+}
+
+// cleanupStmtTempsFrom drops all unclaimed string/vector/channel temps at or
+// above index `floor`, leaving the prefix [0:floor) intact. floor is 0 for every
+// caller except cleanupStmtLevelTemps inside a block-value body (T1329), where it
+// protects the enclosing expression's sibling temps from being freed mid-body.
+func (c *Compiler) cleanupStmtTempsFrom(floor int) {
 	// B0190: Clear per-statement flags that must not leak across statements.
 	// Done before early returns so flags are always reset.
 	c.optionalFieldString = false
@@ -6902,17 +6969,22 @@ func (c *Compiler) cleanupStmtTemps() {
 	c.optionalContainerDup = nil // T0366
 	c.optionalTupleDup = nil     // T0397
 	c.optionalHeapDup = nil      // T0440
-	if len(c.stmtTemps) == 0 {
+	if len(c.stmtTemps) <= floor {
 		return
 	}
 	if c.block == nil || c.block.Term != nil {
-		c.stmtTemps = c.stmtTemps[:0]
-		c.stmtTempMap = make(map[value.Value]int)
-		c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca) // T1211
+		if floor == 0 {
+			c.stmtTemps = c.stmtTemps[:0]
+			c.stmtTempMap = make(map[value.Value]int)
+			c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca) // T1211
+		} else {
+			c.stmtTemps = c.stmtTemps[:floor]
+			pruneTempMapSuffix(c.stmtTempMap, floor)
+		}
 		return
 	}
 
-	for _, temp := range c.stmtTemps {
+	for _, temp := range c.stmtTemps[floor:] {
 		// T1181: fixed-array temp — element-wise drop, no i8* dropFunc.
 		if temp.arrType != nil {
 			c.emitArrayTempDrop(temp)
@@ -6969,9 +7041,17 @@ func (c *Compiler) cleanupStmtTemps() {
 		c.block = skipBlock
 	}
 
-	c.stmtTemps = c.stmtTemps[:0]
-	c.stmtTempMap = make(map[value.Value]int)
-	c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca) // T1211
+	if floor == 0 {
+		c.stmtTemps = c.stmtTemps[:0]
+		c.stmtTempMap = make(map[value.Value]int)
+		c.mergeBoundStructFlag = make(map[value.Value]*ir.InstAlloca) // T1211
+	} else {
+		// T1329: keep the sibling prefix [0:floor) and its map entries live; drain
+		// only the suffix created within the block body. mergeBoundStructFlag is
+		// keyed by value, so stale body entries are harmless — no reset needed.
+		c.stmtTemps = c.stmtTemps[:floor]
+		pruneTempMapSuffix(c.stmtTempMap, floor)
+	}
 }
 
 // emitStmtTempCleanupForErrorPath emits cleanup IR for statement-level
@@ -7129,6 +7209,17 @@ func pruneTempMapSuffix(m map[value.Value]int, base int) {
 			delete(m, k)
 		}
 	}
+}
+
+// copyTempMap returns a shallow copy of a temp-tracking map (SSA value → index).
+// Used by genBlockValue (T1329) to snapshot the sibling-temp prefix so it can be
+// rebuilt if the block body diverges and drains the live map to a fresh one.
+func copyTempMap(m map[value.Value]int) map[value.Value]int {
+	out := make(map[value.Value]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // emitHeapTempCleanupForErrorPath emits cleanup IR for statement-level heap
@@ -7383,16 +7474,27 @@ func (c *Compiler) clearMatchingStmtTemps(val value.Value, temps []stmtTemp) {
 // cleanupHeapTemps drops all unclaimed heap instance temps at statement end (T0088).
 // For each temp: check flag → null-check ptr → call drop(ptr).
 func (c *Compiler) cleanupHeapTemps() {
-	if len(c.heapTemps) == 0 {
+	c.cleanupHeapTempsFrom(0)
+}
+
+// cleanupHeapTempsFrom drops all unclaimed heap instance temps at or above index
+// `floor`, leaving the prefix [0:floor) intact (T1329 — see cleanupStmtTempsFrom).
+func (c *Compiler) cleanupHeapTempsFrom(floor int) {
+	if len(c.heapTemps) <= floor {
 		return
 	}
 	if c.block == nil || c.block.Term != nil {
-		c.heapTemps = c.heapTemps[:0]
-		c.heapTempMap = make(map[value.Value]int)
+		if floor == 0 {
+			c.heapTemps = c.heapTemps[:0]
+			c.heapTempMap = make(map[value.Value]int)
+		} else {
+			c.heapTemps = c.heapTemps[:floor]
+			pruneTempMapSuffix(c.heapTempMap, floor)
+		}
 		return
 	}
 
-	for _, temp := range c.heapTemps {
+	for _, temp := range c.heapTemps[floor:] {
 		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
 		dropBlock := c.newBlock("heap.drop")
 		skipBlock := c.newBlock("heap.skip")
@@ -7432,8 +7534,13 @@ func (c *Compiler) cleanupHeapTemps() {
 		c.block = skipBlock
 	}
 
-	c.heapTemps = c.heapTemps[:0]
-	c.heapTempMap = make(map[value.Value]int)
+	if floor == 0 {
+		c.heapTemps = c.heapTemps[:0]
+		c.heapTempMap = make(map[value.Value]int)
+	} else {
+		c.heapTemps = c.heapTemps[:floor] // T1329
+		pruneTempMapSuffix(c.heapTempMap, floor)
+	}
 }
 
 // promoteHeapTempsToScope converts remaining heapTemps into scope bindings (B0222).
@@ -7647,16 +7754,27 @@ func (c *Compiler) claimAllEnvTemps() {
 // cleanupEnvTemps frees all unclaimed closure env temps at statement end (T0100).
 // For each temp: check flag → null-check ptr → call env drop fn or pal_free (B0221).
 func (c *Compiler) cleanupEnvTemps() {
-	if len(c.envTemps) == 0 {
+	c.cleanupEnvTempsFrom(0)
+}
+
+// cleanupEnvTempsFrom frees all unclaimed closure env temps at or above index
+// `floor`, leaving the prefix [0:floor) intact (T1329 — see cleanupStmtTempsFrom).
+func (c *Compiler) cleanupEnvTempsFrom(floor int) {
+	if len(c.envTemps) <= floor {
 		return
 	}
 	if c.block == nil || c.block.Term != nil {
-		c.envTemps = c.envTemps[:0]
-		c.envTempMap = make(map[value.Value]int)
+		if floor == 0 {
+			c.envTemps = c.envTemps[:0]
+			c.envTempMap = make(map[value.Value]int)
+		} else {
+			c.envTemps = c.envTemps[:floor]
+			pruneTempMapSuffix(c.envTempMap, floor)
+		}
 		return
 	}
 
-	for _, temp := range c.envTemps {
+	for _, temp := range c.envTemps[floor:] {
 		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
 		dropBlock := c.newBlock("env.tmp.drop")
 		skipBlock := c.newBlock("env.tmp.skip")
@@ -7680,8 +7798,13 @@ func (c *Compiler) cleanupEnvTemps() {
 		c.block = skipBlock
 	}
 
-	c.envTemps = c.envTemps[:0]
-	c.envTempMap = make(map[value.Value]int)
+	if floor == 0 {
+		c.envTemps = c.envTemps[:0]
+		c.envTempMap = make(map[value.Value]int)
+	} else {
+		c.envTemps = c.envTemps[:floor] // T1329
+		pruneTempMapSuffix(c.envTempMap, floor)
+	}
 }
 
 // maybeTrackIterTemp tracks the instance pointer from a method call result
@@ -11776,12 +11899,16 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	c.stmtTempMap = savedCondStmtTempMap
 
 	// B0173: Restore heap/env temps and clean up in the merge block.
+	// T1329: when this if-STATEMENT is a leading statement inside a block-value
+	// body, the enclosing expression's sibling heap/env temps sit below the floor
+	// and must survive to the enclosing merge — drain only the suffix created at/
+	// after the if. 0 outside a block-value body → full drain (unchanged).
 	c.heapTemps = savedHeapTemps
 	c.heapTempMap = savedHeapTempMap
-	c.cleanupHeapTemps()
+	c.cleanupHeapTempsFrom(c.blockTempFloorHeap)
 	c.envTemps = savedEnvTempsIf     // T0100
 	c.envTempMap = savedEnvTempMapIf // T0100
-	c.cleanupEnvTemps()
+	c.cleanupEnvTempsFrom(c.blockTempFloorEnv)
 }
 
 // genIfStmtValue generates an if/else statement in value-producing position
@@ -12718,12 +12845,14 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 
 	// B0173: Restore heap/env temps and clean up in the merge block so both
 	// then and else paths reach the cleanup (via their branches to mergeBlock).
+	// T1329: floor-aware drain (see genIfStmt) so a sibling heap/env prefix
+	// survives when this if-unwrap is a leading statement in a block-value body.
 	c.heapTemps = savedHeapTemps
 	c.heapTempMap = savedHeapTempMap
-	c.cleanupHeapTemps()
+	c.cleanupHeapTempsFrom(c.blockTempFloorHeap)
 	c.envTemps = savedEnvTempsUW     // T0100
 	c.envTempMap = savedEnvTempMapUW // T0100
-	c.cleanupEnvTemps()
+	c.cleanupEnvTempsFrom(c.blockTempFloorEnv)
 }
 
 // --- While loop ---

@@ -337,6 +337,17 @@ type Compiler struct {
 	// inline enum constructors in the same statement (e.g., two enum args in one call).
 	enumCtorTemps []enumCtorTemp
 
+	// T1329: statement-boundary drains inside a block-value body (if/match arm,
+	// `?` handler) skip temps below these floor indices — they are SIBLING temps
+	// from the enclosing expression that were materialized before the block body
+	// and must outlive it (the enclosing call re-reads them after the merge). Set
+	// by genBlockValue to the tracking depths at block entry; 0 outside a
+	// block-value body. cleanupStmtLevelTemps passes them to the *From drains.
+	blockTempFloorStmt int
+	blockTempFloorHeap int
+	blockTempFloorEnv  int
+	blockTempFloorEnum int
+
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
 	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
@@ -11156,6 +11167,10 @@ type compilerState struct {
 	envTemps             []envTemp
 	envTempMap           map[value.Value]int
 	enumCtorTemps        []enumCtorTemp // B0267
+	blockTempFloorStmt   int            // T1329
+	blockTempFloorHeap   int            // T1329
+	blockTempFloorEnv    int            // T1329
+	blockTempFloorEnum   int            // T1329
 	tempTrackingEnabled  bool
 	panicExitBlock       *ir.Block       // T0262: prevent cross-function block references
 	coroutineReturnBlock *ir.Block       // T0262: prevent cross-function block references
@@ -11195,7 +11210,11 @@ func (c *Compiler) saveState() compilerState {
 		heapTempMap:          c.heapTempMap,
 		envTemps:             c.envTemps,
 		envTempMap:           c.envTempMap,
-		enumCtorTemps:        c.enumCtorTemps, // B0267
+		enumCtorTemps:        c.enumCtorTemps,      // B0267
+		blockTempFloorStmt:   c.blockTempFloorStmt, // T1329
+		blockTempFloorHeap:   c.blockTempFloorHeap, // T1329
+		blockTempFloorEnv:    c.blockTempFloorEnv,  // T1329
+		blockTempFloorEnum:   c.blockTempFloorEnum, // T1329
 		tempTrackingEnabled:  c.tempTrackingEnabled,
 		panicExitBlock:       c.panicExitBlock,
 		coroutineReturnBlock: c.coroutineReturnBlock,
@@ -11217,6 +11236,13 @@ func (c *Compiler) saveState() compilerState {
 	// params (an elvis there owns/borrows by its own param list). Define sites
 	// repopulate it; restoreState brings the outer's set back afterward.
 	c.borrowedValueParams = nil
+	// T1329: a nested function/coroutine body defined inside a block-value body is
+	// a separate function; its statement boundaries must drain from 0, not inherit
+	// the outer block's sibling-temp floor. restoreState brings the floors back.
+	c.blockTempFloorStmt = 0
+	c.blockTempFloorHeap = 0
+	c.blockTempFloorEnv = 0
+	c.blockTempFloorEnum = 0
 	return s
 }
 
@@ -11237,7 +11263,11 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.heapTempMap = s.heapTempMap
 	c.envTemps = s.envTemps
 	c.envTempMap = s.envTempMap
-	c.enumCtorTemps = s.enumCtorTemps // B0267
+	c.enumCtorTemps = s.enumCtorTemps           // B0267
+	c.blockTempFloorStmt = s.blockTempFloorStmt // T1329
+	c.blockTempFloorHeap = s.blockTempFloorHeap // T1329
+	c.blockTempFloorEnv = s.blockTempFloorEnv   // T1329
+	c.blockTempFloorEnum = s.blockTempFloorEnum // T1329
 	c.tempTrackingEnabled = s.tempTrackingEnabled
 	c.blockCounter = s.blockCounter
 	c.canError = s.canError
@@ -11257,6 +11287,26 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.borrowedValueParams = s.borrowedValueParams
 	c.discardedExpr = s.discardedExpr             // T1029
 	c.discardAliasArgPtrs = s.discardAliasArgPtrs // T1029
+}
+
+// resetBlockTempFloors zeroes the block-value temp floors for a nested function
+// body (lambda / coroutine / generator) whose temp-tracking arrays are reset
+// fresh, returning the outer floors so the caller can restore them on exit.
+// saveState/restoreState already do this; these are for the manual save/restore
+// paths (genLambdaExpr, go-block coroutines) that don't route through saveState.
+// Without the reset a nested body defined inside a block-value body would inherit
+// a stale, non-zero floor and skip draining its own statement-boundary temps
+// (T1329).
+func (c *Compiler) resetBlockTempFloors() [4]int {
+	saved := [4]int{c.blockTempFloorStmt, c.blockTempFloorHeap, c.blockTempFloorEnv, c.blockTempFloorEnum}
+	c.blockTempFloorStmt, c.blockTempFloorHeap, c.blockTempFloorEnv, c.blockTempFloorEnum = 0, 0, 0, 0
+	return saved
+}
+
+// restoreBlockTempFloors restores the floors saved by resetBlockTempFloors (T1329).
+func (c *Compiler) restoreBlockTempFloors(saved [4]int) {
+	c.blockTempFloorStmt, c.blockTempFloorHeap = saved[0], saved[1]
+	c.blockTempFloorEnv, c.blockTempFloorEnum = saved[2], saved[3]
 }
 
 // findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,

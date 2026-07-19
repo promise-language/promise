@@ -1,0 +1,325 @@
+// T1272: Passing an unbound temporary — a function-call result, constructor
+// expression, or module-getter result — as a `~` (MutRef) argument must
+// materialize the temp AND register it for drop at statement end. The value is
+// materialized for the callee but was never drop-registered, so scope exit freed
+// nothing → leak. Getters additionally panicked in genMutRefArg (not an lvalue).
+//
+// Matrix: temp producer (ctor / fn-call / module getter) × param shape
+// (coerced view `Writer ~out` / exact type `Builder ~b`) × call form (inline
+// `? e {}` handler / `?!` / non-failable `~`). The batch harness fails on any
+// allocation leak, so passing == no leak. All controls (named local, field
+// pointer) must still pass without leaking.
+emit!(Writer ~out, string msg) `doc("Writes msg via a coerced Writer view.") {
+  out.write_line(msg);
+}
+
+touch!(Builder ~b, string msg) `doc("Writes msg via an exact-typed Builder.") {
+  b.write_line(msg);
+}
+
+poke(Builder ~b, string msg) `doc("Non-failable exact-typed Builder writer.") {
+  b.write_line(msg);
+}
+
+make_builder() Builder `doc("Fresh builder from a call.") {
+  return Builder();
+}
+
+get a_builder Builder `doc("Fresh builder from a module getter.") {
+  return Builder();
+}
+
+// --- Producer × coerced view (Writer ~out), failable inline handler ---
+
+t1272_ctor_view() `test {
+  emit(Builder(), "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+t1272_fncall_view() `test {
+  emit(make_builder(), "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+t1272_getter_view() `test {
+  emit(a_builder, "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+// --- Producer × exact type (Builder ~b), failable inline handler ---
+
+t1272_ctor_exact() `test {
+  touch(Builder(), "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+t1272_fncall_exact() `test {
+  touch(make_builder(), "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+t1272_getter_exact() `test {
+  touch(a_builder, "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+// --- Member-getter producers: an INSTANCE getter (`owner.getter`) and an ENUM
+// getter (`variant.getter`) returning a fresh heap Builder, passed as a bare
+// temporary into a `~` param. A getter member is not an lvalue — genFieldPtr
+// panics on it — so genMutRefArg must route it through isMemberGetter's
+// LookupGetter branches (named-type getter / enum getter) to the materialize-and-
+// track path. The bare-ident (`a_builder`) and module-member (propmod) getter
+// forms are covered elsewhere; these lock the two remaining isMemberGetter arms. ---
+
+type BuilderSource `doc("Holds a seed and yields a fresh Builder via an instance getter.") {
+  int seed;
+  get fresh Builder `doc("Returns a fresh heap Builder.") {
+    return Builder();
+  }
+  drop(~this) {
+  }
+}
+
+enum BuilderKind `doc("Enum whose getter yields a fresh Builder.") {
+  Plain,
+  Fancy,
+  get fresh Builder `doc("Returns a fresh heap Builder.") {
+    return Builder();
+  }
+}
+
+t1272_instance_getter_member() `test {
+  BuilderSource src = BuilderSource(seed: 1);
+  emit(src.fresh, "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+t1272_enum_getter_member() `test {
+  BuilderKind k = BuilderKind.Fancy;
+  touch(k.fresh, "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+// Loop forms — each iteration materializes a fresh Builder that must be dropped
+// at statement end (leak check enforces no accumulation across 100 iterations).
+t1272_instance_getter_member_loop() `test {
+  BuilderSource src = BuilderSource(seed: 1);
+  for i in 0..100 {
+    poke(src.fresh, "x");
+  }
+}
+
+t1272_enum_getter_member_loop() `test {
+  BuilderKind k = BuilderKind.Plain;
+  for i in 0..100 {
+    poke(k.fresh, "x");
+  }
+}
+
+// --- Failable with `?!` propagation form (wrapped: test fns must not be failable) ---
+
+do_getter_view_bang!() `doc("Propagates via ?! on a getter temp.") {
+  emit(a_builder, "x")?!;
+}
+
+do_ctor_exact_bang!() `doc("Propagates via ?! on a constructor temp.") {
+  touch(Builder(), "x")?!;
+}
+
+t1272_getter_view_bang() `test {
+  do_getter_view_bang()? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+t1272_ctor_exact_bang() `test {
+  do_ctor_exact_bang()? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+// --- Non-failable `~` call (the form that previously panicked for getters) ---
+
+t1272_getter_nonfailable() `test {
+  poke(a_builder, "x");
+}
+
+t1272_ctor_nonfailable() `test {
+  poke(Builder(), "x");
+}
+
+t1272_fncall_nonfailable() `test {
+  poke(make_builder(), "x");
+}
+
+// --- Nested handler: a temp in the OUTER statement of an outer `? e {}` whose
+// body contains an inner failable call. Guards the WIP ok-path temp drain. ---
+
+t1272_nested_handler() `test {
+  emit(make_builder(), "outer")? e {
+    emit(Builder(), "inner")? e2 {
+      assert(false, "inner error");
+      return;
+    };
+    assert(false, "outer error");
+    return;
+  };
+}
+
+// --- Controls that must still pass without leaking ---
+
+t1272_named_local_control() `test {
+  Builder b = Builder();
+  emit(b, "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+  assert(b.to_string().contains("x"), "expected written content");
+}
+
+type Wrap `doc("Owner holding a Builder field, for the field-pointer control.") {
+  Builder inner;
+  drop(~this) {
+  }
+}
+
+t1272_field_pointer_control() `test {
+  Wrap w = Wrap(inner: Builder());
+  touch(w.inner, "y")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+  assert(w.inner.to_string().contains("y"), "expected written content");
+}
+
+// --- Sibling-temp survival: a `? {}` handler nested as a NON-last argument of an
+// enclosing call, alongside a sibling heap temp, must NOT drop that sibling on the
+// OK path. The failable call's OWN temps are drained at the handler split, but the
+// sibling belongs to the enclosing call and must survive to be consumed there.
+// (The T1272 OK-path drain was initially unscoped and freed the sibling early → a
+// use-after-free garbage read. It now snapshots the temp-tracking depth and drains
+// only the failable call's own temps.) ---
+
+sib_make_s() string `doc("Fresh heap string from a call.") {
+  return "abc".to_upper();
+}
+
+sib_may_fail!(int x) int `doc("Fails when x<0, else echoes x.") {
+  if x < 0 {
+    raise error(message: "neg");
+  }
+  return x;
+}
+
+sib_combine(string s, int n) int `doc("Uses both a heap-string and an int arg.") {
+  return s.len + n;
+}
+
+t1272_sibling_temp_ok_path() `test {
+  // OK path (x>=0): the handler does not run; sib_make_s()'s temp must survive
+  // to sib_combine on the merge path. Reading a freed string would yield garbage.
+  int r = sib_combine(sib_make_s(), sib_may_fail(5)? e {
+    100
+  });
+  assert(r == 8, "len(ABC)=3 + 5 = 8");
+}
+
+// NOTE: the error/recover analogue (`sib_combine(sib_make_s(), sib_may_fail(-1)?
+// e { 100 })`) is deliberately NOT tested here — it trips a SEPARATE, pre-existing
+// leak/use-after-free (T1325: a `? {}` handler that recovers-and-continues as a
+// non-last call argument drops the sibling temp on the error path before the
+// enclosing call consumes it). The OK-path case above is what the T1272 fix guards.
+
+// --- Error-unwind temp cleanup: env (closure) and inline enum-constructor temps
+// materialized as a sibling argument while a BARE failable call auto-propagates in
+// the same statement. The T1272 fix added env/enum-ctor cleanup to the error-path
+// unwind, but only the inline `? {}` handler split wired it in; the auto-propagate
+// (bare-call), explicit `?^`, `raise`, generator-factory, and panic-return unwind
+// points cleaned only string/heap temps, leaking the env/enum temp. All error-path
+// unwinds now share one combined cleanup helper. These guard the auto-propagate
+// path specifically (the others share the same helper). ---
+
+sink_may_fail!(int x) int `doc("Fails when x<0, else echoes x.") {
+  if x < 0 {
+    raise error(message: "neg");
+  }
+  return x;
+}
+
+take_closure((int) -> int f, int y) int `doc("Combines a closure result with y.") {
+  return f(1) + y;
+}
+
+enum Payload `doc("Enum carrying a droppable string, for the enum-ctor temp path.") {
+  Full(string s),
+  Empty,
+}
+
+take_enum(Payload p, int y) int `doc("Combines a Payload's contents with y.") {
+  match p {
+    Payload.Full(s) => {
+      return s.len + y;
+    },
+    Payload.Empty => {
+      return y;
+    },
+  }
+}
+
+propagate_with_closure_temp!(int x) int `doc("Closure temp live across auto-propagate.") {
+  int cap = 7;
+  return take_closure(|int a| -> a + cap, sink_may_fail(x));
+}
+
+propagate_with_enum_temp!(int x) int `doc("Enum-ctor temp live across auto-propagate.") {
+  return take_enum(Payload.Full("hello".to_upper()), sink_may_fail(x));
+}
+
+t1272_env_temp_propagate() `test {
+  propagate_with_closure_temp(-1)? e {
+    assert(e.message == "neg", "expected propagated error");
+    return;
+  };
+  assert(false, "should have propagated");
+}
+
+t1272_enum_temp_propagate() `test {
+  propagate_with_enum_temp(-1)? e {
+    assert(e.message == "neg", "expected propagated error");
+    return;
+  };
+  assert(false, "should have propagated");
+}
+
+t1272_env_temp_propagate_ok() `test {
+  int r = propagate_with_closure_temp(5)? e {
+    assert(false, "unexpected error");
+    return;
+  };
+  assert(r == 13, "closure(1)=8 + 5 = 13");
+}
+
+// NOTE: the enum-ctor OK-path analogue (`propagate_with_enum_temp(5)`) is
+// deliberately NOT tested here — it trips a SEPARATE, pre-existing leak (T1317:
+// an inline enum-ctor temp with a droppable payload passed into a call that is
+// directly `return`ed leaks the payload), unrelated to the error-path cleanup
+// this file covers. The error-path case above (`propagate_with_enum_temp(-1)`)
+// is clean and is what this fix guards.

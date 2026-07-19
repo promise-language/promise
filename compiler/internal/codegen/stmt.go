@@ -1017,8 +1017,7 @@ func (c *Compiler) emitFailableResultPropagation(result value.Value) {
 
 	// Error path: cleanup stmt temps + scope bindings, extract error, propagate
 	c.block = propagateBlock
-	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
-	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
+	c.emitAllStmtTempCleanupForErrorPath() // T0103/T1272: free all temp kinds before returning
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
@@ -1141,8 +1140,7 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 
 	// Error path: cleanup stmt temps + scope bindings, extract error, propagate
 	c.block = propagateBlock
-	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
-	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
+	c.emitAllStmtTempCleanupForErrorPath() // T0103/T1272: free all temp kinds before returning
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
@@ -7026,6 +7024,103 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 	}
 }
 
+// emitEnvTempCleanupForErrorPath emits cleanup IR for statement-level closure-env
+// temps without resetting the tracking state. T1272: used at the error-handler
+// split so the outer statement's env temps are dropped on both the error and ok
+// paths (mirrors emitStmtTempCleanupForErrorPath / cleanupEnvTemps).
+func (c *Compiler) emitEnvTempCleanupForErrorPath() {
+	if len(c.envTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	for _, temp := range c.envTemps {
+		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+		dropBlock := c.newBlock("err.env.drop")
+		skipBlock := c.newBlock("err.env.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isNull := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("err.env.exec")
+		doneBlock := c.newBlock("err.env.done")
+		c.block.NewCondBr(isNull, doneBlock, execBlock)
+
+		c.block = execBlock
+		c.emitEnvDropOrFree(ptr) // B0221
+		c.block.NewBr(doneBlock)
+
+		c.block = doneBlock
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	}
+}
+
+// emitEnumCtorTempCleanupForErrorPath emits cleanup IR for inline enum-constructor
+// temps without resetting the tracking state. T1272: used at the error-handler
+// split so the outer statement's enum-ctor temps are dropped on both the error and
+// ok paths (mirrors the enum loop in cleanupStmtLevelTemps).
+func (c *Compiler) emitEnumCtorTempCleanupForErrorPath() {
+	if len(c.enumCtorTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	for _, et := range c.enumCtorTemps {
+		flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
+		dropBlk := c.newBlock("err.enum.drop")
+		skipBlk := c.newBlock("err.enum.skip")
+		c.block.NewCondBr(flag, dropBlk, skipBlk)
+		c.block = dropBlk
+		ptr := c.block.NewLoad(irtypes.I8Ptr, et.alloca)
+		c.block.NewCall(et.dropFunc, ptr)
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), et.dropFlag)
+		c.block.NewBr(skipBlk)
+		c.block = skipBlk
+	}
+}
+
+// emitAllStmtTempCleanupForErrorPath emits flag-guarded cleanup IR for EVERY
+// statement-level temp kind — string/vector/channel temps (stmtTemps), heap
+// user-type instance temps (heapTemps), closure-env temps (envTemps), and inline
+// enum-constructor temps (enumCtorTemps) — without resetting the tracking state.
+// This is the single unwind-path cleanup for every error-in-flight site that
+// abandons the current statement to propagate an error: bare-call auto-propagate,
+// explicit `?^`, `raise`, the generator-factory error path, and the inline `? {}`
+// handler split. T1272: previously each of those sites cleaned only
+// stmtTemps+heapTemps, so a closure-env or inline-enum temp materialized in the
+// abandoned statement (e.g. `take2(|x| -> x + cap, mayFail())`) leaked on the
+// unwind — the env/enum kinds were freed only at the inline `? {}` handler split.
+// Consolidating the four kinds behind one call keeps every site in lockstep so no
+// future kind is dropped at one site and missed at another. Ordered
+// stmt→heap→env→enum to match cleanupStmtLevelTemps.
+//
+// The TLS panic-flag-check unwind (emitPanicReturn, io.go) deliberately does NOT
+// use this helper — see the comment there and T1318.
+func (c *Compiler) emitAllStmtTempCleanupForErrorPath() {
+	c.emitStmtTempCleanupForErrorPath()
+	c.emitHeapTempCleanupForErrorPath()
+	c.emitEnvTempCleanupForErrorPath()
+	c.emitEnumCtorTempCleanupForErrorPath()
+}
+
+// pruneTempMapSuffix deletes value→index entries whose index points at or past
+// `base` — the entries for temps that were truncated off the tail of a tracking
+// slice. Entries below `base` (live siblings) and claimed entries (index -1) are
+// left intact so downstream claim lookups stay valid and in bounds. T1272.
+func pruneTempMapSuffix(m map[value.Value]int, base int) {
+	for k, idx := range m {
+		if idx >= base {
+			delete(m, k)
+		}
+	}
+}
+
 // emitHeapTempCleanupForErrorPath emits cleanup IR for statement-level heap
 // instance temps without resetting the tracking state (T0103). Same rationale
 // as emitStmtTempCleanupForErrorPath.
@@ -11541,8 +11636,7 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	c.claimStringTemp(errVal)
 	c.claimHeapTemp(errVal)
 	if c.block != nil && c.block.Term == nil {
-		c.emitStmtTempCleanupForErrorPath()
-		c.emitHeapTempCleanupForErrorPath()
+		c.emitAllStmtTempCleanupForErrorPath() // T1272: also frees env/enum temps
 	}
 
 	// Emit close() for all active use bindings before raising

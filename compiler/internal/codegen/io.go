@@ -382,6 +382,15 @@ func (c *Compiler) emitPanicReturn() {
 	if c.block == nil || c.block.Term != nil {
 		return
 	}
+	// NB: only string/heap temps are cleaned here — NOT env/enum temps (unlike the
+	// error-propagation unwind sites, which use emitAllStmtTempCleanupForErrorPath).
+	// This is the TLS panic-flag check emitted after EVERY call (emitPanicCheck), so
+	// it fires while the current statement's env/enum temps are still armed-but-not-
+	// yet-consumed; a flag-guarded env/enum drop here is dead at runtime (the flag is
+	// clear until the temp is armed, and cleared again once moved) but would emit an
+	// extra guarded drop call at every panic check, breaking precise per-enum IR
+	// expectations (T1103/T1156). Panic-path env/enum-temp leak-safety is a separate,
+	// pre-existing concern from the T1272 error-propagation fix — tracked as T1318.
 	c.emitStmtTempCleanupForErrorPath()
 	c.emitHeapTempCleanupForErrorPath()
 	if len(c.scopeBindings) > 0 {

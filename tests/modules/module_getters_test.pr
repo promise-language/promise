@@ -261,3 +261,32 @@ test_getter_function_direct_call_in_generic() `test {
   assert(call_getter_in_generic[bool](true) == 42, "second monomorphization should be 42");
   assert(call_scaler_in_generic[int](0, 7) == 70, "generic-context scaler(7) should be 70");
 }
+
+// T1272: a module-level getter returning a fresh heap Builder, passed as a bare
+// temporary into a `~` (MutRef) parameter. This is the `mod.prop` member form of
+// the T1272 fix — it routes through isMemberGetter's `ModuleGetters` branch to
+// the materialize-and-track path (a getter member is not an lvalue, so it must be
+// materialized into a temp alloca and dropped at statement end). Before the fix
+// the temp was materialized for the callee but never drop-registered → leak.
+_emit_via_mutref!(Writer ~out, string msg) `doc("Writes msg via a coerced Writer view.") {
+  out.write_line(msg);
+}
+
+test_module_getter_into_mutref() `test {
+  _emit_via_mutref(propmod.fresh_builder, "x")? e {
+    assert(false, "unexpected error");
+    return;
+  };
+}
+
+// T1272: same module-getter `~`-param temp read in a loop — each iteration
+// materializes a fresh Builder that must be dropped at statement end (leak check
+// enforces no accumulation across 100 iterations).
+test_module_getter_into_mutref_loop() `test {
+  for i in 0..100 {
+    _emit_via_mutref(propmod.fresh_builder, "x")? e {
+      assert(false, "unexpected error");
+      return;
+    };
+  }
+}

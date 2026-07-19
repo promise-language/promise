@@ -681,8 +681,7 @@ func (c *Compiler) unwrapFailableGeneratorResult(result value.Value, pos ast.Pos
 
 	c.block = errBlk
 	errPtr := c.block.NewExtractValue(result, resultErrIdx(resultType))
-	c.emitStmtTempCleanupForErrorPath()
-	c.emitHeapTempCleanupForErrorPath()
+	c.emitAllStmtTempCleanupForErrorPath() // T1272: also frees env/enum temps
 	if c.inGenerator && c.generatorCanError {
 		if len(c.scopeBindings) > 0 {
 			c.emitScopeCleanup(0, true)

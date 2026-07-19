@@ -100,3 +100,11 @@ get scaler(int) -> int `public `doc("Returns a closure that scales its argument.
   factor := 10;
   return move |int x| -> x * factor;
 }
+
+// T1272: getter returning a fresh heap Builder — used as a bare-temporary
+// argument to a `~` (MutRef) parameter (`emit(propmod.fresh_builder, …)`) this
+// exercises the `ModuleGetters` branch of isMemberGetter's materialize-and-track
+// path. The owned Builder must be dropped at statement end (leak check enforces).
+get fresh_builder Builder `public `doc("Returns a fresh heap Builder.") {
+  return Builder();
+}

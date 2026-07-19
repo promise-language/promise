@@ -1184,15 +1184,17 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 	if fn, ok := c.funcs[e.Name]; ok {
 		if obj := c.lookupFunc(e.Name); obj != nil && obj.IsGetter() {
 			result := c.block.NewCall(fn)
-			// T0137/T1321: track every heap-owning result kind (string, vector,
-			// channel, Arc/Weak/Mutex/Task, structural box, heap user type) so a
-			// bare module getter used as a discarded temporary or temp method
-			// receiver is freed at statement end — mirroring the qualified
+			// T0137/T1272/T1321: track every heap-owning result kind (string,
+			// vector, channel, Arc/Weak/Mutex/Task, structural box, heap user
+			// type) so a bare module getter used as a discarded temporary, a
+			// temp method receiver, or a temp passed into a `~` (MutRef)
+			// parameter is freed at statement end — mirroring the qualified
 			// `mod.prop` path (genModuleGetterCall). Module getters take no
-			// receiver and always construct fresh owned values, so tracking is
-			// never an alias/double-free hazard. The binding/assignment path
-			// claims the temp (claimStringTemp / claimHeapTemp) so a single owner
-			// frees it either way.
+			// receiver and (Promise has no mutable globals) always construct
+			// fresh owned values, so tracking is never an alias/double-free
+			// hazard. The binding/assignment/move path claims the temp
+			// (claimStringTemp / claimHeapTemp) so a single owner frees it
+			// either way.
 			retType := c.info.Types[e]
 			if c.typeSubst != nil && retType != nil {
 				retType = types.Substitute(retType, c.typeSubst)
@@ -7183,17 +7185,54 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 		if alloca, ok := c.locals[e.Name]; ok {
 			return alloca
 		}
-		panic(fmt.Sprintf("codegen: MutRef argument %q not found in locals", e.Name))
+		// T1272: a bare module-level getter ident (`emit(a_builder, …)`) is not an
+		// lvalue — it constructs a fresh temporary. Fall through to the default
+		// materialize-and-track path so the temp is dropped at statement end.
 	case *ast.MemberExpr:
-		// Field access: pass field pointer
-		return c.genFieldPtr(e)
-	default:
-		// Fallback: evaluate normally and store to a temp alloca
-		val := c.genCallArgExpr(expr)
-		tmp := c.createEntryAlloca(val.Type())
-		c.block.NewStore(val, tmp)
-		return tmp
+		// T1272: a getter member (`mod.prop`, `owner.getter`) is not a field — it
+		// produces a fresh temporary. genFieldPtr panics on a getter, so materialize
+		// instead. genCallArgExpr registers the getter's heap result as a statement
+		// temp (with the existing alias filters), so the temp is dropped at
+		// statement end. Only a genuine field flows to genFieldPtr.
+		if !c.isMemberGetter(e) {
+			return c.genFieldPtr(e)
+		}
 	}
+	// Fallback (and non-lvalue getter idents/members): evaluate normally and store
+	// to a temp alloca. genCallArgExpr registers any heap-owning result as a
+	// statement temp, so the materialized value is dropped at statement end (T1272).
+	val := c.genCallArgExpr(expr)
+	tmp := c.createEntryAlloca(val.Type())
+	c.block.NewStore(val, tmp)
+	return tmp
+}
+
+// isMemberGetter reports whether a member access resolves to a getter (a
+// module-level `mod.prop` getter, or an instance/enum getter `owner.getter`)
+// rather than a plain field. Used by genMutRefArg to route a getter temporary
+// through the materialize-and-track path instead of genFieldPtr (which panics on
+// a getter). T1272.
+func (c *Compiler) isMemberGetter(e *ast.MemberExpr) bool {
+	if c.info.ModuleGetters[e] {
+		return true
+	}
+	ownerType := c.info.Types[e.Target]
+	if c.typeSubst != nil && ownerType != nil {
+		ownerType = types.Substitute(ownerType, c.typeSubst)
+	}
+	if c.selfSubst != nil && ownerType != nil {
+		ownerType = types.SubstituteSelf(ownerType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if named := extractNamed(ownerType); named != nil {
+		if named.LookupGetter(e.Field) != nil {
+			return true
+		}
+	} else if en := extractEnum(ownerType); en != nil {
+		if en.LookupGetter(e.Field) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // isVariantPayloadBorrowShape reports whether a type has the shape that
@@ -10579,8 +10618,7 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 
 	// Error path: cleanup stmt temps + scope bindings, extract error, propagate
 	c.block = propagateBlock
-	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
-	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
+	c.emitAllStmtTempCleanupForErrorPath() // T0103/T1272: free all temp kinds before returning
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
@@ -10640,6 +10678,18 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		return c.genOptionalHandlerExpr(e)
 	}
 
+	// T1272: snapshot the temp-tracking depth BEFORE evaluating the failable
+	// subexpression, so the OK-path drain below touches only the temps THIS call
+	// materializes (the suffix at/after the snapshot) — never sibling temps from
+	// an enclosing expression (e.g. the `make_s()` arg in
+	// `combine(make_s(), may_fail()? e {})`), which must outlive the handler and
+	// be consumed/dropped by the enclosing statement. Draining a sibling here
+	// frees it before the enclosing call reads it → use-after-free.
+	preStmt := len(c.stmtTemps)
+	preHeap := len(c.heapTemps)
+	preEnv := len(c.envTemps)
+	preEnum := len(c.enumCtorTemps)
+
 	result := c.genExpr(e.Expr)
 	resultType := result.Type().(*irtypes.StructType)
 
@@ -10650,10 +10700,59 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	mergeBlock := c.newBlock("error.merge")
 	c.block.NewCondBr(tag, handlerBlock, okBlock)
 
-	// Handler block: clean up stmt temps before running handler body (T0103)
+	// Handler block: clean up stmt temps before running handler body (T0103/T1272)
 	c.block = handlerBlock
-	c.emitStmtTempCleanupForErrorPath()
-	c.emitHeapTempCleanupForErrorPath()
+	c.emitAllStmtTempCleanupForErrorPath()
+
+	// T1272: The outer statement's argument temporaries (call results, constructor
+	// results, string/closure/enum-ctor temps materialized for THIS failable call)
+	// are still tracked. The error path dropped them above; the OK path relied on
+	// statement-end cleanup, but the handler body's own statement boundaries drain
+	// the shared tracking first — dropping them only on the handler path and
+	// leaving the OK path un-dropped → leak. Emit the OK-path drops now and clear
+	// the tracking so the handler body starts hermetic and statement-end doesn't
+	// double-handle these temps.
+	okContBlock := okBlock
+	if len(c.stmtTemps) > preStmt || len(c.heapTemps) > preHeap || len(c.envTemps) > preEnv || len(c.enumCtorTemps) > preEnum {
+		savedHandlerBlock := c.block
+		c.block = okBlock
+		// T1272: The failable expression's OWN result value is being produced on the
+		// OK path (e.g. a constructor's caller-allocated instance, tracked as a
+		// heapTemp BEFORE the call). Its ownership passes to the enclosing binding /
+		// statement (which re-tracks and drops it after the merge), so it must NOT be
+		// dropped by the arg-temp drain below — dropping it frees the value the caller
+		// is about to consume (use-after-free + double-free). Claim it out of the
+		// drain, leaving only the genuine argument temporaries to be freed. Only heap
+		// user-type results are caller-pre-allocated into the pre-merge tracking;
+		// string/vector/method results are materialized after the extract, so a
+		// heap-temp claim is sufficient here. (The claim runs against the full arrays,
+		// before they are narrowed below, so its runtime-pointer struct-match sees
+		// every tracked temp.)
+		if !isVoidResult(resultType) {
+			okResult := c.block.NewExtractValue(result, 1)
+			c.claimHeapTemp(okResult)
+		}
+		// T1272: Narrow each tracking slice to the failable call's OWN temps (the
+		// suffix past the pre-eval snapshot) so the OK-path drain drops only those.
+		// The sibling prefix is spliced back below, untouched.
+		fullStmt, fullHeap := c.stmtTemps, c.heapTemps
+		fullEnv, fullEnum := c.envTemps, c.enumCtorTemps
+		c.stmtTemps, c.heapTemps = fullStmt[preStmt:], fullHeap[preHeap:]
+		c.envTemps, c.enumCtorTemps = fullEnv[preEnv:], fullEnum[preEnum:]
+		c.emitAllStmtTempCleanupForErrorPath()
+		okContBlock = c.block
+		c.block = savedHandlerBlock
+		// T1272: Drop the drained own-temps from tracking (truncate to the snapshot)
+		// but KEEP the sibling prefix — and prune only the map entries that now point
+		// past the truncated slices so downstream claims stay in bounds. Claimed
+		// entries (index -1, from claimStringTemp/claimHeapTemp) and live sibling
+		// entries (index < snapshot) are preserved.
+		c.stmtTemps, c.heapTemps = fullStmt[:preStmt], fullHeap[:preHeap]
+		c.envTemps, c.enumCtorTemps = fullEnv[:preEnv], fullEnum[:preEnum]
+		pruneTempMapSuffix(c.stmtTempMap, preStmt)
+		pruneTempMapSuffix(c.heapTempMap, preHeap)
+		pruneTempMapSuffix(c.envTempMap, preEnv)
+	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
 
 	// T0770: For the regular (non-optional-wrapping) recovery path, the recovery
@@ -10825,8 +10924,8 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.block.NewBr(mergeBlock)
 	}
 
-	// Ok path: extract value
-	c.block = okBlock
+	// Ok path: extract value (continue after any T1272 ok-path temp drops)
+	c.block = okContBlock
 	var okVal value.Value
 	if !isVoidResult(resultType) {
 		okVal = c.block.NewExtractValue(result, 1)

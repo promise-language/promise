@@ -10581,16 +10581,29 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	}
 	c.block = mergeBlock
 
-	// If both branches produce values, create a phi node
-	if thenVal != nil && elseVal != nil {
-		phi := mergeBlock.NewPhi(
-			&ir.Incoming{X: thenVal, Pred: thenEnd},
-			&ir.Incoming{X: elseVal, Pred: elseEnd},
-		)
+	// Build the phi from whichever branches reach mergeBlock with a value. One
+	// arm may diverge (end in return/raise), leaving only the other to contribute
+	// its value — mirror genIfStmtValue / buildMatchPhi's single-incoming handling
+	// rather than requiring both arms and returning nil (T1330).
+	var incomings []*ir.Incoming
+	if thenVal != nil {
+		if br, ok := thenEnd.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
+			incomings = append(incomings, &ir.Incoming{X: thenVal, Pred: thenEnd})
+		}
+	}
+	if elseVal != nil {
+		if br, ok := elseEnd.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
+			incomings = append(incomings, &ir.Incoming{X: elseVal, Pred: elseEnd})
+		}
+	}
+	if len(incomings) > 0 {
+		phi := mergeBlock.NewPhi(incomings...)
 		// T1107: register an owned i8* phi (string/vector/native handle) as a
 		// statement temp so a borrow/discard consumer frees it exactly once. Reuses
 		// the match path via two synthetic arm records (only .end and .owned are
 		// consulted). A bound/return consumer claims the phi and neutralizes the flag.
+		// trackMergeResultTemp itself filters to arms that branch to mergeBlock, so a
+		// diverging arm's synthetic record is safely ignored.
 		c.trackMergeResultTemp(phi, ifResultType, []matchArmInfo{
 			{end: thenEnd, owned: thenOwned, ownedFlag: thenOwnedFlag},
 			{end: elseEnd, owned: elseOwned, ownedFlag: elseOwnedFlag},

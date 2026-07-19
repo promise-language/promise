@@ -1,0 +1,87 @@
+// T1330: an `if`-expression in value position with one arm diverging
+// (return/raise) must lower to a single-incoming phi, mirroring `match`
+// and `genIfStmtValue`, rather than returning nil / emitting a nil-callee call.
+// Var-decl direct value position, then arm diverges.
+h1!(bool b) int {
+  int r = if b {
+    return 999
+  } else {
+    100
+  };
+  return r;
+}
+// Var-decl direct value position, else arm diverges.
+h2!(bool b) int {
+  int r = if b {
+    100
+  } else {
+    return 999
+  };
+  return r;
+}
+// Operand position: `1 + if ...`.
+h3!(bool b) int {
+  int r = 1 + if b {
+    return 999
+  } else {
+    100
+  };
+  return r;
+}
+combine(int m, int n) int {
+  return m + n;
+}
+// Call-argument position: `combine(5, if ...)`.
+h4!(bool b) int {
+  int r = combine(5, if b {
+    return 999
+  } else {
+    100
+  });
+  return r;
+}
+// `raise` divergence.
+hraise!(bool b) int {
+  int r = if b {
+    raise error(message: "x")
+  } else {
+    100
+  };
+  return r;
+}
+// Owned-string result flowing through a diverging-arm `if` bound to a local:
+// confirms trackMergeResultTemp frees the phi exactly once (leak-clean).
+diverge_owned!(bool b) string {
+  string s = if b {
+    return "early"
+  } else {
+    "made here"
+  };
+  return s;
+}
+// Owned-vector result through a diverging-arm `if` — exercises the same
+// trackMergeResultTemp owned-i8* phi path for a heap type other than string.
+diverge_vec!(bool b) int[] {
+  int[] v = if b {
+    return[1, 2, 3]
+  } else {
+    [4, 5]
+  };
+  return v;
+}
+
+test_if_diverge_value() `test {
+  assert(h1(false)?! == 100, "h1(false) takes non-diverging arm");
+  assert(h1(true)?! == 999, "h1(true) takes diverging arm");
+  assert(h2(true)?! == 100, "h2(true) takes non-diverging arm");
+  assert(h2(false)?! == 999, "h2(false) takes diverging arm");
+  assert(h3(false)?! == 101, "1 + if in operand position");
+  assert(h4(false)?! == 105, "if in call-argument position");
+  assert(hraise(false)?! == 100, "raise-diverging arm not taken");
+  assert(diverge_owned(false)?! == "made here", "owned-string non-diverging arm");
+  assert(diverge_owned(true)?! == "early", "owned-string diverging arm");
+  int[] dv_else = diverge_vec(false)?!;
+  assert(dv_else.len == 2, "owned-vector non-diverging arm");
+  int[] dv_then = diverge_vec(true)?!;
+  assert(dv_then.len == 3, "owned-vector diverging arm");
+}

@@ -1,0 +1,182 @@
+// T1325: Sibling heap temp freed too early when a `? {}` handler recovers-and-
+// continues as a non-last call argument. The handler-block temp drain must be
+// scoped to the failable call's OWN temps — never the enclosing expression's
+// sibling temps, which must outlive the handler and be dropped by the enclosing
+// statement. Error-path analogue of T1272 (which fixed the OK path).
+//
+// Scope note: this fix covers handler bodies that are a single result expression
+// (no intermediate statement). A handler/if/match body with a LEADING statement
+// still over-drains the sibling mid-body — that is the broader, pre-existing
+// architectural bug tracked as T1329 (not error-path-specific).
+make_s() string `doc("fresh heap string") {
+  return "abc".to_upper();
+}
+
+may_fail!(int x) int `doc("fails if neg") {
+  if x < 0 {
+    raise error(message: "neg");
+  }
+  return x;
+}
+
+combine(string s, int n) int `doc("uses both args") {
+  return s.len + n;
+}
+
+// A failable call that itself takes a heap-string arg temp (own-temp case).
+consume!(string s, int x) int `doc("fails if neg, uses s") {
+  if x < 0 {
+    raise error(message: "neg");
+  }
+  return s.len + x;
+}
+
+probe_sibling_recover() `test {
+  // Recovery does NOT return — control continues into combine() with `s` live.
+  // The sibling `make_s()` temp must survive the handler-path drain.
+  int r = combine(make_s(), may_fail(-1)? e {
+    100
+  });
+  assert(r == 103, "len(ABC)=3 + recovered 100");
+}
+
+probe_sibling_ok() `test {
+  // OK path (T1272 non-regression): may_fail(5) succeeds, sibling still consumed.
+  int r = combine(make_s(), may_fail(5)? e {
+    100
+  });
+  assert(r == 8, "len(ABC)=3 + 5");
+}
+
+probe_own_temp_recover() `test {
+  // The failable call ITSELF takes a heap-string arg temp (own-temp). On the
+  // handler path that own-temp is dropped; the sibling make_s() survives.
+  int r = combine(make_s(), consume(make_s(), -1)? e {
+    100
+  });
+  assert(r == 103, "len(ABC)=3 + recovered 100");
+}
+
+probe_own_temp_ok() `test {
+  // OK path with an own-temp on the failable call.
+  int r = combine(make_s(), consume(make_s(), 5)? e {
+    100
+  });
+  assert(r == 11, "len(ABC)=3 + (len(ABC)=3 + 5)=8");
+}
+
+// Divergence via `raise` inside a recovering-outer handler: the outer handler
+// recovers, the inner failable raises and is caught by the outer handler. The
+// sibling make_s() temps must be freed on every path (no leak).
+outer_wrap!() int `doc("nested failable + recover") {
+  int r = combine(make_s(), may_fail(may_fail(-1)? e {
+    raise error(message: "re")
+  })? e2 {
+    42
+  });
+  return r;
+}
+
+probe_diverge_raise() `test {
+  int r = outer_wrap()? e {
+    999
+  };
+  // inner may_fail(-1) raises → caught by `? e { raise ... }` which re-raises →
+  // caught by outer `? e { 999 }` at the call site here.
+  assert(r == 999, "propagated to outermost handler");
+}
+
+// Void-result failable in a recover-and-continue position.
+side_effect!(int x) `doc("void failable") {
+  if x < 0 {
+    raise error(message: "neg");
+  }
+}
+
+combine_after_void(string s) int `doc("uses s after a void stmt") {
+  return s.len;
+}
+
+probe_void_recover() `test {
+  s := make_s();
+  side_effect(-1)? e {
+  };
+  // s must still be alive here (its own binding, but exercises the void-result
+  // branch of the handler drain not clobbering unrelated tracking).
+  assert(s.len == 3, "ABC len 3");
+}
+
+combine3(string a, string b, int n) int `doc("uses three args") {
+  return a.len + b.len + n;
+}
+
+probe_two_siblings_recover() `test {
+  // TWO heap-string sibling temps precede the failable arg. The handler-path
+  // drain must leave BOTH untouched for the enclosing combine3() to consume.
+  int r = combine3(make_s(), make_s(), may_fail(-1)? e {
+    100
+  });
+  assert(r == 106, "3 + 3 + recovered 100");
+}
+
+probe_two_siblings_ok() `test {
+  int r = combine3(make_s(), make_s(), may_fail(5)? e {
+    100
+  });
+  assert(r == 11, "3 + 3 + 5");
+}
+
+// --- Typed handler (`? e is T`) variant: the T1325 own-temp drain block runs
+// BEFORE the RTTI match/nomatch branching, so a typed handler that matches and
+// recovers-with-a-value (single-expr body, in T1325 scope) must also leave the
+// enclosing sibling temp live for the merge. ---
+type MyErr is error `doc("typed error carrying a code") {
+  int code;
+}
+
+may_fail_typed!(int x) int `doc("raises MyErr if neg") {
+  if x < 0 {
+    raise MyErr(message: "neg", code: 7);
+  }
+  return x;
+}
+
+probe_typed_sibling_recover() `test {
+  // Typed handler matches MyErr and recovers with a value; sibling make_s()
+  // must survive the handler-path drain (typed match block).
+  int r = combine(make_s(), may_fail_typed(-1)? e is MyErr {
+    100
+  } else {
+    -1
+  });
+  assert(r == 103, "typed recover: len(ABC)=3 + 100");
+}
+
+probe_typed_sibling_ok() `test {
+  // OK path through the typed handler: no raise, sibling still consumed.
+  int r = combine(make_s(), may_fail_typed(5)? e is MyErr {
+    100
+  } else {
+    -1
+  });
+  assert(r == 8, "typed ok: len(ABC)=3 + 5");
+}
+
+// Failable call that itself takes a heap-string own-temp AND raises a typed error.
+consume_typed!(string s, int x) int `doc("raises MyErr if neg, uses s") {
+  if x < 0 {
+    raise MyErr(message: "neg", code: 9);
+  }
+  return s.len + x;
+}
+
+probe_typed_own_temp_recover() `test {
+  // Typed handler on a failable with its OWN heap-string temp: the own-temp is
+  // dropped on the handler path (no leak), the sibling make_s() survives.
+  int r = combine(make_s(), consume_typed(make_s(), -1)? e is MyErr {
+    100
+  } else {
+    -1
+  });
+  assert(r == 103, "typed own-temp recover: 3 + 100");
+}

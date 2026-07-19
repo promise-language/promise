@@ -10700,9 +10700,15 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	mergeBlock := c.newBlock("error.merge")
 	c.block.NewCondBr(tag, handlerBlock, okBlock)
 
-	// Handler block: clean up stmt temps before running handler body (T0103/T1272)
+	// T1325: The handler-block temp drain is now scoped to the failable call's OWN
+	// temps (emitted inside the narrowing block below), NOT the whole tracking array.
+	// The old unconditional `emitAllStmtTempCleanupForErrorPath()` here dropped
+	// enclosing SIBLING temps too — but when the handler recovers-and-continues
+	// (falls through to the merge instead of returning/raising), control re-enters the
+	// enclosing call, which then reads a freed sibling → use-after-free. Siblings are
+	// left for the enclosing statement to drop; divergence (return/raise inside the
+	// handler) still drains the full arrays via genReturnStmt/genRaiseStmt.
 	c.block = handlerBlock
-	c.emitAllStmtTempCleanupForErrorPath()
 
 	// T1272: The outer statement's argument temporaries (call results, constructor
 	// results, string/closure/enum-ctor temps materialized for THIS failable call)
@@ -10742,6 +10748,12 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.emitAllStmtTempCleanupForErrorPath()
 		okContBlock = c.block
 		c.block = savedHandlerBlock
+		// T1325: Drain the failable call's OWN temps on the handler path too. The
+		// tracking slices are still narrowed to the own-temps suffix here, so this
+		// drops ONLY those (flags are runtime-guarded and the OK/handler blocks are
+		// mutually exclusive → no double-free). Sibling temps stay tracked and are
+		// dropped by the enclosing statement after the merge.
+		c.emitAllStmtTempCleanupForErrorPath()
 		// T1272: Drop the drained own-temps from tracking (truncate to the snapshot)
 		// but KEEP the sibling prefix — and prune only the map entries that now point
 		// past the truncated slices so downstream claims stay in bounds. Claimed

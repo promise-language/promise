@@ -1,0 +1,246 @@
+// T1323: An inline enum-constructor temp with a droppable payload, passed BY
+// VALUE (borrow) as an argument into a call whose RESULT type is ALSO an enum,
+// leaked the payload when the call result was bound with a var-decl / assignment /
+// container-element store. The statement-level enum-ctor-temp clear used a
+// type-based `extractEnum(resultType) != nil` gate, which misfired on the enum
+// call result and cleared the by-value ARG temp's drop flag — orphaning its
+// payload (1 leak). Fix (Part B) gates the clear on the RHS being SYNTACTICALLY a
+// move-out (enum ctor, or match/if producing the enum) and otherwise lets the
+// statement-boundary drain drop the orphaned arg temp.
+//
+// Part A extends the "a borrowed heap param returned by value is deep-cloned"
+// contract to enums: returning a borrowed (non-`~`) enum VALUE param aliases the
+// caller's arg temp (the enum's inline-data payload is invisible to the caller-
+// side alias check), so it must be cloned on return — otherwise the drain from
+// Part B double-frees. Sibling of T1317 (return-operand path).
+enum Payload {
+  Full(string s), Empty,
+}
+
+// Fresh-return callee: builds a NEW enum, ignores the by-value arg's payload —
+// the arg temp is orphaned and must be drained at the binding site (T1323 leak).
+wrap(Payload p) Payload {
+  match p {
+    Payload.Full(s) => {
+      return Payload.Full(s.to_upper());
+    },
+    Payload.Empty => {
+      return Payload.Empty;
+    },
+  }
+}
+
+payload_len(Payload move p) int {
+  match p {
+    Payload.Full(s) => {
+      return s.len;
+    },
+    Payload.Empty => {
+      return 0;
+    },
+  }
+}
+
+// --- T1323 leak shapes: call result (fresh enum) bound at a statement site ---
+
+// Inferred var-decl — the exact reported repro (`q := f(E.V(heapStr))`).
+call_result_inferred_vardecl() `test {
+  q := wrap(Payload.Full("h".to_upper()));
+  assert(payload_len(move q) == 1, "inferred var-decl H len");
+}
+
+// Typed var-decl (`Payload q = f(...)`).
+call_result_typed_vardecl() `test {
+  Payload q = wrap(Payload.Full("hi".to_upper()));
+  assert(payload_len(move q) == 2, "typed var-decl HI len");
+}
+
+// Variable reassignment (`q = f(...)`).
+call_result_reassign() `test {
+  q := Payload.Empty;
+  q = wrap(Payload.Full("abc".to_upper()));
+  assert(payload_len(move q) == 3, "reassign ABC len");
+}
+
+// Container element store (`v[0] = f(...)`).
+call_result_container_element() `test {
+  v := [Payload.Empty];
+  v[0] = wrap(Payload.Full("data".to_upper()));
+  Payload got = v[0];
+  assert(payload_len(move got) == 4, "container element DATA len");
+}
+
+// --- Aliasing regression guards (Part A): returning a borrowed enum param ---
+
+type Resource {
+  string name;
+  drop(~this) {
+  }
+}
+enum Holder {
+  Has(Resource r), Empty,
+}
+make_resource(string move name) Resource {
+  return Resource(name: move name);
+}
+
+// Returns the SAME borrowed enum param — must deep-clone on return so the result
+// and the caller's arg temp own independent payloads.
+consume(Holder h) Holder {
+  return h;
+}
+
+holder_name(Holder move h) string {
+  match h {
+    Holder.Has(r) => {
+      return r.name;
+    },
+    Holder.Empty => {
+      return "";
+    },
+  }
+}
+
+// Ident arg into consume (`y := consume(x)`).
+alias_ident_arg() `test {
+  x := Holder.Has(r: make_resource("test"));
+  y := consume(x);
+  assert(holder_name(move x) == "test", "x still owns its payload");
+  assert(holder_name(move y) == "test", "y owns an independent clone");
+}
+
+// The B0286 shape — inline enum-ctor arg into consume, bound with a typed var-decl.
+alias_inline_ctor_arg() `test {
+  Holder h = consume(Holder.Has(r: make_resource("hello")));
+  assert(holder_name(move h) == "hello", "inline-ctor consume result");
+}
+
+// The T1317 return-path alias: `return consume(E.V(...))` from a nested call.
+top_return_alias() Holder {
+  return consume(Holder.Has(r: make_resource("world")));
+}
+
+alias_return_path() `test {
+  h := top_return_alias();
+  assert(holder_name(move h) == "world", "return-path consume alias");
+}
+
+// An operator method's value operand is ALSO a borrowed value param: returning it
+// unchanged must clone exactly once. dupBorrowedEnumParam (Part A) defers to
+// wrapOperatorParamReturnValue (T0897) for operands so the two don't double-clone
+// (the first clone would leak). Without the guard: 2 allocations leak.
+enum Choice {
+  Left(Resource r), Right(Resource r),
+  +(Choice other) Choice {
+    match other {
+      Choice.Left(r) => {
+        return other;
+      },
+      Choice.Right(r) => {
+        return other;
+      },
+    }
+  }
+}
+choice_name(Choice move c) string {
+  match c {
+    Choice.Left(r) => {
+      return r.name;
+    },
+    Choice.Right(r) => {
+      return r.name;
+    },
+  }
+}
+alias_operator_operand() `test {
+  a := Choice.Left(r: make_resource("lhs"));
+  b := Choice.Right(r: make_resource("rhs"));
+  z := a + b;
+  assert(choice_name(move z) == "rhs", "operator returns cloned operand");
+}
+
+// --- Part A branch guards: return-type shapes reaching dupBorrowedEnumParam ---
+
+// Optional return type (`E?`): dupBorrowedEnumParam unwraps the Optional to the
+// droppable enum before cloning, so the owned `Holder?` result is independent of
+// the caller's arg temp. Both drop exactly once (leak detection guards the alias).
+consume_opt(Holder h) Holder? {
+  return h;
+}
+alias_optional_return() `test {
+  x := Holder.Has(r: make_resource("opt"));
+  y := consume_opt(x);
+  assert(holder_name(move x) == "opt", "x still owns its payload");
+  match y {
+    none => {
+      assert(false, "optional result should be present");
+    },
+    _ => {
+      assert(true, "optional enum result present and dropped once");
+    },
+  }
+}
+
+// Generic borrowed enum param returned by value: exercises the typeSubst branch —
+// the return type `Box[T]` is substituted to `Box[string]` before the drop check,
+// so the concrete monomorphized clone fires and `a`/`c` own independent payloads.
+enum Box[T] {
+  Val(T v), None,
+}
+identity_box[T](Box[T] b) Box[T] {
+  return b;
+}
+box_string(Box[string] move b) string {
+  match b {
+    Box.Val(v) => {
+      return v;
+    },
+    Box.None => {
+      return "";
+    },
+  }
+}
+alias_generic_enum_param() `test {
+  a := Box[string].Val("gen".to_upper());
+  c := identity_box(a);
+  assert(box_string(move a) == "GEN", "a still owns its payload");
+  assert(box_string(move c) == "GEN", "c owns an independent clone");
+}
+
+// Generic move-out: an `if` expr whose arms are enum ctors, bound with a var-decl
+// inside a generic (monomorphized) function — exercises enumCtorTempMovesOut's
+// typeSubst branch for the IfExpr case (the taken arm's ctor temp is the phi'd
+// result moved into `q`; the untaken move param drops once, no leak).
+pick_box[T](bool cond, T move a, T move b) Box[T] {
+  q := if cond {
+    Box[T].Val(move a)
+  } else {
+    Box[T].Val(move b)
+  };
+  return q;
+}
+alias_generic_if_moveout() `test {
+  r := pick_box[string](true, "yes".to_upper(), "no".to_upper());
+  assert(box_string(move r) == "YES", "generic if-expr enum move-out");
+}
+
+// Reference return type (`E&`): genReturnStmt skips dupBorrowedEnumParam entirely
+// for ref returns (the result is a borrowed view, not an owned value), so NO clone
+// fires and the sole payload is dropped once via the caller's `x`. A clone here
+// would leak (the returned reference is never freed).
+peek(Holder h) Holder & {
+  return h;
+}
+alias_ref_return_no_clone() `test {
+  x := Holder.Has(r: make_resource("ref"));
+  view := peek(x);
+  match view {
+    Holder.Has(r) => {
+      assert(r.name == "ref", "reference sees the payload");
+    },
+    Holder.Empty => {
+      assert(false, "unexpected empty");
+    },
+  }
+  assert(holder_name(move x) == "ref", "x still owns the single payload");
+}

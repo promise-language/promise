@@ -63,7 +63,7 @@ func TestT1317ReturnEnumCtorItselfMovedOut(t *testing.T) {
 
 // The subtle case that a value-type check would get wrong: the returned CALL
 // itself returns an enum, but the enum-ctor is a by-value ARGUMENT the callee
-// borrows/dups (B0232). returnValueMovesOutEnumCtor must use a SYNTACTIC check
+// borrows/dups (B0232). enumCtorTempMovesOut must use a SYNTACTIC check
 // (the return expr is a CallExpr, not an enum constructor) and still drain the
 // arg temp here — otherwise the payload leaks.
 func TestT1317ReturnCallReturningEnumStillDrainsArg(t *testing.T) {
@@ -88,7 +88,7 @@ func TestT1317ReturnCallReturningEnumStillDrainsArg(t *testing.T) {
 
 // `return match n { ... => Payload.Full(...), ... }` — the arm ctor temps ARE the
 // phi'd result moved out to the caller. The MatchExpr branch of
-// returnValueMovesOutEnumCtor clears their flags; no drain guard is emitted.
+// enumCtorTempMovesOut clears their flags; no drain guard is emitted.
 func TestT1317ReturnMatchEnumArmsMovedOut(t *testing.T) {
 	ir := generateIR(t, `
 		enum Payload { Full(string s), Empty, }

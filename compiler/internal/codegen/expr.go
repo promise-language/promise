@@ -14869,6 +14869,75 @@ func (c *Compiler) dupBorrowedHeapUserPayload(expr ast.Expr, val value.Value) (v
 	return val, false
 }
 
+// dupBorrowedEnumParam deep-clones the variant payload of a borrowed (non-`~`)
+// enum VALUE parameter returned by value (`consume(E p) E { return p; }`). This
+// extends the "a borrowed heap param returned by value is deep-cloned" contract
+// — already honored for strings (dupString) and containers/arrays
+// (dupBorrowedHeapUserPayload) — to enums (T1323). A by-value enum param is a
+// BORROW: the caller retains ownership of the arg temp, so returning the param
+// unchanged hands the caller's payload back as the result, and both the caller's
+// arg temp and the result then free the same heap payload (double-free / SEGV).
+//
+// The caller-side alias machinery (emitReturnAliasCheckSubst → extractAliasPtr)
+// can't cover this: an enum value is `{i32 tag, [N x i8] data}` with the payload
+// buried in tag-specific inline data — no top-level pointer to compare — so
+// extractAliasPtr returns nil for enums and the clone never fires. Cloning here
+// on the return makes the call result unconditionally independent of the arg
+// temp, which is what lets the statement-boundary enum-ctor-temp drain (T1323
+// Part B) drop the orphaned by-value arg temp safely at the binding site.
+//
+// Deliberately narrow: enum-only (strings/vectors/arrays are handled by the other
+// return dups; cloning them here too would double-clone → leak), only a direct
+// `return <param>` of a borrowed param, and only when the return type is that
+// (droppable) enum and not a borrow (`E&`/`E~` hand back a reference). `~`/move
+// params are a genuine transfer and are already excluded from borrowedValueParams.
+// Returns (dup, true) when a clone was produced, else (val, false) as a
+// transparent pass-through.
+func (c *Compiler) dupBorrowedEnumParam(expr ast.Expr, val value.Value, retType types.Type) (value.Value, bool) {
+	if val == nil || c.block == nil || c.block.Term != nil || retType == nil {
+		return val, false
+	}
+	if isRefType(retType) {
+		return val, false
+	}
+	ident, ok := unwrapDestructureParens(expr).(*ast.IdentExpr)
+	if !ok {
+		return val, false
+	}
+	if c.borrowedValueParams == nil || !c.borrowedValueParams[ident.Name] {
+		return val, false
+	}
+	// An operator method's value operand is ALSO a borrowed value param, but its
+	// return-alias clone is owned by wrapOperatorParamReturnValue (T0897), which
+	// runs right after this and routes the enum through the same
+	// cloneOwnedReturnAlias path. Cloning here too would double-clone → the first
+	// clone leaks. Defer to the operator path for operands.
+	if c.currentOpValueParams != nil && c.currentOpValueParams[ident.Name] {
+		return val, false
+	}
+	effType := retType
+	if opt, isOpt := retType.(*types.Optional); isOpt {
+		effType = opt.Elem()
+	}
+	if c.typeSubst != nil {
+		effType = types.Substitute(effType, c.typeSubst)
+	}
+	enumT := extractEnum(effType)
+	if enumT == nil || !c.enumInstanceHasDrop(effType, enumT) {
+		return val, false
+	}
+	// Confirm the returned param's own resolved type is that enum (not an unrelated
+	// type coerced into an enum return) so the clone applies to a genuine enum value.
+	pt := c.info.Types[ident]
+	if c.typeSubst != nil && pt != nil {
+		pt = types.Substitute(pt, c.typeSubst)
+	}
+	if extractEnum(pt) == nil {
+		return val, false
+	}
+	return c.cloneOwnedReturnAlias(val, effType), true
+}
+
 // optionalHeapDupElem reports whether typ is an Optional whose element is a heap
 // user type (droppable, or no-drop-but-pal-free) — the shape whose value struct
 // merely ALIASES an inner heap instance, so it must be deep-cloned whenever a

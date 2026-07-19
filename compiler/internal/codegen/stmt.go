@@ -1639,8 +1639,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// to a structural interface) so maybeRegisterStructuralFree registers the free
 	// even when the RHS shape (e.g. an identifier copy) isn't a call.
 	claimedOwnedBox := c.lastClaimedDropFunc != nil
-	// B0267: Clear enum temps when the variable IS the enum (not a function result).
-	if len(c.enumCtorTemps) > 0 && extractEnum(resolvedExprType) != nil {
+	// B0267/T1323: Clear enum temps only when the RHS itself MOVES the enum out
+	// into this binding (an enum constructor, or a match/if producing the enum) —
+	// NOT when it is a call whose RESULT happens to be an enum (`q = f(E.V(...))`),
+	// where the by-value enum-ctor ARG temp stays owned here and must fall through
+	// to the statement-boundary drain (a type-based `extractEnum` check would misfire
+	// on the call result and orphan the arg's payload). See enumCtorTempMovesOut.
+	if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
 		for i := range c.enumCtorTemps {
 			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
 		}
@@ -2055,8 +2060,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.claimHeapTemp(val)
 	// T1276: capture whether a fresh owned box was claimed (see genVarDecl).
 	claimedOwnedBox := c.lastClaimedDropFunc != nil
-	// B0267: Clear enum temps when the variable IS the enum (not a function result).
-	if len(c.enumCtorTemps) > 0 && extractEnum(typ) != nil {
+	// B0267/T1323: Clear enum temps only when the RHS itself MOVES the enum out
+	// into this binding (an enum constructor, or a match/if producing the enum) —
+	// NOT when it is a call whose RESULT happens to be an enum (`q := f(E.V(...))`),
+	// where the by-value enum-ctor ARG temp stays owned here and must fall through
+	// to the statement-boundary drain (a type-based `extractEnum` check would misfire
+	// on the call result and orphan the arg's payload). See enumCtorTempMovesOut.
+	if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
 		for i := range c.enumCtorTemps {
 			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
 		}
@@ -9184,10 +9194,15 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimHeapTemp(val)
 			// Claim env temp — ownership transferred to reassigned variable.
 			c.claimEnvTemp(val)
-			// B0293: Clear enum ctor temps — ownership transferred to reassigned variable.
-			// Without this, the ctor temp drop fires at statement end and double-frees
-			// variant data that the variable now owns (segfault on scope exit).
-			if len(c.enumCtorTemps) > 0 && extractEnum(exprType) != nil {
+			// B0293/T1323: Clear enum ctor temps only when the RHS itself MOVES the enum
+			// out into the reassigned variable (an enum constructor, or a match/if
+			// producing the enum) — NOT when it is a call whose RESULT happens to be an
+			// enum (`q = f(E.V(...))`), where the by-value enum-ctor ARG temp stays owned
+			// here and must fall through to the statement-boundary drain (a type-based
+			// `extractEnum` check would misfire on the call result and orphan the arg's
+			// payload). Without the clear on a genuine move-out, the ctor temp drop fires
+			// at statement end and double-frees variant data the variable now owns.
+			if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
 				for i := range c.enumCtorTemps {
 					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
 				}
@@ -9556,24 +9571,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// while the element still references it → use-after-free. T1160 widened
 			// the trigger to closure-returning call results. No-op for non-closures.
 			c.claimEnvTemp(val)
-			// T1103: Clear inline enum constructor temps when the RHS is an enum
-			// moved into the container (e.g. `m[k] = Holder.Pair(...)`). Without
-			// this the enum-ctor temp's drop flag stays set and the temporary is
-			// dropped at statement end — recursively freeing the variant's heap
-			// payload (Ref/string/tuple-with-Ref) the container now owns →
-			// dangling pointer (use-after-free on later reads). Mirrors the
-			// var-decl (B0267) and field-assign (B0269) clears.
-			if len(c.enumCtorTemps) > 0 {
-				resolvedValueType := c.info.Types[s.Value]
-				if c.typeSubst != nil {
-					resolvedValueType = types.Substitute(resolvedValueType, c.typeSubst)
+			// T1103/T1323: Clear inline enum constructor temps only when the RHS itself
+			// MOVES the enum into the container (e.g. `m[k] = Holder.Pair(...)`, or a
+			// match/if producing the enum) — NOT when it is a call whose RESULT happens
+			// to be an enum (`v[i] = f(E.V(...))`), where the by-value enum-ctor ARG temp
+			// stays owned here and must fall through to the statement-boundary drain (a
+			// type-based `extractEnum` check would misfire on the call result and orphan
+			// the arg's payload). Without the clear on a genuine move-out, the ctor temp's
+			// drop fires at statement end and recursively frees the variant's heap payload
+			// the container now owns → use-after-free. Mirrors the var-decl (B0267) and
+			// field-assign (B0269) clears.
+			if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
+				for i := range c.enumCtorTemps {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
 				}
-				if extractEnum(resolvedValueType) != nil {
-					for i := range c.enumCtorTemps {
-						c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
-					}
-					c.enumCtorTemps = c.enumCtorTemps[:0]
-				}
+				c.enumCtorTemps = c.enumCtorTemps[:0]
 			}
 			// B0309: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by the container.
@@ -10509,19 +10521,22 @@ func (c *Compiler) isEnumConstructorExpr(expr ast.Expr) bool {
 	return false
 }
 
-// returnValueMovesOutEnumCtor reports whether the enum-ctor temps tracked while
-// evaluating a return expression are the value being moved OUT to the caller
-// (flags must be cleared, no drop here) versus by-value call arguments left owned
-// here (must be drained). T1317. Two move-out shapes:
-//   - the return expression is ITSELF an enum constructor (`return E.Variant(...)`)
-//   - the return expression is a branch (`return match s {...}` / `return if c {...}`)
-//     whose arm values are enum constructors and whose result type is that enum —
-//     the arm ctor temps are the phi'd result, moved out to the caller.
+// enumCtorTempMovesOut reports whether the enum-ctor temps tracked while
+// evaluating an expression are the value being moved OUT of the statement — into
+// the caller (return), a variable binding, or a container slot (flags must be
+// cleared, no drop here) — versus by-value call arguments left owned here (must be
+// drained). T1317/T1323. Two move-out shapes:
+//   - the expression is ITSELF an enum constructor (`E.Variant(...)`)
+//   - the expression is a branch (`match s {...}` / `if c {...}`) whose arm values
+//     are enum constructors and whose result type is that enum — the arm ctor
+//     temps are the phi'd result, moved out.
 //
-// A call (`return f(E.Variant(...))`) is NEITHER: its result is a distinct value
-// and the ctor is a by-value argument the callee borrows/dups (B0232), so the temp
-// stays owned here and must be drained — even when f itself returns an enum.
-func (c *Compiler) returnValueMovesOutEnumCtor(expr ast.Expr) bool {
+// A call (`f(E.Variant(...))`) is NEITHER: its result is a distinct value and the
+// ctor is a by-value argument the callee borrows/dups (B0232), so the temp stays
+// owned here and must be drained — even when f itself returns an enum (the T1323
+// leak: a type-based `extractEnum(resultType) != nil` check misfires here because
+// the call RESULT is also an enum, clearing the arg temp and orphaning its payload).
+func (c *Compiler) enumCtorTempMovesOut(expr ast.Expr) bool {
 	expr = unwrapDestructureParens(expr)
 	if c.isEnumConstructorExpr(expr) {
 		return true
@@ -10644,6 +10659,12 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// still dup.
 		if !isRefType(retType) {
 			val, _ = c.dupBorrowedHeapUserPayload(s.Value, val)
+			// T1323: a borrowed (non-`~`) enum VALUE param returned by value aliases
+			// the caller's arg temp — deep-clone the variant payload so the result is
+			// independent (the enum's inline-data payload is invisible to the caller-
+			// side alias check). Enum-only; strings/containers/arrays are covered by
+			// dupBorrowedHeapUserPayload / the string dup above.
+			val, _ = c.dupBorrowedEnumParam(s.Value, val, retType)
 		}
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 		val = c.wrapOperatorParamReturnValue(val, s.Value, retType) // T0897
@@ -10800,8 +10821,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// type) is required so `return g(Payload.Full(...))` where g *returns* an enum
 	// still drains the by-value arg temp rather than mistaking it for the result.
 	// The moved-out shapes are a direct constructor or a branch (match/if) whose
-	// arm values ARE the returned enum — see returnValueMovesOutEnumCtor.
-	if len(c.enumCtorTemps) > 0 && s.Value != nil && c.returnValueMovesOutEnumCtor(s.Value) {
+	// arm values ARE the returned enum — see enumCtorTempMovesOut.
+	if len(c.enumCtorTemps) > 0 && s.Value != nil && c.enumCtorTempMovesOut(s.Value) {
 		for i := range c.enumCtorTemps {
 			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
 		}

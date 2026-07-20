@@ -20168,3 +20168,157 @@ func TestT1332_IfBothArmsDivergeReturnPosition(t *testing.T) {
 		}
 	`)
 }
+
+// T1335: a value-position `if`/`match` where ONE arm diverges (return/raise)
+// and another reachable arm produces no value (empty/void block) previously
+// yielded a nil sema result and panicked codegen ("nil value for typed var
+// decl"). Sema now rejects it with a clear diagnostic instead — the reachable
+// void arm cannot satisfy the non-void expected type.
+func TestT1335_MatchDivergeVoidArmErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		f(bool b) int {
+			int r = match b { true => { return 1 }, _ => {} };
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+func TestT1335_IfDivergeVoidArmErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		g(bool b) int {
+			int r = if b { return 1 } else {};
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+func TestT1335_ReturnPositionDivergeVoidIf(t *testing.T) {
+	errs := checkErrs(t, `
+		h(bool b) int {
+			return if b { return 1 } else {};
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+func TestT1335_ReturnPositionDivergeVoidMatch(t *testing.T) {
+	errs := checkErrs(t, `
+		h(bool b) int {
+			return match b { true => { return 1 }, _ => {} };
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+func TestT1335_MixedValueVoidArmErrorsIf(t *testing.T) {
+	errs := checkErrs(t, `
+		k(bool b) int {
+			int r = if b { 1 } else {};
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+func TestT1335_MixedValueVoidArmErrorsMatch(t *testing.T) {
+	errs := checkErrs(t, `
+		k(bool b) int {
+			int r = match b { true => { 1 }, _ => {} };
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+// Regression: all-void statement `match`/`if` used for effect (no value hint)
+// must remain legal — the void-arm rejection only fires in value position.
+func TestT1335_StatementAllVoidMatchOK(t *testing.T) {
+	checkOK(t, `
+		m(bool b) {
+			match b { true => {}, _ => {} };
+		}
+	`)
+}
+
+func TestT1335_StatementAllVoidIfOK(t *testing.T) {
+	checkOK(t, `
+		m(bool b) {
+			if b {} else {};
+		}
+	`)
+}
+
+// Regression: a statement-position match that discards a value arm alongside a
+// void arm must still type-check (hint == nil → no error).
+func TestT1335_StatementDiscardedValueArmOK(t *testing.T) {
+	checkOK(t, `
+		compute() int { return 5; }
+		p(bool b) {
+			match b { true => { compute() }, _ => {} };
+		}
+	`)
+}
+
+// Regression: a normal all-value match/if in value position still type-checks.
+func TestT1335_NormalAllValueOK(t *testing.T) {
+	checkOK(t, `
+		q(bool b) int {
+			int r = match b { true => { 1 }, _ => { 2 } };
+			return r;
+		}
+		s(bool b) int {
+			int r = if b { 1 } else { 2 };
+			return r;
+		}
+	`)
+}
+
+// T1335: divergence detection must recognize `raise`, not just `return`. A
+// failable function whose diverging arm raises (rather than returns) must be
+// rejected identically when the sibling reachable arm is void.
+func TestT1335_IfDivergeViaRaiseVoidArmErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		f!(bool b) int {
+			int r = if b { raise error("x") } else {};
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+func TestT1335_MatchDivergeViaRaiseVoidArmErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		f!(bool b) int {
+			int r = match b { true => { raise error("x") }, _ => {} };
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+// T1335: the reachable void arm may be the FIRST arm (then-arm void, else-arm
+// diverges) — the rejection is arm-order independent.
+func TestT1335_IfVoidThenDivergeElseErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		f(bool b) int {
+			int r = if b {} else { return 1 };
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}
+
+// T1335: a match with three arms where a middle reachable arm is void (the
+// others produce a value / diverge) is still rejected — the void arm cannot be
+// masked by a later value arm.
+func TestT1335_MatchThreeArmsMiddleVoidErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		f(int n) int {
+			int r = match n { 0 => { return 1 }, 1 => {}, _ => { 2 } };
+			return r;
+		}
+	`)
+	expectError(t, errs, "produces no value")
+}

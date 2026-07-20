@@ -3105,17 +3105,34 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 
 	elseType := c.blockValueType(e.Else)
 
+	thenDiverges := c.blockAlwaysExits(e.Then)
+	elseDiverges := c.blockAlwaysExits(e.Else)
+
 	// T0381: if one branch is a borrow (`T&`/`T~`) and the other is owned
 	// (`T`), the result is owned — a single dropflag cannot represent
 	// ownership that varies by arm, so the conservative choice is the
 	// owned form. Otherwise, prefer the then-branch type.
 	joined := c.joinBranchTypes(thenType, elseType, e.Pos())
 
+	// T1335: a reachable (non-diverging) arm produces no value. In value position
+	// (a non-void expected type is in play) the if-expression cannot satisfy that
+	// type — report a type error instead of returning nil and panicking in codegen.
+	if hint != nil {
+		thenVoid := !thenDiverges && (thenType == nil || types.Identical(thenType, types.TypVoid))
+		elseVoid := !elseDiverges && (elseType == nil || types.Identical(elseType, types.TypVoid))
+		if thenVoid || elseVoid {
+			c.errorf(e.Pos(), "if arm produces no value; %s expected", hint)
+			if joined == nil {
+				joined = hint
+			}
+			return joined
+		}
+	}
+
 	// T1332: both arms diverge (return/raise) → no arm produces a value, so the
 	// join is nil. The expression is never-typed; adopt the contextual expected
 	// type so downstream consumers see a well-typed (dead) value instead of nil.
-	if joined == nil && hint != nil &&
-		c.blockAlwaysExits(e.Then) && c.blockAlwaysExits(e.Else) {
+	if joined == nil && hint != nil && thenDiverges && elseDiverges {
 		return hint
 	}
 	return joined
@@ -3202,6 +3219,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 	subjectType := c.checkExpr(e.Subject)
 
 	var resultType types.Type
+	hasReachableVoidArm := false
 	for _, arm := range e.Arms {
 		c.openScope(arm, "match-arm")
 		// T0299: Rewrite module-qualified enum patterns before type-checking.
@@ -3238,6 +3256,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 		}
 
 		var armType types.Type
+		armDiverges := false
 		if arm.Body != nil {
 			armType = c.checkExpr(arm.Body)
 			// T1267: a bare failable call as an expression arm must be subjected
@@ -3249,13 +3268,28 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 			c.checkSubExprFailable(arm.Body)
 		} else if arm.Block != nil {
 			c.checkBlock(arm.Block)
-			// B0126: extract block result type from the last expression
-			// statement, so match expressions with block arms are correctly typed.
-			armType = c.blockValueType(arm.Block)
+			// T1332/T1335: a block arm that always exits (return/raise) contributes
+			// no value; distinguish it from a reachable arm that simply produces no
+			// value (empty/void-ending block).
+			armDiverges = c.blockAlwaysExits(arm.Block)
+			if !armDiverges {
+				// B0126: extract block result type from the last expression
+				// statement, so match expressions with block arms are correctly typed.
+				armType = c.blockValueType(arm.Block)
+			}
 		}
 
 		c.closeScope()
 
+		if armDiverges {
+			// Diverging arm produces no value — skip (no-op join).
+			continue
+		}
+		if armType == nil || types.Identical(armType, types.TypVoid) {
+			// T1335: reachable arm produces no value.
+			hasReachableVoidArm = true
+			continue
+		}
 		if resultType == nil {
 			resultType = armType
 		} else {
@@ -3266,6 +3300,17 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 
 	// Check exhaustiveness
 	c.checkMatchExhaustiveness(e, subjectType)
+
+	// T1335: a reachable (non-diverging) arm produces no value. In value position
+	// (a non-void expected type is in play) the match cannot satisfy that type —
+	// report a type error instead of returning nil and panicking in codegen.
+	if hasReachableVoidArm && hint != nil {
+		c.errorf(e.Pos(), "match arm produces no value; %s expected", hint)
+		if resultType == nil {
+			resultType = hint // avoid nil propagating to other consumers
+		}
+		return resultType
+	}
 
 	// T1332: every arm diverges (return/raise) → no arm produces a value, so
 	// resultType is nil. Adopt the contextual expected type so downstream

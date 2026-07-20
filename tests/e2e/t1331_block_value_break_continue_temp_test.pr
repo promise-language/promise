@@ -1,0 +1,434 @@
+// T1331: A block-value body (if/match arm) used as a NON-LAST call argument that
+// DIVERGES via `break`/`continue` out of an enclosing loop must drain the
+// enclosing call's SIBLING heap temp before leaving the loop — otherwise the
+// sibling (e.g. make_s()'s string) is materialized-and-tracked but never
+// consumed by the enclosing call (which never runs) nor dropped → memory leak.
+//
+// This is the `break`/`continue` counterpart of T1325/T1329's return/raise
+// divergence drain. All tests run under leak enforcement — the sibling temp must
+// be dropped exactly once on the divergent path, and the enclosing statement's
+// own flag-guarded drop must still fire (once) on the non-divergent path.
+make_s() string {
+  return "abc".to_upper();
+}
+// "ABC", len 3
+// Heap-allocated (NOT a `.rodata` constant literal — a constant vector literal
+// would never allocate, so it could not leak and would give the heapTemps-floor
+// drain no signal). Built via push() so it is a genuine heap temp.
+make_vec() int[] {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  v.push(3);
+  return v;
+}
+combine(string s, int n) int {
+  return s.len + n;
+}
+use_vec(int[] v, int n) int {
+  return v.len + n;
+}
+apply((() -> int) f, int n) int {
+  return f() + n;
+}
+
+enum E {
+  V(string s), None,
+}
+use_e(E e, int n) int {
+  match e {
+    V(s) => {
+      return s.len + n;
+    }, None => {
+      return n;
+    },
+  }
+}
+mk4() string {
+  return "abcd".to_upper();
+}
+// "ABCD", len 4
+
+// --- break: single-expression diverging arm ---
+
+// Heap-string sibling; single-expression `{ break }` arm (floor from the
+// leading-sibling temp only). Diverges at i==1; earlier/later iterations reach
+// the merge and consume the sibling normally.
+t1331_break_heap_single() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    total = total + combine(make_s(), match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+    i = i + 1;
+  }
+  assert(total == 103, "break at i==1: only i==0 contributes 3+100");
+}
+
+// Heap-string sibling; leading-statement `{ int d = 7; break }` arm (exercises
+// the leading-statement floor variant).
+t1331_break_heap_leading() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    total = total + combine(make_s(), match i {
+      1 => {
+        int d = 7;
+        break
+      }, _ => {
+        100
+      },
+    });
+    i = i + 1;
+  }
+  assert(total == 103, "break (leading stmt) at i==1");
+}
+
+// Vector sibling — exercises the heapTemps floor.
+t1331_break_vector() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    total = total + use_vec(make_vec(), match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+    i = i + 1;
+  }
+  assert(total == 103, "break vector sibling at i==1");
+}
+
+// Closure-env sibling — exercises the envTemps floor.
+t1331_break_env() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    string cap = make_s();
+    total = total + apply(move || -> int {
+      return cap.len;
+    }, match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+    i = i + 1;
+  }
+  assert(total == 103, "break env sibling at i==1");
+}
+
+// Inline enum-constructor sibling (droppable payload) — exercises the
+// enumCtorTemps floor.
+t1331_break_enum_ctor() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    total = total + use_e(E.V(mk4()), match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+    i = i + 1;
+  }
+  assert(total == 104, "break enum ctor sibling at i==1: i==0 contributes 4+100");
+}
+
+// --- continue: single-expression and leading-statement diverging arms ---
+// NOTE: the increment must precede the diverging statement so `continue` (which
+// skips the remainder of the body) does not livelock.
+
+// Heap-string sibling; single-expression `{ continue }` arm.
+t1331_continue_heap_single() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    i = i + 1;
+    total = total + combine(make_s(), match i {
+      1 => {
+        continue
+      }, _ => {
+        100
+      },
+    });
+  }
+  // i==1 diverges (contributes 0); i==2 and i==3 each contribute 3+100.
+  assert(total == 206, "continue at i==1: i==2,3 contribute 3+100 each");
+}
+
+// Heap-string sibling; leading-statement `{ int d = 7; continue }` arm.
+t1331_continue_heap_leading() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    i = i + 1;
+    total = total + combine(make_s(), match i {
+      1 => {
+        int d = 7;
+        continue
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 206, "continue (leading stmt) at i==1");
+}
+
+// Vector sibling with continue.
+t1331_continue_vector() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    i = i + 1;
+    total = total + use_vec(make_vec(), match i {
+      1 => {
+        continue
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 206, "continue vector sibling at i==1");
+}
+
+// Closure-env sibling with continue.
+t1331_continue_env() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    i = i + 1;
+    string cap = make_s();
+    total = total + apply(move || -> int {
+      return cap.len;
+    }, match i {
+      1 => {
+        continue
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 206, "continue env sibling at i==1");
+}
+
+// Inline enum-constructor sibling with continue.
+t1331_continue_enum_ctor() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    i = i + 1;
+    total = total + use_e(E.V(mk4()), match i {
+      1 => {
+        continue
+      }, _ => {
+        100
+      },
+    });
+  }
+  // i==1 diverges; i==2 and i==3 each contribute 4+100.
+  assert(total == 208, "continue enum ctor sibling at i==1");
+}
+
+// --- nested loops: an inner break/continue drops only the inner statement's
+// sibling temp; the outer loop's iterations keep computing correctly. ---
+
+t1331_nested_break() `test {
+  int total = 0;
+  int o = 0;
+  while o < 2 {
+    int inner = 0;
+    int j = 0;
+    while j < 3 {
+      inner = inner + combine(make_s(), match j {
+        1 => {
+          break
+        }, _ => {
+          100
+        },
+      });
+      j = j + 1;
+    }
+    // inner: j==0 contributes 3+100, j==1 breaks → inner == 103
+    total = total + inner;
+    o = o + 1;
+  }
+  assert(total == 206, "nested break: 103 per outer iteration, 2 iterations");
+}
+
+t1331_nested_continue() `test {
+  int total = 0;
+  int o = 0;
+  while o < 2 {
+    int inner = 0;
+    int j = 0;
+    while j < 3 {
+      j = j + 1;
+      inner = inner + combine(make_s(), match j {
+        1 => {
+          continue
+        }, _ => {
+          100
+        },
+      });
+    }
+    // inner: j==1 continues, j==2,3 each contribute 3+100 → inner == 206
+    total = total + inner;
+    o = o + 1;
+  }
+  assert(total == 412, "nested continue: 206 per outer iteration, 2 iterations");
+}
+
+// --- loop nested INSIDE the block-value arg: break/continue targets a loop that
+// does NOT enclose the sibling-bearing call, so the sibling temp must SURVIVE to
+// that call. The drain must stop at the loop's entry temp floor, not free the
+// enclosing call's prefix (which would be a use-after-free). ---
+
+// The inner `while` (and its `break`) live inside the match-arm block value that
+// is combine()'s LAST argument; make_s() is the surviving sibling.
+t1331_inner_break_preserves_sibling() `test {
+  int total = 0;
+  int k = 0;
+  while k < 2 {
+    total = total + combine(make_s(), match k {
+      _ => {
+        int j = 0;
+        int acc = 0;
+        while j < 5 {
+          if j == 2 {
+            break
+          }
+          acc = acc + 1;
+          j = j + 1;
+        }
+        acc + 100
+      },
+    });
+    k = k + 1;
+  }
+  // acc = 2 (j==0,1 then break at j==2), +100 = 102; combine = 3 + 102 = 105; 2 iters
+  assert(total == 210, "inner break must not free the enclosing call's sibling temp");
+}
+
+t1331_inner_continue_preserves_sibling() `test {
+  int total = 0;
+  int k = 0;
+  while k < 2 {
+    total = total + combine(make_s(), match k {
+      _ => {
+        int j = 0;
+        int acc = 0;
+        while j < 5 {
+          j = j + 1;
+          if j == 2 {
+            continue
+          }
+          acc = acc + 1;
+        }
+        acc + 100
+      },
+    });
+    k = k + 1;
+  }
+  // j runs 1..5; continue skips acc at j==2 → acc = 4; +100 = 104; combine = 3 + 104 = 107; 2 iters
+  assert(total == 214, "inner continue must not free the enclosing call's sibling temp");
+}
+
+// --- non-`while` loop constructs: the fix installs the temp floor at EVERY
+// loop kind's body entry (genForInRange / genClassicForStmt / genInfiniteLoop /
+// genForInVector each call enterLoopTempFloor). The above tests only exercise
+// the `while` path (genWhileStmt); these cover the other break-drain sites so a
+// regression in any single loop kind's floor save/restore is caught. Each leaks
+// the make_s() sibling on the pre-fix baseline. ---
+
+// `for i in 0..3` — range loop (genForInRange).
+t1331_range_break() `test {
+  int total = 0;
+  for i in 0..3 {
+    total = total + combine(make_s(), match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 103, "range-for break sibling at i==1");
+}
+
+// Classic C-style `for` (genClassicForStmt).
+t1331_classic_for_break() `test {
+  int total = 0;
+  for int i = 0; i < 3; i = i + 1 {
+    total = total + combine(make_s(), match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 103, "classic-for break sibling at i==1");
+}
+
+// Infinite `for { ... }` loop (genInfiniteLoop) — the inner-arm `break` exits
+// the whole loop, so only i==0 contributes.
+t1331_infinite_break() `test {
+  int total = 0;
+  int i = 0;
+  for {
+    if i >= 3 {
+      break
+    }
+    total = total + combine(make_s(), match i {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+    i = i + 1;
+  }
+  assert(total == 103, "infinite-loop break sibling at i==1");
+}
+
+// `for x in xs` — for-in-vector loop (genForInVector).
+t1331_forin_vector_break() `test {
+  int total = 0;
+  int[] xs = [0, 1, 2];
+  for x in xs {
+    total = total + combine(make_s(), match x {
+      1 => {
+        break
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 103, "for-in-vector break sibling at x==1");
+}
+
+// `continue` on a non-`while` loop kind (range) — the increment is implicit, so
+// no livelock concern; i==1 diverges (contributes 0), i==0,2 contribute 3+100.
+t1331_range_continue() `test {
+  int total = 0;
+  for i in 0..3 {
+    total = total + combine(make_s(), match i {
+      1 => {
+        continue
+      }, _ => {
+        100
+      },
+    });
+  }
+  assert(total == 206, "range-for continue sibling at i==1");
+}

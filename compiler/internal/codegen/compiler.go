@@ -199,6 +199,13 @@ type Compiler struct {
 	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
 	scopeBindings  []scopeBinding
 	loopScopeDepth int // scopeBindings depth at loop entry (for break/continue cleanup)
+	// T1331: temp-array lengths {stmt, heap, env, enum} captured at the innermost
+	// enclosing loop's entry. A break/continue drains unclaimed temps down to this
+	// floor — dropping temps created inside the loop body while preserving temps
+	// owned by expressions that enclose the loop (e.g. a sibling call argument when
+	// the loop is nested inside a block-value arg). Saved/restored per loop like
+	// loopScopeDepth so nested loops each drain to their own entry depth.
+	loopTempFloor [4]int
 
 	// MutRef parameter pointers: maps param name to the pointer passed by the caller.
 	// MutRef params are passed as pointers to the caller's alloca, enabling
@@ -1853,6 +1860,7 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	c.enumCtorTemps = nil // B0267
 	c.tempTrackingEnabled = true
 	c.loopScopeDepth = 0
+	c.loopTempFloor = [4]int{} // T1331
 	c.inCoroutine = true
 
 	// --- Coroutine preamble ---
@@ -6125,6 +6133,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.mutRefTypes = nil
 	c.scopeBindings = nil // T0085: reset scope bindings for each new function
 	c.loopScopeDepth = 0
+	c.loopTempFloor = [4]int{} // T1331
 	c.blockCounter = 0
 	c.enumCtorTemps = nil        // B0267: prevent cross-function alloca leak
 	c.matchBorrowedIdents = nil  // T0485: clear cross-function stale entries
@@ -7829,6 +7838,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.mutRefTypes = nil
 	c.scopeBindings = nil
 	c.loopScopeDepth = 0
+	c.loopTempFloor = [4]int{} // T1331
 	c.blockCounter = 0
 	c.enumCtorTemps = nil        // B0267: prevent cross-function alloca leak
 	c.matchBorrowedIdents = nil  // T0485: clear cross-function stale entries
@@ -11154,6 +11164,7 @@ type compilerState struct {
 	currentNamed         *types.Named
 	scopeBindings        []scopeBinding
 	loopScopeDepth       int
+	loopTempFloor        [4]int // T1331
 	selfSubst            *selfSubstInfo
 	targetType           types.Type
 	typeSubst            map[*types.TypeParam]types.Type
@@ -11198,6 +11209,7 @@ func (c *Compiler) saveState() compilerState {
 		currentNamed:         c.currentNamed,
 		scopeBindings:        c.scopeBindings,
 		loopScopeDepth:       c.loopScopeDepth,
+		loopTempFloor:        c.loopTempFloor, // T1331
 		selfSubst:            c.selfSubst,
 		targetType:           c.targetType,
 		typeSubst:            c.typeSubst,
@@ -11243,6 +11255,9 @@ func (c *Compiler) saveState() compilerState {
 	c.blockTempFloorHeap = 0
 	c.blockTempFloorEnv = 0
 	c.blockTempFloorEnum = 0
+	// T1331: a nested function/coroutine body has no enclosing loop of its own;
+	// its break/continue drains from 0 until its own loops set a floor.
+	c.loopTempFloor = [4]int{}
 	return s
 }
 
@@ -11275,6 +11290,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.currentNamed = s.currentNamed
 	c.scopeBindings = s.scopeBindings
 	c.loopScopeDepth = s.loopScopeDepth
+	c.loopTempFloor = s.loopTempFloor // T1331
 	c.selfSubst = s.selfSubst
 	c.targetType = s.targetType
 	c.typeSubst = s.typeSubst

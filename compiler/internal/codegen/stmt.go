@@ -12876,6 +12876,7 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	if c.shouldInstrument() {
@@ -12892,6 +12893,7 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 
@@ -12945,6 +12947,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
@@ -13073,6 +13076,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 
@@ -13318,6 +13322,7 @@ func (c *Compiler) genForInCustomIter(s *ast.ForInStmt, iterVal value.Value, ite
 	c.breakTarget = exitBlk
 	c.continueTarget = updateBlk
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlk
 	val := c.block.NewExtractValue(nextResult, 1)
@@ -13342,6 +13347,7 @@ func (c *Compiler) genForInCustomIter(s *ast.ForInStmt, iterVal value.Value, ite
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopScopeDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 
 	c.block = exitBlk
 }
@@ -13524,6 +13530,7 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -13551,6 +13558,7 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 
@@ -13587,6 +13595,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	if c.shouldInstrument() {
@@ -13658,6 +13667,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 
@@ -13675,6 +13685,7 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 	c.breakTarget = exitBlock
 	c.continueTarget = bodyBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	if c.shouldInstrument() {
@@ -13692,6 +13703,7 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 
@@ -13749,6 +13761,7 @@ func (c *Compiler) emitYieldCheck() {
 
 func (c *Compiler) genBreakStmt() {
 	if c.breakTarget != nil {
+		c.drainLoopExitTemps() // T1331
 		// Close use bindings added within the loop body
 		if len(c.scopeBindings) > c.loopScopeDepth {
 			cap := c.emitScopeCleanup(c.loopScopeDepth, false)
@@ -13760,6 +13773,7 @@ func (c *Compiler) genBreakStmt() {
 
 func (c *Compiler) genContinueStmt() {
 	if c.continueTarget != nil {
+		c.drainLoopExitTemps() // T1331
 		// Close use bindings added within the loop body
 		if len(c.scopeBindings) > c.loopScopeDepth {
 			cap := c.emitScopeCleanup(c.loopScopeDepth, false)
@@ -13767,6 +13781,37 @@ func (c *Compiler) genContinueStmt() {
 		}
 		c.block.NewBr(c.continueTarget)
 	}
+}
+
+// enterLoopTempFloor records the current temp-array depths as the innermost
+// loop's temp floor (T1331) and returns the previous floor for restoration at
+// loop exit. Called at each loop's body entry alongside c.loopScopeDepth.
+func (c *Compiler) enterLoopTempFloor() [4]int {
+	saved := c.loopTempFloor
+	c.loopTempFloor = [4]int{len(c.stmtTemps), len(c.heapTemps), len(c.envTemps), len(c.enumCtorTemps)}
+	return saved
+}
+
+// drainLoopExitTemps drops unclaimed temps created inside the current loop body
+// before a break/continue abandons its remainder mid-evaluation (T1331). Drains
+// down to c.loopTempFloor (the temp-array depths at the loop's entry), NOT from
+// 0: a break/continue only abandons the enclosing statement up to the target
+// loop. Temps below the floor belong to expressions that enclose the loop (e.g.
+// a sibling call argument when the loop is nested inside a block-value arg) and
+// must survive — draining them would free a value the post-loop code still uses.
+// For the T1331 case (loop OUTSIDE the enclosing call) the sibling temp is
+// created inside the loop body, so it sits at/above the floor and is dropped —
+// closing the leak. Drops are flag-guarded (B0198), and genBlockValue's deferred
+// prefix rebuild restores tracking for the non-divergent path, so the divergent
+// and non-divergent paths never double-free.
+func (c *Compiler) drainLoopExitTemps() {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	c.cleanupStmtTempsFrom(c.loopTempFloor[0])
+	c.cleanupHeapTempsFrom(c.loopTempFloor[1])
+	c.cleanupEnvTempsFrom(c.loopTempFloor[2])
+	c.drainEnumCtorTempsFrom(c.loopTempFloor[3])
 }
 
 // --- Index assignment ---
@@ -14719,6 +14764,7 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	// T0617: scope the slot-ptr map entry to this loop (save/restore, like
 	// breakTarget) so nesting (`for x in v1 { for x in v2 {} }`) is safe and
@@ -14790,6 +14836,7 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 
 	if isTaskElem { // T0617: restore the scoped slot-ptr map entry
@@ -14867,6 +14914,7 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	// T0617: scope the slot-ptr map entry to this loop (save/restore, like
 	// breakTarget) so nesting is safe and it self-cleans across functions.
@@ -14935,6 +14983,7 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 
 	if isTaskElem { // T0617: restore the scoped slot-ptr map entry
@@ -15110,6 +15159,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	// T0671: the received element is moved out of the ring buffer (recv advanced
@@ -15136,6 +15186,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 
@@ -15259,6 +15310,7 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 
@@ -15356,6 +15408,7 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 
 	// B0214: Drop the temporary keys and values vectors after the loop.
@@ -15404,6 +15457,7 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
 	c.loopScopeDepth = len(c.scopeBindings)
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
 
 	c.block = bodyBlock
 	alloca := c.createEntryAlloca(irtypes.I32)
@@ -15429,6 +15483,7 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.block = exitBlock
 }
 

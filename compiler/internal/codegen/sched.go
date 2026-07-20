@@ -2259,6 +2259,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	savedDropFlags := c.dropFlags
 	savedCastSubjectMatch := c.castSubjectMatch // T0849: function-scoped, like dropFlags
 	savedLoopScopeDepth := c.loopScopeDepth
+	savedLoopTempFloor := c.loopTempFloor // T1331
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
@@ -2287,6 +2288,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.enumCtorTemps = nil                     // B0267
 	c.tempTrackingEnabled = true              // T0100: enable temp tracking in main goroutine
 	c.loopScopeDepth = 0
+	c.loopTempFloor = [4]int{} // T1331: fresh coroutine body — no enclosing loop
 	c.inCoroutine = true
 
 	// --- Coroutine preamble ---
@@ -2453,6 +2455,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.dropFlags = savedDropFlags
 	c.castSubjectMatch = savedCastSubjectMatch // T0849
 	c.loopScopeDepth = savedLoopScopeDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend

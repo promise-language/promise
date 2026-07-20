@@ -3,8 +3,28 @@ package common
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
+
+// TestPromiseTestTimeoutArgs verifies that the per-test timeout flags carry a
+// 3× scale on WASM targets (T1334) while host runs keep the bare 10s default.
+func TestPromiseTestTimeoutArgs(t *testing.T) {
+	cases := []struct {
+		target string
+		want   []string
+	}{
+		{"", []string{"-timeout", "10"}},
+		{"wasm32-wasi", []string{"-timeout", "10", "-timeout-scale", "3"}},
+		{"wasm32-web", []string{"-timeout", "10", "-timeout-scale", "3"}},
+	}
+	for _, c := range cases {
+		got := promiseTestTimeoutArgs(c.target)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("promiseTestTimeoutArgs(%q) = %v, want %v", c.target, got, c.want)
+		}
+	}
+}
 
 // TestRunFlowsGoTests_NoFlowsModule verifies that RunFlowsGoTests skips without
 // error when flows/go.mod does not exist.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -146,14 +147,31 @@ func RunFlowsGoTests(root string) (skipped bool, err error) {
 	return false, RunIn(flowsDir, "go", "test", "-timeout", "30m", "./...")
 }
 
+// promiseTestTimeoutArgs returns the per-test timeout flags for the given target
+// (empty = host). WASM targets execute under wasmtime/Node and, under full
+// parallel suite load (~650 processes at NumCPU), a trivial test's execution can
+// be CPU-starved past the tight 10s host ceiling (T1334; cf. B0108, which raised
+// the WASM *compile* backstop). Scale WASM per-test timeouts 3× so both the
+// default and annotated timeouts get proportional headroom. This only raises the
+// kill ceiling — it adds no runtime cost to passing tests, and host runs (scale
+// 1.0) are unaffected, including their cache keys.
+func promiseTestTimeoutArgs(target string) []string {
+	args := []string{"-timeout", "10"}
+	if strings.HasPrefix(target, "wasm") { // wasm32-wasi and wasm32-web
+		args = append(args, "-timeout-scale", "3")
+	}
+	return args
+}
+
 // RunPromiseTests runs Promise tests for the given target (empty = host).
 // Returns captured stdout (even on failure) and any error.
 func RunPromiseTests(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/...", "tools/stub/..."}
+	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
 	if target != "" {
-		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+		args = append(args, "-target", target)
 	}
+	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
 	return RunTee(root, promiseBin, args...)
 }
 
@@ -161,10 +179,11 @@ func RunPromiseTests(root, target string) (string, error) {
 // instead of stdout, keeping stdout clean for structured output (e.g. JSON).
 func RunPromiseTestsCapture(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/...", "tools/stub/..."}
+	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
 	if target != "" {
-		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+		args = append(args, "-target", target)
 	}
+	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
 	return RunTeeStderr(root, promiseBin, args...)
 }
 
@@ -175,7 +194,8 @@ func RunPromiseTestsCapture(root, target string) (string, error) {
 // target is non-empty it cross-compiles for that target. T0763.
 func RunPromiseTestsJSON(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := []string{"test", "-timeout", "10", "--json"}
+	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
+	args = append(args, "--json")
 	if target != "" {
 		args = append(args, "-target", target)
 	}

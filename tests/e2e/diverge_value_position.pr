@@ -1,0 +1,179 @@
+// T1332: an `if`/`match` expression in value position where BOTH arms diverge
+// (return/raise) previously returned nil from genIfExpr / buildMatchPhi,
+// producing a "nil value for typed var decl" panic (and malformed IR / SIGSEGV
+// in operand and call-argument positions). The merge block is genuinely
+// unreachable — codegen now terminates it with `unreachable` and feeds the
+// consumer a typed poison value, so the arms still run and the never-reached
+// merge is dead code. Distinct from T1330 (one arm diverging).
+// --- if: both arms diverge ---
+if_var!(bool b) int {
+  int r = if b {
+    return 1
+  } else {
+    return 2
+  };
+  return r;
+}
+if_return!(bool b) int {
+  return if b {
+    return 1
+  } else {
+    return 2
+  };
+}
+if_operand!(bool b) int {
+  int r = 10 + if b {
+    return 1
+  } else {
+    return 2
+  };
+  return r;
+}
+combine(int m, int n) int {
+  return m + n;
+}
+if_callarg!(bool b) int {
+  int r = combine(5, if b {
+    return 1
+  } else {
+    return 2
+  });
+  return r;
+}
+if_raise!(bool b) int {
+  int r = if b {
+    raise error(message: "a")
+  } else {
+    raise error(message: "b")
+  };
+  return r;
+}
+
+// --- match: both arms diverge ---
+match_var!(bool b) int {
+  int r = match b {
+    true => {
+      return 1
+    }, _ => {
+      return 2
+    },
+  };
+  return r;
+}
+match_return!(bool b) int {
+  return match b {
+    true => {
+      return 1
+    }, _ => {
+      return 2
+    },
+  };
+}
+match_operand!(bool b) int {
+  int r = 10 + match b {
+    true => {
+      return 1
+    }, _ => {
+      return 2
+    },
+  };
+  return r;
+}
+match_callarg!(bool b) int {
+  int r = combine(5, match b {
+    true => {
+      return 1
+    }, _ => {
+      return 2
+    },
+  });
+  return r;
+}
+
+// Diverging value-position if/match sharing a call with a heap-allocating
+// sibling temp (the `("x" + "y")` concatenation). Exercises the sibling
+// drop-cleanup path (cf. T1329/T1331) interacting with a diverged merge: an
+// earlier arg's heap temp is already live when a later arg diverges (returns)
+// mid-evaluation, so it must be freed exactly once — no leak, no double-free.
+// Batch-test leak detection guards this.
+take_len(string s, int n) int {
+  return s.len + n;
+}
+// heap sibling as the earlier arg, diverging if/match as the later arg
+if_heap_before!(bool b) int {
+  int r = take_len(("x" + "y"), if b {
+    return 1
+  } else {
+    return 2
+  });
+  return r;
+}
+match_heap_before!(bool b) int {
+  int r = take_len(("x" + "y"), match b {
+    true => {
+      return 1
+    }, _ => {
+      return 2
+    },
+  });
+  return r;
+}
+// diverging if/match as the earlier arg, heap sibling as the later arg
+take_n_len(int n, string s) int {
+  return n + s.len;
+}
+if_heap_after!(bool b) int {
+  int r = take_n_len(if b {
+    return 1
+  } else {
+    return 2
+  }, ("x" + "y"));
+  return r;
+}
+match_heap_after!(bool b) int {
+  int r = take_n_len(match b {
+    true => {
+      return 1
+    }, _ => {
+      return 2
+    },
+  }, ("x" + "y"));
+  return r;
+}
+
+diverge_if_both_arms() `test {
+  assert(if_var(true)?! == 1, "if var-decl, then arm");
+  assert(if_var(false)?! == 2, "if var-decl, else arm");
+  assert(if_return(true)?! == 1, "if return position, then arm");
+  assert(if_return(false)?! == 2, "if return position, else arm");
+  assert(if_operand(true)?! == 1, "if operand position, then arm");
+  assert(if_operand(false)?! == 2, "if operand position, else arm");
+  assert(if_callarg(true)?! == 1, "if call-arg position, then arm");
+  assert(if_callarg(false)?! == 2, "if call-arg position, else arm");
+  // raise-divergence: the arm's raise propagates, merge never reached.
+  int got = if_raise(true)? e {
+    7
+  };
+  assert(got == 7, "if raise arm propagates");
+  // sibling heap temp cleanup when a call arg diverges (leak-checked)
+  assert(if_heap_before(true)?! == 1, "if heap-before sibling, then");
+  assert(if_heap_before(false)?! == 2, "if heap-before sibling, else");
+  assert(if_heap_after(true)?! == 1, "if heap-after sibling, then");
+  assert(if_heap_after(false)?! == 2, "if heap-after sibling, else");
+}
+
+diverge_match_both_arms() `test {
+  assert(match_var(true)?! == 1, "match var-decl, first arm");
+  assert(match_var(false)?! == 2, "match var-decl, wildcard arm");
+  assert(match_return(true)?! == 1, "match return position, first arm");
+  assert(match_return(false)?! == 2, "match return position, wildcard arm");
+  assert(match_operand(true)?! == 1, "match operand position, first arm");
+  assert(match_operand(false)?! == 2, "match operand position, wildcard arm");
+  assert(match_callarg(true)?! == 1, "match call-arg position, first arm");
+  assert(match_callarg(false)?! == 2, "match call-arg position, wildcard arm");
+  // sibling heap temp cleanup when a call arg diverges (leak-checked)
+  assert(match_heap_before(true)?! == 1, "match heap-before sibling, first");
+  assert(match_heap_before(false)?! == 2, "match heap-before sibling, wildcard");
+  assert(match_heap_after(true)?! == 1, "match heap-after sibling, first");
+  assert(match_heap_after(false)?! == 2, "match heap-after sibling, wildcard");
+}

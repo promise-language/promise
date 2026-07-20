@@ -296,10 +296,10 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = c.checkErrorHandlerExpr(e)
 
 	case *ast.IfExpr:
-		typ = c.checkIfExpr(e)
+		typ = c.checkIfExpr(e, hint)
 
 	case *ast.MatchExpr:
-		typ = c.checkMatchExpr(e)
+		typ = c.checkMatchExpr(e, hint)
 
 	case *ast.LambdaExpr:
 		typ = c.checkLambdaExpr(e)
@@ -3087,7 +3087,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 	return inner
 }
 
-func (c *Checker) checkIfExpr(e *ast.IfExpr) types.Type {
+func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	cond := c.checkExpr(e.Cond)
 	if cond != nil && !types.Identical(cond, types.TypBool) {
 		c.errorf(e.Cond.Pos(), "if condition must be bool, got %s", cond)
@@ -3109,7 +3109,16 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) types.Type {
 	// (`T`), the result is owned — a single dropflag cannot represent
 	// ownership that varies by arm, so the conservative choice is the
 	// owned form. Otherwise, prefer the then-branch type.
-	return c.joinBranchTypes(thenType, elseType, e.Pos())
+	joined := c.joinBranchTypes(thenType, elseType, e.Pos())
+
+	// T1332: both arms diverge (return/raise) → no arm produces a value, so the
+	// join is nil. The expression is never-typed; adopt the contextual expected
+	// type so downstream consumers see a well-typed (dead) value instead of nil.
+	if joined == nil && hint != nil &&
+		c.blockAlwaysExits(e.Then) && c.blockAlwaysExits(e.Else) {
+		return hint
+	}
+	return joined
 }
 
 // joinBranchTypes unifies two arm types of an if/match expression. When one
@@ -3189,7 +3198,7 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos) types.Type {
 	return a
 }
 
-func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
+func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 	subjectType := c.checkExpr(e.Subject)
 
 	var resultType types.Type
@@ -3257,6 +3266,23 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 
 	// Check exhaustiveness
 	c.checkMatchExhaustiveness(e, subjectType)
+
+	// T1332: every arm diverges (return/raise) → no arm produces a value, so
+	// resultType is nil. Adopt the contextual expected type so downstream
+	// consumers see a well-typed (dead) value instead of nil (mirrors the
+	// if-expr case in checkIfExpr).
+	if resultType == nil && hint != nil && len(e.Arms) > 0 {
+		allDiverge := true
+		for _, arm := range e.Arms {
+			if arm.Block == nil || !c.blockAlwaysExits(arm.Block) {
+				allDiverge = false
+				break
+			}
+		}
+		if allDiverge {
+			return hint
+		}
+	}
 
 	return resultType
 }

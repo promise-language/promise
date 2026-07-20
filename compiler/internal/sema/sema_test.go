@@ -20136,3 +20136,35 @@ func TestT1168_GenuinelyMissingFieldOptionalChainStillErrors(t *testing.T) {
 	`)
 	expectError(t, errs, "no field or method nope")
 }
+
+// T1332: a value-position `if`/`match` whose arms BOTH diverge (return/raise)
+// produces no arm value, so joinBranchTypes yields nil. Sema now adopts the
+// contextual expected type (the var-decl / return / arg hint) so downstream
+// codegen sees a well-typed dead value instead of nil. These must type-check
+// with no errors — a regression guard that the hint-adoption fallback does not
+// over-report or mask genuine mismatches.
+func TestT1332_IfBothArmsDivergeTypeChecks(t *testing.T) {
+	checkOK(t, `
+		h(bool b) int {
+			int r = if b { return 1 } else { return 2 };
+			return r;
+		}
+	`)
+}
+
+func TestT1332_MatchBothArmsDivergeTypeChecks(t *testing.T) {
+	checkOK(t, `
+		h(bool b) int {
+			int r = match b { true => { return 1 }, _ => { return 2 } };
+			return r;
+		}
+	`)
+}
+
+func TestT1332_IfBothArmsDivergeReturnPosition(t *testing.T) {
+	checkOK(t, `
+		h(bool b) int {
+			return if b { return 1 } else { return 2 };
+		}
+	`)
+}

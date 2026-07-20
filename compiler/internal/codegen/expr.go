@@ -8632,7 +8632,24 @@ func (c *Compiler) buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo, resu
 		}
 	}
 	if !hasAnyValue {
-		return nil
+		// T1332: distinguish a value-position match whose arms all diverge
+		// (return/raise — no arm branches to mergeBlock, so it is dead code) from
+		// a statement-position void match (arms reach mergeBlock with no value).
+		// Only the former gets an `unreachable` + typed undef; the latter keeps the
+		// reachable merge block and returns nil as before.
+		anyReachesMerge := false
+		for _, a := range arms {
+			if a.end != nil && a.end.Term != nil {
+				if br, ok := a.end.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
+					anyReachesMerge = true
+					break
+				}
+			}
+		}
+		if anyReachesMerge {
+			return nil
+		}
+		return c.emitDivergedMergeValue(mergeBlock, resultType)
 	}
 
 	// Find a representative non-nil value type for zero-filling arms without values.
@@ -8669,7 +8686,27 @@ func (c *Compiler) buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo, resu
 		c.trackMergeResultTemp(phi, resultType, arms) // T1107
 		return phi
 	}
-	return nil
+	return c.emitDivergedMergeValue(mergeBlock, resultType)
+}
+
+// emitDivergedMergeValue handles a value-position if/match whose arms all diverge
+// (return/raise): mergeBlock has no predecessor, so it is dead code. Terminate it
+// with `unreachable` and return a well-typed poison value of the expression's
+// result type so value consumers produce valid (dead) IR instead of crashing on a
+// nil value (T1332). resultType comes from sema (the contextual hint); fall back to
+// c.targetType, then nil (statement position — value discarded).
+func (c *Compiler) emitDivergedMergeValue(mergeBlock *ir.Block, resultType types.Type) value.Value {
+	if mergeBlock.Term == nil {
+		mergeBlock.NewUnreachable()
+	}
+	rt := resultType
+	if rt == nil {
+		rt = c.targetType
+	}
+	if rt == nil {
+		return nil // statement position: no consumer
+	}
+	return constant.NewUndef(c.resolveType(rt))
 }
 
 // clearMatchArmResultDropFlags clears drop flags for identifiers that appear as
@@ -10611,7 +10648,25 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 		return phi
 	}
 
-	return nil
+	// T1332: both arms diverged (return/raise) → no incoming reaches mergeBlock,
+	// so it is dead code. Terminate it and hand the consumer a typed poison value.
+	// Guard against a reachable-but-void merge (arms branch to merge with no value,
+	// e.g. statement-position void arms): only the truly unreachable case gets the
+	// `unreachable` terminator; the reachable case keeps returning nil.
+	thenReaches := thenEnd.Term != nil && isBrTo(thenEnd.Term, mergeBlock)
+	elseReaches := elseEnd.Term != nil && isBrTo(elseEnd.Term, mergeBlock)
+	if thenReaches || elseReaches {
+		return nil
+	}
+	return c.emitDivergedMergeValue(mergeBlock, ifResultType)
+}
+
+// isBrTo reports whether an unconditional branch terminator targets block b.
+func isBrTo(term ir.Terminator, b *ir.Block) bool {
+	if br, ok := term.(*ir.TermBr); ok {
+		return br.Target == b
+	}
+	return false
 }
 
 // --- Error handling expressions ---

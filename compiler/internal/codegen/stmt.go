@@ -8270,9 +8270,12 @@ func (c *Compiler) argMayAliasStructuralReturn(a ast.Expr) bool {
 //
 // The classification admits ONLY the provably-fresh, non-aliasing shape:
 //   - !isBorrowedExpr: excludes borrow-returning (`T&`/`T~`) calls.
-//   - callee is NOT a MemberExpr: excludes method calls that can hand back `this`
-//     (`c.get_self()`) or an iterator adapter over the receiver (`v.iter()`),
-//     whose box the receiver / iter-cleanup already frees.
+//   - callee is a plain free function (IdentExpr) OR a module-qualified free
+//     function (`mod.fresh_return()`, a MemberExpr whose Target resolves via
+//     resolveModuleName; T1327) — both own their fresh box. A MemberExpr that is
+//     a genuine method call is excluded: it can hand back `this` (`c.get_self()`)
+//     or an iterator adapter over the receiver (`v.iter()`), whose box the
+//     receiver / iter-cleanup already frees.
 //   - return type is not an iterator/generator adapter: excludes free-function
 //     generator returns whose non-standard-RTTI box would be double-dropped.
 //   - no argument is a heap reference the return could alias: excludes both
@@ -8290,8 +8293,17 @@ func (c *Compiler) isFreshOwnedStructuralCall(expr ast.Expr, rt types.Type) bool
 	if c.isBorrowedExpr(expr) {
 		return false
 	}
-	if _, isMember := call.Callee.(*ast.MemberExpr); isMember {
-		return false
+	if mem, isMember := call.Callee.(*ast.MemberExpr); isMember {
+		// T1327: a module-qualified free-function call (`mod.fresh_return()`) has a
+		// MemberExpr callee whose Target is a module name — not a method call. Its
+		// fresh non-value structural return is an owned box, exactly like the
+		// IdentExpr free-function form. Admit it and fall through to the arg-alias
+		// check below (still declines `mod.pass_through(s)`). Value-receiver method
+		// calls (`c.get_self()`, `v.iter()`) still return false.
+		ident, isIdent := mem.Target.(*ast.IdentExpr)
+		if !isIdent || c.resolveModuleName(ident) == "" {
+			return false
+		}
 	}
 	if rtNamed := extractNamed(rt); rtNamed != nil && isIteratorAdapterName(rtNamed.Obj().Name()) {
 		return false

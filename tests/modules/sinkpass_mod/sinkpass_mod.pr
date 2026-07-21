@@ -1,0 +1,40 @@
+// T1327: cross-module structural-interface passthrough / discard assets.
+// Exports a fresh-constructing free function (`fresh_return`), an owned-arg
+// passthrough (`pass_through`), and a non-structural heap return (`make_box`)
+// so the caller-side discard/inline temp-tracking path can be exercised across
+// a module boundary. Sibling of the T1307 binding-path coverage.
+// Structural-interface view whose backing box must be freed by the owner.
+type Sink `public `structural `doc("Structural interface with a single emit method; backed by a heap box.") {
+  emit(int n) `abstract `doc("Consumes an int; concrete satisfiers accumulate or ignore it.");
+}
+
+// Concrete satisfier of Sink.
+type Widget `public `doc("Concrete Sink satisfier holding an int id.") {
+  int id;
+  emit(int n) `doc("Adds n to this widget's id.") {
+    this.id = this.id + n;
+  }
+}
+
+// Fresh-constructing free function: returns a brand-new, distinct-pointer Sink
+// box. A discarded call (`mod.fresh_return();`) must free it at statement end.
+fresh_return() Sink `public `doc("Returns a freshly constructed Sink; the caller owns the returned box.") {
+  return Widget(id: 10);
+}
+
+// Owned-arg passthrough: returns its argument (aliases the caller's still-owned
+// value). A discarded call must NOT be temp-tracked — the arg stays sole owner.
+pass_through(Sink s) Sink `public `doc("Returns the passed-in Sink unchanged; the argument remains the sole owner.") {
+  return s;
+}
+
+// Non-structural owned heap type, for the regression guard.
+type Box `public `doc("Non-structural heap type holding a single int value.") {
+  int value;
+}
+
+// Non-structural fresh heap return: a discarded call frees it via the existing
+// non-structural tracking path (unaffected by the T1327 structural carve-out).
+make_box() Box `public `doc("Returns a freshly constructed Box; the caller owns the returned value.") {
+  return Box(value: 42);
+}

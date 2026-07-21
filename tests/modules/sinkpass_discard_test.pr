@@ -1,0 +1,56 @@
+// T1327: a discarded (unbound) module-qualified free-function call whose result
+// is a FRESH structural-interface value must free the heap box at statement end,
+// exactly like the same-file free-function form (T1294). Sibling of the T1307
+// binding path (`r := mod.pass_through(s)`), which was already fixed.
+//
+// Leak enforcement (T0067) is the real check here: before the fix, `discard_fresh`
+// reported `LEAK: 1 allocations not freed`. The passthrough and non-struct cases
+// double as no-double-free / no-regression guards.
+use sinkpass_mod "./sinkpass_mod";
+
+// The leak: a module-qualified free-function call returning a FRESH structural
+// value, discarded. The returned box must be freed at statement end.
+discard_fresh() `test {
+  sinkpass_mod.fresh_return();
+  assert(true, "");
+}
+
+// Passthrough: `pass_through(s)` returns its argument, aliasing the caller's
+// still-owned `s`. The discarded call must NOT be temp-tracked (the arg stays
+// sole owner) — otherwise the box is dropped twice. The later `s.emit(1)` keeps
+// `s` live past the discard so a stray free would surface as a use-after-free.
+discard_passthrough() `test {
+  s := sinkpass_mod.Widget(id: 3);
+  sinkpass_mod.pass_through(s);
+  s.emit(1);
+  assert(true, "");
+}
+
+// Inline (not bare-discarded): the fresh module-qualified structural box is
+// consumed inline as the receiver of `.emit(...)`, then the whole statement is
+// discarded. The inner `fresh_return()` box still has no other owner and must be
+// freed at statement end — the "inline" half of the discard/inline path the item
+// characterizes (sibling of same-file `show(3).to_string()`, T1294).
+discard_fresh_inline() `test {
+  sinkpass_mod.fresh_return().emit(5);
+  assert(true, "");
+}
+
+// Passthrough of a FRESH temp arg across the module boundary: the argument
+// `fresh_return()` is itself a fresh owned box (tracked & freed once), and the
+// outer `pass_through(...)` returns that SAME box by alias. The outer discarded
+// call must NOT be temp-tracked — tracking it would drop the identical box twice
+// (double-free). Runtime analog of the same-file no-double-free guard: it must
+// neither leak (inner frees it) nor crash (outer must not free it again).
+discard_passthrough_fresh_temp() `test {
+  sinkpass_mod.pass_through(sinkpass_mod.fresh_return());
+  assert(true, "");
+}
+
+// Regression guard: a discarded module-qualified NON-structural fresh heap
+// return is freed by the existing non-structural tracking path, unaffected by
+// the T1327 structural carve-out.
+discard_nonstruct() `test {
+  sinkpass_mod.make_box();
+  assert(true, "");
+}

@@ -735,6 +735,10 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		}
 		if i == n-1 {
 			if es, ok := stmt.(*ast.ExprStmt); ok {
+				// T1326: snapshot the enum-ctor temp count before evaluating the arm
+				// tail so drainNestedArmEnumCtorTemps can drop any by-value call-arg
+				// ctor temps this arm creates that are NOT the phi'd result.
+				tailEnumSnap := len(c.enumCtorTemps)
 				if c.info.AutoPropagateExprs[es.Expr] {
 					// Failable call: auto-propagate error, discard success value.
 					// Block arms don't contribute typed results to match phis;
@@ -820,6 +824,9 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 						c.optionalContainerDup = nil
 					}
 				}
+				// T1326: drain any by-value call-arg enum-ctor temps this arm tail
+				// created (kept only when the tail itself is a move-out ctor).
+				c.drainNestedArmEnumCtorTemps(es.Expr, tailEnumSnap)
 				break
 			}
 			// B0126: Handle if/else as the last statement in a block that
@@ -1013,6 +1020,27 @@ func (c *Compiler) drainEnumCtorTempsFrom(floor int) {
 		c.block = skipBlk
 	}
 	c.enumCtorTemps = c.enumCtorTemps[:floor]
+}
+
+// drainNestedArmEnumCtorTemps drops inline enum-ctor temps created while evaluating
+// a branch-arm result expression that is NOT itself a move-out enum constructor
+// (T1326). Such temps are by-value call arguments the callee only borrows/dups
+// (B0232) — the caller retains ownership, so they must be drained at the arm
+// boundary. Otherwise the branch's statement-level clear (enumCtorTempMovesOut)
+// sweeps them wholesale with the genuine arm-result ctors and orphans the payload.
+// Move-out arm results (a direct ctor / nested move-out branch) are left tracked
+// for the statement-level clear.
+func (c *Compiler) drainNestedArmEnumCtorTemps(armExpr ast.Expr, snap int) {
+	if len(c.enumCtorTemps) <= snap {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return // arm diverged; genReturnStmt/genRaiseStmt already drained the array
+	}
+	if c.enumCtorTempMovesOut(armExpr) {
+		return // arm result IS moved out through the phi — keep for statement-level clear
+	}
+	c.drainEnumCtorTempsFrom(snap)
 }
 
 // genAutoPropagate generates implicit error propagation for a failable call

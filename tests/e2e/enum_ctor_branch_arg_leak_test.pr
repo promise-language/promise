@@ -1,0 +1,171 @@
+// T1326: An inline enum-constructor temp used as a by-value CALL ARGUMENT inside a
+// branch (`match`/`if`) arm leaked its heap payload. When the branch's result type
+// is an enum and the result is moved out (var-decl binding / return), the branch's
+// statement-level enum-ctor-temp clear swept EVERY tracked temp wholesale, assuming
+// all are the arm phi result. The nested arg ctor is NOT the phi result — the callee
+// only borrows/dups it (B0232), so the caller retains ownership and it must be
+// drained at the arm boundary. `"hi".to_upper()` forces a heap string (a bare
+// literal would be .rodata and hide the leak).
+enum Payload {
+  Full(string s), Empty,
+}
+
+// wrap borrows its param and returns a FRESH enum, so the by-value ctor passed as
+// its argument is orphaned in the caller and must be drained.
+wrap(Payload p) Payload {
+  match p {
+    Payload.Full(s) => {
+      return Payload.Full(s.to_upper());
+    },
+    Payload.Empty => {
+      return Payload.Empty;
+    },
+  }
+}
+
+payload_len(Payload move p) int {
+  match p {
+    Payload.Full(s) => {
+      return s.len;
+    },
+    Payload.Empty => {
+      return 0;
+    },
+  }
+}
+
+// Variant a: `if`-expr arm whose value is a call taking a by-value enum-ctor arg.
+branch_if(bool c) int {
+  q := if c {
+    wrap(Payload.Full("hi".to_upper()))
+  } else {
+    Payload.Empty
+  };
+  return payload_len(move q);
+}
+
+// Variant c: `match` block-form arm whose value is such a call.
+branch_match_block(bool c) int {
+  q := match c {
+    true => {
+      wrap(Payload.Full("hi".to_upper()))
+    },
+    _ => {
+      Payload.Empty
+    },
+  };
+  return payload_len(move q);
+}
+
+// Variant b: `match` expression-form arm whose value is such a call.
+branch_match_expr(bool c) int {
+  q := match c {
+    true => wrap(Payload.Full("hi".to_upper())),
+    _ => Payload.Empty,
+  };
+  return payload_len(move q);
+}
+
+// Return path: the branch is the direct operand of `return` (passed to a call).
+branch_return_if(bool c) int {
+  return payload_len(if c {
+    wrap(Payload.Full("hi".to_upper()))
+  } else {
+    Payload.Empty
+  });
+}
+
+// Return path: the branch is the DIRECT return operand of an enum-returning
+// function, so `return`'s statement-level clear sees enumCtorTempMovesOut == true
+// and swept the nested arg ctor wholesale (the leak the arm-boundary drain fixes).
+branch_return_direct(bool c) Payload {
+  return if c {
+    wrap(Payload.Full("hi".to_upper()))
+  } else {
+    Payload.Empty
+  };
+}
+
+// Regression guard: a direct-ctor arm branch — the ctor IS the moved-out phi result,
+// so it must NOT be drained (drained would double-free / lose the value).
+branch_direct_ctor(bool c) int {
+  q := if c {
+    Payload.Full("hi".to_upper())
+  } else {
+    Payload.Empty
+  };
+  return payload_len(move q);
+}
+
+// wrap2 borrows p, has a second (unused) int arg; used to build a call whose
+// by-value enum-ctor 1st arg is followed by a DIVERGING 2nd arg.
+wrap2(Payload p, int k) Payload {
+  match p {
+    Payload.Full(s) => {
+      return Payload.Full(s.to_upper());
+    },
+    Payload.Empty => {
+      return Payload.Empty;
+    },
+  }
+}
+
+// Divergence guard (drainNestedArmEnumCtorTemps early-return): a `match` arm tail is
+// a call whose 1st arg is a by-value enum ctor and whose 2nd arg DIVERGES via
+// `break`. The break terminates the block (and drains the ctor temp array) before
+// the arm-boundary drain runs, so the drain must early-return — draining again would
+// double-free. Must not leak and must not crash. (The `break` sibling-arg case is
+// covered for leaks by T1331; here it exercises the arm-boundary divergence guard.)
+branch_arm_diverge_break(bool c) int {
+  total := 5;
+  for {
+    q := match c {
+      true => wrap2(Payload.Full("hi".to_upper()), if c {
+        break
+      } else {
+        break
+      }),
+      _ => Payload.Empty,
+    };
+    total = payload_len(move q);
+    break;
+  }
+  return total;
+}
+
+test_branch_if() `test {
+  assert(branch_if(true) == 2, "if arm nested call");
+  assert(branch_if(false) == 0, "if arm false");
+}
+
+test_branch_match_block() `test {
+  assert(branch_match_block(true) == 2, "match block arm nested call");
+  assert(branch_match_block(false) == 0, "match block arm false");
+}
+
+test_branch_match_expr() `test {
+  assert(branch_match_expr(true) == 2, "match expr arm nested call");
+  assert(branch_match_expr(false) == 0, "match expr arm false");
+}
+
+test_branch_return_if() `test {
+  assert(branch_return_if(true) == 2, "return if nested call");
+  assert(branch_return_if(false) == 0, "return if false");
+}
+
+test_branch_direct_ctor() `test {
+  assert(branch_direct_ctor(true) == 2, "direct ctor arm moved out");
+  assert(branch_direct_ctor(false) == 0, "direct ctor arm false");
+}
+
+test_branch_return_direct() `test {
+  a := branch_return_direct(true);
+  assert(payload_len(move a) == 2, "direct return branch nested call");
+  b := branch_return_direct(false);
+  assert(payload_len(move b) == 0, "direct return branch false");
+}
+
+test_branch_arm_diverge_break() `test {
+  // c=true diverges out of the loop via break, leaving total at its initial 5.
+  assert(branch_arm_diverge_break(true) == 5, "arm break divergence guard");
+}

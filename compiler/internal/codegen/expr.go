@@ -8581,15 +8581,22 @@ func (c *Compiler) genMatchArmValue(arm *ast.MatchArm, resultType types.Type) va
 		// yields the unwrapped success value. Track the unwrapped heap value as a
 		// stmt temp so the merge phi's claimStringTemp/ownership machinery frees
 		// it — mirroring the explicit `?^` (ErrorPropagateExpr) arm path.
+		// T1326: snapshot the enum-ctor temp count before evaluating the arm body so
+		// drainNestedArmEnumCtorTemps can drop any by-value call-arg ctor temps this
+		// arm creates that are NOT the phi'd result.
+		tailEnumSnap := len(c.enumCtorTemps)
 		if c.info.AutoPropagateExprs[arm.Body] {
 			result := c.genExpr(arm.Body)
 			unwrapped := c.genAutoPropagateValue(result)
 			if unwrapped != nil {
 				c.trackUnwrappedFailableTemp(arm.Body, unwrapped)
 			}
+			c.drainNestedArmEnumCtorTemps(arm.Body, tailEnumSnap)
 			return unwrapped
 		}
-		return c.genExpr(arm.Body)
+		v := c.genExpr(arm.Body)
+		c.drainNestedArmEnumCtorTemps(arm.Body, tailEnumSnap)
+		return v
 	} else if arm.Block != nil {
 		return c.genBlockValue(arm.Block)
 	}

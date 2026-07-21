@@ -10744,6 +10744,12 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// Write back move-captured variables to env struct before returning
 	c.emitLambdaWritebacks()
 
+	// T1339: temps below this snapshot belong to an enclosing INCOMPLETE call (a
+	// sibling by-value ctor arg still on the stack when this return diverges out of
+	// mid-argument evaluation). Only temps created while evaluating THIS return value
+	// are moved out; the move-out clear below must not sweep the sibling prefix.
+	enumCtorSnap := len(c.enumCtorTemps)
+
 	// Set targetType so NoneLit can resolve to the correct Optional struct
 	retType := c.currentRetType
 	if retType != nil && c.typeSubst != nil {
@@ -10985,11 +10991,18 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// still drains the by-value arg temp rather than mistaking it for the result.
 	// The moved-out shapes are a direct constructor or a branch (match/if) whose
 	// arm values ARE the returned enum — see enumCtorTempMovesOut.
-	if len(c.enumCtorTemps) > 0 && s.Value != nil && c.enumCtorTempMovesOut(s.Value) {
-		for i := range c.enumCtorTemps {
+	//
+	// T1339: bound the clear to temps at/above enumCtorSnap. Temps below the
+	// snapshot belong to an enclosing INCOMPLETE call whose by-value ctor arg is
+	// still on the stack when this return diverges mid-argument-evaluation; they are
+	// NOT this return's value, so the wholesale clear must not sweep them (doing so
+	// orphans the sibling's heap payload). The full drainEnumCtorTemps below still
+	// drops the surviving prefix on the divergent path.
+	if len(c.enumCtorTemps) > enumCtorSnap && s.Value != nil && c.enumCtorTempMovesOut(s.Value) {
+		for i := enumCtorSnap; i < len(c.enumCtorTemps); i++ {
 			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
 		}
-		c.enumCtorTemps = c.enumCtorTemps[:0]
+		c.enumCtorTemps = c.enumCtorTemps[:enumCtorSnap]
 	}
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()

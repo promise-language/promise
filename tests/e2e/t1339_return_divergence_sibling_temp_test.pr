@@ -1,0 +1,203 @@
+// T1339: A by-value inline enum-constructor call ARGUMENT followed by a LATER
+// argument that diverges via `return` (or `raise`) orphaned the earlier arg's heap
+// payload. At the diverging `return`, when the returned value is itself a move-out
+// enum ctor (`return Payload.Empty`), genReturnStmt's statement-level enum-ctor-temp
+// clear swept EVERY tracked temp wholesale — including the sibling `Payload.Full(...)`
+// temp still on the stack from the half-built enclosing `combine(...)` call. Clearing
+// its drop flag orphaned its heap payload. The fix snapshots the temp count at return
+// entry and bounds the wholesale clear to temps created while evaluating THIS return
+// value; the sibling prefix survives for the full drain to drop.
+//
+// The `break`/`continue` form of this shape is T1331 (fixed). This file covers the
+// `return`/`raise` divergence forms. `"hi".to_upper()` forces a heap string (a bare
+// literal would be .rodata and hide the leak). All tests run under leak enforcement.
+enum Payload {
+  Full(string s), Empty,
+}
+
+// combine borrows p and returns a FRESH enum; the by-value ctor passed as its 1st
+// argument is orphaned in the caller if the 2nd argument diverges before the call
+// completes.
+combine(Payload p, int k) Payload {
+  match p {
+    Payload.Full(s) => {
+      return Payload.Full(s.to_upper());
+    },
+    Payload.Empty => {
+      return Payload.Empty;
+    },
+  }
+}
+
+payload_len(Payload move p) int {
+  match p {
+    Payload.Full(s) => {
+      return s.len;
+    },
+    Payload.Empty => {
+      return 0;
+    },
+  }
+}
+
+// Core repro: the 2nd arg's `if` diverges via `return Payload.Empty` when d is true
+// (the diverging return value is a move-out enum ctor → enumCtorTempMovesOut == true,
+// the exact condition that swept the sibling wholesale). When d is false the `if`
+// yields an int and combine(...) completes normally. Both runtime paths are covered.
+direct_return(bool d) Payload {
+  q := combine(Payload.Full("hi".to_upper()), if d {
+    return Payload.Empty
+  } else {
+    0
+  });
+  return q;
+}
+
+// TWO by-value enum-ctor args live on the stack when the 3rd arg diverges via
+// `return Payload.Empty`. Exercises the snap>1 case: the bounded clear must leave
+// the WHOLE sibling prefix (both Full temps) for drainEnumCtorTemps to guard-drop —
+// on baseline this leaks 2 allocations, one per orphaned sibling.
+combine2(Payload p, Payload q, int k) Payload {
+  match p {
+    Payload.Full(s) => {
+      return Payload.Full(s.to_upper());
+    },
+    Payload.Empty => {
+      return Payload.Empty;
+    },
+  }
+}
+
+two_siblings(bool d) Payload {
+  q := combine2(Payload.Full("hi".to_upper()), Payload.Full("yo".to_upper()), if d {
+    return Payload.Empty
+  } else {
+    0
+  });
+  return q;
+}
+
+// Divergence via the ELSE arm and through `match` instead of `if`.
+direct_match(bool d) Payload {
+  q := combine(Payload.Full("hi".to_upper()), match d {
+    false => 0,
+    _ => {
+      return Payload.Empty
+    },
+  });
+  return q;
+}
+
+// The diverging return value is itself a BRANCH move-out (`return if ... { ctor }
+// else { ctor }`) — exercises the MatchExpr/IfExpr shape of enumCtorTempMovesOut,
+// which also reports movesOut == true and so must still exclude the sibling.
+direct_branch_return(bool d) Payload {
+  q := combine(Payload.Full("hi".to_upper()), if d {
+    return if d {
+      Payload.Empty
+    } else {
+      Payload.Full("z".to_upper())
+    }
+  } else {
+    0
+  });
+  return q;
+}
+
+// Raise form: the 2nd arg diverges via `raise` (from a failable function). The raise
+// path drains all enum-ctor temps via the error-path cleanup, so it was already
+// leak-free — codified here as a regression guard that it stays that way and that
+// control flow routes to the handler (not the ok path).
+direct_raise!(bool d) Payload {
+  q := combine(Payload.Full("hi".to_upper()), if d {
+    raise error(message: "boom")
+  } else {
+    0
+  });
+  return q;
+}
+
+t1339_return_divergence() `test {
+  // d=true: the if diverges via `return Payload.Empty`; the sibling Full temp must
+  // be dropped exactly once (leak fix). Result is Empty.
+  a := direct_return(true);
+  match a {
+    Payload.Full(s) => {
+      assert(false, "diverging return should yield Empty");
+    },
+    Payload.Empty => {
+      assert(true, "diverging return yields Empty");
+    },
+  }
+  // d=false: the if yields 0, combine completes, q = Full("HI").
+  b := direct_return(false);
+  assert(payload_len(move b) == 2, "non-diverging path yields Full(\"HI\")");
+}
+
+t1339_two_siblings_divergence() `test {
+  // d=true: the if diverges; BOTH sibling Full temps must be dropped (2-alloc leak
+  // fix — the snap>1 drain case). Result is Empty.
+  a := two_siblings(true);
+  match a {
+    Payload.Full(s) => {
+      assert(false, "two-sibling divergence should yield Empty");
+    },
+    Payload.Empty => {
+      assert(true, "two-sibling divergence yields Empty");
+    },
+  }
+  // d=false: the if yields 0, combine2 completes, q = Full("HI"). The unused 2nd
+  // ctor arg ("YO") is consumed by combine2's borrow-and-return-fresh path.
+  b := two_siblings(false);
+  assert(payload_len(move b) == 2, "non-diverging two-sibling path yields Full(\"HI\")");
+}
+
+t1339_match_divergence() `test {
+  a := direct_match(true);
+  match a {
+    Payload.Full(s) => {
+      assert(false, "diverging match arm should yield Empty");
+    },
+    Payload.Empty => {
+      assert(true, "diverging match arm yields Empty");
+    },
+  }
+  b := direct_match(false);
+  assert(payload_len(move b) == 2, "non-diverging match path yields Full(\"HI\")");
+}
+
+t1339_branch_return_divergence() `test {
+  a := direct_branch_return(true);
+  match a {
+    Payload.Full(s) => {
+      assert(false, "branch-return divergence should yield Empty");
+    },
+    Payload.Empty => {
+      assert(true, "branch-return divergence yields Empty");
+    },
+  }
+  b := direct_branch_return(false);
+  assert(payload_len(move b) == 2, "non-diverging branch-return path yields Full(\"HI\")");
+}
+
+t1339_raise_divergence() `test {
+  // d=true: the if raises; control must route to the handler (NOT the ok branch),
+  // and the sibling Full temp must be dropped on the error path (no leak).
+  caught := false;
+  r := direct_raise(true)? e {
+    caught = true;
+    Payload.Empty
+  };
+  assert(caught, "raise divergence routes to the error handler");
+  match r {
+    Payload.Full(s) => {
+      assert(false, "handler-supplied Empty expected, not Full");
+    },
+    Payload.Empty => {
+      assert(true, "handler supplies Empty");
+    },
+  }
+  // d=false: no raise; combine completes, q = Full("HI").
+  ok := direct_raise(false)?!;
+  assert(payload_len(move ok) == 2, "non-raising path yields Full(\"HI\")");
+}

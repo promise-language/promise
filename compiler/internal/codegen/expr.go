@@ -8018,6 +8018,10 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
 		for i, arg := range e.Args {
+			// T1338: snapshot the enum-ctor temp count BEFORE evaluating this arg.
+			// Per-iteration (not pre-loop): a later call-arg's drain must not sweep
+			// an earlier DIRECT ctor arg's kept temp (`E.V(F.W(x), describe(G.H(y)))`).
+			argEnumSnap := len(c.enumCtorTemps)
 			// T0608: Coerce the arg to the declared variant field type before
 			// storing. Mirrors the struct-constructor Optional widening path:
 			// when the variant field is `T?` and the argument is a bare `T`
@@ -8127,6 +8131,13 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 				c.claimHeapTemp(preWrapVal)
 				c.claimEnvTemp(preWrapVal)
 			}
+			// T1338: drain any inline enum-ctor temp buried as a by-value arg inside
+			// THIS arg's evaluation (e.g. `describe(Payload.Full(heap))`). The callee
+			// borrowed/dup'd it (B0232), so the caller must free it here — otherwise
+			// the enclosing move-out site's wholesale enumCtorTemps clear zeroes its
+			// flag and orphans the payload. Skipped when `arg.Value` is itself a ctor
+			// (moved into the payload — kept tracked).
+			c.drainNestedEnumCtorTemps(arg.Value, argEnumSnap)
 		}
 	}
 

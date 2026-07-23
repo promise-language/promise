@@ -1,0 +1,112 @@
+// T1338: an inline enum-ctor temp buried as a by-value arg INSIDE a moved-out
+// enum ctor's own arguments (`E.Full(describe(E.Full(heap)))`) must have its
+// heap payload drained. The callee (`describe`) only borrows/dups the inner
+// ctor (B0232), so the caller retains ownership; the enclosing move-out site's
+// wholesale enumCtorTemps clear must NOT zero the inner temp's drop flag.
+// Covers all four statement-level move-out sinks: var-decl, return, assignment,
+// container push. `.to_upper()` forces a HEAP string so the leak is visible
+// (a bare literal is `.rodata` and hides it).
+enum Payload {
+  Full(string s), Empty,
+}
+
+describe(Payload p) string {
+  match p {
+    Payload.Full(s) => {
+      return s.to_upper();
+    },
+    Payload.Empty => {
+      return "e";
+    },
+  }
+}
+
+payload_len(Payload move p) int {
+  match p {
+    Payload.Full(s) => {
+      return s.len;
+    },
+    Payload.Empty => {
+      return 0;
+    },
+  }
+}
+
+make_nested() Payload {
+  // return sink: the outer ctor is moved out through the function return.
+  return Payload.Full(describe(Payload.Full("hi".to_upper())));
+}
+
+test_nested_var_decl() `test {
+  q := Payload.Full(describe(Payload.Full("hi".to_upper())));
+  assert(payload_len(move q) == 2, "len");
+}
+
+test_nested_return() `test {
+  r := make_nested();
+  assert(payload_len(move r) == 2, "len");
+}
+
+test_nested_assignment() `test {
+  q := Payload.Empty;
+  q = Payload.Full(describe(Payload.Full("hey".to_upper())));
+  assert(payload_len(move q) == 3, "len");
+}
+
+test_nested_container_push() `test {
+  v := Vector[Payload]();
+  v.push(Payload.Full(describe(Payload.Full("yo".to_upper()))));
+  // The pushed element is owned by v and dropped at scope exit; the leak (if
+  // any) is in the nested inner ctor arg, caught by zero-leak enforcement.
+  assert(v.len == 1, "len");
+}
+
+// Control (non-regression): an outer ctor whose only arg is a plain heap-string
+// call (no inner enum ctor buried in a by-value call arg) is swept by the
+// wholesale clear (no nested-arg drain, no double-free).
+test_direct_ctor_arg_control() `test {
+  q := Payload.Full("hi".to_upper());
+  assert(payload_len(move q) == 2, "len");
+}
+
+// Per-iteration snapshot: a multi-arg variant where arg0 is a DIRECT nested ctor
+// (moved into the payload — kept tracked) and arg1 is a call whose OWN arg is an
+// inline ctor (borrowed by `describe_inner` per B0232 — must be drained). The
+// snapshot MUST be per-arg: a pre-loop snapshot would sweep arg0's kept temp when
+// draining arg1, freeing the payload early (double-free / use-after-free). With
+// the per-iteration snapshot the arg1 drain floors at arg1's own start, leaving
+// arg0's kept temp for the enclosing wholesale move-out clear.
+enum Inner {
+  W(string s), None,
+}
+
+enum Outer {
+  V(Inner first, string second), Empty,
+}
+
+describe_inner(Inner p) string {
+  match p {
+    Inner.W(s) => {
+      return s.to_upper();
+    },
+    Inner.None => {
+      return "n";
+    },
+  }
+}
+
+outer_second_len(Outer move o) int {
+  match o {
+    Outer.V(i, s) => {
+      return s.len;
+    },
+    Outer.Empty => {
+      return 0;
+    },
+  }
+}
+
+test_multiarg_kept_and_drained() `test {
+  q := Outer.V(Inner.W("a".to_upper()), describe_inner(Inner.W("bb".to_upper())));
+  assert(outer_second_len(move q) == 2, "second len (BB)");
+}

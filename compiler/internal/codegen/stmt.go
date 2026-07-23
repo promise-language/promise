@@ -1043,6 +1043,33 @@ func (c *Compiler) drainNestedArmEnumCtorTemps(armExpr ast.Expr, snap int) {
 	c.drainEnumCtorTempsFrom(snap)
 }
 
+// drainNestedEnumCtorTemps drops inline enum-ctor temps created while evaluating
+// a by-value call/ctor argument `sub` that the callee only borrows/dups (B0232),
+// so the caller retains ownership and must free them. Called at the enum-ctor
+// argument boundary (genEnumVariantCallLayout) with `snap` = len(enumCtorTemps)
+// captured before `sub` was evaluated. T1338: without this, an inline ctor buried
+// as a by-value arg INSIDE a moved-out ctor's own arguments (e.g.
+// `Payload.Full(describe(Payload.Full(heap)))`) has its drop flag zeroed by the
+// wholesale statement-level clear (which assumes every tracked temp is the
+// moved-out result), orphaning its heap payload → leak.
+//
+// If `sub` is itself moved out (an enum ctor whose temp is the phi'd/payload
+// result), its temp is kept tracked so the enclosing move-out site clears it
+// (matching today's behavior — no double-free). A recursive genEnumVariantCallLayout
+// for such a nested direct-ctor arg drains ITS own by-value arg temps.
+func (c *Compiler) drainNestedEnumCtorTemps(sub ast.Expr, snap int) {
+	if len(c.enumCtorTemps) <= snap {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return // diverged; genReturnStmt/genRaiseStmt already drained the array
+	}
+	if c.enumCtorTempMovesOut(sub) {
+		return // sub IS moved out (into the payload / through the phi) — keep tracked
+	}
+	c.drainEnumCtorTempsFrom(snap)
+}
+
 // genAutoPropagate generates implicit error propagation for a failable call
 // used as a statement in a failable function. Same semantics as explicit `?`:
 // check the error tag, propagate on error, discard ok value on success.

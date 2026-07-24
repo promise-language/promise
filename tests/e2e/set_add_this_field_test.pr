@@ -8,7 +8,7 @@ type HeapBox {
   int n;
   string label;
 
-  add_it(this, Set[string] out) {
+  add_it(this, Set[string] ~out) {
     out.add(this.label);
   }
 }
@@ -31,7 +31,7 @@ set_add_this_field() `test {
 type Sink[T] {
   T[] items;
 
-  push_move(this, T move x) {
+  push_move(~this, T move x) {
     this.items.push(move x);
   }
 }
@@ -39,7 +39,7 @@ type Sink[T] {
 type LabelSource {
   string label;
 
-  feed(this, Sink[string] out) {
+  feed(this, Sink[string] ~out) {
     out.push_move(this.label);
   }
 }
@@ -77,13 +77,13 @@ generic_move_method_this_field() `test {
 // a `U move` param, on a non-generic owner. Without the fix, U reaches
 // maybeEnableDupForMutRefArg unsubstituted, so the field-read dup is skipped.
 type Relay {
-  relay[U: Hashable + Equal](this, Set[U] out, U move x) {
+  relay[U: Hashable + Equal](this, Set[U] ~out, U move x) {
     out.add(move x);
   }
 }
 type RelayOwner {
   string label;
-  feed(this, Relay r, Set[string] out) {
+  feed(this, Relay r, Set[string] ~out) {
     r.relay(out, this.label);
   }
 }
@@ -105,13 +105,13 @@ enum Basket[T: Hashable + Equal] {
   Empty,
   Filled,
 
-  collect(this, Set[T] out, T move x) {
+  collect(this, Set[T] ~out, T move x) {
     out.add(move x);
   }
 }
 type BasketOwner {
   string label;
-  feed(this, Basket[string] b, Set[string] out) {
+  feed(this, Basket[string] b, Set[string] ~out) {
     b.collect(out, this.label);
   }
 }
@@ -134,13 +134,13 @@ enum Vault[T: Hashable + Equal] {
   Open,
   Closed,
 
-  stash[U: Hashable + Equal](this, Set[U] out, U move x) {
+  stash[U: Hashable + Equal](this, Set[U] ~out, U move x) {
     out.add(move x);
   }
 }
 type VaultOwner {
   string label;
-  feed(this, Vault[string] v, Set[string] out) {
+  feed(this, Vault[string] v, Set[string] ~out) {
     v.stash(out, this.label);
   }
 }
@@ -163,7 +163,7 @@ generic_enum_method_move_this_field() `test {
 type Keeper[T: Hashable + Equal] {
   Set[T] kept;
 
-  keep(this, T move x) {
+  keep(~this, T move x) {
     this.kept.add(move x);
   }
 }
@@ -171,7 +171,7 @@ type LoudKeeper[T: Hashable + Equal] is Keeper[T] {
 }
 type KeeperOwner {
   string label;
-  feed(this, Keeper[string] k) {
+  feed(this, Keeper[string] ~k) {
     k.keep(this.label);
   }
 }

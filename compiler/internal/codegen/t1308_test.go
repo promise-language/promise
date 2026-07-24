@@ -23,7 +23,7 @@ import (
 func TestT1308MethodBindingClearsArgAlias(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make(Sink s) Sink { return s; } }
 		method_binding_passthrough() {
 			f := Factory(seed: 1);
@@ -55,7 +55,7 @@ func TestT1308MethodBindingClearsArgAlias(t *testing.T) {
 func TestT1308MethodFreshReturnKeepsOwnDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Widget { int id; emit(int n) { this.id = this.id + n; } }
+		type Widget { int id; emit(~this, int n) { this.id = this.id + n; } }
 		type Factory { int seed; make(int n) Sink { return Widget(id: n); } }
 		method_binding_fresh() {
 			f := Factory(seed: 1);
@@ -82,7 +82,7 @@ func TestT1308MethodFreshReturnKeepsOwnDrop(t *testing.T) {
 func TestT1308MethodMultiArgEmitsGuardPerArg(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; pick_second(Sink a, Sink b) Sink { return b; } }
 		method_multi_arg() {
 			f := Factory(seed: 1);

@@ -23,7 +23,7 @@ import (
 func TestT1310MethodDiscardClearsArgAlias(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make(Sink s) Sink { return s; } }
 		method_discard() {
 			f := Factory(seed: 1);
@@ -53,7 +53,7 @@ func TestT1310MethodDiscardClearsArgAlias(t *testing.T) {
 func TestT1310MethodInlineUseClearsArgAlias(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make(Sink s) Sink { return s; } }
 		method_inline() {
 			f := Factory(seed: 1);
@@ -79,7 +79,7 @@ func TestT1310MethodInlineUseClearsArgAlias(t *testing.T) {
 func TestT1310MethodDiscardMultiArgEmitsGuardPerArg(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; pick_second(Sink a, Sink b) Sink { return b; } }
 		method_two_args() {
 			f := Factory(seed: 1);
@@ -105,7 +105,7 @@ func TestT1310MethodDiscardMultiArgEmitsGuardPerArg(t *testing.T) {
 func TestT1310MethodDiscardParenArgClearsAlias(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make(Sink s) Sink { return s; } }
 		method_paren() {
 			f := Factory(seed: 1);
@@ -130,7 +130,7 @@ func TestT1310MethodDiscardParenArgClearsAlias(t *testing.T) {
 func TestT1310GenericMethodDiscardClearsArgAlias(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; wrap[T](Sink s) Sink { return s; } }
 		method_generic() {
 			f := Factory(seed: 1);
@@ -154,7 +154,7 @@ func TestT1310GenericMethodDiscardClearsArgAlias(t *testing.T) {
 func TestT1310MethodDiscardFreshReturnNoGuard(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make_fresh(int n) Sink { return Counter(total: n); } }
 		method_fresh() {
 			f := Factory(seed: 1);

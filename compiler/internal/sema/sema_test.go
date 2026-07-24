@@ -11730,7 +11730,7 @@ func TestVariadicMethodWithReceiver(t *testing.T) {
 		type Logger {
 			int count;
 
-			logAll(this, ...string msgs) {
+			logAll(~this, ...string msgs) {
 				this.count += msgs.len;
 			}
 		}
@@ -18368,7 +18368,7 @@ func TestT0616_VectorCloneInGenericChannelOK(t *testing.T) {
 func TestT0616_VectorTaskGenericNoCloneOK(t *testing.T) {
 	checkOK(t, `
 		worker() int { return 42; }
-		take[T](Vector[T] v) T? { return v.pop(); }
+		take[T](Vector[T]~ v) T? { return v.pop(); }
 		test_take() {
 			v := Vector[Task[int]]();
 			v.push(go worker());

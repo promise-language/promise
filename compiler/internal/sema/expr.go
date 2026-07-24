@@ -1418,11 +1418,13 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 // This is the receiver analogue of the existing `~param` argument check in
 // args.go (passing `&c` to a `~`-parameter is rejected); without it, calling a
 // `~this` method through a shared borrow silently mutates the caller's value,
-// the soundness hole the shared-borrow model exists to prevent (T0980).
+// the soundness hole the shared-borrow model exists to prevent (T0980/T1053).
 //
-// Scope is exactly RefMut receivers. Implicit-`this` (RefNone) mutators such as
-// Vector.push / Channel.send keep an interior-mutability escape hatch and are
-// intentionally left permissive (a wider design decision tracked separately).
+// Every mutating stdlib method (Vector.push, Map.[]=, Set.add, …) now takes a
+// `~this` receiver, so this single check blocks all of them through a shared
+// borrow. The sole exception is a receiver whose underlying type is marked
+// `interior` (the concurrency primitives Channel / Mutex / MutexGuard), which
+// opt into interior mutability and may be mutated through a shared borrow.
 func (c *Checker) checkReceiverMutability(e *ast.CallExpr, sig *types.Signature) {
 	mem, ok := e.Callee.(*ast.MemberExpr)
 	if !ok {
@@ -1434,7 +1436,45 @@ func (c *Checker) checkReceiverMutability(e *ast.CallExpr, sig *types.Signature)
 	if c.isMutablePlace(mem.Target) {
 		return
 	}
+	if c.recvIsInterior(mem.Target) {
+		return // interior-mutable type — mutation through a shared borrow is allowed
+	}
 	c.errorf(e.Pos(), "cannot call mutating method '%s' through a shared (read-only) borrow; take a `~` mutable borrow instead", mem.Field)
+}
+
+// recvIsInterior reports whether the receiver place has an `interior`-marked
+// underlying type (T1053). Interior types opt into interior mutability: their
+// mutating methods and setters may be invoked through a shared `&` borrow. It
+// unwraps MutRef/SharedRef and resolves the underlying Named/Enum via the
+// instance origin (interior is a per-type-definition property, not per
+// instantiation, so reading the origin flag needs no substitution plumbing).
+func (c *Checker) recvIsInterior(recv ast.Expr) bool {
+	t := c.info.Types[recv]
+	for {
+		switch tt := t.(type) {
+		case *types.MutRef:
+			t = tt.Elem()
+		case *types.SharedRef:
+			t = tt.Elem()
+		default:
+			goto resolved
+		}
+	}
+resolved:
+	switch tt := t.(type) {
+	case *types.Named:
+		return tt.IsInterior()
+	case *types.Enum:
+		return tt.IsInterior()
+	case *types.Instance:
+		switch o := tt.Origin().(type) {
+		case *types.Named:
+			return o.IsInterior()
+		case *types.Enum:
+			return o.IsInterior()
+		}
+	}
+	return false
 }
 
 // isMutablePlace reports whether expr denotes a place the caller may mutate. It

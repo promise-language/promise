@@ -198,7 +198,7 @@ func TestT1035_PopTakesOwnershipOK(t *testing.T) {
 	// for a non-Copy instantiation.
 	ownerOK(t, `
 		type Item { int id; drop(~this) {} }
-		drain_pop[T](T[] v) T[] {
+		drain_pop[T](T[]~ v) T[] {
 			sink := T[]();
 			while v.len > 0 {
 				if e := v.pop() { sink.push(move e); }

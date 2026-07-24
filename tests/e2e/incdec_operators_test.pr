@@ -388,7 +388,7 @@ type FWrapper {
   }
 }
 
-bump_and_read!(FWrapper w) int {
+bump_and_read!(FWrapper ~w) int {
   w.value++;
   return w.backing.n;
 }

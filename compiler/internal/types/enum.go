@@ -52,6 +52,7 @@ type Enum struct {
 	notSendable    bool   // `not_sendable meta — opt-out of auto-derivation
 	notSharable    bool   // `not_sharable meta — opt-out of auto-derivation
 	isConfined     bool   // `confined meta — Ref[T]/Weak[T] is thread-confined: non-atomic counter, rejected at goroutine boundaries (T0995)
+	isInterior     bool   // `interior meta — mutating methods/setters may be called through a shared `&` borrow (interior mutability; T1053)
 	doc            string // `doc meta — documentation string
 	deprecated     string // `deprecated meta — empty means not deprecated
 	hasDrop        bool   // true if any variant has fields needing cleanup (T0102)
@@ -98,6 +99,8 @@ func (e *Enum) IsNotSharable() bool      { return e.notSharable }
 func (e *Enum) SetNotSharable(v bool)    { e.notSharable = v }
 func (e *Enum) IsConfined() bool         { return e.isConfined }
 func (e *Enum) SetConfined(v bool)       { e.isConfined = v }
+func (e *Enum) IsInterior() bool         { return e.isInterior }
+func (e *Enum) SetInterior(v bool)       { e.isInterior = v }
 
 func (e *Enum) String() string {
 	return e.obj.Name()

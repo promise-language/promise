@@ -23,7 +23,7 @@ import (
 func TestT1304BindingClearsArgAlias(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		pass_through(Sink s) Sink { return s; }
 		binding_passthrough() {
 			s := Counter(total: 5);
@@ -55,7 +55,7 @@ func TestT1304BindingClearsArgAlias(t *testing.T) {
 func TestT1304FreshReturnKeepsOwnDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Widget { int id; emit(int n) { this.id = this.id + n; } }
+		type Widget { int id; emit(~this, int n) { this.id = this.id + n; } }
 		fresh_return() Sink { return Widget(id: 10); }
 		binding_fresh() {
 			r := fresh_return();
@@ -79,7 +79,7 @@ func TestT1304FreshReturnKeepsOwnDrop(t *testing.T) {
 func TestT1304FailableBindingPeelsWrapper(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		pass_through_fail!(Sink s) Sink { return s; }
 		binding_fail() {
 			s := Counter(total: 5);
@@ -103,7 +103,7 @@ func TestT1304FailableBindingPeelsWrapper(t *testing.T) {
 func TestT1304MultiArgSkipsNonIdent(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		pass_through2(int x, Sink s) Sink { return s; }
 		binding_multi() {
 			s := Counter(total: 5);
@@ -131,7 +131,7 @@ func TestT1304MultiArgSkipsNonIdent(t *testing.T) {
 func TestT1304ErrorPropagatePeelsWrapper(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		pass_through_fail!(Sink s) Sink { return s; }
 		binding_propagate!() {
 			s := Counter(total: 5);
@@ -154,7 +154,7 @@ func TestT1304ErrorPropagatePeelsWrapper(t *testing.T) {
 func TestT1304NonCallRHSNoGuard(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		make_sink() Sink { return Counter(total: 5); }
 		binding_ident() {
 			s := make_sink();

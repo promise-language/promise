@@ -1566,6 +1566,10 @@ type Counter {
 
 `this` is a shared borrow of the receiver; `~this` is a mutable borrow. A receiver is **never** consumed — a method may mutate `this` but may not move it away whole, even in `drop(~this)`. This is the one asymmetry with parameters, which *can* be declared `move`.
 
+**Mutation through a shared borrow is rejected.** A shared (read-only) borrow may not mutate the value it points at — not by a field store (`c.n = 5`), not through a property setter (`c.value = 5`), not by an index or slice write (`v[i] = x`, `v[:] = …`), and not by calling a `~this` mutating method (`v.push(x)`, `s.add(x)`, `m.remove(k)`). Every mutating operation requires a mutable (`~`) borrow or ownership; the compiler reports *"cannot mutate … through a shared (read-only) borrow; take a `~` mutable borrow instead"*. This closes a soundness hole: without it, a container passed by a shared borrow could `push` and reallocate its backing store, leaving the caller with a dangling pointer. A property setter and any method that writes `this` therefore default to a `~this` receiver — so `set_x(this) { this.x = 5; }` is an error; write `set_x(~this)`.
+
+**`interior` types are the sole exception.** A type marked `` `interior `` opts into *interior mutability* — its mutating methods and setters may be invoked through a shared `&` borrow. This is reserved for the concurrency primitives whose whole purpose is safe shared mutation: `Channel`, `Mutex`, and `MutexGuard`. It lets a captured channel be sent to from a shared reference and a `Mutex` be locked through one, while ordinary containers (`Vector`, `Map`, `Set`) and user types stay bound by the rule above. Interior mutability of these primitives is made safe by their own internal synchronization, not by the borrow checker.
+
 #### Partial moves and captures
 
 A field may be moved out of a value individually. Moving a field leaves the other fields usable (a *partial move*); however a field whose type defines its own `drop()` may **not** be moved out of a still-live aggregate (`cannot move field … — use .clone()`). Closures follow the same rules: `Copy` values are captured by copy, while a non-`Copy` value must be captured with `move`, which transfers ownership into the closure and invalidates the outer binding (see §12).
@@ -2026,6 +2030,7 @@ testAddition() `test {
 | `` `doc ``   | any, parameters | AST-attached documentation (see Section 8.4)      |
 | `` `target(cond) ``| types, enums, functions | Compile-time platform filtering (see Section 8.5) |
 | `` `embed(path) ``| module-level getters | Compile-time resource embedding (see Section 8.6) |
+| `` `interior `` | types, enums    | Interior mutability: mutating methods/setters may be called through a shared `&` borrow (Channel/Mutex only; see Section 6.2) |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
 

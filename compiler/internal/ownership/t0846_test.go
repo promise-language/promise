@@ -31,15 +31,16 @@ func TestT0846DoubleCloseIsMovedUse(t *testing.T) {
 }
 
 func TestT0846CloseOnBorrowedParamRejected(t *testing.T) {
-	// T0980: `close(~this)` is a mutating-receiver method, so calling it through
-	// a shared (read-only) borrow is now rejected at sema — before the ownership
-	// pass runs. The code is still rejected; only the diagnosing pass changed.
+	// `MutexGuard` is `interior (T1053), so calling its `~this` `close()` through a
+	// shared borrow is exempt from the sema mutation check — but consuming a guard
+	// you only borrowed is still a double-unlock/double-free, which the ownership
+	// pass rejects as an illegal move of the borrowed single-owner handle.
 	errs := ownerErrs(t, `
 		consume(MutexGuard[int] g) {
 			g.close();
 		}
 	`)
-	expectOwnerError(t, errs, "cannot call mutating method 'close' through a shared (read-only) borrow")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'g'")
 }
 
 // Positive: close as the last use (no reuse) must still compile.
@@ -89,14 +90,15 @@ func TestT0846UserCloseNotConsumed(t *testing.T) {
 // double-free at the real owner's drop. member.Target is a MemberExpr here, so
 // tryMoveConsume routes through rejectMemberHandleMoveOutOfBorrow.
 func TestT0846CloseGuardFieldOutOfBorrowRejected(t *testing.T) {
-	// T0980: as above — `close(~this)` on a guard field reached through a shared
-	// borrow (`h` is a read-only borrow) is now rejected at sema before the
-	// ownership pass runs. Still rejected; the diagnosing pass changed.
+	// As above — `MutexGuard` is `interior (T1053), so `close(~this)` on a guard
+	// field reached through a shared borrow (`h` is read-only) is exempt from the
+	// sema mutation check. The ownership pass still rejects it: closing the guard
+	// moves a single-owner handle out of a borrowed aggregate (double-free).
 	errs := ownerErrs(t, `
 		type Holder { MutexGuard[int] g; drop(~this){} }
 		f(Holder h) {
 			h.g.close();
 		}
 	`)
-	expectOwnerError(t, errs, "cannot call mutating method 'close' through a shared (read-only) borrow")
+	expectOwnerError(t, errs, "cannot move single-owner handle field 'g'")
 }

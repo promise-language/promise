@@ -112,7 +112,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  remove(K key) bool {
+  remove(~this, K key) bool {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {
@@ -184,7 +184,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  pop(K key) V? {
+  pop(~this, K key) V? {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {
@@ -209,7 +209,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  update(K move key, V move value) bool {
+  update(~this, K move key, V move value) bool {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {
@@ -245,7 +245,7 @@ type Map[K: Hashable + Equal, V] `public {
     return result;
   }
 
-  merge(Map[K, V] other) {
+  merge(~this, Map[K, V] other) {
     for slot in other._buckets {
       match slot {
         Slot.Used(k, v) => {
@@ -257,7 +257,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  clear() {
+  clear(~this) {
     for i in 0..this._buckets.len {
       this._buckets[i] = Slot.Empty;
     }
@@ -291,7 +291,7 @@ type Map[K: Hashable + Equal, V] `public {
     return b.to_string();
   }
 
-  _rehash() {
+  _rehash(~this) {
     Slot[K, V][] old = this._buckets;
     int new_cap = old.len * 2;
     this._buckets = [Slot.Empty];
@@ -310,7 +310,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  _set(K move key, V move value) {
+  _set(~this, K move key, V move value) {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {

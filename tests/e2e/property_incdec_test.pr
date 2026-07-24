@@ -92,7 +92,7 @@ type Box[T] {
   }
   // `this.total++` inside a generic method body exercises codegen's receiver-type
   // substitution (Box[T] -> Box[int]) for the property dispatch.
-  bump() {
+  bump(~this) {
     this.total++;
   }
 }

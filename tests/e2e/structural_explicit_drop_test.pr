@@ -3,7 +3,7 @@
 type Counter is Iterator[int] {
   int val;
 
-  next() int? {
+  next(~this) int? {
     if this.val > 0 {
       this.val = this.val - 1;
       return this.val;

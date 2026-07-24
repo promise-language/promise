@@ -121,7 +121,7 @@ type Box[T] {
   set count(int v) {
     this.counter = v;
   }
-  bump!() {
+  bump!(~this) {
     // The compound read goes through the failable getter while T is substituted
     // (this method is mono'd per instantiation) — exercises the typeSubst path.
     this.count += 1;

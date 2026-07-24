@@ -158,7 +158,7 @@ take_tuple_in_module((string, int) t) `public {
 // with droppable tuple param.
 type TupleConsumer `public {
   int last_n;
-  consume_pair((string, int) p) `public {
+  consume_pair(~this, (string, int) p) `public {
     (_s, n) := p;
     this.last_n = n;
   }

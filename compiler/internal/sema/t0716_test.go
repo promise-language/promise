@@ -4,11 +4,10 @@ import "testing"
 
 // T0716: a direct field store (field assignment or field inc/dec) through a
 // shared (read-only) borrow must be rejected — without it, mutating a field of a
-// borrowed parameter silently mutates the caller's value. Scope is deliberately
-// narrow: direct *field* stores only. Method-mediated writes (property setters,
-// `vec[i] = x`, slice assignment) go through RefNone-receiver methods and remain
-// a permitted interior-mutability escape hatch (T0980 / deferred T1053), as does
-// self-mutation through `this`.
+// borrowed parameter silently mutates the caller's value. T1053 later generalized
+// the rule to every mutation form (method calls, index/slice writes, property
+// setters) and closed the self-mutation carve-out; those cases live in
+// t1053_test.go. The tests below pin the original direct-field-store behavior.
 
 func TestT0716_FieldAssignThroughSharedBorrow(t *testing.T) {
 	// The reported repro: writing a field of a borrowed parameter.
@@ -76,23 +75,34 @@ func TestT0716_FieldAssignOnOwnedLocalOK(t *testing.T) {
 	`)
 }
 
-func TestT0716_FieldStoreThroughThisOK(t *testing.T) {
-	// Self-mutation through a (plain, RefNone) `this` receiver stays permitted —
-	// the deferred RefNone-receiver decision, not this bug. Every stdlib container
-	// mutator relies on it.
-	checkOK(t, `
+func TestT1053_FieldStoreThroughPlainThisRejected(t *testing.T) {
+	// T1053 closes the deferred RefNone-receiver hole: a plain-`this` method that
+	// writes `this.field` is now rejected — the author must annotate `~this`.
+	// The `~this` form stays OK.
+	errs := checkErrs(t, `
 		type Counter {
 			int n;
 			set_plain(this) { this.n = 5; }
 			set_mut(~this) { this.n = 7; }
 		}
 	`)
+	expectError(t, errs, "cannot mutate field 'n' through a shared (read-only) borrow")
 }
 
-func TestT0716_SetterThroughSharedBorrowOK(t *testing.T) {
-	// A property setter is a RefNone-receiver method call — the interior-mutability
-	// escape hatch, not a direct field store. Left permissive (T0980 / T1053).
+func TestT1053_FieldStoreThroughMutThisOK(t *testing.T) {
+	// A `~this` receiver is a mutable borrow, so self-mutation stays permitted.
 	checkOK(t, `
+		type Counter {
+			int n;
+			set_mut(~this) { this.n = 7; }
+		}
+	`)
+}
+
+func TestT1053_SetterThroughSharedBorrowRejected(t *testing.T) {
+	// T1053: a property setter is a `~this` mutating method (setters default to a
+	// mutable-borrow receiver), so writing through a shared borrow is now rejected.
+	errs := checkErrs(t, `
 		type Counter {
 			int n;
 			get value int { return this.n; }
@@ -100,12 +110,14 @@ func TestT0716_SetterThroughSharedBorrowOK(t *testing.T) {
 		}
 		via(Counter c) { c.value = 5; }
 	`)
+	expectError(t, errs, "cannot mutate field 'value' through a shared (read-only) borrow")
 }
 
-func TestT0716_IndexAssignThroughSharedBorrowOK(t *testing.T) {
-	// `vec[i] = x` dispatches to Vector.[]= (RefNone receiver) — the same escape
-	// hatch sort/shuffle rely on. Not a direct field store; left permissive.
-	checkOK(t, `
+func TestT1053_IndexAssignThroughSharedBorrowRejected(t *testing.T) {
+	// T1053: `vec[i] = x` dispatches to Vector.[]= (`~this` setter), so an index
+	// write through a shared borrow is now rejected — take a `~` mutable borrow.
+	errs := checkErrs(t, `
 		via(int[] v) { v[0] = 9; }
 	`)
+	expectError(t, errs, "cannot mutate element through a shared (read-only) borrow")
 }

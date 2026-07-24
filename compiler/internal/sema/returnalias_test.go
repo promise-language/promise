@@ -35,9 +35,9 @@ func assertAliasFact(t *testing.T, info *Info, fn string, want []bool) {
 // construction / owned index clone (no alias) from a returned argument (alias).
 func TestStructuralReturnAliasFacts(t *testing.T) {
 	info := checkOK(t, `
-		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
-		type Widget { int id; emit(int n) {} }
+		type Sink `+"`"+`structural { emit(~this, int n) `+"`"+`abstract; }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
+		type Widget { int id; emit(~this, int n) {} }
 
 		// Owned index clone through a borrow arg — does NOT alias v.
 		first_of(Sink[] v) Sink { return v[0]; }

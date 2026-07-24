@@ -1498,7 +1498,7 @@ func TestOwnershipGetterSetterSameName(t *testing.T) {
 			get inner string { return this._inner; }
 			set inner(string v) { this._inner = v; }
 		}
-		test(Box b) {
+		test(Box ~b) {
 			string v = "hi";
 			b.inner = v;
 		}
@@ -5696,13 +5696,14 @@ func TestT0338_MutParamConsumableInConstructor(t *testing.T) {
 	`)
 }
 
-// Methods that mutate `this.field = v` via plain receiver are still legal —
-// no move of `this` itself occurs.
-func TestT0338_PlainThisFieldAssignOK(t *testing.T) {
+// A method that mutates `this.field = v` requires a `~this` mutable receiver
+// (T1053); the setter param `v` is consumed into the field with no move of
+// `this` itself, so ownership analysis accepts it.
+func TestT0338_MutThisFieldAssignOK(t *testing.T) {
 	ownerOK(t, `
 		type T {
 			int x;
-			set_x(this, int v) { this.x = v; }
+			set_x(~this, int v) { this.x = v; }
 		}
 		test() {}
 	`)
@@ -6294,8 +6295,10 @@ func TestT0351_AssignFieldMoveParamOK(t *testing.T) {
 
 // Vector index assign to a borrowed param double-frees.
 func TestT0351_AssignIndexVectorBorrowedParam(t *testing.T) {
+	// `vec` is a `~` mutable borrow so the index write itself is allowed (T1053);
+	// the double-free being tested is moving the borrowed `s` into the element.
 	errs := ownerErrs(t, `
-		put(string[] vec, string s) {
+		put(string[]~ vec, string s) {
 			vec[0] = s;
 		}
 		test() {}
@@ -6306,7 +6309,7 @@ func TestT0351_AssignIndexVectorBorrowedParam(t *testing.T) {
 // Map index assign to a borrowed param double-frees.
 func TestT0351_AssignIndexMapBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
-		put(map[string,string] m, string k, string v) {
+		put(map[string,string]~ m, string k, string v) {
 			m[k] = v;
 		}
 		test() {}
@@ -6317,7 +6320,7 @@ func TestT0351_AssignIndexMapBorrowedParam(t *testing.T) {
 // Vector slice assign to a borrowed-param Vector double-frees.
 func TestT0351_AssignSliceBorrowedParam(t *testing.T) {
 	errs := ownerErrs(t, `
-		put(string[] vec, string[] s) {
+		put(string[]~ vec, string[] s) {
 			vec[1:3] = s;
 		}
 		test() {}

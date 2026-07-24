@@ -5,13 +5,13 @@
 // a module boundary. Sibling of the T1307 binding-path coverage.
 // Structural-interface view whose backing box must be freed by the owner.
 type Sink `public `structural `doc("Structural interface with a single emit method; backed by a heap box.") {
-  emit(int n) `abstract `doc("Consumes an int; concrete satisfiers accumulate or ignore it.");
+  emit(~this, int n) `abstract `doc("Consumes an int; concrete satisfiers accumulate or ignore it.");
 }
 
 // Concrete satisfier of Sink.
 type Widget `public `doc("Concrete Sink satisfier holding an int id.") {
   int id;
-  emit(int n) `doc("Adds n to this widget's id.") {
+  emit(~this, int n) `doc("Adds n to this widget's id.") {
     this.id = this.id + n;
   }
 }

@@ -90,7 +90,7 @@ array_enum_ctor_ref_index_assign() `test {
 // so the fix's `types.Substitute(resolvedValueType, c.typeSubst)` branch runs
 // (Holder[T] → Holder[int]) before the extractEnum gate. Confirms the clear
 // fires in generic contexts, not just top-level ones.
-t1103_generic_store[T](Map[int, Holder[T]] m, int k, T move v) {
+t1103_generic_store[T](Map[int, Holder[T]] ~m, int k, T move v) {
   m[k] = Holder[T].Pair((Ref[T](move v), 99));
 }
 

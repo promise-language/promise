@@ -304,7 +304,7 @@ test_inherited_setter_arc() `test {
 // exercises the full T0637 chain (Gaps 1+2+3) plus the `isThis` branch in
 // genSetterCall. Must run leak-free with int payload.
 type ChildMutableViaThis[T] is Mutable[T] {
-  set_via(T move v) {
+  set_via(~this, T move v) {
     this.current = v;
   }
 }

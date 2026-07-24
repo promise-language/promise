@@ -169,6 +169,24 @@ func (c *Compiler) buildInferredCallSubst(tparams []*types.TypeParam, targs []ty
 // Includes mergeParentSubst so inherited generic parents are also covered.
 // Returns nil for non-generic owners.
 func (c *Compiler) buildOwnerTypeArgSubst(targetType types.Type) map[*types.TypeParam]types.Type {
+	// Unwrap a mutable/shared borrow of the receiver. With T1053, a container is
+	// mutated through a `~` borrow (e.g. `out: Set[string]~`), so `targetType` is a
+	// MutRef/SharedRef wrapping the instance. Without unwrapping, the Instance
+	// assertion fails and the owner-type subst is empty — a `T move` param (e.g.
+	// Set[string].add(T move elem)) then reaches maybeEnableDupForMutRefArg as the
+	// unsubstituted TypeParam `T`, so the field-read dup (T0366/T1223) is skipped and
+	// `out.add(this.field)` stores an alias of the owner's buffer → UAF on owner drop.
+unwrap:
+	for {
+		switch t := targetType.(type) {
+		case *types.MutRef:
+			targetType = t.Elem()
+		case *types.SharedRef:
+			targetType = t.Elem()
+		default:
+			break unwrap
+		}
+	}
 	inst, ok := targetType.(*types.Instance)
 	if !ok {
 		return nil

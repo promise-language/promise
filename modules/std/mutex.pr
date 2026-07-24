@@ -1,11 +1,18 @@
 // std/mutex.pr — Mutual exclusion for safe interior mutability (T0156)
-type Mutex[T] `native `public {
+// `interior: a Mutex provides safe interior mutability — `lock() mutates internal
+// state through OS synchronization, so it takes a shared `this receiver and stays
+// callable through a shared `& borrow (e.g. a Mutex shared across goroutines).
+type Mutex[T] `native `public `interior {
   new(T value) `native `doc("Create a new Mutex wrapping the given value.");
   lock() MutexGuard[T] `native `doc("Lock this mutex and return a guard. Blocks until the lock is acquired.");
   drop(~this) `native `doc("Drop this mutex, destroying the underlying lock and dropping the inner value.");
 }
 
-type MutexGuard[T] `native `public {
+// `interior: the guard's `set borrow` setter mutates the guarded value through the
+// held lock, so it takes a shared `this receiver (interior mutability). `close and
+// `drop consume the guard and stay `~this — moving a borrowed guard is caught by
+// ownership analysis, not the shared-borrow mutation check.
+type MutexGuard[T] `native `public `interior {
   get borrow T & `native `doc("Get the guarded value.");
   set borrow(T value) `native `doc("Set the guarded value.");
   close(~this) `native `doc("Unlock the mutex and release this guard.");

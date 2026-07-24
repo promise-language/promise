@@ -636,73 +636,49 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	}
 }
 
-// checkWriteThroughSharedBorrow rejects a direct field store (field assignment or
-// field inc/dec) whose receiver place roots in a shared (read-only) borrowed
-// parameter or an explicit shared-ref local. Without it, `f(Counter c){ c.n = 5; }`
-// through a shared borrow silently mutates the caller's value — the soundness hole
-// the shared-borrow model exists to prevent (T0716). Reuses isMutablePlace (expr.go).
+// checkWriteThroughSharedBorrow rejects any write whose receiver place roots in a
+// shared (read-only) borrow — a field store (`c.n = 5`), a property-setter write
+// (`c.value = 5`), or an index/slice assignment (`v[i] = x`, `v[:] = …`). Without
+// it, mutating through a borrowed parameter silently mutates the caller's value,
+// the soundness hole the shared-borrow model exists to prevent (T0716/T1053).
 //
-// Scope is deliberately narrow — direct *field* stores only:
-//   - Method-mediated writes (property setters, `vec[i] = x`, slice assignment) go
-//     through RefNone-receiver methods (Vector.[]=, a `set` property, …). T0980
-//     established that RefNone-receiver mutation through a shared borrow is a
-//     permitted interior-mutability escape hatch; tightening it is the separate,
-//     deferred decision (T1053). Index/slice targets and property writes are skipped.
-//   - Writes rooted at the `this`/`super` receiver are self-mutation through a
-//     (possibly RefNone) `this`; that too is the deferred decision, not this bug.
-//   - A bare identifier target (`c = ...`) rebinds the local, not a write through it.
+// Every mutation form is covered now that mutating methods and setters take a
+// `~this` receiver: `this` inside a correctly-annotated `~this` method is RefMut,
+// so `isMutablePlace` returns true and legitimate self-mutation still passes. A
+// plain-`this` method that writes `this.field`/`this[i]` is now correctly rejected,
+// forcing the author to annotate `~this`. The sole exception is a receiver whose
+// underlying type is marked `interior` (Channel/Mutex/MutexGuard) — interior
+// mutability lets those be mutated through a shared borrow.
+//
+// A bare identifier target (`c = ...`) rebinds the local, not a write through it,
+// so it is not a mutation of any borrowed place and is left to normal move/borrow
+// analysis.
 func (c *Checker) checkWriteThroughSharedBorrow(target ast.Expr, pos ast.Pos) {
-	me, ok := target.(*ast.MemberExpr)
-	if !ok {
-		return
-	}
-	// Only real field stores — not property (getter/setter) writes, which are
-	// method calls subject to the RefNone escape hatch (T0980/T1053).
-	recvType := c.info.Types[me.Target]
-	if mr, ok := recvType.(*types.MutRef); ok {
-		recvType = mr.Elem()
-	}
-	if sr, ok := recvType.(*types.SharedRef); ok {
-		recvType = sr.Elem()
-	}
-	var named *types.Named
-	switch t := recvType.(type) {
-	case *types.Named:
-		named = t
-	case *types.Instance:
-		if n, ok := t.Origin().(*types.Named); ok {
-			named = n
-		}
-	}
-	if named == nil || named.LookupField(me.Field) == nil {
-		return
-	}
-	// Self-mutation through `this`/`super` is the deferred RefNone-receiver case.
-	if rootIsReceiver(me.Target) {
-		return
-	}
-	if !c.isMutablePlace(me.Target) {
-		c.errorf(pos, "cannot mutate field '%s' through a shared (read-only) borrow; take a `~` mutable borrow instead", me.Field)
-	}
-}
-
-// rootIsReceiver reports whether the place's root is the enclosing method's
-// receiver (`this` or its `super` alias), walking through member/index/slice
-// accesses. Used to keep T0716 from rejecting self-mutation through `this`.
-func rootIsReceiver(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.ThisExpr:
-		return true
-	case *ast.IdentExpr:
-		return e.Name == "super"
+	var recvPlace ast.Expr
+	var what string
+	switch t := target.(type) {
 	case *ast.MemberExpr:
-		return rootIsReceiver(e.Target)
+		// Field store or property-setter write — both mutate the target place.
+		recvPlace = t.Target
+		what = "field '" + t.Field + "'"
 	case *ast.IndexExpr:
-		return rootIsReceiver(e.Target)
+		recvPlace = t.Target
+		what = "element"
 	case *ast.SliceExpr:
-		return rootIsReceiver(e.Target)
+		recvPlace = t.Target
+		what = "slice"
+	default:
+		return
 	}
-	return false
+	if c.isMutablePlace(recvPlace) {
+		return
+	}
+	// Interior-mutable types (Channel/Mutex/MutexGuard) opt into mutation through
+	// a shared borrow.
+	if c.recvIsInterior(recvPlace) {
+		return
+	}
+	c.errorf(pos, "cannot mutate %s through a shared (read-only) borrow; take a `~` mutable borrow instead", what)
 }
 
 // binaryOperatorCanError reports whether the binary operator method invoked on

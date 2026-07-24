@@ -128,7 +128,7 @@ func TestT0595_NestedIndexAssignStoreBack(t *testing.T) {
 // exercises the substitution prologue those helpers share with the read path.
 func TestT0595_GenericNestedPush(t *testing.T) {
 	ir := generateIR(t, `
-		push_into[T](Vector[Vector[T]] vov, int i, T val) {
+		push_into[T](Vector[Vector[T]]~ vov, int i, T val) {
 			vov[i].push(val);
 		}
 		caller() {

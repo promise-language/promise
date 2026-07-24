@@ -20,7 +20,7 @@ const t1294Prelude = `
 	type Sink ` + "`" + `structural { emit(int n) ` + "`" + `abstract; }
 	type Counter {
 		int total;
-		emit(int n) { this.total = this.total + n; }
+		emit(~this, int n) { this.total = this.total + n; }
 		get_self() Sink { return this; }
 	}
 	pass_through(Sink s) Sink { return s; }

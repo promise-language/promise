@@ -16,10 +16,10 @@ import (
 const t1305Prelude = `
 	type Showable ` + "`" + `structural { to_string() string ` + "`" + `abstract; }
 	type Widget { int id; to_string() string { return "w" + this.id.to_string(); } }
-	type Sink ` + "`" + `structural { emit(int n) ` + "`" + `abstract; }
+	type Sink ` + "`" + `structural { emit(~this, int n) ` + "`" + `abstract; }
 	type Counter {
 		int total;
-		emit(int n) { this.total = this.total + n; }
+		emit(~this, int n) { this.total = this.total + n; }
 	}
 	first_of(Sink[] v) Sink { return v[0]; }
 	make_vec() Sink[] {

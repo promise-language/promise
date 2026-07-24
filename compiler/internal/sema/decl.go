@@ -255,6 +255,13 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 
 	if isNative {
 		// Native type: only process fields and methods, skip inheritance.
+		// T1053: record `interior BEFORE resolving method signatures (both the
+		// universe-provider and test-helper paths below) — the setter-receiver
+		// default (resolveMethodSignature) reads IsInterior() so an interior type's
+		// `set` property keeps a shared `this receiver.
+		if c.hasAnnotation(d.Annotations, "interior") {
+			named.SetInterior(true)
+		}
 		if c.isUniverseProvider {
 			// Universe provider (std module): reset members to clear stale type
 			// references from a previous sema run in the same process (B0101).
@@ -410,6 +417,12 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	if c.hasAnnotation(d.Annotations, "confined") {
 		named.SetConfined(true)
 		named.SetNotSharable(true)
+	}
+	// T1053: `interior marks a type whose mutating methods/setters may be
+	// invoked through a shared `&` borrow (interior mutability — the escape
+	// hatch for concurrency primitives Channel/Mutex/MutexGuard).
+	if c.hasAnnotation(d.Annotations, "interior") {
+		named.SetInterior(true)
 	}
 
 	// Detect and validate value types (all fields are `value placement).
@@ -832,6 +845,19 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 	} else if md.Receiver != nil {
 		ref := resolveRefMod(md.Receiver.RefMod)
 		recv = types.NewParam("this", named, ref)
+	} else if md.IsSetter || isSetterOperatorName(md.Name) {
+		// A setter (property `set name` or index/slice `[]=`/`[:]=`) inherently
+		// mutates its receiver, so it defaults to a `~this` mutable-borrow
+		// receiver (T1053). This makes writes through it subject to the same
+		// shared-borrow check as any other mutation. Interior types
+		// (Channel/Mutex/MutexGuard) are the exception: they mutate through
+		// internal synchronization, so their setters keep a shared `this receiver
+		// and stay writable through a shared `& borrow.
+		ref := types.RefMut
+		if named.IsInterior() {
+			ref = types.RefNone
+		}
+		recv = types.NewParam("this", named, ref)
 	} else {
 		// Methods without explicit receiver default to value receiver
 		recv = types.NewParam("this", named, types.RefNone)
@@ -1004,6 +1030,12 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		enum.SetConfined(true)
 		enum.SetNotSharable(true)
 	}
+	// T1053: `interior marks a type with interior mutability (see the type-decl
+	// path above). Kept symmetric with the other markers although no enum is
+	// interior today.
+	if c.hasAnnotation(d.Annotations, "interior") {
+		enum.SetInterior(true)
+	}
 }
 
 func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumName string) {
@@ -1097,6 +1129,14 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 		recv = nil // factory methods have no receiver
 	} else if md.Receiver != nil {
 		ref := resolveRefMod(md.Receiver.RefMod)
+		recv = types.NewParam("this", enum, ref)
+	} else if md.IsSetter || isSetterOperatorName(md.Name) {
+		// A setter inherently mutates its receiver → `~this` (T1053), unless the
+		// enum is `interior (interior mutability keeps a shared `this receiver).
+		ref := types.RefMut
+		if enum.IsInterior() {
+			ref = types.RefNone
+		}
 		recv = types.NewParam("this", enum, ref)
 	} else {
 		// Methods without explicit receiver default to value receiver

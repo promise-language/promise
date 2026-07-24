@@ -1,0 +1,133 @@
+// T1053: mutating a container (or user type) through a shared `&` borrow is now a
+// compile error — the old heap-vector `push`-through-borrow UAF and static-literal
+// COW lost-write are gone (see compiler/internal/sema/t1053_test.go for the
+// rejection cases). This file pins the *sanctioned* mutation forms at runtime: a
+// `~` mutable borrow, a `move` (owned) parameter, and an owned local all mutate
+// correctly and leak nothing. `interior` types (Channel) still mutate through a
+// shared borrow.
+// --- Vector: mutation through a `~` mutable borrow ---
+grow_via_mut_borrow(int[] ~v) {
+  v.push(4);
+  v[0] = 10;
+}
+
+vector_push_through_mut_borrow() `test {
+  int[] v = [1, 2, 3];
+  grow_via_mut_borrow(v);
+  assert(v.len == 4, "pushed through ~ borrow");
+  assert(v[0] == 10, "index write through ~ borrow");
+  assert(v[3] == 4, "appended element");
+}
+
+// --- Vector: mutation through a `move` (owned) parameter, returned back ---
+
+double_all(int[] move v) int[] {
+  for i in 0..v.len {
+    v[i] = v[i] * 2;
+  }
+  return v;
+}
+
+vector_mutate_through_move() `test {
+  int[] v = [1, 2, 3];
+  v = double_all(move v);
+  assert(v[0] == 2, "doubled 0");
+  assert(v[1] == 4, "doubled 1");
+  assert(v[2] == 6, "doubled 2");
+}
+
+// --- Vector: mutation of an owned local ---
+
+vector_mutate_owned_local() `test {
+  int[] v = [5, 6, 7];
+  v.push(8);
+  v[0] = 50;
+  assert(v.len == 4, "owned local push");
+  assert(v[0] == 50, "owned local index write");
+}
+
+// --- Map / Set: mutation through a `~` mutable borrow ---
+
+fill_map(Map[int, int] ~m) {
+  m[1] = 100;
+  m[2] = 200;
+}
+
+map_mutate_through_mut_borrow() `test {
+  Map[int, int] m = Map[int, int]();
+  fill_map(m);
+  assert(m[1]! == 100, "map put through ~ borrow");
+  assert(m[2]! == 200, "map put through ~ borrow");
+}
+
+fill_set(Set[int] ~s) {
+  s.add(1);
+  s.add(2);
+}
+
+set_mutate_through_mut_borrow() `test {
+  Set[int] s = Set[int]();
+  fill_set(s);
+  assert(s.contains(1), "set add through ~ borrow");
+  assert(s.contains(2), "set add through ~ borrow");
+}
+
+// --- User type: `~this mutation through a `~` mutable borrow ---
+
+type Counter {
+  int n;
+  bump(~this) {
+    this.n = this.n + 1;
+  }
+}
+
+bump_twice(Counter ~c) {
+  c.bump();
+  c.bump();
+}
+
+user_mut_method_through_mut_borrow() `test {
+  Counter c = Counter(n: 0);
+  bump_twice(c);
+  assert(c.n == 2, "user ~this method through ~ borrow");
+}
+
+// --- interior: Channel send/close through a shared borrow still works ---
+
+emit_and_close(Channel[int] ch) {
+  ch.send(7);
+  ch.send(8);
+  ch.close();
+}
+
+channel_send_through_shared_borrow() `test {
+  ch := channel[int](capacity: 4);
+  emit_and_close(ch);
+  int sum = 0;
+  for v in ch {
+    sum = sum + v;
+  }
+  assert(sum == 15, "channel send/close through shared borrow (interior)");
+}
+
+// --- interior: a user type marked `interior mutates through a shared borrow ---
+// This is the user-facing escape hatch (docs/language-design.md §6.2). The heap
+// (string) field exercises the cleanup path — a reassign through a shared borrow
+// must drop the old value and leave no leak.
+
+type Note `interior {
+  string text;
+  set_text(this, string move t) {
+    this.text = t;
+  }
+}
+
+relabel(Note n) {
+  n.set_text("updated");
+}
+
+interior_user_type_through_shared_borrow() `test {
+  Note note = Note(text: "start");
+  relabel(note);
+  assert(note.text == "updated", "interior user type mutated through shared borrow");
+}

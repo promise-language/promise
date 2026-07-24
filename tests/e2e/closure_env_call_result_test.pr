@@ -1119,7 +1119,7 @@ type Slots {
   [](this, int i)() -> int {
     return this.items[i];
   }
-  []=(this, int i, () -> int move f) {
+  []=(~this, int i, () -> int move f) {
     this.items[i] = f;
   }
 }

@@ -23,7 +23,7 @@ import (
 func TestT1311MethodDiscardFreshTempClearsResult(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make(Sink s) Sink { return s; } }
 		method_discard_freshtmp() {
 			f := Factory(seed: 1);
@@ -51,7 +51,7 @@ func TestT1311MethodDiscardFreshTempClearsResult(t *testing.T) {
 func TestT1311MethodInlineFreshTempClearsResult(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make(Sink s) Sink { return s; } }
 		method_inline_freshtmp() {
 			f := Factory(seed: 1);
@@ -76,7 +76,7 @@ func TestT1311MethodInlineFreshTempClearsResult(t *testing.T) {
 func TestT1311MethodDiscardFreshReturnEmitsGuardDistinctPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make_fresh(Sink s) Sink { s.emit(1); return Counter(total: 99); } }
 		method_fresh_return() {
 			f := Factory(seed: 1);
@@ -103,7 +103,7 @@ func TestT1311MethodDiscardFreshReturnEmitsGuardDistinctPtr(t *testing.T) {
 func TestT1311MethodDiscardFreshTempTwoArgsEmitsPerArgGuards(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; pick_second(Sink a, Sink b) Sink { return b; } }
 		method_two_freshtmp() {
 			f := Factory(seed: 1);
@@ -128,7 +128,7 @@ func TestT1311MethodDiscardFreshTempTwoArgsEmitsPerArgGuards(t *testing.T) {
 func TestT1311GenericMethodDiscardFreshTempClearsResult(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; wrap[T](Sink s) Sink { return s; } }
 		generic_freshtmp() {
 			f := Factory(seed: 1);
@@ -151,7 +151,7 @@ func TestT1311GenericMethodDiscardFreshTempClearsResult(t *testing.T) {
 func TestT1311MethodDiscardNoArgNoGuard(t *testing.T) {
 	ir := generateIR(t, `
 		type Sink `+"`"+`structural { emit(int n) `+"`"+`abstract; }
-		type Counter { int total; emit(int n) { this.total = this.total + n; } }
+		type Counter { int total; emit(~this, int n) { this.total = this.total + n; } }
 		type Factory { int seed; make_none() Sink { return Counter(total: 7); } }
 		method_none() {
 			f := Factory(seed: 1);

@@ -32,7 +32,7 @@ slice_compound_all_operators() `test {
 
 type Counter `doc("Holds a tick counter so a slice bound expression's evaluation count is observable.") {
   int ticks;
-  next_bound() int {
+  next_bound(~this) int {
     this.ticks += 1;
     return this.ticks;
   }

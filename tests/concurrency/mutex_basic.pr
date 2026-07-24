@@ -216,8 +216,7 @@ test_mutex_borrow_reassign_to_owned() `test {
   m := Mutex[string[]](move v);
   use g := m.lock();
   borrowed := g.borrow;
-  borrowed = string[]();
-  borrowed.push("owned" + "");
+  borrowed = ["owned" + ""];
   assert(borrowed.len == 1, "mutex borrow reassigned to owned");
 }
 

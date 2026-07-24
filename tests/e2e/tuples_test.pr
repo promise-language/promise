@@ -887,7 +887,7 @@ test_t0406_use_param_then_exit() `test {
 // `Vector.filled` covers Site 4 with substitution; this covers Site 4 without.
 type _T0406Holder {
   int counter;
-  consume((string, int) t) {
+  consume(~this, (string, int) t) {
     (s, n) := t;
     this.counter = this.counter + n + s.len;
   }
@@ -904,7 +904,7 @@ test_t0406_user_method_tuple_param() `test {
 // substitution-equals-tuple).
 type _T0406GBox[T] {
   T value;
-  set_pair((string, T) p) {
+  set_pair(~this, (string, T) p) {
     (s, v) := p;
     this.value = v;
     assert(s.len > 0, "string moved into local");

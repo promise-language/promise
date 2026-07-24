@@ -23,11 +23,11 @@ type Set[T: Hashable + Equal] `public {
     return result;
   }
 
-  add(T move elem) {
+  add(~this, T move elem) {
     this._map[elem] = true;
   }
 
-  remove(T elem) bool {
+  remove(~this, T elem) bool {
     return this._map.remove(elem);
   }
 
@@ -55,7 +55,7 @@ type Set[T: Hashable + Equal] `public {
     return b.to_string();
   }
 
-  clear() {
+  clear(~this) {
     this._map.clear();
   }
 

@@ -5,7 +5,7 @@ type CountUp {
   int current;
   int limit;
 
-  next() int? {
+  next(~this) int? {
     if this.current >= this.limit {
       return none;
     }
@@ -84,7 +84,7 @@ type Counter is Iterator[int] {
   int current;
   int limit;
 
-  next() int? {
+  next(~this) int? {
     if this.current >= this.limit {
       return none;
     }
@@ -358,7 +358,7 @@ test_vector_iter_chain() `test {
 type NumberIter {
   int i;
   int n;
-  next() int? {
+  next(~this) int? {
     if this.n <= 0 {
       return none;
     }

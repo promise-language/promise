@@ -4,7 +4,7 @@ type Counter {
   int count;
   int max_val;
 
-  next() int? {
+  next(~this) int? {
     if this.count < this.max_val {
       c := this.count;
       this.count = this.count + 1;

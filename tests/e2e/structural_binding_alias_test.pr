@@ -8,14 +8,14 @@ type Sink `structural {
 
 type Counter {
   int total;
-  emit(int n) {
+  emit(~this, int n) {
     this.total = this.total + n;
   }
 }
 
 type Widget {
   int id;
-  emit(int n) {
+  emit(~this, int n) {
     this.id = this.id + n;
   }
 }

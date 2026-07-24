@@ -66,7 +66,7 @@ type Random `public `doc("Deterministic pseudorandom number generator using the 
     return low + this.next_f64() * (high - low);
   }
 
-  shuffle[T](~this, T[] vec `doc("The vector to shuffle. Ownership is taken and the shuffled vector is returned.")) T[] `doc("Returns a new vector with elements in uniformly random order using the Fisher-Yates algorithm. Every permutation is equally likely. O(n) time, O(1) extra space.") {
+  shuffle[T](~this, T[] move vec `doc("The vector to shuffle. Consumes its argument — use `v = r.shuffle(move v)`.")) T[] `doc("Returns a new vector with elements shuffled into uniformly random order using the Fisher-Yates algorithm. Consumes its argument (the shuffled vector is returned). Every permutation is equally likely. O(n) time, O(1) extra space.") {
     int i = vec.len - 1;
     while i > 0 {
       int j = this.next_int_range(0, i + 1);

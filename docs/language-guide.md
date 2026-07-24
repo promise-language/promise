@@ -441,6 +441,14 @@ consume(move val);            // move — val is gone after this line
 // use `T move s` to consume. A borrow parameter cannot be moved out (e.g., into a
 // struct field) — that's a compile-time error.
 
+// No mutation through a shared borrow: a read-only borrow may not mutate the value
+// it points at — not a field store, not a property setter, not an index/slice write,
+// not a `~this` mutating method (v.push(x), s.add(x)). Use a `~` mutable borrow.
+add_one(int[] v)  { v.push(1); }   // error: cannot mutate through a shared borrow
+add_one(int[]~ v) { v.push(1); }   // OK: mutable borrow
+// Exception: `interior types (Channel/Mutex) allow interior mutation through a
+// shared borrow — their internal synchronization makes it safe.
+
 // Reference TYPES (locals and return types; default is owned):
 // (borrows can't be stored in fields — use Ref[T] to hold a reference in a struct)
 //   string  s = ref.borrow;         // error: can't store a borrow as an owned string

@@ -1204,11 +1204,11 @@ test_nested_index_assign_vector_of_vectors() `test {
 // correct under monomorphization for both Vector-of-Vectors and array-of-Vectors,
 // and for a droppable element type (string) so the no-leak gate covers it.
 
-push_into_vov[T](Vector[Vector[T]] vov, int i, T val) {
+push_into_vov[T](Vector[Vector[T]] ~vov, int i, T val) {
   vov[i].push(val);
 }
 
-push_into_arr[T](Vector[T][2] arr, int i, T val) {
+push_into_arr[T](Vector[T][2] ~arr, int i, T val) {
   arr[i].push(val);
 }
 

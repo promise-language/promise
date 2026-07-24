@@ -246,8 +246,7 @@ arc_borrow_reassign_to_owned() `test {
   v.push("borrowed" + "");
   a := Ref[string[]](move v);
   borrowed := a.borrow;
-  borrowed = string[]();
-  borrowed.push("owned" + "");
+  borrowed = ["owned" + ""];
   assert(borrowed.len == 1, "borrow reassigned to owned");
 }
 

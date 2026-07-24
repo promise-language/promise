@@ -2872,7 +2872,7 @@ func TestErrorUnwrapStringTemp(t *testing.T) {
 func TestErrorPropagateStringTemp(t *testing.T) {
 	ir := generateIR(t, `
 		make_str!() string { return "hello"; }
-		wrap!(string[] v) string[] {
+		wrap!(string[] move v) string[] {
 			v.push(make_str()?^);
 			return v;
 		}
@@ -6422,7 +6422,7 @@ func TestClosureUserIndexSetterClaimsEnvTemp(t *testing.T) {
 		type Slots {
 			(() -> int)[] items;
 			[](this, int i) () -> int { return this.items[i]; }
-			[]=(this, int i, () -> int move f) { this.items[i] = f; }
+			[]=(~this, int i, () -> int move f) { this.items[i] = f; }
 		}
 		zero() int { return 0; }
 		make_adder(int x) () -> int { return move || -> x + 1; }
@@ -13232,7 +13232,7 @@ func TestVectorStringIndexAssignDropsOld(t *testing.T) {
 // B0350: Map[K,string] index assign from borrow param dups value
 func TestMapStringIndexAssignBorrowParamDup(t *testing.T) {
 	ir := generateIR(t, `
-		store(map[string, string] m, string key, string value) {
+		store(map[string, string]~ m, string key, string value) {
 			m[key] = value;
 		}
 		main() {
@@ -13249,7 +13249,7 @@ func TestMapStringIndexAssignBorrowParamDup(t *testing.T) {
 func TestMapStringIndexAssignOwnedNoDup(t *testing.T) {
 	ir := generateIR(t, `
 		make_val() string { return "hello"; }
-		store_owned(map[string, string] m) {
+		store_owned(map[string, string]~ m) {
 			string v = make_val();
 			m["k"] = v;
 		}
@@ -14677,7 +14677,7 @@ func TestStructuralInterfaceVarFree(t *testing.T) {
 		type Counter is Iterator[int] {
 			int current;
 			int limit;
-			next() int? {
+			next(~this) int? {
 				if this.current < this.limit {
 					v := this.current;
 					this.current = this.current + 1;
@@ -14707,7 +14707,7 @@ func TestStructuralInterfaceVarBorrow(t *testing.T) {
 		type Counter is Iterator[int] {
 			int current;
 			int limit;
-			next() int? {
+			next(~this) int? {
 				if this.current < this.limit {
 					v := this.current;
 					this.current = this.current + 1;
@@ -22697,7 +22697,7 @@ func TestFailableGetterCompoundInGenericMethodIR(t *testing.T) {
 				return this.counter;
 			}
 			set count(int v) { this.counter = v; }
-			bump!() { this.count += 1; }
+			bump!(~this) { this.count += 1; }
 		}
 		main!() {
 			b := Box[int](payload: 0, counter: 10);
@@ -22781,7 +22781,7 @@ func TestGenericPropertyIncDecIR(t *testing.T) {
 			int count;
 			get total int { return this.count; }
 			set total(int x) { this.count = x; }
-			bump() { this.total++; }
+			bump(~this) { this.total++; }
 		}
 		main() {
 			b := Box[int](v: 5, count: 10);
@@ -26175,7 +26175,7 @@ func TestStreamForInIterCleanup(t *testing.T) {
 		type NumberIter is Iterator[int] {
 			int i;
 			int n;
-			next() int? {
+			next(~this) int? {
 				if this.i >= this.n { return none; }
 				int val = this.i;
 				this.i = this.i + 1;
@@ -26951,7 +26951,7 @@ func TestTerminalOpDoesNotClaimReceiver(t *testing.T) {
 		type Counter is Iterator[int] {
 			int current;
 			int limit;
-			next() int? {
+			next(~this) int? {
 				if this.current >= this.limit { return none; }
 				int val = this.current;
 				this.current = this.current + 1;
@@ -27362,7 +27362,7 @@ func TestRttiDropExplicitUserDropWrap(t *testing.T) {
 	ir := generateIR(t, `
 		type Counter is Iterator[int] {
 			int val;
-			next() int? {
+			next(~this) int? {
 				if this.val > 0 {
 					this.val = this.val - 1;
 					return this.val;
@@ -29929,8 +29929,7 @@ func TestT0381_BorrowLocalReassignedToOwnedDrops(t *testing.T) {
 			v.push("hello");
 			a := Ref[string[]](v);
 			string[]& borrowed = a.borrow;
-			borrowed = string[]();
-			borrowed.push("owned");
+			borrowed = ["owned"];
 		}
 	`)
 	// The reassignment makes `borrowed` an owned vector; on scope exit

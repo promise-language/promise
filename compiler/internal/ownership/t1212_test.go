@@ -37,11 +37,14 @@ func TestT1212_WrapCoerceReturnTaskRejected(t *testing.T) {
 }
 
 func TestT1212_WrapCoerceCallArgConsumeRejected(t *testing.T) {
-	// Escape via a `~`-arg consume (push into a Vector).
+	// Escape via a `move` call-arg consume. The wrap-coerced value `x` (which
+	// aliases the borrowed single-owner `Mutex` handle `m`) is consumed by a
+	// `move` parameter, so it escapes and is rejected.
 	errs := ownerErrs(t, `
-		wrapcoerce(Mutex[int]? m, Mutex[int]??[] v) {
+		sink(Mutex[int]?? move x) {}
+		wrapcoerce(Mutex[int]? m) {
 			Mutex[int]?? x = m;
-			v.push(x);
+			sink(move x);
 		}
 	`)
 	expectOwnerError(t, errs, "wrap-coerces the borrowed single-owner `Mutex` handle 'm'")

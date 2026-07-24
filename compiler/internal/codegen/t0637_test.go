@@ -236,7 +236,7 @@ func TestT0637_InheritedSetterViaThis(t *testing.T) {
 			set fetched(T v) { this._val = v; }
 		}
 		type Child[T] is Base[T] {
-			set_via(T move v) {
+			set_via(~this, T move v) {
 				this.fetched = v;
 			}
 		}

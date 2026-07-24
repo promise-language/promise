@@ -1,5 +1,8 @@
 // std/channel.pr — Channel type for concurrent communication
-type Channel[T] `native `public `sendable `sharable {
+// `interior: a Channel is shared across goroutines and mutated through its own
+// internal synchronization, so its mutating methods (send/close) take a shared
+// `this receiver and stay callable through a shared `& borrow (T1053).
+type Channel[T] `native `public `sendable `sharable `interior {
   new(int? capacity) `native;
   send(T move value) `native;
   close() `native;

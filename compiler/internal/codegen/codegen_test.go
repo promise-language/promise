@@ -7444,6 +7444,51 @@ func TestFixedArrayLiteral(t *testing.T) {
 	assertContains(t, ir, "store i64 3")
 }
 
+// T1297: a fixed-array literal with an Optional element type Some-wraps each
+// non-optional element into the {i1,T} slot via insertvalue.
+func TestT1297_FixedArrayOptionalElementWrap(t *testing.T) {
+	ir := generateIR(t, `
+		main() { int?[3] x = [1, none, 3]; }
+	`)
+	// Elements are wrapped into the { i1, i64 } optional element struct.
+	assertContains(t, ir, "insertvalue { i1, i64 }")
+	// Slot type is the optional element struct.
+	assertContains(t, ir, "alloca [3 x { i1, i64 }]")
+}
+
+// T1297: a vector literal with an Optional element type takes the heap path
+// (not the static .rodata path) so each element can be Some-wrapped, even when
+// every element is a compile-time constant.
+func TestT1297_OptionalElementVectorTakesHeapPath(t *testing.T) {
+	ir := generateIR(t, `
+		main() { int?[] x = [1, 2, 3]; }
+	`)
+	// Heap allocation (not a .rodata static vector global).
+	assertContains(t, ir, "call i8* @pal_alloc(")
+	// Elements Some-wrapped into the { i1, i64 } optional element struct.
+	assertContains(t, ir, "insertvalue { i1, i64 }")
+}
+
+// T1297: an optional-element array/vector literal built inside a generic
+// function Some-wraps each element after substituting the element expression's
+// TypeParam through c.typeSubst (the monomorphization path — argExprType `T` is
+// substituted to `int` before the Identical(argExprType, elem) wrap decision).
+func TestT1297_GenericOptionalElementArrayWrap(t *testing.T) {
+	ir := generateIR(t, `
+		wrap_vec[T](T move a, T move b) T?[] { return [a, b]; }
+		wrap_fixed[T](T move a, T move b) T?[2] { return [a, b]; }
+		main() {
+			int?[] v = wrap_vec[int](1, 2);
+			int?[2] a = wrap_fixed[int](3, 4);
+		}
+	`)
+	// Both the vector-literal and fixed-array-literal monomorphizations wrap
+	// their substituted-int elements into the { i1, i64 } optional slot.
+	assertContains(t, ir, "insertvalue { i1, i64 }")
+	assertContains(t, ir, "wrap_vec[int]")
+	assertContains(t, ir, "wrap_fixed[int]")
+}
+
 func TestFixedArrayIndex(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

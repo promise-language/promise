@@ -11913,10 +11913,17 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		panic(fmt.Sprintf("codegen: array literal type is %T, want Vector instance or Array", typ))
 	}
 	elemLLVM := c.resolveType(elem)
+	_, elemIsOpt := elem.(*types.Optional)
 
-	// Try static .rodata path: all elements must be compile-time constants
-	if consts := c.tryConstantElements(e.Elements, elem, elemLLVM); consts != nil {
-		return c.genStaticVectorLit(int64(len(e.Elements)), elemLLVM, consts)
+	// Try static .rodata path: all elements must be compile-time constants.
+	// T1297: skip the static path for Optional element types — tryConstantExpr
+	// would emit a bare i64/i1 constant for a {i1,T} slot (IR type mismatch);
+	// optional-element vectors take the heap path so each element can be
+	// Some-wrapped below.
+	if !elemIsOpt {
+		if consts := c.tryConstantElements(e.Elements, elem, elemLLVM); consts != nil {
+			return c.genStaticVectorLit(int64(len(e.Elements)), elemLLVM, consts)
+		}
 	}
 
 	elemSize := int64(c.typeSize(elemLLVM))
@@ -11970,13 +11977,39 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		// the same allocation ("fatal: invalid free (bad header magic)"). No-op
 		// for non-index elements (armDupForVectorIndexArg only arms for `v[i]`).
 		c.armDupForVectorIndexArg(elemExpr)
+		// T1297: set targetType to the Optional element type so a bare `none`
+		// element lowers to a zero {i1,T} struct via genNoneLit (mirrors the
+		// T0658 Vector.push path).
+		savedTarget := c.targetType
+		if elemIsOpt {
+			c.targetType = elem
+		}
 		val := c.genCallArgExpr(elemExpr)
+		c.targetType = savedTarget
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
 		c.dupHeapUserFieldAccess = false
+		// T1297: wrap a bare non-optional element into the Optional element
+		// struct when the vector element type is Optional but the element expr
+		// is not (`int?[] = [1, none, 3]`, `int[]?[] = [[1,2]]`). The claim
+		// logic below still operates on the raw `val` (ownership tracking is by
+		// raw-value identity), mirroring the T0658 push path exactly.
+		storeVal := val
+		if elemIsOpt {
+			argExprType := c.info.Types[elemExpr]
+			if c.typeSubst != nil && argExprType != nil {
+				argExprType = types.Substitute(argExprType, c.typeSubst)
+			}
+			if argExprType != types.TypNone && !types.Identical(argExprType, elem) {
+				storeVal = c.coerceToOptionalElem(val, argExprType, elem)
+				if st, ok := elemLLVM.(*irtypes.StructType); ok {
+					storeVal = c.wrapOptional(storeVal, st)
+				}
+			}
+		}
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
 			constant.NewInt(irtypes.I64, int64(i)))
-		c.block.NewStore(val, elemPtr)
+		c.block.NewStore(storeVal, elemPtr)
 		if walkEnabled {
 			// T0610: An ident element of a type that Vector.drop's element-walk
 			// frees is *moved* into the vector (ownership marks it Moved). The
@@ -12215,14 +12248,41 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 		resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 	}
 	claim := c.variantFieldNeedsDrop(resolvedElem)
+	_, elemIsOpt := resolvedElem.(*types.Optional)
 
 	tmp := c.createEntryAlloca(arrType)
 	for i, elemExpr := range e.Elements {
 		savedEnumTemps := len(c.enumCtorTemps)
+		// T1297: set targetType to the Optional element type so a bare `none`
+		// element lowers to a zero {i1,T} struct via genNoneLit (mirrors the
+		// T0658 Vector.push path).
+		savedTarget := c.targetType
+		if elemIsOpt {
+			c.targetType = resolvedElem
+		}
 		val := c.genCallArgExpr(elemExpr)
+		c.targetType = savedTarget
+		// T1297: wrap a bare non-optional element into the Optional element
+		// struct when the array element type is Optional but the element expr
+		// is not (`int?[3] = [1, none, 3]`, `int[]?[2] = [[1,2],[3,4]]`). The
+		// claim logic below still operates on the raw `val` (ownership tracking
+		// is by raw-value identity), mirroring the T0658 push path exactly.
+		storeVal := val
+		if elemIsOpt {
+			argExprType := c.info.Types[elemExpr]
+			if c.typeSubst != nil && argExprType != nil {
+				argExprType = types.Substitute(argExprType, c.typeSubst)
+			}
+			if argExprType != types.TypNone && !types.Identical(argExprType, resolvedElem) {
+				storeVal = c.coerceToOptionalElem(val, argExprType, resolvedElem)
+				if st, ok := elemLLVM.(*irtypes.StructType); ok {
+					storeVal = c.wrapOptional(storeVal, st)
+				}
+			}
+		}
 		ptr := c.block.NewGetElementPtr(arrType, tmp,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
-		c.block.NewStore(val, ptr)
+		c.block.NewStore(storeVal, ptr)
 		if !claim {
 			continue
 		}

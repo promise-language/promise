@@ -6430,6 +6430,65 @@ func TestFixedArrayFieldAccess(t *testing.T) {
 	`)
 }
 
+// T1297: a fixed-array / vector literal whose declared element type is optional
+// is coerced element-wise from non-optional literal elements (Some-wrapping),
+// and the declared element type is propagated as a hint (numeric adaptation).
+func TestT1297_OptionalElementArrayLiteralCoercion(t *testing.T) {
+	// Fixed array of optional vectors — the original repro.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[]?[2] a = [[1, 2], [3, 4]];
+		}
+	`)
+	// Fixed array of optional scalars with a none element.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int?[3] a = [1, none, 3];
+		}
+	`)
+	// Vector literal of optional scalars.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int?[] a = [1, none, 3];
+		}
+	`)
+	// Vector literal of optional vectors.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[]?[] a = [[1, 2], none];
+		}
+	`)
+	// Numeric adaptation falls out of hint propagation.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			i32[3] a = [1, 2, 3];
+			f64[2] b = [1.0, 2.0];
+		}
+	`)
+}
+
+// T1297: even with the optional-element hint active, a later element that is
+// not assignable to the (widened) optional element type is still rejected — the
+// element-mismatch diagnostic reports the widened `unifyType` (`int?`), not the
+// raw first-element type.
+func TestT1297_OptionalElementArrayLiteralMismatch(t *testing.T) {
+	// Vector literal: second element is not assignable to int?.
+	errs := checkErrsWithStd(t, stdContainers, `
+		main() {
+			int?[] a = [1, "x"];
+		}
+	`)
+	expectError(t, errs, "array element type mismatch: expected int?, got string")
+
+	// Fixed array literal: same, through the fixed-array hint path.
+	errs = checkErrsWithStd(t, stdContainers, `
+		main() {
+			int?[2] a = [1, "x"];
+		}
+	`)
+	expectError(t, errs, "array element type mismatch: expected int?, got string")
+}
+
 func TestMapLenProperty(t *testing.T) {
 	checkOKWithStd(t, stdContainers, `
 		main() {

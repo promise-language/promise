@@ -492,7 +492,31 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 		return nil
 	}
 
-	elemType := c.checkExpr(e.Elements[0])
+	// T1297: derive an element hint from the incoming container hint so nested
+	// literals adapt (numeric widening) and coerce element-wise into an optional
+	// element type (`int[]?[2] = [[1,2],[3,4]]`, `int?[3] = [1, none, 3]`).
+	var elemHint types.Type
+	switch h := hint.(type) {
+	case *types.Array:
+		elemHint = h.Elem()
+	case *types.Optional:
+		// Nested container literal whose declared element is optional: peel the
+		// Optional so the inner literal's elements get the container's elem hint.
+		switch inner := h.Elem().(type) {
+		case *types.Array:
+			elemHint = inner.Elem()
+		default:
+			if ve, ok := types.AsVector(h.Elem()); ok {
+				elemHint = ve
+			}
+		}
+	default:
+		if ve, ok := types.AsVector(hint); ok {
+			elemHint = ve
+		}
+	}
+
+	elemType := c.checkExprWithHint(e.Elements[0], elemHint)
 	if elemType == nil {
 		return nil
 	}
@@ -501,16 +525,31 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 	// rejected later by ownership) rather than an unassignable `string&[]`.
 	elemType = stripRef(elemType)
 
+	// T1297: the container element type is `elemType` by default, but widens to
+	// the hint element type when the first element is assignable-but-not-identical
+	// (Some-wrapping `T → T?`, or subtype widening). Individual element
+	// expressions keep their own recorded types — codegen uses that to decide
+	// whether to wrap each element.
+	unifyType := elemType
+	if elemHint != nil && !types.Identical(elemType, elemHint) && types.AssignableTo(elemType, elemHint) {
+		unifyType = elemHint
+	}
+
 	for i := 1; i < len(e.Elements); i++ {
-		et := c.checkExpr(e.Elements[i])
+		et := c.checkExprWithHint(e.Elements[i], elemHint)
 		if et == nil {
 			continue
 		}
 		et = stripRef(et)
-		if !types.Identical(et, elemType) {
-			c.errorf(e.Elements[i].Pos(), "array element type mismatch: expected %s, got %s", elemType, et)
+		if types.Identical(et, unifyType) {
+			continue
 		}
+		if elemHint != nil && types.AssignableTo(et, unifyType) {
+			continue
+		}
+		c.errorf(e.Elements[i].Pos(), "array element type mismatch: expected %s, got %s", unifyType, et)
 	}
+	elemType = unifyType
 
 	// T0545: a vector/array literal whose element type transitively contains a
 	// single-owner handle (e.g. [[go f()]] → Vector[Vector[Task]]) forces the

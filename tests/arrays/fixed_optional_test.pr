@@ -1,0 +1,76 @@
+// T1297: a fixed-size array literal whose declared element type is optional is
+// coerced element-wise from the non-optional literal elements (Some-wrapping),
+// mirroring the T0658 Vector.push / T0615 index-assign optional-coercion paths.
+//
+// Pre-fix, checkArrayLit inferred the container element type solely from the
+// first element, so `int[]?[2] = [[1,2],[3,4]]` typed as `int[][2]` and the
+// whole-array assignment `int[][2] -> int[]?[2]` failed (fixed arrays are not
+// element-covariant). Codegen also stored each raw element straight into the
+// {i1,T} slot with no Some-wrap. The fix propagates the declared element type
+// as a hint and wraps each element into the Optional struct.
+// (1) Primary repro — fixed array of optional vectors.
+test_fixed_array_of_optional_vectors() `test {
+  int[]?[2] a = [[1, 2], [3, 4]];
+  assert(a[0]!.len == 2, "slot 0 len");
+  assert(a[1]![0] == 3, "slot 1 element 0");
+  assert(a[1]![1] == 4, "slot 1 element 1");
+}
+
+// (2) Fixed array of optional scalars, all present.
+test_fixed_array_of_optional_scalars() `test {
+  int?[3] a = [1, 2, 3];
+  assert(a[0]! == 1, "slot 0");
+  assert(a[1]! == 2, "slot 1");
+  assert(a[2]! == 3, "slot 2");
+}
+
+// (3) `none` elements lower to a zero {i1,T} via c.targetType (no double-wrap).
+test_fixed_array_optional_with_none() `test {
+  int?[3] a = [1, none, 3];
+  int? g0 = a[0];
+  int? g1 = a[1];
+  int? g2 = a[2];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g2 is present, "slot 2 present");
+  assert(g0! == 1, "slot 0 value");
+  assert(g2! == 3, "slot 2 value");
+}
+
+// (4) Nested optional vectors with a `none` element — array drop must walk
+// Optional -> Vector for the present slots (leak-checked).
+test_fixed_array_optional_vectors_with_none() `test {
+  int[]?[2] a = [[1, 2, 3], none];
+  int[]? g0 = a[0];
+  int[]? g1 = a[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g0!.len == 3, "slot 0 len");
+}
+
+// (5) Numeric adaptation — the element hint now propagates, so a fixed array of
+// a non-default numeric type accepts default-typed literals.
+test_fixed_array_numeric_adaptation() `test {
+  i32[3] a = [1, 2, 3];
+  assert(a[0] == 1, "i32 slot 0");
+  assert(a[2] == 3, "i32 slot 2");
+  f64[2] b = [1.0, 2.0];
+  assert(b[0] == 1.0, "f64 slot 0");
+  assert(b[1] == 2.0, "f64 slot 1");
+}
+
+// (6) Optional-element fixed-array literal built inside a generic function — the
+// element expr's TypeParam is substituted (c.typeSubst) before the Some-wrap,
+// exercising the monomorphization path of the fix.
+_wrap_optional_fixed[T](T move a, T move b) T?[2] {
+  return[a, b];
+}
+
+test_fixed_array_optional_generic() `test {
+  int?[2] a = _wrap_optional_fixed[int](8, 9);
+  int? g0 = a[0];
+  int? g1 = a[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g0! == 8, "slot 0 value");
+  assert(g1! == 9, "slot 1 value");
+}

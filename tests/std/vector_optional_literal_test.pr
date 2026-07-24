@@ -1,0 +1,63 @@
+// T1297: a vector literal whose declared element type is optional is coerced
+// element-wise from the non-optional literal elements (Some-wrapping). This is
+// the vector-literal analog of the T0658 push path — checkArrayLit now
+// propagates the declared element type as a hint and codegen wraps each element
+// into the Optional struct. Optional-element vectors also take the heap path
+// (the static .rodata path can't hold {i1,T} slots).
+// (1) Vector literal of optional scalars, mixed present/none.
+test_vector_optional_scalar_literal() `test {
+  int?[] a = [1, none, 3];
+  assert(a.len == 3, "three elements");
+  int? g0 = a[0];
+  int? g1 = a[1];
+  int? g2 = a[2];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g2 is present, "slot 2 present");
+  assert(g0! == 1, "slot 0 value");
+  assert(g2! == 3, "slot 2 value");
+}
+
+// (2) Vector literal of optional vectors (nested droppable inner) — leak-checked.
+test_vector_optional_vector_literal() `test {
+  int[]?[] a = [[1, 2], none, [3, 4, 5]];
+  assert(a.len == 3, "three elements");
+  int[]? g0 = a[0];
+  int[]? g1 = a[1];
+  int[]? g2 = a[2];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g2 is present, "slot 2 present");
+  assert(g0!.len == 2, "slot 0 len");
+  assert(g2!.len == 3, "slot 2 len");
+}
+
+// (3) Read-back and mutation of an optional-element vector literal (leak-checked).
+test_vector_optional_literal_mutate() `test {
+  int?[] a = [1, 2, 3];
+  a.push(none);
+  a.push(4);
+  assert(a.len == 5, "five elements after push");
+  int? g3 = a[3];
+  int? g4 = a[4];
+  assert(g3 is absent, "pushed none absent");
+  assert(g4 is present, "pushed value present");
+  assert(g4! == 4, "pushed value");
+}
+
+// (4) Optional-element vector literal built inside a generic function — the
+// element expr's TypeParam is substituted (c.typeSubst) before the Some-wrap,
+// exercising the monomorphization path of the fix (leak-checked).
+_wrap_optional_vec[T](T move a, T move b) T?[] {
+  return[a, b];
+}
+
+test_vector_optional_literal_generic() `test {
+  int?[] v = _wrap_optional_vec[int](5, 7);
+  assert(v.len == 2, "two elements");
+  int? g0 = v[0];
+  int? g1 = v[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g0! == 5, "slot 0 value");
+  assert(g1! == 7, "slot 1 value");
+}

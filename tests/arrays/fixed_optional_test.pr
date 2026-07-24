@@ -74,3 +74,50 @@ test_fixed_array_optional_generic() `test {
   assert(g0! == 8, "slot 0 value");
   assert(g1! == 9, "slot 1 value");
 }
+
+// T1342: the T1297 fix only covered scalar and vector element types. An
+// *optional fixed-array* element (`int[2]?`) still typed the inner bare literal
+// `[1,2]` as a Vector `int[]`, so the outer assignment `int[][] -> int[2]?[]`
+// failed. The fix propagates the peeled Optional's fixed-array-ness into the
+// nested checkArrayLit so the inner literal builds an `int[2]`, then the outer
+// container Some-wraps each fixed array element-wise.
+test_optional_fixed_array_element_in_vector() `test {
+  int[2]?[] a = [[1, 2], [3, 4]];
+  assert(a.len == 2, "vec len");
+  assert(a[0]![0] == 1 && a[0]![1] == 2, "a[0]");
+  assert(a[1]![0] == 3 && a[1]![1] == 4, "a[1]");
+}
+
+test_optional_fixed_array_element_in_fixed_array() `test {
+  int[2]?[2] b = [[1, 2], [3, 4]];
+  assert(b.len == 2, "fixed len");
+  assert(b[0]![0] == 1 && b[0]![1] == 2, "b[0]");
+  assert(b[1]![0] == 3 && b[1]![1] == 4, "b[1]");
+}
+
+// A `none` slot mixed with present fixed-array slots — drop must walk
+// Optional -> Array for the present slots (leak-checked).
+test_optional_fixed_array_element_with_none() `test {
+  int[2]?[2] a = [[1, 2], none];
+  int[2]? g0 = a[0];
+  int[2]? g1 = a[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g0![0] == 1 && g0![1] == 2, "slot 0 value");
+}
+
+// Leading `none` slot: the first element types directly as the optional
+// element (no Some-wrap widening), and the fixed-array size is still carried
+// from the container hint for the later present slot.
+test_optional_fixed_array_element_leading_none() `test {
+  int[2]?[2] a = [none, [3, 4]];
+  assert(a[0] is absent, "slot 0 absent");
+  assert(a[1]![0] == 3 && a[1]![1] == 4, "slot 1 value");
+}
+
+// All-`none` fixed array of optional fixed arrays — no present slot means the
+// element type is fixed solely from the container hint (leak-checked).
+test_optional_fixed_array_element_all_none() `test {
+  int[2]?[2] a = [none, none];
+  assert(a[0] is absent && a[1] is absent, "both absent");
+}

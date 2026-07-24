@@ -6467,6 +6467,51 @@ func TestT1297_OptionalElementArrayLiteralCoercion(t *testing.T) {
 	`)
 }
 
+// T1342: follow-up to T1297 — an optional *fixed-array* element type
+// (`int[2]?`) must propagate its fixed-array-ness into the nested literal so
+// `[1,2]` builds an `int[2]` (not a Vector `int[]`); otherwise the outer
+// assignment `int[][] -> int[2]?[]` is rejected.
+func TestT1342_OptionalFixedArrayElementLiteralCoercion(t *testing.T) {
+	// Vector of optional fixed arrays — the T1342 repro.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[2]?[] a = [[1, 2], [3, 4]];
+		}
+	`)
+	// Fixed array of optional fixed arrays.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[2]?[2] b = [[1, 2], [3, 4]];
+		}
+	`)
+	// With a none slot mixed in.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[2]?[2] a = [[1, 2], none];
+		}
+	`)
+	// Leading none: the first element types directly as the optional element,
+	// yet the fixed-array-ness still propagates for the later present slot.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[2]?[2] a = [none, [3, 4]];
+		}
+	`)
+	// All-none: element type is fixed solely from the container hint.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			int[2]?[2] a = [none, none];
+		}
+	`)
+	// The nested fixed-array element still enforces its declared size.
+	errs := checkErrsWithStd(t, stdContainers, `
+		main() {
+			int[2]?[] a = [[1, 2, 3]];
+		}
+	`)
+	expectError(t, errs, "array literal has 3 elements but type int[2] requires 2")
+}
+
 // T1297: even with the optional-element hint active, a later element that is
 // not assignable to the (widened) optional element type is still rejected — the
 // element-mismatch diagnostic reports the widened `unifyType` (`int?`), not the

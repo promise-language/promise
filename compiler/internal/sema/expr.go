@@ -565,14 +565,23 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 		return nil
 	}
 
-	// If hint is a fixed-size array type, produce Array instead of Vector
-	if arr, ok := hint.(*types.Array); ok {
-		if int64(len(e.Elements)) != arr.Size() {
+	// If hint is a fixed-size array type — possibly wrapped in an Optional, as in
+	// the nested literal of `int[2]?[] = [[1,2],[3,4]]` (T1342) — produce Array
+	// instead of Vector so the fixed-array-ness propagates; the outer container
+	// then Some-wraps each Array element element-wise.
+	arrHint, _ := hint.(*types.Array)
+	if arrHint == nil {
+		if opt, ok := hint.(*types.Optional); ok {
+			arrHint, _ = opt.Elem().(*types.Array)
+		}
+	}
+	if arrHint != nil {
+		if int64(len(e.Elements)) != arrHint.Size() {
 			c.errorf(e.Pos(), "array literal has %d elements but type %s requires %d",
-				len(e.Elements), arr, arr.Size())
+				len(e.Elements), arrHint, arrHint.Size())
 			return nil
 		}
-		return types.NewArray(elemType, arr.Size())
+		return types.NewArray(elemType, arrHint.Size())
 	}
 
 	inst := types.NewVector(elemType)

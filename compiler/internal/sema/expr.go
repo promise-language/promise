@@ -3127,6 +3127,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 }
 
 func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
+	errsBefore := len(c.errors)
 	cond := c.checkExpr(e.Cond)
 	if cond != nil && !types.Identical(cond, types.TypBool) {
 		c.errorf(e.Cond.Pos(), "if condition must be bool, got %s", cond)
@@ -3156,7 +3157,7 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	// T1335: a reachable (non-diverging) arm produces no value. In value position
 	// (a non-void expected type is in play) the if-expression cannot satisfy that
 	// type — report a type error instead of returning nil and panicking in codegen.
-	if hint != nil {
+	if hint != nil && len(c.errors) == errsBefore {
 		thenVoid := !thenDiverges && (thenType == nil || types.Identical(thenType, types.TypVoid))
 		elseVoid := !elseDiverges && (elseType == nil || types.Identical(elseType, types.TypVoid))
 		if thenVoid || elseVoid {
@@ -3255,6 +3256,7 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos) types.Type {
 }
 
 func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
+	errsBefore := len(c.errors)
 	subjectType := c.checkExpr(e.Subject)
 
 	var resultType types.Type
@@ -3343,7 +3345,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 	// T1335: a reachable (non-diverging) arm produces no value. In value position
 	// (a non-void expected type is in play) the match cannot satisfy that type —
 	// report a type error instead of returning nil and panicking in codegen.
-	if hasReachableVoidArm && hint != nil {
+	if hasReachableVoidArm && hint != nil && len(c.errors) == errsBefore {
 		c.errorf(e.Pos(), "match arm produces no value; %s expected", hint)
 		if resultType == nil {
 			resultType = hint // avoid nil propagating to other consumers

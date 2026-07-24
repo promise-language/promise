@@ -135,6 +135,19 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	}
 }
 
+// isValuelessIfOrMatch reports whether expr is an `if`/`match` expression —
+// the two value-position forms whose checker (checkIfExpr/checkMatchExpr) can
+// legitimately return a nil type when no arm yields a value (void/empty arms,
+// or all arms diverge with no contextual hint). Used to turn that nil into a
+// clear var-decl diagnostic instead of a codegen panic (T1337).
+func isValuelessIfOrMatch(expr ast.Expr) bool {
+	switch expr.(type) {
+	case *ast.IfExpr, *ast.MatchExpr:
+		return true
+	}
+	return false
+}
+
 func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	declType := c.resolveType(s.Type)
 	if declType == nil {
@@ -198,6 +211,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 		}
 		if !emptyLitHandled {
+			errsBefore := len(c.errors)
 			valType := c.checkExprWithHint(s.Value, declType)
 			// T1313: a generator (`stream[T]`) value cannot be stored in a variable.
 			if c.rejectStoredGenerator(s.Pos(), valType) {
@@ -211,6 +225,12 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 			if valType != nil && !types.AssignableTo(valType, declType) {
 				c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)
+			} else if valType == nil && len(c.errors) == errsBefore && isValuelessIfOrMatch(s.Value) {
+				// T1337: a value-less `if`/`match` (void/empty arms) returns nil
+				// even with a type hint; without this guard the nil flows to
+				// genTypedVarDecl, which panics. Require "no new error" so a nil
+				// from an inner arm error does not cascade a spurious diagnostic.
+				c.errorf(s.Pos(), "cannot assign void to variable of type %s: if/match expression produces no value; use it as a statement instead", declType)
 			}
 			// Track factory-created locals for `final field write restriction
 			if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
@@ -254,8 +274,17 @@ func (c *Checker) rejectStoredGenerator(pos ast.Pos, valType types.Type) bool {
 }
 
 func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
+	errsBefore := len(c.errors)
 	valType := c.checkExpr(s.Value)
 	if valType == nil {
+		// T1337: a value-less `if`/`match` (void/empty arms, or all arms diverge
+		// with no hint) returns nil; without this guard the nil flows to
+		// genInferredVarDecl, which panics. Mirror the T0682 void guard below.
+		// Require "no new error" so a nil from an inner arm error does not
+		// cascade a spurious second diagnostic.
+		if len(c.errors) == errsBefore && isValuelessIfOrMatch(s.Value) {
+			c.errorf(s.Pos(), "cannot bind void to variable '%s': expression produces no value; use it as a statement instead", s.Name)
+		}
 		return
 	}
 
@@ -485,10 +514,21 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 }
 
 func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
+	errsBefore := len(c.errors)
 	targetType := c.checkExpr(s.Target)
 	valType := c.checkExprWithHint(s.Value, targetType)
 
 	if targetType == nil || valType == nil {
+		// T1337: a value-less `if`/`match` RHS (void/empty arms, or all arms
+		// diverge with no hint) returns nil; without this guard the nil flows to
+		// codegen's assignment store (@NewStore with a nil value operand), which
+		// panics. Sibling of the var-decl guards in checkTypedVarDecl /
+		// checkInferredVarDecl. Require a valid target and "no new error" so this
+		// fires only for the otherwise-clean valueless-RHS case (any other error
+		// already halts compilation before codegen).
+		if valType == nil && targetType != nil && len(c.errors) == errsBefore && isValuelessIfOrMatch(s.Value) {
+			c.errorf(s.Pos(), "cannot assign void to %s: if/match expression produces no value; use it as a statement instead", targetType)
+		}
 		return
 	}
 

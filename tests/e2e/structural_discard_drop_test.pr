@@ -46,6 +46,28 @@ apply(() -> Sink fn) Sink {
   return fn();
 }
 
+// T1305: a free function that takes a heap-typed argument but constructs / clones
+// a FRESH structural box for its return. The T1294 conservative fallback declined
+// to track any call with a heap arg (leaking the fresh return); the sema
+// return-alias fact now proves the return does not alias the argument.
+first_of(Sink[] v) Sink {
+  return v[0];
+}
+
+make_vec() Sink[] {
+  r := Vector[Sink]();
+  r.push(Counter(total: 1));
+  return r;
+}
+
+make_from(Widget ~w) Showable {
+  return Widget(id: w.id);
+}
+
+get_widget() Widget {
+  return Widget(id: 7);
+}
+
 // Discarded fresh-owned free-function structural return — must free the box.
 discard_call() `test {
   show(1);
@@ -97,5 +119,21 @@ discard_passthrough_fresh() `test {
 // (no leak, no double-free).
 discard_lambda_arg() `test {
   apply(|| -> mk_sink(1));
+  assert(true, "ok");
+}
+
+// T1305: the callee takes a heap-typed argument (`Sink[] v`, a borrow) but returns
+// a fresh deep-cloned element (structural index clone, T1292). The vector temp and
+// the returned box are distinct allocations — both must be freed once, no leak.
+discard_index_clone() `test {
+  first_of(make_vec());
+  assert(true, "ok");
+}
+
+// T1305: the callee consumes a moved heap argument (`Widget ~w`) and returns a
+// freshly-constructed box. The moved temp is freed by the callee; the fresh return
+// is freed at the discard site — no leak, no double-free.
+discard_fresh_from_borrow() `test {
+  make_from(get_widget());
   assert(true, "ok");
 }

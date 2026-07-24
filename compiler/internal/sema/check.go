@@ -154,6 +154,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
 			FuncCloneReqs:            make(map[*types.Func][]CloneabilityRequirement),
 			MethodCloneReqs:          make(map[*types.Method][]CloneabilityRequirement),
+
+			StructuralReturnAliasParams: make(map[*types.Func][]bool),
 		},
 	}
 
@@ -244,6 +246,8 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
 			FuncCloneReqs:            make(map[*types.Func][]CloneabilityRequirement),
 			MethodCloneReqs:          make(map[*types.Method][]CloneabilityRequirement),
+
+			StructuralReturnAliasParams: make(map[*types.Func][]bool),
 		},
 	}
 
@@ -418,6 +422,10 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 
 	c.checkBlock(d.Body)
 	c.closeScope()
+
+	// T1305: record the per-parameter structural-return-alias fact now that all
+	// return-expression types are in c.info.Types (after the body has been checked).
+	c.recordStructuralReturnAlias(d, fn, sig)
 
 	// Record generator function if yields were found
 	if c.inGenerator && c.yieldFound {

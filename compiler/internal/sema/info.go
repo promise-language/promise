@@ -167,6 +167,14 @@ type Info struct {
 	// MethodCloneReqs is the per-method analogue of FuncCloneReqs. (T0616)
 	MethodCloneReqs map[*types.Method][]CloneabilityRequirement
 
+	// StructuralReturnAliasParams[fn][i] is true when free function fn (whose
+	// result is a non-value structural interface) may return a value that aliases
+	// parameter i's heap box. Consumed by codegen T1305 to decide whether a
+	// discarded/inline structural return is fresh-owned (safe to drop) or an
+	// alias of a still-owned argument (must not be dropped). Absent for a given
+	// fn ⇒ codegen falls back to the conservative "any heap arg may alias" reject.
+	StructuralReturnAliasParams map[*types.Func][]bool
+
 	// GenericCallEdges records each generic-body call to another generic callee
 	// (when neither caller nor callee is fully concrete). Used by the
 	// cloneability-requirement propagation post-pass. (T0616)

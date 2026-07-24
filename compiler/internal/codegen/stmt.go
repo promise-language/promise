@@ -8289,23 +8289,17 @@ func isIteratorAdapterName(name string) bool {
 	return false
 }
 
-// argMayAliasStructuralReturn reports whether a call argument could be returned
-// as an alias by the callee (e.g. `pass_through(Sink s) Sink { return s; }`, or a
-// container arg whose element/field is returned by view). It is true when the arg
-// (peeling parens) has a heap reference type — a named type that is NOT a value
-// type, NOT copy, and NOT a primitive scalar. Scalars, value types, and copy types
-// carry no heap box for the return to alias, so they can never be the source of an
-// alias-based double-free.
+// argMayAliasStructuralReturn reports whether a call argument carries a heap box
+// that a callee could return by alias (e.g. `pass_through(Sink s) Sink { return
+// s; }`, or a container arg whose element/field is returned by view). It is true
+// when the arg (peeling parens) has a heap reference type — a named type that is
+// NOT a value type, NOT copy, and NOT a primitive scalar. Scalars, value types,
+// and copy types carry no heap box for the return to alias, so they can never be
+// the source of an alias-based double-free.
 //
-// This is deliberately over-approximating: it does NOT restrict to lvalue args.
-// A FRESH heap temp argument (e.g. `pass_through(mk(1))`) is itself temp-tracked
-// for drop at statement end, so if the callee returns it by alias, the outer
-// result and the inner temp are the SAME box — tracking the outer as fresh-owned
-// too would drop it twice (T1294 double-free / segfault). Codegen cannot tell from
-// the call shape whether the callee returns the arg or a fresh construction, so it
-// conservatively treats any heap-typed arg as a possible alias source and declines
-// to track — preferring a leak over a crash. (A precise fix needs sema return-alias
-// analysis; tracked as T1305, which supersedes this heuristic.) T1294.
+// This is the arg-side heap-box predicate. Whether such an arg's box is ACTUALLY
+// a possible alias of the return is decided per-parameter in
+// isFreshOwnedStructuralCall using the sema return-alias fact (T1305). T1294.
 func (c *Compiler) argMayAliasStructuralReturn(a ast.Expr) bool {
 	a = unwrapDestructureParens(a)
 	named := extractNamed(c.resolvedExprType(a))
@@ -8313,6 +8307,33 @@ func (c *Compiler) argMayAliasStructuralReturn(a ast.Expr) bool {
 		return false
 	}
 	return !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named)
+}
+
+// structuralReturnAliasCallee resolves a call's callee to the free-function object
+// it names (or nil for method / non-ident callees), so its sema return-alias fact
+// can be looked up.
+func (c *Compiler) structuralReturnAliasCallee(call *ast.CallExpr) *types.Func {
+	ident, ok := call.Callee.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	fn, _ := c.info.Objects[ident].(*types.Func)
+	return fn
+}
+
+// argsAlignPositionally reports whether a call's arguments line up 1:1 with the
+// signature's parameters — no named args, no variadic, exact arity. Only then can
+// the per-parameter return-alias fact (indexed positionally) be applied safely.
+func argsAlignPositionally(call *ast.CallExpr, sig *types.Signature) bool {
+	if sig.IsVariadic() || len(call.Args) != len(sig.Params()) {
+		return false
+	}
+	for _, a := range call.Args {
+		if a.Name != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // isFreshOwnedStructuralCall reports whether expr is a plain free-function
@@ -8333,13 +8354,18 @@ func (c *Compiler) argMayAliasStructuralReturn(a ast.Expr) bool {
 //     receiver / iter-cleanup already frees.
 //   - return type is not an iterator/generator adapter: excludes free-function
 //     generator returns whose non-standard-RTTI box would be double-dropped.
-//   - no argument is a heap reference the return could alias: excludes both
-//     `pass_through(c)` (returns its param, aliasing the caller's still-owned
-//     local) and `pass_through(mk(1))` (returns its param, aliasing a fresh temp
-//     that is ITSELF temp-tracked — tracking the outer too would double-free the
-//     same box; T1294 segfault). Because codegen cannot tell a returned-arg alias
-//     from a fresh construction, any heap-typed arg conservatively disqualifies the
-//     call — leaking a genuinely-fresh return rather than risking a double-free.
+//   - no argument's heap box can be returned by alias: excludes `pass_through(c)`
+//     (returns its param, aliasing the caller's still-owned local) and
+//     `pass_through(mk(1))` (returns its param, aliasing a fresh temp that is
+//     ITSELF temp-tracked — tracking the outer too would double-free the same box;
+//     T1294 segfault). T1305: per argument, a heap box disqualifies the call ONLY
+//     when the callee's return can actually alias that parameter. The sema fact
+//     StructuralReturnAliasParams[fn][i] answers this; when the args align 1:1 with
+//     the params, an arg is admitted (does not disqualify) when it is consumed by a
+//     move param / call-site `move` (caller relinquished the box), or when the fact
+//     proves the return does not alias parameter i (e.g. an owned index clone
+//     `return v[0]` or a fresh construction `return Widget(...)`). Absent fact or
+//     non-positional args ⇒ conservative reject (a possible leak, never a crash).
 func (c *Compiler) isFreshOwnedStructuralCall(expr ast.Expr, rt types.Type) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -8363,10 +8389,31 @@ func (c *Compiler) isFreshOwnedStructuralCall(expr ast.Expr, rt types.Type) bool
 	if rtNamed := extractNamed(rt); rtNamed != nil && isIteratorAdapterName(rtNamed.Obj().Name()) {
 		return false
 	}
-	for _, a := range call.Args {
-		if c.argMayAliasStructuralReturn(a.Value) {
-			return false
+	var sig *types.Signature
+	var alias []bool
+	var known bool
+	if fn := c.structuralReturnAliasCallee(call); fn != nil {
+		sig, _ = fn.Type().(*types.Signature)
+		alias, known = c.info.StructuralReturnAliasParams[fn]
+	}
+	// A per-parameter fact can be applied only when the args map 1:1 onto the
+	// params (so index i is meaningful) and the fact covers every parameter.
+	positional := known && sig != nil && len(alias) == len(sig.Params()) &&
+		argsAlignPositionally(call, sig)
+	for i, a := range call.Args {
+		if !c.argMayAliasStructuralReturn(a.Value) {
+			continue // no heap box → nothing for the return to alias
 		}
+		if positional {
+			p := sig.Params()[i]
+			if a.Move || p.Ref() == types.RefMut {
+				continue // consumed (move) → caller relinquished this box
+			}
+			if !alias[i] {
+				continue // return provably does not alias this borrowed arg
+			}
+		}
+		return false // conservative: may alias a still-owned box
 	}
 	return true
 }

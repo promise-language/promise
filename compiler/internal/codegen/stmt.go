@@ -1030,6 +1030,25 @@ func (c *Compiler) drainEnumCtorTempsFrom(floor int) {
 	c.enumCtorTemps = c.enumCtorTemps[:floor]
 }
 
+// clearMovedOutEnumCtorTemps neutralizes and untracks the inline enum-ctor temps
+// created while evaluating a move-out RHS (an enum constructor, or a match/if
+// producing the enum) that is bound/assigned/stored by the current statement.
+// The clear is BOUNDED to temps at/above blockTempFloorEnum: inside a block-value
+// arm the floor protects the enclosing call's still-live sibling ctor-arg prefix
+// (T1329) — sweeping it wholesale zeroes the sibling's drop flag (leak, T1338/T1339)
+// and truncates enumCtorTemps below the floor, so the following floor-bounded
+// statement-boundary drain (drainEnumCtorTempsFrom) slices out of range (panic,
+// T1340). Outside a block-value the floor is 0 → unchanged from the old [:0] clear.
+// Caller must have already checked enumCtorTempMovesOut(s.Value) and that
+// len(c.enumCtorTemps) > c.blockTempFloorEnum.
+func (c *Compiler) clearMovedOutEnumCtorTemps() {
+	floor := c.blockTempFloorEnum
+	for i := floor; i < len(c.enumCtorTemps); i++ {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+	}
+	c.enumCtorTemps = c.enumCtorTemps[:floor]
+}
+
 // drainNestedArmEnumCtorTemps drops inline enum-ctor temps created while evaluating
 // a branch-arm result expression that is NOT itself a move-out enum constructor
 // (T1326). Such temps are by-value call arguments the callee only borrows/dups
@@ -1767,11 +1786,9 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// where the by-value enum-ctor ARG temp stays owned here and must fall through
 	// to the statement-boundary drain (a type-based `extractEnum` check would misfire
 	// on the call result and orphan the arg's payload). See enumCtorTempMovesOut.
-	if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
-		for i := range c.enumCtorTemps {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
-		}
-		c.enumCtorTemps = c.enumCtorTemps[:0]
+	// T1340: floor-bounded clear (see clearMovedOutEnumCtorTemps).
+	if len(c.enumCtorTemps) > c.blockTempFloorEnum && c.enumCtorTempMovesOut(s.Value) {
+		c.clearMovedOutEnumCtorTemps()
 	}
 	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
 	// promote remaining heapTemps to scope bindings. Intermediate iterators in
@@ -2188,11 +2205,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// where the by-value enum-ctor ARG temp stays owned here and must fall through
 	// to the statement-boundary drain (a type-based `extractEnum` check would misfire
 	// on the call result and orphan the arg's payload). See enumCtorTempMovesOut.
-	if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
-		for i := range c.enumCtorTemps {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
-		}
-		c.enumCtorTemps = c.enumCtorTemps[:0]
+	// T1340: floor-bounded clear (see clearMovedOutEnumCtorTemps).
+	if len(c.enumCtorTemps) > c.blockTempFloorEnum && c.enumCtorTempMovesOut(s.Value) {
+		c.clearMovedOutEnumCtorTemps()
 	}
 	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
 	// promote remaining heapTemps to scope bindings so intermediate iterators in
@@ -9454,11 +9469,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// `extractEnum` check would misfire on the call result and orphan the arg's
 			// payload). Without the clear on a genuine move-out, the ctor temp drop fires
 			// at statement end and double-frees variant data the variable now owns.
-			if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
-				for i := range c.enumCtorTemps {
-					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
-				}
-				c.enumCtorTemps = c.enumCtorTemps[:0]
+			// T1340: floor-bounded clear (see clearMovedOutEnumCtorTemps).
+			if len(c.enumCtorTemps) > c.blockTempFloorEnum && c.enumCtorTempMovesOut(s.Value) {
+				c.clearMovedOutEnumCtorTemps()
 			}
 			// B0312: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by this variable.
@@ -9833,11 +9846,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// drop fires at statement end and recursively frees the variant's heap payload
 			// the container now owns → use-after-free. Mirrors the var-decl (B0267) and
 			// field-assign (B0269) clears.
-			if len(c.enumCtorTemps) > 0 && c.enumCtorTempMovesOut(s.Value) {
-				for i := range c.enumCtorTemps {
-					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
-				}
-				c.enumCtorTemps = c.enumCtorTemps[:0]
+			// T1340: floor-bounded clear (see clearMovedOutEnumCtorTemps).
+			if len(c.enumCtorTemps) > c.blockTempFloorEnum && c.enumCtorTempMovesOut(s.Value) {
+				c.clearMovedOutEnumCtorTemps()
 			}
 			// B0309: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by the container.

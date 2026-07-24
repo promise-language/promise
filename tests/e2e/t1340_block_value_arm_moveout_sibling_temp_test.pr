@@ -1,0 +1,123 @@
+// T1340: A block-value arm (an `if`/`match` used as a call argument) whose LEADING
+// statement is a var-decl / assignment / container store binding a MOVED-OUT enum
+// constructor, while a sibling by-value enum-ctor arg temp of the ENCLOSING call is
+// still live, panicked codegen with `slice bounds out of range`.
+//
+// genBlockValue raises blockTempFloorEnum on arm entry to protect the enclosing call's
+// sibling ctor-arg prefix. The four move-out clear sites (var-decl, `:=`, assignment,
+// container store) did an UNBOUNDED `enumCtorTemps[:0]` clear, which zeroed the
+// sibling's drop flag (leak) AND truncated below the floor, so the following
+// floor-bounded statement-boundary drain sliced out of range (compiler panic). The fix
+// bounds each clear to temps at/above the floor, leaving the sibling prefix intact.
+//
+// Same wholesale-clear family as T1326 (branch-arm tail), T1338 (nested-in-ctor-arg
+// leak), and T1339 (`return`/`raise` divergence leak). `"hi".to_upper()` forces a heap
+// string (a bare literal would be .rodata and hide the leak). All tests run under leak
+// enforcement.
+enum Payload {
+  Full(string s), Empty,
+}
+
+// combine borrows p and returns the payload length; the by-value ctor passed as its
+// 1st argument is a live sibling temp while the 2nd argument (a block-value arm) is
+// still being evaluated.
+combine(Payload p, int k) int {
+  match p {
+    Payload.Full(s) => {
+      return s.len;
+    },
+    Payload.Empty => {
+      return 0;
+    },
+  }
+}
+
+// `:=` form (genInferredVarDecl) — the exact site that panics in the item repro. The
+// arm's leading statement moves a fresh ctor into `r`; the enclosing call's sibling
+// Full("hi") temp must survive the floor-bounded clear and be dropped exactly once.
+direct_infer(bool c) int {
+  q := combine(Payload.Full("hi".to_upper()), if c {
+    r := Payload.Full("zz".to_upper());
+    combine(r, 0)
+  } else {
+    0
+  });
+  return q;
+}
+
+// Typed var-decl form (`Payload r = ...`, the genTypedVarDecl move-out clear site).
+// Distinct code site from the `:=` inferred form above — same floor-bounded clear.
+direct_typed(bool c) int {
+  q := combine(Payload.Full("hi".to_upper()), if c {
+    Payload r = Payload.Full("zz".to_upper());
+    combine(r, 0)
+  } else {
+    0
+  });
+  return q;
+}
+
+// `=` assignment form (the assignment move-out clear site).
+direct_assign(bool c) int {
+  q := 0;
+  q = combine(Payload.Full("hi".to_upper()), if c {
+    r := Payload.Empty;
+    r = Payload.Full("zz".to_upper());
+    combine(r, 0)
+  } else {
+    0
+  });
+  return q;
+}
+
+// Container-element store form (`v[i] = ctor`, the container move-out clear site).
+direct_container(bool c) int {
+  q := combine(Payload.Full("hi".to_upper()), if c {
+    v := [Payload.Empty];
+    v[0] = Payload.Full("zz".to_upper());
+    combine(v[0], 0)
+  } else {
+    0
+  });
+  return q;
+}
+
+// `match` (rather than `if`) block-value arm variant of the `:=` form.
+direct_match(bool c) int {
+  q := combine(Payload.Full("hi".to_upper()), match c {
+    true => {
+      r := Payload.Full("zz".to_upper());
+      combine(r, 0)
+    },
+    _ => 0,
+  });
+  return q;
+}
+
+// combine's return is `Payload.Full("hi").len` == 2 regardless of the 2nd (k) arg, so
+// every form returns 2 on both the taken and untaken arm. The point is no panic and no
+// leak of the sibling Full("hi") temp on either path.
+t1340_block_value_moveout_infer() `test {
+  assert(direct_infer(true) == 2, "infer form, arm taken");
+  assert(direct_infer(false) == 2, "infer form, arm not taken");
+}
+
+t1340_block_value_moveout_typed() `test {
+  assert(direct_typed(true) == 2, "typed var-decl form, arm taken");
+  assert(direct_typed(false) == 2, "typed var-decl form, arm not taken");
+}
+
+t1340_block_value_moveout_assign() `test {
+  assert(direct_assign(true) == 2, "assign form, arm taken");
+  assert(direct_assign(false) == 2, "assign form, arm not taken");
+}
+
+t1340_block_value_moveout_container() `test {
+  assert(direct_container(true) == 2, "container form, arm taken");
+  assert(direct_container(false) == 2, "container form, arm not taken");
+}
+
+t1340_block_value_moveout_match() `test {
+  assert(direct_match(true) == 2, "match form, arm taken");
+  assert(direct_match(false) == 2, "match form, arm not taken");
+}

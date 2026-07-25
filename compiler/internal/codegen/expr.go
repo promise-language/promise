@@ -10636,19 +10636,43 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	}
 	c.block = mergeBlock
 
-	// Build the phi from whichever branches reach mergeBlock with a value. One
-	// arm may diverge (end in return/raise), leaving only the other to contribute
-	// its value — mirror genIfStmtValue / buildMatchPhi's single-incoming handling
-	// rather than requiring both arms and returning nil (T1330).
-	var incomings []*ir.Incoming
+	// Build the phi from whichever branches reach mergeBlock. One arm may diverge
+	// (end in return/raise), leaving only the other to contribute its value —
+	// mirror genIfStmtValue / buildMatchPhi's single-incoming handling rather than
+	// requiring both arms and returning nil (T1330).
+	//
+	// T1336: in statement / no-hint position one arm may yield a value while the
+	// other is a reachable void arm (`if b { 1 } else {}`). Both arms branch to
+	// mergeBlock, so a phi built from only the value arm has fewer incomings than
+	// mergeBlock has predecessors → malformed IR ("PHINode should have one entry
+	// for each predecessor"). Mirror buildMatchPhi: every predecessor that branches
+	// to mergeBlock must contribute an incoming, zero-filling a reachable void arm
+	// with the value arm's type. The merged value is discarded in statement position
+	// and typed as the value arm's type in a bare `:=` (sema's joinBranchTypes
+	// returns the value arm's type), matching how `match` lowers the same shape.
+	var valType irtypes.Type
 	if thenVal != nil {
-		if br, ok := thenEnd.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
-			incomings = append(incomings, &ir.Incoming{X: thenVal, Pred: thenEnd})
+		valType = thenVal.Type()
+	} else if elseVal != nil {
+		valType = elseVal.Type()
+	}
+	var incomings []*ir.Incoming
+	if thenEnd.Term != nil && isBrTo(thenEnd.Term, mergeBlock) {
+		v := thenVal
+		if v == nil && valType != nil {
+			v = constant.NewZeroInitializer(valType)
+		}
+		if v != nil {
+			incomings = append(incomings, &ir.Incoming{X: v, Pred: thenEnd})
 		}
 	}
-	if elseVal != nil {
-		if br, ok := elseEnd.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
-			incomings = append(incomings, &ir.Incoming{X: elseVal, Pred: elseEnd})
+	if elseEnd.Term != nil && isBrTo(elseEnd.Term, mergeBlock) {
+		v := elseVal
+		if v == nil && valType != nil {
+			v = constant.NewZeroInitializer(valType)
+		}
+		if v != nil {
+			incomings = append(incomings, &ir.Incoming{X: v, Pred: elseEnd})
 		}
 	}
 	if len(incomings) > 0 {

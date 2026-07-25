@@ -1,0 +1,99 @@
+// T1336: a statement / no-hint `if`-expression with one value-producing arm and
+// one reachable void arm (`if b { 1 } else {}`) previously built a phi with an
+// incoming only from the value arm, leaving mergeBlock's void-arm predecessor
+// without an entry → malformed IR ("PHINode should have one entry for each
+// predecessor of its parent basic block!"), rejected by `opt`. Every function
+// below compiles through `opt` and so fails on malformed IR. This is the real
+// well-formedness guard (the Go codegen tests only document the phi shape).
+//
+// The all-void statement `if`/`match` used for effect must stay legal (no
+// value hint), so the T1335 sema gate deliberately does not fire here — the
+// fix is purely codegen zero-filling the reachable void arm.
+// Bare-statement `if b { 1 } else {}` used for effect — value discarded.
+bare_stmt(bool b) {
+  if b {
+    1
+  } else {
+  };
+}
+
+// Inferred `:=` decl — no expected-type hint. Value bound but unused.
+inferred_decl(bool b) {
+  r := if b {
+    1
+  } else {
+  };
+}
+
+// Symmetric void-then arm: `if b {} else { 2 }`.
+void_then(bool b) {
+  if b {
+  } else {
+    2
+  };
+}
+
+// The `match` statement-position analog lowers identically.
+match_stmt(bool b) {
+  match b {
+    true => {
+      1
+    }, _ => {
+    },
+  };
+}
+
+// Owned-string value arm in statement position — the discarded phi must be
+// registered as a statement temp (trackMergeResultTemp) and freed exactly once.
+// Repo is zero-leak, so any double/missing free surfaces as a LEAK outcome.
+owned_bare(bool b) {
+  if b {
+    "owned"
+  } else {
+  };
+}
+
+owned_inferred(bool b) {
+  r := if b {
+    "owned2"
+  } else {
+  };
+}
+
+// Symmetric owned shape: void THEN arm, owned string in the ELSE arm. The void
+// arm's phi incoming is zero-filled (null i8*); the else arm supplies the owned
+// string, which must be freed exactly once.
+owned_void_then(bool b) {
+  if b {
+  } else {
+    "owned3"
+  };
+}
+
+owned_void_then_inferred(bool b) {
+  r := if b {
+  } else {
+    "owned4"
+  };
+}
+
+test_if_void_arm_statement() `test {
+  // Both boolean values for every shape, so each predecessor edge is taken.
+  bare_stmt(true);
+  bare_stmt(false);
+  inferred_decl(true);
+  inferred_decl(false);
+  void_then(true);
+  void_then(false);
+  match_stmt(true);
+  match_stmt(false);
+  owned_bare(true);
+  owned_bare(false);
+  owned_inferred(true);
+  owned_inferred(false);
+  owned_void_then(true);
+  owned_void_then(false);
+  owned_void_then_inferred(true);
+  owned_void_then_inferred(false);
+  assert(true, "compiled and ran without malformed IR or leaks");
+}

@@ -12621,6 +12621,28 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 		}
 	}
 
+	// T1341: Optional[structural-interface] element read from a fixed array
+	// (`Showable? g = a[0]`). The {vtable, instance} view boxes a heap instance;
+	// isDroppableHeapUserType / isHeapUserNoDropPalFree both exclude structural, so
+	// the branch above skips it and the read aliases the array's box. But the local's
+	// optional drop binding (bindingDropOptional rttiDrop) AND the array's element
+	// drop both free that box via __promise_structural_drop → double-free. Deep-clone
+	// the box on read via dupOptionalVectorElem (whose structural case clones only on
+	// the present path, so a `none` element isn't clone-dispatched on a null instance).
+	// Mirrors the genVectorIndex T1291 branch.
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
+		if opt, ok := elemType.(*types.Optional); ok {
+			inner := opt.Elem()
+			if c.typeSubst != nil {
+				inner = types.Substitute(inner, c.typeSubst)
+			}
+			if isNonValueStructuralType(inner) {
+				c.dupHeapUserFieldAccess = false // consume the flag
+				return c.dupOptionalVectorElem(val, opt, inner)
+			}
+		}
+	}
+
 	// Container element: Vector / Channel / Arc / Weak (T0383 analogue)
 	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
 		// T1266: a fixed-array element that is itself a value-copying container transitively

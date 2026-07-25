@@ -121,3 +121,162 @@ test_optional_fixed_array_element_all_none() `test {
   int[2]?[2] a = [none, none];
   assert(a[0] is absent && a[1] is absent, "both absent");
 }
+
+// T1341: reading an Optional[structural-interface] element out of a fixed array
+// (`Showable? g = a[0]`) must deep-clone the {vtable, instance} box on read.
+// Pre-fix genArrayIndex had no dup-on-read branch for Optional[structural], so the
+// extracted optional aliased the array's box and both the extracted local's owning
+// drop and the array's element drop freed it via __promise_structural_drop -> a
+// double free (segfault at 0x…08). Mirrors the T1291 vector fix. Leak-checked.
+type Showable `structural {
+  tag() string `abstract;
+}
+type Widget {
+  int id;
+  tag() string {
+    return "w";
+  }
+}
+
+// (7) Exact repro — extract present optional-structural element, check presence.
+test_fixed_array_optional_structural_read() `test {
+  Showable?[2] a = [Widget(id: 1), Widget(id: 2)];
+  Showable? g = a[0];
+  assert(g is present, "present");
+}
+
+// (8) Method call through the extracted optional-structural (force-unwrap dispatch).
+test_fixed_array_optional_structural_method() `test {
+  Showable?[2] a = [Widget(id: 1), Widget(id: 2)];
+  Showable? g = a[1];
+  assert(g!.tag() == "w", "tag via extracted optional");
+}
+
+// (9) Both slots read into separate independent-owning locals.
+test_fixed_array_optional_structural_both_slots() `test {
+  Showable?[2] a = [Widget(id: 3), Widget(id: 4)];
+  Showable? g0 = a[0];
+  Showable? g1 = a[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is present, "slot 1 present");
+  assert(g0!.tag() == "w", "slot 0 tag");
+  assert(g1!.tag() == "w", "slot 1 tag");
+}
+
+// (10) Same slot read twice — each local must own an independent clone.
+test_fixed_array_optional_structural_double_read() `test {
+  Showable?[2] a = [Widget(id: 5), Widget(id: 6)];
+  Showable? g0 = a[0];
+  Showable? g1 = a[0];
+  assert(g0 is present, "first read present");
+  assert(g1 is present, "second read present");
+  assert(g0!.tag() == "w", "first read tag");
+  assert(g1!.tag() == "w", "second read tag");
+}
+
+// (11) `none` element — the present slot clones on read; the absent slot must NOT
+// clone-dispatch on a null instance (dupOptionalVectorElem gates on the present path).
+test_fixed_array_optional_structural_with_none() `test {
+  Showable?[2] a = [Widget(id: 7), none];
+  Showable? g0 = a[0];
+  Showable? g1 = a[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g0!.tag() == "w", "slot 0 tag");
+}
+
+// (12) Unbound temporary use — `a[0]!.tag()` with no local binding.
+test_fixed_array_optional_structural_temp() `test {
+  Showable?[2] a = [Widget(id: 8), Widget(id: 9)];
+  assert(a[0]!.tag() == "w", "temp slot 0 tag");
+  assert(a[1]!.tag() == "w", "temp slot 1 tag");
+}
+
+// (13) Inferred binding (`g := a[0]`) — distinct flag-setting site from the typed
+// declaration, same genArrayIndex clone-on-read consuming branch.
+test_fixed_array_optional_structural_inferred() `test {
+  Showable?[2] a = [Widget(id: 10), Widget(id: 11)];
+  g := a[0];
+  assert(g is present, "inferred present");
+  assert(g!.tag() == "w", "inferred tag");
+}
+
+// A second concrete implementer, and one carrying a heap (string) field so the
+// deep clone must copy owned payload — a shallow alias would double-free BOTH the
+// structural box AND the inner string.
+type Gadget {
+  int n;
+  tag() string {
+    return "g";
+  }
+}
+type Labeled {
+  string name;
+  tag() string {
+    return this.name;
+  }
+}
+
+// (14) Generic function reads an `Optional[T]` element out of a fixed array where
+// T is a structural interface — the array-index read happens with `c.typeSubst`
+// active, so `elemType`'s inner is a TypeParam substituted to `Showable` before
+// the `isNonValueStructuralType` gate. Exercises the monomorphization path of the
+// T1341 clone-on-read (concrete tests never set `c.typeSubst`).
+_read_first_optional[T](T?[2] move a) T? {
+  return a[0];
+}
+
+test_fixed_array_optional_structural_generic() `test {
+  Showable?[2] a = [Widget(id: 12), Widget(id: 13)];
+  Showable? g = _read_first_optional[Showable](move a);
+  assert(g is present, "generic read present");
+  assert(g!.tag() == "w", "generic read tag");
+}
+
+// (15) Two distinct concrete implementers in one array — each element's clone must
+// dispatch through its own vtable/clone_fn (polymorphic __promise_structural_clone),
+// not a single fixed concrete type.
+test_fixed_array_optional_structural_mixed_types() `test {
+  Showable?[2] a = [Widget(id: 14), Gadget(n: 15)];
+  Showable? g0 = a[0];
+  Showable? g1 = a[1];
+  assert(g0!.tag() == "w", "widget tag");
+  assert(g1!.tag() == "g", "gadget tag");
+}
+
+// (16) Structural box whose concrete type carries a heap (string) field — the deep
+// clone must copy the owned string so neither the extracted optional's drop nor the
+// array's element drop double-frees the string payload (leak/double-free checked).
+test_fixed_array_optional_structural_heap_field() `test {
+  Showable?[2] a = [Labeled(name: "alpha"), Labeled(name: "beta")];
+  Showable? g0 = a[0];
+  Showable? g1 = a[1];
+  assert(g0!.tag() == "alpha", "labeled slot 0 tag");
+  assert(g1!.tag() == "beta", "labeled slot 1 tag");
+}
+
+// (17) Reassignment to an already-declared optional-structural local — a distinct
+// assignment-site flag path from the typed/inferred declarations above. The old
+// box held by `g` must be dropped and the new read must clone independently, so
+// neither the overwritten value nor the array's element drop double-frees.
+test_fixed_array_optional_structural_reassign() `test {
+  Showable?[2] a = [Widget(id: 16), Widget(id: 17)];
+  Showable? g = a[0];
+  assert(g!.tag() == "w", "before reassign");
+  g = a[1];
+  assert(g!.tag() == "w", "after reassign");
+}
+
+// (18) Read with a runtime (loop-variable) index rather than a constant literal —
+// the clone-on-read fires inside the loop body once per iteration; each iteration's
+// local must own an independent box freed at the loop-body scope exit.
+test_fixed_array_optional_structural_loop_index() `test {
+  Showable?[2] a = [Widget(id: 18), Widget(id: 19)];
+  int seen = 0;
+  for i in 0..2 {
+    Showable? g = a[i];
+    assert(g is present, "loop slot present");
+    seen = seen + 1;
+  }
+  assert(seen == 2, "saw both slots");
+}

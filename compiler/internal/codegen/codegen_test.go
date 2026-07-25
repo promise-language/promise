@@ -9670,6 +9670,58 @@ func TestVectorOptionalStructuralElementReadDupsBox(t *testing.T) {
 	assertContains(t, ir, "call i8* @__promise_structural_clone")
 }
 
+func TestT1341_FixedArrayOptionalStructuralClone(t *testing.T) {
+	// T1341: reading an Optional[structural-interface] element out of a fixed-size
+	// array (`Showable? g = a[0]`) must deep-clone the {vtable, instance} box on
+	// read. Pre-fix genArrayIndex had no dup-on-read branch for Optional[structural],
+	// so the extracted optional aliased the array's box and both its owning drop and
+	// the array's element drop freed it via __promise_structural_drop -> double free.
+	// Mirrors the genVectorIndex T1291 branch.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			tag() string `+"`"+`abstract;
+		}
+		type Widget {
+			int id;
+			tag() string { return "w"; }
+		}
+		main() {
+			Showable?[2] a = [Widget(id: 1), Widget(id: 2)];
+			Showable? g = a[0];
+		}
+	`)
+	// The fixed-array index read deep-clones the boxed instance rather than aliasing it.
+	assertContains(t, ir, "call i8* @__promise_structural_clone")
+}
+
+func TestT1341_FixedArrayOptionalStructuralCloneGeneric(t *testing.T) {
+	// T1341, monomorphization path: the array-index read happens inside a generic
+	// body (`_read_first[T](T?[2]) T?`) where the element's inner type is a TypeParam.
+	// The clone-on-read branch must substitute (c.typeSubst) the inner to the concrete
+	// structural type before the isNonValueStructuralType gate — otherwise the mono'd
+	// body aliases the array's box and double-frees it. The concrete test above never
+	// sets c.typeSubst; this one exercises that substitution branch, emitting the
+	// structural clone INSIDE the specialized `_read_first[Showable]` function.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			tag() string `+"`"+`abstract;
+		}
+		type Widget {
+			int id;
+			tag() string { return "w"; }
+		}
+		_read_first[T](T?[2] move a) T? {
+			return a[0];
+		}
+		main() {
+			Showable?[2] a = [Widget(id: 1), Widget(id: 2)];
+			Showable? g = _read_first[Showable](move a);
+		}
+	`)
+	assertContains(t, ir, `define { i1, { i8*, i8* } } @"_read_first[Showable]"`)
+	assertContains(t, ir, "call i8* @__promise_structural_clone")
+}
+
 func TestPrimitiveToFailableStructuralView(t *testing.T) {
 	// Primitive method is non-failable, interface method is failable
 	// → adapter wraps result as success

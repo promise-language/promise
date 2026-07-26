@@ -273,6 +273,24 @@ func (c *Checker) rejectStoredGenerator(pos ast.Pos, valType types.Type) bool {
 	return false
 }
 
+// rejectGeneratorIterCall rejects `<generator>.iter()` — calling iter() on a
+// `stream[T]` value. A generator value is a raw coroutine {handle, slot}, not a
+// structural {vtable, instance} box; codegen's virtual dispatch misreads the
+// handle as a vtable pointer and segfaults (T1350). A generator's iterator is
+// not a first-class value (deferred: B0024) — consume the generator inline with
+// for-in or yield*. Mirrors rejectStoredGenerator (T1313) / the stream-param
+// reject (T1314). recvType is the receiver expression's type.
+func (c *Checker) rejectGeneratorIterCall(pos ast.Pos, recvType types.Type) bool {
+	if recvType == nil {
+		return false
+	}
+	if _, ok := types.AsStream(recvType); ok {
+		c.errorf(pos, "cannot call `.iter()` on a generator value; consume the generator directly with a for-in loop (`for x in <generator> { ... }`) or delegate with `yield *`")
+		return true
+	}
+	return false
+}
+
 func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	errsBefore := len(c.errors)
 	valType := c.checkExpr(s.Value)

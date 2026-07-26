@@ -1245,5 +1245,21 @@ test_t1315_collect_generator_into_vector() `test {
   assert(collected[3] == 3, "last is 3");
 }
 
+// T1350: calling `.iter()` on a generator value (`gen(n).iter().collect()`,
+// `Iterator[int] it = gen(n).iter()`) compiled but segfaulted at runtime — the
+// raw coroutine {handle, slot} was misdispatched through virtual dispatch as a
+// structural box. That call is now rejected in sema (see
+// compiler/internal/sema/t1350_test.go). The intended replacement — consume the
+// generator inline with for-in, collecting into a vector — must still work and
+// not leak (T0067).
+test_t1350_collect_via_for_in() `test {
+  int[] r = [];
+  for x in count_to(3) {
+    r.push(x);
+  }
+  assert(r.len == 3, "collected 3 values");
+  assert(r[0] == 0 && r[2] == 2, "values 0,1,2");
+}
+
 main() {
 }

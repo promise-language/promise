@@ -1385,6 +1385,17 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		return nil
 	}
 
+	// T1350: `.iter()` on a generator (`stream[T]`) value segfaults in codegen
+	// (the raw coroutine {handle, slot} is misdispatched through virtual dispatch
+	// as a structural {vtable, instance} box). Reject here; the crashing
+	// virtual-dispatch path then becomes unreachable for valid programs. Mirrors
+	// rejectStoredGenerator (T1313) / the stream-param reject (T1314).
+	if mem, ok := e.Callee.(*ast.MemberExpr); ok && mem.Field == "iter" && sig.Recv() != nil {
+		if c.rejectGeneratorIterCall(e.Pos(), c.info.Types[mem.Target]) {
+			return nil
+		}
+	}
+
 	// Build call description for error messages.
 	callDesc := "function"
 	if ident, ok := e.Callee.(*ast.IdentExpr); ok {

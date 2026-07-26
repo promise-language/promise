@@ -76,52 +76,111 @@ type Request `public `doc("An HTTP request.") {
     u8[] req_data = buf.to_string().bytes();
     _write_all(stream, req_data)?^;
 
-    // Read entire response (Connection: close — server closes after response)
+    // Read the response in two phases — headers first (until \r\n\r\n), then
+    // the body framed by Content-Length. Mirrors _read_request's two-phase read.
+    // Reading exactly Content-Length bytes (proper HTTP/1.1 framing) rather than
+    // blocking to EOF returns as soon as the message is complete and does not
+    // fold any trailing bytes into the body. Falls back to read-to-EOF only when
+    // there is no length and no chunked encoding (HTTP/1.0-style close framing).
     u8[] raw = u8[]();
     u8[] read_buf = u8[].filled(0, 4096);
-    bool reading = true;
-    while reading {
+
+    // Phase 1: read until the header terminator (\r\n\r\n = bytes 13,10,13,10).
+    int header_end = -1;
+    while header_end < 0 {
       int n = stream.read(read_buf)?^;
       if n == 0 {
-        reading = false;
-      } else {
-        int i = 0;
-        while i < n {
-          raw.push(read_buf[i]);
-          i = i + 1;
-        }
-      }
-    }
-
-    // Find header/body boundary (\r\n\r\n = bytes 13,10,13,10)
-    int sep = -1;
-    int scan = 0;
-    while scan + 3 < raw.len {
-      if raw[scan] == 13 && raw[scan + 1] == 10 && raw[scan + 2] == 13 && raw[scan + 3] == 10 {
-        sep = scan;
         break;
       }
-      scan = scan + 1;
+      int i = 0;
+      while i < n {
+        raw.push(read_buf[i]);
+        i = i + 1;
+      }
+      // Scan only the newly appended region (plus 3-byte overlap).
+      int scan = raw.len - n;
+      if scan > 3 {
+        scan = scan - 3;
+      }
+      if scan < 0 {
+        scan = 0;
+      }
+      while scan + 3 < raw.len {
+        if raw[scan] == 13 && raw[scan + 1] == 10 && raw[scan + 2] == 13 && raw[scan + 3] == 10 {
+          header_end = scan;
+          break;
+        }
+        scan = scan + 1;
+      }
     }
-    if sep < 0 {
+    if header_end < 0 {
       raise HttpError(code: 0, message: "malformed HTTP response: missing header terminator");
     }
 
-    string header_text = string.from_bytes(raw[0:sep]);
-    u8[] body_data = raw[sep + 4:raw.len];
+    string header_text = string.from_bytes(raw[0:header_end]);
 
     // Parse status and headers (single use of header_text)
     _ParsedResponse pr = _parse_response(header_text)?^;
 
-    // Decode chunked transfer encoding if needed
+    // Determine body framing from the parsed headers.
     bool chunked = false;
     for k, v in pr.headers {
       if k == "transfer-encoding" && v.contains("chunked") {
         chunked = true;
       }
     }
-    if chunked {
-      body_data = _decode_chunked(body_data);
+    bool has_length = false;
+    int content_length = 0;
+    if cl := pr.headers["content-length"] {
+      has_length = true;
+      content_length = _parse_decimal(cl);
+    }
+
+    // Phase 2: read the body according to its framing.
+    int body_start = header_end + 4;
+    u8[] body_data = u8[]();
+    if has_length && !chunked {
+      // Content-Length framing (the Promise server always sends a length):
+      // read exactly the declared body length, then stop — do NOT wait for EOF.
+      int body_have = raw.len - body_start;
+      while body_have < content_length {
+        int n = stream.read(read_buf)?^;
+        if n == 0 {
+          break;
+        }
+        int i = 0;
+        while i < n {
+          raw.push(read_buf[i]);
+          i = i + 1;
+        }
+        body_have = raw.len - body_start;
+      }
+      int end = body_start + content_length;
+      if end > raw.len {
+        end = raw.len;
+      }
+      body_data = raw[body_start: end];
+    } else {
+      // Chunked (external servers only) or no length (HTTP/1.0-style): read
+      // to EOF — Connection: close terminates the stream.
+      bool reading = true;
+      while reading {
+        int n = stream.read(read_buf)?^;
+        if n == 0 {
+          reading = false;
+        } else {
+          int i = 0;
+          while i < n {
+            raw.push(read_buf[i]);
+            i = i + 1;
+          }
+        }
+      }
+      if chunked {
+        body_data = _decode_chunked(raw[body_start: raw.len]);
+      } else {
+        body_data = raw[body_start: raw.len];
+      }
     }
 
     string body_str = string.from_bytes(body_data);

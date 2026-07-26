@@ -504,3 +504,32 @@ test_decode_chunked_empty_size_after_extension() `test(exclude: wasm) {
   u8[] result = _decode_chunked(data);
   assert(result.len == 0, "no data decoded when size is empty after stripping extension");
 }
+
+// Content-Length framing: the client must read exactly Content-Length body
+// bytes and stop, NOT block to EOF. This server sends a valid Content-Length: 5
+// response followed by extra trailing bytes and keeps the socket open before
+// closing. A read-to-EOF client would fold "TRAILING-JUNK" into the body (and
+// block until close); a length-aware client returns "hello" immediately.
+test_client_stops_at_content_length() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status == 200, "status 200");
+    assert(resp.body == "hello", "body is exactly Content-Length bytes");
+    assert(resp.body.len == 5, "trailing bytes excluded from body");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] buf = u8[].filled(0, 8192);
+  conn.read(buf)?!;
+  // Valid 5-byte body, then extra trailing bytes the client must ignore. Keep
+  // the socket open briefly to prove the client returns without waiting for EOF.
+  u8[] resp_data = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhelloTRAILING-JUNK".bytes();
+  _write_all(conn, resp_data)?!;
+  sleep(Duration.from_millis(50));
+  conn.close()?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(50));
+}

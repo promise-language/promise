@@ -592,6 +592,10 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 	c.checkBlock(md.Body)
 	c.closeScope()
 
+	// T1349: now that lambda captures are recorded, flag whether the body returns
+	// a value that holds the receiver via a captured-`this` lambda.
+	c.recordReturnHoldsReceiver(m.Sig(), md.Body)
+
 	// Record generator method if yields were found
 	if c.inGenerator && c.yieldFound {
 		c.info.GeneratorFuncs[md] = &GeneratorInfo{ElemType: c.generatorElemType, CanError: m.Sig().CanError()}

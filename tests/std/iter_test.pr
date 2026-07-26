@@ -1503,3 +1503,41 @@ test_t1344_zip_moved_user_drop_no_leak() `test {
 
 main() {
 }
+
+// --- T1349: iterators borrowing an outer-scope source are safe when the source
+// outlives the iterator (in-scope consumption / collect-before-return). The
+// dangling-escape shapes (`return local.iter()`) are rejected at compile time;
+// these positive cases must keep compiling and running leak-free. ---
+
+test_t1349_iter_local_collect_in_scope() `test {
+  int[] local = [1, 2, 3, 4];
+  int[] doubled = local.iter().map[int](|int n| -> int {
+    return n * 2;
+  }).collect();
+  assert(doubled.len == 4, "collect len");
+  assert(doubled[0] == 2, "first doubled");
+  assert(doubled[3] == 8, "last doubled");
+}
+
+test_t1349_iter_bound_then_consumed() `test {
+  int[] local = [10, 20, 30];
+  Iterator[int] it = local.iter();
+  int total = it.fold[int](0, |int acc, int x| -> int {
+    return acc + x;
+  });
+  assert(total == 60, "fold sum");
+}
+
+// Collecting an owned Vector before returning breaks the borrow chain — safe.
+build_owned_from_local() int[] {
+  int[] local = [5, 6, 7];
+  return local.iter().map[int](|int n| -> int {
+    return n + 1;
+  }).collect();
+}
+
+test_t1349_collect_before_return() `test {
+  int[] r = build_owned_from_local();
+  assert(r.len == 3, "owned len");
+  assert(r[0] == 6, "owned first");
+}

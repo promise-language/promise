@@ -85,6 +85,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 			c.tryMove(s.Value)
 			c.tryMoveCastSubject(s.Value) // T0783
 			c.checkReturnRefSafety(s)
+			c.checkReturnBorrowsLocal(s) // T1349
 		}
 
 	case *ast.RaiseStmt:
@@ -241,6 +242,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
+		c.recordIterBorrowTaint(s.Name, s.Value)                   // T1349
 		c.recordWrapCoercedBorrowedHandle(s.Name, s.Value, s.Type) // T1212
 		c.promoteCallBorrows(s.Name, s.Value)
 		if typ := c.info.Types[s.Value]; typ != nil {
@@ -576,6 +578,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	c.tryMove(s.Value)
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
+		c.recordIterBorrowTaint(s.Name, s.Value) // T1349
 		c.promoteCallBorrows(s.Name, s.Value)
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
@@ -941,6 +944,8 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 					c.state[ident.Name] = Owned
 				}
 			}
+			// T1349: track (or clear) iterator-borrows-local taint on reassignment.
+			c.recordIterBorrowTaint(ident.Name, s.Value)
 			// T1212: reassigning the local clears any stale wrap-coerced-handle
 			// provenance — the old borrowed-inner alias is dropped (sound), and the
 			// new value governs safety on its own. An unsafe borrowed wrap-coerce
@@ -1075,6 +1080,103 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 	}
 	if _, exists := c.returnOrigins[origin]; !exists {
 		c.returnOrigins[origin] = s.Pos()
+	}
+}
+
+// methodReceiverExpr returns the receiver expression of a method-call callee,
+// unwrapping the IndexExpr layer that a generic call (`x.map[int](…)`) wraps the
+// MemberExpr in. Returns nil for a non-method callee.
+func methodReceiverExpr(callee ast.Expr) ast.Expr {
+	switch e := callee.(type) {
+	case *ast.MemberExpr:
+		return e.Target
+	case *ast.IndexExpr:
+		return methodReceiverExpr(e.Target)
+	}
+	return nil
+}
+
+// taintOrigin returns the name of the local variable whose borrow `expr`
+// transitively carries via a returned iterator, or "" if none (T1349).
+//
+// The definition-side flag Signature.ReturnHoldsReceiver marks a method whose
+// returned value holds its receiver through a captured-`this` lambda — every
+// `Iterator` builder: `Vector.iter()` (receiver is a borrow → the result borrows
+// the receiver root) and the `~this` combinators map/filter/flat_map/… (receiver
+// is moved → the result owns the receiver but carries its taint forward). Terminal
+// methods (collect/fold/count/first) do NOT hold the receiver, so they break the
+// chain and returning their result is safe.
+//
+//   - iter()-style (borrow receiver): if the receiver root is a tracked non-param
+//     local, that local is the seed of a dangling borrow → return it. A `this` or
+//     parameter root defers to the caller (see the documented limitation).
+//   - combinator (move receiver): propagate the taint of the receiver expression.
+//   - a laundered local (`X y = local.iter();`) resolves via iterBorrowOrigin.
+func (c *Checker) taintOrigin(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		sig := c.calleeSignature(e.Callee)
+		if sig == nil || !sig.ReturnHoldsReceiver() {
+			return ""
+		}
+		recv := sig.Recv()
+		recvExpr := methodReceiverExpr(e.Callee)
+		if recv == nil || recvExpr == nil {
+			return ""
+		}
+		if recv.Ref() == types.RefMut {
+			// `~this` combinator — the result owns the moved receiver but carries
+			// its taint. Propagate through the builder chain (`local.iter().map(f)`).
+			return c.taintOrigin(recvExpr)
+		}
+		// Borrow receiver (RefNone/&this): the result borrows the receiver root.
+		// Seed the taint only for a true local — a variable this function drops at
+		// scope exit. A `this` or parameter root is deferred to the caller: the
+		// enclosing method that returns the iterator becomes ReturnHoldsReceiver
+		// itself, so the check re-fires at each of ITS call sites. (Returning an
+		// iterator over a `move`-param source is a genuine but pre-existing gap —
+		// the enclosing free function has no inline-lambda return, so it is not
+		// flagged; the documented helper-function limitation covers this.)
+		root := resolveReturnOrigin(recvExpr)
+		if root == "" || root == "this" || c.params[root] {
+			return ""
+		}
+		if _, tracked := c.state[root]; !tracked {
+			return ""
+		}
+		return root
+	case *ast.IdentExpr:
+		return c.iterBorrowOrigin[e.Name]
+	}
+	return ""
+}
+
+// recordIterBorrowTaint records (or clears) the T1349 iterator-borrows-local taint
+// for a variable binding, so a laundered `X y = local.iter(); return y;` is caught
+// at the eventual escape.
+func (c *Checker) recordIterBorrowTaint(name string, value ast.Expr) {
+	if name == "" || name == "_" || c.iterBorrowOrigin == nil {
+		return
+	}
+	if o := c.taintOrigin(value); o != "" {
+		c.iterBorrowOrigin[name] = o
+	} else {
+		delete(c.iterBorrowOrigin, name) // reassignment clears stale taint
+	}
+}
+
+// checkReturnBorrowsLocal rejects returning an iterator that transitively borrows a
+// local variable dropped at the end of the current scope (T1349). Runs alongside
+// checkReturnRefSafety regardless of the declared return type, and inside lambda
+// bodies (e.g. the inner iterator returned from a flat_map lambda).
+func (c *Checker) checkReturnBorrowsLocal(s *ast.ReturnStmt) {
+	if s.Value == nil {
+		return
+	}
+	if o := c.taintOrigin(s.Value); o != "" {
+		c.errorf(s.Pos(),
+			"cannot return iterator that borrows local '%s'; the iterator holds a borrow of '%s', which is dropped at the end of this scope — call .collect() to materialize an owned value, or build the iterator over a source that outlives it",
+			o, o)
 	}
 }
 

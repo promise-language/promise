@@ -141,6 +141,10 @@ func substSignature(sig *Signature, subst map[*TypeParam]Type) *Signature {
 		return sig
 	}
 	newSig := NewSignature(newRecv, newParams, newResult, sig.canError)
+	// T1349: the return-holds-receiver fact is a property of the body shape, not
+	// of the concrete type args — preserve it through monomorphization so the
+	// call-site signature (e.g. Vector[int].iter()) still carries it.
+	newSig.returnHoldsReceiver = sig.returnHoldsReceiver
 	// Preserve method-level type params that are NOT being substituted.
 	// When substituting type-level params on a generic method's signature,
 	// the method's own TypeParams must carry through.
@@ -338,7 +342,9 @@ func selfSubstSignature(sig *Signature, iface, concrete *Named) *Signature {
 	if !changed {
 		return sig
 	}
-	return NewSignature(newRecv, newParams, newResult, sig.canError)
+	newSig := NewSignature(newRecv, newParams, newResult, sig.canError)
+	newSig.returnHoldsReceiver = sig.returnHoldsReceiver // T1349
+	return newSig
 }
 
 func typeSliceEq(a, b []Type) bool {

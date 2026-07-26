@@ -57,6 +57,15 @@ type Signature struct {
 	canError       bool         // true if function returns T! (can raise errors)
 	typeParams     []*TypeParam // nil for non-generic functions
 	resultLifetime string       // `lifetime(name) on function — lifetime of the return reference
+
+	// returnHoldsReceiver (T1349) is true when a `return E` in the body returns a
+	// value whose subtree contains a lambda that captures `this` — the
+	// `_FnIter[T](_next: <lambda capturing this>)` shape used by `Vector.iter()`
+	// and every `Iterator` combinator (map/filter/flat_map/…). Combined with the
+	// receiver's ref-kind it lets ownership decide, at each call site, whether the
+	// returned iterator borrows (RefNone/&this) or owns (~this) the receiver — the
+	// basis for rejecting an iterator that borrows a local and escapes its scope.
+	returnHoldsReceiver bool
 }
 
 // NewSignature creates a new function signature.
@@ -90,6 +99,13 @@ func (s *Signature) ResultLifetime() string { return s.resultLifetime }
 
 // SetResultLifetime sets the explicit lifetime name for the return type.
 func (s *Signature) SetResultLifetime(l string) { s.resultLifetime = l }
+
+// ReturnHoldsReceiver reports whether the body returns a value that holds its
+// receiver via a captured-`this` lambda (T1349). See the field comment.
+func (s *Signature) ReturnHoldsReceiver() bool { return s.returnHoldsReceiver }
+
+// SetReturnHoldsReceiver records the T1349 return-holds-receiver fact.
+func (s *Signature) SetReturnHoldsReceiver(v bool) { s.returnHoldsReceiver = v }
 
 func (s *Signature) String() string {
 	var b strings.Builder

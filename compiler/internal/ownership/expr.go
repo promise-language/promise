@@ -2924,6 +2924,12 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	savedSig := c.curSig
 	savedParams := c.params
 	savedReturnOrigins := c.returnOrigins
+	// T1349: the lambda body is a separate return context — give it a fresh
+	// iterator-borrows-local taint map so its inner bindings (e.g. a flat_map
+	// lambda's `inner.iter()`) are tracked against the lambda's own locals and do
+	// not leak taint into (or inherit stale taint from) the enclosing scope.
+	savedIterBorrowOrigin := c.iterBorrowOrigin
+	c.iterBorrowOrigin = make(map[string]string)
 	// T1151: a var-decl inside a lambda body is owned by the closure frame, not
 	// iteration-bounded — reset loop depth so such locals are not flagged even
 	// when the lambda is lexically inside a loop.
@@ -2973,5 +2979,6 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	c.curSig = savedSig
 	c.params = savedParams
 	c.returnOrigins = savedReturnOrigins
+	c.iterBorrowOrigin = savedIterBorrowOrigin // T1349
 	c.loopDepth = savedLoopDepth
 }

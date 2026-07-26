@@ -250,3 +250,52 @@ func TestBuildSubstMapMismatch(t *testing.T) {
 		t.Error("expected nil for mismatched lengths")
 	}
 }
+
+// T1349: the return-holds-receiver flag must survive substitution, so a generic
+// iterator builder's call-site signature (e.g. Vector[int].iter()) still carries
+// it for the ownership escape check.
+func TestSubstPreservesReturnHoldsReceiver(t *testing.T) {
+	tp := makeTP("T", 0)
+	recv := NewParam("this", NewVector(tp), RefNone)
+	sig := NewSignature(recv, nil, NewVector(tp), false)
+	sig.SetReturnHoldsReceiver(true)
+
+	subst := map[*TypeParam]Type{tp: TypInt}
+	result := Substitute(sig, subst)
+	rsig, ok := result.(*Signature)
+	if !ok {
+		t.Fatalf("expected Signature, got %T", result)
+	}
+	if rsig == sig {
+		t.Fatalf("expected a fresh substituted signature (receiver type changed)")
+	}
+	if !rsig.ReturnHoldsReceiver() {
+		t.Errorf("ReturnHoldsReceiver flag lost through Substitute")
+	}
+}
+
+// T1349: the flag must also survive Self-substitution, so a structural default
+// method synthesized onto a concrete type (e.g. an iterator combinator inherited
+// via `is Iterator[T]`) still carries it.
+func TestSelfSubstPreservesReturnHoldsReceiver(t *testing.T) {
+	iface := NewNamed(NewTypeName(Pos{}, "Iterator", nil), nil)
+	concrete := NewNamed(NewTypeName(Pos{}, "Range", nil), nil)
+
+	// Receiver is the interface type; the result references Self (iface) so the
+	// signature genuinely changes under Self-substitution.
+	recv := NewParam("this", iface, RefNone)
+	sig := NewSignature(recv, nil, iface, false)
+	sig.SetReturnHoldsReceiver(true)
+
+	result := SubstituteSelf(sig, iface, concrete)
+	rsig, ok := result.(*Signature)
+	if !ok {
+		t.Fatalf("expected Signature, got %T", result)
+	}
+	if rsig == sig {
+		t.Fatalf("expected a fresh Self-substituted signature")
+	}
+	if !rsig.ReturnHoldsReceiver() {
+		t.Errorf("ReturnHoldsReceiver flag lost through SubstituteSelf")
+	}
+}

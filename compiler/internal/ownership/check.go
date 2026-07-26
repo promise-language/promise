@@ -159,6 +159,13 @@ type Checker struct {
 	// alternative.
 	pendingAliasLocals map[string][]*aliasHandleReuse
 
+	// iterBorrowOrigin (T1349) maps a local variable bound to an iterator that
+	// transitively borrows another local to that borrowed local's name. Populated
+	// at var-decl / assign sites via taintOrigin; consulted at escape sites
+	// (return) so a laundered `X y = local.iter(); return y;` is rejected just like
+	// the direct `return local.iter();`. Reset per function/method body.
+	iterBorrowOrigin map[string]string
+
 	// loopFrames is a stack of per-loop-body frames used to detect loop-back-edge
 	// reuse of an aliased single-owner handle (T1255). A candidate recorded inside
 	// a loop body is flagged `reused` at loop exit unless its source local is
@@ -297,6 +304,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
 	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
+	savedIterBorrowOrigin := c.iterBorrowOrigin
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
 
@@ -317,6 +325,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.goHandleBorrowedLocal = make(map[string]string)
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
+	c.iterBorrowOrigin = make(map[string]string)                // T1349
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.loopFrames = nil                                          // T1255
 	c.curFuncObj = fn
@@ -352,6 +361,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
 	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
+	c.iterBorrowOrigin = savedIterBorrowOrigin
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
 }
@@ -438,6 +448,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedGoHandleBorrowed := c.goHandleBorrowedLocal
 	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
+	savedIterBorrowOrigin := c.iterBorrowOrigin
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
 
@@ -458,6 +469,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.goHandleBorrowedLocal = make(map[string]string)
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
+	c.iterBorrowOrigin = make(map[string]string)                // T1349
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.loopFrames = nil                                          // T1255
 	c.curFuncObj = nil
@@ -500,6 +512,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.goHandleBorrowedLocal = savedGoHandleBorrowed
 	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
+	c.iterBorrowOrigin = savedIterBorrowOrigin
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
 }

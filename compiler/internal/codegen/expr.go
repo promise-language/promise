@@ -3658,8 +3658,9 @@ func (c *Compiler) resolveDropFuncForTemp(named *types.Named, typ types.Type) *i
 		if fn, ok := c.funcs[mangledName]; ok {
 			// B0325: Explicit user drops don't include pal_free — wrap with $wrap
 			// so the cleanup path frees the instance after calling drop.
-			// Synthesized drops already include pal_free.
-			if explicitDrop {
+			// Synthesized drops already include pal_free. T1344: native drops
+			// self-free too, so they must not be wrapped.
+			if explicitDrop && !dropIsNative(named) {
 				return c.getOrCreateDropWrap(mangledName, fn)
 			}
 			return fn
@@ -13946,6 +13947,7 @@ const (
 	envDropUserValue                        // extract inst from value {i8*,i8*}, pal_free — heap user type without drop
 	envDropUserValueDrop                    // extract inst from value {i8*,i8*}, call cleanup fn (synth drop incl. pal_free, or $wrap, or palFree)
 	envDropOptionalStructural               // B0229: optional structural iface — check has_value, extract inst, cleanup
+	envDropStructural                       // T1344: non-optional structural iface — extract inst, RTTI drop dispatch
 )
 
 type envFieldDrop struct {
@@ -14041,6 +14043,17 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 		if innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType() {
 			return envFieldDrop{envDropOptionalStructural, nil}
 		}
+	}
+
+	// T1344: non-optional structural interface (e.g., Iterator[T]) captured by
+	// move — dispatch drop through RTTI, same as the optional case but without
+	// the has_value guard. Any *move*-captured non-`this` structural value is
+	// guaranteed owned: ownership analysis (T0338, ownership/expr.go) rejects
+	// move-capturing a borrowed parameter or borrowed value, and `this` captures
+	// are excluded above (borrowed receiver, dropped by the caller). So dropping
+	// here can never double-free the caller's instance.
+	if named != nil && named.IsStructural() && !named.IsValueType() && cv.Obj.Name() != "this" {
+		return envFieldDrop{envDropStructural, nil}
 	}
 
 	return envFieldDrop{envDropNone, nil}
@@ -14217,6 +14230,44 @@ func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.Stru
 
 			callDropBlk := dropFn.NewBlock(fmt.Sprintf("optst.drop.%d", blockIdx))
 			justFreeBlk := dropFn.NewBlock(fmt.Sprintf("optst.free.%d", blockIdx))
+			rttiBlk.NewCondBr(hasDropFn, callDropBlk, justFreeBlk)
+
+			// Has drop: call it (handles free for synth/native drops)
+			dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+			typedDropFn := callDropBlk.NewBitCast(dropFnRaw, irtypes.NewPointer(dropFnType))
+			callDropBlk.NewCall(typedDropFn, instPtr)
+			callDropBlk.NewBr(nextBlk)
+
+			// No drop: just free the instance
+			justFreeBlk.NewCall(c.palFree, instPtr)
+			justFreeBlk.NewBr(nextBlk)
+
+		case envDropStructural:
+			// T1344: non-optional structural iface value {i8* vtable, i8* instance}:
+			// extract instance, RTTI-based drop dispatch. Identical to
+			// envDropOptionalStructural minus the has_value check.
+			instPtr := curBlock.NewExtractValue(fieldVal, 1)
+			isNull := curBlock.NewICmp(enum.IPredEQ, instPtr, constant.NewNull(irtypes.I8Ptr))
+			rttiBlk := dropFn.NewBlock(fmt.Sprintf("st.rtti.%d", blockIdx))
+			curBlock.NewCondBr(isNull, nextBlk, rttiBlk)
+
+			// Load variant ptr (typeinfo) from instance[0]
+			instStructType := irtypes.NewStruct(irtypes.I8Ptr)
+			typedInst := rttiBlk.NewBitCast(instPtr, irtypes.NewPointer(instStructType))
+			variantField := rttiBlk.NewGetElementPtr(instStructType, typedInst,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			variantPtr := rttiBlk.NewLoad(irtypes.I8Ptr, variantField)
+
+			// Load drop_fn_ptr from typeinfo[1]
+			typeinfoType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+			typedTI := rttiBlk.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+			dropFnField := rttiBlk.NewGetElementPtr(typeinfoType, typedTI,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			dropFnRaw := rttiBlk.NewLoad(irtypes.I8Ptr, dropFnField)
+			hasDropFn := rttiBlk.NewICmp(enum.IPredNE, dropFnRaw, constant.NewNull(irtypes.I8Ptr))
+
+			callDropBlk := dropFn.NewBlock(fmt.Sprintf("st.drop.%d", blockIdx))
+			justFreeBlk := dropFn.NewBlock(fmt.Sprintf("st.free.%d", blockIdx))
 			rttiBlk.NewCondBr(hasDropFn, callDropBlk, justFreeBlk)
 
 			// Has drop: call it (handles free for synth/native drops)

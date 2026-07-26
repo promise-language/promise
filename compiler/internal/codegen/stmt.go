@@ -4654,10 +4654,11 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
-			if explicitDrop {
+			if explicitDrop && !dropIsNative(innerNamed) {
 				// T0419: Explicit user drops don't include pal_free — wrap with $wrap
 				// so the Optional drop path frees the instance after calling drop.
-				// Synthesized drops already include pal_free.
+				// Synthesized drops already include pal_free. T1344: native drops
+				// self-free too, so they must not be wrapped.
 				fn = c.getOrCreateDropWrap(mangledName, fn)
 			}
 			dropFunc = fn

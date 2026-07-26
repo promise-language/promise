@@ -1,11 +1,11 @@
 // std/iter.pr — Structural iterator protocol with lazy combinators.
 // --- Structural interfaces ---
-type Iterator[T] `structural `public `doc("Structural iterator protocol. Any type with next() T? satisfies this. All combinators are default methods.") {
-  next() T? `abstract;
+type Iterator[T] `structural `public `doc("Structural iterator protocol. Any type with next(~this) T? satisfies this. All combinators are default methods.") {
+  next(~this) T? `abstract;
 
   // --- Intermediate (lazy) ---
 
-  filter((T) -> bool pred) Iterator[T] `public `doc("Keeps elements matching the predicate.") {
+  filter(~this, (T) -> bool pred) Iterator[T] `public `doc("Keeps elements matching the predicate.") {
     return _FnIter[T](_next: move || -> T? {
       while true {
         if v := this.next() {
@@ -19,7 +19,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  take(int n) Iterator[T] `public `doc("Yields at most n elements.") {
+  take(~this, int n) Iterator[T] `public `doc("Yields at most n elements.") {
     int remaining = n;
     return _FnIter[T](_next: move || -> T? {
       if remaining <= 0 {
@@ -30,7 +30,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  skip(int n) Iterator[T] `public `doc("Skips the first n elements.") {
+  skip(~this, int n) Iterator[T] `public `doc("Skips the first n elements.") {
     int to_skip = n;
     return _FnIter[T](_next: move || -> T? {
       while to_skip > 0 {
@@ -41,7 +41,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  take_while((T) -> bool pred) Iterator[T] `public `doc("Yields elements while predicate holds, then stops.") {
+  take_while(~this, (T) -> bool pred) Iterator[T] `public `doc("Yields elements while predicate holds, then stops.") {
     bool done = false;
     return _FnIter[T](_next: move || -> T? {
       if done {
@@ -58,7 +58,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  skip_while((T) -> bool pred) Iterator[T] `public `doc("Skips elements while predicate holds, then yields the rest.") {
+  skip_while(~this, (T) -> bool pred) Iterator[T] `public `doc("Skips elements while predicate holds, then yields the rest.") {
     bool skipping = true;
     return _FnIter[T](_next: move || -> T? {
       while true {
@@ -78,7 +78,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  chain(Iterator[T] other) Iterator[T] `public `doc("Concatenates this iterator with another.") {
+  chain(~this, Iterator[T] move other) Iterator[T] `public `doc("Concatenates this iterator with another. Consumes `other` (pass `move`).") {
     bool on_second = false;
     return _FnIter[T](_next: move || -> T? {
       if !on_second {
@@ -93,7 +93,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
 
   // --- Type-changing (method-level generics) ---
 
-  map[R]((T) -> R fn) Iterator[R] `public `doc("Transforms each element using the given function.") {
+  map[R](~this, (T) -> R fn) Iterator[R] `public `doc("Transforms each element using the given function.") {
     return _FnIter[R](_next: move || -> R? {
       if v := this.next() {
         return fn(v);
@@ -102,7 +102,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  fold[R](R init, (R, T) -> R fn) R `public `doc("Folds elements into an accumulator of a different type.") {
+  fold[R](~this, R init, (R, T) -> R fn) R `public `doc("Folds elements into an accumulator of a different type.") {
     R acc = init;
     while item := this.next() {
       acc = fn(acc, item);
@@ -110,7 +110,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return acc;
   }
 
-  zip[U](Iterator[U] other) Iterator[(T, U)] `public `doc("Pairs elements from two iterators. Stops when either exhausts.") {
+  zip[U](~this, Iterator[U] move other) Iterator[(T, U)] `public `doc("Pairs elements from two iterators. Stops when either exhausts. Consumes `other` (pass `move`).") {
     return _FnIter[(T, U)](_next: move || -> (T, U)? {
       if a := this.next() {
         if b := other.next() {
@@ -121,7 +121,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  enumerate() Iterator[(int, T)] `public `doc("Pairs each element with its zero-based index.") {
+  enumerate(~this) Iterator[(int, T)] `public `doc("Pairs each element with its zero-based index.") {
     int idx = 0;
     return _FnIter[(int, T)](_next: move || -> (int, T)? {
       if v := this.next() {
@@ -133,7 +133,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     });
   }
 
-  flat_map[R]((T) -> Iterator[R] fn) Iterator[R] `public `doc("Maps each element to an iterator and flattens.") {
+  flat_map[R](~this, (T) -> Iterator[R] fn) Iterator[R] `public `doc("Maps each element to an iterator and flattens.") {
     Iterator[R]? current = none;
     return _FnIter[R](_next: move || -> R? {
       while true {
@@ -153,7 +153,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
 
   // --- Terminal (eager) ---
 
-  collect() T[] `public `doc("Collects all elements into a Vector.") {
+  collect(~this) T[] `public `doc("Collects all elements into a Vector.") {
     T[] result = [];
     while item := this.next() {
       result.push(move item);
@@ -161,7 +161,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return result;
   }
 
-  count() int `public `doc("Counts the number of elements.") {
+  count(~this) int `public `doc("Counts the number of elements.") {
     int n = 0;
     while _ := this.next() {
       n = n + 1;
@@ -169,13 +169,13 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return n;
   }
 
-  for_each((T) -> void action) `public `doc("Runs an action on each element.") {
+  for_each(~this, (T) -> void action) `public `doc("Runs an action on each element.") {
     while item := this.next() {
       action(item);
     }
   }
 
-  any((T) -> bool pred) bool `public `doc("True if any element matches.") {
+  any(~this, (T) -> bool pred) bool `public `doc("True if any element matches.") {
     while item := this.next() {
       if pred(item) {
         return true;
@@ -184,7 +184,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return false;
   }
 
-  every((T) -> bool pred) bool `public `doc("True if all elements match.") {
+  every(~this, (T) -> bool pred) bool `public `doc("True if all elements match.") {
     while item := this.next() {
       if !pred(item) {
         return false;
@@ -193,11 +193,11 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return true;
   }
 
-  first() T? `public `doc("First element, or none.") {
+  first(~this) T? `public `doc("First element, or none.") {
     return this.next();
   }
 
-  last() T? `public `doc("Last element, or none.") {
+  last(~this) T? `public `doc("Last element, or none.") {
     T? result = none;
     while item := this.next() {
       result = item;
@@ -205,7 +205,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return result;
   }
 
-  find((T) -> bool pred) T? `public `doc("First element matching predicate.") {
+  find(~this, (T) -> bool pred) T? `public `doc("First element matching predicate.") {
     while item := this.next() {
       if pred(item) {
         return item;
@@ -214,7 +214,7 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
     return none;
   }
 
-  reduce((T, T) -> T fn) T? `public `doc("Reduces using a binary function.") {
+  reduce(~this, (T, T) -> T fn) T? `public `doc("Reduces using a binary function.") {
     T? first = this.next();
     if first is absent {
       return none;
@@ -239,7 +239,7 @@ type _FnIter[T] is Iterator[T] `doc("Closure-based iterator wrapper.") {
   () -> T? _next;
   int _parent = 0;
 
-  next() T? {
+  next(~this) T? {
     return this._next();
   }
 
@@ -252,6 +252,6 @@ type Generator[T] is Iterator[T] `public `doc("Generator coroutine wrapper. Sati
   int _handle;
   int _slot;
 
-  next() T? `native;
+  next(~this) T? `native;
   drop(~this) `native;
 }

@@ -264,7 +264,11 @@ func TestT0469_FnIterDropStubPreserved(t *testing.T) {
 		}
 	`)
 	// The _FnIter[int] instance's drop stub exists and delegates to iter_cleanup.
-	stub := extractFunction(ir, `"_FnIter[int].drop"`)
+	// Anchor on the `define` (extractDefine): T1344 made the typeinfo drop_fn and
+	// scope-temp cleanups reference the bare (self-freeing) _FnIter[int].drop
+	// instead of the double-freeing _FnIter[int].drop$wrap, so a by-name call site
+	// now precedes the definition and extractFunction would latch onto it.
+	stub := extractDefine(ir, `"_FnIter[int].drop"`)
 	if stub == "" {
 		t.Fatalf("_FnIter[int].drop stub not found in IR:\n%s", ir)
 	}

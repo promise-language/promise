@@ -164,8 +164,9 @@ func (c *Compiler) resolveTypeInfoDropFn(ownerName string, named *types.Named) c
 		}
 		mangledName := mangleMethodName(resolvedOwner, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
-			if explicitDrop {
-				// B0247: Wrap explicit user drop with pal_free
+			if explicitDrop && !dropIsNative(named) {
+				// B0247: Wrap explicit user drop with pal_free. T1344: native drops
+				// self-free, so wrapping them double-frees under RTTI dispatch.
 				fn = c.getOrCreateDropWrap(mangledName, fn)
 			}
 			return constant.NewBitCast(fn, irtypes.I8Ptr)
@@ -340,6 +341,22 @@ func (c *Compiler) maybeSynthesizeCloneFn(named *types.Named, owner types.Type, 
 	typedNewPtr := c.block.NewBitCast(newPtr, instancePtrType)
 	c.dupHeapValueFields(named, owner, layout, typedNewPtr)
 	c.block.NewRet(newPtr)
+}
+
+// dropIsNative reports whether named's drop method is a `native` drop. Native
+// drops (e.g. _FnIter → __promise_iter_cleanup, Generator) free the instance
+// themselves, exactly like synthesized drops — so they must NOT be wrapped with
+// an extra pal_free ($wrap, B0247/T0419/B0325). Wrapping a self-freeing drop
+// double-frees the instance whenever the drop_fn is invoked via RTTI dispatch
+// (__promise_structural_drop / envDropStructural / envDropOptionalStructural),
+// which is exactly how a structural Iterator[T] value backed by an _FnIter is
+// cleaned up (T1344).
+func dropIsNative(named *types.Named) bool {
+	if named == nil {
+		return false
+	}
+	dm := named.LookupMethod("drop")
+	return dm != nil && dm.IsNative()
 }
 
 // getOrCreateDropWrap returns a wrapper function that calls the given drop function
@@ -655,7 +672,9 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		dropFnConst := constant.Constant(constant.NewNull(irtypes.I8Ptr))
 		monoDropName := mangleMethodName(name, "drop", false)
 		if fn, ok := c.funcs[monoDropName]; ok {
-			if named.HasDrop() && !named.NeedsSynthDrop() {
+			if named.HasDrop() && !named.NeedsSynthDrop() && !dropIsNative(named) {
+				// T1344: native drops (e.g. _FnIter → iter_cleanup) self-free —
+				// wrapping them double-frees under RTTI drop dispatch.
 				fn = c.getOrCreateDropWrap(monoDropName, fn)
 			}
 			dropFnConst = constant.NewBitCast(fn, irtypes.I8Ptr)

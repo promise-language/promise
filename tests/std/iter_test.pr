@@ -262,7 +262,7 @@ test_skip_while() `test {
 test_chain() `test {
   a := Counter(current: 0, limit: 3);
   b := Counter(current: 10, limit: 13);
-  Iterator[int] chained = a.chain(b);
+  Iterator[int] chained = a.chain(move b);
   int sum = 0;
   for x in chained {
     sum = sum + x;
@@ -474,7 +474,7 @@ test_filter_none() `test {
 test_chain_empty_first() `test {
   a := Counter(current: 0, limit: 0);
   b := Counter(current: 10, limit: 13);
-  int[] result = a.chain(b).collect();
+  int[] result = a.chain(move b).collect();
   assert(result.len == 3, "chain empty+3 = 3");
   assert(result[0] == 10, "first=10");
 }
@@ -482,7 +482,7 @@ test_chain_empty_first() `test {
 test_chain_empty_second() `test {
   a := Counter(current: 0, limit: 3);
   b := Counter(current: 0, limit: 0);
-  int[] result = a.chain(b).collect();
+  int[] result = a.chain(move b).collect();
   assert(result.len == 3, "chain 3+empty = 3");
   assert(result[2] == 2, "last=2");
 }
@@ -490,7 +490,7 @@ test_chain_empty_second() `test {
 test_chain_both_empty() `test {
   a := Counter(current: 0, limit: 0);
   b := Counter(current: 0, limit: 0);
-  assert(a.chain(b).count() == 0, "chain empty+empty = 0");
+  assert(a.chain(move b).count() == 0, "chain empty+empty = 0");
 }
 
 test_reduce_empty() `test {
@@ -1015,7 +1015,7 @@ test_chain_three() `test {
   a := Counter(current: 0, limit: 2);
   b := Counter(current: 10, limit: 12);
   c := Counter(current: 100, limit: 102);
-  int[] result = a.chain(b).chain(c).collect();
+  int[] result = a.chain(move b).chain(move c).collect();
   assert(result.len == 6, "chain 3 iterators len=6");
   assert(result[0] == 0, "first=0");
   assert(result[2] == 10, "third=10");
@@ -1039,7 +1039,7 @@ test_fniter_chain_find() `test {
   a := Counter(current: 0, limit: 5);
   b := Counter(current: 100, limit: 105);
   // chain returns _FnIter — test find on it
-  if val := a.chain(b).find(|int x| -> bool {
+  if val := a.chain(move b).find(|int x| -> bool {
     return x > 50;
   }) {
     assert(val == 100, "chain.find=100");
@@ -1404,6 +1404,101 @@ test_stream_iter_concrete_nested_no_leak() `test {
     outer = outer + 1;
   }
   assert(total == 300, "50 * (0+1+2+3)");
+}
+
+// --- T1344: RTTI drop of move-captured structural iterators is leak-free and
+// does not double-free. `chain`/`zip` now consume their second iterator (`move`),
+// which is move-captured into the returned closure's env and dropped via the
+// concrete type's typeinfo drop_fn_ptr. Exercise both a native self-freeing
+// concrete (_FnIter, from `.iter()`) and a plain user concrete (Counter, no drop).
+
+test_t1344_chain_moved_fniter_no_leak() `test {
+  // `b.iter()` is an _FnIter whose native drop self-frees; the chain closure env
+  // must drop it exactly once (no double free, no leak).
+  int[] a = [1, 2, 3];
+  int[] b = [10, 11];
+  int[] r = a.iter().chain(b.iter()).collect();
+  assert(r.len == 5, "chain moved _FnIter len");
+}
+
+test_t1344_chain_moved_user_iter_no_leak() `test {
+  // `other` is a user Counter (no drop → typeinfo drop_fn null → env pal_free's
+  // the box exactly once).
+  a := Counter(current: 0, limit: 3);
+  b := Counter(current: 100, limit: 102);
+  int[] r = a.chain(move b).collect();
+  assert(r.len == 5, "chain moved Counter len");
+}
+
+test_t1344_zip_moved_iter_no_leak() `test {
+  a := Counter(current: 0, limit: 3);
+  b := Counter(current: 10, limit: 13);
+  int sum = 0;
+  for tup in a.zip[int](move b) {
+    (x, y) := tup;
+    sum = sum + x + y;
+  }
+  assert(sum == 36, "zip: (0+10)+(1+11)+(2+12)=36");
+}
+
+// A user Iterator with an EXPLICIT (non-native) drop that owns a heap field.
+// Move-captured into a combinator's closure env, it is cleaned up via
+// envDropStructural → the concrete type's typeinfo drop_fn_ptr, which for an
+// explicit non-native drop is the `$wrap` (drop body + auto field cleanup +
+// pal_free). This exercises the `explicitDrop && !dropIsNative` branch: the
+// drop_fn IS wrapped (unlike the native _FnIter case). If the RTTI drop_fn were
+// skipped, `scratch` and the instance box leak; if a self-freeing drop were
+// wrapped, it would double-free.
+type OwningCounter is Iterator[int] {
+  int current;
+  int limit;
+  int[] scratch;
+
+  next(~this) int? {
+    if this.current >= this.limit {
+      return none;
+    }
+    int val = this.current;
+    this.current = this.current + 1;
+    return val;
+  }
+
+  drop(~this) {
+    // Explicit (non-native) drop body; heap field `scratch` is auto-dropped after.
+  }
+}
+
+test_t1344_chain_moved_user_drop_no_leak() `test {
+  a := Counter(current: 0, limit: 2);
+  b := OwningCounter(current: 100, limit: 103, scratch: [1, 2, 3]);
+  int[] r = a.chain(move b).collect();
+  assert(r.len == 5, "chain moved OwningCounter len");
+}
+
+test_t1344_chain_moved_user_drop_partial_no_leak() `test {
+  // Break mid-stream so the chain closure (and the move-captured OwningCounter,
+  // still holding its heap `scratch`) is dropped before exhaustion.
+  a := Counter(current: 0, limit: 2);
+  b := OwningCounter(current: 100, limit: 103, scratch: [4, 5]);
+  int taken = 0;
+  for _ in a.chain(move b) {
+    taken = taken + 1;
+    if taken == 3 {
+      break;
+    }
+  }
+  assert(taken == 3, "took 3 then dropped mid-stream");
+}
+
+test_t1344_zip_moved_user_drop_no_leak() `test {
+  a := Counter(current: 0, limit: 3);
+  b := OwningCounter(current: 10, limit: 13, scratch: [7, 8, 9]);
+  int sum = 0;
+  for tup in a.zip[int](move b) {
+    (x, y) := tup;
+    sum = sum + x + y;
+  }
+  assert(sum == 36, "zip user-drop: (0+10)+(1+11)+(2+12)=36");
 }
 
 main() {

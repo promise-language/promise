@@ -495,8 +495,15 @@ type Compiler struct {
 	elvisResultReturned   bool        // T0982: true when an elvis `?:` result is the return expression (escapes to the caller). Like elvisResultBound, forces none-path default neutralization for handle/heap results, but does NOT create a per-path elvisBoundDropFlag (no binding consumes it; the returned result temp is claimed by claimStringTemp/claimHeapTemp).
 	elvisBoundDropFlag    value.Value // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
 	elvisResultOwnsForced bool        // T1166: true when an elvis `?:` result is assigned to a member/index target (an owned field/element with no per-slot drop flag). genElvis clones a borrowed operand on the some/none path so the result is unconditionally owned; the container's field/element drop is then correct (no double-free of a caller/container-owned inner).
-	coroCleanupBlk        *ir.Block   // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk        *ir.Block   // coroutine suspend block (suspend path: coro.end + ret)
+
+	// T1353: staged, pre-evaluated receiver value for a compound member assignment
+	// (`a.b += x`). When non-nil, the getter/setter receiver-eval sites consume it
+	// via memberReceiver instead of re-evaluating target.Target, so the receiver is
+	// emitted exactly once (and before the RHS). Set/consumed synchronously within
+	// genMemberCompoundAssign; nil at all other times.
+	stagedMemberReceiver value.Value
+	coroCleanupBlk       *ir.Block // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk       *ir.Block // coroutine suspend block (suspend path: coro.end + ret)
 
 	// T0668: maps each Task[T].drop func to its paired Task[T].free_after_done
 	// func so temp/binding drop sites that only know the drop func can route

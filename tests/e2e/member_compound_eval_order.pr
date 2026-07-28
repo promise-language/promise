@@ -1,0 +1,80 @@
+// T1353: a compound member assignment (`a.b += x`) must evaluate the receiver
+// once and before the RHS, matching the canonical order the index (`[]`) and
+// slice (`[:]`) paths already follow: target → RHS → read → op → write.
+//
+// Before the fix, `boxes[idx()].val += side()` printed `rhs / target-idx /
+// target-idx` — the RHS ran first and the side-effecting receiver `boxes[idx()]`
+// ran twice. Both the setter-property path and the plain-field path are covered.
+side() int {
+  print_line("rhs");
+  return 5;
+}
+idx() int {
+  print_line("target-idx");
+  return 0;
+}
+
+type Box {
+  int x;
+  get val int {
+    return this.x;
+  }
+  set val(int v) {
+    this.x = v;
+  }
+}
+
+type FieldBox {
+  int x;
+}
+
+type StrBox {
+  string s;
+}
+
+// A virtual (inherited) setter/getter: `Base` needs a vtable because `VDerived`
+// extends it, so the compound assignment dispatches through the vtable. The
+// staged receiver must still be consumed once for the read and once for the
+// write (memberReceiver / genVirtualGetterCall / genVirtualSetterCall).
+type Base {
+  int x;
+  get vv int {
+    return this.x;
+  }
+  set vv(int v) {
+    this.x = v;
+  }
+}
+
+type VDerived is Base {
+}
+
+str_rhs() string {
+  print_line("rhs");
+  return "bc";
+}
+
+main() `test(expected: "target-idx\nrhs\nsetter=15\ntarget-idx\nrhs\nfield=15\ntarget-idx\nrhs\nstr=abc\ntarget-idx\nrhs\nvirtual=15") {
+  // Setter-property compound: receiver evaluated once, target-first.
+  boxes := [Box(x: 10)];
+  boxes[idx()].val += side();
+  print_line("setter={boxes[0].val}");
+
+  // Plain-field compound: same single-eval, target-first order.
+  fields := [FieldBox(x: 10)];
+  fields[idx()].x += side();
+  print_line("field={fields[0].x}");
+
+  // Heap-field (string) compound: single-eval, target-first, and the old field
+  // value is dropped before the new one is stored (emitStringDropOldValue).
+  strs := [StrBox(s: "a")];
+  strs[idx()].s += str_rhs();
+  print_line("str={strs[0].s}");
+
+  // Virtual (inherited) setter compound: single-eval, target-first, through the
+  // vtable dispatch path.
+  Base b = VDerived(x: 10);
+  view := [b];
+  view[idx()].vv += side();
+  print_line("virtual={view[0].vv}");
+}

@@ -8793,6 +8793,18 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.genSliceCompoundAssign(sl, s.Op, s.Value)
 			return
 		}
+		// T1353: a member/setter compound assignment (`a.b += x`) must evaluate the
+		// receiver once and before the RHS (target → RHS → read → op → write), the
+		// same canonical order as the index/slice paths. Module-level setters
+		// (`mod.prop += x`) have no runtime receiver, so they have neither the
+		// double-eval nor the ordering issue — leave those on the existing
+		// genModuleSetterAssign path (the MemberExpr case in the switch below).
+		if mem, ok := s.Target.(*ast.MemberExpr); ok {
+			if ident, isIdent := mem.Target.(*ast.IdentExpr); !isIdent || c.resolveModuleName(ident) == "" {
+				c.genMemberCompoundAssign(mem, s.Op, s.Value)
+				return
+			}
+		}
 	}
 
 	// Set targetType for Optional member/variable assignments so NoneLit
@@ -9964,6 +9976,70 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	}
 }
 
+// genMemberCompoundAssign handles a compound member assignment (`a.b += x`) so
+// the receiver is evaluated exactly once and before the RHS, matching the
+// canonical order used by the index/slice paths: target → RHS → read → op →
+// write (T1353). For a setter property the single receiver value is staged (see
+// stagedMemberReceiver / memberReceiver) and reused by both the getter read and
+// the setter write. Module-level setters are routed away by the early-dispatch
+// guard in genAssignStmt; MutexGuard.borrow and any other non-field/non-setter
+// member falls back to the legacy genMemberAssign path (out of scope).
+func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.AssignOp, valueExpr ast.Expr) {
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	named := extractNamed(targetType)
+
+	// Setter-property compound: evaluate the receiver once (target-first), reuse
+	// it for the getter read and the setter write. "borrow" (MutexGuard) is a
+	// native accessor handled by the fallback below. A `global getter/setter
+	// (T0703, Recv() == nil) has no runtime receiver — `Foo.count += x` names a
+	// type, not a value — so it has neither the double-eval nor the ordering
+	// issue and stays on the legacy fallback path.
+	if named != nil && target.Field != "borrow" {
+		if setter := named.LookupSetter(target.Field); setter != nil && setter.Sig().Recv() != nil {
+			getter := named.LookupGetter(target.Field)
+			if getter == nil {
+				panic(fmt.Sprintf("codegen: compound assignment to setter %s.%s but no getter found", named, target.Field))
+			}
+			recv := c.genExprAutoPropagate(target.Target) // target — evaluated ONCE
+			val := c.genExpr(valueExpr)                   // RHS — after target
+			if c.info.AutoPropagateExprs[valueExpr] {
+				val = c.genAutoPropagateValue(val)
+			}
+			c.stagedMemberReceiver = recv
+			current := c.genGetterCall(target, targetType, named, getter)         // read
+			current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
+			result := c.genCompoundOp(op, c.info.Types[target], current, val)     // op
+			c.stagedMemberReceiver = recv
+			c.genSetterCall(target, targetType, named, setter, result) // write
+			c.stagedMemberReceiver = nil
+			return
+		}
+	}
+
+	// Plain-field compound: the field pointer (receiver) is evaluated once, before
+	// the RHS.
+	if named != nil && target.Field != "borrow" && named.LookupField(target.Field) != nil {
+		fieldPtr := c.genFieldPtr(target) // target — evaluated ONCE
+		val := c.genExpr(valueExpr)       // RHS — after target
+		if c.info.AutoPropagateExprs[valueExpr] {
+			val = c.genAutoPropagateValue(val)
+		}
+		c.emitFieldCompoundReadModifyWrite(target, targetType, named, fieldPtr, op, val)
+		return
+	}
+
+	// Fallback (MutexGuard.borrow and any other special member): preserve prior
+	// behavior. Not in scope for the single-eval/ordering fix.
+	val := c.genExpr(valueExpr)
+	if c.info.AutoPropagateExprs[valueExpr] {
+		val = c.genAutoPropagateValue(val)
+	}
+	c.genMemberAssign(target, op, val, valueExpr)
+}
+
 // genMemberAssign handles assignment to a field on a user type instance.
 // If the member is a setter property, emits a setter call instead.
 // Uses lookupTypeLayout for layout-driven field types that work for both
@@ -10262,6 +10338,16 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 		return
 	}
 
+	c.emitFieldCompoundReadModifyWrite(target, targetType, named, fieldPtr, op, val)
+}
+
+// emitFieldCompoundReadModifyWrite performs the read-modify-write tail of a
+// plain-field compound assignment (`a.b += x`): load the current field value,
+// apply the compound operator, drop the old value (string / heap user type), and
+// store the result back through fieldPtr. The receiver (fieldPtr) is evaluated
+// exactly once by the caller. Shared by genMemberAssign's defensive compound
+// branch and genMemberCompoundAssign (T1353).
+func (c *Compiler) emitFieldCompoundReadModifyWrite(target *ast.MemberExpr, targetType types.Type, named *types.Named, fieldPtr value.Value, op ast.AssignOp, val value.Value) {
 	// Compound assignment: resolve field LLVM type for load
 	layout := c.lookupTypeLayout(targetType)
 	field := named.LookupField(target.Field)
@@ -10335,10 +10421,15 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	}
 
 	var args []value.Value
+	// T1353: evaluate the receiver once (target-first) — memberReceiver reuses a
+	// value staged by genMemberCompoundAssign for a compound `a.b += x`, so the
+	// getter read and this setter write share the single evaluation. When nothing
+	// is staged it falls back to a plain genExpr.
+	recv := c.memberReceiver(func() value.Value { return c.genExpr(target.Target) })
 	if isThisReceiver(target.Target) {
-		args = append(args, c.genExpr(target.Target))
+		args = append(args, recv)
 	} else if isContainerType(targetType) {
-		args = append(args, c.genExpr(target.Target))
+		args = append(args, recv)
 	} else if named != nil && named.IsValueType() {
 		// T1354: for an addressable local, pass the address of the variable's
 		// own alloca so the setter mutates in place (mirrors genFieldPtr's
@@ -10349,13 +10440,13 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 			if alloca, ok := c.locals[ident.Name]; ok {
 				args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
 			} else {
-				args = append(args, c.valueTypeReceiverPtr(c.genExpr(target.Target), targetType))
+				args = append(args, c.valueTypeReceiverPtr(recv, targetType))
 			}
 		} else {
-			args = append(args, c.valueTypeReceiverPtr(c.genExpr(target.Target), targetType))
+			args = append(args, c.valueTypeReceiverPtr(recv, targetType))
 		}
 	} else {
-		args = append(args, c.extractInstancePtr(c.genExpr(target.Target)))
+		args = append(args, c.extractInstancePtr(recv))
 	}
 	args = append(args, val)
 	call := c.block.NewCall(fn, args...)
@@ -10364,7 +10455,7 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 
 // genVirtualSetterCall emits an indirect setter call through the vtable.
 func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Named, setter *types.Method, val value.Value) {
-	receiverVal := c.genExpr(target.Target)
+	receiverVal := c.memberReceiver(func() value.Value { return c.genExpr(target.Target) }) // T1353
 
 	var vtableRaw, instance value.Value
 	if isThisReceiver(target.Target) {

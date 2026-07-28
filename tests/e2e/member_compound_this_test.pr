@@ -1,0 +1,142 @@
+// T1353: compound member assignment regression coverage. The receiver is
+// evaluated once and before the RHS; these batch tests confirm the value written
+// back is correct across setter-property and plain-field receivers (including a
+// `this` receiver inside a method body).
+type Counter {
+  int n;
+  get value int {
+    return this.n;
+  }
+  set value(int v) {
+    this.n = v;
+  }
+
+  bump(~this) int {
+    // Setter compound with a `this` receiver.
+    this.value += 3;
+    // Plain-field compound with a `this` receiver.
+    this.n += 1;
+    return this.n;
+  }
+}
+
+this_receiver_setter_and_field() `test {
+  c := Counter(n: 10);
+  // 10 + 3 (setter) + 1 (field) = 14
+  result := c.bump();
+  assert(result == 14, "this setter+field compound should yield 14");
+}
+
+setter_compound_on_local() `test {
+  c := Counter(n: 7);
+  c.value += 5;
+  assert(c.value == 12, "setter += should read-modify-write to 12");
+  c.value -= 2;
+  assert(c.value == 10, "setter -= should read-modify-write to 10");
+}
+
+field_compound_on_local() `test {
+  c := Counter(n: 100);
+  c.n += 23;
+  assert(c.n == 123, "field += should read-modify-write to 123");
+  c.n *= 2;
+  assert(c.n == 246, "field *= should read-modify-write to 246");
+}
+
+// A heap (string) field compound assignment must drop the old field value before
+// storing the concatenated result (emitStringDropOldValue on the T1353 field
+// path). The batch runner's leak check confirms the old string is not leaked.
+type StrHolder {
+  string s;
+}
+
+string_field_compound() `test {
+  h := StrHolder(s: "a");
+  h.s += "bc";
+  assert(h.s == "abc", "string field += concatenates");
+  h.s += "de";
+  assert(h.s == "abcde", "string field += appends, old value dropped (no leak)");
+}
+
+// A virtual (inherited) setter/getter dispatches the compound read and write
+// through the vtable. The staged receiver must be consumed once per side.
+type Shape {
+  int area;
+  get size int {
+    return this.area;
+  }
+  set size(int v) {
+    this.area = v;
+  }
+}
+
+type Square is Shape {
+}
+
+virtual_setter_compound() `test {
+  Shape s = Square(area: 10);
+  s.size += 5;
+  assert(s.size == 15, "virtual setter += reads and writes through the vtable");
+  s.size -= 3;
+  assert(s.size == 12, "virtual setter -= through the vtable");
+}
+
+// The RHS of a member compound assignment is evaluated after the receiver and,
+// when it is a bare failable call inside a failable function, auto-propagates
+// (the AutoPropagateExprs branch in genMemberCompoundAssign, on both the field
+// and the setter path).
+checked!(int v) int {
+  if v < 0 {
+    raise error(message: "negative");
+  }
+  return v;
+}
+
+add_field!(Counter ~c, int d) {
+  c.n += checked(d);
+}
+
+add_setter!(Counter ~c, int d) {
+  c.value += checked(d);
+}
+
+field_compound_autopropagating_rhs() `test {
+  c := Counter(n: 10);
+  add_field(c, 5)? e {
+    assert(false, "positive delta should not fail");
+  };
+  assert(c.n == 15, "field += auto-propagating RHS applies value on success");
+
+  raised := false;
+  add_field(c, -1)? e {
+    raised = true;
+  };
+  assert(raised, "field += auto-propagating RHS surfaces the error");
+  assert(c.n == 15, "field unchanged after the RHS raised");
+}
+
+setter_compound_autopropagating_rhs() `test {
+  c := Counter(n: 10);
+  add_setter(c, 5)? e {
+    assert(false, "positive delta should not fail");
+  };
+  assert(c.value == 15, "setter += auto-propagating RHS applies value on success");
+
+  raised := false;
+  add_setter(c, -1)? e {
+    raised = true;
+  };
+  assert(raised, "setter += auto-propagating RHS surfaces the error");
+}
+
+// A compound assignment to the native `borrow` setter/getter of a MutexGuard is
+// deliberately routed to the legacy fallback path (the `Field != "borrow"`
+// guards in genMemberCompoundAssign). This pins that the T1353 rework left the
+// borrow path working.
+borrow_compound_via_fallback() `test {
+  use g := Mutex[int](3).lock();
+  g.borrow += 5;
+  assert(g.borrow == 8, "borrow += goes through the fallback path");
+  g.borrow *= 2;
+  assert(g.borrow == 16, "borrow *= via the fallback path");
+}

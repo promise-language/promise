@@ -5745,6 +5745,19 @@ func (c *Compiler) freshEnumReceiverNeedsDrop(expr ast.Expr) bool {
 
 // genGetterCall emits a call to a getter method (zero args beyond receiver).
 // Uses virtual dispatch through the vtable when the static type needs it.
+// memberReceiver returns the receiver value for a getter/setter member access,
+// consuming a value staged by genMemberCompoundAssign (T1353) when present so a
+// compound `a.b += x` evaluates the receiver exactly once and target-first. When
+// nothing is staged it evaluates the receiver via the site's own fallback.
+func (c *Compiler) memberReceiver(fallback func() value.Value) value.Value {
+	if c.stagedMemberReceiver != nil {
+		v := c.stagedMemberReceiver
+		c.stagedMemberReceiver = nil
+		return v
+	}
+	return fallback()
+}
+
 func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named *types.Named, getter *types.Method) value.Value {
 	// Global getter: no receiver, just call the function directly.
 	if getter.Sig().Recv() == nil {
@@ -5777,7 +5790,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	}
 
 	var args []value.Value
-	target := c.genExprAutoPropagate(e.Target) // B0323
+	target := c.memberReceiver(func() value.Value { return c.genExprAutoPropagate(e.Target) }) // B0323 / T1353
 	if isThisReceiver(e.Target) {
 		args = append(args, target)
 	} else if isContainerType(targetType) {
@@ -5800,7 +5813,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 
 // genVirtualGetterCall emits an indirect getter call through the vtable.
 func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, getter *types.Method, targetType types.Type) value.Value {
-	receiverVal := c.genExprAutoPropagate(e.Target) // B0323
+	receiverVal := c.memberReceiver(func() value.Value { return c.genExprAutoPropagate(e.Target) }) // B0323 / T1353
 
 	var vtableRaw, instance value.Value
 	if isThisReceiver(e.Target) {

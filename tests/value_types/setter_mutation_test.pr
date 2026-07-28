@@ -1,0 +1,133 @@
+// T1354: Value-type property setter must mutate the receiver local in place.
+// Previously the setter wrote to a spilled copy and the mutation was lost.
+type Vec2 {
+  int x `value;
+  int y `value;
+  get sum int {
+    return this.x + this.y;
+  }
+  set sum(int v) {
+    this.x = v;
+    this.y = 0;
+  }
+
+  // Regression guard for the `this.prop = x` path inside a value-type method:
+  // a setter invoked on `this` must mutate the struct `this` points to in
+  // place, observable within the same method (isThisReceiver branch of
+  // genSetterCall passes the `this` i8* through unspilled). (Whether a
+  // value-type `~this` method's mutation propagates back to the caller is a
+  // separate, pre-existing concern — tracked as T1355 — so this reads the
+  // result back inside the method rather than at the call site.)
+  reset_via_setter(~this) int {
+    this.sum = 0;
+    return this.x + this.y;
+  }
+}
+
+make_vec() Vec2 {
+  return Vec2(x: 1, y: 2);
+}
+
+// Generic pure value type: the in-place setter path must also fire under
+// monomorphization (the local's own `%b` alloca of `Box__T_v` is addressed,
+// not a spilled copy). Covers the IdentExpr-in-c.locals branch of
+// genSetterCall for a monomorphized setter (`Box__int.current$set`).
+type Box[T] {
+  T val `value;
+  get current T {
+    return this.val;
+  }
+  set current(T v) {
+    this.val = v;
+  }
+}
+
+// Failable value-type setter on a plain local. The setter's mangled name gets a
+// `!` (failable) form; the in-place mutation must still land on the local when
+// the setter does not raise. Covers the failable-`$set` path of the fix.
+type Guarded {
+  int x `value;
+  int y `value;
+  get sum int {
+    return this.x + this.y;
+  }
+  set sum!(int v) {
+    if v < 0 {
+      raise error(message: "negative");
+    }
+    this.x = v;
+    this.y = 0;
+  }
+}
+
+set_guarded!() bool {
+  g := Guarded(x: 3, y: 4);
+  g.sum = 17; // auto-propagates on error; here it succeeds and mutates g in place
+  return g.x == 17 && g.y == 0;
+}
+
+// Plain `=` through a value-type setter mutates the local (the repro).
+vt_setter_plain() `test {
+  v := Vec2(x: 3, y: 4);
+  v.sum = 17; // set sum(17) -> x=17, y=0
+  assert(v.x == 17, "plain: x should be 17");
+  assert(v.y == 0, "plain: y should be 0");
+}
+
+// Compound `+=` through a value-type setter mutates the local.
+vt_setter_compound() `test {
+  v := Vec2(x: 3, y: 4); // sum == 7
+  v.sum += 10; // get sum (7) + 10 = 17 -> set sum(17) -> x=17, y=0
+  assert(v.x == 17, "compound: x should be 17");
+  assert(v.y == 0, "compound: y should be 0");
+}
+
+// `++` / `--` through a value-type setter mutate the local.
+vt_setter_incdec() `test {
+  v := Vec2(x: 3, y: 4); // sum == 7
+  v.sum++; // get sum (7) + 1 = 8 -> set sum(8) -> x=8, y=0
+  assert(v.x == 8, "inc: x should be 8");
+  assert(v.y == 0, "inc: y should be 0");
+
+  v.sum--; // get sum (8) - 1 = 7 -> set sum(7) -> x=7, y=0
+  assert(v.x == 7, "dec: x should be 7");
+  assert(v.y == 0, "dec: y should be 0");
+}
+
+// Setter invoked from inside a value-type method via `this.prop = x`: the
+// mutation must be observable within the method (in-place on `this`).
+vt_setter_this() `test {
+  v := Vec2(x: 5, y: 6);
+  r := v.reset_via_setter(); // this.sum = 0 -> x=0, y=0 -> returns 0
+  assert(r == 0, "this: setter mutation must be observable within the method");
+}
+
+// Generic value-type setter mutates the local in place under monomorphization
+// (int and f64 instantiations).
+vt_setter_generic() `test {
+  bi := Box[int](val: 5);
+  bi.current = 20;
+  assert(bi.val == 20, "generic int: val should be 20");
+
+  bf := Box[f64](val: 1.5);
+  bf.current = 9.5;
+  assert(bf.val == 9.5, "generic f64: val should be 9.5");
+}
+
+// Failable value-type setter on a plain local mutates in place when it does not
+// raise (the `$set` mangled name carries the failable marker).
+vt_setter_failable() `test {
+  ok := set_guarded()? e {
+    assert(false, "failable setter must not raise for a valid value");
+    return;
+  };
+  assert(ok, "failable value setter mutates the local in place");
+}
+
+// Non-addressable receiver: setter on a value type returned by a call. The
+// mutation lands on a discarded temp (nothing to write back to) — this must
+// compile and run without crashing.
+vt_setter_nonaddressable() `test {
+  make_vec().sum = 99; // mutation on a temporary, discarded
+  assert(true, "non-addressable setter compiles and runs");
+}

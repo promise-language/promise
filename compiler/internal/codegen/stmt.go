@@ -10335,15 +10335,27 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	}
 
 	var args []value.Value
-	recv := c.genExpr(target.Target)
 	if isThisReceiver(target.Target) {
-		args = append(args, recv)
+		args = append(args, c.genExpr(target.Target))
 	} else if isContainerType(targetType) {
-		args = append(args, recv)
+		args = append(args, c.genExpr(target.Target))
 	} else if named != nil && named.IsValueType() {
-		args = append(args, c.valueTypeReceiverPtr(recv, targetType))
+		// T1354: for an addressable local, pass the address of the variable's
+		// own alloca so the setter mutates in place (mirrors genFieldPtr's
+		// value-type path). Spilling a loaded copy silently discards the
+		// mutation. A non-addressable receiver (e.g. a value type returned by a
+		// call) has nothing to write back to, so it keeps the spill.
+		if ident, ok := target.Target.(*ast.IdentExpr); ok {
+			if alloca, ok := c.locals[ident.Name]; ok {
+				args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
+			} else {
+				args = append(args, c.valueTypeReceiverPtr(c.genExpr(target.Target), targetType))
+			}
+		} else {
+			args = append(args, c.valueTypeReceiverPtr(c.genExpr(target.Target), targetType))
+		}
 	} else {
-		args = append(args, c.extractInstancePtr(recv))
+		args = append(args, c.extractInstancePtr(c.genExpr(target.Target)))
 	}
 	args = append(args, val)
 	call := c.block.NewCall(fn, args...)

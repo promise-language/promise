@@ -351,6 +351,17 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		named.SetStructural(true)
 	}
 
+	// T1053/T1345: set `interior BEFORE resolving method signatures — the
+	// setter-receiver default in resolveMethodSignature reads IsInterior() so
+	// an interior type's implicit setter keeps a shared `this receiver (matches
+	// the native-type path at the top of defineType). `interior marks a type
+	// whose mutating methods/setters may be invoked through a shared `&` borrow
+	// (interior mutability — the escape hatch for concurrency primitives
+	// Channel/Mutex/MutexGuard).
+	if c.hasAnnotation(d.Annotations, "interior") {
+		named.SetInterior(true)
+	}
+
 	// Resolve fields
 	for _, fd := range d.Fields {
 		c.defineField(named, fd)
@@ -418,13 +429,6 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		named.SetConfined(true)
 		named.SetNotSharable(true)
 	}
-	// T1053: `interior marks a type whose mutating methods/setters may be
-	// invoked through a shared `&` borrow (interior mutability — the escape
-	// hatch for concurrency primitives Channel/Mutex/MutexGuard).
-	if c.hasAnnotation(d.Annotations, "interior") {
-		named.SetInterior(true)
-	}
-
 	// Detect and validate value types (all fields are `value placement).
 	// Must run after field/meta processing, before drop/new validation.
 	c.detectValueType(named, d)
@@ -974,6 +978,14 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		enum.AddVariant(variant)
 	}
 
+	// T1053/T1345: set `interior BEFORE resolving method signatures so
+	// resolveEnumMethodSignature's setter branch (interior → RefNone) is
+	// reachable. `interior marks a type with interior mutability (see the
+	// type-decl path in defineType).
+	if c.hasAnnotation(d.Annotations, "interior") {
+		enum.SetInterior(true)
+	}
+
 	// Resolve methods
 	for _, md := range d.Methods {
 		c.defineEnumMethod(enum, md, d.Name)
@@ -1029,12 +1041,6 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 	if c.hasAnnotation(d.Annotations, "confined") {
 		enum.SetConfined(true)
 		enum.SetNotSharable(true)
-	}
-	// T1053: `interior marks a type with interior mutability (see the type-decl
-	// path above). Kept symmetric with the other markers although no enum is
-	// interior today.
-	if c.hasAnnotation(d.Annotations, "interior") {
-		enum.SetInterior(true)
 	}
 }
 

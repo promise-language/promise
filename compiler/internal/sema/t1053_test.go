@@ -300,11 +300,6 @@ func TestT1053_EnumIndexSetterDefaultsToMutThisReceiver(t *testing.T) {
 	// with no explicit receiver defaults to a `~this mutable borrow (T1053) — the
 	// resolveEnumMethodSignature setter branch. This is what makes an index write
 	// through a shared borrow a mutation subject to the shared-borrow check.
-	//
-	// Note: the `interior arm of that branch (setter keeps RefNone) is currently
-	// unreachable — the `interior flag is set after method resolution for enums, so
-	// even an `interior enum's setter resolves to RefMut. Tracked as T1345; benign
-	// because the call-site check (recvIsInterior) resolves interior correctly.
 	info := checkOK(t, `
 		enum Cell {
 			Empty, Full(int n),
@@ -325,6 +320,98 @@ func TestT1053_NamedIndexSetterDefaultsToMutThisReceiver(t *testing.T) {
 	`)
 	if ref := setterRecvRef(t, info, "Bag"); ref != types.RefMut {
 		t.Errorf("named setter should default to ~this (RefMut), got %v", ref)
+	}
+}
+
+func TestT1345_InteriorEnumIndexSetterKeepsSharedThisReceiver(t *testing.T) {
+	// An `interior enum's implicit setter keeps a shared `this receiver
+	// (RefNone) — resolveEnumMethodSignature's interior branch, reachable now
+	// that `interior is set before method resolution (T1345).
+	info := checkOK(t, `
+		enum Cell `+"`interior"+` {
+			Empty, Full(int n),
+			[](int i) int { return 0; }
+			[]=(int i, int v) { this = Cell.Full(v); }
+		}
+	`)
+	if ref := setterRecvRef(t, info, "Cell"); ref != types.RefNone {
+		t.Errorf("interior enum setter should keep shared `this (RefNone), got %v", ref)
+	}
+}
+
+func TestT1345_InteriorNamedIndexSetterKeepsSharedThisReceiver(t *testing.T) {
+	// A user (non-native) `interior type's `[]= setter keeps a shared `this
+	// receiver (RefNone) — resolveMethodSignature reading IsInterior() now that
+	// the flag is set before method resolution (T1345).
+	info := checkOK(t, `
+		type Bag `+"`interior"+` { int slot; [](int i) int { return this.slot; } []=(int i, int v) { this.slot = v; } }
+	`)
+	if ref := setterRecvRef(t, info, "Bag"); ref != types.RefNone {
+		t.Errorf("interior named setter should keep shared `this (RefNone), got %v", ref)
+	}
+}
+
+// propSetterRecvRef returns the receiver ref of the property `set` setter named
+// `setterName on the type/enum `typeName. Distinct from setterRecvRef, which
+// finds the `[]= operator setter — a property setter takes the md.IsSetter
+// disjunct of the setter-receiver branch, an operator setter the
+// isSetterOperatorName disjunct.
+func propSetterRecvRef(t *testing.T, info *Info, typeName, setterName string) types.RefMod {
+	t.Helper()
+	scope := info.Scopes[findFile(t, info)]
+	tn, ok := scope.Lookup(typeName).(*types.TypeName)
+	if !ok {
+		t.Fatalf("%s is not a type name", typeName)
+	}
+	var methods []*types.Method
+	switch typ := tn.Type().(type) {
+	case *types.Named:
+		methods = typ.Methods()
+	case *types.Enum:
+		methods = typ.Methods()
+	default:
+		t.Fatalf("%s is neither Named nor Enum", typeName)
+	}
+	for _, m := range methods {
+		if m.Name() == setterName && m.IsSetter() {
+			return m.Sig().Recv().Ref()
+		}
+	}
+	t.Fatalf("no property setter %q on %s", setterName, typeName)
+	return types.RefNone
+}
+
+func TestT1345_InteriorNamedPropertySetterKeepsSharedThisReceiver(t *testing.T) {
+	// The property-setter analogue of TestT1345_InteriorNamedIndexSetter: a
+	// user `interior type's `set` setter (md.IsSetter disjunct, not the `[]=
+	// operator disjunct) also keeps a shared `this receiver (RefNone) — the
+	// same interior branch of resolveMethodSignature, now reachable for
+	// non-native types because `interior is set before method resolution (T1345).
+	info := checkOK(t, `
+		type Bag `+"`interior"+` {
+			int slot;
+			get slot int { return this.slot; }
+			set slot(int v) { this.slot = v; }
+		}
+	`)
+	if ref := propSetterRecvRef(t, info, "Bag", "slot"); ref != types.RefNone {
+		t.Errorf("interior named property setter should keep shared `this (RefNone), got %v", ref)
+	}
+}
+
+func TestT1345_NonInteriorNamedPropertySetterDefaultsToMutThisReceiver(t *testing.T) {
+	// Negative control for the property-setter path: without `interior, a `set`
+	// setter still defaults to a `~this mutable borrow (RefMut). Confirms the
+	// hoisted flag-setting only relaxes the receiver for interior types.
+	info := checkOK(t, `
+		type Bag {
+			int slot;
+			get slot int { return this.slot; }
+			set slot(int v) { this.slot = v; }
+		}
+	`)
+	if ref := propSetterRecvRef(t, info, "Bag", "slot"); ref != types.RefMut {
+		t.Errorf("non-interior named property setter should default to ~this (RefMut), got %v", ref)
 	}
 }
 

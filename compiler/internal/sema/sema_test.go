@@ -6534,6 +6534,80 @@ func TestT1297_OptionalElementArrayLiteralMismatch(t *testing.T) {
 	expectError(t, errs, "array element type mismatch: expected int?, got string")
 }
 
+// T1346: a numeric literal adapts through an Optional element hint. An int/float
+// literal under an Optional-numeric hint (`i64?`, `u32?`, `f32?`) must adapt to
+// the inner numeric type so the surrounding Some-wrap assignment succeeds; this
+// also covers the scalar case `i64? x = 1`. Crucially, `f64? x = 1` must STILL
+// error — there is no implicit int->float literal widening project-wide, and the
+// fix must not accidentally introduce it.
+func TestT1346_NumericLiteralAdaptThroughOptional(t *testing.T) {
+	// Scalar and container integer-width / f32 adaptation must type-check.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			i64? x = 1;
+			i64?[] a = [1, 2];
+			i64?[] m = [1, none, 3];
+			u32?[] u = [10, 20];
+			f32? s = 1.0;
+			f32?[] f = [1.0, 2.0];
+		}
+	`)
+
+	// int->float widening through Optional must still be rejected (no widening
+	// rule exists project-wide: `f64 x = 1` also errors).
+	errs := checkErrsWithStd(t, stdContainers, `
+		main() {
+			f64? x = 1;
+		}
+	`)
+	expectError(t, errs, "cannot assign int to variable of type f64?")
+
+	// Same rejection through the vector-literal element path.
+	errs = checkErrsWithStd(t, stdContainers, `
+		main() {
+			f64?[] a = [1, 2];
+		}
+	`)
+	expectError(t, errs, "cannot assign int[] to variable of type f64?[]")
+}
+
+// T1346 (bug title): numeric-literal adaptation must also drive through an
+// Optional element whose inner type is itself a container (`i32[]?[]`,
+// `i32[2]?[]`, `f32[]?[]`, `f32[2]?[]`) — the inner literal's scalar elements
+// adapt to the peeled numeric elem type, then each outer element Some-wraps.
+// The int->f64 nested cases from the original repro must STILL error (no
+// implicit int->float widening exists project-wide), so the fix must not leak
+// widening into the nested-container path either.
+func TestT1346_NumericLiteralAdaptThroughOptionalContainer(t *testing.T) {
+	// Int-width and f32 adaptation through optional-vector / optional-fixed-array
+	// elements must type-check.
+	checkOKWithStd(t, stdContainers, `
+		main() {
+			i32[]?[]  a = [[1, 2], [3, 4]];
+			i32[2]?[] b = [[1, 2]];
+			f32[]?[]  c = [[1.0, 2.0]];
+			f32[2]?[] d = [[1.0, 2.0]];
+			i32[]?[]  e = [[1, 2], none, [5, 6]];
+		}
+	`)
+
+	// int->f64 through an optional-vector element must still be rejected.
+	errs := checkErrsWithStd(t, stdContainers, `
+		main() {
+			f64[]?[] b = [[1, 2]];
+		}
+	`)
+	expectError(t, errs, "cannot assign int[][] to variable of type f64[]?[]")
+
+	// int->f64 through an optional-fixed-array element must still be rejected.
+	errs = checkErrsWithStd(t, stdContainers, `
+		main() {
+			f64[2]?[] c = [[1, 2]];
+		}
+	`)
+	expectError(t, errs, "cannot assign int[2][] to variable of type f64[2]?[]")
+}
+
 func TestMapLenProperty(t *testing.T) {
 	checkOKWithStd(t, stdContainers, `
 		main() {

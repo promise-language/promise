@@ -119,6 +119,19 @@ func isFloatType(t types.Type) bool {
 	return t == types.TypF32 || t == types.TypF64
 }
 
+// numericLiteralHint peels a single Optional wrapper so a numeric literal
+// adapts to the inner numeric type (`i64? x = 1`, `f32?[] = [1.0]`, and the
+// array/vector element cases in checkArrayLit). Without this, an int/float
+// literal under an Optional-numeric hint falls back to its default (int/f64)
+// and the surrounding Some-wrap assignment is rejected (T1346). Only Optional
+// is peeled — refs are not numeric-literal targets.
+func numericLiteralHint(t types.Type) types.Type {
+	if opt, ok := t.(*types.Optional); ok {
+		return opt.Elem()
+	}
+	return t
+}
+
 // isNumericType reports whether t is any numeric type.
 func isNumericType(t types.Type) bool {
 	return isIntegerType(t) || isFloatType(t)
@@ -176,8 +189,8 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 					c.errorf(e.Pos(), "%s", msg)
 				}
 			}
-		} else if hint != nil && isIntegerType(hint) {
-			typ = hint
+		} else if h := numericLiteralHint(hint); h != nil && isIntegerType(h) {
+			typ = h
 		} else {
 			typ = types.TypInt
 		}
@@ -189,8 +202,8 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 				c.errorf(e.Pos(), "unknown numeric suffix '%s'", e.Suffix)
 				typ = types.TypF64
 			}
-		} else if hint != nil && isFloatType(hint) {
-			typ = hint
+		} else if h := numericLiteralHint(hint); h != nil && isFloatType(h) {
+			typ = h
 		} else {
 			typ = types.TypF64
 		}

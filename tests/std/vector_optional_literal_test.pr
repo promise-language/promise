@@ -61,3 +61,55 @@ test_vector_optional_literal_generic() `test {
   assert(g0! == 5, "slot 0 value");
   assert(g1! == 7, "slot 1 value");
 }
+
+// T1346: a numeric literal adapts through an Optional element hint. Before the
+// fix, an int/float literal under an Optional-numeric hint (`i64?`, `u32?`,
+// `f32?`) fell back to its default (int/f64), so the container typed as
+// `int[]`/`f64[]` and the outer Some-wrap assignment was rejected. Also covers
+// the scalar case `i64? x = 1`. Note: f64? still requires `1.0` — there is no
+// implicit int->float literal widening project-wide (leak-checked).
+test_optional_numeric_literal_adapt() `test {
+  i64? x = 1;
+  assert(x! == 1, "scalar i64?");
+  i64?[] a = [1, 2];
+  assert(a[0]! == 1 && a[1]! == 2, "vec i64?");
+  i64?[] m = [1, none, 3];
+  assert(m[0]! == 1 && m[2]! == 3, "mixed none i64?");
+  u32?[] u = [10, 20];
+  assert(u[0]! == 10 && u[1]! == 20, "vec u32?");
+  u8? b = 200;
+  assert(b! == 200, "scalar u8?");
+  f32? s = 1.0;
+  assert(s! > 0.5f32, "scalar f32?");
+  f32?[] f = [1.0, 2.0];
+  assert(f[0]! > 0.5f32 && f[1]! > 1.5f32, "vec f32?");
+}
+
+// T1346 (bug title): the numeric literal must also adapt through an Optional
+// element whose inner type is itself a vector or fixed-array container
+// (`f32[]?[]`, `f32[2]?[]`, `i32[]?[]`, `i32[2]?[]`). The inner container
+// literal's scalar elements get the peeled numeric elem hint, then each outer
+// element Some-wraps element-wise. Also covers a `none` slot in the outer
+// optional-of-container. Leak-checked (nested droppable vectors).
+test_optional_numeric_literal_adapt_nested() `test {
+  // int-width adaptation through an optional-vector element.
+  i32[]?[] a = [[1, 2], [3, 4]];
+  assert(a[0]![0] == 1 && a[1]![1] == 4, "vec i32[]?");
+  // int-width adaptation through an optional-fixed-array element.
+  i32[2]?[] b = [[1, 2], [3, 4]];
+  assert(b[0]![0] == 1 && b[1]![1] == 4, "vec i32[2]?");
+  // f32 adaptation through an optional-vector element.
+  f32[]?[] c = [[1.0, 2.0]];
+  assert(c[0]![0] > 0.5f32 && c[0]![1] > 1.5f32, "vec f32[]?");
+  // f32 adaptation through an optional-fixed-array element.
+  f32[2]?[] d = [[1.0, 2.0], [3.0, 4.0]];
+  assert(d[1]![0] > 2.5f32 && d[1]![1] > 3.5f32, "vec f32[2]?");
+  // a `none` outer slot alongside adapting container elements.
+  i32[]?[] e = [[1, 2], none, [5, 6]];
+  assert(e[0]![0] == 1 && e[2]![1] == 6, "mixed none i32[]?");
+  if slot := e[1] {
+    assert(false, "slot 1 should be none");
+  } else {
+    assert(true, "none slot i32[]?");
+  }
+}

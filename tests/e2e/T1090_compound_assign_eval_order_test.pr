@@ -1,0 +1,36 @@
+// T1090: compound assignment through index/slice access evaluates the RHS
+// before the container read, per the canonical order
+// target → key/bounds → RHS → read → operator → write.
+//
+// This is observable only when the RHS side-effects the target. The trace below
+// prints "rhs" (RHS side effect), then "read[]"/"read[:]" (the getter read), so
+// the ordering is pinned for both the [] and [:] paths. Before the fix, the
+// slice path read via [:] *before* evaluating the RHS.
+side() int {
+  print_line("rhs");
+  return 5;
+}
+
+type Box {
+  int x;
+  [](int i) int {
+    print_line("read[]");
+    return this.x;
+  }
+  []=(int i, int v) {
+    this.x = v;
+  }
+  [:](int? low, int? high) int {
+    print_line("read[:]");
+    return this.x;
+  }
+  [:]=(int? low, int? high, int v) {
+    this.x = v;
+  }
+}
+
+main() `test(expected: "rhs\nread[]\nrhs\nread[:]") {
+  b := Box(x: 10);
+  b[0] += side(); // -> rhs, read[]
+  b[0:1] += side(); // -> rhs, read[:]
+}

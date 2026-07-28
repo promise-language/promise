@@ -1,0 +1,50 @@
+// T1090 / T0709 (reopened for slices by T0714): a slice compound assignment
+// (`s[a:b] += x`) reads the current value via a `[:]` getter before applying
+// the operator. When that read getter is failable, the reordered canonical
+// order (target → bounds → RHS → read → operator → write) must still
+// auto-propagate the read's error to the enclosing failable function, and the
+// setter write must not run. This pins the runtime behavior of the
+// `getM.Sig().CanError()` read-propagate branch of genSliceCompoundAssign,
+// which sits directly at the T1090 RHS-before-read reorder site.
+type FSpan `doc("A type with a failable `[:]` slice getter, driving the failable-read branch of slice compound assignment.") {
+  int x;
+  [:]!(int? low, int? high) int {
+    if this.x < 0 {
+      raise error(message: "neg span");
+    }
+    return this.x;
+  }
+  [:]=(int? low, int? high, int v) {
+    this.x = v;
+  }
+}
+
+bump_span!(FSpan ~s, int delta) {
+  s[0:1] += delta;
+}
+
+try_slice_compound_ok() bool {
+  s := FSpan(x: 5);
+  bump_span(s, 3)? e {
+    return false;
+  };
+  return s.x == 8;
+}
+
+try_slice_compound_propagates() bool {
+  s := FSpan(x: -1);
+  // The read getter raises before the setter runs, so the error must surface
+  // and the receiver state must be unchanged.
+  bump_span(s, 5)? e {
+    return e.message == "neg span" && s.x == -1;
+  };
+  return false;
+}
+
+test_failable_slice_getter_compound_ok() `test {
+  assert(try_slice_compound_ok(), "failable [:] compound succeeds when the guard passes");
+}
+
+test_failable_slice_getter_compound_propagates() `test {
+  assert(try_slice_compound_propagates(), "failable [:] compound read propagates the raise (T1090/T0709)");
+}

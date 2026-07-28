@@ -14292,7 +14292,7 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 }
 
 // genCompoundIndexAssign handles compound index assignments (arr[i] += val, m[k] += val)
-// with correct evaluation order: target → key → RHS.
+// with the canonical evaluation order: target → key → RHS → read → modify → write.
 func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp, valueExpr ast.Expr) {
 	targetType := c.info.Types[target.Target]
 	if c.typeSubst != nil {
@@ -14348,6 +14348,8 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 
 // genMethodCompoundAssign handles compound assignment (e.g. m[k] += v) on non-native types
 // by calling [] to read, applying the operator, then calling []= to write.
+// The RHS is evaluated before the [] read, per the canonical compound-assign
+// order target → key → RHS → read → op → write (T1090).
 func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType types.Type, op ast.AssignOp, valueExpr ast.Expr) {
 	typeName := c.resolveTypeName(targetType)
 
@@ -14566,7 +14568,9 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 // (v[a:b] += x) by reading the current value via [:], applying the operator,
 // then writing via [:]=. Mirrors genMethodCompoundAssign (the [] path) for the
 // read/op/write structure and genSliceAssign for receiver-ptr resolution and
-// bound generation. T0714.
+// bound generation. T0714. Follows the canonical compound-assign order
+// target → bounds → RHS → read → op → write (T1090): the RHS is evaluated
+// before the [:] read, consistent with the []/native index paths.
 func (c *Compiler) genSliceCompoundAssign(target *ast.SliceExpr, op ast.AssignOp, valueExpr ast.Expr) {
 	targetType := c.info.Types[target.Target]
 	if c.typeSubst != nil {
@@ -14631,17 +14635,21 @@ func (c *Compiler) genSliceCompoundAssign(target *ast.SliceExpr, op ast.AssignOp
 	low := c.genSliceBound(target.Low, optIntType)
 	high := c.genSliceBound(target.High, optIntType)
 
+	// T1090: evaluate the RHS before the [:] read, matching the canonical order
+	// (target → bounds → RHS → read → op → write) shared with the []/native
+	// index paths. This is observable only when the RHS side-effects the slice
+	// target, in which case the read combines the post-RHS value.
+	val := c.genExpr(valueExpr)
+	if c.info.AutoPropagateExprs[valueExpr] {
+		val = c.genAutoPropagateValue(val)
+	}
+
 	// Read the current value via [:].
 	var current value.Value = c.block.NewCall(getFn, instancePtr, low, high)
 	// T0709 (reopened for slices by T0714): a failable [:] read propagates its
 	// error before the value is used.
 	if getM.Sig().CanError() {
 		current = c.genAutoPropagateValue(current)
-	}
-
-	val := c.genExpr(valueExpr)
-	if c.info.AutoPropagateExprs[valueExpr] {
-		val = c.genAutoPropagateValue(val)
 	}
 
 	operandType := getM.Sig().Result()

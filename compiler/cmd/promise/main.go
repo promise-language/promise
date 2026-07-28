@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -6645,6 +6646,10 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 	return mi, nil
 }
 
+// tmpExtractSeq makes per-extraction temp dir names unique within a process,
+// complementing the PID which makes them unique across processes.
+var tmpExtractSeq atomic.Uint64
+
 // extractEmbeddedModule extracts an embedded catalog module from go:embed to a
 // persistent cache directory (~/.promise/cache/embedded_modules/<name>/).
 // The compiler stamp mechanism (ensureCacheValid) clears these when the binary
@@ -6664,15 +6669,26 @@ func extractEmbeddedModule(name string) (string, error) {
 		return "", err
 	}
 
-	// Fast path: if the directory already exists with files, reuse it.
+	// Fast path: atomic rename guarantees cacheDir only ever appears fully
+	// populated, so a non-empty dir is complete and safe to reuse.
 	// The compiler stamp guarantees these are from the current binary.
 	if info, err := os.ReadDir(cacheDir); err == nil && len(info) > 0 {
 		return cacheDir, nil
 	}
 
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	// Extract into a unique sibling temp dir, then atomically rename into place
+	// so concurrent readers never observe a partial module (T1348).
+	parent := filepath.Dir(cacheDir)
+	if err := os.MkdirAll(parent, 0755); err != nil {
 		return "", err
 	}
+	tmpDir := filepath.Join(parent, fmt.Sprintf(".%s.tmp.%d.%d",
+		name, os.Getpid(), tmpExtractSeq.Add(1)))
+	os.RemoveAll(tmpDir) // clear any leftover from a crashed prior run
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmpDir) // no-op after a successful rename
 
 	for _, e := range entries {
 		if e.IsDir() {
@@ -6682,11 +6698,19 @@ func extractEmbeddedModule(name string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading embedded %s/%s: %w", name, e.Name(), err)
 		}
-		if err := os.WriteFile(filepath.Join(cacheDir, e.Name()), data, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, e.Name()), data, 0644); err != nil {
 			return "", err
 		}
 	}
 
+	if err := os.Rename(tmpDir, cacheDir); err != nil {
+		// Another process won the race and populated cacheDir first (rename
+		// onto a non-empty dir fails with ENOTEMPTY/EEXIST). Accept theirs.
+		if info, rerr := os.ReadDir(cacheDir); rerr == nil && len(info) > 0 {
+			return cacheDir, nil
+		}
+		return "", err
+	}
 	return cacheDir, nil
 }
 

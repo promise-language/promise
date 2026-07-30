@@ -7842,7 +7842,14 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 		// (vs[0]) — so the field store mutates real storage, not a spilled copy.
 		basePtr, addrOK := c.genValueTypeReceiverAddr(target.Target)
 		if !addrOK {
-			panic(fmt.Sprintf("codegen: value type field assignment requires addressable target for %s.%s", named, field.Name()))
+			// T1359: a non-addressable receiver (e.g. a getter/call result) is a fresh
+			// temporary — there is no caller storage to write back to. Spill the
+			// receiver value into a throwaway temp and GEP into that, so the field store
+			// mutates the temp and is discarded. Matches the value-type-setter and
+			// heap-field-assign paths, which already spill/no-op for the same rvalue
+			// receiver.
+			recv := c.memberReceiver(func() value.Value { return c.genExpr(target.Target) })
+			basePtr = c.valueTypeReceiverPtr(recv, targetType)
 		}
 		typedPtr := c.block.NewBitCast(basePtr, valuePtrType)
 		return c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,

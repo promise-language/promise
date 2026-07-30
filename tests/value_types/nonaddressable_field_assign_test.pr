@@ -1,0 +1,84 @@
+// T1359: a direct field assignment to a pure value type reached through a
+// NON-addressable receiver — a getter member that returns a fresh value — must
+// not panic codegen. The getter result is a fresh temporary with no caller
+// storage to write back to, so the write is discarded (a silent no-op). This
+// pins the discard-the-write semantics and keeps all three non-addressable
+// receiver paths (value-type direct field assign, value-type setter, heap-type
+// field assign) consistent.
+type Vec2 {
+  int x `value;
+  int y `value;
+  get sum int {
+    return this.x + this.y;
+  }
+  set sum(int v) {
+    this.x = v;
+    this.y = 0;
+  }
+}
+
+// Heap-type sibling (RTTI, heap-allocated) — same non-addressable getter shape.
+type HeapVec2 {
+  int x;
+  int y;
+}
+
+type Holder {
+  get fresh Vec2 {
+    return Vec2(x: 3, y: 4);
+  }
+  get fresh_heap HeapVec2 {
+    return HeapVec2(x: 3, y: 4);
+  }
+  make(int seed) Vec2 {
+    return Vec2(x: seed, y: seed + 1);
+  }
+}
+
+// Free function returning a fresh value type — a CallExpr receiver, which hits
+// genValueTypeReceiverAddr's `default` (non-addressable) branch, distinct from
+// the getter-member (MemberExpr) branch above.
+make_vec() Vec2 {
+  return Vec2(x: 3, y: 4);
+}
+
+// 1. Value-type DIRECT field assign through a getter member — the panic repro.
+//    The write lands on the fresh temporary and is discarded; a subsequent
+//    getter read returns the originally constructed value.
+value_field_assign_through_getter() `test {
+  h := Holder();
+  h.fresh.x = 99;
+  assert(h.fresh.x == 3, "value field assign through getter is discarded");
+}
+
+// 2. Value-type SETTER through a getter member — same no-op via the spill path.
+value_setter_through_getter() `test {
+  h := Holder();
+  h.fresh.sum = 99;
+  assert(h.fresh.x == 3, "value setter through getter is discarded");
+  assert(h.fresh.y == 4, "value setter through getter is discarded (y)");
+}
+
+// 3. Heap-type field assign through a getter member — mutates a temporary
+//    (no-op), identical observable behavior to the value-type paths.
+heap_field_assign_through_getter() `test {
+  h := Holder();
+  h.fresh_heap.x = 99;
+  assert(h.fresh_heap.x == 3, "heap field assign through getter is discarded");
+}
+
+// 4. Value-type direct field assign through a FREE-FUNCTION call result — a
+//    CallExpr receiver (genValueTypeReceiverAddr `default` branch). Pre-fix this
+//    panicked codegen just like the getter member; the write is discarded.
+value_field_assign_through_free_call() `test {
+  make_vec().x = 99;
+  assert(make_vec().x == 3, "value field assign through free call is discarded");
+}
+
+// 5. Value-type direct field assign through a METHOD call result — also a
+//    CallExpr receiver. Evaluated once, mutation lands on the fresh temp.
+value_field_assign_through_method_call() `test {
+  h := Holder();
+  h.make(5).x = 99;
+  assert(h.make(5).x == 5, "value field assign through method call is discarded");
+}

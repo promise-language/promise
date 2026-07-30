@@ -7821,22 +7821,16 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 			panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), named))
 		}
 		valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
-		if isThisReceiver(target.Target) {
-			// this is an i8* pointing to the value struct
-			thisVal := c.genExpr(target.Target)
-			typedPtr := c.block.NewBitCast(thisVal, valuePtrType)
-			return c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		// T1356: take the in-place address of the receiver l-value — a local,
+		// `this`, a nested value-type member (o.inner), or a container element
+		// (vs[0]) — so the field store mutates real storage, not a spilled copy.
+		basePtr, addrOK := c.genValueTypeReceiverAddr(target.Target)
+		if !addrOK {
+			panic(fmt.Sprintf("codegen: value type field assignment requires addressable target for %s.%s", named, field.Name()))
 		}
-		// For local variables, get the alloca directly
-		if ident, ok := target.Target.(*ast.IdentExpr); ok {
-			if alloca, ok := c.locals[ident.Name]; ok {
-				typedPtr := c.block.NewBitCast(alloca, valuePtrType)
-				return c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-			}
-		}
-		panic(fmt.Sprintf("codegen: value type field assignment requires addressable target for %s.%s", named, field.Name()))
+		typedPtr := c.block.NewBitCast(basePtr, valuePtrType)
+		return c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 	}
 
 	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
@@ -15539,6 +15533,55 @@ func (c *Compiler) valueTypeReceiverPtr(val value.Value, typ types.Type) value.V
 	tmp := c.createEntryAlloca(layout.Value.LLVMType)
 	c.block.NewStore(val, tmp)
 	return c.block.NewBitCast(tmp, irtypes.I8Ptr)
+}
+
+// genValueTypeReceiverAddr returns an i8* to the in-place storage of a value-type
+// l-value receiver — a local, `this`, a nested value-type member (`o.inner`), or a
+// container element (`vs[0]`) — so a field store or setter mutates the real
+// storage rather than a spilled copy (T1356). Returns ok=false for a
+// non-addressable receiver (e.g. a value type returned by a call), where the
+// caller must fall back to a spill (nothing to write back to).
+func (c *Compiler) genValueTypeReceiverAddr(recv ast.Expr) (value.Value, bool) {
+	if isThisReceiver(recv) {
+		// `this` is already an i8* pointing at the value struct.
+		return c.genExpr(recv), true
+	}
+	switch e := recv.(type) {
+	case *ast.IdentExpr:
+		if alloca, ok := c.locals[e.Name]; ok {
+			return c.block.NewBitCast(alloca, irtypes.I8Ptr), true
+		}
+		if ptr, ok := c.mutRefPtrs[e.Name]; ok { // value-type MutRef param
+			return c.block.NewBitCast(ptr, irtypes.I8Ptr), true
+		}
+		return nil, false
+	case *ast.MemberExpr:
+		// Only a real field is addressable in place; a getter member produces a
+		// fresh temporary, so fall back to the spill. genFieldPtr returns an
+		// in-place pointer to the field's storage — for a value-type field on a
+		// heap parent it GEPs into the instance; on a value parent it recurses
+		// back through this helper, terminating as each step strips one member.
+		parentType := c.info.Types[e.Target]
+		if c.typeSubst != nil {
+			parentType = types.Substitute(parentType, c.typeSubst)
+		}
+		if c.selfSubst != nil { // mirror genFieldPtr so a `Self`-typed parent resolves
+			parentType = types.SubstituteSelf(parentType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if pn := extractNamed(parentType); pn == nil || pn.LookupField(e.Field) == nil {
+			return nil, false
+		}
+		return c.block.NewBitCast(c.genFieldPtr(e), irtypes.I8Ptr), true
+	case *ast.IndexExpr:
+		// genIndexSlotPtr returns an element pointer for arrays and vectors.
+		// COW is unnecessary: a value-type-element vector literal is always
+		// heap-allocated (T0062 statics require compile-time-constant scalar
+		// elements), so in-place mutation never touches read-only memory and a
+		// COW guard would be a guaranteed no-op.
+		return c.block.NewBitCast(c.genIndexSlotPtr(e), irtypes.I8Ptr), true
+	default:
+		return nil, false
+	}
 }
 
 // extractInstancePtrForThis extracts the instance/RTTI pointer from a `this` value.

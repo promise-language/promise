@@ -10003,6 +10003,34 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 			if getter == nil {
 				panic(fmt.Sprintf("codegen: compound assignment to setter %s.%s but no getter found", named, target.Field))
 			}
+			// T1356: a value-type setter reached through a side-effecting subscript
+			// (`vs[next()].sum += x`) must evaluate the subscript exactly once. The
+			// generic staged-value path below would re-derive the receiver address in
+			// genSetterCall (re-running the index), so instead take the element address
+			// once here, load a value copy from it for the getter read, and hand the
+			// same address to the setter write. Only IndexExpr can carry side effects
+			// in its receiver derivation — locals/`this`/nested members re-derive for
+			// free, so they stay on the simpler staged-value path.
+			if _, isIndex := target.Target.(*ast.IndexExpr); isIndex && named.IsValueType() {
+				if addr, ok := c.genValueTypeReceiverAddr(target.Target); ok { // subscript — evaluated ONCE
+					layout := c.lookupTypeLayout(targetType)
+					typedAddr := c.block.NewBitCast(addr, irtypes.NewPointer(layout.Value.LLVMType))
+					recvVal := c.block.NewLoad(layout.Value.LLVMType, typedAddr) // value copy for the read
+					val := c.genExpr(valueExpr)                                  // RHS — after target
+					if c.info.AutoPropagateExprs[valueExpr] {
+						val = c.genAutoPropagateValue(val)
+					}
+					c.stagedMemberReceiver = recvVal
+					current := c.genGetterCall(target, targetType, named, getter)         // read
+					current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
+					result := c.genCompoundOp(op, c.info.Types[target], current, val)     // op
+					c.stagedMemberReceiverAddr = addr                                     // reuse the single address
+					c.genSetterCall(target, targetType, named, setter, result)            // write
+					c.stagedMemberReceiver = nil
+					c.stagedMemberReceiverAddr = nil
+					return
+				}
+			}
 			recv := c.genExprAutoPropagate(target.Target) // target — evaluated ONCE
 			val := c.genExpr(valueExpr)                   // RHS — after target
 			if c.info.AutoPropagateExprs[valueExpr] {
@@ -10424,29 +10452,33 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	// T1353: evaluate the receiver once (target-first) — memberReceiver reuses a
 	// value staged by genMemberCompoundAssign for a compound `a.b += x`, so the
 	// getter read and this setter write share the single evaluation. When nothing
-	// is staged it falls back to a plain genExpr.
-	recv := c.memberReceiver(func() value.Value { return c.genExpr(target.Target) })
+	// is staged it falls back to a plain genExpr. The genExpr is deferred into the
+	// branches that need a loaded value so the T1356 address path doesn't
+	// double-evaluate the receiver base (it re-derives storage from target.Target).
 	if isThisReceiver(target.Target) {
-		args = append(args, recv)
+		args = append(args, c.memberReceiver(func() value.Value { return c.genExpr(target.Target) }))
 	} else if isContainerType(targetType) {
-		args = append(args, recv)
+		args = append(args, c.memberReceiver(func() value.Value { return c.genExpr(target.Target) }))
 	} else if named != nil && named.IsValueType() {
-		// T1354: for an addressable local, pass the address of the variable's
-		// own alloca so the setter mutates in place (mirrors genFieldPtr's
-		// value-type path). Spilling a loaded copy silently discards the
-		// mutation. A non-addressable receiver (e.g. a value type returned by a
-		// call) has nothing to write back to, so it keeps the spill.
-		if ident, ok := target.Target.(*ast.IdentExpr); ok {
-			if alloca, ok := c.locals[ident.Name]; ok {
-				args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
-			} else {
-				args = append(args, c.valueTypeReceiverPtr(recv, targetType))
-			}
+		// T1356: mutate the receiver's in-place storage — a local, `this`, a nested
+		// value-type member (o.inner), or a container element (vs[0]). Only a truly
+		// non-addressable receiver (e.g. a value returned by a call) keeps the
+		// spill. Subsumes the T1354 local-Ident special case.
+		if addr := c.stagedMemberReceiverAddr; addr != nil {
+			// A compound assign through a side-effecting subscript already took the
+			// element address once; reuse it so the index is not re-evaluated (T1356).
+			c.stagedMemberReceiverAddr = nil
+			c.stagedMemberReceiver = nil
+			args = append(args, addr)
+		} else if ptr, ok := c.genValueTypeReceiverAddr(target.Target); ok {
+			c.stagedMemberReceiver = nil // drop any staged value; the address path re-derives storage
+			args = append(args, ptr)
 		} else {
+			recv := c.memberReceiver(func() value.Value { return c.genExpr(target.Target) })
 			args = append(args, c.valueTypeReceiverPtr(recv, targetType))
 		}
 	} else {
-		args = append(args, c.extractInstancePtr(recv))
+		args = append(args, c.extractInstancePtr(c.memberReceiver(func() value.Value { return c.genExpr(target.Target) })))
 	}
 	args = append(args, val)
 	call := c.block.NewCall(fn, args...)

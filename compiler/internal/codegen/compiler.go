@@ -502,8 +502,16 @@ type Compiler struct {
 	// emitted exactly once (and before the RHS). Set/consumed synchronously within
 	// genMemberCompoundAssign; nil at all other times.
 	stagedMemberReceiver value.Value
-	coroCleanupBlk       *ir.Block // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk       *ir.Block // coroutine suspend block (suspend path: coro.end + ret)
+
+	// T1356: staged in-place i8* address of a value-type compound-assign receiver
+	// reached through a side-effecting subscript (`vs[next()].sum += x`). The getter
+	// read loads a value copy from this address while the setter write consumes the
+	// same address, so the subscript's side effects fire exactly once. Set/consumed
+	// synchronously within genMemberCompoundAssign; nil at all other times.
+	stagedMemberReceiverAddr value.Value
+
+	coroCleanupBlk *ir.Block // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk *ir.Block // coroutine suspend block (suspend path: coro.end + ret)
 
 	// T0668: maps each Task[T].drop func to its paired Task[T].free_after_done
 	// func so temp/binding drop sites that only know the drop func can route

@@ -1,0 +1,182 @@
+// T1356: mutating a value-type field (or property setter) reached through a
+// non-Ident addressable receiver — a nested value-type member (o.inner) or a
+// container element (vs[0]). Direct assign previously panicked codegen; the
+// setter silently no-op'd (wrote to a spilled copy). Both now mutate the real
+// storage in place.
+type Vec2 {
+  int x `value;
+  int y `value;
+  get sum int {
+    return this.x + this.y;
+  }
+  set sum(int v) {
+    this.x = v;
+    this.y = 0;
+  }
+}
+
+type Outer {
+  Vec2 inner `value;
+  int tag `value;
+}
+
+type Deep {
+  Outer mid `value;
+}
+
+type Counter {
+  int n;
+}
+
+// Returns a fixed index while recording that it was evaluated, so a test can
+// assert the subscript fires exactly once.
+counting_index(Counter ~c) int {
+  c.n = c.n + 1;
+  return 0;
+}
+
+// A value-type mutable-borrow (`~) param: field assign and setter through it
+// must mutate the caller's storage in place (genValueTypeReceiverAddr's
+// mutRefPtrs branch).
+bump_via_mutref(Vec2 ~v) {
+  v.x = 5;
+  v.sum = 40;
+}
+
+type Box[T] {
+  T value `value;
+  get boxed T {
+    return this.value;
+  }
+  set boxed(T v) {
+    this.value = v;
+  }
+}
+
+// 1. Direct field assign through a nested value-type member (the panic repro).
+nested_member_field_assign() `test {
+  o := Outer(inner: Vec2(x: 3, y: 4), tag: 9);
+  o.inner.x = 17;
+  assert(o.inner.x == 17, "nested member field assign");
+  assert(o.inner.y == 4, "nested member sibling field untouched");
+  assert(o.tag == 9, "nested member sibling member untouched");
+}
+
+// 2. Direct field assign through a vector element (the panic repro, indexed).
+vector_element_field_assign() `test {
+  vs := [Vec2(x: 3, y: 4)];
+  vs[0].x = 17;
+  assert(vs[0].x == 17, "vector element field assign");
+  assert(vs[0].y == 4, "vector element sibling field untouched");
+}
+
+// 3. Property setter through a nested value-type member (the no-op repro).
+nested_member_setter() `test {
+  o := Outer(inner: Vec2(x: 3, y: 4), tag: 9);
+  o.inner.sum = 17;
+  assert(o.inner.x == 17, "nested member setter x");
+  assert(o.inner.y == 0, "nested member setter y");
+  assert(o.tag == 9, "nested member setter sibling untouched");
+}
+
+// 3b. Compound assign to a value-type setter through a nested value-type member.
+// This is the non-Index staged path: genMemberCompoundAssign stages the loaded
+// receiver value, then genSetterCall DROPS that staged value and re-derives the
+// in-place address via genValueTypeReceiverAddr's MemberExpr branch, so the
+// setter write lands on o.inner's real storage rather than the read copy.
+nested_member_setter_compound() `test {
+  o := Outer(inner: Vec2(x: 3, y: 4), tag: 9);
+  o.inner.sum += 10; // sum 7 -> 17; setter sets x=17, y=0
+  assert(o.inner.x == 17, "nested member setter compound x");
+  assert(o.inner.y == 0, "nested member setter compound y");
+  assert(o.tag == 9, "nested member setter compound sibling untouched");
+}
+
+// 3c. Property setter reached three levels deep (d.mid.inner) — the MemberExpr
+// branch of genValueTypeReceiverAddr recurses through genFieldPtr for each
+// value-type parent until it reaches the root local's alloca.
+deep_setter() `test {
+  d := Deep(mid: Outer(inner: Vec2(x: 1, y: 2), tag: 7));
+  d.mid.inner.sum = 30;
+  assert(d.mid.inner.x == 30, "deep nested setter x");
+  assert(d.mid.inner.y == 0, "deep nested setter y");
+  assert(d.mid.tag == 7, "deep nested setter outer sibling untouched");
+}
+
+// 4. Property setter through a vector element (the no-op repro, indexed).
+vector_element_setter() `test {
+  vs := [Vec2(x: 3, y: 4)];
+  vs[0].sum = 17;
+  assert(vs[0].x == 17, "vector element setter x");
+  assert(vs[0].y == 0, "vector element setter y");
+}
+
+// 5. Compound plain field through a nested member.
+nested_member_compound() `test {
+  o := Outer(inner: Vec2(x: 3, y: 4), tag: 9);
+  o.inner.x += 5;
+  assert(o.inner.x == 8, "nested member compound field");
+  assert(o.inner.y == 4, "nested member compound sibling untouched");
+}
+
+// 6a. Deep (3-level) value nesting.
+deep_nesting() `test {
+  d := Deep(mid: Outer(inner: Vec2(x: 1, y: 2), tag: 7));
+  d.mid.inner.x = 42;
+  assert(d.mid.inner.x == 42, "deep nested field assign");
+  assert(d.mid.inner.y == 2, "deep nested sibling untouched");
+  assert(d.mid.tag == 7, "deep nested outer sibling untouched");
+}
+
+// 6b. Fixed-size array element.
+fixed_array_element() `test {
+  Vec2[2] arr = [Vec2(x: 1, y: 1), Vec2(x: 2, y: 2)];
+  arr[1].x = 99;
+  assert(arr[1].x == 99, "fixed array element field assign");
+  assert(arr[0].x == 1, "fixed array other element untouched");
+}
+
+// 7. Generic/monomorphized value type reached through a vector element —
+// exercises the typeSubst path in genFieldPtr and the setter address path.
+// (A generic value-type instantiation as a `value field of a concrete type is a
+// separate sema restriction, so the index path is used to reach it.)
+generic_value_type_element() `test {
+  vs := [Box[int](value: 5)];
+  assert(vs[0].boxed == 5, "generic element getter read");
+  vs[0].value = 20;
+  assert(vs[0].value == 20, "generic element field assign");
+  vs[0].boxed = 33;
+  assert(vs[0].value == 33, "generic element setter");
+  assert(vs[0].boxed == 33, "generic element getter after setter");
+}
+
+// 8. Regression: plain local field assign and setter (T1354) still mutate in
+// place.
+local_regression() `test {
+  v := Vec2(x: 3, y: 4);
+  v.x = 10;
+  assert(v.x == 10, "local field assign");
+  v.sum = 21;
+  assert(v.x == 21, "local setter x");
+  assert(v.y == 0, "local setter y");
+}
+
+// 8b. Compound assign to a value-type setter through a side-effecting subscript
+// must evaluate the subscript exactly once (T1356 — the setter reuses the single
+// element address taken for the getter read rather than re-deriving it).
+compound_setter_side_effecting_index() `test {
+  c := Counter(n: 0);
+  vs := [Vec2(x: 3, y: 4)];
+  vs[counting_index(c)].sum += 10; // sum 7 -> 17; setter sets x=17, y=0
+  assert(vs[0].x == 17, "compound setter through index x");
+  assert(vs[0].y == 0, "compound setter through index y");
+  assert(c.n == 1, "subscript evaluated exactly once");
+}
+
+// 9. Value-type mutable-borrow param: field assign + setter mutate in place.
+mutref_param() `test {
+  a := Vec2(x: 1, y: 2);
+  bump_via_mutref(a);
+  assert(a.x == 40, "mutref param setter x");
+  assert(a.y == 0, "mutref param setter y");
+}

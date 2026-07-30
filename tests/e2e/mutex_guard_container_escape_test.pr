@@ -77,7 +77,7 @@ test_guard_push_field_mutex_after_owner() `test {
 // is a compile error covered by TestT0603_RefParamContainerLocalGuard* in the Go
 // ownership tests.
 push_guard_into_ref_param(Vector[MutexGuard[int]] ~vec, MutexGuard[int] move g) {
-  vec.push(g);
+  vec.push(move g);
 }
 test_guard_push_into_ref_param() `test {
   m := Mutex[int](17);

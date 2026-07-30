@@ -4,7 +4,7 @@
 // guard, NLL early-drops the parent Mutex, and vec's element-drop dereferences
 // the freed Mutex -> use-after-free at scope exit.
 push_guard_count(Vector[MutexGuard[int]] ~vec, MutexGuard[int] move g) int {
-  vec.push(g);
+  vec.push(move g);
   return vec.len;
 }
 

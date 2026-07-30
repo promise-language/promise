@@ -1122,7 +1122,14 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 						// conservatively allowed — the Mutex outlives the function, so
 						// the container-store order stays valid (T0557's pattern).
 						if types.IsMutexGuard(peelOptional(c.info.Types[arg.Value])) {
-							if mem, ok := e.Callee.(*ast.MemberExpr); ok {
+							// T1343: storeNative now also covers a `~`/`&`-vector receiver
+							// (isElementStoringNativeCall peels the ref). The same-function
+							// ordering check below only applies to a BARE (owned/plain-borrow)
+							// local Vector target — a ref-param container's guard-escape hazard
+							// is already handled by the T0603 isEscapingContainerStore check
+							// above. Restore the original precondition (unpeeled IsVector) so a
+							// ref-param container does not spuriously trip the ordering check.
+							if mem, ok := e.Callee.(*ast.MemberExpr); ok && types.IsVector(c.info.Types[mem.Target]) {
 								if container, ok := mem.Target.(*ast.IdentExpr); ok {
 									if cOrder, tracked := c.declOrder[container.Name]; tracked {
 										if mroot := c.guardMutexExprRoot(arg.Value); mroot != "" {
@@ -1320,6 +1327,24 @@ func isConsumingNativeMethod(recvType types.Type, methodName string) bool {
 	return methodName == "close" && types.IsMutexGuard(recvType)
 }
 
+// peelRefType unwraps SharedRef/MutRef layers to the referenced value type, so a
+// container receiver reached through a `&`/`~` borrow parameter (whose static
+// type is a *SharedRef/*MutRef wrapping the container Instance) still matches the
+// container-shape predicates (types.IsVector etc.). Returns typ unchanged when it
+// is not a reference.
+func peelRefType(typ types.Type) types.Type {
+	for {
+		switch t := typ.(type) {
+		case *types.SharedRef:
+			typ = t.Elem()
+		case *types.MutRef:
+			typ = t.Elem()
+		default:
+			return typ
+		}
+	}
+}
+
 // isElementStoringNativeCall reports whether the call is to a native container
 // method that takes ownership of (or dups) its value argument at the store
 // site — currently only Vector.push(T elem). For these, a plain `T` argument is
@@ -1334,7 +1359,7 @@ func (c *Checker) isElementStoringNativeCall(callee ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	return member.Field == "push" && types.IsVector(c.info.Types[member.Target])
+	return member.Field == "push" && types.IsVector(peelRefType(c.info.Types[member.Target]))
 }
 
 // guardMutexExprRoot returns the name of the local that owns the Mutex a pushed

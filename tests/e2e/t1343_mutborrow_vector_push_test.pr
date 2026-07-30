@@ -1,0 +1,73 @@
+// T1343: pushing a borrowed non-Copy value into a `~` mutable-borrow Vector used
+// to be accepted by the ownership checker, but codegen moved the element into the
+// vector — the element was then owned by BOTH the vector and the caller, so drop
+// ran twice (double-free). The ownership fix now rejects that shape at compile
+// time (see compiler/internal/ownership/t1343_test.go). This file locks in the
+// runtime side: the legitimate `~`-vector push patterns (owned-move, move-param,
+// auto-dup element) each drop their element exactly once — the zero-tolerance
+// leak/double-free enforcement covers the regression.
+type R {
+  int id;
+  drop(~this) {
+  }
+}
+
+// Owned local moved into a `~` mutable-borrow vector — the vector owns it and
+// drops it once when the vector goes out of scope.
+fill_owned(R[] ~v, int id) {
+  r := R(id: id);
+  v.push(move r);
+}
+
+// A `move`-declared parameter consumed into a `~` vector.
+fill_moved(R move r, R[] ~v) {
+  v.push(move r);
+}
+
+// A temporary constructed at the push site is consumed directly into a `~`
+// vector — no named binding survives, so only the vector drops it.
+fill_temp(R[] ~v, int id) {
+  v.push(R(id: id));
+}
+
+push_owned_into_mut_borrow_vector() `test {
+  R[] v = [];
+  fill_owned(v, 1);
+  fill_owned(v, 2);
+  assert(v.len == 2, "owned pushes land");
+  assert(v[0].id == 1, "first element");
+  assert(v[1].id == 2, "second element");
+  // v drops here; each R dropped exactly once — leak detector guards double-free.
+}
+
+push_move_param_into_mut_borrow_vector() `test {
+  R[] v = [];
+  fill_moved(R(id: 7), v);
+  assert(v.len == 1, "move-param push lands");
+  assert(v[0].id == 7, "moved element id");
+}
+
+push_temp_into_mut_borrow_vector() `test {
+  R[] v = [];
+  fill_temp(v, 3);
+  fill_temp(v, 4);
+  assert(v.len == 2, "temporary pushes land");
+  assert(v[0].id == 3, "first temp element");
+  assert(v[1].id == 4, "second temp element");
+  // v drops here; each R dropped exactly once — leak detector guards double-free.
+}
+
+// Auto-dup element (string): a plain shared-borrow param is duped by codegen at
+// the push site, so the caller's original survives and the vector owns a copy.
+fill_str(string s, string[] ~v) {
+  v.push(s);
+}
+
+push_autodup_into_mut_borrow_vector() `test {
+  string[] v = [];
+  src := "hello".clone();
+  fill_str(src, v);
+  assert(v.len == 1, "autodup push lands");
+  assert(v[0].len == 5, "duped string content");
+  assert(src.len == 5, "caller's source survives the dup");
+}

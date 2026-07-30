@@ -2757,24 +2757,31 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	// Generate receiver
 	var args []value.Value
 	if method.Sig().Recv() != nil {
-		target := c.genExprAutoPropagate(member.Target) // B0323
-		// T0130: Defer receiver claim — only claim if method produces a new iterator
-		// (combinator). Terminal operations (count, collect, find) don't capture the
-		// receiver, so the heap temp should be freed at statement end.
-		c.pendingReceiverClaim = target
-		if isThisReceiver(member.Target) {
-			args = append(args, target)
-		} else if isContainerType(targetType) {
-			args = append(args, target)
-		} else if isPrimitiveScalar(named) {
-			args = append(args, target)
-		} else if named.IsValueType() {
-			args = append(args, c.valueTypeReceiverPtr(target, targetType))
+		// T1358: A value-type non-`this` receiver on a `~this` (mutable-borrow)
+		// method must pass the caller's in-place storage address so field/setter
+		// mutations reach the caller's variable — not a spilled copy. See
+		// genMethodCall for the full rationale.
+		if named.IsValueType() && !isThisReceiver(member.Target) {
+			args = append(args, c.genValueTypeReceiverArg(member.Target, targetType,
+				method.Sig().Recv().Ref() == types.RefMut))
 		} else {
-			instancePtr := c.extractInstancePtr(target)
-			args = append(args, instancePtr)
-			// B0258: Track method chain intermediate for cleanup at statement end.
-			c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
+			target := c.genExprAutoPropagate(member.Target) // B0323
+			// T0130: Defer receiver claim — only claim if method produces a new iterator
+			// (combinator). Terminal operations (count, collect, find) don't capture the
+			// receiver, so the heap temp should be freed at statement end.
+			c.pendingReceiverClaim = target
+			if isThisReceiver(member.Target) {
+				args = append(args, target)
+			} else if isContainerType(targetType) {
+				args = append(args, target)
+			} else if isPrimitiveScalar(named) {
+				args = append(args, target)
+			} else {
+				instancePtr := c.extractInstancePtr(target)
+				args = append(args, instancePtr)
+				// B0258: Track method chain intermediate for cleanup at statement end.
+				c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
+			}
 		}
 	}
 
@@ -5460,27 +5467,36 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 
 	var args []value.Value
 	if method.Sig().Recv() != nil {
-		target := c.genExprAutoPropagate(member.Target) // B0323
-		// T0130: Defer receiver claim — only claim if method produces a new iterator.
-		c.pendingReceiverClaim = target
-		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
-		// `this` in a method body is also i8*.
-		// Primitive scalars (int, f64, bool, char, etc.) are raw values — pass directly.
-		// Value types: store to temp alloca, pass pointer (value semantics).
-		// Regular user types are value structs — extract the instance pointer.
-		if isThisReceiver(member.Target) {
-			args = append(args, target)
-		} else if isContainerType(targetType) {
-			args = append(args, target)
-		} else if isPrimitiveScalar(named) {
-			args = append(args, target)
-		} else if named.IsValueType() {
-			args = append(args, c.valueTypeReceiverPtr(target, targetType))
+		// T1358: A value-type non-`this` receiver on a `~this` (mutable-borrow)
+		// method must pass the caller's in-place storage address so field/setter
+		// mutations reach the caller's variable — not a spilled copy. Handled by
+		// genValueTypeReceiverArg, which evaluates the receiver itself (no shared
+		// pre-eval, so a side-effecting subscript isn't evaluated twice). Value
+		// types have no heap temp, so pendingReceiverClaim/trackChainIntermediate
+		// bookkeeping does not apply.
+		if named.IsValueType() && !isThisReceiver(member.Target) {
+			args = append(args, c.genValueTypeReceiverArg(member.Target, targetType,
+				method.Sig().Recv().Ref() == types.RefMut))
 		} else {
-			instancePtr := c.extractInstancePtr(target)
-			args = append(args, instancePtr)
-			// B0258: Track method chain intermediate for cleanup at statement end.
-			c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
+			target := c.genExprAutoPropagate(member.Target) // B0323
+			// T0130: Defer receiver claim — only claim if method produces a new iterator.
+			c.pendingReceiverClaim = target
+			// Container types (Vector, Map, string) are already i8* pointers — pass directly.
+			// `this` in a method body is also i8*.
+			// Primitive scalars (int, f64, bool, char, etc.) are raw values — pass directly.
+			// Regular user types are value structs — extract the instance pointer.
+			if isThisReceiver(member.Target) {
+				args = append(args, target)
+			} else if isContainerType(targetType) {
+				args = append(args, target)
+			} else if isPrimitiveScalar(named) {
+				args = append(args, target)
+			} else {
+				instancePtr := c.extractInstancePtr(target)
+				args = append(args, instancePtr)
+				// B0258: Track method chain intermediate for cleanup at statement end.
+				c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
+			}
 		}
 	}
 	// T0418: Build owner-type subst (e.g., Box[int].T → int) so generic
@@ -15582,6 +15598,23 @@ func (c *Compiler) genValueTypeReceiverAddr(recv ast.Expr) (value.Value, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// genValueTypeReceiverArg produces the i8* receiver argument for a value-type
+// method call on a non-`this` receiver. For a `~this` (mutable-borrow) receiver
+// on an addressable l-value (local, value-type field, container element), it
+// passes the caller's in-place storage address so field/setter mutations reach
+// the caller's variable (T1358); otherwise it spills the receiver value into a
+// temp and passes the temp's pointer (value semantics). Evaluates recv exactly
+// once in each path.
+func (c *Compiler) genValueTypeReceiverArg(recv ast.Expr, recvType types.Type, mut bool) value.Value {
+	if mut {
+		if addr, ok := c.genValueTypeReceiverAddr(recv); ok {
+			return addr
+		}
+	}
+	val := c.genExprAutoPropagate(recv)
+	return c.valueTypeReceiverPtr(val, recvType)
 }
 
 // extractInstancePtrForThis extracts the instance/RTTI pointer from a `this` value.

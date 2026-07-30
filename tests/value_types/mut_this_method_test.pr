@@ -1,0 +1,167 @@
+// T1358: a value-type method with a `~this` (mutable-borrow) receiver must
+// mutate the CALLER's storage, not a spilled copy. The fix is at the value-type
+// method call site (receiver ABI): for a `~this` receiver on an addressable
+// l-value, pass the caller's in-place address as `this` instead of a temp.
+// A plain `this` (RefNone) receiver must still spill (value semantics).
+type Vec2 {
+  int x `value;
+  int y `value;
+  get sum int {
+    return this.x + this.y;
+  }
+  set sum(int v) {
+    this.x = v;
+    this.y = 0;
+  }
+
+  // `~this` direct field write — must reach the caller.
+  set_x(~this, int v) {
+    this.x = v;
+  }
+
+  // `~this` calling a setter on `this` — must reach the caller.
+  bump_sum(~this) {
+    this.sum = this.sum + 100;
+  }
+
+  // `~this` that chains to another `~this` method on `this`; the outer caller
+  // must observe the mutation performed by the inner method.
+  chain_set_x(~this, int v) {
+    this.set_x(v);
+  }
+}
+
+type Wrap {
+  Vec2 v `value;
+
+  // `~this` mutating a nested value-type field via direct assign.
+  set_inner_x(~this, int n) {
+    this.v.x = n;
+  }
+
+  // `~this` mutating a nested value-type field via that field's setter.
+  bump_inner_sum(~this) {
+    this.v.sum += 100;
+  }
+}
+
+type Box[T] {
+  T val `value;
+
+  // Generic value type, `~this` field write — covers the generic call site.
+  set_val(~this, T move v) {
+    this.val = v;
+  }
+
+  // `~this` method carrying its OWN method-level type param — routes through
+  // genGenericMethodCall (the explicit/inferred type-arg path), distinct from
+  // set_val which is a plain method on a generic owner (genMethodCall).
+  put[U](~this, T move v) {
+    this.val = v;
+  }
+}
+
+type Holder {
+  Vec2 v `value;
+  // A getter returns a fresh COPY of the field (not addressable in place).
+  get inner Vec2 {
+    return this.v;
+  }
+}
+
+// A value-type `~this` method invoked on a value-type `~param` receiver must
+// mutate the caller's storage through the param's mutable borrow.
+set_via_param(Vec2 ~v, int n) {
+  v.set_x(n);
+}
+
+// 1. `~this` direct field write mutates the caller's local.
+mut_this_field() `test {
+  a := Vec2(x: 1, y: 2);
+  a.set_x(9);
+  assert(a.x == 9, "~this field write reaches caller");
+  assert(a.y == 2, "sibling field untouched");
+}
+
+// 2. `~this` invoking a setter on `this` mutates the caller's local.
+mut_this_setter() `test {
+  a := Vec2(x: 3, y: 4); // sum == 7
+  a.bump_sum(); // sum -> 107; setter sets x=107, y=0
+  assert(a.x == 107, "~this setter reaches caller x");
+  assert(a.y == 0, "~this setter reaches caller y");
+}
+
+// 3. Nested value-type field via `~this` direct assign (the Wrap/Vec2 repro).
+mut_this_nested_field() `test {
+  w := Wrap(v: Vec2(x: 1, y: 2));
+  w.set_inner_x(7);
+  assert(w.v.x == 7, "~this nested field write reaches caller");
+  assert(w.v.y == 2, "nested sibling untouched");
+}
+
+// 4. Nested value-type property setter through `~this` (compound `+=`).
+mut_this_nested_setter() `test {
+  w := Wrap(v: Vec2(x: 3, y: 4)); // v.sum == 7
+  w.bump_inner_sum(); // v.sum -> 107; setter sets x=107, y=0
+  assert(w.v.x == 107, "~this nested setter reaches caller x");
+  assert(w.v.y == 0, "~this nested setter reaches caller y");
+}
+
+// 5. Generic value type `~this` field write mutates the caller (generic site).
+mut_this_generic() `test {
+  b := Box[int](val: 1);
+  b.set_val(7);
+  assert(b.val == 7, "generic ~this field write reaches caller");
+}
+
+// 6. `~this` chaining to another `~this` method on `this`; caller observes it.
+mut_this_chain() `test {
+  a := Vec2(x: 1, y: 2);
+  a.chain_set_x(42);
+  assert(a.x == 42, "~this chained through inner ~this reaches caller");
+}
+
+// 7. `~this` on a container element (`vs[0]`) mutates the vector slot, not a
+// copy (the IndexExpr receiver-address path).
+mut_this_vec_element() `test {
+  vs := [Vec2(x: 1, y: 2), Vec2(x: 3, y: 4)];
+  vs[0].set_x(99);
+  assert(vs[0].x == 99, "~this on a vector element reaches the slot");
+  assert(vs[1].x == 3, "sibling element untouched");
+}
+
+// 8. `~this` on a fixed-array element (`vs[0]`) mutates the array slot. The
+// IndexExpr address path handles arrays and vectors through the same
+// genIndexSlotPtr helper, but the array element type differs from the vector's.
+mut_this_array_element() `test {
+  Vec2[2] vs = [Vec2(x: 1, y: 2), Vec2(x: 3, y: 4)];
+  vs[0].set_x(88);
+  assert(vs[0].x == 88, "~this on a fixed-array element reaches the slot");
+  assert(vs[1].x == 3, "sibling element untouched");
+}
+
+// 9. `~this` invoked on a value-type `~param` receiver reaches the outer
+// caller — the mutRefPtrs branch of the receiver-address helper.
+mut_this_through_param() `test {
+  a := Vec2(x: 1, y: 2);
+  set_via_param(a, 55);
+  assert(a.x == 55, "~this through a value-type ~param reaches the caller");
+}
+
+// 10. Generic `~this` method carrying its own method-level type param — routes
+// through genGenericMethodCall's value-type receiver branch and still reaches
+// the caller's storage.
+mut_this_generic_method() `test {
+  b := Box[int](val: 1);
+  b.put[bool](7);
+  assert(b.val == 7, "generic-method ~this field write reaches the caller");
+}
+
+// 11. `~this` on a NON-addressable receiver (a getter result, which is a fresh
+// copy) must fall back to spilling the value — value semantics preserved, the
+// caller's real field is untouched, and it compiles without a diagnostic.
+mut_this_getter_receiver_spills() `test {
+  h := Holder(v: Vec2(x: 1, y: 2));
+  h.inner.set_x(99); // mutates the getter's throwaway copy, not h.v
+  assert(h.v.x == 1, "getter result is a copy — caller's field untouched");
+}

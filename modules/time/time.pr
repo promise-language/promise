@@ -74,6 +74,52 @@ _weekday_from_days(int z) int => _floor_mod(z + 4, 7);
 
 _pad2(int n) string => n.to_string().pad_left(2, '0');
 _pad4(int n) string => n.to_string().pad_left(4, '0');
+_pad9(int n) string => n.to_string().pad_left(9, '0');
+
+// ".fff" fractional-second suffix for a nanosecond value in [0, 1_000_000_000),
+// with trailing zeros trimmed; returns "" when the fraction is zero so whole-
+// second timestamps render unchanged.
+_frac_suffix(int nanos) string {
+  if nanos == 0 {
+    return "";
+  }
+  string digits = _pad9(nanos);
+  int end = 9;
+  while end > 1 && digits[end - 1] == '0' {
+    end = end - 1;
+  }
+  return "." + digits[0:end];
+}
+
+// Consumes an optional ".fff" fractional-second suffix from `s` starting at
+// `start` (which must index a '.' for a fraction to be read). Returns the
+// nanosecond value in [0, 1_000_000_000) and the index just past the fraction.
+// Digits beyond nanosecond precision are consumed but ignored (truncated).
+_read_frac!(string s, int start)(int, int) {
+  int idx = start;
+  int nanos = 0;
+  if idx < s.len && s[idx] == '.' {
+    idx = idx + 1;
+    int scale = 100000000; // 10^8 — weight of the first fraction digit
+    bool any = false;
+    while idx < s.len {
+      int c = s.byte_at(idx) as! int;
+      if c < 48 || c > 57 {
+        break;
+      }
+      if scale > 0 {
+        nanos = nanos + (c - 48) * scale;
+        scale = scale / 10;
+      }
+      any = true;
+      idx = idx + 1;
+    }
+    if !any {
+      raise error(message: "expected digit after decimal point in time string");
+    }
+  }
+  return (nanos, idx);
+}
 
 // "+HH:MM" / "-HH:MM" for a UTC offset in seconds.
 _offset_suffix(int offset_secs) string {
@@ -130,7 +176,7 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
     return DateTime(_epoch_nanos: secs * 1000000000, _offset_secs: 0);
   }
 
-  parse!(string s) DateTime `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\" or \"2026-04-11T14:30:00+05:30\".") {
+  parse!(string s) DateTime `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\", \"2026-04-11T14:30:00.5Z\", or \"2026-04-11T14:30:00.250+05:30\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
     int year = _read_digits(s, 0, 4);
     _expect(s, 4, '-');
     int month = _read_digits(s, 5, 2);
@@ -143,17 +189,20 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
     _expect(s, 16, ':');
     int second = _read_digits(s, 17, 2);
 
+    // optional ".fff" fractional seconds between SS and the zone designator
+    (nanos_frac, idx) := _read_frac(s, 19)?^;
+
     int offset_secs = 0;
-    if s.len <= 19 {
+    if idx >= s.len {
       raise error(message: "missing time zone designator");
     }
-    char zone = s[19];
+    char zone = s[idx];
     if zone == 'Z' {
       offset_secs = 0;
     } else if zone == '+' || zone == '-' {
-      int oh = _read_digits(s, 20, 2);
-      _expect(s, 22, ':');
-      int om = _read_digits(s, 23, 2);
+      int oh = _read_digits(s, idx + 1, 2);
+      _expect(s, idx + 3, ':');
+      int om = _read_digits(s, idx + 4, 2);
       offset_secs = oh * 3600 + om * 60;
       if zone == '-' {
         offset_secs = -offset_secs;
@@ -164,7 +213,7 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
 
     int local_secs = _days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
     int epoch_secs = local_secs - offset_secs;
-    return DateTime(_epoch_nanos: epoch_secs * 1000000000, _offset_secs: offset_secs);
+    return DateTime(_epoch_nanos: epoch_secs * 1000000000 + nanos_frac, _offset_secs: offset_secs);
   }
 
   // --- internal decomposition (reflects the displayed local wall-clock) ---
@@ -221,18 +270,18 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
   >= (DateTime other) bool => this._epoch_nanos >= other._epoch_nanos;
 
   // --- formatting ---
-  to_string() string `public `doc("ISO 8601 form, e.g. \"2026-04-11T14:30:00Z\" (UTC) or \"...+05:30\".") {
+  to_string() string `public `doc("ISO 8601 form, e.g. \"2026-04-11T14:30:00Z\" (UTC) or \"...+05:30\". Non-zero sub-second nanoseconds render as a trimmed \".fff\" fraction, e.g. \"...:00.5Z\".") {
     (y, m, d) := this._civil;
-    string base = _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d) + "T" + _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second);
+    string base = _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d) + "T" + _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second) + _frac_suffix(this.nanosecond);
     if this._offset_secs == 0 {
       return base + "Z";
     }
     return base + _offset_suffix(this._offset_secs);
   }
 
-  format_rfc3339() string `public `doc("RFC 3339 form with a numeric offset, e.g. \"2026-04-11T14:30:00+00:00\".") {
+  format_rfc3339() string `public `doc("RFC 3339 form with a numeric offset, e.g. \"2026-04-11T14:30:00+00:00\". Non-zero sub-second nanoseconds render as a trimmed \".fff\" fraction.") {
     (y, m, d) := this._civil;
-    return _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d) + "T" + _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second) + _offset_suffix(this._offset_secs);
+    return _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d) + "T" + _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second) + _frac_suffix(this.nanosecond) + _offset_suffix(this._offset_secs);
   }
 
   format!(Writer ~w) `public `doc("Writes the ISO 8601 form to a Writer.") {
@@ -309,13 +358,14 @@ type Time `public `doc("A time of day (hour, minute, second, nanosecond) without
   midnight() Time `factory `doc("00:00:00.") => Time(_nanos: 0);
   noon() Time `factory `doc("12:00:00.") => Time(_nanos: 43200000000000);
 
-  parse!(string s) Time `factory `doc("Parses a time such as \"14:30:00\".") {
+  parse!(string s) Time `factory `doc("Parses a time such as \"14:30:00\" or \"14:30:00.5\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
     int hour = _read_digits(s, 0, 2);
     _expect(s, 2, ':');
     int minute = _read_digits(s, 3, 2);
     _expect(s, 5, ':');
     int second = _read_digits(s, 6, 2);
-    return Time(_nanos: (hour * 3600 + minute * 60 + second) * 1000000000);
+    (nanos_frac, _) := _read_frac(s, 8)?^;
+    return Time(_nanos: (hour * 3600 + minute * 60 + second) * 1000000000 + nanos_frac);
   }
 
   get hour int `doc("Hour of day, 0-23.") => (this._nanos / 1000000000) / 3600;
@@ -335,7 +385,7 @@ type Time `public `doc("A time of day (hour, minute, second, nanosecond) without
   <= (Time other) bool => this._nanos <= other._nanos;
   >= (Time other) bool => this._nanos >= other._nanos;
 
-  to_string() string `public `doc("Time-of-day, e.g. \"14:30:00\".") => _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second);
+  to_string() string `public `doc("Time-of-day, e.g. \"14:30:00\". Non-zero sub-second nanoseconds render as a trimmed \".fff\" fraction, e.g. \"14:30:00.5\".") => _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second) + _frac_suffix(this.nanosecond);
   format!(Writer ~w) `public `doc("Writes the time-of-day to a Writer.") {
     w.write_string(this.to_string());
   }

@@ -103,6 +103,109 @@ datetime_negative_offset() `test {
   assert(dt.to_utc().to_string() == "2026-04-11T22:30:00Z", "same instant in UTC");
 }
 
+// ---- fractional seconds (T1068) ----
+
+datetime_parse_fraction_utc() `test {
+  dt := DateTime.parse("2026-04-11T14:30:00.500Z")?!;
+  assert(dt.nanosecond == 500000000, "'.500' parses to 500ms");
+  assert(dt.second == 0, "whole second is 0");
+  assert(dt.to_string() == "2026-04-11T14:30:00.5Z", "trailing zeros trimmed on render");
+}
+
+datetime_fraction_full_precision_round_trip() `test {
+  dt := DateTime.from_unix_nanos(1234567890123456789);
+  s := dt.to_string();
+  assert(s.contains(".123456789"), "full nanosecond fraction rendered");
+  back := DateTime.parse(s)?!;
+  assert(back.unix_nanos == dt.unix_nanos, "ISO round-trip is lossless at nanosecond precision");
+  assert(back.to_string() == s, "re-render is byte-identical");
+}
+
+datetime_fraction_min_precision() `test {
+  dt := DateTime.parse("2026-04-11T14:30:00.000000001Z")?!;
+  assert(dt.nanosecond == 1, "single-nanosecond fraction parses");
+  one := DateTime.from_unix_nanos(1);
+  assert(one.to_string() == "1970-01-01T00:00:00.000000001Z", "1ns renders with full 9-digit fraction");
+}
+
+datetime_fraction_from_millis() `test {
+  dt := DateTime.from_unix_millis(1500);
+  assert(dt.to_string() == "1970-01-01T00:00:01.5Z", "1500ms renders sub-second fraction");
+}
+
+datetime_fraction_with_offset() `test {
+  dt := DateTime.parse("2026-04-11T14:30:00.250+05:30")?!;
+  assert(dt.offset_secs == 19800, "offset preserved alongside fraction");
+  assert(dt.nanosecond == 250000000, "fraction parsed before offset");
+  assert(dt.to_utc().to_string() == "2026-04-11T09:00:00.25Z", "instant + fraction correct in UTC");
+  assert(dt.format_rfc3339() == "2026-04-11T14:30:00.25+05:30", "rfc3339 emits fraction with offset");
+}
+
+datetime_fraction_truncates_excess_digits() `test {
+  dt := DateTime.parse("2026-04-11T14:30:00.1234567890123Z")?!;
+  assert(dt.nanosecond == 123456789, "digits beyond nanosecond precision are truncated");
+}
+
+datetime_fraction_rejects_empty() `test {
+  bool caught = false;
+  DateTime.parse("2026-04-11T14:30:00.Z")? e {
+    caught = true;
+    assert(e.message == "expected digit after decimal point in time string", "empty fraction rejected");
+  };
+  assert(caught, "decimal point with no digits fails");
+}
+
+datetime_whole_second_unchanged() `test {
+  // Zero-nanos instants render without any fraction suffix (backward compatible).
+  dt := DateTime.from_unix_secs(1234567890);
+  assert(dt.to_string() == "2009-02-13T23:31:30Z", "whole-second render has no '.'");
+  assert(!dt.to_string().contains("."), "no decimal point when fraction is zero");
+}
+
+time_parse_fraction() `test {
+  t := Time.parse("14:30:00.5")?!;
+  assert(t.nanosecond == 500000000, "Time fraction parses");
+  assert(t.to_string() == "14:30:00.5", "Time fraction round-trips");
+}
+
+datetime_fraction_leading_zeros_preserved() `test {
+  // 50ms = 0.05s: significant zeros inside the fraction must survive trimming,
+  // which only removes *trailing* zeros — so the suffix is ".05", not ".5".
+  dt := DateTime.from_unix_millis(50);
+  assert(dt.nanosecond == 50000000, "50ms is 50_000_000ns");
+  assert(dt.to_string() == "1970-01-01T00:00:00.05Z", "leading fraction zero preserved");
+}
+
+datetime_fraction_no_zone_after_fraction() `test {
+  // The fraction is consumed, then the missing zone designator is reported —
+  // i.e. `idx` correctly advances past the fraction before the zone check.
+  bool caught = false;
+  DateTime.parse("2026-04-11T14:30:00.5")? e {
+    caught = true;
+    assert(e.message == "missing time zone designator", "zone required after fraction");
+  };
+  assert(caught, "fraction without a zone designator fails");
+}
+
+datetime_format_rfc3339_utc_fraction() `test {
+  // format_rfc3339 always emits a numeric offset; the fraction sits before it.
+  dt := DateTime.from_unix_millis(1500);
+  assert(dt.format_rfc3339() == "1970-01-01T00:00:01.5+00:00", "rfc3339 UTC fraction before +00:00");
+}
+
+time_fraction_truncates_and_rejects_empty() `test {
+  // Extra digits beyond nanosecond precision are truncated on the Time path.
+  t := Time.parse("14:30:00.1234567890123")?!;
+  assert(t.nanosecond == 123456789, "Time truncates sub-nanosecond digits");
+  // A bare decimal point with no digits is rejected on the Time path too.
+  bool caught = false;
+  Time.parse("14:30:00.")? e {
+    caught = true;
+    assert(e.message == "expected digit after decimal point in time string", "empty Time fraction rejected");
+  };
+  assert(caught, "Time decimal point with no digits fails");
+}
+
 // ---- negative (pre-1970) epoch — locks floor-division correctness ----
 
 datetime_pre_epoch() `test {

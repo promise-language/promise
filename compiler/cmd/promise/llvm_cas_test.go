@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
@@ -321,6 +322,17 @@ func TestViewPublishAtomic(t *testing.T) {
 	parent := t.TempDir()
 	viewDir := filepath.Join(parent, "view")
 
+	// Pre-seed a stale orphan .tmp-* dir; a successful publish should reap it
+	// (T1077 opportunistic sweep in publishViewDir).
+	orphan := filepath.Join(parent, ".tmp-view-orphan")
+	if err := os.Mkdir(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(orphan, past, past); err != nil {
+		t.Fatal(err)
+	}
+
 	// Success: populate three files into the temp dir, publish.
 	want := []string{"opt", "lld", "llc"}
 	if err := publishViewDir(parent, viewDir, func(tmp string) error {
@@ -338,8 +350,12 @@ func TestViewPublishAtomic(t *testing.T) {
 			t.Errorf("published view missing %q: %v", n, err)
 		}
 	}
-	// No temp-dir residue should remain in the parent.
+	// No temp-dir residue should remain in the parent — including the pre-seeded
+	// stale orphan, which the opportunistic sweep should have reaped.
 	assertNoTmpResidue(t, parent, viewDir)
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("stale orphan .tmp dir should be swept by publishViewDir, stat err = %v", err)
+	}
 
 	// Failure: a populate error leaves viewDir absent and cleans the temp dir.
 	failView := filepath.Join(parent, "failview")
@@ -354,6 +370,89 @@ func TestViewPublishAtomic(t *testing.T) {
 		t.Errorf("failed publish should leave viewDir absent, stat err = %v", err)
 	}
 	assertNoTmpResidue(t, parent, failView)
+}
+
+// TestSweepStaleViewStaging verifies the orphan-reaper only removes `.tmp-*`
+// staging dirs older than maxAge, leaving fresh temp dirs, published views, and
+// unrelated entries untouched (T1077).
+func TestSweepStaleViewStaging(t *testing.T) {
+	parent := t.TempDir()
+
+	// An old orphan .tmp-* dir — backdated well past the age gate.
+	oldTmp := filepath.Join(parent, ".tmp-view-AAA")
+	if err := os.Mkdir(oldTmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(oldTmp, past, past); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh .tmp-* dir (a concurrent populator's live staging dir).
+	freshTmp := filepath.Join(parent, ".tmp-view-BBB")
+	if err := os.Mkdir(freshTmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A published view dir (no .tmp- prefix) and an unrelated file.
+	published := filepath.Join(parent, "view-CCC")
+	if err := os.Mkdir(published, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(parent, "keep.txt")
+	if err := os.WriteFile(unrelated, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sweepStaleViewStaging(parent, staleViewStagingAge); got != 1 {
+		t.Errorf("sweepStaleViewStaging removed = %d, want 1", got)
+	}
+	if _, err := os.Stat(oldTmp); !os.IsNotExist(err) {
+		t.Errorf("stale .tmp dir should be removed, stat err = %v", err)
+	}
+	for _, keep := range []string{freshTmp, published, unrelated} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("%q should be retained: %v", keep, err)
+		}
+	}
+}
+
+// TestSweepStaleViewStagingEdges covers the reaper's best-effort edges: a
+// nonexistent parent (ReadDir error), a stale `.tmp-`-prefixed regular file
+// (not a dir, so skipped), and multiple stale orphans counted together (T1077).
+func TestSweepStaleViewStagingEdges(t *testing.T) {
+	// Nonexistent parent: ReadDir fails, sweep returns 0 without panicking.
+	if got := sweepStaleViewStaging(filepath.Join(t.TempDir(), "does-not-exist"), staleViewStagingAge); got != 0 {
+		t.Errorf("sweep of missing parent removed = %d, want 0", got)
+	}
+
+	parent := t.TempDir()
+	past := time.Now().Add(-48 * time.Hour)
+
+	// A stale `.tmp-`-prefixed regular file — staging entries are always dirs, so
+	// the IsDir gate must skip this even though the name and age both match.
+	tmpFile := filepath.Join(parent, ".tmp-view-file")
+	if err := os.WriteFile(tmpFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tmpFile, past, past); err != nil {
+		t.Fatal(err)
+	}
+	// Two stale orphan dirs — both should be reaped and counted.
+	for _, name := range []string{".tmp-view-1", ".tmp-view-2"} {
+		d := filepath.Join(parent, name)
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(d, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := sweepStaleViewStaging(parent, staleViewStagingAge); got != 2 {
+		t.Errorf("sweepStaleViewStaging removed = %d, want 2", got)
+	}
+	if _, err := os.Stat(tmpFile); err != nil {
+		t.Errorf("stale .tmp-prefixed regular file should be retained: %v", err)
+	}
 }
 
 // TestViewPublishRenameFailure verifies the publish-failure branch: when the

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
@@ -117,7 +118,9 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	// tools from a previous epoch are never served from a name-only match. The CAS
 	// itself is content-addressed and never stale; the view is a derived working
 	// copy with content-based invalidation. (Old view dirs are wiped by
-	// CleanLLVMCache on a compiler-stamp change and otherwise reclaimed by GC.)
+	// CleanLLVMCache on a compiler-stamp change; orphan `.tmp-*` staging dirs left
+	// by a crashed populator are reaped opportunistically by publishViewDir at the
+	// next materialization, and wholesale by `promise doctor --repair`.)
 	viewDir := filepath.Join(home, "cache", "llvm-view", runtime.GOOS+"-"+runtime.GOARCH+"-"+blobSetKey(entries))
 
 	store, err := blobstore.NewStore()
@@ -211,8 +214,9 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	}
 
 	// Materialize into a sibling temp dir, then publish all-or-nothing via
-	// rename(2). A crashed populator leaves only an orphan temp dir (reclaimed by
-	// GC), never a half-built viewDir.
+	// rename(2). A crashed populator leaves only an orphan temp dir (reaped on a
+	// later materialization by sweepStaleViewStaging, or by `promise doctor
+	// --repair`), never a half-built viewDir.
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
 		for _, e := range entries {
 			toolName := strings.TrimPrefix(e.Name, llvmEntryPrefix)
@@ -373,6 +377,42 @@ func compareLLVMVersion(a, b string) int {
 	return 0
 }
 
+// staleViewStagingAge is how old an orphan .tmp-* view-staging dir must be before
+// publishViewDir reaps it. Comfortably above any live populator's lifetime (an
+// LLVM toolchain download is minutes, not hours) so age-gating never races a
+// concurrent populate() writing into its own fresh temp dir.
+const staleViewStagingAge = 24 * time.Hour
+
+// sweepStaleViewStaging removes orphan `.tmp-<view>-*` staging dirs left in a view
+// parent by a populator killed mid-staging (SIGKILL/crash skips publishViewDir's
+// deferred RemoveAll). Only entries older than maxAge are removed, so a concurrent
+// populate()'s own fresh temp dir is never touched. Best-effort: read/stat/remove
+// errors are ignored (the sweep is a housekeeping side effect of materialization,
+// never a reason to fail a build). Returns the count removed.
+func sweepStaleViewStaging(parent string, maxAge time.Duration) int {
+	ents, err := os.ReadDir(parent)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, ent := range ents {
+		if !ent.IsDir() || !strings.HasPrefix(ent.Name(), ".tmp-") {
+			continue
+		}
+		info, err := ent.Info()
+		if err != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) <= maxAge {
+			continue
+		}
+		if os.RemoveAll(filepath.Join(parent, ent.Name())) == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
 // publishViewDir materializes a view directory atomically: it creates a sibling
 // temp dir under parent, runs populate(tmpDir), then publishes the result with a
 // single rename(2) so a partially-populated view is never observable. On any
@@ -384,6 +424,10 @@ func publishViewDir(parent, viewDir string, populate func(tmpDir string) error) 
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err
 	}
+	// Reap orphan `.tmp-*` staging dirs a crashed populator left behind. Done before
+	// MkdirTemp so the temp dir we're about to create (age 0) is never a candidate,
+	// independent of the age gate.
+	sweepStaleViewStaging(parent, staleViewStagingAge)
 	tmpDir, err := os.MkdirTemp(parent, ".tmp-"+filepath.Base(viewDir)+"-*")
 	if err != nil {
 		return err

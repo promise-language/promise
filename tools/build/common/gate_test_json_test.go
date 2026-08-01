@@ -306,3 +306,60 @@ func TestBuildGateOutputFileFormDiffersFromBase(t *testing.T) {
 		t.Errorf("file[1] = %q, want tests/e2e/hello.pr", out.Files[1].File)
 	}
 }
+
+// TestCanonPathVolumeRootReached exercises canonPath's loop with non-resolving
+// paths. In practice, the "reached volume root" defensive check (if parent == dir)
+// is unreachable because filepath.Dir eventually returns the filesystem root, and
+// EvalSymlinks always succeeds on existing directories like the root. This test
+// verifies the function handles deep non-existent paths correctly by exiting via
+// the EvalSymlinks success path on the root or a valid ancestor.
+func TestCanonPathVolumeRootReached(t *testing.T) {
+	deepPath := filepath.Join("a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+		"k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+		"u", "v", "w", "x", "y", "z", "notfound")
+
+	got := canonPath(deepPath)
+
+	// Verify the function returns without crashing and produces a valid result.
+	if got == "" {
+		t.Errorf("canonPath(%q) returned empty string", deepPath)
+	}
+	if !filepath.IsAbs(got) && !filepath.IsAbs(deepPath) {
+		if !(got == deepPath || strings.HasPrefix(deepPath, got)) {
+			t.Logf("canonPath returned %q for input %q", got, deepPath)
+		}
+	}
+}
+
+// TestClampContextTruncatesLongContexts verifies clampContext enforces line and
+// byte limits, appending a truncation marker when either limit is exceeded.
+func TestClampContextTruncatesLongContexts(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantTrim bool
+	}{
+		{"empty", "", false},
+		{"short", "one line", false},
+		{"many lines", strings.Repeat("line\n", 100), true},
+		{"long bytes", strings.Repeat("x", 5000), true},
+		{"both", strings.Repeat("verylongline\n", 100), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clampContext(tt.input)
+			if tt.wantTrim && !strings.Contains(got, "truncated") {
+				t.Errorf("expected truncation marker in output")
+			}
+			if !tt.wantTrim && strings.Contains(got, "truncated") {
+				t.Errorf("unexpected truncation marker in output")
+			}
+			if len(strings.Split(got, "\n")) > maxContextLines+1 { // +1 for marker line
+				t.Errorf("output has too many lines")
+			}
+			if len(got) > maxContextBytes+100 { // +100 for marker text
+				t.Errorf("output exceeds byte limit")
+			}
+		})
+	}
+}

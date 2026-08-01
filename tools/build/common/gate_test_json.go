@@ -9,11 +9,12 @@ import (
 
 // T0763: the gate consumes the `promise test --json` stream (one JSON record
 // per eligible test) as the single authoritative source of test identity and
-// status. It relativizes each record's absolute file path against the repo
-// root (the runner does NOT deduce the root — that is the gate's job), groups
-// records by file into a two-level envelope, and derives metrics by counting
-// statuses. No human-output scraping is involved, so identity is stable across
-// runs and never varies with outcome.
+// status. It relativizes each record's absolute file path against a
+// caller-supplied base directory (repo root for host/wasm gates; worktree
+// srcDir for the install gate). The runner does NOT deduce the base — that is
+// the gate's job. Groups records by file into a two-level envelope, and
+// derives metrics by counting statuses. No human-output scraping is involved,
+// so identity is stable across runs and never varies with outcome.
 
 // jsonlRecord mirrors one line of the runner's --json output.
 type jsonlRecord struct {

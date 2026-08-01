@@ -1,0 +1,111 @@
+// T1368: an RTTI cast of a non-optional subject to an optional (`as`) or
+// non-optional (`as!`) result binds the cast local as a borrow view aliasing the
+// subject's instance pointer (no drop flag). Reading the subject before the cast
+// result previously made NLL early-drop free the subject's instance at its last
+// direct use, so the later read of the alias dereferenced freed memory and
+// segfaulted. The subject's live range must now cover its borrow-view aliases.
+//
+// Covers all four order permutations from the issue's diagnostic table, for both
+// the optional (`as`) and force (`as!`) result shapes. All must run without a
+// segfault and with zero leaks (the view carries no drop flag; the subject drops
+// exactly once at scope exit).
+type Base {
+  string name;
+  kind(this) string {
+    return "b";
+  }
+  drop(~this) {
+  }
+}
+type Der is Base {
+  kind(this) string {
+    return "d";
+  }
+  drop(~this) {
+  }
+}
+
+// --- Optional result (`as`): subject then result (the original crash). ---
+opt_subject_then_result() `test {
+  Base b = Der(name: "x");
+  Der? d = b as Der;
+  assert(b.name == "x", "b");
+  if d {
+    assert(d.name == "x", "d");
+  }
+}
+
+opt_result_then_subject() `test {
+  Base b = Der(name: "x");
+  Der? d = b as Der;
+  if d {
+    assert(d.name == "x", "d");
+  }
+  assert(b.name == "x", "b");
+}
+
+opt_result_twice() `test {
+  Base b = Der(name: "x");
+  Der? d = b as Der;
+  if d {
+    assert(d.name == "x", "d");
+  }
+  if d {
+    assert(d.name == "x", "d");
+  }
+}
+
+opt_both_under_if() `test {
+  Base b = Der(name: "x");
+  Der? d = b as Der;
+  if d {
+    assert(b.name == "x", "b");
+    assert(d.name == "x", "d");
+  }
+}
+
+// --- Force result (`as!`): non-optional alias, same view relationship. ---
+force_subject_then_result() `test {
+  Base b = Der(name: "x");
+  Der d = b as! Der;
+  assert(b.name == "x", "b");
+  assert(d.name == "x", "d");
+}
+
+force_result_then_subject() `test {
+  Base b = Der(name: "x");
+  Der d = b as! Der;
+  assert(d.name == "x", "d");
+  assert(b.name == "x", "b");
+}
+
+force_result_twice() `test {
+  Base b = Der(name: "x");
+  Der d = b as! Der;
+  assert(d.name == "x", "d");
+  assert(d.name == "x", "d");
+}
+
+// Transitive alias: `e` views `d`, which views `b`. Reading the root `b` first,
+// then the transitive alias, must keep `b`'s instance live for the alias read.
+force_transitive_alias() `test {
+  Base b = Der(name: "x");
+  Der d = b as! Der;
+  Der e = d as! Der;
+  assert(b.name == "x", "b");
+  assert(e.name == "x", "e");
+}
+
+// Assignment-created alias: the view is bound by a plain assignment to a
+// pre-declared local (`Der? d = none; d = b as Der;`), not a var-decl. The
+// subject `b` must still stay live across the alias read even though its last
+// *direct* use (the `b.name` read) precedes it.
+assign_subject_then_result() `test {
+  Base b = Der(name: "x");
+  Der? d = none;
+  d = b as Der;
+  assert(b.name == "x", "b");
+  if d {
+    assert(d.name == "x", "d");
+  }
+}

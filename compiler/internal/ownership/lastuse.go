@@ -71,15 +71,56 @@ func (a *lastUseAnalyzer) analyzeBlock(block *ast.Block) {
 	}
 	var vars []varInfo
 
+	// T1368: map each local bound (or assigned) in this block from a borrow-view
+	// RTTI cast (`x as T` / `x as! T` of a non-optional, non-scalar subject) to the
+	// set of subject roots it thereby aliases. The bound local aliases the subject's
+	// instance pointer (codegen's isRttiCastBorrow gives it no drop flag), so the
+	// subject must stay live until the alias's last use — otherwise early-dropping
+	// the subject frees the instance the alias still reads (UAF). The map is
+	// accumulated monotonically across the block: a later re-binding of an alias to
+	// a different subject only ADDS a root (never removes one), so a subject's live
+	// range is over-approximated — which defers a harmless early drop but never
+	// frees an instance a live view still reads.
+	aliasRoots := make(map[string][]string)
+	addAlias := func(name, root string) {
+		if name == "_" || name == "" || root == "" || name == root {
+			return
+		}
+		for _, r := range aliasRoots[name] {
+			if r == root {
+				return
+			}
+		}
+		aliasRoots[name] = append(aliasRoots[name], root)
+	}
+
 	for i, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.TypedVarDecl:
+			if s.Name != "_" {
+				addAlias(s.Name, a.castBorrowViewRoot(s.Value))
+			}
 			if s.Name != "_" && !a.isVarCopyType(s.Value) && !a.initMayAliasReceiver(s.Value) {
 				vars = append(vars, varInfo{name: s.Name, declIdx: i})
 			}
 		case *ast.InferredVarDecl:
+			if s.Name != "_" {
+				addAlias(s.Name, a.castBorrowViewRoot(s.Value))
+			}
 			if s.Name != "_" && !a.isVarCopyType(s.Value) && !a.initMayAliasReceiver(s.Value) {
 				vars = append(vars, varInfo{name: s.Name, declIdx: i})
+			}
+		case *ast.AssignStmt:
+			// A borrow-view cast assigned to a pre-declared local (`Der? d = none;
+			// d = b as Der;`) makes `d` alias `b` just as a var-decl would. Without
+			// this the subject `b` could be early-dropped at its last direct use
+			// while `d` still reads its instance (UAF). Only bare-ident targets are
+			// tracked — a field/index store (`h.d = b as Der`) escapes into `h`, a
+			// distinct aliasing shape out of scope here.
+			if s.Op == ast.OpAssign {
+				if id, ok := s.Target.(*ast.IdentExpr); ok {
+					addAlias(id.Name, a.castBorrowViewRoot(s.Value))
+				}
 			}
 		case *ast.DestructureVarDecl:
 			for _, name := range s.Names {
@@ -101,13 +142,38 @@ func (a *lastUseAnalyzer) analyzeBlock(block *ast.Block) {
 		return
 	}
 
+	// T1368: precompute, per subject root, the borrow-view-cast aliases that
+	// resolve (transitively) to it. A reference to any such alias counts as a use
+	// of the subject, extending the subject's last-use point to cover its live
+	// aliases. Transitive resolution handles chains like `Der2 e = d as! Der2`
+	// where `d` itself aliases `b`.
+	var aliasesByRoot map[string][]string
+	if len(aliasRoots) > 0 {
+		aliasesByRoot = make(map[string][]string)
+		for alias := range aliasRoots {
+			for _, root := range collectTransitiveRoots(aliasRoots, alias) {
+				aliasesByRoot[root] = append(aliasesByRoot[root], alias)
+			}
+		}
+	}
+
 	// For each variable, scan backwards from the block end to find the last statement
 	// that references it. If it's before the final statement AND the statement type is
 	// safe for early drop, register an early drop.
 	for _, v := range vars {
+		// T1368: treat references to any outstanding borrow-view alias of v as
+		// references to v itself, so v's live range covers its aliases.
+		names := append([]string{v.name}, aliasesByRoot[v.name]...)
 		lastUseIdx := -1
 		for i := len(stmts) - 1; i >= v.declIdx; i-- {
-			if a.stmtReferencesVar(stmts[i], v.name) {
+			referenced := false
+			for _, nm := range names {
+				if a.stmtReferencesVar(stmts[i], nm) {
+					referenced = true
+					break
+				}
+			}
+			if referenced {
 				lastUseIdx = i
 				break
 			}
@@ -520,6 +586,73 @@ func (a *lastUseAnalyzer) initMayAliasReceiver(init ast.Expr) bool {
 		return true
 	}
 	return false
+}
+
+// castBorrowViewRoot reports the root variable of the cast subject when `init` is
+// a borrow-view RTTI cast (`x as T` / `x as! T`) — the local bound to such an init
+// aliases the subject's instance pointer and must not outlive the subject via NLL
+// early drop (T1368). Returns "" if `init` is not a borrow-view cast.
+//
+// This re-implements the essence of codegen's isRttiCastBorrow (stmt.go) locally:
+// internal/ownership cannot import internal/codegen (import cycle), so the borrow
+// predicate is mirrored here. It is deliberately conservative — over-inclusion only
+// defers a harmless early drop to scope exit, so precision is not load-bearing. It
+// keys off the *subject* type (like isRttiCastBorrow), excluding optional-unwrap
+// casts (which extract and own the inner) and scalar/copy casts (fresh values), but
+// skips the getter/user-index owned-return exemptions since over-suppression there
+// is sound. Chained casts (`(x as! A) as! B`) recurse to the innermost subject.
+func (a *lastUseAnalyzer) castBorrowViewRoot(init ast.Expr) string {
+	cast, ok := unwrapDestructureParens(init).(*ast.CastExpr)
+	if !ok {
+		return ""
+	}
+	subj := unwrapDestructureParens(cast.Expr)
+	if _, isCast := subj.(*ast.CastExpr); isCast {
+		return a.castBorrowViewRoot(subj)
+	}
+	root := memberChainRootName(subj)
+	if root == "" {
+		return "" // subject not rooted at a bare local (e.g. call result / this)
+	}
+	srcType := a.info.Types[subj]
+	if srcType == nil {
+		return ""
+	}
+	// Peel a SharedRef/MutRef layer (mirrors isRttiCastBorrow's T0850 handling).
+	switch ref := srcType.(type) {
+	case *types.SharedRef:
+		srcType = ref.Elem()
+	case *types.MutRef:
+		srcType = ref.Elem()
+	}
+	if _, isOpt := srcType.(*types.Optional); isOpt {
+		return "" // optional-unwrap — owns the extracted inner, not a view
+	}
+	if isCopyType(srcType) {
+		return "" // scalar/copy conversion — fresh value, not a view
+	}
+	return root
+}
+
+// collectTransitiveRoots returns every subject root reachable from `alias` by
+// following the borrow-view alias chain — `e -> d -> {b}` yields ["b"], and a
+// multiply-aliased `d -> {b, c}` yields both. `alias` itself is excluded from the
+// result, and cycles are handled via the visited set. T1368.
+func collectTransitiveRoots(aliasRoots map[string][]string, alias string) []string {
+	var out []string
+	seen := map[string]bool{alias: true}
+	stack := append([]string(nil), aliasRoots[alias]...)
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+		stack = append(stack, aliasRoots[n]...)
+	}
+	return out
 }
 
 // aliasReceiverOrigin returns the receiver-origin expression of a method-call

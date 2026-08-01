@@ -432,6 +432,136 @@ test_custom_stream_continue() `test {
   assert(sum == 9, "stream continue odd: 1+3+5=9");
 }
 
+// T1076: a CONCRETE (non-structural) iterator returned by iter() that owns a heap
+// resource must have its drop() run when the for-in loop's scope binding is freed.
+// Before the fix, the fresh iterator instance was freed via pal_free directly,
+// skipping the type's drop() and leaking the owned string. Leak enforcement (T0067)
+// fails these tests if the drop is skipped.
+type LeakyIter {
+  string label; // heap-allocated string (via .repeat()) — owned, needs drop
+  int i;
+  int n;
+  next(~this) int? {
+    if this.n <= 0 {
+      return none;
+    }
+    int val = this.i;
+    this.i = this.i + 1;
+    this.n = this.n - 1;
+    return val;
+  }
+}
+
+type LeakyStream {
+  int start;
+  int count;
+
+  iter() LeakyIter {
+    return LeakyIter(label: "x".repeat(64), i: this.start, n: this.count);
+  }
+}
+
+test_concrete_stream_no_leak() `test {
+  s := LeakyStream(start: 10, count: 3);
+  int sum = 0;
+  for x in s {
+    sum = sum + x;
+  }
+  assert(sum == 33, "10+11+12=33");
+}
+
+test_concrete_stream_break_no_leak() `test {
+  // Break out early — exercises the scope-cleanup-stack unwind path for the
+  // iterator binding registered below loopScopeDepth.
+  s := LeakyStream(start: 0, count: 100);
+  int sum = 0;
+  for x in s {
+    if x >= 3 {
+      break;
+    }
+    sum = sum + x;
+  }
+  assert(sum == 3, "concrete stream break: 0+1+2=3");
+}
+
+// T1076 (continued): the bug's literal scenario — a concrete (non-structural)
+// iterator with an EXPLICIT (non-native) drop() returned by a Stream's iter().
+// The for-in-over-stream path (genForInCustomStream) must dispatch through the
+// type's typeinfo drop_fn_ptr ($wrap: drop body + owned-field auto-drop +
+// pal_free), NOT a bare pal_free. Bare pal_free would both skip the drop body
+// AND leak the owned `scratch` vector; wrapping a self-freeing drop would
+// double-free. Leak enforcement (T0067) plus no crash prove the $wrap path is
+// selected and runs exactly once. Distinct from LeakyIter above (heap field but
+// NO explicit drop → synth drop_fn) — this exercises the explicit-drop $wrap.
+type ExplicitDropIter {
+  string label; // GENUINELY heap-allocated (via .repeat()); freed by the auto
+  // field-drop after the drop body runs. A static vector literal
+  // would NOT catch the bug — it lives in .rodata (T0062).
+  int i;
+  int n;
+
+  next(~this) int? {
+    if this.n <= 0 {
+      return none;
+    }
+    int val = this.i;
+    this.i = this.i + 1;
+    this.n = this.n - 1;
+    return val;
+  }
+
+  drop(~this) {
+    // Explicit non-native drop body: forces the $wrap drop_fn_ptr (not synth).
+  }
+}
+
+type ExplicitDropStream {
+  int start;
+  int count;
+
+  iter() ExplicitDropIter {
+    return ExplicitDropIter(label: "y".repeat(48), i: this.start, n: this.count);
+  }
+}
+
+test_concrete_stream_explicit_drop_no_leak() `test {
+  s := ExplicitDropStream(start: 5, count: 4);
+  int sum = 0;
+  for x in s {
+    sum = sum + x;
+  }
+  assert(sum == 26, "5+6+7+8=26");
+}
+
+test_concrete_stream_explicit_drop_break_no_leak() `test {
+  s := ExplicitDropStream(start: 0, count: 100);
+  int taken = 0;
+  for x in s {
+    taken = taken + 1;
+    if taken == 3 {
+      break;
+    }
+  }
+  assert(taken == 3, "explicit-drop concrete stream break after 3");
+}
+
+concrete_explicit_find_seven(ExplicitDropStream s) int {
+  for x in s {
+    if x == 7 {
+      return x;
+    }
+  }
+  return -1;
+}
+
+test_concrete_stream_explicit_drop_early_return_no_leak() `test {
+  // Early return from inside the loop unwinds via the scope-cleanup stack (not the
+  // post-loop inline cleanup). The iterator binding sits below loopScopeDepth, so
+  // its owned `scratch` must still drop on the return path — the exact leak the fix
+  // guards against for explicit-drop concrete iterators.
+  assert(concrete_explicit_find_seven(ExplicitDropStream(start: 5, count: 50)) == 7, "found 7");
+}
+
 // --- Edge cases for existing combinators ---
 
 test_take_zero() `test {

@@ -13679,11 +13679,19 @@ func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value,
 	// enclosing scope frees it once.
 	//
 	// Drop dispatches through __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr)
-	// for a structural Iterator[T] — handling BOTH the closure-based _FnIter (whose
-	// drop_fn calls iterCleanup to free the env + parent chain) AND a user-defined
-	// iterator (e.g., NumIter) whose layout is NOT _FnIter-shaped. Using iterCleanup
-	// here would misread a user iterator's fields as the _FnIter _parent pointer and
-	// recurse into garbage. A concrete iterator type uses pal_free.
+	// for BOTH structural and concrete iterators — handling the closure-based _FnIter
+	// (whose drop_fn calls iterCleanup to free the env + parent chain), a user-defined
+	// structural iterator (e.g., NumIter) whose layout is NOT _FnIter-shaped, AND a
+	// concrete iterator type. Using iterCleanup here would misread a user iterator's
+	// fields as the _FnIter _parent pointer and recurse into garbage.
+	//
+	// T1076: concrete iterators previously used pal_free directly, which freed the
+	// instance struct WITHOUT running the type's drop() — leaking any heap resource
+	// the iterator owned (user drop() or synth field drop). __promise_structural_drop
+	// dispatches via the instance's typeinfo drop_fn_ptr (user drop wrapped with
+	// pal_free per B0247, or synth drop), falling back to pal_free when the type has
+	// no drop — so it is correct for every concrete sub-case and strictly more correct
+	// than the old pal_free.
 	iterNamed := extractNamed(iterRetType)
 	// T1000: value-type iterators are rejected in sema (checkDuckTypedForIn), so
 	// the value branch here is unreachable — the guard stays as defensive code.
@@ -13691,7 +13699,7 @@ func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value,
 		if _, ok := iterResult.Type().(*irtypes.StructType); ok {
 			instancePtr := c.block.NewExtractValue(iterResult, 1)
 			dropFn := c.palFree
-			if iterNamed.IsStructural() && c.structuralDrop != nil {
+			if c.structuralDrop != nil {
 				dropFn = c.structuralDrop
 			}
 			tmpName := c.uniqueLocalName("__forin_iter_tmp")

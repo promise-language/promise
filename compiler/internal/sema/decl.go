@@ -674,7 +674,7 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	if sig == nil {
 		return
 	}
-	c.validateNoMoveOperatorParam(md, sig, typeName)
+	c.validateOperatorParams(md, sig, typeName)
 
 	placement := c.resolvePlacement(md.Annotations)
 	abstract := c.hasAnnotation(md.Annotations, "abstract")
@@ -789,23 +789,40 @@ func isSetterOperatorName(name string) bool {
 	return name == "[]=" || name == "[:]="
 }
 
-// validateNoMoveOperatorParam rejects move (~) value parameters on value-result
-// operator methods (T0916). Such operators (+, -, ==, [], [:], ...) are dispatched
-// from `a OP b` expressions where there is NO call-site move syntax — codegen does
-// not move the operand into the call, so a consuming (~) operand causes a hidden
-// move and a double-free/segfault. Setters ([]=, [:]=) are EXCLUDED: they are
-// invoked from `lhs[i] = rhs`, an assignment that genuinely moves the RHS into the
-// call, so a move value/key parameter is correct and is relied on by the stdlib
-// (e.g. Map.[]=(K move key, V move value)). Only the param move modifier (RefMut)
-// is checked; the receiver (e.g. ~this) is a legitimate construct and is left
-// alone, as are Type~ mut-ref params.
-func (c *Checker) validateNoMoveOperatorParam(md *ast.MethodDecl, sig *types.Signature, typeName string) {
-	if !isOperatorMethodName(md.Name) || isSetterOperatorName(md.Name) {
+// validateOperatorParams rejects operand-borrow modes on operator methods that
+// operator dispatch cannot honor at the call site (T0916, T1369). Two forms are
+// barred:
+//
+//   - Move (~) value param (RefMut) — rejected on value-result operators only
+//     (T0916). Such operators (+, -, ==, [], [:], ...) are dispatched from
+//     `a OP b` with NO call-site move syntax, so a consuming operand causes a
+//     hidden move and a double-free/segfault. Setters ([]=, [:]=) are EXCLUDED:
+//     they are invoked from `lhs[i] = rhs`, an assignment that genuinely moves
+//     the RHS into the call, so a move value/key param is correct and is relied
+//     on by the stdlib (e.g. Map.[]=(K move key, V move value)).
+//
+//   - Mut-ref (Type~) param (a *types.MutRef param type, whose Ref() is RefNone
+//     — the ~ lives in the type, not the param modifier) — rejected on ALL
+//     operators including setters (T1369). Operator/setter dispatch passes the
+//     operand BY VALUE, but a mut-ref param lowers to a pointer-taking signature
+//     → ABI mismatch → segfault. And no operator form has call-site syntax for a
+//     mutable borrow (`a OP b` cannot mark b mutable), so a mutating operand
+//     would be a hidden effect regardless of the ABI bug.
+//
+// Only operand params are checked; the receiver (e.g. ~this, or a Type~ mut-ref
+// receiver) is a legitimate construct — it mutates the visible left operand and
+// is already passed as a pointer — and is left alone.
+func (c *Checker) validateOperatorParams(md *ast.MethodDecl, sig *types.Signature, typeName string) {
+	if !isOperatorMethodName(md.Name) {
 		return
 	}
+	isSetter := isSetterOperatorName(md.Name)
 	for _, p := range sig.Params() {
-		if p.Ref() == types.RefMut {
+		if p.Ref() == types.RefMut && !isSetter {
 			c.errorf(md.Pos(), "operator method %s.%s cannot take a `move` parameter '%s'; operators borrow their operands — there is no call-site move syntax for 'a %s b', so a consuming operand would be a hidden move. Drop the `move` (use a borrow), or move-consume via a named `move`-parameter method instead.", typeName, md.Name, p.Name(), md.Name)
+		}
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			c.errorf(md.Pos(), "operator method %s.%s cannot take a mut-ref parameter '%s' (a `Type~` mutable borrow); operators borrow their operands read-only — there is no call-site syntax for a mutable borrow in 'a %s b', so mutating an operand would be a hidden effect. Drop the `~` (use a plain borrow), or mutate via a named method instead.", typeName, md.Name, p.Name(), md.Name)
 		}
 	}
 }
@@ -1049,7 +1066,7 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 	if sig == nil {
 		return
 	}
-	c.validateNoMoveOperatorParam(md, sig, enumName)
+	c.validateOperatorParams(md, sig, enumName)
 
 	abstract := c.hasAnnotation(md.Annotations, "abstract")
 	native := c.hasAnnotation(md.Annotations, "native")

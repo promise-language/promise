@@ -85,18 +85,6 @@ func TestT0916_OperatorMoveParamLaterPositionRejected(t *testing.T) {
 	`), "operator method S.[:] cannot take a `move` parameter 'b'")
 }
 
-func TestT0916_OperatorMutRefParamAllowed(t *testing.T) {
-	// A mut-ref operand (suffix-~ type, `S~ other`) is a borrow, not a move — its
-	// param ref modifier is RefNone (the ~ lives in the type, as a MutRef, not on
-	// the param), so only the prefix-~ move modifier (RefMut) is rejected.
-	expectNoErrors(t, checkErrs(t, `
-		type S {
-			string s;
-			+(S~ other) string { return this.s; }
-		}
-	`))
-}
-
 func TestT0916_EnumOperatorMoveParamRejected(t *testing.T) {
 	expectError(t, checkErrs(t, `
 		enum E {

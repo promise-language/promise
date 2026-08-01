@@ -784,17 +784,60 @@ func TestWallclockExternBodyPosix(t *testing.T) {
 	assertContains(t, ir, "call i32 @clock_gettime(i32 0,")
 }
 
-// On WASM there is no portable realtime source from emitted IR, so the body
-// returns 0 (no clock_gettime call).
-func TestWallclockExternBodyWasmReturnsZero(t *testing.T) {
+// On wasm32-wasi the body reads CLOCK_REALTIME (clockid 0) via the WASI
+// clock_time_get import — the same import the monotonic clock uses (clockid 1),
+// distinct only in the clockid argument (T1067).
+func TestWallclockExternBodyWasiRealtime(t *testing.T) {
 	ir := generateIRForTarget(t, `
 		_wallclock() int `+"`extern(\"promise_wallclock\")"+`;
 		main() { int _x = _wallclock(); }
 	`, "wasm32-wasi")
 	assertContains(t, ir, "define void @promise_wallclock(i8* %sret)")
+	// Realtime clockid is 0, passed to the WASI clock_time_get import.
+	assertContains(t, ir, "call i32 @clock_time_get(i32 0,")
 	if strings.Contains(ir, "@clock_gettime") {
-		t.Errorf("WASM wallclock body must not call clock_gettime\ngot:\n%s", ir)
+		t.Errorf("wasm32-wasi wallclock body must not call clock_gettime\ngot:\n%s", ir)
 	}
+}
+
+// On wasm32-web there is no guaranteed realtime source, so the body returns a
+// constant 0 — no WASI clock_time_get import and no POSIX clock_gettime (T1067).
+func TestWallclockExternBodyWasmWebReturnsZero(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_wallclock() int `+"`extern(\"promise_wallclock\")"+`;
+		main() { int _x = _wallclock(); }
+	`, "wasm32-web")
+	assertContains(t, ir, "define void @promise_wallclock(i8* %sret)")
+	if strings.Contains(ir, "@clock_time_get") {
+		t.Errorf("wasm32-web wallclock body must not import clock_time_get\ngot:\n%s", ir)
+	}
+	if strings.Contains(ir, "@clock_gettime") {
+		t.Errorf("wasm32-web wallclock body must not call clock_gettime\ngot:\n%s", ir)
+	}
+}
+
+// When a single wasm32-wasi module emits BOTH the realtime clock (wallclock,
+// clockid 0) and the monotonic clock (the scheduler deadline / nanotime path,
+// clockid 1), the shared emitWasiClockTimeGet helper must still dedup the
+// clock_time_get import to a single declaration while emitting both clockid
+// arguments — the two paths differ only in the clockid constant (T1067).
+func TestWallclockAndMonotonicShareOneClockImport(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_wallclock() int `+"`extern(\"promise_wallclock\")"+`;
+		worker() int { return 7; }
+		main() {
+			int _x = _wallclock();
+			Task[int] t = go worker();
+			int _v = <-t;
+		}
+	`, "wasm32-wasi")
+	if n := strings.Count(ir, "declare i32 @clock_time_get"); n != 1 {
+		t.Errorf("clock_time_get must be declared exactly once across the realtime and monotonic paths, got %d:\n%s", n, ir)
+	}
+	// Realtime path uses clockid 0, monotonic path uses clockid 1 — both flow
+	// through the one shared import.
+	assertContains(t, ir, "call i32 @clock_time_get(i32 0,")
+	assertContains(t, ir, "call i32 @clock_time_get(i32 1,")
 }
 
 // On Windows the body reads GetSystemTimePreciseAsFileTime and converts the

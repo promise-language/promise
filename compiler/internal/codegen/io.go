@@ -603,6 +603,10 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 // (CLOCK_MONOTONIC) passed to clock_time_get.
 const wasmClockMonotonic = 1
 
+// wasmClockRealtime is the WASI clockid for the realtime (wall-clock) clock
+// (CLOCK_REALTIME) passed to clock_time_get.
+const wasmClockRealtime = 0
+
 // getOrDeclareWasmImport declares (once) a WASM host-import function with the
 // given import module/name and returns it. Unlike getOrDeclareFunc it also tags
 // the declaration with the wasm-import-module/wasm-import-name attributes so the
@@ -624,10 +628,7 @@ func (c *Compiler) getOrDeclareWasmImport(name, importMod, importName string, re
 // blk and returns the resulting i64 value. This replaces the old hardcoded
 // `ret i64 0` that froze all WASM time at 0 (T0680 Part 1).
 //
-//   - wasm32-wasi: imports wasi_snapshot_preview1.clock_time_get with
-//     CLOCKID_MONOTONIC (1); writes into a stack i64 out-param and loads it.
-//     The errno is ignored — on the (non-existent in practice) failure path the
-//     out-param simply keeps whatever it held, degrading to 0.
+//   - wasm32-wasi: reads CLOCKID_MONOTONIC (1) via emitWasiClockTimeGet.
 //   - wasm32-web: imports promise_env.monotonic_nanos() → i64, supplied by the
 //     Node harness (process.hrtime.bigint). A host that omits this import must
 //     provide an i64-returning stub — the harness Proxy's generic `() => 0`
@@ -639,7 +640,15 @@ func (c *Compiler) emitWasmMonotonicNanos(blk *ir.Block) value.Value {
 			"promise_env", "monotonic_nanos", irtypes.I64)
 		return blk.NewCall(monoFn)
 	}
+	return c.emitWasiClockTimeGet(blk, wasmClockMonotonic)
+}
 
+// emitWasiClockTimeGet emits a read of the given WASI clockid (nanoseconds) into
+// blk via wasi_snapshot_preview1.clock_time_get and returns the loaded i64. The
+// import dedups by name, so the monotonic and realtime paths share one
+// declaration (they differ only in the clockid argument). The errno is ignored —
+// on the failure path the out-param keeps its zero-initialized value.
+func (c *Compiler) emitWasiClockTimeGet(blk *ir.Block, clockid int64) value.Value {
 	clockTimeGet := c.getOrDeclareWasmImport("clock_time_get",
 		"wasi_snapshot_preview1", "clock_time_get", irtypes.I32,
 		ir.NewParam("clockid", irtypes.I32),
@@ -648,10 +657,25 @@ func (c *Compiler) emitWasmMonotonicNanos(blk *ir.Block) value.Value {
 	out := blk.NewAlloca(irtypes.I64)
 	blk.NewStore(constant.NewInt(irtypes.I64, 0), out)
 	blk.NewCall(clockTimeGet,
-		constant.NewInt(irtypes.I32, wasmClockMonotonic),
+		constant.NewInt(irtypes.I32, clockid),
 		constant.NewInt(irtypes.I64, 1000), // precision hint: 1µs
 		out)
 	return blk.NewLoad(irtypes.I64, out)
+}
+
+// emitWasmRealtimeNanos emits a read of the realtime (wall-clock) clock in
+// nanoseconds since the Unix epoch into blk and returns the resulting i64 value.
+// It parallels emitWasmMonotonicNanos but reads CLOCK_REALTIME (T1067).
+//
+//   - wasm32-wasi: reads CLOCKID_REALTIME (0) via emitWasiClockTimeGet.
+//   - wasm32-web: no guaranteed host source, so return a constant 0. (Unlike the
+//     monotonic clock, there is no promise_env realtime import supplied by the
+//     Node harness; the now()/today() tests are gated off wasm32-web.)
+func (c *Compiler) emitWasmRealtimeNanos(blk *ir.Block) value.Value {
+	if c.isWasmWeb {
+		return constant.NewInt(irtypes.I64, 0)
+	}
+	return c.emitWasiClockTimeGet(blk, wasmClockRealtime)
 }
 
 // defineNanotimeFunc defines .promise_nanotime_raw() → i64 for the test runner.

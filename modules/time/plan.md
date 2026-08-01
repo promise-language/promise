@@ -171,7 +171,7 @@ Calendar math utilities (leap year, days-in-month, day-of-week) will be internal
 
 The module needs one new PAL extern:
 
-- **`promise_wallclock`** — returns nanoseconds since Unix epoch (1970-01-01T00:00:00Z) as `i64`. Implementation: `clock_gettime(CLOCK_REALTIME)` on POSIX, `GetSystemTimeAsFileTime` on Windows, `__wasi_clock_time_get(CLOCK_REALTIME)` on WASM.
+- **`promise_wallclock`** — returns nanoseconds since Unix epoch (1970-01-01T00:00:00Z) as `i64`. Implementation: `clock_gettime(CLOCK_REALTIME)` on POSIX, `GetSystemTimeAsFileTime` on Windows, `__wasi_clock_time_get(CLOCK_REALTIME)` on wasm32-wasi (implemented, T1067). wasm32-web has no guaranteed realtime source and returns 0, so its `now()`/`today()` tests are gated off with `` `test(exclude: web) ``.
 
 All other time operations (component extraction, formatting, parsing, arithmetic) are pure calendar math implemented in Promise — no additional native calls needed. The existing `_nanotime` (monotonic) and `_sleep_nanos` remain in std.
 

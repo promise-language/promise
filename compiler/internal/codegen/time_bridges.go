@@ -32,11 +32,13 @@ func (c *Compiler) defineTimeBodies() {
 func (c *Compiler) buildWallclockExternBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 
-	// WASM has no portable realtime source from emitted IR; return 0. The Promise
-	// round-trip/serialization tests don't depend on the absolute value, and the
-	// now() sanity assertion is gated off WASM with `test(exclude: wasm).
+	// WASM: wasm32-wasi reads CLOCK_REALTIME via wasi_snapshot_preview1's
+	// clock_time_get (same import the monotonic clock uses); wasm32-web has no
+	// guaranteed realtime source and returns 0, so its now()/today() sanity
+	// assertions are gated off with `test(exclude: web) (T1067).
 	if c.isWasm {
-		c.packNanosToSret(entry, fn.Params[0], constant.NewInt(irtypes.I64, 0))
+		nanos := c.emitWasmRealtimeNanos(entry)
+		c.packNanosToSret(entry, fn.Params[0], nanos)
 		return
 	}
 

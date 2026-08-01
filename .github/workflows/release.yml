@@ -43,6 +43,12 @@ on:
 permissions:
   contents: write
 
+# Cancel in-progress release builds to prevent concurrent artifact collisions
+# on the same branch/tag (edge case when a maintainer retries a dispatch).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Resolve the host(s) to build into the compiler matrix. On a tag push there is
   # no `platform` input → defaults to all 3. On workflow_dispatch it honors the
@@ -50,6 +56,7 @@ jobs:
   # cannot see `matrix`, hence this setup job).
   setup:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       compiler: ${{ steps.pick.outputs.compiler }}
     steps:
@@ -74,6 +81,7 @@ jobs:
   compiler:
     name: compiler ${{ matrix.host }}
     needs: setup
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.compiler) }}
@@ -166,6 +174,7 @@ jobs:
   publish:
     needs: [compiler]
     if: ${{ github.event_name == 'push' || inputs.publish }}
+    timeout-minutes: 15
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

@@ -32,6 +32,12 @@ on:
 permissions:
   contents: read
 
+# Cancel in-progress runs on the same branch to prevent wasteful re-runs when
+# multiple commits are pushed in quick succession (e.g., on PR updates).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Resolve the dispatch-selected platform(s) into the test matrix. A job-level
   # `if` cannot reference the `matrix` context, so filtering happens HERE in a tiny
@@ -39,6 +45,7 @@ jobs:
   # macOS bills 10x).
   setup:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
     steps:
@@ -64,6 +71,7 @@ jobs:
   test:
     needs: setup
     name: ${{ matrix.name }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}

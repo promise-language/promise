@@ -15838,3 +15838,141 @@ func TestT1268SortMoveParamAccepted(t *testing.T) {
 		}
 	`)
 }
+
+// T1081: an optional-subject `as` cast (`ob as Der`) runtime-moves the inner
+// (genOptionalCastExpr → neutralizeOptionalCastSource clears the source present
+// flag). Ownership must model that move so a later use of the owned-local
+// subject is reported as use-after-move (the subject silently observes `none`
+// otherwise).
+func TestT1081OptionalCastSubjectMoveReported(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take() {
+			Base? ob = Der(name: "x");
+			Der? d = ob as Der;
+			_ = ob;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'ob'")
+}
+
+// T1081: the cast's own read of the subject is still valid — only a *later* use
+// is flagged. (Order guard: checkExpr(e.Expr) runs before the move-model.)
+func TestT1081OptionalCastSubjectCastItselfOK(t *testing.T) {
+	ownerOK(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take() {
+			Base? ob = Der(name: "x");
+			Der? d = ob as Der;
+			_ = d;
+		}
+		test() {}
+	`)
+}
+
+// T1081: a Copy/scalar optional subject is NOT neutralized by codegen
+// (genOptionalScalarCastExpr), so tryMove's Copy fast-path must leave it usable.
+func TestT1081ScalarOptionalCastSubjectNotFlagged(t *testing.T) {
+	ownerOK(t, `
+		take() {
+			int? x = 5;
+			int? y = x as int;
+			_ = x;
+		}
+		test() {}
+	`)
+}
+
+// T1081: a non-optional subject `as` cast borrows the subject (isRttiCastBorrow),
+// leaving it usable — the move-model must NOT fire (gate is on *types.Optional
+// subjects only).
+func TestT1081NonOptionalCastSubjectNotMoved(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take(Base b) {
+			Der? d = b as Der;
+			_ = b;
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, "use of moved")
+}
+
+// T1081: a borrowed Optional *parameter* subject is not owned by this frame —
+// tryMove short-circuits on Borrowed, so the move-model must not add a
+// "use of moved" diagnostic (the T0811 consume-of-borrowed reject at the cast
+// site is the existing, separate mechanism).
+func TestT1081BorrowedOptionalParamCastNotMovedByT1081(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take(Base? o) {
+			Der? d = o as Der;
+			_ = o;
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, "use of moved")
+}
+
+// T1081: the force `as!` form neutralizes at the *binding* (B0293), a distinct
+// binding-scoped mechanism. tryMoveOptionalCastSubject gates on Force == false,
+// so the move-model must NOT fire — a later use of the owned-local subject is
+// left unflagged here (out of scope, sibling of opt!/B0293).
+func TestT1081ForceCastSubjectNotMovedByT1081(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take() {
+			Base? ob = Der(name: "x");
+			Der d = ob as! Der;
+			_ = ob;
+			_ = d;
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, "use of moved")
+}
+
+// T1081: a parenthesized owned-local Optional subject (`(ob) as Der`) is
+// unwrapped past the ParenExpr layer(s) before the identity/type gates, so the
+// move-model still fires and a later use is reported as use-after-move.
+func TestT1081ParenOptionalCastSubjectMoveReported(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		take() {
+			Base? ob = Der(name: "x");
+			Der? d = (ob) as Der;
+			_ = ob;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'ob'")
+}
+
+// T1081: an owned-*member* Optional subject (`this.slot as Der`) IS neutralized
+// by codegen too, but ownership tracks no per-field partial-move state, so the
+// move-model deliberately gates on a bare *ast.IdentExpr subject and skips
+// member subjects — no spurious "use of moved" is raised (out of scope, matches
+// opt!/B0293). Guards the non-IdentExpr early return.
+func TestT1081MemberOptionalCastSubjectNotMovedByT1081(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(this) string { return "d"; } }
+		type Holder {
+			Base? slot;
+			drop(~this){}
+			take(this) {
+				Der? d = this.slot as Der;
+				_ = d;
+			}
+		}
+		test() {}
+	`)
+	expectNoOwnerError(t, errs, "use of moved")
+}

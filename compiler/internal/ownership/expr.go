@@ -92,6 +92,7 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 
 	case *ast.CastExpr:
 		c.checkExpr(e.Expr)
+		c.tryMoveOptionalCastSubject(e) // T1081
 
 	case *ast.ErrorPropagateExpr:
 		c.checkExpr(e.Expr)
@@ -663,6 +664,54 @@ func (c *Checker) tryMoveCastSubject(expr ast.Expr) {
 		break
 	}
 	c.tryMove(inner)
+}
+
+// tryMoveOptionalCastSubject records the runtime move an optional-subject `as`
+// cast performs on an owned-local subject. genOptionalCastExpr (T0761) clears
+// the source optional's present flag (neutralizeOptionalCastSource) whenever the
+// subject is a directly-owned Optional local, so a later use silently observes
+// `none`. Ownership must report that use as use-after-move (explicit-move goal).
+// T1081.
+//
+// Scope mirrors codegen's neutralize exactly:
+//   - Only the optional `as` form (Force == false): the force `as!` form
+//     neutralizes at the *binding* (B0293), a distinct binding-scoped mechanism
+//     that does not fire in arbitrary positions — modeling it here would
+//     over-claim. Out of scope (tracked separately, sibling of opt!/B0293).
+//   - Only a directly-owned Optional subject (sema type *types.Optional, not a
+//     SharedRef/MutRef of Optional): a borrowed optional (`.borrow`, T0850) is
+//     duped, not neutralized, so its source stays usable.
+//   - tryMove (not tryMoveConsume): its Copy fast-path skips scalar/Copy
+//     optionals (Optional[int] is Copy → genOptionalScalarCastExpr does not
+//     neutralize), and it short-circuits on Borrowed so a borrowed optional
+//     *param* subject (which ownership does not own) is left alone.
+//   - Only a bare *ast.IdentExpr subject: an owned-member subject
+//     (`this.slot as T`) IS neutralized by codegen too, but ownership tracks no
+//     per-field partial-move state, so "later use reported" isn't achievable —
+//     and routing a MemberExpr through tryMove would trip its field-move
+//     rejection (checkFieldMoveOwnership) and wrongly reject the accepted
+//     cast-then-discard shape. The owned-member case is out of scope here
+//     (consistent with opt!/B0293). Container-element (`v[i] as T`) subjects are
+//     likewise excluded — not IdentExprs.
+func (c *Checker) tryMoveOptionalCastSubject(e *ast.CastExpr) {
+	if e.Force {
+		return
+	}
+	subj := e.Expr
+	for {
+		p, ok := subj.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		subj = p.Expr
+	}
+	if _, ok := subj.(*ast.IdentExpr); !ok {
+		return
+	}
+	if _, ok := c.info.Types[subj].(*types.Optional); !ok {
+		return
+	}
+	c.tryMove(subj)
 }
 
 // --- Call expressions ---

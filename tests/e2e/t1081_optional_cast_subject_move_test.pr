@@ -1,0 +1,70 @@
+// T1081: an optional-subject `as` cast (`ob as Der`) runtime-moves the inner
+// (genOptionalCastExpr → neutralizeOptionalCastSource clears the source present
+// flag). Ownership now models that move so a *later* use of the owned-local
+// subject is reported as use-after-move. The compile-time rejection is pinned by
+// the Go ownership unit tests (TestT1081*). This file guards against
+// over-rejection: the accepted shapes must still compile AND run correctly.
+type Base1081 {
+  string name;
+  tag(this) string `abstract;
+}
+type Der1081 is Base1081 {
+  tag(this) string {
+    return "d";
+  }
+}
+
+// Owned-local optional subject: the move is only reported on a *later* use of the
+// subject. Casting and then using only the RESULT compiles and runs — the moved
+// inner is carried by the cast result.
+owned_local_cast_result_used() `test {
+  Base1081? ob = Der1081(name: "x");
+  Der1081? d = ob as Der1081;
+  bool matched = false;
+  string got = "";
+  if d {
+    matched = true;
+    got = d.name;
+  }
+  assert(matched, "downcast matched");
+  assert(got == "x", "moved inner readable via the cast result");
+}
+
+// Scalar/Copy optional subject: NOT neutralized by codegen
+// (genOptionalScalarCastExpr), so the subject stays usable after the cast — the
+// move-model's Copy fast-path leaves it alone.
+scalar_optional_subject_reusable() `test {
+  int? x = 5;
+  int? y = x as int;
+  bool xp = false;
+  if x {
+    xp = true;
+  }
+  assert(xp, "scalar optional subject still present after cast");
+  bool yp = false;
+  if y {
+    yp = true;
+  }
+  assert(yp, "scalar cast result present");
+}
+
+// Borrowed optional subject (`.borrow as T`, T0850): the borrow source is duped,
+// not neutralized. The move-model gate fires only for directly-owned
+// *types.Optional subjects (not a SharedRef/MutRef of Optional), so the borrowed
+// source stays usable across repeated casts.
+borrowed_optional_subject_reusable() `test {
+  Base1081? init = Der1081(name: "b");
+  Ref[Base1081?] a = Ref[Base1081?](move init);
+  Der1081? cc = a.borrow as Der1081;
+  bool p1 = false;
+  if cc {
+    p1 = true;
+  }
+  assert(p1, "borrowed cast result present");
+  Der1081? cc2 = a.borrow as Der1081;
+  bool p2 = false;
+  if cc2 {
+    p2 = true;
+  }
+  assert(p2, "second borrow of the source still yields the value");
+}

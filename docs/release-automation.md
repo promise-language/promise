@@ -316,7 +316,7 @@ bin/release publish-install --host linux-amd64   --out dist
 bin/release publish-install --host windows-amd64 --out dist
 ```
 
-Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `prebuilts`, `""` disables upload), `--dry-run` / `--no-upload` (build + stage but skip upload). Host-only for now (cross-build gated on T0524) — the maintainer runs it on each platform, like `publish-blobs`.
+Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `prebuilts`, `""` disables upload), `--no-upload` (build + stage but skip upload). Host-only for now (cross-build gated on T0524) — the maintainer runs it on each platform, like `publish-blobs`.
 
 **T0804 is done:** the repo is public and the gate fetches straight from GitHub releases via `--channel`. `publish-install` + the install scripts' `PROMISE_BASE_URL` override are no longer used by the gate, but are kept as a manual R2-staging/testing path (stage a bucket, then install from it with `PROMISE_BASE_URL=<mirror> install.sh`).
 

@@ -78,7 +78,7 @@ subcommands:
         the .def symbol lists in tools/build/winlink/def/ via llvm-dlltool,
         writing them to the embedded resources dir. The .def files are the
         source of truth; the .lib files are reproducible build artifacts.
-  publish-install [--host <target>] [--out <dir>] [--r2-bucket <name>] [--dry-run] [--no-upload]
+  publish-install [--host <target>] [--out <dir>] [--r2-bucket <name>] [--no-upload]
         TEMPORARY (T0803/T0804): build the host's thin+full variants, gzip them
         to the published asset names, compute a merge-aware SHA256SUMS, and
         upload the assets + install scripts to the prebuilts R2 bucket under

@@ -222,6 +222,24 @@ func TestRunReleasePublishInstall_RejectsDirtyTree(t *testing.T) {
 	}
 }
 
+// TestRunReleasePublishInstall_DryRunFlagRemoved (T1069): `--dry-run` and
+// `--no-upload` used to `||` into the same skip-upload branch, making them
+// redundant. `--dry-run` was removed in favor of `--no-upload` alone; passing
+// it must now fail as an unrecognized flag rather than silently behaving like
+// `--no-upload`.
+func TestRunReleasePublishInstall_DryRunFlagRemoved(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	err := runReleasePublishInstall(dir, []string{"--dry-run"})
+	if err == nil {
+		t.Fatal("runReleasePublishInstall with --dry-run = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Errorf("error = %q, want it to report an unrecognized flag", err.Error())
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

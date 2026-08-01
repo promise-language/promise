@@ -51,7 +51,6 @@ func runReleasePublishInstall(root string, args []string) error {
 	host := fs.String("host", CurrentBuildTarget(), "target to build+publish install assets for (host-only; T0524)")
 	out := fs.String("out", "", "staging dir for dist artifacts (default <root>/dist)")
 	r2Bucket := fs.String("r2-bucket", "prebuilts", "Cloudflare R2 bucket to upload the dist/ assets to via `npx wrangler` (empty string disables upload)")
-	dryRun := fs.Bool("dry-run", false, "build + stage assets but do not upload")
 	noUpload := fs.Bool("no-upload", false, "build + stage assets but skip the R2 upload (testing without wrangler)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -84,14 +83,14 @@ func runReleasePublishInstall(root string, args []string) error {
 	// compiling, and (b) the later writeInstallSums merge PRESERVES other hosts'
 	// entries (e.g. darwin's, staged from another machine) rather than clobbering
 	// them when this host uploads its SHA256SUMS.
-	willUpload := !*dryRun && !*noUpload && *r2Bucket != ""
+	willUpload := !*noUpload && *r2Bucket != ""
 	// When actually publishing, HEAD must be on origin/main and not ahead of it:
 	// the install gate on another host fetches the binary's stamped build commit
 	// from origin to pin its test sources to what the binary was built from
 	// (T0854). A commit that is ahead of — or off — origin/main is unfetchable
 	// there, so the gate could never set up. Checked before the (expensive) build
 	// and the SHA256SUMS round-trip so it fails fast. Skipped for
-	// --dry-run/--no-upload local builds, which publish nothing.
+	// --no-upload local builds, which publish nothing.
 	if willUpload {
 		if err := requireHeadOnOriginMain(root); err != nil {
 			return err

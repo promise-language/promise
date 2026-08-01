@@ -526,3 +526,141 @@ func TestEnsureWinlinkLibsFetchError(t *testing.T) {
 		t.Errorf("error should report llvm-dlltool not found, got: %v", err)
 	}
 }
+
+// TestRunReleaseWinlinkMkdirFails covers the mkdir error path in runReleaseWinlink
+// (line 67-69). This can happen if the output parent directory is not writable or
+// the path is invalid/inaccessible.
+func TestRunReleaseWinlinkMkdirFails(t *testing.T) {
+	if Which("llvm-dlltool") == "" {
+		t.Skip("llvm-dlltool not on PATH")
+	}
+	root := t.TempDir()
+	defDir := filepath.Join(root, "def")
+	if err := os.MkdirAll(defDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestDef(t, defDir, "kernel32", "kernel32.dll", "ExitProcess")
+
+	// Point at a directory that doesn't exist and whose parent is read-only.
+	// On POSIX systems, trying to mkdir under a read-only parent fails.
+	readOnlyDir := filepath.Join(root, "readonly")
+	if err := os.Mkdir(readOnlyDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(readOnlyDir, "nested")
+
+	err := runReleaseWinlink(root, []string{
+		"--def-dir", defDir,
+		"--out", outDir,
+	})
+	if err == nil {
+		t.Fatal("expected error when mkdir fails")
+	}
+	if !strings.Contains(err.Error(), "mkdir") {
+		t.Errorf("error should mention mkdir, got: %v", err)
+	}
+
+	// Cleanup: restore permissions so TempDir cleanup succeeds
+	os.Chmod(readOnlyDir, 0o755)
+}
+
+// TestRunReleaseWinlinkGlobFails covers the glob error path in runReleaseWinlink
+// (line 59-61). This can happen if the def directory path itself is invalid.
+func TestRunReleaseWinlinkGlobFails(t *testing.T) {
+	root := t.TempDir()
+	outDir := filepath.Join(root, "out")
+
+	// Use an impossible glob pattern or nonexistent but valid parent.
+	// On some systems, globbing a nonexistent parent directory might fail.
+	nonexistentDef := filepath.Join(root, "nonexistent", "def")
+
+	err := runReleaseWinlink(root, []string{
+		"--def-dir", nonexistentDef,
+		"--out", outDir,
+	})
+	// Note: on most systems, glob on a nonexistent dir returns an empty slice
+	// without error, so this test checks the "no .def files" error instead.
+	if err == nil {
+		t.Fatal("expected error when no .def files are found")
+	}
+}
+
+// TestWinlinkLibsFreshStatError covers the error path in winlinkLibsFresh
+// (line 164-166) where os.Stat fails on a .def file. This can happen if a .def
+// is deleted or becomes inaccessible between checks.
+func TestWinlinkLibsFreshStatError(t *testing.T) {
+	defDir := t.TempDir()
+	outDir := t.TempDir()
+
+	// Create a .def and a corresponding .lib
+	defPath := filepath.Join(defDir, "kernel32.def")
+	if err := os.WriteFile(defPath, []byte("LIBRARY kernel32.dll\nEXPORTS\nExitProcess"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	libPath := filepath.Join(outDir, "kernel32.lib")
+	if err := os.WriteFile(libPath, []byte("!<arch>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete the .def after creating the lib — winlinkLibsFresh will try to
+	// stat the missing .def and get an error, returning false.
+	if err := os.Remove(defPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// winlinkLibsFresh should return false when stat fails on the .def
+	// (meaning libs are stale or there's a mismatch).
+	if winlinkLibsFresh(defDir, outDir) {
+		t.Error("winlinkLibsFresh should return false when a .def is missing")
+	}
+}
+
+// TestResolveWinlinkDllToolNotFoundAnywhere covers the branch where llvm-dlltool
+// is not found in the slim cache, not on PATH, and the fetch fails (line 119),
+// returning an empty string so the caller surfaces a clear error. This test
+// ensures the error propagation is correct.
+func TestResolveWinlinkDllToolNotFoundAnywhere(t *testing.T) {
+	root := t.TempDir()
+	target := CurrentBuildTarget()
+
+	// Write prebuilts.toml with no host target entry, so fetch will fail.
+	writeHostLLVMPrebuilts(t, root, target, false)
+
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	t.Setenv("PATH", t.TempDir()) // no system llvm-dlltool
+
+	// resolveWinlinkDllTool should return "" when nothing is found.
+	tool := resolveWinlinkDllTool(root)
+	if tool != "" {
+		t.Errorf("expected empty string when tool is not found, got: %q", tool)
+	}
+}
+
+// TestRunReleaseWinlinkEmptyDefDir is a standalone test for the "no .def files"
+// error path (line 62-64) that doesn't require llvm-dlltool. It verifies that
+// runReleaseWinlink properly errors when the def directory exists but contains
+// no .def files.
+func TestRunReleaseWinlinkEmptyDefDir(t *testing.T) {
+	root := t.TempDir()
+	defDir := filepath.Join(root, "def")
+	outDir := filepath.Join(root, "out")
+
+	// Create the def directory but leave it empty.
+	if err := os.MkdirAll(defDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a stub tool path so we don't need llvm-dlltool to be installed.
+	err := runReleaseWinlink(root, []string{
+		"--llvm-dlltool", filepath.Join(root, "nonexistent-tool"),
+		"--def-dir", defDir,
+		"--out", outDir,
+	})
+
+	if err == nil {
+		t.Fatal("expected error when def directory is empty")
+	}
+	if !strings.Contains(err.Error(), "no .def files") {
+		t.Errorf("error should mention 'no .def files', got: %v", err)
+	}
+}

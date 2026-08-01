@@ -80,11 +80,12 @@ self-suppliable:
 | `__chkstk` | codegen-emitted IR (naked asm) | stack-probe helper (compiler-rt's Windows lib lacks it; no DLL exports it) |
 | `_fltused` | codegen-emitted IR | MSVC floating-point marker |
 
-The import libs are produced from license-clean **symbol-list `.def` files**
-(`tools/build/winlink/def/`) via `llvm-dlltool` — symbol→DLL mappings are not
-copyrightable, so the generated `.lib`s are freely re-hostable. They are
-committed under `compiler/cmd/promise/resources/winlink/windows-amd64/` and
-embedded (`go:embed`) into the compiler binary (~21 KiB total), then extracted to
+The import libs are generated at build time from license-clean **symbol-list
+`.def` files** (`tools/build/winlink/def/`) via `llvm-dlltool` — symbol→DLL
+mappings are not copyrightable, so the generated `.lib`s are freely re-hostable.
+The `.def` files are the committed source of truth; the generated `.lib` files
+are gitignored build artifacts. The `.lib` files are then embedded (`go:embed`)
+into the compiler binary (~21 KiB total), then extracted to
 `<PROMISE_HOME>/cache/winlink/<arch>/` at link time (mirroring the embedded musl
 CRT objects). Regenerate with `bin/release winlink`.
 

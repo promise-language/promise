@@ -504,3 +504,78 @@ t0842_mtx_read_in_place_owned_vector() `test {
   cs := [T0842MtxCell(m: Mutex[int](7))];
   assert(cs[0].m.lock().borrow == 7, "mtx read in place owned vector elem");
 }
+
+// ---------------------------------------------------------------------------
+// T1083: Arc(Ref)/Weak member-source force-unwrap TEMP on an owner-with-drop.
+// Fix A's owner-governed skip in genOptionalForceUnwrap's i8*-handle branch is
+// dispatched over ALL handle types (Arc/Weak/Mutex/Task/...), so it silently
+// also fixed a latent double-DECREF for Ref/Weak field temps. The Mutex/Task
+// rows above never exercise the Arc/Weak arms; these rows guard against a future
+// refactor narrowing the skip to Mutex/Task only. `.borrow` (Ref) / `.upgrade()`
+// (Weak) BORROW — the owner keeps ownership and its drop frees the handle, so the
+// `h.arc!` / `h.weak!` temp must NOT be tracked as an owned statement temp.
+// All-heap (Ref control blocks) → leak/double-free detector live.
+// ---------------------------------------------------------------------------
+
+type RefHolder {
+  Ref[int]? arc;
+  drop(~this) {
+  }
+  // Owned ~this: force-unwrap a self Ref field temp and borrow through it.
+  peek_owned(~this) int {
+    return (this.arc!).borrow;
+  }
+}
+
+type WeakHolder {
+  Weak[int]? weak;
+  drop(~this) {
+  }
+  // Owned ~this: force-unwrap a self Weak field temp and upgrade through it.
+  peek_owned(~this) int {
+    if u := (this.weak!).upgrade() {
+      return u.borrow;
+    }
+    return -1;
+  }
+}
+
+// Arc(Ref) — force-unwrap temp `(owner.arc!).borrow`, owned contexts.
+t1083_ref_fu_owned_local() `test {
+  h := RefHolder(arc: Ref[int](5));
+  assert((h.arc!).borrow == 5, "ref fu owned local");
+}
+
+t1083_ref_fu_owned_this() `test {
+  h := RefHolder(arc: Ref[int](6));
+  assert(h.peek_owned() == 6, "ref fu owned ~this");
+}
+
+// Weak — force-unwrap temp `(owner.weak!).upgrade()`, owned contexts. A strong
+// Ref is kept alive in the caller so upgrade succeeds (the point is the borrowing
+// temp use of the unwrapped Weak field, not upgrade failure).
+t1083_weak_fu_owned_local() `test {
+  a := Ref[int](7);
+  h := WeakHolder(weak: a.downgrade());
+  if u := (h.weak!).upgrade() {
+    assert(u.borrow == 7, "weak fu owned local");
+  } else {
+    assert(false, "weak upgrade should succeed while strong ref alive");
+  }
+}
+
+t1083_weak_fu_owned_this() `test {
+  a := Ref[int](8);
+  h := WeakHolder(weak: a.downgrade());
+  assert(h.peek_owned() == 8, "weak fu owned ~this");
+}
+
+// No-owner control: call-source Ref temp — no governing owner, so statement-temp
+// tracking must still fire (Fix A's owner-governed skip must NOT over-fire here).
+make_opt_ref() Ref[int]? {
+  return Ref[int](11);
+}
+
+t1083_ctrl_call_ref_temp() `test {
+  assert((make_opt_ref()!).borrow == 11, "call-source ref temp tracked/freed");
+}

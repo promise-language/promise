@@ -7142,7 +7142,16 @@ func (c *Compiler) evalVectorReceiver(target ast.Expr) (slicePtr, slot value.Val
 		// matching what cow/push/pop/remove consume below.
 		return c.block.NewLoad(irtypes.I8Ptr, slot), slot
 	}
-	return c.genExprAutoPropagate(target), nil // B0323
+	val := c.genExprAutoPropagate(target) // B0323
+	// T1370: rvalue receiver (a Vector returned by a call/getter, not an
+	// addressable place). If it is a tracked statement temp, hand back its backing
+	// alloca as the write-back slot so a relocating `push` stores the grown buffer
+	// where cleanupStmtTemps will read it. Otherwise the temp's drop frees the stale
+	// pre-realloc pointer (double-free / "bad header magic") or leaks the new buffer.
+	if idx, ok := c.stmtTempMap[val]; ok && idx >= 0 {
+		return val, c.stmtTemps[idx].alloca
+	}
+	return val, nil
 }
 
 // storeVectorReceiverBack writes a grown/relocated Vector pointer back into its

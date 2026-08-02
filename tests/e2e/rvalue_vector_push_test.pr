@@ -1,0 +1,132 @@
+// T1370: push() on an rvalue Vector receiver (a Vector returned by a
+// method/getter/call, not an addressable place) must be memory-safe. Previously a
+// relocating push realloc'd the buffer but the statement-temp drop still freed the
+// stale pre-realloc pointer → double-free / "bad header magic" (droppable elements)
+// or leaked the grown buffer (non-droppable). The fix hands the temp's backing
+// alloca to push as the write-back slot. The mutation does not persist (an rvalue
+// has nowhere to persist to) — that no-persist contract is pinned below.
+type VecBox {
+  Vector[string][] _data;
+  new(~this) {
+    this._data = [["x", "y", "z"]];
+  }
+  get_vec(int i) Vector[string] => this._data[i];
+}
+
+type IntBox {
+  Vector[int][] _data;
+  new(~this) {
+    this._data = [[1, 2, 3]];
+  }
+  get_vec(int i) Vector[int] => this._data[i];
+}
+
+fresh() Vector[string] {
+  r := ["x", "y", "z"];
+  return r;
+}
+freshi() Vector[int] {
+  r := [1, 2, 3];
+  return r;
+}
+fresh_empty() Vector[string] {
+  Vector[string] r = [];
+  return r;
+}
+
+// Original repro: droppable-element Vector returned by a getter.
+test_method_return_push_string() `test {
+  b := VecBox();
+  b.get_vec(0).push("w");
+}
+
+// Non-droppable element variant (was a silent leak / lost push).
+test_method_return_push_int() `test {
+  b := IntBox();
+  b.get_vec(0).push(99);
+}
+
+// Genuinely non-aliasing fresh rvalue — pins that the fix is not aliasing-specific.
+test_fresh_rvalue_push_string() `test {
+  fresh().push("w");
+}
+
+test_fresh_rvalue_push_int() `test {
+  freshi().push(99);
+}
+
+// Empty inner vector push (was the "silent no-op" case; must stay clean).
+test_fresh_empty_rvalue_push() `test {
+  fresh_empty().push("w");
+}
+
+// No-persist / no-corruption contract: pushing onto the rvalue does not mutate the
+// container the getter read from.
+test_container_not_corrupted() `test {
+  b := IntBox();
+  b.get_vec(0).push(99);
+  assert(b.get_vec(0).len == 3, "container preserved after rvalue push");
+}
+
+// Droppable-element variant of the survival contract — this is the axis the bug
+// hinged on (only droppable elements double-freed). The container must survive the
+// rvalue push AND its elements must stay intact after the temp buffer is dropped.
+test_string_container_not_corrupted() `test {
+  b := VecBox();
+  b.get_vec(0).push("w");
+  assert(b.get_vec(0).len == 3, "string container preserved after rvalue push");
+  assert(b.get_vec(0)[0] == "x", "string element intact after rvalue push");
+}
+
+// T1065-note surface: user-`[]` rvalue unwrapped via `!`, then pushed. No-persist.
+test_map_unwrap_push() `test {
+  map[string, Vector[int]] m = {:};
+  m["a"] = [1, 2, 3];
+  m["a"]!.push(99);
+  assert(m["a"]!.len == 3, "map value preserved after rvalue unwrap push");
+}
+
+// Droppable-value variant of the map unwrap push (map value elements are strings,
+// so the relocated buffer's drop must not double-free the map's live buffer).
+test_map_droppable_unwrap_push() `test {
+  map[string, Vector[string]] m = {:};
+  m["a"] = ["x", "y", "z"];
+  m["a"]!.push("w");
+  assert(m["a"]!.len == 3, "map string value preserved after rvalue unwrap push");
+}
+
+// `?!`-propagated rvalue receiver (the B0323 auto-propagate path into
+// evalVectorReceiver): a failable call unwrapped inline, then pushed.
+may_fail_vec!(bool ok) Vector[string] {
+  if !ok {
+    raise error("no");
+  }
+  r := ["a", "b"];
+  return r;
+}
+test_failable_rvalue_push() `test {
+  may_fail_vec(true)?!.push("c");
+}
+
+// Pushing a droppable ELEMENT (a Vector) onto an rvalue vector-of-vectors: both the
+// rvalue buffer and the pushed inner vector must be dropped exactly once.
+type VovBox {
+  Vector[int][][] _rows;
+  new(~this) {
+    this._rows = [[[1, 2, 3]]];
+  }
+  get_rows(int i) Vector[Vector[int]] => this._rows[i];
+}
+test_push_droppable_element_onto_rvalue() `test {
+  b := VovBox();
+  b.get_rows(0).push([9, 9]);
+}
+
+// Regression guard: shrink-in-place methods on an rvalue receiver still work.
+test_rvalue_pop() `test {
+  fresh().pop();
+}
+
+test_rvalue_remove() `test {
+  freshi().remove(0);
+}

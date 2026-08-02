@@ -1,0 +1,241 @@
+// T1064: nested-vector push where an ARGUMENT reallocates the outer vector.
+//
+// In `vov[i].push(f(vov))`, genVectorMethodCall used to capture the inner-vector
+// write-back slot (a GEP into the outer vector's heap buffer) BEFORE evaluating
+// the argument. If the argument reallocated the outer vector (e.g. by pushing onto
+// it via a mutref), that buffer was freed and the captured slot dangled: the
+// post-push store-back wrote the grown inner pointer through the freed slot
+// (use-after-free) and left the live outer buffer's slot pointing at a stale inner
+// pointer → "fatal: invalid free (bad header magic)".
+//
+// The fix defers the write-back slot computation to AFTER argument evaluation,
+// recomputing it from a freshly-loaded outer pointer while evaluating the (possibly
+// impure) index exactly once.
+// grow_outer reallocates the OUTER vector during argument evaluation (outer is at
+// capacity, so the push relocates its heap buffer).
+grow_outer(int[][] ~vov) int {
+  vov.push(Vector[int](capacity: 1));
+  return 7;
+}
+
+// Forces both the outer AND the inner vector to reallocate: the inner is at
+// capacity so its push relocates too, exercising both store-backs at once.
+test_push_arg_reallocs_outer() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 2);
+  inner.push(1);
+  inner.push(2);
+  vov.push(move inner); // vov[0]=[1,2]; outer len=1 cap=1 (full)
+  vov[0].push(grow_outer(vov)); // arg reallocs outer; inner push reallocs inner
+  assert(vov.len == 2, "outer grew to 2");
+  assert(vov[0].len == 3, "inner grew to 3");
+  assert(vov[0][0] == 1, "vov[0][0]");
+  assert(vov[0][1] == 2, "vov[0][1]");
+  assert(vov[0][2] == 7, "vov[0][2] is the pushed 7");
+  assert(vov[1].len == 0, "the argument-appended inner is empty");
+}
+
+// Pointer-stability variant: the argument reallocates the outer but the target
+// inner does NOT reallocate (it has spare capacity), so only the outer store-back
+// slot is exercised.
+test_push_arg_reallocs_outer_inner_stable() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 8); // room to spare — inner push won't relocate
+  inner.push(10);
+  vov.push(move inner);
+  vov[0].push(grow_outer(vov));
+  assert(vov.len == 2, "outer grew");
+  assert(vov[0].len == 2, "inner grew in place");
+  assert(vov[0][0] == 10, "vov[0][0]");
+  assert(vov[0][1] == 7, "vov[0][1] is the pushed 7");
+}
+
+// A second outer element so vov[1] holds a real value; confirm the argument push
+// lands there and both inners are intact.
+test_two_inners() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 2);
+  int[] a = Vector[int](capacity: 4);
+  a.push(1);
+  a.push(2);
+  int[] b = Vector[int](capacity: 4);
+  b.push(99);
+  vov.push(move a);
+  vov.push(move b); // outer len=2 cap=2 (full)
+  vov[0].push(grow_outer(vov)); // arg reallocs outer (len 2→3)
+  assert(vov.len == 3, "outer grew to 3");
+  assert(vov[0].len == 3, "vov[0] grew");
+  assert(vov[0][0] == 1, "vov[0][0]");
+  assert(vov[0][1] == 2, "vov[0][1]");
+  assert(vov[0][2] == 7, "vov[0][2]");
+  assert(vov[1].len == 1, "vov[1] intact");
+  assert(vov[1][0] == 99, "vov[1][0] intact after outer realloc");
+}
+
+// pop receiver with a reallocating argument. pop takes no user arg, so this pins
+// that the store-back path for pop still recomputes correctly after the receiver
+// index is evaluated. We separately reallocate the outer between operations.
+test_pop_after_outer_realloc() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 4);
+  inner.push(5);
+  inner.push(6);
+  vov.push(move inner);
+  vov.push(Vector[int](capacity: 1)); // reallocate outer (len 1→2)
+  popped := vov[0].pop(); // pop after outer relocated
+  assert(popped! == 6, "popped last element");
+  assert(vov[0].len == 1, "inner shrank");
+  assert(vov[0][0] == 5, "remaining element intact");
+}
+
+// remove receiver after an outer reallocation.
+test_remove_after_outer_realloc() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 4);
+  inner.push(7);
+  inner.push(8);
+  inner.push(9);
+  vov.push(move inner);
+  vov.push(Vector[int](capacity: 1)); // reallocate outer
+  vov[0].remove(0); // remove after outer relocated
+  assert(vov[0].len == 2, "inner shrank");
+  assert(vov[0][0] == 8, "shifted element");
+  assert(vov[0][1] == 9, "shifted element");
+}
+
+// Field outer: the vov[i] receiver's outer container is a struct FIELD, not a
+// local ident. The store-back recompute re-addresses the field to get a fresh
+// pointer — it must reach the real element slot, not a clone of the field
+// (dupContainerFieldAccess must stay suppressed across the recompute).
+type Holder {
+  int[][] rows;
+  new(~this) {
+    this.rows = Vector[Vector[int]](capacity: 1);
+  }
+  run(~this) {
+    int[] inner = Vector[int](capacity: 2);
+    inner.push(1);
+    inner.push(2);
+    this.rows.push(move inner);
+    this.rows[0].push(grow_outer(this.rows));
+  }
+}
+test_field_outer_realloc() `test {
+  h := Holder();
+  h.run();
+  assert(h.rows.len == 2, "field outer grew");
+  assert(h.rows[0].len == 3, "inner grew");
+  assert(h.rows[0][0] == 1, "rows[0][0]");
+  assert(h.rows[0][1] == 2, "rows[0][1]");
+  assert(h.rows[0][2] == 7, "rows[0][2] is the pushed 7");
+  assert(h.rows[1].len == 0, "argument-appended inner empty");
+}
+
+// Impure-index form: the receiver index has a side effect. It must be evaluated
+// EXACTLY ONCE — the early read (to load the inner pointer) and the store-back
+// recompute share the single evaluated index value. A double-eval would append
+// twice to `log` and target the wrong slot.
+bump(int[] ~log) int {
+  log.push(1); // observable: one entry per evaluation
+  return 0;
+}
+test_impure_index_single_eval() `test {
+  int[] log = [];
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 2);
+  inner.push(1);
+  inner.push(2);
+  vov.push(move inner);
+  vov[bump(log)].push(grow_outer(vov));
+  assert(log.len == 1, "index evaluated exactly once");
+  assert(vov[0].len == 3, "inner grew");
+  assert(vov[0][2] == 7, "pushed value landed in the right slot");
+}
+
+// Rvalue-container index receiver: the outer container is a temporary returned by
+// a call, NOT an addressable place. No external alias can reach it to reallocate
+// it during argument evaluation, so the store-back must NOT recompute the slot by
+// re-evaluating the call (that would spawn a second temporary → double-free /
+// "bad header magic"). The push mutates the temporary and is then dropped; the
+// requirement here is simply that it neither crashes nor leaks.
+fresh_vov() int[][] {
+  int[][] v = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 2);
+  inner.push(1);
+  v.push(move inner);
+  return v;
+}
+test_rvalue_container_index_push() `test {
+  fresh_vov()[0].push(9);
+  fresh_vov()[0].pop();
+  fresh_vov()[0].remove(0);
+  assert(true, "rvalue-container index mutation must not crash or leak");
+}
+
+// Mutable-borrow outer: the vov[i] receiver's outer container is a MUTABLE-BORROW
+// parameter (`int[][] ~vov`), reached via the mutref branch of
+// indexTargetIsReallocatablePlace rather than the plain-local branch. The
+// store-back must still recompute the element slot from a fresh outer pointer
+// after the argument reallocates it — the recompute re-addresses the mutref.
+grow_via(int[][] ~vov) int {
+  vov.push(Vector[int](capacity: 1));
+  return 7;
+}
+do_push_via_mutref(int[][] ~vov) {
+  vov[0].push(grow_via(vov)); // outer is a mutref; arg reallocs it via reborrow
+}
+test_mutref_outer_realloc() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 2);
+  inner.push(1);
+  inner.push(2);
+  vov.push(move inner);
+  do_push_via_mutref(vov);
+  assert(vov.len == 2, "mutref outer grew to 2");
+  assert(vov[0].len == 3, "inner grew to 3");
+  assert(vov[0][0] == 1, "vov[0][0]");
+  assert(vov[0][1] == 2, "vov[0][1]");
+  assert(vov[0][2] == 7, "vov[0][2] is the pushed 7");
+  assert(vov[1].len == 0, "argument-appended inner empty");
+}
+
+// remove with a reallocating INDEX argument: the outer reallocs DURING the
+// remove's argument evaluation (the index expression has the side effect), so the
+// remove store-back must recompute the inner slot from a fresh outer pointer. The
+// earlier test_remove_after_outer_realloc reallocates the outer BEFORE the remove,
+// which does not exercise the arg-eval realloc window that T1064 addresses.
+grow_and_return_index(int[][] ~vov) int {
+  vov.push(Vector[int](capacity: 1)); // reallocs outer during arg eval
+  return 0; // → remove index 0
+}
+test_remove_arg_reallocs_outer() `test {
+  int[][] vov = Vector[Vector[int]](capacity: 1);
+  int[] inner = Vector[int](capacity: 4);
+  inner.push(7);
+  inner.push(8);
+  inner.push(9);
+  vov.push(move inner);
+  vov[0].remove(grow_and_return_index(vov)); // arg reallocs outer, then remove 0
+  assert(vov.len == 2, "outer grew via remove's argument");
+  assert(vov[0].len == 2, "inner shrank");
+  assert(vov[0][0] == 8, "shifted element");
+  assert(vov[0][1] == 9, "shifted element");
+  assert(vov[1].len == 0, "argument-appended inner empty");
+}
+
+// Nested-index receiver (`vovv[i][j].push`): the receiver's outer container is
+// itself an IndexExpr, not an ident/field, so indexTargetIsReallocatablePlace
+// returns false and it routes to the early-slot path (pre-T1064 behavior — a
+// recompute would re-evaluate the inner index). Pins that this path keeps working
+// correctly and leaks nothing after the T1064 refactor.
+test_nested_index_target() `test {
+  int[][][] vovv = Vector[Vector[Vector[int]]](capacity: 1);
+  int[][] mid = Vector[Vector[int]](capacity: 1);
+  int[] leaf = Vector[int](capacity: 2);
+  leaf.push(1);
+  mid.push(move leaf);
+  vovv.push(move mid);
+  vovv[0][0].push(2);
+  assert(vovv[0][0].len == 2, "leaf grew");
+  assert(vovv[0][0][0] == 1, "leaf[0]");
+  assert(vovv[0][0][1] == 2, "leaf[1]");
+}

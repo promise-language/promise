@@ -6350,11 +6350,14 @@ func (c *Compiler) getOrEmitOptContainsEqFn(optLLVM irtypes.Type) value.Value {
 }
 
 func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
-	// T0595: capture the receiver slot once. `receiverSlot` is non-nil only for an
-	// arr[i]/vov[i] receiver; the push/pop/remove store-back below writes through
-	// it instead of re-evaluating the index. Held in a local (not a Compiler field)
-	// so a nested vector method call during argument evaluation can't clobber it.
-	slicePtr, receiverSlot := c.evalVectorReceiver(member.Target)
+	// T0595/T1064: evaluate the receiver once into a vectorReceiver. For an
+	// arr[i]/vov[i] receiver it captures the once-evaluated index (not an early
+	// element slot); the push/pop/remove store-back recomputes the slot from a fresh
+	// outer pointer, so an argument that reallocates the outer vector during argument
+	// evaluation can't leave the write-back slot dangling. Held in a local (not a
+	// Compiler field) so a nested vector method call during arg eval can't clobber it.
+	rcv := c.evalVectorReceiver(member.Target)
+	slicePtr := rcv.slicePtr
 	elemLLVM := c.resolveType(elemType)
 	elemSize := int64(c.typeSize(elemLLVM))
 
@@ -6599,14 +6602,14 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		newSlice := c.block.NewCall(c.funcs["promise_vector_push"],
 			cowSlice, argPtr, constant.NewInt(irtypes.I64, elemSize))
 		// Store the (possibly reallocated) pointer back
-		c.storeVectorReceiverBack(member.Target, receiverSlot, newSlice)
+		c.storeVectorReceiverBack(rcv, newSlice)
 		return newSlice
 
 	case "pop":
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))
-		c.storeVectorReceiverBack(member.Target, receiverSlot, cowSlice)
+		c.storeVectorReceiverBack(rcv, cowSlice)
 		outAlloca := c.createEntryAlloca(elemLLVM)
 		outPtr := c.block.NewBitCast(outAlloca, irtypes.I8Ptr)
 		found := c.block.NewCall(c.funcs["promise_vector_pop"],
@@ -6733,7 +6736,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))
-		c.storeVectorReceiverBack(member.Target, receiverSlot, cowSlice)
+		c.storeVectorReceiverBack(rcv, cowSlice)
 
 		// B0189: Drop the element being removed if it's droppable (e.g., string).
 		// The remove operation shifts subsequent elements, overwriting the removed one.
@@ -6965,10 +6968,11 @@ func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 		c.block.NewStore(newPtr, fieldPtr)
 	case *ast.IndexExpr:
 		// T0595: nested slice receiver (arr[i].push / slices[i].push) reached via a
-		// path that did NOT pre-capture the slot. The Vector method-call path uses
-		// storeVectorReceiverBack with a slot captured once by evalVectorReceiver, so
-		// it never lands here; this recompute is a defensive fallback. NOTE: it
-		// re-evaluates e.Index — sound only for a side-effect-free index.
+		// path that did NOT go through storeVectorReceiverBack. The Vector method-call
+		// path recomputes the slot itself via genIndexSlotPtrWithIndex (using the
+		// once-evaluated index, T1064), so it never lands here; this recompute is a
+		// defensive fallback. NOTE: it re-evaluates e.Index — sound only for a
+		// side-effect-free index.
 		// T1065: a user-defined `[]` operator returns a Vector by VALUE (an rvalue
 		// temporary), not an addressable element slot. There is no slot to write the
 		// grown pointer back into, so skip the store-back — matching how a Vector
@@ -7023,6 +7027,38 @@ func (c *Compiler) indexTargetIsArrayOrVector(e *ast.IndexExpr) bool {
 		return true
 	}
 	return extractNamed(t) == types.TypVector && c.typeSubst != nil
+}
+
+// indexTargetIsReallocatablePlace reports whether an index receiver's outer
+// container (e.g. `vov` in `vov[i].push(...)`) is an addressable NAMED place — a
+// local/mutref ident or a real owned struct field — that a method ARGUMENT could
+// reach and reallocate during argument evaluation (T1064). For such a place the
+// store-back must recompute the element slot from a freshly-loaded outer pointer,
+// and re-addressing it via genExpr is side-effect-free so the recompute is sound.
+//
+// An rvalue outer (a call/getter result, e.g. `get_vov()[0].push(x)`) is NOT a
+// place: no external alias can reach it to reallocate it during argument
+// evaluation, AND re-evaluating it would spawn a fresh temporary — so the caller
+// captures the early slot ONCE instead (matching the pre-T1064 T0595 behavior;
+// re-evaluating a call rvalue at store-back would double-free / leak). Nested
+// index targets (`vovv[i][j]`) are likewise routed to the early-slot path: a
+// recompute would re-evaluate the inner index, so they keep their pre-T1064
+// behavior rather than risk a double-eval of an impure inner index.
+func (c *Compiler) indexTargetIsReallocatablePlace(target ast.Expr) bool {
+	switch e := target.(type) {
+	case *ast.IdentExpr:
+		if _, ok := c.mutRefPtrs[e.Name]; ok {
+			return true
+		}
+		_, ok := c.locals[e.Name]
+		return ok
+	case *ast.MemberExpr:
+		// A real owned field re-addresses purely; a getter/module-getter or a
+		// borrow-returning member produces a fresh rvalue (mirrors the T1295
+		// addressability guards in optionalPayloadReceiverSlot).
+		return !c.isGetterCallExpr(target) && !c.isBorrowedExpr(target)
+	}
+	return false
 }
 
 // optionalPayloadReceiverSlot handles a Vector-method receiver of the form
@@ -7114,21 +7150,37 @@ func (c *Compiler) optionalPayloadReceiverSlot(target ast.Expr) (slicePtr, slot 
 	return slicePtr, payloadPtr, true
 }
 
+// vectorReceiver holds everything storeVectorReceiverBack needs to write a
+// grown/relocated Vector pointer back into a push/pop/remove receiver. For an
+// arr[i]/vov[i] receiver it deliberately does NOT carry an early-computed element
+// slot: an argument expression can reallocate the outer vector during argument
+// evaluation, freeing the buffer that slot points into (T1064). Instead the slot
+// is recomputed from a freshly-loaded outer pointer at store-back time, reusing
+// idxVal so the (possibly impure) index is still evaluated exactly once.
+type vectorReceiver struct {
+	target   ast.Expr       // ident/field store-back fallback (plain v.push(x))
+	slicePtr value.Value    // loaded inner Vector pointer (read once, up front)
+	slot     value.Value    // directly-captured non-dangling slot (T1295 payload / T1370 temp alloca)
+	idxExpr  *ast.IndexExpr // set for an arr[i]/vov[i] receiver → recompute slot at store-back
+	idxVal   value.Value    // index evaluated exactly once (impure-index safety)
+}
+
 // evalVectorReceiver evaluates a Vector method-call receiver. For an arr[i] /
-// vov[i] receiver it computes the element slot pointer EXACTLY ONCE, returning
-// both the loaded inner-Vector pointer (slicePtr) and that slot pointer (T0595).
-// The caller stores any grown pointer back through the returned slot rather than
-// recomputing it — recomputing would re-evaluate e.Index, which for an impure
-// index yields a DIFFERENT slot and writes the grown buffer into the wrong slot
-// (use-after-free on the real slot + leak). For non-index receivers it falls back
-// to genExprAutoPropagate and returns a nil slot (store-back recomputes as before).
-func (c *Compiler) evalVectorReceiver(target ast.Expr) (slicePtr, slot value.Value) {
+// vov[i] receiver it evaluates the index EXACTLY ONCE (idxVal) and loads the inner
+// Vector pointer, but returns idxExpr/idxVal instead of an early element slot: the
+// store-back must recompute the slot from a fresh outer pointer, because an
+// argument that reallocates the outer vector would leave an early slot dangling
+// (T1064). Recomputing with the saved idxVal keeps an impure index single-eval —
+// re-evaluating e.Index would yield a DIFFERENT slot (use-after-free + leak).
+// For non-index receivers it falls back to genExprAutoPropagate.
+func (c *Compiler) evalVectorReceiver(target ast.Expr) vectorReceiver {
 	// T1295: `place!.push/pop/remove` on an addressable Optional[Vector[T]] place.
-	// Capture the optional's payload field as the write-back slot so a relocating
-	// method stores the grown pointer straight into it (else the write-back is
-	// dropped and the fresh COW/realloc buffer leaks).
+	// The captured slot is the optional's payload field — addressable stack/heap
+	// storage, never a freeable vector buffer — so a relocating method stores the
+	// grown pointer straight into it (else the write-back is dropped and the fresh
+	// COW/realloc buffer leaks).
 	if sp, slotPtr, ok := c.optionalPayloadReceiverSlot(target); ok {
-		return sp, slotPtr
+		return vectorReceiver{target: target, slicePtr: sp, slot: slotPtr}
 	}
 	if idxExpr, ok := target.(*ast.IndexExpr); ok && c.indexTargetIsArrayOrVector(idxExpr) {
 		// T0648: suppress whole-container field dup while evaluating the outer
@@ -7136,11 +7188,33 @@ func (c *Compiler) evalVectorReceiver(target ast.Expr) (slicePtr, slot value.Val
 		// we want the real slot, not a clone of the outer field.
 		savedDupContainer := c.dupContainerFieldAccess
 		c.dupContainerFieldAccess = false
-		slot = c.genIndexSlotPtr(idxExpr)
+		// Evaluate the index once, then compute the slot with it purely to load the
+		// inner Vector pointer. The early slot is intentionally discarded: an
+		// argument that reallocates the outer vector would free the buffer it points
+		// into (T1064). storeVectorReceiverBack recomputes the slot from a fresh
+		// outer pointer using idxVal.
+		idxVal := c.genExpr(idxExpr.Index)
+		slot := c.genIndexSlotPtrWithIndex(idxExpr, idxVal)
 		c.dupContainerFieldAccess = savedDupContainer
 		// The slot holds the inner Vector's i8* (resolveType(Vector[T]) == i8*),
 		// matching what cow/push/pop/remove consume below.
-		return c.block.NewLoad(irtypes.I8Ptr, slot), slot
+		slicePtr := c.block.NewLoad(irtypes.I8Ptr, slot)
+		if c.indexTargetIsReallocatablePlace(idxExpr.Target) {
+			// Addressable outer place (local/mutref/field): an argument could
+			// reallocate it during arg eval, so discard the early slot and
+			// recompute it from a fresh outer pointer at store-back (T1064).
+			return vectorReceiver{
+				target:   target,
+				slicePtr: slicePtr,
+				idxExpr:  idxExpr,
+				idxVal:   idxVal,
+			}
+		}
+		// Rvalue outer (call/getter result) or nested index: no external alias
+		// can reallocate it during arg eval, and re-evaluating it at store-back
+		// would spawn a fresh temporary (double-free) — so keep the early slot
+		// and store through it once, exactly as before T1064.
+		return vectorReceiver{target: target, slicePtr: slicePtr, slot: slot}
 	}
 	val := c.genExprAutoPropagate(target) // B0323
 	// T1370: rvalue receiver (a Vector returned by a call/getter, not an
@@ -7149,28 +7223,52 @@ func (c *Compiler) evalVectorReceiver(target ast.Expr) (slicePtr, slot value.Val
 	// where cleanupStmtTemps will read it. Otherwise the temp's drop frees the stale
 	// pre-realloc pointer (double-free / "bad header magic") or leaks the new buffer.
 	if idx, ok := c.stmtTempMap[val]; ok && idx >= 0 {
-		return val, c.stmtTemps[idx].alloca
+		return vectorReceiver{target: target, slicePtr: val, slot: c.stmtTemps[idx].alloca}
 	}
-	return val, nil
+	return vectorReceiver{target: target, slicePtr: val}
 }
 
 // storeVectorReceiverBack writes a grown/relocated Vector pointer back into its
-// receiver. When the receiver slot was pre-captured by evalVectorReceiver (T0595),
-// it stores through that slot directly (single evaluation); otherwise it defers to
-// storeBackSlicePtr, which handles ident/field/index-recompute targets.
-func (c *Compiler) storeVectorReceiverBack(target ast.Expr, slot, newPtr value.Value) {
-	if slot != nil {
-		c.block.NewStore(newPtr, slot)
+// receiver. For an arr[i]/vov[i] receiver it recomputes the element slot from the
+// current (post-argument) outer pointer + the once-evaluated index (T1064). When a
+// non-dangling slot was pre-captured (T1295 optional payload / T1370 temp alloca)
+// it stores through that slot directly; otherwise it defers to storeBackSlicePtr
+// for an ident/field target (plain v.push(x)).
+func (c *Compiler) storeVectorReceiverBack(rcv vectorReceiver, newPtr value.Value) {
+	if rcv.idxExpr != nil {
+		// T1064: recompute the element slot from the current (post-argument) outer
+		// pointer + the once-evaluated index, so an argument that reallocated the
+		// outer vector can't leave the write-back slot dangling. Suppress
+		// dupContainerFieldAccess exactly as the early read does — for a field outer
+		// (self.vov[i]) we want the real element slot, not a clone of the field.
+		savedDupContainer := c.dupContainerFieldAccess
+		c.dupContainerFieldAccess = false
+		c.block.NewStore(newPtr, c.genIndexSlotPtrWithIndex(rcv.idxExpr, rcv.idxVal))
+		c.dupContainerFieldAccess = savedDupContainer
 		return
 	}
-	c.storeBackSlicePtr(target, newPtr)
+	if rcv.slot != nil {
+		c.block.NewStore(newPtr, rcv.slot)
+		return
+	}
+	c.storeBackSlicePtr(rcv.target, newPtr)
 }
 
 // genIndexSlotPtr returns a pointer to the element slot of a fixed-size array or
 // Vector at e.Index, bounds-checked. Used by storeBackSlicePtr to write a grown
 // nested Vector's pointer back into its slot (T0595). Mirrors the element-pointer
-// computation in genArrayIndex / genVectorIndexAssign.
+// computation in genArrayIndex / genVectorIndexAssign. Re-evaluates e.Index.
 func (c *Compiler) genIndexSlotPtr(e *ast.IndexExpr) value.Value {
+	return c.genIndexSlotPtrWithIndex(e, nil)
+}
+
+// genIndexSlotPtrWithIndex is genIndexSlotPtr with an optional pre-evaluated index.
+// When idx is non-nil it is used verbatim instead of re-evaluating e.Index, so a
+// caller that reads the slot early and recomputes it after argument evaluation
+// (T1064 store-back) evaluates a possibly-impure index exactly once. The container
+// target is re-addressed on each call so the recompute uses the current (possibly
+// reallocated) outer pointer.
+func (c *Compiler) genIndexSlotPtrWithIndex(e *ast.IndexExpr, idx value.Value) value.Value {
 	targetType := c.info.Types[e.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
@@ -7185,7 +7283,9 @@ func (c *Compiler) genIndexSlotPtr(e *ast.IndexExpr) value.Value {
 	// Fixed-size array (Vector[int][2]): GEP into the array storage.
 	if arr, ok := targetType.(*types.Array); ok {
 		basePtr := c.genArrayBasePtr(e.Target, arr)
-		idx := c.genExpr(e.Index)
+		if idx == nil {
+			idx = c.genExpr(e.Index)
+		}
 		elemLLVM := c.resolveType(arr.Elem())
 		arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 		c.emitIndexBoundsCheck(idx, constant.NewInt(irtypes.I64, arr.Size()),
@@ -7196,8 +7296,10 @@ func (c *Compiler) genIndexSlotPtr(e *ast.IndexExpr) value.Value {
 
 	// Vector (Vector[int][]): GEP into the heap buffer after the header. The outer
 	// vector is always heap-allocated (a vector-of-vectors can never be a .rodata
-	// static literal — T0062 statics require compile-time-constant scalar elements),
-	// so the inner push never reallocates it and the loaded pointer is stable.
+	// static literal — T0062 statics require compile-time-constant scalar elements).
+	// The inner push never reallocates the outer, but an ARGUMENT to the method can
+	// (T1064) — so the store-back caller re-addresses e.Target here to pick up the
+	// current outer pointer rather than trusting an early-captured slot.
 	elemType, ok := types.AsVector(targetType)
 	if !ok && extractNamed(targetType) == types.TypVector && c.typeSubst != nil {
 		elemType = c.resolveTypeParam(types.TypVector.TypeParams()[0])
@@ -7207,7 +7309,9 @@ func (c *Compiler) genIndexSlotPtr(e *ast.IndexExpr) value.Value {
 		panic(fmt.Sprintf("codegen: storeBackSlicePtr index target is not array/vector: %s", targetType))
 	}
 	slicePtr := c.genExpr(e.Target)
-	idx := c.genExpr(e.Index)
+	if idx == nil {
+		idx = c.genExpr(e.Index)
+	}
 	elemLLVM := c.resolveType(elemType)
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(vectorHeaderType()))
 	length := loadVectorLen(c.block, headerPtr)

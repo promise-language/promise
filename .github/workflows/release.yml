@@ -102,14 +102,17 @@ jobs:
           go-version-file: compiler/go.mod
           cache: true
           cache-dependency-path: compiler/go.sum
-      # No LLVM install step here either (T0798): `bin/build`/`bin/release
-      # build` self-fetch the pinned LLVM (opt/llc/lld) from
-      # `deps-llvm-<version>` via the slim brotli blob catalog — the same blobs
-      # the runtime resolver fetches for end users. The forge prebuilts cache is
-      # populated by EnsureLLVMBlobs and reused by phase B's findLLVMTool
-      # (via the PROMISE_LLVM fallback chain). The maintainer pre-stages blobs
-      # locally on a dep bump via `bin/release publish-blobs`; nothing in this
-      # job has to install or extract a 700 MB upstream tarball.
+      # No LLVM install step here either (T0798): the embedded manifest
+      # (projected by `bin/release manifest --from-catalog` below) is the input
+      # to phase B (bootstrap compiler stub compilation). Phase B re-fetches
+      # missing blobs from `deps-llvm-<version>` via the runtime resolver into
+      # its own CAS at ~/.promise/cache/blobs/sha256/, honoring PROMISE_OPT/
+      # PROMISE_LLC/PROMISE_LLD environment variables if set. This is NOT the
+      # PROMISE_LLVM build-tool env nor the forge prebuilts cache — phase B has
+      # its own, self-contained fetching path populated by the embedded manifest.
+      # The maintainer pre-stages blobs locally on a dep bump via `bin/release
+      # publish-blobs`; nothing in this job has to install or extract a 700 MB
+      # upstream tarball.
       - name: Install musl (Linux)
         if: runner.os == 'Linux'
         # Linux static link still needs musl-dev. No llvm-22 / lld-22 install.

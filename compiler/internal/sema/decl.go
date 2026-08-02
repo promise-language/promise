@@ -790,8 +790,8 @@ func isSetterOperatorName(name string) bool {
 }
 
 // validateOperatorParams rejects operand-borrow modes on operator methods that
-// operator dispatch cannot honor at the call site (T0916, T1369). Two forms are
-// barred:
+// operator dispatch cannot honor at the call site (T0916, T1070, T1369). Two
+// forms are barred:
 //
 //   - Move (~) value param (RefMut) — rejected on value-result operators only
 //     (T0916). Such operators (+, -, ==, [], [:], ...) are dispatched from
@@ -803,11 +803,16 @@ func isSetterOperatorName(name string) bool {
 //
 //   - Mut-ref (Type~) param (a *types.MutRef param type, whose Ref() is RefNone
 //     — the ~ lives in the type, not the param modifier) — rejected on ALL
-//     operators including setters (T1369). Operator/setter dispatch passes the
-//     operand BY VALUE, but a mut-ref param lowers to a pointer-taking signature
-//     → ABI mismatch → segfault. And no operator form has call-site syntax for a
-//     mutable borrow (`a OP b` cannot mark b mutable), so a mutating operand
-//     would be a hidden effect regardless of the ABI bug.
+//     operators including setters (T1070, T1369). EVERY operator dispatch site —
+//     genBinaryExpr and friends AND the setter path (genMethodIndexAssign /
+//     genSliceAssign) — passes the operand BY VALUE; none route through
+//     genCallArgsWithMutRef, which is what supplies the alloca pointer a mut-ref
+//     param lowers to expect → ABI mismatch → segfault. And no operator form has
+//     call-site syntax for a mutable borrow (`a OP b` cannot mark b mutable), so a
+//     mutating operand would be a hidden effect regardless of the ABI bug. (A
+//     `Type~` mut-ref param on a NORMAL named method call routes through
+//     genCallArgsWithMutRef and is genuinely safe — see
+//     tests/e2e/t1070_mutref_param_test.pr.)
 //
 // Only operand params are checked; the receiver (e.g. ~this, or a Type~ mut-ref
 // receiver) is a legitimate construct — it mutates the visible left operand and

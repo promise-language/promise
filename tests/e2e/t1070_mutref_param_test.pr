@@ -1,0 +1,82 @@
+// T1070/T1369: an operator method may NOT take a mut-ref (`S~`) operand —
+// operator dispatch passes operands by value and never routes through
+// genCallArgsWithMutRef, so a `S~` param (lowered to a pointer by
+// resolveParamType) would receive the value struct's null vtable word where a
+// pointer is expected → segfault. Sema now rejects it (see the sema-level
+// TestT0916_*MutRef* tests). The rejection message tells the user to "expose the
+// mutation through a named method" — this file is the runtime positive control
+// proving that named-method path is genuinely safe with droppable heap fields,
+// so the operator-only rejection does not over-reject anything that actually
+// works. A mut-ref param on a NORMAL method call routes through
+// genCallArgsWithMutRef, which supplies the alloca pointer the pointer-typed
+// param expects.
+type Named {
+  string s;
+  drop(~this) {
+  }
+  overwrite_from(Named ~other) {
+    // Write back through the mut-ref param: the callee mutates the caller's
+    // still-owned value. The old string is dropped and replaced.
+    other.s = this.s;
+  }
+}
+
+// Droppable string field mutated through a mut-ref param — the caller keeps
+// ownership, so a hidden double-free (the operator miscompile's failure mode)
+// would abort here; a leaked replaced string would fail leak detection.
+mutref_param_writes_back_string() `test {
+  a := Named(s: "from-a");
+  b := Named(s: "original-b");
+  a.overwrite_from(b);
+  assert(b.s == "from-a", "b overwritten through mut-ref param");
+  assert(a.s == "from-a", "a still live after the call");
+}
+
+type VecOwner {
+  int[] values;
+  drop(~this) {
+  }
+  append_all(VecOwner ~other) {
+    // Mutate a droppable-container field through the mut-ref param.
+    for v in this.values {
+      other.values.push(v);
+    }
+  }
+}
+
+mutref_param_mutates_vector_field() `test {
+  src := VecOwner(values: int[]());
+  src.values.push(1);
+  src.values.push(2);
+  dst := VecOwner(values: int[]());
+  dst.values.push(9);
+  src.append_all(dst);
+  assert(dst.values.len == 3, "dst grew via mut-ref param");
+  assert(dst.values[0] == 9, "dst[0] preserved");
+  assert(dst.values[2] == 2, "dst[2] appended");
+  assert(src.values.len == 2, "src still live after the call");
+}
+
+// A plain (unmarked) operand IS the shared read-only borrow — the runtime-safe
+// alternative for operators that the rejection steers users toward. A binary
+// operator on a heap type with a droppable field reads both operands and leaves
+// both live (companion to tests/e2e/operator_return_other_test.pr, from the
+// mut-ref-rejection angle).
+type Pair {
+  string label;
+  int v;
+  drop(~this) {
+  }
+  + (Pair other) int {
+    return this.v + other.v;
+  }
+}
+
+operator_plain_borrow_operand_droppable() `test {
+  a := Pair(label: "aa", v: 10);
+  b := Pair(label: "bb", v: 32);
+  sum := a + b;
+  assert(sum == 42, "operator read both operands");
+  assert(a.label == "aa", "left operand still live");
+  assert(b.label == "bb", "right operand still live");
+}

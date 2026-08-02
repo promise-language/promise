@@ -6969,6 +6969,14 @@ func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 		// storeVectorReceiverBack with a slot captured once by evalVectorReceiver, so
 		// it never lands here; this recompute is a defensive fallback. NOTE: it
 		// re-evaluates e.Index — sound only for a side-effect-free index.
+		// T1065: a user-defined `[]` operator returns a Vector by VALUE (an rvalue
+		// temporary), not an addressable element slot. There is no slot to write the
+		// grown pointer back into, so skip the store-back — matching how a Vector
+		// returned from any other method (e.g. `get_vec(0).push(x)`) behaves. Only a
+		// genuine array/Vector index has an addressable slot.
+		if !c.indexTargetIsArrayOrVector(t) {
+			return
+		}
 		slotPtr := c.genIndexSlotPtr(t)
 		c.block.NewStore(newPtr, slotPtr)
 	}

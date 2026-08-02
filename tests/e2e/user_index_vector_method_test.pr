@@ -1,0 +1,84 @@
+// T1065: nested vector method-calls / index-assign on a container whose
+// user-defined `[]` operator returns a Vector BY VALUE must not panic in
+// codegen. The returned Vector is an rvalue temporary (like any method return),
+// so push/pop/remove and nested index-assign operate on that temporary and do
+// not persist back into the container. These tests pin that "behaves like a
+// method-return receiver" contract and guard against the old codegen panic
+// ("storeBackSlicePtr index target is not array/vector").
+//
+// Elements are Vector[int] (non-droppable) so the tests stay leak-clean and do
+// not tangle with the separate rvalue-push-with-droppable-elements corruption
+// tracked as T1370.
+type IntVecBox {
+  Vector[int][] _data;
+  new(~this) {
+    this._data = [[1, 2, 3]];
+  }
+  [](int i) Vector[int] => this._data[i];
+}
+
+// Container whose inner vector is empty. push reallocs from an empty buffer, so
+// it does not free an aliased backing buffer — this keeps the push test clear of
+// the pre-existing rvalue-push realloc/aliasing corruption (T1370) while still
+// exercising the fixed store-back path.
+type EmptyIntVecBox {
+  Vector[int][] _data;
+  new(~this) {
+    this._data = [Vector[int]()];
+  }
+  [](int i) Vector[int] => this._data[i];
+}
+
+// pop on a user-`[]` receiver returns the last element and does not crash/leak.
+test_userindex_pop() `test {
+  b := IntVecBox();
+  x := b[0].pop();
+  assert(x! == 3, "pop should return last element");
+}
+
+// remove on a user-`[]` receiver (returns void); the point is no crash/leak and
+// that it does not persist back into the container.
+test_userindex_remove() `test {
+  b := IntVecBox();
+  b[0].remove(0);
+  assert(b[0].len == 3, "remove on rvalue receiver must not persist");
+}
+
+// push targets the returned temporary, so the container does not grow.
+test_userindex_push_int_no_persist() `test {
+  b := EmptyIntVecBox();
+  b[0].push(99);
+  assert(b[0].len == 0, "push on rvalue receiver must not persist");
+}
+
+// nested index-assign writes into the returned temporary, not the container.
+test_userindex_nested_assign_no_persist() `test {
+  g := IntVecBox();
+  g[0][1] = 99;
+  assert(g[0][1] == 2, "index-assign on rvalue receiver must not persist");
+}
+
+// nested inc/dec writes into the returned temporary, not the container. This
+// exercises the inc/dec store-back caller (stmt.go), a distinct path from the
+// plain index-assign above that also reached the old panic.
+test_userindex_nested_incdec_no_persist() `test {
+  g := IntVecBox();
+  g[0][1]++;
+  assert(g[0][1] == 2, "inc on rvalue receiver must not persist");
+}
+
+// nested compound-assign writes into the returned temporary, not the container.
+// This exercises the compound-assign store-back caller (stmt.go).
+test_userindex_nested_compound_no_persist() `test {
+  g := IntVecBox();
+  g[0][1] += 5;
+  assert(g[0][1] == 2, "compound-assign on rvalue receiver must not persist");
+}
+
+// nested slice-assign writes into the returned temporary, not the container.
+// This exercises the slice-assign store-back caller (stmt.go).
+test_userindex_nested_slice_assign_no_persist() `test {
+  g := IntVecBox();
+  g[0][0:2] = [7, 8];
+  assert(g[0][0] == 1, "slice-assign on rvalue receiver must not persist");
+}

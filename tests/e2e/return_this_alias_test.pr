@@ -109,6 +109,75 @@ return_this_structural_operator() `test {
   assert(it.v == 8, "it.v == 8");
 }
 
+// T1061: BORROW-returning structural operators/methods (`T&`). The result is a
+// genuine alias of the receiver's heap instance (no clone), so codegen must NOT
+// register a structural free for the binding — otherwise the shared allocation is
+// freed while the receiver still owns it (double-free → "invalid free (bad header
+// magic)" panic on drop, and a would-be leak masking). Both `m` and the receiver
+// must read the live field, and the single owner (the receiver) drops it once.
+type SBorrow `structural {
+  int v;
+  -() SBorrow & {
+    return this;
+  }
+  + (SBorrow other) SBorrow & {
+    return this;
+  }
+  borrow_self(this) SBorrow & {
+    return this;
+  }
+}
+type SBorrowItem is SBorrow {
+  int v;
+}
+
+// Borrow-returning structural UNARY operator — `m` aliases `it`'s instance.
+return_this_structural_borrow_unary() `test {
+  it := SBorrowItem(v: 8);
+  m := -it;
+  assert(m.v == 8, "m.v == 8");
+  assert(it.v == 8, "it.v == 8");
+}
+
+// Borrow-returning structural BINARY operator — `m` aliases `a`'s instance.
+return_this_structural_borrow_binary() `test {
+  a := SBorrowItem(v: 7);
+  b := SBorrowItem(v: 3);
+  m := a + b;
+  assert(m.v == 7, "m.v == 7");
+  assert(a.v == 7, "a.v == 7");
+}
+
+// Borrow-returning structural METHOD call — `m` aliases `it`'s instance.
+return_this_structural_borrow_method() `test {
+  it := SBorrowItem(v: 5);
+  m := it.borrow_self();
+  assert(m.v == 5, "m.v == 5");
+  assert(it.v == 5, "it.v == 5");
+}
+
+// Same three borrows, but bound to an EXPLICITLY ref-typed local (`SBorrow& m`).
+// The inferred forms above route through genInferredVarDecl; an explicit ref type
+// routes through genTypedVarDecl — a distinct structural-free registration site
+// that must apply the same borrow guard (no free, single owner, no double-free).
+return_this_structural_borrow_explicit_ref() `test {
+  it := SBorrowItem(v: 8);
+  SBorrow &u = -it;
+  assert(u.v == 8, "u.v == 8");
+  assert(it.v == 8, "it.v == 8");
+
+  a := SBorrowItem(v: 7);
+  b := SBorrowItem(v: 3);
+  SBorrow &s = a + b;
+  assert(s.v == 7, "s.v == 7");
+  assert(a.v == 7, "a.v == 7");
+
+  base := SBorrowItem(v: 5);
+  SBorrow &r = base.borrow_self();
+  assert(r.v == 5, "r.v == 5");
+  assert(base.v == 5, "base.v == 5");
+}
+
 // Polymorphic `return this` — typeinfo clone dispatch must copy the concrete
 // subtype, not the abstract base.
 type Animal {

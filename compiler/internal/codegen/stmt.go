@@ -4011,7 +4011,12 @@ func (c *Compiler) isFreshOwnedStructuralRHS(rhs ast.Expr) bool {
 	}
 	switch e := innerRHS.(type) {
 	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
-		return true
+		// T1061: a borrow-returning call/operator (`T&`) aliases existing
+		// storage rather than producing a fresh owned allocation — mirror the
+		// IndexExpr/MemberExpr borrow guards below so maybeRegisterStructuralFree
+		// (and the if-let/while-let structural-param free) does not register a
+		// free over borrowed storage.
+		return !c.isBorrowedExpr(innerRHS)
 	case *ast.IdentExpr:
 		// T1273: a bare-identifier module getter (e.g. `stdout`) returns a fresh
 		// owned value, just like a call — free its box at scope exit. A plain local
@@ -4056,6 +4061,19 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	}
 	named := extractNamed(typ)
 	if named == nil || !named.IsStructural() || named.IsValueType() {
+		return
+	}
+	// T1061: a borrow-returning RHS (`T&`/`T~`, e.g. a structural operator/method
+	// whose body is `return this` with a `&`-return type) aliases existing storage
+	// rather than owning a fresh allocation. Never register a free over it — even
+	// when claimHeapTemp opportunistically captured a drop func for the binding
+	// (claimedOwnedBox), since the return value's instance ptr matches the still-
+	// owned receiver/temp, whose own drop performs the single cleanup. Registering
+	// here would risk a premature/double free (this over-registration is masked in
+	// the var-decl path by the downstream borrow-clear, but the guard closes it at
+	// the source). extractNamed peels SharedRef/MutRef, so the checks above do not
+	// catch this on their own.
+	if c.isBorrowedExpr(rhs) {
 		return
 	}
 	// Only register when the RHS produces a fresh heap allocation the variable

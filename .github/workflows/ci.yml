@@ -71,7 +71,11 @@ jobs:
   test:
     needs: setup
     name: ${{ matrix.name }}
-    timeout-minutes: 40
+    # Windows is consistently the slowest host: observed 44-50m on runs #20-22,
+    # 38m on #23, and #24 was cancelled at the 40m cap mid-test-suite. 75m gives
+    # real headroom over the worst observed run while still bounding a hang well
+    # under the GitHub-hosted ceiling of 360m.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}

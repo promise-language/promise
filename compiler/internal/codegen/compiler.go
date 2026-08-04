@@ -957,7 +957,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareEnumMethods(file)
 	c.declareMonoMethods(file, monoInstances)
 	c.declareMonoEnumMethods(file, monoInstances)
-	c.declareMonoSynthesizedDefaults(file, monoInstances)   // structural parent defaults
+	c.declareMonoSynthesizedDefaults(monoInstances)         // structural parent defaults
 	c.declareSynthesizedDrops(file)                         // B0158: auto-synthesized drops (non-generic)
 	c.declareSynthesizedEnumDrops(file)                     // T0102: auto-synthesized enum drops (non-generic)
 	c.declareSynthesizedMonoDrops(file, monoInstances)      // B0158: auto-synthesized drops (generic)
@@ -1009,7 +1009,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineEnumMethods(file)
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoEnumMethods(file, monoInstances)
-	c.defineMonoSynthesizedDefaults(file, monoInstances)   // structural parent defaults
+	c.defineMonoSynthesizedDefaults(monoInstances)         // structural parent defaults
 	c.defineGenericStructuralDefaults(file)                // T0862: non-generic impls of generic structural interfaces
 	c.defineSynthesizedDrops(file)                         // B0158: auto-synthesized drops (non-generic)
 	c.defineSynthesizedEnumDrops(file)                     // T0102: auto-synthesized enum drops (non-generic)
@@ -6523,7 +6523,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareModuleEnumMethods(modFile, irName)
 	c.declareMonoMethods(modFile, monoInstances)
 	c.declareMonoEnumMethods(modFile, monoInstances)
-	c.declareMonoSynthesizedDefaults(modFile, monoInstances)
+	c.declareMonoSynthesizedDefaults(monoInstances)
 	c.declareSynthesizedModuleDrops(modFile, irName)           // B0158
 	c.declareSynthesizedModuleEnumDrops(modFile, irName)       // T0102
 	c.declareSynthesizedMonoDrops(modFile, monoInstances)      // B0158
@@ -6551,7 +6551,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineModuleEnumMethods(modFile, irName)
 	c.defineMonoMethods(modFile, monoInstances)
 	c.defineMonoEnumMethods(modFile, monoInstances)
-	c.defineMonoSynthesizedDefaults(modFile, monoInstances)
+	c.defineMonoSynthesizedDefaults(monoInstances)
 	c.defineSynthesizedModuleDrops(modFile, irName)           // B0158
 	c.defineSynthesizedModuleEnumDrops(modFile, irName)       // T0102
 	c.defineSynthesizedMonoDrops(modFile, monoInstances)      // B0158
@@ -10968,27 +10968,16 @@ func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *t
 func (c *Compiler) declareGenericStructuralDefaults(file *ast.File) {
 	c.forEachConcreteGenericStructuralParent(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
 		// The interface may live in a catalog/std module (e.g. std.Iterator[T]).
-		// declareStructuralDefaultStubs resolves the interface's method decls from
-		// the *ast.File it's handed and its inner type references against c.info, so
-		// when the interface is module-defined we must feed it the module's file and
-		// temporarily swap c.info to the module's — mirroring
-		// defineConcreteStructuralDefaultBodies. Using main-file-only lookup here
-		// (the T0862 fix's original form) found no TypeDecl for a module interface,
-		// so no stub was declared and the concrete type's vtable slot for the
-		// inherited default was left null → segfault when dispatched (T1374).
-		ifaceTD, declFile, ifaceModInfo := c.findTypeDeclAnyFileWithFile(iface.Obj().Name())
-		if ifaceTD == nil {
-			return
-		}
-		if ifaceModInfo != nil {
-			savedInfo := c.info
-			c.info = ifaceModInfo
-			defer func() { c.info = savedInfo }()
-		}
-		// Reuse the mono declare path — its name uses the concrete type's plain
+		// declareStructuralDefaultStubs now self-resolves the interface's declaring
+		// file and swaps c.info per recursion level (T1377), so the direct interface
+		// as well as any transitively-inherited grandparent interface that crosses
+		// files/modules resolve correctly. Its name uses the concrete type's plain
 		// name (no instance suffix) and it does not tag moduleOwnedFuncs/
-		// instanceOwnedFuncs, so the stub stays in the main IR.
-		c.declareStructuralDefaultStubs(declFile, named.Obj().Name(), named, iface, subst)
+		// instanceOwnedFuncs, so the stub stays in the main IR. Using main-file-only
+		// lookup here (the T0862 fix's original form) found no TypeDecl for a module
+		// interface, so no stub was declared and the concrete type's vtable slot for
+		// the inherited default was left null → segfault when dispatched (T1374).
+		c.declareStructuralDefaultStubs(named.Obj().Name(), named, iface, subst)
 	})
 }
 

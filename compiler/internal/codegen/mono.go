@@ -2394,7 +2394,7 @@ func (c *Compiler) defineSynthesizedMonoEnumClones(file *ast.File, instances []*
 // parents that need to be synthesized for mono instances of concrete types.
 // E.g., _FnIter[int] inherits filter/take/skip from Iterator[T] — these become
 // _FnIter__int.filter, _FnIter__int.take, etc. Must run BEFORE vtable emission.
-func (c *Compiler) declareMonoSynthesizedDefaults(file *ast.File, instances []*types.Instance) {
+func (c *Compiler) declareMonoSynthesizedDefaults(instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
 		if !ok || named.IsStructural() {
@@ -2406,7 +2406,7 @@ func (c *Compiler) declareMonoSynthesizedDefaults(file *ast.File, instances []*t
 
 		for _, pr := range named.Parents() {
 			if pr.Named.IsStructural() {
-				c.declareStructuralDefaultStubs(file, name, named, pr.Named, subst)
+				c.declareStructuralDefaultStubs(name, named, pr.Named, subst)
 			}
 		}
 	}
@@ -2414,10 +2414,22 @@ func (c *Compiler) declareMonoSynthesizedDefaults(file *ast.File, instances []*t
 
 // declareStructuralDefaultStubs declares function stubs for default methods from
 // a structural interface, using mono-qualified names for the concrete type.
-func (c *Compiler) declareStructuralDefaultStubs(file *ast.File, mName string, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type) {
-	ifaceTD := c.findTypeDecl(file, iface.Obj().Name())
+//
+// Each call (entry and recursive) re-resolves the interface's own declaring file
+// and swaps c.info to the module's, mirroring defineConcreteStructuralDefaultBodies.
+// This is essential when the structural-parent chain crosses files/modules (e.g.
+// a user `MyIter[T] is Iterator[T]` where Iterator lives in std): resolving a
+// grandparent interface against the wrong file would find no TypeDecl, declare no
+// stub, and leave the concrete's vtable slot null → segfault on dispatch (T1377).
+func (c *Compiler) declareStructuralDefaultStubs(mName string, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+	ifaceTD, _, ifaceModInfo := c.findTypeDeclAnyFileWithFile(iface.Obj().Name())
 	if ifaceTD == nil {
 		return
+	}
+	if ifaceModInfo != nil {
+		savedInfo := c.info
+		c.info = ifaceModInfo
+		defer func() { c.info = savedInfo }()
 	}
 	for _, md := range ifaceTD.Methods {
 		if md.Body == nil {
@@ -2460,17 +2472,17 @@ func (c *Compiler) declareStructuralDefaultStubs(file *ast.File, mName string, c
 		c.funcs[mangledName] = fn
 	}
 
-	// Recurse into parent interfaces
+	// Recurse into parent interfaces — each level self-resolves its own file/info.
 	for _, pr := range iface.Parents() {
 		if pr.Named.IsStructural() {
-			c.declareStructuralDefaultStubs(file, mName, concrete, pr.Named, subst)
+			c.declareStructuralDefaultStubs(mName, concrete, pr.Named, subst)
 		}
 	}
 }
 
 // defineMonoSynthesizedDefaults generates bodies for synthesized default methods
 // on mono instances of concrete types with structural parents.
-func (c *Compiler) defineMonoSynthesizedDefaults(file *ast.File, instances []*types.Instance) {
+func (c *Compiler) defineMonoSynthesizedDefaults(instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
 		if !ok || named.IsStructural() {
@@ -2482,7 +2494,7 @@ func (c *Compiler) defineMonoSynthesizedDefaults(file *ast.File, instances []*ty
 
 		for _, pr := range named.Parents() {
 			if pr.Named.IsStructural() {
-				c.defineStructuralDefaultBodies(file, name, named, pr.Named, subst, inst)
+				c.defineStructuralDefaultBodies(name, named, pr.Named, subst, inst)
 			}
 		}
 	}
@@ -2490,10 +2502,20 @@ func (c *Compiler) defineMonoSynthesizedDefaults(file *ast.File, instances []*ty
 
 // defineStructuralDefaultBodies generates method bodies for already-declared
 // synthesized default method stubs with mono-qualified names.
-func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type, inst *types.Instance) {
-	ifaceTD := c.findTypeDecl(file, iface.Obj().Name())
+//
+// Like declareStructuralDefaultStubs, each call re-resolves the interface's own
+// declaring file and swaps c.info symmetrically, so a cross-file mono chain gets
+// its stubs both declared AND defined (T1377). The per-method saveState/restoreState
+// does not touch c.info, so the defer-based swap composes cleanly with it.
+func (c *Compiler) defineStructuralDefaultBodies(mName string, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type, inst *types.Instance) {
+	ifaceTD, _, ifaceModInfo := c.findTypeDeclAnyFileWithFile(iface.Obj().Name())
 	if ifaceTD == nil {
 		return
+	}
+	if ifaceModInfo != nil {
+		savedInfo := c.info
+		c.info = ifaceModInfo
+		defer func() { c.info = savedInfo }()
 	}
 	for _, md := range ifaceTD.Methods {
 		if md.Body == nil {
@@ -2539,10 +2561,10 @@ func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, c
 		c.restoreState(saved)
 	}
 
-	// Recurse into parent interfaces
+	// Recurse into parent interfaces — each level self-resolves its own file/info.
 	for _, pr := range iface.Parents() {
 		if pr.Named.IsStructural() {
-			c.defineStructuralDefaultBodies(file, mName, concrete, pr.Named, subst, inst)
+			c.defineStructuralDefaultBodies(mName, concrete, pr.Named, subst, inst)
 		}
 	}
 }

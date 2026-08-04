@@ -216,3 +216,84 @@ module_interface_closure_combinators_through_view() `test {
   Iterator[int] c = mk_upto(100);
   assert(c.take(7).count() == 7, "take().count() through Iterator[int] view");
 }
+
+// T1377: a *user-defined* generic structural interface (main file) that extends
+// the *module*-defined Iterator[int]. A concrete implements the user interface;
+// dispatching an inherited default combinator through the view crosses files
+// transitively (UpTo2 -> MyIter[int] -> std Iterator[int]). The stub-declaration
+// recursion previously reused the main file when resolving the grandparent
+// Iterator, found nothing, declared no stub, and left the vtable slot null →
+// segfault. Bound routed through the opaque `mk_upto2` helper so opt can't
+// const-fold the dispatch away (same reasoning as mk_upto above).
+type MyIter[T] is Iterator[T] `structural {
+}
+type UpTo2 is MyIter[int] {
+  int cur;
+  int limit;
+  next(~this) int? {
+    if this.cur >= this.limit {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+mk_upto2(int n) UpTo2 {
+  return UpTo2(cur: 0, limit: n);
+}
+user_iface_extends_module_iface_through_view() `test {
+  MyIter[int] it = mk_upto2(5);
+  assert(it.count() == 5, "inherited combinator via user iface extending module iface");
+}
+user_iface_extends_module_iface_direct() `test {
+  UpTo2 u = mk_upto2(5);
+  assert(u.count() == 5, "same default called directly on concrete");
+}
+user_iface_chained_combinator_through_view() `test {
+  MyIter[int] a = mk_upto2(10);
+  assert(a.filter(|int x| -> bool {
+    return x % 2 == 0;
+  }).count() == 5, "filter().count() via user-iface view");
+}
+
+// T1377 (mono symmetry, runtime): a *generic concrete* type whose structural
+// parent chain crosses files — MyBox[T] is MyIter[T] is std Iterator[T] —
+// instantiated as MyBox[int] and dispatched through the MyIter[int] view. This is
+// the runtime counterpart to the IR-shape Go test TestT1377MonoTransitiveDefault
+// Defined: the transitively-inherited default must be both declared AND *defined*
+// under the mono-qualified name (MyBox__int.count), else the slot is null (declare
+// broken) or the stub is declared-but-undefined (only declare fixed). Bound routed
+// through the opaque `mk_mybox` helper so opt can't const-fold the dispatch away.
+type MyBox[T] is MyIter[T] {
+  T val;
+  int remaining;
+  next(~this) T? {
+    if this.remaining <= 0 {
+      return none;
+    }
+    this.remaining = this.remaining - 1;
+    return this.val;
+  }
+}
+mk_mybox(int v, int n) MyBox[int] {
+  return MyBox[int](val: v, remaining: n);
+}
+generic_concrete_cross_file_through_view() `test {
+  MyIter[int] it = mk_mybox(7, 3);
+  assert(it.count() == 3, "count() default through MyIter[int] view on generic concrete");
+}
+generic_concrete_cross_file_direct() `test {
+  MyBox[int] b = mk_mybox(7, 4);
+  assert(b.count() == 4, "count() default called directly on generic concrete");
+}
+generic_concrete_cross_file_chained() `test {
+  // Chained intermediate combinator (filter) then a terminal (collect) through the
+  // view exercises the closure-returning synthesized slots on the generic concrete.
+  MyIter[int] a = mk_mybox(2, 6);
+  int[] evens = a.filter(|int x| -> bool {
+    return x % 2 == 0;
+  }).collect();
+  assert(evens.len == 6, "filter().collect() length via generic-concrete view");
+  assert(evens[0] == 2 && evens[5] == 2, "filter().collect() values via generic-concrete view");
+}

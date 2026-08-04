@@ -449,6 +449,18 @@ add_one(int[]~ v) { v.push(1); }   // OK: mutable borrow
 // Exception: `interior types (Channel/Mutex) allow interior mutation through a
 // shared borrow — their internal synchronization makes it safe.
 
+// Self-aliasing: a `~this` (mutable-receiver) method may not take a plain/shared
+// borrow of one of the SAME receiver's fields in the same call — the receiver's
+// mutable borrow overlaps the field's shared borrow:
+//   o.mutate(o.field);  // error: cannot borrow 'o' as mutable — already borrowed
+// The method could reassign/drop o.field while the borrow is live. Pass a distinct
+// value or a clone (o.field.clone()) instead. Borrow tracking keys on the root
+// variable (`o`), not the field: passing ANY field of a non-Copy receiver triggers
+// this — including a Copy-typed field (a conservative over-approximation, since a
+// Copy field is actually passed by value with no aliasing hazard). The rule lifts
+// only when the whole receiver is a Copy/value type, so the call copies rather than
+// borrows.
+
 // Reference TYPES (locals and return types; default is owned):
 // (borrows can't be stored in fields — use Ref[T] to hold a reference in a struct)
 //   string  s = ref.borrow;         // error: can't store a borrow as an owned string

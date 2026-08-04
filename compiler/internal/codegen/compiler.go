@@ -10967,10 +10967,28 @@ func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *t
 // pipeline uses for generic concrete types (declare/defineMonoSynthesizedDefaults).
 func (c *Compiler) declareGenericStructuralDefaults(file *ast.File) {
 	c.forEachConcreteGenericStructuralParent(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+		// The interface may live in a catalog/std module (e.g. std.Iterator[T]).
+		// declareStructuralDefaultStubs resolves the interface's method decls from
+		// the *ast.File it's handed and its inner type references against c.info, so
+		// when the interface is module-defined we must feed it the module's file and
+		// temporarily swap c.info to the module's — mirroring
+		// defineConcreteStructuralDefaultBodies. Using main-file-only lookup here
+		// (the T0862 fix's original form) found no TypeDecl for a module interface,
+		// so no stub was declared and the concrete type's vtable slot for the
+		// inherited default was left null → segfault when dispatched (T1374).
+		ifaceTD, declFile, ifaceModInfo := c.findTypeDeclAnyFileWithFile(iface.Obj().Name())
+		if ifaceTD == nil {
+			return
+		}
+		if ifaceModInfo != nil {
+			savedInfo := c.info
+			c.info = ifaceModInfo
+			defer func() { c.info = savedInfo }()
+		}
 		// Reuse the mono declare path — its name uses the concrete type's plain
 		// name (no instance suffix) and it does not tag moduleOwnedFuncs/
 		// instanceOwnedFuncs, so the stub stays in the main IR.
-		c.declareStructuralDefaultStubs(file, named.Obj().Name(), named, iface, subst)
+		c.declareStructuralDefaultStubs(declFile, named.Obj().Name(), named, iface, subst)
 	})
 }
 
@@ -11344,8 +11362,18 @@ func (c *Compiler) restoreBlockTempFloors(saved [4]int) {
 // then in all loaded module files. Returns the decl and (if found in a module)
 // the module's sema.Info so callers can switch context for body generation.
 func (c *Compiler) findTypeDeclAnyFile(name string) (*ast.TypeDecl, *sema.Info) {
+	td, _, info := c.findTypeDeclAnyFileWithFile(name)
+	return td, info
+}
+
+// findTypeDeclAnyFileWithFile is like findTypeDeclAnyFile but also returns the
+// *ast.File the TypeDecl was found in. Callers that must feed a module file into
+// another file-parameterized helper (e.g. declareStructuralDefaultStubs) need the
+// file, not just the sema info. The returned file is c.file when the type is in
+// the current file (with a nil Info meaning "use current context").
+func (c *Compiler) findTypeDeclAnyFileWithFile(name string) (*ast.TypeDecl, *ast.File, *sema.Info) {
 	if td := c.findTypeDecl(c.file, name); td != nil {
-		return td, nil // nil Info means "use current context"
+		return td, c.file, nil // nil Info means "use current context"
 	}
 	// Always search from rootInfo (original user sema info) so that module lookups
 	// work correctly even when c.info has been temporarily swapped during synthesis.
@@ -11357,12 +11385,12 @@ func (c *Compiler) findTypeDeclAnyFile(name string) (*ast.TypeDecl, *sema.Info) 
 		for _, modInfo := range root.ModuleInfos {
 			if modInfo.File != nil {
 				if td := c.findTypeDecl(modInfo.File, name); td != nil {
-					return td, modInfo.SemaInfo
+					return td, modInfo.File, modInfo.SemaInfo
 				}
 			}
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // synthesizeDefaultMethods generates LLVM functions for default methods from

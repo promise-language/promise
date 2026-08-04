@@ -137,11 +137,22 @@ generic_default_method() `test {
 
 // A non-generic concrete type implementing a generic structural interface that
 // lives in a *module* (std's Iterator[int]). Calling an inherited default
-// combinator through the view exercises the cross-module synthesis path.
+// combinator through the view exercises the cross-module synthesis path (T1374).
+//
+// `next` must match Iterator's abstract signature (non-failable `next(~this)
+// T?`); a failable `next!` does not satisfy it and slips past sema into a
+// codegen crash (insertvalue elem type mismatch) — tracked as T1376.
+//
+// The iterator bound comes through the opaque `mk` helper so the count/collect/
+// find dispatch is genuinely executed at runtime. An earlier version used a
+// compile-time-constant `limit: 3`, which let `opt -O1` const-fold and elide the
+// combinator dispatch entirely — so the test passed even while the concrete
+// type's vtable slot for the module default was left null (the T1374 crash was
+// never actually exercised).
 type UpTo is Iterator[int] {
   int cur;
   int limit;
-  next!(~this) int? {
+  next(~this) int? {
     if this.cur >= this.limit {
       return none;
     }
@@ -150,8 +161,58 @@ type UpTo is Iterator[int] {
     return v;
   }
 }
+mk_upto(int n) UpTo {
+  return UpTo(cur: 0, limit: n);
+}
 module_interface_default_through_view() `test {
-  UpTo u = UpTo(cur: 0, limit: 3);
-  Iterator[int] it = u;
-  assert(it.count() == 3, "count() default through Iterator[int] view");
+  // count() — the original T1374 crash: an inherited terminal combinator
+  // dispatched through the module-interface view jumped to a null vtable slot.
+  Iterator[int] it = mk_upto(5);
+  assert(it.count() == 5, "count() default through Iterator[int] view");
+}
+module_interface_default_direct() `test {
+  // Same default called directly on the concrete (no view coercion).
+  UpTo u = mk_upto(5);
+  assert(u.count() == 5, "count() default called directly on concrete");
+}
+module_interface_defaults_collect_find() `test {
+  // Additional terminal combinators through the view exercise more of the
+  // synthesized vtable slots (collect, find, first) with data-dependent input.
+  Iterator[int] a = mk_upto(4);
+  assert(a.collect().len == 4, "collect() through Iterator[int] view");
+  Iterator[int] b = mk_upto(9);
+  if f := b.find(|int x| -> bool {
+    return x == 3;
+  }) {
+    assert(f == 3, "find() through Iterator[int] view");
+  } else {
+    assert(false, "find() found nothing");
+  }
+  Iterator[int] c = mk_upto(5);
+  if v := c.first() {
+    assert(v == 0, "first() through Iterator[int] view");
+  } else {
+    assert(false, "first() found nothing");
+  }
+}
+module_interface_closure_combinators_through_view() `test {
+  // Closure-returning *intermediate* combinators (filter/map/take) through the
+  // module-interface view. These are the vtable slots the plan flagged as the
+  // risky part of per-concrete synthesis (each returns a `move ||` lambda that
+  // captures `this`); a chained terminal then dispatches on the wrapped view.
+  // Data-dependent input keeps opt from const-folding the chain away.
+  Iterator[int] a = mk_upto(10);
+  assert(a.filter(|int x| -> bool {
+    return x % 2 == 0;
+  }).count() == 5, "filter().count() through Iterator[int] view");
+
+  Iterator[int] b = mk_upto(4);
+  int[] mapped = b.map[int](|int x| -> int {
+    return x * 10;
+  }).collect();
+  assert(mapped.len == 4, "map().collect() length through Iterator[int] view");
+  assert(mapped[0] == 0 && mapped[3] == 30, "map().collect() values through view");
+
+  Iterator[int] c = mk_upto(100);
+  assert(c.take(7).count() == 7, "take().count() through Iterator[int] view");
 }

@@ -2161,6 +2161,145 @@ func TestAbstractMethodWithoutBody(t *testing.T) {
 	checkOK(t, "type Shape {\n\tarea() f64 `abstract;\n}")
 }
 
+// T1376: a concrete override must actually satisfy the inherited abstract
+// requirement's signature. Sema previously matched an override to a requirement
+// by slot key only, so an incompatible override (failable vs non-failable, wrong
+// return type) slipped through and panicked codegen when synthesizing inherited
+// default combinators. These must now be clean sema errors.
+func TestAbstractOverrideSignatureMismatch(t *testing.T) {
+	// Failable next! cannot satisfy Iterator[int]'s non-failable next.
+	errs := checkErrs(t, `
+		type UpTo is Iterator[int] {
+			int cur; int limit;
+			next!(~this) int? {
+				if this.cur >= this.limit { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}`)
+	expectError(t, errs, "cannot satisfy abstract method 'next'")
+	expectError(t, errs, "failable")
+
+	// Wrong return type cannot satisfy the requirement.
+	errs = checkErrs(t, `
+		type UpTo is Iterator[int] {
+			int cur; int limit;
+			next(~this) string { return "x"; }
+		}`)
+	expectError(t, errs, "incompatible signature")
+
+	// A non-optional `next(~this) int` is structurally allowed by the relaxed
+	// "T satisfies T?" rule, but Iterator synthesizes default combinator bodies
+	// that unwrap this.next() — a non-optional return changes the LLVM shape and
+	// panicked codegen. Since Iterator contributes synthesized default bodies,
+	// the override must match the abstract return shape exactly, so this is now
+	// a clean sema error rather than a compiler panic.
+	errs = checkErrs(t, `
+		type UpTo is Iterator[int] {
+			int cur; int limit;
+			next(~this) int { int v = this.cur; this.cur = this.cur + 1; return v; }
+		}`)
+	expectError(t, errs, "cannot satisfy abstract method 'next'")
+	expectError(t, errs, "incompatible signature")
+
+	// The mismatch check also runs for getter and setter requirements: a
+	// getter/setter override whose type differs from the abstract one is
+	// rejected (covers the LookupGetter/LookupSetter branches and the
+	// getter/setter position anchoring in reportOverrideMismatch).
+	errs = checkErrs(t, `
+		type HasId `+"`structural"+` {
+			get id int `+"`abstract;"+`
+			info(~this) int { return 1; }
+		}
+		type Widget is HasId {
+			string name;
+			get id string { return this.name; }
+		}`)
+	expectError(t, errs, "cannot satisfy abstract method 'id'")
+	expectError(t, errs, "incompatible signature")
+
+	errs = checkErrs(t, `
+		type Cell `+"`structural"+` {
+			set value(int v) `+"`abstract;"+`
+			info(~this) int { return 1; }
+		}
+		type Box is Cell {
+			int n;
+			set value(string v) { this.n = 0; }
+		}`)
+	expectError(t, errs, "cannot satisfy abstract method 'value'")
+	expectError(t, errs, "incompatible signature")
+
+	// A non-failable override of a failable abstract is normally allowed by the
+	// relaxed rule, but when the declaring `structural interface contributes
+	// synthesized default bodies the failability (and thus the LLVM return
+	// shape) must match exactly — otherwise codegen would synthesize the default
+	// against the wrong optional shape (T1376). This is the canError-differs
+	// branch of ReturnShapeMatchesAbstract, reached only after SatisfiesAbstract
+	// already accepted the override.
+	errs = checkErrs(t, `
+		type Src `+"`structural"+` {
+			read!(~this) int? `+"`abstract;"+`
+			info(~this) int { return 7; }
+		}
+		type Impl is Src {
+			int x;
+			read(~this) int? { return this.x; }
+		}`)
+	expectError(t, errs, "cannot satisfy abstract method 'read'")
+	expectError(t, errs, "incompatible signature")
+}
+
+func TestAbstractOverrideSignatureMatch(t *testing.T) {
+	// The correct non-failable next(~this) int? satisfies Iterator[int].
+	checkOK(t, `
+		type UpTo is Iterator[int] {
+			int cur; int limit;
+			next(~this) int? {
+				if this.cur >= this.limit { return none; }
+				int v = this.cur; this.cur = this.cur + 1; return v;
+			}
+		}`)
+
+	// Relaxed rules must still pass: a non-failable concrete satisfies a
+	// failable abstract requirement, and a concrete returning T satisfies an
+	// abstract requiring T?.
+	checkOK(t, `
+		type Source {
+			read!(~this) int? `+"`abstract;"+`
+		}
+		type PlainSource is Source {
+			int v;
+			read(~this) int { return this.v; }
+		}`)
+
+	// A `structural interface with ONLY abstract methods contributes no
+	// synthesized default bodies, so the shape check is skipped and the relaxed
+	// `T satisfies T?` rule still applies through explicit `is`. (Covers the
+	// declarerSynthesizesDefaults "structural but no defaults" path.)
+	checkOK(t, `
+		type Finder `+"`structural"+` {
+			find() int? `+"`abstract;"+`
+		}
+		type Always is Finder {
+			int v;
+			find() int { return this.v; }
+		}`)
+
+	// A `structural interface WITH a default method DOES contribute synthesized
+	// bodies, but a void abstract method satisfied by a void override matches the
+	// return shape exactly (both results nil), so it is accepted. (Covers the
+	// ReturnShapeMatchesAbstract both-results-nil path.)
+	checkOK(t, `
+		type Sink `+"`structural"+` {
+			push(~this, int x) `+"`abstract;"+`
+			info(~this) int { return 1; }
+		}
+		type Bucket is Sink {
+			int total;
+			push(~this, int x) { this.total = this.total + x; }
+		}`)
+}
+
 // --- Index Expression Tests ---
 
 func TestArrayIndex(t *testing.T) {

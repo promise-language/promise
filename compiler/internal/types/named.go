@@ -442,6 +442,29 @@ type abstractMethodInfo struct {
 	declarer *Named
 }
 
+// AbstractMethodInfo pairs an abstract method inherited from a parent with the
+// interface that declared it (the Self type for signature comparison). Exported
+// for the sema override-validation pass.
+type AbstractMethodInfo struct {
+	Method   *Method
+	Declarer *Named
+}
+
+// ParentAbstractMethods returns every abstract method reachable through this
+// type's parents, paired with its declaring interface — including ones this type
+// overrides. Unlike allAbstractMethodsWithDeclarer (which drops the type's own
+// overrides), this returns the full set so a validator can compare each override
+// against the requirement it claims to satisfy.
+func (n *Named) ParentAbstractMethods() []AbstractMethodInfo {
+	var out []AbstractMethodInfo
+	for _, p := range n.parents {
+		for _, am := range p.Named.allAbstractMethodsWithDeclarer() {
+			out = append(out, AbstractMethodInfo{Method: am.method, Declarer: am.declarer})
+		}
+	}
+	return out
+}
+
 // allAbstractMethodsWithDeclarer returns all abstract methods from this type
 // and its parents, paired with their declaring interface.
 func (n *Named) allAbstractMethodsWithDeclarer() []abstractMethodInfo {

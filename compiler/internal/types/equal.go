@@ -522,6 +522,44 @@ func Implements(x Type, iface *Named) bool {
 	}
 }
 
+// SatisfiesAbstract reports whether the concrete method signature satisfies the
+// abstract interface method signature after substituting the interface's generic
+// type params (subst) and mapping the interface's Self type (self) to the
+// implementing type (replacement). It uses the same relaxed rules as structural
+// satisfaction (Implements) — see identicalSignaturesWithSelf. This exists so the
+// explicit-`is` override-validation path can reuse the exact comparator the
+// structural path already uses. Self is stored as the declaring *Named (not a
+// TypeParam), so Substitute leaves it intact for identicalSignaturesWithSelf.
+func SatisfiesAbstract(concrete, abstract *Signature, subst map[*TypeParam]Type, self, replacement *Named) bool {
+	substAbstract := Substitute(abstract, subst).(*Signature)
+	return identicalSignaturesWithSelf(concrete, substAbstract, self, replacement)
+}
+
+// ReturnShapeMatchesAbstract reports whether the concrete method's failability
+// and return type EXACTLY match the abstract requirement's (after substituting
+// generic params and mapping Self). Unlike SatisfiesAbstract, it does NOT apply
+// the relaxed rules (T for T?, non-failable for failable): those relaxations
+// change the LLVM return shape, and codegen's structural-default-method synthesis
+// calls the override directly and assumes the abstract's exact substituted shape
+// (T1376). A relaxed-but-shape-different override compiles fine when the interface
+// is only used through a view, but panics synthesis. Callers gate this on "the
+// declaring interface contributes synthesized default bodies to this type" so the
+// relaxed rules still hold for pure-abstract requirements. Params are left relaxed
+// — only the return value's shape is extracted by the synthesized bodies.
+func ReturnShapeMatchesAbstract(concrete, abstract *Signature, subst map[*TypeParam]Type, self, replacement *Named) bool {
+	substAbstract := Substitute(abstract, subst).(*Signature)
+	if concrete.canError != substAbstract.canError {
+		return false
+	}
+	if (concrete.result == nil) != (substAbstract.result == nil) {
+		return false
+	}
+	if concrete.result == nil {
+		return true
+	}
+	return identicalWithSelf(concrete.result, substAbstract.result, self, replacement)
+}
+
 // identicalSignaturesWithSelf compares two signatures for structural interface
 // satisfaction, treating occurrences of the `self` type in the interface signature
 // as equal to the `replacement` type in the concrete signature.

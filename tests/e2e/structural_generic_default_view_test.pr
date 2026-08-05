@@ -140,8 +140,10 @@ generic_default_method() `test {
 // combinator through the view exercises the cross-module synthesis path (T1374).
 //
 // `next` must match Iterator's abstract signature (non-failable `next(~this)
-// T?`); a failable `next!` does not satisfy it and slips past sema into a
-// codegen crash (insertvalue elem type mismatch) — tracked as T1376.
+// T?`); a failable `next!` does not satisfy it. Sema now rejects that mismatch
+// with a clean diagnostic (T1376) instead of letting it slip through to a
+// codegen crash (insertvalue elem type mismatch); the rejection is covered by
+// TestAbstractOverrideSignatureMismatch in the sema package.
 //
 // The iterator bound comes through the opaque `mk` helper so the count/collect/
 // find dispatch is genuinely executed at runtime. An earlier version used a

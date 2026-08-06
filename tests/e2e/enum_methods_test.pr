@@ -570,6 +570,41 @@ test_enum_getter_fieldless_string_call_arg() `test {
   assert(b, "Gold as arg");
 }
 
+// T1056: vector-returning enum getters must free their result when used inline
+// or as a call argument (zero-leak enforcer validates no allocation leaks).
+enum ItemBucket {
+  items(int[] data),
+  empty,
+  get values int[] {
+    match this {
+      items(d) => {
+        return d;
+      },
+      empty => {
+        return[];
+      },
+    }
+  }
+}
+
+check_bucket_len(int[] v, int n) bool {
+  return v.len == n;
+}
+
+test_enum_getter_vector_inline_len() `test {
+  t := ItemBucket.items([1, 2, 3]);
+  assert(t.values.len == 3, "inline len");
+}
+
+test_enum_getter_vector_as_call_arg() `test {
+  t := ItemBucket.items([10, 20, 30]);
+  assert(check_bucket_len(t.values, 3), "call arg");
+}
+
+test_enum_getter_vector_empty() `test {
+  assert(ItemBucket.empty.values.len == 0, "empty values");
+}
+
 // Fieldless enum: the value IS the tag (i32) — `this is Variant` must load the
 // i32 from the i8* `this` rather than icmp-ing the pointer.
 enum Light {

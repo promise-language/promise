@@ -148,3 +148,66 @@ func TestT0879_StringGetterOnFieldlessEnum(t *testing.T) {
 			"emit promise_string_drop; absent in @__user.caller:\n%s", body)
 	}
 }
+
+// TestT1056_VectorGetterInlineUseDrop — an enum getter returning int[] used via
+// a method chain on the unbound temporary (`t.values.len == 3`). Pre-fix, the
+// vector temp was never tracked; post-fix, trackGetterResult → trackVectorTemp
+// registers it and cleanupStmtTemps emits Vector.drop at statement end.
+func TestT1056_VectorGetterInlineUseDrop(t *testing.T) {
+	ir := generateIR(t, `
+		enum ItemBucket {
+			items(int[] data),
+			empty,
+			get values int[] {
+				match this {
+					items(d) => { return d; },
+					empty    => { return []; },
+				}
+			}
+		}
+		caller() bool {
+			t := ItemBucket.items([1, 2, 3]);
+			return t.values.len == 3;
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected @__user.caller in IR")
+	}
+	if !strings.Contains(body, "call void @Vector.drop(") {
+		t.Errorf("T1056: vector getter result used inline must be freed "+
+			"(Vector.drop); got no drop in @__user.caller:\n%s", body)
+	}
+}
+
+// TestT1056_VectorGetterCallArgDrop — same enum getter, result passed directly
+// as a call argument without binding to a local first.
+func TestT1056_VectorGetterCallArgDrop(t *testing.T) {
+	ir := generateIR(t, `
+		enum ItemBucket {
+			items(int[] data),
+			empty,
+			get values int[] {
+				match this {
+					items(d) => { return d; },
+					empty    => { return []; },
+				}
+			}
+		}
+		sink(int[] v, int n) bool { return v.len == n; }
+		caller() bool {
+			t := ItemBucket.items([10, 20, 30]);
+			return sink(t.values, 3);
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected @__user.caller in IR")
+	}
+	if !strings.Contains(body, "call void @Vector.drop(") {
+		t.Errorf("T1056: vector getter result passed as call arg must be freed "+
+			"(Vector.drop); got no drop in @__user.caller:\n%s", body)
+	}
+}

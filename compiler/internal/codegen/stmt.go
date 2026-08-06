@@ -74,7 +74,7 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
 		return true
 	}
-	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+	if _, ok := types.AsAnyTask(typ); ok || types.IsTaskLikeOrigin(named) {
 		return true
 	}
 	return false
@@ -86,7 +86,7 @@ func isDroppableContainerOrString(typ types.Type) bool {
 func argTypeIsDroppable(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
-		if t == types.TypString || t == types.TypVector || t == types.TypChannel || t == types.TypTask {
+		if t == types.TypString || t == types.TypVector || t == types.TypChannel || t == types.TypTask || t == types.TypFailableTask {
 			return true
 		}
 		if t.HasDrop() || t.NeedsSynthDrop() {
@@ -98,7 +98,7 @@ func argTypeIsDroppable(typ types.Type) bool {
 		return t.HasDrop() || t.NeedsSynthDrop()
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
-			if n == types.TypVector || n == types.TypChannel || n == types.TypTask {
+			if n == types.TypVector || n == types.TypChannel || n == types.TypTask || n == types.TypFailableTask {
 				return true
 			}
 			if n.HasDrop() || n.NeedsSynthDrop() {
@@ -1600,7 +1600,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 				if extractNamed(exprType) == types.TypString ||
 					types.IsVector(exprType) || types.IsChannel(exprType) ||
 					types.IsArc(exprType) || types.IsWeak(exprType) ||
-					types.IsMutex(exprType) || types.IsTask(exprType) ||
+					types.IsMutex(exprType) || types.IsAnyTask(exprType) ||
 					types.IsMutexGuard(exprType) {
 					// T1210: an Optional-wrapped mixed owned/borrowed match/if result
 					// owns its inner value only on the paths that selected an owned
@@ -1763,7 +1763,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0561: MutexGuard temps from m.lock() also need claiming.
 	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) ||
 		types.IsArc(resolvedExprType) || types.IsWeak(resolvedExprType) ||
-		types.IsMutex(resolvedExprType) || types.IsTask(resolvedExprType) ||
+		types.IsMutex(resolvedExprType) || types.IsAnyTask(resolvedExprType) ||
 		types.IsMutexGuard(resolvedExprType)) {
 		c.claimStringTemp(val)
 	}
@@ -2183,7 +2183,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
 	// T0561: MutexGuard temps from m.lock() also need claiming.
 	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ) ||
-		types.IsMutex(typ) || types.IsTask(typ) || types.IsMutexGuard(typ) {
+		types.IsMutex(typ) || types.IsAnyTask(typ) || types.IsMutexGuard(typ) {
 		c.claimStringTemp(val)
 	}
 	// T1181: Claim fixed-array temp — ownership transferred to this variable's
@@ -2752,7 +2752,7 @@ func isTypeDroppable(typ types.Type) bool {
 	// drop flag — returning a borrowed task param then double-freed the handle.
 	// Must agree with the drop-registration path; keep adjacent to the other
 	// single-owner handles.
-	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+	if _, ok := types.AsAnyTask(typ); ok || types.IsTaskLikeOrigin(named) {
 		return true
 	}
 	if isContainerType(typ) {
@@ -3834,10 +3834,17 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	// finishes, drops the result T (if any), then frees result_ptr/panic_msg/G.
 	// Without this, `task[T] t = go fn();` leaks the G struct, the result_ptr
 	// buffer, and any droppable result value when t is never awaited via <-t.
-	if elemType, ok := types.AsTask(typ); ok || named == types.TypTask {
+	if elemType, ok := types.AsAnyTask(typ); ok || types.IsTaskLikeOrigin(named) {
+		// T1379: FailableTask[T] drop discharges the buffered {ok,value,err}
+		// aggregate before freeing; a plain Task[T] drop frees bare T.
+		failable := types.IsFailableTask(typ) || named == types.TypFailableTask
+		taskOrigin := types.TypTask
+		if failable {
+			taskOrigin = types.TypFailableTask
+		}
 		resolvedElem := elemType
-		if resolvedElem == nil && named == types.TypTask && c.typeSubst != nil {
-			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+		if resolvedElem == nil && named != nil && c.typeSubst != nil {
+			if tp := taskOrigin.TypeParams(); len(tp) > 0 {
 				resolvedElem = c.typeSubst[tp[0]]
 			}
 		}
@@ -3850,7 +3857,7 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 		c.dropFlags[varName] = dropFlag
 
-		dropFunc := c.getOrCreateTaskDrop(resolvedElem)
+		dropFunc := c.getOrCreateTaskDrop(resolvedElem, failable)
 		binding := scopeBinding{
 			kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
 			alloca:   alloca,
@@ -4361,7 +4368,7 @@ func (c *Compiler) emitOptionalLocalValueDrop(optVal value.Value, elemType types
 			c.block.NewStore(innerVal, tmpAlloca)
 			ptr := c.block.NewBitCast(tmpAlloca, irtypes.I8Ptr)
 			c.block.NewCall(b.dropFunc, ptr)
-		} else if _, isTask := types.AsTask(elemType); (isTask || b.named == types.TypTask) &&
+		} else if _, isTask := types.AsAnyTask(elemType); (isTask || types.IsTaskLikeOrigin(b.named)) &&
 			c.emitTaskJoinAndFreeByDropFn(innerVal, b.dropFunc) {
 			// T0668: `task[T]? o` local — cooperative park-suspend join in a
 			// coroutine body (test body / WASM main / go {}) so the
@@ -4637,26 +4644,31 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 	case innerNamed != nil && (func() bool { _, ok := types.AsMutexGuard(elem); return ok }() || innerNamed == types.TypMutexGuard):
 		// T0156: MutexGuard inner drop — T-independent
 		dropFunc = c.funcs["MutexGuard.drop"]
-	case innerNamed != nil && (func() bool { _, ok := types.AsTask(elem); return ok }() || innerNamed == types.TypTask):
+	case innerNamed != nil && (types.IsAnyTask(elem) || types.IsTaskLikeOrigin(innerNamed)):
 		// T0558: Task inner drop — per-instantiation drop blocks on goroutine
 		// completion, drops the result, frees result_ptr/panic_msg/G. Without
 		// this case, dispatch fell through to the heap-user-type catch-all and
 		// called pal_free on the raw G handle, causing segfaults at scope exit.
+		failable := types.IsFailableTask(elem) || innerNamed == types.TypFailableTask
+		taskOrigin := types.TypTask
+		if failable {
+			taskOrigin = types.TypFailableTask
+		}
 		var resolvedTaskElem types.Type
-		if taskElem, ok := types.AsTask(elem); ok {
+		if taskElem, ok, _ := types.AsAnyTaskFailable(elem); ok {
 			resolvedTaskElem = taskElem
 			if c.typeSubst != nil {
 				resolvedTaskElem = types.Substitute(taskElem, c.typeSubst)
 			}
-		} else if innerNamed == types.TypTask && c.typeSubst != nil {
-			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+		} else if innerNamed != nil && c.typeSubst != nil {
+			if tp := taskOrigin.TypeParams(); len(tp) > 0 {
 				resolvedTaskElem = c.typeSubst[tp[0]]
 				if resolvedTaskElem != nil {
 					resolvedTaskElem = types.Substitute(resolvedTaskElem, c.typeSubst)
 				}
 			}
 		}
-		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem, failable)
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		explicitDrop := innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop()
@@ -5311,6 +5323,23 @@ func (c *Compiler) emitRttiDropDispatch(instance value.Value) {
 	c.block = doneBlock
 }
 
+// emitFailableErrorDrop drops a buffered failable error instance (an i8* to a
+// heap error) via the same RTTI dispatch used for a caught error at scope exit
+// — the concrete error type's drop (which frees message strings and the
+// instance) or the base error.drop fallback. Null-guarded. T1379: used by
+// FailableTask[T].free_after_done to discharge the error of an un-received
+// failable task so it does not leak.
+func (c *Compiler) emitFailableErrorDrop(errInstance value.Value) {
+	isNull := c.block.NewICmp(enum.IPredEQ, errInstance, constant.NewNull(irtypes.I8Ptr))
+	dropBlk := c.newBlock("ftask.err.drop")
+	doneBlk := c.newBlock("ftask.err.done")
+	c.block.NewCondBr(isNull, doneBlk, dropBlk)
+	c.block = dropBlk
+	c.emitRttiDropDispatch(errInstance)
+	c.block.NewBr(doneBlk)
+	c.block = doneBlk
+}
+
 // emitStructuralInstanceDrop drops a heap-allocated instance behind a structural interface
 // using RTTI-based dispatch (B0243). Loads the typeinfo drop_fn_ptr from the instance's
 // variant field. If drop_fn is non-null, calls it — synthesized drops include pal_free;
@@ -5727,7 +5756,7 @@ func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	// body / WASM main / go {}) route the un-awaited-Task scope-exit drop
 	// through the cooperative park-suspend join so the single-threaded WASM
 	// scheduler can run the pending goroutine instead of livelocking.
-	if _, isTask := types.AsTask(valType); (isTask || (b.named != nil && b.named == types.TypTask)) &&
+	if _, isTask := types.AsAnyTask(valType); (isTask || (b.named != nil && types.IsTaskLikeOrigin(b.named))) &&
 		c.emitTaskJoinAndFreeByDropFn(ptr, b.dropFunc) {
 		c.block.NewBr(doneBlock)
 		c.block = doneBlock
@@ -6192,7 +6221,9 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// type-specific message instead of falling through to dupHeapValue (which
 	// Go-panics on the i8* → StructType cast).
 	unclonableTypeName := ""
-	if _, isTask := types.AsTask(elemType); isTask || named == types.TypTask {
+	if _, isFTask := types.AsFailableTask(elemType); isFTask || named == types.TypFailableTask {
+		unclonableTypeName = "FailableTask"
+	} else if _, isTask := types.AsTask(elemType); isTask || named == types.TypTask {
 		unclonableTypeName = "Task"
 	} else if _, isMutex := types.AsMutex(elemType); isMutex || named == types.TypMutex {
 		unclonableTypeName = "Mutex"
@@ -9369,7 +9400,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if extractNamed(exprType) == types.TypString ||
 						types.IsVector(exprType) || types.IsChannel(exprType) ||
 						types.IsArc(exprType) || types.IsWeak(exprType) ||
-						types.IsMutex(exprType) || types.IsTask(exprType) ||
+						types.IsMutex(exprType) || types.IsAnyTask(exprType) ||
 						types.IsMutexGuard(exprType) {
 						c.claimStringTemp(val)
 					}
@@ -9475,7 +9506,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// T0561: MutexGuard temps from m.lock() also need claiming.
 			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType) ||
 				types.IsArc(exprType) || types.IsWeak(exprType) ||
-				types.IsMutex(exprType) || types.IsTask(exprType) ||
+				types.IsMutex(exprType) || types.IsAnyTask(exprType) ||
 				types.IsMutexGuard(exprType)) {
 				c.claimStringTemp(val)
 			}
@@ -9591,7 +9622,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if extractNamed(exprType) == types.TypString ||
 						types.IsVector(exprType) || types.IsChannel(exprType) ||
 						types.IsArc(exprType) || types.IsWeak(exprType) ||
-						types.IsTask(exprType) || types.IsMutex(exprType) ||
+						types.IsAnyTask(exprType) || types.IsMutex(exprType) ||
 						types.IsMutexGuard(exprType) {
 						// T0560: Task RHS in `field = go ...` where the field is
 						// Optional[Task[T]]. Without claiming the temp BEFORE
@@ -9793,7 +9824,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if extractNamed(exprType) == types.TypString ||
 						types.IsVector(exprType) || types.IsChannel(exprType) ||
 						types.IsArc(exprType) || types.IsWeak(exprType) ||
-						types.IsTask(exprType) || types.IsMutex(exprType) ||
+						types.IsAnyTask(exprType) || types.IsMutex(exprType) ||
 						types.IsMutexGuard(exprType) {
 						c.claimStringTemp(val)
 					}
@@ -10273,7 +10304,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				// for a plain Task[T] field silently leaks the old G handle (the
 				// generic dispatch falls into the heap-user-type catch-all which
 				// is gated by !isOpaqueContainerType and so skips Task entirely).
-				if taskElem, isTask := types.AsTask(fieldType); isTask {
+				if taskElem, isTask, taskFail := types.AsAnyTaskFailable(fieldType); isTask {
 					resolvedElem := taskElem
 					if c.typeSubst != nil {
 						resolvedElem = types.Substitute(taskElem, c.typeSubst)
@@ -10286,7 +10317,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					c.block = dropBlock
 					// T0668: cooperative join in a coroutine body (this runs in
 					// user code, often a test body / go {}); legacy spin otherwise.
-					c.emitTaskJoinAndFree(oldVal, resolvedElem)
+					c.emitTaskJoinAndFree(oldVal, resolvedElem, taskFail)
 					c.block.NewBr(mergeBlock)
 					c.block = mergeBlock
 				}

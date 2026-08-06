@@ -9,38 +9,47 @@ import (
 
 // Checker performs semantic analysis on a parsed AST file.
 type Checker struct {
-	file               *ast.File
-	info               *Info
-	errors             []error
-	isUniverseProvider bool                             // auto-detected: true when this file provides universe type implementations (std module)
-	globScope          *types.Scope                     // glob-import scope (child of Universe, parent of fileScope)
-	fileScope          *types.Scope                     // file-level scope (child of globScope, holds user declarations)
-	scope              *types.Scope                     // current scope during traversal
-	curFunc            *types.Signature                 // current function being checked (for return/raise)
-	curFuncObj         *types.Func                      // current function object (for clone-requirement recording, T0616)
-	curMethodObj       *types.Method                    // current method object (for clone-requirement recording, T0616)
-	curType            *types.Named                     // current type being defined/checked (for Self resolution)
-	inNewBody          bool                             // true when checking a new() constructor body
-	inFactoryBody      bool                             // true when checking a `factory method body
-	factoryLocals      map[string]bool                  // variables initialized from constructor calls in factory body
-	inLoop             int                              // nesting depth of loop constructs
-	lambdaDepth        int                              // nesting depth of lambdas (0 = not in lambda)
-	lambdaCaptures     map[string]*CapturedVar          // current lambda's captured vars (by name)
-	lambdaScope        *types.Scope                     // scope at lambda definition site (capture boundary)
-	lambdaMove         bool                             // true if current lambda uses `move` keyword
-	typeHint           types.Type                       // expected type for numeric literal adaptation (propagated through arithmetic)
-	sliceTypeAllowed   bool                             // T0685: bare `T[]` (SliceTypeExpr) is a type ref, not a value — only legitimate as a CallExpr.Callee (`int[]()`) or MemberExpr.Target (`int[].filled(...)`); snapshot/cleared at checkExpr entry like typeHint, granted by the two trusted call sites
-	inUnaryNeg         bool                             // true when checking operand of unary negation (for signed suffix range check)
-	inGenerator        bool                             // true when checking a generator function body
-	generatorElemType  types.Type                       // T from stream[T] or Iterator[T] return type
-	yieldFound         bool                             // true if at least one yield seen in current generator func
-	modules            []*types.Module                  // all modules from use declarations
-	moduleScopes       map[string]*types.Scope          // pre-loaded module scopes (catalog name or path → scope)
-	target             TargetInfo                       // compile target for `target(cond)` filtering (zero = no filtering)
-	pendingNarrowings  []NarrowedVar                    // post-divergence narrowings to apply before next statement
-	narrowedVariants   map[string]*IsNarrowing          // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
-	brokenFields       map[*types.Named]map[string]bool // T1168: fields whose declared type failed to resolve; member accesses to them are suppressed instead of cascading into "no field or method" errors
-	nonFailableScope   bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (§17.2.1); errors cannot propagate/raise regardless of the enclosing fn
+	file                *ast.File
+	info                *Info
+	errors              []error
+	isUniverseProvider  bool                             // auto-detected: true when this file provides universe type implementations (std module)
+	globScope           *types.Scope                     // glob-import scope (child of Universe, parent of fileScope)
+	fileScope           *types.Scope                     // file-level scope (child of globScope, holds user declarations)
+	scope               *types.Scope                     // current scope during traversal
+	curFunc             *types.Signature                 // current function being checked (for return/raise)
+	curFuncObj          *types.Func                      // current function object (for clone-requirement recording, T0616)
+	curMethodObj        *types.Method                    // current method object (for clone-requirement recording, T0616)
+	curType             *types.Named                     // current type being defined/checked (for Self resolution)
+	inNewBody           bool                             // true when checking a new() constructor body
+	inFactoryBody       bool                             // true when checking a `factory method body
+	factoryLocals       map[string]bool                  // variables initialized from constructor calls in factory body
+	inLoop              int                              // nesting depth of loop constructs
+	lambdaDepth         int                              // nesting depth of lambdas (0 = not in lambda)
+	lambdaCaptures      map[string]*CapturedVar          // current lambda's captured vars (by name)
+	lambdaScope         *types.Scope                     // scope at lambda definition site (capture boundary)
+	lambdaMove          bool                             // true if current lambda uses `move` keyword
+	typeHint            types.Type                       // expected type for numeric literal adaptation (propagated through arithmetic)
+	sliceTypeAllowed    bool                             // T0685: bare `T[]` (SliceTypeExpr) is a type ref, not a value — only legitimate as a CallExpr.Callee (`int[]()`) or MemberExpr.Target (`int[].filled(...)`); snapshot/cleared at checkExpr entry like typeHint, granted by the two trusted call sites
+	inUnaryNeg          bool                             // true when checking operand of unary negation (for signed suffix range check)
+	inGenerator         bool                             // true when checking a generator function body
+	generatorElemType   types.Type                       // T from stream[T] or Iterator[T] return type
+	yieldFound          bool                             // true if at least one yield seen in current generator func
+	modules             []*types.Module                  // all modules from use declarations
+	moduleScopes        map[string]*types.Scope          // pre-loaded module scopes (catalog name or path → scope)
+	target              TargetInfo                       // compile target for `target(cond)` filtering (zero = no filtering)
+	pendingNarrowings   []NarrowedVar                    // post-divergence narrowings to apply before next statement
+	narrowedVariants    map[string]*IsNarrowing          // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
+	brokenFields        map[*types.Named]map[string]bool // T1168: fields whose declared type failed to resolve; member accesses to them are suppressed instead of cascading into "no field or method" errors
+	nonFailableScope    bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (§17.2.1); errors cannot propagate/raise regardless of the enclosing fn
+	failableScope       bool                             // T1379: true inside a `go! {}` block body — a failable scope (§17.2.1); errors auto-propagate/raise into the task regardless of the enclosing fn
+	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (auto-propagate, `?^`, `raise`); snapshotted around a `go! {}` body to detect a body that cannot fail
+}
+
+// markFailableEscape records that a failable operation escapes the current
+// scope (an auto-propagated call, an explicit `?^`, or a `raise`). Used only to
+// detect a `go! { }` body that cannot fail (§17.2.1, T1379).
+func (c *Checker) markFailableEscape() {
+	c.failableEscapeCount++
 }
 
 // canPropagateError reports whether the current context can auto-propagate or
@@ -50,6 +59,9 @@ type Checker struct {
 func (c *Checker) canPropagateError() bool {
 	if c.nonFailableScope {
 		return false
+	}
+	if c.failableScope {
+		return true // T1379: inside a `go! {}` body, errors propagate into the task
 	}
 	return c.curFunc != nil && c.curFunc.CanError()
 }

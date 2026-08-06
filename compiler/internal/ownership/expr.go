@@ -857,7 +857,7 @@ func isCallArgUnsafeBorrowedType(t types.Type) bool {
 	if _, ok := types.AsMutexGuard(t); ok {
 		return true
 	}
-	if _, ok := types.AsTask(t); ok {
+	if _, ok := types.AsAnyTask(t); ok {
 		return true
 	}
 	// T1265: a value-copying container of closures (Vector/Map/Set nesting a
@@ -2015,7 +2015,7 @@ func isSingleOwnerNativeType(typ types.Type) bool {
 	if opt, ok := typ.(*types.Optional); ok {
 		return isSingleOwnerNativeType(opt.Elem())
 	}
-	return types.IsMutex(typ) || types.IsMutexGuard(typ) || types.IsTask(typ)
+	return types.IsMutex(typ) || types.IsMutexGuard(typ) || types.IsAnyTask(typ)
 }
 
 // forInAliasingElementType returns the element type of an iterable used in a
@@ -2454,7 +2454,7 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 			ownerDesc = "a call result"
 		}
 		remedy := "bind the owner to a local first, then move the field"
-		if !types.IsTask(handleType) {
+		if !types.IsAnyTask(handleType) {
 			remedy = fmt.Sprintf("read it in place through a borrow (e.g. `(...%s!).lock()`), or %s", member.Field, remedy)
 		}
 		c.errorf(member.Pos(),
@@ -2480,7 +2480,7 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 	// borrowing `.lock()`, but a Task has no in-place read (the only operation,
 	// `<-`, consumes it) — so for a Task only the take-ownership remedy applies.
 	remedy := "take ownership with a `~this` receiver or a `move` parameter"
-	if !types.IsTask(handleType) {
+	if !types.IsAnyTask(handleType) {
 		remedy = fmt.Sprintf("read it in place through a borrow (e.g. `(%s.%s!).lock()`), or %s", rootName, member.Field, remedy)
 	}
 	c.errorf(member.Pos(),
@@ -2503,7 +2503,7 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 // the operand's static type — for elvis/if/match operands that is the merged result
 // type (Task vs Channel), so the whole receive is classified correctly.
 func (c *Checker) rejectBorrowedTaskAwait(operand ast.Expr) {
-	if !types.IsTask(c.info.Types[unwrapDestructureParens(operand)]) {
+	if !types.IsAnyTask(c.info.Types[unwrapDestructureParens(operand)]) {
 		return
 	}
 	c.rejectAwaitNonOwnedSource(operand)

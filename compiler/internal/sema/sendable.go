@@ -64,7 +64,8 @@ func isSendableType(typ types.Type, visited map[types.Type]bool) bool {
 			return false
 		}
 		// Channel, Arc, Weak, Task are inherently sendable (internal synchronization)
-		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak || origin == types.TypTask {
+		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak ||
+			origin == types.TypTask || origin == types.TypFailableTask {
 			return true
 		}
 		// Containers: sendable iff element types are sendable
@@ -155,7 +156,7 @@ func isSharableType(typ types.Type, visited map[types.Type]bool) bool {
 			return true
 		}
 		// Task handles are sharable (read-only handle)
-		if origin == types.TypTask {
+		if origin == types.TypTask || origin == types.TypFailableTask {
 			return true
 		}
 		for _, ta := range t.TypeArgs() {

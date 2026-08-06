@@ -620,6 +620,7 @@ func (b *Builder) VisitGoExpression(ctx *parser.GoExpressionContext) interface{}
 
 func (b *Builder) VisitGoExpr(ctx *parser.GoExprContext) interface{} {
 	node := &GoExpr{nodeBase: b.baseFromContext(ctx)}
+	node.Failable = ctx.BANG() != nil // `go!` → failable_task[T] (§17.2.1)
 	// A goroutine body runs detached — a bare call inside it does NOT
 	// auto-propagate to the spawning (`!`) function, so reset inFailableFunc
 	// while visiting it to avoid a false "drop the `?`" lead (T0867), same as

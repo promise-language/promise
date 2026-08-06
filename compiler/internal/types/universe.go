@@ -25,13 +25,14 @@ var (
 	TypNone   *Named
 
 	// Generic native types (in Universe scope)
-	TypTask       *Named // Task[T] — concurrency handle from go expressions
-	TypChannel    *Named // Channel[T] — channel type
-	TypVector     *Named // Vector[T] — dynamic array
-	TypArc        *Named // Ref[T] — reference counting for shared ownership
-	TypMutex      *Named // Mutex[T] — mutual exclusion lock wrapping a value
-	TypMutexGuard *Named // MutexGuard[T] — RAII guard for Mutex[T]
-	TypWeak       *Named // Weak[T] — weak reference to Ref[T]-managed data
+	TypTask         *Named // Task[T] — concurrency handle from go expressions
+	TypFailableTask *Named // FailableTask[T] — handle from `go!` (§17.2.1); result buffer holds a failable {ok,value,err} aggregate
+	TypChannel      *Named // Channel[T] — channel type
+	TypVector       *Named // Vector[T] — dynamic array
+	TypArc          *Named // Ref[T] — reference counting for shared ownership
+	TypMutex        *Named // Mutex[T] — mutual exclusion lock wrapping a value
+	TypMutexGuard   *Named // MutexGuard[T] — RAII guard for Mutex[T]
+	TypWeak         *Named // Weak[T] — weak reference to Ref[T]-managed data
 )
 
 // Non-native stdlib types — NOT in the Universe scope. These are regular types
@@ -90,6 +91,7 @@ func init() {
 
 	// Generic native types
 	TypTask = defGeneric("Task", "T")
+	TypFailableTask = defGeneric("FailableTask", "T")
 	TypChannel = defGeneric("Channel", "T")
 	TypVector = defGeneric("Vector", "T")
 	TypArc = defGeneric("Ref", "T")
@@ -103,6 +105,7 @@ func init() {
 		Universe.Insert(tn)
 	}
 	defAlias("task", TypTask)
+	defAlias("failable_task", TypFailableTask)
 	defAlias("channel", TypChannel)
 
 	// Non-native types (error, Map, Range, Iterator, Stream) and their aliases

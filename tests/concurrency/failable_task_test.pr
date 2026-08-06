@@ -1,0 +1,202 @@
+// T1379: failable goroutines — `go!` spawn + failable_task[T] + failable `<-`.
+// Covers spawn+propagate, inline handling (`(<-t)?!`, `(<-t) ? e {}`),
+// fan-out+await, heap (string) results, and leak-free drop of un-received
+// failable tasks (both the success and error payload paths). All batch tests
+// compile into one binary and run under the zero-leak enforcement.
+produce!(int x) int {
+  if x < 0 {
+    raise error("negative:{x}");
+  }
+  return x * 2;
+}
+
+make_str!(int x) string {
+  if x < 0 {
+    raise error("bad string");
+  }
+  return "value={x}";
+}
+
+// A failable helper that spawns, receives (auto-propagating the goroutine's
+// error), and returns the value.
+via_propagate!(int x) int {
+  t := go! produce(x);
+  v := <-t;
+  return v + 100;
+}
+
+// Auto-propagate: success value flows through the receive.
+failable_task_propagate_ok() `test {
+  r := via_propagate(5)? e {
+    assert(false, "should not fail");
+    return;
+  };
+  assert(r == 110, "propagate ok value");
+}
+
+// Auto-propagate: the goroutine's raised error surfaces at the receive.
+failable_task_propagate_err() `test {
+  handled := false;
+  r := via_propagate(-3)? e {
+    handled = true;
+    assert(e.message == "negative:-3", "propagated error message");
+    return;
+  };
+  assert(handled, "error handler ran");
+}
+
+// `(<-t)?!` panics on error, returns the value on success.
+failable_task_panic_on_success() `test {
+  t := go! produce(7);
+  v := (<-t)?!;
+  assert(v == 14, "panic-form success value");
+}
+
+// `(<-t) ? e { }` recovers with an inline handler.
+failable_task_inline_handler() `test {
+  t := go! produce(-1);
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    0
+  };
+  assert(got, "inline handler ran");
+  assert(v == 0, "recovery value");
+}
+
+// Fan-out: spawn several failable tasks, await each handle individually.
+failable_task_fanout() `test {
+  t1 := go! produce(1);
+  t2 := go! produce(2);
+  t3 := go! produce(3);
+  a := (<-t1)?!;
+  b := (<-t2)?!;
+  c := (<-t3)?!;
+  assert(a + b + c == 12, "fan-out sum");
+}
+
+// Heap (string) success value: received and dropped leak-free.
+failable_task_string_result() `test {
+  t := go! make_str(4);
+  s := (<-t)?!;
+  assert(s == "value=4", "string result");
+}
+
+// Leak-free drop: an un-received failable task whose producer RAISES must free
+// the buffered error in FailableTask[int].drop (zero-leak enforcement checks).
+failable_task_dropped_error_leak_free() `test {
+  {
+    t := go! produce(-9);
+    // t is never received — its buffered error must be discharged on drop.
+  }
+  assert(true, "dropped-error path did not leak");
+}
+
+// Leak-free drop: an un-received failable task whose producer SUCCEEDS with a
+// heap value must drop that value in FailableTask[string].drop.
+failable_task_dropped_success_leak_free() `test {
+  {
+    t := go! make_str(8);
+    // never received — the buffered success string must be dropped.
+  }
+  assert(true, "dropped-success path did not leak");
+}
+
+// §17.2.1: a failable_task[T] crosses field/collection boundaries like any type
+// (single-owner handle). These exercise the field/collection drop paths.
+
+type FTHolder {
+  failable_task[int] t;
+}
+
+// Receive out of a failable_task field.
+failable_task_field_received() `test {
+  h := FTHolder(t: go! produce(5));
+  v := (<-h.t)?!;
+  assert(v == 10, "field receive value");
+}
+
+// A holder dropped without receiving: the field drop must discharge the buffered
+// error leak-free.
+failable_task_field_dropped_leak_free() `test {
+  {
+    h := FTHolder(t: go! produce(-2));
+  }
+  assert(true, "field drop path did not leak");
+}
+
+// A vector of failable tasks dropped without draining: each element's drop must
+// discharge its aggregate (mix of success + error payloads) leak-free.
+failable_task_vector_dropped_leak_free() `test {
+  {
+    v := [go! make_str(1), go! make_str(-1), go! make_str(3)];
+  }
+  assert(true, "vector drop path did not leak");
+}
+
+// §17.2.1: `go! obj.method()` — a failable *method* spawn goes through the
+// ViaBlock codegen path (full context inside the coroutine body), distinct from
+// the free-function fast path above. Covers success, inline recovery, and the
+// leak-free drop of an un-received method-spawned failable task.
+type Adder {
+  int base;
+  compute!(this, int x) int {
+    if x < 0 {
+      raise error("negative arg");
+    }
+    return this.base + x;
+  }
+}
+
+failable_task_method_spawn_ok() `test(exclude: wasm) {
+  a := Adder(base: 100);
+  t := go! a.compute(5);
+  v := (<-t)?!;
+  assert(v == 105, "method spawn success value");
+}
+
+failable_task_method_spawn_err_handled() `test(exclude: wasm) {
+  a := Adder(base: 100);
+  t := go! a.compute(-1);
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    -1
+  };
+  assert(got, "method spawn error handled");
+  assert(v == -1, "method spawn recovery value");
+}
+
+failable_task_method_spawn_dropped_leak_free() `test(exclude: wasm) {
+  {
+    a := Adder(base: 100);
+    t := go! a.compute(-7); // never received — buffered error must be freed
+  }
+  assert(true, "method-spawn drop path did not leak");
+}
+
+// §17.2.1: `go! generic_fn(...)` — a failable *generic* free function spawn with
+// inferred type args also routes through the ViaBlock failable path.
+pick![T](T a, T b, bool fail) T {
+  if fail {
+    raise error("pick failed");
+  }
+  return a;
+}
+
+failable_task_generic_spawn_ok() `test(exclude: wasm) {
+  t := go! pick(7, 9, false);
+  v := (<-t)?!;
+  assert(v == 7, "generic spawn success value");
+}
+
+failable_task_generic_spawn_err() `test(exclude: wasm) {
+  t := go! pick(1, 2, true);
+  handled := false;
+  v := (<-t)? e {
+    handled = true;
+    0
+  };
+  assert(handled, "generic spawn error handled");
+  assert(v == 0, "generic spawn recovery value");
+}

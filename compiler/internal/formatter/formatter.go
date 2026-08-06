@@ -1361,6 +1361,18 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		return false
 	}
 
+	// `go!` failable-goroutine marker (T1379): glue the `!` to `go` (no space
+	// before), but keep a space after it before the spawned operand — so it reads
+	// `go! produce(5)`, not `go !produce(5)`. Must precede the unary-prefix rule
+	// below (which would otherwise treat `!` as prefix-not on the operand because
+	// `go` is a non-value keyword).
+	if c == tkBang && prev.kind == tkIdent && prev.text == "go" {
+		return false
+	}
+	if p == tkBang && f.prevPrev.kind == tkIdent && f.prevPrev.text == "go" {
+		return true
+	}
+
 	// Unary prefix operators: no space between op and operand, but space BEFORE the op
 	// ~ & ! - + <- are unary if the token before them is NOT value-producing
 	if isUnaryPrefixOp(p) && !isValue(f.prevPrev) {

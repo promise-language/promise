@@ -172,8 +172,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
 				} else if mutexElem, isMutex := types.AsMutex(rt); isMutex {
 					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-				} else if taskElem, isTask := types.AsTask(rt); isTask {
-					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+				} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(rt); isTask {
+					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 				} else if _, isMG := types.AsMutexGuard(rt); isMG {
 					// T0561: MutexGuard.drop is a single non-per-element-type symbol.
 					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
@@ -387,8 +387,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
 				} else if mutexElem, isMutex := types.AsMutex(exprType); isMutex {
 					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-				} else if taskElem, isTask := types.AsTask(exprType); isTask {
-					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+				} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(exprType); isTask {
+					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 				} else if _, isMG := types.AsMutexGuard(exprType); isMG {
 					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 						c.trackTempWithDrop(result, dropFn)
@@ -505,8 +505,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			if c.selfSubst != nil && rt != nil {
 				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
 			}
-			if taskElem, isTask := types.AsTask(rt); isTask {
-				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			if taskElem, isTask, taskFail := types.AsAnyTaskFailable(rt); isTask {
+				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 			}
 		}
 		return result
@@ -5983,9 +5983,9 @@ func (c *Compiler) trackGetterResultByType(e ast.Expr, retType types.Type, resul
 		} else if mutexElem, isMutex := types.AsMutex(retType); isMutex {
 			// T0486: Mutex[T] getter result owns a heap allocation.
 			c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-		} else if taskElem, isTask := types.AsTask(retType); isTask {
+		} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(retType); isTask {
 			// T0503: Task[T] getter result owns a G struct + result buffer.
-			c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 		}
 	} else {
 		c.trackHeapUserTypeResult(e, result)
@@ -6027,8 +6027,8 @@ func (c *Compiler) trackReceivedTaskResult(result value.Value, innerType types.T
 			c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
 		} else if mutexElem, isMutex := types.AsMutex(innerType); isMutex {
 			c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-		} else if taskElem, isTask := types.AsTask(innerType); isTask {
-			c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+		} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(innerType); isTask {
+			c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 		}
 		return
 	}
@@ -6447,7 +6447,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 				if extractNamed(argExprType) == types.TypString ||
 					types.IsVector(argExprType) || types.IsChannel(argExprType) ||
 					types.IsArc(argExprType) || types.IsWeak(argExprType) ||
-					types.IsTask(argExprType) || types.IsMutex(argExprType) ||
+					types.IsAnyTask(argExprType) || types.IsMutex(argExprType) ||
 					types.IsMutexGuard(argExprType) {
 					c.claimStringTemp(argVal)
 				}
@@ -6811,7 +6811,7 @@ func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
 	if _, isMG := types.AsMutexGuard(resolvedElem); isMG || named == types.TypMutexGuard {
 		return false
 	}
-	if _, isTask := types.AsTask(resolvedElem); isTask || named == types.TypTask {
+	if _, isTask := types.AsAnyTask(resolvedElem); isTask || types.IsTaskLikeOrigin(named) {
 		return false
 	}
 	return !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
@@ -6932,7 +6932,7 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 	if _, isMG := types.AsMutexGuard(resolvedElem); isMG || named == types.TypMutexGuard {
 		return nil
 	}
-	if _, isTask := types.AsTask(resolvedElem); isTask || named == types.TypTask {
+	if _, isTask := types.AsAnyTask(resolvedElem); isTask || types.IsTaskLikeOrigin(named) {
 		return nil
 	}
 
@@ -9076,8 +9076,8 @@ func (c *Compiler) ownedI8PtrResultDrop(rt types.Type) (*ir.Func, types.Type) {
 	if mutexElem, ok := types.AsMutex(rt); ok {
 		return c.getOrCreateMutexDrop(mutexElem), nil
 	}
-	if taskElem, ok := types.AsTask(rt); ok {
-		return c.getOrCreateTaskDrop(taskElem), nil
+	if taskElem, ok, taskFail := types.AsAnyTaskFailable(rt); ok {
+		return c.getOrCreateTaskDrop(taskElem, taskFail), nil
 	}
 	if _, ok := types.AsMutexGuard(rt); ok || named == types.TypMutexGuard {
 		return c.funcs["MutexGuard.drop"], nil
@@ -11975,8 +11975,8 @@ func (c *Compiler) elvisResultHandleDrop(e *ast.BinaryExpr) *ir.Func {
 	if _, ok := types.AsMutexGuard(rt); ok || named == types.TypMutexGuard {
 		return c.funcs["MutexGuard.drop"]
 	}
-	if taskElem, ok := types.AsTask(rt); ok {
-		return c.getOrCreateTaskDrop(taskElem)
+	if taskElem, ok, taskFail := types.AsAnyTaskFailable(rt); ok {
+		return c.getOrCreateTaskDrop(taskElem, taskFail)
 	}
 	return nil
 }
@@ -13239,8 +13239,8 @@ func (c *Compiler) trackUserIndexResult(e *ast.IndexExpr, result value.Value) {
 				c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
 			} else if mutexElem, isMutex := types.AsMutex(rt); isMutex {
 				c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-			} else if taskElem, isTask := types.AsTask(rt); isTask {
-				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(rt); isTask {
+				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 			} else if _, isMG := types.AsMutexGuard(rt); isMG {
 				// T0561: MutexGuard.drop is a single non-per-element-type symbol.
 				if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
@@ -14177,10 +14177,10 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 			return envFieldDrop{envDropCallFn, fn}
 		}
 	}
-	// T0503: Task[T] capture → per-instantiation drop (spin-wait + free).
-	if elemType, ok := types.AsTask(typ); ok || (named != nil && named == types.TypTask) {
+	// T0503: Task[T]/FailableTask[T] capture → per-instantiation drop (spin-wait + free).
+	if elemType, ok, taskFail := types.AsAnyTaskFailable(typ); ok || (named != nil && types.IsTaskLikeOrigin(named)) {
 		if ok {
-			return envFieldDrop{envDropCallFn, c.getOrCreateTaskDrop(elemType)}
+			return envFieldDrop{envDropCallFn, c.getOrCreateTaskDrop(elemType, taskFail)}
 		}
 	}
 
@@ -16496,8 +16496,8 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 				c.trackTempWithDrop(phi, c.getOrCreateWeakDrop(weakElem))
 			} else if mutexElem, isMutex := types.AsMutex(trackPhiI8Type); isMutex {
 				c.trackTempWithDrop(phi, c.getOrCreateMutexDrop(mutexElem))
-			} else if taskElem, isTask := types.AsTask(trackPhiI8Type); isTask {
-				c.trackTempWithDrop(phi, c.getOrCreateTaskDrop(taskElem))
+			} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(trackPhiI8Type); isTask {
+				c.trackTempWithDrop(phi, c.getOrCreateTaskDrop(taskElem, taskFail))
 			} else if _, isMG := types.AsMutexGuard(trackPhiI8Type); isMG {
 				if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 					c.trackTempWithDrop(phi, dropFn)
@@ -16700,8 +16700,8 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 				// because the inner i8* fell through with no tracking. The
 				// binding-site claim (stmt.go) is a no-op when no temp exists.
 				c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-			} else if taskElem, isTask := types.AsTask(innerType); isTask {
-				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(innerType); isTask {
+				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
 			} else if _, isMG := types.AsMutexGuard(innerType); isMG {
 				if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 					c.trackTempWithDrop(result, dropFn)
@@ -17036,7 +17036,7 @@ func (c *Compiler) handlerResultIsNativeHandle(e *ast.ErrorHandlerExpr) bool {
 	if _, ok := types.AsMutex(rt); ok {
 		return true
 	}
-	_, ok := types.AsTask(rt)
+	_, ok := types.AsAnyTask(rt)
 	return ok
 }
 
@@ -17071,8 +17071,8 @@ func (c *Compiler) optionalHandlerHandleDrop(e *ast.ErrorHandlerExpr) *ir.Func {
 	if _, ok := types.AsMutexGuard(rt); ok || named == types.TypMutexGuard {
 		return c.funcs["MutexGuard.drop"]
 	}
-	if taskElem, ok := types.AsTask(rt); ok {
-		return c.getOrCreateTaskDrop(taskElem)
+	if taskElem, ok, taskFail := types.AsAnyTaskFailable(rt); ok {
+		return c.getOrCreateTaskDrop(taskElem, taskFail)
 	}
 	return nil
 }
@@ -17458,7 +17458,7 @@ func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
 		// owner's drop does not double-free the handle we already took ownership
 		// of. So let these two through the opaque-container skip below.
 		_, isMutexField := types.AsMutex(innerElem)
-		_, isTaskField := types.AsTask(innerElem)
+		_, isTaskField := types.AsAnyTask(innerElem)
 		if innerNamed == nil || innerNamed.IsValueType() || innerNamed.IsCopy() ||
 			isPrimitiveScalar(innerNamed) || innerNamed.IsStructural() ||
 			(isOpaqueContainerType(innerElem) && !isMutexField && !isTaskField) {
@@ -17549,7 +17549,7 @@ func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
 			// skipped upstream.
 			panic(fmt.Sprintf("codegen: internal error: go operand should be a call after sema, got %T", e.Expr))
 		}
-		return c.genGoCallExpr(callExpr)
+		return c.genGoCallExpr(callExpr, e.Failable)
 	}
 	// go { block } form
 	return c.genGoBlock(e)
@@ -17626,12 +17626,12 @@ func (c *Compiler) emitGoArgBorrowDrops(coroFn *ir.Func, entry, cur *ir.Block, d
 // genGoCallExpr handles `go func(args...)` — the common case.
 // For non-IdentExpr callees (method calls, module calls, etc.), delegates to
 // genGoCallExprViaBlock which uses the full codegen context inside the coroutine body.
-func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
+func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Value {
 	// Complex callees (method calls, module calls, generic calls, etc.)
 	// need the full codegen context — use block-style coroutine (B0113).
 	ident, ok := callExpr.Callee.(*ast.IdentExpr)
 	if !ok {
-		return c.genGoCallExprViaBlock(callExpr)
+		return c.genGoCallExprViaBlock(callExpr, failable)
 	}
 
 	// T1024: A bare-ident callee that resolves to a generic free function with
@@ -17641,14 +17641,27 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	// callee) already takes — which builds the call via genExpr → the inferred
 	// generic-call codegen.
 	if _, ok := c.info.InferredTypeArgs[callExpr]; ok {
-		return c.genGoCallExprViaBlock(callExpr)
+		return c.genGoCallExprViaBlock(callExpr, failable)
 	}
 
-	// 1. Resolve result type T from sema
+	// 1. Resolve result type T from sema.
+	//
+	// T1379: for `go! f()` the goroutine's stored result is the failable
+	// aggregate `{i1 ok, T value, i8* err}` that the failable target function
+	// returns — the receive (`<-t`) surfaces it exactly like a failable call.
+	// So the result buffer holds the aggregate (never void, even when T is
+	// void), and the coroutine stores the call's return value verbatim.
 	callResultType := c.info.Types[callExpr]
 	isVoid := (callResultType == nil || callResultType == types.TypVoid)
 	var resultLLVM irtypes.Type = irtypes.Void
-	if !isVoid {
+	if failable {
+		var inner irtypes.Type = irtypes.Void
+		if !isVoid {
+			inner = c.resolveType(callResultType)
+		}
+		resultLLVM = computeResultType(inner)
+		isVoid = false // the aggregate is always a stored, non-void result
+	} else if !isVoid {
 		resultLLVM = c.resolveType(callResultType)
 	}
 
@@ -18142,12 +18155,21 @@ func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) (*ir.Func, *ExternFun
 // Uses the genGoBlock pattern: captures outer locals, creates a coroutine with
 // full codegen context, and generates the call via genExpr inside the body.
 // Unlike genGoBlock, supports non-void results for Task[T].
-func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
-	// 1. Determine result type
+func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) value.Value {
+	// 1. Determine result type. T1379: `go! obj.method()` stores the failable
+	// aggregate {i1 ok, T value, i8* err} returned by the failable target — the
+	// same lowering the fast path (genGoCallExpr) uses, surfaced at `<-t`.
 	callResultType := c.info.Types[callExpr]
 	isVoid := (callResultType == nil || callResultType == types.TypVoid)
 	var resultLLVM irtypes.Type = irtypes.Void
-	if !isVoid {
+	if failable {
+		var inner irtypes.Type = irtypes.Void
+		if !isVoid {
+			inner = c.resolveType(callResultType)
+		}
+		resultLLVM = computeResultType(inner)
+		isVoid = false
+	} else if !isVoid {
 		resultLLVM = c.resolveType(callResultType)
 	}
 
@@ -19746,14 +19768,29 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	}
 	c.claimStringTemp(gRaw)
 
+	// T1379: `<-t` on a failable_task[T] loads the failable aggregate
+	// {i1 ok, T value, i8* err} that the goroutine stored, and returns it raw so
+	// the surrounding surfacing machinery (auto-propagate / `?!` / `?^` / `? e {}`)
+	// consumes it exactly like a failable call. The buffer therefore always holds
+	// the aggregate (even for T = void).
+	failable := inst.Origin() == types.TypFailableTask
+
 	var innerType types.Type
 	if len(inst.TypeArgs()) > 0 {
 		innerType = inst.TypeArgs()[0]
 	}
-	isVoid := (innerType == nil || innerType == types.TypVoid)
+	tVoid := (innerType == nil || innerType == types.TypVoid)
+	isVoid := tVoid
 
 	var resultLLVM irtypes.Type = irtypes.Void
-	if !isVoid {
+	if failable {
+		var inner irtypes.Type = irtypes.Void
+		if !tVoid {
+			inner = c.resolveType(innerType)
+		}
+		resultLLVM = computeResultType(inner)
+		isVoid = false // the aggregate is always loaded
+	} else if !isVoid {
 		resultLLVM = c.resolveType(innerType)
 	}
 
@@ -19938,6 +19975,12 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		if isVoid {
 			return nil
 		}
+		if failable {
+			// T1379: return the {ok,value,err} aggregate raw. The surfacing
+			// machinery extracts + tracks the success value exactly like a failable
+			// call; tracking the aggregate as a plain-T temp here would be wrong.
+			return resultVal
+		}
 		// T1150: register the received heap result as a droppable statement temp so
 		// it is freed at statement end when consumed inline (no named binding owns
 		// it). c.block is loadResultBlk here — where resultVal is live and the return
@@ -19965,6 +20008,10 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		ir.NewIncoming(resultVal, loadDoneBlk),
 		ir.NewIncoming(constant.NewZeroInitializer(resultLLVM), taskTimeoutBlk),
 	)
+	if failable {
+		// T1379: return the failable aggregate raw (see the non-timeout path).
+		return resultPhi
+	}
 	// T1150 (see above): register the merged result as a droppable statement temp.
 	c.trackReceivedTaskResult(resultPhi, innerType)
 	return resultPhi

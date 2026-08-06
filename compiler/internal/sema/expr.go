@@ -242,6 +242,12 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.ParenExpr:
 		c.typeHint = hint // propagate through parentheses
 		typ = c.checkExpr(e.Expr)
+		// Failability propagates through parentheses so operators bind to a
+		// parenthesized failable expression — e.g. `(<-t)?!`, `(<-go! f())?!`,
+		// `(f())?^` (T1379).
+		if c.info.FailableExprs[e.Expr] {
+			c.info.FailableExprs[e] = true
+		}
 
 	case *ast.TupleLit:
 		typ = c.checkTupleLit(e)
@@ -915,12 +921,24 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		return c.checkUnaryOperatorFailable(e.Pos(), operand, "~")
 
 	case ast.UnaryReceive:
-		// <-expr: operand should be Task[T] or Channel[T]
-		// Task[T] returns T, Channel[T] returns T? (none when closed+empty)
+		// <-expr: operand should be Task[T], FailableTask[T], or Channel[T].
+		// Task[T] returns T; FailableTask[T] returns T but the receive is a
+		// failable operation (§17.2.1); Channel[T] returns T? (none when
+		// closed+empty).
 		if inst, ok := operand.(*types.Instance); ok {
 			origin := inst.Origin()
 			if origin == types.TypTask {
 				if len(inst.TypeArgs()) > 0 {
+					return inst.TypeArgs()[0]
+				}
+			}
+			if origin == types.TypFailableTask {
+				if len(inst.TypeArgs()) > 0 {
+					// §17.2.1: `<-t` on a failable_task[T] is a failable operation
+					// yielding T. Marking it failable makes it obey §7.2
+					// automatically (auto-propagate in a failable fn, require
+					// handling otherwise, accept `?!`/`?^`/`? e {}`).
+					c.info.FailableExprs[e] = true
 					return inst.TypeArgs()[0]
 				}
 			}
@@ -930,7 +948,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 				}
 			}
 		}
-		c.errorf(e.Pos(), "receive operator (<-) requires Task[T] or Channel[T], got %s", operand)
+		c.errorf(e.Pos(), "receive operator (<-) requires Task[T], FailableTask[T], or Channel[T], got %s", operand)
 		return nil
 
 	default:
@@ -3062,6 +3080,8 @@ func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type 
 	inner := c.checkExpr(e.Expr)
 	if !c.canPropagateError() {
 		c.errorf(e.Pos(), "error propagation (?^) used outside of failable function")
+	} else {
+		c.markFailableEscape() // T1379: `?^` is a failable escape (for `go! {}` body-can-fail)
 	}
 	if !c.info.FailableExprs[e.Expr] {
 		c.errorf(e.Pos(), "error propagation (?^) requires a failable expression")
@@ -4032,31 +4052,113 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 	return sig
 }
 
+// goCalleeName returns a short human-readable name for a `go`/`go!` call
+// operand's callee, for diagnostics ("`fetchUser` is failable — spawn with
+// `go!`"). Falls back to "this call" for complex callees.
+func goCalleeName(expr ast.Expr) string {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return "this call"
+	}
+	switch callee := call.Callee.(type) {
+	case *ast.IdentExpr:
+		return callee.Name
+	case *ast.MemberExpr:
+		return callee.Field
+	}
+	return "this call"
+}
+
+// unwrapGoExprCall returns the underlying call operand of a `go`/`go!`
+// expression (peeling any error operator), or nil for the block form.
+func unwrapGoExprCall(g *ast.GoExpr) ast.Expr {
+	if g.Expr != nil {
+		return unwrapGoOperator(g.Expr)
+	}
+	return nil
+}
+
 func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
+	taskOrigin := types.TypTask
+	if e.Failable {
+		taskOrigin = types.TypFailableTask
+	}
+
 	var innerType types.Type
 	if e.Expr != nil {
 		innerType = c.checkExpr(e.Expr)
-		// The operand of `go` must be a plain call: a goroutine runs
-		// asynchronously, so any error it produces cannot be propagated back to
-		// the spawning function. Reject non-call operands (e.g. `go work()?!`,
-		// `go x + 1`) and failable calls (`go work()` where `work!()`) with a
-		// clear diagnostic, steering users to the block form (T1149).
-		if _, ok := e.Expr.(*ast.CallExpr); !ok {
-			c.errorf(e.Expr.Pos(), "the operand of `go` must be a function or method call, or a block")
-			c.hintf(e.Expr.Pos(), "to spawn a computation that uses operators like `?!`, wrap it in a block: go { work()?!; }")
-		} else if c.info.FailableExprs[e.Expr] {
-			c.errorf(e.Expr.Pos(), "cannot spawn a failable call with `go`: a goroutine runs asynchronously, so its error cannot be propagated")
-			c.hintf(e.Expr.Pos(), "handle the error inside the goroutine: go { work()?!; } or go { work() else { ... } }")
+		_, isCall := e.Expr.(*ast.CallExpr)
+
+		// §17.2.1: an error operator attached to the spawn (`go! f()?!`,
+		// `go! f()?^`, `go! f() ? e { }`) binds to the spawn, not the receive —
+		// the error appears at the receive. Reject with a fix-it. The parser binds
+		// the postfix operator around the whole `go!` operand, so these show up as
+		// the operand's node type.
+		switch e.Expr.(type) {
+		case *ast.ErrorPanicExpr, *ast.ErrorPropagateExpr, *ast.ErrorHandlerExpr:
+			if e.Failable {
+				c.errorf(e.Expr.Pos(), "apply the error operator to the receive, not the spawn: `(<-go! %s())?!`", goCalleeName(unwrapGoOperator(e.Expr)))
+			} else {
+				c.errorf(e.Expr.Pos(), "the operand of `go` must be a function or method call, or a block")
+				c.hintf(e.Expr.Pos(), "to spawn a computation that uses operators like `?!`, wrap it in a block: go { work()?!; }")
+			}
+			if innerType == nil {
+				innerType = types.TypVoid
+			}
+			return types.NewInstance(taskOrigin, []types.Type{innerType})
+		}
+
+		if e.Failable {
+			// `go! f()` — the operand must be a failable call.
+			if !isCall {
+				c.errorf(e.Expr.Pos(), "the operand of `go!` must be a failable function or method call, or a block")
+			} else if !c.info.FailableExprs[e.Expr] {
+				c.errorf(e.Expr.Pos(), "`%s` cannot fail; spawn it with plain `go`", goCalleeName(e.Expr))
+			}
+		} else {
+			// Plain `go f()` — the operand must be a non-failable call. A goroutine
+			// runs asynchronously, so a failable call's error would have nowhere to
+			// go (T1149); steer to `go!` or handling the error inside the goroutine.
+			if !isCall {
+				c.errorf(e.Expr.Pos(), "the operand of `go` must be a function or method call, or a block")
+				c.hintf(e.Expr.Pos(), "to spawn a computation that uses operators like `?!`, wrap it in a block: go { work()?!; }")
+			} else if c.info.FailableExprs[e.Expr] {
+				c.errorf(e.Expr.Pos(), "`%s` is failable — spawn it with `go!`, or handle the error inside the goroutine", goCalleeName(e.Expr))
+				c.hintf(e.Expr.Pos(), "e.g. `t := go! %s(...)` and receive with `<-t`, or `go { %s(...)?!; }`", goCalleeName(e.Expr), goCalleeName(e.Expr))
+			}
 		}
 		// Expression form: check argument types are sendable
 		c.checkGoExprSendable(e.Expr)
 	} else if e.Block != nil {
 		c.openScope(e.Block, "go")
 		savedNFS := c.nonFailableScope
-		c.nonFailableScope = true // §17.2.1: plain `go {}` is a non-failable scope (T1217)
+		savedFS := c.failableScope
+		savedEsc := c.failableEscapeCount
+		if e.Failable {
+			// §17.2.1: `go! {}` is a failable scope — bare failable calls
+			// auto-propagate into the task and `?^`/`raise` are allowed.
+			c.nonFailableScope = false
+			c.failableScope = true
+		} else {
+			// §17.2.1: plain `go {}` is a non-failable scope (T1217).
+			c.nonFailableScope = true
+			c.failableScope = false
+		}
 		c.checkBlock(e.Block)
+		escaped := c.failableEscapeCount > savedEsc
 		c.nonFailableScope = savedNFS
+		c.failableScope = savedFS
 		c.closeScope()
+		// §17.2.1: a `go! {}` body that cannot fail is misleading — reject it,
+		// symmetric to `go! f()` on a non-failable call.
+		if e.Failable && !escaped {
+			c.errorf(e.Block.Pos(), "this goroutine's body cannot fail; spawn it with plain `go`")
+		} else if e.Failable {
+			// T1384: the `go! {}` block form's failable-coroutine-body codegen is
+			// not yet implemented (the call form `go! f()` is). Reject here rather
+			// than panic in codegen. The sema above still validates the body.
+			c.errorf(e.Block.Pos(), "the `go! { }` block form is not yet implemented; use the call form `go! f()` and receive with `<-` (tracked as T1384)")
+		}
 		// Block form: infer T from last expression statement
 		if len(e.Block.Stmts) > 0 {
 			if es, ok := e.Block.Stmts[len(e.Block.Stmts)-1].(*ast.ExprStmt); ok {
@@ -4069,7 +4171,23 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 	if innerType == nil {
 		innerType = types.TypVoid
 	}
-	return types.NewInstance(types.TypTask, []types.Type{innerType})
+	return types.NewInstance(taskOrigin, []types.Type{innerType})
+}
+
+// unwrapGoOperator peels an error operator wrapping a `go!`/`go` call operand
+// (`f()?!`, `f()?^`, `f() ? e { }`, `f()?`) down to the underlying call, for
+// building the "apply the operator to the receive" fix-it. Returns the operand
+// unchanged if it is not one of these operator forms.
+func unwrapGoOperator(expr ast.Expr) ast.Expr {
+	switch e := expr.(type) {
+	case *ast.ErrorPanicExpr:
+		return e.Expr
+	case *ast.ErrorPropagateExpr:
+		return e.Expr
+	case *ast.ErrorHandlerExpr:
+		return e.Expr
+	}
+	return expr
 }
 
 func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {

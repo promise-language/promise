@@ -226,6 +226,7 @@ func (d *decoder) expr() ast.Expr {
 		d.setPosEnd(n)
 		n.Expr = d.expr()
 		n.Block = d.blockOpt()
+		n.Failable = d.bool_()
 		return n
 	case tagUnsafeExpr:
 		n := &ast.UnsafeExpr{}

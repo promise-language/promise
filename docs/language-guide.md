@@ -648,6 +648,17 @@ t := go { expensive_work(); };
 t := go fetch_data(url);
 string result = <-t;           // blocks until done
 
+// Failable goroutine: spawn a fallible producer with `go!` → failable_task[T].
+// The error surfaces at the receive, which is itself a failable operation.
+t := go! fetch_user(42);       // fetch_user!() — t : failable_task[User]
+user := <-t;                   // in a failable fn: auto-propagates the error
+// in a non-failable fn, handle it at the receive:
+user := (<-t)?!;               // panic on the goroutine's error
+user := (<-t) ? e { recover(e); };
+// `go` on a failable call is rejected (use `go!`); `go!` on a non-failable call
+// is rejected (use `go`); discarding a `go! …` is rejected (fire-and-forget must
+// be non-failable — handle the error inside a plain `go { f()?!; }`).
+
 // Channels
 ch := channel[int](capacity: 10);
 ch.send(42);

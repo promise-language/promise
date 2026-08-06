@@ -359,6 +359,7 @@ func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
 	}
 	if c.canPropagateError() {
 		c.info.AutoPropagateExprs[expr] = true
+		c.markFailableEscape()
 	} else {
 		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
@@ -374,6 +375,7 @@ func (c *Checker) checkSubExprFailable(expr ast.Expr) {
 	}
 	if c.canPropagateError() {
 		c.info.AutoPropagateExprs[expr] = true
+		c.markFailableEscape()
 	} else {
 		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
@@ -1178,6 +1180,8 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
 	if !c.canPropagateError() {
 		c.errorf(s.Pos(), "raise outside of failable function")
+	} else {
+		c.markFailableEscape() // T1379: a raise is a failable escape (for `go! {}` body-can-fail)
 	}
 	valType := c.checkExpr(s.Value)
 	if valType == nil {
@@ -1199,6 +1203,16 @@ func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
 // In failable functions, naked failable calls are auto-propagated.
 // In non-failable functions, naked failable calls are a compile error.
 func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
+	// §17.2.1: a discarded `go! f()` / `go! { }` is a fire-and-forget failable
+	// task — its error would be silently swallowed. Fire-and-forget must be
+	// non-failable (T1379).
+	if goExpr, ok := s.Expr.(*ast.GoExpr); ok && goExpr.Failable {
+		if types.IsFailableTask(c.info.Types[s.Expr]) {
+			c.errorf(s.Expr.Pos(), "a fire-and-forget goroutine must be non-failable")
+			c.hintf(s.Expr.Pos(), "handle the error inside it — `go { %s(...)?!; }` — or keep the task and receive it with `<-`", goCalleeName(unwrapGoExprCall(goExpr)))
+		}
+		return
+	}
 	if !c.info.FailableExprs[s.Expr] {
 		return
 	}
@@ -1206,6 +1220,7 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 	if c.canPropagateError() {
 		// Auto-propagate: codegen will emit tag-check + early return.
 		c.info.AutoPropagateExprs[s.Expr] = true
+		c.markFailableEscape()
 	} else {
 		c.errorf(s.Expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}

@@ -2881,13 +2881,13 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 			blk.NewCall(dropFn, innerGuard)
 		}
-	case named != nil && (types.IsTask(elemType) || named == types.TypTask):
+	case named != nil && (types.IsAnyTask(elemType) || types.IsTaskLikeOrigin(named)):
 		// T0546: Task is an opaque container — slot type is i8*, not userValueType.
 		// Load the G handle and join+free the un-awaited task.
 		valField := blk.NewGetElementPtr(structTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), fi)
 		innerTask := blk.NewLoad(irtypes.I8Ptr, valField)
-		if taskElem, ok := types.AsTask(elemType); ok {
+		if taskElem, ok, taskFail := types.AsAnyTaskFailable(elemType); ok {
 			// T0668: route through emitTaskJoinAndFree. emitInnerDrop runs in a
 			// synthesized struct/enum field-drop body (c.inCoroutine == false),
 			// so this takes the legacy callable Task[T].drop path — identical
@@ -2897,7 +2897,7 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 			c.fn = blk.Parent
 			c.entryBlock = blk.Parent.Blocks[0]
 			c.block = blk
-			c.emitTaskJoinAndFree(innerTask, taskElem)
+			c.emitTaskJoinAndFree(innerTask, taskElem, taskFail)
 			blk = c.block
 			c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
 		}
@@ -3217,21 +3217,29 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 // genuinely non-coroutine drop bodies (synthesized struct/enum/Arc field drops,
 // monomorphized Promise Map[K,Task].drop); on WASM its spin pumps the
 // cooperative scheduler one step per iteration instead of a no-op usleep.
-func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
+func (c *Compiler) getOrCreateTaskDrop(elemType types.Type, failable bool) *ir.Func {
 	elemName := "void"
 	if elemType != nil {
 		elemName = typeArgStr(elemType)
 	}
-	funcName := "Task[" + elemName + "].drop"
+	// T1379: a FailableTask[T] drop differs only in free_after_done, which
+	// discharges the buffered {ok,value,err} aggregate (drops the success value
+	// or frees the error) before freeing the buffer. Distinct name so the two
+	// per-element-type drops never collide.
+	handleName := "Task"
+	if failable {
+		handleName = "FailableTask"
+	}
+	funcName := handleName + "[" + elemName + "].drop"
 
 	if fn, ok := c.funcs[funcName]; ok {
 		if len(fn.Blocks) == 0 {
-			c.defineTaskDropBody(fn, elemType)
+			c.defineTaskDropBody(fn, elemType, failable)
 		}
 		// T0668: keep the drop→free_after_done mapping populated even on the
 		// already-defined / declared-only fast paths (used by the by-drop-fn
 		// temp/binding join route).
-		c.taskFreeAfterDone[fn] = c.getOrCreateTaskFreeAfterDone(elemType)
+		c.taskFreeAfterDone[fn] = c.getOrCreateTaskFreeAfterDone(elemType, failable)
 		return fn
 	}
 
@@ -3239,10 +3247,10 @@ func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
 	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	c.defineTaskDropBody(fn, elemType)
+	c.defineTaskDropBody(fn, elemType, failable)
 
 	c.funcs[funcName] = fn
-	c.taskFreeAfterDone[fn] = c.getOrCreateTaskFreeAfterDone(elemType)
+	c.taskFreeAfterDone[fn] = c.getOrCreateTaskFreeAfterDone(elemType, failable)
 	return fn
 }
 
@@ -3255,7 +3263,7 @@ func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
 // G is still not done the program is genuinely deadlocked → terminal message +
 // exit(2), matching promise_sched_coop_run's deadlock block. The host path is
 // unchanged (usleep; another M runs the awaited G).
-func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
+func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type, failable bool) {
 	gTy := goroutineStructType()
 	thisParam := fn.Params[0]
 
@@ -3325,7 +3333,7 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	}
 
 	// ready: G is done — defer the post-done cleanup to Task[T].free_after_done.
-	readyBlk.NewCall(c.getOrCreateTaskFreeAfterDone(elemType), thisParam)
+	readyBlk.NewCall(c.getOrCreateTaskFreeAfterDone(elemType, failable), thisParam)
 	readyBlk.NewBr(doneBlk)
 
 	doneBlk.NewRet(nil)
@@ -3336,16 +3344,20 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 // Assumes the goroutine G is already done. Used by both the legacy spin shell
 // (after the wait) and the cooperative park-suspend join (emitTaskJoinAndFree),
 // so the post-done IR exists in exactly one place.
-func (c *Compiler) getOrCreateTaskFreeAfterDone(elemType types.Type) *ir.Func {
+func (c *Compiler) getOrCreateTaskFreeAfterDone(elemType types.Type, failable bool) *ir.Func {
 	elemName := "void"
 	if elemType != nil {
 		elemName = typeArgStr(elemType)
 	}
-	funcName := "Task[" + elemName + "].free_after_done"
+	handleName := "Task"
+	if failable {
+		handleName = "FailableTask"
+	}
+	funcName := handleName + "[" + elemName + "].free_after_done"
 
 	if fn, ok := c.funcs[funcName]; ok {
 		if len(fn.Blocks) == 0 {
-			c.defineTaskFreeAfterDoneBody(fn, elemType)
+			c.defineTaskFreeAfterDoneBody(fn, elemType, failable)
 		}
 		return fn
 	}
@@ -3354,7 +3366,7 @@ func (c *Compiler) getOrCreateTaskFreeAfterDone(elemType types.Type) *ir.Func {
 	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	c.defineTaskFreeAfterDoneBody(fn, elemType)
+	c.defineTaskFreeAfterDoneBody(fn, elemType, failable)
 
 	c.funcs[funcName] = fn
 	return fn
@@ -3366,10 +3378,13 @@ func (c *Compiler) getOrCreateTaskFreeAfterDone(elemType types.Type) *ir.Func {
 // free the G struct. This is the old Task[T].drop post-done logic moved
 // verbatim; the only structural change is the leading null check (callers may
 // pass a consumed / zero-initialized handle) and the entry→ready wiring.
-func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type) {
+func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type, failable bool) {
 	gTy := goroutineStructType()
 	thisParam := fn.Params[0]
-	isVoid := (elemType == nil || elemType == types.TypVoid)
+	// T1379: a FailableTask[T] result buffer holds the failable aggregate
+	// {i1 ok, T value, i8* err} (never bare T). It is therefore never "void" as
+	// far as the buffer is concerned — even T = void stores {i1, i8*}.
+	isVoid := (elemType == nil || elemType == types.TypVoid) && !failable
 
 	entry := fn.NewBlock(".entry")
 	readyBlk := fn.NewBlock("task.fad.ready")
@@ -3414,7 +3429,69 @@ func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type)
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
 	rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
 
-	if !isVoid {
+	if failable {
+		// T1379: FailableTask[T] — result_ptr holds the {ok,value,err} aggregate.
+		// An un-received (dropped) failable task must discharge its buffered
+		// payload so neither the success value nor the error instance leaks:
+		//   ok==true  → drop the success value T (if any);
+		//   ok==false → drop the buffered error instance.
+		// Then free the aggregate buffer. Skip entirely if the goroutine panicked
+		// (aggregate never written) or the buffer is null/sentinel.
+		tVoid := (elemType == nil || elemType == types.TypVoid)
+		var innerLLVM irtypes.Type = irtypes.Void
+		if !tVoid {
+			innerLLVM = c.resolveType(elemType)
+		}
+		aggType := computeResultType(innerLLVM)
+
+		sentinelInt := c.block.NewPtrToInt(rpVal, c.ptrIntType())
+		isSentinel := c.block.NewICmp(enum.IPredULE, sentinelInt,
+			constant.NewInt(c.ptrIntType(), 1))
+		notSentinelBlk := c.newBlock("ftask.drop.not_sentinel")
+		freeBufOnlyBlk := c.newBlock("ftask.drop.free_buf_only")
+		dischargeBlk := c.newBlock("ftask.drop.discharge")
+		afterResultBlk := c.newBlock("ftask.drop.after_result")
+		c.block.NewCondBr(isSentinel, afterResultBlk, notSentinelBlk)
+
+		// Panicked goroutine never wrote the aggregate → free the buffer only.
+		c.block = notSentinelBlk
+		c.block.NewCondBr(isPanicked, freeBufOnlyBlk, dischargeBlk)
+
+		c.block = freeBufOnlyBlk
+		c.block.NewCall(c.palFree, rpVal)
+		c.block.NewBr(afterResultBlk)
+
+		// discharge: load the aggregate, then drop success value or free error.
+		c.block = dischargeBlk
+		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(aggType))
+		agg := c.block.NewLoad(aggType, typedRP)
+		tag := c.block.NewExtractValue(agg, 0) // i1: 0 = ok, 1 = error
+		errIdx := resultErrIdx(aggType)
+		okBlk := c.newBlock("ftask.drop.ok")
+		errBlk := c.newBlock("ftask.drop.err")
+		freeBlk2 := c.newBlock("ftask.drop.free_buf")
+		c.block.NewCondBr(tag, errBlk, okBlk)
+
+		// ok path: drop the success value T (if non-void).
+		c.block = okBlk
+		if !tVoid {
+			okVal := c.block.NewExtractValue(agg, 1)
+			c.emitVariantFieldDrop(okVal, elemType)
+		}
+		c.block.NewBr(freeBlk2)
+
+		// err path: free the buffered error instance via runtime drop dispatch.
+		c.block = errBlk
+		errVal := c.block.NewExtractValue(agg, errIdx)
+		c.emitFailableErrorDrop(errVal)
+		c.block.NewBr(freeBlk2)
+
+		c.block = freeBlk2
+		c.block.NewCall(c.palFree, rpVal)
+		c.block.NewBr(afterResultBlk)
+
+		c.block = afterResultBlk
+	} else if !isVoid {
 		// Non-void task: result_ptr is a heap allocation holding T.
 		// Defensive sentinel guard: skip if result_ptr is null or the 0x1 sentinel.
 		resultLLVM := c.resolveType(elemType)
@@ -3642,6 +3719,9 @@ func singleOwnerHandleName(typ types.Type, named *types.Named) string {
 	}
 	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
 		return "MutexGuard"
+	}
+	if _, ok := types.AsFailableTask(typ); ok || named == types.TypFailableTask {
+		return "FailableTask"
 	}
 	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
 		return "Task"
@@ -8199,8 +8279,9 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 		// T0560: TypTask has no declared drop() method (per-instantiation drop
 		// is synthesized via getOrCreateTaskDrop). Without the explicit Task
 		// allowance, the skip below fires and the Task field branch below is
-		// unreachable, leaking the G handle.
-		if !hasMonoSynthDrop && !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && fieldNamed != types.TypTask && !needsFreeOnly {
+		// unreachable, leaking the G handle. T1379: TypFailableTask is the same
+		// (its drop additionally discharges the buffered aggregate).
+		if !hasMonoSynthDrop && !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && !types.IsTaskLikeOrigin(fieldNamed) && !needsFreeOnly {
 			continue
 		}
 
@@ -8281,12 +8362,12 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 		// drops the result, frees result_ptr/panic_msg/G. Without this case the field
 		// fell through to the heap-user-type path (gated by !isOpaqueContainerType),
 		// so plain Task[T] fields silently no-op'd at scope exit and leaked the G.
-		if taskElem, ok := types.AsTask(fieldType); ok {
+		if taskElem, ok, taskFail := types.AsAnyTaskFailable(fieldType); ok {
 			resolvedElem := taskElem
 			if c.typeSubst != nil {
 				resolvedElem = types.Substitute(taskElem, c.typeSubst)
 			}
-			dropFn := c.getOrCreateTaskDrop(resolvedElem)
+			dropFn := c.getOrCreateTaskDrop(resolvedElem, taskFail)
 			c.block.NewCall(dropFn, fieldInstance)
 			continue
 		}
@@ -8494,6 +8575,7 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 	// for `task[T]?` fields/locals dropped inside a coroutine body.
 	var taskJoinElem types.Type
 	haveTaskJoin := false
+	taskJoinFailable := false // T1379: inner is FailableTask[taskJoinElem]
 	isHeapUser := false
 
 	switch {
@@ -8519,19 +8601,24 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 			}
 		}
 		dropFunc = c.getOrCreateChannelDrop(resolvedChanElem)
-	case types.IsTask(elem) || innerNamed == types.TypTask:
+	case types.IsAnyTask(elem) || types.IsTaskLikeOrigin(innerNamed):
 		// T0560: Optional[Task[T]] field scope-exit — per-instantiation drop
 		// blocks on goroutine completion, drops result, frees result_ptr/G.
 		// Without this, dispatch fell through to the heap-user-type case which
 		// is gated by !isOpaqueContainerType, so this branch was never taken.
+		failable := types.IsFailableTask(elem) || innerNamed == types.TypFailableTask
+		taskOrigin := types.TypTask
+		if failable {
+			taskOrigin = types.TypFailableTask
+		}
 		var resolvedTaskElem types.Type
-		if taskElem, ok := types.AsTask(elem); ok {
+		if taskElem, ok, _ := types.AsAnyTaskFailable(elem); ok {
 			resolvedTaskElem = taskElem
 			if c.typeSubst != nil {
 				resolvedTaskElem = types.Substitute(taskElem, c.typeSubst)
 			}
-		} else if innerNamed == types.TypTask && c.typeSubst != nil {
-			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+		} else if innerNamed != nil && c.typeSubst != nil {
+			if tp := taskOrigin.TypeParams(); len(tp) > 0 {
 				resolvedTaskElem = c.typeSubst[tp[0]]
 				if resolvedTaskElem != nil {
 					resolvedTaskElem = types.Substitute(resolvedTaskElem, c.typeSubst)
@@ -8540,8 +8627,9 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		}
 		// T0668: keep dropFunc non-nil so the has-value branch is still reached,
 		// but emit the cooperative join at the drop site instead of this spin.
-		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem, failable)
 		taskJoinElem = resolvedTaskElem
+		taskJoinFailable = failable
 		haveTaskJoin = true
 	case types.IsArc(elem) || innerNamed == types.TypArc:
 		// T0573: Optional[Ref[T]] field scope-exit — per-instantiation drop
@@ -8693,7 +8781,7 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 	} else if haveTaskJoin {
 		// T0668: Optional[Task[T]] — cooperative park-suspend join in a
 		// coroutine body (test body / WASM main / go {}); legacy spin otherwise.
-		c.emitTaskJoinAndFree(innerVal, taskJoinElem)
+		c.emitTaskJoinAndFree(innerVal, taskJoinElem, taskJoinFailable)
 		c.block.NewBr(skipBlock)
 	} else {
 		// T0354: For Vector inner type, iterate elements and drop heap elements
@@ -8728,6 +8816,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 	// T0668: Task[taskJoinElem] reassignment → cooperative join (coroutine).
 	var taskJoinElem types.Type
 	haveTaskJoin := false
+	taskJoinFailable := false // T1379: inner is FailableTask[taskJoinElem]
 	needsFreeOnly := false
 	isStructuralInner := false
 
@@ -8754,28 +8843,34 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 			}
 		}
 		dropFunc = c.getOrCreateChannelDrop(resolvedChanElem)
-	case types.IsTask(elem) || innerNamed == types.TypTask:
+	case types.IsAnyTask(elem) || types.IsTaskLikeOrigin(innerNamed):
 		// T0560: Optional[Task[T]] field reassignment — per-instantiation drop
 		// blocks on goroutine completion, drops result, frees result_ptr/G.
 		// Without this, dispatch fell through to the heap-user-type case which
 		// is gated by !isOpaqueContainerType, so this branch was never taken
 		// and old tasks leaked on reassignment.
+		failable := types.IsFailableTask(elem) || innerNamed == types.TypFailableTask
+		taskOrigin := types.TypTask
+		if failable {
+			taskOrigin = types.TypFailableTask
+		}
 		var resolvedTaskElem types.Type
-		if taskElem, ok := types.AsTask(elem); ok {
+		if taskElem, ok, _ := types.AsAnyTaskFailable(elem); ok {
 			resolvedTaskElem = taskElem
 			if c.typeSubst != nil {
 				resolvedTaskElem = types.Substitute(taskElem, c.typeSubst)
 			}
-		} else if innerNamed == types.TypTask && c.typeSubst != nil {
-			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+		} else if innerNamed != nil && c.typeSubst != nil {
+			if tp := taskOrigin.TypeParams(); len(tp) > 0 {
 				resolvedTaskElem = c.typeSubst[tp[0]]
 				if resolvedTaskElem != nil {
 					resolvedTaskElem = types.Substitute(resolvedTaskElem, c.typeSubst)
 				}
 			}
 		}
-		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem, failable)
 		taskJoinElem = resolvedTaskElem
+		taskJoinFailable = failable
 		haveTaskJoin = true
 	case types.IsArc(elem) || innerNamed == types.TypArc:
 		// T0573: Optional[Ref[T]] field reassignment — per-instantiation drop
@@ -8926,7 +9021,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 
 		c.block = afterBlock
 	} else if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
-		types.IsTask(elem) || innerNamed == types.TypTask ||
+		types.IsAnyTask(elem) || types.IsTaskLikeOrigin(innerNamed) ||
 		types.IsArc(elem) || innerNamed == types.TypArc ||
 		types.IsWeak(elem) || innerNamed == types.TypWeak ||
 		types.IsMutex(elem) || innerNamed == types.TypMutex ||
@@ -8939,7 +9034,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		if haveTaskJoin {
 			// T0668: Optional[Task[T]] reassignment — cooperative join in a
 			// coroutine body; legacy spin otherwise.
-			c.emitTaskJoinAndFree(innerVal, taskJoinElem)
+			c.emitTaskJoinAndFree(innerVal, taskJoinElem, taskJoinFailable)
 		} else {
 			// String/container/Arc/Weak/Mutex/MutexGuard: inner is i8*, call drop directly.
 			c.block.NewCall(dropFunc, innerVal)
@@ -10127,12 +10222,12 @@ func (c *Compiler) emitCoroTaskJoinAndFree(handle value.Value, freeAfterDoneFn *
 // scheduler can run the pending goroutine. Otherwise it falls back to the
 // legacy callable Task[T].drop (busy spin on host; cooperative-step pump on
 // WASM for genuinely non-coroutine drop bodies).
-func (c *Compiler) emitTaskJoinAndFree(handle value.Value, elemType types.Type) {
+func (c *Compiler) emitTaskJoinAndFree(handle value.Value, elemType types.Type, failable bool) {
 	if c.inCoroutine && c.coroSuspendBlk != nil {
-		c.emitCoroTaskJoinAndFree(handle, c.getOrCreateTaskFreeAfterDone(elemType))
+		c.emitCoroTaskJoinAndFree(handle, c.getOrCreateTaskFreeAfterDone(elemType, failable))
 		return
 	}
-	c.block.NewCall(c.getOrCreateTaskDrop(elemType), handle)
+	c.block.NewCall(c.getOrCreateTaskDrop(elemType, failable), handle)
 }
 
 // emitTaskJoinAndFreeByDropFn is the temp/binding-site variant of
@@ -10217,13 +10312,14 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
-		if taskElem, isTask := types.AsTask(typ); isTask || named == types.TypTask {
+		if taskElem, isTask, taskFail := types.AsAnyTaskFailable(typ); isTask || types.IsTaskLikeOrigin(named) {
 			// T0668: central chokepoint for Vector/array/tuple element loops and
 			// enum-variant drops. Route through the cooperative join so an
 			// un-awaited Task in a container dropped inside a coroutine (test
 			// body / WASM main / go {}) parks instead of livelocking the
-			// single-threaded WASM scheduler.
-			c.emitTaskJoinAndFree(fieldVal, taskElem)
+			// single-threaded WASM scheduler. T1379: FailableTask discharges its
+			// buffered aggregate in free_after_done.
+			c.emitTaskJoinAndFree(fieldVal, taskElem, taskFail)
 			return
 		}
 		// T0765: Structural-interface field (non-value-type). The variant data slot

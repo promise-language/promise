@@ -4167,7 +4167,7 @@ func TestReceiveFromNonTask(t *testing.T) {
 			y := <-x;
 		}
 	`)
-	expectError(t, errs, "requires Task[T] or Channel[T]")
+	expectError(t, errs, "requires Task[T], FailableTask[T], or Channel[T]")
 }
 
 // --- Missing Return Tests ---
@@ -16543,7 +16543,7 @@ func TestGoExprFailableCallRejected(t *testing.T) {
 			t := go work();
 		}
 	`)
-	expectError(t, errs, "cannot spawn a failable call")
+	expectError(t, errs, "is failable — spawn it with `go!`")
 }
 
 func TestGoExprFailableCallInFailableFnRejected(t *testing.T) {
@@ -16555,7 +16555,7 @@ func TestGoExprFailableCallInFailableFnRejected(t *testing.T) {
 			t := go work();
 		}
 	`)
-	expectError(t, errs, "cannot spawn a failable call")
+	expectError(t, errs, "is failable — spawn it with `go!`")
 }
 
 func TestGoExprNonCallOperandRejected(t *testing.T) {
@@ -16598,7 +16598,7 @@ func TestGoExprFailableMethodCallRejected(t *testing.T) {
 			t := go w.work();
 		}
 	`)
-	expectError(t, errs, "cannot spawn a failable call")
+	expectError(t, errs, "is failable — spawn it with `go!`")
 }
 
 func TestGoExprPropagateOperandRejected(t *testing.T) {
@@ -16623,6 +16623,179 @@ func TestGoExprArithmeticOperandRejected(t *testing.T) {
 		}
 	`)
 	expectError(t, errs, "operand of `go` must be")
+}
+
+// --- T1379: failable goroutines (`go!` + failable_task[T] + failable `<-`) ---
+
+func TestGoBangFailableCallAccepted(t *testing.T) {
+	// `go! f()` where f is failable spawns a failable_task[T]; receiving it in a
+	// failable function auto-propagates.
+	checkOK(t, `
+		produce!(int x) int { return x; }
+		load!() int {
+			t := go! produce(5);
+			v := <-t;
+			return v;
+		}
+	`)
+}
+
+func TestGoBangNonFailableCallRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		score(int x) int { return x; }
+		test!() {
+			t := go! score(5);
+			v := <-t;
+		}
+	`)
+	expectError(t, errs, "cannot fail; spawn it with plain `go`")
+}
+
+func TestGoBangReceiveUnhandledInNonFailableFn(t *testing.T) {
+	// A bare `<-t` on a failable_task in a non-failable function must be handled.
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test() {
+			t := go! produce(5);
+			v := <-t;
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestGoBangReceivePanicHandled(t *testing.T) {
+	// `(<-t)?!` handles the failable receive in a non-failable function.
+	checkOK(t, `
+		produce!(int x) int { return x; }
+		test() {
+			t := go! produce(5);
+			v := (<-t)?!;
+		}
+	`)
+}
+
+func TestGoBangReceiveInlineHandler(t *testing.T) {
+	// `(<-t) ? e { }` handles the failable receive with an error binding.
+	checkOK(t, `
+		produce!(int x) int { return x; }
+		test() {
+			t := go! produce(5);
+			v := (<-t) ? e { 0 };
+		}
+	`)
+}
+
+func TestGoBangOperatorOnSpawnRejected(t *testing.T) {
+	// An error operator on the spawn (`go! f()?!`) binds to the spawn, not the
+	// receive — reject with a fix-it.
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test() {
+			v := go! produce(5)?!;
+		}
+	`)
+	expectError(t, errs, "apply the error operator to the receive")
+}
+
+func TestGoBangPropagateOnSpawnRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test!() {
+			v := go! produce(5)?^;
+		}
+	`)
+	expectError(t, errs, "apply the error operator to the receive")
+}
+
+func TestGoBangFireAndForgetRejected(t *testing.T) {
+	// Discarding a failable_task silently swallows its error — reject.
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test() {
+			go! produce(5);
+		}
+	`)
+	expectError(t, errs, "fire-and-forget goroutine must be non-failable")
+}
+
+func TestGoBangBlockNotYetImplemented(t *testing.T) {
+	// The `go! { }` block form's codegen is deferred (T1384) — sema rejects it
+	// cleanly rather than allowing a codegen panic.
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test!() {
+			t := go! { produce(5) };
+			v := <-t;
+		}
+	`)
+	expectError(t, errs, "block form is not yet implemented")
+}
+
+func TestGoBangNonCallOperandRejected(t *testing.T) {
+	// `go!` with a non-call, non-operator operand (a bare expression) is rejected
+	// with the `go!`-specific diagnostic (T1379) — distinct from the plain-`go`
+	// message, which mentions the block-wrapping fix-it for operators.
+	errs := checkErrs(t, `
+		test!() {
+			t := go! 1 + 1;
+		}
+	`)
+	expectError(t, errs, "the operand of `go!` must be a failable function or method call, or a block")
+}
+
+func TestGoBangInlineHandlerOnSpawnRejected(t *testing.T) {
+	// The inline-handler arm `go! f() ? e { }` binds the handler to the spawn, not
+	// the receive — reject with the same fix-it as `?!`/`?^` (T1379).
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test() {
+			v := go! produce(5) ? e { 0 };
+		}
+	`)
+	expectError(t, errs, "apply the error operator to the receive")
+}
+
+func TestGoBangBlockCannotFailRejected(t *testing.T) {
+	// `go! { }` whose body cannot fail is misleading — reject it symmetric to
+	// `go! f()` on a non-failable call. This fires BEFORE the not-yet-implemented
+	// diagnostic (a can-fail body would instead hit T1384) (T1379).
+	errs := checkErrs(t, `
+		compute() int { return 1; }
+		test!() {
+			t := go! { compute() };
+			v := <-t;
+		}
+	`)
+	expectError(t, errs, "this goroutine's body cannot fail; spawn it with plain `go`")
+}
+
+func TestGoBangFailableMethodCallAccepted(t *testing.T) {
+	// `go! obj.method()` on a failable method spawns a failable_task[T] (the
+	// MemberExpr-callee path). Receiving it in a failable fn auto-propagates.
+	checkOK(t, `
+		type W {
+			work!(this) int { return 1; }
+		}
+		load!() int {
+			w := W();
+			t := go! w.work();
+			return <-t;
+		}
+	`)
+}
+
+func TestGoBangReceiveInFailableMethodBody(t *testing.T) {
+	// A failable receive inside a failable *method* body (not a free function)
+	// auto-propagates — exercises canPropagateError via curFunc on a method.
+	checkOK(t, `
+		produce!(int x) int { return x; }
+		type Runner {
+			run!(this) int {
+				t := go! produce(5);
+				return <-t;
+			}
+		}
+	`)
 }
 
 func TestSendableWithOptionalField(t *testing.T) {

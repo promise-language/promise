@@ -470,7 +470,7 @@ func isVarDeclAliasSafeType(typ types.Type) bool {
 	if types.IsMutexGuard(typ) {
 		return true
 	}
-	if types.IsTask(typ) {
+	if types.IsAnyTask(typ) {
 		return true
 	}
 	if opt, ok := typ.(*types.Optional); ok {
@@ -491,6 +491,9 @@ func isVarDeclAliasSafeType(typ types.Type) bool {
 // handle. The call-arg-unsafe rationale mirrors expr.go's
 // isCallArgUnsafeBorrowedType, which already flags these for move-arg passing.
 func singleOwnerHandleKind(t types.Type) string {
+	if _, ok := types.AsFailableTask(t); ok {
+		return "failable_task"
+	}
 	if _, ok := types.AsTask(t); ok {
 		return "task"
 	}

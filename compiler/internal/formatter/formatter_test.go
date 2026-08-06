@@ -1072,6 +1072,24 @@ func TestFormat(t *testing.T) {
 			input:    "foo() `public `doc(\"Does stuff.\") {",
 			expected: "foo() `public `doc(\"Does stuff.\") {\n",
 		},
+		{
+			// T1379: the `go!` failable-goroutine marker glues `!` to `go`
+			// with a space before the spawned operand.
+			name:     "go bang failable spawn",
+			input:    "t := go !produce(5);\n",
+			expected: "t := go! produce(5);\n",
+		},
+		{
+			name:     "go bang already formatted",
+			input:    "t := go! produce(5);\n",
+			expected: "t := go! produce(5);\n",
+		},
+		{
+			// Plain `go` (non-failable) is unchanged.
+			name:     "plain go spawn unchanged",
+			input:    "t := go worker();\n",
+			expected: "t := go worker();\n",
+		},
 	}
 
 	for _, tt := range tests {

@@ -160,7 +160,7 @@ func isOpaqueContainerType(typ types.Type) bool {
 	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
 		return true
 	}
-	if named == types.TypTask {
+	if types.IsAnyTask(typ) || named == types.TypTask || named == types.TypFailableTask {
 		return true
 	}
 	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
@@ -186,7 +186,7 @@ func isOpaqueContainerType(typ types.Type) bool {
 // Go panic (the dupHeapValue `{vtable,instance}` struct assert fails on i8*).
 func isSingleOwnerHandleType(typ types.Type) bool {
 	named := extractNamed(typ)
-	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+	if _, ok := types.AsAnyTask(typ); ok || types.IsTaskLikeOrigin(named) {
 		return true
 	}
 	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
@@ -226,7 +226,7 @@ func isContainerType(typ types.Type) bool {
 	// T0508: Task[T] is an opaque i8* handle (G struct pointer), same as the
 	// other native handles. Missing entry caused Optional[Task[T]] drop paths
 	// to fall through to extractInstancePtr and emit malformed IR.
-	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+	if _, ok := types.AsAnyTask(typ); ok || types.IsTaskLikeOrigin(named) {
 		return true
 	}
 	if named == types.TypString {
@@ -339,7 +339,7 @@ func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts ma
 	// Native container/handle types (Vector, Channel, Task) are opaque i8* pointers.
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
-			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc &&
+			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypFailableTask && n != types.TypArc &&
 			n != types.TypWeak && n != types.TypMutex && n != types.TypMutexGuard {
 			// Pure value types embed their fields directly in the value struct
 			// rather than using the boxed {i8*,i8*} layout. (T1016)
@@ -470,7 +470,7 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 	}
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
-			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc &&
+			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypFailableTask && n != types.TypArc &&
 			n != types.TypWeak && n != types.TypMutex && n != types.TypMutexGuard {
 			// Value types have a wider value struct with embedded fields
 			if n.IsValueType() {
@@ -545,7 +545,7 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		}
 		// Vector/task instances → opaque pointer (native type)
 		if origin, ok := inst.Origin().(*types.Named); ok {
-			if origin == types.TypVector || origin == types.TypTask || origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak || origin == types.TypMutex || origin == types.TypMutexGuard {
+			if origin == types.TypVector || origin == types.TypTask || origin == types.TypFailableTask || origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak || origin == types.TypMutex || origin == types.TypMutexGuard {
 				return irtypes.I8Ptr
 			}
 			// Instance wrapping Named user type → value struct

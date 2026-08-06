@@ -13,7 +13,7 @@ import (
 
 const (
 	magic         = "PAST"
-	formatVersion = 2          // T0998: Arg.Move added to encode/decode
+	formatVersion = 3          // T1379: GoExpr.Failable added to encode/decode
 	headerSize    = 4 + 4 + 16 // magic + version + key hash
 	cacheSubdir   = "astcache"
 )

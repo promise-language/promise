@@ -196,10 +196,13 @@ type MatchArm struct {
 }
 
 // GoExpr represents a go expression: go expr or go { block }.
+// Failable is true for the `go!` form (§17.2.1): the spawned goroutine is a
+// failable scope whose escaping error is captured into a failable_task[T].
 type GoExpr struct {
 	nodeBase
-	Expr  Expr   // nil if block form
-	Block *Block // nil if expression form
+	Expr     Expr   // nil if block form
+	Block    *Block // nil if expression form
+	Failable bool   // true for `go!` — spawn a failable_task[T]
 }
 
 func (*GoExpr) exprTag() {}

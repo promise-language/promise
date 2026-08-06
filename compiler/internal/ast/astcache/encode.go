@@ -177,6 +177,7 @@ func (e *encoder) expr(x ast.Expr) {
 		e.nodePos(n)
 		e.expr(n.Expr)
 		e.blockOpt(n.Block)
+		e.bool_(n.Failable)
 	case *ast.UnsafeExpr:
 		e.u8(tagUnsafeExpr)
 		e.nodePos(n)

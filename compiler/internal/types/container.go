@@ -211,6 +211,58 @@ func AsTask(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// IsFailableTask reports whether t is a FailableTask instance
+// (Instance{TypFailableTask, _}) — the handle produced by `go!` (§17.2.1).
+func IsFailableTask(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypFailableTask
+}
+
+// AsFailableTask extracts the (success) element type from a FailableTask instance.
+// Returns (elem, true) for FailableTask instances, (nil, false) otherwise.
+func AsFailableTask(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypFailableTask {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
+// IsAnyTask reports whether t is a Task or FailableTask instance. Both are
+// single-owner goroutine handles with identical LLVM representation (an i8* G
+// pointer) and identical move/ownership plumbing — they differ only in that a
+// FailableTask's result buffer holds a failable {ok,value,err} aggregate, which
+// matters solely at spawn, receive, and drop. Use this at every plumbing site
+// that treats a task handle uniformly (type resolution, layout, move tracking,
+// sendability, ownership consume); use the Task/FailableTask-specific predicates
+// where the aggregate distinction matters.
+func IsAnyTask(t Type) bool { return IsTask(t) || IsFailableTask(t) }
+
+// AsAnyTask extracts the element type from a Task or FailableTask instance.
+func AsAnyTask(t Type) (elem Type, ok bool) {
+	if e, ok := AsTask(t); ok {
+		return e, true
+	}
+	return AsFailableTask(t)
+}
+
+// IsTaskLikeOrigin reports whether n is the Task or FailableTask origin type.
+func IsTaskLikeOrigin(n *Named) bool {
+	return n == TypTask || n == TypFailableTask
+}
+
+// AsAnyTaskFailable is like AsAnyTask but also reports whether the handle is a
+// FailableTask (true) or a plain Task (false). Used by codegen to select the
+// element-type drop that discharges the failable {ok,value,err} aggregate.
+func AsAnyTaskFailable(t Type) (elem Type, ok bool, failable bool) {
+	if e, ok := AsTask(t); ok {
+		return e, true, false
+	}
+	if e, ok := AsFailableTask(t); ok {
+		return e, true, true
+	}
+	return nil, false, false
+}
+
 // IsMap reports whether t is a Map instance (Instance{TypMap, _}).
 func IsMap(t Type) bool {
 	inst, ok := t.(*Instance)

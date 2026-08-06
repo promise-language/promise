@@ -243,7 +243,7 @@ func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs
 func firstSingleOwnerHandle(typ types.Type) types.Type {
 	switch t := typ.(type) {
 	case *types.Instance:
-		if types.IsTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+		if types.IsAnyTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
 			return t
 		}
 		for _, ta := range t.TypeArgs() {
@@ -326,7 +326,7 @@ func (c *Checker) rejectStreamTypeArg(pos ast.Pos, typeArgs []types.Type) {
 func isStdNativeContainerNamed(n *types.Named) bool {
 	switch n {
 	case types.TypVector, types.TypMap, types.TypArc, types.TypChannel,
-		types.TypWeak, types.TypTask, types.TypMutex, types.TypMutexGuard,
+		types.TypWeak, types.TypTask, types.TypFailableTask, types.TypMutex, types.TypMutexGuard,
 		types.TypString:
 		return true
 	}
@@ -397,7 +397,7 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 	}
 	switch t := typ.(type) {
 	case *types.Instance:
-		if types.IsTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+		if types.IsAnyTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
 			return t
 		}
 		// TypeArgs recursion — same as firstSingleOwnerHandle (covers a handle
@@ -509,7 +509,7 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 		// A direct Task/Mutex/MutexGuard read result IS reported (so callers can
 		// special-case it if desired), but the caller's isSingleOwnerNativeType
 		// branch handles those first in practice.
-		if types.IsTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+		if types.IsAnyTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
 			return t
 		}
 		switch origin := t.Origin().(type) {
@@ -899,7 +899,7 @@ func (c *Checker) checkPushNestedHandleArg(e *ast.CallExpr) {
 		return
 	}
 	// Direct single-owner handle elements are out of scope (T0508/T0556).
-	if types.IsTask(elem) || types.IsMutex(elem) || types.IsMutexGuard(elem) {
+	if types.IsAnyTask(elem) || types.IsMutex(elem) || types.IsMutexGuard(elem) {
 		return
 	}
 	off := firstNestedSingleOwnerHandle(elem, nil)

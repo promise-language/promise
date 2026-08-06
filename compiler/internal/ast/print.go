@@ -307,7 +307,11 @@ func (p *printer) printExpr(e Expr) {
 	case *LambdaExpr:
 		p.line("Lambda(%d params)", len(n.Params))
 	case *GoExpr:
-		p.line("Go")
+		if n.Failable {
+			p.line("Go!")
+		} else {
+			p.line("Go")
+		}
 	case *UnsafeExpr:
 		p.line("Unsafe")
 	case *IsExpr:

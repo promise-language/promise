@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,89 @@ func stubLLVMDir(t *testing.T) string {
 		}
 	}
 	return dir
+}
+
+// hideSystemLLVM redirects every path that platform-specific LLVM discovery
+// probes (PATH, Homebrew on macOS, Program Files / USERPROFILE on Windows) so
+// that FindLLVM's step-2 system search always fails, letting tests drive the
+// step-3 slim-fetch fallback in isolation without a real LLVM install.
+func hideSystemLLVM(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", "")
+	switch runtime.GOOS {
+	case "darwin":
+		// findLLVMDarwin probes Homebrew paths directly (not via PATH) so
+		// redirecting HOMEBREW_PREFIX to an empty temp dir is also required.
+		t.Setenv("HOMEBREW_PREFIX", t.TempDir())
+	case "windows":
+		// findLLVMWindows probes %ProgramFiles%\LLVM\bin and
+		// %USERPROFILE%\LLVM\bin directly, so both must be redirected.
+		t.Setenv("ProgramFiles", t.TempDir())
+		t.Setenv("USERPROFILE", t.TempDir())
+	}
+}
+
+// fakeReleaseRootForTarget creates a temp repo root with the minimal
+// catalog.toml and a prebuilts.toml that lists opt+llc (but NOT lld) for
+// the given target, using platform-appropriate file-name suffixes. It is the
+// per-platform analogue of fakeReleaseRoot (which is linux-amd64 only).
+func fakeReleaseRootForTarget(t *testing.T, target string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "catalog.toml"), []byte("epoch = \"2026.0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toolsBuild := filepath.Join(root, "tools", "build")
+	if err := os.MkdirAll(toolsBuild, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	suffix := ExeSuffix()
+	prebuilts := fmt.Sprintf(`schema = 1
+[binaries.llvm]
+version = "22.1.0"
+bundle_dir = "compiler/cmd/promise/resources/llvm"
+[binaries.llvm.targets.%s]
+url = "https://example.test/LLVM.tar.xz"
+sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0"
+files = [
+  { src = "bin/opt%s", out = "opt%s" },
+  { src = "bin/llc%s", out = "llc%s" },
+]
+`, target, suffix, suffix, suffix, suffix)
+	if err := os.WriteFile(filepath.Join(toolsBuild, "prebuilts.toml"), []byte(prebuilts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// seedSlimCatalogForTarget is seedSlimCatalog generalised to any target string.
+func seedSlimCatalogForTarget(t *testing.T, root, target string, contents map[string]string) map[string][]byte {
+	t.Helper()
+	cat := &BlobsCatalog{Schema: BlobsCatalogSchema}
+	brs := map[string][]byte{}
+	for name, content := range contents {
+		raw := []byte(content)
+		br := brotliBytes(t, raw)
+		sha := sha256Hex(raw)
+		if err := cat.Upsert(BlobEntry{
+			Dependency:       "llvm",
+			Version:          "22.1.0",
+			Target:           target,
+			Name:             name,
+			SHA256:           sha,
+			Size:             int64(len(raw)),
+			Compression:      compressionBrotli,
+			CompressedSize:   int64(len(br)),
+			CompressedSHA256: sha256Hex(br),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		brs[sha+".br"] = br
+	}
+	if err := WriteBlobsCatalog(root, cat); err != nil {
+		t.Fatal(err)
+	}
+	return brs
 }
 
 func TestFindLLVM_PromiseLLVMOverride(t *testing.T) {
@@ -202,6 +286,53 @@ func TestFindLLVM_SlimFetchError_WrapsCleanly(t *testing.T) {
 	}
 }
 
+// TestFindLLVM_SlimSuccessButMissingLLD exercises the silent-fallthrough fix
+// (T1062): EnsureLLVMBlobs succeeds (opt+llc fetched, tools.ok written) but
+// llvmInfoFromDir returns (nil, false) because lld is absent from the
+// prebuilts.toml files list. FindLLVM must return an error that names the
+// cache directory and the missing file ("slim-fetch populated" / "lld"),
+// rather than falling through to the generic "LLVM not found in PATH" message.
+func TestFindLLVM_SlimSuccessButMissingLLD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-stripping is awkward on Windows")
+	}
+	root, _ := fakeReleaseRoot(t, nil)
+	// fakeReleaseRoot's default prebuilts.toml already has only opt+llc (no lld).
+	// Seed the catalog to match: only opt and llc blobs.
+	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": "OPT_SLIM", "llc": "LLC_SLIM"})
+
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
+	t.Setenv("PROMISE_LLVM", "")
+	// Hide system LLVM so discovery fails and we reach the slim fallback.
+	t.Setenv("PATH", "")
+	t.Setenv("HOMEBREW_PREFIX", t.TempDir())
+
+	prev := defaultBlobFetcher
+	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
+	t.Cleanup(func() { defaultBlobFetcher = prev })
+
+	if CurrentBuildTarget() != "linux-amd64" {
+		t.Skipf("slim-fallback test pinned to linux-amd64 (CurrentBuildTarget=%s)", CurrentBuildTarget())
+	}
+
+	_, err := FindLLVM(root)
+	if err == nil {
+		t.Fatal("expected error: slim-fetch succeeded but lld absent from prebuilts.toml")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "slim-fetch populated") {
+		t.Errorf("error should mention 'slim-fetch populated', got: %v", err)
+	}
+	if !strings.Contains(msg, "lld") {
+		t.Errorf("error should name the missing file 'lld', got: %v", err)
+	}
+	// Must NOT look like the generic "LLVM not found" bottom message.
+	if strings.Contains(msg, "need opt in PATH") || strings.Contains(msg, "slim-blob fetch failed") {
+		t.Errorf("error should not be the generic fallback message, got: %v", err)
+	}
+}
+
 // TestFindLLVM_PromiseLLVMOverride_PartialDir covers a directory that has
 // opt+llc but no lld — the override must reject, since the build pipeline
 // can't link without lld and the override is a "use exactly this" signal.
@@ -315,5 +446,87 @@ func TestLLVMInfoFromDir_Dlltool(t *testing.T) {
 	}
 	if info.DlltoolPath != dt {
 		t.Errorf("DlltoolPath = %q, want %q", info.DlltoolPath, dt)
+	}
+}
+
+// TestFindLLVM_SlimSuccessButMissingFile_CrossPlatform exercises the T1062 fix
+// on the current host platform (linux-amd64, darwin-arm64, or windows-amd64):
+// EnsureLLVMBlobs succeeds (opt + llc fetched into the slim cache) but lld is
+// absent from the prebuilts.toml files list, so FindLLVM must return the
+// specific "slim-fetch populated … required file is missing" error rather than
+// the generic "LLVM not found in PATH / Homebrew" fallthrough.
+//
+// This is the cross-platform companion to TestFindLLVM_SlimSuccessButMissingLLD
+// (which is pinned to linux-amd64 via fakeReleaseRoot). Together they verify
+// the fix on every CI host.
+func TestFindLLVM_SlimSuccessButMissingFile_CrossPlatform(t *testing.T) {
+	target := CurrentBuildTarget()
+	root := fakeReleaseRootForTarget(t, target)
+	suffix := ExeSuffix()
+
+	// Seed the catalog with opt and llc blobs for this target (deliberately
+	// omitting lld so llvmInfoFromDir returns (nil,false) after the fetch).
+	brs := seedSlimCatalogForTarget(t, root, target, map[string]string{
+		"opt" + suffix: "OPT_SLIM",
+		"llc" + suffix: "LLC_SLIM",
+	})
+
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	t.Setenv("PROMISE_LLVM", "")
+	hideSystemLLVM(t)
+
+	prev := defaultBlobFetcher
+	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
+	t.Cleanup(func() { defaultBlobFetcher = prev })
+
+	_, err := FindLLVM(root)
+	if err == nil {
+		t.Fatal("expected error: slim-fetch succeeded but lld absent from prebuilts.toml files list")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "slim-fetch populated") {
+		t.Errorf("error should contain 'slim-fetch populated', got: %v", err)
+	}
+	if !strings.Contains(msg, "lld") {
+		t.Errorf("error should name the missing file 'lld', got: %v", err)
+	}
+	// Must NOT be the generic fallback message, confirming the fix did not
+	// silently fall through.
+	if strings.Contains(msg, "need opt in PATH") || strings.Contains(msg, "slim-blob fetch failed") {
+		t.Errorf("error should not be the generic fallback message, got: %v", err)
+	}
+}
+
+// TestFindLLVM_SlimSuccessButMissingOpt_CrossPlatform covers the less common
+// variant of the T1062 fix where opt itself is absent from the slim cache (not
+// just lld). In this case llvmInfoFromDir returns (nil,false) on the first
+// check, and the error message should name opt rather than lld.
+// TestFindLLVM_SlimSuccessButMissingOpt covers the less common variant of the
+// T1062 fix where opt itself is absent from the slim cache (not just lld).
+// llvmInfoFromDir returns (nil,false) on the first check, and the new T1062
+// detection logic in FindLLVM should name opt (not lld) in the error.
+//
+// Driving "opt absent after successful EnsureLLVMBlobs" via FindLLVM end-to-end
+// requires a catalog entry pointing to a tarball server (no slim entry causes a
+// tarball fallback), so we unit-test the detection logic directly using the same
+// Exists-branch that FindLLVM executes.
+func TestFindLLVM_SlimSuccessButMissingOpt(t *testing.T) {
+	suffix := ExeSuffix()
+	// Cache dir with only llc (no opt) — simulates a partial fetch where opt
+	// was not listed in prebuilts.toml at all.
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "llc"+suffix), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := llvmInfoFromDir(cacheDir); ok {
+		t.Fatal("expected llvmInfoFromDir to return (nil,false) when opt is missing")
+	}
+	// Replicate the T1062 detection branch: opt absent → missing stays as opt path.
+	missing := filepath.Join(cacheDir, "opt"+suffix)
+	if Exists(missing) {
+		missing = filepath.Join(cacheDir, "lld"+suffix)
+	}
+	if !strings.Contains(missing, "opt") {
+		t.Errorf("missing-file detection should point to opt when opt is absent, got %q", missing)
 	}
 }

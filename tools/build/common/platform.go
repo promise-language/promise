@@ -74,6 +74,12 @@ func FindLLVM(root string) (*LLVMInfo, error) {
 			if info, ok := llvmInfoFromDir(cacheDir); ok {
 				return info, nil
 			}
+			suffix := ExeSuffix()
+			missing := filepath.Join(cacheDir, "opt"+suffix)
+			if Exists(missing) {
+				missing = filepath.Join(cacheDir, "lld"+suffix)
+			}
+			return nil, fmt.Errorf("slim-fetch populated %q but required file is missing: %s (the prebuilts.toml files list for this target may be incomplete)", cacheDir, missing)
 		} else {
 			return nil, fmt.Errorf("LLVM %d-%d not found in system search and slim-blob fetch failed: %w (set PROMISE_LLVM=<dir> to point at a local install)", LLVMMinVersion, LLVMMaxVersion, err)
 		}

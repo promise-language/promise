@@ -16718,17 +16718,17 @@ func TestGoBangFireAndForgetRejected(t *testing.T) {
 	expectError(t, errs, "fire-and-forget goroutine must be non-failable")
 }
 
-func TestGoBangBlockNotYetImplemented(t *testing.T) {
-	// The `go! { }` block form's codegen is deferred (T1384) — sema rejects it
-	// cleanly rather than allowing a codegen panic.
-	errs := checkErrs(t, `
+func TestGoBangBlockFormAccepted(t *testing.T) {
+	// T1384: the `go! { }` block form is now implemented end-to-end — a body that
+	// can fail (a bare failable call auto-propagates in the failable scope) is
+	// accepted and yields a failable_task[T].
+	checkOK(t, `
 		produce!(int x) int { return x; }
 		test!() {
 			t := go! { produce(5) };
 			v := <-t;
 		}
 	`)
-	expectError(t, errs, "block form is not yet implemented")
 }
 
 func TestGoBangNonCallOperandRejected(t *testing.T) {
@@ -16757,8 +16757,8 @@ func TestGoBangInlineHandlerOnSpawnRejected(t *testing.T) {
 
 func TestGoBangBlockCannotFailRejected(t *testing.T) {
 	// `go! { }` whose body cannot fail is misleading — reject it symmetric to
-	// `go! f()` on a non-failable call. This fires BEFORE the not-yet-implemented
-	// diagnostic (a can-fail body would instead hit T1384) (T1379).
+	// `go! f()` on a non-failable call. A can-fail body is instead accepted and
+	// lowered (T1384) (T1379).
 	errs := checkErrs(t, `
 		compute() int { return 1; }
 		test!() {

@@ -596,8 +596,15 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 		c.block.NewCall(c.palFree, errYieldSlot)
 		c.block.NewCall(c.palFree, errSlotPtr)
 		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
-		// Propagate error to enclosing failable function/generator
-		if c.inGenerator && c.generatorCanError {
+		// Propagate error to enclosing failable function/generator/go-block
+		if c.inFailableGoBlock {
+			// T1384: a failable generator consumed inside a `go! {}` body routes
+			// its error into the goroutine's result aggregate.
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, true)
+			}
+			c.emitFailableGoBlockError(errPtr)
+		} else if c.inGenerator && c.generatorCanError {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0, true)
 			}
@@ -682,7 +689,14 @@ func (c *Compiler) unwrapFailableGeneratorResult(result value.Value, pos ast.Pos
 	c.block = errBlk
 	errPtr := c.block.NewExtractValue(result, resultErrIdx(resultType))
 	c.emitAllStmtTempCleanupForErrorPath() // T1272: also frees env/enum temps
-	if c.inGenerator && c.generatorCanError {
+	if c.inFailableGoBlock {
+		// T1384: a failable generator factory called inside a `go! {}` body routes
+		// its error into the goroutine's result aggregate.
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, true)
+		}
+		c.emitFailableGoBlockError(errPtr)
+	} else if c.inGenerator && c.generatorCanError {
 		if len(c.scopeBindings) > 0 {
 			c.emitScopeCleanup(0, true)
 		}
@@ -875,8 +889,15 @@ func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.
 		c.block.NewCall(c.palFree, errS)
 		c.block.NewCall(c.palFree, subErrSlotPtr)
 		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
-		// Propagate to outer generator or failable function
-		if c.inGenerator && c.generatorCanError {
+		// Propagate to outer generator, failable function, or go-block
+		if c.inFailableGoBlock {
+			// T1384: parallel with the other sites. yield* only appears in a
+			// generator body (never a go-block), so this branch is defensive.
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, true)
+			}
+			c.emitFailableGoBlockError(subErrPtr)
+		} else if c.inGenerator && c.generatorCanError {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0, true)
 			}

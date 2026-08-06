@@ -723,6 +723,11 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 			c.enumCtorTemps = prefixEnum
 		}
 	}()
+	// T1384: read-and-clear the one-shot go!-value flag so only THIS (outermost,
+	// the go! body) block yields a trailing auto-propagated value; nested arm
+	// blocks reached via genExpr below see it cleared and keep discard semantics.
+	wantAutoPropValue := c.goBlockTrailingWantValue
+	c.goBlockTrailingWantValue = false
 	savedScopeLen := len(c.scopeBindings)
 	// T1107: track whether this block yields an owned heap value moved out of the
 	// block scope, so genIfExpr / genMatchArmValue can register the merge phi as an
@@ -748,10 +753,26 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 				// ctor temps this arm creates that are NOT the phi'd result.
 				tailEnumSnap := len(c.enumCtorTemps)
 				if c.info.AutoPropagateExprs[es.Expr] {
-					// Failable call: auto-propagate error, discard success value.
-					// Block arms don't contribute typed results to match phis;
-					// only expression arms (arm.Body) produce match result values.
-					c.genAutoPropagate(es.Expr)
+					if wantAutoPropValue {
+						// T1384: a `go! {}` value body's trailing bare failable call
+						// yields its auto-propagated success value as the block result
+						// (the error path routes to the go-block sink inside
+						// genAutoPropagateValue). Ownership of an owned heap success value
+						// transfers to the block's caller (genGoBlock stores it into
+						// G.result_ptr), so mark it owned like the normal-result path.
+						result = c.genAutoPropagateValue(c.genExpr(es.Expr))
+						if result != nil {
+							if c.resultIsFreshOwnedHeapTemp(result) {
+								blockOwned = true
+							}
+							c.claimStringTemp(result)
+						}
+					} else {
+						// Failable call: auto-propagate error, discard success value.
+						// Block arms don't contribute typed results to match phis;
+						// only expression arms (arm.Body) produce match result values.
+						c.genAutoPropagate(es.Expr)
+					}
 				} else if c.borrowBlockResult {
 					// T0792: result consumed as a borrow (`T&`/`T~`) — the last expr
 					// aliases storage owned elsewhere, so do not dup or track it. The
@@ -1163,7 +1184,11 @@ func (c *Compiler) emitFailableResultPropagation(result value.Value) {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
-	if c.inGenerator && c.generatorCanError {
+	if c.inFailableGoBlock {
+		// T1384: store the error into the goroutine's result aggregate and branch
+		// to the coroutine's final suspend (a `ret` is invalid in the coro ramp).
+		c.emitFailableGoBlockError(errVal)
+	} else if c.inGenerator && c.generatorCanError {
 		// B0023: store error to generator error_slot and branch to final suspend
 		c.emitGeneratorError(errVal)
 	} else {
@@ -1286,7 +1311,11 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
-	if c.inGenerator && c.generatorCanError {
+	if c.inFailableGoBlock {
+		// T1384: store the error into the goroutine's result aggregate and branch
+		// to the coroutine's final suspend (a `ret` is invalid in the coro ramp).
+		c.emitFailableGoBlockError(errVal)
+	} else if c.inGenerator && c.generatorCanError {
 		// B0023: store error to generator error_slot and branch to final suspend
 		c.emitGeneratorError(errVal)
 	} else {
@@ -5122,8 +5151,18 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 
 	c.block = errRetBlock
 	errVal := c.block.NewLoad(irtypes.I8Ptr, cap.val)
-	resultType := c.currentResultType()
-	c.block.NewRet(c.wrapError(errVal, resultType))
+	if c.inFailableGoBlock {
+		// T1384: a use-binding `close()` that fails inside a `go! {}` body routes
+		// its error into the goroutine's result aggregate (a `ret` is invalid in
+		// the coro ramp).
+		c.emitFailableGoBlockError(errVal)
+	} else if c.inGenerator && c.generatorCanError {
+		// B0023: store error to generator error_slot and branch to final suspend.
+		c.emitGeneratorError(errVal)
+	} else {
+		resultType := c.currentResultType()
+		c.block.NewRet(c.wrapError(errVal, resultType))
+	}
 
 	c.block = contBlock
 }
@@ -12130,7 +12169,11 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	if st, ok := errVal.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
 		errVal = c.block.NewExtractValue(errVal, 1)
 	}
-	if c.inGenerator && c.generatorCanError {
+	if c.inFailableGoBlock {
+		// T1384: store the error into the goroutine's result aggregate and branch
+		// to the coroutine's final suspend (a `ret` is invalid in the coro ramp).
+		c.emitFailableGoBlockError(errVal)
+	} else if c.inGenerator && c.generatorCanError {
 		// B0023: store error to generator error_slot and branch to final suspend
 		c.emitGeneratorError(errVal)
 	} else {

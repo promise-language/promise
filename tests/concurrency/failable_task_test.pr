@@ -200,3 +200,273 @@ failable_task_generic_spawn_err() `test(exclude: wasm) {
   assert(handled, "generic spawn error handled");
   assert(v == 0, "generic spawn recovery value");
 }
+
+// ---------------------------------------------------------------------------
+// T1384: `go! { }` BLOCK FORM. The coroutine body is a failable scope — an
+// escaping error (bare auto-propagated failable call, explicit `?^`, or `raise`)
+// is captured into the task's {ok,value,err} aggregate and surfaces at `<-t`,
+// exactly like the call form. A trailing success value is wrapped as ok. These
+// mirror the call-form cases above for symmetry, plus block-only shapes.
+// ---------------------------------------------------------------------------
+
+// Void failable helper for the block form.
+do_effect!(int x) {
+  if x < 0 {
+    raise error("effect:{x}");
+  }
+}
+
+// Block spawn + auto-propagate: success value flows through the receive.
+failable_go_block_propagate_ok() `test {
+  t := go! {
+    produce(5)
+  };
+  v := (<-t)?!;
+  assert(v == 10, "block auto-propagate ok value");
+}
+
+// Block spawn + auto-propagate: the raised error surfaces at the receive.
+failable_go_block_propagate_err() `test {
+  t := go! {
+    produce(-3)
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "negative:-3", "block propagated error message");
+    0
+  };
+  assert(got, "block error handler ran");
+}
+
+// Explicit `?^` inside the block — same observable result as the bare-call form.
+failable_go_block_explicit_propagate() `test {
+  t := go! {
+    produce(7)?^
+  };
+  assert((<-t)?! == 14, "block ?^ value");
+}
+
+// Trailing computed success value is wrapped and surfaced.
+failable_go_block_trailing_value() `test {
+  t := go! {
+    a := produce(4);
+    a + 1
+  };
+  assert((<-t)?! == 9, "block trailing computed value");
+}
+
+// `raise` inside the block surfaces at the receive.
+failable_go_block_raise() `test {
+  t := go! {
+    if 0 < 1 {
+      raise error("boom");
+    }
+    3
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "boom", "block raise message");
+    0
+  };
+  assert(got, "block raise handler ran");
+}
+
+// Void success: a void-failable block awaited with `(<-t)?!`.
+failable_go_block_void_ok() `test {
+  t := go! {
+    do_effect(1);
+  };
+  (<-t)?!;
+  assert(true, "block void success");
+}
+
+// Void error: a void-failable block recovered with an inline handler.
+failable_go_block_void_err() `test {
+  t := go! {
+    do_effect(-1);
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "effect:-1", "block void error message");
+  };
+  assert(got, "block void error handler ran");
+}
+
+// Heap (string) trailing success value: received and dropped leak-free.
+failable_go_block_string_result() `test {
+  t := go! {
+    make_str(6)
+  };
+  s := (<-t)?!;
+  assert(s == "value=6", "block string result");
+}
+
+// Inline panic-form on a block-form task.
+failable_go_block_inline_panic() `test {
+  t := go! {
+    produce(11)
+  };
+  assert((<-t)?! == 22, "block inline panic-form value");
+}
+
+// Leak-free drop: an un-received block-form task whose body RAISES must free the
+// buffered error in FailableTask[int].drop.
+failable_go_block_dropped_error_leak_free() `test {
+  {
+    t := go! {
+      produce(-9)
+    };
+    // never received — the buffered error must be discharged on drop.
+  }
+  assert(true, "block dropped-error path did not leak");
+}
+
+// Leak-free drop: an un-received block-form task whose body SUCCEEDS with a heap
+// value must drop that value in FailableTask[string].drop.
+failable_go_block_dropped_success_leak_free() `test {
+  {
+    t := go! {
+      make_str(8)
+    };
+    // never received — the buffered success string must be dropped.
+  }
+  assert(true, "block dropped-success path did not leak");
+}
+
+// ---------------------------------------------------------------------------
+// T1384 (extra coverage): sink reached via other escaping constructs, nested
+// spawns, and multiple escape sites in one body.
+// ---------------------------------------------------------------------------
+
+// A non-failable helper for nested-spawn coverage.
+triple(int x) int {
+  return x * 3;
+}
+
+// A failable generator that yields `n` values then optionally raises.
+count_gen!(int n, bool fail) stream[int] {
+  int i = 0;
+  while i < n {
+    yield i;
+    i = i + 1;
+  }
+  if fail {
+    raise error("gen boom");
+  }
+}
+
+// A for-in over a failable generator inside a `go! {}` body routes the
+// generator's mid-stream error through the go-block sink to `<-t`. The body is
+// already a failable scope via the leading `produce(1)?^` escape site (a pure
+// for-in-generator body is currently rejected by sema — T1386), so this
+// exercises genForInGenerator's failable-go-block branch, not the sema gap.
+failable_go_block_generator_forin_err() `test {
+  t := go! {
+    _ := produce(1)?^; // escape site → failable scope
+    int sum = 0;
+    for x in count_gen(3, true) {
+      sum = sum + x;
+    }
+    sum
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "gen boom", "generator error surfaced from go! block");
+    -1
+  };
+  assert(got, "generator error handler ran");
+}
+
+// Same shape, generator succeeds: the computed value flows through `<-t`.
+failable_go_block_generator_forin_ok() `test {
+  t := go! {
+    base := produce(1)?^; // 2
+    int sum = 0;
+    for x in count_gen(4, false) {
+      // 0+1+2+3 = 6
+      sum = sum + x;
+    }
+    base + sum
+  };
+  assert((<-t)?! == 8, "generator ok value from go! block");
+}
+
+// A nested plain `go` spawn inside a `go! {}` body must NOT inherit the outer
+// failable sink — the inner goroutine completes normally and the outer body's
+// trailing value surfaces at `<-t` (exercises the inFailableGoBlock save/restore
+// around the nested-spawn coroutine).
+failable_go_block_nested_go() `test {
+  t := go! {
+    inner := go triple(4);
+    iv := <-inner;
+    produce(iv) // produce(12) → 24
+  };
+  assert((<-t)?! == 24, "nested go inside go! result");
+}
+
+// Two escaping `?^` sites in one body: the first success flows on, the second
+// error is captured. Exercises the multiple-store-site path (storeGoResultAgg's
+// unique block labels — one per escape site plus the trailing store).
+failable_go_block_multiple_escape_sites() `test {
+  t := go! {
+    a := produce(3)?^; // 6, succeeds
+    b := produce(-5)?^; // raises "negative:-5"
+    a + b
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "negative:-5", "second escape site error surfaced");
+    0
+  };
+  assert(got, "multi-escape-site handler ran");
+}
+
+// A successful use-binding close() inside a `go! {}` value body does not
+// interfere with the trailing value (the close-error path is tracked separately
+// as T1387). The body is a failable scope via the leading `produce(2)?^`.
+type GoBlockOkResource {
+  int id;
+  close!(~this) void {
+    // success — no error
+  }
+}
+
+failable_go_block_use_ok_close() `test {
+  t := go! {
+    base := produce(2)?^; // 4
+    use r := GoBlockOkResource(id: 5);
+    base + r.id // 9
+  };
+  assert((<-t)?! == 9, "ok-close trailing value surfaced");
+}
+
+// A typed error handler (`? e is T { }`) inside a `go! {}` body whose subject
+// raises a NON-matching error: the unmatched error propagates through the
+// go-block sink to `<-t` (exercises genErrorHandlerExpr's failable-go-block
+// branch). The body is a failable scope via the leading `produce(1)?^` escape
+// site — a typed no-match handler alone is not yet counted as an escape by sema
+// (T1386).
+type GoBlockNotThisError is error {
+  int a;
+}
+
+failable_go_block_typed_handler_nomatch() `test {
+  t := go! {
+    _ := produce(1)?^; // escape site → failable scope
+    produce(-1)? e is GoBlockNotThisError {
+      99 // matches only GoBlockNotThisError; base error escapes
+    }
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "negative:-1", "unmatched typed-handler error propagated");
+    0
+  };
+  assert(got, "typed-no-match propagation handler ran");
+}

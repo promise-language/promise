@@ -542,6 +542,21 @@ type Compiler struct {
 	generatorFinalSuspend *ir.Block   // final suspend block (for early return)
 	generatorCounter      int         // counter for unique generator function names
 
+	// Failable go-block state (T1384) — active while compiling a `go! {}`
+	// coroutine body. An escaping error (bare failable call, `?^`, `raise`)
+	// is captured into the goroutine's result buffer as a failable
+	// {ok,value,err} aggregate and branches to the coroutine's final suspend,
+	// instead of the `ret wrapError(...)` used by ordinary failable functions
+	// (invalid in a coroutine ramp whose return type is i8*).
+	inFailableGoBlock           bool                // inside a `go! {}` coroutine body (failable scope)
+	failableGoBlockAggType      *irtypes.StructType // {i1,T,i8*} aggregate stored into G.result_ptr
+	failableGoBlockFinalSuspend *ir.Block           // branch target after storing an escaping error
+	// One-shot: set by genGoBlock before evaluating a `go! {}` value body so
+	// genBlockValue yields (not discards) a trailing bare failable call's
+	// auto-propagated success value. Read-and-cleared at genBlockValue entry so
+	// only the outermost block (the go! body) sees it — nested arm blocks don't.
+	goBlockTrailingWantValue bool
+
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).

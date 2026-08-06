@@ -4153,11 +4153,6 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		// symmetric to `go! f()` on a non-failable call.
 		if e.Failable && !escaped {
 			c.errorf(e.Block.Pos(), "this goroutine's body cannot fail; spawn it with plain `go`")
-		} else if e.Failable {
-			// T1384: the `go! {}` block form's failable-coroutine-body codegen is
-			// not yet implemented (the call form `go! f()` is). Reject here rather
-			// than panic in codegen. The sema above still validates the body.
-			c.errorf(e.Block.Pos(), "the `go! { }` block form is not yet implemented; use the call form `go! f()` and receive with `<-` (tracked as T1384)")
 		}
 		// Block form: infer T from last expression statement
 		if len(e.Block.Stmts) > 0 {

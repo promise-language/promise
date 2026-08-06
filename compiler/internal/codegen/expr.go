@@ -10885,7 +10885,11 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
-	if c.inGenerator && c.generatorCanError {
+	if c.inFailableGoBlock {
+		// T1384: store the error into the goroutine's result aggregate and branch
+		// to the coroutine's final suspend (a `ret` is invalid in the coro ramp).
+		c.emitFailableGoBlockError(errVal)
+	} else if c.inGenerator && c.generatorCanError {
 		// B0023: store error to generator error_slot and branch to final suspend
 		c.emitGeneratorError(errVal)
 	} else {
@@ -11122,11 +11126,15 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		} else if e.PanicOnNomatch {
 			// Explicit ! suffix: panic on non-matching error (T0142: include source location)
 			c.emitErrorPanic(errVal, e.Pos().File, e.Pos().Line)
-		} else if c.canError || (c.inGenerator && c.generatorCanError) {
+		} else if c.canError || (c.inGenerator && c.generatorCanError) || c.inFailableGoBlock {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 			}
-			if c.inGenerator && c.generatorCanError {
+			if c.inFailableGoBlock {
+				// T1384: store the error into the goroutine's result aggregate and
+				// branch to the coroutine's final suspend.
+				c.emitFailableGoBlockError(errVal)
+			} else if c.inGenerator && c.generatorCanError {
 				// B0023: store error to generator error_slot and branch to final suspend
 				c.emitGeneratorError(errVal)
 			} else {
@@ -18303,6 +18311,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	savedEnvTemps := c.envTemps                       // T1105: isolate coro-body closure env temps from the outer fn
 	savedEnvTempMap := c.envTempMap                   // T1105
 	savedBorrowedValueParams := c.borrowedValueParams // T0945
+	savedInFailableGoBlock := c.inFailableGoBlock     // T1384: a nested `go x()` inside a `go! {}` body must not inherit the outer sink
 	savedBlockTempFloors := c.resetBlockTempFloors()  // T1329: fresh function → floors from 0
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -18317,6 +18326,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
+	c.inFailableGoBlock = false               // T1384: the call form handles failability via the failable aggregate it stores, not the sink
 	c.stmtTemps = nil                         // T0594: fresh temp state for coroutine body
 	c.stmtTempMap = make(map[value.Value]int) // T0594
 	c.enumCtorTemps = nil                     // B0267
@@ -18574,6 +18584,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	c.dropBindings = savedDropBindings         // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
+	c.inFailableGoBlock = savedInFailableGoBlock // T1384
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
@@ -19077,6 +19088,45 @@ func (c *Compiler) snapshotThisForGoBlock() (value.Value, irtypes.Type, *goThisS
 	return dupVS, vsType, &goThisSnapshot{isValueType: false, resolvedType: resolvedType}
 }
 
+// storeGoResultAgg null-checks the current goroutine's G.result_ptr and stores
+// `agg` (a failable {ok,value,err} aggregate) through it. Factors the value-path
+// store used by genGoBlock so the success and error paths share one lowering.
+// T1384. Must be called on a live (non-terminated) block.
+func (c *Compiler) storeGoResultAgg(agg value.Value) {
+	gTy := goroutineStructType()
+	currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	gPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
+	rpField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+	rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
+	rpNotNull := c.block.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
+	// Unique block names: a failable coroutine can invoke this helper multiple
+	// times (one per escaping-error site, plus the void-success store), and the
+	// trailing-value path uses its own fixed store_result/after_store — duplicate
+	// labels in one function produce broken IR.
+	storeResultBlk := c.newBlock("go.store_result")
+	afterStoreBlk := c.newBlock("go.after_store")
+	c.block.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
+
+	typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(agg.Type()))
+	storeResultBlk.NewStore(agg, typedRP)
+	storeResultBlk.NewBr(afterStoreBlk)
+
+	c.block = afterStoreBlk
+}
+
+// emitFailableGoBlockError wraps errVal into the failable-task aggregate, stores
+// it into the goroutine's G.result_ptr, and branches to the coroutine's final
+// suspend. The `<-t` receive loads the aggregate raw and surfaces the error like
+// any failable call. The caller has already run stmt-temp + scope cleanup on the
+// error path (matching emitGeneratorError's contract) — this helper must NOT
+// duplicate it. T1384.
+func (c *Compiler) emitFailableGoBlockError(errVal value.Value) {
+	agg := c.wrapError(errVal, c.failableGoBlockAggType)
+	c.storeGoResultAgg(agg)
+	c.block.NewBr(c.failableGoBlockFinalSuspend)
+}
+
 // genGoBlock handles `go { block }` — wraps the block in a void function and spawns it.
 // Captures outer local variables referenced in the block and passes them through the arg pack.
 func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
@@ -19092,11 +19142,22 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	if c.typeSubst != nil && goResultType != nil {
 		goResultType = types.Substitute(goResultType, c.typeSubst)
 	}
-	goElem, goHasElem := types.AsTask(goResultType)
+	// T1384: `go! { … }` produces a failable_task[T] whose result buffer holds
+	// the failable aggregate {i1 ok, T value, i8* err} — the same shape the call
+	// form stores, surfaced by `<-t`. goIsVoid now means "no success value T"
+	// (for both task kinds); goResultLLVM is the aggregate type for a failable
+	// task (always non-void) and the plain success type for a non-failable task.
+	goElem, goHasElem, goFailable := types.AsAnyTaskFailable(goResultType)
 	goIsVoid := !goHasElem || goElem == nil || goElem == types.TypVoid
-	var goResultLLVM irtypes.Type = irtypes.Void
+	var successLLVM irtypes.Type = irtypes.Void
 	if !goIsVoid {
-		goResultLLVM = c.resolveType(goElem)
+		successLLVM = c.resolveType(goElem)
+	}
+	var goResultLLVM irtypes.Type = irtypes.Void
+	if goFailable {
+		goResultLLVM = computeResultType(successLLVM) // {i1,T,i8*}; always non-void
+	} else if !goIsVoid {
+		goResultLLVM = successLLVM
 	}
 
 	// Collect outer variables referenced in the block
@@ -19232,20 +19293,23 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
-	savedLocalNameCount := c.localNameCount           // T0261
-	savedEnumCtorTemps := c.enumCtorTemps             // B0267
-	savedStmtTemps := c.stmtTemps                     // T0683/T0594: isolate coro-body temps from the outer fn
-	savedStmtTempMap := c.stmtTempMap                 // T0683/T0594
-	savedHeapTemps := c.heapTemps                     // T0686: isolate coro-body heap temps from the outer fn
-	savedHeapTempMap := c.heapTempMap                 // T0686
-	savedEnvTemps := c.envTemps                       // T0739: isolate coro-body closure env temps from the outer fn
-	savedEnvTempMap := c.envTempMap                   // T0739
-	savedBorrowedValueParams := c.borrowedValueParams // T0945
-	savedDiscardedExpr := c.discardedExpr             // T1029: coro body is not the discarded statement
-	savedDiscardAliasArgPtrs := c.discardAliasArgPtrs // T1029
-	c.goExprFireAndForget = false                     // reset for inner statements (B0109)
-	c.discardedExpr = nil                             // T1029: inner ExprStmts set their own
-	c.discardAliasArgPtrs = nil                       // T1029
+	savedLocalNameCount := c.localNameCount                           // T0261
+	savedEnumCtorTemps := c.enumCtorTemps                             // B0267
+	savedStmtTemps := c.stmtTemps                                     // T0683/T0594: isolate coro-body temps from the outer fn
+	savedStmtTempMap := c.stmtTempMap                                 // T0683/T0594
+	savedHeapTemps := c.heapTemps                                     // T0686: isolate coro-body heap temps from the outer fn
+	savedHeapTempMap := c.heapTempMap                                 // T0686
+	savedEnvTemps := c.envTemps                                       // T0739: isolate coro-body closure env temps from the outer fn
+	savedEnvTempMap := c.envTempMap                                   // T0739
+	savedBorrowedValueParams := c.borrowedValueParams                 // T0945
+	savedDiscardedExpr := c.discardedExpr                             // T1029: coro body is not the discarded statement
+	savedDiscardAliasArgPtrs := c.discardAliasArgPtrs                 // T1029
+	savedInFailableGoBlock := c.inFailableGoBlock                     // T1384
+	savedFailableGoBlockAggType := c.failableGoBlockAggType           // T1384
+	savedFailableGoBlockFinalSuspend := c.failableGoBlockFinalSuspend // T1384
+	c.goExprFireAndForget = false                                     // reset for inner statements (B0109)
+	c.discardedExpr = nil                                             // T1029: inner ExprStmts set their own
+	c.discardAliasArgPtrs = nil                                       // T1029
 	// T1329: save the block-value temp floors; reset to 0 only on the value path
 	// (below), where the coro body's temp arrays are reset fresh. Restored at the
 	// end. Kept off the aligned save block above so its length doesn't widen the
@@ -19273,6 +19337,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
+	c.inFailableGoBlock = false // T1384: (re)activated below only for the `go! {}` body
 	c.enumCtorTemps = nil       // B0267
 	c.borrowedValueParams = nil // T0945: coroutine body has no user value params
 	if useGoBlockValuePath {
@@ -19431,18 +19496,53 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.panicExitBlock = goPanicExitBlk2
 	c.coroutineReturnBlock = finalSuspBlk // B0353
 
+	// T1384: activate the failable-go-block error sink for the `go! {}` body. An
+	// escaping error (bare failable call, `?^`, `raise`) stores a failable
+	// aggregate into G.result_ptr and branches to finalSuspBlk instead of
+	// `ret wrapError(...)` (invalid in this coroutine ramp). Cleared after the
+	// body is generated; restored to the outer value below.
+	var failAggTy *irtypes.StructType
+	if goFailable {
+		failAggTy = goResultLLVM.(*irtypes.StructType)
+		c.inFailableGoBlock = true
+		c.failableGoBlockAggType = failAggTy
+		c.failableGoBlockFinalSuspend = finalSuspBlk
+	}
+
 	if !useGoBlockValuePath {
 		// Void or fire-and-forget: discard the trailing value. genBlock's
 		// per-statement genStmt cleanup frees a heap trailing value, so a
 		// fire-and-forget value block (`go { "x"+"y" };`) does not leak.
 		c.genBlock(block)
+		// T1384: a void-failable block (`go! { work()!; }`, T==void) reaching
+		// the end without an escaping error stores the {ok=false} void aggregate
+		// so `<-t` sees success. (An error already stored its aggregate + branched
+		// to finalSuspBlk via the sink.) Plain-void and fire-and-forget paths
+		// (goFailable=false) are untouched.
+		if goFailable && c.block != nil && c.block.Term == nil {
+			c.storeGoResultAgg(c.wrapOk(nil, failAggTy))
+		}
 	} else {
 		// T0683: non-void awaited block — capture the trailing-expression
 		// value and store it into the caller-allocated G.result_ptr buffer.
 		// genBlockValue claims `result` and drops block locals after, so the
 		// value is safe to store here.
+		// T1384: for a failable block, a trailing bare failable call
+		// (`go! { produce(5) }`) must yield its auto-propagated success value as
+		// the block result rather than discard it — signal genBlockValue.
+		if goFailable {
+			c.goBlockTrailingWantValue = true
+		}
 		result := c.genBlockValue(block)
 		if result != nil && c.block != nil && c.block.Term == nil {
+			// T1384: for a failable task the buffer holds the {ok,value,err}
+			// aggregate — wrap the trailing success value as {ok=false, value,
+			// null}. The raw `result` is kept for the claim* calls below so heap
+			// payload ownership transfer is unchanged.
+			storeVal := result
+			if goFailable {
+				storeVal = c.wrapOk(result, failAggTy)
+			}
 			// B0109 null-check store pattern (mirrors genGoCallExpr): the
 			// caller allocates result_ptr for an awaited task. The null
 			// check is defensive — symmetric with the working call form.
@@ -19458,7 +19558,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 			c.block.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
 
 			typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(goResultLLVM))
-			storeResultBlk.NewStore(result, typedRP)
+			storeResultBlk.NewStore(storeVal, typedRP)
 			storeResultBlk.NewBr(afterStoreBlk)
 
 			c.block = afterStoreBlk
@@ -19490,6 +19590,12 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	// Clear panic exit block and coroutine return block after body generation
 	c.panicExitBlock = nil
 	c.coroutineReturnBlock = nil
+	// T1384: deactivate the failable-go-block sink before the shared tail (channel
+	// drops, final panic check, final suspend) so those stores don't route through
+	// it. Restored to the outer value in the restore block below.
+	c.inFailableGoBlock = false
+	c.failableGoBlockAggType = nil
+	c.failableGoBlockFinalSuspend = nil
 
 	// B0163: Emit cleanup for captured channel drop bindings registered before genBlock.
 	// genBlock only cleans up bindings added within its scope, so we must handle
@@ -19569,6 +19675,9 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.dropBindings = savedDropBindings         // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
+	c.inFailableGoBlock = savedInFailableGoBlock                     // T1384
+	c.failableGoBlockAggType = savedFailableGoBlockAggType           // T1384
+	c.failableGoBlockFinalSuspend = savedFailableGoBlockFinalSuspend // T1384
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
@@ -19604,7 +19713,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 		rpField := c.block.NewGetElementPtr(gTy, gPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-		if goIsVoid {
+		if goIsVoid && !goFailable {
 			// Void task: set result_ptr to sentinel (0x1) so goroutine_exit
 			// knows the receiver will free G (via <-task). Without this,
 			// goroutine_exit would free the G and the receiver would access
@@ -19616,6 +19725,9 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 			// coroutine body stores into and the <-task receiver loads +
 			// frees (mirrors genGoCallExpr). result_ptr != null also tells
 			// goroutine_exit not to free G (the receiver owns it).
+			// T1384: a void-failable task (`go! { work(); }`, T==void) also holds
+			// a real {i1,i8*} aggregate buffer (goResultLLVM), never the sentinel —
+			// the receive expects and frees it, matching the call form.
 			resultSize := constant.NewInt(irtypes.I64, int64(c.typeSize(goResultLLVM)))
 			resultBuf := c.block.NewCall(c.palAlloc, resultSize)
 			c.block.NewStore(resultBuf, rpField)

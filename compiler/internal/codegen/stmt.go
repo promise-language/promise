@@ -4950,8 +4950,16 @@ func (c *Compiler) emitEarlyDrops(stmt ast.Stmt) {
 func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCapture {
 	// Check if we need error capture: failable function, normal path, and at least
 	// one failable close binding in the range.
+	//
+	// T1387: also capture inside a failable `go! {}` body. There c.canError is
+	// false (the coroutine ramp returns i8*, not a failable aggregate), so without
+	// this a use-binding whose failable close() fails on the block's SUCCESS exit
+	// would take the suppress path (error dropped) and the goroutine would report
+	// {ok, value} instead of the error. Capturing here lets emitCloseErrCheck route
+	// the error into the goroutine's result aggregate (surfacing it at `<-t`),
+	// symmetric to a failable function propagating the close error via its return.
 	var cap *closeErrCapture
-	if c.canError && !errorInFlight {
+	if (c.canError || c.inFailableGoBlock) && !errorInFlight {
 		for i := len(c.scopeBindings) - 1; i >= fromIdx; i-- {
 			b := c.scopeBindings[i]
 			if b.kind == bindingClose && b.closeIsFailable {
@@ -5151,10 +5159,17 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 
 	c.block = errRetBlock
 	errVal := c.block.NewLoad(irtypes.I8Ptr, cap.val)
+	// T1388: this early error-exit does NOT clean up outer still-live bindings
+	// (bindings below the block's savedScopeLen) — they leak. Pre-existing and
+	// systemic across all three branches below (normal fn / generator / go-block);
+	// only manifests when an outer live binding coexists with a failing nested
+	// close. Tracked separately from T1387 (correctness of the go-block routing).
 	if c.inFailableGoBlock {
-		// T1384: a use-binding `close()` that fails inside a `go! {}` body routes
-		// its error into the goroutine's result aggregate (a `ret` is invalid in
-		// the coro ramp).
+		// T1384/T1387: a use-binding `close()` that fails inside a `go! {}` body
+		// routes its error into the goroutine's result aggregate so it surfaces at
+		// `<-t` (a `ret` is invalid in the coro ramp). Reached because T1387
+		// broadened emitScopeCleanup's cap-capture guard to fire in a failable
+		// go-block (where c.canError is false).
 		c.emitFailableGoBlockError(errVal)
 	} else if c.inGenerator && c.generatorCanError {
 		// B0023: store error to generator error_slot and branch to final suspend.

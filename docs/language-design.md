@@ -3689,6 +3689,22 @@ t := go! {
 };
 ```
 
+Inside a `go! { … }` block, explicit propagation with `?^` is equivalent to a bare failable call — both deliver the escaping error to the task's receiver:
+
+```promise
+t := go! {
+  user := fetchUser(id)?^;          // explicit; same effect as the bare `fetchUser(id)`
+  return enrich(user);
+};
+```
+
+Symmetrically with the call form, a `go! { … }` block whose body **cannot fail** (no failable operation escapes it) is a compile error — the `!` would be misleading:
+
+```promise
+t := go! { return score(board); };  // score() cannot fail
+//   ^ error: this goroutine's body cannot fail; spawn it with plain `go`
+```
+
 #### Receiving
 
 Receiving with `<-` is where a failable task's error surfaces. **A `<-` on a `failable_task[T]` is itself a failable operation** that yields `T` — semantically identical to calling a failable function — so it obeys the ordinary error rules of §7.2:
@@ -3717,6 +3733,16 @@ Receiving with `<-` is where a failable task's error surfaces. **A `<-` on a `fa
 
 Receiving from a plain `task[T]` is unchanged: an ordinary, non-failable receive.
 
+**`<-` consumes the task.** A `task[T]` / `failable_task[T]` is a single-owner handle, and the receive is its terminal operation: it moves the handle, delivers the result **exactly once**, and ends the handle's lifetime. Using a task after receiving it is the ordinary use-after-move error:
+
+```promise
+t := go! fetchUser(42);
+a := <-t;                            // consumes t
+b := <-t;                            // error: use of moved value `t`
+```
+
+This is unlike `<-ch` on a **channel**, which is a *repeatable* receive — a channel is a shared, multi-receive endpoint; a task is a one-shot result.
+
 **Operator binding — error operators apply to the receive, not the spawn.** Because the error appears at the receive, the error operators attach there. Writing one on the spawn is a compile error with a fix-it:
 
 ```promise
@@ -3726,6 +3752,17 @@ v := go! fetchUser(42)?!;
 ```
 
 So `go! f()?!`, `go! f()?^`, and `go! f() ? e { … }` are all rejected. The inline launch-await-handle form is `(<-go! f())?!` (the failable counterpart of the plain `<-go f()` await).
+
+**`select` over tasks.** A `failable_task[T]` may be awaited in a `select` arm. Selecting an arm **consumes** that task, and its binding is a **failable receive**: the goroutine's error surfaces in the arm and obeys §7.2 — auto-propagated in a failable function, or handled in the arm within a non-failable one:
+
+```promise
+select {
+  user := <-userTask { render(user); }   // failable receive — error propagates/handled here
+  <-timeout           { cancel(); }
+}
+```
+
+Tasks whose arm was **not** selected are not consumed and retain their obligation to be received or moved afterward (see below).
 
 #### Fire-and-forget must be non-failable
 
@@ -3743,7 +3780,33 @@ A plain `task[T]` (including `task[Void]`) may be discarded as before.
 
 #### `failable_task[T]` is a single-owner handle
 
-Like `task[T]`, a `failable_task[T]` is a **single-owner handle**: move-only, no `clone()`, and subject to the same non-cloneable-transitivity rules described above for `task[T]`. Its failability is part of its type, so it crosses field, collection, parameter, and return boundaries like any other type — `failable_task[int][]`, `Holder{ failable_task[int] t }`, `process(failable_task[int] t)` — and in every case must still be received (or moved to someone who will receive it) before it goes out of scope.
+Like `task[T]`, a `failable_task[T]` is a **single-owner handle**: move-only, no `clone()`, and subject to the same non-cloneable-transitivity rules described above for `task[T]`. Its failability is part of its type, so it crosses field, collection, parameter, and return boundaries like any other type — `failable_task[int][]`, `Holder{ failable_task[int] t }`, `process(failable_task[int] t)`.
+
+#### `failable_task[T]` is linear (must-use)
+
+A `task[T]` is droppable — an unreceived one may go out of scope (fire-and-forget). A `failable_task[T]` is **not**: it carries an error that must reach exactly one receiver, so it is a **must-use** value. Every `failable_task[T]` is *discharged* before its owner's scope ends, by either:
+
+- **receiving** it — `<-t` (consumes it), or
+- **moving** it onward — into a field, collection, argument, or `return`; the obligation transfers to the new owner.
+
+Letting one reach end of scope undischarged is a compile error:
+
+```promise
+{
+  t := go! fetchUser(42);
+}   // error: `t` is a failable task that was never received; its error must be
+    //        received (or the task moved to a receiver) before it goes out of scope
+```
+
+**Must-use is transitive.** A type that transitively owns a `failable_task[T]` — a field (`Holder{ failable_task[T] t }`), an enum payload, or a collection element (`failable_task[T][]`) — is itself must-use: it cannot be implicitly dropped, only **moved** onward or **drained**. Draining is the aggregate form of receive:
+
+- `<-tasks`, where `tasks : failable_task[T][]`, is a **failable** operation that consumes the collection, awaits every task, and yields `T[]` — succeeding only if all succeeded, else failing with the **first** error by index (§7.2). The remaining errors are discharged by the drain, not silently swallowed by a drop.
+- A user type holding a task field is discharged by moving it, or by destructuring out the field and receiving it.
+
+```promise
+handles := ids.map(id => go! fetchUser(id));  // handles : failable_task[User][]
+users := <-handles;                           // drain: awaits all, propagates first error, consumes handles
+```
 
 #### Summary
 
@@ -3755,9 +3818,13 @@ Like `task[T]`, a `failable_task[T]` is a **single-owner handle**: move-only, no
 | `go! f()` — `f` non-failable | **compile error** → use plain `go` |
 | `go { … }` | non-failable scope → `task[T]` (block handles its own errors) |
 | `go! { … }` | failable scope → `failable_task[T]` (escaping error captured) |
-| `<-t` — `t : task[T]` | non-failable receive → `T` |
-| `<-t` — `t : failable_task[T]` | **failable** receive → `T` (auto-propagate or handle per §7.2) |
+| `go! { … }` — body cannot fail | **compile error** → use plain `go` |
+| `<-t` — `t : task[T]` | non-failable receive → `T` (consumes `t`) |
+| `<-t` — `t : failable_task[T]` | **failable** receive → `T` (consumes `t`; auto-propagate or handle per §7.2) |
+| `<-tasks` — `tasks : failable_task[T][]` | **failable** drain → `T[]` (consumes `tasks`; first error by index) |
+| `<-task` in a `select` arm | **failable** receive → `T` (consumes the task; error surfaces in the arm) |
 | `(<-go! f())?!` | inline launch + await + panic-on-error |
+| `failable_task[T]` unreceived at scope end | **compile error** → must be received or moved (must-use) |
 | `go! f()` discarded | **compile error** → fire-and-forget must be non-failable |
 
 ### 17.3 Channels

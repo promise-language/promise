@@ -3607,6 +3607,13 @@ user := fetchUser(42)?^;
 
 `go` is an **expression** that launches a goroutine. A plain `go` returns a `task[T]`, where `T` is the result type of the block or call; the failable form `go!` returns a `failable_task[T]` (§17.2.1). The `<-` operator receives the result, suspending the current goroutine until it is ready.
 
+**Producing the result.** `go` takes either an expression or a block, and the two forms yield `T` differently:
+
+- **Expression form** — `go <expr>` (e.g. `go score(board)`): the spawned expression *is* the result; `T` is its type.
+- **Block form** — `go { … }`: the body is a goroutine *body* that yields its result with `return <expr>`, exactly like a function body. `T` is the type of the returned value, unified across all `return` paths.
+
+`T` is always **inferred** — from the expression, or from the block's `return` statements — and is never written at the spawn site; only *failability* is chosen there (`go` vs `go!`, §17.2.1). A block that yields no value on any path (every path is a bare `return;` or falls off the end) has `T = Void`. As in a value function, a bare trailing expression is **not** the result — a goroutine block produces a value only through `return` — and a bare `return;` on one path while another path returns a value is a compile error (*"missing return value (expected T)"*): every path of a value-producing body must return a value.
+
 The examples in this section spawn **non-failable** producers, so each yields a plain `task[T]`. Spawning a producer that can fail (a name ending in `!`, such as `fetchUser!`) uses `go!` and is covered in §17.2.1.
 
 ```promise
@@ -3614,6 +3621,13 @@ The examples in this section spawn **non-failable** producers, so each yields a 
 go {
   logAnalytics(event);
 };
+
+// Block form — the body yields its result with `return`
+sumT := go {
+  a := score(boardA);
+  return a * 2;                     // T = int, inferred from the return
+};
+doubled := <-sumT;
 
 // Value-returning task — `score` cannot fail, so `go` yields a plain task[int]
 task := go score(board);           // task : task[int]
@@ -3685,7 +3699,7 @@ go {
 // Failable block — an escaping error is captured into the task
 t := go! {
   user := fetchUser(42);            // auto-propagates into the task
-  return enrich(user);              // T = the block's result type
+  return enrich(user);              // yields the result — T = User (inferred)
 };
 ```
 
@@ -3819,6 +3833,8 @@ users := <-handles;                           // drain: awaits all, propagates f
 | `go { … }` | non-failable scope → `task[T]` (block handles its own errors) |
 | `go! { … }` | failable scope → `failable_task[T]` (escaping error captured) |
 | `go! { … }` — body cannot fail | **compile error** → use plain `go` |
+| `go { … }` / `go! { … }` block result | yielded by `return <expr>`; `T` inferred from the `return` paths (§17.2) |
+| bare `return;` on a value-producing path | **compile error** → every path must return a value |
 | `<-t` — `t : task[T]` | non-failable receive → `T` (consumes `t`) |
 | `<-t` — `t : failable_task[T]` | **failable** receive → `T` (consumes `t`; auto-propagate or handle per §7.2) |
 | `<-tasks` — `tasks : failable_task[T][]` | **failable** drain → `T[]` (consumes `tasks`; first error by index) |

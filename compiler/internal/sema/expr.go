@@ -175,6 +175,11 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	allowSliceType := c.sliceTypeAllowed
 	c.sliceTypeAllowed = false
 
+	// T1393: snapshot/clear the match-value-discarded signal so it applies only
+	// to the immediate expression (a match STATEMENT), not to nested sub-exprs.
+	discardMatchValue := c.matchValueDiscarded
+	c.matchValueDiscarded = false
+
 	var typ types.Type
 
 	switch e := expr.(type) {
@@ -318,7 +323,7 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = c.checkIfExpr(e, hint)
 
 	case *ast.MatchExpr:
-		typ = c.checkMatchExpr(e, hint)
+		typ = c.checkMatchExpr(e, hint, !discardMatchValue)
 
 	case *ast.LambdaExpr:
 		typ = c.checkLambdaExpr(e)
@@ -3230,13 +3235,13 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	c.checkBlock(e.Then)
 	c.closeScope()
 
-	thenType := c.blockValueType(e.Then)
+	thenType := c.blockValueType(e.Then, true)
 
 	c.openScope(e.Else, "if-else")
 	c.checkBlock(e.Else)
 	c.closeScope()
 
-	elseType := c.blockValueType(e.Else)
+	elseType := c.blockValueType(e.Else, true)
 
 	thenDiverges := c.blockAlwaysExits(e.Then)
 	elseDiverges := c.blockAlwaysExits(e.Else)
@@ -3245,7 +3250,7 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	// (`T`), the result is owned — a single dropflag cannot represent
 	// ownership that varies by arm, so the conservative choice is the
 	// owned form. Otherwise, prefer the then-branch type.
-	joined := c.joinBranchTypes(thenType, elseType, e.Pos())
+	joined := c.joinBranchTypes(thenType, elseType, e.Pos(), true)
 
 	// T1335: a reachable (non-diverging) arm produces no value. In value position
 	// (a non-void expected type is in play) the if-expression cannot satisfy that
@@ -3281,7 +3286,11 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 // T0438's Rules 8b/8c by gating the decay on `IsCopy(elem)`. For non-Copy
 // elements we emit a sema error and continue with the owned form to avoid
 // cascading "cannot assign T& to T" diagnostics.
-func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos) types.Type {
+// report controls whether genuinely incompatible concrete arms (e.g. int vs
+// string) are diagnosed. It is false when the enclosing if/match is a STATEMENT
+// whose value is discarded — such arms never merge into a single value, so no
+// invalid phi is emitted and no diagnostic is warranted (T1393).
+func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos, report bool) types.Type {
 	if a == nil {
 		return b
 	}
@@ -3345,10 +3354,138 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos) types.Type {
 		}
 		return a
 	}
+
+	// T1393: a `none` arm is left to the enclosing Optional context (return
+	// type / typed binding), which wraps the join into `T?`. joinBranchTypes
+	// receives the bare (T, none) pair even in that context, so preserve the
+	// concrete side here rather than rejecting it as incompatible. (A bare
+	// `if c { T } else { none }` with no Optional context is a distinct,
+	// pre-existing gap — valid `T?` inference that needs codegen wrapping.)
+	if isNoneType(a) {
+		return b
+	}
+	if isNoneType(b) {
+		return a
+	}
+
+	// Arm types unify when one is assignable to the other; pick the wider
+	// (assignable-to) side so subtype/`is` and structural arms still join and
+	// numeric-literal/optional widening is honored. Identical types (incl.
+	// `void`+`void`, where both arms produce no value) join here too.
+	if types.AssignableTo(b, a) {
+		return a
+	}
+	if types.AssignableTo(a, b) {
+		return b
+	}
+	// Sibling subtypes (e.g. `if c { Dog() } else { Cat() }` where both are
+	// `is Animal`) share an LLVM value layout and must join to their nearest
+	// common ancestor rather than error.
+	if lub := c.commonBranchAncestor(a, b); lub != nil {
+		return lub
+	}
+
+	// T1393/T1015: when either arm type is (or contains) an unbound type
+	// parameter, real compatibility cannot be decided here — the generic body
+	// is checked once with `T` unbound, so a `T` arm and a concrete arm (e.g.
+	// `int`) look incompatible even though they coincide under the actual
+	// substitution (Box[int] makes both `int`). Defer to monomorphization,
+	// which re-derives the join with concrete types. Keep the concrete side so
+	// the surrounding inference still has a usable type.
+	if types.ContainsTypeParam(a) || types.ContainsTypeParam(b) {
+		if isVoidType(a) {
+			return b
+		}
+		return a
+	}
+
+	// T1393: a `void`/non-void MISMATCH (one arm produces a value, the other
+	// does not). In statement (discarded) position codegen builds a valid merge
+	// phi by zero-filling the void arm, so it unifies with the value arm. In
+	// value position (`report`) — binding, returning, or passing the result —
+	// this is a real error: an arm produces no value. This is the ONLY
+	// incompatibility the discard flag is permitted to suppress, precisely
+	// because codegen CAN lower a void+value merge; two incompatible non-void
+	// values (below) it cannot.
+	if isVoidType(a) || isVoidType(b) {
+		if report {
+			c.errorf(pos, "if/match arms produce incompatible types '%s' and '%s'", a, b)
+		}
+		if isVoidType(a) {
+			return b
+		}
+		return a
+	}
+
+	// Genuinely incompatible non-void arms (e.g. int vs string) always produce
+	// an invalid merge phi in codegen — the if/match lowers a phi over the arm
+	// values regardless of whether its result is used, so discarding the value
+	// does not avoid the crash. Reject them unconditionally so the mismatch
+	// surfaces as a clean sema diagnostic instead of crashing opt (T1393).
+	c.errorf(pos, "if/match arms produce incompatible types '%s' and '%s'", a, b)
 	return a
 }
 
-func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
+// isNoneType reports whether t is the built-in `none` literal type.
+func isNoneType(t types.Type) bool {
+	n, ok := t.(*types.Named)
+	return ok && n == types.TypNone
+}
+
+// isVoidType reports whether t is the built-in `void` type (an arm that
+// produces no value).
+func isVoidType(t types.Type) bool {
+	n, ok := t.(*types.Named)
+	return ok && n == types.TypVoid
+}
+
+// commonBranchAncestor returns the nearest supertype (walking a's then b's
+// parent chains) that the other arm type is assignable to, or nil when the two
+// arm types share no common ancestor. Used by joinBranchTypes to unify sibling
+// subtypes without special-casing inheritance in the base case (T1393).
+func (c *Checker) commonBranchAncestor(a, b types.Type) types.Type {
+	if an := semaExtractNamed(a); an != nil {
+		for _, anc := range collectAncestors(an) {
+			if types.AssignableTo(b, anc) {
+				return anc
+			}
+		}
+	}
+	if bn := semaExtractNamed(b); bn != nil {
+		for _, anc := range collectAncestors(bn) {
+			if types.AssignableTo(a, anc) {
+				return anc
+			}
+		}
+	}
+	return nil
+}
+
+// collectAncestors returns n's transitive parent types in nearest-first order
+// (breadth-first), excluding n itself.
+func collectAncestors(n *types.Named) []types.Type {
+	var out []types.Type
+	seen := map[*types.Named]bool{n: true}
+	queue := []*types.Named{n}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, pr := range cur.Parents() {
+			if pr.Named == nil || seen[pr.Named] {
+				continue
+			}
+			seen[pr.Named] = true
+			out = append(out, pr.Named)
+			queue = append(queue, pr.Named)
+		}
+	}
+	return out
+}
+
+// report is false when the match is a STATEMENT whose value is discarded — its
+// arms need not unify to one value type, so incompatible arms are not diagnosed
+// (T1393). Value-position matches pass report=true.
+func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type, report bool) types.Type {
 	errsBefore := len(c.errors)
 	subjectType := c.checkExpr(e.Subject)
 
@@ -3409,7 +3546,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 			if !armDiverges {
 				// B0126: extract block result type from the last expression
 				// statement, so match expressions with block arms are correctly typed.
-				armType = c.blockValueType(arm.Block)
+				armType = c.blockValueType(arm.Block, report)
 			}
 		}
 
@@ -3428,7 +3565,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 			resultType = armType
 		} else {
 			// T0381: unify ref/owned mismatches across arms.
-			resultType = c.joinBranchTypes(resultType, armType, e.Pos())
+			resultType = c.joinBranchTypes(resultType, armType, e.Pos(), report)
 		}
 	}
 
@@ -3470,7 +3607,10 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type) types.Type {
 // last expression statement. Returns nil if the block doesn't end with an
 // expression. Handles IfStmt as the last statement by recursing into its
 // then body.
-func (c *Checker) blockValueType(block *ast.Block) types.Type {
+// report is forwarded to joinBranchTypes for a trailing if/else: false when the
+// enclosing block's value is discarded, so incompatible arms are not diagnosed
+// (T1393).
+func (c *Checker) blockValueType(block *ast.Block, report bool) types.Type {
 	if block == nil || len(block.Stmts) == 0 {
 		return nil
 	}
@@ -3479,7 +3619,31 @@ func (c *Checker) blockValueType(block *ast.Block) types.Type {
 		return c.info.Types[es.Expr]
 	}
 	if ifS, ok := last.(*ast.IfStmt); ok && ifS.Else != nil {
-		return c.blockValueType(ifS.Body)
+		// T1393: an if/else statement in trailing position produces a value
+		// (codegen builds a merge phi via genIfStmtValue). Unify BOTH arm value
+		// types — not just the then-body — so incompatible arms are rejected
+		// here instead of emitting an invalid phi that crashes opt.
+		thenType := c.blockValueType(ifS.Body, report)
+		elseType := c.stmtValueType(ifS.Else, report)
+		return c.joinBranchTypes(thenType, elseType, ifS.Pos(), report)
+	}
+	return nil
+}
+
+// stmtValueType returns the value type of an if/else-branch statement — a
+// `*ast.Block` (plain else) or a nested `*ast.IfStmt` (else-if chain). Returns
+// nil for any other statement. Used by blockValueType to unify else-if chains.
+func (c *Checker) stmtValueType(s ast.Stmt, report bool) types.Type {
+	switch st := s.(type) {
+	case *ast.Block:
+		return c.blockValueType(st, report)
+	case *ast.IfStmt:
+		if st.Else == nil {
+			return nil
+		}
+		thenType := c.blockValueType(st.Body, report)
+		elseType := c.stmtValueType(st.Else, report)
+		return c.joinBranchTypes(thenType, elseType, st.Pos(), report)
 	}
 	return nil
 }
@@ -4158,7 +4322,7 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		// expression statement, or a value-producing if/else in statement
 		// position. Mirrors codegen's genBlockValue (ExprStmt + IfStmt) via the
 		// shared blockValueType helper (T1389).
-		innerType = c.blockValueType(e.Block)
+		innerType = c.blockValueType(e.Block, true)
 		// Block form: check captured variables are sendable
 		c.checkGoBlockSendable(e)
 	}

@@ -1,0 +1,110 @@
+// T1393: joinBranchTypes must still unify VALID if/match value-arm types after
+// the incompatible-type rejection was added. These cover the cases the fix must
+// preserve: sibling subtypes joining to a common ancestor, child/parent arms
+// joining to the parent, and a hinted-`none` arm producing an Optional.
+type Animal {
+  get sound string {
+    return "?";
+  }
+}
+type Dog is Animal {
+  get sound string {
+    return "woof";
+  }
+}
+type Cat is Animal {
+  get sound string {
+    return "meow";
+  }
+}
+
+// Sibling subtypes (both `is Animal`) unify to their common ancestor Animal.
+test_sibling_subtypes_join_to_ancestor() `test {
+  bool bark = true;
+  Animal a = if bark {
+    Dog()
+  } else {
+    Cat()
+  };
+  assert(a.sound == "woof", "sibling arms join to Animal");
+}
+
+// Child/parent arms unify to the parent type.
+test_child_parent_join_to_parent() `test {
+  bool asDog = false;
+  Animal a = if asDog {
+    Dog()
+  } else {
+    Animal()
+  };
+  assert(a.sound == "?", "child/parent arms join to Animal");
+}
+
+// A hinted-`none` arm still compiles and the concrete (present) arm evaluates
+// correctly — the incompatible-type rejection must NOT fire on a `(T, none)`
+// pair. (The none-branch-TAKEN path is a distinct pre-existing codegen gap:
+// `T?` inference over a `none` arm needs per-arm wrapping — tracked separately.)
+test_hinted_none_arm_present_branch() `test {
+  int x = 3;
+  int? v = if x > 0 {
+    x * 2
+  } else {
+    none
+  };
+  assert(v! == 6, "none-arm join yields the concrete present value");
+}
+
+// A trailing if-STATEMENT with an `else if` chain, used as a block value, must
+// unify EVERY arm (then, else-if, else). All arms are `int` here, so the join
+// succeeds and the selected arm evaluates. Exercises the recursive
+// blockValueType/stmtValueType else-if path for the VALID (non-error) case.
+test_else_if_chain_valid_join() `test {
+  int x = 4;
+  int y = if x > 0 {
+    if x > 5 {
+      1
+    } else if x > 3 {
+      2
+    } else {
+      3
+    }
+  } else {
+    0
+  };
+  assert(y == 2, "else-if chain arms unify to int and pick the matching arm");
+}
+
+// Three-level hierarchy: Circle and Square are siblings under Shape2D, which is
+// itself a Shape. Joining two Shape2D siblings walks past the immediate parent
+// into the grandparent chain (collectAncestors BFS queue expansion) and selects
+// the NEAREST common ancestor (Shape2D, not Shape).
+type Shape {
+  get name string {
+    return "shape";
+  }
+}
+type Shape2D is Shape {
+  get name string {
+    return "shape2d";
+  }
+}
+type Circle is Shape2D {
+  get name string {
+    return "circle";
+  }
+}
+type Square is Shape2D {
+  get name string {
+    return "square";
+  }
+}
+
+test_sibling_join_to_nearest_grandparent_chain() `test {
+  bool round = true;
+  Shape2D s = if round {
+    Circle()
+  } else {
+    Square()
+  };
+  assert(s.name == "circle", "siblings join to nearest common ancestor Shape2D");
+}

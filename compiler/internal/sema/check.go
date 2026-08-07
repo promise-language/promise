@@ -30,6 +30,7 @@ type Checker struct {
 	lambdaMove          bool                             // true if current lambda uses `move` keyword
 	typeHint            types.Type                       // expected type for numeric literal adaptation (propagated through arithmetic)
 	sliceTypeAllowed    bool                             // T0685: bare `T[]` (SliceTypeExpr) is a type ref, not a value — only legitimate as a CallExpr.Callee (`int[]()`) or MemberExpr.Target (`int[].filled(...)`); snapshot/cleared at checkExpr entry like typeHint, granted by the two trusted call sites
+	matchValueDiscarded bool                             // T1393: true when the immediate expression is a match STATEMENT (ExprStmt subject) whose value is discarded — its arms need not unify to a single value type, so joinBranchTypes must not report incompatible-arm errors. Snapshot/cleared at checkExpr entry like typeHint.
 	inUnaryNeg          bool                             // true when checking operand of unary negation (for signed suffix range check)
 	inGenerator         bool                             // true when checking a generator function body
 	generatorElemType   types.Type                       // T from stream[T] or Iterator[T] return type

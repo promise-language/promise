@@ -121,12 +121,14 @@ func expectNoErrors(t *testing.T, errs []error) {
 	}
 }
 
-// expectNoErrorContaining fails if any error contains substr.
+// expectNoErrorContaining asserts that no error's message contains substr.
+// Unlike expectNoErrors it tolerates unrelated diagnostics — used when a case
+// legitimately produces other errors but must NOT trigger a specific one.
 func expectNoErrorContaining(t *testing.T, errs []error, substr string) {
 	t.Helper()
 	for _, e := range errs {
 		if strings.Contains(e.Error(), substr) {
-			t.Errorf("did not expect error containing %q, got %v", substr, errs)
+			t.Errorf("expected no error containing %q, got %v", substr, errs)
 			return
 		}
 	}
@@ -5581,10 +5583,164 @@ func TestMatchPatternBindingTypeMismatch(t *testing.T) {
 			int y = x;
 		}
 	`)
-	// The second arm returns string, but we assign to int
-	// Currently only first arm type is used for result, so this checks the binding type
-	// The key point is that v: int and m: string are correctly typed
+	// T1393: the first arm binds v: int and the second binds m: string, so the
+	// match arms produce incompatible value types. This must be rejected in sema
+	// rather than silently inferring the first arm's type (int) and emitting an
+	// invalid merge phi (i64 vs ptr) that crashes opt at codegen.
+	expectError(t, errs, "if/match arms produce incompatible types 'int' and 'string'")
+}
+
+// T1393: an if-EXPRESSION in value position with incompatible arm types must be
+// rejected in sema rather than inferring the then-arm type and emitting an
+// invalid merge phi (i64 vs ptr) that crashes opt.
+func TestIfExprIncompatibleArmTypes(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 5;
+			v := if x > 0 { x * 3 } else { "str" };
+		}
+	`)
+	expectError(t, errs, "if/match arms produce incompatible types 'int' and 'string'")
+}
+
+// T1393: a trailing if/else STATEMENT used as a block value (codegen builds a
+// merge phi via genIfStmtValue) must have its arm types unified in sema. The
+// nested form exercises the recursive blockValueType/stmtValueType path.
+func TestIfStmtBlockValueIncompatibleArmTypes(t *testing.T) {
+	errs := checkErrs(t, `
+		f(int x) int {
+			y := if x > 0 { if x > 5 { 1 } else { "s" } } else { 2 };
+			return y;
+		}
+	`)
+	expectError(t, errs, "if/match arms produce incompatible types 'int' and 'string'")
+}
+
+// T1393: a match used as a STATEMENT discards its value, so heterogeneous arm
+// value-types (here void from `p()` vs int from `1`) must NOT be reported as
+// incompatible — no merge phi is emitted for a discarded match. Mirrors the
+// real json.pr string-escape match that regressed during T1393 development.
+func TestMatchStatementDiscardedArmsNoError(t *testing.T) {
+	errs := checkErrs(t, `
+		p() {}
+		test(int x) {
+			match x {
+				0 => { p(); },
+				_ => { 1 },
+			};
+		}
+	`)
 	expectNoErrors(t, errs)
+}
+
+// T1393: discard tolerance extends ONLY to void arms (codegen zero-fills them
+// into a valid merge phi). A trailing if/else STATEMENT with genuinely
+// incompatible non-void arms (int vs string) lowers its OWN merge phi
+// regardless of whether the enclosing match value is discarded, so it still
+// crashes opt. It must therefore be rejected in sema even inside a discarded
+// match arm — the discard flag must not suppress this.
+func TestMatchStatementDiscardedTrailingIfIncompatibleErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		test(int x) {
+			match x {
+				0 => { if x > 0 { 1 } else { "s" } },
+				_ => { x },
+			};
+		}
+	`)
+	expectError(t, errs, "if/match arms produce incompatible types 'int' and 'string'")
+}
+
+// T1393: an if-EXPRESSION in VALUE position where one arm produces a value and
+// the other produces none (`void`) is a real error — the binding cannot receive
+// a value from the void arm. This exercises joinBranchTypes' void/non-void
+// branch with report=true (an if-expression always reports; only bare match
+// STATEMENTS get discard tolerance).
+func TestIfExprVoidArmValuePositionErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		p() {}
+		test(int x) {
+			v := if x > 0 { p() } else { 1 };
+		}
+	`)
+	expectError(t, errs, "if/match arms produce incompatible types 'void' and 'int'")
+}
+
+// T1393: a `none` arm in the THEN position (not just the else) must be preserved
+// by joinBranchTypes rather than rejected as incompatible — the concrete other
+// arm's type wins so the enclosing Optional context can wrap it. Exercises the
+// isNoneType(a) branch (the existing hinted-none e2e only covers none in else).
+func TestIfExprNoneThenArmNotRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		test(int x) {
+			int? v = if x > 0 { none } else { x * 2 };
+		}
+	`)
+	expectNoErrorContaining(t, errs, "if/match arms produce incompatible types")
+}
+
+// T1393: an else-if chain used as a block value (trailing if-STATEMENT with an
+// `else if` continuation) must have every arm unified. Exercises stmtValueType's
+// recursive *ast.IfStmt case, which the flat trailing-if test does not reach.
+func TestIfStmtElseIfChainIncompatibleArmTypes(t *testing.T) {
+	errs := checkErrs(t, `
+		f(int x) int {
+			y := if x > 0 {
+				if x > 5 { 1 } else if x > 3 { 2 } else { "s" }
+			} else { 0 };
+			return y;
+		}
+	`)
+	expectError(t, errs, "if/match arms produce incompatible types 'int' and 'string'")
+}
+
+// T1393: a bare match STATEMENT whose two arms produce incompatible NON-void
+// values (int vs string) is rejected even though the match value is discarded —
+// codegen lowers a merge phi over the arm values regardless of use, so the
+// mismatch would crash opt. The discard flag suppresses only void arms, not two
+// incompatible non-void values. Exercises the unconditional final errorf under
+// report=false.
+func TestMatchStatementDiscardedNonVoidIncompatibleErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		test(int x) {
+			match x {
+				0 => { 1 },
+				_ => { "s" },
+			};
+		}
+	`)
+	expectError(t, errs, "if/match arms produce incompatible types 'int' and 'string'")
+}
+
+// T1393: sibling subtypes (both `is Animal`) are neither assignable to each
+// other, so joinBranchTypes falls through to commonBranchAncestor, which walks
+// Dog's parent chain and unifies to Animal — no incompatible-type error.
+func TestIfExprSiblingSubtypesJoinToAncestor(t *testing.T) {
+	errs := checkErrs(t, `
+		type Animal { get sound string { return "?"; } }
+		type Dog is Animal { get sound string { return "woof"; } }
+		type Cat is Animal { get sound string { return "meow"; } }
+		test(bool b) {
+			Animal a = if b { Dog() } else { Cat() };
+		}
+	`)
+	expectNoErrorContaining(t, errs, "if/match arms produce incompatible types")
+}
+
+// T1393: a three-level hierarchy forces commonBranchAncestor to walk past the
+// immediate parent into the grandparent chain (collectAncestors BFS queue
+// expansion), selecting the NEAREST common ancestor Shape2D.
+func TestIfExprSiblingsJoinToNearestGrandparentChain(t *testing.T) {
+	errs := checkErrs(t, `
+		type Shape { get name string { return "shape"; } }
+		type Shape2D is Shape { get name string { return "shape2d"; } }
+		type Circle is Shape2D { get name string { return "circle"; } }
+		type Square is Shape2D { get name string { return "square"; } }
+		test(bool b) {
+			Shape2D s = if b { Circle() } else { Square() };
+		}
+	`)
+	expectNoErrorContaining(t, errs, "if/match arms produce incompatible types")
 }
 
 // --- Unreachable Code Tests ---

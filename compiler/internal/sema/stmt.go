@@ -39,6 +39,11 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		c.checkRaiseStmt(s)
 
 	case *ast.ExprStmt:
+		// T1393: an expression statement discards its value. Signal this so a
+		// bare match STATEMENT (`match x { ... }`) does not require its arms to
+		// unify to a single value type — checkExpr snapshots and clears the flag
+		// so it applies only to the immediate expression.
+		c.matchValueDiscarded = true
 		c.checkExpr(s.Expr)
 		c.checkExprStmtFailable(s)
 

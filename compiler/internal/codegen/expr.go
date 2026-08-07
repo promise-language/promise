@@ -14046,7 +14046,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 			// Clean up capture bindings before returning
 			if len(c.scopeBindings) > 0 {
 				cap := c.emitScopeCleanup(0, false)
-				c.emitCloseErrCheck(cap)
+				c.emitCloseErrCheck(cap, 0)
 			}
 			c.block.NewRet(val)
 		}
@@ -14057,7 +14057,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		c.emitLambdaWritebacks()
 		if len(c.scopeBindings) > 0 {
 			cap := c.emitScopeCleanup(0, false)
-			c.emitCloseErrCheck(cap)
+			c.emitCloseErrCheck(cap, 0)
 		}
 		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
 			c.block.NewRet(nil)

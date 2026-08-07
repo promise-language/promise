@@ -278,3 +278,244 @@ test_failable_init_heap_field_no_leak() `test {
   int result = failable_init_heap_field()?!;
   assert(result == 6, "failable init of a resource with a heap string field; no leak on close");
 }
+
+// --- T1388: close-error early exit must clean up OUTER live bindings ---
+//
+// A failable use-binding close() that fails on a block's NORMAL exit takes an
+// early error-return. Before T1388 that early exit skipped scope cleanup for any
+// still-live OUTER bindings (those below the block's floor), leaking them. Each
+// test below pairs a heap-allocating OUTER droppable with a nested failing close
+// and relies on the harness's zero-leak enforcement to prove the outer binding is
+// freed on the error path.
+
+// A droppable heap type (explicit drop() → heap-allocated instance, not a value
+// type). If its drop() never runs, the instance malloc leaks.
+type T1388Droppable {
+  int id;
+  drop(~this) {
+  }
+}
+
+// Outer droppable + nested block whose use-close fails on exit (the item's first
+// repro). floor = block savedScopeLen; prefix [0, floor) holds `d`.
+outer_droppable_nested_close!() int {
+  d := T1388Droppable(id: 1);
+  {
+    use r := FailResource(id: 2);
+  }
+  // r.close() fails at block exit → early exit
+  return d.id;
+}
+
+test_t1388_outer_droppable_nested_close() `test {
+  bool caught = false;
+  int v = outer_droppable_nested_close()? e {
+    caught = true;
+    -1
+  };
+  assert(caught, "close error surfaces past the outer droppable");
+}
+
+// Two enclosing blocks + a function-level droppable — exercises full prefix
+// unwind (both `d` and `e` must be dropped on the innermost close-error exit).
+deep_nesting_close!() int {
+  d := T1388Droppable(id: 1);
+  {
+    e := T1388Droppable(id: 2);
+    {
+      use r := FailResource(id: 3);
+    }
+    // fails → early exit past both d and e
+    return e.id;
+  }
+}
+
+test_t1388_deep_nesting_close() `test {
+  bool caught = false;
+  deep_nesting_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past two nested outer droppables");
+}
+
+// if-let body: outer droppable + failing close inside the unwrap body (covers the
+// unwrapScopeLen floor). The unwrapped `v` sits in the cleaned suffix; `d` is the
+// outer prefix binding.
+some_positive(int x) int? {
+  if x > 0 {
+    return x;
+  }
+  return none;
+}
+
+iflet_body_close!() int {
+  d := T1388Droppable(id: 1);
+  if v := some_positive(5) {
+    use r := FailResource(id: 2); // fails at if-let body exit → early exit
+  }
+  return d.id;
+}
+
+test_t1388_iflet_body_close() `test {
+  bool caught = false;
+  iflet_body_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable from if-let body");
+}
+
+// while-let body: outer droppable + failing close inside the loop body (covers the
+// while-let unwrapScopeLen floor). The subject yields Some once (n>0), so the body
+// runs and its use-close fails on the first iteration end; if the close somehow
+// succeeded, n is reset to 0 and the loop terminates.
+whilelet_body_close!() int {
+  d := T1388Droppable(id: 1);
+  n := 1;
+  while v := some_positive(n) {
+    n = 0;
+    use r := FailResource(id: 2); // fails at body exit → early exit
+  }
+  return d.id;
+}
+
+test_t1388_whilelet_body_close() `test {
+  bool caught = false;
+  whilelet_body_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable from while-let body");
+}
+
+// Loop break: outer droppable declared before the loop + failing close in the loop
+// body, then `break` (covers the loopScopeDepth floor). The break's cleanup closes
+// `r` (fails) → early exit that must still drop the outer `d`.
+loop_break_close!() int {
+  d := T1388Droppable(id: 1);
+  i := 0;
+  while i < 3 {
+    use r := FailResource(id: 2); // break-time close fails → early exit
+    break;
+  }
+  return d.id;
+}
+
+test_t1388_loop_break_close() `test {
+  bool caught = false;
+  loop_break_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable on loop break");
+}
+
+// Loop continue: same shape, but `continue` drives the close (also loopScopeDepth
+// floor). A counter bounds the loop so it terminates if the close somehow succeeds.
+loop_continue_close!() int {
+  d := T1388Droppable(id: 1);
+  i := 0;
+  while i < 3 {
+    i = i + 1;
+    use r := FailResource(id: 2); // continue-time close fails → early exit
+    continue;
+  }
+  return d.id;
+}
+
+test_t1388_loop_continue_close() `test {
+  bool caught = false;
+  loop_continue_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable on loop continue");
+}
+
+// Block-value form: an if-expression arm holds a failing use-close, with an
+// outer droppable declared before the assignment (covers the genBlockValue
+// savedScopeLen floor — a distinct call site from the statement-block genBlock).
+// The arm's `r.id` is the suffix result; `d` is the outer prefix binding.
+blockvalue_close!() int {
+  d := T1388Droppable(id: 1);
+  x := if true {
+    use r := FailResource(id: 2); // fails at arm exit → early exit past `d`
+    r.id
+  } else {
+    0
+  };
+  return d.id + x;
+}
+
+test_t1388_blockvalue_close() `test {
+  bool caught = false;
+  blockvalue_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable from a block-value arm");
+}
+
+// Select case body: an outer droppable + a ready channel whose select case body
+// holds a failing use-close (covers the genSelectStmt savedScopeLen floor). The
+// channel is pre-loaded so the case is immediately ready (no blocking), then the
+// case body's use-close fails at case-body exit → early exit that must drop `d`.
+select_case_close!() int {
+  d := T1388Droppable(id: 1);
+  ch := channel[int](capacity: 1);
+  ch.send(7);
+  select {
+    v := <-ch:
+      use r := FailResource(id: 2); // fails at case-body exit → early exit past `d`
+  }
+  return d.id;
+}
+
+test_t1388_select_case_close() `test {
+  bool caught = false;
+  select_case_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable from a select case body");
+}
+
+// Select default body: an outer droppable + a select whose (empty) channel makes
+// the default clause run, and whose default body holds a failing use-close
+// (covers the genSelectStmt default-clause savedScopeLen floor — a distinct
+// emission site from the case body). The empty channel forces the default.
+select_default_close!() int {
+  d := T1388Droppable(id: 1);
+  ch := channel[int](capacity: 1);
+  select {
+    v := <-ch:
+    default:
+      use r := FailResource(id: 2); // fails at default-body exit → early exit past `d`
+  }
+  return d.id;
+}
+
+test_t1388_select_default_close() `test {
+  bool caught = false;
+  select_default_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable from a select default body");
+}
+
+// For-in over a channel: an outer droppable + a for-in-channel loop whose body
+// holds a failing use-close (covers the genForInChannel bodyScopeStart floor).
+// The channel yields one value then closes; the first iteration's use-close fails
+// at body exit → early exit that must drop `d`.
+forin_channel_close!() int {
+  d := T1388Droppable(id: 1);
+  ch := channel[int](capacity: 1);
+  ch.send(7);
+  ch.close();
+  for v in ch {
+    use r := FailResource(id: 2); // fails at loop-body exit → early exit past `d`
+  }
+  return d.id;
+}
+
+test_t1388_forin_channel_close() `test {
+  bool caught = false;
+  forin_channel_close()? e {
+    caught = true;
+  };
+  assert(caught, "close error surfaces past outer droppable from a for-in-channel body");
+}

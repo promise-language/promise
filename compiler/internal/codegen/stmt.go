@@ -42,7 +42,7 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	// Emit cleanup calls for scope bindings added in this block (fall-through exit)
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
 		cap := c.emitScopeCleanup(savedScopeLen, false)
-		c.emitCloseErrCheck(cap)
+		c.emitCloseErrCheck(cap, savedScopeLen)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 	c.heapTemps = savedHeapTemps
@@ -894,7 +894,7 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 	}
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
 		cap := c.emitScopeCleanup(savedScopeLen, false)
-		c.emitCloseErrCheck(cap)
+		c.emitCloseErrCheck(cap, savedScopeLen)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 	c.blockValueOwnedResult = blockOwned   // T1107
@@ -5148,7 +5148,15 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 
 // emitCloseErrCheck checks a captured close error and, if set, returns it from
 // the current failable function. Otherwise, continues in a new block.
-func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
+//
+// outerFloor is the same index passed to the preceding
+// emitScopeCleanup(outerFloor, false): that call cleaned only the block-local
+// suffix [outerFloor, end). The error path below escapes the function (return /
+// generator-error / go-block-error), skipping the enclosing scope's own cleanup
+// of the outer prefix [0, outerFloor). T1388: unwind that prefix here with
+// errorInFlight=true before escaping, mirroring the raise/?^ paths — otherwise
+// still-live outer bindings leak.
+func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture, outerFloor int) {
 	if cap == nil {
 		return
 	}
@@ -5158,6 +5166,16 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 	c.block.NewCondBr(flag, errRetBlock, contBlock)
 
 	c.block = errRetBlock
+	// T1388: clean the outer prefix [0, outerFloor) that this early exit would
+	// otherwise skip. The suffix [outerFloor, end) was already cleaned before the
+	// branch, so union = [0, end) with no overlap. errorInFlight=true suppresses
+	// any secondary close error among the outer bindings ("first close error wins").
+	if outerFloor > 0 {
+		savedBindings := c.scopeBindings
+		c.scopeBindings = c.scopeBindings[:outerFloor]
+		c.emitScopeCleanup(0, true)
+		c.scopeBindings = savedBindings
+	}
 	errVal := c.block.NewLoad(irtypes.I8Ptr, cap.val)
 	// T1388: this early error-exit does NOT clean up outer still-live bindings
 	// (bindings below the block's savedScopeLen) — they leak. Pre-existing and
@@ -11355,7 +11373,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if len(c.scopeBindings) > 0 {
 		closeCap = c.emitScopeCleanup(0, false)
 	}
-	c.emitCloseErrCheck(closeCap)
+	c.emitCloseErrCheck(closeCap, 0)
 
 	if c.canError {
 		resultType := c.currentResultType()
@@ -13195,7 +13213,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	// respective base depths (which include this binding).
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > unwrapScopeLen {
 		cap := c.emitScopeCleanup(unwrapScopeLen, false)
-		c.emitCloseErrCheck(cap)
+		c.emitCloseErrCheck(cap, unwrapScopeLen)
 	}
 	c.scopeBindings = c.scopeBindings[:unwrapScopeLen]
 
@@ -13437,7 +13455,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// B0215: Emit drop for the unwrapped value at iteration end (fall-through).
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > unwrapScopeLen {
 		cap := c.emitScopeCleanup(unwrapScopeLen, false)
-		c.emitCloseErrCheck(cap)
+		c.emitCloseErrCheck(cap, unwrapScopeLen)
 	}
 	c.scopeBindings = c.scopeBindings[:unwrapScopeLen]
 
@@ -14187,7 +14205,7 @@ func (c *Compiler) genBreakStmt() {
 		// Close use bindings added within the loop body
 		if len(c.scopeBindings) > c.loopScopeDepth {
 			cap := c.emitScopeCleanup(c.loopScopeDepth, false)
-			c.emitCloseErrCheck(cap)
+			c.emitCloseErrCheck(cap, c.loopScopeDepth)
 		}
 		c.block.NewBr(c.breakTarget)
 	}
@@ -14199,7 +14217,7 @@ func (c *Compiler) genContinueStmt() {
 		// Close use bindings added within the loop body
 		if len(c.scopeBindings) > c.loopScopeDepth {
 			cap := c.emitScopeCleanup(c.loopScopeDepth, false)
-			c.emitCloseErrCheck(cap)
+			c.emitCloseErrCheck(cap, c.loopScopeDepth)
 		}
 		c.block.NewBr(c.continueTarget)
 	}
@@ -15606,7 +15624,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	if c.block != nil && c.block.Term == nil {
 		if len(c.scopeBindings) > bodyScopeStart {
 			cap := c.emitScopeCleanup(bodyScopeStart, false)
-			c.emitCloseErrCheck(cap)
+			c.emitCloseErrCheck(cap, bodyScopeStart)
 		}
 		c.emitYieldCheck()
 		c.block.NewBr(headerBlock)
@@ -16313,7 +16331,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		}
 		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
 			cap := c.emitScopeCleanup(savedScopeLen, false)
-			c.emitCloseErrCheck(cap)
+			c.emitCloseErrCheck(cap, savedScopeLen)
 		}
 		c.scopeBindings = c.scopeBindings[:savedScopeLen]
 		if c.block != nil && c.block.Term == nil {
@@ -16334,7 +16352,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		}
 		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
 			cap := c.emitScopeCleanup(savedScopeLen, false)
-			c.emitCloseErrCheck(cap)
+			c.emitCloseErrCheck(cap, savedScopeLen)
 		}
 		c.scopeBindings = c.scopeBindings[:savedScopeLen]
 		if c.block != nil && c.block.Term == nil {
@@ -16561,7 +16579,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			}
 			if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
 				cap := c.emitScopeCleanup(savedScopeLen, false)
-				c.emitCloseErrCheck(cap)
+				c.emitCloseErrCheck(cap, savedScopeLen)
 			}
 			c.scopeBindings = c.scopeBindings[:savedScopeLen]
 			if c.block != nil && c.block.Term == nil {

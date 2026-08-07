@@ -16731,6 +16731,79 @@ func TestGoBangBlockFormAccepted(t *testing.T) {
 	`)
 }
 
+func TestGoBlockTrailingIfInfersValueType(t *testing.T) {
+	// T1389: a trailing value-producing `if/else` in a `go`/`go!` block is an
+	// `*ast.IfStmt`, not an `*ast.ExprStmt`, so block-form inference used to leave
+	// the element type as void → `<-t` yielded void and binding it errored.
+	// Inference now routes through blockValueType (ExprStmt OR value-producing
+	// if/else), so the element type is the branch type and `v` binds fine.
+
+	// Plain `go` block, trailing if/else → task[int], bindable.
+	checkOK(t, `
+		test() {
+			x := 5;
+			t := go {
+				if x > 0 { x * 3 } else { 0 }
+			};
+			v := <-t;
+		}
+	`)
+
+	// Failable `go!` block, trailing if/else after a propagating call → int.
+	checkOK(t, `
+		produce!(int x) int { return x; }
+		test!() {
+			t := go! {
+				base := produce(1)?^;
+				if base > 0 { base } else { 0 }
+			};
+			v := (<-t)?^;
+		}
+	`)
+
+	// Nested trailing if/else — blockValueType recurses into the else branch.
+	checkOK(t, `
+		test() {
+			x := 7;
+			t := go {
+				if x > 10 { 1 } else { if x > 5 { 2 } else { 3 } }
+			};
+			v := <-t;
+		}
+	`)
+}
+
+func TestGoBlockElselessTrailingIfStaysVoid(t *testing.T) {
+	// T1389 regression: an else-less trailing `if` produces no value, so
+	// blockValueType returns nil and the block correctly stays task[void].
+	// Binding a value from a void receive must still error.
+	errs := checkErrs(t, `
+		test() {
+			n := 3;
+			t := go {
+				if n > 0 { m := n + 1; }
+			};
+			v := <-t;
+		}
+	`)
+	expectError(t, errs, "cannot bind void to variable 'v'")
+
+	// Failable `go!` counterpart: an else-less trailing `if` also leaves
+	// innerType nil, so the block is failable_task[void]. The body is legitimately
+	// failable via `?^`, and draining the void result with `?!` type-checks clean
+	// (the void-fallback must apply on the failable path too, not just plain `go`).
+	checkOK(t, `
+		produce!(int x) int { return x; }
+		test!() {
+			t := go! {
+				base := produce(2)?^;
+				if base > 0 { m := base * 2; }
+			};
+			(<-t)?^;
+		}
+	`)
+}
+
 func TestGoBangNonCallOperandRejected(t *testing.T) {
 	// `go!` with a non-call, non-operator operand (a bare expression) is rejected
 	// with the `go!`-specific diagnostic (T1379) — distinct from the plain-`go`

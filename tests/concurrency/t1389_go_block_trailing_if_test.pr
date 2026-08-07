@@ -1,0 +1,168 @@
+// T1389: `go`/`go!` block-form result type inference ignored a trailing
+// value-producing `if/else` (an `*ast.IfStmt` in statement position, not an
+// `*ast.ExprStmt`), so the task element type was mis-inferred as
+// `task[void]`/`failable_task[void]` and `<-t` yielded void. The fix routes
+// block-form inference through the shared `blockValueType` helper (already used
+// for if-expression / match-arm typing), which returns the type of a trailing
+// ExprStmt OR recurses into a trailing value-producing `if/else` — mirroring
+// codegen's `genBlockValue` (ExprStmt + IfStmt via genIfStmtValue), so sema and
+// codegen stay in lockstep and no codegen change is needed.
+//
+// NO `exclude: wasm`: the go-block value path is exercised on host + wasm32-wasi
+// and zero-leak enforcement applies on both.
+produce!(int x) int {
+  if x < 0 {
+    raise error("neg:{x}");
+  }
+  return x * 2;
+}
+
+// (a) The exact reported repro: failable go! block with a trailing value-
+// producing if/else. Before the fix `<-t` yielded void → "cannot bind void".
+t1389_failable_trailing_if() `test {
+  t := go! {
+    base := produce(1)?^;
+    if base > 0 {
+      base
+    } else {
+      0
+    }
+  };
+  v := (<-t)?!;
+  assert(v == 2, "failable trailing-if value inferred as int");
+}
+
+// (b) Plain (non-failable) go block with a trailing if/else.
+t1389_plain_trailing_if() `test {
+  x := 5;
+  t := go {
+    if x > 0 {
+      x * 3
+    } else {
+      0
+    }
+  };
+  assert((<-t) == 15, "plain trailing-if value inferred as int");
+}
+
+// (c) Nested trailing if — value comes from a trailing `if/else` whose else
+// branch is itself an `if/else`. Exercises blockValueType's recursion.
+t1389_nested_trailing_if() `test {
+  x := 7;
+  t := go {
+    if x > 10 {
+      1
+    } else {
+      if x > 5 {
+        2
+      } else {
+        3
+      }
+    }
+  };
+  assert((<-t) == 2, "nested trailing-if picks the middle branch");
+}
+
+// (d) Trailing if/else with preceding statements run for effect; the trailing
+// if is still the block value.
+t1389_trailing_if_with_locals() `test {
+  t := go {
+    a := 20;
+    b := 22;
+    if a < b {
+      a + b
+    } else {
+      0
+    }
+  };
+  assert((<-t) == 42, "trailing if after locals is the block value");
+}
+
+// (e) Heap (string) result from a trailing if/else — exercises ownership
+// transfer of the branch value into the task result (zero-leak guard).
+t1389_trailing_if_string() `test {
+  which := true;
+  t := go {
+    if which {
+      "he" + "llo"
+    } else {
+      "wor" + "ld"
+    }
+  };
+  string r = <-t;
+  assert(r == "hello", "trailing-if heap string result, no leak");
+}
+
+// (f) Regression — an else-less trailing `if` produces no value, so the block
+// stays `task[void]` (blockValueType returns nil → the void fallback). The
+// explicit `task[void]` annotation confirms the inference: had the fix wrongly
+// inferred a value type, this binding would be a type mismatch. Awaited to
+// exercise the void receive path.
+t1389_elseless_trailing_if_stays_void() `test {
+  n := 3;
+  task[void] t = go {
+    m := n + 1;
+    if m > 0 {
+      k := m * 2;
+    }
+  };
+  <-t;
+  assert(true, "else-less trailing if: block stays task[void]");
+}
+
+// (f2) Failable `go!` counterpart of (f): an else-less trailing `if` in a
+// failable body produces no value, so `innerType` stays nil and the block is
+// `failable_task[void]` — the void fallback must apply on the failable path too
+// (checkGoExpr shares blockValueType for both go and go!). The `?^` propagation
+// keeps the body legitimately failable; the void receive is drained via `?!`.
+t1389_failable_elseless_trailing_if_stays_void() `test {
+  t := go! {
+    base := produce(2)?^;
+    if base > 0 {
+      k := base * 2;
+    }
+  };
+  (<-t)?!;
+  assert(true, "failable else-less trailing if: block stays failable_task[void]");
+}
+
+// (g) Regression guard — the already-working trailing plain expression form.
+t1389_trailing_plain_expr() `test {
+  t := go {
+    a := 40;
+    a + 2
+  };
+  assert((<-t) == 42, "trailing plain expression still inferred correctly");
+}
+
+// (h) Regression guard — the already-working trailing expression-form `match`
+// (`=>` arms), which is an ExprStmt(MatchExpr) and was never broken.
+t1389_trailing_match_expr() `test {
+  k := 2;
+  t := go {
+    match k {
+      2 => 200,
+      _ => 0,
+    }
+  };
+  assert((<-t) == 200, "trailing expression-form match still inferred correctly");
+}
+
+// (i) Loop leak guard — a per-iteration leak in the heap trailing-if result
+// path would trip the zero-tolerance alloc-delta check.
+t1389_trailing_if_loop_no_leak() `test {
+  i := 0;
+  while i < 30 {
+    t := go {
+      if i % 2 == 0 {
+        "ev" + "en"
+      } else {
+        "od" + "d"
+      }
+    };
+    string r = <-t;
+    assert(r.len == 4 || r.len == 3, "loop trailing-if string result");
+    i = i + 1;
+  }
+  assert(i == 30, "30 trailing-if heap results awaited: no leak");
+}

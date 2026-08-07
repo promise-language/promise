@@ -4154,12 +4154,11 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		if e.Failable && !escaped {
 			c.errorf(e.Block.Pos(), "this goroutine's body cannot fail; spawn it with plain `go`")
 		}
-		// Block form: infer T from last expression statement
-		if len(e.Block.Stmts) > 0 {
-			if es, ok := e.Block.Stmts[len(e.Block.Stmts)-1].(*ast.ExprStmt); ok {
-				innerType = c.info.Types[es.Expr]
-			}
-		}
+		// Block form: infer T from the block's result value — a trailing
+		// expression statement, or a value-producing if/else in statement
+		// position. Mirrors codegen's genBlockValue (ExprStmt + IfStmt) via the
+		// shared blockValueType helper (T1389).
+		innerType = c.blockValueType(e.Block)
 		// Block form: check captured variables are sendable
 		c.checkGoBlockSendable(e)
 	}

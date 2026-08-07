@@ -557,6 +557,14 @@ type Compiler struct {
 	// only the outermost block (the go! body) sees it — nested arm blocks don't.
 	goBlockTrailingWantValue bool
 
+	// T1392: the raw result LLVM type of a value-producing NON-failable `go {}`
+	// body (nil when not in one, or when the body is void/fire-and-forget). A bare
+	// `return` in such a body is an early exit that carries no trailing value; without
+	// a defined store, `<-t` reads the uninitialized G.result_ptr buffer (poison).
+	// genReturnStmt's coroutine branch stores this type's zero on that exit. The
+	// failable analog uses failableGoBlockAggType instead.
+	goBlockValueResultLLVM irtypes.Type
+
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).

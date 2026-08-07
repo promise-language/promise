@@ -11089,8 +11089,39 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// ret void (the coroutine function returns ptr, not void).
 	if c.coroutineReturnBlock != nil {
 		c.emitLambdaWritebacks()
+		// T1391: capture and route a failing use-binding close() error (mirrors the
+		// value-return path below). In a failable go! body emitScopeCleanup takes the
+		// CAPTURE path (T1387 guard on c.inFailableGoBlock), so without a following
+		// emitCloseErrCheck the error is saved-but-never-freed → leak. outerFloor=0:
+		// this bare return cleaned all bindings [0, end), so there is no outer prefix
+		// to unwind. For a non-failable go{} block closeCap is nil and emitCloseErrCheck
+		// is a no-op.
+		var closeCap *closeErrCapture
 		if len(c.scopeBindings) > 0 {
-			c.emitScopeCleanup(0, false)
+			closeCap = c.emitScopeCleanup(0, false)
+		}
+		c.emitCloseErrCheck(closeCap, 0)
+		// T1392: a bare `return` is an early SUCCESS exit of a failable `go! {}` body.
+		// Unlike the trailing-expression exit (which stores {ok, value, null}) and the
+		// escaping-error exits (which store {err}), this path stored nothing into the
+		// caller-allocated G.result_ptr — leaving that buffer uninitialized. On wasm
+		// the poison bytes make `<-t` misread the {ok,err} discriminant as an error and
+		// dereference a garbage error pointer (SIGABRT). Store a well-defined ok
+		// aggregate so the receive sees success. The trailing ok-VALUE on a bare return
+		// in a value body is semantically undefined (a bare return carries no value), so
+		// we fill the value slot with the type's zero — defined, never a spurious error.
+		// Only the failable go-block path stores an aggregate; generators and
+		// non-failable go blocks fall through unchanged.
+		if c.inFailableGoBlock && c.block != nil && c.block.Term == nil {
+			var okVal value.Value
+			if !isVoidResult(c.failableGoBlockAggType) {
+				okVal = c.zeroValue(c.failableGoBlockAggType.Fields[1])
+			}
+			c.storeGoResultAgg(c.wrapOk(okVal, c.failableGoBlockAggType))
+		} else if c.goBlockValueResultLLVM != nil && c.block != nil && c.block.Term == nil {
+			// T1392: same defect for a value-producing NON-failable `go {}` body — the
+			// buffer holds the raw success type, so store its zero directly.
+			c.storeGoResultAgg(c.zeroValue(c.goBlockValueResultLLVM))
 		}
 		if c.block != nil && c.block.Term == nil {
 			c.block.NewBr(c.coroutineReturnBlock)

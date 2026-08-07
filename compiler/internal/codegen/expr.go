@@ -19307,6 +19307,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedInFailableGoBlock := c.inFailableGoBlock                     // T1384
 	savedFailableGoBlockAggType := c.failableGoBlockAggType           // T1384
 	savedFailableGoBlockFinalSuspend := c.failableGoBlockFinalSuspend // T1384
+	savedGoBlockValueResultLLVM := c.goBlockValueResultLLVM           // T1392
 	c.goExprFireAndForget = false                                     // reset for inner statements (B0109)
 	c.discardedExpr = nil                                             // T1029: inner ExprStmts set their own
 	c.discardAliasArgPtrs = nil                                       // T1029
@@ -19337,9 +19338,10 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
-	c.inFailableGoBlock = false // T1384: (re)activated below only for the `go! {}` body
-	c.enumCtorTemps = nil       // B0267
-	c.borrowedValueParams = nil // T0945: coroutine body has no user value params
+	c.inFailableGoBlock = false    // T1384: (re)activated below only for the `go! {}` body
+	c.goBlockValueResultLLVM = nil // T1392: (re)activated below only for a value-producing non-failable body
+	c.enumCtorTemps = nil          // B0267
+	c.borrowedValueParams = nil    // T0945: coroutine body has no user value params
 	if useGoBlockValuePath {
 		// T1329: fresh function → statement boundaries drain from 0, not the outer
 		// block-value floor. Only on this path (temp arrays are reset fresh here);
@@ -19507,6 +19509,11 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		c.inFailableGoBlock = true
 		c.failableGoBlockAggType = failAggTy
 		c.failableGoBlockFinalSuspend = finalSuspBlk
+	} else if useGoBlockValuePath {
+		// T1392: a bare `return` in a value-producing NON-failable `go {}` body must
+		// store a defined zero into G.result_ptr (the failable path uses the aggregate
+		// sink above). goResultLLVM here is the raw success type.
+		c.goBlockValueResultLLVM = goResultLLVM
 	}
 
 	if !useGoBlockValuePath {
@@ -19596,6 +19603,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.inFailableGoBlock = false
 	c.failableGoBlockAggType = nil
 	c.failableGoBlockFinalSuspend = nil
+	c.goBlockValueResultLLVM = nil // T1392
 
 	// B0163: Emit cleanup for captured channel drop bindings registered before genBlock.
 	// genBlock only cleans up bindings added within its scope, so we must handle
@@ -19678,6 +19686,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.inFailableGoBlock = savedInFailableGoBlock                     // T1384
 	c.failableGoBlockAggType = savedFailableGoBlockAggType           // T1384
 	c.failableGoBlockFinalSuspend = savedFailableGoBlockFinalSuspend // T1384
+	c.goBlockValueResultLLVM = savedGoBlockValueResultLLVM           // T1392
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock

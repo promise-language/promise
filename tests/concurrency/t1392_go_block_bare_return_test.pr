@@ -1,0 +1,64 @@
+// T1392: a bare `return` in a value-producing `go`/`go!` block is an early exit
+// that carries no trailing value. It previously stored NOTHING into the caller's
+// G.result_ptr buffer, so `<-t` read uninitialized memory (poison). On wasm the
+// poison bytes deterministically crashed the receiver (mis-read discriminant →
+// garbage error-pointer dereference); on the host it silently yielded a garbage
+// int. Codegen now stores a DEFINED default on that exit — the result type's zero
+// for a non-failable body, and {ok, zero, null} for a failable one — so `<-t`
+// observes a defined value and never a spurious error. (A bare return carries no
+// value, so the ok-value is the type's zero, not a meaningful result.)
+//
+// The failable analog is covered in gobang_use_failable_close_test.pr
+// (gobang_use_close_bare_return_ok_no_surface). These cover the non-failable
+// `go {}` value path and a value body with no use-binding.
+// --- Non-failable value body, bare return → defined zero (int) ---
+t1392_nonfailable_bare_return_zero() `test {
+  n := 5;
+  t := go {
+    if n > 0 {
+      return; // early exit, no trailing value
+    }
+    n + 100
+  };
+  v := <-t;
+  assert(v == 0, "non-failable value go bare-return yields the type's defined zero");
+}
+
+// --- Non-failable value body, trailing value path unaffected ---
+t1392_nonfailable_trailing_value() `test {
+  n := 5;
+  t := go {
+    n + 100
+  };
+  v := <-t;
+  assert(v == 105, "trailing-value path still returns the computed value");
+}
+
+// --- Failable value body WITHOUT a use-binding: bare return → no spurious error ---
+// Exercises the failable bare-return store when closeCap is nil (no use-binding),
+// so emitCloseErrCheck is a no-op and the defined {ok, zero, null} store is what
+// keeps `<-t` from reading poison.
+produce_ok!(int x) int {
+  if x < 0 {
+    raise error("neg:{x}");
+  }
+  return x * 2;
+}
+
+t1392_failable_bare_return_no_binding() `test {
+  n := 5;
+  t := go! {
+    base := produce_ok(1)?^; // makes the body a failable scope; no use-binding
+    if n > 0 {
+      return;
+    }
+    base + n
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    -1
+  };
+  assert(!got, "failable bare return (no use-binding) must not surface a spurious error");
+  assert(v == 0, "failable bare-return ok-value is the defined zero");
+}

@@ -146,6 +146,99 @@ gobang_use_close_ok_heap_value() `test {
   assert(v == "value=3", "heap trailing value returned with ok close");
 }
 
+// --- Bare `return` early-exit: use-close error surfaces at <-t (T1391) ---
+// A bare `return` inside a failable go! value body is an early SUCCESS exit; a
+// use-binding whose failable close() raises on that exit must route the close
+// error into the task's {ok,err} aggregate (surfacing at <-t) and must not leak
+// the captured error instance.
+gobang_use_close_bare_return_surfaces() `test {
+  t := go! {
+    base := produce(1)?^; // succeeds; makes the body a failable scope
+    use r := FailResource(id: 1); // close() raises on the bare-return exit
+    if base > 0 {
+      return;
+    }
+    // bare return: r live + failing close
+    base + r.id
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "bare-return surfaced error is the close error");
+    -1
+  };
+  assert(got, "bare-return use-close error should surface at <-t");
+  assert(v == -1, "handler recovery value returned");
+}
+
+// --- Bare `return` + OK close: no spurious error, defined ok-value at <-t (T1391/T1392) ---
+// On the bare-return exit emitCloseErrCheck runs with a non-nil cap (T1387 guard),
+// but a SUCCEEDING close leaves cap.val null, so the check falls through to the
+// normal coroutineReturnBlock. T1392: that exit now stores a DEFINED {ok, zero, null}
+// aggregate (previously it stored nothing → `<-t` read poison and, on wasm, mis-read
+// the discriminant as an error and dereferenced a garbage error pointer). The ok-value
+// on a bare return carries no trailing value, so it is the result type's zero (0 here).
+gobang_use_close_bare_return_ok_no_surface() `test {
+  t := go! {
+    base := produce(1)?^; // succeeds; makes the body a failable scope
+    use r := OkResource(id: 7); // close() succeeds on the bare-return exit
+    if base > 0 {
+      return;
+    }
+    base + r.id
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    -1
+  };
+  assert(!got, "ok close on a bare return must not spuriously surface an error");
+  assert(v == 0, "bare-return ok-value is the result type's defined zero, not poison");
+}
+
+// --- Bare `return` + multiple use bindings: first close error (LIFO) wins (T1391) ---
+// Mirrors gobang_use_close_multiple_first_wins but on the bare-return exit: the LIFO
+// close order means the last-declared binding closes first and its error is captured;
+// the earlier binding's close error is suppressed. Exercises the capture/suppress
+// interplay of emitScopeCleanup+emitCloseErrCheck on the coroutineReturnBlock path.
+gobang_use_close_bare_return_multi_first_wins() `test {
+  t := go! {
+    base := produce(4)?^;
+    use a := FailResource(id: 1); // closes second (LIFO) — error suppressed
+    use b := FailResource(id: 2); // closes first — error captured & routed
+    if base > 0 {
+      return;
+    }
+    base + a.id + b.id
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "first close error (LIFO) surfaces on bare return");
+  };
+  assert(got, "multi-close bare-return error handler ran");
+}
+
+// --- Bare `return` + un-received task: buffered close error freed on drop (T1391) ---
+// The bare-return exit stores the captured close error into the task's {ok,err}
+// aggregate; an un-received FailableTask must discharge that buffered error in its
+// drop path (leak enforcement, T0067, fails the test otherwise). Sibling of
+// gobang_use_close_dropped_error_leak_free but via the bare-return exit.
+gobang_use_close_bare_return_dropped_leak_free() `test {
+  {
+    t := go! {
+      base := produce(1)?^;
+      use r := FailResource(id: 1); // close() raises → error buffered in the task
+      if base > 0 {
+        return;
+      }
+      base + r.id
+    };
+    // never received — the buffered close error must be discharged on drop.
+  }
+  assert(true, "dropped bare-return use-close error path did not leak");
+}
+
 // --- Un-received task whose use-close FAILS: buffered error freed on drop ---
 // The captured close error is stored into the task's {ok,err} aggregate; an
 // un-received FailableTask must discharge that buffered error in its drop path

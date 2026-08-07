@@ -37,12 +37,43 @@ stdout.write_line("data — same as print_line, but as a Writer handle");
 |------|-------------|----------|
 | `int` / `i8` `i16` `i32` `i64` | Signed integers | `42`, `-1i8`, `0xFF`, `0b1010`, `1_000` |
 | `uint` / `u8` `u16` `u32` `u64` | Unsigned integers | `42u`, `255u8`, `0o77u32` |
+| `i128` `i256` `i512` / `u128` `u256` `u512` | Wide integers | `0xDEADBEEFu128`, `1_000u256`, `~0u512` |
 | `f32` `f64` | Floats | `3.14`, `1.0f32` |
 | `bool` | Boolean | `true`, `false` |
 | `char` | Unicode character | `'a'`, `'\n'`, `'\u{1F600}'` |
 | `string` | UTF-8 string | `"hello"`, `"val={x}"`, `r"raw\n"` |
 
 Bare numeric literals infer as `int` or `f64`. Use suffixes for specific types.
+
+### Wide integers (`i128`/`u128`, `i256`/`u256`, `i512`/`u512`)
+
+Fixed-width integers wider than 64 bits — for cryptography, hashing, UUIDs,
+network/IPv6 identifiers, and fixed-point currency. They are native primitives
+(LLVM `iN`): pure value types with the full `i64`/`u64` operator set (arithmetic,
+comparison, bitwise, shifts, ranges), automatically `` `copy ``, no heap
+allocation, no `drop()`. A literal that exceeds `i64` range needs an explicit
+wide suffix (`0x...u128`); unsuffixed literals still infer as `int`.
+
+```promise
+u128 id  = 0x550e8400e29b41d4a716446655440000u128;  // a UUID as one value
+u256 big = 1u256 << 255u256;                          // 2^255
+u64  high = (id >> 64u128) as! u64;                   // widths mix only via as!
+```
+
+- **Default base is 16.** `to_string()` and `parse()` default to hexadecimal —
+  the natural form for hashes/UUIDs, and the only base whose formatting needs no
+  division. Decimal is available via `to_string(base: 10)` / `parse(r, base: 10)`.
+- **Conversions are explicit.** Mixing widths (or signedness) requires `as!`:
+  widening sign-extends (signed) or zero-extends (unsigned); narrowing truncates.
+- **Performance.** `add`/`sub`/`mul`/bitwise/shifts lower to inline word-sized
+  sequences (carry-flag aware). **Division and remainder are the exception** —
+  they lower to compiler-rt soft-arithmetic library calls (tens to hundreds of
+  cycles depending on width), so hoist them out of hot loops. Decimal `to_string`
+  uses one division per digit; the default base-16 path is division-free.
+- **Not constant-time.** LLVM's wide `div`/`mul` are not constant-time; crypto
+  needing constant-time must hand-craft routines over `u64[]`/`u32[]`.
+  Arbitrary-precision (beyond 512 bits), checked/wrapping/saturating variants, and
+  wide-integer atomics are out of scope — see [large-integers.md](large-integers.md).
 
 **String escapes:** `\n` `\t` `\r` `\b` `\\` `\"` `\0` `\{` (literal `{`, suppresses interpolation). Raw strings (`r"..."`) skip all escapes.
 

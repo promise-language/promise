@@ -1,0 +1,485 @@
+// std/wide_int.pr — Wide integer types (128/256/512-bit, signed and unsigned).
+//
+// These are pure value types backed by LLVM `iN`, so they are automatically
+// `copy, need no heap allocation, and have no drop(). The operator surface
+// mirrors i64.pr/u64.pr; LLVM lowers each `native op to the corresponding
+// width-polymorphic instruction (division on wide types routes through the
+// compiler-rt soft-arithmetic library, which is already linked).
+//
+// to_string / parse default to base 16 (hex), the natural representation for
+// the dominant wide-integer use cases (hashes, UUIDs, addresses, ECC scalars)
+// and the only base whose formatting is division-free. Decimal remains
+// available via an explicit `base: 10` argument. See docs/large-integers.md.
+type i128 `native `public `doc("Signed 128-bit integer.") {
+  +(i128 other) i128 `native;
+  -(i128 other) i128 `native;
+  * (i128 other) i128 `native;
+  / (i128 other) i128 `native;
+  % (i128 other) i128 `native;
+  == (i128 other) bool `native;
+  != (i128 other) bool `native;
+  < (i128 other) bool `native;
+  > (i128 other) bool `native;
+  <= (i128 other) bool `native;
+  >= (i128 other) bool `native;
+  -() i128 `native;
+  ++ () i128 `native;
+  -- () i128 `native;
+  &(i128 other) i128 `native;
+  | (i128 other) i128 `native;
+  ^ (i128 other) i128 `native;
+  << (i128 other) i128 `native;
+  >> (i128 other) i128 `native;
+  ~() i128 `native;
+  .. (i128 end) Range[i128] `native;
+  ..= (i128 end) Range[i128] `native;
+  get hash int `native;
+  get max i128 `public `global => 170141183460469231731687303715884105727i128;
+  get min i128 `public `global => -170141183460469231731687303715884105727i128 - 1i128;
+
+  parse!(Reader ~r, int base = 16) i128 `factory `public `doc("Parses a signed 128-bit integer (default base 16).") {
+    i128 result = 0i128;
+    i128 b = base as! i128;
+    bool negative = false;
+    bool started = false;
+    bool has_digit = false;
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        if !started && c == 45 {
+          negative = true;
+          started = true;
+        } else {
+          int digit = _digit_value(c);
+          if digit >= 0 && digit < base {
+            result = result * b + (digit as! i128);
+            has_digit = true;
+            started = true;
+          } else {
+            break;
+          }
+        }
+      } else {
+        if !started {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
+    }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    if negative {
+      result = 0i128 - result;
+    }
+    return result;
+  }
+
+  to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string (default base 16). Optional base (2-36), prefix, width, and fill.") {
+    bool negative = this < 0i128;
+    u128 abs_val = 0u128;
+    if negative {
+      abs_val = (0i128 - (this + 1i128)) as! u128 + 1u128;
+    } else {
+      abs_val = this as! u128;
+    }
+    return _format_with_prefix_width(_wide_int_format_128(abs_val, base), negative, base, prefix, width, fill);
+  }
+  format!(Writer ~w) `public {
+    w.write_string(this.to_string());
+  }
+  encode!(Encoder ~e) `public `doc("Encodes as a decimal string (lossless).") {
+    e.encode_string(this.to_string(base: 10));
+  }
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
+    string s = d.decode_string();
+    Scanner r = Scanner(s: s);
+    return i128.parse(r, 10);
+  }
+}
+
+type u128 `native `public `doc("Unsigned 128-bit integer.") {
+  +(u128 other) u128 `native;
+  -(u128 other) u128 `native;
+  * (u128 other) u128 `native;
+  / (u128 other) u128 `native;
+  % (u128 other) u128 `native;
+  == (u128 other) bool `native;
+  != (u128 other) bool `native;
+  < (u128 other) bool `native;
+  > (u128 other) bool `native;
+  <= (u128 other) bool `native;
+  >= (u128 other) bool `native;
+  -() u128 `native;
+  ++ () u128 `native;
+  -- () u128 `native;
+  &(u128 other) u128 `native;
+  | (u128 other) u128 `native;
+  ^ (u128 other) u128 `native;
+  << (u128 other) u128 `native;
+  >> (u128 other) u128 `native;
+  ~() u128 `native;
+  .. (u128 end) Range[u128] `native;
+  ..= (u128 end) Range[u128] `native;
+  get hash int `native;
+  get max u128 `public `global => ~0u128;
+  get min u128 `public `global => 0u128;
+
+  parse!(Reader ~r, int base = 16) u128 `factory `public `doc("Parses an unsigned 128-bit integer (default base 16).") {
+    u128 result = 0u128;
+    u128 b = base as! u128;
+    bool has_digit = false;
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        int digit = _digit_value(c);
+        if digit >= 0 && digit < base {
+          result = result * b + (digit as! u128);
+          has_digit = true;
+        } else {
+          break;
+        }
+      } else {
+        if !has_digit {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
+    }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    return result;
+  }
+
+  to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string (default base 16). Optional base (2-36), prefix, width, and fill.") {
+    return _format_with_prefix_width(_wide_int_format_128(this, base), false, base, prefix, width, fill);
+  }
+  format!(Writer ~w) `public {
+    w.write_string(this.to_string());
+  }
+  encode!(Encoder ~e) `public `doc("Encodes as a decimal string (lossless).") {
+    e.encode_string(this.to_string(base: 10));
+  }
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
+    string s = d.decode_string();
+    Scanner r = Scanner(s: s);
+    return u128.parse(r, 10);
+  }
+}
+
+type i256 `native `public `doc("Signed 256-bit integer.") {
+  +(i256 other) i256 `native;
+  -(i256 other) i256 `native;
+  * (i256 other) i256 `native;
+  / (i256 other) i256 `native;
+  % (i256 other) i256 `native;
+  == (i256 other) bool `native;
+  != (i256 other) bool `native;
+  < (i256 other) bool `native;
+  > (i256 other) bool `native;
+  <= (i256 other) bool `native;
+  >= (i256 other) bool `native;
+  -() i256 `native;
+  ++ () i256 `native;
+  -- () i256 `native;
+  &(i256 other) i256 `native;
+  | (i256 other) i256 `native;
+  ^ (i256 other) i256 `native;
+  << (i256 other) i256 `native;
+  >> (i256 other) i256 `native;
+  ~() i256 `native;
+  .. (i256 end) Range[i256] `native;
+  ..= (i256 end) Range[i256] `native;
+  get hash int `native;
+  get max i256 `public `global => 57896044618658097711785492504343953926634992332820282019728792003956564819967i256;
+  get min i256 `public `global => -57896044618658097711785492504343953926634992332820282019728792003956564819967i256 - 1i256;
+
+  parse!(Reader ~r, int base = 16) i256 `factory `public `doc("Parses a signed 256-bit integer (default base 16).") {
+    i256 result = 0i256;
+    i256 b = base as! i256;
+    bool negative = false;
+    bool started = false;
+    bool has_digit = false;
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        if !started && c == 45 {
+          negative = true;
+          started = true;
+        } else {
+          int digit = _digit_value(c);
+          if digit >= 0 && digit < base {
+            result = result * b + (digit as! i256);
+            has_digit = true;
+            started = true;
+          } else {
+            break;
+          }
+        }
+      } else {
+        if !started {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
+    }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    if negative {
+      result = 0i256 - result;
+    }
+    return result;
+  }
+
+  to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string (default base 16). Optional base (2-36), prefix, width, and fill.") {
+    bool negative = this < 0i256;
+    u256 abs_val = 0u256;
+    if negative {
+      abs_val = (0i256 - (this + 1i256)) as! u256 + 1u256;
+    } else {
+      abs_val = this as! u256;
+    }
+    return _format_with_prefix_width(_wide_int_format_256(abs_val, base), negative, base, prefix, width, fill);
+  }
+  format!(Writer ~w) `public {
+    w.write_string(this.to_string());
+  }
+  encode!(Encoder ~e) `public `doc("Encodes as a decimal string (lossless).") {
+    e.encode_string(this.to_string(base: 10));
+  }
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
+    string s = d.decode_string();
+    Scanner r = Scanner(s: s);
+    return i256.parse(r, 10);
+  }
+}
+
+type u256 `native `public `doc("Unsigned 256-bit integer.") {
+  +(u256 other) u256 `native;
+  -(u256 other) u256 `native;
+  * (u256 other) u256 `native;
+  / (u256 other) u256 `native;
+  % (u256 other) u256 `native;
+  == (u256 other) bool `native;
+  != (u256 other) bool `native;
+  < (u256 other) bool `native;
+  > (u256 other) bool `native;
+  <= (u256 other) bool `native;
+  >= (u256 other) bool `native;
+  -() u256 `native;
+  ++ () u256 `native;
+  -- () u256 `native;
+  &(u256 other) u256 `native;
+  | (u256 other) u256 `native;
+  ^ (u256 other) u256 `native;
+  << (u256 other) u256 `native;
+  >> (u256 other) u256 `native;
+  ~() u256 `native;
+  .. (u256 end) Range[u256] `native;
+  ..= (u256 end) Range[u256] `native;
+  get hash int `native;
+  get max u256 `public `global => ~0u256;
+  get min u256 `public `global => 0u256;
+
+  parse!(Reader ~r, int base = 16) u256 `factory `public `doc("Parses an unsigned 256-bit integer (default base 16).") {
+    u256 result = 0u256;
+    u256 b = base as! u256;
+    bool has_digit = false;
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        int digit = _digit_value(c);
+        if digit >= 0 && digit < base {
+          result = result * b + (digit as! u256);
+          has_digit = true;
+        } else {
+          break;
+        }
+      } else {
+        if !has_digit {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
+    }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    return result;
+  }
+
+  to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string (default base 16). Optional base (2-36), prefix, width, and fill.") {
+    return _format_with_prefix_width(_wide_int_format_256(this, base), false, base, prefix, width, fill);
+  }
+  format!(Writer ~w) `public {
+    w.write_string(this.to_string());
+  }
+  encode!(Encoder ~e) `public `doc("Encodes as a decimal string (lossless).") {
+    e.encode_string(this.to_string(base: 10));
+  }
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
+    string s = d.decode_string();
+    Scanner r = Scanner(s: s);
+    return u256.parse(r, 10);
+  }
+}
+
+type i512 `native `public `doc("Signed 512-bit integer.") {
+  +(i512 other) i512 `native;
+  -(i512 other) i512 `native;
+  * (i512 other) i512 `native;
+  / (i512 other) i512 `native;
+  % (i512 other) i512 `native;
+  == (i512 other) bool `native;
+  != (i512 other) bool `native;
+  < (i512 other) bool `native;
+  > (i512 other) bool `native;
+  <= (i512 other) bool `native;
+  >= (i512 other) bool `native;
+  -() i512 `native;
+  ++ () i512 `native;
+  -- () i512 `native;
+  &(i512 other) i512 `native;
+  | (i512 other) i512 `native;
+  ^ (i512 other) i512 `native;
+  << (i512 other) i512 `native;
+  >> (i512 other) i512 `native;
+  ~() i512 `native;
+  .. (i512 end) Range[i512] `native;
+  ..= (i512 end) Range[i512] `native;
+  get hash int `native;
+  get max i512 `public `global => 6703903964971298549787012499102923063739682910296196688861780721860882015036773488400937149083451713845015929093243025426876941405973284973216824503042047i512;
+  get min i512 `public `global => -6703903964971298549787012499102923063739682910296196688861780721860882015036773488400937149083451713845015929093243025426876941405973284973216824503042047i512 - 1i512;
+
+  parse!(Reader ~r, int base = 16) i512 `factory `public `doc("Parses a signed 512-bit integer (default base 16).") {
+    i512 result = 0i512;
+    i512 b = base as! i512;
+    bool negative = false;
+    bool started = false;
+    bool has_digit = false;
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        if !started && c == 45 {
+          negative = true;
+          started = true;
+        } else {
+          int digit = _digit_value(c);
+          if digit >= 0 && digit < base {
+            result = result * b + (digit as! i512);
+            has_digit = true;
+            started = true;
+          } else {
+            break;
+          }
+        }
+      } else {
+        if !started {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
+    }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    if negative {
+      result = 0i512 - result;
+    }
+    return result;
+  }
+
+  to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string (default base 16). Optional base (2-36), prefix, width, and fill.") {
+    bool negative = this < 0i512;
+    u512 abs_val = 0u512;
+    if negative {
+      abs_val = (0i512 - (this + 1i512)) as! u512 + 1u512;
+    } else {
+      abs_val = this as! u512;
+    }
+    return _format_with_prefix_width(_wide_int_format_512(abs_val, base), negative, base, prefix, width, fill);
+  }
+  format!(Writer ~w) `public {
+    w.write_string(this.to_string());
+  }
+  encode!(Encoder ~e) `public `doc("Encodes as a decimal string (lossless).") {
+    e.encode_string(this.to_string(base: 10));
+  }
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
+    string s = d.decode_string();
+    Scanner r = Scanner(s: s);
+    return i512.parse(r, 10);
+  }
+}
+
+type u512 `native `public `doc("Unsigned 512-bit integer.") {
+  +(u512 other) u512 `native;
+  -(u512 other) u512 `native;
+  * (u512 other) u512 `native;
+  / (u512 other) u512 `native;
+  % (u512 other) u512 `native;
+  == (u512 other) bool `native;
+  != (u512 other) bool `native;
+  < (u512 other) bool `native;
+  > (u512 other) bool `native;
+  <= (u512 other) bool `native;
+  >= (u512 other) bool `native;
+  -() u512 `native;
+  ++ () u512 `native;
+  -- () u512 `native;
+  &(u512 other) u512 `native;
+  | (u512 other) u512 `native;
+  ^ (u512 other) u512 `native;
+  << (u512 other) u512 `native;
+  >> (u512 other) u512 `native;
+  ~() u512 `native;
+  .. (u512 end) Range[u512] `native;
+  ..= (u512 end) Range[u512] `native;
+  get hash int `native;
+  get max u512 `public `global => ~0u512;
+  get min u512 `public `global => 0u512;
+
+  parse!(Reader ~r, int base = 16) u512 `factory `public `doc("Parses an unsigned 512-bit integer (default base 16).") {
+    u512 result = 0u512;
+    u512 b = base as! u512;
+    bool has_digit = false;
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        int digit = _digit_value(c);
+        if digit >= 0 && digit < base {
+          result = result * b + (digit as! u512);
+          has_digit = true;
+        } else {
+          break;
+        }
+      } else {
+        if !has_digit {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
+    }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    return result;
+  }
+
+  to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string (default base 16). Optional base (2-36), prefix, width, and fill.") {
+    return _format_with_prefix_width(_wide_int_format_512(this, base), false, base, prefix, width, fill);
+  }
+  format!(Writer ~w) `public {
+    w.write_string(this.to_string());
+  }
+  encode!(Encoder ~e) `public `doc("Encodes as a decimal string (lossless).") {
+    e.encode_string(this.to_string(base: 10));
+  }
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
+    string s = d.decode_string();
+    Scanner r = Scanner(s: s);
+    return u512.parse(r, 10);
+  }
+}

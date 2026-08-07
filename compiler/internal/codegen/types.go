@@ -33,9 +33,11 @@ func isSignedType(n *types.Named) bool {
 // This is the single point in codegen that compares against universe type singletons.
 func classify(n *types.Named) TypeCategory {
 	switch n {
-	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64:
+	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
+		types.TypI128, types.TypI256, types.TypI512:
 		return CatSignedInt
-	case types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64:
+	case types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypU128, types.TypU256, types.TypU512:
 		return CatUnsignedInt
 	case types.TypF32, types.TypF64:
 		return CatFloat
@@ -109,6 +111,12 @@ func llvmNamedType(n *types.Named) irtypes.Type {
 		return irtypes.I16
 	case types.TypU8:
 		return irtypes.I8
+	case types.TypI128, types.TypU128:
+		return irtypes.NewInt(128)
+	case types.TypI256, types.TypU256:
+		return irtypes.NewInt(256)
+	case types.TypI512, types.TypU512:
+		return irtypes.NewInt(512)
 	case types.TypF64:
 		return irtypes.Double
 	case types.TypF32:

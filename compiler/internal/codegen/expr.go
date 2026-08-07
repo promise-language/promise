@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -529,13 +530,14 @@ func (c *Compiler) genIntLit(e *ast.IntLit) value.Value {
 		intType = irtypes.I64
 	}
 	raw := strings.ReplaceAll(e.Raw, "_", "")
-	val, err := strconv.ParseInt(raw, 0, 64)
-	if err != nil {
-		// Try unsigned parse for large values
-		uval, _ := strconv.ParseUint(raw, 0, 64)
-		return constant.NewInt(intType, int64(uval))
+	// Parse the magnitude at arbitrary precision so wide literals (>64-bit)
+	// are represented losslessly. big.Int.SetString(_, 0) handles the 0x/0o/0b
+	// prefixes; the AST never carries a sign here (unary minus is a separate op).
+	if bv, ok := new(big.Int).SetString(raw, 0); ok {
+		return &constant.Int{Typ: intType, X: bv}
 	}
-	return constant.NewInt(intType, val)
+	// Fallback: unparseable literal (sema already reported the error).
+	return constant.NewInt(intType, 0)
 }
 
 func (c *Compiler) genFloatLit(e *ast.FloatLit) value.Value {
@@ -5162,6 +5164,21 @@ func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 }
 
 // genMapLen returns the length of a map via the runtime.
+// foldWideToI64 folds a wide integer value (width a multiple of 64) down to a
+// single i64 by XOR-ing its 64-bit limbs, so wide types can feed the uniform
+// i64 hash interface (§3.5 of docs/large-integers.md).
+func (c *Compiler) foldWideToI64(val value.Value, width uint64) value.Value {
+	wide := val.Type().(*irtypes.IntType)
+	// Lowest limb.
+	var acc value.Value = c.block.NewTrunc(val, irtypes.I64)
+	for shift := uint64(64); shift < width; shift += 64 {
+		shifted := c.block.NewLShr(val, constant.NewInt(wide, int64(shift)))
+		limb := c.block.NewTrunc(shifted, irtypes.I64)
+		acc = c.block.NewXor(acc, limb)
+	}
+	return acc
+}
+
 // genNativeHashGetter emits native hash computation for primitive types.
 // Returns (value, true) if the type has a native hash getter, (nil, false) otherwise.
 // All primitive hashes use the Promise-implemented _fnv1a_hash function.
@@ -5196,6 +5213,12 @@ func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (v
 		trueHash := constant.NewInt(irtypes.I64, 0x517cc1b727220a95)
 		falseHash := constant.NewInt(irtypes.I64, 0x6c62272e07bb0142)
 		return c.block.NewSelect(target, trueHash, falseHash), true
+	case types.TypI128, types.TypU128:
+		return c.block.NewCall(hashFn, c.foldWideToI64(target, 128)), true
+	case types.TypI256, types.TypU256:
+		return c.block.NewCall(hashFn, c.foldWideToI64(target, 256)), true
+	case types.TypI512, types.TypU512:
+		return c.block.NewCall(hashFn, c.foldWideToI64(target, 512)), true
 	case types.TypChar:
 		ext := c.block.NewZExt(target, irtypes.I64)
 		return c.block.NewCall(hashFn, ext), true

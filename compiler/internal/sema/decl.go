@@ -595,6 +595,8 @@ func isPrimitive(n *types.Named) bool {
 		n == types.TypBool || n == types.TypChar ||
 		n == types.TypI8 || n == types.TypI16 || n == types.TypI32 || n == types.TypI64 ||
 		n == types.TypU8 || n == types.TypU16 || n == types.TypU32 || n == types.TypU64 ||
+		n == types.TypI128 || n == types.TypU128 || n == types.TypI256 ||
+		n == types.TypU256 || n == types.TypI512 || n == types.TypU512 ||
 		n == types.TypF32 || n == types.TypF64 ||
 		n == types.TypVoid || n == types.TypNone
 }

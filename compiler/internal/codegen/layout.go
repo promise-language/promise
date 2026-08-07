@@ -140,6 +140,18 @@ func primitiveRawType(n *types.Named) (irtypes.Type, string, bool) {
 		return irtypes.I16, "uint16_t", false
 	case types.TypU8:
 		return irtypes.I8, "uint8_t", false
+	case types.TypI128:
+		return irtypes.NewInt(128), "__int128", true
+	case types.TypU128:
+		return irtypes.NewInt(128), "unsigned __int128", false
+	case types.TypI256:
+		return irtypes.NewInt(256), "int256_t", true
+	case types.TypU256:
+		return irtypes.NewInt(256), "uint256_t", false
+	case types.TypI512:
+		return irtypes.NewInt(512), "int512_t", true
+	case types.TypU512:
+		return irtypes.NewInt(512), "uint512_t", false
 	case types.TypF64:
 		return irtypes.Double, "double", false
 	case types.TypF32:
@@ -562,6 +574,7 @@ func computeLayouts(module *ir.Module, externs []*ExternFunc) map[*types.Named]*
 		types.TypF32, types.TypF64,
 		types.TypI8, types.TypI16, types.TypI32, types.TypI64, types.TypInt,
 		types.TypU8, types.TypU16, types.TypU32, types.TypU64, types.TypUint,
+		types.TypI128, types.TypU128, types.TypI256, types.TypU256, types.TypI512, types.TypU512,
 	}
 	for _, named := range builtins {
 		layouts[named] = computePrimitiveLayout(module, named)

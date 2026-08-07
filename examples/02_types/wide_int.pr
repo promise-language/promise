@@ -1,0 +1,50 @@
+// Wide integers in Promise: i128/u128, i256/u256, i512/u512.
+//
+// These are native fixed-width integer types backed by LLVM `iN`. They behave
+// exactly like i64/u64 — same operators, comparisons, bitwise ops, ranges — but
+// hold 128, 256, or 512 bits. They are pure value types: no heap allocation, no
+// drop(), automatically `copy`.
+//
+// to_string() and parse() default to BASE 16 (hex), the natural representation
+// for the dominant wide-integer use cases (UUIDs, hashes, addresses, ECC
+// scalars). Decimal is available via an explicit `base: 10` argument.
+// A UUID is exactly 128 bits — a single u128 instead of a 16-byte array.
+type Uuid `public {
+  u128 value `value;
+
+  to_string(this) string {
+    // 32 hex digits, zero-padded.
+    return this.value.to_string(base: 16, width: 32, fill: '0');
+  }
+}
+
+main() `test(expected: """--- UUID as u128 ---
+uuid: 550e8400e29b41d4a716446655440000
+high 64 bits: 550e8400e29b41d4
+--- u256 word arithmetic ---
+2^255 in hex: 8000000000000000000000000000000000000000000000000000000000000000
+2^255 in dec: 57896044618658097711785492504343953926634992332820282019728792003956564819968
+sum wraps to: 0
+--- signed 128 ---
+min: -170141183460469231731687303715884105728
+max:  170141183460469231731687303715884105727""") {
+  print_line("--- UUID as u128 ---");
+  Uuid id = Uuid(value: 0x550e8400e29b41d4a716446655440000u128);
+  print_line("uuid: {id.to_string()}");
+  // Extract the high 64 bits with a shift — no byte fiddling.
+  u64 high = (id.value >> 64u128) as! u64;
+  print_line("high 64 bits: {high.to_string(base: 16)}");
+
+  print_line("--- u256 word arithmetic ---");
+  // A 256-bit word, as used in SHA-256 / EVM-style arithmetic.
+  u256 word = 1u256 << 255u256; // 2^255
+  print_line("2^255 in hex: {word.to_string()}");
+  print_line("2^255 in dec: {word.to_string(base: 10)}");
+  // Unsigned arithmetic wraps modulo 2^256.
+  u256 wrapped = word + word; // 2^256 == 0 (mod 2^256)
+  print_line("sum wraps to: {wrapped.to_string(base: 10)}");
+
+  print_line("--- signed 128 ---");
+  print_line("min: {i128.min.to_string(base: 10)}");
+  print_line("max:  {i128.max.to_string(base: 10)}");
+}

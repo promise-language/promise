@@ -258,6 +258,7 @@ func (*FloatLit) exprTag() {}
 func splitNumericSuffix(text string) (raw, suffix string) {
 	// Known suffixes ordered longest-first for correct matching.
 	suffixes := []string{
+		"i128", "u128", "i256", "u256", "i512", "u512",
 		"i16", "i32", "i64", "u16", "u32", "u64", "f32", "f64",
 		"i8", "u8",
 		"i", "u",

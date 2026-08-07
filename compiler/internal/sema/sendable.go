@@ -19,6 +19,7 @@ func isSendableType(typ types.Type, visited map[types.Type]bool) bool {
 	switch typ {
 	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
 		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypI128, types.TypU128, types.TypI256, types.TypU256, types.TypI512, types.TypU512,
 		types.TypF32, types.TypF64,
 		types.TypBool, types.TypChar, types.TypString, types.TypNone, types.TypVoid:
 		return true
@@ -115,6 +116,7 @@ func isSharableType(typ types.Type, visited map[types.Type]bool) bool {
 	switch typ {
 	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
 		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypI128, types.TypU128, types.TypI256, types.TypU256, types.TypI512, types.TypU512,
 		types.TypF32, types.TypF64,
 		types.TypBool, types.TypChar, types.TypString, types.TypNone, types.TypVoid:
 		return true

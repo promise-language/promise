@@ -25,6 +25,12 @@ func (c *Checker) validateBuiltins() {
 		"u16":  types.TypU16,
 		"u32":  types.TypU32,
 		"u64":  types.TypU64,
+		"i128": types.TypI128,
+		"u128": types.TypU128,
+		"i256": types.TypI256,
+		"u256": types.TypU256,
+		"i512": types.TypI512,
+		"u512": types.TypU512,
 		"f32":  types.TypF32,
 		"f64":  types.TypF64,
 	}

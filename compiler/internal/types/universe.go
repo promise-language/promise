@@ -16,6 +16,12 @@ var (
 	TypU16    *Named
 	TypU32    *Named
 	TypU64    *Named
+	TypI128   *Named
+	TypU128   *Named
+	TypI256   *Named
+	TypU256   *Named
+	TypI512   *Named
+	TypU512   *Named
 	TypF32    *Named
 	TypF64    *Named
 	TypBool   *Named
@@ -81,6 +87,12 @@ func init() {
 	TypU16 = defNamed("u16")
 	TypU32 = defNamed("u32")
 	TypU64 = defNamed("u64")
+	TypI128 = defNamed("i128")
+	TypU128 = defNamed("u128")
+	TypI256 = defNamed("i256")
+	TypU256 = defNamed("u256")
+	TypI512 = defNamed("i512")
+	TypU512 = defNamed("u512")
 	TypF32 = defNamed("f32")
 	TypF64 = defNamed("f64")
 	TypBool = defNamed("bool")

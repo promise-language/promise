@@ -144,6 +144,122 @@ _format_with_prefix_width(string digits, bool negative, int base, bool prefix, i
   return result;
 }
 
+// _digit_value returns the numeric value of an ASCII digit character for bases
+// up to 36 (0-9, a-z, A-Z), or -1 if the character is not a valid digit.
+_digit_value(int c) int {
+  if c >= 48 && c <= 57 {
+    return c - 48; // '0'..'9'
+  }
+  if c >= 97 && c <= 122 {
+    return c - 97 + 10; // 'a'..'z'
+  }
+  if c >= 65 && c <= 90 {
+    return c - 65 + 10; // 'A'..'Z'
+  }
+  return -1;
+}
+
+// _reverse_bytes reads a byte vector back-to-front into a string. Used by the
+// wide-integer digit loops, which emit digits least-significant first.
+_reverse_bytes(u8[] src) string {
+  Builder out = Builder(capacity: src.len);
+  int i = src.len - 1;
+  while i >= 0 {
+    out.buf.push(src[i]);
+    i = i - 1;
+  }
+  return out.to_string();
+}
+
+// _wide_int_format_128 renders the magnitude of a 128-bit value as digit
+// characters in the given base (2-36). Base 16 uses the shift/mask fast path
+// (no division); other bases use the division loop (soft-arith libcall).
+_wide_int_format_128(u128 value, int base) string {
+  if base < 2 {
+    return "0";
+  }
+  if value == 0u128 {
+    return "0";
+  }
+  string alpha = "0123456789abcdefghijklmnopqrstuvwxyz";
+  Builder rev = Builder(capacity: 40);
+  if base == 16 {
+    u128 v = value;
+    while v > 0u128 {
+      int digit = (v & 0xfu128) as! int;
+      rev.buf.push(alpha.byte_at(digit));
+      v = v >> 4u128;
+    }
+  } else {
+    u128 b = base as! u128;
+    u128 v = value;
+    while v > 0u128 {
+      int digit = (v % b) as! int;
+      rev.buf.push(alpha.byte_at(digit));
+      v = v / b;
+    }
+  }
+  return _reverse_bytes(rev.buf);
+}
+
+// _wide_int_format_256 — 256-bit variant of _wide_int_format_128.
+_wide_int_format_256(u256 value, int base) string {
+  if base < 2 {
+    return "0";
+  }
+  if value == 0u256 {
+    return "0";
+  }
+  string alpha = "0123456789abcdefghijklmnopqrstuvwxyz";
+  Builder rev = Builder(capacity: 72);
+  if base == 16 {
+    u256 v = value;
+    while v > 0u256 {
+      int digit = (v & 0xfu256) as! int;
+      rev.buf.push(alpha.byte_at(digit));
+      v = v >> 4u256;
+    }
+  } else {
+    u256 b = base as! u256;
+    u256 v = value;
+    while v > 0u256 {
+      int digit = (v % b) as! int;
+      rev.buf.push(alpha.byte_at(digit));
+      v = v / b;
+    }
+  }
+  return _reverse_bytes(rev.buf);
+}
+
+// _wide_int_format_512 — 512-bit variant of _wide_int_format_128.
+_wide_int_format_512(u512 value, int base) string {
+  if base < 2 {
+    return "0";
+  }
+  if value == 0u512 {
+    return "0";
+  }
+  string alpha = "0123456789abcdefghijklmnopqrstuvwxyz";
+  Builder rev = Builder(capacity: 136);
+  if base == 16 {
+    u512 v = value;
+    while v > 0u512 {
+      int digit = (v & 0xfu512) as! int;
+      rev.buf.push(alpha.byte_at(digit));
+      v = v >> 4u512;
+    }
+  } else {
+    u512 b = base as! u512;
+    u512 v = value;
+    while v > 0u512 {
+      int digit = (v % b) as! int;
+      rev.buf.push(alpha.byte_at(digit));
+      v = v / b;
+    }
+  }
+  return _reverse_bytes(rev.buf);
+}
+
 // _f64_format formats an f64 with optional precision and scientific notation.
 _f64_format(f64 value, int? precision, bool scientific) string {
   // Handle special values

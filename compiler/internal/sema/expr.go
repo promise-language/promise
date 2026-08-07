@@ -2,9 +2,8 @@ package sema
 
 import (
 	"fmt"
-	"math"
+	"math/big"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/promise-language/promise/compiler/internal/ast"
@@ -30,6 +29,18 @@ func suffixToType(suffix string) types.Type {
 		return types.TypU32
 	case "u64":
 		return types.TypU64
+	case "i128":
+		return types.TypI128
+	case "u128":
+		return types.TypU128
+	case "i256":
+		return types.TypI256
+	case "u256":
+		return types.TypU256
+	case "i512":
+		return types.TypI512
+	case "u512":
+		return types.TypU512
 	case "i":
 		return types.TypInt
 	case "u":
@@ -44,61 +55,82 @@ func suffixToType(suffix string) types.Type {
 
 // isSignedIntSuffix reports whether suffix is a signed integer suffix.
 func isSignedIntSuffix(suffix string) bool {
-	return suffix == "i" || suffix == "i8" || suffix == "i16" || suffix == "i32" || suffix == "i64"
+	return suffix == "i" || suffix == "i8" || suffix == "i16" || suffix == "i32" || suffix == "i64" ||
+		suffix == "i128" || suffix == "i256" || suffix == "i512"
+}
+
+// intTypeBitWidth returns the bit width and signedness of an integer type,
+// plus whether typ is an integer type at all. Widths >64 cover the wide
+// integer ladder (i128/u128/i256/u256/i512/u512).
+func intTypeBitWidth(typ types.Type) (width uint, signed, ok bool) {
+	switch typ {
+	case types.TypI8:
+		return 8, true, true
+	case types.TypI16:
+		return 16, true, true
+	case types.TypI32:
+		return 32, true, true
+	case types.TypInt, types.TypI64:
+		return 64, true, true
+	case types.TypI128:
+		return 128, true, true
+	case types.TypI256:
+		return 256, true, true
+	case types.TypI512:
+		return 512, true, true
+	case types.TypU8:
+		return 8, false, true
+	case types.TypU16:
+		return 16, false, true
+	case types.TypU32:
+		return 32, false, true
+	case types.TypUint, types.TypU64:
+		return 64, false, true
+	case types.TypU128:
+		return 128, false, true
+	case types.TypU256:
+		return 256, false, true
+	case types.TypU512:
+		return 512, false, true
+	}
+	return 0, false, false
 }
 
 // validateIntRange checks that a raw integer literal value fits in the target
 // type. When negated is true, the value is checked as -(raw) against the
-// signed minimum. Returns an error message or "" if valid.
+// signed minimum. Returns an error message or "" if valid. Uses arbitrary
+// precision so wide literals (>64-bit) are range-checked losslessly.
 func validateIntRange(raw string, typ types.Type, negated bool) string {
 	cleanRaw := strings.ReplaceAll(raw, "_", "")
-	val, err := strconv.ParseUint(cleanRaw, 0, 64)
-	if err != nil {
-		// Try signed parse for edge cases
-		sval, serr := strconv.ParseInt(cleanRaw, 0, 64)
-		if serr != nil {
-			return fmt.Sprintf("invalid integer literal: %s", raw)
-		}
-		val = uint64(sval)
+	val, ok := new(big.Int).SetString(cleanRaw, 0)
+	if !ok {
+		return fmt.Sprintf("invalid integer literal: %s", raw)
 	}
 
-	var maxPos uint64
-	var minNeg uint64 // absolute value of minimum (e.g. 128 for i8)
-	switch typ {
-	case types.TypI8:
-		maxPos, minNeg = math.MaxInt8, 128
-	case types.TypI16:
-		maxPos, minNeg = math.MaxInt16, 32768
-	case types.TypI32:
-		maxPos, minNeg = math.MaxInt32, 2147483648
-	case types.TypInt, types.TypI64:
-		maxPos, minNeg = math.MaxInt64, 9223372036854775808
-	case types.TypU8:
-		maxPos = math.MaxUint8
-	case types.TypU16:
-		maxPos = math.MaxUint16
-	case types.TypU32:
-		maxPos = math.MaxUint32
-	case types.TypUint, types.TypU64:
-		maxPos = math.MaxUint64
-	default:
+	width, signed, isInt := intTypeBitWidth(typ)
+	if !isInt {
 		return ""
 	}
 
-	switch {
-	case typ == types.TypUint || typ == types.TypU8 || typ == types.TypU16 || typ == types.TypU32 || typ == types.TypU64:
-		if val > maxPos {
-			return fmt.Sprintf("value %s overflows %s (max %d)", raw, typ, maxPos)
-		}
-	default: // signed
+	one := big.NewInt(1)
+	if signed {
+		// maxPos = 2^(width-1) - 1 ; minNeg (abs of min) = 2^(width-1)
+		maxPos := new(big.Int).Sub(new(big.Int).Lsh(one, width-1), one)
+		minNeg := new(big.Int).Lsh(one, width-1)
 		if negated {
-			if val > minNeg {
-				return fmt.Sprintf("value -%s overflows %s (min -%d)", raw, typ, minNeg)
+			if val.Cmp(minNeg) > 0 {
+				return fmt.Sprintf("value -%s overflows %s (min -%s)", raw, typ, minNeg.String())
 			}
 		} else {
-			if val > maxPos {
-				return fmt.Sprintf("value %s overflows %s (max %d)", raw, typ, maxPos)
+			if val.Cmp(maxPos) > 0 {
+				return fmt.Sprintf("value %s overflows %s (max %s)", raw, typ, maxPos.String())
 			}
+		}
+	} else {
+		// maxPos = 2^width - 1
+		maxPos := new(big.Int).Sub(new(big.Int).Lsh(one, width), one)
+		if val.Cmp(maxPos) > 0 {
+			return fmt.Sprintf("value %s overflows %s (max %s)", raw, typ, maxPos.String())
 		}
 	}
 	return ""
@@ -106,12 +138,8 @@ func validateIntRange(raw string, typ types.Type, negated bool) string {
 
 // isIntegerType reports whether t is any integer type (signed or unsigned).
 func isIntegerType(t types.Type) bool {
-	switch t {
-	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
-		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64:
-		return true
-	}
-	return false
+	_, _, ok := intTypeBitWidth(t)
+	return ok
 }
 
 // isFloatType reports whether t is any float type.
@@ -4516,6 +4544,7 @@ func isPrimitiveOrString(n *types.Named) bool {
 	switch n {
 	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
 		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypI128, types.TypU128, types.TypI256, types.TypU256, types.TypI512, types.TypU512,
 		types.TypF32, types.TypF64, types.TypBool, types.TypChar, types.TypString:
 		return true
 	}

@@ -18,6 +18,7 @@ func IsCopy(typ Type) bool {
 	switch typ {
 	case TypInt, TypI8, TypI16, TypI32, TypI64,
 		TypUint, TypU8, TypU16, TypU32, TypU64,
+		TypI128, TypU128, TypI256, TypU256, TypI512, TypU512,
 		TypF32, TypF64,
 		TypBool, TypChar, TypNone, TypVoid:
 		return true

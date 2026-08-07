@@ -2291,8 +2291,14 @@ func (c *Compiler) declareIntrinsics() {
 
 	// WASM: emit __multi3 (128-bit multiply) — LLVM may lower 64-bit multiply
 	// chains into __multi3 calls, which wasm32 doesn't natively provide.
+	// Also emit the 128-bit division/remainder builtins (__udivti3, __umodti3,
+	// __divti3, __modti3) that i128/u128 `/` and `%` lower to — wasm32 has no
+	// compiler-rt linked, so these must be provided in-IR (T0587). LLVM's
+	// ExpandLargeDivRem pass inline-expands >128-bit div/rem, so only the
+	// 128-bit width needs a libcall.
 	if c.isWasm {
 		c.emitMulti3()
+		c.emitDivTi3()
 	}
 
 	// Signal pipe read fd global (NOT TLS — dispatch goroutine reads from it)
@@ -2413,6 +2419,128 @@ func (c *Compiler) emitMulti3() {
 	result := entry.NewOr(hiShifted, resultLoWide)
 
 	entry.NewRet(result)
+}
+
+// emitDivTi3 emits the 128-bit integer division/remainder builtins for WASM:
+// __udivti3 (unsigned quotient), __umodti3 (unsigned remainder), __divti3
+// (signed quotient), __modti3 (signed remainder). LLVM lowers i128/u128 `/`
+// and `%` to these libcalls, which wasm32 does not provide (no compiler-rt).
+//
+// Core routine is an internal shift-subtract long-division helper returning
+// {quotient, remainder}; the four public builtins wrap it. Division by zero is
+// undefined (as elsewhere in Promise) — the loop simply produces an all-ones
+// quotient rather than trapping.
+func (c *Compiler) emitDivTi3() {
+	i128 := irtypes.I128
+	udivmod := c.emitUdivmod128()
+
+	// __udivti3(a, b) -> a / b   (unsigned)
+	udiv := c.module.NewFunc("__udivti3", i128,
+		ir.NewParam("a", i128), ir.NewParam("b", i128))
+	{
+		e := udiv.NewBlock(".entry")
+		qr := e.NewCall(udivmod, udiv.Params[0], udiv.Params[1])
+		e.NewRet(e.NewExtractValue(qr, 0))
+	}
+
+	// __umodti3(a, b) -> a % b   (unsigned)
+	umod := c.module.NewFunc("__umodti3", i128,
+		ir.NewParam("a", i128), ir.NewParam("b", i128))
+	{
+		e := umod.NewBlock(".entry")
+		qr := e.NewCall(udivmod, umod.Params[0], umod.Params[1])
+		e.NewRet(e.NewExtractValue(qr, 1))
+	}
+
+	// __divti3(a, b) -> a / b   (signed): divide magnitudes, apply xor of signs.
+	sdiv := c.module.NewFunc("__divti3", i128,
+		ir.NewParam("a", i128), ir.NewParam("b", i128))
+	{
+		e := sdiv.NewBlock(".entry")
+		a, b := sdiv.Params[0], sdiv.Params[1]
+		sa := e.NewAShr(a, constant.NewInt(i128, 127)) // 0 or -1
+		sb := e.NewAShr(b, constant.NewInt(i128, 127))
+		absA := e.NewSub(e.NewXor(a, sa), sa)
+		absB := e.NewSub(e.NewXor(b, sb), sb)
+		qr := e.NewCall(udivmod, absA, absB)
+		q := e.NewExtractValue(qr, 0)
+		sign := e.NewXor(sa, sb)
+		e.NewRet(e.NewSub(e.NewXor(q, sign), sign))
+	}
+
+	// __modti3(a, b) -> a % b   (signed): remainder takes the dividend's sign.
+	smod := c.module.NewFunc("__modti3", i128,
+		ir.NewParam("a", i128), ir.NewParam("b", i128))
+	{
+		e := smod.NewBlock(".entry")
+		a, b := smod.Params[0], smod.Params[1]
+		sa := e.NewAShr(a, constant.NewInt(i128, 127))
+		sb := e.NewAShr(b, constant.NewInt(i128, 127))
+		absA := e.NewSub(e.NewXor(a, sa), sa)
+		absB := e.NewSub(e.NewXor(b, sb), sb)
+		qr := e.NewCall(udivmod, absA, absB)
+		r := e.NewExtractValue(qr, 1)
+		e.NewRet(e.NewSub(e.NewXor(r, sa), sa)) // apply dividend sign
+	}
+}
+
+// emitUdivmod128 emits an internal helper computing unsigned 128-bit
+// division and remainder together via a shift-subtract loop, returning
+// {quotient, remainder}. Used by the __*ti3 builtins above.
+func (c *Compiler) emitUdivmod128() *ir.Func {
+	i128 := irtypes.I128
+	retTy := irtypes.NewStruct(i128, i128)
+	fn := c.module.NewFunc("__promise_udivmod128", retTy,
+		ir.NewParam("a", i128), ir.NewParam("b", i128))
+	// External linkage (not internal): the main IR holds the definition; split
+	// module/instance .bc files reference it as an extern declaration resolved
+	// at link time — same pattern as __multi3. Internal linkage would strip to
+	// an invalid `declare internal` in those split IRs (T0587).
+	a, b := fn.Params[0], fn.Params[1]
+
+	entry := fn.NewBlock(".entry")
+	head := fn.NewBlock(".head")
+	body := fn.NewBlock(".body")
+	exit := fn.NewBlock(".exit")
+
+	entry.NewBr(head)
+
+	// Classic MSB-first long division. Shift the combined {rem:num} pair left by
+	// one bit per iteration, pulling the top bit of `num` into `rem`, and shift
+	// the quotient left, setting its low bit when rem >= b. All shifts are by a
+	// COMPILE-TIME-CONSTANT amount (1 or 127) so llc lowers them inline on wasm —
+	// avoiding the variable-shift libcalls (__lshrti3/__ashlti3) that wasm lacks.
+	one := constant.NewInt(i128, 1)
+	c127 := constant.NewInt(i128, 127)
+	iPhi := head.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), entry))
+	qPhi := head.NewPhi(ir.NewIncoming(constant.NewInt(i128, 0), entry))
+	rPhi := head.NewPhi(ir.NewIncoming(constant.NewInt(i128, 0), entry))
+	nPhi := head.NewPhi(ir.NewIncoming(a, entry))
+	cond := head.NewICmp(enum.IPredSLT, iPhi, constant.NewInt(irtypes.I32, 128))
+	head.NewCondBr(cond, body, exit)
+
+	// rem = (rem << 1) | (num >> 127); num <<= 1; quo <<= 1
+	topBit := body.NewLShr(nPhi, c127)
+	rShift := body.NewOr(body.NewShl(rPhi, one), topBit)
+	nNew := body.NewShl(nPhi, one)
+	qShift := body.NewShl(qPhi, one)
+	// if rem >= b: rem -= b; quo |= 1
+	ge := body.NewICmp(enum.IPredUGE, rShift, b)
+	rNew := body.NewSelect(ge, body.NewSub(rShift, b), rShift)
+	qNew := body.NewSelect(ge, body.NewOr(qShift, one), qShift)
+	iNext := body.NewAdd(iPhi, constant.NewInt(irtypes.I32, 1))
+	body.NewBr(head)
+
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, body))
+	qPhi.Incs = append(qPhi.Incs, ir.NewIncoming(qNew, body))
+	rPhi.Incs = append(rPhi.Incs, ir.NewIncoming(rNew, body))
+	nPhi.Incs = append(nPhi.Incs, ir.NewIncoming(nNew, body))
+
+	agg := exit.NewInsertValue(constant.NewUndef(retTy), qPhi, 0)
+	agg2 := exit.NewInsertValue(agg, rPhi, 1)
+	exit.NewRet(agg2)
+
+	return fn
 }
 
 // strInstanceType returns the canonical string instance struct type.

@@ -693,7 +693,8 @@ func (c *Checker) typeToTypeRef(typ types.Type) ast.TypeRef {
 func (c *Checker) zeroValueExpr(typ types.Type) ast.Expr {
 	switch typ {
 	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
-		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64:
+		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypI128, types.TypU128, types.TypI256, types.TypU256, types.TypI512, types.TypU512:
 		return intLit(0)
 	case types.TypF32, types.TypF64:
 		return &ast.FloatLit{Raw: "0.0"}

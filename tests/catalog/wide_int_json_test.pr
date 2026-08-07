@@ -1,0 +1,40 @@
+// tests/catalog/wide_int_json_test.pr — JSON encode/decode of wide integers.
+// Wide integers serialize as decimal strings (Ethereum-style), preserving the
+// full value losslessly through the json module. See docs/large-integers.md §6.
+use json;
+
+type Account `serializable `public {
+  u128 id;
+  i256 balance;
+}
+
+wide_int_json_round_trip() `test {
+  Account a = Account(id: 0xdeadbeefcafebabedeadbeefcafebabeu128, balance: -12345678901234567890i256);
+  string s = json.encode_string(a)?!;
+  Account b = json.decode_string[Account](move s)?!;
+  assert(b.id == a.id, "u128 id survives JSON round-trip");
+  assert(b.balance == a.balance, "i256 balance survives JSON round-trip");
+}
+
+wide_int_json_extremes() `test {
+  Account a = Account(id: u128.max, balance: i256.max);
+  string s = json.encode_string(a)?!;
+  Account b = json.decode_string[Account](move s)?!;
+  assert(b.id == u128.max, "u128.max round-trip");
+  assert(b.balance == i256.max, "i256.max round-trip");
+}
+
+// A `skip wide-integer field must not disable decode synthesis: wide ints have
+// a well-defined zero value, so the field is reconstructed as 0 on decode.
+type Wallet `serializable `public {
+  u128 address;
+  u512 nonce `skip;
+}
+
+wide_int_json_skip_field() `test {
+  Wallet w = Wallet(address: 0xabcdu128, nonce: 7u512);
+  string s = json.encode_string(w)?!;
+  Wallet back = json.decode_string[Wallet](move s)?!;
+  assert(back.address == 0xabcdu128, "address round-trip");
+  assert(back.nonce == 0u512, "skip field decodes to zero");
+}

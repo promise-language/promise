@@ -1,0 +1,290 @@
+// tests/std/wide_int_test.pr — wide integer types (i128/u128/i256/u256/i512/u512)
+// --- Arithmetic (128) ---
+u128_arith() `test {
+  u128 a = 1000000000000000000000u128; // 10^21, exceeds u64
+  u128 b = 3u128;
+  assert(a + b == 1000000000000000000003u128, "u128 add");
+  assert(a - b == 999999999999999999997u128, "u128 sub");
+  assert(a * b == 3000000000000000000000u128, "u128 mul");
+  assert(a / b == 333333333333333333333u128, "u128 div"); // exercises __udivti3
+  assert(a % b == 1u128, "u128 rem");
+}
+
+i128_arith() `test {
+  i128 a = -1000000000000000000000i128;
+  i128 b = 7i128;
+  assert(a + b == -999999999999999999993i128, "i128 add");
+  assert(a * -1i128 == 1000000000000000000000i128, "i128 negate mul");
+  assert(a / b == -142857142857142857142i128, "i128 div"); // exercises __divti3
+  assert(-a > 0i128, "i128 unary minus");
+}
+
+// --- Comparison / bitwise (128) ---
+u128_bitwise() `test {
+  u128 x = 0xff00ff00ff00ff00ff00ff00ff00ff00u128;
+  u128 y = 0x00ff00ff00ff00ff00ff00ff00ff00ffu128;
+  assert((x & y) == 0u128, "and");
+  assert((x | y) == u128.max, "or");
+  assert((x ^ y) == u128.max, "xor");
+  assert(~0u128 == u128.max, "not");
+  assert((1u128 << 100u128) >> 100u128 == 1u128, "shift");
+  assert(x > y, "gt");
+  assert(y < x, "lt");
+}
+
+// --- Boundaries ---
+wide_bounds() `test {
+  assert(u128.min == 0u128, "u128 min");
+  assert(u128.max == 340282366920938463463374607431768211455u128, "u128 max");
+  assert(i128.max == 170141183460469231731687303715884105727i128, "i128 max");
+  assert(i128.min == -170141183460469231731687303715884105727i128 - 1i128, "i128 min");
+  assert(i128.min < 0i128, "i128 min negative");
+  assert(i128.max + 1i128 == i128.min, "i128 wrap");
+  assert(u256.max == ~0u256, "u256 max");
+  assert(u512.max == ~0u512, "u512 max");
+}
+
+// --- Casts ---
+wide_casts() `test {
+  i128 a = 42i128;
+  i64 narrow = a as! i64;
+  assert(narrow == 42i64, "widen->narrow");
+  i256 wide = a as! i256;
+  assert(wide == 42i256, "widen 128->256");
+  u128 ub = a as! u128;
+  assert(ub == 42u128, "signed->unsigned same width");
+  i128 fromi64 = 12345i64 as! i128;
+  assert(fromi64 == 12345i128, "i64->i128 sign extend");
+  // narrow truncates lower bits
+  u128 big = 0x1_0000_0000_0000_0001u128;
+  assert((big as! u64) == 1u64, "truncate to u64");
+  // signed widen sign-extends
+  i128 neg = -5i128;
+  assert((neg as! i256) == -5i256, "negative sign extend");
+  // float <-> wide
+  u128 fromf = 100.0 as! u128;
+  assert(fromf == 100u128, "f64->u128");
+  f64 tof = 256u128 as! f64;
+  assert(tof == 256.0, "u128->f64");
+}
+
+// --- to_string / parse round-trips (base 16 default + explicit base 10) ---
+wide_format_parse() `test {
+  u128 v = 0xdeadbeefcafebabeu128;
+  assert(v.to_string() == "deadbeefcafebabe", "default base 16");
+  assert(v.to_string(base: 10) == "16045690984503098046", "base 10");
+  assert(v.to_string(prefix: true) == "0xdeadbeefcafebabe", "hex prefix");
+  // round trip via Scanner using the default base (16). Exercises the
+  // Parse-interface default-param path through a concrete call. (scan[u128](s)
+  // would route the same call through generic structural dispatch, which drops
+  // the defaulted base — tracked as T1395; use a direct call until it lands.)
+  u128 rt16 = u128.parse(Scanner(s: "deadbeefcafebabe"))?!;
+  assert(rt16 == v, "parse default base 16");
+  u128 rt10 = u128.parse(Scanner(s: "16045690984503098046"), 10)?!;
+  assert(rt10 == v, "parse base 10");
+  // signed
+  i128 s = -255i128;
+  assert(s.to_string(base: 10) == "-255", "signed base 10");
+  assert(s.to_string() == "-ff", "signed base 16");
+  i128 sp = i128.parse(Scanner(s: "-ff"), 16)?!;
+  assert(sp == s, "parse signed base 16");
+}
+
+// --- Range / iteration ---
+wide_range() `test {
+  u128 sum = 0u128;
+  for i in 0u128..5u128 {
+    sum = sum + i;
+  }
+  assert(sum == 10u128, "exclusive range"); // 0+1+2+3+4
+  u128 total = 0u128;
+  for i in 1u128..=3u128 {
+    total = total + i;
+  }
+  assert(total == 6u128, "inclusive range");
+}
+
+// --- Hash (usable as map keys / set members) ---
+wide_hash() `test {
+  Set[u128] s = Set[u128]();
+  s.add(0xffffffffffffffffffffffffffffffffu128);
+  s.add(1u128);
+  assert(s.contains(0xffffffffffffffffffffffffffffffffu128), "set contains max");
+  assert(s.contains(1u128), "set contains 1");
+  assert(!s.contains(2u128), "set absent");
+  map[u128, string] m = map[u128, string]();
+  m[42u128] = "answer";
+  assert(m[42u128]! == "answer", "map lookup");
+}
+
+// --- 256-bit arithmetic + division ---
+wide_256() `test {
+  u256 a = 0x1_00000000_00000000_00000000_00000000u256; // 2^128
+  u256 b = a * a; // 2^256 overflow -> 0 (wraps)
+  assert(b == 0u256, "256 mul wrap");
+  u256 c = a - 1u256;
+  assert(c == 0xffffffffffffffffffffffffffffffffu256, "2^128 - 1"); // 2^128 - 1
+  u256 d = u256.max / 2u256; // exercises 256-bit division libcall
+  assert(d == 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffu256, "256 div");
+  assert(d.to_string(base: 10).len == 77, "256 decimal width");
+}
+
+// --- 512-bit arithmetic + division ---
+wide_512() `test {
+  u512 one = 1u512;
+  u512 big = one << 256u512;
+  assert(big / big == 1u512, "512 div self");
+  assert(big % (big - 1u512) == 1u512, "512 rem"); // exercises 512-bit rem libcall
+  assert((big - 1u512).to_string() == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "512 hex");
+  i512 neg = -12345678901234567890123456789012345678901234567890i512;
+  assert(neg.to_string(base: 10) == "-12345678901234567890123456789012345678901234567890", "512 signed decimal");
+}
+
+// --- parse error paths (raise) ---
+wide_parse_errors() `test {
+  // Empty input: no bytes at all -> "unexpected end of input".
+  bool empty_caught = false;
+  u128 e1 = u128.parse(Scanner(s: ""), 16)? err {
+    assert(err.message == "unexpected end of input", "empty msg");
+    empty_caught = true;
+    0u128;
+  };
+  assert(empty_caught, "empty input raises");
+  assert(e1 == 0u128, "empty fallback value");
+
+  // A leading non-digit character yields no digits -> "expected digit".
+  bool nondigit_caught = false;
+  u128 e2 = u128.parse(Scanner(s: "xyz"), 10)? err {
+    assert(err.message == "expected digit", "nondigit msg");
+    nondigit_caught = true;
+    0u128;
+  };
+  assert(nondigit_caught, "non-digit start raises");
+
+  // Signed: a lone minus with no following digit -> "expected digit".
+  bool minus_caught = false;
+  i128 e3 = i128.parse(Scanner(s: "-"), 10)? err {
+    assert(err.message == "expected digit", "lone minus msg");
+    minus_caught = true;
+    0i128;
+  };
+  assert(minus_caught, "lone minus raises");
+
+  // Signed empty input (never started) -> "unexpected end of input".
+  bool sempty_caught = false;
+  i256 e4 = i256.parse(Scanner(s: ""), 10)? err {
+    assert(err.message == "unexpected end of input", "signed empty msg");
+    sempty_caught = true;
+    0i256;
+  };
+  assert(sempty_caught, "signed empty raises");
+}
+
+// --- parse stops at first out-of-base / non-digit character ---
+wide_parse_partial() `test {
+  // Base 10: parsing halts at the first non-digit, returning the prefix.
+  u128 p = u128.parse(Scanner(s: "10zzz"), 10)?!;
+  assert(p == 10u128, "trailing garbage stops parse");
+  // Base 2: '0'/'1' consumed, '9' is out of range -> stops. "101" = 5.
+  u128 b2 = u128.parse(Scanner(s: "1019"), 2)?!;
+  assert(b2 == 5u128, "out-of-base digit stops parse");
+}
+
+// --- uppercase hex digits (exercises _digit_value A-Z branch) ---
+wide_uppercase_parse() `test {
+  u128 v = u128.parse(Scanner(s: "DEADBEEF"), 16)?!;
+  assert(v == 0xdeadbeefu128, "uppercase hex parses");
+  // Mixed case must also work.
+  u256 m = u256.parse(Scanner(s: "AbCdEf"), 16)?!;
+  assert(m == 0xabcdefu256, "mixed case hex parses");
+  // Signed negative uppercase.
+  i128 n = i128.parse(Scanner(s: "-FF"), 16)?!;
+  assert(n == -255i128, "negative uppercase hex parses");
+}
+
+// --- to_string width / fill / prefix formatting ---
+wide_format_width_fill() `test {
+  u128 v = 0xabu128; // 171
+  assert(v.to_string(width: 6) == "    ab", "space pad to width");
+  assert(v.to_string(width: 6, fill: '0') == "0000ab", "zero pad to width");
+  assert(v.to_string(base: 10, width: 5, fill: '0') == "00171", "decimal zero pad");
+  assert(v.to_string(base: 16, prefix: true, width: 8, fill: '0') == "0x0000ab", "prefix + pad");
+  // Width narrower than the value is a no-op (no truncation).
+  assert(v.to_string(width: 1) == "ab", "width below length");
+  // Signed negative with prefix + decimal.
+  i128 n = -171i128;
+  assert(n.to_string(base: 10) == "-171", "signed decimal");
+  assert(n.to_string(prefix: true) == "-0xab", "signed hex prefix");
+}
+
+// --- formatting edge cases ---
+wide_format_edge() `test {
+  // Zero renders as "0" in every base and at every width.
+  assert(0u128.to_string() == "0", "zero hex");
+  assert(0u256.to_string(base: 10) == "0", "zero decimal 256");
+  assert(0u512.to_string() == "0", "zero hex 512");
+  // base < 2 is guarded and yields "0" rather than looping forever.
+  assert(0xffu128.to_string(base: 1) == "0", "base 1 guarded");
+  assert(0xffu128.to_string(base: 0) == "0", "base 0 guarded");
+  // Base 2 and base 36 exercise the division slow path at the extremes.
+  assert(5u128.to_string(base: 2) == "101", "base 2");
+  assert(35u128.to_string(base: 36) == "z", "base 36 max digit");
+}
+
+// --- increment / decrement operators ---
+wide_incr_decr() `test {
+  u128 a = 5u128;
+  a++;
+  assert(a == 6u128, "u128 increment");
+  a--;
+  assert(a == 5u128, "u128 decrement");
+  i256 b = -1i256;
+  b++;
+  assert(b == 0i256, "i256 increment across zero");
+  b--;
+  assert(b == -1i256, "i256 decrement across zero");
+}
+
+// --- remaining comparison operators (<=, >=, !=) ---
+wide_comparisons() `test {
+  assert(5u128 <= 5u128, "u128 le equal");
+  assert(5u128 <= 6u128, "u128 le less");
+  assert(!(6u128 <= 5u128), "u128 le false");
+  assert(6u128 >= 6u128, "u128 ge equal");
+  assert(6u128 >= 5u128, "u128 ge greater");
+  assert(5u128 != 6u128, "u128 ne");
+  assert(!(5u128 != 5u128), "u128 ne false");
+  // Signed comparisons must treat the sign bit correctly.
+  assert(-5i256 < -3i256, "i256 negative ordering");
+  assert(-5i256 <= -5i256, "i256 negative le");
+  assert(-3i256 >= -5i256, "i256 negative ge");
+  assert(i512.min < i512.max, "i512 min < max");
+}
+
+// --- Format structural interface via a Writer (format! method) ---
+_wide_write_through(Writer ~w, u128 v) {
+  v.format(w)?!;
+}
+
+wide_format_interface() `test {
+  Builder b = Builder();
+  _wide_write_through(b, 0xabu128);
+  assert(b.to_string() == "ab", "format! writes hex through Writer");
+  // Signed value through the same path.
+  Builder b2 = Builder();
+  (-255i128).format(b2)?!;
+  assert(b2.to_string() == "-ff", "signed format! through Writer");
+}
+
+// --- encode / decode round-trip (decimal string, lossless) ---
+wide_encode_decode() `test {
+  u128 v = u128.max;
+  string s = v.to_string(base: 10);
+  u128 back = u128.parse(Scanner(s: move s), 10)?!;
+  assert(back == v, "u128 decimal round-trip");
+
+  i256 n = -99999999999999999999999999999999i256;
+  string sn = n.to_string(base: 10);
+  i256 bn = i256.parse(Scanner(s: move sn), 10)?!;
+  assert(bn == n, "i256 negative decimal round-trip");
+}

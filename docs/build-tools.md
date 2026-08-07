@@ -64,10 +64,22 @@ git config core.hooksPath .githooks
 
 Downloads the ANTLR 4.13.1 JAR (if not cached) and generates the Go lexer/parser from the grammar files:
 - Input: `compiler/grammar/PromiseLexer.g4`, `compiler/grammar/PromiseParser.g4`
-- Output: `compiler/internal/parser/` (Go source files)
-- Requires: Java 11+
+- Output: `compiler/internal/parser/` (Go source files, **committed**)
+- Requires: Java 11+ (only when regeneration is actually needed)
 
-Generation is skipped if the output is up to date.
+Generation is skipped when the output is up to date. Staleness is determined by a
+committed content-hash sidecar, **not** file modification times: `GenerateParser`
+computes an FNV-128a hash of the `.g4` files and stores it in
+`compiler/internal/parser/.grammar.hash` (committed alongside the generated Go
+parser). A build regenerates only when that sidecar is missing or its hash no
+longer matches the current grammar; after regenerating, the sidecar is rewritten.
+
+The hash normalizes line endings to LF before hashing, and `.gitattributes` pins
+`*.g4` / `.grammar.hash` to `eol=lf`, so a Windows checkout (git `core.autocrlf`)
+matches the LF-committed sidecar. This is deliberate: git does not preserve mtime
+ordering across checkouts, so the previous mtime comparison spuriously regenerated
+the parser (and required a JRE + ANTLR download) on every fresh clone/worktree,
+Windows most of all (T1407). `bin/build --generate` forces regeneration regardless.
 
 ### 3. Resource embedding
 

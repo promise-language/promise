@@ -1,11 +1,15 @@
 package common
 
 import (
+	"bytes"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 const (
@@ -96,32 +100,80 @@ func GenerateParser(root string, force bool) error {
 		return fmt.Errorf("generate parser: %w", err)
 	}
 
+	// Record the grammar hash so a later build can tell whether the committed
+	// parser is up to date without relying on file mtimes (which git does not
+	// preserve across checkouts).
+	hash, err := grammarHash(grammarDir)
+	if err != nil {
+		return fmt.Errorf("hash grammar: %w", err)
+	}
+	if err := os.WriteFile(grammarHashPath(parserPkg), []byte(hash+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write grammar hash: %w", err)
+	}
+
 	return nil
 }
 
-// parserUpToDate returns true if the generated parser files exist and are
-// newer than the grammar source files (.g4).
-func parserUpToDate(grammarDir, parserPkg string) bool {
-	// Check that the key output file exists.
-	parserFile := filepath.Join(parserPkg, "promise_parser.go")
-	parserInfo, err := os.Stat(parserFile)
+// grammarHashPath is the sidecar file recording the hash of the .g4 grammar
+// that produced the current generated parser. It is committed alongside the
+// generated Go parser files.
+func grammarHashPath(parserPkg string) string {
+	return filepath.Join(parserPkg, ".grammar.hash")
+}
+
+// grammarHash computes an FNV-128a hash of all .g4 grammar files (name + size +
+// contents), independent of file modification times. Line endings are
+// normalized to LF before hashing so the result is identical whether git checks
+// the grammar out with LF (POSIX) or CRLF (Windows core.autocrlf) — otherwise a
+// CRLF checkout would never match the LF-committed sidecar and would regenerate
+// on every build. Matches the content-hash pattern used by ToolsSourceHash.
+func grammarHash(grammarDir string) (string, error) {
+	g4s, err := filepath.Glob(filepath.Join(grammarDir, "*.g4"))
 	if err != nil {
+		return "", err
+	}
+	if len(g4s) == 0 {
+		return "", fmt.Errorf("no .g4 files in %s", grammarDir)
+	}
+	sort.Strings(g4s)
+
+	h := fnv.New128a()
+	for _, g4 := range g4s {
+		data, err := os.ReadFile(g4)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", g4, err)
+		}
+		data = normalizeLineEndings(data)
+		fmt.Fprintf(h, "%s\n%d\n", filepath.Base(g4), len(data))
+		h.Write(data)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// normalizeLineEndings collapses CRLF and lone CR to LF so content hashes are
+// stable across platforms regardless of git's checkout line-ending policy.
+func normalizeLineEndings(data []byte) []byte {
+	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+}
+
+// parserUpToDate returns true if the generated parser exists and the committed
+// grammar-hash sidecar matches the current .g4 grammar. This is deterministic
+// across fresh git checkouts, where file mtimes carry no ordering information
+// (T1407 — the old mtime comparison spuriously regenerated on Windows clones).
+func parserUpToDate(grammarDir, parserPkg string) bool {
+	// The key output file must exist.
+	if !Exists(filepath.Join(parserPkg, "promise_parser.go")) {
 		return false
 	}
 
-	// Find the newest grammar file.
-	g4s, err := filepath.Glob(filepath.Join(grammarDir, "*.g4"))
-	if err != nil || len(g4s) == 0 {
+	want, err := grammarHash(grammarDir)
+	if err != nil {
 		return false
 	}
-	for _, g4 := range g4s {
-		info, err := os.Stat(g4)
-		if err != nil {
-			return false
-		}
-		if info.ModTime().After(parserInfo.ModTime()) {
-			return false // grammar is newer than parser output
-		}
+	got, err := os.ReadFile(grammarHashPath(parserPkg))
+	if err != nil {
+		return false // no sidecar → regenerate (and create it)
 	}
-	return true
+	return strings.TrimSpace(string(got)) == want
 }

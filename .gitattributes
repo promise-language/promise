@@ -11,3 +11,9 @@ tests/embed/glob_fixtures/** -text
 # Windows scripts keep CRLF.
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+
+# ANTLR grammar and its generated-parser hash sidecar stay LF so the committed
+# grammarHash sidecar matches on a Windows checkout (the hash also normalizes
+# line endings, but pinning eol keeps the working tree canonical).
+*.g4 text eol=lf
+.grammar.hash text eol=lf

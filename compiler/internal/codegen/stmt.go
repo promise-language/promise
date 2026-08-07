@@ -4958,8 +4958,15 @@ func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCa
 	// {ok, value} instead of the error. Capturing here lets emitCloseErrCheck route
 	// the error into the goroutine's result aggregate (surfacing it at `<-t`),
 	// symmetric to a failable function propagating the close error via its return.
+	//
+	// T1390: same shape for a failable generator body. There c.canError is false
+	// (the generator ramp returns i8*), but c.generatorCanError is true. Without
+	// this a use-binding whose failable close() fails on the generator's SUCCESS
+	// exit would take the suppress path (error dropped) instead of surfacing at the
+	// failable consumer. Capturing here lets emitCloseErrCheck route the error into
+	// the generator's error_slot + final suspend (via emitGeneratorError).
 	var cap *closeErrCapture
-	if (c.canError || c.inFailableGoBlock) && !errorInFlight {
+	if (c.canError || c.inFailableGoBlock || (c.inGenerator && c.generatorCanError)) && !errorInFlight {
 		for i := len(c.scopeBindings) - 1; i >= fromIdx; i-- {
 			b := c.scopeBindings[i]
 			if b.kind == bindingClose && b.closeIsFailable {
@@ -11076,10 +11083,21 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// Generator return: bare return means "stop producing values"
 	if c.inGenerator {
 		if len(c.scopeBindings) > 0 {
-			c.emitScopeCleanup(0, false) // generators have canError=false, so no capture
+			// T1390: in a failable generator, emitScopeCleanup captures a failing
+			// use-binding close() error; emitCloseErrCheck routes it into the
+			// generator error_slot + final suspend. Discarding cap here would both
+			// drop the error and leak it (the error is extracted into cap.val but
+			// never checked/routed).
+			cap := c.emitScopeCleanup(0, false)
+			// emitScopeCleanup(0, ...) already cleaned the whole scope [0, end),
+			// so the error path has nothing left to unwind: outerFloor = 0.
+			c.emitCloseErrCheck(cap, 0)
 		}
-		// Branch to the single final suspend block
-		c.block.NewBr(c.generatorFinalSuspend)
+		// emitCloseErrCheck may have diverted the error path to the generator error
+		// slot (terminator already set); only its OK-continuation is un-terminated.
+		if c.block != nil && c.block.Term == nil {
+			c.block.NewBr(c.generatorFinalSuspend)
+		}
 		// c.block already has a terminator, so subsequent codegen is skipped
 		return
 	}

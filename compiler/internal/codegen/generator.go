@@ -743,7 +743,14 @@ func (c *Compiler) emitYieldValue(val value.Value) {
 
 		savedScope := c.scopeBindings
 		c.scopeBindings = snapshot
-		c.emitScopeCleanup(0, false)
+		// T1390: pass errorInFlight=true so a failing use-binding close() on this
+		// mid-flight DESTROY path (consumer broke before the generator completed)
+		// is suppressed+freed, not captured. This is a teardown sink heading to
+		// generatorCleanup/coro-free — there is no consumer waiting to receive an
+		// error and no emitCloseErrCheck follows, so a capture (only possible now
+		// that the T1390 guard fires for failable generators) would leak the error
+		// instance. Suppressing matches destructor-during-unwind semantics (T0135).
+		c.emitScopeCleanup(0, true)
 		c.scopeBindings = savedScope
 
 		c.block.NewBr(c.generatorCleanup)

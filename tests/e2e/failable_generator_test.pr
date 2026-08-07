@@ -295,3 +295,187 @@ test_failable_forin_inside_failable_generator_normal() `test {
   assert(results[1] == 11, "1*10 + 1 = 11");
   assert(results[2] == 21, "2*10 + 1 = 21");
 }
+
+// --- T1390: use-binding failable close() error surfaces from a failable generator ---
+
+type T1390CloseError is error {
+  int code;
+}
+
+// Resource whose close() raises on scope exit.
+type T1390FailResource {
+  int id;
+  close!(~this) void {
+    raise T1390CloseError(message: "close failed", code: 42);
+  }
+}
+
+// Resource whose close() succeeds (no-error control).
+type T1390OkResource {
+  int id;
+  close!(~this) void {
+  }
+}
+
+// Failable generator: use-binding lives to natural (fall-through) generator end.
+t1390_gen_fallthrough!() stream[int] {
+  use r := T1390FailResource(id: 1);
+  yield r.id;
+}
+
+// Failable generator: use-binding live at an early `return` inside the generator.
+t1390_gen_early_return!() stream[int] {
+  use r := T1390FailResource(id: 7);
+  if r.id > 0 {
+    yield r.id;
+    return;
+  }
+  yield 999;
+}
+
+// Failable generator whose close() succeeds — must yield correctly, no error.
+t1390_gen_ok!() stream[int] {
+  use r := T1390OkResource(id: 5);
+  yield r.id;
+  yield r.id + 1;
+}
+
+// Failable generator: early `return` with a SUCCEEDING use-binding close. Unlike
+// t1390_gen_early_return (whose close always raises and thus always diverts to the
+// generator error slot), here the genReturnStmt close-error check finds no error
+// at runtime, so its OK-continuation branch to the final suspend is taken —
+// exercising normal generator termination through the early-return capture path.
+t1390_gen_early_return_ok!() stream[int] {
+  use r := T1390OkResource(id: 8);
+  if r.id > 0 {
+    yield r.id;
+    return;
+  }
+  yield 999;
+}
+
+// Failable generator: break out of an inner loop with a live use-binding, then
+// fall through to the generator's success exit where close() raises.
+t1390_gen_break!() stream[int] {
+  use r := T1390FailResource(id: 3);
+  int i = 0;
+  while true {
+    if i >= 1 {
+      break;
+    }
+    yield r.id + i;
+    i = i + 1;
+  }
+}
+
+// Failable generator with a live failing use-binding across MULTIPLE yields —
+// used to exercise the mid-flight DESTROY path (consumer breaks before the
+// generator completes). The generator is torn down while `r` is still live, so
+// its failing close() runs on the destroy sink where no consumer is waiting.
+t1390_gen_multi!() stream[int] {
+  use r := T1390FailResource(id: 2);
+  yield r.id;
+  yield r.id + 10;
+  yield r.id + 20;
+}
+
+t1390_consume_fallthrough!() int {
+  int total = 0;
+  for v in t1390_gen_fallthrough()?^ {
+    total = total + v;
+  }
+  return total;
+}
+
+t1390_consume_early_return!() int {
+  int total = 0;
+  for v in t1390_gen_early_return()?^ {
+    total = total + v;
+  }
+  return total;
+}
+
+t1390_consume_break!() int {
+  int total = 0;
+  for v in t1390_gen_break()?^ {
+    total = total + v;
+  }
+  return total;
+}
+
+test_t1390_gen_use_close_surfaces_fallthrough() `test {
+  // The failing close() on the generator's success exit must surface at the
+  // failable consumer (was silently dropped before T1390).
+  bool got = false;
+  int v = t1390_consume_fallthrough()? e {
+    got = true;
+    assert(e.message == "close failed", "generator use-close error surfaces");
+    -1
+  };
+  assert(got, "generator use-close error should surface (fall-through)");
+  assert(v == -1, "catch handler value used");
+}
+
+test_t1390_gen_use_close_surfaces_early_return() `test {
+  // use-binding live at an early `return` inside the generator: error surfaces
+  // and — critically — no leak (the return path must check the captured error).
+  bool got = false;
+  int v = t1390_consume_early_return()? e {
+    got = true;
+    assert(e.message == "close failed", "early-return use-close error surfaces");
+    -2
+  };
+  assert(got, "generator use-close error should surface (early return)");
+  assert(v == -2, "catch handler value used");
+}
+
+test_t1390_gen_use_close_surfaces_break() `test {
+  // break out of an inner loop, then close() raises on the success exit.
+  bool got = false;
+  int v = t1390_consume_break()? e {
+    got = true;
+    assert(e.message == "close failed", "break use-close error surfaces");
+    -3
+  };
+  assert(got, "generator use-close error should surface (break)");
+  assert(v == -3, "catch handler value used");
+}
+
+test_t1390_gen_use_close_midflight_destroy_no_leak() `test {
+  // Consumer breaks mid-flight (before the generator completes) while the
+  // use-binding is still live. The generator is destroyed and its failing
+  // close() runs on the teardown sink — there is no consumer to receive the
+  // error, so it must be suppressed+freed (no leak, no error surfaced). Before
+  // the T1390 mid-flight fix this captured-but-never-checked error leaked.
+  int total = 0;
+  for v in t1390_gen_multi()?! {
+    total = total + v;
+    if v == 2 {
+      break;
+    }
+  }
+  assert(total == 2, "consumed only the first value before breaking");
+}
+
+test_t1390_gen_use_close_ok_control() `test {
+  // Control: succeeding close() yields all values, no error, no leak.
+  int[] results = [];
+  for v in t1390_gen_ok()?! {
+    results.push(v);
+  }
+  assert(results.len == 2, "ok generator yields 2");
+  assert(results[0] == 5, "ok gen[0]");
+  assert(results[1] == 6, "ok gen[1]");
+}
+
+test_t1390_gen_use_close_early_return_ok() `test {
+  // Early `return` with a succeeding close: the genReturnStmt capture path runs,
+  // finds no close error, and takes its OK-continuation to the final suspend —
+  // normal termination, exactly one yielded value, no error, no leak.
+  int[] results = [];
+  for v in t1390_gen_early_return_ok()?! {
+    results.push(v);
+  }
+  assert(results.len == 1, "early-return-ok generator yields exactly 1");
+  assert(results[0] == 8, "early-return-ok gen[0]");
+}

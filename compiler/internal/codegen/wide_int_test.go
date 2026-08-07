@@ -71,35 +71,41 @@ func TestWideIntCasts(t *testing.T) {
 	assertContains(t, ir, "sitofp i128") // 128 -> f64 (signed)
 }
 
-func TestWideIntWasmDivBuiltins(t *testing.T) {
-	// wasm32 has no compiler-rt, so the 128-bit div/rem libcalls that i128/u128
-	// `/` and `%` lower to must be emitted in-IR (T0587). They must NOT appear
-	// on native targets (compiler-rt provides them; a duplicate definition would
-	// be a link conflict).
-	wasmIR := generateIRForTarget(t, `main() {
-		u128 a = 100u128;
-		u128 b = 7u128;
-		u128 q = a / b;
-		u128 r = a % b;
-	}`, "wasm32-wasi")
-	for _, sym := range []string{"__udivti3", "__umodti3", "__divti3", "__modti3", "__promise_udivmod128"} {
-		if !strings.Contains(wasmIR, "@"+sym+"(") {
-			t.Errorf("wasm IR must define %s:\n%s", sym, wasmIR)
+func TestWideIntDivBuiltins(t *testing.T) {
+	// The 128-bit div/rem libcalls that i128/u128 `/` and `%` lower to must be
+	// emitted in-IR on EVERY target (T0587, T1399). wasm32 has no compiler-rt,
+	// and the default linux target statically links musl with no compiler-rt or
+	// libgcc — so a missing definition is an undefined-symbol link error, not a
+	// resolved external. The main-IR definitions use external linkage; on the
+	// glibc dynamic path the strong definition simply satisfies the reference
+	// before -lgcc's archive member is consulted, so there is no link conflict.
+	for _, target := range []string{"wasm32-wasi", ""} {
+		var ir string
+		if target == "" {
+			ir = generateIR(t, `main() {
+				u128 a = 100u128;
+				u128 b = 7u128;
+				u128 q = a / b;
+				u128 r = a % b;
+			}`)
+		} else {
+			ir = generateIRForTarget(t, `main() {
+				u128 a = 100u128;
+				u128 b = 7u128;
+				u128 q = a / b;
+				u128 r = a % b;
+			}`, target)
 		}
-	}
-	// The helper must use only constant-amount i128 shifts (no variable-shift
-	// libcalls __lshrti3/__ashlti3, which wasm also lacks).
-	if strings.Contains(wasmIR, "__lshrti3") || strings.Contains(wasmIR, "__ashlti3") {
-		t.Errorf("wasm div helper must not require variable-shift libcalls:\n%s", wasmIR)
-	}
-
-	nativeIR := generateIR(t, `main() {
-		u128 a = 100u128;
-		u128 b = 7u128;
-		u128 q = a / b;
-	}`)
-	if strings.Contains(nativeIR, "define i128 @__udivti3") {
-		t.Errorf("native IR must NOT define __udivti3 (compiler-rt provides it):\n%s", nativeIR)
+		for _, sym := range []string{"__udivti3", "__umodti3", "__divti3", "__modti3", "__promise_udivmod128"} {
+			if !strings.Contains(ir, "@"+sym+"(") {
+				t.Errorf("target %q: IR must define %s:\n%s", target, sym, ir)
+			}
+		}
+		// The helper must use only constant-amount i128 shifts (no variable-shift
+		// libcalls __lshrti3/__ashlti3, which wasm also lacks).
+		if strings.Contains(ir, "__lshrti3") || strings.Contains(ir, "__ashlti3") {
+			t.Errorf("target %q: div helper must not require variable-shift libcalls:\n%s", target, ir)
+		}
 	}
 }
 

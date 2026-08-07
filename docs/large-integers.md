@@ -191,12 +191,12 @@ LLVM lowers wide-integer ops differently per target:
   - `add`/`sub`/`and`/`or`/`xor`/`shl`/`lshr`/`ashr` on `i128`/`i256`/`i512` → inline multi-word sequences using carry flags. **No runtime calls.**
   - `mul` on `i128` → inline using `mulq` + `umulh`. **No runtime calls.**
   - `mul` on `i256`/`i512` → expanded as multiple double-word multiplies. **No runtime calls.**
-  - `udiv`/`sdiv`/`urem`/`srem` on `i128` → inline on ARM64 (long sequence), but on x86_64 typically calls `__udivti3`/`__divti3`/`__umodti3`/`__modti3` from compiler-rt.
-  - `udiv`/`sdiv`/`urem`/`srem` on `i256`/`i512` → calls `__udivei4` / `__udivmodei5` (variable-width) from compiler-rt on most targets.
-- **WASM**: similar — small ops inline, division goes through compiler-rt soft routines.
-- **Conclusion**: division is the only operation that requires runtime support, and the runtime is already linked. Promise links musl + compiler-rt on Linux/macOS; WASM ships with compiler-rt; Windows links the MSVC math runtime (which includes equivalents). **The PAL needs no new entry points.**
+  - `udiv`/`sdiv`/`urem`/`srem` on `i128` → inline on ARM64 (long sequence), but on x86_64 lowers to `__udivti3`/`__divti3`/`__umodti3`/`__modti3` libcalls.
+  - `udiv`/`sdiv`/`urem`/`srem` on `i256`/`i512` → LLVM's `ExpandLargeDivRem` pass inline-expands these; **no libcall**.
+- **WASM**: similar — small ops inline, 128-bit division lowers to the `__*ti3` libcalls.
+- **Conclusion**: 128-bit division is the only operation that requires runtime support. Promise does **not** link compiler-rt or libgcc (the default target statically links musl alone), so the compiler **emits the four `__*ti3` builtins in-IR itself** on every target (`emitDivTi3` in `codegen/compiler.go`, T1399), backed by a shared shift-subtract `__promise_udivmod128` helper. The definitions use external linkage in the main IR; on the glibc dynamic path the strong definition satisfies the reference before `-lgcc`'s archive member is consulted, so there is no duplicate-symbol conflict. **The PAL needs no new entry points**, but the builtins are not free — they must be emitted, not assumed.
 
-A pre-implementation step is to **verify** by writing a small `i256` divide test and inspecting the linker output for missing symbols; if any are missing on a target, file a tracker bug for adding them.
+A regression guard (`TestWideIntDivBuiltins`) asserts the `__*ti3` + `__promise_udivmod128` symbols are present in generated IR on both native and wasm targets.
 
 ### 4.5 ABI for value types
 
@@ -285,11 +285,11 @@ These costs are documented in the language guide section that introduces wide ty
 
 ## 8. Target Compatibility
 
-- **Linux x86_64** (musl + compiler-rt): supported. Verify `__udivti3` etc. are linked (compiler-rt provides them).
-- **Linux ARM64**: supported. Compiler-rt provides 128-bit division.
-- **macOS x86_64 / ARM64**: supported via compiler-rt embedded in LLVM toolchain.
-- **Windows x86_64 (MSVC)**: 128-bit integers in MSVC require LLVM's compiler-rt builtins or libgcc-equivalent. Verify the link line picks them up; if not, ship them in the embedded LLVM bundle.
-- **WASM (wasm32-wasi, wasm32-web)**: supported. `wasm-ld` resolves wide-integer libcalls against compiler-rt builtins, which the WASM toolchain provides.
+- **Linux x86_64** (static musl, no compiler-rt): supported. The compiler emits `__udivti3`/`__umodti3`/`__divti3`/`__modti3` in-IR (T1399); nothing external is required.
+- **Linux ARM64**: supported. The same in-IR builtins are emitted; ARM64 may inline some 128-bit div/rem sequences directly.
+- **macOS x86_64 / ARM64**: supported via the same in-IR builtins.
+- **Windows x86_64 (MSVC)**: the in-IR builtins are emitted on all targets, so 128-bit div/rem resolves without relying on the MSVC/compiler-rt runtime.
+- **WASM (wasm32-wasi, wasm32-web)**: supported. The in-IR builtins (plus `__multi3`) cover what the WASM toolchain does not provide.
 
 Verification step before committing: a single test program performing `i128`, `i256`, `i512` add/mul/div on each target, observed via `bin/test --wasm --wasm-web`.
 

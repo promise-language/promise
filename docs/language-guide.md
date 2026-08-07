@@ -67,8 +67,8 @@ u64  high = (id >> 64u128) as! u64;                   // widths mix only via as!
   widening sign-extends (signed) or zero-extends (unsigned); narrowing truncates.
 - **Performance.** `add`/`sub`/`mul`/bitwise/shifts lower to inline word-sized
   sequences (carry-flag aware). **Division and remainder are the exception** —
-  they lower to compiler-rt soft-arithmetic library calls (tens to hundreds of
-  cycles depending on width), so hoist them out of hot loops. Decimal `to_string`
+  they lower to soft-arithmetic routines the compiler emits in-IR (tens to
+  hundreds of cycles depending on width), so hoist them out of hot loops. Decimal `to_string`
   uses one division per digit; the default base-16 path is division-free.
 - **Not constant-time.** LLVM's wide `div`/`mul` are not constant-time; crypto
   needing constant-time must hand-craft routines over `u64[]`/`u32[]`.

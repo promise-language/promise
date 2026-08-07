@@ -276,6 +276,62 @@ wide_format_interface() `test {
   assert(b2.to_string() == "-ff", "signed format! through Writer");
 }
 
+// --- signed div/rem sign matrix (exercises __divti3 + __modti3 directly) ---
+// Truncated (toward-zero) semantics: quotient sign = xor of operand signs,
+// remainder sign = dividend sign. __modti3 is otherwise untested at runtime,
+// and __divti3 was only exercised with a single sign combination (T1399).
+wide_signed_div_rem_matrix() `test {
+  // Operands wider than u64 so the op cannot be strength-reduced to a 64-bit path.
+  i128 a = 1000000000000000000007i128; // 10^21 + 7 (prime-ish, non-divisible by 3)
+  i128 b = 3i128;
+  // +/+
+  assert(a / b == 333333333333333333335i128, "i128 +/+ div");
+  assert(a % b == 2i128, "i128 +/+ rem");
+  // -/+  (quotient negative, remainder takes dividend's minus sign)
+  assert((-a) / b == -333333333333333333335i128, "i128 -/+ div");
+  assert((-a) % b == -2i128, "i128 -/+ rem");
+  // +/-  (quotient negative, remainder stays positive — dividend is positive)
+  assert(a / (-b) == -333333333333333333335i128, "i128 +/- div");
+  assert(a % (-b) == 2i128, "i128 +/- rem");
+  // -/-  (quotient positive, remainder negative — dividend is negative)
+  assert((-a) / (-b) == 333333333333333333335i128, "i128 -/- div");
+  assert((-a) % (-b) == -2i128, "i128 -/- rem");
+}
+
+// --- division edge cases (quotient 0, exact, by one, self) ---
+wide_div_edge() `test {
+  u128 big = 340282366920938463463374607431768211453u128; // u128.max - 2
+  // Dividend smaller than divisor: quotient 0, remainder = dividend.
+  assert(7u128 / big == 0u128, "u128 quotient zero");
+  assert(7u128 % big == 7u128, "u128 rem is dividend");
+  // Exact division: remainder 0.
+  assert((big - 1u128) / 2u128 == 170141183460469231731687303715884105726u128, "u128 exact div");
+  assert((big - 1u128) % 2u128 == 0u128, "u128 exact rem zero");
+  // Divide by one and divide self.
+  assert(big / 1u128 == big, "u128 div by one");
+  assert(big / big == 1u128, "u128 div self");
+  assert(big % big == 0u128, "u128 rem self zero");
+  // Signed: i128.min divided by a large magnitude — most-negative dividend path.
+  assert(i128.min / i128.max == -1i128, "i128 min / max");
+  assert(i128.min % i128.max == -1i128, "i128 min % max");
+}
+
+// --- wide signed div/rem (256/512 go through ExpandLargeDivRem, not the ti3 libcalls) ---
+wide_signed_256_512() `test {
+  i256 a = -123456789012345678901234567890i256;
+  i256 b = 1000000i256;
+  assert(a / b == -123456789012345678901234i256, "i256 -/+ div");
+  assert(a % b == -567890i256, "i256 -/+ rem takes dividend sign");
+  assert(a / (-b) == 123456789012345678901234i256, "i256 -/- div positive");
+  assert(a % (-b) == -567890i256, "i256 -/- rem takes dividend sign");
+
+  i512 c = -1000000000000000000000000000000000000000000000000000i512;
+  i512 d = 7i512;
+  assert(c / d == -142857142857142857142857142857142857142857142857142i512, "i512 -/+ div");
+  assert(c % d == -6i512, "i512 -/+ rem");
+  assert(c / (-d) == 142857142857142857142857142857142857142857142857142i512, "i512 -/- div");
+}
+
 // --- encode / decode round-trip (decimal string, lossless) ---
 wide_encode_decode() `test {
   u128 v = u128.max;

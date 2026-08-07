@@ -2298,8 +2298,15 @@ func (c *Compiler) declareIntrinsics() {
 	// 128-bit width needs a libcall.
 	if c.isWasm {
 		c.emitMulti3()
-		c.emitDivTi3()
 	}
+	// __udivti3/__umodti3/__divti3/__modti3 (128-bit div/rem builtins) are needed
+	// on EVERY target, not just wasm: the default linux target statically links
+	// musl with no compiler-rt/libgcc, so these symbols are otherwise unresolved
+	// (T1399). Emitted with external linkage in the main IR (declared extern in
+	// split module/instance .bc files). On the glibc dynamic path this strong
+	// definition simply satisfies the reference before -lgcc's archive member is
+	// consulted, so libgcc's copy is never pulled — no duplicate-symbol error.
+	c.emitDivTi3()
 
 	// Signal pipe read fd global (NOT TLS — dispatch goroutine reads from it)
 	c.signalPipeRdFd = c.module.NewGlobal("__promise_signal_pipe_rd", irtypes.I32)

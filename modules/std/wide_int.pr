@@ -3,8 +3,10 @@
 // These are pure value types backed by LLVM `iN`, so they are automatically
 // `copy, need no heap allocation, and have no drop(). The operator surface
 // mirrors i64.pr/u64.pr; LLVM lowers each `native op to the corresponding
-// width-polymorphic instruction (division on wide types routes through the
-// compiler-rt soft-arithmetic library, which is already linked).
+// width-polymorphic instruction. 128-bit division/remainder lowers to the
+// __udivti3/__umodti3/__divti3/__modti3 libcalls, which the compiler emits
+// in-IR on every target (Promise links musl with no compiler-rt/libgcc — see
+// T1399); >128-bit div/rem is expanded inline by LLVM's ExpandLargeDivRem.
 //
 // to_string / parse default to base 16 (hex), the natural representation for
 // the dominant wide-integer use cases (hashes, UUIDs, addresses, ECC scalars)

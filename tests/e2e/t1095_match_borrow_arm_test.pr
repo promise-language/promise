@@ -1,0 +1,248 @@
+// T1095: the T0792 sibling for the `genMatchExpr` arm-body route.
+//
+// A borrow-typed binding whose initializer is a `match` expression with an
+// allocating borrow-read arm (`string & x = match s { 0 => r.d[0], ... }`) goes
+// through a *different* codegen route than the T0792 error-handler recovery path.
+// The item worried the same "borrow block-result that allocates an unowned dup"
+// shape could leak here.
+//
+// It does not. The block-form arm *does* emit a spurious `promise_string_new` dup,
+// but the merge-phi ownership machinery added after T0792 — `trackMergeResultTemp`
+// (T1107) plus the per-path ownership flags (T1206/T1208) — registers that dup as an
+// owned statement temp and drops it exactly once at scope exit. No leak, no double
+// free; the only cost is one wasteful copy on the block-form borrow-read path.
+//
+// Crucially the fix must NOT be a whole-block `borrowBlockResult` (T0792's signal):
+// a borrow-bound match legitimately permits *owned-temp* arms
+// (`_ => { "z" + "z" }`), and suppressing the dup wholesale for those would leave the
+// owned temp undropped — a real leak. The per-path (T1208) machinery already
+// discriminates the two; these tests exist so a future regression (either a leak, or
+// a double-free from over-eager dup-suppression) is caught immediately under the
+// zero-leak gate.
+//
+// Every element is built at runtime (`"aa" + "x"`) so it is genuinely heap-allocated
+// (not `.rodata`) — otherwise the dup is a no-op and the allocation path is never
+// exercised. Assertions read `.len` to force the borrow to be materialized/consumed.
+type Refs {
+  string[] d;
+}
+
+type Grid {
+  int[][] rows;
+}
+
+_refs() Refs {
+  return Refs(d: ["aa" + "x", "bbb" + "y"]);
+}
+
+_grid() Grid {
+  return Grid(rows: [[1, 2, 3].clone(), [4, 5, 6, 7].clone()]);
+}
+
+// 1. Single-expression borrow-read arms, both selections (len 3 / 4).
+value_match_single_borrow_arm() `test {
+  r := _refs();
+  s := 0;
+  string &x = match s {
+    0 => r.d[0], _ => r.d[1],
+  };
+  assert(x.len == 3, "single-expr borrow arm, first selection");
+
+  s2 := 5;
+  string &y = match s2 {
+    0 => r.d[0], _ => r.d[1],
+  };
+  assert(y.len == 4, "single-expr borrow arm, default selection");
+}
+
+// 2. Block-form arms — the exact allocating T0792 shape `{ r.d[0] }`, both selections.
+value_match_block_borrow_arm() `test {
+  r := _refs();
+  s := 0;
+  string &x = match s {
+    0 => {
+      r.d[0]
+    }, _ => {
+      r.d[1]
+    },
+  };
+  assert(x.len == 3, "block borrow arm, first selection");
+
+  s2 := 5;
+  string &y = match s2 {
+    0 => {
+      r.d[0]
+    }, _ => {
+      r.d[1]
+    },
+  };
+  assert(y.len == 4, "block borrow arm, default selection");
+}
+
+// 3. Mut-borrow binding (`string ~ x`) over the same block-form arm.
+value_match_mut_borrow_arm() `test {
+  r := _refs();
+  s := 5;
+  string ~x = match s {
+    0 => {
+      r.d[0]
+    }, _ => {
+      r.d[1]
+    },
+  };
+  assert(x.len == 4, "mut-borrow block arm");
+}
+
+// 4. Transient result, no binding — the `.len` is read directly off the match.
+value_match_transient_len() `test {
+  r := _refs();
+  s := 0;
+  n := (match s {
+    0 => r.d[0], _ => r.d[1],
+  }).len;
+  assert(n == 3, "transient borrow-read match len");
+}
+
+// 5. Mixed borrow-read arm + owned-temp arm, BOTH selections. This is the case that
+// would regress under a naive whole-block `borrowBlockResult`: the owned `"z" + "z"`
+// arm must still be dropped exactly once. `.len`: borrow arm 3, owned arm 2.
+value_match_mixed_borrow_and_owned() `test {
+  r := _refs();
+  s := 0;
+  string &x = match s {
+    0 => {
+      r.d[0]
+    }, _ => {
+      "z" + "z"
+    },
+  };
+  assert(x.len == 3, "mixed arms, borrow-read selection");
+
+  s2 := 5;
+  string &y = match s2 {
+    0 => {
+      r.d[0]
+    }, _ => {
+      "z" + "z"
+    },
+  };
+  assert(y.len == 2, "mixed arms, owned-temp selection");
+}
+
+// 5b. Single-expr (non-block) owned-temp arm mixed with a single-expr borrow-read
+// arm. Distinct codegen route from #5's block-form owned arm: here the owned temp is
+// produced directly in the arm slot, not via genBlockValue. The owned `"z" + "z"`
+// must still be dropped exactly once. `.len`: borrow arm 3, owned arm 2.
+value_match_mixed_single_expr_arms() `test {
+  r := _refs();
+  s := 0;
+  string &x = match s {
+    0 => r.d[0], _ => "z" + "z",
+  };
+  assert(x.len == 3, "mixed single-expr arms, borrow-read selection");
+
+  s2 := 5;
+  string &y = match s2 {
+    0 => r.d[0], _ => "z" + "z",
+  };
+  assert(y.len == 2, "mixed single-expr arms, owned-temp selection");
+}
+
+// 5c. ALL arms owned temps, bound to a borrow (`string & x = match s { .. }`). The
+// borrow binding materializes and owns the fresh heap string (C++-const-ref style),
+// so every arm's owned temp must be dropped exactly once. This is the case a naive
+// whole-block `borrowBlockResult` would regress *most* directly: it would suppress
+// ownership tracking on every arm, leaking on both selections. `.len` both arms 3.
+value_match_all_owned_arms() `test {
+  s := 0;
+  string &x = match s {
+    0 => "aa" + "a", _ => "bb" + "b",
+  };
+  assert(x.len == 3, "all-owned arms, first selection");
+
+  s2 := 5;
+  string &y = match s2 {
+    0 => "aa" + "a", _ => "bb" + "b",
+  };
+  assert(y.len == 3, "all-owned arms, default selection");
+}
+
+// 6. Fieldless-enum subject with block-form and single-expr borrow-read arms.
+enum Pick {
+  First, Second,
+}
+
+enum_match_borrow_arm() `test {
+  r := _refs();
+  p := Pick.First;
+  string &x = match p {
+    First => {
+      r.d[0]
+    }, Second => r.d[1],
+  };
+  assert(x.len == 3, "enum block borrow arm, first");
+
+  q := Pick.Second;
+  string &y = match q {
+    First => {
+      r.d[0]
+    }, Second => r.d[1],
+  };
+  assert(y.len == 4, "enum single-expr borrow arm, second");
+}
+
+// 7. Vector-typed borrow arm — exercises dupContainerFieldAccess (sibling of
+// dupStringFieldAccess). Row lengths 3 / 4.
+vector_match_borrow_arm() `test {
+  g := _grid();
+  s := 0;
+  int[] &row = match s {
+    0 => {
+      g.rows[0]
+    }, _ => {
+      g.rows[1]
+    },
+  };
+  assert(row.len == 3, "vector block borrow arm, first selection");
+
+  s2 := 5;
+  int[] &row2 = match s2 {
+    0 => {
+      g.rows[0]
+    }, _ => {
+      g.rows[1]
+    },
+  };
+  assert(row2.len == 4, "vector block borrow arm, default selection");
+}
+
+// 8. Nested if inside a block-form borrow-read arm (nested merge-phi borrow).
+nested_match_if_borrow_arm() `test {
+  r := _refs();
+  s := 0;
+  b := false;
+  string &x = match s {
+    0 => {
+      if b {
+        r.d[0]
+      } else {
+        r.d[1]
+      }
+    },
+    _ => r.d[0],
+  };
+  assert(x.len == 4, "nested if inside borrow arm, else path");
+
+  b2 := true;
+  string &y = match s {
+    0 => {
+      if b2 {
+        r.d[0]
+      } else {
+        r.d[1]
+      }
+    },
+    _ => r.d[0],
+  };
+  assert(y.len == 3, "nested if inside borrow arm, then path");
+}

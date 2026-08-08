@@ -57,7 +57,7 @@ type goBlockCtx struct {
 	resultType    types.Type // running unification of the `return <expr>` value types; nil until the first one
 	hasValueRet   bool       // at least one `return <expr>` — the block is in explicit-return style
 	hasBareRet    bool       // at least one bare `return;`
-	bareReturnPos ast.Pos    // position of the first bare `return;` (verdict deferred until T is known)
+	bareReturnPos ast.Pos    // T1392: position of the first bare `return;` (verdict deferred until T is known — a bare `return;` in a value-producing block is an error in either style)
 }
 
 // markFailableEscape records that a failable operation escapes the current

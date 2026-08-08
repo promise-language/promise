@@ -4215,8 +4215,9 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 	// Type-check body. A lambda body is governed by its own signature, so it
 	// is not the enclosing `go {}` non-failable scope (T1217); reset the
 	// override alongside the curFunc swap so the two contexts stay independent.
-	// T1385: for the same reason, a `return` inside a lambda nested in a `go {}`
-	// block binds to the LAMBDA, not the goroutine — clear the go-block context.
+	// T1385/T1392: for the same reason, a `return` inside a lambda nested in a
+	// `go {}` block binds to the LAMBDA, not the goroutine — clear the go-block
+	// context.
 	saved := c.curFunc
 	c.curFunc = sig
 	savedNFS := c.nonFailableScope
@@ -4405,8 +4406,9 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 			c.nonFailableScope = true
 			c.failableScope = false
 		}
-		// T1385: `return` inside the body binds to the goroutine (§17.2
-		// explicit-return style), not to the enclosing function.
+		// T1385/T1392: `return` inside the body binds to the goroutine (§17.2
+		// explicit-return style), not to the enclosing function. Save/restore
+		// makes nested go blocks fall out for free.
 		savedGoBlock := c.goBlock
 		goCtx := &goBlockCtx{}
 		c.goBlock = goCtx
@@ -4450,8 +4452,15 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		} else {
 			innerType = trailing
 		}
-		// §17.2: a bare `return;` on a value-producing path is an error in either
-		// style — the verdict is deferred to here because T is only known now.
+		// T1392/§17.2: a bare `return;` carries no value, so on a value-producing
+		// path it is the exact analog of `f() int { return; }` — an error in either
+		// style, rather than the type's zero ("every path of a value-producing body
+		// must produce one"). The verdict is deferred to here because T is only known
+		// now. The rule keys on the BLOCK alone: a discarded fire-and-forget
+		// `go { … };` statement gets the identical diagnostic, since the trailing `;`
+		// is insignificant and a block's legality must not depend on whether its
+		// handle is received. The repair is to make the block void — end it with a
+		// bare `return;`, or bind the trailing call.
 		if goCtx.hasBareRet && innerType != nil && !types.Identical(innerType, types.TypVoid) {
 			c.errorf(goCtx.bareReturnPos, "missing return value (expected %s)", innerType)
 		}

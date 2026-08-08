@@ -14,10 +14,15 @@
 // {ok, null}. The value side of the original coverage moved to
 // t1385_go_block_return_test.pr, where an explicit `return <expr>` produces one.
 //
+// §17.2 keys that rule on the BLOCK alone, so a discarded fire-and-forget
+// `go { … };` statement is rejected identically to a bound one — the fire-and-forget
+// bodies below are therefore void (binding the non-void call, `ignored := …`, is one
+// of the two documented repairs).
+//
 // The failable-with-use-binding analog is covered in
 // gobang_use_failable_close_test.pr (gobang_use_close_bare_return_ok_no_surface).
-// These cover the non-failable `go {}` void path and a failable body with no
-// use-binding.
+// These cover the non-failable `go {}` void path, a failable body with no
+// use-binding, the fire-and-forget paths, and multi-level scope cleanup on the exit.
 // --- Non-failable void body, bare return → coroutine exits cleanly ---
 t1392_nonfailable_bare_return_void() `test {
   n := 5;
@@ -44,6 +49,49 @@ t1392_nonfailable_trailing_value() `test {
   assert(v == 105, "trailing-value path still returns the computed value");
 }
 
+// --- Fire-and-forget VOID block, bare return taken ---
+// A discarded `go { … };` statement has no receiver, so codegen takes the void path
+// (useGoBlockValuePath == false) and allocates no result buffer — the bare-return
+// exit must store nothing rather than write through a buffer that does not exist.
+t1392_score(int n) int {
+  return n * 2;
+}
+
+t1392_fire_and_forget_bare_return_void_body() `test {
+  done := channel[int](1);
+  n := 5;
+  go {
+    if n > 0 {
+      done.send(7);
+      return;
+    }
+    done.send(99);
+    ignored := t1392_score(n); // bound, not trailing → the block is void
+  };
+  assert((<-done)! == 7, "fire-and-forget bare return exits the goroutine early");
+  sleep(Duration.from_millis(30)); // let the unawaited goroutine finish tearing down before the leak snapshot
+}
+
+// --- Fire-and-forget VALUE block, no bare return: the discarded trailing heap value
+// must still be freed (no result buffer to claim it into). Still a legal shape — the
+// rule rejects a bare `return;` in a value block, not the value block itself.
+// Leak-checked; the sleep closes the accounting window on the unawaited goroutine's
+// tail, matching the fire-and-forget pattern in go_method_call.pr.
+t1392_fire_and_forget_trailing_heap_discarded() `test {
+  done := channel[int](1);
+  n := 0;
+  go {
+    if n > 0 {
+      done.send(7);
+    } else {
+      done.send(99);
+    }
+    "abc" + "def" // heap trailing value, discarded
+  };
+  assert((<-done)! == 99, "fire-and-forget trailing value is computed and discarded");
+  sleep(Duration.from_millis(30));
+}
+
 // --- Failable void body WITHOUT a use-binding: bare return → no spurious error ---
 // Exercises the failable bare-return store when closeCap is nil (no use-binding),
 // so emitCloseErrCheck is a no-op and the defined {ok, null} store is what keeps
@@ -53,6 +101,9 @@ produce_ok!(int x) int {
     raise error("neg:{x}");
   }
   return x * 2;
+}
+
+log_it(int x) void {
 }
 
 t1392_failable_bare_return_no_binding() `test {
@@ -69,4 +120,98 @@ t1392_failable_bare_return_no_binding() `test {
     got = true;
   };
   assert(!got, "failable bare return (no use-binding) must not surface a spurious error");
+}
+
+// --- Bare return out of a LOOP, with heap locals live at the exit ---
+// The bare-return branch runs emitScopeCleanup(0) — cleanup down to depth 0 — from
+// inside a loop scope, so both the loop-body binding and the outer block binding must
+// be released before the goroutine reaches its final suspend. Leak-checked (T0067):
+// a missed level would show up as a LEAK, not a wrong value.
+t1392_nonfailable_bare_return_in_loop_frees_locals() `test {
+  ch := channel[int](1);
+  t := go {
+    outer_s := "pre" + "fix";
+    for i in 0..5 {
+      inner_s := "iter" + "{i}";
+      if i == 2 {
+        ch.send(outer_s.len + inner_s.len);
+        return;
+      }
+    }
+    ch.send(-1);
+  };
+  <-t;
+  assert((<-ch)! == 11, "bare return out of a loop exits the goroutine with both scopes cleaned up");
+}
+
+// --- Nested `go {}` blocks, both taking their bare-return exit ---
+// genGoBlock saves/restores the coroutine context around a nested body, so the inner
+// goroutine's bare-return exit must not disturb the outer one's. Each block is void,
+// so each has its own coroutineReturnBlock and its own scope cleanup.
+t1392_nested_go_blocks_bare_return() `test {
+  ch := channel[int](2);
+  n := 1;
+  outer := go {
+    inner := go {
+      s := "in" + "ner";
+      if n > 0 {
+        ch.send(s.len);
+        return;
+      }
+      ch.send(-1);
+    };
+    <-inner;
+    if n > 0 {
+      ch.send(20);
+      return;
+    }
+    ch.send(-2);
+  };
+  <-outer;
+  assert((<-ch)! == 5, "inner goroutine's bare-return exit ran and cleaned up");
+  assert((<-ch)! == 20, "outer goroutine's bare-return exit ran after the inner one");
+}
+
+// --- Fire-and-forget void block, bare-return branch TAKEN with a live heap local ---
+// The sibling test above covers a value block's discarded trailing heap value. This
+// one takes the bare-return exit: on the void codegen path (useGoBlockValuePath ==
+// false) it must still release the goroutine's own heap bindings.
+t1392_fire_and_forget_bare_return_frees_locals() `test {
+  done := channel[int](1);
+  n := 5;
+  go {
+    s := "abc" + "def";
+    if n > 0 {
+      done.send(s.len);
+      return;
+    }
+    done.send(99);
+    doubled := n * 2; // bound, not trailing → the block is void
+  };
+  assert((<-done)! == 6, "fire-and-forget bare-return branch ran with a live heap local");
+  sleep(Duration.from_millis(30));
+}
+
+// --- Failable void body, bare return out of a loop with a heap local live ---
+// Combines the failable {ok, null} store on the bare-return exit with multi-level
+// scope cleanup: the store must happen after emitCloseErrCheck and the drop bindings
+// must still be released (leak-checked).
+t1392_failable_bare_return_in_loop() `test {
+  base := 0;
+  t := go! {
+    base = produce_ok(2)?^; // 4 — makes the body a failable scope
+    s := "he" + "ap";
+    for i in 0..4 {
+      if i == base - 3 {
+        log_it(s.len);
+        return;
+      }
+    }
+    log_it(0);
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+  };
+  assert(!got, "failable bare return out of a loop must not surface a spurious error");
 }

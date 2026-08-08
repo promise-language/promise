@@ -6,7 +6,7 @@ import (
 )
 
 // T1391: a use-binding whose failable close() fails on a bare `return` early-exit
-// inside a `go! {}` value body must route the close error into the goroutine's
+// inside a `go! {}` body must route the close error into the goroutine's
 // result aggregate (so it surfaces at `<-t`) instead of capturing it without a
 // route — which orphans the error instance (leak).
 //
@@ -61,7 +61,7 @@ func TestT1391_GoBlockBareReturnUseCloseRoutesToSink(t *testing.T) {
 	if !strings.Contains(goro, "final.suspend") {
 		t.Errorf("expected the close-error path to branch to the coroutine final.suspend:\n%s", goro)
 	}
-	if strings.Contains(goro, "ret { i1, i32, i8* }") {
+	if strings.Contains(goro, "ret { i1, i8* }") {
 		t.Errorf("failable go-block close-error path must not `ret` the aggregate from the coroutine ramp:\n%s", goro)
 	}
 }

@@ -1705,6 +1705,29 @@ type Connection {
 - `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
 - Types that are `` `copy `` are implicitly copied on assignment. Others are moved.
 
+### 6.5 Sendable and Sharable
+
+Two further capabilities govern whether a type may cross a **goroutine boundary**. They are what §17.4's boundary rule is checked against:
+
+- `` `sendable `` — values of the type may be **moved** across a boundary.
+- `` `sharable `` — a reference to the type may be **shared** across one, because the type carries whatever synchronization that requires.
+
+**Both are derived structurally, so ordinary code never writes them.** A type is sendable when all its fields are sendable, and sharable when all its fields are sharable; an enum derives from its variants' fields, a generic from its type arguments. Primitives, `char`, `bool`, and `string` are both. Closures are never sendable — a closure's captured environment is not a thing the compiler can prove safe to hand to another goroutine.
+
+The annotations exist only to **override** the derivation, for types whose safety the compiler cannot see:
+
+| Annotation | Effect |
+|---|---|
+| `` `sendable `` / `` `sharable `` | assert the capability, skipping field derivation — for natively-implemented types |
+| `` `not_sendable `` / `` `not_sharable `` | deny it, even though the fields would derive it |
+| `` `confined `` | thread-confined: a `Ref`/`Weak` of this type uses a non-atomic counter and may never cross a boundary. Mutually exclusive with `` `sharable `` |
+
+Asserting a capability contradicts denying it, and a non-native type marked `` `sendable `` whose fields are not sendable is rejected — the override is for hiding *implementation* detail, not for defeating the check.
+
+The standard library's concurrency primitives are the types that assert these natively: `Ref[T]`, `Weak[T]`, and `Channel[T]` are `` `sendable `sharable ``; `Task[T]` is `` `sendable ``.
+
+The capabilities also constrain the primitives' own element types: `Channel[T]` requires `T` sendable — a channel exists to move values between goroutines — while `Ref[T]` and `Weak[T]` require `T` to be both sendable and sharable, since a shared reference makes `T` reachable from several goroutines at once. (A `` `confined `` `T` is exempt: such a `Ref` can never cross a boundary, so the question does not arise.)
+
 ---
 
 ## 7. Error Handling
@@ -3614,36 +3637,56 @@ user := fetchUser(42)?^;
 **Producing the result.** `go` takes either an expression or a block, and the two forms yield `T` differently:
 
 - **Expression form** — `go <expr>` (e.g. `go score(board)`): the spawned expression *is* the result; `T` is its type.
-- **Block form** — `go { … }`: the body is a goroutine *body* that yields its result with `return <expr>`, exactly like a function body. `T` is the type of the returned value, unified across all `return` paths.
+- **Block form** — `go { … }`: the body yields its result either as a **trailing expression** — the block's last statement is a bare expression, whose value is the result — or with an **explicit `return <expr>`**, exactly like a function body. `T` is the type of that value, unified across all paths that produce one.
 
-`T` is always **inferred** — from the expression, or from the block's `return` statements — and is never written at the spawn site; only *failability* is chosen there (`go` vs `go!`, §17.2.1). A block that yields no value on any path (every path is a bare `return;` or falls off the end) has `T = Void`. As in a value function, a bare trailing expression is **not** the result — a goroutine block produces a value only through `return` — and a bare `return;` on one path while another path returns a value is a compile error (*"missing return value (expected T)"*): every path of a value-producing body must return a value.
+`T` is always **inferred** — from the expression, from the trailing expression, or from the block's `return` statements — and is never written at the spawn site; only *failability* is chosen there (`go` vs `go!`, §17.2.1). A block that yields no value on any path has `T = Void`.
+
+**A block picks one style and holds to it.** The two forms are alternatives, not ingredients: as soon as a block contains a single `return <expr>`, it is in explicit-return style, and *every* value-producing path must then end in `return <expr>`. A trailing bare expression in such a block is a compile error (*"this block returns with 'return'; a trailing expression is discarded — did you mean `return <expr>;`?"*), never a second, silent exit. Mixing is rejected rather than resolved, because a reader scanning for how a block produces its value should have to check exactly one thing.
+
+```promise
+sum := go { a := score(boardA.clone()); a * 2 };   // trailing style — the last expression is the result
+
+best := go {                                       // explicit-return style — every path returns
+  if boards.len == 0 { return 0; }
+  return score(boardA.clone());
+};
+
+bad := go {                                        // error: mixing — `return 0` makes this
+  if boards.len == 0 { return 0; }                 // explicit-return style, so the trailing
+  score(boardA.clone())                            // expression is discarded, not the result
+};
+```
+
+In either style, a bare `return;` on one path while another path produces a value is a compile error (*"missing return value (expected T)"*): every path of a value-producing body must produce one. In a `T = Void` block, a bare `return;` is an ordinary early exit.
 
 The examples in this section spawn **non-failable** producers, so each yields a plain `task[T]`. Spawning a producer that can fail (a name ending in `!`, such as `fetchUser!`) uses `go!` and is covered in §17.2.1.
+
+A goroutine must own what it touches (§17.4), so each spawn below hands the callee a value of its own. That ownership can come from a **copy** — `.clone()` — or from a **transfer**: `move` at a call site, or binding the value to a local inside a block. These examples use `.clone()` throughout only because each binding is reused by the next one; a spawn that is finished with the value would `move` it instead and pay nothing.
 
 ```promise
 // Fire-and-forget (task[Void] result ignored)
 go {
-  logAnalytics(event);
+  logAnalytics(event.clone());
 };
 
 // Block form — the body yields its result with `return`
 sumT := go {
-  a := score(boardA);
+  a := score(boardA.clone());
   return a * 2;                     // T = int, inferred from the return
 };
 doubled := <-sumT;
 
 // Value-returning task — `score` cannot fail, so `go` yields a plain task[int]
-task := go score(board);           // task : task[int]
+task := go score(board.clone());   // task : task[int]
 points := <-task;                  // suspends until result ready
 
 // Inline: launch + receive
-points := <-go score(board);       // equivalent to "await"
+points := <-go score(board.clone());  // equivalent to "await"
 
 // Fan out, fan in — structured concurrency
-t1 := go score(boardA);
-t2 := go score(boardB);
-t3 := go score(boardC);
+t1 := go score(boardA.clone());
+t2 := go score(boardB.clone());
+t3 := go score(boardC.clone());
 a := <-t1;                         // all three ran concurrently
 b := <-t2;
 c := <-t3;
@@ -3685,7 +3728,7 @@ t := go fetchUser(42);
 Symmetrically, `go!` on a producer that cannot fail is a compile error — the `!` would be misleading:
 
 ```promise
-t := go! score(board);              // score() is not failable
+t := go! score(board.clone());      // score() is not failable
 //   ^ error: `score` cannot fail; spawn it with plain `go`
 ```
 
@@ -3697,7 +3740,7 @@ t := go! score(board);              // score() is not failable
 ```promise
 // Non-failable block — handles its own error; safe to fire and forget
 go {
-  saveMetrics(snapshot)?!;          // panics in the goroutine on failure
+  saveMetrics(snapshot.clone())?!;  // panics in the goroutine on failure
 };
 
 // Failable block — an escaping error is captured into the task
@@ -3719,7 +3762,7 @@ t := go! {
 Symmetrically with the call form, a `go! { … }` block whose body **cannot fail** (no failable operation escapes it) is a compile error — the `!` would be misleading:
 
 ```promise
-t := go! { return score(board); };  // score() cannot fail
+t := go! { return score(board.clone()); };  // score() cannot fail
 //   ^ error: this goroutine's body cannot fail; spawn it with plain `go`
 ```
 
@@ -3837,7 +3880,8 @@ users := <-handles;                           // drain: awaits all, propagates f
 | `go { … }` | non-failable scope → `task[T]` (block handles its own errors) |
 | `go! { … }` | failable scope → `failable_task[T]` (escaping error captured) |
 | `go! { … }` — body cannot fail | **compile error** → use plain `go` |
-| `go { … }` / `go! { … }` block result | yielded by `return <expr>`; `T` inferred from the `return` paths (§17.2) |
+| `go { … }` / `go! { … }` block result | yielded by a trailing expression **or** by `return <expr>` — one style per block; `T` inferred either way (§17.2) |
+| trailing expression in a block that also uses `return <expr>` | **compile error** → mixing the two styles is rejected |
 | bare `return;` on a value-producing path | **compile error** → every path must return a value |
 | `<-t` — `t : task[T]` | non-failable receive → `T` (consumes `t`) |
 | `<-t` — `t : failable_task[T]` | **failable** receive → `T` (consumes `t`; auto-propagate or handle per §7.2) |
@@ -3874,7 +3918,81 @@ A `channel[T]` is iterable — `ch.iter()` returns a `stream[T]`, and from there
 
 ### 17.4 Ownership Across Goroutines
 
-Ownership rules apply across goroutines — data is either **moved** into the goroutine or shared via `Ref[T]` (reference-counted shared ownership; the counter is atomic precisely because the value crosses a goroutine boundary here):
+A goroutine's lifetime is **not** bounded by the statement that spawns it. `go f(x)` returns as soon as the goroutine is scheduled — by the time `f` reads `x`, the spawning scope may already have exited and dropped it. Every rule in §6 assumes the opposite: §6.2 makes the shared borrow the *unmarked* default precisely because "a borrow is transient — the value survives the call, and a mutation is observable right there". Across a `go` boundary that premise does not hold, so the absence of a marker — correct at a normal call site, where the borrow ends with the call — would instead be concealing a permanent effect.
+
+Promise therefore applies one categorical rule:
+
+> **A borrow — shared or mutable — may never cross a `go` spawn boundary, unless the referent's type is `` `sharable ``.** Everything else a goroutine touches, it must own: by `move` — which requires the type to be `` `sendable `` — or as a freshly built temporary.
+
+`Copy` types (primitives, `char`, `bool`, pure value types) are unaffected — every mode is a by-value copy (§6.2), so nothing is shared and nothing can dangle.
+
+The two capabilities are what the boundary is actually checked against (§6.5):
+
+- `` `sendable `` — values of the type may be **moved** across a goroutine boundary.
+- `` `sharable `` — a reference to the type may be **shared** across one, because the type carries whatever synchronization that requires.
+
+Both are **derived structurally** — a type is sendable if all its fields are, and likewise sharable — so ordinary user types need no annotation. The tags exist to override the derivation for types whose safety the compiler cannot see: `` `sendable ``/`` `sharable `` assert it (used by the natively-implemented concurrency primitives), `` `not_sendable ``/`` `not_sharable `` deny it. Closures are never sendable.
+
+#### The spawn site is where ownership transfers
+
+Arguments to `go f(…)` are evaluated in the **spawning** goroutine, and the resulting values are transferred into the **spawned** goroutine's frame. The callee is untouched by this: it still declares an ordinary borrow parameter and still borrows — only now it borrows from the goroutine's own frame rather than the spawner's. This is what keeps §17.2's promise that "concurrency is always a caller-side decision — the callee does not know or care whether it runs in a goroutine". A function is spawnable exactly as written; the *caller* supplies something the goroutine can own.
+
+```promise
+keep(string p) string {           // ordinary shared-borrow parameter — unchanged
+  return p.clone();
+}
+
+main() {
+  string s = "hello".clone();
+  go keep(move s);                // move — ownership transfers into the goroutine
+
+  go keep("hi".clone());          // temporary — the goroutine owns it (no marker, §6.2)
+
+  string t = "hey".clone();
+  go keep(t);                     // error: cannot pass a borrow of local 't' across a
+                                  // 'go' boundary — the goroutine may outlive 't'.
+                                  // Pass an owned value: 'move t' or 't.clone()'.
+}
+```
+
+The block form transfers ownership through a syntax §6.2 already provides: **bind the value inside the block**. A plain assignment of a non-`Copy` value "is *always* a move whose target ownership is visible right there", so binding `obj` to a block-local moves it into the goroutine and invalidates the outer binding. No extra marker is needed, and none exists — `go` takes no capture list, because the binding *is* the capture:
+
+```promise
+Worker obj = Worker();
+go { Worker w = obj; w.method(); };   // `obj` moves into the goroutine; unusable outside after this
+go { obj.method(); };                 // error: bare read of an outer binding is a borrow
+```
+
+Reading an outer non-`Copy` binding directly, as in the second line, borrows it and is rejected. Block and call form thus agree — **nothing non-`Copy` crosses a `go` boundary except by move, as a temporary, or as a refcounted handle.**
+
+**`` `sharable `` types are the exception, and they need no ceremony.** A value whose type is sharable may cross a spawn boundary by reference — as an argument or as a block capture — with no marker and no consumption of the outer binding, because the type itself guarantees the sharing is safe. This is not a special case for a couple of blessed names: any type carrying the capability qualifies, including user types that derive it structurally.
+
+The standard library's concurrency primitives are the ones that assert it natively — `Ref[T]`, `Weak[T]`, and `Channel[T]` are all `` `sendable `sharable ``. For the refcounted handles among them, crossing the boundary **duplicates** the handle: the compiler bumps the refcount at the spawn site, so the goroutine gets its own and the spawner keeps using its own. You never write `.clone()` to cross:
+
+```promise
+Ref[Config] config = Ref[Config](loadConfig());
+go { serve(config.borrow); };     // handle duplicated into the goroutine
+use(config.borrow);               // `config` still usable here — it was duplicated, not moved
+
+channel[int] ch = channel[int](capacity: 8);
+go { for i in 0..100 { ch.send(i); } ch.close(); };   // same rule — `ch` is duplicated
+for v in ch { consume(v); }
+```
+
+The refcount is what makes this sound: the referent cannot be freed while any handle survives, and the goroutine's handle is created before the spawner's can drop. A bare *borrow* of the handle would not be sound — the spawner's binding could drop, and with it the last reference — which is why the duplication happens at the boundary rather than being skipped.
+
+| At a spawn boundary | Non-`Copy` argument / capture | Result |
+|---|---|---|
+| `go f(move x)` | ownership transfers | accepted |
+| `go { T w = x; … }` | ownership transfers (the binding is the capture) | accepted |
+| `go f(x.clone())`, `go f(build())` | temporary, goroutine-owned | accepted |
+| `go f(h)` / `go { … h … }` where `h`'s type is `` `sharable `` | shared by reference; refcounted handles duplicate automatically | accepted |
+| `go f(x)` for a named local `x` of a non-sharable type | shared borrow | **rejected** |
+| `go { x.method(); }` reading outer non-sharable `x` | shared borrow | **rejected** |
+| `go f(x)` where `f` takes `T~ x` and `T` is not sharable | mutable borrow | **rejected** |
+| `go f(move x)` / `go { T w = x; … }` where `T` is not `` `sendable `` | cannot cross at all | **rejected** |
+
+Shared *access* — as opposed to transferred ownership — is what `Ref[T]` is for, and it is the answer whenever copying the value would be too expensive:
 
 ```promise
 main() {
@@ -3882,16 +4000,48 @@ main() {
 
   // data is moved into the goroutine — no longer valid in main
   go {
-    process(data);
+    process(move data);
   };
 
-  // Shared access requires Ref
+  // Shared access requires Ref — the handle is duplicated at the boundary
   Ref[Config] config = Ref[Config](loadConfig());
   go {
-    serve(config.clone());
+    serve(config.borrow);
   };
 }
 ```
+
+#### Receivers
+
+A receiver is a borrow (§6.2: "`this` is a shared borrow of the receiver"), so `go obj.method()` carries a borrow across the boundary and is rejected on exactly the same grounds: nothing at the spawn site establishes that `obj` outlives the goroutine, so the goroutine has no basis for calling a method on it at all. Give the goroutine a receiver it owns — bind it inside the block, pass it by `move`, or hold it in a `Ref[T]` and spawn against a duplicated handle:
+
+```promise
+main() {
+  Worker obj = Worker();
+  go obj.method();                        // error: receiver is a borrow — see above
+
+  go { Worker w = obj; w.method(); };     // ownership moves into the block
+
+  go run(move obj);                       // or transfer through a move parameter,
+                                          // given `run(Worker move w) { w.method(); }`
+
+  Ref[Worker] shared = Ref[Worker](Worker());
+  go { shared.borrow.method(); };          // `Ref` is `sharable` — the handle is
+                                           // duplicated at the boundary; `shared`
+}                                          // stays usable here
+```
+
+Methods on `Copy` and pure value types are unaffected, since the receiver is a by-value copy.
+
+#### Why not "reject only when it escapes"
+
+A narrower rule is tempting: permit `go f(x)` when the resulting `task` provably joins before `x` drops. It is rejected here on the design grounds this document holds throughout:
+
+- **Self-contained readability.** Whether `go f(s)` is legal would depend on where the handle flows *afterwards* — possibly into another function. A reader could not decide, from the spawn site, whether the line is sound. The categorical rule is decidable at the spawn site with no non-local reasoning.
+- **Explicit over implicit.** Under the categorical rule, every value a goroutine touches is visibly handed to it — `move`, `.clone()`, or a `Ref` handle — at the point it crosses. An escape-based rule leaves the most consequential case, the borrow that *is* permitted, marked by nothing at all.
+- **One obvious way.** "Move it, clone it, or share a `Ref`" is a single answer to "how do I get data into a goroutine". An escape-based rule adds a second, conditional answer whose validity the reader must re-derive at every call site.
+
+The cost is real and accepted: a borrow that a joined `task` would have made safe now needs an explicit `.clone()` or `move`. That is one visible copy or one visible transfer, in exchange for a rule that holds locally and uniformly.
 
 **Atomicity is a transparent implementation detail.** A `Ref[T]` is reference-counted; *whether the counter is atomic is decided by the compiler, not the program.* A `Ref` that never crosses a `go`/channel/`Task` boundary uses a plain non-atomic counter; one that may be shared across goroutines uses an atomic counter. Semantics are identical either way. You can opt a type into the fast non-atomic counter explicitly by marking it `` `confined ``:
 

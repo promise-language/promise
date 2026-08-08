@@ -676,7 +676,7 @@ t := go { expensive_work(); };
 <-t;                              // blocks until done, frees G
 
 // Task with return value (go + function call)
-t := go fetch_data(url);
+t := go fetch_data(url.clone());  // the goroutine must own what it touches (§17.4)
 string result = <-t;           // blocks until done
 
 // Failable goroutine: spawn a fallible producer with `go!` → failable_task[T].
@@ -721,8 +721,9 @@ select {
 // Ref[T] is reference-counted shared ownership — clone() to share, drop frees
 // the inner value when the last reference goes away.
 config := Ref[Config](load_config());
-worker := config.clone();        // shares the same Config
-go { use(worker.borrow); };      // the goroutine holds its own reference
+go { use(config.borrow); };      // the goroutine gets its own reference — crossing the
+                                 // boundary duplicates the handle (refcount bumped at
+                                 // the spawn); `config` stays usable here
 
 // Atomicity of the Ref counter is a compiler decision, not part of the type:
 // a Ref that never crosses a go/channel/Task boundary uses a plain counter; one

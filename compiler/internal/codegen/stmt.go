@@ -9874,10 +9874,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// raw NewStore (genArrayIndexAssign / genVectorIndexAssign) with no
 			// argument coercion. Vector's []= is `native` so it bypasses the
 			// argument-passing coercion that the original T0599 gating assumed
-			// would handle the wrap. Map's []= is a normal Promise method so
-			// argument-passing already wraps bare values into Optional —
-			// wrapping here would double-wrap and corrupt every Map[K,V?]
-			// index assign, so Map is intentionally excluded. idxTargetType is
+			// would handle the wrap. Map's []= is handled by the dedicated
+			// !isArr && !isVec block below (its genMethodIndexAssign also passes
+			// val raw, so the Map[K,V?] bare-RHS wrap lives there — T1296);
+			// wrapping a Map value here too would double-wrap. idxTargetType is
 			// already MutRef/SharedRef-unwrapped above, matching genIndexAssign's
 			// own dispatch (stmt.go:8410-8421). For arrays/vectors
 			// c.info.Types[target] is the element type (sema checkIndexExpr
@@ -9949,6 +9949,33 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 							}
 							val = c.coerceToView(val, exprType, valParamType)
 							val = c.coerceToOptionalElem(val, exprType, valParamType)
+							// T1296: wrap a bare RHS into Optional when the []= setter's
+							// value param is Optional but the expr is not (e.g. `m[k] = v`
+							// on a map[K, Vector[T]?]). genMethodIndexAssign passes val
+							// straight to the setter with NO argument coercion, so without
+							// this a bare T is passed where {i1, T} is expected → a
+							// type-mismatched store, and the slot reads back as `none`.
+							// Mirrors the isArr||isVec block above; Map's []= was previously
+							// unreachable for a bare RHS because sema rejected it (T1296).
+							if _, isOpt := valParamType.(*types.Optional); isOpt &&
+								exprType != nil && exprType != types.TypNone &&
+								!types.Identical(unwrapRefsType(exprType), valParamType) {
+								// String / native-handle / container temps are tracked by
+								// val-identity in stmtTempMap and fail to match once val
+								// becomes the wrapped struct — claim BEFORE wrapping. Heap
+								// user-type temps are claimed correctly post-wrap by
+								// claimHeapTemp's struct-extraction fallback (B0233).
+								if extractNamed(exprType) == types.TypString ||
+									types.IsVector(exprType) || types.IsChannel(exprType) ||
+									types.IsArc(exprType) || types.IsWeak(exprType) ||
+									types.IsAnyTask(exprType) || types.IsMutex(exprType) ||
+									types.IsMutexGuard(exprType) {
+									c.claimStringTemp(val)
+								}
+								if st, ok := c.resolveType(valParamType).(*irtypes.StructType); ok {
+									val = c.wrapOptional(val, st)
+								}
+							}
 						}
 					}
 				}

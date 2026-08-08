@@ -541,6 +541,25 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	errsBefore := len(c.errors)
 	targetType := c.checkExpr(s.Target)
+
+	// T1296: For an index assignment into a map, the assignment target type is the
+	// `[]=` setter's value parameter (V), not the `[]` getter's return (V?). They
+	// coincide for vectors/arrays, but a map getter is presence-optional, so an
+	// optional-valued map (V = Vector[T]?) would otherwise double-wrap to V?? and
+	// reject a valid `m[k] = v`. Mirrors the compound-assignment handling below.
+	if idx, ok := s.Target.(*ast.IndexExpr); ok && s.Op == ast.OpAssign {
+		mt := c.info.Types[idx.Target]
+		if ref, ok := mt.(*types.MutRef); ok {
+			mt = ref.Elem()
+		}
+		if ref, ok := mt.(*types.SharedRef); ok {
+			mt = ref.Elem()
+		}
+		if _, val, ok := types.AsMap(mt); ok {
+			targetType = val
+		}
+	}
+
 	valType := c.checkExprWithHint(s.Value, targetType)
 
 	if targetType == nil || valType == nil {

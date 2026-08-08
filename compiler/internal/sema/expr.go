@@ -1888,10 +1888,51 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		c.errorf(e.Pos(), "type parameter %s has no method or getter %s", t, e.Field)
 		return nil
 
+	case *types.Optional:
+		// T1296: member access on an optional needs unwrapping with `!` first. The
+		// painful case is an optional-valued map: `m[k]` is `V?`, so for
+		// map[K, Vector[T]?] it is a double optional and a single `!` still leaves
+		// it optional. In-place mutation through a map value is unsupported — map
+		// `[]` returns a copy, so there is no addressable slot to write a grown
+		// pointer back into — so steer to read-modify-write.
+		if c.isMapIndexOptionalUnwrap(e.Target) {
+			c.errorf(e.Pos(),
+				"cannot mutate a map value in place: `m[k]` returns a copy and, for an optional-valued map, `m[k]!` is still optional (%s); read, modify, then write back — `x := m[k]!!; x.%s(...); m[k] = x`",
+				target, e.Field)
+		} else {
+			c.errorf(e.Pos(),
+				"cannot access member '%s' on optional type %s: unwrap it first with `!`",
+				e.Field, target)
+		}
+		return nil
+
 	default:
 		c.errorf(e.Pos(), "cannot access member on type %s", target)
 		return nil
 	}
+}
+
+// isMapIndexOptionalUnwrap reports whether e is `m[k]!` where m is a map — used
+// to give a read-modify-write hint for the unsupported in-place mutation of an
+// optional-valued map value (T1296).
+func (c *Checker) isMapIndexOptionalUnwrap(e ast.Expr) bool {
+	unwrap, ok := e.(*ast.OptionalUnwrapExpr)
+	if !ok {
+		return false
+	}
+	idx, ok := unwrap.Expr.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	t := c.info.Types[idx.Target]
+	if ref, ok := t.(*types.MutRef); ok {
+		t = ref.Elem()
+	}
+	if ref, ok := t.(*types.SharedRef); ok {
+		t = ref.Elem()
+	}
+	_, _, isMap := types.AsMap(t)
+	return isMap
 }
 
 // resolveInstanceMember resolves field/method/variant access on a generic Instance.

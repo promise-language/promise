@@ -1,0 +1,69 @@
+// T1296: Read-modify-write on an optional-valued map (`map[K, Vector[T]?]`).
+//
+// Issue 1 (fixed): assigning a plain (non-optional) value into an
+// optional-valued map (`m[0] = [1, 2]`) and writing back a modified vector
+// (`m[0] = inner`) was rejected by sema because the assignment target type was
+// taken from the presence-optional `[]` getter (`V?`) instead of the `[]=`
+// setter's value parameter (`V`), double-wrapping to `V??`.
+//
+// In-place mutation through a map value (`m[0]!.push(7)`) is intentionally
+// unsupported — map `[]` returns a copy, so there is no addressable slot to
+// write a grown pointer back into. The supported path is read-modify-write.
+map_optional_value_rmw() `test {
+  map[int, int[]?] m = {:};
+  m[0] = [1, 2]; // Issue 1: was rejected
+  int[] inner = m[0]!!; // presence + value unwrap
+  inner.push(7);
+  m[0] = inner; // Issue 1: write-back, was rejected
+  assert(m[0]!!.len == 3, "expected len 3");
+}
+
+// Guard the correctness tightening: plain (non-optional) map assignment still
+// works.
+map_plain_value_assign() `test {
+  map[int, int] m = {:};
+  m[0] = 5;
+  m[0] = m[0]! + 1;
+  assert(m[0]! == 6, "expected 6");
+}
+
+// A drop-carrying user type used to exercise the heap-temp claim path and
+// confirm overwrite drops the previous value with no leak.
+type T1296Res {
+  int id;
+  drop(~this) {
+  }
+}
+
+// Bare string RHS into an optional-valued map exercises the claimStringTemp
+// path in the T1296 codegen wrap block (string temp must be claimed BEFORE the
+// Optional wrap or it leaks).
+map_string_value_wrap() `test {
+  map[int, string?] m = {:};
+  m[0] = "hello"; // bare string -> string? wrap
+  m[1] = "world";
+  assert(m[0]!! == "hello", "expected hello");
+  m[0] = m[0]!! + "!"; // overwrite (drops old) + rewrap
+  assert(m[0]!! == "hello!", "expected hello!");
+  assert(m[1]!! == "world", "expected world");
+}
+
+// Bare heap user-type RHS exercises the post-wrap claimHeapTemp fallback
+// (B0233) and the overwrite-drops-old path — batch-test leak enforcement is
+// the assertion here.
+map_usertype_value_wrap() `test {
+  map[int, T1296Res?] m = {:};
+  m[0] = T1296Res(id: 7); // bare Res -> Res? wrap
+  assert(m[0]!!.id == 7, "expected 7");
+  m[0] = T1296Res(id: 9); // overwrite drops the id:7 value
+  assert(m[0]!!.id == 9, "expected 9");
+}
+
+// An already-optional RHS must NOT be double-wrapped: the wrap block is skipped
+// when the expr type is already identical to the setter's Optional value param.
+map_already_optional_rhs() `test {
+  map[int, int[]?] m = {:};
+  int[]? src = [3, 4, 5];
+  m[0] = src; // already int[]? -> no re-wrap (double-wrap would make m[0]!! fail)
+  assert(m[0]!!.len == 3, "expected len 3");
+}

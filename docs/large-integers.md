@@ -196,7 +196,22 @@ LLVM lowers wide-integer ops differently per target:
 - **WASM**: similar — small ops inline, 128-bit division lowers to the `__*ti3` libcalls.
 - **Conclusion**: 128-bit division is the only operation that requires runtime support. Promise does **not** link compiler-rt or libgcc (the default target statically links musl alone), so the compiler **emits the four `__*ti3` builtins in-IR itself** on every target (`emitDivTi3` in `codegen/compiler.go`, T1399), backed by a shared shift-subtract `__promise_udivmod128` helper. The definitions use external linkage in the main IR; on the glibc dynamic path the strong definition satisfies the reference before `-lgcc`'s archive member is consulted, so there is no duplicate-symbol conflict. **The PAL needs no new entry points**, but the builtins are not free — they must be emitted, not assumed.
 
-A regression guard (`TestWideIntDivBuiltins`) asserts the `__*ti3` + `__promise_udivmod128` symbols are present in generated IR on both native and wasm targets.
+**Builtin signatures are target-dependent (T1414).** The emitted definition must match the calling convention LLVM's backend uses at the *call* site, which is not the same on every target:
+
+- **x86-64 Windows** (`x86_64-pc-windows-msvc`) uses the Win64 128-bit libcall convention: both operands are passed **indirectly by pointer** (`rcx`/`rdx`), and the 128-bit result is returned in **`xmm0`**. The compiler therefore emits `define <2 x i64> @__udivti3(i128* %pa, i128* %pb)` there — element 0 is the low word, element 1 the high word (`bitcast i128 to <2 x i64>` on little-endian). A by-value `i128` definition compiles to a callee that reads the *pointers* as operands and returns into registers the caller never reads, so every `/` and `%` with a non-constant i128/u128 divisor silently yields garbage. (Constant divisors are strength-reduced to multiply+shift and never reach the libcall, which is why the breakage was partial.)
+- **Every other target** — SysV x86-64, ARM64 (including `aarch64-pc-windows-msvc`), macOS, wasm — passes `i128` by value in register pairs and returns it the same way, so the plain `define i128 @__udivti3(i128 %a, i128 %b)` form is correct.
+
+The builtin *bodies* are identical across targets; only the wrapper signature and the loads/bitcast around it differ. `win64IndirectI128Libcall()` gates the two shapes.
+
+Regression guards:
+
+- `TestWideIntDivBuiltins` asserts the `__*ti3` + `__promise_udivmod128` symbols are present in generated IR on both native and wasm targets.
+- `TestWideIntDivBuiltinsWin64ABI` pins the emitted *signature and body* per target — symbol presence alone passes with the wrong ABI, and the signature alone would pass for a wrapper that never dereferences its pointer operands. It also asserts the internal `__promise_udivmod128` helper keeps its by-value signature everywhere (only the four public wrappers change shape) and covers both discriminating triples: `aarch64-pc-windows-msvc` (Windows, not x86-64) and `x86_64-apple-macosx*` (x86-64, not Windows).
+- `TestWin64IndirectI128LibcallGate` pins the target-triple predicate directly.
+
+Because these tests drive codegen with explicit target triples, they catch a Windows ABI regression from any host — no Windows CI runner is required.
+
+At runtime, `tests/std/wide_int_test.pr` exercises the libcall itself with optimizer-opaque divisors (a literal divisor is strength-reduced to multiply+shift and never reaches it): `wide_div_opaque_divisor` (sign matrix), `wide_div_opaque_unsigned_edge` / `wide_div_opaque_signed_edge` (quotient zero, self-division, divide-by-one, zero dividend, divisors wider than u64, `i128.min` magnitude wrap), `wide_format_opaque_base` (the `_wide_int_format_128` digit loop that first surfaced T1414, driven at an opaque base), and `wide_div_opaque_256_512` (guards the inline-expanded widths against ever reinheriting a libcall). Note that a batch-test file whose process dies mid-run currently still reports success (T1415), so the Go signature tests — not the runtime tests — are the load-bearing guard until that lands.
 
 ### 4.5 ABI for value types
 
@@ -288,7 +303,8 @@ These costs are documented in the language guide section that introduces wide ty
 - **Linux x86_64** (static musl, no compiler-rt): supported. The compiler emits `__udivti3`/`__umodti3`/`__divti3`/`__modti3` in-IR (T1399); nothing external is required.
 - **Linux ARM64**: supported. The same in-IR builtins are emitted; ARM64 may inline some 128-bit div/rem sequences directly.
 - **macOS x86_64 / ARM64**: supported via the same in-IR builtins.
-- **Windows x86_64 (MSVC)**: the in-IR builtins are emitted on all targets, so 128-bit div/rem resolves without relying on the MSVC/compiler-rt runtime.
+- **Windows x86_64 (MSVC)**: supported. The in-IR builtins are emitted here too, so 128-bit div/rem resolves without relying on the MSVC/compiler-rt runtime — but they must be emitted with the **Win64 indirect libcall ABI** (operands by pointer, `<2 x i64>` result in `xmm0`), not the by-value `i128` form the other targets use. See §4.4 and T1414.
+- **Windows ARM64 (MSVC)**: supported. `aarch64-pc-windows-msvc` passes `i128` by value like SysV, so it uses the same by-value builtin signature as Linux/macOS.
 - **WASM (wasm32-wasi, wasm32-web)**: supported. The in-IR builtins (plus `__multi3`) cover what the WASM toolchain does not provide.
 
 Verification step before committing: a single test program performing `i128`, `i256`, `i512` add/mul/div on each target, observed via `bin/test --wasm --wasm-web`.

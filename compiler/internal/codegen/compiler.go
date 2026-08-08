@@ -2428,67 +2428,89 @@ func (c *Compiler) emitMulti3() {
 	entry.NewRet(result)
 }
 
-// emitDivTi3 emits the 128-bit integer division/remainder builtins for WASM:
+// win64IndirectI128Libcall reports whether the target lowers 128-bit integer
+// libcalls (__udivti3 and friends) with the Win64 convention: both operands
+// passed INDIRECTLY by pointer in rcx/rdx, and the 128-bit result returned as
+// <2 x i64> in xmm0 — not the by-value i128 register pairs every other target
+// uses. Only x86-64 Windows does this; aarch64-pc-windows-msvc passes i128 by
+// value in x0:x1 / x2:x3 exactly like SysV (T1414).
+func (c *Compiler) win64IndirectI128Libcall() bool {
+	ti := sema.ParseTargetInfo(c.target)
+	return ti.OS == "windows" && ti.Arch == "x86_64"
+}
+
+// emitDivTi3 emits the 128-bit integer division/remainder builtins:
 // __udivti3 (unsigned quotient), __umodti3 (unsigned remainder), __divti3
 // (signed quotient), __modti3 (signed remainder). LLVM lowers i128/u128 `/`
-// and `%` to these libcalls, which wasm32 does not provide (no compiler-rt).
+// and `%` to these libcalls, which wasm32 does not provide (no compiler-rt)
+// and which the static-musl linux target does not link either (T0587, T1399).
 //
 // Core routine is an internal shift-subtract long-division helper returning
 // {quotient, remainder}; the four public builtins wrap it. Division by zero is
 // undefined (as elsewhere in Promise) — the loop simply produces an all-ones
 // quotient rather than trapping.
+//
+// The builtin *bodies* are target-independent; only the wrapper *signature*
+// varies, because it must match the calling convention LLVM's backend uses when
+// it emits the libcall. See win64IndirectI128Libcall — on x86-64 Windows the
+// operands arrive by pointer and the result is returned as <2 x i64> in xmm0,
+// so a by-value `i128` definition silently reads the pointers as operands and
+// returns into registers the caller never reads (T1414).
 func (c *Compiler) emitDivTi3() {
 	i128 := irtypes.I128
 	udivmod := c.emitUdivmod128()
 
-	// __udivti3(a, b) -> a / b   (unsigned)
-	udiv := c.module.NewFunc("__udivti3", i128,
-		ir.NewParam("a", i128), ir.NewParam("b", i128))
-	{
-		e := udiv.NewBlock(".entry")
-		qr := e.NewCall(udivmod, udiv.Params[0], udiv.Params[1])
-		e.NewRet(e.NewExtractValue(qr, 0))
+	emit := func(name string, build func(e *ir.Block, a, b value.Value) value.Value) {
+		if c.win64IndirectI128Libcall() {
+			vecTy := irtypes.NewVector(2, irtypes.I64)
+			ptrTy := irtypes.NewPointer(i128)
+			fn := c.module.NewFunc(name, vecTy,
+				ir.NewParam("pa", ptrTy), ir.NewParam("pb", ptrTy))
+			e := fn.NewBlock(".entry")
+			a := e.NewLoad(i128, fn.Params[0])
+			b := e.NewLoad(i128, fn.Params[1])
+			e.NewRet(e.NewBitCast(build(e, a, b), vecTy))
+			return
+		}
+		fn := c.module.NewFunc(name, i128,
+			ir.NewParam("a", i128), ir.NewParam("b", i128))
+		e := fn.NewBlock(".entry")
+		e.NewRet(build(e, fn.Params[0], fn.Params[1]))
 	}
 
+	// __udivti3(a, b) -> a / b   (unsigned)
+	emit("__udivti3", func(e *ir.Block, a, b value.Value) value.Value {
+		return e.NewExtractValue(e.NewCall(udivmod, a, b), 0)
+	})
+
 	// __umodti3(a, b) -> a % b   (unsigned)
-	umod := c.module.NewFunc("__umodti3", i128,
-		ir.NewParam("a", i128), ir.NewParam("b", i128))
-	{
-		e := umod.NewBlock(".entry")
-		qr := e.NewCall(udivmod, umod.Params[0], umod.Params[1])
-		e.NewRet(e.NewExtractValue(qr, 1))
+	emit("__umodti3", func(e *ir.Block, a, b value.Value) value.Value {
+		return e.NewExtractValue(e.NewCall(udivmod, a, b), 1)
+	})
+
+	// magnitude emits |v| plus v's sign mask (0 for non-negative, -1 for
+	// negative) branchlessly: |v| == (v ^ mask) - mask.
+	magnitude := func(e *ir.Block, v value.Value) (abs, sign value.Value) {
+		sign = e.NewAShr(v, constant.NewInt(i128, 127)) // 0 or -1
+		return e.NewSub(e.NewXor(v, sign), sign), sign
 	}
 
 	// __divti3(a, b) -> a / b   (signed): divide magnitudes, apply xor of signs.
-	sdiv := c.module.NewFunc("__divti3", i128,
-		ir.NewParam("a", i128), ir.NewParam("b", i128))
-	{
-		e := sdiv.NewBlock(".entry")
-		a, b := sdiv.Params[0], sdiv.Params[1]
-		sa := e.NewAShr(a, constant.NewInt(i128, 127)) // 0 or -1
-		sb := e.NewAShr(b, constant.NewInt(i128, 127))
-		absA := e.NewSub(e.NewXor(a, sa), sa)
-		absB := e.NewSub(e.NewXor(b, sb), sb)
-		qr := e.NewCall(udivmod, absA, absB)
-		q := e.NewExtractValue(qr, 0)
+	emit("__divti3", func(e *ir.Block, a, b value.Value) value.Value {
+		absA, sa := magnitude(e, a)
+		absB, sb := magnitude(e, b)
+		q := e.NewExtractValue(e.NewCall(udivmod, absA, absB), 0)
 		sign := e.NewXor(sa, sb)
-		e.NewRet(e.NewSub(e.NewXor(q, sign), sign))
-	}
+		return e.NewSub(e.NewXor(q, sign), sign)
+	})
 
 	// __modti3(a, b) -> a % b   (signed): remainder takes the dividend's sign.
-	smod := c.module.NewFunc("__modti3", i128,
-		ir.NewParam("a", i128), ir.NewParam("b", i128))
-	{
-		e := smod.NewBlock(".entry")
-		a, b := smod.Params[0], smod.Params[1]
-		sa := e.NewAShr(a, constant.NewInt(i128, 127))
-		sb := e.NewAShr(b, constant.NewInt(i128, 127))
-		absA := e.NewSub(e.NewXor(a, sa), sa)
-		absB := e.NewSub(e.NewXor(b, sb), sb)
-		qr := e.NewCall(udivmod, absA, absB)
-		r := e.NewExtractValue(qr, 1)
-		e.NewRet(e.NewSub(e.NewXor(r, sa), sa)) // apply dividend sign
-	}
+	emit("__modti3", func(e *ir.Block, a, b value.Value) value.Value {
+		absA, sa := magnitude(e, a)
+		absB, _ := magnitude(e, b)
+		r := e.NewExtractValue(e.NewCall(udivmod, absA, absB), 1)
+		return e.NewSub(e.NewXor(r, sa), sa) // apply dividend sign
+	})
 }
 
 // emitUdivmod128 emits an internal helper computing unsigned 128-bit

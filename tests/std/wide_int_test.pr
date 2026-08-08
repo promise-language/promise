@@ -344,3 +344,178 @@ wide_encode_decode() `test {
   i256 bn = i256.parse(Scanner(s: move sn), 10)?!;
   assert(bn == n, "i256 negative decimal round-trip");
 }
+
+// --- opaque-divisor div/rem (actually reaches the __*ti3 libcalls) ---
+// Divisors the optimizer cannot see as constants, so `/` and `%` reach the
+// __udivti3/__umodti3/__divti3/__modti3 libcalls instead of being strength-
+// reduced to multiply+shift. Every other div test here uses literal divisors
+// and so never exercises the libcall ABI (T1414). Operands are pushed onto a
+// vector at runtime rather than written as a vector literal — a literal would
+// take the static .rodata path, which corrupts >64-bit wide-int elements
+// (T1418).
+_wide_pick[T](T[] v, int i) T {
+  return v[i];
+}
+
+wide_div_opaque_divisor() `test {
+  u128[] uv = [];
+  uv.push(1000000000000000000007u128);
+  uv.push(3u128);
+  u128 ua = _wide_pick(uv, 0);
+  u128 ub = _wide_pick(uv, 1);
+  assert(ua == 1000000000000000000007u128, "u128 opaque operand intact");
+  assert(ua / ub == 333333333333333333335u128, "u128 opaque div");
+  assert(ua % ub == 2u128, "u128 opaque rem");
+  assert(u128.max / ub == 113427455640312821154458202477256070485u128, "u128 opaque max div");
+  assert(u128.max % ub == 0u128, "u128 opaque max rem");
+
+  i128[] iv = [];
+  iv.push(-1000000000000000000007i128);
+  iv.push(3i128);
+  iv.push(1000000000000000000007i128);
+  i128 ia = _wide_pick(iv, 0);
+  i128 ib = _wide_pick(iv, 1);
+  i128 ip = _wide_pick(iv, 2);
+  assert(ip / ib == 333333333333333333335i128, "i128 opaque +/+ div");
+  assert(ip % ib == 2i128, "i128 opaque +/+ rem");
+  assert(ia / ib == -333333333333333333335i128, "i128 opaque -/+ div");
+  assert(ia % ib == -2i128, "i128 opaque -/+ rem");
+  assert(ip / (0i128 - ib) == -333333333333333333335i128, "i128 opaque +/- div");
+  assert(ip % (0i128 - ib) == 2i128, "i128 opaque +/- rem");
+  assert(ia / (0i128 - ib) == 333333333333333333335i128, "i128 opaque -/- div");
+  assert(ia % (0i128 - ib) == -2i128, "i128 opaque -/- rem");
+}
+
+// The div/rem edge cases (quotient zero, self-division, divide-by-one, zero
+// dividend, divisor wider than u64) are all covered above by wide_div_edge with
+// LITERAL divisors — which LLVM strength-reduces to multiply+shift, so none of
+// them ever reach __udivti3/__umodti3. Re-run the same shapes with opaque
+// divisors so the shift-subtract loop and the libcall ABI actually see them.
+wide_div_opaque_unsigned_edge() `test {
+  u128[] uv = [];
+  uv.push(340282366920938463463374607431768211453u128); // u128.max - 2
+  uv.push(1u128);
+  uv.push(18446744073709551629u128); // 2^64 + 13: > u64 and not a power of two
+  uv.push(0u128);
+  u128 big = _wide_pick(uv, 0);
+  u128 one = _wide_pick(uv, 1);
+  u128 wide_d = _wide_pick(uv, 2);
+  u128 zero = _wide_pick(uv, 3);
+
+  // Dividend smaller than the divisor: quotient 0, remainder = dividend.
+  assert(7u128 / big == 0u128, "opaque quotient zero");
+  assert(7u128 % big == 7u128, "opaque rem is dividend");
+  // Dividend equal to the divisor, and divide-by-one.
+  assert(big / big == 1u128, "opaque div self");
+  assert(big % big == 0u128, "opaque rem self zero");
+  assert(big / one == big, "opaque div by one");
+  assert(big % one == 0u128, "opaque rem by one");
+  // Zero dividend must exit the shift-subtract loop immediately.
+  assert(zero / big == 0u128, "opaque zero dividend div");
+  assert(zero % big == 0u128, "opaque zero dividend rem");
+  // A divisor whose HIGH 64 bits are set: both limbs of the second operand have
+  // to survive the call. A wrapper that reads the operand pointer as the value
+  // (the original T1414 failure) or that keeps only the low word gets this wrong.
+  assert(u128.max / wide_d == 18446744073709551603u128, "opaque >2^64 divisor div");
+  assert(u128.max % wide_d == 168u128, "opaque >2^64 divisor rem");
+  // Both operands opaque and both wider than u64.
+  assert(big / wide_d == 18446744073709551603u128, "opaque/opaque wide div");
+  assert(big % wide_d == 166u128, "opaque/opaque wide rem");
+}
+
+wide_div_opaque_signed_edge() `test {
+  i128[] iv = [];
+  iv.push(3i128);
+  iv.push(18446744073709551629i128); // 2^64 + 13
+  iv.push(i128.max);
+  iv.push(i128.min);
+  i128 three = _wide_pick(iv, 0);
+  i128 wide_d = _wide_pick(iv, 1);
+  i128 imax = _wide_pick(iv, 2);
+  i128 imin = _wide_pick(iv, 3);
+
+  // i128.min has no positive counterpart, so the branchless magnitude
+  // (v ^ mask) - mask wraps it back to itself — which is the correct UNSIGNED
+  // 2^127 for the division loop. Any "fix-up" that clamps or negates loses the
+  // top bit and silently halves the quotient.
+  assert(i128.min / three == -56713727820156410577229101238628035242i128, "opaque min div");
+  assert(i128.min % three == -2i128, "opaque min rem");
+  assert(i128.min / imax == -1i128, "opaque min / max div");
+  assert(i128.min % imax == -1i128, "opaque min / max rem");
+  assert(i128.min / imin == 1i128, "opaque min / min div");
+  assert(i128.min % imin == 0i128, "opaque min / min rem");
+  // Dividend smaller in magnitude than a most-negative divisor.
+  assert(i128.max / imin == 0i128, "opaque max / min div");
+  assert(i128.max % imin == i128.max, "opaque max / min rem");
+  // Divisor wider than u64, both dividend signs (quotient sign = xor of signs,
+  // remainder sign = dividend sign).
+  assert(i128.max / wide_d == 9223372036854775801i128, "opaque wide divisor div");
+  assert(i128.max % wide_d == 9223372036854775898i128, "opaque wide divisor rem");
+  assert(i128.min / wide_d == -9223372036854775801i128, "opaque wide divisor neg div");
+  assert(i128.min % wide_d == -9223372036854775899i128, "opaque wide divisor neg rem");
+  assert(i128.max / (0i128 - wide_d) == -9223372036854775801i128, "opaque wide neg divisor div");
+  assert(i128.max % (0i128 - wide_d) == 9223372036854775898i128, "opaque wide neg divisor rem");
+}
+
+// --- opaque BASE through to_string (the loop that first surfaced T1414) ---
+// _wide_int_format_128 divides by its `base` parameter, which is opaque inside
+// the std module — that call site is what produced garbage on Windows x64. The
+// existing wide_format_parse tests pass literal bases at the CALL site, but the
+// division still happens against the parameter, so both are worth pinning: here
+// the base is opaque at the call site too, which also keeps the test honest if
+// std is ever inlined into user code under LTO.
+wide_format_opaque_base() `test {
+  int[] bases = [];
+  bases.push(2);
+  bases.push(8);
+  bases.push(10);
+  bases.push(36);
+  int b2 = _wide_pick(bases, 0);
+  int b8 = _wide_pick(bases, 1);
+  int b10 = _wide_pick(bases, 2);
+  int b36 = _wide_pick(bases, 3);
+
+  assert(5u128.to_string(base: b2) == "101", "opaque base 2");
+  assert(u128.max.to_string(base: b8) == "3777777777777777777777777777777777777777777", "opaque base 8");
+  assert(u128.max.to_string(base: b10) == "340282366920938463463374607431768211455", "opaque base 10");
+  assert(u128.max.to_string(base: b36) == "f5lxx1zz5pnorynqglhzmsp33", "opaque base 36");
+  // Signed magnitudes go through the same division loop after sign extraction.
+  assert((-1000000000000000000007i128).to_string(base: b10) == "-1000000000000000000007", "opaque signed base 10");
+  assert((-1000000000000000000007i128).to_string(base: b36) == "-5v1j4f4ds79m9z", "opaque signed base 36");
+  assert(i128.min.to_string(base: b10) == "-170141183460469231731687303715884105728", "opaque i128.min base 10");
+  // Round-trip back through parse at the same opaque base.
+  assert(u128.parse(Scanner(s: "340282366920938463463374607431768211455"), b10)?! == u128.max, "opaque base 10 round-trip");
+  assert(u128.parse(Scanner(s: "f5lxx1zz5pnorynqglhzmsp33"), b36)?! == u128.max, "opaque base 36 round-trip");
+  assert(i128.parse(Scanner(s: "-170141183460469231731687303715884105728"), b10)?! == i128.min, "opaque i128.min round-trip");
+}
+
+// 256/512-bit div/rem is inline-expanded by LLVM's ExpandLargeDivRem and never
+// reaches a libcall, so it was unaffected by T1414 — but nothing pinned that,
+// and a future width/lowering change that reintroduced a libcall would inherit
+// exactly the same ABI trap. Guard the widths with opaque divisors too.
+wide_div_opaque_256_512() `test {
+  u256[] uv = [];
+  uv.push(7u256);
+  u256 du = _wide_pick(uv, 0);
+  assert(u256.max / du == 16541727033902313631938712144098272550467140666520080577065369143987589948562u256, "u256 opaque div");
+  assert(u256.max % du == 1u256, "u256 opaque rem");
+
+  i256[] iv = [];
+  iv.push(7i256);
+  i256 di = _wide_pick(iv, 0);
+  assert(i256.min / di == -8270863516951156815969356072049136275233570333260040288532684571993794974281i256, "i256 opaque neg div");
+  assert(i256.min % di == -1i256, "i256 opaque neg rem");
+
+  u512[] wv = [];
+  wv.push(7u512);
+  u512 dw = _wide_pick(wv, 0);
+  assert(u512.max / dw == 1915401132848942442796289285457978018211337974370341911103365920531680575724792425257410614023843346812861694026640864407679126115992367135204807000869156u512, "u512 opaque div");
+  assert(u512.max % dw == 3u512, "u512 opaque rem");
+
+  // The 256/512 format loops divide by their `base` parameter as well.
+  int[] bases = [];
+  bases.push(10);
+  int b10 = _wide_pick(bases, 0);
+  assert(i256.min.to_string(base: b10) == "-57896044618658097711785492504343953926634992332820282019728792003956564819968", "i256.min opaque base 10");
+  assert(u512.max.to_string(base: b10) == "13407807929942597099574024998205846127479365820592393377723561443721764030073546976801874298166903427690031858186486050853753882811946569946433649006084095", "u512.max opaque base 10");
+}

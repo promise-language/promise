@@ -109,6 +109,122 @@ func TestWideIntDivBuiltins(t *testing.T) {
 	}
 }
 
+func TestWideIntDivBuiltinsWin64ABI(t *testing.T) {
+	// x86-64 Windows lowers 128-bit div/rem libcalls with operands passed
+	// indirectly by pointer and the result returned as <2 x i64> in xmm0. A
+	// by-value `i128` definition silently reads the POINTERS as operands and
+	// returns into registers the caller never reads — every non-constant-divisor
+	// i128/u128 `/` and `%` produced garbage (T1414). ARM64 Windows and every
+	// other target pass i128 by value, so they keep the plain signature.
+	src := `main() {
+		u128 a = 100u128;
+		u128 b = 7u128;
+		u128 q = a / b;
+		u128 r = a % b;
+	}`
+	syms := []string{"__udivti3", "__umodti3", "__divti3", "__modti3"}
+
+	winIR := generateIRForTarget(t, src, "x86_64-pc-windows-msvc")
+	for _, sym := range syms {
+		assertContains(t, winIR, "define <2 x i64> @"+sym+"(i128* %pa, i128* %pb)")
+		// The signature alone is not enough: a wrapper that returns <2 x i64>
+		// but never dereferences its pointer operands would still match. Pin the
+		// body — both operands loaded, result bitcast back out through xmm0.
+		body := extractFunction(winIR, sym)
+		if body == "" {
+			t.Fatalf("%s: no body extracted from win64 IR:\n%s", sym, winIR)
+		}
+		for _, want := range []string{
+			"load i128, i128* %pa",
+			"load i128, i128* %pb",
+			"bitcast i128 %",
+			"to <2 x i64>",
+			"ret <2 x i64> %",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("win64 %s body must contain %q:\n%s", sym, want, body)
+			}
+		}
+		// The by-value shape must be gone entirely — a function is defined once,
+		// so a leftover `define i128 @sym` means the gate did not apply.
+		if strings.Contains(winIR, "define i128 @"+sym+"(") {
+			t.Errorf("win64 %s must not also be defined with the by-value i128 ABI", sym)
+		}
+	}
+
+	// Sign correction still has to happen inside the indirect wrappers — the
+	// signed pair is the easiest thing to lose when refactoring the shared emit
+	// closure, and `__divti3`/`__modti3` differ only in which sign they apply.
+	if body := extractFunction(winIR, "__divti3"); !strings.Contains(body, "ashr i128 %0, 127") ||
+		!strings.Contains(body, "ashr i128 %1, 127") {
+		t.Errorf("win64 __divti3 must derive both operand signs:\n%s", body)
+	}
+	if body := extractFunction(winIR, "__modti3"); !strings.Contains(body, "ashr i128 %0, 127") {
+		t.Errorf("win64 __modti3 must derive the dividend sign:\n%s", body)
+	}
+
+	// Only the four PUBLIC wrappers change shape. The internal helper is called
+	// directly from the wrappers (not through the backend's libcall lowering),
+	// so it must keep the by-value signature on every target — including win64.
+	assertContains(t, winIR, "define { i128, i128 } @__promise_udivmod128(i128 %a, i128 %b)")
+
+	// Every other target passes i128 by value in register pairs and returns it
+	// the same way, so the plain signature is the correct one there. macOS
+	// x86_64 discriminates an arch-only gate; aarch64 Windows an OS-only one.
+	for _, target := range []string{
+		"x86_64-unknown-linux-musl",
+		"x86_64-unknown-linux-gnu",
+		"x86_64-apple-macosx14.0.0",
+		"aarch64-apple-macosx14.0.0",
+		"aarch64-unknown-linux-gnu",
+		"aarch64-pc-windows-msvc",
+		"wasm32-wasi",
+		"wasm32-web",
+	} {
+		ir := generateIRForTarget(t, src, target)
+		for _, sym := range syms {
+			assertContains(t, ir, "define i128 @"+sym+"(i128 %a, i128 %b)")
+			if strings.Contains(ir, "define <2 x i64> @"+sym+"(") {
+				t.Errorf("target %q: %s must use the by-value i128 ABI", target, sym)
+			}
+		}
+		assertContains(t, ir, "define { i128, i128 } @__promise_udivmod128(i128 %a, i128 %b)")
+	}
+}
+
+func TestWin64IndirectI128LibcallGate(t *testing.T) {
+	// The ABI switch is a pure function of the target triple, so pin it directly
+	// rather than only through emitted IR — the discriminating cases are "windows
+	// but not x86_64" and "x86_64 but not windows", which an OS-only or arch-only
+	// check would each get wrong in one direction (T1414).
+	for _, tc := range []struct {
+		target string
+		want   bool
+	}{
+		{"x86_64-pc-windows-msvc", true},
+		{"x86_64-pc-windows-gnu", true},
+		{"aarch64-pc-windows-msvc", false},
+		{"arm64-pc-windows-msvc", false},
+		{"x86_64-unknown-linux-musl", false},
+		{"x86_64-unknown-linux-gnu", false},
+		{"x86_64-apple-macosx14.0.0", false},
+		{"x86_64-apple-darwin", false},
+		{"aarch64-apple-macosx14.0.0", false},
+		{"aarch64-unknown-linux-gnu", false},
+		{"wasm32-wasi", false},
+		{"wasm32-web", false},
+		// An empty triple never reaches codegen — compile() substitutes
+		// HostTargetTriple() before constructing the Compiler — so the
+		// conservative by-value answer here is unreachable, not a Windows hole.
+		{"", false},
+	} {
+		c := &Compiler{target: tc.target}
+		if got := c.win64IndirectI128Libcall(); got != tc.want {
+			t.Errorf("win64IndirectI128Libcall(%q) = %v, want %v", tc.target, got, tc.want)
+		}
+	}
+}
+
 func TestWideIntHashFold(t *testing.T) {
 	// The native hash getter folds the wide value to i64 by XOR-ing 64-bit limbs.
 	ir := generateIR(t, `main() {

@@ -1,0 +1,78 @@
+// T1307: cross-module structural-passthrough BINDING coverage. A module-qualified
+// free-function call `sinkpass_mod.pass_through(s)` returns the owned structural
+// arg by value, so the result box aliases the caller's still-owned arg box. The
+// arg-alias guard (maybeClearStructuralBindingAliasArg, codegen/stmt.go) must clear
+// the binding's free flag across the module boundary — same double-free class as
+// the same-file T1304/T1308 coverage in tests/e2e/structural_binding_alias_test.pr,
+// but reached through `use mod`, where the callee is a MemberExpr whose target is a
+// module name rather than a value.
+//
+// Sibling of sinkpass_discard_test.pr (T1327), which covers the discard/inline path
+// over the same module. `Counter` carries a heap `string` field so a missed guard
+// double-frees the box — observable as a crash, not a silent benign double-free.
+// Leak enforcement (T0067) is the co-check on the fresh-return case.
+use sinkpass_mod "./sinkpass_mod";
+
+// Sink satisfier with a heap string field so a double-free of the box is observable.
+type Counter {
+  int total;
+  string label;
+  emit(~this, int n) {
+    this.total = this.total + n;
+  }
+}
+
+// Exact T1307 repro: r aliases s's box through a module-qualified free function;
+// without the guard both drop it → double free.
+module_binding_passthrough() `test {
+  s := Counter(total: 5, label: "a");
+  r := sinkpass_mod.pass_through(s);
+  r.emit(1);
+  assert(true, "module passthrough: no double free");
+}
+
+// Source read after the aliasing binding — s must stay the sole owner.
+module_binding_use_source() `test {
+  s := Counter(total: 5, label: "b");
+  r := sinkpass_mod.pass_through(s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "module passthrough: source still usable");
+}
+
+// Multi-arg passthrough: the leading literal is skipped and the owned structural
+// arg s is recognized as the alias source across the module boundary.
+module_multi_arg_passthrough() `test {
+  s := Counter(total: 5, label: "c");
+  r := sinkpass_mod.pass_through2(9, s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "module multi-arg passthrough: no double free");
+}
+
+// Negative case: a fresh module-qualified return is a distinct pointer, so r owns
+// and frees it — the guard must NOT clear r's free flag (else the fresh box leaks).
+module_fresh_return() `test {
+  r := sinkpass_mod.fresh_return();
+  r.emit(3);
+  assert(true, "module fresh return freed independently");
+}
+
+// Typed var-decl form (`mod.Sink r = ...`) exercises the second alias-clear call
+// site (genTypedVarDecl) across the module boundary; the inferred `:=` path above
+// exercises the first.
+module_typed_binding_passthrough() `test {
+  s := Counter(total: 5, label: "d");
+  sinkpass_mod.Sink r = sinkpass_mod.pass_through(s);
+  r.emit(1);
+  s.emit(2);
+  assert(true, "module typed decl: no double free, source usable");
+}
+
+// Typed var-decl form on the fresh return: the negative case through the same
+// second call site — r owns the distinct box and must still free it.
+module_typed_fresh_return() `test {
+  sinkpass_mod.Sink r = sinkpass_mod.fresh_return();
+  r.emit(3);
+  assert(true, "module typed decl fresh return freed independently");
+}

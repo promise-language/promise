@@ -28,6 +28,12 @@ pass_through(Sink s) Sink `public `doc("Returns the passed-in Sink unchanged; th
   return s;
 }
 
+// Multi-arg passthrough: the leading non-heap literal must be skipped by the
+// arg-alias scan so the owned structural arg is recognized as the alias source.
+pass_through2(int x, Sink s) Sink `public `doc("Ignores x and returns the passed-in Sink unchanged; the argument remains the sole owner.") {
+  return s;
+}
+
 // Non-structural owned heap type, for the regression guard.
 type Box `public `doc("Non-structural heap type holding a single int value.") {
   int value;

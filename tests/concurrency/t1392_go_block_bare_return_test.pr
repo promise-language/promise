@@ -1,27 +1,37 @@
-// T1392: a bare `return` in a value-producing `go`/`go!` block is an early exit
-// that carries no trailing value. It previously stored NOTHING into the caller's
-// G.result_ptr buffer, so `<-t` read uninitialized memory (poison). On wasm the
-// poison bytes deterministically crashed the receiver (mis-read discriminant →
-// garbage error-pointer dereference); on the host it silently yielded a garbage
-// int. Codegen now stores a DEFINED default on that exit — the result type's zero
-// for a non-failable body, and {ok, zero, null} for a failable one — so `<-t`
-// observes a defined value and never a spurious error. (A bare return carries no
-// value, so the ok-value is the type's zero, not a meaningful result.)
+// T1392: a bare `return` is an early exit from a `go`/`go!` block that carries no
+// value. It previously stored NOTHING into the caller's G.result_ptr buffer, so
+// `<-t` read uninitialized memory (poison). On wasm the poison bytes
+// deterministically crashed the receiver (mis-read discriminant → garbage
+// error-pointer dereference); on the host it silently yielded a garbage int.
+// Codegen now stores a DEFINED default on that exit (storeGoResultDefault), so `<-t`
+// observes a defined value and never a spurious error.
 //
-// The failable analog is covered in gobang_use_failable_close_test.pr
-// (gobang_use_close_bare_return_ok_no_surface). These cover the non-failable
-// `go {}` value path and a value body with no use-binding.
-// --- Non-failable value body, bare return → defined zero (int) ---
-t1392_nonfailable_bare_return_zero() `test {
+// T1385/§17.2: a bare `return;` on a VALUE-producing path is now a compile error
+// ("missing return value (expected T)"), so every body that can reach this exit is
+// `T = Void`. That narrows what the default has to be: a plain `go {}` void body has
+// no result buffer at all (the caller stores the 0x1 sentinel), and a `go! {}` void
+// body's buffer holds the two-field {ok, err} aggregate, whose defined default is
+// {ok, null}. The value side of the original coverage moved to
+// t1385_go_block_return_test.pr, where an explicit `return <expr>` produces one.
+//
+// The failable-with-use-binding analog is covered in
+// gobang_use_failable_close_test.pr (gobang_use_close_bare_return_ok_no_surface).
+// These cover the non-failable `go {}` void path and a failable body with no
+// use-binding.
+// --- Non-failable void body, bare return → coroutine exits cleanly ---
+t1392_nonfailable_bare_return_void() `test {
   n := 5;
+  ch := channel[int](1);
   t := go {
+    ch.send(1);
     if n > 0 {
-      return; // early exit, no trailing value
+      return; // early exit
     }
-    n + 100
+    ch.send(2);
   };
-  v := <-t;
-  assert(v == 0, "non-failable value go bare-return yields the type's defined zero");
+  <-t;
+  v := (<-ch)!;
+  assert(v == 1, "void go bare-return exits before the second send");
 }
 
 // --- Non-failable value body, trailing value path unaffected ---
@@ -34,10 +44,10 @@ t1392_nonfailable_trailing_value() `test {
   assert(v == 105, "trailing-value path still returns the computed value");
 }
 
-// --- Failable value body WITHOUT a use-binding: bare return → no spurious error ---
+// --- Failable void body WITHOUT a use-binding: bare return → no spurious error ---
 // Exercises the failable bare-return store when closeCap is nil (no use-binding),
-// so emitCloseErrCheck is a no-op and the defined {ok, zero, null} store is what
-// keeps `<-t` from reading poison.
+// so emitCloseErrCheck is a no-op and the defined {ok, null} store is what keeps
+// `<-t` from reading poison.
 produce_ok!(int x) int {
   if x < 0 {
     raise error("neg:{x}");
@@ -52,13 +62,11 @@ t1392_failable_bare_return_no_binding() `test {
     if n > 0 {
       return;
     }
-    base + n
+    print_line(base.to_string());
   };
   got := false;
-  v := (<-t)? e {
+  (<-t)? e {
     got = true;
-    -1
   };
   assert(!got, "failable bare return (no use-binding) must not surface a spurious error");
-  assert(v == 0, "failable bare-return ok-value is the defined zero");
 }

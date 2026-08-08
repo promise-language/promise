@@ -3319,7 +3319,7 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	// (`T`), the result is owned — a single dropflag cannot represent
 	// ownership that varies by arm, so the conservative choice is the
 	// owned form. Otherwise, prefer the then-branch type.
-	joined := c.joinBranchTypes(thenType, elseType, e.Pos(), true)
+	joined := c.joinBranchTypes(thenType, elseType, e.Pos(), true, branchArmSubject)
 
 	// T1335: a reachable (non-diverging) arm produces no value. In value position
 	// (a non-void expected type is in play) the if-expression cannot satisfy that
@@ -3345,6 +3345,16 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	return joined
 }
 
+// branchArmSubject is joinBranchTypes' default diagnostic subject — the
+// if/match arm callers. It is a plural noun phrase: the messages read
+// "<subject> produce incompatible types …".
+const branchArmSubject = "if/match arms"
+
+// goBlockReturnSubject is joinBranchTypes' diagnostic subject for the §17.2
+// explicit-return unification of a `go {}` / `go! {}` body (T1385), where the
+// values being unified are `return` statements rather than if/match arms.
+const goBlockReturnSubject = "goroutine block `return` statements"
+
 // joinBranchTypes unifies two arm types of an if/match expression. When one
 // arm produces `T&`/`T~` and another produces `T`, we strip the borrow to
 // the owned form so downstream codegen treats the result as owned (T0381).
@@ -3359,7 +3369,11 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 // string) are diagnosed. It is false when the enclosing if/match is a STATEMENT
 // whose value is discarded — such arms never merge into a single value, so no
 // invalid phi is emitted and no diagnostic is warranted (T1393).
-func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos, report bool) types.Type {
+//
+// subject names what is being unified in the diagnostics ("if/match arms" for
+// the arm callers; the go-block `return` unification passes its own, T1385) so
+// the message describes the construct the user actually wrote.
+func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos, report bool, subject string) types.Type {
 	if a == nil {
 		return b
 	}
@@ -3413,9 +3427,9 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos, report bool) typ
 		elem := stripped(refSide)
 		if !types.IsCopy(elem) {
 			c.errorf(pos,
-				"if/match arms mix borrowed and owned non-Copy '%s'; "+
+				"%s mix borrowed and owned non-Copy '%s'; "+
 					"call .clone() on the borrow arm or change all arms to produce '%s&'",
-				elem, elem)
+				subject, elem, elem)
 			return elem
 		}
 		if aIsRef {
@@ -3478,7 +3492,7 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos, report bool) typ
 	// values (below) it cannot.
 	if isVoidType(a) || isVoidType(b) {
 		if report {
-			c.errorf(pos, "if/match arms produce incompatible types '%s' and '%s'", a, b)
+			c.errorf(pos, "%s produce incompatible types '%s' and '%s'", subject, a, b)
 		}
 		if isVoidType(a) {
 			return b
@@ -3491,7 +3505,7 @@ func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos, report bool) typ
 	// values regardless of whether its result is used, so discarding the value
 	// does not avoid the crash. Reject them unconditionally so the mismatch
 	// surfaces as a clean sema diagnostic instead of crashing opt (T1393).
-	c.errorf(pos, "if/match arms produce incompatible types '%s' and '%s'", a, b)
+	c.errorf(pos, "%s produce incompatible types '%s' and '%s'", subject, a, b)
 	return a
 }
 
@@ -3634,7 +3648,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type, report bool)
 			resultType = armType
 		} else {
 			// T0381: unify ref/owned mismatches across arms.
-			resultType = c.joinBranchTypes(resultType, armType, e.Pos(), report)
+			resultType = c.joinBranchTypes(resultType, armType, e.Pos(), report, branchArmSubject)
 		}
 	}
 
@@ -3694,9 +3708,19 @@ func (c *Checker) blockValueType(block *ast.Block, report bool) types.Type {
 		// here instead of emitting an invalid phi that crashes opt.
 		thenType := c.blockValueType(ifS.Body, report)
 		elseType := c.stmtValueType(ifS.Else, report)
-		return c.joinBranchTypes(thenType, elseType, ifS.Pos(), report)
+		return c.joinBranchTypes(thenType, elseType, ifS.Pos(), report, branchArmSubject)
 	}
 	return nil
+}
+
+// trailingValueStmtPos returns the position of a block's last statement — the
+// one blockValueType reads the block's trailing value from. Used to anchor the
+// §17.2 "trailing expression is discarded" diagnostic (T1385).
+func trailingValueStmtPos(block *ast.Block) ast.Pos {
+	if block == nil || len(block.Stmts) == 0 {
+		return ast.Pos{}
+	}
+	return block.Stmts[len(block.Stmts)-1].Pos()
 }
 
 // stmtValueType returns the value type of an if/else-branch statement — a
@@ -3712,7 +3736,7 @@ func (c *Checker) stmtValueType(s ast.Stmt, report bool) types.Type {
 		}
 		thenType := c.blockValueType(st.Body, report)
 		elseType := c.stmtValueType(st.Else, report)
-		return c.joinBranchTypes(thenType, elseType, st.Pos(), report)
+		return c.joinBranchTypes(thenType, elseType, st.Pos(), report, branchArmSubject)
 	}
 	return nil
 }
@@ -4191,11 +4215,15 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 	// Type-check body. A lambda body is governed by its own signature, so it
 	// is not the enclosing `go {}` non-failable scope (T1217); reset the
 	// override alongside the curFunc swap so the two contexts stay independent.
+	// T1385: for the same reason, a `return` inside a lambda nested in a `go {}`
+	// block binds to the LAMBDA, not the goroutine — clear the go-block context.
 	saved := c.curFunc
 	c.curFunc = sig
 	savedNFS := c.nonFailableScope
 	c.nonFailableScope = false
-	defer func() { c.curFunc = saved; c.nonFailableScope = savedNFS }()
+	savedGoBlock := c.goBlock
+	c.goBlock = nil
+	defer func() { c.curFunc = saved; c.nonFailableScope = savedNFS; c.goBlock = savedGoBlock }()
 
 	if e.Body != nil {
 		c.openScope(e.Body, "lambda")
@@ -4377,7 +4405,13 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 			c.nonFailableScope = true
 			c.failableScope = false
 		}
+		// T1385: `return` inside the body binds to the goroutine (§17.2
+		// explicit-return style), not to the enclosing function.
+		savedGoBlock := c.goBlock
+		goCtx := &goBlockCtx{}
+		c.goBlock = goCtx
 		c.checkBlock(e.Block)
+		c.goBlock = savedGoBlock
 		escaped := c.failableEscapeCount > savedEsc
 		c.nonFailableScope = savedNFS
 		c.failableScope = savedFS
@@ -4387,11 +4421,40 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		if e.Failable && !escaped {
 			c.errorf(e.Block.Pos(), "this goroutine's body cannot fail; spawn it with plain `go`")
 		}
-		// Block form: infer T from the block's result value — a trailing
-		// expression statement, or a value-producing if/else in statement
-		// position. Mirrors codegen's genBlockValue (ExprStmt + IfStmt) via the
-		// shared blockValueType helper (T1389).
-		innerType = c.blockValueType(e.Block, true)
+		// Block form: infer T from the block's result value. §17.2 gives two
+		// styles and the block is in exactly one of them:
+		//   - trailing-expression: the last statement is a bare expression (or a
+		//     value-producing if/else in statement position). Mirrors codegen's
+		//     genBlockValue (ExprStmt + IfStmt) via the shared blockValueType
+		//     helper (T1389).
+		//   - explicit-return: the block yields with `return <expr>` (T1385); T is
+		//     the unification of every returned value.
+		// Report trailing-arm mismatches only in trailing style — in explicit-return
+		// style the trailing value is already an error (mixing), so arm-mismatch
+		// noise on top of it would be misleading.
+		trailing := c.blockValueType(e.Block, !goCtx.hasValueRet)
+		if goCtx.hasValueRet {
+			innerType = goCtx.resultType
+			// §17.2: no mixing — once a block returns with `return`, a trailing
+			// expression is silently discarded, so reject it.
+			if trailing != nil && !types.Identical(trailing, types.TypVoid) {
+				pos := trailingValueStmtPos(e.Block)
+				c.errorf(pos, "this block returns with `return`; a trailing expression is discarded")
+				c.hintf(pos, "did you mean `return <expr>;`?")
+			} else if !c.blockReturns(e.Block) {
+				// §17.2: in explicit-return style every path must produce the value.
+				// Suppressed above: the trailing expression IS the fall-through path,
+				// and converting it to `return <expr>;` fixes both at once.
+				c.errorf(e.Block.End(), "goroutine block missing return statement")
+			}
+		} else {
+			innerType = trailing
+		}
+		// §17.2: a bare `return;` on a value-producing path is an error in either
+		// style — the verdict is deferred to here because T is only known now.
+		if goCtx.hasBareRet && innerType != nil && !types.Identical(innerType, types.TypVoid) {
+			c.errorf(goCtx.bareReturnPos, "missing return value (expected %s)", innerType)
+		}
 		// Block form: check captured variables are sendable
 		c.checkGoBlockSendable(e)
 	}

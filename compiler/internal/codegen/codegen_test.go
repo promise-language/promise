@@ -18865,9 +18865,12 @@ func TestGoBlockValueResultStored(t *testing.T) {
 		}
 	`)
 	// Coroutine body stores the trailing value into G.result_ptr via the
-	// B0109 null-check store pattern.
-	assertContains(t, ir, "store_result:")
-	assertContains(t, ir, "after_store:")
+	// B0109 null-check store pattern. T1385 collapsed this open-coded store onto
+	// the shared storeGoResultAgg helper, so the blocks are its uniquely-numbered
+	// `go.store_result.N`/`go.after_store.N` (the fixed `store_result:` labels now
+	// belong only to the `go f()` call form).
+	assertContains(t, ir, "go.store_result")
+	assertContains(t, ir, "go.after_store")
 	assertContains(t, ir, "store i64 42, i64*")
 	// Caller allocates a heap result buffer for the non-void task.
 	assertContains(t, ir, "@pal_alloc")
@@ -18915,7 +18918,7 @@ func TestT0686_StructResultNoTokenLoad(t *testing.T) {
 	assertNotContains(t, body, "i8** %0")               // no heap pointer load from the token
 	// Positive guards: the Box value is still stored into G.result_ptr inside the
 	// inner coroutine, and the caller allocates a real result buffer.
-	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "go.store_result")
 	assertContains(t, ir, "@pal_alloc")
 }
 
@@ -18948,7 +18951,7 @@ func TestT0686_VectorResultNoTokenLoad(t *testing.T) {
 	assertNotContains(t, body, "i8** %0")               // no heap pointer load from the token
 	// Positive guards: the vector result is still stored into G.result_ptr inside
 	// the inner coroutine, and the caller allocates a real result buffer.
-	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "go.store_result")
 	assertContains(t, ir, "@pal_alloc")
 }
 
@@ -18975,7 +18978,7 @@ func TestT0739_ClosureResultDropFreesEnv(t *testing.T) {
 	assertContains(t, ir, "closure.env.free")
 	// Positive value-path guards: the closure is still stored into G.result_ptr
 	// inside the inner coroutine, and the caller allocates a real result buffer.
-	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "go.store_result")
 	assertContains(t, ir, "@pal_alloc")
 }
 
@@ -19124,7 +19127,10 @@ func TestGoBlockVoidStillUsesSentinel(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "inttoptr i64 1 to i8*")
-	assertNotContains(t, ir, "store_result:")
+	// T1385: the go-block store now goes through storeGoResultAgg, whose blocks
+	// are named `go.store_result.N` — assert on that prefix so the guard keeps
+	// biting (the bare `store_result:` label no longer exists on this path).
+	assertNotContains(t, ir, "go.store_result")
 }
 
 // T0683: a value-returning go-block inside a *generic* function exercises
@@ -19151,8 +19157,8 @@ func TestGoBlockValueResultMonomorphized(t *testing.T) {
 	// The value path was taken inside the monomorphized go-block coroutine
 	// (store into G.result_ptr), the caller allocated a real result buffer,
 	// and no void sentinel was used for this non-void monomorphized task.
-	assertContains(t, ir, "store_result:")
-	assertContains(t, ir, "after_store:")
+	assertContains(t, ir, "go.store_result")
+	assertContains(t, ir, "go.after_store")
 	assertContains(t, ir, "@pal_alloc")
 	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
 }

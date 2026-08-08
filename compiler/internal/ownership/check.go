@@ -18,6 +18,16 @@ type Checker struct {
 	inUnsafe int
 	pinned   map[string]bool // use-bound variables that cannot be moved
 
+	// T1385: inside a `go {}` / `go! {}` block body, `return <expr>` yields the
+	// GOROUTINE's result (§17.2 explicit-return style), not the enclosing
+	// function's — so the return checks must be run against the task's element
+	// type, not curSig.Result(). One field, three states, so there is nothing to
+	// keep in sync: the element type inside a value-producing block body,
+	// types.TypVoid inside a `T = Void` one (a `return <void expr>` there escapes
+	// nothing, so no result contract applies), and nil ONLY outside any go block
+	// body — where curSig.Result() governs. See currentReturnResult.
+	goBlockResult types.Type
+
 	// T0652: for-in loop binding names whose iterable is a native container
 	// (Vector/Array/Map-value) of single-owner native handles (Mutex/MutexGuard/
 	// Task). Moves of such bindings (`x := h`, `foo(h)`, `use x := h`, `return h`)

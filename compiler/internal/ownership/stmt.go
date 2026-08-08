@@ -995,13 +995,40 @@ func (c *Checker) checkAssignTarget(target ast.Expr) {
 	}
 }
 
+// currentReturnResult reports the result type a `return <expr>` at the current
+// position produces. Inside a `go {}` / `go! {}` block body that is the task's
+// element type (§17.2 explicit-return style, T1385); everywhere else it is the
+// enclosing function's result. Getting this wrong inside a go block would both
+// skip the owned-result checks (when the enclosing fn is void, Result() is nil)
+// and apply the borrow-result rules to an owned value (when the enclosing fn
+// returns a borrow). A task element is never a borrow type, so the owned-result
+// checks are the correct contract for a value escaping into a task.
+//
+// A `T = Void` go block body reports nil: `return <void expr>;` is legal there
+// (the same rule a void function follows) but escapes no value, so no result
+// contract applies — and inheriting the enclosing function's would be the very
+// mix-up this exists to prevent.
+func (c *Checker) currentReturnResult() types.Type {
+	if c.goBlockResult != nil {
+		if c.goBlockResult == types.TypVoid {
+			return nil
+		}
+		return c.goBlockResult
+	}
+	if c.curSig == nil {
+		return nil
+	}
+	return c.curSig.Result()
+}
+
 // checkReturnRefSafety validates that returned references don't point to locals
 // and enforces lifetime constraints (B0033).
 func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
-	if c.curSig == nil || c.curSig.Result() == nil {
+	result := c.currentReturnResult()
+	if result == nil {
 		return
 	}
-	if !isRefType(c.curSig.Result()) {
+	if !isRefType(result) {
 		// T1102/T1138: returning a borrowed (non-`move`) single-owner native
 		// handle parameter (task/Mutex/MutexGuard), possibly wrapped in Optional
 		// layers (Mutex[int]?, task[int]??, …), as owned is unsound — these have
@@ -1045,9 +1072,13 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 		if s.Value != nil && c.returnsBorrowAsOwned(s.Value) {
 			c.errorf(s.Pos(),
 				"cannot return a borrowed reference as owned '%s'; the original Arc/Mutex still owns this value — call .clone() to produce an independent owned copy",
-				c.curSig.Result().String())
+				result.String())
 		}
 		return
+	}
+
+	if c.curSig == nil {
+		return // borrow result from a go block (not constructible) — nothing to anchor to
 	}
 
 	origin := resolveReturnOrigin(s.Value)

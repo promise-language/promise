@@ -1,0 +1,1359 @@
+// T1385 / §17.2 "Producing the result": a `go {}` / `go! {}` block yields its
+// result in one of two styles — a trailing expression, or explicit
+// `return <expr>` — and `T` is inferred either way.
+//
+// Only the trailing form used to be implemented: a `return` inside a go block was
+// treated as an ENCLOSING-FUNCTION return that happened to run on the coroutine
+// path, so it neither typed nor produced the block's result (`go { return 42; }`
+// typed `task[void]`; a mixed block silently yielded 0). `return <expr>` now binds
+// to the goroutine: sema infers T from the returns, and codegen evaluates the
+// value, moves it out of the coroutine frame, and stores it into G.result_ptr.
+//
+// Mixing the two styles, and a bare `return;` on a value-producing path, are
+// compile errors — covered by the sema unit tests in
+// compiler/internal/sema/t1385_test.go. This file covers the runtime behavior.
+produce!(int n) int {
+  if n < 0 {
+    raise error("neg:{n}");
+  }
+  return n * 2;
+}
+
+make_str!(int n) string {
+  if n < 0 {
+    raise error("neg:{n}");
+  }
+  return "value={n}";
+}
+
+// A droppable heap user type, for the move-out / discard paths.
+type Droppable {
+  int id;
+  string tag;
+  drop(~this) {
+  }
+}
+
+// --- Explicit-return × `go` × scalar T ---
+t1385_go_return_scalar() `test {
+  t := go {
+    return 42;
+  };
+  assert(<-t == 42, "explicit-return go block yields the returned scalar");
+}
+
+// --- Explicit-return × `go` × heap T: the returned owned local moves out ---
+// The block builds a heap string it owns, then returns it. The move-out must claim
+// the value away from the coroutine body's temp/scope cleanup (else use-after-free)
+// without leaving the drop flag set (else double-free) — and the receiver owns it.
+t1385_go_return_heap_string() `test {
+  t := go {
+    s := "hello" + " world";
+    return s;
+  };
+  r := <-t;
+  assert(r == "hello world", "explicit-return go block yields the owned heap string");
+}
+
+// --- Explicit-return × `go` × heap T: a Vector local moved out ---
+t1385_go_return_heap_vector() `test {
+  t := go {
+    int[] v = [];
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    return v;
+  };
+  r := <-t;
+  assert(r.len == 3, "returned vector has all elements");
+  assert(r[0] + r[1] + r[2] == 6, "returned vector contents survive the move-out");
+}
+
+// --- Explicit-return × `go` × a droppable heap user type moved out ---
+// The receiver owns the instance; the coroutine's scope-exit drop must NOT also
+// fire on it (double-free) and the instance must not be orphaned (leak).
+t1385_go_return_droppable_user_type() `test {
+  t := go {
+    d := Droppable(id: 7, tag: "seven");
+    return d;
+  };
+  r := <-t;
+  assert(r.id == 7, "returned droppable's field survives the move-out");
+  assert(r.tag == "seven", "returned droppable's heap field survives the move-out");
+}
+
+// --- Explicit-return × `go` × a heap temp (not a named local) ---
+t1385_go_return_heap_temp() `test {
+  t := go {
+    return "a" + "b" + "c";
+  };
+  assert(<-t == "abc", "explicit-return of a heap temp is claimed, not freed");
+}
+
+// --- Explicit-return × `go!` × scalar T, success path ---
+t1385_gobang_return_scalar() `test {
+  t := go! {
+    base := produce(21)?^;
+    return base + 100;
+  };
+  assert((<-t)?! == 142, "explicit-return go! block yields the returned scalar");
+}
+
+// --- Explicit-return × `go!` × heap T, success path ---
+t1385_gobang_return_heap() `test {
+  t := go! {
+    s := make_str(3)?^;
+    return s + "!";
+  };
+  assert((<-t)?! == "value=3!", "explicit-return go! block yields the owned heap string");
+}
+
+// --- Explicit-return × `go!` with an AUTO-PROPAGATED call as the returned value ---
+// `return produce(5);` is a bare failable call in a failable scope: its error
+// propagates into the task and its success value becomes the block's result.
+t1385_gobang_return_autopropagate_ok() `test {
+  t := go! {
+    return produce(5);
+  };
+  assert((<-t)?! == 10, "auto-propagated return value becomes the task result");
+}
+
+t1385_gobang_return_autopropagate_error() `test {
+  t := go! {
+    return produce(-1);
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "neg:-1", "auto-propagated return error surfaces at the receive");
+    -1
+  };
+  assert(got, "auto-propagated return error handler ran");
+  assert(v == -1, "handler recovery value returned");
+}
+
+// --- Explicit-return × `go!` × error raised before the return ---
+t1385_gobang_return_error_before() `test {
+  t := go! {
+    base := produce(-2)?^; // raises; the return is never reached
+    return base + 1;
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "neg:-2", "the raised error surfaces, not a zero result");
+  };
+  assert(got, "error handler ran");
+}
+
+// --- Multi-path unification: every path returns, T joins to int ---
+t1385_go_multipath_first() `test {
+  c := true;
+  t := go {
+    if c {
+      return 1;
+    }
+    return 2;
+  };
+  assert(<-t == 1, "the taken return path's value is stored");
+}
+
+t1385_go_multipath_second() `test {
+  c := false;
+  t := go {
+    if c {
+      return 1;
+    }
+    return 2;
+  };
+  assert(<-t == 2, "the fall-through return path's value is stored");
+}
+
+// --- Trailing if/else whose arms ALL return ---
+// The block's last statement is an if/else, so the trailing-value inference
+// inspects it — and finds nothing, because both arms `return`. Codegen's
+// genIfStmtValue still leaves a (predecessor-less) merge block behind, so this
+// also covers genGoBlock's fall-through default store not clobbering the result.
+t1385_trailing_if_else_all_return() `test {
+  c := true;
+  t := go {
+    if c {
+      return 7;
+    } else {
+      return 2;
+    }
+  };
+  assert(<-t == 7, "if/else whose arms all return yields the taken arm's value");
+}
+
+t1385_trailing_if_else_all_return_heap() `test {
+  c := false;
+  t := go {
+    if c {
+      return "a" + "1";
+    } else {
+      return "b" + "2";
+    }
+  };
+  assert(<-t == "b2", "heap value from the else arm's return survives");
+}
+
+// --- Multi-path unification with a heap T on both arms ---
+t1385_go_multipath_heap() `test {
+  n := 2;
+  t := go {
+    if n > 1 {
+      return "big:{n}";
+    }
+    return "small:{n}";
+  };
+  assert(<-t == "big:2", "heap value from the taken arm survives");
+}
+
+// --- Multi-path: `none` + value unify to T? ---
+t1385_go_multipath_none_join() `test {
+  c := false;
+  t := go {
+    if c {
+      return 5;
+    }
+    return none;
+  };
+  v := <-t;
+  got := false;
+  if x := v {
+    got = true;
+  }
+  assert(!got, "none return path yields an empty optional");
+}
+
+t1385_go_multipath_none_join_value() `test {
+  c := true;
+  t := go {
+    if c {
+      return 5;
+    }
+    return none;
+  };
+  v := <-t;
+  n := 0;
+  if x := v {
+    n = x;
+  }
+  assert(n == 5, "value return path wraps into the joined optional");
+}
+
+// --- T = Void: an early bare `return;` is an ordinary early exit ---
+t1385_void_bare_return_early_exit() `test {
+  ch := channel[int](2);
+  n := 3;
+  t := go {
+    ch.send(1);
+    if n > 0 {
+      return;
+    }
+    ch.send(2);
+  };
+  <-t;
+  ch.close();
+  count := 0;
+  for v in ch {
+    count = count + 1;
+  }
+  assert(count == 1, "the bare return exited before the second send");
+}
+
+// --- T = Void via an explicit `return;` on every path ---
+t1385_void_explicit_return_all_paths() `test {
+  ch := channel[int](1);
+  n := 1;
+  t := go {
+    if n > 0 {
+      ch.send(7);
+      return;
+    }
+    return;
+  };
+  <-t;
+  assert((<-ch)! == 7, "void explicit-return block ran its effect");
+}
+
+// --- T = Void via `return <void expression>` ---
+// `return f();` where f yields no value is legal (same rule as a void function),
+// so the block still types `Void` — but it takes the explicit-return exit with a
+// nil value. In the `go!` form that exit HAS a result buffer, so it must still
+// store the well-defined void {ok, null} aggregate rather than nothing.
+t1385_void_return_void_expression() `test {
+  ch := channel[int](1);
+  t := go {
+    return ch.send(3);
+  };
+  <-t;
+  assert((<-ch)! == 3, "returning a void expression runs it and exits the block");
+}
+
+t1385_gobang_void_return_void_expression() `test {
+  ch := channel[int](1);
+  t := go! {
+    base := produce(1)?^;
+    return ch.send(base);
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+  };
+  assert(!got, "a void explicit-return exit must not surface a spurious error");
+  assert((<-ch)! == 2, "the returned void expression ran");
+}
+
+// --- Fire-and-forget with an explicit return: the value is discarded, not leaked ---
+// There is no result buffer for a discarded `go { … };`, so the returned value must
+// be freed by the coroutine body's cleanup rather than claimed out of it. Leak
+// enforcement (T0067) is the real assertion here.
+t1385_fire_and_forget_return_heap() `test {
+  done := channel[int](1);
+  go {
+    s := "orphan" + "ed";
+    done.send(s.len);
+    return s;
+  };
+  assert((<-done)! == 8, "fire-and-forget block ran; its returned value is discarded");
+}
+
+t1385_fire_and_forget_return_vector() `test {
+  done := channel[int](1);
+  go {
+    int[] v = [];
+    v.push(1);
+    v.push(2);
+    done.send(v.len);
+    return v;
+  };
+  assert((<-done)! == 2, "fire-and-forget vector return is discarded and freed");
+}
+
+t1385_fire_and_forget_return_droppable_user_type() `test {
+  done := channel[int](1);
+  go {
+    d := Droppable(id: 3, tag: "t" + "ag");
+    done.send(d.id);
+    return d;
+  };
+  assert((<-done)! == 3, "fire-and-forget droppable return is discarded and dropped");
+}
+
+t1385_fire_and_forget_return_scalar() `test {
+  done := channel[int](1);
+  go {
+    done.send(1);
+    return 42;
+  };
+  assert((<-done)! == 1, "fire-and-forget scalar return is discarded");
+}
+
+// --- Inside a GENERIC function: the return type is substituted per instance ---
+// codegen sets the go block's currentRetType to the task element, which is the
+// unsubstituted type param here; genReturnStmt substitutes it through typeSubst
+// before the coercions and the store.
+t1385_wrap_in_go[T](T x) T {
+  t := go {
+    return x;
+  };
+  return <-t;
+}
+
+t1385_generic_go_return() `test {
+  assert(t1385_wrap_in_go[int](7) == 7, "generic go-block return, scalar instance");
+  assert(t1385_wrap_in_go[string]("g" + "en") == "gen", "generic go-block return, heap instance");
+}
+
+// --- Polymorphic return: the arms' types join to the parent, and the stored
+// value keeps its concrete vtable (coerceReturnValue's view coercion) ---
+type T1385Animal {
+  string name;
+  get sound string {
+    return "...";
+  }
+}
+
+type T1385Dog is T1385Animal {
+  get sound string {
+    return "woof";
+  }
+}
+
+type T1385Cat is T1385Animal {
+  get sound string {
+    return "meow";
+  }
+}
+
+t1385_go_return_polymorphic() `test {
+  c := true;
+  t := go {
+    if c {
+      T1385Animal a = T1385Dog(name: "d");
+      return a;
+    }
+    T1385Animal b = T1385Cat(name: "c");
+    return b;
+  };
+  r := <-t;
+  assert(r.sound == "woof", "the returned value keeps its concrete vtable");
+}
+
+// --- A `return` inside a lambda nested in a go block still binds to the LAMBDA ---
+t1385_lambda_return_binds_to_lambda() `test {
+  t := go {
+    fn := || -> int {
+      return 7;
+    };
+    return fn() + 1;
+  };
+  assert(<-t == 8, "the lambda's return is its own; the block returns the sum");
+}
+
+// --- A go block nested in a GENERATOR body owns its own returns ---
+// `c.inGenerator` stays set inside the nested block, so the return used to take
+// the generator's exit — which stores nothing into G.result_ptr, handing `<-t`
+// poison. The nested coroutine's own exit must win.
+t1385_gen_with_go_return() stream[int] {
+  t := go {
+    return 42;
+  };
+  yield <-t;
+  yield 2;
+}
+
+t1385_go_return_inside_generator() `test {
+  total := 0;
+  for v in t1385_gen_with_go_return() {
+    total = total + v;
+  }
+  assert(total == 44, "the nested go block's returned value reaches the generator");
+}
+
+t1385_gen_with_go_bare_return() stream[int] {
+  ch := channel[int](2);
+  t := go {
+    ch.send(5);
+    if true {
+      return;
+    }
+    ch.send(9);
+  };
+  <-t;
+  yield (<-ch)!;
+  yield 2;
+}
+
+t1385_go_bare_return_inside_generator() `test {
+  total := 0;
+  for v in t1385_gen_with_go_bare_return() {
+    total = total + v;
+  }
+  assert(total == 7, "the nested go block's bare return exits only the goroutine");
+}
+
+// --- Trailing style stays valid and unchanged ---
+t1385_trailing_scalar_regression() `test {
+  t := go {
+    42
+  };
+  assert(<-t == 42, "trailing-expression style still yields its value");
+}
+
+t1385_trailing_heap_regression() `test {
+  t := go {
+    s := "trail" + "ing";
+    s
+  };
+  assert(<-t == "trailing", "trailing heap value still moves out");
+}
+
+t1385_trailing_if_else_regression() `test {
+  n := 4;
+  t := go {
+    if n > 2 {
+      n * 10
+    } else {
+      n
+    }
+  };
+  assert(<-t == 40, "trailing if/else value (T1389) still yields its arm value");
+}
+
+// --- Explicit-return through a `use` binding: the value survives the close ---
+// A resource with a plain (non-failable) close.
+type Res {
+  int id;
+  close(~this) void {
+  }
+}
+
+t1385_return_past_use_binding() `test {
+  t := go {
+    use r := Res(id: 5);
+    s := "id={r.id}";
+    return s;
+  };
+  assert(<-t == "id=5", "the returned value outlives the use-binding's close");
+}
+
+// --- Nested go blocks: each body owns its own returns and its own result buffer ---
+// `c.goBlock` (sema), `c.goBlockResult` (ownership), and the coroutine's
+// currentRetType/result-buffer state (codegen) are all saved and restored around
+// the inner block, so the inner's `return` must not be mistaken for the outer's.
+t1385_nested_go_return_scalar() `test {
+  t := go {
+    inner := go {
+      return 5;
+    };
+    return (<-inner) + 1;
+  };
+  assert(<-t == 6, "each nested block yields its own returned value");
+}
+
+t1385_nested_go_return_heap() `test {
+  t := go {
+    inner := go {
+      return "in" + "ner";
+    };
+    s := <-inner;
+    return s + "!";
+  };
+  assert(<-t == "inner!", "the inner block's heap result moves out through the outer's return");
+}
+
+// A fire-and-forget block nested inside an awaited one: the inner discards its
+// returned heap value (must be freed, not claimed) while the outer stores its own.
+t1385_nested_fire_and_forget_inside_awaited() `test {
+  done := channel[int](1);
+  t := go {
+    go {
+      orphan := "dis" + "carded";
+      done.send(orphan.len);
+      return orphan;
+    };
+    return (<-done)! + 1;
+  };
+  assert(<-t == 10, "the inner discarded value is freed; the outer's result is stored");
+}
+
+// --- A go block with an explicit return inside a METHOD body ---
+type T1385Spawner {
+  int base;
+
+  spawn_scalar(this) int {
+    t := go {
+      return 7;
+    };
+    return (<-t) + this.base;
+  }
+
+  spawn_heap(this) string {
+    t := go {
+      return "m" + "eth";
+    };
+    return (<-t) + "od";
+  }
+}
+
+t1385_method_go_return() `test {
+  s := T1385Spawner(base: 1);
+  assert(s.spawn_scalar() == 8, "go-block return inside a method yields the block's value");
+  assert(s.spawn_heap() == "method", "heap result moves out of a method's go block");
+}
+
+// --- `return` from inside a loop nested in the block body ---
+// The ownership pass resets loopDepth for a go-block body, and codegen must take
+// the goroutine exit (not a `ret`) from inside the loop.
+t1385_go_return_from_for_loop() `test {
+  t := go {
+    for i in 0..10 {
+      if i == 3 {
+        return i * 10;
+      }
+    }
+    return -1;
+  };
+  assert(<-t == 30, "a return from inside a for loop yields the goroutine's result");
+}
+
+t1385_go_return_from_while_loop_heap() `test {
+  t := go {
+    i := 0;
+    while i < 10 {
+      if i == 4 {
+        return "hit{i}";
+      }
+      i = i + 1;
+    }
+    return "miss";
+  };
+  assert(<-t == "hit4", "a return from inside a while loop moves its heap value out");
+}
+
+// --- `return` from inside a match arm ---
+enum T1385Shape {
+  Circle(int r),
+  Square(int s),
+}
+
+t1385_go_return_from_match_arm() `test {
+  sh := T1385Shape.Circle(r: 2);
+  t := go {
+    match sh {
+      Circle(r) => {
+        return "c{r}";
+      },
+      Square(s) => {
+        return "s{s}";
+      },
+    }
+  };
+  assert(<-t == "c2", "a return from inside a match arm yields the goroutine's result");
+}
+
+// --- Result types beyond scalar/string: enum, value type, map, tuple, closure ---
+t1385_go_return_enum_value() `test {
+  t := go {
+    return T1385Shape.Square(s: 3);
+  };
+  r := <-t;
+  n := match r {
+    Circle(x) => x,
+    Square(x) => x,
+  };
+  assert(n == 3, "an enum result survives the store and the receive");
+}
+
+type T1385Pt {
+  int x `value;
+  int y `value;
+}
+
+t1385_go_return_value_type() `test {
+  t := go {
+    return T1385Pt(x: 3, y: 4);
+  };
+  p := <-t;
+  assert(p.x + p.y == 7, "a pure value type is stored by value into the result buffer");
+}
+
+t1385_go_return_map() `test {
+  t := go {
+    map[string, int] m = {:};
+    m["a"] = 1;
+    m["b"] = 2;
+    return m;
+  };
+  r := <-t;
+  assert(r.len == 2, "a map moves out of the coroutine frame intact");
+  assert(r["a"]! + r["b"]! == 3, "the moved map's entries survive");
+}
+
+t1385_go_return_tuple() `test {
+  t := go {
+    return (1, "a" + "b");
+  };
+  (n, s) := <-t;
+  assert(n == 1, "tuple scalar element survives");
+  assert(s == "ab", "tuple heap element survives");
+}
+
+t1385_go_return_closure() `test {
+  t := go {
+    return || -> int {
+      return 9;
+    };
+  };
+  f := <-t;
+  assert(f() == 9, "a closure result (fn ptr + env) moves out and is callable");
+}
+
+// --- Sibling subtypes join to their nearest common ancestor ---
+// Unlike t1385_go_return_polymorphic (which returns pre-typed `T1385Animal`
+// locals, joining via assignability), these arms return the CONCRETE subtypes, so
+// T comes from commonBranchAncestor — and the stored value must keep its own
+// vtable through that join.
+t1385_go_return_sibling_subtypes() `test {
+  c := true;
+  t := go {
+    if c {
+      return T1385Dog(name: "d");
+    }
+    return T1385Cat(name: "c");
+  };
+  assert((<-t).sound == "woof", "the sibling-subtype join keeps the concrete vtable");
+}
+
+// The parent type itself is a legal result too — the join is only interesting
+// because the concrete arms keep their own vtables, so pin the base behavior.
+t1385_go_return_base_type() `test {
+  t := go {
+    return T1385Animal(name: "a");
+  };
+  assert((<-t).sound == "...", "a base-typed result dispatches to the base getter");
+}
+
+t1385_go_return_sibling_subtypes_else_arm() `test {
+  c := false;
+  t := go {
+    if c {
+      return T1385Dog(name: "d");
+    }
+    return T1385Cat(name: "c");
+  };
+  assert((<-t).sound == "meow", "the other arm's concrete vtable is kept too");
+}
+
+// --- All-return trailing if/else in a FAILABLE block ---
+// genBlockValue finds no trailing value, so genGoBlock's fall-through emits the
+// {ok, zero, null} default into the (predecessor-less) merge block. The real
+// result must still come from the taken arm, not that default.
+t1385_gobang_all_return_if_else() `test {
+  c := true;
+  t := go! {
+    base := produce(1)?^; // base == 2
+    if c {
+      return base + 5;
+    } else {
+      return base + 1;
+    }
+  };
+  assert((<-t)?! == 7, "the taken arm's value wins over the fall-through default");
+}
+
+t1385_gobang_all_return_if_else_other_arm() `test {
+  c := false;
+  t := go! {
+    base := produce(1)?^;
+    if c {
+      return base + 5;
+    } else {
+      return base + 1;
+    }
+  };
+  assert((<-t)?! == 3, "the else arm's value wins over the fall-through default");
+}
+
+// --- Explicit return inside a generic `go!` block ---
+t1385_gobang_wrap[T](T x) T {
+  t := go! {
+    produce(1)?^; // makes the body a failable scope
+    return x;
+  };
+  return (<-t)?!;
+}
+
+t1385_generic_gobang_return() `test {
+  assert(t1385_gobang_wrap[int](3) == 3, "generic go! block return, scalar instance");
+  assert(t1385_gobang_wrap[string]("a" + "b") == "ab", "generic go! block return, heap instance");
+}
+
+// --- A local that took ownership of a captured heap value is returned ---
+t1385_go_return_moved_capture() `test {
+  s := "cap" + "tured";
+  t := go {
+    m := s;
+    return m + "!";
+  };
+  assert(<-t == "captured!", "the captured value is moved into the block and returned");
+}
+
+// --- The produced result is never received: nothing may leak ---
+// The block runs to completion and stores its heap result into the
+// caller-allocated buffer, then the task handle goes out of scope unreceived. The
+// task's drop has to free both the buffer and the result it now owns.
+t1385_result_never_received() `test {
+  done := channel[int](1);
+  {
+    t := go {
+      s := "he" + "ap";
+      done.send(s.len);
+      return s;
+    };
+    assert((<-done)! == 4, "the block ran and produced its result");
+    // t leaves scope without a `<-t`.
+  }
+}
+
+t1385_gobang_result_never_received() `test {
+  done := channel[int](1);
+  {
+    t := go! {
+      base := produce(1)?^; // base == 2
+      s := "hea{base}";
+      done.send(s.len);
+      return s;
+    };
+    assert((<-done)! == 4, "the go! block ran and produced its result");
+  }
+}
+
+// The receive happens but its value is discarded — the result still has to be
+// freed by the statement-level drain rather than orphaned in the buffer.
+t1385_result_received_and_discarded() `test {
+  t := go {
+    return "dis" + "carded";
+  };
+  <-t;
+  assert(true, "a discarded receive frees the result");
+}
+
+// --- Failable operators INSIDE the returned expression ---
+// The returned expression is not itself the failable call: `?^` propagates from a
+// sub-expression, and the surviving success value is what reaches the buffer.
+t1385_gobang_return_inline_propagate() `test {
+  t := go! {
+    return produce(5)?^ +1;
+  };
+  assert((<-t)?! == 11, "an inline ?^ inside the returned expression yields its success value");
+}
+
+t1385_gobang_return_inline_propagate_error() `test {
+  t := go! {
+    return produce(-4)?^ +1;
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "neg:-4", "the inline ?^ error surfaces at the receive");
+  };
+  assert(got, "the inline ?^ error path ran");
+}
+
+// A `?` handler as the returned value: the error never escapes, so a PLAIN `go`
+// block is the right spawn form and the recovery value becomes the result.
+t1385_go_return_handler_recovery() `test {
+  t := go {
+    return produce(-3)? e {
+      -7
+    };
+  };
+  assert(<-t == -7, "the handler's recovery value becomes the goroutine result");
+}
+
+t1385_go_return_handler_heap_recovery() `test {
+  t := go {
+    return make_str(-3)? e {
+      "fall" + "back"
+    };
+  };
+  assert(<-t == "fallback", "a heap recovery value moves out of the block");
+}
+
+// --- Single-owner handles moved out through the explicit-return exit ---
+t1385_go_return_channel_handle() `test {
+  t := go {
+    ch := channel[int](1);
+    ch.send(3);
+    return ch;
+  };
+  c := <-t;
+  assert((<-c)! == 3, "a channel handle moves out of the block and stays usable");
+}
+
+// --- `return` from inside a select case body ---
+t1385_go_return_from_select_case() `test {
+  a := channel[int](capacity: 1);
+  a.send(9);
+  t := go {
+    select {
+      v := <-a:
+        return v! * 2;
+    }
+    return -1;
+  };
+  assert(<-t == 18, "a return from a select case yields the goroutine result");
+}
+
+// --- Borrowed sources escaping through the return: the value must be dup'd ---
+// `this.tag` and a borrowed parameter are still owned by the caller, so the
+// receiver must get an independent copy — otherwise the first drop frees the
+// other's data (a double-free, or a leak if nothing is dup'd at all).
+type T1385Holder {
+  string tag;
+
+  spawn_tag(this) string {
+    t := go {
+      return this.tag;
+    };
+    return <-t;
+  }
+}
+
+t1385_go_return_borrowed_field_dups() `test {
+  h := T1385Holder(tag: "he" + "ld");
+  assert(h.spawn_tag() == "held", "a borrowed field returned from the block is dup'd out");
+  assert(h.tag == "held", "the original field is untouched");
+}
+
+t1385_pass_through(string s) string {
+  t := go {
+    return s;
+  };
+  return <-t;
+}
+
+t1385_go_return_borrowed_param_dups() `test {
+  assert(t1385_pass_through("a" + "b") == "ab", "a borrowed parameter returned from the block is dup'd out");
+}
+
+// --- A go block nested inside a LAMBDA (the reverse of the nesting above) ---
+t1385_go_block_inside_lambda() `test {
+  fn := || -> int {
+    t := go {
+      return 5;
+    };
+    return (<-t) + 1;
+  };
+  assert(fn() == 6, "the lambda's return and the block's return each stay their own");
+}
+
+t1385_go_block_inside_lambda_heap() `test {
+  fn := || -> string {
+    t := go {
+      return "la" + "mbda";
+    };
+    return (<-t) + "!";
+  };
+  assert(fn() == "lambda!", "a heap result moves out of a block nested in a lambda");
+}
+
+// --- Enum with a heap payload as the result ---
+enum T1385Msg {
+  Text(string body),
+  Code(int n),
+}
+
+t1385_go_return_enum_heap_payload() `test {
+  t := go {
+    return T1385Msg.Text(body: "he" + "llo");
+  };
+  r := <-t;
+  s := match r {
+    Text(b) => b,
+    Code(n) => "n",
+  };
+  assert(s == "hello", "an enum's heap payload survives the move-out");
+}
+
+// --- Fire-and-forget discard: every result shape must be freed, not orphaned ---
+// These have no result buffer, so the returned value is dropped on the floor
+// inside the coroutine. Leak enforcement (T0067) is the assertion.
+t1385_fire_and_forget_return_enum_heap_payload() `test {
+  done := channel[int](1);
+  go {
+    m := T1385Msg.Text(body: "dis" + "carded");
+    done.send(1);
+    return m;
+  };
+  assert((<-done)! == 1, "a discarded enum heap payload is freed");
+}
+
+t1385_fire_and_forget_return_map() `test {
+  done := channel[int](1);
+  go {
+    map[string, int] m = {:};
+    m["a"] = 1;
+    done.send(m.len);
+    return m;
+  };
+  assert((<-done)! == 1, "a discarded map is freed");
+}
+
+t1385_fire_and_forget_return_vector_of_string() `test {
+  done := channel[int](1);
+  go {
+    string[] v = [];
+    v.push("a" + "b");
+    done.send(v.len);
+    return v;
+  };
+  assert((<-done)! == 1, "a discarded vector of heap elements is freed");
+}
+
+t1385_fire_and_forget_return_closure_env() `test {
+  done := channel[int](1);
+  go {
+    cap := "en" + "v";
+    done.send(cap.len);
+    return move || -> int {
+      return cap.len;
+    };
+  };
+  assert((<-done)! == 3, "a discarded closure's captured env is freed");
+}
+
+t1385_fire_and_forget_return_optional_heap() `test {
+  done := channel[int](1);
+  go {
+    string? o = "op" + "t";
+    done.send(1);
+    return o;
+  };
+  assert((<-done)! == 1, "a discarded optional heap value is freed");
+}
+
+t1385_fire_and_forget_return_named_tuple_local() `test {
+  done := channel[int](1);
+  go {
+    pair := (1, "a" + "b");
+    done.send(1);
+    return pair;
+  };
+  assert((<-done)! == 1, "a discarded tuple LOCAL is dropped by its scope binding");
+}
+
+// NOTE (T1433): the same shape with a tuple built IN the return expression —
+// `return (1, "a" + "b");` or `return mk_tuple();` from a fire-and-forget block —
+// LEAKS its heap element. Tuple construction claims the element's temp, so the
+// no-sink return path's temp drain finds nothing to free and no type-directed
+// discard drop runs. Not asserted here because a leaking test fails the suite;
+// the assertions belong here once T1433 is fixed. The named-local form above is
+// the closest currently-correct sibling.
+
+// --- Concurrency: many blocks producing heap results at once ---
+// The result buffer is allocated per spawn and written by the coroutine on
+// another M; this fans out wide enough to shake out a shared-state mistake in the
+// store, and leak enforcement covers the per-task buffers.
+t1385_many_concurrent_heap_returns() `test(timeout: "30s") {
+  task[string][] tasks = [];
+  for i in 0..64 {
+    tasks.push(go {
+      s := "v{i}";
+      return s + "!";
+    });
+  }
+  total := 0;
+  for t in tasks {
+    r := <-t;
+    total = total + r.len;
+  }
+  // "v0!".."v9!" are 3 bytes each; "v10!".."v63!" are 4.
+  assert(total == 10 * 3 + 54 * 4, "every concurrent heap result arrived intact");
+}
+
+t1385_many_concurrent_scalar_returns() `test(timeout: "30s") {
+  task[int][] tasks = [];
+  for i in 0..64 {
+    tasks.push(go {
+      if i % 2 == 0 {
+        return i;
+      }
+      return -i;
+    });
+  }
+  sum := 0;
+  for t in tasks {
+    sum = sum + <-t;
+  }
+  assert(sum == -32, "every concurrent multi-path result arrived");
+}
+
+// NOTE (T1434): the `go!` analog of the two fan-out tests above — pushing
+// `failable_task[T]` handles into a vector and awaiting them in a for-in — HANGS.
+// That is pre-existing (it reproduces at 0b47d373 in the trailing-expression
+// style too), so it is not covered here; sequential `go!` spawn+await in a loop is
+// covered by t1385_gobang_sequential_loop below.
+
+t1385_gobang_sequential_loop() `test(timeout: "30s") {
+  sum := 0;
+  for i in 0..8 {
+    t := go! {
+      base := produce(i)?^;
+      return base + 1;
+    };
+    sum = sum + (<-t)?!;
+  }
+  assert(sum == 8 * 7 + 8, "sequential go! explicit returns all arrive");
+}
+
+// ============================================================================
+// Coverage fill: shapes the sections above do not reach.
+// ============================================================================
+
+// --- Fire-and-forget × a BORROWED return value: dup'd, then discarded ---
+// The dup (`needsDup`) is decided before the fire-and-forget sink gate, so a
+// borrowed source is copied on the way out even though there is nowhere to store
+// it. That copy must then be freed by the coroutine's own cleanup — the
+// claim*Temp calls that would hand it to a receiver are gated off here, so an
+// ungated claim would leak one string per spawn. Leak enforcement is the
+// assertion; the channel only guarantees the block actually ran.
+type T1385BorrowSpawner {
+  string tag;
+
+  spawn_field(this, channel[int] done) void {
+    go {
+      done.send(this.tag.len);
+      return this.tag;
+    };
+  }
+}
+
+t1385_fire_and_forget_return_borrowed_field() `test {
+  done := channel[int](1);
+  h := T1385BorrowSpawner(tag: "he" + "ld");
+  h.spawn_field(done);
+  assert((<-done)! == 4, "the fire-and-forget block ran");
+  assert(h.tag == "held", "the borrowed field is untouched by the discarded copy");
+}
+
+t1385_spawn_borrowed_param(string s, channel[int] done) void {
+  go {
+    done.send(s.len);
+    return s;
+  };
+}
+
+t1385_fire_and_forget_return_borrowed_param() `test {
+  done := channel[int](1);
+  t1385_spawn_borrowed_param("a" + "b", done);
+  assert((<-done)! == 2, "the fire-and-forget block ran");
+}
+
+// --- Fire-and-forget × a value CONSTRUCTED in the return expression ---
+// The tests above discard named LOCALS, which the coroutine's scope bindings
+// free. A value built directly in the `return` expression has no binding — it is
+// a statement temp, and the no-sink path has to leave it in the temp list for the
+// drain to free. (The tuple form of this shape leaks; see the T1433 note above.)
+t1385_fire_and_forget_return_string_expression() `test {
+  done := channel[int](1);
+  go {
+    done.send(1);
+    return "a" + "b";
+  };
+  assert((<-done)! == 1, "a discarded string temp is drained, not leaked");
+}
+
+t1385_fire_and_forget_return_vector_expression() `test {
+  done := channel[int](1);
+  go {
+    done.send(1);
+    return["x" + "y"];
+  };
+  assert((<-done)! == 1, "a discarded vector temp is drained, not leaked");
+}
+
+t1385_fire_and_forget_return_user_type_expression() `test {
+  done := channel[int](1);
+  go {
+    done.send(1);
+    return Droppable(id: 1, tag: "t" + "ag");
+  };
+  assert((<-done)! == 1, "a discarded droppable temp is dropped, not leaked");
+}
+
+t1385_make_str() string {
+  return "m" + "k";
+}
+
+t1385_fire_and_forget_return_call_result() `test {
+  done := channel[int](1);
+  go {
+    done.send(1);
+    return t1385_make_str();
+  };
+  assert((<-done)! == 1, "a discarded call-result temp is drained, not leaked");
+}
+
+// --- Single-owner native handles moved out through the explicit return ---
+// The channel handle is covered above; these are the remaining handle kinds.
+// Ownership treats them specially (T1102/T1138: a borrowed handle may not escape
+// as owned), so the move-out has to be a real move — the handle must still work
+// on the receiving side, and must be dropped exactly once.
+t1385_go_return_ref_handle() `test {
+  t := go {
+    r := Ref[int](3);
+    return r;
+  };
+  h := <-t;
+  assert(h.borrow == 3, "a Ref handle moves out of the block and stays usable");
+}
+
+t1385_go_return_mutex_handle() `test {
+  t := go {
+    m := Mutex[int](4);
+    return m;
+  };
+  mu := <-t;
+  g := mu.lock();
+  assert(g.borrow == 4, "a Mutex handle moves out of the block and stays usable");
+}
+
+// A task handle as the result: the inner block's own result buffer must outlive
+// the outer block that produced the handle.
+t1385_go_return_task_handle() `test {
+  t := go {
+    inner := go {
+      return "in" + "ner";
+    };
+    return inner;
+  };
+  it := <-t;
+  assert(<-it == "inner", "a task handle moves out and its result is still receivable");
+}
+
+// The discard side of the same three: nothing receives them, so the coroutine
+// must drop each handle itself.
+t1385_fire_and_forget_return_ref_handle() `test {
+  done := channel[int](1);
+  go {
+    r := Ref[int](3);
+    done.send(r.borrow);
+    return r;
+  };
+  assert((<-done)! == 3, "a discarded Ref handle is released, not leaked");
+}
+
+t1385_fire_and_forget_return_mutex_handle() `test {
+  done := channel[int](1);
+  go {
+    m := Mutex[int](4);
+    done.send(1);
+    return m;
+  };
+  assert((<-done)! == 1, "a discarded Mutex handle is destroyed, not leaked");
+}
+
+t1385_fire_and_forget_return_task_handle() `test {
+  done := channel[int](1);
+  go {
+    inner := go {
+      return "in" + "ner";
+    };
+    done.send(1);
+    return inner;
+  };
+  assert((<-done)! == 1, "a discarded task handle is released, not leaked");
+}
+
+// --- Result shapes the store has to type correctly ---
+
+// A fixed-size array is stored by value into the result buffer, not by pointer.
+t1385_go_return_fixed_array() `test {
+  t := go {
+    int[3] a = [1, 2, 3];
+    return a;
+  };
+  r := <-t;
+  assert(r[0] + r[1] + r[2] == 6, "a fixed-size array result survives the store");
+}
+
+// goResultBufferType types both the value store and the storeGoResultDefault
+// zero from the block's inferred T, so a non-i64 scalar must not be coerced into
+// the int shape on the way through.
+t1385_go_return_scalar_widths() `test {
+  tf := go {
+    return 1.5;
+  };
+  assert(<-tf == 1.5, "an f64 result keeps its width");
+  tb := go {
+    return true;
+  };
+  assert(<-tb, "a bool result keeps its width");
+  tc := go {
+    return 'q';
+  };
+  assert(<-tc == 'q', "a char result keeps its width");
+  tu := go {
+    u8 x = 200;
+    return x;
+  };
+  assert(<-tu == 200, "a u8 result keeps its width and is not sign-extended");
+}
+
+// A value type wider than a register: the whole aggregate is copied through the
+// buffer, so a partial store would corrupt the trailing fields.
+type T1385Wide {
+  int a `value;
+  int b `value;
+  int c `value;
+  f64 d `value;
+  bool e `value;
+  char f `value;
+}
+
+t1385_go_return_wide_value_aggregate() `test {
+  t := go {
+    return T1385Wide(a: 1, b: 2, c: 3, d: 4.5, e: true, f: 'z');
+  };
+  r := <-t;
+  assert(r.a == 1 && r.b == 2 && r.c == 3, "the leading scalar fields survive");
+  assert(r.d == 4.5 && r.e && r.f == 'z', "the trailing fields survive too");
+}
+
+// `none` joined with a VALUE-type arm: the buffer is the Optional struct, so the
+// value arm has to be wrapped (coerceReturnValue) before the store, and the
+// `none` arm has to resolve against the block's T rather than void.
+t1385_go_return_optional_value_type() `test {
+  c := true;
+  t := go {
+    if c {
+      return T1385Wide(a: 9, b: 0, c: 0, d: 0.0, e: false, f: 'a');
+    }
+    return none;
+  };
+  r := <-t;
+  assert(r!.a == 9, "the value arm of an optional value-type result survives");
+}
+
+// A concrete type returned where T is an ABSTRACT parent: coerceReturnToView runs
+// on the go-block exit too, so the stored value carries the view's vtable and the
+// receiver dispatches to the concrete override.
+type T1385Sink {
+  emit(this, int n) int `abstract;
+}
+
+type T1385Adder is T1385Sink {
+  int base;
+  emit(this, int n) int {
+    return this.base + n;
+  }
+}
+
+t1385_go_return_abstract_parent_view() `test {
+  t := go {
+    T1385Sink s = T1385Adder(base: 4);
+    return s;
+  };
+  assert((<-t).emit(3) == 7, "the view-coerced result dispatches to the concrete override");
+}
+
+// --- Nesting the other two ways round ---
+// A go block inside a LAMBDA inside a go block: three nested return contexts,
+// each of which must claim only its own `return`.
+t1385_go_inside_lambda_inside_go() `test {
+  t := go {
+    f := || -> int {
+      inner := go {
+        return "de" + "ep";
+      };
+      return (<-inner).len;
+    };
+    return f() + 1;
+  };
+  assert(<-t == 5, "each of the three nested contexts owns its own return");
+}
+
+// --- A generic METHOD on a generic TYPE ---
+// The block's T is the METHOD's type param while the owner contributes its own,
+// so the substitution the store types itself from is the merged map.
+type T1385Relay[T] {
+  T v;
+
+  relay[U](this, U extra) U {
+    t := go {
+      return extra;
+    };
+    return <-t;
+  }
+}
+
+t1385_generic_method_go_return() `test {
+  b := T1385Relay[int](v: 1);
+  assert(b.relay[string]("o" + "k") == "ok", "a generic method's go-block return substitutes correctly");
+  assert(b.relay[int](7) == 7, "a second instantiation of the same method still stores its own type");
+}

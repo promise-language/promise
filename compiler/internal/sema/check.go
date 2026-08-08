@@ -44,6 +44,20 @@ type Checker struct {
 	nonFailableScope    bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (§17.2.1); errors cannot propagate/raise regardless of the enclosing fn
 	failableScope       bool                             // T1379: true inside a `go! {}` block body — a failable scope (§17.2.1); errors auto-propagate/raise into the task regardless of the enclosing fn
 	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (auto-propagate, `?^`, `raise`); snapshotted around a `go! {}` body to detect a body that cannot fail
+	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (§17.2 explicit-return style)
+}
+
+// goBlockCtx accumulates the `return` statements seen inside one `go {}` /
+// `go! {}` block body. §17.2 gives a block two result styles — a trailing
+// expression, or explicit `return <expr>` — and the block's `T` is inferred
+// either way. A `return` inside a go block therefore binds to the goroutine,
+// not to the enclosing function, so its value type is unified here rather than
+// checked against `curFunc.Result()` (T1385).
+type goBlockCtx struct {
+	resultType    types.Type // running unification of the `return <expr>` value types; nil until the first one
+	hasValueRet   bool       // at least one `return <expr>` — the block is in explicit-return style
+	hasBareRet    bool       // at least one bare `return;`
+	bareReturnPos ast.Pos    // position of the first bare `return;` (verdict deferred until T is known)
 }
 
 // markFailableEscape records that a failable operation escapes the current
@@ -395,10 +409,16 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedMethodObj := c.curMethodObj
 	c.curFuncObj = fn
 	c.curMethodObj = nil
+	// T1385: a function body is governed by its own signature — clear any
+	// go-block return context alongside curFunc so the invariant "goBlock != nil
+	// ⇒ returns bind to the block" holds.
+	savedGoBlock := c.goBlock
+	c.goBlock = nil
 	defer func() {
 		c.curFunc = saved
 		c.curFuncObj = savedFuncObj
 		c.curMethodObj = savedMethodObj
+		c.goBlock = savedGoBlock
 	}()
 
 	// Open type-param scope if generic (so T resolves during body checking)
@@ -560,10 +580,13 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 	savedMethodObj := c.curMethodObj
 	c.curFuncObj = nil
 	c.curMethodObj = m
+	savedGoBlock := c.goBlock // T1385: see checkFuncDecl
+	c.goBlock = nil
 	defer func() {
 		c.curFunc = saved
 		c.curFuncObj = savedFuncObj
 		c.curMethodObj = savedMethodObj
+		c.goBlock = savedGoBlock
 	}()
 
 	// Detect generator: return type is stream[T]

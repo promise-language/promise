@@ -81,6 +81,46 @@ gobang_use_close_ok_returns_value() `test {
   assert(v == 9, "successful close returns the trailing value");
 }
 
+// --- Explicit-return exit + failing close: the close error surfaces (T1385/T1391) ---
+// §17.2 explicit-return style routes through the same emitScopeCleanup +
+// emitCloseErrCheck sequence as the bare-return and trailing-value exits, so a
+// failing close on that exit must divert the already-computed return value and
+// surface the close error instead — without leaking either.
+gobang_use_close_explicit_return_surfaces() `test {
+  t := go! {
+    base := produce(1)?^; // succeeds; makes the body a failable scope
+    use r := FailResource(id: 1); // close() raises on the explicit-return exit
+    return base + r.id;
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "explicit-return surfaced error is the close error");
+    -1
+  };
+  assert(got, "explicit-return use-close error should surface at <-t");
+  assert(v == -1, "handler recovery value returned");
+}
+
+// --- Explicit-return exit + OK close: the returned value surfaces (T1385) ---
+gobang_use_close_explicit_return_ok_value() `test {
+  t := go! {
+    base := produce(2)?^; // base == 4
+    use r := OkResource(id: 5); // close() succeeds
+    return base + r.id;
+  };
+  v := (<-t)?!;
+  assert(v == 9, "explicit-return value survives a successful close");
+}
+
+// NOTE (T1427): a HEAP result value diverted by a FAILING close leaks — the value
+// is claimed away from the coroutine's temp cleanup for the store into
+// G.result_ptr that emitCloseErrCheck then diverts, so nothing frees it. That is a
+// pre-existing defect of the value exits (reproduced on the trailing-expression
+// style at 0b47d373, before T1385 added the explicit-return exit), tracked
+// separately. Its coverage — trailing and explicit-return heap-diverted cases —
+// belongs here once T1427 is fixed; adding it now would only assert the leak.
+
 // --- Explicit raise in the body suppresses the close error (original preserved) ---
 gobang_use_close_raise_suppresses() `test {
   t := go! {
@@ -147,37 +187,36 @@ gobang_use_close_ok_heap_value() `test {
 }
 
 // --- Bare `return` early-exit: use-close error surfaces at <-t (T1391) ---
-// A bare `return` inside a failable go! value body is an early SUCCESS exit; a
+// A bare `return` inside a failable go! body is an early SUCCESS exit; a
 // use-binding whose failable close() raises on that exit must route the close
 // error into the task's {ok,err} aggregate (surfacing at <-t) and must not leak
 // the captured error instance.
+// T1385/§17.2: a bare `return;` is only legal on a non-value path, so these
+// bodies are `failable_task[Void]`. The bare-return close-error routing is
+// unchanged — it is the exit, not the result type, that this covers.
 gobang_use_close_bare_return_surfaces() `test {
   t := go! {
     base := produce(1)?^; // succeeds; makes the body a failable scope
     use r := FailResource(id: 1); // close() raises on the bare-return exit
     if base > 0 {
-      return;
+      return; // bare return: r live + failing close
     }
-    // bare return: r live + failing close
-    base + r.id
+    print_line((base + r.id).to_string());
   };
   got := false;
-  v := (<-t)? e {
+  (<-t)? e {
     got = true;
     assert(e.message == "close failed", "bare-return surfaced error is the close error");
-    -1
   };
   assert(got, "bare-return use-close error should surface at <-t");
-  assert(v == -1, "handler recovery value returned");
 }
 
-// --- Bare `return` + OK close: no spurious error, defined ok-value at <-t (T1391/T1392) ---
+// --- Bare `return` + OK close: no spurious error at <-t (T1391/T1392) ---
 // On the bare-return exit emitCloseErrCheck runs with a non-nil cap (T1387 guard),
 // but a SUCCEEDING close leaves cap.val null, so the check falls through to the
-// normal coroutineReturnBlock. T1392: that exit now stores a DEFINED {ok, zero, null}
+// normal coroutineReturnBlock. T1392: that exit stores a DEFINED {ok, null}
 // aggregate (previously it stored nothing → `<-t` read poison and, on wasm, mis-read
-// the discriminant as an error and dereferenced a garbage error pointer). The ok-value
-// on a bare return carries no trailing value, so it is the result type's zero (0 here).
+// the discriminant as an error and dereferenced a garbage error pointer).
 gobang_use_close_bare_return_ok_no_surface() `test {
   t := go! {
     base := produce(1)?^; // succeeds; makes the body a failable scope
@@ -185,15 +224,13 @@ gobang_use_close_bare_return_ok_no_surface() `test {
     if base > 0 {
       return;
     }
-    base + r.id
+    print_line((base + r.id).to_string());
   };
   got := false;
-  v := (<-t)? e {
+  (<-t)? e {
     got = true;
-    -1
   };
   assert(!got, "ok close on a bare return must not spuriously surface an error");
-  assert(v == 0, "bare-return ok-value is the result type's defined zero, not poison");
 }
 
 // --- Bare `return` + multiple use bindings: first close error (LIFO) wins (T1391) ---
@@ -209,7 +246,7 @@ gobang_use_close_bare_return_multi_first_wins() `test {
     if base > 0 {
       return;
     }
-    base + a.id + b.id
+    print_line((base + a.id + b.id).to_string());
   };
   got := false;
   (<-t)? e {
@@ -232,7 +269,7 @@ gobang_use_close_bare_return_dropped_leak_free() `test {
       if base > 0 {
         return;
       }
-      base + r.id
+      print_line((base + r.id).to_string());
     };
     // never received — the buffered close error must be discharged on drop.
   }

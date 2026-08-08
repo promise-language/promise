@@ -19134,10 +19134,23 @@ func (c *Compiler) snapshotThisForGoBlock() (value.Value, irtypes.Type, *goThisS
 }
 
 // storeGoResultAgg null-checks the current goroutine's G.result_ptr and stores
-// `agg` (a failable {ok,value,err} aggregate) through it. Factors the value-path
-// store used by genGoBlock so the success and error paths share one lowering.
-// T1384. Must be called on a live (non-terminated) block.
+// `agg` through it — the failable {ok,value,err} aggregate for a `go! {}` block,
+// or the raw success value for a plain `go {}` one. The single store lowering
+// shared by every producer of a goroutine result: the trailing-expression value,
+// the §17.2 explicit-return value (T1385), the escaping-error path, and the
+// bare-return zero (T1392). T1384. Must be called on a live (non-terminated) block.
 func (c *Compiler) storeGoResultAgg(agg value.Value) {
+	// The buffer is `pal_alloc(typeSize(bufTy))`, and the store below types its
+	// pointer from `agg` — so a value whose LLVM type is WIDER than the buffer
+	// would write past the allocation instead of failing IR verification. (The
+	// pre-T1385 open-coded store typed the pointer from the buffer instead, so a
+	// mismatch surfaced as an `opt` verifier error; keep an equivalent tripwire.)
+	// Every result-producing exit agrees with the buffer by construction, so a
+	// mismatch here is a codegen bug, not a user error.
+	if bufTy := c.goResultBufferType(); bufTy != nil && !agg.Type().Equal(bufTy) {
+		panic(fmt.Sprintf("codegen: goroutine result store type %s does not match the result buffer type %s",
+			agg.Type(), bufTy))
+	}
 	gTy := goroutineStructType()
 	currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
 	gPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
@@ -19145,10 +19158,9 @@ func (c *Compiler) storeGoResultAgg(agg value.Value) {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
 	rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
 	rpNotNull := c.block.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
-	// Unique block names: a failable coroutine can invoke this helper multiple
-	// times (one per escaping-error site, plus the void-success store), and the
-	// trailing-value path uses its own fixed store_result/after_store — duplicate
-	// labels in one function produce broken IR.
+	// Unique block names: a coroutine can invoke this helper multiple times (one
+	// per escaping-error site, plus the success store, plus one per `return
+	// <expr>` exit) — duplicate labels in one function produce broken IR.
 	storeResultBlk := c.newBlock("go.store_result")
 	afterStoreBlk := c.newBlock("go.after_store")
 	c.block.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
@@ -19158,6 +19170,44 @@ func (c *Compiler) storeGoResultAgg(agg value.Value) {
 	storeResultBlk.NewBr(afterStoreBlk)
 
 	c.block = afterStoreBlk
+}
+
+// goResultBufferType returns the LLVM type of the result buffer the enclosing
+// `go {}` / `go! {}` body's caller allocated — the failable {ok,value,err}
+// aggregate for a `go! {}` body, the raw success type for a value-producing
+// plain `go {}` one. nil when the current body has no buffer (plain void,
+// fire-and-forget, generator, or not a go block at all).
+func (c *Compiler) goResultBufferType() irtypes.Type {
+	if c.inFailableGoBlock && c.failableGoBlockAggType != nil {
+		return c.failableGoBlockAggType
+	}
+	return c.goBlockValueResultLLVM // nil unless a value-producing plain `go {}`
+}
+
+// storeGoResultDefault stores a DEFINED default into the goroutine's result
+// buffer on an exit that carries no value of its own — the {ok, zero, null}
+// aggregate for a `go! {}` body, the raw success type's zero for a
+// value-producing plain `go {}` one. Leaving the caller-allocated buffer
+// uninitialized is what handed `<-t` poison before T1392, so every valueless
+// exit of a body that HAS a buffer must come through here. A no-op when there
+// is no buffer to define (plain void body, fire-and-forget, generator) and on
+// an already-terminated block. Shared by the bare-`return` exit (genReturnStmt)
+// and genGoBlock's fall-through.
+func (c *Compiler) storeGoResultDefault() {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	if c.inFailableGoBlock {
+		var okVal value.Value
+		if !isVoidResult(c.failableGoBlockAggType) {
+			okVal = c.zeroValue(c.failableGoBlockAggType.Fields[1])
+		}
+		c.storeGoResultAgg(c.wrapOk(okVal, c.failableGoBlockAggType))
+		return
+	}
+	if c.goBlockValueResultLLVM != nil {
+		c.storeGoResultAgg(c.zeroValue(c.goBlockValueResultLLVM))
+	}
 }
 
 // emitFailableGoBlockError wraps errVal into the failable-task aggregate, stores
@@ -19376,7 +19426,16 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false
-	c.currentRetType = types.TypVoid
+	// T1385: §17.2 explicit-return style — a `return <expr>` inside the body
+	// yields the GOROUTINE's result, so the shared return machinery's retType
+	// (Optional wrap, view coercion, field/index dup decisions, `none`
+	// resolution) must be the block's success type T, not void. A block with no
+	// result stays void. currentRetType is read only by genReturnStmt.
+	if goIsVoid {
+		c.currentRetType = types.TypVoid
+	} else {
+		c.currentRetType = goElem
+	}
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.castSubjectMatch = nil // T0849: fresh per function body; restored below
@@ -19598,22 +19657,18 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 			// B0109 null-check store pattern (mirrors genGoCallExpr): the
 			// caller allocates result_ptr for an awaited task. The null
 			// check is defensive — symmetric with the working call form.
-			gTy := goroutineStructType()
-			currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
-			gPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
-			rpField := c.block.NewGetElementPtr(gTy, gPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-			rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
-			rpNotNull := c.block.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
-			storeResultBlk := coroFn.NewBlock("store_result")
-			afterStoreBlk := coroFn.NewBlock("after_store")
-			c.block.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
-
-			typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(goResultLLVM))
-			storeResultBlk.NewStore(storeVal, typedRP)
-			storeResultBlk.NewBr(afterStoreBlk)
-
-			c.block = afterStoreBlk
+			// T1385: shared with the explicit-return store in genReturnStmt.
+			c.storeGoResultAgg(storeVal)
+		} else {
+			// T1385: no trailing value on a live fall-through. Sema requires every
+			// path of an explicit-return block to produce a value, so this is
+			// unreachable at RUNTIME — but it is still EMITTED, for a trailing
+			// if/else whose arms all `return`: genIfStmtValue leaves a live (but
+			// predecessor-less) merge block behind. Store the defined default
+			// anyway rather than leave G.result_ptr undefined on any path out of
+			// here — that is exactly the class of defect T1392 fixed, and `opt`
+			// deletes the dead block.
+			c.storeGoResultDefault()
 		}
 		// T0594: ownership of `result` transferred to G.result_ptr — claim
 		// so the coroutine body's stmt-temp cleanup doesn't free it, then

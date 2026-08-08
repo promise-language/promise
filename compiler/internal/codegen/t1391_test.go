@@ -15,6 +15,11 @@ import (
 // fire when c.inFailableGoBlock — takes the CAPTURE path. Without a following
 // emitCloseErrCheck the captured error is saved-but-never-freed. The fix mirrors
 // the value-return path: capture the cap and call emitCloseErrCheck to route it.
+//
+// T1385/§17.2: a bare `return;` is legal only on a non-value path, so the body is
+// `failable_task[Void]`. What this covers is the bare-return EXIT, not the result
+// type — the close-error routing on that exit is unchanged. (The sibling
+// explicit-return exit is covered by TestT1385_FailableExplicitReturnStoresOk.)
 func TestT1391_GoBlockBareReturnUseCloseRoutesToSink(t *testing.T) {
 	ir := generateIR(t, `
 		type CloseError is error { int code; }
@@ -27,8 +32,7 @@ func TestT1391_GoBlockBareReturnUseCloseRoutesToSink(t *testing.T) {
 			t := go! {
 				base := produce(1)?^;
 				use r := FailResource(id: 1);
-				if base > 0 { return; }
-				base + r.id
+				if base + r.id > 0 { return; }
 			};
 		}
 	`)

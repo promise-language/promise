@@ -1160,6 +1160,15 @@ func (c *Checker) indexGetterCanError(target ast.Expr) bool {
 }
 
 func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
+	// T1385: inside a `go {}` / `go! {}` block body a `return` yields the
+	// GOROUTINE's result (§17.2 explicit-return style), not the enclosing
+	// function's — including inside a generator, where the go block owns its own
+	// returns. checkLambdaExpr clears the context, so a `return` in a lambda
+	// nested in a go block still binds to the lambda.
+	if c.goBlock != nil {
+		c.checkGoBlockReturn(s)
+		return
+	}
 	if c.curFunc == nil {
 		c.errorf(s.Pos(), "return outside of function")
 		return
@@ -1199,6 +1208,33 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 		c.errorf(s.Pos(), "cannot return %s from function returning %s", valType, expected)
 	}
 	c.checkSubExprFailable(s.Value) // T0976: reject bare failable in non-failable fn
+}
+
+// checkGoBlockReturn type-checks a `return` inside a `go {}` / `go! {}` block
+// body (§17.2 explicit-return style, T1385). The block's `T` is INFERRED from
+// these returns, so there is no expected type to check against — successive
+// returns are unified with joinBranchTypes exactly like if/match arms. The
+// bare-`return;` verdict is deferred to checkGoExpr, which is the first point
+// where `T` is known.
+func (c *Checker) checkGoBlockReturn(s *ast.ReturnStmt) {
+	ctx := c.goBlock
+	if s.Value == nil {
+		if !ctx.hasBareRet {
+			ctx.bareReturnPos, ctx.hasBareRet = s.Pos(), true
+		}
+		return
+	}
+	// Hint with the running unified T so a numeric literal in a later return
+	// adapts to the first return's type (nil hint on the first return).
+	valType := c.checkExprWithHint(s.Value, ctx.resultType)
+	// T0976 in a plain `go {}` (the body is a non-failable scope); §17.2.1
+	// auto-propagation into the task in a `go! {}`.
+	c.checkSubExprFailable(s.Value)
+	ctx.hasValueRet = true
+	if valType == nil {
+		return
+	}
+	ctx.resultType = c.joinBranchTypes(ctx.resultType, valType, s.Pos(), true, goBlockReturnSubject)
 }
 
 func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {

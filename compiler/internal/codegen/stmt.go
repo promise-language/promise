@@ -11107,8 +11107,17 @@ func (c *Compiler) enumCtorTempMovesOut(expr ast.Expr) bool {
 }
 
 func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
-	// Generator return: bare return means "stop producing values"
-	if c.inGenerator {
+	// Generator return: bare return means "stop producing values".
+	// T1385: `c.inGenerator` stays set inside a `go { … }` block nested in a
+	// generator body (genGoBlock does not reset it), but that body is a SEPARATE
+	// coroutine function — its `return` belongs to the goroutine, not the
+	// generator. c.coroutineReturnBlock is nil in the generator body itself
+	// (defineGeneratorBody clears it) and non-nil only inside such a nested go
+	// block, so it is exactly the discriminator. Without this the value form fell
+	// into the generator branch, which stores nothing into G.result_ptr — `<-t`
+	// read poison — and the bare form only worked because both coroutines happen
+	// to name their final-suspend block `final.suspend`.
+	if c.inGenerator && c.coroutineReturnBlock == nil {
 		if len(c.scopeBindings) > 0 {
 			// T1390: in a failable generator, emitScopeCleanup captures a failing
 			// use-binding close() error; emitCloseErrCheck routes it into the
@@ -11132,7 +11141,12 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// B0353: Goroutine return: bare return means "exit this goroutine".
 	// Branch to the coroutine's final suspend block instead of emitting
 	// ret void (the coroutine function returns ptr, not void).
-	if c.coroutineReturnBlock != nil {
+	// T1385: only the BARE form takes this shortcut. A `return <expr>` is §17.2
+	// explicit-return style — it produces the goroutine's result, so it falls
+	// through to the shared value-return path below (evaluate-before-cleanup,
+	// dups, drop-flag clearing, temp claims, scope cleanup) and stores the value
+	// into G.result_ptr instead of emitting a `ret`.
+	if c.coroutineReturnBlock != nil && s.Value == nil {
 		c.emitLambdaWritebacks()
 		// T1391: capture and route a failing use-binding close() error (mirrors the
 		// value-return path below). In a failable go! body emitScopeCleanup takes the
@@ -11146,28 +11160,17 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			closeCap = c.emitScopeCleanup(0, false)
 		}
 		c.emitCloseErrCheck(closeCap, 0)
-		// T1392: a bare `return` is an early SUCCESS exit of a failable `go! {}` body.
-		// Unlike the trailing-expression exit (which stores {ok, value, null}) and the
-		// escaping-error exits (which store {err}), this path stored nothing into the
-		// caller-allocated G.result_ptr — leaving that buffer uninitialized. On wasm
-		// the poison bytes make `<-t` misread the {ok,err} discriminant as an error and
-		// dereference a garbage error pointer (SIGABRT). Store a well-defined ok
-		// aggregate so the receive sees success. The trailing ok-VALUE on a bare return
-		// in a value body is semantically undefined (a bare return carries no value), so
-		// we fill the value slot with the type's zero — defined, never a spurious error.
-		// Only the failable go-block path stores an aggregate; generators and
-		// non-failable go blocks fall through unchanged.
-		if c.inFailableGoBlock && c.block != nil && c.block.Term == nil {
-			var okVal value.Value
-			if !isVoidResult(c.failableGoBlockAggType) {
-				okVal = c.zeroValue(c.failableGoBlockAggType.Fields[1])
-			}
-			c.storeGoResultAgg(c.wrapOk(okVal, c.failableGoBlockAggType))
-		} else if c.goBlockValueResultLLVM != nil && c.block != nil && c.block.Term == nil {
-			// T1392: same defect for a value-producing NON-failable `go {}` body — the
-			// buffer holds the raw success type, so store its zero directly.
-			c.storeGoResultAgg(c.zeroValue(c.goBlockValueResultLLVM))
-		}
+		// T1392: a bare `return` is an early SUCCESS exit of a `go {}` / `go! {}`
+		// body. Unlike the trailing-expression exit (which stores {ok, value, null})
+		// and the escaping-error exits (which store {err}), this path stored nothing
+		// into the caller-allocated G.result_ptr — leaving that buffer uninitialized.
+		// On wasm the poison bytes make `<-t` misread the {ok,err} discriminant as an
+		// error and dereference a garbage error pointer (SIGABRT). storeGoResultDefault
+		// writes the well-defined default so the receive sees success; it is a no-op
+		// for a body with no result buffer (plain void, fire-and-forget, generator).
+		// T1385/§17.2: a bare `return;` on a VALUE-producing path is now a sema error,
+		// so a body reaching here is `T = Void` — the default IS the whole result.
+		c.storeGoResultDefault()
 		if c.block != nil && c.block.Term == nil {
 			c.block.NewBr(c.coroutineReturnBlock)
 		}
@@ -11182,6 +11185,24 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// mid-argument evaluation). Only temps created while evaluating THIS return value
 	// are moved out; the move-out clear below must not sweep the sibling prefix.
 	enumCtorSnap := len(c.enumCtorTemps)
+
+	// T1385: §17.2 explicit-return style inside a `go {}` / `go! {}` body. goRet
+	// means the value terminates the goroutine (branch to the final suspend
+	// instead of `ret`); goSink additionally means the caller allocated a result
+	// buffer to store it into. Without a sink the returned value is DISCARDED, so
+	// the move-out steps below (drop-flag clear, temp claims) must NOT run or it
+	// leaks — same discard semantics as the trailing-value fire-and-forget path in
+	// genGoBlock. Both flags below imply a buffer:
+	//   - goBlockValueResultLLVM is set only on genGoBlock's useGoBlockValuePath
+	//     (non-void AND not fire-and-forget), which is exactly when one is alloc'd;
+	//   - inFailableGoBlock implies one because a fire-and-forget `go! {}` is a sema
+	//     error ("a fire-and-forget goroutine must be non-failable", T1379), so every
+	//     `go! {}` that reaches codegen is awaited and gets its aggregate buffer.
+	// goRet is also true in the main/test coroutines (sched.go, compileTestCoroutine),
+	// where neither flag is set: their bodies are void, so a `return <expr>` there is
+	// already a sema error and the discard path is the correct fallback.
+	goRet := c.coroutineReturnBlock != nil
+	goSink := goRet && (c.inFailableGoBlock || c.goBlockValueResultLLVM != nil)
 
 	// Set targetType so NoneLit can resolve to the correct Optional struct
 	retType := c.currentRetType
@@ -11245,6 +11266,14 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			c.returningBorrowedUnwrap = true
 		}
 		val = c.genExpr(s.Value)
+		// T1385: `go! { …; return produce(5); }` — a bare failable call as the
+		// returned value auto-propagates. Unwrap it to its success value BEFORE any
+		// cleanup below (mirrors genBlockValue's trailing case); genAutoPropagateValue
+		// runs its own error-path cleanup and routes to the go-block sink via
+		// emitFailableGoBlockError.
+		if goRet && c.inFailableGoBlock && c.info.AutoPropagateExprs[s.Value] {
+			val = c.genAutoPropagateValue(val)
+		}
 		c.returningBorrowedUnwrap = prevReturningBorrowedUnwrap
 		c.elvisResultReturned = prevElvisReturned
 		c.dupStringFieldAccess = false
@@ -11370,7 +11399,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// B0205: When the return value was dup'd (B0189), the original variable must
 	// still be dropped at scope exit — the caller receives the dup, not the original.
 	// Only clear the flag when we're returning the original (no dup).
-	if s.Value != nil && !needsDup {
+	// T1385: `!goRet || goSink` — a fire-and-forget go block discards the returned
+	// value, so leaving the flag set lets emitScopeCleanup drop the local (no leak).
+	if s.Value != nil && !needsDup && (!goRet || goSink) {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		} else if _, ok := unwrapDestructureParens(s.Value).(*ast.CastExpr); ok {
@@ -11394,7 +11425,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// string concat intermediaries) that are normally freed at statement end.
 	// Since return terminates the block, the post-statement cleanup never runs.
 	// Claim the return value first so it's not freed — only intermediaries are freed.
-	if s.Value != nil && val != nil {
+	// T1385: same fire-and-forget gate as the drop-flag clear above — not claiming
+	// lets the cleanup below free the discarded value.
+	if s.Value != nil && val != nil && (!goRet || goSink) {
 		c.claimStringTemp(val)
 		c.claimHeapTemp(val)
 		c.claimEnvTemp(val)
@@ -11451,6 +11484,24 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	}
 	c.emitCloseErrCheck(closeCap, 0)
 
+	// T1385: §17.2 explicit-return style — store the returned value into the
+	// goroutine's result buffer and branch to the coroutine's final suspend. The
+	// coroutine ramp returns a handle, so a `ret` here would be invalid IR.
+	if goRet {
+		if goSink && c.block != nil && c.block.Term == nil {
+			val = c.coerceReturnValue(val, s.Value, retType, retBoxSrcOwned)
+			if c.inFailableGoBlock {
+				c.storeGoResultAgg(c.wrapOk(val, c.failableGoBlockAggType))
+			} else {
+				c.storeGoResultAgg(val) // raw success type; buffer typed by goBlockValueResultLLVM
+			}
+		}
+		if c.block != nil && c.block.Term == nil {
+			c.block.NewBr(c.coroutineReturnBlock)
+		}
+		return
+	}
+
 	if c.canError {
 		resultType := c.currentResultType()
 		if s.Value == nil {
@@ -11461,35 +11512,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			if c.info.FailableExprs[s.Value] && val != nil && val.Type().Equal(resultType) {
 				c.block.NewRet(val)
 			} else {
-				// T1298: box/view-coerce into the Optional return type's element
-				// BEFORE the optional wrap, so `return Counter(...)` from a `Sink?`-
-				// returning function boxes to the structural view first (the trailing
-				// coerceToView runs against the Optional target and is a no-op).
-				// T1282: an owned move source boxed into an Optional structural element
-				// is built here, so the clone-vs-move decision must apply at this call.
-				c.boxSrcOwned = retBoxSrcOwned
-				val = c.coerceReturnToOptionalElem(val, s.Value, retType)
-				c.boxSrcOwned = false
-				// Wrap value in Optional if return type is Optional but expr is not
-				val = c.wrapReturnOptional(val, s.Value, retType)
-				// Coerce value struct vtable when returning through a parent type
-				if retType != nil {
-					exprType := c.info.Types[s.Value]
-					if c.typeSubst != nil {
-						exprType = types.Substitute(exprType, c.typeSubst)
-					}
-					if c.selfSubst != nil {
-						exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
-					}
-					// T1282: apply the owned/borrowed box decision; T1320:
-					// coerceReturnToView heap-allocates a value-type box that
-					// escapes to the caller, then delegates to coerceToView (which
-					// reads boxSrcOwned).
-					c.boxSrcOwned = retBoxSrcOwned
-					val = c.coerceReturnToView(val, exprType, retType)
-					c.boxSrcOwned = false
-				}
-				c.block.NewRet(c.wrapOk(val, resultType))
+				c.block.NewRet(c.wrapOk(c.coerceReturnValue(val, s.Value, retType, retBoxSrcOwned), resultType))
 			}
 		}
 		return
@@ -11497,32 +11520,44 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if s.Value == nil {
 		c.block.NewRet(nil)
 	} else {
-		// T1298: box/view-coerce into the Optional return type's element BEFORE the
-		// optional wrap (see the failable branch above).
-		// T1282: apply the owned/borrowed box decision here too (see failable branch).
-		c.boxSrcOwned = retBoxSrcOwned
-		val = c.coerceReturnToOptionalElem(val, s.Value, retType)
-		c.boxSrcOwned = false
-		// Wrap value in Optional if return type is Optional but expr is not
-		val = c.wrapReturnOptional(val, s.Value, retType)
-		// Coerce value struct vtable when returning through a parent type
-		if retType != nil {
-			exprType := c.info.Types[s.Value]
-			if c.typeSubst != nil {
-				exprType = types.Substitute(exprType, c.typeSubst)
-			}
-			if c.selfSubst != nil {
-				exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
-			}
-			// T1282: apply the owned/borrowed box decision; T1320:
-			// coerceReturnToView heap-allocates a value-type box that escapes to the
-			// caller, then delegates to coerceToView (which reads boxSrcOwned).
-			c.boxSrcOwned = retBoxSrcOwned
-			val = c.coerceReturnToView(val, exprType, retType)
-			c.boxSrcOwned = false
-		}
-		c.block.NewRet(val)
+		c.block.NewRet(c.coerceReturnValue(val, s.Value, retType, retBoxSrcOwned))
 	}
+}
+
+// coerceReturnValue applies the shape coercions every return value needs before
+// it lands in the result slot: structural box into an Optional element, Optional
+// wrap, and value-struct vtable coercion through a parent/view type. Shared by
+// the failable-`ret`, plain-`ret`, and goroutine-result (T1385) exits of
+// genReturnStmt so all three agree by construction.
+func (c *Compiler) coerceReturnValue(val value.Value, expr ast.Expr, retType types.Type, boxSrcOwned bool) value.Value {
+	// T1298: box/view-coerce into the Optional return type's element BEFORE the
+	// optional wrap, so `return Counter(...)` from a `Sink?`-returning function
+	// boxes to the structural view first (the trailing coerceToView runs against
+	// the Optional target and is a no-op).
+	// T1282: an owned move source boxed into an Optional structural element is
+	// built here, so the clone-vs-move decision must apply at this call.
+	c.boxSrcOwned = boxSrcOwned
+	val = c.coerceReturnToOptionalElem(val, expr, retType)
+	c.boxSrcOwned = false
+	// Wrap value in Optional if return type is Optional but expr is not
+	val = c.wrapReturnOptional(val, expr, retType)
+	// Coerce value struct vtable when returning through a parent type
+	if retType != nil {
+		exprType := c.info.Types[expr]
+		if c.typeSubst != nil {
+			exprType = types.Substitute(exprType, c.typeSubst)
+		}
+		if c.selfSubst != nil {
+			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		// T1282: apply the owned/borrowed box decision; T1320: coerceReturnToView
+		// heap-allocates a value-type box that escapes to the caller, then
+		// delegates to coerceToView (which reads boxSrcOwned).
+		c.boxSrcOwned = boxSrcOwned
+		val = c.coerceReturnToView(val, exprType, retType)
+		c.boxSrcOwned = false
+	}
+	return val
 }
 
 // wrapThisReturnValue wraps a `this` expression (i8* instance pointer) into the

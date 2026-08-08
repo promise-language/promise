@@ -142,8 +142,11 @@ func TestT1217GoBlockTypedHandlerElseOK(t *testing.T) {
 	`)
 }
 
-// --- Unaffected control: `return` inside a `go {}` validates against the
-// enclosing fn's result type (a separate mechanism), and must be untouched. ---
+// --- Unaffected control: `return` inside a `go {}` yields the GOROUTINE's result
+// (T1385, §17.2 explicit-return style), a separate mechanism from T1217's
+// non-failable scope, and must be untouched. Here the fire-and-forget block's only
+// path returns, so it satisfies the all-paths rule; the enclosing `int` result is
+// irrelevant to it. ---
 
 func TestT1217GoBlockReturnUnaffected(t *testing.T) {
 	checkOK(t, `

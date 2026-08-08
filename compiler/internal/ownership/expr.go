@@ -134,7 +134,15 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			// locals are not flagged even when the go-block is lexically in a loop.
 			savedLoopDepth := c.loopDepth
 			c.loopDepth = 0
+			// T1385: a `return <expr>` in the body yields the TASK's element, not
+			// the enclosing function's result — see currentReturnResult.
+			savedGoResult := c.goBlockResult
+			c.goBlockResult = types.TypVoid // in a go block body; refined below
+			if elem, ok, _ := types.AsAnyTaskFailable(c.info.Types[e]); ok && elem != nil {
+				c.goBlockResult = elem
+			}
 			c.checkBlock(e.Block)
+			c.goBlockResult = savedGoResult
 			c.loopDepth = savedLoopDepth
 		}
 
@@ -3016,6 +3024,10 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	// false negatives (outer void → skips T0402) and false positives (outer
 	// owned T → rejects legit `return &capture` from a lambda returning T&).
 	// Sema records the lambda's signature in info.Types[e].
+	// T1385: a `return` inside a lambda nested in a go block binds to the LAMBDA
+	// — clear the go-block result alongside the signature swap.
+	savedGoBlockResult := c.goBlockResult
+	c.goBlockResult = nil
 	lambdaSig, _ := c.info.Types[e].(*types.Signature)
 	c.curSig = lambdaSig
 	c.params = make(map[string]bool)
@@ -3056,4 +3068,5 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	c.returnOrigins = savedReturnOrigins
 	c.iterBorrowOrigin = savedIterBorrowOrigin // T1349
 	c.loopDepth = savedLoopDepth
+	c.goBlockResult = savedGoBlockResult // T1385
 }

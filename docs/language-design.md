@@ -3651,7 +3651,7 @@ user := fetchUser(42)?^;
 
 `T` is always **inferred** — from the expression, from the trailing expression, or from the block's `return` statements — and is never written at the spawn site; only *failability* is chosen there (`go` vs `go!`, §17.2.1). A block that yields no value on any path has `T = Void`.
 
-**A block picks one style and holds to it.** The two forms are alternatives, not ingredients: as soon as a block contains a single `return <expr>`, it is in explicit-return style, and *every* value-producing path must then end in `return <expr>`. A trailing bare expression in such a block is a compile error (*"this block returns with 'return'; a trailing expression is discarded — did you mean `return <expr>;`?"*), never a second, silent exit. Mixing is rejected rather than resolved, because a reader scanning for how a block produces its value should have to check exactly one thing.
+**A block picks one style and holds to it.** The two forms are alternatives, not ingredients: as soon as a block contains a single `return <expr>`, it is in explicit-return style, and *every* value-producing path must then end in `return <expr>`. A trailing bare expression in such a block is a compile error (*"this block returns with `return`; a trailing expression is discarded"*, with the fix-it hint *"did you mean `return <expr>;`?"*), never a second, silent exit. Mixing is rejected rather than resolved, because a reader scanning for how a block produces its value should have to check exactly one thing.
 
 ```promise
 sum := go { a := score(boardA.clone()); a * 2 };   // trailing style — the last expression is the result

@@ -824,8 +824,9 @@ pal_wait_pid(i32 pid) i32              // waitpid with EINTR retry; returns exit
 
 ## 9. `modules/time` — Higher-Level Time Operations
 
-**Status**: Placeholder. `modules/std/time.pr` already provides `Duration`, `Instant`, and `sleep`. The
-`modules/time` placeholder should become higher-level time utilities that build on top of those:
+**Status**: Implemented. `modules/std/time.pr` provides `Duration`, `Instant`, and `sleep`; the
+`modules/time` catalog module builds higher-level wall-clock utilities on top of those — `DateTime.now()`,
+`Date`, `Time`, `from_unix_secs`, UTC offsets, and ISO-8601 (RFC 3339) format/parse all work today:
 
 ```promise
 use time;
@@ -898,7 +899,7 @@ modules/
   strings/        — join, spaces, reverse, ...                        (DONE)
   io/             — File, Dir, IoError, read_line, read_stdin          (DONE)
   os/             — args, get_env, get_cwd, exit, execute, OsError     (DONE)
-  time/           — DateTime, unix_now, format/parse calendar ops     (PLACEHOLDER)
+  time/           — DateTime, unix_now, format/parse calendar ops     (DONE)
   http/           — HTTP server/client                                 (PLACEHOLDER)
 ```
 

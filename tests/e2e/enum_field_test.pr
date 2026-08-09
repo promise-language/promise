@@ -798,12 +798,13 @@ test_t0512_nested_optional_while_let() `test {
     _T0485NestedOptWrapper.Some(opt_opt) => {
       int iters = 0;
       while first := opt_opt {
+        // T1436: `first` is consumed by this inner while-let; a second unwrap
+        // of `first` afterward is a use-after-move (rejected by ownership),
+        // mirroring the if-let path. Single unwrap still exercises the T0512
+        // borrow-marker propagation through the nested while-let.
         while r := first {
           assert(r.name == "deep3", "deep3 wl");
           break;
-        }
-        if r2 := first {
-          assert(r2.name == "deep3", "deep3 if");
         }
         iters = iters + 1;
         break;

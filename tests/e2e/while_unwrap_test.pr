@@ -127,3 +127,63 @@ test_while_unwrap_strings() `test {
   }
   assert(result == "world hello", "reverse order via pop");
 }
+
+// --- while-unwrap consumes an owned optional local (T1436) ---
+
+type T1436Row {
+  string name;
+}
+
+// T1436: a while-let that consumes an owned `T?` local and re-inits it in the
+// body drops the unwrapped payload each iteration and re-owns the source — the
+// legal runtime companion to the ownership rejection of a consume-then-reuse
+// (`while r := o { … } if r2 := o { … }` is a use-after-move at compile time).
+// Correctness plus leak-freedom (droppable string field) validate the
+// drop-per-iteration + clearDropFlag path in genWhileUnwrapStmt.
+test_t1436_while_let_owned_reassign_drain() `test {
+  T1436Row? o = T1436Row(name: "a".to_string());
+  string[] seen = [];
+  int n = 0;
+  while r := o {
+    seen.push(r.name.clone());
+    n += 1;
+    if n >= 3 {
+      o = none;
+    } else {
+      o = T1436Row(name: "b".to_string());
+    }
+  }
+  assert(seen.len == 3, "drained 3");
+  assert(seen[0] == "a", "first a");
+  assert(seen[1] == "b", "second b");
+  assert(seen[2] == "b", "third b");
+}
+
+// T1436: a copy-type optional source is a tryMove no-op, so repeated unwraps of
+// the same `int?` local stay legal — confirm it runs and the post-loop unwrap
+// still reads the (now-none) source without a use-after-move.
+test_t1436_while_let_copy_optional_reuse() `test {
+  int? o = 5;
+  int total = 0;
+  while r := o {
+    total += r;
+    o = none;
+  }
+  if r2 := o {
+    total += r2 * 100;
+  }
+  assert(total == 5, "copy optional drained once, post-unwrap sees none");
+}
+
+// T1436: draining a droppable owned optional to `none` in the body terminates
+// and leaves nothing to leak.
+test_t1436_while_let_drain_to_none() `test {
+  T1436Row? o = T1436Row(name: "solo".to_string());
+  int iters = 0;
+  while r := o {
+    assert(r.name == "solo", "solo");
+    iters += 1;
+    o = none;
+  }
+  assert(iters == 1, "one iteration");
+}

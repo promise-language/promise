@@ -1768,6 +1768,14 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// across the back-edge (silent UAF) unless its candidate lands on this frame.
 	snap := c.enterLoopBody(s.Body)
 	c.checkExpr(s.Value)
+	// T1436: a while-let consumes its optional source exactly like if-let —
+	// genWhileUnwrapStmt clears the source ident's drop flag and drops the
+	// unwrapped payload per iteration. Mark the source Moved so a later unwrap
+	// of the same source (`while r := s { … } if r2 := s { … }`) is rejected as
+	// a use-after-move instead of reading the freed payload at runtime (SEGV).
+	// A call/getter source is a no-op (tryMove only moves idents); a body that
+	// reassigns the source re-inits it, so terminating while-let loops stay legal.
+	c.tryMove(s.Value)
 	// T0589: same shape as if-let — `while x := a { … }` consumes the inner
 	// heap value of a borrowed Optional parameter on each loop iteration.
 	// Caller still owns and drops the same allocation → double-free / UAF on

@@ -375,7 +375,20 @@ func (p *PosixPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoLocFn *ir.Func) 
 }
 
 // EmitFileOpen declares libc @open and defines @pal_file_open.
-// Maps mode (0=open-rw, 1=read, 2=create, 3=append) to platform-specific O_* flags.
+// Maps mode to platform-specific O_* flags:
+//
+//	0 = O_RDWR                    (open)
+//	1 = O_RDONLY                  (open_read)
+//	2 = O_RDWR|O_CREAT|O_TRUNC    (reserved for create_readable, T1447 — kept but unemitted)
+//	3 = O_RDWR|O_CREAT|O_APPEND   (reserved for append_readable, T1447 — kept but unemitted)
+//	4 = O_WRONLY                  (open_write)
+//	5 = O_WRONLY|O_CREAT|O_TRUNC  (create)
+//	6 = O_WRONLY|O_CREAT|O_APPEND (append)
+//
+// Modes 2 and 3 are intentionally retained in the select chain even though no
+// Promise factory currently emits them: their flag constants are exactly what
+// create_readable/append_readable (T1447) need, so keeping them here makes T1447
+// a pure modules/io/io.pr change with zero PAL work.
 func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	// declare i32 @open(i8*, i32, ...) nounwind
 	// open() is variadic: mode_t is a variadic arg, which matters on AArch64
@@ -387,18 +400,25 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 
 	// Platform-specific O_* flag constants
 	var oRDWR, oRDONLY, oCreateTrunc, oCreateAppend int64
+	var oWRONLY, oWrCreateTrunc, oWrCreateAppend int64
 	if p.isMacOS() {
-		// macOS: O_RDONLY=0, O_RDWR=2, O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x8
+		// macOS: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x8
 		oRDONLY = 0
+		oWRONLY = 1
 		oRDWR = 2
-		oCreateTrunc = 2 | 0x200 | 0x400 // O_RDWR|O_CREAT|O_TRUNC
-		oCreateAppend = 2 | 0x200 | 0x8  // O_RDWR|O_CREAT|O_APPEND
+		oCreateTrunc = 2 | 0x200 | 0x400   // O_RDWR|O_CREAT|O_TRUNC
+		oCreateAppend = 2 | 0x200 | 0x8    // O_RDWR|O_CREAT|O_APPEND
+		oWrCreateTrunc = 1 | 0x200 | 0x400 // O_WRONLY|O_CREAT|O_TRUNC
+		oWrCreateAppend = 1 | 0x200 | 0x8  // O_WRONLY|O_CREAT|O_APPEND
 	} else {
-		// Linux: O_RDONLY=0, O_RDWR=2, O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
+		// Linux: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
 		oRDONLY = 0
+		oWRONLY = 1
 		oRDWR = 2
-		oCreateTrunc = 2 | 0x40 | 0x200  // O_RDWR|O_CREAT|O_TRUNC
-		oCreateAppend = 2 | 0x40 | 0x400 // O_RDWR|O_CREAT|O_APPEND
+		oCreateTrunc = 2 | 0x40 | 0x200    // O_RDWR|O_CREAT|O_TRUNC
+		oCreateAppend = 2 | 0x40 | 0x400   // O_RDWR|O_CREAT|O_APPEND
+		oWrCreateTrunc = 1 | 0x40 | 0x200  // O_WRONLY|O_CREAT|O_TRUNC
+		oWrCreateAppend = 1 | 0x40 | 0x400 // O_WRONLY|O_CREAT|O_APPEND
 	}
 
 	fn := module.NewFunc("pal_file_open", irtypes.I32,
@@ -411,10 +431,16 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	isRead := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 1))
 	isCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 2))
 	isAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 3))
+	isWrite := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 4))
+	isWrCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 5))
+	isWrAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 6))
 
 	f1 := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, oRDONLY), constant.NewInt(irtypes.I32, oRDWR))
 	f2 := entry.NewSelect(isCreate, constant.NewInt(irtypes.I32, oCreateTrunc), f1)
-	flags := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
+	f3 := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
+	f4 := entry.NewSelect(isWrite, constant.NewInt(irtypes.I32, oWRONLY), f3)
+	f5 := entry.NewSelect(isWrCreate, constant.NewInt(irtypes.I32, oWrCreateTrunc), f4)
+	flags := entry.NewSelect(isWrAppend, constant.NewInt(irtypes.I32, oWrCreateAppend), f5)
 
 	// open(path, flags, 0644)
 	fd := entry.NewCall(openFn, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0644))

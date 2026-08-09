@@ -51,7 +51,7 @@ w.finish_to(f)?!;
 f.close()?!;
 
 // Decompress from a file
-File f2 = File.open("data.gz", readonly: true)?!;
+File f2 = File.open_read("data.gz")?!;
 u8[] bytes = gunzip_from(f2)?!;
 f2.close()?!;
 ```

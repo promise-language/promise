@@ -3447,7 +3447,9 @@ Because these are `` `structural ``, any type with matching method signatures sa
 type File is ReadWriteCloser {
   int fd;
 
-  open!(string path, bool readonly = false) Self `factory `native;
+  open_read!(string path) Self `factory `native;  // O_RDONLY
+  open_write!(string path) Self `factory `native; // O_WRONLY
+  open!(string path) Self `factory `native;       // O_RDWR
 
   read!(~this, u8[]~ buf) int `instance `native;
   write!(~this, u8[] buf) int `instance `native;
@@ -3485,7 +3487,7 @@ A `use` binding ties a resource's lifetime to the enclosing scope. When the scop
 
 ```promise
 main!() {
-  use f := File.open("data.txt", readonly: true)?^;
+  use f := File.open_read("data.txt")?^;
   string data = f.read_all()?^;
   // f.close() called automatically here
 }
@@ -3495,7 +3497,7 @@ main!() {
 
 ```promise
 process!(string path) {
-  use f := File.open(path, readonly: true)?^;
+  use f := File.open_read(path)?^;
 
   if needsBackup(path) {
     use backup := File.create(path + ".bak")?^;

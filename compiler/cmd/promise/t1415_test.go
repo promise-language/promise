@@ -547,7 +547,7 @@ func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 	src := filepath.Join(dir, "excluded_test.pr")
 	// Excluded on every supported target, so the assertion never runs anywhere.
 	source := "a_first() `test {\n  assert(1 + 1 == 2, \"sanity\");\n}\n\n" +
-		"b_skipped() `test(exclude: macos, linux, windows, wasm) {\n  assert(false, \"must not run\");\n}\n\n" +
+		"b_skipped() `test(exclude: macos || linux || windows || wasm) {\n  assert(false, \"must not run\");\n}\n\n" +
 		"c_after() `test {\n  assert(2 + 2 == 4, \"sanity2\");\n}\n"
 	if err := os.WriteFile(src, []byte(source), 0o644); err != nil {
 		t.Fatal(err)

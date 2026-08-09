@@ -805,9 +805,11 @@ type File {
     int _fd;
 
     // Factory constructors
-    open!(string path, bool readonly = false) Self `factory; // read-write (or read-only)
-    create!(string path) Self `factory; // write, create/truncate
-    append!(string path) Self `factory; // append, create if needed
+    open_read!(string path) Self `factory; // O_RDONLY
+    open_write!(string path) Self `factory; // O_WRONLY
+    open!(string path) Self `factory; // O_RDWR
+    create!(string path) Self `factory; // write-only, create/truncate
+    append!(string path) Self `factory; // write-only, append, create if needed
     ~~open_mode!(string path, string mode) Self `factory;~~ // NOT implementing
 
     // Byte-level I/O (Reader/Writer interface compliance)

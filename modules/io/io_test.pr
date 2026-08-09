@@ -35,7 +35,7 @@ file_write_read() `test(exclude: wasm) {
   File fw = File.create(os.temp_dir + "/pr_iot_wr")?!;
   fw.write_string("hello world")?!;
   fw.close()?!;
-  File fr = File.open(os.temp_dir + "/pr_iot_wr", readonly: true)?!;
+  File fr = File.open_read(os.temp_dir + "/pr_iot_wr")?!;
   string data = fr.read_all()?!;
   fr.close()?!;
   assert(data == "hello world", "read back what was written");
@@ -252,7 +252,7 @@ dir_list_nonexistent() `test(exclude: wasm) {
 
 read_line_from_file() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_readline", "line1\nline2\nline3")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_readline", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_readline")?!;
 
   string line1 = _io_file_read_line(f._fd);
   int rc1 = _io_errno();
@@ -280,7 +280,7 @@ read_line_from_file() `test(exclude: wasm) {
 
 read_line_crlf() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_rlcrlf", "hello\r\nworld\r\n")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rlcrlf", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_rlcrlf")?!;
 
   string line1 = _io_file_read_line(f._fd);
   int rc1 = _io_errno();
@@ -298,7 +298,7 @@ read_line_crlf() `test(exclude: wasm) {
 
 read_line_empty_lines() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_rlempty", "\n\nhello\n\n")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rlempty", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_rlempty")?!;
 
   string l1 = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "e1");
@@ -325,7 +325,7 @@ read_line_empty_lines() `test(exclude: wasm) {
 
 read_line_empty_file() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_rlef", "")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rlef", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_rlef")?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == _io_eof_sentinel(), "EOF on empty file");
   f.close()?!;
@@ -341,7 +341,7 @@ read_line_long_line() `test(exclude: wasm) {
     i += 1;
   }
   File.write_content(os.temp_dir + "/pr_iot_rllong", long + "\n")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rllong", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_rllong")?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "no error on long line");
   assert(line.len == 400, "long line length preserved");
@@ -351,7 +351,7 @@ read_line_long_line() `test(exclude: wasm) {
 
 read_line_single_no_newline() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_rlsingle", "onlythis")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rlsingle", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_rlsingle")?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "no error");
   assert(line == "onlythis", "single line no trailing newline");
@@ -406,7 +406,7 @@ dir_exists_nonexistent() `test(exclude: wasm) {
 
 file_write_readonly() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_wro", "data")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_wro", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_wro")?!;
   bool caught = false;
   f.write_string("fail")? e {
     caught = true;
@@ -414,6 +414,85 @@ file_write_readonly() `test(exclude: wasm) {
   assert(caught, "writing to readonly file raises error");
   f.close()?!;
   File.remove(os.temp_dir + "/pr_iot_wro")?!;
+}
+
+file_open_write_overwrites_in_place() `test(exclude: wasm) {
+  // open_write (O_WRONLY) overwrites from the start without truncating: the
+  // trailing bytes beyond what we write must survive (unlike create).
+  File.write_content(os.temp_dir + "/pr_iot_ow", "ABCDEFGH")?!;
+  File f = File.open_write(os.temp_dir + "/pr_iot_ow")?!;
+  f.write_string("xyz")?!;
+  f.close()?!;
+  string data = File.read_content(os.temp_dir + "/pr_iot_ow")?!;
+  assert(data == "xyzDEFGH", "open_write overwrites in place, does not truncate");
+  File.remove(os.temp_dir + "/pr_iot_ow")?!;
+}
+
+file_open_write_missing_raises() `test(exclude: wasm) {
+  // O_WRONLY without O_CREAT: opening a nonexistent path must fail (ENOENT).
+  bool caught = false;
+  File.open_write(os.temp_dir + "/pr_iot_ow_missing_xyz")? e {
+    caught = true;
+  };
+  assert(caught, "open_write on missing file raises error");
+}
+
+file_open_write_read_raises() `test(exclude: wasm) {
+  // A write-only handle cannot be read from; the read raises (EBADF).
+  File.write_content(os.temp_dir + "/pr_iot_owr", "data")?!;
+  File f = File.open_write(os.temp_dir + "/pr_iot_owr")?!;
+  bool caught = false;
+  f.read_all()? e {
+    caught = true;
+  };
+  assert(caught, "reading from write-only handle raises error");
+  f.close()?!;
+  File.remove(os.temp_dir + "/pr_iot_owr")?!;
+}
+
+file_create_handle_read_raises() `test(exclude: wasm) {
+  // T1275 narrowed create to O_WRONLY|O_CREAT|O_TRUNC: the returned handle is
+  // write-only, so reading from it must raise (EBADF). Guards the mode-5
+  // narrowing — if create ever regressed to O_RDWR this read would succeed.
+  File f = File.create(os.temp_dir + "/pr_iot_crd")?!;
+  f.write_string("payload")?!;
+  f.seek(0)?!;
+  bool caught = false;
+  f.read_all()? e {
+    caught = true;
+  };
+  assert(caught, "reading from create handle raises error");
+  f.close()?!;
+  File.remove(os.temp_dir + "/pr_iot_crd")?!;
+}
+
+file_append_handle_read_raises() `test(exclude: wasm) {
+  // T1275 narrowed append to O_WRONLY|O_CREAT|O_APPEND: the returned handle is
+  // write-only, so reading from it must raise (EBADF). Guards the mode-6
+  // narrowing — if append ever regressed to O_RDWR this read would succeed.
+  File.write_content(os.temp_dir + "/pr_iot_ard", "existing")?!;
+  File f = File.append(os.temp_dir + "/pr_iot_ard")?!;
+  f.seek(0)?!;
+  bool caught = false;
+  f.read_all()? e {
+    caught = true;
+  };
+  assert(caught, "reading from append handle raises error");
+  f.close()?!;
+  File.remove(os.temp_dir + "/pr_iot_ard")?!;
+}
+
+file_append_creates_missing() `test(exclude: wasm) {
+  // append carries O_CREAT (mode 6): opening a nonexistent path creates it
+  // rather than raising, then writes land at the end.
+  File.remove(os.temp_dir + "/pr_iot_acm")? _ {
+  };
+  File f = File.append(os.temp_dir + "/pr_iot_acm")?!;
+  f.write_string("fresh")?!;
+  f.close()?!;
+  string d = File.read_content(os.temp_dir + "/pr_iot_acm")?!;
+  assert(d == "fresh", "append creates a missing file");
+  File.remove(os.temp_dir + "/pr_iot_acm")?!;
 }
 
 file_read_after_close() `test(exclude: wasm) {
@@ -649,7 +728,7 @@ file_write_read_bytes() `test(exclude: wasm) {
   assert(written == 2, "wrote 2 bytes");
   fw.close()?!;
 
-  File fr = File.open(os.temp_dir + "/pr_iot_wrb", readonly: true)?!;
+  File fr = File.open_read(os.temp_dir + "/pr_iot_wrb")?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
   int n = fr.read(buf)?!;
   assert(n == 2, "read 2 bytes");
@@ -661,7 +740,7 @@ file_write_read_bytes() `test(exclude: wasm) {
 
 file_read_method() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_rby", "abc")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rby", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_rby")?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
   int n = f.read(buf)?!;
   assert(n == 3, "read returns 3 bytes");
@@ -674,7 +753,7 @@ file_read_method() `test(exclude: wasm) {
 
 file_read_eof() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_reof", "x")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_reof", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_reof")?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
   int n1 = f.read(buf)?!;
   assert(n1 == 1, "first read got 1 byte");
@@ -711,7 +790,7 @@ file_write_after_close_bytes() `test(exclude: wasm) {
 
 file_read_line_method() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_frl", "alpha\nbeta\ngamma")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_frl", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_frl")?!;
   if v := f.read_line()?! {
     assert(v == "alpha", "line1");
   } else {
@@ -736,7 +815,7 @@ file_read_line_method() `test(exclude: wasm) {
 
 buffered_reader_basic() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_br", "hello world")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_br", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_br")?!;
   BufferedReader r = BufferedReader(move f, buf_size: 4);
   u8[] buf = Vector[u8].filled(0u8, 5);
   int n1 = r.read(buf)?!;
@@ -752,7 +831,7 @@ buffered_reader_basic() `test(exclude: wasm) {
 
 buffered_reader_read_line() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_brl", "one\ntwo\nthree")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_brl", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_brl")?!;
   BufferedReader r = BufferedReader(move f, buf_size: 8);
   if v := r.read_line()?! {
     assert(v == "one", "line1");
@@ -778,7 +857,7 @@ buffered_reader_read_line() `test(exclude: wasm) {
 
 buffered_reader_read_line_crlf() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_brlc", "aa\r\nbb\r\n")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_brlc", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_brlc")?!;
   BufferedReader r = BufferedReader(move f, buf_size: 4);
   if v := r.read_line()?! {
     assert(v == "aa", "crlf line1");
@@ -799,7 +878,7 @@ buffered_reader_read_line_crlf() `test(exclude: wasm) {
 
 buffered_reader_read_byte() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_brb", "AB")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_brb", readonly: true)?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_brb")?!;
   BufferedReader r = BufferedReader(move f);
   if b := r.read_byte()?! {
     assert(b as! int == 65, "A");

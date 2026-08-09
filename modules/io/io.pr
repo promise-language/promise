@@ -91,28 +91,40 @@ read_stdin!() string `public `doc("Reads all of stdin into a string.") {
 type File `public `doc("A file handle. Use factory constructors to open files. Auto-closes on drop.") {
   int _fd;
 
-  open!(string path, bool readonly = false) Self `factory `public `doc("Opens an existing file. Pass readonly: true for read-only access.") {
-    int mode = 0;
-    if readonly {
-      mode = 1;
-    }
-    int fd = _io_file_open(path, mode);
+  open_read!(string path) Self `factory `public `doc("Opens an existing file for reading only (O_RDONLY).") {
+    int fd = _io_file_open(path, 1);
     if fd < 0 {
       raise _make_io_error(fd);
     }
     return File(_fd: fd);
   }
 
-  create!(string path) Self `factory `public `doc("Creates or truncates a file for reading and writing.") {
-    int fd = _io_file_open(path, 2);
+  open_write!(string path) Self `factory `public `doc("Opens an existing file for writing only (O_WRONLY). Writes overwrite in place from the start; the file is not truncated.") {
+    int fd = _io_file_open(path, 4);
     if fd < 0 {
       raise _make_io_error(fd);
     }
     return File(_fd: fd);
   }
 
-  append!(string path) Self `factory `public `doc("Opens or creates a file for appending.") {
-    int fd = _io_file_open(path, 3);
+  open!(string path) Self `factory `public `doc("Opens an existing file for reading and writing (O_RDWR).") {
+    int fd = _io_file_open(path, 0);
+    if fd < 0 {
+      raise _make_io_error(fd);
+    }
+    return File(_fd: fd);
+  }
+
+  create!(string path) Self `factory `public `doc("Creates or truncates a file for writing only (O_WRONLY|O_CREAT|O_TRUNC).") {
+    int fd = _io_file_open(path, 5);
+    if fd < 0 {
+      raise _make_io_error(fd);
+    }
+    return File(_fd: fd);
+  }
+
+  append!(string path) Self `factory `public `doc("Opens or creates a file for appending, write-only (O_WRONLY|O_CREAT|O_APPEND).") {
+    int fd = _io_file_open(path, 6);
     if fd < 0 {
       raise _make_io_error(fd);
     }
@@ -218,7 +230,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
   }
 
   read_content!(string path) string `global `public `doc("Reads entire file contents as a string.") {
-    File f = File.open(path, readonly: true);
+    File f = File.open_read(path);
     string data = f.read_all();
     f.close();
     return data;

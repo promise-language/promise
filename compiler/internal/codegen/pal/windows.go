@@ -420,7 +420,18 @@ func (p *WindowsPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoFn *ir.Func) {
 }
 
 // EmitFileOpen declares UCRT @_open and defines @pal_file_open.
-// Maps mode (0=open-rw, 1=read, 2=create, 3=append) to _O_* flags.
+// Maps mode to _O_* flags:
+//
+//	0 = _O_RDWR                     (open)
+//	1 = _O_RDONLY                   (open_read)
+//	2 = _O_RDWR|_O_CREAT|_O_TRUNC   (reserved for create_readable, T1447 — kept but unemitted)
+//	3 = _O_RDWR|_O_CREAT|_O_APPEND  (reserved for append_readable, T1447 — kept but unemitted)
+//	4 = _O_WRONLY                   (open_write)
+//	5 = _O_WRONLY|_O_CREAT|_O_TRUNC (create)
+//	6 = _O_WRONLY|_O_CREAT|_O_APPEND (append)
+//
+// Modes 2 and 3 are intentionally retained but currently unemitted from Promise —
+// reserved for create_readable/append_readable (T1447). See the POSIX comment.
 func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	// declare i32 @_open(i8*, i32, i32) nounwind
 	ucrtOpen := getOrDeclareFunc(module, "_open", irtypes.I32,
@@ -428,14 +439,17 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 		ir.NewParam("oflag", irtypes.I32),
 		ir.NewParam("pmode", irtypes.I32))
 
-	// Windows UCRT flags: _O_RDONLY=0, _O_RDWR=2, _O_CREAT=0x100,
+	// Windows UCRT flags: _O_RDONLY=0, _O_WRONLY=1, _O_RDWR=2, _O_CREAT=0x100,
 	// _O_TRUNC=0x200, _O_APPEND=0x8, _O_BINARY=0x8000
 	const (
-		oBinary       = 0x8000
-		oRDWR         = 2 | oBinary
-		oRDONLY       = 0 | oBinary
-		oCreateTrunc  = 2 | 0x100 | 0x200 | oBinary
-		oCreateAppend = 2 | 0x100 | 0x8 | oBinary
+		oBinary         = 0x8000
+		oRDWR           = 2 | oBinary
+		oRDONLY         = 0 | oBinary
+		oCreateTrunc    = 2 | 0x100 | 0x200 | oBinary
+		oCreateAppend   = 2 | 0x100 | 0x8 | oBinary
+		oWROnly         = 1 | oBinary
+		oWrCreateTrunc  = 1 | 0x100 | 0x200 | oBinary
+		oWrCreateAppend = 1 | 0x100 | 0x8 | oBinary
 	)
 
 	fn := module.NewFunc("pal_file_open", irtypes.I32,
@@ -447,10 +461,16 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	isRead := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 1))
 	isCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 2))
 	isAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 3))
+	isWrite := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 4))
+	isWrCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 5))
+	isWrAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 6))
 
 	f1 := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, oRDONLY), constant.NewInt(irtypes.I32, oRDWR))
 	f2 := entry.NewSelect(isCreate, constant.NewInt(irtypes.I32, oCreateTrunc), f1)
-	flags := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
+	f3 := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
+	f4 := entry.NewSelect(isWrite, constant.NewInt(irtypes.I32, oWROnly), f3)
+	f5 := entry.NewSelect(isWrCreate, constant.NewInt(irtypes.I32, oWrCreateTrunc), f4)
+	flags := entry.NewSelect(isWrAppend, constant.NewInt(irtypes.I32, oWrCreateAppend), f5)
 
 	// _open(path, flags, _S_IREAD|_S_IWRITE=0x180)
 	fd := entry.NewCall(ucrtOpen, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0x180))

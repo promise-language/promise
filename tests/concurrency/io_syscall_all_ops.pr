@@ -17,7 +17,7 @@ error_handling ok""", exclude: wasm) {
     io.File f = io.File.create(os.temp_dir + "/pr_sc_ops1")?!;
     f.write_string("goroutine wrote this")?!;
     f.close()?!;
-    io.File f2 = io.File.open(os.temp_dir + "/pr_sc_ops1", readonly: true)?!;
+    io.File f2 = io.File.open_read(os.temp_dir + "/pr_sc_ops1")?!;
     string data = f2.read_all()?!;
     f2.close()?!;
     io.File.remove(os.temp_dir + "/pr_sc_ops1")?!;

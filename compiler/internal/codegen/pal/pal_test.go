@@ -1632,11 +1632,19 @@ func TestFileOpenPosix(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		target string
-		// mode 2 (create) flags: O_RDWR|O_CREAT|O_TRUNC
+		// mode 2 (create_readable, reserved) flags: O_RDWR|O_CREAT|O_TRUNC
 		createFlags string
+		// mode 3 (append_readable, reserved) flags: O_RDWR|O_CREAT|O_APPEND
+		appendFlags string
+		// mode 5 (create) flags: O_WRONLY|O_CREAT|O_TRUNC
+		wrCreateFlags string
+		// mode 6 (append) flags: O_WRONLY|O_CREAT|O_APPEND
+		wrAppendFlags string
 	}{
-		{"Linux", "x86_64-unknown-linux-gnu", "i32 578"},  // 2|0x40|0x200
-		{"macOS", "arm64-apple-darwin23.0.0", "i32 1538"}, // 2|0x200|0x400
+		// Linux: O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
+		{"Linux", "x86_64-unknown-linux-gnu", "i32 578", "i32 1090", "i32 577", "i32 1089"},
+		// macOS: O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x8
+		{"macOS", "arm64-apple-darwin23.0.0", "i32 1538", "i32 522", "i32 1537", "i32 521"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			module := ir.NewModule()
@@ -1649,12 +1657,22 @@ func TestFileOpenPosix(t *testing.T) {
 			}
 			assertContains(t, out, "@open(i8*", "open declaration")
 			assertContains(t, out, "define i32 @pal_file_open(i8* %path, i32 %mode)", "pal_file_open definition")
-			// Mode-to-flags select chain
+			// Mode-to-flags select chain (modes 2 and 3 are reserved for T1447 but
+			// still emitted in the chain).
 			assertContains(t, out, "icmp eq i32 %mode, 1", "read mode check")
-			assertContains(t, out, "icmp eq i32 %mode, 2", "create mode check")
-			assertContains(t, out, "icmp eq i32 %mode, 3", "append mode check")
-			// Platform-specific create flags
-			assertContains(t, out, tc.createFlags, "platform-specific create flags")
+			assertContains(t, out, "icmp eq i32 %mode, 2", "create_readable (reserved) mode check")
+			assertContains(t, out, "icmp eq i32 %mode, 3", "append_readable (reserved) mode check")
+			assertContains(t, out, "icmp eq i32 %mode, 4", "write mode check")
+			assertContains(t, out, "icmp eq i32 %mode, 5", "create (write-only) mode check")
+			assertContains(t, out, "icmp eq i32 %mode, 6", "append (write-only) mode check")
+			// O_WRONLY (mode 4) = 1
+			assertContains(t, out, "i32 1,", "O_WRONLY flag")
+			// Platform-specific reserved RDWR create/append flags (modes 2, 3)
+			assertContains(t, out, tc.createFlags, "platform-specific RDWR create flags")
+			assertContains(t, out, tc.appendFlags, "platform-specific RDWR append flags")
+			// Platform-specific write-only create/append flags (modes 5, 6)
+			assertContains(t, out, tc.wrCreateFlags, "platform-specific WRONLY create flags")
+			assertContains(t, out, tc.wrAppendFlags, "platform-specific WRONLY append flags")
 			// Permission mode 0644 = 420
 			assertContains(t, out, "i32 420", "0644 permission mode")
 		})
@@ -1674,6 +1692,17 @@ func TestFileOpenWindows(t *testing.T) {
 	assertContains(t, out, "define i32 @pal_file_open(", "pal_file_open definition")
 	// _O_BINARY=0x8000 flag must be included (llir renders as u0x8000)
 	assertContains(t, out, "0x8000", "_O_BINARY flag in mode mapping")
+	// Mode-to-flags select chain (modes 2/3 reserved for T1447; 4/5/6 new)
+	assertContains(t, out, "icmp eq i32 %mode, 4", "write mode check")
+	assertContains(t, out, "icmp eq i32 %mode, 5", "create (write-only) mode check")
+	assertContains(t, out, "icmp eq i32 %mode, 6", "append (write-only) mode check")
+	// Write-only flag values (all carry _O_BINARY=0x8000):
+	//   mode 4 _O_WRONLY                     = 1|0x8000                  = 32769
+	//   mode 5 _O_WRONLY|_O_CREAT|_O_TRUNC   = 1|0x100|0x200|0x8000      = 33537
+	//   mode 6 _O_WRONLY|_O_CREAT|_O_APPEND  = 1|0x100|0x8|0x8000        = 33033
+	assertContains(t, out, "i32 32769", "O_WRONLY flag value")
+	assertContains(t, out, "i32 33537", "WRONLY create flag value")
+	assertContains(t, out, "i32 33033", "WRONLY append flag value")
 	// _open called with permission mode argument
 	assertContains(t, out, "call i32 @_open(", "_open called")
 }

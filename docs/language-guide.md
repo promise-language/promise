@@ -525,7 +525,7 @@ main!() {
   // One-shot (preferred for simple reads/writes):
   string content = io.File.read_content("data.txt");
   // Manual open/close for streaming:
-  io.File f = io.File.open("data.txt", readonly: true);
+  io.File f = io.File.open_read("data.txt");
   string data = f.read_all();
   f.close();
 }
@@ -758,7 +758,7 @@ use json;
 use json as j;
 
 // Named import — types AND functions go through the module prefix
-io.File f = io.File.open("data.txt", readonly: true);
+io.File f = io.File.open_read("data.txt");
 io.Dir.make("/tmp/out");                 // not Dir.make(...)
 string p = path.join("/usr", "bin");     // functions need the prefix too — join(...) alone is an error
 json.JsonValue v = json.parse_value(data);
@@ -965,7 +965,7 @@ main!() {
 // File I/O with manual open/close
 use io;
 main!() {
-  io.File f = io.File.open("/tmp/data.txt", readonly: true);
+  io.File f = io.File.open_read("/tmp/data.txt");
   string content = f.read_all();
   f.close();
   print_line(content);

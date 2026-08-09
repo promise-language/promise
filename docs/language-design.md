@@ -2596,6 +2596,16 @@ fn(1, 2);                  // VALID: positional through function-type variable
 fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 ```
 
+**Failable function types** carry the `!` producer marker (§7.1) as a **prefix on the whole function type**, before the parameter list:
+
+```promise
+!(int) -> int                      // failable producer taking an int, returning an int
+!(string) -> ()                    // failable producer taking a string, returning nothing
+!() -> User                        // failable producer taking nothing, returning a User
+```
+
+The marker sits on the producer, not on the result, because failability is a property of *calling* the function — not of the value it yields (there is no failable value type `int!`, §17.2.1). This is the notation used in diagnostics when rendering a failable function type — e.g. a non-sendable capture error reports `!(int) -> int`.
+
 ### 9.7 No Function/Method Overloading
 
 Promise does not support **function or method overloading** — defining multiple functions or methods with the same name but different parameter signatures. Each function name within a scope must be unique.

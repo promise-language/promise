@@ -18,6 +18,117 @@ map_optional_value_rmw() `test {
   assert(m[0]!!.len == 3, "expected len 3");
 }
 
+// T1432: `m[k]!!` on an optional-valued map must return an INDEPENDENT value, not
+// an alias of the bucket's stored payload. Pushing past the literal's capacity
+// reallocs the buffer; if the read aliased, the map's stored Vector would still
+// point at the freed buffer (observable as a wrong len, then a double free at
+// scope exit).
+map_optional_value_read_is_independent() `test {
+  map[int, int[]?] m = {:};
+  int[] init = [1, 2];
+  init.push(9);
+  m[0] = init;
+  int[] inner = m[0]!!;
+  inner.push(7);
+  assert(inner.len == 4, "expected read-out len 4");
+  assert(m[0]!!.len == 3, "map value must be independent of the read");
+  m[0] = inner;
+  assert(m[0]!!.len == 4, "expected write-back len 4");
+}
+
+// T1432: same independence contract for a string-valued optional map. The
+// read-derived write-back form (`m[0] = m[0]!! + "!"`) is already covered by
+// map_string_value_wrap below, so assert the complementary direction here: a
+// value read OUT of the map must survive the overwrite that drops the stored
+// string. The stored string must be HEAP-allocated (`repeat`, not a literal) —
+// dropping a .rodata literal is a no-op (T0060 bit-63 flag), so a literal would
+// hide the use-after-free an aliased read produces.
+map_optional_string_read_is_independent() `test {
+  map[int, string?] m = {:};
+  string heap = "hel".repeat(2);
+  m[0] = heap;
+  string read_out = m[0]!!;
+  m[0] = "world"; // drops the stored heap string
+  assert(read_out == "helhel", "read-out string must survive the overwrite");
+  assert(m[0]!! == "world", "expected world");
+}
+
+// T1432: the peel routes every refcounted handle shape (Ref/Weak/channel) through
+// the same dupContainerFieldAccess arm as Vector. Each read-out handle must own
+// its own reference, so dropping the map's entry afterwards leaves it usable —
+// pre-fix the read aliased the bucket's handle and its temp drop released the
+// map's reference (use-after-free on the next touch).
+map_optional_ref_value_read_is_independent() `test {
+  map[int, Ref[int]?] m = {:};
+  m[0] = Ref[int](5);
+  Ref[int] held = m[0]!!;
+  m.remove(0);
+  assert(held.borrow == 5, "held reference must outlive the map entry");
+  assert(m.len == 0, "expected empty map");
+}
+
+map_optional_channel_value_read() `test {
+  map[int, channel[int]?] m = {:};
+  m[0] = channel[int](2);
+  channel[int] c = m[0]!!;
+  c.send(7);
+  m.remove(0);
+  int got = (<-c)!;
+  assert(got == 7, "expected 7 through the read-out handle");
+}
+
+map_optional_weak_value_read() `test {
+  Ref[int] strong = Ref[int](11);
+  map[int, Weak[int]?] m = {:};
+  m[0] = strong.downgrade();
+  Weak[int] w = m[0]!!;
+  m.remove(0);
+  assert(w.upgrade()!.borrow == 11, "read-out weak must still upgrade");
+}
+
+// T1432 resource invariant: the fix ADDS a copy at every read, so a read whose
+// result is never bound must still free it. Batch-test leak enforcement is the
+// assertion — a missing cleanup on the repeated transient reads shows up as LEAK.
+map_optional_value_transient_reads_no_leak() `test {
+  map[int, int[]?] m = {:};
+  m[0] = [1, 2];
+  m[1] = [3];
+  int total = 0;
+  for k in m.keys() {
+    total = total + m[k]!!.len;
+  }
+  assert(total == 3, "expected 3");
+}
+
+// T1432: `setDupFlagsForFieldAccess` is armed from several sinks, not just the
+// getter's own `return`. Cover the two other escape shapes for a nested-optional
+// read: consuming it as a `move` argument, and returning it out of a function
+// that borrows the map.
+t1432_consume(string move s) int {
+  return s.len;
+}
+
+t1432_first(map[int, string?] m) string {
+  return m[0]!!;
+}
+
+map_optional_read_into_move_param() `test {
+  map[int, string?] m = {:};
+  m[0] = "he".repeat(2);
+  int n = t1432_consume(m[0]!!);
+  assert(n == 4, "expected 4");
+  assert(m[0]!! == "hehe", "map value must survive the move-param consume");
+}
+
+map_optional_read_returned_from_function() `test {
+  map[int, string?] m = {:};
+  m[0] = "ab".repeat(2);
+  string out = t1432_first(m);
+  m[0] = "zz";
+  assert(out == "abab", "returned value must be independent of the map");
+  assert(m[0]!! == "zz", "expected zz");
+}
+
 // Guard the correctness tightening: plain (non-optional) map assignment still
 // works.
 map_plain_value_assign() `test {

@@ -7445,6 +7445,28 @@ func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
 	if t == nil || isRefType(t) {
 		return
 	}
+	// T1432: `Map[K, V?].[]` returns `V??` — `Optional[Optional[X]]`, which matched
+	// none of the shape arms below (extractNamed/arrayElemNeedsEscapeDup/
+	// isNonValueStructuralType all miss on an Optional, and the single-Optional arm
+	// peels only to `Optional[X]`), so NO dup flag was armed and the getter's
+	// match-borrowed `return v` handed back the bucket's stored payload by alias →
+	// the read temp's cleanup and the map's own drop free the same allocation
+	// (double-free). Peel down to the LAST single Optional so a nested optional is
+	// classified by the same inner shape the one-layer form already uses. Strictly
+	// additive: a nested Optional previously matched no case at all, so this only
+	// turns "no flag" into the flag the innermost type already dictates; one-layer
+	// `T?` is untouched. (`Optional[Map]`/`Optional[Set]` inners still get no flag —
+	// Map/Set are excluded from every dup predicate by design; see T1438/T1439.)
+	for {
+		opt, ok := t.(*types.Optional)
+		if !ok {
+			break
+		}
+		if _, nested := opt.Elem().(*types.Optional); !nested {
+			break
+		}
+		t = opt.Elem()
+	}
 	if extractNamed(t) == types.TypString {
 		c.dupStringFieldAccess = true
 		return

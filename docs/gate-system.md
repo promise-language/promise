@@ -319,10 +319,10 @@ For **`go-test`**, `file` is the Go package as a repo-relative directory (the mo
 | `excluded` | a `test(exclude: <this target>)` test, compiled but not run for this target |
 | `not-run`  | the test never ran because an earlier test aborted the process |
 
-**Abort attribution.** A `memory` abort and a hard crash terminate the whole test process without the runner naming the offending test by line. The runner attributes these from the file's roster (the ordered list of test functions, known at compile time):
+**Abort attribution.** A `memory` abort and a process death mid-batch terminate the whole test process without the runner naming the offending test by line. The runner attributes these from the file's roster (the ordered list of test functions, known at compile time):
 
 - **MEMLIMIT abort** → the first roster test with no result is marked `memory`; every later roster test is `not-run`.
-- **Hard crash with no summary** → the first unseen roster test is marked `fail` (with a crash `context`); every later roster test is `not-run`.
+- **Process exits with _any_ status (including 0) without reporting a result for a roster test** → the first unseen roster test is marked `fail` (with a crash / "process exited before reporting a result" `context`); every later roster test is `not-run`. The runner also prints a synthetic `INCOMPLETE` line naming that first unreported test, lists every unreported test in its context line, and exits non-zero — so the human path (`bin/verify`, interactive runs) sees the truncation too, not just the gate (T1415).
 
 Tests that completed before the abort keep their real result.
 

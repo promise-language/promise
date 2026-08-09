@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,14 +18,25 @@ import (
 // lifts into the gate test identity as a phantom ledger. These tests lock the
 // child-side wire format and the parent's classification of it.
 
+// locatePromiseBin is the single locator for the compiler binary used by the
+// end-to-end runner tests in this package. It returns an absolute path so a
+// test that runs the binary from a temp working directory still finds it, and
+// skips when no binary is available.
 func locatePromiseBin(t *testing.T) string {
 	t.Helper()
 	if bin := os.Getenv("PROMISE_TEST_BIN"); bin != "" {
 		return bin
 	}
 	// go test cwd = compiler/cmd/promise → repo root is three levels up.
-	candidate := filepath.Join("..", "..", "..", "bin", "promise")
+	name := "promise"
+	if runtime.GOOS == "windows" {
+		name = "promise.exe"
+	}
+	candidate := filepath.Join("..", "..", "..", "bin", name)
 	if _, err := os.Stat(candidate); err == nil {
+		if abs, err := filepath.Abs(candidate); err == nil {
+			return abs
+		}
 		return candidate
 	}
 	t.Skip("set PROMISE_TEST_BIN or build via bin/build to run this end-to-end test")

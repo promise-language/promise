@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/promise-language/promise/compiler/internal/module"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
 )
@@ -69,17 +70,19 @@ func testNames(tests []*types.Func) []string {
 	return names
 }
 
-// emitRoster prints the roster marker to stdout when jsonMode is set. names is
-// the full set of test functions; testExcludes maps a test name to its
-// `test(exclude: ...) identifiers (batch); e2eExclude is the file-level
-// `target(...) exclude set for e2e snapshot tests. target is the resolved
-// triple. Called by the child before it runs anything.
-func emitRoster(kind string, names []string, testExcludes map[string][]string, e2eExclude []string, target string) {
-	if !childRoster {
-		return
-	}
+// buildRoster returns the roster for a set of test functions: every eligible
+// test in declaration order, flagged with whether it is excluded for the
+// current target. names is the full set of test functions; testExcludes maps a
+// test name to its `test(exclude: ...) identifiers (batch); e2eExclude is the
+// file-level `target(...) exclude set for e2e snapshot tests. target is the
+// resolved triple.
+//
+// The roster is the single source of truth for "which tests must report a
+// result" — it feeds both the --json roster marker and the runner's
+// completeness check (T1415).
+func buildRoster(kind string, names []string, testExcludes map[string][]string, e2eExclude []string, target string) []rosterEntry {
 	ti := sema.ParseTargetInfo(target)
-	m := rosterMarker{Kind: kind}
+	entries := make([]rosterEntry, 0, len(names))
 	for _, n := range names {
 		excluded := false
 		if kind == "e2e" {
@@ -92,13 +95,64 @@ func emitRoster(kind string, names []string, testExcludes map[string][]string, e
 				}
 			}
 		}
-		m.Tests = append(m.Tests, rosterEntry{Name: n, Excluded: excluded})
+		entries = append(entries, rosterEntry{Name: n, Excluded: excluded})
 	}
-	data, err := json.Marshal(m)
+	return entries
+}
+
+// emitRoster prints the roster marker to stdout when jsonMode is set. Called by
+// the child before it runs anything.
+func emitRoster(entries []rosterEntry, kind string) {
+	if !childRoster {
+		return
+	}
+	data, err := json.Marshal(rosterMarker{Kind: kind, Tests: entries})
 	if err != nil {
 		return // best-effort: a missing roster only loses not-run/excluded detail
 	}
 	fmt.Println(rosterMarkerPrefix + string(data))
+}
+
+// cachedBatchRoster builds (and emits) the roster for a batch test run served
+// from the build cache. A cache entry whose meta is missing or lists no tests
+// gives the runner nothing to reconcile the child's output against, which would
+// silently disable the completeness check — so it reports usable=false and the
+// caller recompiles rather than running blind (T1415).
+func cachedBatchRoster(meta *module.CacheMeta, target string) (roster []rosterEntry, usable bool) {
+	if meta == nil || len(meta.Tests) == 0 {
+		return nil, false
+	}
+	roster = buildRoster("batch", meta.Tests, meta.TestExcludes, nil, target)
+	emitRoster(roster, "batch")
+	return roster, true
+}
+
+// unreportedTests returns, in declaration order, the roster tests that produced
+// no result line. Excluded tests are compiled but deliberately not run, so they
+// are never expected to report. A non-empty result means the test process died
+// mid-batch (T1415).
+func unreportedTests(roster []rosterEntry, reported map[string]bool) []string {
+	var missing []string
+	for _, e := range roster {
+		if e.Excluded || reported[e.Name] {
+			continue
+		}
+		missing = append(missing, e.Name)
+	}
+	return missing
+}
+
+// rosterCounts returns how many roster tests are expected to report (eligible)
+// and how many are excluded for the current target (skipped).
+func rosterCounts(roster []rosterEntry) (eligible, skipped int) {
+	for _, e := range roster {
+		if e.Excluded {
+			skipped++
+		} else {
+			eligible++
+		}
+	}
+	return
 }
 
 var (
@@ -107,10 +161,13 @@ var (
 	jsonLeakRe     = regexp.MustCompile(`^LEAK \(([\d.]+)s\) (\S+)`)
 	jsonTimeoutRe  = regexp.MustCompile(`^TIMEOUT \(([\d.]+)s\) (\S+)`)
 	jsonMemlimitRe = regexp.MustCompile(`^MEMLIMIT \(`)
-	jsonSummaryRe  = regexp.MustCompile(`^\d+ passed, \d+ failed`)
-	jsonE2EPassRe  = regexp.MustCompile(`^PASS \(([\d.]+)s\)`)
-	jsonE2EFailRe  = regexp.MustCompile(`^FAIL \(([\d.]+)s\)`)
-	jsonE2ETimeRe  = regexp.MustCompile(`^TIMEOUT \(([\d.]+)s\)`)
+	// T1415: synthetic INCOMPLETE line — the child exited (with any status)
+	// without reporting a result for every roster test.
+	jsonIncompleteRe = regexp.MustCompile(`^INCOMPLETE \(`)
+	jsonSummaryRe    = regexp.MustCompile(`^\d+ passed, \d+ failed`)
+	jsonE2EPassRe    = regexp.MustCompile(`^PASS \(([\d.]+)s\)`)
+	jsonE2EFailRe    = regexp.MustCompile(`^FAIL \(([\d.]+)s\)`)
+	jsonE2ETimeRe    = regexp.MustCompile(`^TIMEOUT \(([\d.]+)s\)`)
 )
 
 // seenResult is a per-test outcome recovered from the child's output.
@@ -128,10 +185,13 @@ type seenResult struct {
 //   - MEMLIMIT aborts the whole process without naming the offending test, so
 //     the first roster test with no result is marked "memory" and the rest
 //     "not-run".
+//   - A process death mid-batch (any exit status) makes the runner emit an
+//     INCOMPLETE line naming the first unreported test; that test is marked
+//     "fail" and the rest "not-run".
 //   - A hard crash with no summary line marks the first unseen test "fail"
 //     (with the crash context) and the rest "not-run".
 func buildTestRecords(relFile, output string, crashed bool) []testRecord {
-	marker, seen, memlimit, sawSummary := parseChildOutput(output)
+	marker, seen, memlimit, incomplete, sawSummary := parseChildOutput(output)
 	if marker == nil {
 		// Files with no eligible tests (or excluded from compilation entirely)
 		// produce no records at all.
@@ -180,6 +240,10 @@ func buildTestRecords(relFile, output string, crashed bool) []testRecord {
 		switch {
 		case memlimit:
 			promote, ctx = "memory", "memory limit exceeded (test process aborted)"
+		case incomplete:
+			// T1415: the runner already synthesized a summary line, so the
+			// crash branch below no longer fires — attribute here instead.
+			promote, ctx = "fail", "process exited before reporting a result"
 		case crashed && !sawSummary:
 			promote, ctx = "fail", "process crashed before completing"
 		}
@@ -239,7 +303,7 @@ func buildE2ERecord(relFile string, marker *rosterMarker, output string, crashed
 
 // parseChildOutput extracts the roster marker, per-test results, and abort
 // signals from a child's captured output.
-func parseChildOutput(output string) (marker *rosterMarker, seen map[string]seenResult, memlimit, sawSummary bool) {
+func parseChildOutput(output string) (marker *rosterMarker, seen map[string]seenResult, memlimit, incomplete, sawSummary bool) {
 	seen = map[string]seenResult{}
 	lines := strings.Split(output, "\n")
 	for i := 0; i < len(lines); i++ {
@@ -257,6 +321,10 @@ func parseChildOutput(output string) (marker *rosterMarker, seen map[string]seen
 		}
 		if jsonMemlimitRe.MatchString(line) {
 			memlimit = true
+			continue
+		}
+		if jsonIncompleteRe.MatchString(line) {
+			incomplete = true
 			continue
 		}
 		if m := jsonPassRe.FindStringSubmatch(line); m != nil && !strings.Contains(m[2], ".pr") {

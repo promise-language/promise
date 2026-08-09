@@ -581,11 +581,16 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 							break
 						}
 					}
-				} else if err != nil {
-					// Binary crashed — find the first unseen test (the one running
-					// when the crash happened). Only count that test as failed.
-					crashReason := extractCrashReason(stdout, stderr, err)
-					crashCtx := buildCrashContext(stderr, err)
+				} else {
+					// The process died mid-batch if any test never reported —
+					// including when it exited 0 (T1415). Attribute it to the
+					// first unseen test (the one that was running).
+					crashReason := "process exited before reporting a result"
+					var crashCtx string
+					if err != nil {
+						crashReason = extractCrashReason(stdout, stderr, err)
+						crashCtx = buildCrashContext(stderr, err)
+					}
 					for _, name := range fs.testOrder {
 						if !seen[name] {
 							st := fs.stats[name]

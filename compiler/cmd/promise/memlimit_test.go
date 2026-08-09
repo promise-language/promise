@@ -80,18 +80,7 @@ func TestParseMemoryLimitArg_RejectsBareNumbers(t *testing.T) {
 // produced by `bin/build` (PROMISE_TEST_BIN env override) and skips if not set
 // — keeps the unit-test path fast while still allowing CI to opt in.
 func TestMemoryLimitHarnessReportsMemlimit(t *testing.T) {
-	promiseBin := os.Getenv("PROMISE_TEST_BIN")
-	if promiseBin == "" {
-		// Fall back to repo's bin/promise relative to PWD.
-		// go test runs with cwd = the test's package dir, which is
-		// compiler/cmd/promise — so the binary is at ../../../bin/promise.
-		candidate := filepath.Join("..", "..", "..", "bin", "promise")
-		if _, err := os.Stat(candidate); err == nil {
-			promiseBin = candidate
-		} else {
-			t.Skip("set PROMISE_TEST_BIN or build via bin/build to run this end-to-end test")
-		}
-	}
+	promiseBin := locatePromiseBin(t)
 
 	tmp, err := os.CreateTemp("", "memlimit_runaway_*.pr")
 	if err != nil {
@@ -122,6 +111,11 @@ func TestMemoryLimitHarnessReportsMemlimit(t *testing.T) {
 	}
 	if !strings.Contains(combined, "memory limit") {
 		t.Errorf("expected output to mention 'memory limit'.\nOutput:\n%s", combined)
+	}
+	// T1415: a memlimit abort also leaves tests unreported, but MEMLIMIT keeps
+	// precedence — reporting INCOMPLETE here would lose the specific diagnostic.
+	if strings.Contains(combined, "INCOMPLETE") {
+		t.Errorf("MEMLIMIT must take precedence over INCOMPLETE.\nOutput:\n%s", combined)
 	}
 }
 
@@ -245,15 +239,7 @@ func TestBuildChildTestArgs_DefaultCompileTimeoutOmitted(t *testing.T) {
 // children, the runaway trips MEMLIMIT. Pre-fix this passed (children ran at
 // the 2 GiB default), so the test guards the forwarding specifically.
 func TestMemoryLimitForwardedToMultiFileRun(t *testing.T) {
-	promiseBin := os.Getenv("PROMISE_TEST_BIN")
-	if promiseBin == "" {
-		candidate := filepath.Join("..", "..", "..", "bin", "promise")
-		if _, err := os.Stat(candidate); err == nil {
-			promiseBin = candidate
-		} else {
-			t.Skip("set PROMISE_TEST_BIN or build via bin/build to run this end-to-end test")
-		}
-	}
+	promiseBin := locatePromiseBin(t)
 
 	dir, err := os.MkdirTemp("", "memlimit_multifile_")
 	if err != nil {

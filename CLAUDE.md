@@ -121,7 +121,9 @@ TIMEOUT (0.100s) test_stuck                    # per-test timeout exceeded (T002
   timeout: exceeded 60s limit                  # timeout context
 MEMLIMIT (-) <aborted>                         # memory limit exceeded (T0689)
   memory limit: exceeded (test process aborted; subsequent tests not run)
-pass (0.001s) test_other                       # subsequent tests still run after panic/timeout (but NOT after MEMLIMIT)
+INCOMPLETE (-) test_killer                     # process died mid-batch (T1415)
+  incomplete: process exited (status 0) without reporting a result - 2 of 9 tests did not run: test_killer, test_next
+pass (0.001s) test_other                       # subsequent tests still run after panic/timeout (but NOT after MEMLIMIT/INCOMPLETE)
 
 2 passed, 1 failed, 1 leaked, 1 timed out (0.423s)
 FAILED:
@@ -129,7 +131,7 @@ FAILED:
   test_broken
   test_stuck
 ```
-Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT`/`MEMLIMIT` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed. **MEMLIMIT** aborts the whole test process (the PAL emits `fatal: memory limit exceeded` and calls `exit(134)`), so any tests that hadn't started yet in the same batch do not run; this is the intentional safety trade-off versus letting a runaway test exhaust machine RAM.
+Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT`/`MEMLIMIT`/`INCOMPLETE` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed. **MEMLIMIT** aborts the whole test process (the PAL emits `fatal: memory limit exceeded` and calls `exit(134)`), so any tests that hadn't started yet in the same batch do not run; this is the intentional safety trade-off versus letting a runaway test exhaust machine RAM. **INCOMPLETE** is synthesized by the harness when the test process exits — with *any* status, including 0 — before every registered test reported a result: tests run in declaration order, so the first unreported test is the one that killed the process and names the line, while the context line lists every test that never ran. An incomplete run always exits non-zero, so a truncated batch can never be mistaken for a pass.
 
 Multi-file output (compact — one line per file):
 ```

@@ -1229,7 +1229,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			fmt.Println("no tests found")
 			return
 		}
-		emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+		roster := buildRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+		emitRoster(roster, "batch")
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
 		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
@@ -1239,7 +1240,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			totalNs += ns
 		}
 		processTimeout := time.Duration(totalNs) + 30*time.Second
-		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions)
+		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions, roster)
 		return
 	}
 
@@ -1264,16 +1265,17 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
 			}
 			if meta != nil && meta.E2E {
-				emitRoster("e2e", []string{"main"}, nil, meta.ExcludeTargets, target)
+				emitRoster(buildRoster("e2e", []string{"main"}, nil, meta.ExcludeTargets, target), "e2e")
 				executeE2EBinary(cachedBin, meta.ExpectedOutput, meta.ExcludeTargets,
 					filename, timeout, start, targetTriple)
-			} else {
-				if meta != nil {
-					emitRoster("batch", meta.Tests, meta.TestExcludes, nil, target)
-				}
-				runTestBinary(cachedBin, timeout, start, targetTriple)
+				return
 			}
-			return
+			// T1415: an unusable meta yields no roster, which would silently
+			// disable the completeness check — recompile instead of running blind.
+			if roster, ok := cachedBatchRoster(meta, target); ok {
+				runTestBinary(cachedBin, timeout, start, targetTriple, roster)
+				return
+			}
 		}
 	}
 
@@ -1299,7 +1301,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 	file, info := compileFrontendForTarget(filename, targetTriple)
 
 	if info.HasExpectOutput {
-		emitRoster("e2e", []string{"main"}, nil, info.ExcludeTargets, target)
+		emitRoster(buildRoster("e2e", []string{"main"}, nil, info.ExcludeTargets, target), "e2e")
 		e2eTimeout := computeE2ETimeout(info, cfg)
 		runE2ETest(file, info, filename, e2eTimeout, start, targetTriple, cacheDir, cacheKey, compileStart)
 		return
@@ -1310,7 +1312,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		return
 	}
 
-	emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+	roster := buildRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+	emitRoster(roster, "batch")
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
@@ -1350,7 +1353,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		})
 	}
 
-	runTestBinary(binaryPath, processTimeout, start, targetTriple)
+	runTestBinary(binaryPath, processTimeout, start, targetTriple, roster)
 }
 
 // runModuleTestFile compiles and runs a module's test suite. All module source
@@ -1369,7 +1372,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			fmt.Println("no tests found")
 			return
 		}
-		emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+		roster := buildRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+		emitRoster(roster, "batch")
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
 		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
@@ -1379,7 +1383,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			totalNs += ns
 		}
 		processTimeout := time.Duration(totalNs) + 30*time.Second
-		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions)
+		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions, roster)
 		return
 	}
 
@@ -1424,11 +1428,12 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			} else if meta != nil && len(meta.Tests) > 1 {
 				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
 			}
-			if meta != nil {
-				emitRoster("batch", meta.Tests, meta.TestExcludes, nil, target)
+			// T1415: an unusable meta yields no roster, which would silently
+			// disable the completeness check — recompile instead of running blind.
+			if roster, ok := cachedBatchRoster(meta, target); ok {
+				runTestBinary(cachedBin, timeout, start, targetTriple, roster)
+				return
 			}
-			runTestBinary(cachedBin, timeout, start, targetTriple)
-			return
 		}
 	}
 
@@ -1460,7 +1465,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		return
 	}
 
-	emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+	roster := buildRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+	emitRoster(roster, "batch")
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
@@ -1495,7 +1501,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		})
 	}
 
-	runTestBinary(binaryPath, processTimeout, start, targetTriple)
+	runTestBinary(binaryPath, processTimeout, start, targetTriple, roster)
 }
 
 // compileTestBinary runs codegen + link for a test file and returns the binary path.
@@ -1527,8 +1533,161 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	return tmpOutput.Name()
 }
 
+// childSummaryPattern matches the summary line a test binary prints when it
+// runs to completion. The runner rewrites that line with the real wall-clock
+// elapsed time.
+const childSummaryPattern = `^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`
+
+var childSummaryRe = regexp.MustCompile(childSummaryPattern)
+
+// parentSummaryRe matches the summary line a single-file `promise test` child
+// prints. It extends childSummaryPattern with the runner-synthesized memlimit
+// (T0689) and incomplete (T1415) buckets, which only the parent aggregates.
+var parentSummaryRe = regexp.MustCompile(childSummaryPattern + `(?:, (\d+) memlimit)?(?:, (\d+) incomplete)?`)
+
+// childOutcomeCounts tallies the per-test result lines a test binary printed.
+type childOutcomeCounts struct {
+	passed   int
+	failed   int
+	leaked   int
+	timedOut int
+}
+
+// printChildTestOutput prints a test binary's output with the summary line
+// rewritten to the real elapsed time, and reports which tests produced a result
+// line plus the per-outcome counts. dropMemlimitFatal suppresses the raw PAL
+// `fatal: memory limit exceeded` line so the caller can emit a synthetic
+// MEMLIMIT block instead (T0689).
+func printChildTestOutput(output string, elapsed time.Duration, targetSuffix string, dropMemlimitFatal bool) (c childOutcomeCounts, reported map[string]bool, sawSummary bool) {
+	reported = map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		if dropMemlimitFatal && strings.HasPrefix(line, "fatal: memory limit exceeded") {
+			continue
+		}
+		if m := jsonPassRe.FindStringSubmatch(line); m != nil {
+			c.passed++
+			reported[m[2]] = true
+		} else if m := jsonFailRe.FindStringSubmatch(line); m != nil {
+			c.failed++
+			reported[m[2]] = true
+		} else if m := jsonLeakRe.FindStringSubmatch(line); m != nil {
+			c.leaked++
+			reported[m[2]] = true
+		} else if m := jsonTimeoutRe.FindStringSubmatch(line); m != nil {
+			c.timedOut++
+			reported[m[2]] = true
+		}
+		if m := childSummaryRe.FindStringSubmatch(line); m != nil {
+			sawSummary = true
+			fmt.Println() // empty line before summary
+			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
+			for _, part := range []struct {
+				value string
+				label string
+			}{
+				{m[3], "skipped"},
+				{m[4], "leaked"},
+				{m[5], "timed out"},
+				{m[6], "allowed leaks"},
+				{m[7], "stale allow_leaks"},
+			} {
+				if part.value != "" {
+					summary += fmt.Sprintf(", %s %s", part.value, part.label)
+				}
+			}
+			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
+			continue
+		}
+		if targetSuffix != "" && isTestOutcomeLine(line) {
+			fmt.Printf("%s%s\n", line, targetSuffix)
+		} else {
+			fmt.Println(line)
+		}
+	}
+	return
+}
+
+// isTestOutcomeLine reports whether a child line is a per-test result line (the
+// only lines the runner annotates with a target suffix).
+func isTestOutcomeLine(line string) bool {
+	for _, p := range []string{"pass ", "FAIL ", "LEAK ", "TIMEOUT ", "MEMLIMIT ", "INCOMPLETE "} {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// reportIncompleteRun prints the synthetic INCOMPLETE outcome for a test
+// process that exited without reporting a result for every roster test, then
+// exits non-zero. Tests run in declaration order, so the first unreported test
+// is the one that killed the process — it names the INCOMPLETE line, and every
+// unreported test is listed in the context line (T1415).
+func reportIncompleteRun(missing []string, roster []rosterEntry, c childOutcomeCounts,
+	elapsed time.Duration, targetSuffix string, runErr error) {
+	eligible, skipped := rosterCounts(roster)
+	fmt.Printf("INCOMPLETE (-) %s%s\n", missing[0], targetSuffix)
+	fmt.Printf("  incomplete: process exited (%s) without reporting a result - %d of %d tests did not run: %s\n",
+		exitStatusDescription(runErr), len(missing), eligible, joinCapped(missing, 8))
+	fmt.Println()
+	summary := fmt.Sprintf("%d passed, %d failed", c.passed, c.failed)
+	if skipped > 0 {
+		summary += fmt.Sprintf(", %d skipped", skipped)
+	}
+	if c.leaked > 0 {
+		summary += fmt.Sprintf(", %d leaked", c.leaked)
+	}
+	if c.timedOut > 0 {
+		summary += fmt.Sprintf(", %d timed out", c.timedOut)
+	}
+	summary += fmt.Sprintf(", %d incomplete", len(missing))
+	fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
+	os.Exit(incompleteExitCode(runErr))
+}
+
+// exitStatusDescription renders a child process's exit status for the
+// INCOMPLETE context line.
+func exitStatusDescription(runErr error) string {
+	if runErr == nil {
+		return "status 0"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		if code := exitErr.ExitCode(); code >= 0 {
+			return fmt.Sprintf("status %d", code)
+		}
+		return exitErr.String() // killed by a signal, e.g. "signal: segmentation fault"
+	}
+	return runErr.Error()
+}
+
+// incompleteExitCode preserves a non-zero child exit code, and turns a
+// deceptive exit 0 (or a signal death, which has no usable code) into 1.
+func incompleteExitCode(runErr error) int {
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		if code := exitErr.ExitCode(); code > 0 {
+			return sanitizeExitCode(code)
+		}
+	}
+	return 1
+}
+
+// joinCapped joins names with ", ", truncating after max entries.
+func joinCapped(names []string, max int) string {
+	if len(names) <= max {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s, ... and %d more", strings.Join(names[:max], ", "), len(names)-max)
+}
+
 // runTestBinary executes a compiled test binary and prints formatted results.
-func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, targetTriple string) {
+// roster (nil when unknown) is the set of tests the binary must report a result
+// for; any that don't are reported as INCOMPLETE (T1415).
+func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, targetTriple string, roster []rosterEntry) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -1566,50 +1725,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
-	sawSummary := false
-	passedCount := 0
-	failedCount := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if line == "" {
-			continue
-		}
-		// T0689: filter out raw PAL fatal lines — we'll emit a synthetic
-		// MEMLIMIT report block at the end.
-		if memlimitTripped && strings.HasPrefix(line, "fatal: memory limit exceeded") {
-			continue
-		}
-		if strings.HasPrefix(line, "pass ") {
-			passedCount++
-		} else if strings.HasPrefix(line, "FAIL ") {
-			failedCount++
-		}
-		if m := summaryRe.FindStringSubmatch(line); m != nil {
-			sawSummary = true
-			fmt.Println() // empty line before summary
-			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
-			if m[3] != "" {
-				summary += fmt.Sprintf(", %s skipped", m[3])
-			}
-			if len(m) > 4 && m[4] != "" {
-				summary += fmt.Sprintf(", %s leaked", m[4])
-			}
-			if len(m) > 5 && m[5] != "" {
-				summary += fmt.Sprintf(", %s timed out", m[5])
-			}
-			if len(m) > 6 && m[6] != "" {
-				summary += fmt.Sprintf(", %s allowed leaks", m[6])
-			}
-			if len(m) > 7 && m[7] != "" {
-				summary += fmt.Sprintf(", %s stale allow_leaks", m[7])
-			}
-			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
-		} else if targetSuffix != "" && (strings.HasPrefix(line, "pass ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "LEAK ") || strings.HasPrefix(line, "TIMEOUT ") || strings.HasPrefix(line, "MEMLIMIT ")) {
-			fmt.Printf("%s%s\n", line, targetSuffix)
-		} else {
-			fmt.Println(line)
-		}
-	}
+	counts, reported, sawSummary := printChildTestOutput(string(output), elapsed, targetSuffix, memlimitTripped)
 
 	if memlimitTripped {
 		// Synthesize a MEMLIMIT line + summary if the child aborted before
@@ -1619,9 +1735,15 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 		if !sawSummary {
 			fmt.Println()
 			fmt.Printf("%d passed, %d failed, 1 memlimit (%.3fs)%s\n",
-				passedCount, failedCount, elapsed.Seconds(), targetSuffix)
+				counts.passed, counts.failed, elapsed.Seconds(), targetSuffix)
 		}
 		os.Exit(1)
+	}
+
+	// T1415: the process died mid-batch — some registered tests never reported.
+	// Never report success for a truncated run.
+	if missing := unreportedTests(roster, reported); len(missing) > 0 {
+		reportIncompleteRun(missing, roster, counts, elapsed, targetSuffix, runErr)
 	}
 
 	if runErr != nil {
@@ -1661,7 +1783,7 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 
 // runTestBinaryWithCoverage executes an instrumented test binary, prints test
 // results, extracts coverage counter data, and formats a coverage report.
-func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start time.Time, targetTriple string, regions []codegen.CoverageRegion) {
+func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start time.Time, targetTriple string, regions []codegen.CoverageRegion, roster []rosterEntry) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -1693,33 +1815,19 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	testOutput, counters := extractCoverageData(fullOutput)
 
 	// Print test output (same formatting as runTestBinary)
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
-	for _, line := range strings.Split(strings.TrimSpace(testOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		if m := summaryRe.FindStringSubmatch(line); m != nil {
-			fmt.Println()
-			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
-			if m[3] != "" {
-				summary += fmt.Sprintf(", %s skipped", m[3])
-			}
-			if len(m) > 4 && m[4] != "" {
-				summary += fmt.Sprintf(", %s leaked", m[4])
-			}
-			if len(m) > 5 && m[5] != "" {
-				summary += fmt.Sprintf(", %s timed out", m[5])
-			}
-			if len(m) > 6 && m[6] != "" {
-				summary += fmt.Sprintf(", %s allowed leaks", m[6])
-			}
-			if len(m) > 7 && m[7] != "" {
-				summary += fmt.Sprintf(", %s stale allow_leaks", m[7])
-			}
-			fmt.Printf("%s (%.3fs)\n", summary, elapsed.Seconds())
-		} else {
-			fmt.Println(line)
-		}
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	}
+	counts, reported, _ := printChildTestOutput(testOutput, elapsed, targetSuffix, false)
+
+	// T1415: the process died mid-batch — some registered tests never reported.
+	// Checked before the coverage report so the INCOMPLETE line and its summary
+	// stay in the result section: the multi-file parent drops every line after
+	// the "=== Coverage ===" marker, so anything printed later is invisible to
+	// it. Coverage from a truncated run is meaningless anyway.
+	if missing := unreportedTests(roster, reported); len(missing) > 0 {
+		reportIncompleteRun(missing, roster, counts, elapsed, targetSuffix, runErr)
 	}
 
 	// Print coverage report
@@ -2240,13 +2348,14 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	// Print results in file order, streaming as each slot completes.
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?(?:, (\d+) memlimit)?`)
+	summaryRe := parentSummaryRe
 	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
 	leakLineRe := regexp.MustCompile(`^LEAK \([\d.]+s\)(?: (.+))?$`)
 	timeoutLineRe := regexp.MustCompile(`^TIMEOUT \([\d.]+s\)(?: (.+))?$`)
-	memlimitLineRe := regexp.MustCompile(`^MEMLIMIT \([^)]+\)(?: (.+))?$`) // T0689
+	memlimitLineRe := regexp.MustCompile(`^MEMLIMIT \([^)]+\)(?: (.+))?$`)     // T0689
+	incompleteLineRe := regexp.MustCompile(`^INCOMPLETE \([^)]+\)(?: (.+))?$`) // T1415
 	passLineRe := regexp.MustCompile(`^pass \([\d.]+s\)`)
-	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:|timeout:|memory limit:)`)
+	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:|timeout:|memory limit:|incomplete:)`)
 
 	type failureInfo struct {
 		name    string
@@ -2259,6 +2368,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalLeaked := 0
 	totalTimedOut := 0
 	totalMemlimited := 0 // T0689
+	totalIncomplete := 0 // T1415
 	totalIgnored := 0
 	totalStale := 0
 	totalFiles := 0
@@ -2338,6 +2448,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		fileLeaked := 0
 		fileTimedOut := 0
 		fileMemlimited := 0 // T0689
+		fileIncomplete := 0 // T1415
 		var summaryMatch []string
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
@@ -2400,6 +2511,22 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if detail != "" {
 					failDetails = append(failDetails, detail)
 				}
+			} else if m := incompleteLineRe.FindStringSubmatch(line); m != nil {
+				// T1415: INCOMPLETE outcome (synthetic) — the test process died
+				// mid-batch, so some registered tests never reported.
+				fileIncomplete++
+				detail := m[1]
+				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
+					i++
+					if detail == "" {
+						detail = strings.TrimSpace(lines[i])
+					} else {
+						detail += "\n" + lines[i]
+					}
+				}
+				if detail != "" {
+					failDetails = append(failDetails, detail)
+				}
 			} else if sm := summaryRe.FindStringSubmatch(line); sm != nil {
 				summaryMatch = sm
 			}
@@ -2427,7 +2554,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			// (meaning the test harness completed), treat as a pass — the crash is
 			// in the shutdown path, not in user code. B0230.
 			// Without a summary line, the subprocess crashed mid-test (B0300).
-			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 && fileMemlimited == 0 && summaryMatch != nil {
+			// T1415: an INCOMPLETE run does print a parseable summary, so it
+			// must be excluded here or a truncated run would report as pass.
+			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 && fileMemlimited == 0 && fileIncomplete == 0 && summaryMatch != nil {
 				relPath, relErr := filepath.Rel(baseDir, r.file)
 				if relErr != nil {
 					relPath = r.file
@@ -2498,6 +2627,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 					totalMemlimited += atoi(m[8])
 					fileMemlimited = atoi(m[8])
 				}
+				if len(m) > 9 && m[9] != "" {
+					// T1415: the summary carries the full count of tests that
+					// never reported; the INCOMPLETE line names only the first.
+					totalIncomplete += atoi(m[9])
+					fileIncomplete = atoi(m[9])
+				}
 			} else if fileFailed > 0 || filePassed > 0 {
 				totalPassed += filePassed
 				totalFailed += fileFailed
@@ -2516,16 +2651,19 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				continue
 			}
 
-			totalTests := filePassed + fileFailed + fileLeaked + fileTimedOut + fileMemlimited
-			if fileFailed == 0 && fileLeaked > 0 && fileTimedOut == 0 && fileMemlimited == 0 {
+			totalTests := filePassed + fileFailed + fileLeaked + fileTimedOut + fileMemlimited + fileIncomplete
+			if fileFailed == 0 && fileLeaked > 0 && fileTimedOut == 0 && fileMemlimited == 0 && fileIncomplete == 0 {
 				fmt.Printf("FAIL (%.3fs) %s (%d leaked)%s\n", r.elapsed.Seconds(), relPath, fileLeaked, targetSuffix)
-			} else if fileFailed == 0 && fileTimedOut > 0 && fileLeaked == 0 && fileMemlimited == 0 {
+			} else if fileFailed == 0 && fileTimedOut > 0 && fileLeaked == 0 && fileMemlimited == 0 && fileIncomplete == 0 {
 				fmt.Printf("FAIL (%.3fs) %s (%d timed out)%s\n", r.elapsed.Seconds(), relPath, fileTimedOut, targetSuffix)
-			} else if fileFailed == 0 && fileMemlimited > 0 && fileLeaked == 0 && fileTimedOut == 0 {
+			} else if fileFailed == 0 && fileMemlimited > 0 && fileLeaked == 0 && fileTimedOut == 0 && fileIncomplete == 0 {
 				// T0689: pure memlimit abort — process didn't run all tests.
 				fmt.Printf("FAIL (%.3fs) %s (memory limit exceeded)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+			} else if fileFailed == 0 && fileIncomplete > 0 && fileLeaked == 0 && fileTimedOut == 0 && fileMemlimited == 0 {
+				// T1415: the process died mid-batch — some tests never reported.
+				fmt.Printf("FAIL (%.3fs) %s (%d incomplete)%s\n", r.elapsed.Seconds(), relPath, fileIncomplete, targetSuffix)
 			} else if totalTests > 0 {
-				failCount := fileFailed + fileLeaked + fileTimedOut + fileMemlimited
+				failCount := fileFailed + fileLeaked + fileTimedOut + fileMemlimited + fileIncomplete
 				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, failCount, totalTests, targetSuffix)
 			} else {
 				fmt.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
@@ -2585,6 +2723,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if len(m) > 8 && m[8] != "" {
 				totalMemlimited += atoi(m[8])
 			}
+			if len(m) > 9 && m[9] != "" {
+				totalIncomplete += atoi(m[9]) // T1415
+			}
 		}
 
 		// Parse stale allow_leaks tests from output
@@ -2631,6 +2772,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 	if totalMemlimited > 0 {
 		summary += fmt.Sprintf(", %d memlimit", totalMemlimited)
+	}
+	if totalIncomplete > 0 {
+		summary += fmt.Sprintf(", %d incomplete", totalIncomplete)
 	}
 	if totalIgnored > 0 {
 		summary += fmt.Sprintf(", %d allowed leaks", totalIgnored)
@@ -2689,7 +2833,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	// The B0230 workaround (line ~1466) treats crash-during-shutdown as PASS
 	// when filePassed > 0 && fileFailed == 0, but this also swallows leak-only
 	// exits. Rather than changing that logic, enforce leaks at the final gate.
-	if totalFailed > 0 || totalLeaked > 0 || totalTimedOut > 0 || totalMemlimited > 0 || failedFiles > 0 {
+	if totalFailed > 0 || totalLeaked > 0 || totalTimedOut > 0 || totalMemlimited > 0 || totalIncomplete > 0 || failedFiles > 0 {
 		os.Exit(1)
 	}
 }

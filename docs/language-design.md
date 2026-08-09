@@ -3800,6 +3800,24 @@ t := go! { return score(board.clone()); };  // score() cannot fail
 //   ^ error: this goroutine's body cannot fail; spawn it with plain `go`
 ```
 
+An operation **escapes** the body — and so makes it failable — when its error is delivered to the task's receiver rather than handled in place. Exhaustively:
+
+- a bare failable call (auto-propagates) or an explicit `?^`;
+- a `raise`;
+- a typed error handler with no `else { }` and no `!` suffix (a non-matching error propagates out of it);
+- **any** failable operator — binary, prefix-unary, `++`/`--`, or the one applied by a compound assignment;
+- **any** failable setter — named property, `[]`/`[:]` index, or module-level — invoked by an assignment, a compound assignment, or `++`/`--`;
+- **any** failable getter of those same kinds, wherever the target's current value is read back: a compound assignment or `++`/`--`;
+- a `for`-in over a **failable generator** (its mid-stream error propagates even when an error operator on the iterable already handled the factory call);
+- a `use` binding whose `close()` is failable (it raises on scope exit).
+
+An error that is handled inside the body does *not* escape: `?!` panics in the goroutine, and `? { }` / `? e is T { } else { }` recovers.
+
+Neither does merely *defining* something that can fail. Failability is a property of **calling** a fallible producer, never of a value (§7.1) — so only a call site can escape:
+
+- A nested `go! { … }` runs **asynchronously**: its errors are delivered to *its own* receiver. Spawning it is never an escape, and an error raised inside it does not by itself make the enclosing body failable. The enclosing body becomes failable only where it **consumes** that task with `<-`, and it is that receive — an ordinary failable call, per the first bullet — that escapes.
+- A lambda body is governed by its own signature, so a failable call inside it must be handled there (§7.2). Binding a lambda, or binding a reference to a failable function, is likewise not an escape; only **calling** it is.
+
 #### Receiving
 
 Receiving with `<-` is where a failable task's error surfaces. **A `<-` on a `failable_task[T]` is itself a failable operation** that yields `T` — semantically identical to calling a failable function — so it obeys the ordinary error rules of §7.2:

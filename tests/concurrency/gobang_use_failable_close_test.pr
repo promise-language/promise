@@ -4,10 +4,12 @@
 // failable function propagating a use-binding close error via its return
 // (see tests/e2e/use_failable_close_test.pr).
 //
-// Each body carries an unrelated escape site (`produce(...)?^`) so the body is a
-// failable scope even without the use-close escape — a workaround for T1386
-// (body-can-fail detection misses use-close). The trailing expression is a plain
-// binary expr (not a trailing if/match — see T1389).
+// A failable `close()` is itself an escape site, so a use binding alone makes the
+// body a failable scope (T1386) — see gobang_use_close_error_surfaces. The other
+// bodies additionally call `produce(...)?^` to obtain a value to combine with,
+// which also covers the close error interacting with an unrelated escape site.
+// The trailing expression is a plain binary expr (not a trailing if/match — see
+// T1389).
 // A resource whose failable close() always fails.
 type CloseError is error {
   int code;
@@ -75,11 +77,12 @@ make_vec!(int x) int[] {
 }
 
 // --- The repro: use-close error surfaces at `<-t` ---
+// The failable close() is the body's ONLY escape site — it is what makes the body
+// a failable scope (T1386), so this reaches the close-error sink naturally.
 gobang_use_close_error_surfaces() `test {
   t := go! {
-    base := produce(1)?^; // succeeds; makes the body a failable scope
     use r := FailResource(id: 1); // close() raises on scope exit
-    base + r.id
+    r.id
   };
   got := false;
   v := (<-t)? e {
@@ -89,6 +92,77 @@ gobang_use_close_error_surfaces() `test {
   };
   assert(got, "use-close error should surface at <-t");
   assert(v == -1, "handler recovery value returned");
+}
+
+// The use binding sits in a NESTED block, so it closes mid-body rather than at
+// the body's exit — and it is still the body's only escape site (T1386).
+gobang_use_close_nested_block_error_surfaces() `test {
+  t := go! {
+    int q = 0;
+    {
+      use r := FailResource(id: 3); // close() raises at the inner block's exit
+      q = r.id;
+    }
+    q + 1 // never reached — the close error preempts it
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "surfaced error is the nested-block close error");
+    -1
+  };
+  assert(got, "nested-block use-close error should surface at <-t");
+  assert(v == -1, "handler recovery value returned");
+}
+
+// Same nested-block shape with a close that succeeds: the body runs to its
+// trailing value.
+gobang_use_close_nested_block_ok() `test {
+  t := go! {
+    int q = 0;
+    {
+      use r := OkResource(id: 3);
+      q = r.id;
+    }
+    q + 1
+  };
+  assert((<-t)?! == 4, "nested-block ok close returns the trailing value");
+}
+
+// A GENERIC resource: the close() lookup resolves through the instance, and the
+// monomorphized close error must reach the same sink (T1386).
+type GenericFailResource[T] {
+  T id;
+
+  close!(~this) void {
+    raise CloseError(message: "generic close failed", code: 43);
+  }
+}
+
+gobang_use_close_generic_error_surfaces() `test {
+  t := go! {
+    use r := GenericFailResource[int](id: 7); // close() raises on scope exit
+    r.id
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "generic close failed", "surfaced error is the generic close error");
+    -1
+  };
+  assert(got, "generic use-close error should surface at <-t");
+  assert(v == -1, "handler recovery value returned");
+}
+
+gobang_use_close_generic_dropped_error_leak_free() `test {
+  {
+    t := go! {
+      use r := GenericFailResource[int](id: 7);
+      r.id
+    };
+    // never received — the buffered generic close error must be discharged on drop.
+  }
+  assert(true, "dropped generic use-close error path did not leak");
 }
 
 // --- Successful close returns the trailing value ---
@@ -255,7 +329,7 @@ gobang_use_close_multiple_first_wins() `test {
 // is stored), routing the error into the void {ok,err} aggregate.
 gobang_use_close_void_body() `test {
   t := go! {
-    do_effect(1)?^; // escape site (succeeds); makes the body a failable scope
+    do_effect(1)?^; // an unrelated escape site alongside the close (succeeds)
     use r := FailResource(id: 1); // close() raises on scope exit; no trailing value
   };
   got := false;
@@ -289,7 +363,7 @@ gobang_use_close_ok_heap_value() `test {
 // unchanged — it is the exit, not the result type, that this covers.
 gobang_use_close_bare_return_surfaces() `test {
   t := go! {
-    base := produce(1)?^; // succeeds; makes the body a failable scope
+    base := produce(1)?^; // succeeds; supplies the early-return branch condition
     use r := FailResource(id: 1); // close() raises on the bare-return exit
     if base > 0 {
       return; // bare return: r live + failing close
@@ -312,7 +386,7 @@ gobang_use_close_bare_return_surfaces() `test {
 // the discriminant as an error and dereferenced a garbage error pointer).
 gobang_use_close_bare_return_ok_no_surface() `test {
   t := go! {
-    base := produce(1)?^; // succeeds; makes the body a failable scope
+    base := produce(1)?^; // succeeds; supplies the early-return branch condition
     use r := OkResource(id: 7); // close() succeeds on the bare-return exit
     if base > 0 {
       return;
@@ -383,4 +457,132 @@ gobang_use_close_dropped_error_leak_free() `test {
     // never received — the buffered close error must be discharged on drop.
   }
   assert(true, "dropped use-close error path did not leak");
+}
+
+// --- Concurrent tasks whose ONLY escape is the failable close ---
+// The close-error capture is per-goroutine state written on that goroutine's own
+// stack. Spawning several tasks before receiving any of them means their close
+// sinks run concurrently, so this checks the capture is not shared: every
+// receiver must see its own close error, and the succeeding tasks must still
+// return their trailing values.
+//
+// The handles are kept in plain locals rather than a `failable_task[int][]` — a
+// vector of failable task handles is separately broken (T1434: the for-in `<-`
+// silently exits the process with no output on Windows, hangs on macOS).
+gobang_use_close_concurrent_fan_out() `test {
+  a := go! {
+    use r := FailResource(id: 1); // close() raises — the body's only escape
+    r.id
+  };
+  b := go! {
+    use r := FailResource(id: 2);
+    r.id
+  };
+  c := go! {
+    use r := FailResource(id: 3);
+    r.id
+  };
+  p := go! {
+    use r := OkResource(id: 10);
+    r.id
+  };
+  q := go! {
+    use r := OkResource(id: 20);
+    r.id
+  };
+
+  int surfaced = 0;
+  (<-a)? e {
+    surfaced = surfaced + 1;
+    assert(e.message == "close failed", "task a surfaced its own close error");
+    -1
+  };
+  (<-b)? e {
+    surfaced = surfaced + 1;
+    assert(e.message == "close failed", "task b surfaced its own close error");
+    -1
+  };
+  (<-c)? e {
+    surfaced = surfaced + 1;
+    assert(e.message == "close failed", "task c surfaced its own close error");
+    -1
+  };
+  assert(surfaced == 3, "every failing task surfaced its close error");
+  assert((<-p)?! == 10, "concurrent ok close still returns its trailing value");
+  assert((<-q)?! == 20, "concurrent ok close still returns its trailing value");
+}
+
+// Same concurrent fan-out, but only some handles are received: the buffered close
+// errors of the un-received ones must be discharged by their drop paths (leak
+// enforcement, T0067) while the received ones surface normally.
+gobang_use_close_concurrent_partial_receive_leak_free() `test {
+  {
+    a := go! {
+      use r := FailResource(id: 1);
+      r.id
+    };
+    b := go! {
+      use r := FailResource(id: 2);
+      r.id
+    };
+    c := go! {
+      use r := FailResource(id: 3);
+      r.id
+    };
+    d := go! {
+      use r := FailResource(id: 4);
+      r.id
+    };
+    got := false;
+    (<-a)? e {
+      got = true;
+      -1
+    };
+    (<-c)? e {
+      got = true;
+      -1
+    };
+    assert(got, "the received half surfaced its close errors");
+    // b and d are never received — dropped with the error still buffered.
+  }
+  assert(true, "partially received fan-out did not leak");
+}
+
+// A resource created inside a LOOP: the escape is recorded once for the binding
+// but the close runs (and raises) on every iteration. The first close error to
+// reach the sink wins and the body stops there — later iterations never run, so
+// nothing is left un-dropped.
+gobang_use_close_in_loop_first_error_wins() `test {
+  t := go! {
+    int seen = 0;
+    int i = 0;
+    while i < 4 {
+      use r := FailResource(id: i); // close() raises at the end of each iteration
+      seen = seen + r.id;
+      i = i + 1;
+    }
+    seen
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "loop-body close error surfaced");
+    -1
+  };
+  assert(got, "loop-body use-close error should surface at <-t");
+  assert(v == -1, "handler recovery value returned");
+}
+
+gobang_use_close_in_loop_ok() `test {
+  t := go! {
+    int seen = 0;
+    int i = 0;
+    while i < 4 {
+      use r := OkResource(id: i);
+      seen = seen + r.id;
+      i = i + 1;
+    }
+    seen
+  };
+  assert((<-t)?! == 6, "loop-body ok close returns the trailing value");
 }

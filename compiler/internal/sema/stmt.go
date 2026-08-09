@@ -362,9 +362,8 @@ func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
 	if !c.info.FailableExprs[expr] {
 		return
 	}
-	if c.canPropagateError() {
+	if c.recordFailableEscape() {
 		c.info.AutoPropagateExprs[expr] = true
-		c.markFailableEscape()
 	} else {
 		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
@@ -378,9 +377,8 @@ func (c *Checker) checkSubExprFailable(expr ast.Expr) {
 	if !c.info.FailableExprs[expr] {
 		return
 	}
-	if c.canPropagateError() {
+	if c.recordFailableEscape() {
 		c.info.AutoPropagateExprs[expr] = true
-		c.markFailableEscape()
 	} else {
 		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
@@ -527,9 +525,20 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 		c.errorf(s.Pos(), "use binding requires a type with close() method, got %s", valType)
 		return
 	}
-	if named.LookupMethod("close") == nil {
+	closeMethod := named.LookupMethod("close")
+	if closeMethod == nil {
 		c.errorf(s.Pos(), "type %s has no close() method (required for use binding)", valType)
 		return
+	}
+	// T1386: a failable close() raises on scope exit, which escapes into the
+	// enclosing failable context exactly like a bare failable call. Record it so
+	// a `go! {}` body whose only failure is the close is not wrongly rejected as
+	// "cannot fail". Being declared failable is the contract — whether the body
+	// actually raises is not knowable here (same rule as `go! f()`). In a
+	// non-propagating context the close error panics instead, so nothing is
+	// recorded and there is nothing to reject.
+	if closeMethod.Sig().CanError() {
+		c.recordFailableEscape()
 	}
 
 	if s.Name != "_" {
@@ -630,10 +639,10 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	// T0708: A failable setter / []= / [:]= silently dropped its error before;
 	// reject the assignment unless the enclosing function is failable, in which
 	// case codegen auto-propagates the call result via propagateIfFailable.
-	if c.assignmentSetterCanError(s) && !c.canPropagateError() {
+	if c.assignmentSetterCanError(s) && !c.recordFailableEscape() {
 		c.errorf(s.Pos(), "failable setter assignment must be in a failable function: mark the enclosing function with `!`")
 	} else if s.Op != ast.OpAssign && c.assignmentGetterCanError(s) &&
-		!c.canPropagateError() {
+		!c.recordFailableEscape() {
 		// T0709: a compound assignment reads the current value via a getter; a
 		// failable read getter propagates, so require a failable scope. The
 		// else-if guards against a duplicate diagnostic when the setter also errors.
@@ -674,7 +683,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		// T0715: a failable operator returns {ok, value, err}; codegen
 		// auto-propagates the error, so the enclosing function must be failable.
 		// Symmetric with the T0708/T0709 setter/getter checks above.
-		if c.binaryOperatorCanError(opTarget, op) && !c.canPropagateError() {
+		if c.binaryOperatorCanError(opTarget, op) && !c.recordFailableEscape() {
 			c.errorf(s.Pos(), "failable operator in compound assignment must be in a failable function: mark the enclosing function with `!`")
 		}
 	}
@@ -1238,10 +1247,9 @@ func (c *Checker) checkGoBlockReturn(s *ast.ReturnStmt) {
 }
 
 func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
-	if !c.canPropagateError() {
+	// T1379: a raise is a failable escape (for `go! {}` body-can-fail).
+	if !c.recordFailableEscape() {
 		c.errorf(s.Pos(), "raise outside of failable function")
-	} else {
-		c.markFailableEscape() // T1379: a raise is a failable escape (for `go! {}` body-can-fail)
 	}
 	valType := c.checkExpr(s.Value)
 	if valType == nil {
@@ -1277,10 +1285,9 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 		return
 	}
 	// The expression is a failable call used as a statement (no ?^, ?!, or handler).
-	if c.canPropagateError() {
+	if c.recordFailableEscape() {
 		// Auto-propagate: codegen will emit tag-check + early return.
 		c.info.AutoPropagateExprs[s.Expr] = true
-		c.markFailableEscape()
 	} else {
 		c.errorf(s.Expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
@@ -1862,6 +1869,21 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.inLoop--
 }
 
+// recordFailableGeneratorForIn records a failable escape for a for-in over a
+// failable generator: the generator's mid-stream error auto-propagates into the
+// enclosing failable context, exactly like a bare failable call (T1386). In a
+// non-propagating context it panics instead, so nothing is recorded.
+//
+// The error operator (`?!`/`?^`/`? {}`) on the iterable only handles the
+// *factory* call's error — genForInGenerator still routes mid-stream errors to
+// the enclosing sink — so peel it before asking whether the generator itself is
+// failable.
+func (c *Checker) recordFailableGeneratorForIn(s *ast.ForInStmt) {
+	if c.info.FailableExprs[unwrapErrorOperator(s.Iterable)] {
+		c.recordFailableEscape()
+	}
+}
+
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	iterType := c.checkExpr(s.Iterable)
 
@@ -1912,6 +1934,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 					elemType = dispatchType
 				}
 				// Stream still uses genForInGenerator (raw coroutine path)
+				c.recordFailableGeneratorForIn(s)
 			} else if origin == types.TypChannel {
 				// Channel[T] yields T via channel receive
 				if len(inst.TypeArgs()) > 0 {
@@ -2118,7 +2141,7 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 	c.checkIncDecOperator(s.Pos(), targetType, op)
 
 	// T0709: inc/dec reads the current value via [] — a failable getter propagates.
-	if c.indexGetterCanError(s.Target) && !c.canPropagateError() {
+	if c.indexGetterCanError(s.Target) && !c.recordFailableEscape() {
 		c.errorf(s.Pos(), "failable index read in inc/dec must be in a failable function: mark the enclosing function with `!`")
 	}
 
@@ -2134,7 +2157,7 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 		// T0712: inc/dec on a property reads via the getter and writes via the
 		// setter. If either accessor is failable, the read/write propagates, so
 		// require a failable enclosing function (previously a hard codegen panic).
-		if c.incDecPropertyCanError(tgt) && !c.canPropagateError() {
+		if c.incDecPropertyCanError(tgt) && !c.recordFailableEscape() {
 			c.errorf(s.Pos(), "failable property inc/dec must be in a failable function: mark the enclosing function with `!`")
 		}
 	case *ast.IndexExpr:

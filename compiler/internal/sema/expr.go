@@ -764,7 +764,7 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 // is not double-reported.
 func (c *Checker) checkOperatorFailable(pos ast.Pos, left types.Type, op string, right types.Type) types.Type {
 	result := c.checkOperator(pos, left, op, right)
-	if c.binaryOperatorCanError(left, op) && !c.canPropagateError() {
+	if c.binaryOperatorCanError(left, op) && !c.recordFailableEscape() {
 		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return result
@@ -996,7 +996,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 // result). Symmetric with checkOperatorFailable (T0984).
 func (c *Checker) checkUnaryOperatorFailable(pos ast.Pos, operand types.Type, op string) types.Type {
 	result := c.checkUnaryOperator(pos, operand, op)
-	if c.unaryOperatorCanError(operand, op) && !c.canPropagateError() {
+	if c.unaryOperatorCanError(operand, op) && !c.recordFailableEscape() {
 		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return result
@@ -1085,7 +1085,7 @@ func (c *Checker) checkIncDecOperator(pos ast.Pos, targetType types.Type, op str
 	}
 	// T0984: a failable operator returns {ok, value, err}; codegen auto-propagates
 	// the error, so the enclosing function must be failable.
-	if c.unaryOperatorCanError(targetType, op) && !c.canPropagateError() {
+	if c.unaryOperatorCanError(targetType, op) && !c.recordFailableEscape() {
 		c.errorf(pos, "failable operator must be in a failable function: mark the enclosing function with `!`")
 	}
 	return resultType
@@ -3152,10 +3152,9 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 
 func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
-	if !c.canPropagateError() {
+	// T1379: `?^` is a failable escape (for `go! {}` body-can-fail).
+	if !c.recordFailableEscape() {
 		c.errorf(e.Pos(), "error propagation (?^) used outside of failable function")
-	} else {
-		c.markFailableEscape() // T1379: `?^` is a failable escape (for `go! {}` body-can-fail)
 	}
 	if !c.info.FailableExprs[e.Expr] {
 		c.errorf(e.Pos(), "error propagation (?^) requires a failable expression")
@@ -3225,8 +3224,11 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 	if e.TypeName != "" {
 		// Typed handlers in non-failable functions need else or ! to be exhaustive.
 		// Without them, non-matching errors have nowhere to go.
+		// T1386: without else/`!` a non-matching error propagates out of the
+		// handler into the enclosing failable context — a failable escape, like
+		// `?^`, and the only failure a `go! {}` body may have.
 		isExhaustive := e.ElseBody != nil || e.PanicOnNomatch
-		if !isExhaustive && !c.canPropagateError() {
+		if !isExhaustive && !c.recordFailableEscape() {
 			c.errorf(e.Pos(), "typed error handler in non-failable function; add 'else { }', '!' suffix, or make function failable")
 		}
 		// Generic typed handler: resolve via typeRef (e.g., DataError[string])
@@ -4212,19 +4214,29 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 	c.lambdaScope = c.scope // scope at lambda definition site
 	c.lambdaMove = e.Move
 
-	// Type-check body. A lambda body is governed by its own signature, so it
-	// is not the enclosing `go {}` non-failable scope (T1217); reset the
-	// override alongside the curFunc swap so the two contexts stay independent.
+	// Type-check body. A lambda body is governed by its own signature, so it is
+	// neither the enclosing `go {}` non-failable scope (T1217) nor the enclosing
+	// `go! {}` failable scope (T1379); reset both overrides alongside the curFunc
+	// swap so the contexts stay independent. Without the failableScope reset, a
+	// `raise` (or any other escape) in a non-failable lambda declared inside a
+	// `go! {}` body is wrongly accepted and wrongly counts as that body's escape.
 	// T1385/T1392: for the same reason, a `return` inside a lambda nested in a
 	// `go {}` block binds to the LAMBDA, not the goroutine — clear the go-block
 	// context.
 	saved := c.curFunc
 	c.curFunc = sig
 	savedNFS := c.nonFailableScope
+	savedFS := c.failableScope
 	c.nonFailableScope = false
+	c.failableScope = false
 	savedGoBlock := c.goBlock
 	c.goBlock = nil
-	defer func() { c.curFunc = saved; c.nonFailableScope = savedNFS; c.goBlock = savedGoBlock }()
+	defer func() {
+		c.curFunc = saved
+		c.nonFailableScope = savedNFS
+		c.failableScope = savedFS
+		c.goBlock = savedGoBlock
+	}()
 
 	if e.Body != nil {
 		c.openScope(e.Body, "lambda")
@@ -4335,7 +4347,7 @@ func goCalleeName(expr ast.Expr) string {
 // expression (peeling any error operator), or nil for the block form.
 func unwrapGoExprCall(g *ast.GoExpr) ast.Expr {
 	if g.Expr != nil {
-		return unwrapGoOperator(g.Expr)
+		return unwrapErrorOperator(g.Expr)
 	}
 	return nil
 }
@@ -4359,7 +4371,7 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		switch e.Expr.(type) {
 		case *ast.ErrorPanicExpr, *ast.ErrorPropagateExpr, *ast.ErrorHandlerExpr:
 			if e.Failable {
-				c.errorf(e.Expr.Pos(), "apply the error operator to the receive, not the spawn: `(<-go! %s())?!`", goCalleeName(unwrapGoOperator(e.Expr)))
+				c.errorf(e.Expr.Pos(), "apply the error operator to the receive, not the spawn: `(<-go! %s())?!`", goCalleeName(unwrapErrorOperator(e.Expr)))
 			} else {
 				c.errorf(e.Expr.Pos(), "the operand of `go` must be a function or method call, or a block")
 				c.hintf(e.Expr.Pos(), "to spawn a computation that uses operators like `?!`, wrap it in a block: go { work()?!; }")
@@ -4415,6 +4427,10 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		c.checkBlock(e.Block)
 		c.goBlock = savedGoBlock
 		escaped := c.failableEscapeCount > savedEsc
+		// The body's escapes belong to THIS task — they surface at its `<-t`, not
+		// in the enclosing scope. Rewind the counter so a nested `go! {}` does not
+		// make an enclosing `go! {}` body look like it can fail (T1386).
+		c.failableEscapeCount = savedEsc
 		c.nonFailableScope = savedNFS
 		c.failableScope = savedFS
 		c.closeScope()
@@ -4473,11 +4489,10 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 	return types.NewInstance(taskOrigin, []types.Type{innerType})
 }
 
-// unwrapGoOperator peels an error operator wrapping a `go!`/`go` call operand
-// (`f()?!`, `f()?^`, `f() ? e { }`, `f()?`) down to the underlying call, for
-// building the "apply the operator to the receive" fix-it. Returns the operand
-// unchanged if it is not one of these operator forms.
-func unwrapGoOperator(expr ast.Expr) ast.Expr {
+// unwrapErrorOperator peels an error operator (`f()?!`, `f()?^`, `f() ? e { }`,
+// `f()?`) down to the underlying expression. Returns the expression unchanged
+// if it is not one of these operator forms.
+func unwrapErrorOperator(expr ast.Expr) ast.Expr {
 	switch e := expr.(type) {
 	case *ast.ErrorPanicExpr:
 		return e.Expr

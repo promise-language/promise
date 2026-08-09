@@ -359,13 +359,12 @@ count_gen!(int n, bool fail) stream[int] {
 }
 
 // A for-in over a failable generator inside a `go! {}` body routes the
-// generator's mid-stream error through the go-block sink to `<-t`. The body is
-// already a failable scope via the leading `produce(1)?^` escape site (a pure
-// for-in-generator body is currently rejected by sema — T1386), so this
-// exercises genForInGenerator's failable-go-block branch, not the sema gap.
+// generator's mid-stream error through the go-block sink to `<-t`. The for-in is
+// the body's ONLY escape site (T1386: it is what makes the body a failable
+// scope), so this exercises genForInGenerator's failable-go-block branch reached
+// naturally, without an unrelated escape propping the scope up.
 failable_go_block_generator_forin_err() `test {
   t := go! {
-    _ := produce(1)?^; // escape site → failable scope
     int sum = 0;
     for x in count_gen(3, true) {
       sum = sum + x;
@@ -381,18 +380,184 @@ failable_go_block_generator_forin_err() `test {
   assert(got, "generator error handler ran");
 }
 
-// Same shape, generator succeeds: the computed value flows through `<-t`.
+// Same shape, generator succeeds: the computed value flows through `<-t`. The
+// for-in remains the body's only escape site (T1386).
 failable_go_block_generator_forin_ok() `test {
   t := go! {
-    base := produce(1)?^; // 2
     int sum = 0;
     for x in count_gen(4, false) {
       // 0+1+2+3 = 6
       sum = sum + x;
     }
-    base + sum
+    sum
   };
-  assert((<-t)?! == 8, "generator ok value from go! block");
+  assert((<-t)?! == 6, "generator ok value from go! block");
+}
+
+// An error operator on the ITERABLE handles only the factory call's error — the
+// generator value it unwraps still carries the error slot, so a MID-STREAM error
+// keeps routing to the enclosing sink. That is why sema counts `for x in g()?!`
+// as an escape too (T1386): here `?!` never fires (the factory succeeds) and the
+// mid-stream raise still surfaces at `<-t` rather than panicking.
+failable_go_block_generator_forin_panic_operator_err() `test {
+  t := go! {
+    int sum = 0;
+    for x in count_gen(2, true)?! {
+      sum = sum + x;
+    }
+    sum
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "gen boom", "mid-stream error surfaces past the factory `?!`");
+    -1
+  };
+  assert(got, "mid-stream generator error handler ran");
+}
+
+// The `?^` peel arm of the same rule (T1386): `?^` on the iterable handles the
+// factory call, and — unlike `?!` — is itself an escape, so the body would be a
+// failable scope either way. What this pins down is that the mid-stream error
+// still routes to `<-t` (not to the `?^`, which never fires here) and that the
+// two escapes on one statement do not double-route or corrupt the sink.
+failable_go_block_generator_forin_propagate_operator_err() `test {
+  t := go! {
+    int sum = 0;
+    for x in count_gen(2, true)?^ {
+      sum = sum + x;
+    }
+    sum
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "gen boom", "mid-stream error surfaces past the factory `?^`");
+    -1
+  };
+  assert(got, "mid-stream generator error handler ran (?^ form)");
+}
+
+failable_go_block_generator_forin_propagate_operator_ok() `test {
+  t := go! {
+    int sum = 0;
+    for x in count_gen(4, false)?^ {
+      sum = sum + x;
+    }
+    sum
+  };
+  assert((<-t)?! == 6, "generator ok value from go! block (?^ form)");
+}
+
+// A failable generator METHOD as the iterable: the same escape, reached through
+// the member-call path rather than a free-function call (T1386).
+type GoBlockRowSource {
+  int base;
+
+  rows!(int n, bool fail) stream[int] {
+    int i = 0;
+    while i < n {
+      yield this.base + i;
+      i = i + 1;
+    }
+    if fail {
+      raise error("rows boom");
+    }
+  }
+}
+
+failable_go_block_generator_method_forin_err() `test {
+  t := go! {
+    s := GoBlockRowSource(base: 10);
+    int sum = 0;
+    for x in s.rows(2, true) {
+      sum = sum + x;
+    }
+    sum
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "rows boom", "generator method error surfaced from go! block");
+    -1
+  };
+  assert(got, "generator method error handler ran");
+}
+
+failable_go_block_generator_method_forin_ok() `test {
+  t := go! {
+    s := GoBlockRowSource(base: 10);
+    int sum = 0;
+    for x in s.rows(3, false) {
+      // 10+11+12 = 33
+      sum = sum + x;
+    }
+    sum
+  };
+  assert((<-t)?! == 33, "generator method ok value from go! block");
+}
+
+// The escape site nested below the body's top-level statement list: the for-in
+// sits inside an `if`, so the body-can-fail decision must be made over the whole
+// body, not just its immediate statements (T1386).
+failable_go_block_generator_forin_nested_in_if_err() `test {
+  t := go! {
+    int sum = 0;
+    if sum == 0 {
+      for x in count_gen(2, true) {
+        sum = sum + x;
+      }
+    }
+    sum
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "gen boom", "nested for-in error surfaced from go! block");
+    -1
+  };
+  assert(got, "nested for-in error handler ran");
+}
+
+// A never-received task whose generator for-in raised: the buffered error must be
+// discharged by the task's drop path (leak enforcement, T0067).
+failable_go_block_generator_forin_dropped_error_leak_free() `test {
+  {
+    t := go! {
+      int sum = 0;
+      for x in count_gen(2, true) {
+        sum = sum + x;
+      }
+      sum
+    };
+    // never received — the buffered generator error must be discharged on drop.
+  }
+  assert(true, "dropped generator for-in error path did not leak");
+}
+
+// The mirror image of the two `go! {}` for-in cases: a plain `go {}` body is a
+// NON-failable scope, so a for-in over a failable generator records no escape and
+// the spawn stays legal (T1386 must not turn the routing into a rejection). The
+// generator succeeds here — a mid-stream raise would panic the goroutine.
+plain_go_block_generator_forin_ok() `test {
+  t := go {
+    int sum = 0;
+    for x in count_gen(4, false) {
+      sum = sum + x;
+    }
+    sum
+  };
+  assert(<-t == 6, "plain go block generator for-in value");
+}
+
+// Same for the use-close site in a plain `go {}` — a failable close() that
+// succeeds is not an escape and the spawn stays legal.
+plain_go_block_use_ok_close() `test {
+  t := go {
+    use r := GoBlockOkResource(id: 5);
+    r.id
+  };
+  assert(<-t == 5, "plain go block use-close value");
 }
 
 // A nested plain `go` spawn inside a `go! {}` body must NOT inherit the outer
@@ -406,6 +571,48 @@ failable_go_block_nested_go() `test {
     produce(iv) // produce(12) → 24
   };
   assert((<-t)?! == 24, "nested go inside go! result");
+}
+
+// A nested `go!` spawn: spawning it is NOT the outer body's failure (its error
+// belongs to its own receiver), but CONSUMING it with `<-` is — that receive is
+// an ordinary failable call, and here it is the outer body's ONLY escape site
+// (T1386). The inner task's error must therefore travel inner-sink → `<-inner`
+// → outer sink → `<-t`, without either sink capturing the other's.
+failable_go_block_nested_gobang_error_propagates() `test {
+  t := go! {
+    inner := go! produce(-3); // raises "negative:-3" into the INNER task
+    iv := <-inner; // auto-propagates into the OUTER task
+    iv + 1
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative:-3", "inner task's error surfaced at the outer receive");
+    -1
+  };
+  assert(got, "nested go! error should surface at the outer <-t");
+}
+
+// Same shape, inner task succeeds: the value flows through both sinks.
+failable_go_block_nested_gobang_ok() `test {
+  t := go! {
+    inner := go! produce(4); // 8
+    iv := <-inner;
+    iv + 1
+  };
+  assert((<-t)?! == 9, "nested go! ok value through both sinks");
+}
+
+// The outer body never receives the inner failable task, so the inner error is
+// buffered and must be discharged by the inner task's drop path *inside* the
+// goroutine — and the outer body then genuinely cannot fail on its own, so it
+// needs an escape of its own to stay a `go!` (T1386's rewind rule).
+failable_go_block_nested_gobang_unreceived_leak_free() `test {
+  t := go! {
+    inner := go! produce(-3); // raises; never received — dropped in the body
+    produce(2) // the outer body's own escape site
+  };
+  assert((<-t)?! == 4, "outer value unaffected by the dropped inner task");
 }
 
 // Two escaping `?^` sites in one body: the first success flows on, the second
@@ -448,16 +655,14 @@ failable_go_block_use_ok_close() `test {
 // A typed error handler (`? e is T { }`) inside a `go! {}` body whose subject
 // raises a NON-matching error: the unmatched error propagates through the
 // go-block sink to `<-t` (exercises genErrorHandlerExpr's failable-go-block
-// branch). The body is a failable scope via the leading `produce(1)?^` escape
-// site — a typed no-match handler alone is not yet counted as an escape by sema
-// (T1386).
+// branch). The handler is the body's ONLY escape site — a typed no-match handler
+// is itself what makes the body a failable scope (T1386).
 type GoBlockNotThisError is error {
   int a;
 }
 
 failable_go_block_typed_handler_nomatch() `test {
   t := go! {
-    _ := produce(1)?^; // escape site → failable scope
     produce(-1)? e is GoBlockNotThisError {
       99 // matches only GoBlockNotThisError; base error escapes
     }
@@ -469,4 +674,41 @@ failable_go_block_typed_handler_nomatch() `test {
     0
   };
   assert(got, "typed-no-match propagation handler ran");
+}
+
+// A failable helper raising the handler's matching error type.
+raise_not_this!(int x) int {
+  if x < 0 {
+    raise GoBlockNotThisError(message: "not-this:{x}", a: 1);
+  }
+  return x;
+}
+
+// The MATCHING case: the handler recovers in place, nothing escapes, and the
+// recovery value flows to `<-t`. Pairs with the no-match test above — together
+// they show the typed handler is an escape only for the errors it does not
+// handle (T1386's rule for counting it as one).
+failable_go_block_typed_handler_match() `test {
+  t := go! {
+    raise_not_this(-1)? e is GoBlockNotThisError {
+      99 // matches → recovered inside the body, no escape to the receiver
+    }
+  };
+  assert((<-t)?! == 99, "matched typed-handler recovery value surfaced");
+}
+
+// A never-received task whose typed handler let a non-matching error escape: the
+// buffered error must be discharged by the task's drop path (leak enforcement,
+// T0067). The escape site is the handler itself, so this is the sink reached
+// naturally (T1386).
+failable_go_block_typed_handler_dropped_error_leak_free() `test {
+  {
+    t := go! {
+      produce(-1)? e is GoBlockNotThisError {
+        99
+      }
+    };
+    // never received — the buffered unmatched error must be discharged on drop.
+  }
+  assert(true, "dropped typed-handler error path did not leak");
 }

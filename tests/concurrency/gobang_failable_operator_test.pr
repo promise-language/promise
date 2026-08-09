@@ -1,0 +1,423 @@
+// T1386: `go! { }` body-can-fail detection counts every construct whose error
+// escapes into the task, not just auto-propagated calls / `?^` / `raise`. A
+// failable user-defined operator (binary, prefix-unary, inc/dec, compound
+// assignment) auto-propagates its {ok, value, err} result, so it IS such an
+// escape — a body whose only failure is an operator was previously rejected with
+// "this goroutine's body cannot fail".
+//
+// Each body below has the operator as its ONLY escape site, so it both proves
+// the acceptance and exercises genAutoPropagateValue's failable-go-block sink
+// (T1384) reached naturally. Siblings: gobang_use_failable_close_test.pr
+// (use-close escape) and failable_task_test.pr (generator for-in, typed handler).
+type OpError is error `doc("Error raised by CheckedVec's failable operators.") {
+  int code;
+}
+
+type CheckedVec `doc("A value type whose arithmetic operators raise on a negative operand.") {
+  int x `value;
+
+  +!(CheckedVec other) CheckedVec {
+    if other.x < 0 {
+      raise OpError(message: "negative addend", code: 1);
+    }
+    return CheckedVec(x: this.x + other.x);
+  }
+
+  - !() CheckedVec {
+    if this.x < 0 {
+      raise OpError(message: "negative negation", code: 2);
+    }
+    return CheckedVec(x: 0 - this.x);
+  }
+
+  ++!() CheckedVec {
+    if this.x < 0 {
+      raise OpError(message: "negative increment", code: 3);
+    }
+    return CheckedVec(x: this.x + 1);
+  }
+}
+
+// --- Binary operator ---------------------------------------------------------
+
+gobang_failable_binary_op_error_surfaces() `test {
+  t := go! {
+    a := CheckedVec(x: 10);
+    c := a + CheckedVec(x: -1); // raises — the body's ONLY escape site
+    c.x
+  };
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "negative addend", "surfaced error is the operator error");
+    -1
+  };
+  assert(got, "failable binary operator error should surface at <-t");
+  assert(v == -1, "handler recovery value returned");
+}
+
+gobang_failable_binary_op_ok() `test {
+  t := go! {
+    a := CheckedVec(x: 10);
+    c := a + CheckedVec(x: 5);
+    c.x
+  };
+  assert((<-t)?! == 15, "successful failable operator returns the trailing value");
+}
+
+// --- Prefix unary operator ---------------------------------------------------
+
+gobang_failable_unary_op_error_surfaces() `test {
+  t := go! {
+    a := CheckedVec(x: -3);
+    c := -a; // raises
+    c.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative negation", "surfaced error is the unary operator error");
+  };
+  assert(got, "failable unary operator error should surface at <-t");
+}
+
+gobang_failable_unary_op_ok() `test {
+  t := go! {
+    a := CheckedVec(x: 3);
+    c := -a;
+    c.x
+  };
+  assert((<-t)?! == -3, "successful failable unary operator returns the trailing value");
+}
+
+// --- Inc/dec operator --------------------------------------------------------
+
+gobang_failable_incdec_op_error_surfaces() `test {
+  t := go! {
+    CheckedVec a = CheckedVec(x: -2);
+    a++; // raises
+    a.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative increment", "surfaced error is the inc/dec operator error");
+  };
+  assert(got, "failable inc/dec operator error should surface at <-t");
+}
+
+gobang_failable_incdec_op_ok() `test {
+  t := go! {
+    CheckedVec a = CheckedVec(x: 4);
+    a++;
+    a.x
+  };
+  assert((<-t)?! == 5, "successful failable inc/dec returns the trailing value");
+}
+
+// --- Compound assignment -----------------------------------------------------
+
+gobang_failable_compound_assign_error_surfaces() `test {
+  t := go! {
+    CheckedVec a = CheckedVec(x: 10);
+    a += CheckedVec(x: -1); // raises
+    a.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative addend", "surfaced error is the compound-assign operator error");
+  };
+  assert(got, "failable compound assignment error should surface at <-t");
+}
+
+gobang_failable_compound_assign_ok() `test {
+  t := go! {
+    CheckedVec a = CheckedVec(x: 10);
+    a += CheckedVec(x: 5);
+    a.x
+  };
+  assert((<-t)?! == 15, "successful failable compound assignment returns the trailing value");
+}
+
+// --- Failable setter assignment ----------------------------------------------
+// A failable setter propagates via propagateIfFailable (T0708), whose
+// inFailableGoBlock branch is the same sink.
+type Counter `doc("A counter whose value setter rejects negative assignments.") {
+  int _n;
+
+  get value int {
+    return this._n;
+  }
+
+  set value!(int v) {
+    if v < 0 {
+      raise OpError(message: "negative value", code: 4);
+    }
+    this._n = v;
+  }
+}
+
+gobang_failable_setter_error_surfaces() `test {
+  t := go! {
+    c := Counter(_n: 0);
+    c.value = -1; // raises — the body's ONLY escape site
+    c.value
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative value", "surfaced error is the setter error");
+  };
+  assert(got, "failable setter error should surface at <-t");
+}
+
+gobang_failable_setter_ok() `test {
+  t := go! {
+    c := Counter(_n: 0);
+    c.value = 7;
+    c.value
+  };
+  assert((<-t)?! == 7, "successful failable setter returns the trailing value");
+}
+
+// --- Failable index/slice accessors ------------------------------------------
+// A failable `[]` getter read by a compound assignment or an inc/dec, and a
+// failable `[:]=` setter, are the remaining T0708/T0709 escape sites. Each is
+// the body's ONLY escape site.
+type Cell `doc("A cell whose index accessors reject a negative stored value.") {
+  int x;
+
+  []!(int k) int {
+    if this.x < 0 {
+      raise OpError(message: "negative cell read", code: 5);
+    }
+    return this.x;
+  }
+
+  []=(int k, int v) {
+    this.x = v;
+  }
+
+  [:](int? low, int? high) int {
+    return this.x;
+  }
+
+  [:]= !(int? low, int? high, int v) {
+    if v < 0 {
+      raise OpError(message: "negative cell slice write", code: 6);
+    }
+    this.x = v;
+  }
+}
+
+gobang_failable_index_getter_compound_assign_error_surfaces() `test {
+  t := go! {
+    c := Cell(x: -1);
+    c[0] += 5; // the compound read raises
+    c.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative cell read", "surfaced error is the index-getter error");
+  };
+  assert(got, "failable index getter error should surface at <-t");
+}
+
+gobang_failable_index_getter_compound_assign_ok() `test {
+  t := go! {
+    c := Cell(x: 3);
+    c[0] += 5;
+    c.x
+  };
+  assert((<-t)?! == 8, "successful failable index getter returns the trailing value");
+}
+
+gobang_failable_index_getter_incdec_error_surfaces() `test {
+  t := go! {
+    c := Cell(x: -1);
+    c[0]++; // inc/dec reads via the failable [] getter
+    c.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative cell read", "surfaced error is the index-getter error");
+  };
+  assert(got, "failable index getter inc/dec error should surface at <-t");
+}
+
+gobang_failable_index_getter_incdec_ok() `test {
+  t := go! {
+    c := Cell(x: 3);
+    c[0]++;
+    c.x
+  };
+  assert((<-t)?! == 4, "successful failable index inc/dec returns the trailing value");
+}
+
+gobang_failable_slice_setter_error_surfaces() `test {
+  t := go! {
+    c := Cell(x: 0);
+    c[0:1] = -1; // the slice setter raises
+    c.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative cell slice write", "surfaced error is the slice-setter error");
+  };
+  assert(got, "failable slice setter error should surface at <-t");
+}
+
+gobang_failable_slice_setter_ok() `test {
+  t := go! {
+    c := Cell(x: 0);
+    c[0:1] = 9;
+    c.x
+  };
+  assert((<-t)?! == 9, "successful failable slice setter returns the trailing value");
+}
+
+// --- Failable index setter ----------------------------------------------------
+// A plain index *store* through a failable `[]=` — the remaining
+// assignmentSetterCanError arm, distinct from `[:]=` and from the `[]` reads.
+type Slot `doc("A slot whose index setter rejects a negative write.") {
+  int x;
+
+  [](int k) int {
+    return this.x;
+  }
+
+  []= !(int k, int v) {
+    if v < 0 {
+      raise OpError(message: "negative slot write", code: 8);
+    }
+    this.x = v;
+  }
+}
+
+gobang_failable_index_setter_error_surfaces() `test {
+  t := go! {
+    s := Slot(x: 0);
+    s[0] = -1; // the index setter raises — the body's ONLY escape site
+    s.x
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative slot write", "surfaced error is the index-setter error");
+  };
+  assert(got, "failable index setter error should surface at <-t");
+}
+
+gobang_failable_index_setter_ok() `test {
+  t := go! {
+    s := Slot(x: 0);
+    s[0] = 6;
+    s.x
+  };
+  assert((<-t)?! == 6, "successful failable index setter returns the trailing value");
+}
+
+// The last two escape sites T1386 reroutes — a bare `level = v` / `level += v`
+// resolving to a MODULE-LEVEL setter/getter (the `IdentExpr` arms of
+// assignmentSetterCanError / assignmentGetterCanError) — have no runtime test
+// here: a module-level setter cannot read its value parameter at all (T1446 —
+// codegen panics `undefined variable "v"`, and the unused-parameter form
+// silently discards the assignment), so a failable one cannot be written. Sema
+// coverage for both arms is in compiler/internal/sema/t1386_test.go
+// (TestT1386GoBlockFailableModuleLevelSetterAssignment and friends).
+
+// --- Failable property inc/dec (T0712) ---------------------------------------
+// `c.value++` reads through the getter and writes through the setter; either
+// half being failable is an escape.
+gobang_failable_property_setter_incdec_error_surfaces() `test {
+  t := go! {
+    Counter c = Counter(_n: -2);
+    c.value++; // the write-back through the failable setter raises
+    c._n
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative value", "surfaced error is the setter error");
+  };
+  assert(got, "failable property setter inc/dec error should surface at <-t");
+}
+
+type Gauge `doc("A gauge whose value getter rejects a negative reading.") {
+  int _n;
+
+  get value! int {
+    if this._n < 0 {
+      raise OpError(message: "negative reading", code: 7);
+    }
+    return this._n;
+  }
+
+  set value(int v) {
+    this._n = v;
+  }
+}
+
+gobang_failable_property_getter_incdec_error_surfaces() `test {
+  t := go! {
+    Gauge g = Gauge(_n: -1);
+    g.value++; // the read through the failable getter raises
+    g._n
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "negative reading", "surfaced error is the getter error");
+  };
+  assert(got, "failable property getter inc/dec error should surface at <-t");
+}
+
+gobang_failable_property_getter_incdec_ok() `test {
+  t := go! {
+    Gauge g = Gauge(_n: 4);
+    g.value++;
+    g._n
+  };
+  assert((<-t)?! == 5, "successful failable property inc/dec returns the trailing value");
+}
+
+// --- Un-received task whose operator raises: buffered error freed on drop -----
+// The error is stored into the task's {ok, err} aggregate; a never-received
+// FailableTask must discharge it in its drop path (leak enforcement, T0067).
+gobang_failable_op_dropped_error_leak_free() `test {
+  {
+    t := go! {
+      a := CheckedVec(x: 10);
+      c := a + CheckedVec(x: -1); // raises → error buffered in the task
+      c.x
+    };
+    // never received — the buffered operator error must be discharged on drop.
+  }
+  assert(true, "dropped failable-operator error path did not leak");
+}
+
+// Same for the accessor sinks: the raising type is heap-allocated and the error
+// is buffered rather than received, so both must be discharged on drop.
+gobang_failable_accessor_dropped_error_leak_free() `test {
+  {
+    t := go! {
+      c := Cell(x: -1);
+      c[0]++; // raises → error buffered in the task
+      c.x
+    };
+    // never received.
+  }
+  {
+    t := go! {
+      Gauge g = Gauge(_n: -1);
+      g.value++; // raises → error buffered in the task
+      g._n
+    };
+    // never received.
+  }
+  assert(true, "dropped failable-accessor error path did not leak");
+}

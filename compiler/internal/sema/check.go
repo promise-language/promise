@@ -43,7 +43,7 @@ type Checker struct {
 	brokenFields        map[*types.Named]map[string]bool // T1168: fields whose declared type failed to resolve; member accesses to them are suppressed instead of cascading into "no field or method" errors
 	nonFailableScope    bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (§17.2.1); errors cannot propagate/raise regardless of the enclosing fn
 	failableScope       bool                             // T1379: true inside a `go! {}` block body — a failable scope (§17.2.1); errors auto-propagate/raise into the task regardless of the enclosing fn
-	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (auto-propagate, `?^`, `raise`); snapshotted around a `go! {}` body to detect a body that cannot fail
+	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (see recordFailableEscape); snapshotted around a `go! {}` body to detect a body that cannot fail
 	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (§17.2 explicit-return style)
 }
 
@@ -60,11 +60,28 @@ type goBlockCtx struct {
 	bareReturnPos ast.Pos    // T1392: position of the first bare `return;` (verdict deferred until T is known — a bare `return;` in a value-producing block is an error in either style)
 }
 
-// markFailableEscape records that a failable operation escapes the current
-// scope (an auto-propagated call, an explicit `?^`, or a `raise`). Used only to
-// detect a `go! { }` body that cannot fail (§17.2.1, T1379).
-func (c *Checker) markFailableEscape() {
+// recordFailableEscape records that a failable operation escapes the current
+// scope, and reports whether the current context can actually take that escape.
+// When it cannot (a non-failable function, or a plain `go {}` body) nothing is
+// recorded and false is returned — the caller then either reports its own
+// diagnostic or, for the forms that panic instead of propagating (a use-binding
+// close, a for-in over a failable generator), does nothing.
+//
+// Escape sites are: an auto-propagated call, `?^`, `raise`, a typed error
+// handler with no `else`/`!`, a failable operator (binary, unary, inc/dec,
+// compound assignment), a failable setter/getter in an assignment or inc/dec, a
+// for-in over a failable generator, and a use binding with a failable `close()`.
+//
+// EVERY such site must go through this one helper: the count it maintains is
+// what `go! { }` body-can-fail detection reads (§17.2.1, T1379), so a site that
+// tests canPropagateError() directly silently drops its escape and makes a
+// genuinely failable body look like it cannot fail (T1386).
+func (c *Checker) recordFailableEscape() bool {
+	if !c.canPropagateError() {
+		return false
+	}
 	c.failableEscapeCount++
+	return true
 }
 
 // canPropagateError reports whether the current context can auto-propagate or

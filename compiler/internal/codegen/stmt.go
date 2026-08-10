@@ -728,6 +728,11 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 	// blocks reached via genExpr below see it cleared and keep discard semantics.
 	wantAutoPropValue := c.goBlockTrailingWantValue
 	c.goBlockTrailingWantValue = false
+	// T1427: read-and-clear the one-shot go!-value result drop type — only THIS
+	// (outermost go! body) block drops its trailing result on a close-error divert;
+	// nested arm blocks reached via genExpr see it cleared.
+	resultDropType := c.goBlockResultDropType
+	c.goBlockResultDropType = nil
 	savedScopeLen := len(c.scopeBindings)
 	// T1107: track whether this block yields an owned heap value moved out of the
 	// block scope, so genIfExpr / genMatchArmValue can register the merge phi as an
@@ -893,8 +898,16 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.genStmt(stmt)
 	}
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+		// T1427: arm the divert-drop for the trailing heap result across the close
+		// check — if a failing use-close diverts this exit, the claimed result would
+		// otherwise be orphaned (the store into G.result_ptr happens only on the OK
+		// continuation). Cleared immediately after so no other exit sees it.
+		if c.inFailableGoBlock && result != nil && resultDropType != nil {
+			c.goResultDivertVal, c.goResultDivertType = result, resultDropType
+		}
 		cap := c.emitScopeCleanup(savedScopeLen, false)
 		c.emitCloseErrCheck(cap, savedScopeLen)
+		c.goResultDivertVal, c.goResultDivertType = nil, nil
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 	c.blockValueOwnedResult = blockOwned   // T1107
@@ -5195,6 +5208,15 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture, outerFloor int) {
 		// `<-t` (a `ret` is invalid in the coro ramp). Reached because T1387
 		// broadened emitScopeCleanup's cap-capture guard to fire in a failable
 		// go-block (where c.canError is false).
+		//
+		// T1427: on a value exit the computed heap success value was claimed away
+		// from temp cleanup for the store into G.result_ptr — but this divert stores
+		// the {err} aggregate instead of that value, so the value would be orphaned.
+		// Drop it here (this branch and the OK-continuation store are mutually
+		// exclusive, so exactly one frees it — no double free).
+		if c.goResultDivertVal != nil && c.goResultDivertType != nil {
+			c.emitVariantFieldDrop(c.goResultDivertVal, c.goResultDivertType)
+		}
 		c.emitFailableGoBlockError(errVal)
 	} else if c.inGenerator && c.generatorCanError {
 		// B0023: store error to generator error_slot and branch to final suspend.
@@ -11478,11 +11500,25 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.drainEnumCtorTemps()
 	}
 	// Emit cleanup for all active scope bindings before returning
+	// T1427: on the go-block value exit the return value was claimed away from temp
+	// cleanup (above) for the store into G.result_ptr; a failing use-close divert
+	// stores the {err} aggregate instead, orphaning it. Arm the divert-drop across
+	// the close check. Use the return-expression's sema type (not retType) so the
+	// drop matches val's actual pre-coercion shape — the OK-path coerceReturnValue
+	// may box/optional-wrap it, but the divert and OK paths are mutually exclusive.
+	if goSink && c.inFailableGoBlock && val != nil {
+		exprTy := c.info.Types[s.Value]
+		if c.typeSubst != nil && exprTy != nil {
+			exprTy = types.Substitute(exprTy, c.typeSubst)
+		}
+		c.goResultDivertVal, c.goResultDivertType = val, exprTy
+	}
 	var closeCap *closeErrCapture
 	if len(c.scopeBindings) > 0 {
 		closeCap = c.emitScopeCleanup(0, false)
 	}
 	c.emitCloseErrCheck(closeCap, 0)
+	c.goResultDivertVal, c.goResultDivertType = nil, nil
 
 	// T1385: §17.2 explicit-return style — store the returned value into the
 	// goroutine's result buffer and branch to the coroutine's final suspend. The

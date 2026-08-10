@@ -53,6 +53,27 @@ make_str!(int x) string {
   return "value={x}";
 }
 
+// A heap user type (non-`value` field layout) and a failable factory — exercises
+// the divert-drop on a heap kind other than string/vector (T1427).
+type Box {
+  int v;
+}
+
+make_box!(int x) Box {
+  if x < 0 {
+    raise error("bad:{x}");
+  }
+  return Box(v: x);
+}
+
+// A failable helper returning a heap Vector value.
+make_vec!(int x) int[] {
+  if x < 0 {
+    raise error("bad:{x}");
+  }
+  return[x, x + 1, x + 2];
+}
+
 // --- The repro: use-close error surfaces at `<-t` ---
 gobang_use_close_error_surfaces() `test {
   t := go! {
@@ -113,13 +134,85 @@ gobang_use_close_explicit_return_ok_value() `test {
   assert(v == 9, "explicit-return value survives a successful close");
 }
 
-// NOTE (T1427): a HEAP result value diverted by a FAILING close leaks — the value
-// is claimed away from the coroutine's temp cleanup for the store into
-// G.result_ptr that emitCloseErrCheck then diverts, so nothing frees it. That is a
-// pre-existing defect of the value exits (reproduced on the trailing-expression
-// style at 0b47d373, before T1385 added the explicit-return exit), tracked
-// separately. Its coverage — trailing and explicit-return heap-diverted cases —
-// belongs here once T1427 is fixed; adding it now would only assert the leak.
+// --- Heap result + FAILING use-close divert: close error surfaces, leak-free (T1427) ---
+// On a `go! {}` value exit the computed HEAP result is claimed away from temp
+// cleanup for the store into G.result_ptr; a failing use-close diverts that exit
+// (emitCloseErrCheck → emitFailableGoBlockError) and stores the {err} aggregate
+// instead — so the divert path must drop the orphaned result or it leaks (T0067).
+// Three shapes: trailing binary expr (fresh temp), trailing bare ident (moved-local,
+// no temp record), and explicit `return` (§17.2 / T1385).
+gobang_use_close_trailing_heap_diverted_leak_free() `test {
+  t := go! {
+    s := make_str(3)?^; // heap (string) result computed
+    use r := FailResource(id: 1); // close() raises → the string is diverted
+    s + "!"
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "trailing heap divert surfaces the close error");
+  };
+  assert(got, "trailing heap-diverted use-close error surfaces at <-t");
+}
+
+gobang_use_close_trailing_heap_bareident_diverted_leak_free() `test {
+  t := go! {
+    s := make_str(4)?^; // heap (string) result; the trailing expr is a bare ident
+    use r := FailResource(id: 1); // close() raises → the moved-local is diverted
+    s
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "bare-ident heap divert surfaces the close error");
+  };
+  assert(got, "bare-ident heap-diverted use-close error surfaces at <-t");
+}
+
+gobang_use_close_explicit_return_heap_diverted_leak_free() `test {
+  t := go! {
+    s := make_str(5)?^; // heap (string) result computed
+    use r := FailResource(id: 1); // close() raises on the explicit-return exit
+    return s + "!";
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "explicit-return heap divert surfaces the close error");
+  };
+  assert(got, "explicit-return heap-diverted use-close error surfaces at <-t");
+}
+
+// Non-string heap kinds go through the same divert-drop (emitVariantFieldDrop),
+// so cover a heap USER TYPE (trailing exit) and a heap VECTOR (explicit-return
+// exit) to guard against a string-only drop path (T1427).
+gobang_use_close_trailing_heap_usertype_diverted_leak_free() `test {
+  t := go! {
+    b := make_box(3)?^; // heap user-type result computed
+    use r := FailResource(id: 1); // close() raises → the Box is diverted
+    b
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "user-type heap divert surfaces the close error");
+  };
+  assert(got, "user-type heap-diverted use-close error surfaces at <-t");
+}
+
+gobang_use_close_explicit_return_heap_vector_diverted_leak_free() `test {
+  t := go! {
+    v := make_vec(5)?^; // heap Vector result computed
+    use r := FailResource(id: 1); // close() raises on the explicit-return exit
+    return v;
+  };
+  got := false;
+  (<-t)? e {
+    got = true;
+    assert(e.message == "close failed", "vector heap divert surfaces the close error");
+  };
+  assert(got, "vector heap-diverted use-close error surfaces at <-t");
+}
 
 // --- Explicit raise in the body suppresses the close error (original preserved) ---
 gobang_use_close_raise_suppresses() `test {

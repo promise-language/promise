@@ -19660,6 +19660,10 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		// the block result rather than discard it — signal genBlockValue.
 		if goFailable {
 			c.goBlockTrailingWantValue = true
+			// T1427: thread the trailing result's success type so genBlockValue can
+			// drop a claimed heap result on a failing use-close divert. goElem is the
+			// already-substituted block result type; nil-safe on non-value paths.
+			c.goBlockResultDropType = goElem
 		}
 		result := c.genBlockValue(block)
 		if result != nil && c.block != nil && c.block.Term == nil {

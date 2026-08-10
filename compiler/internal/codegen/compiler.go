@@ -557,6 +557,18 @@ type Compiler struct {
 	// only the outermost block (the go! body) sees it — nested arm blocks don't.
 	goBlockTrailingWantValue bool
 
+	// T1427: on a `go! {}` value exit the computed heap success value is claimed away
+	// from temp cleanup for the store into G.result_ptr. A failing use-binding close()
+	// diverts that exit (emitCloseErrCheck → emitFailableGoBlockError), skipping the
+	// store — so the value must be dropped on the divert or it leaks. Set tightly
+	// around the emitScopeCleanup/emitCloseErrCheck pair on the two value exits.
+	goResultDivertVal  value.Value
+	goResultDivertType types.Type
+	// T1427: success type T of the `go! {}` value body, threaded to genBlockValue so
+	// the outermost body block can drop its trailing result on a close-error divert.
+	// One-shot: read-and-cleared at genBlockValue entry (nested arm blocks see nil).
+	goBlockResultDropType types.Type
+
 	// T1392: the raw result LLVM type of a value-producing NON-failable `go {}`
 	// body (nil when not in one, or when the body is void/fire-and-forget). A bare
 	// `return` in such a body is an early exit that carries no trailing value; without

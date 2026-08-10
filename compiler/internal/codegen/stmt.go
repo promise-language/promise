@@ -15345,7 +15345,9 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	// otherwise the Vector's scope-exit element drop reloads the freed G
 	// and Task[T].drop double-frees → segfault. Per-iteration (not whole
 	// vector) so un-awaited slots are still dropped once (T0503).
-	isTaskElem := s.Binding != "_" && types.IsTask(elemType)
+	// T1434: IsAnyTask covers failable_task[T] too — a `go! {}` handle in a
+	// Vector slot double-frees identically (segfault on Linux, hang on macOS).
+	isTaskElem := s.Binding != "_" && types.IsAnyTask(elemType)
 	var slotPtrAlloca *ir.InstAlloca
 	if isTaskElem {
 		slotPtrAlloca = c.createEntryAlloca(irtypes.NewPointer(elemLLVM))
@@ -15495,7 +15497,8 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	// otherwise the array's scope-exit element drop reloads the freed G and
 	// Task[T].drop double-frees → segfault. Per-iteration (not whole array)
 	// so un-awaited slots are still dropped once (T0503).
-	isTaskElem := s.Binding != "_" && types.IsTask(arr.Elem())
+	// T1434: IsAnyTask covers failable_task[T] too — see genForInVector.
+	isTaskElem := s.Binding != "_" && types.IsAnyTask(arr.Elem())
 	var slotPtrAlloca *ir.InstAlloca
 	if isTaskElem {
 		slotPtrAlloca = c.createEntryAlloca(irtypes.NewPointer(elemLLVM))

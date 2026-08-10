@@ -666,3 +666,174 @@ t0652_workaround_pop_then_receive() `test(exclude: wasm) {
   }
   assert(total == 84, "T0652 workaround: pop then receive");
 }
+
+// --- T1434: failable-task analog of the T0617 for-in double-free ---
+// `go! {}` handles (FailableTask[T]) held in a Vector/fixed-array slot and
+// awaited in a for-in `<-` body must null the consumed slot, exactly like the
+// plain-Task path. Before the IsAnyTask gate fix the slot was never nulled, so
+// the container's scope-exit element drop reloaded the freed G and
+// FailableTask[T].drop double-freed it (Linux segfault / macOS hang). All batch
+// tests here run under zero-leak enforcement.
+fproduce!(int n) int {
+  if n < 0 {
+    raise error("neg:{n}");
+  }
+  return n * 2;
+}
+
+// Exact tracker repro: push `go! {}` trailing-expression handles into a
+// FailableTask[int][], then await each in a for-in.
+t1434_failable_vec_iter_await_all() `test(exclude: wasm) {
+  FailableTask[int][] tasks = [];
+  for i in 0..2 {
+    tasks.push(go! {
+      base := fproduce(i)?^;
+      base + 1
+    });
+  }
+  sum := 0;
+  for t in tasks {
+    sum = sum + (<-t)?!;
+  }
+  assert(sum == 4, "T1434 failable vec iter await all");
+}
+
+// Explicit-return `go! {}` style — same double-free shape, result-production
+// style is irrelevant to the fix.
+t1434_failable_vec_iter_explicit_return() `test(exclude: wasm) {
+  FailableTask[int][] tasks = [];
+  for i in 0..3 {
+    tasks.push(go! {
+      return fproduce(i)?^;
+    });
+  }
+  sum := 0;
+  for t in tasks {
+    sum = sum + (<-t)?!;
+  }
+  assert(sum == 6, "T1434 failable vec iter explicit return");
+}
+
+// Index variant: `for idx, t in tasks`. The slot-null keys off the value
+// binding (`t`), unaffected by the index var.
+t1434_failable_vec_iter_index_var() `test(exclude: wasm) {
+  FailableTask[int][] tasks = [];
+  for i in 0..2 {
+    tasks.push(go! fproduce(i));
+  }
+  sum := 0;
+  for idx, t in tasks {
+    sum = sum + (<-t)?!;
+  }
+  assert(sum == 2, "T1434 failable vec iter index var");
+}
+
+// Fixed-array path: FailableTask[int][3] iterated + awaited (genForInArray gate).
+t1434_failable_arr_iter_await_all() `test(exclude: wasm) {
+  FailableTask[int][3] tasks = [go! fproduce(1), go! fproduce(2), go! fproduce(3)];
+  sum := 0;
+  for t in tasks {
+    sum = sum + (<-t)?!;
+  }
+  assert(sum == 12, "T1434 failable arr iter await all");
+}
+
+// Partial await + `break`: the awaited slot is nulled at the receive site, the
+// remaining un-awaited slots must drop exactly once via the scope-exit element
+// walk (T0503 non-regression). Zero leaks.
+t1434_failable_vec_iter_partial_break() `test(exclude: wasm) {
+  FailableTask[int][] tasks = [];
+  for i in 0..3 {
+    tasks.push(go! fproduce(i));
+  }
+  for t in tasks {
+    x := (<-t)?!;
+    assert(x == 0, "T1434 partial break first value");
+    break;
+  }
+  // The two un-awaited tasks drop once each at scope exit (FailableTask.drop).
+}
+
+// Error-surfacing handler: mix an erroring `go!` with succeeding ones, surface
+// via `? e { }`. The error path must drop cleanly with no leak, and awaited
+// slots (ok or error) are nulled so scope-exit drop no-ops on them.
+t1434_failable_vec_iter_error_handler() `test(exclude: wasm) {
+  FailableTask[int][] tasks = [];
+  tasks.push(go! fproduce(2));
+  tasks.push(go! fproduce(-1));
+  tasks.push(go! fproduce(3));
+  oks := 0;
+  errs := 0;
+  for t in tasks {
+    v := (<-t)? e {
+      errs = errs + 1;
+      -1
+    };
+    if v >= 0 {
+      oks = oks + 1;
+    }
+  }
+  assert(oks == 2, "T1434 error handler ok count");
+  assert(errs == 1, "T1434 error handler err count");
+}
+
+// --- T1434 heap-result variants ---
+// The double-free the fix prevents is of the G handle, but the FailableTask[T]
+// drop path also frees the task's heap *result* for un-awaited slots. int
+// payloads (above) never exercise that; these use a string result so the
+// scope-exit element drop must free the heap payload exactly once (zero leaks).
+fproduce_str!(int n) string {
+  if n < 0 {
+    raise error("neg:{n}");
+  }
+  return "v{n}";
+}
+
+// Heap-result failable tasks, await all in for-in vector.
+t1434_failable_vec_iter_heap_await_all() `test(exclude: wasm) {
+  FailableTask[string][] tasks = [];
+  for i in 0..3 {
+    tasks.push(go! fproduce_str(i));
+  }
+  total := 0;
+  for t in tasks {
+    s := (<-t)?!;
+    total = total + s.bytes().len;
+  }
+  assert(total == 6, "T1434 heap results awaited (v0,v1,v2)");
+}
+
+// Heap-result partial break: the un-awaited string-producing tasks must drop
+// once each, freeing their heap result via the scope-exit walk (T0503, no leak).
+t1434_failable_vec_iter_heap_partial_break() `test(exclude: wasm) {
+  FailableTask[string][] tasks = [];
+  for i in 0..4 {
+    tasks.push(go! fproduce_str(i));
+  }
+  for t in tasks {
+    s := (<-t)?!;
+    assert(s == "v0", "T1434 heap first value");
+    break;
+  }
+}
+
+// Heap-result error handler: an erroring task mixed with a succeeding one, the
+// error surfaced via `? e { }`. Error and ok paths both drop cleanly, no leak.
+t1434_failable_vec_iter_heap_error_handler() `test(exclude: wasm) {
+  FailableTask[string][] tasks = [];
+  tasks.push(go! fproduce_str(1));
+  tasks.push(go! fproduce_str(-1));
+  oks := 0;
+  errs := 0;
+  for t in tasks {
+    s := (<-t)? e {
+      errs = errs + 1;
+      ""
+    };
+    if s.bytes().len > 0 {
+      oks = oks + 1;
+    }
+  }
+  assert(oks == 1, "T1434 heap error handler ok count");
+  assert(errs == 1, "T1434 heap error handler err count");
+}

@@ -390,3 +390,65 @@ func TestT0617_ForInChannelRecvDoesNotNullSlot(t *testing.T) {
 		t.Errorf("expected `call void @\"Channel[int].drop\"(` scope-exit element drop walk:\n%s", body)
 	}
 }
+
+// TestT1434_FailableTaskVectorForInRecvNullsSlot — the failable analog of T0617:
+// `go! {}` handles (failable_task[int]) held in a Vector slot, awaited in a
+// for-in `<-` body, must null the consumed slot so the scope-exit element drop
+// walk reloads null and FailableTask[int].drop no-ops (no double-free — Linux
+// segfault / macOS hang before the IsAnyTask gate fix).
+func TestT1434_FailableTaskVectorForInRecvNullsSlot(t *testing.T) {
+	ir := generateIR(t, `
+		produce!(int x) int { return x; }
+		caller() {
+			Vector[FailableTask[int]] v = [go! produce(1), go! produce(2)];
+			for h in v { x := (<-h)?!; }
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	bodyBlk := blockByPrefixT0638(body, "forin.body")
+	if bodyBlk == "" {
+		t.Fatalf("expected forin.body block (failable for-in receive operand):\n%s", body)
+	}
+	// The slot-null: a store of null i8* into the recorded slot at the receive
+	// site inside the loop body. Absent before the IsAnyTask gate fix (T1434).
+	if !strings.Contains(bodyBlk, "store i8* null, i8**") {
+		t.Errorf("expected slot-null `store i8* null, i8**` in forin.body block (T1434):\n%s", bodyBlk)
+	}
+	// The scope-exit Vector element drop walk must still be present — the slot is
+	// nulled per-iteration, so the drop walk runs and FailableTask[int].drop
+	// null-checks (T0503 preserved).
+	if !strings.Contains(body, `@"FailableTask[int].drop"`) {
+		t.Errorf("expected @\"FailableTask[int].drop\" scope-exit element drop walk:\n%s", body)
+	}
+}
+
+// TestT1434_FailableTaskArrayForInRecvNullsSlot — same for the fixed-array path:
+// `FailableTask[int][2] ts = [...]; for h in ts { (<-h)?! }`.
+func TestT1434_FailableTaskArrayForInRecvNullsSlot(t *testing.T) {
+	ir := generateIR(t, `
+		produce!(int x) int { return x; }
+		caller() {
+			FailableTask[int][2] ts = [go! produce(1), go! produce(2)];
+			for h in ts { x := (<-h)?!; }
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	bodyBlk := blockByPrefixT0638(body, "forin.body")
+	if bodyBlk == "" {
+		t.Fatalf("expected forin.body block (failable array for-in receive operand):\n%s", body)
+	}
+	if !strings.Contains(bodyBlk, "store i8* null, i8**") {
+		t.Errorf("expected slot-null `store i8* null, i8**` in forin.body block (T1434 array):\n%s", bodyBlk)
+	}
+	if !strings.Contains(body, `@"FailableTask[int].drop"`) {
+		t.Errorf("expected @\"FailableTask[int].drop\" scope-exit element drop walk:\n%s", body)
+	}
+}

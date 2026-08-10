@@ -125,6 +125,7 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 	}
 
 	if !c.matchesTarget(d.Annotations) {
+		c.validateFilteredTargetMeta(d.Annotations)
 		c.info.FilteredDecls[d] = true
 		return
 	}
@@ -149,6 +150,7 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 		return
 	}
 	if !c.matchesTarget(d.Annotations) {
+		c.validateFilteredTargetMeta(d.Annotations)
 		c.info.FilteredDecls[d] = true
 		return
 	}
@@ -169,6 +171,7 @@ func (c *Checker) declareFunc(d *ast.FuncDecl) {
 		return
 	}
 	if !c.matchesTarget(d.Annotations) {
+		c.validateFilteredTargetMeta(d.Annotations)
 		c.info.FilteredDecls[d] = true
 		return
 	}
@@ -1321,7 +1324,6 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			}
 		}
 
-		c.validateTestExclude(d.Annotations)
 		if expected, ok := extractTestExpected(d.Annotations); ok {
 			// `test(expected="...") — e2e output test on main()
 			if d.Name != "main" {

@@ -115,9 +115,9 @@ func (c *Checker) matchesTarget(annotations []*ast.MetaAnnotation) bool {
 //	!windows         — logical not
 //	linux || macos   — logical or
 //	linux && x86_64  — logical and
-//	(linux || macos) — grouping (parentheses are transparent in the AST)
+//	(linux || macos) — grouping
 func (c *Checker) evalTargetExpr(expr ast.Expr) bool {
-	switch e := expr.(type) {
+	switch e := unwrapParens(expr).(type) {
 	case *ast.IdentExpr:
 		return c.matchTargetIdent(e.Name)
 	case *ast.UnaryExpr:
@@ -135,7 +135,9 @@ func (c *Checker) evalTargetExpr(expr ast.Expr) bool {
 	return true // unknown expression form — include by default (safe)
 }
 
-// ValidExcludeIdents is the set of valid identifier names for test(exclude:) parameters.
+// ValidExcludeIdents is the set of valid platform identifier names accepted in
+// `test(exclude: cond) and `target(cond) conditions — the single source of
+// truth for both the checks in metaparams.go and their diagnostics.
 var ValidExcludeIdents = map[string]bool{
 	"windows": true, "linux": true, "macos": true,
 	"wasm": true, "wasi": true, "web": true,

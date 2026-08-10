@@ -14307,7 +14307,7 @@ func TestWasmImportRequiresTwoParams(t *testing.T) {
 		main() {}
 	`
 	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
-	expectError(t, errs, "requires exactly 2 parameters")
+	expectError(t, errs, "`wasm_import requires 2 positional parameters (module name, import name)")
 }
 
 func TestWasmImportWarnsWithoutWasmTarget(t *testing.T) {
@@ -16087,7 +16087,7 @@ func TestLifetimeWrongParamCount(t *testing.T) {
 	errs := checkErrs(t, `
 		bad(string a `+"`"+`lifetime) string& { return a; }
 	`)
-	expectError(t, errs, "`lifetime requires exactly one identifier parameter")
+	expectError(t, errs, "`lifetime requires 1 positional parameter (name)")
 }
 
 func TestLifetimeStringParam(t *testing.T) {
@@ -16095,7 +16095,7 @@ func TestLifetimeStringParam(t *testing.T) {
 	errs := checkErrs(t, `
 		bad(string a `+"`"+`lifetime("x")) string& { return a; }
 	`)
-	expectError(t, errs, "`lifetime parameter must be an identifier")
+	expectError(t, errs, "`lifetime parameter 'name' must be an identifier")
 }
 
 func TestLifetimeOnMethod(t *testing.T) {

@@ -339,6 +339,33 @@ func TestDocDeprecatedFunc(t *testing.T) {
 	assertContainsDoc(t, out, "DEPRECATED")
 }
 
+// T1449: `deprecated(since: …, message: …) used to be read positionally, so the
+// version string was rendered as the deprecation message. The named parameter is
+// now read by name — this is the user-visible payoff of that fix.
+func TestDocDeprecatedNamedMessage(t *testing.T) {
+	out := docFromSource(t, `
+		type OldThing `+"`public `deprecated(since: \"1.3\", message: \"use NewThing\")"+` {}
+		old_func() `+"`public `deprecated(since: \"1.3\", message: \"use new_func\")"+` {}
+		enum OldEnum `+"`public `deprecated(since: \"1.3\", message: \"use NewEnum\")"+` { A, B }
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, `DEPRECATED("use NewThing")`)
+	assertContainsDoc(t, out, `DEPRECATED("use new_func")`)
+	assertContainsDoc(t, out, `DEPRECATED("use NewEnum")`)
+	assertNotContainsDoc(t, out, `DEPRECATED("1.3")`)
+}
+
+// T1449: `deprecated(since: …) alone still marks the entity deprecated, but has
+// no message to render — the version must not be substituted for one.
+func TestDocDeprecatedSinceOnly(t *testing.T) {
+	out := docFromSource(t, `
+		type OldThing `+"`public `deprecated(since: \"1.3\")"+` {}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "DEPRECATED")
+	assertNotContainsDoc(t, out, `DEPRECATED("`)
+}
+
 // === Enum compact mode ===
 
 func TestDocEnumCompactFlat(t *testing.T) {

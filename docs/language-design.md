@@ -2006,6 +2006,28 @@ MetaParams     = MetaParam ( ',' MetaParam )* ;
 MetaParam      = Expression | Identifier ':' Expression ;
 ```
 
+**All positional parameters must precede all named parameters** — the same rule as call arguments elsewhere in the language. `` `test(exclude: wasm, macos) `` is a compilation error; write `` `test(exclude: wasm || macos) ``.
+
+Each annotation declares a fixed parameter contract. Unknown named parameters, positional parameters beyond the declared arity, missing required positional parameters, duplicate parameters, and values of the wrong form are all compilation errors — a parameter the author wrote is never silently discarded.
+
+| Annotation | Positional | Named |
+|---|---|---|
+| `` `doc `` | `text` (string, required) | — |
+| `` `deprecated `` | `message` (string, optional) | `since` (string), `message` (string) |
+| `` `test `` | — | `expected` (string), `exclude` (condition), `timeout` (string), `memory_limit` (string), `allow_leaks` (bool) |
+| `` `embed `` | `path` (string, required) | `compress` (bool) |
+| `` `key `` | `name` (string, required) | — |
+| `` `serializable `` | — | `tag` (string) |
+| `` `lifetime `` | `name` (identifier, required) | — |
+| `` `wasm_import `` | `module name`, `import name` (strings, required) | — |
+| `` `target `` | `condition` (target condition, required) | — |
+| `` `align `` | `alignment` (integer, required) | — |
+| `` `extern `` | `symbol` (string, optional) | — |
+
+Every other built-in annotation takes no parameters.
+
+A *target condition* is an identifier drawn from `windows`, `linux`, `macos`, `wasm`, `wasi`, `web`, `posix`, `x86_64`, `aarch64`, `arm64`, optionally combined with `!`, `||`, `&&`, and parentheses (see Section 8.5). `` `test(exclude:) `` accepts the narrower form of an identifier or a `||` chain of identifiers.
+
 Meta annotations appear in post-definition position:
 
 - **Types**: `type Foo `meta { ... }`
@@ -2017,9 +2039,9 @@ Meta annotations appear in post-definition position:
 ### 8.2 Examples
 
 ```promise
-type OldThing `serializable `version(2) `deprecated(since: "1.3", message: "Use newMethod instead") {
-  string name `json(name: "user_name") `required;
-  int age `json(name: "user_age");
+type OldThing `serializable(tag: "kind") `deprecated(since: "1.3", message: "Use NewThing instead") {
+  string name `key("user_name") `required;
+  int age `key("user_age");
 }
 
 fastAdd(int a, int b) int `inline {
@@ -2045,9 +2067,9 @@ testAddition() `test {
 | `` `deprecated`` | any         | Mark as deprecated with optional message         |
 | `` `test ``   | functions      | Mark as a test function                          |
 | `` `serializable`` | types     | Auto-generate serialization code                 |
-| `` `align(N)``| types, fields  | Memory alignment                                 |
+| `` `align(N)``| types          | Memory alignment (single integer literal)        |
 | `` `packed `` | types          | Pack fields without padding                      |
-| `` `extern(abi)``| functions   | Foreign function interface                       |
+| `` `extern ``, `` `extern("c_symbol")``| functions | Foreign function interface; the optional string is the C symbol name (default `promise_<name>`) |
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
 | `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
 | `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |

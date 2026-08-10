@@ -87,7 +87,15 @@ var builtinMetas = map[string][]MetaTarget{
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:
-// known names, correct targets, no duplicates.
+// known names, correct targets, no duplicates, and — via validateMetaParams —
+// that each annotation's parameter list matches its declared contract (T1449).
+//
+// Note: declarations filtered out by `target(cond) never reach this check
+// (see Info.FilteredDecls), so a malformed annotation on a platform-specific
+// declaration surfaces only on the targets that compile it — consistent with
+// the existing behavior that filtered bodies are not type-checked either. The
+// one exception is the `target annotation itself, which is validated on the
+// filtering path too (see validateFilteredTargetMeta).
 func (c *Checker) validateMetas(annotations []*ast.MetaAnnotation, target MetaTarget) {
 	seen := make(map[string]bool)
 	for _, ann := range annotations {
@@ -106,17 +114,22 @@ func (c *Checker) validateMetas(annotations []*ast.MetaAnnotation, target MetaTa
 			c.errorf(ann.Pos(), "meta `%s cannot be applied to %s", ann.Name, targetLabel(target))
 		}
 
-		// Check for duplicate named parameters within this annotation.
-		seenParams := make(map[string]bool)
-		for _, p := range ann.Params {
-			if p.Name == "" {
-				continue // positional params don't have names to conflict
-			}
-			if seenParams[p.Name] {
-				c.errorf(p.Pos(), "duplicate annotation parameter '%s' in `%s", p.Name, ann.Name)
-				continue
-			}
-			seenParams[p.Name] = true
+		c.validateMetaParams(ann)
+	}
+}
+
+// validateFilteredTargetMeta validates the `target annotation of a declaration
+// that `target(cond) has just excluded from this build. Excluded declarations
+// never reach validateMetas, so without this a typo in the condition —
+// `target(sparc64) — would evaluate false on every platform and silently drop
+// the declaration from every build with no diagnostic anywhere (T1449). A
+// condition that *does* match leaves the declaration in the build, where
+// validateMetas reports it, so the two paths never double-report.
+func (c *Checker) validateFilteredTargetMeta(annotations []*ast.MetaAnnotation) {
+	for _, ann := range annotations {
+		if ann.Name == "target" {
+			c.validateMetaParams(ann)
+			return
 		}
 	}
 }
@@ -196,21 +209,14 @@ func isRefResultType(t types.Type) bool {
 // - `lifetime on a param requires the param to be a reference type
 // - `lifetime on a function/method requires a reference return type
 // - The return lifetime name must match a declared parameter lifetime
-// - `lifetime must have exactly one identifier parameter
+//
+// The annotation's shape (exactly one positional identifier) is enforced by the
+// shared parameter-contract validator in metaparams.go (T1449).
 func (c *Checker) validateLifetimes(sig *types.Signature, funcAnnotations []*ast.MetaAnnotation, astParams []*ast.Param) {
 	// Validate `lifetime annotation format on parameters
 	for i, p := range astParams {
 		for _, ann := range p.Annotations {
 			if ann.Name != "lifetime" {
-				continue
-			}
-			// Check format: must have exactly one positional identifier parameter
-			if len(ann.Params) != 1 || ann.Params[0].Name != "" {
-				c.errorf(ann.Pos(), "`lifetime requires exactly one identifier parameter, e.g. `lifetime(a)")
-				continue
-			}
-			if _, ok := ann.Params[0].Value.(*ast.IdentExpr); !ok {
-				c.errorf(ann.Pos(), "`lifetime parameter must be an identifier, e.g. `lifetime(a)")
 				continue
 			}
 			// Check that the param is a reference type
@@ -223,15 +229,6 @@ func (c *Checker) validateLifetimes(sig *types.Signature, funcAnnotations []*ast
 	// Validate `lifetime on the function/method (refers to return type)
 	for _, ann := range funcAnnotations {
 		if ann.Name != "lifetime" {
-			continue
-		}
-		// Check format
-		if len(ann.Params) != 1 || ann.Params[0].Name != "" {
-			c.errorf(ann.Pos(), "`lifetime requires exactly one identifier parameter, e.g. `lifetime(a)")
-			continue
-		}
-		if _, ok := ann.Params[0].Value.(*ast.IdentExpr); !ok {
-			c.errorf(ann.Pos(), "`lifetime parameter must be an identifier, e.g. `lifetime(a)")
 			continue
 		}
 
@@ -260,15 +257,21 @@ func (c *Checker) validateLifetimes(sig *types.Signature, funcAnnotations []*ast
 }
 
 // extractDeprecated returns the deprecation message from a `deprecated annotation.
+// The message may be given positionally — `deprecated("use X instead") — or by
+// name — `deprecated(since: "1.3", message: "use X instead"). T1449: the named
+// form is read by name; previously Params[0] was read positionally, so
+// `deprecated(since: …) reported the version as the message.
 // Returns "" if not deprecated. Returns " " if deprecated with no message.
 func extractDeprecated(annotations []*ast.MetaAnnotation) string {
 	for _, ann := range annotations {
 		if ann.Name != "deprecated" {
 			continue
 		}
-		if len(ann.Params) > 0 {
-			msg := stringLitValue(ann.Params[0].Value)
-			if msg != "" {
+		for _, p := range ann.Params {
+			if p.Name != "" && p.Name != "message" {
+				continue
+			}
+			if msg := stringLitValue(p.Value); msg != "" {
 				return msg
 			}
 		}
@@ -482,7 +485,7 @@ func extractTestExclude(annotations []*ast.MetaAnnotation) []string {
 
 // collectExcludeIdents recursively gathers identifier names from || expressions.
 func collectExcludeIdents(expr ast.Expr) []string {
-	switch e := expr.(type) {
+	switch e := unwrapParens(expr).(type) {
 	case *ast.IdentExpr:
 		return []string{e.Name}
 	case *ast.BinaryExpr:
@@ -491,41 +494,6 @@ func collectExcludeIdents(expr ast.Expr) []string {
 		}
 	}
 	return nil
-}
-
-// validateTestExclude validates the exclude parameter(s) of a `test annotation.
-func (c *Checker) validateTestExclude(annotations []*ast.MetaAnnotation) {
-	for _, ann := range annotations {
-		if ann.Name != "test" {
-			continue
-		}
-		for _, p := range ann.Params {
-			if p.Name == "exclude" {
-				c.validateExcludeExpr(p.Value)
-			}
-		}
-	}
-}
-
-// validateExcludeExpr validates an exclude expression (identifier or || of identifiers).
-func (c *Checker) validateExcludeExpr(expr ast.Expr) {
-	switch e := expr.(type) {
-	case *ast.IdentExpr:
-		if !ValidExcludeIdents[e.Name] {
-			c.errorf(e.Pos(), "unknown exclude target %q; valid identifiers: windows, linux, macos, wasm, wasi, web, posix, x86_64, aarch64, arm64", e.Name)
-		}
-	case *ast.BinaryExpr:
-		if e.Op == ast.BinOr {
-			c.validateExcludeExpr(e.Left)
-			c.validateExcludeExpr(e.Right)
-		} else {
-			c.errorf(expr.Pos(), "exclude expression must use || to combine target identifiers")
-		}
-	case *ast.StringLit:
-		c.errorf(expr.Pos(), "exclude target must be an identifier, not a string literal (e.g., exclude: wasm instead of exclude: \"wasm32\")")
-	default:
-		c.errorf(expr.Pos(), "invalid exclude expression; expected identifier or identifier || identifier")
-	}
 }
 
 // extractTestAllowLeaks extracts the allow_leaks flag from a `test(allow_leaks: true) annotation.
@@ -553,15 +521,12 @@ func extractEmbedPath(annotations []*ast.MetaAnnotation) (string, bool) {
 		if ann.Name != "embed" {
 			continue
 		}
-		if len(ann.Params) > 0 {
-			// First positional parameter is the file path
-			for _, p := range ann.Params {
-				if p.Name == "" {
-					return evalStringLit(p.Value), true
-				}
-			}
+		// The path is the first positional parameter; its presence and string
+		// form are enforced by the parameter-contract validator (T1449).
+		if len(ann.Params) > 0 && ann.Params[0].Name == "" {
+			return evalStringLit(ann.Params[0].Value), true
 		}
-		return "", true // `embed with no path — will be caught as an error
+		return "", true // `embed with no path — already reported as an error
 	}
 	return "", false
 }
@@ -611,20 +576,8 @@ func (c *Checker) validateWasmImport(d *ast.FuncDecl) {
 		return
 	}
 
-	// Must have exactly 2 positional string parameters
-	if len(ann.Params) != 2 {
-		c.errorf(ann.Pos(), "`wasm_import requires exactly 2 parameters: module name and import name")
-		return
-	}
-	for i, p := range ann.Params {
-		if _, ok := p.Value.(*ast.StringLit); !ok {
-			label := "module name"
-			if i == 1 {
-				label = "import name"
-			}
-			c.errorf(p.Pos(), "`wasm_import %s must be a string literal", label)
-		}
-	}
+	// Arity and string-literal shape are enforced by the shared
+	// parameter-contract validator in metaparams.go (T1449).
 
 	// Warn if no `target(wasm) — annotation will be ignored on non-WASM targets
 	hasWasmTarget := false
@@ -641,7 +594,7 @@ func (c *Checker) validateWasmImport(d *ast.FuncDecl) {
 
 // exprMentionsWasm returns true if a target condition expression references "wasm", "wasi", or "web".
 func (c *Checker) exprMentionsWasm(expr ast.Expr) bool {
-	switch e := expr.(type) {
+	switch e := unwrapParens(expr).(type) {
 	case *ast.IdentExpr:
 		return e.Name == "wasm" || e.Name == "wasi" || e.Name == "web"
 	case *ast.UnaryExpr:

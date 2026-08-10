@@ -779,17 +779,31 @@ t1385_result_never_received() `test {
   }
 }
 
-t1385_gobang_result_never_received() `test {
+// T1381 made `failable_task[T]` must-use, so a `go!` handle can no longer simply
+// fall out of scope unreceived — that is a compile error. The drop path this test
+// exercises is still reachable the one way must-use allows: leave the scope while
+// the task is still owned, via an error-propagation early exit. The task's drop
+// must free both the buffer and the heap result it now owns.
+gobang_result_dropped!() void {
   done := channel[int](1);
-  {
-    t := go! {
-      base := produce(1)?^; // base == 2
-      s := "hea{base}";
-      done.send(s.len);
-      return s;
-    };
-    assert((<-done)! == 4, "the go! block ran and produced its result");
-  }
+  t := go! {
+    base := produce(1)?^; // base == 2
+    s := "hea{base}";
+    done.send(s.len);
+    return s;
+  };
+  assert((<-done)! == 4, "the go! block ran and produced its result");
+  produce(-1)?^; // propagates → early exit drops the still-owned t
+  (<-t)?^; // unreachable; discharges the obligation on the success edge
+}
+
+t1385_gobang_result_never_received() `test {
+  got := false;
+  gobang_result_dropped()? e {
+    got = true;
+    assert(e.message == "neg:-1", "the propagated error surfaces");
+  };
+  assert(got, "the dropped go! result path ran and did not leak");
 }
 
 // The receive happens but its value is discarded — the result still has to be

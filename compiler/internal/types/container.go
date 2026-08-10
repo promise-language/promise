@@ -227,6 +227,107 @@ func AsFailableTask(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// ContainsFailableTask reports whether typ transitively owns a `failable_task[T]`
+// (§17.2.1). A `failable_task[T]` carries an error that must reach exactly one
+// receiver, so it — and any type that owns it — is a **must-use** value that may
+// not be implicitly dropped. This predicate drives every must-use decision
+// (linearity enforcement in the ownership pass, expr-statement discard rejection
+// in sema).
+//
+// UNLIKE firstNestedSingleOwnerHandle (which stops at std native container
+// fields), this descends into EVERYTHING that transitively owns the handle:
+// Instance type-args (covers `failable_task[T][]`, `map[K, failable_task[T]]`,
+// `Arc[failable_task[T]]`, `failable_task[T]?` as an Optional-instance), user
+// *Named fields, and Enum variant payloads — because a `Holder{ failable_task t }`
+// or a `failable_task[T][]` is itself must-use. A bare *TypeParam → false:
+// generic bodies are checked with unbound params, and each concrete
+// instantiation is re-validated at its own site (mirrors firstSingleOwnerHandle).
+func ContainsFailableTask(typ Type) bool {
+	return containsFailableTask(typ, nil)
+}
+
+func containsFailableTask(typ Type, seen map[Type]bool) bool {
+	if typ == nil {
+		return false
+	}
+	if seen == nil {
+		seen = make(map[Type]bool)
+	}
+	switch t := typ.(type) {
+	case *Instance:
+		if t.origin == TypFailableTask {
+			return true
+		}
+		for _, ta := range t.typeArgs {
+			if containsFailableTask(ta, seen) {
+				return true
+			}
+		}
+		// Recurse a generic user type/enum origin's fields/variants under the
+		// type-arg substitution (e.g. Holder[int] whose failable_task[int] field
+		// is concrete, not reachable via TypeArgs).
+		switch origin := t.origin.(type) {
+		case *Named:
+			if seen[origin] {
+				return false
+			}
+			seen[origin] = true
+			subst := BuildSubstMap(origin.TypeParams(), t.typeArgs)
+			for _, f := range origin.AllFields() {
+				if containsFailableTask(Substitute(f.Type(), subst), seen) {
+					return true
+				}
+			}
+		case *Enum:
+			if seen[origin] {
+				return false
+			}
+			seen[origin] = true
+			subst := BuildSubstMap(origin.TypeParams(), t.typeArgs)
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					if containsFailableTask(Substitute(f.Type(), subst), seen) {
+						return true
+					}
+				}
+			}
+		}
+	case *Named:
+		if seen[t] {
+			return false
+		}
+		seen[t] = true
+		for _, f := range t.AllFields() {
+			if containsFailableTask(f.Type(), seen) {
+				return true
+			}
+		}
+	case *Enum:
+		if seen[t] {
+			return false
+		}
+		seen[t] = true
+		for _, v := range t.Variants() {
+			for _, f := range v.Fields() {
+				if containsFailableTask(f.Type(), seen) {
+					return true
+				}
+			}
+		}
+	case *Optional:
+		return containsFailableTask(t.Elem(), seen)
+	case *Tuple:
+		for _, e := range t.elems {
+			if containsFailableTask(e, seen) {
+				return true
+			}
+		}
+	case *Array:
+		return containsFailableTask(t.elem, seen)
+	}
+	return false
+}
+
 // IsAnyTask reports whether t is a Task or FailableTask instance. Both are
 // single-owner goroutine handles with identical LLVM representation (an i8* G
 // pointer) and identical move/ownership plumbing — they differ only in that a

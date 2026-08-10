@@ -96,3 +96,24 @@ func TestT1379_PlainTaskUnaffected(t *testing.T) {
 		t.Errorf("plain `go` must not emit a FailableTask drop:\n%s", ir)
 	}
 }
+
+// T1381: `<-tasks` drain over a failable_task[T][] lowers to a per-element await
+// loop that collects successes into a fresh Vector[T] and returns the failable
+// aggregate, capturing the first error by index. The IR carries the drain loop
+// blocks, the accumulator push, and the success/error aggregate-build split.
+func TestT1381_DrainTasksLowering(t *testing.T) {
+	ir := generateIR(t, `
+		produce!(int x) int { return x; }
+		run!() int {
+			v := [go! produce(1), go! produce(2)];
+			xs := (<-v)?^;
+			return xs.len;
+		}
+	`)
+	assertContains(t, ir, "drain.head")
+	assertContains(t, ir, "drain.build.err")
+	// Successes are pushed onto the fresh accumulator vector.
+	assertContains(t, ir, "@promise_vector_push(")
+	// The partially-collected result vector is dropped on the error path.
+	assertContains(t, ir, "@Vector.drop")
+}

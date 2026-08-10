@@ -1,0 +1,164 @@
+// T1381: `<-tasks` drain over `failable_task[T][]` (§17.2.1). A drain consumes
+// the vector, awaits every task in index order, and yields `T[]` — succeeding
+// only if every task succeeded, else failing with the FIRST error by index.
+// Remaining errors are discharged by the drain (not silently swallowed), and on
+// the error path the partially-collected result vector is dropped leak-free. All
+// batch tests compile into one binary and run under zero-leak enforcement.
+produce!(int x) int {
+  if x < 0 {
+    raise error("neg:{x}");
+  }
+  return x * 2;
+}
+
+fetch_str!(int x) string {
+  if x < 0 {
+    raise error("bad:{x}");
+  }
+  return "v={x}";
+}
+
+// Drain success (int): all tasks succeed → Vector[int] in index order.
+drain_all_ok() `test {
+  handles := [go! produce(1), go! produce(2), go! produce(3)];
+  results := (<-handles)?!;
+  assert(results.len == 3, "drain len");
+  assert(results[0] == 2, "drain[0]");
+  assert(results[1] == 4, "drain[1]");
+  assert(results[2] == 6, "drain[2]");
+}
+
+// Drain success (heap string element): the collected strings survive the drain
+// and are dropped leak-free after the assertions.
+drain_all_ok_str() `test {
+  handles := [go! fetch_str(1), go! fetch_str(2)];
+  strs := (<-handles)?!;
+  assert(strs.len == 2, "str drain len");
+  assert(strs[0] == "v=1", "str drain[0]");
+  assert(strs[1] == "v=2", "str drain[1]");
+}
+
+// Fan-out then drain: build a failable_task[int][] dynamically (one spawn per
+// input) and await all with a single drain. (The `ids.map(id => go! produce(id))`
+// spelling from §17.2.1 is blocked on a parser gap, T1398 — a loop-built vector
+// exercises the same drain over a dynamically-sized handle vector.)
+build_handles!(int n) failable_task[int][] {
+  hs := failable_task[int][]();
+  i := 1;
+  while i <= n {
+    hs.push(go! produce(i)); // move each handle into the vector (a discharge)
+    i = i + 1;
+  }
+  return hs;
+}
+
+drain_fanout() `test {
+  handles := build_handles(4)?!;
+  results := (<-handles)?!;
+  assert(results.len == 4, "fanout drain len");
+  assert(results[0] == 2, "fanout drain[0]");
+  assert(results[3] == 8, "fanout drain[3]");
+}
+
+// Drain a call-result temp directly: `<-make(...)` where `make` is itself a
+// failable function returning failable_task[int][] — the operand is
+// auto-propagated to the raw vector before draining (leak-free, no double-free).
+drain_temp_operand() `test {
+  r := drain_temp_impl()? e {
+    -1
+  };
+  assert(r == 3, "temp-operand drain len");
+}
+
+drain_temp_impl!() int {
+  results := (<-build_handles(3))?^;
+  return results.len;
+}
+
+// Drain empty vector: yields an empty Vector[int], no error.
+drain_empty() `test {
+  handles := new_empty();
+  results := (<-handles)?!;
+  assert(results.len == 0, "empty drain len");
+}
+
+new_empty() failable_task[int][] {
+  h := failable_task[int][]();
+  return h;
+}
+
+// Drain first-error-by-index: two tasks fail (indices 1 and 3); the drain fails
+// with the FIRST by index (index 1). The later error (index 3) is discharged and
+// the partially-collected success (index 0) is dropped — leak-free on both.
+drain_first_error_impl!() int {
+  handles := [go! produce(1), go! produce(-2), go! produce(3), go! produce(-4)];
+  results := (<-handles)?^;
+  return results.len;
+}
+
+drain_first_error_by_index() `test {
+  msg := "";
+  r := drain_first_error_impl()? e {
+    msg = e.message;
+    -1
+  };
+  assert(r == -1, "drain error path taken");
+  assert(msg == "neg:-2", "first error by index");
+}
+
+// Drain error with a heap (string) partial success: index 0 succeeds with a heap
+// string that must be dropped on the error path; index 1 fails first.
+drain_str_error_impl!() int {
+  handles := [go! fetch_str(1), go! fetch_str(-2), go! fetch_str(3)];
+  strs := (<-handles)?^;
+  return strs.len;
+}
+
+drain_str_error_frees_partial() `test {
+  msg := "";
+  r := drain_str_error_impl()? e {
+    msg = e.message;
+    -1
+  };
+  assert(r == -1, "str drain error path taken");
+  assert(msg == "bad:-2", "str first error by index");
+}
+
+// Drain where EVERY task fails (index 0 too): the first error (index 0) is kept
+// and each of the remaining errors (indices 1, 2) is discharged by the drain —
+// exercising the later-error drop loop repeatedly (error objects are heap, so a
+// missed discharge would leak) and the empty partial-success vector on the error
+// path.
+drain_all_error_impl!() int {
+  handles := [go! produce(-1), go! produce(-2), go! produce(-3)];
+  results := (<-handles)?^;
+  return results.len;
+}
+
+drain_all_fail_first_by_index() `test {
+  msg := "";
+  r := drain_all_error_impl()? e {
+    msg = e.message;
+    -1
+  };
+  assert(r == -1, "all-fail drain error path taken");
+  assert(msg == "neg:-1", "all-fail keeps first error, discharges rest");
+}
+
+// Single-task drain that fails: the whole error handling reduces to index 0 →
+// firstErrBlk with no later-error discharge and an empty partial vector.
+drain_single_error_impl!() int {
+  handles := [go! produce(-7)];
+  results := (<-handles)?^;
+  return results.len;
+}
+
+drain_single_error() `test {
+  msg := "";
+  r := drain_single_error_impl()? e {
+    msg = e.message;
+    -1
+  };
+  assert(r == -1, "single-task drain error path taken");
+  assert(msg == "neg:-7", "single-task drain error message");
+}

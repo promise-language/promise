@@ -19891,7 +19891,194 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 	if origin == types.TypChannel {
 		return c.genReceiveChannel(e, inst)
 	}
+	// T1381: `<-tasks` where tasks : failable_task[T][] is a drain (sema records
+	// the result type as Vector[T] and marks it failable). The operand is a
+	// Vector instance whose element is a FailableTask.
+	if origin == types.TypVector {
+		return c.genDrainTasks(e, inst)
+	}
 	return c.genReceiveTask(e, inst)
+}
+
+// genDrainTasks generates code for `<-tasks` where tasks : failable_task[T][]
+// (§17.2.1). It consumes the vector, awaits every task in index order, and
+// collects the successes into a fresh Vector[T]. It returns the failable
+// aggregate `{ i1 is_error, i8* vec, i8* err }` — succeeding (is_error=0, vec)
+// only if every task succeeded, else failing (is_error=1, err) with the FIRST
+// error by index. Remaining errors are discharged via emitFailableErrorDrop (not
+// silently dropped); on the error path the partially-collected result vector is
+// dropped leak-free. The aggregate shape matches computeResultType(i8*), so the
+// ordinary failable-surfacing machinery (auto-propagate / `?!` / `?^` / `? e {}`
+// / `return`) consumes it exactly like any failable call. (T1381)
+func (c *Compiler) genDrainTasks(e *ast.UnaryExpr, inst *types.Instance) value.Value {
+	// inst is Vector[FailableTask[T]] — extract the success element type T.
+	elemFT := inst.TypeArgs()[0]
+	if c.typeSubst != nil {
+		elemFT = types.Substitute(elemFT, c.typeSubst)
+	}
+	succType, _ := types.AsFailableTask(elemFT)
+	isVoidSucc := succType == nil || succType == types.TypVoid
+	var succLLVM irtypes.Type = irtypes.Void
+	var succSize int64
+	if !isVoidSucc {
+		succLLVM = c.resolveType(succType)
+		succSize = int64(c.typeSize(succLLVM))
+	}
+	// Result aggregate: { i1 is_error, i8* vec, i8* err } — Vector[T] resolves to
+	// i8*, so the value field is i8*.
+	aggType := computeResultType(irtypes.I8Ptr)
+
+	// Evaluate the source vector (an i8* to { i64 len, i64 cap, [i8* G ...] }).
+	// genExprAutoPropagate unwraps a failable operand (e.g. `<-make_handles()`
+	// where make_handles is itself failable) to the raw vector before draining;
+	// for a plain ident/temp operand it is a no-op over genExpr.
+	vecRaw := c.genExprAutoPropagate(e.Operand)
+	// The drain consumes the whole vector: suppress the source's scope-exit /
+	// statement-temp drop so its element FailableTask.drop's don't double-free the
+	// G's we join+free below, and its storage isn't double-freed (we free it via
+	// Vector.drop after the loop). clearDropFlag covers a named binding; the
+	// claimStringTemp covers a call-result temp (both are no-ops otherwise).
+	if ident, ok := e.Operand.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	c.claimStringTemp(vecRaw)
+
+	// Source length + element (G-pointer) data base.
+	srcHdrPtr := c.block.NewBitCast(vecRaw, irtypes.NewPointer(vectorHeaderType()))
+	srcLen := loadVectorLen(c.block, srcHdrPtr)
+	srcDataBase := c.block.NewGetElementPtr(irtypes.I8, vecRaw,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	srcDataPtr := c.block.NewBitCast(srcDataBase, irtypes.NewPointer(irtypes.I8Ptr))
+
+	// Accumulator Vector[T]: a fresh empty heap block { len=0, cap=0 }.
+	accBuf := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	accHdrPtr := c.block.NewBitCast(accBuf, irtypes.NewPointer(vectorHeaderType()))
+	accLenField := c.block.NewGetElementPtr(vectorHeaderType(), accHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), accLenField)
+	accCapField := c.block.NewGetElementPtr(vectorHeaderType(), accHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), accCapField)
+
+	// Mutable state across the loop: the (grown) accumulator pointer, the first
+	// error, and whether an error was seen.
+	accAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+	c.block.NewStore(accBuf, accAlloca)
+	errAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), errAlloca)
+	hasErrAlloca := c.createEntryAlloca(irtypes.I1)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), hasErrAlloca)
+	var valAlloca *ir.InstAlloca
+	if !isVoidSucc {
+		valAlloca = c.createEntryAlloca(succLLVM)
+	}
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+
+	loopHead := c.newBlock("drain.head")
+	loopBody := c.newBlock("drain.body")
+	loopDone := c.newBlock("drain.done")
+	c.block.NewBr(loopHead)
+
+	// Head: i < len ?
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, srcLen)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	// Body: await tasks[i], collect success or capture/discharge error.
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	gSlot := c.block.NewGetElementPtr(irtypes.I8Ptr, srcDataPtr, idx2)
+	gRaw := c.block.NewLoad(irtypes.I8Ptr, gSlot)
+
+	agg := c.emitTaskAwaitLoadFree(gRaw, succType, true, func() {})
+	aggStructType := agg.Type().(*irtypes.StructType)
+	tag := c.block.NewExtractValue(agg, 0)
+
+	elemOkBlk := c.newBlock("drain.elem.ok")
+	elemErrBlk := c.newBlock("drain.elem.err")
+	elemContBlk := c.newBlock("drain.elem.cont")
+	c.block.NewCondBr(tag, elemErrBlk, elemOkBlk)
+
+	// ok: push the success value onto the accumulator (capturing the grown ptr).
+	c.block = elemOkBlk
+	if !isVoidSucc {
+		okVal := c.block.NewExtractValue(agg, 1)
+		c.block.NewStore(constant.NewZeroInitializer(succLLVM), valAlloca)
+		c.block.NewStore(okVal, valAlloca)
+		argPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
+		acc := c.block.NewLoad(irtypes.I8Ptr, accAlloca)
+		newAcc := c.block.NewCall(c.funcs["promise_vector_push"], acc, argPtr,
+			constant.NewInt(irtypes.I64, succSize))
+		c.block.NewStore(newAcc, accAlloca)
+	}
+	c.block.NewBr(elemContBlk)
+
+	// err: keep the FIRST error; discharge (drop) any later error.
+	c.block = elemErrBlk
+	errVal := c.block.NewExtractValue(agg, resultErrIdx(aggStructType))
+	hadErr := c.block.NewLoad(irtypes.I1, hasErrAlloca)
+	firstErrBlk := c.newBlock("drain.err.first")
+	laterErrBlk := c.newBlock("drain.err.later")
+	c.block.NewCondBr(hadErr, laterErrBlk, firstErrBlk)
+
+	c.block = firstErrBlk
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), hasErrAlloca)
+	c.block.NewStore(errVal, errAlloca)
+	c.block.NewBr(elemContBlk)
+
+	c.block = laterErrBlk
+	c.emitFailableErrorDrop(errVal) // remaining errors discharged, not swallowed
+	c.block.NewBr(elemContBlk)
+
+	// cont: i++
+	c.block = elemContBlk
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	// Done: free the drained source storage (elements already consumed), then
+	// build the result aggregate.
+	c.block = loopDone
+	if dropFn, ok := c.funcs["Vector.drop"]; ok {
+		c.block.NewCall(dropFn, vecRaw)
+	}
+	accVec := c.block.NewLoad(irtypes.I8Ptr, accAlloca)
+	hasErr := c.block.NewLoad(irtypes.I1, hasErrAlloca)
+	firstErr := c.block.NewLoad(irtypes.I8Ptr, errAlloca)
+
+	buildOkBlk := c.newBlock("drain.build.ok")
+	buildErrBlk := c.newBlock("drain.build.err")
+	buildDoneBlk := c.newBlock("drain.build.done")
+	c.block.NewCondBr(hasErr, buildErrBlk, buildOkBlk)
+
+	// Success: return { 0, accVec, null }. The surfacing machinery tracks the
+	// extracted vector as a droppable temp (keyed on the drain expr's Vector[T]
+	// success type), so it is not tracked here.
+	c.block = buildOkBlk
+	okAgg := c.wrapSuccessResult(accVec, aggType)
+	okEnd := c.block
+	c.block.NewBr(buildDoneBlk)
+
+	// Error: drop the partially-collected result vector (leak-free), return
+	// { 1, _, firstErr }.
+	c.block = buildErrBlk
+	if !isVoidSucc {
+		c.emitVectorElementDropLoop(accVec, succType)
+	}
+	if dropFn, ok := c.funcs["Vector.drop"]; ok {
+		c.block.NewCall(dropFn, accVec)
+	}
+	errAgg := c.wrapError(firstErr, aggType)
+	errEnd := c.block
+	c.block.NewBr(buildDoneBlk)
+
+	c.block = buildDoneBlk
+	return c.block.NewPhi(
+		ir.NewIncoming(okAgg, okEnd),
+		ir.NewIncoming(errAgg, errEnd),
+	)
 }
 
 // unwrapTaskOptionalSource peels a `<-` operand of the shape `(src!)` or
@@ -20021,6 +20208,49 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	if len(inst.TypeArgs()) > 0 {
 		innerType = inst.TypeArgs()[0]
 	}
+
+	// T0547: If the operand is a captured task in the current lambda, the
+	// env field still holds the G pointer because emitLambdaWritebacks ran
+	// at return-statement entry (stmt.go:6351) — before this receive — and
+	// wrote local→env. After pal_free(G) the env field would dangle, so
+	// env_drop's Task[T].drop would spin-wait on freed memory (segfault or
+	// infinite spin). Null the local alloca and env field after each pal_free
+	// so env_drop sees null and no-ops. Both Task[T].drop (compiler.go:2793)
+	// and envDropCallFn (expr.go:8855) already null-check. This is
+	// operand-shape-specific, so it is passed as the afterFree callback to the
+	// shared await helper (a no-op for the `<-tasks` drain over a Vector).
+	nullCapturedEnvField := func() {
+		ident, ok := e.Operand.(*ast.IdentExpr)
+		if !ok {
+			return
+		}
+		alloca, found := c.locals[ident.Name]
+		if !found {
+			return
+		}
+		for _, wb := range c.lambdaWritebacks {
+			if wb.localAlloca == alloca {
+				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), wb.envFieldPtr)
+				return
+			}
+		}
+	}
+
+	return c.emitTaskAwaitLoadFree(gRaw, innerType, failable, nullCapturedEnvField)
+}
+
+// emitTaskAwaitLoadFree emits the per-task await + result handling shared by
+// `<-t` (genReceiveTask) and `<-tasks` drain (genDrainTasks): wait for G to
+// finish (cooperative park-suspend in a coroutine, or a thread-blocking / WASM
+// coop-step spin otherwise), re-panic if the goroutine panicked, load the result
+// from G.result_ptr, and free the result buffer + G struct. gRaw is the raw i8*
+// G handle. For a failable task it returns the raw {i1, T, i8*} aggregate; for a
+// plain non-void task the T value (registered as a droppable statement temp); nil
+// for void. afterFree runs after each pal_free(G) to null any operand-specific
+// captured-env alias (T0547) — the drain passes a no-op since it consumes the
+// whole vector. (T1379/T1381)
+func (c *Compiler) emitTaskAwaitLoadFree(gRaw value.Value, innerType types.Type, failable bool, afterFree func()) value.Value {
 	tVoid := (innerType == nil || innerType == types.TypVoid)
 	isVoid := tVoid
 
@@ -20159,39 +20389,13 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	loadResultBlk := c.newBlock("task.load_result")
 	c.block.NewCondBr(isPanicked, rePanicBlk, loadResultBlk)
 
-	// T0547: If the operand is a captured task in the current lambda, the
-	// env field still holds the G pointer because emitLambdaWritebacks ran
-	// at return-statement entry (stmt.go:6351) — before this receive — and
-	// wrote local→env. After pal_free(G) the env field would dangle, so
-	// env_drop's Task[T].drop would spin-wait on freed memory (segfault or
-	// infinite spin). Null the local alloca and env field after each pal_free
-	// so env_drop sees null and no-ops. Both Task[T].drop (compiler.go:2793)
-	// and envDropCallFn (expr.go:8855) already null-check.
-	nullCapturedEnvField := func() {
-		ident, ok := e.Operand.(*ast.IdentExpr)
-		if !ok {
-			return
-		}
-		alloca, found := c.locals[ident.Name]
-		if !found {
-			return
-		}
-		for _, wb := range c.lambdaWritebacks {
-			if wb.localAlloca == alloca {
-				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
-				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), wb.envFieldPtr)
-				return
-			}
-		}
-	}
-
 	// rePanicBlk: goroutine panicked — load panic_msg, free G, re-panic
 	c.block = rePanicBlk
 	panicMsgField := c.block.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
 	panicMsg := c.block.NewLoad(irtypes.I8Ptr, panicMsgField)
 	c.block.NewCall(c.palFree, gRaw)
-	nullCapturedEnvField()
+	afterFree()
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
 	c.emitPanicReturn()
 
@@ -20210,7 +20414,7 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 
 	// Free G struct
 	c.block.NewCall(c.palFree, gRaw)
-	nullCapturedEnvField()
+	afterFree()
 
 	// T0680 Part 2: no WASM deadline break emitted — original single-path return.
 	if taskTimeoutBlk == nil {
@@ -20239,7 +20443,7 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	loadDoneBlk.NewBr(mergeBlk)
 
 	c.block = taskTimeoutBlk
-	nullCapturedEnvField()
+	afterFree()
 	c.block.NewBr(mergeBlk)
 
 	c.block = mergeBlk

@@ -154,15 +154,22 @@ gobang_use_close_generic_error_surfaces() `test {
   assert(v == -1, "handler recovery value returned");
 }
 
+// A still-owned task is dropped on the propagation early-exit — the buffered
+// generic close error must be discharged by the task's drop path (leak, T0067).
+drop_generic_close_error!(int x) int {
+  t := go! {
+    use r := GenericFailResource[int](id: 7);
+    r.id
+  };
+  do_effect(x); // x < 0 → early-exit drops t (buffered generic close error freed)
+  return (<-t)?^;
+}
+
 gobang_use_close_generic_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      use r := GenericFailResource[int](id: 7);
-      r.id
-    };
-    // never received — the buffered generic close error must be discharged on drop.
-  }
-  assert(true, "dropped generic use-close error path did not leak");
+  r := drop_generic_close_error(-1)? e {
+    -1
+  };
+  assert(r == -1, "dropped generic use-close error path did not leak");
 }
 
 // --- Successful close returns the trailing value ---
@@ -423,40 +430,57 @@ gobang_use_close_bare_return_multi_first_wins() `test {
   assert(got, "multi-close bare-return error handler ran");
 }
 
-// --- Bare `return` + un-received task: buffered close error freed on drop (T1391) ---
+// --- Bare `return` + still-owned task: buffered close error freed on drop (T1391) ---
 // The bare-return exit stores the captured close error into the task's {ok,err}
-// aggregate; an un-received FailableTask must discharge that buffered error in its
-// drop path (leak enforcement, T0067, fails the test otherwise). Sibling of
-// gobang_use_close_dropped_error_leak_free but via the bare-return exit.
-gobang_use_close_bare_return_dropped_leak_free() `test {
-  {
-    t := go! {
-      base := produce(1)?^;
-      use r := FailResource(id: 1); // close() raises → error buffered in the task
-      if base > 0 {
-        return;
-      }
-      print_line((base + r.id).to_string());
-    };
-    // never received — the buffered close error must be discharged on drop.
-  }
-  assert(true, "dropped bare-return use-close error path did not leak");
+// aggregate; a still-owned FailableTask dropped on an error-propagation early-exit
+// (`do_effect(-1)` auto-propagates before the task is received) must discharge that
+// buffered error in its drop path (leak enforcement, T0067, fails otherwise).
+// Sibling of gobang_use_close_dropped_error_leak_free but via the bare-return exit.
+// (T1381 makes failable tasks must-use, so the drop path is reached by spawning +
+// leaving the scope on a propagation edge while the task is still owned.)
+// The block is void: T1385 rejects mixing a bare `return;` with a trailing value
+// expression, and the bare-return exit is the whole point of this test.
+drop_bare_return_task!() void {
+  t := go! {
+    base := produce(1)?^;
+    use r := FailResource(id: 1); // close() raises → error buffered in the task
+    if base > 0 {
+      return;
+    }
+    print_line((base + r.id).to_string());
+  };
+  do_effect(-1); // auto-propagate → early-exit drops the still-owned t
+  (<-t)?^; // (reached only if do_effect succeeds; discharges otherwise)
 }
 
-// --- Un-received task whose use-close FAILS: buffered error freed on drop ---
-// The captured close error is stored into the task's {ok,err} aggregate; an
-// un-received FailableTask must discharge that buffered error in its drop path
-// (leak enforcement, T0067, fails the test otherwise).
+gobang_use_close_bare_return_dropped_leak_free() `test {
+  got := false;
+  drop_bare_return_task()? e {
+    got = true;
+  };
+  assert(got, "dropped bare-return use-close error path did not leak");
+}
+
+// --- Still-owned task whose use-close FAILS: buffered error freed on drop ---
+// The captured close error is stored into the task's {ok,err} aggregate; a
+// still-owned FailableTask dropped on the propagation early-exit must discharge
+// that buffered error in its drop path (leak enforcement, T0067, fails otherwise).
+drop_use_close_task!() void {
+  t := go! {
+    base := produce(1)?^;
+    use r := FailResource(id: 1); // close() raises → error buffered in the task
+    base + r.id
+  };
+  do_effect(-1); // auto-propagate → early-exit drops the still-owned t
+  (<-t)?^;
+}
+
 gobang_use_close_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      base := produce(1)?^;
-      use r := FailResource(id: 1); // close() raises → error buffered in the task
-      base + r.id
-    };
-    // never received — the buffered close error must be discharged on drop.
-  }
-  assert(true, "dropped use-close error path did not leak");
+  got := false;
+  drop_use_close_task()? e {
+    got = true;
+  };
+  assert(got, "dropped use-close error path did not leak");
 }
 
 // --- Concurrent tasks whose ONLY escape is the failable close ---
@@ -512,40 +536,46 @@ gobang_use_close_concurrent_fan_out() `test {
   assert((<-q)?! == 20, "concurrent ok close still returns its trailing value");
 }
 
-// Same concurrent fan-out, but only some handles are received: the buffered close
-// errors of the un-received ones must be discharged by their drop paths (leak
-// enforcement, T0067) while the received ones surface normally.
+// Same concurrent fan-out, but only some handles are received: the still-owned
+// un-received ones are dropped on the propagation early-exit, so their buffered
+// close errors must be discharged by their drop paths (leak enforcement, T0067)
+// while the received ones surface normally.
+partial_receive_fanout!(int x) int {
+  a := go! {
+    use r := FailResource(id: 1);
+    r.id
+  };
+  b := go! {
+    use r := FailResource(id: 2);
+    r.id
+  };
+  c := go! {
+    use r := FailResource(id: 3);
+    r.id
+  };
+  d := go! {
+    use r := FailResource(id: 4);
+    r.id
+  };
+  got := false;
+  (<-a)? e {
+    got = true;
+    -1
+  };
+  (<-c)? e {
+    got = true;
+    -1
+  };
+  assert(got, "the received half surfaced its close errors");
+  do_effect(x); // x < 0 → early-exit drops b and d (buffered close errors freed)
+  return (<-b)?^ +(<-d)?^;
+}
+
 gobang_use_close_concurrent_partial_receive_leak_free() `test {
-  {
-    a := go! {
-      use r := FailResource(id: 1);
-      r.id
-    };
-    b := go! {
-      use r := FailResource(id: 2);
-      r.id
-    };
-    c := go! {
-      use r := FailResource(id: 3);
-      r.id
-    };
-    d := go! {
-      use r := FailResource(id: 4);
-      r.id
-    };
-    got := false;
-    (<-a)? e {
-      got = true;
-      -1
-    };
-    (<-c)? e {
-      got = true;
-      -1
-    };
-    assert(got, "the received half surfaced its close errors");
-    // b and d are never received — dropped with the error still buffered.
-  }
-  assert(true, "partially received fan-out did not leak");
+  r := partial_receive_fanout(-1)? e {
+    -1
+  };
+  assert(r == -1, "partially received fan-out did not leak");
 }
 
 // A resource created inside a LOOP: the escape is recorded once for the binding

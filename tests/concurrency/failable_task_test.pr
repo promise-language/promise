@@ -82,24 +82,47 @@ failable_task_string_result() `test {
   assert(s == "value=4", "string result");
 }
 
-// Leak-free drop: an un-received failable task whose producer RAISES must free
-// the buffered error in FailableTask[int].drop (zero-leak enforcement checks).
-failable_task_dropped_error_leak_free() `test {
-  {
-    t := go! produce(-9);
-    // t is never received — its buffered error must be discharged on drop.
+// A failable gate that forces an auto-propagation early-exit. §17.2.1 (T1381)
+// makes a failable_task must-use, so the only legal way to reach the drop path is
+// to still OWN a task (or holder/vector) when control leaves the scope on an
+// error-propagation edge: spawn, then a bare `gate!(true)` auto-propagates before
+// the task is received, and scope cleanup drops the still-owned task leak-free.
+gate!(bool fail) {
+  if fail {
+    raise error("gate");
   }
-  assert(true, "dropped-error path did not leak");
 }
 
-// Leak-free drop: an un-received failable task whose producer SUCCEEDS with a
-// heap value must drop that value in FailableTask[string].drop.
+// Leak-free drop: a still-owned failable task whose producer RAISES is dropped on
+// the propagation early-exit — FailableTask[int].drop must free the buffered
+// error (zero-leak enforcement checks).
+drop_task_error!(bool fail) int {
+  t := go! produce(-9); // buffered error, still owned
+  gate(fail); // fail → early-exit drops t (buffered error freed)
+  return (<-t)?^; // fall-through discharges the obligation
+}
+
+failable_task_dropped_error_leak_free() `test {
+  r := drop_task_error(true)? e {
+    -1
+  };
+  assert(r == -1, "dropped-error path did not leak");
+}
+
+// Leak-free drop: a still-owned failable task whose producer SUCCEEDS with a heap
+// value is dropped on the propagation early-exit — FailableTask[string].drop must
+// drop that buffered success string.
+drop_task_success!(bool fail) string {
+  t := go! make_str(8); // buffered success string, still owned
+  gate(fail); // fail → early-exit drops t (buffered string dropped)
+  return (<-t)?^;
+}
+
 failable_task_dropped_success_leak_free() `test {
-  {
-    t := go! make_str(8);
-    // never received — the buffered success string must be dropped.
-  }
-  assert(true, "dropped-success path did not leak");
+  s := drop_task_success(true)? e {
+    ""
+  };
+  assert(s == "", "dropped-success path did not leak");
 }
 
 // §17.2.1: a failable_task[T] crosses field/collection boundaries like any type
@@ -116,22 +139,103 @@ failable_task_field_received() `test {
   assert(v == 10, "field receive value");
 }
 
-// A holder dropped without receiving: the field drop must discharge the buffered
-// error leak-free.
-failable_task_field_dropped_leak_free() `test {
-  {
-    h := FTHolder(t: go! produce(-2));
-  }
-  assert(true, "field drop path did not leak");
+// A still-owned holder dropped on the propagation early-exit: the field drop must
+// discharge the buffered error leak-free.
+drop_holder!(bool fail) int {
+  h := FTHolder(t: go! produce(-2));
+  gate(fail); // fail → early-exit drops h → field drop discharges t
+  return (<-h.t)?^;
 }
 
-// A vector of failable tasks dropped without draining: each element's drop must
-// discharge its aggregate (mix of success + error payloads) leak-free.
+failable_task_field_dropped_leak_free() `test {
+  r := drop_holder(true)? e {
+    -1
+  };
+  assert(r == -1, "field drop path did not leak");
+}
+
+// A still-owned vector of failable tasks dropped on the propagation early-exit:
+// each element's drop must discharge its aggregate (mix of success + error
+// payloads) leak-free.
+drop_vector!(bool fail) int {
+  v := [go! make_str(1), go! make_str(-1), go! make_str(3)];
+  gate(fail); // fail → early-exit drops v → each element discharged
+  strs := (<-v)?^;
+  return strs.len;
+}
+
 failable_task_vector_dropped_leak_free() `test {
-  {
-    v := [go! make_str(1), go! make_str(-1), go! make_str(3)];
+  r := drop_vector(true)? e {
+    -1
+  };
+  assert(r == -1, "vector drop path did not leak");
+}
+
+// §17.2.1 (T1381): an ENUM whose variant payload owns a failable_task is
+// transitively must-use, and its drop must discharge the buffered aggregate
+// leak-free — the enum-payload sibling of the holder/vector drop tests above.
+// One variant carries a buffered ERROR (produce raises), the other a buffered
+// HEAP value (make_str succeeds); both must be discharged when the enum is
+// dropped on the propagation early-exit.
+enum FTBoxI {
+  Some(failable_task[int] t), Empty,
+}
+enum FTBoxS {
+  Some(failable_task[string] t), Empty,
+}
+
+// Move the whole enum onward and destructure-receive the payload — the only
+// receive path that reaches the buffered task inside an enum variant.
+consume_box_i!(FTBoxI move b) int {
+  match b {
+    FTBoxI.Some(t) => {
+      return (<-t)?^;
+    },
+    FTBoxI.Empty => {
+      return 0;
+    },
   }
-  assert(true, "vector drop path did not leak");
+}
+
+consume_box_s!(FTBoxS move b) string {
+  match b {
+    FTBoxS.Some(t) => {
+      return (<-t)?^;
+    },
+    FTBoxS.Empty => {
+      return "";
+    },
+  }
+}
+
+// Buffered error held in an enum, dropped on the early-exit: FailableTask[int].drop
+// (reached through the enum's variant-field drop) must free the buffered error.
+drop_enum_error!(bool fail) int {
+  b := FTBoxI.Some(go! produce(-9));
+  gate(fail); // fail → early-exit drops b → enum variant drop discharges t
+  return consume_box_i(move b)?^; // fall-through: move enum onward, then receive
+}
+
+failable_task_enum_dropped_error_leak_free() `test {
+  r := drop_enum_error(true)? e {
+    -1
+  };
+  assert(r == -1, "enum buffered-error drop path did not leak");
+}
+
+// Buffered heap (string) success held in an enum, dropped on the early-exit:
+// the enum variant drop must drop the buffered success string leak-free.
+drop_enum_success!(bool fail) string {
+  b := FTBoxS.Some(go! make_str(8));
+  gate(fail); // fail → early-exit drops b → enum variant drop discharges t
+  return consume_box_s(move b)?^;
+}
+
+failable_task_enum_dropped_success_leak_free() `test {
+  s := drop_enum_success(true)? e {
+    ""
+  };
+  assert(s == "", "enum buffered-success drop path did not leak");
 }
 
 // §17.2.1: `go! obj.method()` — a failable *method* spawn goes through the
@@ -167,12 +271,18 @@ failable_task_method_spawn_err_handled() `test(exclude: wasm) {
   assert(v == -1, "method spawn recovery value");
 }
 
+drop_method!(bool fail) int {
+  a := Adder(base: 100);
+  t := go! a.compute(-7); // buffered error, still owned
+  gate(fail); // fail → early-exit drops t (buffered error freed)
+  return (<-t)?^;
+}
+
 failable_task_method_spawn_dropped_leak_free() `test(exclude: wasm) {
-  {
-    a := Adder(base: 100);
-    t := go! a.compute(-7); // never received — buffered error must be freed
-  }
-  assert(true, "method-spawn drop path did not leak");
+  r := drop_method(true)? e {
+    -1
+  };
+  assert(r == -1, "method-spawn drop path did not leak");
 }
 
 // §17.2.1: `go! generic_fn(...)` — a failable *generic* free function spawn with
@@ -199,6 +309,80 @@ failable_task_generic_spawn_err() `test(exclude: wasm) {
   };
   assert(handled, "generic spawn error handled");
   assert(v == 0, "generic spawn recovery value");
+}
+
+// §17.2.1 (T1381): must-use discharge across BRANCHES. A failable_task must be
+// received (or moved onward) on EVERY control-flow path that reaches scope end —
+// enforced by the AND-merge in the ownership pass (a task discharged on only some
+// arms is a compile error, see the ownership T1381 tests). These runtime tests
+// confirm the accepted case (discharged on every arm) is leak-free whichever arm
+// executes, for both `match` statements and `select`.
+
+enum FTPick {
+  A, B,
+}
+
+// Discharge on every match arm — leak-free whichever arm runs at runtime.
+match_arm_discharge_impl(FTPick p) int {
+  int result = 0;
+  t := go! produce(3);
+  match p {
+    FTPick.A => {
+      result = (<-t)? e {
+        -1
+      };
+    },
+    FTPick.B => {
+      result = (<-t)? e {
+        -2
+      };
+    },
+  }
+  return result;
+}
+
+failable_task_match_arm_discharge() `test {
+  assert(match_arm_discharge_impl(FTPick.A) == 6, "match arm A discharge");
+  assert(match_arm_discharge_impl(FTPick.B) == 6, "match arm B discharge");
+}
+
+// Heap (string) result discharged on every match arm — the received string is
+// dropped leak-free after use.
+failable_task_match_arm_discharge_heap() `test {
+  t := go! make_str(7);
+  s := "";
+  match FTPick.A {
+    FTPick.A => {
+      s = (<-t)? e {
+        ""
+      };
+    },
+    FTPick.B => {
+      s = (<-t)? e {
+        ""
+      };
+    },
+  }
+  assert(s == "value=7", "match arm heap discharge");
+}
+
+// Discharge on every select alternative — the `default` runs (empty channel) and
+// discharges t; leak-free.
+failable_task_select_case_discharge() `test {
+  ch := channel[int](1);
+  t := go! produce(4);
+  int got = 0;
+  select {
+    v := <-ch:
+      got = (<-t)? e {
+        -1
+      };
+    default:
+      got = (<-t)? e {
+        -2
+      };
+  }
+  assert(got == 8, "select default discharge");
 }
 
 // ---------------------------------------------------------------------------
@@ -312,28 +496,39 @@ failable_go_block_inline_panic() `test {
   assert((<-t)?! == 22, "block inline panic-form value");
 }
 
-// Leak-free drop: an un-received block-form task whose body RAISES must free the
-// buffered error in FailableTask[int].drop.
-failable_go_block_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      produce(-9)
-    };
-    // never received — the buffered error must be discharged on drop.
-  }
-  assert(true, "block dropped-error path did not leak");
+// Leak-free drop: a still-owned block-form task whose body RAISES is dropped on
+// the propagation early-exit — FailableTask[int].drop must free the buffered error.
+drop_block_error!(bool fail) int {
+  t := go! {
+    produce(-9)
+  };
+  gate(fail); // fail → early-exit drops t (buffered error freed)
+  return (<-t)?^;
 }
 
-// Leak-free drop: an un-received block-form task whose body SUCCEEDS with a heap
-// value must drop that value in FailableTask[string].drop.
+failable_go_block_dropped_error_leak_free() `test {
+  r := drop_block_error(true)? e {
+    -1
+  };
+  assert(r == -1, "block dropped-error path did not leak");
+}
+
+// Leak-free drop: a still-owned block-form task whose body SUCCEEDS with a heap
+// value is dropped on the propagation early-exit — FailableTask[string].drop must
+// drop that buffered success string.
+drop_block_success!(bool fail) string {
+  t := go! {
+    make_str(8)
+  };
+  gate(fail); // fail → early-exit drops t (buffered string dropped)
+  return (<-t)?^;
+}
+
 failable_go_block_dropped_success_leak_free() `test {
-  {
-    t := go! {
-      make_str(8)
-    };
-    // never received — the buffered success string must be dropped.
-  }
-  assert(true, "block dropped-success path did not leak");
+  s := drop_block_success(true)? e {
+    ""
+  };
+  assert(s == "", "block dropped-success path did not leak");
 }
 
 // ---------------------------------------------------------------------------
@@ -519,20 +714,26 @@ failable_go_block_generator_forin_nested_in_if_err() `test {
   assert(got, "nested for-in error handler ran");
 }
 
-// A never-received task whose generator for-in raised: the buffered error must be
-// discharged by the task's drop path (leak enforcement, T0067).
+// A still-owned task whose generator for-in raised is dropped on the propagation
+// early-exit — the buffered generator error must be discharged by the task's drop
+// path (leak enforcement, T0067).
+drop_block_generator_error!(bool fail) int {
+  t := go! {
+    int sum = 0;
+    for x in count_gen(2, true) {
+      sum = sum + x;
+    }
+    sum
+  };
+  gate(fail); // fail → early-exit drops t (buffered generator error freed)
+  return (<-t)?^;
+}
+
 failable_go_block_generator_forin_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      int sum = 0;
-      for x in count_gen(2, true) {
-        sum = sum + x;
-      }
-      sum
-    };
-    // never received — the buffered generator error must be discharged on drop.
-  }
-  assert(true, "dropped generator for-in error path did not leak");
+  r := drop_block_generator_error(true)? e {
+    -1
+  };
+  assert(r == -1, "dropped generator for-in error path did not leak");
 }
 
 // The mirror image of the two `go! {}` for-in cases: a plain `go {}` body is a
@@ -603,16 +804,24 @@ failable_go_block_nested_gobang_ok() `test {
   assert((<-t)?! == 9, "nested go! ok value through both sinks");
 }
 
-// The outer body never receives the inner failable task, so the inner error is
-// buffered and must be discharged by the inner task's drop path *inside* the
-// goroutine — and the outer body then genuinely cannot fail on its own, so it
-// needs an escape of its own to stay a `go!` (T1386's rewind rule).
+// The outer body owns an inner failable task and never receives it; the outer
+// body's own escape site raises, so the inner task is discharged by its drop path
+// *inside* the goroutine on that unwind (T1381 linearity — an owned failable task
+// may not be silently dropped by scope exit, only via an early-exit/raise path).
 failable_go_block_nested_gobang_unreceived_leak_free() `test {
   t := go! {
-    inner := go! produce(-3); // raises; never received — dropped in the body
-    produce(2) // the outer body's own escape site
+    inner := go! produce(-3); // raises; still owned, dropped on the outer unwind
+    produce(-2)?^; // the outer body's own escape raises → inner dropped in the body
+    <-inner // unreachable success edge — discharges inner's obligation statically
   };
-  assert((<-t)?! == 4, "outer value unaffected by the dropped inner task");
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    assert(e.message == "negative:-2", "outer escape error surfaced");
+    -1
+  };
+  assert(got, "outer body raised; inner task dropped in the body leak-free");
+  assert(v == -1, "handler recovery value returned");
 }
 
 // Two escaping `?^` sites in one body: the first success flows on, the second
@@ -697,18 +906,23 @@ failable_go_block_typed_handler_match() `test {
   assert((<-t)?! == 99, "matched typed-handler recovery value surfaced");
 }
 
-// A never-received task whose typed handler let a non-matching error escape: the
-// buffered error must be discharged by the task's drop path (leak enforcement,
-// T0067). The escape site is the handler itself, so this is the sink reached
-// naturally (T1386).
+// A still-owned task whose typed handler let a non-matching error escape is
+// dropped on the propagation early-exit: the buffered error must be discharged by
+// the task's drop path (leak enforcement, T0067). The escape site is the handler
+// itself, so this is the sink reached naturally (T1386).
+drop_typed_handler_error!(bool fail) int {
+  t := go! {
+    produce(-1)? e is GoBlockNotThisError {
+      99
+    }
+  };
+  gate(fail); // fail → early-exit drops t (buffered unmatched error freed)
+  return (<-t)?^;
+}
+
 failable_go_block_typed_handler_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      produce(-1)? e is GoBlockNotThisError {
-        99
-      }
-    };
-    // never received — the buffered unmatched error must be discharged on drop.
-  }
-  assert(true, "dropped typed-handler error path did not leak");
+  r := drop_typed_handler_error(true)? e {
+    -1
+  };
+  assert(r == -1, "dropped typed-handler error path did not leak");
 }

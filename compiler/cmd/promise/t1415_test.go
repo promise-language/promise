@@ -546,6 +546,9 @@ func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "excluded_test.pr")
 	// Excluded on every supported target, so the assertion never runs anywhere.
+	// Multiple targets combine with `||` — a comma starts the next NAMED annotation
+	// parameter, so `exclude: macos, linux, …` would exclude macOS alone and let the
+	// assertion run everywhere else (T1449).
 	source := "a_first() `test {\n  assert(1 + 1 == 2, \"sanity\");\n}\n\n" +
 		"b_skipped() `test(exclude: macos || linux || windows || wasm) {\n  assert(false, \"must not run\");\n}\n\n" +
 		"c_after() `test {\n  assert(2 + 2 == 4, \"sanity2\");\n}\n"

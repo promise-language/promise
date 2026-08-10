@@ -1,6 +1,8 @@
 package ownership
 
 import (
+	"sort"
+
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
@@ -176,6 +178,21 @@ type Checker struct {
 	// the direct `return local.iter();`. Reset per function/method body.
 	iterBorrowOrigin map[string]string
 
+	// mustUse (T1381) maps an owned local's name to its declaration position when
+	// its type transitively owns a `failable_task[T]` (§17.2.1). Such a value is
+	// LINEAR (must-use): it must be *discharged* — received (`<-t` / `<-tasks`) or
+	// moved onward (field/collection/argument/return) — before its owner's scope
+	// ends; letting one reach scope end undischarged silently swallows its error.
+	// Discharge is tracked via the ordinary flow-sensitive state: a discharged
+	// name reaches state Moved (receive marks it Moved in ownership/expr.go, and
+	// every move site already does via tryMove/tryMoveConsume). The `merge` inverts
+	// its Moved-absorbing rule for these names so a value is Moved after a branch
+	// only if discharged on EVERY path. reportUndischargedMustUse scans this map
+	// against the final state at each frame boundary. Reset per function/method,
+	// and saved/restored around lambda bodies (their own frame). Params are not
+	// recorded (a `failable_task` param is the caller's obligation).
+	mustUse map[string]ast.Pos
+
 	// loopFrames is a stack of per-loop-body frames used to detect loop-back-edge
 	// reuse of an aliased single-owner handle (T1255). A candidate recorded inside
 	// a loop body is flagged `reused` at loop exit unless its source local is
@@ -317,12 +334,14 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedIterBorrowOrigin := c.iterBorrowOrigin
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
+	savedMustUse := c.mustUse
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
 	c.params = make(map[string]bool)
 	c.curSig = sig
 	c.pinned = make(map[string]bool)
+	c.mustUse = nil
 	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.forInAliasBindings = make(map[string]bool)
 	c.forInTypeParamAliasBindings = make(map[string]*types.TypeParam)
@@ -353,11 +372,13 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.checkBlock(d.Body)
 	c.checkDropOrderSafety()
 	c.checkReturnAmbiguity()
+	c.reportUndischargedMustUse() // T1381: linear failable_task discharge
 
 	c.state = savedState
 	c.borrows = savedBorrows
 	c.params = savedParams
 	c.pinned = savedPinned
+	c.mustUse = savedMustUse
 	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.forInAliasBindings = savedForInAlias
 	c.forInTypeParamAliasBindings = savedForInTypeParamAlias
@@ -461,12 +482,14 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedIterBorrowOrigin := c.iterBorrowOrigin
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
+	savedMustUse := c.mustUse
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
 	c.params = make(map[string]bool)
 	c.curSig = m.Sig()
 	c.pinned = make(map[string]bool)
+	c.mustUse = nil
 	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.forInAliasBindings = make(map[string]bool)
 	c.forInTypeParamAliasBindings = make(map[string]*types.TypeParam)
@@ -504,12 +527,14 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.checkBlock(md.Body)
 	c.checkDropOrderSafety()
 	c.checkReturnAmbiguity()
+	c.reportUndischargedMustUse() // T1381: linear failable_task discharge
 
 	c.state = savedState
 	c.borrows = savedBorrows
 	c.params = savedParams
 	c.curSig = savedSig
 	c.pinned = savedPinned
+	c.mustUse = savedMustUse
 	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.forInAliasBindings = savedForInAlias
 	c.forInTypeParamAliasBindings = savedForInTypeParamAlias
@@ -525,6 +550,53 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.iterBorrowOrigin = savedIterBorrowOrigin
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
+}
+
+// recordMustUse records `name` as a must-use local (T1381) when `typ`
+// transitively owns a `failable_task[T]`. No-op for `_`, borrowed bindings
+// (recorded only from owned-value var-decl sites), and non-must-use types.
+func (c *Checker) recordMustUse(name string, typ types.Type, pos ast.Pos) {
+	if name == "" || name == "_" || typ == nil {
+		return
+	}
+	if !types.ContainsFailableTask(typ) {
+		return
+	}
+	if c.mustUse == nil {
+		c.mustUse = make(map[string]ast.Pos)
+	}
+	c.mustUse[name] = pos
+}
+
+// reportUndischargedMustUse scans the current frame's must-use locals and reports
+// any whose final ownership state is not Moved — i.e. a `failable_task` that
+// reached scope end without being received or moved to a receiver. Called at each
+// frame boundary (function / method / lambda end) before the frame's state is
+// restored; each frame is given a fresh c.mustUse map, so the whole map is that
+// frame's set. Names are reported in declaration order for deterministic output.
+// (§17.2.1)
+func (c *Checker) reportUndischargedMustUse() {
+	if len(c.mustUse) == 0 {
+		return
+	}
+	names := make([]string, 0, len(c.mustUse))
+	for name := range c.mustUse {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		pi, pj := c.mustUse[names[i]], c.mustUse[names[j]]
+		if pi.Line != pj.Line {
+			return pi.Line < pj.Line
+		}
+		return pi.Column < pj.Column
+	})
+	for _, name := range names {
+		if c.state[name] != Moved {
+			c.errorf(c.mustUse[name],
+				"'%s' is a failable task that was never received; receive it with `<-%s` (or move it to a receiver) before it goes out of scope",
+				name, name)
+		}
+	}
 }
 
 // lookupFileScope finds an object in the file-level scope.

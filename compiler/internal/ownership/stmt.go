@@ -248,7 +248,8 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
 		}
-		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
+		c.recordMustUse(s.Name, c.info.Types[s.Value], s.Pos()) // T1381
+		c.recordGuardMutexRoot(s.Name, s.Value)                 // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 	c.recordLaunderedHandleReq(s.Value, s.Pos()) // T1214/T1216: also for `_` discard
@@ -586,7 +587,8 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
 		}
-		c.recordGuardMutexRoot(s.Name, s.Value) // T0665
+		c.recordMustUse(s.Name, c.info.Types[s.Value], s.Pos()) // T1381
+		c.recordGuardMutexRoot(s.Name, s.Value)                 // T0665
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 	c.recordLaunderedHandleReq(s.Value, s.Pos()) // T1214/T1216: also for `_` discard
@@ -1593,7 +1595,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			c.borrows = thenBorrows
 			c.pendingAliasLocals = thenPending
 		default:
-			c.state = merge(thenState, elseState)
+			c.state = c.merge(thenState, elseState)
 			c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
 			c.pendingAliasLocals = mergePending(thenPending, elsePending)
 		}
@@ -1605,7 +1607,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		c.pendingAliasLocals = savedPending // T1255
 	} else {
 		// No else: conservative merge with pre-if state.
-		c.state = merge(savedState, thenState)
+		c.state = c.merge(savedState, thenState)
 		c.borrows = MergeBorrowSets(savedBorrows, thenBorrows)
 		c.pendingAliasLocals = mergePending(savedPending, thenPending) // T1255
 	}
@@ -1738,6 +1740,7 @@ func (c *Checker) trackGoHandleBinding(name string, value ast.Expr, pos ast.Pos)
 				if typ := c.info.Types[value]; typ != nil {
 					c.trackDeclOrder(name, typ)
 				}
+				c.recordMustUse(name, c.info.Types[value], pos) // T1381
 			}
 			return true
 		}
@@ -2183,12 +2186,12 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 		merged := states[0]
 		mergedBorrows := borrowSets[0]
 		for i := 1; i < len(states); i++ {
-			merged = merge(merged, states[i])
+			merged = c.merge(merged, states[i])
 			mergedBorrows = MergeBorrowSets(mergedBorrows, borrowSets[i])
 		}
 		// Also merge with pre-select state (select might not execute any case if no default)
 		if s.Default == nil {
-			merged = merge(savedState, merged)
+			merged = c.merge(savedState, merged)
 			mergedBorrows = MergeBorrowSets(savedBorrows, mergedBorrows)
 		}
 		c.state = merged
@@ -2222,6 +2225,6 @@ func (c *Checker) mergeLoopState(body *ast.Block, savedState StateMap, savedBorr
 		c.borrows = savedBorrows
 		return
 	}
-	c.state = merge(savedState, c.state)
+	c.state = c.merge(savedState, c.state)
 	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }

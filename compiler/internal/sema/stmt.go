@@ -340,6 +340,13 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	// Auto-propagate failable calls in assignments within failable functions.
 	c.checkVarDeclFailable(s.Value)
 
+	// T1381: binding a must-use value (one that transitively owns a
+	// `failable_task[T]`) to `_` discards it, silently swallowing its error —
+	// reject, same as an expression-statement discard.
+	if s.Name == "_" && types.ContainsFailableTask(valType) {
+		c.errorf(s.Pos(), "a failable task must be received or moved to a receiver; discarding it silently swallows its error")
+	}
+
 	// Error handler in value context must produce recovery value or diverge.
 	c.checkErrorHandlerRecovery(s.Value, nil)
 
@@ -1279,6 +1286,15 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 			c.errorf(s.Expr.Pos(), "a fire-and-forget goroutine must be non-failable")
 			c.hintf(s.Expr.Pos(), "handle the error inside it — `go { %s(...)?!; }` — or keep the task and receive it with `<-`", goCalleeName(unwrapGoExprCall(goExpr)))
 		}
+		return
+	}
+	// §17.2.1 (T1381): discarding any must-use value — one that transitively owns
+	// a `failable_task[T]` — silently swallows its error. Reject a bare
+	// expression-statement whose result type is must-use (e.g. a call returning a
+	// `failable_task[T]`, or a `failable_task[T][]`). It must be bound and then
+	// received (`<-t` / `<-tasks`) or moved onward to a receiver.
+	if types.ContainsFailableTask(c.info.Types[s.Expr]) {
+		c.errorf(s.Expr.Pos(), "a failable task must be received or moved to a receiver; discarding it silently swallows its error")
 		return
 	}
 	if !c.info.FailableExprs[s.Expr] {

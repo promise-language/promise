@@ -10,6 +10,41 @@ import (
 
 // checkExpr recursively walks an expression, checking for use-after-move
 // at every variable reference.
+// unwrapReceiveDischargeOperand peels ParenExpr wrappers off a `<-` operand and
+// returns the underlying *ast.IdentExpr (bare `<-t` / `<-tasks`) or *ast.MemberExpr
+// (in-place field receive `<-h.t`) so the caller can discharge a must-use
+// obligation (T1381). Any other shape (index expression, call, etc.) returns
+// unchanged and is ignored by the caller — `<-coll[i]` must not discharge the
+// whole container.
+func unwrapReceiveDischargeOperand(expr ast.Expr) ast.Expr {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			return expr
+		}
+		expr = p.Expr
+	}
+}
+
+// memberRootName returns the root local name of a field-access chain rooted at an
+// ident (`h.t` → "h", `h.a.t` → "h"), or "" if the chain is not rooted at a plain
+// ident (e.g. `foo().t`, `arr[i].t`). (T1381)
+func memberRootName(m *ast.MemberExpr) string {
+	var expr ast.Expr = m
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.MemberExpr:
+			expr = e.Target
+		case *ast.IdentExpr:
+			return e.Name
+		default:
+			return ""
+		}
+	}
+}
+
 func (c *Checker) checkExpr(expr ast.Expr) {
 	if expr == nil {
 		return
@@ -60,6 +95,28 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 		// non-consuming).
 		if e.Op == ast.UnaryReceive {
 			c.rejectBorrowedTaskAwait(e.Operand)
+			// T1381: receiving a must-use value's `failable_task[T]` error DISCHARGES
+			// its linear obligation. Only names recorded as must-use are affected, so
+			// channel receives and plain-`task[T]` receives (never must-use) are
+			// untouched, and index receives (`<-coll[i]`) do not discharge the whole
+			// container.
+			switch op := unwrapReceiveDischargeOperand(e.Operand).(type) {
+			case *ast.IdentExpr:
+				// A bare `<-t` / `<-tasks` fully CONSUMES the value — mark it Moved so
+				// the linearity scan sees it discharged and any later use is a
+				// use-after-move.
+				if _, mustUse := c.mustUse[op.Name]; mustUse {
+					c.state[op.Name] = Moved
+				}
+			case *ast.MemberExpr:
+				// An in-place field receive `<-h.t` reads the error out of a must-use
+				// holder without consuming the holder itself: discharge the obligation
+				// (drop it from the scan) but keep `h` Owned so its other fields stay
+				// usable and its emptied husk is still dropped leak-free.
+				if root := memberRootName(op); root != "" {
+					delete(c.mustUse, root)
+				}
+			}
 		}
 
 	case *ast.IndexExpr:
@@ -1718,7 +1775,7 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) {
 		c.borrows = thenBorrows
 		c.pendingAliasLocals = thenPending
 	default:
-		c.state = merge(thenState, elseState)
+		c.state = c.merge(thenState, elseState)
 		c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
 		c.pendingAliasLocals = mergePending(thenPending, elsePending)
 	}
@@ -1793,7 +1850,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 	resultState := states[0]
 	resultBorrows := borrowSets[0]
 	for i := 1; i < len(states); i++ {
-		resultState = merge(resultState, states[i])
+		resultState = c.merge(resultState, states[i])
 		resultBorrows = MergeBorrowSets(resultBorrows, borrowSets[i])
 	}
 	c.state = resultState
@@ -3018,6 +3075,12 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	// when the lambda is lexically inside a loop.
 	savedLoopDepth := c.loopDepth
 	c.loopDepth = 0
+	// T1381: the lambda body is its own frame — give it a fresh must-use set so a
+	// `failable_task` created inside it must be discharged before the lambda
+	// returns (scanned at lambda end), and does not leak into (or get satisfied by)
+	// the enclosing frame's scan.
+	savedMustUse := c.mustUse
+	c.mustUse = nil
 
 	// T0426: use the lambda's own signature for return checks. Without this,
 	// `checkReturnRefSafety` reads the outer fn's c.curSig, producing both
@@ -3060,6 +3123,7 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 		c.checkExpr(e.ExprBody)
 	}
 	c.checkReturnAmbiguity()
+	c.reportUndischargedMustUse() // T1381: lambda-local failable_task discharge
 
 	c.state = savedState
 	c.borrows = savedBorrows
@@ -3069,4 +3133,5 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	c.iterBorrowOrigin = savedIterBorrowOrigin // T1349
 	c.loopDepth = savedLoopDepth
 	c.goBlockResult = savedGoBlockResult // T1385
+	c.mustUse = savedMustUse             // T1381
 }

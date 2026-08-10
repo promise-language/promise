@@ -690,6 +690,18 @@ user := (<-t) ? e { recover(e); };
 // is rejected (use `go`); discarding a `go! …` is rejected (fire-and-forget must
 // be non-failable — handle the error inside a plain `go { f()?!; }`).
 
+// A failable_task[T] is LINEAR (must-use): its error must reach exactly one
+// receiver, so it must be received (`<-t`), or moved onward (into a field,
+// collection, argument, or `return`), before its owner's scope ends — letting one
+// go out of scope undischarged is a compile error. Must-use is transitive: a type
+// or collection that owns one (`Holder{ failable_task[T] t }`, `failable_task[T][]`)
+// is itself must-use.
+handles := build_handles(ids);   // handles : failable_task[User][]
+users := <-handles;              // drain: awaits all, consumes handles, yields User[]
+// `<-tasks` (drain) is a failable operation: it succeeds only if every task
+// succeeded, else fails with the FIRST error by index (remaining errors are
+// discharged by the drain, not swallowed).
+
 // Channels
 ch := channel[int](capacity: 10);
 ch.send(42);

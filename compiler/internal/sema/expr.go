@@ -960,6 +960,18 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		// closed+empty).
 		if inst, ok := operand.(*types.Instance); ok {
 			origin := inst.Origin()
+			// §17.2.1: `<-tasks` where tasks : failable_task[T][] is a **drain** —
+			// a failable operation that consumes the vector, awaits every task, and
+			// yields T[] (succeeding only if all succeed, else failing with the first
+			// error by index). Detect a Vector whose element is a failable_task.
+			if origin == types.TypVector && len(inst.TypeArgs()) > 0 {
+				if elem, ok := types.AsFailableTask(inst.TypeArgs()[0]); ok {
+					c.info.FailableExprs[e] = true
+					result := types.NewVector(elem)
+					c.recordInstance(result)
+					return result
+				}
+			}
 			if origin == types.TypTask {
 				if len(inst.TypeArgs()) > 0 {
 					return inst.TypeArgs()[0]

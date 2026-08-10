@@ -385,39 +385,55 @@ gobang_failable_property_getter_incdec_ok() `test {
   assert((<-t)?! == 5, "successful failable property inc/dec returns the trailing value");
 }
 
-// --- Un-received task whose operator raises: buffered error freed on drop -----
-// The error is stored into the task's {ok, err} aggregate; a never-received
-// FailableTask must discharge it in its drop path (leak enforcement, T0067).
-gobang_failable_op_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      a := CheckedVec(x: 10);
-      c := a + CheckedVec(x: -1); // raises → error buffered in the task
-      c.x
-    };
-    // never received — the buffered operator error must be discharged on drop.
+// A failable helper providing an early-exit escape site (T1381 linearity: a
+// still-owned failable task is discharged via its drop path on the propagation
+// early-exit — it may not be silently dropped by scope exit).
+gate!(bool fail) {
+  if fail {
+    raise error("gate");
   }
-  assert(true, "dropped failable-operator error path did not leak");
+}
+
+// --- Still-owned task whose operator raises: buffered error freed on drop ------
+// The error is stored into the task's {ok, err} aggregate; a task dropped on the
+// propagation early-exit must discharge it in its drop path (leak, T0067).
+drop_op_error!(bool fail) int {
+  t := go! {
+    a := CheckedVec(x: 10);
+    c := a + CheckedVec(x: -1); // raises → error buffered in the task
+    c.x
+  };
+  gate(fail); // fail → early-exit drops t (buffered operator error freed)
+  return (<-t)?^;
+}
+
+gobang_failable_op_dropped_error_leak_free() `test {
+  r := drop_op_error(true)? e {
+    -1
+  };
+  assert(r == -1, "dropped failable-operator error path did not leak");
 }
 
 // Same for the accessor sinks: the raising type is heap-allocated and the error
 // is buffered rather than received, so both must be discharged on drop.
+drop_accessor_error!(bool fail) int {
+  t1 := go! {
+    c := Cell(x: -1);
+    c[0]++; // raises → error buffered in the task
+    c.x
+  };
+  t2 := go! {
+    Gauge g = Gauge(_n: -1);
+    g.value++; // raises → error buffered in the task
+    g._n
+  };
+  gate(fail); // fail → early-exit drops t1 and t2 (both buffered errors freed)
+  return (<-t1)?^ +(<-t2)?^;
+}
+
 gobang_failable_accessor_dropped_error_leak_free() `test {
-  {
-    t := go! {
-      c := Cell(x: -1);
-      c[0]++; // raises → error buffered in the task
-      c.x
-    };
-    // never received.
-  }
-  {
-    t := go! {
-      Gauge g = Gauge(_n: -1);
-      g.value++; // raises → error buffered in the task
-      g._n
-    };
-    // never received.
-  }
-  assert(true, "dropped failable-accessor error path did not leak");
+  r := drop_accessor_error(true)? e {
+    -1
+  };
+  assert(r == -1, "dropped failable-accessor error path did not leak");
 }

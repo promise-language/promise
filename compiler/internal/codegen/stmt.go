@@ -13853,11 +13853,31 @@ func (c *Compiler) genForInCustomIter(s *ast.ForInStmt, iterVal value.Value, ite
 	val := c.block.NewExtractValue(nextResult, 1)
 	c.block.NewStore(val, elemAlloca)
 
+	// T1440: next() hands back an owned T — Vector.iter()'s closure dups the
+	// element, every combinator forwards an owned value, and sema rejects any
+	// user next() that tries to return a borrow ("cannot return a borrowed
+	// reference as owned"). Ownership analysis already assumes this: it exempts
+	// iterator-based for-ins from the loop-binding move ban that native
+	// container for-ins get (forInAliasingElementType, ownership/expr.go). So
+	// the loop variable owns the element and must drop it once per iteration.
+	//
+	// Register the binding at loopScopeDepth so a heap element (string/Vector/user/Optional…)
+	// is dropped on every exit: normal iteration end (below), break/continue
+	// (genBreak/ContinueStmt → emitScopeCleanup(loopScopeDepth)), and early
+	// return/raise (function unwind). maybeRegisterDrop no-ops for value elems,
+	// so `int[]` iteration is unchanged. Mirrors T0671's channel for-in.
+	bodyScopeStart := len(c.scopeBindings) // == c.loopScopeDepth
+	c.maybeRegisterDrop(s.Binding, elemAlloca, elemType)
 	c.genBlock(s.Body)
 
-	if c.block.Term == nil {
+	if c.block != nil && c.block.Term == nil {
+		if len(c.scopeBindings) > bodyScopeStart {
+			cap := c.emitScopeCleanup(bodyScopeStart, false)
+			c.emitCloseErrCheck(cap, bodyScopeStart)
+		}
 		c.block.NewBr(updateBlk)
 	}
+	c.scopeBindings = c.scopeBindings[:bodyScopeStart] // unconditional codegen-time pop
 
 	// Update: increment index, branch back to header
 	c.block = updateBlk

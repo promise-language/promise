@@ -14191,6 +14191,24 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 	if c.selfSubst != nil {
 		typ = types.SubstituteSelf(typ, c.selfSubst.iface, c.selfSubst.concrete)
 	}
+	// T1440: a `this` capture never transfers ownership to the closure, so
+	// env_drop must leave it alone:
+	//   - borrowed `this` (e.g. `Vector[T].iter()`): the receiver belongs to the
+	//     caller, which drops it via its own scope binding. Freeing it here is
+	//     the double-free T1440 reported.
+	//   - `~this` (e.g. the `Iterator[T]` combinators): the receiver has no drop
+	//     binding inside the method either — defineMethodFunc only allocates
+	//     `this.addr`. A consumed upstream iterator is reclaimed through
+	//     `_FnIter._parent` by `__promise_iter_cleanup` (T0128).
+	// Sema forces `move` on every `this` capture (checkThisExpr) even though
+	// nothing is transferred, so `cv.ByMove` cannot be used to tell the two
+	// apart; the name check is the discriminator.
+	//
+	// This is the single place that decision is made — the heap-user-type and
+	// structural branches below rely on it rather than re-testing the name.
+	if cv.Obj.Name() == "this" {
+		return envFieldDrop{envDropNone, nil}
+	}
 	// String/Vector/Channel → call specific drop function (i8* field, drop handles free)
 	named := extractNamed(typ)
 	if named == types.TypString {
@@ -14243,14 +14261,13 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 	}
 
 	// Heap user type — need to free instance (and call drop if it has one).
-	// Skip `this` captures: method receivers are borrowed from the caller, which
-	// handles cleanup via its own scope binding. Freeing here would double-free.
+	// `this` captures already returned above (never owned by the closure).
 	//
 	// T0554: Use resolveDropFuncForTemp to get the correct cleanup function.
 	// For synthesized drops, the bare drop already includes pal_free. For
 	// explicit user drops, $wrap is returned which calls drop + pal_free.
 	// Either way, env_drop just calls this function (no separate pal_free).
-	if named != nil && cv.Obj.Name() != "this" && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+	if named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 		if dropFn := c.resolveDropFuncForTemp(named, typ); dropFn != nil {
 			return envFieldDrop{envDropUserValueDrop, dropFn}
 		}
@@ -14276,9 +14293,9 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 	// the has_value guard. Any *move*-captured non-`this` structural value is
 	// guaranteed owned: ownership analysis (T0338, ownership/expr.go) rejects
 	// move-capturing a borrowed parameter or borrowed value, and `this` captures
-	// are excluded above (borrowed receiver, dropped by the caller). So dropping
-	// here can never double-free the caller's instance.
-	if named != nil && named.IsStructural() && !named.IsValueType() && cv.Obj.Name() != "this" {
+	// already returned above. So dropping here can never double-free the
+	// caller's instance.
+	if named != nil && named.IsStructural() && !named.IsValueType() {
 		return envFieldDrop{envDropStructural, nil}
 	}
 

@@ -1671,3 +1671,572 @@ test_t1349_collect_before_return() `test {
   assert(r.len == 3, "owned len");
   assert(r[0] == 6, "owned first");
 }
+
+// --- T1440: Vector.iter() with heap (non-Copy) element types ---
+//
+// Two independent defects broke iteration over heap elements:
+//   1. Vector[T].iter()'s closure captured the borrowed `this` receiver, and
+//      the generated env_drop called Vector.drop on the caller's vector.
+//   2. for-in over a custom iterator never dropped the owned element that
+//      next() hands back, leaking every heap element.
+// The whole suite above uses `int[]`, which hid both: an all-constant int[]
+// is a T0062 .rodata static vector (double-drop is a no-op) and `int` needs
+// no element drop at all.
+
+// T1440Res is a heap user type with an explicit drop, so a double-free or a
+// missed drop shows up as a crash or a leak rather than silently passing.
+type T1440Res {
+  int id;
+  drop(~this) {
+  }
+}
+
+test_t1440_iter_string_elements() `test {
+  string[] v = ["ab", "cd"];
+  int count = 0;
+  for e in v.iter() {
+    count = count + 1;
+  }
+  assert(count == 2, "two string elements");
+  assert(v.len == 2, "vector intact after iteration");
+}
+
+test_t1440_iter_string_elements_used() `test {
+  string[] v = ["ab", "cd"];
+  string joined = "";
+  for e in v.iter() {
+    joined = joined + e;
+  }
+  assert(joined == "abcd", "elements readable");
+}
+
+// String literals live in .rodata (T0060), so the cases above exercise the
+// double-free but not the allocation accounting. Interpolated strings are
+// heap-allocated, so a missed or duplicated element drop shows up as a LEAK or
+// an invalid free.
+test_t1440_iter_heap_strings() `test {
+  string[] v = [];
+  int i = 0;
+  while i < 3 {
+    v.push("s{i}");
+    i = i + 1;
+  }
+  string joined = "";
+  for e in v.iter() {
+    joined = joined + e;
+  }
+  assert(joined == "s0s1s2", "heap elements readable");
+  assert(v[0] == "s0", "first element intact");
+  assert(v[2] == "s2", "last element intact");
+}
+
+test_t1440_iter_nested_vector_elements() `test {
+  int[][] v = [[1, 2], [3]];
+  int total = 0;
+  for e in v.iter() {
+    total = total + e.len;
+  }
+  assert(total == 3, "nested vector lens 2+1=3");
+}
+
+test_t1440_iter_user_type_elements() `test {
+  T1440Res[] v = [T1440Res(id: 1), T1440Res(id: 2)];
+  int total = 0;
+  for e in v.iter() {
+    total = total + e.id;
+  }
+  assert(total == 3, "user type ids 1+2=3");
+}
+
+test_t1440_iter_optional_elements() `test {
+  string?[] v = ["ab", none];
+  int count = 0;
+  for e in v.iter() {
+    count = count + 1;
+  }
+  assert(count == 2, "two optional elements");
+}
+
+// push() forces the T0062 static vector to COW onto the heap, so the receiver
+// double-drop is no longer a silent no-op for `int[]` either.
+test_t1440_iter_int_after_cow() `test {
+  int[] v = [1, 2, 3];
+  v.push(4);
+  int total = 0;
+  for x in v.iter() {
+    total = total + x;
+  }
+  assert(total == 10, "1+2+3+4=10");
+  assert(v.len == 4, "vector intact after iteration");
+}
+
+test_t1440_iter_via_local_binding() `test {
+  string[] v = ["ab"];
+  Iterator[string] it = v.iter();
+  int count = 0;
+  for e in it {
+    count = count + 1;
+  }
+  assert(count == 1, "one element via bound iterator");
+}
+
+test_t1440_iter_string_count() `test {
+  string[] v = ["ab", "cd", "ef"];
+  assert(v.iter().count() == 3, "count over string elements");
+}
+
+test_t1440_iter_string_take() `test {
+  string[] v = ["ab", "cd", "ef"];
+  int count = 0;
+  for e in v.iter().take(2) {
+    count = count + 1;
+  }
+  assert(count == 2, "take(2) over string elements");
+}
+
+test_t1440_iter_string_map() `test {
+  string[] v = ["ab", "cd"];
+  int total = 0;
+  for n in v.iter().map[int](|string s| -> int {
+    return s.len;
+  }) {
+    total = total + n;
+  }
+  assert(total == 4, "map to lens 2+2=4");
+}
+
+test_t1440_iter_string_filter_collect() `test {
+  string[] v = ["ab", "cde", "f"];
+  string[] result = v.iter().filter(|string s| -> bool {
+    return s.len > 1;
+  }).collect();
+  assert(result.len == 2, "filter len>1 keeps 2");
+  assert(result[0] == "ab", "first kept");
+  assert(result[1] == "cde", "second kept");
+}
+
+test_t1440_iter_string_chain() `test {
+  string[] a = ["ab"];
+  string[] b = ["cd", "ef"];
+  int count = 0;
+  for e in a.iter().chain(b.iter()) {
+    count = count + 1;
+  }
+  assert(count == 3, "chain over string elements");
+}
+
+// break/continue leave the loop above the element's drop binding, so the
+// in-flight element must still be dropped exactly once on those paths.
+test_t1440_iter_string_break() `test {
+  string[] v = ["ab", "cd", "ef"];
+  int count = 0;
+  for e in v.iter() {
+    count = count + 1;
+    if count == 2 {
+      break;
+    }
+  }
+  assert(count == 2, "stopped at 2");
+}
+
+test_t1440_iter_string_continue() `test {
+  string[] v = ["ab", "cd", "ef"];
+  int count = 0;
+  for e in v.iter() {
+    if e == "cd" {
+      continue;
+    }
+    count = count + 1;
+  }
+  assert(count == 2, "skipped one");
+}
+
+// Unlike a native-container for-in (whose binding aliases element storage and
+// cannot be moved), an iterator binding is owned, so the body may move it out.
+// The move site must clear the new drop flag, or the element is freed twice —
+// once by the loop and once by its new owner.
+test_t1440_iter_string_element_moved_out() `test {
+  string[] v = ["ab", "cd"];
+  string[] out = [];
+  for e in v.iter() {
+    out.push(move e);
+  }
+  assert(out.len == 2, "both elements moved out");
+  assert(out[0] == "ab", "first moved intact");
+  assert(out[1] == "cd", "second moved intact");
+  assert(v.len == 2, "source vector intact");
+}
+
+// A `_` binding has no local, but the element next() yields is still owned and
+// must be dropped — the drop binding is registered regardless of the name.
+// Heap (interpolated) elements, not .rodata literals: with a literal element a
+// missing element drop is invisible to leak accounting.
+test_t1440_iter_wildcard_binding() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("b{2}");
+  int count = 0;
+  for _ in v.iter() {
+    count = count + 1;
+  }
+  assert(count == 2, "wildcard binding iterates");
+}
+
+// The indexed form takes the same body path; the index variable must not
+// disturb the element's drop binding.
+test_t1440_iter_indexed_binding() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("bb{2}");
+  int total = 0;
+  for i, e in v.iter() {
+    total = total + i + e.len;
+  }
+  assert(total == 6, "(0+2) + (1+3) = 6");
+}
+
+// The element drop is registered for every `ForInNext` loop, not just
+// Vector.iter()'s _FnIter — so a user-written next() that hands back an owned
+// heap element must also be dropped exactly once per iteration.
+type T1440StrIter {
+  string[] items;
+  int pos = 0;
+
+  next(~this) string? {
+    if this.pos >= this.items.len {
+      return none;
+    }
+    string s = this.items[this.pos];
+    this.pos = this.pos + 1;
+    return s;
+  }
+}
+
+test_t1440_user_iterator_heap_elements() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("b{2}");
+  T1440StrIter it = T1440StrIter(items: move v);
+  string joined = "";
+  for e in it {
+    joined = joined + e;
+  }
+  assert(joined == "a1b2", "user iterator yields owned elements");
+}
+
+// The function-unwind paths (`return`/`raise` with the element still live) are
+// also covered by the drop binding registered above — a heap-string loop leaks
+// exactly the same 2 allocations as an `int[]` loop, i.e. the element itself is
+// released — but they cannot be asserted here yet: T1442 leaks the iterator
+// instance + its closure env on every early `return` *and* `raise` out of a
+// `ForInNext` loop, including plain `int[]`. Add both cases once T1442 lands.
+
+// The receiver must survive iteration: still readable, still mutable, and
+// still dropped exactly once at scope exit.
+test_t1440_iter_receiver_reusable() `test {
+  string[] v = ["ab", "cd"];
+  for e in v.iter() {
+  }
+  for e in v.iter() {
+  }
+  assert(v[0] == "ab", "first element intact");
+  v.push("gh");
+  assert(v.len == 3, "still mutable after iteration");
+}
+
+// --- T1440: remaining shapes that reach the same two code paths ---
+//
+// Except where a comment says otherwise, each test below was verified to crash
+// (`invalid free`) on the unfixed compiler AND — rebuilt with only the env-drop
+// half of the fix applied — to LEAK, so it independently guards both defects.
+
+// The other duck-typed for-in kind. `for e in bag` where Bag has iter() (not
+// next()) is sema.ForInIter → genForInCustomStream, which registers its own
+// iterator binding and *then* delegates to genForInCustomIter. Everything above
+// enters through the direct `v.iter()` (ForInNext) door only.
+type T1440Bag {
+  string[] items;
+
+  iter() Iterator[string] {
+    return this.items.iter();
+  }
+}
+
+test_t1440_forin_iter_kind_heap() `test {
+  string[] items = [];
+  items.push("x{1}");
+  items.push("y{2}");
+  T1440Bag b = T1440Bag(items: move items);
+  string joined = "";
+  for e in b {
+    joined = joined + e;
+  }
+  assert(joined == "x1y2", "ForInIter path yields owned elements");
+}
+
+// A `this.field.iter()` receiver: the captured `this` is the field's owner, one
+// indirection further out than the local-variable cases above.
+type T1440Holder {
+  string[] items;
+
+  total() int {
+    int n = 0;
+    for e in this.items.iter() {
+      n = n + e.len;
+    }
+    return n;
+  }
+}
+
+test_t1440_iter_field_receiver() `test {
+  string[] items = [];
+  items.push("ab{1}");
+  T1440Holder h = T1440Holder(items: move items);
+  assert(h.total() == 3, "field receiver survives iteration");
+  assert(h.total() == 3, "and is reusable");
+}
+
+// Two element drops live at once, at different scope depths.
+test_t1440_iter_nested_loops_heap() `test {
+  string[] a = [];
+  a.push("p{1}");
+  string[] b = [];
+  b.push("q{2}");
+  b.push("r{3}");
+  int n = 0;
+  for x in a.iter() {
+    for y in b.iter() {
+      n = n + x.len + y.len;
+    }
+  }
+  assert(n == 8, "2 inner iterations x (2+2)");
+}
+
+// The inner receiver is the outer loop's *owned* element, which the outer
+// iteration drops — the inner iterator's borrowed capture must not outlive it.
+test_t1440_iter_inner_iter_on_binding() `test {
+  string[][] v = [];
+  string[] row = [];
+  row.push("z{1}");
+  row.push("w{2}");
+  v.push(move row);
+  int n = 0;
+  for r in v.iter() {
+    for e in r.iter() {
+      n = n + e.len;
+    }
+  }
+  assert(n == 4, "inner iter over the outer binding");
+}
+
+// Zero iterations: the element drop flag is never armed, so the exit path must
+// not drop an uninitialized slot. This one passes on the unfixed compiler too —
+// it is a boundary guard against over-dropping, not a repro of either defect.
+test_t1440_iter_empty_heap_vector() `test {
+  string[] v = [];
+  int n = 0;
+  for e in v.iter() {
+    n = n + 1;
+  }
+  assert(n == 0, "no iterations over an empty vector");
+}
+
+// The iterator crosses a call boundary, so the loop's scope is not the one that
+// created it.
+t1440_consume(Iterator[string] it) int {
+  int n = 0;
+  for e in it {
+    n = n + e.len;
+  }
+  return n;
+}
+
+test_t1440_iter_as_parameter() `test {
+  string[] v = [];
+  v.push("ab{1}");
+  v.push("c{2}");
+  assert(t1440_consume(v.iter()) == 5, "iterator passed as a parameter");
+}
+
+// break out of a combinator chain: the in-flight element belongs to the map()
+// iterator, and the abandoned chain still has to be torn down.
+test_t1440_iter_break_in_combinator_chain() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("b{2}");
+  v.push("c{3}");
+  int n = 0;
+  for e in v.iter().map[string](|string s| -> string {
+    return s + "!";
+  }) {
+    n = n + 1;
+    if n == 2 {
+      break;
+    }
+  }
+  assert(n == 2, "broke out of a mapped chain");
+}
+
+// move-out and break in the same body: the moved element must not be dropped by
+// the break's scope cleanup, while the un-yielded remainder is still released.
+test_t1440_iter_move_out_then_break() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("b{2}");
+  v.push("c{3}");
+  string[] out = [];
+  for e in v.iter() {
+    out.push(move e);
+    if out.len == 2 {
+      break;
+    }
+  }
+  assert(out.len == 2, "moved two elements out");
+  assert(out[0] == "a1", "first moved intact");
+  assert(out[1] == "b2", "second moved intact");
+  assert(v.len == 3, "source vector intact");
+}
+
+// Element kinds that route through a different arm of maybeRegisterDrop than
+// the string/Vector/user-type cases above: enum-with-payload
+// (maybeRegisterEnumDrop), tuple (bindingDropTuple), and Optional
+// (maybeRegisterOptionalDrop).
+enum T1440Shape {
+  Named(string label),
+  Blank,
+}
+
+test_t1440_iter_enum_elements() `test {
+  T1440Shape[] v = [];
+  v.push(T1440Shape.Named("n{1}"));
+  v.push(T1440Shape.Blank);
+  int n = 0;
+  for e in v.iter() {
+    n = n + 1;
+  }
+  assert(n == 2, "enum elements with a heap payload");
+}
+
+test_t1440_iter_tuple_elements() `test {
+  (string, int)[] v = [];
+  v.push(("a{1}", 2));
+  int n = 0;
+  for e in v.iter() {
+    (s, k) := e;
+    n = n + k + s.len;
+  }
+  assert(n == 4, "tuple elements with a heap field");
+}
+
+test_t1440_iter_optional_heap_elements() `test {
+  string?[] v = [];
+  v.push("a{1}");
+  v.push(none);
+  int untouched = 0;
+  for e in v.iter() {
+    untouched = untouched + 1;
+  }
+  assert(untouched == 2, "optional elements left wrapped");
+  int len_sum = 0;
+  for e in v.iter() {
+    if s := e {
+      len_sum = len_sum + s.len;
+    }
+  }
+  assert(len_sum == 2, "optional elements unwrapped");
+}
+
+test_t1440_iter_user_type_moved_out() `test {
+  T1440Res[] v = [T1440Res(id: 1), T1440Res(id: 2)];
+  T1440Res[] out = [];
+  for e in v.iter() {
+    out.push(move e);
+  }
+  assert(out.len == 2, "moved user-type elements out");
+  assert(out[1].id == 2, "value intact after the move");
+  assert(v.len == 2, "source vector intact");
+}
+
+// Terminal combinators over heap elements. The existing coverage for each of
+// these (fold/any/skip/collect) is int-only.
+test_t1440_iter_heap_terminal_combinators() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("bb{2}");
+  assert(v.iter().count() == 2, "count");
+  int total = v.iter().fold[int](0, |int acc, string s| -> int {
+    return acc + s.len;
+  });
+  assert(total == 5, "fold over lens 2+3=5");
+  assert(v.iter().any(|string s| -> bool {
+    return s.len == 2;
+  }), "any");
+  v.iter().for_each(|string s| {
+  });
+  string[] rest = v.iter().skip(1).collect();
+  assert(rest.len == 1, "skip(1) leaves one");
+  assert(rest[0] == "bb2", "skipped value intact");
+}
+
+// Inside a `go` block the loop is lowered into a coroutine, so the element
+// alloca and its drop flag have to be spilled to the coroutine frame like any
+// other entry-block alloca.
+test_t1440_iter_inside_goroutine() `test {
+  string[] v = [];
+  v.push("a{1}");
+  v.push("b{2}");
+  ch := channel[int](capacity: 1);
+  go {
+    int n = 0;
+    for e in v.iter() {
+      n = n + e.len;
+    }
+    ch.send(n);
+    ch.close();
+  };
+  int total = 0;
+  for got in ch {
+    total = total + got;
+  }
+  assert(total == 4, "iterated inside a goroutine");
+}
+
+// Inside a monomorphized generic the element type is only concrete after
+// substitution, and each instantiation gets its own answer about whether the
+// element needs dropping.
+t1440_generic_count[T](T[] v) int {
+  int n = 0;
+  for e in v.iter() {
+    n = n + 1;
+  }
+  return n;
+}
+
+test_t1440_iter_in_generic_function() `test {
+  string[] sv = [];
+  sv.push("a{1}");
+  sv.push("b{2}");
+  assert(t1440_generic_count[string](sv) == 2, "generic over a heap element");
+  int[] iv = [];
+  iv.push(3);
+  assert(t1440_generic_count[int](iv) == 1, "generic over a Copy element");
+}
+
+test_t1440_iter_enumerate_zip_heap() `test {
+  string[] a = [];
+  a.push("a{1}");
+  a.push("b{2}");
+  int idx_and_len = 0;
+  for tup in a.iter().enumerate() {
+    (i, s) := tup;
+    idx_and_len = idx_and_len + i + s.len;
+  }
+  assert(idx_and_len == 5, "enumerate: (0+2) + (1+2)");
+  string[] b = [];
+  b.push("c{3}");
+  int pairs = 0;
+  for tup in a.iter().zip[string](b.iter()) {
+    pairs = pairs + 1;
+  }
+  assert(pairs == 1, "zip stops at the shorter side");
+}

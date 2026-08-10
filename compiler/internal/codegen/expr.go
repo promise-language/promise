@@ -2514,7 +2514,7 @@ func (c *Compiler) genGenericCallArgs(args []*ast.Arg, sig *types.Signature, sub
 			c.dupStringFieldAccess = false
 			c.dupContainerFieldAccess = false
 			c.dupHeapUserFieldAccess = false // T0403
-			argTypes = append(argTypes, c.info.Types[arg.Value])
+			argTypes = append(argTypes, c.exprType(arg.Value))
 		}
 		return argVals, argTypes, nil
 	}
@@ -5488,6 +5488,15 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		panic(fmt.Sprintf("codegen: undeclared method %s", mangledName))
 	}
 
+	// T1395: When a generic function dispatches a structural-interface method
+	// through a type param (e.g. scan[T: Parse] calling T.parse(r)), the generic
+	// body was type-checked against the interface's abstract signature, so e.Args
+	// is frozen at the interface arity. The concrete override may carry EXTRA
+	// trailing defaulted/optional params (a supported conformance shape — see
+	// identicalSignaturesWithSelf). Pad the missing trailing args with their
+	// defaults so the concrete method isn't invoked with too few arguments.
+	callArgs := c.padTrailingDefaultArgs(e.Args, method.Sig())
+
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		// T1358: A value-type non-`this` receiver on a `~this` (mutable-borrow)
@@ -5531,15 +5540,171 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	// dup that every move sink arms (T0366) is skipped — `out.add(this.label)` then
 	// stores an alias of the owner's inner buffer into the set → UAF when the owner drops.
 	ownerSubst := c.buildOwnerTypeArgSubst(targetType)
-	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), ownerSubst)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(callArgs, method.Sig(), ownerSubst)
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, ownerSubst)
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), callArgs, ownerSubst)
 	args = append(args, argVals...)
 
 	var result value.Value = c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	result = c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, ownerSubst, e) // B0345/T0418
+	result = c.emitReturnAliasCheckSubst(result, method.Sig(), callArgs, origArgVals, ownerSubst, e) // B0345/T0418
 	return result
+}
+
+// buildParamDefaultInfos indexes every parameter default expression by the sema
+// Info that type-checked it — the main file's and each imported module's (T1395).
+//
+// Call arguments normally belong to the same compilation unit as the call site,
+// so codegen can read their recorded types straight out of c.info. Parameter
+// defaults break that: sema (and padTrailingDefaultArgs) splice the DECLARING
+// unit's expression into the call site's argument list, and that call site may
+// be compiled with another unit's Info active — a mono'd `scan[T]` body from
+// std filling a trailing default declared on a user type, for instance. This
+// index lets useDeclaringInfo/exprType fall back to the owning Info.
+func (c *Compiler) buildParamDefaultInfos() {
+	record := func(info *sema.Info) {
+		for _, expr := range info.ParamDefaults {
+			// Only the Info that actually type-checked the expression can serve
+			// it. std declarations are merged into every module's AST, so the
+			// same node can appear in several Infos — first one with a recorded
+			// type wins; they agree on the type either way.
+			if _, ok := c.paramDefaultInfos[expr]; ok {
+				continue
+			}
+			if _, typed := info.Types[expr]; typed {
+				c.paramDefaultInfos[expr] = info
+			}
+		}
+	}
+	c.paramDefaultInfos = make(map[ast.Expr]*sema.Info)
+	record(c.info)
+	// Visit modules in name order: which Info wins for a node several units
+	// share must not depend on map iteration order, or the emitted IR (and with
+	// it the build cache key) becomes run-dependent.
+	modNames := make([]string, 0, len(c.info.ModuleInfos))
+	for name := range c.info.ModuleInfos {
+		modNames = append(modNames, name)
+	}
+	sort.Strings(modNames)
+	for _, name := range modNames {
+		if modInfo := c.info.ModuleInfos[name]; modInfo != nil && modInfo.SemaInfo != nil {
+			record(modInfo.SemaInfo)
+		}
+	}
+}
+
+// useDeclaringInfo switches c.info to the unit that type-checked expr when expr
+// is a parameter default spliced in from another compilation unit (T1395), so
+// the whole expression subtree is emitted against the Info that holds its types.
+// Returns nil when no switch is needed; otherwise the caller must invoke the
+// returned restore function.
+//
+// The switch is a strict fallback: when the active Info has a type for expr it
+// resolved this splice itself (sema records the whole subtree at the call site,
+// including per-call facts such as auto-propagation) and its records must win.
+func (c *Compiler) useDeclaringInfo(expr ast.Expr) func() {
+	if _, ok := c.info.Types[expr]; ok {
+		return nil
+	}
+	owner := c.paramDefaultInfos[expr]
+	if owner == nil || owner == c.info {
+		return nil
+	}
+	saved := c.info
+	c.info = owner
+	return func() { c.info = saved }
+}
+
+// exprType returns the sema-recorded type of expr, falling back to the Info that
+// declared it when expr is a parameter default from another compilation unit
+// (T1395). Use it wherever an argument expression's type is read outside the
+// useDeclaringInfo window.
+func (c *Compiler) exprType(expr ast.Expr) types.Type {
+	if t, ok := c.info.Types[expr]; ok {
+		return t
+	}
+	if owner := c.paramDefaultInfos[expr]; owner != nil {
+		return owner.Types[expr]
+	}
+	return nil
+}
+
+// emitTrailingDefaultArgValues emits argument values for sig's parameters from
+// index `from` onward — the trailing parameters a call site does not supply
+// (T1395). Each is that parameter's default expression, emitted against the Info
+// that declared it, or a zero value (`none`) for an optional-typed parameter
+// with no default. subst resolves the owner type's params in the parameter
+// types. Returns the values and their LLVM types, the latter for callers that
+// must also build the callee's function type (indirect/vtable dispatch).
+//
+// Use this where the call is emitted without an AST argument list; call sites
+// that have one use padTrailingDefaultArgs so the padded args still flow through
+// the normal ownership-aware argument pipeline.
+func (c *Compiler) emitTrailingDefaultArgValues(sig *types.Signature, from int,
+	subst map[*types.TypeParam]types.Type) ([]value.Value, []irtypes.Type) {
+
+	params := sig.Params()
+	var vals []value.Value
+	var llvmTypes []irtypes.Type
+	for i := from; i < len(params); i++ {
+		p := params[i]
+		pType := p.Type()
+		if subst != nil {
+			pType = types.Substitute(pType, subst)
+		}
+		llvmTypes = append(llvmTypes, c.resolveType(pType))
+		if defExpr := c.info.DefaultArgExpr(p); defExpr != nil {
+			restore := c.useDeclaringInfo(defExpr)
+			vals = append(vals, c.genExpr(defExpr))
+			if restore != nil {
+				restore()
+			}
+			continue
+		}
+		// Optional-typed param with no default → none (zeroed optional).
+		vals = append(vals, c.zeroValue(llvmTypes[len(llvmTypes)-1]))
+	}
+	return vals, llvmTypes
+}
+
+// padTrailingDefaultArgs returns args extended with synthetic entries for any
+// trailing parameters of sig that args does not supply (T1395). This handles the
+// generic structural-dispatch case where the call's args were frozen at an
+// interface's abstract arity but the resolved concrete method carries extra
+// defaulted or optional-typed params. Each missing param is filled from its
+// default expression or, for an optional-typed param with no default, a none
+// literal — mirroring sema's resolveCallArgs. When args already covers every
+// param (the common case), the original slice is returned unchanged.
+//
+// A missing trailing *variadic* param cannot reach here: structural conformance
+// (identicalSignaturesWithSelf) only accepts extra params that have a default or
+// an optional type, and a variadic param has neither — so such a type never
+// satisfies the interface in the first place.
+func (c *Compiler) padTrailingDefaultArgs(args []*ast.Arg, sig *types.Signature) []*ast.Arg {
+	params := sig.Params()
+	if len(args) >= len(params) {
+		return args
+	}
+	padded := make([]*ast.Arg, len(args), len(params))
+	copy(padded, args)
+	for i := len(args); i < len(params); i++ {
+		p := params[i]
+		if defExpr := c.info.DefaultArgExpr(p); defExpr != nil {
+			padded = append(padded, &ast.Arg{Name: p.Name(), Value: defExpr})
+			continue
+		}
+		// Optional-typed param with no default → none literal. Register its type
+		// as TypNone (exactly what sema records for a `none` literal) so the arg
+		// pipeline — genGenericCallArgs / coerceCallArgs — takes the none→T?
+		// zero-value path instead of mishandling an untyped node. Sema does this
+		// for the normal call path by type-checking the synthetic none it inserts
+		// (resolveCallArgs step 6); the generic structural path never re-resolves
+		// these trailing params, so we mirror it here.
+		none := &ast.NoneLit{}
+		c.info.Types[none] = types.TypNone
+		padded = append(padded, &ast.Arg{Name: p.Name(), Value: none})
+	}
+	return padded
 }
 
 // genEnumGetterAccess emits a getter call on an enum value (e.g., s.name where name is a getter on enum Shape).
@@ -5710,14 +5875,15 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			enumSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		}
 	}
-	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), enumSubst)
+	callArgs := c.padTrailingDefaultArgs(e.Args, method.Sig()) // T1395
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(callArgs, method.Sig(), enumSubst)
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, enumSubst)
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), callArgs, enumSubst)
 	args = append(args, argVals...)
 
 	var result value.Value = c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	result = c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, enumSubst, e) // B0345/T0418
+	result = c.emitReturnAliasCheckSubst(result, method.Sig(), callArgs, origArgVals, enumSubst, e) // B0345/T0418
 
 	// Drop temp enum receiver if it was a fresh temporary not tracked by the
 	// enumCtorTemps mechanism (e.g. an enum returned from a call, not an inline
@@ -6159,13 +6325,18 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	// T1223: route arg-gen through genGenericCallArgs so genCallArgsWithMutRef sees
 	// CONCRETE param types (a raw `T move` param would otherwise skip the field-read
 	// dup every move sink arms).
-	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, method.Sig(), vtableSubst)
+	// T1395: the vtable slot's LLVM signature is built above from the FULL param
+	// list of method.Sig(), so trailing defaulted/optional params omitted by a
+	// generic structural-interface call site must be filled here too — otherwise
+	// the indirect call passes too few arguments and the callee reads garbage.
+	callArgs := c.padTrailingDefaultArgs(e.Args, method.Sig())
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(callArgs, method.Sig(), vtableSubst)
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, vtableSubst)
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), callArgs, vtableSubst)
 	args = append(args, argVals...)
 	var result value.Value = c.block.NewCall(fnTyped, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	result = c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, vtableSubst, e) // B0345/T0418
+	result = c.emitReturnAliasCheckSubst(result, method.Sig(), callArgs, origArgVals, vtableSubst, e) // B0345/T0418
 	return result
 }
 
@@ -7769,7 +7940,7 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 	for i, arg := range args {
 		if i < len(params) {
 			if _, isMutRef := params[i].Type().(*types.MutRef); isMutRef {
-				argType := c.info.Types[arg.Value]
+				argType := c.exprType(arg.Value)
 				paramInner := params[i].Type().(*types.MutRef).Elem()
 				// Check if the arg type matches the param inner type exactly
 				// (no view coercion needed). If so, pass the alloca directly.
@@ -7785,7 +7956,7 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 					c.block.NewStore(val, tmp)
 					argVals = append(argVals, tmp)
 				}
-				argTypes = append(argTypes, c.info.Types[arg.Value])
+				argTypes = append(argTypes, c.exprType(arg.Value))
 				continue
 			}
 		}
@@ -7817,7 +7988,7 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 			v, _ = c.dupBorrowedHeapUserPayload(arg.Value, v)
 		}
 		argVals = append(argVals, v)
-		argTypes = append(argTypes, c.info.Types[arg.Value])
+		argTypes = append(argTypes, c.exprType(arg.Value))
 		// T0087: For ~ (move) params, transfer ownership to callee.
 		// Clear caller's drop flag and claim string/heap temps so they're not double-freed.
 		if isMutRefParam {

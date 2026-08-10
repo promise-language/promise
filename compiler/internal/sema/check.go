@@ -45,6 +45,73 @@ type Checker struct {
 	failableScope       bool                             // T1379: true inside a `go! {}` block body — a failable scope (§17.2.1); errors auto-propagate/raise into the task regardless of the enclosing fn
 	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (see recordFailableEscape); snapshotted around a `go! {}` body to detect a body that cannot fail
 	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (§17.2 explicit-return style)
+	paramDefaults       []paramDefault                   // T1395: every parameter default declared in this file, in declaration order — type-checked once by checkParamDefaults
+}
+
+// paramDefault pairs a parameter that declares a default with its AST default
+// expression, recorded in the Define pass so the Check pass can type-check the
+// expression exactly once, at its declaration (T1395).
+type paramDefault struct {
+	param *types.Param
+	expr  ast.Expr
+}
+
+// recordParamDefault marks a parameter as having a default and records the
+// default expression: on the param itself (for cross-module lookup), in
+// Info.ParamDefaults (for codegen and the call-site fast path), and in the
+// checker's declaration-order list (for checkParamDefaults).
+func (c *Checker) recordParamDefault(param *types.Param, expr ast.Expr) {
+	param.SetHasDefault(true)
+	param.SetDefaultExpr(expr)
+	c.info.ParamDefaults[param] = expr
+	c.paramDefaults = append(c.paramDefaults, paramDefault{param: param, expr: expr})
+}
+
+// checkParamDefaults type-checks every parameter default expression at its
+// declaration, in file scope (T1395).
+//
+// Defaults are otherwise only type-checked lazily, when a call site omits the
+// argument and resolveCallArgs splices the expression into that call's args. A
+// default that no call site ever omits therefore stays untyped — and codegen
+// panics when it later has to emit it, which is exactly what happens when a
+// concrete method satisfies a structural interface via EXTRA defaulted params:
+// the generic call site is frozen at the interface arity, so sema never
+// resolves those trailing params and only codegen's padTrailingDefaultArgs
+// materializes them. Checking here guarantees every default carries a recorded
+// type before codegen, independent of call sites.
+//
+// File scope (not the function's body scope) is deliberate: it is what call
+// sites already resolve defaults against, so a default may reference only
+// module-level names — never another parameter or `this`, which would resolve
+// differently for every caller.
+//
+// Diagnostics raised by this pre-pass are discarded: a default expression is
+// evaluated in the CALLER's context, so anything context-sensitive (a `?^` that
+// needs a failable enclosing function, a name that resolves only at the call
+// site) can only be judged there, and every call site still reports it as
+// before. The one error reported here is the context-independent one — a
+// default whose type cannot be assigned to its parameter — which otherwise goes
+// unreported entirely when no call site ever omits the argument.
+func (c *Checker) checkParamDefaults() {
+	savedScope, savedFunc := c.scope, c.curFunc
+	c.scope, c.curFunc = c.fileScope, nil
+	defer func() { c.scope, c.curFunc = savedScope, savedFunc }()
+
+	for _, pd := range c.paramDefaults {
+		paramType := pd.param.Type()
+		// A default on a generic-typed param would have to name the type param,
+		// which is not in file scope — skip rather than report a bogus error.
+		if paramType == nil || types.ContainsTypeParam(paramType) {
+			continue
+		}
+		errCount := len(c.errors)
+		argType := c.checkExprWithHint(pd.expr, paramType)
+		c.errors = c.errors[:errCount]
+		if argType != nil && !types.AssignableTo(argType, paramType) {
+			c.errorf(pd.expr.Pos(), "cannot use default value of type %s for parameter '%s' of type %s",
+				argType, pd.param.Name(), paramType)
+		}
+	}
 }
 
 // goBlockCtx accumulates the `return` statements seen inside one `go {}` /
@@ -234,7 +301,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.info.Timings.Define = time.Since(tPass)
 
 	tPass = time.Now()
-	c.check(file) // Pass 3: type-check function/method bodies
+	c.checkParamDefaults() // T1395: type-check parameter defaults at their declaration
+	c.check(file)          // Pass 3: type-check function/method bodies
 	c.propagateCloneReqs()
 	c.info.Timings.Check = time.Since(tPass)
 

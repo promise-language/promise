@@ -912,9 +912,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 		}
 		if p.Default != nil {
-			params[i].SetHasDefault(true)
-			params[i].SetDefaultExpr(p.Default) // stored on param for cross-module lookup
-			c.info.ParamDefaults[params[i]] = p.Default
+			c.recordParamDefault(params[i], p.Default)
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
 		params[i].SetLifetime(extractLifetime(p.Annotations))
@@ -1194,9 +1192,7 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 		}
 		if p.Default != nil {
-			params[i].SetHasDefault(true)
-			params[i].SetDefaultExpr(p.Default)
-			c.info.ParamDefaults[params[i]] = p.Default
+			c.recordParamDefault(params[i], p.Default)
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
 		params[i].SetLifetime(extractLifetime(p.Annotations))
@@ -1493,9 +1489,7 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
 		}
 		if p.Default != nil {
-			params[i].SetHasDefault(true)
-			params[i].SetDefaultExpr(p.Default) // stored on param for cross-module lookup
-			c.info.ParamDefaults[params[i]] = p.Default
+			c.recordParamDefault(params[i], p.Default)
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
 		params[i].SetLifetime(extractLifetime(p.Annotations))

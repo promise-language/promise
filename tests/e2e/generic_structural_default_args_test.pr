@@ -1,0 +1,331 @@
+// T1395: trailing defaulted / optional params on a concrete method must be
+// filled in when the method is dispatched generically through a structural
+// interface (e.g. scan[T: Parse] calling T.parse(r)). The generic body is
+// type-checked against the interface's abstract arity, so codegen must pad the
+// missing trailing args with their defaults at the concrete dispatch site.
+// --- 1. Extra `int` default on a value type (the core repro) ---
+type Widget `public `doc("Value type satisfying Parse with an extra defaulted param.") {
+  int v;
+  parse!(Reader ~r, int extra = 7) Widget `factory `public `doc("Parses a Widget; extra defaults to 7.") {
+    return Widget(v: 100 + extra);
+  }
+}
+
+test_widget_extra_int_default_via_scan() `test {
+  Widget w = scan[Widget]("ignored")?!;
+  assert(w.v == 107, "extra int default applied through scan[Widget]");
+}
+
+test_widget_direct_call_control() `test {
+  // Direct call has always worked (sema fills against the concrete signature).
+  Scanner r = Scanner(s: "x");
+  Widget w = Widget.parse(r)?!;
+  assert(w.v == 107, "direct call also fills the default");
+}
+
+// --- 2. Extra heap-producing (`string`) default — exercises drop paths ---
+type Label `public `doc("Heap user type satisfying Parse with an extra string default.") {
+  string name;
+  parse!(Reader ~r, string suffix = "-tail") Label `factory `public `doc("Parses a Label; suffix defaults to -tail.") {
+    return Label(name: "base" + suffix);
+  }
+}
+
+test_label_extra_string_default_via_scan() `test {
+  Label l = scan[Label]("ignored")?!;
+  assert(l.name == "base-tail", "extra string default applied through scan[Label]");
+}
+
+// --- 3. Extra optional-typed param with NO default → none literal ---
+type Tagged `public `doc("Satisfies Parse with an extra optional param (no default).") {
+  int base;
+  parse!(Reader ~r, int? tag) Tagged `factory `public `doc("Parses a Tagged; tag is optional.") {
+    int t = tag ?: 5;
+    return Tagged(base: t * 2);
+  }
+}
+
+test_tagged_optional_no_default_via_scan() `test {
+  Tagged t = scan[Tagged]("ignored")?!;
+  assert(t.base == 10, "optional extra param filled with none, defaults to 5");
+}
+
+// --- 4. Multiple trailing defaulted params ---
+type Combo `public `doc("Satisfies Parse with two extra defaulted params.") {
+  int total;
+  parse!(Reader ~r, int a = 3, int b = 4) Combo `factory `public `doc("Parses a Combo; a=3, b=4 default.") {
+    return Combo(total: a * 10 + b);
+  }
+}
+
+test_combo_multiple_defaults_via_scan() `test {
+  Combo c = scan[Combo]("ignored")?!;
+  assert(c.total == 34, "both trailing defaults filled through scan[Combo]");
+}
+
+// --- 5. A non-literal default expression ---
+// The default expression is only type-checked at a call site that omits the
+// argument — which never happens on the generic path, since the interface arity
+// freezes the args. Sema therefore type-checks every parameter default at its
+// declaration; without that, emitting `2 * 3` here has no recorded operand type.
+type Computed `public `doc("Satisfies Parse with a compound (non-literal) default.") {
+  int v;
+  parse!(Reader ~r, int extra = 2 * 3) Computed `factory `public `doc("Parses a Computed; extra defaults to 6.") {
+    return Computed(v: 10 + extra);
+  }
+}
+
+test_computed_expression_default_via_scan() `test {
+  Computed c = scan[Computed]("ignored")?!;
+  assert(c.v == 16, "compound default expression evaluated at the concrete dispatch");
+}
+
+// A default that ALLOCATES (concatenation, not a .rodata literal) must be owned
+// and freed like any other argument — the leak check guards the drop path.
+type Joined `public `doc("Satisfies Parse with a heap-allocating default.") {
+  string name;
+  parse!(Reader ~r, string suffix = "-" + "tail") Joined `factory `public `doc("Parses a Joined; suffix defaults to -tail.") {
+    return Joined(name: "base" + suffix);
+  }
+}
+
+test_heap_allocating_default_via_scan() `test {
+  Joined j = scan[Joined]("ignored")?!;
+  assert(j.name == "base-tail", "heap-allocating default filled and freed");
+}
+
+// --- 6. Non-factory interface method, reached three ways ---
+// Direct dispatch, virtual dispatch (the concrete type has a child, so the call
+// goes through the vtable), and the boxed structural-view adapter must all fill
+// the same trailing default.
+type Shower `structural `public `doc("Structural interface with a single no-argument method.") {
+  show(this) string `abstract `doc("Renders the value.");
+}
+
+type Plain `public `doc("Satisfies Shower with an extra defaulted param; no subtypes.") {
+  int v;
+  show(this, int extra = 9) string `public `doc("Renders v + extra; extra defaults to 9.") => "{this.v + extra}";
+}
+
+type Parent `public `doc("Satisfies Shower with an extra defaulted param; has a subtype, so it dispatches virtually.") {
+  int v;
+  show(this, int extra = 20) string `public `doc("Renders v + extra; extra defaults to 20.") => "{this.v + extra}";
+}
+
+type Child is Parent `public `doc("Subtype of Parent — its existence forces vtable dispatch on Parent.") {
+  new(~this, int v) {
+    this.v = v;
+  }
+}
+
+render[T: Shower](T x) string `doc("Calls show() through the Shower bound.") => x.show();
+
+test_direct_dispatch_default() `test {
+  Plain p = Plain(v: 1);
+  assert(render[Plain](p) == "10", "direct generic dispatch fills the default");
+}
+
+test_virtual_dispatch_default() `test {
+  Parent p = Parent(v: 2);
+  assert(render[Parent](p) == "22", "vtable dispatch fills the default");
+  Child c = Child(3);
+  assert(render[Child](c) == "23", "inherited method through a subtype fills the default");
+}
+
+test_boxed_structural_view_default() `test {
+  Plain p = Plain(v: 4);
+  Shower s = p;
+  assert(s.show() == "13", "structural-view adapter fills the default");
+}
+
+// --- 7. Enum satisfying the interface with an extra defaulted param ---
+enum Level `doc("Enum satisfying Shower with an extra defaulted param.") {
+  Low, High,
+
+  show(this, int extra = 5) string `doc("Renders the level and extra; extra defaults to 5.") {
+    match this {
+      Level.Low => {
+        return "low{extra}";
+      },
+      Level.High => {
+        return "high{extra}";
+      },
+    }
+  }
+}
+
+test_enum_dispatch_default() `test {
+  Level l = Level.High;
+  assert(render[Level](l) == "high5", "enum dispatch fills the default");
+}
+
+// --- 8. Iterator protocol: for-in supplies no arguments at all ---
+// A concrete next() may satisfy Iterator[T] with an extra defaulted param; the
+// for-in lowering must fill it, or `step` arrives as 0 and the loop never ends.
+type Stepper `public `doc("Iterator whose next() carries an extra defaulted step.") {
+  int n;
+  next(~this, int step = 1) int? `public `doc("Advances by step (default 1) until 3.") {
+    if this.n >= 3 {
+      return none;
+    }
+    this.n = this.n + step;
+    return this.n;
+  }
+}
+
+test_for_in_iterator_default() `test(timeout: "10s") {
+  Stepper s = Stepper(n: 0);
+  int sum = 0;
+  for v in s {
+    sum = sum + v;
+  }
+  assert(sum == 6, "for-in fills next()'s trailing default (1 + 2 + 3)");
+}
+
+// --- 9. for-in over an iterator that dispatches VIRTUALLY ---
+type CountIter `public `doc("Iterator with a subtype, so next() dispatches through the vtable.") {
+  int n;
+  next(~this, int step = 2) int? `public `doc("Advances by step (default 2) until 6.") {
+    if this.n >= 6 {
+      return none;
+    }
+    this.n = this.n + step;
+    return this.n;
+  }
+}
+
+type FastCounter is CountIter `public `doc("Subtype of CountIter — its existence forces vtable dispatch on CountIter.next().") {
+  new(~this) {
+    this.n = 0;
+  }
+}
+
+// NOTE: `for v in FastCounter()` — iterating the SUBTYPE, whose next() is
+// inherited — panics in codegen ("undeclared method FastCounter.next").
+// Pre-existing and unrelated to defaults; tracked as T1459. Only the parent
+// receiver (which is what exercises the vtable path here) is iterated below.
+
+test_for_in_virtual_iterator_default() `test(timeout: "10s") {
+  CountIter c = CountIter(n: 0);
+  int sum = 0;
+  for v in c {
+    sum = sum + v;
+  }
+  assert(sum == 12, "vtable for-in fills next()'s trailing default (2 + 4 + 6)");
+}
+
+test_subtype_inherited_next_direct_default() `test {
+  // The subtype cannot be iterated (T1459), but calling its inherited next()
+  // directly still has to fill the parent's trailing default.
+  FastCounter f = FastCounter();
+  int? first = f.next();
+  assert((first ?: 0) == 2, "inherited next() called directly fills the default");
+}
+
+// --- 10. for-in over a GENERIC iterator ---
+type Repeater[T] `public `doc("Generic iterator whose next() carries an extra defaulted step.") {
+  int left;
+  T value;
+  next(~this, int step = 1) T? `public `doc("Yields value until left runs out; step defaults to 1.") {
+    if this.left <= 0 {
+      return none;
+    }
+    this.left = this.left - step;
+    return this.value;
+  }
+}
+
+test_for_in_generic_iterator_default() `test(timeout: "10s") {
+  Repeater[int] r = Repeater[int](left: 3, value: 7);
+  int sum = 0;
+  for v in r {
+    sum = sum + v;
+  }
+  assert(sum == 21, "generic for-in substitutes owner type args and fills the default");
+}
+
+// --- 11. Extra OPTIONAL param (no default) through every dispatch shape ---
+type OptShow `public `doc("Satisfies Shower with an extra optional param that has no default.") {
+  int v;
+  show(this, int? bump) string `public `doc("Renders v + bump; bump defaults to none.") => "{this.v + (bump ?: 100)}";
+}
+
+test_optional_no_default_generic_dispatch() `test {
+  OptShow o = OptShow(v: 2);
+  assert(render[OptShow](o) == "102", "generic dispatch fills the optional extra param with none");
+}
+
+test_optional_no_default_boxed_view() `test {
+  OptShow o = OptShow(v: 1);
+  Shower s = o;
+  assert(s.show() == "101", "view adapter fills the optional extra param with none");
+}
+
+// --- 12. Heap-allocating default across virtual + view dispatch (leak guard) ---
+type Tagger `structural `public `doc("Structural interface with a no-argument tag().") {
+  tag(this) string `abstract `doc("Tags the value.");
+}
+
+type HeapParent `public `doc("Satisfies Tagger with a heap-allocating default; has a subtype.") {
+  int v;
+  tag(this, string suffix = "-" + "end") string `public `doc("Tags v with suffix; suffix defaults to -end.") => "p{this.v}{suffix}";
+}
+
+type HeapChild is HeapParent `public `doc("Subtype of HeapParent — forces vtable dispatch.") {
+  new(~this, int v) {
+    this.v = v;
+  }
+}
+
+label[T: Tagger](T x) string `doc("Calls tag() through the Tagger bound.") => x.tag();
+
+test_heap_default_virtual_dispatch() `test {
+  HeapParent p = HeapParent(v: 1);
+  assert(label[HeapParent](p) == "p1-end", "heap default filled at vtable dispatch");
+  HeapChild c = HeapChild(2);
+  assert(label[HeapChild](c) == "p2-end", "heap default filled for a subtype");
+}
+
+// NOTE: the same heap-allocating default reached through the boxed structural
+// VIEW adapter (`Tagger t = p; t.tag()`) is correct but leaks — the adapter has
+// no AST argument list, so its default temp bypasses the ownership-aware arg
+// pipeline and is never freed. Tracked as T1460 (pre-existing, reproduces on a
+// clean HEAD build); a regression test belongs there once it is fixed. The
+// non-allocating view-adapter defaults ARE covered above
+// (test_boxed_structural_view_default, test_optional_no_default_boxed_view).
+
+// --- 13. Pure value type ---
+type Coord `public `doc("Pure value type satisfying Shower with an extra defaulted param.") {
+  int x `value;
+  int y `value;
+  show(this, int extra = 7) string `public `doc("Renders x + y + extra; extra defaults to 7.") => "{this.x + this.y + extra}";
+}
+
+test_value_type_dispatch_default() `test {
+  Coord c = Coord(x: 1, y: 2);
+  assert(render[Coord](c) == "10", "pure value type generic dispatch fills the default");
+}
+
+// --- 14. Default that CALLS a module-level function ---
+base_bump() int `doc("Module-level function used as a parameter default.") => 11;
+
+type Callish `public `doc("Satisfies Shower with a function-call default.") {
+  int v;
+  show(this, int extra = base_bump()) string `public `doc("Renders v + extra; extra defaults to base_bump().") => "{this.v + extra}";
+}
+
+test_function_call_default_via_generic_dispatch() `test {
+  Callish c = Callish(v: 1);
+  assert(render[Callish](c) == "12", "function-call default evaluated at the concrete dispatch");
+}
+
+// --- 15. Generic concrete type reached through the interface ---
+type Wrap[T] `public `doc("Generic type satisfying Shower with an extra defaulted param.") {
+  T inner;
+  show(this, int extra = 4) string `public `doc("Renders inner and extra; extra defaults to 4.") => "{this.inner}:{extra}";
+}
+
+test_generic_owner_dispatch_default() `test {
+  Wrap[int] w = Wrap[int](inner: 9);
+  assert(render[Wrap[int]](w) == "9:4", "mono'd generic owner fills the trailing default");
+}

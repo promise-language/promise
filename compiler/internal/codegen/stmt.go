@@ -1400,6 +1400,11 @@ func (c *Compiler) genReceiverExpr(expr ast.Expr) value.Value {
 // stores, constructors via genConstructorCallMono). The return-aliases-arg
 // case is handled at runtime by emitReturnAliasCheck.
 func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
+	// T1395: a spliced parameter default belongs to the unit that declared it,
+	// which may not be the unit being compiled — emit it against its own Info.
+	if restore := c.useDeclaringInfo(expr); restore != nil {
+		defer restore()
+	}
 	val := c.genExpr(expr)
 	if c.info.AutoPropagateExprs[expr] {
 		val = c.genAutoPropagateValue(val)
@@ -14022,6 +14027,13 @@ func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value,
 func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type,
 	named *types.Named, method *types.Method, retLLVM irtypes.Type) value.Value {
 
+	// T1395: the for-in protocol supplies no arguments, but a concrete next()
+	// may satisfy `Iterator[T]` with EXTRA trailing defaulted/optional params.
+	// Fill them, or the callee reads a garbage value for each (e.g. a `step`
+	// default that arrives as 0 makes the loop never advance).
+	defaultArgs, defaultTypes := c.emitTrailingDefaultArgValues(
+		method.Sig(), 0, c.buildOwnerTypeArgSubst(receiverType))
+
 	if c.needsVtable(named) && !method.IsNative() {
 		// Virtual dispatch: extract vtable + instance, call through vtable slot
 		vtableRaw := c.extractVtablePtr(receiverVal)
@@ -14036,11 +14048,11 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 			constant.NewInt(irtypes.I32, int64(slotIndex)))
 		fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
 
-		// Build function type: (i8*) -> retLLVM  (receiver only, no other args)
-		funcType := irtypes.NewFunc(retLLVM, irtypes.I8Ptr)
+		// Build function type: (i8*, <defaulted params...>) -> retLLVM
+		funcType := irtypes.NewFunc(retLLVM, append([]irtypes.Type{irtypes.I8Ptr}, defaultTypes...)...)
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
-		return c.block.NewCall(fnTyped, instance)
+		return c.block.NewCall(fnTyped, append([]value.Value{instance}, defaultArgs...)...)
 	}
 
 	// Direct dispatch: call the concrete method function
@@ -14053,7 +14065,7 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 
 	// Extract instance pointer as receiver
 	instance := c.extractInstancePtr(receiverVal)
-	return c.block.NewCall(fn, instance)
+	return c.block.NewCall(fn, append([]value.Value{instance}, defaultArgs...)...)
 }
 
 // genForInRange handles for-in over a Range[T] value type (e.g., 0..10, 'a'..'z').

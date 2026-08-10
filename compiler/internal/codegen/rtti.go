@@ -976,28 +976,9 @@ func (c *Compiler) emitViewMethodAdapter(
 		paramIdx++
 	}
 
-	// Supply defaults for extra concrete params
-	for i := len(ifaceSig.Params()); i < len(concreteSig.Params()); i++ {
-		p := concreteSig.Params()[i]
-		pType := c.resolveType(p.Type())
-
-		if p.HasDefault() {
-			// Compile the default expression — check local ParamDefaults first,
-			// then fall back to the default stored on the param (cross-module).
-			if defExpr, ok := c.info.ParamDefaults[p]; ok {
-				args = append(args, c.genExpr(defExpr))
-				continue
-			}
-			if raw := p.DefaultExpr(); raw != nil {
-				if defExpr, ok := raw.(ast.Expr); ok {
-					args = append(args, c.genExpr(defExpr))
-					continue
-				}
-			}
-		}
-		// Optional type or fallback: pass zeroinitializer (none)
-		args = append(args, constant.NewZeroInitializer(pType))
-	}
+	// Supply defaults for extra concrete params (T1395)
+	defaultArgs, _ := c.emitTrailingDefaultArgValues(concreteSig, len(ifaceSig.Params()), nil)
+	args = append(args, defaultArgs...)
 
 	// Call the concrete method
 	result := c.block.NewCall(concreteFn, args...)

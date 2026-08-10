@@ -433,6 +433,28 @@ type VariantFieldAccess struct {
 	FieldType   types.Type // resolved field type (substitution applied)
 }
 
+// DefaultArgExpr returns the AST default expression for a parameter that
+// declares one, or nil if the parameter has no default (or its default was not
+// recorded). The current file's ParamDefaults is the fast path for locally
+// declared functions; the default stored on the param itself covers cross-module
+// calls (e.g. user code calling a std module function). Sema's call-argument
+// resolution and codegen's default filling share this single lookup so the two
+// can never disagree about what a parameter's default is.
+func (i *Info) DefaultArgExpr(p *types.Param) ast.Expr {
+	if !p.HasDefault() {
+		return nil
+	}
+	if expr, ok := i.ParamDefaults[p]; ok {
+		return expr
+	}
+	if raw := p.DefaultExpr(); raw != nil {
+		if expr, ok := raw.(ast.Expr); ok {
+			return expr
+		}
+	}
+	return nil
+}
+
 // recordType stores the resolved type for an expression.
 func (c *Checker) recordType(expr ast.Expr, typ types.Type) {
 	if typ != nil {

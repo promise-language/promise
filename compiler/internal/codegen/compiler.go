@@ -102,6 +102,13 @@ type Compiler struct {
 	moduleCanonical  map[string]string           // module path → IR prefix (for alias→prefix mapping)
 	moduleInfos      map[string]*sema.ModuleInfo // B0212: cached from main info for cross-module lookups
 
+	// T1395: parameter default expression → the sema Info that type-checked it.
+	// A default is spliced into the call site's argument list, so it can be
+	// emitted while a DIFFERENT compilation unit's Info is active (e.g. std's
+	// `scan[T]` filling a user type's trailing default). Only the declaring Info
+	// holds the expression's recorded types/objects.
+	paramDefaultInfos map[ast.Expr]*sema.Info
+
 	// Instance BC codegen state
 	instanceOwnedFuncs map[string]string // IR func name → mono instance name (e.g., "Box[int]")
 	cachedInstances    map[string]bool   // mono instance names whose .bc is already cached
@@ -937,6 +944,8 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		c.debugAllocator = opts.DebugAllocator
 		c.memoryLimitAccounting = opts.MemoryLimitAccounting
 	}
+
+	c.buildParamDefaultInfos() // T1395
 
 	// Collect extern declarations and compute type layouts
 	externList := collectExterns(file, info)

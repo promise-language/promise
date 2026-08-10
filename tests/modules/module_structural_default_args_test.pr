@@ -1,0 +1,70 @@
+// T1395: a concrete method declared in a MODULE may satisfy a structural
+// interface through EXTRA trailing defaulted / optional params. The default
+// expression is type-checked by the module's sema Info, but it is spliced into
+// a dispatch site emitted with a DIFFERENT unit's Info active — the cross-unit
+// lookup that codegen's paramDefaultInfos / useDeclaringInfo exist for.
+//
+// NOTE: the std `scan[T: Parse]` route cannot be exercised over a module type at
+// all — `scan[module.T]` panics ("codegen: undeclared method T.parse") whether
+// or not the concrete parse carries extra defaults. Pre-existing and unrelated
+// to defaults; tracked as T1458. The same-unit scan coverage lives in
+// tests/e2e/generic_structural_default_args_test.pr.
+use defaultsmod "./defaultsmod";
+
+// --- Through a generic function declared in the CONSUMER ---
+// render_here is monomorphized in the main unit; the default it must fill was
+// type-checked by defaultsmod's Info.
+render_here[T: defaultsmod.Shower](T x) string `doc("Calls show() through the module's Shower bound.") => x.show();
+
+test_consumer_generic_dispatch_module_default() `test {
+  defaultsmod.Plain p = defaultsmod.Plain(v: 1);
+  assert(render_here[defaultsmod.Plain](p) == "10", "consumer-side generic dispatch fills the module's default");
+}
+
+test_consumer_generic_dispatch_module_compound_default() `test {
+  defaultsmod.Computed c = defaultsmod.Computed(v: 1);
+  assert(render_here[defaultsmod.Computed](c) == "7", "compound default from another unit evaluated at the dispatch");
+}
+
+test_consumer_generic_dispatch_module_function_call_default() `test {
+  defaultsmod.Called c = defaultsmod.Called(v: 1);
+  assert(render_here[defaultsmod.Called](c) == "12", "default calling a module-level function evaluated at the dispatch");
+}
+
+test_consumer_generic_dispatch_module_optional_no_default() `test {
+  defaultsmod.Tagged t = defaultsmod.Tagged(v: 1);
+  assert(render_here[defaultsmod.Tagged](t) == "6", "optional extra param from another unit filled with none");
+}
+
+// --- Through a generic function declared in the MODULE ---
+test_module_generic_dispatch_module_default() `test {
+  defaultsmod.Plain p = defaultsmod.Plain(v: 2);
+  assert(defaultsmod.render_in_module[defaultsmod.Plain](p) == "11", "module-side generic dispatch fills the default");
+}
+
+// --- Boxed structural view over a module type ---
+// The view is typed by a CONSUMER-declared interface deliberately: boxing into a
+// MODULE-declared structural interface corrupts the heap ("fatal: invalid free")
+// regardless of defaults — pre-existing, tracked as T1462. Structural conformance
+// is duck-typed, so LocalShower is satisfied by the module type all the same.
+type LocalShower `structural `doc("Consumer-declared structural interface, satisfied by the module's types.") {
+  show(this) string `abstract `doc("Renders the value.");
+}
+
+test_module_boxed_view_default() `test {
+  defaultsmod.Plain p = defaultsmod.Plain(v: 4);
+  LocalShower s = p;
+  assert(s.show() == "13", "view adapter fills the module-declared default");
+}
+
+// --- Virtual dispatch: the module type has a subtype, so it goes via the vtable ---
+test_module_virtual_dispatch_default() `test {
+  defaultsmod.Parent p = defaultsmod.Parent(v: 2);
+  assert(render_here[defaultsmod.Parent](p) == "22", "vtable dispatch fills the module-declared default");
+}
+
+// --- Direct call control: sema fills against the concrete signature ---
+test_module_direct_call_control() `test {
+  defaultsmod.Plain p = defaultsmod.Plain(v: 5);
+  assert(p.show() == "14", "direct call fills the default");
+}

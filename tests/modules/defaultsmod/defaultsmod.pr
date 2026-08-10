@@ -1,0 +1,43 @@
+// T1395: types declared in a MODULE that satisfy a structural interface via an
+// EXTRA trailing defaulted / optional param. The default expression belongs to
+// this compilation unit's sema Info, but it is materialized at a dispatch site
+// compiled with the consumer's Info — the cross-unit lookup that codegen's
+// paramDefaultInfos / useDeclaringInfo exist for.
+module_bump() int `public `doc("Module-level function used as a parameter default.") => 11;
+
+type Shower `structural `public `doc("Structural interface with a no-argument show().") {
+  show(this) string `abstract `doc("Renders the value.");
+}
+
+type Plain `public `doc("Satisfies Shower with an extra defaulted param; no subtypes.") {
+  int v `public;
+  show(this, int extra = 9) string `public `doc("Renders v + extra; extra defaults to 9.") => "{this.v + extra}";
+}
+
+type Computed `public `doc("Satisfies Shower with a compound (non-literal) default.") {
+  int v `public;
+  show(this, int extra = 2 * 3) string `public `doc("Renders v + extra; extra defaults to 6.") => "{this.v + extra}";
+}
+
+type Called `public `doc("Satisfies Shower with a default that calls a module-level function.") {
+  int v `public;
+  show(this, int extra = module_bump()) string `public `doc("Renders v + extra; extra defaults to module_bump().") => "{this.v + extra}";
+}
+
+type Tagged `public `doc("Satisfies Shower with an extra optional param and no default.") {
+  int v `public;
+  show(this, int? bump) string `public `doc("Renders v + bump; bump defaults to none.") => "{this.v + (bump ?: 5)}";
+}
+
+type Parent `public `doc("Satisfies Shower with an extra defaulted param; has a subtype, so it dispatches virtually.") {
+  int v `public;
+  show(this, int extra = 20) string `public `doc("Renders v + extra; extra defaults to 20.") => "{this.v + extra}";
+}
+
+type Child is Parent `public `doc("Subtype of Parent — its existence forces vtable dispatch.") {
+  new(~this, int v) `public {
+    this.v = v;
+  }
+}
+
+render_in_module[T: Shower](T x) string `public `doc("Calls show() through the Shower bound, from inside the module.") => x.show();

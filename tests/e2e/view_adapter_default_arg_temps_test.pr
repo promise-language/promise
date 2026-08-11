@@ -1,0 +1,713 @@
+// T1460: a structural-view method adapter must own the temporaries it creates
+// for the concrete method's trailing default arguments. The adapter has no AST
+// argument list, so those values never reach the statement-end drain that frees
+// an ordinary call's argument temps — before the fix, every heap-allocating
+// default leaked once per call through the boxed view.
+//
+// Each shape is exercised twice: the direct call (which is also what makes sema
+// type-check the default, and doubles as the vtable/monomorphized control) and
+// the boxed structural view (the adapter path under test).
+type Tagger `structural `public `doc("Structural interface with a no-argument tag().") {
+  tag(this) string `abstract `doc("Tags the value.");
+}
+
+// --- heap-allocating string default (the filed repro) ---
+
+type HeapParent `public `doc("Satisfies Tagger with a concatenated string default.") {
+  int v;
+  tag(this, string suffix = "-" + "end") string `public `doc("Tags v with suffix.") => "p{this.v}{suffix}";
+}
+
+test_heap_string_default_direct() `test {
+  HeapParent p = HeapParent(v: 1);
+  assert(p.tag() == "p1-end", "direct call fills the heap default");
+}
+
+test_heap_string_default_boxed_view() `test {
+  HeapParent p = HeapParent(v: 3);
+  Tagger t = p;
+  assert(t.tag() == "p3-end", "view adapter fills the heap default");
+}
+
+// --- default returned unchanged: the adapter must not free what it handed back ---
+
+type AliasParent `public `doc("Returns its default argument verbatim.") {
+  int v;
+  tag(this, string suffix = "-" + "alias") string `public `doc("Returns suffix.") => suffix;
+}
+
+test_alias_default_direct() `test {
+  AliasParent p = AliasParent(v: 1);
+  assert(p.tag() == "-alias", "direct call returns the default");
+}
+
+test_alias_default_boxed_view() `test {
+  AliasParent p = AliasParent(v: 1);
+  Tagger t = p;
+  // The result aliases the default temp: the runtime alias check must clear the
+  // temp's drop flag, or this is a double free (and without the drain, a leak).
+  assert(t.tag() == "-alias", "view adapter hands back the default itself");
+}
+
+// --- heap user-type default: the constructor emits an unwind path ---
+
+type Boxed `public `doc("Heap user type used as a default argument.") {
+  int n;
+}
+
+type UserParent `public `doc("Satisfies Tagger with a constructed default.") {
+  int v;
+  tag(this, Boxed b = Boxed(n: 7)) string `public `doc("Tags with b.n.") => "u{b.n}";
+}
+
+test_user_type_default_direct() `test {
+  UserParent p = UserParent(v: 1);
+  assert(p.tag() == "u7", "direct call constructs the default");
+}
+
+test_user_type_default_boxed_view() `test {
+  UserParent p = UserParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "u7", "view adapter constructs and frees the default");
+}
+
+// --- vector default ---
+
+type VectorParent `public `doc("Satisfies Tagger with a heap vector default.") {
+  int v;
+  tag(this, int[] xs = [1, 2, 3].clone()) string `public `doc("Tags with xs.len.") => "v{xs.len}";
+}
+
+test_vector_default_direct() `test {
+  VectorParent p = VectorParent(v: 1);
+  assert(p.tag() == "v3", "direct call clones the default vector");
+}
+
+test_vector_default_boxed_view() `test {
+  VectorParent p = VectorParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "v3", "view adapter frees the default vector");
+}
+
+// --- tuple default: no i8* drop function, freed field-wise (T1233) ---
+
+type TupleParent `public `doc("Satisfies Tagger with a tuple default holding a heap string.") {
+  int v;
+  tag(this, (int, string) pr = (1, "a" + "b")) string `public `doc("Tags with the tuple fields.") {
+    (n, s) := pr;
+    return "t{n}{s}";
+  }
+}
+
+test_tuple_default_direct() `test {
+  TupleParent p = TupleParent(v: 1);
+  assert(p.tag() == "t1ab", "direct call builds the default tuple");
+}
+
+test_tuple_default_boxed_view() `test {
+  TupleParent p = TupleParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "t1ab", "view adapter drops the default tuple field-wise");
+}
+
+// --- enum default whose payload allocates: drained as an enum-ctor temp ---
+
+enum Payload `public `doc("Enum variant holding a heap string.") {
+  Text(string s),
+  Empty,
+}
+
+type EnumParent `public `doc("Satisfies Tagger with a constructed enum default.") {
+  int v;
+  tag(this, Payload p = Payload.Text("a" + "b")) string `public `doc("Tags with p's payload.") {
+    match p {
+      Payload.Text(s) => {
+        return "e{s}";
+      },
+      Payload.Empty => {
+        return "none";
+      },
+    }
+  }
+}
+
+test_enum_default_direct() `test {
+  EnumParent p = EnumParent(v: 1);
+  assert(p.tag() == "eab", "direct call builds the default enum");
+}
+
+test_enum_default_boxed_view() `test {
+  EnumParent p = EnumParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "eab", "view adapter drops the default enum's payload");
+}
+
+// --- the default enum handed straight back. An enum value struct is not a
+//     2-field struct, so no runtime alias check is emitted for it; correctness
+//     rests on the payload's ownership having already moved INTO the enum (the
+//     string temp's flag is cleared at the move), leaving the drain nothing to
+//     free. If the drain ever reached the payload this would read freed memory. ---
+
+type PayloadMaker `structural `public `doc("Structural interface returning a Payload.") {
+  make(this) Payload `abstract `doc("Makes a payload.");
+}
+
+type PayloadParent `public `doc("Returns its default enum verbatim.") {
+  int v;
+  make(this, Payload p = Payload.Text("a" + "b")) Payload `public `doc("Returns p.") => p;
+}
+
+read_payload(Payload p) string `doc("Reads a payload's text.") {
+  match p {
+    Payload.Text(s) => {
+      return s;
+    },
+    Payload.Empty => {
+      return "none";
+    },
+  }
+}
+
+test_enum_return_default_direct() `test {
+  PayloadParent p = PayloadParent(v: 1);
+  Payload got = p.make();
+  assert(read_payload(got) == "ab", "direct call returns the default enum");
+}
+
+test_enum_return_default_boxed_view() `test {
+  PayloadParent p = PayloadParent(v: 1);
+  PayloadMaker m = p;
+  Payload got = m.make();
+  assert(read_payload(got) == "ab", "view adapter hands back the default enum");
+}
+
+// --- `T~` mutable-borrow default: passed by address, still owned by the adapter ---
+
+type MutRefParent `public `doc("Satisfies Tagger with a mutable-borrow default param.") {
+  int v;
+  tag(this, string ~s = "-" + "mut") string `public `doc("Tags v with s.") => "r{this.v}{s}";
+}
+
+test_mut_ref_default_direct() `test {
+  MutRefParent p = MutRefParent(v: 4);
+  assert(p.tag() == "r4-mut", "direct call fills the mutable-borrow default");
+}
+
+test_mut_ref_default_boxed_view() `test {
+  MutRefParent p = MutRefParent(v: 4);
+  Tagger t = p;
+  // A `T~` param is passed as a pointer to the caller's storage: the adapter must
+  // materialize the default into a slot (passing it raw crashed) and, since the
+  // callee only borrows, free it after the call returns.
+  assert(t.tag() == "r4-mut", "view adapter passes the default by address");
+}
+
+// --- non-allocating .rodata literal default: unchanged, no drop machinery ---
+
+type LiteralParent `public `doc("Satisfies Tagger with a .rodata literal default.") {
+  int v;
+  tag(this, string suffix = "-end") string `public `doc("Tags v with suffix.") => "l{this.v}{suffix}";
+}
+
+test_literal_default_direct() `test {
+  LiteralParent p = LiteralParent(v: 2);
+  assert(p.tag() == "l2-end", "direct call uses the literal default");
+}
+
+test_literal_default_boxed_view() `test {
+  LiteralParent p = LiteralParent(v: 2);
+  Tagger t = p;
+  assert(t.tag() == "l2-end", "view adapter passes the literal through untouched");
+}
+
+// --- two trailing defaults: both are drained ---
+
+type TwoParent `public `doc("Satisfies Tagger with two heap defaults.") {
+  int v;
+  tag(this, string a = "a" + "1", string b = "b" + "2") string `public `doc("Tags with a and b.") => "{a}{b}";
+}
+
+test_two_defaults_direct() `test {
+  TwoParent p = TwoParent(v: 1);
+  assert(p.tag() == "a1b2", "direct call fills both defaults");
+}
+
+test_two_defaults_boxed_view() `test {
+  TwoParent p = TwoParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "a1b2", "view adapter drains both defaults");
+}
+
+// --- generic owner type: the default is compiled under the instance's typeSubst ---
+
+type Box[T] `public `doc("Generic owner satisfying Tagger with a heap default.") {
+  T item;
+  tag(this, string suffix = "-" + "g") string `public `doc("Tags with suffix.") => "g{suffix}";
+}
+
+test_generic_owner_default_direct() `test {
+  Box[int] b = Box[int](item: 1);
+  assert(b.tag() == "g-g", "direct call on the monomorphized owner");
+}
+
+test_generic_owner_default_boxed_view() `test {
+  Box[int] b = Box[int](item: 1);
+  Tagger t = b;
+  assert(t.tag() == "g-g", "view adapter on the monomorphized owner");
+}
+
+// --- failable concrete: the drain must not mistake the error tuple for a value ---
+
+type FailTagger `structural `public `doc("Structural interface whose tag() is failable.") {
+  tag!(this) string `abstract `doc("Tags the value, or fails.");
+}
+
+type FailParent `public `doc("Failable concrete with a heap-allocating default.") {
+  int v;
+  tag!(this, string suffix = "-" + "f") string `public `doc("Tags v, failing when v is negative.") {
+    if (this.v < 0) {
+      raise error("negative");
+    }
+    return "f{this.v}{suffix}";
+  }
+}
+
+test_failable_default_direct() `test {
+  FailParent p = FailParent(v: 3);
+  string s = p.tag()? {
+    "err"
+  };
+  assert(s == "f3-f", "direct call: {s}");
+}
+
+test_failable_default_boxed_view() `test {
+  FailParent p = FailParent(v: 3);
+  FailTagger t = p;
+  string s = t.tag()? {
+    "err"
+  };
+  assert(s == "f3-f", "view adapter, success path: {s}");
+}
+
+test_failable_default_error_path_boxed_view() `test {
+  FailParent p = FailParent(v: -1);
+  FailTagger t = p;
+  string s = t.tag()? {
+    "err"
+  };
+  // The default was still allocated before the call — the drain must free it on
+  // the error path too, where the result tuple carries no value to alias.
+  assert(s == "err", "view adapter, error path: {s}");
+}
+
+// --- covariant return: the drain runs BEFORE the result is boxed into the view ---
+
+type Shape `structural `public `doc("Structural interface for a shape.") {
+  area(this) int `abstract `doc("Reports the area.");
+}
+
+type Square `public `doc("Concrete shape.") {
+  int side;
+  area(this) int `public `doc("Reports the area.") => this.side * this.side;
+}
+
+type Maker `structural `public `doc("Structural interface returning a Shape.") {
+  make(this) Shape `abstract `doc("Makes a shape.");
+}
+
+type SquareMaker `public `doc("Returns a Square (covariant) with a heap default.") {
+  int k;
+  make(this, string tag = "ab" + "c") Square `public `doc("Makes a square sized by tag.") => Square(side: tag.len);
+}
+
+test_covariant_return_default_direct() `test {
+  SquareMaker m = SquareMaker(k: 1);
+  Square q = m.make();
+  assert(q.area() == 9, "direct call");
+}
+
+test_covariant_return_default_boxed_view() `test {
+  SquareMaker m = SquareMaker(k: 1);
+  Maker mk = m;
+  Shape sh = mk.make();
+  // Draining after the covariant boxing would free the value being returned.
+  assert(sh.area() == 9, "view adapter coerces the result after draining");
+}
+
+// --- void return: there is no result, so the drain runs with no alias check ---
+
+type Runner `structural `public `doc("Structural interface with a no-argument void run().") {
+  run(this) `abstract `doc("Runs the value.");
+}
+
+type VoidParent `public `doc("Void-returning concrete with a heap-allocating default.") {
+  int v;
+  run(this, string s = "-" + "v") `public `doc("Checks s.") {
+    assert(s == "-v", "void body sees the default");
+  }
+}
+
+test_void_return_default_direct() `test {
+  VoidParent p = VoidParent(v: 1);
+  p.run();
+}
+
+test_void_return_default_boxed_view() `test {
+  VoidParent p = VoidParent(v: 1);
+  Runner r = p;
+  // Result() is nil, so no value can alias the default — the drain frees it
+  // unconditionally.
+  r.run();
+}
+
+// --- failable void: the result tuple is {i1, i8*}, whose field 1 is the ERROR
+//     pointer, not a value — mistaking it for one would clear the wrong flag ---
+
+type FailRunner `structural `public `doc("Structural interface whose run() is failable and void.") {
+  run!(this) `abstract `doc("Runs the value, or fails.");
+}
+
+type FailVoidParent `public `doc("Failable void concrete with a heap-allocating default.") {
+  int v;
+  run!(this, string s = "-" + "fv") `public `doc("Checks s, failing when v is negative.") {
+    if (this.v < 0) {
+      raise error("negative");
+    }
+    assert(s == "-fv", "failable void body sees the default");
+  }
+}
+
+test_failable_void_default_direct() `test {
+  FailVoidParent p = FailVoidParent(v: 1);
+  p.run()? {
+    assert(false, "direct call should not fail");
+  };
+}
+
+test_failable_void_default_boxed_view() `test {
+  FailVoidParent p = FailVoidParent(v: 1);
+  FailRunner r = p;
+  r.run()? {
+    assert(false, "success path should not fail");
+  };
+}
+
+test_failable_void_default_error_path_boxed_view() `test {
+  FailVoidParent p = FailVoidParent(v: -1);
+  FailRunner r = p;
+  bool caught = false;
+  r.run()? {
+    caught = true;
+  };
+  assert(caught, "error path taken");
+}
+
+// --- non-pointer return: nothing can alias, so no alias check is emitted ---
+
+type Counter `structural `public `doc("Structural interface returning an int count.") {
+  count(this) int `abstract `doc("Counts.");
+}
+
+type IntParent `public `doc("int-returning concrete with a heap-allocating default.") {
+  int v;
+  count(this, string s = "ab" + "c") int `public `doc("Counts s plus v.") => s.len + this.v;
+}
+
+test_int_return_default_direct() `test {
+  IntParent p = IntParent(v: 1);
+  assert(p.count() == 4, "direct call");
+}
+
+test_int_return_default_boxed_view() `test {
+  IntParent p = IntParent(v: 1);
+  Counter c = p;
+  assert(c.count() == 4, "view adapter frees the default an int cannot alias");
+}
+
+// --- the alias guard is a RUNTIME compare: the same adapter must free the
+//     default when the method did not hand it back, and keep it when it did ---
+
+type CondParent `public `doc("Returns its default only on some paths.") {
+  int v;
+  tag(this, string s = "-" + "c") string `public `doc("Returns s when v is positive.") {
+    if (this.v > 0) {
+      return s;
+    }
+    return "other";
+  }
+}
+
+test_conditional_alias_default_direct() `test {
+  CondParent p = CondParent(v: 1);
+  assert(p.tag() == "-c", "direct call returns the default");
+}
+
+test_conditional_alias_default_boxed_view() `test {
+  CondParent aliased = CondParent(v: 1);
+  Tagger t1 = aliased;
+  // Returns the default itself: clearing the flag is what avoids a double free.
+  assert(t1.tag() == "-c", "aliasing path");
+
+  CondParent fresh = CondParent(v: 0);
+  Tagger t2 = fresh;
+  // Same adapter, other path: the default is not the result, so it must be freed.
+  assert(t2.tag() == "other", "non-aliasing path");
+}
+
+// --- the interface supplies leading params: only the TRAILING extras default ---
+
+type Joiner `structural `public `doc("Structural interface taking one string argument.") {
+  join(this, string head) string `abstract `doc("Joins head with a tail.");
+}
+
+type JoinParent `public `doc("Forwards the interface's param and defaults the rest.") {
+  int v;
+  join(this, string head, string tail = "-" + "t") string `public `doc("Joins head and tail.") => "{head}{tail}";
+}
+
+test_forwarded_param_plus_default_direct() `test {
+  JoinParent p = JoinParent(v: 1);
+  assert(p.join("h") == "h-t", "direct call");
+}
+
+test_forwarded_param_plus_default_boxed_view() `test {
+  JoinParent p = JoinParent(v: 1);
+  Joiner j = p;
+  // The adapter forwards `head` untouched and owns only the synthesized `tail`.
+  assert(j.join("h") == "h-t", "view adapter forwards then defaults");
+}
+
+// --- generic owner with a tuple default: registered field-wise under typeSubst ---
+
+type TupleBox[T] `public `doc("Generic owner whose default is a heap-holding tuple.") {
+  T item;
+  tag(this, (int, string) pr = (1, "x" + "y")) string `public `doc("Tags with the tuple fields.") {
+    (n, s) := pr;
+    return "gt{n}{s}";
+  }
+}
+
+test_generic_owner_tuple_default_direct() `test {
+  TupleBox[string] b = TupleBox[string](item: "i");
+  assert(b.tag() == "gt1xy", "direct call on the monomorphized owner");
+}
+
+test_generic_owner_tuple_default_boxed_view() `test {
+  TupleBox[string] b = TupleBox[string](item: "i");
+  Tagger t = b;
+  assert(t.tag() == "gt1xy", "view adapter drains the tuple under typeSubst");
+}
+
+// --- adapter first emitted INSIDE a coroutine: the adapter's own body must not
+//     inherit (or disturb) the enclosing go block's coroutine state ---
+
+type CoroParent `public `doc("Boxed into a view only from inside a goroutine.") {
+  int v;
+  tag(this, string s = "-" + "co") string `public `doc("Tags v with s.") => "c{this.v}{s}";
+}
+
+test_coroutine_default_direct() `test {
+  CoroParent p = CoroParent(v: 5);
+  assert(p.tag() == "c5-co", "direct call");
+}
+
+test_view_built_inside_goroutine() `test {
+  ch := channel[string](capacity: 1);
+  go {
+    // The only coerceToView for CoroParent — so emitViewMethodAdapter runs while
+    // the compiler is inside this goroutine's coroutine body.
+    CoroParent p = CoroParent(v: 5);
+    Tagger t = p;
+    ch.send(t.tag());
+    ch.close();
+  };
+  for got in ch {
+    assert(got == "c5-co", "goroutine view: {got}");
+  }
+}
+
+// --- lambda default. A default expression is evaluated outside any method scope
+//     (`this` is not in scope there), so a lambda WRITTEN as a default can never
+//     capture: its env is null and there is nothing to free. ---
+
+type LambdaParent `public `doc("Satisfies Tagger with a non-capturing lambda default.") {
+  int v;
+  tag(this, (int) -> int f = |int x| -> x + 1) string `public `doc("Tags with f(1).") => "L{f(1)}";
+}
+
+test_lambda_default_direct() `test {
+  LambdaParent p = LambdaParent(v: 1);
+  assert(p.tag() == "L2", "direct call builds the default closure");
+}
+
+test_lambda_default_boxed_view() `test {
+  LambdaParent p = LambdaParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "L2", "view adapter passes a null-env closure through");
+}
+
+// --- closure default WITH a heap env: the default calls a function that returns
+//     a capturing closure, so the adapter owns the env struct ---
+
+make_adder(int n)(int) -> int `doc("Returns a closure capturing n.") {
+  return |int x| -> x + n;
+}
+
+type EnvCaller `structural `public `doc("Structural interface returning an int.") {
+  call(this) int `abstract `doc("Calls its closure.");
+}
+
+type EnvParent `public `doc("Default closure whose env is heap-allocated.") {
+  int v;
+  call(this, (int) -> int f = make_adder(10)) int `public `doc("Calls f with 1.") => f(1);
+}
+
+test_closure_env_default_direct() `test {
+  EnvParent p = EnvParent(v: 1);
+  assert(p.call() == 11, "direct call builds the capturing closure");
+}
+
+test_closure_env_default_boxed_view() `test {
+  EnvParent p = EnvParent(v: 1);
+  EnvCaller c = p;
+  // The env struct is freed from the adapter's env-temp list.
+  assert(c.call() == 11, "view adapter frees the default closure's env");
+}
+
+// --- and the same closure handed straight back: the env-temp alias check ---
+
+type EnvMaker `structural `public `doc("Structural interface returning a function.") {
+  make(this)(int) -> int `abstract `doc("Makes a function.");
+}
+
+type EnvAliasParent `public `doc("Returns its default closure verbatim.") {
+  int v;
+  make(this, (int) -> int f = make_adder(10))(int) -> int `public `doc("Returns f.") => f;
+}
+
+test_closure_env_alias_default_direct() `test {
+  EnvAliasParent p = EnvAliasParent(v: 1);
+  g := p.make();
+  assert(g(1) == 11, "direct call returns the default closure");
+}
+
+test_closure_env_alias_default_boxed_view() `test {
+  EnvAliasParent p = EnvAliasParent(v: 1);
+  EnvMaker m = p;
+  g := m.make();
+  // The result's env pointer IS the default's, so the adapter must clear that
+  // temp's flag — freeing it here would leave the caller holding freed memory.
+  assert(g(1) == 11, "view adapter hands back the closure and its env");
+}
+
+// --- map default ---
+
+type MapParent `public `doc("Satisfies Tagger with a heap map default.") {
+  int v;
+  tag(this, map[string, int] m = map[string, int]()) string `public `doc("Tags with m.len.") => "M{m.len}";
+}
+
+test_map_default_direct() `test {
+  MapParent p = MapParent(v: 1);
+  assert(p.tag() == "M0", "direct call builds the default map");
+}
+
+test_map_default_boxed_view() `test {
+  MapParent p = MapParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "M0", "view adapter frees the default map");
+}
+
+// --- default produced by a call rather than an operator ---
+
+make_call_tag() string `doc("Builds a heap-allocated tag.") => "m" + "k";
+
+type CallParent `public `doc("Satisfies Tagger with a call-produced default.") {
+  int v;
+  tag(this, string s = make_call_tag()) string `public `doc("Tags with s.") => "F{s}";
+}
+
+test_call_default_direct() `test {
+  CallParent p = CallParent(v: 1);
+  assert(p.tag() == "Fmk", "direct call");
+}
+
+test_call_default_boxed_view() `test {
+  CallParent p = CallParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "Fmk", "view adapter frees a call-produced default");
+}
+
+// --- channel default: a droppable resource that is not a string or container ---
+
+type ChannelParent `public `doc("Satisfies Tagger with a channel default.") {
+  int v;
+  tag(this, channel[int] c = channel[int](capacity: 2)) string `public `doc("Uses c, then tags v.") {
+    c.send(7);
+    c.close();
+    return "C{this.v}";
+  }
+}
+
+test_channel_default_direct() `test {
+  ChannelParent p = ChannelParent(v: 1);
+  assert(p.tag() == "C1", "direct call builds the default channel");
+}
+
+test_channel_default_boxed_view() `test {
+  ChannelParent p = ChannelParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "C1", "view adapter frees the default channel");
+}
+
+// --- trailing `move` param: the callee CONSUMES the value, so the adapter must
+//     not also free it. The grammar allows a default only on a regular param
+//     (`param` rule: `= expression` is on regularParam alone), so a move param
+//     reaches the adapter only as an optional with no default — filled with
+//     `none`, which owns nothing. ---
+
+type MoveParent `public `doc("Satisfies Tagger with a consumed optional param.") {
+  int v;
+  tag(this, string? move s) string `public `doc("Tags v, ignoring s.") => "O{this.v}";
+}
+
+test_move_param_boxed_view() `test {
+  MoveParent p = MoveParent(v: 1);
+  Tagger t = p;
+  // The adapter hands the callee a `none` it does not own — no drop, no leak.
+  assert(t.tag() == "O1", "view adapter fills a consumed optional param");
+}
+
+// --- repeated dispatch: a per-call leak would accumulate ---
+
+type LoopParent `public `doc("Called repeatedly through the boxed view.") {
+  int v;
+  tag(this, string s = "-" + "l") string `public `doc("Tags v with s.") => "{this.v}{s}";
+}
+
+test_repeated_view_calls_direct() `test {
+  LoopParent p = LoopParent(v: 1);
+  assert(p.tag() == "1-l", "direct call");
+}
+
+test_repeated_view_calls_boxed_view() `test {
+  LoopParent p = LoopParent(v: 1);
+  Tagger t = p;
+  for i in 0..50 {
+    assert(t.tag() == "1-l", "iteration {i}");
+  }
+}
+
+// Not covered here, deliberately:
+//   - `T? p = <expr>` optional defaults — T1465 (the filled value is wrong).
+//   - `string[N]` fixed-array defaults — T1466 (leaks on the ordinary call path too).
+//   - a heap default on a generator (`stream[T]`) method — T1467 (the coroutine
+//     frame reads the default lazily, so it is a use-after-free on the ordinary
+//     call path too; the adapter cannot outlive the stream, so the lifetime rule
+//     has to come from T1467's fix).
+//   - a GENERIC owner with a defaulted param boxed at two instantiations
+//     (`TupleBox[string]` and `TupleBox[int]` both assigned to a `Tagger`) —
+//     T1468: the adapter is named from the generic name, not the mono name, so
+//     the second instantiation emits a duplicate `TupleBox.tag$view_adapt` and
+//     `opt` rejects the module. Hence the single instantiation above.
+// All four belong next to the shapes above once their own items are fixed.

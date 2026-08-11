@@ -935,6 +935,41 @@ func (c *Compiler) emitViewMethodAdapter(
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 
+	// T1460: the adapter is a synthesized FUNCTION BODY, not a continuation of the
+	// caller's. saveState() saves the caller's temp/scope state but does not clear
+	// it, so the default expressions below were compiled against the caller's live
+	// state: their temps landed in the caller's lists (whose entries restoreState
+	// then discards → leak), and any default emitting an unwind path made
+	// emitPanicReturn walk the CALLER's scopeBindings, emitting loads of the
+	// caller's allocas inside this function (malformed IR). Give the adapter its
+	// own state, exactly as genLambdaExpr does for a lambda body; restoreState
+	// brings the caller's back.
+	c.scopeBindings = nil
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
+	c.castSubjectMatch = nil
+	c.forInHandleSlotPtr = make(map[string]*ir.InstAlloca)
+	c.lambdaWritebacks = nil
+	c.loopScopeDepth = 0
+	c.canError = false // the adapter forwards the failable tuple; it never propagates
+	c.currentRetType = nil
+	c.stmtTemps = nil
+	c.stmtTempMap = make(map[value.Value]int)
+	c.heapTemps = nil
+	c.heapTempMap = make(map[value.Value]int)
+	c.envTemps = nil
+	c.envTempMap = make(map[value.Value]int)
+	c.enumCtorTemps = nil
+	c.tempTrackingEnabled = true
+	// The coroutine fields are not part of compilerState; save/reset/restore them
+	// manually (as genLambdaExpr does) so a default's channel/task operation can
+	// never branch to an enclosing coroutine's suspend/cleanup blocks.
+	savedInCoroutine, savedCoroSuspend, savedCoroCleanup := c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk
+	c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk = false, nil, nil
+	defer func() {
+		c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk = savedInCoroutine, savedCoroSuspend, savedCoroCleanup
+	}()
+
 	entry := fn.NewBlock(".entry")
 	c.block = entry
 	c.entryBlock = entry
@@ -976,12 +1011,23 @@ func (c *Compiler) emitViewMethodAdapter(
 		paramIdx++
 	}
 
-	// Supply defaults for extra concrete params (T1395)
-	defaultArgs, _ := c.emitTrailingDefaultArgValues(concreteSig, len(ifaceSig.Params()), nil)
-	args = append(args, defaultArgs...)
+	// Supply defaults for extra concrete params (T1395), then give each the
+	// ownership/calling-convention handling an ordinary call's arguments get from
+	// genCallArgExpr (T1460) — the adapter has no AST argument list, so nothing
+	// else owns or adapts these values.
+	firstDefault := len(ifaceSig.Params())
+	defaultArgs, _ := c.emitTrailingDefaultArgValues(concreteSig, firstDefault, nil)
+	for i, v := range defaultArgs {
+		args = append(args, c.adaptViewDefaultArg(concreteSig.Params()[firstDefault+i], v))
+	}
 
 	// Call the concrete method
 	result := c.block.NewCall(concreteFn, args...)
+
+	// T1460: free the synthesized default temps now that the call has returned.
+	// Must run BEFORE the return adaptation below — the covariant/optional boxing
+	// there allocates the value being returned, which a floor-0 drain would free.
+	c.emitAdapterDefaultTempDrain(result, concreteSig)
 
 	// Handle return type adaptation
 	concreteCanError := concreteSig.CanError()
@@ -1056,6 +1102,108 @@ func (c *Compiler) emitViewMethodAdapter(
 	}
 
 	return fn
+}
+
+// adaptViewDefaultArg applies the ordinary argument pipeline's ownership and
+// calling-convention handling to a default value the adapter just synthesized for
+// the concrete method's parameter `p` (T1460), returning the value to pass.
+// The adapter has no AST argument list, so nothing else owns or adapts it.
+//
+//   - `move` param: the callee consumes the value (genCallArgsWithMutRef claims
+//     there too), so the adapter must not also free it.
+//   - `T~` param: the callee receives a POINTER to the caller's storage (B0149)
+//     and only borrows it. Materialize the value into a temp slot and pass its
+//     address, exactly as genMutRefArg's non-lvalue fallback does at ordinary call
+//     sites. Passing the value raw produced a type-mismatched call (crash).
+//   - everything else borrows: the adapter keeps the temp and drains it after the
+//     call. A tuple temp carries no i8* drop function, so it is registered
+//     field-wise, as the borrow-tuple argument path does (T1233).
+func (c *Compiler) adaptViewDefaultArg(p *types.Param, v value.Value) value.Value {
+	if p.Ref() == types.RefMut {
+		c.claimStringTemp(v)
+		c.claimHeapTemp(v)
+		c.claimEnvTemp(v)
+		return v
+	}
+	pType := p.Type()
+	if c.typeSubst != nil {
+		pType = types.Substitute(pType, c.typeSubst)
+	}
+	mutRef, isMutRef := pType.(*types.MutRef)
+	inner := pType
+	if isMutRef {
+		inner = mutRef.Elem()
+	}
+	if tup, ok := inner.(*types.Tuple); ok && c.tupleNeedsDrop(tup) {
+		c.registerTupleStmtTemp(v, tup)
+	}
+	if isMutRef {
+		slot := c.createEntryAlloca(v.Type())
+		c.block.NewStore(v, slot)
+		return slot
+	}
+	return v
+}
+
+// emitAdapterDefaultTempDrain frees the temporaries created for the adapter's
+// synthesized default arguments, now that the forwarding call has returned
+// (T1460). The adapter has no AST argument list, so these values never reach
+// the statement-end drain that owns an ordinary call's argument temps.
+// When the concrete result ALIASES a default temp (`tag(this, string s = "-" + "end")
+// string => s`), the caller now owns that buffer: clear the temp's flag first —
+// the same runtime pointer compare emitReturnAliasCheckSubst emits at ordinary
+// call sites (stmt.go:3060). Only the adapter's own temps are tracked here (the
+// state was reset at entry), so a floor-0 drain is exactly the default set.
+func (c *Compiler) emitAdapterDefaultTempDrain(result value.Value, concreteSig *types.Signature) {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	if len(c.stmtTemps) == 0 && len(c.heapTemps) == 0 && len(c.envTemps) == 0 && len(c.enumCtorTemps) == 0 {
+		return // no allocating default — leave the adapter's IR exactly as it was
+	}
+	if concreteSig.Result() != nil && result != nil {
+		aliasSrc := result
+		if concreteSig.CanError() {
+			// {i1, T, i8*} — the value component is field 1. (A void failable is
+			// {i1, i8*}, excluded by the Result() != nil guard: field 1 is the
+			// error pointer there, not a value that could alias.)
+			if st, ok := result.Type().(*irtypes.StructType); ok && len(st.Fields) == 3 {
+				aliasSrc = c.block.NewExtractValue(result, 1)
+			}
+		}
+		if retPtr := extractAliasPtr(c, aliasSrc); retPtr != nil && retPtr.Type() == irtypes.I8Ptr {
+			for _, t := range c.stmtTemps {
+				c.emitAdapterAliasFlagClear(retPtr, t.alloca, t.dropFlag)
+			}
+			for _, t := range c.heapTemps {
+				c.emitAdapterAliasFlagClear(retPtr, t.alloca, t.dropFlag)
+			}
+			for _, t := range c.envTemps {
+				c.emitAdapterAliasFlagClear(retPtr, t.alloca, t.dropFlag)
+			}
+		}
+	}
+	c.cleanupStmtLevelTemps()
+}
+
+// emitAdapterAliasFlagClear clears a default temp's drop flag when the value it
+// holds is the very pointer the concrete method handed back (T1460) — the caller
+// owns it from here, so the adapter must not free it. Temps whose alloca does not
+// hold an i8* (tuple / fixed-array aggregates) cannot alias a returned pointer
+// and are skipped.
+func (c *Compiler) emitAdapterAliasFlagClear(retPtr value.Value, alloca, dropFlag *ir.InstAlloca) {
+	if alloca == nil || dropFlag == nil || alloca.ElemType != irtypes.I8Ptr {
+		return
+	}
+	tempPtr := c.block.NewLoad(irtypes.I8Ptr, alloca)
+	same := c.block.NewICmp(enum.IPredEQ, retPtr, tempPtr)
+	clearBlock := c.newBlock("adapt.alias.clear")
+	skipBlock := c.newBlock("adapt.alias.skip")
+	c.block.NewCondBr(same, clearBlock, skipBlock)
+	c.block = clearBlock
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewBr(skipBlock)
+	c.block = skipBlock
 }
 
 // wrapSome wraps a value T as some(T) = {i1 true, T}.

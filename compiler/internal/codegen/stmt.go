@@ -15191,13 +15191,38 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 		}
 		return types.NewInstance(base, args)
 	case *ast.QualifiedTypeRef:
-		// Module-qualified types: look up in sema scopes by unqualified name
+		// Module-qualified types (e.g. `vmod.Shower`): resolve the module alias to
+		// its *types.Module, then look up the member in the module's own scope —
+		// mirroring sema.resolveQualifiedType. T1462: the previous unqualified
+		// `scope.Lookup(r.Name)` scan never found module member types (they live in
+		// the module scope, not the consumer's file scopes), so it returned nil.
+		// For a `mod.Iface s = concrete;` binding that nil collapsed declType to the
+		// concrete RHS type, making maybeRegisterDrop emit a full heap drop for `s`
+		// that double-freed the box the concrete owner also frees.
 		var base types.Type
 		for _, scope := range c.info.ScopeOrder {
-			if obj := scope.Lookup(r.Name); obj != nil {
-				if tn, ok := obj.(*types.TypeName); ok {
-					base = tn.Type()
-					break
+			if obj := scope.Lookup(r.Module); obj != nil {
+				if mod, ok := obj.(*types.Module); ok {
+					if ms := mod.Scope(); ms != nil {
+						if member := ms.Lookup(r.Name); member != nil {
+							if tn, ok := member.(*types.TypeName); ok {
+								base = tn.Type()
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+		// Fallback: bare-name scan across file scopes (robustness for refs whose
+		// module object isn't reachable via ScopeOrder).
+		if base == nil {
+			for _, scope := range c.info.ScopeOrder {
+				if obj := scope.Lookup(r.Name); obj != nil {
+					if tn, ok := obj.(*types.TypeName); ok {
+						base = tn.Type()
+						break
+					}
 				}
 			}
 		}

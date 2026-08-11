@@ -1,0 +1,18 @@
+// viewmod: a `structural interface declared in a module, plus a concrete type
+// that satisfies it at the exact interface arity. Regression fixture for T1462
+// (boxing a value into a module-declared structural interface double-freed the
+// box, aborting with "fatal: invalid free (bad header magic)").
+type Shower `structural `public `doc("Structural interface with a no-argument show().") {
+  show(this) string `abstract `doc("Renders the value.");
+}
+
+type Exact `public `doc("Satisfies Shower at the exact interface arity.") {
+  int v `public;
+  show(this) string `public `doc("Renders v.") => "{this.v}";
+}
+
+type Heavy `public `doc("Satisfies Shower while owning heap fields (string + vector).") {
+  string label `public;
+  int[] tags `public;
+  show(this) string `public `doc("Renders label plus tag count.") => "{this.label}#{this.tags.len}";
+}

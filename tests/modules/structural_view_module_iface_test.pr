@@ -1,0 +1,98 @@
+// T1462: boxing a value into a MODULE-declared `structural interface corrupted
+// the heap ("fatal: invalid free (bad header magic)"). Codegen re-resolved the
+// module-qualified interface type ref by unqualified name across the consumer's
+// file scopes, which never found the module member, collapsed the declared type
+// to the concrete RHS type, and emitted a full heap drop for the view binding
+// that double-freed the box the concrete owner already frees.
+//
+// These tests lock in that boxing a value into a module-declared structural
+// interface frees the box exactly once (leak enforcement catches any regression
+// double-free/leak automatically).
+use viewmod "./viewmod";
+
+// A consumer type that satisfies the module's structural interface by duck typing.
+type ConsumerShower `doc("Consumer type satisfying viewmod.Shower structurally.") {
+  int n;
+  show(this) string => "n={this.n}";
+}
+
+// A consumer-declared structural interface (passing control from the bug table).
+type LocalShower `structural `doc("Consumer-declared structural interface.") {
+  show(this) string `abstract `doc("Renders the value.");
+}
+
+// Row 1 of the bug table: module interface + module concrete (was a crash).
+test_module_iface_module_concrete() `test {
+  viewmod.Exact e = viewmod.Exact(v: 4);
+  viewmod.Shower s = e;
+  assert(s.show() == "4", "view over a module type, exact arity");
+}
+
+// Row 2 of the bug table: module interface + consumer concrete (was a crash).
+test_module_iface_consumer_concrete() `test {
+  ConsumerShower c = ConsumerShower(n: 7);
+  viewmod.Shower s = c;
+  assert(s.show() == "n=7", "module interface over a consumer concrete type");
+}
+
+// Control: consumer-declared interface over a module type (always passed).
+test_consumer_iface_module_concrete() `test {
+  viewmod.Exact e = viewmod.Exact(v: 9);
+  LocalShower s = e;
+  assert(s.show() == "9", "consumer interface over a module concrete type");
+}
+
+// Control: direct (non-boxed) call on the module concrete type (always passed).
+test_module_concrete_direct() `test {
+  e := viewmod.Exact(v: 42);
+  assert(e.show() == "42", "direct call, no boxing");
+}
+
+// Boxing a module concrete that OWNS heap fields (string + vector) into the
+// module interface: the view box must not touch the concrete's heap fields, and
+// the concrete owner must free them exactly once. A regression that re-collapsed
+// the view's declared type to the concrete would emit a full heap drop for the
+// box and either double-free the label/tags or leak them — leak enforcement and
+// the double-free abort both catch it.
+test_module_iface_heap_field_concrete() `test {
+  int[] t = [];
+  t.push(10);
+  t.push(20);
+  string lbl = "id-{t.len}";
+  viewmod.Heavy h = viewmod.Heavy(label: move lbl, tags: move t);
+  viewmod.Shower s = h;
+  assert(s.show() == "id-2#2", "boxed module concrete owning heap fields");
+}
+
+// NOTE: reassigning a module-interface view binding in place (`s = b;`) leaks
+// the first box — filed as T1464 (a general structural-interface-view
+// reassignment leak, NOT specific to the module path: it reproduces with fully
+// consumer-declared types too). A regression test for it lives with the fix for
+// T1464. Not asserted here so this file stays green.
+
+// Boxing a module concrete inside a nested block so the box drops at block exit
+// (the working alternative to in-place reassignment), then boxing a second value
+// at the outer scope. Confirms per-scope boxing frees each box exactly once.
+test_module_iface_scoped_reboxing() `test {
+  viewmod.Exact a = viewmod.Exact(v: 1);
+  {
+    viewmod.Shower inner = a;
+    assert(inner.show() == "1", "inner-scope box renders and drops at block exit");
+  }
+  viewmod.Exact b = viewmod.Exact(v: 2);
+  viewmod.Shower s = b;
+  assert(s.show() == "2", "outer-scope box renders");
+}
+
+// Repeatedly boxing into a module interface inside a loop: each iteration's box
+// must be freed once at scope exit. Amplifies any per-box double-free or leak so
+// leak enforcement flags a regression deterministically.
+test_module_iface_boxed_in_loop() `test {
+  int total = 0;
+  for i in 0..50 {
+    viewmod.Exact e = viewmod.Exact(v: i);
+    viewmod.Shower s = e;
+    total += s.show().len;
+  }
+  assert(total > 0, "repeated boxing in a loop does not leak or double-free");
+}

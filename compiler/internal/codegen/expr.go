@@ -25,6 +25,13 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	if expr == nil {
 		return nil
 	}
+	// T1421: synthetic node staged with a pre-evaluated value (optional-chain
+	// present-path receiver). Return it verbatim before AST dispatch.
+	if c.stagedExprValues != nil {
+		if v, ok := c.stagedExprValues[expr]; ok {
+			return v
+		}
+	}
 	switch e := expr.(type) {
 	case *ast.IntLit:
 		return c.genIntLit(e)
@@ -14734,15 +14741,40 @@ func (c *Compiler) genOptionalChainExpr(e *ast.OptionalChainExpr) value.Value {
 	optType := targetType.(*types.Optional)
 	innerType := optType.Elem()
 
-	// Access field on inner value
-	fieldVal := c.genFieldOnValue(innerVal, innerType, e.Field)
-
 	// Determine the result Optional type from sema
 	resultType := c.info.Types[e]
 	if c.typeSubst != nil {
 		resultType = types.Substitute(resultType, c.typeSubst)
 	}
 	resultLLVM := c.resolveType(resultType).(*irtypes.StructType)
+
+	// Access field/getter on inner value. Delegate to the full member-access
+	// machinery (genMemberExpr) via a synthetic target node staged with innerVal,
+	// so native getters (string.len/Vector.len), virtual dispatch, value-type
+	// receivers, and enum getters are all handled correctly (T1421). Temp tracking
+	// is disabled during the delegated call: the some-path member result is only
+	// valid in this branch, so it must not be registered for unconditional
+	// statement-end cleanup; ownership of the wrapped optional follows the same
+	// borrow semantics as the pre-T1421 path.
+	//
+	// T1463: disabling tracking here leaves `?.` without a full ownership model for
+	// the member result — a fresh droppable getter result that is *discarded* (not
+	// bound) leaks, and a heap field read through `?.` and bound to a variable is
+	// double-freed (pre-existing). A correct fix needs branch-local, presence-flag-
+	// guarded cleanup for fresh results plus clone-on-escape for borrowed fields.
+	synTarget := &ast.IdentExpr{}
+	synMember := &ast.MemberExpr{Target: synTarget, Field: e.Field}
+	if c.stagedExprValues == nil {
+		c.stagedExprValues = make(map[ast.Expr]value.Value)
+	}
+	c.stagedExprValues[synTarget] = innerVal
+	c.info.Types[synTarget] = innerType
+	c.info.Types[synMember] = resultType.(*types.Optional).Elem()
+	savedTracking := c.tempTrackingEnabled
+	c.tempTrackingEnabled = false
+	fieldVal := c.genMemberExpr(synMember)
+	c.tempTrackingEnabled = savedTracking
+	delete(c.stagedExprValues, synTarget)
 
 	someResult := c.wrapOptional(fieldVal, resultLLVM)
 	c.block.NewBr(mergeBlock)
@@ -14760,63 +14792,6 @@ func (c *Compiler) genOptionalChainExpr(e *ast.OptionalChainExpr) value.Value {
 		&ir.Incoming{X: someResult, Pred: someEnd},
 		&ir.Incoming{X: noneResult, Pred: noneEnd},
 	)
-}
-
-// genFieldOnValue accesses a field or getter on a value of a known type.
-// For fields on user types (i8* pointers), it does bitcast + GEP.
-// For getters, it emits a direct call to the getter method.
-func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName string) value.Value {
-	named := extractNamed(typ)
-	if named == nil {
-		panic(fmt.Sprintf("codegen: cannot access field %s on type %s", fieldName, typ))
-	}
-
-	field := named.LookupField(fieldName)
-	if field != nil {
-		layout := c.lookupTypeLayout(typ)
-		if layout == nil {
-			panic(fmt.Sprintf("codegen: no layout for type %s", typ))
-		}
-
-		// Value types: fields are in the value struct
-		if layout.IsValueType {
-			fieldIdx, ok := layout.ValueFieldIndex[field.Name()]
-			if !ok {
-				panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), typ))
-			}
-			return c.block.NewExtractValue(val, uint64(fieldIdx))
-		}
-
-		fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
-		if !ok {
-			panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
-		}
-
-		// val is a value struct {vtable_ptr, instance_ptr} — extract the instance pointer
-		instance := c.extractInstancePtr(val)
-		typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
-		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-
-		return c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
-	}
-
-	// Getter property: emit a direct call with the value as receiver
-	if g := named.LookupGetter(fieldName); g != nil {
-		mangledName := mangleMethodName(c.resolveTypeName(typ), fieldName, false)
-		fn, ok := c.funcs[mangledName]
-		if !ok {
-			panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))
-		}
-		// Global getter: no receiver
-		if g.Sig().Recv() == nil {
-			return c.block.NewCall(fn)
-		}
-		// val is a value struct — pass it directly (getters expect the value struct as receiver)
-		return c.block.NewCall(fn, val)
-	}
-
-	panic(fmt.Sprintf("codegen: no field or getter %s on type %s", fieldName, named))
 }
 
 // genIndirectCall calls a function through a fat pointer {i8* fn, i8* env}.

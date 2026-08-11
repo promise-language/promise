@@ -774,3 +774,155 @@ while_let_string_drop() `test {
   }
   assert(count == 3, "iterated 3 times");
 }
+
+// --- Optional chaining into getters (T1421) ---
+// `opt?.getter` must evaluate the getter on the present path and short-circuit
+// to none when absent. Previously ICE'd for native getters (string.len /
+// Vector.len) and segfaulted for user-declared getters.
+
+type _T1421Box `public {
+  string value;
+  get size int => this.value.len;
+  get label string => "box:{this.value}";
+}
+
+type _T1421Counter `public {
+  int n `value;
+  get doubled int => this.n * 2;
+}
+
+type _T1421Wrap[T] `public {
+  T item;
+  get held T => this.item;
+}
+
+// Base with a virtual getter + a plain field, overridden by a subtype. Exercises
+// the vtable-dispatch path that the pre-T1421 raw-GEP `genFieldOnValue` could not
+// reach — the delegated genMemberExpr emits an indirect call through the vtable.
+type _T1421Animal `public {
+  int legs;
+  get sound string => "generic";
+}
+type _T1421Dog is _T1421Animal `public {
+  get sound string => "woof";
+}
+
+// Built-in string.len getter through ?. — the ICE case.
+optional_chain_native_string_len() `test {
+  string? name = "promise";
+  int? size = name?.len;
+  if v := size {
+    assert(v == 7, "native string.len through ?.");
+  } else {
+    assert(false, "size should be present");
+  }
+}
+
+// Built-in Vector.len getter through ?. — the ICE case.
+optional_chain_native_vector_len() `test {
+  int[]? xs = [10, 20, 30];
+  int? size = xs?.len;
+  if v := size {
+    assert(v == 3, "native Vector.len through ?.");
+  } else {
+    assert(false, "size should be present");
+  }
+}
+
+// User-declared getter through ?. — the segfault case.
+optional_chain_user_getter_present() `test {
+  _T1421Box? box = _T1421Box(value: "abc");
+  int? size = box?.size;
+  if v := size {
+    assert(v == 3, "user getter through ?.");
+  } else {
+    assert(false, "size should be present");
+  }
+}
+
+// None short-circuits: the getter must not run when the receiver is absent.
+optional_chain_user_getter_none() `test {
+  _T1421Box? box = none;
+  int? size = box?.size;
+  assert("{size}" == "none", "getter short-circuits on none");
+}
+
+optional_chain_native_len_none() `test {
+  string? name = none;
+  int? size = name?.len;
+  assert("{size}" == "none", "native getter short-circuits on none");
+}
+
+// Getter returning a droppable string — must not leak or double-free.
+optional_chain_getter_returns_string() `test {
+  _T1421Box? box = _T1421Box(value: "abc");
+  string? label = box?.label;
+  if v := label {
+    assert(v == "box:abc", "getter returning droppable string through ?.");
+  } else {
+    assert(false, "label should be present");
+  }
+}
+
+// Value-type receiver getter through ?.
+optional_chain_value_type_getter() `test {
+  _T1421Counter? c = _T1421Counter(n: 21);
+  int? d = c?.doubled;
+  if v := d {
+    assert(v == 42, "value-type getter through ?.");
+  } else {
+    assert(false, "doubled should be present");
+  }
+}
+
+// Generic instance getter and field through ?.
+optional_chain_generic_getter() `test {
+  _T1421Wrap[int]? w = _T1421Wrap[int](item: 99);
+  int? h = w?.held;
+  if v := h {
+    assert(v == 99, "generic getter through ?.");
+  } else {
+    assert(false, "held should be present");
+  }
+}
+
+optional_chain_generic_field() `test {
+  _T1421Wrap[string]? w = _T1421Wrap[string](item: "xyz");
+  string? f = w?.item;
+  if v := f {
+    assert(v.len == 3, "generic field through ?.");
+  } else {
+    assert(false, "item should be present");
+  }
+}
+
+// Virtual getter through ?.: a base-typed optional holding a subtype must
+// dispatch the override via the vtable (returns "woof", not "generic").
+optional_chain_virtual_getter() `test {
+  _T1421Animal? a = _T1421Dog(legs: 4);
+  string? s = a?.sound;
+  if v := s {
+    assert(v == "woof", "virtual getter override dispatched through ?.");
+  } else {
+    assert(false, "sound should be present");
+  }
+}
+
+// Polymorphic field through ?.: field read on a base-typed optional holding a
+// subtype resolves against the concrete instance layout.
+optional_chain_polymorphic_field() `test {
+  _T1421Animal? a = _T1421Dog(legs: 4);
+  int? n = a?.legs;
+  if v := n {
+    assert(v == 4, "polymorphic field through ?.");
+  } else {
+    assert(false, "legs should be present");
+  }
+}
+
+// Virtual getter through ?. short-circuits on none (getter must not run).
+optional_chain_virtual_getter_none() `test {
+  _T1421Animal? a = none;
+  string? s = a?.sound;
+  assert("{s}" == "none", "virtual getter short-circuits on none");
+}

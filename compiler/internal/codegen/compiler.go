@@ -510,6 +510,13 @@ type Compiler struct {
 	// genMemberCompoundAssign; nil at all other times.
 	stagedMemberReceiver value.Value
 
+	// T1421: pre-evaluated values for synthetic AST nodes. genOptionalChainExpr
+	// delegates its present-path member access to the full genMemberExpr machinery
+	// (native getters, virtual dispatch, value-type receivers, etc.) by staging the
+	// already-extracted inner value under a synthetic target node. genExpr returns
+	// the staged value verbatim when it sees that node. nil/empty at all other times.
+	stagedExprValues map[ast.Expr]value.Value
+
 	// T1356: staged in-place i8* address of a value-type compound-assign receiver
 	// reached through a side-effecting subscript (`vs[next()].sum += x`). The getter
 	// read loads a value copy from this address while the setter write consumes the

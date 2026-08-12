@@ -27,6 +27,28 @@ func TestMuslArchDir(t *testing.T) {
 	}
 }
 
+// TestMuslManifestName pins the arch-qualified runtime-manifest name format.
+// The producer (MuslManifestName in tools/build/common/musl_slim.go) lives in a
+// separate Go module and duplicates this format by necessity — a silent drift
+// here makes every musl blob unresolvable, and the failure mode is a fall-
+// through to the embedded CRT rather than a loud error, so pin it.
+func TestMuslManifestName(t *testing.T) {
+	for _, tt := range []struct {
+		arch, file, want string
+	}{
+		{"x86_64-linux-musl", "crt1.o", "musl-x86_64-linux-musl-crt1.o"},
+		{"aarch64-linux-musl", "libc.a", "musl-aarch64-linux-musl-libc.a"},
+	} {
+		if got := muslManifestName(tt.arch, tt.file); got != tt.want {
+			t.Errorf("muslManifestName(%q, %q) = %q, want %q", tt.arch, tt.file, got, tt.want)
+		}
+	}
+	// Arches must not collide — the reason the name is qualified at all.
+	if muslManifestName("x86_64-linux-musl", "crt1.o") == muslManifestName("aarch64-linux-musl", "crt1.o") {
+		t.Error("arch-qualified names collided across arches")
+	}
+}
+
 func TestMuslCRTCompleteEmpty(t *testing.T) {
 	dir := t.TempDir()
 	if muslCRTComplete(dir) {

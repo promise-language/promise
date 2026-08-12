@@ -40,7 +40,7 @@ func TestLoadPrebuiltsManifest_Real(t *testing.T) {
 	if llvm.Version == "" {
 		t.Error("llvm.version is empty")
 	}
-	wantTargets := []string{"linux-amd64", "darwin-arm64", "darwin-amd64", "windows-amd64"}
+	wantTargets := []string{"linux-amd64", "linux-arm64", "darwin-arm64", "darwin-amd64", "windows-amd64"}
 	for _, target := range wantTargets {
 		te := llvm.Targets[target]
 		if te == nil {

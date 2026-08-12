@@ -412,7 +412,7 @@ func TestCachedSlimDigestOK_DigestMismatch(t *testing.T) {
 func TestCachedSlimDigestOK_MissingPlanFile(t *testing.T) {
 	cacheDir := t.TempDir()
 	plan := []slimPlanFile{{Out: "opt", BE: &BlobEntry{SHA256: "deadbeef", Size: 3, Compression: compressionBrotli}}}
-	digest := slimToolsDigest("22.1.0", "linux-amd64", plan)
+	digest := slimToolsDigest("llvm", "22.1.0", "linux-amd64", plan)
 	if err := os.WriteFile(filepath.Join(cacheDir, toolsOKFile), []byte(digest+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

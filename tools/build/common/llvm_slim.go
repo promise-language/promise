@@ -52,17 +52,38 @@ type slimPlanFile struct {
 // in-place (§5.1): the CAS stays raw upstream bytes (deterministic hash), the
 // loadable copy in the cache is patched.
 func EnsureLLVMBlobs(root, target string) (string, error) {
+	return ensureSlimBlobs(root, "llvm", target, "~700 MB", func(outPath string) {
+		// The CAS keeps raw upstream bytes (deterministic hash); only the
+		// loadable copy in the cache is patched + ad-hoc re-signed (§5.1).
+		if runtime.GOOS == "darwin" && strings.HasPrefix(target, "darwin-") {
+			patchAndSignMachO(outPath)
+		}
+	})
+}
+
+// ensureSlimBlobs is the shared slim-blob acquisition used by EnsureLLVMBlobs
+// and EnsureMuslBlobs (T0530): resolve `dep`'s prebuilts.toml file list for
+// `target` against the blob catalog, fetch each hosted brotli blob into
+// `<cacheRoot>/<dep>-slim/<version>/<target>/`, and fall back to the upstream
+// archive when the catalog has no entry for the target.
+//
+// fallbackHint is the download size quoted in the catalog-miss note ("~700 MB"
+// for the LLVM tarball, "~2.4 MB" for a musl apk) so the message tells a
+// maintainer what the fallback actually costs. afterFetch, when non-nil, runs on
+// each decompressed output path — the hook LLVM uses for the darwin Mach-O
+// patch+sign step.
+func ensureSlimBlobs(root, dep, target, fallbackHint string, afterFetch func(outPath string)) (string, error) {
 	pm, err := LoadPrebuiltsManifest(root)
 	if err != nil {
 		return "", fmt.Errorf("load prebuilts manifest: %w", err)
 	}
-	entry := pm.Binaries["llvm"]
+	entry := pm.Binaries[dep]
 	if entry == nil {
-		return "", fmt.Errorf("prebuilts manifest: missing [binaries.llvm]")
+		return "", fmt.Errorf("prebuilts manifest: missing [binaries.%s]", dep)
 	}
 	tEntry := entry.Targets[target]
 	if tEntry == nil {
-		return "", fmt.Errorf("prebuilts manifest: no [binaries.llvm.targets.%s]", target)
+		return "", fmt.Errorf("prebuilts manifest: no [binaries.%s.targets.%s]", dep, target)
 	}
 	if tEntry.Unsupported != "" {
 		return "", fmt.Errorf("target %s is not supported: %s", target, tEntry.Unsupported)
@@ -75,15 +96,15 @@ func EnsureLLVMBlobs(root, target string) (string, error) {
 
 	// Build per-file plan against the catalog. A single missing file is treated
 	// as a complete miss — half the toolchain from blobs and half from upstream
-	// would race brotli decompression against tarball extraction and produce a
+	// would race brotli decompression against archive extraction and produce a
 	// confusing partial cache.
 	plan := make([]slimPlanFile, 0, len(tEntry.Files))
 	for _, f := range tEntry.Files {
-		be, ok := catalog.Lookup("llvm", entry.Version, target, f.Out)
+		be, ok := catalog.Lookup(dep, entry.Version, target, f.Out)
 		if !ok {
-			fmt.Printf("note: no slim blob hosted for llvm/%s/%s/%s — falling back to upstream tarball (~700 MB). Publish via `bin/release publish-blobs --dependency llvm --host %s`.\n",
-				entry.Version, target, f.Out, target)
-			return FetchPrebuilt(pm, "llvm", target)
+			fmt.Printf("note: no slim blob hosted for %s/%s/%s/%s — falling back to upstream archive (%s). Publish via `bin/release publish-blobs --dependency %s --host %s`.\n",
+				dep, entry.Version, target, f.Out, fallbackHint, dep, target)
+			return FetchPrebuilt(pm, dep, target)
 		}
 		plan = append(plan, slimPlanFile{Out: f.Out, BE: be})
 	}
@@ -92,19 +113,19 @@ func EnsureLLVMBlobs(root, target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cacheDir := filepath.Join(cacheRoot, "llvm-slim", entry.Version, target)
+	cacheDir := filepath.Join(cacheRoot, dep+"-slim", entry.Version, target)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", err
 	}
 
-	digest := slimToolsDigest(entry.Version, target, plan)
+	digest := slimToolsDigest(dep, entry.Version, target, plan)
 
 	// Fast path — lock-free cache hit.
 	if cachedSlimDigestOK(cacheDir, digest, plan) {
 		return cacheDir, nil
 	}
 
-	unlock, err := acquireCacheLock(cacheDir, fmt.Sprintf("llvm-slim/%s/%s fetch", entry.Version, target))
+	unlock, err := acquireCacheLock(cacheDir, fmt.Sprintf("%s-slim/%s/%s fetch", dep, entry.Version, target))
 	if err != nil {
 		return "", err
 	}
@@ -118,7 +139,7 @@ func EnsureLLVMBlobs(root, target string) (string, error) {
 	// cache that looks valid against `digest`.
 	_ = os.Remove(filepath.Join(cacheDir, toolsOKFile))
 
-	tag := DepsReleaseTag("llvm", entry.Version)
+	tag := DepsReleaseTag(dep, entry.Version)
 	suffix, err := assetSuffix(compressionBrotli)
 	if err != nil {
 		return "", err
@@ -137,8 +158,8 @@ func EnsureLLVMBlobs(root, target string) (string, error) {
 			return "", fmt.Errorf("decompress %s: %w", sf.Out, err)
 		}
 		_ = os.Remove(brPath)
-		if runtime.GOOS == "darwin" && strings.HasPrefix(target, "darwin-") {
-			patchAndSignMachO(outPath)
+		if afterFetch != nil {
+			afterFetch(outPath)
 		}
 	}
 
@@ -165,12 +186,14 @@ func SlimLLVMCacheDir(root, target string) (string, bool) {
 	return filepath.Join(cacheRoot, "llvm-slim", pm.Binaries["llvm"].Version, target), true
 }
 
-// slimToolsDigest is the cache identity for one (version, target, [(out, sha,
-// size, compression), ...]) tuple. Mirrors manifestToolsDigest's role for the
-// upstream-tarball cache.
-func slimToolsDigest(version, target string, plan []slimPlanFile) string {
+// slimToolsDigest is the cache identity for one (dep, version, target, [(out,
+// sha, size, compression), ...]) tuple. Mirrors manifestToolsDigest's role for
+// the upstream-archive cache. `dep` is part of the digest so two dependencies
+// that happen to share a version string can never alias each other's sentinel.
+func slimToolsDigest(dep, version, target string, plan []slimPlanFile) string {
 	h := sha256.New()
-	io.WriteString(h, "llvm-slim\n")
+	io.WriteString(h, dep)
+	io.WriteString(h, "-slim\n")
 	io.WriteString(h, version)
 	io.WriteString(h, "\n")
 	io.WriteString(h, target)

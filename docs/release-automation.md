@@ -55,7 +55,7 @@ Each blob is a dependency artifact identified by the `sha256` of its extracted c
 |------|-----|-------|
 | `opt`, `llc`, `lld` (+ `libLLVM`) | host platform | LLVM 22+ tools. The bulk of the size. |
 | `wasmtime` / Node wasm harness | host platform | For `wasm32-wasi` / `wasm32-web` targets. |
-| musl CRT objects | linux target | Static-link CRT. |
+| musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) | linux target | **Done** (T0530): static-link CRT, sliced from the pinned upstream Alpine `musl-dev` apk (musl.libc.org publishes source only, so a distro package is the only prebuilt). Manifest names are **arch-qualified** (`musl-<arch>-crt1.o`) because the CRT is a *target* dependency — one host manifest can carry several arches. Projected best-effort: an unpublished CRT is skipped, never fatal, since Linux binaries also embed the host arch's copy. |
 | macOS SDK stubs (`libSystem.tbd` + headers) | macOS target | Zero-dep goal ([distribution.md](distribution.md) §5.1). |
 | Windows SDK / UCRT `.lib` import stubs | windows target | **Done** (T0772): self-generated license-clean import libs embedded in the compiler (~21 KiB), not a fetched blob. Zero-dep goal ([distribution.md](distribution.md) §5.2). |
 
@@ -65,8 +65,14 @@ Blobs are produced **locally on a maintainer machine** (T0797), not on a per-epo
 
 ```sh
 bin/release publish-blobs --dependency llvm --host linux-amd64
+bin/release publish-blobs --dependency llvm --host linux-arm64
 bin/release publish-blobs --dependency llvm --host darwin-arm64
 bin/release publish-blobs --dependency llvm --host windows-amd64
+
+# musl CRT — one per Linux TARGET, not per host (T0530). Any host can produce
+# both: the Alpine apk is sliced with the stdlib reader in tools/build/common/apk.go.
+bin/release publish-blobs --dependency musl --host linux-amd64
+bin/release publish-blobs --dependency musl --host linux-arm64
 ```
 
 Each invocation downloads the upstream archive (already verified against `prebuilts.toml`'s pinned sha256), brotli-11-compresses each file under its content-addressed `<sha>.br` name, records the entry in `tools/build/blobs.json`, uploads the blob to a dedicated `deps-<dep>-<version>` GitHub release (created on demand), and **mirrors it to Cloudflare R2** (`--r2-bucket`, default `prebuilts`; `""` disables) as a flat `<sha>.br` object via `npx wrangler`. The catalog is the dedup oracle: a second `publish-blobs` invocation with the same dep version sees the existing catalog entry + existing release asset and skips both compress and upload. After the first run, `tools/build/blobs.json` is committed; the per-epoch pipeline reads it via `bin/release manifest --from-catalog` to project the per-epoch runtime manifest.
@@ -127,11 +133,10 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: compiler/go.mod, cache: true, cache-dependency-path: compiler/go.sum }
       # No Java/ANTLR step: the generated parser (compiler/internal/parser/*.go) is committed.
-      - name: Install LLVM + musl (Linux)
+      - name: Install LLVM (Linux)
         if: runner.os == 'Linux'
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-          sudo apt-get install -y musl-dev
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         run: choco install llvm -y   # 22+; windows-latest already ships VS Build Tools (MSVC + Windows SDK)
@@ -156,7 +161,7 @@ jobs:
 
 **Triggering manually (`bin/release ci`).** The convenience trigger for the dispatch above (`tools/build/common/release_ci.go`). With no platform it dispatches **`linux-amd64` only** (the cheap default); `bin/release ci all` runs the whole matrix in one run; `bin/release ci darwin` — or `linux`/`windows`, or a canonical `<os>-<arch>` — names individual targets, and multiple names fan out to one run each. `--no-tests` sets `run_tests=false` (build-only toolchain check); `--watch` polls the dispatched run(s) to completion and **exits non-zero if CI is red** (usable as a script gate — it snapshots the latest run ID first, so it follows the run *this* dispatch creates, not a stale green one already at the same commit). Because `workflow_dispatch` can only target a branch/tag ref — never an arbitrary commit — and `actions/checkout` runs at that ref's **remote tip**, `ci` dispatches on the current branch and verifies your local HEAD **is** that pushed tip, so CI tests the commit you are on; it errors if you have not pushed (`--force` dispatches on the remote tip anyway, `--ref <branch>` picks another branch). `--commit-hash <sha>` pins CI to an exact commit (must be HEAD or an ancestor of the branch), useful when you want CI to validate a specific historical commit rather than the current HEAD. `git`/`gh` sit behind the same interface seams as `cut`, so the tests are hermetic. (`cut` dispatches the same workflow as a release-gate side effect — §6.3; `bin/release ci` is the standalone "run CI on my commit" path.)
 
-**Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). Linux installs LLVM 22 from `apt.llvm.org` and `musl-dev`. macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — same frontend/codegen, only the backend driver differs. **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang), LLVM 22 via `choco`, with VS Build Tools (MSVC + Windows SDK) preinstalled on `windows-latest`, and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
+**Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). Linux installs LLVM 22 from `apt.llvm.org` (the musl CRT is a fetched prebuilt, not a system package — T0530). macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — same frontend/codegen, only the backend driver differs. **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang), LLVM 22 via `choco`, with VS Build Tools (MSVC + Windows SDK) preinstalled on `windows-latest`, and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
 
 ---
 

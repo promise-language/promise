@@ -72,6 +72,19 @@ func FindLLVM(root string) (*LLVMInfo, error) {
 	if root != "" {
 		if cacheDir, err := EnsureLLVMBlobs(root, CurrentBuildTarget()); err == nil {
 			if info, ok := llvmInfoFromDir(cacheDir); ok {
+				// A fetched toolchain is not automatically a usable one: the
+				// upstream Linux tarballs are dynamically linked against glibc,
+				// so on a musl host (Alpine) every tool fails to exec. Probe it
+				// here — otherwise the build "succeeds" and ships a compiler
+				// that dies at the first `opt` invocation, far from the cause.
+				if _, verr := probeLLVMVersion(info.OptPath); verr != nil {
+					return nil, fmt.Errorf("fetched LLVM prebuilt for %s cannot run on this host: %w\n"+
+						"  probed: %s --version\n"+
+						"  the upstream LLVM release binaries are dynamically linked against glibc "+
+						"(ld-linux, libc.so.6, libstdc++.so.6); a musl host such as Alpine cannot execute them\n"+
+						"  fix: build on a glibc host, or set PROMISE_LLVM=<dir> to an LLVM %d-%d built for this host",
+						CurrentBuildTarget(), verr, info.OptPath, LLVMMinVersion, LLVMMaxVersion)
+				}
 				return info, nil
 			}
 			suffix := ExeSuffix()
@@ -362,17 +375,32 @@ func findLLDWindows(info *LLVMInfo) string {
 var versionRe = regexp.MustCompile(`version (\d+)\.`)
 
 // parseLLVMVersion runs "opt --version" and extracts the major version number.
+// Returns 0 when the tool cannot run or its output is unparseable — callers that
+// need to tell those two cases apart (or report WHY) use probeLLVMVersion.
 func parseLLVMVersion(optPath string) int {
-	out, err := RunOutputQuiet(optPath, "--version")
+	v, err := probeLLVMVersion(optPath)
 	if err != nil {
 		return 0
 	}
+	return v
+}
+
+// probeLLVMVersion runs "<opt> --version" and returns the major version, or an
+// error describing why the tool is unusable. The distinction matters for fetched
+// prebuilts: "0" from parseLLVMVersion silently reads as "unknown version", but
+// an exec failure means the binary cannot run on this host at all (wrong libc)
+// and must stop the build with an explanation.
+func probeLLVMVersion(optPath string) (int, error) {
+	out, err := RunOutputQuiet(optPath, "--version")
+	if err != nil {
+		return 0, err
+	}
 	m := versionRe.FindStringSubmatch(out)
 	if m == nil {
-		return 0
+		return 0, fmt.Errorf("unparseable `--version` output: %q", strings.TrimSpace(out))
 	}
 	v, _ := strconv.Atoi(m[1])
-	return v
+	return v, nil
 }
 
 // IsLinux returns true on Linux.

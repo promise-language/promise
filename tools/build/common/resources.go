@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -122,23 +121,52 @@ func ensureRuntimeManifest(resDir string) error {
 	return os.WriteFile(path, []byte("{\n  \"schema\": 1,\n  \"epoch\": \"\",\n  \"entries\": []\n}\n"), 0o644)
 }
 
-// EmbedMuslCRT copies musl C runtime objects (Linux only).
+// EmbedMuslCRT stages the musl C runtime objects into
+// resources/crt/<musl-arch>/ for `//go:embed` (Linux hosts only — see
+// compiler/cmd/promise/crt_linux_*.go; other hosts compile crt_other.go's empty
+// stub and need nothing staged).
+//
+// The bytes come from the pinned prebuilt (hosted blob, or the upstream Alpine
+// apk on a catalog miss) — never from the build host's /usr/lib. Scraping
+// `/usr/lib/<arch>-linux-musl/` made the compiler's link output depend on
+// whichever musl-dev the host happened to have installed, and broke `bin/build`
+// outright on hosts with none (T0530).
+//
+// Only the HOST arch is staged: the embed directive is per-GOARCH, and
+// cross-arch Linux linking resolves its CRT from the content-addressed store at
+// link time (the arch-qualified `musl-<arch>-*` manifest entries) rather than
+// doubling every Linux binary's embedded libc.a.
 func EmbedMuslCRT(root string) error {
 	if !IsLinux() {
 		return nil
 	}
-	muslArch := "x86_64-linux-musl"
-	if runtime.GOARCH == "arm64" {
-		muslArch = "aarch64-linux-musl"
+	target := CurrentBuildTarget()
+	muslArch, err := MuslArchDir(target)
+	if err != nil {
+		return err
 	}
-	src := "/usr/lib/" + muslArch
+	src, err := EnsureMuslBlobs(root, target)
+	if err != nil {
+		return fmt.Errorf("fetch musl CRT for %s: %w", target, err)
+	}
+	pm, err := LoadPrebuiltsManifest(root)
+	if err != nil {
+		return err
+	}
+	tEntry := pm.Binaries["musl"].Targets[target]
+
+	// Wipe first so a file dropped from prebuilts.toml can't linger and get
+	// swept back in by the embed glob (mirrors wipeBundleDir for LLVM).
 	dst := filepath.Join(root, "compiler", "cmd", "promise", "resources", "crt", muslArch)
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
 	}
-	for _, name := range []string{"crt1.o", "crti.o", "crtn.o", "libc.a"} {
-		if err := copyFile(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
-			return fmt.Errorf("copy musl %s: %w", name, err)
+	for _, f := range tEntry.ClientFiles() {
+		if err := copyFile(filepath.Join(src, f.Out), filepath.Join(dst, f.Out)); err != nil {
+			return fmt.Errorf("stage musl %s: %w", f.Out, err)
 		}
 	}
 	return nil

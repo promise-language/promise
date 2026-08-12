@@ -51,13 +51,15 @@ func RunPrereqs(root string, _ []string) error {
 		fmt.Printf("✅ lld:      %s\n", llvm.LLDPath)
 	}
 
-	// musl (Linux only)
+	// musl CRT (Linux only) — a fetched prebuilt since T0530, never a system
+	// package. Reported for visibility only: `bin/build` fetches it on demand,
+	// so a cold cache is normal and must not fail the prereq check.
 	if IsLinux() {
-		if Exists("/usr/lib/x86_64-linux-musl/libc.a") {
-			fmt.Println("✅ musl:     installed")
-		} else {
-			fmt.Println("❌ musl:     NOT FOUND — install: sudo apt-get install musl-dev")
+		if arch, err := MuslArchDir(CurrentBuildTarget()); err != nil {
+			fmt.Printf("❌ musl:     no CRT prebuilt for %s\n", CurrentBuildTarget())
 			ok = false
+		} else {
+			fmt.Printf("✅ musl:     %s CRT fetched by bin/build (no system musl-dev needed)\n", arch)
 		}
 	}
 

@@ -106,11 +106,9 @@ jobs:
       # builds. The `PROMISE_LLVM` env var still works for offline / air-gapped
       # CI; the fallback path in FindLLVM honors it before any network access.
 
-      - name: Install musl (Linux)
-        if: runner.os == 'Linux'
-        # Linux still needs the musl CRT for static-linked output. LLVM itself
-        # is fetched by `bin/build` (no apt llvm-22 / lld-22 install).
-        run: sudo apt-get install -y musl-dev
+      # No musl-dev install: the CRT for static-linked Linux output is a pinned
+      # prebuilt fetched by `bin/build` like LLVM itself (T0530). Nothing in the
+      # build reads /usr/lib/<arch>-linux-musl any more.
 
       - name: Install wasmtime (runtime for the wasm32-wasi tests)
         uses: bytecodealliance/actions/wasmtime/setup@v1

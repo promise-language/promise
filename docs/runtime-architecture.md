@@ -598,7 +598,7 @@ sudo dnf install llvm lld musl-devel
 sudo pacman -S llvm lld musl
 ```
 
-Provides: `opt`, `llc`, `ld.lld` (LLVM 22+ tools) and musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`). The `musl-dev` package is required — musl CRT objects are embedded in the Go binary via `go:embed` during `make build`. The `build-essential` package is no longer required for building Promise programs (glibc CRT is only used with `PROMISE_USE_CLANG=1`). The LLVM apt repository ([apt.llvm.org](https://apt.llvm.org)) is needed on Ubuntu/Debian since stock repos may not have LLVM 22+.
+Provides: `opt`, `llc`, `ld.lld` (LLVM 22+ tools). Both of these are optional conveniences — `bin/build` fetches LLVM from the pinned prebuilt blobs when the host has none, and the musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) are **always** fetched from the `[binaries.musl]` prebuilt, so `musl-dev` is no longer required on the build host at all (T0530). The `build-essential` package is not required either (glibc CRT is only used with `PROMISE_USE_CLANG=1`). The LLVM apt repository ([apt.llvm.org](https://apt.llvm.org)) is needed on Ubuntu/Debian if you do want a system LLVM, since stock repos may not have LLVM 22+.
 
 **macOS** (Phase 7c — opt + llc + system ld):
 ```bash
@@ -782,7 +782,9 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | `findLLVMTool(name)` | Discovers `opt`/`llc`/`ld.lld` — sibling → env → versioned PATH → unversioned PATH |
 | `llvmToolVersion(path)` | Parses `LLVM version X` or `LLD X` from `--version` output |
 | `checkLLVMToolVersion(path)` | Enforces LLVM 22+ minimum |
-| `findMuslCRT(target)` | Locates musl CRT — sibling → installed → cache → extract from embedded |
+| `findMuslCRT(target)` | Locates musl CRT — sibling → installed → cache → CAS view → extract from embedded |
+| `resolveMuslCRTView(arch)` | Materializes the CRT from the content-addressed store into `cache/crt-view/<arch>-<blobkey>/` |
+| `muslManifestName(arch, file)` | Arch-qualified manifest name, e.g. `musl-aarch64-linux-musl-crt1.o` |
 | `muslCRTValid(dir)` | Validates cached CRT against embedded sizes (detects stale cache) |
 | `buildMuslLinkArgs(target, obj, out, crtDir)` | Builds `ld.lld -static` argument list with musl CRT |
 | `findCRT(target)` | Discovers system glibc CRT objects via `cc -print-file-name` + fallback probing |
@@ -802,13 +804,17 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | File | Build constraint | Purpose |
 |------|-----------------|---------|
 | `crt_linux_amd64.go` | `linux && amd64` | `go:embed resources/crt/x86_64-linux-musl/*` — embeds musl CRT |
-| `crt_other.go` | `!(linux && amd64)` | Empty `embed.FS` stub — no musl CRT on other platforms |
+| `crt_linux_arm64.go` | `linux && arm64` | `go:embed resources/crt/aarch64-linux-musl/*` — embeds musl CRT |
+| `crt_other.go` | `!(linux && (amd64 \|\| arm64))` | Empty `embed.FS` stub — no musl CRT on other platforms |
 
 **Musl CRT discovery order** (`findMuslCRT`):
 1. Sibling of binary: `{exe_dir}/crt/x86_64-linux-musl/`
 2. Installed: `~/.promise/lib/crt/x86_64-linux-musl/`
 3. Cache: `~/.promise/cache/crt/x86_64-linux-musl/` (validated by size against embedded)
-4. Extract embedded CRT to cache (first build only, ~2.5 MB)
+4. Content-addressed store (`resolveMuslCRTView`) — resolves the arch-qualified `musl-<arch>-*` entries out of the embedded manifest into `cache/crt-view/<arch>-<blobkey>/`, fetching blobs on first use. This is the only path that can serve an arch the binary does not embed.
+5. Extract embedded CRT to cache (first build only, ~2.5 MB)
+
+The CRT objects themselves are a pinned prebuilt (`[binaries.musl]` in `tools/build/prebuilts.toml`, sliced from the upstream Alpine `musl-dev` apk), fetched by `bin/build` and hosted content-addressed by `bin/release publish-blobs --dependency musl` — never taken from the build host's `/usr/lib` (T0530).
 
 **Phased rollout**:
 

@@ -585,11 +585,26 @@ func decompressEmbeddedLLVM(name string, data []byte) ([]byte, error) {
 	}
 }
 
+// muslManifestName is the runtime-manifest logical name for one musl CRT object
+// on one arch, e.g. ("aarch64-linux-musl", "crt1.o") →
+// "musl-aarch64-linux-musl-crt1.o".
+//
+// The arch is part of the NAME, not just the manifest's identity, because the
+// musl CRT is a *target* dependency: one host manifest can legitimately carry
+// several arches at once (a linux-amd64 host cross-linking for linux-arm64), and
+// an unqualified "musl-crt1.o" could only ever describe one of them. Keep the
+// format in lockstep with MuslManifestName in tools/build/common/musl_slim.go —
+// the two live in separate Go modules, so the format is duplicated by necessity.
+func muslManifestName(arch, file string) string {
+	return "musl-" + arch + "-" + file
+}
+
 // resolveMuslCRTView materializes the musl CRT objects from the CAS into a
 // per-arch view dir (cache/crt-view/<arch>/). Returns ("", nil) when the
-// manifest carries no musl entries (thin placeholder / cross-arch), so the
-// caller falls through to its embedded/system probes. A fetch failure surfaces
-// the offline / broken-release error.
+// manifest carries no musl entries for this arch (thin placeholder / an arch
+// this binary's manifest doesn't cover), so the caller falls through to its
+// embedded/system probes. A fetch failure surfaces the offline / broken-release
+// error.
 func resolveMuslCRTView(arch string) (string, error) {
 	m, err := loadEmbeddedManifest()
 	if err != nil || m == nil {
@@ -597,7 +612,7 @@ func resolveMuslCRTView(arch string) (string, error) {
 	}
 	var entries []*blobstore.ManifestEntry
 	for _, f := range muslCRTFiles {
-		e, ok := m.Lookup("musl-" + f)
+		e, ok := m.Lookup(muslManifestName(arch, f))
 		if !ok {
 			return "", nil // manifest doesn't carry musl blobs → fall through
 		}
@@ -636,12 +651,13 @@ func resolveMuslCRTView(arch string) (string, error) {
 	defer resolver.Close()
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
 		for _, f := range muslCRTFiles {
-			entry, _ := m.Lookup("musl-" + f)
+			name := muslManifestName(arch, f)
+			entry, _ := m.Lookup(name)
 			var blobPath string
 			if store.Has(entry.SHA256) {
 				blobPath = store.BlobPath(entry.SHA256)
 			} else {
-				p, rerr := resolver.Resolve("musl-" + f)
+				p, rerr := resolver.Resolve(name)
 				if rerr != nil {
 					return rerr
 				}

@@ -95,7 +95,7 @@ Copies project files into `compiler/cmd/promise/resources/` for Go's `embed` dir
 
 Also computes `resources/.sources.sha256` — a sorted list of SHA256 hashes for all module and catalog files. This hash is used for build cache invalidation.
 
-**Linux only:** Copies musl C runtime objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) from `/usr/lib/x86_64-linux-musl/` into `resources/crt/x86_64-linux-musl/` for static linking.
+**Linux only:** Stages the musl C runtime objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) into `resources/crt/<musl-arch>/` for static linking. The bytes come from the pinned `[binaries.musl]` prebuilt — a hosted content-addressed blob, or the upstream Alpine `musl-dev` apk on a catalog miss — **never** from the build host's `/usr/lib` (T0530). No `musl-dev` package is required on the build host. Only the host arch is staged; cross-arch Linux linking resolves its CRT from the content-addressed store at link time via the arch-qualified `musl-<arch>-*` manifest entries.
 
 ### 4. LLVM detection
 

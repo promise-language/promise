@@ -48,6 +48,17 @@ files = [
   { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
 ]
 
+[binaries.llvm.targets.linux-arm64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-ARM64.tar.xz"
+sha256 = "e3b4205fe45d5561dec9d46465873a79c26b25b028b310515b38c34f668c6aec"
+files = [
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llc", out = "llc" },
+  { src = "bin/lld", out = "lld" },
+  # Build-only: regenerates the Windows winlink import libs (T0772/T0833).
+  { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
+]
+
 [binaries.llvm.targets.darwin-arm64]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-macOS-ARM64.tar.xz"
 sha256 = "cd5e615f4dab23d0239359cd343202c5f6ceeaf072c245a3c685d73afac09646"
@@ -83,4 +94,54 @@ files = [
   { src = "bin/lld.exe", out = "lld.exe" },
   # Build-only: regenerates the Windows winlink import libs (T0772/T0833).
   { src = "bin/llvm-dlltool.exe", out = "llvm-dlltool.exe", build_only = true },
+]
+
+# ----------------------------------------------------------------------------
+# musl CRT (crt1.o, crti.o, crtn.o, libc.a) — required to link Linux binaries.
+#
+# Promise links Linux targets `-static` against musl, so these objects are a
+# *target* dependency, not a host one: `target` below is the Linux target being
+# linked FOR. They were previously scraped off the build host's /usr/lib
+# (`musl-dev` package) at `bin/build` time, which made the build depend on
+# preinstalled system state and broke outright on hosts that have no musl-dev
+# (T0530). Now they are fetched like every other prebuilt.
+#
+# Source: musl.libc.org publishes SOURCE ONLY — there is no upstream binary
+# release to mirror the LLVM pattern against. Alpine is the reference musl
+# distribution, and its `musl-dev` package is the canonical prebuilt (2.4 MiB,
+# per-arch). The apk is three concatenated gzip tar streams; tools/build/common/
+# apk.go extracts it with the stdlib.
+#
+# Alpine prunes superseded package revisions from the CDN, so a URL here can rot
+# on an Alpine `-rN` bump. That is contained: once `bin/release publish-blobs
+# --dependency musl --host <target>` has run, the content-addressed blob is
+# hosted by us and the upstream URL is only a last-resort fallback source. A
+# rotted URL surfaces as a loud 404 at pin time, never as silently different
+# bytes — `version` carries the full `1.2.5-rN` so a revision bump is a new
+# catalog identity rather than a mutation of an existing one.
+# ----------------------------------------------------------------------------
+[binaries.musl]
+version = "1.2.5-r23"
+# Raw (not gzipped) per-arch CRT objects land in <bundle_dir>/<musl-arch>/ for
+# `//go:embed resources/crt/<musl-arch>/*` — see compiler/cmd/promise/crt_linux_*.go.
+bundle_dir = "compiler/cmd/promise/resources/crt"
+
+[binaries.musl.targets.linux-amd64]
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-dev-1.2.5-r23.apk"
+sha256 = "2ea566b665ebaea4f84cee1e4b7ef093b0aa67356006e84deb26d9bd7a716c6b"
+files = [
+  { src = "usr/lib/crt1.o", out = "crt1.o" },
+  { src = "usr/lib/crti.o", out = "crti.o" },
+  { src = "usr/lib/crtn.o", out = "crtn.o" },
+  { src = "usr/lib/libc.a", out = "libc.a" },
+]
+
+[binaries.musl.targets.linux-arm64]
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-dev-1.2.5-r23.apk"
+sha256 = "19032a762b8c6967d3789de1bf540754a0121e517402022eebd3ae6f1c9965a4"
+files = [
+  { src = "usr/lib/crt1.o", out = "crt1.o" },
+  { src = "usr/lib/crti.o", out = "crti.o" },
+  { src = "usr/lib/crtn.o", out = "crtn.o" },
+  { src = "usr/lib/libc.a", out = "libc.a" },
 ]

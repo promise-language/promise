@@ -709,7 +709,7 @@ func wipeBundleDir(dstDir string) error {
 // Falls back to ".tar.xz" since that's the dominant LLVM/wasmtime format.
 func archiveExtFor(url string) string {
 	lower := strings.ToLower(url)
-	for _, ext := range []string{".tar.xz", ".tar.gz", ".tgz", ".zip"} {
+	for _, ext := range []string{".tar.xz", ".tar.gz", ".tgz", ".zip", ".apk"} {
 		if strings.HasSuffix(lower, ext) {
 			return ext
 		}
@@ -718,10 +718,14 @@ func archiveExtFor(url string) string {
 }
 
 // ExtractArchive extracts the given archive into dst.
-// Supports .tar.xz, .tar.gz, .tgz (via system `tar`), and .zip (via stdlib).
+// Supports .tar.xz, .tar.gz, .tgz (via system `tar`), .zip and Alpine .apk
+// (via stdlib).
 func ExtractArchive(archive, dst string) error {
 	lower := strings.ToLower(archive)
 	switch {
+	case strings.HasSuffix(lower, ".apk"):
+		// Alpine package — concatenated gzip tar segments, NOT a zip (see apk.go).
+		return extractAPK(archive, dst)
 	case strings.HasSuffix(lower, ".tar.xz"),
 		strings.HasSuffix(lower, ".tar.gz"),
 		strings.HasSuffix(lower, ".tgz"):

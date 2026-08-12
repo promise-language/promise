@@ -113,10 +113,8 @@ jobs:
       # The maintainer pre-stages blobs locally on a dep bump via `bin/release
       # publish-blobs`; nothing in this job has to install or extract a 700 MB
       # upstream tarball.
-      - name: Install musl (Linux)
-        if: runner.os == 'Linux'
-        # Linux static link still needs musl-dev. No llvm-22 / lld-22 install.
-        run: sudo apt-get install -y musl-dev
+      # No musl-dev install: the Linux static-link CRT is a pinned prebuilt
+      # fetched by `bin/build`, same as LLVM (T0530).
       - name: Bootstrap dev tools (Unix)
         if: runner.os != 'Windows'
         run: ./make

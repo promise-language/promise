@@ -217,11 +217,14 @@ func llvmTargetEntry(root, target string) (*PrebuiltsManifest, *TargetEntry, err
 // cache by FetchAll and copied out raw+executable. Each file is named by its
 // runtime `out` name — an extracted blob ready to hash by `manifest`.
 //
-// musl CRT, macOS SDK stubs, and Windows UCRT stubs are NOT collected here: they
-// have no public blob host nor upstream-archive source yet and stay
-// embedded-delivered (musl) / are owned by the cross-compile track (T0530/T0531/
-// T0532). Emitting them into the manifest would activate an unsatisfiable runtime
-// fetch path. They join once their hosting lands.
+// The musl CRT is NOT collected here even though it is now a hosted blob
+// (T0530): this is the non-catalog bootstrap flow, whose companion producer
+// (`bin/release manifest` without --from-catalog → buildLLVMEntries) emits LLVM
+// entries only, so collecting musl would stage artifacts no manifest references.
+// The catalog flow needs no staging at all — `publish-install` projects musl via
+// BuildRuntimeManifestFromCatalog and `fetch-blobs` pulls every manifest entry,
+// musl included. macOS SDK stubs and Windows UCRT stubs remain out of both flows
+// (T0531/T0532, cross-compile track).
 func runReleaseBlobs(root string, args []string) error {
 	fs := flag.NewFlagSet("blobs", flag.ContinueOnError)
 	host := fs.String("host", CurrentBuildTarget(), "target to collect blobs for")
@@ -413,6 +416,13 @@ var errCatalogMissForHost = errors.New("blobs.json has no entry for host")
 // errCatalogMissForHost so callers can react (the manifest CLI bubbles the
 // error to the user; `bin/build` falls back to the empty placeholder).
 //
+// musl CRT entries are appended BEST-EFFORT (T0530): an unpublished musl blob
+// is skipped with a note rather than failing the whole projection. LLVM is the
+// host's hard requirement — nothing links without it — whereas a missing musl
+// entry degrades to the embedded CRT that Linux binaries carry anyway. Making
+// musl fatal here would mean one unpublished CRT blob wipes the LLVM entries
+// too and silently downgrades the binary to the empty placeholder.
+//
 // The release tag is ALWAYS the catalog-derived `deps-<dep>-<version>`; the
 // caller cannot override it (overriding would produce a manifest whose blob
 // URLs point at a release that does not host them).
@@ -471,7 +481,72 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 			},
 		})
 	}
+
+	muslEntries, err := buildMuslEntriesFromCatalog(pm, catalog, target)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, muslEntries...)
+
 	return &runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}, nil
+}
+
+// buildMuslEntriesFromCatalog projects the musl CRT blobs a `target` host can
+// link with into runtime manifest entries (T0530).
+//
+// Which arches land here is a host-workflow decision, matching the "full binary
+// pre-stages the host workflow" rule (distribution.md §1.2): a Linux host gets
+// its OWN arch, so `promise build` can resolve a CRT even when the binary
+// carries no embedded one. A non-Linux host gets none — a darwin box only needs
+// a Linux CRT once cross-compilation lands, and emitting entries it can't use
+// would inflate every macOS manifest.
+//
+// Best-effort by contract: an arch whose blobs aren't published yet is skipped
+// with a note, never an error. See BuildRuntimeManifestFromCatalog.
+func buildMuslEntriesFromCatalog(pm *PrebuiltsManifest, catalog *BlobsCatalog, target string) ([]runtimeManifestEntry, error) {
+	musl := pm.Binaries["musl"]
+	if musl == nil {
+		return nil, nil // prebuilts.toml doesn't declare musl (older tree)
+	}
+	arch, err := MuslArchDir(target)
+	if err != nil {
+		return nil, nil // not a Linux target → no CRT in this host's workflow
+	}
+	tEntry := musl.Targets[target]
+	if tEntry == nil || tEntry.Unsupported != "" {
+		return nil, nil
+	}
+	tag := DepsReleaseTag("musl", musl.Version)
+
+	var entries []runtimeManifestEntry
+	for _, f := range tEntry.ClientFiles() {
+		be, ok := catalog.Lookup("musl", musl.Version, target, f.Out)
+		if !ok {
+			fmt.Printf("  note: no musl blob hosted for musl/%s/%s/%s — CRT stays embedded-only; publish via `bin/release publish-blobs --dependency musl --host %s`\n",
+				musl.Version, target, f.Out, target)
+			return nil, nil // partial musl entries would strand the view builder
+		}
+		assetURL, err := BlobAssetURL(tag, be.SHA256, be.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+		}
+		mirrorURL, err := BlobMirrorURL(be.SHA256, be.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+		}
+		entries = append(entries, runtimeManifestEntry{
+			Name:   MuslManifestName(arch, f.Out),
+			SHA256: be.SHA256,
+			Size:   be.Size,
+			Kind:   "blob", // inert relocatable ELF — never patched or signed
+			Sources: []runtimeSource{
+				{Blob: assetURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+				{Blob: mirrorURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+				{Archive: tEntry.URL, ArchivePath: f.Src, ArchiveSHA256: tEntry.SHA256},
+			},
+		})
+	}
+	return entries, nil
 }
 
 // runReleaseManifestFromCatalog is the thin CLI wrapper around

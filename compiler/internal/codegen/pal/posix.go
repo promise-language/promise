@@ -66,13 +66,13 @@ func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
 		// POSIX libc 'write' returns ssize_t (i64).
-		return emitLibcFreeDebug(module, "write", false, p.MemoryLimitAccounting)
+		return emitLibcFreeDebug(module, "write", false, p.MemoryLimitAccounting, true)
 	}
 	return emitLibcFree(module)
 }
 func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcReallocDebug(module, "write", false, p.MemoryLimitAccounting)
+		return emitLibcReallocDebug(module, "write", false, p.MemoryLimitAccounting, true)
 	}
 	return emitLibcRealloc(module)
 }
@@ -325,6 +325,14 @@ func (p *PosixPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 // isMacOS returns true if the target is macOS/Apple.
 func (p *PosixPAL) isMacOS() bool {
 	return strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple")
+}
+
+// isARM64 returns true if the target is 64-bit ARM. Only meaningful for Linux
+// targets: several libc structs (struct stat, struct epoll_event) have a
+// different layout on aarch64 than on x86_64. On macOS every arch shares one
+// ABI, so isMacOS() must always be checked first.
+func (p *PosixPAL) isARM64() bool {
+	return strings.HasPrefix(p.target, "aarch64") || strings.HasPrefix(p.target, "arm64")
 }
 
 // getOrDeclareErrnoLocFn returns (or declares) the platform-specific errno
@@ -725,13 +733,30 @@ func (p *PosixPAL) EmitFileStat(module *ir.Module) *ir.Func {
 	var birthtimeOff int64
 	var hasBirthtime bool
 
-	if p.isMacOS() {
+	switch {
+	case p.isMacOS():
+		// Darwin (same layout on x86_64 and arm64):
+		// st_dev(4) st_mode(2) st_nlink(2) st_ino(8) st_uid(4) st_gid(4) ...
 		modeOff, modeIs16 = 4, true
 		uidOff, gidOff = 16, 20
 		sizeOff = 96
 		atimeOff, mtimeOff, ctimeOff = 32, 48, 64
 		birthtimeOff, hasBirthtime = 80, true
-	} else {
+	case p.isARM64():
+		// Linux/AArch64 (identical in glibc and musl):
+		// st_dev(8) st_ino(8) st_mode(4) st_nlink(4) st_uid(4) st_gid(4)
+		// st_rdev(8) __pad(8) st_size(8) st_blksize(4) __pad2(4) st_blocks(8)
+		// st_atim(16) st_mtim(16) st_ctim(16)
+		// st_mode is 32-bit here and precedes st_nlink — the reverse of x86_64.
+		modeOff, modeIs16 = 16, false
+		uidOff, gidOff = 24, 28
+		sizeOff = 48
+		atimeOff, mtimeOff, ctimeOff = 72, 88, 104
+		birthtimeOff, hasBirthtime = 0, false
+	default:
+		// Linux/x86_64:
+		// st_dev(8) st_ino(8) st_nlink(8) st_mode(4) st_uid(4) st_gid(4)
+		// __pad0(4) st_rdev(8) st_size(8) ...
 		modeOff, modeIs16 = 24, false
 		uidOff, gidOff = 28, 32
 		sizeOff = 48
@@ -2252,6 +2277,27 @@ func (p *PosixPAL) emitSigsegvAddrHandler(
 
 	hEntry := handlerFn.NewBlock(".entry")
 
+	// Debug builds: a fault raised while pal_free was reading a block's header
+	// means the block is no longer mapped — the allocator already handed it back
+	// to the OS, so this is a double free (or a wildly bad pointer), not an
+	// ordinary segfault. Report it as such and exit 134 like the other allocator
+	// aborts, instead of printing an unmapped address and exiting 2. Without
+	// this, musl (the default Linux target, and the only allocator here that
+	// unmaps a slot group as soon as it empties) dies silently where macOS and
+	// glibc print "fatal: double free" — the platform split this closes.
+	if p.DebugAllocator {
+		probe := getOrCreateFreeProbeGlobal(module)
+		probing := hEntry.NewLoad(irtypes.I64, probe)
+		isProbing := hEntry.NewICmp(enum.IPredNE, probing, constant.NewInt(irtypes.I64, 0))
+		doubleFreeBlk := handlerFn.NewBlock(".dbg.double_free_unmapped")
+		segvBlk := handlerFn.NewBlock(".segv")
+		hEntry.NewCondBr(isProbing, doubleFreeBlk, segvBlk)
+
+		emitDebugAbortCallLibc(module, doubleFreeBlk, "double_free_unmapped",
+			"fatal: double free or invalid free (unmapped block)\n", "write", false)
+		hEntry = segvBlk
+	}
+
 	// Allocate 48-byte message buffer on stack
 	const msgLen = 48
 	bufTy := irtypes.NewArray(msgLen, irtypes.I8)
@@ -2307,11 +2353,19 @@ func (p *PosixPAL) emitSigsegvAddrHandler(
 }
 
 // emitLinuxStackOverflowInit emits sigaction(SIGSEGV, SA_SIGINFO) setup for Linux.
-// Uses byte-array struct construction to handle the sigaction struct layout
-// difference between glibc and musl:
+// Uses byte-array struct construction rather than a typed struct so the layout
+// is stated explicitly:
 //
-//	glibc: {handler(8), sa_mask(128), sa_flags(4), pad(4), sa_restorer(8)} = 152 bytes
-//	musl:  {handler(8), sa_mask(16),  sa_flags(4), pad(4), sa_restorer(8)} = 40 bytes
+//	{handler(8), sa_mask(128), sa_flags(4), pad(4), sa_restorer(8)} = 152 bytes
+//
+// This is identical in glibc and musl, and on every Linux architecture: both
+// libcs define sigset_t as `unsigned long __bits[128/sizeof(long)]`, i.e. 128
+// bytes regardless of word size. An earlier version of this code assumed musl
+// used a 16-byte mask and wrote sa_flags at offset 24 into a 40-byte struct;
+// sigaction() then read sa_flags from uninitialized stack past the end of that
+// buffer, so SA_SIGINFO was set only by chance and the handler often received a
+// garbage siginfo_t pointer. Linux musl is the default target for `promise
+// build`, so that affected ordinary Linux builds, not just an exotic path.
 //
 // SA_SIGINFO = 4 on Linux (all architectures).
 func (p *PosixPAL) emitLinuxStackOverflowInit(
@@ -2322,17 +2376,8 @@ func (p *PosixPAL) emitLinuxStackOverflowInit(
 		ir.NewParam("act", irtypes.I8Ptr),
 		ir.NewParam("oact", irtypes.I8Ptr))
 
-	// Struct sizes and flag offsets differ between musl and glibc.
-	isMusl := strings.Contains(p.target, "musl")
-	var structSize int64
-	var flagsOffset int64
-	if isMusl {
-		structSize = 40  // {handler(8), mask(16), flags(4), pad(4), restorer(8)}
-		flagsOffset = 24 // after handler(8) + mask(16)
-	} else {
-		structSize = 152  // {handler(8), mask(128), flags(4), pad(4), restorer(8)}
-		flagsOffset = 136 // after handler(8) + mask(128)
-	}
+	const structSize = 152  // {handler(8), mask(128), flags(4), pad(4), restorer(8)}
+	const flagsOffset = 136 // after handler(8) + mask(128)
 
 	// Allocate and zero the sigaction struct on the stack.
 	actArrTy := irtypes.NewArray(uint64(structSize), irtypes.I8)
@@ -3160,12 +3205,29 @@ func emitHtons(block *ir.Block, port value.Value) value.Value {
 // macOS uses kqueue; Linux uses epoll.
 
 // epollEventStructType returns the LLVM struct for Linux's struct epoll_event.
-// C: struct epoll_event { u32 events; epoll_data_t data; } __attribute__((packed))
-// Packed layout: <{ i32, i64 }> = 12 bytes. data holds a pointer via ptrtoint/inttoptr.
-func epollEventStructType() *irtypes.StructType {
+// C: struct epoll_event { u32 events; epoll_data_t data; } __EPOLL_PACKED
+//
+// __EPOLL_PACKED expands to __attribute__((packed)) only under `#ifdef
+// __x86_64__` — in glibc and in musl alike. So the layout is arch-dependent:
+//
+//	x86_64:  <{ i32, i64 }> — data at offset 4,  sizeof = 12
+//	aarch64:  { i32, i64 }  — data at offset 8,  sizeof = 16
+//
+// Getting this wrong is silent: epoll_ctl() stores the userdata pointer where
+// the kernel does not look, so epoll_wait() hands back a null pointer that the
+// reactor then dereferences. data holds a pointer via ptrtoint/inttoptr.
+func (p *PosixPAL) epollEventStructType() *irtypes.StructType {
 	ty := irtypes.NewStruct(irtypes.I32, irtypes.I64)
-	ty.Packed = true
+	ty.Packed = !p.isARM64()
 	return ty
+}
+
+// epollEventSize returns sizeof(struct epoll_event) for the target.
+func (p *PosixPAL) epollEventSize() int64 {
+	if p.isARM64() {
+		return 16
+	}
+	return 12
 }
 
 // EmitReactorCreate defines @pal_reactor_create() → i32 (fd or -errno).
@@ -3301,10 +3363,10 @@ func (p *PosixPAL) emitKqueueAdd(module *ir.Module, fn *ir.Func, entry *ir.Block
 
 // emitEpollAdd emits the body for pal_reactor_add on Linux using epoll_ctl().
 func (p *PosixPAL) emitEpollAdd(module *ir.Module, fn *ir.Func, entry *ir.Block) {
-	// struct epoll_event { u32 events; epoll_data_t data; } __attribute__((packed))
 	// epoll_data_t is a union (8 bytes) — we use the ptr field via ptrtoint/inttoptr.
-	// Packed layout: {i32 events, i64 data} = 12 bytes (no padding between fields).
-	epollEventType := epollEventStructType()
+	// The struct is packed only on x86_64 (see epollEventStructType); the field-1
+	// GEP below picks up the right offset either way.
+	epollEventType := p.epollEventStructType()
 
 	epollCtlFn := getOrDeclareFunc(module, "epoll_ctl", irtypes.I32,
 		ir.NewParam("epfd", irtypes.I32),
@@ -3422,7 +3484,7 @@ func (p *PosixPAL) emitKqueueRemove(module *ir.Module, fn *ir.Func, entry *ir.Bl
 }
 
 func (p *PosixPAL) emitEpollRemove(module *ir.Module, fn *ir.Func, entry *ir.Block) {
-	epollEventType := epollEventStructType()
+	epollEventType := p.epollEventStructType()
 	epollCtlFn := getOrDeclareFunc(module, "epoll_ctl", irtypes.I32,
 		ir.NewParam("epfd", irtypes.I32),
 		ir.NewParam("op", irtypes.I32),
@@ -3577,16 +3639,17 @@ func (p *PosixPAL) emitKqueuePoll(module *ir.Module, fn *ir.Func, entry *ir.Bloc
 }
 
 func (p *PosixPAL) emitEpollPoll(module *ir.Module, fn *ir.Func, entry *ir.Block) {
-	epollEventType := epollEventStructType()
+	epollEventType := p.epollEventStructType()
 	epollWaitFn := getOrDeclareFunc(module, "epoll_wait", irtypes.I32,
 		ir.NewParam("epfd", irtypes.I32),
 		ir.NewParam("events", irtypes.NewPointer(epollEventType)),
 		ir.NewParam("maxevents", irtypes.I32),
 		ir.NewParam("timeout", irtypes.I32))
 
-	// Stack-allocate epoll_event array: max_events * 12 bytes (packed struct).
+	// Stack-allocate epoll_event array: max_events * sizeof(struct epoll_event)
+	// (12 packed on x86_64, 16 aligned on aarch64 — see epollEventStructType).
 	// Uses alloca instead of palAlloc — same rationale as kqueue path (B0326).
-	evSize := constant.NewInt(irtypes.I64, 12) // sizeof(struct epoll_event) = 12 (packed)
+	evSize := constant.NewInt(irtypes.I64, p.epollEventSize())
 	maxI64 := entry.NewZExt(fn.Params[2], irtypes.I64)
 	bufSize := entry.NewMul(maxI64, evSize)
 	rawBuf := entry.NewAlloca(irtypes.I8)
@@ -3616,7 +3679,7 @@ func (p *PosixPAL) emitEpollPoll(module *ir.Module, fn *ir.Func, entry *ir.Block
 	cmp := loopCond.NewICmp(enum.IPredSLT, i, count)
 	loopCond.NewCondBr(cmp, loopBody, loopEnd)
 
-	// Read epoll_event[i] — packed struct <{ i32 events, i64 data }>
+	// Read epoll_event[i] — { i32 events, i64 data }, packed only on x86_64
 	eev := loopBody.NewGetElementPtr(epollEventType, epollBuf, i)
 	eevEventsPtr := loopBody.NewGetElementPtr(epollEventType, eev, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	eevEvents := loopBody.NewLoad(irtypes.I32, eevEventsPtr)

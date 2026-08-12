@@ -2057,6 +2057,50 @@ func TestFileStatPosix(t *testing.T) {
 	assertContains(t, out, "select i1", "file type select chain")
 }
 
+// TestFileStatPosixOffsets pins the per-platform struct stat byte offsets that
+// pal_file_stat GEPs into. Linux/aarch64 orders st_mode before st_nlink (both
+// 32-bit), while Linux/x86_64 has a 64-bit st_nlink first — so st_mode, st_uid
+// and st_gid all move. Reading x86_64 offsets on aarch64 yields a mode of 0,
+// which silently breaks is_file/is_directory/is_executable rather than erroring.
+func TestFileStatPosixOffsets(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		// mode, uid, gid, size — the offsets that differ across platforms.
+		want []string
+	}{
+		{"linux-x86_64", "x86_64-unknown-linux-musl", []string{
+			"getelementptr i8, i8* %1, i64 24", // st_mode (i32)
+			"getelementptr i8, i8* %1, i64 28", // st_uid
+			"getelementptr i8, i8* %1, i64 32", // st_gid
+			"getelementptr i8, i8* %1, i64 48", // st_size
+		}},
+		{"linux-aarch64", "aarch64-unknown-linux-musl", []string{
+			"getelementptr i8, i8* %1, i64 16", // st_mode (i32)
+			"getelementptr i8, i8* %1, i64 24", // st_uid
+			"getelementptr i8, i8* %1, i64 28", // st_gid
+			"getelementptr i8, i8* %1, i64 48", // st_size
+		}},
+		{"macOS", "aarch64-apple-darwin", []string{
+			"getelementptr i8, i8* %1, i64 4",  // st_mode (i16)
+			"getelementptr i8, i8* %1, i64 16", // st_uid
+			"getelementptr i8, i8* %1, i64 20", // st_gid
+			"getelementptr i8, i8* %1, i64 96", // st_size
+			"getelementptr i8, i8* %1, i64 80", // st_birthtimespec
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := &PosixPAL{target: tc.target}
+			p.EmitFileStat(module)
+			out := module.String()
+			for _, want := range tc.want {
+				assertContains(t, out, want, "struct stat field offset")
+			}
+		})
+	}
+}
+
 func TestFileStatWindows(t *testing.T) {
 	module := ir.NewModule()
 	p := &WindowsPAL{}
@@ -2509,36 +2553,74 @@ func TestLinuxStackOverflowUsesSigaction(t *testing.T) {
 	}
 }
 
-func TestLinuxStackOverflowGlibcLayout(t *testing.T) {
-	// Glibc sigaction struct: 152 bytes, flags at offset 136
-	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-gnu"})
-	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitWrite(module)
-	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitStackOverflowInit(module)
+// TestLinuxStackOverflowSigactionLayout pins the struct sigaction layout used to
+// register the SIGSEGV handler. glibc and musl agree here: both define sigset_t
+// as `unsigned long __bits[128/sizeof(long)]` — 128 bytes regardless of word
+// size — so the struct is 152 bytes with sa_flags at offset 136 on every Linux
+// architecture.
+//
+// The flags offset is the load-bearing half. This code previously used a
+// 40-byte struct with sa_flags at offset 24 for musl, so sigaction() read
+// sa_flags from uninitialized stack past the end of the buffer: SA_SIGINFO was
+// set only by chance, and when it was not, the handler ran as a plain
+// sa_handler and read si_addr out of a garbage pointer. Linux musl is the
+// default target for `promise build`, so this affected ordinary Linux builds.
+// Asserting only the struct size would not have caught it — assert the offset.
+// TestDebugFreeProbeGuard pins the thread-local guard that lets the SIGSEGV
+// handler report an unmapped-header fault in pal_free as a double free rather
+// than a bare segfault.
+//
+// The end-to-end proof is TestRuntimeDoubleFreeUnmappedAborts in cmd/promise,
+// but that only runs on POSIX hosts; this shape test runs everywhere and covers
+// the three pieces that must line up: the guard is raised and cleared around
+// the header loads, the handler branches on it, and it is thread-local (the
+// scheduler faults on whichever M happened to be running).
+func TestDebugFreeProbeGuard(t *testing.T) {
+	p := &PosixPAL{target: "x86_64-unknown-linux-musl", DebugAllocator: true}
+	module := newModuleWithAlloc(p)
+	p.EmitFree(module)
+	p.EmitStackOverflowInit(module)
 	out := module.String()
 
-	// Glibc: 152-byte struct alloca
-	if !strings.Contains(out, "[152 x i8]") {
-		t.Error("glibc sigaction struct should be 152 bytes")
-	}
-	// memset to zero the struct
-	if !strings.Contains(out, "call i8* @memset(") {
-		t.Error("should memset the sigaction struct to zero")
+	assertContains(t, out, "@__promise_dbg_free_probe = thread_local(initialexec) global i64 0",
+		"guard is a thread-local global")
+	assertContains(t, out, "store i64 0, i64* @__promise_dbg_free_probe",
+		"guard is cleared once the header loads survive")
+	assertContains(t, out, "load i64, i64* @__promise_dbg_free_probe",
+		"handler reads the guard")
+	assertContains(t, out, "label %.dbg.double_free_unmapped",
+		"handler branches to the double-free report")
+	assertContains(t, out, "fatal: double free or invalid free (unmapped block)",
+		"double-free message names the cause")
+
+	// Release builds must not pay for any of this.
+	rel := &PosixPAL{target: "x86_64-unknown-linux-musl"}
+	relModule := newModuleWithAlloc(rel)
+	rel.EmitFree(relModule)
+	rel.EmitStackOverflowInit(relModule)
+	if strings.Contains(relModule.String(), "__promise_dbg_free_probe") {
+		t.Error("free probe guard must be debug-allocator only")
 	}
 }
 
-func TestLinuxStackOverflowMuslLayout(t *testing.T) {
-	// Musl sigaction struct: 40 bytes, flags at offset 24
-	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-musl"})
-	(&PosixPAL{target: "x86_64-unknown-linux-musl"}).EmitWrite(module)
-	(&PosixPAL{target: "x86_64-unknown-linux-musl"}).EmitStackOverflowInit(module)
-	out := module.String()
+func TestLinuxStackOverflowSigactionLayout(t *testing.T) {
+	for _, target := range []string{
+		"x86_64-unknown-linux-gnu",
+		"x86_64-unknown-linux-musl",
+		"aarch64-unknown-linux-musl",
+	} {
+		t.Run(target, func(t *testing.T) {
+			p := &PosixPAL{target: target}
+			module := newModuleWithAlloc(p)
+			p.EmitWrite(module)
+			p.EmitStackOverflowInit(module)
+			out := module.String()
 
-	// Musl: 40-byte struct alloca
-	if !strings.Contains(out, "[40 x i8]") {
-		t.Error("musl sigaction struct should be 40 bytes")
-	}
-	if !strings.Contains(out, "call i32 @sigaction(i32 11,") {
-		t.Error("musl should also use sigaction for SIGSEGV")
+			assertContains(t, out, "alloca [152 x i8]", "sigaction struct is 152 bytes")
+			assertContains(t, out, "@memset(i8* %1, i32 0, i64 152)", "zeroes all 152 bytes")
+			assertContains(t, out, "getelementptr i8, i8* %1, i64 136", "sa_flags at offset 136")
+			assertContains(t, out, "call i32 @sigaction(i32 11,", "registers a SIGSEGV handler")
+		})
 	}
 }
 
@@ -4327,6 +4409,46 @@ func TestReactorPollPosix(t *testing.T) {
 			if strings.Contains(out, "call noalias i8* @pal_alloc(") {
 				t.Error("B0326: pal_reactor_poll must not heap-allocate syscall buffer — use alloca instead")
 			}
+		})
+	}
+}
+
+// TestReactorEpollEventLayout pins the arch-dependent layout of struct
+// epoll_event. glibc and musl both apply __attribute__((packed)) under
+// `#ifdef __x86_64__` only, so on aarch64 the union sits at offset 8 and the
+// struct is 16 bytes. Emitting the packed layout there makes epoll_ctl store
+// the userdata pointer where the kernel never looks, epoll_wait returns null,
+// and the reactor segfaults dereferencing it.
+func TestReactorEpollEventLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		target   string
+		typeStr  string
+		sizeStr  string
+		wantSize int64
+	}{
+		{"x86_64", "x86_64-unknown-linux-musl", "<{ i32, i64 }>", "mul i64 %0, 12", 12},
+		{"aarch64", "aarch64-unknown-linux-musl", "{ i32, i64 }", "mul i64 %0, 16", 16},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PosixPAL{target: tc.target}
+			if got := p.epollEventSize(); got != tc.wantSize {
+				t.Errorf("epollEventSize() = %d, want %d", got, tc.wantSize)
+			}
+			if got := p.epollEventStructType().String(); got != tc.typeStr {
+				t.Errorf("epollEventStructType() = %s, want %s", got, tc.typeStr)
+			}
+
+			module := newModuleWithAlloc(p)
+			p.EmitReactorAdd(module)
+			p.EmitReactorPoll(module)
+			out := module.String()
+
+			assertContains(t, out, "declare i32 @epoll_ctl(i32 %epfd, i32 %op, i32 %fd, "+tc.typeStr+"* %event)",
+				"epoll_ctl takes the target's epoll_event layout")
+			assertContains(t, out, "declare i32 @epoll_wait(i32 %epfd, "+tc.typeStr+"* %events,",
+				"epoll_wait takes the target's epoll_event layout")
+			assertContains(t, out, tc.sizeStr, "epoll_wait buffer sized for the target's epoll_event")
 		})
 	}
 }

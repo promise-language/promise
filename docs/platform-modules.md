@@ -635,6 +635,7 @@ pal_errno() i32                                       // current thread-local er
 **Design decisions:**
 - `pal_file_open` takes a mode enum (not raw O_* flags) — the PAL maps to platform-specific constants internally. This avoids leaking POSIX vs Windows flag differences.
 - `pal_file_stat_size` uses open+lseek(SEEK_END)+close instead of `stat()` — avoids `struct stat` layout differences between macOS and Linux.
+- `pal_file_stat` (D0012) cannot dodge that and GEPs into `struct stat` by byte offset, so it carries a table per platform **and per architecture**: Linux/aarch64 declares a 32-bit `st_mode` before `st_nlink`, where Linux/x86_64 has a 64-bit `st_nlink` first, moving `st_mode`/`st_uid`/`st_gid`. Darwin shares one layout across arches. A wrong table reads zeros rather than failing, so the offsets are pinned by `TestFileStatPosixOffsets`.
 - POSIX `pal_dir_exists` uses opendir/closedir instead of `stat()` for the same reason.
 - Windows uses UCRT POSIX wrappers (`_open`, `_read`, etc.) with `_O_BINARY` always set. `pal_dir_exists` uses `GetFileAttributesA` since UCRT has no `opendir`.
 - WASM stubs return -1 (error) or 0 (not found) for all file ops — no filesystem access yet.

@@ -307,6 +307,39 @@ func getOrCreateAllocCountGlobal(module *ir.Module) *ir.Global {
 	return g
 }
 
+// getOrCreateFreeProbeGlobal returns the thread-local guard the debug allocator
+// raises while it reads the 16-byte header sitting beside a block it is about
+// to free.
+//
+// That read is the only part of pal_free that can touch memory the process no
+// longer owns. musl's mallocng returns a slot group to the OS the moment every
+// slot in it is free, so double-freeing the last live block of a group faults
+// on an unmapped page — and musl's own free() path for a bad pointer is a bare
+// a_crash() with no message. Either way Linux died silently where macOS and
+// glibc printed a diagnostic, which is exactly the platform split that makes a
+// double free look like "works on Linux, crashes on Mac".
+//
+// The guard closes that gap: pal_free stores the user pointer here before the
+// header loads and zeroes it immediately after, so @__promise_sigsegv_handler
+// can tell "we faulted reading a freed block's header" (report a double free,
+// exit 134) from any other segfault (report the fault address, exit 2). It is
+// thread-local because the scheduler runs many Ms concurrently, and initialexec
+// so the access is a plain register-relative load — async-signal-safe, with no
+// lazy allocation on the signal path.
+func getOrCreateFreeProbeGlobal(module *ir.Module) *ir.Global {
+	for _, g := range module.Globals {
+		if g.Name() == freeProbeGlobalName {
+			return g
+		}
+	}
+	g := module.NewGlobal(freeProbeGlobalName, irtypes.I64)
+	g.Init = constant.NewInt(irtypes.I64, 0)
+	g.TLSModel = enum.TLSModelInitialExec
+	return g
+}
+
+const freeProbeGlobalName = "__promise_dbg_free_probe"
+
 // Memory limit accounting (T0689).
 //
 // When MemoryLimitAccounting is enabled (used by test binaries with -memory-limit > 0),
@@ -636,18 +669,38 @@ func emitDebugAbortCallLibc(module *ir.Module, blk *ir.Block, key, msg, writeNam
 //
 // Three abort blocks are emitted for double-free / bad-magic / tail-corruption
 // paths, each using emitDebugAbortCallLibc with platform-specific write fn.
+//
+// probeGuard raises the thread-local guard (see getOrCreateFreeProbeGlobal)
+// across the two header loads, so that if the header is unmapped — a double
+// free whose block the allocator already returned to the OS — the resulting
+// SIGSEGV is reported as a double free rather than as a bare segfault. Set on
+// POSIX, where a signal handler is installed to read it.
 func emitHeaderValidationLibc(
 	module *ir.Module,
 	fn *ir.Func, blk *ir.Block, userPtr value.Value,
-	writeName string, writeReturnsI32 bool,
+	writeName string, writeReturnsI32 bool, probeGuard bool,
 ) (sizeVal value.Value, headerPtr value.Value, validatedBlk *ir.Block) {
 	negHeader := constant.NewInt(irtypes.I64, -debugHeaderSize)
 	hdrPtr := blk.NewGetElementPtr(irtypes.I8, userPtr, negHeader)
+
+	// Raise the guard before the loads below — they are the only reads in
+	// pal_free that can touch memory the process no longer owns.
+	var probe *ir.Global
+	if probeGuard {
+		probe = getOrCreateFreeProbeGlobal(module)
+		blk.NewStore(blk.NewPtrToInt(userPtr, irtypes.I64), probe)
+	}
 
 	magicSlot := blk.NewBitCast(hdrPtr, irtypes.NewPointer(irtypes.I64))
 	magic := blk.NewLoad(irtypes.I64, magicSlot)
 	sizeFieldPtr := blk.NewGetElementPtr(irtypes.I64, magicSlot, constant.NewInt(irtypes.I64, 1))
 	sizeOrFreedTag := blk.NewLoad(irtypes.I64, sizeFieldPtr)
+
+	// Survived the loads — the header was mapped, so any later fault in this
+	// thread is unrelated and must report normally.
+	if probeGuard {
+		blk.NewStore(constant.NewInt(irtypes.I64, 0), probe)
+	}
 
 	freedMagic := constant.NewInt(irtypes.I64, debugMagicFreed)
 	aliveMagic := constant.NewInt(irtypes.I64, debugMagicAlive)
@@ -791,7 +844,7 @@ func emitLibcAllocDebug(module *ir.Module, memoryLimitAccounting bool, writeName
 // When memoryLimitAccounting is true (T0689), atomically subtracts the validated
 // requested_size from @__promise_memory_used_bytes so per-test alloc/free churn
 // under a tight limit doesn't trip.
-func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool, memoryLimitAccounting bool) *ir.Func {
+func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool, memoryLimitAccounting, probeGuard bool) *ir.Func {
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
@@ -815,7 +868,7 @@ func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool
 	entry.NewCondBr(nonnull, checkBlk, doneBlk)
 
 	size, hdrPtr, validated := emitHeaderValidationLibc(module, fn, checkBlk, fn.Params[0],
-		writeName, writeReturnsI32)
+		writeName, writeReturnsI32, probeGuard)
 
 	// Poison user region with 0xDE (using stored requested_size — exact bound).
 	validated.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size)
@@ -913,7 +966,7 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 //
 // When memoryLimitAccounting is true (T0689), adjusts @__promise_memory_used_bytes
 // by (new_size - old_size) and checks the limit when growing.
-func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 bool, memoryLimitAccounting bool) *ir.Func {
+func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 bool, memoryLimitAccounting, probeGuard bool) *ir.Func {
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	reallocSz := ir.NewParam("size", irtypes.I64)
@@ -964,7 +1017,7 @@ func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 b
 	// Case 3: resize. Validate the old header, then realloc(header_ptr, n + 24)
 	// and reconstruct header + tail.
 	oldSize, hdrPtr, validatedBlk := emitHeaderValidationLibc(module, fn, resizeBlk, fn.Params[0],
-		writeName, writeReturnsI32)
+		writeName, writeReturnsI32, probeGuard)
 
 	newTotal := validatedBlk.NewAdd(fn.Params[1], constant.NewInt(irtypes.I64, debugSlackSize))
 	newInternal := validatedBlk.NewCall(reallocFn, hdrPtr, newTotal)

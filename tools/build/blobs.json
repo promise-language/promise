@@ -132,6 +132,70 @@
     {
       "dependency": "llvm",
       "version": "22.1.0",
+      "target": "linux-arm64",
+      "name": "llc",
+      "sha256": "129d7200b98f6ab79fee8892ca7861eb67c6d1d3557076f6f41cef637a3ae8ba",
+      "size": 172392816,
+      "compression": "brotli",
+      "compressed_size": 32443028,
+      "compressed_sha256": "7bc84b848622e4f116d324377d48afb124d1332b0dce30267b1d93d4347757cc",
+      "source": {
+        "archive_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-ARM64.tar.xz",
+        "archive_sha256": "e3b4205fe45d5561dec9d46465873a79c26b25b028b310515b38c34f668c6aec",
+        "member": "bin/llc"
+      }
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-arm64",
+      "name": "lld",
+      "sha256": "0ede75a20f2964732e3ac43677517d8bab5840eb29fe1a03a378eafcf0a45106",
+      "size": 193045504,
+      "compression": "brotli",
+      "compressed_size": 36633895,
+      "compressed_sha256": "3f70e3997b4d833e12837602abae54c450849f17382efd3f6880d86d400c9a06",
+      "source": {
+        "archive_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-ARM64.tar.xz",
+        "archive_sha256": "e3b4205fe45d5561dec9d46465873a79c26b25b028b310515b38c34f668c6aec",
+        "member": "bin/lld"
+      }
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-arm64",
+      "name": "llvm-dlltool",
+      "sha256": "60cfd87058663a1b4ec8531b0e9e115905dde9143e3bda23260aff1164da1522",
+      "size": 48025176,
+      "compression": "brotli",
+      "compressed_size": 6639683,
+      "compressed_sha256": "209e7ed53296838a8df82f2ade57e6be1a2615df78222b8c765476df9e430478",
+      "source": {
+        "archive_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-ARM64.tar.xz",
+        "archive_sha256": "e3b4205fe45d5561dec9d46465873a79c26b25b028b310515b38c34f668c6aec",
+        "member": "bin/llvm-dlltool"
+      }
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-arm64",
+      "name": "opt",
+      "sha256": "7e3d4bbfb0aff020e591bda50b769277c751c622347660b5bda504422c388ead",
+      "size": 182313448,
+      "compression": "brotli",
+      "compressed_size": 34327709,
+      "compressed_sha256": "c5d0db21d69c98c3e5db4c31eb269a327b6d92cfa95ff3a05607038d2e3bc545",
+      "source": {
+        "archive_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-ARM64.tar.xz",
+        "archive_sha256": "e3b4205fe45d5561dec9d46465873a79c26b25b028b310515b38c34f668c6aec",
+        "member": "bin/opt"
+      }
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
       "target": "windows-amd64",
       "name": "llc.exe",
       "sha256": "9b103980a0cd3ac543827c25017ebd5e88b00c2a0801253d60ee4815a37afb28",
@@ -191,6 +255,134 @@
         "archive_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz",
         "archive_sha256": "2dd6a6c990865f98766dec58cce1cbfba48e5affc0098e5b1fff96c2f1d23e81",
         "member": "bin/opt.exe"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-amd64",
+      "name": "crt1.o",
+      "sha256": "4ba4f059d999b47718448a929f60af011dcdf258b153902d0c66b7058e59a645",
+      "size": 5088,
+      "compression": "brotli",
+      "compressed_size": 1788,
+      "compressed_sha256": "f3a994716cdfeea18150a293c88f2c22cbf4b7cc3431c8f6d81e8c9a9178fd0f",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "2ea566b665ebaea4f84cee1e4b7ef093b0aa67356006e84deb26d9bd7a716c6b",
+        "member": "usr/lib/crt1.o"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-amd64",
+      "name": "crti.o",
+      "sha256": "47625ab743667d464ee4b4e159bcfd9d0167846ba075b2d71b6c6ae018c6f203",
+      "size": 2792,
+      "compression": "brotli",
+      "compressed_size": 671,
+      "compressed_sha256": "1eb164ee5de322f236c03c2cb151badb6ae72069e9d51070b7f5e48b90676b00",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "2ea566b665ebaea4f84cee1e4b7ef093b0aa67356006e84deb26d9bd7a716c6b",
+        "member": "usr/lib/crti.o"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-amd64",
+      "name": "crtn.o",
+      "sha256": "17933b2225cadc3dc0034099fbc78b109c69e3c7697a5af251d2b074912deb9b",
+      "size": 2736,
+      "compression": "brotli",
+      "compressed_size": 667,
+      "compressed_sha256": "b806f1cc41889d619df869383dac2694954207a7d3b8a7e310f8b1a2fc9b5598",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "2ea566b665ebaea4f84cee1e4b7ef093b0aa67356006e84deb26d9bd7a716c6b",
+        "member": "usr/lib/crtn.o"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-amd64",
+      "name": "libc.a",
+      "sha256": "1e166797caa732280c64b4dd5d869656ce970c16cc3b3c60be93ff11fb1c07e4",
+      "size": 9376178,
+      "compression": "brotli",
+      "compressed_size": 2506400,
+      "compressed_sha256": "efac3556fc0553fb7a8df71841a9e3a7ca46269a3445f6f28882a2ac71135f4b",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "2ea566b665ebaea4f84cee1e4b7ef093b0aa67356006e84deb26d9bd7a716c6b",
+        "member": "usr/lib/libc.a"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-arm64",
+      "name": "crt1.o",
+      "sha256": "f22a6bb060283ea97c5d5ea458f307e7ebfbfd9033abaf113b03bf5ac7b8e75e",
+      "size": 5672,
+      "compression": "brotli",
+      "compressed_size": 1555,
+      "compressed_sha256": "5b08507ff1c87b3af34a9d2bd4105e7da9d7d3a622d9c5d62777fda7119dc6ae",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "19032a762b8c6967d3789de1bf540754a0121e517402022eebd3ae6f1c9965a4",
+        "member": "usr/lib/crt1.o"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-arm64",
+      "name": "crti.o",
+      "sha256": "813ffad772970da3e872c4ea4bac428a9572b8d2acceac6e4212259494529afe",
+      "size": 2872,
+      "compression": "brotli",
+      "compressed_size": 617,
+      "compressed_sha256": "c48f83e27e576c5b4297c7769c92ae095ba72ff6427cce2938f177f4580a2d23",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "19032a762b8c6967d3789de1bf540754a0121e517402022eebd3ae6f1c9965a4",
+        "member": "usr/lib/crti.o"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-arm64",
+      "name": "crtn.o",
+      "sha256": "93a9a7b007a929ddc9d190c08d82716c399da5dc1cc7ddbed0d786b1c27538b1",
+      "size": 2816,
+      "compression": "brotli",
+      "compressed_size": 604,
+      "compressed_sha256": "c5daef98d535a962dbb3a4c948dad7a0d9ec3b4926cc96f5d06bf877feef9d58",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "19032a762b8c6967d3789de1bf540754a0121e517402022eebd3ae6f1c9965a4",
+        "member": "usr/lib/crtn.o"
+      }
+    },
+    {
+      "dependency": "musl",
+      "version": "1.2.5-r23",
+      "target": "linux-arm64",
+      "name": "libc.a",
+      "sha256": "ec4c125e74bf6d9e9050d6555f3c90204ed117693b4065801b5a1ba2d408cabd",
+      "size": 11141330,
+      "compression": "brotli",
+      "compressed_size": 1504498,
+      "compressed_sha256": "1fa19e4a48284bc208e63d02821fd51adef8f4b11f926eaa20ec1fd992245b74",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-dev-1.2.5-r23.apk",
+        "archive_sha256": "19032a762b8c6967d3789de1bf540754a0121e517402022eebd3ae6f1c9965a4",
+        "member": "usr/lib/libc.a"
       }
     }
   ]

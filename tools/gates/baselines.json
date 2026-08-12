@@ -210,6 +210,26 @@
       "updated": "2026-06-03"
     }
   },
+  "linux-arm64": {
+    "host_leak_count": {
+      "type": "informational"
+    },
+    "host_test_count": {
+      "type": "informational"
+    },
+    "host_test_failures": {
+      "type": "informational"
+    },
+    "wasm_leak_count": {
+      "type": "informational"
+    },
+    "wasm_test_count": {
+      "type": "informational"
+    },
+    "wasm_test_failures": {
+      "type": "informational"
+    }
+  },
   "windows-amd64": {
     "host_excluded_count": {
       "type": "informational"

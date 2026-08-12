@@ -1,0 +1,52 @@
+{
+  "name": "Promise",
+
+  // Debian bookworm (glibc 2.36). glibc is a hard requirement, not a
+  // preference: `bin/build` and `promise build` both run the pinned upstream
+  // LLVM prebuilts (opt/llc/lld), which are dynamically linked against
+  // ld-linux / libc.so.6 / libstdc++.so.6. A musl image (Alpine) cannot exec
+  // them — FindLLVM probes for exactly that and fails the build with an
+  // explanation rather than shipping a compiler that dies at the first `opt`.
+  //
+  // Tag is the rolling Go 1.x. compiler/go.mod requires go 1.25.6; with the
+  // default GOTOOLCHAIN=auto, Go fetches that exact toolchain on demand, so the
+  // image's Go minor version does not have to match. Pin to e.g.
+  // "go:1.25-bookworm" if you want the image to carry it directly.
+  "image": "mcr.microsoft.com/devcontainers/go:1-bookworm",
+
+  "features": {
+    // `bin/build` self-fetches the pinned LLVM + musl CRT blobs via
+    // `gh release download` from the deps-* releases.
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // Only needed for `bin/test --wasm-web` (Node harness) and `npx wrangler`
+    // during releases. Drop this feature if you use neither.
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+
+  // NOT required to build or test:
+  //   - musl-dev  — the static-link CRT is a fetched prebuilt (T0530)
+  //   - llvm/lld  — fetched as pinned slim blobs by bin/build
+  //   - java/antlr — the generated parser is committed
+  // This mirrors .github/workflows/ci.yml, which installs none of them either.
+
+  "onCreateCommand": "bash .devcontainer/setup.sh",
+
+  // ./make bootstraps bin/ (gitignored) and bakes the repo root into each tool,
+  // so it must run in the final workspace path. Tools refuse to run stale.
+  "postCreateCommand": "./make",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go"],
+      "settings": {
+        "go.toolsManagement.autoUpdate": false
+      }
+    }
+  },
+
+  // The LLVM slim blobs extract to roughly a gigabyte in the build cache
+  // (.promise-home/ inside the workspace). Give Docker Desktop enough disk.
+  "hostRequirements": {
+    "storage": "16gb"
+  }
+}

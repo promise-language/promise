@@ -250,7 +250,10 @@ func TestBuildWindowsLinkArgs(t *testing.T) {
 	t.Setenv("PROMISE_HOME", tmp)
 
 	objs := []string{"a.obj", "b.obj"}
-	args := buildWindowsLinkArgs("x86_64-pc-windows-msvc", objs, "out.exe")
+	args, err := buildWindowsLinkArgs("x86_64-pc-windows-msvc", objs, "out.exe")
+	if err != nil {
+		t.Fatalf("buildWindowsLinkArgs: %v", err)
+	}
 
 	joined := strings.Join(args, " ")
 	// Zero-dep entry point replaces the MSVC CRT's mainCRTStartup.

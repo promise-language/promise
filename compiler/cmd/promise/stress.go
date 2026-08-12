@@ -209,7 +209,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 			result.SetTestMemoryLimits(testMemoryLimits)
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
-			compileAndLink(result, tmp.Name(), target, f, false)
+			exitOnCompileError(compileAndLink(result, tmp.Name(), target, f, false))
 			tempFiles = append(tempFiles, tmp.Name())
 			var testNames []string
 			for _, t := range info.Tests {
@@ -286,7 +286,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				continue
 			}
 			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{DebugAllocator: true})
-			compileAndLink(result, tmp.Name(), target, f, false)
+			exitOnCompileError(compileAndLink(result, tmp.Name(), target, f, false))
 			tempFiles = append(tempFiles, tmp.Name())
 
 			// Save to cache.
@@ -318,7 +318,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 			result.SetTestMemoryLimits(testMemoryLimits)
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
-			compileAndLink(result, tmp.Name(), target, f, false)
+			exitOnCompileError(compileAndLink(result, tmp.Name(), target, f, false))
 			tempFiles = append(tempFiles, tmp.Name())
 
 			var testNames []string

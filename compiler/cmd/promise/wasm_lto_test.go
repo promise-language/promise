@@ -11,7 +11,10 @@ import (
 // late LTO pass. Keeping this test ensures we don't accidentally regress to
 // --lto-O2 (which restores the original miscompile).
 func TestWasmLinkUsesLtoO1(t *testing.T) {
-	args := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true /* useLTO */)
+	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true /* useLTO */)
+	if err != nil {
+		t.Fatalf("buildWasmLinkArgs: %v", err)
+	}
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--lto-O2") {
 		t.Errorf("WASM link uses --lto-O2 which miscompiles icmp samesign (T0333). Args: %v", args)
@@ -25,7 +28,10 @@ func TestWasmLinkUsesLtoO1(t *testing.T) {
 // embedded math runtime (wasm_math.o). T0333: --lto-O1 doesn't constant-fold
 // sin/cos/etc., so unresolved libcall imports would appear without this object.
 func TestWasmLinkIncludesMathRuntime(t *testing.T) {
-	args := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true)
+	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true)
+	if err != nil {
+		t.Fatalf("buildWasmLinkArgs: %v", err)
+	}
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "wasm_math.o") {
 		t.Errorf("WASM link does not include wasm_math.o (T0333). Args: %v", args)
@@ -38,7 +44,10 @@ func TestWasmLinkIncludesMathRuntime(t *testing.T) {
 // TestWasmLinkNonLTOUsesGcSections verifies the non-LTO path uses --gc-sections
 // for DCE on object files. Sanity check on the alternative branch.
 func TestWasmLinkNonLTOUsesGcSections(t *testing.T) {
-	args := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", false /* useLTO */)
+	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", false /* useLTO */)
+	if err != nil {
+		t.Fatalf("buildWasmLinkArgs: %v", err)
+	}
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--gc-sections") {
 		t.Errorf("non-LTO WASM link does not use --gc-sections. Args: %v", args)
@@ -51,7 +60,10 @@ func TestWasmLinkNonLTOUsesGcSections(t *testing.T) {
 // TestWasmLinkWebTargetExportsInitialize verifies that the wasm32-web target
 // exports _initialize and memory (instead of _start) for browser bootstrapping.
 func TestWasmLinkWebTargetExportsInitialize(t *testing.T) {
-	args := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-web", "out.wasm", true)
+	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-web", "out.wasm", true)
+	if err != nil {
+		t.Fatalf("buildWasmLinkArgs: %v", err)
+	}
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--export=_initialize") {
 		t.Errorf("wasm32-web link does not export _initialize. Args: %v", args)

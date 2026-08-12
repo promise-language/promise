@@ -728,11 +728,17 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	if componentMode {
 		// Component mode: link to a temp core wasm, then wrap with wasm-tools.
 		coreWasm := outputFile + ".core"
-		compileAndLink(result, coreWasm, target, filename, releaseMode)
+		if err := compileAndLink(result, coreWasm, target, filename, releaseMode); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		defer os.Remove(coreWasm)
 		componentWrap(coreWasm, outputFile, adaptPath)
 	} else {
-		compileAndLink(result, outputFile, target, filename, releaseMode)
+		if err := compileAndLink(result, outputFile, target, filename, releaseMode); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 
 	if timePhases {
@@ -1233,7 +1239,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		emitRoster(roster, "batch")
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
-		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
+		binaryPath, regions, err := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
+		exitOnCompileError(err)
 		defer os.Remove(binaryPath)
 		var totalNs int64
 		for _, ns := range testTimeouts {
@@ -1317,7 +1324,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
-	binaryPath := compileTestBinary(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
+	binaryPath, err := compileTestBinary(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
+	exitOnCompileError(err)
 
 	if timePhases {
 		timePhase("total", time.Since(compileStart), "")
@@ -1376,7 +1384,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		emitRoster(roster, "batch")
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
-		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
+		binaryPath, regions, err := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
+		exitOnCompileError(err)
 		defer os.Remove(binaryPath)
 		var totalNs int64
 		for _, ns := range testTimeouts {
@@ -1470,7 +1479,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
-	binaryPath := compileTestBinary(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
+	binaryPath, err := compileTestBinary(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
+	exitOnCompileError(err)
 
 	defer os.Remove(binaryPath)
 	// Process-level timeout: sum of per-test timeouts + 30s buffer.
@@ -1504,11 +1514,25 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	runTestBinary(binaryPath, processTimeout, start, targetTriple, roster)
 }
 
+// exitOnCompileError is the single top-level funnel for a backend compile/link
+// error on the test/exec paths (T1470). The backend now returns errors instead
+// of calling os.Exit(1) deep in the call graph, so its defer-based temp-file
+// cleanup runs before this prints the error and exits non-zero. In a multi-file
+// `promise test` run each file compiles in its own subprocess, so a non-zero
+// exit here surfaces as one "(compilation error)" FAIL for that file (the parent
+// already renders it) without aborting the sibling files.
+func exitOnCompileError(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
 // compileTestBinary runs codegen + link for a test file and returns the binary path.
 // testTimeouts maps test function names to their computed timeout in nanoseconds.
 // testMemoryLimits (nil = no accounting) maps test function names to memory
 // limits in bytes (T0689).
-func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64, testMemoryLimits map[string]int64) string {
+func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64, testMemoryLimits map[string]int64) (string, error) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -1525,12 +1549,14 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-test-*"+ext)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("error creating temp file: %w", err)
 	}
 	tmpOutput.Close()
-	compileAndLink(result, tmpOutput.Name(), target, sourceFile, false) // tests always use debug mode
-	return tmpOutput.Name()
+	if err := compileAndLink(result, tmpOutput.Name(), target, sourceFile, false); err != nil { // tests always use debug mode
+		os.Remove(tmpOutput.Name())
+		return "", err
+	}
+	return tmpOutput.Name(), nil
 }
 
 // childSummaryPattern matches the summary line a test binary prints when it
@@ -1757,7 +1783,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 
 // compileTestBinaryWithCoverage compiles a test binary with coverage instrumentation enabled.
 // Returns the binary path and the coverage region metadata for report formatting.
-func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64, testMemoryLimits map[string]int64) (string, []codegen.CoverageRegion) {
+func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64, testMemoryLimits map[string]int64) (string, []codegen.CoverageRegion, error) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -1773,12 +1799,14 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-test-cov-*"+ext)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", nil, fmt.Errorf("error creating temp file: %w", err)
 	}
 	tmpOutput.Close()
-	compileAndLink(result, tmpOutput.Name(), target, sourceFile, false) // tests always use debug mode
-	return tmpOutput.Name(), result.CoverageRegions
+	if err := compileAndLink(result, tmpOutput.Name(), target, sourceFile, false); err != nil { // tests always use debug mode
+		os.Remove(tmpOutput.Name())
+		return "", nil, err
+	}
+	return tmpOutput.Name(), result.CoverageRegions, nil
 }
 
 // runTestBinaryWithCoverage executes an instrumented test binary, prints test
@@ -2074,7 +2102,12 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target, filename, false) // tests always use debug mode
+	if cerr := compileAndLink(result, tmpOutput.Name(), target, filename, false); cerr != nil { // tests always use debug mode
+		// os.Exit skips the deferred os.Remove above, so drop the (empty/partial)
+		// output binary here to match the compileTestBinary paths (T1470).
+		os.Remove(tmpOutput.Name())
+		exitOnCompileError(cerr)
+	}
 
 	if timePhases && !compileStart.IsZero() {
 		timePhase("total", time.Since(compileStart), "")
@@ -3056,7 +3089,7 @@ func parseMemoryLimitArg(s string) (int64, error) {
 // compileAndLink writes the IR to a temp file and links it into the output binary.
 // On Linux, macOS, and WASM, uses opt + llc + linker pipeline (Phase 7a/7b/7c).
 // On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
-func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) {
+func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) error {
 	// Dump generated LLVM IR to a file for debugging/inspection.
 	// Usage: PROMISE_DUMP_IR=/tmp/out.ll promise build foo.pr
 	if envDump := os.Getenv("PROMISE_DUMP_IR"); envDump != "" {
@@ -3065,29 +3098,26 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 
 	// Separate compilation: split IR into main + per-module .ll files
 	if result.HasModules() && !useClangPipeline(target) {
-		compileAndLinkSeparate(result, outputFile, target, sourceFile, releaseMode)
-		return
+		return compileAndLinkSeparate(result, outputFile, target, sourceFile, releaseMode)
 	}
 
 	// Single-file compilation (no modules or clang fallback)
 	llFile, err := os.CreateTemp("", "promise-*.ll")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error creating temp file: %w", err)
 	}
 	defer os.Remove(llFile.Name())
 
 	if _, err := fmt.Fprint(llFile, result.Module.String()); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
-		os.Exit(1)
+		llFile.Close()
+		return fmt.Errorf("error writing IR: %w", err)
 	}
 	llFile.Close()
 
 	if useClangPipeline(target) {
-		compileAndLinkClang(llFile.Name(), target, outputFile)
-	} else {
-		compileAndLinkLLVM(llFile.Name(), target, outputFile, releaseMode)
+		return compileAndLinkClang(llFile.Name(), target, outputFile)
 	}
+	return compileAndLinkLLVM(llFile.Name(), target, outputFile, releaseMode)
 }
 
 // compileAndLinkSeparate compiles each module to its own .bc/.o file, then links
@@ -3095,14 +3125,16 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 // pipeline (llc → .o → linker with --gc-sections / -dead_strip). Windows uses
 // opt+llc object pipeline (no LTO). Uses content-hash caching: if a module's
 // source hasn't changed, its cached output is reused.
-func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) {
+func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) error {
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
+	// checkLLVMToolVersion still calls os.Exit on a version mismatch: that is an
+	// environment-level fatal (wrong LLVM toolchain), not a temp-file-stranding
+	// backend step, and is explicitly out of scope for T1470.
 	checkLLVMToolVersion(optPath)
 
 	// Release: LTO pipeline (opt -O1 → .bc → linker --lto-O1).
@@ -3118,8 +3150,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	if !useLTO {
 		llcPath, err = findLLVMTool("llc")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error: %w", err)
 		}
 		checkLLVMToolVersion(llcPath)
 	}
@@ -3131,7 +3162,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	modInfos := result.ModuleInfos()
 
 	// compileModule compiles one IR text to bitcode (LTO) or object (debug/Windows).
-	compileModule := func(irText, prefix string) string {
+	compileModule := func(irText, prefix string) (string, error) {
 		if useLTO {
 			return compileLLToBC(irText, prefix, optPath, optLevel)
 		}
@@ -3140,7 +3171,10 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 
 	// Compile main IR (always recompiled — main changes with every build).
 	tOpt := time.Now()
-	mainObj := compileModule(mainIR, "promise-main")
+	mainObj, err := compileModule(mainIR, "promise-main")
+	if err != nil {
+		return err
+	}
 	defer os.Remove(mainObj)
 
 	// Compile each module IR in parallel, with caching.
@@ -3153,6 +3187,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var firstErr error // first backend error across module-compile goroutines (T1470)
 	for modName, modIR := range moduleIRs {
 		wg.Add(1)
 		go func(name, irText string) {
@@ -3187,7 +3222,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			}
 
 			// Cache miss — compile
-			obj := compileModule(irText, "promise-mod-"+name)
+			obj, cerr := compileModule(irText, "promise-mod-"+name)
+			if cerr != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = cerr
+				}
+				mu.Unlock()
+				return
+			}
 
 			// Save to cache
 			if contentCacheKey != "" {
@@ -3215,11 +3258,16 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 	wg.Wait()
 
-	// Clean up non-cached temp files after linking
+	// Clean up non-cached temp files after linking. Register the defers even on
+	// the error path (before returning firstErr) so that any objects that DID
+	// get compiled before a sibling goroutine failed are still removed (T1470).
 	for _, mo := range moduleObjs {
 		if !mo.cached {
 			defer os.Remove(mo.objFile)
 		}
+	}
+	if firstErr != nil {
+		return firstErr
 	}
 
 	// Compile per-instance .bc files (each generic type instantiation gets its own .bc).
@@ -3244,6 +3292,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	var instObjs []instObj
 	var instWg sync.WaitGroup
 	var instMu sync.Mutex
+	var firstInstErr error // first backend error across instance-compile goroutines (T1470)
 
 	// Pre-cached instances: body generation was skipped (CompileWithCache), so they
 	// won't appear in instIRs. Load their .bc directly from the build cache.
@@ -3277,7 +3326,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			}
 
 			// Cache miss — compile
-			obj := compileModule(irText, "promise-inst-"+name)
+			obj, cerr := compileModule(irText, "promise-inst-"+name)
+			if cerr != nil {
+				instMu.Lock()
+				if firstInstErr == nil {
+					firstInstErr = cerr
+				}
+				instMu.Unlock()
+				return
+			}
 
 			if instMeta != nil {
 				_ = module.SaveBuildCache(cacheDir, instMeta.CacheKey, instMeta, obj)
@@ -3293,10 +3350,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	optExtra := fmt.Sprintf("(%d modules, %d instances)", len(moduleIRs), len(instObjs))
 	timePhase("opt", time.Since(tOpt), optExtra)
 
+	// Register instance cleanup defers even on the error path (before returning
+	// firstInstErr) so already-compiled instance objects are removed (T1470).
 	for _, iobj := range instObjs {
 		if !iobj.cached {
 			defer os.Remove(iobj.objFile)
 		}
+	}
+	if firstInstErr != nil {
+		return firstInstErr
 	}
 
 	// Collect all bitcode/object files for linking
@@ -3311,16 +3373,21 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	// Link all files together (release: LTO linkers handle cross-module optimization;
 	// debug: plain linking with --gc-sections for DCE)
 	tLink := time.Now()
+	var linkErr error
 	if isDarwinTarget(target) {
-		linkDarwinMulti(objFiles, target, outputFile, useLTO)
+		linkErr = linkDarwinMulti(objFiles, target, outputFile, useLTO)
 	} else if isWasmTarget(target) {
-		linkWasmMulti(objFiles, target, outputFile, useLTO)
+		linkErr = linkWasmMulti(objFiles, target, outputFile, useLTO)
 	} else if isWindowsTarget(target) {
-		linkWindowsMulti(objFiles, target, outputFile)
+		linkErr = linkWindowsMulti(objFiles, target, outputFile)
 	} else {
-		linkLinuxMulti(objFiles, target, outputFile, useLTO)
+		linkErr = linkLinuxMulti(objFiles, target, outputFile, useLTO)
+	}
+	if linkErr != nil {
+		return linkErr
 	}
 	timePhase("link", time.Since(tLink), "")
+	return nil
 }
 
 // buildInstCacheMetas builds a map from mono instance name (e.g., "Vector[int]")
@@ -3461,24 +3528,27 @@ func sanitizeTempPrefix(prefix string) string {
 }
 
 // compileLLToObj compiles LLVM IR text to an object file via opt + llc.
-func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) string {
+// Returns the object file path on success. On any error path the intermediate
+// .ll/.bc temps and the created .o are removed (via the success-gated defer)
+// before the error is returned, so a failed backend step never strands temps
+// (T1470).
+func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) (string, error) {
 	prefix = sanitizeTempPrefix(prefix)
 	llFile, err := os.CreateTemp("", prefix+"-*.ll")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("error creating temp file: %w", err)
 	}
 	if _, err := fmt.Fprint(llFile, irText); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
-		os.Exit(1)
+		llFile.Close()
+		os.Remove(llFile.Name())
+		return "", fmt.Errorf("error writing IR: %w", err)
 	}
 	llFile.Close()
 	defer os.Remove(llFile.Name())
 
 	bcFile, err := os.CreateTemp("", prefix+"-*.bc")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("error creating temp file: %w", err)
 	}
 	bcFile.Close()
 	defer os.Remove(bcFile.Name())
@@ -3488,17 +3558,24 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
-		os.Exit(1)
+		return "", fmt.Errorf("error running opt on %s: %w", prefix, err)
 	}
 
-	// llc → .o
+	// llc → .o. The .o is handed back on success, so it is cleaned via a
+	// success-gated defer rather than an unconditional one (T1470): the llc
+	// failure path below used to leak this file when it called os.Exit(1).
 	objFile, err := os.CreateTemp("", prefix+"-*.o")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("error creating temp file: %w", err)
 	}
 	objFile.Close()
+	objName := objFile.Name()
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(objName)
+		}
+	}()
 
 	// T1089: debug/object builds don't need optimized machine code. Lower llc to
 	// -O0 (default is -O2) — a 3.6× faster llc with no correctness coupling, since
@@ -3520,46 +3597,57 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error running llc on %s: %v\n", prefix, err)
-		os.Exit(1)
+		return "", fmt.Errorf("error running llc on %s: %w", prefix, err)
 	}
 
-	return objFile.Name()
+	success = true
+	return objName, nil
 }
 
 // compileLLToBC compiles LLVM IR text to LLVM bitcode via opt.
 // The bitcode is passed to LTO-capable linkers (ld.lld/wasm-ld/ld64.lld with --lto-O1).
-func compileLLToBC(irText, prefix, optPath, optLevel string) string {
+// Returns the bitcode path on success; on any error the intermediate .ll and the
+// created .bc are removed before the error is returned (T1470).
+func compileLLToBC(irText, prefix, optPath, optLevel string) (string, error) {
 	prefix = sanitizeTempPrefix(prefix)
 	llFile, err := os.CreateTemp("", prefix+"-*.ll")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("error creating temp file: %w", err)
 	}
 	if _, err := fmt.Fprint(llFile, irText); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
-		os.Exit(1)
+		llFile.Close()
+		os.Remove(llFile.Name())
+		return "", fmt.Errorf("error writing IR: %w", err)
 	}
 	llFile.Close()
 	defer os.Remove(llFile.Name())
 
+	// The .bc is handed back on success, so it is cleaned via a success-gated
+	// defer rather than an unconditional one (T1470): the opt failure path below
+	// used to leak this file when it called os.Exit(1).
 	bcFile, err := os.CreateTemp("", prefix+"-*.bc")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("error creating temp file: %w", err)
 	}
 	bcFile.Close()
+	bcName := bcFile.Name()
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(bcName)
+		}
+	}()
 
 	if err := runResilient(func() *exec.Cmd {
 		c := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
-		os.Exit(1)
+		return "", fmt.Errorf("error running opt on %s: %w", prefix, err)
 	}
 
-	return bcFile.Name()
+	success = true
+	return bcName, nil
 }
 
 // useClangPipeline returns true if the clang pipeline should be used instead of opt+llc+linker.
@@ -4621,11 +4709,10 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string, useLTO bool) 
 // Debug: opt -O1 → .bc → llc → .o → linker with --gc-sections (no LTO).
 // Windows: always opt → .bc → llc → .o → lld-link (LTO not wired up for MSVC yet).
 // Note: opt -O1 in both modes until B0314 (alloca domination) is fixed to enable -O0.
-func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
+func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) error {
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	checkLLVMToolVersion(optPath)
 
@@ -4635,8 +4722,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 	// Step 1: opt (coroutine lowering + optimization → bitcode)
 	bcFile, err := os.CreateTemp("", "promise-*.bc")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error creating temp file: %w", err)
 	}
 	bcFile.Close()
 	defer os.Remove(bcFile.Name())
@@ -4647,8 +4733,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error running opt: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error running opt: %w", err)
 	}
 	timePhase("opt", time.Since(tOpt), "")
 
@@ -4656,15 +4741,13 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 		// Debug / Windows: llc → .o → linker (no LTO)
 		llcPath, err := findLLVMTool("llc")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error: %w", err)
 		}
 		checkLLVMToolVersion(llcPath)
 
 		objFile, err := os.CreateTemp("", "promise-*.o")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error creating temp file: %w", err)
 		}
 		objFile.Close()
 		defer os.Remove(objFile.Name())
@@ -4686,44 +4769,51 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 			c.Stderr = os.Stderr
 			return c
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error running llc: %w", err)
 		}
 
 		tLink := time.Now()
+		var linkErr error
 		if isWindowsTarget(target) {
-			linkWindows(objFile.Name(), target, outputFile)
+			linkErr = linkWindows(objFile.Name(), target, outputFile)
 		} else if isDarwinTarget(target) {
-			linkDarwin(objFile.Name(), target, outputFile, false)
+			linkErr = linkDarwin(objFile.Name(), target, outputFile, false)
 		} else if isWasmTarget(target) {
-			linkWasm(objFile.Name(), target, outputFile, false)
+			linkErr = linkWasm(objFile.Name(), target, outputFile, false)
 		} else {
-			linkLinux(objFile.Name(), target, outputFile, false)
+			linkErr = linkLinux(objFile.Name(), target, outputFile, false)
+		}
+		if linkErr != nil {
+			return linkErr
 		}
 		timePhase("link", time.Since(tLink), "")
-		return
+		return nil
 	}
 
 	// Release: Link with LTO — linker performs cross-module inlining and DCE on bitcode.
 	tLink := time.Now()
+	var linkErr error
 	if isDarwinTarget(target) {
-		linkDarwin(bcFile.Name(), target, outputFile, true)
+		linkErr = linkDarwin(bcFile.Name(), target, outputFile, true)
 	} else if isWasmTarget(target) {
-		linkWasm(bcFile.Name(), target, outputFile, true)
+		linkErr = linkWasm(bcFile.Name(), target, outputFile, true)
 	} else {
-		linkLinux(bcFile.Name(), target, outputFile, true)
+		linkErr = linkLinux(bcFile.Name(), target, outputFile, true)
+	}
+	if linkErr != nil {
+		return linkErr
 	}
 	timePhase("link", time.Since(tLink), "")
+	return nil
 }
 
 // linkDarwin runs ld64.lld for macOS Mach-O linking.
 // Accepts LLVM bitcode (.bc) or native object (.o) as input.
 // Uses --lto-O1 for LTO when useLTO is true. The !isLLD path is only reachable via PROMISE_LD override.
-func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
+func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) error {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	if isLLD {
 		checkLLVMToolVersion(linkerPath)
@@ -4734,13 +4824,11 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 	if !isLLD && strings.HasSuffix(bcOrObjFile, ".bc") {
 		llcPath, lerr := findLLVMTool("llc")
 		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "error: PROMISE_LD linker requires native object but llc not found: %v\n", lerr)
-			os.Exit(1)
+			return fmt.Errorf("error: PROMISE_LD linker requires native object but llc not found: %w", lerr)
 		}
 		nativeObj, nerr := os.CreateTemp("", "promise-darwin-*.o")
 		if nerr != nil {
-			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", nerr)
-			os.Exit(1)
+			return fmt.Errorf("error creating temp file: %w", nerr)
 		}
 		nativeObj.Close()
 		defer os.Remove(nativeObj.Name())
@@ -4754,8 +4842,7 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 			c.Stderr = os.Stderr
 			return c
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "error running llc for PROMISE_LD linker: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error running llc for PROMISE_LD linker: %w", err)
 		}
 		fileToLink = nativeObj.Name()
 	}
@@ -4782,14 +4869,14 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 		if isLLD {
 			linkerName = "ld64.lld"
 		}
-		fmt.Fprintf(os.Stderr, "error linking (%s): %v\n", linkerName, err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (%s): %w", linkerName, err)
 	}
+	return nil
 }
 
 // linkWasm runs wasm-ld for WebAssembly linking (single .o file).
-func linkWasm(objFile, target, outputFile string, useLTO bool) {
-	linkWasmMulti([]string{objFile}, target, outputFile, useLTO)
+func linkWasm(objFile, target, outputFile string, useLTO bool) error {
+	return linkWasmMulti([]string{objFile}, target, outputFile, useLTO)
 }
 
 // ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
@@ -4933,28 +5020,30 @@ func ensureWasiAdapter() (string, error) {
 }
 
 // linkWasmMulti links multiple .o files for WebAssembly.
-func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) {
+func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) error {
 	lldPath, err := findLLVMTool("wasm-ld")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	checkLLVMToolVersion(lldPath)
 
-	linkArgs := buildWasmLinkArgs(objFiles, target, outputFile, useLTO)
+	linkArgs, err := buildWasmLinkArgs(objFiles, target, outputFile, useLTO)
+	if err != nil {
+		return err
+	}
 	if err := runResilient(func() *exec.Cmd {
 		c := runLLVMCmd(lldPath, linkArgs...)
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (wasm-ld): %w", err)
 	}
 
 	// Post-link: emit bootstrap .js loader for wasm32-web targets
 	if strings.Contains(target, "web") {
 		emitWebBootstrapJS(outputFile)
 	}
+	return nil
 }
 
 // emitWebBootstrapJS writes a minimal JavaScript loader alongside the .wasm
@@ -4990,16 +5079,14 @@ export async function init(importObject = {}) {
 // math runtime (wasm_math.o — sin/cos/exp/log/pow/etc. that LLVM lowers to
 // libcalls but WASI doesn't supply).
 // For wasm32-web: exports _initialize and memory instead of _start.
-func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool) []string {
+func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool) ([]string, error) {
 	allocObj, err := ensureWasmAllocObj()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error: %w", err)
 	}
 	mathObj, err := ensureWasmMathObj()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error: %w", err)
 	}
 	isWeb := strings.Contains(target, "web")
 	var args []string
@@ -5028,15 +5115,14 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 	args = append(args, "--export=cabi_realloc", "--export=__cabi_retarea")
 	args = append(args, objFiles...)
 	args = append(args, allocObj, mathObj)
-	return args
+	return args, nil
 }
 
 // linkLinux runs ld.lld for Linux ELF linking (glibc or musl).
-func linkLinux(objFile, target, outputFile string, useLTO bool) {
+func linkLinux(objFile, target, outputFile string, useLTO bool) error {
 	lldPath, err := findLLVMTool("ld.lld")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	checkLLVMToolVersion(lldPath)
 
@@ -5044,8 +5130,7 @@ func linkLinux(objFile, target, outputFile string, useLTO bool) {
 	if strings.Contains(target, "linux-musl") {
 		crtDir, err := findMuslCRT(target)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error: %w", err)
 		}
 		linkArgs = buildMuslLinkArgs(target, objFile, outputFile, crtDir, useLTO)
 	} else {
@@ -5056,17 +5141,16 @@ func linkLinux(objFile, target, outputFile string, useLTO bool) {
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (ld.lld): %w", err)
 	}
+	return nil
 }
 
 // linkDarwinMulti links multiple .o/.bc files on macOS.
-func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) {
+func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) error {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	if isLLD {
 		checkLLVMToolVersion(linkerPath)
@@ -5074,8 +5158,7 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) 
 
 	sdk, err := findMacOSSDK()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 
 	tri := parseDarwinTriple(target)
@@ -5114,17 +5197,16 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) 
 		if isLLD {
 			linkerName = "ld64.lld"
 		}
-		fmt.Fprintf(os.Stderr, "error linking (%s): %v\n", linkerName, err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (%s): %w", linkerName, err)
 	}
+	return nil
 }
 
 // linkLinuxMulti links multiple .o/.bc files on Linux (glibc or musl).
-func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
+func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) error {
 	lldPath, err := findLLVMTool("ld.lld")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	checkLLVMToolVersion(lldPath)
 
@@ -5137,8 +5219,7 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	if strings.Contains(target, "linux-musl") {
 		crtDir, err := findMuslCRT(target)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error: %w", err)
 		}
 		linkArgs = []string{
 			"-m", emulationMode(target),
@@ -5158,8 +5239,7 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	} else {
 		crt, err := findCRT(target)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error: %w", err)
 		}
 		linkArgs = []string{
 			"-z", "relro",
@@ -5193,9 +5273,9 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (ld.lld): %w", err)
 	}
+	return nil
 }
 
 // --- Windows linking via lld-link (MSVC-compatible COFF linker) ---
@@ -5320,11 +5400,10 @@ func findWindowsLinkSurface(target string) (string, error) {
 // buildWindowsLinkArgs builds the lld-link argument list for COFF linking
 // against the self-generated zero-dependency surface (T0772). Entry is the
 // codegen-emitted @__promise_start (replacing the MSVC CRT's mainCRTStartup).
-func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) []string {
+func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) ([]string, error) {
 	libDir, err := findWindowsLinkSurface(target)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error: %w", err)
 	}
 
 	args := []string{
@@ -5336,51 +5415,55 @@ func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) [
 	}
 	args = append(args, winLinkFiles...)
 	args = append(args, objFiles...)
-	return args
+	return args, nil
 }
 
 // linkWindows runs lld-link for a single .obj file.
-func linkWindows(objFile, target, outputFile string) {
+func linkWindows(objFile, target, outputFile string) error {
 	lldPath, err := findLLVMTool("lld-link")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	checkLLVMToolVersion(lldPath)
 
-	linkArgs := buildWindowsLinkArgs(target, []string{objFile}, outputFile)
+	linkArgs, err := buildWindowsLinkArgs(target, []string{objFile}, outputFile)
+	if err != nil {
+		return err
+	}
 	if err := runResilient(func() *exec.Cmd {
 		c := runLLVMCmd(lldPath, linkArgs...)
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (lld-link): %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (lld-link): %w", err)
 	}
+	return nil
 }
 
 // linkWindowsMulti links multiple .obj files on Windows via lld-link.
-func linkWindowsMulti(objFiles []string, target, outputFile string) {
+func linkWindowsMulti(objFiles []string, target, outputFile string) error {
 	lldPath, err := findLLVMTool("lld-link")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error: %w", err)
 	}
 	checkLLVMToolVersion(lldPath)
 
-	linkArgs := buildWindowsLinkArgs(target, objFiles, outputFile)
+	linkArgs, err := buildWindowsLinkArgs(target, objFiles, outputFile)
+	if err != nil {
+		return err
+	}
 	if err := runResilient(func() *exec.Cmd {
 		c := runLLVMCmd(lldPath, linkArgs...)
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (lld-link): %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (lld-link): %w", err)
 	}
+	return nil
 }
 
 // compileAndLinkClang runs the clang pipeline (non-Linux or fallback).
-func compileAndLinkClang(llFile, target, outputFile string) {
+func compileAndLinkClang(llFile, target, outputFile string) error {
 	linkArgs := []string{"-O1", "-target", target, llFile, "-o", outputFile}
 	if strings.Contains(target, "linux") {
 		linkArgs = append(linkArgs, "-lpthread")
@@ -5394,10 +5477,10 @@ func compileAndLinkClang(llFile, target, outputFile string) {
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (clang): %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error linking (clang): %w", err)
 	}
 	timePhase("opt+link", time.Since(tOptLink), "(clang)")
+	return nil
 }
 
 // --- Frontend pipeline ---
@@ -7416,7 +7499,7 @@ func runExec(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target, "", false) // exec always uses debug mode
+	exitOnCompileError(compileAndLink(result, tmpOutput.Name(), target, "", false)) // exec always uses debug mode
 
 	// Save the compiled binary to the cache for future runs (T0857).
 	if cacheDir != "" {

@@ -152,3 +152,71 @@ test_static_slice() `test {
   assert(s[1] == 30, "s[1]");
   assert(s[2] == 40, "s[2]");
 }
+
+// The element folds below are shared with the scalar literal path (T1418
+// unified them), so these also guard genIntLit/genFloatLit/genCharLit.
+
+test_static_int_radix_and_underscores() `test {
+  // The fold parses with base detection from the prefix, after stripping
+  // underscores.
+  int[] v = [0xff, 0o17, 0b1010, 1_000_000, -0xff];
+  assert(v[0] == 255, "hex");
+  assert(v[1] == 15, "octal");
+  assert(v[2] == 10, "binary");
+  assert(v[3] == 1000000, "underscores");
+  assert(v[4] == -255, "negated hex");
+}
+
+test_static_narrow_int_extremes() `test {
+  // Element values at the edge of each narrow width. u64.max does not fit in an
+  // int64, so it exercises the same >int64.max fold path the wide types do,
+  // just at a width where truncation happens to be a no-op.
+  i8[] a = [-128i8, 127i8];
+  assert(a[0] == i8.min && a[1] == i8.max, "i8 extremes");
+
+  u8[] b = [0u8, 255u8];
+  assert(b[0] == u8.min && b[1] == u8.max, "u8 extremes");
+
+  i64[] c = [-9223372036854775808i64, 9223372036854775807i64];
+  assert(c[0] == i64.min && c[1] == i64.max, "i64 extremes");
+
+  u64[] d = [0u64, 18446744073709551615u64];
+  assert(d[0] == u64.min && d[1] == u64.max, "u64 extremes");
+  assert(d[1].to_string() == "18446744073709551615", "u64 max prints unsigned");
+}
+
+test_static_char_escapes() `test {
+  // Every escape PromiseLexer.g4's CHAR_LITERAL admits, plus a multi-byte rune
+  // (the utf8-decode branch of the fold).
+  char[] v = ['\n', '\r', '\t', '\b', '\\', '\'', '\0', 'e'];
+  assert(v.len == 8, "len");
+  assert(v[0] == '\n', "newline");
+  assert(v[1] == '\r', "carriage return");
+  assert(v[2] == '\t', "tab");
+  assert(v[3] == '\b', "backspace");
+  assert(v[4] == '\\', "backslash");
+  assert(v[5] == '\'', "quote");
+  assert(v[6] == '\0', "nul");
+  assert(v[7] == 'e', "plain");
+
+  char[] wide = ['é', '€'];
+  assert((wide[0] as int) == 233, "two-byte rune");
+  assert((wide[1] as int) == 8364, "three-byte rune");
+}
+
+test_static_f32_vector() `test {
+  // f32 elements are folded at single precision, so 0.1f32 must equal the
+  // scalar 0.1f32 exactly rather than a truncated double.
+  f32[] v = [0.1f32, -2.5f32, 0.0f32];
+  assert(v[0] == 0.1f32, "f32 rounds like the scalar literal");
+  assert(v[1] == -2.5f32, "negative f32");
+  assert(v[2] == 0.0f32, "zero f32");
+}
+
+test_static_negative_float_vector() `test {
+  f64[] v = [-1.5, 0.0, -0.5, 1_000.5];
+  assert(v[0] == -1.5, "negative");
+  assert(v[1] == 0.0, "zero");
+  assert(v[2] == -0.5, "negative fraction");
+  assert(v[3] == 1000.5, "underscored float");
+}

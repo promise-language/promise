@@ -350,9 +350,11 @@ wide_encode_decode() `test {
 // __udivti3/__umodti3/__divti3/__modti3 libcalls instead of being strength-
 // reduced to multiply+shift. Every other div test here uses literal divisors
 // and so never exercises the libcall ABI (T1414). Operands are pushed onto a
-// vector at runtime rather than written as a vector literal — a literal would
-// take the static .rodata path, which corrupts >64-bit wide-int elements
-// (T1418).
+// vector at runtime rather than written as a vector literal — a literal takes
+// the static .rodata path, and a load from a `private constant` global is
+// exactly the kind of thing the optimizer folds back into a constant divisor.
+// (The .rodata path also used to corrupt >64-bit elements; fixed in T1418 and
+// covered by the wide_vector_literal_* tests below.)
 _wide_pick[T](T[] v, int i) T {
   return v[i];
 }
@@ -566,4 +568,257 @@ set_u128_membership() `test {
   assert(s.contains(7u128), "u128 set contains present");
   assert(s.contains(18446744073709551617u128), "u128 set contains wide present");
   assert(!s.contains(1u128), "u128 set absent");
+}
+
+// --- static .rodata vector literals with wide elements (T1418) ---
+// An all-constant vector literal takes the T0062 static path, which folded each
+// element through strconv's 64-bit parsers and sign-extended the int64 into the
+// wide element type. Every element above int64.max was silently wrong. Keep
+// every element written as a literal here — routing a value in as a member
+// (u128.max) or via push would take the known-good heap path and miss the bug.
+
+wide_vector_literal_u128() `test {
+  u128[] v = [9223372036854775808u128, // 2^63 — first value ParseInt rejects
+  18446744073709551615u128, // 2^64-1 — last value ParseUint accepts
+  18446744073709551617u128, // 2^64+1 — ParseUint range-errors too
+  340282366920938463463374607431768211455u128, // u128.max
+  0u128,
+  ];
+  assert(v.len == 5, "u128 literal vector length");
+  assert(v[0] == 1u128 << 63u128, "u128 2^63");
+  assert(v[1] == 18446744073709551615u128, "u128 2^64-1");
+  assert(v[1].to_string(base: 16) == "ffffffffffffffff", "u128 2^64-1 hex");
+  assert(v[2] == (1u128 << 64u128) + 1u128, "u128 2^64+1");
+  assert(v[3] == u128.max, "u128 max");
+  assert(v[4] == 0u128, "u128 zero");
+}
+
+wide_vector_literal_unsuffixed() `test {
+  // Same fold, but the element type comes from the declared vector type instead
+  // of a suffix. This is the riskier half: sema range-checks a literal only when
+  // it carries a suffix (validateIntRange is called from the Suffix != "" arm),
+  // so an unsuffixed element that the fold truncates has nothing upstream to
+  // catch it.
+  u128[] a = [18446744073709551617, 340282366920938463463374607431768211455];
+  assert(a[0] == (1u128 << 64u128) + 1u128, "unsuffixed 2^64+1");
+  assert(a[1] == u128.max, "unsuffixed u128.max");
+
+  i128[] b = [-170141183460469231731687303715884105728, 170141183460469231731687303715884105727];
+  assert(b[0] == i128.min, "unsuffixed i128.min");
+  assert(b[1] == i128.max, "unsuffixed i128.max");
+
+  u256[] c = [0x1_0000_0000_0000_0000, 0b11];
+  assert(c[0] == 1u256 << 64u256, "unsuffixed wide hex");
+  assert(c[1] == 3u256, "unsuffixed binary");
+
+  // The same value written with and without a suffix must fold identically.
+  u128[] suffixed = [18446744073709551617u128];
+  assert(a[0] == suffixed[0], "suffixed and unsuffixed agree");
+}
+
+wide_vector_literal_empty() `test {
+  // len 0 still takes the static path (tryConstantElements returns an empty
+  // constant slice), so the .rodata buffer has a zero-length wide element array
+  // and the first push must COW it to a correctly-strided heap buffer.
+  u128[] v = [];
+  assert(v.len == 0, "empty static wide vector");
+  v.push(u128.max);
+  v.push(18446744073709551617u128);
+  assert(v.len == 2, "post-COW length");
+  assert(v[0] == u128.max, "post-COW element 0");
+  assert(v[1] == (1u128 << 64u128) + 1u128, "post-COW element 1");
+
+  i512[] w = [];
+  assert(w.len == 0, "empty static i512 vector");
+  w.push(i512.min);
+  assert(w[0] == i512.min, "i512 post-COW element");
+}
+
+wide_vector_literal_i128() `test {
+  i128[] v = [170141183460469231731687303715884105727i128, // i128.max
+  -170141183460469231731687303715884105728i128, // i128.min (negated literal)
+  -18446744073709551617i128, // -(2^64+1)
+  9223372036854775807i128, // int64.max — regression guard
+  -5i128,
+  ];
+  assert(v[0] == i128.max, "i128 max");
+  assert(v[1] == i128.min, "i128 min");
+  assert(v[2] == -((1i128 << 64i128) + 1i128), "i128 -(2^64+1)");
+  assert(v[3] == 9223372036854775807i128, "i128 int64.max");
+  assert(v[4] == -5i128, "i128 small negative");
+  assert(v[0].to_string(base: 10) == "170141183460469231731687303715884105727", "i128 max decimal");
+  assert(v[1].to_string(base: 10) == "-170141183460469231731687303715884105728", "i128 min decimal");
+}
+
+wide_vector_literal_hex() `test {
+  // Exercises the base-0 prefix + underscore-strip path above 64 bits.
+  u128[] v = [0xff00ff00ff00ff00ff00ff00ff00ff00u128,
+  0x1_0000_0000_0000_0000u128,
+  0b1_0000000000000000000000000000000000000000000000000000000000000000u128,
+  0o2000000000000000000000u128, // 2^64
+  ];
+  assert(v[0].to_string(base: 16) == "ff00ff00ff00ff00ff00ff00ff00ff00", "u128 wide hex");
+  assert(v[1] == 1u128 << 64u128, "u128 underscored hex 2^64");
+  assert(v[2] == 1u128 << 64u128, "u128 binary 2^64");
+  assert(v[3] == 1u128 << 64u128, "u128 octal 2^64");
+}
+
+wide_vector_literal_256_512() `test {
+  u256[] a = [115792089237316195423570985008687907853269984665640564039457584007913129639935u256];
+  assert(a[0] == u256.max, "u256 max");
+
+  i256[] b = [18446744073709551617i256, -57896044618658097711785492504343953926634992332820282019728792003956564819968i256];
+  assert(b[0] == (1i256 << 64i256) + 1i256, "i256 2^64+1");
+  assert(b[1] == i256.min, "i256 min");
+
+  i512[] c = [-18446744073709551617i512];
+  assert(c[0] == -((1i512 << 64i512) + 1i512), "i512 -(2^64+1)");
+
+  u512[] d = [1000000000000000000000000u512]; // 10^24
+  assert(d[0] == 1000000000000000000000000u512, "u512 10^24");
+}
+
+wide_vector_literal_roundtrip() `test {
+  u128[] lit = [9223372036854775808u128, 18446744073709551617u128, 340282366920938463463374607431768211455u128];
+
+  // Cross-check the static path against the known-good push path element-wise.
+  u128[] built = [];
+  built.push(9223372036854775808u128);
+  built.push(18446744073709551617u128);
+  built.push(340282366920938463463374607431768211455u128);
+  assert(built.len == lit.len, "roundtrip lengths match");
+  for i in 0..lit.len {
+    assert(lit[i] == built[i], "roundtrip element " + i.to_string());
+  }
+
+  // Pushing onto a static vector triggers promise_vector_cow — the heap copy
+  // must preserve the full element width.
+  lit.push(7u128);
+  assert(lit.len == 4, "post-COW length");
+  assert(lit[2] == u128.max, "post-COW wide element preserved");
+  assert(lit[3] == 7u128, "post-COW appended element");
+
+  // for-in over a static buffer must see the full-width elements (consumes it).
+  u128[] iter = [9223372036854775808u128, 18446744073709551617u128, 340282366920938463463374607431768211455u128];
+  u128 sum = 0u128;
+  for x in iter {
+    sum = sum + (x >> 64u128);
+  }
+  assert(sum == 1u128 + 18446744073709551615u128, "for-in high halves");
+}
+
+wide_vector_literal_cow_ops() `test {
+  // Every mutation of a static vector goes through promise_vector_cow, which
+  // copies len*elem_size bytes off .rodata. The T1418 tests above only cover
+  // push; pop/remove/index-assign/slice/clone each have their own COW call site,
+  // and a wide element is 16-64 bytes rather than the 8 every existing static
+  // vector test uses. Keep the first element above 2^64 so a truncated copy or
+  // a stride computed at 64 bits is visible.
+  u128 big = 18446744073709551617u128; // 2^64+1
+
+  u128[] assigned = [big, 7u128, u128.max];
+  assigned[1] = big + 1u128;
+  assert(assigned[0] == big, "index-assign leaves neighbours intact");
+  assert(assigned[1] == big + 1u128, "index-assign wide element");
+  assert(assigned[2] == u128.max, "index-assign trailing element");
+
+  u128[] popped = [big, u128.max];
+  if p := popped.pop() {
+    assert(p == u128.max, "popped wide element");
+  } else {
+    assert(false, "pop returned nothing");
+  }
+  assert(popped.len == 1 && popped[0] == big, "post-pop remainder");
+
+  u128[] removed = [big, 7u128, u128.max];
+  removed.remove(1);
+  assert(removed.len == 2, "post-remove length");
+  assert(removed[0] == big && removed[1] == u128.max, "post-remove elements shifted");
+
+  u128[] source = [1u128, big, u128.max, 9223372036854775808u128];
+  u128[] sliced = source[1:3];
+  assert(sliced.len == 2, "slice length");
+  assert(sliced[0] == big && sliced[1] == u128.max, "slice copies full-width elements");
+
+  u128[] cloned = source.clone();
+  assert(cloned.len == source.len, "clone length");
+  assert(cloned[1] == big && cloned[3] == 9223372036854775808u128, "clone elements");
+  cloned[0] = u128.max;
+  assert(source[0] == 1u128, "clone is independent of the static original");
+
+  assert(source.contains(big), "contains wide element");
+  assert(!source.contains(big + 1u128), "contains rejects a near-miss");
+
+  // Formatting the whole vector walks every element through Format.
+  u128[] shown = [big, 0u128];
+  assert(shown.to_string() == "[10000000000000001, 0]", "vector to_string");
+}
+
+wide_vector_literal_signed_cow_ops() `test {
+  // i128 repeats the COW matrix at the signed extremes: a truncating copy or a
+  // 64-bit sign-extension shows up as min/max flipping sign.
+  i128[] v = [i128.min, -1i128, i128.max];
+  i128[] sliced = v[0:2];
+  assert(sliced[0] == i128.min && sliced[1] == -1i128, "signed slice");
+
+  v[1] = i128.min + 1i128;
+  assert(v[0] == i128.min, "signed index-assign neighbour");
+  assert(v[1] == i128.min + 1i128, "signed index-assign element");
+  assert(v[2] == i128.max, "signed index-assign trailing");
+
+  i256[] w = [i256.min, i256.max];
+  i256[] cloned = w.clone();
+  assert(cloned[0] == i256.min && cloned[1] == i256.max, "i256 clone extremes");
+
+  i512[] x = [i512.min, i512.max];
+  x.push(0i512);
+  assert(x.len == 3, "i512 post-COW length");
+  assert(x[0] == i512.min && x[1] == i512.max && x[2] == 0i512, "i512 post-COW elements");
+}
+
+wide_vector_literal_call_boundary() `test {
+  // A static wide vector passed straight into a call (no intervening binding)
+  // and one returned from a function: the .rodata pointer crosses a frame
+  // boundary, and the callee must not free it (bit 63 keeps Vector.drop off it).
+  assert(_wide_pick[u128]([9223372036854775808u128, u128.max], 1) == u128.max, "literal as argument");
+  assert(_wide_pick[i128]([i128.min, i128.max], 0) == i128.min, "signed literal as argument");
+  u128[] returned = _wide_static_vector();
+  assert(returned.len == 3, "returned static length");
+  assert(returned[1] == 18446744073709551617u128, "returned static wide element");
+}
+
+_wide_static_vector() u128[] {
+  return[9223372036854775808u128, 18446744073709551617u128, u128.max];
+}
+
+wide_vector_literal_nested() `test {
+  // The outer literal's elements are array literals, so tryConstantExpr returns
+  // nil and the outer vector takes the heap path while each inner vector is
+  // still a static .rodata buffer.
+  u128[][] grid = [[18446744073709551617u128, u128.max],
+  [9223372036854775808u128],
+  ];
+  assert(grid.len == 2, "outer length");
+  assert(grid[0][0] == 18446744073709551617u128, "inner static element");
+  assert(grid[0][1] == u128.max, "inner static max");
+  assert(grid[1][0] == 9223372036854775808u128, "second inner static element");
+}
+
+wide_fixed_array_literal() `test {
+  // The contrast case from T1418: fixed-size arrays store elements with
+  // per-element stores instead of a folded .rodata initializer, so they were
+  // never affected. Pin that so a future unification of the two literal paths
+  // cannot regress arrays into the broken fold.
+  u128[3] a = [9223372036854775808u128, 18446744073709551617u128, u128.max];
+  assert(a[0] == 1u128 << 63u128, "array 2^63");
+  assert(a[1] == (1u128 << 64u128) + 1u128, "array 2^64+1");
+  assert(a[2] == u128.max, "array u128.max");
+
+  i128[2] b = [i128.min, i128.max];
+  assert(b[0] == i128.min, "array i128.min");
+  assert(b[1] == i128.max, "array i128.max");
+
+  i256[2] c = [-18446744073709551617i256, 18446744073709551617i256];
+  assert(c[0] == -c[1], "array i256 negation symmetry");
+  assert(c[1].to_string(base: 10) == "18446744073709551617", "array i256 decimal");
 }

@@ -3,9 +3,7 @@ package codegen
 import (
 	"fmt"
 	"math"
-	"strconv"
-	"strings"
-	"unicode/utf8"
+	"math/big"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -1125,58 +1123,26 @@ func (c *Compiler) tryConstantExpr(expr ast.Expr, elemType types.Type, elemLLVM 
 		if !ok {
 			intType = irtypes.I64
 		}
-		raw := strings.ReplaceAll(e.Raw, "_", "")
-		val, err := strconv.ParseInt(raw, 0, 64)
-		if err != nil {
-			uval, _ := strconv.ParseUint(raw, 0, 64)
-			return constant.NewInt(intType, int64(uval))
+		// T1418: parse at full precision. The old strconv.ParseInt/ParseUint pair
+		// truncated to 64 bits and constant.NewInt then SIGN-EXTENDED the int64
+		// into the wide element type, so every u128/i128/i256/i512 element above
+		// int64.max was silently written wrong (2^63..2^64-1 got all-ones high
+		// bits; >= 2^64 became -1 because the ParseUint range error was dropped).
+		cv, parsed := constIntFromRaw(intType, e.Raw)
+		if !parsed {
+			return nil // unreachable post-sema; fall back to the heap path
 		}
-		return constant.NewInt(intType, val)
+		return cv
 	case *ast.FloatLit:
 		floatType, ok := elemLLVM.(*irtypes.FloatType)
 		if !ok {
 			floatType = irtypes.Double
 		}
-		raw := strings.ReplaceAll(e.Raw, "_", "")
-		bitSize := 64
-		if floatType == irtypes.Float {
-			bitSize = 32
-		}
-		val, _ := strconv.ParseFloat(raw, bitSize)
-		return constant.NewFloat(floatType, val)
+		return constFloatFromRaw(floatType, e.Raw)
 	case *ast.BoolLit:
-		if e.Value {
-			return constant.NewInt(irtypes.I1, 1)
-		}
-		return constant.NewInt(irtypes.I1, 0)
+		return constBool(e.Value)
 	case *ast.CharLit:
-		raw := e.Raw
-		inner := raw[1 : len(raw)-1]
-		var cp int32
-		if len(inner) > 1 && inner[0] == '\\' {
-			switch inner[1] {
-			case 'n':
-				cp = '\n'
-			case 'r':
-				cp = '\r'
-			case 't':
-				cp = '\t'
-			case 'b':
-				cp = '\b'
-			case '\\':
-				cp = '\\'
-			case '\'':
-				cp = '\''
-			case '0':
-				cp = 0
-			default:
-				cp = int32(inner[1])
-			}
-		} else {
-			r, _ := utf8.DecodeRuneInString(inner)
-			cp = int32(r)
-		}
-		return constant.NewInt(irtypes.I32, int64(cp))
+		return constCharFromRaw(e.Raw)
 	case *ast.UnaryExpr:
 		// Handle negative literals: -42, -3.14
 		if e.Op == ast.UnaryNeg {
@@ -1186,7 +1152,9 @@ func (c *Compiler) tryConstantExpr(expr ast.Expr, elemType types.Type, elemLLVM 
 			}
 			switch v := inner.(type) {
 			case *constant.Int:
-				return constant.NewInt(v.Typ, -v.X.Int64())
+				// T1418: negate at full precision — v.X.Int64() truncated wide
+				// magnitudes (-i128.min folded to +1).
+				return &constant.Int{Typ: v.Typ, X: new(big.Int).Neg(v.X)}
 			case *constant.Float:
 				neg, _ := v.X.Float64()
 				return constant.NewFloat(v.Typ, -neg)

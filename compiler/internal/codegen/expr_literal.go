@@ -31,12 +31,8 @@ func (c *Compiler) genIntLit(e *ast.IntLit) value.Value {
 	if !ok {
 		intType = irtypes.I64
 	}
-	raw := strings.ReplaceAll(e.Raw, "_", "")
-	// Parse the magnitude at arbitrary precision so wide literals (>64-bit)
-	// are represented losslessly. big.Int.SetString(_, 0) handles the 0x/0o/0b
-	// prefixes; the AST never carries a sign here (unary minus is a separate op).
-	if bv, ok := new(big.Int).SetString(raw, 0); ok {
-		return &constant.Int{Typ: intType, X: bv}
+	if cv, parsed := constIntFromRaw(intType, e.Raw); parsed {
+		return cv
 	}
 	// Fallback: unparseable literal (sema already reported the error).
 	return constant.NewInt(intType, 0)
@@ -53,26 +49,66 @@ func (c *Compiler) genFloatLit(e *ast.FloatLit) value.Value {
 	if !ok {
 		floatType = irtypes.Double
 	}
-	raw := strings.ReplaceAll(e.Raw, "_", "")
+	return constFloatFromRaw(floatType, e.Raw)
+}
+
+func (c *Compiler) genBoolLit(e *ast.BoolLit) value.Value {
+	return constBool(e.Value)
+}
+
+func (c *Compiler) genCharLit(e *ast.CharLit) value.Value {
+	return constCharFromRaw(e.Raw)
+}
+
+// --- Literal → LLVM constant folds ---
+//
+// These are the single source of truth for turning a literal's raw source text
+// into an LLVM constant. Both the scalar path (genIntLit/genFloatLit/…) and the
+// static .rodata vector-literal fold (tryConstantExpr) go through them, so the
+// two can never disagree about a literal's value — the duplicated int case is
+// exactly how T1418 happened: the scalar copy parsed at arbitrary precision
+// while the vector copy still went through strconv's 64-bit parsers.
+
+// constIntFromRaw parses an integer literal's raw text into an LLVM constant of
+// the given integer type at arbitrary precision. Underscores are stripped and
+// big.Int.SetString(_, 0) handles the 0x/0o/0b prefixes; the AST never carries a
+// sign here (unary minus is a separate op). Wide types (i128..i512) hold values
+// no int64 can represent, so the magnitude must never be routed through
+// strconv's 64-bit parsers — doing so sign-extended or clamped it (T1418).
+// Reports false only for text that is not a valid integer literal, which sema's
+// validateIntRange has already rejected.
+func constIntFromRaw(intType *irtypes.IntType, raw string) (*constant.Int, bool) {
+	bv, ok := new(big.Int).SetString(strings.ReplaceAll(raw, "_", ""), 0)
+	if !ok {
+		return nil, false
+	}
+	return &constant.Int{Typ: intType, X: bv}, true
+}
+
+// constFloatFromRaw parses a float literal's raw text into an LLVM constant of
+// the given float type.
+func constFloatFromRaw(floatType *irtypes.FloatType, raw string) *constant.Float {
 	// Parse with the target precision so round-to-nearest-even is correct.
 	// ParseFloat(s, 32) returns a float64 holding the correctly-rounded float32 value.
 	bitSize := 64
 	if floatType == irtypes.Float {
 		bitSize = 32
 	}
-	val, _ := strconv.ParseFloat(raw, bitSize)
+	val, _ := strconv.ParseFloat(strings.ReplaceAll(raw, "_", ""), bitSize)
 	return constant.NewFloat(floatType, val)
 }
 
-func (c *Compiler) genBoolLit(e *ast.BoolLit) value.Value {
-	if e.Value {
+// constBool returns the i1 constant for a boolean literal.
+func constBool(v bool) *constant.Int {
+	if v {
 		return constant.NewInt(irtypes.I1, 1)
 	}
 	return constant.NewInt(irtypes.I1, 0)
 }
 
-func (c *Compiler) genCharLit(e *ast.CharLit) value.Value {
-	raw := e.Raw
+// constCharFromRaw decodes a char literal's raw text (surrounding quotes
+// included) into its i32 code point.
+func constCharFromRaw(raw string) *constant.Int {
 	inner := raw[1 : len(raw)-1] // strip surrounding quotes
 	var cp int32
 	if len(inner) > 1 && inner[0] == '\\' {

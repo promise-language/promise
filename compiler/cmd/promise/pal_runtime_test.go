@@ -146,18 +146,50 @@ func TestRuntimeDoubleFreeAborts(t *testing.T) {
 	}
 }
 
+// wantDoubleFreeMessage returns the diagnostic a lone-allocation double free
+// must produce on the host allocator.
+//
+// The debug allocator marks a block MAGIC_FREED at header offsets 0 and 8 and
+// then hands it to libc. Whether that marker is still there when the second
+// pal_free reads it is entirely up to libc:
+//
+//   - musl (the default Linux target): mallocng unmaps a slot group the moment
+//     it empties, so the header is gone and reading it faults. The thread-local
+//     probe guard turns that SIGSEGV into "double free or invalid free
+//     (unmapped block)" — the path this test exists to pin down.
+//   - macOS libsystem_malloc: zeroes the whole block on free (a hardening
+//     measure, so a use-after-free reads zeros rather than stale data). Both
+//     marker slots read back as 0 — neither MAGIC_ALIVE nor MAGIC_FREED — so
+//     detection lands on the bad-header-magic path. No in-band marker can
+//     survive there, which is why this is asserted rather than fixed.
+//
+// glibc leaves enough of the block alone that "double free" itself survives,
+// and is covered by the substring below.
+func wantDoubleFreeMessage() string {
+	if runtime.GOOS == "darwin" {
+		return "invalid free (bad header magic)"
+	}
+	return "double free"
+}
+
 // TestRuntimeDoubleFreeUnmappedAborts is the counterpart to the test above: the
 // double-freed block is the program's ONLY live allocation, so by the time the
 // second pal_free runs, musl's mallocng has handed the whole slot group back to
 // the OS and the header pal_free wants to inspect is unmapped.
 //
 // This used to be a silent death — SIGSEGV, empty stderr, no exit code of our
-// own — while macOS and glibc reported the double free normally. It is the
-// exact shape of the bug that "only reproduces on Mac". The thread-local probe
-// guard makes the handler recognize the fault as a double free instead.
+// own — while glibc reported the double free normally. It is the exact shape of
+// the bug that "only reproduces on musl". The thread-local probe guard makes the
+// handler recognize the fault as a double free instead.
 //
 // pal_stack_overflow_init() is called first because that is what installs the
 // handler; real Promise binaries call it during runtime startup.
+//
+// Which of the three detection paths answers depends on what the host allocator
+// does with a block it has just taken back, so the assertion below is
+// per-allocator (see wantDoubleFreeMessage). All of them abort with 134 and all
+// of them name a free that should not have happened; what must never happen is
+// the silent death, or the fault being reported as a plain segfault.
 func TestRuntimeDoubleFreeUnmappedAborts(t *testing.T) {
 	stdout, stderr, exit := buildAndRunDebugAlloc(t, func() *ir.Module {
 		m := ir.NewModule()
@@ -182,8 +214,8 @@ func TestRuntimeDoubleFreeUnmappedAborts(t *testing.T) {
 	if exit != 134 {
 		t.Errorf("expected exit code 134, got %d (stderr=%q stdout=%q)", exit, stderr, stdout)
 	}
-	if !strings.Contains(stderr, "double free") {
-		t.Errorf("expected a double-free diagnostic, got: stderr=%q stdout=%q", stderr, stdout)
+	if want := wantDoubleFreeMessage(); !strings.Contains(stderr, want) {
+		t.Errorf("expected %q in stderr, got: stderr=%q stdout=%q", want, stderr, stdout)
 	}
 	// The generic handler message would mean the guard did not fire and we fell
 	// through to reporting this as an ordinary segfault.

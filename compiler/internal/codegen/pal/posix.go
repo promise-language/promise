@@ -2283,8 +2283,11 @@ func (p *PosixPAL) emitSigsegvAddrHandler(
 	// ordinary segfault. Report it as such and exit 134 like the other allocator
 	// aborts, instead of printing an unmapped address and exiting 2. Without
 	// this, musl (the default Linux target, and the only allocator here that
-	// unmaps a slot group as soon as it empties) dies silently where macOS and
-	// glibc print "fatal: double free" — the platform split this closes.
+	// unmaps a slot group as soon as it empties) dies silently where glibc
+	// prints "fatal: double free" and macOS — which zeroes a freed block, so the
+	// MAGIC_FREED marker never survives — prints "fatal: invalid free (bad
+	// header magic)". Every platform now names the bad free; this closes the one
+	// that named nothing.
 	if p.DebugAllocator {
 		probe := getOrCreateFreeProbeGlobal(module)
 		probing := hEntry.NewLoad(irtypes.I64, probe)

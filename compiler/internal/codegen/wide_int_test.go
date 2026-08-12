@@ -235,3 +235,50 @@ func TestWideIntHashFold(t *testing.T) {
 	assertContains(t, ir, "lshr i128")
 	assertContains(t, ir, "xor i64")
 }
+
+func TestWideIntStaticVectorLiteral(t *testing.T) {
+	// T1418: an all-constant vector literal takes the T0062 static .rodata path,
+	// which folded each element through strconv's 64-bit parsers and then
+	// sign-extended the int64 into the wide element type. Every element above
+	// int64.max was silently wrong: 2^63..2^64-1 gained all-ones high bits, and
+	// >= 2^64 became -1 (the discarded ParseUint range error yields MaxUint64).
+	ir := generateIR(t, `main() {
+		u128[] a = [9223372036854775808u128];
+		u128[] b = [18446744073709551615u128];
+		i128[] c = [170141183460469231731687303715884105727i128];
+		i128[] d = [-170141183460469231731687303715884105728i128];
+		i256[] e = [18446744073709551617i256];
+	}`)
+	// llir renders wide constants that exceed int64 as unsigned hex.
+	assertContains(t, ir, "[1 x i128] [i128 u0x8000000000000000]")
+	assertContains(t, ir, "[1 x i128] [i128 u0xFFFFFFFFFFFFFFFF]")
+	assertContains(t, ir, "[1 x i128] [i128 u0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF]")
+	assertContains(t, ir, "[1 x i128] [i128 -170141183460469231731687303715884105728]")
+	assertContains(t, ir, "[1 x i256] [i256 u0x10000000000000001]")
+	// The pre-fix folds: sign-extended int64 and the MaxUint64/-1 clamp.
+	assertNotContains(t, ir, "[i128 -1]")
+	assertNotContains(t, ir, "[i256 -1]")
+	assertNotContains(t, ir, "[i128 1]")
+	assertNotContains(t, ir, "[i128 -9223372036854775808]")
+}
+
+func TestWideIntStaticVectorLiteralNarrowUnchanged(t *testing.T) {
+	// The full-precision parse must not disturb the narrow element types that
+	// already worked (int/i8/u64/char/bool/f64 vector literals).
+	ir := generateIR(t, `main() {
+		int[] a = [1, -2, 3];
+		i8[] b = [-128i8, 127i8];
+		u64[] c = [18446744073709551615u64];
+		char[] d = ['a', '\n'];
+		bool[] e = [true, false];
+		f64[] f = [1.5, -2.5];
+	}`)
+	assertContains(t, ir, "[3 x i64] [i64 1, i64 -2, i64 3]")
+	assertContains(t, ir, "[2 x i8] [i8 -128, i8 127]")
+	// u64.max no longer folds through int64: it renders as unsigned hex, the
+	// same bit pattern (and the same rendering) the scalar genIntLit path emits.
+	assertContains(t, ir, "[1 x i64] [i64 u0xFFFFFFFFFFFFFFFF]")
+	assertContains(t, ir, "[2 x i32] [i32 97, i32 10]")
+	assertContains(t, ir, "[2 x i1] [i1 true, i1 false]")
+	assertContains(t, ir, "[2 x double] [double 1.5, double -2.5]")
+}

@@ -857,7 +857,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// directly; the adapter loads field 1 from the box first.
 			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete) || concrete == types.TypString)
 			if needsAdapter {
-				adapter := c.emitViewMethodAdapter(concrete, concreteMethod, m, fn)
+				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, concreteMethod, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
 			} else {
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
@@ -900,14 +900,20 @@ func needsViewAdapter(concrete, iface *types.Signature) bool {
 // params and wrapping the return if needed (non-failable→failable, T→T?).
 func (c *Compiler) emitViewMethodAdapter(
 	concreteType *types.Named,
+	concreteCacheKey string,
 	concreteMethod, ifaceMethod *types.Method,
 	concreteFn *ir.Func,
 ) *ir.Func {
 	ifaceSig := ifaceMethod.Sig()
 	concreteSig := concreteMethod.Sig()
 
-	// Build adapter function type matching the interface method's signature
-	adapterName := fmt.Sprintf("%s.%s$view_adapt", concreteType.Obj().Name(), ifaceMethod.Name())
+	// Build adapter function type matching the interface method's signature.
+	// T1468: name the adapter from the per-instance mono key (e.g. GBox[int]),
+	// not the generic type name (GBox). A monomorphized concrete method is
+	// per-instance, so boxing two instantiations of the same generic type into
+	// the same view produces genuinely distinct adapters — using the generic
+	// name would emit two definitions under one LLVM name (invalid IR).
+	adapterName := fmt.Sprintf("%s.%s$view_adapt", concreteCacheKey, ifaceMethod.Name())
 
 	var params []*ir.Param
 	if ifaceSig.Recv() != nil {

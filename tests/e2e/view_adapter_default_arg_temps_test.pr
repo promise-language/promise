@@ -498,6 +498,42 @@ test_generic_owner_tuple_default_boxed_view() `test {
   assert(t.tag() == "gt1xy", "view adapter drains the tuple under typeSubst");
 }
 
+// T1468: boxing two DIFFERENT instantiations of the same generic owner into the
+// same structural view forces the adapter to be emitted twice. The adapter name
+// must be keyed on the per-instance mono name (TupleBox__string vs TupleBox__int),
+// not the generic name (TupleBox) — otherwise `opt` rejects the module with
+// "invalid redefinition of function 'TupleBox.tag$view_adapt'".
+test_generic_owner_two_instantiations_boxed() `test {
+  TupleBox[string] bs = TupleBox[string](item: "i");
+  Tagger ts = bs;
+  assert(ts.tag() == "gt1xy", "string instantiation view adapter");
+
+  TupleBox[int] bi = TupleBox[int](item: 2);
+  Tagger ti = bi;
+  assert(ti.tag() == "gt1xy", "int instantiation view adapter");
+}
+
+// T1468 (correctness, not just non-collision): the case above returns the same
+// string from both instantiations, so it proves the two adapters have distinct
+// names but not that each reaches its OWN monomorphized method — a single shared
+// adapter would pass it too. Here the result embeds `this.item` (type T), so the
+// two instantiations MUST produce different strings: this fails unless each
+// per-instance adapter forwards to that instance's own `tag` under its typeSubst.
+type IdBox[T] `public `doc("Generic owner whose tag() output depends on its type parameter.") {
+  T item;
+  tag(this, string s = "x" + "y") string `public `doc("Tags item with s.") => "g{this.item}{s}";
+}
+
+test_generic_owner_two_instantiations_distinct_results() `test {
+  IdBox[string] bs = IdBox[string](item: "i");
+  Tagger ts = bs;
+  assert(ts.tag() == "gixy", "string instantiation reaches its own method: {ts.tag()}");
+
+  IdBox[int] bi = IdBox[int](item: 7);
+  Tagger ti = bi;
+  assert(ti.tag() == "g7xy", "int instantiation reaches its own method: {ti.tag()}");
+}
+
 // --- adapter first emitted INSIDE a coroutine: the adapter's own body must not
 //     inherit (or disturb) the enclosing go block's coroutine state ---
 
@@ -705,9 +741,4 @@ test_repeated_view_calls_boxed_view() `test {
 //     frame reads the default lazily, so it is a use-after-free on the ordinary
 //     call path too; the adapter cannot outlive the stream, so the lifetime rule
 //     has to come from T1467's fix).
-//   - a GENERIC owner with a defaulted param boxed at two instantiations
-//     (`TupleBox[string]` and `TupleBox[int]` both assigned to a `Tagger`) —
-//     T1468: the adapter is named from the generic name, not the mono name, so
-//     the second instantiation emits a duplicate `TupleBox.tag$view_adapt` and
-//     `opt` rejects the module. Hence the single instantiation above.
-// All four belong next to the shapes above once their own items are fixed.
+// All three belong next to the shapes above once their own items are fixed.

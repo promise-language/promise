@@ -519,3 +519,51 @@ wide_div_opaque_256_512() `test {
   assert(i256.min.to_string(base: b10) == "-57896044618658097711785492504343953926634992332820282019728792003956564819968", "i256.min opaque base 10");
   assert(u512.max.to_string(base: b10) == "13407807929942597099574024998205846127479365820592393377723561443721764030073546976801874298166903427690031858186486050853753882811946569946433649006084095", "u512.max opaque base 10");
 }
+
+// --- T1419: wide integers as Map values / keys and Set elements ---
+// Regression: enum variant data blobs (Map stores values in a generic
+// `Slot[K,V]` enum) were sized with i128+ alignment capped at 8, so a wide-int
+// value at a non-zero payload offset overflowed the blob and read back 0.
+map_u128_value_literal() `test {
+  map[int, u128] m = {
+    1: 7u128, 2: 18446744073709551617u128
+  };
+  assert((m[1] ?: 99u128) == 7u128, "u128 map literal value key 1");
+  assert((m[2] ?: 99u128) == 18446744073709551617u128, "u128 map literal value key 2");
+  assert((m[3] ?: 99u128) == 99u128, "u128 map miss falls back");
+}
+
+map_u128_value_runtime() `test {
+  map[int, u128] m = {:};
+  m[1] = 18446744073709551617u128;
+  m[2] = u128.max;
+  assert((m[1] ?: 99u128) == 18446744073709551617u128, "u128 map runtime insert key 1");
+  assert((m[2] ?: 99u128) == u128.max, "u128 map runtime insert key 2");
+}
+
+map_i256_value() `test {
+  map[int, i256] m = {
+    1: 7i256
+  };
+  assert((m[1] ?: 99i256) == 7i256, "i256 map literal value");
+  m[2] = i256.min;
+  assert((m[2] ?: 99i256) == i256.min, "i256 map runtime insert");
+}
+
+map_u128_key() `test {
+  map[u128, int] m = {:};
+  m[18446744073709551617u128] = 42;
+  m[u128.max] = 7;
+  assert((m[18446744073709551617u128] ?: -1) == 42, "u128 key lookup");
+  assert((m[u128.max] ?: -1) == 7, "u128 key lookup max");
+  assert((m[1u128] ?: -1) == -1, "u128 key miss");
+}
+
+set_u128_membership() `test {
+  Set[u128] s = Set[u128]();
+  s.add(7u128);
+  s.add(18446744073709551617u128);
+  assert(s.contains(7u128), "u128 set contains present");
+  assert(s.contains(18446744073709551617u128), "u128 set contains wide present");
+  assert(!s.contains(1u128), "u128 set absent");
+}

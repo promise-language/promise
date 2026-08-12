@@ -1,0 +1,49 @@
+// tests/value_types/wide_int_field_test.pr — T1419 regression, struct-layout
+// angle.
+//
+// The root cause (llvmTypeAlignWithPtr capping alignment at 8 for integers
+// wider than 64 bits, instead of matching LLVM's real 16-byte alignment) is
+// pinned directly against enum variant data blobs in
+// tests/e2e/enum_wide_int_payload_offset_test.pr. This file exercises the
+// same underlying c.typeSize/c.typeAlign computation through a different
+// caller: a pure value type's Value struct with a wide int as a *non-first*
+// field, copied via local binding, passed by value, and stored in a
+// Vector[T] (whose push/index use raw memcpy sized by c.typeSize — if that
+// size disagreed with LLVM's real struct layout the way the enum blob did,
+// the trailing wide-int field would truncate the same way).
+type WidePair {
+  int tag `value;
+  u128 amount `value;
+}
+
+wide_pair_field_roundtrip() `test {
+  p := WidePair(tag: 5, amount: 18446744073709551617u128);
+  assert(p.tag == 5, "leading field preserved");
+  assert(p.amount == 18446744073709551617u128, "trailing wide-int field not truncated");
+
+  q := p;
+  assert(q.amount == 18446744073709551617u128, "wide-int field survives value copy");
+}
+
+wide_pair_by_value_param() `test {
+  p := WidePair(tag: 9, amount: u128.max);
+  assert(check_amount(p, u128.max), "by-value param preserves trailing wide field");
+}
+
+check_amount(WidePair p, u128 expect) bool {
+  return p.amount == expect;
+}
+
+wide_pair_in_vector() `test {
+  WidePair[] v = [];
+  v.push(WidePair(tag: 1, amount: 7u128));
+  v.push(WidePair(tag: 2, amount: 18446744073709551617u128));
+  v.push(WidePair(tag: 3, amount: u128.max));
+
+  assert(v[0].tag == 1, "vector element 0 leading field");
+  assert(v[0].amount == 7u128, "vector element 0 trailing wide field");
+  assert(v[1].tag == 2, "vector element 1 leading field");
+  assert(v[1].amount == 18446744073709551617u128, "vector element 1 trailing wide field");
+  assert(v[2].tag == 3, "vector element 2 leading field");
+  assert(v[2].amount == u128.max, "vector element 2 trailing wide field");
+}

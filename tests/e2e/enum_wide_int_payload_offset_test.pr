@@ -1,0 +1,37 @@
+// tests/e2e/enum_wide_int_payload_offset_test.pr — T1419 root-cause regression.
+//
+// A wide integer stored as a *non-first* enum variant payload field used to
+// truncate to 0: variant data blobs were sized with i128+ alignment capped at
+// 8, so `{ i64, i128 }` was modeled at 24 bytes while LLVM lays it out at 32
+// (i128 at offset 16). The `store i128` overflowed the blob and read back 0.
+// This pins the enum-level cause directly, independent of Map/Set generics.
+enum Slot {
+  Empty,
+  Used(int key, u128 value),
+}
+
+wide_int_second_payload_field() `test {
+  Slot s = Slot.Used(key: 5, value: 18446744073709551617u128);
+  match s {
+    Slot.Used(k, v) => {
+      assert(k == 5, "key preserved");
+      assert(v == 18446744073709551617u128, "wide-int second field not truncated");
+    },
+    Slot.Empty => {
+      assert(false, "unexpected Empty");
+    },
+  }
+}
+
+wide_int_second_payload_field_max() `test {
+  Slot s = Slot.Used(key: -3, value: u128.max);
+  match s {
+    Slot.Used(k, v) => {
+      assert(k == -3, "signed key preserved");
+      assert(v == u128.max, "wide-int max not truncated");
+    },
+    Slot.Empty => {
+      assert(false, "unexpected Empty");
+    },
+  }
+}

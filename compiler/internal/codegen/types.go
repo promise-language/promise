@@ -674,7 +674,17 @@ func llvmTypeAlignWithPtr(typ irtypes.Type, ptrSize int) int {
 	case *irtypes.IntType:
 		sz := int((t.BitSize + 7) / 8)
 		if sz > 8 {
-			return 8
+			// Neither the x86_64 nor the aarch64 default target datalayout specifies
+			// an explicit ABI alignment for integers wider than i128 (both list
+			// "...-i64:64-i128:128-..." and nothing larger); LLVM's alignment
+			// inference falls back to the widest explicitly specified integer type
+			// in that case, so every width beyond 128 bits still aligns to 16 bytes,
+			// not to its own rounded-up size. Confirmed against real `opt`-computed
+			// struct offsets for { i64, i128/i256/i512 } on both targets. Must match
+			// LLVM's real struct layout, or enum variant data blobs sized from this
+			// model are too small and wide-int fields at a non-zero offset truncate
+			// (T1419).
+			return 16
 		}
 		return sz
 	case *irtypes.FloatType:

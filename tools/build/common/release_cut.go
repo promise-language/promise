@@ -34,7 +34,12 @@ import (
 
 // requiredPlatforms is the CI/release matrix gate-7 evaluates and gate-4 checks
 // blob hosting for. darwin-amd64 is deferred (docs/release-automation.md §7).
-var requiredPlatforms = []string{"linux-amd64", "darwin-arm64", "windows-amd64"}
+//
+// Adding a platform here makes it release-blocking: `bin/release cut` refuses
+// to tag until that platform has a green CI job at the target SHA and its
+// dependency blobs are hosted. That is the intent for linux-arm64 — shipping an
+// asset nothing gates on is how a platform silently rots.
+var requiredPlatforms = []string{"linux-amd64", "linux-arm64", "darwin-arm64", "windows-amd64"}
 
 // ── git/gh seams ────────────────────────────────────────────────────────────
 

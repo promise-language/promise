@@ -164,6 +164,35 @@ func (f *fakeCutGH) DispatchWorkflow(workflow, ref string, inputs map[string]str
 	return nil
 }
 
+// lastPlatform is the platform these tests single out when they need exactly
+// one member of the matrix to be missing or failing. Derived from the end of
+// requiredPlatforms rather than a literal index so that adding a platform (e.g.
+// linux-arm64) cannot silently change which case is under test — or, worse,
+// leave a test asserting "one absent" while two are.
+func lastPlatform() string { return requiredPlatforms[len(requiredPlatforms)-1] }
+
+// allButLastGreen returns a successful job for every required platform except
+// the last, i.e. a matrix with exactly one platform absent.
+func allButLastGreen() []ghJob {
+	jobs := make([]ghJob, 0, len(requiredPlatforms)-1)
+	for _, p := range requiredPlatforms[:len(requiredPlatforms)-1] {
+		jobs = append(jobs, ghJob{Name: p, Status: "completed", Conclusion: "success"})
+	}
+	return jobs
+}
+
+// olderRunReportingLinuxFailed is the second, older run used by the
+// newest-run-wins test: it re-reports requiredPlatforms[0] as a failure (which
+// must be ignored, the newer run already decided it green) and supplies a green
+// job for every other platform.
+func olderRunReportingLinuxFailed() []ghJob {
+	jobs := []ghJob{{Name: requiredPlatforms[0], Conclusion: "failure"}}
+	for _, p := range requiredPlatforms[1:] {
+		jobs = append(jobs, ghJob{Name: p, Conclusion: "success"})
+	}
+	return jobs
+}
+
 // greenCI builds a single ci.yml run at sha whose jobs all succeed.
 func greenCI(sha string) *fakeCutGH {
 	jobs := make([]ghJob, len(requiredPlatforms))
@@ -266,36 +295,34 @@ func TestCIStatusAtSHA(t *testing.T) {
 
 	t.Run("one failed", func(t *testing.T) {
 		gh := greenCI(sha)
-		gh.jobs[1][2] = ghJob{Name: requiredPlatforms[2], Conclusion: "failure"}
+		gh.jobs[1][len(requiredPlatforms)-1] = ghJob{Name: lastPlatform(), Conclusion: "failure"}
 		status, _ := ciStatusAtSHA(gh, sha)
 		failed, _ := splitCIStatus(status)
-		if len(failed) != 1 || failed[0] != requiredPlatforms[2] {
-			t.Fatalf("failed = %v, want [%s]", failed, requiredPlatforms[2])
+		if len(failed) != 1 || failed[0] != lastPlatform() {
+			t.Fatalf("failed = %v, want [%s]", failed, lastPlatform())
 		}
 	})
 
 	t.Run("one absent", func(t *testing.T) {
 		gh := greenCI(sha)
-		gh.jobs[1] = gh.jobs[1][:2] // drop the windows job
+		gh.jobs[1] = allButLastGreen() // drop the last platform's job
 		status, _ := ciStatusAtSHA(gh, sha)
 		_, absent := splitCIStatus(status)
-		if len(absent) != 1 || absent[0] != requiredPlatforms[2] {
-			t.Fatalf("absent = %v, want [%s]", absent, requiredPlatforms[2])
+		if len(absent) != 1 || absent[0] != lastPlatform() {
+			t.Fatalf("absent = %v, want [%s]", absent, lastPlatform())
 		}
 	})
 
 	t.Run("multiple runs aggregated", func(t *testing.T) {
 		// One per-platform run each — must aggregate to all-green.
-		gh := &fakeCutGH{
-			ciRunsBefore: []ghRun{
-				{DatabaseID: 1, HeadSHA: sha}, {DatabaseID: 2, HeadSHA: sha}, {DatabaseID: 3, HeadSHA: sha},
-			},
-			jobs: map[int64][]ghJob{
-				1: {{Name: requiredPlatforms[0], Conclusion: "success"}},
-				2: {{Name: requiredPlatforms[1], Conclusion: "success"}},
-				3: {{Name: requiredPlatforms[2], Conclusion: "success"}},
-			},
+		runs := make([]ghRun, 0, len(requiredPlatforms))
+		jobs := make(map[int64][]ghJob, len(requiredPlatforms))
+		for i, p := range requiredPlatforms {
+			id := int64(i + 1)
+			runs = append(runs, ghRun{DatabaseID: id, HeadSHA: sha})
+			jobs[id] = []ghJob{{Name: p, Conclusion: "success"}}
 		}
+		gh := &fakeCutGH{ciRunsBefore: runs, jobs: jobs}
 		status, _ := ciStatusAtSHA(gh, sha)
 		failed, absent := splitCIStatus(status)
 		if len(failed) != 0 || len(absent) != 0 {
@@ -310,9 +337,10 @@ func TestCIStatusAtSHA(t *testing.T) {
 		gh.jobs[9] = []ghJob{{Name: requiredPlatforms[0], Conclusion: "success"}}
 		status, _ := ciStatusAtSHA(gh, sha)
 		_, absent := splitCIStatus(status)
-		// darwin + windows have no run at sha → absent.
-		if len(absent) != 2 {
-			t.Fatalf("absent = %v, want darwin+windows (other-SHA run ignored)", absent)
+		// Every platform but linux has no run at sha → absent.
+		if len(absent) != len(requiredPlatforms)-1 {
+			t.Fatalf("absent = %v, want every platform but %s (other-SHA run ignored)",
+				absent, requiredPlatforms[0])
 		}
 	})
 }
@@ -433,17 +461,14 @@ func TestGateCIAbsentNonInteractiveNamesPlatforms(t *testing.T) {
 func TestGateCIAbsentInteractiveYesDispatches(t *testing.T) {
 	noOpSleep(t)
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
-	// Before dispatch: run 1 covers only linux+darwin (windows absent). After
-	// dispatch: a second run adds the windows job, so the matrix is complete.
+	// Before dispatch: run 1 covers every platform but the last. After dispatch:
+	// a second run adds the missing job, so the matrix is complete.
 	gh := &fakeCutGH{
 		ciRunsBefore: []ghRun{{DatabaseID: 1, HeadSHA: sha}},
 		ciRunsAfter:  []ghRun{{DatabaseID: 1, HeadSHA: sha}, {DatabaseID: 2, HeadSHA: sha}},
 		jobs: map[int64][]ghJob{
-			1: {
-				{Name: requiredPlatforms[0], Conclusion: "success"},
-				{Name: requiredPlatforms[1], Conclusion: "success"},
-			},
-			2: {{Name: requiredPlatforms[2], Conclusion: "success"}},
+			1: allButLastGreen(),
+			2: {{Name: lastPlatform(), Conclusion: "success"}},
 		},
 	}
 	ctx := baseCutCtx(gh, newFakeCutGit())
@@ -453,14 +478,14 @@ func TestGateCIAbsentInteractiveYesDispatches(t *testing.T) {
 	if !res.passed {
 		t.Fatalf("interactive 'y' must dispatch + pass: %s", res.detail)
 	}
-	if len(gh.dispatched) != 1 || gh.dispatched[0]["platform"] != requiredPlatforms[2] {
-		t.Fatalf("expected single windows dispatch, got %v", gh.dispatched)
+	if len(gh.dispatched) != 1 || gh.dispatched[0]["platform"] != lastPlatform() {
+		t.Fatalf("expected a single %s dispatch, got %v", lastPlatform(), gh.dispatched)
 	}
 }
 
 func TestGateCIAbsentInteractiveNoDeclines(t *testing.T) {
 	gh := greenCI("abcdef0123456789abcdef0123456789abcdef01")
-	gh.jobs[1] = gh.jobs[1][:2] // windows absent
+	gh.jobs[1] = allButLastGreen() // last platform absent
 	ctx := baseCutCtx(gh, newFakeCutGit())
 	ctx.interactive = true
 	ctx.stdin = strings.NewReader("n\n")
@@ -1096,18 +1121,14 @@ func TestCIStatusAtSHAIgnoresNonPlatformAndDuplicate(t *testing.T) {
 	gh := &fakeCutGH{
 		// gh returns runs newest-first; run 1 decides linux (green) and carries a
 		// non-platform "lint" job. Run 2 (older) re-reports linux as failure — it
-		// must be ignored (already decided) — and supplies darwin + windows.
+		// must be ignored (already decided) — and supplies every other platform.
 		ciRunsBefore: []ghRun{{DatabaseID: 1, HeadSHA: sha}, {DatabaseID: 2, HeadSHA: sha}},
 		jobs: map[int64][]ghJob{
 			1: {
 				{Name: requiredPlatforms[0], Conclusion: "success"},
 				{Name: "lint", Conclusion: "failure"},
 			},
-			2: {
-				{Name: requiredPlatforms[0], Conclusion: "failure"},
-				{Name: requiredPlatforms[1], Conclusion: "success"},
-				{Name: requiredPlatforms[2], Conclusion: "success"},
-			},
+			2: olderRunReportingLinuxFailed(),
 		},
 	}
 	status, err := ciStatusAtSHA(gh, sha)

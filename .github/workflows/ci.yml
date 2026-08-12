@@ -20,6 +20,7 @@ on:
         options:
           - all
           - linux-amd64
+          - linux-arm64
           - darwin-arm64
           - windows-amd64
       run_tests:
@@ -56,11 +57,19 @@ jobs:
         run: |
           all='[
             {"name":"linux-amd64","runner":"ubuntu-24.04"},
+            {"name":"linux-arm64","runner":"ubuntu-24.04-arm"},
             {"name":"darwin-arm64","runner":"macos-latest"},
             {"name":"windows-amd64","runner":"windows-latest"}
           ]'
-          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13, no working
-          # Xcode CLT) and linux-arm64 (arm64 runner + arm64 LLVM blobs, T0524/T0530).
+          # linux-arm64 builds natively on GitHub's arm64 Linux runner — no
+          # cross-compilation. Both blockers are cleared: the arm64 LLVM tools
+          # (22.1.0) and the aarch64 musl CRT are catalogued in
+          # tools/build/blobs.json, so bin/build self-fetches them exactly as it
+          # does on amd64. NOTE: ubuntu-24.04-arm is free for public repos but
+          # metered on private ones — if a run fails to pick up a runner, that
+          # billing plan is why, not the workflow.
+          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13, no
+          # working Xcode CLT).
           if [ "$PLATFORM" = "all" ]; then
             inc=$(echo "$all" | jq -c .)
           else

@@ -4,7 +4,7 @@ Promise installs as a single self-contained binary (compiler + standard library 
 catalog modules + runtime). The install script detects your platform, downloads
 the matching release binary, verifies its checksum, and sets up `~/.promise/`.
 
-## macOS (Apple Silicon) or Linux (x86_64)
+## macOS (Apple Silicon) or Linux (x86_64 / arm64)
 
 ```sh
 curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
@@ -26,7 +26,7 @@ Verify with `promise version`, and keep it current with `promise update`.
 
 ## Notes
 
-- **Supported platforms:** macOS Apple Silicon (arm64), Linux x86_64, Windows x86_64.
+- **Supported platforms:** macOS Apple Silicon (arm64), Linux x86_64 and arm64, Windows x86_64.
   Intel Macs (x86_64) are not supported.
 - **macOS** also needs the Xcode Command Line Tools (`xcode-select --install`) for
   now; a bundled SDK stub is on the way.

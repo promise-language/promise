@@ -210,7 +210,7 @@ no_prebuilt_for_platform() {
     fi
   fi
   echo "" >&2
-  echo "  Supported platforms: macOS (Apple Silicon / arm64), Linux (x86_64), Windows (x86_64)." >&2
+  echo "  Supported platforms: macOS (Apple Silicon / arm64), Linux (x86_64, arm64), Windows (x86_64)." >&2
   exit 1
 }
 

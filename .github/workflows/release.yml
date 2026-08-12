@@ -33,6 +33,7 @@ on:
         options:
           - all
           - linux-amd64
+          - linux-arm64
           - darwin-arm64
           - windows-amd64
       publish:
@@ -66,8 +67,14 @@ jobs:
           PLATFORM: ${{ github.event.inputs.platform }}
         run: |
           P="${PLATFORM:-all}"
-          compiler='[{"host":"linux-amd64","runner":"ubuntu-24.04","ext":""},{"host":"darwin-arm64","runner":"macos-latest","ext":""},{"host":"windows-amd64","runner":"windows-latest","ext":".exe"}]'
-          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13), linux-arm64.
+          compiler='[{"host":"linux-amd64","runner":"ubuntu-24.04","ext":""},{"host":"linux-arm64","runner":"ubuntu-24.04-arm","ext":""},{"host":"darwin-arm64","runner":"macos-latest","ext":""},{"host":"windows-amd64","runner":"windows-latest","ext":".exe"}]'
+          # linux-arm64 is built natively on ubuntu-24.04-arm (metered on private
+          # repos — see ci.yml). Its thin+full variants project from the same
+          # blobs catalog as every other host; `manifest --from-catalog --host
+          # linux-arm64` resolves the arm64 LLVM + aarch64 musl CRT entries.
+          # scripts/install.sh already maps uname -m aarch64 → promise-linux-arm64.gz,
+          # so the asset is consumed by the existing install path with no change.
+          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13).
           if [ "$P" = "all" ]; then
             echo "compiler={\"include\":$compiler}" >> "$GITHUB_OUTPUT"
           else

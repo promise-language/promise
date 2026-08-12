@@ -2,7 +2,7 @@
 
 Statically-typed language designed for AI-agent efficiency — and written by AI agents. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — no hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
-**[Install Promise](docs/installing.md)** — macOS (Apple Silicon), Linux (x86_64), or Windows (x86_64).
+**[Install Promise](docs/installing.md)** — macOS (Apple Silicon), Linux (x86_64 or arm64), or Windows (x86_64).
 
 **Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Open any one `.pr` file and you know what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic. The full rationale for these decisions is in the [Language Design](docs/language-design.md) specification.
 

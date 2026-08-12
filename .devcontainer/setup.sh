@@ -18,6 +18,21 @@ if ! command -v wasmtime >/dev/null 2>&1; then
   echo 'export PATH="$HOME/.wasmtime/bin:$PATH"' >>"$HOME/.bashrc"
 fi
 
+# `gh` is OPTIONAL for building (#7): bin/build fetches the LLVM + musl CRT blobs
+# from ranked sources — an authenticated `gh` first, then anonymous HTTPS on the
+# public release asset, then the public CAS mirror. Every path is verified against
+# the catalog's sha256, so an unauthenticated fetch is not a weaker one. The
+# github-cli feature installs the binary but no credentials (VS Code forwards git
+# credentials, not gh's token), so an un-authenticated container is the normal
+# case and builds fine. Authenticating is still worth it for `gh`-driven work and
+# to sidestep GitHub's anonymous rate limits.
+if ! gh auth status >/dev/null 2>&1; then
+  echo
+  echo "    note: gh is not authenticated — fine for building (blobs fall back to"
+  echo "          anonymous HTTPS). Run 'gh auth login' if you want the gh CLI."
+  echo
+fi
+
 echo "==> done. Next:"
 echo "    bin/build         # fetches pinned LLVM + musl CRT on first run (~1 GB cache)"
 echo "    bin/verify --wasm # format + vet + full suite"

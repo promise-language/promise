@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -476,53 +475,16 @@ func retryTransient(what string, attempts int, backoff time.Duration, fn func() 
 
 type ghCLIFetcher struct{}
 
+// A deps-release blob goes through the ranked, credential-optional sources in
+// blob_fetch.go (#7) — `gh` is preferred when authenticated but is no longer
+// required, so a fresh clone with no GitHub credentials can still build. An
+// empty tag means `asset` is already a full URL (a manifest source that is not a
+// deps release), which is a plain anonymous GET.
 func (ghCLIFetcher) FetchAsset(tag, asset, dst string) error {
 	if tag != "" {
-		dir := filepath.Dir(dst)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		// A fresh *exec.Cmd is built per attempt (exec.Cmd is single-use).
-		err := retryTransient(fmt.Sprintf("gh release download %s %s", tag, asset),
-			blobFetchAttempts, blobFetchBackoff, func() error {
-				cmd := exec.Command("gh", "release", "download", tag, "-p", asset, "-D", dir, "--clobber")
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				return cmd.Run()
-			})
-		if err != nil {
-			return err
-		}
-		// `gh` writes <dir>/<asset>; rename to dst if they differ.
-		downloaded := filepath.Join(dir, asset)
-		if downloaded != dst {
-			if err := os.Rename(downloaded, dst); err != nil {
-				return err
-			}
-		}
-		return nil
+		return fetchBlobRanked(tag, asset, dst)
 	}
-	// Non-deps URL fallback: plain HTTP.
-	resp, err := http.Get(asset)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, asset)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		return err
-	}
-	return out.Close()
+	return httpDownloadBlob(asset, dst)
 }
 
 // runReleaseFetchBlobs implements `bin/release fetch-blobs`. Per-manifest one

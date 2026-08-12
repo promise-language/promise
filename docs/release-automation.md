@@ -2,7 +2,7 @@
 
 > How Promise releases are built and published on GitHub. This is the pipeline behind the artifacts in [distribution.md](distribution.md) §3. It covers the new-model specifics the original distribution §7 did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest under a strict **build order**, producing **thin + full** binary variants, building the **Promise stub** per target, and publishing on an `epoch-*` tag.
 >
-> **Status.** The repository lives on GitHub at [`github.com/promise-language/promise`](https://github.com/promise-language/promise) (currently **private**, default branch `main`). The CI and release workflows are **committed** at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/release.yml`](../.github/workflows/release.yml) (T0774) and wrap the `bin/release` driver (§7, T0773). The pipeline is now **exercised end-to-end**: CI is green on all three platforms (`linux-amd64`, `windows-amd64`, `darwin-arm64`), the `epoch-next` pre-release was cut, and the first stable release **`epoch-2026.0`** is published. CI and the release runners fetch dependency blobs **only from the `deps-<dep>-<version>` GitHub release** (`gh release download`) — the `prebuilts.promise-lang.org` R2 mirror is an end-user-install backstop, never a build source. The committed workflow files are the **source of truth**; the YAML excerpts below are the design rationale, kept in sync with them. The release *procedure* (which gates must pass before a tag) is now **enforced by `bin/release cut next` / `cut stable`** (T0943, §6): the gates run automatically and the tag/push happens only when every gate is green. The hand-run `git tag` fallback is documented in §6.2.
+> **Status.** The repository lives on GitHub at [`github.com/promise-language/promise`](https://github.com/promise-language/promise) (currently **private**, default branch `main`). The CI and release workflows are **committed** at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/release.yml`](../.github/workflows/release.yml) (T0774) and wrap the `bin/release` driver (§7, T0773). The pipeline is now **exercised end-to-end**: CI is green on all three platforms (`linux-amd64`, `windows-amd64`, `darwin-arm64`), the `epoch-next` pre-release was cut, and the first stable release **`epoch-2026.0`** is published. CI and the release runners fetch dependency blobs from the `deps-<dep>-<version>` GitHub release via `gh release download`, but that is no longer *required*: build-time acquisition falls back to anonymous HTTPS on the release asset and then the `prebuilts.promise-lang.org` R2 mirror (§ blob acquisition, #7), so a host with no GitHub credentials can still build. The committed workflow files are the **source of truth**; the YAML excerpts below are the design rationale, kept in sync with them. The release *procedure* (which gates must pass before a tag) is now **enforced by `bin/release cut next` / `cut stable`** (T0943, §6): the gates run automatically and the tag/push happens only when every gate is green. The hand-run `git tag` fallback is documented in §6.2.
 
 ---
 
@@ -343,9 +343,20 @@ bin/release publish-blobs --dependency llvm --host darwin-arm64  --r2-bucket ""
 bin/release publish-blobs --dependency llvm --host windows-amd64 --r2-bucket ""
 ```
 
-`--r2-bucket ""` disables the Cloudflare R2 mirror: **CI and the release runners fetch blobs only from the `deps-<dep>-<version>` GitHub release.** The build-time fetcher is `gh release download` (see `release_publish_blobs.go`), never HTTP — so the GitHub release must exist and be complete, or `bin/build`/`bin/release build` fails during resource embedding (the winlink import-lib step needs `llvm-dlltool`). The R2 mirror (`prebuilts.promise-lang.org`) is an end-user-install backstop while the repo is private, not a build source. `publish-blobs` is idempotent — blobs already in `blobs.json` with a matching hash + hosted asset are skipped.
+`--r2-bucket ""` disables the Cloudflare R2 mirror. `publish-blobs` is idempotent — blobs already in `blobs.json` with a matching hash + hosted asset are skipped.
 
-> The CI/release build steps must also set `GH_TOKEN` (job-level) so `gh release download` can authenticate on the runners — this is why the `compiler`/`test` jobs carry `env: GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`. The read-only `GITHUB_TOKEN` suffices for downloading same-repo release assets.
+**Build-time acquisition is ranked and credential-optional** (`blob_fetch.go`, #7). It was once `gh release download` and nothing else, which made an authenticated `gh` a hard requirement of `bin/build` — a fresh clone in a clean container could not build at all. Two changes removed the need: the repo is public (release assets download anonymously), and `publish-blobs` mirrors every blob to the public flat CAS bucket. Sources are tried in order, each optional:
+
+| # | source | when |
+|---|--------|------|
+| 0 | `$PROMISE_BLOB_MIRROR/<sha>.br` | only when set — explicit intent outranks everything, and on an air-gapped host a GitHub attempt is dead latency |
+| 1 | `gh release download` | `gh` installed **and** authenticated; still the only path that works for a private fork |
+| 2 | `<releaseAssetBase>/<tag>/<sha>.br` | anonymous HTTPS |
+| 3 | `<blobMirrorBase>/<sha>.br` | anonymous HTTPS; replaced by source 0 when that is set |
+
+Trying an unauthenticated source is safe by construction: every path ends in `decompressAndVerify` against the catalog's uncompressed `sha256`, so a wrong or tampered blob fails exactly as a corrupt `gh` download would — **the sha is the trust anchor, not the transport**. The gh-auth probe runs *before* the gh attempt rather than after it fails, because a missing credential is not transient and retrying it burns the full backoff schedule per blob. A definitive 4xx likewise costs one request, not the whole schedule; 5xx and 429 are retried.
+
+> CI still sets `GH_TOKEN` (job-level) so source 1 is used on the runners — deterministic, and unaffected by GitHub's anonymous rate limits. It is now an optimization rather than a requirement; without it the runners would fall through to sources 2/3.
 
 ### 6.2 The procedure
 

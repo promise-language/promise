@@ -132,6 +132,24 @@ func happyCIGit() *fakeCIGit {
 
 // ── platform resolution ──────────────────────────────────────────────────────
 
+// TestEveryRequiredPlatformIsDispatchable ties the two platform lists together.
+// They are declared independently — requiredPlatforms in release_cut.go, the
+// alias table here — so adding a platform to the release gate without adding it
+// here yields a gate that blocks on a CI job no one can dispatch by name, and
+// gateCI's own "dispatch the absent platform" path fails on its own request.
+func TestEveryRequiredPlatformIsDispatchable(t *testing.T) {
+	for _, p := range requiredPlatforms {
+		got, err := resolveCIPlatforms([]string{p})
+		if err != nil {
+			t.Errorf("required platform %q is not dispatchable: %v", p, err)
+			continue
+		}
+		if len(got) != 1 || got[0] != p {
+			t.Errorf("required platform %q resolved to %v, want [%s]", p, got, p)
+		}
+	}
+}
+
 func TestResolveCIPlatforms(t *testing.T) {
 	cases := []struct {
 		name string
@@ -148,6 +166,9 @@ func TestResolveCIPlatforms(t *testing.T) {
 		{name: "case insensitive", in: []string{"Linux", "WINDOWS"}, want: []string{"linux-amd64", "windows-amd64"}},
 		{name: "multiple specific", in: []string{"linux", "darwin", "windows"}, want: []string{"linux-amd64", "darwin-arm64", "windows-amd64"}},
 		{name: "dedup", in: []string{"linux", "linux-amd64"}, want: []string{"linux-amd64"}},
+		{name: "linux-arm64 canonical", in: []string{"linux-arm64"}, want: []string{"linux-arm64"}},
+		{name: "linux-aarch64 alias", in: []string{"linux-aarch64"}, want: []string{"linux-arm64"}},
+		{name: "bare linux stays amd64", in: []string{"linux", "linux-arm64"}, want: []string{"linux-amd64", "linux-arm64"}},
 		{name: "unknown", in: []string{"freebsd"}, err: "unknown platform"},
 		{name: "all cannot combine", in: []string{"all", "linux"}, err: "cannot be combined"},
 	}

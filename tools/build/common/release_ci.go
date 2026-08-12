@@ -41,10 +41,19 @@ var (
 // ciPlatformAliases maps user-friendly platform tokens to the canonical values
 // ci.yml's `platform` choice input accepts. "all" fans the whole matrix out in a
 // single run; the OS short names save typing the `-arch` suffix.
+//
+// Every canonical name in requiredPlatforms must be a key here, or that platform
+// cannot be dispatched by name — including by gateCI, which asks for an absent
+// platform by its canonical name. Bare "linux" stays amd64: it is the cheap
+// default and silently redirecting it to arm64 would surprise. "linux-aarch64"
+// is accepted because that is what `uname -m` reports on the machine you are
+// most likely typing this from.
 var ciPlatformAliases = map[string]string{
 	"all":           "all",
 	"linux":         "linux-amd64",
 	"linux-amd64":   "linux-amd64",
+	"linux-arm64":   "linux-arm64",
+	"linux-aarch64": "linux-arm64",
 	"darwin":        "darwin-arm64",
 	"mac":           "darwin-arm64",
 	"macos":         "darwin-arm64",

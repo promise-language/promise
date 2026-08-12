@@ -161,7 +161,12 @@ func TestFindLLVM_FallsThroughToSlim(t *testing.T) {
 		t.Skip("PATH-stripping is awkward on Windows; the slim fallback is exercised on other hosts")
 	}
 	root, _ := fakeReleaseRoot(t, nil)
-	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": "OPT_SLIM", "llc": "LLC_SLIM"})
+	// T0530 made FindLLVM probe the fetched `opt` with `--version` before
+	// accepting it, so the stub has to be an executable that answers that probe
+	// (blobs land in the cache with mode 0755). A plain text stub would fail to
+	// exec and be rejected as an unrunnable prebuilt.
+	optStub := "#!/bin/sh\necho \"LLVM version 22.1.0\"\n"
+	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": optStub, "llc": "LLC_SLIM"})
 
 	// fakeReleaseRoot's prebuilts.toml omits `lld` (only opt+llc). FindLLVM's
 	// llvmInfoFromDir requires lld too — so extend the catalog and the

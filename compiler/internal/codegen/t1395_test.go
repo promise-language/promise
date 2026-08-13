@@ -299,7 +299,7 @@ func TestT1395_ViewAdapterFillsOptionalWithZero(t *testing.T) {
 		}
 		main() { run(); }
 	`)
-	body := extractDefine(ir, "OptShow.show$view_adapt")
+	body := extractDefine(ir, "OptShow.show$view_adapt_as_Shower")
 	if body == "" {
 		t.Fatalf("expected the OptShow.show view adapter in IR:\n%s", ir)
 	}
@@ -333,7 +333,7 @@ func TestT1395_ViewAdapterFillsDefaultNeverOmittedAtAnyCallSite(t *testing.T) {
 		}
 		main() { run(); }
 	`)
-	body := extractDefine(ir, "Computed.show$view_adapt")
+	body := extractDefine(ir, "Computed.show$view_adapt_as_Shower")
 	if body == "" {
 		t.Fatalf("expected the Computed.show view adapter in IR:\n%s", ir)
 	}

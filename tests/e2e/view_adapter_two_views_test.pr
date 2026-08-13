@@ -1,0 +1,57 @@
+// T1477: boxing one concrete type into two DIFFERENT structural views, where each
+// view exposes an abstract method of the same name that requires an adapter (here
+// a trailing defaulted param makes the concrete signature differ from the view's),
+// forces emitViewMethodAdapter to run once per (concrete, view) pair. The adapter
+// name must include the view — otherwise both pairs produce `Thing.tag$view_adapt`
+// and `opt` rejects the module with "invalid redefinition of function". This is
+// the view/interface axis of the same defect T1468 fixed on the mono-name axis; it
+// reproduces on a NON-generic concrete type and is untouched by T1468.
+type ViewA `structural `public `doc("View A.") {
+  tag(this) string `abstract `doc("Tags.");
+}
+
+type ViewB `structural `public `doc("View B.") {
+  tag(this) string `abstract `doc("Tags.");
+}
+
+type Thing `public `doc("Boxed into two views, both need an adapter for tag.") {
+  int v;
+  tag(this, string s = "x" + "y") string `public `doc("Tags with s.") => "t{s}";
+}
+
+test_boxed_into_two_views() `test {
+  Thing a = Thing(v: 1);
+  ViewA va = a;
+  assert(va.tag() == "txy", "view A");
+
+  Thing b = Thing(v: 2);
+  ViewB vb = b;
+  assert(vb.tag() == "txy", "view B");
+}
+
+// Combined axis with T1468: one GENERIC instantiation boxed into two different
+// views. The adapter name carries both the per-instance mono key (GBox[string])
+// and the view suffix (_as_GViewA / _as_GViewB); dropping either half collides
+// the two adapters. Runtime confirmation that both dispatch to the right method.
+type GViewA `structural `public `doc("Generic view A.") {
+  tag(this) string `abstract `doc("Tags.");
+}
+
+type GViewB `structural `public `doc("Generic view B.") {
+  tag(this) string `abstract `doc("Tags.");
+}
+
+type GBox[T] `public `doc("Generic boxed into two views, both need an adapter for tag.") {
+  T item;
+  tag(this, string s = "x" + "y") string `public `doc("Tags with s.") => "g{s}";
+}
+
+test_generic_instance_boxed_into_two_views() `test {
+  GBox[string] a = GBox[string](item: "i");
+  GViewA ga = a;
+  assert(ga.tag() == "gxy", "generic view A");
+
+  GBox[string] b = GBox[string](item: "j");
+  GViewB gb = b;
+  assert(gb.tag() == "gxy", "generic view B");
+}

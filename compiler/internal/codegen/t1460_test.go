@@ -35,7 +35,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "HeapParent.tag$view_adapt")
+	adapter := extractDefine(ir, "HeapParent.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -62,7 +62,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "UserDefP.tag$view_adapt")
+	adapter := extractDefine(ir, "UserDefP.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -94,7 +94,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "TupP.tag$view_adapt")
+	adapter := extractDefine(ir, "TupP.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -119,7 +119,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "MutRefP.tag$view_adapt")
+	adapter := extractDefine(ir, "MutRefP.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -151,7 +151,7 @@ main() {
   r.run();
 }
 `)
-	adapter := extractDefine(ir, "VoidP.run$view_adapt")
+	adapter := extractDefine(ir, "VoidP.run$view_adapt_as_Runner")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -183,7 +183,7 @@ main() {
   r.run()?! ;
 }
 `)
-	adapter := extractDefine(ir, "FailVoidP.run$view_adapt")
+	adapter := extractDefine(ir, "FailVoidP.run$view_adapt_as_FailRunner")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -209,7 +209,7 @@ main() {
   print_line("{c.count()}");
 }
 `)
-	adapter := extractDefine(ir, "IntP.count$view_adapt")
+	adapter := extractDefine(ir, "IntP.count$view_adapt_as_Counter")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -236,7 +236,7 @@ main() {
   print_line(j.join("h"));
 }
 `)
-	adapter := extractDefine(ir, "JoinP.join$view_adapt")
+	adapter := extractDefine(ir, "JoinP.join$view_adapt_as_Joiner")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -276,7 +276,7 @@ main() {
   }
 }
 `)
-	adapter := extractDefine(ir, "CoroP.tag$view_adapt")
+	adapter := extractDefine(ir, "CoroP.tag$view_adapt_as_Tagger2")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -326,7 +326,7 @@ main() {
 `)
 	// Not returned: the adapter owns the env and frees it, with no alias check
 	// (an int result cannot alias a pointer).
-	dropper := extractDefine(ir, "EnvP.call$view_adapt")
+	dropper := extractDefine(ir, "EnvP.call$view_adapt_as_EnvCaller")
 	if dropper == "" {
 		t.Fatalf("no view adapter emitted for EnvP.call\n%s", ir)
 	}
@@ -335,7 +335,7 @@ main() {
 
 	// Returned: the caller owns the env from here, so the temp's flag is cleared
 	// when the returned fat pointer's env field matches.
-	aliaser := extractDefine(ir, "EnvAliasP.make$view_adapt")
+	aliaser := extractDefine(ir, "EnvAliasP.make$view_adapt_as_EnvMaker")
 	if aliaser == "" {
 		t.Fatalf("no view adapter emitted for EnvAliasP.make\n%s", ir)
 	}
@@ -361,7 +361,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "ChanP.tag$view_adapt")
+	adapter := extractDefine(ir, "ChanP.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -387,7 +387,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "MoveP.tag$view_adapt")
+	adapter := extractDefine(ir, "MoveP.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}
@@ -412,7 +412,7 @@ main() {
   print_line(t.tag());
 }
 `)
-	adapter := extractDefine(ir, "LitP.tag$view_adapt")
+	adapter := extractDefine(ir, "LitP.tag$view_adapt_as_Tagger")
 	if adapter == "" {
 		t.Fatalf("no view adapter emitted\n%s", ir)
 	}

@@ -857,7 +857,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// directly; the adapter loads field 1 from the box first.
 			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete) || concrete == types.TypString)
 			if needsAdapter {
-				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, concreteMethod, m, fn)
+				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, view, concreteMethod, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
 			} else {
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
@@ -901,6 +901,7 @@ func needsViewAdapter(concrete, iface *types.Signature) bool {
 func (c *Compiler) emitViewMethodAdapter(
 	concreteType *types.Named,
 	concreteCacheKey string,
+	view *types.Named,
 	concreteMethod, ifaceMethod *types.Method,
 	concreteFn *ir.Func,
 ) *ir.Func {
@@ -913,7 +914,12 @@ func (c *Compiler) emitViewMethodAdapter(
 	// per-instance, so boxing two instantiations of the same generic type into
 	// the same view produces genuinely distinct adapters — using the generic
 	// name would emit two definitions under one LLVM name (invalid IR).
-	adapterName := fmt.Sprintf("%s.%s$view_adapt", concreteCacheKey, ifaceMethod.Name())
+	// T1477: also include the view/interface in the name, mirroring the vtable
+	// global name (promise_vtable_%s_as_%s). getOrEmitViewVtable caches per
+	// (concreteCacheKey, view) pair, so boxing one concrete into two DIFFERENT
+	// views that each expose a same-named adapter-requiring method would
+	// otherwise emit two definitions under one LLVM name (invalid IR).
+	adapterName := fmt.Sprintf("%s.%s$view_adapt_as_%s", concreteCacheKey, ifaceMethod.Name(), view.Obj().Name())
 
 	var params []*ir.Param
 	if ifaceSig.Recv() != nil {

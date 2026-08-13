@@ -31,16 +31,17 @@ main() {
 }
 `)
 	// Each instantiation gets its own mono-keyed adapter (monoName uses bracket
-	// notation: GBox[string], GBox[int])...
-	assertContains(t, ir, `@"GBox[string].tag$view_adapt"`)
-	assertContains(t, ir, `@"GBox[int].tag$view_adapt"`)
+	// notation: GBox[string], GBox[int]). T1477: the adapter name also carries
+	// the view suffix (_as_Tagger), mirroring the vtable global name.
+	assertContains(t, ir, `@"GBox[string].tag$view_adapt_as_Tagger"`)
+	assertContains(t, ir, `@"GBox[int].tag$view_adapt_as_Tagger"`)
 	// ...and the generic-named collision is gone entirely.
 	assertNotContains(t, ir, "@GBox.tag$view_adapt")
 	// No adapter is defined twice under any single name.
-	if got := strings.Count(ir, `define i8* @"GBox[string].tag$view_adapt"(`); got != 1 {
-		t.Errorf("want exactly 1 definition of GBox[string].tag$view_adapt, got %d", got)
+	if got := strings.Count(ir, `define i8* @"GBox[string].tag$view_adapt_as_Tagger"(`); got != 1 {
+		t.Errorf("want exactly 1 definition of GBox[string].tag$view_adapt_as_Tagger, got %d", got)
 	}
-	if got := strings.Count(ir, `define i8* @"GBox[int].tag$view_adapt"(`); got != 1 {
-		t.Errorf("want exactly 1 definition of GBox[int].tag$view_adapt, got %d", got)
+	if got := strings.Count(ir, `define i8* @"GBox[int].tag$view_adapt_as_Tagger"(`); got != 1 {
+		t.Errorf("want exactly 1 definition of GBox[int].tag$view_adapt_as_Tagger, got %d", got)
 	}
 }

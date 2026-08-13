@@ -17,13 +17,15 @@ import (
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
 	}
 	switch args[0] {
 	case "test":
 		return runGateTest(root, args[1:])
 	case "install":
 		return runGateInstall(root, args[1:])
+	case "latest-invariant":
+		return runGateLatestInvariant(args[1:])
 	case "wasm-test":
 		return runGateWasmTests(root, args[1:])
 	case "wasm-size":
@@ -37,7 +39,7 @@ func RunGate(root string, args []string) error {
 	case "schema":
 		return runGateSchema()
 	default:
-		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-size, go-test, stress, coverage, install, schema", args[0])
+		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-size, go-test, stress, coverage, install, latest-invariant, schema", args[0])
 	}
 }
 

@@ -64,13 +64,26 @@ func (ghCLIUploader) EnsureRelease(tag, title, notes string) error {
 	if err := exec.Command("gh", "release", "view", tag).Run(); err == nil {
 		return nil // already exists
 	}
-	cmd := exec.Command("gh", "release", "create", tag, "--title", title, "--notes", notes)
+	cmd := newDepsReleaseCreateCmd(tag, title, notes)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("gh release create %s: %w", tag, err)
 	}
 	return nil
+}
+
+// newDepsReleaseCreateCmd builds the `gh release create` command for a deps
+// blob release. --prerelease is mandatory: deps releases are dependency
+// artifacts, never user-facing installs, so they must NEVER take GitHub's
+// `latest` slot. Without it, a deps-* release published after the newest
+// epoch-* release becomes `latest`, and `releases/latest/download/install.sh`
+// 404s (deps releases carry only `*.br` blobs) while `resolve_latest()` returns
+// a deps tag whose binary download 404s — the entire documented install path
+// breaks (T1493). --prerelease keeps `latest` pinned to the newest epoch-*.
+func newDepsReleaseCreateCmd(tag, title, notes string) *exec.Cmd {
+	return exec.Command("gh", "release", "create", tag,
+		"--title", title, "--notes", notes, "--prerelease")
 }
 
 func (ghCLIUploader) ListAssets(tag string) ([]string, error) {

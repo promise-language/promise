@@ -100,6 +100,74 @@ func installPhasesFor(variant string) []string {
 	return phases
 }
 
+// validateLatestTag enforces the `latest` invariant (T1493): GitHub's `latest`
+// release must only ever point at a Promise epoch release (`epoch-*`). A deps-*
+// blob release taking the `latest` slot breaks every documented install path.
+// Split from the HTTP fetch so it is unit-testable without a network call.
+func validateLatestTag(tag string) error {
+	if !strings.HasPrefix(tag, "epoch-") {
+		return fmt.Errorf("`latest` release resolves to %q, not an epoch-* release — "+
+			"a deps-* blob release has taken the `latest` slot and broken the install path (T1493); "+
+			"run `gh release edit %s --prerelease` to demote it", tag, tag)
+	}
+	return nil
+}
+
+// assertLatestIsEpoch is the cheap network-only tripwire for the `latest`
+// invariant: one GitHub API request (no asset download, no test suite), then
+// validateLatestTag. Wired as `bin/gate latest-invariant` (scheduled hourly)
+// and preflighted by the stable install gate so a regression fails fast with an
+// actionable message instead of a mystery 404 on a blob URL (T1493).
+func assertLatestIsEpoch() error {
+	return assertLatestIsEpochAt("https://api.github.com/repos/" + installGitHubRepo + "/releases/latest")
+}
+
+// assertLatestIsEpochAt is assertLatestIsEpoch parameterized on the API URL so
+// the HTTP/status/JSON-parse branches are exercisable with an httptest server
+// (no live GitHub call). assertLatestIsEpoch passes the real release endpoint.
+func assertLatestIsEpochAt(api string) error {
+	req, err := http.NewRequest(http.MethodGet, api, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "promise-gate")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", api, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", api, resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return fmt.Errorf("parse %s: %w", api, err)
+	}
+	return validateLatestTag(rel.TagName)
+}
+
+// runGateLatestInvariant implements `bin/gate latest-invariant` — the cheap,
+// platform-independent tripwire that fails unless `releases/latest` resolves to
+// an epoch-* tag (T1493). It emits a one-line human message to stderr; the
+// exit status is the signal.
+func runGateLatestInvariant(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: bin/gate latest-invariant")
+	}
+	if err := assertLatestIsEpoch(); err != nil {
+		fmt.Fprintf(os.Stderr, "latest-invariant: FAIL: %v\n", err)
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "latest-invariant: ok (`latest` points at an epoch-* release)")
+	return nil
+}
+
 // runGateInstall runs the end-to-end install gate for one variant (thin|full)
 // and writes the structured JSON gate envelope to stdout. Phase progress goes to
 // stderr so stdout stays clean JSON.
@@ -249,6 +317,20 @@ func runInstallPhases(root, work, variant, channel string, system bool) error {
 	}
 	baseEnv := envWith(os.Environ(), overrides)
 	promiseBin := filepath.Join(promiseHome, "bin", promiseLeaf)
+
+	// ── preflight: the `latest` invariant (stable channel only) ──────────────
+	// The stable channel resolves `releases/latest`, so a deps-* release wrongly
+	// occupying the `latest` slot (T1493) would surface here as a mystery 404 on
+	// the install script / binary. Assert the invariant first so the failure is
+	// actionable ("latest resolves to <tag>, not an epoch release") rather than a
+	// bare download error. Cheap: one GitHub API request, no download.
+	if channel == "stable" {
+		if err := assertLatestIsEpoch(); err != nil {
+			logf("preflight: %v", err)
+			return fmt.Errorf("fetch: %w", err)
+		}
+		logf("preflight: `latest` points at an epoch-* release")
+	}
 
 	// ── phase: fetch the published install script ────────────────────────────
 	// The script + assets are GitHub release assets (the repo is public;

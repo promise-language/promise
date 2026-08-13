@@ -135,6 +135,11 @@ if ($env:PROMISE_BASE_URL) {
         } catch {
             $Tag = $null
         }
+        # `latest` must only ever resolve to an epoch-* release. A deps-* blob
+        # release accidentally taking the `latest` slot (T1493) would otherwise
+        # 404 on the binary download with no actionable message — clear a
+        # non-epoch tag so the guidance path below fires instead.
+        if ($Tag -notlike 'epoch-*') { $Tag = $null }
         if (-not $Tag) {
             # `releases/latest` excludes pre-releases, so this is reached when no stable
             # epoch has been published yet (only epoch-next pre-releases exist) or the

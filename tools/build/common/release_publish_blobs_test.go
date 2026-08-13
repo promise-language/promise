@@ -442,6 +442,30 @@ func TestGhCLIUploaderAlreadyExists(t *testing.T) {
 	}
 }
 
+// TestNewDepsReleaseCreateCmdIsPrerelease pins T1493's publish-time fix: a
+// deps blob release must be created with --prerelease so it never takes
+// GitHub's `latest` slot (which must stay pinned to the newest epoch-* release).
+func TestNewDepsReleaseCreateCmdIsPrerelease(t *testing.T) {
+	cmd := newDepsReleaseCreateCmd("deps-musl-1.2.5-r23", "musl blobs", "notes body")
+	args := cmd.Args
+	if len(args) == 0 || filepath.Base(args[0]) != "gh" {
+		t.Fatalf("expected a `gh` command, got args=%v", args)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"release", "create", "deps-musl-1.2.5-r23", "--title", "musl blobs", "--notes", "notes body", "--prerelease"} {
+		found := false
+		for _, a := range args {
+			if a == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("deps release create command missing %q (args: %s)", want, joined)
+		}
+	}
+}
+
 // TestPublishBlobsGHAlreadyExistsStillMirrorsR2 is the end-to-end regression
 // test for T0834: when GitHub returns "asset under the same name already
 // exists", the whole publish-blobs run must still succeed AND the R2 mirror

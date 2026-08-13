@@ -28,6 +28,33 @@ func TestRunGate_UnknownSubcommand(t *testing.T) {
 	}
 }
 
+// TestRunGate_LatestInvariantIsAdvertised verifies the T1493 subcommand is wired
+// into the dispatcher: both the no-args usage text and the unknown-subcommand
+// hint must list `latest-invariant`, so an operator can discover the tripwire.
+func TestRunGate_LatestInvariantIsAdvertised(t *testing.T) {
+	usageErr := RunGate("", nil)
+	if usageErr == nil || !strings.Contains(usageErr.Error(), "latest-invariant") {
+		t.Errorf("no-args usage does not advertise latest-invariant: %v", usageErr)
+	}
+	unknownErr := RunGate("", []string{"bogus"})
+	if unknownErr == nil || !strings.Contains(unknownErr.Error(), "latest-invariant") {
+		t.Errorf("unknown-subcommand hint does not list latest-invariant: %v", unknownErr)
+	}
+}
+
+// TestRunGate_LatestInvariantRejectsArgs verifies the dispatcher routes
+// `latest-invariant` to its handler, which rejects stray positional args with a
+// usage error before any network call (T1493).
+func TestRunGate_LatestInvariantRejectsArgs(t *testing.T) {
+	err := RunGate("", []string{"latest-invariant", "extra"})
+	if err == nil {
+		t.Fatal("expected error for stray arg, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
 // TestRunGate_TestBadFlag verifies that unrecognized flags are rejected early.
 func TestRunGate_TestBadFlag(t *testing.T) {
 	err := RunGate("", []string{"test", "--bogus"})

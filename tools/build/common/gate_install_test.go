@@ -535,3 +535,95 @@ func TestValidateGateChannel(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateLatestTag pins the `latest` invariant (T1493): the tripwire must
+// accept only epoch-* tags and reject a deps-* blob release (or anything else)
+// that wrongly occupies the `latest` slot.
+func TestValidateLatestTag(t *testing.T) {
+	for _, ok := range []string{"epoch-2026.6", "epoch-next", "epoch-2026.0"} {
+		if err := validateLatestTag(ok); err != nil {
+			t.Errorf("validateLatestTag(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"deps-musl-1.2.5-r23", "deps-llvm-22.1.0", "", "v1.2.3", "latest"} {
+		if err := validateLatestTag(bad); err == nil {
+			t.Errorf("validateLatestTag(%q) = nil, want error", bad)
+		}
+	}
+	// The error message names the offending tag so the failure is actionable.
+	err := validateLatestTag("deps-musl-1.2.5-r23")
+	if err == nil || !strings.Contains(err.Error(), "deps-musl-1.2.5-r23") {
+		t.Errorf("error should name the offending tag, got: %v", err)
+	}
+}
+
+// TestAssertLatestIsEpochAt exercises the network tripwire's HTTP/status/parse
+// branches against an httptest server (no live GitHub call): a 200 with an
+// epoch-* tag passes; a 200 with a deps-* tag fails; a non-200 status and a
+// malformed body both fail with a message that names the endpoint (T1493).
+func TestAssertLatestIsEpochAt(t *testing.T) {
+	newServer := func(status int, body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+
+	t.Run("epoch tag passes", func(t *testing.T) {
+		srv := newServer(http.StatusOK, `{"tag_name":"epoch-2026.6"}`)
+		defer srv.Close()
+		if err := assertLatestIsEpochAt(srv.URL); err != nil {
+			t.Errorf("epoch-* latest = %v, want nil", err)
+		}
+	})
+
+	t.Run("deps tag fails", func(t *testing.T) {
+		srv := newServer(http.StatusOK, `{"tag_name":"deps-musl-1.2.5-r23"}`)
+		defer srv.Close()
+		err := assertLatestIsEpochAt(srv.URL)
+		if err == nil || !strings.Contains(err.Error(), "deps-musl-1.2.5-r23") {
+			t.Errorf("deps-* latest = %v, want error naming the tag", err)
+		}
+	})
+
+	t.Run("non-200 fails", func(t *testing.T) {
+		srv := newServer(http.StatusNotFound, "not found")
+		defer srv.Close()
+		err := assertLatestIsEpochAt(srv.URL)
+		if err == nil || !strings.Contains(err.Error(), srv.URL) {
+			t.Errorf("404 = %v, want error naming the endpoint", err)
+		}
+	})
+
+	t.Run("malformed body fails", func(t *testing.T) {
+		srv := newServer(http.StatusOK, "{not json")
+		defer srv.Close()
+		err := assertLatestIsEpochAt(srv.URL)
+		if err == nil || !strings.Contains(err.Error(), "parse") {
+			t.Errorf("bad JSON = %v, want parse error", err)
+		}
+	})
+
+	t.Run("unreachable host fails", func(t *testing.T) {
+		// A closed server URL surfaces the transport error branch (GET %s: %w).
+		srv := newServer(http.StatusOK, `{"tag_name":"epoch-2026.6"}`)
+		url := srv.URL
+		srv.Close()
+		if err := assertLatestIsEpochAt(url); err == nil {
+			t.Error("closed server = nil, want transport error")
+		}
+	})
+}
+
+// TestRunGateLatestInvariantRejectsArgs pins the arg-validation branch of
+// `bin/gate latest-invariant` (T1493): it takes no positional args, and a stray
+// arg is rejected with a usage error before any network call is attempted.
+func TestRunGateLatestInvariantRejectsArgs(t *testing.T) {
+	err := runGateLatestInvariant([]string{"stray"})
+	if err == nil {
+		t.Fatal("expected usage error for a stray arg, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}

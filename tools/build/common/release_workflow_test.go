@@ -292,6 +292,63 @@ func TestInstallScriptsUseExactMatch(t *testing.T) {
 	}
 }
 
+// TestInstallResolveLatestRejectsNonEpoch runs the exact `case` filter install.sh
+// applies to the `latest`-resolved tag (T1493). Only epoch-* tags survive; a
+// deps-* blob release (or anything else) that wrongly took the `latest` slot is
+// cleared to "", forcing the "no published stable release" guidance path instead
+// of a 404 on a blob URL.
+func TestInstallResolveLatestRejectsNonEpoch(t *testing.T) {
+	cases := []struct {
+		tag  string
+		want string
+	}{
+		{"epoch-2026.6", "epoch-2026.6"},
+		{"epoch-next", "epoch-next"},
+		{"deps-musl-1.2.5-r23", ""},
+		{"deps-llvm-22.1.0", ""},
+		{"", ""},
+		{"v1.2.3", ""},
+	}
+	for _, c := range cases {
+		got := runInstallEpochFilter(t, c.tag)
+		if got != c.want {
+			t.Errorf("epoch filter on %q = %q, want %q", c.tag, got, c.want)
+		}
+	}
+}
+
+// runInstallEpochFilter runs the exact `case $TAG in epoch-*) ;; *) TAG="" ;; esac`
+// filter install.sh uses, echoing the result. Mirrors runAwkExtract's approach of
+// executing the real shell logic rather than reimplementing it.
+func runInstallEpochFilter(t *testing.T, tag string) string {
+	t.Helper()
+	script := `TAG="$1"; case "$TAG" in epoch-*) ;; *) TAG="" ;; esac; printf '%s' "$TAG"`
+	cmd := exec.Command("sh", "-c", script, "sh", tag)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sh: %v", err)
+	}
+	return string(out)
+}
+
+// TestInstallScriptsEnforceEpochInvariant is a source-level regression guard: the
+// committed installers must reject a non-epoch `latest` tag (T1493). Pairs with
+// TestInstallResolveLatestRejectsNonEpoch (which proves the runtime behavior).
+func TestInstallScriptsEnforceEpochInvariant(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skipf("find root: %v", err)
+	}
+	sh := readScript(t, root, "install.sh")
+	if !strings.Contains(sh, "epoch-*)") {
+		t.Error("install.sh no longer filters the `latest` tag to epoch-* (T1493 invariant lost)")
+	}
+	ps1 := readScript(t, root, "install.ps1")
+	if !strings.Contains(ps1, "-notlike 'epoch-*'") {
+		t.Error("install.ps1 no longer filters the `latest` tag to epoch-* (T1493 invariant lost)")
+	}
+}
+
 func readScript(t *testing.T, root, name string) string {
 	t.Helper()
 	p := filepath.Join(root, "scripts", name)

@@ -116,6 +116,15 @@ else
   if [ "$EPOCH" = "latest" ]; then
     echo "Fetching latest release..."
     TAG=$(resolve_latest)
+    # `latest` must only ever resolve to an epoch-* release. A deps-* blob release
+    # accidentally taking the `latest` slot (T1493) would otherwise 404 on the
+    # binary download with no actionable message — force the guidance path below
+    # by clearing a non-epoch tag. (Filtered here in the caller, not inside
+    # resolve_latest, so a grep no-match doesn't trip `set -e`.)
+    case "$TAG" in
+      epoch-*) ;;
+      *) TAG="" ;;
+    esac
     if [ -z "$TAG" ]; then
       # `releases/latest` excludes pre-releases, so this is reached when no stable
       # epoch has been published yet (only epoch-next pre-releases exist) or the

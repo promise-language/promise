@@ -1,0 +1,137 @@
+// T1466: A fixed-size array LITERAL used directly as a call argument to a plain
+// (borrow) array-by-value param was never registered as a caller temp, so its
+// heap-allocating elements (concatenated strings, vectors, heap-user types) were
+// never dropped. genCallArgs now drives trackArrayTemp from the argument path
+// (previously only the call-result path did). These tests assert zero leaks
+// across explicit arg / parameter default / .rodata / move / owned-variable /
+// vector-element / loop-reuse. `.rodata` string literals do not allocate, which
+// is why this originally went unnoticed.
+type Impl `public `doc("Takes fixed arrays of heap-allocating elements by borrow.") {
+  int k;
+  a(this, string[2] xs) int `public `doc("Length of the first borrowed string element.") => xs[0].len;
+  with_default(this, string[2] xs = ["a" + "b", "c" + "d"]) int `public `doc("Same, with an array-literal parameter default.") => xs[0].len;
+  consume(this, string[2] move xs) int `public `doc("Takes ownership of the array and drops it.") => xs[0].len;
+  vec(this, Vector[int][2] xs) int `public `doc("First element of the first borrowed vector.") => xs[0][0];
+}
+
+type Boxed `public `doc("Heap user type used as a fixed-array element (not string, not Vector).") {
+  int v;
+}
+
+// The item's exact repro: array literal with concatenated (heap) elements passed
+// to a plain borrow param — the caller must free both element strings.
+test_explicit_arg() `test {
+  Impl im = Impl(k: 1);
+  assert(im.a(["a" + "b", "c" + "d"]) == 2, "explicit arg");
+}
+
+// Same shape reached through a parameter DEFAULT — sema synthesizes the default
+// array literal as a call argument, so it flows through the same arg path.
+test_default_arg() `test {
+  Impl im = Impl(k: 1);
+  assert(im.with_default() == 2, "default arg");
+}
+
+// `.rodata` string literals do not allocate — the fix must not regress the
+// non-allocating literal case (no spurious drop, still correct result).
+test_rodata_arg() `test {
+  Impl im = Impl(k: 1);
+  assert(im.a(["a", "b"]) == 1, "rodata arg");
+}
+
+// A move (`~`) param: the callee owns and drops the array via bindingDropArray.
+// The fix is borrow-only, so this must remain leak-free (no double-free).
+test_move_arg() `test {
+  Impl im = Impl(k: 1);
+  assert(im.consume(["a" + "b", "c" + "d"]) == 2, "move arg");
+}
+
+// An owned array VARIABLE passed to a borrow param drops via its own scope-exit
+// binding exactly once — not via a caller statement temp (guards double-free).
+test_owned_variable_arg() `test {
+  Impl im = Impl(k: 1);
+  string[2] xs = ["a" + "b", "c" + "d"];
+  assert(im.a(xs) == 2, "owned variable arg");
+}
+
+// A non-string droppable element type (Vector[int]) exercises the element-wise
+// drop through emitVariantFieldDrop rather than the string fast path.
+test_vector_elements() `test {
+  Impl im = Impl(k: 1);
+  int[] p = int[]();
+  p.push(7);
+  int[] q = int[]();
+  q.push(9);
+  assert(im.vec([p, q]) == 7, "vector elements");
+}
+
+// The call in a loop body: the statement temp is created and dropped each
+// iteration, so the drop flag must reset (no double-free across iterations).
+test_in_loop() `test {
+  Impl im = Impl(k: 1);
+  for i in 0..3 {
+    assert(im.a(["a" + "b", "c" + "d"]) == 2, "loop iter");
+  }
+}
+
+// A generator borrows its array param but reads it LAZILY (the frame outlives the
+// call statement), so a statement-end drop is too early (UAF). The array-literal
+// arg must get a scope-level owned drop instead — leak-free, correct values.
+mk_pair() string[2] `doc("Heap-allocating fixed-array helper for generator args.") => ["a" + "b", "c" + "d"];
+
+lens(string[2] xs) stream[int] `doc("Yields each element length, reading the array lazily.") {
+  yield xs[0].len;
+  yield xs[1].len;
+}
+
+test_generator_literal_arg() `test {
+  int total = 0;
+  for n in lens(["a" + "b", "c" + "d"]) {
+    total = total + n;
+  }
+  assert(total == 4, "generator literal arg");
+}
+
+// The same generator fed a CALL-RESULT array (already statement-tracked by the
+// T1181 CallExpr path): the too-early statement-end drop must be claimed so only
+// the scope-level drop fires — else the lazily-read elements are freed early
+// (UAF → wrong lengths) and double-freed.
+test_generator_call_result_arg() `test {
+  int total = 0;
+  for n in lens(mk_pair()) {
+    total = total + n;
+  }
+  assert(total == 4, "generator call-result arg");
+}
+
+// A HEAP-USER element type (not string, not Vector) exercises the
+// variantFieldNeedsDrop heap-user branch and the emitVariantFieldDrop heap-user
+// cleanup path — distinct from the string fast path and the Vector.drop path.
+// The method returns an int (no element escape), so the caller frees both
+// element instances exactly once.
+take_boxed(Boxed[2] xs) int `doc("First heap-user element's field, borrowed.") => xs[0].v;
+
+test_heap_user_element_arg() `test {
+  assert(take_boxed([Boxed(v: 5), Boxed(v: 6)]) == 5, "heap-user element arg");
+}
+
+// A CALL-RESULT array passed to a PLAIN (non-generator) borrow param: the T1181
+// CallExpr path already statement-tracked the owned call result, and
+// trackArrayTemp de-dups via stmtTempMap, so exactly one element-wise drop fires
+// — no double-free, no leak. (The generator path covers this shape for lazy
+// reads; this covers the eager non-generator path.)
+mk_strs() string[2] `doc("Owned call-result fixed-array of heap strings.") => ["a" + "b", "c" + "d"];
+take_len(string[2] xs) int `doc("First element length, borrowed (non-generator).") => xs[0].len;
+
+test_call_result_to_plain_borrow() `test {
+  assert(take_len(mk_strs()) == 2, "call-result to plain borrow");
+}
+
+// A GENERIC borrow param `T[2]` with an array-literal arg, instantiated at
+// T=string: the caller temp's heap elements must be freed exactly once through
+// the generic-instance code path.
+firstg[T](T[2] xs) T `doc("First element of a generic fixed-array, borrowed.") => xs[0];
+
+test_generic_string_array_arg() `test {
+  assert(firstg[string](["a" + "b", "c" + "d"]) == "ab", "generic string array arg");
+}

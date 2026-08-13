@@ -1523,6 +1523,39 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 				}
 			}
 		}
+		// T1466: A fixed-size array literal (or owned-array call result) passed to a
+		// plain (borrow) array-by-value param is copied as an [N x T] aggregate and
+		// borrowed by the callee — nothing frees its heap-allocating elements
+		// (strings/vectors/heap-user). Register it as an element-wise-drop statement
+		// temp so the caller frees them after the call, mirroring the T1233 tuple case
+		// above. move (RefMut) params are excluded: the callee owns and drops via
+		// bindingDropArray, and an already-tracked call-result temp was claimed above.
+		if i < len(params) && !isMutRefParam && !params[i].IsVariadic() {
+			paramType := params[i].Type()
+			if c.typeSubst != nil {
+				paramType = types.Substitute(paramType, c.typeSubst)
+			}
+			if arr, isArr := paramType.(*types.Array); isArr &&
+				c.variantFieldNeedsDrop(arr.Elem()) && c.tupleArgIsCallerOwnedTemp(arg.Value) {
+				if calleeIsGenerator {
+					// Generator borrows its param but reads it lazily (frame outlives
+					// this statement) — a statement-end drop is too early (UAF). Give
+					// the temp a scope-level owned drop, mirroring the tuple case.
+					// A call-result array (`gen(mk())`) was already registered as a
+					// statement-end temp by the T1181 CallExpr path; claim it here so
+					// that too-early drop doesn't fire — the scope drop below owns it.
+					// No-op for an array literal (never statement-tracked).
+					c.claimStringTemp(v)
+					name := c.uniqueLocalName("_genarrarg")
+					argAlloca := c.createEntryAlloca(v.Type())
+					argAlloca.SetName(name)
+					c.block.NewStore(v, argAlloca)
+					c.maybeRegisterDrop(name, argAlloca, arr)
+				} else {
+					c.trackArrayTemp(v, arr)
+				}
+			}
+		}
 		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's
 		// len field so the callee's scope-exit drop skips element drops and buffer free.
 		// Passthrough is detected when the arg is NOT an ArrayLit (ArrayLit means

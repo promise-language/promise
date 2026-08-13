@@ -2,6 +2,7 @@ package common
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,13 +30,23 @@ type createdTag struct {
 type fakeCutGit struct {
 	head        string
 	branch      string
+	branchErr   error
 	clean       bool
 	ancestorOK  bool
 	fetchErr    error
 	tags        map[string]string // tag → sha (existence + TagSHA)
 	epochTags   []string
-	resolved    map[string]string // --sha ref → full sha (ResolveSHA)
+	resolved    map[string]string // --commit commit-ish → full sha (ResolveSHA)
 	logSubjects []string          // commit subjects LogSubjects returns
+
+	remotePinTags []string        // ci-pin-* tags ListRemotePinTags reports
+	pushedPinTags []string        // tags pushed via PushTagAt
+	deletedTags   []string        // tags deleted via DeletePinTag
+	notOnOrigin   map[string]bool // shas ReachableFromOrigin reports as absent
+	pushPinErr    error
+	deletePinErr  error
+	listPinErr    error
+	reachableErr  error
 
 	// Injected tool-failure errors, so tests can cover the "underlying git call
 	// errored → gate hard-fails (non-overridable)" contract.
@@ -63,7 +74,7 @@ func newFakeCutGit() *fakeCutGit {
 }
 
 func (g *fakeCutGit) HeadSHA() (string, error)       { return g.head, g.headErr }
-func (g *fakeCutGit) CurrentBranch() (string, error) { return g.branch, nil }
+func (g *fakeCutGit) CurrentBranch() (string, error) { return g.branch, g.branchErr }
 func (g *fakeCutGit) CleanTree() (bool, error)       { return g.clean, g.cleanErr }
 func (g *fakeCutGit) IsAncestor(sha, ref string) (bool, error) {
 	return g.ancestorOK, g.ancestorErr
@@ -114,6 +125,29 @@ func (g *fakeCutGit) ResolveSHA(ref string) (string, error) {
 func (g *fakeCutGit) LogSubjects(fromRef, toSHA string) ([]string, error) {
 	return g.logSubjects, g.logErr
 }
+func (g *fakeCutGit) PushTagAt(tag, _ string) error {
+	if g.pushPinErr != nil {
+		return g.pushPinErr
+	}
+	g.pushedPinTags = append(g.pushedPinTags, tag)
+	return nil
+}
+func (g *fakeCutGit) DeletePinTag(tag string) error {
+	if g.deletePinErr != nil {
+		return g.deletePinErr
+	}
+	g.deletedTags = append(g.deletedTags, tag)
+	return nil
+}
+func (g *fakeCutGit) ListRemotePinTags() ([]string, error) {
+	return g.remotePinTags, g.listPinErr
+}
+
+// ReachableFromOrigin defaults to "yes" — the normal state for a cut target, so
+// only the tests that exercise the unpushed-commit refusal opt out.
+func (g *fakeCutGit) ReachableFromOrigin(sha string) (bool, error) {
+	return !g.notOnOrigin[sha], g.reachableErr
+}
 
 // fakeCutGH is an in-memory cutGH. ci.yml runs flip from ciRunsBefore to
 // ciRunsAfter once a dispatch happens, so the dispatch-and-watch path can be
@@ -124,18 +158,42 @@ type fakeCutGH struct {
 	ciRunsAfter    []ghRun
 	releaseRuns    []ghRun
 	jobs           map[int64][]ghJob
+	jobsFn         func(int64) ([]ghJob, error) // overrides the jobs map when set
 	dispatched     []map[string]string
+	dispatchedRefs []string // the ref each dispatch targeted, index-aligned with dispatched
 	dispatchedFlag bool
 	dispatchErr    error
 	runsErr        error // injected `gh run list` failure
+	runsErrAfter   error // injected `gh run list` failure, but only once a dispatch has happened
+	runsCalls      int   // WorkflowRuns call count, so a test can fail a specific one
+	runsErrFrom    int   // 1-based call number from which WorkflowRuns fails (0 = never)
 	jobsErr        error // injected `gh run view` failure
+	cancelled      []int64
+	cancelErr      error
+}
+
+func (f *fakeCutGH) CancelRun(runID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, runID)
+	return nil
 }
 
 func (f *fakeCutGH) WorkflowRuns(workflow string, limit int) ([]ghRun, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.runsCalls++
 	if f.runsErr != nil {
 		return nil, f.runsErr
+	}
+	if f.runsErrFrom != 0 && f.runsCalls >= f.runsErrFrom {
+		return nil, fmt.Errorf("run list failed on call %d", f.runsCalls)
+	}
+	if f.runsErrAfter != nil && f.dispatchedFlag {
+		return nil, f.runsErrAfter
 	}
 	if workflow == "release.yml" {
 		return f.releaseRuns, nil
@@ -151,6 +209,9 @@ func (f *fakeCutGH) RunJobs(runID int64) ([]ghJob, error) {
 	if f.jobsErr != nil {
 		return nil, f.jobsErr
 	}
+	if f.jobsFn != nil {
+		return f.jobsFn(runID)
+	}
 	return f.jobs[runID], nil
 }
 func (f *fakeCutGH) DispatchWorkflow(workflow, ref string, inputs map[string]string) error {
@@ -160,6 +221,7 @@ func (f *fakeCutGH) DispatchWorkflow(workflow, ref string, inputs map[string]str
 		return f.dispatchErr
 	}
 	f.dispatched = append(f.dispatched, inputs)
+	f.dispatchedRefs = append(f.dispatchedRefs, ref)
 	f.dispatchedFlag = true
 	return nil
 }
@@ -1198,10 +1260,10 @@ func TestGateCatalogEpochYearAdvance(t *testing.T) {
 
 func TestGateCIPerPlatformDispatchError(t *testing.T) {
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
-	// linux + darwin already green; only windows is absent → dispatchCI takes the
-	// per-platform branch (not platform=all), and that single dispatch fails.
+	// Some platforms already green, the rest absent → dispatchCI issues its single
+	// run, and that dispatch fails.
 	gh := greenCI(sha)
-	gh.jobs[1] = gh.jobs[1][:2] // drop the windows job → windows absent
+	gh.jobs[1] = gh.jobs[1][:2] // drop the trailing jobs → those platforms absent
 	gh.dispatchErr = errors.New("gh down")
 	ctx := baseCutCtx(gh, newFakeCutGit())
 	ctx.runCI = true
@@ -1436,9 +1498,328 @@ func TestCutNextCreateTagError(t *testing.T) {
 	}
 }
 
-// ── --sha flag (pin to exact commit/ref) ─────────────────────────────────────
+// ── gate 7: dispatch ref + concurrency (T1489) ───────────────────────────────
 
-func TestCutNextWithShaPin(t *testing.T) {
+// cutDispatchCtx is an absent-CI context whose target is `sha`, ready to take
+// the --run-ci dispatch path.
+func cutDispatchCtx(t *testing.T, gh *fakeCutGH, g *fakeCutGit, sha string) *cutContext {
+	t.Helper()
+	ctx := baseCutCtx(gh, g)
+	ctx.targetSHA = sha
+	ctx.runCI = true
+	return ctx
+}
+
+// TestCutRunCIDispatchesOnPinTagWhenPinned: a pinned cut must dispatch on its own
+// immutable pin ref. Dispatching on the branch (the old behavior) tested whatever
+// origin/main had moved to, so `cut --commit <past> --run-ci` could never produce
+// CI at the pinned commit.
+func TestCutRunCIDispatchesOnPinTagWhenPinned(t *testing.T) {
+	noOpSleep(t)
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	g.remotePinTags = []string{"ci-pin-stale"}
+	gh := &fakeCutGH{
+		ciRunsBefore: []ghRun{{DatabaseID: 3, HeadBranch: "ci-pin-stale", Status: "completed"}},
+		ciRunsAfter:  greenCI(sha).ciRunsBefore,
+		jobs:         greenCI(sha).jobs,
+	}
+	ctx := cutDispatchCtx(t, gh, g, sha)
+	ctx.pinnedRef = sha
+	if res := gateCI(ctx); !res.passed {
+		t.Fatalf("pinned dispatch must pass: %s", res.detail)
+	}
+	wantTag := "ci-pin-" + short(sha)
+	if len(g.pushedPinTags) != 1 || g.pushedPinTags[0] != wantTag {
+		t.Fatalf("pushed pins = %v, want [%s]", g.pushedPinTags, wantTag)
+	}
+	if len(gh.dispatchedRefs) != 1 || gh.dispatchedRefs[0] != wantTag {
+		t.Fatalf("dispatch refs = %v, want [%s] (never the branch)", gh.dispatchedRefs, wantTag)
+	}
+	// The stale pin is collected, and our own pin is removed once the watch ends.
+	if strings.Join(g.deletedTags, ",") != "ci-pin-stale,"+wantTag {
+		t.Errorf("deleted tags = %v, want [ci-pin-stale %s]", g.deletedTags, wantTag)
+	}
+}
+
+// TestCutRunCINoCIWaitLeavesPin: with --no-ci-wait nothing tracks the run, so the
+// pin must survive for the next dispatch's prune — deleting it here is exactly
+// the T1489 bug.
+func TestCutRunCINoCIWaitLeavesPin(t *testing.T) {
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	gh := &fakeCutGH{}
+	ctx := cutDispatchCtx(t, gh, g, sha)
+	ctx.pinnedRef = sha
+	ctx.noCIWait = true
+	if res := gateCI(ctx); res.passed {
+		t.Fatal("--no-ci-wait must not pass the gate")
+	}
+	if len(g.deletedTags) != 0 {
+		t.Errorf("pin must outlive an unwatched dispatch, deleted %v", g.deletedTags)
+	}
+}
+
+// TestCutRunCIPinSurvivesUnfinishedWatch: watchCI gives up after its attempt
+// ceiling with platforms still pending. The run is still live, so deleting the
+// ref it checks out is exactly T1489 — the pin must survive for a later prune.
+func TestCutRunCIPinSurvivesUnfinishedWatch(t *testing.T) {
+	noOpSleep(t)
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	gh := &fakeCutGH{} // no runs ever appear → every platform stays absent
+	ctx := cutDispatchCtx(t, gh, g, sha)
+	ctx.pinnedRef = sha
+	res := gateCI(ctx)
+	if res.passed || !strings.Contains(res.detail, "still pending") {
+		t.Fatalf("want a still-pending gate failure, got %+v", res)
+	}
+	if len(g.deletedTags) != 0 {
+		t.Errorf("pin must outlive a run that never finished, deleted %v", g.deletedTags)
+	}
+}
+
+// TestCutRunCIRefusesUnpushedPinCommit: gate 2 (reachable from origin/main) is
+// overridable and every gate still runs after an override, so without this guard
+// `--reason` would let the pin push a local-only commit to origin as a side
+// effect of "run CI".
+func TestCutRunCIRefusesUnpushedPinCommit(t *testing.T) {
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	g.notOnOrigin = map[string]bool{sha: true}
+	gh := &fakeCutGH{}
+	ctx := cutDispatchCtx(t, gh, g, sha)
+	ctx.pinnedRef = sha
+	res := gateCI(ctx)
+	if res.passed || !strings.Contains(res.detail, "is not on origin") {
+		t.Fatalf("want a not-on-origin refusal, got %+v", res)
+	}
+	if len(g.pushedPinTags) != 0 || len(gh.dispatched) != 0 {
+		t.Errorf("must not push a pin or dispatch: tags=%v dispatched=%v", g.pushedPinTags, gh.dispatched)
+	}
+}
+
+// TestCutRunCINoCIWaitReportsJoinedRun: with --no-ci-wait the gate detail must
+// say what actually happened — claiming a dispatch that never occurred (the run
+// was already live at this SHA) misreports an outward-facing action.
+func TestCutRunCINoCIWaitReportsJoinedRun(t *testing.T) {
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	gh := &fakeCutGH{ciRunsBefore: []ghRun{{DatabaseID: 4, HeadSHA: sha, HeadBranch: "main", Status: "in_progress"}}}
+	ctx := cutDispatchCtx(t, gh, newFakeCutGit(), sha)
+	ctx.noCIWait = true
+	res := gateCI(ctx)
+	if len(gh.dispatched) != 0 {
+		t.Fatalf("must not dispatch over the run already testing this SHA, got %v", gh.dispatched)
+	}
+	if strings.Contains(res.detail, "dispatched ci.yml") {
+		t.Errorf("detail must not claim a dispatch that did not happen: %q", res.detail)
+	}
+	if !strings.Contains(res.detail, "already running") {
+		t.Errorf("detail = %q, want it to name the run it joined", res.detail)
+	}
+}
+
+// TestCutRunCIUsesAllForMultipleAbsentPlatforms: several absent platforms become
+// ONE platform=all run — a run per platform would self-cancel through ci.yml's
+// shared concurrency group.
+func TestCutRunCIUsesAllForMultipleAbsentPlatforms(t *testing.T) {
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	before := greenCI(sha)
+	before.jobs[1] = before.jobs[1][:len(requiredPlatforms)-2] // last two absent
+	gh := &fakeCutGH{
+		ciRunsBefore: before.ciRunsBefore,
+		ciRunsAfter:  greenCI(sha).ciRunsBefore,
+		jobs:         before.jobs,
+	}
+	ctx := cutDispatchCtx(t, gh, newFakeCutGit(), sha)
+	res := gateCI(ctx)
+	if len(gh.dispatched) != 1 {
+		t.Fatalf("want exactly 1 dispatch for 2 absent platforms, got %v (%s)", gh.dispatched, res.detail)
+	}
+	if gh.dispatched[0]["platform"] != "all" {
+		t.Errorf("platform = %q, want all", gh.dispatched[0]["platform"])
+	}
+}
+
+// TestCutRunCIWaitsForMatchingInProgressRun: a live run on our dispatch ref at
+// exactly the target SHA IS the run we want — wait on it, never cancel-and-requeue.
+func TestCutRunCIWaitsForMatchingInProgressRun(t *testing.T) {
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	// Run 4 is live at the target SHA. Its jobs are still pending on the gate's
+	// first look (→ absent, so the dispatch path is entered) and green by the time
+	// the watch polls.
+	var jobCalls int
+	gh := &fakeCutGH{
+		ciRunsBefore: []ghRun{{DatabaseID: 4, HeadSHA: sha, HeadBranch: "main", Status: "in_progress"}},
+		jobsFn: func(int64) ([]ghJob, error) {
+			jobCalls++
+			if jobCalls == 1 {
+				return nil, nil
+			}
+			return greenCI(sha).jobs[1], nil
+		},
+	}
+	ctx := cutDispatchCtx(t, gh, newFakeCutGit(), sha)
+	res := gateCI(ctx)
+	if !res.passed {
+		t.Fatalf("must fall through to the watch and pass: %s", res.detail)
+	}
+	if len(gh.dispatched) != 0 {
+		t.Errorf("must not dispatch over the run already testing this SHA, got %v", gh.dispatched)
+	}
+	if len(gh.cancelled) != 0 {
+		t.Errorf("cut must never cancel a run, cancelled %v", gh.cancelled)
+	}
+}
+
+// TestCutRunCIRejectsForeignInProgressRun: a live run on our ref at a DIFFERENT
+// SHA would be silently cancelled by the dispatch — refuse, overridably.
+func TestCutRunCIRejectsForeignInProgressRun(t *testing.T) {
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	gh := &fakeCutGH{
+		ciRunsBefore: []ghRun{{DatabaseID: 4, HeadSHA: "ffffffffffffffffffffffffffffffffffffffff", HeadBranch: "main", Status: "in_progress"}},
+	}
+	ctx := cutDispatchCtx(t, gh, newFakeCutGit(), sha)
+	res := gateCI(ctx)
+	if res.passed {
+		t.Fatal("a foreign live run must block the dispatch")
+	}
+	if !res.overridable {
+		t.Error("waiting out a live run is an overridable gate, not a tool failure")
+	}
+	if !strings.Contains(res.detail, "#4") || !strings.Contains(res.detail, "gh run cancel 4") {
+		t.Errorf("detail = %q, want the run id and a way out", res.detail)
+	}
+	// `cut` defines no --cancel-running flag, so pointing the reader at one would
+	// send them into `flag provided but not defined`.
+	if strings.Contains(res.detail, "--cancel-running") {
+		t.Errorf("detail must not name a flag `cut` does not define: %q", res.detail)
+	}
+	if len(gh.dispatched) != 0 || len(gh.cancelled) != 0 {
+		t.Errorf("must neither dispatch nor cancel: dispatched=%v cancelled=%v", gh.dispatched, gh.cancelled)
+	}
+}
+
+// TestCutDispatchCIToolFailures: every tool call dispatchCI makes before the
+// workflow_dispatch can fail, and each must abort the dispatch as a HARD gate
+// failure (not overridable — only a live-run collision is "wait it out"), with
+// no pin left behind for a run that will never exist.
+func TestCutDispatchCIToolFailures(t *testing.T) {
+	sha := "1111111111111111111111111111111111111111"
+	cases := []struct {
+		name   string
+		pinned bool
+		mutGit func(*fakeCutGit)
+		mutGH  func(*fakeCutGH)
+		want   string
+	}{
+		{
+			// gateCI's own status query is call 1; dispatchCI's is call 2. Failing
+			// exactly call 2 lands inside dispatchCI rather than short-circuiting
+			// the gate before it ever gets there.
+			name:  "run list fails",
+			mutGH: func(gh *fakeCutGH) { gh.runsErrFrom = 2 },
+			want:  "run list failed on call 2",
+		},
+		{
+			name:   "current branch fails",
+			mutGit: func(g *fakeCutGit) { g.branchErr = errors.New("detached") },
+			want:   "current branch: detached",
+		},
+		{
+			name:   "pin push fails",
+			pinned: true,
+			mutGit: func(g *fakeCutGit) { g.pushPinErr = errors.New("push rejected") },
+			want:   "push rejected",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			noOpSleep(t)
+			g := newFakeCutGit()
+			// A run exists at the SHA but reports no jobs, so every platform is
+			// absent and the gate falls through to the dispatch path — while the
+			// first WorkflowRuns query (gateCI's own) still succeeds.
+			gh := &fakeCutGH{
+				ciRunsBefore: []ghRun{{DatabaseID: 1, HeadSHA: sha, HeadBranch: "main", Status: "completed"}},
+				jobs:         map[int64][]ghJob{1: {}},
+			}
+			if tc.mutGit != nil {
+				tc.mutGit(g)
+			}
+			if tc.mutGH != nil {
+				tc.mutGH(gh)
+			}
+			ctx := cutDispatchCtx(t, gh, g, sha)
+			if tc.pinned {
+				ctx.pinnedRef = sha
+			}
+			res := gateCI(ctx)
+			if res.passed || !strings.Contains(res.detail, tc.want) {
+				t.Fatalf("gate = %+v, want a failure mentioning %q", res, tc.want)
+			}
+			if res.overridable {
+				t.Error("a tool failure is a hard stop, not an overridable gate")
+			}
+			if len(gh.dispatched) != 0 {
+				t.Errorf("must not dispatch after the failure, got %v", gh.dispatched)
+			}
+			if len(g.pushedPinTags) != len(g.deletedTags) {
+				t.Errorf("every pushed pin must be cleaned up: pushed=%v deleted=%v", g.pushedPinTags, g.deletedTags)
+			}
+		})
+	}
+}
+
+// TestCutRunCIDispatchErrorCleansPin: a pin pushed for a dispatch that then
+// fails is removed — no run will ever reference it, so leaving it would strand a
+// ref the next prune cannot justify collecting (no completed run on it).
+func TestCutRunCIDispatchErrorCleansPin(t *testing.T) {
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	gh := &fakeCutGH{dispatchErr: errors.New("dispatch refused")}
+	ctx := cutDispatchCtx(t, gh, g, sha)
+	ctx.pinnedRef = sha
+	res := gateCI(ctx)
+	if res.passed || !strings.Contains(res.detail, "dispatch refused") {
+		t.Fatalf("gate = %+v, want the dispatch error surfaced", res)
+	}
+	want := "ci-pin-" + short(sha)
+	if strings.Join(g.pushedPinTags, ",") != want || strings.Join(g.deletedTags, ",") != want {
+		t.Errorf("pin lifecycle = pushed %v / deleted %v, want both [%s]", g.pushedPinTags, g.deletedTags, want)
+	}
+}
+
+// TestCutRunCIPinSurvivesWatchError: the watch's status query itself failing
+// leaves the run's state UNKNOWN — it may still be queued, so deleting the ref it
+// is about to check out is exactly T1489. The pin stays for a later prune.
+func TestCutRunCIPinSurvivesWatchError(t *testing.T) {
+	noOpSleep(t)
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	gh := &fakeCutGH{runsErrAfter: errors.New("api down mid-watch")}
+	ctx := cutDispatchCtx(t, gh, g, sha)
+	ctx.pinnedRef = sha
+	res := gateCI(ctx)
+	if res.passed || !strings.Contains(res.detail, "watch CI: ") {
+		t.Fatalf("gate = %+v, want a watch failure", res)
+	}
+	if !strings.Contains(res.detail, "api down mid-watch") {
+		t.Errorf("detail = %q, want the underlying query error", res.detail)
+	}
+	if len(gh.dispatched) != 1 {
+		t.Fatalf("the dispatch itself must have happened, got %v", gh.dispatched)
+	}
+	if len(g.deletedTags) != 0 {
+		t.Errorf("run state is unknown — the pin must stay, deleted %v", g.deletedTags)
+	}
+}
+
+// ── --commit flag (pin to an exact commit-ish) ───────────────────────────────
+
+func TestCutNextWithCommitPin(t *testing.T) {
 	noOpSleep(t)
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	pinnedSHA := "1111111111111111111111111111111111111111"
@@ -1447,7 +1828,7 @@ func TestCutNextWithShaPin(t *testing.T) {
 
 	g := newFakeCutGit()
 	g.head = sha                      // current HEAD is different
-	g.resolved[pinnedSHA] = pinnedSHA // the pinned --sha resolves to itself
+	g.resolved[pinnedSHA] = pinnedSHA // the pinned --commit resolves to itself
 	g.ancestorOK = true               // pinnedSHA is reachable
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "oldsha"
@@ -1461,7 +1842,7 @@ func TestCutNextWithShaPin(t *testing.T) {
 		git: g, gh: gh, uploader: uploader, stdout: &strings.Builder{},
 	}
 	if err := cutNext(ctx); err != nil {
-		t.Fatalf("cut next with --sha pin: %v", err)
+		t.Fatalf("cut next with --commit pin: %v", err)
 	}
 	if len(g.createdTags) != 1 || g.createdTags[0].tag != "epoch-next" {
 		t.Fatalf("createdTags = %+v, want epoch-next", g.createdTags)
@@ -1472,7 +1853,7 @@ func TestCutNextWithShaPin(t *testing.T) {
 	}
 }
 
-func TestCutStableWithShaPin(t *testing.T) {
+func TestCutStableWithCommitPin(t *testing.T) {
 	noOpSleep(t)
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
 	pinnedSHA := "2222222222222222222222222222222222222222"
@@ -1481,7 +1862,7 @@ func TestCutStableWithShaPin(t *testing.T) {
 
 	g := newFakeCutGit()
 	g.head = sha                      // current HEAD is different
-	g.resolved[pinnedSHA] = pinnedSHA // the pinned --sha resolves
+	g.resolved[pinnedSHA] = pinnedSHA // the pinned --commit resolves
 	g.ancestorOK = true               // pinnedSHA is reachable from origin/main
 	g.epochTags = []string{"epoch-2026.0"}
 	g.tags["epoch-2026.0"] = "oldsha"
@@ -1491,10 +1872,10 @@ func TestCutStableWithShaPin(t *testing.T) {
 	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: pinnedSHA, HeadBranch: "epoch-next", Conclusion: "success"}}
 
 	ctx := stableCtx(root, g, gh, uploader)
-	ctx.pinnedRef = pinnedSHA // set the --sha pin
+	ctx.pinnedRef = pinnedSHA // set the --commit pin
 	withYear(t, 2026)
 	if err := cutStable(ctx); err != nil {
-		t.Fatalf("cut stable with --sha pin: %v", err)
+		t.Fatalf("cut stable with --commit pin: %v", err)
 	}
 	if len(g.createdTags) != 1 || g.createdTags[0].tag != "epoch-2026.1" {
 		t.Fatalf("createdTags = %+v, want epoch-2026.1", g.createdTags)
@@ -1505,7 +1886,7 @@ func TestCutStableWithShaPin(t *testing.T) {
 	}
 }
 
-func TestCutWithShaResolveError(t *testing.T) {
+func TestCutWithCommitResolveError(t *testing.T) {
 	g := newFakeCutGit()
 	g.resolveErr = errors.New("invalid ref")
 	ctx := &cutContext{root: t.TempDir(), channel: "next", pinnedRef: "bad-ref", git: g, gh: &fakeCutGH{}, stdout: &strings.Builder{}}
@@ -1514,7 +1895,7 @@ func TestCutWithShaResolveError(t *testing.T) {
 	}
 }
 
-func TestCutWithShaRefPinning(t *testing.T) {
+func TestCutWithCommitRefPinning(t *testing.T) {
 	// Test that a branch/tag ref (not a raw SHA) is resolved correctly.
 	noOpSleep(t)
 	sha := "abcdef0123456789abcdef0123456789abcdef01"
@@ -1717,6 +2098,39 @@ func TestShellGitSeam(t *testing.T) {
 		t.Fatalf("Fetch: %v", err)
 	}
 
+	// Pin refs: push at a sha → list → delete. `first` is on origin (pushed
+	// above), so it is reachable; a commit that exists only locally is not.
+	if reach, err := g.ReachableFromOrigin(first); err != nil || !reach {
+		t.Fatalf("ReachableFromOrigin(pushed) = %v (%v), want true", reach, err)
+	}
+	run(work, "checkout", "-b", "local-only")
+	os.WriteFile(filepath.Join(work, "d.txt"), []byte("d\n"), 0o644)
+	run(work, "add", "d.txt")
+	run(work, "commit", "-m", "unpushed")
+	unpushed := run(work, "rev-parse", "HEAD")
+	run(work, "checkout", "main")
+	if reach, err := g.ReachableFromOrigin(unpushed); err != nil || reach {
+		t.Fatalf("ReachableFromOrigin(unpushed) = %v (%v), want false", reach, err)
+	}
+
+	pin := "ci-pin-" + short(first)
+	if err := g.PushTagAt(pin, first); err != nil {
+		t.Fatalf("PushTagAt: %v", err)
+	}
+	pins, err := g.ListRemotePinTags()
+	if err != nil {
+		t.Fatalf("ListRemotePinTags: %v", err)
+	}
+	if strings.Join(pins, ",") != pin {
+		t.Fatalf("ListRemotePinTags = %v, want [%s] (epoch tags must not match)", pins, pin)
+	}
+	if err := g.DeletePinTag(pin); err != nil {
+		t.Fatalf("DeletePinTag: %v", err)
+	}
+	if pins, err := g.ListRemotePinTags(); err != nil || len(pins) != 0 {
+		t.Fatalf("ListRemotePinTags after delete = %v (%v), want empty", pins, err)
+	}
+
 	// CommitFile stages + commits, leaving a clean tree.
 	os.WriteFile(filepath.Join(work, "c.txt"), []byte("c\n"), 0o644)
 	if err := g.CommitFile("c.txt", "add c"); err != nil {
@@ -1724,6 +2138,149 @@ func TestShellGitSeam(t *testing.T) {
 	}
 	if clean, _ := g.CleanTree(); !clean {
 		t.Fatal("tree must be clean after CommitFile")
+	}
+}
+
+// newTempOriginRepo builds a work tree with a bare `origin` and one pushed
+// commit on `main`, returning the shellGit under test, a `git` runner (dir +
+// args), the work-tree path and the pushed HEAD sha.
+func newTempOriginRepo(t *testing.T) (g shellGit, run func(dir string, args ...string) string, work, head string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	remote := t.TempDir()
+	work = t.TempDir()
+	run = func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run(remote, "init", "--bare")
+	run(work, "init")
+	run(work, "config", "user.name", "t")
+	run(work, "config", "user.email", "t@t")
+	run(work, "remote", "add", "origin", remote)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(work, "add", "a.txt")
+	run(work, "commit", "-m", "first")
+	run(work, "branch", "-M", "main")
+	run(work, "push", "-u", "origin", "main")
+	return shellGit{root: work}, run, work, run(work, "rev-parse", "HEAD")
+}
+
+// TestShellGitRemoteBranchSHA covers the query behind `ci`'s HEAD-is-remote-tip
+// guard: workflow_dispatch checks out origin's tip, so a wrong answer here either
+// blocks a legitimate dispatch or lets `ci` claim it tested a commit it did not.
+func TestShellGitRemoteBranchSHA(t *testing.T) {
+	g, run, work, head := newTempOriginRepo(t)
+
+	if sha, err := g.RemoteBranchSHA("main"); err != nil || sha != head {
+		t.Fatalf("RemoteBranchSHA(main) = %q (%v), want %s", sha, err, head)
+	}
+	// Absent on origin is "" with NO error — `ci` turns that into "push it first",
+	// which an error would instead render as a git malfunction.
+	if sha, err := g.RemoteBranchSHA("no-such-branch"); err != nil || sha != "" {
+		t.Fatalf("RemoteBranchSHA(absent) = %q (%v), want \"\"", sha, err)
+	}
+	// A tag-only match resolves to the tag's tip.
+	run(work, "tag", "release-marker", head)
+	run(work, "push", "origin", "refs/tags/release-marker")
+	if sha, err := g.RemoteBranchSHA("release-marker"); err != nil || sha != head {
+		t.Fatalf("RemoteBranchSHA(tag) = %q (%v), want %s", sha, err, head)
+	}
+	// When a branch and a tag share a name, the BRANCH wins — `ci` dispatches on a
+	// branch ref, so comparing HEAD against the tag's commit would guard the wrong
+	// thing. Point them at different commits so the preference is observable.
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(work, "add", "b.txt")
+	run(work, "commit", "-m", "second")
+	second := run(work, "rev-parse", "HEAD")
+	run(work, "branch", "shared", second)
+	run(work, "push", "origin", "shared")
+	run(work, "tag", "shared", head)
+	run(work, "push", "origin", "refs/tags/shared")
+	if sha, err := g.RemoteBranchSHA("shared"); err != nil || sha != second {
+		t.Fatalf("RemoteBranchSHA(shared) = %q (%v), want the branch tip %s not the tag %s", sha, err, second, head)
+	}
+
+	run(work, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone"))
+	if sha, err := g.RemoteBranchSHA("main"); err == nil {
+		t.Errorf("RemoteBranchSHA = %q, want an error when origin is unreachable", sha)
+	}
+}
+
+// TestShellGitPinRefEdges covers the pin-ref seam's edges, which the happy path
+// in TestShellGitSeam does not reach: annotated tags (whose `ls-remote` output
+// names each tag TWICE), local-copy cleanup, and each call's failure mode.
+func TestShellGitPinRefEdges(t *testing.T) {
+	g, run, work, head := newTempOriginRepo(t)
+
+	// An ANNOTATED pin: `git ls-remote --tags` lists the tag object AND its
+	// peeled `…^{}` commit, so a naive parse would report the same pin twice and
+	// try to delete it twice (the second delete failing loudly).
+	annotated := "ci-pin-annotated"
+	run(work, "tag", "-a", annotated, "-m", "annotated pin", head)
+	run(work, "push", "origin", "refs/tags/"+annotated)
+	pins, err := g.ListRemotePinTags()
+	if err != nil {
+		t.Fatalf("ListRemotePinTags: %v", err)
+	}
+	if strings.Join(pins, ",") != annotated {
+		t.Fatalf("ListRemotePinTags = %v, want exactly [%s] (peeled entries deduped)", pins, annotated)
+	}
+
+	// DeletePinTag also drops the LOCAL copy: `git fetch origin --tags` leaves one
+	// behind and fetch never prunes tags, so a survivor would be re-pushed by the
+	// next `git push --tags`, resurrecting a pin nothing tracks.
+	if err := g.DeletePinTag(annotated); err != nil {
+		t.Fatalf("DeletePinTag: %v", err)
+	}
+	if out := run(work, "tag", "--list", annotated); out != "" {
+		t.Errorf("local tag %s survived DeletePinTag: %q", annotated, out)
+	}
+	if pins, err := g.ListRemotePinTags(); err != nil || len(pins) != 0 {
+		t.Fatalf("ListRemotePinTags after delete = %v (%v), want empty", pins, err)
+	}
+
+	// Deleting a pin origin no longer has is IDEMPOTENT (git only warns), which is
+	// what the prune relies on: two invocations can race on the same stale pin and
+	// the loser must not turn a harmless double-delete into a user-facing warning.
+	if err := g.DeletePinTag(annotated); err != nil {
+		t.Errorf("re-deleting an absent pin must be a no-op, got %v", err)
+	}
+
+	// ReachableFromOrigin on a name git cannot resolve is an ERROR, not "false":
+	// silently reporting "not reachable" would turn a git malfunction into the
+	// user-facing "push it first" advice.
+	if _, err := g.ReachableFromOrigin("not-a-real-object"); err == nil {
+		t.Error("ReachableFromOrigin must surface a malformed object name")
+	}
+
+	// A broken origin makes every remote-touching call fail, and ListRemotePinTags
+	// must propagate it rather than report "no pins" (which would silently disable
+	// pruning forever).
+	run(work, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone"))
+	if pins, err := g.ListRemotePinTags(); err == nil {
+		t.Errorf("ListRemotePinTags = %v, want an error when origin is unreachable", pins)
+	}
+	if err := g.PushTagAt("ci-pin-x", head); err == nil {
+		t.Error("PushTagAt must surface an unreachable origin")
+	}
+	if err := g.DeletePinTag("ci-pin-x"); err == nil {
+		t.Error("DeletePinTag must surface an unreachable origin")
 	}
 }
 
@@ -1792,6 +2349,24 @@ func TestShellGHDispatchArgs(t *testing.T) {
 	}
 }
 
+// TestShellGHCancelRunArgs pins the argv `gh run cancel` is invoked with — the
+// run ID is formatted as a decimal string, so a large real-world ID (they are
+// well past 2^31) must not be truncated or rendered in scientific notation.
+func TestShellGHCancelRunArgs(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	out := filepath.Join(t.TempDir(), "argv")
+	writeFakeGH(t, "#!/bin/sh\necho \"$@\" > \""+out+"\"\nexit 0\n")
+	if err := (shellGH{}).CancelRun(31660226927); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(out)
+	if line := strings.TrimSpace(string(got)); line != "run cancel 31660226927" {
+		t.Fatalf("cancel argv = %q, want %q", line, "run cancel 31660226927")
+	}
+}
+
 func TestShellGHErrors(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -1806,6 +2381,12 @@ func TestShellGHErrors(t *testing.T) {
 	}
 	if err := (shellGH{}).DispatchWorkflow("ci.yml", "main", nil); err == nil {
 		t.Fatal("DispatchWorkflow must surface a gh failure")
+	}
+	// A failed cancel MUST surface: --cancel-running dispatches only if the
+	// cancel succeeded, so swallowing this would silently cancel the run anyway
+	// through ci.yml's concurrency group — the exact behavior the guard prevents.
+	if err := (shellGH{}).CancelRun(42); err == nil {
+		t.Fatal("CancelRun must surface a gh failure")
 	}
 	// gh exits 0 but emits non-JSON → the parse errors surface.
 	writeFakeGH(t, "#!/bin/sh\necho 'not json'\nexit 0\n")

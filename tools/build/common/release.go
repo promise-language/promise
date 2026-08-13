@@ -83,40 +83,49 @@ subcommands:
         to the published asset names, compute a merge-aware SHA256SUMS, and
         upload the assets + install scripts to the prebuilts R2 bucket under
         dist/. Backs the end-to-end install gate while the repo is private.
-  cut next   [--dry-run] [--reason <text>] [--sha <commit/ref>] [--run-ci] [--no-ci-wait]
+  cut next   [--dry-run] [--reason <text>] [--commit <commit>] [--run-ci] [--no-ci-wait]
              [--notes-file <path>|-] [--notes <text>]
-  cut stable [--dry-run] [--reason <text>] [--sha <commit/ref>] [--run-ci] [--no-ci-wait] [--confirm-year]
+  cut stable [--dry-run] [--reason <text>] [--commit <commit>] [--run-ci] [--no-ci-wait] [--confirm-year]
              [--notes-file <path>|-] [--notes <text>]
         gated release orchestrator (T0943, docs/release-automation.md §6.3).
         cut next refreshes the moving epoch-next pre-release at HEAD; cut stable
         derives the epoch (no --epoch flag), runs every gate, then tags, pushes,
         and bumps catalog.toml — all only when every gate is green. --dry-run
-        prints the checklist and changes nothing. --sha <commit/ref> pins the cut
-        to an exact commit instead of HEAD. A gate may be bypassed only with
+        prints the checklist and changes nothing. --commit <commit> pins the cut
+        to a commit-ish (hash, branch, tag, HEAD~2 — peeled to its commit)
+        instead of HEAD. A gate may be bypassed only with
         --reason "<text>", which is recorded into the tag/commit message. --run-ci
         dispatches ci.yml for platforms with no run at the release SHA (--no-ci-wait
-        dispatches then stops); --confirm-year confirms a year-rollover epoch
+        dispatches then stops); with --commit it dispatches on the same immutable
+        ci-pin-<sha> ref that "ci --commit" uses, so a pinned cut can produce its
+        own CI. --confirm-year confirms a year-rollover epoch
         non-interactively. --notes-file <path> (or - to read from stdin) and
         --notes "<text>" override the mechanical git-log bullets with a hand-
         authored or AI-generated body; mutually exclusive. The install header is
         always auto-prepended. Notes live only in the annotated tag — nothing is
         committed. Workflow: bin/release changes | <AI summary> |
         bin/release cut stable --notes-file -
-  ci [platform...] [--no-tests] [--watch] [--ref <branch>] [--commit-hash <sha>] [--force]
-        dispatch .github/workflows/ci.yml on the current branch. No platform =
-        linux-amd64 only (cheap); "all" = the whole matrix in one run; or name
-        targets (linux|darwin|windows, or canonical <os>-<arch>). workflow_dispatch
-        runs on the branch's pushed tip, so ci errors if your local HEAD is not
-        that tip — push first, or --force to dispatch on the remote tip anyway,
-        or --ref to choose a branch. --commit-hash <sha> pins CI to an exact
-        commit (must be HEAD or an ancestor of --ref). --no-tests builds only
-        (skips the suite); --watch polls the dispatched run(s) to completion and
-        exits non-zero on red CI.
-  changes [--commit-hash <sha>]
+  ci [platform] [--no-tests] [--watch] [--commit <commit>] [--force] [--cancel-running]
+        dispatch .github/workflows/ci.yml. No platform = linux-amd64 only
+        (cheap); "all" = the whole matrix in one run; or name ONE target
+        (linux|darwin|windows, or canonical <os>-<arch>) — naming several is
+        refused, because ci.yml cancels in-progress runs sharing a ref, so they
+        would cancel each other (use "all"). By default workflow_dispatch runs on
+        the current branch's pushed tip, so ci errors if your local HEAD is not
+        that tip — push first, or --force to dispatch on the remote tip anyway.
+        --commit <commit> pins CI to a commit-ish (resolved to a SHA, which must
+        be on origin) by pushing an immutable ci-pin-<sha> tag and dispatching on
+        it; the tag lives until the run finishes (--watch deletes it once the run
+        concludes, otherwise a later dispatch prunes it). Dispatching onto a ref
+        that already has a live
+        run is refused (it would cancel that run) — --cancel-running cancels it
+        and dispatches anyway. --no-tests builds only (skips the suite); --watch
+        polls the dispatched run to completion and exits non-zero on red CI.
+  changes [--commit <commit>]
         list non-merge commit subjects since the last stable epoch tag (newest
-        first). Default upper bound is HEAD; --commit-hash pins to an exact SHA
-        (must be HEAD or an ancestor of HEAD). Prints a header line then one
-        subject per line — pipeable for AI summarizers before cutting.`
+        first). Default upper bound is HEAD; --commit pins it to a commit-ish
+        (must resolve to HEAD or an ancestor of HEAD). Prints a header line then
+        one subject per line — pipeable for AI summarizers before cutting.`
 
 // RunRelease dispatches a `bin/release` subcommand.
 func RunRelease(root string, args []string) error {

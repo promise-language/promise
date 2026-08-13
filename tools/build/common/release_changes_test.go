@@ -44,7 +44,7 @@ func TestReleaseChangesWithEpoch(t *testing.T) {
 	}
 }
 
-func TestReleaseChangesCommitHashValid(t *testing.T) {
+func TestReleaseChangesCommitValid(t *testing.T) {
 	g := newFakeCutGit()
 	g.epochTags = []string{"epoch-2026.0"}
 	g.logSubjects = []string{"fix: something"}
@@ -58,16 +58,44 @@ func TestReleaseChangesCommitHashValid(t *testing.T) {
 	}
 }
 
-func TestReleaseChangesCommitHashNotAncestor(t *testing.T) {
+// TestReleaseChangesCommitIshResolved: --commit takes any commit-ish (same as
+// `ci --commit` / `cut --commit`), peeled to a concrete SHA before the range is
+// built — the bound must never be the raw `HEAD~2` string.
+func TestReleaseChangesCommitIshResolved(t *testing.T) {
+	sha := "1111111111111111111111111111111111111111"
+	g := newFakeCutGit()
+	g.resolved = map[string]string{"HEAD~2": sha}
+	g.ancestorOK = true
+	upper, err := resolveChangesUpper(g, "HEAD~2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if upper != sha {
+		t.Fatalf("upper bound = %q, want the resolved sha %q", upper, sha)
+	}
+}
+
+func TestReleaseChangesCommitResolveError(t *testing.T) {
+	g := newFakeCutGit()
+	g.resolveErr = errors.New("unknown revision")
+	if _, err := resolveChangesUpper(g, "nope"); err == nil || !strings.Contains(err.Error(), "unknown revision") {
+		t.Fatalf("want the resolve error surfaced, got %v", err)
+	}
+}
+
+func TestReleaseChangesCommitNotAncestor(t *testing.T) {
 	g := newFakeCutGit()
 	g.ancestorOK = false
 	var buf bytes.Buffer
 	err := releaseChanges(g, &buf, "deadzz0")
 	if err == nil {
-		t.Fatal("expected error for non-ancestor commit hash, got nil")
+		t.Fatal("expected error for a non-ancestor commit, got nil")
 	}
 	if !strings.Contains(err.Error(), "not reachable from HEAD") {
 		t.Errorf("expected 'not reachable from HEAD', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--commit must be") {
+		t.Errorf("error must name the --commit flag, got: %v", err)
 	}
 }
 

@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
-// release_changes.go implements `bin/release changes [--commit-hash <sha>]` — a
+// release_changes.go implements `bin/release changes [--commit <commit>]` — a
 // read-only preview of the non-merge commit subjects that would go into the next
 // stable release's notes. Output is pipeable for AI summarizers (one subject per
 // line, preceded by a count header line). No tagging, no network beyond
@@ -16,7 +17,7 @@ import (
 // runReleaseChanges is the CLI entry point for `bin/release changes`.
 func runReleaseChanges(root string, args []string) error {
 	fs := flag.NewFlagSet("changes", flag.ContinueOnError)
-	commitHash := fs.String("commit-hash", "", "upper bound: must be HEAD or ancestor of HEAD (default: HEAD)")
+	commit := fs.String("commit", "", "upper bound: must be HEAD or ancestor of HEAD (default: HEAD)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -24,13 +25,13 @@ func runReleaseChanges(root string, args []string) error {
 	if err := git.Fetch(); err != nil {
 		return fmt.Errorf("changes: git fetch: %w", err)
 	}
-	return releaseChanges(git, os.Stdout, *commitHash)
+	return releaseChanges(git, os.Stdout, *commit)
 }
 
 // releaseChanges is the testable core: resolves the upper bound, finds the last
 // stable epoch tag, and prints the commit subjects between them to out.
-func releaseChanges(git cutGit, out io.Writer, commitHash string) error {
-	upper, err := resolveChangesUpper(git, commitHash)
+func releaseChanges(git cutGit, out io.Writer, commit string) error {
+	upper, err := resolveChangesUpper(git, commit)
 	if err != nil {
 		return err
 	}
@@ -58,23 +59,29 @@ func releaseChanges(git cutGit, out io.Writer, commitHash string) error {
 }
 
 // resolveChangesUpper returns the upper SHA bound for the changes range. If
-// commitHash is empty it returns HEAD; otherwise it validates that commitHash is
-// reachable from HEAD (mirrors the `ci --commit-hash` ancestry check).
-func resolveChangesUpper(git cutGit, commitHash string) (string, error) {
+// commit is empty it returns HEAD; otherwise the commit-ish is peeled to a
+// concrete SHA (so a branch/tag/`HEAD~2` works, same as `ci --commit` and
+// `cut --commit`) and validated as reachable from HEAD.
+func resolveChangesUpper(git cutGit, commit string) (string, error) {
 	head, err := git.HeadSHA()
 	if err != nil {
 		return "", fmt.Errorf("changes: resolve HEAD: %w", err)
 	}
-	if commitHash == "" {
+	if commit == "" {
 		return head, nil
 	}
-	anc, err := git.IsAncestor(commitHash, head)
+	sha, err := git.ResolveSHA(commit)
+	if err != nil {
+		return "", fmt.Errorf("changes: resolve --commit %q: %w", commit, err)
+	}
+	sha = strings.TrimSpace(sha)
+	anc, err := git.IsAncestor(sha, head)
 	if err != nil {
 		return "", fmt.Errorf("changes: ancestry check: %w", err)
 	}
 	if !anc {
-		return "", fmt.Errorf("changes: commit %s is not reachable from HEAD (%s): --commit-hash must be HEAD or an ancestor",
-			short(commitHash), short(head))
+		return "", fmt.Errorf("changes: commit %s is not reachable from HEAD (%s): --commit must be HEAD or an ancestor",
+			short(sha), short(head))
 	}
-	return commitHash, nil
+	return sha, nil
 }

@@ -46,6 +46,7 @@ var requiredPlatforms = []string{"linux-amd64", "linux-arm64", "darwin-arm64", "
 // cutGit is the git surface the gates need. The production impl (shellGit)
 // shells out to `git`; tests substitute a fake.
 type cutGit interface {
+	pinGit                                                // ci-pin-<sha> refs, shared with `bin/release ci`
 	HeadSHA() (string, error)                             // git rev-parse HEAD
 	CurrentBranch() (string, error)                       // git rev-parse --abbrev-ref HEAD
 	CleanTree() (bool, error)                             // git status --porcelain == ""
@@ -202,15 +203,63 @@ func (g shellGit) RemoteBranchSHA(name string) (string, error) {
 }
 
 // PushTagAt pushes a lightweight tag directly to origin at sha without creating
-// a local tag — used by `ci --commit-hash` to create a pin ref for dispatch.
+// a local tag — used by `ci --commit` / `cut --commit` to create the pin ref a
+// pinned workflow_dispatch checks out.
 func (g shellGit) PushTagAt(tag, sha string) error {
 	return RunIn(g.root, "git", "push", "origin", sha+":refs/tags/"+tag)
 }
 
-// DeleteRemoteTag deletes a tag from origin — used to clean up pin tags after
-// `ci --commit-hash` dispatches successfully.
-func (g shellGit) DeleteRemoteTag(tag string) error {
-	return RunIn(g.root, "git", "push", "origin", "--delete", "refs/tags/"+tag)
+// DeletePinTag removes a pin tag from origin, then drops any local copy. A prior
+// `git fetch origin --tags` leaves one behind and fetch never prunes tags, so a
+// stale local pin would be re-pushed by the next `git push --tags`.
+func (g shellGit) DeletePinTag(tag string) error {
+	if err := RunIn(g.root, "git", "push", "origin", "--delete", "refs/tags/"+tag); err != nil {
+		return err
+	}
+	// Best-effort, and silent: "tag not found" is the normal case (the pin was
+	// created remote-only), not something to print at the user.
+	local := exec.Command("git", "tag", "-d", tag)
+	local.Dir = g.root
+	_ = local.Run()
+	return nil
+}
+
+// ListRemotePinTags returns the `ci-pin-*` tag names currently on origin, so a
+// dispatch can garbage-collect the pins whose runs have finished.
+func (g shellGit) ListRemotePinTags() ([]string, error) {
+	out, err := RunOutputIn(g.root, "git", "ls-remote", "--tags", "origin", "refs/tags/ci-pin-*")
+	if err != nil {
+		return nil, err
+	}
+	var tags []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		// Peeled entries (`…^{}`) name the same tag twice; dedupe them.
+		name, ok := strings.CutPrefix(strings.TrimSuffix(fields[1], "^{}"), "refs/tags/")
+		if !ok || name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		tags = append(tags, name)
+	}
+	return tags, nil
+}
+
+// ReachableFromOrigin reports whether sha is reachable from ANY origin ref. This
+// is the branch-independent precondition a pinned dispatch actually needs:
+// workflow_dispatch checks the commit out from origin, so origin must have it —
+// which branch carries it is irrelevant.
+func (g shellGit) ReachableFromOrigin(sha string) (bool, error) {
+	out, err := RunOutputIn(g.root, "git", "for-each-ref", "--contains", sha,
+		"--count=1", "--format=%(refname)", "refs/remotes/origin/")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // ghRun is one GitHub Actions run row (`gh run list --json …`). ghJob is one
@@ -235,6 +284,7 @@ type cutGH interface {
 	WorkflowRuns(workflow string, limit int) ([]ghRun, error)
 	RunJobs(runID int64) ([]ghJob, error)
 	DispatchWorkflow(workflow, ref string, inputs map[string]string) error
+	CancelRun(runID int64) error
 }
 
 // defaultCutGH is the production cutGH. Tests swap it.
@@ -268,6 +318,18 @@ func (shellGH) RunJobs(runID int64) ([]ghJob, error) {
 		return nil, fmt.Errorf("parse gh run view: %w", err)
 	}
 	return wrap.Jobs, nil
+}
+
+// CancelRun cancels an in-flight run — the `--cancel-running` escape hatch for
+// the "a dispatch here would silently cancel that run" guard.
+func (shellGH) CancelRun(runID int64) error {
+	cmd := exec.Command("gh", "run", "cancel", strconv.FormatInt(runID, 10))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gh run cancel %d: %w", runID, err)
+	}
+	return nil
 }
 
 func (shellGH) DispatchWorkflow(workflow, ref string, inputs map[string]string) error {
@@ -399,7 +461,7 @@ type gateFn func(ctx *cutContext) gateResult
 type cutContext struct {
 	root        string
 	channel     string // "next" | "stable"
-	pinnedRef   string // --sha <ref>: pin the cut to this commit instead of HEAD
+	pinnedRef   string // --commit <commit>: pin the cut to this commit-ish instead of HEAD
 	targetSHA   string
 	targetEpoch epoch
 	lastEpoch   epoch
@@ -641,14 +703,14 @@ func gateEpochNextValidated(ctx *cutContext) gateResult {
 	return gateResult{name: name, detail: "no successful epoch-next release.yml run at " + short(ctx.targetSHA), overridable: true}
 }
 
-// resolveTargetSHA picks the commit a cut targets: the --sha ref when pinned
-// (origin/main keeps moving under continuous development, so a cut names the
-// commit it validated rather than whatever HEAD happens to be now), else HEAD.
+// resolveTargetSHA picks the commit a cut targets: the --commit commit-ish when
+// pinned (origin/main keeps moving under continuous development, so a cut names
+// the commit it validated rather than whatever HEAD happens to be now), else HEAD.
 func resolveTargetSHA(ctx *cutContext) (string, error) {
 	if ctx.pinnedRef != "" {
 		sha, err := ctx.git.ResolveSHA(ctx.pinnedRef)
 		if err != nil {
-			return "", fmt.Errorf("resolve --sha %q: %w", ctx.pinnedRef, err)
+			return "", fmt.Errorf("resolve --commit %q: %w", ctx.pinnedRef, err)
 		}
 		return strings.TrimSpace(sha), nil
 	}
@@ -858,23 +920,35 @@ func resolveAbsentCI(ctx *cutContext, name string, absent []string) gateResult {
 		return gateResult{name: name, detail: msg + " — re-run with --run-ci to dispatch, or --reason to override", overridable: true}
 	}
 
-	branch, err := ctx.git.CurrentBranch()
+	d, err := dispatchCI(ctx, absent)
 	if err != nil {
-		return gateResult{name: name, detail: "current branch: " + err.Error()}
-	}
-	if err := dispatchCI(ctx, branch, absent); err != nil {
-		return gateResult{name: name, detail: "dispatch ci.yml: " + err.Error()}
+		// A live run on our dispatch ref is a "wait it out" condition, not a tool
+		// failure — surface it as a normal overridable gate detail.
+		var active *ciRunActiveError
+		return gateResult{name: name, detail: "dispatch ci.yml: " + err.Error(), overridable: errors.As(err, &active)}
 	}
 	if ctx.noCIWait {
 		// Dispatched but not waiting — a hard stop, not an override: come back
-		// and re-run `cut` once CI is green.
-		return gateResult{name: name, detail: "dispatched ci.yml for " + strings.Join(absent, ", ") + "; re-run `cut` once green"}
+		// and re-run `cut` once CI is green. The pin (if any) stays on origin for
+		// the next dispatch's prune, exactly as `ci` without --watch leaves it.
+		what := "dispatched ci.yml for " + strings.Join(absent, ", ")
+		if !d.dispatched {
+			what = "ci.yml already running at " + short(ctx.targetSHA)
+		}
+		return gateResult{name: name, detail: what + "; re-run `cut` once green"}
 	}
 	status, err := watchCI(ctx)
 	if err != nil {
+		// The run's state is unknown, so the pin stays — a later dispatch prunes it
+		// once its run has genuinely finished (T1489).
 		return gateResult{name: name, detail: "watch CI: " + err.Error()}
 	}
 	failed, stillAbsent := splitCIStatus(status)
+	if len(stillAbsent) == 0 {
+		// Every platform concluded, so nothing can still be checking the pin out.
+		// While a platform is pending the ref must survive (T1489).
+		deletePinTag(ctx.git, d.pinTag)
+	}
 	switch {
 	case len(failed) == 0 && len(stillAbsent) == 0:
 		return gateResult{name: name, passed: true, detail: "all platforms green after dispatch"}
@@ -887,18 +961,76 @@ func resolveAbsentCI(ctx *cutContext, name string, absent []string) gateResult {
 	}
 }
 
-// dispatchCI dispatches ci.yml for the absent platforms on `branch` —
-// platform=all when the whole matrix is missing, else one run per platform.
-func dispatchCI(ctx *cutContext, branch string, absent []string) error {
-	if len(absent) == len(requiredPlatforms) {
-		return ctx.gh.DispatchWorkflow("ci.yml", branch, map[string]string{"platform": "all", "run_tests": "true"})
+// ciDispatch is what dispatchCI decided: the pin ref it pushed (removed once the
+// run has concluded, never before — T1489) and whether it actually dispatched, a
+// live run already testing the target SHA being joined rather than re-queued.
+type ciDispatch struct {
+	pinTag     string
+	dispatched bool
+}
+
+// dispatchCI dispatches ONE ci.yml run covering every absent platform, on the
+// pin ref when the cut is pinned (`--commit`) and on the current branch
+// otherwise.
+//
+// One run, never a fan-out: ci.yml cancels in-progress runs sharing github.ref,
+// so a run per platform would cancel its predecessors — `platform=all` covers
+// the whole matrix in a single concurrency entry.
+func dispatchCI(ctx *cutContext, absent []string) (ciDispatch, error) {
+	runs, err := ctx.gh.WorkflowRuns("ci.yml", ciWatchRunLimit)
+	if err != nil {
+		return ciDispatch{}, err
 	}
-	for _, p := range absent {
-		if err := ctx.gh.DispatchWorkflow("ci.yml", branch, map[string]string{"platform": p, "run_tests": "true"}); err != nil {
-			return err
+	var pinTag, dispatchRef string
+	if ctx.pinnedRef != "" {
+		// Dispatch on an immutable pin at the target commit — the branch tip has
+		// almost certainly moved past it, which is why the cut was pinned at all.
+		// Same origin precondition as `ci --commit`: gate 2 (reachable from
+		// origin/main) is overridable and every gate still runs after an override,
+		// so without this check `--reason` would let a pin push a local-only commit
+		// to origin.
+		if cerr := requirePinnableCommit(ctx.git, ctx.targetSHA); cerr != nil {
+			return ciDispatch{}, cerr
+		}
+		pinTag = pinTagName(ctx.targetSHA)
+		prunePinTags(ctx.git, runs, pinTag)
+		dispatchRef = pinTag
+	} else {
+		branch, berr := ctx.git.CurrentBranch()
+		if berr != nil {
+			return ciDispatch{}, fmt.Errorf("current branch: %w", berr)
+		}
+		dispatchRef = branch
+	}
+
+	for _, r := range activeCIRuns(runs, dispatchRef) {
+		// A live run on our ref at exactly the SHA we want IS the run we would
+		// dispatch — wait on it instead of cancelling and re-queuing it.
+		if sameSHA(r.HeadSHA, ctx.targetSHA) {
+			fmt.Fprintf(ctx.stdout, "  ci.yml run #%d is already running at %s on %s — waiting on it\n",
+				r.DatabaseID, short(ctx.targetSHA), dispatchRef)
+			return ciDispatch{}, nil
+		}
+		// `cut` has no --cancel-running of its own, so the hint points at the two
+		// things the reader can actually do.
+		return ciDispatch{}, concurrentRunError(ctx.gh, r, dispatchRef, fmt.Sprintf(
+			"Wait for it to finish and re-run `cut`, or cancel it first: gh run cancel %d.", r.DatabaseID))
+	}
+
+	if pinTag != "" {
+		if perr := ctx.git.PushTagAt(pinTag, ctx.targetSHA); perr != nil {
+			return ciDispatch{}, fmt.Errorf("push pin tag %s: %w", pinTag, perr)
 		}
 	}
-	return nil
+	platform := "all"
+	if len(absent) == 1 {
+		platform = absent[0]
+	}
+	if derr := ctx.gh.DispatchWorkflow("ci.yml", dispatchRef, map[string]string{"platform": platform, "run_tests": "true"}); derr != nil {
+		deletePinTag(ctx.git, pinTag)
+		return ciDispatch{}, derr
+	}
+	return ciDispatch{pinTag: pinTag, dispatched: true}, nil
 }
 
 // watchCI re-evaluates ciStatusAtSHA until no required platform is absent (all
@@ -931,7 +1063,7 @@ func runReleaseCut(root string, args []string) error {
 	channel, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("cut", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "run all gates and print the checklist, change nothing")
-	sha := fs.String("sha", "", "pin the cut to this commit/ref instead of HEAD (origin/main keeps moving)")
+	commit := fs.String("commit", "", "pin the cut to this commit-ish instead of HEAD (origin/main keeps moving)")
 	reason := fs.String("reason", "", "override failed gate(s); recorded into the tag/commit message")
 	runCI := fs.Bool("run-ci", false, "non-interactively dispatch ci.yml for platforms with no run at this SHA")
 	noCIWait := fs.Bool("no-ci-wait", false, "with --run-ci: dispatch CI then stop (re-run `cut` once green)")
@@ -947,7 +1079,7 @@ func runReleaseCut(root string, args []string) error {
 	ctx := &cutContext{
 		root:        root,
 		channel:     channel,
-		pinnedRef:   *sha,
+		pinnedRef:   *commit,
 		dryRun:      *dryRun,
 		reason:      *reason,
 		runCI:       *runCI,

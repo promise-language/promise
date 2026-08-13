@@ -155,6 +155,32 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			isUnwrappedContainerIndex(s.Value) {
 			c.dupHeapUserFieldAccess = true
 		}
+		// T1488: a direct `return xs[i]` / `=> xs[i]` where xs is a FIXED-SIZE array
+		// of a bare heap-user / Map-Set / droppable-enum element. genArrayIndex only
+		// dups such an element when dupHeapUserFieldAccess is armed — T0590 arms it at
+		// var-decl (stmt_decl.go) and assignment (stmt_assign.go) RHS sites, but the
+		// direct return/arrow escape never did, so the returned value aliased the
+		// array's owned slot → the array's element-walk drop and the caller's drop of
+		// the returned value double-free at scope exit. Mirror the var-decl arming
+		// (shape = IndexExpr into an *types.Array, gated on the return type). Scoped to
+		// fixed arrays: Vector targets have their own return-path handling that a broad
+		// arm here would double-dup (tracked separately as T1491). String elements dup
+		// independently (dupStringFieldAccess); structural via setDupFlagsForFieldAccess;
+		// Optional[heap-user] via optionalHeapDupElem above.
+		if !isRefType(retType) {
+			if idx, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+				tgt := c.info.Types[idx.Target]
+				if c.typeSubst != nil {
+					tgt = types.Substitute(tgt, c.typeSubst)
+				}
+				if _, isArr := tgt.(*types.Array); isArr {
+					if isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType) ||
+						isMapOrSetType(retType) || c.enumElemNeedsDupOnRead(retType) {
+						c.dupHeapUserFieldAccess = true
+					}
+				}
+			}
+		}
 		// T0982: `return a ?: b` — when the return expression (peeling parens) is an
 		// inline elvis, signal genElvis so it neutralizes a handle/heap none-path
 		// owned-local default's scope-exit drop. The returned value escapes to the

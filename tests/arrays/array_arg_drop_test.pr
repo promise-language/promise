@@ -135,3 +135,109 @@ firstg[T](T[2] xs) T `doc("First element of a generic fixed-array, borrowed.") =
 test_generic_string_array_arg() `test {
   assert(firstg[string](["a" + "b", "c" + "d"]) == "ab", "generic string array arg");
 }
+
+// T1488: Returning a heap-user element OUT of a fixed-array param by value
+// (`=> xs[0]`) must dup-on-read the array slot's owned instance. T0590 armed the
+// dup only at var-decl/assignment RHS sites; the direct return/arrow escape never
+// did, so the returned value aliased the array's owned slot → the array's
+// element-walk drop and the caller's drop of the returned value double-free.
+firstb(Boxed[2] xs) Boxed `doc("Returns the first heap-user element out of a borrowed fixed array.") => xs[0];
+mk_boxed() Boxed[2] `doc("Owned call-result fixed-array of heap-user elements.") => [Boxed(v: 5), Boxed(v: 6)];
+
+// (a) owned-array-VARIABLE arg — the item's exact pre-existing repro. The owned
+// array `v` drops both elements at scope exit; without the return-site dup,
+// element 0 was also returned and dropped → double free.
+test_return_heap_user_owned_var() `test {
+  Boxed[2] v = [Boxed(v: 5), Boxed(v: 6)];
+  assert(firstb(v).v == 5, "return heap-user element (owned var arg)");
+}
+
+// (b) array-LITERAL arg — a leak pre-T1466, a double-free post-T1466 without this
+// fix (T1466's caller-temp element drop + the missing return dup free element 0
+// twice).
+test_return_heap_user_literal() `test {
+  assert(firstb([Boxed(v: 5), Boxed(v: 6)]).v == 5, "return heap-user element (literal arg)");
+}
+
+// (c) CALL-RESULT array arg.
+test_return_heap_user_call_result() `test {
+  assert(firstb(mk_boxed()).v == 5, "return heap-user element (call-result arg)");
+}
+
+// A DROPPABLE heap-user element (has a droppable string field) exercises the
+// isDroppableHeapUserType branch rather than the no-drop pal_free branch.
+type WithStr `public `doc("Droppable heap-user type (owns a string) used as a fixed-array element.") {
+  string s;
+}
+firstw(WithStr[2] xs) WithStr `doc("Returns the first droppable heap-user element out of a borrowed fixed array.") => xs[0];
+
+test_return_droppable_heap_user() `test {
+  WithStr[2] v = [WithStr(s: "a" + "b"), WithStr(s: "c" + "d")];
+  assert(firstw(v).s == "ab", "return droppable heap-user element");
+}
+
+// A `map[K,V]` element exercises the isMapOrSetType branch.
+firstm(map[int, int][2] xs) map[int, int] `doc("Returns the first Map element out of a borrowed fixed array.") => xs[0];
+
+test_return_map_element() `test {
+  map[int, int] a = map[int, int]();
+  a[1] = 10;
+  map[int, int] b = map[int, int]();
+  b[2] = 20;
+  map[int, int][2] v = [a, b];
+  assert(firstm(v)[1]! == 10, "return map element");
+}
+
+// A `Set[T]` element exercises the OTHER arm of the isMapOrSetType branch.
+firsts(Set[int][2] xs) Set[int] `doc("Returns the first Set element out of a borrowed fixed array.") => xs[0];
+
+test_return_set_element() `test {
+  Set[int] a = Set[int]();
+  a.add(1);
+  Set[int] b = Set[int]();
+  b.add(2);
+  Set[int][2] v = [a, b];
+  assert(firsts(v).contains(1), "return set element");
+}
+
+// A droppable ENUM element (variant carries a droppable string payload) exercises
+// the enumElemNeedsDupOnRead branch — the returned enum must dup its owned payload
+// so the array's element-walk drop and the returned value's drop don't double-free.
+enum Tagged `doc("Droppable enum (a variant owns a string) used as a fixed-array element.") {
+  T(string s),
+  Empty,
+}
+firste(Tagged[2] xs) Tagged `doc("Returns the first enum element out of a borrowed fixed array.") => xs[0];
+
+test_return_droppable_enum_element() `test {
+  Tagged[2] v = [Tagged.T("a" + "b"), Tagged.Empty];
+  got := firste(v);
+  match got {
+    T(s) => {
+      assert(s == "ab", "return droppable enum element payload");
+    },
+    Empty => {
+      assert(false, "unexpected Empty variant");
+    },
+  }
+}
+
+// GENERIC `firstg[T](T[2] xs) T => xs[0]` instantiated at T=Boxed: the return-site
+// dup must fire through the generic-instance code path (typeSubst applied to the
+// index target type).
+test_return_generic_heap_user() `test {
+  Boxed[2] v = [Boxed(v: 5), Boxed(v: 6)];
+  assert(firstg[Boxed](v).v == 5, "return generic heap-user element");
+}
+
+// An owned-LOCAL-in-callee form: the array is a local owned by the callee itself,
+// which drops it at scope exit — the returned element must be duped so the
+// returned value survives the callee's own scope-exit array drop.
+mk_first() Boxed `doc("Returns the first element of a callee-local fixed array.") {
+  Boxed[2] a = [Boxed(v: 5), Boxed(v: 6)];
+  return a[0];
+}
+
+test_return_owned_local_array_element() `test {
+  assert(mk_first().v == 5, "return owned-local array element");
+}

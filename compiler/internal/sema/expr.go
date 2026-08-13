@@ -222,10 +222,19 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 					c.errorf(e.Pos(), "%s", msg)
 				}
 			}
-		} else if h := numericLiteralHint(hint); h != nil && isIntegerType(h) {
-			typ = h
 		} else {
-			typ = types.TypInt
+			// Unsuffixed: the type comes from the declared-type hint (e.g.
+			// `u8 a = 300`) or defaults to int. Range-check against whichever
+			// applies — T1483: this arm previously skipped the check, so an
+			// out-of-range literal silently wrapped modulo the type width.
+			if h := numericLiteralHint(hint); h != nil && isIntegerType(h) {
+				typ = h
+			} else {
+				typ = types.TypInt
+			}
+			if msg := validateIntRange(e.Raw, typ, c.inUnaryNeg); msg != "" {
+				c.errorf(e.Pos(), "%s", msg)
+			}
 		}
 
 	case *ast.FloatLit:

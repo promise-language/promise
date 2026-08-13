@@ -12384,6 +12384,114 @@ func TestNumericSuffixNegMinI64(t *testing.T) {
 	`)
 }
 
+// T1483: unsuffixed integer literals must be range-checked against the type
+// resolved from the declared-type hint (not just the suffix arm).
+
+func TestUnsuffixedRangeOverflowU8(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { u8 a = 300; }
+	`)
+	expectError(t, errs, "overflows u8")
+}
+
+func TestUnsuffixedRangeOverflowI32(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { i32 c = 4294967296; }
+	`)
+	expectError(t, errs, "overflows i32")
+}
+
+func TestUnsuffixedRangeOverflowU128(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { u128 d = 340282366920938463463374607431768211456; }
+	`)
+	expectError(t, errs, "overflows u128")
+}
+
+func TestUnsuffixedNegBoundary(t *testing.T) {
+	// -128 is valid for i8 on the hint path (inUnaryNeg propagates).
+	checkOK(t, `
+		main() { i8 x = -128; }
+	`)
+	// -129 overflows i8.
+	errs := checkErrs(t, `
+		main() { i8 x = -129; }
+	`)
+	expectError(t, errs, "overflows i8")
+}
+
+func TestUnsuffixedVectorElementOverflow(t *testing.T) {
+	// Element hint threads through the vector literal to each element.
+	errs := checkErrs(t, `
+		main() { u8[] e = [300, 7]; }
+	`)
+	expectError(t, errs, "overflows u8")
+}
+
+func TestUnsuffixedDefaultIntOverflow(t *testing.T) {
+	// No hint: defaults to int, which the literal overflows.
+	errs := checkErrs(t, `
+		main() { x := 99999999999999999999999; }
+	`)
+	expectError(t, errs, "overflows int")
+}
+
+func TestUnsuffixedInRangeValid(t *testing.T) {
+	// Regression guard: in-range unsuffixed literals still pass.
+	checkOK(t, `
+		main() {
+			u8 a = 255;
+			i32 c = 2147483647;
+			u32 g = 4294967295;
+			u8[] e = [1, 2, 3];
+		}
+	`)
+}
+
+func TestUnsuffixedOptionalHintOverflow(t *testing.T) {
+	// numericLiteralHint peels the Optional wrapper, so the range check still
+	// applies to `u8? a = 300`.
+	errs := checkErrs(t, `
+		main() { u8? a = 300; }
+	`)
+	expectError(t, errs, "overflows u8")
+	// In-range through the Optional hint is still accepted.
+	checkOK(t, `
+		main() { u8? a = 200; }
+	`)
+}
+
+func TestUnsuffixedVectorNegElementBoundary(t *testing.T) {
+	// inUnaryNeg threads through the vector element hint: -128 is valid for i8,
+	// -129 overflows.
+	checkOK(t, `
+		main() { i8[] e = [-128, -1]; }
+	`)
+	errs := checkErrs(t, `
+		main() { i8[] e = [-129]; }
+	`)
+	expectError(t, errs, "overflows i8")
+}
+
+func TestUnsuffixedNonDecimalOverflow(t *testing.T) {
+	// validateIntRange parses via base-0 and strips underscores, so hex and
+	// digit-separated literals are range-checked too.
+	errs := checkErrs(t, `
+		main() { u8 a = 0x1FF; }
+	`)
+	expectError(t, errs, "overflows u8")
+	errs = checkErrs(t, `
+		main() { u8 a = 3_00; }
+	`)
+	expectError(t, errs, "overflows u8")
+	checkOK(t, `
+		main() {
+			u8 a = 0xFF;
+			i32 b = -2147483648;
+		}
+	`)
+}
+
 func TestNumericSuffixEdgeValuesAllTypes(t *testing.T) {
 	checkOK(t, `
 		main() {

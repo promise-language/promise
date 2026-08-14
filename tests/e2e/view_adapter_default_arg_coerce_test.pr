@@ -1,0 +1,194 @@
+// T1465: a structural-view method adapter appended each synthesized trailing
+// default to the forwarding call RAW — it never ran coerceCallArgs, the
+// adaptation an ordinary call site applies (optional wrapping `T` → `T?`,
+// structural-view coercion / boxing, subtype vtable swap). So a
+// `T? p = <bare T expr>` default was stored into the callee's `{i1, T}` optional
+// slot without the some()-wrap, and the callee read `none` — silently computing
+// the wrong answer through the boxed view while the direct call was correct.
+//
+// Each shape is exercised twice: the direct call (the control) and the boxed
+// structural view (the adapter path under test). The view result must equal the
+// direct result, and every case must leak nothing (the drain is T1460's).
+//
+// This is the sibling of view_adapter_default_arg_temps_test.pr (T1460); the
+// header there deliberately deferred `T? p = <expr>` optional defaults to here.
+type Vw `structural `public `doc("Structural interface with a no-argument o().") {
+  o(this) int `abstract `doc("Reports whether the default arrived.");
+}
+
+// --- the filed repro: an optional param defaulting to a BARE (non-optional)
+//     expression. The ordinary path wraps it as some(v); the adapter must too. ---
+
+type Impl `public `doc("Concrete whose extra param is an optional with a heap default.") {
+  int k;
+  o(this, string? s = "a" + "b") int `public `doc("1 when s is present.") {
+    if (s is string) {
+      return 1;
+    }
+    return 0;
+  }
+}
+
+test_bare_optional_default_direct() `test {
+  Impl im = Impl(k: 1);
+  assert(im.o() == 1, "direct call sees the wrapped default");
+}
+
+test_bare_optional_default_boxed_view() `test {
+  Impl im = Impl(k: 1);
+  Vw w = im;
+  assert(w.o() == 1, "view adapter wraps the bare default as some()");
+}
+
+// --- the default's value must survive the wrap unchanged: read it back out ---
+
+type ValueImpl `public `doc("Reads the wrapped optional default's value back out.") {
+  int k;
+  o(this, string? s = "a" + "b") int `public `doc("Length of s, or -1 when absent.") {
+    if (s is string) {
+      return s!.len;
+    }
+    return -1;
+  }
+}
+
+test_optional_default_value_direct() `test {
+  ValueImpl im = ValueImpl(k: 1);
+  assert(im.o() == 2, "direct call reads the default's value");
+}
+
+test_optional_default_value_boxed_view() `test {
+  ValueImpl im = ValueImpl(k: 1);
+  Vw w = im;
+  assert(w.o() == 2, "view adapter carries the default's value through the wrap");
+}
+
+// --- a no-default optional trailing param must still arrive as `none` on the
+//     view path (coerceCallArgs sees TypNone and takes the none→T? path) ---
+
+type NoneImpl `public `doc("Optional trailing param with no default.") {
+  int k;
+  o(this, string? s) int `public `doc("1 when s is present, else 0.") {
+    if (s is string) {
+      return 1;
+    }
+    return 0;
+  }
+}
+
+test_no_default_optional_direct() `test {
+  NoneImpl im = NoneImpl(k: 1);
+  assert(im.o() == 0, "direct call: no default means none");
+}
+
+test_no_default_optional_boxed_view() `test {
+  NoneImpl im = NoneImpl(k: 1);
+  Vw w = im;
+  assert(w.o() == 0, "view adapter fills the no-default optional with none");
+}
+
+// --- move param with a heap-allocating default: coerceCallArgs claims the box
+//     for the `~T` (RefMut) param; adaptViewDefaultArg's own claim is idempotent
+//     on the same temp, so the callee is the single owner and nothing leaks ---
+
+type MoveDefaultImpl `public `doc("Move param whose default allocates on the heap.") {
+  int k;
+  o(this, string t = "x" + "y") int `public `doc("Length of the consumed default t.") => t.len;
+}
+
+test_move_heap_default_direct() `test {
+  MoveDefaultImpl im = MoveDefaultImpl(k: 1);
+  assert(im.o() == 2, "direct call consumes the heap default");
+}
+
+test_move_heap_default_boxed_view() `test {
+  MoveDefaultImpl im = MoveDefaultImpl(k: 1);
+  Vw w = im;
+  assert(w.o() == 2, "view adapter forwards the coerced move default once");
+}
+
+// --- concrete default → OPTIONAL STRUCTURAL param: coerceCallArgs must both BOX
+//     the concrete into the interface's element view (T1298 coerceToOptionalElem)
+//     AND some()-wrap it. adaptViewDefaultArg alone (the pre-fix path) does the
+//     box but not the optional wrap, so the callee read `none`. Read the value
+//     back via `!` (not `is`, which is broken for structural interfaces — T1532). ---
+
+type Greeter `structural `public `doc("Structural interface with a greet().") {
+  greet(this) int `abstract `doc("Returns an int the caller can check.");
+}
+
+type Hi `public `doc("Concrete Greeter implementer used as an optional-structural default.") {
+  int n;
+  greet(this) int `public `doc("Returns n.") => this.n;
+}
+
+type OptStructImpl `public `doc("Extra param is an optional structural defaulting to a concrete.") {
+  int k;
+  o(this, Greeter? g = Hi(n: 9)) int `public `doc("The boxed default's greet(), or -1.") {
+    if (g is Greeter) {
+      return g!.greet();
+    }
+    return -1;
+  }
+}
+
+test_optional_structural_default_direct() `test {
+  OptStructImpl im = OptStructImpl(k: 1);
+  // NOTE: `is Greeter` is broken (T1532) so this reads -1 on BOTH paths today;
+  // the point of this case is that direct and view AGREE and neither leaks.
+  int direct = im.o();
+  assert(direct == -1 || direct == 9, "direct call has a defined result");
+}
+
+test_optional_structural_default_view_matches_direct() `test {
+  OptStructImpl a = OptStructImpl(k: 1);
+  int direct = a.o();
+  OptStructImpl b = OptStructImpl(k: 1);
+  Vw w = b;
+  assert(w.o() == direct, "view adapter boxes+wraps the concrete default identically to the direct call");
+}
+
+// The same shape read back WITHOUT `is` (unaffected by T1532): the boxed default
+// must be present (some), so `g!.greet()` yields the default's value on both paths.
+type OptStructUnwrapImpl `public `doc("Reads the optional structural default back via unwrap.") {
+  int k;
+  o(this, Greeter? g = Hi(n: 9)) int `public `doc("The boxed default's greet().") => g!.greet();
+}
+
+test_optional_structural_unwrap_direct() `test {
+  OptStructUnwrapImpl im = OptStructUnwrapImpl(k: 1);
+  assert(im.o() == 9, "direct call: box+wrap present, unwrap reads 9");
+}
+
+test_optional_structural_unwrap_boxed_view() `test {
+  OptStructUnwrapImpl im = OptStructUnwrapImpl(k: 1);
+  Vw w = im;
+  assert(w.o() == 9, "view adapter boxes the concrete default into the optional element AND some()-wraps it");
+}
+
+// --- interface supplies a leading param; only the TRAILING optional defaults ---
+
+type Vw2 `structural `public `doc("Structural interface taking one int argument.") {
+  o(this, int head) int `abstract `doc("Combines head with a defaulted tail.");
+}
+
+type LeadingImpl `public `doc("Forwards the interface's param and wraps the trailing optional default.") {
+  int k;
+  o(this, int head, string? s = "z" + "z") int `public `doc("head plus 1 when s is present.") {
+    if (s is string) {
+      return head + 1;
+    }
+    return head;
+  }
+}
+
+test_leading_param_plus_optional_default_direct() `test {
+  LeadingImpl im = LeadingImpl(k: 1);
+  assert(im.o(10) == 11, "direct call wraps the trailing optional default");
+}
+
+test_leading_param_plus_optional_default_boxed_view() `test {
+  LeadingImpl im = LeadingImpl(k: 1);
+  Vw2 w = im;
+  assert(w.o(10) == 11, "view adapter forwards head then wraps the default");
+}

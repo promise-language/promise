@@ -1028,9 +1028,20 @@ func (c *Compiler) emitViewMethodAdapter(
 	// genCallArgExpr (T1460) — the adapter has no AST argument list, so nothing
 	// else owns or adapts these values.
 	firstDefault := len(ifaceSig.Params())
-	defaultArgs, _ := c.emitTrailingDefaultArgValues(concreteSig, firstDefault, nil)
+	defaultArgs, _, defaultTypes := c.emitTrailingDefaultArgValues(concreteSig, firstDefault, nil)
+	// T1465: run the synthesized defaults through the SAME adaptation an ordinary
+	// call site applies via coerceCallArgs — optional wrapping (T → T?), structural-
+	// interface view coercion / boxing, subtype vtable swap. Without this a
+	// `T? p = <bare T expr>` default arrives raw and the callee reads `none`. The
+	// adapter has no AST argument list, so pass nil args / nil callSubst (mirroring
+	// the raw genExpr above, which used no subst). coerceCallArgs claims a freshly-
+	// boxed value into a `move` (RefMut) param; adaptViewDefaultArg's own RefMut
+	// claim below is idempotent on the same temp, and its borrow temps are freed by
+	// emitAdapterDefaultTempDrain after the call (T1460).
+	trailingParams := concreteSig.Params()[firstDefault:]
+	defaultArgs = c.coerceCallArgs(defaultArgs, defaultTypes, trailingParams, nil, nil)
 	for i, v := range defaultArgs {
-		args = append(args, c.adaptViewDefaultArg(concreteSig.Params()[firstDefault+i], v))
+		args = append(args, c.adaptViewDefaultArg(trailingParams[i], v))
 	}
 
 	// Call the concrete method

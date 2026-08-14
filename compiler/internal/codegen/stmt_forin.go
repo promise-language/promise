@@ -400,7 +400,7 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 	// may satisfy `Iterator[T]` with EXTRA trailing defaulted/optional params.
 	// Fill them, or the callee reads a garbage value for each (e.g. a `step`
 	// default that arrives as 0 makes the loop never advance).
-	defaultArgs, defaultTypes := c.emitTrailingDefaultArgValues(
+	defaultArgs, defaultTypes, _ := c.emitTrailingDefaultArgValues(
 		method.Sig(), 0, c.buildOwnerTypeArgSubst(receiverType))
 
 	if c.needsVtable(named) && !method.IsNative() {

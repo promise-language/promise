@@ -246,11 +246,12 @@ func (c *Compiler) exprType(expr ast.Expr) types.Type {
 // that have one use padTrailingDefaultArgs so the padded args still flow through
 // the normal ownership-aware argument pipeline.
 func (c *Compiler) emitTrailingDefaultArgValues(sig *types.Signature, from int,
-	subst map[*types.TypeParam]types.Type) ([]value.Value, []irtypes.Type) {
+	subst map[*types.TypeParam]types.Type) ([]value.Value, []irtypes.Type, []types.Type) {
 
 	params := sig.Params()
 	var vals []value.Value
 	var llvmTypes []irtypes.Type
+	var semaTypes []types.Type
 	for i := from; i < len(params); i++ {
 		p := params[i]
 		pType := p.Type()
@@ -259,6 +260,10 @@ func (c *Compiler) emitTrailingDefaultArgValues(sig *types.Signature, from int,
 		}
 		llvmTypes = append(llvmTypes, c.resolveType(pType))
 		if defExpr := c.info.DefaultArgExpr(p); defExpr != nil {
+			// Record the default's sema type (from the Info that declared it) so
+			// callers can run the value through coerceCallArgs — optional wrapping,
+			// view coercion / boxing — exactly as an ordinary call site would (T1465).
+			semaTypes = append(semaTypes, c.exprType(defExpr))
 			restore := c.useDeclaringInfo(defExpr)
 			vals = append(vals, c.genExpr(defExpr))
 			if restore != nil {
@@ -266,10 +271,13 @@ func (c *Compiler) emitTrailingDefaultArgValues(sig *types.Signature, from int,
 			}
 			continue
 		}
-		// Optional-typed param with no default → none (zeroed optional).
+		// Optional-typed param with no default → none (zeroed optional). The sema
+		// type is TypNone, mirroring the synthetic `none` literal padTrailingDefaultArgs
+		// inserts on the ordinary call path, so coerceCallArgs takes the none→T? path.
+		semaTypes = append(semaTypes, types.TypNone)
 		vals = append(vals, c.zeroValue(llvmTypes[len(llvmTypes)-1]))
 	}
-	return vals, llvmTypes
+	return vals, llvmTypes, semaTypes
 }
 
 // padTrailingDefaultArgs returns args extended with synthetic entries for any

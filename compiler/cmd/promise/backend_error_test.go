@@ -26,6 +26,43 @@ func strandedTemps(t *testing.T, prefix string) []string {
 	return matches
 }
 
+// clearStrandedTemps best-effort removes any prefix-* files before a test
+// runs, so a leftover from an earlier crashed/interrupted run (sharing
+// TMPDIR under bin/test) is never misattributed to the current run.
+func clearStrandedTemps(t *testing.T, prefix string) {
+	t.Helper()
+	for _, f := range strandedTemps(t, prefix) {
+		os.Remove(f)
+	}
+}
+
+// pruneLeftovers removes every prefix-* file other than keep and returns
+// their paths. Removal happens unconditionally (T1499) so a reported
+// leftover can never poison a later run's glob, regardless of whether the
+// caller goes on to fail the test over it.
+func pruneLeftovers(t *testing.T, prefix, keep string) []string {
+	t.Helper()
+	var pruned []string
+	for _, leftover := range strandedTemps(t, prefix) {
+		if leftover == keep {
+			continue
+		}
+		os.Remove(leftover)
+		pruned = append(pruned, leftover)
+	}
+	return pruned
+}
+
+// reportLeftovers fails the test for any prefix-* file other than keep, and
+// removes every file it reports. Mirrors the failure-path cleanup so a
+// leftover here can never poison a later run's glob (T1499).
+func reportLeftovers(t *testing.T, prefix, keep string) {
+	t.Helper()
+	for _, leftover := range pruneLeftovers(t, prefix, keep) {
+		t.Errorf("success left an intermediate temp behind: %s", leftover)
+	}
+}
+
 // withSilencedStderr runs fn with os.Stderr redirected to the null device so the
 // opt/llc parse-error noise doesn't pollute test output. The child processes in
 // the backend attach to os.Stderr directly, so this must swap the file itself.
@@ -64,6 +101,7 @@ const validIR = "define i32 @__t1470_main() {\nentry:\n  ret i32 0\n}\n"
 func TestCompileLLToObjInvalidIRReturnsErrorAndCleansTemps(t *testing.T) {
 	optPath, llcPath := requireLLVMTools(t)
 	const prefix = "t1470objfail"
+	clearStrandedTemps(t, prefix)
 	target := codegen.HostTargetTriple()
 
 	var obj string
@@ -88,6 +126,7 @@ func TestCompileLLToObjInvalidIRReturnsErrorAndCleansTemps(t *testing.T) {
 func TestCompileLLToBCInvalidIRReturnsErrorAndCleansTemps(t *testing.T) {
 	optPath, _ := requireLLVMTools(t)
 	const prefix = "t1470bcfail"
+	clearStrandedTemps(t, prefix)
 
 	var bc string
 	var cerr error
@@ -111,6 +150,7 @@ func TestCompileLLToBCInvalidIRReturnsErrorAndCleansTemps(t *testing.T) {
 func TestCompileLLToObjSuccessReturnsObjAndCleansIntermediates(t *testing.T) {
 	optPath, llcPath := requireLLVMTools(t)
 	const prefix = "t1470objok"
+	clearStrandedTemps(t, prefix)
 	target := codegen.HostTargetTriple()
 
 	obj, err := compileLLToObj(validIR, prefix, target, optPath, llcPath, "-O1")
@@ -125,17 +165,13 @@ func TestCompileLLToObjSuccessReturnsObjAndCleansIntermediates(t *testing.T) {
 		t.Fatalf("returned object file does not exist: %v", statErr)
 	}
 	// The .o is handed back; the .ll and .bc intermediates must be gone.
-	for _, leftover := range strandedTemps(t, prefix) {
-		if leftover == obj {
-			continue
-		}
-		t.Errorf("success left an intermediate temp behind: %s", leftover)
-	}
+	reportLeftovers(t, prefix, obj)
 }
 
 func TestCompileLLToBCSuccessReturnsBCAndCleansIntermediates(t *testing.T) {
 	optPath, _ := requireLLVMTools(t)
 	const prefix = "t1470bcok"
+	clearStrandedTemps(t, prefix)
 
 	bc, err := compileLLToBC(validIR, prefix, optPath, "-O1")
 	if err != nil {
@@ -148,11 +184,61 @@ func TestCompileLLToBCSuccessReturnsBCAndCleansIntermediates(t *testing.T) {
 	if _, statErr := os.Stat(bc); statErr != nil {
 		t.Fatalf("returned bitcode file does not exist: %v", statErr)
 	}
-	for _, leftover := range strandedTemps(t, prefix) {
-		if leftover == bc {
-			continue
-		}
-		t.Errorf("success left an intermediate temp behind: %s", leftover)
+	reportLeftovers(t, prefix, bc)
+}
+
+// TestClearStrandedTempsRemovesPreexistingLeftovers is a regression test for
+// T1499: bin/test points TMPDIR at the shared .promise-home/tmp/, so a
+// stranded prefix-* file left by an earlier crashed/interrupted run used to
+// fail these tests on every subsequent run until someone ran bin/clean.
+// clearStrandedTemps must sweep away any pre-existing match before a test
+// starts, so a foreign leftover is never misattributed to the current run.
+// Without this test, the sweep is only ever exercised on an empty glob (the
+// common case), so a broken prefix or a no-op body would go unnoticed.
+func TestClearStrandedTempsRemovesPreexistingLeftovers(t *testing.T) {
+	const prefix = "t1499clearpreexisting"
+	stray := filepath.Join(os.TempDir(), prefix+"-stray.bc")
+	if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
+		t.Fatalf("write stray temp: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(stray) })
+
+	clearStrandedTemps(t, prefix)
+
+	if leftover := strandedTemps(t, prefix); len(leftover) != 0 {
+		t.Fatalf("clearStrandedTemps left files behind: %v", leftover)
+	}
+}
+
+// TestPruneLeftoversRemovesWhatItReports is a regression test for T1499: the
+// success-path leftover check used to report a stray temp via t.Errorf but
+// never delete it, so a stray file sharing the shared TMPDIR under bin/test
+// poisoned every later run permanently. This plants a stray file and asserts
+// pruneLeftovers (the removal step reportLeftovers builds on) both names it
+// and removes it, so the glob is clean again for the next run.
+func TestPruneLeftoversRemovesWhatItReports(t *testing.T) {
+	const prefix = "t1499pruneleftover"
+	clearStrandedTemps(t, prefix)
+	stray := filepath.Join(os.TempDir(), prefix+"-stray.ll")
+	if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
+		t.Fatalf("write stray temp: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(stray) })
+	keep := filepath.Join(os.TempDir(), prefix+"-keep.o")
+	if err := os.WriteFile(keep, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write keep temp: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(keep) })
+
+	pruned := pruneLeftovers(t, prefix, keep)
+	if len(pruned) != 1 || pruned[0] != stray {
+		t.Fatalf("pruneLeftovers reported %v, want [%s]", pruned, stray)
+	}
+	if _, statErr := os.Stat(stray); !os.IsNotExist(statErr) {
+		t.Fatalf("pruneLeftovers reported the stray file but did not remove it (stat err: %v)", statErr)
+	}
+	if _, statErr := os.Stat(keep); statErr != nil {
+		t.Fatalf("pruneLeftovers must not remove the kept file: %v", statErr)
 	}
 }
 

@@ -34,7 +34,11 @@ Cut a stable `epoch-<year>.<n>` release from a chosen commit. `bin/release` enfo
 
 8. **Verify publish.** Poll the stable release.yml run (ref `epoch-<epoch>`) to green (all 4 compilers + publish). Then confirm `gh release view epoch-<epoch>` is published (not draft/prerelease) with thin+full assets for all 4 platforms + install scripts + `SHA256SUMS`, and that `latest` resolves to the new epoch (`gh release view --json tagName`).
 
-9. **Write the narrative write-up for the user (required every stable cut — see [[feedback_release_writeup]]).** Cover what shipped (epoch, release commit/tag, headline features & platforms) and how it got there — blockers found and fixed, and any decisions (e.g. the commit choice, a platform that couldn't ship the originally-requested SHA).
+9. **Announce the release in GitHub Discussions → Announcements (public, maintainer voice).** After publish is verified (step 8), post an announcement to the **Announcements** category. Draft the body from the synthesized notes (step 5) in the maintainer's voice — plain and terse, no hype or emoji, honest that Promise is pre-1.0: a one-line "epoch-`<epoch>` is the current stable epoch", 3–5 headline bullets (the language/platform highlights, not the full changelog), links to the release tag + install doc, and a closing pointer to Q&A / Ideas. It should PARALLEL the GitHub release, not restate it — link to it. Save the body to a scratchpad file.
+   - Get the ids once: `gh api graphql -f query='{ repository(owner:"promise-language", name:"promise"){ id discussionCategories(first:25){ nodes{ id name } } } }'` → the repo id and the **Announcements** category id.
+   - Post it: `gh api graphql -f query='mutation($r:ID!,$c:ID!,$t:String!,$b:String!){ createDiscussion(input:{repositoryId:$r,categoryId:$c,title:$t,body:$b}){ discussion{ url } } }' -f r=<repoId> -f c=<announcementsCatId> -f t="Promise epoch-<epoch>" -F b=@<body-file>`. Announcements is maintainer-post-only, so this needs a token with Discussions write (`repo` scope). Report the discussion URL.
+
+10. **Write the narrative write-up for the user (required every stable cut — see [[feedback_release_writeup]]).** Cover what shipped (epoch, release commit/tag, headline features & platforms) and how it got there — blockers found and fixed, and any decisions (e.g. the commit choice, a platform that couldn't ship the originally-requested SHA).
 
 ## Rules
 - Never work around a compiler / build / CI / test-infra blocker — file a tracker bug and get it fixed properly.

@@ -868,6 +868,52 @@ type Circle is Shape, Drawable {
 }
 ```
 
+#### Sealed by Default (`` `open ``)
+
+> **Status:** design-approved, **not yet implemented** (tracked as T1537). Today every concrete type is implicitly extensible; the rules below describe the intended semantics.
+
+Concrete types are **sealed**: by default, no other type may declare `is` on them. To permit a concrete type to be used as an `is` parent, mark it `` `open ``.
+
+```promise
+type User {              // concrete → sealed
+  string name;
+}
+type Admin is User {}    // ERROR: cannot inherit from sealed type `User`
+                         //        (mark `User` with `open` to allow subtyping)
+
+type Entity `open {      // explicitly extensible
+  int id;
+}
+type Player is Entity {} // OK
+```
+
+**Abstract types are implicitly open.** A type with any `` `abstract `` method (or the `` `abstract `` meta) cannot be instantiated, so its sole purpose is to be extended — it is an extension point by definition and needs no `` `open ``. The same holds for `` `structural `` interfaces. Because `` `abstract `` ("must be extended") is a strictly stronger statement than `` `open `` ("may be extended"), writing `` `open `` on an abstract type is redundant and is **rejected**.
+
+```promise
+type Shape `abstract {    // abstract → implicitly open
+  area() f64 `abstract;
+}
+type Circle is Shape {    // OK — no `open` needed on Shape
+  f64 radius;
+  area() f64 { return 3.14159 * this.radius * this.radius; }
+}
+```
+
+Sealing is **per type, not inherited**: a *concrete* child of an `` `open `` or `` `abstract `` parent is itself sealed unless it, too, is marked `` `open ``. So `Circle` above cannot be subclassed:
+
+```promise
+type Wheel is Circle {}   // ERROR: cannot inherit from sealed type `Circle`
+```
+
+**Rationale.** Extension points should be deliberate. Promise's foremost goal is that a single source file be understandable in isolation, with no action-at-a-distance — but an extensible type *is* action-at-a-distance: a subtype in another module can override a method and change behavior polymorphically. Sealing by default means an unmarked `type Foo {}` cannot be altered by any subtype, so it can be reasoned about locally; `` `open `` flags the deliberate exceptions. This mirrors Kotlin's `final`-by-default rather than Java's open-by-default (cf. *Effective Java*, "Design and document for inheritance or else prohibit it"). There is deliberately **no `` `sealed `` meta** — sealing is the default, so extensibility has exactly one spelling.
+
+**Interaction with value newtypes.** A value type used as a newtype base (see §5.3, T1527; sealing tracked in T1537) must likewise be `` `open ``:
+
+```promise
+type Hash128 `open { u128 value `value; }   // pure value type: every field is `value-placed
+type EntityId is Hash128 {}                  // OK — a nominal newtype of Hash128
+```
+
 #### How Inheritance Maps to Vtables
 
 When a type inherits from a parent, the child's vtable **extends** the parent's layout — the parent's slots appear first at the same positions, and the child appends its own new slots (see Section 5.2.1). This means:
@@ -2072,6 +2118,7 @@ testAddition() `test {
 | `` `extern ``, `` `extern("c_symbol")``| functions | Foreign function interface; the optional string is the C symbol name (default `promise_<name>`) |
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
 | `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
+| `` `open ``  | types           | Type may be used as an `is` parent; concrete types are otherwise sealed. Redundant (rejected) on abstract/`` `structural `` types, which are implicitly open (see Section 5.4) |
 | `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |
 | `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are also `` `copy `` |
 | `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |

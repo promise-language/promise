@@ -295,12 +295,9 @@ Identity is composed bottom-up:
 content hash; the exact algorithm is implementation-defined but must be stable across
 compiler versions once chosen — changing it is a hard schema break.
 
-On the wire, a `Hash128` serializes as its 32-character lowercase hex string — the
-base-16 form of the wrapped `u128` (`to_hex()`), matching the `$ref` targets in §2.
-This overrides the `u128` default (wide integers otherwise encode as decimal strings):
-ids are hex for readability and to line up with `$ref`. "Raw 128 bits" describes only a
-future binary transport; over JSON a `Hash128` is always a lossless hex string, never a
-JSON number.
+On the wire, a `Hash128` serializes as its 32-character lowercase hex string (`to_hex()`),
+matching the `$ref` targets in §2. "Raw 128 bits" describes only a future binary transport;
+over JSON a `Hash128` is always a lossless hex string, never a JSON number.
 
 `type_args` is the recursive component: `Vector[int]` and `Vector[string]` get
 different ids because their argument lists differ. `Map[string, Vector[int]]` flattens

@@ -206,6 +206,9 @@ func TestT0951GenericContextHandleElvisSubstituted(t *testing.T) {
 //
 // Pre-fix the third line was `store i1 true, i1* %bindingflag` with no preceding
 // load, so the load→store-register→store-false sequence is unique to the fix.
+// The promoted binding's flag is a NAMED alloca (%_handletmp.dropflag) while the
+// source temp's is unnamed, so the pattern accepts either spelling — this test is
+// about the load-and-thread shape, not about how the allocas are named.
 func TestT0951MutexLockPromotionThreadsPerBranchFlag(t *testing.T) {
 	ir := generateIR(t, `
 		demo() {
@@ -227,5 +230,5 @@ func TestT0951MutexLockPromotionThreadsPerBranchFlag(t *testing.T) {
 	// The promotion threads the temp's LOADED per-branch flag into the promoted
 	// binding (load i1; store i1 <reg>; store i1 false) — NOT a hardcoded store i1 1.
 	assertContainsMatch(t, fn,
-		`%\d+ = load i1, i1\* %\d+\s*\n\s*store i1 %\d+, i1\* %\d+\s*\n\s*store i1 false, i1\* %\d+`)
+		`%\d+ = load i1, i1\* %[\w.]+\s*\n\s*store i1 %\d+, i1\* %[\w.]+\s*\n\s*store i1 false, i1\* %[\w.]+`)
 }

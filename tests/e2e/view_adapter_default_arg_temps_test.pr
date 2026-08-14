@@ -734,11 +734,52 @@ test_repeated_view_calls_boxed_view() `test {
   }
 }
 
+// --- fixed-array default: an `[N x T]` aggregate carries no i8* drop function,
+//     so the adapter registers it element-wise (T1181) the way it registers a
+//     tuple default — mirroring the ordinary argument path (T1466). ---
+
+type ArrayParent `public `doc("Satisfies Tagger with a fixed-array default param.") {
+  int v;
+  tag(this, string[2] xs = ["-" + "a", "-" + "b"]) string `public `doc("Tags v with the first element.") => "{this.v}{xs[0]}";
+}
+
+test_fixed_array_default_direct() `test {
+  ArrayParent p = ArrayParent(v: 1);
+  assert(p.tag() == "1-a", "direct call builds the default array");
+}
+
+test_fixed_array_default_boxed_view() `test {
+  ArrayParent p = ArrayParent(v: 1);
+  Tagger t = p;
+  assert(t.tag() == "1-a", "view adapter frees the default array's elements");
+}
+
+// --- generic concrete type: the adapter is emitted inside the monomorphized
+//     instance, so the default's param type is resolved through the active
+//     substitution before its ownership is decided. ---
+
+type GenericParent[T] `public `doc("Generic type satisfying Tagger with a heap default.") {
+  T v;
+  tag(this, string suffix = "-" + "g") string `public `doc("Tags v with suffix.") => "{this.v}{suffix}";
+}
+
+test_generic_heap_default_direct() `test {
+  GenericParent[int] p = GenericParent[int](v: 1);
+  assert(p.tag() == "1-g", "direct call fills the generic type's heap default");
+}
+
+test_generic_heap_default_boxed_view() `test {
+  GenericParent[int] p = GenericParent[int](v: 3);
+  Tagger t = p;
+  assert(t.tag() == "3-g", "generic view adapter frees the heap default");
+}
+
 // Not covered here, deliberately:
 //   - `T? p = <expr>` optional defaults — T1465 (the filled value is wrong).
-//   - `string[N]` fixed-array defaults — T1466 (leaks on the ordinary call path too).
-//   - a heap default on a generator (`stream[T]`) method — T1467 (the coroutine
-//     frame reads the default lazily, so it is a use-after-free on the ordinary
-//     call path too; the adapter cannot outlive the stream, so the lifetime rule
-//     has to come from T1467's fix).
-// All three belong next to the shapes above once their own items are fixed.
+//   - a heap default on a generator (`stream[T]`) method reached THROUGH a view
+//     adapter — T1486. The coroutine frame reads the default lazily; T1467 fixed
+//     the ordinary call path by giving the temp scope lifetime (see
+//     tests/e2e/generator_arg_temp_lifetime_test.pr), but no lifetime the adapter
+//     can pick is long enough — it returns before the stream is ever resumed — so
+//     that shape needs a different mechanism.
+// Both belong next to the shapes above once their own items are fixed.

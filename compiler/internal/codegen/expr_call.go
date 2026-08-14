@@ -1420,6 +1420,10 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 		// caller's statement-end drop must not also fire (double-free). Borrow
 		// params leave the temp tracked → caller drops it at statement end.
 		savedEnumTemps := len(c.enumCtorTemps)
+		// T1467: same purpose for the heap-instance and closure-env registries —
+		// promoteGeneratorArgToScope needs to know whether THIS argument's
+		// evaluation materialized a temp before it re-homes one.
+		savedHeapTemps, savedEnvTemps := len(c.heapTemps), len(c.envTemps)
 		v := c.genCallArgExpr(arg.Value)
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
@@ -1521,6 +1525,17 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 				} else {
 					c.registerTupleStmtTemp(v, tup)
 				}
+			} else if calleeIsGenerator {
+				// T1467: generalize T1233 beyond tuples — EVERY droppable by-value
+				// arg temp is read lazily by the coroutine frame, so a statement-end
+				// drop is too early (UAF / double-free / leak, depending on which
+				// temp registry holds it). Re-home it to a scope-level owned local,
+				// the same lifetime an owned variable argument already gets. Runs
+				// after the move-param claim block above so a `~`-param arg (already
+				// transferred to the callee) is never re-registered, and leaves
+				// fixed arrays to the T1466 block below — the sole owner of that
+				// shape, which also covers the array literal that has no temp yet.
+				c.promoteGeneratorArgToScope(v, paramType, arg.Value, savedHeapTemps, savedEnvTemps, savedEnumTemps)
 			}
 		}
 		// T1466: A fixed-size array literal (or owned-array call result) passed to a

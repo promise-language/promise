@@ -997,40 +997,286 @@ func (c *Compiler) promoteHandleTempToScopeBinding(val value.Value, dropFunc *ir
 	if !ok || idx < 0 { // not a tracked temp → leave bound path untouched
 		return false
 	}
-	// Coroutine-safe entry-block allocas (same primitive as trackTempWithDrop):
-	// initialized to null/false in the entry block so a temp created inside a
-	// branch has defined values on untaken paths.
-	alloca := c.createEntryAlloca(irtypes.I8Ptr)
-	dropFlag := c.createEntryAlloca(irtypes.I1)
-	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
-	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
-	c.block.NewStore(val, alloca)
-	// T0951: preserve the temp's live per-branch ownership flag instead of
-	// hardcoding 1. An ordinary handle temp (`Mutex[int](7).lock()`,
+	// T0951: scopeOwnPointerTemp COPIES the temp's live per-branch ownership flag
+	// instead of hardcoding 1. An ordinary handle temp (`Mutex[int](7).lock()`,
 	// `mk_mtx().lock()`) carries flag=1, so this is identical to the prior
 	// `store 1` for the T0655 case. But an inline elvis handle result
 	// (`(a ?: b).lock()`) carries a per-path flag — owned (1) on the orphaned
 	// some-path, borrowed (0) on the none-path where the default keeps its own
 	// owner. Hardcoding 1 would force-drop the borrowed none-path default, which
-	// its own scope binding also drops → double-free. Loaded before claimStringTemp
-	// below clears the source temp's flag.
-	curFlag := c.block.NewLoad(irtypes.I1, c.stmtTemps[idx].dropFlag)
-	c.block.NewStore(curFlag, dropFlag)
-	// bindingDropString: i8* alloca + void(i8*) drop — identical IR shape to the
-	// known-good bound-Mutex scope binding (stmt.go ~2097). The Vector
-	// static-flag branch in emitStringDropCall is inert for a Mutex valType.
-	c.scopeBindings = append(c.scopeBindings, scopeBinding{
-		kind:     bindingDropString,
-		alloca:   alloca,
-		dropFlag: dropFlag,
-		dropFunc: dropFunc,
-		valType:  valType,
-	})
+	// its own scope binding also drops → double-free. The copy happens before
+	// claimStringTemp below clears the source temp's flag.
+	c.scopeOwnPointerTemp(c.uniqueLocalName("_handletmp"), val, c.stmtTemps[idx].dropFlag, dropFunc, valType)
 	// Neutralize the stmt-temp (clears its flag + maps it to -1) so it is not
 	// also dropped at statement end. Keeps the T0555/T0561 binding-site claim
 	// machinery intact.
 	c.claimStringTemp(val)
 	return true
+}
+
+// promoteGeneratorArgToScope re-homes a droppable by-value argument of a
+// GENERATOR call from statement lifetime to SCOPE lifetime (T1467).
+//
+// A generator's by-value params are copied into the coroutine frame and read
+// LAZILY on each resume — strictly after the statement that created the stream
+// has ended. So a statement temp (freed by cleanupStmtLevelTemps at the end of
+// the call statement) is always freed too early and the frame reads freed
+// memory. Sema forbids every way a stream[T] could outlive the statement that
+// creates it (it cannot be stored in a variable, returned, passed as a param, or
+// put in a field/container), so the enclosing scope is always long enough — and
+// never longer than the value is reachable. This generalizes the tuple-only
+// T1233 branch in genCallArgsWithMutRef to every temp registry.
+//
+// Where the registry can identify the temp that actually HOLDS the argument value
+// (a keyed SSA match, or a runtime pointer match), only that one is re-homed and
+// intermediates produced while evaluating the arg keep statement lifetime. The
+// enum-ctor registry is keyed by storage rather than by value, so there the whole
+// window is re-homed — each temp keeping its own flag, which over-retains an
+// intermediate by one scope but never leaks or double-frees it. Untracking a temp
+// without re-registering it is the one thing that is never done: that leaks. The
+// floor arguments are the registry lengths snapshotted just before the arg was
+// evaluated, so "this arg materialized a temp" is decidable per registry.
+//
+// Ordering:
+//   - The binding is appended BEFORE genForInGenerator appends its
+//     bindingGenerator, so LIFO scope cleanup destroys the coroutine first and
+//     frees the argument second.
+//   - It is registered before genForInStmt records loopScopeDepth, so
+//     break/continue cleanup leaves it alone and the enclosing scope drops it
+//     exactly once — the same shape as the T0109/T0494/T0502 for-in promotions.
+//   - Inside a generator body (`yield * gen(temp)`) this turns a statement temp
+//     into a coroutine body local, which a mid-flight destroy leaks — but it
+//     leaks today too (that statement never ends), so this is no regression
+//     (tracked as T1453).
+//
+// Everything not covered below (scalars, value/copy types, untracked literals,
+// plain variables, field reads) falls through untouched.
+func (c *Compiler) promoteGeneratorArgToScope(v value.Value, paramType types.Type, argExpr ast.Expr, floorHeap, floorEnv, floorEnum int) {
+	if v == nil || c.block == nil || c.block.Term != nil || c.entryBlock == nil {
+		return
+	}
+
+	// 1. String / vector / channel / fixed-array statement temp (T0073/T1181).
+	if idx, ok := c.stmtTempMap[v]; ok && idx >= 0 {
+		temp := c.stmtTemps[idx]
+		switch {
+		case temp.arrType != nil:
+			// [N x T] storage with element-wise drop (T1181) — left alone on
+			// purpose. The dedicated fixed-array block in genCallArgsWithMutRef
+			// (T1466) runs right after this one and already re-homes an array
+			// argument to a scope drop for a generator callee, claiming this temp
+			// as it does. Re-homing it here as well would register the SAME array
+			// twice and drop every element twice (`fatal: invalid free`), and that
+			// block also covers the array LITERAL shape, which has no temp here.
+		case temp.tupleType != nil:
+			// Unreachable today — registerTupleStmtTemp deliberately keeps tuple
+			// temps out of stmtTempMap, and the T1233 branch in
+			// genCallArgsWithMutRef registers none at all for a generator callee.
+			// Kept as an explicit guard: a tuple aggregate must never be re-homed
+			// here, or it would be dropped by both owners.
+		case temp.dropFunc != nil && v.Type() == irtypes.I8Ptr:
+			// valType drives emitVectorElementDrops. Set it only when the temp
+			// itself carries an elemType — i.e. a genuinely owned vector temp that
+			// owns its elements. A shallow-dup vector temp (field read) shares its
+			// elements with its owner, so element drops there would double-free.
+			// It is rebuilt from the temp's own elemType rather than taken from
+			// paramType: the temp is the record of what is actually owned, and a
+			// wrapped param (e.g. `Vector[string]?`) would not survive AsVector.
+			var valType types.Type
+			if temp.elemType != nil {
+				valType = types.NewVector(temp.elemType)
+			} else if inner := peelOptional(paramType); isTaskLikeType(inner) {
+				// T0668: a Task temp's drop must route through the cooperative
+				// park-suspend join inside a coroutine body, or the single-threaded
+				// WASM scheduler cannot run the pending goroutine the blocking join
+				// waits on. The statement-end drain this promotion replaces did that
+				// (cleanupStmtTemps → emitTaskJoinAndFreeByDropFn); naming the task
+				// type here is what makes emitStringDropCall keep doing it. Inert for
+				// every non-Task shape, and outside a coroutine it still lowers to the
+				// same direct drop call.
+				valType = inner
+			}
+			c.scopeOwnPointerTemp(c.uniqueLocalName("_genarg"), v, temp.dropFlag, temp.dropFunc, valType)
+			// Neutralize the source: clears the flag scopeOwnPointerTemp just copied
+			// and maps the temp to -1, so the statement-end drain skips it.
+			c.claimStringTemp(v)
+		}
+		return
+	}
+
+	// 2. Inline enum-constructor temps (B0267/B0269) — a separate registry keyed by
+	// the enum's own storage alloca, not by the argument SSA value, so the window
+	// itself is the match (the gate T1108 uses for move params). Every temp in the
+	// window is re-homed, each keeping its own pointer and live flag: the one
+	// holding the argument is what the frame reads lazily, and an intermediate (an
+	// inline ctor a nested borrowing call consumed, `gen(n, rewrap(E.V(s)))`) is a
+	// caller-owned temp that must still be freed exactly once — moving it a scope
+	// later is harmless, dropping it wholesale from the registry would leak its
+	// payload. The drop goes through the temp's OWN storage, so this is independent
+	// of how the argument was wrapped for the callee (an `E?` param is passed as a
+	// bare enum value here), which is why it runs before the layout guard below.
+	if extractEnum(peelOptional(paramType)) != nil && len(c.enumCtorTemps) > floorEnum {
+		for _, et := range c.enumCtorTemps[floorEnum:] {
+			// An enum-ctor temp holds the pointer to the enum storage and a
+			// void(i8*) drop — the same shape a string/vector temp holds, so it
+			// promotes through the same helper. valType stays nil: the vector and
+			// task branches of the drop are inert for an enum.
+			ptr := c.block.NewLoad(irtypes.I8Ptr, et.alloca)
+			c.scopeOwnPointerTemp(c.uniqueLocalName("_genenumarg"), ptr, et.dropFlag, et.dropFunc, nil)
+			// Neutralize the source (the flag was copied above). A ctor temp created
+			// in a conditional arm carries 0 on the arm that borrowed instead, so
+			// the promoted binding stays borrowed there rather than double-freeing.
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), et.dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:floorEnum]
+		return
+	}
+
+	// The remaining registries store `v` whole and let maybeRegisterDrop/emitEnvFree
+	// pick the binding kind from paramType, so the promoted alloca must have the
+	// layout that kind expects. When the materialized value is not in the param
+	// type's own representation — an Optional[user type] argument is passed as the
+	// bare {vtable, instance} value struct, not as the {i1, T} optional layout —
+	// registering anyway emits a drop that reads the wrong fields (malformed IR).
+	// Such a shape keeps ordinary statement lifetime, exactly as before T1467
+	// (T1500 tracks the leak that leaves behind).
+	if !v.Type().Equal(c.resolveType(paramType)) {
+		return
+	}
+
+	// 3. Closure env temp (T0100) — the fat pointer's env struct is heap
+	// allocated; emitEnvFree extracts field 1 and routes through the env drop
+	// function (B0221) so moved captures are dropped, not just the struct freed.
+	if _, isSig := paramType.(*types.Signature); isSig && len(c.envTemps) > floorEnv {
+		name := c.uniqueLocalName("_genclosurearg")
+		alloca := c.createEntryAlloca(v.Type())
+		alloca.SetName(name)
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(name + ".dropflag")
+		c.entryBlock.NewStore(constant.NewZeroInitializer(v.Type()), alloca)
+		c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+		c.block.NewStore(v, alloca)
+		// Re-clear in the CURRENT block, not just at function entry: when the call
+		// sits in a loop, an iteration that constructs no env must not inherit the
+		// previous iteration's live flag and free an already-freed env. The
+		// takeover below re-arms it on every iteration that does construct one.
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+		slots := make([]tempSlot, 0, len(c.envTemps)-floorEnv)
+		for _, t := range c.envTemps[floorEnv:] {
+			slots = append(slots, tempSlot{alloca: t.alloca, dropFlag: t.dropFlag})
+		}
+		c.takeOverPointerTempFlag(v, dropFlag, slots, "genenv")
+		c.scopeBindings = append(c.scopeBindings, scopeBinding{
+			kind:     bindingFreeEnv,
+			alloca:   alloca,
+			dropFlag: dropFlag,
+			varName:  name,
+		})
+		return
+	}
+
+	// 4. Heap user-type instance temp (T0088). tupleArgIsCallerOwnedTemp gates on
+	// the argument being a fresh owned value rather than a borrow, so a borrowed
+	// `obj.field` / native index argument is not registered as owned merely
+	// because some unrelated intermediate heap temp exists in this window.
+	if len(c.heapTemps) > floorHeap && c.tupleArgIsCallerOwnedTemp(argExpr) {
+		name := c.uniqueLocalName("_genheaparg")
+		alloca := c.createEntryAlloca(v.Type())
+		alloca.SetName(name)
+		c.entryBlock.NewStore(constant.NewZeroInitializer(v.Type()), alloca)
+		c.block.NewStore(v, alloca)
+		c.maybeRegisterDrop(name, alloca, paramType)
+		flag, ok := c.dropFlags[name]
+		if !ok {
+			return // nothing droppable was registered — leave the temps as they are
+		}
+		// maybeRegisterDrop opens the binding as owned; start it borrowed and let
+		// the runtime match below hand over the one temp that actually holds this
+		// argument. Intermediates in the same window keep statement lifetime.
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flag)
+		slots := make([]tempSlot, 0, len(c.heapTemps)-floorHeap)
+		for _, t := range c.heapTemps[floorHeap:] {
+			slots = append(slots, tempSlot{alloca: t.alloca, dropFlag: t.dropFlag})
+		}
+		c.takeOverPointerTempFlag(v, flag, slots, "genheap")
+	}
+}
+
+// scopeOwnPointerTemp gives an i8*-shaped temp (string / vector / channel /
+// task / mutex handle / enum-ctor storage) a SCOPE-level owned drop: an entry
+// alloca holding the pointer plus its own live flag, both zero-initialized at
+// function entry so a path that never materializes the value drops nothing, and
+// a bindingDropString that calls dropFn(ptr) at scope exit. valType is the type
+// the drop needs to see — a vector's element walk, a task's cooperative join;
+// nil for shapes with neither. Shared by promoteHandleTempToScopeBinding (T0655)
+// and promoteGeneratorArgToScope (T1467).
+//
+// The new flag is COPIED from srcFlag rather than hardcoded to 1: a per-path
+// elvis temp is owned on one path and borrowed on another (T0951), and
+// force-dropping the borrowed path would double-free. The copy happens here, so
+// the caller must neutralize the source only AFTER this returns.
+func (c *Compiler) scopeOwnPointerTemp(name string, ptr value.Value, srcFlag *ir.InstAlloca, dropFn *ir.Func, valType types.Type) {
+	alloca := c.createEntryAlloca(irtypes.I8Ptr)
+	alloca.SetName(name)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(name + ".dropflag")
+	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewStore(ptr, alloca)
+	c.block.NewStore(c.block.NewLoad(irtypes.I1, srcFlag), dropFlag)
+	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+		kind:     bindingDropString,
+		alloca:   alloca,
+		dropFlag: dropFlag,
+		dropFunc: dropFn,
+		valType:  valType,
+		varName:  name,
+	})
+}
+
+// tempSlot is the (storage, live flag) pair shared by heapTemp and envTemp,
+// letting takeOverPointerTempFlag serve both registries (T1467).
+type tempSlot struct {
+	alloca   *ir.InstAlloca // entry-block i8* alloca holding the tracked pointer
+	dropFlag *ir.InstAlloca // entry-block i1 "this temp owns its value here"
+}
+
+// takeOverPointerTempFlag transfers ownership of whichever slot matches val at
+// runtime to dst: dst receives that slot's live flag and the slot's own flag is
+// cleared. val may be a raw i8* or a value/closure struct whose field 1 is the
+// pointer, so the comparison is done at runtime (the tracked SSA value is an
+// extractvalue the caller never sees). T1467.
+//
+// dst is expected to be cleared by the caller, so a path on which val is a
+// borrow — a conditional arm that constructed nothing — leaves dst at 0 and the
+// promoted binding does not drop a value it never owned. Slots that do not match
+// keep their own flag and stay on the statement-end cleanup path.
+func (c *Compiler) takeOverPointerTempFlag(val value.Value, dst *ir.InstAlloca, slots []tempSlot, label string) {
+	if val == nil || dst == nil || len(slots) == 0 || c.block == nil || c.block.Term != nil {
+		return
+	}
+	ptr := val
+	if _, isStruct := ptr.Type().(*irtypes.StructType); isStruct {
+		ptr = c.block.NewExtractValue(ptr, 1)
+	}
+	if ptr.Type() != irtypes.I8Ptr {
+		if _, isPtr := ptr.Type().(*irtypes.PointerType); !isPtr {
+			return
+		}
+		ptr = c.block.NewBitCast(ptr, irtypes.I8Ptr)
+	}
+	for _, slot := range slots {
+		tracked := c.block.NewLoad(irtypes.I8Ptr, slot.alloca)
+		isSame := c.block.NewICmp(enum.IPredEQ, ptr, tracked)
+		claimBlk := c.newBlock(label + ".claim")
+		skipBlk := c.newBlock(label + ".claim.skip")
+		c.block.NewCondBr(isSame, claimBlk, skipBlk)
+		live := claimBlk.NewLoad(irtypes.I1, slot.dropFlag)
+		claimBlk.NewStore(constant.NewInt(irtypes.I1, 0), slot.dropFlag)
+		claimBlk.NewStore(live, dst)
+		claimBlk.NewBr(skipBlk)
+		c.block = skipBlk
+	}
 }
 
 // trackEnvTemp registers a heap-allocated closure env pointer for cleanup at

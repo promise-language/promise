@@ -1149,6 +1149,14 @@ func (c *Compiler) adaptViewDefaultArg(p *types.Param, v value.Value) value.Valu
 	if tup, ok := inner.(*types.Tuple); ok && c.tupleNeedsDrop(tup) {
 		c.registerTupleStmtTemp(v, tup)
 	}
+	if arr, ok := inner.(*types.Array); ok && c.variantFieldNeedsDrop(arr.Elem()) {
+		// Same shape as the tuple case: an `[N x T]` aggregate carries no i8* drop
+		// function, so it is registered element-wise (T1181) rather than as a
+		// pointer temp — mirroring the fixed-array argument branch in
+		// genCallArgsWithMutRef (T1466). Without it the adapter's synthesized
+		// `string[N]` default leaks every heap element.
+		c.trackArrayTemp(v, arr)
+	}
 	if isMutRef {
 		slot := c.createEntryAlloca(v.Type())
 		c.block.NewStore(v, slot)

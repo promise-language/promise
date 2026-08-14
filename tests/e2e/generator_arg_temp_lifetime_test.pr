@@ -1,0 +1,1090 @@
+// T1467: a droppable temporary passed by value to a generator (`stream[T]`)
+// call must outlive the statement that creates the stream. The coroutine frame
+// copies the argument and reads it LAZILY on each resume — long after the call
+// statement ended — so a statement-scoped temp is freed too early (use after
+// free / double free / leak, depending on which temp registry held it).
+//
+// Every test below asserts the streamed value AND runs under the suite's
+// zero-leak policy, so an over-retained argument shows up as a leak and an
+// under-retained one as corrupted output.
+type Gen `public `doc("Generator method with a heap-allocating default parameter.") {
+  int n;
+
+  items(this, string sep = "-" + "x") stream[string] `public `doc("Streams n indexed items joined with sep.") {
+    int i = 0;
+    while (i < this.n) {
+      yield "{i}{sep}";
+      i += 1;
+    }
+  }
+
+  literal_items(this, string sep = "-y") stream[string] `public `doc("Streams n items with a .rodata default separator.") {
+    int i = 0;
+    while (i < this.n) {
+      yield "{i}{sep}";
+      i += 1;
+    }
+  }
+}
+
+free_items(int n, string sep) stream[string] `doc("Free generator function taking a separator.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep}";
+    i += 1;
+  }
+}
+
+free_items_default(int n, string sep = "-" + "f") stream[string] `doc("Free generator function with a heap default separator.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep}";
+    i += 1;
+  }
+}
+
+make_sep() string `doc("Returns a freshly allocated separator.") {
+  string s = "-";
+  return s + "c";
+}
+
+// --- 1. heap-allocating default on a generator method -----------------------
+
+test_t1467_heap_string_default_method() `test {
+  Gen g = Gen(n: 3);
+  string acc = "";
+  for s in g.items() {
+    acc = acc + s;
+  }
+  assert(acc == "0-x1-x2-x", "heap default (method): {acc}");
+}
+
+// --- 2. heap-allocating default on a free generator function ----------------
+
+test_t1467_heap_string_default_free_fn() `test {
+  string acc = "";
+  for s in free_items_default(3) {
+    acc = acc + s;
+  }
+  assert(acc == "0-f1-f2-f", "heap default (free fn): {acc}");
+}
+
+// --- 3. explicit heap arguments (not defaults) ------------------------------
+
+test_t1467_explicit_concat_arg() `test {
+  Gen g = Gen(n: 3);
+  string acc = "";
+  for s in g.items("-" + "e") {
+    acc = acc + s;
+  }
+  assert(acc == "0-e1-e2-e", "explicit concat: {acc}");
+}
+
+test_t1467_call_result_arg() `test {
+  string acc = "";
+  for s in free_items(3, make_sep()) {
+    acc = acc + s;
+  }
+  assert(acc == "0-c1-c2-c", "call result arg: {acc}");
+}
+
+// --- 4. vector argument -----------------------------------------------------
+
+join_parts(int n, string[] parts) stream[string] `doc("Streams n items suffixed by parts joined together.") {
+  int i = 0;
+  while (i < n) {
+    string joined = "";
+    for p in parts {
+      joined = joined + p;
+    }
+    yield "{i}:{joined}";
+    i += 1;
+  }
+}
+
+test_t1467_vector_arg() `test {
+  string acc = "";
+  for s in join_parts(2, "a,b".split(",")) {
+    acc = acc + s + ";";
+  }
+  assert(acc == "0:ab;1:ab;", "vector arg: {acc}");
+}
+
+// --- 5. heap user-type argument ---------------------------------------------
+
+type Box `public `doc("Heap user type holding a string.") {
+  string s;
+}
+
+boxed_items(int n, Box b) stream[string] `doc("Streams n items suffixed by the box's string.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{b.s}";
+    i += 1;
+  }
+}
+
+test_t1467_heap_user_type_arg() `test {
+  string acc = "";
+  for s in boxed_items(3, Box(s: "-" + "b")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-b1-b2-b", "heap user type arg: {acc}");
+}
+
+// --- 6. closure argument with a heap capture --------------------------------
+
+mapped_items(int n, (int) -> string f) stream[string] `doc("Streams f(i) for i in 0..n.") {
+  int i = 0;
+  while (i < n) {
+    yield f(i);
+    i += 1;
+  }
+}
+
+test_t1467_closure_arg() `test {
+  string suffix = "-" + "z";
+  string acc = "";
+  for s in mapped_items(3, move |int i| -> "{i}{suffix}") {
+    acc = acc + s;
+  }
+  assert(acc == "0-z1-z2-z", "closure arg: {acc}");
+}
+
+// --- 7. enum argument with droppable variant data ---------------------------
+
+enum Tag `public `doc("Tag with an optional heap-allocated name.") {
+  Anonymous,
+  Named(string name),
+}
+
+tagged_items(int n, Tag t) stream[string] `doc("Streams n items suffixed by the tag's name.") {
+  int i = 0;
+  while (i < n) {
+    string suffix = match (t) {
+      Tag.Anonymous => "?",
+      Tag.Named(name) => name,
+    };
+    yield "{i}{suffix}";
+    i += 1;
+  }
+}
+
+test_t1467_enum_arg() `test {
+  string acc = "";
+  for s in tagged_items(3, Tag.Named("-" + "e")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-e1-e2-e", "enum arg: {acc}");
+}
+
+// --- 7b. enum argument shapes around the ctor temp --------------------------
+
+rewrap(Tag t) Tag `doc("Borrows t and returns an unrelated fresh tag.") {
+  return Tag.Named("-w");
+}
+
+// The inline ctor is an INTERMEDIATE: `rewrap` borrows it and hands back a
+// different value, so the ctor temp is not what the generator reads. It is still
+// caller-owned and must be freed exactly once — re-homing the whole ctor window
+// (rather than transferring one flag onto the argument value) is what keeps its
+// payload from being orphaned.
+test_t1467_enum_intermediate_ctor_arg() `test {
+  string acc = "";
+  for s in tagged_items(2, rewrap(Tag.Named("-" + "i"))) {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w", "enum intermediate ctor: {acc}");
+}
+
+optional_tagged_items(int n, Tag? t) stream[string] `doc("Streams n items suffixed by the optional tag's name.") {
+  int i = 0;
+  while (i < n) {
+    string suffix = match (t!) {
+      Tag.Anonymous => "?",
+      Tag.Named(name) => name,
+    };
+    yield "{i}{suffix}";
+    i += 1;
+  }
+}
+
+// The enum is wrapped into `{present, Tag}` for the callee but is still a bare
+// enum value at the call site. The ctor temp is dropped through its own storage,
+// so the promotion does not depend on the param's wrapping.
+test_t1467_optional_enum_arg() `test {
+  string acc = "";
+  for s in optional_tagged_items(2, Tag.Named("-" + "p")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-p1-p", "optional enum arg: {acc}");
+}
+
+// --- 7c. vector literal and fixed-array arguments ---------------------------
+
+test_t1467_vector_literal_arg() `test {
+  string acc = "";
+  for s in join_parts(2, ["a" + "1", "b" + "2"]) {
+    acc = acc + s + ";";
+  }
+  assert(acc == "0:a1b2;1:a1b2;", "vector literal arg: {acc}");
+}
+
+array_items(int n, string[2] parts) stream[string] `doc("Streams n items suffixed by both array elements.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{parts[0]}{parts[1]}";
+    i += 1;
+  }
+}
+
+make_parts() string[2] `doc("Returns a fresh fixed array of heap strings.") {
+  string[2] a = ["-" + "p", "-" + "q"];
+  return a;
+}
+
+// Fixed arrays are re-homed by T1466's own generator branch, not by the generic
+// promotion — an array-RETURNING call also leaves a `[N x T]` statement temp
+// (T1181) that the promotion could re-home, and registering it in both places
+// drops every element twice (`fatal: invalid free`). This guards that boundary.
+test_t1467_fixed_array_call_result_arg() `test {
+  string acc = "";
+  for s in array_items(2, make_parts()) {
+    acc = acc + s;
+  }
+  assert(acc == "0-p-q1-p-q", "fixed array arg: {acc}");
+}
+
+// --- 8. controls: the two shapes that already worked ------------------------
+
+test_t1467_rodata_default_control() `test {
+  Gen g = Gen(n: 3);
+  string acc = "";
+  for s in g.literal_items() {
+    acc = acc + s;
+  }
+  assert(acc == "0-y1-y2-y", "rodata default: {acc}");
+}
+
+test_t1467_variable_arg_control() `test {
+  string sep = "-" + "v";
+  string acc = "";
+  for s in free_items(3, sep) {
+    acc = acc + s;
+  }
+  assert(acc == "0-v1-v2-v", "variable arg: {acc}");
+  // The caller still owns `sep` after the loop — the promotion must not have
+  // stolen ownership of a borrowed variable.
+  assert(sep == "-v", "variable still owned: {sep}");
+}
+
+// --- 9. early break ---------------------------------------------------------
+
+// Yields ints, not strings: a mid-flight destroy of a generator whose *body*
+// holds a droppable local leaks it (pre-existing, tracked as T1453). This test
+// isolates the argument lifetime — the heap separator must still be freed
+// exactly once when the loop exits via `break`.
+sep_lengths(int n, string sep) stream[int] `doc("Streams the separator length n times.") {
+  int i = 0;
+  while (i < n) {
+    yield sep.len + i;
+    i += 1;
+  }
+}
+
+test_t1467_break_early() `test {
+  int total = 0;
+  for x in sep_lengths(10, "-" + "k") {
+    total += x;
+    if (total >= 5) {
+      break;
+    }
+  }
+  assert(total == 5, "break early: {total}");
+}
+
+// --- 10. re-entry: generator call inside an outer loop body -----------------
+
+test_t1467_nested_loop_reentry() `test {
+  Gen g = Gen(n: 2);
+  string acc = "";
+  int outer = 0;
+  while (outer < 3) {
+    for s in g.items() {
+      acc = acc + s;
+    }
+    acc = acc + "|";
+    outer += 1;
+  }
+  assert(acc == "0-x1-x|0-x1-x|0-x1-x|", "nested reentry: {acc}");
+}
+
+// --- 11. conditional argument: untaken path must not drop -------------------
+
+test_t1467_conditional_arg() `test {
+  string acc = "";
+  int i = 0;
+  while (i < 3) {
+    if (i % 2 == 0) {
+      for s in free_items(1, "-" + "o") {
+        acc = acc + s;
+      }
+    } else {
+      acc = acc + "#";
+    }
+    i += 1;
+  }
+  assert(acc == "0-o#0-o", "conditional arg: {acc}");
+}
+
+// --- 11b. conditional droppable args in a loop: the promoted binding's live
+// flag must be re-armed per iteration, never inherited from the previous one.
+// A closure env and a heap instance are both allocated fresh each time; an
+// iteration that constructs neither must leave the binding borrowed.
+
+test_t1467_conditional_closure_arg_in_loop() `test {
+  string acc = "";
+  int i = 0;
+  while (i < 4) {
+    if (i % 2 == 0) {
+      // Built inside the taken branch: the capture is moved into the closure,
+      // so it must be a fresh value on every iteration that constructs one.
+      string suffix = "-" + "n";
+      for s in mapped_items(1, move |int k| -> "{k}{suffix}") {
+        acc = acc + s;
+      }
+    } else {
+      acc = acc + "#";
+    }
+    i += 1;
+  }
+  assert(acc == "0-n#0-n#", "conditional closure arg in loop: {acc}");
+}
+
+test_t1467_conditional_heap_arg_in_loop() `test {
+  string acc = "";
+  int i = 0;
+  while (i < 4) {
+    if (i % 2 == 0) {
+      for s in boxed_items(1, Box(s: "-" + "r")) {
+        acc = acc + s;
+      }
+    } else {
+      acc = acc + "#";
+    }
+    i += 1;
+  }
+  assert(acc == "0-r#0-r#", "conditional heap arg in loop: {acc}");
+}
+
+// --- 12. generic generator --------------------------------------------------
+
+gen_generic[T](int n, T x) stream[string] `doc("Streams n items formatted from x.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{x}";
+    i += 1;
+  }
+}
+
+test_t1467_generic_generator() `test {
+  string acc = "";
+  for s in gen_generic[string](3, "-" + "g") {
+    acc = acc + s;
+  }
+  assert(acc == "0-g1-g2-g", "generic generator: {acc}");
+}
+
+// --- 13. virtual dispatch through an abstract base --------------------------
+
+type Base `public `doc("Abstract base declaring a generator method.") {
+  int n;
+  stream_items(this, string sep) stream[string] `public `abstract `doc("Streams n items joined with sep.");
+}
+
+type Child is Base `public `doc("Concrete generator override.") {
+  stream_items(this, string sep) stream[string] `public `doc("Streams n items joined with sep.") {
+    int i = 0;
+    while (i < this.n) {
+      yield "{i}{sep}";
+      i += 1;
+    }
+  }
+}
+
+test_t1467_virtual_dispatch() `test {
+  Base b = Child(n: 3);
+  string acc = "";
+  for s in b.stream_items("-" + "d") {
+    acc = acc + s;
+  }
+  assert(acc == "0-d1-d2-d", "virtual dispatch: {acc}");
+}
+
+// --- 14. failable generator factory -----------------------------------------
+
+failable_items!(int n, string sep) stream[string] `doc("Streams n items, failing when n is negative.") {
+  if (n < 0) {
+    raise error("negative");
+  }
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep}";
+    i += 1;
+  }
+}
+
+test_t1467_failable_generator() `test {
+  string acc = "";
+  for s in failable_items(3, "-" + "q")?! {
+    acc = acc + s;
+  }
+  assert(acc == "0-q1-q2-q", "failable generator: {acc}");
+}
+
+// --- 14b. failable generator that raises: the unwind must drop the promoted
+// argument exactly once (the scope cleanup on the error path owns it, and the
+// statement-end temp drain that also runs there must find its flag already
+// handed over).
+
+raising_items!(int n, string sep) stream[string] `doc("Raises when n is negative, else streams n items.") {
+  if (n < 0) {
+    raise error("negative");
+  }
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep}";
+    i += 1;
+  }
+}
+
+consume!(int n) string `doc("Consumes the stream, propagating iteration errors.") {
+  string acc = "";
+  for s in raising_items(n, "-" + "r")?^ {
+    acc = acc + s;
+  }
+  return acc;
+}
+
+test_t1467_failable_generator_error_path() `test {
+  string failed = consume(-1)? e {
+    "err";
+  };
+  assert(failed == "err", "error path: {failed}");
+  string ok = consume(2)?!;
+  assert(ok == "0-r1-r", "ok path: {ok}");
+}
+
+// --- 15. yield-delegation ---------------------------------------------------
+
+delegating(int n) stream[string] `doc("Delegates to free_items with a heap separator.") {
+  yield * free_items(n, "-" + "w");
+}
+
+test_t1467_yield_delegate() `test {
+  string acc = "";
+  for s in delegating(3) {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w2-w", "yield delegate: {acc}");
+}
+
+// --- 16. two droppable arguments in one call --------------------------------
+
+two_args(int n, string sep, string[] parts) stream[string] `doc("Streams n items using sep and parts.") {
+  int i = 0;
+  while (i < n) {
+    string joined = "";
+    for p in parts {
+      joined = joined + p;
+    }
+    yield "{i}{sep}{joined}";
+    i += 1;
+  }
+}
+
+test_t1467_two_generator_args() `test {
+  string acc = "";
+  for s in two_args(2, "-" + "t", "a,b".split(",")) {
+    acc = acc + s + ";";
+  }
+  assert(acc == "0-tab;1-tab;", "two generator args: {acc}");
+}
+
+// --- 17. per-path ownership: an elvis argument whose default is borrowed -----
+//
+// `maybe(...) ?: h.field` owns the freshly built some-value but BORROWS the
+// struct-owned default. The promoted binding must inherit that per-path flag, not
+// assume ownership: taking the borrowed path as owned frees the holder's value
+// here and again at the holder's drop (`fatal: invalid free`).
+
+type OwnerBox `public `doc("Holds a heap user-type value.") {
+  Box b;
+}
+
+type OwnerSep `public `doc("Holds a heap string.") {
+  string s;
+}
+
+maybe_box(bool b) Box? `doc("Returns a freshly built Box when b is true.") {
+  if (b) {
+    return Box(s: "-" + "m");
+  }
+  return none;
+}
+
+maybe_sep(bool b) string? `doc("Returns a freshly built separator when b is true.") {
+  if (b) {
+    return "-" + "m";
+  }
+  return none;
+}
+
+test_t1467_elvis_heap_arg_borrowed_path() `test {
+  OwnerBox h = OwnerBox(b: Box(s: "-" + "h"));
+  string acc = "";
+  for s in boxed_items(2, maybe_box(false) ?: h.b) {
+    acc = acc + s;
+  }
+  assert(acc == "0-h1-h", "elvis heap borrowed path: {acc}");
+  assert(h.b.s == "-h", "holder still owns its box: {h.b.s}");
+}
+
+test_t1467_elvis_heap_arg_owned_path() `test {
+  OwnerBox h = OwnerBox(b: Box(s: "-" + "h"));
+  string acc = "";
+  for s in boxed_items(2, maybe_box(true) ?: h.b) {
+    acc = acc + s;
+  }
+  assert(acc == "0-m1-m", "elvis heap owned path: {acc}");
+  assert(h.b.s == "-h", "holder untouched: {h.b.s}");
+}
+
+test_t1467_elvis_string_arg_borrowed_path() `test {
+  OwnerSep h = OwnerSep(s: "-" + "h");
+  string acc = "";
+  for s in free_items(2, maybe_sep(false) ?: h.s) {
+    acc = acc + s;
+  }
+  assert(acc == "0-h1-h", "elvis string borrowed path: {acc}");
+  assert(h.s == "-h", "holder still owns its string: {h.s}");
+}
+
+test_t1467_elvis_string_arg_owned_path() `test {
+  OwnerSep h = OwnerSep(s: "-" + "h");
+  string acc = "";
+  for s in free_items(2, maybe_sep(true) ?: h.s) {
+    acc = acc + s;
+  }
+  assert(acc == "0-m1-m", "elvis string owned path: {acc}");
+  assert(h.s == "-h", "holder untouched: {h.s}");
+}
+
+// --- 18. task-handle argument -----------------------------------------------
+//
+// A `task[T]` temp is the one promoted shape whose drop is not a plain call: in a
+// coroutine body (a test body, a `go {}`, a generator) it must park-suspend on the
+// goroutine instead of blocking, or the single-threaded WASM scheduler can never
+// run the goroutine the join waits on (T0668). The promotion carries the task type
+// through to the scope binding so that lowering is preserved.
+
+spin(int n) int `doc("Sums 0..n so the goroutine must actually be scheduled.") {
+  int total = 0;
+  int i = 0;
+  while (i < n) {
+    total += i;
+    i += 1;
+  }
+  return total;
+}
+
+task_lengths(int n, task[int] t) stream[int] `doc("Streams n items without ever awaiting the task.") {
+  int i = 0;
+  while (i < n) {
+    yield n + i;
+    i += 1;
+  }
+}
+
+test_t1467_unawaited_task_arg() `test(timeout: "10s") {
+  int total = 0;
+  for x in task_lengths(2, go spin(50000)) {
+    total += x;
+  }
+  assert(total == 5, "task arg: {total}");
+}
+
+// --- 19. wrapped parameter: the argument is a bare string, the param is `T?` --
+//
+// The materialized value is an i8* the string/vector registry already holds, so
+// the promotion happens in that branch and returns BEFORE the layout guard that
+// declines a shape whose value is not in the param type's own representation.
+// Pre-fix the temp was freed at statement end and the frame read the freed
+// buffer — the separator came back as digits ("0-O11").
+
+optional_sep_items(int n, string? sep) stream[string] `doc("Streams n items joined with an optional separator.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep!}";
+    i += 1;
+  }
+}
+
+test_t1467_optional_string_param() `test {
+  string acc = "";
+  for s in optional_sep_items(3, "-" + "O") {
+    acc = acc + s;
+  }
+  assert(acc == "0-O1-O2-O", "optional string param: {acc}");
+}
+
+// --- 20. map / set / channel arguments ---------------------------------------
+//
+// A Map and a Set are heap user-type instances (promoted through the heap
+// branch, dropped via their own `drop`); a Channel is a pointer temp promoted
+// through the string/vector branch. Each owns interior allocations, so the
+// zero-leak policy is what proves the promoted binding drops it exactly once.
+
+map_sizes(int n, map[string, int] m) stream[string] `doc("Streams the map's size n times.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}:{m.len}";
+    i += 1;
+  }
+}
+
+make_map() map[string, int] `doc("Returns a freshly built map with heap keys.") {
+  map[string, int] m = {:};
+  m["a" + "1"] = 1;
+  m["b" + "2"] = 2;
+  return m;
+}
+
+test_t1467_map_arg() `test {
+  string acc = "";
+  for s in map_sizes(2, make_map()) {
+    acc = acc + s + ";";
+  }
+  assert(acc == "0:2;1:2;", "map arg: {acc}");
+}
+
+set_sizes(int n, Set[string] s) stream[string] `doc("Streams the set's size n times.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}:{s.len}";
+    i += 1;
+  }
+}
+
+make_set() Set[string] `doc("Returns a freshly built set with heap elements.") {
+  Set[string] s = Set[string]();
+  s.add("a" + "1");
+  s.add("b" + "2");
+  return s;
+}
+
+test_t1467_set_arg() `test {
+  string acc = "";
+  for s in set_sizes(2, make_set()) {
+    acc = acc + s + ";";
+  }
+  assert(acc == "0:2;1:2;", "set arg: {acc}");
+}
+
+channel_lengths(int n, channel[int] ch) stream[int] `doc("Streams n items without touching the channel.") {
+  int i = 0;
+  while (i < n) {
+    yield n + i;
+    i += 1;
+  }
+}
+
+test_t1467_channel_arg() `test {
+  int total = 0;
+  for x in channel_lengths(2, channel[int](2)) {
+    total += x;
+  }
+  assert(total == 5, "channel arg: {total}");
+}
+
+// --- 21. intermediate temps consumed by a nested borrowing call --------------
+//
+// The promoted value is the OUTER call's result; the inline temp the inner call
+// only borrowed is a different value that must keep its own (statement) owner.
+// Pre-fix the outer result was freed at statement end and the frame read it
+// back corrupted ("0-s!1", "0:3;1:0;").
+
+wrap_sep(string s) string `doc("Borrows s and returns a fresh suffixed copy.") {
+  return s + "!";
+}
+
+test_t1467_string_intermediate_arg() `test {
+  string acc = "";
+  for s in free_items(2, wrap_sep("-" + "s")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-s!1-s!", "string intermediate: {acc}");
+}
+
+wrap_parts(string[] v) string[] `doc("Borrows v and returns a fresh vector.") {
+  return["x" + "1", "y" + "2", "z" + "3"];
+}
+
+test_t1467_vector_intermediate_arg() `test {
+  string acc = "";
+  for s in join_parts(2, wrap_parts("a,b".split(","))) {
+    acc = acc + s + ";";
+  }
+  assert(acc == "0:x1y2z3;1:x1y2z3;", "vector intermediate: {acc}");
+}
+
+// --- 22. generic shapes ------------------------------------------------------
+//
+// The promotion runs inside a monomorphized caller, and the promoted alloca must
+// carry the substituted layout. Pre-fix the generic instance leaked (generic
+// argument) and the generic type's default came back corrupted ("0-gx717").
+
+type GenericBox[T] `public `doc("Generic heap box holding one value.") {
+  T v;
+}
+
+generic_boxed[T](int n, GenericBox[T] b) stream[string] `doc("Streams n items suffixed by the box's value.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{b.v}";
+    i += 1;
+  }
+}
+
+test_t1467_generic_heap_arg() `test {
+  string acc = "";
+  for s in generic_boxed[string](3, GenericBox[string](v: "-" + "G")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-G1-G2-G", "generic heap arg: {acc}");
+}
+
+type GenericGen[T] `public `doc("Generic type whose generator method has a heap default.") {
+  T v;
+
+  items(this, string sep = "-" + "gx") stream[string] `public `doc("Streams v twice joined with sep.") {
+    int i = 0;
+    while (i < 2) {
+      yield "{i}{sep}{this.v}";
+      i += 1;
+    }
+  }
+}
+
+test_t1467_generic_type_heap_default() `test {
+  GenericGen[int] g = GenericGen[int](v: 7);
+  string acc = "";
+  for s in g.items() {
+    acc = acc + s;
+  }
+  assert(acc == "0-gx71-gx7", "generic type heap default: {acc}");
+}
+
+// --- 23. two generator loops nested inside one another -----------------------
+//
+// The inner loop's promoted binding lives in the inner scope while the outer
+// one's is still live — both must drop exactly once, and the inner one must be
+// re-armed on each outer iteration. Pre-fix the outer separator was freed by the
+// inner statement's cleanup ("0-A0-B;0-A1;10-B;11;").
+
+test_t1467_nested_generator_loops() `test {
+  string acc = "";
+  for a in free_items(2, "-" + "A") {
+    for b in free_items(2, "-" + "B") {
+      acc = acc + a + b + ";";
+    }
+  }
+  assert(acc == "0-A0-B;0-A1-B;1-A0-B;1-A1-B;", "nested generator loops: {acc}");
+}
+
+// --- 24. `move` params: the callee already owns the argument ------------------
+//
+// The promotion runs AFTER the move-param claim block, so an argument the callee
+// consumed must not get a second (caller-side) owner. Registering one here would
+// free the value the coroutine frame owns.
+
+move_items(int n, string move sep) stream[string] `doc("Consumes sep and streams n items.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep}";
+    i += 1;
+  }
+}
+
+test_t1467_move_string_param() `test {
+  string acc = "";
+  for s in move_items(3, "-" + "M") {
+    acc = acc + s;
+  }
+  assert(acc == "0-M1-M2-M", "move string param: {acc}");
+}
+
+move_boxed(int n, Box move b) stream[string] `doc("Consumes b and streams n items.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{b.s}";
+    i += 1;
+  }
+}
+
+test_t1467_move_heap_param() `test {
+  string acc = "";
+  for s in move_boxed(3, Box(s: "-" + "B")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-B1-B2-B", "move heap param: {acc}");
+}
+
+move_tagged(int n, Tag move t) stream[string] `doc("Consumes t and streams n items.") {
+  int i = 0;
+  while (i < n) {
+    string suffix = match (t) {
+      Tag.Anonymous => "?",
+      Tag.Named(name) => name,
+    };
+    yield "{i}{suffix}";
+    i += 1;
+  }
+}
+
+test_t1467_move_enum_param() `test {
+  string acc = "";
+  for s in move_tagged(3, Tag.Named("-" + "E")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-E1-E2-E", "move enum param: {acc}");
+}
+
+// --- 25. payload-free enum variant: nothing to promote ----------------------
+//
+// `Tag.Anonymous` allocates nothing, so the ctor registers no temp and the enum
+// branch's window is empty — the argument must reach the frame untouched and no
+// scope binding may be opened for it (an owner for a value nobody allocated
+// would free a stack aggregate). Covers the same three enum generators the
+// droppable variant does.
+
+test_t1467_payload_free_enum_arg() `test {
+  string acc = "";
+  for s in tagged_items(2, Tag.Anonymous) {
+    acc = acc + s;
+  }
+  for s in optional_tagged_items(2, Tag.Anonymous) {
+    acc = acc + s;
+  }
+  for s in move_tagged(2, Tag.Anonymous) {
+    acc = acc + s;
+  }
+  assert(acc == "0?1?0?1?0?1?", "payload-free enum arg: {acc}");
+}
+
+// --- 26. the factory itself raises before the first yield --------------------
+//
+// The generator body runs up to its first suspend inside the factory call, so a
+// `raise` there unwinds while the promoted binding is already registered. The
+// heap separator must be freed exactly once on that path — by the scope cleanup,
+// with the statement-end drain finding the flag already handed over.
+
+consume_failable!(int n) string `doc("Consumes failable_items, propagating iteration errors.") {
+  string acc = "";
+  for s in failable_items(n, "-" + "z")?^ {
+    acc = acc + s;
+  }
+  return acc;
+}
+
+test_t1467_failable_factory_raises_with_heap_arg() `test {
+  string failed = consume_failable(-1)? e {
+    "err";
+  };
+  assert(failed == "err", "factory raise path: {failed}");
+  string ok = consume_failable(2)?!;
+  assert(ok == "0-z1-z", "factory ok path: {ok}");
+}
+
+// --- 27. `continue` in the loop body ----------------------------------------
+//
+// The promoted binding is registered BEFORE genForInStmt records loopScopeDepth,
+// so it sits *outside* the loop's own cleanup window. `break` (test 9) leaves the
+// loop once; `continue` runs that same cleanup on EVERY skipped iteration, so a
+// binding that landed inside the window would be dropped repeatedly and the next
+// resume would read freed memory. One test per binding kind: bindingDropString,
+// bindingFreeEnv, bindingDrop.
+
+test_t1467_continue_string_arg() `test {
+  string acc = "";
+  for s in free_items(4, "-" + "C") {
+    if (s.starts_with("1") || s.starts_with("2")) {
+      continue;
+    }
+    acc = acc + s;
+  }
+  assert(acc == "0-C3-C", "continue with string arg: {acc}");
+}
+
+test_t1467_continue_closure_arg() `test {
+  string suffix = "-" + "D";
+  string acc = "";
+  for s in mapped_items(4, move |int i| -> "{i}{suffix}") {
+    if (s.starts_with("1")) {
+      continue;
+    }
+    acc = acc + s;
+  }
+  assert(acc == "0-D2-D3-D", "continue with closure arg: {acc}");
+}
+
+test_t1467_continue_heap_arg() `test {
+  string acc = "";
+  for s in boxed_items(4, Box(s: "-" + "E")) {
+    if (s.starts_with("2")) {
+      continue;
+    }
+    acc = acc + s;
+  }
+  assert(acc == "0-E1-E3-E", "continue with heap arg: {acc}");
+}
+
+// --- 28. early `return` out of the enclosing function from inside the loop ----
+//
+// `break` exits to the scope that owns the promoted binding; `return` unwinds
+// THROUGH it, taking the return-cleanup path instead of the scope-exit one. The
+// argument must be freed there exactly once — missing it leaks, running it twice
+// on top of the scope drain is an invalid free.
+//
+// These generators yield ints so their bodies hold no droppable local: a
+// mid-flight destroy leaks generator BODY locals (pre-existing, T1453), which
+// would mask the argument lifetime this test is isolating. Same reason test 9
+// uses sep_lengths.
+
+boxed_lengths(int n, Box b) stream[int] `doc("Streams the box string's length n times.") {
+  int i = 0;
+  while (i < n) {
+    yield b.s.len + i;
+    i += 1;
+  }
+}
+
+// Takes an `(int) -> int` closure rather than the `(int) -> string` of
+// mapped_items: the ENV still holds a heap capture (which is what the promoted
+// bindingFreeEnv has to release), but the call result is not droppable, so no
+// generator body temp is live across the suspend that the mid-flight destroy
+// would leak (T1453).
+mapped_lengths(int n, (int) -> int f) stream[int] `doc("Streams f(i) for i in 0..n.") {
+  int i = 0;
+  while (i < n) {
+    yield f(i);
+    i += 1;
+  }
+}
+
+first_at_least(int limit) int `doc("Returns the first streamed length at or above limit.") {
+  for x in sep_lengths(10, "-" + "R") {
+    if (x >= limit) {
+      return x;
+    }
+  }
+  return -1;
+}
+
+first_boxed_at_least(int limit) int `doc("Returns the first boxed length at or above limit.") {
+  for x in boxed_lengths(10, Box(s: "-" + "S")) {
+    if (x >= limit) {
+      return x;
+    }
+  }
+  return -1;
+}
+
+first_mapped_at_least(int limit) int `doc("Returns the first mapped length at or above limit.") {
+  string suffix = "-" + "T";
+  for x in mapped_lengths(10, move |int i| -> suffix.len + i) {
+    if (x >= limit) {
+      return x;
+    }
+  }
+  return -1;
+}
+
+test_t1467_early_return_string_arg() `test {
+  assert(first_at_least(4) == 4, "early return, string arg: {first_at_least(4)}");
+  // The loop also has to run to exhaustion without returning — that path drops
+  // the binding at ordinary scope exit instead.
+  assert(first_at_least(99) == -1, "exhausted, string arg: {first_at_least(99)}");
+}
+
+test_t1467_early_return_heap_arg() `test {
+  assert(first_boxed_at_least(4) == 4, "early return, heap arg: {first_boxed_at_least(4)}");
+  assert(first_boxed_at_least(99) == -1, "exhausted, heap arg: {first_boxed_at_least(99)}");
+}
+
+test_t1467_early_return_closure_arg() `test {
+  assert(first_mapped_at_least(4) == 4, "early return, closure arg: {first_mapped_at_least(4)}");
+  assert(first_mapped_at_least(99) == -1, "exhausted, closure arg: {first_mapped_at_least(99)}");
+}
+
+// --- 29. `raise` out of the CONSUMER from inside the loop body ---------------
+//
+// Test 14b raises inside the generator body and test 26 raises inside the
+// factory; neither exercises the consumer abandoning a healthy stream mid-flight
+// via the error path. `raise` unwinds the consumer's scope while the coroutine is
+// suspended, so the promoted argument is dropped by the raise cleanup — and the
+// statement-end temp drain that also runs there must find the flag already
+// handed over.
+
+stop_at!(int limit) int `doc("Raises when a streamed length reaches limit.") {
+  int seen = 0;
+  for x in sep_lengths(10, "-" + "U") {
+    seen += 1;
+    if (x >= limit) {
+      raise error("limit");
+    }
+  }
+  return seen;
+}
+
+stop_at_boxed!(int limit) int `doc("Raises when a streamed boxed length reaches limit.") {
+  int seen = 0;
+  for x in boxed_lengths(10, Box(s: "-" + "V")) {
+    seen += 1;
+    if (x >= limit) {
+      raise error("limit");
+    }
+  }
+  return seen;
+}
+
+test_t1467_raise_from_loop_body_string_arg() `test {
+  int failed = stop_at(4)? e {
+    -1;
+  };
+  assert(failed == -1, "raise from loop body, string arg: {failed}");
+  assert(stop_at(99)?! == 10, "no raise, string arg");
+}
+
+test_t1467_raise_from_loop_body_heap_arg() `test {
+  int failed = stop_at_boxed(4)? e {
+    -1;
+  };
+  assert(failed == -1, "raise from loop body, heap arg: {failed}");
+  assert(stop_at_boxed(99)?! == 10, "no raise, heap arg");
+}
+
+// Not covered here, deliberately — each is a pre-existing defect with its own
+// item, verified to reproduce identically on a clean pre-T1467 build:
+//   - a heap user-type INTERMEDIATE in the argument list
+//     (`boxed_items(2, rebox(Box(s: "-" + "i")))`) leaks: for-in's stream branch
+//     disarms every pending heap temp before building the generator (T0088), so
+//     an intermediate the promotion did not claim is never freed — T1514.
+//   - a closure-env INTERMEDIATE (`mapped_items(2, fwrap(move |..| ..))`) leaks
+//     on the ordinary call path and double-frees through a generator — T1515.
+//   - a mut-ref (`T ~p`) generator param reads garbage after the first resume —
+//     T1516.
+//   - a FAILABLE method returning its own heap default double-frees on the
+//     direct call path (the `{i1, T, i8*}` result skips the return-alias
+//     check) — T1517.
+// All four belong next to the shapes above once their own items are fixed.

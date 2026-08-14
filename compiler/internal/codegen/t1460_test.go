@@ -102,6 +102,57 @@ main() {
 	assertContains(t, adapter, "call void @promise_string_drop")
 }
 
+// A fixed-array default is the same shape as the tuple one: an `[N x T]`
+// aggregate carries no i8* drop function, so it must be registered element-wise
+// (T1181) — mirroring the fixed-array argument branch the ordinary call path
+// gained in T1466. Without it every heap element of the default leaks.
+func TestT1460ViewAdapterFixedArrayDefaultDrainsElementWise(t *testing.T) {
+	ir := generateIR(t, t1460TaggerIface+`
+type ArrP {
+  int v;
+  tag(this, string[2] xs = ["a" + "b", "c" + "d"]) string `+"`public"+` => "a{xs[0]}";
+}
+main() {
+  ArrP p = ArrP(v: 1);
+  print_line(p.tag());
+  Tagger t = p;
+  print_line(t.tag());
+}
+`)
+	adapter := extractDefine(ir, "ArrP.tag$view_adapt_as_Tagger")
+	if adapter == "" {
+		t.Fatalf("no view adapter emitted\n%s", ir)
+	}
+	assertContains(t, adapter, "arrtmp.drop")
+	assertContains(t, adapter, "call void @promise_string_drop")
+}
+
+// A GENERIC concrete type: the adapter is emitted inside the monomorphized
+// instance, so the default's param type must be resolved through the active
+// substitution before its ownership is decided (adaptViewDefaultArg's typeSubst
+// branch). The heap default still has to be dropped inside the adapter.
+func TestT1460GenericViewAdapterDropsHeapStringDefault(t *testing.T) {
+	ir := generateIR(t, t1460TaggerIface+`
+type GenP[T] {
+  T v;
+  tag(this, string suffix = "-" + "g") string `+"`public"+` => "{this.v}{suffix}";
+}
+main() {
+  GenP[int] p = GenP[int](v: 1);
+  print_line(p.tag());
+  Tagger t = p;
+  print_line(t.tag());
+}
+`)
+	adapter := extractDefine(ir, "GenP[int].tag$view_adapt_as_Tagger")
+	if adapter == "" {
+		t.Fatalf("no generic view adapter emitted\n%s", ir)
+	}
+	assertContains(t, adapter, "@promise_string_concat")
+	assertContains(t, adapter, "call void @promise_string_drop")
+	assertContains(t, adapter, "adapt.alias.clear")
+}
+
 // A `T~` param is passed as a POINTER to the caller's storage (B0149), so the
 // adapter must materialize the default into a slot and forward its address —
 // passing the value raw produced a type-mismatched call. The callee only borrows,

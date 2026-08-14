@@ -292,6 +292,33 @@ func extractEnum(typ types.Type) *types.Enum {
 	return nil
 }
 
+// peelOptional strips every Optional layer from a type, returning the innermost
+// non-Optional type (`T??` → `T`). Used where a decision depends on what the
+// value ultimately IS rather than on how the declaration wraps it — e.g. an
+// enum argument passed to an `E?` parameter is still an enum value at the call
+// site, so its ownership is handled by the same rule (T1467).
+func peelOptional(typ types.Type) types.Type {
+	for {
+		opt, ok := typ.(*types.Optional)
+		if !ok {
+			return typ
+		}
+		typ = opt.Elem()
+	}
+}
+
+// isTaskLikeType reports whether typ is a task handle — `task[T]`/`Task[T]` or
+// `FailableTask[T]` — either as a concrete instance or as the bare generic
+// origin (which is what a `T`-substituted param resolves to). Mirrors the pair
+// of checks emitStringDropCall uses to route a task drop through the
+// cooperative join (T0668).
+func isTaskLikeType(typ types.Type) bool {
+	if _, ok := types.AsAnyTask(typ); ok {
+		return true
+	}
+	return types.IsTaskLikeOrigin(extractNamed(typ))
+}
+
 // userValueType returns the value struct layout for user-defined types.
 // All user types share this layout: { i8* _vtable, i8* _instance }.
 // This is the unit of passing per the four-struct model (T#v).

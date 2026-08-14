@@ -29,8 +29,10 @@ var t1215NativeDirectUse = regexp.MustCompile(`extractvalue \{ i1, i8\* \} %\d+,
 
 // The owned-temp double-tracking smoking gun: the extracted force result stored
 // into a temp slot and armed with `store i1 true`. Must NOT appear for the
-// double-force receiver.
-var t1215OwnedTempStore = regexp.MustCompile(`store i8\* %\d+, i8\*\* %\d+\s*\n\s*store i1 true, i1\* %\d+\s*\n\s*store i8\* %\d+, i8\*\* %\d+`)
+// double-force receiver. The third store's destination is the handle-promotion
+// alloca (T0655), which is a NAMED local (`%_handletmp`), so that operand accepts
+// either spelling — this pattern is about the store sequence, not alloca names.
+var t1215OwnedTempStore = regexp.MustCompile(`store i8\* %\d+, i8\*\* %\d+\s*\n\s*store i1 true, i1\* %\d+\s*\n\s*store i8\* %\d+, i8\*\* %[\w.]+`)
 
 // Native single-owner handle: `Mutex[int]??` → `r!!.lock().borrow`.
 func TestT1215NativeDoubleForceNoOwnedTemp(t *testing.T) {

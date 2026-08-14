@@ -2,7 +2,6 @@ package common
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -239,30 +238,36 @@ func TestInstallChecksumExactMatch(t *testing.T) {
 		t.Fatalf("fixture is not exercising the bug: substring match hit %d lines, want >=2", substringHits)
 	}
 
-	// The fix, run via the real awk program embedded in install.sh.
-	if _, err := exec.LookPath("awk"); err != nil {
-		t.Skip("awk not available; skipping awk-semantics check")
-	}
-	got := runAwkExtract(t, sums, "promise-linux-amd64.gz")
+	// The fix: the exact-match semantics install.sh's awk program implements.
+	got := awkExactField2(sums, "promise-linux-amd64.gz")
 	if got != hashThin {
-		t.Errorf("awk exact-match for promise-linux-amd64.gz = %q, want the thin hash %q (a substring match would have returned two hashes)", got, hashThin)
+		t.Errorf("exact-match for promise-linux-amd64.gz = %q, want the thin hash %q (a substring match would have returned two hashes)", got, hashThin)
 	}
 	// The full name must resolve to its own hash, not the thin one.
-	if got := runAwkExtract(t, sums, "promise-linux-amd64-full.gz"); got != hashFull {
-		t.Errorf("awk exact-match for promise-linux-amd64-full.gz = %q, want %q", got, hashFull)
+	if got := awkExactField2(sums, "promise-linux-amd64-full.gz"); got != hashFull {
+		t.Errorf("exact-match for promise-linux-amd64-full.gz = %q, want %q", got, hashFull)
 	}
 }
 
-// runAwkExtract runs the exact awk program install.sh uses for checksum lookup.
-func runAwkExtract(t *testing.T, sums, name string) string {
-	t.Helper()
-	cmd := exec.Command("awk", "-v", "name="+name, "$2 == name { print $1 }")
-	cmd.Stdin = strings.NewReader(sums)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("awk: %v", err)
+// awkExactField2 models `awk -v name=<name> '$2 == name { print $1 }'`, the
+// checksum lookup install.sh uses: split each line on runs of whitespace
+// (strings.Fields matches awk's default field splitting), and emit field 1 of
+// every line whose field 2 equals name exactly.
+//
+// This is a deliberate Go reimplementation rather than a shell-out: the test
+// suite must not depend on tools the project does not install itself (awk is
+// absent on a stock Windows host). Fidelity to the committed script is held by
+// TestInstallScriptsUseExactMatch, which pins install.sh to this awk form — so
+// together the two assert "the script uses form X" and "form X has these
+// semantics".
+func awkExactField2(sums, name string) string {
+	var out []string
+	for _, line := range strings.Split(sums, "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && f[1] == name {
+			out = append(out, f[0])
+		}
 	}
-	return strings.TrimSpace(string(out))
+	return strings.Join(out, "\n")
 }
 
 // TestInstallScriptsUseExactMatch is a source-level regression guard: it asserts
@@ -292,7 +297,7 @@ func TestInstallScriptsUseExactMatch(t *testing.T) {
 	}
 }
 
-// TestInstallResolveLatestRejectsNonEpoch runs the exact `case` filter install.sh
+// TestInstallResolveLatestRejectsNonEpoch covers the `case` filter install.sh
 // applies to the `latest`-resolved tag (T1493). Only epoch-* tags survive; a
 // deps-* blob release (or anything else) that wrongly took the `latest` slot is
 // cleared to "", forcing the "no published stable release" guidance path instead
@@ -310,25 +315,27 @@ func TestInstallResolveLatestRejectsNonEpoch(t *testing.T) {
 		{"v1.2.3", ""},
 	}
 	for _, c := range cases {
-		got := runInstallEpochFilter(t, c.tag)
+		got := shEpochFilter(c.tag)
 		if got != c.want {
 			t.Errorf("epoch filter on %q = %q, want %q", c.tag, got, c.want)
 		}
 	}
 }
 
-// runInstallEpochFilter runs the exact `case $TAG in epoch-*) ;; *) TAG="" ;; esac`
-// filter install.sh uses, echoing the result. Mirrors runAwkExtract's approach of
-// executing the real shell logic rather than reimplementing it.
-func runInstallEpochFilter(t *testing.T, tag string) string {
-	t.Helper()
-	script := `TAG="$1"; case "$TAG" in epoch-*) ;; *) TAG="" ;; esac; printf '%s' "$TAG"`
-	cmd := exec.Command("sh", "-c", script, "sh", tag)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("sh: %v", err)
+// shEpochFilter models `case "$TAG" in epoch-*) ;; *) TAG="" ;; esac`, the tag
+// filter install.sh applies to the `latest`-resolved release. The `epoch-*`
+// glob matches "epoch-" followed by anything (including nothing), which is
+// exactly strings.HasPrefix; every other tag is cleared.
+//
+// Reimplemented in Go rather than shelled out to `sh` for the same reason as
+// awkExactField2 — no dependency on tools the project does not install itself.
+// TestInstallScriptsEnforceEpochInvariant pins install.sh to this `epoch-*`
+// form, so the pair still covers both halves of the T1493 invariant.
+func shEpochFilter(tag string) string {
+	if !strings.HasPrefix(tag, "epoch-") {
+		return ""
 	}
-	return string(out)
+	return tag
 }
 
 // TestInstallScriptsEnforceEpochInvariant is a source-level regression guard: the

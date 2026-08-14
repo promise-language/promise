@@ -1,6 +1,6 @@
 # Large Integer Types — Design Plan
 
-> **Status**: Implemented (T0587). Adds `i128`/`u128`, `i256`/`u256`, and `i512`/`u512` as first-class native primitive types. Phases 1–3 (all six widths, with arithmetic/comparison/bitwise/range/format/parse/encode/decode/hash, casts, and JSON as decimal strings) are done and tested. Phase 4 remainder: collapsing the three per-width `_wide_int_format_*` helpers into one generic helper is deferred until numeric generics are expressive enough. `scan[wide](s)` through the generic `Parse` interface is blocked on a separate default-argument bug (tracker T1395); direct `wide.parse(reader)` works. This document captures motivation, scope, the language/codegen/stdlib changes, and the implementation phasing.
+> **Status**: Implemented (T0587). Adds `i128`/`u128`, `i256`/`u256`, and `i512`/`u512` as first-class native primitive types. Phases 1–3 (all six widths, with arithmetic/comparison/bitwise/range/format/parse/encode/decode/hash, casts, and JSON as decimal strings) are done and tested. Phase 4 remainder: collapsing the three per-width `_wide_int_format_*` helpers into one generic helper is deferred until numeric generics are expressive enough. `scan[wide](s)` through the generic `Parse` interface now works (the default-argument bug T1395 is fixed); `wide.parse(reader)` also works directly. This document captures motivation, scope, the language/codegen/stdlib changes, and the implementation phasing.
 
 ---
 

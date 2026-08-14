@@ -295,6 +295,13 @@ Identity is composed bottom-up:
 content hash; the exact algorithm is implementation-defined but must be stable across
 compiler versions once chosen — changing it is a hard schema break.
 
+On the wire, a `Hash128` serializes as its 32-character lowercase hex string — the
+base-16 form of the wrapped `u128` (`to_hex()`), matching the `$ref` targets in §2.
+This overrides the `u128` default (wide integers otherwise encode as decimal strings):
+ids are hex for readability and to line up with `$ref`. "Raw 128 bits" describes only a
+future binary transport; over JSON a `Hash128` is always a lossless hex string, never a
+JSON number.
+
 `type_args` is the recursive component: `Vector[int]` and `Vector[string]` get
 different ids because their argument lists differ. `Map[string, Vector[int]]` flattens
 to two argument hashes (`string`, `Vector[int]`), in that order.
@@ -509,14 +516,25 @@ being importable, and importability already requires either a catalog name or a
 
 `schema.of[T]()` and `schema.for_func[F]()` are `` `mono `` free functions: each
 instantiation triggers the compiler's monomorphization pipeline (CLAUDE.md
-§"Monomorphization"). The schema-generation hook runs in the same sema pass that
-synthesizes encode/decode for `` `serializable `` types
-(`compiler/internal/sema/serialize.go`). It produces an AST-level expression that
-constructs the `Type` value at runtime.
+§"Monomorphization"). The schema-generation hook lives alongside the already-shipped
+encode/decode synthesis for `` `serializable `` types
+(`compiler/internal/sema/serialize.go`) and reuses its field walk. It produces an
+AST-level expression that constructs the `Type` value at runtime.
+
+Two ordering rules the generator must obey:
+
+- **Independent of the hand-written codec.** A descriptor is synthesized for *every*
+  `` `serializable `` type, including one whose `encode`/`decode` the user hand-wrote —
+  schema identity is independent of wire codegen.
+- **Whole-program final pass.** Generation runs only after every compilation unit,
+  including all used modules, has registered its `` `serializable `` types. It must
+  never run per-module in isolation, or a descriptor could miss a type a later unit
+  registers.
 
 ### 7.1 What the Compiler Must Do
 
-For every `` `serializable `` type, while synthesizing encode/decode methods:
+For every `` `serializable `` type (whether its `encode`/`decode` are
+compiler-synthesized or hand-written):
 
 1. **Synthesize a hidden factory** `_schema_descriptor() Type `` `factory `` `` `mono ``
    `` `internal ``` that returns the runtime `Type` value. The method is private (uses

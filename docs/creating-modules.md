@@ -50,13 +50,15 @@ Proposal → Setup → Implement → Validate → Ship
 
 ## 2. Phase 1: Write the Proposal
 
-Before writing code, write a design document. The proposal establishes the API contract
-that implementation must satisfy. Place it inside the module directory from the start
-(`modules/<name>/plan.md`) — see [Phase 2](#3-phase-2-set-up-the-module) for setup.
+Before writing code, write a design document. This proposal establishes the API contract
+that the implementation must satisfy, and it becomes the module's *design of record* — the
+intended outcome, kept current for the life of the module. Save it as
+`modules/<name>/design.md` (see [Phase 2](#3-phase-2-set-up-the-module) for setup).
 
-Saving the document as `plan.md` is important: `promise doc <name>` automatically surfaces
-`plan.md` when a module has no public declarations yet, making planned modules
-self-documenting from day one.
+`design.md` holds the durable design. A separate, optional `plan.md` holds *transient*
+execution notes — work sequencing, open TODOs, migration steps — and may be deleted once
+the module ships. In short: `design.md` says *what the module is and why*; `plan.md` says
+*how we're getting there right now*.
 
 ### What to include
 
@@ -106,18 +108,27 @@ This helps reviewers verify completeness and helps implementors find reference i
 **9. Future extensions** — Things explicitly out of scope for v1, but designed to layer on top.
 This proves the API won't need breaking changes when these are added.
 
-### Where to put the proposal
+### Where the design lives
 
-Place the proposal inside the module directory: `modules/<name>/plan.md`. This keeps
-the design doc co-located with the code it describes, even before any code exists. Create
-the module directory and `promise.toml` first (see Phase 2), then add the proposal there.
+The design's home follows one rule — **the feature's center of gravity**:
 
-For example: `modules/term/plan.md`.
+- **Module-owned feature** (implemented mostly within one module) → co-locate the design
+  with the code: `modules/<name>/design.md`. This keeps the design of record next to the
+  implementation it describes, even before any code exists. Create the module directory and
+  `promise.toml` first (see Phase 2), then add `design.md` there. For example:
+  `modules/term/design.md`.
+- **Cross-cutting feature** (spans several modules, or has compiler/runtime surface — sema
+  hooks, codegen, built-in metas — that no single module owns) → central `docs/`. For
+  example: `docs/schema.md`, `docs/cloud-persistence.md`, `docs/runtime-architecture.md`.
 
-The filename `plan.md` is the standard — `promise doc <name>` automatically surfaces it
-when a module has no public declarations yet. This means a planned module directory with
-only `promise.toml` and `plan.md` produces useful output from `promise doc` without any
-implementation.
+Discovery is **by convention, not by index**: a module's design is always at
+`modules/<name>/design.md`; cross-cutting designs are always in `docs/`. There is no
+hand-maintained list linking the two — the fixed paths *are* the index, so nothing goes
+stale.
+
+For a module whose code lives in its own repository (an external catalog module), the
+`design.md` travels with that repository — a central `docs/` copy would be orphaned the
+moment either side moves.
 
 ### Review checklist
 
@@ -719,7 +730,8 @@ This ensures catalog modules are self-contained and have no circular dependency 
 ```
 modules/<name>/
   promise.toml          # [module] name = "<name>"
-  plan.md               # API proposal (design doc) — surfaced by `promise doc` before implementation
+  design.md             # design of record — the module's intended design (see Phase 1)
+  plan.md               # optional, transient — execution notes; delete once shipped
   <name>.pr             # implementation
   <name>_test.pr        # tests (compiled into module, access private symbols)
 ```

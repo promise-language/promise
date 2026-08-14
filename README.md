@@ -188,6 +188,7 @@ promise/
 
 - [Website](https://promise-lang.org) — overview, quickstart, and links
 - [Zoo](https://github.com/promise-language/zoo) — programs AI agents built in Promise (each with prompt, code, writeup, and a terminal recording)
+- [Sponsors](SPONSORS.md) — fund the agent time that builds Promise
 - [Contributing](CONTRIBUTING.md) — building the compiler, running tests & gates (start here to work on the project)
 - [Language Guide](docs/language-guide.md) — concise reference for writing Promise code
 - [Language Design](docs/language-design.md) — full language specification (types, ownership, errors, concurrency, generics)

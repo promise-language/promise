@@ -7,8 +7,10 @@ assignees: ""
 ---
 
 <!--
-Significant language/stdlib changes go through a lightweight written proposal
-(RFC-lite) — see GOVERNANCE.md. This issue is a good place to start that discussion.
+Significant language/stdlib changes start as an idea in Discussions → Ideas
+(https://github.com/promise-language/promise/discussions/categories/ideas) and go
+through a lightweight written proposal (RFC-lite) — see GOVERNANCE.md. Open this
+feature request once the design is settled, to track the work toward a PR.
 -->
 
 ### Problem

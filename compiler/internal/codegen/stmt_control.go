@@ -163,9 +163,10 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// array's owned slot → the array's element-walk drop and the caller's drop of
 		// the returned value double-free at scope exit. Mirror the var-decl arming
 		// (shape = IndexExpr into an *types.Array, gated on the return type). Scoped to
-		// fixed arrays: Vector targets have their own return-path handling that a broad
-		// arm here would double-dup (tracked separately as T1491). String elements dup
-		// independently (dupStringFieldAccess); structural via setDupFlagsForFieldAccess;
+		// fixed arrays here; the Vector sibling (T1491) lives in the adjacent `else if`
+		// branch below because it must exclude the droppable-enum shape (handled by the
+		// post-hoc cloneEnumValue block below). String elements dup independently
+		// (dupStringFieldAccess); structural via setDupFlagsForFieldAccess;
 		// Optional[heap-user] via optionalHeapDupElem above.
 		if !isRefType(retType) {
 			if idx, isIdx := s.Value.(*ast.IndexExpr); isIdx {
@@ -176,6 +177,19 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 				if _, isArr := tgt.(*types.Array); isArr {
 					if isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType) ||
 						isMapOrSetType(retType) || c.enumElemNeedsDupOnRead(retType) {
+						c.dupHeapUserFieldAccess = true
+					}
+				} else if _, isVec := types.AsVector(tgt); isVec {
+					// T1491: Vector sibling of T1488. A direct `return xs[i]` / `=> xs[i]`
+					// where xs is a Vector of a bare heap-user / Map-Set element aliases the
+					// vector's owned slot; the vector's element-walk drop and the caller's
+					// drop double-free at scope exit. EXCLUDES the droppable-enum shape
+					// (enumElemNeedsDupOnRead): the post-hoc cloneEnumValue block below
+					// already clones droppable-enum vector elements at return time — arming
+					// here too would double-clone (leak). Strings via the B0189 dup below;
+					// Optional[heap-user] via optionalHeapDupElem above.
+					if isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType) ||
+						isMapOrSetType(retType) {
 						c.dupHeapUserFieldAccess = true
 					}
 				}

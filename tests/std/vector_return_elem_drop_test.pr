@@ -1,0 +1,138 @@
+// T1491: Returning a heap-user element directly out of a Vector param/variable
+// (`return v[0]` / `=> v[0]`) must dup-on-read the vector slot's owned instance.
+// Without the dup the returned value aliases the vector's owned element; when the
+// owning vector drops its elements at scope exit the aliased instance is freed
+// twice → `fatal: double free` (bare heap-user) or SIGSEGV (droppable heap-user
+// with an inner string). The zero-leak / no-crash policy is the real guard here:
+// every function below asserts the correct value AND must not leak or double-free.
+type Boxed {
+  int v;
+}
+
+type WithStr {
+  string s;
+}
+
+enum Msg {
+  Text(string body),
+  Ping,
+}
+
+// Bare no-drop heap-user, borrow param, arrow escape.
+firstv(Boxed[] xs) Boxed => xs[0];
+
+// Bare no-drop heap-user, borrow param, explicit return.
+firstv_ret(Boxed[] xs) Boxed {
+  return xs[0];
+}
+
+// Droppable heap-user (inner string) — the SIGSEGV case.
+firsts(WithStr[] xs) WithStr => xs[0];
+
+// Generic element escape at T=heap-user — exercises the typeSubst path.
+first[T](T[] xs) T => xs[0];
+
+// Vector-of-maps: element is a Map (isMapOrSetType return shape).
+firstmap(map[string, int][] xs) map[string, int] => xs[0];
+
+// Vector-of-sets: element is a Set (isMapOrSetType return shape).
+firstset(Set[int][] xs) Set[int] => xs[0];
+
+// Droppable-enum element — must stay on the post-hoc cloneEnumValue path
+// (regression guard: the T1491 arm must NOT fire here, else double-clone/leak).
+firstm(Msg[] xs) Msg => xs[0];
+
+// String element — must stay on the B0189 dupStringFieldAccess path
+// (regression guard: string is none of isDroppableHeapUserType /
+// isHeapUserNoDropPalFree / isMapOrSetType, so the T1491 arm must NOT fire).
+firststr(string[] xs) string => xs[0];
+
+// Optional[heap-user] element — must stay on the optionalHeapDupElem / T1180
+// path armed above the T1491 branch (retType is Optional, so the T1491 arm's
+// bare-shape predicates are all false and it must NOT fire a second dup).
+firstopt(Boxed?[] xs) Boxed? => xs[0];
+
+// Whole-vector return regression guard — no double-dup of the vector itself.
+identity(Boxed[] xs) Boxed[] {
+  return xs;
+}
+
+vector_return_bare_heap_user() `test {
+  Boxed[] v = [Boxed(v: 5), Boxed(v: 6)];
+  assert(firstv(v).v == 5, "arrow escape");
+  assert(firstv_ret(v).v == 5, "return escape");
+}
+
+vector_return_bare_heap_user_owned_local() `test {
+  // Owned-local vector; it still drops both elements after the call, so an
+  // aliased return would double-free element 0.
+  Boxed[] v = [Boxed(v: 10), Boxed(v: 20), Boxed(v: 30)];
+  b := firstv(v);
+  assert(b.v == 10, "owned-local");
+}
+
+vector_return_bare_heap_user_call_arg() `test {
+  // Call-result vector passed straight into the borrow-param function.
+  b := firstv([Boxed(v: 42), Boxed(v: 7)]);
+  assert(b.v == 42, "call-result arg");
+}
+
+vector_return_droppable_heap_user() `test {
+  WithStr[] v = [WithStr(s: "hello"), WithStr(s: "world")];
+  w := firsts(v);
+  assert(w.s == "hello", "droppable heap-user");
+}
+
+vector_return_generic_heap_user() `test {
+  Boxed[] v = [Boxed(v: 100), Boxed(v: 200)];
+  b := first[Boxed](v);
+  assert(b.v == 100, "generic");
+}
+
+vector_return_map_element() `test {
+  map[string, int] a = map[string, int]();
+  a["one"] = 1;
+  map[string, int] b = map[string, int]();
+  b["two"] = 2;
+  map[string, int][] v = [a, b];
+  m := firstmap(v);
+  assert(m.get_or("one", 0) == 1, "map element");
+}
+
+vector_return_set_element() `test {
+  s0 := Set[int]();
+  s0.add(7);
+  s0.add(9);
+  s1 := Set[int]();
+  s1.add(11);
+  Set[int][] v = [s0, s1];
+  s := firstset(v);
+  assert(s.contains(7), "set element 7");
+  assert(s.contains(9), "set element 9");
+}
+
+vector_return_enum_element_regression() `test {
+  Msg[] v = [Msg.Text("hi"), Msg.Ping];
+  match firstm(v) {
+    Msg.Text(s) => assert(s == "hi", "enum text"),
+    Msg.Ping => assert(false, "unexpected ping"),
+  }
+}
+
+vector_return_string_element_regression() `test {
+  string[] v = ["hello", "world"];
+  assert(firststr(v) == "hello", "string element");
+}
+
+vector_return_optional_heap_user_regression() `test {
+  Boxed?[] v = [Boxed(v: 5), none];
+  o := firstopt(v);
+  assert(o!.v == 5, "optional heap-user element");
+}
+
+vector_return_whole_vector_regression() `test {
+  Boxed[] v = [Boxed(v: 1), Boxed(v: 2), Boxed(v: 3)];
+  w := identity(v);
+  assert(w.len == 3, "whole-vector len");
+  assert(w[1].v == 2, "whole-vector element");
+}

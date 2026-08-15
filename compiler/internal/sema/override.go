@@ -75,6 +75,15 @@ func (c *Checker) validateAbstractOverrides(file *ast.File) {
 				c.reportOverrideMismatch(td, am, override, subst)
 				continue
 			}
+			// T1486: a generator override with extra trailing params the view
+			// adapter must default cannot be lowered — the adapter frees the
+			// synthesized default before the coroutine reads it lazily. Reject at
+			// the declaration (this fires for every explicit-`is` relationship,
+			// whether or not the type is ever boxed into a view).
+			if types.IsUnlowerableStreamAdapter(override.Sig(), am.Method.Sig()) {
+				c.reportUnlowerableStreamAdapter(td, am, override)
+				continue
+			}
 			// A structurally-valid override can still break codegen: when the
 			// declaring interface contributes synthesized default method bodies
 			// (e.g. Iterator's combinators), those bodies call this override
@@ -107,6 +116,29 @@ func declarerSynthesizesDefaults(d *types.Named) bool {
 		}
 	}
 	return false
+}
+
+// reportUnlowerableStreamAdapter emits the T1486 diagnostic for a generator
+// override whose extra trailing parameters a view adapter would have to default.
+// It anchors at the overriding MethodDecl when the type declares it directly,
+// else at the type declaration (mirroring reportOverrideMismatch's anchoring).
+func (c *Checker) reportUnlowerableStreamAdapter(td *ast.TypeDecl, am types.AbstractMethodInfo, override *types.Method) {
+	pos := td.Pos()
+	for _, md := range td.Methods {
+		if md.Name == am.Method.Name() &&
+			md.IsGetter == am.Method.IsGetter() &&
+			md.IsSetter == am.Method.IsSetter() {
+			pos = md.Pos()
+			break
+		}
+	}
+	name := am.Method.Name()
+	c.errorf(pos, "type %s cannot be used as %s: its generator method '%s' takes "+
+		"parameter(s) beyond %s.%s, and a stream view-adapter cannot forward a "+
+		"synthesized default into the coroutine safely (T1486). Declare the "+
+		"parameter in %s.%s, or remove the extra parameter from %s.%s.",
+		td.Name, am.Declarer, name, am.Declarer, name,
+		am.Declarer, name, td.Name, name)
 }
 
 // reportOverrideMismatch emits a diagnostic for a concrete method that does not

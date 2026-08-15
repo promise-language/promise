@@ -535,6 +535,73 @@ func SatisfiesAbstract(concrete, abstract *Signature, subst map[*TypeParam]Type,
 	return identicalSignaturesWithSelf(concrete, substAbstract, self, replacement)
 }
 
+// IsUnlowerableStreamAdapter reports whether adapting `concrete` to satisfy
+// `abstract` would force a structural-view adapter to synthesize a trailing
+// default argument for a GENERATOR method — the T1486 shape emitViewMethodAdapter
+// cannot lower without a use-after-free (the coroutine frame reads the default
+// lazily, after the adapter has freed it). True when the concrete method returns
+// stream[T] AND declares more parameters than the abstract requirement.
+func IsUnlowerableStreamAdapter(concrete, abstract *Signature) bool {
+	if concrete == nil || abstract == nil || len(concrete.params) <= len(abstract.params) {
+		return false
+	}
+	_, isStream := AsStream(concrete.result)
+	return isStream
+}
+
+// UnlowerableStreamViewMethod returns the name of the first abstract method of
+// `view` whose satisfying concrete method on `x` is an unlowerable stream adapter
+// (see IsUnlowerableStreamAdapter, T1486). Returns "" when x boxes into view
+// cleanly (or does not implement it). x may be *Named or *Instance.
+func UnlowerableStreamViewMethod(x Type, view *Named) string {
+	if !view.IsAbstract() {
+		return ""
+	}
+	var xt *Named
+	switch t := x.(type) {
+	case *Named:
+		xt = t
+	case *Instance:
+		xt, _ = t.Origin().(*Named)
+	}
+	if xt == nil {
+		return ""
+	}
+	for _, am := range view.allAbstractMethodsWithDeclarer() {
+		var m *Method
+		if am.method.IsGetter() {
+			m = xt.LookupGetter(am.method.name)
+		} else if am.method.IsSetter() {
+			m = xt.LookupSetter(am.method.name)
+		} else {
+			m = xt.LookupMethod(am.method.name)
+		}
+		if m == nil || m.abstract {
+			continue
+		}
+		if IsUnlowerableStreamAdapter(m.sig, am.method.sig) {
+			return am.method.name
+		}
+	}
+	return ""
+}
+
+// IsExplicitChild reports whether x inherits from view via an explicit `is`
+// clause (transitively) — as opposed to pure structural satisfaction. Used to
+// dedup the T1486 diagnostic: the explicit-`is` path reports at the declaration
+// (override.go), so the structural boxing check skips explicit children.
+func IsExplicitChild(x Type, view *Named) bool {
+	switch xt := x.(type) {
+	case *Named:
+		return isChild(xt, view)
+	case *Instance:
+		if n, ok := xt.Origin().(*Named); ok {
+			return isChild(n, view)
+		}
+	}
+	return false
+}
+
 // ReturnShapeMatchesAbstract reports whether the concrete method's failability
 // and return type EXACTLY match the abstract requirement's (after substituting
 // generic params and mapping Self). Unlike SatisfiesAbstract, it does NOT apply

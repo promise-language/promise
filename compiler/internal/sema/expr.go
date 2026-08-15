@@ -179,7 +179,43 @@ func (c *Checker) checkExprWithHint(expr ast.Expr, hint types.Type) types.Type {
 	c.typeHint = hint
 	typ := c.checkExpr(expr)
 	c.typeHint = old
+	c.checkStreamViewBox(expr.Pos(), typ, hint) // T1486
 	return typ
+}
+
+// checkStreamViewBox rejects boxing a concrete type into a structural abstract
+// view when the satisfying concrete method is an unlowerable stream adapter
+// (T1486): a generator method (`stream[T]`) with extra trailing parameters the
+// view adapter would have to synthesize a default for. The adapter frees that
+// default before the coroutine reads it lazily → use-after-free. The explicit
+// `is` path reports at the declaration (override.go), so this skips explicit
+// children to avoid a duplicate diagnostic.
+func (c *Checker) checkStreamViewBox(pos ast.Pos, from, to types.Type) {
+	if from == nil || to == nil {
+		return
+	}
+	// Unwrap an optional target (`Streamer? t = impl` still boxes — cf. T1298).
+	if opt, ok := to.(*types.Optional); ok {
+		to = opt.Elem()
+	}
+	view, ok := to.(*types.Named)
+	if !ok || !view.IsAbstract() || !view.IsStructural() {
+		return
+	}
+	if types.Identical(from, view) || !types.Implements(from, view) {
+		return
+	}
+	if types.IsExplicitChild(from, view) {
+		return // reported at the declaration by validateAbstractOverrides
+	}
+	if name := types.UnlowerableStreamViewMethod(from, view); name != "" {
+		c.errorf(pos, "type %s cannot be used as %s: its generator method '%s' takes "+
+			"parameter(s) beyond %s.%s, and a stream view-adapter cannot forward a "+
+			"synthesized default into the coroutine safely (T1486). Declare the "+
+			"parameter in %s.%s, or remove the extra parameter from %s.%s.",
+			from.String(), view.String(), name, view.String(), name,
+			view.String(), name, from.String(), name)
+	}
 }
 
 // checkExpr type-checks an expression and returns its resolved type.

@@ -777,9 +777,9 @@ test_generic_heap_default_boxed_view() `test {
 // Not covered here, deliberately:
 //   - `T? p = <expr>` optional defaults — T1465 (the filled value is wrong).
 //   - a heap default on a generator (`stream[T]`) method reached THROUGH a view
-//     adapter — T1486. The coroutine frame reads the default lazily; T1467 fixed
-//     the ordinary call path by giving the temp scope lifetime (see
-//     tests/e2e/generator_arg_temp_lifetime_test.pr), but no lifetime the adapter
-//     can pick is long enough — it returns before the stream is ever resumed — so
-//     that shape needs a different mechanism.
-// Both belong next to the shapes above once their own items are fixed.
+//     adapter — T1486. The coroutine frame reads the default lazily and no
+//     lifetime the adapter can pick is long enough (it returns before the stream
+//     is ever resumed), so as of T1486 this shape is REJECTED AT COMPILE TIME:
+//     boxing such a concrete type into a view is a sema error. The coverage lives
+//     in the sema tests (TestStreamViewAdapter* in internal/sema); a runtime pin
+//     is impossible here because the crashing program no longer compiles.

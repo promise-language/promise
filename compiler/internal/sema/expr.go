@@ -3053,11 +3053,17 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 			ref := &ast.NamedTypeRef{Name: p.Name, TypeArgs: p.TypeArgs}
 			resolved := c.resolveType(ref)
 			if resolved != nil {
+				if c.rejectValueTypeIdentity(e.Pos(), subjectType, resolved, "'is' type check") {
+					break
+				}
 				c.info.IsPatternTypes[p] = resolved
 			}
 			break
 		}
 		obj := c.lookup(p.Name)
+		if tn, ok := obj.(*types.TypeName); ok && c.rejectValueTypeIdentity(e.Pos(), subjectType, tn.Type(), "'is' type check") {
+			break
+		}
 		if obj != nil {
 			// Reject `enumVar is EnumType` — the `is` operator is for inheritance checks,
 			// not enum variant testing. But allow `optionalEnumVar is EnumType` which is
@@ -3107,9 +3113,38 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 				break
 			}
 		}
+		if obj := c.lookup(p.TypeName); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok && c.rejectValueTypeIdentity(e.Pos(), subjectType, tn.Type(), "'is' type check") {
+				break
+			}
+		}
 		c.checkDestructureIsPattern(p, subjectType)
 	}
 	return types.TypBool
+}
+
+// rejectValueTypeIdentity reports a runtime type check (`is`, `as`, or a match
+// type-pattern arm) as an error when the subject's static type and the target
+// are two DIFFERENT value types, and returns whether it did (T1527). Value types
+// carry no runtime type identity —
+// RTTI is read from the static type's global — so a check across a value newtype
+// boundary would silently answer from the static type. Keyed on both sides being
+// value types, so a value type tested against a structural interface (T1284), or
+// a structural view tested against a concrete value type, still works; and on
+// them differing, so the self-check `v is Vec2` (and its destructuring form
+// `v is Vec2(x, y)`), which the static type answers correctly, still works.
+func (c *Checker) rejectValueTypeIdentity(pos ast.Pos, subject, target types.Type, what string) bool {
+	subjectNamed := semaExtractNamed(subject)
+	targetNamed := semaExtractNamed(target)
+	if subjectNamed == nil || targetNamed == nil || subjectNamed == targetNamed {
+		return false
+	}
+	if !subjectNamed.IsValueType() || !targetNamed.IsValueType() {
+		return false
+	}
+	c.errorf(pos, "cannot use %s between value types %s and %s; value types have no runtime type identity (the subtype distinction is compile-time only)",
+		what, subjectNamed.Obj().Name(), targetNamed.Obj().Name())
+	return true
 }
 
 // checkDestructureIsPattern validates a destructure is-pattern (e.g., `x is Circle(r)`)
@@ -3197,6 +3232,11 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 	srcType := c.info.Types[e.Expr]
 	if isScalarCastType(srcType) && isScalarCastType(target) {
 		return target
+	}
+
+	// T1527: a cast between two value types has no runtime identity to test.
+	if c.rejectValueTypeIdentity(e.Pos(), srcType, target, "'as' cast") {
+		return nil
 	}
 
 	if e.Force {
@@ -3857,6 +3897,12 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 		// RTTI; the bound type must be a subtype of the match subject, otherwise
 		// the arm can never match (a silent dead arm). Validate the is-relation.
 		if tn, ok := obj.(*types.TypeName); ok && subjectType != nil {
+			// T1527: same RTTI dependency as `is`/`as` — between two value types
+			// there is no runtime tag to dispatch on, so the arm would answer from
+			// the static type and read as another silent dead arm.
+			if c.rejectValueTypeIdentity(p.Pos(), subjectType, tn.Type(), "'match' type pattern") {
+				return
+			}
 			if patNamed, ok := tn.Type().(*types.Named); ok {
 				if subjNamed := namedOfType(subjectType); subjNamed != nil {
 					if !patNamed.InheritsFrom(subjNamed) && !subjNamed.InheritsFrom(patNamed) {

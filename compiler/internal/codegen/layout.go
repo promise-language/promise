@@ -31,7 +31,7 @@ const (
 type TypeDeclLayout struct {
 	PromiseName        string
 	Kind               LayoutKind
-	Value              *StructLayout        // T#v — vtable_ptr + instance_ptr + value fields
+	Value              *StructLayout        // T#v — vtable_ptr + instance_ptr + value fields. SHARED (same pointer) with the value parent's for a value newtype — treat as read-only (T1527).
 	Instance           *StructLayout        // T#i — variant_ptr + default fields
 	Variant            *StructLayout        // T#m — type_ptr + variant fields
 	Type               *StructLayout        // T#t — type fields + metadata
@@ -43,7 +43,7 @@ type TypeDeclLayout struct {
 
 	// Value-type-specific fields
 	IsValueType     bool           // true if all fields are value-placed (no heap alloc)
-	ValueFieldIndex map[string]int // field name → index in value struct (starts at 1)
+	ValueFieldIndex map[string]int // field name → index in value struct (starts at 1). Shared with the value parent's map for a value newtype — read-only (T1527).
 
 	// Enum-specific fields
 	EnumInternalType   irtypes.Type                   // i32 (fieldless) or { i32, [N x i8] } (data enum)
@@ -354,9 +354,11 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 
 	for _, f := range named.AllFields() {
 		if f.Placement() != types.PlaceInstance {
-			// Sema rejects hybrid value+instance types before codegen (T0994);
-			// reaching here means that invariant was violated — a compiler bug.
-			panic("codegen invariant: hybrid value+instance type " + name + " reached layout (should be rejected by sema, T0994): " + f.Name())
+			// Sema rejects hybrid value+instance types before codegen — both the
+			// own-fields form (T0994) and the inherited form (T1527, see
+			// checkNoStrayValueFields); reaching here means that invariant was
+			// violated — a compiler bug.
+			panic("codegen invariant: hybrid value+instance type " + name + " reached layout (should be rejected by sema, T0994/T1527): " + f.Name())
 		}
 		fType := types.Substitute(f.Type(), parentSubst)
 		llvmFT := instanceFieldLLVMType(fType, allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
@@ -482,26 +484,47 @@ func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts ma
 
 	// Value struct: { i8* _vtable, field1, field2, ... }
 	// RTTI is accessed via the compile-time-known global, not stored in the value struct.
-	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr}
-	valueFieldLayouts := []FieldLayout{
-		{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
-	}
-	fieldIndex := map[string]int{}
+	//
+	// T1527: a value newtype (a fieldless child of a value parent) reuses its
+	// parent's value struct verbatim instead of declaring an identical one of its
+	// own. The bits are the same by definition of the newtype, so sharing the
+	// LLVM type makes every upcast to the parent a no-op — a distinct identified
+	// struct would need a coercion at each one, and LLVM cannot bitcast a struct
+	// value. The child still gets its own _t/_m/_i (and thus its own RTTI global
+	// and compile-time identity).
+	var valueStructLayout *StructLayout
+	var fieldIndex map[string]int
+	if parent := valueParentLayout(named, allLayouts); parent != nil {
+		valueStructLayout = parent.Value
+		fieldIndex = parent.ValueFieldIndex
+	} else {
+		valueLLVMFields := []irtypes.Type{irtypes.I8Ptr}
+		valueFieldLayouts := []FieldLayout{
+			{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
+		}
+		fieldIndex = map[string]int{}
 
-	for _, f := range named.AllFields() {
-		llvmFT := instanceFieldLLVMType(f.Type(), allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
-		cType := userFieldCType(f.Type(), allLayouts)
-		idx := len(valueFieldLayouts) // GEP index in value struct
-		valueLLVMFields = append(valueLLVMFields, llvmFT)
-		valueFieldLayouts = append(valueFieldLayouts, FieldLayout{
-			Name: f.Name(), CType: cType, LLVMType: llvmFT, IsInternal: false,
-		})
-		fieldIndex[f.Name()] = idx
-	}
+		for _, f := range named.AllFields() {
+			llvmFT := instanceFieldLLVMType(f.Type(), allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
+			cType := userFieldCType(f.Type(), allLayouts)
+			idx := len(valueFieldLayouts) // GEP index in value struct
+			valueLLVMFields = append(valueLLVMFields, llvmFT)
+			valueFieldLayouts = append(valueFieldLayouts, FieldLayout{
+				Name: f.Name(), CType: cType, LLVMType: llvmFT, IsInternal: false,
+			})
+			fieldIndex[f.Name()] = idx
+		}
 
-	valueStruct := irtypes.NewStruct(valueLLVMFields...)
-	valueStruct.SetName("promise_" + name + "_v")
-	module.NewTypeDef("promise_"+name+"_v", valueStruct)
+		valueStruct := irtypes.NewStruct(valueLLVMFields...)
+		valueStruct.SetName("promise_" + name + "_v")
+		module.NewTypeDef("promise_"+name+"_v", valueStruct)
+		valueStructLayout = &StructLayout{
+			CName:    "promise_" + name + "_v",
+			Suffix:   "_v",
+			Fields:   valueFieldLayouts,
+			LLVMType: valueStruct,
+		}
+	}
 
 	return &TypeDeclLayout{
 		PromiseName:     name,
@@ -534,13 +557,28 @@ func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts ma
 			},
 			LLVMType: instanceStruct,
 		},
-		Value: &StructLayout{
-			CName:    "promise_" + name + "_v",
-			Suffix:   "_v",
-			Fields:   valueFieldLayouts,
-			LLVMType: valueStruct,
-		},
+		Value: valueStructLayout,
 	}
+}
+
+// valueParentLayout returns the already-computed layout of named's value parent,
+// or nil when it has none. A value newtype's parent layout is always computed
+// first — both in the topological pass and in ensureValueTypeLayout — so the nil
+// return for a parent without a layout is defensive: the child then simply gets
+// its own (identical) value struct. T1527.
+func valueParentLayout(named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
+	if named.NumFields() > 0 {
+		return nil // not a newtype: sema rejects a value child that adds fields
+	}
+	for _, p := range named.Parents() {
+		if !p.Named.IsValueType() {
+			continue
+		}
+		if layout, ok := allLayouts[p.Named]; ok && layout.Value != nil {
+			return layout
+		}
+	}
+	return nil
 }
 
 // userFieldCType returns the C type string for a user type field.

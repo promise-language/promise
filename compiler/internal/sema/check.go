@@ -46,6 +46,7 @@ type Checker struct {
 	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (see recordFailableEscape); snapshotted around a `go! {}` body to detect a body that cannot fail
 	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (§17.2 explicit-return style)
 	paramDefaults       []paramDefault                   // T1395: every parameter default declared in this file, in declaration order — type-checked once by checkParamDefaults
+	deferredValueTypes  []deferredValueType              // T1527: types whose value-type classification could not be decided during Define (see deferValueType), in declaration order
 }
 
 // paramDefault pairs a parameter that declares a default with its AST default
@@ -291,6 +292,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 
 	tPass = time.Now()
 	c.define(file)                         // Pass 2: resolve types, populate type structures
+	c.resolveInheritedValueTypes(file)     // T1527: classify value newtypes (a fieldless child of a value parent) before drop propagation
 	c.propagateDrops(file)                 // B0158: auto-synthesize drop for types with droppable fields
 	c.validateCloneTypes(file)             // T0154: validate `clone field types (after all types defined)
 	c.validateSendableTypes(file)          // T0158: validate `sendable/`sharable field types
@@ -378,6 +380,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 	c.declare(file)                        // Pass 1: collect all declarations
 	c.populateUniverseTypes()              // Populate non-native universe type pointers (TypError, TypMap, etc.)
 	c.define(file)                         // Pass 2: resolve types, populate type structures
+	c.resolveInheritedValueTypes(file)     // T1527: classify value newtypes (a fieldless child of a value parent) before drop propagation
 	c.propagateDrops(file)                 // B0158: auto-synthesize drop for types with droppable fields
 	c.validateCloneTypes(file)             // T0154: validate `clone field types (after all types defined)
 	c.validateSendableTypes(file)          // T0158: validate `sendable/`sharable field types

@@ -123,6 +123,11 @@ func (c *Compiler) computeAllTypeLayouts(file *ast.File, monoInstances []*types.
 				pkey := "user:" + pr.Named.Obj().Name()
 				if _, ok := pending[pkey]; ok {
 					compute(pkey)
+				} else if pr.Named.IsValueType() {
+					// T1527: a value newtype shares its value parent's struct,
+					// so the parent's layout must exist first. An imported
+					// parent (e.g. std Duration) has no pending entry here.
+					c.ensureValueTypeLayout(pr.Named)
 				}
 			}
 			// Generic parents have their layouts created through monoInstances
@@ -202,8 +207,10 @@ func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingI
 // Enum variant data fields of value type need the embedded value struct, but
 // enum layouts are built before the unified type-layout pass (both the
 // non-generic enum pass and the mono-enum pass run before value-type layouts
-// are computed). Value types only ever contain value/copy fields and no parents
-// (enforced by sema), so the recursion terminates. Idempotent presence-guards
+// are computed). Value types only ever contain value/copy fields, and their only
+// possible parent is another value type (a newtype's parent, T1527), so the
+// recursion terminates as long as inheritance is acyclic — which sema does not
+// yet verify, it just stack-overflows on a cycle first (T1547). Idempotent presence-guards
 // prevent duplicate module.NewTypeDef; the later computeAllTypeLayouts pass skips
 // anything already present. (T1016)
 func (c *Compiler) ensureValueTypeLayout(typ types.Type) {
@@ -235,7 +242,9 @@ func (c *Compiler) ensureValueTypeLayout(typ types.Type) {
 			return
 		}
 		subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
-		// Recurse into field types first so nested value types are laid out.
+		// Recurse into field types first so nested value types are laid out. A
+		// generic value type has no value parent to lay out first — sema rejects
+		// value-type inheritance when either side is generic (T1527).
 		for _, f := range origin.AllFields() {
 			c.ensureValueTypeLayout(types.Substitute(f.Type(), subst))
 		}
@@ -246,7 +255,13 @@ func (c *Compiler) ensureValueTypeLayout(typ types.Type) {
 		if _, exists := c.layouts[n]; exists {
 			return
 		}
-		// Recurse into field types first so nested value types are laid out.
+		// Recurse into value parents and field types first so the parent's
+		// shared value struct (T1527) and nested value types are laid out.
+		for _, p := range n.Parents() {
+			if p.Named.IsValueType() {
+				c.ensureValueTypeLayout(p.Named)
+			}
+		}
 		for _, f := range n.AllFields() {
 			c.ensureValueTypeLayout(f.Type())
 		}

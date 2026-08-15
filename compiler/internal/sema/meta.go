@@ -718,11 +718,8 @@ func (c *Checker) validateNewMethod(named *types.Named, m *types.Method, d *ast.
 	if m.IsAbstract() {
 		c.errorf(pos, "new() method on %s must not be abstract", d.Name)
 	}
-	// Value types cannot have failable new() — codegen builds the value struct
-	// inline and doesn't support error propagation in that path.
-	if named.IsValueType() && sig.CanError() {
-		c.errorf(pos, "value type %s cannot have a failable new() method", d.Name)
-	}
+	// Value types cannot have a failable new() — that rule lives in
+	// markValueType so it also covers types classified after Define (T1527).
 }
 
 // validateFactoryMethod checks that a `factory method has a valid signature:
@@ -819,13 +816,19 @@ func (c *Checker) validateCopyEnum(enum *types.Enum, d *ast.EnumDecl) {
 // detectValueType checks if a type is a pure value type (all fields are `value placement)
 // and validates the constraints. If valid, sets IsValueType and auto-enables Copy.
 func (c *Checker) detectValueType(named *types.Named, d *ast.TypeDecl) {
-	// Must have at least one field
-	if named.NumFields() == 0 {
+	// Native types handle their own layout — skip value type detection
+	if c.hasAnnotation(d.Annotations, "native") {
 		return
 	}
 
-	// Native types handle their own layout — skip value type detection
-	if c.hasAnnotation(d.Annotations, "native") {
+	// Must have at least one field of its own — with one exception: a fieldless
+	// type may still be a value type by inheriting a value parent's fields
+	// (T1527, the newtype form). The parent's fields aren't necessarily resolved
+	// yet (it may be declared later in the file), so defer that decision.
+	if named.NumFields() == 0 {
+		if len(named.Parents()) > 0 {
+			c.deferValueType(named, d)
+		}
 		return
 	}
 
@@ -843,7 +846,13 @@ func (c *Checker) detectValueType(named *types.Named, d *ast.TypeDecl) {
 		}
 	}
 	if !hasValue {
-		return // pure-instance regular type — unchanged behavior
+		// Pure-instance regular type — unchanged behavior, except that it may
+		// still inherit `value fields from a value parent (T1527); that
+		// combination is diagnosed by resolveInheritedValueTypes.
+		if len(named.Parents()) > 0 {
+			c.deferValueType(named, d)
+		}
+		return
 	}
 	if hasInstance {
 		// Hybrid value+instance types are part of the unified 4-struct model
@@ -855,24 +864,98 @@ func (c *Checker) detectValueType(named *types.Named, d *ast.TypeDecl) {
 		return
 	}
 
-	// Validate: value types cannot have parent types (no inheritance)
-	if len(named.Parents()) > 0 {
-		c.errorf(d.Pos(), "value type %s cannot have parent types (all fields are `value)", d.Name)
+	// T1527: the remaining decisions depend on types that may not be classified
+	// yet — a parent's fields (the parent may be declared later in the file, and
+	// a value parent makes this type a value newtype) or a `value field whose own
+	// type is not copy yet but may still become one. Defer to the post-Define
+	// pass, which reports the diagnostics for everything it cannot classify.
+	if len(named.Parents()) > 0 || hasPendingValueField(named) {
+		c.deferValueType(named, d)
 		return
 	}
 
-	// Validate: all `value fields must be copy types
+	c.markValueType(named, d, true)
+}
+
+// hasPendingValueField reports whether any own `value field currently fails the
+// copy check. That is exactly the set of types whose classification must wait
+// for resolveInheritedValueTypes (T1527): the field's type may still be marked
+// copy by that pass — directly, as a value newtype, or transitively, as a value
+// type whose own fields are newtypes — and rejecting it here would be wrong.
+// A field type that is genuinely not copy stays unclassified through the
+// fixpoint and gets the same diagnostic from the reporting pass.
+func hasPendingValueField(named *types.Named) bool {
 	for _, f := range named.Fields() {
+		if f.Placement() != types.PlaceValue {
+			continue
+		}
 		if !isCopyField(f.Type()) {
-			c.errorf(d.Pos(), "value field %s.%s must be a copy type, got %s", d.Name, f.Name(), f.Type())
-			return
+			return true
+		}
+	}
+	return false
+}
+
+// markValueType validates the value-type constraints for named and, if they all
+// hold, marks it as a value type (auto-enabling copy). Returns whether it was
+// marked. Diagnostics are emitted only when report is true — the T1527 fixpoint
+// runs this silently while classification is still converging, then once more
+// with reporting for whatever remains unclassified.
+func (c *Checker) markValueType(named *types.Named, d *ast.TypeDecl, report bool) bool {
+	// Validate: all `value fields must be copy types
+	for _, f := range named.AllFields() {
+		if !isCopyField(f.Type()) {
+			if report {
+				c.errorf(d.Pos(), "value field %s.%s must be a copy type, got %s", d.Name, f.Name(), f.Type())
+			}
+			return false
 		}
 	}
 
 	// Validate: value types cannot have drop() methods
 	if named.LookupMethod("drop") != nil {
-		c.errorf(d.Pos(), "value type %s cannot have a drop() method", d.Name)
-		return
+		if report {
+			c.errorf(d.Pos(), "value type %s cannot have a drop() method", d.Name)
+		}
+		return false
+	}
+
+	// Validate: value types cannot declare abstract methods. A value type never
+	// dispatches virtually (codegen's needsVtable excludes it), so an abstract
+	// method has no vtable slot a child could fill — the call would resolve to a
+	// body that does not exist and panic codegen. T1527.
+	for _, m := range named.Methods() {
+		if !m.IsAbstract() {
+			continue
+		}
+		if report {
+			c.errorf(d.Pos(), "value type %s cannot have abstract methods: '%s' has no implementation and value types dispatch statically (there is no vtable to resolve it through)",
+				d.Name, m.Name())
+		}
+		return false
+	}
+
+	// Validate: a value child adds methods, it never overrides them (T1527).
+	// Dispatch is static, so a redeclaration with the parent's exact signature
+	// would apply only where the child is the static type — the same call through
+	// a parent-typed variable would silently run the parent's body.
+	if m, parent := valueTypeOverride(named); m != nil {
+		if report {
+			c.errorf(d.Pos(), "value type %s cannot override '%s' from %s: value types dispatch statically, so a value child may add methods but not override them",
+				d.Name, m.Name(), parent.Obj().Name())
+		}
+		return false
+	}
+
+	// Validate: value types cannot have a failable new() — codegen builds the
+	// value struct inline and doesn't support error propagation in that path.
+	// Checked here rather than in validateNewMethod so late-classified value
+	// types (T1527) are covered by the same rule.
+	if nm := lookupOwnMethod(named, "new"); nm != nil && nm.Sig() != nil && nm.Sig().CanError() {
+		if report {
+			c.errorf(d.Pos(), "value type %s cannot have a failable new() method", d.Name)
+		}
+		return false
 	}
 
 	// All checks passed — mark as value type and auto-enable copy
@@ -880,6 +963,40 @@ func (c *Checker) detectValueType(named *types.Named, d *ast.TypeDecl) {
 	if !named.IsCopy() {
 		named.SetCopy(true)
 	}
+	return true
+}
+
+// valueTypeOverride returns the first method a value type declares that
+// redeclares an inherited method with an identical signature, together with the
+// parent it comes through, or (nil, nil) when there is none. Overloads (same
+// name, different signature) are not overrides — they resolve statically to
+// exactly the declaration the argument types select — so only an identical
+// signature counts. new() is exempt: constructors are per-type and their
+// inheritance rules live in validateConstructors. T1527.
+func valueTypeOverride(named *types.Named) (*types.Method, *types.Named) {
+	for _, p := range named.Parents() {
+		for _, m := range named.Methods() {
+			if m.Name() == "new" || m.Sig() == nil {
+				continue
+			}
+			var pm *types.Method
+			switch {
+			case m.IsGetter():
+				pm = p.Named.LookupGetter(m.Name())
+			case m.IsSetter():
+				pm = p.Named.LookupSetter(m.Name())
+			default:
+				pm = p.Named.LookupMethod(m.Name())
+			}
+			if pm == nil || pm.Sig() == nil {
+				continue
+			}
+			if types.Identical(m.Sig(), pm.Sig()) {
+				return m, p.Named
+			}
+		}
+	}
+	return nil, nil
 }
 
 // isCopyField returns true if a type is considered copy for field validation.

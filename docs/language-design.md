@@ -765,12 +765,52 @@ main() {
 **Rules**:
 - Automatically `` `copy `` — no explicit annotation needed
 - All fields must themselves be copy types (primitives, other value types, bool, char)
-- Cannot have `is` parents (leaf types only)
+- The only permitted `is` parent is another pure value type (see *Value-type inheritance* below)
 - Cannot have `drop()` methods (nothing to clean up)
 - Cannot have failable `new()` methods
+- Cannot have `` `abstract `` methods — dispatch is always static, so nothing could
+  ever resolve them
 - Methods work normally — `this`/`~this` receive a pointer to the value struct alloca
 
 **Use cases**: coordinates (`Point`, `Vec2`), dimensions (`Size`, `Rect`), colors (`Color`), ranges, small fixed-size data.
+
+#### Value-Type Inheritance (Newtype)
+
+A type that inherits from a pure value type and declares **no fields of its own** is
+itself a pure value type — a **newtype**: a distinct name for the parent's exact layout.
+
+```promise
+type Hash128 {
+  u128 value `value;
+  get half u128 => this.value / 2u128;
+}
+
+type EntityId is Hash128 {   // newtype: same bits, distinct name
+  get tag int => 7;          // may add methods…
+}                            // …but never fields
+```
+
+- **Layout-preserving**: the child reuses the parent's value struct verbatim, so an
+  upcast (assigning to a parent-typed variable, passing as a parent parameter,
+  returning as the parent) is a no-op — there is no conversion at any of them.
+- **Methods only**: a value child may add methods, getters and operators, but not
+  fields — an own field would change the layout it shares with its parent. Adding one
+  is a compile error.
+- **Substitutable one way**: a child is usable wherever the parent is expected; the
+  reverse needs an explicit reconstruction.
+- **Static dispatch**: value types never dispatch virtually, so a value parent that
+  gains children keeps calling methods directly. A child does not override — it adds:
+  redeclaring an inherited method with the *same* signature is a compile error, since
+  the parent's body would still run wherever the parent is the static type. Overloads
+  (same name, different signature) stay legal — they resolve statically to exactly the
+  declaration the argument types select. For the same reason a value type may not
+  declare `` `abstract `` methods at all: there is no vtable slot for a child to fill.
+- **Compile-time identity only**: the child has its own type identity for type
+  checking, but a value carries no runtime type tag, so `is`/`as` **between two value
+  types** is rejected — the answer would come from the static type alone. (Testing a
+  value type against a structural interface still works.)
+- **Not generic (yet)**: neither the child nor the value parent may have type
+  parameters. `type Id is Box[int] {}` is rejected with a clear diagnostic.
 
 **Hybrid types** — a type that mixes `` `value `` fields with regular instance (heap) fields — fit the same four-struct model: the value struct embeds the `` `value `` fields directly *and* carries the instance pointer for the heap fields, so a method reaches every field uniformly (`` `value `` fields in the value struct, instance fields through the pointer). This is the natural consequence of treating all types through one layout rather than forking pure-value and pure-instance into separate models. Hybrid types are **not yet implemented**, however: for now a type's fields must be either **all** `` `value `` (a pure value type) or **none** (a regular instance type); mixing the two is rejected at compile time with a clean source-located diagnostic (`type T mixes \`value\` and instance fields; … not yet supported`). Support may be added in the future.
 
@@ -1773,7 +1813,7 @@ type Connection {
 }
 ```
 
-- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have `is` parents, non-copy fields, or `drop()` methods.
+- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*).
 - `` `copy ``: Bitwise copy on assignment (primitives, small value types). The compiler verifies all fields are themselves `` `copy ``. No method generated — the copy is a direct memory copy.
 - `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
 - Types that are `` `copy `` are implicitly copied on assignment. Others are moved.

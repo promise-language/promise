@@ -42,6 +42,18 @@ func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, enumL
 	// Sort layouts by name for deterministic output.
 	sorted := sortedLayouts(layouts)
 
+	// A value newtype shares its parent's value struct (T1527), so the same
+	// CName is reachable from two layouts — emit each struct exactly once, or
+	// the header would redefine the typedef and fail to compile.
+	emitted := map[string]bool{}
+	emitOnce := func(sl *StructLayout) error {
+		if sl == nil || emitted[sl.CName] {
+			return nil
+		}
+		emitted[sl.CName] = true
+		return emitStructTypedef(w, sl)
+	}
+
 	if err := ln("// === Type Layouts ==="); err != nil {
 		return err
 	}
@@ -54,16 +66,16 @@ func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, enumL
 		if err := p("// %s\n", layout.PromiseName); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Type); err != nil {
+		if err := emitOnce(layout.Type); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Variant); err != nil {
+		if err := emitOnce(layout.Variant); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Instance); err != nil {
+		if err := emitOnce(layout.Instance); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Value); err != nil {
+		if err := emitOnce(layout.Value); err != nil {
 			return err
 		}
 		if err := ln(""); err != nil {
@@ -78,16 +90,16 @@ func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, enumL
 		if err := p("// %s (enum)\n", layout.PromiseName); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Type); err != nil {
+		if err := emitOnce(layout.Type); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Variant); err != nil {
+		if err := emitOnce(layout.Variant); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Instance); err != nil {
+		if err := emitOnce(layout.Instance); err != nil {
 			return err
 		}
-		if err := emitStructTypedef(w, layout.Value); err != nil {
+		if err := emitOnce(layout.Value); err != nil {
 			return err
 		}
 		if err := ln(""); err != nil {

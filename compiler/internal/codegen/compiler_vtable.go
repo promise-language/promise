@@ -47,8 +47,11 @@ func (c *Compiler) computeVtableInfo(file *ast.File) {
 
 // needsVtable reports whether a type needs virtual dispatch.
 // True if the type has children (someone inherits from it) or is abstract.
+// Value types are excluded: a value newtype (T1527) adds methods, never
+// overrides, so a value parent that gains a child stays static-dispatch —
+// value types carry no runtime type identity to dispatch on.
 func (c *Compiler) needsVtable(named *types.Named) bool {
-	return c.hasChildren[named] || named.IsAbstract()
+	return (c.hasChildren[named] || named.IsAbstract()) && !named.IsValueType()
 }
 
 // isNativeTypeDecl checks if a type declaration has the `native annotation.

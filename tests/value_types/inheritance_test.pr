@@ -1,0 +1,547 @@
+// T1527: a fieldless child of a pure `value type is itself a pure value type —
+// a layout-preserving newtype. It shares the parent's value struct (so an upcast
+// is a no-op), adds methods but never fields, dispatches statically, and keeps
+// its own compile-time identity. Before the fix, sema accepted the declaration
+// and codegen panicked on the inherited `value field.
+type Hash128 {
+  u128 value `value;
+
+  get half u128 => this.value / 2u128;
+  combine(this, Hash128 other) Hash128 => Hash128(value: this.value + other.value);
+  +(Hash128 other) Hash128 => Hash128(value: this.value + other.value);
+  == (Hash128 other) bool => this.value == other.value;
+  get hash int => this.value as int;
+}
+
+type EntityId is Hash128 {
+  get tag int => 7;
+
+  // Own `==` so EntityId satisfies `Equal` (whose `==(Self)` the inherited
+  // `==(Hash128)` does not match — T1545, a general structural-Self/inheritance
+  // gap, not specific to value types).
+  == (EntityId other) bool => this.value == other.value;
+}
+
+newtype_construct_and_read() `test {
+  e := EntityId(value: 42u128);
+  assert(e.value == 42u128, "inherited field read");
+  assert(e.half == 21u128, "inherited getter");
+  assert(e.tag == 7, "own getter added by the child");
+}
+
+newtype_inherited_method() `test {
+  a := EntityId(value: 10u128);
+  b := EntityId(value: 5u128);
+  Hash128 sum = a.combine(b);
+  assert(sum.value == 15u128, "inherited method on the child");
+}
+
+newtype_inherited_operators() `test {
+  a := EntityId(value: 3u128);
+  b := EntityId(value: 4u128);
+  Hash128 sum = a + b;
+  assert(sum.value == 7u128, "inherited + operator");
+  assert(a == a, "inherited == operator");
+  assert(!(a == b), "inherited == operator, unequal");
+}
+
+widen(Hash128 h) u128 => h.value;
+as_parent(EntityId e) Hash128 => e;
+
+newtype_upcast() `test {
+  e := EntityId(value: 9u128);
+  Hash128 h = e;
+  assert(h.value == 9u128, "assign child to parent-typed variable");
+  assert(widen(e) == 9u128, "pass child as parent parameter");
+  assert(as_parent(e).value == 9u128, "return child as parent");
+}
+
+newtype_is_copy() `test {
+  e := EntityId(value: 4u128);
+  copy := e;
+  assert(widen(e) == 4u128, "original usable after copy (value types are copy)");
+  assert(copy.value == e.value, "copy round-trips the field");
+  assert(copy.tag == e.tag, "copy keeps the child's own methods");
+}
+
+// Three-level chain: every level is classified, and all share the root layout.
+type Level1 {
+  int n `value;
+  get doubled int => this.n * 2;
+}
+type Level2 is Level1 {
+}
+type Level3 is Level2 {
+}
+
+newtype_chain() `test {
+  c := Level3(n: 6);
+  assert(c.n == 6, "field inherited through two levels");
+  assert(c.doubled == 12, "method inherited through two levels");
+  Level2 mid = c;
+  Level1 root = mid;
+  assert(root.doubled == 12, "upcast through the whole chain");
+}
+
+// Deliberately an int-based newtype rather than the u128-based EntityId: on
+// wasm32 the emitted DataLayout disagrees with the toolchain's own, so any
+// i128-bearing struct is laid out at one offset by `opt` and another by `llc`
+// and corrupts inside a Vector (T1544). That is unrelated to inheritance — a
+// plain `type P { u128 v `value; }` corrupts identically — so this case covers
+// newtype-in-a-Vector without riding on it. The u128 regression test belongs
+// with the T1544 fix.
+type Ticket {
+  int n `value;
+
+  get doubled int => this.n * 2;
+  < (Ticket other) bool => this.n < other.n;
+  == (Ticket other) bool => this.n == other.n;
+  to_string(this) string => "T{this.n}";
+}
+
+type Seat is Ticket {
+  get tag int => 7;
+
+  // Own Self-typed comparisons so Seat satisfies `Ordered` — the inherited
+  // `<(Ticket)`/`==(Ticket)` do not match `Self` (T1545, the same general
+  // structural-Self/inheritance gap noted on EntityId above). Overloads, not
+  // overrides: the signatures differ, so they resolve statically.
+  < (Seat other) bool => this.n < other.n;
+  == (Seat other) bool => this.n == other.n;
+}
+
+newtype_in_vector() `test {
+  Seat[] seats = [Seat(n: 1), Seat(n: 2)];
+  seats.push(Seat(n: 3));
+  assert(seats.len == 3, "vector of newtypes");
+  assert(seats[2].n == 3, "element read");
+  assert(seats[1].doubled == 4, "element keeps the inherited methods");
+  assert(seats[0].tag == 7, "element keeps the child's methods");
+}
+
+newtype_in_optional() `test {
+  EntityId? maybe = EntityId(value: 8u128);
+  assert(maybe!.value == 8u128, "optional newtype payload");
+  EntityId? empty = none;
+  if got := empty {
+    assert(false, "expected none");
+  } else {
+    assert(true, "optional newtype none");
+  }
+}
+
+newtype_as_map_key() `test {
+  map[EntityId, int] counts = map[EntityId, int]();
+  counts[EntityId(value: 1u128)] = 10;
+  counts[EntityId(value: 2u128)] = 20;
+  counts[EntityId(value: 1u128)] = 30; // overwrite
+  assert(counts[EntityId(value: 1u128)]! == 30, "newtype map key overwrite");
+  assert(counts[EntityId(value: 2u128)]! == 20, "newtype map key lookup");
+  assert(!counts.contains(EntityId(value: 9u128)), "absent newtype key");
+}
+
+// A newtype whose `value parent lives in another compilation unit (std).
+type Timeout is Duration {
+}
+
+newtype_of_std_value_type() `test {
+  t := Timeout(nanos: 5000);
+  assert(t.as_micros == 5, "inherited getter from a std value parent");
+  Duration d = t;
+  assert(d.as_nanos == 5000, "upcast to the std parent");
+}
+
+// A newtype used as a `value field of another value type: the containing type is
+// classified only after the newtype is, so its copy-field check must wait.
+type Edge {
+  EntityId src `value;
+  EntityId dst `value;
+
+  get span u128 => this.dst.value - this.src.value;
+}
+
+newtype_as_value_field() `test {
+  e := Edge(src: EntityId(value: 2u128), dst: EntityId(value: 9u128));
+  assert(e.src.value == 2u128, "newtype value field read");
+  assert(e.span == 7u128, "method over newtype value fields");
+}
+
+// One level deeper: Inner's `value field is a newtype and Outer's is Inner, so
+// neither is known to be copy when it is defined — classification has to reach
+// both, transitively, before either can be validated.
+type Inner {
+  Seat seat `value;
+}
+
+type Outer {
+  Inner inner `value;
+
+  get seat_tag int => this.inner.seat.tag;
+}
+
+newtype_as_nested_value_field() `test {
+  o := Outer(inner: Inner(seat: Seat(n: 5)));
+  assert(o.inner.seat.n == 5, "field read through two value-type levels");
+  assert(o.seat_tag == 7, "newtype method through two value-type levels");
+}
+
+// Enum layouts are computed before the general type-layout pass, so a newtype
+// used as variant payload reaches the layout builder through a second path and
+// must still embed the parent's shared value struct rather than a boxed value.
+enum SeatSlot {
+  Empty,
+  Used(Seat seat),
+}
+
+newtype_as_enum_payload() `test {
+  SeatSlot s = SeatSlot.Used(Seat(n: 4));
+  match s {
+    Used(k) => {
+      assert(k.n == 4, "enum payload field read");
+      assert(k.tag == 7, "enum payload keeps the child's own methods");
+    },
+    Empty => assert(false, "expected Used"),
+  }
+}
+
+// Set membership needs the inherited `hash` and the child's own `==`.
+newtype_in_set() `test {
+  Set[EntityId] ids = Set[EntityId]();
+  ids.add(EntityId(value: 1u128));
+  ids.add(EntityId(value: 2u128));
+  ids.add(EntityId(value: 1u128));
+  assert(ids.len == 2, "set dedups equal newtypes");
+  assert(ids.contains(EntityId(value: 2u128)), "newtype set membership");
+  assert(!ids.contains(EntityId(value: 9u128)), "absent newtype set element");
+}
+
+newtype_in_fixed_array() `test {
+  Seat[3] seats = [Seat(n: 1), Seat(n: 2), Seat(n: 3)];
+  assert(seats[2].n == 3, "fixed-array element read");
+  assert(seats[1].doubled == 4, "inherited method on a fixed-array element");
+  assert(seats[0].tag == 7, "own method on a fixed-array element");
+}
+
+// A fixed array of newtypes as another value type's `value field: the array's
+// element layout is the parent's shared value struct, embedded inline twice over.
+type Row {
+  Seat[3] seats `value;
+
+  get first_tag int => this.seats[0].tag;
+}
+
+newtype_fixed_array_as_value_field() `test {
+  r := Row(seats: [Seat(n: 1), Seat(n: 2), Seat(n: 3)]);
+  assert(r.seats[2].n == 3, "fixed array of newtypes inside a value type");
+  assert(r.seats[1].doubled == 4, "inherited method on a nested fixed-array element");
+  assert(r.first_tag == 7, "method over a fixed array of newtypes");
+}
+
+// for-in goes through the vector's iterator rather than plain indexing, so the
+// loop variable is bound from the shared value struct on every step.
+newtype_for_in_loop() `test {
+  Seat[] seats = [Seat(n: 1), Seat(n: 2), Seat(n: 3)];
+  total := 0;
+  for s in seats {
+    total = total + s.n + s.tag;
+  }
+  assert(total == 27, "for-in over newtypes reads fields and own methods");
+}
+
+// The iterator combinators monomorphize `_FnIter[Seat]` and carry the newtype
+// through a lambda parameter — a distinct mono path from a bare Vector[Seat].
+newtype_through_iterator_combinators() `test {
+  Seat[] seats = [Seat(n: 1), Seat(n: 2), Seat(n: 3), Seat(n: 4)];
+  sum := 0;
+  for s in seats.iter().filter(|Seat x| -> x.n % 2 == 0) {
+    sum = sum + s.doubled;
+  }
+  assert(sum == 12, "filter over newtypes keeps the inherited method");
+
+  int[] tagged = seats.iter().map[int](|Seat s| -> s.n + s.tag).collect();
+  assert(tagged.len == 4, "map over newtypes");
+  assert(tagged[3] == 11, "mapped element combines inherited field and own method");
+}
+
+// A generic METHOD (type params on the method, not the owner) instantiated at
+// the newtype: the method instance substitutes the shared value struct.
+type Holder {
+  int k;
+
+  wrap[T](this, T move v) T[] => [v];
+}
+
+newtype_through_generic_method() `test {
+  h := Holder(k: 1);
+  Seat[] got = h.wrap[Seat](Seat(n: 4));
+  assert(got[0].n == 4, "newtype through a generic method instance");
+  assert(got[0].tag == 7, "newtype keeps its methods after generic-method mono");
+}
+
+// The self type-pattern is the one runtime type test a value type can answer —
+// it comes from the static type — so a match arm naming the newtype's own type
+// must still be taken.
+newtype_match_self_pattern() `test {
+  s := Seat(n: 2);
+  match s {
+    Seat k => {
+      assert(k.n == 2, "self type-pattern arm binds the newtype");
+      assert(k.tag == 7, "bound value keeps the child's own methods");
+    },
+    _ => assert(false, "expected the Seat arm"),
+  }
+}
+
+// Monomorphization has to substitute the newtype like any other type argument —
+// the shared value struct is what gets passed and returned.
+pick[T](T[] items, int i) T => items[i];
+
+newtype_through_generic_function() `test {
+  s := pick[Seat]([Seat(n: 8), Seat(n: 9)], 1);
+  assert(s.n == 9, "newtype returned from a generic function");
+  assert(s.tag == 7, "newtype keeps its methods through monomorphization");
+}
+
+type Cell[T] {
+  T item;
+
+  get held T => this.item;
+}
+
+newtype_in_generic_type() `test {
+  c := Cell[Seat](item: Seat(n: 2));
+  assert(c.held.n == 2, "newtype as a generic type argument");
+  assert(c.held.doubled == 4, "inherited method through a generic holder");
+}
+
+// A newtype stored in an ordinary heap type's (instance-placed) field: the
+// value struct is embedded in the instance, not boxed.
+type Booking {
+  Seat seat;
+  int count;
+}
+
+newtype_as_heap_type_field() `test {
+  b := Booking(seat: Seat(n: 3), count: 2);
+  assert(b.seat.n == 3, "newtype read from a heap type's field");
+  assert(b.seat.doubled == 6, "inherited method through a heap field");
+  assert(b.count == 2, "sibling instance field unaffected");
+}
+
+// Resource invariant: a newtype sitting beside genuinely droppable fields in a
+// heap type must contribute nothing to that type's drop path — it owns no
+// allocation. Repeating the construct/destroy cycle would surface either a leak
+// (the newtype counted as droppable and its siblings skipped) or a double free.
+type Record {
+  Seat tag;
+  string name;
+  int[] nums;
+}
+
+newtype_beside_droppable_fields() `test {
+  r := Record(tag: Seat(n: 3), name: "hi".to_upper(), nums: [1, 2, 3]);
+  assert(r.tag.doubled == 6, "newtype field beside droppable siblings");
+  assert(r.name == "HI", "heap-allocated string sibling survives");
+  assert(r.nums.len == 3, "vector sibling survives");
+}
+
+newtype_beside_droppable_fields_repeated() `test {
+  Record[] records = [];
+  for i in 0..20 {
+    records.push(Record(tag: Seat(n: i), name: "n{i}", nums: [i]));
+  }
+  assert(records.len == 20, "20 records built and retained");
+  assert(records[19].tag.doubled == 38, "last record's newtype field");
+  assert(records[19].name == "n19", "last record's string field");
+}
+
+// A value type carries no runtime identity, but it can still satisfy a
+// structural interface — the newtype's inherited and own methods both count.
+type Tagged `structural {
+  get tag int `abstract;
+}
+
+newtype_satisfies_structural() `test {
+  Tagged t = Seat(n: 1);
+  assert(t.tag == 7, "structural view over a newtype");
+  // Not a value-to-value check: the structural view does carry the concrete
+  // type, so this `is` stays legal and must answer correctly.
+  if t is Seat {
+    assert(true, "structural view identifies the newtype");
+  } else {
+    assert(false, "expected the structural view to identify Seat");
+  }
+}
+
+newtype_inherited_to_string() `test {
+  s := Seat(n: 3);
+  assert(s.to_string() == "T3", "inherited to_string on a newtype");
+}
+
+newtype_as_map_value() `test {
+  map[int, Seat] m = map[int, Seat]();
+  m[1] = Seat(n: 4);
+  assert(m[1]!.n == 4, "newtype as a map value");
+  assert(m[1]!.doubled == 8, "inherited method on a map value");
+}
+
+// sort() monomorphizes over the newtype and moves the vector through — the
+// shared value struct has to survive the generic Ordered path.
+newtype_sorted() `test {
+  Seat[] seats = [Seat(n: 3), Seat(n: 1), Seat(n: 2)];
+  Seat[] ordered = sort(move seats);
+  assert(ordered[0].n == 1, "sorted newtypes, first");
+  assert(ordered[2].n == 3, "sorted newtypes, last");
+  assert(ordered[0].tag == 7, "sorted elements keep the child's methods");
+}
+
+// The tracker's original repro shape — a `clone-annotated value parent. The
+// inherited clone() is typed as the PARENT and yields a parent value: a child
+// of a `clone parent is sliced by clone (T1548, pre-existing and not specific
+// to value types). The field copy itself is correct, which is what this asserts.
+type Fingerprint `clone {
+  u128 value `value;
+}
+
+type FileId is Fingerprint {
+  get tag int => 7;
+}
+
+newtype_of_clone_annotated_parent() `test {
+  f := FileId(value: 5u128);
+  Fingerprint c = f.clone();
+  assert(c.value == 5u128, "clone copies the inherited field");
+  assert(f.tag == 7, "the original keeps the child's methods");
+}
+
+make_seat(int n) Seat => Seat(n: n);
+
+// A task returns the newtype across the scheduler boundary.
+newtype_task_return() `test(exclude: wasm) {
+  t := go make_seat(5);
+  Seat s = <-t;
+  assert(s.n == 5, "newtype returned from a task");
+  assert(s.tag == 7, "newtype keeps its methods across the task boundary");
+}
+
+// A newtype may declare its own new(): constructors are per-type, so this is
+// not the (rejected) override of an inherited method.
+type Nid is Hash128 {
+  new(~this, u128 v) {
+    this.value = v;
+  }
+}
+
+newtype_own_constructor() `test {
+  n := Nid(3u128);
+  assert(n.value == 3u128, "child constructor writes the inherited field");
+  assert(n.half == 1u128, "inherited getter after the child's constructor");
+}
+
+newtype_captured_in_lambda() `test {
+  s := Seat(n: 5);
+  f := || -> s.n + s.tag;
+  assert(f() == 12, "newtype captured by a lambda (copy capture)");
+  assert(s.n == 5, "original still usable after the capture");
+}
+
+// Mutation: the child shares the parent's value struct, so an inherited `~this`
+// method has to mutate the CHILD's storage in place (the T1358 receiver ABI) —
+// with no repack between the two, a spilled copy would silently drop the write.
+type Meter {
+  int n `value;
+
+  get scaled int => this.n * 10;
+  set scaled(int v) {
+    this.n = v / 10;
+  }
+  set_n(~this, int v) {
+    this.n = v;
+  }
+  bump_scaled(~this) {
+    this.scaled = this.scaled + 100;
+  }
+}
+
+type Gauge is Meter {
+  get tag int => 7;
+}
+
+newtype_inherited_mutating_method() `test {
+  g := Gauge(n: 1);
+  g.set_n(5);
+  assert(g.n == 5, "inherited ~this method mutates the child in place");
+  g.bump_scaled();
+  assert(g.n == 15, "inherited ~this chaining through an inherited setter");
+  assert(g.tag == 7, "the child's own methods survive mutation");
+}
+
+newtype_inherited_setter_and_field_assign() `test {
+  g := Gauge(n: 1);
+  g.scaled = 40;
+  assert(g.n == 4, "inherited setter on the child");
+  g.n = 9;
+  assert(g.scaled == 90, "direct assign to the inherited field");
+}
+
+// The upcast is a copy, not an alias — mutating the child afterwards must not
+// reach through the shared struct into the parent-typed variable.
+newtype_mutation_does_not_reach_a_copy() `test {
+  g := Gauge(n: 1);
+  Meter parent = g;
+  g.set_n(5);
+  assert(g.n == 5, "child mutated");
+  assert(parent.n == 1, "the parent-typed copy is unaffected");
+}
+
+// Mutating a newtype held as another value type's `value field: the write has to
+// land in the outer value's storage, through the embedded parent struct.
+type Reading {
+  Gauge g `value;
+
+  retune(~this, int v) {
+    this.g.set_n(v);
+  }
+}
+
+newtype_mutation_as_nested_value_field() `test {
+  r := Reading(g: Gauge(n: 1));
+  r.retune(6);
+  assert(r.g.n == 6, "inherited ~this method reaches through an outer value type");
+  r.g.n = 2;
+  assert(r.g.scaled == 20, "direct assign to a nested newtype's inherited field");
+}
+
+// A `structural parent whose fields are all `value is itself a pure value type,
+// so a fieldless child of it is an ordinary newtype — "structural" is not a
+// reason for the classification pass to skip it. The UPCAST to such a parent is
+// still broken (T1550: codegen builds a structural-view fat pointer where the
+// shared value struct is expected), so this covers only what works today; the
+// upcast case belongs with that fix.
+type Metric `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+}
+
+type Latency is Metric {
+  get tag int => 7;
+}
+
+newtype_of_structural_value_parent() `test {
+  l := Latency(raw: 6);
+  assert(l.raw == 6, "field inherited from a structural value parent");
+  assert(l.raw_doubled == 12, "method inherited from a structural value parent");
+  assert(l.tag == 7, "own method added on top of a structural value parent");
+}
+
+// Value types are copy, so a newtype crosses a goroutine boundary by value.
+newtype_over_channel() `test(exclude: wasm) {
+  ch := channel[Seat](capacity: 1);
+  go {
+    ch.send(Seat(n: 6));
+  };
+  Seat s = (<-ch)!;
+  assert(s.n == 6, "newtype sent through a channel");
+  assert(s.tag == 7, "newtype keeps its methods across the goroutine boundary");
+}

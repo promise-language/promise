@@ -1,0 +1,193 @@
+// T1542: a field whose type is a value type imported from another module
+// (here std's `Duration`) must use that type's wide value struct in the
+// containing type's layout. Before the fix, the main file's layouts were
+// computed before the module pass ran, so the imported value type had no
+// layout yet and the container fell back to the generic {i8*, i8*} user-value
+// struct — while the constructor produced the wide value struct, panicking in
+// codegen with "insertvalue elem type mismatch" (or "store operands are not
+// compatible" for heap containers).
+type T1542Wrapper {
+  Duration d `value;
+}
+
+type T1542Heap {
+  Duration d;
+  int x;
+}
+
+type T1542Optional {
+  Duration? d;
+}
+
+type T1542Array {
+  Duration[3] d;
+}
+
+type T1542Tuple {
+  (Duration, int) d;
+}
+
+type T1542Pair[T] {
+  T a `value;
+  T b `value;
+}
+
+type T1542Inner {
+  Duration d `value;
+}
+
+type T1542Outer {
+  T1542Inner inner `value;
+}
+
+imported_value_type_as_value_field() `test {
+  w := T1542Wrapper(d: Duration.from_secs(2));
+  assert(w.d.as_secs == 2, "value field seconds");
+  assert(w.d.as_millis == 2000, "value field millis");
+}
+
+imported_value_type_as_heap_field() `test {
+  h := T1542Heap(d: Duration.from_secs(3), x: 7);
+  assert(h.d.as_secs == 3, "heap field seconds");
+  assert(h.x == 7, "heap sibling field");
+}
+
+imported_value_type_as_optional_field() `test {
+  o := T1542Optional(d: Duration.from_secs(4));
+  assert(o.d!.as_secs == 4, "optional field seconds");
+
+  T1542Optional empty = T1542Optional(d: none);
+  bool had = false;
+  if d := empty.d {
+    had = true;
+  }
+  assert(!had, "absent optional field");
+}
+
+imported_value_type_as_array_field() `test {
+  a := T1542Array(d: [Duration.from_secs(1), Duration.from_secs(2), Duration.from_secs(3)]);
+  assert(a.d[0].as_secs == 1, "array element 0");
+  assert(a.d[2].as_secs == 3, "array element 2");
+}
+
+imported_value_type_as_tuple_field() `test {
+  t := T1542Tuple(d: (Duration.from_secs(5), 9));
+  (dur, n) := t.d;
+  assert(dur.as_secs == 5, "tuple element 0");
+  assert(n == 9, "tuple element 1");
+}
+
+imported_value_type_as_generic_arg() `test {
+  p := T1542Pair[Duration](a: Duration.from_secs(6), b: Duration.from_secs(7));
+  assert(p.a.as_secs == 6, "generic field a");
+  assert(p.b.as_secs == 7, "generic field b");
+
+  // Same shape through a std generic value type.
+  pt := Point[Duration](x: Duration.from_secs(11), y: Duration.from_secs(12));
+  assert(pt.x.as_secs == 11, "Point[Duration].x");
+  assert(pt.y.as_secs == 12, "Point[Duration].y");
+}
+
+imported_value_type_nested_in_value_type() `test {
+  o := T1542Outer(inner: T1542Inner(d: Duration.from_secs(8)));
+  assert(o.inner.d.as_secs == 8, "nested value field");
+
+  // Copy semantics still hold through the nested value struct.
+  duplicate := o;
+  assert(duplicate.inner.d.as_secs == 8, "copied nested value field");
+}
+
+imported_value_field_mutation() `test {
+  w := T1542Wrapper(d: Duration.from_secs(1));
+  w.d = Duration.from_secs(42);
+  assert(w.d.as_secs == 42, "reassigned value field");
+}
+
+// --- Inherited, contained, and passed-around imported value fields ---
+
+type T1542Base {
+  Duration d;
+}
+
+type T1542Derived is T1542Base {
+  int x;
+}
+
+type T1542WithMethods {
+  Duration d `value;
+
+  get doubled Duration => this.d + this.d;
+  plus(Duration extra) int => (this.d + extra).as_secs;
+}
+
+enum T1542Payload {
+  Empty,
+  One(T1542Wrapper w),
+}
+
+take_wrapper(T1542Wrapper w) int {
+  return w.d.as_secs;
+}
+
+make_wrapper(int secs) T1542Wrapper {
+  return T1542Wrapper(d: Duration.from_secs(secs));
+}
+
+// AllFields() includes inherited fields, so the derived type's layout depends on
+// the imported value type reached only through its parent.
+imported_value_field_through_inheritance() `test {
+  d := T1542Derived(d: Duration.from_secs(9), x: 1);
+  assert(d.d.as_secs == 9, "inherited value field");
+  assert(d.x == 1, "own field");
+
+  T1542Base b = d;
+  assert(b.d.as_secs == 9, "inherited value field through the parent view");
+}
+
+// The embedded value struct must survive being returned from and passed to
+// functions, not just being read in place.
+imported_value_field_across_calls() `test {
+  w := make_wrapper(12);
+  assert(take_wrapper(w) == 12, "container round-trips through a signature");
+
+  m := T1542WithMethods(d: Duration.from_secs(3));
+  assert(m.doubled.as_secs == 6, "getter returning the imported value type");
+  assert(m.plus(Duration.from_secs(4)) == 7, "method taking the imported value type");
+}
+
+// Operators and to_string() on a field read out of the containing struct.
+imported_value_field_operators() `test {
+  a := T1542Wrapper(d: Duration.from_secs(2));
+  b := T1542Wrapper(d: Duration.from_secs(2));
+  assert(a.d == b.d, "equality on imported value fields");
+  assert(!(a.d < b.d), "ordering on imported value fields");
+  assert((a.d + b.d).as_secs == 4, "arithmetic on imported value fields");
+  assert(a.d.to_string() == "2s", "to_string on an imported value field");
+}
+
+// Heap containers holding an imported value field, stored in std containers —
+// exercises allocation and the drop path (the suite enforces zero leaks).
+imported_value_field_in_containers() `test {
+  T1542Wrapper[] v = [];
+  v.push(make_wrapper(1));
+  v.push(make_wrapper(2));
+  assert(v.len == 2, "vector length");
+  assert(v[1].d.as_secs == 2, "value field through a vector element");
+
+  map[string, T1542Heap] m = {:};
+  m["a"] = T1542Heap(d: Duration.from_secs(5), x: 3);
+  assert(m["a"]!.d.as_secs == 5, "value field through a map value");
+}
+
+payload_secs(T1542Payload p) int {
+  return match p {
+    T1542Payload.One(w) => w.d.as_secs,
+    T1542Payload.Empty => 0,
+  };
+}
+
+// An enum variant carrying a type that itself has an imported value field.
+imported_value_field_in_enum_variant() `test {
+  assert(payload_secs(T1542Payload.One(make_wrapper(8))) == 8, "value field through an enum payload");
+  assert(payload_secs(T1542Payload.Empty) == 0, "payload-free variant of the same enum");
+}

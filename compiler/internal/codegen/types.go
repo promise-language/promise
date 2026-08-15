@@ -629,12 +629,15 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 				// module is compiled. The body phase resolves it correctly via the
 				// computed layout, so the stub must agree — returning the generic
 				// userValueType() here would mismatch ({i8*,i8*} vs {i8*,fields}).
-				// Compute the layout on demand and cache it so both phases (and the
-				// later module-layout pass, which skips already-computed entries)
-				// share one consistent named struct. (T0962)
-				if len(n.TypeParams()) == 0 {
-					layout := computeValueTypeLayout(c.module, n, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
-					c.layouts[n] = layout
+				// ensureValueTypeLayout builds it on demand and caches it, so both
+				// phases (and the later module-layout pass, which skips
+				// already-computed entries) share one consistent named struct. It
+				// recurses into nested value-type fields first — computing the
+				// layout directly here would give an inner value-type field the
+				// generic {i8*, i8*} slot and permanently cache that wrong struct.
+				// (T0962, T0965)
+				c.ensureValueTypeLayout(n)
+				if layout, ok := c.layouts[n]; ok {
 					return layout.Value.LLVMType
 				}
 			}

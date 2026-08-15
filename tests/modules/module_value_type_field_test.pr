@@ -1,0 +1,84 @@
+// T1542: a field whose type is a value type imported from another module must
+// use that type's wide value struct in the containing layout. The importing
+// file's layouts are computed before the module is compiled, so an imported
+// value type has no layout yet and the field slot fell back to the generic
+// {i8*, i8*} user-value struct — while the constructor produced the wide value
+// struct, panicking in codegen with "insertvalue elem type mismatch".
+//
+// The signature-only variant lives in module_nested_value_type_signature_test.pr
+// (it needs a file that mentions nothing else from this module).
+use valuemod "./valuemod";
+
+type LocalHolder {
+  valuemod.Meters distance `value;
+}
+
+type LocalHeapHolder {
+  valuemod.Wrapped w;
+  string label;
+}
+
+imported_value_type_as_local_field() `test {
+  h := LocalHolder(distance: valuemod.make_meters(7));
+  assert(h.distance.amount == 7, "imported value field");
+  assert(h.distance.doubled().amount == 14, "method on imported value field");
+}
+
+imported_nested_value_type_as_heap_field() `test {
+  h := LocalHeapHolder(w: valuemod.make_wrapped(3), label: "three");
+  assert(h.w.inner.amount == 3, "nested imported value field");
+  assert(h.label == "three", "sibling string field");
+}
+
+imported_nested_value_type_through_module_signature() `test {
+  assert(valuemod.unwrap(valuemod.make_wrapped(6)) == 6, "module-side signature");
+}
+
+imported_value_type_copy_semantics() `test {
+  original := LocalHolder(distance: valuemod.make_meters(2));
+  duplicate := original;
+  assert(duplicate.distance.amount == 2, "copied imported value field");
+}
+
+type LocalBoxHolder {
+  // No `value placement: sema rejects it on a generic value-type instance
+  // today (T1553). The field slot is the embedded value struct either way.
+  valuemod.Boxed[int] b;
+}
+
+type LocalSpanHolder {
+  valuemod.Span span `value;
+}
+
+// A generic value type imported from a module: its mono layout must exist before
+// the containing type's layout is built.
+imported_generic_value_type_as_local_field() `test {
+  h := LocalBoxHolder(b: valuemod.make_boxed(9));
+  assert(h.b.item == 9, "imported generic value field");
+
+  direct := valuemod.Boxed[int](item: 4);
+  assert(direct.item == 4, "directly constructed imported generic value type");
+}
+
+// The module's own type has a field of a value type imported from *another*
+// module (std's Duration) — the non-pending branch is taken during that
+// module's layout pass, not the importing file's.
+module_type_with_std_value_field() `test {
+  h := LocalSpanHolder(span: valuemod.make_span(3));
+  assert(h.span.d.as_secs == 3, "std value field nested inside a module value type");
+  assert(valuemod.make_span(5).d.as_secs == 5, "module value type returned directly");
+}
+
+// Imported value fields inside heap containers — exercises the drop path
+// (the suite enforces zero leaks).
+imported_value_fields_in_containers() `test {
+  LocalHolder[] v = [];
+  v.push(LocalHolder(distance: valuemod.make_meters(1)));
+  v.push(LocalHolder(distance: valuemod.make_meters(2)));
+  assert(v[1].distance.amount == 2, "imported value field through a vector element");
+
+  LocalHeapHolder[] hs = [];
+  hs.push(LocalHeapHolder(w: valuemod.make_wrapped(4), label: "four"));
+  assert(hs[0].w.inner.amount == 4, "nested imported value field through a vector element");
+  assert(hs[0].label == "four", "sibling string field survives");
+}

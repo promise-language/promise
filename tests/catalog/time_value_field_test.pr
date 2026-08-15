@@ -1,0 +1,60 @@
+// T1542: a value type imported from a non-std catalog module used as a field.
+// Same layout gap as the std `Duration` case (tests/value_types/
+// imported_value_field_test.pr) — the container's layout is computed before the
+// catalog module's own layout pass runs, so the field slot must be built on
+// demand instead of falling back to the generic {i8*, i8*} user-value struct.
+use time;
+
+type T1542Stamp {
+  time.DateTime at `value;
+}
+
+type T1542StampHeap {
+  time.DateTime at;
+  string label;
+}
+
+catalog_value_type_as_value_field() `test {
+  s := T1542Stamp(at: time.DateTime.from_unix_secs(0));
+  assert(s.at.year == 1970, "epoch year");
+}
+
+catalog_value_type_as_heap_field() `test {
+  s := T1542StampHeap(at: time.DateTime.from_unix_secs(0), label: "epoch");
+  assert(s.at.year == 1970, "epoch year through heap field");
+  assert(s.label == "epoch", "sibling string field");
+}
+
+type T1542Window {
+  time.DateTime start;
+  time.Date? day;
+  (time.DateTime, int) tagged;
+}
+
+span_days(time.DateTime from, time.DateTime to) int {
+  return (to.unix_secs - from.unix_secs) / 86400;
+}
+
+// Optional, tuple, and a second catalog value type in one container — each shape
+// reaches time's value types before the catalog module's own layout pass runs.
+catalog_value_types_in_mixed_field_shapes() `test {
+  w := T1542Window(start: time.DateTime.from_unix_secs(0),
+  day: time.Date.create(1970, 1, 2),
+  tagged: (time.DateTime.from_unix_secs(86400), 7));
+  assert(w.start.year == 1970, "heap field");
+  assert(w.day!.day == 2, "optional catalog value field");
+  (at, tag) := w.tagged;
+  assert(at.unix_secs == 86400, "tuple element 0");
+  assert(tag == 7, "tuple element 1");
+  assert(span_days(w.start, at) == 1, "catalog value fields passed through a signature");
+}
+
+// Heap containers holding catalog value fields — exercises the drop path
+// (the suite enforces zero leaks).
+catalog_value_field_in_container() `test {
+  T1542StampHeap[] v = [];
+  v.push(T1542StampHeap(at: time.DateTime.from_unix_secs(0), label: "epoch"));
+  v.push(T1542StampHeap(at: time.DateTime.from_unix_secs(86400), label: "day one"));
+  assert(v[1].at.day == 2, "catalog value field through a vector element");
+  assert(v[1].label == "day one", "sibling string field survives");
+}

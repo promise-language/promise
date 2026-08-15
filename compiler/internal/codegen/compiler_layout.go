@@ -138,7 +138,7 @@ func (c *Compiler) computeAllTypeLayouts(file *ast.File, monoInstances []*types.
 		// Value-type field dependencies (recurses into Optional/Tuple).
 		for _, f := range named.AllFields() {
 			fType := types.Substitute(f.Type(), subst)
-			collectValueTypeFieldDeps(fType, pending, compute)
+			c.collectValueTypeFieldDeps(fType, pending, compute)
 		}
 
 		// Now compute this item.
@@ -166,30 +166,39 @@ func (c *Compiler) computeAllTypeLayouts(file *ast.File, monoInstances []*types.
 	}
 }
 
-// collectValueTypeFieldDeps walks a field type and calls compute(key) for every
-// value-type target (user value type or mono value-type instance) whose layout
-// must exist before the containing item's layout is built. Recurses into
-// Optional, Tuple, and Array inner types.
-func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingItem, compute func(string)) {
+// collectValueTypeFieldDeps walks a field type and ensures the layout of every
+// value-type target (user value type or mono value-type instance) exists before
+// the containing item's layout is built. Recurses into Optional, Tuple, and
+// Array inner types.
+//
+// Targets in `pending` are computed through the topological walk (compute), so
+// same-file ordering and cycle breaking are preserved. Targets outside it — a
+// value type imported from another module, whose own layout pass only runs later
+// in compileModule — are built on demand via ensureValueTypeLayout; without this
+// the container's layout would fall back to the generic `{i8*, i8*}` user-value
+// struct while the constructor emits the wide value struct. (T1542)
+func (c *Compiler) collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingItem, compute func(string)) {
 	switch t := typ.(type) {
 	case *types.Optional:
-		collectValueTypeFieldDeps(t.Elem(), pending, compute)
+		c.collectValueTypeFieldDeps(t.Elem(), pending, compute)
 		return
 	case *types.Tuple:
 		for _, elem := range t.Elems() {
-			collectValueTypeFieldDeps(elem, pending, compute)
+			c.collectValueTypeFieldDeps(elem, pending, compute)
 		}
 		return
 	case *types.Array:
 		// T0579: Fixed-size array fields can hold value-type elements; the
 		// element layout must exist before the container's layout is built.
-		collectValueTypeFieldDeps(t.Elem(), pending, compute)
+		c.collectValueTypeFieldDeps(t.Elem(), pending, compute)
 		return
 	case *types.Instance:
 		if origin, ok := t.Origin().(*types.Named); ok && origin.IsValueType() {
 			key := "mono:" + monoName(t)
 			if _, ok := pending[key]; ok {
 				compute(key)
+			} else {
+				c.ensureValueTypeLayout(t)
 			}
 		}
 		return
@@ -198,6 +207,8 @@ func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingI
 		key := "user:" + n.Obj().Name()
 		if _, ok := pending[key]; ok {
 			compute(key)
+		} else {
+			c.ensureValueTypeLayout(n)
 		}
 	}
 }

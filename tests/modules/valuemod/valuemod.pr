@@ -1,0 +1,43 @@
+// valuemod: value types exported for cross-module layout tests (T1542).
+// `Wrapped` nests `Meters`, so a consumer that only sees `Wrapped` must lay out
+// the inner value type too — otherwise the inner field slot falls back to the
+// generic {i8*, i8*} user-value struct.
+type Meters `public `doc("A distance in whole meters, stored as a value type.") {
+  int amount `value;
+
+  doubled(this) Meters `doc("Returns a Meters with twice this distance.") {
+    return Meters(amount: this.amount * 2);
+  }
+}
+
+type Wrapped `public `doc("A value type whose only field is another value type.") {
+  Meters inner `value;
+}
+
+make_meters(int amount) Meters `public `doc("Builds a Meters of the given amount.") {
+  return Meters(amount: amount);
+}
+
+make_wrapped(int amount) Wrapped `public `doc("Builds a Wrapped around a Meters of the given amount.") {
+  return Wrapped(inner: Meters(amount: amount));
+}
+
+unwrap(Wrapped w) int `public `doc("Returns the meter amount inside a Wrapped.") {
+  return w.inner.amount;
+}
+
+type Boxed[T] `public `doc("A generic value type holding a single copy-type item.") {
+  T item `value;
+}
+
+type Span `public `doc("A value type whose field is a value type imported from std.") {
+  Duration d `value;
+}
+
+make_boxed(int item) Boxed[int] `public `doc("Builds a Boxed holding the given int.") {
+  return Boxed[int](item: item);
+}
+
+make_span(int secs) Span `public `doc("Builds a Span covering the given number of seconds.") {
+  return Span(d: Duration.from_secs(secs));
+}

@@ -1,0 +1,18 @@
+// T0962/T1542: a local signature mentioning an imported value type forces that
+// type's layout to be computed before its module is compiled. The on-demand
+// build must recurse into nested value-type fields first — otherwise `Wrapped`'s
+// inner `Meters` slot gets the generic {i8*, i8*} user-value struct, that wrong
+// layout is cached, and the module's own `Wrapped(inner: Meters(...))`
+// constructor panics with "insertvalue elem type mismatch".
+//
+// Kept in its own file on purpose: any other mention of `Meters` (a field, a
+// local, a second signature) lays the inner type out first and masks the bug.
+use valuemod "./valuemod";
+
+unwrap_locally(valuemod.Wrapped w) int {
+  return w.inner.amount;
+}
+
+nested_imported_value_type_in_local_signature() `test {
+  assert(unwrap_locally(valuemod.make_wrapped(5)) == 5, "nested imported value type through a local signature");
+}

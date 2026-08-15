@@ -47,3 +47,105 @@ wide_pair_in_vector() `test {
   assert(v[2].tag == 3, "vector element 2 leading field");
   assert(v[2].amount == u128.max, "vector element 2 trailing wide field");
 }
+
+// T1544: single wide-int value field — { i8*, i128 } is the layout where the
+// narrow (i128@8, size 24) and wide (i128@16, size 32) datalayouts diverge, so
+// Vector push (byte-sized memcpy) and index (typed GEP) disagreed on wasm32.
+// WidePair above passes even under the narrow layout because its leading `int`
+// already pads the struct to a 16-multiple; P128 is the case where they differ.
+type P128 {
+  u128 value `value;
+}
+
+p128_single_field_in_vector() `test {
+  P128[] v = [];
+  v.push(P128(value: 7u128));
+  v.push(P128(value: u128.max));
+  assert(v[0].value == 7u128, "first element wide field intact");
+  assert(v[1].value == u128.max, "second element wide field intact");
+}
+
+// T1544: the miscompile was a disagreement between the byte-sized element stride
+// (writes: push/pop/remove/cow/vector-literal) and the LLVM-typed-GEP stride
+// (reads: index, for-in, slice, index-assign, element-drop). p128_..._in_vector
+// above pins push+index; the rest of these pin the remaining stride sites so a
+// future narrow-layout regression on any one of them is caught independently.
+
+p128_vector_forin() `test {
+  P128[] v = [P128(value: 1u128), P128(value: 2u128), P128(value: u128.max)];
+  u128 sum = 0u128;
+  for p in v {
+    sum = sum + p.value;
+  }
+  // 1 + 2 + max wraps to (max + 3) mod 2^128 = 2.
+  assert(sum == 2u128, "for-in read stride: wrapped sum of wide fields");
+}
+
+p128_vector_pop_remove() `test {
+  P128[] v = [];
+  v.push(P128(value: 10u128));
+  v.push(P128(value: 20u128));
+  v.push(P128(value: 30u128));
+  v.remove(1); // drop middle → shifts element 2 into slot 1 via typed copy
+  assert(v.len == 2, "len after remove");
+  assert(v[0].value == 10u128, "remove: element 0 intact");
+  assert(v[1].value == 30u128, "remove: shifted trailing element intact");
+  if last := v.pop() {
+    assert(last.value == 30u128, "pop returns last wide field intact");
+  } else {
+    assert(false, "expected a popped value");
+  }
+  assert(v[0].value == 10u128, "pop: surviving element intact");
+}
+
+p128_vector_slice() `test {
+  P128[] v = [P128(value: 100u128), P128(value: 200u128), P128(value: 300u128), P128(value: 400u128)];
+  P128[] mid = v[1:3];
+  assert(mid.len == 2, "slice len");
+  assert(mid[0].value == 200u128, "slice element 0 wide field intact");
+  assert(mid[1].value == 300u128, "slice element 1 wide field intact");
+}
+
+p128_vector_index_assign() `test {
+  P128[] v = [P128(value: 1u128), P128(value: 2u128), P128(value: 3u128)];
+  v[1] = P128(value: u128.max); // typed-GEP write over the middle element
+  assert(v[0].value == 1u128, "index-assign left neighbor intact");
+  assert(v[1].value == u128.max, "index-assign wrote wide field");
+  assert(v[2].value == 3u128, "index-assign right neighbor intact");
+}
+
+p128_vector_literal() `test {
+  // A vector literal of non-constant elements allocates via c.typeSize; each
+  // element must still be readable at the LLVM-typed stride.
+  u128 a = 7u128;
+  u128 b = u128.max;
+  P128[] v = [P128(value: a), P128(value: b), P128(value: a + b)];
+  assert(v[0].value == 7u128, "literal element 0");
+  assert(v[1].value == u128.max, "literal element 1");
+  assert(v[2].value == 6u128, "literal element 2 (7 + max wraps to 6)");
+}
+
+// A wide-int value type used as a container key exercises the Slot-enum variant
+// data-blob sizing path (layout.go / mono.go) inside Vector[Slot], the other
+// consumer of the same alignment model the bug names.
+type Coin {
+  u128 amount `value;
+  == (Coin other) bool => this.amount == other.amount;
+  get hash int => this.amount.hash;
+}
+
+wide_value_type_set_and_map_key() `test {
+  Set[Coin] s = Set[Coin]();
+  s.add(Coin(amount: 7u128));
+  s.add(Coin(amount: u128.max));
+  s.add(Coin(amount: 7u128)); // duplicate
+  assert(s.len == 2, "wide-key set dedup");
+  assert(s.contains(Coin(amount: u128.max)), "wide-key set membership");
+  assert(!s.contains(Coin(amount: 8u128)), "absent wide key");
+
+  map[Coin, int] m = map[Coin, int]();
+  m[Coin(amount: u128.max)] = 99;
+  m[Coin(amount: 1u128)] = 1;
+  assert(m[Coin(amount: u128.max)]! == 99, "wide map key lookup");
+  assert(!m.contains(Coin(amount: 2u128)), "absent wide map key");
+}

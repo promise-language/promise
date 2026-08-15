@@ -33,10 +33,13 @@ func TestWasmDataLayoutVersionGate(t *testing.T) {
 
 // TestWasmDataLayoutResolverWiring verifies compile() routes the wasm32
 // DataLayout through the WasmLinkerMajorVersion hook so the CLI-detected linker
-// version drives the emitted layout.
+// version drives the emitted layout. This is the fallback path used when the
+// WasmDataLayout probe is unavailable (T1544), so the probe is neutralized here.
 func TestWasmDataLayoutResolverWiring(t *testing.T) {
 	saved := WasmLinkerMajorVersion
-	defer func() { WasmLinkerMajorVersion = saved }()
+	savedProbe := WasmDataLayout
+	defer func() { WasmLinkerMajorVersion = saved; WasmDataLayout = savedProbe }()
+	WasmDataLayout = nil // force the version-gated fallback
 
 	src := `main() { }`
 
@@ -50,6 +53,34 @@ func TestWasmDataLayoutResolverWiring(t *testing.T) {
 	ir23 := generateIRForTarget(t, src, "wasm32-wasi")
 	if !strings.Contains(ir23, `target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"`) {
 		t.Errorf("LLVM 23 wasm IR missing reference-type datalayout:\n%s", firstLines(ir23, 3))
+	}
+}
+
+// TestWasmDataLayoutProbeWiring verifies compile() prefers the WasmDataLayout
+// probe over the version gate, and falls back to the version-gated layout when
+// the probe returns "" (T1544). The probe reflects the toolchain's real layout,
+// so its result must win by construction.
+func TestWasmDataLayoutProbeWiring(t *testing.T) {
+	savedProbe := WasmDataLayout
+	savedVer := WasmLinkerMajorVersion
+	defer func() { WasmDataLayout = savedProbe; WasmLinkerMajorVersion = savedVer }()
+
+	src := `main() { }`
+
+	const sentinel = "e-m:e-p:32:32-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+	WasmDataLayout = func(string) string { return sentinel }
+	WasmLinkerMajorVersion = func() int { return 22 } // would give the narrow layout
+	irProbe := generateIRForTarget(t, src, "wasm32-wasi")
+	if !strings.Contains(irProbe, `target datalayout = "`+sentinel+`"`) {
+		t.Errorf("probe layout not used; got:\n%s", firstLines(irProbe, 3))
+	}
+
+	// Empty probe result → version-gated fallback.
+	WasmDataLayout = func(string) string { return "" }
+	irFallback := generateIRForTarget(t, src, "wasm32-wasi")
+	want := `target datalayout = "` + wasmDataLayout(22) + `"`
+	if !strings.Contains(irFallback, want) {
+		t.Errorf("empty probe did not fall back to version gate; got:\n%s", firstLines(irFallback, 3))
 	}
 }
 

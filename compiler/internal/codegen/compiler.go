@@ -867,6 +867,17 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 // Nil or a 0 return falls back to the long-standing pre-LLVM-23 layout.
 var WasmLinkerMajorVersion func() int
 
+// WasmDataLayout, when set, returns the wasm32 target DataLayout string that the
+// build toolchain's own LLVM (opt/llc/wasm-ld share one target machine) actually
+// uses for the given triple, probed once per triple by the CLI. Empty return =>
+// fall back to the version-gated wasmDataLayout below. This makes the module
+// layout equal the backend's by construction, fixing the i128 offset disagreement
+// that silently miscompiled wide-int value types on wasm32 (T1544): the version
+// guess produced a narrow layout without an i128 entry, so opt aligned i128 to 8
+// (size 24) while llc/wasm-ld aligned it to 16 (size 32), and Vector's byte-sized
+// writes and typed-GEP reads disagreed on element stride.
+var WasmDataLayout func(triple string) string
+
 // wasmDataLayout returns the wasm32 target DataLayout string matching the wasm
 // LTO linker's LLVM major version. LLVM 23 added reference-type address spaces
 // (p10=funcref, p20=externref), i128:128, and a non-integral pointer spec
@@ -874,7 +885,8 @@ var WasmLinkerMajorVersion func() int
 // "Target-incompatible DataLayout" if the module's layout lacks them. LLVM 22
 // and earlier use the narrower layout and in turn reject the LLVM-23 string, so
 // the two cannot share one layout — select by detected linker version (T0764).
-// An unknown version (0) keeps the pre-23 layout.
+// An unknown version (0) keeps the pre-23 layout. This is now the fallback path
+// used only when the WasmDataLayout probe above is unavailable or fails (T1544).
 func wasmDataLayout(llvmMajor int) string {
 	if llvmMajor >= 23 {
 		return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
@@ -889,11 +901,18 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	}
 	module.TargetTriple = target
 	if strings.Contains(target, "wasm32") {
-		major := 0
-		if WasmLinkerMajorVersion != nil {
-			major = WasmLinkerMajorVersion()
+		layout := ""
+		if WasmDataLayout != nil {
+			layout = WasmDataLayout(target)
 		}
-		module.DataLayout = wasmDataLayout(major)
+		if layout == "" { // probe unavailable/failed → version-gated guess (T0764)
+			major := 0
+			if WasmLinkerMajorVersion != nil {
+				major = WasmLinkerMajorVersion()
+			}
+			layout = wasmDataLayout(major)
+		}
+		module.DataLayout = layout
 	}
 
 	c := &Compiler{

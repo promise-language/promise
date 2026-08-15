@@ -35,3 +35,35 @@ wide_int_second_payload_field_max() `test {
     },
   }
 }
+
+// T1544: the enum variant data-blob is sized by the same wide-int alignment
+// model as value-type structs. A local Slot (above) stores and loads the blob
+// through one consistent typed GEP, so an over-sized blob alone does not corrupt
+// it. Putting the enum in a Vector is what exposes the model: push writes each
+// element at the byte-sized (model) stride while index/for-in read at the
+// LLVM-typed stride, so a wide-int payload truncates if the two disagree.
+wide_int_enum_payload_in_vector() `test {
+  Slot[] v = [];
+  v.push(Slot.Used(key: 1, value: 11u128));
+  v.push(Slot.Empty);
+  v.push(Slot.Used(key: 2, value: u128.max));
+
+  match v[0] {
+    Slot.Used(k, val) => {
+      assert(k == 1, "vec enum 0 key");
+      assert(val == 11u128, "vec enum 0 wide payload intact");
+    },
+    Slot.Empty => assert(false, "element 0 should be Used"),
+  }
+  match v[1] {
+    Slot.Used(k, val) => assert(false, "element 1 should be Empty"),
+    Slot.Empty => assert(true, "element 1 Empty"),
+  }
+  match v[2] {
+    Slot.Used(k, val) => {
+      assert(k == 2, "vec enum 2 key");
+      assert(val == u128.max, "vec enum 2 wide payload not truncated");
+    },
+    Slot.Empty => assert(false, "element 2 should be Used"),
+  }
+}

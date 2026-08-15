@@ -4059,8 +4059,48 @@ func detectWasmLinkerMajor() int {
 	return wasmLinkerVersionCached
 }
 
+var (
+	wasmDataLayoutMu     sync.Mutex
+	wasmDataLayoutCached = map[string]string{}
+	wasmDataLayoutRe     = regexp.MustCompile(`target datalayout = "([^"]*)"`)
+)
+
+// detectWasmDataLayout returns the wasm32 DataLayout string that the build
+// toolchain's own `opt` produces for the given triple, cached per-triple. This
+// is the layout llc/wasm-ld also use (all three share one target machine), so
+// emitting it makes the module layout agree with the backend by construction —
+// the fix for T1544, where the version-guessed narrow layout lacked an i128
+// entry and silently miscompiled wide-int value types in Vectors. Returns "" on
+// any failure (opt not found, exec error, unparseable output), letting codegen
+// fall back to the version-gated wasmDataLayout. Uses the same findLLVMTool /
+// runLLVMCmd infra as detectWasmLinkerMajor; opt is already required on the wasm
+// path. Both wasm32-wasi and wasm32-web are probed, so caching keys by triple
+// rather than using a single sync.Once.
+func detectWasmDataLayout(triple string) string {
+	wasmDataLayoutMu.Lock()
+	defer wasmDataLayoutMu.Unlock()
+	if v, ok := wasmDataLayoutCached[triple]; ok {
+		return v
+	}
+	layout := ""
+	if optPath, err := findLLVMTool("opt"); err == nil {
+		cmd := runLLVMCmd(optPath, "-O0", "-S", "-")
+		cmd.Stdin = strings.NewReader("target triple = \"" + triple + "\"\n")
+		if out, err := cmd.Output(); err == nil {
+			if m := wasmDataLayoutRe.FindSubmatch(out); m != nil {
+				layout = string(m[1])
+			}
+		}
+	}
+	wasmDataLayoutCached[triple] = layout
+	return layout
+}
+
 func init() {
-	// Let codegen pick a wasm32 DataLayout matching the wasm-ld version (T0764).
+	// Probe the toolchain's real wasm32 DataLayout so the module layout agrees
+	// with the backend by construction (T1544); fall back to the wasm-ld
+	// version guess when the probe is unavailable (T0764).
+	codegen.WasmDataLayout = detectWasmDataLayout
 	codegen.WasmLinkerMajorVersion = detectWasmLinkerMajor
 }
 

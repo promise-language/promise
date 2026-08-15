@@ -905,7 +905,34 @@ Sealing is **per type, not inherited**: a *concrete* child of an `` `open `` or 
 type Wheel is Circle {}   // ERROR: cannot inherit from sealed type `Circle`
 ```
 
-**Rationale.** Extension points should be deliberate. Promise's foremost goal is that a single source file be understandable in isolation, with no action-at-a-distance — but an extensible type *is* action-at-a-distance: a subtype in another module can override a method and change behavior polymorphically. Sealing by default means an unmarked `type Foo {}` cannot be altered by any subtype, so it can be reasoned about locally; `` `open `` flags the deliberate exceptions. This mirrors Kotlin's `final`-by-default rather than Java's open-by-default (cf. *Effective Java*, "Design and document for inheritance or else prohibit it"). There is deliberately **no `` `sealed `` meta** — sealing is the default, so extensibility has exactly one spelling.
+#### Closed Hierarchies (`` `sealed ``)
+
+The concrete/abstract defaults give two states: no `is` at all, or `is` by anyone, anywhere. A third is often wanted — a hierarchy whose case set is **fixed and owned by one module**: extensible *inside* the declaring module (its own cases derive from the base) but closed *outside* it. This is the standard shape for a closed tagged union whenever an enum won't serve — notably a *recursive* one, since directly-recursive enums are rejected (T0628), so any recursive closed union must be a class hierarchy. Mark the base `` `sealed ``:
+
+```promise
+// module `ui`
+type View `abstract `sealed {   // ui's own primitives extend it
+  kind(this) NodeKind `abstract;
+}
+type Row is View {}             // OK — same module
+type Column is View {}          // OK — same module
+
+// another module:
+type Sneaky is ui.View {}       // ERROR: `View` is `sealed outside its declaring module `ui`
+```
+
+Because an abstract type sealed *globally* would be uninhabitable — uninstantiable *and* unextendable, so no value could ever exist — `` `sealed `` on an abstract type has exactly one coherent meaning: **closed outside the declaring module**, no qualifier needed. The boundary is the `promise.toml` compilation unit. This is Kotlin's `sealed class` / Scala's `sealed trait` under the same name and meaning.
+
+The seal is **transitive**: no subtype of a `` `sealed `` type may be `` `open ``, at any depth. Otherwise an in-module case could be re-opened and extended from outside, producing an external subtype of the sealed base and defeating the closure — so `type Row is View `open {}` is rejected. The fully-known, closed case set is what makes exhaustive matching over the hierarchy sound.
+
+`` `sealed `` is **inapplicable to concrete types** and rejected there — a concrete type has no extensibility to scope (it is already globally sealed). A module-internal case set therefore always has an `` `abstract `` base; a concrete, instantiable base extensible only in-module is intentionally not supported (use an `` `abstract `` base, or containment).
+
+**Rationale.** Extension points should be deliberate. Promise's foremost goal is that a single source file be understandable in isolation, with no action-at-a-distance — but an extensible type *is* action-at-a-distance: a subtype in another module can override a method and change behavior polymorphically. Sealing concrete types by default means an unmarked `type Foo {}` cannot be altered by any subtype, so it can be reasoned about locally; `` `open `` flags the deliberate exceptions. This mirrors Kotlin's `final`-by-default rather than Java's open-by-default (cf. *Effective Java*, "Design and document for inheritance or else prohibit it"). Each kind of type has exactly **one** annotation that flips its default, so there is never more than one spelling for a given transition:
+
+| Type kind | Default | Flip | Rejected |
+|-----------|---------|------|----------|
+| concrete | sealed (no `is`) | `` `open `` (global) | `` `sealed `` (inapplicable — nothing to scope) |
+| `` `abstract `` / `` `structural `` | open (global) | `` `sealed `` (module-scoped) | `` `open `` (redundant — already open) |
 
 **Interaction with value newtypes.** A value type used as a newtype base (see §5.3, T1527; sealing tracked in T1537) must likewise be `` `open ``:
 
@@ -2119,6 +2146,7 @@ testAddition() `test {
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
 | `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
 | `` `open ``  | types           | Type may be used as an `is` parent; concrete types are otherwise sealed. Redundant (rejected) on abstract/`` `structural `` types, which are implicitly open (see Section 5.4) |
+| `` `sealed ``| types (`` `abstract ``/`` `structural ``) | Hierarchy closed outside the declaring `promise.toml` module — extensible only within it; transitive (no `` `open `` subtype). Rejected on concrete types (nothing to scope) (see Section 5.4) |
 | `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |
 | `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are also `` `copy `` |
 | `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |

@@ -1,0 +1,436 @@
+// T1551: a direct (non-virtual) dispatch to a method a subtype INHERITS must
+// target the type that declares it, not a <Child>.<method> function that was
+// never emitted. The fix routes string interpolation's format!() call, plain
+// method calls, and binary/compound/unary operators through one shared owner
+// resolver, so all of those paths are exercised here.
+// --- plain heap child ---------------------------------------------------
+type Base {
+  int n;
+  format!(Writer ~w) {
+    w.write_string("B{this.n}");
+  }
+  describe(this) string {
+    return "d{this.n}";
+  }
+}
+type Kid is Base {
+}
+type Grand is Kid {
+}
+
+heap_child_interpolation() `test {
+  k := Kid(n: 3);
+  assert("{k}" == "B3", "inherited format via interpolation");
+}
+
+grandchild_interpolation() `test {
+  g := Grand(n: 4);
+  assert("{g}" == "B4", "format inherited through two levels");
+}
+
+vector_of_children_formats() `test {
+  Kid[] ks = [Kid(n: 1), Kid(n: 2)];
+  assert("{ks}" == "[B1, B2]", "Vector[Kid] synthesized format");
+}
+
+// A child that adds fields still passes a receiver the parent's format() can
+// read — parent fields keep their instance-struct indices.
+type Wide is Base {
+  string tag;
+}
+
+child_with_extra_fields_interpolation() `test {
+  w := Wide(n: 11, tag: "x");
+  assert("{w}" == "B11", "parent format reads parent field on a wider child");
+}
+
+// --- child of a parent that explicitly declares `is Format` -------------
+
+type FBase is Format {
+  int n;
+  format!(Writer ~w) {
+    w.write_string("F{this.n}");
+  }
+}
+type FKid is FBase {
+}
+
+format_interface_child_interpolation() `test {
+  k := FKid(n: 5);
+  assert("{k}" == "F5", "inherited format from an `is Format` parent");
+}
+
+format_interface_child_explicit_call() `test {
+  k := FKid(n: 6);
+  Builder b = Builder(capacity: 8);
+  k.format(b)?!;
+  assert(b.to_string() == "F6", "explicit inherited format call");
+}
+
+// --- value newtype (T1527) ----------------------------------------------
+
+type Ticket {
+  int n `value;
+  format!(Writer ~w) {
+    w.write_string("T{this.n}");
+  }
+}
+type Seat is Ticket {
+}
+
+value_newtype_child_interpolation() `test {
+  s := Seat(n: 7);
+  assert("{s}" == "T7", "inherited format on a value newtype");
+}
+
+// --- generic parent ------------------------------------------------------
+
+type Box[T] {
+  T v;
+  format!(Writer ~w) {
+    w.write_string("box:{this.v}");
+  }
+}
+type IntBox is Box[int] {
+}
+
+generic_parent_child_interpolation() `test {
+  b := IntBox(v: 8);
+  assert("{b}" == "box:8", "inherited format from a generic parent instance");
+}
+
+// Generic child of a generic parent: the owner name must be monomorphized with
+// the child's own type argument (Box[string], not Box).
+type Wrap[T] is Box[T] {
+}
+
+generic_child_of_generic_parent_interpolation() `test {
+  w := Wrap[string](v: "s");
+  assert("{w}" == "box:s", "inherited format from a generic parent of a generic child");
+}
+
+// --- override still wins -------------------------------------------------
+
+type OverrideKid is Base {
+  format!(Writer ~w) {
+    w.write_string("O{this.n}");
+  }
+}
+
+override_wins() `test {
+  k := OverrideKid(n: 9);
+  assert("{k}" == "O9", "child override takes precedence");
+}
+
+// --- structural default is still synthesized per-concrete ----------------
+
+type Tagged `structural {
+  format!(Writer ~w) {
+    w.write_string("D");
+  }
+}
+type TBase is Tagged {
+  int n;
+}
+type TKid is TBase {
+}
+
+structural_default_inherited() `test {
+  k := TKid(n: 10);
+  assert("{k}" == "D", "structural default format synthesized per-concrete");
+}
+
+// --- the child reached indirectly, not via a literal "{child}" -----------
+
+type Holder {
+  Kid k;
+  show(this) string {
+    return "h{this.k}";
+  }
+}
+
+// A plain `T` parameter is a shared borrow — the receiver arrives as a
+// borrowed value struct rather than an owned one.
+borrowed_interpolation(Kid k) string {
+  return "{k}";
+}
+
+optional_child_interpolation() `test {
+  Kid? k = Kid(n: 21);
+  assert("{k}" == "B21", "optional child interpolation");
+}
+
+borrowed_child_interpolation() `test {
+  x := Kid(n: 22);
+  assert(borrowed_interpolation(x) == "B22", "borrowed child interpolation");
+  assert(x.n == 22, "caller still owns the borrowed child");
+}
+
+child_field_interpolated_inside_method() `test {
+  h := Holder(k: Kid(n: 23));
+  assert(h.show() == "hB23", "child field interpolated inside a method body");
+}
+
+map_of_children_formats() `test {
+  map[string, Kid] m = {
+    "a": Kid(n: 24)
+  };
+  assert("{m}" == "\{a: B24\}", "Map[string, Kid] synthesized format");
+}
+
+// --- inherited plain method calls (genMethodCall) ------------------------
+
+inherited_method_call() `test {
+  k := Kid(n: 25);
+  assert(k.describe() == "d25", "inherited plain method on a heap child");
+  g := Grand(n: 26);
+  assert(g.describe() == "d26", "inherited plain method two levels down");
+}
+
+// Inherited from a GENERIC parent: the callee is the parent's monomorphized
+// name (Box[int].label / Box[string].label), never <Child>.label.
+type Labeled[T] {
+  T v;
+  label(this) string {
+    return "L{this.v}";
+  }
+}
+type IntLabeled is Labeled[int] {
+}
+type WrapLabeled[T] is Labeled[T] {
+}
+
+inherited_method_from_generic_parent() `test {
+  b := IntLabeled(v: 27);
+  assert(b.label() == "L27", "inherited method from a generic parent instance");
+  w := WrapLabeled[string](v: "x");
+  assert(w.label() == "Lx", "inherited method from a generic parent of a generic child");
+}
+
+// --- inherited operators (binary / compound / unary) ---------------------
+//
+// Pre-T1551 these walked past the concrete parent that declares the operator
+// and landed on the structural interface it implements (Equal/Ordered), whose
+// operator is `abstract` and therefore never synthesized per-concrete — so
+// codegen panicked on a missing <Child>.<op>.
+
+type Amount is Ordered {
+  int cents;
+  == (Self other) bool => this.cents == other.cents;
+  < (Self other) bool => this.cents < other.cents;
+  +(Self other) Amount => Amount(cents: this.cents + other.cents);
+  -(this) Amount => Amount(cents: 0 - this.cents);
+}
+type Fee is Amount {
+}
+type LateFee is Fee {
+}
+
+inherited_binary_operator() `test {
+  a := Fee(cents: 1);
+  b := Fee(cents: 1);
+  assert(a == b, "inherited == from a non-structural parent");
+  Amount s = Fee(cents: 2) + Fee(cents: 3);
+  assert(s.cents == 5, "inherited + from a non-structural parent");
+  assert(Fee(cents: 1) < Fee(cents: 2), "inherited < from a non-structural parent");
+}
+
+// The mirror case: `!=` and `>` are genuine structural defaults with bodies, so
+// they must still be synthesized under the concrete child's own name.
+inherited_structural_operator_default() `test {
+  assert(Fee(cents: 1) != Fee(cents: 2), "structural != default on an inheriting child");
+  assert(Fee(cents: 2) > Fee(cents: 1), "structural > default on an inheriting child");
+  assert(Fee(cents: 1) <= Fee(cents: 1), "structural <= default on an inheriting child");
+  assert(Fee(cents: 2) >= Fee(cents: 1), "structural >= default on an inheriting child");
+}
+
+inherited_compound_operator() `test {
+  Amount a = Fee(cents: 1);
+  a += Fee(cents: 2);
+  assert(a.cents == 3, "inherited compound += from a non-structural parent");
+}
+
+inherited_unary_operator() `test {
+  Amount u = -Fee(cents: 5);
+  assert(u.cents == -5, "inherited unary - from a non-structural parent");
+}
+
+two_level_inherited_operators() `test {
+  assert(LateFee(cents: 1) < LateFee(cents: 2), "inherited < two levels down");
+  assert(LateFee(cents: 1) != LateFee(cents: 2), "structural != default two levels down");
+}
+
+// --- inherited operators on a value newtype (T1527) ----------------------
+
+type Cents {
+  int v `value;
+  == (Self other) bool => this.v == other.v;
+  < (Self other) bool => this.v < other.v;
+  +(Self other) Cents => Cents(v: this.v + other.v);
+  -(this) Cents => Cents(v: 0 - this.v);
+}
+type Price is Cents {
+}
+type SalePrice is Price {
+}
+
+value_newtype_inherited_operators() `test {
+  assert(Price(v: 1) == Price(v: 1), "value newtype inherited ==");
+  assert(Price(v: 1) < Price(v: 2), "value newtype inherited <");
+  assert((Price(v: 1) + Price(v: 2)).v == 3, "value newtype inherited +");
+  assert((-Price(v: 5)).v == -5, "value newtype inherited unary -");
+  Cents c = Price(v: 1);
+  c += Price(v: 4);
+  assert(c.v == 5, "value newtype inherited compound +=");
+  assert(SalePrice(v: 1) < SalePrice(v: 2), "value newtype inherited < two levels down");
+}
+
+// --- both branches through one plain method call -------------------------
+//
+// `speak` is the parent's implementation of a structural ABSTRACT method — the
+// child must call Animal.speak (nothing named Dog.speak exists). `loud` is a
+// structural DEFAULT with a body — it is synthesized per-concrete, so the child
+// must call its own Dog.loud.
+
+type Speaker `structural {
+  speak(this) string `abstract;
+  loud(this) string => this.speak() + "!";
+}
+type Animal is Speaker {
+  int age;
+  speak(this) string {
+    return "woof";
+  }
+}
+type Dog is Animal {
+}
+
+inherited_impl_and_structural_default() `test {
+  d := Dog(age: 1);
+  assert(d.speak() == "woof", "inherited implementation of a structural abstract method");
+  assert(d.loud() == "woof!", "structural default still synthesized for the child");
+}
+
+// --- parent OVERRIDES a structural default that has a body ---------------
+//
+// The silent-miscompile variant: because `Greeter.greet` has a body, the
+// pre-T1551 walk found a structural owner and synthesized `GKid.greet` from the
+// INTERFACE default — so the child returned "default" instead of the parent's
+// override. No panic, just the wrong answer.
+
+type Greeter `structural {
+  greet(this) string => "default";
+}
+type GBase is Greeter {
+  int n;
+  greet(this) string => "base{this.n}";
+}
+type GKid is GBase {
+}
+
+parent_override_of_structural_default() `test {
+  k := GKid(n: 1);
+  assert(k.greet() == "base1", "parent's override wins over the structural default");
+}
+
+// Operator form of the same shape: `!=` and `>` are Ordered/Equal defaults with
+// bodies, but this parent overrides both, so the child must reach the parent's
+// bodies — not a per-concrete synthesis of the interface defaults.
+type EqBase is Ordered {
+  int n;
+  == (Self other) bool => this.n == other.n;
+  < (Self other) bool => this.n < other.n;
+  != (Self other) bool => false;
+  > (Self other) bool => false;
+}
+type EqKid is EqBase {
+}
+
+parent_override_of_structural_operator_default() `test {
+  assert(!(EqKid(n: 1) != EqKid(n: 2)), "parent's != override wins over the default");
+  assert(!(EqKid(n: 2) > EqKid(n: 1)), "parent's > override wins over the default");
+  assert(EqKid(n: 1) == EqKid(n: 1), "parent's own == still reached");
+}
+
+// --- override at the MIDDLE level, inherited by the grandchild -----------
+
+type MidBase {
+  int n;
+  format!(Writer ~w) {
+    w.write_string("MB");
+  }
+  tag(this) string => "mb";
+}
+type MidOverride is MidBase {
+  format!(Writer ~w) {
+    w.write_string("MO{this.n}");
+  }
+  tag(this) string => "mo";
+}
+type MidGrand is MidOverride {
+}
+
+middle_level_override_inherited_by_grandchild() `test {
+  g := MidGrand(n: 12);
+  assert("{g}" == "MO12", "grandchild reaches the middle override, not the root");
+  assert(g.tag() == "mo", "grandchild reaches the middle override for a plain method");
+}
+
+// --- generic parent that itself declares `is Format` ---------------------
+//
+// Combines both post-fix branches: the guard must stop at the parent that
+// declares format(), and the owner name must then be MONOMORPHIZED
+// (GB[int].format, not GB.format).
+
+type GB[T] is Format {
+  T v;
+  format!(Writer ~w) {
+    w.write_string("gb:{this.v}");
+  }
+}
+type GBInt is GB[int] {
+}
+type GBWrap[T] is GB[T] {
+}
+
+generic_format_parent_child_interpolation() `test {
+  b := GBInt(v: 13);
+  assert("{b}" == "gb:13", "inherited format from a generic `is Format` parent");
+  w := GBWrap[string](v: "q");
+  assert("{w}" == "gb:q", "generic child of a generic `is Format` parent");
+}
+
+// --- heap payload through every inherited direct-dispatch path -----------
+//
+// Each inherited operator allocates a fresh string-bearing child. Batch tests
+// enforce zero leaked allocations, so this doubles as the cleanup gate for the
+// rewritten dispatch: a callee mangled to the wrong owner would either not link
+// or skip the parent's drop wiring.
+
+type Msg is Ordered {
+  string s;
+  == (Self other) bool => this.s == other.s;
+  < (Self other) bool => this.s < other.s;
+  +(Self other) Msg => Msg(s: this.s + other.s);
+  -(this) Msg => Msg(s: "-{this.s}");
+  format!(Writer ~w) {
+    w.write_string("M{this.s}");
+  }
+}
+type Note is Msg {
+}
+
+heap_payload_inherited_dispatch() `test {
+  Msg sum = Note(s: "x") + Note(s: "y");
+  assert(sum.s == "xy", "inherited + on a heap-payload child");
+  assert("{sum}" == "Mxy", "inherited format on a heap-payload child");
+  Msg neg = -Note(s: "z");
+  assert(neg.s == "-z", "inherited unary - on a heap-payload child");
+  Msg acc = Note(s: "p");
+  acc += Note(s: "q");
+  assert(acc.s == "pq", "inherited += on a heap-payload child");
+  assert(Note(s: "a") < Note(s: "b"), "inherited < on a heap-payload child");
+  assert(Note(s: "a") != Note(s: "b"), "structural != default on a heap-payload child");
+  Note[] ns = [Note(s: "a"), Note(s: "b")];
+  assert("{ns}" == "[Ma, Mb]", "vector of heap-payload children formats");
+}

@@ -66,27 +66,11 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		return c.genVirtualMethodCall(e, member, named, method, targetType)
 	}
 
-	// Direct dispatch: resolve method to a compile-time-known function.
-	// For mono/generic types, use resolveTypeName (handles Instance → mono name).
-	// For regular Named types with inheritance, use resolveMethodOwner to find
-	// the parent that actually defines the method.
-	var mangledName string
-	ownerName := c.resolveMethodOwner(named, member.Field)
-	if ownerName != named.Obj().Name() {
-		// Method inherited from parent. Check if the parent is structural —
-		// if so, use the concrete type's name (methods are synthesized per-concrete).
-		if structParent := c.findStructuralOwner(named, member.Field); structParent != nil {
-			concreteName := c.resolveTypeName(targetType)
-			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodName(concreteName, member.Field, false)
-		} else {
-			// Non-structural parent: use the monomorphized parent name.
-			monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
-			mangledName = mangleMethodName(monoOwner, member.Field, false)
-		}
-	} else {
-		mangledName = mangleMethodName(c.resolveTypeName(targetType), member.Field, false)
-	}
+	// Direct dispatch: resolve method to a compile-time-known function. The owner
+	// may be the concrete type, a structural interface (synthesized per-concrete),
+	// or a non-structural parent — resolveDirectDispatchOwner picks between them.
+	mangledName := mangleMethodName(
+		c.resolveDirectDispatchOwner(named, targetType, member.Field), member.Field, false)
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {

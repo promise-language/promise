@@ -208,6 +208,35 @@ func (c *Compiler) resolveMonoParentName(named *types.Named, targetType types.Ty
 	return findMonoParentName(named, ownerName, subst)
 }
 
+// resolveDirectDispatchOwner returns the type name that a direct (non-virtual)
+// call to methodName on `named` — reached through `targetType` — must be mangled
+// against. Three cases, in order:
+//
+//   - `named` declares the method itself → its own name, monomorphized when
+//     `targetType` is a generic instance (e.g. "Pair[int]").
+//   - inherited from a structural interface default → still the concrete type's
+//     name, because defaults are synthesized per-concrete; the synthesis is
+//     triggered here so the callee exists.
+//   - inherited from a non-structural parent → the parent's monomorphized name
+//     (e.g. `IntBox is Box[int]` inheriting format() → "Box[int]"), since no
+//     <child>.<method> function is ever emitted for a plain inherited method
+//     (T1551).
+//
+// Shared by method calls, binary/unary/compound operators, and string
+// interpolation's format() dispatch so every direct-dispatch site agrees on the
+// callee.
+func (c *Compiler) resolveDirectDispatchOwner(named *types.Named, targetType types.Type, methodName string) string {
+	ownerName := c.resolveMethodOwner(named, methodName)
+	if ownerName == named.Obj().Name() {
+		return c.resolveTypeName(targetType)
+	}
+	if structParent := c.findStructuralOwner(named, methodName); structParent != nil {
+		c.ensureDefaultMethodsSynthesized(named, structParent)
+		return c.resolveTypeName(targetType)
+	}
+	return c.resolveMonoParentName(named, targetType, ownerName)
+}
+
 // findMonoParentName walks the parent chain to find ownerName and build
 // the monomorphized Instance name from the already-computed substitution map.
 func findMonoParentName(named *types.Named, ownerName string, subst map[*types.TypeParam]types.Type) string {

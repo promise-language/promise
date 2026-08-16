@@ -441,9 +441,17 @@ func hasOwnMethod(named *types.Named, name string) bool {
 // inherited by `named`, or nil if the method comes from a non-structural parent.
 func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *types.Named {
 	for _, pr := range named.Parents() {
-		if pr.Named.LookupMethod(methodName) != nil {
+		if m := pr.Named.LookupMethod(methodName); m != nil {
 			if pr.Named.IsStructural() {
 				return pr.Named
+			}
+			// T1551: a non-structural parent that DECLARES the method itself owns
+			// the implementation — dispatch targets <parent>.<method>, not a
+			// per-concrete synthesis of a structural grandparent's default. An
+			// abstract declaration is not an implementation, so keep recursing
+			// through abstract classes.
+			if hasOwnMethod(pr.Named, methodName) && !m.IsAbstract() {
+				return nil
 			}
 			// Recurse into parent's parents
 			if found := c.findStructuralOwner(pr.Named, methodName); found != nil {

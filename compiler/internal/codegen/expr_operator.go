@@ -97,25 +97,9 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		return c.trackOperatorResult(e, c.genVirtualBinaryOp(e, named, method, left, right))
 	}
 
-	// Direct dispatch: call the concrete type's operator method.
-	// Use resolveTypeName to get mono name for generic instances (e.g., "Pair[int]").
-	ownerName := c.resolveMethodOwner(named, op)
-	var mangledName string
-	if ownerName != named.Obj().Name() {
-		// Operator inherited from a parent. If the parent is structural, the method
-		// was synthesized under the concrete type's name — use that, not the parent's.
-		// (Mirrors the same logic in genMethodCall for structural inheritance.)
-		if structParent := c.findStructuralOwner(named, op); structParent != nil {
-			concreteName := c.resolveTypeName(leftType)
-			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodName(concreteName, op, false)
-		} else {
-			monoOwner := c.resolveMonoParentName(named, leftType, ownerName)
-			mangledName = mangleMethodName(monoOwner, op, false)
-		}
-	} else {
-		mangledName = mangleMethodName(c.resolveTypeName(leftType), op, false)
-	}
+	// Direct dispatch: call the concrete type's operator method (or the parent's,
+	// when the operator is inherited — see resolveDirectDispatchOwner).
+	mangledName := mangleMethodName(c.resolveDirectDispatchOwner(named, leftType, op), op, false)
 	fn, ok := c.funcs[mangledName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
@@ -396,20 +380,7 @@ func (c *Compiler) genNonNativeCompoundOp(named *types.Named, operandType types.
 		// Direct dispatch: resolve the mangled name exactly as genBinaryExpr does
 		// (mono name for generic instances, structural-default synthesis under the
 		// concrete name, mono-parent resolution for inherited operators).
-		ownerName := c.resolveMethodOwner(named, op)
-		var mangledName string
-		if ownerName != named.Obj().Name() {
-			if structParent := c.findStructuralOwner(named, op); structParent != nil {
-				concreteName := c.resolveTypeName(operandType)
-				c.ensureDefaultMethodsSynthesized(named, structParent)
-				mangledName = mangleMethodName(concreteName, op, false)
-			} else {
-				monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
-				mangledName = mangleMethodName(monoOwner, op, false)
-			}
-		} else {
-			mangledName = mangleMethodName(c.resolveTypeName(operandType), op, false)
-		}
+		mangledName := mangleMethodName(c.resolveDirectDispatchOwner(named, operandType, op), op, false)
 		fn, ok := c.funcs[mangledName]
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
@@ -522,20 +493,9 @@ func (c *Compiler) emitUnaryOpResult(op string, operandType types.Type, operand 
 		// Direct dispatch: call the concrete type's operator method. Resolve the
 		// mangled name exactly as genBinaryExpr does (mono name for generic
 		// instances, structural-default synthesis under the concrete name).
-		ownerName := c.resolveMethodOwner(named, op)
-		var mangledName string
-		if ownerName != named.Obj().Name() {
-			if structParent := c.findStructuralOwner(named, op); structParent != nil {
-				concreteName := c.resolveTypeName(operandType)
-				c.ensureDefaultMethodsSynthesized(named, structParent)
-				mangledName = mangleMethodNameForMethod(concreteName, method)
-			} else {
-				monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
-				mangledName = mangleMethodNameForMethod(monoOwner, method)
-			}
-		} else {
-			mangledName = mangleMethodNameForMethod(c.resolveTypeName(operandType), method)
-		}
+		// mangleMethodNameForMethod keeps the "$unary" discriminator (T0883).
+		mangledName := mangleMethodNameForMethod(
+			c.resolveDirectDispatchOwner(named, operandType, op), method)
 		fn, ok := c.funcs[mangledName]
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))

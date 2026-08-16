@@ -578,8 +578,9 @@ func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value
 		return c.block.NewCall(fnTyped, receiver, writerAlloca)
 	}
 
-	// Direct dispatch
-	mangledName := mangleMethodName(c.resolveTypeName(typ), "format", false)
+	// Direct dispatch. Resolve the type that actually DECLARES format() — a child
+	// that inherits format() from its parent has no <Child>.format (T1551).
+	mangledName := mangleMethodName(c.resolveDirectDispatchOwner(named, typ, "format"), "format", false)
 	fn, ok := c.funcs[mangledName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared method %s for interpolation", mangledName))

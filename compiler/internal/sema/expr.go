@@ -3134,8 +3134,12 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 // them differing, so the self-check `v is Vec2` (and its destructuring form
 // `v is Vec2(x, y)`), which the static type answers correctly, still works.
 func (c *Checker) rejectValueTypeIdentity(pos ast.Pos, subject, target types.Type, what string) bool {
-	subjectNamed := semaExtractNamed(subject)
-	targetNamed := semaExtractNamed(target)
+	// Strip a leading Optional so an Optional-typed subject/target (e.g. `V? v`,
+	// a supported narrowing idiom) still resolves to its underlying Named (T1552).
+	// Done locally rather than in semaExtractNamed, whose other callers rely on
+	// Optionals staying opaque.
+	subjectNamed := semaExtractNamed(unwrapOptional(subject))
+	targetNamed := semaExtractNamed(unwrapOptional(target))
 	if subjectNamed == nil || targetNamed == nil || subjectNamed == targetNamed {
 		return false
 	}
@@ -4719,6 +4723,18 @@ func (c *Checker) validateInterpolationType(typ types.Type, node ast.Expr) {
 		return
 	}
 	c.errorf(node.Pos(), "type %s cannot be used in string interpolation (does not implement Format)", named)
+}
+
+// unwrapOptional strips leading Optional wrappers so the underlying Named can be
+// extracted; other unwrapping (Instance/SharedRef/MutRef) is left to semaExtractNamed.
+func unwrapOptional(typ types.Type) types.Type {
+	for {
+		if o, ok := typ.(*types.Optional); ok {
+			typ = o.Elem()
+			continue
+		}
+		return typ
+	}
 }
 
 // semaExtractNamed unwraps Instance/SharedRef/MutRef to get the underlying *Named type.

@@ -576,6 +576,96 @@ func TestT1527OptionalValueNewtypeSelfIsAllowed(t *testing.T) {
 	`)
 }
 
+// T1552: an Optional-typed SUBJECT must still be seen through to its underlying
+// value type — otherwise `V? v = W(...); v is W` is answered from the static type
+// and silently reports false. Mirrors TestT1527IsCheckBetweenValueTypesRejected
+// with an upcast into an Optional.
+func TestT1552OptionalSubjectIsCheckBetweenValueTypesRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type V { int n `+vt+`; }
+		type W is V {}
+		main() {
+			V? v = W(n: 1);
+			if v is W { print_line("W"); }
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' type check between value types V and W")
+}
+
+func TestT1552OptionalSubjectAsCastBetweenValueTypesRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type V { int n `+vt+`; }
+		type W is V {}
+		main() {
+			V? v = W(n: 1);
+			x := v as W;
+		}
+	`)
+	expectError(t, errs, "cannot use 'as' cast between value types V and W")
+}
+
+func TestT1552OptionalSubjectMatchTypePatternRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type V { int n `+vt+`; }
+		type W is V {}
+		main() {
+			V? v = W(n: 1);
+			match v {
+				W k => print_line("W"),
+				_ => print_line("other"),
+			}
+		}
+	`)
+	expectError(t, errs, "cannot use 'match' type pattern between value types V and W")
+}
+
+// The destructuring `is` form (`v is W(k)`) resolves through a separate call
+// site from bare `is` (checkExpr's DestructureIsPattern branch), so the Optional
+// subject has to be unwrapped there too. Mirrors
+// TestT1527DestructureIsBetweenValueTypesRejected with an upcast into an Optional.
+func TestT1552OptionalSubjectDestructureIsRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type V { int n `+vt+`; }
+		type W is V {}
+		main() {
+			V? v = W(n: 1);
+			if v is W(k) { print_line(k.to_string()); }
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' type check between value types V and W")
+}
+
+// A generic-argument target (`v is Box[int]`) resolves through yet another call
+// site (the len(TypeArgs) > 0 branch that resolves via typeRef), which the
+// Optional-subject fix must also reach. Mirrors
+// TestT1527IsAgainstGenericValueInstanceRejected with an Optional subject.
+func TestT1552OptionalSubjectGenericTargetIsRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T v `+vt+`; }
+		type Pt { int x `+vt+`; }
+		main() {
+			Pt? p = Pt(x: 1);
+			if p is Box[int] { print_line("box"); }
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' type check between value types Pt and Box")
+}
+
+// `as!` short-circuits to the target type before wrapping in an Optional, but it
+// shares rejectValueTypeIdentity with `as` and so must reject an Optional subject
+// the same way. Mirrors TestT1527ForceCastBetweenValueTypesRejected.
+func TestT1552OptionalSubjectForceCastRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type V { int n `+vt+`; }
+		type W is V {}
+		main() {
+			V? v = W(n: 1);
+			x := v as! W;
+		}
+	`)
+	expectError(t, errs, "cannot use 'as' cast between value types V and W")
+}
+
 // An `is` whose target carries type ARGUMENTS resolves through a different
 // pattern branch than a bare type name — the generic instance has to be unwrapped
 // to its origin before the value-to-value rejection can see it.

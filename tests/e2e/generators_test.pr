@@ -1192,10 +1192,16 @@ test_t1306_discarded_failable_generator_no_leak() `test {
 // inside a MONOMORPHIZED generic function body — exercises the typeSubst branch of
 // dropDiscardedGenerator (stream[T] substituted to a concrete stream at codegen).
 // Both instantiations must free the box with no leak.
+// T1498: this used to be `while i < n { yield x; i = i + 1; }`, which yields the
+// same owned `x` on every iteration — a genuine double free for droppable T that
+// only went unnoticed because this test discards the stream. Ownership now
+// rejects a move of a binding declared outside the loop. Yielding once keeps the
+// discard-at-first-suspend path (the leak-critical path this test guards) while
+// the trailing loop keeps the generator's loop shape.
 t1306_gen_of[T](T move x, int n) stream[T] {
-  int i = 0;
+  yield x;
+  int i = 1;
   while i < n {
-    yield x;
     i = i + 1;
   }
 }

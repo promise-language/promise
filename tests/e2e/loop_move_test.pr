@@ -1,0 +1,461 @@
+// T1498 — loop-carried moves.
+//
+// Moving a binding declared OUTSIDE a loop from INSIDE its body is now a compile
+// error: the back edge re-reaches the move site with the variable already moved,
+// so iteration 2+ consumed a freed value (`invalid free (bad header magic)` for a
+// plain move, an unbounded allocation for a moved closure capture). The
+// compile-fail cases live in compiler/internal/ownership/t1498_test.go — there is
+// no `.pr` harness for programs that must not compile.
+//
+// This file covers the LEGAL shapes at runtime: every way of re-establishing
+// ownership inside the body must still work, produce the right values, and leak
+// nothing (T0067 enforces zero leaks).
+_t1498_take(string move s) int `doc("Consumes s and returns its length.") {
+  return s.len;
+}
+
+_t1498_call(() -> string f) int `doc("Calls f and returns the length of its result.") {
+  return f().len;
+}
+
+_t1498_grow(string move acc, string suffix) string `doc("Consumes acc and returns it with suffix appended.") {
+  return acc + suffix;
+}
+
+// Declaring the value inside the body gives each iteration its own fresh value —
+// the shape the diagnostic points users at.
+test_t1498_loop_local_decl_plain_move() `test {
+  int total = 0;
+  int i = 0;
+  while (i < 3) {
+    string v = "-" + "n";
+    total += _t1498_take(move v);
+    i += 1;
+  }
+  assert(total == 6, "loop-local plain move: {total}");
+}
+
+// Same, for a `move` closure capture — the capture is freed with the closure env
+// each iteration.
+test_t1498_loop_local_decl_move_capture() `test {
+  int total = 0;
+  int i = 0;
+  while (i < 3) {
+    string suffix = "-" + "n";
+    total += _t1498_call(move || -> suffix);
+    i += 1;
+  }
+  assert(total == 6, "loop-local move capture: {total}");
+}
+
+// Move-and-reassign accumulator: the name is consumed and re-owned before the
+// back edge, so the loop carries a live value across iterations.
+test_t1498_move_then_reassign_accumulator() `test {
+  string acc = "" + "";
+  for i in 0..4 {
+    acc = _t1498_grow(move acc, "x");
+  }
+  assert(acc == "xxxx", "accumulator: {acc}");
+}
+
+// A body whose tail is a `break` runs at most once, so a move of an outer binding
+// inside it is sound.
+test_t1498_body_ending_in_break() `test {
+  string v = "hello" + "!";
+  int seen = 0;
+  for i in 0..3 {
+    seen += _t1498_take(move v);
+    break;
+  }
+  assert(seen == 6, "break-terminated body: {seen}");
+}
+
+// Every path from the move leaves the loop, so the back edge never re-reaches it
+// — the conditional form of the shape above, and the one real code actually
+// writes.
+test_t1498_move_on_conditional_break_arm() `test {
+  string v = "hello" + "!";
+  int seen = 0;
+  int i = 0;
+  while (i < 5) {
+    if i == 2 {
+      seen = _t1498_take(move v);
+      break;
+    }
+    i += 1;
+  }
+  assert(seen == 6, "conditional-break move: {seen}");
+  assert(i == 2, "stopped at 2: {i}");
+}
+
+// A for-in binding is fresh per iteration, so moving it into a sink is legal.
+test_t1498_for_in_binding_moved_into_sink() `test {
+  out := string[]();
+  for s in["a" + "b", "c" + "d", "e" + "f"] {
+    out.push(move s);
+  }
+  assert(out.len == 3, "sink len");
+  assert(out[0] == "ab", "sink[0]");
+  assert(out[2] == "ef", "sink[2]");
+}
+
+// The move sits on a `return` arm, so the fall-through path never carries a moved
+// value to the back edge (the `Map.[]=` shape in modules/std/map.pr).
+_t1498_take_on_match_arm(string move key, int stop) int `doc("Consumes key on the iteration that matches stop.") {
+  for i in 0..4 {
+    if i == stop {
+      return _t1498_take(move key);
+    }
+  }
+  return 0;
+}
+
+test_t1498_move_on_return_arm() `test {
+  assert(_t1498_take_on_match_arm("abc" + "de", 2) == 5, "return-arm move");
+}
+
+// A nested loop that re-declares the value in the INNER body: the outer loop
+// carries nothing, so both back edges are clean.
+test_t1498_nested_loop_inner_local() `test {
+  int total = 0;
+  for a in 0..2 {
+    for b in 0..3 {
+      string v = "z" + "z";
+      total += _t1498_take(move v);
+    }
+  }
+  assert(total == 12, "nested inner-local: {total}");
+}
+
+// A CONDITIONAL move followed by an UNCONDITIONAL reassignment: every path
+// re-owns the binding before the back edge, so iterations that do move and
+// iterations that do not both leave a live value behind.
+test_t1498_conditional_move_then_unconditional_reassign() `test {
+  string v = "a" + "b";
+  int moved = 0;
+  for i in 0..5 {
+    if i % 2 == 0 {
+      moved += _t1498_take(move v);
+    }
+    v = "c" + "d";
+  }
+  assert(moved == 6, "conditional move total: {moved}");
+  assert(v == "cd", "final value: {v}");
+}
+
+// The while-let binding is unwrapped fresh from the optional each iteration, so
+// moving it into a sink is legal — the same exemption the for-in binding gets.
+test_t1498_while_let_binding_moved_into_sink() `test {
+  out := string[]();
+  string? o = "a" + "b";
+  int n = 0;
+  while r := o {
+    out.push(move r);
+    n += 1;
+    if n < 3 {
+      o = "x" + "y";
+    } else {
+      o = none;
+    }
+  }
+  assert(out.len == 3, "while-let sink len: {out.len}");
+  assert(out[0] == "ab", "while-let sink[0]: {out[0]}");
+  assert(out[2] == "xy", "while-let sink[2]: {out[2]}");
+}
+
+// Classic-`for` form of the loop-local declaration — the header is re-evaluated
+// every iteration but the moved value is created inside the body.
+test_t1498_classic_for_loop_local_decl() `test {
+  int total = 0;
+  for int i = 0; i < 4; i += 1 {
+    string v = "q" + "q";
+    total += _t1498_take(move v);
+  }
+  assert(total == 8, "classic-for loop-local: {total}");
+}
+
+// Same, with a `move` closure capture: the env struct (and the captured string)
+// is freed with the closure at the end of each iteration.
+test_t1498_classic_for_loop_local_move_capture() `test {
+  int total = 0;
+  for int i = 0; i < 4; i += 1 {
+    string suffix = "r" + "r";
+    total += _t1498_call(move || -> suffix);
+  }
+  assert(total == 8, "classic-for move capture: {total}");
+}
+
+// The move sits in the ELSE arm, which breaks — every path from it leaves the
+// loop, so it runs at most once.
+test_t1498_move_in_else_arm_that_breaks() `test {
+  string v = "hello" + "!";
+  int seen = 0;
+  int i = 0;
+  while (i < 5) {
+    if i < 2 {
+      i += 1;
+    } else {
+      seen = _t1498_take(move v);
+      break;
+    }
+  }
+  assert(seen == 6, "else-arm move: {seen}");
+  assert(i == 2, "stopped at 2: {i}");
+}
+
+// Returning an outer local from inside the loop leaves the function on that
+// path, so the value is handed to the caller exactly once.
+_t1498_return_from_loop(int stop) string `doc("Returns an outer local from inside a loop on iteration stop.") {
+  string v = "pick" + "ed";
+  for i in 0..4 {
+    if i == stop {
+      return v;
+    }
+  }
+  return "fall" + "back";
+}
+
+test_t1498_return_of_outer_local_in_loop() `test {
+  assert(_t1498_return_from_loop(2) == "picked", "returned from loop");
+  assert(_t1498_return_from_loop(9) == "fallback", "fell through loop");
+}
+
+// A droppable user type, not just a string: the box is built fresh inside the
+// inner body and consumed there, so each iteration allocates and frees exactly
+// one box. A loop-carried move here would double-free the label (T0067's leak
+// check covers the other direction).
+type _T1498Box `doc("A droppable box around a heap string, used to check per-iteration cleanup.") {
+  string label;
+
+  len() int `doc("Returns the length of the label.") {
+    return this.label.len;
+  }
+}
+
+_t1498_eat_box(_T1498Box move b) int `doc("Consumes b and returns its label length.") {
+  return b.len();
+}
+
+test_t1498_droppable_user_type_loop_local() `test {
+  int total = 0;
+  for a in 0..3 {
+    for b in 0..2 {
+      box := _T1498Box(label: "ab" + "c");
+      total += _t1498_eat_box(move box);
+    }
+  }
+  assert(total == 18, "droppable box total: {total}");
+}
+
+// An inner loop that breaks after moving its own loop-local: both the inner and
+// the outer back edge see a value the body itself created.
+test_t1498_inner_loop_break_after_moving_loop_local() `test {
+  int total = 0;
+  for a in 0..3 {
+    for b in 0..5 {
+      string v = "mn" + "op";
+      total += _t1498_take(move v);
+      break;
+    }
+  }
+  assert(total == 12, "inner-break total: {total}");
+}
+
+// An infinite `for { … }` whose body ends in a `break` runs at most once, so a
+// move of an outer binding inside it is sound at runtime too.
+test_t1498_infinite_loop_body_ending_in_break() `test {
+  string v = "infi" + "nite";
+  int seen = 0;
+  int guard = 0;
+  for {
+    seen = _t1498_take(move v);
+    guard += 1;
+    break;
+  }
+  assert(seen == 8, "infinite-loop break move: {seen}");
+  assert(guard == 1, "ran once: {guard}");
+}
+
+// A `continue` BEFORE the move does not put the move on the back edge — the
+// continuing iterations never reach it, and the one that does breaks out.
+test_t1498_continue_before_move_then_break() `test {
+  string v = "cont" + "inue";
+  int seen = 0;
+  int i = 0;
+  for {
+    i += 1;
+    if i < 3 {
+      continue;
+    }
+    seen = _t1498_take(move v);
+    break;
+  }
+  assert(seen == 8, "continue-then-move: {seen}");
+  assert(i == 3, "skipped two iterations: {i}");
+}
+
+// A bare nested block whose tail is a `break` — the same shielding as the `if`
+// form, one level of block nesting deeper.
+test_t1498_move_in_bare_block_that_breaks() `test {
+  string v = "bl" + "ock";
+  int seen = 0;
+  for i in 0..3 {
+    {
+      seen = _t1498_take(move v);
+      break;
+    }
+  }
+  assert(seen == 5, "bare-block move: {seen}");
+}
+
+// `raise` consumes its value and leaves the function, so raising an
+// outer-declared error from inside a loop hands it over exactly once.
+type _T1498Err is error `doc("An error raised from inside a loop.") {
+}
+
+_t1498_raise_from_loop!(int stop) int `doc("Raises an outer-declared error on iteration stop.") {
+  e := _T1498Err(message: "boo" + "m");
+  for i in 0..4 {
+    if i == stop {
+      raise e;
+    }
+  }
+  return 0;
+}
+
+test_t1498_raise_of_outer_local_in_loop() `test {
+  int r = _t1498_raise_from_loop(2)? e {
+    -1
+  };
+  assert(r == -1, "raised from loop: {r}");
+  int ok = _t1498_raise_from_loop(9)? e {
+    -1
+  };
+  assert(ok == 0, "fell through loop: {ok}");
+}
+
+// A generator that builds its yielded value inside the loop body: each
+// iteration yields a value it owns, so draining the stream sees three distinct
+// strings and frees each exactly once.
+_t1498_gen_loop_local(int n) stream[string] `doc("Yields a freshly built string on each of n iterations.") {
+  int i = 0;
+  while i < n {
+    string v = "y" + "z";
+    yield v;
+    i = i + 1;
+  }
+}
+
+test_t1498_generator_yields_loop_local() `test {
+  int total = 0;
+  int count = 0;
+  for s in _t1498_gen_loop_local(3) {
+    total += s.len;
+    count += 1;
+  }
+  assert(count == 3, "generator count: {count}");
+  assert(total == 6, "generator total: {total}");
+}
+
+// Sending a value built inside the body: the channel takes ownership of a fresh
+// string each iteration, and draining it afterwards frees each exactly once.
+test_t1498_channel_send_of_loop_local() `test {
+  ch := channel[string](4);
+  for i in 0..3 {
+    string v = "se" + "nd";
+    ch.send(move v);
+  }
+  ch.close();
+  int total = 0;
+  for s in ch {
+    total += s.len;
+  }
+  assert(total == 12, "channel send total: {total}");
+}
+
+// A consuming native method (`MutexGuard.close()`, T0846) on a guard acquired
+// inside the body: each iteration acquires and consumes its own guard. Closing
+// an outer-declared guard in a loop is the rejected form.
+test_t1498_consuming_close_of_loop_local_guard() `test {
+  m := Mutex[int](7);
+  int total = 0;
+  for i in 0..3 {
+    g := m.lock();
+    total += g.borrow;
+    g.close();
+  }
+  assert(total == 21, "guard per iteration: {total}");
+}
+
+// An `if is` enum destructure binds a fresh view of the payload each iteration —
+// the enum keeps its own copy, so the loop neither double-frees nor leaves a
+// hole behind.
+enum _T1498Payload `doc("An enum carrying a heap string payload.") {
+  Text(string s),
+  Empty,
+}
+
+test_t1498_enum_destructure_binding_moved_in_loop() `test {
+  _T1498Payload e = _T1498Payload.Text("ab" + "cd");
+  int total = 0;
+  for i in 0..3 {
+    if e is Text(s) {
+      total += _t1498_take(move s);
+    }
+  }
+  assert(total == 12, "enum binding total: {total}");
+  if e is Text(after) {
+    assert(after == "abcd", "payload intact after the loop: {after}");
+  }
+}
+
+// Move-and-reassign with a DROPPABLE USER TYPE rather than a string: each
+// iteration consumes the previous box and installs a new one, so exactly one box
+// is live at the back edge and the last is dropped at scope exit.
+_t1498_grow_box(_T1498Box move b, string extra) _T1498Box `doc("Consumes b and returns a box with extra appended.") {
+  return _T1498Box(label: b.label + extra);
+}
+
+test_t1498_move_then_reassign_user_type_accumulator() `test {
+  box := _T1498Box(label: "" + "");
+  for i in 0..4 {
+    box = _t1498_grow_box(move box, "ab");
+  }
+  assert(box.len() == 8, "box accumulator: {box.len()}");
+  assert(box.label == "abababab", "box label: {box.label}");
+}
+
+// Collection literals consume their elements, so building one from a loop-local
+// each iteration is the legal form: three separate vectors and tuples, each
+// owning its own string.
+test_t1498_collection_literal_from_loop_local() `test {
+  int total = 0;
+  for i in 0..3 {
+    string v = "el" + "em";
+    a := [v];
+    total += a[0].len;
+  }
+  assert(total == 12, "vector literal total: {total}");
+
+  int tuple_total = 0;
+  for i in 0..3 {
+    string w = "tu" + "ple";
+    p := (w, i);
+    (s, n) := p;
+    tuple_total += s.len + n;
+  }
+  assert(tuple_total == 18, "tuple literal total: {tuple_total}");
+}
+
+// A typed var-decl binding an outer local moves it; done from a loop-local
+// source it is legal, and the rebound name is dropped at the end of each
+// iteration.
+test_t1498_typed_var_decl_rebind_of_loop_local() `test {
+  int total = 0;
+  for i in 0..3 {
+    string v = "re" + "bind";
+    string w = v;
+    total += w.len;
+  }
+  assert(total == 18, "rebind total: {total}");
+}

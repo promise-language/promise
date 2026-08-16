@@ -202,6 +202,11 @@ type Checker struct {
 	// of the source is the call arg itself, which is not a "later use"). Reset per
 	// function/method body.
 	loopFrames []*aliasLoopFrame
+
+	// loopMoveReported dedups T1498 loop-carried-move diagnostics, keyed
+	// name@file:line:col, so a move site inside nested loops is reported once
+	// rather than by every enclosing loop. Reset per function/method body.
+	loopMoveReported map[string]bool
 }
 
 // wrapCoercedHandle records the provenance of a T1212 wrap-coerced borrowed
@@ -357,6 +362,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.iterBorrowOrigin = make(map[string]string)                // T1349
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.loopFrames = nil                                          // T1255
+	c.loopMoveReported = make(map[string]bool)                  // T1498
 	c.curFuncObj = fn
 	c.curMethodObj = nil
 
@@ -505,6 +511,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.iterBorrowOrigin = make(map[string]string)                // T1349
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.loopFrames = nil                                          // T1255
+	c.loopMoveReported = make(map[string]bool)                  // T1498
 	c.curFuncObj = nil
 	c.curMethodObj = m
 

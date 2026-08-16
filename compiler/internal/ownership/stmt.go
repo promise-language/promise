@@ -1791,6 +1791,7 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
+	c.reportLoopCarriedMoves(s.Body, savedState)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 }
@@ -1847,6 +1848,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	}
 
 	c.checkBlock(s.Body)
+	c.reportLoopCarriedMoves(s.Body, savedState, s.Binding)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 }
@@ -1963,6 +1965,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
+	c.reportLoopCarriedMoves(s.Body, savedState, s.Binding, s.Index)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 
@@ -2099,6 +2102,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	} else if s.UpdateValue != nil {
 		c.checkExpr(s.UpdateValue)
 	}
+	c.reportLoopCarriedMoves(s.Body, savedState)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 }
@@ -2207,6 +2211,7 @@ func (c *Checker) checkInfiniteLoop(s *ast.InfiniteLoop) {
 	savedBorrows := c.borrows.Clone()
 	snap := c.enterLoopBody(s.Body)
 	c.checkBlock(s.Body)
+	c.reportLoopCarriedMoves(s.Body, savedState)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 }

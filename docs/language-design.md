@@ -1670,6 +1670,8 @@ The duplication is a copy the source does not spell out, which is why it is conf
 
 Invariant: **`move` on an argument ⇔ a named, reusable binding of yours is consumed there.**
 
+**A `move` inside a loop body must consume a value the body itself owns.** Moving a binding declared *outside* the loop is rejected — the back edge re-reaches the move site with the binding already moved, so the second iteration would consume a freed value. The loop is not a special case; it is the same "value is gone" rule the straight-line `f(move x); f(move x);` already trips, applied to the one control-flow edge the source does not spell out. Re-establish ownership inside the body: declare the value there (`for … { string v = build(); f(move v); }`), or reassign the binding after the move (`acc = grow(move acc, x);`). A move every path of which leaves the loop — `if done { f(move v); break; }`, or a body ending in `break`/`return`/`raise` — never reaches the back edge, so it stays legal.
+
 #### Receivers (`this`)
 
 A method's receiver uses the same markers, written on `this`:

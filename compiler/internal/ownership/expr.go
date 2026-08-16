@@ -513,6 +513,7 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
 		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
 	}
+	c.noteLoopMoveSite(ident.Name, ident.Pos(), v.Type())
 	c.state[ident.Name] = Moved
 }
 
@@ -624,6 +625,7 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
 		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
 	}
+	c.noteLoopMoveSite(ident.Name, ident.Pos(), v.Type())
 	c.state[ident.Name] = Moved
 }
 
@@ -3054,6 +3056,7 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 				}
 				continue
 			}
+			c.noteLoopMoveSite(name, e.Pos(), cv.Obj.Type())
 			c.state[name] = Moved
 		}
 	}

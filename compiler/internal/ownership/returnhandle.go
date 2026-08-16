@@ -47,9 +47,14 @@ type aliasHandleReuse struct {
 // the next iteration with no intervening fresh handle — and is flagged `reused`.
 // A top-level rebind (var-decl or plain `=`) dominates the back-edge and yields
 // a fresh handle each iteration, so it shields the candidate. (T1255)
+// It also carries the move sites recorded for each name moved inside this body
+// (including sites nested in an inner loop, which this body still re-executes
+// every iteration), which reportLoopCarriedMoves turns into a loop-carried-move
+// diagnostic at the back edge (T1498).
 type aliasLoopFrame struct {
 	candidates []*aliasHandleReuse
 	freshBound map[string]bool
+	moveSites  map[string][]loopMoveSite
 }
 
 // loopFreshBoundNames collects the names freshly rebound at the TOP LEVEL of a

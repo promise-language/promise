@@ -750,19 +750,21 @@ test_t0441_three_element_mixed_types() `test {
   assert(flag == true, "bool");
 }
 
-// T0399: re-push a droppable tuple variable in a loop. First iteration moves;
-// subsequent iterations hit the IdentExpr-with-drop-flag dup branch (line
-// 4520). Without `pushElemNeedsDup`'s tuple branch, the runtime CFG isn't
-// generated and the re-pushed slots alias the moved-out tuple's heap fields,
-// crashing with "invalid free" on Vector.drop. Sibling to Vector.filled.
+// T0399: repeatedly push a droppable tuple in a loop. Without
+// `maybeDupPushElement`'s tuple branch the pushed slots alias one tuple's
+// heap-string pointer and Vector.drop frees it three times ("invalid free").
+//
+// T1498: the hand-rolled `t := (…); while i < 3 { v.push(move t); }` form this
+// test used to spell out is now a compile error — a move of a binding declared
+// outside the loop re-reaches the move site on the back edge. `Vector.filled`
+// pushes in a loop from a BORROWED generic param, so it covers
+// `maybeDupPushElement`'s tuple clone (the always-dup, no-drop-flag path) but
+// NOT `pushElemNeedsDup`'s runtime drop-flag CFG, which the moved-local form was
+// the only cover for. That CFG is no longer reachable from a legal program —
+// tracked as a dead-path/coverage question in T1534.
 test_t0399_repush_owned_tuple_loop() `test {
-  v := (string, int)[]();
   t := ("hello".to_string(), 42);
-  int i = 0;
-  while i < 3 {
-    v.push(move t);
-    i = i + 1;
-  }
+  v := (string, int)[].filled(t, 3);
   assert(v.len == 3, "len");
   e0 := v[0];
   (s0, n0) := e0;

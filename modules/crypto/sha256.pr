@@ -1,0 +1,255 @@
+// crypto/sha256.pr — SHA-256 (FIPS 180-4 / RFC 6234), pure Promise, scalar u32.
+//
+// Tier-1 portable scalar implementation: the round function is defined on 32-bit
+// words (u32), and only the final digest assembly widens to u256. Modeled on
+// gzip/crc32.pr (typed u32 arithmetic, `as!` casts, constant table as a
+// _private helper). Hardware/LLVM SHA intrinsics are a separate task (T1572).
+//
+// Constant-time note (verified via `bin/promise emit-ir`): `u256 ==` lowers to a
+// single branchless `icmp eq i256` (no per-limb branch chain), so digest and
+// signature comparison can use `==` directly — no u256 constant-time comparator
+// is needed here. For raw byte-buffer compares, use constant_time_equal (T1565).
+// The 64 SHA-256 round constants K[0..63] (FIPS 180-4 §4.2.2): the first 32 bits
+// of the fractional parts of the cube roots of the first 64 primes.
+_sha256_k() u32[] {
+  u32[] k = u32[].filled(0u32, 64);
+  k[0] = 0x428a2f98u32;
+  k[1] = 0x71374491u32;
+  k[2] = 0xb5c0fbcfu32;
+  k[3] = 0xe9b5dba5u32;
+  k[4] = 0x3956c25bu32;
+  k[5] = 0x59f111f1u32;
+  k[6] = 0x923f82a4u32;
+  k[7] = 0xab1c5ed5u32;
+  k[8] = 0xd807aa98u32;
+  k[9] = 0x12835b01u32;
+  k[10] = 0x243185beu32;
+  k[11] = 0x550c7dc3u32;
+  k[12] = 0x72be5d74u32;
+  k[13] = 0x80deb1feu32;
+  k[14] = 0x9bdc06a7u32;
+  k[15] = 0xc19bf174u32;
+  k[16] = 0xe49b69c1u32;
+  k[17] = 0xefbe4786u32;
+  k[18] = 0x0fc19dc6u32;
+  k[19] = 0x240ca1ccu32;
+  k[20] = 0x2de92c6fu32;
+  k[21] = 0x4a7484aau32;
+  k[22] = 0x5cb0a9dcu32;
+  k[23] = 0x76f988dau32;
+  k[24] = 0x983e5152u32;
+  k[25] = 0xa831c66du32;
+  k[26] = 0xb00327c8u32;
+  k[27] = 0xbf597fc7u32;
+  k[28] = 0xc6e00bf3u32;
+  k[29] = 0xd5a79147u32;
+  k[30] = 0x06ca6351u32;
+  k[31] = 0x14292967u32;
+  k[32] = 0x27b70a85u32;
+  k[33] = 0x2e1b2138u32;
+  k[34] = 0x4d2c6dfcu32;
+  k[35] = 0x53380d13u32;
+  k[36] = 0x650a7354u32;
+  k[37] = 0x766a0abbu32;
+  k[38] = 0x81c2c92eu32;
+  k[39] = 0x92722c85u32;
+  k[40] = 0xa2bfe8a1u32;
+  k[41] = 0xa81a664bu32;
+  k[42] = 0xc24b8b70u32;
+  k[43] = 0xc76c51a3u32;
+  k[44] = 0xd192e819u32;
+  k[45] = 0xd6990624u32;
+  k[46] = 0xf40e3585u32;
+  k[47] = 0x106aa070u32;
+  k[48] = 0x19a4c116u32;
+  k[49] = 0x1e376c08u32;
+  k[50] = 0x2748774cu32;
+  k[51] = 0x34b0bcb5u32;
+  k[52] = 0x391c0cb3u32;
+  k[53] = 0x4ed8aa4au32;
+  k[54] = 0x5b9cca4fu32;
+  k[55] = 0x682e6ff3u32;
+  k[56] = 0x748f82eeu32;
+  k[57] = 0x78a5636fu32;
+  k[58] = 0x84c87814u32;
+  k[59] = 0x8cc70208u32;
+  k[60] = 0x90befffau32;
+  k[61] = 0xa4506cebu32;
+  k[62] = 0xbef9a3f7u32;
+  k[63] = 0xc67178f2u32;
+  return k;
+}
+
+// Rotate-right of a 32-bit word. n is always 2..25 in SHA-256, so neither shift
+// is by 0 or 32 (no undefined-behavior edge case).
+_rotr(u32 x, u32 n) u32 => (x >> n) | (x << (32u32 - n));
+
+type Sha256 `public `doc("Streaming SHA-256 context. Build with Sha256(), feed bytes with update(), then finalize() to a u256 digest. Prefer the one-shot sha256() when the whole input is in hand.") {
+  u32 h0;
+  u32 h1;
+  u32 h2;
+  u32 h3;
+  u32 h4;
+  u32 h5;
+  u32 h6;
+  u32 h7;
+  u8[] buffer; // partial (<64-byte) tail block awaiting a full 512-bit block
+  u64 total_len; // total bytes consumed (bit length = total_len << 3)
+  u32[] kt; // the 64 round constants (allocated once, reused per block)
+  u32[] w; // 64-word message schedule scratch (allocated once, reused per block)
+
+  new(~this) `public `doc("Creates a fresh SHA-256 context initialized to the FIPS 180-4 initial hash values.") {
+    this.h0 = 0x6a09e667u32;
+    this.h1 = 0xbb67ae85u32;
+    this.h2 = 0x3c6ef372u32;
+    this.h3 = 0xa54ff53au32;
+    this.h4 = 0x510e527fu32;
+    this.h5 = 0x9b05688cu32;
+    this.h6 = 0x1f83d9abu32;
+    this.h7 = 0x5be0cd19u32;
+    this.buffer = u8[]();
+    this.total_len = 0u64;
+    this.kt = _sha256_k();
+    this.w = u32[].filled(0u32, 64);
+  }
+
+  update(~this, u8[] data) `public `doc("Feeds more bytes into the digest. May be called repeatedly; the context stays usable for further update() / finalize() calls.") {
+    int i = 0;
+    while i < data.len {
+      this.buffer.push(data[i]);
+      i = i + 1;
+    }
+    this.total_len = this.total_len + (data.len as! u64);
+    this._drain();
+  }
+
+  finalize(~this) u256 `public `doc("Applies SHA-256 padding, processes the final block(s), and returns the 256-bit digest in big-endian order (H0 in the most significant 32 bits). Call once per context: finalize mutates the internal buffer with padding, so a second finalize() — or any update() after it — yields an incorrect digest. Discard the context afterward.") {
+    u64 bit_len = this.total_len << 3u64;
+    // Append the 0x80 terminator, then 0x00 until len ≡ 56 (mod 64).
+    this.buffer.push(0x80u8);
+    while this.buffer.len % 64 != 56 {
+      this.buffer.push(0x00u8);
+    }
+    // Append the 64-bit big-endian message bit length.
+    int s = 56;
+    while s >= 0 {
+      this.buffer.push(((bit_len >> (s as! u64)) & 0xffu64) as! u8);
+      s = s - 8;
+    }
+    // Process the remaining one or two blocks.
+    int off = 0;
+    while off < this.buffer.len {
+      this._process_block(off);
+      off = off + 64;
+    }
+    // Assemble the big-endian u256 digest: H0 occupies the top 32 bits.
+    u256 d = this.h0 as! u256;
+    d = (d << 32u256) | (this.h1 as! u256);
+    d = (d << 32u256) | (this.h2 as! u256);
+    d = (d << 32u256) | (this.h3 as! u256);
+    d = (d << 32u256) | (this.h4 as! u256);
+    d = (d << 32u256) | (this.h5 as! u256);
+    d = (d << 32u256) | (this.h6 as! u256);
+    d = (d << 32u256) | (this.h7 as! u256);
+    return d;
+  }
+
+  // Process every full 512-bit block currently buffered, keeping the trailing
+  // (<64-byte) remainder. Front-trimming a fresh tail vector keeps this O(n)
+  // rather than O(n²) (no per-block front-removal shuffle of the buffer).
+  _drain(~this) {
+    int n = this.buffer.len;
+    int full = n - (n % 64);
+    int off = 0;
+    while off < full {
+      this._process_block(off);
+      off = off + 64;
+    }
+    if full > 0 {
+      u8[] tail = u8[]();
+      int i = full;
+      while i < n {
+        tail.push(this.buffer[i]);
+        i = i + 1;
+      }
+      this.buffer = tail;
+    }
+  }
+
+  // One 64-round SHA-256 compression over the 64-byte block at `offset` in the
+  // buffer; folds the result back into h0..h7.
+  _process_block(~this, int offset) {
+    // Message schedule scratch is reused across blocks (all 64 words are fully
+    // overwritten below before being read, so no stale state carries over).
+    // Big-endian message schedule: first 16 words read directly from the block.
+    int i = 0;
+    while i < 16 {
+      int j = offset + i * 4;
+      this.w[i] = ((this.buffer[j] as! u32) << 24u32) | ((this.buffer[j + 1] as! u32) << 16u32) | ((this.buffer[j + 2] as! u32) << 8u32) | (this.buffer[j + 3] as! u32);
+      i = i + 1;
+    }
+    // Remaining 48 words derived via the small-sigma recurrence.
+    while i < 64 {
+      u32 x15 = this.w[i - 15];
+      u32 x2 = this.w[i - 2];
+      u32 s0 = _rotr(x15, 7u32) ^ _rotr(x15, 18u32) ^ (x15 >> 3u32);
+      u32 s1 = _rotr(x2, 17u32) ^ _rotr(x2, 19u32) ^ (x2 >> 10u32);
+      this.w[i] = this.w[i - 16] + s0 + this.w[i - 7] + s1;
+      i = i + 1;
+    }
+    u32 a = this.h0;
+    u32 b = this.h1;
+    u32 c = this.h2;
+    u32 d = this.h3;
+    u32 e = this.h4;
+    u32 f = this.h5;
+    u32 g = this.h6;
+    u32 h = this.h7;
+    int t = 0;
+    while t < 64 {
+      u32 big1 = _rotr(e, 6u32) ^ _rotr(e, 11u32) ^ _rotr(e, 25u32);
+      u32 ch = (e & f) ^ ((~e) & g);
+      u32 temp1 = h + big1 + ch + this.kt[t] + this.w[t];
+      u32 big0 = _rotr(a, 2u32) ^ _rotr(a, 13u32) ^ _rotr(a, 22u32);
+      u32 maj = (a & b) ^ (a & c) ^ (b & c);
+      u32 temp2 = big0 + maj;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temp1;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2;
+      t = t + 1;
+    }
+    this.h0 = this.h0 + a;
+    this.h1 = this.h1 + b;
+    this.h2 = this.h2 + c;
+    this.h3 = this.h3 + d;
+    this.h4 = this.h4 + e;
+    this.h5 = this.h5 + f;
+    this.h6 = this.h6 + g;
+    this.h7 = this.h7 + h;
+  }
+}
+
+sha256(u8[] data) u256 `public `doc("Computes the SHA-256 digest of a byte slice, returned as a big-endian u256 (H0 in the most significant 32 bits). Route hex output through to_hex().") {
+  Sha256 ctx = Sha256();
+  ctx.update(data);
+  return ctx.finalize();
+}
+
+to_hex(u256 digest) string `public `doc("Canonical lowercase 64-character hex of a SHA-256 digest. The ONLY sanctioned hex path: bare to_string(base: 16) drops leading zero bytes (~1 in 256 digests, yielding 63 chars); this always zero-pads to 64.") {
+  return digest.to_string(base: 16, width: 64, fill: '0');
+}
+
+to_bytes(u256 digest) u8[] `public `doc("The 32-byte big-endian byte string of a SHA-256 digest, for consumers that need raw bytes (HMAC inner-digest concatenation, SCRAM base64).") {
+  u8[] out = u8[]();
+  int i = 31;
+  while i >= 0 {
+    out.push(((digest >> ((i * 8) as! u256)) & 0xffu256) as! u8);
+    i = i - 1;
+  }
+  return out;
+}

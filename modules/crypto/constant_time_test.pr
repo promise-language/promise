@@ -1,0 +1,93 @@
+// Vectors for constant_time_equal: equality, first/last-byte differences,
+// length mismatch, and the empty-input edge case.
+ct_equal_true_test() `test {
+  u8[] a = u8[]();
+  a.push(1u8);
+  a.push(2u8);
+  a.push(3u8);
+  u8[] b = u8[]();
+  b.push(1u8);
+  b.push(2u8);
+  b.push(3u8);
+  assert(constant_time_equal(a, b), "equal buffers compare equal");
+}
+
+ct_differ_first_byte_test() `test {
+  u8[] a = u8[]();
+  a.push(9u8);
+  a.push(2u8);
+  a.push(3u8);
+  u8[] b = u8[]();
+  b.push(1u8);
+  b.push(2u8);
+  b.push(3u8);
+  assert(!constant_time_equal(a, b), "differ in first byte => not equal");
+}
+
+ct_differ_last_byte_test() `test {
+  u8[] a = u8[]();
+  a.push(1u8);
+  a.push(2u8);
+  a.push(3u8);
+  u8[] b = u8[]();
+  b.push(1u8);
+  b.push(2u8);
+  b.push(9u8);
+  assert(!constant_time_equal(a, b), "differ in last byte => not equal");
+}
+
+ct_length_mismatch_test() `test {
+  u8[] a = u8[]();
+  a.push(1u8);
+  a.push(2u8);
+  a.push(3u8);
+  u8[] b = u8[]();
+  b.push(1u8);
+  b.push(2u8);
+  assert(!constant_time_equal(a, b), "length mismatch => not equal");
+}
+
+ct_both_empty_test() `test {
+  assert(constant_time_equal(u8[](), u8[]()), "empty == empty");
+}
+
+// b longer than a, with a a prefix of b: the loop only scans a.len bytes (all
+// matching), so falseness rests entirely on the length seed. Guards the
+// length-timing-leak protection from the opposite direction of the test above.
+ct_b_longer_prefix_test() `test {
+  u8[] a = u8[]();
+  a.push(1u8);
+  a.push(2u8);
+  u8[] b = u8[]();
+  b.push(1u8);
+  b.push(2u8);
+  b.push(3u8);
+  assert(!constant_time_equal(a, b), "b longer with matching prefix => not equal");
+}
+
+ct_empty_vs_nonempty_test() `test {
+  u8[] b = u8[]();
+  b.push(1u8);
+  assert(!constant_time_equal(u8[](), b), "empty vs non-empty => not equal");
+  assert(!constant_time_equal(b, u8[]()), "non-empty vs empty => not equal");
+}
+
+ct_single_byte_equal_test() `test {
+  u8[] a = u8[]();
+  a.push(42u8);
+  u8[] b = u8[]();
+  b.push(42u8);
+  assert(constant_time_equal(a, b), "single equal byte => equal");
+}
+
+ct_differ_middle_byte_test() `test {
+  u8[] a = u8[]();
+  a.push(1u8);
+  a.push(5u8);
+  a.push(3u8);
+  u8[] b = u8[]();
+  b.push(1u8);
+  b.push(2u8);
+  b.push(3u8);
+  assert(!constant_time_equal(a, b), "same length, differ in middle byte => not equal");
+}

@@ -1,0 +1,18 @@
+// crypto/constant_time.pr — timing-attack-resistant byte-slice comparison.
+constant_time_equal(u8[] a, u8[] b) bool `public `doc("Compares two byte slices in data-independent time (no early return), returning true only if they are equal. Unequal-length inputs return false but are still fully scanned to avoid leaking length via timing. Use for verifying MACs, signatures, and secret tokens.") {
+  int n = a.len;
+  // Seed the accumulator with the length delta: nonzero => already unequal.
+  int result = a.len ^ b.len;
+  int i = 0;
+  while i < n {
+    // Read the aligned byte from b, or 0 when b is shorter — bounded, index-only
+    // branch (does not depend on secret byte values).
+    int bi = 0;
+    if i < b.len {
+      bi = b[i] as! int;
+    }
+    result = result | ((a[i] as! int) ^ bi);
+    i = i + 1;
+  }
+  return result == 0;
+}

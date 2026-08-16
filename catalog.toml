@@ -34,6 +34,9 @@ description = "TCP networking: TcpListener, TcpStream with reactor-based non-blo
 [modules.gzip]
 description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) compression and decompression in pure Promise: gzip_encode, gunzip, deflate, inflate, crc32, GzipWriter, GunzipReader, gunzip_from, DecompressError"
 
+[modules.crypto]
+description = "Cryptographic primitives (pure Promise): SHA-256, HMAC-SHA-256, PBKDF2, MD5, constant_time_equal, CSPRNG random_bytes"
+
 [modules.wasi_preview_1]
 url = "https://github.com/promise-language/wasi_preview_1.git"
 commit = "c6437c59c3649f545b6ad032556811d718d20412"

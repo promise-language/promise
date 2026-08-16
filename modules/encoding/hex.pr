@@ -1,0 +1,50 @@
+// encoding/hex.pr — base16 (hex), RFC 4648 §8.
+hex_encode(u8[] data) string `public `doc("Encodes bytes as a lowercase hexadecimal string. Each byte becomes exactly two characters, so the result is twice the input length; empty input encodes to the empty string.") {
+  string digits = "0123456789abcdef";
+  u8[] out = Vector[u8](capacity: data.len * 2);
+  int i = 0;
+  while i < data.len {
+    u8 b = data[i];
+    out.push(digits.byte_at((b >> 4u8) as! int));
+    out.push(digits.byte_at((b & 0x0Fu8) as! int));
+    i = i + 1;
+  }
+  return string.from_bytes(out);
+}
+
+hex_decode!(string text) u8[] `public `doc("Decodes a hexadecimal string into bytes. Accepts both upper- and lower-case digits. Raises EncodingError when the input has an odd number of characters or contains a non-hex character.") {
+  // text.len and byte_at() are byte-oriented, so a multi-byte UTF-8 character
+  // is seen as its individual bytes — all >= 0x80, so all rejected as non-hex.
+  if text.len % 2 != 0 {
+    raise EncodingError(message: "hex input has an odd number of characters", at_index: -1);
+  }
+  u8[] out = Vector[u8](capacity: text.len / 2);
+  int i = 0;
+  while i < text.len {
+    int hi = _hex_digit_value(text.byte_at(i));
+    if hi < 0 {
+      raise EncodingError(message: "invalid hex digit", at_index: i);
+    }
+    int lo = _hex_digit_value(text.byte_at(i + 1));
+    if lo < 0 {
+      raise EncodingError(message: "invalid hex digit", at_index: i + 1);
+    }
+    out.push((hi * 16 + lo) as! u8);
+    i = i + 2;
+  }
+  return out;
+}
+
+// Value of a single hex digit, or -1 if the byte is not a hex digit.
+_hex_digit_value(u8 c) int {
+  if c >= 0x30u8 && c <= 0x39u8 {
+    return (c - 0x30u8) as! int;
+  }
+  if c >= 0x61u8 && c <= 0x66u8 {
+    return (c - 0x61u8) as! int + 10;
+  }
+  if c >= 0x41u8 && c <= 0x46u8 {
+    return (c - 0x41u8) as! int + 10;
+  }
+  return -1;
+}

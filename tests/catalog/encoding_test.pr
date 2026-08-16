@@ -1,0 +1,63 @@
+use encoding;
+
+test_hex_encode_qualified() `test {
+  u8[] data = u8[]();
+  data.push(0xDEu8);
+  data.push(0xADu8);
+  data.push(0xBEu8);
+  data.push(0xEFu8);
+  assert(encoding.hex_encode(data) == "deadbeef", "hex_encode via catalog import");
+}
+
+test_hex_decode_qualified() `test {
+  u8[] bytes = encoding.hex_decode("00ff")?!;
+  assert(bytes.len == 2, "hex_decode length");
+  assert(bytes[0] == 0x00u8, "hex_decode first byte");
+  assert(bytes[1] == 0xFFu8, "hex_decode second byte");
+}
+
+test_hex_empty_qualified() `test {
+  u8[] data = u8[]();
+  assert(encoding.hex_encode(data) == "", "empty input encodes to the empty string");
+  u8[] back = encoding.hex_decode("")?!;
+  assert(back.len == 0, "empty string decodes to no bytes");
+}
+
+test_hex_roundtrip_qualified() `test {
+  // Round trip across the module boundary: exercises Vector[u8] and
+  // string.from_bytes in the module's own compilation unit.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 64 {
+    data.push((i * 4) as! u8);
+    i = i + 1;
+  }
+  string text = encoding.hex_encode(data);
+  assert(text.len == 128, "two characters per byte");
+  u8[] back = encoding.hex_decode(text)?!;
+  assert(back.len == data.len, "round trip preserves length");
+  int j = 0;
+  while j < back.len {
+    assert(back[j] == data[j], "round trip preserves byte " + j.to_string());
+    j = j + 1;
+  }
+}
+
+test_encoding_error_qualified() `test {
+  // EncodingError is `public, so a consumer can name and construct it. (Only
+  // downcasting a caught error to it is blocked — see T1538 below.)
+  encoding.EncodingError e = encoding.EncodingError(message: "boom", at_index: 7);
+  assert(e.message == "boom", "message field is readable cross-module");
+  assert(e.at_index == 7, "at_index field is readable cross-module");
+}
+
+test_hex_decode_error_qualified() `test {
+  // The caught binding is the base `error` type; the EncodingError-specific
+  // at_index field is covered in modules/encoding/hex_test.pr (downcasting to a
+  // module-qualified type is blocked by T1538).
+  u8[] _v = encoding.hex_decode("xyz")? e {
+    assert(e.message == "hex input has an odd number of characters", "odd-length input raises");
+    return;
+  };
+  assert(false, "hex_decode of invalid input must raise");
+}

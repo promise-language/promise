@@ -1,0 +1,192 @@
+_bytes(int[] xs) u8[] {
+  u8[] r = u8[]();
+  for v in xs {
+    r.push(v as! u8);
+  }
+  return r;
+}
+
+_assert_eq(u8[] got, u8[] want, string label) {
+  assert(got.len == want.len, label + " length");
+  int i = 0;
+  while i < want.len {
+    assert(got[i] == want[i], label + " byte " + i.to_string());
+    i = i + 1;
+  }
+}
+
+_try_hex_decode(string text) bool {
+  return _hex_decode_error_index(text) != -100;
+}
+
+// Returns the failure index reported by EncodingError, or -100 if the decode succeeded.
+_hex_decode_error_index(string text) int {
+  u8[] _v = hex_decode(text)? e {
+    EncodingError ee = e as! EncodingError;
+    return ee.at_index;
+  };
+  return -100;
+}
+
+hex_encode_empty_test() `test {
+  u8[] data = u8[]();
+  assert(hex_encode(data) == "", "empty input encodes to empty string");
+}
+
+hex_encode_deadbeef_test() `test {
+  int[] raw = int[]();
+  raw.push(0xDE);
+  raw.push(0xAD);
+  raw.push(0xBE);
+  raw.push(0xEF);
+  assert(hex_encode(_bytes(raw)) == "deadbeef", "deadbeef encodes lowercase");
+}
+
+hex_encode_nibbles_test() `test {
+  // Covers the high-nibble shift and the low-nibble mask independently.
+  int[] raw = int[]();
+  raw.push(0x00);
+  raw.push(0x0F);
+  raw.push(0x10);
+  raw.push(0xFF);
+  assert(hex_encode(_bytes(raw)) == "000f10ff", "nibble boundaries encode correctly");
+}
+
+hex_decode_empty_test() `test {
+  u8[] out = hex_decode("")?!;
+  assert(out.len == 0, "empty string decodes to 0 bytes");
+}
+
+hex_decode_deadbeef_test() `test {
+  int[] want = int[]();
+  want.push(0xDE);
+  want.push(0xAD);
+  want.push(0xBE);
+  want.push(0xEF);
+  _assert_eq(hex_decode("deadbeef")?!, _bytes(want), "deadbeef decode");
+}
+
+hex_decode_uppercase_test() `test {
+  int[] want = int[]();
+  want.push(0xDE);
+  want.push(0xAD);
+  want.push(0xBE);
+  want.push(0xEF);
+  _assert_eq(hex_decode("DEADBEEF")?!, _bytes(want), "uppercase decode");
+  _assert_eq(hex_decode("DeAdBeEf")?!, _bytes(want), "mixed-case decode");
+}
+
+hex_roundtrip_all_bytes_test() `test {
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 256 {
+    data.push(i as! u8);
+    i = i + 1;
+  }
+  string text = hex_encode(data);
+  assert(text.len == 512, "512 characters for 256 bytes");
+  _assert_eq(hex_decode(text)?!, data, "all-byte round trip");
+}
+
+hex_decode_odd_length_test() `test {
+  assert(_try_hex_decode("abc"), "odd-length input raises");
+  assert(_try_hex_decode("0"), "single character raises");
+}
+
+hex_decode_invalid_digit_test() `test {
+  assert(_try_hex_decode("zz"), "non-hex digits raise");
+  assert(_try_hex_decode("0g"), "invalid low nibble raises");
+  assert(_try_hex_decode("g0"), "invalid high nibble raises");
+  assert(_try_hex_decode("ab  cd"), "spaces are not hex digits");
+}
+
+hex_decode_error_index_test() `test {
+  assert(_hex_decode_error_index("abc") == -1, "odd length is not tied to a position");
+  assert(_hex_decode_error_index("0") == -1, "single character is an odd-length failure");
+  assert(_hex_decode_error_index("zz") == 0, "bad high nibble reports its own index");
+  assert(_hex_decode_error_index("0g") == 1, "bad low nibble reports the second index");
+  assert(_hex_decode_error_index("dead0z") == 5, "index points into the failing pair");
+  assert(_hex_decode_error_index("dead") == -100, "valid input does not raise");
+}
+
+hex_decode_digit_boundaries_test() `test {
+  // _hex_digit_value accepts exactly '0'-'9', 'a'-'f', 'A'-'F'. Check the byte
+  // immediately outside each range end — the classic off-by-one sites.
+  string[] outside = string[]();
+  outside.push("0/"); // 0x2F, one below '0'
+  outside.push("0:"); // 0x3A, one above '9'
+  outside.push("0@"); // 0x40, one below 'A'
+  outside.push("0G"); // 0x47, one above 'F'
+  outside.push("0`"); // 0x60, one below 'a'
+  outside.push("0g"); // 0x67, one above 'f'
+  for text in outside {
+    assert(_hex_decode_error_index(text) == 1, "rejects out-of-range byte in " + text);
+  }
+
+  // ...and the bytes at each range end are accepted.
+  u8[] digits = hex_decode("09")?!;
+  assert(digits[0] == 0x09u8, "'0' and '9' are accepted");
+  u8[] lower = hex_decode("af")?!;
+  assert(lower[0] == 0xAFu8, "'a' and 'f' are accepted");
+  u8[] upper = hex_decode("AF")?!;
+  assert(upper[0] == 0xAFu8, "'A' and 'F' are accepted");
+}
+
+hex_decode_multibyte_utf8_test() `test {
+  // hex.pr documents that scanning is byte-oriented, so a multi-byte UTF-8
+  // character is seen as its individual bytes — all >= 0x80, all non-hex.
+  assert("éé".len == 4, "'éé' is four bytes, so it clears the odd-length check");
+  assert(_hex_decode_error_index("éé") == 0, "multi-byte UTF-8 is rejected as non-hex");
+  assert(_hex_decode_error_index("deé") == 2, "rejected at the first byte of the character");
+}
+
+hex_decode_error_message_test() `test {
+  u8[] _v = hex_decode("zz")? e {
+    assert(e is EncodingError, "raises an EncodingError");
+    EncodingError ee = e as! EncodingError;
+    assert(ee.message == "invalid hex digit", "invalid-digit message");
+    assert(ee.at_index == 0, "invalid-digit error carries the position");
+    return;
+  };
+  assert(false, "hex_decode of an invalid digit must raise");
+}
+
+hex_decode_error_after_partial_output_test() `test {
+  // The output vector already holds 16 decoded bytes when the raise fires, so
+  // scope cleanup has to free it on the error path (leak detection enforces it).
+  assert(_hex_decode_error_index("00112233445566778899aabbccddeeffzz") == 32,
+  "reports the bad digit after a long valid prefix");
+}
+
+hex_encode_charset_test() `test {
+  // Every emitted character must come from the lowercase digit table.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 256 {
+    data.push(i as! u8);
+    i = i + 1;
+  }
+  u8[] chars = hex_encode(data).bytes();
+  int j = 0;
+  while j < chars.len {
+    u8 c = chars[j];
+    bool is_digit = (c >= 0x30u8 && c <= 0x39u8) || (c >= 0x61u8 && c <= 0x66u8);
+    assert(is_digit, "character " + j.to_string() + " is a lowercase hex digit");
+    j = j + 1;
+  }
+}
+
+hex_encode_normalizes_case_test() `test {
+  u8[] bytes = hex_decode("DeAdBeEf")?!;
+  assert(hex_encode(bytes) == "deadbeef", "decode then encode normalizes to lowercase");
+}
+
+hex_encode_borrows_input_test() `test {
+  int[] raw = int[]();
+  raw.push(0x01);
+  raw.push(0x02);
+  u8[] data = _bytes(raw);
+  assert(hex_encode(data) == "0102", "first encode");
+  assert(hex_encode(data) == "0102", "input is borrowed, not consumed");
+  assert(data.len == 2, "input vector is left unchanged");
+}

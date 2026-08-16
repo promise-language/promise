@@ -37,6 +37,9 @@ description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) compression and decompress
 [modules.crypto]
 description = "Cryptographic primitives (pure Promise): SHA-256, HMAC-SHA-256, PBKDF2, MD5, constant_time_equal, CSPRNG random_bytes"
 
+[modules.encoding]
+description = "Binary-to-text encodings (RFC 4648): hex_encode, hex_decode, EncodingError; base64/base64url (planned)"
+
 [modules.wasi_preview_1]
 url = "https://github.com/promise-language/wasi_preview_1.git"
 commit = "c6437c59c3649f545b6ad032556811d718d20412"

@@ -31,7 +31,7 @@ The full methodology is described in the [Bounded-Autonomy Software Engineering 
 
 **Self-contained toolchain.** The compiler is a single binary that bundles the standard library, catalog modules, and runtime. [Install it](docs/installing.md) — a small (~15MB) download that then sets up the LLVM 22 toolchain it builds with (a one-time fetch, cached under `~/.promise`) — then keep it current with `promise update`. Promise brings its own linker (`lld`), not the system one — nothing to install but Promise itself.* (* macOS also needs the Xcode Command Line Tools for now; a bundled SDK stub is on the way.) Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
-**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `http`, `gzip`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `toml`, `yaml`.
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `http`, `gzip`, `encoding`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `toml`, `yaml`.
 
 ## Example
 
@@ -172,6 +172,7 @@ promise/
 │   ├── time/                    # Date/time, calendar, ISO-8601
 │   ├── http/                    # HTTP client
 │   ├── gzip/                    # gzip/DEFLATE compression
+│   ├── encoding/                # Binary-to-text encodings (hex, base64)
 │   └── (ai, auth, cloud, markdown, mcp, msgpack, sandbox, schema, term, toml, yaml — planned, design only)
 ├── tests/                       # Integration and e2e tests
 ├── examples/                    # Runnable examples

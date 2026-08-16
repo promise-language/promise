@@ -990,19 +990,29 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
 		c.dupHeapUserFieldAccess = false
+		elemExprType := c.info.Types[elemExpr]
+		if c.typeSubst != nil && elemExprType != nil {
+			elemExprType = types.Substitute(elemExprType, c.typeSubst)
+		}
+		// T1558: coerce every element to the vector's element type before the
+		// store — matching the Vector.push path (expr_container.go). A value-type
+		// element boxes into a {vtable, box} structural view; a subtype element
+		// gets its view-specific vtable. Without this, a value-type element's wide
+		// value struct is stored straight into the {i8*, i8*} slot → codegen panic
+		// ("store operands are not compatible"), a check/build disagreement.
+		// No-op for an identical element type or an Optional elem (extractNamed
+		// doesn't peel Optional — the coerceToOptionalElem below handles the
+		// under-optional box). The heap box coerceToView registers is claimed
+		// below via claimHeapTemp(storeVal) so the vector owns it exactly once.
+		storeVal := c.coerceToView(val, elemExprType, elem)
 		// T1297: wrap a bare non-optional element into the Optional element
 		// struct when the vector element type is Optional but the element expr
-		// is not (`int?[] = [1, none, 3]`, `int[]?[] = [[1,2]]`). The claim
-		// logic below still operates on the raw `val` (ownership tracking is by
-		// raw-value identity), mirroring the T0658 push path exactly.
-		storeVal := val
+		// is not (`int?[] = [1, none, 3]`, `int[]?[] = [[1,2]]`).
 		if elemIsOpt {
-			argExprType := c.info.Types[elemExpr]
-			if c.typeSubst != nil && argExprType != nil {
-				argExprType = types.Substitute(argExprType, c.typeSubst)
-			}
-			if argExprType != types.TypNone && !types.Identical(argExprType, elem) {
-				storeVal = c.coerceToOptionalElem(val, argExprType, elem)
+			// T1298: box a structural-view element into the Optional element view
+			// before wrapping (no-op for a non-structural or already-matching elem).
+			storeVal = c.coerceToOptionalElem(storeVal, elemExprType, elem)
+			if elemExprType != types.TypNone && !types.Identical(elemExprType, elem) {
 				if st, ok := elemLLVM.(*irtypes.StructType); ok {
 					storeVal = c.wrapOptional(storeVal, st)
 				}
@@ -1028,6 +1038,7 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 					c.vecElemNeedsUserTypeDrop(elem) ||
 					c.tupleNeedsDrop(elem) ||
 					c.vecElemNeedsOptionalDrop(elem) ||
+					c.vecElemNeedsStructuralDrop(elem) || // T1558: structural-view element moved into vector
 					isSignatureElem(elem) { // T1237: closure element moved into vector
 					c.clearDropFlag(ident.Name)
 				}
@@ -1040,7 +1051,8 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 					c.vecElemNeedsEnumDrop(elem) ||
 					c.vecElemNeedsUserTypeDrop(elem) ||
 					c.tupleNeedsDrop(elem) ||
-					c.vecElemNeedsOptionalDrop(elem) {
+					c.vecElemNeedsOptionalDrop(elem) ||
+					c.vecElemNeedsStructuralDrop(elem) { // T1558: `x as Tagged` cast subject moved into vector
 					if ident := c.castSubjectMovableIdent(elemExpr); ident != nil {
 						// T0849: conditional `as` form drops iff the cast failed.
 						c.consumeCastSubjectDropFlag(elemExpr, ident.Name)
@@ -1055,7 +1067,13 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 			// Vector.drop does NOT free elements, so the source must keep ownership.
 			c.neutralizeForceUnwrapElem(elemExpr)
 			// B0233: Claim heap temp — element ownership transferred to vector literal.
-			c.claimHeapTemp(val)
+			// T1558: claim on the coerced storeVal (not the raw val): for a value-type
+			// element, coerceToView above heap-boxed it into a {vtable, box} view and
+			// registered the box as a heap temp — its owner is the box pointer in
+			// storeVal's field 1, which the raw value struct does not carry. For every
+			// other element type storeVal aliases val's field-1 pointer, so the runtime
+			// claim matches identically.
+			c.claimHeapTemp(storeVal)
 			// T0366: Also claim string/vector/channel stmt-temps. trackVectorTempWithElemType
 			// (called by CallExpr / ?! / ?^ / ! / ? e {} for Vector results) registers in
 			// stmtTemps, not heapTemps — claimHeapTemp doesn't see them. Without claiming,

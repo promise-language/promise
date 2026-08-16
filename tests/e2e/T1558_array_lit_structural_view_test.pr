@@ -1,0 +1,142 @@
+// T1558: genArrayLit must view-coerce non-optional elements.
+//
+// `genArrayLit` used to coerce an element to the vector's element type only when
+// that type was Optional (the T1297 branch); every other element type stored the
+// raw value straight into the slot, disagreeing with `Vector.push` which always
+// coerces. Two failures resulted:
+//
+//   Symptom 1 — codegen panic: a value-type element in a `structural[]` literal
+//   is a wide value struct that doesn't fit the {i8*, i8*} view slot, so
+//   `NewStore` panicked ("store operands are not compatible"). `check` said OK
+//   but `build`/`run` crashed — a check/build disagreement of the T1527/T1550
+//   class. The element needed `boxValueTypeForStructuralView`.
+//
+//   Symptom 2 — double free: when the element was already a {vtable, box} view,
+//   the store type-checked but the box ended up owned by both the source local
+//   and the vector's element drop. `walkEnabled` never cleared the source's drop
+//   flag for structural-view element types.
+//
+// Fix: coerce every element via `coerceToView` before the store, and extend the
+// `walkEnabled` drop-flag gate to `vecElemNeedsStructuralDrop`. Mirrors the push
+// path (T0658) and the tuple/map element ownership handling (T0610/B0242/B0280).
+type Tagged `structural {
+  get tag int `abstract;
+}
+
+type Seat {
+  int row `value;
+  get tag int => this.row * 2;
+}
+
+// Heap (non-value) implementer of the same interface, for mixed literals.
+type Booth {
+  int seat;
+  get tag int => this.seat + 100;
+}
+
+// Helpers returning by value type, by structural view, and by heap type — used to
+// exercise the element source being a call TEMP (not an inline ctor or an ident).
+make_seat(int r) Seat => Seat(row: r);
+make_tagged(int r) Tagged => Seat(row: r);
+make_booth(int s) Booth => Booth(seat: s);
+
+// Symptom 1: value-type elements constructed inline. Panicked in codegen before.
+value_type_elements() `test {
+  Tagged[] v = [Seat(row: 1), Seat(row: 2), Seat(row: 3)];
+  assert(v.len == 3, "len");
+  assert(v[0].tag == 2, "e0");
+  assert(v[1].tag == 4, "e1");
+  assert(v[2].tag == 6, "e2");
+}
+
+// Symptom 2: element already a boxed view aliasing a source local. Double-freed
+// at scope exit before the fix (source drop + vector element drop).
+preboxed_view_element() `test {
+  s := Seat(row: 1);
+  Tagged t = s;
+  Tagged[] v = [t];
+  assert(v.len == 1, "len");
+  assert(v[0].tag == 2, "element");
+}
+
+// Multiple pre-boxed view idents moved into a literal — each source drop flag
+// must be cleared so the vector is the sole owner.
+multiple_preboxed_views() `test {
+  Tagged a = Seat(row: 5);
+  Tagged b = Seat(row: 6);
+  Tagged[] v = [a, b];
+  assert(v[0].tag == 10, "a");
+  assert(v[1].tag == 12, "b");
+}
+
+// Mixed value-type and heap-type implementers in one literal. Each boxes/vtable-
+// swaps to the same {i8*, i8*} slot via coerceToView.
+mixed_implementers() `test {
+  Tagged[] v = [Seat(row: 4), Booth(seat: 7)];
+  assert(v[0].tag == 8, "seat");
+  assert(v[1].tag == 107, "booth");
+}
+
+// Iterating a structural-view vector built from a literal exercises the element
+// read path (no aliasing double-free) alongside the drop.
+sum_over_literal() `test {
+  Tagged[] v = [Seat(row: 1), Seat(row: 2), Seat(row: 3)];
+  total := 0;
+  for t in v {
+    total = total + t.tag;
+  }
+  assert(total == 12, "sum");
+}
+
+// Optional element type still works (the pre-existing T1297 branch), now layered
+// after coerceToView: a value-type under an optional structural element.
+optional_structural_elements() `test {
+  Tagged?[] v = [Seat(row: 3), none, Seat(row: 4)];
+  assert(v.len == 3, "len");
+  assert(v[0]!.tag == 6, "e0");
+  middle_is_none := true;
+  if slot := v[1] {
+    middle_is_none = false;
+  }
+  assert(middle_is_none, "none");
+  assert(v[2]!.tag == 8, "e2");
+}
+
+// Element source is a function-call TEMP returning a value type — coerceToView
+// boxes the returned Seat value, and claimHeapTemp(storeVal) must claim the box
+// (not the raw value) so the vector owns it exactly once (no leak / double-free).
+call_result_value_elements() `test {
+  Tagged[] v = [make_seat(5), make_seat(6)];
+  assert(v.len == 2, "len");
+  assert(v[0].tag == 10, "c0");
+  assert(v[1].tag == 12, "c1");
+}
+
+// Element source is a call returning an already-boxed structural view — the
+// fromNamed==toNamed no-op branch of coerceToView, then the view box (a call temp)
+// is claimed by the vector.
+call_result_view_element() `test {
+  Tagged[] v = [make_tagged(7), make_tagged(8)];
+  assert(v[0].tag == 14, "v0");
+  assert(v[1].tag == 16, "v1");
+}
+
+// Element source is a call returning a heap concrete type — vtable-swap coercion,
+// box owned solely by the vector's structural element drop.
+call_result_heap_element() `test {
+  Tagged[] v = [make_booth(2), make_booth(3)];
+  assert(v[0].tag == 102, "h0");
+  assert(v[1].tag == 103, "h1");
+}
+
+// The structural-view vector literal ESCAPES its defining frame (returned from a
+// helper): boxValueTypeForStructuralView heap-allocates the box, so reads through
+// the returned vector are valid and each box is freed once at the caller's drop.
+build_view_vector() Tagged[] => [Seat(row: 2), Seat(row: 5)];
+
+escaped_literal() `test {
+  v := build_view_vector();
+  assert(v.len == 2, "len");
+  assert(v[0].tag == 4, "e0");
+  assert(v[1].tag == 10, "e1");
+}

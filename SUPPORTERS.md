@@ -1,4 +1,4 @@
-# Sponsors
+# Supporters
 
 Promise is written by AI agents directed by one maintainer, and the project's
 largest cost is inference. Sponsorship converts directly into agent time — more

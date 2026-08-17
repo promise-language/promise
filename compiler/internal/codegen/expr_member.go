@@ -447,9 +447,18 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, e.Field)
 	if ownerName != named.Obj().Name() {
-		// Getter inherited from parent. Resolve to mono name if parent is generic.
-		monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
-		mangledName = mangleMethodName(monoOwner, e.Field, false)
+		// Getter inherited from parent. A default getter from a structural
+		// interface is synthesized per-concrete (T1559), mirroring genMethodCall:
+		// use the concrete type's name, not the (possibly generic) interface's.
+		if structParent := c.findStructuralOwnerBy(named, e.Field, (*types.Named).LookupGetter); structParent != nil {
+			concreteName := c.resolveTypeName(targetType)
+			c.ensureDefaultMethodsSynthesized(named, structParent)
+			mangledName = mangleMethodName(concreteName, e.Field, false)
+		} else {
+			// Non-structural parent: resolve to mono name if parent is generic.
+			monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
+			mangledName = mangleMethodName(monoOwner, e.Field, false)
+		}
 	} else {
 		mangledName = mangleMethodName(c.resolveTypeName(targetType), e.Field, false)
 	}
@@ -591,6 +600,18 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 	}
 	if c.selfSubst != nil && retType != nil {
 		retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	// T1559: a default getter inherited from a *generic* structural interface has
+	// return type `T`. When the concrete implementor is a plain Named (not a
+	// generic Instance), the interface's TypeParam→concrete mapping lives in the
+	// implementor's parent ref, which none of the ambient substitutions above
+	// carry — so retType can stay an unresolved TypeParam and an owned heap result
+	// (e.g. a returned string) would never be registered for drop, leaking it.
+	// Sema already resolved this member expression to its concrete type; use it.
+	if _, isTP := retType.(*types.TypeParam); isTP {
+		if semaType := c.info.Types[e]; semaType != nil {
+			retType = semaType
+		}
 	}
 	c.trackGetterResultByType(e, retType, result)
 }

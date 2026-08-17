@@ -1,0 +1,216 @@
+// T1559: a concrete type that inherits a default getter/setter from a *generic*
+// `structural` interface type-checked clean but panicked in codegen
+// ("undeclared getter Holder[int].doubled_item") because the call site resolved
+// the getter's owner to the interface instance instead of the concrete implementor.
+// Iterator[T]'s 20 default combinators are all methods, so the stdlib never
+// exercised the getter/setter path.
+type Holder[T] `structural {
+  get item T `abstract;
+  get doubled_item T => this.item;
+}
+
+type IntBox is Holder[int] {
+  int raw;
+  get item int => this.raw;
+}
+
+// A default setter is only reachable through codegen when a matching getter also
+// resolves, so the setter case uses a get+set `proxy` property pair.
+type Proxy[T] `structural {
+  get raw T `abstract;
+  set raw(T v) `abstract;
+  get proxy T => this.raw;
+  set proxy(T v) {
+    this.raw = v;
+  }
+}
+
+type IntCell is Proxy[int] {
+  int stored;
+  get raw int => this.stored;
+  set raw(int v) {
+    this.stored = v;
+  }
+}
+
+default_getter_from_generic_structural() `test {
+  b := IntBox(raw: 3);
+  assert(b.doubled_item == 3, "default getter inherited from generic structural interface");
+}
+
+default_setter_from_generic_structural() `test {
+  c := IntCell(stored: 0);
+  c.proxy = 9;
+  assert(c.proxy == 9, "default setter inherited from generic structural interface");
+  assert(c.raw == 9, "default setter wrote through to the concrete field");
+}
+
+// --- Regression guard (found during T1559 coverage) ---
+// A getter that is *concretely* implemented on a non-structural intermediate
+// class, while a structural ancestor only *declares* it abstractly, must dispatch
+// to the intermediate's implementation — NOT be treated as a per-concrete
+// synthesized default. The first cut of the T1559 fix routed such a getter to the
+// structural ancestor and panicked ("undeclared getter Leaf.item"); the same shape
+// with a plain method had been broken pre-existingly. Both must resolve normally.
+type OverrideBase `structural {
+  get item int `abstract;
+  compute(this) int `abstract;
+}
+type OverrideMid is OverrideBase {
+  int raw;
+  get item int => this.raw;
+  compute(this) int {
+    return this.raw * 10;
+  }
+}
+type OverrideLeaf is OverrideMid {
+}
+
+getter_overridden_on_intermediate_class() `test {
+  x := OverrideLeaf(raw: 5);
+  assert(x.item == 5, "getter concretely implemented on non-structural intermediate dispatches to it");
+  assert(x.compute() == 50, "method concretely implemented on non-structural intermediate dispatches to it");
+}
+
+// Setter symmetry of the regression guard: a setter concretely implemented on a
+// non-structural intermediate, abstract on a structural ancestor, must dispatch to
+// the intermediate — not be routed through per-concrete synthesis under the leaf.
+type SetBase `structural {
+  get slot int `abstract;
+  set slot(int v) `abstract;
+}
+type SetMid is SetBase {
+  int stored;
+  get slot int => this.stored;
+  set slot(int v) {
+    this.stored = v;
+  }
+}
+type SetLeaf is SetMid {
+}
+
+setter_overridden_on_intermediate_class() `test {
+  x := SetLeaf(stored: 0);
+  x.slot = 8;
+  assert(x.slot == 8, "setter concretely implemented on non-structural intermediate dispatches to it");
+}
+
+// A default getter living on a structural *grandparent*, reached through a second
+// structural interface, must still synthesize under the concrete implementor
+// (exercises findStructuralOwnerBy's recursion / transitive-parent subst).
+type ChainBase[T] `structural {
+  get item T `abstract;
+  get echoed T => this.item;
+}
+type ChainDerived[T] is ChainBase[T] `structural {
+  get extra T `abstract;
+}
+type ChainBox is ChainDerived[int] {
+  int raw;
+  get item int => this.raw;
+  get extra int => this.raw;
+}
+
+default_getter_from_structural_grandparent() `test {
+  b := ChainBox(raw: 7);
+  assert(b.echoed == 7, "default getter inherited through a structural interface chain");
+}
+
+// A generic structural interface with *two* type parameters: both default getters
+// must substitute their respective params against the concrete implementor.
+type Pair[K, V] `structural {
+  get key K `abstract;
+  get val V `abstract;
+  get first K => this.key;
+  get second V => this.val;
+}
+type Entry is Pair[int, string] {
+  int k;
+  string v;
+  get key int => this.k;
+  get val string => this.v;
+}
+
+default_getter_from_multi_param_generic_structural() `test {
+  e := Entry(k: 9, v: "hi");
+  assert(e.first == 9, "first default getter substitutes K=int");
+  assert(e.second == "hi", "second default getter substitutes V=string");
+}
+
+// Symmetry with the non-generic default getter boundary case: a non-generic
+// structural default *setter* must also flow through per-concrete synthesis.
+type NonGenProxy `structural {
+  get raw int `abstract;
+  set raw(int v) `abstract;
+  get proxy int => this.raw;
+  set proxy(int v) {
+    this.raw = v;
+  }
+}
+type NonGenCell is NonGenProxy {
+  int stored;
+  get raw int => this.stored;
+  set raw(int v) {
+    this.stored = v;
+  }
+}
+
+default_setter_from_nongeneric_structural() `test {
+  c := NonGenCell(stored: 0);
+  c.proxy = 4;
+  assert(c.proxy == 4, "non-generic structural default setter reads back written value");
+  assert(c.raw == 4, "non-generic structural default setter wrote through to the concrete field");
+}
+
+// A default getter/setter reached through a *non-structural* intermediate that
+// merely inherits it (does not override) must still synthesize under the concrete
+// leaf implementor. This is the only shape that drives findStructuralOwnerBy's
+// recursion into a non-structural parent: the grandparent case recurses through a
+// structural interface, and the intermediate-override case stops at the override.
+type IntBase[T] `structural {
+  get item T `abstract;
+  set item(T v) `abstract;
+  get echoed T => this.item;
+  set echoed(T v) {
+    this.item = v;
+  }
+}
+type IntMid is IntBase[int] {
+  int raw;
+  get item int => this.raw;
+  set item(int v) {
+    this.raw = v;
+  }
+}
+type IntLeaf is IntMid {
+}
+
+default_getter_setter_through_nonstructural_intermediate() `test {
+  x := IntLeaf(raw: 9);
+  assert(x.echoed == 9, "default getter reached through a non-structural intermediate");
+  x.echoed = 12;
+  assert(x.echoed == 12, "default setter reached through a non-structural intermediate reads back");
+  assert(x.item == 12, "default setter wrote through to the concrete field");
+}
+
+// A concrete type inheriting two structural interfaces where the FIRST parent in
+// declaration order does not declare the default member: the owner search must skip
+// the member-less parent and find the default on the second one.
+type HasTag `structural {
+  get tag int `abstract;
+}
+type HasEcho[T] `structural {
+  get item T `abstract;
+  get echoed T => this.item;
+}
+type MultiBox is HasTag, HasEcho[int] {
+  int raw;
+  get item int => this.raw;
+  get tag int => 7;
+}
+
+default_getter_from_second_structural_parent() `test {
+  b := MultiBox(raw: 9);
+  assert(b.echoed == 9, "default getter found on the second of two structural parents");
+  assert(b.tag == 7, "abstract getter on the first structural parent still dispatches");
+}

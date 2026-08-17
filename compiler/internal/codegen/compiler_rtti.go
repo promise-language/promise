@@ -440,24 +440,53 @@ func hasOwnMethod(named *types.Named, name string) bool {
 // findStructuralOwner returns the structural parent type that owns a method
 // inherited by `named`, or nil if the method comes from a non-structural parent.
 func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *types.Named {
+	return c.findStructuralOwnerBy(named, methodName, (*types.Named).LookupMethod)
+}
+
+// findStructuralOwnerBy is the kind-parameterized form of findStructuralOwner.
+// getters/setters are skipped by LookupMethod (T0637), so getter/setter dispatch
+// must pass LookupGetter/LookupSetter to locate the structural parent that owns
+// an inherited default getter/setter (T1559).
+func (c *Compiler) findStructuralOwnerBy(named *types.Named, methodName string, lookup func(*types.Named, string) *types.Method) *types.Named {
 	for _, pr := range named.Parents() {
-		if m := pr.Named.LookupMethod(methodName); m != nil {
-			if pr.Named.IsStructural() {
+		m := lookup(pr.Named, methodName)
+		if m == nil {
+			continue
+		}
+		if pr.Named.IsStructural() {
+			// A structural parent is a per-concrete *synthesis* owner only when it
+			// supplies a concrete default body. An abstract-only declaration on a
+			// structural interface is implemented by a concrete descendant and is
+			// dispatched normally — treating it as a synthesized default would look
+			// up a function that was never emitted (T1559 regression).
+			if !m.IsAbstract() {
 				return pr.Named
 			}
-			// T1551: a non-structural parent that DECLARES the method itself owns
-			// the implementation — dispatch targets <parent>.<method>, not a
-			// per-concrete synthesis of a structural grandparent's default. An
-			// abstract declaration is not an implementation, so keep recursing
-			// through abstract classes.
-			if hasOwnMethod(pr.Named, methodName) && !m.IsAbstract() {
-				return nil
-			}
-			// Recurse into parent's parents
-			if found := c.findStructuralOwner(pr.Named, methodName); found != nil {
-				return found
-			}
+			continue
+		}
+		// T1551: a non-structural parent that concretely DECLARES the member itself
+		// owns the implementation — dispatch targets <parent>.<member>, not a
+		// per-concrete synthesis of a structural grandparent's default. An abstract
+		// declaration is not an implementation, so keep recursing through abstract
+		// classes. Only recurse when the parent merely inherits the member.
+		if ownsConcreteMember(pr.Named, m) {
+			continue
+		}
+		if found := c.findStructuralOwnerBy(pr.Named, methodName, lookup); found != nil {
+			return found
 		}
 	}
 	return nil
+}
+
+// ownsConcreteMember reports whether `named` declares its own concrete (non-abstract)
+// method of the same kind (regular/getter/setter) and name as `m`.
+func ownsConcreteMember(named *types.Named, m *types.Method) bool {
+	for _, own := range named.Methods() {
+		if own.Name() == m.Name() && own.IsGetter() == m.IsGetter() &&
+			own.IsSetter() == m.IsSetter() && !own.IsAbstract() {
+			return true
+		}
+	}
+	return false
 }

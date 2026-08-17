@@ -305,9 +305,17 @@ export async function init(wasmPath) {
     _refStore(console);            // handle 3 = console
   }
 
-  // Call WASM _initialize if exported
+  // Call WASM _initialize if exported. A normal main() return is signaled by
+  // pal_exit(0), which lowers to the promise_env.exit import — the only way
+  // to abort a synchronous WASM call from a JS import is to throw, so exit()
+  // always throws to unwind the call stack. That's expected on success, not
+  // a crash, so swallow exactly this sentinel and let anything else propagate.
   if (wasm.exports._initialize) {
-    wasm.exports._initialize();
+    try {
+      wasm.exports._initialize();
+    } catch (e) {
+      if (!(e && e.message === "promise_env.exit")) throw e;
+    }
   }
 
   return wasm.exports;

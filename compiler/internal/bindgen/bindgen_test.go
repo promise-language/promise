@@ -3003,6 +3003,22 @@ func TestGenerateJSGlueInstantiation(t *testing.T) {
 	assertContains(t, out, "_initialize")
 }
 
+// TestGenerateJSGlueInstantiationCatchesExitUnwind verifies init() wraps
+// _initialize() in a try/catch that swallows exactly the promise_env.exit
+// unwind sentinel. A successful main() return is signaled by pal_exit(0)
+// throwing to unwind the WASM call stack (#3) — without this catch, every
+// successful run looks like a crash to the calling JS code.
+func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "try {")
+	assertContains(t, out, "wasm.exports._initialize();")
+	assertContains(t, out, `e.message === "promise_env.exit"`)
+}
+
 func TestWebIdlEndToEnd(t *testing.T) {
 	// Full pipeline: parse WebIDL → IR → Promise code + JS glue
 	src := `

@@ -5087,22 +5087,66 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) er
 }
 
 // emitWebBootstrapJS writes a minimal JavaScript loader alongside the .wasm
-// output for wasm32-web targets. The loader handles WebAssembly.instantiateStreaming
-// and provides the basic runtime entry point. Module-specific JS glue (from
-// promise bind webidl) should be imported separately.
+// output for wasm32-web targets. The loader handles WebAssembly.instantiateStreaming,
+// wires up the base PAL runtime imports every wasm32-web binary needs
+// (promise_env.write/exit/monotonic_nanos — mirroring the browser-equivalent
+// behavior of the Node test harness's wasm_web_harness.js), and provides the
+// basic runtime entry point. A caller-supplied importObject (e.g. the
+// WebIDL-bindgen-generated glue from `promise bind webidl`) is deep-merged on
+// top of these defaults so both halves are available together; the caller's
+// own promise_env entries win on conflict.
 func emitWebBootstrapJS(wasmFile string) {
 	jsFile := strings.TrimSuffix(wasmFile, ".wasm") + ".js"
 	wasmBase := filepath.Base(wasmFile)
 
 	content := fmt.Sprintf(`// Auto-generated bootstrap loader for %s
-// Import module-specific glue files separately if using WebIDL bindings.
+// Import module-specific glue files separately if using WebIDL bindings; any
+// promise_env entries on the importObject passed to init() are merged on top
+// of (and override) the base PAL runtime glue below.
+
+const _decoder = new TextDecoder("utf-8");
 
 export async function init(importObject = {}) {
+  let instance;
+
+  // Base PAL runtime imports every wasm32-web binary needs, regardless of
+  // whether it uses WebIDL bindings.
+  const basePromiseEnv = {
+    write(fd, ptr, len) {
+      const lenN = Number(len);
+      if (lenN > 0) {
+        const mem = new Uint8Array(instance.exports.memory.buffer, Number(ptr), lenN);
+        (Number(fd) === 2 ? console.error : console.log)(_decoder.decode(mem));
+      }
+      return BigInt(lenN);
+    },
+    exit(code) {
+      // A normal main() return is signaled by pal_exit(0), which lowers to
+      // this import — the only way to abort a synchronous WASM call is to
+      // throw, so this always throws to unwind. init() below catches exactly
+      // this sentinel; a successful run is not an error.
+      throw new Error("promise_env.exit");
+    },
+    monotonic_nanos() {
+      return BigInt(Math.round(performance.now() * 1e6));
+    },
+  };
+
+  const mergedImportObject = {
+    ...importObject,
+    promise_env: { ...basePromiseEnv, ...(importObject.promise_env || {}) },
+  };
+
   const response = await fetch("%s");
-  const { instance } = await WebAssembly.instantiateStreaming(response, importObject);
+  const result = await WebAssembly.instantiateStreaming(response, mergedImportObject);
+  instance = result.instance;
 
   if (instance.exports._initialize) {
-    instance.exports._initialize();
+    try {
+      instance.exports._initialize();
+    } catch (e) {
+      if (!(e && e.message === "promise_env.exit")) throw e;
+    }
   }
 
   return instance.exports;

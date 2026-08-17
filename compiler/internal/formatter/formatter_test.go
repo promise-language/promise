@@ -1090,6 +1090,23 @@ func TestFormat(t *testing.T) {
 			input:    "t := go worker();\n",
 			expected: "t := go worker();\n",
 		},
+		{
+			// T1579: `;` inside `[...]` is a repeat-literal separator, not a
+			// statement terminator — it stays inline (space after, no newline).
+			name:     "array repeat literal stays inline",
+			input:    "u32[64] w = [0u32;64];\n",
+			expected: "u32[64] w = [0u32; 64];\n",
+		},
+		{
+			name:     "array repeat literal already formatted",
+			input:    "u32[64] w = [0u32; 64];\n",
+			expected: "u32[64] w = [0u32; 64];\n",
+		},
+		{
+			name:     "nested array repeat literal",
+			input:    "u8[4][3] g = [[0u8;4];3];\n",
+			expected: "u8[4][3] g = [[0u8; 4]; 3];\n",
+		},
 	}
 
 	for _, tt := range tests {

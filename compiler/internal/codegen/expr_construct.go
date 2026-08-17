@@ -1304,6 +1304,60 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 	return c.block.NewLoad(arrType, tmp)
 }
 
+// genArrayRepeatLit generates a stack-allocated repeat array literal `[value; count]`.
+// The value is evaluated ONCE and stored into all N slots; the element type is
+// `copy` (enforced by sema), so no drop-flag/claim machinery is needed. The
+// resulting [N x T] bit pattern is identical to the equivalent hand-written
+// N-element literal — this is pure sugar over genFixedArrayLit's store loop. T1579.
+func (c *Compiler) genArrayRepeatLit(e *ast.ArrayRepeatLit) value.Value {
+	typ := c.info.Types[e]
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	arr, ok := typ.(*types.Array)
+	if !ok {
+		panic(fmt.Sprintf("codegen: array repeat literal type is %T, want Array", typ))
+	}
+	resolvedElem := arr.Elem()
+	if c.typeSubst != nil {
+		resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+	}
+	elemLLVM := c.resolveType(resolvedElem)
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+
+	// T1579: sema widens the element type to the hint when assignable-but-not-
+	// identical (Some-wrapping `T → T?`). Mirror genFixedArrayLit: set targetType
+	// so a bare `none` lowers to a zero {i1,T} struct, then wrap a bare
+	// non-optional value into the Optional element struct before storing.
+	_, elemIsOpt := resolvedElem.(*types.Optional)
+	savedTarget := c.targetType
+	if elemIsOpt {
+		c.targetType = resolvedElem
+	}
+	val := c.genCallArgExpr(e.Value) // evaluate the element once
+	c.targetType = savedTarget
+	if elemIsOpt {
+		argExprType := c.info.Types[e.Value]
+		if c.typeSubst != nil && argExprType != nil {
+			argExprType = types.Substitute(argExprType, c.typeSubst)
+		}
+		if argExprType != types.TypNone && !types.Identical(argExprType, resolvedElem) {
+			val = c.coerceToOptionalElem(val, argExprType, resolvedElem)
+			if st, ok := elemLLVM.(*irtypes.StructType); ok {
+				val = c.wrapOptional(val, st)
+			}
+		}
+	}
+
+	tmp := c.createEntryAlloca(arrType)
+	for i := int64(0); i < arr.Size(); i++ {
+		ptr := c.block.NewGetElementPtr(arrType, tmp,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, i))
+		c.block.NewStore(val, ptr)
+	}
+	return c.block.NewLoad(arrType, tmp)
+}
+
 // --- Map ---
 
 // genMapLit creates a map instance via its new() constructor, then inserts each entry

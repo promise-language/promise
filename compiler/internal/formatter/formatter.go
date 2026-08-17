@@ -1117,6 +1117,9 @@ func (f *formatter) emitRegular(tok token) {
 		if f.forHeaderDepth > 0 {
 			f.forHeaderDepth--
 			// Don't newline — stay on same line for classic for
+		} else if f.totalBracketDepth > 0 {
+			// T1579: `;` inside `[...]` is a repeat-literal separator (`[0u32; 64]`),
+			// not a statement terminator — keep it inline (space after, no newline).
 		} else {
 			f.skipNewlines()
 			next := f.peek()

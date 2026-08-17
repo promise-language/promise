@@ -401,6 +401,8 @@ func exprReassignsIdent(e ast.Expr, name string) bool {
 			}
 		}
 		return false
+	case *ast.ArrayRepeatLit:
+		return exprReassignsIdent(ex.Value, name) || exprReassignsIdent(ex.Count, name)
 	}
 	return false
 }

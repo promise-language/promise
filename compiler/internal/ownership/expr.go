@@ -242,6 +242,12 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			}
 		}
 
+	case *ast.ArrayRepeatLit:
+		// T1579: `[value; count]` — the element type is `copy` (enforced by
+		// sema), so no move-consume; just visit for use-tracking consistency.
+		c.checkExpr(e.Value)
+		c.checkExpr(e.Count)
+
 	case *ast.MapLit:
 		for _, entry := range e.Entries {
 			c.checkExpr(entry.Key)

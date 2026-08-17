@@ -209,6 +209,9 @@ func (ra *returnAliasWalker) walkExpr(e ast.Expr) {
 		for _, el := range ex.Elements {
 			ra.walkExpr(el)
 		}
+	case *ast.ArrayRepeatLit:
+		ra.walkExpr(ex.Value)
+		ra.walkExpr(ex.Count)
 	case *ast.MapLit:
 		for _, en := range ex.Entries {
 			ra.walkExpr(en.Key)

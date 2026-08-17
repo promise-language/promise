@@ -445,6 +445,9 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 		}
 		return false
 
+	case *ast.ArrayRepeatLit:
+		return a.exprBackRefCapturesVar(e.Value, name) || a.exprBackRefCapturesVar(e.Count, name)
+
 	case *ast.MapLit:
 		for _, entry := range e.Entries {
 			if a.exprBackRefCapturesVar(entry.Key, name) || a.exprBackRefCapturesVar(entry.Value, name) {
@@ -1029,6 +1032,9 @@ func (a *lastUseAnalyzer) exprReferencesVar(expr ast.Expr, name string) bool {
 			}
 		}
 		return false
+
+	case *ast.ArrayRepeatLit:
+		return a.exprReferencesVar(e.Value, name) || a.exprReferencesVar(e.Count, name)
 
 	case *ast.MapLit:
 		for _, entry := range e.Entries {

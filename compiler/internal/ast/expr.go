@@ -379,6 +379,17 @@ type ArrayLit struct {
 
 func (*ArrayLit) exprTag() {}
 
+// ArrayRepeatLit represents a repeat array literal: [value; count].
+// `value` is evaluated once and copied `count` times; `count` must be a
+// compile-time constant integer and the element type must be `copy`.
+type ArrayRepeatLit struct {
+	nodeBase
+	Value Expr // the element, evaluated once and copied
+	Count Expr // compile-time constant integer count
+}
+
+func (*ArrayRepeatLit) exprTag() {}
+
 // MapLit represents a map literal: { k: v, ... }.
 type MapLit struct {
 	nodeBase

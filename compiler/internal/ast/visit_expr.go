@@ -478,6 +478,13 @@ func (b *Builder) VisitArrayLiteral(ctx *parser.ArrayLiteralContext) interface{}
 	return node
 }
 
+func (b *Builder) VisitArrayRepeatLiteral(ctx *parser.ArrayRepeatLiteralContext) interface{} {
+	node := &ArrayRepeatLit{nodeBase: b.baseFromContext(ctx)}
+	node.Value = b.visitExpr(ctx.Expression(0))
+	node.Count = b.visitExpr(ctx.Expression(1))
+	return node
+}
+
 func (b *Builder) VisitMapLiteral(ctx *parser.MapLiteralContext) interface{} {
 	node := &MapLit{nodeBase: b.baseFromContext(ctx)}
 	for _, me := range ctx.AllMapEntry() {

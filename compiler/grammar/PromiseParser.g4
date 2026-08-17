@@ -505,6 +505,7 @@ primary
     | LPAREN expression RPAREN                                 # parenExpr
     | LPAREN expression COMMA expression (COMMA expression)* RPAREN  # tupleLiteral
     | LBRACKET (expression (COMMA expression)* COMMA?)? RBRACKET     # arrayLiteral
+    | LBRACKET expression SEMI expression RBRACKET                   # arrayRepeatLiteral
     | LBRACE RBRACE                                              # emptyBraceLiteral
     | LBRACE (COLON | mapEntry (COMMA mapEntry)* COMMA?) RBRACE  # mapLiteral
     | lambdaExpr                                               # lambda

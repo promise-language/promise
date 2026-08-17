@@ -1,0 +1,109 @@
+// T1579: fixed-array repeat literal `[value; count]` — bulk initializer for
+// sized arrays. `[x; n]` means "n elements, each a copy of x", yielding `T[n]`.
+type Holder {
+  u8[3] data;
+}
+
+sum3(u8[3] w) u8 {
+  return w[0] + w[1] + w[2];
+}
+
+make_schedule() u32[64] {
+  return[0u32; 64];
+}
+
+// A repeat literal fills every slot with a copy of the value.
+repeat_basic() `test {
+  u32[64] w = [0u32; 64];
+  assert(w.len == 64, "length");
+  assert(w[0] == 0u32, "first zero");
+  assert(w[63] == 0u32, "last zero");
+
+  u8[256] table = [7u8; 256];
+  assert(table[0] == 7u8, "table first");
+  assert(table[128] == 7u8, "table middle");
+  assert(table[255] == 7u8, "table last");
+}
+
+// Nesting falls out naturally: `[[x; a]; b]` yields `T[a][b]`.
+repeat_nested() `test {
+  u8[4][3] grid = [[1u8; 4]; 3];
+  assert(grid[0][0] == 1u8, "grid 0 0");
+  assert(grid[0][3] == 1u8, "grid 0 3");
+  assert(grid[2][0] == 1u8, "grid 2 0");
+  assert(grid[2][3] == 1u8, "grid 2 3");
+}
+
+// The repeat literal works inline in every expression context.
+repeat_inline_contexts() `test {
+  // call argument
+  assert(sum3([2u8; 3]) == 6u8, "call arg");
+
+  // field initializer
+  h := Holder(data: [9u8; 3]);
+  assert(h.data[0] == 9u8, "field init 0");
+  assert(h.data[2] == 9u8, "field init 2");
+
+  // return value
+  r := make_schedule();
+  assert(r.len == 64, "return len");
+  assert(r[10] == 0u32, "return elem");
+}
+
+// Non-zero values and single evaluation of the element.
+repeat_value_copies() `test {
+  i32[5] xs = [-3i32; 5];
+  for x in xs {
+    assert(x == -3i32, "each copy");
+  }
+  assert(xs.len == 5, "len");
+}
+
+// Optional element type: sema widens `T` to the `T?` hint (Some-wrapping) and
+// codegen must wrap the once-evaluated value into the {i1,T} element struct.
+repeat_optional() `test {
+  u32?[4] some = [0u32; 4];
+  assert(some[0]! == 0u32, "some first");
+  assert(some[3]! == 0u32, "some last");
+
+  u32?[4] nones = [none; 4];
+  n0 := nones[0]? {
+    99u32
+  };
+  n3 := nones[3]? {
+    99u32
+  };
+  assert(n0 == 99u32, "none first defaulted");
+  assert(n3 == 99u32, "none last defaulted");
+}
+
+// The `;` is what flips the reading — the comma/single forms are unaffected.
+list_forms_still_work() `test {
+  one := [0u32];
+  assert(one.len == 1, "single element");
+  two := [0u32, 0u32];
+  assert(two.len == 2, "two elements");
+  three := [1u32, 2u32, 3u32];
+  assert(three[1] == 2u32, "three elements");
+}
+
+sum4(u32[4] w) u32 {
+  return w[0] + w[1] + w[2] + w[3];
+}
+
+// A repeat literal inside a `go` block: capture analysis walks the literal
+// (element + count) for sendability and captured-ident collection.
+repeat_in_go_block() `test {
+  ch := channel[u32](1);
+  n := 5u32;
+  go {
+    local := [n; 4];
+    ch.send(sum4(local));
+    ch.close();
+  };
+  total := 0u32;
+  for v in ch {
+    total = total + v;
+  }
+  assert(total == 20u32, "go block repeat literal");
+}

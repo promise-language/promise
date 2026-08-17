@@ -38,6 +38,7 @@ const (
 	tagAutoCloneExpr      = 32 // T0605: synth-only; never serialized (defensive)
 	tagTypeRefExpr        = 33 // T0670: typeInstCallExpr wrapper for optional/function type args
 	tagEmptyBraceLit      = 34 // T0866: bare `{}` in value position
+	tagArrayRepeatLit     = 35 // T1579: repeat array literal `[value; count]`
 
 	// Statements (51-80)
 	tagBlock              = 51

@@ -1335,6 +1335,9 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 			for _, elem := range e.Elements {
 				walkExpr(elem)
 			}
+		case *ast.ArrayRepeatLit:
+			walkExpr(e.Value)
+			walkExpr(e.Count)
 		case *ast.MapLit:
 			for _, entry := range e.Entries {
 				walkExpr(entry.Key)

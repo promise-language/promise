@@ -598,6 +598,11 @@ func hExpr(h hash.Hash, e ast.Expr) {
 			hExpr(h, el)
 		}
 		wb(h, 0xFE)
+	case *ast.ArrayRepeatLit:
+		wb(h, 35)
+		hExpr(h, ex.Value)
+		hExpr(h, ex.Count)
+		wb(h, 0xFE)
 	case *ast.MapLit:
 		wb(h, 30)
 		for _, entry := range ex.Entries {

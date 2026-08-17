@@ -296,6 +296,12 @@ func (p *printer) printExpr(e Expr) {
 		p.line("Tuple(%d)", len(n.Elements))
 	case *ArrayLit:
 		p.line("Array(%d)", len(n.Elements))
+	case *ArrayRepeatLit:
+		p.line("ArrayRepeat")
+		p.indent++
+		p.printExpr(n.Value)
+		p.printExpr(n.Count)
+		p.indent--
 	case *MapLit:
 		p.line("Map(%d)", len(n.Entries))
 	case *EmptyBraceLit:

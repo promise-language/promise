@@ -876,9 +876,16 @@ for i, v in arr { }           // indexed iteration
 type Matrix {
   f64[9] data;
 }
+
+// Repeat literal: [value; count] — bulk-initialize a sized array
+u32[64] schedule = [0u32; 64];   // 64 copies of 0u32
+u8[256] table    = [7u8; 256];   // 256 copies of 7u8
+u8[4][3] grid    = [[0u8; 4]; 3]; // nesting: u8[4][3]
 ```
 
 Fixed-size arrays are value types (stack-allocated, auto-copied). Distinct from `T[]` (heap-allocated vector).
+
+The **repeat literal** `[value; count]` builds a sized array of `count` copies of `value`. Restrictions: `count` must be a compile-time constant integer literal, and the element type must be `` `copy `` — `value` is evaluated **once** and copied, so a non-`` `copy `` element (e.g. a `string`) is a compile error rather than `count` aliased handles. The `;` is what distinguishes it from a list: `[0u32]` is a one-element array, `[0u32, 0u32]` a two-element array, `[0u32; 64]` a 64-element array.
 
 ## Explicit Constructors
 
@@ -1086,7 +1093,7 @@ Cross-compile to a non-host OS (e.g. Linux → Windows binary) is not yet wired 
 6. **Mutable methods** — use `~this` for methods that modify state; bare `this` is read-only.
 7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use`.
 8. **`?` handler spacing is insignificant** — Whitespace around the `?` handler is optional: `expr?{...}`, `expr ?{...}`, `expr? {...}`, and `expr ? {...}` all parse identically (same for the binding forms `expr?e{...}` / `expr? e {...}`). This applies to both the error handler (on failable `!` values) and the optional handler (on `T?` values). Note the companion operators `?^` and `?!` are single tokens — no space is allowed between `?` and `^`/`!`.
-9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them.
+9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them. The repeat literal `[x; n]` is **sized-array-only** (yields `T[n]`, never a vector); to fill a vector use `u8[].filled(x, n)`. Note `u32[64].filled(...)` does **not** parse (a type in expression position reads as indexing) — use `[0u32; 64]` for a sized array.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.
 11. **Naked catalog names** — under a named `use io;`, both types *and* functions need the `io.` prefix (`io.File`, `io.read_line()`); naked `File`/`read_line()` is an error. To use names without a prefix, import anonymously: `use io as _;`.
 12. **`;` in blocks** — All statements need `;`. The trailing `;` on the last expression before `}` is optional: both `? { "default" }` and `? { "default"; }` work.

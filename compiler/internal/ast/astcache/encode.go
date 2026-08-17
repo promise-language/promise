@@ -256,6 +256,11 @@ func (e *encoder) expr(x ast.Expr) {
 		e.u8(tagArrayLit)
 		e.nodePos(n)
 		e.exprs(n.Elements)
+	case *ast.ArrayRepeatLit:
+		e.u8(tagArrayRepeatLit)
+		e.nodePos(n)
+		e.expr(n.Value)
+		e.expr(n.Count)
 	case *ast.MapLit:
 		e.u8(tagMapLit)
 		e.nodePos(n)

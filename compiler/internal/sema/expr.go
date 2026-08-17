@@ -333,6 +333,9 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.ArrayLit:
 		typ = c.checkArrayLit(e, hint)
 
+	case *ast.ArrayRepeatLit:
+		typ = c.checkArrayRepeatLit(e, hint)
+
 	case *ast.MapLit:
 		typ = c.checkMapLit(e)
 
@@ -684,6 +687,70 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 	inst := types.NewVector(elemType)
 	c.recordInstance(inst)
 	return inst
+}
+
+// checkArrayRepeatLit type-checks a repeat array literal `[value; count]`,
+// producing a fixed-size array `T[count]` of `count` copies of `value`. The
+// count must be a compile-time constant integer literal (the sized-array type
+// grammar accepts only INT_LITERAL) and the element type must be `copy` — the
+// value is evaluated once and bit-copied, so a non-copy element would alias.
+// T1579.
+func (c *Checker) checkArrayRepeatLit(e *ast.ArrayRepeatLit, hint types.Type) types.Type {
+	// Derive an element hint from an incoming fixed-array hint so a numeric or
+	// nested element widens correctly (`u8[4][3] w = [[0u8; 4]; 3]`).
+	var elemHint types.Type
+	switch h := hint.(type) {
+	case *types.Array:
+		elemHint = h.Elem()
+	case *types.Optional:
+		if inner, ok := h.Elem().(*types.Array); ok {
+			elemHint = inner.Elem()
+		}
+	}
+
+	elemType := c.checkExprWithHint(e.Value, elemHint)
+	if elemType == nil {
+		return nil
+	}
+	// Elements are owned by the array — strip borrow refs (mirrors checkArrayLit).
+	elemType = stripRef(elemType)
+	// Widen to the hint element type when the value is assignable-but-not-identical
+	// (numeric widening, Some-wrapping), matching checkArrayLit's unify step.
+	if elemHint != nil && !types.Identical(elemType, elemHint) && types.AssignableTo(elemType, elemHint) {
+		elemType = elemHint
+	}
+
+	// The count must be a constant non-negative integer literal.
+	lit, ok := e.Count.(*ast.IntLit)
+	if !ok {
+		c.errorf(e.Count.Pos(), "array repeat count must be a constant integer literal")
+		return nil
+	}
+	// Type-check the count expression too (validates any numeric suffix range).
+	c.checkExpr(e.Count)
+	cleanRaw := strings.ReplaceAll(lit.Raw, "_", "")
+	bigN, parsed := new(big.Int).SetString(cleanRaw, 0)
+	if !parsed || bigN.Sign() < 0 || !bigN.IsInt64() {
+		c.errorf(e.Count.Pos(), "array repeat count must be a non-negative constant integer literal")
+		return nil
+	}
+	n := bigN.Int64()
+
+	// The element must be `copy`: it is evaluated once and copied `n` times.
+	if !isCopyField(elemType) {
+		c.errorf(e.Value.Pos(), "array repeat element type %s must be `copy`; the element is evaluated once and copied %d times", elemType, n)
+		return nil
+	}
+
+	// Reuse the element guards from checkArrayLit for consistency (copy-only
+	// largely precludes these, but keep the diagnostics aligned).
+	c.reportContainerSingleOwnerNesting(e.Pos(), elemType)
+	if s := firstStream(elemType); s != nil {
+		c.errorf(e.Pos(), "a generator value cannot be stored: %s used as a vector/array element; consume it directly with a for-in loop or delegate with `yield *`", s)
+		return nil
+	}
+
+	return types.NewArray(elemType, n)
 }
 
 func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
@@ -2399,6 +2466,16 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 			c.errorf(e.Index.Pos(), "array index must be int, got %s", index)
 		}
 		return arr.Elem()
+	}
+
+	// T1579: `u32[64]` in expression position parses as indexing (not a sized-array
+	// type — that ambiguity is inherent). Recognise the shape and point at the
+	// repeat literal, which builds a sized array without the ambiguity.
+	if isTypeRef {
+		if lit, ok := e.Index.(*ast.IntLit); ok && len(e.ExtraIndices) == 0 {
+			c.errorf(e.Pos(), "cannot index type %s; to build a sized array use a repeat literal: [<value>; %s]", target, lit.Raw)
+			return nil
+		}
 	}
 
 	c.errorf(e.Pos(), "cannot index type %s", target)

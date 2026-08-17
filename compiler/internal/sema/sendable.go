@@ -376,6 +376,9 @@ func (c *Checker) checkGoBlockSendable(e *ast.GoExpr) {
 			for _, el := range ex.Elements {
 				walkExpr(el)
 			}
+		case *ast.ArrayRepeatLit:
+			walkExpr(ex.Value)
+			walkExpr(ex.Count)
 		case *ast.MapLit:
 			for _, entry := range ex.Entries {
 				walkExpr(entry.Key)

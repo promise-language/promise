@@ -92,6 +92,10 @@ func (w *holdsThisWalker) valueHoldsThis(e ast.Expr) bool {
 				return true
 			}
 		}
+	case *ast.ArrayRepeatLit:
+		if w.valueHoldsThis(ex.Value) {
+			return true
+		}
 	}
 	return false
 }

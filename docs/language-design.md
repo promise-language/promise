@@ -3199,6 +3199,7 @@ Built-in collection types with generic support:
 ```promise
 // Array (fixed-size, stack-allocated)
 int[3] arr = [1, 2, 3];
+u32[64] w = [0u32; 64];    // repeat literal: 64 copies of 0u32 (see §13.1a)
 
 // Vector (dynamic, heap-allocated) — T[] is sugar for Vector[T]
 int[] list = [1, 2, 3, 4, 5];
@@ -3284,6 +3285,35 @@ int[] nums = [10, 20, 30];
 for n in nums { print_line("{n}"); }          // value iteration
 for i, n in nums { print_line("{i}: {n}"); }  // indexed iteration
 ```
+
+### 13.1a Fixed-Array Repeat Literal (`[x; n]`)
+
+A sized array `T[n]` has no default initialization (an uninitialized variable requires an optional type — no hidden defaults). The **repeat literal** bulk-initializes one:
+
+```promise
+u32[64] w     = [0u32; 64];      // 64 elements, each a copy of 0u32
+u8[256] table = [0u8; 256];
+u8[4][3] grid = [[0u8; 4]; 3];   // nesting yields u8[4][3]
+```
+
+Two literal forms share the `[` `]` brackets; the token after the first expression decides which:
+
+```
+primary
+    : '[' (expression (',' expression)* ','?)? ']'   // arrayLiteral       (list / vector)
+    | '[' expression ';' expression ']'              // arrayRepeatLiteral (repeat)
+    ;
+```
+
+`,` (or `]`) → list; `;` → repeat. This is strictly LL(1) — after the first expression the parser needs one token of lookahead. `[0u32]` remains a one-element array; `[0u32, 0u32]` a two-element array; `[0u32; 64]` a 64-element array.
+
+**Semantics:**
+- The result type is always `T[n]` (sized array), never a `Vector` — there is no "sometimes array, sometimes vector" inference. Vectors already have `u8[].filled(x, n)`, so the repeat literal is deliberately sized-array-only.
+- `n` must be a **compile-time constant integer literal** — the sized-array type requires a constant size anyway.
+- The element type must be `` `copy ``. `x` is evaluated **once** and copied `n` times; a non-`` `copy `` element (e.g. `[some_string; 13]`) is a compile error rather than `n` aliased heap handles (the same restriction Rust imposes).
+- It is pure sugar: codegen emits the same inline `[n x T]` stack store pattern as the equivalent hand-written N-element literal, so the `.rodata` / value-copy behaviour carries over with no new allocation path. It works in every expression context (call argument, `return`, field initializer, local declaration) for free.
+
+**Why a repeat literal rather than a `.filled` constructor:** the obvious spelling `u32[64].filled(0u32, 64)` does not parse — `u32[64]` in expression position reads as *indexing* `u32` by `64` (`expression '[' expression ']'`), not as a sized-array type. That ambiguity is inherent: `a[64]` is legitimate indexing when `a` is a value. Distinguishing a type from a value there would need a semantic predicate or a sema-side reinterpretation of every index expression — a wide parser/sema change. (`u32[]` *does* work in expression position because the empty-bracket slice form has its own unambiguous rule, which is why `u32[].filled(...)` parses.) The repeat literal sidesteps the ambiguity with one new LL(1) alternative nowhere near the index rule, and solves the general problem (any `n`, any element type) rather than one call site. Sema still improves the `u32[64].filled(...)` diagnostic to point at the repeat literal.
 
 ### 13.2 Map (`map[K, V]`)
 

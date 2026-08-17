@@ -62,6 +62,7 @@ func TestRoundTripExpressions(t *testing.T) {
 		makeExpr(&ast.OptionalUnwrapExpr{Expr: makeIdent("x")}, pos, end),
 		makeExpr(&ast.TupleLit{Elements: []ast.Expr{makeIdent("a"), makeIdent("b")}}, pos, end),
 		makeExpr(&ast.ArrayLit{Elements: []ast.Expr{makeIdent("a")}}, pos, end),
+		makeExpr(&ast.ArrayRepeatLit{Value: makeIdent("a"), Count: makeIdent("n")}, pos, end), // T1579
 		makeExpr(&ast.MapLit{Entries: []*ast.MapEntry{{Key: makeIdent("a"), Value: makeIdent("b")}}}, pos, end),
 		makeExpr(&ast.EmptyBraceLit{}, pos, end), // T0866
 		// T0998: call args must round-trip the `move` marker.

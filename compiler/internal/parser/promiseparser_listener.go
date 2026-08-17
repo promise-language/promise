@@ -397,6 +397,9 @@ type PromiseParserListener interface {
 	// EnterArrayLiteral is called when entering the arrayLiteral production.
 	EnterArrayLiteral(c *ArrayLiteralContext)
 
+	// EnterArrayRepeatLiteral is called when entering the arrayRepeatLiteral production.
+	EnterArrayRepeatLiteral(c *ArrayRepeatLiteralContext)
+
 	// EnterEmptyBraceLiteral is called when entering the emptyBraceLiteral production.
 	EnterEmptyBraceLiteral(c *EmptyBraceLiteralContext)
 
@@ -888,6 +891,9 @@ type PromiseParserListener interface {
 
 	// ExitArrayLiteral is called when exiting the arrayLiteral production.
 	ExitArrayLiteral(c *ArrayLiteralContext)
+
+	// ExitArrayRepeatLiteral is called when exiting the arrayRepeatLiteral production.
+	ExitArrayRepeatLiteral(c *ArrayRepeatLiteralContext)
 
 	// ExitEmptyBraceLiteral is called when exiting the emptyBraceLiteral production.
 	ExitEmptyBraceLiteral(c *EmptyBraceLiteralContext)

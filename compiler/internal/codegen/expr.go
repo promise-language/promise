@@ -429,6 +429,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genNoneLit(e)
 	case *ast.ArrayLit:
 		return c.genArrayLit(e)
+	case *ast.ArrayRepeatLit:
+		return c.genArrayRepeatLit(e)
 	case *ast.MapLit:
 		return c.genMapLit(e)
 	case *ast.IndexExpr:

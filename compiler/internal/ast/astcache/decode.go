@@ -324,6 +324,12 @@ func (d *decoder) expr() ast.Expr {
 		d.setPosEnd(n)
 		n.Elements = d.exprs()
 		return n
+	case tagArrayRepeatLit:
+		n := &ast.ArrayRepeatLit{}
+		d.setPosEnd(n)
+		n.Value = d.expr()
+		n.Count = d.expr()
+		return n
 	case tagMapLit:
 		n := &ast.MapLit{}
 		d.setPosEnd(n)

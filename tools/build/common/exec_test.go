@@ -220,6 +220,68 @@ func TestRunTeeFiltered_FlushFwdWriteError(t *testing.T) {
 	}
 }
 
+// manyArgs builds an argument list long enough that joining it would dominate
+// any error message, while staying well under the 32,767-character
+// CreateProcessW limit so the subprocess itself still launches on Windows.
+func manyArgs(n int) []string {
+	args := make([]string, n)
+	for i := range args {
+		args[i] = fmt.Sprintf("modules/std/file_%04d.pr", i)
+	}
+	return args
+}
+
+// TestRunInBrief_ErrorNamesArgCountNotArgs verifies RunInBrief's whole reason
+// for existing (T1582): when a command with a huge argument list fails, the
+// error must name the command and how many arguments it had, NOT splice every
+// argument into the message. The original failure was a ~33,000-character error
+// string that buried the actual cause.
+func TestRunInBrief_ErrorNamesArgCountNotArgs(t *testing.T) {
+	args := append(manyArgs(400), "-exit", "1")
+	err := RunInBrief("", teeStub(t), args...)
+	if err == nil {
+		t.Fatal("expected error from non-zero exit, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, teeStubName) {
+		t.Errorf("error %q does not name the command", msg)
+	}
+	if !strings.Contains(msg, fmt.Sprintf("(%d args)", len(args))) {
+		t.Errorf("error %q does not report the argument count %d", msg, len(args))
+	}
+	// The args themselves must not be spliced in: one sample is enough to catch
+	// a regression back to strings.Join.
+	if strings.Contains(msg, "modules/std/file_0200.pr") {
+		t.Errorf("error joins the argument list: %q", msg)
+	}
+	// Guard the size directly — the point is a message a human can read.
+	if len(msg) > 500 {
+		t.Errorf("error message is %d chars, want a brief summary", len(msg))
+	}
+}
+
+func TestRunInBrief_SuccessReturnsNil(t *testing.T) {
+	if err := RunInBrief("", teeStub(t), manyArgs(100)...); err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+}
+
+// TestRunIn_ErrorStillJoinsArgs pins the behavior RunIn kept when RunInBrief was
+// split out of it: for ordinary short command lines the error still shows the
+// full arguments, which is what makes build-tool failures diagnosable.
+func TestRunIn_ErrorStillJoinsArgs(t *testing.T) {
+	err := RunIn("", teeStub(t), "-line", "hello", "-exit", "3")
+	if err == nil {
+		t.Fatal("expected error from non-zero exit, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{teeStubName, "-line hello", "-exit 3"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
 // TestRunTeeStderrFiltered_DelegatesAndCaptures smoke-tests the public wrapper.
 // We can't easily inspect what reaches os.Stderr from a unit test, but the
 // captured-stdout return value confirms the writer chain is wired up.

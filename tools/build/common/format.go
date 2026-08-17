@@ -30,15 +30,8 @@ func RunFormat(root string, args []string) error {
 		fmt.Println("Skipping Promise format (bin/promise not found — run bin/build first)")
 	} else {
 		fmt.Println("Formatting Promise...")
-		prFiles, err := findPromiseFiles(root)
-		if err != nil {
-			return fmt.Errorf("find .pr files: %w", err)
-		}
-		if len(prFiles) > 0 {
-			fmtArgs := append([]string{"format"}, prFiles...)
-			if err := RunIn(root, promiseBin, fmtArgs...); err != nil {
-				return fmt.Errorf("promise format: %w", err)
-			}
+		if err := FormatPromiseFiles(root, promiseBin); err != nil {
+			return fmt.Errorf("promise format: %w", err)
 		}
 	}
 
@@ -85,18 +78,116 @@ func findPromiseFiles(root string) ([]string, error) {
 	return files, nil
 }
 
+// maxCommandLine bounds the rendered length of a single child command line.
+// Windows' CreateProcessW hard-limits lpCommandLine to 32,767 characters and
+// returns ERROR_FILENAME_EXCED_RANGE ("The filename or extension is too long")
+// beyond that; the repo's 864 .pr files rendered 32,826 characters (T1582).
+// 30,000 leaves headroom for the absolute exe path, flags, separators and
+// per-argument quoting. POSIX ARG_MAX is ~2 MB, so batching there is harmless —
+// it just means a couple of invocations instead of one, on every platform.
+const maxCommandLine = 30000
+
+// argCost is an upper bound on the command-line length one argument consumes:
+// its own bytes, the separating space, and the two quotes Go's syscall.EscapeArg
+// may add on Windows. Byte length also bounds the UTF-16 length Windows actually
+// counts (a non-ASCII rune is 2–4 UTF-8 bytes but only 1–2 UTF-16 units), so the
+// estimate stays conservative for non-ASCII paths. Over-estimating is safe —
+// correctness only needs a bound, and it just yields slightly smaller batches.
+func argCost(s string) int { return len(s) + 3 }
+
+// commandLineBatches splits files into consecutive batches such that the command
+// line for `exe fixed... batch...` stays within budget. Order is preserved and
+// every input path appears in exactly one batch: a single path that cannot fit
+// on its own still gets its own batch rather than being dropped, so the OS
+// reports a real error instead of the file being silently skipped.
+func commandLineBatches(exe string, fixed, files []string, budget int) [][]string {
+	if len(files) == 0 {
+		return nil
+	}
+	fixedCost := argCost(exe)
+	for _, f := range fixed {
+		fixedCost += argCost(f)
+	}
+
+	var batches [][]string
+	var batch []string
+	cost := fixedCost
+	for _, f := range files {
+		c := argCost(f)
+		if len(batch) > 0 && cost+c > budget {
+			batches = append(batches, batch)
+			batch = nil
+			cost = fixedCost
+		}
+		batch = append(batch, f)
+		cost += c
+	}
+	return append(batches, batch)
+}
+
+// formatRunner runs one `promise format` batch with the given full argument
+// list, returning the child's stdout. Injected so the batching logic is
+// testable without a real compiler binary.
+type formatRunner func(args []string) (stdout string, err error)
+
+// formatPromiseFilesWith formats files in command-line-sized batches, aborting
+// on the first batch that fails.
+func formatPromiseFilesWith(promiseBin string, files []string, run formatRunner) error {
+	fixed := []string{"format"}
+	batches := commandLineBatches(promiseBin, fixed, files, maxCommandLine)
+	for i, batch := range batches {
+		if _, err := run(append(append([]string{}, fixed...), batch...)); err != nil {
+			return fmt.Errorf("batch %d/%d, %d files: %w", i+1, len(batches), len(batch), err)
+		}
+	}
+	return nil
+}
+
+// unformattedPromiseFilesWith runs `format -check` in command-line-sized batches
+// and accumulates the reported paths across all of them, so the caller sees every
+// unformatted file rather than only those in the first batch that reported any.
+//
+// Per-batch failure semantics match a single unbatched run: `promise format -check`
+// prints each unformatted file to stdout and exits non-zero when any need
+// formatting, so a non-zero exit *with* output is the expected "unformatted"
+// signal, not a tool failure. Only an empty stdout together with a non-zero exit
+// is a genuine failure (e.g. a read error the CLI reports before exiting).
+func unformattedPromiseFilesWith(promiseBin string, files []string, run formatRunner) ([]string, error) {
+	fixed := []string{"format", "-check"}
+	batches := commandLineBatches(promiseBin, fixed, files, maxCommandLine)
+
+	var unformatted []string
+	for i, batch := range batches {
+		out, runErr := run(append(append([]string{}, fixed...), batch...))
+		out = strings.TrimSpace(out)
+		if out == "" {
+			if runErr != nil {
+				return nil, fmt.Errorf("promise format -check (batch %d/%d): %w", i+1, len(batches), runErr)
+			}
+			continue
+		}
+		for line := range strings.SplitSeq(out, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				unformatted = append(unformatted, line)
+			}
+		}
+	}
+	return unformatted, nil
+}
+
 // FormatPromiseFiles is a convenience for verify — formats Promise files
 // using the given promise binary path. Returns silently if no files found.
 func FormatPromiseFiles(root, promiseBin string) error {
 	prFiles, err := findPromiseFiles(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("find .pr files: %w", err)
 	}
 	if len(prFiles) == 0 {
 		return nil
 	}
-	fmtArgs := append([]string{"format"}, prFiles...)
-	return RunIn(root, promiseBin, fmtArgs...)
+	return formatPromiseFilesWith(promiseBin, prFiles, func(args []string) (string, error) {
+		return "", RunInBrief(root, promiseBin, args...)
+	})
 }
 
 // goFileDirs returns the directories to scan for Go source files.
@@ -248,26 +339,7 @@ func UnformattedPromiseFiles(root string) ([]string, error) {
 		return nil, nil
 	}
 
-	// `promise format -check` prints each unformatted file to stdout and exits 1
-	// when any need formatting. A non-zero exit with file output is the expected
-	// "unformatted" signal, not a tool failure — so we parse stdout and only
-	// surface runErr when nothing was printed (a genuine failure, e.g. a read
-	// error the CLI reports before exiting non-zero).
-	args := append([]string{"format", "-check"}, prFiles...)
-	out, runErr := RunCaptureStdout(root, promiseBin, args...)
-	out = strings.TrimSpace(out)
-	if out == "" {
-		if runErr != nil {
-			return nil, fmt.Errorf("promise format -check: %w", runErr)
-		}
-		return nil, nil
-	}
-
-	var files []string
-	for line := range strings.SplitSeq(out, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			files = append(files, line)
-		}
-	}
-	return files, nil
+	return unformattedPromiseFilesWith(promiseBin, prFiles, func(args []string) (string, error) {
+		return RunCaptureStdout(root, promiseBin, args...)
+	})
 }

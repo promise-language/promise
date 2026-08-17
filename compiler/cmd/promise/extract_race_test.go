@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/promise-language/promise/compiler/internal/module"
 )
@@ -79,6 +80,98 @@ func TestExtractRaceEmbeddedModule(t *testing.T) {
 		if strings.HasPrefix(s.Name(), ".net.tmp.") {
 			t.Fatalf("leftover temp dir not cleaned up: %s", s.Name())
 		}
+	}
+}
+
+// TestExtractEmbeddedModuleStaleEmptyCacheDir covers the destination-exists
+// publish path: an empty leftover cache dir (a racing or crashed cleaner that
+// removed a module's files but not the directory itself) must not wedge
+// extraction. On Windows this is the failure that made bin/verify die with
+// "rename ...\.path.tmp.N: Access is denied." — MoveFileEx refuses to replace
+// any existing directory, empty or not.
+func TestExtractEmbeddedModuleStaleEmptyCacheDir(t *testing.T) {
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	cacheDir, err := module.EmbeddedModuleCacheDir("net")
+	if err != nil {
+		t.Fatalf("EmbeddedModuleCacheDir: %v", err)
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("pre-create empty cache dir: %v", err)
+	}
+
+	dir, err := extractEmbeddedModule("net")
+	if err != nil {
+		t.Fatalf("extract over empty cache dir: %v", err)
+	}
+	if dir != cacheDir {
+		t.Fatalf("extract returned %q, want %q", dir, cacheDir)
+	}
+	want, err := embeddedModules.ReadFile("resources/modules/net/promise.toml")
+	if err != nil {
+		t.Fatalf("read embedded net/promise.toml: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "promise.toml"))
+	if err != nil {
+		t.Fatalf("read extracted promise.toml: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("extracted promise.toml content mismatch")
+	}
+}
+
+// TestPublishExtractedModulePeerWins covers the cross-process race directly: a
+// peer already published a complete module, so our own rename must fail (the
+// destination exists) yet publish must report success and leave the peer's
+// content untouched — a module is only ever made visible by an atomic rename,
+// so any non-empty destination is complete.
+func TestPublishExtractedModulePeerWins(t *testing.T) {
+	parent := t.TempDir()
+	cacheDir := filepath.Join(parent, "net")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "promise.toml"), []byte("peer"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := filepath.Join(parent, ".net.tmp.1.1")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "promise.toml"), []byte("ours"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := publishExtractedModule(tmpDir, cacheDir); err != nil {
+		t.Fatalf("publish against a populated peer dir: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(cacheDir, "promise.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "peer" {
+		t.Fatalf("peer content overwritten: got %q, want %q", got, "peer")
+	}
+}
+
+// TestPublishExtractedModuleGivesUp guards the retry budget's exit: an
+// unpublishable staging dir (it does not exist, so every rename fails and the
+// destination never appears) must return the underlying error after a bounded
+// number of attempts rather than spinning forever.
+func TestPublishExtractedModuleGivesUp(t *testing.T) {
+	defer func(a int, b, m time.Duration) {
+		extractPublishAttempts, extractPublishBackoff, extractPublishMaxSleep = a, b, m
+	}(extractPublishAttempts, extractPublishBackoff, extractPublishMaxSleep)
+	extractPublishAttempts, extractPublishBackoff, extractPublishMaxSleep = 3, time.Millisecond, time.Millisecond
+
+	parent := t.TempDir()
+	err := publishExtractedModule(filepath.Join(parent, "does-not-exist"), filepath.Join(parent, "net"))
+	if err == nil {
+		t.Fatal("expected an error when the staging dir cannot be published")
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "net")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed publish must not leave a destination behind: stat err=%v", statErr)
 	}
 }
 

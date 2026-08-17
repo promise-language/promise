@@ -6970,15 +6970,62 @@ func extractEmbeddedModule(name string) (string, error) {
 		}
 	}
 
-	if err := os.Rename(tmpDir, cacheDir); err != nil {
-		// Another process won the race and populated cacheDir first (rename
-		// onto a non-empty dir fails with ENOTEMPTY/EEXIST). Accept theirs.
-		if info, rerr := os.ReadDir(cacheDir); rerr == nil && len(info) > 0 {
-			return cacheDir, nil
-		}
+	if err := publishExtractedModule(tmpDir, cacheDir); err != nil {
 		return "", err
 	}
 	return cacheDir, nil
+}
+
+// Bounded retry budget for publishExtractedModule: 5ms doubling to a 100ms
+// ceiling over 24 attempts (~2s worst case) — long enough to outlast a virus
+// scanner's handle on a just-written file, short enough that a genuinely stuck
+// rename still reports promptly. Vars, not consts, so tests can shrink the
+// budget when they exercise the give-up path.
+var (
+	extractPublishAttempts = 24
+	extractPublishBackoff  = 5 * time.Millisecond
+	extractPublishMaxSleep = 100 * time.Millisecond
+)
+
+// publishExtractedModule moves a fully-populated staging dir into place as the
+// module cache dir. A module only ever becomes visible through this rename, so
+// a non-empty cacheDir is by construction a complete module — which makes
+// "a peer won the race" indistinguishable from our own success.
+//
+// A single rename is not enough on Windows. MoveFileEx refuses to replace an
+// existing directory even when it is empty (ERROR_ACCESS_DENIED, not the
+// ENOTEMPTY a POSIX rename reports), and it also fails with ACCESS_DENIED
+// transiently whenever another process still holds a handle inside the source
+// or destination tree — a peer compiler part-way through a CleanEmbeddedModule
+// Cache sweep, or an antivirus scanner walking the files we just wrote. Both
+// are recoverable, so retry with a bounded backoff: accept a populated
+// destination as success, and reap an empty one (which no reader can be using,
+// and which os.Remove can only delete while it stays empty) so a later attempt
+// can win (T1348).
+func publishExtractedModule(tmpDir, cacheDir string) error {
+	sleep := extractPublishBackoff
+	var lastErr error
+	for attempt := 0; attempt < extractPublishAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(sleep)
+			if sleep < extractPublishMaxSleep {
+				sleep *= 2
+			}
+		}
+		if err := os.Rename(tmpDir, cacheDir); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		entries, rerr := os.ReadDir(cacheDir)
+		if rerr == nil && len(entries) > 0 {
+			return nil // a peer published a complete module — use theirs
+		}
+		if rerr == nil {
+			os.Remove(cacheDir) // empty leftover from a racing/crashed cleaner
+		}
+	}
+	return lastErr
 }
 
 // overrideIdentity replaces a module's identity (GlobalIdentity + IRPrefix) and

@@ -17,12 +17,30 @@ func Run(name string, args ...string) error {
 
 // RunIn executes a command in the given directory.
 func RunIn(dir string, name string, args ...string) error {
+	return runIn(dir, name, args, func() string {
+		return name + " " + strings.Join(args, " ")
+	})
+}
+
+// RunInBrief is RunIn for commands with very large argument lists: on failure the
+// error names the command and the argument count instead of joining every argument
+// into the message (a 700-file `promise format` batch would otherwise produce a
+// ~30,000-character error that buries the real cause).
+func RunInBrief(dir string, name string, args ...string) error {
+	return runIn(dir, name, args, func() string {
+		return fmt.Sprintf("%s (%d args)", name, len(args))
+	})
+}
+
+// runIn is the shared body of RunIn/RunInBrief. describe is called only on
+// failure, so callers never pay to render the command line on the happy path.
+func runIn(dir string, name string, args []string, describe func() string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+		return fmt.Errorf("%s: %w", describe(), err)
 	}
 	return nil
 }

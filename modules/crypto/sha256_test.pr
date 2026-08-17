@@ -1,13 +1,14 @@
 // crypto/sha256_test.pr — FIPS 180-4 / RFC 6234 known-answer vectors, streaming
-// equivalence, to_bytes round-trip, and the leading-zero padding guard.
+// equivalence, Digest256.to_bytes round-trip, the leading-zero padding guard, and
+// the Digest256 wrapper surface (format!, ^ fold, hash + value field, ==/!=).
 // One-shot digests for the canonical FIPS 180-4 / RFC 6234 test vectors.
 sha256_empty_test() `test {
-  assert(to_hex(sha256("".bytes())) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  assert(sha256("".bytes()).to_string() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "empty string digest");
 }
 
 sha256_abc_test() `test {
-  assert(to_hex(sha256("abc".bytes())) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  assert(sha256("abc".bytes()).to_string() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
   "\"abc\" digest");
 }
 
@@ -16,7 +17,7 @@ sha256_abc_test() `test {
 sha256_448bit_test() `test {
   string msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
   assert(msg.len == 56, "vector is 56 bytes");
-  assert(to_hex(sha256(msg.bytes())) == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+  assert(sha256(msg.bytes()).to_string() == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
   "448-bit two-block digest");
 }
 
@@ -24,7 +25,7 @@ sha256_448bit_test() `test {
 sha256_896bit_test() `test {
   string msg = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
   assert(msg.len == 112, "vector is 112 bytes");
-  assert(to_hex(sha256(msg.bytes())) == "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+  assert(sha256(msg.bytes()).to_string() == "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
   "896-bit multi-block digest");
 }
 
@@ -32,7 +33,7 @@ sha256_896bit_test() `test {
 // ~15,625 blocks in a single update() call.
 sha256_million_a_test() `test {
   u8[] data = u8[].filled(97u8, 1000000);
-  assert(to_hex(sha256(data)) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+  assert(sha256(data).to_string() == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
   "one million 'a' digest");
 }
 
@@ -42,8 +43,8 @@ sha256_million_a_test() `test {
 // 00328ce5...df60 — the smallest non-negative integer whose SHA-256 digest
 // starts with 0x00. The bounded search below re-derives it as documentation.
 sha256_leading_zero_padding_test() `test {
-  u256 d = sha256("286".bytes());
-  string hx = to_hex(d);
+  Digest256 d = sha256("286".bytes());
+  string hx = d.to_string();
   assert(hx == "00328ce57bbc14b33bd6695bc8eb32cdf2fb5f3a7d89ec14a42825e15d39df60",
   "\"286\" digest");
   assert(hx.starts_with("00"), "digest begins with a zero byte");
@@ -53,7 +54,7 @@ sha256_leading_zero_padding_test() `test {
   int i = 0;
   int found = -1;
   while i < 1000 {
-    if to_hex(sha256(i.to_string().bytes())).starts_with("00") {
+    if sha256(i.to_string().bytes()).to_string().starts_with("00") {
       found = i;
       break;
     }
@@ -67,7 +68,7 @@ sha256_leading_zero_padding_test() `test {
 sha256_streaming_equivalence_test() `test {
   string msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
   u8[] bytes = msg.bytes();
-  u256 oneshot = sha256(bytes);
+  Digest256 oneshot = sha256(bytes);
 
   // Chunk sizes chosen to cross the 64-byte boundary at irregular offsets.
   int[] sizes = [1, 3, 7, 13, 64, 65, 100];
@@ -112,7 +113,7 @@ sha256_streaming_large_test() `test {
       ctx.update(bytes[pos: end]);
       pos = end;
     }
-    assert(to_hex(ctx.finalize()) == "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+    assert(ctx.finalize().to_string() == "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
     "896-bit streamed in odd chunks matches FIPS digest");
     si = si + 1;
   }
@@ -132,13 +133,13 @@ sha256_streaming_large_test() `test {
     big.update(million[p: e]);
     p = e;
   }
-  assert(to_hex(big.finalize()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+  assert(big.finalize().to_string() == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
   "million 'a' streamed in 97-byte chunks matches FIPS digest");
 }
 
 // Empty streaming (no update, or a single empty update) equals sha256("").
 sha256_streaming_empty_test() `test {
-  u256 expected = sha256("".bytes());
+  Digest256 expected = sha256("".bytes());
   Sha256 a = Sha256();
   assert(a.finalize() == expected, "no update finalizes to empty digest");
   Sha256 b = Sha256();
@@ -152,17 +153,17 @@ sha256_streaming_empty_test() `test {
 // (64, 128). Reference digests from Python hashlib (all inputs are repeated 'a').
 sha256_block_boundary_test() `test {
   // 55 bytes: 55 + 0x80 + 8-byte length == 64, padding stays in one block.
-  assert(to_hex(sha256(u8[].filled(97u8, 55))) == "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318", "55 x 'a'");
+  assert(sha256(u8[].filled(97u8, 55)).to_string() == "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318", "55 x 'a'");
   // 56 bytes: 0x80 no longer fits before the length field, forcing a 2nd block.
-  assert(to_hex(sha256(u8[].filled(97u8, 56))) == "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a", "56 x 'a'");
+  assert(sha256(u8[].filled(97u8, 56)).to_string() == "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a", "56 x 'a'");
   // 63 bytes: one byte short of a full block.
-  assert(to_hex(sha256(u8[].filled(97u8, 63))) == "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34", "63 x 'a'");
+  assert(sha256(u8[].filled(97u8, 63)).to_string() == "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34", "63 x 'a'");
   // 64 bytes: exactly one full block; padding becomes an entire second block.
-  assert(to_hex(sha256(u8[].filled(97u8, 64))) == "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb", "64 x 'a'");
+  assert(sha256(u8[].filled(97u8, 64)).to_string() == "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb", "64 x 'a'");
   // 65 bytes: one full block drained plus a 1-byte tail spanning two more blocks.
-  assert(to_hex(sha256(u8[].filled(97u8, 65))) == "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0", "65 x 'a'");
+  assert(sha256(u8[].filled(97u8, 65)).to_string() == "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0", "65 x 'a'");
   // 128 bytes: two exact full blocks plus a third all-padding block.
-  assert(to_hex(sha256(u8[].filled(97u8, 128))) == "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e", "128 x 'a'");
+  assert(sha256(u8[].filled(97u8, 128)).to_string() == "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e", "128 x 'a'");
 }
 
 // Binary input with the high bit set exercises the big-endian word assembly and
@@ -176,13 +177,13 @@ sha256_binary_input_test() `test {
     all.push(i as! u8);
     i = i + 1;
   }
-  assert(to_hex(sha256(all)) == "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880", "0x00..0xff");
+  assert(sha256(all).to_string() == "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880", "0x00..0xff");
 
   // A single 0xff byte (top bit set in the first schedule word).
-  assert(to_hex(sha256(u8[].filled(0xffu8, 1))) == "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89", "single 0xff");
+  assert(sha256(u8[].filled(0xffu8, 1)).to_string() == "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89", "single 0xff");
 
   // Streaming the 256-byte binary buffer in odd chunks equals the one-shot digest.
-  u256 oneshot = sha256(all);
+  Digest256 oneshot = sha256(all);
   Sha256 ctx = Sha256();
   int pos = 0;
   while pos < all.len {
@@ -200,8 +201,8 @@ sha256_binary_input_test() `test {
 // padding guard): the "286" digest begins with 0x00, and the 32 bytes must still
 // round-trip to the full 64-char hex, with byte[0] == 0.
 sha256_to_bytes_leading_zero_test() `test {
-  u256 d = sha256("286".bytes());
-  u8[] bytes = to_bytes(d);
+  Digest256 d = sha256("286".bytes());
+  u8[] bytes = d.to_bytes();
   assert(bytes.len == 32, "digest is 32 bytes");
   assert(bytes[0] == 0u8, "leading byte is zero");
 
@@ -211,37 +212,115 @@ sha256_to_bytes_leading_zero_test() `test {
     b.write_string((bytes[i] as! uint).to_string(base: 16, width: 2, fill: '0'));
     i = i + 1;
   }
-  assert(b.to_string() == to_hex(d), "leading-zero bytes round-trip to hex");
+  assert(b.to_string() == d.to_string(), "leading-zero bytes round-trip to hex");
 }
 
-// Digest inequality: distinct inputs must yield distinct digests, and u256 `==`
+// Digest inequality: distinct inputs must yield distinct digests, and Digest256 `==`
 // must return false for them. Every other assertion here checks `==` -> true;
 // this exercises the reject path (`==` -> false) that signature verification
 // depends on — a broken comparator that always answered true would pass every
 // known-answer vector above yet silently accept forged signatures.
 sha256_digest_inequality_test() `test {
-  u256 a = sha256("abc".bytes());
-  u256 b = sha256("abd".bytes()); // one bit flipped in the last byte
+  Digest256 a = sha256("abc".bytes());
+  Digest256 b = sha256("abd".bytes()); // one bit flipped in the last byte
   assert(!(a == b), "distinct inputs produce unequal digests");
   assert(a != b, "!= agrees with ==");
   // Single-bit input difference propagates to a wholly different digest.
-  assert(to_hex(a) != to_hex(b), "hex renderings differ");
+  assert(a.to_string() != b.to_string(), "hex renderings differ");
   // A digest equals itself (reflexive true branch, distinct from KAT compares).
   assert(a == sha256("abc".bytes()), "same input reproduces the same digest");
 }
 
+// Digest256.format!(Writer): the wrapper overrides format so string interpolation
+// renders the canonical zero-padded 64-char hex — the same guarantee to_string()
+// gives. Without the override, interpolation would fall back to the field default
+// and could drop leading zero bytes (the "286" bug). Interpolation is the idiomatic
+// format! entry point; a direct Builder write exercises the same method explicitly.
+sha256_digest_format_test() `test {
+  // Ordinary digest: interpolation matches to_string().
+  Digest256 a = sha256("abc".bytes());
+  assert("{a}" == a.to_string(), "interpolation renders canonical hex");
+  assert("{a}".len == 64, "interpolated digest is 64 hex chars");
+
+  // Leading-zero digest ("286"): format! must still emit the full 64 chars.
+  Digest256 z = sha256("286".bytes());
+  assert("{z}" == "00328ce57bbc14b33bd6695bc8eb32cdf2fb5f3a7d89ec14a42825e15d39df60",
+  "format! zero-pads a leading-zero digest");
+  assert("{z}".starts_with("00"), "format! preserves the leading zero byte");
+
+  // Interpolation inside a larger string still routes through format!(Writer).
+  assert("digest={a}!" == "digest=" + a.to_string() + "!", "format! composes in a Writer");
+}
+
+// Digest256.^ : the bitwise XOR fold that motivates the wrapper (PBKDF2's
+// U1 ^ U2 ^ … ^ Uc). Verified as operations on the underlying i256 field:
+// self-inverse (x ^ y ^ y == x), identity (x ^ 0 == x), nilpotent (x ^ x == 0),
+// commutative, and field-consistent ((a ^ b).value == a.value ^ b.value).
+sha256_digest_xor_test() `test {
+  Digest256 a = sha256("abc".bytes());
+  Digest256 b = sha256("abd".bytes());
+
+  // Nilpotent: a ^ a is the all-zero digest, rendering as 64 zero chars.
+  Digest256 zero = a ^ a;
+  assert(zero.value == 0u256, "a ^ a has a zero value");
+  assert(zero.to_string() == "0000000000000000000000000000000000000000000000000000000000000000",
+  "a ^ a renders as 64 zeros");
+
+  // Identity: x ^ 0 == x.
+  assert(a ^ zero == a, "x ^ 0 == x");
+
+  // Self-inverse: (a ^ b) ^ b == a — the property PBKDF2's fold relies on.
+  assert((a ^ b) ^ b == a, "xor is self-inverse");
+
+  // Commutative.
+  assert(a ^ b == b ^ a, "xor commutes");
+
+  // Field-consistent: the operator is exactly XOR on the underlying u256.
+  assert((a ^ b).value == (a.value ^ b.value), "^ matches field-level u256 xor");
+  assert(a ^ b != a, "xor of distinct digests differs from either operand");
+}
+
+// Digest256.hash + `value` field: the getter delegates to the underlying u256's
+// hash so equal digests hash equal (the map/set-key contract), and the exposed
+// `value` field round-trips a digest back into a Digest256. Using Digest256 as a
+// map key exercises the Hashable + Equal pair the wrapper provides.
+sha256_digest_hash_and_value_test() `test {
+  Digest256 a = sha256("abc".bytes());
+  Digest256 a2 = sha256("abc".bytes());
+  Digest256 b = sha256("abd".bytes());
+
+  // Equal digests must hash equal (else they would miss in a hashed container).
+  assert(a == a2, "same input reproduces the same digest");
+  assert(a.hash == a2.hash, "equal digests hash equal");
+  // hash delegates to the underlying value's hash.
+  assert(a.hash == a.value.hash, "digest hash delegates to value hash");
+
+  // The exposed `value` field round-trips through the constructor unchanged.
+  Digest256 rebuilt = Digest256(value: a.value);
+  assert(rebuilt == a, "rebuilding from .value reproduces the digest");
+  assert(rebuilt.to_string() == a.to_string(), "rebuilt digest renders identically");
+
+  // Digest256 works as a map key (Hashable via get hash + Equal via ==).
+  map[Digest256, string] labels = map[Digest256, string]();
+  labels[a] = "abc";
+  labels[b] = "abd";
+  assert(labels.len == 2, "distinct digests occupy distinct map slots");
+  assert(labels[a2]! == "abc", "lookup by an equal digest finds the entry");
+  assert(labels[b]! == "abd", "second key retrievable");
+}
+
 // to_bytes yields 32 big-endian bytes that round-trip back to the hex digest.
 sha256_to_bytes_roundtrip_test() `test {
-  u256 d = sha256("abc".bytes());
-  u8[] bytes = to_bytes(d);
+  Digest256 d = sha256("abc".bytes());
+  u8[] bytes = d.to_bytes();
   assert(bytes.len == 32, "digest is 32 bytes");
 
-  // Re-hex the bytes and compare against to_hex(d).
+  // Re-hex the bytes and compare against d.to_string().
   Builder b = Builder(capacity: 64);
   int i = 0;
   while i < bytes.len {
     b.write_string((bytes[i] as! uint).to_string(base: 16, width: 2, fill: '0'));
     i = i + 1;
   }
-  assert(b.to_string() == to_hex(d), "to_bytes round-trips against to_hex");
+  assert(b.to_string() == d.to_string(), "to_bytes round-trips against to_string");
 }

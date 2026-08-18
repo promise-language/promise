@@ -208,6 +208,36 @@ func (c *Checker) resolveCallArgs(
 			c.errorf(arg.Pos(), "cannot assign %s to parameter '%s' of type %s in %s",
 				argType, param.Name(), paramType, callDesc)
 		}
+		// T1585: a force-unwrapped container element (`container[key]!`) passed to a
+		// `~` (mutable-borrow) parameter would silently discard the mutation —
+		// `Map.[]` returns Optional[V] and `!` unwraps a genuine COPY, so there is no
+		// stable element address to write back to. Reject it rather than compile a
+		// clean program that quietly loses the write (the sibling of the Vector-index
+		// write-back fix in genMutRefArg). Move/consuming params are unaffected: their
+		// Type() is the bare type, not *types.MutRef.
+		if mr, isMutRef := paramType.(*types.MutRef); isMutRef {
+			if isUnwrappedContainerIndexArg(arg.Value) {
+				c.errorf(arg.Pos(),
+					"cannot pass a force-unwrapped container element to mutable-borrow parameter '%s' of type %s in %s: "+
+						"'container[key]!' produces a copy, so the mutation would be silently discarded — "+
+						"bind it to a local, mutate that, then write it back",
+					param.Name(), mr, callDesc)
+			} else if idx, isIndex := arg.Value.(*ast.IndexExpr); isIndex &&
+				!c.isMutablePlace(idx) && !c.recvIsInterior(idx) {
+				// T1585: an in-place container element (`container[i]`) passed to a `~`
+				// parameter now writes back to the element (genMutRefArg's IndexExpr
+				// path). If the container is only a shared (read-only) borrow, that
+				// write-back would mutate through the borrow — the same soundness hole
+				// that checkReceiverMutability blocks for `container[i].mutating()` and
+				// checkMutation blocks for `container[i].field = x`. Reject it here so
+				// the three spellings agree: mutate a container element only through a
+				// mutable place. (Without this the write silently escaped through a
+				// read-only borrow instead of being discarded as it was pre-fix.)
+				c.errorf(arg.Pos(),
+					"cannot pass a container element through a shared (read-only) borrow to mutable-borrow parameter '%s' of type %s in %s; take a `~` mutable borrow of the container instead",
+					param.Name(), mr, callDesc)
+			}
+		}
 		// Check for failable calls used as arguments: auto-propagate in ! functions,
 		// compile error in non-! functions. For variadic params whose args were
 		// wrapped in a synthetic ArrayLit, check each element individually (the
@@ -226,6 +256,25 @@ func (c *Checker) resolveCallArgs(
 	e.Args = resolved
 
 	return true
+}
+
+// isUnwrappedContainerIndexArg reports whether expr is `container[key]!` — an
+// OptionalUnwrapExpr whose inner (peeling ParenExpr) is an IndexExpr. Such an
+// unwrap produces a genuine copy of the element, so passing it to a `~`
+// (mutable-borrow) parameter would silently discard the callee's mutation. Used
+// by resolveCallArgs to reject that shape (T1585). Mirrors codegen's
+// isUnwrappedContainerIndex (expr_container.go).
+func isUnwrappedContainerIndexArg(expr ast.Expr) bool {
+	unwrap, ok := expr.(*ast.OptionalUnwrapExpr)
+	if !ok {
+		return false
+	}
+	inner := unwrap.Expr
+	if paren, ok := inner.(*ast.ParenExpr); ok {
+		inner = paren.Expr
+	}
+	_, ok = inner.(*ast.IndexExpr)
+	return ok
 }
 
 // resolveImplicitConstructorArgs validates and reorders arguments for an implicit

@@ -535,6 +535,24 @@ newtype_of_structural_value_parent() `test {
   assert(l.tag == 7, "own method added on top of a structural value parent");
 }
 
+// A value newtype's mutable-borrow (`~) param: an assign to the inherited
+// `value field mutates the caller's storage in place (T1550 extended the direct-
+// pass ABI so a newtype sharing its parent's struct forwards the caller's alloca).
+bump_latency(Latency ~p) {
+  p.raw = 21;
+}
+
+// T1585: a value newtype read out of a VECTOR element and passed to a `~ param
+// writes back to the caller's element. Uses a `Latency[]-typed vector (not
+// `Metric[]) so the write-back does not depend on the still-broken upcast-to-
+// structural-parent case called out just above (T1550).
+newtype_element_mutref_arg_writes_back() `test {
+  Latency[] v = [Latency(raw: 1), Latency(raw: 2)];
+  bump_latency(v[0]);
+  assert(v[0].raw == 21, "value-newtype vector element mut-ref arg writes back");
+  assert(v[1].raw == 2, "sibling newtype element untouched");
+}
+
 // Value types are copy, so a newtype crosses a goroutine boundary by value.
 newtype_over_channel() `test(exclude: wasm) {
   ch := channel[Seat](capacity: 1);

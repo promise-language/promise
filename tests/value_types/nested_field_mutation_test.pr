@@ -180,3 +180,60 @@ mutref_param() `test {
   assert(a.x == 40, "mutref param setter x");
   assert(a.y == 0, "mutref param setter y");
 }
+
+// 10. T1585: a value-type VECTOR element passed to a `~ (mut-ref) param must
+// write back to the caller's element, not a discarded materialization temp.
+// Index *receivers* (vs[0].setter, T1356/T1358) already wrote back; index
+// *arguments* to a `~ param silently lost the write until this fix.
+mutref_param_vector_element() `test {
+  vs := [Vec2(x: 1, y: 2), Vec2(x: 3, y: 4)];
+  bump_via_mutref(vs[0]);
+  assert(vs[0].x == 40, "vector element mut-ref arg writes back x");
+  assert(vs[0].y == 0, "vector element mut-ref arg writes back y");
+  assert(vs[1].x == 3, "sibling vector element untouched");
+  assert(vs[1].y == 4, "sibling vector element untouched y");
+}
+
+// 11. T1585: same for a fixed-size array element (the array index-slot path).
+mutref_param_array_element() `test {
+  Vec2[2] arr = [Vec2(x: 1, y: 2), Vec2(x: 3, y: 4)];
+  bump_via_mutref(arr[1]);
+  assert(arr[1].x == 40, "array element mut-ref arg writes back x");
+  assert(arr[1].y == 0, "array element mut-ref arg writes back y");
+  assert(arr[0].x == 1, "sibling array element untouched");
+  assert(arr[0].y == 2, "sibling array element untouched y");
+}
+
+// 12. T1585: the write-back reaches the caller's element through a `~ (mutable)
+// borrow of the container too — not just an owned local. This is the spelling the
+// read-only-borrow rejection tells the caller to use, so it must actually work.
+bump_first(Vec2[] ~v) {
+  bump_via_mutref(v[0]);
+}
+mutref_param_vector_element_through_mut_borrow() `test {
+  vs := [Vec2(x: 1, y: 2), Vec2(x: 3, y: 4)];
+  bump_first(vs);
+  assert(vs[0].x == 40, "mut-borrow container element writes back x");
+  assert(vs[0].y == 0, "mut-borrow container element writes back y");
+  assert(vs[1].x == 3, "sibling untouched through mut borrow");
+}
+
+// 13. T1585: a value-type element reached through a NESTED index (`vv[0][1]`)
+// also writes back — the inner index target is itself a vector, so
+// indexTargetIsArrayOrVector still holds and genIndexSlotPtr addresses the leaf
+// element slot rather than a temp.
+mutref_param_nested_vector_element() `test {
+  Vec2[][] vv = [[Vec2(x: 1, y: 2), Vec2(x: 3, y: 4)]];
+  bump_via_mutref(vv[0][1]);
+  assert(vv[0][1].x == 40, "nested vector element mut-ref arg writes back x");
+  assert(vv[0][1].y == 0, "nested vector element mut-ref arg writes back y");
+  assert(vv[0][0].x == 1, "sibling leaf element untouched");
+}
+
+// NOTE (T1585): two spellings are now COMPILE ERRORS rather than silent write
+// loss, so a batch test cannot contain them — they are covered by sema Go tests:
+//   - `bump_via_mutref(m[k]!)` — a force-unwrapped map element is an Optional[V]
+//     copy with no addressable slot (TestT1585_MapUnwrapToMutRefParamRejected).
+//   - `bump_via_mutref(v[0])` where `v` is a shared (read-only) borrow — the
+//     write-back would mutate through the borrow
+//     (TestT1585_VectorElementToMutRefThroughSharedBorrowRejected).

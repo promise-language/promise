@@ -1927,6 +1927,14 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	// Reset state for coroutine compilation
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
+	// A `~`-param helper compiled just before this test (e.g. `bump(T ~v)`) leaves
+	// stale mutRefPtrs/mutRefTypes entries. genIdentExpr consults mutRefPtrs BEFORE
+	// locals, so a same-named local in the test body (`v := ...`) would load through
+	// the helper's pointer with the helper's LLVM type — emitting an ill-typed
+	// `load`/`extractvalue` that fails opt on WASM. Test bodies take no params, so
+	// clearing both maps here is always correct (T1585).
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
 	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false

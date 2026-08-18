@@ -1153,6 +1153,18 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 		if !c.isMemberGetter(e) {
 			return c.genFieldPtr(e)
 		}
+	case *ast.IndexExpr:
+		// T1585: a vector/array element of a VALUE type is addressable in place.
+		// Pass the element slot pointer so the callee's `~` (mut-ref) mutations
+		// write back to the caller's element rather than a discarded temp. Value-
+		// type element vectors are always heap-allocated (T0062 statics require
+		// compile-time-constant scalar elements), so there is no rodata-write / COW
+		// hazard. Mirrors the value-type `~this` receiver path
+		// (genValueTypeReceiverAddr, T1358) — index *receivers* already write back;
+		// index *arguments* to a `~` param did not.
+		if c.mutRefIndexArgAddressable(e) {
+			return c.genIndexSlotPtr(e)
+		}
 	}
 	// Fallback (and non-lvalue getter idents/members): evaluate normally and store
 	// to a temp alloca. genCallArgExpr registers any heap-owning result as a
@@ -1161,6 +1173,33 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 	tmp := c.createEntryAlloca(val.Type())
 	c.block.NewStore(val, tmp)
 	return tmp
+}
+
+// mutRefIndexArgAddressable reports whether an IndexExpr argument to a `~`
+// (mut-ref) parameter names an in-place element slot that genIndexSlotPtr can
+// address AND whose element is a value type (T1585). Both must hold:
+//
+//  1. The index target is a Vector or fixed Array — so genIndexSlotPtr won't
+//     panic (a Map index is Optional[V] and returns by value; a user `[]`
+//     operator likewise returns a value, never an addressable slot).
+//  2. The element is a value type — its bits live directly in the slot, so
+//     passing the slot address lets the callee mutate the caller's element.
+//     A heap user-type element is a shared instance pointer that already
+//     reaches the caller through the materialized temp, so it stays on the
+//     existing fallback path (whole-value reassignment there is out of scope).
+func (c *Compiler) mutRefIndexArgAddressable(e *ast.IndexExpr) bool {
+	if !c.indexTargetIsArrayOrVector(e) {
+		return false
+	}
+	elemType := c.exprType(e)
+	if elemType == nil {
+		return false
+	}
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	named := extractNamed(elemType)
+	return named != nil && named.IsValueType()
 }
 
 // maybeEnableDupForMutRefArg sets dupStringFieldAccess or dupContainerFieldAccess

@@ -1,0 +1,53 @@
+// T1589: a `~` (mutable-borrow) parameter cannot be captured into a closure or a
+// `go {}` block — a mutable borrow's lifetime is bounded by the enclosing call, so
+// letting it escape would alias/dangle the borrow (and codegen would otherwise emit
+// malformed IR referencing the enclosing function's parameter). Sema now rejects it.
+//
+// The rejection cases are covered by Go sema tests (the batch harness compiles all
+// functions into one binary and cannot assert per-function compile failures). These
+// batch tests exercise the *sound alternative* the error steers users toward:
+// capture an owned value with `move`. The invariant: borrows are not capturable;
+// capture requires an owned value (via `move`) or a copy-type value.
+// --- owned heap value captured via `move` (the alternative to a `~` capture) ---
+take_box(Box move x)() -> int {
+  return move || -> int {
+    return x.v;
+  };
+}
+
+type Box {
+  int v;
+}
+
+mutref_alternative_heap() `test {
+  b := Box(v: 7);
+  g := take_box(move b);
+  assert(g() == 7, "closure capturing an owned Box via move reads correctly");
+}
+
+// --- owned value-type value captured via `move` ---
+type P {
+  int x `value;
+  int y `value;
+}
+
+take_point(P move p)() -> int {
+  return move || -> int {
+    return p.x + p.y;
+  };
+}
+
+mutref_alternative_value() `test {
+  q := P(x: 3, y: 4);
+  g := take_point(move q);
+  assert(g() == 7, "closure capturing an owned value-type via move reads correctly");
+}
+
+// --- a copy-type value captured without move still works (control) ---
+mutref_alternative_copy() `test {
+  n := 41;
+  g := || -> int {
+    return n + 1;
+  };
+  assert(g() == 42, "copy-type capture still works without move");
+}

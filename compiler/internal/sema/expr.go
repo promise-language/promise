@@ -519,6 +519,17 @@ func (c *Checker) checkLambdaCapture(e *ast.IdentExpr, obj types.Object) {
 		return
 	}
 
+	// T1589: a `~` (mutable-borrow) parameter cannot be captured into a closure.
+	// A mutable borrow's lifetime is bounded by the enclosing call; letting it escape
+	// into a lambda (or `go {}` block) would alias/dangle the borrow. Reject it the
+	// same way a plain non-copy borrow is already rejected — capture an owned value
+	// with `move` instead. (MutRef is misclassified as copy by isCopyField, which is
+	// why it otherwise slips past the non-copy check below and crashes codegen.)
+	if _, isMutRef := v.Type().(*types.MutRef); isMutRef {
+		c.errorf(e.Pos(), "cannot capture mutable borrow '%s' in a closure; a `~` parameter is a mutable borrow that cannot outlive the call — pass an owned value and capture it with `move`", e.Name)
+		return
+	}
+
 	// Determine capture mode
 	byMove := c.lambdaMove
 	if !byMove && !isCopyField(v.Type()) {

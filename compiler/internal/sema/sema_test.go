@@ -2676,6 +2676,101 @@ func TestLambdaCapturesNonCopyWithMove(t *testing.T) {
 	`)
 }
 
+// T1589: a `~` (mutable-borrow) parameter cannot be captured into a closure —
+// its lifetime is bounded by the enclosing call. Reject it in sema instead of
+// crashing codegen with malformed IR (`opt: use of undefined value`).
+func TestLambdaCapturesMutRefParamHeapError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box { int v; }
+		apply(Box ~x) {
+			f := || -> int { return x.v; };
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesMutRefParamPrimitiveError(t *testing.T) {
+	// The primitive (copy-type) path also crashed codegen — MutRef is
+	// misclassified as copy, so it slipped past the non-copy check.
+	errs := checkErrs(t, `
+		bump(int ~n) {
+			f := || -> int { return n; };
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesMutRefParamValueTypeError(t *testing.T) {
+	errs := checkErrs(t, `
+		type P { int x `+"`value"+`; int y `+"`value"+`; }
+		apply(P ~p) {
+			f := || -> int { return p.x; };
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesMutRefParamInGoBlockError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box { int v; }
+		apply(Box ~x) {
+			go { int y = x.v; }
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesMutRefParamMoveDoesNotRescue(t *testing.T) {
+	// `move` cannot rescue a `~` param — you cannot move out of a borrow.
+	errs := checkErrs(t, `
+		type Box { int v; }
+		apply(Box ~x) {
+			f := move || -> int { return x.v; };
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesMutRefParamNestedLambdaError(t *testing.T) {
+	// The `~` param is referenced only from an inner lambda nested inside an
+	// outer one. Capture propagation must still reject it at the inner boundary
+	// — a stale mut-ref binding would otherwise reach codegen through either
+	// nesting level.
+	errs := checkErrs(t, `
+		type Box { int v; }
+		apply(Box ~x) {
+			f := || -> int {
+				g := || -> int { return x.v; };
+				return g();
+			};
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesMutRefParamPrimitiveInGoBlockError(t *testing.T) {
+	// The go-block rejection is type-based (MutRef), not sendability-based, so a
+	// primitive `int ~n` — which would otherwise pass the isSendableType check —
+	// must still be rejected before it reaches codegen.
+	errs := checkErrs(t, `
+		bump(int ~n) {
+			go { int y = n; }
+		}
+	`)
+	expectError(t, errs, "cannot capture mutable borrow")
+}
+
+func TestLambdaCapturesValueTypeParamOK(t *testing.T) {
+	// Negative control: a plain value-type param is a copy and captures fine —
+	// the T1589 guard must be MutRef-specific and not regress copy-capture.
+	checkOK(t, `
+		type P { int x `+"`value"+`; int y `+"`value"+`; }
+		apply(P p) {
+			f := || -> int { return p.x; };
+		}
+	`)
+}
+
 func TestLambdaNoFalseCapture(t *testing.T) {
 	// Variable declared inside lambda should not trigger capture
 	checkOK(t, `

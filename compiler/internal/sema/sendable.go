@@ -323,6 +323,17 @@ func (c *Checker) checkGoBlockSendable(e *ast.GoExpr) {
 			if !scopeContains(goScope, v.Pos()) {
 				seen[v.Name()] = true
 				typ := v.Type()
+				// T1589: a `~` (mutable-borrow) parameter cannot be captured into a
+				// `go {}` block. A mutable borrow's lifetime is bounded by the
+				// enclosing call, so letting it escape into a goroutine (which runs
+				// asynchronously) would alias/dangle the borrow — and codegen would
+				// otherwise emit malformed IR referencing the enclosing function's
+				// parameter. Reject it; pass an owned value instead. Mirrors the
+				// lambda-capture rejection in checkLambdaCapture.
+				if _, isMutRef := typ.(*types.MutRef); isMutRef {
+					c.errorf(ex.Pos(), "cannot capture mutable borrow '%s' in a goroutine; a `~` parameter is a mutable borrow that cannot outlive the call — pass an owned value instead", v.Name())
+					return
+				}
 				if typ != nil && !isSendableType(typ, make(map[types.Type]bool)) {
 					c.errorf(ex.Pos(), "cannot send non-sendable variable '%s' of type %s across goroutine boundary", v.Name(), typ)
 				}

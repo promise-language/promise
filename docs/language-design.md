@@ -2540,6 +2540,7 @@ The following abbreviations are **universally preferred exceptions** to the full
 | `dir` | `directory` |
 | `env` | `environment` |
 | `func` | `function` |
+| `hex` | `hexadecimal` |
 | `id` | `identifier` |
 | `info` | `information` |
 | `init` | `initialize` |
@@ -2560,6 +2561,23 @@ These abbreviations are so universally recognized that the abbreviated form is m
 `stdin`/`stdout`/`stderr` are the standard-stream names; they abbreviate two-word forms and are the canonical identifiers wherever a standard stream (the process's own, or a subprocess's) is referenced — e.g. `os.ProcessResult.stdout`/`.stderr`, `os.Process.take_stdin()`/`take_stdout()`/`take_stderr()`, and the `std` `stdin`/`stdout`/`stderr` getters.
 
 Human-readable prose (doc strings, error messages, comments) is not subject to this rule — only identifiers (type names, field names, function/method names, parameter names, getter/setter names).
+
+#### Proper Names Are Used Verbatim
+
+The full-word rule governs **abbreviating English words for the sake of shortness** — it never applies to proper names. The names of technologies, formats, protocols, algorithms, standards, and products are used verbatim, exactly as their own specification or documentation spells them, even when they look like abbreviations and even when they are absent from the dictionary above.
+
+`base64` is `base64` — not `base_sixty_four`. Likewise `utf8`, `json`, `http`, `tcp`, `sha256`, `url`, `uuid`, `ascii`, `posix`, `wasm`, `sql`, `iso8601`, `png`. A name is a name: it identifies one specific thing, so an agent can neither predict nor expand it, and rewriting it makes the identifier harder to recognize, not easier.
+
+Only the casing is adapted to Promise's conventions — `snake_case` for functions, methods, fields, parameters, and getters; `PascalCase` for types and enums:
+
+```promise
+decode_base64(string input) u8[] { ... }     // not decode_base_sixty_four
+type JsonEncoder { ... }                     // not JSONEncoder
+type HttpRequest { ... }                     // not HTTPRequest
+sha256(u8[] data) u8[] { ... }               // not secure_hash_algorithm_256
+```
+
+Acronyms embedded in a `PascalCase` name are capitalized as a normal word (`JsonEncoder`, `HttpRequest`, `TcpListener`, `UuidV4`), never left fully upper-case — this keeps word boundaries visible in names that combine several.
 
 ### 9.4 Named Arguments, Defaults & Optional Parameters
 

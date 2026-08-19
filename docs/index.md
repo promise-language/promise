@@ -26,6 +26,7 @@
 - [release-automation.md](release-automation.md) — GitHub release pipeline: prebuilt blobs, hash-embedded manifest, thin/full + stub builds, publishing.
 - [windows-support.md](windows-support.md) — Native MSVC ABI, Windows SDK, self-contained compiler binary.
 - [wasm-bindings.md](wasm-bindings.md) — WIT/WebIDL ingestion for safe WASM host bindings.
+- [wasm-web-callbacks.md](wasm-web-callbacks.md) — Host→guest callbacks on `wasm32-web`: the reactor execution model, bounded pumps, and event channels.
 - [size-optimization.md](size-optimization.md) — Binary size tracking and regression prevention across all targets.
 
 ## Infrastructure

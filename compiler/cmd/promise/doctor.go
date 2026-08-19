@@ -314,9 +314,10 @@ func doctorCheckMuslCRT() doctorCheck {
 }
 
 // doctorCheckOpenSSL reports whether the static OpenSSL archives (for TLS static
-// linking, T1596 / #28) are available. NOT required: no program links TLS yet (the
-// codegen bridge lands with T0077), so a build without OpenSSL is healthy — this
-// check is informational and never fails the environment.
+// linking, T1596 / #28) are available. NOT required: only a program that imports
+// the tls module (T0077) links OpenSSL, so a host without the archives is still
+// healthy for every other build — this check is informational and never fails the
+// environment. A tls build that cannot find them errors at link time instead.
 func doctorCheckOpenSSL() doctorCheck {
 	c := makeDoctorCheck("OpenSSL (Linux TLS static linking)", doctorOK, false)
 

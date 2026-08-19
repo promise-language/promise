@@ -4794,8 +4794,9 @@ func openSSLValid(dir string) bool {
 //  4. Content-addressed store view (when the manifest carries openssl blobs)
 //  5. Extract the embedded archives to cache (full builds with real archives)
 //
-// Only ever called when a program needs TLS (needsTLS). No program declares a
-// promise_tls_* extern yet, so today this is reached only by `promise doctor`.
+// Only ever called when a program needs TLS (needsTLS) — i.e. one that imports
+// the tls catalog module (T0077), whose PAL entry points are the promise_tls_*
+// externs NeedsTLS detects. Also reached by `promise doctor`.
 func findOpenSSL(target string) (string, error) {
 	ensureCacheValid()
 

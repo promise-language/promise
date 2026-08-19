@@ -4,9 +4,9 @@ import "testing"
 
 // TestNeedsTLS exercises the OpenSSL link gate (T1596 / #28). NeedsTLS is true iff the
 // program declares at least one promise_tls_* extern — the by-construction gate
-// that keeps non-TLS programs from linking OpenSSL. No program declares such an
-// extern until T0077's codegen bridge, so in the real suite this is always
-// false; here we drive both branches directly via the exported Externs field.
+// that keeps non-TLS programs from linking OpenSSL. Since T0077 the tls module
+// declares those externs, so the gate is live; here we drive both branches
+// directly via the exported Externs field.
 func TestNeedsTLS(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -92,7 +92,7 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 				// WASM imports: strings flatten to a canonical (ptr, len) pair
 				// instead of a pointer to Promise's private boxed-string value
 				// struct — the host (JS) side has no knowledge of that internal
-				// layout, and previously received a single pointer to it verbatim (#4).
+				// layout, and previously received a single pointer to it verbatim (T1506).
 				params = append(params, ir.NewParam(paramName+"_ptr", irtypes.I8Ptr))
 				params = append(params, ir.NewParam(paramName+"_len", irtypes.I32))
 				continue
@@ -183,7 +183,7 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 				continue
 			}
 			// WASM imports: strings flatten to a (ptr, len) pair rather than a
-			// pointer to Promise's private boxed-string value struct (#4). `arg`
+			// pointer to Promise's private boxed-string value struct (T1506). `arg`
 			// is already the raw i8* string instance pointer (see packString).
 			if paramLayout != nil && paramLayout.Kind == LayoutString {
 				dataPtr, dataLen := c.extractStringDataLenFromInstance(c.block, arg)

@@ -3056,7 +3056,7 @@ func TestWebIdlEndToEnd(t *testing.T) {
 	}
 	// The .pr side's wasm_import name and the .js side's import key must match
 	// exactly, or WebAssembly.instantiate() fails at import-resolution time
-	// before any user code runs (#1).
+	// before any user code runs (T1506).
 	if !strings.Contains(prCode, `"[resource-drop]console"`) {
 		t.Error("Promise code should declare a wasm_import for [resource-drop]console")
 	}

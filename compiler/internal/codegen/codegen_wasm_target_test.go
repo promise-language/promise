@@ -168,13 +168,14 @@ func TestWasmExternF64Param(t *testing.T) {
 	assertContains(t, ir, "declare void @test_set(double %val)")
 }
 
-// #4: wasm_import string PARAMETERS must flatten to a canonical (ptr, len)
+// T1506: wasm_import string PARAMETERS must flatten to a canonical (ptr, len)
 // pair, matching what host (JS) glue expects — not a pointer to Promise's
 // private boxed-string value struct. Before this fix, a wasm_import function
 // taking a plain `string` param received a single i8* pointing to a
-// {vtable=null, instance} value-struct alloca (the record layout reverse-
-// engineered in PROMISE_COMPILER_BUGS.md), so real host code receiving the
+// {vtable=null, instance} value-struct alloca, so real host code receiving the
 // call saw one opaque pointer argument instead of the expected (ptr, len).
+// The canonical (ptr, len) shape is the one documented in docs/wasm-bindings.md
+// §"Canonical ABI Representation"; no host should need to know the boxed layout.
 func TestWasmImportStringParamFlattensToPtrLen(t *testing.T) {
 	ir := generateIRForTarget(t, `
 		take_string(string s) `+"`extern(\"take_string\") `wasm_import(\"dbg\", \"take_string\") `target(web)"+`;
@@ -185,7 +186,7 @@ func TestWasmImportStringParamFlattensToPtrLen(t *testing.T) {
 	assertContains(t, ir, "call void @take_string(i8*")
 }
 
-// #4: the flattening must be scoped to wasm_import externs only — a plain
+// T1506: the flattening must be scoped to wasm_import externs only — a plain
 // (non-wasm_import) native extern taking a string param keeps passing the
 // existing boxed value-struct pointer, matching the native C ABI other
 // native extern callers (e.g. cabi_string_data in wasm_alloc.c) already rely on.

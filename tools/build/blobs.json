@@ -384,6 +384,70 @@
         "archive_sha256": "19032a762b8c6967d3789de1bf540754a0121e517402022eebd3ae6f1c9965a4",
         "member": "usr/lib/libc.a"
       }
+    },
+    {
+      "dependency": "openssl",
+      "version": "3.5.7-r0",
+      "target": "linux-amd64",
+      "name": "libcrypto.a",
+      "sha256": "d4ef5d00feb97858c4c704ae4a64a3e43f544ea44a13b038d55a922ae24302d7",
+      "size": 28162174,
+      "compression": "brotli",
+      "compressed_size": 8877133,
+      "compressed_sha256": "427a0fe3dbfcbd1a98ff9739f040712f6481a8fb4db288c585edb52f18cb0fe8",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssl-libs-static-3.5.7-r0.apk",
+        "archive_sha256": "2eb5c7a1307ecdc391fbb597ec024c12f0144937a3dca88414de6e093290aa39",
+        "member": "usr/lib/libcrypto.a"
+      }
+    },
+    {
+      "dependency": "openssl",
+      "version": "3.5.7-r0",
+      "target": "linux-amd64",
+      "name": "libssl.a",
+      "sha256": "b4fd4631bda7ccdfc913ad24f5e4f20fa459473227940fe90d93ee7821d3cdc8",
+      "size": 6955116,
+      "compression": "brotli",
+      "compressed_size": 2546646,
+      "compressed_sha256": "c4d2ad4db6e5a8a46760ca65a9bc3f413c550e9710b7d3b277ce62362b855088",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssl-libs-static-3.5.7-r0.apk",
+        "archive_sha256": "2eb5c7a1307ecdc391fbb597ec024c12f0144937a3dca88414de6e093290aa39",
+        "member": "usr/lib/libssl.a"
+      }
+    },
+    {
+      "dependency": "openssl",
+      "version": "3.5.7-r0",
+      "target": "linux-arm64",
+      "name": "libcrypto.a",
+      "sha256": "f5dc87374cab41deac203efd78caabdda8061475a84da3ef53fad3473c09da0f",
+      "size": 35653020,
+      "compression": "brotli",
+      "compressed_size": 7251970,
+      "compressed_sha256": "e5090bc9fe1491c77e63bb6651d8eb405956634dda0aa433bcd9c9d93528bdc4",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssl-libs-static-3.5.7-r0.apk",
+        "archive_sha256": "592bb90fd5156de0a6dc657e154246eaa18f8c6e40677fb013c5a42b094eae86",
+        "member": "usr/lib/libcrypto.a"
+      }
+    },
+    {
+      "dependency": "openssl",
+      "version": "3.5.7-r0",
+      "target": "linux-arm64",
+      "name": "libssl.a",
+      "sha256": "5b1501a8a907c02ff931eb4a350b732a5b7d2d77726a9d5e8ffbc1ca098042af",
+      "size": 9635708,
+      "compression": "brotli",
+      "compressed_size": 1853145,
+      "compressed_sha256": "5b2815392691f2a4bdbfc55a5e06a72688c1abd549cc8cdadfd59502864622d7",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssl-libs-static-3.5.7-r0.apk",
+        "archive_sha256": "592bb90fd5156de0a6dc657e154246eaa18f8c6e40677fb013c5a42b094eae86",
+        "member": "usr/lib/libssl.a"
+      }
     }
   ]
 }

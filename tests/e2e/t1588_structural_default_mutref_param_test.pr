@@ -1,0 +1,250 @@
+// T1588: a mut-ref (`T~`) parameter used after a point in the same body that
+// lazily synthesizes a structural default method panicked codegen with
+// `undefined variable "x"`.
+//
+// A mut-ref param is never alloca'd — it is bound in the compiler's
+// mutRefPtrs/mutRefTypes maps, not in `locals`. Resolving the call's owner runs
+// ensureDefaultMethodsSynthesized, which generates the synthesized method body
+// mid-statement, bracketed by saveState/restoreState. compilerState carried
+// `locals` but not mutRefPtrs, so the nested define* entry cleared the mut-ref
+// binding and nothing put it back. A *local* receiver never hit this, which is
+// why the boundary looked value-newtype-specific: `locals` IS snapshotted.
+//
+// Every test below asserts the write-back actually reaches the caller, so a
+// silently-spilled copy fails here just as loudly as the original panic.
+// --- (a) value newtype: inherited `~this` default through a `T~` param -------
+type Counter `structural {
+  int c `value;
+  bump(~this) {
+    this.c = this.c + 20;
+  }
+}
+type Tick is Counter {
+}
+
+apply_value(Tick ~x) {
+  x.bump();
+}
+
+value_newtype_inherited_mutref_param() `test {
+  Tick t = Tick(c: 1);
+  apply_value(t);
+  assert(t.c == 21, "value newtype write-back reaches the caller");
+}
+
+// --- (b) heap newtype: same shape, other genMethodCall branch ---------------
+
+type Bumper `structural {
+  int c;
+  bump(~this) {
+    this.c = this.c + 20;
+  }
+}
+type Heaped is Bumper {
+}
+
+apply_heap(Heaped ~x) {
+  x.bump();
+}
+
+heap_newtype_inherited_mutref_param() `test {
+  Heaped h = Heaped(c: 1);
+  apply_heap(h);
+  assert(h.c == 21, "heap newtype write-back reaches the caller");
+}
+
+// --- (c) through a generic bound --------------------------------------------
+
+apply_generic[T: Counter](T ~x) {
+  x.bump();
+}
+
+generic_bound_inherited_mutref_param() `test {
+  Tick t = Tick(c: 2);
+  apply_generic(t);
+  assert(t.c == 22, "generic-bound write-back reaches the caller");
+}
+
+// --- (d) the general case: a mut-ref param used AFTER an unrelated -----------
+//     structural-default call in the same body. No inheritance is involved in
+//     the second statement — the binding just has to survive the lazy
+//     synthesis triggered by the first one.
+
+type Greeter `structural {
+  int n;
+  greet(this) int {
+    return this.n;
+  }
+}
+type Hello is Greeter {
+}
+
+type Plain {
+  int v;
+}
+
+apply_after_synthesis(Plain ~p, Hello h) {
+  g := h.greet();
+  p.v = g + 1;
+}
+
+mutref_param_survives_unrelated_default_synthesis() `test {
+  Plain p = Plain(v: 0);
+  Hello h = Hello(n: 6);
+  apply_after_synthesis(p, h);
+  assert(p.v == 7, "mut-ref param still bound after a nested synthesis");
+}
+
+// --- (e) droppable fields mutated through the mut-ref param -----------------
+//     Mirrors tests/e2e/t1070_mutref_param_test.pr so leak detection covers
+//     the structural-default path: a spilled copy would drop the caller's
+//     string/vector twice or leak the replaced one.
+
+type Labeled `structural {
+  string label;
+  int[] items;
+  relabel(~this) {
+    this.label = "relabeled";
+    this.items.push(99);
+  }
+}
+type Tagged is Labeled {
+}
+
+apply_droppable(Tagged ~x) {
+  x.relabel();
+}
+
+droppable_fields_through_mutref_param() `test {
+  Tagged t = Tagged(label: "original", items: [1, 2]);
+  apply_droppable(t);
+  assert(t.label == "relabeled", "string field replaced through mut-ref param");
+  assert(t.items.len == 3, "vector field grown through mut-ref param");
+  assert(t.items[2] == 99, "pushed element visible to the caller");
+}
+
+// --- (f) the mirror half: the binding must also be CLEARED for a nested body --
+//     A structural-view method adapter is built by hand, mid-expression, while
+//     the enclosing function is being generated, and it fills the concrete
+//     method's trailing parameters by generating their DEFAULT-VALUE expressions
+//     into its own body. Identifier resolution consults the mut-ref bindings
+//     BEFORE locals, so an inherited binding makes a default expression naming
+//     the same identifier resolve to the ENCLOSING function's parameter pointer.
+//     The default here allocates, so a leak also surfaces if the adapter's temps
+//     land in the wrong body's cleanup list.
+
+get default_suffix string {
+  return "!";
+}
+
+type Describable `structural {
+  describe(this) string `abstract;
+}
+
+type Widget {
+  string name;
+  describe(this, string suffix = default_suffix) string {
+    return this.name + suffix;
+  }
+}
+
+type Sink {
+  string text;
+}
+
+// `default_suffix` is deliberately also the name of the mut-ref parameter.
+fill_through_view(Sink ~default_suffix) {
+  Widget w = Widget(name: "widget");
+  Describable d = w;
+  default_suffix.text = d.describe();
+}
+
+view_adapter_default_arg_with_colliding_mutref_param() `test {
+  Sink s = Sink(text: "");
+  fill_through_view(s);
+  assert(s.text == "widget!", "the adapter's default came from the module getter, not the mut-ref param");
+}
+
+// --- (g) the other per-name binding maps carried by the same fix --------------
+//     mutRefPtrs is the one that panicked, but the same snapshot also has to
+//     carry matchBorrowedIdents (T0485/T0672) and borrowOptionalLocals (T1085).
+//     Losing either fails SILENTLY — a borrow stops being recognized as one and
+//     is freed a second time — so both shapes below put a structural-default
+//     call BETWEEN the point that records the borrow and the point that consults
+//     it, and rely on the double-free/leak enforcement to catch a lost mark.
+
+type Noter `structural {
+  int n;
+  note(this) int {
+    return this.n;
+  }
+}
+type Noted is Noter {
+}
+
+type MapHolder {
+  (map[string, string]?, int) pr;
+}
+
+// matchBorrowedIdents: `(m, k) := hd.pr` sources from a struct field, so `m`
+// aliases heap owned by MapHolder and carries no drop binding. If the mark is
+// lost across the synthesis of `Noted.note`, the `if let` below gives `mm` an
+// owning drop and the map is freed twice — with MapHolder.drop.
+match_borrowed_ident_survives_default_synthesis() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  MapHolder hd = MapHolder(pr: (mo, 5));
+  (m, k) := hd.pr;
+  Noted nt = Noted(n: 2);
+  int g = nt.note();
+  assert(g == 2, "the structural default ran between the destructure and the unwrap");
+  if mm := m {
+    assert(mm.len == 1, "the borrowed map is still readable");
+    assert(mm.get_or("k", "") == "v", "the borrowed map still holds its entry");
+  } else {
+    assert(false, "should be some");
+  }
+  assert(k == 5, "the second destructured element is unaffected");
+}
+
+// borrowOptionalLocals: `Sub588? o = b as Sub588` downcasts a borrow, so the
+// optional's inner aliases the caller's instance. If the mark is lost across the
+// synthesis, the handler unwrap neutralizes the source and tracks the merged phi,
+// which then frees an instance the caller still owns.
+type Base588 {
+  string tag;
+  kind(this) string {
+    return "base";
+  }
+}
+type Sub588 is Base588 {
+  int y;
+  kind(this) string {
+    return "sub";
+  }
+}
+
+downcast_through_default_synthesis(Base588 b) int {
+  Sub588? o = b as Sub588;
+  Noted nt = Noted(n: 3);
+  int g = nt.note();
+  return (o? _ {
+    Sub588(tag: "fallback", y: -1)
+  }).y + g;
+}
+
+borrow_optional_local_survives_default_synthesis() `test {
+  Sub588 s = Sub588(tag: "owned", y: 4);
+  int got = downcast_through_default_synthesis(s);
+  assert(got == 7, "the borrowed downcast yielded its own y plus the default's value");
+  assert(s.tag == "owned", "the caller still owns its instance after the borrowed unwrap");
+  assert(s.kind() == "sub", "the caller's instance is intact");
+}
+
+borrow_optional_local_absent_arm_survives_default_synthesis() `test {
+  Base588 b = Base588(tag: "plain");
+  int got = downcast_through_default_synthesis(b);
+  assert(got == 2, "the absent arm used the recovery value plus the default's value");
+  assert(b.tag == "plain", "the caller's instance is intact");
+}

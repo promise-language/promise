@@ -983,14 +983,9 @@ func (c *Compiler) emitViewMethodAdapter(
 	c.envTempMap = make(map[value.Value]int)
 	c.enumCtorTemps = nil
 	c.tempTrackingEnabled = true
-	// The coroutine fields are not part of compilerState; save/reset/restore them
-	// manually (as genLambdaExpr does) so a default's channel/task operation can
-	// never branch to an enclosing coroutine's suspend/cleanup blocks.
-	savedInCoroutine, savedCoroSuspend, savedCoroCleanup := c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk
-	c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk = false, nil, nil
-	defer func() {
-		c.inCoroutine, c.coroSuspendBlk, c.coroCleanupBlk = savedInCoroutine, savedCoroSuspend, savedCoroCleanup
-	}()
+	// The coroutine/generator body flags are cleared by saveState above (and put
+	// back by restoreState), so a default's channel/task operation can never branch
+	// to an enclosing coroutine's suspend/cleanup blocks.
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry

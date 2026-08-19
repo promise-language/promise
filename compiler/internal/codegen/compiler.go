@@ -1916,14 +1916,11 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	coroFn := c.module.NewFunc(fmt.Sprintf(".test_coro.%s", nameStr), irtypes.I8Ptr)
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
 
-	// Save compiler state
+	// Save compiler state. saveState covers the coroutine/generator body flags and
+	// the panic/return blocks (it snapshots them and clears them for this body), so
+	// only goExprFireAndForget — which it does not carry — is saved by hand.
 	saved := c.saveState()
-	savedInCoroutine := c.inCoroutine
-	savedCoroCleanup := c.coroCleanupBlk
-	savedCoroSuspend := c.coroSuspendBlk
-	savedPanicExitBlock := c.panicExitBlock
 	savedGoExprFF := c.goExprFireAndForget
-	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	c.goExprFireAndForget = false
 
 	// Reset state for coroutine compilation
@@ -2087,18 +2084,29 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 
 	// --- Restore compiler state ---
 	c.restoreState(saved)
-	c.inCoroutine = savedInCoroutine
-	c.coroCleanupBlk = savedCoroCleanup
-	c.coroSuspendBlk = savedCoroSuspend
-	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
-	c.coroutineReturnBlock = savedCoroutineReturnBlock
 
 	return coroFn
 }
 
-// compilerState captures the mutable compiler fields that defineMethodFunc overwrites.
-// Used to save/restore state when synthesizing default methods during another function's codegen.
+// compilerState captures the mutable compiler fields that belong to the function
+// body being generated. Used to save/restore state when a nested body (a
+// structural default method, a view adapter, a test coroutine) has to be
+// generated in the middle of another function's codegen.
+//
+// T1588 invariant: every per-function-body field MUST appear here and be copied
+// in saveState / written back in restoreState — both the ones the define* entry
+// points (defineFunc, defineMethodFunc, ...) reset and the ones they don't.
+// A nested body synthesized mid-statement (a structural default method
+// synthesized lazily while generating a call) fails in one of two ways otherwise:
+//   - a field the define* entry resets but that isn't snapshotted here is
+//     silently LOST — how T1588 dropped mutRefPtrs and panicked with
+//     "undefined variable";
+//   - a field they don't reset and that isn't cleared here is silently INHERITED
+//     — how the same synthesis inside a `go {}` / generator body emitted branches
+//     to the enclosing coroutine's blocks ("use of undefined value '%cleanup'").
+//
+// state_test.go enforces the round-trip mechanically.
 type compilerState struct {
 	fn                   *ir.Func
 	block                *ir.Block
@@ -2106,6 +2114,10 @@ type compilerState struct {
 	locals               map[string]*ir.InstAlloca
 	localNameCount       map[string]int
 	dropFlags            map[string]*ir.InstAlloca
+	mutRefPtrs           map[string]value.Value    // T1588: per-function, reset by every define* entry
+	mutRefTypes          map[string]irtypes.Type   // T1588
+	matchBorrowedIdents  map[string]bool           // T1588: per-function (T0485)
+	borrowOptionalLocals map[string]bool           // T1588: per-function (T1085)
 	castSubjectMatch     map[string]value.Value    // T0849: function-scoped, like dropFlags
 	forInHandleSlotPtr   map[string]*ir.InstAlloca // T0617
 	dropBindings         map[string]scopeBinding
@@ -2141,6 +2153,30 @@ type compilerState struct {
 	borrowedValueParams  map[string]bool // T0945: borrowed value params of the current function/method
 	discardedExpr        ast.Expr        // T1029
 	discardAliasArgPtrs  []value.Value   // T1029
+
+	// The "what kind of function body am I in" flags. A body synthesized through
+	// saveState is always a plain function of its own, never a continuation of the
+	// enclosing coroutine/generator/`go! {}` body, so saveState CLEARS these after
+	// snapshotting them (like panicExitBlock/coroutineReturnBlock above) and
+	// restoreState brings the enclosing body's back. Leaving them set made a
+	// default method synthesized mid-statement inside a `go {}` body branch to the
+	// enclosing coroutine's %cleanup, and one synthesized inside a generator body
+	// branch to its %final.suspend — blocks of a different LLVM function, so `opt`
+	// rejected the module with "use of undefined value".
+	inCoroutine                 bool
+	coroCleanupBlk              *ir.Block
+	coroSuspendBlk              *ir.Block
+	inGenerator                 bool
+	generatorCanError           bool // B0023
+	generatorYieldSlot          value.Value
+	generatorErrorSlot          value.Value // B0023
+	generatorCoroId             value.Value
+	generatorCleanup            *ir.Block
+	generatorSuspend            *ir.Block
+	generatorFinalSuspend       *ir.Block
+	inFailableGoBlock           bool // T1384
+	failableGoBlockAggType      *irtypes.StructType
+	failableGoBlockFinalSuspend *ir.Block
 }
 
 func (c *Compiler) saveState() compilerState {
@@ -2151,8 +2187,12 @@ func (c *Compiler) saveState() compilerState {
 		locals:               c.locals,
 		localNameCount:       c.localNameCount,
 		dropFlags:            c.dropFlags,
-		castSubjectMatch:     c.castSubjectMatch,   // T0849
-		forInHandleSlotPtr:   c.forInHandleSlotPtr, // T0617
+		mutRefPtrs:           c.mutRefPtrs,           // T1588
+		mutRefTypes:          c.mutRefTypes,          // T1588
+		matchBorrowedIdents:  c.matchBorrowedIdents,  // T1588
+		borrowOptionalLocals: c.borrowOptionalLocals, // T1588
+		castSubjectMatch:     c.castSubjectMatch,     // T0849
+		forInHandleSlotPtr:   c.forInHandleSlotPtr,   // T0617
 		dropBindings:         c.dropBindings,
 		blockCounter:         c.blockCounter,
 		canError:             c.canError,
@@ -2186,6 +2226,21 @@ func (c *Compiler) saveState() compilerState {
 		borrowedValueParams:  c.borrowedValueParams,
 		discardedExpr:        c.discardedExpr,       // T1029
 		discardAliasArgPtrs:  c.discardAliasArgPtrs, // T1029
+
+		inCoroutine:                 c.inCoroutine,
+		coroCleanupBlk:              c.coroCleanupBlk,
+		coroSuspendBlk:              c.coroSuspendBlk,
+		inGenerator:                 c.inGenerator,
+		generatorCanError:           c.generatorCanError,
+		generatorYieldSlot:          c.generatorYieldSlot,
+		generatorErrorSlot:          c.generatorErrorSlot,
+		generatorCoroId:             c.generatorCoroId,
+		generatorCleanup:            c.generatorCleanup,
+		generatorSuspend:            c.generatorSuspend,
+		generatorFinalSuspend:       c.generatorFinalSuspend,
+		inFailableGoBlock:           c.inFailableGoBlock,
+		failableGoBlockAggType:      c.failableGoBlockAggType,
+		failableGoBlockFinalSuspend: c.failableGoBlockFinalSuspend,
 	}
 	// T1029: a nested function/coroutine body is not the discarded statement; do not
 	// inherit the outer's discarded-expr marker. restoreState brings it back.
@@ -2195,6 +2250,36 @@ func (c *Compiler) saveState() compilerState {
 	// when saveState is used before switching c.fn to a different LLVM function.
 	c.panicExitBlock = nil
 	c.coroutineReturnBlock = nil
+	// The nested body is its own plain function — it must not inherit (and branch
+	// into) the enclosing coroutine / generator / `go! {}` body's blocks. The
+	// coroutine and generator entry points set these up again for their own body;
+	// restoreState brings the enclosing body's back. See compilerState.
+	c.inCoroutine = false
+	c.coroCleanupBlk = nil
+	c.coroSuspendBlk = nil
+	c.inGenerator = false
+	c.generatorCanError = false
+	c.generatorYieldSlot = nil
+	c.generatorErrorSlot = nil
+	c.generatorCoroId = nil
+	c.generatorCleanup = nil
+	c.generatorSuspend = nil
+	c.generatorFinalSuspend = nil
+	c.inFailableGoBlock = false
+	c.failableGoBlockAggType = nil
+	c.failableGoBlockFinalSuspend = nil
+	// T1588: nor the outer's per-name bindings. genIdentExpr consults mutRefPtrs
+	// BEFORE locals, so a leftover entry silently shadows a same-named local of the
+	// nested body and loads through ANOTHER function's parameter pointer. defineFunc
+	// / defineMethodFunc reset all four themselves, but the saveState callers that
+	// build a body by hand (compileTestCoroutine, emitViewMethodAdapter, emitCloneFn,
+	// the extern-call wrapper) each maintain their own reset list and had drifted out
+	// of sync — clearing here makes every nested body start clean by construction and
+	// leaves those lists as defense in depth. restoreState brings the outer's back.
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
+	c.matchBorrowedIdents = nil
+	c.borrowOptionalLocals = nil
 	// T0945: a nested function body must not inherit the outer's borrowed value
 	// params (an elvis there owns/borrows by its own param list). Define sites
 	// repopulate it; restoreState brings the outer's set back afterward.
@@ -2219,8 +2304,12 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.locals = s.locals
 	c.localNameCount = s.localNameCount
 	c.dropFlags = s.dropFlags
-	c.castSubjectMatch = s.castSubjectMatch     // T0849
-	c.forInHandleSlotPtr = s.forInHandleSlotPtr // T0617
+	c.mutRefPtrs = s.mutRefPtrs                     // T1588
+	c.mutRefTypes = s.mutRefTypes                   // T1588
+	c.matchBorrowedIdents = s.matchBorrowedIdents   // T1588
+	c.borrowOptionalLocals = s.borrowOptionalLocals // T1588
+	c.castSubjectMatch = s.castSubjectMatch         // T0849
+	c.forInHandleSlotPtr = s.forInHandleSlotPtr     // T0617
 	c.dropBindings = s.dropBindings
 	c.stmtTemps = s.stmtTemps
 	c.stmtTempMap = s.stmtTempMap
@@ -2254,6 +2343,20 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.borrowedValueParams = s.borrowedValueParams
 	c.discardedExpr = s.discardedExpr             // T1029
 	c.discardAliasArgPtrs = s.discardAliasArgPtrs // T1029
+	c.inCoroutine = s.inCoroutine
+	c.coroCleanupBlk = s.coroCleanupBlk
+	c.coroSuspendBlk = s.coroSuspendBlk
+	c.inGenerator = s.inGenerator
+	c.generatorCanError = s.generatorCanError
+	c.generatorYieldSlot = s.generatorYieldSlot
+	c.generatorErrorSlot = s.generatorErrorSlot
+	c.generatorCoroId = s.generatorCoroId
+	c.generatorCleanup = s.generatorCleanup
+	c.generatorSuspend = s.generatorSuspend
+	c.generatorFinalSuspend = s.generatorFinalSuspend
+	c.inFailableGoBlock = s.inFailableGoBlock
+	c.failableGoBlockAggType = s.failableGoBlockAggType
+	c.failableGoBlockFinalSuspend = s.failableGoBlockFinalSuspend
 }
 
 // resetBlockTempFloors zeroes the block-value temp floors for a nested function

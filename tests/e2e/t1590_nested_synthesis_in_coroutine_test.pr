@@ -1,0 +1,230 @@
+// T1590: a structural default method whose FIRST use is inside a `go {}` block
+// or a generator body was synthesized mid-statement through
+// saveState/restoreState with the enclosing coroutine's state still live, so the
+// synthesized body — a plain LLVM function of its own — emitted branches to the
+// enclosing coroutine's `%cleanup` / `%final.suspend` blocks and `opt` rejected
+// the module ("use of undefined value").
+//
+// Mirror image of T1588: there a per-function field that defineMethodFunc DOES
+// reset was silently lost; here fields it does NOT reset were silently
+// inherited. saveState now snapshots and clears the coroutine/generator body
+// flags, exactly as it already did for panicExitBlock/coroutineReturnBlock.
+//
+// Each type below is used for the first time inside the coroutine/generator, so
+// the synthesis really happens there — a type touched from ordinary code first
+// would be synthesized in a plain body and never reach the bug.
+// --- (a) go block: the default suspends (channel send) ----------------------
+type Waiter `structural {
+  int n;
+  emit(this, channel[int] c) {
+    c.send(this.n);
+    c.send(this.n + 1);
+  }
+}
+type Waited is Waiter {
+}
+
+structural_default_first_used_in_go_block() `test {
+  ch := channel[int](capacity: 1);
+  go {
+    Waited w = Waited(n: 5);
+    w.emit(ch);
+    ch.close();
+  };
+  int total = 0;
+  for v in ch {
+    total = total + v;
+  }
+  assert(total == 11, "both values sent from the synthesized default arrived");
+}
+
+// --- (b) generator body ------------------------------------------------------
+
+type Doubler `structural {
+  int n;
+  twice(this) int {
+    return this.n * 2;
+  }
+}
+type Doubled is Doubler {
+}
+
+doubled_stream() stream[int] {
+  Doubled d = Doubled(n: 3);
+  yield d.twice();
+  yield 1;
+}
+
+structural_default_first_used_in_generator() `test {
+  int total = 0;
+  for v in doubled_stream() {
+    total = total + v;
+  }
+  assert(total == 7, "generator yielded 6 then 1");
+}
+
+// --- (c) go block whose default allocates ------------------------------------
+//     A heap-allocating default exercises the drop path of the synthesized body
+//     too, so a body wired to the wrong function's cleanup blocks would leak.
+
+type Namer `structural {
+  string tag;
+  describe(this) string {
+    return "[" + this.tag + "]";
+  }
+}
+type Named is Namer {
+}
+
+structural_default_allocating_in_go_block() `test {
+  ch := channel[string](capacity: 1);
+  go {
+    Named n = Named(tag: "x");
+    ch.send(n.describe());
+    ch.close();
+  };
+  string got = "";
+  for s in ch {
+    got = s;
+  }
+  assert(got == "[x]", "heap-allocating default synthesized in a coroutine body");
+}
+
+// --- (d) `go! { }`: the failable-go-block sink is a THIRD state group ---------
+//     `go! { }` bodies route an escaping error through their own sink — store the
+//     error aggregate into the goroutine's result buffer, branch to the
+//     coroutine's final suspend — held in state separate from the plain-coroutine
+//     and generator flags above. A failable default synthesized inside a `go! { }`
+//     body inherited that sink and ended its own error exit by writing the
+//     ENCLOSING goroutine's result and branching into the coroutine ramp.
+//
+//     Both outcomes are checked: the error must surface at `<-t` in the awaiting
+//     scope (not be swallowed into the task buffer by the callee), and the
+//     success path must still deliver its value.
+
+type Validator `structural {
+  int n;
+  validate!(this) int {
+    if this.n < 0 {
+      raise error("negative");
+    }
+    return this.n;
+  }
+}
+type Validated is Validator {
+}
+
+failable_default_first_used_in_failable_go_block() `test {
+  t := go! {
+    Validated v = Validated(n: 7);
+    v.validate()
+  };
+  int got = (<-t)?!;
+  assert(got == 7, "the synthesized failable default returned its own value");
+}
+
+failable_default_raising_in_failable_go_block() `test {
+  t := go! {
+    Validated v = Validated(n: -1);
+    v.validate()
+  };
+  bool caught = false;
+  int got = (<-t)? e {
+    caught = true;
+    0
+  };
+  assert(caught, "the default's error propagated out of the go! block to the receive");
+  assert(got == 0, "the recovery value was used");
+}
+
+// --- (e) a heap-allocating failable default in a `go! { }` body ---------------
+//     Exercises the synthesized body's own drop path on both exits, so a body
+//     wired to another function's cleanup blocks leaks here.
+
+type Tagger `structural {
+  string tag;
+  render!(this) string {
+    if this.tag.len == 0 {
+      raise error("empty tag");
+    }
+    return "<" + this.tag + ">";
+  }
+}
+type Tagged2 is Tagger {
+}
+
+allocating_failable_default_in_failable_go_block() `test {
+  t := go! {
+    Tagged2 g = Tagged2(tag: "hi");
+    g.render()
+  };
+  string got = (<-t)?!;
+  assert(got == "<hi>", "heap-allocating failable default synthesized in a go! body");
+
+  t2 := go! {
+    Tagged2 bad = Tagged2(tag: "");
+    bad.render()
+  };
+  bool caught = false;
+  string fallback = (<-t2)? e {
+    caught = true;
+    "fallback"
+  };
+  assert(caught, "the raising path propagated out of the go! block");
+  assert(fallback == "fallback", "the recovery value was used");
+}
+
+// --- (f) failable generator: the generator group's OTHER half ----------------
+//     (b) uses an infallible generator, which leaves generatorCanError and
+//     generatorErrorSlot zero — so it is blind to them. A FAILABLE generator sets
+//     both, and they are what every error-propagation path consults
+//     (`inGenerator && generatorCanError`). A failable structural default
+//     synthesized inside a failable generator body inherited them and routed its
+//     OWN error exit into the generator's error slot instead of returning its
+//     failable aggregate: the raising case below never reached the consumer's
+//     recovery, and the value case's error slot was written by a function that
+//     does not own it.
+//
+//     The default allocates on both exits, so a body wired to the generator's
+//     cleanup blocks also leaks here.
+
+type Ranker `structural {
+  string tag;
+  rank!(this) string {
+    if this.tag.len == 0 {
+      raise error("empty tag");
+    }
+    return "#" + this.tag;
+  }
+}
+type Ranked is Ranker {
+}
+
+ranked_stream!(string tag) stream[string] {
+  Ranked r = Ranked(tag: tag.clone());
+  yield r.rank()?^;
+  yield "end";
+}
+
+collect_ranked!(string tag) string[] {
+  string[] out = [];
+  for s in ranked_stream(tag)?^ {
+    out.push(move s);
+  }
+  return out;
+}
+
+failable_default_first_used_in_failable_generator() `test {
+  string[] got = collect_ranked("hi")?!;
+  assert(got.len == 2, "the generator yielded both values");
+  assert(got[0] == "#hi", "the synthesized failable default returned its own value");
+  assert(got[1] == "end", "the generator continued after the default");
+}
+
+raising_failable_default_in_failable_generator() `test {
+  bool caught = false;
+  collect_ranked("")? e {
+    caught = true;
+  };
+  assert(caught, "the default's error propagated out of the failable generator to the consumer");
+}

@@ -63,6 +63,11 @@ func TestEmitWebBootstrapJSMergesImportObject(t *testing.T) {
 // exit-unwind sentinel around _initialize(): once base PAL glue provides a
 // real (throwing) exit() implementation, a normal successful main() return —
 // which lowers to pal_exit(0) — must not surface as an uncaught JS exception.
+// It also checks for the typed _ExitSignal sentinel (rather than matching a
+// bare Error's .message string, which would swallow any unrelated JS error
+// carrying the same text) and that a non-zero code is checked, not just the
+// sentinel's identity — see TestEmitWebBootstrapJSSmokeSurfacesNonZeroExit
+// for the corresponding behavioral proof that exit(1) actually propagates.
 func TestEmitWebBootstrapJSCatchesExitUnwind(t *testing.T) {
 	dir := t.TempDir()
 	wasmFile := filepath.Join(dir, "frontend.wasm")
@@ -75,7 +80,13 @@ func TestEmitWebBootstrapJSCatchesExitUnwind(t *testing.T) {
 	}
 	content := string(data)
 
-	if !strings.Contains(content, "try {") || !strings.Contains(content, "promise_env.exit") {
-		t.Error("init() should try/catch _initialize() and swallow the promise_env.exit sentinel")
+	if !strings.Contains(content, "class _ExitSignal") {
+		t.Error("expected a typed _ExitSignal sentinel class instead of bare Error message matching")
+	}
+	if !strings.Contains(content, "try {") || !strings.Contains(content, "instanceof _ExitSignal") {
+		t.Error("init() should try/catch _initialize() and check instanceof _ExitSignal")
+	}
+	if !strings.Contains(content, "e.code !== 0") {
+		t.Error("init() should distinguish exit(0) from a non-zero exit code, not swallow every exit unconditionally")
 	}
 }

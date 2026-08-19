@@ -5106,8 +5106,44 @@ func emitWebBootstrapJS(wasmFile string) {
 
 const _decoder = new TextDecoder("utf-8");
 
+// Thrown by exit() to unwind the synchronous WASM call stack — the only way
+// to abort a WASM function from a JS import. Carries the real exit code so
+// init() can tell a normal main() return (pal_exit(0)) apart from a panic or
+// an explicit non-zero exit(), instead of treating every unwind as success.
+class _ExitSignal extends Error {
+  constructor(code) {
+    super("promise_env.exit");
+    this.code = code;
+  }
+}
+
 export async function init(importObject = {}) {
   let instance;
+
+  // console.log/console.error each add their own trailing newline, but
+  // Promise's print_line already appends one before the write ever reaches
+  // the PAL (see definePrintStringBody in internal/codegen/io.go) — logging
+  // each write verbatim would double every line. Buffer per fd and only flush
+  // on complete lines, holding back a trailing partial line until the next
+  // write (or process exit) completes it.
+  const _lineBuf = { 1: "", 2: "" };
+  function _flushLine(fd, line) {
+    (fd === 2 ? console.error : console.log)(line);
+  }
+  function _writeChunk(fd, text) {
+    const pending = _lineBuf[fd] + text;
+    const lines = pending.split("\n");
+    _lineBuf[fd] = lines.pop();
+    for (const line of lines) _flushLine(fd, line);
+  }
+  function _flushRemainder() {
+    for (const fd of [1, 2]) {
+      if (_lineBuf[fd]) {
+        _flushLine(fd, _lineBuf[fd]);
+        _lineBuf[fd] = "";
+      }
+    }
+  }
 
   // Base PAL runtime imports every wasm32-web binary needs, regardless of
   // whether it uses WebIDL bindings.
@@ -5116,16 +5152,12 @@ export async function init(importObject = {}) {
       const lenN = Number(len);
       if (lenN > 0) {
         const mem = new Uint8Array(instance.exports.memory.buffer, Number(ptr), lenN);
-        (Number(fd) === 2 ? console.error : console.log)(_decoder.decode(mem));
+        _writeChunk(Number(fd) === 2 ? 2 : 1, _decoder.decode(mem));
       }
       return BigInt(lenN);
     },
     exit(code) {
-      // A normal main() return is signaled by pal_exit(0), which lowers to
-      // this import — the only way to abort a synchronous WASM call is to
-      // throw, so this always throws to unwind. init() below catches exactly
-      // this sentinel; a successful run is not an error.
-      throw new Error("promise_env.exit");
+      throw new _ExitSignal(Number(code));
     },
     monotonic_nanos() {
       return BigInt(Math.round(performance.now() * 1e6));
@@ -5141,14 +5173,20 @@ export async function init(importObject = {}) {
   const result = await WebAssembly.instantiateStreaming(response, mergedImportObject);
   instance = result.instance;
 
-  if (instance.exports._initialize) {
-    try {
-      instance.exports._initialize();
-    } catch (e) {
-      if (!(e && e.message === "promise_env.exit")) throw e;
+  try {
+    if (instance.exports._initialize) instance.exports._initialize();
+  } catch (e) {
+    // A normal main() return unwinds through exit(0) — that's expected, not
+    // a crash. Anything else (a real trap, or exit() called with a non-zero
+    // code by a panic or an explicit exit()) must propagate so the caller
+    // learns the run failed instead of getting exports back silently.
+    if (!(e instanceof _ExitSignal) || e.code !== 0) {
+      _flushRemainder();
+      throw e;
     }
   }
 
+  _flushRemainder();
   return instance.exports;
 }
 `, wasmBase, wasmBase)

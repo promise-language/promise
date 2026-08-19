@@ -244,10 +244,10 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 }
 
 // TestBuildFileInsideProject verifies that `promise build main.pr` (a concrete
-// file argument, not `.`) run inside a project directory detects the enclosing
-// promise.toml and builds the whole project, so sibling declarations are visible
-// (T0927). The binary is named after [module].name and an informational note is
-// printed to stderr.
+// file argument, not `.`) run inside a project directory is an ERROR (T1603):
+// naming a file that belongs to a project silently compiled something other than
+// what the user typed, so the shared resolver now rejects it and points the user
+// at the project. No project binary is produced.
 func TestBuildFileInsideProject(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
@@ -271,36 +271,33 @@ func TestBuildFileInsideProject(t *testing.T) {
 	cmd := exec.Command(bin, "build", "main.pr")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("expected build of a file inside a project to fail; got success:\n%s", out)
 	}
-	if !strings.Contains(string(out), "belongs to the project") {
-		t.Errorf("expected 'belongs to the project' note on stderr; got:\n%s", out)
+	if !strings.Contains(string(out), "belongs to the project at") {
+		t.Errorf("expected 'belongs to the project at' error; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "hint: build the project directly:") {
+		t.Errorf("expected 'hint: build the project directly:' naming the run command; got:\n%s", out)
 	}
 
-	// Binary is named after the project, not the file basename.
+	// No project binary must be produced.
 	binaryName := "insideproj"
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
 	}
-	binPath := filepath.Join(dir, binaryName)
-	if _, err := os.Stat(binPath); err != nil {
-		t.Fatalf("expected binary at %s, got: %v\noutput: %s", binPath, err, out)
-	}
-
-	runCmd := exec.Command(binPath)
-	runOut, err := runCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("running %s failed: %v\n%s", binPath, err, runOut)
-	}
-	if got := strings.TrimSpace(string(runOut)); got != "7" {
-		t.Errorf("output = %q, want %q", got, "7")
+	if _, err := os.Stat(filepath.Join(dir, binaryName)); err == nil {
+		t.Errorf("project binary %s should not exist after a rejected build", binaryName)
 	}
 }
 
 // TestRunFileInsideProject verifies that `promise run main.pr` inside a project
-// builds the whole project (sibling visibility) and that the project cache key is
-// aligned so a second run produces the same output (T0927, change #3).
+// is an ERROR, and — the core drift fix (T1603) — that a cold run and a warm run
+// fail *identically*. Previously the "belongs to the project" note printed on a
+// cold run (via buildToFile) but not on a cache-hit run (runRun resolved
+// silently). Routing both the cache-key path and the compile path through the one
+// shared resolver means the same command can no longer produce different output
+// depending on cache state.
 func TestRunFileInsideProject(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
@@ -321,17 +318,26 @@ func TestRunFileInsideProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var first string
 	for i := 0; i < 2; i++ {
 		cmd := exec.Command(bin, "run", "main.pr")
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("run #%d failed: %v\n%s", i, err, out)
+		if err == nil {
+			t.Fatalf("run #%d: expected running a file inside a project to fail; got success:\n%s", i, out)
 		}
-		// CombinedOutput includes the stderr project note on the cache-miss run;
-		// just assert the program's output is present.
-		if !strings.Contains(string(out), "42") {
-			t.Errorf("run #%d output = %q, want it to contain %q", i, string(out), "42")
+		if !strings.Contains(string(out), "belongs to the project at") {
+			t.Errorf("run #%d: expected 'belongs to the project at' error; got:\n%s", i, out)
+		}
+		if !strings.Contains(string(out), "hint: run the project directly:") {
+			t.Errorf("run #%d: expected 'hint: run the project directly:'; got:\n%s", i, out)
+		}
+		if i == 0 {
+			first = string(out)
+		} else if string(out) != first {
+			// Cold and warm runs must be byte-for-byte identical — this is the drift
+			// the shared resolver eliminates.
+			t.Errorf("cold and warm run output diverged:\ncold:\n%s\nwarm:\n%s", first, out)
 		}
 	}
 }
@@ -414,9 +420,10 @@ func TestBuildNonexistentFileInsideProject(t *testing.T) {
 // TestBuildFileInProjectSubdir exercises the multi-level walk-up in
 // findEnclosingProjectDir: the target file lives in a subdirectory and the
 // promise.toml is an ancestor, so the search loop must iterate past the file's
-// own directory before finding the project root (T0927). Every other test
-// places promise.toml in the same directory as the file, leaving the walk-up
-// loop body uncovered.
+// own directory before finding the project root. Under T1603 a file inside a
+// project is an error, so this asserts the walk-up still detects the ancestor
+// project and rejects the build. Every other test places promise.toml in the
+// same directory as the file, leaving the walk-up loop body uncovered.
 func TestBuildFileInProjectSubdir(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
@@ -446,29 +453,20 @@ func TestBuildFileInProjectSubdir(t *testing.T) {
 	cmd := exec.Command(bin, "build", filepath.Join("src", "main.pr"))
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("subdir build failed: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("expected build of a subdir file inside a project to fail; got success:\n%s", out)
 	}
-	if !strings.Contains(string(out), "belongs to the project") {
-		t.Errorf("expected 'belongs to the project' note for subdir file; got:\n%s", out)
+	if !strings.Contains(string(out), "belongs to the project at") {
+		t.Errorf("expected 'belongs to the project at' error for subdir file; got:\n%s", out)
 	}
 
-	// Binary is named after the project and placed at the project root.
+	// No project binary must be produced.
 	binaryName := "subproj"
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
 	}
-	binPath := filepath.Join(dir, binaryName)
-	if _, err := os.Stat(binPath); err != nil {
-		t.Fatalf("expected binary at %s, got: %v\noutput: %s", binPath, err, out)
-	}
-
-	runOut, err := exec.Command(binPath).CombinedOutput()
-	if err != nil {
-		t.Fatalf("running %s failed: %v\n%s", binPath, err, runOut)
-	}
-	if got := strings.TrimSpace(string(runOut)); got != "9" {
-		t.Errorf("output = %q, want %q", got, "9")
+	if _, err := os.Stat(filepath.Join(dir, binaryName)); err == nil {
+		t.Errorf("project binary %s should not exist after a rejected build", binaryName)
 	}
 }
 
@@ -499,6 +497,107 @@ func TestRunFileNoProjectStillSingleFile(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "solo-ok") {
 		t.Errorf("expected program output 'solo-ok'; got:\n%s", out)
+	}
+}
+
+// TestTargetDirWithoutProjectIsError verifies rule 2 of T1603: a directory
+// argument that lacks a promise.toml is an error for every command that takes a
+// source target. The old T0115 single-file auto-discovery for non-project
+// directories is gone — a directory has exactly one meaning now (a project).
+func TestTargetDirWithoutProjectIsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	for _, cmdName := range []string{"build", "run", "emit-ir"} {
+		t.Run(cmdName, func(t *testing.T) {
+			dir := t.TempDir()
+			// A lone .pr file with main() but no promise.toml — under the old
+			// behavior this directory would have auto-discovered main.pr.
+			if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+				[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command(bin, cmdName, ".")
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%s .: expected a non-project directory to be rejected; got success:\n%s", cmdName, out)
+			}
+			if !strings.Contains(string(out), "is not a Promise project") {
+				t.Errorf("%s .: expected 'is not a Promise project' error; got:\n%s", cmdName, out)
+			}
+			// The hint must name the command actually typed.
+			if !strings.Contains(string(out), "promise "+cmdName+" file.pr") {
+				t.Errorf("%s .: expected hint naming 'promise %s file.pr'; got:\n%s", cmdName, cmdName, out)
+			}
+		})
+	}
+}
+
+// TestNoArgInNonProjectDirIsError verifies the no-arg consequence of T1603 rule
+// 2: `promise build` / `promise run` with no positional argument defaults to CWD,
+// which must be a project. In a non-project directory this is the same
+// "not a Promise project" error as an explicit `.` argument.
+func TestNoArgInNonProjectDirIsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	for _, cmdName := range []string{"build", "run"} {
+		t.Run(cmdName, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+				[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command(bin, cmdName)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%s (no arg): expected a non-project CWD to be rejected; got success:\n%s", cmdName, out)
+			}
+			if !strings.Contains(string(out), "is not a Promise project") {
+				t.Errorf("%s (no arg): expected 'is not a Promise project' error; got:\n%s", cmdName, out)
+			}
+		})
+	}
+}
+
+// TestEmitIRFileInsideProjectIsError verifies rule 1 of T1603 for emit-ir, which
+// previously ignored project membership and compiled the file standalone: a file
+// inside a project is now rejected here too.
+func TestEmitIRFileInsideProjectIsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping emit-ir integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"emitproj\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+		[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "emit-ir", "main.pr")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected emit-ir of a file inside a project to fail; got success:\n%s", out)
+	}
+	if !strings.Contains(string(out), "belongs to the project at") {
+		t.Errorf("expected 'belongs to the project at' error; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "hint: emit-ir the project directly:") {
+		t.Errorf("expected hint naming the emit-ir command; got:\n%s", out)
 	}
 }
 
@@ -581,8 +680,9 @@ interface Element {
 		t.Fatalf("bind webidl failed: %v\n%s", err, out)
 	}
 
-	prPath := filepath.Join(outDir, "idl.pr")
-	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", prPath)
+	// `bind webidl` writes a promise.toml alongside idl.pr, so outDir is a
+	// project; under T1603 a file-in-project is an error — emit-ir the project.
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
 	out, err := emitCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)

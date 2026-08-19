@@ -448,35 +448,21 @@ func runEmitIR(args []string) {
 		os.Exit(1)
 	}
 	checkTargetFlag(target)
+	cfg, files, resolvedFile, err := resolveTarget(filename, "emit-ir")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	var file *ast.File
 	var info *sema.Info
-	if stat, err := os.Stat(filename); err == nil && stat.IsDir() {
-		cfg, files, err := discoverProject(filename)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if cfg != nil {
-			file, info = compileProjectFrontend(cfg.Dir, files, target)
-		} else {
-			discovered, err := discoverMainFile(filename)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			file, info = compileFrontendForTarget(discovered, target)
-		}
+	if cfg != nil {
+		file, info = compileProjectFrontend(cfg.Dir, files, target)
 	} else {
-		file, info = compileFrontendForTarget(filename, target)
+		file, info = compileFrontendForTarget(resolvedFile, target)
 	}
 	result := codegen.Compile(file, info, target)
 	fmt.Print(result.Module.String())
 }
-
-// mainFuncRe matches a top-level main() function declaration in Promise source.
-// Matches: main() { ... }, main!() { ... }, main() Type { ... }, main() ! { ... }
-// Avoids matching: comments, strings, or nested/indented declarations.
-var mainFuncRe = regexp.MustCompile(`(?m)^main\s*!?\s*\(`)
 
 // discoverProject returns the project config and full list of non-test .pr
 // source files when dir contains a promise.toml. When there is no promise.toml
@@ -510,74 +496,63 @@ func discoverProject(dir string) (*module.Config, []string, error) {
 	return cfg, files, nil
 }
 
-// discoverMainFile finds the entry point .pr file for a project directory.
-// Discovery rules (in order):
-//  1. promise.toml "main" field → use that file
-//  2. Scan .pr files in directory for main() → use if exactly one
-//  3. Multiple main() files → error listing them
-//  4. No main() files → error
-func discoverMainFile(dir string) (string, error) {
-	// Rule 1: check promise.toml for explicit main field
-	mainField, err := module.FindProjectMain(dir)
-	if err != nil {
-		return "", err
+// resolveTarget maps a build/run/emit-ir source argument to either a project or
+// a single file, applying one uniform policy (T1603) so build, run and emit-ir
+// can never drift apart:
+//   - empty arg       → CWD (must be a project)
+//   - directory       → must contain promise.toml, else error
+//   - file in project → error (name the project, suggest running it directly)
+//   - standalone file → single-file compile
+//   - nonexistent     → returned as a file so the frontend reports file-not-found
+//
+// cmd is the command the user typed ("build"/"run"/"emit-ir"), used in hint text
+// so the error names the command actually run. On success exactly one of cfg
+// (project) or file (standalone) is non-empty; files holds the project sources
+// when cfg != nil.
+func resolveTarget(arg, cmd string) (cfg *module.Config, files []string, file string, err error) {
+	target := arg
+	if target == "" {
+		target = "."
 	}
-	if mainField != "" {
-		path := filepath.Join(dir, mainField)
-		if _, err := os.Stat(path); err != nil {
-			return "", fmt.Errorf("error: main file %q (from promise.toml) not found", mainField)
-		}
-		return path, nil
+	stat, statErr := os.Stat(target)
+	if statErr != nil {
+		// Nonexistent path: hand back the name as a file so the frontend reports a
+		// clear file-not-found error, rather than claiming project membership for a
+		// name that doesn't exist (T0927).
+		return nil, nil, arg, nil
 	}
-
-	// Rule 2-4: scan .pr files for main() function
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", fmt.Errorf("error: cannot read directory %s: %w", dir, err)
+	if stat.IsDir() {
+		cfg, files, derr := discoverProject(target)
+		if derr != nil {
+			return nil, nil, "", derr
+		}
+		if cfg == nil {
+			return nil, nil, "", fmt.Errorf(
+				"error: %s is not a Promise project (no promise.toml)\n"+
+					"hint: create a promise.toml, or name a source file: promise %s file.pr",
+				target, cmd)
+		}
+		return cfg, files, "", nil
 	}
-
-	var candidates []string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		if mainFuncRe.Match(data) {
-			candidates = append(candidates, e.Name())
-		}
+	if projRoot := findEnclosingProjectDir(target); projRoot != "" {
+		return nil, nil, "", fmt.Errorf(
+			"error: %s belongs to the project at %s\n"+
+				"hint: %s the project directly: promise %s %s",
+			target, projRoot, cmd, cmd, projRoot)
 	}
-
-	switch len(candidates) {
-	case 1:
-		return filepath.Join(dir, candidates[0]), nil
-	case 0:
-		return "", fmt.Errorf("error: no main() function found in project\nhint: add a main() function or specify a file: promise build file.pr")
-	default:
-		var b strings.Builder
-		b.WriteString("error: multiple files contain main() — specify which to use:")
-		for _, f := range candidates {
-			b.WriteString("\n  ")
-			b.WriteString(f)
-		}
-		b.WriteString("\nhint: add 'main = \"")
-		b.WriteString(candidates[0])
-		b.WriteString("\"' to promise.toml")
-		return "", fmt.Errorf("%s", b.String())
-	}
+	return nil, nil, target, nil
 }
 
 // runBuild compiles a .pr file to an executable.
 func runBuild(args []string) {
-	filename, outputFile, _ := buildToFile(args)
+	filename, outputFile, _ := buildToFile(args, "build")
 	fmt.Printf("Compiled %s → %s\n", filename, outputFile)
 }
 
 // buildToFile compiles a .pr file to an executable, returning the source path,
-// output path, and target triple.
-func buildToFile(args []string) (filename, outputFile, target string) {
+// output path, and target triple. cmd is the command the user typed (used by the
+// shared target resolver for error hint text).
+func buildToFile(args []string, cmd string) (filename, outputFile, target string) {
 	debugMode := false
 	releaseMode := false
 	componentMode := false
@@ -619,48 +594,19 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 
 	checkTargetFlag(target)
 
-	// Auto-discover main file: no arg → CWD, directory arg → that dir (T0115).
-	// When the directory contains a promise.toml, switch to project mode and
-	// compile every .pr file in the tree as a single program (T0492).
+	// Resolve the source argument to a project or a single file via the shared
+	// policy (T1603): no arg → CWD (must be a project), directory → must be a
+	// project, file inside a project → error, standalone file → single-file.
+	projectCfg, projectFiles, resolvedFile, err := resolveTarget(filename, cmd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	filename = resolvedFile
 	var projectDir string
-	var projectCfg *module.Config
-	var projectFiles []string
-
-	resolveDir := func(dir string) {
-		cfg, files, err := discoverProject(dir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if cfg != nil {
-			projectDir = cfg.Dir
-			projectCfg = cfg
-			projectFiles = files
-			return
-		}
-		discovered, err := discoverMainFile(dir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		filename = discovered
+	if projectCfg != nil {
+		projectDir = projectCfg.Dir
 	}
-
-	if filename == "" {
-		resolveDir(".")
-	} else if info, err := os.Stat(filename); err == nil {
-		if info.IsDir() {
-			resolveDir(filename)
-		} else if projRoot := findEnclosingProjectDir(filename); projRoot != "" {
-			fmt.Fprintf(os.Stderr,
-				"note: %s belongs to the project at %s — building the whole project "+
-					"(run `promise build` to build it directly)\n", filename, projRoot)
-			resolveDir(projRoot)
-		}
-	}
-	// A nonexistent filename falls through to compileFrontend below, which
-	// reports a clear file-not-found error rather than silently building the
-	// enclosing project for a name that doesn't exist (T0927).
 
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -806,30 +752,20 @@ func runRun(args []string) {
 	// os.Exit would leak — it doesn't run deferreds).
 	checkTargetFlag(target)
 
-	// Resolve the target binary to what buildToFile would actually compile so the
-	// cache key matches across invocations (T0115 auto-discovery, T0492 project mode).
-	var projectDir string
-	resolveDir := func(dir string) {
-		if cfg, _, err := discoverProject(dir); err == nil && cfg != nil {
-			projectDir = cfg.Dir
-			return
-		}
-		if discovered, err := discoverMainFile(dir); err == nil {
-			filename = discovered
-		}
+	// Resolve the target to what buildToFile would actually compile so the cache
+	// key matches across invocations. Using the SAME shared resolver (T1603) for
+	// the cache-key path and the compile path means cold and warm runs cannot
+	// diverge — the bad-target error surfaces here, before any cache/temp work.
+	cfg, _, resolvedFile, err := resolveTarget(filename, "run")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	if filename == "" {
-		resolveDir(".")
-	} else if info, err := os.Stat(filename); err == nil {
-		if info.IsDir() {
-			resolveDir(filename)
-		} else if projRoot := findEnclosingProjectDir(filename); projRoot != "" {
-			// A file inside a project builds the whole project (T0927); align the
-			// cache key with the project so it doesn't go stale when siblings change.
-			if cfg, _, err := discoverProject(projRoot); err == nil && cfg != nil {
-				projectDir = cfg.Dir
-			}
-		}
+	var projectDir string
+	if cfg != nil {
+		projectDir = cfg.Dir
+	} else {
+		filename = resolvedFile
 	}
 
 	if target == "" {
@@ -896,7 +832,7 @@ func runRun(args []string) {
 
 	buildArgs := []string{"-o", tmpOutput.Name()}
 	buildArgs = append(buildArgs, args...)
-	buildToFile(buildArgs)
+	buildToFile(buildArgs, "build")
 
 	// Save the compiled binary to the cache for future runs.
 	if cacheDir != "" {
@@ -6427,8 +6363,8 @@ func isModuleTestFile(filename string) string {
 
 // findEnclosingProjectDir walks up from a source file to the nearest ancestor
 // directory containing a promise.toml, returning that directory, or "" if the
-// file is not inside any project. Used so `promise build file.pr` / `run file.pr`
-// builds the whole project instead of single-file-compiling (T0927).
+// file is not inside any project. Used by resolveTarget so naming a file that
+// belongs to a project is rejected with a pointer to the project (T1603).
 func findEnclosingProjectDir(file string) string {
 	abs, err := filepath.Abs(file)
 	if err != nil {

@@ -1728,6 +1728,7 @@ func TestFileReadAllPlatforms(t *testing.T) {
 		{"POSIX", &PosixPAL{}, "@read("},
 		{"Windows", &WindowsPAL{}, "@_read("},
 		{"WASM", &WasmPAL{}, ""},
+		{"WasmWeb", &WasmWebPAL{}, ""},
 	}
 	for _, tc := range pals {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1743,6 +1744,27 @@ func TestFileReadAllPlatforms(t *testing.T) {
 				assertContains(t, out, tc.decl, "libc declaration")
 			}
 		})
+	}
+}
+
+// T1586: a browser has no stdin, so a read of fd 0 is already at end-of-input
+// and must return 0 — not the -1 "read failed" the shared stub returned, which
+// made stdin.read(buf)?! panic instead of reporting a clean empty stream. Every
+// other fd stays -1: there is genuinely no file I/O in a browser.
+func TestWasmWebFileReadStdinIsEOF(t *testing.T) {
+	module := ir.NewModule()
+	(&WasmWebPAL{}).EmitFileRead(module)
+	out := module.String()
+
+	assertContains(t, out, "define i64 @pal_file_read(i32 %fd, i8* %buf, i64 %len)", "definition")
+	assertContains(t, out, "icmp eq i32 %fd, 0", "branches on fd 0")
+	assertContains(t, out, "ret i64 0", "stdin returns EOF")
+	assertContains(t, out, "ret i64 -1", "other fds remain unsupported")
+
+	// No host import: the EOF answer is decided in the module, so it needs no
+	// cooperation from the JS glue and cannot LinkError on a missing import.
+	if strings.Contains(out, "promise_env") {
+		t.Error("wasm32-web pal_file_read should not require a promise_env import")
 	}
 }
 

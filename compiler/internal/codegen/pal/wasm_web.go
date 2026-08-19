@@ -2,6 +2,7 @@ package pal
 
 import (
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 )
@@ -74,9 +75,40 @@ func (p *WasmWebPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	return (&WasmPAL{DebugAllocator: p.DebugAllocator, MemoryLimitAccounting: p.MemoryLimitAccounting, WebTarget: true}).EmitRealloc(module)
 }
 
+// EmitFileRead defines @pal_file_read for the browser target.
+//
+// A browser has no stdin. There is no input pending and none can ever arrive,
+// so a read of fd 0 is already at end-of-input: it returns 0, not an error.
+// Every other fd is a genuine "no file I/O in a browser" and returns -1, like
+// the neighbouring stubs.
+//
+// Returning -1 for fd 0 (which the shared stub did) made a read report a
+// failure that never happened: a program checking for EOF panicked on
+// "read failed" instead of seeing a clean empty stream — T1586, which this
+// also fixes on the wasm32-web leg of bin/verify. Note the WASI target reaches
+// the same observable behavior by a different route: wasmtime hands the module
+// a real fd 0 wired to /dev/null, so fd_read there returns 0 too.
+func (p *WasmWebPAL) EmitFileRead(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	eofBlk := fn.NewBlock(".eof")
+	unsupportedBlk := fn.NewBlock(".unsupported")
+
+	isStdin := entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewInt(irtypes.I32, 0))
+	entry.NewCondBr(isStdin, eofBlk, unsupportedBlk)
+
+	eofBlk.NewRet(constant.NewInt(irtypes.I64, 0))
+	unsupportedBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
 // Stubs — same as WasmPAL (no file I/O, threading, etc. in browser).
 func (p *WasmWebPAL) EmitFileOpen(module *ir.Module) *ir.Func  { return emitStubFileOpen(module) }
-func (p *WasmWebPAL) EmitFileRead(module *ir.Module) *ir.Func  { return emitStubFileRead(module) }
 func (p *WasmWebPAL) EmitFileWrite(module *ir.Module) *ir.Func { return emitStubFileWrite(module) }
 func (p *WasmWebPAL) EmitFileClose(module *ir.Module) *ir.Func { return emitStubFileClose(module) }
 func (p *WasmWebPAL) EmitPipeRead(module *ir.Module) *ir.Func  { return emitStubPipeRead(module) }

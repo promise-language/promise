@@ -1234,18 +1234,6 @@ func emitStubFileOpen(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitStubFileRead returns -1.
-func emitStubFileRead(module *ir.Module) *ir.Func {
-	fn := module.NewFunc("pal_file_read", irtypes.I64,
-		ir.NewParam("fd", irtypes.I32),
-		ir.NewParam("buf", irtypes.I8Ptr),
-		ir.NewParam("len", irtypes.I64))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock(".entry")
-	entry.NewRet(constant.NewInt(irtypes.I64, -1))
-	return fn
-}
-
 // emitStubFileWrite returns -1.
 func emitStubFileWrite(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_file_write", irtypes.I64,

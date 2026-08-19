@@ -265,6 +265,8 @@ Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates p
 
 One gate invocation reports exactly one target, stamped once at the top of the envelope — never per record. `bin/gate test` reports the host (e.g. `linux-amd64`) and is host-only; `bin/gate wasm-test` reports `wasm32-wasi`; `bin/gate wasm-web-test` reports `wasm32-web`; `go-test`/`stress`/`coverage`/`wasm-size` report the host they ran on. Any unknown argument (including `-wasm` to `bin/gate test`) is rejected — wasm tests are separate single-target gates (`bin/gate wasm-test`, `bin/gate wasm-web-test`).
 
+The two wasm targets are separate gates because they run under different runtimes: `wasm-test` needs `wasmtime` on PATH, while `wasm-web-test` executes the module under the Node harness (`compiler/cmd/promise/wasm_web_harness.js`) and needs Node 20+. Keeping them apart means a host missing one runtime still reports the other, rather than the pair failing together.
+
 ### Envelope
 
 ```json

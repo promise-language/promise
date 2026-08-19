@@ -1,6 +1,8 @@
 # WASM Runtime Binding Architecture
 
 > **Status: Design proposal.** No implementation yet. This document describes how Promise will ingest IDL definitions (WIT, WebIDL) and generate safe, ergonomic bindings to WASM host environments.
+>
+> This document covers the guest→host direction. For host→guest calls — WebIDL `callback` types, `addEventListener`, timers, and the `wasm32-web` reactor execution model they require — see [wasm-web-callbacks.md](wasm-web-callbacks.md).
 
 ## Problem
 

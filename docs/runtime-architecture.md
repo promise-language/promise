@@ -2,6 +2,8 @@
 
 Promise's runtime infrastructure: PAL (platform abstraction), build pipeline (opt/llc/lld/musl), M:N scheduler (GMP model, LLVM coroutines), and multi-platform support.
 
+> On `wasm32-web` the scheduler's top level is proposed to change from a run-to-completion loop to a browser-driven reactor — see [wasm-web-callbacks.md](wasm-web-callbacks.md).
+
 ## Current State
 
 No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or pure Promise (including `promise_test_run`, `promise_test_print_result`, `promise_test_summary`).

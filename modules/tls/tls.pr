@@ -1,0 +1,403 @@
+// tls module — TLS 1.2/1.3 transport security over TCP (T0077).
+// Requires: use tls;  (which itself builds on `use net;`)
+//
+// Design: OpenSSL is driven through two in-memory BIOs rather than a socket fd.
+// Promise code pumps ciphertext between those BIOs and an owned net.TcpStream,
+// so all socket I/O and reactor parking reuse net's non-blocking, reactor-aware
+// read/write. The PAL backend (compiler/internal/codegen/pal/tls_posix.go) never
+// sees a socket, an fd, or the scheduler.
+//
+// Backend availability: Linux (musl-static OpenSSL, T1596) only for now. On
+// every other target the promise_tls_* bridges are inert stubs that return a 0
+// handle, and the constructors raise TlsError(kind: unsupported).
+use net;
+
+// --- PAL bridge (compiler-emitted symbols; see codegen/tls.go) --------------
+// These are NOT user FFI — the real external symbols (SSL_*, BIO_*) are declared
+// in codegen IR and resolved against the vendored static libssl.a/libcrypto.a.
+_tls_ctx_new_client() int `extern("promise_tls_ctx_new_client");
+_tls_ctx_new_server() int `extern("promise_tls_ctx_new_server");
+_tls_ctx_free(int ctx) `extern("promise_tls_ctx_free");
+_tls_ctx_set_verify(int ctx, int peer) `extern("promise_tls_ctx_set_verify");
+_tls_ctx_set_min_version(int ctx, int ver) int `extern("promise_tls_ctx_set_min_version");
+_tls_ctx_add_ca(int ctx, u8[] pem) int `extern("promise_tls_ctx_add_ca");
+_tls_ctx_use_cert(int ctx, u8[] pem) int `extern("promise_tls_ctx_use_cert");
+_tls_ctx_use_key(int ctx, u8[] pem) int `extern("promise_tls_ctx_use_key");
+_tls_ctx_load_default_trust(int ctx) int `extern("promise_tls_ctx_load_default_trust");
+_tls_new(int ctx) int `extern("promise_tls_new");
+_tls_set_connect_state(int ssl) `extern("promise_tls_set_connect_state");
+_tls_set_accept_state(int ssl) `extern("promise_tls_set_accept_state");
+_tls_set_sni(int ssl, string host) int `extern("promise_tls_set_sni");
+_tls_set_verify_host(int ssl, string host) int `extern("promise_tls_set_verify_host");
+_tls_do_handshake(int ssl) int `extern("promise_tls_do_handshake");
+_tls_read(int ssl, u8[] ~buf) int `extern("promise_tls_read");
+_tls_write(int ssl, u8[] buf) int `extern("promise_tls_write");
+_tls_shutdown(int ssl) int `extern("promise_tls_shutdown");
+_tls_bio_read_out(int ssl, u8[] ~buf) int `extern("promise_tls_bio_read_out");
+_tls_bio_write_in(int ssl, u8[] buf, int len) int `extern("promise_tls_bio_write_in");
+_tls_bio_pending_out(int ssl) int `extern("promise_tls_bio_pending_out");
+_tls_get_version(int ssl) string `extern("promise_tls_get_version");
+_tls_get_cipher(int ssl) string `extern("promise_tls_get_cipher");
+_tls_get_verify_result(int ssl) int `extern("promise_tls_get_verify_result");
+_tls_free(int ssl) `extern("promise_tls_free");
+
+enum TlsVersion `public `doc("TLS protocol version.") {
+  tls_1_2 `doc("TLS 1.2."),
+  tls_1_3 `doc("TLS 1.3."),
+
+  // OpenSSL protocol-version numbers (TLS1_2_VERSION / TLS1_3_VERSION) — the
+  // single source of truth for these constants.
+  _to_openssl(this) int {
+    return match this {
+      TlsVersion.tls_1_2 => 771, // 0x0303
+      TlsVersion.tls_1_3 => 772, // 0x0304
+    };
+  }
+}
+
+enum TlsErrorKind `public `doc("Classifies a TLS failure so callers can tell a network problem apart from a certificate or protocol problem.") {
+  handshake `doc("The TLS handshake failed for a protocol reason (e.g. the peer is not a TLS server)."),
+  certificate `doc("The peer's certificate did not verify against the trust store."),
+  io `doc("An underlying network read/write failed or the connection closed unexpectedly."),
+  no_trust_store `doc("Certificate verification was requested but no system trust store could be found."),
+  unsupported `doc("No TLS backend is available on this platform yet."),
+}
+
+type TlsError is error `public `doc("A TLS error. `kind` distinguishes handshake, certificate, I/O, missing-trust-store, and unsupported-platform failures; `code` carries the underlying OpenSSL/errno code when available.") {
+  int code;
+  TlsErrorKind kind;
+}
+
+_tls_err(TlsErrorKind move kind, string move message) TlsError {
+  return TlsError(code: 0, kind: move kind, message: move message);
+}
+
+type TlsConfig `public `doc("TLS configuration for a connection. Controls certificate verification, trust anchors, client certificates, and the minimum protocol version. Auto-frees its OpenSSL context on drop.") {
+  int _ctx; // SSL_CTX* as int (0 = no backend / unsupported)
+  bool _verify; // whether server certificates are validated
+  bool _has_trust_store; // whether a trust store was successfully loaded
+
+  create() Self `factory `public `doc("Creates a default client TLS config that validates server certificates against the system trust store (SSL_CERT_FILE / SSL_CERT_DIR or a well-known bundle path).") {
+    int ctx = _tls_ctx_new_client();
+    bool trust = false;
+    if ctx != 0 {
+      _tls_ctx_set_verify(ctx, 1);
+      _tls_ctx_set_min_version(ctx, TlsVersion.tls_1_2._to_openssl());
+      trust = _tls_ctx_load_default_trust(ctx) == 1;
+    }
+    return TlsConfig(_ctx: ctx, _verify: true, _has_trust_store: trust);
+  }
+
+  insecure() Self `factory `public `doc("Creates a client TLS config that skips certificate validation. INSECURE — use only for testing against self-signed servers.") {
+    int ctx = _tls_ctx_new_client();
+    if ctx != 0 {
+      _tls_ctx_set_verify(ctx, 0);
+      _tls_ctx_set_min_version(ctx, TlsVersion.tls_1_2._to_openssl());
+    }
+    return TlsConfig(_ctx: ctx, _verify: false, _has_trust_store: true);
+  }
+
+  add_root_certificate!(~this, u8[] pem) `public `doc("Adds a custom CA certificate (PEM-encoded) as an additional trust anchor.") {
+    if this._ctx == 0 {
+      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
+    }
+    if _tls_ctx_add_ca(this._ctx, pem) != 1 {
+      raise _tls_err(TlsErrorKind.certificate, "failed to add CA certificate (invalid PEM?)");
+    }
+    this._has_trust_store = true;
+  }
+
+  set_client_certificate!(~this, u8[] cert_pem, u8[] key_pem) `public `doc("Sets the client certificate and private key (both PEM-encoded) for mutual TLS.") {
+    if this._ctx == 0 {
+      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
+    }
+    if _tls_ctx_use_cert(this._ctx, cert_pem) != 1 {
+      raise _tls_err(TlsErrorKind.certificate, "failed to load client certificate (invalid PEM?)");
+    }
+    if _tls_ctx_use_key(this._ctx, key_pem) != 1 {
+      raise _tls_err(TlsErrorKind.certificate, "failed to load private key (invalid PEM or mismatched key?)");
+    }
+  }
+
+  set_min_version(~this, TlsVersion version) `public `doc("Sets the minimum accepted TLS version (default: TLS 1.2).") {
+    if this._ctx != 0 {
+      _tls_ctx_set_min_version(this._ctx, version._to_openssl());
+    }
+  }
+
+  drop(~this) {
+    if this._ctx != 0 {
+      _tls_ctx_free(this._ctx);
+    }
+  }
+}
+
+type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connection. Satisfies Reader and Writer. Auto-frees the TLS session and closes the socket on drop.") {
+  int _ssl; // SSL* as int (0 = never established)
+  net.TcpStream _tcp;
+
+  connect!(net.TcpStream move tcp, string hostname, TlsConfig config) Self `factory `public `doc("Performs a TLS client handshake over an already-connected TCP stream. `hostname` sets SNI and, for verifying configs, the certificate host to check.") {
+    if config._ctx == 0 {
+      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
+    }
+    if config._verify && !config._has_trust_store {
+      raise _tls_err(TlsErrorKind.no_trust_store, "certificate verification requested but no system trust store was found; set SSL_CERT_FILE, add_root_certificate(), or use insecure()");
+    }
+    int ssl = _tls_new(config._ctx);
+    if ssl == 0 {
+      raise _tls_err(TlsErrorKind.handshake, "failed to allocate TLS session");
+    }
+    _tls_set_connect_state(ssl);
+    _tls_set_sni(ssl, hostname);
+    if config._verify {
+      _tls_set_verify_host(ssl, hostname);
+    }
+    TlsStream s = TlsStream(_ssl: ssl, _tcp: move tcp);
+    s._handshake()?^; // on failure s drops here: frees ssl + closes tcp
+    return s;
+  }
+
+  read!(~this, u8[] ~buf) int `public `doc("Reads decrypted bytes into buf. Returns the number of bytes read, or 0 at clean end-of-stream. Suspends the goroutine until data is available.") {
+    while true {
+      int n = _tls_read(this._ssl, buf);
+      this._flush_out()?^;
+      if n > 0 {
+        return n;
+      }
+      if n == 0 {
+        return 0; // clean close_notify
+      }
+      if n == -1 {
+        this._fill_in()?^; // want_read
+        continue;
+      }
+      if n == -2 {
+        continue; // want_write — already flushed
+      }
+      raise _tls_err(TlsErrorKind.io, "TLS read failed");
+    }
+    raise _tls_err(TlsErrorKind.io, "unreachable");
+  }
+
+  write!(~this, u8[] ~buf) int `public `doc("Encrypts and writes bytes from buf. Returns the number of bytes written. Suspends the goroutine until the write completes.") {
+    while true {
+      int n = _tls_write(this._ssl, buf);
+      this._flush_out()?^;
+      if n > 0 {
+        return n;
+      }
+      if n == -1 {
+        this._fill_in()?^; // want_read (renegotiation)
+        continue;
+      }
+      if n == -2 {
+        continue; // want_write — already flushed
+      }
+      raise _tls_err(TlsErrorKind.io, "TLS write failed");
+    }
+    raise _tls_err(TlsErrorKind.io, "unreachable");
+  }
+
+  read_all!(~this) u8[] `public `doc("Reads and decrypts all remaining bytes until the stream closes.") {
+    u8[] out = u8[]();
+    u8[] buf = u8[].filled(0u8, 16384);
+    while true {
+      int n = this.read(buf)?^;
+      if n == 0 {
+        break;
+      }
+      int i = 0;
+      while i < n {
+        out.push(buf[i]);
+        i = i + 1;
+      }
+    }
+    return out;
+  }
+
+  read_line!(~this) string? `public `doc("Reads one newline-terminated line (without the trailing newline). Returns none at end-of-stream with no data.") {
+    u8[] line = u8[]();
+    u8[] one = u8[].filled(0u8, 1);
+    while true {
+      int n = this.read(one)?^;
+      if n == 0 {
+        if line.len == 0 {
+          return none;
+        }
+        break;
+      }
+      u8 b = one[0];
+      if b == 10 {
+        // \n
+        break;
+      }
+      line.push(b);
+    }
+    if line.len > 0 && line[line.len - 1] == 13 {
+      // strip trailing \r
+      return string.from_bytes(line[0:line.len - 1]);
+    }
+    return string.from_bytes(line);
+  }
+
+  write_string!(~this, string s) `public `doc("Encrypts and writes a string.") {
+    u8[] bytes = s.bytes();
+    int total = bytes.len;
+    int off = 0;
+    while off < total {
+      int w = this.write(bytes[off: total])?^;
+      off = off + w;
+    }
+  }
+
+  close!(~this) `public `doc("Sends a TLS close_notify and closes the underlying connection. Best-effort — network errors during shutdown are ignored.") {
+    if this._ssl != 0 {
+      _tls_shutdown(this._ssl); // queues close_notify into the write BIO
+      this._flush_out()? e {
+      };
+    }
+    this._tcp.close()? e {
+    };
+  }
+
+  get version TlsVersion `public `doc("The negotiated TLS protocol version.") {
+    if _tls_get_version(this._ssl) == "TLSv1.3" {
+      return TlsVersion.tls_1_3;
+    }
+    return TlsVersion.tls_1_2;
+  }
+
+  get cipher_suite string `public `doc("The negotiated cipher suite name (e.g. \"TLS_AES_256_GCM_SHA384\").") {
+    return _tls_get_cipher(this._ssl);
+  }
+
+  // Runs the handshake state machine to completion, pumping ciphertext over the
+  // underlying TCP stream. Distinguishes certificate failures from other
+  // handshake failures via the verify result.
+  _handshake!(~this) {
+    while true {
+      int st = _tls_do_handshake(this._ssl);
+      this._flush_out()?^;
+      if st == 0 {
+        break;
+      }
+      if st == 1 {
+        this._fill_in()?^; // want_read
+        continue;
+      }
+      if st == 2 {
+        continue; // want_write — already flushed
+      }
+      // fatal — separate certificate verification failure from protocol failure
+      if _tls_get_verify_result(this._ssl) != 0 {
+        raise _tls_err(TlsErrorKind.certificate, "certificate verification failed");
+      }
+      raise _tls_err(TlsErrorKind.handshake, "TLS handshake failed");
+    }
+  }
+
+  // Drains ciphertext produced by OpenSSL (the write BIO) onto the TCP stream.
+  _flush_out!(~this) {
+    while true {
+      int pend = _tls_bio_pending_out(this._ssl);
+      if pend <= 0 {
+        break;
+      }
+      u8[] buf = u8[].filled(0u8, pend);
+      _tls_bio_read_out(this._ssl, buf);
+      this._tcp_write_all(buf)?^;
+    }
+  }
+
+  // Reads ciphertext from the TCP stream into OpenSSL's read BIO.
+  _fill_in!(~this) {
+    u8[] buf = u8[].filled(0u8, 16384);
+    int n = this._tcp.read(buf)? e {
+      raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
+    };
+    if n == 0 {
+      raise _tls_err(TlsErrorKind.io, "connection closed by peer during TLS exchange");
+    }
+    _tls_bio_write_in(this._ssl, buf, n);
+  }
+
+  // Writes an entire ciphertext buffer to the TCP stream, handling partial writes.
+  _tcp_write_all!(~this, u8[] ~data) {
+    int total = data.len;
+    if total == 0 {
+      return;
+    }
+    int off = this._tcp.write(data)? e {
+      raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
+    };
+    while off < total {
+      int w = this._tcp.write(data[off: total])? e {
+        raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
+      };
+      off = off + w;
+    }
+  }
+
+  drop(~this) {
+    if this._ssl != 0 {
+      _tls_free(this._ssl); // also frees the attached memory BIOs
+    }
+    // this._tcp drops automatically, closing the socket.
+  }
+}
+
+type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections. Auto-frees its OpenSSL context and closes the socket on drop.") {
+  net.TcpListener _listener;
+  int _ctx; // SSL_CTX* (server) as int
+
+  bind!(string host, int port, u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Binds a TLS listener to host:port using the given PEM-encoded certificate chain and private key.") {
+    int ctx = _tls_ctx_new_server();
+    if ctx == 0 {
+      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
+    }
+    if _tls_ctx_use_cert(ctx, cert_pem) != 1 {
+      _tls_ctx_free(ctx);
+      raise _tls_err(TlsErrorKind.certificate, "failed to load server certificate (invalid PEM?)");
+    }
+    if _tls_ctx_use_key(ctx, key_pem) != 1 {
+      _tls_ctx_free(ctx);
+      raise _tls_err(TlsErrorKind.certificate, "failed to load server private key (invalid PEM or mismatched key?)");
+    }
+    net.TcpListener listener = net.TcpListener.bind(host, port)? e {
+      _tls_ctx_free(ctx);
+      raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
+    };
+    return TlsListener(_listener: move listener, _ctx: ctx);
+  }
+
+  accept!(~this) TlsStream `public `doc("Accepts a new TLS connection and completes its handshake. Suspends the goroutine until a connection arrives.") {
+    net.TcpStream tcp = this._listener.accept()? e {
+      raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
+    };
+    int ssl = _tls_new(this._ctx);
+    if ssl == 0 {
+      raise _tls_err(TlsErrorKind.handshake, "failed to allocate TLS session");
+    }
+    _tls_set_accept_state(ssl);
+    TlsStream s = TlsStream(_ssl: ssl, _tcp: move tcp);
+    s._handshake()?^;
+    return s;
+  }
+
+  get local_port int `public `doc("The port this listener is bound to. Useful after binding to port 0 (dynamic allocation).") {
+    return this._listener.local_port;
+  }
+
+  close!(~this) `public `doc("Closes the listener socket.") {
+    this._listener.close()? e {
+      raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
+    };
+  }
+
+  drop(~this) {
+    if this._ctx != 0 {
+      _tls_ctx_free(this._ctx);
+    }
+    // this._listener drops automatically, closing the socket.
+  }
+}

@@ -127,16 +127,24 @@ func (r *CompileResult) CoverageEnabled() bool {
 const tlsExternPrefix = "promise_tls_"
 
 // NeedsTLS reports whether this compilation references the TLS runtime bridge —
-// i.e. declares at least one `promise_tls_*` extern. When true, the Linux linker
-// splices libssl.a + libcrypto.a into the static musl link line and the runtime
-// resolves those archives on demand (main.go, T1596 / #28).
+// i.e. links against OpenSSL. When true, the Linux linker splices libssl.a +
+// libcrypto.a into the static musl link line and the runtime resolves those
+// archives on demand (main.go, T1596 / #28).
 //
-// The gate is by construction: it is derived from the externs actually present
-// in the compiled program, never set by hand. NO program declares a
-// promise_tls_* extern today — the codegen bridge that emits them lands with
-// T0077, at which point this flips true automatically with no change here. So
-// this always returns false for now, and nothing links OpenSSL.
+// The gate is by construction, never set by hand. The authoritative signal is
+// the codegen bridge (defineTLSPALBodies, T0077): it sets c.needsTLS exactly
+// when it emits the OpenSSL PAL calls, which happens iff the program imports the
+// tls module (`use tls;`) and thus declares promise_tls_* externs. Those externs
+// live in the tls *module's* IR (c.moduleExterns), not the main file's Externs
+// slice, so the flag — not an Externs scan — is the real source of truth.
+//
+// The Externs scan below is retained as a secondary signal for main-file
+// promise_tls_* externs and to keep this callable on a CompileResult with no
+// attached compiler (unit tests construct one directly).
 func (r *CompileResult) NeedsTLS() bool {
+	if r.compiler != nil && r.compiler.needsTLS {
+		return true
+	}
 	for _, e := range r.Externs {
 		if e != nil && strings.HasPrefix(e.CName, tlsExternPrefix) {
 			return true

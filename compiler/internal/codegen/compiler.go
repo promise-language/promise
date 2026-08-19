@@ -615,6 +615,7 @@ type Compiler struct {
 	debugAllocator        bool       // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
 	memoryLimitAccounting bool       // T0689: emit memory-limit counter + helpers (test binaries with -memory-limit > 0)
 	needsNetpoll          bool       // true if net module imported — netpoll_init needed at startup (T0071)
+	needsTLS              bool       // true if tls module bridged — OpenSSL archives linked on Linux (T0077)
 	netpollBatchLock      *ir.Global // @__netpoll_batch_lock — held by reactor during event processing; close waits on it (B0324)
 	nextDebugID           int        // counter for emitDebugPrint global names
 
@@ -1072,6 +1073,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineFileIOBodies()      // bridge io module externs → PAL file I/O functions
 	c.defineOSBodies()          // bridge os module externs → PAL OS functions
 	c.defineNetPALBodies()      // bridge net module externs → PAL socket functions (T0069)
+	c.defineTLSPALBodies()      // bridge tls module externs → PAL OpenSSL functions (T0077)
 	c.defineTimeBodies()        // bridge time module wall-clock extern → realtime clock (T0962)
 
 	c.defineTypeMethods(file)

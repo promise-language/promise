@@ -247,11 +247,15 @@ func TestResolveOpenSSLDirWithTLS(t *testing.T) {
 	}
 }
 
-// TestFindOpenSSLEmbeddedExtraction drives the LAST rung of findOpenSSL's ladder:
-// with an empty PROMISE_HOME (no sibling/install/cache dir) and no openssl blobs
-// in the manifest, findOpenSSL must extract the embedded archives into the cache
-// dir and return it. A second call must then hit the cache rung (rung 3) and
-// return the same dir. Skips unless the build embedded the REAL archives.
+// TestFindOpenSSLEmbeddedExtraction drives the fallback rungs of findOpenSSL's
+// ladder: with an empty PROMISE_HOME (no sibling/install/cache dir), findOpenSSL
+// must still resolve the REAL archives from a build that embedded them —
+// materializing them either through the content-addressed store view (rung 4,
+// taken when the manifest carries openssl blobs) or by extracting the embedded
+// archives into the cache dir (rung 5). Both are valid "found OpenSSL" outcomes,
+// so this asserts the contract — a complete dir of real archives, resolved
+// idempotently — rather than a specific rung's path (T1601). Skips unless the
+// build embedded the REAL archives.
 func TestFindOpenSSLEmbeddedExtraction(t *testing.T) {
 	if !embeddedOpenSSLReal(t) {
 		t.Skip("build embedded only a placeholder — nothing to extract")
@@ -263,18 +267,13 @@ func TestFindOpenSSLEmbeddedExtraction(t *testing.T) {
 	if runtime.GOARCH == "arm64" {
 		target = "aarch64-unknown-linux-musl"
 	}
-	arch := opensslArchDir(target)
-	wantDir := filepath.Join(home, "cache", "openssl", arch)
 
 	got, err := findOpenSSL(target)
 	if err != nil {
-		t.Fatalf("findOpenSSL (extraction rung): %v", err)
-	}
-	if got != wantDir {
-		t.Errorf("findOpenSSL = %q, want cache dir %q", got, wantDir)
+		t.Fatalf("findOpenSSL (fallback rung): %v", err)
 	}
 	if !openSSLComplete(got) {
-		t.Errorf("extracted dir %q is missing archives", got)
+		t.Errorf("resolved dir %q is missing archives", got)
 	}
 	// Both archives must be non-trivial (real, not the 1-byte placeholder).
 	for _, name := range opensslFiles {
@@ -283,17 +282,17 @@ func TestFindOpenSSLEmbeddedExtraction(t *testing.T) {
 			t.Fatalf("stat %s: %v", name, statErr)
 		}
 		if info.Size() < 1024 {
-			t.Errorf("%s extracted at %d bytes — looks like a placeholder, not a real archive", name, info.Size())
+			t.Errorf("%s resolved at %d bytes — looks like a placeholder, not a real archive", name, info.Size())
 		}
 	}
 
-	// Second call: cache is now populated, so rung 3 (openSSLValid) short-circuits.
+	// Second call must be idempotent: the same resolved dir, no re-materialization.
 	got2, err := findOpenSSL(target)
 	if err != nil {
-		t.Fatalf("findOpenSSL (cache rung): %v", err)
+		t.Fatalf("findOpenSSL (second call): %v", err)
 	}
-	if got2 != wantDir {
-		t.Errorf("second findOpenSSL = %q, want cached dir %q", got2, wantDir)
+	if got2 != got {
+		t.Errorf("second findOpenSSL = %q, want the same dir as the first call %q", got2, got)
 	}
 }
 

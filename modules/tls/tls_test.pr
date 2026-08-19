@@ -1,0 +1,271 @@
+// tls module tests — loopback TLS handshake over the reactor (T0077).
+// A self-signed cert/key (generated once, committed) drives a TlsListener
+// server and a TlsStream client on 127.0.0.1, exercising the full memory-BIO
+// handshake, encrypted round-trip, negotiated version/cipher, close_notify, and
+// TlsError kind differentiation. Excluded on wasm (no TLS backend / no sockets).
+// Self-signed certificate and matching private key (CN=localhost), PEM-encoded.
+_test_cert() u8[] {
+  return "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUIdE48rWcPrShBQQO6bmpIWC4UYswDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgxOTE2MzQwM1oXDTM2MDgx\nNjE2MzQwM1owFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAmNxN4Db03AQ7rfUWkwMdfiAR+861FfWwgVFTeGFcmdE8\nImoPdZVlY0Kp3POt9+znOg4keaLQlCF/st8MkVcTafgbX8WNkPdQBep23bTwvezi\nj9QOJs/YNesImsYgs08p9R0HOiQvuRsK2E/khvok8XQtOGbe0D9+vG0LOqGc2CKG\nu1M9WfuI0A8iWlcVXFoiJQLas/FpXaNqkJ1+GDj4XW4JfkgByA3olAGiWZP+rZn8\nd8fUyZjbfI+huUTV8OWAXJpk8CI8BNFyEQU+WS8EsaVEgp1j6vOKbtBxFa1fu+Jz\n7vEllrAJQxBE4EWYr3u40K8DzG0kSYEnNzql62QzZQIDAQABo1MwUTAdBgNVHQ4E\nFgQUZ6zv3vHCsCg2daSNRgzxPh1Uy6EwHwYDVR0jBBgwFoAUZ6zv3vHCsCg2daSN\nRgzxPh1Uy6EwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAOkKf\nM+4hRfY33y+6LExP5qc7n7XBD8axlPbwWTTz4VnZhtb/1mhDilzsIvvqnr4joyVU\nasNZfV17Y5PBKdLJi7oAGQY6vBQTY/6oliltMMfyuwUlED4lpQrzR5eHETwLxae9\nyn2la4zq/T06latfpJsn69XDhfBFd8ZmF9aYlon80l6532hXtSVO3lpQmlst5Ke9\nevsiUh6EFMg67xKRgz6WBQYmUwe36uz84FC5etCHQkpuWSvYrPEfZs21J+ep4tvh\nIXSqOb2LDsJhf3V9VfILQRmzgSY36oUaHg2gck3QCYBj0wVCZm+BHw4FzFOe6MEa\nIe6jqBg4hHdNVc6mAw==\n-----END CERTIFICATE-----\n".bytes();
+}
+
+_test_key() u8[] {
+  return "-----BEGIN PRIVATE KEY-----\nMIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQCY3E3gNvTcBDut\n9RaTAx1+IBH7zrUV9bCBUVN4YVyZ0Twiag91lWVjQqnc86337Oc6DiR5otCUIX+y\n3wyRVxNp+BtfxY2Q91AF6nbdtPC97OKP1A4mz9g16wiaxiCzTyn1HQc6JC+5GwrY\nT+SG+iTxdC04Zt7QP368bQs6oZzYIoa7Uz1Z+4jQDyJaVxVcWiIlAtqz8Wldo2qQ\nnX4YOPhdbgl+SAHIDeiUAaJZk/6tmfx3x9TJmNt8j6G5RNXw5YBcmmTwIjwE0XIR\nBT5ZLwSxpUSCnWPq84pu0HEVrV+74nPu8SWWsAlDEETgRZive7jQrwPMbSRJgSc3\nOqXrZDNlAgMBAAECgf8TAfytD324iM44U2xQhj1PRwL1d5QM/FV2adEh/E6yJyfT\nH7J3F0dZkHCO3mjuQLHVW5eC3ea8hMMxpYq/3T63bqKjcMKpxBcEpU3NQ91Wa0kW\nRB1+YK9XWmKM3GuJ4HjXLJo5dfEj6LjwglQTH10jU872XymrEOTcNAhcF2c+zjBq\n8UUa35Sb4ZrI4yoqdbpp6ovUraThhWZyjCPBex6yGPp5UJTfwNN6xyuQhzX96wP/\nVzIqYNeXYHFbArllxzFojD/2Al28jWlnYowIKPGu0OFJ40zM83daGqmrx8wrIX0h\n54fgomhb9KGajlzeCtiLYgrU/wHExG15I54hgqECgYEAxjurs9JSoUUaGGJLYfnB\nXRVG/tuMkUsPLEmUwRL0lnybBUJf+zjMp+xMpEfVvGzXOlnT8KIkZp6102QOAAoV\ngFQX023ZEWoQB4ePsh/JMZXUusXCUhqQWa4mvQVllaCurixIM00aH1lvC/bNNo6f\n6fIdZJNcuFWa+4dnzdfNL9ECgYEAxWfPk9731OvEaSMAC2r6H+EAiXC5fHRvImJD\nAvWNwkz7KodJbD7TE+SGN6Dm7v4MalYP0q46wtlo8f533q6AMXco1ctCg8T11h0w\nPyemWmd2OyibXLI41drnPT5OvnQ9Ou5oo59gsFSdRy2o529cGpGruvsZwkjQfNot\nQSFN41UCgYBi1W9XGX7PHyfSjndtItvQcAJUoNvluNmYyBrdZHkD6p5TsfMuyvPm\nqT7RDWu4JT/tvMmZiQ3DCFA5VAJS7LQppkO2y2bVct8JEgKH2aczDLPiZyTqUIo1\n3Ek+JsmuH03YUwWwZjmm9a0S9vr7v4JlXqxe78XjtfKug6UykOyhcQKBgQCI4gcq\nPj4TwribPs3VHQT7/gVlSGkWR5aYfRKChssZpE+1mcHr8VRkQt5ezI/VwQvS4IJw\nUKgmXKNMymtMWixCIKKMPTmOLZFaOzstT80mev+c3fd9O4f1oqkd6oqnveqHZrHg\nY6+kFchJhvvMH4f6VHCEY4HlGqCXMqKWuwVLUQKBgA9hDCSR+3iAb1Ykg4zBVOls\ntpl8/tzWsbaCKIBX92r96IHGc62tKHZaAuTG3V9xpGhlKlh95+rOY743/adkopiP\nQGAB1YPT+v0+JvG6iuF6Y8SYfwomrFv4ujNyoQE0weUgfy4LMN7wmFyIB70Y8Z8h\nYWo7gB89opWiQ8YrIFQ+\n-----END PRIVATE KEY-----\n".bytes();
+}
+
+test_tls_loopback_roundtrip() `test(exclude: wasm, timeout: "20s") {
+  u8[] cert = _test_cert();
+  u8[] key = _test_key();
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
+  int port = listener.local_port;
+  assert(port > 0, "listener bound to a port");
+
+  // Client runs in a goroutine; it connects, sends a line, and checks the echo.
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.insecure();
+    TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+    assert(client.cipher_suite.len > 0, "client negotiated a cipher suite");
+    client.write_string("hello tls\n")?!;
+    if reply := client.read_line()?! {
+      assert(reply == "echo:hello tls", "client received the server echo");
+    } else {
+      assert(false, "client expected an echo line");
+    }
+    client.close()?!;
+  };
+
+  // Server handshakes, reads one line, echoes it back, and closes.
+  TlsStream server = listener.accept()?!;
+  assert(server.cipher_suite.len > 0, "server negotiated a cipher suite");
+  match server.version {
+    TlsVersion.tls_1_2 => {
+    },
+    TlsVersion.tls_1_3 => {
+    },
+  }
+  if line := server.read_line()?! {
+    assert(line == "hello tls", "server received the plaintext over TLS");
+    server.write_string("echo:" + line + "\n")?!;
+  } else {
+    assert(false, "server expected a request line");
+  }
+  server.close()?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(150));
+}
+
+test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  // A plain-TCP server that speaks no TLS: it reads the ClientHello and replies
+  // with non-TLS bytes, so the client handshake must fail.
+  go {
+    net.TcpStream conn = listener.accept()? e {
+      return;
+    };
+    u8[] buf = u8[].filled(0u8, 1024);
+    conn.read(buf)? e {
+    };
+    u8[] garbage = "NOT-A-TLS-SERVER\n".bytes();
+    conn.write(garbage)? e {
+    };
+    conn.close()? e {
+    };
+    // listener is owned by this goroutine and drops here, closing its socket.
+  };
+
+  net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+  TlsConfig cfg = TlsConfig.insecure();
+  bool caught = false;
+  TlsStream.connect(move tcp, "localhost", cfg)? e is TlsError {
+    // Must be a handshake or io failure — NOT a certificate error (we used
+    // insecure()) and NOT unsupported (this is Linux).
+    match e.kind {
+      TlsErrorKind.handshake => {
+        caught = true;
+      },
+      TlsErrorKind.io => {
+        caught = true;
+      },
+      TlsErrorKind.certificate => {
+        assert(false, "should not be a certificate error under insecure()");
+      },
+      TlsErrorKind.no_trust_store => {
+        assert(false, "should not be a trust-store error under insecure()");
+      },
+      TlsErrorKind.unsupported => {
+        assert(false, "TLS should be supported on Linux");
+      },
+    }
+  }!;
+  assert(caught, "TLS handshake against a plain-TCP server must fail");
+  sleep(Duration.from_millis(100));
+}
+
+// Compile-time proof that TlsStream satisfies Reader and Writer, as its type doc
+// claims — required for layering (e.g. HTTPS) over a generic byte stream. These
+// helpers are never called; sema type-checks the interface views at compile time.
+_tls_stream_is_reader(TlsStream move s) {
+  _tls_consume_reader(s);
+}
+_tls_stream_is_writer(TlsStream move s) {
+  _tls_consume_writer(s);
+}
+_tls_consume_reader(Reader r) {
+}
+_tls_consume_writer(Writer w) {
+}
+
+test_tls_config_insecure_and_default() `test(exclude: wasm) {
+  // Both config factories succeed on a backed platform (non-zero context).
+  TlsConfig a = TlsConfig.insecure();
+  TlsConfig b = TlsConfig.create();
+  b.set_min_version(TlsVersion.tls_1_3);
+  // a and b drop here, freeing their OpenSSL contexts (leak detector verifies).
+}
+
+// A verifying client that trusts the server's self-signed certificate (added as a
+// custom root) completes the handshake and drains the server's whole response via
+// read_all. Exercises: TlsConfig.create + add_root_certificate, the connect verify
+// path with a matching hostname, a certificate that verifies (get_verify_result ==
+// 0), and TlsStream.read_all draining to a clean close_notify. Deterministic — the
+// trust anchor is supplied inline (no system-trust-store dependency), and it follows
+// the request/response ordering of the stable roundtrip: the client sends first, the
+// server responds and closes while the client is still open, then the client
+// read_all's to the server's close_notify and simply drops.
+test_tls_verified_handshake_and_read_all() `test(exclude: wasm, timeout: "20s") {
+  u8[] cert = _test_cert();
+  u8[] key = _test_key();
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
+  int port = listener.local_port;
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.create();
+    cfg.add_root_certificate(_test_cert())?!; // trust the self-signed server cert
+    TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+    client.write_string("ping\n")?!;
+    // Drain the server's full response until its close_notify, then just drop — no
+    // close_notify is written back into the already-closed peer.
+    u8[] got = client.read_all()?!;
+    assert(string.from_bytes(got) == "payload-over-verified-tls",
+    "client read_all decrypted the whole response over a verified TLS link");
+  };
+
+  TlsStream server = listener.accept()?!;
+  if line := server.read_line()?! {
+    assert(line == "ping", "server received the client request over verified TLS");
+  } else {
+    assert(false, "server expected a request line");
+  }
+  server.write_string("payload-over-verified-tls")?!;
+  server.close()?!; // close_notify while the client is still reading — clean EOF
+  listener.close()?!;
+  sleep(Duration.from_millis(150));
+}
+
+// A verifying client whose trust anchor DOES cover the server cert still rejects
+// the connection when the requested hostname does not match the certificate.
+// Exercises the certificate-failure branch of _handshake (get_verify_result != 0
+// → TlsErrorKind.certificate) distinctly from a protocol handshake failure, and
+// is deterministic because the trust store is supplied inline (no no_trust_store).
+test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm, timeout: "15s") {
+  u8[] cert = _test_cert();
+  u8[] key = _test_key();
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
+  int port = listener.local_port;
+
+  go {
+    // Server accept fails once the client aborts on the bad hostname; swallow it.
+    listener.accept()? e {
+    };
+  };
+
+  net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+  TlsConfig cfg = TlsConfig.create();
+  cfg.add_root_certificate(_test_cert())?!; // chain will verify; hostname will not
+  bool caught_cert = false;
+  TlsStream.connect(move tcp, "wronghost.invalid", cfg)? e is TlsError {
+    match e.kind {
+      TlsErrorKind.certificate => {
+        caught_cert = true;
+      },
+      _ => {
+        assert(false, "a hostname mismatch must surface as a certificate error");
+      },
+    }
+  }!;
+  assert(caught_cert, "verifying client must reject a certificate whose host mismatches");
+  sleep(Duration.from_millis(100));
+}
+
+// Certificate/key loading error paths that need no network: a valid client cert
+// and key load; invalid PEM is rejected as a certificate error on both the config
+// (add_root_certificate / set_client_certificate) and the server listener (bind).
+test_tls_certificate_loading_errors() `test(exclude: wasm) {
+  u8[] garbage = "-----BEGIN CERTIFICATE-----\nnot-valid-base64\n-----END CERTIFICATE-----\n".bytes();
+
+  // A valid client certificate + matching key load on a (non-verifying) config.
+  TlsConfig client_cfg = TlsConfig.insecure();
+  client_cfg.set_client_certificate(_test_cert(), _test_key())?!;
+
+  // Adding a valid CA to a verifying config succeeds and marks a trust store.
+  TlsConfig verifier = TlsConfig.create();
+  verifier.add_root_certificate(_test_cert())?!;
+
+  // Invalid PEM is a certificate error via add_root_certificate.
+  TlsConfig bad_ca = TlsConfig.insecure();
+  bool caught_ca = false;
+  bad_ca.add_root_certificate(garbage)? e is TlsError {
+    match e.kind {
+      TlsErrorKind.certificate => {
+        caught_ca = true;
+      },
+      _ => {
+      },
+    }
+  }!;
+  assert(caught_ca, "invalid CA PEM must raise a certificate error");
+
+  // A malformed private key is a certificate error via set_client_certificate.
+  TlsConfig bad_key = TlsConfig.insecure();
+  u8[] badkey = "-----BEGIN PRIVATE KEY-----\nnot-valid-base64\n-----END PRIVATE KEY-----\n".bytes();
+  bool caught_key = false;
+  bad_key.set_client_certificate(_test_cert(), badkey)? e is TlsError {
+    match e.kind {
+      TlsErrorKind.certificate => {
+        caught_key = true;
+      },
+      _ => {
+      },
+    }
+  }!;
+  assert(caught_key, "malformed private key must raise a certificate error");
+
+  // A server listener rejects an invalid certificate at bind time (frees its ctx).
+  bool caught_bind_cert = false;
+  TlsListener.bind("127.0.0.1", 0, garbage, _test_key())? e is TlsError {
+    match e.kind {
+      TlsErrorKind.certificate => {
+        caught_bind_cert = true;
+      },
+      _ => {
+      },
+    }
+  }!;
+  assert(caught_bind_cert, "TlsListener.bind must reject an invalid server certificate");
+
+  // ...and rejects a valid certificate paired with an invalid key.
+  bool caught_bind_key = false;
+  TlsListener.bind("127.0.0.1", 0, _test_cert(), badkey)? e is TlsError {
+    match e.kind {
+      TlsErrorKind.certificate => {
+        caught_bind_key = true;
+      },
+      _ => {
+      },
+    }
+  }!;
+  assert(caught_bind_key, "TlsListener.bind must reject an invalid server key");
+}

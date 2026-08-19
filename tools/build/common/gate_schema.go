@@ -18,6 +18,7 @@ machine-readable JSON. Run ` + "`bin/gate schema`" + ` to print this contract.
 |-------------|----------------|--------------------|---------|
 | ` + "`test`" + `      | host           | yes (Promise tests) | ` + "`host_*`" + ` |
 | ` + "`wasm-test`" + ` | ` + "`wasm32-wasi`" + `  | yes (Promise tests) | ` + "`wasm_*`" + ` |
+| ` + "`wasm-web-test`" + ` | ` + "`wasm32-web`" + `  | yes (Promise tests) | ` + "`wasm_web_*`" + ` |
 | ` + "`go-test`" + `   | host           | yes (Go tests, grouped by package) | ` + "`go_test_*`" + ` |
 | ` + "`stress`" + `    | host           | no                 | ` + "`stress_*`" + ` |
 | ` + "`coverage`" + `  | host           | no                 | ` + "`*_coverage_pct`" + ` |
@@ -31,9 +32,10 @@ populate it. The envelope shape is identical so the tracker ingests one schema.
 One gate invocation reports exactly one target, stamped once at the top of the
 envelope — never per record. ` + "`bin/gate test`" + ` reports the host (e.g.
 ` + "`linux-amd64`" + `) and is host-only; ` + "`bin/gate wasm-test`" + ` reports ` + "`wasm32-wasi`" + `;
+` + "`bin/gate wasm-web-test`" + ` reports ` + "`wasm32-web`" + `;
 ` + "`go-test`" + `/` + "`stress`" + `/` + "`coverage`" + `/` + "`wasm-size`" + ` report the host they ran on. Any
 unknown argument (including ` + "`-wasm`" + ` to ` + "`bin/gate test`" + `) is rejected — wasm tests
-are a separate single-target gate (` + "`bin/gate wasm-test`" + `).
+are separate single-target gates (` + "`bin/gate wasm-test`" + `, ` + "`bin/gate wasm-web-test`" + `).
 
 ## Envelope
 

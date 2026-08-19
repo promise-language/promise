@@ -77,6 +77,32 @@ func TestRunGate_WasmTestsBadFlag(t *testing.T) {
 	}
 }
 
+// TestRunGate_WasmWebTestIsAdvertised verifies the T1594 subcommand is wired
+// into the dispatcher: both the no-args usage text and the unknown-subcommand
+// hint must list `wasm-web-test`, so an operator (or gate scheduler) can
+// discover it instead of hitting "unknown subcommand" as in T1594.
+func TestRunGate_WasmWebTestIsAdvertised(t *testing.T) {
+	usageErr := RunGate("", nil)
+	if usageErr == nil || !strings.Contains(usageErr.Error(), "wasm-web-test") {
+		t.Errorf("no-args usage does not advertise wasm-web-test: %v", usageErr)
+	}
+	unknownErr := RunGate("", []string{"bogus"})
+	if unknownErr == nil || !strings.Contains(unknownErr.Error(), "wasm-web-test") {
+		t.Errorf("unknown-subcommand hint does not list wasm-web-test: %v", unknownErr)
+	}
+}
+
+// TestRunGate_WasmWebTestsBadFlag verifies that unrecognized flags are rejected for wasm-web-test.
+func TestRunGate_WasmWebTestsBadFlag(t *testing.T) {
+	err := RunGate("", []string{"wasm-web-test", "--bogus"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
 // TestRunGate_OldWasmTestsNameRejected verifies that the old plural "wasm-tests" subcommand
 // is no longer recognized — renamed to "wasm-test" by T0245.
 func TestRunGate_OldWasmTestsNameRejected(t *testing.T) {

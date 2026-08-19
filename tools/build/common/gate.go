@@ -17,7 +17,7 @@ import (
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-web-test  run only wasm32-web target tests (via Node) and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
 	}
 	switch args[0] {
 	case "test":
@@ -28,6 +28,8 @@ func RunGate(root string, args []string) error {
 		return runGateLatestInvariant(args[1:])
 	case "wasm-test":
 		return runGateWasmTests(root, args[1:])
+	case "wasm-web-test":
+		return runGateWasmWebTests(root, args[1:])
 	case "wasm-size":
 		return runGateWasmSize(root, args[1:])
 	case "go-test":
@@ -39,7 +41,7 @@ func RunGate(root string, args []string) error {
 	case "schema":
 		return runGateSchema()
 	default:
-		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-size, go-test, stress, coverage, install, latest-invariant, schema", args[0])
+		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-web-test, wasm-size, go-test, stress, coverage, install, latest-invariant, schema", args[0])
 	}
 }
 
@@ -193,6 +195,78 @@ func runGateWasmTests(root string, args []string) error {
 
 	if wasmErr != nil {
 		return fmt.Errorf("promise tests (wasm32-wasi) failed")
+	}
+	return nil
+}
+
+// runGateWasmWebTests runs only wasm32-web target tests (via Node) and writes
+// structured JSON gate values to stdout.
+func runGateWasmWebTests(root string, args []string) error {
+	args = NormalizeArgs(args)
+	shared := slices.Contains(args, "-shared")
+
+	for _, arg := range args {
+		switch arg {
+		case "-shared", "-local":
+		default:
+			return fmt.Errorf("usage: bin/gate wasm-web-test [-shared]")
+		}
+	}
+
+	if Which("node") == "" {
+		return fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
+	}
+
+	if !shared {
+		if err := SetupLocalCache(root); err != nil {
+			return fmt.Errorf("setup local cache: %w", err)
+		}
+	}
+
+	// Build compiler first. Redirect stdout→stderr so build progress lines
+	// don't contaminate the JSON we emit to stdout at the end.
+	savedStdout := os.Stdout
+	os.Stdout = os.Stderr
+	buildErr := RunBuild(root, nil)
+	os.Stdout = savedStdout
+	if buildErr != nil {
+		return fmt.Errorf("build: %w", buildErr)
+	}
+
+	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+
+	// Run wasm32-web tests with --json (single-target gate). The runner streams
+	// one JSON record per eligible test to stdout; human progress to stderr.
+	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-web)...\n")
+	wasmWebJSONL, wasmWebErr := RunPromiseTestsJSON(root, "wasm32-web")
+
+	// Build the single-target wasm32-web envelope.
+	out, err := BuildGateOutput(root, "wasm32-web", "wasm_web", "wasm-web-test", wasmWebJSONL)
+	if err != nil {
+		return fmt.Errorf("build gate output: %w", err)
+	}
+
+	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
+	// Platform is the host (where the gate ran); the metrics carry the
+	// wasm_web_ prefix and the envelope's target records the test target.
+	gv := &GateValues{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Platform:  hostTarget,
+		Values:    out.Metrics,
+	}
+	if err := WriteGateValues(root, gv); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+
+	// Output the two-level GateOutput JSON to stdout (machine-readable).
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal gate output: %w", err)
+	}
+	fmt.Println(string(data))
+
+	if wasmWebErr != nil {
+		return fmt.Errorf("promise tests (wasm32-web) failed")
 	}
 	return nil
 }

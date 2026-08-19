@@ -109,10 +109,13 @@ func (g *jsGlueGenerator) emitImportObject(modules []*Module) {
 	for _, m := range modules {
 		g.writef("  %s: {\n", m.ImportModule)
 
-		// Resource drop functions
+		// Resource drop functions. Import name must match the WIT/component-model
+		// canonical naming ("[resource-drop]<kebab-case>") that codegen.go's
+		// emitResource emits on the .pr side — see toKebab, which both generators
+		// must share rather than deriving this name independently (#1).
 		for _, res := range m.Resources {
 			if res.Drop {
-				importName := res.Name + ".drop"
+				importName := "[resource-drop]" + toKebab(res.Name)
 				g.writef("    \"%s\"(handle) {\n", importName)
 				g.write("      _refRelease(handle);\n")
 				g.write("    },\n")

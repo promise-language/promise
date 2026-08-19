@@ -2940,7 +2940,7 @@ func TestGenerateJSGlueResourceDrop(t *testing.T) {
 		}},
 	}}
 	out := GenerateJSGlue(modules)
-	assertContains(t, out, `"Element.drop"(handle)`)
+	assertContains(t, out, `"[resource-drop]element"(handle)`)
 	assertContains(t, out, "_refRelease(handle)")
 }
 
@@ -3048,11 +3048,20 @@ func TestWebIdlEndToEnd(t *testing.T) {
 	if !strings.Contains(jsCode, "promise_env") {
 		t.Error("JS glue should reference promise_env import module")
 	}
-	if !strings.Contains(jsCode, "Console.drop") {
-		t.Error("JS glue should contain Console.drop")
+	if !strings.Contains(jsCode, `"[resource-drop]console"`) {
+		t.Error("JS glue should contain [resource-drop]console")
 	}
-	if !strings.Contains(jsCode, "Document.drop") {
-		t.Error("JS glue should contain Document.drop")
+	if !strings.Contains(jsCode, `"[resource-drop]document"`) {
+		t.Error("JS glue should contain [resource-drop]document")
+	}
+	// The .pr side's wasm_import name and the .js side's import key must match
+	// exactly, or WebAssembly.instantiate() fails at import-resolution time
+	// before any user code runs (#1).
+	if !strings.Contains(prCode, `"[resource-drop]console"`) {
+		t.Error("Promise code should declare a wasm_import for [resource-drop]console")
+	}
+	if !strings.Contains(prCode, `"[resource-drop]document"`) {
+		t.Error("Promise code should declare a wasm_import for [resource-drop]document")
 	}
 }
 

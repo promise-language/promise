@@ -66,26 +66,40 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		for i, pt := range ext.ParamTypes {
 			paramName := ext.Sig.Params()[i].Name()
 
-			var paramType irtypes.Type
 			if isOpaqueContainerType(pt) {
 				// Container types (Vector, Channel, string) are i8* pointers
-				paramType = irtypes.I8Ptr
-			} else {
-				layout := c.lookupLayout(pt)
-				if layout == nil {
-					panic(fmt.Sprintf("codegen: cannot resolve layout for extern param %d of %s", i, ext.PromiseName))
-				}
-				if isRefType(pt) {
-					paramType = irtypes.NewPointer(layout.Value.LLVMType)
-				} else if isWasmImport && layout.Kind == LayoutPrimitive {
-					// WASM imports: primitive scalars pass by value directly
-					paramType = llvmNamedType(extractNamed(pt))
-				} else {
-					// All extern value struct params: pass by pointer to match C ABI
-					paramType = irtypes.I8Ptr
-				}
+				params = append(params, ir.NewParam(paramName, irtypes.I8Ptr))
+				continue
 			}
-			params = append(params, ir.NewParam(paramName, paramType))
+
+			layout := c.lookupLayout(pt)
+			if layout == nil {
+				panic(fmt.Sprintf("codegen: cannot resolve layout for extern param %d of %s", i, ext.PromiseName))
+			}
+
+			if isRefType(pt) {
+				params = append(params, ir.NewParam(paramName, irtypes.NewPointer(layout.Value.LLVMType)))
+				continue
+			}
+
+			if isWasmImport && layout.Kind == LayoutPrimitive {
+				// WASM imports: primitive scalars pass by value directly
+				params = append(params, ir.NewParam(paramName, llvmNamedType(extractNamed(pt))))
+				continue
+			}
+
+			if isWasmImport && layout.Kind == LayoutString {
+				// WASM imports: strings flatten to a canonical (ptr, len) pair
+				// instead of a pointer to Promise's private boxed-string value
+				// struct — the host (JS) side has no knowledge of that internal
+				// layout, and previously received a single pointer to it verbatim (#4).
+				params = append(params, ir.NewParam(paramName+"_ptr", irtypes.I8Ptr))
+				params = append(params, ir.NewParam(paramName+"_len", irtypes.I32))
+				continue
+			}
+
+			// All extern value struct params: pass by pointer to match C ABI
+			params = append(params, ir.NewParam(paramName, irtypes.I8Ptr))
 		}
 
 		retType := irtypes.Type(irtypes.Void)
@@ -166,6 +180,14 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 			paramLayout := c.lookupLayout(ext.ParamTypes[i])
 			if paramLayout != nil && paramLayout.Kind == LayoutPrimitive {
 				callArgs = append(callArgs, arg)
+				continue
+			}
+			// WASM imports: strings flatten to a (ptr, len) pair rather than a
+			// pointer to Promise's private boxed-string value struct (#4). `arg`
+			// is already the raw i8* string instance pointer (see packString).
+			if paramLayout != nil && paramLayout.Kind == LayoutString {
+				dataPtr, dataLen := c.extractStringDataLenFromInstance(c.block, arg)
+				callArgs = append(callArgs, dataPtr, c.block.NewTrunc(dataLen, irtypes.I32))
 				continue
 			}
 		}

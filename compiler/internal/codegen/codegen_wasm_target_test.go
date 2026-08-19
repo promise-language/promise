@@ -168,6 +168,35 @@ func TestWasmExternF64Param(t *testing.T) {
 	assertContains(t, ir, "declare void @test_set(double %val)")
 }
 
+// #4: wasm_import string PARAMETERS must flatten to a canonical (ptr, len)
+// pair, matching what host (JS) glue expects — not a pointer to Promise's
+// private boxed-string value struct. Before this fix, a wasm_import function
+// taking a plain `string` param received a single i8* pointing to a
+// {vtable=null, instance} value-struct alloca (the record layout reverse-
+// engineered in PROMISE_COMPILER_BUGS.md), so real host code receiving the
+// call saw one opaque pointer argument instead of the expected (ptr, len).
+func TestWasmImportStringParamFlattensToPtrLen(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		take_string(string s) `+"`extern(\"take_string\") `wasm_import(\"dbg\", \"take_string\") `target(web)"+`;
+		main() { take_string("hello"); }
+	`, "wasm32-web")
+	assertContains(t, ir, `declare void @take_string(i8* %s_ptr, i32 %s_len) `)
+	assertContains(t, ir, `"wasm-import-name"="take_string"`)
+	assertContains(t, ir, "call void @take_string(i8*")
+}
+
+// #4: the flattening must be scoped to wasm_import externs only — a plain
+// (non-wasm_import) native extern taking a string param keeps passing the
+// existing boxed value-struct pointer, matching the native C ABI other
+// native extern callers (e.g. cabi_string_data in wasm_alloc.c) already rely on.
+func TestWasmExternStringParamUnchangedForNonWasmImport(t *testing.T) {
+	ir := generateIR(t, `
+		_take(string s) `+"`extern(\"native_take\")"+`;
+		main() { _take("hello"); }
+	`)
+	assertContains(t, ir, "declare void @native_take(i8* %s)")
+}
+
 func TestWasmExternFailableStillSret(t *testing.T) {
 	ir := generateIRForTarget(t, `
 		_open!(i32 fd) i32 `+"`extern(\"test_open\") `wasm_import(\"env\", \"test_open\") `target(wasm)"+`;

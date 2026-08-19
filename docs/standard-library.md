@@ -54,10 +54,10 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `json` | `modules/json/json.pr` | ~900 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 157 tests. |
 | `os` | `modules/os/os.pr` | 4 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal |
 | `time` | `modules/time/time.pr` | ~370 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 25 tests. |
-| `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
+| `http` | `modules/http/http.pr` | ~950 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, graceful shutdown. https/TLS is T0079. 74 tests. |
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | **Done** (hex) — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
 
-**What's missing**: Networking, HTTP. OS access (args, env, cwd, execute, set env, set cwd, streaming process, env listing, user/group info, hostname, pid, signal handling) is done.
+**What's missing**: TLS/https (T0079). Networking (TCP) and HTTP client/server are done. OS access (args, env, cwd, execute, set env, set cwd, streaming process, env listing, user/group info, hostname, pid, signal handling) is done.
 
 ### Naming Conventions
 
@@ -1020,22 +1020,37 @@ type TcpStream {
 - **Dependencies**: PAL socket extensions, IO reactor (epoll/kqueue)
 - **Note**: Requires significant PAL work and potentially goroutine-aware I/O integration
 
-#### 5d. `modules/http/http.pr` — HTTP Client
+#### 5d. `modules/http/http.pr` — HTTP Client & Server
 
-Currently a 4-line placeholder. Planned API:
+HTTP/1.1 over the `net` module (no TLS yet — see T0079). Convenience functions
+plus a reusable `Client` and a serial `Server`:
 
 ```promise
-type HttpResponse {
-    int status;
-    map[string, string] headers;
-    string body;
-}
+// One-shot helpers (redirect-following + gzip via a transient Client).
+http_get!(string url) Response;
+http_post!(string url, string body, map[string, string] headers) Response;
+http_post_json![T: Encodable](string url, T data) Response;
 
-http_get!(string url) HttpResponse ;
-http_post!(string url, string body, map[string, string] headers) HttpResponse ;
+// Reusable client with redirects, keep-alive pooling, and gzip.
+Client client = Client.create(max_redirects: 10, auto_gzip: true);
+Response r = client.get("http://host/path")?;   // also post!, send!, close
 ```
 
-- **Dependencies**: `modules/net/net.pr`, `modules/json/json.pr`
+- **`Request`/`Response`**: build requests (`new_get`/`new_post`, `set_header`),
+  read responses (`status`, `headers`, `body`, `body_bytes`, `json[T]`,
+  `is_success`). `Request.send` performs a single `Connection: close` exchange
+  (gzip decoded) with no redirects or pooling.
+- **`Client`** (T0447): follows up to `max_redirects` redirects
+  (301/302/303/307/308). Method/body policy — 303 → GET (body dropped); 307/308
+  preserve method+body; 301/302 preserve GET/HEAD but rewrite other methods to
+  GET. `Authorization`/`Cookie` are stripped on cross-host redirects. Idle
+  keep-alive connections are pooled per `host:port` (LIFO, stale-connection
+  retry). Sends `Accept-Encoding: gzip` and decodes `Content-Encoding: gzip`
+  responses when `auto_gzip`.
+- **`Server`**: `bind` + `serve` with a `Handler`, `ServerRequest`/
+  `ServerResponse`, and graceful shutdown via `ServerShutdownHandle`.
+
+- **Dependencies**: `modules/net/net.pr`, `modules/json/json.pr`, `modules/gzip/gzip.pr`
 
 #### 5e. `modules/crypto/crypto.pr` — Cryptographic Hashing
 
@@ -1266,7 +1281,7 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 5a | `modules/json/json.pr` | Promise | No | ~300 | Future |
 | 5b | `modules/regex/regex.pr` | Promise | No | ~400 | Future |
 | 5c | `modules/net/net.pr` | Promise + Native | 6+ | ~150 | Future |
-| 5d | `modules/http/http.pr` | Promise | No | ~200 | Future |
+| 5d | `modules/http/http.pr` | Promise | No | ~950 | Done (client+server, no TLS) |
 | 5e | `modules/crypto/crypto.pr` | Promise | No | ~150 | Future |
 | 5f | `modules/std/embed.pr` | Promise | No | ~50 | Future (T0012) |
 | | **Phases 0-4 (actual)** | | **12** | **~3,055** | **19/20 done** |

@@ -1,6 +1,9 @@
 // http module — HTTP/1.1 client (T0072).
-// Built on top of modules/net/ (TcpStream) and modules/json/ (encode/decode).
-// v1: HTTP only (no TLS), Connection: close, eager response reading.
+// Built on top of modules/net/ (TcpStream), modules/json/ (encode/decode),
+// and modules/gzip/ (response decoding).
+// HTTP only (no TLS). Request.send uses one Connection: close exchange; Client
+// (T0447) adds redirect following, keep-alive connection reuse, and gzip.
+use gzip;
 use json;
 use net;
 
@@ -38,153 +41,15 @@ type Request `public `doc("An HTTP request.") {
     this.headers[key] = value;
   }
 
-  send!(~this) Response `public `doc("Send the request and return the response.") {
+  send!(~this) Response `public `doc("Send the request over a single fresh connection (Connection: close) and return the response. gzip responses are decoded, but no redirect following or connection reuse is performed — for those, construct a Client.") {
     _Url parsed = _parse_url(this.url)?^;
     net.TcpStream stream = net.TcpStream.connect(parsed.host, parsed.port)?^;
-
-    // Build HTTP/1.1 request
-    Builder buf = Builder();
-    buf.write_string(_method_to_string(this.method));
-    buf.write_string(" ");
-    buf.write_string(parsed.path);
-    buf.write_string(" HTTP/1.1\r\n");
-    buf.write_string("Host: ");
-    buf.write_string(parsed.host);
-    if parsed.port != 80 {
-      buf.write_string(":");
-      buf.write_string(parsed.port.to_string());
-    }
-    buf.write_string("\r\n");
-    buf.write_string("Connection: close\r\n");
-    if this.body.len > 0 {
-      buf.write_string("Content-Length: ");
-      buf.write_string(this.body.len.to_string());
-      buf.write_string("\r\n");
-    }
-    for key, value in this.headers {
-      buf.write_string(key);
-      buf.write_string(": ");
-      buf.write_string(value);
-      buf.write_string("\r\n");
-    }
-    buf.write_string("\r\n");
-    if this.body.len > 0 {
-      buf.write_string(this.body);
-    }
-
-    // Send request
-    u8[] req_data = buf.to_string().bytes();
-    _write_all(stream, req_data)?^;
-
-    // Read the response in two phases — headers first (until \r\n\r\n), then
-    // the body framed by Content-Length. Mirrors _read_request's two-phase read.
-    // Reading exactly Content-Length bytes (proper HTTP/1.1 framing) rather than
-    // blocking to EOF returns as soon as the message is complete and does not
-    // fold any trailing bytes into the body. Falls back to read-to-EOF only when
-    // there is no length and no chunked encoding (HTTP/1.0-style close framing).
-    u8[] raw = u8[]();
-    u8[] read_buf = u8[].filled(0, 4096);
-
-    // Phase 1: read until the header terminator (\r\n\r\n = bytes 13,10,13,10).
-    int header_end = -1;
-    while header_end < 0 {
-      int n = stream.read(read_buf)?^;
-      if n == 0 {
-        break;
-      }
-      int i = 0;
-      while i < n {
-        raw.push(read_buf[i]);
-        i = i + 1;
-      }
-      // Scan only the newly appended region (plus 3-byte overlap).
-      int scan = raw.len - n;
-      if scan > 3 {
-        scan = scan - 3;
-      }
-      if scan < 0 {
-        scan = 0;
-      }
-      while scan + 3 < raw.len {
-        if raw[scan] == 13 && raw[scan + 1] == 10 && raw[scan + 2] == 13 && raw[scan + 3] == 10 {
-          header_end = scan;
-          break;
-        }
-        scan = scan + 1;
-      }
-    }
-    if header_end < 0 {
-      raise HttpError(code: 0, message: "malformed HTTP response: missing header terminator");
-    }
-
-    string header_text = string.from_bytes(raw[0:header_end]);
-
-    // Parse status and headers (single use of header_text)
-    _ParsedResponse pr = _parse_response(header_text)?^;
-
-    // Determine body framing from the parsed headers.
-    bool chunked = false;
-    for k, v in pr.headers {
-      if k == "transfer-encoding" && v.contains("chunked") {
-        chunked = true;
-      }
-    }
-    bool has_length = false;
-    int content_length = 0;
-    if cl := pr.headers["content-length"] {
-      has_length = true;
-      content_length = _parse_decimal(cl);
-    }
-
-    // Phase 2: read the body according to its framing.
-    int body_start = header_end + 4;
-    u8[] body_data = u8[]();
-    if has_length && !chunked {
-      // Content-Length framing (the Promise server always sends a length):
-      // read exactly the declared body length, then stop — do NOT wait for EOF.
-      int body_have = raw.len - body_start;
-      while body_have < content_length {
-        int n = stream.read(read_buf)?^;
-        if n == 0 {
-          break;
-        }
-        int i = 0;
-        while i < n {
-          raw.push(read_buf[i]);
-          i = i + 1;
-        }
-        body_have = raw.len - body_start;
-      }
-      int end = body_start + content_length;
-      if end > raw.len {
-        end = raw.len;
-      }
-      body_data = raw[body_start: end];
-    } else {
-      // Chunked (external servers only) or no length (HTTP/1.0-style): read
-      // to EOF — Connection: close terminates the stream.
-      bool reading = true;
-      while reading {
-        int n = stream.read(read_buf)?^;
-        if n == 0 {
-          reading = false;
-        } else {
-          int i = 0;
-          while i < n {
-            raw.push(read_buf[i]);
-            i = i + 1;
-          }
-        }
-      }
-      if chunked {
-        body_data = _decode_chunked(raw[body_start: raw.len]);
-      } else {
-        body_data = raw[body_start: raw.len];
-      }
-    }
-
-    string body_str = string.from_bytes(body_data);
-    return Response(_status: pr.status, _headers: pr.headers.clone(), _body: move body_str);
+    // keep_alive=false, want_gzip=false: preserve the historical single-exchange,
+    // plaintext-request semantics of Request.send.
+    u8[] req_bytes = _build_request(this.method, parsed, this.headers, this.body, false, false);
+    bool is_head = _is_head(this.method);
+    _RawResponse rr = _exchange(stream, req_bytes, is_head)?^;
+    return _raw_to_response(rr);
   }
 }
 
@@ -206,6 +71,173 @@ type Response `public `doc("An HTTP response.") {
   }
 
   get is_success bool `public `doc("True if the status code indicates success (2xx).") => this._status >= 200 && this._status < 300;
+}
+
+// _RawResponse is the framed result of a single request/response exchange,
+// shared by Request.send and Client.send. `keep_alive` is true only when the
+// body was definitively framed (Content-Length or chunked) AND the connection
+// may be reused per HTTP semantics — such a socket can go back into the pool.
+type _RawResponse {
+  int status;
+  map[string, string] headers;
+  u8[] body;
+  bool keep_alive;
+}
+
+// Pool is a small LIFO cache of idle keep-alive connections, keyed by
+// "host:port". Parallel arrays keep a stream beside its key. LIFO reuse is
+// optimal for the single-host request bursts this client targets (e.g. the
+// GitHub API). Eviction and drain close fds via TcpStream.drop — no explicit
+// close needed, so the pool is leak-free by construction.
+type Pool {
+  string[] _keys;
+  net.TcpStream[] _streams;
+  int _limit;
+
+  create(int limit) Self `factory {
+    return Pool(_keys: string[](), _streams: net.TcpStream[](), _limit: limit);
+  }
+
+  // take returns an idle connection for `key` when the most-recently-returned
+  // connection matches (LIFO), else none.
+  take(~this, string key) net.TcpStream? {
+    int n = this._keys.len;
+    if n > 0 && this._keys[n - 1] == key {
+      this._keys.remove(n - 1);
+      return this._streams.pop();
+    }
+    return none;
+  }
+
+  // put returns a connection to the pool, evicting the oldest (index 0) when at
+  // capacity. The evicted stream's drop closes its fd.
+  put(~this, string move key, net.TcpStream move s) {
+    if this._keys.len >= this._limit {
+      this._keys.remove(0);
+      this._streams.remove(0);
+    }
+    this._keys.push(move key);
+    this._streams.push(move s);
+  }
+
+  // drain closes every pooled connection now (rather than at drop time).
+  drain(~this) {
+    while this._streams.len > 0 {
+      this._streams.remove(this._streams.len - 1);
+    }
+    while this._keys.len > 0 {
+      this._keys.remove(this._keys.len - 1);
+    }
+  }
+}
+
+type Client `public `doc("A reusable HTTP/1.1 client with redirect following, keep-alive connection reuse, and automatic gzip response decoding. Create once and reuse for many requests to the same host. Not safe for concurrent use — the connection pool is mutated per request, so use one Client per goroutine.") {
+  Pool _pool;
+  int _max_redirects;
+  bool _auto_gzip;
+
+  create(int max_redirects = 10, bool auto_gzip = true) Self `factory `public `doc("Create a client. max_redirects bounds redirect hops (default 10); auto_gzip sends Accept-Encoding: gzip and decodes gzip responses (default true).") {
+    return Client(_pool: Pool.create(8), _max_redirects: max_redirects, _auto_gzip: auto_gzip);
+  }
+
+  send!(~this, Request move req) Response `public `doc("Send a request, following up to max_redirects redirects and reusing pooled connections. Redirect policy: 303 becomes GET (body dropped); 307/308 preserve method and body; 301/302 preserve GET/HEAD but rewrite other methods to GET (body dropped). Authorization and Cookie headers are stripped when a redirect crosses to a different host:port. A redirect to https:// raises HttpError until TLS support lands (T0079).") {
+    Method method = _method_clone(req.method);
+    string url = req.url[0:];
+    map[string, string] headers = req.headers.clone();
+    string body = req.body[0:];
+
+    int hops = 0;
+    for {
+      _Url parsed = _parse_url(url)?^;
+      bool is_head = _is_head(method);
+      _RawResponse rr = this._send_once(parsed, method, headers, body, is_head)?^;
+
+      if !_is_redirect(rr.status) {
+        return _raw_to_response(rr);
+      }
+      if hops >= this._max_redirects {
+        raise HttpError(code: rr.status, message: "too many redirects");
+      }
+
+      string location = "";
+      bool have_location = false;
+      if loc := rr.headers["location"] {
+        location = loc[0:];
+        have_location = true;
+      }
+      if !have_location {
+        // 3xx without a Location header — nothing to follow; return it as-is.
+        return _raw_to_response(rr);
+      }
+
+      string new_url = _resolve_url(parsed, location)?^;
+      _Url new_parsed = _parse_url(new_url)?^;
+      if new_parsed.host != parsed.host || new_parsed.port != parsed.port {
+        // Cross-host redirect: drop credentials so they are not leaked.
+        _strip_header_ci(headers, "authorization");
+        _strip_header_ci(headers, "cookie");
+      }
+
+      // Apply the method/body rewrite policy for this status.
+      if rr.status == 303 {
+        method = _method_get();
+        body = "";
+      } else if rr.status == 301 || rr.status == 302 {
+        if !_is_get_or_head(method) {
+          method = _method_get();
+          body = "";
+        }
+      }
+      // 307/308: preserve method and body unchanged.
+
+      url = new_url;
+      hops = hops + 1;
+    }
+  }
+
+  get!(~this, string move url) Response `public `doc("Send a GET request, following redirects and reusing connections.") {
+    return this.send(Request.new_get(move url))?^;
+  }
+
+  post!(~this, string move url, string move body) Response `public `doc("Send a POST request with a text/plain body, following redirects and reusing connections.") {
+    return this.send(Request.new_post(move url, move body))?^;
+  }
+
+  close(~this) `public `doc("Close all pooled connections now. The client remains usable; later requests reconnect.") {
+    this._pool.drain();
+  }
+
+  // _send_once runs a single hop: reuse a pooled connection when one is
+  // available (retrying on a fresh connection if the pooled one is stale), else
+  // connect fresh. Reusable connections are returned to the pool.
+  _send_once!(~this, _Url base, Method method, map[string, string] headers, string body, bool is_head) _RawResponse {
+    string key = _pool_key(base);
+    // take() borrows the key, so pass it directly (no copy).
+    if pooled := this._pool.take(key) {
+      u8[] req_bytes = _build_request(method, base, headers, body, true, this._auto_gzip);
+      _RawResponse rr = _exchange(pooled, req_bytes, is_head)? e {
+        // Stale pooled connection (server closed it while idle). The request is
+        // fully in memory, so it is safe to discard this socket and resend on a
+        // fresh one. `pooled` drops here, closing the dead fd.
+        return this._send_fresh(base, key[0:], method, headers, body, is_head)?^;
+      };
+      if rr.keep_alive {
+        this._pool.put(move key, move pooled);
+      }
+      return rr;
+    }
+    return this._send_fresh(base, key[0:], method, headers, body, is_head)?^;
+  }
+
+  _send_fresh!(~this, _Url base, string move key, Method method, map[string, string] headers, string body, bool is_head) _RawResponse {
+    net.TcpStream stream = net.TcpStream.connect(base.host, base.port)?^;
+    u8[] req_bytes = _build_request(method, base, headers, body, true, this._auto_gzip);
+    _RawResponse rr = _exchange(stream, req_bytes, is_head)?^;
+    if rr.keep_alive {
+      this._pool.put(move key, move stream);
+    }
+    return rr;
+  }
 }
 
 type ServerShutdownHandle `public `doc("A handle to shut down a running Server. Create before calling serve, then call shutdown from another goroutine.") {
@@ -325,17 +357,18 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
   get port int `public `doc("The bound port.") => this._port;
 }
 
-http_get!(string move url) Response `public `doc("Perform an HTTP GET request.") {
-  Request req = Request.new_get(move url);
-  return req.send()?^;
+http_get!(string move url) Response `public `doc("Perform an HTTP GET request. Follows redirects and decodes gzip responses via a transient Client.") {
+  Client client = Client.create();
+  return client.send(Request.new_get(move url))?^;
 }
 
-http_post!(string move url, string move body, map[string, string] move headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
+http_post!(string move url, string move body, map[string, string] move headers) Response `public `doc("Perform an HTTP POST request with a string body. Follows redirects and decodes gzip responses via a transient Client.") {
   Request req = Request.new_post(move url, move body);
   for key, value in headers {
     req.set_header(move key, move value);
   }
-  return req.send()?^;
+  Client client = Client.create();
+  return client.send(move req)?^;
 }
 
 http_post_json![T: Encodable](string move url, T data) Response `public `doc("Perform an HTTP POST request with a JSON-encoded body.") {
@@ -399,6 +432,436 @@ _method_to_string(Method m) string {
     Method.Head => "HEAD",
     Method.Options => "OPTIONS",
   };
+}
+
+_method_get() Method {
+  return Method.Get;
+}
+
+// _method_clone reconstructs a Method (a non-copy enum) so callers can hold a
+// method independently of the moved-in Request.
+_method_clone(Method m) Method {
+  return match m {
+    Method.Get => Method.Get,
+    Method.Post => Method.Post,
+    Method.Put => Method.Put,
+    Method.Delete => Method.Delete,
+    Method.Patch => Method.Patch,
+    Method.Head => Method.Head,
+    Method.Options => Method.Options,
+  };
+}
+
+_is_head(Method m) bool {
+  return match m {
+    Method.Head => true,
+    _ => false,
+  };
+}
+
+_is_get_or_head(Method m) bool {
+  return match m {
+    Method.Get => true,
+    Method.Head => true,
+    _ => false,
+  };
+}
+
+_is_redirect(int status) bool {
+  return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
+_pool_key(_Url base) string {
+  Builder b = Builder();
+  b.write_string(base.host);
+  b.write_string(":");
+  b.write_string(base.port.to_string());
+  return b.to_string();
+}
+
+// _strip_header_ci removes every header whose name matches `name`
+// (case-insensitively). Request headers preserve the caller's original casing,
+// so a plain map.remove would miss "Authorization" vs "authorization".
+_strip_header_ci(map[string, string] ~headers, string name) {
+  string[] to_remove = string[]();
+  for k, v in headers {
+    if k.to_lower() == name {
+      to_remove.push(k[0:]);
+    }
+  }
+  int i = 0;
+  while i < to_remove.len {
+    headers.remove(to_remove[i]);
+    i = i + 1;
+  }
+}
+
+// _resolve_url resolves a redirect Location against the current request URL.
+// Handles absolute http:// URLs, scheme-relative //host/path, absolute-path
+// /path (same host:port), and basic relative-path joins. https:// targets raise
+// until TLS support lands (T0079).
+_resolve_url!(_Url base, string location) string {
+  if location.starts_with("http://") {
+    return location[0:];
+  }
+  if location.starts_with("https://") {
+    raise HttpError(code: 0, message: "redirect to https:// is not supported yet (T0079)");
+  }
+  if location.starts_with("//") {
+    // Scheme-relative: inherit http.
+    return "http:" + location;
+  }
+
+  Builder auth = Builder();
+  auth.write_string("http://");
+  auth.write_string(base.host);
+  if base.port != 80 {
+    auth.write_string(":");
+    auth.write_string(base.port.to_string());
+  }
+  string prefix = auth.to_string();
+
+  if location.starts_with("/") {
+    // Absolute path on the same authority.
+    return prefix + location;
+  }
+
+  // Relative path: join against the base path's directory.
+  string base_path = base.path[0:];
+  if q := base_path.index_of("?") {
+    base_path = base_path[0:q];
+  }
+  int last_slash = -1;
+  int i = 0;
+  while i < base_path.len {
+    if base_path[i] == '/' {
+      last_slash = i;
+    }
+    i = i + 1;
+  }
+  string dir = "/";
+  if last_slash >= 0 {
+    dir = base_path[0:last_slash + 1];
+  }
+  return prefix + dir + location;
+}
+
+// _build_request serializes an HTTP/1.1 request. It sends Connection: keep-alive
+// or close per `keep_alive`, adds Accept-Encoding: gzip when `want_gzip` and the
+// caller did not already set it, and always recomputes Content-Length from
+// `body`. Caller-managed headers (Host, Connection, Content-Length) are skipped
+// so they cannot be duplicated.
+_build_request(Method method, _Url parsed, map[string, string] headers, string body, bool keep_alive, bool want_gzip) u8[] {
+  Builder buf = Builder();
+  buf.write_string(_method_to_string(method));
+  buf.write_string(" ");
+  buf.write_string(parsed.path);
+  buf.write_string(" HTTP/1.1\r\n");
+  buf.write_string("Host: ");
+  buf.write_string(parsed.host);
+  if parsed.port != 80 {
+    buf.write_string(":");
+    buf.write_string(parsed.port.to_string());
+  }
+  buf.write_string("\r\n");
+  if keep_alive {
+    buf.write_string("Connection: keep-alive\r\n");
+  } else {
+    buf.write_string("Connection: close\r\n");
+  }
+
+  bool user_accept_encoding = false;
+  for k, v in headers {
+    if k.to_lower() == "accept-encoding" {
+      user_accept_encoding = true;
+    }
+  }
+  if want_gzip && !user_accept_encoding {
+    buf.write_string("Accept-Encoding: gzip\r\n");
+  }
+
+  if body.len > 0 {
+    buf.write_string("Content-Length: ");
+    buf.write_string(body.len.to_string());
+    buf.write_string("\r\n");
+  }
+  for key, value in headers {
+    string lk = key.to_lower();
+    if lk == "host" || lk == "connection" || lk == "content-length" {
+      continue;
+    }
+    buf.write_string(key);
+    buf.write_string(": ");
+    buf.write_string(value);
+    buf.write_string("\r\n");
+  }
+  buf.write_string("\r\n");
+  if body.len > 0 {
+    buf.write_string(body);
+  }
+  return buf.to_string().bytes();
+}
+
+// _exchange writes a request, reads and frames the response, gzip-decodes it
+// when Content-Encoding is gzip, and reports whether the connection is reusable.
+// The body is framed by Content-Length or chunked encoding (both stop exactly at
+// the message boundary, leaving the socket reusable); a response with neither
+// falls back to read-to-EOF and is never reusable. HEAD responses carry no body.
+_exchange!(net.TcpStream ~stream, u8[] request_bytes, bool head_request) _RawResponse {
+  _write_all(stream, request_bytes)?^;
+
+  u8[] raw = u8[]();
+  u8[] read_buf = u8[].filled(0, 4096);
+
+  // Phase 1: read until the header terminator (\r\n\r\n = bytes 13,10,13,10).
+  int header_end = -1;
+  while header_end < 0 {
+    int n = stream.read(read_buf)?^;
+    if n == 0 {
+      break;
+    }
+    int i = 0;
+    while i < n {
+      raw.push(read_buf[i]);
+      i = i + 1;
+    }
+    int scan = raw.len - n;
+    if scan > 3 {
+      scan = scan - 3;
+    }
+    if scan < 0 {
+      scan = 0;
+    }
+    while scan + 3 < raw.len {
+      if raw[scan] == 13 && raw[scan + 1] == 10 && raw[scan + 2] == 13 && raw[scan + 3] == 10 {
+        header_end = scan;
+        break;
+      }
+      scan = scan + 1;
+    }
+  }
+  if header_end < 0 {
+    raise HttpError(code: 0, message: "malformed HTTP response: missing header terminator");
+  }
+
+  string header_text = string.from_bytes(raw[0:header_end]);
+  bool http11 = header_text.starts_with("HTTP/1.1");
+  _ParsedResponse pr = _parse_response(header_text)?^;
+
+  // Determine body framing from the parsed headers.
+  bool chunked = false;
+  for k, v in pr.headers {
+    if k == "transfer-encoding" && v.contains("chunked") {
+      chunked = true;
+    }
+  }
+  bool has_length = false;
+  int content_length = 0;
+  if cl := pr.headers["content-length"] {
+    has_length = true;
+    content_length = _parse_decimal(cl);
+  }
+  bool conn_close = false;
+  bool conn_keepalive = false;
+  if cv := pr.headers["connection"] {
+    string lcv = cv.to_lower();
+    if lcv.contains("close") {
+      conn_close = true;
+    }
+    if lcv.contains("keep-alive") {
+      conn_keepalive = true;
+    }
+  }
+
+  // Phase 2: read the body according to its framing.
+  int body_start = header_end + 4;
+  u8[] body_data = u8[]();
+  bool framed = false;
+  if head_request {
+    // No body on a HEAD response; the connection stays framed/reusable.
+    framed = true;
+  } else if chunked {
+    body_data = _read_chunked_body(stream, raw, body_start)?^;
+    framed = true;
+  } else if has_length {
+    int body_have = raw.len - body_start;
+    while body_have < content_length {
+      int n = stream.read(read_buf)?^;
+      if n == 0 {
+        break;
+      }
+      int i = 0;
+      while i < n {
+        raw.push(read_buf[i]);
+        i = i + 1;
+      }
+      body_have = raw.len - body_start;
+    }
+    int end = body_start + content_length;
+    if end > raw.len {
+      end = raw.len;
+    }
+    body_data = raw[body_start: end];
+    framed = true;
+  } else {
+    // No length and not chunked: read to EOF. Connection: close terminates the
+    // stream, so the socket is not reusable afterward.
+    bool reading = true;
+    while reading {
+      int n = stream.read(read_buf)?^;
+      if n == 0 {
+        reading = false;
+      } else {
+        int i = 0;
+        while i < n {
+          raw.push(read_buf[i]);
+          i = i + 1;
+        }
+      }
+    }
+    body_data = raw[body_start: raw.len];
+    framed = false;
+  }
+
+  // gzip decode (never for HEAD — there is no body to decode).
+  if !head_request {
+    if ce := pr.headers["content-encoding"] {
+      if ce.to_lower().contains("gzip") {
+        u8[] decoded = gzip.gunzip(body_data)? e {
+          raise HttpError(code: 0, message: "gzip decode failed: " + e.message);
+        };
+        body_data = decoded;
+      }
+    }
+  }
+
+  // A connection is reusable only when the body was definitively framed. Under
+  // HTTP/1.1 that is the default unless the server said Connection: close; under
+  // HTTP/1.0 it requires an explicit Connection: keep-alive.
+  bool keep_alive = false;
+  if framed {
+    if http11 {
+      keep_alive = !conn_close;
+    } else {
+      keep_alive = conn_keepalive;
+    }
+  }
+
+  return _RawResponse(status: pr.status, headers: pr.headers.clone(), body: move body_data, keep_alive: keep_alive);
+}
+
+// _read_chunked_body decodes a chunked transfer-encoded body incrementally,
+// reading more from the stream only as needed and stopping exactly at the
+// terminating 0-size chunk plus its trailer section. `raw` holds bytes already
+// read past the header terminator; body_start indexes the first body byte.
+// Stopping at the message boundary (rather than reading to EOF) is what makes a
+// keep-alive connection reusable.
+_read_chunked_body!(net.TcpStream ~stream, u8[] ~raw, int body_start) u8[] {
+  u8[] result = u8[]();
+  u8[] read_buf = u8[].filled(0, 4096);
+  int pos = body_start;
+
+  for {
+    // Find the CRLF ending the chunk-size line, reading more if needed.
+    int line_end = -1;
+    for {
+      int s = pos;
+      while s + 1 < raw.len {
+        if raw[s] == 13 && raw[s + 1] == 10 {
+          line_end = s;
+          break;
+        }
+        s = s + 1;
+      }
+      if line_end >= 0 {
+        break;
+      }
+      int n = stream.read(read_buf)?^;
+      if n == 0 {
+        raise HttpError(code: 0, message: "malformed chunked body: unexpected EOF in chunk size");
+      }
+      int i = 0;
+      while i < n {
+        raw.push(read_buf[i]);
+        i = i + 1;
+      }
+    }
+
+    // Parse the hex chunk size, stripping any ;-extension.
+    Builder hex_buf = Builder();
+    int h = pos;
+    while h < line_end {
+      hex_buf.write_string((raw[h] as! char).to_string());
+      h = h + 1;
+    }
+    string size_str = hex_buf.to_string().trim();
+    if semi := size_str.index_of(";") {
+      size_str = size_str[0:semi].trim();
+    }
+    int chunk_size = _parse_hex(size_str);
+    int data_start = line_end + 2;
+
+    if chunk_size == 0 {
+      // Terminating chunk. Consume the trailer section up to the final blank
+      // line (\r\n\r\n), reading more as needed, so the socket is left at the
+      // message boundary.
+      for {
+        int found = -1;
+        int q = line_end;
+        while q + 3 < raw.len {
+          if raw[q] == 13 && raw[q + 1] == 10 && raw[q + 2] == 13 && raw[q + 3] == 10 {
+            found = q;
+            break;
+          }
+          q = q + 1;
+        }
+        if found >= 0 {
+          break;
+        }
+        int n = stream.read(read_buf)?^;
+        if n == 0 {
+          // Tolerate a missing final CRLF at EOF.
+          break;
+        }
+        int i = 0;
+        while i < n {
+          raw.push(read_buf[i]);
+          i = i + 1;
+        }
+      }
+      break;
+    }
+
+    // Ensure the full chunk data plus its trailing CRLF is present.
+    int need_end = data_start + chunk_size + 2;
+    while raw.len < need_end {
+      int n = stream.read(read_buf)?^;
+      if n == 0 {
+        raise HttpError(code: 0, message: "malformed chunked body: unexpected EOF in chunk data");
+      }
+      int i = 0;
+      while i < n {
+        raw.push(read_buf[i]);
+        i = i + 1;
+      }
+    }
+
+    int j = 0;
+    while j < chunk_size {
+      result.push(raw[data_start + j]);
+      j = j + 1;
+    }
+    pos = data_start + chunk_size + 2;
+  }
+  return result;
+}
+
+// _raw_to_response converts the framed exchange result into the public Response.
+// The headers map is cloned (partial field moves are not permitted); the body is
+// copied out of its byte buffer by string.from_bytes.
+_raw_to_response(_RawResponse rr) Response {
+  string body_str = string.from_bytes(rr.body);
+  return Response(_status: rr.status, _headers: rr.headers.clone(), _body: move body_str);
 }
 
 _write_all!(net.TcpStream ~stream, u8[] ~data) {
@@ -477,57 +940,6 @@ _parse_status_code!(string line) int {
     return _parse_decimal(after);
   }
   raise HttpError(code: 0, message: "malformed HTTP status line");
-}
-
-_decode_chunked(u8[] data) u8[] {
-  u8[] result = u8[]();
-  int pos = 0;
-  while pos < data.len {
-    // Find \r\n (inline to avoid moving data)
-    int line_end = -1;
-    int s = pos;
-    while s + 1 < data.len {
-      if data[s] == 13 && data[s + 1] == 10 {
-        line_end = s;
-        break;
-      }
-      s = s + 1;
-    }
-    if line_end < 0 {
-      break;
-    }
-
-    // Build hex size string from bytes (no slicing on ~data)
-    Builder hex_buf = Builder();
-    int h = pos;
-    while h < line_end {
-      hex_buf.write_string((data[h] as! char).to_string());
-      h = h + 1;
-    }
-    string size_str = hex_buf.to_string().trim();
-
-    // Strip chunk extensions after ';'
-    if semi := size_str.index_of(";") {
-      size_str = size_str[0:semi].trim();
-    }
-    if size_str.len == 0 {
-      break;
-    }
-    int chunk_size = _parse_hex(size_str);
-    if chunk_size == 0 {
-      break;
-    }
-
-    // Copy chunk data
-    int data_start = line_end + 2;
-    int j = 0;
-    while j < chunk_size && data_start + j < data.len {
-      result.push(data[data_start + j]);
-      j = j + 1;
-    }
-    pos = data_start + chunk_size + 2;
-  }
-  return result;
 }
 
 _parse_decimal(string s) int {

@@ -20,7 +20,7 @@ description = "File and directory I/O: File (open/create/append/read/write/close
 description = "JSON encoding and decoding: JsonEncoder, JsonDecoder, encode_string, decode_string"
 
 [modules.http]
-description = "HTTP client and server over the net module: Request/Response, methods, headers, send; Server with Handler, ServerRequest, and graceful shutdown"
+description = "HTTP/1.1 client and server over the net module: Request/Response, methods, headers; Client with redirect following, keep-alive connection pooling, and gzip; http_get/http_post/http_post_json; Server with Handler, ServerRequest, and graceful shutdown"
 
 [modules.os]
 description = "Operating system interface: args, env vars, one-shot execute, streaming Process (spawn/wait/kill) with stdin/stdout/stderr pipes, OS info (user/hostname/pid), and signal handling"

@@ -772,6 +772,32 @@ main() {
   ever resolve them
 - Methods work normally — `this`/`~this` receive a pointer to the value struct alloca
 
+**A `` `structural `` type whose fields are all `` `value `` is a value type, not an interface view.** The `` `structural `` annotation does not change the representation: such a type is still register-resident as the flat value struct `{ i8* _vtable, field1, ... }`, *not* the `{ vtable_ptr, instance_ptr }` fat pointer that a structural interface normally lowers to. Two consequences follow, and together they make the shape closed and unambiguous (T1550):
+
+- It **cannot be satisfied structurally.** Structural satisfaction requires the target to declare at least one `` `abstract `` method, and a value type may not declare one — so no unrelated type can ever "duck-type" into it.
+- The only types assignable to it are its own **layout-sharing value newtypes** (a fieldless child that inherits the parent's value struct verbatim — see *Value-Type Inheritance* below), for which the crossing is a plain register copy — never a heap box.
+
+This restricts what such a type can be a *target* of; it does not restrict what it can *satisfy*. A `` `structural `` value type is an ordinary concrete value type in the other direction — it can satisfy a real (abstract-method-bearing) interface and, assigned to one, is heap-boxed behind that interface's view exactly like any other value type. `` `structural `` on a type is therefore never on its own a reason to treat it as an interface.
+
+```promise
+type Metric `structural {
+  int raw `value;                    // all fields `value → pure value type
+  get raw_doubled int => this.raw * 2;
+}
+
+type Latency is Metric {}            // value newtype — shares Metric's value struct
+
+main() {
+  Metric m = Latency(raw: 6);        // upcast: a plain register copy, no box
+  print_line(m.raw_doubled);         // 12
+}
+
+type Shape `structural {
+  int side `value;
+  get area int `abstract;            // ERROR: value type Shape cannot have abstract methods
+}
+```
+
 **Use cases**: coordinates (`Point`, `Vec2`), dimensions (`Size`, `Rect`), colors (`Color`), ranges, small fixed-size data.
 
 #### Value-Type Inheritance (Newtype)
@@ -792,7 +818,10 @@ type EntityId is Hash128 {   // newtype: same bits, distinct name
 
 - **Layout-preserving**: the child reuses the parent's value struct verbatim, so an
   upcast (assigning to a parent-typed variable, passing as a parent parameter,
-  returning as the parent) is a no-op — there is no conversion at any of them.
+  returning as the parent) is a no-op — there is no conversion at any of them. A
+  parent-typed `` ~ `` (mutable borrow) parameter therefore borrows the child's own
+  storage, so writes through it are visible to the caller — the upcast introduces no
+  intermediate copy that could swallow them.
 - **Methods only**: a value child may add methods, getters and operators, but not
   fields — an own field would change the layout it shares with its parent. Adding one
   is a compile error.
@@ -1815,7 +1844,7 @@ type Connection {
 }
 ```
 
-- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*).
+- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*). Carrying `` `structural `` does not make one an interface view — it stays register-resident and can only be satisfied by its own value newtypes (§5.2, T1550).
 - `` `copy ``: Bitwise copy on assignment (primitives, small value types). The compiler verifies all fields are themselves `` `copy ``. No method generated — the copy is a direct memory copy.
 - `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
 - Types that are `` `copy `` are implicitly copied on assignment. Others are moved.

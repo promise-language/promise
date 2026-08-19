@@ -354,7 +354,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				if opt, isOpt := ctorFieldType.(*types.Optional); isOpt {
 					structTarget = opt.Elem() // peel so `Showable?` decides like `Showable`
 				}
-				if sn := extractNamed(structTarget); sn != nil && sn.IsStructural() {
+				if sn := extractNamed(structTarget); isStructuralView(sn) {
 					if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 						ctorBoxSrcOwned = c.hasDropFlag(ident.Name) // owned var / move-param
 					} else if _, tracked := c.stmtTempMap[val]; tracked {

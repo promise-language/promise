@@ -64,7 +64,7 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 	// unlike clearDiscardedAliasTempFlag, which clears ALL matching heap temps and is
 	// safe only when the keeper is a non-temp local (a fresh arg temp is itself a heap
 	// temp, so clearing every match would leave nobody freeing the box → leak).
-	if rn := extractNamed(retType); rn != nil && rn.IsStructural() && !rn.IsValueType() {
+	if isNonValueStructuralType(retType) {
 		for i := range args {
 			if i >= len(argVals) {
 				break
@@ -540,7 +540,7 @@ peel:
 	// receiver's implementers are open-ended (any type can satisfy it), so it stays
 	// unconditionally conservative.
 	if named := extractNamed(rt); named != nil {
-		if named.IsStructural() {
+		if isStructuralView(named) {
 			return true
 		}
 		if c.needsVtable(named) {
@@ -951,7 +951,7 @@ func hasStructuralParam(sig *types.Signature, typeSubst map[*types.TypeParam]typ
 		if typeSubst != nil {
 			pt = types.Substitute(pt, typeSubst)
 		}
-		if named := extractNamed(pt); named != nil && named.IsStructural() {
+		if named := extractNamed(pt); isStructuralView(named) {
 			return true
 		}
 	}

@@ -83,6 +83,27 @@ newtype_chain() `test {
   assert(root.doubled == 12, "upcast through the whole chain");
 }
 
+bump_level1(Level1 ~v) {
+  v.n = 42;
+}
+
+bump_level2(Level2 ~v) {
+  v.n = 43;
+}
+
+// A `~` (mutable borrow) param anywhere up a multi-level chain must borrow the
+// grandchild's own storage — the direct-alloca decision walks the whole first-parent
+// chain, not just the immediate parent, so skipping a level must not silently
+// reintroduce the coercion temp that swallows the write. T1550.
+newtype_chain_through_mut_ref() `test {
+  c := Level3(n: 1);
+  bump_level2(c);
+  assert(c.n == 43, "grandchild mutated through a mid-level `~` param");
+  bump_level1(c);
+  assert(c.n == 42, "grandchild mutated through a root-level `~` param");
+  assert(c.doubled == 84, "inherited getter sees the mutation");
+}
+
 // Deliberately an int-based newtype rather than the u128-based EntityId: on
 // wasm32 the emitted DataLayout disagrees with the toolchain's own, so any
 // i128-bearing struct is laid out at one offset by `opt` and another by `llc`
@@ -514,10 +535,11 @@ newtype_mutation_as_nested_value_field() `test {
 
 // A `structural parent whose fields are all `value is itself a pure value type,
 // so a fieldless child of it is an ordinary newtype — "structural" is not a
-// reason for the classification pass to skip it. The UPCAST to such a parent is
-// still broken (T1550: codegen builds a structural-view fat pointer where the
-// shared value struct is expected), so this covers only what works today; the
-// upcast case belongs with that fix.
+// reason for the classification pass to skip it, and crossing to the parent is a
+// plain copy of the shared value struct, not a {vtable, instance} box (T1550:
+// codegen used to take the structural-view branch on the `structural annotation
+// alone and panic with "store operands are not compatible: src={ i8*, i8* };
+// dst=%promise_Metric_v*", or — passed as a parameter — silently print a pointer).
 type Metric `structural {
   int raw `value;
 
@@ -526,6 +548,14 @@ type Metric `structural {
 
 type Latency is Metric {
   get tag int => 7;
+}
+
+show_metric(Metric m) int {
+  return m.raw_doubled;
+}
+
+make_latency() Metric {
+  return Latency(raw: 6);
 }
 
 newtype_of_structural_value_parent() `test {
@@ -544,13 +574,259 @@ bump_latency(Latency ~p) {
 
 // T1585: a value newtype read out of a VECTOR element and passed to a `~ param
 // writes back to the caller's element. Uses a `Latency[]-typed vector (not
-// `Metric[]) so the write-back does not depend on the still-broken upcast-to-
-// structural-parent case called out just above (T1550).
+// `Metric[]) so the write-back is pinned at the child's own type, independent of
+// the crossing to the structural value parent (covered separately below, T1550).
 newtype_element_mutref_arg_writes_back() `test {
   Latency[] v = [Latency(raw: 1), Latency(raw: 2)];
   bump_latency(v[0]);
   assert(v[0].raw == 21, "value-newtype vector element mut-ref arg writes back");
   assert(v[1].raw == 2, "sibling newtype element untouched");
+}
+
+// T1550: the upcast itself — a plain copy of the shared value struct.
+newtype_upcast_to_structural_value_parent() `test {
+  l := Latency(raw: 6);
+  assert(l.tag == 7, "own method reachable before the upcast");
+  Metric m = l;
+  assert(m.raw_doubled == 12, "upcast to a structural value parent keeps the value");
+  assert(m.raw == 6, "inherited field readable through the parent-typed variable");
+  assert(l.tag == 7, "child still usable after the upcast (value types are copy)");
+}
+
+// T1550 silent-corruption variant: passing the child as a parent-typed parameter
+// did not panic — it boxed, and the callee read the pointer as the field.
+newtype_as_structural_value_param() `test {
+  l := Latency(raw: 6);
+  assert(show_metric(m: l) == 12, "child passed as a structural value parameter");
+  assert(show_metric(m: Latency(raw: 7)) == 14, "fresh child passed straight in");
+  assert(l.raw == 6, "caller's copy intact after the parameter pass");
+}
+
+// T1550: returning the child as the parent must not heap-box on the escape path.
+newtype_returned_as_structural_value_parent() `test {
+  m := make_latency();
+  assert(m.raw_doubled == 12, "child returned as a structural value parent");
+  assert(show_metric(m: make_latency()) == 12, "returned straight into a param");
+}
+
+newtype_in_optional_of_structural_value_parent() `test {
+  Metric? o = Latency(raw: 6);
+  if p := o {
+    assert(p.raw_doubled == 12, "child wrapped in an optional of the parent");
+  } else {
+    assert(false, "optional should be present");
+  }
+}
+
+newtype_in_vector_of_structural_value_parent() `test {
+  Metric[] v = [Latency(raw: 6), Latency(raw: 7)];
+  assert(v[0].raw_doubled == 12, "child in a vector of the parent type");
+  assert(v[1].raw_doubled == 14, "second element");
+  v.push(Latency(raw: 8));
+  assert(v[2].raw_doubled == 16, "pushed child");
+}
+
+// A `~` (mutable borrow) parameter typed as the value PARENT, given a child arg.
+// The newtype shares the parent's LLVM struct, so the caller's alloca is already a
+// parent-typed slot and must be passed directly. Materializing a coercion temp
+// instead (which is what the differing static types used to select) landed every
+// write in the temp and dropped it on return — the mutation silently vanished
+// while `check` reported OK. T1550.
+bump_ticket(Ticket ~t) {
+  t.n = 42;
+}
+
+bump_metric(Metric ~m) {
+  m.raw = 21;
+}
+
+newtype_through_value_parent_mut_ref() `test {
+  s := Seat(n: 1);
+  bump_ticket(s);
+  assert(s.n == 42, "child arg mutated through a parent-typed `~` param");
+  assert(s.doubled == 84, "inherited method sees the mutation");
+  assert(s.tag == 7, "child's own method still reachable");
+}
+
+newtype_field_through_value_parent_mut_ref() `test {
+  b := Booking(seat: Seat(n: 1), count: 2);
+  bump_ticket(b.seat);
+  assert(b.seat.n == 42, "newtype field of a heap type mutated through a parent-typed `~` param");
+  assert(b.count == 2, "sibling field untouched");
+}
+
+newtype_through_structural_value_parent_mut_ref() `test {
+  l := Latency(raw: 1);
+  bump_metric(l);
+  assert(l.raw == 21, "child mutated through a structural value parent `~` param");
+  assert(l.raw_doubled == 42, "inherited getter sees the mutation");
+}
+
+// Control: the same call with the variable already declared as the parent type
+// took the direct-alloca path all along — it must keep working.
+parent_typed_local_through_mut_ref() `test {
+  Metric m = Latency(raw: 1);
+  bump_metric(m);
+  assert(m.raw == 21, "parent-typed local mutated through a `~` param");
+}
+
+// The crossing to a `structural value parent is decided per target site, and every
+// one of the sites below is a distinct branch in codegen — a typed declaration is not
+// an assignment statement is not a field store is not a container element. The fix
+// went in at the shared coercion point (coerceToView), so these pin that no caller
+// reaches a boxing path around it. T1550.
+
+// Assignment STATEMENT rather than a declaration (genAssignStmt's own gate).
+newtype_assigned_to_structural_value_parent_variable() `test {
+  Metric m = Metric(raw: 1);
+  m = Latency(raw: 6);
+  assert(m.raw_doubled == 12, "child literal assigned to a parent-typed variable");
+  l := Latency(raw: 2);
+  m = l;
+  assert(m.raw_doubled == 4, "child variable assigned to a parent-typed variable");
+  assert(l.tag == 7, "the source is copied, not consumed");
+}
+
+// A parent-typed field of a HEAP type — the field here is deliberately not `value`,
+// so the owner stays a heap type and the store goes through the instance struct.
+type Panel {
+  Metric current;
+  Metric? best;
+}
+
+newtype_into_structural_value_parent_field() `test {
+  p := Panel(current: Latency(raw: 6), best: none);
+  assert(p.current.raw_doubled == 12, "child in a parent-typed field at construction");
+  p.current = Latency(raw: 7);
+  assert(p.current.raw_doubled == 14, "child assigned into a parent-typed field");
+  p.best = Latency(raw: 8);
+  assert(p.best!.raw_doubled == 16, "child assigned into an optional parent field");
+}
+
+// Fixed-size arrays are a separate element-type path from vectors.
+newtype_in_array_of_structural_value_parent() `test {
+  Metric[2] a = [Latency(raw: 6), Latency(raw: 7)];
+  assert(a[0].raw_doubled == 12, "array element 0");
+  assert(a[1].raw_doubled == 14, "array element 1");
+  a[0] = Latency(raw: 8);
+  assert(a[0].raw_doubled == 16, "child assigned into an array slot");
+}
+
+newtype_into_vector_slot_of_structural_value_parent() `test {
+  Metric[] v = [Metric(raw: 1)];
+  v[0] = Latency(raw: 6);
+  assert(v[0].raw_doubled == 12, "child assigned into a parent-typed vector slot");
+  v.push(Latency(raw: 7));
+  w := v.clone();
+  assert(w[1].raw_doubled == 14, "cloned parent-typed vector of children");
+  s := v[1:];
+  assert(s[0].raw_doubled == 14, "sliced");
+  assert(v.len == 2, "original length unchanged");
+}
+
+newtype_in_map_of_structural_value_parent() `test {
+  map[string, Metric] m = {:};
+  m["p50"] = Latency(raw: 6);
+  assert(m["p50"]!.raw_doubled == 12, "child stored as a parent-typed map value");
+  assert(m.len == 1, "one entry");
+}
+
+// for-in reads each element back out of the parent-typed container.
+newtype_iterated_as_structural_value_parent() `test {
+  Metric[] v = [Latency(raw: 1), Latency(raw: 2), Latency(raw: 3)];
+  int total = 0;
+  for m in v {
+    total = total + m.raw_doubled;
+  }
+  assert(total == 12, "for-in over a parent-typed vector of children");
+}
+
+// A generic type instantiated AT the parent, holding a child — the substituted field
+// type reaches the same coercion point through the mono path.
+type Slot[T] {
+  T item;
+}
+
+newtype_in_generic_at_structural_value_parent() `test {
+  s := Slot[Metric](item: Latency(raw: 6));
+  assert(s.item.raw_doubled == 12, "child in a generic field instantiated at the parent");
+  s.item = Latency(raw: 7);
+  assert(s.item.raw_doubled == 14, "child assigned into the generic field");
+}
+
+// A generic FUNCTION instantiated at the parent, called with children.
+first_of[T](T a, T b) T {
+  return a;
+}
+
+newtype_through_generic_fn_at_structural_value_parent() `test {
+  p := first_of[Metric](a: Latency(raw: 3), b: Latency(raw: 4));
+  assert(p.raw_doubled == 6, "generic function instantiated at the parent type");
+}
+
+// A lambda parameter typed as the parent, and a newtype captured by one — the closure
+// env stores the captured value by its own type and reads it back at the parent's.
+apply_metric((Metric) -> int f, Metric m) int {
+  return f(m);
+}
+
+newtype_through_lambda_at_structural_value_parent() `test {
+  f := |Metric m| -> m.raw_doubled;
+  assert(apply_metric(f: f, m: Latency(raw: 6)) == 12, "child through a lambda param");
+  l := Latency(raw: 5);
+  g := || -> l.raw_doubled;
+  assert(g() == 10, "newtype captured by a lambda");
+}
+
+// An enum variant payload typed as the parent, carrying a child.
+enum Sample {
+  ok(Metric m),
+  missing,
+}
+
+newtype_in_enum_payload_of_structural_value_parent() `test {
+  r := Sample.ok(m: Latency(raw: 6));
+  match r {
+    ok(m) => assert(m.raw_doubled == 12, "child as a parent-typed enum payload"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+// Across a goroutine boundary at the parent's element type (the sibling of
+// newtype_over_channel, which sends at the child's own type).
+newtype_over_structural_value_parent_channel() `test(exclude: wasm) {
+  ch := channel[Metric](capacity: 1);
+  go {
+    ch.send(Latency(raw: 6));
+  };
+  Metric m = (<-ch)!;
+  assert(m.raw_doubled == 12, "child sent over a parent-typed channel");
+  ch.close();
+}
+
+// A value newtype of a `structural value parent can still SATISFY a real abstract-only
+// interface, which is the one case where it genuinely IS boxed — the child's typeinfo
+// travels in the box, so its clone_fn has to be synthesized off the shared layout.
+// Getting either half of the fix wrong shows up here rather than in the flat cases.
+type Doubling `structural {
+  get raw_doubled int `abstract;
+}
+
+fill_doubling() Doubling[] {
+  Doubling[] v = [];
+  v.push(Latency(raw: 1));
+  v.push(Latency(raw: 2));
+  return v;
+}
+
+newtype_boxed_behind_abstract_interface() `test {
+  Doubling d = Latency(raw: 6);
+  assert(d.raw_doubled == 12, "newtype boxed behind a real interface");
+  v := fill_doubling();
+  assert(v[1].raw_doubled == 4, "newtype boxed into a vector of the interface");
+  w := v.clone();
+  assert(w[0].raw_doubled == 2, "cloned box owns its own copy");
+  assert(v[0].raw_doubled == 2, "original box still readable");
 }
 
 // Value types are copy, so a newtype crosses a goroutine boundary by value.
@@ -562,4 +838,566 @@ newtype_over_channel() `test(exclude: wasm) {
   Seat s = (<-ch)!;
   assert(s.n == 6, "newtype sent through a channel");
   assert(s.tag == 7, "newtype keeps its methods across the goroutine boundary");
+}
+
+// ---------------------------------------------------------------------------
+// T1550: the MUTATING and multi-level shapes over a `structural value parent.
+//
+// The flat/read-only crossings above pin that codegen does not box on the way IN
+// to a parent-typed slot. These pin the other half: once the child is sitting in
+// a slot typed as its `structural value parent, writing through the parent's own
+// members has to reach the child's copy of the shared struct. Every one of these
+// is a distinct receiver path (setter store, `~this` spill-back, an inherited
+// method whose RETURN type is the parent) and each decides on the target type
+// independently — the same decision that took the view branch in T1550.
+//
+// Deliberately a separate type family from `Metric`: that one is pinned by the
+// tests above, and adding members to it would change the shape they assert on.
+type Budget `structural {
+  int cents `value;
+
+  get dollars int => this.cents / 100;
+  get amount int => this.cents;
+  set amount(int v) {
+    this.cents = v;
+  }
+
+  add_cents(~this, int by) {
+    this.cents = this.cents + by;
+  }
+  scaled(this, int factor) Budget {
+    return Budget(cents: this.cents * factor);
+  }
+}
+
+type Rent is Budget {
+  get tag int => 7;
+}
+
+// A property setter inherited from the `structural value parent. The setter runs
+// against the parent's struct definition, and the child IS that struct (T1527) —
+// so the write must land in the child's own local, not in a spilled copy.
+newtype_inherits_structural_value_parent_setter() `test {
+  r := Rent(cents: 100);
+  r.amount = 900;
+  assert(r.dollars == 9, "inherited setter mutates the newtype in place");
+  assert(r.tag == 7, "the child's own member is unaffected by the setter");
+}
+
+// Compound assignment reads through the inherited getter and writes back through
+// the inherited setter — both halves on the parent, the receiver on the child.
+newtype_compound_assign_through_inherited_property() `test {
+  r := Rent(cents: 300);
+  r.amount += 400;
+  assert(r.dollars == 7, "read-modify-write through an inherited property");
+  r.amount -= 200;
+  assert(r.dollars == 5, "and back down");
+}
+
+// A `~this` method inherited from the `structural value parent. The non-structural
+// spelling of this is covered by the Gauge tests above; `structural is the variant
+// that could still pick the view branch for the receiver.
+newtype_inherits_structural_value_parent_mut_this() `test {
+  r := Rent(cents: 100);
+  r.add_cents(by: 500);
+  assert(r.dollars == 6, "inherited ~this method mutates the newtype in place");
+  r.add_cents(by: 300);
+  assert(r.dollars == 9, "and again, cumulatively");
+  assert(r.tag == 7, "own getter still reachable after the mutation");
+}
+
+// An inherited method whose RETURN type is the parent, called on the child: the
+// return crosses child → parent through coerceReturnToView, the one path that
+// heap-boxes rather than stack-boxes when it mistakes the target for a view.
+newtype_inherits_method_returning_structural_value_parent() `test {
+  r := Rent(cents: 300);
+  Budget b = r.scaled(factor: 4);
+  assert(b.dollars == 12, "inherited method returning the parent type");
+  assert(r.dollars == 3, "receiver unchanged — value semantics");
+  assert(r.scaled(factor: 2).dollars == 6, "used directly without binding");
+}
+
+// Three levels rooted at a `structural value parent. The existing three-level test
+// (Level1/2/3 above) has a plain value root; this one pins that the `structural
+// annotation on the ROOT does not re-open the boxing decision at either hop, and
+// that a `~` param typed at the root reaches a grandchild's alloca.
+type Deposit is Rent {
+  get sharper int => 9;
+}
+
+bump_budget(Budget ~b) {
+  b.cents = 2100;
+}
+
+newtype_chain_rooted_at_structural_value_parent() `test {
+  d := Deposit(cents: 600);
+  assert(d.dollars == 6, "root getter through two levels");
+  assert(d.tag == 7, "mid-level getter");
+  assert(d.sharper == 9, "own getter");
+  Budget b = d;
+  assert(b.dollars == 6, "grandchild upcast to the structural value root");
+  Rent m = d;
+  assert(m.tag == 7, "grandchild upcast to the mid level");
+  assert(d.sharper == 9, "grandchild still usable after both upcasts");
+}
+
+newtype_chain_rooted_at_structural_value_parent_mut_ref() `test {
+  d := Deposit(cents: 100);
+  bump_budget(d);
+  assert(d.cents == 2100, "grandchild mutated through a root-typed `~` param");
+  assert(d.dollars == 21, "root getter sees the mutation");
+  assert(d.sharper == 9, "own getter intact");
+}
+
+// Container keying: a `structural value parent that satisfies Hashable/Ordered is
+// usable as a Map key and Set element, and a CHILD may be handed to a slot keyed at
+// the parent — the key crossing is the same plain copy, and the hash it produces
+// has to match the parent's own so lookups line up.
+type Tally `structural {
+  int reading `value;
+
+  get doubled int => this.reading * 2;
+  == (this, Tally o) bool => this.reading == o.reading;
+  get hash int => this.reading;
+  < (this, Tally o) bool => this.reading < o.reading;
+}
+
+type Subtotal is Tally {
+  get tag int => 7;
+}
+
+newtype_as_key_of_structural_value_parent() `test {
+  map[Tally, int] m = {:};
+  m[Subtotal(reading: 6)] = 1;
+  assert(m[Tally(reading: 6)]! == 1, "child stored under a parent-typed key");
+  assert(m.len == 1, "child and parent hash to the same key");
+
+  Set[Tally] s = Set[Tally]();
+  s.add(Subtotal(reading: 6));
+  assert(s.contains(Tally(reading: 6)), "child as a parent-typed set element");
+  assert(!s.contains(Tally(reading: 9)), "absent element");
+}
+
+newtype_sorted_as_structural_value_parent() `test {
+  Tally[] v = [Subtotal(reading: 3), Subtotal(reading: 1), Subtotal(reading: 2)];
+  s := sort(move v);
+  assert(s[0].doubled == 2, "sorted first");
+  assert(s[2].doubled == 6, "sorted last");
+}
+
+// ---------------------------------------------------------------------------
+// T1550: the remaining crossings for a newtype of a `structural value parent.
+
+// Returning an owned LOCAL as the parent, rather than a constructor call. The return
+// path has a separate gate that only fires for a bare identifier operand, so the
+// `make_latency()` test above never reaches it — if that gate still keyed on the
+// `structural annotation it would mark the flat struct as an owned box and hand it to
+// the heap boxer.
+make_latency_from_local() Metric {
+  l := Latency(raw: 6);
+  return l;
+}
+
+newtype_returned_from_local_as_structural_value_parent() `test {
+  m := make_latency_from_local();
+  assert(m.raw_doubled == 12, "owned local returned as the structural value parent");
+  assert(show_metric(m: make_latency_from_local()) == 12, "and straight into a param");
+}
+
+// Optional-of-parent CONTAINER elements: `Metric?[]` reaches the element dup/drop
+// gates through the optional-payload route rather than the plain element route, and
+// that route asks the same "is this element a structural view?" question.
+newtype_in_vector_of_optional_structural_value_parent() `test {
+  Metric?[] v = [Latency(raw: 6), none, Latency(raw: 7)];
+  assert(v[0]!.raw_doubled == 12, "present element 0");
+  assert(v[2]!.raw_doubled == 14, "present element 2");
+  if _ := v[1] {
+    assert(false, "element 1 should be none");
+  }
+  w := v.clone();
+  assert(w[0]!.raw_doubled == 12, "cloned optional element");
+  assert(v.len == 3, "original length unchanged");
+}
+
+// A `structural value type nested as a `value field of ANOTHER `structural value type,
+// with a newtype of the outer one. The outer struct embeds the inner's value struct by
+// value, so the boxing decision has to come out right at both levels — and the upcast
+// then copies the whole nested struct.
+type Window `structural {
+  Metric lo `value;
+  Metric hi `value;
+
+  get span int => this.hi.raw - this.lo.raw;
+  widened(this, int by) Window {
+    return Window(lo: Metric(raw: this.lo.raw - by), hi: Metric(raw: this.hi.raw + by));
+  }
+}
+
+type Bucket is Window {
+  get label int => 3;
+}
+
+span_of(Window w) int {
+  return w.span;
+}
+
+widen_in_place(Window ~w) {
+  w.hi = Metric(raw: 20);
+}
+
+newtype_of_nested_structural_value_parent() `test {
+  b := Bucket(lo: Latency(raw: 2), hi: Latency(raw: 9));
+  assert(b.span == 7, "getter over two nested structural value fields");
+  assert(b.label == 3, "own getter");
+  Window w = b;
+  assert(w.span == 7, "upcast a newtype whose parent has structural value fields");
+  assert(w.lo.raw_doubled == 4, "inner child field read back through the outer parent");
+  assert(span_of(w: b) == 7, "child passed as the nested parent type");
+  assert(b.widened(by: 1).span == 9, "inherited method returning the nested parent");
+}
+
+newtype_of_nested_structural_value_parent_mut_ref() `test {
+  b := Bucket(lo: Latency(raw: 2), hi: Latency(raw: 9));
+  widen_in_place(b);
+  assert(b.span == 18, "nested field written through a parent-typed `~` param");
+  assert(b.hi.raw_doubled == 40, "the inner value struct really was replaced");
+  assert(b.label == 3, "own getter intact");
+}
+
+// A `structural value parent that satisfies `Format` — the interface's abstract method
+// takes a `~` MUTABLE borrow, which is a different view-adapter shape from the
+// read-only `Doubling` interface above, and string interpolation reaches it implicitly.
+// The newtype inherits the impl, so its box has to carry the child's typeinfo while the
+// crossing to the parent stays a flat copy.
+type Sensor `structural {
+  int cents `value;
+
+  get doubled int => this.cents * 2;
+  to_string() string {
+    return "S(" + this.cents.to_string() + ")";
+  }
+  format!(Writer ~w) {
+    w.write_string("S[" + this.cents.to_string() + "]");
+  }
+}
+
+type Probe is Sensor {
+  get tag int => 7;
+}
+
+newtype_formats_through_structural_value_parent() `test {
+  p := Probe(cents: 6);
+  assert(p.to_string() == "S(6)", "to_string inherited from the structural value parent");
+  assert("v={p}" == "v=S[6]", "newtype interpolated through the inherited format!");
+  Sensor up = p;
+  assert(up.to_string() == "S(6)", "to_string after the upcast");
+  assert("v={up}" == "v=S[6]", "interpolated after the upcast");
+  assert(up.doubled == 12, "and the flat value survived both");
+}
+
+newtype_vector_formats_at_structural_value_parent() `test {
+  Sensor[] v = [Probe(cents: 1), Probe(cents: 2)];
+  assert(v.to_string() == "[S[1], S[2]]", "vector of children formatted at the parent");
+  assert(v[1].doubled == 4, "element still readable afterwards");
+}
+
+// --- T1550, second wave: crossings the first wave did not reach -----------------
+// Each of these hands a value NEWTYPE to a slot typed at its `structural value parent
+// through a codegen path with its own view/copy decision — a path that would have
+// panicked (or silently boxed) exactly like the plain declaration did.
+
+// A generic type whose FIELD is typed at the structural value parent. The constructor
+// runs through genConstructorCallMono, which decides per argument whether the field
+// slot is a view to box into; the substituted field type is the parent, the argument
+// is the child.
+type Crate[T] {
+  T item;
+
+  get held T => this.item;
+}
+
+newtype_into_generic_field_of_structural_value_parent() `test {
+  c := Crate[Metric](item: Latency(raw: 5));
+  assert(c.item.raw_doubled == 10, "child stored into a generic field typed at the parent");
+  assert(c.held.raw_doubled == 10, "and read back through the generic getter");
+  d := Crate[Latency](item: Latency(raw: 6));
+  assert(d.held.tag == 7, "a second instantiation at the child itself");
+}
+
+// A tuple element typed at the parent. Tuple elements have their own store/load path,
+// separate from struct fields and container slots.
+metric_and_double(Metric m)(Metric, int) {
+  return (m, m.raw_doubled);
+}
+
+newtype_in_tuple_of_structural_value_parent() `test {
+  (m, d) := metric_and_double(m: Latency(raw: 6));
+  assert(m.raw_doubled == 12, "child returned as the parent inside a tuple");
+  assert(d == 12, "the scalar element alongside it");
+  (m2, d2) := metric_and_double(m: Latency(raw: 1));
+  assert(m2.raw_doubled + d2 == 4, "a second call, both tuple elements are flat copies");
+}
+
+// Returned as the parent from a FAILABLE function — the success value crosses through
+// the failable-result wrapper rather than the plain return slot.
+checked_latency!(int n) Metric {
+  if n < 0 {
+    raise error("negative");
+  }
+  return Latency(raw: n);
+}
+
+newtype_returned_as_structural_value_parent_from_failable() `test {
+  m := checked_latency(n: 9)?!;
+  assert(m.raw_doubled == 18, "child out of a failable success, typed at the parent");
+  fallback := checked_latency(n: -1)? {
+    Latency(raw: 2)
+  };
+  assert(fallback.raw_doubled == 4, "and out of the recovery expression");
+}
+
+// Two returns of the child from different branches, merged into one parent-typed
+// result. Each return site coerces independently, so both have to agree.
+pick_latency(bool hi) Metric {
+  if hi {
+    return Latency(raw: 8);
+  }
+  return Latency(raw: 3);
+}
+
+newtype_returned_as_parent_from_both_branches() `test {
+  assert(pick_latency(hi: true).raw_doubled == 16, "the taken branch");
+  assert(pick_latency(hi: false).raw_doubled == 6, "the other branch");
+}
+
+// A getter/method on a FRESH TEMPORARY receiver returning the child as the parent.
+// genCallExpr claims the receiver heap temp when the call result is a view that would
+// alias it; a value-parent result is a detached copy, so the claim must not fire.
+type Rack {
+  string label;
+
+  get best Metric => Latency(raw: 4);
+  at(this, int n) Metric {
+    return Latency(raw: n);
+  }
+}
+
+fresh_rack() Rack {
+  return Rack(label: "r");
+}
+
+newtype_as_parent_from_temp_receiver() `test {
+  assert(fresh_rack().best.raw_doubled == 8, "getter on a fresh temp receiver");
+  assert(fresh_rack().at(n: 5).raw_doubled == 10, "method on a fresh temp receiver");
+  assert(fresh_rack().best.raw_doubled + fresh_rack().at(n: 1).raw_doubled == 10, "two temps in one expression");
+}
+
+// Captured by a closure ENV at the parent type. Value types are Copy, so the capture
+// is an inline copy of the flat struct — a boxed capture would want a free at env drop,
+// which a value type must never get.
+newtype_captured_by_closure_at_structural_value_parent() `test {
+  Metric captured = Latency(raw: 6);
+  f := || -> captured.raw_doubled;
+  assert(f() == 12, "child captured through a parent-typed variable");
+  child := Latency(raw: 4);
+  g := || -> show_metric(m: child);
+  assert(g() == 8, "child captured directly, passed as the parent inside the lambda");
+  assert(captured.raw_doubled == 12, "the originals are untouched — they were copied in");
+}
+
+// Bound by an `if`-unwrap of an Optional payload typed at the parent. genIfUnwrapStmt
+// registers a free for the binding when the payload is a boxed view.
+maybe_latency(int n) Metric? {
+  if n > 0 {
+    return Latency(raw: n);
+  }
+  return none;
+}
+
+newtype_if_unwrapped_at_structural_value_parent() `test {
+  if m := maybe_latency(n: 8) {
+    assert(m.raw_doubled == 16, "unwrapped child, typed at the parent");
+  } else {
+    assert(false, "should have unwrapped");
+  }
+  if m := maybe_latency(n: 0) {
+    assert(false, "should not have unwrapped, got {m.raw}");
+  }
+  o := maybe_latency(n: 3);
+  assert(o!.raw_doubled == 6, "force-unwrap of the same optional");
+}
+
+// Behind a `Ref[T]` typed at the parent — a heap allocation holding the flat struct,
+// borrowed back out and shared with a second reference.
+newtype_in_ref_of_structural_value_parent() `test {
+  Metric m = Latency(raw: 9);
+  r := Ref[Metric](m);
+  assert(r.borrow.raw_doubled == 18, "child borrowed out of a parent-typed Ref");
+  r2 := r.clone();
+  assert(r2.borrow.raw_doubled == 18, "the second reference sees the same value");
+}
+
+// Through iterator COMBINATORS at the parent element type — the crossings happen
+// inside monomorphized std code rather than in user code.
+newtype_through_iterator_combinators_at_parent() `test {
+  Metric[] v = [Latency(raw: 1), Latency(raw: 2), Latency(raw: 3)];
+  assert(v.iter().filter(|Metric m| -> m.raw > 1).count() == 2, "filter over children at the parent");
+  total := v.iter().fold[int](init: 0, fn: |int acc, Metric m| -> acc + m.raw_doubled);
+  assert(total == 12, "fold to a scalar");
+  kept := v.iter().filter(|Metric m| -> m.raw != 2).collect();
+  assert(kept.len == 2 && kept[1].raw_doubled == 6, "collected back into a parent-typed vector");
+}
+
+// Yielded from a GENERATOR declared at the parent — each yield stores into the
+// coroutine frame and reads back at the resume.
+latency_stream() stream[Metric] {
+  yield Latency(raw: 1);
+  yield Latency(raw: 2);
+  yield Latency(raw: 3);
+}
+
+newtype_yielded_as_structural_value_parent() `test {
+  total := 0;
+  for m in latency_stream() {
+    total = total + m.raw_doubled;
+  }
+  assert(total == 12, "children yielded at the parent across suspensions");
+}
+
+// Across a TASK boundary: produced on another goroutine and received here as the
+// parent, crossing the task result slot.
+newtype_across_task_at_structural_value_parent() `test(exclude: wasm) {
+  t := go make_latency();
+  Metric m = <-t;
+  assert(m.raw_doubled == 12, "child received from a task, typed at the parent");
+}
+
+// A generic FREE function instantiated at the parent and at the child. Both
+// instantiations monomorphize the same body against a shared struct layout.
+boxed_up[T](T v) T[] {
+  T copy = v;
+  return[copy];
+}
+
+newtype_through_generic_free_fn_at_parent_and_child() `test {
+  Metric m = Latency(raw: 6);
+  atparent := boxed_up[Metric](v: m);
+  assert(atparent[0].raw_doubled == 12, "instantiated at the parent, holding a child");
+  atchild := boxed_up[Latency](v: Latency(raw: 7));
+  assert(atchild[0].tag == 7, "instantiated at the child itself");
+  assert(atchild[0].raw_doubled == 14, "inherited getter on the child instantiation");
+}
+
+// A method with its OWN type parameters, inherited by the newtype from the structural
+// value parent. This is declareMonoMethodInstances — a different mono entry than the
+// declareMonoMethods one that skipped every `structural origin.
+type Voltmeter `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+  mapped[U](this, (int) -> U f) U {
+    int x = this.raw;
+    return f(x);
+  }
+}
+
+type Ammeter is Voltmeter {
+  get tag int => 7;
+}
+
+newtype_inherits_generic_method_from_structural_value_parent() `test {
+  a := Ammeter(raw: 5);
+  assert(a.mapped[int](f: |int x| -> x * 3) == 15, "generic method inherited by the newtype");
+  assert(a.mapped[string](f: |int x| -> x.to_string()) == "5", "a second method instantiation");
+  assert(a.tag == 7, "the newtype own getter is intact");
+  Voltmeter up = a;
+  assert(up.mapped[int](f: |int x| -> x + 1) == 6, "the same generic method after the upcast");
+}
+
+// A free function taking the parent as a PARAMETER and returning a STRING, called with
+// the child. The T0092 string-temp gate selected on the parameter being `structural,
+// which for a value parent is a flat struct rather than an interface — the discarded
+// temp below is where a regression shows up as a leak, and the child argument adds the
+// shared-layout crossing on top of it.
+type Rate `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+}
+
+type Bitrate is Rate {
+  get tag int => 9;
+}
+
+describe_rate(Rate r) string {
+  return "r=" + r.raw_doubled.to_string();
+}
+
+newtype_through_string_returning_parent_param() `test {
+  b := Bitrate(raw: 6);
+  assert(describe_rate(r: b) == "r=12", "child through a string-returning parent param");
+  assert(describe_rate(r: Rate(raw: 7)) == "r=14", "the parent itself, same call");
+  s := describe_rate(r: b);
+  assert(s == "r=12", "bound to an owned local");
+  assert(b.tag == 9, "the child is intact afterwards");
+}
+
+// A method on the value parent that RETURNS A CLOSURE, inherited by the newtype. The
+// alias check answered "assume the result aliases the receiver" for every `structural
+// receiver, so the env went untracked; a value receiver owns no heap storage for it to
+// alias. Exercised on the child, on a parent-typed local holding a child, and as a
+// discarded temp (nothing binds the closure, so only the temp free reclaims the env).
+type Throttle `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+  adder(this)(int) -> int {
+    int base = this.raw;
+    return |int x| -> x + base;
+  }
+}
+
+type Limiter is Throttle {
+  get tag int => 4;
+}
+
+newtype_inherits_closure_returning_method() `test {
+  l := Limiter(raw: 6);
+  f := l.adder();
+  assert(f(4) == 10, "closure returned from the inherited method");
+  Throttle up = l;
+  g := up.adder();
+  assert(g(1) == 7, "the same method after the upcast to the parent");
+  assert(l.adder()(2) == 8, "discarded closure temp, called straight off the result");
+  assert(l.tag == 4, "the child own getter is intact");
+}
+
+// A generic type parameter CONSTRAINED by the `structural value parent, instantiated at
+// the parent AND at the child. The constraint check and the body's crossings each have
+// to agree the bound is a value type, and the child instantiation additionally shares
+// the parent's struct.
+type Quota `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+}
+
+type Cap is Quota {
+  get tag int => 3;
+}
+
+sum_quotas[T: Quota](T[] xs) int {
+  int total = 0;
+  for x in xs {
+    total = total + x.raw_doubled;
+  }
+  return total;
+}
+
+newtype_as_generic_constraint_argument() `test {
+  Quota[] atparent = [Cap(raw: 1), Cap(raw: 2)];
+  assert(sum_quotas[Quota](xs: atparent) == 6, "instantiated at the parent, holding children");
+  Cap[] atchild = [Cap(raw: 3), Cap(raw: 4)];
+  assert(sum_quotas[Cap](xs: atchild) == 14, "instantiated at the child itself");
+  assert(atchild[1].tag == 3, "the child own getter after the generic call");
 }

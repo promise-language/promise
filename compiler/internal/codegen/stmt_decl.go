@@ -322,7 +322,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// value, so the original must retain its drop flag for cleanup. T0082.
 	isStructuralTarget := false
 	if coerceTarget != nil {
-		if cn := extractNamed(coerceTarget); cn != nil && cn.IsStructural() {
+		if cn := extractNamed(coerceTarget); isStructuralView(cn) {
 			isStructuralTarget = true
 		}
 	}
@@ -436,7 +436,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		resolvedDeclType = types.Substitute(resolvedDeclType, c.typeSubst)
 	}
 	if len(c.heapTemps) > 0 {
-		if n := extractNamed(resolvedDeclType); n != nil && n.IsStructural() {
+		if n := extractNamed(resolvedDeclType); isStructuralView(n) {
 			c.promoteHeapTempsToScope()
 		}
 	}
@@ -768,7 +768,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// clearing the operand's drop flag would leave the shared instance unfreed.
 	// This mirrors the typed path's isStructuralTarget guard. T0882.
 	isStructuralTarget := false
-	if n := extractNamed(typ); n != nil && n.IsStructural() {
+	if n := extractNamed(typ); isStructuralView(n) {
 		isStructuralTarget = true
 	}
 	if !isStructuralTarget {
@@ -847,7 +847,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// promote remaining heapTemps to scope bindings so intermediate iterators in
 	// generic combinator chains survive until scope exit.
 	if len(c.heapTemps) > 0 {
-		if n := extractNamed(typ); n != nil && n.IsStructural() {
+		if n := extractNamed(typ); isStructuralView(n) {
 			c.promoteHeapTempsToScope()
 		}
 	}

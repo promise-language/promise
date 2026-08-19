@@ -629,7 +629,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// leaking the instance).
 			if binding, ok := c.dropBindings[target.Name]; ok && !selfAliasOrigin {
 				structuralTarget := false
-				if n := extractNamed(targetType); n != nil && n.IsStructural() {
+				if n := extractNamed(targetType); isStructuralView(n) {
 					structuralTarget = true
 				}
 				if !structuralTarget {

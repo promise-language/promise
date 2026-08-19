@@ -428,7 +428,7 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// (RTTI dispatch) so the cloned vector owns an independent box. Without this
 	// the shallow memcpy aliases the box across both vectors → double-free once
 	// the element drop loop (now structural-aware) frees each.
-	isStructuralElem := named != nil && named.IsStructural() && !named.IsValueType()
+	isStructuralElem := isStructuralView(named)
 
 	if !isChannel && !isVector && !isArcType && !isWeakType && !isHeapUser && !isStructuralElem && !isCloneableEnum && !isDupableEnum && !isDupableTuple {
 		return // value/copy type — shallow memcpy is correct
@@ -637,9 +637,11 @@ func (c *Compiler) cloneStructuralView(view value.Value) value.Value {
 // be deep-cloned on read (__promise_structural_clone) and dropped via RTTI
 // (__promise_structural_drop). Shared by the vector element drop gate and the
 // Optional[structural] dup-on-read gates. T1284/T1291.
+//
+// The types.Type-taking spelling of isStructuralView (rtti.go), which owns the
+// reasoning; kept as one predicate so the two can never drift apart. T1550.
 func isNonValueStructuralType(t types.Type) bool {
-	named := extractNamed(t)
-	return named != nil && named.IsStructural() && !named.IsValueType()
+	return isStructuralView(extractNamed(t))
 }
 
 // vecElemNeedsStructuralDrop returns true if a vector element type is a
@@ -730,7 +732,7 @@ func (c *Compiler) typeNeedsFieldDrop(typ types.Type) bool {
 		// `(K, Showable)` elements of `Map.entries()`'s result vector) drops each box.
 		// T1291: same routing also covers Optional[structural] vector elements (via
 		// vecElemNeedsOptionalDrop → here); without it those boxed instances leak.
-		if named.IsStructural() && !named.IsValueType() {
+		if isStructuralView(named) {
 			return true
 		}
 		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {

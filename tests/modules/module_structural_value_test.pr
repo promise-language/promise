@@ -1,0 +1,90 @@
+// T1550: a `structural type whose fields are all `value is a pure value type, and the
+// same is true across a module boundary. Monomorphization declares and defines methods
+// per module (registering them in moduleOwnedFuncs so the module IR is split and cached
+// correctly), and that path skipped every `structural origin on the assumption it was
+// an interface whose default methods belong to each implementor. A `structural value
+// type has no implementors, so its own methods simply went missing — the single-file
+// tests in tests/value_types/ cannot reach this entry.
+use valuemod "./valuemod";
+
+module_structural_value_type() `test {
+  m := valuemod.Metric(raw: 6);
+  assert(m.raw == 6, "field read across a module boundary");
+  assert(m.raw_doubled == 12, "getter defined in the module");
+  assert(m.scaled(factor: 3).raw_doubled == 36, "method returning its own value type");
+}
+
+module_structural_value_newtype() `test {
+  l := valuemod.Latency(raw: 6);
+  assert(l.raw_doubled == 12, "inherited getter");
+  assert(l.tag == 7, "the newtype's own getter");
+  valuemod.Metric m = l;
+  assert(m.raw_doubled == 12, "upcast to the module's structural value parent");
+  assert(l.tag == 7, "child still usable — value types are copy");
+}
+
+module_structural_value_param_and_return() `test {
+  l := valuemod.Latency(raw: 6);
+  assert(valuemod.show_metric(m: l) == 12, "child passed as the parent parameter");
+  r := valuemod.make_latency(n: 7);
+  assert(r.raw_doubled == 14, "child returned as the parent");
+  assert(valuemod.show_metric(m: valuemod.make_latency(n: 8)) == 16, "returned straight into a param");
+}
+
+// The `~` (mutable borrow) crossing: the child shares the parent's struct, so the
+// caller's alloca is borrowed directly and the module's write has to be visible here.
+module_structural_value_mut_ref() `test {
+  l := valuemod.Latency(raw: 1);
+  valuemod.bump_metric(l, to: 21);
+  assert(l.raw == 21, "child mutated through the module's parent-typed `~` param");
+  assert(l.raw_doubled == 42, "inherited getter sees the mutation");
+  assert(l.tag == 7, "own getter intact");
+}
+
+// The generic form, instantiated from user code: the instance is collected through
+// collectMonoInstancesWithExtra and its methods declared into the module's IR.
+module_generic_structural_value_type() `test {
+  s := valuemod.Slot[int](a: 3, b: 4);
+  assert(s.first == 3, "getter on a module-owned generic structural value type");
+  assert(s.swapped().first == 4, "method returning its own instantiation");
+  t := valuemod.Slot[f64](a: 1.5, b: 2.5);
+  assert(t.first == 1.5, "a second instantiation gets its own methods");
+}
+
+module_structural_value_in_containers() `test {
+  valuemod.Metric[] v = [valuemod.Latency(raw: 1), valuemod.Latency(raw: 2)];
+  assert(v[0].raw_doubled == 2, "child in a vector of the module's parent type");
+  v.push(valuemod.Latency(raw: 3));
+  w := v.clone();
+  assert(w[2].raw_doubled == 6, "cloned");
+  map[string, valuemod.Metric] m = {:};
+  m["p50"] = valuemod.Latency(raw: 4);
+  assert(m["p50"]!.raw_doubled == 8, "child as a map value typed at the parent");
+}
+
+// A generic METHOD on a module-owned `structural value type: the method instance is
+// declared and defined into the module's own IR (declareMonoMethodInstances, a
+// different entry than the declareMonoMethods one that skipped `structural origins),
+// and the instantiation is driven from user code here.
+module_structural_value_generic_method() `test {
+  r := valuemod.Reading(raw: 5);
+  assert(r.mapped[int](f: |int x| -> x * 3) == 15, "generic method instantiated across a module boundary");
+  assert(r.mapped[string](f: |int x| -> x.to_string()) == "5", "a second instantiation of the same method");
+  assert(r.raw_doubled == 10, "the flat value is intact afterwards");
+}
+
+// …and inherited by the module's value newtype, before and after the upcast.
+module_structural_value_newtype_generic_method() `test {
+  s := valuemod.Sample(raw: 4);
+  assert(s.mapped[int](f: |int x| -> x + 1) == 5, "generic method inherited by the newtype");
+  assert(s.tag == 5, "the newtype's own getter");
+  valuemod.Reading up = s;
+  assert(up.mapped[int](f: |int x| -> x * 2) == 8, "the same method after the upcast to the parent");
+}
+
+// NOT COVERED: a generic type instantiated at the module's `structural value type and
+// named from user code (`valuemod.Crate[valuemod.Reading]`) panics codegen with
+// "store operands are not compatible: src=%promise_Reading_v; dst={ i8*, i8* }*".
+// That is T1597, the cross-module half of T0565 — it is not specific to `structural
+// (a plain module-owned value type reproduces it), so it is tracked separately rather
+// than worked around here. Add the case to this file when T1597 is fixed.

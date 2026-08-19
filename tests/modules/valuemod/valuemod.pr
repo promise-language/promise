@@ -41,3 +41,63 @@ make_boxed(int item) Boxed[int] `public `doc("Builds a Boxed holding the given i
 make_span(int secs) Span `public `doc("Builds a Span covering the given number of seconds.") {
   return Span(d: Duration.from_secs(secs));
 }
+
+// valuemod: `structural types whose fields are all `value — pure VALUE types, not
+// interface views (T1550). Exported so a consumer compiles them through the module
+// path, where monomorphization declares and defines methods into the module's own IR
+// and registers them in moduleOwnedFuncs. That is a different declare/define entry
+// than the single-file path the rest of the T1550 tests exercise, and it is the entry
+// that skipped every `structural origin's methods outright.
+type Metric `structural `public `doc("A `structural type that is itself a pure value type.") {
+  int raw `value;
+
+  get raw_doubled int `public `doc("Twice the raw reading.") => this.raw * 2;
+  scaled(this, int factor) Metric `public `doc("A new Metric with the reading scaled.") {
+    return Metric(raw: this.raw * factor);
+  }
+}
+
+type Latency is Metric `public `doc("A value newtype of Metric — same struct, extra methods.") {
+  get tag int `public `doc("A constant tag distinguishing Latency from Metric.") => 7;
+}
+
+type Slot[T] `structural `public `doc("A generic `structural value type holding two `value fields.") {
+  T a `value;
+  T b `value;
+
+  get first T `public `doc("The first field.") => this.a;
+  swapped(this) Slot[T] `public `doc("A copy with the two fields exchanged.") {
+    return Slot[T](a: this.b, b: this.a);
+  }
+}
+
+show_metric(Metric m) int `public `doc("Reads raw_doubled through a parent-typed parameter.") {
+  return m.raw_doubled;
+}
+
+bump_metric(Metric ~m, int to) `public `doc("Writes through a parent-typed mutable borrow.") {
+  m.raw = to;
+}
+
+make_latency(int n) Metric `public `doc("Returns a Latency as its Metric parent.") {
+  return Latency(raw: n);
+}
+
+// A method with its OWN type parameters on a module-owned `structural value type.
+// This is declareMonoMethodInstances / defineMonoMethodInstances rather than the
+// declareMonoMethods entry the other members exercise, and inside a module it also
+// registers the instance in moduleOwnedFuncs so the module IR is split and cached
+// with the body in it.
+type Reading `structural `public `doc("A `structural value type with a generic method.") {
+  int raw `value;
+
+  get raw_doubled int `public `doc("Twice the raw reading.") => this.raw * 2;
+  mapped[U](this, (int) -> U f) U `public `doc("Applies f to the raw reading.") {
+    int x = this.raw;
+    return f(x);
+  }
+}
+
+type Sample is Reading `public `doc("A value newtype of Reading — same struct, extra method.") {
+  get tag int `public `doc("A constant tag distinguishing Sample from Reading.") => 5;
+}

@@ -189,7 +189,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			if c.typeSubst != nil {
 				callResultType = types.Substitute(callResultType, c.typeSubst)
 			}
-			if resultNamed := extractNamed(callResultType); resultNamed != nil && resultNamed.IsStructural() {
+			if resultNamed := extractNamed(callResultType); isStructuralView(resultNamed) {
 				c.claimHeapTemp(c.pendingReceiverClaim)
 			}
 		}
@@ -1434,7 +1434,12 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 				paramInner := params[i].Type().(*types.MutRef).Elem()
 				// Check if the arg type matches the param inner type exactly
 				// (no view coercion needed). If so, pass the alloca directly.
-				if types.Identical(argType, paramInner) || types.Identical(argType, params[i].Type()) {
+				// T1550: a value newtype is the SAME LLVM struct as its value parent
+				// (T1527), so a child arg for a parent-typed `~` param also needs the
+				// caller's alloca — the materialize-into-a-temp branch below would land
+				// every mutation in the temp and silently discard it.
+				if types.Identical(argType, paramInner) || types.Identical(argType, params[i].Type()) ||
+					c.sharesValueStruct(argType, paramInner) {
 					argVals = append(argVals, c.genMutRefArg(arg.Value))
 				} else {
 					// Coercion needed (e.g., Builder → Writer view).

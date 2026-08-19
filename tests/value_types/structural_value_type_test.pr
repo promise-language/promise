@@ -1,0 +1,838 @@
+// T1550: a `structural type whose fields are ALL `value is itself a pure value
+// type, not an interface view. It is register-resident (flat %promise_T_v struct),
+// so every crossing to a `Metric`-typed slot is a plain copy — codegen must not
+// build a {vtable, instance} fat pointer for it, which used to panic with
+// "store operands are not compatible: src={ i8*, i8* }; dst=%promise_Metric_v*".
+//
+// These tests pin the shapes that work, on every crossing codegen has a distinct
+// path for: declaration, parameter, return, optional, vector, array, nested field.
+// The complementary sema rule (a value type may not declare abstract methods, so it
+// can never be satisfied structurally) is covered in compiler/internal/sema.
+type Metric `structural {
+  int raw `value;
+  get raw_doubled int => this.raw * 2;
+  scale(this, int factor) Metric {
+    return Metric(raw: this.raw * factor);
+  }
+}
+
+type Pair {
+  Metric lo `value;
+  Metric hi `value;
+}
+
+make_metric(int n) Metric {
+  return Metric(raw: n);
+}
+
+double_of(Metric m) int {
+  return m.raw_doubled;
+}
+
+maybe_metric(int n) Metric? {
+  if n > 0 {
+    return Metric(raw: n);
+  }
+  return none;
+}
+
+// 1. Direct construction and inherited-getter use — the baseline shape.
+structural_value_direct() `test {
+  m := Metric(raw: 6);
+  assert(m.raw == 6, "field read");
+  assert(m.raw_doubled == 12, "getter on a structural value type");
+}
+
+// 2. Explicitly typed declaration — the genTypedVarDecl store that used to panic.
+structural_value_typed_decl() `test {
+  Metric m = Metric(raw: 6);
+  assert(m.raw_doubled == 12, "typed decl keeps the flat value struct");
+}
+
+// 3. Parameter pass — the silent-corruption variant (a boxed fat pointer read back
+// as an i64 printed a pointer instead of the value).
+structural_value_param() `test {
+  m := Metric(raw: 6);
+  assert(double_of(m: m) == 12, "param pass carries the value, not a pointer");
+  assert(m.raw == 6, "value types are copy — caller's copy is intact");
+}
+
+// 4. Return — the escape path (coerceReturnToView) must not heap-box.
+structural_value_return() `test {
+  m := make_metric(n: 6);
+  assert(m.raw_doubled == 12, "returned by value");
+  assert(double_of(m: make_metric(n: 7)) == 14, "returned straight into a param");
+}
+
+// 5. Method returning the type itself (Self-shaped return on a value type).
+structural_value_method_return() `test {
+  m := Metric(raw: 3);
+  s := m.scale(factor: 4);
+  assert(s.raw_doubled == 24, "method returning its own value type");
+  assert(m.raw == 3, "receiver unchanged (value semantics)");
+}
+
+// 6. Optional — coerceToOptionalElem must leave the payload flat.
+structural_value_optional() `test {
+  Metric? o = Metric(raw: 6);
+  if p := o {
+    assert(p.raw_doubled == 12, "unwrapped optional payload");
+  } else {
+    assert(false, "optional should be present");
+  }
+  Metric? empty = maybe_metric(n: 0);
+  if _ := empty {
+    assert(false, "optional should be none");
+  }
+  if p := maybe_metric(n: 5) {
+    assert(p.raw_doubled == 10, "optional returned from a function");
+  }
+}
+
+// 7. Vector element — container element crossing.
+structural_value_vector() `test {
+  Metric[] v = [Metric(raw: 6), Metric(raw: 7)];
+  assert(v[0].raw_doubled == 12, "vector element 0");
+  assert(v[1].raw_doubled == 14, "vector element 1");
+  v.push(Metric(raw: 8));
+  assert(v[2].raw_doubled == 16, "pushed element");
+}
+
+// 8. Fixed-size array element — a distinct element-type path from vectors.
+structural_value_array() `test {
+  Metric[2] a = [Metric(raw: 6), Metric(raw: 7)];
+  assert(a[0].raw_doubled == 12, "array element 0");
+  assert(a[1].raw_doubled == 14, "array element 1");
+}
+
+// 9. Nested as a `value field of another value type.
+structural_value_nested_field() `test {
+  p := Pair(lo: Metric(raw: 2), hi: Metric(raw: 5));
+  assert(p.lo.raw_doubled == 4, "nested lo");
+  assert(p.hi.raw_doubled == 10, "nested hi");
+}
+
+// 10. Copy semantics — a value type is `copy, so assignment does not move.
+structural_value_copy() `test {
+  a := Metric(raw: 6);
+  b := a;
+  assert(a.raw_doubled == 12, "source still usable after copy");
+  assert(b.raw_doubled == 12, "copy carries the value");
+}
+
+// 10b. The remaining crossings, each of which reads or writes the type through a
+// container/closure/payload slot rather than a local: every one of them is a separate
+// coercion site that could have decided "this `structural target is a view" on its own.
+type Panel {
+  Metric current;
+  Metric? best;
+}
+
+enum Sample {
+  ok(Metric m),
+  missing,
+}
+
+apply_metric((Metric) -> int f, Metric m) int {
+  return f(m);
+}
+
+structural_value_assign_stmt() `test {
+  Metric m = Metric(raw: 1);
+  m = Metric(raw: 6);
+  assert(m.raw_doubled == 12, "assignment statement, not a declaration");
+}
+
+// A NON-`value` field of a heap type: the owner stays heap-allocated, so the value
+// struct is stored into (and read back out of) the instance struct.
+structural_value_heap_field() `test {
+  p := Panel(current: Metric(raw: 6), best: none);
+  assert(p.current.raw_doubled == 12, "field set at construction");
+  p.current = Metric(raw: 7);
+  assert(p.current.raw_doubled == 14, "field assigned");
+  p.best = Metric(raw: 8);
+  assert(p.best!.raw_doubled == 16, "optional field assigned");
+}
+
+structural_value_map_value() `test {
+  map[string, Metric] m = {:};
+  m["p50"] = Metric(raw: 6);
+  m["p99"] = Metric(raw: 7);
+  assert(m["p50"]!.raw_doubled == 12, "map value read back");
+  assert(m.len == 2, "two entries");
+}
+
+structural_value_for_in() `test {
+  Metric[] v = [Metric(raw: 1), Metric(raw: 2), Metric(raw: 3)];
+  int total = 0;
+  for m in v {
+    total = total + m.raw_doubled;
+  }
+  assert(total == 12, "for-in sum");
+}
+
+structural_value_lambda() `test {
+  f := |Metric m| -> m.raw_doubled;
+  assert(apply_metric(f: f, m: Metric(raw: 6)) == 12, "lambda parameter");
+  captured := Metric(raw: 5);
+  g := || -> captured.raw_doubled;
+  assert(g() == 10, "captured by a closure env");
+}
+
+structural_value_enum_payload() `test {
+  r := Sample.ok(m: Metric(raw: 6));
+  match r {
+    ok(m) => assert(m.raw_doubled == 12, "enum variant payload"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+structural_value_over_channel() `test(exclude: wasm) {
+  ch := channel[Metric](capacity: 1);
+  go {
+    ch.send(Metric(raw: 6));
+  };
+  Metric m = (<-ch)!;
+  assert(m.raw_doubled == 12, "sent across a goroutine boundary by value");
+  ch.close();
+}
+
+// 11. The GENERIC form. Monomorphization skipped method declaration for every
+// `structural origin, on the assumption that a structural type's methods are
+// synthesized per-implementor — true for an interface, false for a value type,
+// which has no implementors. So `Slot[int](a: 3).first` type-checked clean and
+// then panicked codegen with "undeclared getter Slot[int].first". Field-only
+// generic structural value types worked, which is why the non-generic cases
+// above did not catch it. T1550.
+type Slot[T] `structural {
+  T a `value;
+  T b `value;
+
+  get first T => this.a;
+  swapped(this) Slot[T] {
+    return Slot[T](a: this.b, b: this.a);
+  }
+}
+
+first_of(Slot[int] s) int {
+  return s.first;
+}
+
+make_slot() Slot[int] {
+  return Slot[int](a: 1, b: 2);
+}
+
+generic_structural_value_methods() `test {
+  s := Slot[int](a: 3, b: 4);
+  assert(s.first == 3, "getter on a generic structural value type");
+  assert(s.swapped().first == 4, "method returning its own instantiation");
+  assert(first_of(s: s) == 3, "passed as a parameter");
+  assert(make_slot().first == 1, "returned by value");
+}
+
+// A second instantiation must get its own declared methods, not the first's.
+// f64 rather than string: a string field is not a copy type, so `Slot[string]`
+// sits on the unvalidated "TypeParam is assumed copy" path (T1557) and this test
+// should not pin that shape while it is still in question.
+generic_structural_value_second_instantiation() `test {
+  t := Slot[f64](a: 1.5, b: 2.5);
+  assert(t.first == 1.5, "getter on the f64 instantiation");
+  assert(t.swapped().first == 2.5, "method on the f64 instantiation");
+}
+
+generic_structural_value_in_containers() `test {
+  Slot[int][] v = [Slot[int](a: 5, b: 6), Slot[int](a: 7, b: 8)];
+  assert(v[0].first == 5, "vector element");
+  assert(v[1].swapped().first == 8, "method through a vector element");
+  Slot[int]? o = Slot[int](a: 9, b: 10);
+  assert(o!.first == 9, "optional payload");
+}
+
+// 12. A `structural value type is not itself a view, but it can still SATISFY a
+// real abstract-only structural interface — so it reaches the ordinary value-type
+// box path (T1284) and needs everything a boxed value type needs. The clone
+// function synthesizer skipped every `structural origin, on the assumption that a
+// structural type is always the interface and never the boxed concrete type. For
+// this shape it IS the concrete type, so its typeinfo carried a null clone_fn:
+// __promise_structural_clone fell back to aliasing the source box, and the clone
+// and the original then both freed it — the process died at scope exit without
+// reporting a result. The non-`structural spelling of the same type was fine,
+// which is what hid it. T1550.
+// Abstract-only on purpose. Adding a DEFAULT GETTER here and reading it from a default
+// method's body panics codegen for any structurally-satisfying implementor — heap, plain
+// value, or `structural value alike — so that shape is T1600, not something this file
+// can assert yet. Add it here once T1600 is fixed.
+type Doubler `structural {
+  get raw_doubled int `abstract;
+}
+
+// Same method set as Metric, without `structural — the working control.
+type Plain {
+  int raw `value;
+  get raw_doubled int => this.raw * 2;
+}
+
+// push rather than a vector literal: literal elements take a separate coercion
+// path (T1558) that is not what this covers.
+fill_doublers() Doubler[] {
+  Doubler[] v = [];
+  v.push(Metric(raw: 1));
+  v.push(Metric(raw: 2));
+  v.push(Metric(raw: 3));
+  return v;
+}
+
+structural_value_boxed_behind_interface() `test {
+  Doubler[] v = [];
+  v.push(Metric(raw: 6));
+  assert(v[0].raw_doubled == 12, "dispatch through the box");
+  Doubler? o = Metric(raw: 7);
+  assert(o!.raw_doubled == 14, "boxed under an optional");
+}
+
+// The escape path takes a different box builder (heap rather than stack) — both had
+// to learn that a `structural TARGET which is a value type is not a view, without
+// losing the ability to box a `structural SOURCE that is one. T1550.
+escaping_doubler() Doubler {
+  return Metric(raw: 6);
+}
+
+structural_value_boxed_on_escape() `test {
+  d := escaping_doubler();
+  assert(d.raw_doubled == 12, "returned boxed behind a real interface");
+  Doubler[] v = [];
+  v.push(escaping_doubler());
+  w := v.clone();
+  assert(w[0].raw_doubled == 12, "escaped box cloned");
+}
+
+structural_value_boxed_clone() `test {
+  v := fill_doublers();
+  w := v.clone();
+  assert(w[0].raw_doubled == 2, "clone element 0");
+  assert(w[2].raw_doubled == 6, "clone element 2");
+  assert(v[0].raw_doubled == 2, "original element 0 still readable");
+  assert(v.len == 3, "original length unchanged");
+}
+
+structural_value_boxed_slice() `test {
+  v := fill_doublers();
+  s := v[1:];
+  assert(s.len == 2, "slice length");
+  assert(s[0].raw_doubled == 4, "slice element 0");
+  assert(s[1].raw_doubled == 6, "slice element 1");
+}
+
+// Control: the identical shape on a non-`structural value type.
+plain_value_boxed_clone() `test {
+  Doubler[] v = [];
+  v.push(Plain(raw: 1));
+  v.push(Plain(raw: 2));
+  w := v.clone();
+  assert(w[0].raw_doubled == 2, "clone element 0");
+  assert(v[1].raw_doubled == 4, "original element 1");
+}
+
+// Both spellings side by side in one vector — the boxes carry different concrete
+// typeinfos, so each element clones through its own clone_fn.
+mixed_value_kinds_boxed_clone() `test {
+  Doubler[] v = [];
+  v.push(Metric(raw: 1));
+  v.push(Plain(raw: 2));
+  w := v.clone();
+  assert(w[0].raw_doubled == 2, "cloned `structural value element");
+  assert(w[1].raw_doubled == 4, "cloned plain value element");
+}
+
+// The GENERIC form of the same thing: a mono instance's typeinfo is emitted on a
+// separate path from a plain type's, so the clone_fn has to reach both.
+type Gauge[T] `structural {
+  T reading `value;
+
+  get raw_doubled int => 8;
+}
+
+generic_structural_value_boxed_clone() `test {
+  Doubler[] v = [];
+  v.push(Gauge[int](reading: 1));
+  v.push(Gauge[int](reading: 2));
+  w := v.clone();
+  assert(w[0].raw_doubled == 8, "cloned generic `structural value element");
+  assert(v[1].raw_doubled == 8, "original element still readable");
+}
+
+// 13. MUTATION through the type's own members. Everything above reads a `structural
+// value type out of a slot; these write to one. A property setter, a `~this` method,
+// and a compound assignment each reach the receiver by a different route, and each
+// decides on the receiver's type independently — the same decision that took the
+// view branch in T1550. If any of them treated the flat struct as a fat pointer the
+// write would land in a box and silently vanish rather than panic.
+type Budget `structural {
+  int cents `value;
+
+  get dollars int => this.cents / 100;
+  get amount int => this.cents;
+  set amount(int v) {
+    this.cents = v;
+  }
+
+  add_cents(~this, int by) {
+    this.cents = this.cents + by;
+  }
+}
+
+structural_value_setter() `test {
+  b := Budget(cents: 100);
+  b.amount = 900;
+  assert(b.dollars == 9, "property setter mutates in place");
+}
+
+structural_value_compound_assign() `test {
+  b := Budget(cents: 300);
+  b.amount += 400;
+  assert(b.dollars == 7, "read through the getter, write through the setter");
+  b.amount -= 200;
+  assert(b.dollars == 5, "and back down");
+}
+
+structural_value_mut_this() `test {
+  b := Budget(cents: 100);
+  b.add_cents(by: 500);
+  assert(b.dollars == 6, "~this method mutates in place");
+  b.add_cents(by: 300);
+  assert(b.dollars == 9, "cumulatively");
+}
+
+// A `~` (mutable borrow) parameter typed as the `structural value type: the caller's
+// alloca is passed directly, so the write has to be visible on return.
+raise_budget(Budget ~b) {
+  b.cents = 2100;
+}
+
+structural_value_mut_ref_param() `test {
+  b := Budget(cents: 100);
+  raise_budget(b);
+  assert(b.cents == 2100, "mutated through a `~` param");
+  assert(b.dollars == 21, "getter sees the mutation");
+}
+
+// 14. Container KEYING. A `structural value type that satisfies Hashable/Ordered is
+// usable as a Map key, a Set element, and a sort element — each of which hashes or
+// compares the flat struct rather than reading it through a slot.
+type Tally `structural {
+  int reading `value;
+
+  get doubled int => this.reading * 2;
+  == (this, Tally o) bool => this.reading == o.reading;
+  get hash int => this.reading;
+  < (this, Tally o) bool => this.reading < o.reading;
+}
+
+structural_value_map_key() `test {
+  map[Tally, int] m = {:};
+  m[Tally(reading: 6)] = 1;
+  m[Tally(reading: 7)] = 2;
+  assert(m[Tally(reading: 6)]! == 1, "keyed lookup");
+  assert(m.len == 2, "two distinct keys");
+  m[Tally(reading: 6)] = 3;
+  assert(m.len == 2, "equal keys collapse");
+  assert(m[Tally(reading: 6)]! == 3, "overwritten");
+}
+
+structural_value_set_element() `test {
+  Set[Tally] s = Set[Tally]();
+  s.add(Tally(reading: 6));
+  s.add(Tally(reading: 6));
+  assert(s.len == 1, "set dedups equal values");
+  assert(s.contains(Tally(reading: 6)), "membership");
+  assert(!s.contains(Tally(reading: 9)), "absent element");
+}
+
+structural_value_sorted() `test {
+  Tally[] v = [Tally(reading: 3), Tally(reading: 1), Tally(reading: 2)];
+  s := sort(move v);
+  assert(s[0].doubled == 2, "sorted first");
+  assert(s[1].doubled == 4, "sorted middle");
+  assert(s[2].doubled == 6, "sorted last");
+}
+
+// 15. NESTING a `structural value type inside another one. `Pair` above is a plain
+// heap-free value type holding two Metrics; this one is `structural at BOTH levels, so
+// the outer's value struct embeds the inner's value struct by value and every field
+// read, write and pass has to agree that neither level is a fat pointer.
+type Window `structural {
+  Metric lo `value;
+  Metric hi `value;
+
+  get span int => this.hi.raw - this.lo.raw;
+  widened(this, int by) Window {
+    return Window(lo: Metric(raw: this.lo.raw - by), hi: Metric(raw: this.hi.raw + by));
+  }
+}
+
+span_of(Window w) int {
+  return w.span;
+}
+
+widen_in_place(Window ~w) {
+  w.hi = Metric(raw: 20);
+}
+
+structural_value_nested_in_structural_value() `test {
+  w := Window(lo: Metric(raw: 2), hi: Metric(raw: 9));
+  assert(w.span == 7, "getter over two nested structural value fields");
+  assert(w.lo.raw_doubled == 4, "inner getter through the outer field");
+  assert(span_of(w: w) == 7, "passed by value");
+  assert(w.widened(by: 1).span == 9, "method returning the nested value type");
+  assert(w.span == 7, "receiver unchanged");
+}
+
+structural_value_nested_mutation() `test {
+  w := Window(lo: Metric(raw: 2), hi: Metric(raw: 9));
+  w.hi = Metric(raw: 12);
+  assert(w.span == 10, "inner value struct replaced by a field assignment");
+  widen_in_place(w);
+  assert(w.span == 18, "inner value struct replaced through a `~` param");
+  assert(w.hi.raw_doubled == 40, "inner getter sees the replacement");
+}
+
+structural_value_nested_in_containers() `test {
+  Window[] v = [Window(lo: Metric(raw: 1), hi: Metric(raw: 4))];
+  assert(v[0].span == 3, "nested value type as a vector element");
+  Window? o = Window(lo: Metric(raw: 2), hi: Metric(raw: 8));
+  assert(o!.span == 6, "nested value type as an optional payload");
+}
+
+// 16. Satisfying `Format` — the abstract method takes a `~` MUTABLE borrow, a different
+// view-adapter shape from the read-only `Doubler` interface above, and string
+// interpolation reaches it implicitly rather than through an explicit interface-typed
+// slot. A `structural value type is boxed for that crossing exactly like a plain one.
+type Sensor `structural {
+  int cents `value;
+
+  get doubled int => this.cents * 2;
+  to_string() string {
+    return "S(" + this.cents.to_string() + ")";
+  }
+  format!(Writer ~w) {
+    w.write_string("S[" + this.cents.to_string() + "]");
+  }
+}
+
+structural_value_to_string_and_format() `test {
+  s := Sensor(cents: 6);
+  assert(s.to_string() == "S(6)", "own to_string");
+  assert("v={s}" == "v=S[6]", "interpolation boxes into Format");
+  assert(s.doubled == 12, "flat value intact after being formatted");
+}
+
+structural_value_formatted_in_containers() `test {
+  Sensor[] v = [Sensor(cents: 1), Sensor(cents: 2)];
+  assert(v.to_string() == "[S[1], S[2]]", "vector formatted element by element");
+  Sensor? o = Sensor(cents: 3);
+  assert("o={o!}" == "o=S[3]", "optional payload interpolated");
+}
+
+// 17. Operators declared ON the `structural value type. `==` and `+` take and return
+// the type itself, so each operand crossing and the result crossing is a value-struct
+// copy; the operator path builds its argument list separately from a plain call and so
+// selects the view/copy branch on its own.
+type Reading `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+  == (this, Reading o) bool => this.raw == o.raw;
+  < (this, Reading o) bool => this.raw < o.raw;
+  +(this, Reading o) Reading => Reading(raw: this.raw + o.raw);
+}
+
+structural_value_operators() `test {
+  a := Reading(raw: 3);
+  b := Reading(raw: 4);
+  assert(a + b == Reading(raw: 7), "+ returning the structural value type, compared with ==");
+  assert(a < b, "< through the structural value type");
+  assert(!(b == a), "== is not accidentally identity");
+  assert((a + b).raw_doubled == 14, "getter on the operator result");
+}
+
+// 18. A method with its OWN type parameters on a `structural value type. This is
+// declareMonoMethodInstances / defineMonoMethodInstances — a different mono entry than
+// the declareMonoMethods one that skipped every `structural origin, and it is reached
+// only when the method (not the owner) is generic.
+type Gauge2 `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+  mapped[U](this, (int) -> U f) U {
+    int x = this.raw;
+    return f(x);
+  }
+}
+
+structural_value_generic_method() `test {
+  g := Gauge2(raw: 5);
+  assert(g.mapped[int](f: |int x| -> x * 3) == 15, "generic method on a structural value type");
+  assert(g.mapped[string](f: |int x| -> x.to_string()) == "5", "a second method instantiation");
+  assert(g.raw_doubled == 10, "the flat value is intact afterwards");
+}
+
+// …and the same on a GENERIC `structural value type: owner type params and method type
+// params are substituted from two different maps that have to combine into one.
+type Cell[T] `structural {
+  T a `value;
+
+  get held T => this.a;
+  mapped[U](this, (T) -> U f) U {
+    T x = this.a;
+    return f(x);
+  }
+}
+
+generic_structural_value_generic_method() `test {
+  c := Cell[int](a: 3);
+  assert(c.mapped[string](f: |int x| -> x.to_string()) == "3", "method instance on a generic owner");
+  assert(c.mapped[int](f: |int x| -> x * 5) == 15, "a second method instantiation, same owner");
+  d := Cell[f64](a: 1.5);
+  assert(d.mapped[int](f: |f64 x| -> x as! int) == 1, "a second owner instantiation");
+  assert(d.held == 1.5, "owner getter still flat");
+}
+
+// A generic `structural value type instantiated AT a `structural value type — both the
+// owner field crossing and the method-instance crossing are value-struct copies.
+generic_structural_value_holding_structural_value() `test {
+  c := Cell[Reading](a: Reading(raw: 4));
+  assert(c.held.raw_doubled == 8, "nested structural value type read back out");
+  assert(c.mapped[int](f: |Reading r| -> r.raw_doubled) == 8, "generic method over it");
+}
+
+// 19. A tuple element typed at the `structural value type — tuples have their own
+// element load/store path, distinct from struct fields and container slots.
+split_reading(Reading r)(Reading, int) {
+  return (r, r.raw_doubled);
+}
+
+structural_value_in_tuple() `test {
+  (r, d) := split_reading(r: Reading(raw: 6));
+  assert(r.raw_doubled == 12, "tuple element typed at the structural value type");
+  assert(d == 12, "the scalar element alongside it");
+  (Reading, Reading) pair = (Reading(raw: 1), Reading(raw: 2));
+  (lo, hi) := pair;
+  assert(lo + hi == Reading(raw: 3), "both elements are flat values");
+}
+
+// 20. Returned from a FAILABLE function — the success value travels through the
+// failable-result wrapper, a separate return path from the plain one.
+checked_reading!(int n) Reading {
+  if n < 0 {
+    raise error("negative");
+  }
+  return Reading(raw: n);
+}
+
+structural_value_failable_return() `test {
+  r := checked_reading(n: 9)?!;
+  assert(r.raw_doubled == 18, "structural value type out of a failable success");
+  fallback := checked_reading(n: -1)? {
+    Reading(raw: 2)
+  };
+  assert(fallback.raw_doubled == 4, "and out of the recovery expression");
+}
+
+// 21. A getter/method on a FRESH TEMPORARY receiver returning the `structural value
+// type. genCallExpr claims the receiver heap temp when the call result type is a view
+// (the result would alias the receiver box); a `structural value type result is a
+// detached copy, so the claim must not fire.
+type Station {
+  string label;
+
+  get reading Reading => Reading(raw: 4);
+  scaled(this, int by) Reading {
+    return Reading(raw: by);
+  }
+}
+
+fresh_station() Station {
+  return Station(label: "s");
+}
+
+structural_value_from_temp_receiver() `test {
+  assert(fresh_station().reading.raw_doubled == 8, "getter on a fresh temp receiver");
+  assert(fresh_station().scaled(by: 5).raw_doubled == 10, "method on a fresh temp receiver");
+  assert(fresh_station().reading + fresh_station().reading == Reading(raw: 8), "two temps, both flat");
+}
+
+// 22. Captured by a closure ENV. Copy types are auto-captured, so the env struct holds
+// the flat value struct inline — a boxed capture would need a free at env drop, which
+// a value type must never get.
+structural_value_closure_capture() `test {
+  captured := Reading(raw: 6);
+  f := || -> captured.raw_doubled;
+  assert(f() == 12, "structural value type read out of a closure env");
+  g := |int by| -> (captured + Reading(raw: by)).raw_doubled;
+  assert(g(by: 1) == 14, "operator on the captured copy");
+  assert(captured.raw_doubled == 12, "the original is untouched — it was copied in");
+}
+
+// 23. Bound by an `if`-unwrap of an Optional payload. genIfUnwrapStmt registers a free
+// for the binding when the payload is a boxed view; for a flat value struct there is
+// nothing to free.
+maybe_reading(int n) Reading? {
+  if n > 0 {
+    return Reading(raw: n);
+  }
+  return none;
+}
+
+structural_value_if_unwrap() `test {
+  if r := maybe_reading(n: 8) {
+    assert(r.raw_doubled == 16, "unwrapped structural value payload");
+  } else {
+    assert(false, "should have unwrapped");
+  }
+  if r := maybe_reading(n: 0) {
+    assert(false, "should not have unwrapped, got {r.raw}");
+  }
+  o := maybe_reading(n: 3);
+  assert(o!.raw_doubled == 6, "force-unwrap of the same optional");
+}
+
+// 24. Behind a `Ref[T]` — a heap allocation holding the flat value struct, borrowed
+// back out. The refcount path drops the allocation, and a value payload must not add
+// a payload drop on top of it.
+structural_value_in_ref() `test {
+  r := Ref[Reading](Reading(raw: 9));
+  assert(r.borrow.raw_doubled == 18, "borrowed out of a Ref");
+  r2 := r.clone();
+  assert(r2.borrow.raw_doubled == 18, "second reference sees the same value");
+}
+
+// 25. Through iterator COMBINATORS. Each combinator is a generic structural interface
+// instantiated at the element type, so the element crossings happen inside monomorphized
+// std code rather than in user code.
+structural_value_iterator_combinators() `test {
+  Reading[] v = [Reading(raw: 1), Reading(raw: 2), Reading(raw: 3)];
+  assert(v.iter().filter(|Reading r| -> r.raw > 1).count() == 2, "filter over structural values");
+  assert(v.iter().fold[int](init: 0, fn: |int acc, Reading r| -> acc + r.raw_doubled) == 12, "fold to a scalar");
+  doubled := v.iter().map[Reading](|Reading r| -> r + Reading(raw: 1)).collect();
+  assert(doubled[2].raw_doubled == 8, "map producing structural values again");
+}
+
+// 26. Yielded from a GENERATOR. Each yield stores the value into the coroutine frame
+// and reads it back at the resume — a crossing the plain-return path does not cover.
+reading_stream() stream[Reading] {
+  yield Reading(raw: 1);
+  yield Reading(raw: 2);
+  yield Reading(raw: 3);
+}
+
+structural_value_from_generator() `test {
+  total := 0;
+  for r in reading_stream() {
+    total = total + r.raw_doubled;
+  }
+  assert(total == 12, "structural values yielded across suspensions");
+}
+
+// 27. Across a TASK boundary — the value is produced on another goroutine stack and
+// received here, so it crosses the task result slot.
+make_reading(int n) Reading {
+  return Reading(raw: n);
+}
+
+structural_value_across_task() `test(exclude: wasm) {
+  t := go make_reading(n: 6);
+  Reading r = <-t;
+  assert(r.raw_doubled == 12, "structural value type received from a task");
+}
+
+// 28. A free function that takes the `structural value type as a PARAMETER and returns
+// a STRING. T0092 tracks such a return as a fresh allocation to be freed at statement
+// end, and it selected on the parameter being `structural — which for this shape is a
+// flat value struct, not an interface the callee formats through. The gate now selects
+// on isStructuralView, so this shape is no longer tracked; the string still has to be
+// freed by the ordinary owned-return path, and the discarded-temp spelling below is
+// where a regression would surface as a leak rather than a wrong answer.
+type Gauge3 `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+}
+
+describe_gauge(Gauge3 g) string {
+  return "g=" + g.raw_doubled.to_string();
+}
+
+label_gauges(Gauge3 a, Gauge3 b) string {
+  return describe_gauge(g: a) + "/" + describe_gauge(g: b);
+}
+
+structural_value_param_returning_string() `test {
+  g := Gauge3(raw: 6);
+  // Discarded temp: nobody binds the result, so only the temp free keeps it from leaking.
+  assert(describe_gauge(g: g) == "g=12", "string returned from a structural-value param fn");
+  s := describe_gauge(g: Gauge3(raw: 7));
+  assert(s == "g=14", "and bound to an owned local");
+  assert(label_gauges(a: g, b: Gauge3(raw: 1)) == "g=12/g=2", "two such calls nested in one statement");
+  assert(g.raw_doubled == 12, "the flat value is intact afterwards");
+}
+
+// 29. A method on the `structural value type that RETURNS A CLOSURE. The alias check
+// asks whether a call result may alias storage the receiver owns, and it answered
+// "assume yes" for every `structural receiver — which for a flat value struct means the
+// returned env was never tracked. A value type owns no heap storage a result could
+// alias, so the check now treats it like any other value receiver and the env is freed
+// on the ordinary path.
+type Meter `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+  adder(this)(int) -> int {
+    int base = this.raw;
+    return |int x| -> x + base;
+  }
+  scaler(this, int by)(int) -> int {
+    int base = this.raw * by;
+    return |int x| -> x * base;
+  }
+}
+
+structural_value_method_returning_closure() `test {
+  m := Meter(raw: 6);
+  f := m.adder();
+  assert(f(4) == 10, "closure returned from a structural value type method");
+  g := m.scaler(by: 2);
+  assert(g(3) == 36, "a second closure over the same receiver");
+  // Discarded closure temp — the env must be freed without ever being bound.
+  assert(m.adder()(1) == 7, "closure called straight off the call result");
+  assert(m.raw_doubled == 12, "the receiver is untouched");
+}
+
+// 30. A generic type parameter CONSTRAINED by the `structural value type. The constraint
+// is checked structurally at the call site, and the instantiation then monomorphizes the
+// body against the flat value struct rather than a view — so both the constraint check
+// and every crossing inside the body have to agree that the bound is a value type.
+type Ledger `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+}
+
+total_of[T: Ledger](T[] xs) int {
+  int total = 0;
+  for x in xs {
+    total = total + x.raw_doubled;
+  }
+  return total;
+}
+
+first_doubled[T: Ledger](T x) int {
+  T copy = x;
+  return copy.raw_doubled;
+}
+
+structural_value_as_generic_constraint() `test {
+  Ledger[] v = [Ledger(raw: 1), Ledger(raw: 2), Ledger(raw: 3)];
+  assert(total_of[Ledger](xs: v) == 12, "generic constrained by the structural value type");
+  assert(first_doubled[Ledger](x: Ledger(raw: 5)) == 10, "a scalar-returning instantiation");
+  assert(v[0].raw_doubled == 2, "the source vector is intact");
+}

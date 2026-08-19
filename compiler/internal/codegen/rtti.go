@@ -204,7 +204,17 @@ func (c *Compiler) maybeSynthesizeCloneFn(named *types.Named, owner types.Type, 
 	// flat malloc+memcpy clone sized to the value struct (value types are Copy with
 	// no droppable sub-fields, so a byte copy is a correct deep copy) so the cloned
 	// vector owns an independent box instead of aliasing → double-free at drop.
-	if named.IsValueType() && !named.IsAbstract() && !named.IsStructural() {
+	//
+	// T1550: `structural is NOT a reason to skip this. A `structural type whose
+	// fields are all `value is itself a concrete value type (never an interface
+	// view — isStructuralView), and it can still structurally satisfy a real
+	// abstract-only interface, so it reaches the box path exactly like any other
+	// value type. Excluding it left its typeinfo clone_fn null, so
+	// __promise_structural_clone fell back to a shallow alias and the clone and the
+	// original both freed the same box. The structural-interface exclusion below is
+	// unaffected: an interface declares abstract methods, which a value type may
+	// not, so no interface can ever reach this branch.
+	if named.IsValueType() && !named.IsAbstract() {
 		if owner == named && len(named.TypeParams()) > 0 {
 			return // generic origin — mono instances handle clone
 		}
@@ -1272,6 +1282,41 @@ func isInFirstParentChain(concrete, target *types.Named) bool {
 	return false
 }
 
+// isStructuralView reports whether a Named type is a structural interface represented
+// as a {vtable, instance} fat pointer. A `structural type that is ITSELF a pure value
+// type is not a view: it has a flat value struct, it can never be satisfied structurally
+// (types.Implements requires an abstract method, which a value type may not have — see
+// markValueType in sema/meta.go), and its only subtypes are layout-sharing value
+// newtypes (T1527) — so crossing to it is a plain copy, not a box. T1550.
+//
+// This is the single definition of "is a view" for the whole package. Spelling it out
+// inline as `IsStructural() && !IsValueType()` is what caused T1550: the sites that
+// dropped the second half took the boxing path for a flat value struct. Call this (or
+// isNonValueStructuralType, which delegates here from a types.Type) instead.
+func isStructuralView(n *types.Named) bool {
+	return n != nil && n.IsStructural() && !n.IsValueType()
+}
+
+// sharesValueStruct reports whether a value newtype and its value parent are the
+// same LLVM struct, so a slot typed as one is directly usable as the other with no
+// coercion. computeValueTypeLayout hands the child its parent's *StructLayout
+// verbatim (T1527), which is exactly what makes the upcast a no-op; the LLVM-type
+// comparison keeps this honest if that ever stops holding. T1550.
+func (c *Compiler) sharesValueStruct(from, to types.Type) bool {
+	fromNamed, toNamed := extractNamed(from), extractNamed(to)
+	if fromNamed == nil || toNamed == nil || fromNamed == toNamed {
+		return false
+	}
+	if !fromNamed.IsValueType() || !toNamed.IsValueType() {
+		return false
+	}
+	if !isInFirstParentChain(fromNamed, toNamed) {
+		return false
+	}
+	fromLLVM, toLLVM := c.resolveType(fromNamed), c.resolveType(toNamed)
+	return fromLLVM != nil && toLLVM != nil && fromLLVM.Equal(toLLVM)
+}
+
 // coerceToView swaps the vtable pointer in a value struct when the value crosses
 // a type boundary to a non-first-parent view. For first parent chain coercion
 // (prefix-compatible), the vtable is left unchanged.
@@ -1283,6 +1328,16 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 		return val
 	}
 	if fromNamed == toNamed {
+		return val
+	}
+
+	// T1550: a pure value type target is never a view, even when it carries
+	// `structural. Its LLVM shape is the flat value struct, so boxing would produce
+	// an unstorable {i8*, i8*}. Nothing reaching it needs a vtable swap either: the
+	// only values assignable to it are its layout-sharing value newtypes, for which
+	// the crossing is a plain copy. Placed ahead of every boxing branch below so all
+	// of them stay consistent.
+	if toNamed.IsValueType() {
 		return val
 	}
 
@@ -1367,8 +1422,9 @@ func isMaterializedViewPtr(val value.Value) bool {
 // deep clone and creates {vtable, box}, so the box drops cleanly on escape.
 // For opaque containers: creates {vtable, i8*} directly (the raw pointer).
 func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
-	// Only box when target is a structural interface
-	if !toNamed.IsStructural() {
+	// Only box when target is a structural interface represented as a fat pointer
+	// (a `structural target that is itself a value type is a flat struct — T1550).
+	if !isStructuralView(toNamed) {
 		return val
 	}
 	// Skip void/none
@@ -1472,6 +1528,12 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 // the correct owner frees it exactly once (transfers to the caller on return/binding,
 // freed at statement end for borrow args).
 func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+	// T1550: never box into a `structural target that is itself a value type — it has
+	// a flat value struct, not a fat pointer. Defence in depth; coerceToView already
+	// returns early for such targets.
+	if !isStructuralView(toNamed) {
+		return val
+	}
 	// T1276: already-materialized `~`-param view (pointer to {i8*, i8*}) — the arg was
 	// boxed and stored into a temp by genCallArgsWithMutRef; the second coerceCallArgs
 	// pass must not re-box it.
@@ -1531,6 +1593,11 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 // a null drop_fn_ptr (pure value types have no drop), frees the box via pal_free.
 // Method dispatch is unaffected: value-type methods read their fields at index 1+.
 func (c *Compiler) boxValueTypeForStructuralViewHeap(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+	// T1550: see boxValueTypeForStructuralView — a value-type `structural target is a
+	// flat struct, so the crossing is a plain copy rather than a heap box.
+	if !isStructuralView(toNamed) {
+		return val
+	}
 	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 
@@ -1570,7 +1637,7 @@ func (c *Compiler) coerceReturnToView(val value.Value, fromType, toType types.Ty
 	toNamed := extractNamed(toType)
 	if fromNamed != nil && toNamed != nil && fromNamed != toNamed &&
 		c.isUserValueType(fromType) && c.isUserValueType(toType) &&
-		fromNamed.IsValueType() && toNamed.IsStructural() {
+		fromNamed.IsValueType() && isStructuralView(toNamed) {
 		return c.boxValueTypeForStructuralViewHeap(val, fromNamed, toNamed, fromType)
 	}
 	return c.coerceToView(val, fromType, toType)

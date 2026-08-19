@@ -1468,7 +1468,10 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	// Check if the result type is a structural interface (e.g., Iterator[T])
 	resultType := c.resolvedExprType(e)
 	resultNamed := extractNamed(resultType)
-	if resultNamed == nil || !resultNamed.IsStructural() {
+	// T1550: a `structural type that is itself a pure value type is a flat value
+	// struct, not a {vtable, instance} fat pointer — field 1 is a data field, so
+	// handing it to __promise_structural_drop would free a scalar.
+	if !isStructuralView(resultNamed) {
 		return
 	}
 	// The result is a value struct {i8* vtable, i8* instance}. Extract instance ptr.
@@ -1698,7 +1701,7 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	// genuine owned clone reaches here. A plain call returning a structural view
 	// (e.g. `c.iter()` returning borrowed `this`) is NOT tracked — dropping a
 	// borrowed/non-standard-RTTI view would double-free or crash.
-	if rtNamed := extractNamed(rt); rtNamed != nil && rtNamed.IsStructural() && !rtNamed.IsValueType() && c.structuralDrop != nil {
+	if isNonValueStructuralType(rt) && c.structuralDrop != nil {
 		_, isUnwrap := expr.(*ast.OptionalUnwrapExpr)
 		_, isHandler := expr.(*ast.ErrorHandlerExpr)
 		// T1299: a getter (or its force-unwrap) returning a non-value structural hands

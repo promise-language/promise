@@ -1709,9 +1709,13 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 		if !ok {
 			continue
 		}
-		// Skip structural types — their default methods are synthesized for
-		// concrete implementors via synthesizeDefaultMethods.
-		if named.IsStructural() {
+		// Skip structural interfaces — their default methods are synthesized for
+		// concrete implementors via synthesizeDefaultMethods. A `structural type
+		// that is itself a pure value type is NOT one (T1550): it has no
+		// implementors to synthesize for, so its own methods must be declared here
+		// like any other mono type's, or every call panics with "undeclared
+		// method T[int].m".
+		if isStructuralView(named) {
 			continue
 		}
 		name := monoName(inst)
@@ -1797,9 +1801,10 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 		if !ok {
 			continue
 		}
-		// Skip structural types — their default methods are synthesized for
-		// concrete implementors via synthesizeDefaultMethods.
-		if named.IsStructural() {
+		// Skip structural interfaces (see declareMonoMethods) — but not a
+		// `structural type that is itself a pure value type, whose bodies must be
+		// generated here to match the stubs declared there. T1550.
+		if isStructuralView(named) {
 			continue
 		}
 		name := monoName(inst)
@@ -1993,7 +1998,7 @@ func monoTypeHasDroppable(typ types.Type) bool {
 		// inside Map[K, Showable]) gets a synth drop and its element-drop loop
 		// routes each box through the RTTI drop. Sibling of the Vector element-drop
 		// fix (T1283/T1284).
-		if fNamed.IsStructural() && !fNamed.IsValueType() {
+		if isStructuralView(fNamed) {
 			return true
 		}
 		if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {

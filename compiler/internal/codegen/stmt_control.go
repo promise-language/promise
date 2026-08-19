@@ -333,7 +333,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		if opt, isOpt := retType.(*types.Optional); isOpt {
 			structTarget = opt.Elem()
 		}
-		if named := extractNamed(structTarget); named != nil && named.IsStructural() {
+		if named := extractNamed(structTarget); isStructuralView(named) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				// Only owned if the move-site actually clears the flag (!needsDup).
 				retBoxSrcOwned = !needsDup && c.hasDropFlag(ident.Name)
@@ -2262,7 +2262,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		// double-free. T1289: a getter-call MemberExpr and a user-defined `[]`
 		// IndexExpr are now correctly recognized as fresh-owned by the helper.
 		if _, already := c.dropBindings[s.Binding]; !already {
-			if en := extractNamed(elemType); en != nil && en.IsStructural() && !en.IsValueType() {
+			if isNonValueStructuralType(elemType) {
 				if c.isFreshOwnedStructuralRHS(s.Init) {
 					c.maybeRegisterStructuralParamFree(s.Binding, alloca, elemType)
 				}

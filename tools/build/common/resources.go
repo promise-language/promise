@@ -172,6 +172,91 @@ func EmbedMuslCRT(root string) error {
 	return nil
 }
 
+// openSSLPlaceholderName is the sentinel file EmbedOpenSSL drops into an arch
+// dir when the real archives can't be obtained (offline / not-yet-pinned). Its
+// only purpose is to give `//go:embed resources/openssl/<arch>/*` at least one
+// matching file so the compiler package still builds — the `*` glob skips
+// dot-prefixed names, so this is deliberately NOT dot-prefixed. Consumers key
+// availability on the actual `libssl.a`/`libcrypto.a` presence (openSSLComplete
+// in main.go), so a dir holding only this sentinel reads as "OpenSSL not
+// available", which is correct while TLS is unwired.
+const openSSLPlaceholderName = "PLACEHOLDER"
+
+// EmbedOpenSSL stages the musl-static OpenSSL archives (libssl.a, libcrypto.a)
+// into resources/openssl/<musl-arch>/ for `//go:embed` (Linux hosts only — see
+// compiler/cmd/promise/openssl_linux_*.go; other hosts compile
+// openssl_other.go's empty stub and need nothing staged).
+//
+// This mirrors EmbedMuslCRT but is BEST-EFFORT rather than fatal: OpenSSL is
+// only needed to link TLS programs, and no program links TLS yet (T1596 / #28
+// introduces the link gate but never sets it — T0077 will). So a build host
+// that cannot obtain the archives (they are not pinned/hosted yet, or it is
+// offline) must NOT fail the whole build; it stages a placeholder so the embed
+// directive still resolves and moves on. TLS links, once they exist, resolve
+// OpenSSL from the content-addressed store / on-demand fetch instead.
+//
+// When the thin/full release split lands (docs/distribution.md §1, §4) the embed
+// decision becomes a release-flavour knob (full = embed, thin = fetch-on-demand)
+// rather than always-embed; until then this defaults to embedding, matching
+// today's `--release` == "full".
+//
+// Only the HOST arch is staged (the embed directive is per-GOARCH); cross-arch
+// Linux TLS linking resolves its archives from the content-addressed store.
+func EmbedOpenSSL(root string) error {
+	if !IsLinux() {
+		return nil
+	}
+	target := CurrentBuildTarget()
+	arch, err := OpenSSLArchDir(target)
+	if err != nil {
+		// Host is Linux but on an arch we don't carry OpenSSL for — nothing to
+		// embed. (Can't happen for amd64/arm64; a guard, not a real path.)
+		return nil
+	}
+
+	// Wipe first so a stale archive can't linger and get swept back in by the
+	// embed glob (mirrors EmbedMuslCRT).
+	dst := filepath.Join(root, "compiler", "cmd", "promise", "resources", "openssl", arch)
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+
+	if !openSSLPinned(root, target) {
+		fmt.Println("note: OpenSSL archives not pinned/hosted yet — skipping embed (TLS support pending T0077); no program links TLS, so this is a no-op for now")
+		return writeOpenSSLPlaceholder(dst)
+	}
+
+	src, err := EnsureOpenSSLBlobs(root, target)
+	if err != nil {
+		fmt.Printf("note: could not obtain OpenSSL archives for %s (%v) — skipping embed; TLS links (none yet) would fetch on demand\n", target, err)
+		return writeOpenSSLPlaceholder(dst)
+	}
+	pm, err := LoadPrebuiltsManifest(root)
+	if err != nil {
+		return err
+	}
+	tEntry := pm.Binaries["openssl"].Targets[target]
+	for _, f := range tEntry.ClientFiles() {
+		if err := copyFile(filepath.Join(src, f.Out), filepath.Join(dst, f.Out)); err != nil {
+			return fmt.Errorf("stage openssl %s: %w", f.Out, err)
+		}
+	}
+	return nil
+}
+
+// writeOpenSSLPlaceholder drops the sentinel that keeps the go:embed directive
+// satisfiable when the real archives aren't available. See
+// openSSLPlaceholderName.
+func writeOpenSSLPlaceholder(dstDir string) error {
+	msg := "OpenSSL static archives are not embedded in this build.\n" +
+		"See #28 / prebuilts.toml [binaries.openssl]. TLS links resolve\n" +
+		"libssl.a/libcrypto.a from the content-addressed store on demand.\n"
+	return os.WriteFile(filepath.Join(dstDir, openSSLPlaceholderName), []byte(msg), 0o644)
+}
+
 // computeSourcesSHA256 generates .sources.sha256 matching the Makefile's format:
 // (cd .. && find modules/ catalog.toml -type f | sort | xargs sha256sum)
 func computeSourcesSHA256(root, resDir string) error {

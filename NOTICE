@@ -24,3 +24,26 @@ and modules vendored into the compiler) are governed by their own
 licenses. See the THIRD-PARTY-LICENSES file in official release
 distributions for the full list of third-party notices and license
 texts.
+
+The following third-party components are redistributed in binary form
+(statically linked into, or bundled with, Promise Lang release
+artifacts). Their notices are reproduced here:
+
+  OpenSSL
+  ------
+  Promise Lang links Linux binaries that use TLS against a static build
+  of OpenSSL (libssl.a / libcrypto.a). OpenSSL 3.x is licensed under the
+  Apache License, Version 2.0:
+
+      Copyright (c) 1998-2024 The OpenSSL Project Authors
+      Copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson
+      All rights reserved.
+
+      Licensed under the Apache License, Version 2.0 (the "License");
+      you may not use these files except in compliance with the License.
+      You may obtain a copy of the License at
+
+          https://www.apache.org/licenses/LICENSE-2.0
+
+  The upstream OpenSSL sources and full license text are available at
+  https://www.openssl.org/.

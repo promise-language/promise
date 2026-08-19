@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
@@ -118,6 +119,30 @@ func (r *CompileResult) SemaInfo() *sema.Info {
 // undefined-symbol link error (and vice versa would silently undercount).
 func (r *CompileResult) CoverageEnabled() bool {
 	return r.compiler.coverageEnabled
+}
+
+// tlsExternPrefix is the C-symbol prefix every TLS runtime bridge function
+// shares. NeedsTLS keys the OpenSSL link/fetch gate on the presence of at least
+// one such extern.
+const tlsExternPrefix = "promise_tls_"
+
+// NeedsTLS reports whether this compilation references the TLS runtime bridge —
+// i.e. declares at least one `promise_tls_*` extern. When true, the Linux linker
+// splices libssl.a + libcrypto.a into the static musl link line and the runtime
+// resolves those archives on demand (main.go, T1596 / #28).
+//
+// The gate is by construction: it is derived from the externs actually present
+// in the compiled program, never set by hand. NO program declares a
+// promise_tls_* extern today — the codegen bridge that emits them lands with
+// T0077, at which point this flips true automatically with no change here. So
+// this always returns false for now, and nothing links OpenSSL.
+func (r *CompileResult) NeedsTLS() bool {
+	for _, e := range r.Externs {
+		if e != nil && strings.HasPrefix(e.CName, tlsExternPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // primitiveRawType returns the raw LLVM type, C type string, and signedness

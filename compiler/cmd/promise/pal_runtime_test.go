@@ -62,7 +62,7 @@ func buildAndRunDebugAlloc(t *testing.T, modBuilder func() *ir.Module) (string, 
 
 	llPath := writeLL(t, modBuilder().String())
 	binPath := filepath.Join(t.TempDir(), "test")
-	if err := compileAndLinkLLVM(llPath, codegen.HostTargetTriple(), binPath, false); err != nil {
+	if err := compileAndLinkLLVM(llPath, codegen.HostTargetTriple(), binPath, false, false); err != nil {
 		t.Fatalf("compileAndLinkLLVM failed: %v", err)
 	}
 

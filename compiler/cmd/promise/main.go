@@ -3117,7 +3117,7 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 	if useClangPipeline(target) {
 		return compileAndLinkClang(llFile.Name(), target, outputFile)
 	}
-	return compileAndLinkLLVM(llFile.Name(), target, outputFile, releaseMode)
+	return compileAndLinkLLVM(llFile.Name(), target, outputFile, releaseMode, result.NeedsTLS())
 }
 
 // compileAndLinkSeparate compiles each module to its own .bc/.o file, then links
@@ -3381,7 +3381,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	} else if isWindowsTarget(target) {
 		linkErr = linkWindowsMulti(objFiles, target, outputFile)
 	} else {
-		linkErr = linkLinuxMulti(objFiles, target, outputFile, useLTO)
+		linkErr = linkLinuxMulti(objFiles, target, outputFile, useLTO, result.NeedsTLS())
 	}
 	if linkErr != nil {
 		return linkErr
@@ -4720,8 +4720,165 @@ func findMuslCRT(target string) (string, error) {
 	return cacheDir, nil
 }
 
-// buildMuslLinkArgs builds the ld.lld argument list for static musl linking.
-func buildMuslLinkArgs(target, objFile, outputFile, crtDir string, useLTO bool) []string {
+// opensslFiles lists the static OpenSSL archives needed to link a TLS program
+// (T1596 / #28). libssl depends on libcrypto, so the order matters at the link line
+// (see buildMuslLinkArgs). Single source of truth shared with resolveOpenSSLView
+// in llvm_cas.go.
+var opensslFiles = []string{"libssl.a", "libcrypto.a"}
+
+// opensslArchDir returns the OpenSSL archive subdirectory name for the given
+// target triple. Reuses the musl arch layout (the archives ARE the musl build
+// of OpenSSL), so it is identical to muslArchDir.
+func opensslArchDir(target string) string {
+	return muslArchDir(target)
+}
+
+// openSSLComplete reports whether every required OpenSSL archive exists in dir.
+// A dir holding only EmbedOpenSSL's PLACEHOLDER sentinel fails this check — which
+// is the intended reading of "OpenSSL not available" while TLS is unwired.
+func openSSLComplete(dir string) bool {
+	for _, name := range opensslFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// openSSLValid checks that cached OpenSSL archives match the embedded versions
+// (by size). Mirrors muslCRTValid. When nothing real is embedded (placeholder
+// only) the embedded ReadDir won't list libssl.a/libcrypto.a, so this returns
+// false and the caller falls through — correct, since the cache can't be
+// validated against a non-existent embedded copy.
+func openSSLValid(dir string) bool {
+	if !hasEmbeddedOpenSSL {
+		return openSSLComplete(dir)
+	}
+	arch := filepath.Base(dir)
+	prefix := "resources/openssl/" + arch
+
+	entries, err := embeddedOpenSSL.ReadDir(prefix)
+	if err != nil {
+		return false
+	}
+	embeddedSizes := make(map[string]int64, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			return false
+		}
+		embeddedSizes[e.Name()] = info.Size()
+	}
+
+	for _, name := range opensslFiles {
+		cached, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return false
+		}
+		embSize, ok := embeddedSizes[name]
+		if !ok {
+			return false
+		}
+		if cached.Size() != embSize {
+			return false
+		}
+	}
+	return true
+}
+
+// findOpenSSL locates the static OpenSSL archives (libssl.a, libcrypto.a) for a
+// TLS static link (T1596 / #28). Exact mirror of findMuslCRT's discovery ladder:
+//  1. Sibling of promise binary: {exe_dir}/openssl/{arch}/
+//  2. Installed location: <PROMISE_HOME>/lib/openssl/{arch}/
+//  3. Cache dir: <PROMISE_HOME>/cache/openssl/{arch}/
+//  4. Content-addressed store view (when the manifest carries openssl blobs)
+//  5. Extract the embedded archives to cache (full builds with real archives)
+//
+// Only ever called when a program needs TLS (needsTLS). No program declares a
+// promise_tls_* extern yet, so today this is reached only by `promise doctor`.
+func findOpenSSL(target string) (string, error) {
+	ensureCacheValid()
+
+	arch := opensslArchDir(target)
+
+	// 1. Sibling of promise binary
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(execPath), "openssl", arch)
+		if openSSLComplete(dir) {
+			return dir, nil
+		}
+	}
+
+	promiseHome, err := module.PromiseHome()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise home: %v", err)
+	}
+
+	// 2. Installed location (<PROMISE_HOME>/lib/openssl/{arch}/)
+	installDir := filepath.Join(promiseHome, "lib", "openssl", arch)
+	if openSSLComplete(installDir) {
+		return installDir, nil
+	}
+
+	// 3. Cache dir (<PROMISE_HOME>/cache/openssl/{arch}/)
+	cacheDir := filepath.Join(promiseHome, "cache", "openssl", arch)
+	if openSSLValid(cacheDir) {
+		return cacheDir, nil
+	}
+
+	// 4. Content-addressed store — resolve openssl blobs into a per-arch view
+	//    dir, but only when the manifest carries openssl entries. Returns ""
+	//    otherwise so we fall through.
+	if viewDir, verr := resolveOpenSSLView(arch); verr != nil {
+		return "", verr
+	} else if viewDir != "" {
+		return viewDir, nil
+	}
+
+	// 5. Extract the embedded archives to the cache dir. When only a placeholder
+	//    was embedded (offline / not-yet-pinned build) the archive reads below
+	//    fail and we return the not-available error — correct, since OpenSSL is
+	//    genuinely absent.
+	if !hasEmbeddedOpenSSL {
+		return "", fmt.Errorf("static OpenSSL not available for %s\n  this binary was not built with embedded OpenSSL and the manifest has no openssl blobs\n  OpenSSL is only needed to link TLS programs (T0077); publish blobs via `bin/release publish-blobs --dependency openssl`", arch)
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create OpenSSL cache dir %s: %v", cacheDir, err)
+	}
+	prefix := "resources/openssl/" + arch
+	for _, name := range opensslFiles {
+		data, err := embeddedOpenSSL.ReadFile(prefix + "/" + name)
+		if err != nil {
+			return "", fmt.Errorf("static OpenSSL not available for %s: embedded %s missing (build did not embed real archives)\n  OpenSSL is only needed to link TLS programs (T0077)", arch, name)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
+			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
+		}
+	}
+	return cacheDir, nil
+}
+
+// resolveOpenSSLDir returns the directory holding libssl.a + libcrypto.a for the
+// given Linux target, or "" when the program needs no TLS. Called only from the
+// musl static-link paths (linkLinux / linkLinuxMulti); other platforms use their
+// native TLS stack (T0077 §7). Centralizing the needsTLS→findOpenSSL step keeps
+// the two link paths in sync.
+func resolveOpenSSLDir(target string, needsTLS bool) (string, error) {
+	if !needsTLS {
+		return "", nil
+	}
+	return findOpenSSL(target)
+}
+
+// buildMuslLinkArgs builds the ld.lld argument list for static musl linking of
+// one or more object/bitcode inputs. When opensslDir is non-empty (a TLS
+// program — resolveOpenSSLDir returned a dir), libssl.a + libcrypto.a are
+// spliced in AFTER the object files and BEFORE libc.a. Static-archive
+// resolution is order-sensitive: OpenSSL's libc references must resolve against
+// the later libc.a, and libssl's references against the later libcrypto.a
+// (T1596 / #28). Shared by the single-file (linkLinux) and multi-file (linkLinuxMulti)
+// musl paths so the arg construction lives in exactly one place.
+func buildMuslLinkArgs(target string, objFiles []string, outputFile, crtDir string, useLTO bool, opensslDir string) []string {
 	args := []string{
 		"-m", emulationMode(target),
 		"-static",
@@ -4737,7 +4894,15 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string, useLTO bool) 
 		"-o", outputFile,
 		filepath.Join(crtDir, "crt1.o"),
 		filepath.Join(crtDir, "crti.o"),
-		objFile,
+	)
+	args = append(args, objFiles...)
+	if opensslDir != "" {
+		args = append(args,
+			filepath.Join(opensslDir, "libssl.a"),
+			filepath.Join(opensslDir, "libcrypto.a"),
+		)
+	}
+	args = append(args,
 		filepath.Join(crtDir, "libc.a"),
 		filepath.Join(crtDir, "crtn.o"),
 	)
@@ -4749,7 +4914,7 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string, useLTO bool) 
 // Debug: opt -O1 → .bc → llc → .o → linker with --gc-sections (no LTO).
 // Windows: always opt → .bc → llc → .o → lld-link (LTO not wired up for MSVC yet).
 // Note: opt -O1 in both modes until B0314 (alloca domination) is fixed to enable -O0.
-func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) error {
+func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode, needsTLS bool) error {
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
@@ -4821,7 +4986,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) err
 		} else if isWasmTarget(target) {
 			linkErr = linkWasm(objFile.Name(), target, outputFile, false)
 		} else {
-			linkErr = linkLinux(objFile.Name(), target, outputFile, false)
+			linkErr = linkLinux(objFile.Name(), target, outputFile, false, needsTLS)
 		}
 		if linkErr != nil {
 			return linkErr
@@ -4838,7 +5003,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) err
 	} else if isWasmTarget(target) {
 		linkErr = linkWasm(bcFile.Name(), target, outputFile, true)
 	} else {
-		linkErr = linkLinux(bcFile.Name(), target, outputFile, true)
+		linkErr = linkLinux(bcFile.Name(), target, outputFile, true, needsTLS)
 	}
 	if linkErr != nil {
 		return linkErr
@@ -5159,7 +5324,7 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 }
 
 // linkLinux runs ld.lld for Linux ELF linking (glibc or musl).
-func linkLinux(objFile, target, outputFile string, useLTO bool) error {
+func linkLinux(objFile, target, outputFile string, useLTO, needsTLS bool) error {
 	lldPath, err := findLLVMTool("ld.lld")
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
@@ -5172,7 +5337,11 @@ func linkLinux(objFile, target, outputFile string, useLTO bool) error {
 		if err != nil {
 			return fmt.Errorf("error: %w", err)
 		}
-		linkArgs = buildMuslLinkArgs(target, objFile, outputFile, crtDir, useLTO)
+		opensslDir, err := resolveOpenSSLDir(target, needsTLS)
+		if err != nil {
+			return fmt.Errorf("error: %w", err)
+		}
+		linkArgs = buildMuslLinkArgs(target, []string{objFile}, outputFile, crtDir, useLTO, opensslDir)
 	} else {
 		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile, useLTO)
 	}
@@ -5243,7 +5412,7 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) 
 }
 
 // linkLinuxMulti links multiple .o/.bc files on Linux (glibc or musl).
-func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) error {
+func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO, needsTLS bool) error {
 	lldPath, err := findLLVMTool("ld.lld")
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
@@ -5261,21 +5430,12 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) e
 		if err != nil {
 			return fmt.Errorf("error: %w", err)
 		}
-		linkArgs = []string{
-			"-m", emulationMode(target),
-			"-static",
-			"--build-id",
-			"--eh-frame-hdr",
-			ltoOrGC,
-			"-o", outputFile,
-			filepath.Join(crtDir, "crt1.o"),
-			filepath.Join(crtDir, "crti.o"),
+		opensslDir, err := resolveOpenSSLDir(target, needsTLS)
+		if err != nil {
+			return fmt.Errorf("error: %w", err)
 		}
-		linkArgs = append(linkArgs, objFiles...)
-		linkArgs = append(linkArgs,
-			filepath.Join(crtDir, "libc.a"),
-			filepath.Join(crtDir, "crtn.o"),
-		)
+		// Shared with the single-file path so OpenSSL splicing lives in one place.
+		linkArgs = buildMuslLinkArgs(target, objFiles, outputFile, crtDir, useLTO, opensslDir)
 	} else {
 		crt, err := findCRT(target)
 		if err != nil {
@@ -8931,6 +9091,25 @@ func runInstall(args []string) {
 			os.Exit(1)
 		}
 		extractEmbedded(embeddedMuslCRT, "resources/crt/"+arch, crtDest)
+	}
+
+	// Extract embedded static OpenSSL archives into the epoch lib dir (Linux,
+	// T1596 / #28). Only a full build with real archives ships them; a thin / offline /
+	// not-yet-pinned build embedded only a placeholder, which extracts harmlessly
+	// (openSSLComplete keys use on the real .a files at link time, so a
+	// placeholder install reads as "not available" and TLS links resolve from the
+	// CAS instead).
+	if hasEmbeddedOpenSSL {
+		arch := "x86_64-linux-musl"
+		if runtime.GOARCH == "arm64" {
+			arch = "aarch64-linux-musl"
+		}
+		opensslDest := filepath.Join(epochLibDir, "openssl", arch)
+		if err := os.MkdirAll(opensslDest, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", opensslDest, err)
+			os.Exit(1)
+		}
+		extractEmbedded(embeddedOpenSSL, "resources/openssl/"+arch, opensslDest)
 	}
 
 	// Stage heavy dependencies into the content-addressed store and record the

@@ -497,7 +497,69 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 	}
 	entries = append(entries, muslEntries...)
 
+	opensslEntries, err := buildOpenSSLEntriesFromCatalog(pm, catalog, target)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, opensslEntries...)
+
 	return &runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}, nil
+}
+
+// buildOpenSSLEntriesFromCatalog projects the static OpenSSL archives a `target`
+// host can link TLS programs with into runtime manifest entries (T1596 / #28). The
+// exact counterpart of buildMuslEntriesFromCatalog: a Linux host gets its own
+// arch (so `promise build` can resolve OpenSSL even from a binary that carries
+// no embedded copy), a non-Linux host gets none.
+//
+// Best-effort by contract: an arch whose blobs aren't published yet is skipped
+// with a note, never an error — the common case until a maintainer runs
+// `bin/release publish-blobs --dependency openssl`. See
+// BuildRuntimeManifestFromCatalog.
+func buildOpenSSLEntriesFromCatalog(pm *PrebuiltsManifest, catalog *BlobsCatalog, target string) ([]runtimeManifestEntry, error) {
+	openssl := pm.Binaries["openssl"]
+	if openssl == nil {
+		return nil, nil // prebuilts.toml doesn't declare openssl (older tree)
+	}
+	arch, err := OpenSSLArchDir(target)
+	if err != nil {
+		return nil, nil // not a Linux target → no OpenSSL in this host's workflow
+	}
+	tEntry := openssl.Targets[target]
+	if tEntry == nil || tEntry.Unsupported != "" {
+		return nil, nil
+	}
+	tag := DepsReleaseTag("openssl", openssl.Version)
+
+	var entries []runtimeManifestEntry
+	for _, f := range tEntry.ClientFiles() {
+		be, ok := catalog.Lookup("openssl", openssl.Version, target, f.Out)
+		if !ok {
+			fmt.Printf("  note: no openssl blob hosted for openssl/%s/%s/%s — TLS links will fall back to the upstream apk; publish via `bin/release publish-blobs --dependency openssl --host %s`\n",
+				openssl.Version, target, f.Out, target)
+			return nil, nil // partial openssl entries would strand the view builder
+		}
+		assetURL, err := BlobAssetURL(tag, be.SHA256, be.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+		}
+		mirrorURL, err := BlobMirrorURL(be.SHA256, be.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+		}
+		entries = append(entries, runtimeManifestEntry{
+			Name:   OpenSSLManifestName(arch, f.Out),
+			SHA256: be.SHA256,
+			Size:   be.Size,
+			Kind:   "blob", // inert relocatable ELF — never patched or signed
+			Sources: []runtimeSource{
+				{Blob: assetURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+				{Blob: mirrorURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+				{Archive: tEntry.URL, ArchivePath: f.Src, ArchiveSHA256: tEntry.SHA256},
+			},
+		})
+	}
+	return entries, nil
 }
 
 // buildMuslEntriesFromCatalog projects the musl CRT blobs a `target` host can

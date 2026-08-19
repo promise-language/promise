@@ -32,6 +32,8 @@ func prettyLabel(name string) string {
 		return strings.TrimPrefix(name, "llvm-") + " (LLVM)"
 	case strings.HasPrefix(name, "musl-"):
 		return strings.TrimPrefix(name, "musl-") + " (musl)"
+	case strings.HasPrefix(name, "openssl-"):
+		return strings.TrimPrefix(name, "openssl-") + " (OpenSSL)"
 	default:
 		return name
 	}

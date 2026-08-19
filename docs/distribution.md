@@ -363,6 +363,10 @@ fetched. (x86_64 first; arm64 is a follow-up.)
 
 Fully static via musl. The musl CRT objects are a fetched blob (full builds pre-stage them). No system dependencies beyond the kernel.
 
+Programs that use TLS additionally link a **musl-built static OpenSSL** (`libssl.a` / `libcrypto.a`), vendored as a pinned prebuilt exactly like the musl CRT — pinned in `tools/build/prebuilts.toml` (`[binaries.openssl]`, from Alpine's `openssl-libs-static` on the same v3.23 baseline as musl), fetched as a content-addressed blob, and embedded by full builds (#28). This preserves the "no system dependencies beyond the kernel" promise for TLS programs — a Promise binary never links the host's dynamic `libssl.so`. The link gate is by construction: only a program that references the TLS runtime bridge (a `promise_tls_*` extern) links the archives, so non-TLS binaries are unaffected. OpenSSL 3.x is Apache-2.0 licensed; the attribution is in `NOTICE`.
+
+Expected limitation (static musl): the static `libcrypto.a` uses musl's static `dlopen`/`dlsym` stubs, which cannot load OpenSSL *providers* at runtime, so the built-in **default provider** is expected to be the only one available — the legacy and FIPS providers would be unavailable. This is the normal trade-off for a fully static binary and is fine for standard TLS. (This is the anticipated behavior; it is confirmed at the point where a TLS program is first linked and run — see #28 step 0 / T0077.)
+
 ---
 
 ## 6. CI / building & publishing releases

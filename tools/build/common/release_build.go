@@ -87,6 +87,14 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host, tag s
 		if err := EmbedMuslCRT(root); err != nil {
 			return fmt.Errorf("musl CRT: %w", err)
 		}
+		// OpenSSL static archives (Linux only, T1596 / #28). Best-effort: skips (with
+		// a note) when not pinned/hosted. A full release embeds them when pinned;
+		// the thin/full flavour switch (docs/distribution.md §1,§4) will later
+		// gate this per flavour.
+		fmt.Println("Embedding OpenSSL (best-effort)...")
+		if err := EmbedOpenSSL(root); err != nil {
+			return fmt.Errorf("openssl: %w", err)
+		}
 	}
 
 	// Embed the prebuilt manifest, overwriting EmbedResources' empty placeholder.

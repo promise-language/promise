@@ -81,6 +81,12 @@ func RunBuild(root string, args []string) error {
 		if err := EmbedMuslCRT(root); err != nil {
 			return fmt.Errorf("musl CRT: %w", err)
 		}
+		// OpenSSL static archives (Linux only, T1596 / #28). Best-effort: skips
+		// (with a note) when not pinned/hosted, since no program links TLS yet.
+		fmt.Println("Embedding OpenSSL (best-effort)...")
+		if err := EmbedOpenSSL(root); err != nil {
+			return fmt.Errorf("openssl: %w", err)
+		}
 	}
 
 	// 5. Project per-host runtime dependency manifest from blobs.json (T0798).

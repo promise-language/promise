@@ -79,6 +79,7 @@ func runDoctor(args []string) {
 	}
 	if runtime.GOOS == "linux" {
 		checks = append(checks, doctorCheckMuslCRT())
+		checks = append(checks, doctorCheckOpenSSL())
 	}
 	checks = append(checks,
 		doctorCheckBuildCache(),
@@ -307,6 +308,45 @@ func doctorCheckMuslCRT() doctorCheck {
 		c.Status = doctorErr.String()
 		c.Summary = "Incomplete musl CRT files in " + dir
 		c.Fix = "Delete the cache directory and rebuild to re-extract CRT files"
+	}
+
+	return c
+}
+
+// doctorCheckOpenSSL reports whether the static OpenSSL archives (for TLS static
+// linking, T1596 / #28) are available. NOT required: no program links TLS yet (the
+// codegen bridge lands with T0077), so a build without OpenSSL is healthy — this
+// check is informational and never fails the environment.
+func doctorCheckOpenSSL() doctorCheck {
+	c := makeDoctorCheck("OpenSSL (Linux TLS static linking)", doctorOK, false)
+
+	target := "x86_64-unknown-linux-musl"
+	if runtime.GOARCH == "arm64" {
+		target = "aarch64-unknown-linux-musl"
+	}
+
+	if hasEmbeddedOpenSSL {
+		c.Details = append(c.Details, "Source: embedded")
+	} else {
+		c.Details = append(c.Details, "Source: on-demand / none")
+	}
+
+	dir, err := findOpenSSL(target)
+	if err != nil {
+		// Not an error: TLS is not wired to any program yet, so absence is fine.
+		c.Status = doctorWarn.String()
+		c.Summary = "static OpenSSL not available (TLS support pending T0077)"
+		c.Fix = "No action needed until TLS lands; a full release build embeds it, or publish blobs via `bin/release publish-blobs --dependency openssl`"
+		return c
+	}
+
+	c.Details = append(c.Details, "Path: "+dir)
+	if openSSLComplete(dir) {
+		c.Summary = "All OpenSSL archives found"
+	} else {
+		c.Status = doctorWarn.String()
+		c.Summary = "Incomplete OpenSSL archives in " + dir
+		c.Fix = "Delete the cache directory and rebuild to re-extract the archives"
 	}
 
 	return c

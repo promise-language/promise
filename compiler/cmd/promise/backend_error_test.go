@@ -271,7 +271,7 @@ func TestCompileAndLinkLLVMInvalidIRReturnsError(t *testing.T) {
 
 	var err error
 	withSilencedStderr(t, func() {
-		err = compileAndLinkLLVM(llPath, target, out, false)
+		err = compileAndLinkLLVM(llPath, target, out, false, false)
 	})
 	if err == nil {
 		t.Fatalf("expected an error from opt on invalid IR, got nil")
@@ -295,7 +295,7 @@ func TestCompileAndLinkLLVMLinkFailureReturnsError(t *testing.T) {
 
 	var err error
 	withSilencedStderr(t, func() {
-		err = compileAndLinkLLVM(llPath, target, out, false)
+		err = compileAndLinkLLVM(llPath, target, out, false, false)
 	})
 	if err == nil {
 		t.Fatalf("expected a link error for IR with no entry point, got nil")
@@ -315,7 +315,7 @@ func TestCompileAndLinkLLVMSuccessProducesRunnableBinary(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out.bin")
 	target := codegen.HostTargetTriple()
 
-	if err := compileAndLinkLLVM(llPath, target, out, false); err != nil {
+	if err := compileAndLinkLLVM(llPath, target, out, false, false); err != nil {
 		t.Skipf("in-process link unavailable in this environment: %v", err)
 	}
 	info, statErr := os.Stat(out)

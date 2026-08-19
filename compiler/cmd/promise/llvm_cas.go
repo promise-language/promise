@@ -672,6 +672,95 @@ func resolveMuslCRTView(arch string) (string, error) {
 	return viewDir, nil
 }
 
+// opensslManifestName is the runtime-manifest logical name for one static
+// OpenSSL archive on one arch, e.g. ("aarch64-linux-musl", "libssl.a") →
+// "openssl-aarch64-linux-musl-libssl.a".
+//
+// The arch is part of the NAME, not just the manifest's identity, because
+// OpenSSL is a *target* dependency (same reasoning as muslManifestName): one
+// host manifest can carry several arches at once. Keep the format in lockstep
+// with OpenSSLManifestName in tools/build/common/openssl_slim.go — the two live
+// in separate Go modules, so the format is duplicated by necessity (pinned by
+// TestOpenSSLManifestName). T1596 / #28.
+func opensslManifestName(arch, file string) string {
+	return "openssl-" + arch + "-" + file
+}
+
+// resolveOpenSSLView materializes the static OpenSSL archives from the CAS into
+// a per-arch view dir (cache/openssl-view/<arch>/). Returns ("", nil) when the
+// manifest carries no openssl entries for this arch (thin placeholder / an arch
+// this binary's manifest doesn't cover), so the caller falls through to its
+// embedded probe. A fetch failure surfaces the offline / broken-release error.
+//
+// Exact mirror of resolveMuslCRTView (T1596 / #28). Reuses the same blobstore, lock,
+// and atomic-publish primitives.
+func resolveOpenSSLView(arch string) (string, error) {
+	m, err := loadEmbeddedManifest()
+	if err != nil || m == nil {
+		return "", nil
+	}
+	var entries []*blobstore.ManifestEntry
+	for _, f := range opensslFiles {
+		e, ok := m.Lookup(opensslManifestName(arch, f))
+		if !ok {
+			return "", nil // manifest doesn't carry openssl blobs → fall through
+		}
+		entries = append(entries, e)
+	}
+	home, err := module.PromiseHome()
+	if err != nil {
+		return "", err
+	}
+	// Content-key the view dir on the blob set (see resolveMuslCRTView) so an
+	// OpenSSL version bump never serves stale archives from a name-only match.
+	viewDir := filepath.Join(home, "cache", "openssl-view", arch+"-"+blobSetKey(entries))
+	// Fast path: a previously published view (lock-free).
+	if openSSLComplete(viewDir) {
+		return viewDir, nil
+	}
+	store, err := blobstore.NewStore()
+	if err != nil {
+		return "", err
+	}
+	// Serialize population across processes (same atomic-publish barrier as the
+	// musl CRT view). Lock lives outside the view tree so cache cleanup can't
+	// delete it mid-hold.
+	lockPath := filepath.Join(home, "cache", "openssl-view.lock")
+	unlock, err := blobstore.Lock(lockPath, "promise (materializing OpenSSL)",
+		"Waiting for another process to finish staging OpenSSL...")
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	// Double-checked after acquiring the lock.
+	if openSSLComplete(viewDir) {
+		return viewDir, nil
+	}
+	resolver := blobstore.NewResolver(store, m)
+	defer resolver.Close()
+	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
+		for _, f := range opensslFiles {
+			name := opensslManifestName(arch, f)
+			entry, _ := m.Lookup(name)
+			var blobPath string
+			if store.Has(entry.SHA256) {
+				blobPath = store.BlobPath(entry.SHA256)
+			} else {
+				p, rerr := resolver.Resolve(name)
+				if rerr != nil {
+					return rerr
+				}
+				blobPath = p
+			}
+			copyFile(blobPath, filepath.Join(tmpDir, f), 0o644)
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return viewDir, nil
+}
+
 // unbrotliBytes decompresses a brotli byte slice.
 func unbrotliBytes(data []byte) ([]byte, error) {
 	return io.ReadAll(brotli.NewReader(bytes.NewReader(data)))

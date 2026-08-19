@@ -145,3 +145,58 @@ files = [
   { src = "usr/lib/crtn.o", out = "crtn.o" },
   { src = "usr/lib/libc.a", out = "libc.a" },
 ]
+
+# ----------------------------------------------------------------------------
+# OpenSSL static archives (libssl.a, libcrypto.a) — required to link Promise
+# programs that use TLS (#28 — internal: T1596; unblocks T0077).
+#
+# Like the musl CRT above, these are a *target* dependency: Promise links Linux
+# binaries `-static` against musl, so a TLS program must link a musl-built
+# static OpenSSL rather than the host's glibc `libssl.so.3`. Alpine's
+# `openssl-libs-static` package ships exactly `usr/lib/libssl.a` +
+# `usr/lib/libcrypto.a` built against musl, on the same CDN and apk format
+# tools/build/common/apk.go already parses. Pinned to the SAME Alpine branch as
+# the musl CRT (v3.23 main) so the two dependencies share one distro baseline.
+#
+# Nothing links OpenSSL yet: this item introduces the `needsTLS` link gate but
+# never sets it true (no program declares a `promise_tls_*` extern until T0077
+# emits the codegen bridge). The pin exists so that machinery is in place and
+# testable ahead of any TLS code.
+#
+# VERIFIED 2026-08-19 against the live Alpine CDN (#28 step 0):
+#   - package name `openssl-libs-static` is correct; current revision 3.5.7-r0
+#   - both apks ship `usr/lib/libssl.a` + `usr/lib/libcrypto.a`
+#   - x86_64 apk 14,235,266 B -> libssl.a 6,955,116 B, libcrypto.a 28,162,174 B
+#   - a static musl binary calling SSL_CTX_new(TLS_client_method()) links and
+#     runs on the reference host, via `ld.lld -static --gc-sections` with the
+#     archives spliced after the objects and before libc.a, on BOTH the plain
+#     and the `--lto-O1` (release) path.
+#   - the default provider is fully functional statically: EVP_sha256 digests
+#     correctly, EVP_MD_fetch("SHA2-256") succeeds and RAND_bytes succeeds.
+#     musl's static dlopen stubs therefore do NOT impair the default provider;
+#     they only preclude loading external/legacy providers from disk.
+#   - linux-arm64 is pinned from the same branch/revision but is NOT
+#     link-verified — the reference host is x86_64.
+# ----------------------------------------------------------------------------
+[binaries.openssl]
+version = "3.5.7-r0"
+# Raw (not gzipped) per-arch static archives land in <bundle_dir>/<musl-arch>/
+# for `//go:embed resources/openssl/<musl-arch>/*` — see
+# compiler/cmd/promise/openssl_linux_*.go.
+bundle_dir = "compiler/cmd/promise/resources/openssl"
+
+[binaries.openssl.targets.linux-amd64]
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssl-libs-static-3.5.7-r0.apk"
+sha256 = "2eb5c7a1307ecdc391fbb597ec024c12f0144937a3dca88414de6e093290aa39"
+files = [
+  { src = "usr/lib/libssl.a", out = "libssl.a" },
+  { src = "usr/lib/libcrypto.a", out = "libcrypto.a" },
+]
+
+[binaries.openssl.targets.linux-arm64]
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssl-libs-static-3.5.7-r0.apk"
+sha256 = "592bb90fd5156de0a6dc657e154246eaa18f8c6e40677fb013c5a42b094eae86"
+files = [
+  { src = "usr/lib/libssl.a", out = "libssl.a" },
+  { src = "usr/lib/libcrypto.a", out = "libcrypto.a" },
+]

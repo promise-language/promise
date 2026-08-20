@@ -3,6 +3,8 @@ package codegen
 import (
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/codegen/pal"
 )
 
 // tlsAllExternsSrc declares every promise_tls_* extern with the exact Promise
@@ -83,19 +85,44 @@ func TestTLSBridgeLinuxEmitsOpenSSL(t *testing.T) {
 	}
 }
 
-// TestTLSBridgeNonLinuxStubs verifies that on a target with no TLS backend the
-// bridge emits inert stubs — no OpenSSL symbol is referenced — while NeedsTLS()
-// still reports true (harmless: the OpenSSL link gate is Linux-only).
-func TestTLSBridgeNonLinuxStubs(t *testing.T) {
+// TestTLSBridgeDarwinEmitsSecureTransport verifies that a macOS target gets the
+// real Secure Transport backend (T1599) rather than a stub: the bridge routes to
+// pal_tls_new, which creates an SSLContextRef, and no OpenSSL symbol appears.
+func TestTLSBridgeDarwinEmitsSecureTransport(t *testing.T) {
+	src := "_tls_new(int ctx) int `extern(\"promise_tls_new\");\n" +
+		"main() { int x = _tls_new(0); }\n"
+	for _, target := range []string{"arm64-apple-darwin", "x86_64-apple-darwin"} {
+		file, info := parseWithStd(t, src)
+		result := Compile(file, info, target)
+		ir := result.Module.String()
+
+		assertContains(t, ir, "@promise_tls_new")
+		assertContains(t, ir, "@pal_tls_new")
+		assertContains(t, ir, "@SSLCreateContext") // real Secure Transport symbol
+		if strings.Contains(ir, "@SSL_new") || strings.Contains(ir, "@BIO_new") {
+			t.Errorf("%s must not reference OpenSSL symbols", target)
+		}
+		if !result.NeedsTLS() {
+			t.Errorf("%s: NeedsTLS() must be true so the frameworks are linked", target)
+		}
+	}
+}
+
+// TestTLSBridgeBackendlessStubs verifies that on a target with no TLS backend
+// (wasm; Windows until T1598) the bridge emits inert stubs — no platform TLS
+// symbol is referenced — while NeedsTLS() still reports true (harmless: the link
+// gate is per-platform).
+func TestTLSBridgeBackendlessStubs(t *testing.T) {
 	src := "_tls_new(int ctx) int `extern(\"promise_tls_new\");\n" +
 		"main() { int x = _tls_new(0); }\n"
 	file, info := parseWithStd(t, src)
-	result := Compile(file, info, "arm64-apple-darwin")
+	result := Compile(file, info, "wasm32-wasi")
 	ir := result.Module.String()
 
 	assertContains(t, ir, "@promise_tls_new")
-	if strings.Contains(ir, "@SSL_new") || strings.Contains(ir, "@pal_tls_new") {
-		t.Error("non-Linux target must not reference OpenSSL symbols")
+	if strings.Contains(ir, "@SSL_new") || strings.Contains(ir, "@pal_tls_new") ||
+		strings.Contains(ir, "@SSLCreateContext") {
+		t.Error("a backend-less target must not reference any platform TLS symbol")
 	}
 }
 
@@ -141,22 +168,59 @@ func TestTLSBridgeAllShapesLinux(t *testing.T) {
 	}
 }
 
-// TestTLSBridgeAllShapesNonLinuxStubs compiles the same all-externs program for a
-// backend-less target and asserts every extern gets an inert stub: no pal_tls_* /
-// OpenSSL symbol is referenced, int/handle returners store 0, and the two string
-// getters synthesize an empty Promise string. This is the path that makes the
-// module compile-and-link everywhere while failing cleanly at runtime.
-func TestTLSBridgeAllShapesNonLinuxStubs(t *testing.T) {
+// TestTLSBridgeAllShapesDarwin compiles the all-externs program for macOS so every
+// bridge shape is body-filled against the Secure Transport PAL. The bridge helpers
+// are backend-agnostic and shared verbatim with Linux, so this pins that the same
+// 25 shapes route to the same 25 pal_tls_* wrapper names on a second backend.
+func TestTLSBridgeAllShapesDarwin(t *testing.T) {
 	file, info := parseWithStd(t, tlsAllExternsSrc)
 	result := Compile(file, info, "arm64-apple-darwin")
 	ir := result.Module.String()
 
-	if strings.Contains(ir, "@pal_tls_") {
-		t.Error("non-Linux stubs must not reference any pal_tls_* wrapper")
+	palWrappers := []string{
+		"pal_tls_ctx_new_client", "pal_tls_ctx_new_server", "pal_tls_ctx_free",
+		"pal_tls_ctx_set_verify", "pal_tls_ctx_set_min_version", "pal_tls_ctx_add_ca",
+		"pal_tls_ctx_use_cert", "pal_tls_ctx_use_key", "pal_tls_ctx_load_default_trust",
+		"pal_tls_new", "pal_tls_set_connect_state", "pal_tls_set_accept_state",
+		"pal_tls_set_sni", "pal_tls_set_verify_host", "pal_tls_do_handshake",
+		"pal_tls_read", "pal_tls_write", "pal_tls_shutdown",
+		"pal_tls_bio_read_out", "pal_tls_bio_write_in", "pal_tls_bio_pending_out",
+		"pal_tls_get_version", "pal_tls_get_cipher", "pal_tls_get_verify_result",
+		"pal_tls_free",
 	}
+	for _, w := range palWrappers {
+		assertContains(t, ir, "@"+w+"(")
+	}
+	// Secure Transport, not OpenSSL.
+	assertContains(t, ir, "@SSLHandshake")
+	assertContains(t, ir, "@SecItemImport")
 	for _, sym := range []string{"@SSL_new", "@SSL_CTX_new", "@BIO_new", "@SSL_read"} {
 		if strings.Contains(ir, sym) {
-			t.Errorf("non-Linux stub must not reference OpenSSL symbol %s", sym)
+			t.Errorf("darwin backend must not reference OpenSSL symbol %s", sym)
+		}
+	}
+	if !result.NeedsTLS() {
+		t.Error("NeedsTLS() must be true when promise_tls_* externs are bridged")
+	}
+}
+
+// TestTLSBridgeAllShapesBackendlessStubs compiles the same all-externs program for a
+// backend-less target and asserts every extern gets an inert stub: no pal_tls_* /
+// platform TLS symbol is referenced, int/handle returners store 0, and the two string
+// getters synthesize an empty Promise string. This is the path that makes the
+// module compile-and-link everywhere while failing cleanly at runtime.
+func TestTLSBridgeAllShapesBackendlessStubs(t *testing.T) {
+	file, info := parseWithStd(t, tlsAllExternsSrc)
+	result := Compile(file, info, "wasm32-wasi")
+	ir := result.Module.String()
+
+	if strings.Contains(ir, "@pal_tls_") {
+		t.Error("backend-less stubs must not reference any pal_tls_* wrapper")
+	}
+	for _, sym := range []string{"@SSL_new", "@SSL_CTX_new", "@BIO_new", "@SSL_read",
+		"@SSLCreateContext", "@SSLHandshake", "@SecItemImport"} {
+		if strings.Contains(ir, sym) {
+			t.Errorf("backend-less stub must not reference platform TLS symbol %s", sym)
 		}
 	}
 	// Every bridge symbol is still defined (so the module links on this target).
@@ -165,4 +229,74 @@ func TestTLSBridgeAllShapesNonLinuxStubs(t *testing.T) {
 	}
 	// String getters return an empty Promise string via promise_string_new(null, 0).
 	assertContains(t, ir, "@promise_string_new")
+}
+
+// TestTLSBridgeProductionMacOSTriple is the regression guard the two -apple-darwin
+// tests above cannot be: the triple Promise actually compiles macOS with is
+// "arm64-apple-macosx26.0.0" (HostTargetTriple derives it from sw_vers), which
+// contains "apple" but NOT "darwin". The backend gate in defineTLSPALBodies matches
+// either substring, and only the "apple" alternative carries production. Narrow it
+// to just "darwin" and every existing TLS test still passes while every real macOS
+// build silently falls back to inert stubs — TLS programs would compile, link, and
+// then raise TlsError(kind: unsupported) at runtime.
+func TestTLSBridgeProductionMacOSTriple(t *testing.T) {
+	src := "_tls_new(int ctx) int `extern(\"promise_tls_new\");\n" +
+		"main() { int x = _tls_new(0); }\n"
+	// The forms HostTargetTriple can produce, on both macOS arches. None of them
+	// contains the word "darwin".
+	for _, target := range []string{
+		"arm64-apple-macosx26.0.0",
+		"arm64-apple-macosx14.0.0",
+		"x86_64-apple-macosx10.15.0",
+	} {
+		if strings.Contains(target, "darwin") {
+			t.Fatalf("%s defeats the point of this test — pick a triple without \"darwin\"", target)
+		}
+		file, info := parseWithStd(t, src)
+		result := Compile(file, info, target)
+		ir := result.Module.String()
+
+		if !strings.Contains(ir, "@SSLCreateContext") {
+			t.Errorf("%s got no Secure Transport backend — the production macOS triple "+
+				"must not fall through to the stub path (T1599)", target)
+		}
+		assertContains(t, ir, "@pal_tls_new")
+		if !result.NeedsTLS() {
+			t.Errorf("%s: NeedsTLS() must be true so Security/CoreFoundation are linked", target)
+		}
+	}
+}
+
+// TestTLSBridgeUnknownPosixTargetStubs covers the backend switch's default arm.
+// The two stub tests above use wasm, which never reaches the switch at all —
+// pal.ForTarget returns a WasmPAL, so the earlier *PosixPAL type assertion fails
+// and returns first. Windows takes that same early return. A POSIX-ish target that
+// is neither Linux nor macOS (FreeBSD, or any triple Promise gains before it gains
+// a TLS backend for it) is the only thing that reaches `default:`, and it must
+// degrade to stubs rather than emitting OpenSSL calls that cannot link.
+func TestTLSBridgeUnknownPosixTargetStubs(t *testing.T) {
+	for _, target := range []string{"x86_64-unknown-freebsd", "riscv64-unknown-none"} {
+		if p, ok := pal.ForTarget(target).(*pal.PosixPAL); !ok || p == nil {
+			t.Fatalf("%s no longer resolves to a PosixPAL — this test no longer reaches "+
+				"the backend switch's default arm", target)
+		}
+		file, info := parseWithStd(t, tlsAllExternsSrc)
+		result := Compile(file, info, target)
+		ir := result.Module.String()
+
+		if strings.Contains(ir, "@pal_tls_") {
+			t.Errorf("%s: a target with no TLS backend must not call any pal_tls_* wrapper", target)
+		}
+		for _, sym := range []string{"@SSL_new", "@SSL_CTX_new", "@BIO_new",
+			"@SSLCreateContext", "@SSLHandshake", "@SecItemImport"} {
+			if strings.Contains(ir, sym) {
+				t.Errorf("%s: stub path must not reference platform TLS symbol %s", target, sym)
+			}
+		}
+		// Still fully defined, so the module links and fails cleanly at runtime.
+		for _, name := range []string{"@promise_tls_ctx_new_client", "@promise_tls_new",
+			"@promise_tls_do_handshake", "@promise_tls_get_cipher"} {
+			assertContains(t, ir, name)
+		}
+	}
 }

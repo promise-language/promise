@@ -1,20 +1,26 @@
-// tls module — TLS 1.2/1.3 transport security over TCP (T0077).
+// tls module — TLS transport security over TCP (T0077, T1599).
 // Requires: use tls;  (which itself builds on `use net;`)
 //
-// Design: OpenSSL is driven through two in-memory BIOs rather than a socket fd.
-// Promise code pumps ciphertext between those BIOs and an owned net.TcpStream,
-// so all socket I/O and reactor parking reuse net's non-blocking, reactor-aware
-// read/write. The PAL backend (compiler/internal/codegen/pal/tls_posix.go) never
-// sees a socket, an fd, or the scheduler.
+// Design: the TLS engine is driven through in-memory byte buffers rather than a
+// socket fd. Promise code pumps ciphertext between those buffers and an owned
+// net.TcpStream, so all socket I/O and reactor parking reuse net's non-blocking,
+// reactor-aware read/write. The PAL backend never sees a socket, an fd, or the
+// scheduler — which is what lets a second backend slot in unchanged.
 //
-// Backend availability: Linux (musl-static OpenSSL, T1596) only for now. On
-// every other target the promise_tls_* bridges are inert stubs that return a 0
-// handle, and the constructors raise TlsError(kind: unsupported).
+// Backend availability:
+//   Linux   — OpenSSL memory BIOs, vendored musl-static (T1596). TLS 1.2 + 1.3.
+//   macOS   — Secure Transport with buffer queues (T1599). TLS 1.2 only; see
+//             set_min_version below.
+//   other   — Windows (T1598) and wasm have no backend: the promise_tls_*
+//             bridges are inert stubs that return a 0 handle, and the
+//             constructors raise TlsError(kind: unsupported).
 use net;
 
 // --- PAL bridge (compiler-emitted symbols; see codegen/tls.go) --------------
-// These are NOT user FFI — the real external symbols (SSL_*, BIO_*) are declared
-// in codegen IR and resolved against the vendored static libssl.a/libcrypto.a.
+// These are NOT user FFI — the real external symbols (OpenSSL's SSL_*/BIO_* on
+// Linux, Secure Transport's SSL*/Sec* on macOS) are declared in codegen IR and
+// resolved at link against the vendored static libssl.a/libcrypto.a or
+// Security.framework respectively.
 _tls_ctx_new_client() int `extern("promise_tls_ctx_new_client");
 _tls_ctx_new_server() int `extern("promise_tls_ctx_new_server");
 _tls_ctx_free(int ctx) `extern("promise_tls_ctx_free");
@@ -43,11 +49,12 @@ _tls_free(int ssl) `extern("promise_tls_free");
 
 enum TlsVersion `public `doc("TLS protocol version.") {
   tls_1_2 `doc("TLS 1.2."),
-  tls_1_3 `doc("TLS 1.3."),
+  tls_1_3 `doc("TLS 1.3. Not available on macOS — Secure Transport implements no TLS 1.3, so a macOS connection negotiates at most TLS 1.2."),
 
-  // OpenSSL protocol-version numbers (TLS1_2_VERSION / TLS1_3_VERSION) — the
-  // single source of truth for these constants.
-  _to_openssl(this) int {
+  // TLS wire version numbers (the values that appear on the wire, 0x0303 /
+  // 0x0304) — the single source of truth for these constants, and the
+  // backend-neutral argument every PAL backend maps onto its own encoding.
+  _to_wire(this) int {
     return match this {
       TlsVersion.tls_1_2 => 771, // 0x0303
       TlsVersion.tls_1_3 => 772, // 0x0304
@@ -63,7 +70,7 @@ enum TlsErrorKind `public `doc("Classifies a TLS failure so callers can tell a n
   unsupported `doc("No TLS backend is available on this platform yet."),
 }
 
-type TlsError is error `public `doc("A TLS error. `kind` distinguishes handshake, certificate, I/O, missing-trust-store, and unsupported-platform failures; `code` carries the underlying OpenSSL/errno code when available.") {
+type TlsError is error `public `doc("A TLS error. `kind` distinguishes handshake, certificate, I/O, missing-trust-store, and unsupported-platform failures; `code` carries the underlying backend/errno code when available.") {
   int code;
   TlsErrorKind kind;
 }
@@ -72,17 +79,17 @@ _tls_err(TlsErrorKind move kind, string move message) TlsError {
   return TlsError(code: 0, kind: move kind, message: move message);
 }
 
-type TlsConfig `public `doc("TLS configuration for a connection. Controls certificate verification, trust anchors, client certificates, and the minimum protocol version. Auto-frees its OpenSSL context on drop.") {
-  int _ctx; // SSL_CTX* as int (0 = no backend / unsupported)
+type TlsConfig `public `doc("TLS configuration for a connection. Controls certificate verification, trust anchors, client certificates, and the minimum protocol version. Auto-frees its backend context on drop.") {
+  int _ctx; // backend context handle as int (0 = no backend / unsupported)
   bool _verify; // whether server certificates are validated
   bool _has_trust_store; // whether a trust store was successfully loaded
 
-  create() Self `factory `public `doc("Creates a default client TLS config that validates server certificates against the system trust store (SSL_CERT_FILE / SSL_CERT_DIR or a well-known bundle path).") {
+  create() Self `factory `public `doc("Creates a default client TLS config that validates server certificates against the system trust store (on Linux: SSL_CERT_FILE / SSL_CERT_DIR or a well-known bundle path; on macOS the system trust store is used directly).") {
     int ctx = _tls_ctx_new_client();
     bool trust = false;
     if ctx != 0 {
       _tls_ctx_set_verify(ctx, 1);
-      _tls_ctx_set_min_version(ctx, TlsVersion.tls_1_2._to_openssl());
+      _tls_ctx_set_min_version(ctx, TlsVersion.tls_1_2._to_wire());
       trust = _tls_ctx_load_default_trust(ctx) == 1;
     }
     return TlsConfig(_ctx: ctx, _verify: true, _has_trust_store: trust);
@@ -92,7 +99,7 @@ type TlsConfig `public `doc("TLS configuration for a connection. Controls certif
     int ctx = _tls_ctx_new_client();
     if ctx != 0 {
       _tls_ctx_set_verify(ctx, 0);
-      _tls_ctx_set_min_version(ctx, TlsVersion.tls_1_2._to_openssl());
+      _tls_ctx_set_min_version(ctx, TlsVersion.tls_1_2._to_wire());
     }
     return TlsConfig(_ctx: ctx, _verify: false, _has_trust_store: true);
   }
@@ -119,9 +126,9 @@ type TlsConfig `public `doc("TLS configuration for a connection. Controls certif
     }
   }
 
-  set_min_version(~this, TlsVersion version) `public `doc("Sets the minimum accepted TLS version (default: TLS 1.2).") {
+  set_min_version(~this, TlsVersion version) `public `doc("Sets the minimum accepted TLS version (default: TLS 1.2). Requesting TLS 1.3 has no effect on macOS, whose Secure Transport backend implements no TLS 1.3 — the connection stays capped at TLS 1.2 rather than failing.") {
     if this._ctx != 0 {
-      _tls_ctx_set_min_version(this._ctx, version._to_openssl());
+      _tls_ctx_set_min_version(this._ctx, version._to_wire());
     }
   }
 
@@ -133,7 +140,7 @@ type TlsConfig `public `doc("TLS configuration for a connection. Controls certif
 }
 
 type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connection. Satisfies Reader and Writer. Auto-frees the TLS session and closes the socket on drop.") {
-  int _ssl; // SSL* as int (0 = never established)
+  int _ssl; // backend session handle as int (0 = never established)
   net.TcpStream _tcp;
 
   connect!(net.TcpStream move tcp, string hostname, TlsConfig config) Self `factory `public `doc("Performs a TLS client handshake over an already-connected TCP stream. `hostname` sets SNI and, for verifying configs, the certificate host to check.") {
@@ -168,7 +175,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
         return 0; // clean close_notify
       }
       if n == -1 {
-        this._fill_in()?^; // want_read
+        this._fill_in(false)?^; // want_read
         continue;
       }
       if n == -2 {
@@ -187,7 +194,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
         return n;
       }
       if n == -1 {
-        this._fill_in()?^; // want_read (renegotiation)
+        this._fill_in(false)?^; // want_read (renegotiation)
         continue;
       }
       if n == -2 {
@@ -252,7 +259,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
 
   close!(~this) `public `doc("Sends a TLS close_notify and closes the underlying connection. Best-effort — network errors during shutdown are ignored.") {
     if this._ssl != 0 {
-      _tls_shutdown(this._ssl); // queues close_notify into the write BIO
+      _tls_shutdown(this._ssl); // queues close_notify into the outbound buffer
       this._flush_out()? e {
       };
     }
@@ -282,7 +289,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
         break;
       }
       if st == 1 {
-        this._fill_in()?^; // want_read
+        this._fill_in(true)?^; // want_read
         continue;
       }
       if st == 2 {
@@ -296,7 +303,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
     }
   }
 
-  // Drains ciphertext produced by OpenSSL (the write BIO) onto the TCP stream.
+  // Drains ciphertext produced by the TLS engine onto the TCP stream.
   _flush_out!(~this) {
     while true {
       int pend = _tls_bio_pending_out(this._ssl);
@@ -309,13 +316,22 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
     }
   }
 
-  // Reads ciphertext from the TCP stream into OpenSSL's read BIO.
-  _fill_in!(~this) {
+  // Reads ciphertext from the TCP stream into the TLS engine's inbound buffer.
+  // `handshaking` selects how a clean end-of-stream is reported: a peer that
+  // closes before the handshake completes never spoke TLS, so that is a handshake
+  // failure, not an I/O failure. This keeps the two backends agreeing on the kind
+  // for the same situation — OpenSSL rejects a malformed record outright, while
+  // Secure Transport reads the same bytes as a record header promising more data
+  // and only fails once the peer closes.
+  _fill_in!(~this, bool handshaking) {
     u8[] buf = u8[].filled(0u8, 16384);
     int n = this._tcp.read(buf)? e {
       raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
     };
     if n == 0 {
+      if handshaking {
+        raise _tls_err(TlsErrorKind.handshake, "connection closed by peer during the TLS handshake");
+      }
       raise _tls_err(TlsErrorKind.io, "connection closed by peer during TLS exchange");
     }
     _tls_bio_write_in(this._ssl, buf, n);
@@ -340,15 +356,15 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
 
   drop(~this) {
     if this._ssl != 0 {
-      _tls_free(this._ssl); // also frees the attached memory BIOs
+      _tls_free(this._ssl); // also frees the attached ciphertext buffers
     }
     // this._tcp drops automatically, closing the socket.
   }
 }
 
-type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections. Auto-frees its OpenSSL context and closes the socket on drop.") {
+type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections. Auto-frees its backend context on drop and closes the socket.") {
   net.TcpListener _listener;
-  int _ctx; // SSL_CTX* (server) as int
+  int _ctx; // backend context handle (server) as int
 
   bind!(string host, int port, u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Binds a TLS listener to host:port using the given PEM-encoded certificate chain and private key.") {
     int ctx = _tls_ctx_new_server();

@@ -1042,3 +1042,83 @@ First real use of `` `target `` in production code. Platform constants consolida
 ### Phase F — calendar time
 
 16. **`modules/time`** — `DateTime`, wall clock PAL, format/parse utilities
+
+---
+
+## 15. `modules/tls` — Transport Security Backends
+
+`modules/tls` layers TLS over an owned `net.TcpStream`. The design point that makes
+it portable is that **no backend ever sees a socket, an fd, or the scheduler**: the
+TLS engine is driven through in-memory ciphertext buffers, and Promise code
+(`tls.pr`) pumps those buffers over `net.TcpStream`, which already parks on the
+reactor. So TLS reads park exactly like plain TCP reads, on one event loop.
+
+This is also a hard constraint, not just a preference. Promise parks by emitting an
+inline `coro.suspend` into the Promise frame (`promise_netpoll_wait_read`/`_write`
+are intercepted at codegen dispatch and lowered inline), so a coroutine **cannot**
+suspend from inside a C stack frame. Any backend callback invoked from within the
+TLS library must therefore be a pure buffer operation that never blocks and never
+performs I/O.
+
+### Backend availability
+
+| Target | Backend | Protocol | Link surface |
+|---|---|---|---|
+| Linux | OpenSSL 3.x memory BIOs, vendored musl-static (T1596) | TLS 1.2 + 1.3 | static `libssl.a` / `libcrypto.a` |
+| macOS | Secure Transport with buffer queues (T1599) | **TLS 1.2 only** | `Security.framework`, `CoreFoundation.framework` |
+| Windows | none yet (T1598) | — | — |
+| wasm | none (no sockets) | — | — |
+
+Targets without a backend still compile and link: the `promise_tls_*` bridges become
+inert stubs returning a 0 handle, and the constructors raise
+`TlsError(kind: unsupported)`. Gating is by handle, not by `` `target() ``.
+
+### The shared PAL surface
+
+Both backends implement the same 25 `pal_tls_*` entry points and the same
+backend-neutral status enum — `0 ok, 1 want_read, 2 want_write, <0 fatal` for the
+handshake, `>0 bytes / 0 EOF / -1 want_read / -2 want_write / -3 fatal` for read and
+write. **No platform-specific status code may cross the PAL boundary**
+(`errSSLWouldBlock`, `SSL_ERROR_WANT_READ`, … are all mapped inside the backend), so
+every bridge helper in `codegen/tls.go` and all of `tls.pr` is shared verbatim.
+
+The `bio_read_out` / `bio_write_in` / `bio_pending_out` names are OpenSSL heritage;
+on macOS they operate on the session's own byte queues.
+
+PEM inputs must also behave identically. A multi-block PEM — the ordinary
+`fullchain.pem` shape (leaf plus its issuers), or a CA bundle — is accepted by both
+backends, and both use the leaf and ignore the rest. On macOS that means the import
+helper picks the first item of the wanted kind out of `SecItemImport`'s result by
+`CFTypeID`: the reported `SecExternalItemType` for a multi-block PEM is
+`kSecItemTypeAggregate`, so gating on it would reject every real-world certificate
+bundle that Linux accepts.
+
+### macOS: why Secure Transport, and the TLS 1.3 gap
+
+Network.framework was rejected deliberately. It owns the socket *and* its own
+libdispatch event loop, so completions arrive on threads the M:N scheduler does not
+own and the reactor never sees the fd — TLS would get a wholly separate I/O path
+from plain TCP, and everything built on reactor parking (socket deadlines,
+cancellation, select) would need reimplementing for TLS alone. Promise already has a
+non-blocking reactor; it needs the platform to stay out of the way, not to supply a
+second one.
+
+The cost of that choice is protocol coverage: **Secure Transport implements no TLS
+1.3.** `kTLSProtocol13` exists in the enum but `SSLSetProtocolVersionMin` rejects it
+with `errSSLIllegalParam` (-9830) on both sides, so a macOS connection negotiates at
+most TLS 1.2. `TlsConfig.set_min_version(TlsVersion.tls_1_3)` is silently capped
+rather than failing, and `TlsStream.version` always reports `tls_1_2` on macOS.
+
+Secure Transport is deprecated by Apple. If it is ever removed, the recorded
+successor is **vendoring a static BoringSSL/OpenSSL for macOS** the way T1596 did for
+Linux — that preserves the in-memory-buffer architecture instead of dismantling it.
+
+### Zero-dependency linking
+
+A TLS program must build on a macOS host with **no Xcode Command Line Tools**, so TLS
+is not the one feature that requires an SDK. `ensureBundledSDK` therefore writes
+hand-authored TBD v4 stubs for `Security.framework` and `CoreFoundation.framework`
+alongside the existing `libSystem` one, listing exactly the symbols the backend
+references. `TestBundledFrameworkTBDsCoverBackendSymbols` derives that symbol list
+from the backend itself and fails if a stub falls behind — the failure would
+otherwise only appear on machines without an SDK, which is where nobody is looking.

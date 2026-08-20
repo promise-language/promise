@@ -11,15 +11,20 @@ import (
 	"github.com/promise-language/promise/compiler/internal/codegen/pal"
 )
 
-// tls.go — bridge modules/tls/tls.pr externs to the OpenSSL memory-BIO PAL
-// backend (T0077). Mirrors defineNetPALBodies: each promise_tls_* extern gets a
-// thin body that unpacks the Promise value-struct ABI and calls the raw
-// pal_tls_* wrapper emitted by pal.PosixPAL.EmitTLS.
+// tls.go — bridge modules/tls/tls.pr externs to a platform TLS PAL backend.
+// Mirrors defineNetPALBodies: each promise_tls_* extern gets a thin body that
+// unpacks the Promise value-struct ABI and calls the raw pal_tls_* wrapper
+// emitted by the backend for this target.
 //
-// The PAL calls operate purely on OpenSSL's in-memory BIOs — they never touch a
-// socket or block — so no syscall enter/exit accounting is needed here. All
-// socket I/O and reactor parking stay in Promise (tls.pr drives the ciphertext
-// pump over net.TcpStream, which already parks on the reactor).
+// Two backends implement the same pal_tls_* surface and the same status enum:
+//   Linux  — OpenSSL memory BIOs      (pal.PosixPAL.EmitTLS,               T0077)
+//   macOS  — Secure Transport queues  (pal.PosixPAL.EmitTLSSecureTransport, T1599)
+// Every bridge helper below is backend-agnostic and shared verbatim by both.
+//
+// The PAL calls operate purely on in-memory buffers — they never touch a socket
+// or block — so no syscall enter/exit accounting is needed here. All socket I/O
+// and reactor parking stay in Promise (tls.pr drives the ciphertext pump over
+// net.TcpStream, which already parks on the reactor).
 //
 // Must run after compileModules() so tls module externs are declared in
 // c.module.Funcs.
@@ -77,20 +82,26 @@ func (c *Compiler) defineTLSPALBodies() {
 	// program imports the tls module (NeedsTLS reads it). See layout.go.
 	c.needsTLS = true
 
-	// Only Linux has a vendored OpenSSL backend (T1596). Other targets get inert
-	// stubs so the module still compiles and links, failing cleanly at runtime
-	// with TlsError(kind: unsupported) — the constructors observe a 0 handle.
-	if !strings.Contains(c.module.TargetTriple, "linux") {
-		c.defineTLSStubBodies(irFuncByName)
-		return
-	}
-
-	p, ok := pal.ForTarget(c.module.TargetTriple).(*pal.PosixPAL)
+	// Select the backend for this target. Targets without one (Windows — T1598,
+	// wasm) get inert stubs so the module still compiles and links, failing
+	// cleanly at runtime with TlsError(kind: unsupported) — the constructors
+	// observe a 0 handle.
+	triple := c.module.TargetTriple
+	p, ok := pal.ForTarget(triple).(*pal.PosixPAL)
 	if !ok {
 		c.defineTLSStubBodies(irFuncByName)
 		return
 	}
-	pf := p.EmitTLS(c.module)
+	var pf map[string]*ir.Func
+	switch {
+	case strings.Contains(triple, "linux"):
+		pf = p.EmitTLS(c.module) // vendored static OpenSSL (T1596)
+	case strings.Contains(triple, "darwin"), strings.Contains(triple, "apple"):
+		pf = p.EmitTLSSecureTransport(c.module) // Security.framework (T1599)
+	default:
+		c.defineTLSStubBodies(irFuncByName)
+		return
+	}
 
 	bridge := func(name string, body func(fn *ir.Func)) {
 		if fn, ok := irFuncByName[name]; ok {
@@ -142,7 +153,7 @@ func (c *Compiler) defineTLSPALBodies() {
 	bridge("promise_tls_get_cipher", func(fn *ir.Func) { c.tlsStrRet1Arg(fn, pf["pal_tls_get_cipher"]) })
 }
 
-// --- bridge shapes (Linux/OpenSSL) -----------------------------------------
+// --- bridge shapes (backend-agnostic) --------------------------------------
 
 // tlsStoreInt stores a pal result (i32 or i64) as a Promise int, sign-extending
 // i32 returns to i64 first. The pal_tls_* wrappers return i32 for status/flag
@@ -245,13 +256,13 @@ func (c *Compiler) tlsStrRet1Arg(fn, palFn *ir.Func) {
 	b.NewRet(nil)
 }
 
-// --- non-Linux stub bodies -------------------------------------------------
+// --- stub bodies (targets with no TLS backend) -----------------------------
 
 // defineTLSStubBodies emits inert bodies for every promise_tls_* extern on
-// targets with no TLS backend (macOS/Windows/WASM). Handle factories and int
-// getters return 0, void ops no-op, and string getters return "". tls.pr sees a
-// 0 handle from ctx creation and raises TlsError(kind: unsupported); no OpenSSL
-// symbol is referenced, so nothing links.
+// targets with no TLS backend (Windows — T1598 — and wasm). Handle factories and
+// int getters return 0, void ops no-op, and string getters return "". tls.pr sees
+// a 0 handle from ctx creation and raises TlsError(kind: unsupported); no
+// platform TLS symbol is referenced, so nothing links.
 func (c *Compiler) defineTLSStubBodies(irFuncByName map[string]*ir.Func) {
 	// Signatures with an sret (int/string return) vs. void return differ only in
 	// whether Params[0] is the sret slot. Classify by the Promise result type,

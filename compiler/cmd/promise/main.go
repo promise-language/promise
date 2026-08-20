@@ -3330,7 +3330,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	tLink := time.Now()
 	var linkErr error
 	if isDarwinTarget(target) {
-		linkErr = linkDarwinMulti(objFiles, target, outputFile, useLTO)
+		linkErr = linkDarwinMulti(objFiles, target, outputFile, useLTO, result.NeedsTLS())
 	} else if isWasmTarget(target) {
 		linkErr = linkWasmMulti(objFiles, target, outputFile, useLTO)
 	} else if isWindowsTarget(target) {
@@ -4304,6 +4304,51 @@ exports:
 ...
 `
 
+// bundledSecurityTBD and bundledCoreFoundationTBD are hand-crafted TAPI TBD v4
+// stubs for the two frameworks the macOS TLS backend links against (T1599).
+// They exist for the same reason as bundledLibSystemTBD: a TLS program must build
+// on a machine with no Xcode Command Line Tools installed, so TLS cannot be the
+// one feature that requires an SDK. Each lists exactly the symbols
+// pal.PosixPAL.EmitTLSSecureTransport references and nothing more — keep them in
+// sync with that file's extern list.
+//
+// SecIdentityCreate is SPI: it is exported from Security.framework and present in
+// the real SDK stub, but has no public header. It builds a transient identity
+// from a cert+key pair without touching a keychain, which is what a self-contained
+// Promise binary needs.
+const bundledSecurityTBD = `--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos, arm64e-macos ]
+install-name:    '/System/Library/Frameworks/Security.framework/Versions/A/Security'
+current-version: 1
+exports:
+  - targets:     [ x86_64-macos, arm64-macos, arm64e-macos ]
+    symbols:     [ _SSLCreateContext, _SSLSetIOFuncs, _SSLSetConnection,
+                   _SSLSetProtocolVersionMin, _SSLSetPeerDomainName,
+                   _SSLSetCertificate, _SSLSetSessionOption, _SSLHandshake,
+                   _SSLRead, _SSLWrite, _SSLClose,
+                   _SSLGetNegotiatedProtocolVersion, _SSLGetNegotiatedCipher,
+                   _SSLCopyPeerTrust,
+                   _SecItemImport, _SecIdentityCreate,
+                   _SecCertificateGetTypeID, _SecKeyGetTypeID,
+                   _SecTrustEvaluateWithError, _SecTrustSetAnchorCertificates,
+                   _SecTrustSetAnchorCertificatesOnly ]
+...
+`
+
+const bundledCoreFoundationTBD = `--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos, arm64e-macos ]
+install-name:    '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation'
+current-version: 1
+exports:
+  - targets:     [ x86_64-macos, arm64-macos, arm64e-macos ]
+    symbols:     [ _CFRelease, _CFRetain, _CFGetTypeID, _CFDataCreate,
+                   _CFArrayCreate, _CFArrayGetCount, _CFArrayGetValueAtIndex,
+                   _kCFTypeArrayCallBacks ]
+...
+`
+
 // ensureBundledSDK writes the bundled libSystem TBD stub to the Promise cache
 // directory and returns an SDK info pointing to it. Used as fallback when
 // xcrun is unavailable (no Xcode CLT installed). (T0178)
@@ -4336,6 +4381,26 @@ func ensureBundledSDK() (*macOSSDKInfo, error) {
 	if _, err := os.Lstat(symlinkPath); err != nil {
 		if err := os.Symlink("libSystem.B.tbd", symlinkPath); err != nil {
 			return nil, fmt.Errorf("cannot create libSystem.tbd symlink: %w", err)
+		}
+	}
+
+	// Framework stubs for the TLS backend (T1599). -framework Security resolves
+	// to <sysroot>/System/Library/Frameworks/Security.framework/Security.tbd, so
+	// no symlink is needed — the framework name is the file name.
+	for _, fw := range []struct{ name, content string }{
+		{"Security", bundledSecurityTBD},
+		{"CoreFoundation", bundledCoreFoundationTBD},
+	} {
+		fwDir := filepath.Join(sdkDir, "System", "Library", "Frameworks", fw.name+".framework")
+		if err := os.MkdirAll(fwDir, 0755); err != nil {
+			return nil, fmt.Errorf("cannot create bundled %s.framework directory: %w", fw.name, err)
+		}
+		fwPath := filepath.Join(fwDir, fw.name+".tbd")
+		body := []byte(fw.content)
+		if info, err := os.Stat(fwPath); err != nil || info.Size() != int64(len(body)) {
+			if err := os.WriteFile(fwPath, body, 0644); err != nil {
+				return nil, fmt.Errorf("cannot write bundled %s.tbd: %w", fw.name, err)
+			}
 		}
 	}
 
@@ -4449,8 +4514,10 @@ func isTestExcluded(target string, excludes []string) bool {
 }
 
 // buildDarwinLinkArgs builds the linker argument list for macOS Mach-O linking.
-// Works with ld64.lld and PROMISE_LD override linkers.
-func buildDarwinLinkArgs(target, objFile, outputFile string) []string {
+// Works with ld64.lld and PROMISE_LD override linkers. needsTLS adds the two
+// frameworks the Secure Transport backend needs (T1599); programs that do not
+// import the tls module link exactly as before.
+func buildDarwinLinkArgs(target, objFile, outputFile string, needsTLS bool) []string {
 	sdk, err := findMacOSSDK()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -4465,7 +4532,7 @@ func buildDarwinLinkArgs(target, objFile, outputFile string) []string {
 		sdkVersion = sdk.sdkVersion
 	}
 
-	return []string{
+	args := []string{
 		"-arch", tri.arch,
 		"-platform_version", "macos", tri.minVersion, sdkVersion,
 		"-syslibroot", sdk.sysroot,
@@ -4473,6 +4540,10 @@ func buildDarwinLinkArgs(target, objFile, outputFile string) []string {
 		objFile,
 		"-lSystem",
 	}
+	if needsTLS {
+		args = append(args, "-framework", "Security", "-framework", "CoreFoundation")
+	}
+	return args
 }
 
 // --- Linux linking ---
@@ -4938,7 +5009,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode, needsTLS
 		if isWindowsTarget(target) {
 			linkErr = linkWindows(objFile.Name(), target, outputFile)
 		} else if isDarwinTarget(target) {
-			linkErr = linkDarwin(objFile.Name(), target, outputFile, false)
+			linkErr = linkDarwin(objFile.Name(), target, outputFile, false, needsTLS)
 		} else if isWasmTarget(target) {
 			linkErr = linkWasm(objFile.Name(), target, outputFile, false)
 		} else {
@@ -4955,7 +5026,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode, needsTLS
 	tLink := time.Now()
 	var linkErr error
 	if isDarwinTarget(target) {
-		linkErr = linkDarwin(bcFile.Name(), target, outputFile, true)
+		linkErr = linkDarwin(bcFile.Name(), target, outputFile, true, needsTLS)
 	} else if isWasmTarget(target) {
 		linkErr = linkWasm(bcFile.Name(), target, outputFile, true)
 	} else {
@@ -4971,7 +5042,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode, needsTLS
 // linkDarwin runs ld64.lld for macOS Mach-O linking.
 // Accepts LLVM bitcode (.bc) or native object (.o) as input.
 // Uses --lto-O1 for LTO when useLTO is true. The !isLLD path is only reachable via PROMISE_LD override.
-func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) error {
+func linkDarwin(bcOrObjFile, target, outputFile string, useLTO, needsTLS bool) error {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
@@ -5008,7 +5079,7 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) error {
 		fileToLink = nativeObj.Name()
 	}
 
-	linkArgs := buildDarwinLinkArgs(target, fileToLink, outputFile)
+	linkArgs := buildDarwinLinkArgs(target, fileToLink, outputFile, needsTLS)
 	if !useLTO {
 		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
 	}
@@ -5312,7 +5383,7 @@ func linkLinux(objFile, target, outputFile string, useLTO, needsTLS bool) error 
 }
 
 // linkDarwinMulti links multiple .o/.bc files on macOS.
-func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) error {
+func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO, needsTLS bool) error {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
@@ -5340,6 +5411,9 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) 
 	}
 	linkArgs = append(linkArgs, objFiles...)
 	linkArgs = append(linkArgs, "-lSystem")
+	if needsTLS {
+		linkArgs = append(linkArgs, "-framework", "Security", "-framework", "CoreFoundation")
+	}
 	if !useLTO {
 		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
 	}

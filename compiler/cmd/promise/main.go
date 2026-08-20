@@ -5515,9 +5515,17 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO, needsT
 // crt0 (@__promise_start), TLS directory, __chkstk, and _fltused, these let a
 // Promise .exe link with NO Visual Studio Build Tools / Windows SDK present and
 // no Microsoft .lib redistribution. All resolve at runtime against DLLs that
-// ship with every Windows install (kernel32/advapi32/ws2_32 are always present;
-// ucrtbase.dll ships with Windows 10+).
-var winLinkFiles = []string{"kernel32.lib", "advapi32.lib", "ws2_32.lib", "ucrtbase.lib"}
+// ship with every Windows install (kernel32/advapi32/ws2_32/secur32/crypt32/
+// ncrypt are always present; ucrtbase.dll ships with Windows 10+).
+//
+// secur32/crypt32/ncrypt back the SChannel TLS backend (T1598). They add no new
+// external dependency: the libs come from the same license-clean .def →
+// llvm-dlltool machinery, and lld-link emits no import directory entry for a lib
+// whose symbols are never referenced, so a non-TLS .exe is unchanged.
+var winLinkFiles = []string{
+	"kernel32.lib", "advapi32.lib", "ws2_32.lib", "ucrtbase.lib",
+	"secur32.lib", "crypt32.lib", "ncrypt.lib",
+}
 
 // winLinkArchDir returns the import-lib subdirectory for the given target
 // triple. Only x86_64 is supported today (arm64 Windows is a follow-up).

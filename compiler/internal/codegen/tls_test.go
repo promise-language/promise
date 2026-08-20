@@ -300,3 +300,60 @@ func TestTLSBridgeUnknownPosixTargetStubs(t *testing.T) {
 		}
 	}
 }
+
+// TestTLSBridgeWindowsEmitsSChannel verifies that a program declaring a
+// promise_tls_* extern on a Windows target gets the real SChannel backend rather
+// than the unsupported-platform stubs: the bridge routes to pal_tls_new, which
+// composes an SSPI credential, and no OpenSSL symbol is pulled in (T1598).
+func TestTLSBridgeWindowsEmitsSChannel(t *testing.T) {
+	src := "_tls_new(int ctx) int `extern(\"promise_tls_new\");\n" +
+		"main() { int x = _tls_new(0); }\n"
+	file, info := parseWithStd(t, src)
+	result := Compile(file, info, "x86_64-pc-windows-msvc")
+	ir := result.Module.String()
+
+	assertContains(t, ir, "@promise_tls_new")
+	assertContains(t, ir, "@pal_tls_new")
+	assertContains(t, ir, "@AcquireCredentialsHandleA") // real SSPI symbol for the link
+	if strings.Contains(ir, "@SSL_new") || strings.Contains(ir, "@SSL_CTX_new") {
+		t.Error("Windows target must not reference OpenSSL symbols")
+	}
+	if !result.NeedsTLS() {
+		t.Error("NeedsTLS() must be true for a program declaring a promise_tls_* extern")
+	}
+}
+
+// TestTLSBridgeAllShapesWindows compiles the all-externs program for Windows so
+// every bridge shape is body-filled against the SChannel PAL, pinning that the
+// bridge layer is genuinely backend-agnostic: the exact same wirings that drive
+// OpenSSL on Linux drive SSPI here.
+func TestTLSBridgeAllShapesWindows(t *testing.T) {
+	file, info := parseWithStd(t, tlsAllExternsSrc)
+	result := Compile(file, info, "x86_64-pc-windows-msvc")
+	ir := result.Module.String()
+
+	for _, w := range []string{
+		"pal_tls_ctx_new_client", "pal_tls_ctx_new_server", "pal_tls_ctx_free",
+		"pal_tls_ctx_set_verify", "pal_tls_ctx_set_min_version", "pal_tls_ctx_add_ca",
+		"pal_tls_ctx_use_cert", "pal_tls_ctx_use_key", "pal_tls_ctx_load_default_trust",
+		"pal_tls_new", "pal_tls_set_connect_state", "pal_tls_set_accept_state",
+		"pal_tls_set_sni", "pal_tls_set_verify_host", "pal_tls_do_handshake",
+		"pal_tls_read", "pal_tls_write", "pal_tls_shutdown",
+		"pal_tls_bio_read_out", "pal_tls_bio_write_in", "pal_tls_bio_pending_out",
+		"pal_tls_get_version", "pal_tls_get_cipher", "pal_tls_get_verify_result",
+		"pal_tls_free",
+	} {
+		assertContains(t, ir, "@"+w+"(")
+	}
+	// Handshake and record crypto go through SSPI, certificates through crypt32.
+	assertContains(t, ir, "@InitializeSecurityContextA")
+	assertContains(t, ir, "@AcceptSecurityContext")
+	assertContains(t, ir, "@DecryptMessage")
+	assertContains(t, ir, "@EncryptMessage")
+	assertContains(t, ir, "@CertGetCertificateChain")
+	// String-return bridges still copy into a fresh Promise string.
+	assertContains(t, ir, "@promise_string_new")
+	if !result.NeedsTLS() {
+		t.Error("NeedsTLS() must be true when promise_tls_* externs are bridged")
+	}
+}

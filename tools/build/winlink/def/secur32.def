@@ -1,0 +1,17 @@
+; secur32.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). Provides the SSPI entry points the SChannel TLS backend
+; drives (T1598, compiler/internal/codegen/pal/tls_windows.go). secur32.dll
+; ships with every Windows install and name-exports (or forwards) all of these.
+; See kernel32.def header. Regenerate import libs with: bin/release winlink
+LIBRARY secur32.dll
+EXPORTS
+AcceptSecurityContext
+AcquireCredentialsHandleA
+ApplyControlToken
+DecryptMessage
+DeleteSecurityContext
+EncryptMessage
+FreeContextBuffer
+FreeCredentialsHandle
+InitializeSecurityContextA
+QueryContextAttributesA

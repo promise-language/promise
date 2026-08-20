@@ -29,6 +29,7 @@ GetSystemTimePreciseAsFileTime
 InitializeConditionVariable
 InitializeCriticalSection
 LeaveCriticalSection
+MultiByteToWideChar
 QueryPerformanceCounter
 QueryPerformanceFrequency
 ReadFile
@@ -40,4 +41,5 @@ TerminateProcess
 WaitForSingleObject
 WakeAllConditionVariable
 WakeConditionVariable
+WideCharToMultiByte
 WriteFile

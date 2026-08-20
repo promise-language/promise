@@ -1,0 +1,13 @@
+; ncrypt.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). Provides the CNG key-storage entry points the SChannel TLS
+; backend uses to import a PEM private key as a named CNG key (T1598,
+; compiler/internal/codegen/pal/tls_windows.go). A CNG key (rather than a legacy
+; CAPI CSP key) is what lets SChannel offer TLS 1.3 server-side, since 1.3
+; requires RSA-PSS signatures that legacy CSPs cannot produce. ncrypt.dll ships
+; with every Windows install. See kernel32.def header.
+LIBRARY ncrypt.dll
+EXPORTS
+NCryptDeleteKey
+NCryptFreeObject
+NCryptImportKey
+NCryptOpenStorageProvider

@@ -1,0 +1,18 @@
+; crypt32.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). Provides the certificate/PEM-decode and chain-validation
+; entry points the SChannel TLS backend uses (T1598,
+; compiler/internal/codegen/pal/tls_windows.go). crypt32.dll ships with every
+; Windows install. See kernel32.def header. Regenerate with: bin/release winlink
+LIBRARY crypt32.dll
+EXPORTS
+CertAddEncodedCertificateToStore
+CertCloseStore
+CertCreateCertificateContext
+CertFindCertificateInStore
+CertFreeCertificateChain
+CertFreeCertificateContext
+CertGetCertificateChain
+CertOpenStore
+CertSetCertificateContextProperty
+CertVerifyCertificateChainPolicy
+CryptStringToBinaryA

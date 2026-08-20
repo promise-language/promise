@@ -82,22 +82,26 @@ func (c *Compiler) defineTLSPALBodies() {
 	// program imports the tls module (NeedsTLS reads it). See layout.go.
 	c.needsTLS = true
 
-	// Select the backend for this target. Targets without one (Windows — T1598,
-	// wasm) get inert stubs so the module still compiles and links, failing
-	// cleanly at runtime with TlsError(kind: unsupported) — the constructors
-	// observe a 0 handle.
+	// Pick the backend by PAL. Linux drives the vendored OpenSSL memory BIOs
+	// (T1596); macOS drives Security.framework (T1599); Windows drives SChannel
+	// (T1598). Targets with none — WASM — get inert stubs so the module still
+	// compiles and links, failing cleanly at runtime with TlsError(kind:
+	// unsupported): the constructors observe a 0 handle.
 	triple := c.module.TargetTriple
-	p, ok := pal.ForTarget(triple).(*pal.PosixPAL)
-	if !ok {
-		c.defineTLSStubBodies(irFuncByName)
-		return
-	}
 	var pf map[string]*ir.Func
-	switch {
-	case strings.Contains(triple, "linux"):
-		pf = p.EmitTLS(c.module) // vendored static OpenSSL (T1596)
-	case strings.Contains(triple, "darwin"), strings.Contains(triple, "apple"):
-		pf = p.EmitTLSSecureTransport(c.module) // Security.framework (T1599)
+	switch p := pal.ForTarget(triple).(type) {
+	case *pal.PosixPAL:
+		switch {
+		case strings.Contains(triple, "linux"):
+			pf = p.EmitTLS(c.module) // vendored static OpenSSL (T1596)
+		case strings.Contains(triple, "darwin"), strings.Contains(triple, "apple"):
+			pf = p.EmitTLSSecureTransport(c.module) // Security.framework (T1599)
+		default:
+			c.defineTLSStubBodies(irFuncByName)
+			return
+		}
+	case *pal.WindowsPAL:
+		pf = p.EmitTLS(c.module) // SChannel (T1598)
 	default:
 		c.defineTLSStubBodies(irFuncByName)
 		return

@@ -1,6 +1,9 @@
 package codegen
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -113,4 +116,74 @@ func TestEmitWindowsEntryGuard(t *testing.T) {
 			t.Errorf("after double emitWindowsEntry: %q defined %d times, want 1", sym, got)
 		}
 	}
+}
+
+// TestWindowsExternalSymbolsAreExported audits the whole external link surface:
+// every `declare` left in a Windows program's IR must be either defined in the
+// same module or listed in one of the .def symbol lists that generate the import
+// libraries. A hand-written extern nobody exports still links against the
+// self-generated libs but fails at *load* time with a missing-entry-point error,
+// which is a miserable way to find out — and the SChannel TLS backend (T1598)
+// adds ~40 such externs by hand across secur32/crypt32/ncrypt.
+func TestWindowsExternalSymbolsAreExported(t *testing.T) {
+	exported := winlinkExportedSymbols(t)
+	declRe := regexp.MustCompile(`(?m)^declare[^@]*@"?([A-Za-z0-9_.$]+)"?\(`)
+
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"plain", `main() { print_line("hi"); }`},
+		{"tls", tlsAllExternsSrc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, info := parseWithStd(t, tc.src)
+			result := Compile(file, info, winTarget)
+
+			defined := make(map[string]bool)
+			for _, fn := range result.Module.Funcs {
+				if len(fn.Blocks) > 0 {
+					defined[fn.Name()] = true
+				}
+			}
+			for _, m := range declRe.FindAllStringSubmatch(result.Module.String(), -1) {
+				sym := m[1]
+				// llvm.* are intrinsics the backend lowers; they never reach the linker.
+				if defined[sym] || exported[sym] || strings.HasPrefix(sym, "llvm.") {
+					continue
+				}
+				t.Errorf("external symbol @%s is declared but exported by no .def in %s "+
+					"— add it to the matching import-lib symbol list", sym, winlinkDefDirForTest)
+			}
+		})
+	}
+}
+
+// winlinkDefDirForTest is the .def source directory, relative to the repo root.
+const winlinkDefDirForTest = "tools/build/winlink/def"
+
+// winlinkExportedSymbols parses every .def symbol list into a set.
+func winlinkExportedSymbols(t *testing.T) map[string]bool {
+	t.Helper()
+	defs, err := filepath.Glob(filepath.Join("..", "..", "..",
+		filepath.FromSlash(winlinkDefDirForTest), "*.def"))
+	if err != nil || len(defs) == 0 {
+		t.Fatalf("no .def symbol lists found (err=%v)", err)
+	}
+	exported := make(map[string]bool)
+	for _, path := range defs {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, ";") ||
+				strings.HasPrefix(line, "LIBRARY") || line == "EXPORTS" {
+				continue
+			}
+			exported[line] = true
+		}
+	}
+	return exported
 }

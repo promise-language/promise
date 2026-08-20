@@ -88,7 +88,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise build           Compile the project/file in the current directory
   promise build <dir>     Compile the project/file in <dir> (after promise init)
   promise build file.pr   Compile a single file to an executable
-  promise run file.pr     Compile and run
+  promise run file.pr     Compile and run (append -- args to forward argv to os.args)
   promise test file.pr    Run tests
   promise exec '<code>'   Run inline code (failable main, ?^ works)
   promise package add <name|url>   Add an external dependency (git URL or catalog name)

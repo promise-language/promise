@@ -39,7 +39,7 @@ var groupOrder = []string{
 var commandTree = []*cmdNode{
 	// Compile & run
 	{name: "build", group: "Compile & run", summary: "Compile a Promise source file or project to an executable"},
-	{name: "run", group: "Compile & run", summary: "Compile and run a Promise source file or project"},
+	{name: "run", group: "Compile & run", summary: "Compile and run a Promise source file or project", help: func(w io.Writer) { printRunUsage(w) }},
 	{name: "exec", group: "Compile & run", summary: "Execute inline Promise code (auto-wraps in failable main)"},
 	{name: "test", group: "Compile & run", summary: "Discover and run test functions"},
 	{name: "check", group: "Compile & run", summary: "Run semantic analysis (type checking) only"},
@@ -256,6 +256,11 @@ func handleHelp(args []string) bool {
 	}
 	hasFlag := false
 	for _, a := range args {
+		if a == "--" {
+			// Everything after a bare `--` is the run target's argv (T1426),
+			// not a help flag — don't hijack a forwarded `-h`/`-help`.
+			break
+		}
 		if isHelpFlag(a) {
 			hasFlag = true
 			break

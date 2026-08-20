@@ -132,6 +132,34 @@ func TestRouteHelpEmptyPrintsOverview(t *testing.T) {
 	}
 }
 
+// TestRunHelpDocumentsSeparator verifies `promise run --help` (the rich renderer
+// wired via the run node's help func) documents the `--` argv-forwarding
+// convention (T1426): the usage line advertises `[-- program-args...]`, an
+// example shows argv reaching `os.args`, and the prose states that everything
+// after `--` goes to the program. This is the discoverability half of the task
+// — the CLI is useless if agents can't find the convention from --help.
+func TestRunHelpDocumentsSeparator(t *testing.T) {
+	node, matched, ok := findNode([]string{"run"})
+	if !ok {
+		t.Fatal("run node not found")
+	}
+	if node.help == nil {
+		t.Fatal("run node has no rich help renderer (T1426 wiring regressed)")
+	}
+	var buf strings.Builder
+	printNodeHelp(&buf, node, matched)
+	out := buf.String()
+	for _, want := range []string{
+		"-- program-args...", // usage line advertises the separator
+		"os.args",            // ties the convention to the observable effect
+		"after a bare `--`",  // prose explains the rule
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("run help missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
 // TestPrintNodeHelpSynthesizedLeaf verifies a leaf without a rich renderer gets a
 // synthesized usage synopsis plus its summary.
 func TestPrintNodeHelpSynthesizedLeaf(t *testing.T) {
@@ -219,6 +247,35 @@ func TestHelpFlagsCollapseViaNormalize(t *testing.T) {
 		}
 		if !strings.Contains(out, "promise build") {
 			t.Errorf("build %s help missing usage line, got:\n%s", flag, out)
+		}
+	}
+}
+
+// TestNormalizeArgsStopsAtSeparator verifies that a bare `--` halts flag
+// canonicalization so a run target's argv (T1426) is forwarded verbatim — no
+// `--flag → -flag` rewrite and no `=`/`:` value splitting past the separator.
+func TestNormalizeArgsStopsAtSeparator(t *testing.T) {
+	got := normalizeArgs([]string{"run", "app.pr", "--", "--verbose", "-o=x"})
+	want := []string{"run", "app.pr", "--", "--verbose", "-o=x"}
+	if !slicesEqual(got, want) {
+		t.Errorf("normalizeArgs = %#v, want %#v", got, want)
+	}
+	// Sanity check: without the separator, the same flags WOULD be rewritten,
+	// proving the separator is what protects the tail.
+	rewritten := normalizeArgs([]string{"run", "app.pr", "--verbose", "-o=x"})
+	if slicesEqual(rewritten, want[:2]) {
+		t.Fatalf("expected pre-separator flags to be rewritten, got %#v", rewritten)
+	}
+}
+
+// TestHandleHelpForwardsProgramFlags verifies handleHelp does not hijack a
+// `-h`/`-help` that appears after a bare `--` — it belongs to the run target
+// (T1426), so help must decline and let dispatch forward it.
+func TestHandleHelpForwardsProgramFlags(t *testing.T) {
+	for _, tail := range []string{"-h", "-help"} {
+		args := []string{"run", "app.pr", "--", tail}
+		if handleHelp(args) {
+			t.Errorf("handleHelp(%v) = true, want false (tail is program argv)", args)
 		}
 	}
 }

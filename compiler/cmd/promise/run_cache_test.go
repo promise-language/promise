@@ -413,6 +413,7 @@ func TestParseRunArgs(t *testing.T) {
 		wantFilename    string
 		wantTarget      string
 		wantReleaseMode bool
+		wantProgArgs    []string
 	}{
 		{
 			name:         "single file",
@@ -452,10 +453,41 @@ func TestParseRunArgs(t *testing.T) {
 			args:         []string{},
 			wantFilename: "",
 		},
+		{
+			name:         "program args after separator (T1426)",
+			args:         []string{"app.pr", "--", "add", "a.txt"},
+			wantFilename: "app.pr",
+			wantProgArgs: []string{"add", "a.txt"},
+		},
+		{
+			name:            "flags before separator, program flags after",
+			args:            []string{"-release", "app.pr", "--", "--verbose"},
+			wantFilename:    "app.pr",
+			wantReleaseMode: true,
+			wantProgArgs:    []string{"--verbose"},
+		},
+		{
+			name:         "separator with no source runs CWD project with args",
+			args:         []string{"--", "x"},
+			wantFilename: "",
+			wantProgArgs: []string{"x"},
+		},
+		{
+			name:         "trailing separator yields empty program args",
+			args:         []string{"app.pr", "--"},
+			wantFilename: "app.pr",
+			wantProgArgs: nil,
+		},
+		{
+			name:         "pre-separator last-wins still applies (T1604 scope untouched)",
+			args:         []string{"foo.pr", "bar.pr"},
+			wantFilename: "bar.pr",
+			wantProgArgs: nil,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			filename, target, releaseMode := parseRunArgs(tc.args)
+			filename, target, releaseMode, progArgs := parseRunArgs(tc.args)
 			if filename != tc.wantFilename {
 				t.Errorf("filename = %q, want %q", filename, tc.wantFilename)
 			}
@@ -465,6 +497,23 @@ func TestParseRunArgs(t *testing.T) {
 			if releaseMode != tc.wantReleaseMode {
 				t.Errorf("releaseMode = %v, want %v", releaseMode, tc.wantReleaseMode)
 			}
+			if !slicesEqual(progArgs, tc.wantProgArgs) {
+				t.Errorf("progArgs = %#v, want %#v", progArgs, tc.wantProgArgs)
+			}
 		})
 	}
+}
+
+// slicesEqual reports whether two string slices have identical contents,
+// treating nil and empty as equal.
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

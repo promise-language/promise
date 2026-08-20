@@ -43,8 +43,14 @@ func normalizeArgs(args []string) []string {
 		return nil
 	}
 	var result []string
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+	for i, arg := range args {
+		if arg == "--" {
+			// Program-args separator (T1426): everything after the first bare
+			// `--` is the run target's argv — pass the marker and the whole tail
+			// through untouched so program flags/values aren't mangled.
+			return append(result, args[i:]...)
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			result = append(result, arg)
 			continue
 		}
@@ -558,6 +564,13 @@ func buildToFile(args []string, cmd string) (filename, outputFile, target string
 	componentMode := false
 	adaptPath := ""
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			// Program-args separator (T1426): the tail is the run target's argv,
+			// forwarded by runRun via parseRunArgs — never source files. (A plain
+			// `promise build x.pr -- y` harmlessly ignores the tail; T1604 makes
+			// it an error.)
+			break
+		}
 		switch args[i] {
 		case "-o":
 			if i+1 < len(args) {
@@ -713,9 +726,17 @@ func hasMainFunc(info *sema.Info) bool {
 
 // parseRunArgs extracts the filename, target triple, and releaseMode from
 // `promise run` arguments using the same last-wins semantics as buildToFile,
-// so the cache key aligns with what actually gets compiled.
-func parseRunArgs(args []string) (filename, target string, releaseMode bool) {
+// so the cache key aligns with what actually gets compiled. Everything after
+// the first bare `--` is returned as progArgs — the program's argv (T1426) —
+// and is deliberately excluded from the filename slot and the cache key (argv
+// affects runtime only, not the compiled artifact).
+func parseRunArgs(args []string) (filename, target string, releaseMode bool, progArgs []string) {
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			// May be empty for a trailing `--`; nil-safe for exec forwarding.
+			progArgs = args[i+1:]
+			break
+		}
 		switch args[i] {
 		case "-o":
 			// Consume the arg value so it isn't misread as the filename.
@@ -745,7 +766,7 @@ func parseRunArgs(args []string) (filename, target string, releaseMode bool) {
 func runRun(args []string) {
 	// Parse args locally to compute the cache key before invoking buildToFile.
 	// buildToFile reparses the same args on cache miss; that's cheap.
-	filename, target, releaseMode := parseRunArgs(args)
+	filename, target, releaseMode, progArgs := parseRunArgs(args)
 
 	// Validate -target here so we reject bogus values before acquiring the
 	// build-cache lock, computing a cache key, or creating a temp file (which
@@ -796,7 +817,7 @@ func runRun(args []string) {
 			if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
 				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(cacheLabel), cacheKey[:16])
 			}
-			execRunBinary(cachedBin)
+			execRunBinary(cachedBin, progArgs)
 			return
 		}
 	}
@@ -845,13 +866,14 @@ func runRun(args []string) {
 		}
 	}
 
-	execRunBinary(tmpOutput.Name())
+	execRunBinary(tmpOutput.Name(), progArgs)
 }
 
 // execRunBinary runs the given binary with the current process's stdio wired
-// through, and exits with the child's exit code on failure.
-func execRunBinary(path string) {
-	cmd := exec.Command(path)
+// through, forwarding progArgs as the program's argv (T1426), and exits with the
+// child's exit code on failure.
+func execRunBinary(path string, progArgs []string) {
+	cmd := exec.Command(path, progArgs...)
 	isolateProcessGroup(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -8541,6 +8563,21 @@ func runPkgUpdate(args []string) {
 	}
 
 	fmt.Printf("\nUpdated %d of %d dependencies\n", updated, len(entries))
+}
+
+func printRunUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: promise run [target] [-- program-args...]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Compile and run a Promise source file or project.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  promise run .                      run the project in the current directory")
+	fmt.Fprintln(w, "  promise run main.pr                run a single file")
+	fmt.Fprintln(w, "  promise run . -- add a.txt         forward argv → os.args == [\"add\", \"a.txt\"]")
+	fmt.Fprintln(w, "  promise run main.pr -- commit -m \"hi\"")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Everything after a bare `--` is passed to the program as its arguments")
+	fmt.Fprintln(w, "(os.args); before `--` only promise flags and the target are accepted.")
 }
 
 func printInitUsage(w io.Writer) {

@@ -362,15 +362,46 @@ func TestUsageErrorsToStderr(t *testing.T) {
 	case "catalog-unknown":
 		runCatalog([]string{"frobnicate"})
 		return
+	case "run-typo-release":
+		// Headline T1604 repro: a typo'd --release must error, not silently
+		// produce a debug build. Args arrive pre-normalized (--relase → -relase).
+		runRun(normalizeArgs([]string{"--relase", "main.pr"}))
+		return
+	case "run-two-positionals":
+		runRun(normalizeArgs([]string{"a.pr", "b.pr"}))
+		return
+	case "build-unknown-flag":
+		runBuild(normalizeArgs([]string{"x.pr", "--optimize=3"}))
+		return
+	case "emit-ir-unknown-flag":
+		runEmitIR(normalizeArgs([]string{"--optimize=3", "main.pr"}))
+		return
+	case "emit-ir-two-positionals":
+		runEmitIR(normalizeArgs([]string{"a.pr", "b.pr"}))
+		return
+	case "exec-unknown-flag":
+		// T1604 for exec: an unknown flag is an error, NOT swallowed into the
+		// free-form source text (exec allows many positionals). If it were
+		// swallowed the child would try to compile `-optimize` as source and fail
+		// with a parse/type error, not the strict "unknown flag" diagnostic.
+		runExec(normalizeArgs([]string{"--optimize=3", "print_line(1)"}))
+		return
 	}
 
 	cases := []struct {
 		name    string
 		wantErr string // substring expected on stderr
+		noHelp  bool   // T1604 flag errors point at `--`/the arg, not `promise help`
 	}{
-		{"route-help-unknown", "unknown help topic"},
-		{"package-unknown", "unknown package subcommand"},
-		{"catalog-unknown", "unknown catalog subcommand"},
+		{"route-help-unknown", "unknown help topic", false},
+		{"package-unknown", "unknown package subcommand", false},
+		{"catalog-unknown", "unknown catalog subcommand", false},
+		{"run-typo-release", "unknown flag -relase", true},
+		{"run-two-positionals", "unexpected extra argument", true},
+		{"build-unknown-flag", "unknown flag -optimize", true},
+		{"emit-ir-unknown-flag", "unknown flag -optimize", true},
+		{"emit-ir-two-positionals", "unexpected extra argument", true},
+		{"exec-unknown-flag", "unknown flag -optimize", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -386,8 +417,9 @@ func TestUsageErrorsToStderr(t *testing.T) {
 			if !strings.Contains(stderr.String(), tc.wantErr) {
 				t.Errorf("%s: stderr missing %q, got:\n%s", tc.name, tc.wantErr, stderr.String())
 			}
-			// Every usage error must point at help (the short pointer, §1).
-			if !strings.Contains(stderr.String(), "promise help") {
+			// Every usage error must point at help (the short pointer, §1) — except
+			// strict-flag errors (T1604), whose pointer is `--`/the offending arg.
+			if !tc.noHelp && !strings.Contains(stderr.String(), "promise help") {
 				t.Errorf("%s: stderr missing help pointer, got:\n%s", tc.name, stderr.String())
 			}
 			if strings.TrimSpace(stdout.String()) != "" {

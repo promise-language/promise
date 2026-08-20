@@ -414,6 +414,7 @@ func TestParseRunArgs(t *testing.T) {
 		wantTarget      string
 		wantReleaseMode bool
 		wantProgArgs    []string
+		wantErr         bool
 	}{
 		{
 			name:         "single file",
@@ -421,9 +422,9 @@ func TestParseRunArgs(t *testing.T) {
 			wantFilename: "main.pr",
 		},
 		{
-			name:         "last-wins for multiple filenames (matches buildToFile)",
-			args:         []string{"foo.pr", "bar.pr"},
-			wantFilename: "bar.pr",
+			name:    "second positional is an error (T1604)",
+			args:    []string{"foo.pr", "bar.pr"},
+			wantErr: true,
 		},
 		{
 			name:         "target flag consumed before filename",
@@ -438,9 +439,9 @@ func TestParseRunArgs(t *testing.T) {
 			wantReleaseMode: true,
 		},
 		{
-			name:         "-o value is consumed (not treated as filename)",
-			args:         []string{"-o", "out.bin", "main.pr"},
-			wantFilename: "main.pr",
+			name:    "run rejects -o (compiles to temp/cache, cannot honor an output path) (T1604)",
+			args:    []string{"-o", "out.bin", "main.pr"},
+			wantErr: true,
 		},
 		{
 			name:         "flags interleaved with filename",
@@ -479,15 +480,36 @@ func TestParseRunArgs(t *testing.T) {
 			wantProgArgs: nil,
 		},
 		{
-			name:         "pre-separator last-wins still applies (T1604 scope untouched)",
-			args:         []string{"foo.pr", "bar.pr"},
-			wantFilename: "bar.pr",
-			wantProgArgs: nil,
+			name:         "program args after separator preserved with pre-`--` file (T1426)",
+			args:         []string{"app.pr", "--", "--flag"},
+			wantFilename: "app.pr",
+			wantProgArgs: []string{"--flag"},
+		},
+		{
+			name:    "unknown flag before separator is an error (T1604)",
+			args:    []string{"-optimize", "3", "main.pr"},
+			wantErr: true,
+		},
+		{
+			name:    "typo'd --release rejected instead of silent debug build (T1604)",
+			args:    []string{"-relase", "main.pr"},
+			wantErr: true,
+		},
+		{
+			name:    "run rejects -adapt (cannot produce a component) (T1604)",
+			args:    []string{"-adapt", "x.wit", "main.pr"},
+			wantErr: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			filename, target, releaseMode, progArgs := parseRunArgs(tc.args)
+			filename, target, releaseMode, progArgs, err := parseRunArgs(tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
 			if filename != tc.wantFilename {
 				t.Errorf("filename = %q, want %q", filename, tc.wantFilename)
 			}

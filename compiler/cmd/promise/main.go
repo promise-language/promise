@@ -437,17 +437,17 @@ func runLegacy(args []string) {
 
 // runEmitIR compiles a .pr file and prints the generated LLVM IR to stdout.
 func runEmitIR(args []string) {
-	var filename, target string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-target":
-			if i+1 < len(args) {
-				target = args[i+1]
-				i++
-			}
-		default:
-			filename = args[i]
-		}
+	var target string
+	res, err := parseCLIArgs("emit-ir", args, flagSpec{
+		value: map[string]*string{"target": &target},
+	}, false, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var filename string
+	if len(res.positionals) > 0 {
+		filename = res.positionals[0]
 	}
 	if filename == "" {
 		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
@@ -563,41 +563,26 @@ func buildToFile(args []string, cmd string) (filename, outputFile, target string
 	releaseMode := false
 	componentMode := false
 	adaptPath := ""
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--" {
-			// Program-args separator (T1426): the tail is the run target's argv,
-			// forwarded by runRun via parseRunArgs — never source files. (A plain
-			// `promise build x.pr -- y` harmlessly ignores the tail; T1604 makes
-			// it an error.)
-			break
-		}
-		switch args[i] {
-		case "-o":
-			if i+1 < len(args) {
-				outputFile = args[i+1]
-				i++
-			}
-		case "-target":
-			if i+1 < len(args) {
-				target = args[i+1]
-				i++
-			}
-		case "-component":
-			componentMode = true
-		case "-adapt":
-			if i+1 < len(args) {
-				adaptPath = args[i+1]
-				i++
-			}
-		case "-debug":
-			debugMode = true
-		case "-release":
-			releaseMode = true
-		case "-time-phases":
-			timePhases = true
-		default:
-			filename = args[i]
-		}
+	// Strict parse (T1604): unknown flags and a stray second positional are
+	// errors, not silently-swallowed "filenames". buildToFile never launches the
+	// program, so a bare `--` is rejected here — runRun strips the program-argv
+	// tail (T1426) before calling buildToFile, so the direct-build path is the
+	// only one that can see `--`, and `promise build x.pr -- y` is now an error.
+	res, err := parseCLIArgs(cmd, args, flagSpec{
+		value: map[string]*string{"o": &outputFile, "target": &target, "adapt": &adaptPath},
+		flag: map[string]*bool{
+			"component":   &componentMode,
+			"debug":       &debugMode,
+			"release":     &releaseMode,
+			"time-phases": &timePhases,
+		},
+	}, false, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if len(res.positionals) > 0 {
+		filename = res.positionals[0]
 	}
 
 	if debugMode && releaseMode {
@@ -725,38 +710,34 @@ func hasMainFunc(info *sema.Info) bool {
 }
 
 // parseRunArgs extracts the filename, target triple, and releaseMode from
-// `promise run` arguments using the same last-wins semantics as buildToFile,
-// so the cache key aligns with what actually gets compiled. Everything after
-// the first bare `--` is returned as progArgs — the program's argv (T1426) —
-// and is deliberately excluded from the filename slot and the cache key (argv
-// affects runtime only, not the compiled artifact).
-func parseRunArgs(args []string) (filename, target string, releaseMode bool, progArgs []string) {
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--" {
-			// May be empty for a trailing `--`; nil-safe for exec forwarding.
-			progArgs = args[i+1:]
-			break
-		}
-		switch args[i] {
-		case "-o":
-			// Consume the arg value so it isn't misread as the filename.
-			if i+1 < len(args) {
-				i++
-			}
-		case "-target":
-			if i+1 < len(args) {
-				target = args[i+1]
-				i++
-			}
-		case "-release":
-			releaseMode = true
-		case "-debug", "-time-phases":
-			// no-op for cache key: -debug is default; -time-phases doesn't affect output
-		default:
-			filename = args[i]
-		}
+// `promise run` arguments via the shared strict parser (T1604), so the cache
+// key aligns with what buildToFile actually compiles and a mistyped flag is an
+// error rather than a silent debug build. Everything after the first bare `--`
+// is returned as progArgs — the program's argv (T1426) — and is deliberately
+// excluded from the filename slot and the cache key (argv affects runtime only,
+// not the compiled artifact). Returns an error for unknown flags or a stray
+// second positional.
+func parseRunArgs(args []string) (filename, target string, releaseMode bool, progArgs []string, err error) {
+	// -debug/-time-phases are cache-neutral: consumed into throwaways so they
+	// aren't misread as the filename, but not reflected in the key (-debug is the
+	// default, -time-phases is output-neutral). run deliberately omits
+	// -component/-adapt/-o: it always compiles to a temp/cache path and execs it,
+	// so a user -o cannot be honored (worse — buildToFile would override the temp
+	// path and run would exec an empty file). Those now error instead of being
+	// silently ignored (or silently breaking, for -o) (T1604).
+	var debug, tp bool
+	res, perr := parseCLIArgs("run", args, flagSpec{
+		value: map[string]*string{"target": &target},
+		flag:  map[string]*bool{"release": &releaseMode, "debug": &debug, "time-phases": &tp},
+	}, true, false)
+	if perr != nil {
+		return "", "", false, nil, perr
 	}
-	return
+	if len(res.positionals) > 0 {
+		filename = res.positionals[0]
+	}
+	progArgs = res.progArgs
+	return filename, target, releaseMode, progArgs, nil
 }
 
 // runRun compiles and immediately runs a .pr file. The compiled binary is
@@ -766,7 +747,11 @@ func parseRunArgs(args []string) (filename, target string, releaseMode bool, pro
 func runRun(args []string) {
 	// Parse args locally to compute the cache key before invoking buildToFile.
 	// buildToFile reparses the same args on cache miss; that's cheap.
-	filename, target, releaseMode, progArgs := parseRunArgs(args)
+	filename, target, releaseMode, progArgs, err := parseRunArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Validate -target here so we reject bogus values before acquiring the
 	// build-cache lock, computing a cache key, or creating a temp file (which
@@ -851,8 +836,19 @@ func runRun(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
+	// buildToFile now rejects a bare `--` (it never launches the program), so
+	// strip the program-argv tail (T1426) before handing it the compile args —
+	// progArgs was already captured by parseRunArgs and is forwarded to the
+	// binary below via execRunBinary.
+	compileArgs := args
+	for i, a := range args {
+		if a == "--" {
+			compileArgs = args[:i]
+			break
+		}
+	}
 	buildArgs := []string{"-o", tmpOutput.Name()}
-	buildArgs = append(buildArgs, args...)
+	buildArgs = append(buildArgs, compileArgs...)
 	buildToFile(buildArgs, "build")
 
 	// Save the compiled binary to the cache for future runs.
@@ -7513,25 +7509,28 @@ func autoInjectCatalogUses(source string) string {
 func runExec(args []string) {
 	timeout := 60 * time.Second
 	target := ""
-	var remaining []string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-timeout" && i+1 < len(args) {
-			d, err := parseTimeoutArg(args[i+1])
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			timeout = d
-			i++
-		} else if args[i] == "-target" && i+1 < len(args) {
-			target = args[i+1]
-			i++
-		} else if args[i] == "-time-phases" {
-			timePhases = true
-		} else {
-			remaining = append(remaining, args[i])
-		}
+	timeoutStr := ""
+	// exec takes free-form source as its positionals (joined by spaces), so it
+	// allows many positionals — but an unknown flag is still an error rather than
+	// being swallowed into the source text (T1604). exec never launches a
+	// separate program, so it does not forward args after `--`.
+	res, err := parseCLIArgs("exec", args, flagSpec{
+		value: map[string]*string{"timeout": &timeoutStr, "target": &target},
+		flag:  map[string]*bool{"time-phases": &timePhases},
+	}, false, true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+	if timeoutStr != "" {
+		d, err := parseTimeoutArg(timeoutStr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		timeout = d
+	}
+	remaining := res.positionals
 
 	checkTargetFlag(target)
 

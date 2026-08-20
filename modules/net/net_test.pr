@@ -299,13 +299,18 @@ test_stream_drop_without_close() `test(exclude: wasm) {
   _net_socket_close(sfd);
 }
 
-// T1631: a write to a socket whose peer has closed must surface as an ordinary
-// failable error. Before SIGPIPE was set to SIG_IGN at startup, that EPIPE
-// arrived as a fatal signal instead and killed the entire test binary, taking
-// every later test in the batch with it — the failure mode that broke trunk via
-// modules/tls/tls_test.pr. Reaching the end of this test at all is the core of
-// the regression check; `raised` additionally pins that the error is reported.
-test_stream_write_after_peer_close_raises_not_sigpipe() `test(exclude: wasm, timeout: "10s") {
+// T1631: a write to a socket that can no longer send must surface as an
+// ordinary failable error, never kill the process with SIGPIPE. Before SIGPIPE
+// was set to SIG_IGN at startup, that EPIPE arrived as a fatal signal and
+// killed the entire test binary, taking every later test in the batch with it —
+// the failure mode that broke trunk via modules/tls/tls_test.pr.
+//
+// Shutting down our own send half is what makes this deterministic: POSIX
+// requires a write on a socket already shut down for writing to fail with
+// EPIPE and raise SIGPIPE, with no dependence on when a peer's FIN or RST
+// happens to arrive. So the test needs no sleep and cannot race under load
+// (T1632).
+test_stream_write_after_shutdown_raises_not_sigpipe() `test(exclude: wasm, timeout: "10s") {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -316,23 +321,17 @@ test_stream_write_after_peer_close_raises_not_sigpipe() `test(exclude: wasm, tim
   int afd = _net_socket_accept_addr(sfd);
   assert(afd >= 0, "accept");
 
-  // The peer goes away entirely — both the accepted connection and the listener
-  // close — so a later write draws an RST rather than sitting in a half-open FIN.
+  // Close our own send half; the next write is required to fail.
+  client.shutdown(write: true)?!;
+
+  bool raised = false;
+  client.write("ping".bytes())? e {
+    raised = true;
+  };
+  assert(raised, "write after shutdown(write) must raise an error, not kill the process");
+
   _net_socket_close(afd);
   _net_socket_close(sfd);
-
-  // The first write typically lands in the local send buffer and reports
-  // success; once the RST arrives, a subsequent write hits EPIPE.
-  u8[] data = "ping".bytes();
-  bool raised = false;
-  for i in 0..8 {
-    client.write(data)? e {
-      raised = true;
-    };
-    sleep(Duration.from_millis(20));
-  }
-  assert(raised, "write to a closed peer must raise an error, not kill the process");
-
   client.close()? e {
   };
 }

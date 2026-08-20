@@ -6,7 +6,7 @@ Statically-typed language designed for AI-agent efficiency — and written by AI
 
 **Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Open any one `.pr` file and you know what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic. The full rationale for these decisions is in the [Language Design](docs/language-design.md) specification.
 
-Promise is also a bet: that an AI agent, with limited human oversight, can build large, complex, *high-quality* software — not throwaway snippets, but systems you maintain for years. This compiler is the first evidence: it was **built by AI agents**, on a single $200/month subscription.
+Promise is also a bet: that an AI agent, with limited human oversight, can build large, complex, *high-quality* software — not throwaway snippets, but systems you maintain for years. This project is the first evidence: it was **built by AI agents**, on a single $200/month subscription.
 
 **Bounded-Autonomy Software Engineering (BASE)** is the methodology behind that bet, and Promise is the pilot project that validates it. The full methodology is in the [white paper](https://github.com/promise-language/reactor/blob/main/WHITEPAPER.md); here is the short version.
 
@@ -20,7 +20,7 @@ Building the compiler this way shows agents can build something large and real. 
 
 1. **The language and platform** — the compiler, runtime, standard library, catalog, and packaging. An early version is here today: you can install it and write against it, but it's rough — the compiler still crashes, features are missing, and the standard library is thin.
 
-2. **Bounded-Autonomy Software Engineering on Promise** — the system that builds the compiler today (durable intent, the quality floor, the resolution loop, the orchestrator), made native to any project you build on the platform. The end state: a Zoo entry is no longer a one-shot prompt but a project built with that full system around it, where humans define the intent and the design parameters, and the system implements to match.
+2. **Bounded-Autonomy Software Engineering on Promise** — the system that builds Promise today (durable intent, the quality floor, the resolution loop, the orchestrator), made native to any project you build on the platform. The end state: a Zoo entry is no longer a one-shot prompt but a project built with that full system around it, where humans define the intent and the design parameters, and the system implements to match.
 
 The first you can use today; the second is what the project is building toward.
 
@@ -195,6 +195,21 @@ promise/
 - [Language Design](docs/language-design.md) — full language specification (types, ownership, errors, concurrency, generics)
 - [Standard Library](docs/standard-library.md) — module inventory and API reference
 - [Build Tools](docs/build-tools.md) — build system architecture
+
+## Sponsoring
+
+Promise is built by AI agents directed by one maintainer, on a ~$200/month
+subscription. That budget — not anyone's time — is the hard limit on how fast the
+project improves.
+
+Which makes the math unusually simple: **roughly every $250/month is one more
+agent working full time.** The first $250 is close to a doubling. Whether it keeps
+scaling past that is an open question — you can't build on the type checker before
+it works — and measuring it is part of the point. What the money bought gets
+published monthly, including when it hits a ceiling.
+
+**[Sponsor Promise →](https://github.com/sponsors/promise-language)** · sponsors
+are listed in [SUPPORTERS.md](SUPPORTERS.md) unless they prefer to stay private.
 
 ## License
 

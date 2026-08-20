@@ -958,16 +958,16 @@ test_pool_eviction_and_take() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
-  // Accept two connections so the test has two live streams to pool, then hold
-  // them briefly so their fds stay valid for the duration of the pool checks.
-  go {
-    net.TcpStream a = listener.accept()?!;
-    net.TcpStream b = listener.accept()?!;
-    sleep(Duration.from_millis(120));
-  };
-
+  // Connect two clients and accept them in the same goroutine. connect() returns
+  // as soon as the kernel completes the handshake into the listener backlog, so
+  // no concurrent accept — and therefore no goroutine and no sleep — is needed to
+  // keep the server-side fds alive (T1615/T1632: synchronize by scope, never by a
+  // clock). The accepted streams a and b live as locals across the pool checks
+  // and drop deterministically at function end, before the leak snapshot.
   net.TcpStream s1 = net.TcpStream.connect("127.0.0.1", port)?!;
   net.TcpStream s2 = net.TcpStream.connect("127.0.0.1", port)?!;
+  net.TcpStream a = listener.accept()?!;
+  net.TcpStream b = listener.accept()?!;
 
   Pool p = Pool.create(1);
   p.put("a", move s1); // pooled: [a]
@@ -988,7 +988,6 @@ test_pool_eviction_and_take() `test(exclude: wasm, timeout: "10s") {
   assert(hit, "take(b) hits the retained connection");
 
   listener.close()?!;
-  sleep(Duration.from_millis(120));
 }
 
 // --- _exchange framing: HEAD (no body), EOF-framed, gzip failure ---

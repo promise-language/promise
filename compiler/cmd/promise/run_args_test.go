@@ -65,10 +65,7 @@ func TestRunForwardsProgramArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("promise run failed: %v\n%s", err, out)
 			}
-			var got []string
-			if s := strings.TrimSpace(string(out)); s != "" {
-				got = strings.Split(s, "\n")
-			}
+			got := splitOutputLines(out)
 			if !slicesEqual(got, tc.want) {
 				t.Errorf("forwarded argv = %#v, want %#v (raw output %q)", got, tc.want, out)
 			}
@@ -114,12 +111,21 @@ func TestRunForwardsFilenameLikeArgOnCacheMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promise run failed (buildToFile likely misread the tail as source): %v\n%s", err, out)
 	}
-	var got []string
-	if s := strings.TrimSpace(string(out)); s != "" {
-		got = strings.Split(s, "\n")
-	}
+	got := splitOutputLines(out)
 	want := []string{"ghost.pr", "extra"}
 	if !slicesEqual(got, want) {
 		t.Errorf("forwarded argv = %#v, want %#v (raw output %q)", got, want, out)
 	}
+}
+
+// splitOutputLines splits a captured program's stdout into one string per line,
+// tolerating the CRLF endings a Windows console program emits. Splitting on "\n"
+// alone leaves a trailing "\r" on every element but the last, which silently
+// fails the argv comparisons above on Windows only (T1637).
+func splitOutputLines(out []byte) []string {
+	s := strings.TrimSpace(strings.ReplaceAll(string(out), "\r\n", "\n"))
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
 }

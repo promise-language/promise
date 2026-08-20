@@ -559,7 +559,7 @@ func TestResolveEpochAwareWalkBack(t *testing.T) {
 	bin := findPromiseBinary(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	work := filepath.Join(t.TempDir(), "walkback")
+	work := filepath.Join(shortRepoDir(t), "walkback")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
 	gitRun(t, work, "config", "user.email", "t@t.com")
@@ -616,7 +616,7 @@ func TestResolveEpochAwareNoCompatible(t *testing.T) {
 	bin := findPromiseBinary(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	work := filepath.Join(t.TempDir(), "nocompat")
+	work := filepath.Join(shortRepoDir(t), "nocompat")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
 	gitRun(t, work, "config", "user.email", "t@t.com")
@@ -654,7 +654,7 @@ func TestResolveEpochAwareOnlyNewerEpochs(t *testing.T) {
 	bin := findPromiseBinary(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	work := filepath.Join(t.TempDir(), "onlynewer")
+	work := filepath.Join(shortRepoDir(t), "onlynewer")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
 	gitRun(t, work, "config", "user.email", "t@t.com")
@@ -705,7 +705,7 @@ func TestResolveEpochAwareCompatibleHappyPath(t *testing.T) {
 	bin := findPromiseBinary(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	work := filepath.Join(t.TempDir(), "happy")
+	work := filepath.Join(shortRepoDir(t), "happy")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
 	gitRun(t, work, "config", "user.email", "t@t.com")
@@ -922,7 +922,7 @@ func TestResolveEpochAwareWalksBackPastMissingManifest(t *testing.T) {
 	bin := findPromiseBinary(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
-	work := filepath.Join(t.TempDir(), "nomanifest")
+	work := filepath.Join(shortRepoDir(t), "nomanifest")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
 	gitRun(t, work, "config", "user.email", "t@t.com")

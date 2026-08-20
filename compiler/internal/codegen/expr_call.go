@@ -447,11 +447,17 @@ func (c *Compiler) resolveModuleName(ident *ast.IdentExpr) string {
 			if prefix, ok := c.moduleCanonical[mod.Path()]; ok {
 				return prefix
 			}
-			// Catalog modules have empty Path(); use catalog name as IR prefix.
-			// Catalog names are simple identifiers that pass through SanitizeIRPrefix
-			// unchanged, so catalogName == IRPrefix. This handles aliased imports
-			// like `use json as j;` where mod.Name() = "j" but IR prefix = "json".
+			// Path-less imports resolve through the import name, which is stable under
+			// aliasing (`use json as j;` still has CatalogName "json"). The looked-up
+			// prefix is required for a named-require module, whose prefix is derived
+			// from its URL rather than its import name (T1611).
 			if catName := mod.CatalogName(); catName != "" {
+				if prefix, ok := c.moduleCanonical[catName]; ok {
+					return prefix
+				}
+				// Fallback for tests that build a Compiler without ModuleInfos: a
+				// catalog name is a simple identifier, so it passes through
+				// SanitizeIRPrefix unchanged and catalogName == IRPrefix.
 				return catName
 			}
 			return mod.Name()

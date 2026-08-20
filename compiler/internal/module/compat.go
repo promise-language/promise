@@ -13,6 +13,7 @@ import (
 // per-epoch compatibility index (§9.9) — never published anywhere central.
 type CompatVerdict struct {
 	URL          string `json:"url"`
+	Subdir       string `json:"subdir,omitempty"` // module subdirectory within the repo, if any
 	Commit       string `json:"commit"`
 	Epoch        string `json:"epoch"`
 	Compatible   bool   `json:"compatible"`
@@ -34,10 +35,12 @@ func compatCacheDir() (string, error) {
 	return dir, nil
 }
 
-// compatKey is the cache key for a verdict: url@commit#epoch, normalized so two
-// spellings of the same remote share a verdict.
-func compatKey(url, commit, epoch string) string {
-	return hashString(NormalizeURL(url) + "@" + commit + "#" + epoch)
+// compatKey is the cache key for a verdict: identity@commit#epoch, normalized so
+// two spellings of the same remote share a verdict. The identity carries the
+// subdir, so two modules in one repo at the same commit are verified — and cached
+// — independently.
+func compatKey(url, subdir, commit, epoch string) string {
+	return hashString(GlobalIdentityForRemote(NormalizeURL(url), subdir) + "@" + commit + "#" + epoch)
 }
 
 // LookupCompat returns a previously recorded verdict for (url, commit, epoch), or
@@ -45,12 +48,12 @@ func compatKey(url, commit, epoch string) string {
 // build (CompilerHash mismatch) is treated as absent: a rebuilt compiler can flip
 // a verdict (a source-breaking patch within an epoch), so "verify, never assume"
 // must re-run rather than trust a stale yes/no.
-func LookupCompat(url, commit, epoch string) (*CompatVerdict, bool) {
+func LookupCompat(url, subdir, commit, epoch string) (*CompatVerdict, bool) {
 	dir, err := compatCacheDir()
 	if err != nil {
 		return nil, false
 	}
-	path := filepath.Join(dir, compatKey(url, commit, epoch)+".json")
+	path := filepath.Join(dir, compatKey(url, subdir, commit, epoch)+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
@@ -77,6 +80,6 @@ func SaveCompat(v *CompatVerdict) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, compatKey(v.URL, v.Commit, v.Epoch)+".json")
+	path := filepath.Join(dir, compatKey(v.URL, v.Subdir, v.Commit, v.Epoch)+".json")
 	return os.WriteFile(path, data, 0644)
 }

@@ -861,8 +861,10 @@ func testModuleLoaderWithConfig(projectDir string, cfg *module.Config) *moduleLo
 		for url, pin := range cfg.Require {
 			commitPins[module.NormalizeURL(url)] = pin
 		}
+		// Mirror loadModuleScopes: named pins are keyed on the module identity
+		// (URL plus subdir), so two modules in one repo keep independent pins.
 		for name, entry := range cfg.NamedRequire {
-			commitPins[module.NormalizeURL(entry.URL)] = entry.Commit
+			commitPins[module.GlobalIdentityForRemote(module.NormalizeURL(entry.URL), entry.Subdir)] = entry.Commit
 			namedRequire[name] = entry
 		}
 	}
@@ -1461,7 +1463,7 @@ parse(int x) int `+"`"+`public {
 
 	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
-	modInfo, err := loader.loadRemote("github.com/someone/parser", "parser")
+	modInfo, err := loader.loadRemote("github.com/someone/parser", "", "parser")
 	if err != nil {
 		t.Fatalf("loadRemote with [replace] failed: %v", err)
 	}
@@ -1483,7 +1485,7 @@ parse(int x) int `+"`"+`public {
 	}
 
 	// Second call should return the same module (dedup)
-	modInfo2, err := loader.loadRemote("github.com/someone/parser", "parser")
+	modInfo2, err := loader.loadRemote("github.com/someone/parser", "", "parser")
 	if err != nil {
 		t.Fatalf("second loadRemote failed: %v", err)
 	}
@@ -1522,7 +1524,7 @@ parse(int x) int `+"`"+`public { return x; }
 	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	// Import with https:// scheme — should still match the replace
-	modInfo, err := loader.loadRemote("https://github.com/someone/parser", "parser")
+	modInfo, err := loader.loadRemote("https://github.com/someone/parser", "", "parser")
 	if err != nil {
 		t.Fatalf("loadRemote with scheme variant failed: %v", err)
 	}
@@ -1545,7 +1547,7 @@ func TestLoadRemoteModuleNoPinError(t *testing.T) {
 
 	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
-	_, err := loader.loadRemote("github.com/someone/parser", "parser")
+	_, err := loader.loadRemote("github.com/someone/parser", "", "parser")
 	if err == nil {
 		t.Fatal("expected error for missing pin")
 	}
@@ -1563,7 +1565,7 @@ func TestLoadRemoteModuleNilConfig(t *testing.T) {
 	// nil config — no [require], no [replace]
 	loader := testModuleLoaderWithConfig(projectDir, nil)
 
-	_, err := loader.loadRemote("github.com/someone/parser", "parser")
+	_, err := loader.loadRemote("github.com/someone/parser", "", "parser")
 	if err == nil {
 		t.Fatal("expected error for remote module with nil config")
 	}
@@ -1658,7 +1660,7 @@ b_func() int `+"`"+`public { return 2; }
 	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	// Load A — should succeed and register its pin for shared/lib
-	_, err := loader.loadRemote("github.com/someone/mod_a", "mod_a")
+	_, err := loader.loadRemote("github.com/someone/mod_a", "", "mod_a")
 	if err != nil {
 		t.Fatalf("loadRemote mod_a: %v", err)
 	}
@@ -1670,7 +1672,7 @@ b_func() int `+"`"+`public { return 2; }
 	}
 
 	// Load B — should fail because it pins shared/lib to a different commit
-	_, err = loader.loadRemote("github.com/someone/mod_b", "mod_b")
+	_, err = loader.loadRemote("github.com/someone/mod_b", "", "mod_b")
 	if err == nil {
 		t.Fatal("expected error for conflicting pins")
 	}
@@ -1731,13 +1733,13 @@ b_func() int `+"`"+`public { return 2; }
 	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	// Load A — should succeed, its pin for shared/lib is overridden by top-level
-	_, err := loader.loadRemote("github.com/someone/mod_a", "mod_a")
+	_, err := loader.loadRemote("github.com/someone/mod_a", "", "mod_a")
 	if err != nil {
 		t.Fatalf("loadRemote mod_a: %v", err)
 	}
 
 	// Load B — should also succeed because top-level overrides both
-	_, err = loader.loadRemote("github.com/someone/mod_b", "mod_b")
+	_, err = loader.loadRemote("github.com/someone/mod_b", "", "mod_b")
 	if err != nil {
 		t.Fatalf("loadRemote mod_b should succeed with top-level override: %v", err)
 	}
@@ -1799,7 +1801,7 @@ parse(int x) int `+"`"+`public { return x + 1; }
 
 	// Simulate the dispatch: loadRemote with the named require URL
 	// (same call loadModuleScopes/loadDeps would make)
-	modInfo, err := loader.loadRemote("https://github.com/alice/parser", "parser")
+	modInfo, err := loader.loadRemote("https://github.com/alice/parser", "", "parser")
 	if err != nil {
 		t.Fatalf("loadRemote via named require: %v", err)
 	}

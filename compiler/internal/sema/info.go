@@ -102,6 +102,7 @@ type CapturedVar struct {
 // the module's merged AST file and its sema output.
 type ModuleInfo struct {
 	Name           string    // module alias (binding name used in consumer code)
+	CatalogName    string    // import name for path-less imports: catalog name, or the [require.NAME] key
 	CanonicalName  string    // module's own name from its promise.toml (display only)
 	GlobalIdentity string    // globally unique identity (URL for remote, path for local, name for catalog)
 	IRPrefix       string    // sanitized prefix for IR symbols (derived from GlobalIdentity)

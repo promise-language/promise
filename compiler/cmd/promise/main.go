@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -6565,8 +6566,10 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 			commitPins[module.NormalizeURL(url)] = pin
 		}
 		// Add commit pins from named require entries ([require.NAME] sections).
+		// Keyed on the module identity (URL plus subdir), so two modules addressed
+		// in one repo keep independent pins.
 		for name, entry := range projectCfg.NamedRequire {
-			commitPins[module.NormalizeURL(entry.URL)] = entry.Commit
+			commitPins[module.GlobalIdentityForRemote(module.NormalizeURL(entry.URL), entry.Subdir)] = entry.Commit
 			namedRequire[name] = entry
 		}
 	}
@@ -6613,7 +6616,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 			var modInfo *sema.ModuleInfo
 			var err error
 			if entry, ok := loader.namedRequire[u.CatalogName]; ok {
-				modInfo, err = loader.loadRemote(entry.URL, u.CatalogName)
+				modInfo, err = loader.loadRemote(entry.URL, entry.Subdir, u.CatalogName)
 			} else {
 				modInfo, err = loader.loadCatalog(u.CatalogName)
 			}
@@ -6625,6 +6628,8 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 				if u.Alias != "_" {
 					modInfo.Name = u.Alias
 				}
+				// Path-less imports are addressed in IR by their import name (T1611).
+				modInfo.CatalogName = u.CatalogName
 				exportedScope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 				modInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
 				scopes[u.CatalogName] = exportedScope
@@ -6637,7 +6642,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		if module.IsLocalPath(u.Path) {
 			modInfo, err = loader.load(u.Path)
 		} else {
-			modInfo, err = loader.loadRemote(u.Path, u.Alias)
+			modInfo, err = loader.loadRemote(u.Path, "", u.Alias)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
@@ -6884,17 +6889,23 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 
 // loadRemote resolves a remote module URL to a local directory and loads it.
 // Checks [replace] overrides first, then fetches via git using the commit pin.
-func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, error) {
+func (ml *moduleLoader) loadRemote(remoteURL, subdir, alias string) (*sema.ModuleInfo, error) {
 	normalized := module.NormalizeURL(remoteURL)
+	// The module identity carries the subdir (T1524): two modules addressed in one
+	// repo must not share a dedup slot, a commit pin, or an IR prefix. An empty
+	// subdir yields the bare URL, so root-addressed modules are unaffected.
+	identity := module.GlobalIdentityForRemote(normalized, subdir)
 
-	// Check dedup cache — already resolved this URL
-	if absDir, ok := ml.remoteResolved[normalized]; ok {
+	// Check dedup cache — already resolved this module
+	if absDir, ok := ml.remoteResolved[identity]; ok {
 		if mi, ok := ml.loaded[absDir]; ok {
 			return mi, nil
 		}
 	}
 
-	// Check [replace] in root project config — redirect to local path
+	// Check [replace] in root project config — redirect to local path.
+	// Matching is on the bare repo URL, so one [replace] line redirects every
+	// subdir module in that repo; the subdir is then applied under the local path.
 	if ml.projectCfg != nil {
 		for replaceURL, localPath := range ml.projectCfg.Replace {
 			if module.NormalizeURL(replaceURL) == normalized {
@@ -6902,14 +6913,16 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 				if !filepath.IsAbs(localPath) {
 					localPath = filepath.Join(ml.projectRoot, localPath)
 				}
+				localPath = filepath.Join(localPath, filepath.FromSlash(subdir))
 				mi, err := ml.load(localPath)
 				if err != nil {
 					return nil, fmt.Errorf("replace %s → %s: %w", remoteURL, localPath, err)
 				}
-				// Override identity: replaced remote modules use the remote URL identity.
-				ml.overrideIdentity(mi, module.GlobalIdentityForRemote(normalized))
+				// Override identity: replaced remote modules use the remote identity,
+				// so a replaced module gets the same IR prefix as an unreplaced one.
+				ml.overrideIdentity(mi, identity)
 
-				ml.remoteResolved[normalized] = mi.AbsDir
+				ml.remoteResolved[identity] = mi.AbsDir
 				if err := ml.mergeTransitivePins(mi.AbsDir, remoteURL); err != nil {
 					return nil, err
 				}
@@ -6919,18 +6932,21 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 	}
 
 	// Look up commit pin
-	pin, ok := ml.commitPins[normalized]
+	pin, ok := ml.commitPins[identity]
 	if !ok {
+		if subdir != "" {
+			return nil, fmt.Errorf("remote module %q (subdir %q) has no pin in promise.toml\n  hint: add a [require.%s] section with url, commit and subdir = %q", remoteURL, subdir, alias, subdir)
+		}
 		return nil, fmt.Errorf("remote module %q has no pin in promise.toml [require] section\n  hint: add '%s = \"<commit>\"' to [require], or run 'promise package pin \"%s\"'", remoteURL, remoteURL, remoteURL)
 	}
 
 	// Fetch/checkout via git
-	absDir, err := module.ResolveRemoteModule(remoteURL, pin)
+	absDir, err := module.ResolveRemoteModule(remoteURL, pin, subdir)
 	if err != nil {
 		return nil, err
 	}
 
-	ml.remoteResolved[normalized] = absDir
+	ml.remoteResolved[identity] = absDir
 
 	// Delegate to load() which handles parsing, sema, cycle detection, etc.
 	// Use the resolved absolute path directly.
@@ -6939,9 +6955,9 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 		return nil, fmt.Errorf("remote module %s: %w", remoteURL, err)
 	}
 
-	// Override identity: remote modules use normalized URL as global identity,
+	// Override identity: remote modules use the remote identity as global identity,
 	// not the local path that load() derived from the checkout directory.
-	ml.overrideIdentity(mi, module.GlobalIdentityForRemote(normalized))
+	ml.overrideIdentity(mi, identity)
 
 	if err := ml.mergeTransitivePins(absDir, remoteURL); err != nil {
 		return nil, err
@@ -7001,7 +7017,7 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 		absDir = dir
 	} else {
 		// External module: fetch/checkout via git
-		dir, err := module.ResolveRemoteModule(entry.URL, entry.Commit)
+		dir, err := module.ResolveRemoteModule(entry.URL, entry.Commit, entry.Subdir)
 		if err != nil {
 			return nil, fmt.Errorf("cannot fetch catalog module '%s': %w", catalogName, err)
 		}
@@ -7202,7 +7218,7 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 			var depInfo *sema.ModuleInfo
 			var err error
 			if entry, ok := ml.namedRequire[u.CatalogName]; ok {
-				depInfo, err = ml.loadRemote(entry.URL, u.CatalogName)
+				depInfo, err = ml.loadRemote(entry.URL, entry.Subdir, u.CatalogName)
 			} else {
 				depInfo, err = ml.loadCatalog(u.CatalogName)
 			}
@@ -7210,6 +7226,7 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 				return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
 			}
 			if depInfo != nil {
+				depInfo.CatalogName = u.CatalogName
 				exportedScope := sema.ExportedScope(depInfo.SemaInfo, depInfo.File)
 				depInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
 				scopes[u.CatalogName] = exportedScope
@@ -7222,7 +7239,7 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 		if module.IsLocalPath(u.Path) {
 			depInfo, err = ml.load(u.Path)
 		} else {
-			depInfo, err = ml.loadRemote(u.Path, u.Alias)
+			depInfo, err = ml.loadRemote(u.Path, "", u.Alias)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
@@ -8068,6 +8085,8 @@ func runPin(args []string) {
 	if len(args) < 1 || len(args) > 2 {
 		fmt.Fprintln(os.Stderr, "usage: promise package pin <url> [ref]")
 		fmt.Fprintln(os.Stderr, "  ref: tag, branch, commit hash, or HEAD (default: HEAD)")
+		fmt.Fprintln(os.Stderr, "  Writes a flat [require] entry (keyed by URL); a module in a repo")
+		fmt.Fprintln(os.Stderr, "  subdirectory needs the named form — promise package add --subdir <path> <url>")
 		os.Exit(1)
 	}
 
@@ -8075,6 +8094,12 @@ func runPin(args []string) {
 	ref := "HEAD"
 	if len(args) == 2 {
 		ref = args[1]
+	}
+	// Catch the `repo//subdir` spelling here rather than writing a manifest that
+	// no longer parses (T1524).
+	if err := module.CheckURLIdentitySafe(url); err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid url %q: %v\n", url, err)
+		os.Exit(1)
 	}
 
 	// Find promise.toml
@@ -8119,14 +8144,66 @@ func isBareName(s string) bool {
 	return !strings.Contains(s, "/") && !strings.Contains(s, ":") && !module.IsLocalPath(s)
 }
 
+// printAddUsage prints the `promise package add` usage block.
+func printAddUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: promise package add [--subdir <path>] [--name <name>] <name|url> [ref]")
+	fmt.Fprintln(w, "  name:     catalog module name (e.g., json) or git URL")
+	fmt.Fprintln(w, "  ref:      tag, branch, commit hash, or HEAD (default: HEAD)")
+	fmt.Fprintln(w, "  --subdir: repo-relative directory holding the module's promise.toml,")
+	fmt.Fprintln(w, "            for a module that lives inside a larger repo")
+	fmt.Fprintln(w, "  --name:   import name to write as [require.NAME] (default: last")
+	fmt.Fprintln(w, "            component of --subdir); imported as `use NAME;`")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Either flag writes a [require.NAME] section instead of a flat [require] line.")
+}
+
+// parseAddFlags splits the `--subdir`/`--name` options out of args, returning the
+// remaining positional arguments. Both `--flag value` and `--flag=value` forms are
+// accepted.
+func parseAddFlags(args []string) (positional []string, subdir, name string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		var target *string
+		switch {
+		case a == "--subdir":
+			target = &subdir
+		case a == "--name":
+			target = &name
+		case strings.HasPrefix(a, "--subdir="):
+			subdir = strings.TrimPrefix(a, "--subdir=")
+			continue
+		case strings.HasPrefix(a, "--name="):
+			name = strings.TrimPrefix(a, "--name=")
+			continue
+		default:
+			positional = append(positional, a)
+			continue
+		}
+		if i+1 >= len(args) {
+			return nil, "", "", fmt.Errorf("%s requires a value", a)
+		}
+		i++
+		*target = args[i]
+	}
+	return positional, subdir, name, nil
+}
+
 // runAdd implements the `promise package add <name|url> [ref]` subcommand.
 // If the first argument matches a catalog name, resolves to its URL.
 // Otherwise treats it as a raw git URL. Writes to promise.toml.
+//
+// With --subdir (and/or --name) the dependency is written as a [require.NAME]
+// section rather than a flat [require] line: only the named form carries a
+// subdir, since its key is the import name rather than the repo URL (T1524).
 func runAdd(args []string) {
+	args, subdir, requireName, ferr := parseAddFlags(args)
+	if ferr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", ferr)
+		printAddUsage(os.Stderr)
+		os.Exit(1)
+	}
 	if len(args) < 1 || len(args) > 2 {
-		fmt.Fprintln(os.Stderr, "usage: promise package add <name|url> [ref]")
-		fmt.Fprintln(os.Stderr, "  name: catalog module name (e.g., json) or git URL")
-		fmt.Fprintln(os.Stderr, "  ref:  tag, branch, commit hash, or HEAD (default: HEAD)")
+		printAddUsage(os.Stderr)
 		os.Exit(1)
 	}
 
@@ -8136,6 +8213,39 @@ func runAdd(args []string) {
 	explicitRef := ""
 	if len(args) == 2 {
 		explicitRef = args[1]
+	}
+
+	// The `repo//subdir` spelling other ecosystems use would alias a subdir
+	// identity, so ParseConfig refuses it — catch it before writing a manifest
+	// that no longer parses (T1524).
+	if !isBareName(nameOrURL) {
+		if err := module.CheckURLIdentitySafe(nameOrURL); err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid url %q: %v\n", nameOrURL, err)
+			os.Exit(1)
+		}
+	}
+
+	named := subdir != "" || requireName != ""
+	if named {
+		// A catalog or community NAME resolves to a URL the user does not control,
+		// and its import name is fixed by the catalog — neither flag applies.
+		if isBareName(nameOrURL) {
+			fmt.Fprintln(os.Stderr, "error: --subdir/--name require a git URL, not a catalog or community module name")
+			os.Exit(1)
+		}
+		normSub, serr := module.NormalizeSubdir(subdir)
+		if serr != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid --subdir: %v\n", serr)
+			os.Exit(1)
+		}
+		subdir = normSub
+		if requireName == "" {
+			requireName = path.Base(subdir)
+		}
+		if !module.IsImportName(requireName) {
+			fmt.Fprintf(os.Stderr, "error: %q is not a usable import name — pass --name <identifier>\n", requireName)
+			os.Exit(1)
+		}
 	}
 
 	// Find promise.toml
@@ -8161,6 +8271,9 @@ func runAdd(args []string) {
 	// Check catalog (skip if no embedded catalog — treat argument as raw URL)
 	url := nameOrURL
 	label := nameOrURL
+	if named && subdir != "" {
+		label = nameOrURL + "//" + subdir
+	}
 	resolvedByCatalog := false
 	if len(embeddedCatalog) > 0 {
 		cat, err := module.ParseCatalog(embeddedCatalog)
@@ -8168,10 +8281,22 @@ func runAdd(args []string) {
 			fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
 			os.Exit(1)
 		}
+		// A [require.NAME] entry is shadowed by a catalog module of the same name at
+		// load time, so reject the collision here, where the message is actionable.
+		if named && cat.Lookup(requireName) != nil {
+			fmt.Fprintf(os.Stderr, "error: import name '%s' conflicts with catalog module '%s' — pass a different --name\n", requireName, requireName)
+			os.Exit(1)
+		}
 		if entry := cat.Lookup(nameOrURL); entry != nil {
 			if entry.IsEmbedded() {
 				fmt.Printf("module '%s' is built-in — use it with: use %s;\n", nameOrURL, nameOrURL)
 				return
+			}
+			// The check on the CLI argument above does not cover a URL the catalog
+			// supplies; ParseConfig would reject it, so refuse to write it (T1524).
+			if err := module.CheckURLIdentitySafe(entry.URL); err != nil {
+				fmt.Fprintf(os.Stderr, "error: catalog url %q for module '%s' is unusable: %v\n", entry.URL, nameOrURL, err)
+				os.Exit(1)
 			}
 			url = entry.URL
 			label = fmt.Sprintf("%s (%s)", nameOrURL, url)
@@ -8192,6 +8317,12 @@ func runAdd(args []string) {
 			os.Exit(1)
 		}
 		if found {
+			// Same guard as for the catalog: an index-supplied URL that ParseConfig
+			// would reject must not be written into the manifest (T1524).
+			if err := module.CheckURLIdentitySafe(curl); err != nil {
+				fmt.Fprintf(os.Stderr, "error: community catalog url %q for module '%s' is unusable: %v\n", curl, nameOrURL, err)
+				os.Exit(1)
+			}
 			tomlPath := filepath.Join(cfg.Dir, "promise.toml")
 			if err := module.SetRequire(tomlPath, curl, ccommit); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -8222,7 +8353,7 @@ func runAdd(args []string) {
 		fmt.Fprintf(os.Stderr, "Resolving %s for epoch %s...\n", label, cfg.Epoch)
 	}
 	warn := func(msg string) { fmt.Fprintf(os.Stderr, "  %s\n", msg) }
-	commitHash, err := resolveEpochAware(compilerBin, cfg.Epoch, label, url, explicitRef, warn)
+	commitHash, err := resolveEpochAware(compilerBin, cfg.Epoch, label, url, subdir, explicitRef, warn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -8230,6 +8361,14 @@ func runAdd(args []string) {
 
 	// Write to promise.toml
 	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
+	if named {
+		if err := module.SetNamedRequire(tomlPath, requireName, url, commitHash, subdir); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Added %s → %s (import it with: use %s;)\n", label, shortCommit(commitHash), requireName)
+		return
+	}
 	if err := module.SetRequire(tomlPath, url, commitHash); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -8347,13 +8486,17 @@ func runLegacyPackageAlias(cmd string, args []string) {
 	}
 }
 
-// runPackageRemove implements `promise package remove <url>`.
+// runPackageRemove implements `promise package remove <name|url>`. The target
+// matches a flat [require] key by URL, or a [require.NAME] section by its import
+// name or its URL — a URL can back several named entries when a repo publishes
+// more than one module from subdirectories (T1524), and all of them are removed.
 func runPackageRemove(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise package remove <url>")
+		fmt.Fprintln(os.Stderr, "usage: promise package remove <name|url>")
+		fmt.Fprintln(os.Stderr, "  name: the [require.NAME] import name; url: a [require] key or a named entry's url")
 		os.Exit(1)
 	}
-	url := args[0]
+	target := args[0]
 
 	dir, err := os.Getwd()
 	if err != nil {
@@ -8370,24 +8513,92 @@ func runPackageRemove(args []string) {
 		os.Exit(1)
 	}
 
-	found := false
+	normalizedTarget := module.NormalizeURL(target)
+	var flatURL string
 	for u := range cfg.Require {
-		if module.NormalizeURL(u) == module.NormalizeURL(url) {
-			found = true
+		if module.NormalizeURL(u) == normalizedTarget {
+			flatURL = u
 			break
 		}
 	}
-	if !found {
-		fmt.Fprintf(os.Stderr, "error: no [require] entry matching '%s'\n", url)
+	var namedNames []string
+	for name, entry := range cfg.NamedRequire {
+		if name == target || (entry.URL != "" && module.NormalizeURL(entry.URL) == normalizedTarget) {
+			namedNames = append(namedNames, name)
+		}
+	}
+	sort.Strings(namedNames) // deterministic output when one URL backs several entries
+
+	if flatURL == "" && len(namedNames) == 0 {
+		fmt.Fprintf(os.Stderr, "error: no [require] or [require.NAME] entry matching '%s'\n", target)
 		os.Exit(1)
 	}
 
 	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
-	if err := module.RemoveRequire(tomlPath, url); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	if flatURL != "" {
+		if err := module.RemoveRequire(tomlPath, flatURL); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Removed %s\n", flatURL)
 	}
-	fmt.Printf("Removed %s\n", url)
+	for _, name := range namedNames {
+		removed, err := module.RemoveNamedRequire(tomlPath, name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if removed {
+			fmt.Printf("Removed [require.%s]\n", name)
+		}
+	}
+}
+
+// updateEntry is one dependency `promise package update` will re-resolve.
+type updateEntry struct {
+	label         string // display label
+	url           string // git URL
+	subdir        string // module subdirectory within the repo ("" = repo root)
+	currentCommit string // current pinned commit
+	named         bool   // true if [require.NAME] entry
+	name          string // NAME for named entries
+}
+
+// selectUpdateEntries picks the dependencies `promise package update [target]`
+// should re-resolve, sorted by label so output (and the order in which entries
+// are rewritten) is stable regardless of map iteration order.
+//
+// An empty target selects every entry. Otherwise a flat [require] key matches by
+// URL, and a [require.NAME] section matches by its import name or its URL — and a
+// URL match takes *every* named entry addressing that repo, since one repo can
+// publish several modules from subdirectories (T1524). Returns nil when nothing
+// matches.
+func selectUpdateEntries(cfg *module.Config, target string) []updateEntry {
+	var entries []updateEntry
+	if target == "" {
+		for url, commit := range cfg.Require {
+			entries = append(entries, updateEntry{url, url, "", commit, false, ""})
+		}
+		for name, entry := range cfg.NamedRequire {
+			entries = append(entries, updateEntry{name, entry.URL, entry.Subdir, entry.Commit, true, name})
+		}
+	} else {
+		normalizedTarget := module.NormalizeURL(target)
+		for url, commit := range cfg.Require {
+			if module.NormalizeURL(url) == normalizedTarget || url == target {
+				entries = append(entries, updateEntry{url, url, "", commit, false, ""})
+			}
+		}
+		if len(entries) == 0 {
+			for name, entry := range cfg.NamedRequire {
+				if name == target || module.NormalizeURL(entry.URL) == normalizedTarget {
+					entries = append(entries, updateEntry{name, entry.URL, entry.Subdir, entry.Commit, true, name})
+				}
+			}
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].label < entries[j].label })
+	return entries
 }
 
 // runPkgUpdate updates git-dependency [require]/[require.NAME] pins in
@@ -8423,64 +8634,19 @@ func runPkgUpdate(args []string) {
 
 	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
 
-	// Build list of entries to update
-	type updateEntry struct {
-		label         string // display label
-		url           string // git URL
-		currentCommit string // current pinned commit
-		named         bool   // true if [require.NAME] entry
-		name          string // NAME for named entries
-	}
-	var entries []updateEntry
-
+	target := ""
 	if len(args) == 1 {
-		target := args[0]
-		found := false
-
-		// Check URL-keyed entries
-		normalizedTarget := module.NormalizeURL(target)
-		for url, commit := range cfg.Require {
-			if module.NormalizeURL(url) == normalizedTarget || url == target {
-				entries = append(entries, updateEntry{url, url, commit, false, ""})
-				found = true
-				break
-			}
-		}
-
-		// Check named entries
-		if !found {
-			for name, entry := range cfg.NamedRequire {
-				if name == target || module.NormalizeURL(entry.URL) == normalizedTarget {
-					entries = append(entries, updateEntry{name, entry.URL, entry.Commit, true, name})
-					found = true
-					break
-				}
-			}
-		}
-
-		if !found {
-			fmt.Fprintf(os.Stderr, "error: no [require] entry matching '%s'\n", target)
-			os.Exit(1)
-		}
-	} else {
-		// Update all
-		for url, commit := range cfg.Require {
-			entries = append(entries, updateEntry{url, url, commit, false, ""})
-		}
-		for name, entry := range cfg.NamedRequire {
-			entries = append(entries, updateEntry{name, entry.URL, entry.Commit, true, name})
-		}
+		target = args[0]
 	}
-
+	entries := selectUpdateEntries(cfg, target)
+	if target != "" && len(entries) == 0 {
+		fmt.Fprintf(os.Stderr, "error: no [require] or [require.NAME] entry matching '%s'\n", target)
+		os.Exit(1)
+	}
 	if len(entries) == 0 {
 		fmt.Println("No [require] entries to update.")
 		return
 	}
-
-	// Sort for stable output
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].label < entries[j].label
-	})
 
 	// Re-resolution re-runs the epoch-aware tag pick + verification (§9.8 step 3:
 	// moving a tag upstream never changes an existing build until `update`), so it
@@ -8512,8 +8678,11 @@ func runPkgUpdate(args []string) {
 		// (authoritative, no local test run) rather than the generic epoch-tag
 		// walk-back. Falls through to the engine path if the URL is no longer
 		// listed in the community catalog.
+		// A subdir module is not what the community index verified — the index
+		// records a verdict for the repo-root module at that URL — so it always
+		// takes the generic path, which verifies the addressed module (T1524).
 		var newCommit string
-		if module.ModuleTier(e.url) == module.TierCommunity {
+		if e.subdir == "" && module.ModuleTier(e.url) == module.TierCommunity {
 			fmt.Fprintf(os.Stderr, "Checking %s (community catalog)...\n", e.label)
 			c, found, cerr := resolveCommunityByURL(e.url, cfg.Epoch)
 			if cerr != nil {
@@ -8528,7 +8697,7 @@ func runPkgUpdate(args []string) {
 			ensureCompiler()
 			fmt.Fprintf(os.Stderr, "Checking %s...\n", e.label)
 			warn := func(msg string) { fmt.Fprintf(os.Stderr, "  %s\n", msg) }
-			c, err := resolveEpochAware(compilerBin, cfg.Epoch, e.label, e.url, "", warn)
+			c, err := resolveEpochAware(compilerBin, cfg.Epoch, e.label, e.url, e.subdir, "", warn)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
 				continue

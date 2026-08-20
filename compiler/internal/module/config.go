@@ -14,6 +14,7 @@ type RequireEntry struct {
 	URL    string // git URL or archive URL
 	Commit string // pinned commit hash (git only)
 	SHA256 string // optional content hash (non-git sources)
+	Subdir string // repo-relative path to the module directory; empty means repo root
 }
 
 // sha256Hex matches exactly 64 lowercase hex characters.
@@ -119,6 +120,8 @@ func ParseConfig(path string) (*Config, error) {
 				namedReqEntry.Commit = val
 			case "sha256":
 				namedReqEntry.SHA256 = val
+			case "subdir":
+				namedReqEntry.Subdir = val
 			}
 		case section == "module":
 			switch key {
@@ -154,6 +157,14 @@ func ParseConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: missing [module] name", path)
 	}
 
+	// Validate flat require entries. Only the URL is checkable here — the value is
+	// a commit hash and the key carries no subdir.
+	for url := range cfg.Require {
+		if err := CheckURLIdentitySafe(url); err != nil {
+			return nil, fmt.Errorf("%s: [require] invalid url %q: %w", path, url, err)
+		}
+	}
+
 	// Validate named require entries.
 	for name, entry := range cfg.NamedRequire {
 		if entry.URL == "" && entry.Commit == "" && entry.SHA256 == "" {
@@ -174,6 +185,14 @@ func ParseConfig(path string) (*Config, error) {
 		if entry.SHA256 != "" && !sha256Hex.MatchString(entry.SHA256) {
 			return nil, fmt.Errorf("%s: [require.%s] invalid 'sha256': must be exactly 64 lowercase hex characters", path, name)
 		}
+		if err := CheckURLIdentitySafe(entry.URL); err != nil {
+			return nil, fmt.Errorf("%s: [require.%s] invalid 'url': %w", path, name, err)
+		}
+		sub, serr := NormalizeSubdir(entry.Subdir)
+		if serr != nil {
+			return nil, fmt.Errorf("%s: [require.%s] invalid 'subdir': %w", path, name, serr)
+		}
+		entry.Subdir = sub
 	}
 
 	return cfg, nil
@@ -403,59 +422,147 @@ func RemoveRequire(path, url string) error {
 // SetNamedRequireCommit updates the commit field in a [require.NAME] section
 // of the promise.toml file at path. Returns an error if the section doesn't exist.
 func SetNamedRequireCommit(path, name, commitHash string) error {
+	return setNamedRequireFields(path, name, [][2]string{{"commit", commitHash}}, false)
+}
+
+// SetNamedRequire creates or updates the [require.NAME] section of the
+// promise.toml file at path, writing url, commit and subdir. An empty subdir
+// writes no `subdir` line (and removes an existing one), so an entry re-added
+// without a subdir addresses the repo root again.
+func SetNamedRequire(path, name, url, commitHash, subdir string) error {
+	return setNamedRequireFields(path, name, [][2]string{
+		{"url", url}, {"commit", commitHash}, {"subdir", subdir},
+	}, true)
+}
+
+// findNamedRequireSection locates the [require.NAME] section in lines. It returns
+// the index of the header line and the index one past the section body — the next
+// section header, or len(lines) when the section runs to EOF. start is -1 when
+// there is no such section.
+func findNamedRequireSection(lines []string, name string) (start, end int) {
+	header := fmt.Sprintf("[require.%s]", name)
+	start, end = -1, len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if start < 0 {
+			if trimmed == header {
+				start = i
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			return start, i
+		}
+	}
+	return start, end
+}
+
+// RemoveNamedRequire deletes the whole [require.NAME] section — header, keys, and
+// the blank lines that separated it from the next section — from the promise.toml
+// at path. Reports whether a section was found; a missing section is a no-op, not
+// an error, so removal is idempotent.
+func RemoveNamedRequire(path, name string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("cannot read %s: %w", path, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	start, end := findNamedRequireSection(lines, name)
+	if start < 0 {
+		return false, nil
+	}
+	// end already sits on the next section header, so the blank line that
+	// separated the two is inside [start, end) and goes with the section — the
+	// blank line *above* the header stays and keeps separating what remains.
+	out := append([]string{}, lines[:start]...)
+	out = append(out, lines[end:]...)
+	return true, os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
+}
+
+// setNamedRequireFields writes key/value pairs into the [require.NAME] section of
+// the promise.toml at path, preserving all surrounding content (comments,
+// formatting, other sections). A key already present is rewritten in place (the
+// last assignment, matching ParseConfig's last-wins reading, with any earlier
+// duplicates dropped); a missing key is appended to the end of the section; a pair
+// with an empty value removes every assignment of that key rather than writing it.
+// When create is true a missing section is appended to the file, otherwise a
+// missing section is an error.
+func setNamedRequireFields(path, name string, fields [][2]string, create bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("cannot read %s: %w", path, err)
 	}
 
 	lines := strings.Split(string(data), "\n")
-	sectionHeader := fmt.Sprintf("[require.%s]", name)
+	header := fmt.Sprintf("[require.%s]", name)
+	start, end := findNamedRequireSection(lines, name)
 
-	// Find the [require.NAME] section
-	sectionStart := -1
-	sectionEnd := -1
-	commitLine := -1
-
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == sectionHeader {
-			sectionStart = i
-			continue
+	if start < 0 {
+		if !create {
+			return fmt.Errorf("%s: section [require.%s] not found", path, name)
 		}
-		if sectionStart >= 0 && sectionEnd < 0 {
-			if strings.HasPrefix(trimmed, "[") {
-				sectionEnd = i
-				break
+		var b strings.Builder
+		b.WriteString(strings.TrimRight(string(data), "\n"))
+		b.WriteString("\n\n")
+		b.WriteString(header)
+		b.WriteByte('\n')
+		for _, f := range fields {
+			if f[1] == "" {
+				continue
 			}
-			if key, _, err := parseTOMLLine(trimmed); err == nil && key == "commit" {
-				commitLine = i
-			}
+			fmt.Fprintf(&b, "%s = %q\n", f[0], f[1])
 		}
+		return os.WriteFile(path, []byte(b.String()), 0644)
 	}
 
-	if sectionStart < 0 {
-		return fmt.Errorf("%s: section [require.%s] not found", path, name)
-	}
-
-	if commitLine >= 0 {
-		lines[commitLine] = fmt.Sprintf("commit = %q", commitHash)
-	} else {
-		// No commit line found — append after last key in section
-		insertAt := len(lines)
-		if sectionEnd >= 0 {
-			insertAt = sectionEnd
+	section := append([]string{}, lines[start+1:end]...)
+	for _, f := range fields {
+		key, val := f[0], f[1]
+		// Collect *every* line assigning this key. A hand-edited manifest can carry
+		// a duplicate, and ParseConfig is last-wins — so rewriting only the first
+		// occurrence would leave the read and the write disagreeing (an update that
+		// reports success while the effective value never changed). Rewrite the last
+		// occurrence and drop the earlier ones.
+		var idxs []int
+		for i, l := range section {
+			trimmed := strings.TrimSpace(l)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if k, _, perr := parseTOMLLine(trimmed); perr == nil && k == key {
+				idxs = append(idxs, i)
+			}
 		}
-		for j := insertAt - 1; j > sectionStart; j-- {
-			if strings.TrimSpace(lines[j]) != "" {
+		// Deleting from the end keeps the not-yet-visited indices valid.
+		dropFrom := len(idxs) - 1 // remove every occurrence
+		if val != "" && len(idxs) > 0 {
+			section[idxs[len(idxs)-1]] = fmt.Sprintf("%s = %q", key, val)
+			dropFrom = len(idxs) - 2 // keep the rewritten one
+		}
+		for i := dropFrom; i >= 0; i-- {
+			section = append(section[:idxs[i]], section[idxs[i]+1:]...)
+		}
+		if val == "" || len(idxs) > 0 {
+			continue // removed, or rewritten in place
+		}
+		// New key: append after the last non-empty line so a trailing blank line
+		// before the next section stays where it is.
+		insertAt := 0
+		for j := len(section) - 1; j >= 0; j-- {
+			if strings.TrimSpace(section[j]) != "" {
 				insertAt = j + 1
 				break
 			}
 		}
-		newLine := fmt.Sprintf("commit = %q", commitHash)
-		lines = append(lines[:insertAt], append([]string{newLine}, lines[insertAt:]...)...)
+		line := fmt.Sprintf("%s = %q", key, val)
+		section = append(section[:insertAt], append([]string{line}, section[insertAt:]...)...)
 	}
 
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+	out := append([]string{}, lines[:start+1]...)
+	out = append(out, section...)
+	out = append(out, lines[end:]...)
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
 }
 
 // IsLocalPath returns true if the location string refers to a local module.
@@ -466,10 +573,69 @@ func IsLocalPath(location string) bool {
 	if strings.HasPrefix(location, "/") {
 		return true
 	}
-	// Windows drive letter: C:\, D:/, etc.
-	if len(location) >= 2 && location[1] == ':' &&
-		((location[0] >= 'A' && location[0] <= 'Z') || (location[0] >= 'a' && location[0] <= 'z')) {
+	if hasWindowsDrive(location) {
 		return true
 	}
 	return false
+}
+
+// hasWindowsDrive reports whether s starts with a Windows drive letter (C:\, d:/).
+func hasWindowsDrive(s string) bool {
+	return len(s) >= 2 && s[1] == ':' &&
+		((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))
+}
+
+// IsImportName reports whether s can be used as the NAME of a [require.NAME]
+// section — the identifier that a `use NAME;` declaration names.
+func IsImportName(s string) bool {
+	return isSimpleIdent(s)
+}
+
+// CheckURLIdentitySafe rejects a module URL that could not be told apart from a
+// subdir-addressed module. GlobalIdentityForRemote joins the normalized URL and
+// the subdir with "//", so a URL that itself normalizes to something containing
+// "//" would let two distinct (url, subdir) pairs collapse to one identity — and
+// therefore share a commit pin, a resolution slot and an IR prefix. Such a URL has
+// an empty path component and is malformed anyway, so it is refused at parse time.
+func CheckURLIdentitySafe(url string) error {
+	if strings.Contains(NormalizeURL(url), "//") {
+		return fmt.Errorf("contains an empty path component ('//'); a module in a repo subdirectory is addressed with the 'subdir' field of a [require.NAME] entry")
+	}
+	return nil
+}
+
+// NormalizeSubdir validates and canonicalizes a repo-relative subdirectory path —
+// the `subdir` field on a [require.NAME] entry or a catalog entry, naming the
+// directory inside the checkout that holds the module's promise.toml.
+//
+// "" means the repo root (the behavior of every manifest written before subdir
+// existed) and is returned unchanged. Otherwise backslashes become '/', one
+// leading "./" and one trailing "/" are stripped, and the result must be a
+// sequence of non-empty components that are neither "." nor "..". Absolute paths
+// (leading "/" or a Windows drive) and any escape above the repo root are
+// rejected: a subdir must address a directory *inside* the checkout.
+func NormalizeSubdir(s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	orig := s
+	s = strings.ReplaceAll(s, "\\", "/")
+	if strings.HasPrefix(s, "/") || hasWindowsDrive(s) {
+		return "", fmt.Errorf("must be repo-relative, got absolute path %q", orig)
+	}
+	s = strings.TrimPrefix(s, "./")
+	s = strings.TrimSuffix(s, "/")
+	if s == "" {
+		return "", fmt.Errorf("empty path %q", orig)
+	}
+	parts := strings.Split(s, "/")
+	for _, p := range parts {
+		switch p {
+		case "":
+			return "", fmt.Errorf("empty path component in %q", orig)
+		case ".", "..":
+			return "", fmt.Errorf("path component %q is not allowed in %q", p, orig)
+		}
+	}
+	return strings.Join(parts, "/"), nil
 }

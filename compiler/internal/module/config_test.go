@@ -1193,3 +1193,536 @@ epoch = "2026.0"
 		t.Fatalf("RemoveRequire returned error when no [require] section: %v", err)
 	}
 }
+
+// --- T1524: subdir addressing on [require.NAME] entries ---
+
+func TestNormalizeSubdir(t *testing.T) {
+	ok := []struct{ in, want string }{
+		{"", ""},
+		{"a", "a"},
+		{"a/b", "a/b"},
+		{"./a/b", "a/b"},
+		{"a/b/", "a/b"},
+		{"./a/b/", "a/b"},
+		{`a\b`, "a/b"},
+		{"proto/wire-types", "proto/wire-types"},
+	}
+	for _, tc := range ok {
+		got, err := NormalizeSubdir(tc.in)
+		if err != nil {
+			t.Errorf("NormalizeSubdir(%q): unexpected error %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("NormalizeSubdir(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	bad := []string{"/abs", "/", "../esc", "a/../../b", "a//b", "a/b//", ".", "..", "./", "C:/x", `c:\x`, "a/./b"}
+	for _, in := range bad {
+		if got, err := NormalizeSubdir(in); err == nil {
+			t.Errorf("NormalizeSubdir(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestParseConfigSubdir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+epoch = "2026.1"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "./proto/wire/"
+
+[require.plain]
+url = "https://github.com/acme/plain"
+commit = "def456"
+`), 0644)
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if got := cfg.NamedRequire["wire"].Subdir; got != "proto/wire" {
+		t.Errorf("wire subdir = %q, want normalized %q", got, "proto/wire")
+	}
+	if got := cfg.NamedRequire["plain"].Subdir; got != "" {
+		t.Errorf("plain subdir = %q, want empty (repo root)", got)
+	}
+}
+
+func TestParseConfigInvalidSubdir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "../escape"
+`), 0644)
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected an error for a subdir escaping the repo root")
+	}
+	if !strings.Contains(err.Error(), "invalid 'subdir'") {
+		t.Errorf("error = %v, want it to mention invalid 'subdir'", err)
+	}
+}
+
+// A '//' in a URL would collide with the subdir separator used by
+// GlobalIdentityForRemote, letting two distinct modules share one identity.
+func TestParseConfigRejectsDoubleSlashURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+
+[require.wire]
+url = "https://github.com/acme//base"
+commit = "abc123"
+`), 0644)
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected an error for a URL with an empty path component")
+	}
+	if !strings.Contains(err.Error(), "invalid 'url'") {
+		t.Errorf("error = %v, want it to mention invalid 'url'", err)
+	}
+}
+
+// The flat [require] table needs the same guard: its key is a raw URL, and a user
+// borrowing the `repo//subdir` spelling from other tooling would otherwise write a
+// key whose identity aliases a [require.NAME] entry with a subdir — the two would
+// then share a commit pin and an IR prefix.
+func TestParseConfigRejectsDoubleSlashURLInFlatRequire(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+
+[require]
+"https://github.com/acme/base//proto/wire" = "abc123"
+`), 0644)
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected an error for a flat require URL with an empty path component")
+	}
+	if !strings.Contains(err.Error(), "[require] invalid url") {
+		t.Errorf("error = %v, want it to mention the flat [require] url", err)
+	}
+	// The message should point at the supported way to address a subdir module.
+	if !strings.Contains(err.Error(), "subdir") {
+		t.Errorf("error = %v, want it to mention the 'subdir' field", err)
+	}
+}
+
+// The guard exists to keep identities distinct: had the '//' URL been accepted, it
+// would have produced exactly the identity of the named entry below.
+func TestDoubleSlashURLWouldAliasSubdirIdentity(t *testing.T) {
+	flat := NormalizeURL("https://github.com/acme/base//proto/wire")
+	named := GlobalIdentityForRemote(NormalizeURL("https://github.com/acme/base"), "proto/wire")
+	if flat != named {
+		t.Fatalf("expected the collision this guard prevents; got %q vs %q", flat, named)
+	}
+	if err := CheckURLIdentitySafe("https://github.com/acme/base//proto/wire"); err == nil {
+		t.Error("CheckURLIdentitySafe accepted a URL that aliases a subdir identity")
+	}
+	if err := CheckURLIdentitySafe("https://github.com/acme/base"); err != nil {
+		t.Errorf("CheckURLIdentitySafe rejected an ordinary URL: %v", err)
+	}
+}
+
+func TestSetNamedRequireCreatesSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	original := `# project manifest
+[module]
+name = "app"
+epoch = "2026.1"
+`
+	os.WriteFile(path, []byte(original), 0644)
+
+	if err := SetNamedRequire(path, "wire", "https://github.com/acme/base", "abc123", "proto/wire"); err != nil {
+		t.Fatalf("SetNamedRequire: %v", err)
+	}
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig after create: %v", err)
+	}
+	e := cfg.NamedRequire["wire"]
+	if e == nil || e.URL != "https://github.com/acme/base" || e.Commit != "abc123" || e.Subdir != "proto/wire" {
+		t.Fatalf("entry after create = %+v", e)
+	}
+	if !strings.Contains(string(mustRead(t, path)), "# project manifest") {
+		t.Error("SetNamedRequire dropped the leading comment")
+	}
+
+	// Updating an existing section rewrites the fields in place.
+	if err := SetNamedRequire(path, "wire", "https://github.com/acme/base", "def456", "proto/wire2"); err != nil {
+		t.Fatalf("SetNamedRequire update: %v", err)
+	}
+	cfg, err = ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig after update: %v", err)
+	}
+	if e := cfg.NamedRequire["wire"]; e.Commit != "def456" || e.Subdir != "proto/wire2" {
+		t.Fatalf("entry after update = %+v", e)
+	}
+	if n := strings.Count(string(mustRead(t, path)), "[require.wire]"); n != 1 {
+		t.Errorf("[require.wire] appears %d times, want 1", n)
+	}
+
+	// Re-adding with no subdir removes the stale subdir line.
+	if err := SetNamedRequire(path, "wire", "https://github.com/acme/base", "def456", ""); err != nil {
+		t.Fatalf("SetNamedRequire clear subdir: %v", err)
+	}
+	cfg, err = ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig after clear: %v", err)
+	}
+	if e := cfg.NamedRequire["wire"]; e.Subdir != "" {
+		t.Errorf("subdir = %q, want cleared", e.Subdir)
+	}
+}
+
+// SetNamedRequireCommit must leave a sibling `subdir` line untouched — otherwise
+// `promise package update` would silently re-point the entry at the repo root.
+func TestSetNamedRequireCommitPreservesSubdir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "proto/wire"
+
+[replace]
+"github.com/acme/base" = "../base"
+`), 0644)
+
+	if err := SetNamedRequireCommit(path, "wire", "999fff"); err != nil {
+		t.Fatalf("SetNamedRequireCommit: %v", err)
+	}
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	e := cfg.NamedRequire["wire"]
+	if e.Commit != "999fff" || e.Subdir != "proto/wire" {
+		t.Fatalf("entry = %+v, want commit rewritten and subdir preserved", e)
+	}
+	if cfg.Replace["github.com/acme/base"] != "../base" {
+		t.Error("[replace] section was disturbed")
+	}
+}
+
+func TestSetNamedRequireCommitMissingSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte("[module]\nname = \"app\"\n"), 0644)
+	if err := SetNamedRequireCommit(path, "absent", "abc"); err == nil {
+		t.Fatal("expected an error for a missing [require.NAME] section")
+	}
+}
+
+func TestIsImportName(t *testing.T) {
+	for _, s := range []string{"wire", "_x", "a1", "Wire"} {
+		if !IsImportName(s) {
+			t.Errorf("IsImportName(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "wire-types", "a.b", "1a", "a/b"} {
+		if IsImportName(s) {
+			t.Errorf("IsImportName(%q) = true, want false", s)
+		}
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// T1524: `promise package add --subdir` writes named entries, so removal must be
+// able to take one back out again — header, keys, and the separator that followed.
+func TestRemoveNamedRequire(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`# manifest
+[module]
+name = "app"
+epoch = "2026.1"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "proto/wire"
+
+[require.types]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "proto/types"
+
+[replace]
+"github.com/acme/base" = "../base"
+`), 0644)
+
+	removed, err := RemoveNamedRequire(path, "wire")
+	if err != nil {
+		t.Fatalf("RemoveNamedRequire: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected the section to be found")
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig after remove: %v", err)
+	}
+	if _, ok := cfg.NamedRequire["wire"]; ok {
+		t.Error("[require.wire] survived removal")
+	}
+	if e := cfg.NamedRequire["types"]; e == nil || e.Subdir != "proto/types" {
+		t.Errorf("sibling entry disturbed: %+v", e)
+	}
+	if cfg.Replace["github.com/acme/base"] != "../base" {
+		t.Error("[replace] section was disturbed")
+	}
+	data := string(mustRead(t, path))
+	if !strings.Contains(data, "# manifest") {
+		t.Error("leading comment was dropped")
+	}
+	if strings.Contains(data, "proto/wire") {
+		t.Errorf("removed section left content behind:\n%s", data)
+	}
+
+	// Removing again is a no-op, not an error.
+	removed, err = RemoveNamedRequire(path, "wire")
+	if err != nil || removed {
+		t.Errorf("second remove = %v, %v; want false, nil", removed, err)
+	}
+}
+
+// A section that runs to EOF is removed without eating the file's final newline.
+func TestRemoveNamedRequireAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+`), 0644)
+
+	if _, err := RemoveNamedRequire(path, "wire"); err != nil {
+		t.Fatalf("RemoveNamedRequire: %v", err)
+	}
+	if got, want := string(mustRead(t, path)), "[module]\nname = \"app\"\n"; got != want {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+}
+
+// ParseConfig is last-wins on a duplicated key, so a write must rewrite the LAST
+// assignment and drop the earlier ones — otherwise `promise package update` would
+// report success while the effective pin never moved.
+func TestSetNamedRequireFieldsDuplicateKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "old111"
+subdir = "proto/stale"
+commit = "old222"
+subdir = "proto/wire"
+`), 0644)
+
+	if err := SetNamedRequireCommit(path, "wire", "new333"); err != nil {
+		t.Fatalf("SetNamedRequireCommit: %v", err)
+	}
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if got := cfg.NamedRequire["wire"].Commit; got != "new333" {
+		t.Errorf("commit = %q, want the rewritten value", got)
+	}
+	data := string(mustRead(t, path))
+	if n := strings.Count(data, "commit ="); n != 1 {
+		t.Errorf("duplicate commit lines survived (%d):\n%s", n, data)
+	}
+	// The untouched key keeps its effective (last) value.
+	if got := cfg.NamedRequire["wire"].Subdir; got != "proto/wire" {
+		t.Errorf("subdir = %q, want the effective value preserved", got)
+	}
+
+	// Clearing a duplicated key must remove every occurrence, not just one.
+	if err := SetNamedRequire(path, "wire", "https://github.com/acme/base", "new333", ""); err != nil {
+		t.Fatalf("SetNamedRequire clear: %v", err)
+	}
+	cfg, err = ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig after clear: %v", err)
+	}
+	if got := cfg.NamedRequire["wire"].Subdir; got != "" {
+		t.Errorf("subdir = %q, want every occurrence cleared", got)
+	}
+	if strings.Contains(string(mustRead(t, path)), "subdir") {
+		t.Errorf("a subdir line survived:\n%s", mustRead(t, path))
+	}
+}
+
+// `promise package add --name w <url>` (no --subdir) creates a fresh
+// [require.NAME] section for a repo-root module: the empty subdir must be skipped
+// entirely rather than written as `subdir = ""`, which NormalizeSubdir would then
+// have to special-case on the way back in.
+func TestSetNamedRequireCreatesSectionWithoutSubdir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte("[module]\nname = \"app\"\nepoch = \"2026.1\"\n"), 0644)
+
+	if err := SetNamedRequire(path, "wire", "https://github.com/acme/wire", "abc123", ""); err != nil {
+		t.Fatalf("SetNamedRequire: %v", err)
+	}
+	text := string(mustRead(t, path))
+	if strings.Contains(text, "subdir") {
+		t.Errorf("an empty subdir must write no line, got:\n%s", text)
+	}
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	e := cfg.NamedRequire["wire"]
+	if e == nil || e.URL != "https://github.com/acme/wire" || e.Commit != "abc123" || e.Subdir != "" {
+		t.Fatalf("entry = %+v", e)
+	}
+}
+
+// A missing manifest is a read error, not a "section not found" no-op — removal is
+// idempotent only for a file that exists.
+func TestRemoveNamedRequireReadError(t *testing.T) {
+	removed, err := RemoveNamedRequire(filepath.Join(t.TempDir(), "absent.toml"), "wire")
+	if err == nil {
+		t.Fatal("expected an error for a missing promise.toml")
+	}
+	if removed {
+		t.Error("removed = true for a file that does not exist")
+	}
+}
+
+// Removing a named entry must be idempotent: a second removal reports "not found"
+// without an error, and leaves the rest of the manifest intact.
+func TestRemoveNamedRequireIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	os.WriteFile(path, []byte(`[module]
+name = "app"
+epoch = "2026.0"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "proto/wire"
+`), 0644)
+
+	for i, wantRemoved := range []bool{true, false} {
+		removed, err := RemoveNamedRequire(path, "wire")
+		if err != nil {
+			t.Fatalf("removal %d: %v", i, err)
+		}
+		if removed != wantRemoved {
+			t.Errorf("removal %d: removed = %v, want %v", i, removed, wantRemoved)
+		}
+	}
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig after double removal: %v", err)
+	}
+	if cfg.Name != "app" {
+		t.Errorf("manifest damaged, [module] name = %q", cfg.Name)
+	}
+	if len(cfg.NamedRequire) != 0 {
+		t.Errorf("NamedRequire = %+v, want empty", cfg.NamedRequire)
+	}
+}
+
+// NormalizeSubdir is the only guard between a manifest and a path escaping the
+// checkout, so the rejected spellings are pinned explicitly. Windows-style
+// separators are accepted and folded, since a manifest may be hand-written there.
+func TestNormalizeSubdirRejectsEscapes(t *testing.T) {
+	for _, bad := range []string{
+		"..",
+		"../sibling",
+		"proto/../../etc",
+		"proto/./wire",
+		"/abs/path",
+		"C:/repo/proto",
+		`C:\repo\proto`,
+		`\\server\share`,
+		"proto//wire",
+		"./",
+		"/",
+	} {
+		if got, err := NormalizeSubdir(bad); err == nil {
+			t.Errorf("NormalizeSubdir(%q) = %q, want an error", bad, got)
+		}
+	}
+
+	for in, want := range map[string]string{
+		"":                    "",
+		"proto/wire":          "proto/wire",
+		"./proto/wire":        "proto/wire",
+		"proto/wire/":         "proto/wire",
+		`proto\wire`:          "proto/wire",
+		`.\proto\wire\`:       "proto/wire",
+		"a/b/c/d":             "a/b/c/d",
+		"dir with spaces/mod": "dir with spaces/mod",
+		"..hidden/mod":        "..hidden/mod", // a component *starting* with dots is fine
+	} {
+		got, err := NormalizeSubdir(in)
+		if err != nil {
+			t.Errorf("NormalizeSubdir(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("NormalizeSubdir(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A normalized subdir must be a fixed point — `promise package add` normalizes
+// before writing and ParseConfig normalizes on the way back in, so a second pass
+// over an already-canonical value must not change it.
+func TestNormalizeSubdirIdempotent(t *testing.T) {
+	for _, in := range []string{"", "proto/wire", "./a/b/", `a\b\c`} {
+		once, err := NormalizeSubdir(in)
+		if err != nil {
+			t.Fatalf("NormalizeSubdir(%q): %v", in, err)
+		}
+		twice, err := NormalizeSubdir(once)
+		if err != nil {
+			t.Fatalf("NormalizeSubdir(%q) (second pass): %v", once, err)
+		}
+		if once != twice {
+			t.Errorf("NormalizeSubdir not idempotent for %q: %q → %q", in, once, twice)
+		}
+	}
+}

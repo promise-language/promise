@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,23 +68,35 @@ func moduleHasTests(modDir string) (bool, error) {
 // against the SAME project epoch first (§9.8/§9.10 apply transitively), so a
 // failing dep surfaces as a clean gate rather than a raw compiler error buried in
 // the dependency's source.
-func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[string]bool, warn func(string)) (ok bool, reason string, err error) {
-	if v, found := module.LookupCompat(url, commit, epoch); found {
+func verifyModuleCompat(compilerBin, url, subdir, commit, epoch string, visiting map[string]bool, warn func(string)) (ok bool, reason string, err error) {
+	if v, found := module.LookupCompat(url, subdir, commit, epoch); found {
 		return v.Compatible, v.FailReason, nil
 	}
 
 	// Break dependency cycles: a module currently being verified higher in the
 	// recursion is treated as satisfied — its own verdict is decided by its own
-	// (eventual) test run, not re-entered here.
-	key := module.NormalizeURL(url) + "@" + commit + "#" + epoch
+	// (eventual) test run, not re-entered here. The key carries the subdir, so two
+	// modules in one repo are distinct nodes in the cycle graph.
+	key := module.GlobalIdentityForRemote(module.NormalizeURL(url), subdir) + "@" + commit + "#" + epoch
 	if visiting[key] {
 		return true, "", nil
 	}
 	visiting[key] = true
 	defer delete(visiting, key)
 
-	modDir, err := module.ResolveRemoteModule(url, commit)
+	// modDir is the addressed module directory (the subdir when there is one), so
+	// the §9.9 gate below compiles and tests exactly that module, not its whole repo.
+	modDir, err := module.ResolveRemoteModule(url, commit, subdir)
 	if err != nil {
+		// A commit whose checkout has no manifest at the addressed directory is a
+		// verdict, not a fetch failure — record it and let the caller keep walking
+		// back through older epoch tags, exactly as an unparseable manifest does.
+		var noManifest *module.NoManifestError
+		if errors.As(err, &noManifest) {
+			reason = noManifest.Error()
+			_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
+			return false, reason, nil
+		}
 		return false, "", fmt.Errorf("fetching %s@%s: %w", url, shortCommit(commit), err)
 	}
 
@@ -93,7 +106,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 	cfg, perr := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
 	if perr != nil {
 		reason = fmt.Sprintf("invalid promise.toml: %v", perr)
-		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
 		return false, reason, nil
 	}
 	depsOK, depReason, derr := verifyDeps(compilerBin, cfg, epoch, visiting, warn)
@@ -101,7 +114,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 		return false, "", derr
 	}
 	if !depsOK {
-		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: depReason})
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: false, FailReason: depReason})
 		return false, depReason, nil
 	}
 
@@ -110,7 +123,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 		return false, "", herr
 	}
 	if !hasTests {
-		return verifyModuleCompatCompileOnly(compilerBin, url, commit, epoch, modDir, warn)
+		return verifyModuleCompatCompileOnly(compilerBin, url, subdir, commit, epoch, modDir, warn)
 	}
 
 	cmd := exec.Command(compilerBin, "test", modDir)
@@ -120,7 +133,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 	if !compatible {
 		reason = lastLines(string(out), 20)
 	}
-	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: compatible, FailReason: reason})
+	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: compatible, FailReason: reason})
 	return compatible, reason, nil
 }
 
@@ -128,7 +141,7 @@ func verifyModuleCompat(compilerBin, url, commit, epoch string, visiting map[str
 // on the module source to verify it compiles under the epoch. On success, records
 // a compile-only verdict and calls warn. On compile failure, records incompatible.
 // An empty module (no .pr files) is accepted vacuously with a warning.
-func verifyModuleCompatCompileOnly(compilerBin, url, commit, epoch, modDir string, warn func(string)) (ok bool, reason string, err error) {
+func verifyModuleCompatCompileOnly(compilerBin, url, subdir, commit, epoch, modDir string, warn func(string)) (ok bool, reason string, err error) {
 	srcFiles, serr := module.CollectModuleSources(modDir, false)
 	if serr != nil {
 		return false, "", serr
@@ -137,7 +150,7 @@ func verifyModuleCompatCompileOnly(compilerBin, url, commit, epoch, modDir strin
 		// No .pr source files at all — accept vacuously (emit-ir would error on empty project).
 		warnMsg := fmt.Sprintf("module %q has no .pr files — treating as compatible (§9.9 vacuous pass)", url)
 		warn(warnMsg)
-		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
 		return true, "", nil
 	}
 	// Compile-only check: emit-ir accepts a directory, compiles all non-test .pr
@@ -147,12 +160,12 @@ func verifyModuleCompatCompileOnly(compilerBin, url, commit, epoch, modDir strin
 	out, runErr := emitCmd.CombinedOutput()
 	if runErr != nil {
 		reason = lastLines(string(out), 20)
-		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
+		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
 		return false, reason, nil
 	}
 	warnMsg := fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (§9.9)", url)
 	warn(warnMsg)
-	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
+	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
 	return true, "", nil
 }
 
@@ -167,7 +180,7 @@ func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting m
 		if depCommit == "" {
 			continue // non-git source (sha256) — not epoch-resolved here
 		}
-		depOK, depReason, derr := verifyModuleCompat(compilerBin, depURL, depCommit, epoch, visiting, warn)
+		depOK, depReason, derr := verifyModuleCompat(compilerBin, depURL, "", depCommit, epoch, visiting, warn)
 		if derr != nil {
 			return false, "", derr
 		}
@@ -179,7 +192,7 @@ func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting m
 		if entry.URL == "" || entry.Commit == "" {
 			continue
 		}
-		depOK, depReason, derr := verifyModuleCompat(compilerBin, entry.URL, entry.Commit, epoch, visiting, warn)
+		depOK, depReason, derr := verifyModuleCompat(compilerBin, entry.URL, entry.Subdir, entry.Commit, epoch, visiting, warn)
 		if derr != nil {
 			return false, "", derr
 		}
@@ -334,8 +347,14 @@ func resolveCommunityByURL(url, epoch string) (commit string, found bool, err er
 // (§9.10) — raised here, at resolve time, so raw dependency compiler errors never
 // reach the project build.
 //
+// Tags are repo-scoped (a repo has one tag namespace) but verification is scoped
+// to the addressed module: `subdir` names the module directory inside the repo, so
+// each candidate is compiled and tested as that module alone. Two modules from one
+// repo may therefore settle on different commits — checkouts are per-commit, so
+// that is harmless.
+//
 // warn receives human-facing notices (e.g. the "unversioned" fallback warning).
-func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string, warn func(string)) (commit string, err error) {
+func resolveEpochAware(compilerBin, projectEpoch, label, url, subdir, explicitRef string, warn func(string)) (commit string, err error) {
 	visiting := map[string]bool{}
 
 	if explicitRef != "" {
@@ -343,7 +362,7 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 		if perr != nil {
 			return "", perr
 		}
-		ok, reason, verr := verifyModuleCompat(compilerBin, url, c, projectEpoch, visiting, warn)
+		ok, reason, verr := verifyModuleCompat(compilerBin, url, subdir, c, projectEpoch, visiting, warn)
 		if verr != nil {
 			return "", verr
 		}
@@ -390,7 +409,7 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 			fallback = h
 			warn(fmt.Sprintf("module %q is unversioned (no epoch-* or 'stable' tags); pinning default-branch HEAD %s", label, shortCommit(h)))
 		}
-		ok, reason, verr := verifyModuleCompat(compilerBin, url, fallback, projectEpoch, visiting, warn)
+		ok, reason, verr := verifyModuleCompat(compilerBin, url, subdir, fallback, projectEpoch, visiting, warn)
 		if verr != nil {
 			return "", verr
 		}
@@ -407,7 +426,7 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, explicitRef string
 
 	// Walk back through candidate tags (largest epoch first); first verified wins.
 	for _, cand := range candidates {
-		ok, reason, verr := verifyModuleCompat(compilerBin, url, cand.Commit, projectEpoch, visiting, warn)
+		ok, reason, verr := verifyModuleCompat(compilerBin, url, subdir, cand.Commit, projectEpoch, visiting, warn)
 		if verr != nil {
 			return "", verr
 		}
@@ -526,14 +545,14 @@ func runPackageCheckUpgrade(args []string) {
 	}
 
 	// Build the dependency list (URL-keyed + named git entries).
-	type dep struct{ label, url string }
+	type dep struct{ label, url, subdir string }
 	var deps []dep
 	for url := range cfg.Require {
-		deps = append(deps, dep{url, url})
+		deps = append(deps, dep{url, url, ""})
 	}
 	for name, entry := range cfg.NamedRequire {
 		if entry.URL != "" && entry.Commit != "" {
-			deps = append(deps, dep{name, entry.URL})
+			deps = append(deps, dep{name, entry.URL, entry.Subdir})
 		}
 	}
 	if len(deps) == 0 {
@@ -551,7 +570,7 @@ func runPackageCheckUpgrade(args []string) {
 	fmt.Printf("Checking %d dependencies against epoch %s:\n\n", len(deps), targetEpoch)
 	blocked := 0
 	for _, d := range deps {
-		commit, rerr := resolveEpochAware(compilerBin, targetEpoch, d.label, d.url, "", func(string) {})
+		commit, rerr := resolveEpochAware(compilerBin, targetEpoch, d.label, d.url, d.subdir, "", func(string) {})
 		if rerr != nil {
 			blocked++
 			if nce, ok := rerr.(*module.NoCompatibleVersionError); ok {

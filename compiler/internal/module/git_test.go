@@ -241,7 +241,7 @@ func TestResolveRemoteModuleLocalRepo(t *testing.T) {
 	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// First resolve — should clone and checkout
-	dir, err := ResolveRemoteModule(bareRepo, commitHash)
+	dir, err := ResolveRemoteModule(bareRepo, commitHash, "")
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestResolveRemoteModuleLocalRepo(t *testing.T) {
 	}
 
 	// Second resolve — should hit the fast path
-	dir2, err := ResolveRemoteModule(bareRepo, commitHash)
+	dir2, err := ResolveRemoteModule(bareRepo, commitHash, "")
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
@@ -317,13 +317,13 @@ func TestResolveRemoteModuleTwoCommits(t *testing.T) {
 	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// Resolve first commit
-	dir1, err := ResolveRemoteModule(bareRepo, hash1)
+	dir1, err := ResolveRemoteModule(bareRepo, hash1, "")
 	if err != nil {
 		t.Fatalf("resolve commit 1: %v", err)
 	}
 
 	// Resolve second commit
-	dir2, err := ResolveRemoteModule(bareRepo, hash2)
+	dir2, err := ResolveRemoteModule(bareRepo, hash2, "")
 	if err != nil {
 		t.Fatalf("resolve commit 2: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestResolveRemoteModuleShortHash(t *testing.T) {
 	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// Use the full hash — checkout dir should use first 12 chars
-	dir, err := ResolveRemoteModule(bareRepo, commitHash)
+	dir, err := ResolveRemoteModule(bareRepo, commitHash, "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -623,4 +623,178 @@ func TestAcquireLock(t *testing.T) {
 		t.Fatalf("second lock: %v", err)
 	}
 	unlock2()
+}
+
+// createSubdirTestRepo builds a bare repo with NO root promise.toml and two
+// Promise modules in subdirectories — the T1524 shape: a repo that is not itself
+// Promise-primary but contains Promise modules.
+func createSubdirTestRepo(t *testing.T) (bareRepo, commitHash string) {
+	t.Helper()
+
+	workDir := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v failed: %s\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	run(workDir, "git", "init", "--initial-branch=main")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+
+	// A Go-primary repo marker at the root — deliberately no promise.toml here.
+	os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example.com/base\n"), 0644)
+
+	for _, name := range []string{"wire", "types"} {
+		sub := filepath.Join(workDir, "proto", name)
+		if err := os.MkdirAll(sub, 0755); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(sub, "promise.toml"),
+			[]byte("[module]\nname = \""+name+"\"\nepoch = \"2026.0\"\n"), 0644)
+		os.WriteFile(filepath.Join(sub, name+".pr"),
+			[]byte(name+"_hello() int `public { return 42; }\n"), 0644)
+	}
+
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "initial")
+	hash := strings.TrimSpace(run(workDir, "git", "rev-parse", "HEAD"))
+
+	bareRepo = filepath.Join(t.TempDir(), "base.git")
+	run("", "git", "clone", "--bare", "--quiet", workDir, bareRepo)
+	return bareRepo, hash
+}
+
+// T1524: two modules addressed in one repo resolve to their own directories and
+// share a single checkout (one fetch, one lock).
+func TestResolveRemoteModuleSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	bareRepo, commitHash := createSubdirTestRepo(t)
+
+	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
+	os.Unsetenv("PROMISE_HOME")
+	os.Setenv("HOME", t.TempDir())
+	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
+
+	wireDir, err := ResolveRemoteModule(bareRepo, commitHash, "proto/wire")
+	if err != nil {
+		t.Fatalf("resolve proto/wire: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wireDir, "promise.toml")); err != nil {
+		t.Fatal("expected promise.toml in the resolved subdir")
+	}
+	if filepath.Base(wireDir) != "wire" {
+		t.Errorf("resolved dir = %q, want it to end in the subdir", wireDir)
+	}
+
+	typesDir, err := ResolveRemoteModule(bareRepo, commitHash, "proto/types")
+	if err != nil {
+		t.Fatalf("resolve proto/types: %v", err)
+	}
+	if typesDir == wireDir {
+		t.Fatal("two subdir modules resolved to the same directory")
+	}
+	// One checkout shared by both: <checkout>/proto/{wire,types}.
+	if got, want := filepath.Dir(filepath.Dir(wireDir)), filepath.Dir(filepath.Dir(typesDir)); got != want {
+		t.Errorf("modules do not share a checkout: %q vs %q", got, want)
+	}
+
+	// Idempotent (fast path).
+	again, err := ResolveRemoteModule(bareRepo, commitHash, "proto/wire")
+	if err != nil || again != wireDir {
+		t.Errorf("second resolve = %q, %v; want %q", again, err, wireDir)
+	}
+}
+
+// A mistyped subdir must be named directly, not surface later as a raw
+// "cannot read .../promise.toml".
+func TestResolveRemoteModuleSubdirMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	bareRepo, commitHash := createSubdirTestRepo(t)
+
+	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
+	os.Unsetenv("PROMISE_HOME")
+	os.Setenv("HOME", t.TempDir())
+	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
+
+	_, err := ResolveRemoteModule(bareRepo, commitHash, "proto/nope")
+	if err == nil {
+		t.Fatal("expected an error for a subdir with no promise.toml")
+	}
+	if !strings.Contains(err.Error(), "no promise.toml at") || !strings.Contains(err.Error(), "proto/nope") {
+		t.Errorf("error = %v, want it to name the missing subdir", err)
+	}
+
+	// The repo root has no promise.toml either — the root-addressed form must
+	// report that too rather than returning a directory without a manifest.
+	if _, err := ResolveRemoteModule(bareRepo, commitHash, ""); err == nil {
+		t.Fatal("expected an error for a repo with no root promise.toml")
+	}
+}
+
+// NoManifestError has two spellings — a bare repo root and a named subdirectory —
+// and both must name the commit. The root form is what a plain (subdir-less)
+// remote dependency produces, so it is not dead code (T1524).
+func TestNoManifestErrorMessage(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+
+	root := (&NoManifestError{URL: "https://github.com/acme/base", Commit: commit}).Error()
+	if !strings.Contains(root, "at the root of") {
+		t.Errorf("root error = %q, want it to say the manifest is missing at the repo root", root)
+	}
+	if strings.Contains(root, `""`) {
+		t.Errorf("root error = %q, must not print an empty quoted subdir", root)
+	}
+
+	sub := (&NoManifestError{URL: "https://github.com/acme/base", Subdir: "proto/wire", Commit: commit}).Error()
+	if !strings.Contains(sub, `"proto/wire"`) {
+		t.Errorf("subdir error = %q, want it to name the subdir", sub)
+	}
+
+	// Both forms abbreviate the commit rather than printing 40 characters.
+	for _, msg := range []string{root, sub} {
+		if !strings.Contains(msg, commit[:12]) || strings.Contains(msg, commit) {
+			t.Errorf("error = %q, want the commit shortened to %q", msg, commit[:12])
+		}
+	}
+}
+
+// shortCommitHash must pass a hash that is already short (or empty) through
+// untouched rather than slicing out of range.
+func TestShortCommitHash(t *testing.T) {
+	cases := map[string]string{
+		"":             "",
+		"abc123":       "abc123",
+		"0123456789ab": "0123456789ab", // exactly 12 — no truncation
+		"0123456789abcdef0123456789abcdef01234567": "0123456789ab",
+	}
+	for in, want := range cases {
+		if got := shortCommitHash(in); got != want {
+			t.Errorf("shortCommitHash(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 // runPackage dispatch (T1007): consolidates dependency management under
@@ -133,8 +135,9 @@ func TestRunPackageRemoveMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit for remove of missing URL")
 	}
-	if !strings.Contains(string(out), "no [require] entry") {
-		t.Errorf("expected 'no [require] entry' message, got: %s", string(out))
+	// The message names both tables — a named entry is removable too (T1524).
+	if !strings.Contains(string(out), "no [require] or [require.NAME] entry") {
+		t.Errorf("expected a 'no matching entry' message, got: %s", string(out))
 	}
 }
 
@@ -424,5 +427,92 @@ func TestRunUpdateRejectsEpochArg(t *testing.T) {
 	}
 	if !strings.Contains(s, "promise use <epoch>") {
 		t.Errorf("expected pointer to `promise use`, got: %s", s)
+	}
+}
+
+// TestSelectUpdateEntries: `promise package update <target>` entry selection.
+// T1524 — a repo URL can back several [require.NAME] entries (one per subdir
+// module), so a URL target must take all of them, not whichever one map iteration
+// happened to reach first.
+func TestSelectUpdateEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	toml := `[module]
+name = "app"
+epoch = "2026.0"
+
+[require]
+"github.com/example/flat" = "111111"
+
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "proto/wire"
+
+[require.types]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "proto/types"
+
+[require.other]
+url = "https://github.com/acme/other"
+commit = "def456"
+`
+	if err := os.WriteFile(path, []byte(toml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := module.ParseConfig(path)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	labels := func(entries []updateEntry) []string {
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.label)
+		}
+		return out
+	}
+	joined := func(entries []updateEntry) string { return strings.Join(labels(entries), ",") }
+
+	// No target — every entry, sorted by label.
+	if got, want := joined(selectUpdateEntries(cfg, "")), "github.com/example/flat,other,types,wire"; got != want {
+		t.Errorf("select all = %q, want %q", got, want)
+	}
+
+	// A repo URL that backs two subdir modules selects both, deterministically.
+	both := selectUpdateEntries(cfg, "https://github.com/acme/base")
+	if got, want := joined(both), "types,wire"; got != want {
+		t.Errorf("select by shared repo url = %q, want %q", got, want)
+	}
+	for _, e := range both {
+		if !e.named || e.subdir == "" {
+			t.Errorf("entry %+v: expected a named subdir entry", e)
+		}
+	}
+
+	// A URL spelling variant normalizes to the same entries.
+	if got, want := joined(selectUpdateEntries(cfg, "github.com/acme/base.git")), "types,wire"; got != want {
+		t.Errorf("select by normalized url = %q, want %q", got, want)
+	}
+
+	// An import name selects exactly that entry, not its repo siblings.
+	one := selectUpdateEntries(cfg, "wire")
+	if got, want := joined(one), "wire"; got != want {
+		t.Fatalf("select by import name = %q, want %q", got, want)
+	}
+	if one[0].subdir != "proto/wire" || one[0].currentCommit != "abc123" {
+		t.Errorf("entry = %+v, want subdir and commit carried through", one[0])
+	}
+
+	// A flat [require] key still matches by URL and carries no subdir.
+	flat := selectUpdateEntries(cfg, "github.com/example/flat")
+	if len(flat) != 1 || flat[0].named || flat[0].subdir != "" || flat[0].currentCommit != "111111" {
+		t.Errorf("flat selection = %+v", flat)
+	}
+
+	// No match — nil, so the caller can report it.
+	if got := selectUpdateEntries(cfg, "github.com/nobody/nothing"); got != nil {
+		t.Errorf("select of an unknown target = %+v, want nil", got)
 	}
 }

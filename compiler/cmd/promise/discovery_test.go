@@ -337,8 +337,10 @@ func TestUpdateNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit")
 	}
-	if !strings.Contains(string(out), "no [require] entry matching") {
-		t.Errorf("expected 'no [require] entry matching' in output, got: %s", string(out))
+	// The message names both tables — `update` also matches [require.NAME]
+	// sections, by import name or by URL (T1524).
+	if !strings.Contains(string(out), "no [require] or [require.NAME] entry matching") {
+		t.Errorf("expected a 'no matching entry' message, got: %s", string(out))
 	}
 }
 

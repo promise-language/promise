@@ -26,7 +26,7 @@ func TestResolveRemoteModuleSurvivesUpstreamDeletion(t *testing.T) {
 	os.Unsetenv("PROMISE_HOME")
 
 	// First resolve fetches + checks out into the cache.
-	dir1, err := ResolveRemoteModule(bareRepo, commitHash)
+	dir1, err := ResolveRemoteModule(bareRepo, commitHash, "")
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestResolveRemoteModuleSurvivesUpstreamDeletion(t *testing.T) {
 	}
 
 	// Re-resolve must still succeed from the cache (fast path: checkout exists).
-	dir2, err := ResolveRemoteModule(bareRepo, commitHash)
+	dir2, err := ResolveRemoteModule(bareRepo, commitHash, "")
 	if err != nil {
 		t.Fatalf("resolve after upstream deletion: %v", err)
 	}

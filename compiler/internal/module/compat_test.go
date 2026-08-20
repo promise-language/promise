@@ -26,7 +26,7 @@ func TestCompatVerdictRoundTrip(t *testing.T) {
 
 	// URL normalization means a differently-spelled but equivalent URL hits the
 	// same verdict.
-	got, found := LookupCompat("github.com/you/foo", "abc123", "2026.1")
+	got, found := LookupCompat("github.com/you/foo", "", "abc123", "2026.1")
 	if !found {
 		t.Fatal("expected verdict to be found")
 	}
@@ -35,7 +35,7 @@ func TestCompatVerdictRoundTrip(t *testing.T) {
 	}
 
 	// A different epoch is a separate key — not found.
-	if _, found := LookupCompat("github.com/you/foo", "abc123", "2026.2"); found {
+	if _, found := LookupCompat("github.com/you/foo", "", "abc123", "2026.2"); found {
 		t.Error("verdict should be keyed by epoch")
 	}
 }
@@ -51,11 +51,11 @@ func TestLookupCompatCorruptJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	url, commit, epoch := "github.com/you/corrupt", "cafef00d", "2026.1"
-	path := filepath.Join(dir, compatKey(url, commit, epoch)+".json")
+	path := filepath.Join(dir, compatKey(url, "", commit, epoch)+".json")
 	if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, found := LookupCompat(url, commit, epoch); found {
+	if _, found := LookupCompat(url, "", commit, epoch); found {
 		t.Error("corrupt verdict file should be treated as absent")
 	}
 }
@@ -79,7 +79,7 @@ func TestCompatVerdictCompileOnlyRoundTrip(t *testing.T) {
 		t.Fatalf("SaveCompat: %v", err)
 	}
 
-	got, found := LookupCompat("https://github.com/you/notest.git", "aaabbb", "2026.1")
+	got, found := LookupCompat("https://github.com/you/notest.git", "", "aaabbb", "2026.1")
 	if !found {
 		t.Fatal("expected verdict to be found")
 	}
@@ -103,7 +103,7 @@ func TestCompatVerdictCompileOnlyRoundTrip(t *testing.T) {
 	if err := SaveCompat(v2); err != nil {
 		t.Fatalf("SaveCompat v2: %v", err)
 	}
-	got2, found2 := LookupCompat("https://github.com/you/tested.git", "cccddd", "2026.1")
+	got2, found2 := LookupCompat("https://github.com/you/tested.git", "", "cccddd", "2026.1")
 	if !found2 {
 		t.Fatal("expected v2 to be found")
 	}
@@ -134,12 +134,12 @@ func TestCompatVerdictBackwardCompatOldJSON(t *testing.T) {
   "compatible": true,
   "compiler_hash": "` + CompilerHash() + `"
 }`
-	path := filepath.Join(dir, compatKey(url, commit, epoch)+".json")
+	path := filepath.Join(dir, compatKey(url, "", commit, epoch)+".json")
 	if err := os.WriteFile(path, []byte(oldJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, found := LookupCompat(url, commit, epoch)
+	got, found := LookupCompat(url, "", commit, epoch)
 	if !found {
 		t.Fatal("pre-T1052 verdict should still be found")
 	}
@@ -168,14 +168,14 @@ func TestCompatVerdictCompilerHashInvalidation(t *testing.T) {
 		CompilerHash: "STALE-HASH-FROM-AN-OLDER-COMPILER",
 	}
 	data, _ := json.MarshalIndent(stale, "", "  ")
-	path := filepath.Join(dir, compatKey(stale.URL, stale.Commit, stale.Epoch)+".json")
+	path := filepath.Join(dir, compatKey(stale.URL, "", stale.Commit, stale.Epoch)+".json")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// A verdict from a different compiler build must be treated as absent — a
 	// rebuilt compiler can flip the verdict, so "verify, never assume" re-runs.
-	if _, found := LookupCompat(stale.URL, stale.Commit, stale.Epoch); found {
+	if _, found := LookupCompat(stale.URL, "", stale.Commit, stale.Epoch); found {
 		t.Error("stale-compiler verdict should be ignored")
 	}
 
@@ -183,11 +183,38 @@ func TestCompatVerdictCompilerHashInvalidation(t *testing.T) {
 	if err := SaveCompat(&CompatVerdict{URL: stale.URL, Commit: stale.Commit, Epoch: stale.Epoch, Compatible: false, FailReason: "boom"}); err != nil {
 		t.Fatal(err)
 	}
-	got, found := LookupCompat(stale.URL, stale.Commit, stale.Epoch)
+	got, found := LookupCompat(stale.URL, "", stale.Commit, stale.Epoch)
 	if !found {
 		t.Fatal("expected fresh verdict to be found")
 	}
 	if got.Compatible || got.FailReason != "boom" {
 		t.Errorf("unexpected verdict: %+v", got)
+	}
+}
+
+// T1524: two modules in one repo at one commit are verified independently — their
+// verdicts must not alias, or a failing module would poison a passing sibling.
+func TestCompatVerdictSubdirScoped(t *testing.T) {
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	const url, commit, epoch = "https://github.com/acme/base", "abc123", "2026.1"
+	if err := SaveCompat(&CompatVerdict{URL: url, Subdir: "proto/wire", Commit: commit, Epoch: epoch, Compatible: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveCompat(&CompatVerdict{URL: url, Subdir: "proto/types", Commit: commit, Epoch: epoch, Compatible: false, FailReason: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+
+	wire, found := LookupCompat(url, "proto/wire", commit, epoch)
+	if !found || !wire.Compatible {
+		t.Fatalf("proto/wire verdict = %+v found=%v, want compatible", wire, found)
+	}
+	types, found := LookupCompat(url, "proto/types", commit, epoch)
+	if !found || types.Compatible || types.FailReason != "boom" {
+		t.Fatalf("proto/types verdict = %+v found=%v, want incompatible", types, found)
+	}
+	// The repo-root identity is a third, independent key.
+	if _, found := LookupCompat(url, "", commit, epoch); found {
+		t.Error("root-addressed verdict should not alias a subdir verdict")
 	}
 }

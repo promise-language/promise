@@ -143,7 +143,7 @@ func TestGlobalIdentityFunctions(t *testing.T) {
 	if got := GlobalIdentityForLocal("./mylib"); got != "./mylib" {
 		t.Errorf("GlobalIdentityForLocal = %q", got)
 	}
-	if got := GlobalIdentityForRemote("github.com/alice/parser"); got != "github.com/alice/parser" {
+	if got := GlobalIdentityForRemote("github.com/alice/parser", ""); got != "github.com/alice/parser" {
 		t.Errorf("GlobalIdentityForRemote = %q", got)
 	}
 	if got := GlobalIdentityForCatalog("json"); got != "json" {
@@ -181,5 +181,41 @@ func TestEnsureLetterStart(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ensureLetterStart(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+// --- T1524: subdir-aware remote identity ---
+
+// The empty-subdir identity must stay byte-identical to the pre-T1524 value —
+// every existing IR prefix, module-cache key and instance-cache key depends on it.
+func TestGlobalIdentityForRemoteEmptySubdirUnchanged(t *testing.T) {
+	for _, url := range []string{"github.com/alice/parser", "example.com/x", "git@github.com:a/b"} {
+		if got := GlobalIdentityForRemote(url, ""); got != url {
+			t.Errorf("GlobalIdentityForRemote(%q, \"\") = %q, want the bare URL", url, got)
+		}
+		if got, want := SanitizeIRPrefix(GlobalIdentityForRemote(url, "")), SanitizeIRPrefix(url); got != want {
+			t.Errorf("IR prefix drifted for %q: %q != %q", url, got, want)
+		}
+	}
+}
+
+func TestGlobalIdentityForRemoteSubdirDistinct(t *testing.T) {
+	const url = "github.com/acme/base"
+	wire := GlobalIdentityForRemote(url, "proto/wire")
+	types := GlobalIdentityForRemote(url, "proto/types")
+	root := GlobalIdentityForRemote(url, "")
+
+	if wire != "github.com/acme/base//proto/wire" {
+		t.Errorf("identity = %q", wire)
+	}
+	if wire == types || wire == root || types == root {
+		t.Fatalf("identities must be distinct: %q %q %q", wire, types, root)
+	}
+	pw, pt, pr := SanitizeIRPrefix(wire), SanitizeIRPrefix(types), SanitizeIRPrefix(root)
+	if pw == pt || pw == pr || pt == pr {
+		t.Fatalf("IR prefixes must be distinct: %q %q %q", pw, pt, pr)
+	}
+	if !strings.HasPrefix(pw, "github_com_acme_base_proto_wire_") {
+		t.Errorf("IR prefix = %q, want the sanitized identity plus a hash suffix", pw)
 	}
 }

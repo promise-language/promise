@@ -14,6 +14,7 @@ type CatalogEntry struct {
 	Name        string // module name (the TOML key, e.g., "json")
 	URL         string // fetch-ready git URL; empty for embedded modules
 	Commit      string // pinned commit hash; empty for embedded modules
+	Subdir      string // repo-relative path to the module directory; empty means repo root
 	Description string // human-readable description
 }
 
@@ -115,6 +116,8 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 				currentEntry.URL = val
 			case "commit":
 				currentEntry.Commit = val
+			case "subdir":
+				currentEntry.Subdir = val
 			case "description":
 				currentEntry.Description = val
 			}
@@ -133,6 +136,14 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 		if entry.URL == "" && entry.Commit != "" {
 			return nil, fmt.Errorf("catalog.toml: module '%s' has 'commit' but is missing 'url'", name)
 		}
+		if entry.URL == "" && entry.Subdir != "" {
+			return nil, fmt.Errorf("catalog.toml: module '%s' has 'subdir' but is missing 'url' — embedded modules have no repo to address into", name)
+		}
+		sub, serr := NormalizeSubdir(entry.Subdir)
+		if serr != nil {
+			return nil, fmt.Errorf("catalog.toml: module '%s' has invalid 'subdir': %w", name, serr)
+		}
+		entry.Subdir = sub
 	}
 
 	return cat, nil

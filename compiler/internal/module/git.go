@@ -52,8 +52,12 @@ func sanitizeURLPath(normalizedURL string) string {
 }
 
 // ResolveRemoteModule ensures the repo at `url` is checked out at `commitHash`
-// in the global cache. Returns the absolute path to the checkout directory.
-func ResolveRemoteModule(url, commitHash string) (string, error) {
+// in the global cache. Returns the absolute path to the module directory: the
+// checkout root, or the `subdir` within it when the module lives in a
+// subdirectory of the repo (T1524). The bare repo and the checkout are keyed on
+// (url, commit) only, so several subdir modules from one repo share a single
+// fetch and a single checkout.
+func ResolveRemoteModule(url, commitHash, subdir string) (string, error) {
 	if err := requireGit(); err != nil {
 		return "", err
 	}
@@ -77,11 +81,13 @@ func ResolveRemoteModule(url, commitHash string) (string, error) {
 	}
 	checkoutDir := filepath.Join(modCacheDir, checkoutSuffix)
 
+	modDir := filepath.Join(checkoutDir, filepath.FromSlash(subdir))
+
 	// Fast path: checkout already exists
 	if info, err := os.Stat(checkoutDir); err == nil && info.IsDir() {
-		toml := filepath.Join(checkoutDir, "promise.toml")
+		toml := filepath.Join(modDir, "promise.toml")
 		if _, err := os.Stat(toml); err == nil {
-			return checkoutDir, nil
+			return modDir, nil
 		}
 	}
 
@@ -95,9 +101,9 @@ func ResolveRemoteModule(url, commitHash string) (string, error) {
 
 	// Re-check after acquiring lock (another process may have completed)
 	if info, err := os.Stat(checkoutDir); err == nil && info.IsDir() {
-		toml := filepath.Join(checkoutDir, "promise.toml")
+		toml := filepath.Join(modDir, "promise.toml")
 		if _, err := os.Stat(toml); err == nil {
-			return checkoutDir, nil
+			return modDir, nil
 		}
 	}
 
@@ -111,7 +117,42 @@ func ResolveRemoteModule(url, commitHash string) (string, error) {
 		return "", fmt.Errorf("cannot checkout %s at %s: %w", url, commitHash, err)
 	}
 
-	return checkoutDir, nil
+	// A mistyped subdir is easy to make and would otherwise surface much later as
+	// a raw "cannot read .../promise.toml" from ParseConfig — name it here.
+	if _, err := os.Stat(filepath.Join(modDir, "promise.toml")); err != nil {
+		return "", &NoManifestError{URL: url, Subdir: subdir, Commit: commitHash}
+	}
+
+	return modDir, nil
+}
+
+// NoManifestError reports that the addressed module directory inside a checkout
+// holds no promise.toml — the repo root when Subdir is empty, otherwise Subdir.
+//
+// It is distinguished from an ordinary fetch failure because it is a property of
+// the commit, not of the network: the §9.9 compatibility gate records it as an
+// incompatible verdict and keeps walking back through older epoch tags, rather
+// than aborting resolution (a module may have gained its manifest — or moved into
+// its subdirectory — in a later commit).
+type NoManifestError struct {
+	URL    string
+	Subdir string
+	Commit string
+}
+
+func (e *NoManifestError) Error() string {
+	if e.Subdir == "" {
+		return fmt.Sprintf("no promise.toml at the root of %s@%s", e.URL, shortCommitHash(e.Commit))
+	}
+	return fmt.Sprintf("no promise.toml at %q in %s@%s", e.Subdir, e.URL, shortCommitHash(e.Commit))
+}
+
+// shortCommitHash truncates a commit SHA to 12 chars for error messages.
+func shortCommitHash(c string) string {
+	if len(c) > 12 {
+		return c[:12]
+	}
+	return c
 }
 
 // PinResolve resolves a human-friendly ref (tag, branch, "HEAD", or short hash prefix)

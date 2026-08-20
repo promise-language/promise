@@ -325,3 +325,53 @@ this is not valid toml
 		t.Errorf("expected 'expected key = value' error, got: %v", err)
 	}
 }
+
+// --- T1524: subdir on catalog entries ---
+
+func TestParseCatalogSubdir(t *testing.T) {
+	cat, err := ParseCatalog([]byte(`[catalog]
+epoch = "2026.1"
+
+[modules.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "./proto/wire/"
+description = "wire types"
+`))
+	if err != nil {
+		t.Fatalf("ParseCatalog: %v", err)
+	}
+	if got := cat.Lookup("wire").Subdir; got != "proto/wire" {
+		t.Errorf("subdir = %q, want normalized %q", got, "proto/wire")
+	}
+}
+
+func TestParseCatalogSubdirOnEmbeddedEntry(t *testing.T) {
+	_, err := ParseCatalog([]byte(`[catalog]
+epoch = "2026.1"
+
+[modules.io]
+subdir = "sub"
+description = "embedded"
+`))
+	if err == nil {
+		t.Fatal("expected an error: an embedded entry has no repo to address into")
+	}
+	if !strings.Contains(err.Error(), "subdir") {
+		t.Errorf("error = %v, want it to mention subdir", err)
+	}
+}
+
+func TestParseCatalogInvalidSubdir(t *testing.T) {
+	_, err := ParseCatalog([]byte(`[catalog]
+epoch = "2026.1"
+
+[modules.wire]
+url = "https://github.com/acme/base"
+commit = "abc123"
+subdir = "../escape"
+`))
+	if err == nil {
+		t.Fatal("expected an error for a subdir escaping the repo root")
+	}
+}

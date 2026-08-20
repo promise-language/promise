@@ -23,10 +23,18 @@ func (c *Compiler) compileModules() {
 	// B0212: Cache module infos for cross-module drop function lookups during module compilation.
 	c.moduleInfos = c.info.ModuleInfos
 
-	// Build path → IR prefix mapping for alias resolution in genModuleCall.
+	// Build path/import-name → IR prefix mapping for alias resolution in
+	// genModuleCall. Path-less imports (`use json;`, or `use wire;` resolving
+	// through a [require.wire] entry) are keyed by their import name: a
+	// named-require module's prefix comes from its URL, not its import name, so it
+	// cannot be assumed (T1611). Import names are unique within a build and paths
+	// always contain a separator, so the two key spaces never collide.
 	for _, modInfo := range c.info.ModuleInfos {
 		if modInfo.Path != "" {
 			c.moduleCanonical[modInfo.Path] = modInfo.EffectiveIRPrefix()
+		}
+		if modInfo.CatalogName != "" {
+			c.moduleCanonical[modInfo.CatalogName] = modInfo.EffectiveIRPrefix()
 		}
 	}
 

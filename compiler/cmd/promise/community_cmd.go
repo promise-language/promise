@@ -149,7 +149,7 @@ func runPackageBuildIndex(args []string) {
 	var failed []string
 	for _, name := range names {
 		url := cc.Modules[name].URL
-		commit, rerr := resolveEpochAware(compilerBin, epoch, name, url, "", func(string) {})
+		commit, rerr := resolveEpochAware(compilerBin, epoch, name, url, "", "", func(string) {})
 		if rerr != nil {
 			failed = append(failed, name)
 			fmt.Printf("  ✗ %s — no version compatible with epoch %s\n", name, epoch)

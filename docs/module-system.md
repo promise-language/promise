@@ -124,6 +124,7 @@ description = "Cryptographic primitives"
 Key properties:
 - **Flat namespace.** Module names are simple identifiers (`json`, `http`, `crypto`). No URLs, no paths, no version numbers in names.
 - **Embedded or external.** A catalog entry **without** `url`/`commit` is an **embedded module** — its source lives in `modules/<name>/` in the compiler repo and is compiled into the binary. An entry **with** `url`/`commit` is an **external module** — fetched from git on first use. From the user's perspective, both are just `use name`. This allows modules to start embedded (fast iteration during early development) and graduate to external repos when stable.
+- **`subdir` (external only).** An external entry may add `subdir = "path/to/module"` when the module lives in a subdirectory of its repo rather than at the root — the same field and the same rules as a `[require.NAME]` entry (§6.2). It is rejected on an embedded entry, which has no repo to address into.
 - **Fetch-ready URLs (external only).** The `url` field stores the full git-fetchable URL including protocol and authentication info (e.g., `https://github.com/...`, `git@github.com:...`, `ssh://git@git.corp.com/...`). This is the URL passed directly to `git clone` — not the normalized canonical form used for identity/deduplication (which strips schemes and suffixes). The catalog entry is the source of truth for *how* to fetch each module.
 - **Pinned commits (external only).** Each external module points to an exact commit hash. No ranges, no "latest", no resolution. Embedded modules are versioned implicitly by the compiler commit (they're in the same repo).
 - **Implicit dependencies.** Catalog modules declare dependencies via `use` declarations in their source code, not in catalog.toml. The compiler resolves them transitively at build time. The catalog CI validates that all inter-module dependencies form a DAG (no cycles).
@@ -287,7 +288,7 @@ warning: absolute local import path "/opt/shared/auth" is non-portable
 
 **Local modules** point to a directory containing its own `promise.toml`. The path is always relative to the project's module root (the directory containing the project's `promise.toml`), not the importing source file. This means every source file in the project uses the same path to reference the same local module, regardless of which subdirectory the source file lives in. Subdirectories without a `promise.toml` are organizational — their `.pr` files belong to the parent module.
 
-**Remote modules** point to a git repository containing a `promise.toml` at its root. They must be pinned to a specific git commit hash in the project's `promise.toml` `[require]` section (see Section 6.2). The compiler clones (or fetches from cache) the repository at the pinned commit. If a source file references a remote URL that has no `[require]` entry, the compiler errors:
+**Remote modules** point to a git repository containing a `promise.toml` — at the repo root, or at the `subdir` named by a `[require.NAME]` entry (§6.2) when the module lives inside a larger, not-necessarily-Promise repo. They must be pinned to a specific git commit hash in the project's `promise.toml` `[require]` section (see Section 6.2). The compiler clones (or fetches from cache) the repository at the pinned commit. If a source file references a remote URL that has no `[require]` entry, the compiler errors:
 
 ```
 error: remote module "github.com/someone/parser" has no pin in promise.toml
@@ -370,7 +371,7 @@ The existing grammar rule `USE IDENT stringLiteral SEMI` already covers sourced 
 
 ### 6.1 `promise.toml` File
 
-Every module (including your project) has a `promise.toml` file at its root. The file uses standard [TOML](https://toml.io) format, so editors and IDEs provide syntax highlighting, validation, and completion out of the box.
+Every module (including your project) has a `promise.toml` file at its root — the root of the *module*, which for a module published from a subdirectory of a larger repo is that subdirectory (§6.2), not the repo. The file uses standard [TOML](https://toml.io) format, so editors and IDEs provide syntax highlighting, validation, and completion out of the box.
 
 ```toml
 [module]
@@ -410,7 +411,57 @@ epoch = "2026.0"
 
 Each entry in `[require]` maps a remote URL to a git commit hash. This is the **only** version information in the entire project — and it only applies to remote modules.
 
-**What lives at the remote URL:** Always a git repository containing a `promise.toml` at its root. The compiler clones the repo (or fetches into its cache) at the pinned commit. No other formats (zip, tar, registry) are supported — git is universal and commit hashes map directly to git objects.
+**What lives at the remote URL:** Always a git repository containing a `promise.toml` — at the repo root, or at the `subdir` named by a `[require.NAME]` entry (see below). The compiler clones the repo (or fetches into its cache) at the pinned commit. No other formats (zip, tar, registry) are supported — git is universal and commit hashes map directly to git objects.
+
+**Named requires (`[require.NAME]`).** The flat `[require]` table is keyed by URL, so the import must spell out the URL: `use parser "github.com/someone/promise-parser"`. The **named** form instead keys on a local *import name*, letting source say `use parser;` while all addressing lives in the manifest:
+
+```toml
+[require.parser]
+url = "https://github.com/someone/promise-parser"
+commit = "a1b2c3d4e5f6"
+```
+
+A named entry accepts `sha256` in place of `commit` for non-git sources, and one more field the flat form does not have:
+
+**`subdir` — a module inside a larger repo.** A repo that is not itself Promise-primary (a Go service, a monorepo, a spec repo) can still publish Promise modules from subdirectories. `subdir` names the repo-relative directory holding that module's `promise.toml`; the repo root needs no manifest at all:
+
+```toml
+[require.wire]
+url = "https://github.com/acme/base"
+commit = "a1b2c3d4e5f6"
+subdir = "proto/wire"
+
+[require.types]
+url = "https://github.com/acme/base"
+commit = "a1b2c3d4e5f6"
+subdir = "proto/types"
+```
+
+```promise
+use wire;
+use types;    // two modules, one repo, one checkout
+```
+
+Rules:
+
+- **`subdir` is repo-relative and must stay inside the repo.** Absolute paths, `..` components, and empty components are rejected when the manifest is parsed. `./a/b/`, `a/b/` and `a\b` all normalize to `a/b`.
+- **Named-only.** `subdir` has no meaning on the flat `[require]` table, whose key is the repo URL — a repo could then only ever contribute one module. `promise package pin` writes flat entries and takes no `subdir`.
+- **One checkout per (url, commit).** Every module addressed in a repo shares a single fetch and a single checkout; only the module's own directory is compiled (the containment rule in §5.4 already stops a module from absorbing a subdirectory that carries its own `promise.toml`).
+- **Distinct identities.** A subdir module's global identity is `<normalized-url>//<subdir>`, so two modules from one repo get different IR prefixes and different cache entries. A module addressed at the repo root keeps the bare URL as its identity, exactly as before.
+- **Independent verification.** The §9.9 compatibility gate compiles and tests the addressed module alone, and caches its verdict per identity — a failing sibling in the same repo cannot poison it. Tags remain repo-scoped (§9.8), so two modules in one repo may settle on different commits.
+
+Add one from the command line with:
+
+```bash
+promise package add --subdir proto/wire https://github.com/acme/base
+promise package add --subdir proto/wire --name wireproto https://github.com/acme/base
+```
+
+`--name` defaults to the last component of `--subdir` and must be a plain identifier (it is what `use NAME;` writes). Neither flag applies to a catalog or community module name, which resolves to a URL you do not control.
+
+Remove one with `promise package remove <name|url>`: the import name takes out that one entry, while the repo URL takes out *every* named entry addressing that repo (all of its subdir modules at once). `promise package update <name|url>` selects the same way — updating by repo URL re-resolves every subdir module in that repo, and each is verified independently, so they may land on different commits.
+
+A URL containing an empty path component (`.../base//proto/wire` — the subpath spelling some other ecosystems use) is rejected by `promise package add`, `promise package pin`, and by the manifest parser, because it would normalize to exactly the identity of `url = ".../base"` plus `subdir = "proto/wire"` and the two would then share a commit pin, a resolution slot and an IR prefix.
 
 **Why commit hashes, not semver?** Consistency with the catalog model. The catalog pins exact commits internally; remote modules follow the same principle. A commit hash is unambiguous and immutable. Semver tags can be moved or deleted. Remote module authors can use whatever versioning scheme they like (tags, semver, etc.) — Promise resolves everything to a commit hash at pin time.
 
@@ -729,6 +780,18 @@ The compiler:
 4. Reads the remote module's `promise.toml` to confirm the module name
 5. Compiles the remote module and links it
 
+With a named require (§6.2) the source names the module, not its location:
+
+```promise
+use wire;
+```
+
+1. Sees `use wire;` with no path, and finds a `[require.wire]` entry (named requires are consulted before the catalog — §9.9 name resolution order)
+2. Reads `url`, `commit` and, if present, `subdir` from that entry
+3. Clones (or uses cached) the repo at the pinned commit — one checkout per `(url, commit)`, shared by every module addressed in that repo
+4. Descends into `subdir` and reads that directory's `promise.toml`; a missing manifest there is reported as `no promise.toml at "proto/wire" in <url>@<commit>`
+5. Compiles that directory as the module and links it, under the identity `<normalized-url>//<subdir>`
+
 ### 9.4 Remote Module Dependency Rules
 
 Remote modules can depend on:
@@ -850,6 +913,8 @@ epoch = "2026.0"
 [replace]
 "github.com/someone/promise-parser" = "../promise-parser"
 ```
+
+`[replace]` keys on the **repo URL**, so a single line redirects *every* module addressed in that repo — including subdir modules (§6.2). The subdir is then applied under the local path: with `subdir = "proto/wire"`, a replacement pointing at `../base` compiles `../base/proto/wire`. A replaced module keeps its remote identity, so replacing it does not split the build cache.
 
 The `[replace]` section redirects a module to a local directory during development. **`[replace]` values are always local paths** — it is purely a path-redirection mechanism, never used for changing commit hashes (use `[require]` for commit overrides — see Section 9.5). It is **not** committed to source control (or if committed, the CI should reject it). This is the same pattern as Go's `replace` directive — a development convenience that doesn't affect the published module.
 

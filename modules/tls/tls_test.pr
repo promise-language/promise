@@ -2,7 +2,15 @@
 // A self-signed cert/key (generated once, committed) drives a TlsListener
 // server and a TlsStream client on 127.0.0.1, exercising the full memory-BIO
 // handshake, encrypted round-trip, negotiated version/cipher, close_notify, and
-// TlsError kind differentiation. Excluded on wasm (no TLS backend / no sockets).
+// TlsError kind differentiation.
+//
+// Only Linux has a TLS backend today (the vendored musl-static OpenSSL, T1596);
+// on every other target the promise_tls_* bridges are inert stubs, so these tests
+// are excluded on wasm (no backend / no sockets), macOS (T1599) and Windows
+// (T1598) — running them there would only assert that TLS is missing. That
+// contract is covered instead by test_tls_unsupported_without_backend below, which
+// runs exactly where the handshake tests do not (T1614). Drop a target from the
+// exclude lists when its backend lands.
 // Self-signed certificate and matching private key (CN=localhost), PEM-encoded.
 _test_cert() u8[] {
   return "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUIdE48rWcPrShBQQO6bmpIWC4UYswDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgxOTE2MzQwM1oXDTM2MDgx\nNjE2MzQwM1owFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAmNxN4Db03AQ7rfUWkwMdfiAR+861FfWwgVFTeGFcmdE8\nImoPdZVlY0Kp3POt9+znOg4keaLQlCF/st8MkVcTafgbX8WNkPdQBep23bTwvezi\nj9QOJs/YNesImsYgs08p9R0HOiQvuRsK2E/khvok8XQtOGbe0D9+vG0LOqGc2CKG\nu1M9WfuI0A8iWlcVXFoiJQLas/FpXaNqkJ1+GDj4XW4JfkgByA3olAGiWZP+rZn8\nd8fUyZjbfI+huUTV8OWAXJpk8CI8BNFyEQU+WS8EsaVEgp1j6vOKbtBxFa1fu+Jz\n7vEllrAJQxBE4EWYr3u40K8DzG0kSYEnNzql62QzZQIDAQABo1MwUTAdBgNVHQ4E\nFgQUZ6zv3vHCsCg2daSNRgzxPh1Uy6EwHwYDVR0jBBgwFoAUZ6zv3vHCsCg2daSN\nRgzxPh1Uy6EwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAOkKf\nM+4hRfY33y+6LExP5qc7n7XBD8axlPbwWTTz4VnZhtb/1mhDilzsIvvqnr4joyVU\nasNZfV17Y5PBKdLJi7oAGQY6vBQTY/6oliltMMfyuwUlED4lpQrzR5eHETwLxae9\nyn2la4zq/T06latfpJsn69XDhfBFd8ZmF9aYlon80l6532hXtSVO3lpQmlst5Ke9\nevsiUh6EFMg67xKRgz6WBQYmUwe36uz84FC5etCHQkpuWSvYrPEfZs21J+ep4tvh\nIXSqOb2LDsJhf3V9VfILQRmzgSY36oUaHg2gck3QCYBj0wVCZm+BHw4FzFOe6MEa\nIe6jqBg4hHdNVc6mAw==\n-----END CERTIFICATE-----\n".bytes();
@@ -12,7 +20,7 @@ _test_key() u8[] {
   return "-----BEGIN PRIVATE KEY-----\nMIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQCY3E3gNvTcBDut\n9RaTAx1+IBH7zrUV9bCBUVN4YVyZ0Twiag91lWVjQqnc86337Oc6DiR5otCUIX+y\n3wyRVxNp+BtfxY2Q91AF6nbdtPC97OKP1A4mz9g16wiaxiCzTyn1HQc6JC+5GwrY\nT+SG+iTxdC04Zt7QP368bQs6oZzYIoa7Uz1Z+4jQDyJaVxVcWiIlAtqz8Wldo2qQ\nnX4YOPhdbgl+SAHIDeiUAaJZk/6tmfx3x9TJmNt8j6G5RNXw5YBcmmTwIjwE0XIR\nBT5ZLwSxpUSCnWPq84pu0HEVrV+74nPu8SWWsAlDEETgRZive7jQrwPMbSRJgSc3\nOqXrZDNlAgMBAAECgf8TAfytD324iM44U2xQhj1PRwL1d5QM/FV2adEh/E6yJyfT\nH7J3F0dZkHCO3mjuQLHVW5eC3ea8hMMxpYq/3T63bqKjcMKpxBcEpU3NQ91Wa0kW\nRB1+YK9XWmKM3GuJ4HjXLJo5dfEj6LjwglQTH10jU872XymrEOTcNAhcF2c+zjBq\n8UUa35Sb4ZrI4yoqdbpp6ovUraThhWZyjCPBex6yGPp5UJTfwNN6xyuQhzX96wP/\nVzIqYNeXYHFbArllxzFojD/2Al28jWlnYowIKPGu0OFJ40zM83daGqmrx8wrIX0h\n54fgomhb9KGajlzeCtiLYgrU/wHExG15I54hgqECgYEAxjurs9JSoUUaGGJLYfnB\nXRVG/tuMkUsPLEmUwRL0lnybBUJf+zjMp+xMpEfVvGzXOlnT8KIkZp6102QOAAoV\ngFQX023ZEWoQB4ePsh/JMZXUusXCUhqQWa4mvQVllaCurixIM00aH1lvC/bNNo6f\n6fIdZJNcuFWa+4dnzdfNL9ECgYEAxWfPk9731OvEaSMAC2r6H+EAiXC5fHRvImJD\nAvWNwkz7KodJbD7TE+SGN6Dm7v4MalYP0q46wtlo8f533q6AMXco1ctCg8T11h0w\nPyemWmd2OyibXLI41drnPT5OvnQ9Ou5oo59gsFSdRy2o529cGpGruvsZwkjQfNot\nQSFN41UCgYBi1W9XGX7PHyfSjndtItvQcAJUoNvluNmYyBrdZHkD6p5TsfMuyvPm\nqT7RDWu4JT/tvMmZiQ3DCFA5VAJS7LQppkO2y2bVct8JEgKH2aczDLPiZyTqUIo1\n3Ek+JsmuH03YUwWwZjmm9a0S9vr7v4JlXqxe78XjtfKug6UykOyhcQKBgQCI4gcq\nPj4TwribPs3VHQT7/gVlSGkWR5aYfRKChssZpE+1mcHr8VRkQt5ezI/VwQvS4IJw\nUKgmXKNMymtMWixCIKKMPTmOLZFaOzstT80mev+c3fd9O4f1oqkd6oqnveqHZrHg\nY6+kFchJhvvMH4f6VHCEY4HlGqCXMqKWuwVLUQKBgA9hDCSR+3iAb1Ykg4zBVOls\ntpl8/tzWsbaCKIBX92r96IHGc62tKHZaAuTG3V9xpGhlKlh95+rOY743/adkopiP\nQGAB1YPT+v0+JvG6iuF6Y8SYfwomrFv4ujNyoQE0weUgfy4LMN7wmFyIB70Y8Z8h\nYWo7gB89opWiQ8YrIFQ+\n-----END PRIVATE KEY-----\n".bytes();
 }
 
-test_tls_loopback_roundtrip() `test(exclude: wasm, timeout: "20s") {
+test_tls_loopback_roundtrip() `test(exclude: wasm || macos || windows, timeout: "20s") {
   u8[] cert = _test_cert();
   u8[] key = _test_key();
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
@@ -54,7 +62,7 @@ test_tls_loopback_roundtrip() `test(exclude: wasm, timeout: "20s") {
   sleep(Duration.from_millis(150));
 }
 
-test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
+test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm || macos || windows, timeout: "15s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -117,8 +125,63 @@ _tls_consume_reader(Reader r) {
 _tls_consume_writer(Writer w) {
 }
 
+// The mirror image of the handshake tests: it runs on exactly the targets they
+// are excluded from (a backend-less, socket-capable platform — macOS, Windows).
+// The module documents that on such a target the promise_tls_* bridges are inert
+// stubs and the constructors raise TlsError(kind: unsupported); this pins that
+// contract, so a missing backend fails cleanly instead of crashing or silently
+// producing a plaintext stream. Delete a target from the handshake tests' exclude
+// lists and this test's coverage of it disappears with it (T1614).
+test_tls_unsupported_without_backend() `test(exclude: wasm || linux) {
+  // A server listener cannot be created: no SSL_CTX.
+  bool caught_bind = false;
+  TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())? e is TlsError {
+    match e.kind {
+      TlsErrorKind.unsupported => {
+        caught_bind = true;
+      },
+      _ => {
+        assert(false, "a missing TLS backend must surface as unsupported");
+      },
+    }
+  }!;
+  assert(caught_bind, "TlsListener.bind must raise unsupported with no TLS backend");
+
+  // A client config is still constructible (it holds a 0 context) but every
+  // operation that needs the backend refuses.
+  TlsConfig cfg = TlsConfig.insecure();
+  bool caught_ca = false;
+  cfg.add_root_certificate(_test_cert())? e is TlsError {
+    match e.kind {
+      TlsErrorKind.unsupported => {
+        caught_ca = true;
+      },
+      _ => {
+        assert(false, "a missing TLS backend must surface as unsupported");
+      },
+    }
+  }!;
+  assert(caught_ca, "add_root_certificate must raise unsupported with no TLS backend");
+
+  TlsConfig client_cfg = TlsConfig.insecure();
+  bool caught_client_cert = false;
+  client_cfg.set_client_certificate(_test_cert(), _test_key())? e is TlsError {
+    match e.kind {
+      TlsErrorKind.unsupported => {
+        caught_client_cert = true;
+      },
+      _ => {
+        assert(false, "a missing TLS backend must surface as unsupported");
+      },
+    }
+  }!;
+  assert(caught_client_cert, "set_client_certificate must raise unsupported with no TLS backend");
+}
+
 test_tls_config_insecure_and_default() `test(exclude: wasm) {
-  // Both config factories succeed on a backed platform (non-zero context).
+  // Both config factories succeed on every socket-capable target: on a backed
+  // platform they hold a real SSL_CTX, and on a backend-less one a 0 context that
+  // every later operation refuses (test_tls_unsupported_without_backend).
   TlsConfig a = TlsConfig.insecure();
   TlsConfig b = TlsConfig.create();
   b.set_min_version(TlsVersion.tls_1_3);
@@ -134,7 +197,7 @@ test_tls_config_insecure_and_default() `test(exclude: wasm) {
 // the request/response ordering of the stable roundtrip: the client sends first, the
 // server responds and closes while the client is still open, then the client
 // read_all's to the server's close_notify and simply drops.
-test_tls_verified_handshake_and_read_all() `test(exclude: wasm, timeout: "20s") {
+test_tls_verified_handshake_and_read_all() `test(exclude: wasm || macos || windows, timeout: "20s") {
   u8[] cert = _test_cert();
   u8[] key = _test_key();
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
@@ -170,7 +233,7 @@ test_tls_verified_handshake_and_read_all() `test(exclude: wasm, timeout: "20s") 
 // Exercises the certificate-failure branch of _handshake (get_verify_result != 0
 // → TlsErrorKind.certificate) distinctly from a protocol handshake failure, and
 // is deterministic because the trust store is supplied inline (no no_trust_store).
-test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm, timeout: "15s") {
+test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm || macos || windows, timeout: "15s") {
   u8[] cert = _test_cert();
   u8[] key = _test_key();
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
@@ -203,7 +266,7 @@ test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm, timeout: "
 // Certificate/key loading error paths that need no network: a valid client cert
 // and key load; invalid PEM is rejected as a certificate error on both the config
 // (add_root_certificate / set_client_certificate) and the server listener (bind).
-test_tls_certificate_loading_errors() `test(exclude: wasm) {
+test_tls_certificate_loading_errors() `test(exclude: wasm || macos || windows) {
   u8[] garbage = "-----BEGIN CERTIFICATE-----\nnot-valid-base64\n-----END CERTIFICATE-----\n".bytes();
 
   // A valid client certificate + matching key load on a (non-verifying) config.

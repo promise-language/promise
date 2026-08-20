@@ -98,7 +98,7 @@ type Compiler struct {
 	moduleExterns    map[string]*ExternFunc      // "irprefix.funcname" → extern (cross-module externs)
 	compilingModule  string                      // non-empty when compiling a module's declarations (IR prefix)
 	moduleOwnedFuncs map[string]string           // IR func name → module IR prefix (for separate compilation)
-	moduleCanonical  map[string]string           // module path → IR prefix (for alias→prefix mapping)
+	moduleCanonical  map[string]string           // module path or import name → IR prefix (for alias→prefix mapping)
 	moduleInfos      map[string]*sema.ModuleInfo // B0212: cached from main info for cross-module lookups
 
 	// T1395: parameter default expression → the sema Info that type-checked it.

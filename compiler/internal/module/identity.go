@@ -20,8 +20,16 @@ func GlobalIdentityForLocal(modPath string) string {
 	return modPath
 }
 
-func GlobalIdentityForRemote(normalizedURL string) string {
-	return normalizedURL
+// GlobalIdentityForRemote computes the identity of a remote module. A module that
+// lives in a subdirectory of its repo appends "//<subdir>" to the normalized URL,
+// so two modules addressed in the same repo get distinct identities (and therefore
+// distinct IR prefixes and cache keys). An empty subdir — every manifest written
+// before `subdir` existed — returns the bare URL unchanged.
+func GlobalIdentityForRemote(normalizedURL, subdir string) string {
+	if subdir == "" {
+		return normalizedURL
+	}
+	return normalizedURL + "//" + subdir
 }
 
 func GlobalIdentityForCatalog(catalogName string) string {
@@ -47,6 +55,7 @@ func GlobalIdentityForCatalog(catalogName string) string {
 //     with '_', collapsing runs of underscores, and trimming leading/trailing underscores.
 //     A 6-character hash suffix is appended for disambiguation.
 //     E.g., "github.com/alice/parser" → "github_com_alice_parser_<hash6>"
+//     and "github.com/acme/base//proto/wire" → "github_com_acme_base_proto_wire_<hash6>"
 func SanitizeIRPrefix(globalID string) string {
 	// Strip all leading ./ and ../ components for local paths
 	clean := stripPathPrefixes(globalID)

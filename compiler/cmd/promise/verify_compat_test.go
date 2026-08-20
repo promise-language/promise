@@ -90,7 +90,7 @@ func TestVerifyModuleCompatCacheHit(t *testing.T) {
 	if err := module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: true}); err != nil {
 		t.Fatal(err)
 	}
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", url, commit, epoch, map[string]bool{}, noop)
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", url, "", commit, epoch, map[string]bool{}, noop)
 	if err != nil || !ok || reason != "" {
 		t.Fatalf("cache hit (compatible): ok=%v reason=%q err=%v", ok, reason, err)
 	}
@@ -99,7 +99,7 @@ func TestVerifyModuleCompatCacheHit(t *testing.T) {
 	if err := module.SaveCompat(&module.CompatVerdict{URL: url, Commit: commit, Epoch: epoch, Compatible: false, FailReason: "boom"}); err != nil {
 		t.Fatal(err)
 	}
-	ok, reason, err = verifyModuleCompat("/nonexistent/compiler", url, commit, epoch, map[string]bool{}, noop)
+	ok, reason, err = verifyModuleCompat("/nonexistent/compiler", url, "", commit, epoch, map[string]bool{}, noop)
 	if err != nil || ok || reason != "boom" {
 		t.Fatalf("cache hit (incompatible): ok=%v reason=%q err=%v", ok, reason, err)
 	}
@@ -127,7 +127,7 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 	commit := gitRun(t, repo, "rev-parse", "HEAD")
 
 	var warnings []string
-	ok, reason, err := verifyModuleCompat(bin, repo, commit, "2026.0", map[string]bool{}, func(msg string) { warnings = append(warnings, msg) })
+	ok, reason, err := verifyModuleCompat(bin, repo, "", commit, "2026.0", map[string]bool{}, func(msg string) { warnings = append(warnings, msg) })
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 		t.Errorf("expected a no-tests advisory warning, got %v", warnings)
 	}
 	// The compile-only verdict must be cached.
-	v, found := module.LookupCompat(repo, commit, "2026.0")
+	v, found := module.LookupCompat(repo, "", commit, "2026.0")
 	if !found {
 		t.Fatal("expected a cached verdict")
 	}
@@ -177,7 +177,7 @@ func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
 	gitRun(t, repo, "commit", "-m", "broken")
 	commit := gitRun(t, repo, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat(bin, repo, commit, "2026.0", map[string]bool{}, func(string) {})
+	ok, reason, err := verifyModuleCompat(bin, repo, "", commit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
 		t.Error("incompatible verdict must carry a reason (compile error output)")
 	}
 	// Must be cached as incompatible.
-	if v, found := module.LookupCompat(repo, commit, "2026.0"); !found || v.Compatible {
+	if v, found := module.LookupCompat(repo, "", commit, "2026.0"); !found || v.Compatible {
 		t.Errorf("expected cached incompatible verdict, got %+v found=%v", v, found)
 	}
 }
@@ -209,7 +209,7 @@ func TestVerifyModuleCompatNoSourceFiles(t *testing.T) {
 
 	var warnings []string
 	// compilerBin is irrelevant — we short-circuit before running emit-ir.
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, commit, "2026.0", map[string]bool{}, func(msg string) { warnings = append(warnings, msg) })
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, "", commit, "2026.0", map[string]bool{}, func(msg string) { warnings = append(warnings, msg) })
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestVerifyModuleCompatNoSourceFiles(t *testing.T) {
 	if len(warnings) == 0 || !strings.Contains(warnings[0], "no .pr files") {
 		t.Errorf("expected a no-files advisory warning, got %v", warnings)
 	}
-	v, found := module.LookupCompat(repo, commit, "2026.0")
+	v, found := module.LookupCompat(repo, "", commit, "2026.0")
 	if !found || !v.Compatible || !v.CompileOnly {
 		t.Errorf("expected cached compatible+CompileOnly verdict, got %+v found=%v", v, found)
 	}
@@ -241,7 +241,7 @@ func TestVerifyModuleCompatInvalidToml(t *testing.T) {
 	gitRun(t, repo, "commit", "-m", "init")
 	commit := gitRun(t, repo, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, commit, "2026.0", map[string]bool{}, func(string) {})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", repo, "", commit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 	gitRun(t, parent, "commit", "-m", "init")
 	parentCommit := gitRun(t, parent, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{}, func(string) {})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, "", parentCommit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
 	gitRun(t, parent, "commit", "-m", "init")
 	parentCommit := gitRun(t, parent, "rev-parse", "HEAD")
 
-	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, parentCommit, "2026.0", map[string]bool{}, func(string) {})
+	ok, reason, err := verifyModuleCompat("/nonexistent/compiler", parent, "", parentCommit, "2026.0", map[string]bool{}, func(string) {})
 	if err != nil {
 		t.Fatalf("verifyModuleCompat: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestResolveEpochAwareExplicitRefIncompatible(t *testing.T) {
 	gitRun(t, work, "add", ".")
 	gitRun(t, work, "commit", "-m", "broken")
 
-	_, err := resolveEpochAware(bin, "2026.1", "brokenref", work, "HEAD", func(string) {})
+	_, err := resolveEpochAware(bin, "2026.1", "brokenref", work, "", "HEAD", func(string) {})
 	if err == nil {
 		t.Fatal("expected an incompatibility error for a broken explicit ref")
 	}
@@ -408,7 +408,7 @@ func TestResolveEpochAwareStableFallback(t *testing.T) {
 	gitRun(t, work, "tag", "stable")
 
 	var warnings []string
-	commit, err := resolveEpochAware(bin, "2026.1", "stablemod", work, "", func(m string) { warnings = append(warnings, m) })
+	commit, err := resolveEpochAware(bin, "2026.1", "stablemod", work, "", "", func(m string) { warnings = append(warnings, m) })
 	if err != nil {
 		t.Fatalf("resolveEpochAware: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestResolveEpochAwareHeadFallback(t *testing.T) {
 	head := gitRun(t, work, "rev-parse", "HEAD")
 
 	var warnings []string
-	commit, err := resolveEpochAware(bin, "2026.1", "unver", work, "", func(m string) { warnings = append(warnings, m) })
+	commit, err := resolveEpochAware(bin, "2026.1", "unver", work, "", "", func(m string) { warnings = append(warnings, m) })
 	if err != nil {
 		t.Fatalf("resolveEpochAware: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestResolveEpochAwareWalkBack(t *testing.T) {
 
 	warnings := []string{}
 	warn := func(m string) { warnings = append(warnings, m) }
-	commit, err := resolveEpochAware(bin, "2026.1", "walkback", work, "", warn)
+	commit, err := resolveEpochAware(bin, "2026.1", "walkback", work, "", "", warn)
 	if err != nil {
 		t.Fatalf("resolveEpochAware: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestResolveEpochAwareWalkBack(t *testing.T) {
 	}
 
 	// Verdicts must now be cached for both commits.
-	if v, ok := module.LookupCompat(work, commitGood, "2026.1"); !ok || !v.Compatible {
+	if v, ok := module.LookupCompat(work, "", commitGood, "2026.1"); !ok || !v.Compatible {
 		t.Errorf("expected cached compatible verdict for good commit, got %+v ok=%v", v, ok)
 	}
 }
@@ -627,7 +627,7 @@ func TestResolveEpochAwareNoCompatible(t *testing.T) {
 	gitRun(t, work, "commit", "-m", "broken")
 	gitRun(t, work, "tag", "epoch-2026.1")
 
-	_, err := resolveEpochAware(bin, "2026.1", "nocompat", work, "", func(string) {})
+	_, err := resolveEpochAware(bin, "2026.1", "nocompat", work, "", "", func(string) {})
 	if err == nil {
 		t.Fatal("expected NoCompatibleVersionError, got nil")
 	}
@@ -666,7 +666,7 @@ func TestResolveEpochAwareOnlyNewerEpochs(t *testing.T) {
 	gitRun(t, work, "tag", "epoch-2026.3")
 
 	var warnings []string
-	_, err := resolveEpochAware(bin, "2026.1", "onlynewer", work, "", func(w string) {
+	_, err := resolveEpochAware(bin, "2026.1", "onlynewer", work, "", "", func(w string) {
 		warnings = append(warnings, w)
 	})
 	if err == nil {
@@ -717,7 +717,7 @@ func TestResolveEpochAwareCompatibleHappyPath(t *testing.T) {
 	head := gitRun(t, work, "rev-parse", "HEAD")
 	gitRun(t, work, "tag", "epoch-2026.1")
 
-	commit, err := resolveEpochAware(bin, "2026.1", "happy", work, "", func(string) {})
+	commit, err := resolveEpochAware(bin, "2026.1", "happy", work, "", "", func(string) {})
 	if err != nil {
 		t.Fatalf("resolveEpochAware: %v", err)
 	}
@@ -904,5 +904,55 @@ func TestEpochCompilerBinPresent(t *testing.T) {
 	}
 	if got != binPath {
 		t.Errorf("epochCompilerBin = %q, want %q", got, binPath)
+	}
+}
+
+// T1524 regression: a commit whose checkout has no promise.toml at the addressed
+// directory must be recorded as an incompatible verdict, not raised as a fetch
+// error — otherwise the epoch walk-back aborts instead of trying older tags, and a
+// module that only gained its manifest (or its subdirectory) in a later commit
+// becomes unresolvable.
+func TestResolveEpochAwareWalksBackPastMissingManifest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	bin := findPromiseBinary(t)
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	work := filepath.Join(t.TempDir(), "nomanifest")
+	os.MkdirAll(work, 0755)
+	gitRun(t, work, "init", "--initial-branch=main")
+	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.name", "T")
+
+	// Commit A — a complete module — tag epoch-2026.0.
+	writeMod(t, work, "nomanifest", true)
+	gitRun(t, work, "add", ".")
+	gitRun(t, work, "commit", "-m", "good")
+	commitGood := gitRun(t, work, "rev-parse", "HEAD")
+	gitRun(t, work, "tag", "epoch-2026.0")
+
+	// Commit B — manifest deleted — tag epoch-2026.1.
+	gitRun(t, work, "rm", "promise.toml")
+	gitRun(t, work, "commit", "-m", "drop manifest")
+	commitBad := gitRun(t, work, "rev-parse", "HEAD")
+	gitRun(t, work, "tag", "epoch-2026.1")
+
+	commit, err := resolveEpochAware(bin, "2026.1", "nomanifest", work, "", "", func(string) {})
+	if err != nil {
+		t.Fatalf("resolveEpochAware aborted instead of walking back: %v", err)
+	}
+	if commit != commitGood {
+		t.Errorf("resolved %s, want the manifest-bearing commit %s", commit, commitGood)
+	}
+	v, ok := module.LookupCompat(work, "", commitBad, "2026.1")
+	if !ok || v.Compatible {
+		t.Fatalf("expected a cached incompatible verdict for the manifest-less commit, got %+v ok=%v", v, ok)
+	}
+	if !strings.Contains(v.FailReason, "no promise.toml") {
+		t.Errorf("verdict reason = %q, want it to name the missing manifest", v.FailReason)
 	}
 }

@@ -243,7 +243,7 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 					}
 					modDir = dir
 				} else {
-					dir, err := module.ResolveRemoteModule(entry.URL, entry.Commit)
+					dir, err := module.ResolveRemoteModule(entry.URL, entry.Commit, entry.Subdir)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "error: cannot fetch module '%s': %v\n", name, err)
 						os.Exit(1)

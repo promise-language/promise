@@ -2191,7 +2191,10 @@ func (p *PosixPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 
 // EmitStackOverflowInit defines @pal_stack_overflow_init() → void
 // Registers a SIGSEGV handler (and SIGBUS on macOS) that prints
-// a diagnostic message to stderr and calls _exit(2).
+// a diagnostic message to stderr and calls _exit(2), and sets SIGPIPE to
+// SIG_IGN so a write to a closed peer fails with EPIPE instead of killing the
+// process (T1631). This is the process-wide POSIX signal setup point, called
+// once at startup.
 //
 // Both macOS and Linux use sigaction(SA_SIGINFO) to get the fault address from
 // siginfo_t.si_addr and print "fatal: segmentation fault at 0x<hex>". This
@@ -2218,6 +2221,12 @@ func (p *PosixPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 
+	// Ignore SIGPIPE process-wide (T1631). Emitted as a void call into a
+	// separate function so it contributes no SSA value here — the sigaction
+	// layout below is asserted by tests against specific unnamed registers, and
+	// an inline call returning a value would renumber them.
+	entry.NewCall(p.emitSigpipeIgnore(module))
+
 	if isDarwin {
 		// macOS: 3-arg SA_SIGINFO handler that reads si_addr (siginfo offset 24)
 		// and prints "fatal: segmentation fault at 0x<hex>\n" with the fault
@@ -2239,6 +2248,61 @@ func (p *PosixPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
 		p.emitLinuxStackOverflowInit(module, entry, handlerFn)
 	}
 
+	return fn
+}
+
+// emitSigpipeIgnore defines @__promise_sigpipe_ignore() -> void, which sets
+// SIGPIPE to SIG_IGN, and returns it for the caller to invoke at startup (T1631).
+//
+// POSIX's default disposition for SIGPIPE is to terminate the process, so a
+// write to a socket or pipe whose peer has already closed would kill a Promise
+// program outright — no error, no raise, nothing user code could observe or
+// recover from. With SIG_IGN the write fails with EPIPE instead, which the
+// net/http/tls paths surface as an ordinary failable error, matching Promise's
+// explicit-error model. Go and Rust make the same choice for the same reason.
+//
+// Uses sigaction(2) rather than signal(2) to keep every signal registration in
+// the runtime going through one syscall. The struct is 152 zeroed bytes: that
+// is the Linux layout (glibc and musl agree), and it is comfortably larger than
+// the 16-byte macOS struct, which reads only its first two fields. Since every
+// byte past the handler is zero, the same buffer is correct on both — sa_mask
+// empty and sa_flags 0, which is what SIG_IGN wants on either platform.
+// SIGPIPE is 13 and SIG_IGN is 1 everywhere POSIX.
+//
+// Windows has no SIGPIPE (socket errors surface as WSA codes) and wasm has no
+// signals, so this lives only in the POSIX PAL.
+func (p *PosixPAL) emitSigpipeIgnore(module *ir.Module) *ir.Func {
+	sigactionFn := getOrDeclareFunc(module, "sigaction", irtypes.I32,
+		ir.NewParam("sig", irtypes.I32),
+		ir.NewParam("act", irtypes.I8Ptr),
+		ir.NewParam("oact", irtypes.I8Ptr))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	const structSize = 152
+	const sigpipe = 13
+	const sigIgn = 1
+
+	fn := module.NewFunc("__promise_sigpipe_ignore", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	b := fn.NewBlock(".entry")
+
+	actArrTy := irtypes.NewArray(uint64(structSize), irtypes.I8)
+	actAlloca := b.NewAlloca(actArrTy)
+	actI8 := b.NewBitCast(actAlloca, irtypes.I8Ptr)
+	b.NewCall(memsetFn, actI8, constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I64, structSize))
+
+	// sa_handler = SIG_IGN at offset 0.
+	handlerPtrPtr := b.NewBitCast(actI8, irtypes.NewPointer(irtypes.I8Ptr))
+	b.NewStore(constant.NewIntToPtr(constant.NewInt(irtypes.I64, sigIgn), irtypes.I8Ptr),
+		handlerPtrPtr)
+
+	b.NewCall(sigactionFn, constant.NewInt(irtypes.I32, sigpipe),
+		actI8, constant.NewNull(irtypes.I8Ptr))
+	b.NewRet(nil)
 	return fn
 }
 

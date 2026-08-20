@@ -399,6 +399,7 @@ Tests are organized by category:
 Bugs and tasks are tracked on **[GitHub Issues](https://github.com/promise-language/promise/issues)**. When you hit a compiler bug, language limitation, codegen issue, or test-infrastructure problem, open an issue with a clear title, a minimal repro, any workaround, and relevant labels — rather than working around it in module code.
 
 - **Filing:** Open a GitHub issue with a descriptive title and a minimal reproducer. Include the platform when the problem is platform-specific.
+- **Tagging:** Tags/labels come from **`docs/tags.md`** — read it before tagging.
 - **Reference in code:** Reference issues from code comments and commit messages (e.g., `// #123: workaround for optional user type in constructor`).
 - **`docs/archive/stages.md`** is the archived implementation roadmap.
 

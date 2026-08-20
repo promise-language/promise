@@ -8,7 +8,13 @@ import (
 	"github.com/llir/llvm/ir/value"
 )
 
-// tls_darwin.go — Secure Transport TLS backend for macOS (T1599).
+// tls_securetransport.go — Secure Transport TLS backend for macOS (T1599).
+//
+// NOTE: this file must NOT be named tls_darwin.go. Go applies an implicit
+// GOOS build constraint to any file whose name ends in _darwin.go, which would
+// exclude this backend when the compiler is built on Linux — breaking the
+// cross-compilation path, since codegen dispatches on the *target* triple, not
+// the host OS. Backend selection lives in codegen/tls.go; keep it that way.
 //
 // Slots in behind the same pal_tls_* surface and the same backend-neutral status
 // enum as the OpenSSL backend in tls_posix.go, so codegen/tls.go's bridge helpers

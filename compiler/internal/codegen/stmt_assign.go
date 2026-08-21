@@ -463,8 +463,15 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					return
 				}
 			}
-			// Drop old value before reassignment (if target is droppable)
-			if binding, ok := c.dropBindings[target.Name]; ok {
+			// Drop old value before reassignment (if target is droppable).
+			//
+			// T1640: a closure local is now in dropBindings too (B0354 needs it to
+			// see the capture), but its old value is released by the T0911/T0913
+			// env block below — which alias-checks the env pointer and re-arms the
+			// flag itself. Letting a bindingFreeEnv fall through here would emit a
+			// drop-flag test and an empty drop body on every closure reassignment,
+			// and any future branch keyed on a non-env kind could act on it.
+			if binding, ok := c.dropBindings[target.Name]; ok && binding.kind != bindingFreeEnv {
 				// Skip self-assignment (would drop then store dangling pointer)
 				if ident, ok := s.Value.(*ast.IdentExpr); ok && ident.Name == target.Name {
 					return
@@ -528,10 +535,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
 			}
 
-			// T0911: Closures aren't in dropBindings — their env cleanup is a
-			// bindingFreeEnv in scopeBindings with a flag in c.dropFlags (see
-			// maybeRegisterEnvFree). The drop-old logic above never frees the old
-			// env, so reassigning a closure local that owns a heap env leaks it.
+			// T0911: a closure's env cleanup is a bindingFreeEnv with a flag in
+			// c.dropFlags (see maybeRegisterEnvFree). The drop-old logic above
+			// skips that kind, so reassigning a closure local that owns a heap env
+			// would otherwise leak it.
 			// Free the old env here (guarded by the flag + an old-vs-new
 			// env-pointer alias check, since `f = <expr aliasing f's env>` could
 			// occur) and re-arm the flag so the new value is owned. The later
@@ -670,9 +677,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// local borrows the heap env (the aggregate retains sole ownership;
 			// closures aren't Cloneable, so the fat pointer {fn,env} is copied by
 			// value with no env dup). Clear f's env-free drop flag (still 1 from
-			// the var-decl's maybeRegisterEnvFree — the drop-old re-arm above only
-			// runs for dropBindings entries, whereas closures register a
-			// bindingFreeEnv in scopeBindings) so scope-exit env-free doesn't
+			// the var-decl's maybeRegisterEnvFree — the drop-old re-arm above
+			// skips bindingFreeEnv, and the T0911 env block re-arms instead) so
+			// scope-exit env-free doesn't
 			// double-free against the aggregate's drop. Mirrors
 			// maybeRegisterEnvFree's var-decl suppression. isClosureAggregateBorrow
 			// is now self-gated on FirstFieldNestedClosure, so it fires for a direct

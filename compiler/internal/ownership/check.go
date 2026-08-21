@@ -178,6 +178,15 @@ type Checker struct {
 	// the direct `return local.iter();`. Reset per function/method body.
 	iterBorrowOrigin map[string]string
 
+	// closureOwnedLocals (T1640, R5) records the closure-typed bindings that own
+	// their heap env — a `move` closure parameter, or a local bound from a
+	// fresh-owned RHS (lambda literal, named-function reference, call/getter/`[]`
+	// result, channel receive). It is the positive half of the fail-closed
+	// allowlist gating a closure's crossing of a `go` boundary; a binding absent
+	// here is rejected. Distinct from `state`, which records borrow/move status
+	// rather than where the env came from. Reset per function/method body.
+	closureOwnedLocals map[string]bool
+
 	// mustUse (T1381) maps an owned local's name to its declaration position when
 	// its type transitively owns a `failable_task[T]` (§17.2.1). Such a value is
 	// LINEAR (must-use): it must be *discharged* — received (`<-t` / `<-tasks`) or
@@ -337,6 +346,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
 	savedIterBorrowOrigin := c.iterBorrowOrigin
+	savedClosureOwnedLocals := c.closureOwnedLocals
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
 	savedMustUse := c.mustUse
@@ -360,6 +370,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.iterBorrowOrigin = make(map[string]string)                // T1349
+	c.closureOwnedLocals = make(map[string]bool)                // T1640
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.loopFrames = nil                                          // T1255
 	c.loopMoveReported = make(map[string]bool)                  // T1498
@@ -372,6 +383,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 			c.state[p.Name()] = paramInitialState(p, consuming)
 			c.params[p.Name()] = true
 			c.trackDeclOrder(p.Name(), p.Type())
+			c.recordClosureOwnedParam(p) // T1640
 		}
 	}
 
@@ -399,6 +411,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
 	c.iterBorrowOrigin = savedIterBorrowOrigin
+	c.closureOwnedLocals = savedClosureOwnedLocals
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
 }
@@ -486,6 +499,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
 	savedIterBorrowOrigin := c.iterBorrowOrigin
+	savedClosureOwnedLocals := c.closureOwnedLocals
 	savedFuncObj := c.curFuncObj
 	savedMethodObj := c.curMethodObj
 	savedMustUse := c.mustUse
@@ -509,6 +523,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.iterBorrowOrigin = make(map[string]string)                // T1349
+	c.closureOwnedLocals = make(map[string]bool)                // T1640
 	c.pendingAliasLocals = make(map[string][]*aliasHandleReuse) // T1137
 	c.loopFrames = nil                                          // T1255
 	c.loopMoveReported = make(map[string]bool)                  // T1498
@@ -528,6 +543,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 			c.state[p.Name()] = paramInitialState(p, consuming)
 			c.params[p.Name()] = true
 			c.trackDeclOrder(p.Name(), p.Type())
+			c.recordClosureOwnedParam(p) // T1640
 		}
 	}
 
@@ -555,6 +571,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
 	c.iterBorrowOrigin = savedIterBorrowOrigin
+	c.closureOwnedLocals = savedClosureOwnedLocals
 	c.curFuncObj = savedFuncObj
 	c.curMethodObj = savedMethodObj
 }

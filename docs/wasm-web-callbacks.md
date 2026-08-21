@@ -359,6 +359,19 @@ as: subscribe, spawn a goroutine that consumes the channel and calls the closure
 per event. Because it is defined in terms of (b), it inherits (b)'s lifetime
 properties instead of introducing its own.
 
+Its handler parameter is spelled `(Event) -> void move handler`. The `move` is
+load-bearing, not decoration: the sugar spawns a goroutine that outlives the
+call, and a closure crosses a `go` boundary by moving its heap environment into
+the coroutine frame (T1640). A borrowed handler — a plain `(Event) -> void`
+parameter — is rejected at compile time, because the caller's scope would free
+the environment while the consuming goroutine is still invoking it.
+
+T1640 is what makes that spelling *compile*; it is not by itself enough to make
+`web.on` writable. The remaining prerequisite is **T1634-A/B** — a
+void-returning lambda (`|Event e| -> handle(e)`, the natural shape of an event
+handler) still emits malformed IR, with no `go` involved. Both are needed before
+§8's sugar and §14's WebIDL `callback` lowering can be implemented.
+
 ### 8.1 Queue semantics and overflow
 
 The host push happens outside any G and must never block, so "channel full"

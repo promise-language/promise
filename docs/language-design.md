@@ -1856,7 +1856,7 @@ Two further capabilities govern whether a type may cross a **goroutine boundary*
 - `` `sendable `` — values of the type may be **moved** across a boundary.
 - `` `sharable `` — a reference to the type may be **shared** across one, because the type carries whatever synchronization that requires.
 
-**Both are derived structurally, so ordinary code never writes them.** A type is sendable when all its fields are sendable, and sharable when all its fields are sharable; an enum derives from its variants' fields, a generic from its type arguments. Primitives, `char`, `bool`, and `string` are both. Closures are never sendable — a closure's captured environment is not a thing the compiler can prove safe to hand to another goroutine.
+**Both are derived structurally, so ordinary code never writes them.** A type is sendable when all its fields are sendable, and sharable when all its fields are sharable; an enum derives from its variants' fields, a generic from its type arguments. Primitives, `char`, `bool`, and `string` are both. A **function value is sendable** — but not sharable: a closure crosses a `go` boundary **by move**, handing its heap environment to the goroutine (which then frees it), because the environment has a single owner and no refcount. Two rules keep that sound, and both are checked where the information still exists: every value a closure *captures* must itself be sendable (checked at the capture site, since the function type erases the captures), and only a binding that provably *owns* its environment may cross (a `move` parameter, or a local bound from a lambda, a named function, or a call result — not a borrowed parameter or a closure read out of a field). A naked `&closure` stays non-sharable. Both checks have a documented residual where the capture set is genuinely invisible: a closure captured inside a *generic* body is checked with its type parameters unbound, and a closure whose environment borrows its receiver is opaque once it arrives through a `move` parameter.
 
 The annotations exist only to **override** the derivation, for types whose safety the compiler cannot see:
 
@@ -4177,7 +4177,7 @@ The two capabilities are what the boundary is actually checked against (§6.5):
 - `` `sendable `` — values of the type may be **moved** across a goroutine boundary.
 - `` `sharable `` — a reference to the type may be **shared** across one, because the type carries whatever synchronization that requires.
 
-Both are **derived structurally** — a type is sendable if all its fields are, and likewise sharable — so ordinary user types need no annotation. The tags exist to override the derivation for types whose safety the compiler cannot see: `` `sendable ``/`` `sharable `` assert it (used by the natively-implemented concurrency primitives), `` `not_sendable ``/`` `not_sharable `` deny it. Closures are never sendable.
+Both are **derived structurally** — a type is sendable if all its fields are, and likewise sharable — so ordinary user types need no annotation. The tags exist to override the derivation for types whose safety the compiler cannot see: `` `sendable ``/`` `sharable `` assert it (used by the natively-implemented concurrency primitives), `` `not_sendable ``/`` `not_sharable `` deny it. A function value is sendable but not sharable — it crosses a boundary by move (see §9.6 and the spawn-boundary table below).
 
 #### The spawn site is where ownership transfers
 
@@ -4237,6 +4237,10 @@ The refcount is what makes this sound: the referent cannot be freed while any ha
 | `go { x.method(); }` reading outer non-sharable `x` | shared borrow | **rejected** |
 | `go f(x)` where `f` takes `T~ x` and `T` is not sharable | mutable borrow | **rejected** |
 | `go f(move x)` / `go { T w = x; … }` where `T` is not `` `sendable `` | cannot cross at all | **rejected** |
+| `go { … f(…) … }` / `go g(move f)` for a closure `f` that **owns** its env | env moves into the goroutine; `f` is moved-from afterwards | accepted |
+| `go { … f(…) … }` / `go g(f)` for a closure `f` that **borrows** an env (a non-`move` parameter, `h.cb`, a match-borrowed payload) | the real owner still frees the env | **rejected** |
+| `go { … f(…) … }` where `f`'s env borrows a local (`c.make_getter()`) | the enclosing scope still drops that local | **rejected** |
+| `go g(|x| -> …)` / `go g(make_cb())` — a **temporary** closure argument | the spawning scope frees the temp env at statement end | **rejected** — bind it to a local, pass `move` |
 
 Shared *access* — as opposed to transferred ownership — is what `Ref[T]` is for, and it is the answer whenever copying the value would be too expensive:
 

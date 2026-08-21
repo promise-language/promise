@@ -180,6 +180,11 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 
 	case *ast.GoExpr:
 		if e.Expr != nil {
+			// T1640 (R5): reject a borrowed closure argument BEFORE checkExpr, so
+			// the diagnostic sees the argument's original binding state.
+			if ce, ok := e.Expr.(*ast.CallExpr); ok {
+				c.rejectGoCallClosureBorrow(ce)
+			}
 			c.checkExpr(e.Expr)
 			if ce, ok := e.Expr.(*ast.CallExpr); ok {
 				c.rejectGoCallLoopBindingBorrowEscape(ce)
@@ -201,6 +206,10 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.checkBlock(e.Block)
 			c.goBlockResult = savedGoResult
 			c.loopDepth = savedLoopDepth
+			// T1640 (R4/R5): after the body is checked (so in-block uses are still
+			// valid), apply the closure env-ownership rules to the captures — reject
+			// a borrowed env, and mark an accepted one Moved in the enclosing scope.
+			c.checkGoClosureCaptures(e)
 		}
 
 	case *ast.UnsafeExpr:
@@ -3079,6 +3088,11 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	// not leak taint into (or inherit stale taint from) the enclosing scope.
 	savedIterBorrowOrigin := c.iterBorrowOrigin
 	c.iterBorrowOrigin = make(map[string]string)
+	// T1640: same reasoning for the closure env-ownership allowlist — the lambda
+	// body's own closure locals must not leak into (or inherit from) the enclosing
+	// scope's records.
+	savedClosureOwnedLocals := c.closureOwnedLocals
+	c.closureOwnedLocals = make(map[string]bool)
 	// T1151: a var-decl inside a lambda body is owned by the closure frame, not
 	// iteration-bounded — reset loop depth so such locals are not flagged even
 	// when the lambda is lexically inside a loop.
@@ -3139,7 +3153,8 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	c.curSig = savedSig
 	c.params = savedParams
 	c.returnOrigins = savedReturnOrigins
-	c.iterBorrowOrigin = savedIterBorrowOrigin // T1349
+	c.iterBorrowOrigin = savedIterBorrowOrigin     // T1349
+	c.closureOwnedLocals = savedClosureOwnedLocals // T1640
 	c.loopDepth = savedLoopDepth
 	c.goBlockResult = savedGoBlockResult // T1385
 	c.mustUse = savedMustUse             // T1381

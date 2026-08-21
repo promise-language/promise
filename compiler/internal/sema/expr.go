@@ -537,10 +537,39 @@ func (c *Checker) checkLambdaCapture(e *ast.IdentExpr, obj types.Object) {
 		return
 	}
 
+	// T1640 (R2): a closure value is sendable, so this env may end up owned by a
+	// goroutine — every capture must therefore be sendable too.
+	if c.rejectNonSendableCapture(e.Pos(), e.Name, v.Type()) {
+		return
+	}
+
 	c.lambdaCaptures[e.Name] = &CapturedVar{
 		Obj:    obj,
 		ByMove: byMove,
 	}
+}
+
+// rejectNonSendableCapture reports a non-sendable value being captured into a
+// closure and returns true when the capture must be dropped (T1640, R2).
+//
+// A closure value is sendable (isSendableType returns true for *types.Signature),
+// which means the env it points at may be moved into a goroutine frame long after
+// the capture site. The boundary check cannot see the captures — a `(int) -> void`
+// has erased them — so sendability of the CAPTURES has to be enforced here, at the
+// one place they are still visible. Shared by all three capture-recording sites
+// (named capture, `this` capture, nested-lambda propagation) so none can drift.
+//
+// KNOWN RESIDUAL — T1652: this runs ONCE per generic body, with type parameters
+// unbound, and isSendableType assumes a *types.TypeParam is sendable ("validated
+// at instantiation"). For captures there is no instantiation-time revalidation,
+// so a `Vector[T]` captured inside `make_counter[T]` and instantiated with a
+// `not_sendable` T slips through. Tracked with its repro and fix sketch in T1652.
+func (c *Checker) rejectNonSendableCapture(pos ast.Pos, name string, typ types.Type) bool {
+	if typ == nil || isSendableType(typ, make(map[types.Type]bool)) {
+		return false
+	}
+	c.errorf(pos, "cannot capture non-sendable value '%s' of type %s in a closure; a closure value may cross a goroutine boundary, so every capture must be sendable", name, typ)
+	return true
 }
 
 func (c *Checker) checkThisExpr(e *ast.ThisExpr) types.Type {
@@ -556,6 +585,10 @@ func (c *Checker) checkThisExpr(e *ast.ThisExpr) types.Type {
 					byMove := c.lambdaMove
 					if !byMove && !isCopyField(v.Type()) {
 						c.errorf(e.Pos(), "cannot capture 'this' without move")
+						return v.Type()
+					}
+					// T1640 (R2): see rejectNonSendableCapture.
+					if c.rejectNonSendableCapture(e.Pos(), "this", v.Type()) {
 						return v.Type()
 					}
 					c.lambdaCaptures["this"] = &CapturedVar{
@@ -4505,9 +4538,13 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 			}
 			// Enclosing lambda must also capture this variable
 			byMove := c.lambdaMove
-			if !byMove {
-				if v, ok := cv.Obj.(*types.Var); ok && !isCopyField(v.Type()) {
+			if v, ok := cv.Obj.(*types.Var); ok {
+				if !byMove && !isCopyField(v.Type()) {
 					c.errorf(e.Pos(), "cannot capture non-copy variable '%s' without move", name)
+					continue
+				}
+				// T1640 (R2): see rejectNonSendableCapture.
+				if c.rejectNonSendableCapture(e.Pos(), name, v.Type()) {
 					continue
 				}
 			}
@@ -4676,7 +4713,7 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 			c.errorf(goCtx.bareReturnPos, "missing return value (expected %s)", innerType)
 		}
 		// Block form: check captured variables are sendable
-		c.checkGoBlockSendable(e)
+		c.checkGoBlockCaptures(e)
 	}
 	if innerType == nil {
 		innerType = types.TypVoid

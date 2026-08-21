@@ -242,8 +242,9 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
-		c.recordIterBorrowTaint(s.Name, s.Value)                   // T1349
-		c.recordWrapCoercedBorrowedHandle(s.Name, s.Value, s.Type) // T1212
+		c.recordIterBorrowTaint(s.Name, s.Value)                          // T1349
+		c.recordClosureOwnedLocal(s.Name, s.Value, c.info.Types[s.Value]) // T1640
+		c.recordWrapCoercedBorrowedHandle(s.Name, s.Value, s.Type)        // T1212
 		c.promoteCallBorrows(s.Name, s.Value)
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
@@ -582,7 +583,8 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	c.tryMove(s.Value)
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
-		c.recordIterBorrowTaint(s.Name, s.Value) // T1349
+		c.recordIterBorrowTaint(s.Name, s.Value)                          // T1349
+		c.recordClosureOwnedLocal(s.Name, s.Value, c.info.Types[s.Value]) // T1640
 		c.promoteCallBorrows(s.Name, s.Value)
 		if typ := c.info.Types[s.Value]; typ != nil {
 			c.trackDeclOrder(s.Name, typ)
@@ -951,6 +953,9 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 			}
 			// T1349: track (or clear) iterator-borrows-local taint on reassignment.
 			c.recordIterBorrowTaint(ident.Name, s.Value)
+			// T1640: same for the closure env-ownership record — a reassignment
+			// rebinds the local, so a stale "owns its env" record must not survive.
+			c.recordClosureOwnedLocal(ident.Name, s.Value, c.info.Types[s.Value])
 			// T1212: reassigning the local clears any stale wrap-coerced-handle
 			// provenance — the old borrowed-inner alias is dropped (sound), and the
 			// new value governs safety on its own. An unsafe borrowed wrap-coerce

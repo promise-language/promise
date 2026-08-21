@@ -755,12 +755,19 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 
 	// B0354: Collect droppable non-channel captures for ownership transfer.
 	capturedDroppablesVB := make(map[string]types.Type)
+	// T1640: names whose OUTER binding was a closure env-free. The goroutine-side
+	// re-registration must reproduce that KIND; it cannot be re-derived from
+	// valType, which holds the ELEMENT type for an optional binding.
+	capturedEnvOwnersVB := make(map[string]bool)
 	for _, name := range captureNames {
 		if _, isChannel := capturedChanTypesVB[name]; isChannel {
 			continue
 		}
 		if binding, ok := c.dropBindings[name]; ok {
 			capturedDroppablesVB[name] = binding.valType
+			if binding.kind == bindingFreeEnv {
+				capturedEnvOwnersVB[name] = true
+			}
 		}
 	}
 
@@ -944,7 +951,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	for _, name := range captureNames {
 		if valType, ok := capturedDroppablesVB[name]; ok {
 			alloca := c.locals[name]
-			c.maybeRegisterDrop(name, alloca, valType)
+			c.registerGoCaptureOwnership(name, alloca, valType, capturedEnvOwnersVB[name])
 		}
 	}
 
@@ -1783,12 +1790,18 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	// Strings, vectors, heap user types with drop, etc. — the goroutine takes
 	// ownership; the outer scope's drop flag is cleared after spawn.
 	capturedDroppables := make(map[string]types.Type)
+	// T1640: names whose OUTER binding was a closure env-free — see the twin
+	// comment in genGoCallExprViaBlock.
+	capturedEnvOwners := make(map[string]bool)
 	for _, name := range captureNames {
 		if _, isChannel := capturedChanTypes[name]; isChannel {
 			continue
 		}
 		if binding, ok := c.dropBindings[name]; ok {
 			capturedDroppables[name] = binding.valType
+			if binding.kind == bindingFreeEnv {
+				capturedEnvOwners[name] = true
+			}
 		}
 	}
 
@@ -2040,7 +2053,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	for _, name := range captureNames {
 		if valType, ok := capturedDroppables[name]; ok {
 			alloca := c.locals[name]
-			c.maybeRegisterDrop(name, alloca, valType)
+			c.registerGoCaptureOwnership(name, alloca, valType, capturedEnvOwners[name])
 		}
 	}
 
@@ -3095,4 +3108,28 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	)
 
 	return phi
+}
+
+// registerGoCaptureOwnership registers the goroutine-side owning binding for a
+// capture whose ownership B0354 transfers into the coroutine frame. Shared by the
+// two spawn paths (genGoCallExprViaBlock and genGoBlock) so they cannot drift.
+//
+// T1640 (R3): a closure capture needs maybeRegisterEnvFree, not maybeRegisterDrop
+// — the latter routes through extractNamed, which is nil for a *types.Signature,
+// so it returns without registering anything and the moved env would leak (the
+// outer drop flag is cleared after the spawn, so nobody else frees it). The
+// closure's fat pointer was copied into the coroutine frame by value, so passing a
+// nil valueExpr is correct: this is a transfer, never an aggregate/match borrow
+// (ownership's R5 already rejected any binding that did not own its env).
+//
+// outerWasEnvFree, not valType, selects the env path: an optional binding carries
+// its ELEMENT type in valType, so an `((int) -> int)?` capture would otherwise be
+// given an env-free binding over an Optional-struct alloca and emitEnvFree would
+// extractvalue a fat pointer out of it.
+func (c *Compiler) registerGoCaptureOwnership(name string, alloca *ir.InstAlloca, valType types.Type, outerWasEnvFree bool) {
+	if outerWasEnvFree {
+		c.maybeRegisterEnvFree(name, alloca, valType, nil)
+		return
+	}
+	c.maybeRegisterDrop(name, alloca, valType)
 }

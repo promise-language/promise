@@ -1977,10 +1977,19 @@ func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, t
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
 
-	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+	binding := scopeBinding{
 		kind:     bindingFreeEnv,
 		alloca:   alloca,
+		valType:  typ,
 		dropFlag: dropFlag,
 		varName:  varName,
-	})
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+	// T1640 (R3): record the env-free in dropBindings too, so B0354's captured-
+	// droppable collection in genGoBlock/genGoCallExprViaBlock sees the closure and
+	// MOVES its heap env into the coroutine frame. Without this the env is freed at
+	// exit of the DEFINING scope while the goroutine still holds the pointer — a
+	// use-after-free even for a capture-free closure. Mirrors every other owning
+	// binding kind, which all register here alongside scopeBindings.
+	c.dropBindings[varName] = binding
 }

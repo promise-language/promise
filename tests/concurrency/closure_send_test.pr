@@ -1,0 +1,762 @@
+// T1640: closures crossing a goroutine boundary.
+//
+// A closure is a fat pointer `{fn, env}` whose heap `env` is freed at exit of
+// the scope that owns it. Capturing one into a goroutine therefore MOVES the
+// env into the coroutine frame — the goroutine may outlive the defining scope,
+// and the env must be freed exactly once, by whoever ends up owning it.
+//
+// Every test synchronises over a channel; none uses `sleep`.
+double(int x) int {
+  return x * 2;
+}
+
+run_it((int) -> int move f, channel[int] done) {
+  done.send(f(1));
+}
+
+run_optional(((int) -> int)? move f, channel[int] done) {
+  done.send(f!(1));
+}
+
+make_adder(int base)(int) -> int {
+  return move |int x| -> x + base;
+}
+
+// A capture-free closure captured by a `go` block: env is null, nothing to free.
+non_capturing_closure_into_go() `test {
+  done := channel[int](1);
+  f := |int x| -> x + 1;
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 2, "capture-free closure runs in the goroutine");
+}
+
+// A capturing closure: the goroutine owns the env and frees it exactly once.
+capturing_closure_into_go() `test {
+  done := channel[int](1);
+  int base = 10;
+  f := |int x| -> x + base;
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 11, "captured `base` survives the transfer");
+}
+
+// A named-function reference has a null env and crosses the boundary too.
+named_function_reference_into_go() `test {
+  done := channel[int](1);
+  (int) -> int f = double;
+  go {
+    done.send(f(21));
+  };
+  assert((<-done)! == 42, "named function reference crosses the boundary");
+}
+
+// The goroutine outlives the DEFINING scope: without the env move-transfer the
+// coroutine would read `base` out of memory the inner block already freed.
+detached_goroutine_outlives_defining_scope() `test {
+  done := channel[int](1);
+  {
+    int base = 10;
+    f := |int x| -> x + base;
+    go {
+      done.send(f(1));
+    };
+  }
+  assert((<-done)! == 11, "env outlives the defining scope");
+}
+
+// Transfer through a `move` parameter: the callee owns the env and may spawn.
+move_parameter_into_go() `test {
+  done := channel[int](1);
+  int base = 100;
+  f := |int x| -> x + base;
+  run_it(move f, done);
+  assert((<-done)! == 101, "`move` parameter owns the env");
+}
+
+// `go f(move closure)` — the call form transfers the env into the goroutine.
+go_call_with_move_closure_argument() `test {
+  done := channel[int](1);
+  int base = 1000;
+  f := |int x| -> x + base;
+  go run_it(move f, done);
+  assert((<-done)! == 1001, "go-call `move` argument transfers the env");
+}
+
+// A closure produced by a call must be BOUND to a local before it can cross: a
+// temporary argument is rejected (T1654), because the spawning scope frees the
+// temp env at statement end. Binding it makes the local the owner, and `move`
+// hands that ownership to the goroutine.
+call_result_bound_then_moved() `test {
+  done := channel[int](1);
+  f := make_adder(1000);
+  go run_it(move f, done);
+  assert((<-done)! == 1001, "call result bound to a local then moved");
+}
+
+// An optional-wrapped closure crosses via the CALL form (the block-capture form
+// is gated on T1653): the `move` parameter owns the env and frees it once.
+optional_closure_go_call() `test {
+  done := channel[int](1);
+  int base = 7;
+  ((int) -> int)? f = |int x| -> x + base;
+  go run_optional(move f, done);
+  assert((<-done)! == 8, "optional closure through a `move` parameter");
+}
+
+// A closure sent over a Channel[(int) -> int] — the element type is sendable.
+closure_over_channel() `test {
+  ch := channel[(int) -> int](1);
+  int base = 7;
+  f := |int x| -> x + base;
+  ch.send(move f);
+  g := (<-ch)!;
+  assert(g(1) == 8, "closure survives a channel round-trip");
+}
+
+// A closure buffered in a channel that is never received is freed by the
+// channel's own drop — no leak, no double free.
+buffered_closure_dropped_with_channel() `test {
+  ch := channel[(int) -> int](1);
+  int base = 5;
+  f := |int x| -> x + base;
+  ch.send(move f);
+}
+
+// A closure reaching the goroutine only through a NESTED lambda is captured by
+// the coroutine too, so it must transfer the same way.
+nested_lambda_closure_into_go() `test {
+  done := channel[int](1);
+  int base = 10;
+  f := |int x| -> x + base;
+  go {
+    inner := move || -> f(1);
+    done.send(inner());
+  };
+  assert((<-done)! == 11, "nested-lambda capture transfers the env");
+}
+
+// Several goroutines, each owning its own closure — no cross-talk, no leaks.
+many_closures_into_goroutines() `test {
+  done := channel[int](4);
+  for i in 0..4 {
+    int base = i * 10;
+    f := |int x| -> x + base;
+    go {
+      done.send(f(1));
+    };
+  }
+  int total = 0;
+  for _ in 0..4 {
+    total = total + (<-done)!;
+  }
+  assert(total == 64, "each goroutine owns its own closure");
+}
+
+// --- Owned-env shapes that R5 accepts (each has an owning env-free in codegen) ---
+
+type Registry {
+  int base;
+  get callback(int) -> int {
+    return move |int x| -> x + 1;
+  }
+}
+
+type Table {
+  int base;
+  [](int i)(int) -> int {
+    return move |int x| -> x + i;
+  }
+}
+
+enum Kind {
+  a,
+  b,
+  get handler(int) -> int {
+    return move |int x| -> x + 2;
+  }
+}
+
+make_cb!()(int) -> int {
+  return move |int x| -> x + 1;
+}
+
+failable_run!((int) -> int move f, channel[int] done) {
+  done.send(f(1));
+}
+
+// A closure that came off a channel owns its env — the sender moved it in — so
+// it may be moved on into a goroutine. This is the full round trip: lambda →
+// local → channel → local → coroutine frame, freed exactly once at the end.
+closure_from_channel_into_go() `test {
+  ch := channel[(int) -> int](1);
+  done := channel[int](1);
+  int base = 4;
+  f := |int x| -> x + base;
+  ch.send(move f);
+  g := (<-ch)!;
+  go {
+    done.send(g(1));
+  };
+  assert((<-done)! == 5, "channel-received closure crosses the boundary");
+}
+
+// A getter returns a FRESH closure, so its binding owns the env — unlike a plain
+// field read of the same shape, which aliases the aggregate's.
+getter_closure_into_go() `test {
+  done := channel[int](2);
+  r := Registry(base: 1);
+  f := r.callback;
+  go {
+    done.send(f(1));
+  };
+  k := Kind.a;
+  h := k.handler;
+  go {
+    done.send(h(1));
+  };
+  assert((<-done)! + (<-done)! == 5, "struct and enum getters both transfer");
+}
+
+// A user-defined non-native `[]` is a call in disguise: fresh, owned, crossable.
+user_index_closure_into_go() `test {
+  done := channel[int](1);
+  tbl := Table(base: 0);
+  f := tbl[5];
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 6, "user `[]` result transfers the env");
+}
+
+// Parenthesising the lambda must not change ownership classification.
+parenthesized_lambda_into_go() `test {
+  done := channel[int](1);
+  int base = 3;
+  f := (|int x| -> x + base);
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 4, "parenthesised lambda transfers the env");
+}
+
+// `?!` peels to the underlying call, which is fresh-owned.
+error_panic_closure_into_go() `test {
+  done := channel[int](1);
+  f := make_cb()?!;
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 2, "error-panic-peeled call result transfers the env");
+}
+
+// --- Container element types: the shape a subscription registry actually needs ---
+
+// A Vector of closures is sendable because Vector derives sendability from its
+// element type. Its outer binding is a normal drop binding, so the transfer goes
+// through Vector.drop and every element env is freed exactly once.
+vector_of_closures_into_go() `test {
+  done := channel[int](1);
+  ((int) -> int)[] fns = [];
+  int base = 1;
+  f1 := |int x| -> x + base;
+  f2 := |int x| -> x + base + 1;
+  fns.push(move f1);
+  fns.push(move f2);
+  go {
+    int total = 0;
+    for f in fns {
+      total = total + f(1);
+    }
+    done.send(total);
+  };
+  assert((<-done)! == 5, "a vector of closures crosses the boundary");
+}
+
+// The dispatch-table shape: a map from event name to handler.
+map_of_closures_into_go() `test {
+  done := channel[int](1);
+  map[string, (int) -> int] handlers = {:};
+  int base = 4;
+  handlers["a"] = move |int x| -> x + base;
+  go {
+    done.send(handlers["a"]!(1));
+  };
+  assert((<-done)! == 5, "a map of closures crosses the boundary");
+}
+
+// --- Reassignment: a closure local is now a drop binding, so the env release on
+// reassignment must still happen exactly once, with or without a later spawn. ---
+
+reassigned_closure_into_go() `test {
+  done := channel[int](1);
+  int a = 1;
+  int b = 100;
+  (int) -> int f = move |int x| -> x + a;
+  f = move |int x| -> x + b;
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 101, "the NEW env is what transfers");
+}
+
+reassigned_closure_without_spawn() `test {
+  int a = 1;
+  int b = 100;
+  (int) -> int f = move |int x| -> x + a;
+  assert(f(1) == 2, "first env");
+  f = move |int x| -> x + b;
+  assert(f(1) == 101, "second env");
+}
+
+// --- Transfer paths other than a bare `go { }` capture ---
+
+// Mixed captures in one spawn: the closure takes the env path, the string and
+// the vector take the ordinary drop path, all in the same coroutine frame.
+mixed_captures_into_go() `test {
+  done := channel[int](1);
+  int base = 2;
+  f := |int x| -> x + base;
+  s := "abcd";
+  ((int) -> int)[] extra = [];
+  tripler := |int x| -> x * 3;
+  extra.push(move tripler);
+  go {
+    done.send(f(1) + s.len + extra[0](2));
+  };
+  assert((<-done)! == 13, "closure, string and vector captures all transfer");
+}
+
+// A task RETURNING a closure: the env travels back out of the goroutine.
+task_returning_closure() `test {
+  t := go make_adder(50);
+  g := <-t;
+  assert(g(1) == 51, "a task can return a closure");
+}
+
+// The failable spawn form transfers the same way.
+failable_go_call_with_move_closure() `test {
+  done := channel[int](1);
+  int base = 5;
+  f := |int x| -> x + base;
+  ft := go! failable_run(move f, done);
+  assert((<-done)! == 6, "failable go call transfers the env");
+  (<-ft)?!;
+}
+
+// `web.on`'s shape: a callback registered inside a lambda that spawns.
+go_block_inside_lambda() `test {
+  done := channel[int](1);
+  int base = 3;
+  spawner := |channel[int] d| {
+    f := move |int x| -> x + base;
+    go {
+      d.send(f(1));
+    };
+  };
+  spawner(done);
+  assert((<-done)! == 4, "a go block inside a lambda transfers its closure");
+}
+
+// A closure capturing a closure: both envs must reach the coroutine and both
+// must be freed exactly once (the env drop function recurses).
+nested_closure_env_into_go() `test {
+  done := channel[int](1);
+  int base = 5;
+  inner := move |int x| -> x + base;
+  outer := move |int x| -> inner(x) * 2;
+  go {
+    done.send(outer(1));
+  };
+  assert((<-done)! == 12, "a closure capturing a closure transfers both envs");
+}
+
+// A closure that OWNS a channel: the env holds a droppable, so the env drop
+// function must drop it rather than just freeing the struct.
+closure_owning_channel_into_go() `test {
+  done := channel[int](1);
+  int base = 6;
+  ring := channel[int](1);
+  f := move |int x| -> int {
+    ring.send(x + base);
+    return (<-ring)!;
+  };
+  go {
+    done.send(f(1));
+  };
+  assert((<-done)! == 7, "a closure owning a channel transfers with its env");
+}
+
+// A conditional spawn: the transfer happens on exactly one path, so the outer
+// drop flag must be cleared on that path only — the else branch still owns it.
+conditional_spawn_of_closure() `test {
+  done := channel[int](1);
+  int base = 8;
+  f := |int x| -> x + base;
+  if (base > 0) {
+    go {
+      done.send(f(1));
+    };
+  } else {
+    done.send(0);
+  }
+  assert((<-done)! == 9, "a conditional spawn transfers the env once");
+}
+
+// A method spawning a goroutine whose nested lambda captures `this` — the
+// receiver is borrowed, not transferred, so the coroutine must not free it.
+//
+// DISABLED — T1657: this shape leaks exactly 1 allocation. The leak is
+// PRE-EXISTING (it reproduces with the whole T1640 diff stashed and the compiler
+// rebuilt), so it does not gate T1640, but the zero-leak policy means the test
+// cannot be enabled until T1657 is fixed. The sema half of the guarantee — that
+// a `this` capture reaching the goroutine through a nested lambda is NOT
+// rejected at the boundary — is covered by
+// TestT1640ThisCaptureThroughNestedLambdaAllowedAtGoBoundary in
+// compiler/internal/sema/t1640_test.go. Re-enable this test with T1657.
+//
+// this_capture_through_nested_lambda_into_go() `test {
+//   done := channel[int](1);
+//   c := Counter(n: 5);
+//   c.spawn(done);
+//   assert((<-done)! == 5, "`this` reaches the goroutine through a nested lambda");
+// }
+//
+// type Counter {
+//   int n;
+//   spawn(this, channel[int] done) {
+//     go {
+//       inner := move || -> this.n;
+//       done.send(inner());
+//     };
+//   }
+// }
+
+// Contention: many goroutines, each owning its own closure env, spawned and
+// joined through a single channel. Exercises the transfer under real scheduler
+// pressure (work stealing, park/wake) rather than just repeating one spawn —
+// a mis-transferred env shows up here as a double free or a corrupted capture,
+// not merely as a leak. Deterministic: every spawn is joined by a receive.
+many_closure_envs_under_contention() `test {
+  int workers = 64;
+  done := channel[int](workers);
+  for i in 0..workers {
+    int base = i;
+    s := "payload";
+    f := |int x| -> x + base;
+    go {
+      done.send(f(1) + s.len - 7);
+    };
+  }
+  int total = 0;
+  for _ in 0..workers {
+    total = total + (<-done)!;
+  }
+  // sum(i + 1 for i in 0..64) == 64*63/2 + 64 == 2080
+  assert(total == 2080, "every goroutine owns and frees its own env");
+}
+
+// The same contention through the CALL form, which transfers via a `move`
+// argument rather than a block capture.
+many_move_arguments_under_contention() `test {
+  int workers = 64;
+  done := channel[int](workers);
+  for i in 0..workers {
+    int base = i;
+    f := |int x| -> x + base;
+    go run_it(move f, done);
+  }
+  int total = 0;
+  for _ in 0..workers {
+    total = total + (<-done)!;
+  }
+  assert(total == 2080, "every `move` argument transfers its own env");
+}
+
+// --- Known-blocked shapes: enable these with their tracker items ---
+//
+// T1655 — `Channel.send` of a TEMPORARY closure corrupts the env. The sending
+// scope frees the temp env at end of statement, so the receiver reads zeroed
+// captures and the eventual free aborts with "invalid free (bad header magic)".
+// Binding the closure to a local first and sending it with `move` is correct and
+// is covered above by `closure_over_channel`.
+//
+// temporary_closure_over_channel() `test {
+//   ch := channel[(int) -> int](1);
+//   int base = 4;
+//   ch.send(move |int x| -> x + base);
+//   g := (<-ch)!;
+//   assert(g(1) == 5, "temporary closure survives the send");
+// }
+//
+// T1656 — a closure received through a `select` case or a `for-in` over a
+// channel never registers an env-free, so each received closure leaks its env.
+// A plain var-decl receive (`g := (<-ch)!`) is correct and is covered above.
+//
+// select_received_closure() `test {
+//   ch := channel[(int) -> int](1);
+//   int base = 4;
+//   f := |int x| -> x + base;
+//   ch.send(move f);
+//   select {
+//     g := <-ch:
+//       assert(g!(1) == 5, "select-received closure is freed once");
+//   }
+// }
+//
+// for_in_received_closures() `test {
+//   ch := channel[(int) -> int](2);
+//   int base = 4;
+//   f1 := |int x| -> x + base;
+//   f2 := |int x| -> x + base + 1;
+//   ch.send(move f1);
+//   ch.send(move f2);
+//   ch.close();
+//   int total = 0;
+//   for g in ch {
+//     total = total + g(1);
+//   }
+//   assert(total == 11, "for-in received closures are freed once each");
+// }
+
+// --- The env transfer must work for EVERY syntactic shape that captures ---
+//
+// `checkGoBlockCaptures` records a capture only if its walk reaches the
+// reference; codegen transfers the env only if ITS walk reaches it. The tests
+// above all capture through a plain expression statement. These reach the
+// closure through a different AST arm each time, and assert the goroutine
+// computed with the transferred env (not a zeroed one) and that nothing leaked.
+// The compile-time half — that the same arms record the capture, so R4 marks it
+// Moved and R5 gates it — is pinned in
+// compiler/internal/ownership/t1640_capture_walk_test.go.
+
+// Captured only through a classic for-loop CONDITION.
+capture_through_classic_for_condition() `test {
+  done := channel[int](1);
+  int base = 10;
+  f := |int x| -> x + base;
+  go {
+    int last = 0;
+    for int i = 0; f(i) < 13; i = i + 1 {
+      last = f(i);
+    }
+    done.send(last);
+  };
+  assert((<-done)! == 12, "classic-for condition capture keeps its env");
+}
+
+// Captured only through a `select` case BODY.
+capture_through_select_case_body() `test {
+  done := channel[int](1);
+  ready := channel[int](1);
+  int base = 20;
+  f := |int x| -> x + base;
+  ready.send(1);
+  go {
+    select {
+      v := <-ready:
+        done.send(f(v!));
+    }
+  };
+  assert((<-done)! == 21, "select-case capture keeps its env");
+}
+
+// Captured only through a `select` send-case VALUE expression.
+capture_through_select_send_value() `test {
+  done := channel[int](1);
+  int base = 30;
+  f := |int x| -> x + base;
+  go {
+    select {
+      done.send(f(1)):
+        print_line("");
+    }
+  };
+  assert((<-done)! == 31, "select send-value capture keeps its env");
+}
+
+// Captured only through a `select` DEFAULT arm — a separate walk from the cases.
+capture_through_select_default() `test {
+  done := channel[int](1);
+  empty := channel[int](1);
+  int base = 40;
+  f := |int x| -> x + base;
+  go {
+    select {
+      v := <-empty:
+        done.send(v!);
+      default:
+        done.send(f(1));
+    }
+  };
+  assert((<-done)! == 41, "select default capture keeps its env");
+}
+
+// Captured only through a MAP LITERAL value — the dispatch-table shape built
+// inside the goroutine rather than outside it.
+capture_through_map_literal_value() `test {
+  done := channel[int](1);
+  int base = 50;
+  f := |int x| -> x + base;
+  go {
+    map[string, int] m = {
+      "k": f(1)
+    };
+    done.send(m["k"]!);
+  };
+  assert((<-done)! == 51, "map-literal capture keeps its env");
+}
+
+// Captured only through an ARRAY REPEAT literal `[value; count]`.
+capture_through_array_repeat_literal() `test {
+  done := channel[int](1);
+  int base = 60;
+  f := |int x| -> x + base;
+  go {
+    int[3] a = [f(1); 3];
+    done.send(a[0] + a[2]);
+  };
+  assert((<-done)! == 122, "array-repeat capture keeps its env");
+}
+
+// Captured only through a `while v := opt { … }` body.
+capture_through_while_unwrap_body() `test {
+  done := channel[int](1);
+  int base = 70;
+  f := |int x| -> x + base;
+  go {
+    int? o = 1;
+    while v := o {
+      done.send(f(v));
+      o = none;
+    }
+  };
+  assert((<-done)! == 71, "while-unwrap capture keeps its env");
+}
+
+// Captured only through a `use` binding's initializer. The `use` value is closed
+// at scope exit inside the coroutine, so this also checks that the env free and
+// the close ordering coexist.
+capture_through_use_var_decl() `test {
+  done := channel[int](1);
+  int base = 80;
+  f := |int x| -> x + base;
+  go {
+    use r := Holder(v: f(1));
+    done.send(r.v);
+  };
+  assert((<-done)! == 81, "use-binding capture keeps its env");
+}
+
+type Holder {
+  int v;
+  close(~this) {
+  }
+}
+
+// Captured only through a destructuring binding's initializer.
+capture_through_destructure_var_decl() `test {
+  done := channel[int](1);
+  int base = 90;
+  f := |int x| -> x + base;
+  go {
+    (a, b) := split_pair(f(1));
+    done.send(a + b);
+  };
+  assert((<-done)! == 183, "destructure capture keeps its env");
+}
+
+split_pair(int n)(int, int) {
+  return (n, n + 1);
+}
+
+// --- Sendable aggregates that HOLD a closure ---
+
+// A `sendable`-annotated type with a closure field: R1 makes the field sendable,
+// so the whole struct crosses. The struct owns the env, so the goroutine's drop
+// of the struct must free it exactly once.
+type Subscription `sendable {
+  int id;
+  (int) -> int handler;
+}
+
+sendable_struct_with_closure_field_into_go() `test {
+  done := channel[int](1);
+  int base = 100;
+  s := Subscription(id: 1, handler: move |int x| -> x + base);
+  go {
+    done.send(s.handler(1));
+  };
+  assert((<-done)! == 101, "a sendable struct carries its closure field across");
+}
+
+// A `sendable` ENUM variant carrying a closure payload — the same guarantee
+// through the enum layout, whose variant data is dropped by the synthesized enum
+// drop function rather than a plain field drop.
+enum Event `sendable {
+  idle,
+  handler((int) -> int fn),
+}
+
+sendable_enum_with_closure_payload_into_go() `test {
+  done := channel[int](1);
+  int base = 110;
+  e := Event.handler(fn: move |int x| -> x + base);
+  go {
+    match e {
+      Event.handler(fn) => done.send(fn(1)),
+      _ => done.send(0),
+    }
+  };
+  assert((<-done)! == 111, "a sendable enum carries its closure payload across");
+}
+
+// An enum-carried closure that is NEVER matched still has to be freed exactly
+// once by the enum's drop — the payload env has no other owner.
+sendable_enum_closure_payload_dropped_unmatched() `test {
+  int base = 120;
+  e := Event.handler(fn: move |int x| -> x + base);
+}
+
+// --- The go-CALL spawn path has its own capture collection ---
+//
+// A go-call with a NON-ident callee (a method here) is lowered by
+// `genGoCallExprViaBlock`, which builds the whole call inside the coroutine
+// body. A closure referenced from an argument expression is therefore a real
+// coroutine capture on that path, with its own env-owner detection — distinct
+// from `go named_fn(f(1))`, where the argument is evaluated in the SPAWNER and
+// only its result crosses (so `f` never leaves the defining scope at all).
+// Both spellings are exercised here so neither path can regress into leaking
+// the env or reading it after free.
+
+type Sink {
+  int bias;
+  take(this, channel[int] done, int v) {
+    done.send(v + this.bias);
+  }
+}
+
+go_method_call_capturing_closure_argument() `test {
+  done := channel[int](1);
+  s := Sink(bias: 100);
+  int base = 10;
+  f := |int x| -> x + base;
+  go s.take(done, f(1));
+  assert((<-done)! == 111, "via-block go-call transfers the captured env");
+}
+
+go_named_call_with_closure_in_argument_expression() `test {
+  done := channel[int](1);
+  int base = 20;
+  f := |int x| -> x + base;
+  go send_int(f(1), done);
+  assert((<-done)! == 21, "argument evaluated in the spawner, env stays home");
+  // `f` was never captured on this path, so it is still usable afterwards.
+  assert(f(2) == 22, "the spawner keeps ownership of the env");
+}
+
+send_int(int v, channel[int] done) {
+  done.send(v);
+}

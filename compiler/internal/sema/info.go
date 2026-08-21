@@ -235,6 +235,15 @@ type Info struct {
 	// Empty slice means no captures; nil key means lambda was not analyzed.
 	LambdaCaptures map[*ast.LambdaExpr][]*CapturedVar
 
+	// GoCaptures maps each `go { … }` block to the variables it captures from an
+	// enclosing scope, as computed by checkGoBlockCaptures. Ownership consumes it
+	// to apply the T1640 closure env-ownership rules (a closure crossing the
+	// boundary moves its heap env, and only an owning binding may cross); the
+	// GoExpr node itself carries no capture list, so this is the only record of it.
+	// CapturedVar.ByMove is always false here — a `go` block has no capture-mode
+	// syntax; the transfer is implicit (codegen's B0354 ownership move).
+	GoCaptures map[*ast.GoExpr][]*CapturedVar
+
 	// OptionalNarrowings maps if-statement nodes to their narrowing info.
 	// Used by codegen to unwrap optional variables in narrowed scopes.
 	OptionalNarrowings map[*ast.IfStmt]*OptionalNarrowing

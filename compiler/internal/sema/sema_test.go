@@ -16665,13 +16665,14 @@ func TestSendableEnumNonSendableField(t *testing.T) {
 	expectError(t, errs, "non-sendable type Holder")
 }
 
-func TestSignatureNotSendable(t *testing.T) {
-	errs := checkErrs(t, `
+// T1640 (R1): a function value is sendable, so a `sendable type may hold one.
+// Inverts the pre-T1640 expectation that a closure field poisoned sendability.
+func TestSignatureIsSendable(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
 		type Callback `+"`sendable"+` {
 			() -> void fn;
 		}
-	`)
-	expectError(t, errs, "non-sendable type")
+	`))
 }
 
 func TestChannelNonSendableElement(t *testing.T) {

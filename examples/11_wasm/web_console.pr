@@ -6,12 +6,15 @@
 // `wasm-import-module` / `wasm-import-name` attributes so the host JavaScript
 // can supply the implementation.
 //
-// In a real browser, the auto-generated bootstrap `.js` (see
-// `docs/wasm-bindings.md`) wires `promise_env.log` to `console.log`. The
-// Node.js test harness (compiler/cmd/promise/wasm_web_harness.js) routes
-// `promise_env.write`/`exit` to stdout/process.exit and stubs every other
-// import with a no-op — including `promise_env.log`. So the test below just
-// verifies the binding compiles and links cleanly for wasm32-web.
+// `promise_env.log` below is declared by this example alone — it is not one of
+// the three base PAL imports (`write`/`exit`/`monotonic_nanos`) that every
+// wasm32-web binary carries, so no generated JS supplies it. In a real browser
+// the host page must implement it: pass it to the bootstrap's `init()` via
+// `importObject.promise_env`, or declare the API in WebIDL and let
+// `promise bind webidl` generate the binding (see `docs/wasm-bindings.md`).
+// The Node.js test harness (compiler/cmd/promise/wasm_web_harness.js) stubs
+// every unknown import with a no-op, including `promise_env.log`, so the test
+// below just verifies the binding compiles and links cleanly for wasm32-web.
 //
 // For real DOM/web bindings, generate them from `.webidl` instead of writing
 // `wasm_import` declarations by hand:

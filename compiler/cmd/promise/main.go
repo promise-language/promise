@@ -5279,24 +5279,106 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) er
 }
 
 // emitWebBootstrapJS writes a minimal JavaScript loader alongside the .wasm
-// output for wasm32-web targets. The loader handles WebAssembly.instantiateStreaming
-// and provides the basic runtime entry point. Module-specific JS glue (from
-// promise bind webidl) should be imported separately.
+// output for wasm32-web targets. The loader handles WebAssembly.instantiateStreaming,
+// wires up the base PAL runtime imports every wasm32-web binary needs
+// (promise_env.write/exit/monotonic_nanos — mirroring the browser-equivalent
+// behavior of the Node test harness's wasm_web_harness.js), and provides the
+// basic runtime entry point. A caller-supplied importObject (e.g. the
+// WebIDL-bindgen-generated glue from `promise bind webidl`) is deep-merged on
+// top of these defaults so both halves are available together; the caller's
+// own promise_env entries win on conflict.
 func emitWebBootstrapJS(wasmFile string) {
 	jsFile := strings.TrimSuffix(wasmFile, ".wasm") + ".js"
 	wasmBase := filepath.Base(wasmFile)
 
 	content := fmt.Sprintf(`// Auto-generated bootstrap loader for %s
-// Import module-specific glue files separately if using WebIDL bindings.
+// Import module-specific glue files separately if using WebIDL bindings; any
+// promise_env entries on the importObject passed to init() are merged on top
+// of (and override) the base PAL runtime glue below.
+
+const _decoder = new TextDecoder("utf-8");
+
+// Thrown by exit() to unwind the synchronous WASM call stack — the only way
+// to abort a WASM function from a JS import. Carries the real exit code so
+// init() can tell a normal main() return (pal_exit(0)) apart from a panic or
+// an explicit non-zero exit(), instead of treating every unwind as success.
+class _ExitSignal extends Error {
+  constructor(code) {
+    super("promise_env.exit");
+    this.code = code;
+  }
+}
 
 export async function init(importObject = {}) {
-  const response = await fetch("%s");
-  const { instance } = await WebAssembly.instantiateStreaming(response, importObject);
+  let instance;
 
-  if (instance.exports._initialize) {
-    instance.exports._initialize();
+  // console.log/console.error each add their own trailing newline, but
+  // Promise's print_line already appends one before the write ever reaches
+  // the PAL (see definePrintStringBody in internal/codegen/io.go) — logging
+  // each write verbatim would double every line. Buffer per fd and only flush
+  // on complete lines, holding back a trailing partial line until the next
+  // write (or process exit) completes it.
+  const _lineBuf = { 1: "", 2: "" };
+  function _flushLine(fd, line) {
+    (fd === 2 ? console.error : console.log)(line);
+  }
+  function _writeChunk(fd, text) {
+    const pending = _lineBuf[fd] + text;
+    const lines = pending.split("\n");
+    _lineBuf[fd] = lines.pop();
+    for (const line of lines) _flushLine(fd, line);
+  }
+  function _flushRemainder() {
+    for (const fd of [1, 2]) {
+      if (_lineBuf[fd]) {
+        _flushLine(fd, _lineBuf[fd]);
+        _lineBuf[fd] = "";
+      }
+    }
   }
 
+  // Base PAL runtime imports every wasm32-web binary needs, regardless of
+  // whether it uses WebIDL bindings.
+  const basePromiseEnv = {
+    write(fd, ptr, len) {
+      const lenN = Number(len);
+      if (lenN > 0) {
+        const mem = new Uint8Array(instance.exports.memory.buffer, Number(ptr), lenN);
+        _writeChunk(Number(fd) === 2 ? 2 : 1, _decoder.decode(mem));
+      }
+      return BigInt(lenN);
+    },
+    exit(code) {
+      throw new _ExitSignal(Number(code));
+    },
+    monotonic_nanos() {
+      return BigInt(Math.round(performance.now() * 1e6));
+    },
+  };
+
+  const mergedImportObject = {
+    ...importObject,
+    promise_env: { ...basePromiseEnv, ...(importObject.promise_env || {}) },
+  };
+
+  const response = await fetch("%s");
+  const result = await WebAssembly.instantiateStreaming(response, mergedImportObject);
+  instance = result.instance;
+
+  try {
+    if (instance.exports._initialize) instance.exports._initialize();
+  } catch (e) {
+    // A normal main() return unwinds through exit(0) — that's expected, not
+    // a crash. Anything else (a real trap, or exit() called with a non-zero
+    // code by a panic or an explicit exit()) must propagate so the caller
+    // learns the run failed instead of getting exports back silently.
+    if (!(e instanceof _ExitSignal) || e.code !== 0) {
+      _flushRemainder();
+      throw e;
+    }
+  }
+
+  _flushRemainder();
   return instance.exports;
 }
 `, wasmBase, wasmBase)

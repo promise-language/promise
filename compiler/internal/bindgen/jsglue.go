@@ -28,6 +28,8 @@ func (g *jsGlueGenerator) generate(modules []*Module) string {
 	g.emitHeader()
 	g.emitRefTable()
 	g.emitStringHelpers()
+	g.emitExitSignal()
+	g.emitLineBufferHelpers()
 	g.emitImportObject(modules)
 	g.emitInstantiation()
 	return g.buf.String()
@@ -102,12 +104,92 @@ function _writeString(str) {
 `)
 }
 
+// emitExitSignal defines the typed sentinel exit() throws to unwind the
+// synchronous WASM call stack — the only way to abort a WASM function from a
+// JS import. Carrying the real exit code lets init() tell a normal main()
+// return (pal_exit(0)) apart from a panic or an explicit non-zero exit(),
+// instead of matching on a bare Error's .message string, which would also
+// swallow any unrelated JS error that happened to carry the same text.
+func (g *jsGlueGenerator) emitExitSignal() {
+	g.write(`class _ExitSignal extends Error {
+  constructor(code) {
+    super("promise_env.exit");
+    this.code = code;
+  }
+}
+
+`)
+}
+
+// emitLineBufferHelpers defines the per-fd line buffering that
+// promise_env.write uses. console.log/console.error each add their own
+// trailing newline, but Promise's print_line already appends
+// Platform.line_separator before the write ever reaches the PAL (see
+// definePrintStringBody in internal/codegen/io.go) — logging each write
+// verbatim would double every line, and a write with no trailing newline
+// would become its own console line, making it impossible to build one line
+// out of several print() calls. Buffering per fd and flushing only on
+// complete lines fixes both.
+func (g *jsGlueGenerator) emitLineBufferHelpers() {
+	g.write(`const _lineBuf = { 1: "", 2: "" };
+
+function _flushLine(fd, line) {
+  (fd === 2 ? console.error : console.log)(line);
+}
+
+function _writeChunk(fd, text) {
+  const pending = _lineBuf[fd] + text;
+  const lines = pending.split("\n");
+  _lineBuf[fd] = lines.pop();
+  for (const line of lines) _flushLine(fd, line);
+}
+
+function _flushRemainder() {
+  for (const fd of [1, 2]) {
+    if (_lineBuf[fd]) {
+      _flushLine(fd, _lineBuf[fd]);
+      _lineBuf[fd] = "";
+    }
+  }
+}
+
+`)
+}
+
+// emitBasePromiseEnvImports writes the promise_env.write/exit/monotonic_nanos
+// entries every Promise wasm32-web binary imports unconditionally, regardless
+// of which WebIDL bindings it also uses. Without these, WebAssembly.instantiate
+// throws a LinkError before any binding code — or _initialize — ever runs, so
+// the exit-unwind catch in emitInstantiation has nothing to catch (T1506).
+func (g *jsGlueGenerator) emitBasePromiseEnvImports() {
+	g.write(`    write(fd, ptr, len) {
+      // i64 args/returns are BigInts in default WebAssembly mode.
+      const lenN = Number(len);
+      if (lenN > 0) {
+        const mem = new Uint8Array(wasm.exports.memory.buffer, Number(ptr), lenN);
+        _writeChunk(Number(fd) === 2 ? 2 : 1, _decoder.decode(mem));
+      }
+      return BigInt(lenN);
+    },
+    exit(code) {
+      throw new _ExitSignal(Number(code));
+    },
+    monotonic_nanos() {
+      return BigInt(Math.round(performance.now() * 1e6));
+    },
+`)
+}
+
 func (g *jsGlueGenerator) emitImportObject(modules []*Module) {
 	g.write("// --- Import Implementations ---\n")
 	g.write("const importObject = {\n")
 
 	for _, m := range modules {
 		g.writef("  %s: {\n", m.ImportModule)
+
+		if m.ImportModule == "promise_env" {
+			g.emitBasePromiseEnvImports()
+		}
 
 		// Resource drop functions. Import name must match the WIT/component-model
 		// canonical naming ("[resource-drop]<kebab-case>") that codegen.go's
@@ -308,10 +390,24 @@ export async function init(wasmPath) {
     _refStore(console);            // handle 3 = console
   }
 
-  // Call WASM _initialize if exported
+  // Call WASM _initialize if exported. A normal main() return is signaled by
+  // pal_exit(0), which lowers to the promise_env.exit import — the only way
+  // to abort a synchronous WASM call from a JS import is to throw, so exit()
+  // always throws to unwind the call stack. That's expected on success, not
+  // a crash, so swallow exactly that case; a non-zero code (a panic, or an
+  // explicit exit()) must still propagate so the caller learns the run
+  // failed instead of getting exports back silently (T1506).
   if (wasm.exports._initialize) {
-    wasm.exports._initialize();
+    try {
+      wasm.exports._initialize();
+    } catch (e) {
+      if (!(e instanceof _ExitSignal) || e.code !== 0) {
+        _flushRemainder();
+        throw e;
+      }
+    }
   }
+  _flushRemainder();
 
   return wasm.exports;
 }

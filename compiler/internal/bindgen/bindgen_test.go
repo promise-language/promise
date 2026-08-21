@@ -3003,6 +3003,47 @@ func TestGenerateJSGlueInstantiation(t *testing.T) {
 	assertContains(t, out, "_initialize")
 }
 
+// TestGenerateJSGlueInstantiationCatchesExitUnwind verifies init() wraps
+// _initialize() in a try/catch that swallows exactly a clean promise_env.exit
+// unwind (code 0). A successful main() return is signaled by pal_exit(0)
+// throwing to unwind the WASM call stack (T1506) — without this catch, every
+// successful run looks like a crash to the calling JS code. The catch must
+// use the typed _ExitSignal sentinel rather than matching a bare Error's
+// .message string (which would also swallow unrelated JS errors carrying the
+// same text), and must still propagate a non-zero code — see
+// TestGenerateJSGlueRejectsNonZeroExit for the corresponding behavioral proof.
+func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "class _ExitSignal")
+	assertContains(t, out, "try {")
+	assertContains(t, out, "wasm.exports._initialize();")
+	assertContains(t, out, "e instanceof _ExitSignal")
+	assertContains(t, out, "e.code !== 0")
+}
+
+// TestGenerateJSGluePromiseEnvImportsPresent verifies the generated glue's
+// own importObject.promise_env defines write/exit/monotonic_nanos — every
+// Promise wasm32-web binary imports these unconditionally, WebIDL bindings or
+// not. Before this fix, WebAssembly.instantiate threw a LinkError for any
+// module before _initialize (and so the exit-unwind catch above) ever ran,
+// because the generated importObject had no base PAL imports at all (T1506).
+func TestGenerateJSGluePromiseEnvImportsPresent(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+	}}
+	out := GenerateJSGlue(modules)
+	for _, want := range []string{"write(fd, ptr, len)", "exit(code)", "monotonic_nanos()"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated importObject.promise_env missing base PAL import %q", want)
+		}
+	}
+}
+
 func TestWebIdlEndToEnd(t *testing.T) {
 	// Full pipeline: parse WebIDL → IR → Promise code + JS glue
 	src := `

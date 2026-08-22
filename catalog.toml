@@ -11,7 +11,7 @@ description = "String utility functions: join, reverse, is_blank, spaces, repeat
 description = "Pure math utilities: lerp, map_range, deg/rad conversion, sign, gcd, lcm"
 
 [modules.path]
-description = "File path manipulation: join, basename, dirname, extension, stem"
+description = "File path manipulation: join, file_name, parent, extension, stem, split, is_absolute, is_relative, normalize"
 
 [modules.io]
 description = "File and directory I/O: File (open/create/append/read/write/close), Dir (make/remove/exists), IoError"
@@ -26,19 +26,19 @@ description = "HTTP/1.1 client and server over the net module: Request/Response,
 description = "Operating system interface: args, env vars, one-shot execute, streaming Process (spawn/wait/kill) with stdin/stdout/stderr pipes, OS info (user/hostname/pid), and signal handling"
 
 [modules.time]
-description = "Time and duration operations (placeholder — pending native PAL support)"
+description = "Wall-clock date and time: DateTime, Date, Time; Unix-epoch conversion, calendar components, Duration arithmetic, UTC offsets, ISO-8601 format and parse"
 
 [modules.net]
 description = "TCP networking: TcpListener, TcpStream with reactor-based non-blocking I/O"
 
 [modules.tls]
-description = "TLS 1.2/1.3 transport security over TCP (Linux/OpenSSL): TlsConfig, TlsStream (Reader/Writer), TlsListener, TlsError with handshake/certificate/io/no_trust_store/unsupported kinds"
+description = "TLS 1.2/1.3 transport security over TCP (OpenSSL on Linux, Secure Transport on macOS, SChannel on Windows; unsupported on WASM): TlsConfig, TlsStream (Reader/Writer), TlsListener, TlsError with handshake/certificate/io/no_trust_store/unsupported kinds"
 
 [modules.gzip]
 description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) compression and decompression in pure Promise: gzip_encode, gunzip, deflate, inflate, crc32, GzipWriter, GunzipReader, gunzip_from, DecompressError"
 
 [modules.crypto]
-description = "Cryptographic primitives (pure Promise): SHA-256, HMAC-SHA-256, PBKDF2, MD5, constant_time_equal, CSPRNG random_bytes"
+description = "Cryptographic primitives (pure Promise): SHA-256 (Sha256 streaming context, Digest256, one-shot sha256), constant_time_equal; HMAC-SHA-256, PBKDF2, CSPRNG random_bytes (planned)"
 
 [modules.encoding]
 description = "Binary-to-text encodings (RFC 4648): hex_encode, hex_decode, EncodingError; base64/base64url (planned)"

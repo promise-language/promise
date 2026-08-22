@@ -74,6 +74,15 @@ func RunPreCommit(root string) error {
 		return err
 	}
 
+	// Mechanical documentation checks: dangling relative .md links,
+	// docs/index.md coverage, and catalog/doc module coverage. Cheap enough
+	// to run unconditionally, and each catches drift that is otherwise only
+	// found by a manual sweep (T1675). Deliberately ahead of the staged-file
+	// scan, which returns early when nothing is staged.
+	if err := CheckDocs(root); err != nil {
+		return err
+	}
+
 	// core.quotePath=false keeps non-ASCII bytes raw in the output (the
 	// default would octal-escape them into an all-ASCII quoted string,
 	// defeating the non-ASCII filename check below).

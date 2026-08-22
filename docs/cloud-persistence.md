@@ -875,7 +875,8 @@ under any name.
 2. `modules/schema` (see `docs/schema.md`) — `Hash128`, `Origin`, `Type`, `id` meta,
    project-id resolution, and the `` `entity `` meta with hidden-id-field synthesis.
 3. `modules/json` — already done.
-4. `modules/http` — currently a placeholder; required for the default transport.
+4. `modules/http` — implemented (client + server). The default transport additionally
+   needs https, which is `modules/tls` wired into the HTTP client (T0079).
 5. `[executable]` table support in `promise.toml` parsing.
 
 ### Phase 1 — Wire Types and Client

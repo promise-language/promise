@@ -197,7 +197,7 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 
 ## Key Architecture Concepts
 
-**Four-struct type layout**: Each user type generates up to 4 LLVM structs — Type (static), Instance (heap fields), Value (`{vtable_ptr, instance_ptr}`), and Variant (enum payload). Value structs are passed around; instance ptrs are what methods receive as `this`. **Pure value types** (all fields `` `value ``): Value struct is `{vtable_ptr, field1, field2, ...}` with data embedded directly — no heap allocation, no RTTI pointer in the value struct (RTTI is accessed via the compile-time-known `promise_rtti_T` global). Instance struct is a global RTTI-only singleton. Automatically `` `copy ``, no `is` parents, no `drop()`. See `layout.go:computeValueTypeLayout()`.
+**Four-struct type layout**: Each user type generates up to 4 LLVM structs — Type (static), Instance (heap fields), Value (`{vtable_ptr, instance_ptr}`), and Variant (enum payload). Value structs are passed around; instance ptrs are what methods receive as `this`. **Pure value types** (all fields `` `value ``): Value struct is `{vtable_ptr, field1, field2, ...}` with data embedded directly — no heap allocation, no RTTI pointer in the value struct (RTTI is accessed via the compile-time-known `promise_rtti_T` global). Instance struct is a global RTTI-only singleton. Automatically `` `copy ``, no `drop()`. Value types may inherit: a fieldless value child of a value parent is a layout-preserving newtype (T1527/T1550). See `layout.go:computeValueTypeLayout()`.
 
 **Scope cleanup stack**: `scopeBindings` is a LIFO stack of `bindingClose` (use vars), `bindingDrop` (droppable vars), `bindingDropEnum` (enum vars with droppable variant data, T0102), and `bindingFreeEnv` (closure env structs). Emitted in reverse at scope exit, return, raise, break, continue. Drop bindings have an `i1` drop flag that's cleared at move sites. Enum drop bindings pass the alloca pointer (bitcast to i8*) to the synthesized enum drop function, which switches on the tag and drops variant-specific fields. Env free bindings null-check the env pointer before calling `free()`.
 
@@ -252,7 +252,7 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 - **Sysmon**: Background thread sets `G.preempt=1` every 10ms; yield checks at loop back-edges call `coro.suspend`. Also acts as a lost-wakeup safety net (T0352): after each preemption-scan pass, if `sched.global_size != 0` it calls `promise_sched_wake_m`, bounding worst-case stuck time to ~10ms when a non-M-thread enqueue races with an M's transition into `park_m`.
 - **Stack overflow detection** (B0010): Guard page via `pthread_attr_setguardsize(4096)` on each M's 2MB stack. macOS uses `sigaction(SA_ONSTACK)` + per-thread `sigaltstack(64KB)` for reliable delivery, prints "fatal: stack overflow". Linux uses `sigaction(SA_SIGINFO | SA_ONSTACK)` + per-thread `sigaltstack(64KB)`, reads `si_addr` from `siginfo_t` and prints "fatal: segmentation fault at 0x\<hex\>" with the fault address (B0128). The `struct sigaction` layout is `{handler(8), sa_mask(128), sa_flags(4), pad(4), sa_restorer(8)}` = 152 bytes with `sa_flags` at offset 136 — identical in glibc and musl and on every Linux arch, since both define `sigset_t` as `unsigned long __bits[128/sizeof(long)]`. Handler registered at startup (`pal_stack_overflow_init`); per-thread alt stack set up at `sched_loop` entry (`pal_stack_overflow_thread_init`). In debug-allocator builds the handler first checks the thread-local `__promise_dbg_free_probe` guard: a fault raised while `pal_free` was reading a block's header means the block was already returned to the OS, so it reports "fatal: double free or invalid free (unmapped block)" and exits 134 instead — musl's mallocng unmaps a slot group as soon as it empties, which otherwise made a double free die silently on Linux while macOS and glibc reported it.
 
-**Standard library**: 40 `.pr` files in `modules/std/` compiled as a regular embedded catalog module and auto-imported into every file via `use std as _`. Catalog modules (`modules/io/`, `modules/path/`, `modules/math/`, `modules/strings/`, `modules/os/`, `modules/time/`, `modules/http/`, `modules/tls/`) are separate compilation units with their own `promise.toml`. Runtime is codegen-emitted LLVM IR (no C runtime). See `docs/standard-library.md` for the full module inventory, PAL extensions, and implementation phases.
+**Standard library**: the `.pr` files in `modules/std/` are compiled as a regular embedded catalog module and auto-imported into every file via `use std as _`. Catalog modules (`modules/io/`, `modules/json/`, `modules/path/`, `modules/math/`, `modules/strings/`, `modules/os/`, `modules/time/`, `modules/net/`, `modules/http/`, `modules/tls/`, `modules/gzip/`, `modules/crypto/`, `modules/encoding/`) are separate compilation units with their own `promise.toml`. Runtime is codegen-emitted LLVM IR (no C runtime). See `docs/standard-library.md` for the full module inventory, PAL extensions, and implementation phases.
 
 ## Test Patterns
 
@@ -280,7 +280,7 @@ Methods must be declared inside the type body (for types) or after variants (for
 
 ## Standard Library & Catalog Modules
 
-The standard library (`modules/std/`, 40 files) is auto-imported via `use std as _` into every file. Catalog modules (`modules/<name>/`) are separate compilation units imported explicitly with `use <name>;`.
+The standard library (`modules/std/`) is auto-imported via `use std as _` into every file. Catalog modules (`modules/<name>/`) are separate compilation units imported explicitly with `use <name>;`.
 
 **Standard library** (`modules/std/`):
 
@@ -290,15 +290,18 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]`/`T[]` (push/pop/remove/contains/slice/`filled`/`clone`/`format`/`to_string`), `Map[K,V]`/`map[K,V]` (open-addressing, rehash, `clone`/`format`/`to_string`), `Set[T]` (`clone`/`format`/`to_string`) |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Writer`/`Format` structural interfaces, `Builder` (string building, satisfies `Writer`), `Reader`/`Parse` structural interfaces, `Scanner`, `scan[T]()` |
-| I/O (std) | `io.pr` | `Reader`/`Writer`/`Closer` structural interfaces, `println`, `print_int`, `print_f64`, `print_bool` |
+| I/O (std) | `io.pr` | `Reader`/`Writer`/`Closer` structural interfaces, `print(Format)`, `print_line(Format)`, `stdin`/`stdout`/`stderr` getters |
 | Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]`, `_FnIter[T]`, `Generator[T]`, duck-typed for-in |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
 | Sorting | `sort.pr` | `sort(T[] move)` for `Ordered` types (consumes and returns) |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr`, `clone.pr` | `Equal`, `Ordered`, `Hashable`, `Cloneable` structural types |
-| Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `arc.pr` | `Channel[T]`/`channel[T]` send/close, `Task[T]`/`task[T]` handle, `Arc[T]` atomic ref-counted sharing, scheduler stats |
+| Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `ref.pr`, `mutex.pr` | `Channel[T]`/`channel[T]` send/close, `Task[T]`/`task[T]` handle, `Ref[T]`/`Weak[T]` reference-counted shared ownership, `Mutex[T]`/`MutexGuard[T]`, scheduler stats |
 | Time | `time.pr` | `Duration` (value type), `Instant`, `sleep()` |
 | Serialization | `encode.pr` | `Encoder`/`Decoder` (non-structural), `Encodable`/`Decodable` (structural), `DecodeError` |
 | Geometry | `geometry.pr` | `Point[T]`, `Size[T]`, `Rect[T]` generic value types for 2D coordinates, sizes, rectangles |
+| Unicode | `unicode.pr`, `unicode_ccc.pr`, `unicode_comp.pr`, `unicode_decomp.pr`, `unicode_qc.pr` | `normalize_nfc`, `normalize_nfd`, `is_nfc`, `is_nfd` over generated Unicode 16.0.0 tables (combining class, composition pairs, decomposition, quick-check ranges) |
+| Numerics | `ryu.pr`, `wide_int.pr` | Ryū shortest round-trip float→string formatting; `i128`/`u128`/`i256`/`u256`/`i512`/`u512` wide integers |
+| Embedding | `embed.pr` | `` `embed(path) `` compile-time file embedding — `EmbeddedFile`, `EmbeddedFiles` |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr`, `platform.pr` | `Range`/`..`/`..=`, FNV-1a hash, `assert()`, `error` base type, platform detection |
 
 **Catalog modules** (separate `promise.toml`, imported via `use <name>;`):
@@ -307,15 +310,17 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 |--------|------|---------------|
 | `io` | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, `read_line()`, `read_stdin()` |
 | `json` | `modules/json/json.pr` | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string[T]`, `decode_string[T]`, `encode_string_pretty[T]`, `JsonValue` enum (with `is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value` |
-| `path` | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
+| `path` | `modules/path/path.pr` | `join`, `parent`, `file_name`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize` |
 | `math` | `modules/math/math.pr` | Extended math functions |
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |
 | `os` | `modules/os/os.pr` | OS interaction, environment, one-shot `execute`, streaming `Process`/`ProcessInput`/`ProcessOutput`, OS info (user/group/hostname/pid), signal handling (`Signal` enum, `setup_signal_handling`, `receive_signal`) |
 | `time` | `modules/time/time.pr` | Wall-clock `DateTime`/`Date`/`Time` — Unix epoch, calendar components, `Duration` arithmetic, UTC offsets, ISO-8601 format/parse (native `promise_wallclock`, calendar math in Promise) |
 | `net` | `modules/net/net.pr` | TCP networking: `TcpListener` (bind/accept/close), `TcpStream` (connect/read/write/close/shutdown), `NetError`, reactor-based non-blocking I/O |
-| `tls` | `modules/tls/tls.pr` | TLS 1.2/1.3 over TCP: `TlsConfig` (verification, custom roots, client certs, minimum version), `TlsStream` (Reader+Writer), `TlsListener`, `TlsError`. Backends: OpenSSL on Linux, SChannel on Windows; other targets raise `TlsError(kind: unsupported)` |
 | `http` | `modules/http/http.pr` | HTTP/1.1 client + server (no TLS): `Request`/`Response`, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following, keep-alive connection pooling, gzip); `Server` with `Handler` — one goroutine per connection, keep-alive, bounded concurrency (`max_connections`/`max_keep_alive_requests`), draining graceful shutdown; `Handler.handle` takes a shared `this`, so handler state must be immutable or `Mutex`-guarded |
-| `tls` | `modules/tls/tls.pr` | TLS 1.2/1.3 over TCP (Linux only; other targets raise `unsupported`): `TlsConfig` (`create`/`insecure`, custom CA, client certificate, min version), `TlsStream` (satisfies `Reader`/`Writer`), `TlsListener` (bind/accept, `local_port`), `TlsError`/`TlsErrorKind`. Static OpenSSL via the vendored prebuilt (T1596) |
+| `tls` | `modules/tls/tls.pr` | TLS 1.2/1.3 over TCP: `TlsConfig` (`create`/`insecure`, custom CA, client certificate, min version), `TlsStream` (satisfies `Reader`/`Writer`), `TlsListener` (bind/accept, `local_port`), `TlsError`/`TlsErrorKind`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `TlsError(kind: unsupported)` |
+| `gzip` | `modules/gzip/` | RFC 1951 (DEFLATE) + RFC 1952 (gzip): `gzip_encode`, `gunzip!`, `gunzip_from!`, `deflate`, `inflate!`, `crc32`, `GzipWriter`, `GunzipReader`, `DecompressError` |
+| `crypto` | `modules/crypto/` | `sha256.pr` — `Sha256` streaming context, `Digest256`, one-shot `sha256()`; `constant_time.pr` — `constant_time_equal` |
+| `encoding` | `modules/encoding/` | Binary-to-text encodings (RFC 4648): `hex_encode`, `hex_decode!`, `EncodingError` |
 
 ## Test Suite
 
@@ -330,6 +335,8 @@ Tests are organized by category:
 | `tests/value_types/` | Pure value types: construction, copying, operators, methods, nested, optional |
 | `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters |
 | `tests/catalog/` | Catalog module integration tests |
+| `tests/embed/` | `` `embed `` annotation: string, bytes, glob directory trees, compressed embedding |
+| `tests/size/` | Binary-size canaries (minimal, strings, collections, concurrency, full) for the size gate |
 | `modules/*/` | Catalog module internal tests (`*_test.pr`) |
 | `examples/` | Runnable examples: basics, types, errors, ownership, collections, lambdas, concurrency, modules, patterns |
 
@@ -352,7 +359,7 @@ Tests are organized by category:
 - `compiler/internal/types/named.go` — Named type with fields, methods, generics, flags
 - `compiler/internal/formatter/formatter.go` — token-based source formatter (lexer + reformatter)
 - `compiler/cmd/promise/fmt.go` — `promise format` CLI wiring
-- `examples/` — 33 runnable examples (basics → concurrency → patterns), also verified as tests
+- `examples/` — runnable examples (basics → concurrency → patterns), also verified as tests
 - `docs/language-guide.md` — concise language reference
 
 ## Implementation Philosophy
@@ -378,7 +385,7 @@ Tests are organized by category:
   - **Snapshot tests** — `main()` tagged `` `test(expected: "...") ``. Each file compiles into its **own binary** and the stdout output is compared against the expected string. Use only when testing exact program output matters (e.g., print formatting, REPL-style verification).
     ```
     main() `test(expected: "hello world") {
-      println("hello world");
+      print_line("hello world");
     }
     ```
   The cost of running tests is dominated by how many binaries are compiled — test execution itself is practically instant. Batch tests minimize binary count.

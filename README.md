@@ -12,7 +12,7 @@ Promise is also a bet: that an AI agent, with limited human oversight, can build
 
 Humans own intent; agents own implementation. The agent is free over the *how*, bounded by two things the human owns: durable **intent** (the what and why) and a mechanical definition of **quality** (gates and ratcheting baselines). Together these form the specification the work must satisfy — and it is *fluid*, not fixed: when the spec proves contradictory, infeasible, or outdated, the agent escalates to renegotiate the bound rather than break it. Humans make the high-level design calls, captured in decision docs; agents implement against them.
 
-The compiler, standard library, and catalog are all agent-written — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. What keeps a codebase this large correct isn't the model being magic; it's the system around it: durable intent (design docs plus tracked work items), a mechanical quality floor (multi-class gates, a zero-memory-leak policy, and ratcheted baselines that only let metrics improve), an automated resolution loop, and an orchestrator that coordinates work across machines — autonomous by default, engaging the human only by deliberate escalation and keeping them off the critical path. **17,734 tests** (9,897 Promise, 7,837 compiler in Go, as of August 14, 2026) must pass before any commit, green across Linux, macOS, Windows, and WASM.
+The compiler, standard library, and catalog are all agent-written — a real parser, type checker, ownership analysis, and LLVM backend, built commit by commit, not a generated-once snippet. What keeps a codebase this large correct isn't the model being magic; it's the system around it: durable intent (design docs plus tracked work items), a mechanical quality floor (multi-class gates, a zero-memory-leak policy, and ratcheted baselines that only let metrics improve), an automated resolution loop, and an orchestrator that coordinates work across machines — autonomous by default, engaging the human only by deliberate escalation and keeping them off the critical path. **18,869 tests** (10,461 Promise, 8,408 compiler in Go, as of August 22, 2026) must pass before any commit, green across Linux, macOS, Windows, and WASM.
 
 Building the compiler this way shows agents can build something large and real. Whether they can build genuinely complex *solutions on* Promise is the open experiment — and that's what the [Zoo](https://github.com/promise-language/zoo) tracks: programs agents built in Promise, each with the prompt, the generated code, an honest writeup, and a terminal recording. It's early, and the programs are simple. But the real test of whether an AI-built platform is slop isn't the code in any one Zoo program — it's whether agents can use the platform to build software that actually runs. The recordings let you see that for yourself.
 
@@ -31,7 +31,7 @@ The full methodology is described in the [Bounded-Autonomy Software Engineering 
 
 **Self-contained toolchain.** The compiler is a single binary that bundles the standard library, catalog modules, and runtime. [Install it](docs/installing.md) — a small (~15MB) download that then sets up the LLVM 22 toolchain it builds with (a one-time fetch, cached under `~/.promise`) — then keep it current with `promise update`. Promise brings its own linker (`lld`), not the system one — nothing to install but Promise itself.* (* macOS also needs the Xcode Command Line Tools for now; a bundled SDK stub is on the way.) Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
-**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `http`, `gzip`, `encoding`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `toml`, `yaml`.
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `tls`, `path`, `math`, `strings`, `time`, `http`, `gzip`, `crypto`, `encoding`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `toml`, `yaml`.
 
 ## Example
 
@@ -166,13 +166,15 @@ promise/
 │   ├── json/                    # JSON encode/decode
 │   ├── os/                      # OS interaction, processes, signals
 │   ├── net/                     # TCP networking
+│   ├── tls/                     # TLS 1.2/1.3 transport
 │   ├── path/                    # Path manipulation
 │   ├── math/                    # Extended math
 │   ├── strings/                 # Extended string utilities
 │   ├── time/                    # Date/time, calendar, ISO-8601
-│   ├── http/                    # HTTP client
+│   ├── http/                    # HTTP/1.1 client and server
 │   ├── gzip/                    # gzip/DEFLATE compression
-│   ├── encoding/                # Binary-to-text encodings (hex, base64)
+│   ├── crypto/                  # SHA-256, constant-time compare
+│   ├── encoding/                # Binary-to-text encodings (hex; base64 planned)
 │   └── (ai, auth, cloud, markdown, mcp, msgpack, sandbox, schema, term, toml, yaml — planned, design only)
 ├── tests/                       # Integration and e2e tests
 ├── examples/                    # Runnable examples

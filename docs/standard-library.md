@@ -22,7 +22,7 @@ Promise's standard library design: module inventory, implementation phases, PAL 
 
 ## 1. Current State
 
-The stdlib today (29 files, ~2,440 lines) provides:
+The stdlib today provides:
 
 | Category | Files | What it covers |
 |----------|-------|---------------|
@@ -32,31 +32,38 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Format` structural interface, `Builder` (string building, satisfies `Writer`), `Parse` structural interface, `Scanner` (string parsing, satisfies `Reader`), `scan[T]()` |
 | I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `print(Format)`, `print_line(Format)`, `stdin` (Reader) / `stdout` / `stderr` (Writer) standard-stream getters |
 | I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()` |
-| Path (module) | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
+| Path (module) | `modules/path/path.pr` | `join`, `parent`, `file_name`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize` |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG (xoshiro256**) |
 | Sorting | `sort.pr` | `sort(T[] move)` for `Ordered` types (consumes and returns; iterative quicksort) |
-| Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
+| Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr`, `clone.pr` | `Equal`, `Ordered`, `Hashable`, `Cloneable` structural types |
 | Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]` structural interface, `_FnIter[T]` closure-based iterator, `Generator[T]` coroutine-based iterator, duck-typed for-in |
-| Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `ref.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, `Ref[T]` / `Weak[T]` reference-counted shared ownership, scheduler stats |
+| Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `ref.pr`, `mutex.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, `Ref[T]` / `Weak[T]` reference-counted shared ownership, `Mutex[T]` / `MutexGuard[T]`, scheduler stats |
 | Time | `time.pr` | `Duration` (value type, nanosecond precision), `Instant` (monotonic clock), `sleep()` |
 | Platform | `platform.pr` | `Platform` type with `line_separator`, `path_separator`, `is_path_separator()` — compile-time `` `target `` filtering for Windows/POSIX |
 | Serialization | `encode.pr` | `Encoder`/`Decoder` (non-structural), `Encodable`/`Decodable` (structural), `DecodeError` |
+| Geometry | `geometry.pr` | `Point[T]`, `Size[T]`, `Rect[T]` — generic pure value types for 2D coordinates, sizes, rectangles |
+| Unicode | `unicode.pr`, `unicode_ccc.pr`, `unicode_comp.pr`, `unicode_decomp.pr`, `unicode_qc.pr` | `normalize_nfc`, `normalize_nfd`, `is_nfc`, `is_nfd`; generated Unicode 16.0.0 tables (combining class, composition pairs, canonical decomposition, quick-check ranges) |
+| Numerics | `ryu.pr`, `wide_int.pr` | Ryū shortest round-trip float→string formatting; `i128`/`u128`, `i256`/`u256`, `i512`/`u512` wide integers |
+| Embedding | `embed.pr` | `` `embed(path) `` compile-time file embedding — `EmbeddedFile`, `EmbeddedFiles` |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)`, `error` base type |
 
 **Catalog modules** (separate `promise.toml`, imported via `use <name>;`):
 
 | Module | File | Lines | Status |
 |--------|------|-------|--------|
-| `io` | `modules/io/io.pr` | 501 | **Done** — `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()`. 69 tests. |
-| `path` | `modules/path/path.pr` | 192 | **Done** — `join`, `file_name`, `parent`, `extension`, `is_absolute`, `normalize`. 13 tests. |
-| `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
-| `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
-| `json` | `modules/json/json.pr` | ~900 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 157 tests. |
-| `os` | `modules/os/os.pr` | 4 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal |
-| `time` | `modules/time/time.pr` | ~370 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 25 tests. |
-| `http` | `modules/http/http.pr` | ~950 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
-| `tls` | `modules/tls/tls.pr` | 403 | **Done** (client + server) — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. |
+| `io` | `modules/io/io.pr` | 548 | **Done** — `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()`. 88 tests. |
+| `path` | `modules/path/path.pr` | 192 | **Done** — `join`, `file_name`, `parent`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize`. 9 tests. |
+| `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 15 tests. |
+| `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 8 tests. |
+| `json` | `modules/json/json.pr` | 1003 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 164 tests. |
+| `os` | `modules/os/os.pr` | 511 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 147 tests. |
+| `net` | `modules/net/net.pr` | 281 | **Done** — `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `NetError`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. 21 tests. |
+| `time` | `modules/time/time.pr` | 392 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 53 tests. |
+| `http` | `modules/http/http.pr` | 1414 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
+| `tls` | `modules/tls/tls.pr` | 421 | **Done** (client + server) — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 16 tests. |
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | **Done** (hex) — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
+| `gzip` | `modules/gzip/` | 956 | **Done** — RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
+| `crypto` | `modules/crypto/` | 239 | **Done** (SHA-256) — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`. HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) remain to be built. 26 tests. |
 
 **What's missing**: https — wiring `tls` into the HTTP client/server (T0079). Networking (TCP), the TLS transport (Linux + macOS + Windows), and HTTP client/server are done. OS access (args, env, cwd, execute, set env, set cwd, streaming process, env listing, user/group info, hostname, pid, signal handling) is done.
 ### Naming Conventions
@@ -1069,14 +1076,33 @@ Response r = client.get("http://host/path")?;   // also post!, send!, close
 
 - **Dependencies**: `modules/net/net.pr`, `modules/json/json.pr`, `modules/gzip/gzip.pr`
 
-#### 5e. `modules/crypto/crypto.pr` — Cryptographic Hashing
+#### 5e. `modules/crypto/` — Cryptographic Primitives — DONE
+
+Shipped as two files: `sha256.pr` and `constant_time.pr`.
 
 ```promise
-sha256(u8[] data) u8[];
-sha256_hex(u8[] data) string;
+type Digest256 `doc("A SHA-256 digest: 32 bytes as a big-endian u256, H0 in the most significant 32 bits.") {
+    u256 value `value;
+
+    to_string(this) string  `doc("Canonical lowercase 64-character hex, zero-padded.");
+    to_bytes(this) u8[]     `doc("The 32-byte big-endian byte string.");
+    ^ (Digest256 other) Digest256 `doc("Bitwise XOR (PBKDF2's U1 ^ U2 ^ ... fold).");
+    == (Digest256 other) bool;
+    get hash int;
+}
+
+type Sha256 `doc("Streaming SHA-256 context: update() repeatedly, then finalize() once.") {
+    new(~this);
+    update(~this, u8[] data);
+    finalize(~this) Digest256;
+}
+
+sha256(u8[] data) Digest256 `doc("One-shot digest; prefer this when the whole input is in hand.");
+constant_time_equal(u8[] a, u8[] b) bool `doc("Data-independent comparison for MACs, signatures, and secret tokens.");
 ```
 
-- **Implementation**: Pure Promise (SHA-256 is ~100 lines of bit manipulation)
+- **Implementation**: Pure Promise, built on the `u256` wide integer in `modules/std/wide_int.pr`.
+- **Remaining**: HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) are not yet built.
 
 #### 5f. `modules/std/embed.pr` — Resource Embedding Types
 
@@ -1275,31 +1301,31 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | Phase | File | Type | New PAL | Lines | Status |
 |-------|------|------|---------|-------|--------|
 | 0a | `modules/std/error.pr` | Promise | No | 3 | **DONE** |
-| 0b | `modules/std/iter.pr` | Promise | No | 254 | **DONE** |
-| 0c | `modules/std/int.pr` etc. | Native | No | ~930 | **DONE** |
-| 0d | `modules/std/format.pr` | Promise | No | 129 | **DONE** |
+| 0b | `modules/std/iter.pr` | Promise | No | 257 | **DONE** |
+| 0c | `modules/std/int.pr` etc. | Native | No | 909 | **DONE** |
+| 0d | `modules/std/format.pr` | Promise | No | 495 | **DONE** |
 | 0e | `modules/std/parse.pr` | Promise | No | 43 | **DONE** |
-| 1a | `modules/std/set.pr` | Promise | No | 73 | **DONE** |
-| 1b | `modules/std/sort.pr` | Promise | No | 92 | **DONE** |
-| 1c | `modules/std/string.pr` + `modules/strings/` | Promise | No | 191+65 | **DONE** |
+| 1a | `modules/std/set.pr` | Promise | No | 107 | **DONE** |
+| 1b | `modules/std/sort.pr` | Promise | No | 91 | **DONE** |
+| 1c | `modules/std/string.pr` + `modules/strings/` | Promise | No | 199+65 | **DONE** |
 | 1d | `modules/std/result.pr` | ~~Promise~~ | No | — | DEFERRED |
 | 2a | (merged into 0c) | — | — | — | **DONE** |
 | 2b | `modules/std/builder.pr` | Promise | No | 38 | **DONE** |
 | 2c | `modules/std/fmt.pr` | ~~Promise~~ | No | — | DEFERRED |
 | 3a | `modules/std/math.pr` + `modules/math/` | Native + Promise | No | 111+67 | **DONE** |
-| 3b | `modules/std/random.pr` | Promise | No | 107 | **DONE** |
+| 3b | `modules/std/random.pr` | Promise | No | 165 | **DONE** |
 | 3c | `modules/std/time.pr` | Promise + Native | 3 | 96 | **DONE** |
-| 4a | `modules/std/io.pr` | Promise | No | 59 | **DONE** |
-| 4b | `modules/io/io.pr` | Promise + Native | 12 | 501 | **DONE** |
+| 4a | `modules/std/io.pr` | Promise | No | 97 | **DONE** |
+| 4b | `modules/io/io.pr` | Promise + Native | 12 | 548 | **DONE** |
 | 4c | `modules/path/path.pr` | Promise | No | 192 | **DONE** |
-| 4d | `modules/os/os.pr` | Promise + Native | 13 | 449 | **DONE** |
+| 4d | `modules/os/os.pr` | Promise + Native | 13 | 511 | **DONE** |
 | 4e | (merged into 4b) | — | — | — | **DONE** |
 | — | `modules/std/platform.pr` | Promise | No | 33 | **DONE** |
-| 5a | `modules/json/json.pr` | Promise | No | ~300 | Future |
+| 5a | `modules/json/json.pr` | Promise | No | 1,003 | **DONE** |
 | 5b | `modules/regex/regex.pr` | Promise | No | ~400 | Future |
-| 5c | `modules/net/net.pr` | Promise + Native | 6+ | ~150 | Future |
-| 5d | `modules/http/http.pr` | Promise | No | ~950 | Done (client+server, no TLS) |
-| 5e | `modules/crypto/crypto.pr` | Promise | No | ~150 | Future |
-| 5f | `modules/std/embed.pr` | Promise | No | ~50 | Future (T0012) |
-| | **Phases 0-4 (actual)** | | **12** | **~3,055** | **19/20 done** |
-| | **Total (all phases)** | | **18+** | **~4,305** | |
+| 5c | `modules/net/net.pr` | Promise + Native | 6+ | 281 | **DONE** |
+| 5d | `modules/http/http.pr` | Promise | No | 1,414 | **DONE** (client+server, no TLS) |
+| 5e | `modules/crypto/` | Promise | No | 239 | **DONE** (SHA-256; HMAC/PBKDF2/CSPRNG remain — T1567/T1568/T1571) |
+| 5f | `modules/std/embed.pr` | Promise | No | 54 | **DONE** |
+| | **Phases 0-4 (actual)** | | **28** | **4,027** | **18/20 done** (`result`, `fmt` deferred) |
+| | **Total (implemented)** | | **34+** | **7,018** | **Phase 5: 5/6 done** (`regex` remains) |

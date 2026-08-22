@@ -84,9 +84,11 @@ The AI platform depends on two catalog modules that must be implemented first:
 - **`modules/json`** — already implemented. Used by tool argument serialization
   (`json.decode_string[T]`, `json.encode_string`), session persistence, and MCP
   protocol messages.
-- **`modules/http`** — currently a placeholder in `catalog.toml`. Used by community
-  provider modules and MCP SSE/HTTP transports. Must be completed before any concrete
-  provider can be implemented.
+- **`modules/http`** — implemented (HTTP/1.1 client and server, 109 tests). Used by
+  community provider modules and MCP SSE/HTTP transports. Two gaps remain before a
+  concrete provider can talk to a real vendor endpoint: https (wiring `modules/tls`
+  into the client, T0079) and streaming response bodies for SSE — the client currently
+  reads a fully framed body rather than yielding chunks as they arrive.
 
 The standard library already provides what the platform needs at the language level:
 the `Encoder`/`Decoder` interfaces (`modules/std/encode.pr`), the `` `serializable ``
@@ -1927,8 +1929,9 @@ test_agent_responds() `test {
 
 1. **`modules/json`**: already implemented — `json.encode_string[T]()`,
    `json.decode_string[T]()`.
-2. **`modules/http`**: currently a placeholder in `catalog.toml` — must be filled in
-   (HTTP client with `get`, `post`, SSE streaming support; uses `modules/net`).
+2. **`modules/http`**: implemented — `http_get`, `http_post`, `http_post_json`, and a
+   pooling/redirect-following `Client`, over `modules/net`. Still needed here: https
+   (T0079) and incremental body streaming for SSE.
 3. **`modules/schema` and shared compiler hooks** — see `docs/schema.md` for the full
    plan. The AI platform depends on:
    - The `Type` tagged enum and helper structs.

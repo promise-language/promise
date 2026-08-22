@@ -197,9 +197,9 @@ Concrete inventory across std and modules:
 | `sleep(Duration)` | WASM no-op vs `nanosleep` | Go codegen `if c.isWasm` |
 | `File` type | `!wasm` only (no filesystem on WASM) | `modules/io/io.pr` — 4 factory constructors, handle methods, one-shot helpers |
 | `read_line/read_stdin` | `!wasm` only | `modules/io/io.pr` — free functions, `read_line` returns `string?!` (optional+failable) |
-| `exec(...)` | `!wasm` only (no subprocess on WASM) | (not yet implemented) |
+| `execute(...)`, `Process` | `!wasm` only (no subprocess on WASM) | `modules/os/os.pr` — one-shot `execute`, streaming `Process`/`ProcessInput`/`ProcessOutput` |
 | `args` (getter) | different impl on WASM | `modules/os/os.pr` — returns `string[]` from argc/argv globals |
-| `get_env(string)` | `!wasm` (WASM env access varies) | (not yet implemented) |
+| `get_env_var(string)`, `env` | `!wasm` (WASM env access varies) | `modules/os/os.pr` — `get_env_var(string) string?`, `env` getter |
 
 That's ~18 `\`target` annotation uses across std+modules. This replaces an equal number of
 Go codegen special cases with Promise source that is visible, readable, and owned by the module
@@ -211,7 +211,7 @@ author rather than the compiler internals.
 on Windows calls `CreateFile`. Both exist at runtime, just with different implementations.
 PAL handles this in Go codegen — the generated IR is different but the function exists on both.
 
-**`\`target`** = the function should not exist at all on some targets. `exec()` is not a
+**`\`target`** = the function should not exist at all on some targets. `os.execute()` is not a
 "different implementation on WASM" — it is absent. `File.open` is not "calls a different
 syscall on WASM" — there is no filesystem. `\`target(!wasm)` on `File` means WASM programs
 that import `modules/io` and try to use `File` get a sema error at compile time, not a runtime
@@ -402,7 +402,7 @@ Failable getters like `working_dir` use `!` unwrap at the call site (`os.working
 
 ## 7. `modules/io` — File I/O and Standard Input
 
-**Status**: Placeholder file (`io.pr` with comment only). Implement from scratch.
+**Status**: Implemented. `modules/io/io.pr` ships `File`, `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, and the `read_line()`/`read_stdin()` free functions.
 
 ### I/O Architecture: Reactor + Async/Sync Backends
 
@@ -547,10 +547,10 @@ not files — conflating them adds noise to `File` and misleads readers about wh
 type Dir `public `doc("Directory operations. All methods are global — no Dir instances needed.") {
 
     `doc("Creates a directory. Parent must exist.")
-    mkdir!(string path) `global `public;
+    make!(string path) `global `public;
 
     `doc("Creates a directory and all missing parent directories.")
-    mkdir_all!(string path) `global `public;
+    make_all!(string path) `global `public;
 
     `doc("Returns the names (not full paths) of entries in a directory.")
     list!(string path) string[] `global `public;
@@ -568,7 +568,7 @@ Usage:
 ```promise
 use io;
 
-Dir.mkdir_all!("/tmp/myapp/cache");
+Dir.make_all!("/tmp/myapp/cache");
 string[] entries = Dir.list!("/tmp/myapp");
 if Dir.exists("output/") {
     Dir.remove!("output/old");
@@ -764,19 +764,32 @@ set_working_dir(string path) ! `public
     `doc("Changes the current working directory to the given path.
           Raises an error if the path does not exist or is not a directory.");
 
-// --- Planned: signal handling ---
+// --- Signal handling (implemented) ---
 
-type Signal `public `doc("An OS signal (SIGINT, SIGTERM, etc.).") {
-    int number;
+enum Signal `public `doc("A POSIX signal type. Use with setup_signal_handling() and receive_signal() to handle signals.") {
+    Interrupt `doc("SIGINT (2) — sent by Ctrl+C."),
+    Terminate `doc("SIGTERM (15) — default signal sent by kill command."),
+    Hangup `doc("SIGHUP (1) — sent when the terminal is closed."),
 }
 
-on_signal(Signal signal, () handler) `public
-    `doc("Registers a handler to be called when the given signal is received.
-          Replaces any previously registered handler for that signal.");
+setup_signal_handling!(...Signal signals) `public
+    `doc("Sets up signal handling for the given signals. Creates an internal pipe and
+          registers signal handlers on first call. Subsequent calls register additional
+          signals. After calling this, use receive_signal() to block until a signal arrives.");
 
-// --- Future: streaming subprocess (modules/process) ---
-// Streaming subprocess I/O (piped stdin/stdout/stderr) is a separate concern.
-// Will live in modules/process, not modules/os. See Q4 below.
+receive_signal!() Signal `public
+    `doc("Blocks until a registered signal arrives. Returns the Signal that was received.
+          Raises if the signal pipe read fails or the signal number is unrecognized.");
+
+// Signals are delivered over a self-pipe and consumed by an ordinary blocking read, so
+// there is no async-signal-unsafe callback: the receiving goroutine parks like any other
+// reader. This is why the surface is a blocking receive rather than a registered handler.
+
+// --- Streaming subprocess (implemented, in modules/os) ---
+// Q4 below asked whether piped stdin/stdout/stderr belonged in a separate
+// modules/process. It did not: Process / ProcessInput / ProcessOutput
+// (spawn/wait/kill) live here next to the one-shot execute, because they share
+// the same PAL fork/exec bridge.
 ```
 
 **Implementation notes**:
@@ -863,18 +876,20 @@ The PAL function for wall clock time (`pal_wall_clock` / `CLOCK_REALTIME`) belon
 
 ## 10. Future Platform Modules
 
-These are placeholders in the catalog for future design:
+One platform-facing module from the original list is still unbuilt, and unlike the planned
+entries in `catalog.toml` (`toml`, `yaml`, `mcp`, …) it has no catalog name reserved yet:
 
 | Module | Content | Key dependency |
 |---|---|---|
-| `modules/net` | TCP/UDP sockets, HTTP client | async I/O PAL, event loop |
-| `modules/http` | HTTP server, routing, middleware | `modules/net`, `modules/io` |
-| `modules/process` | Child process streams, pipes | PAL fork/exec with pipe capture |
 | `modules/fs` | Advanced filesystem: symlinks, watch, temp files | PAL extensions |
-| `modules/crypto` | Hashing, HMAC, random bytes | LLVM intrinsics + PAL getrandom |
-| `modules/json` | JSON parse/serialize | `modules/io`, `modules/std/error.pr` |
 
-None of these belong in `std/`. They are progressively heavier and progressively less universal.
+`modules/net`, `modules/http`, `modules/json`, and `modules/crypto` were on this list and have
+since shipped — see `docs/standard-library.md` §1 for their surfaces. `modules/process` was never
+created: streaming child-process I/O landed inside `modules/os` as `Process`/`ProcessInput`/
+`ProcessOutput`, next to the one-shot `execute`, because it shares the same PAL fork/exec bridge.
+
+None of this belongs in `std/` — catalog modules are progressively heavier and progressively
+less universal, which is exactly why they are imported explicitly rather than auto-imported.
 
 ---
 
@@ -893,15 +908,21 @@ modules/
     vector.pr     — Vector[T]
     map.pr        — Map[K,V]
     iter.pr       — Iterator[T], combinators
-    ... (28 files total)
+    ...
 
   path/           — join, file_name, parent, extension, stem, split, normalize  (DONE)
   math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
   strings/        — join, spaces, reverse, ...                        (DONE)
   io/             — File, Dir, IoError, read_line, read_stdin          (DONE)
-  os/             — args, get_env, get_cwd, exit, execute, OsError     (DONE)
-  time/           — DateTime, unix_now, format/parse calendar ops     (DONE)
-  http/           — HTTP server/client                                 (PLACEHOLDER)
+  os/             — args, get_env_var, working_dir, execute, Process   (DONE)
+  time/           — DateTime, Date, Time; now, from_unix_*, parse       (DONE)
+  json/           — JsonEncoder, JsonDecoder, JsonValue                (DONE)
+  net/            — TcpListener, TcpStream, NetError                   (DONE)
+  http/           — HTTP/1.1 client and server                         (DONE)
+  tls/            — TlsConfig, TlsStream, TlsListener, TlsError        (DONE)
+  gzip/           — gzip_encode, gunzip, deflate, inflate, crc32       (DONE)
+  crypto/         — Sha256, Digest256, constant_time_equal             (DONE)
+  encoding/       — hex_encode, hex_decode, EncodingError              (DONE)
 ```
 
 **The invariant**: the `std` module is auto-imported everywhere (convenience), but compiled and
@@ -931,10 +952,12 @@ Go: `os.Args[0]` is the program name. Rust: `std::env::args().next()` is the pro
 **Decision**: exclude it — `args()` returns `argv[1..]`. Use `executable_path()` for `argv[0]`.
 
 **Q4: `execute` API — blocking only for now?**
-The current `ProcessResult` design is synchronous (blocks until the subprocess exits, captures all
-output in memory). Streaming subprocess I/O (piped stdin/stdout) is a separate concern for
-`modules/process`. **Lean**: `modules/os` provides the blocking convenience API only; streaming
-APIs come later in `modules/process`.
+The `ProcessResult` design is synchronous (blocks until the subprocess exits, captures all output in
+memory). The open question was whether streaming subprocess I/O (piped stdin/stdout/stderr) should
+become a separate `modules/process`.
+**Resolved**: no separate module. `modules/os` ships both — the blocking convenience `execute` and
+streaming `Process` / `ProcessInput` / `ProcessOutput` (spawn/wait/kill) — because they share the
+same PAL fork/exec bridge and splitting them would have duplicated it.
 
 **Q5: `read_line()` — strip trailing `\r\n` or just `\n`?**
 **Lean**: strip both `\n` and `\r\n` — returns the line content without any line terminator.
@@ -996,12 +1019,13 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 ### Phase D — file I/O (biggest phase — needs PAL + reactor)
 
-12. **Reactor infrastructure** — global reactor in `codegen/reactor.go`: epoll (Linux), kqueue (macOS)
-    integration with sysmon (`reactor_poll(0)`) and idle Ms (`reactor_poll(block)`)
+12. ~~**Reactor infrastructure**~~ — **Done.** Global reactor in `codegen/netpoll.go` (T0070): epoll (Linux),
+    kqueue (macOS), WSAPoll (Windows), integrated with sysmon (`reactor_poll(0)`) and idle Ms
+    (`reactor_poll(block)`). `net`, `http`, and `tls` all park on it.
 13. ~~**PAL file functions**~~ — **Done.** 15 PAL functions in `codegen/pal/` (open, read, write, close, seek, stat_size, remove, exists, mkdir, dir_remove, dir_exists, errno, dir_open, dir_next_name, dir_close) across POSIX/Windows/WASM.
 14. ~~**`modules/io`**~~ — **Done.** `IoError`, `File` (4 factory constructors + handle methods + one-shot helpers),
     `Dir` (make/make_all/list/remove/exists), `read_line`, `read_stdin`. 54 tests covering edge cases.
-15. **BufReader** — deferred until real usage drives it
+15. ~~**BufReader**~~ — **Done.** Shipped as `BufferedReader` / `BufferedWriter` in `modules/io/io.pr`.
 
 ### Phase E — OS and process
 
@@ -1036,8 +1060,14 @@ First real use of `` `target `` in production code. Platform constants consolida
     int exit_code = _os_wait_pid!(pid);
     ```
     Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
-20. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
-21. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
+20. ~~**Signal handling**~~ — **Done**, but not as the callback sketched here. The shipped surface is a
+    blocking receive: a `Signal` enum (`Interrupt`/`Terminate`/`Hangup`), `setup_signal_handling!(...Signal)`,
+    and `receive_signal!() Signal`. Signals arrive over a self-pipe and are consumed by an ordinary
+    blocking read, so the receiving goroutine parks like any other reader and no handler ever runs in
+    async-signal context. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
+21. ~~**Streaming subprocess**~~ — **Done**, inside `modules/os` rather than a separate `modules/process`:
+    `Process` / `ProcessInput` / `ProcessOutput` (spawn/wait/kill with piped stdin/stdout/stderr), next to
+    the one-shot `execute`, because they share the same PAL fork/exec bridge.
 
 ### Phase F — calendar time
 

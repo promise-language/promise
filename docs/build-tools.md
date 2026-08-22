@@ -23,6 +23,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | `bin/vet` | Run `go vet` on compiler packages (excluding generated parser). |
 | `bin/coverage` | Test coverage analysis for Go packages and Promise tests. |
 | `bin/stress` | Stress testing for flaky test detection. |
+| `bin/precommit` | The `pre-commit` git hook body: identity, staged-file, baseline-ratchet, formatting, and documentation checks. |
 | `bin/setup` | One-time dev setup (git hooks). |
 | `bin/prereqs` | Install build prerequisites (LLVM, Go, Java, wasmtime). |
 
@@ -175,6 +176,23 @@ The verify tool orchestrates the full pre-commit check:
 ### Global lock
 
 Concurrent verify runs from different worktrees are serialized via a file lock (`~/.promise/verify.lock`), preventing resource contention.
+
+## Pre-Commit Hook (`bin/precommit`)
+
+`.githooks/pre-commit` runs `bin/precommit`, which is `common.RunPreCommit`. Every
+check here is cheap enough to run on each commit — the expensive suites live in
+`bin/verify` and the gates. In order:
+
+1. **Commit identity** — author and committer emails must be `@users.noreply.github.com`, so a personal address never reaches public history. Read via `git var`, so it matches what the commit would actually record (honoring `--author`, the `GIT_*_EMAIL` env vars, and `user.email` alike).
+2. **Documentation** (`common.CheckDocs`, T1675) — three mechanical checks. All look at the whole tree rather than at the staged set, and all run before the staged-file scan so an `--allow-empty` commit cannot slip past them:
+   - **Dangling links.** Every relative Markdown link to a `.md` file, across all git-tracked `.md` files, must resolve to a file that exists. The file set comes from `git ls-files`, which is what keeps build output and the generated-but-untracked `compiler/cmd/promise/resources/` tree out of scope with no ignore list to maintain. Only link *targets* are validated — anchors are stripped, never checked, which is what holds the false-positive rate at zero.
+   - **Index coverage.** Every tracked `docs/*.md` must be linked from [index.md](index.md) — a doc the index never names is effectively unpublished. Link targets are resolved relative to `docs/`, so `../CONTRIBUTING.md` cannot stand in for `docs/CONTRIBUTING.md`. Scope is the top level of `docs/` only: `docs/archive/` is superseded material that is intentionally unindexed.
+   - **Catalog coverage.** Every directory under `modules/` needs a `[modules.<name>]` entry in `catalog.toml` (entries with a `url` key are remote and exempt from needing a directory), and every catalog module that actually ships source — a non-`_test.pr` file with at least one non-comment line — must be named as `modules/<name>/` in both `CLAUDE.md` and `docs/standard-library.md`.
+
+   These verify link targets, index reachability, and module-name *presence* only, never prose accuracy. `README.md` is deliberately out of scope for catalog coverage: its module list lives in an ASCII box-drawing tree using bare directory names, and a matcher robust enough to read that would produce false positives. README stays human-reviewed.
+3. **Staged files** — rejects compiled binaries (`bin/promise`, …), stray `.log` files, and non-ASCII filenames. A commit with nothing staged stops here; the remaining checks have nothing to look at.
+4. **Baseline ratchet** — when `tools/gates/baselines.json` is staged, compares it against `HEAD` and rejects any metric that moved the wrong way.
+5. **Formatting** — rejects the commit if `bin/format` would change anything. Go is checked in-process via `go/format`; Promise by shelling out to `bin/promise format -check`.
 
 ## Staleness Check
 

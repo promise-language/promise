@@ -58,8 +58,8 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](../windows-support.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](../language-design.md#structural-interface-satisfaction) |
-| Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](../documentation-proposal.md) |
-| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Planned (T0012) | [language-design.md](../language-design.md#86-resource-embedding-embed) |
+| Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [platform-documentation.md](../platform-documentation.md) |
+| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Done (T0012) — `modules/std/embed.pr`, `tests/embed/` | [language-design.md](../language-design.md#86-resource-embedding-embed) |
 
 ---
 

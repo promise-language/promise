@@ -99,6 +99,16 @@ Edit and commit gates run locally (fast, synchronous). Periodic and platform gat
 
 **Mechanism:** `bin/verify` writes a flat `gate-values.json` sidecar to `.promise-home/`. The commit gate (`tools/build/common/commitgate.go`) reads gate values directly by name and compares against baselines. No translation layer -- metric names in gate values match metric names in baselines.
 
+### Non-ratchet commit checks
+
+Not every commit-time check is a ratcheted metric. The pre-commit hook (`tools/build/common/precommit.go`, documented in [build-tools.md](build-tools.md#pre-commit-hook-binprecommit)) also enforces pass/fail invariants that have no baseline to move: commit identity, staged-file rules, formatting, and three **documentation checks** (`common.CheckDocs`, T1675):
+
+- **Dangling Markdown links** -- every relative `.md` link target across all git-tracked Markdown must exist on disk. Scoped by `git ls-files`, so generated and untracked trees are skipped without an ignore list.
+- **Index coverage** -- every tracked `docs/*.md` is linked from `docs/index.md`. Top level only; `docs/archive/` is intentionally unindexed.
+- **Catalog coverage** -- every `modules/` directory has a `catalog.toml` entry, and every catalog module that ships real source is named in both `CLAUDE.md` and `docs/standard-library.md`.
+
+**What these do not cover:** they verify link *targets*, index reachability, and module-name *presence* -- nothing about whether the surrounding prose is true. The failure mode that motivated them (T1675) was docs listing API names that do not exist and modules described as "planned" long after they shipped; that class of drift is not mechanically detectable and still needs a human sweep. The numeric facts that *are* derivable but still hand-maintained -- the per-module line and test counts in `docs/standard-library.md`, and the test-count snapshot in `README.md` -- are tracked separately as T1682. `README.md` is deliberately excluded from catalog coverage -- its module list is an ASCII repo tree of bare directory names, where a matcher robust enough to parse it would generate false positives.
+
 ### Gate Values
 
 After a successful `bin/verify`, a sidecar file `.promise-home/gate-values.json` is written:

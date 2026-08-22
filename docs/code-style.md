@@ -57,9 +57,9 @@ Callers read naturally:
 
 ```promise
 Response r = http_get(url)?^;
-println(r.status.to_string());
+print_line(r.status.to_string());
 for k, v in r.headers { ... }
-println(r.body);
+print_line(r.body);
 ```
 
 ### When the field is already public

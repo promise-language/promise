@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -737,5 +738,70 @@ func TestValidateBaselinesDiff_StagedValueNilTreatedAsZero(t *testing.T) {
 	err := validateBaselinesDiff(root)
 	if err == nil {
 		t.Fatal("expected regression (nil staged value treated as 0 < 100), got nil")
+	}
+}
+
+// TestRunPreCommit_RejectsDanglingMarkdownLink proves CheckDocs is actually
+// wired into the hook. The doc checks are only worth anything if a bad commit
+// is stopped at commit time — that is the whole point of mechanizing the T1675
+// sweep instead of relying on the next manual pass.
+func TestRunPreCommit_RejectsDanglingMarkdownLink(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "docs/guide.md")
+	os.WriteFile(filepath.Join(root, "docs", "guide.md"),
+		[]byte("see [tags](tracker-tags.md)\n"), 0o644)
+	err := RunPreCommit(root)
+	if err == nil {
+		t.Fatal("expected the hook to reject a dangling markdown link")
+	}
+	if !strings.Contains(err.Error(), "tracker-tags.md") {
+		t.Fatalf("hook error should name the dangling target, got: %v", err)
+	}
+}
+
+// TestRunPreCommit_AllowsCoherentDocs is the companion: a doc tree that
+// satisfies the checks must pass through the hook untouched, so the gate
+// cannot be "always red" and get disabled.
+func TestRunPreCommit_AllowsCoherentDocs(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "docs/index.md")
+	os.WriteFile(filepath.Join(root, "docs", "index.md"),
+		[]byte("- [guide](guide.md)\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "docs", "guide.md"), []byte("# Guide\n"), 0o644)
+	cmd := exec.Command("git", "add", "docs/guide.md")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("a coherent doc tree must pass the hook, got: %v", err)
+	}
+}
+
+// TestRunPreCommit_DocChecksRunBeforeStagedFileScan pins the ordering the
+// wiring depends on: the staged-file scan returns early when nothing is
+// staged, so a doc problem already committed to the tree would go unreported
+// if CheckDocs ran after it.
+func TestRunPreCommit_DocChecksRunBeforeStagedFileScan(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "docs/guide.md")
+	os.WriteFile(filepath.Join(root, "docs", "guide.md"),
+		[]byte("see [tags](tracker-tags.md)\n"), 0o644)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// Commit the bad doc so the staging area is empty but the tree still has
+	// the dangling link.
+	git("add", "docs/guide.md")
+	git("commit", "-m", "add doc")
+
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected the doc checks to run even with an empty staging area")
 	}
 }

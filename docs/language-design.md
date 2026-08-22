@@ -1795,7 +1795,7 @@ get(Ref[string] a) string& {
 // (3) For locals, declare with the borrow type to skip the decay:
 inspect(Ref[string] a) {
   string& s = a.borrow;     // OK — no decay, no implicit allocation.
-  println(s);
+  print_line(s);
 }
 ```
 

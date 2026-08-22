@@ -2196,3 +2196,49 @@ func TestT0482_NestedHandleBackstopNoPanic(t *testing.T) {
 	// nested-handle backstop path was exercised in codegen, not skipped).
 	assertContains(t, ir, "dup_holders[Holder]")
 }
+
+// T1634: an indirect (closure) call to a *failable* function type must type the
+// function pointer with the callee's result struct — `{ i1, T, i8* }` — not the
+// bare `T` from sig.Result(). The thunk copies the real function's RetType, so
+// building the pointer from sig.Result() alone made the two disagree: the call
+// was typed to return `i64` while the callee returned `{ i1, i64, i8* }`, and
+// unwrapping it (`?^`) panicked codegen with "types.Type is *types.IntType,
+// not *types.StructType".
+func TestT1634_FailableFunctionTypeIndirectCallResultShape(t *testing.T) {
+	ir := generateIR(t, `
+		boom!(int x) int { return x * 2; }
+		test_indirect!() {
+			!(int) -> int f = boom;
+			int r = f(3)?^;
+		}
+	`)
+	// The function pointer the indirect call is bitcast to must carry the
+	// failable result struct, with the env pointer as the first parameter.
+	assertContains(t, ir, "{ i1, i64, i8* } (i8*, i64)*")
+}
+
+// T1634: `!() -> void` — a failable function with nothing to return uses the
+// two-field result struct `{ i1, i8* }`.
+func TestT1634_FailableVoidFunctionTypeIndirectCallResultShape(t *testing.T) {
+	ir := generateIR(t, `
+		vboom!() { }
+		test_indirect_void!() {
+			!() -> void v = vboom;
+			v()?^;
+		}
+	`)
+	assertContains(t, ir, "{ i1, i8* } (i8*)*")
+}
+
+// T1634: a non-failable function type is unaffected — its indirect call still
+// returns the bare result type.
+func TestT1634_NonFailableFunctionTypeIndirectCallResultShape(t *testing.T) {
+	ir := generateIR(t, `
+		test_plain() {
+			(int) -> int f = |int x| -> x * 2;
+			int r = f(3);
+		}
+	`)
+	assertContains(t, ir, "i64 (i8*, i64)*")
+	assertNotContains(t, ir, "{ i1, i64, i8* } (i8*, i64)*")
+}

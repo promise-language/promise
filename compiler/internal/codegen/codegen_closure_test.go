@@ -52,6 +52,45 @@ func TestLambdaVoid(t *testing.T) {
 	assertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i64 %x\)`)
 }
 
+// T1634: an expression-body lambda whose body expression is void-typed used to
+// feed the void call instruction to `ret`, emitting the invalid `ret void %0`
+// (which `opt` rejected with a parse error pointing at the *next* label).
+func TestLambdaVoidExprBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int y| -> print_line("{y}");
+			f(1);
+		}
+	`)
+	assertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i64 %y\)`)
+	assertContains(t, ir, "ret void")
+	// `ret void` takes no operand — any `ret void %…` is malformed IR.
+	assertNotContains(t, ir, "ret void %")
+}
+
+// T1634: the vector-literal symptom is the same lambda defect, not a vector bug.
+func TestLambdaVoidExprBodyInVectorLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [|int y| -> print_line("{y}")];
+		}
+	`)
+	assertNotContains(t, ir, "ret void %")
+}
+
+// T1634: the void body's temps (here the interpolated string) must still be
+// cleaned up on the return path — dropping the claim/cleanup would leak.
+func TestLambdaVoidExprBodyCleansTemps(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int y| -> print_line("v={y}");
+			f(1);
+		}
+	`)
+	assertNotContains(t, ir, "ret void %")
+	assertContains(t, ir, "@promise_string_drop")
+}
+
 func TestLambdaVariable(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -1308,4 +1347,86 @@ func TestLambdaBodyNoDropOnMoveCapture(t *testing.T) {
 		strings.Contains(body, "call void @_T554BO.drop$wrap(") {
 		t.Errorf("lambda body should not drop captured user type:\n%s", body)
 	}
+}
+
+// T1634: the write-back that stores move-captured locals back into the env
+// struct was only emitted on the lambda's fallthrough/block path. A void
+// expression body terminates with its own `ret`, so without the write-back a
+// `move |int y| -> c.bump(y)` silently discarded the mutation while the
+// equivalent block form kept it. The reload-and-store back into the env field
+// must precede the `ret void`.
+func TestLambdaVoidExprBodyWritesBackMoveCapture(t *testing.T) {
+	ir := generateIR(t, `
+		type C { int n `+"`"+`value; bump(~this, int y) { this.n = this.n + y; } }
+		call2((int) -> void f) { f(1); f(2); }
+		main() { c := C(n: 0); call2(move |int y| -> c.bump(y)); }
+	`)
+	fn := extractDefineMatch(t, ir, `@\.lambda\.\d+\(i8\* %env, i64 %y\)`)
+	assertContains(t, fn, "%c.cap")
+	// Reload the mutated local and store it back through the env field pointer.
+	assertContainsMatch(t, fn, `load %promise_C_v, %promise_C_v\* %c\.cap\n\tstore %promise_C_v %\d+, %promise_C_v\* %\d+`)
+	assertNotContains(t, fn, "ret void %")
+}
+
+// T1634: a void expression body that move-captures a *droppable* value must
+// still get an env drop function — the captured string is owned by the env and
+// freed when the closure dies, not by the lambda body.
+func TestLambdaVoidExprBodyMoveCapturedStringHasEnvDrop(t *testing.T) {
+	ir := generateIR(t, `
+		sink(string s) { }
+		call1((int) -> void f) { f(1); }
+		main() { s := "owned string"; call1(move |int y| -> sink(s)); }
+	`)
+	assertContainsMatch(t, ir, `define void @\.lambda\.\d+\.env_drop\(i8\* %env\)`)
+	envDrop := extractDefineMatch(t, ir, `@\.lambda\.\d+\.env_drop\(i8\* %env\)`)
+	assertContains(t, envDrop, "call void @promise_string_drop")
+	assertContains(t, envDrop, "call void @pal_free")
+	assertNotContains(t, ir, "ret void %")
+}
+
+// T1634: a void expression body whose expression is a *method* call on a
+// non-move (borrowed) capture terminates cleanly too — the void-return branch
+// must not depend on the capture being by-move.
+func TestLambdaVoidExprBodyBorrowedCapture(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int base = 10;
+			f := |int y| -> print_line("{base + y}");
+			f(1);
+		}
+	`)
+	assertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i64 %y\)`)
+	assertNotContains(t, ir, "ret void %")
+}
+
+// T1634: a no-parameter void expression-body lambda — `|| -> <void expr>` — is
+// the degenerate case of the same path.
+func TestLambdaVoidExprBodyNoParams(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			() -> void f = || -> print_line("hi");
+			f();
+		}
+	`)
+	assertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env\)`)
+	assertNotContains(t, ir, "ret void %")
+}
+
+// extractDefineMatch returns the body of the first `define ... @<pat>(...)`
+// whose signature matches pat, which is a regexp over the text starting at the
+// `@`. Generated lambda names carry an unpredictable counter, so they cannot be
+// looked up by literal name the way extractFunction does.
+func extractDefineMatch(t *testing.T, ir, pat string) string {
+	t.Helper()
+	re := regexp.MustCompile(`define [^\n]*` + pat + ` \{\n`)
+	loc := re.FindStringIndex(ir)
+	if loc == nil {
+		t.Fatalf("no function definition matching %s in IR", pat)
+	}
+	rest := ir[loc[0]:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end+2]
 }

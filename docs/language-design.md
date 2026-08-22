@@ -2768,8 +2768,14 @@ Function types use arrow syntax instead of a keyword:
 ```promise
 (int, int) -> int                  // function taking two ints, returning int
 (string&) -> bool                  // function taking a borrowed string, returning bool
-() -> ()                           // function taking nothing, returning nothing
+() -> void                         // function taking nothing, returning nothing
+(int) -> void                      // function taking an int, returning nothing
 ```
+
+`void` is the **only** spelling for an empty return — there is no `()` type. The
+same word is used in declaration position (`foo() void { … }`), and a function
+declared with no return type at all produces the identical type, so
+`() -> void` is satisfied by both `foo() void { … }` and `foo() { … }`.
 
 Function types **erase parameter names and default values**. Only the types and borrow modifiers are part of the function type signature. This means named arguments and default-value skipping are only available when calling a function by its declared name — not when calling through a function-type variable:
 
@@ -2786,11 +2792,20 @@ fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 
 ```promise
 !(int) -> int                      // failable producer taking an int, returning an int
-!(string) -> ()                    // failable producer taking a string, returning nothing
+!(string) -> void                  // failable producer taking a string, returning nothing
 !() -> User                        // failable producer taking nothing, returning a User
 ```
 
-The marker sits on the producer, not on the result, because failability is a property of *calling* the function — not of the value it yields (there is no failable value type `int!`, §17.2.1). This is the notation used in diagnostics when rendering a failable function type — e.g. a non-sendable capture error reports `!(int) -> int`.
+The marker sits on the producer, not on the result, because failability is a property of *calling* the function — not of the value it yields (there is no failable value type `int!`, §17.2.1). This is also the notation used in diagnostics when rendering a failable function type — e.g. a non-sendable capture error reports `!(int) -> int`.
+
+Failability is part of the type: a non-failable function is not assignable to a failable function type, nor the reverse. A failable function type is inhabited by a reference to a declared failable function; a call through it needs the usual `?^` / `?!` / `? e { … }` handling at the call site:
+
+```promise
+double_or_raise!(int x) int { … }
+
+!(int) -> int f = double_or_raise;
+int r = f(3)?^;                    // propagate
+```
 
 ### 9.7 No Function/Method Overloading
 

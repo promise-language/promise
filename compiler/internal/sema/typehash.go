@@ -232,6 +232,14 @@ func hTypeRef(h hash.Hash, tr ast.TypeRef) {
 		wb(h, 0xFE)
 	case *ast.FunctionTypeRef:
 		wb(h, 4)
+		// T1634: failability is part of the type — without it, changing a field
+		// from `(int) -> int` to `!(int) -> int` would not change the decl hash
+		// and a stale per-instance .bc would be served from the cache.
+		if t.CanError {
+			wb(h, 1)
+		} else {
+			wb(h, 0)
+		}
 		for _, p := range t.Params {
 			hTypeRef(h, p)
 		}

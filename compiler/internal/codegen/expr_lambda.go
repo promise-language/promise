@@ -245,15 +245,33 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		c.genBlock(e.Body)
 	} else if e.ExprBody != nil {
 		val := c.genExpr(e.ExprBody)
+		// T1634: a void-typed body expression (`|int y| -> print_line("{y}")`) still
+		// yields a non-nil instruction, but it is not a value — feeding it to NewRet
+		// emits the invalid `ret void %0`. Emit a bare `ret void` instead, while
+		// running the same temp/scope cleanup so temps built by the expression (e.g.
+		// the interpolated string argument) are still freed.
+		// A nil val still falls through to the terminator path below, unchanged.
+		_, voidRet := fn.Sig.RetType.(*irtypes.VoidType)
 		if val != nil && c.block.Term == nil {
-			// T1254: `move || -> a` returning an env-owned droppable capture must
-			// hand back an independent clone; env_drop frees the retained copy.
-			val = c.maybeDupReturnedEnvCapture(val, e.ExprBody, sig.Result())
-			// B0259: Clean up string/heap/env temps from the expression.
-			// Claim the return value first so it's not freed.
-			c.claimStringTemp(val)
-			c.claimHeapTemp(val)
-			c.claimEnvTemp(val)
+			if voidRet {
+				val = nil
+			} else {
+				// T1254: `move || -> a` returning an env-owned droppable capture must
+				// hand back an independent clone; env_drop frees the retained copy.
+				val = c.maybeDupReturnedEnvCapture(val, e.ExprBody, sig.Result())
+				// B0259: Clean up string/heap/env temps from the expression.
+				// Claim the return value first so it's not freed.
+				c.claimStringTemp(val)
+				c.claimHeapTemp(val)
+				c.claimEnvTemp(val)
+			}
+			// Store move-captured locals back into the env struct, exactly as the
+			// fallthrough terminator below does. An expression body can mutate a
+			// move-captured value through a `~this` method (`move |int y| ->
+			// c.bump(y)`), and without the write-back the mutation is lost when the
+			// call returns — so the expression form silently diverged from the
+			// equivalent block form `move |int y| { c.bump(y); }`.
+			c.emitLambdaWritebacks()
 			c.cleanupStmtTemps()
 			c.cleanupHeapTemps()
 			c.cleanupEnvTemps()

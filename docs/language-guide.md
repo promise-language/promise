@@ -642,6 +642,29 @@ fn := move |string name| -> string { return "{msg}, {name}"; };
 // msg is moved into closure, unavailable after
 ```
 
+## Function Types
+
+```promise
+(int, int) -> int f = add;      // takes two ints, returns int
+(string&) -> bool p = check;    // borrowed parameter
+() -> void a = setup;           // takes nothing, returns nothing
+(int) -> void cb = log_value;   // callback returning nothing
+
+// `void` is the only spelling for an empty return — there is no `()` type.
+// A function declared with no return type has the same type as one declared
+// `void`, so both satisfy `() -> void`.
+
+// Failable function types prefix the `!` producer marker onto the whole type.
+// Failability is part of the type — a plain function is not assignable to a
+// failable one, or the reverse.
+double_or_raise!(int x) int { ... }
+
+!(int) -> int g = double_or_raise;
+int r = g(3)?^;                 // handle at the call site: ?^ / ?! / ? e { ... }
+
+// Function types erase parameter names — call through them positionally only.
+```
+
 ## Tuples
 
 ```promise

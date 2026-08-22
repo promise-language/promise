@@ -119,3 +119,69 @@ test_lambda_in_loop() `test {
   }
   assert(sum == 55, "1+4+9+16+25 = 55");
 }
+
+// --- expression-body lambdas persist mutations to move-captured values ---
+// An expression body can mutate a move-captured value through a `~this` method.
+// The write-back that stores the mutated local back into the env struct ran only
+// on the block-body path, so `move |int y| -> c.bump(y)` reset to the captured
+// value on every call while `move |int y| { c.bump(y); }` accumulated — the two
+// spellings of the same lambda disagreed.
+
+type LambdaCounter {
+  int n `value;
+
+  // Mutate, then publish the running total so a void lambda's effect is visible.
+  bump_into(~this, int y, Mutex[int] out) {
+    this.n = this.n + y;
+    use g := out.lock();
+    g.borrow = this.n;
+  }
+
+  bump_and_get(~this, int y) int {
+    this.n = this.n + y;
+    return this.n;
+  }
+}
+
+lambdas_call_void_twice((int) -> void f) {
+  f(1);
+  f(2);
+}
+
+lambdas_call_int_twice((int) -> int f) int {
+  f(1);
+  return f(2);
+}
+
+test_void_expr_body_lambda_persists_capture_mutation() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  c := LambdaCounter(n: 0);
+  lambdas_call_void_twice(move |int y| -> c.bump_into(y, r.borrow));
+  use g := r2.borrow.lock();
+  assert(g.borrow == 3, "void expression-body lambda accumulated 1 then 2 across calls");
+}
+
+test_value_expr_body_lambda_persists_capture_mutation() `test {
+  c := LambdaCounter(n: 0);
+  int last = lambdas_call_int_twice(move |int y| -> c.bump_and_get(y));
+  assert(last == 3, "value expression-body lambda accumulated 1 then 2 across calls");
+}
+
+test_block_body_lambda_persists_capture_mutation() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  c := LambdaCounter(n: 0);
+  lambdas_call_void_twice(move |int y| {
+    c.bump_into(y, r.borrow);
+  });
+  use g := r2.borrow.lock();
+  assert(g.borrow == 3, "block-body lambda accumulates identically");
+}
+
+// Note: the value-returning block form `move |int y| -> int { return
+// c.bump_and_get(y); }` still loses the mutation — genReturnStmt emits the
+// write-back BEFORE evaluating the return expression, so a mutation performed by
+// that expression is never stored back. That is a separate pre-existing defect
+// (T1664), not the expression-body path fixed here; binding the call to a local
+// first (`int r = c.bump_and_get(y); return r;`) already works.

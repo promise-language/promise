@@ -1257,6 +1257,37 @@ func (f *formatter) detectForHeader() int {
 	return 0
 }
 
+// bangStartsFunctionType reports whether the `!` just emitted begins a failable
+// function type — `!(int) -> int` (T1634) — rather than being the postfix unwrap
+// operator applied to a parenthesized expression that is then called, `(o)!()`.
+// Both spell `) ! (`, so the two are told apart by what follows the balanced
+// paren group: a function type is followed by `->`, a call is not.
+func (f *formatter) bangStartsFunctionType() bool {
+	if f.pos >= len(f.tokens) || f.tokens[f.pos].kind != tkLParen {
+		return false
+	}
+	depth := 0
+	for i := f.pos; i < len(f.tokens); i++ {
+		switch f.tokens[i].kind {
+		case tkLParen:
+			depth++
+		case tkRParen:
+			depth--
+			if depth == 0 {
+				// Look past the closing paren, skipping newlines.
+				for j := i + 1; j < len(f.tokens); j++ {
+					if f.tokens[j].kind == tkNewline {
+						continue
+					}
+					return f.tokens[j].kind == tkArrow
+				}
+				return false
+			}
+		}
+	}
+	return false
+}
+
 // needsSpace returns whether a space should separate prev from cur.
 func (f *formatter) needsSpace(prev, cur token) bool {
 	p := prev.kind
@@ -1340,6 +1371,15 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 	// ? and ! as postfix after value-producing tokens: no space
 	if c == tkQuestion && isValue(prev) {
 		return false
+	}
+	// T1634: a failable function type in return position — `maker() !(int) -> int`.
+	// The `!` here prefixes the *type*, not the declaration, so it must stay
+	// detached from the parameter list's `)`; glued (`maker()!(int) -> int`) it
+	// reads as the failable-declaration marker `maker!()`, a different construct.
+	// The lookahead distinguishes it from postfix unwrap-then-call — `(o)!()`,
+	// where the `)` closes an expression and the `!` is the unwrap operator.
+	if c == tkBang && p == tkRParen && f.bangStartsFunctionType() {
+		return true
 	}
 	if c == tkBang && isValue(prev) {
 		return false

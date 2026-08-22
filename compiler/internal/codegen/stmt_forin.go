@@ -705,16 +705,15 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 		}
 		var result types.Type
 		if r.Return != nil {
-			if named, ok := r.Return.(*ast.NamedTypeRef); ok && named.Name == "void" && len(named.TypeArgs) == 0 {
-				// result stays nil
-			} else {
-				result = c.resolveTypeRefToType(r.Return)
-				if result == nil {
-					return nil
-				}
+			// T1634: NewSignature normalizes a TypVoid result to nil, so `void` in
+			// return position needs no special case here.
+			result = c.resolveTypeRefToType(r.Return)
+			if result == nil {
+				return nil
 			}
 		}
-		return types.NewSignature(nil, params, result, false)
+		// T1634: `!(int) -> int` — the `!` prefix makes the type failable.
+		return types.NewSignature(nil, params, result, r.CanError)
 	}
 	return nil
 }

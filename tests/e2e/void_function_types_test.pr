@@ -15,7 +15,6 @@ apply_and_count((int) -> void fn, int x) int {
 }
 
 // --- Void function type as parameter ---
-// flaky leak — sometimes leaks depending on timing
 test_void_fn_param() `test {
   int ran = apply_and_count(|int x| {
     int _ = x + 1;
@@ -85,4 +84,185 @@ make_noop()(int) -> void {
 }
 
 main() {
+}
+
+// --- T1634: expression-body void lambdas (`|p| -> <void expr>`) ---
+// These used to be a hard compile failure: codegen fed the void-typed body
+// expression to `ret`, emitting the invalid `ret void %0`, and the user saw a
+// raw `opt` parse error rather than a Promise diagnostic. Separately, the
+// `(T) -> void` annotation itself was uninhabitable, because a declared `void`
+// return resolved to a nil signature result while an inferred one was TypVoid.
+//
+// Note: these deliberately use no `~` (mut-ref) callback parameters — those
+// miscompile independently of T1634 (see T1661).
+
+// Helper: a void free function with an externally observable effect. The Mutex
+// gives interior mutability, so the shared `Ref` handle can still write.
+t1634_set_value(Mutex[int] m, int y) {
+  use g := m.lock();
+  g.borrow = y;
+}
+
+// The side effect of a void expression-body lambda is actually observable.
+test_t1634_void_expr_body_side_effect() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  (int) -> void setter = move |int y| -> t1634_set_value(r.borrow, y);
+  setter(42);
+  use g := r2.borrow.lock();
+  assert(g.borrow == 42, "void expression-body lambda ran its side effect");
+}
+
+// The same lambda called more than once — each call re-runs the body.
+test_t1634_void_expr_body_called_twice() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  (int) -> void setter = move |int y| -> t1634_set_value(r.borrow, y);
+  setter(1);
+  setter(2);
+  use g := r2.borrow.lock();
+  assert(g.borrow == 2, "second call overwrote the first");
+}
+
+// Passed directly as an argument, not bound to a variable first.
+test_t1634_void_expr_body_as_argument() `test {
+  int ran = apply_and_count(|int x| -> t1634_noop(x), 5);
+  assert(ran == 1, "void expression-body lambda accepted as a (int) -> void argument");
+}
+
+t1634_noop(int x) {
+}
+
+// The explicit `-> void` block form was rejected by the same signature
+// mismatch, even though it names the return type outright.
+test_t1634_explicit_void_block_lambda() `test {
+  int ran = apply_and_count(|int x| -> void {
+    int _ = x + 1;
+  }, 5);
+  assert(ran == 1, "explicit `-> void` block lambda accepted");
+}
+
+// A declared function with an explicit `void` return must satisfy the
+// annotation too — this was never lambda-specific.
+test_t1634_declared_void_function_reference() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  (Mutex[int], int) -> void setter = t1634_set_value;
+  setter(r.borrow, 9);
+  use g := r2.borrow.lock();
+  assert(g.borrow == 9, "declared `void` function assignable to a `-> void` type");
+}
+
+// A function with no declared return type produces the same signature.
+test_t1634_bare_function_reference() `test {
+  (int) -> void f = t1634_noop;
+  f(3);
+  assert(true, "function with no return type assignable to a `-> void` type");
+}
+
+// The vector-literal symptom was the same lambda defect, not a vector bug:
+// building a `((int) -> void)[]` failed to compile for exactly the same reason.
+test_t1634_void_expr_body_in_vector_literal() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  fns := [move |int y| -> t1634_set_value(r.borrow, y)];
+  assert(fns.len == 1, "vector of void expression-body lambdas built");
+  fns[0](7);
+  use g := r2.borrow.lock();
+  assert(g.borrow == 7, "lambda read back out of the vector still runs");
+}
+
+// The void body allocates a temp (the interpolated string) that must still be
+// freed on the return path — the leak checker is the assertion here.
+test_t1634_void_expr_body_temp_cleanup() `test {
+  (int) -> void fmt = |int y| -> t1634_discard("value={y}");
+  fmt(1);
+  fmt(2);
+  assert(true, "interpolated-string temp in a void expression body is freed");
+}
+
+t1634_discard(string s) {
+}
+
+// `Iterator.for_each` declares `(T) -> void action` — the stdlib's only
+// callback of this shape, and previously unreachable from an expression-body
+// lambda.
+test_t1634_void_expr_body_in_for_each() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  [1, 2, 3].iter().for_each(move |int y| -> t1634_add_value(r.borrow, y));
+  use g := r2.borrow.lock();
+  assert(g.borrow == 6, "for_each ran the void expression-body lambda for every element");
+}
+
+t1634_add_value(Mutex[int] m, int y) {
+  use g := m.lock();
+  g.borrow = g.borrow + y;
+}
+
+// --- T1634: void function types in nested and generic positions ---
+// A function type is itself a type, so it may be a generic type argument, the
+// parameter of another function type, or the inner type of an optional. Each of
+// those routes the signature through a different construction site
+// (`types.Substitute`, a nested `resolveType`, an optional's inner resolve), and
+// every one of them has to agree that "returns nothing" is a nil result.
+
+// A void expression-body lambda with no parameters at all.
+test_t1634_void_expr_body_no_params() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  () -> void f = move || -> t1634_set_value(r.borrow, 11);
+  f();
+  use g := r2.borrow.lock();
+  assert(g.borrow == 11, "no-parameter void expression-body lambda ran");
+}
+
+// A void function type as a generic type argument.
+test_t1634_void_fn_type_as_map_value() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  Map[string, (int) -> void] m = Map[string, (int) -> void]();
+  m["set"] = move |int y| -> t1634_set_value(r.borrow, y);
+  m["set"]!(5);
+  assert(m.len == 1, "void function type stored as a Map value");
+  use g := r2.borrow.lock();
+  assert(g.borrow == 5, "callback read back out of the Map still runs");
+}
+
+// A void function type as the *parameter* of another function type.
+t1634_call_with_one((int) -> void f) {
+  f(1);
+}
+
+t1634_apply_void(((int) -> void) -> void h, (int) -> void f) {
+  h(f);
+}
+
+test_t1634_nested_void_fn_type() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  t1634_apply_void(t1634_call_with_one, move |int y| -> t1634_set_value(r.borrow, y));
+  use g := r2.borrow.lock();
+  assert(g.borrow == 1, "void callback threaded through a higher-order function type");
+}
+
+// An optional void function type — unwrapped and called.
+test_t1634_optional_void_fn_type() `test {
+  r := Ref[Mutex[int]](Mutex[int](0));
+  r2 := r.clone();
+  ((int) -> void)? o = move |int y| -> t1634_set_value(r.borrow, y);
+  o!(4);
+  use g := r2.borrow.lock();
+  assert(g.borrow == 4, "optional void function type unwrapped and called");
+}
+
+// A void expression body that move-captures a *droppable* value. The capture is
+// owned by the env struct and freed by the generated env drop function, so the
+// leak checker is the real assertion: called twice, freed once.
+test_t1634_void_expr_body_move_captured_string() `test {
+  string owned = "captured payload";
+  (int) -> void f = move |int y| -> t1634_discard(owned);
+  f(1);
+  f(2);
+  assert(true, "move-captured droppable in a void expression body is freed exactly once");
 }

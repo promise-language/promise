@@ -232,7 +232,7 @@ typeRef
     : IDENT DOT IDENT typeArgs?                                # qualifiedType
     | IDENT typeArgs?                                          # namedType
     | LPAREN typeRef (COMMA typeRef)+ RPAREN                   # tupleType
-    | LPAREN typeRefList? RPAREN ARROW funcTypeReturn          # functionType
+    | BANG? LPAREN typeRefList? RPAREN ARROW funcTypeReturn    # functionType
     | LPAREN typeRef RPAREN                                    # parenType
     | typeRef AMP                                              # sharedRefType
     | typeRef TILDE                                            # mutRefType

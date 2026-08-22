@@ -1692,6 +1692,14 @@ func (c *Compiler) genIndirectCall(closure value.Value, sig *types.Signature, ar
 	if sig.Result() != nil {
 		retType = c.resolveType(sig.Result())
 	}
+	if sig.CanError() {
+		// T1634: a failable callee returns the result struct ({i1, T, i8*}, or
+		// {i1, i8*} when void), not a bare T. Typing the function pointer from
+		// sig.Result() alone made the indirect call disagree with the thunk, which
+		// copies the callee's real RetType — the caller then read the error flag
+		// out of a bare i64 and the `?^`/`?!` unwrap crashed the compiler.
+		retType = computeResultType(retType)
+	}
 
 	// Function type includes env (i8*) as first parameter
 	paramTypes := []irtypes.Type{irtypes.I8Ptr}

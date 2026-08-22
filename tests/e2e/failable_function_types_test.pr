@@ -1,0 +1,311 @@
+// Tests for failable function types: !(T) -> U
+//
+// T1634/D: the `!`-prefix notation from §9.6 did not parse at all — `apply(!(int)
+// -> int fn)` failed with `missing ')' at '!'`, and the trailing form
+// `(int) -> int!` failed too. A failable function type could not be written, so
+// no callback parameter could accept a failable function.
+//
+// Landing the syntax alone was not enough: `genIndirectCall` typed the function
+// pointer from `sig.Result()` and ignored `sig.CanError()`, so the indirect call
+// returned a bare `T` while the callee returned `{i1, T, i8*}` — unwrapping it
+// panicked codegen. Both halves are covered here.
+//
+// Note: every callback below is a reference to a *declared* failable function.
+// There is no syntax for a failable lambda literal, so `!(T) -> U` is not
+// inhabitable by an inline lambda — that is the separate design item T1662.
+// A failable function that raises on negative input.
+double_or_raise!(int x) int {
+  if x < 0 {
+    raise error(message: "negative");
+  }
+  return x * 2;
+}
+
+// A failable function with nothing to return.
+check_positive!(int x) {
+  if x <= 0 {
+    raise error(message: "not positive");
+  }
+}
+
+// A non-failable function of the same shape, for the negative cases.
+double_plain(int x) int {
+  return x * 2;
+}
+
+type Transformer {
+  !(int) -> int op;
+
+  apply!(int x) int {
+    return this.op(x)?^;
+  }
+}
+
+// --- Failable function type as a parameter ---
+test_failable_fn_param() `test {
+  int r = call_with(double_or_raise, 3)?!;
+  assert(r == 6, "failable function passed as a callback and propagated");
+}
+
+call_with!(!(int) -> int fn, int x) int {
+  return fn(x)?^;
+}
+
+// --- Failable function type as a local variable ---
+test_failable_fn_local() `test {
+  !(int) -> int f = double_or_raise;
+  int r = f(5)?!;
+  assert(r == 10, "failable function type as a local");
+}
+
+// --- Failable function type as a field, called through a method ---
+test_failable_fn_field() `test {
+  t := Transformer(op: double_or_raise);
+  int r = t.apply(7)?!;
+  assert(r == 14, "failable function type as a field");
+}
+
+// --- Failable function type as a return type ---
+test_failable_fn_return_type() `test {
+  !(int) -> int f = make_doubler();
+  int r = f(8)?!;
+  assert(r == 16, "failable function type as a return type");
+}
+
+make_doubler() !(int) -> int {
+  return double_or_raise;
+}
+
+// --- The error path actually propagates through the indirect call ---
+test_failable_fn_error_recovered() `test {
+  !(int) -> int f = double_or_raise;
+  int r = f(-1)? e {
+    assert(e.message == "negative", "recovered the callee's own error");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+// `?^` propagation *out of* an indirect failable call, through a failable
+// helper — a test function may not itself be failable.
+test_failable_fn_propagates() `test {
+  assert(propagate(4)?! == 8, "?^ propagation through an indirect failable call");
+}
+
+propagate!(int x) int {
+  !(int) -> int f = double_or_raise;
+  return f(x)?^;
+}
+
+// --- !() -> void: failable with nothing to return ---
+test_failable_void_fn_ok() `test {
+  !(int) -> void check = check_positive;
+  check(1)?!;
+  assert(true, "failable void function type succeeded");
+}
+
+test_failable_void_fn_error_recovered() `test {
+  !(int) -> void check = check_positive;
+  check(0)? e {
+    assert(e.message == "not positive", "failable void callback raised");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+// --- Failability is part of the type, both directions ---
+// A non-failable function is NOT assignable to a failable type and vice versa;
+// those are sema rejections and live in the Go tests (t1634_test.go). Here we
+// confirm the non-failable type still works unchanged alongside the new syntax.
+test_non_failable_fn_type_unaffected() `test {
+  (int) -> int f = double_plain;
+  assert(f(6) == 12, "non-failable function type still resolves and calls");
+}
+
+// --- Multiple params, and a failable callback stored in a container ---
+test_failable_fn_multi_param() `test {
+  !(int, int) -> int add = add_or_raise;
+  assert(add(2, 3)?! == 5, "multi-param failable function type");
+}
+
+add_or_raise!(int a, int b) int {
+  if a < 0 || b < 0 {
+    raise error(message: "negative");
+  }
+  return a + b;
+}
+
+test_failable_fn_in_vector() `test {
+  fns := [double_or_raise, double_or_raise];
+  assert(fns.len == 2, "vector of failable functions built");
+  assert(fns[0](3)?! == 6, "failable function called out of a vector");
+}
+
+// --- Getter and setter positions ---
+// A getter's return type must be PARENTHESIZED here: bare `get op !(int) -> int`
+// matches `getterDecl`'s failable-getter alternative (`IDENT IDENT BANG typeRef`),
+// so the `!` is consumed as the getter's own marker and the type silently becomes
+// the non-failable `(int) -> int` — see T1665. The setter needs no parentheses.
+type CallbackSlot {
+  (!(int) -> int)[] slots;
+
+  get op(!(int) -> int) {
+    return this.slots[0];
+  }
+
+  set op(!(int) -> int v) {
+    this.slots[0] = v;
+  }
+
+  invoke!(int x) int {
+    return this.slots[0](x)?^;
+  }
+}
+
+test_failable_fn_getter_parenthesized() `test {
+  b := CallbackSlot(slots: [double_or_raise]);
+  assert(b.invoke(4)?! == 8, "failable callback called through the container");
+  b.op = triple_or_raise;
+  assert(b.invoke(4)?! == 12, "setter replaced the failable callback");
+  !(int) -> int g = b.op;
+  assert(g(5)?! == 15, "getter handed back the failable callback");
+}
+
+triple_or_raise!(int x) int {
+  if x < 0 {
+    raise error(message: "negative");
+  }
+  return x * 3;
+}
+
+// --- A non-failable function returning a failable function type ---
+// The `!` in return position binds to the type, not to the declaration: this is
+// `maker() -> (!(int) -> int)`, not the failable `maker!()`.
+test_failable_fn_type_from_non_failable_maker() `test {
+  !(int) -> int f = make_doubler();
+  assert(f(9)?! == 18, "non-failable maker returned a failable callback");
+}
+
+// --- Optional of a failable function type ---
+test_failable_fn_optional() `test {
+  (!(int) -> int)? o = double_or_raise;
+  assert(o!(6)?! == 12, "optional failable function type unwrapped and called");
+}
+
+main() {
+}
+
+// --- The error path through each storage position ---
+// The success paths above prove the syntax resolves; these prove the failable
+// *result shape* (`{i1, T, i8*}`) survives every indirect call site. Reading the
+// error flag out of the wrong shape is exactly what T1634's genIndirectCall fix
+// addressed, and it only shows up when the callee actually raises.
+
+test_failable_fn_field_error_recovered() `test {
+  t := Transformer(op: double_or_raise);
+  int r = t.apply(-1)? e {
+    assert(e.message == "negative", "error propagated out of a field-stored callback");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+test_failable_fn_in_vector_error_recovered() `test {
+  fns := [double_or_raise, triple_or_raise];
+  int r = fns[1](-1)? e {
+    assert(e.message == "negative", "error propagated out of a vector-stored callback");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+test_failable_fn_return_type_error_recovered() `test {
+  !(int) -> int f = make_doubler();
+  int r = f(-1)? e {
+    assert(e.message == "negative", "error propagated out of a maker-returned callback");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+test_failable_fn_multi_param_error_recovered() `test {
+  !(int, int) -> int add = add_or_raise;
+  int r = add(1, -1)? e {
+    assert(e.message == "negative", "error propagated out of a multi-param callback");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+// --- !() -> void: no parameters and nothing to return ---
+// The two-field result struct `{i1, i8*}` — the degenerate shape.
+always_ok!() {
+}
+
+always_raises!() {
+  raise error(message: "always");
+}
+
+test_failable_no_param_void_fn_ok() `test {
+  !() -> void f = always_ok;
+  f()?!;
+  assert(true, "!() -> void succeeded");
+}
+
+test_failable_no_param_void_fn_error_recovered() `test {
+  !() -> void f = always_raises;
+  f()? e {
+    assert(e.message == "always", "!() -> void raised through the indirect call");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+// --- Failable function types in nested and generic positions ---
+// The `!` binds to the producer it prefixes: in `(!(int) -> int, int) -> int`
+// the *inner* type is failable and the outer one is not.
+
+run_with(!(int) -> int fn, int x) int {
+  return fn(x)? e {
+    return -1;
+  };
+}
+
+higher((!(int) -> int, int) -> int h) int {
+  return h(double_or_raise, 5);
+}
+
+test_failable_fn_as_param_of_function_type() `test {
+  assert(higher(run_with) == 10, "failable callback threaded through a higher-order function type");
+}
+
+higher_error((!(int) -> int, int) -> int h) int {
+  return h(double_or_raise, -1);
+}
+
+test_failable_fn_as_param_of_function_type_error() `test {
+  assert(higher_error(run_with) == -1, "the inner callback's error was recovered by the outer handler");
+}
+
+test_failable_fn_type_as_map_value() `test {
+  Map[string, !(int) -> int] m = Map[string, !(int) -> int]();
+  m["double"] = double_or_raise;
+  m["triple"] = triple_or_raise;
+  assert(m.len == 2, "failable function type stored as a Map value");
+  assert(m["double"]!(4)?! == 8, "failable callback called out of a Map");
+  int r = m["triple"]!(-1)? e {
+    assert(e.message == "negative", "error propagated out of a Map-stored callback");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}
+
+// --- Optional of a failable void function type ---
+test_failable_void_fn_optional() `test {
+  (!() -> void)? o = always_raises;
+  o!()? e {
+    assert(e.message == "always", "optional !() -> void unwrapped, called, and raised");
+    return;
+  };
+  assert(false, "unreachable — the recover arm returns");
+}

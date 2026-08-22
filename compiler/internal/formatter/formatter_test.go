@@ -31,6 +31,64 @@ func TestFormat(t *testing.T) {
 			expected: "int x = 1;\n",
 		},
 		{
+			// T1634: `!` prefixes the function *type*, so it binds tightly to the
+			// following `(` and takes a space from a preceding `)` — glued, it would
+			// read as the failable-declaration marker (`maker!()`).
+			name:     "failable function type in parameter position",
+			input:    "apply(!(int)->int fn, !()->void g) { }",
+			expected: "apply(!(int) -> int fn, !() -> void g) {\n}\n",
+		},
+		{
+			name:     "failable function type in return position",
+			input:    "maker() !(int)->int { return double; }",
+			expected: "maker() !(int) -> int {\n  return double;\n}\n",
+		},
+		{
+			// T1634: `(o)!()` is postfix unwrap applied to a parenthesized
+			// expression, then called — the same `) ! (` token shape as a failable
+			// function type in return position, told apart by the trailing `->`.
+			name:     "postfix unwrap of parenthesized expression then call",
+			input:    "assert((o)!() == 8);",
+			expected: "assert((o)!() == 8);\n",
+		},
+		{
+			name:     "failable function type in field position",
+			input:    "type Holder { !(string)->int op; }",
+			expected: "type Holder {\n  !(string) -> int op;\n}\n",
+		},
+		{
+			// T1634: postfix unwrap NOT followed by a call — the `!` is glued to the
+			// preceding `)` because what follows is not a `(` at all, so the
+			// function-type lookahead bails out immediately.
+			name:     "postfix unwrap of parenthesized expression without a call",
+			input:    "assert((o)!   ==   8);",
+			expected: "assert((o)! == 8);\n",
+		},
+		{
+			// T1634: the lookahead skips newlines between the parameter list's `)`
+			// and the `->`, so a function type split across lines still formats as
+			// one — and the `!` still detaches from the declaration's `)`.
+			name:     "failable function type split across lines",
+			input:    "maker() !(int)\n-> int {\n}\n",
+			expected: "maker() !(int) -> int {\n}\n",
+		},
+		{
+			// T1634: truncated input — nothing follows the balanced paren group, so
+			// the lookahead cannot see an `->` and treats the `!` as postfix unwrap.
+			// The contract here is only that the formatter degrades gracefully on
+			// incomplete source rather than panicking past the end of the tokens.
+			name:     "failable function type truncated at end of input",
+			input:    "maker() !(int)",
+			expected: "maker()!(int)\n",
+		},
+		{
+			// T1634: unbalanced parens — the scan runs off the end without ever
+			// closing the group, and must not panic or hang.
+			name:     "failable function type with unbalanced parens",
+			input:    "maker() !(int",
+			expected: "maker()!(int\n",
+		},
+		{
 			name:     "function declaration",
 			input:    "main(){\nprint_line(\"hello\");\n}",
 			expected: "main() {\n  print_line(\"hello\");\n}\n",
@@ -1147,6 +1205,12 @@ func TestIdempotent(t *testing.T) {
 		"f(int[] ~buf) {\n}\n",
 		"f(Document ~doc) {\n}\n",
 		"String &r = s;\n",
+		// T1634: failable function types
+		"apply(!(int) -> int fn) {\n}\n",
+		"maker() !(int) -> int {\n}\n",
+		"type Holder {\n  !(string) -> int op;\n}\n",
+		// T1634: postfix unwrap-then-call spells `) ! (` too — must stay glued
+		"assert((o)!() == 8, \"(o)!()\");\n",
 	}
 
 	for i, input := range inputs {

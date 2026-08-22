@@ -460,7 +460,11 @@ func (p *printer) typeRefStr(t TypeRef) string {
 		for _, param := range n.Params {
 			params = append(params, p.typeRefStr(param))
 		}
-		return "(" + strings.Join(params, ", ") + ") -> " + p.typeRefStr(n.Return)
+		bang := ""
+		if n.CanError {
+			bang = "!" // T1634: the failability marker prefixes the producer
+		}
+		return bang + "(" + strings.Join(params, ", ") + ") -> " + p.typeRefStr(n.Return)
 	case *SharedRefTypeRef:
 		return p.typeRefStr(n.Inner) + "&"
 	case *MutRefTypeRef:

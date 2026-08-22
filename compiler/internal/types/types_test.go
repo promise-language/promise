@@ -426,7 +426,7 @@ func TestSignature(t *testing.T) {
 			name: "no_params_no_return",
 			check: func(t *testing.T) {
 				sig := NewSignature(nil, nil, nil, false)
-				assertEqual(t, sig.String(), "()")
+				assertEqual(t, sig.String(), "() -> void")
 				assertFalse(t, sig.CanError(), "should not have error")
 			},
 		},
@@ -457,7 +457,7 @@ func TestSignature(t *testing.T) {
 					NewParam("arr", NewVector(TypInt), RefMut),
 				}
 				sig := NewSignature(nil, params, nil, false)
-				assertEqual(t, sig.String(), "(string&, int[]~)")
+				assertEqual(t, sig.String(), "(string&, int[]~) -> void")
 			},
 		},
 		{
@@ -465,7 +465,7 @@ func TestSignature(t *testing.T) {
 			check: func(t *testing.T) {
 				sig := NewSignature(nil, nil, TypString, true)
 				assertTrue(t, sig.CanError(), "should have error")
-				assertEqual(t, sig.String(), "() -> string!")
+				assertEqual(t, sig.String(), "!() -> string")
 			},
 		},
 		{
@@ -476,6 +476,65 @@ func TestSignature(t *testing.T) {
 				sig := NewSignature(recv, nil, TypString, false)
 				assertEqual(t, sig.Recv().Name(), "this")
 				assertEqual(t, sig.Recv().Type(), Type(dog))
+			},
+		},
+		{
+			// T1634: "returns nothing" has one representation. A signature written
+			// `(int) -> void` and one inferred from a void-typed lambda body must
+			// compare Identical, or the annotation is uninhabitable.
+			name: "void_result_normalized_to_nil",
+			check: func(t *testing.T) {
+				params := []*Param{NewParam("x", TypInt, RefNone)}
+				declared := NewSignature(nil, params, TypVoid, false)
+				inferred := NewSignature(nil, params, nil, false)
+				assertTrue(t, declared.Result() == nil, "TypVoid result should normalize to nil")
+				assertTrue(t, Identical(declared, inferred), "(int) -> void should be identical to (int) -> <nil>")
+				assertEqual(t, declared.String(), "(int) -> void")
+			},
+		},
+		{
+			// T1634: the arrow is now unconditional, so it must also appear for the
+			// variadic and receiver forms — `String()` is what renders a signature in
+			// every "cannot assign X to Y" diagnostic.
+			name: "variadic_and_void_result",
+			check: func(t *testing.T) {
+				v := NewParam("nums", NewVector(TypInt), RefNone)
+				v.SetVariadic(true)
+				sig := NewSignature(nil, []*Param{v}, nil, false)
+				assertEqual(t, sig.String(), "(...int) -> void")
+
+				failable := NewSignature(nil, []*Param{v}, nil, true)
+				assertEqual(t, failable.String(), "!(...int) -> void")
+			},
+		},
+		{
+			// T1634: a TypVoid result normalizes to nil no matter how the signature
+			// is built — including the failable and receiver-bearing forms, which
+			// take different construction paths in sema.
+			name: "void_result_normalized_for_failable_and_method",
+			check: func(t *testing.T) {
+				failable := NewSignature(nil, nil, TypVoid, true)
+				assertTrue(t, failable.Result() == nil, "failable TypVoid result should normalize to nil")
+				assertEqual(t, failable.String(), "!() -> void")
+
+				dog := makeNamed("Dog")
+				recv := NewParam("this", dog, RefNone)
+				method := NewSignature(recv, nil, TypVoid, false)
+				assertTrue(t, method.Result() == nil, "method TypVoid result should normalize to nil")
+				assertTrue(t, Identical(method, NewSignature(recv, nil, nil, false)),
+					"() -> void method should be identical to a nil-result method")
+			},
+		},
+		{
+			// T1634: canError is part of signature identity, so a failable function
+			// type is not satisfied by a non-failable one (and vice versa).
+			name: "can_error_differs",
+			check: func(t *testing.T) {
+				params := []*Param{NewParam("x", TypInt, RefNone)}
+				failable := NewSignature(nil, params, TypInt, true)
+				plain := NewSignature(nil, params, TypInt, false)
+				assertFalse(t, Identical(failable, plain), "!(int) -> int is not (int) -> int")
+				assertEqual(t, failable.String(), "!(int) -> int")
 			},
 		},
 	}

@@ -161,6 +161,107 @@ func TestRoundTripTypeDecl(t *testing.T) {
 	}
 }
 
+// TestRoundTripFunctionTypeRef checks that a function type's failability
+// survives the cache (T1634). This asserts the decoded *field*, not just
+// encode/decode byte equality: a dropped field re-encodes to identical bytes,
+// so the byte-comparison round-trip used elsewhere in this file cannot see it.
+// When CanError was missing from encode/decode, a `!(int) -> int` field read
+// back from the cache as non-failable, and `this.op(x)?^` in the cached file
+// failed with "error propagation (?^) requires a failable expression" — a
+// failure that only appeared on the second compile of a given source.
+func TestRoundTripFunctionTypeRef(t *testing.T) {
+	pos := ast.Pos{File: "test.pr", Line: 1, Column: 0}
+	end := ast.Pos{File: "test.pr", Line: 5, Column: 0}
+
+	td := &ast.TypeDecl{
+		Name: "Holder",
+		Fields: []*ast.FieldDecl{
+			{Name: "failable", Type: &ast.FunctionTypeRef{
+				CanError: true,
+				Params:   []ast.TypeRef{&ast.NamedTypeRef{Name: "int"}},
+				Return:   &ast.NamedTypeRef{Name: "int"},
+			}},
+			{Name: "plain", Type: &ast.FunctionTypeRef{
+				Params: []ast.TypeRef{&ast.NamedTypeRef{Name: "int"}},
+				Return: &ast.NamedTypeRef{Name: "int"},
+			}},
+		},
+	}
+	td.SetPosEnd(pos, end)
+
+	f := &ast.File{Decls: []ast.Decl{td}}
+	f.SetPosEnd(pos, end)
+
+	decoded, err := Decode(Encode(f))
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+	got := decoded.Decls[0].(*ast.TypeDecl)
+	failable := got.Fields[0].Type.(*ast.FunctionTypeRef)
+	plain := got.Fields[1].Type.(*ast.FunctionTypeRef)
+	if !failable.CanError {
+		t.Error("failable function type lost CanError through the cache")
+	}
+	if plain.CanError {
+		t.Error("plain function type gained CanError through the cache")
+	}
+}
+
+// TestRoundTripParsedFunctionTypeRef is the parser-fed counterpart to
+// TestRoundTripFunctionTypeRef: it walks real source through Build → Encode →
+// Decode, so a mismatch between what the AST builder sets and what the encoder
+// writes is caught too (the hand-built test constructs the node itself and so
+// cannot see a builder that never sets CanError). Every type position that can
+// hold a function type is covered — parameter, return, field, and local — plus a
+// nested function type, whose inner marker must not leak to the outer one.
+func TestRoundTripParsedFunctionTypeRef(t *testing.T) {
+	f := parseString(t, "test.pr", `
+apply(!(int) -> int failable, (int) -> void plain, (!(int) -> int, int) -> int nested) {}
+maker() !(string) -> int { return op; }
+type Holder { !(string) -> int op; (int) -> void cb; }
+run() { !(int) -> int local = boom; }
+`)
+
+	decoded, err := Decode(Encode(f))
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	apply := decoded.Decls[0].(*ast.FuncDecl)
+	if !apply.Params[0].Type.(*ast.FunctionTypeRef).CanError {
+		t.Error("failable parameter lost CanError")
+	}
+	if apply.Params[1].Type.(*ast.FunctionTypeRef).CanError {
+		t.Error("plain parameter gained CanError")
+	}
+	outer := apply.Params[2].Type.(*ast.FunctionTypeRef)
+	if outer.CanError {
+		t.Error("outer function type gained the inner type's CanError")
+	}
+	if !outer.Params[0].(*ast.FunctionTypeRef).CanError {
+		t.Error("nested failable function type lost CanError")
+	}
+
+	maker := decoded.Decls[1].(*ast.FuncDecl)
+	if !maker.ReturnType.Type.(*ast.FunctionTypeRef).CanError {
+		t.Error("failable return type lost CanError")
+	}
+
+	holder := decoded.Decls[2].(*ast.TypeDecl)
+	if !holder.Fields[0].Type.(*ast.FunctionTypeRef).CanError {
+		t.Error("failable field lost CanError")
+	}
+	if holder.Fields[1].Type.(*ast.FunctionTypeRef).CanError {
+		t.Error("plain field gained CanError")
+	}
+
+	run := decoded.Decls[3].(*ast.FuncDecl)
+	local := run.Body.Stmts[0].(*ast.TypedVarDecl)
+	if !local.Type.(*ast.FunctionTypeRef).CanError {
+		t.Error("failable local declaration lost CanError")
+	}
+}
+
 // TestRoundTripEnumDecl tests enum declaration encoding.
 func TestRoundTripEnumDecl(t *testing.T) {
 	pos := ast.Pos{File: "test.pr", Line: 1, Column: 0}

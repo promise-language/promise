@@ -42,17 +42,15 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		}
 		var result types.Type
 		if r.Return != nil {
-			// "void" in return position means no return value
-			if named, ok := r.Return.(*ast.NamedTypeRef); ok && named.Name == "void" && len(named.TypeArgs) == 0 {
-				// result stays nil
-			} else {
-				result = c.resolveType(r.Return)
-				if result == nil {
-					return nil
-				}
+			// T1634: `void` needs no special case here — NewSignature normalizes a
+			// TypVoid result to nil, the single "returns nothing" representation.
+			result = c.resolveType(r.Return)
+			if result == nil {
+				return nil
 			}
 		}
-		return types.NewSignature(nil, params, result, false)
+		// T1634: `!(int) -> int` — the `!` prefix makes the type failable.
+		return types.NewSignature(nil, params, result, r.CanError)
 
 	case *ast.SharedRefTypeRef:
 		inner := c.resolveType(r.Inner)

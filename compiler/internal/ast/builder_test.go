@@ -1769,6 +1769,33 @@ func TestBuildTypeRefsExtended(t *testing.T) {
 				assertLen(t, ft.Params, 2)
 				ret := ft.Return.(*NamedTypeRef)
 				assertEqual(t, ret.Name, "Bool")
+				assertFalse(t, ft.CanError)
+			},
+		},
+		{
+			// T1634: `!(…) -> T` — the failability marker prefixes the producer.
+			name: "failable_function_type",
+			src:  `f(!(Int) -> Bool fn) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				ft := fn.Params[0].Type.(*FunctionTypeRef)
+				assertTrue(t, ft.CanError)
+				assertLen(t, ft.Params, 1)
+				ret := ft.Return.(*NamedTypeRef)
+				assertEqual(t, ret.Name, "Bool")
+			},
+		},
+		{
+			// T1634: a failable function type with no params and no return.
+			name: "failable_function_type_void",
+			src:  `f(!() -> void fn) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				ft := fn.Params[0].Type.(*FunctionTypeRef)
+				assertTrue(t, ft.CanError)
+				assertLen(t, ft.Params, 0)
+				ret := ft.Return.(*NamedTypeRef)
+				assertEqual(t, ret.Name, "void")
 			},
 		},
 		{

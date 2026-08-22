@@ -28,10 +28,14 @@ type TupleTypeRef struct {
 func (*TupleTypeRef) typeRefTag() {}
 
 // FunctionTypeRef represents a function type: (Int, Int) -> Bool.
+// CanError records the `!` prefix of a failable function type — `!(int) -> int`
+// (T1634). The marker is a prefix on the producer, not a suffix on the result:
+// there is no `int!` value type (§9.6, §17.2.1).
 type FunctionTypeRef struct {
 	nodeBase
-	Params []TypeRef
-	Return TypeRef
+	Params   []TypeRef
+	Return   TypeRef
+	CanError bool
 }
 
 func (*FunctionTypeRef) typeRefTag() {}

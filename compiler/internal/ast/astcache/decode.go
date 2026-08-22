@@ -551,6 +551,7 @@ func (d *decoder) typeRef() ast.TypeRef {
 	case tagFunctionTypeRef:
 		n := &ast.FunctionTypeRef{}
 		d.setPosEnd(n)
+		n.CanError = d.bool_() // T1634: `!(int) -> int`
 		n.Params = d.typeRefs()
 		n.Return = d.typeRef()
 		return n

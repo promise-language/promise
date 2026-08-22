@@ -440,6 +440,7 @@ func (e *encoder) typeRef(t ast.TypeRef) {
 	case *ast.FunctionTypeRef:
 		e.u8(tagFunctionTypeRef)
 		e.nodePos(n)
+		e.bool_(n.CanError) // T1634: `!(int) -> int`
 		e.typeRefs(n.Params)
 		e.typeRef(n.Return)
 	case *ast.SharedRefTypeRef:

@@ -68,8 +68,18 @@ type Signature struct {
 	returnHoldsReceiver bool
 }
 
-// NewSignature creates a new function signature.
+// NewSignature creates a new function signature. A TypVoid result is normalized
+// to nil (T1634): "returns nothing" gets exactly one representation, so a
+// signature written `(int) -> void` and one inferred from a void-typed lambda
+// body compare Identical. Every construction site — sema/decl.go,
+// sema/resolve.go, sema/expr.go, types/subst.go, codegen/stmt_forin.go — routes
+// through here. TypVoid used as a *value* type elsewhere (a go-block result, an
+// enum-field fallback, a `Task[void]` element) never passes through this
+// function and is untouched.
 func NewSignature(recv *Param, params []*Param, result Type, canError bool) *Signature {
+	if result == Type(TypVoid) {
+		result = nil
+	}
 	return &Signature{
 		recv:     recv,
 		params:   params,
@@ -109,6 +119,12 @@ func (s *Signature) SetReturnHoldsReceiver(v bool) { s.returnHoldsReceiver = v }
 
 func (s *Signature) String() string {
 	var b strings.Builder
+	if s.canError {
+		// T1445: the failability marker sits on the producer, not on the result —
+		// §9.6 spells it `!(int) -> int`, never `(int) -> int!` (there is no `int!`
+		// value type, §17.2.1).
+		b.WriteByte('!')
+	}
 	b.WriteByte('(')
 	for i, p := range s.params {
 		if i > 0 {
@@ -132,12 +148,14 @@ func (s *Signature) String() string {
 		}
 	}
 	b.WriteByte(')')
+	b.WriteString(" -> ")
 	if s.result != nil {
-		b.WriteString(" -> ")
 		b.WriteString(s.result.String())
-	}
-	if s.canError {
-		b.WriteByte('!')
+	} else {
+		// T1634: a nil result is "returns nothing" — render it as `void` rather
+		// than dropping the arrow, which made `(int) -> void` print as the bare
+		// `(int)` and read as a tuple in diagnostics.
+		b.WriteString("void")
 	}
 	return b.String()
 }

@@ -108,6 +108,46 @@ func TestHashTypeDeclFieldTypeChanged(t *testing.T) {
 	}
 }
 
+// T1634: failability is part of a function type. Without hashing CanError,
+// changing a field from `(int) -> int` to `!(int) -> int` would leave the decl
+// hash unchanged and a stale per-instance .bc would be served from the cache.
+func TestHashTypeDeclFunctionTypeFailabilityChanged(t *testing.T) {
+	h1 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { (int) -> int op; }`))
+	h2 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { !(int) -> int op; }`))
+	if h1 == h2 {
+		t.Error("expected different hash when a function-type field becomes failable")
+	}
+}
+
+// T1634: the same must hold wherever a function type appears inside the decl,
+// not just in a field — a method parameter and a method return type each reach
+// hTypeRef through their own path.
+func TestHashTypeDeclMethodFunctionTypeFailabilityChanged(t *testing.T) {
+	param1 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { run(this, (int) -> int f) {} }`))
+	param2 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { run(this, !(int) -> int f) {} }`))
+	if param1 == param2 {
+		t.Error("expected different hash when a method's function-type parameter becomes failable")
+	}
+
+	ret1 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { make(this) (int) -> int { return f; } }`))
+	ret2 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { make(this) !(int) -> int { return f; } }`))
+	if ret1 == ret2 {
+		t.Error("expected different hash when a method's function-type return becomes failable")
+	}
+}
+
+// T1634: `void` and an omitted return are the same type, but they are different
+// *source*, and the decl hash is over the AST — the point of this test is that
+// the two nested-position spellings still hash stably rather than colliding with
+// a genuinely different type.
+func TestHashTypeDeclNestedFunctionTypeFailability(t *testing.T) {
+	outer := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { !((int) -> int) -> int op; }`))
+	inner := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { (!(int) -> int) -> int op; }`))
+	if outer == inner {
+		t.Error("expected different hash when the `!` moves between the outer and inner function type")
+	}
+}
+
 func TestHashTypeDeclMethodBodyChanged(t *testing.T) {
 	h1 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { int x; get(this) int { return this.x; } }`))
 	h2 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { int x; get(this) int { return this.x + 1; } }`))

@@ -1,7 +1,6 @@
 package common
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -24,47 +23,24 @@ import (
 // paths end to end but the link gate (needsTLS) is never set true until T0077
 // emits the TLS codegen bridge, so no build actually pulls these archives.
 
-// opensslArchDirs maps a prebuilts.toml Linux target to the arch directory name
-// used by the compiler's OpenSSL layout (`resources/openssl/<arch>/`,
-// `<PROMISE_HOME>/cache/openssl/<arch>/`). We deliberately reuse the SAME
-// musl-arch triples as the CRT (`x86_64-linux-musl`, `aarch64-linux-musl`) so
-// the on-disk arch layout is uniform across both target dependencies — the
-// archives are, after all, the musl build of OpenSSL.
-var opensslArchDirs = map[string]string{
-	"linux-amd64": "x86_64-linux-musl",
-	"linux-arm64": "aarch64-linux-musl",
-}
-
 // OpenSSLTargets returns the Linux targets that carry static OpenSSL archives,
-// in a stable order. A new target only has to be added to opensslArchDirs (and
-// prebuilts.toml) in one place.
-func OpenSSLTargets() []string { return []string{"linux-amd64", "linux-arm64"} }
+// in a stable order. See target_dep.go for the shared arch layout.
+func OpenSSLTargets() []string { return LinuxTargetDepTargets() }
 
 // OpenSSLArchDir returns the arch directory name for a Linux target (e.g.
-// "linux-arm64" → "aarch64-linux-musl"). A non-Linux or unknown target is an
-// error rather than a silent default: guessing here would embed one arch's
-// archives under another arch's name and produce link failures far from the
-// cause.
+// "linux-arm64" → "aarch64-linux-musl"), used by the compiler's OpenSSL layout
+// (`resources/openssl/<arch>/`, `<PROMISE_HOME>/cache/openssl/<arch>/`). The
+// SAME musl-arch triples as the CRT — the archives are, after all, the musl
+// build of OpenSSL.
 func OpenSSLArchDir(target string) (string, error) {
-	arch, ok := opensslArchDirs[target]
-	if !ok {
-		return "", fmt.Errorf("no static OpenSSL arch for target %q (want one of linux-amd64, linux-arm64)", target)
-	}
-	return arch, nil
+	return linuxTargetArchDir("static OpenSSL", target)
 }
 
 // OpenSSLManifestName is the runtime-manifest logical name for one OpenSSL
 // archive on one arch, e.g. ("aarch64-linux-musl", "libssl.a") →
 // "openssl-aarch64-linux-musl-libssl.a".
-//
-// The arch is part of the NAME, not just the catalog's (dep, version, target,
-// name) identity, because OpenSSL is a target dependency: one host manifest can
-// carry several arches at once, and an unqualified "openssl-libssl.a" could only
-// ever describe one of them. Keep in lockstep with opensslManifestName in
-// compiler/cmd/promise/llvm_cas.go — separate Go modules, so the format is
-// duplicated by necessity.
 func OpenSSLManifestName(arch, file string) string {
-	return "openssl-" + arch + "-" + file
+	return targetDepManifestName("openssl", arch, file)
 }
 
 // EnsureOpenSSLBlobs returns a host-stable directory whose flat contents are the

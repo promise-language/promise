@@ -1408,3 +1408,84 @@ func TestHashEmbedGlobSkipsDirs(t *testing.T) {
 		t.Fatalf("expected 1 entry (dir skipped), got %d", len(entries))
 	}
 }
+
+// TestCleanCRTCache covers the four cache dirs CleanCRTCache is responsible for
+// (T0769, T1676): the musl CRT extraction + its content-addressed view, and the
+// compiler-rt builtins extraction + its view. All are extracted from the
+// compiler binary and are unconditional inputs to every Linux link, so a
+// compiler change must be able to invalidate every one of them — a dir missed
+// here would serve a stale archive from a previous compiler forever.
+func TestCleanCRTCache(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmpHome)
+
+	crtDirs := []string{
+		filepath.Join("crt", "aarch64-linux-musl"),
+		filepath.Join("crt-view", "aarch64-linux-musl-deadbeef"),
+		filepath.Join("compiler-rt", "aarch64-linux-musl"),
+		filepath.Join("compiler-rt-view", "aarch64-linux-musl-deadbeef"),
+	}
+	for _, rel := range crtDirs {
+		dir := filepath.Join(tmpHome, "cache", rel)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "artifact"), []byte("stale"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Neighbours that must SURVIVE: the CAS blob store (re-fetching it is
+	// expensive and it is content-addressed, so it can never be stale), the
+	// build cache, and the lock files the view publishers hold outside the view
+	// trees precisely so a concurrent clean cannot delete them mid-hold.
+	survivors := []string{
+		filepath.Join("blobs", "ab", "abcdef"),
+		filepath.Join("build", "ab", "abc.o"),
+	}
+	for _, rel := range survivors {
+		p := filepath.Join(tmpHome, "cache", rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("keep"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	locks := []string{"crt-view.lock", "compiler-rt-view.lock", "openssl-view.lock"}
+	for _, name := range locks {
+		if err := os.WriteFile(filepath.Join(tmpHome, "cache", name), []byte("lock"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := CleanCRTCache(); err != nil {
+		t.Fatalf("CleanCRTCache: %v", err)
+	}
+
+	for _, rel := range crtDirs {
+		top := filepath.Join(tmpHome, "cache", filepath.Dir(rel))
+		if _, err := os.Stat(top); !os.IsNotExist(err) {
+			t.Errorf("%s survived CleanCRTCache (stat err = %v)", top, err)
+		}
+	}
+	for _, rel := range survivors {
+		if _, err := os.Stat(filepath.Join(tmpHome, "cache", rel)); err != nil {
+			t.Errorf("CleanCRTCache deleted unrelated cache entry %s: %v", rel, err)
+		}
+	}
+	for _, name := range locks {
+		if _, err := os.Stat(filepath.Join(tmpHome, "cache", name)); err != nil {
+			t.Errorf("CleanCRTCache deleted lock file %s (a concurrent publisher may hold it): %v", name, err)
+		}
+	}
+}
+
+// TestCleanCRTCacheNonexistent pins that a home with no CRT caches at all is a
+// no-op success, not an error — `bin/clean` on a fresh clone must not fail.
+func TestCleanCRTCacheNonexistent(t *testing.T) {
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	if err := CleanCRTCache(); err != nil {
+		t.Errorf("CleanCRTCache on a home with no CRT caches: %v", err)
+	}
+}

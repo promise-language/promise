@@ -47,3 +47,23 @@ artifacts). Their notices are reproduced here:
 
   The upstream OpenSSL sources and full license text are available at
   https://www.openssl.org/.
+
+  LLVM compiler-rt (builtins)
+  ------
+  Promise Lang links every Linux binary against a static build of the
+  LLVM compiler-rt builtins (libclang_rt.builtins.a), which supplies the
+  compiler runtime helpers the target ABI requires — soft-float IEEE
+  binary128 arithmetic on aarch64, and the LSE outline-atomics helpers.
+  compiler-rt is licensed under the Apache License, Version 2.0, with
+  LLVM Exceptions:
+
+      Copyright (c) 2003-2025 University of Illinois at Urbana-Champaign
+      and the LLVM Project contributors.
+
+      Licensed under the Apache License, Version 2.0, with LLVM
+      Exceptions. You may obtain a copy of the License at
+
+          https://llvm.org/LICENSE.txt
+
+  The upstream compiler-rt sources and full license text are available
+  at https://llvm.org/.

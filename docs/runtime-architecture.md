@@ -818,6 +818,8 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 
 The CRT objects themselves are a pinned prebuilt (`[binaries.musl]` in `tools/build/prebuilts.toml`, sliced from the upstream Alpine `musl-dev` apk), fetched by `bin/build` and hosted content-addressed by `bin/release publish-blobs --dependency musl` — never taken from the build host's `/usr/lib` (T0530).
 
+The **compiler-rt builtins archive** (`libclang_rt.builtins.a`) rides the exact same machinery one level over: `compiler_rt_linux_{amd64,arm64}.go` / `compiler_rt_other.go` embed FS files, a `findCompilerRT` discovery ladder identical to the five steps above (`compiler-rt/<arch>/` instead of `crt/<arch>/`, `resolveCompilerRTView` instead of `resolveMuslCRTView`), and `[binaries.compiler-rt]` in `prebuilts.toml`. It is spliced onto the link line immediately **after** `libc.a` — musl's own `libc.a` references the aarch64 soft-float binary128 helpers from its float `printf`/`scanf` path, so it has to come later; lld's lazy archive resolution still satisfies the builtins' own libc references back into the earlier `libc.a`, so no `--start-group` is needed (T1676).
+
 **Phased rollout**:
 
 | Step | Work | Status |

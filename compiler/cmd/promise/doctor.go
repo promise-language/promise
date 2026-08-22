@@ -79,6 +79,7 @@ func runDoctor(args []string) {
 	}
 	if runtime.GOOS == "linux" {
 		checks = append(checks, doctorCheckMuslCRT())
+		checks = append(checks, doctorCheckCompilerRT())
 		checks = append(checks, doctorCheckOpenSSL())
 	}
 	checks = append(checks,
@@ -308,6 +309,44 @@ func doctorCheckMuslCRT() doctorCheck {
 		c.Status = doctorErr.String()
 		c.Summary = "Incomplete musl CRT files in " + dir
 		c.Fix = "Delete the cache directory and rebuild to re-extract CRT files"
+	}
+
+	return c
+}
+
+// doctorCheckCompilerRT reports whether the compiler-rt builtins archive is
+// available. REQUIRED, unlike doctorCheckOpenSSL: it is spliced onto every musl
+// link line (musl's own libc.a references the aarch64 soft-float binary128
+// helpers), so a host without it cannot link ANY Linux binary — T1676.
+func doctorCheckCompilerRT() doctorCheck {
+	c := makeDoctorCheck("compiler-rt builtins (Linux static linking)", doctorOK, true)
+
+	target := "x86_64-unknown-linux-musl"
+	if runtime.GOARCH == "arm64" {
+		target = "aarch64-unknown-linux-musl"
+	}
+
+	if hasEmbeddedCompilerRT {
+		c.Details = append(c.Details, "Source: embedded")
+	} else {
+		c.Details = append(c.Details, "Source: on-demand / none")
+	}
+
+	dir, err := findCompilerRT(target)
+	if err != nil {
+		c.Status = doctorErr.String()
+		c.Summary = "compiler-rt builtins archive not found"
+		c.Fix = "Rebuild with `bin/build`, or publish blobs via `bin/release publish-blobs --dependency compiler-rt`"
+		return c
+	}
+
+	c.Details = append(c.Details, "Path: "+dir)
+	if compilerRTComplete(dir) {
+		c.Summary = "Builtins archive found"
+	} else {
+		c.Status = doctorErr.String()
+		c.Summary = "Incomplete compiler-rt builtins in " + dir
+		c.Fix = "Delete the cache directory and rebuild to re-extract the archive"
 	}
 
 	return c

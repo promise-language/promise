@@ -355,7 +355,7 @@ func indexOfSuffix(args []string, suffix string) int {
 // the link line contains NEITHER archive — the gate default that must hold for
 // every existing program.
 func TestBuildMuslLinkArgsNoTLS(t *testing.T) {
-	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"}, "/tmp/out", "/crt", false, "")
+	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"}, "/tmp/out", "/crt", false, "", "/builtins")
 	if indexOfSuffix(args, "libssl.a") != -1 {
 		t.Errorf("needsTLS=false: libssl.a must be absent, args=%v", args)
 	}
@@ -372,7 +372,7 @@ func TestBuildMuslLinkArgsNoTLS(t *testing.T) {
 // libssl.a + libcrypto.a appear AFTER the object files and BEFORE libc.a, in the
 // order ssl-then-crypto (static-archive resolution is order-sensitive, T1596 / #28).
 func TestBuildMuslLinkArgsWithTLS(t *testing.T) {
-	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"}, "/tmp/out", "/crt", false, "/openssl")
+	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"}, "/tmp/out", "/crt", false, "/openssl", "/builtins")
 
 	iObj := indexOfSuffix(args, "main.o")
 	iSSL := indexOfSuffix(args, "libssl.a")
@@ -397,7 +397,7 @@ func TestBuildMuslLinkArgsWithTLS(t *testing.T) {
 // precede libc.a.
 func TestBuildMuslLinkArgsMultiWithTLS(t *testing.T) {
 	objs := []string{"/tmp/main.o", "/tmp/mod.o", "/tmp/inst.o"}
-	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", objs, "/tmp/out", "/crt", true, "/openssl")
+	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", objs, "/tmp/out", "/crt", true, "/openssl", "/builtins")
 
 	iSSL := indexOfSuffix(args, "libssl.a")
 	iLibc := indexOfSuffix(args, "libc.a")

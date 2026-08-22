@@ -56,6 +56,7 @@ Each blob is a dependency artifact identified by the `sha256` of its extracted c
 | `opt`, `llc`, `lld` (+ `libLLVM`) | host platform | LLVM 22+ tools. The bulk of the size. |
 | `wasmtime` / Node wasm harness | host platform | For `wasm32-wasi` / `wasm32-web` targets. |
 | musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) | linux target | **Done** (T0530): static-link CRT, sliced from the pinned upstream Alpine `musl-dev` apk (musl.libc.org publishes source only, so a distro package is the only prebuilt). Manifest names are **arch-qualified** (`musl-<arch>-crt1.o`) because the CRT is a *target* dependency — one host manifest can carry several arches. Projected best-effort: an unpublished CRT is skipped, never fatal, since Linux binaries also embed the host arch's copy. |
+| compiler-rt builtins (`libclang_rt.builtins.a`) | linux target | **Done** (T1676): the compiler runtime the target ABI presumes — aarch64 soft-float binary128 helpers (musl's own `libc.a` calls them from its float `printf`/`scanf` path) and LSE outline-atomics helpers. Sliced from the pinned Alpine `compiler-rt` apk, same v3.23 baseline as musl. Arch-qualified manifest names (`compiler-rt-<arch>-libclang_rt.builtins.a`) — a *target* dependency, like the CRT. Spliced onto **every** musl link line, unconditionally. |
 | macOS SDK stubs (`libSystem.tbd` + headers) | macOS target | Zero-dep goal ([distribution.md](distribution.md) §5.1). |
 | Windows SDK / UCRT `.lib` import stubs | windows target | **Done** (T0772): self-generated license-clean import libs embedded in the compiler (~21 KiB), not a fetched blob. Zero-dep goal ([distribution.md](distribution.md) §5.2). |
 
@@ -73,6 +74,13 @@ bin/release publish-blobs --dependency llvm --host windows-amd64
 # both: the Alpine apk is sliced with the stdlib reader in tools/build/common/apk.go.
 bin/release publish-blobs --dependency musl --host linux-amd64
 bin/release publish-blobs --dependency musl --host linux-arm64
+
+# compiler-rt builtins + static OpenSSL — same story: one per Linux TARGET,
+# any host can produce both (T1676 / T1596).
+bin/release publish-blobs --dependency compiler-rt --host linux-amd64
+bin/release publish-blobs --dependency compiler-rt --host linux-arm64
+bin/release publish-blobs --dependency openssl --host linux-amd64
+bin/release publish-blobs --dependency openssl --host linux-arm64
 ```
 
 Each invocation downloads the upstream archive (already verified against `prebuilts.toml`'s pinned sha256), brotli-11-compresses each file under its content-addressed `<sha>.br` name, records the entry in `tools/build/blobs.json`, uploads the blob to a dedicated `deps-<dep>-<version>` GitHub release (created on demand), and **mirrors it to Cloudflare R2** (`--r2-bucket`, default `prebuilts`; `""` disables) as a flat `<sha>.br` object via `npx wrangler`. The catalog is the dedup oracle: a second `publish-blobs` invocation with the same dep version sees the existing catalog entry + existing release asset and skips both compress and upload. After the first run, `tools/build/blobs.json` is committed; the per-epoch pipeline reads it via `bin/release manifest --from-catalog` to project the per-epoch runtime manifest.

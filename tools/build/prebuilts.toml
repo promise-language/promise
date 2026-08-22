@@ -200,3 +200,74 @@ files = [
   { src = "usr/lib/libssl.a", out = "libssl.a" },
   { src = "usr/lib/libcrypto.a", out = "libcrypto.a" },
 ]
+
+# ----------------------------------------------------------------------------
+# compiler-rt builtins (libclang_rt.builtins.a) — required to link ANY Linux
+# binary (T1676).
+#
+# Promise links Linux targets `-static` against musl with `ld.lld` and, until
+# this pin, nothing else: no libgcc, no compiler-rt. That premise held only
+# because x86-64 codegen happens not to need the compiler runtime. It does not
+# hold on aarch64, and the gap is NOT TLS-specific even though a TLS link is
+# what first exposed it:
+#
+#   - musl's OWN libc.a (vfprintf.lo, vfscanf.lo, floatscan.lo) calls the
+#     soft-float IEEE binary128 helpers (__addtf3, __multf3, __trunctfdf2, …)
+#     because aarch64 `long double` is binary128 with no hardware support. Any
+#     program whose link pulls musl's float printf/scanf path needs them.
+#   - prebuilt aarch64 objects (the vendored musl-static OpenSSL, T1596)
+#     reference the LSE outline-atomics helpers `__aarch64_{ldadd,ldclr,ldset}
+#     {4,8}{_relax,_acq,_rel,_acq_rel}`, which GCC ≥ 10 / Clang emit by default
+#     under `-moutline-atomics`.
+#
+# Neither family can be honestly provided in-IR: the outline-atomics helpers use
+# a restricted register convention (only x0/x1, x15–x17, x30, NZCV may be
+# clobbered) that an llc-compiled function silently violates — a miscompile, not
+# a link error — and binary128 add/mul/div with correct rounding and subnormals
+# is not something to reimplement. So we link the real archive.
+#
+# Like the musl CRT and OpenSSL above, this is a *target* dependency: `target`
+# is the Linux target being linked FOR. Source is Alpine's `compiler-rt`
+# package, pinned to the SAME Alpine branch as musl-dev and openssl-libs-static
+# (v3.23 main) so all three target dependencies share one distro baseline.
+# Apache-2.0 with LLVM Exception (see NOTICE).
+#
+# Pinned for BOTH Linux arches and spliced onto the link line unconditionally.
+# linux-amd64 needs nothing from it today (x87 80-bit long double, no outline
+# atomics), but keeping the machinery symmetric costs nothing: unreferenced
+# archive members are never extracted.
+#
+# VERIFIED 2026-08-22 against the live Alpine CDN (T1676 step 0):
+#   - package name `compiler-rt` is correct; current revision 21.1.2-r0
+#   - aarch64 apk 12,546,484 B -> libclang_rt.builtins-aarch64.a 1,343,400 B
+#   - x86_64  apk 16,170,797 B -> libclang_rt.builtins-x86_64.a  1,027,996 B
+#   - the aarch64 archive defines all 26 symbols the failing TLS link reported
+#     undefined, plus the `__aarch64_have_lse_atomics` ifunc flag they dispatch
+#     on.
+#   - its own externally-undefined set is entirely musl libc (malloc, memcpy,
+#     getauxval, pthread_*, …) plus `_Unwind_*` in gcc_personality_v0.c.o, which
+#     nothing pulls. lld's lazy archive resolution satisfies those back into the
+#     EARLIER libc.a, so no `--start-group` is needed.
+# ----------------------------------------------------------------------------
+[binaries.compiler-rt]
+version = "21.1.2-r0"
+# Raw (not gzipped) per-arch builtins archive lands in <bundle_dir>/<musl-arch>/
+# for `//go:embed resources/compiler-rt/<musl-arch>/*` — see
+# compiler/cmd/promise/compiler_rt_linux_*.go. The `out` name is deliberately
+# arch-neutral: each arch already has its own directory, so qualifying the file
+# name would only complicate every consumer.
+bundle_dir = "compiler/cmd/promise/resources/compiler-rt"
+
+[binaries.compiler-rt.targets.linux-amd64]
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/compiler-rt-21.1.2-r0.apk"
+sha256 = "1c2f55bf9d4c6d1dc3a95d67be09114a08f4befcaee06444b563ef0e3571285b"
+files = [
+  { src = "usr/lib/llvm21/lib/clang/21/lib/x86_64-alpine-linux-musl/libclang_rt.builtins-x86_64.a", out = "libclang_rt.builtins.a" },
+]
+
+[binaries.compiler-rt.targets.linux-arm64]
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/compiler-rt-21.1.2-r0.apk"
+sha256 = "c8dc9a9e98a23a30f4b5c89f44b7978e1d45db637742824304e0031aca12b200"
+files = [
+  { src = "usr/lib/llvm21/lib/clang/21/lib/aarch64-alpine-linux-musl/libclang_rt.builtins-aarch64.a", out = "libclang_rt.builtins.a" },
+]

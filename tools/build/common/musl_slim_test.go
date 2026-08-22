@@ -110,7 +110,7 @@ var testCRTContents = map[string]string{
 // TestPrebuiltsManifest_MuslReal checks the REAL prebuilts.toml against
 // MuslTargets(): every Linux target the build tools know about must declare a
 // pinned musl entry with the full CRT file set. Without this, adding a target to
-// muslArchDirs and forgetting prebuilts.toml would only surface as a build
+// linuxTargetArchDirs and forgetting prebuilts.toml would only surface as a build
 // failure on that architecture's host.
 func TestPrebuiltsManifest_MuslReal(t *testing.T) {
 	root, err := FindRoot()

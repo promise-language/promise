@@ -81,6 +81,13 @@ func RunBuild(root string, args []string) error {
 		if err := EmbedMuslCRT(root); err != nil {
 			return fmt.Errorf("musl CRT: %w", err)
 		}
+		// compiler-rt builtins (Linux only, T1676). Required, not best-effort:
+		// spliced onto every musl link line, since musl's own libc.a needs the
+		// aarch64 soft-float binary128 helpers.
+		fmt.Println("Embedding compiler-rt builtins...")
+		if err := EmbedCompilerRT(root); err != nil {
+			return fmt.Errorf("compiler-rt: %w", err)
+		}
 		// OpenSSL static archives (Linux only, T1596 / #28). Best-effort: skips
 		// (with a note) when not pinned/hosted, since no program links TLS yet.
 		fmt.Println("Embedding OpenSSL (best-effort)...")

@@ -87,6 +87,12 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host, tag s
 		if err := EmbedMuslCRT(root); err != nil {
 			return fmt.Errorf("musl CRT: %w", err)
 		}
+		// compiler-rt builtins (Linux only, T1676). Required, not best-effort —
+		// see the RunBuild counterpart.
+		fmt.Println("Embedding compiler-rt builtins...")
+		if err := EmbedCompilerRT(root); err != nil {
+			return fmt.Errorf("compiler-rt: %w", err)
+		}
 		// OpenSSL static archives (Linux only, T1596 / #28). Best-effort: skips (with
 		// a note) when not pinned/hosted. A full release embeds them when pinned;
 		// the thin/full flavour switch (docs/distribution.md §1,§4) will later

@@ -585,125 +585,59 @@ func decompressEmbeddedLLVM(name string, data []byte) ([]byte, error) {
 	}
 }
 
-// muslManifestName is the runtime-manifest logical name for one musl CRT object
-// on one arch, e.g. ("aarch64-linux-musl", "crt1.o") →
+// targetDepManifestName is the runtime-manifest logical name for one file of a
+// per-arch *target* dependency, e.g. ("musl", "aarch64-linux-musl", "crt1.o") →
 // "musl-aarch64-linux-musl-crt1.o".
 //
-// The arch is part of the NAME, not just the manifest's identity, because the
-// musl CRT is a *target* dependency: one host manifest can legitimately carry
-// several arches at once (a linux-amd64 host cross-linking for linux-arm64), and
-// an unqualified "musl-crt1.o" could only ever describe one of them. Keep the
-// format in lockstep with MuslManifestName in tools/build/common/musl_slim.go —
-// the two live in separate Go modules, so the format is duplicated by necessity.
-func muslManifestName(arch, file string) string {
-	return "musl-" + arch + "-" + file
+// The arch is part of the NAME, not just the manifest's identity, because these
+// are target dependencies: one host manifest can legitimately carry several
+// arches at once (a linux-amd64 host cross-linking for linux-arm64), and an
+// unqualified "musl-crt1.o" could only ever describe one of them. Keep the
+// format in lockstep with MuslManifestName / OpenSSLManifestName /
+// CompilerRTManifestName in tools/build/common — those live in a separate Go
+// module, so the format is duplicated by necessity (pinned by
+// TestMuslManifestName, TestOpenSSLManifestName, TestCompilerRTManifestName).
+func targetDepManifestName(dep, arch, file string) string {
+	return dep + "-" + arch + "-" + file
 }
 
-// resolveMuslCRTView materializes the musl CRT objects from the CAS into a
-// per-arch view dir (cache/crt-view/<arch>/). Returns ("", nil) when the
-// manifest carries no musl entries for this arch (thin placeholder / an arch
-// this binary's manifest doesn't cover), so the caller falls through to its
-// embedded/system probes. A fetch failure surfaces the offline / broken-release
-// error.
-func resolveMuslCRTView(arch string) (string, error) {
-	m, err := loadEmbeddedManifest()
-	if err != nil || m == nil {
-		return "", nil
-	}
-	var entries []*blobstore.ManifestEntry
-	for _, f := range muslCRTFiles {
-		e, ok := m.Lookup(muslManifestName(arch, f))
-		if !ok {
-			return "", nil // manifest doesn't carry musl blobs → fall through
-		}
-		entries = append(entries, e)
-	}
-	home, err := module.PromiseHome()
-	if err != nil {
-		return "", err
-	}
-	// Content-key the view dir on the blob set (see resolveLLVMView) so a CRT
-	// version bump never serves stale objects from a name-only match.
-	viewDir := filepath.Join(home, "cache", "crt-view", arch+"-"+blobSetKey(entries))
-	// Fast path: a previously published view (lock-free).
-	if muslCRTComplete(viewDir) {
-		return viewDir, nil
-	}
-	store, err := blobstore.NewStore()
-	if err != nil {
-		return "", err
-	}
-	// Serialize population across processes (same atomic-publish barrier as the
-	// LLVM view) so a partially-built CRT view is never observable. Lock lives
-	// outside the crt-view tree so CleanCRTCache can't delete it mid-hold.
-	lockPath := filepath.Join(home, "cache", "crt-view.lock")
-	unlock, err := blobstore.Lock(lockPath, "promise (materializing musl CRT)",
-		"Waiting for another process to finish staging the musl CRT...")
-	if err != nil {
-		return "", err
-	}
-	defer unlock()
-	// Double-checked after acquiring the lock.
-	if muslCRTComplete(viewDir) {
-		return viewDir, nil
-	}
-	resolver := blobstore.NewResolver(store, m)
-	defer resolver.Close()
-	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
-		for _, f := range muslCRTFiles {
-			name := muslManifestName(arch, f)
-			entry, _ := m.Lookup(name)
-			var blobPath string
-			if store.Has(entry.SHA256) {
-				blobPath = store.BlobPath(entry.SHA256)
-			} else {
-				p, rerr := resolver.Resolve(name)
-				if rerr != nil {
-					return rerr
-				}
-				blobPath = p
-			}
-			copyFile(blobPath, filepath.Join(tmpDir, f), 0o644)
-		}
-		return nil
-	}); err != nil {
-		return "", err
-	}
-	return viewDir, nil
-}
+func muslManifestName(arch, file string) string { return targetDepManifestName("musl", arch, file) }
 
-// opensslManifestName is the runtime-manifest logical name for one static
-// OpenSSL archive on one arch, e.g. ("aarch64-linux-musl", "libssl.a") →
-// "openssl-aarch64-linux-musl-libssl.a".
-//
-// The arch is part of the NAME, not just the manifest's identity, because
-// OpenSSL is a *target* dependency (same reasoning as muslManifestName): one
-// host manifest can carry several arches at once. Keep the format in lockstep
-// with OpenSSLManifestName in tools/build/common/openssl_slim.go — the two live
-// in separate Go modules, so the format is duplicated by necessity (pinned by
-// TestOpenSSLManifestName). T1596 / #28.
 func opensslManifestName(arch, file string) string {
-	return "openssl-" + arch + "-" + file
+	return targetDepManifestName("openssl", arch, file)
 }
 
-// resolveOpenSSLView materializes the static OpenSSL archives from the CAS into
-// a per-arch view dir (cache/openssl-view/<arch>/). Returns ("", nil) when the
-// manifest carries no openssl entries for this arch (thin placeholder / an arch
-// this binary's manifest doesn't cover), so the caller falls through to its
-// embedded probe. A fetch failure surfaces the offline / broken-release error.
+func compilerRTManifestName(arch, file string) string {
+	return targetDepManifestName("compiler-rt", arch, file)
+}
+
+// resolveTargetDepView materializes one per-arch target dependency (musl CRT,
+// static OpenSSL, compiler-rt builtins) from the CAS into a view dir at
+// cache/<viewSubdir>/<arch>-<blobSetKey>/. Returns ("", nil) when the embedded
+// manifest carries no entries for this dep+arch (thin placeholder / an arch this
+// binary's manifest doesn't cover), so the caller falls through to its
+// embedded/system probes. A fetch failure surfaces the offline /
+// broken-release error.
 //
-// Exact mirror of resolveMuslCRTView (T1596 / #28). Reuses the same blobstore, lock,
-// and atomic-publish primitives.
-func resolveOpenSSLView(arch string) (string, error) {
+// One implementation for all three: the dependencies differ only in their file
+// set and cache-dir name, and every one of them wants the same atomic-publish
+// barrier. `holder` names this process in the lock file; `waiting` is shown to
+// a process that has to wait for it.
+//
+// The view dir is content-keyed on the blob set (see resolveLLVMView) so a
+// version bump never serves stale files from a name-only match. The lock file
+// lives OUTSIDE the view tree so cache cleanup (CleanCRTCache) can't delete it
+// mid-hold.
+func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, waiting string) (string, error) {
 	m, err := loadEmbeddedManifest()
 	if err != nil || m == nil {
 		return "", nil
 	}
 	var entries []*blobstore.ManifestEntry
-	for _, f := range opensslFiles {
-		e, ok := m.Lookup(opensslManifestName(arch, f))
+	for _, f := range files {
+		e, ok := m.Lookup(targetDepManifestName(dep, arch, f))
 		if !ok {
-			return "", nil // manifest doesn't carry openssl blobs → fall through
+			return "", nil // manifest doesn't carry this dep's blobs → fall through
 		}
 		entries = append(entries, e)
 	}
@@ -711,36 +645,32 @@ func resolveOpenSSLView(arch string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Content-key the view dir on the blob set (see resolveMuslCRTView) so an
-	// OpenSSL version bump never serves stale archives from a name-only match.
-	viewDir := filepath.Join(home, "cache", "openssl-view", arch+"-"+blobSetKey(entries))
+	viewDir := filepath.Join(home, "cache", viewSubdir, arch+"-"+blobSetKey(entries))
 	// Fast path: a previously published view (lock-free).
-	if openSSLComplete(viewDir) {
+	if depFilesPresent(viewDir, files) {
 		return viewDir, nil
 	}
 	store, err := blobstore.NewStore()
 	if err != nil {
 		return "", err
 	}
-	// Serialize population across processes (same atomic-publish barrier as the
-	// musl CRT view). Lock lives outside the view tree so cache cleanup can't
-	// delete it mid-hold.
-	lockPath := filepath.Join(home, "cache", "openssl-view.lock")
-	unlock, err := blobstore.Lock(lockPath, "promise (materializing OpenSSL)",
-		"Waiting for another process to finish staging OpenSSL...")
+	// Serialize population across processes so a partially-built view is never
+	// observable (same barrier as the LLVM view).
+	lockPath := filepath.Join(home, "cache", viewSubdir+".lock")
+	unlock, err := blobstore.Lock(lockPath, holder, waiting)
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
 	// Double-checked after acquiring the lock.
-	if openSSLComplete(viewDir) {
+	if depFilesPresent(viewDir, files) {
 		return viewDir, nil
 	}
 	resolver := blobstore.NewResolver(store, m)
 	defer resolver.Close()
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
-		for _, f := range opensslFiles {
-			name := opensslManifestName(arch, f)
+		for _, f := range files {
+			name := targetDepManifestName(dep, arch, f)
 			entry, _ := m.Lookup(name)
 			var blobPath string
 			if store.Has(entry.SHA256) {
@@ -759,6 +689,29 @@ func resolveOpenSSLView(arch string) (string, error) {
 		return "", err
 	}
 	return viewDir, nil
+}
+
+// resolveMuslCRTView materializes the musl CRT objects from the CAS (T0530).
+func resolveMuslCRTView(arch string) (string, error) {
+	return resolveTargetDepView("musl", "crt-view", arch, muslCRTFiles,
+		"promise (materializing musl CRT)",
+		"Waiting for another process to finish staging the musl CRT...")
+}
+
+// resolveOpenSSLView materializes the static OpenSSL archives from the CAS
+// (T1596 / #28).
+func resolveOpenSSLView(arch string) (string, error) {
+	return resolveTargetDepView("openssl", "openssl-view", arch, opensslFiles,
+		"promise (materializing OpenSSL)",
+		"Waiting for another process to finish staging OpenSSL...")
+}
+
+// resolveCompilerRTView materializes the compiler-rt builtins archive from the
+// CAS (T1676).
+func resolveCompilerRTView(arch string) (string, error) {
+	return resolveTargetDepView("compiler-rt", "compiler-rt-view", arch, compilerRTFiles,
+		"promise (materializing compiler-rt builtins)",
+		"Waiting for another process to finish staging the compiler-rt builtins...")
 }
 
 // unbrotliBytes decompresses a brotli byte slice.

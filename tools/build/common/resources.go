@@ -247,6 +247,58 @@ func EmbedOpenSSL(root string) error {
 	return nil
 }
 
+// EmbedCompilerRT stages the musl-built compiler-rt builtins archive
+// (libclang_rt.builtins.a) into resources/compiler-rt/<musl-arch>/ for
+// `//go:embed` (Linux hosts only — see
+// compiler/cmd/promise/compiler_rt_linux_*.go; other hosts compile
+// compiler_rt_other.go's empty stub and need nothing staged).
+//
+// Modeled on EmbedMuslCRT, and FATAL like it rather than best-effort like
+// EmbedOpenSSL: the archive is spliced onto every musl link line (musl's own
+// libc.a references the aarch64 soft-float binary128 helpers), so a build that
+// silently skipped it would produce a compiler that cannot link — exactly the
+// T1676 release blocker returning by the back door.
+//
+// Only the HOST arch is staged: the embed directive is per-GOARCH, and
+// cross-arch Linux linking resolves its builtins from the content-addressed
+// store at link time (the arch-qualified `compiler-rt-<arch>-*` manifest
+// entries) rather than doubling every Linux binary's embedded archive.
+func EmbedCompilerRT(root string) error {
+	if !IsLinux() {
+		return nil
+	}
+	target := CurrentBuildTarget()
+	arch, err := CompilerRTArchDir(target)
+	if err != nil {
+		return err
+	}
+	src, err := EnsureCompilerRTBlobs(root, target)
+	if err != nil {
+		return fmt.Errorf("fetch compiler-rt builtins for %s: %w", target, err)
+	}
+	pm, err := LoadPrebuiltsManifest(root)
+	if err != nil {
+		return err
+	}
+	tEntry := pm.Binaries["compiler-rt"].Targets[target]
+
+	// Wipe first so a file dropped from prebuilts.toml can't linger and get
+	// swept back in by the embed glob (mirrors EmbedMuslCRT).
+	dst := filepath.Join(root, "compiler", "cmd", "promise", "resources", "compiler-rt", arch)
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	for _, f := range tEntry.ClientFiles() {
+		if err := copyFile(filepath.Join(src, f.Out), filepath.Join(dst, f.Out)); err != nil {
+			return fmt.Errorf("stage compiler-rt %s: %w", f.Out, err)
+		}
+	}
+	return nil
+}
+
 // writeOpenSSLPlaceholder drops the sentinel that keeps the go:embed directive
 // satisfiable when the real archives aren't available. See
 // openSSLPlaceholderName.

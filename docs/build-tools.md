@@ -97,6 +97,8 @@ Also computes `resources/.sources.sha256` — a sorted list of SHA256 hashes for
 
 **Linux only:** Stages the musl C runtime objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) into `resources/crt/<musl-arch>/` for static linking. The bytes come from the pinned `[binaries.musl]` prebuilt — a hosted content-addressed blob, or the upstream Alpine `musl-dev` apk on a catalog miss — **never** from the build host's `/usr/lib` (T0530). No `musl-dev` package is required on the build host. Only the host arch is staged; cross-arch Linux linking resolves its CRT from the content-addressed store at link time via the arch-qualified `musl-<arch>-*` manifest entries.
 
+**Linux only:** Stages the compiler-rt builtins archive (`libclang_rt.builtins.a`) into `resources/compiler-rt/<musl-arch>/` the same way, from the pinned `[binaries.compiler-rt]` prebuilt (T1676). Like the CRT and unlike OpenSSL this step is **fatal** on failure: the archive is spliced onto every musl link line, so a build that skipped it would produce a compiler that cannot link.
+
 ### 4. LLVM detection
 
 The compiler requires LLVM 22-25. The build tool searches for `opt` and `lld` in this order:

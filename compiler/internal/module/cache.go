@@ -721,18 +721,27 @@ func CleanLLVMCache() error {
 	return err
 }
 
-// CleanCRTCache removes all cached CRT extractions (musl, WASM), including the
-// content-addressed view dirs (T0769). CAS blobs are left intact.
+// CleanCRTCache removes all cached CRT extractions (musl, WASM) and the
+// compiler-rt builtins archive, including the content-addressed view dirs
+// (T0769, T1676). CAS blobs are left intact.
+//
+// The builtins archive belongs here for the same reason the musl CRT does: it
+// is an unconditional input to every Linux link, extracted from the compiler
+// binary, so a compiler change must be able to invalidate it. (Its cache dir is
+// additionally size-validated against the embedded copy — this is belt and
+// braces, matching the musl CRT.)
 func CleanCRTCache() error {
 	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
-	err = os.RemoveAll(filepath.Join(home, "cache", "crt"))
-	if e := os.RemoveAll(filepath.Join(home, "cache", "crt-view")); e != nil && err == nil {
-		err = e
+	var firstErr error
+	for _, dir := range []string{"crt", "crt-view", "compiler-rt", "compiler-rt-view"} {
+		if e := os.RemoveAll(filepath.Join(home, "cache", dir)); e != nil && firstErr == nil {
+			firstErr = e
+		}
 	}
-	return err
+	return firstErr
 }
 
 // CleanBuildCache removes all entries from the build cache.

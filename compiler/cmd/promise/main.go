@@ -4616,6 +4616,60 @@ func buildLinuxLinkArgs(target, objFile, outputFile string, useLTO bool) []strin
 	return args
 }
 
+// --- Per-arch target dependencies (musl CRT, static OpenSSL, compiler-rt) ---
+//
+// All three Linux target dependencies are staged identically: a flat set of
+// files under a per-arch directory, found through the same five-step ladder
+// (exe sibling -> <PROMISE_HOME>/lib -> <PROMISE_HOME>/cache -> CAS view ->
+// embedded extraction). The two predicates that ladder is built from live here
+// so there is one implementation rather than one per dependency. The ladders
+// themselves stay separate: their "not available" errors differ, and so does
+// whether absence is fatal (musl CRT and compiler-rt are required for every
+// Linux link; OpenSSL only for TLS programs).
+
+// depFilesPresent reports whether every name in files exists in dir.
+func depFilesPresent(dir string, files []string) bool {
+	for _, name := range files {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// depFilesMatchEmbedded reports whether every name in files exists in dir with
+// the same size as the copy embedded under prefix in fsys - the cache-validity
+// check for a dir this binary populated from its own embedded resources. Uses
+// fs.DirEntry.Info() so sizes are compared without reading contents into
+// memory. A prefix the embed FS does not carry (a cross-arch dir, or a build
+// that embedded only a placeholder) reads as "cannot validate" -> false, so the
+// caller falls through to its next probe.
+func depFilesMatchEmbedded(fsys embed.FS, prefix, dir string, files []string) bool {
+	entries, err := fsys.ReadDir(prefix)
+	if err != nil {
+		return false
+	}
+	embeddedSizes := make(map[string]int64, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			return false
+		}
+		embeddedSizes[e.Name()] = info.Size()
+	}
+	for _, name := range files {
+		cached, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return false
+		}
+		embSize, ok := embeddedSizes[name]
+		if !ok || cached.Size() != embSize {
+			return false
+		}
+	}
+	return true
+}
+
 // --- Musl CRT (Phase 7b') ---
 
 // muslCRTFiles lists the musl CRT objects needed for static linking.
@@ -4630,52 +4684,14 @@ func muslArchDir(target string) string {
 }
 
 // muslCRTComplete checks if all required musl CRT files exist in dir.
-func muslCRTComplete(dir string) bool {
-	for _, name := range muslCRTFiles {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			return false
-		}
-	}
-	return true
-}
+func muslCRTComplete(dir string) bool { return depFilesPresent(dir, muslCRTFiles) }
 
 // muslCRTValid checks if cached musl CRT files match the embedded versions (by size).
-// Uses fs.DirEntry.Info() to compare sizes without reading file contents into memory.
 func muslCRTValid(dir string) bool {
 	if !hasEmbeddedMuslCRT {
 		return muslCRTComplete(dir)
 	}
-	arch := filepath.Base(dir)
-	prefix := "resources/crt/" + arch
-
-	// Build a size map from the embedded FS
-	entries, err := embeddedMuslCRT.ReadDir(prefix)
-	if err != nil {
-		return false
-	}
-	embeddedSizes := make(map[string]int64, len(entries))
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
-			return false
-		}
-		embeddedSizes[e.Name()] = info.Size()
-	}
-
-	for _, name := range muslCRTFiles {
-		cached, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			return false
-		}
-		embSize, ok := embeddedSizes[name]
-		if !ok {
-			return false
-		}
-		if cached.Size() != embSize {
-			return false
-		}
-	}
-	return true
+	return depFilesMatchEmbedded(embeddedMuslCRT, "resources/crt/"+filepath.Base(dir), dir, muslCRTFiles)
 }
 
 // findMuslCRT locates musl CRT objects for static linking.
@@ -4761,15 +4777,8 @@ func opensslArchDir(target string) string {
 
 // openSSLComplete reports whether every required OpenSSL archive exists in dir.
 // A dir holding only EmbedOpenSSL's PLACEHOLDER sentinel fails this check — which
-// is the intended reading of "OpenSSL not available" while TLS is unwired.
-func openSSLComplete(dir string) bool {
-	for _, name := range opensslFiles {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			return false
-		}
-	}
-	return true
-}
+// is the intended reading of "OpenSSL not available".
+func openSSLComplete(dir string) bool { return depFilesPresent(dir, opensslFiles) }
 
 // openSSLValid checks that cached OpenSSL archives match the embedded versions
 // (by size). Mirrors muslCRTValid. When nothing real is embedded (placeholder
@@ -4780,36 +4789,7 @@ func openSSLValid(dir string) bool {
 	if !hasEmbeddedOpenSSL {
 		return openSSLComplete(dir)
 	}
-	arch := filepath.Base(dir)
-	prefix := "resources/openssl/" + arch
-
-	entries, err := embeddedOpenSSL.ReadDir(prefix)
-	if err != nil {
-		return false
-	}
-	embeddedSizes := make(map[string]int64, len(entries))
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
-			return false
-		}
-		embeddedSizes[e.Name()] = info.Size()
-	}
-
-	for _, name := range opensslFiles {
-		cached, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			return false
-		}
-		embSize, ok := embeddedSizes[name]
-		if !ok {
-			return false
-		}
-		if cached.Size() != embSize {
-			return false
-		}
-	}
-	return true
+	return depFilesMatchEmbedded(embeddedOpenSSL, "resources/openssl/"+filepath.Base(dir), dir, opensslFiles)
 }
 
 // findOpenSSL locates the static OpenSSL archives (libssl.a, libcrypto.a) for a
@@ -4885,6 +4865,101 @@ func findOpenSSL(target string) (string, error) {
 	return cacheDir, nil
 }
 
+// --- compiler-rt builtins (T1676) ---
+
+// compilerRTFiles lists the compiler-rt archives spliced onto every musl link
+// line. Single source of truth shared with resolveCompilerRTView in llvm_cas.go.
+var compilerRTFiles = []string{"libclang_rt.builtins.a"}
+
+// compilerRTArchDir returns the builtins subdirectory name for the given target
+// triple. Reuses the musl arch layout (the archive IS the musl build of
+// compiler-rt), so it is identical to muslArchDir.
+func compilerRTArchDir(target string) string {
+	return muslArchDir(target)
+}
+
+// compilerRTComplete reports whether every required builtins archive exists in dir.
+func compilerRTComplete(dir string) bool { return depFilesPresent(dir, compilerRTFiles) }
+
+// compilerRTValid checks that cached builtins archives match the embedded
+// versions (by size). Mirrors muslCRTValid.
+func compilerRTValid(dir string) bool {
+	if !hasEmbeddedCompilerRT {
+		return compilerRTComplete(dir)
+	}
+	return depFilesMatchEmbedded(embeddedCompilerRT, "resources/compiler-rt/"+filepath.Base(dir), dir, compilerRTFiles)
+}
+
+// findCompilerRT locates the compiler-rt builtins archive for a musl static
+// link (T1676). Exact mirror of findMuslCRT's discovery ladder:
+//  1. Sibling of promise binary: {exe_dir}/compiler-rt/{arch}/
+//  2. Installed location: <PROMISE_HOME>/lib/compiler-rt/{arch}/
+//  3. Cache dir: <PROMISE_HOME>/cache/compiler-rt/{arch}/
+//  4. Content-addressed store view (when the manifest carries compiler-rt blobs)
+//  5. Extract the embedded archive to cache (the working path today)
+//
+// Unlike findOpenSSL this is called for EVERY musl link, not just TLS programs:
+// musl's own libc.a references the aarch64 soft-float binary128 helpers, and
+// prebuilt aarch64 objects reference the LSE outline-atomics helpers.
+func findCompilerRT(target string) (string, error) {
+	ensureCacheValid()
+
+	arch := compilerRTArchDir(target)
+
+	// 1. Sibling of promise binary
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(execPath), "compiler-rt", arch)
+		if compilerRTComplete(dir) {
+			return dir, nil
+		}
+	}
+
+	promiseHome, err := module.PromiseHome()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise home: %v", err)
+	}
+
+	// 2. Installed location (<PROMISE_HOME>/lib/compiler-rt/{arch}/)
+	installDir := filepath.Join(promiseHome, "lib", "compiler-rt", arch)
+	if compilerRTComplete(installDir) {
+		return installDir, nil
+	}
+
+	// 3. Cache dir (<PROMISE_HOME>/cache/compiler-rt/{arch}/)
+	cacheDir := filepath.Join(promiseHome, "cache", "compiler-rt", arch)
+	if compilerRTValid(cacheDir) {
+		return cacheDir, nil
+	}
+
+	// 4. Content-addressed store — resolve compiler-rt blobs into a per-arch
+	//    view dir, but only when the manifest carries compiler-rt entries.
+	//    Returns "" otherwise so we fall through.
+	if viewDir, verr := resolveCompilerRTView(arch); verr != nil {
+		return "", verr
+	} else if viewDir != "" {
+		return viewDir, nil
+	}
+
+	// 5. Extract the embedded archive to the cache dir.
+	if !hasEmbeddedCompilerRT {
+		return "", fmt.Errorf("compiler-rt builtins not available for %s\n  this binary was not built with embedded compiler-rt and the manifest has no compiler-rt blobs\n  publish blobs via `bin/release publish-blobs --dependency compiler-rt --host <target>`, or set PROMISE_USE_CLANG=1 to use clang with system glibc instead", arch)
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create compiler-rt cache dir %s: %v", cacheDir, err)
+	}
+	prefix := "resources/compiler-rt/" + arch
+	for _, name := range compilerRTFiles {
+		data, err := embeddedCompilerRT.ReadFile(prefix + "/" + name)
+		if err != nil {
+			return "", fmt.Errorf("compiler-rt builtins not available for %s: embedded %s missing (build did not embed the archive)\n  publish blobs via `bin/release publish-blobs --dependency compiler-rt --host <target>`", arch, name)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
+			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
+		}
+	}
+	return cacheDir, nil
+}
+
 // resolveOpenSSLDir returns the directory holding libssl.a + libcrypto.a for the
 // given Linux target, or "" when the program needs no TLS. Called only from the
 // musl static-link paths (linkLinux / linkLinuxMulti); other platforms use their
@@ -4903,9 +4978,21 @@ func resolveOpenSSLDir(target string, needsTLS bool) (string, error) {
 // spliced in AFTER the object files and BEFORE libc.a. Static-archive
 // resolution is order-sensitive: OpenSSL's libc references must resolve against
 // the later libc.a, and libssl's references against the later libcrypto.a
-// (T1596 / #28). Shared by the single-file (linkLinux) and multi-file (linkLinuxMulti)
-// musl paths so the arg construction lives in exactly one place.
-func buildMuslLinkArgs(target string, objFiles []string, outputFile, crtDir string, useLTO bool, opensslDir string) []string {
+// (T1596 / #28).
+//
+// builtinsDir holds the compiler-rt builtins archive, which goes AFTER libc.a
+// and before crtn.o (T1676). That position is deliberate and load-bearing:
+// musl's OWN libc.a references the soft-float IEEE binary128 helpers
+// (__addtf3, __trunctfdf2, …) from its float printf/scanf path on aarch64, so
+// the builtins must come after it to satisfy them. lld's lazy archive
+// resolution still lets the builtins' own libc references (getauxval, malloc,
+// memcpy, …) resolve back into the EARLIER libc.a, so no `--start-group` is
+// required. Unlike OpenSSL this is unconditional — every musl link gets it;
+// unreferenced archive members are simply never extracted.
+//
+// Shared by the single-file (linkLinux) and multi-file (linkLinuxMulti) musl
+// paths so the arg construction lives in exactly one place.
+func buildMuslLinkArgs(target string, objFiles []string, outputFile, crtDir string, useLTO bool, opensslDir, builtinsDir string) []string {
 	args := []string{
 		"-m", emulationMode(target),
 		"-static",
@@ -4929,10 +5016,11 @@ func buildMuslLinkArgs(target string, objFiles []string, outputFile, crtDir stri
 			filepath.Join(opensslDir, "libcrypto.a"),
 		)
 	}
-	args = append(args,
-		filepath.Join(crtDir, "libc.a"),
-		filepath.Join(crtDir, "crtn.o"),
-	)
+	args = append(args, filepath.Join(crtDir, "libc.a"))
+	if builtinsDir != "" {
+		args = append(args, filepath.Join(builtinsDir, "libclang_rt.builtins.a"))
+	}
+	args = append(args, filepath.Join(crtDir, "crtn.o"))
 	return args
 }
 
@@ -5446,11 +5534,15 @@ func linkLinux(objFile, target, outputFile string, useLTO, needsTLS bool) error 
 		if err != nil {
 			return fmt.Errorf("error: %w", err)
 		}
+		builtinsDir, err := findCompilerRT(target)
+		if err != nil {
+			return fmt.Errorf("error: %w", err)
+		}
 		opensslDir, err := resolveOpenSSLDir(target, needsTLS)
 		if err != nil {
 			return fmt.Errorf("error: %w", err)
 		}
-		linkArgs = buildMuslLinkArgs(target, []string{objFile}, outputFile, crtDir, useLTO, opensslDir)
+		linkArgs = buildMuslLinkArgs(target, []string{objFile}, outputFile, crtDir, useLTO, opensslDir, builtinsDir)
 	} else {
 		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile, useLTO)
 	}
@@ -5542,12 +5634,17 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO, needsT
 		if err != nil {
 			return fmt.Errorf("error: %w", err)
 		}
+		builtinsDir, err := findCompilerRT(target)
+		if err != nil {
+			return fmt.Errorf("error: %w", err)
+		}
 		opensslDir, err := resolveOpenSSLDir(target, needsTLS)
 		if err != nil {
 			return fmt.Errorf("error: %w", err)
 		}
-		// Shared with the single-file path so OpenSSL splicing lives in one place.
-		linkArgs = buildMuslLinkArgs(target, objFiles, outputFile, crtDir, useLTO, opensslDir)
+		// Shared with the single-file path so OpenSSL/builtins splicing lives in
+		// one place.
+		linkArgs = buildMuslLinkArgs(target, objFiles, outputFile, crtDir, useLTO, opensslDir, builtinsDir)
 	} else {
 		crt, err := findCRT(target)
 		if err != nil {
@@ -9399,6 +9496,22 @@ func runInstall(args []string) {
 		extractEmbedded(embeddedMuslCRT, "resources/crt/"+arch, crtDest)
 	}
 
+	// Extract the embedded compiler-rt builtins archive into the epoch lib dir
+	// (Linux, T1676). Required by every musl link, so unlike OpenSSL there is no
+	// placeholder case: a build that got here always embedded the real archive.
+	if hasEmbeddedCompilerRT {
+		arch := "x86_64-linux-musl"
+		if runtime.GOARCH == "arm64" {
+			arch = "aarch64-linux-musl"
+		}
+		builtinsDest := filepath.Join(epochLibDir, "compiler-rt", arch)
+		if err := os.MkdirAll(builtinsDest, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", builtinsDest, err)
+			os.Exit(1)
+		}
+		extractEmbedded(embeddedCompilerRT, "resources/compiler-rt/"+arch, builtinsDest)
+	}
+
 	// Extract embedded static OpenSSL archives into the epoch lib dir (Linux,
 	// T1596 / #28). Only a full build with real archives ships them; a thin / offline /
 	// not-yet-pinned build embedded only a placeholder, which extracts harmlessly
@@ -9770,6 +9883,11 @@ func hydrateHostToolchain() error {
 			target = "aarch64-unknown-linux-musl"
 		}
 		if _, err := findMuslCRT(target); err != nil {
+			return err
+		}
+		// The compiler-rt builtins archive is on every musl link line (T1676),
+		// so an "offline builds are ready" claim is false without it.
+		if _, err := findCompilerRT(target); err != nil {
 			return err
 		}
 	}

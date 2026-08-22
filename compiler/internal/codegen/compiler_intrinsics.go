@@ -269,13 +269,22 @@ func (c *Compiler) declareIntrinsics() {
 	if c.isWasm {
 		c.emitMulti3()
 	}
-	// __udivti3/__umodti3/__divti3/__modti3 (128-bit div/rem builtins) are needed
-	// on EVERY target, not just wasm: the default linux target statically links
-	// musl with no compiler-rt/libgcc, so these symbols are otherwise unresolved
-	// (T1399). Emitted with external linkage in the main IR (declared extern in
-	// split module/instance .bc files). On the glibc dynamic path this strong
-	// definition simply satisfies the reference before -lgcc's archive member is
-	// consulted, so libgcc's copy is never pulled — no duplicate-symbol error.
+	// __udivti3/__umodti3/__divti3/__modti3 (128-bit div/rem builtins) are
+	// emitted on EVERY target, not just wasm (T1399). Emitted with external
+	// linkage in the main IR (declared extern in split module/instance .bc
+	// files).
+	//
+	// The original justification — "the linux target statically links musl with
+	// no compiler-rt/libgcc, so these are otherwise unresolved" — no longer
+	// holds: T1676 put a real musl-built compiler-rt builtins archive on every
+	// Linux musl link line (it had to, for aarch64's soft-float binary128 and
+	// LSE outline-atomics helpers, which cannot be honestly defined in-IR). But
+	// wasm still links no compiler runtime at all, so these definitions are
+	// still required there, and keeping them unconditional is harmless
+	// everywhere else: a strong definition simply satisfies the reference
+	// before the archive member is consulted, so the archive's copy is never
+	// pulled — no duplicate-symbol error. Same reasoning as the glibc/-lgcc
+	// dynamic path.
 	c.emitDivTi3()
 
 	// Signal pipe read fd global (NOT TLS — dispatch goroutine reads from it)

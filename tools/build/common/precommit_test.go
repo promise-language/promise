@@ -20,8 +20,8 @@ func setupGitRepo(t *testing.T, headBaselines, stagedBaselines Baselines) string
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -31,7 +31,7 @@ func setupGitRepo(t *testing.T, headBaselines, stagedBaselines Baselines) string
 
 	git("init")
 	git("config", "user.name", "test")
-	git("config", "user.email", "test@test")
+	git("config", "user.email", "1+test@users.noreply.github.com")
 
 	// Create baselines.json under the expected path and commit.
 	gatesDir := filepath.Join(root, "tools", "gates")
@@ -66,8 +66,8 @@ func initGitRepoWithStagedFile(t *testing.T, relPath string) string {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -77,7 +77,7 @@ func initGitRepoWithStagedFile(t *testing.T, relPath string) string {
 
 	git("init")
 	git("config", "user.name", "test")
-	git("config", "user.email", "test@test")
+	git("config", "user.email", "1+test@users.noreply.github.com")
 
 	// Seed an initial commit so HEAD exists.
 	os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o644)
@@ -90,6 +90,76 @@ func initGitRepoWithStagedFile(t *testing.T, relPath string) string {
 	git("add", relPath)
 
 	return root
+}
+
+// initBareGitRepo creates an empty temp git repo (no commits) for tests that
+// only exercise 'git var', which works without a commit history. Identity is
+// driven entirely by the env vars each test sets via t.Setenv, which
+// RunOutputIn's subprocess inherits since it does not override cmd.Env.
+func initBareGitRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	return root
+}
+
+func TestCheckNoreplyIdentity_RejectsNonNoreplyAuthorEmail(t *testing.T) {
+	root := initBareGitRepo(t)
+
+	t.Setenv("GIT_AUTHOR_EMAIL", "personal@gmail.com")
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "1+test@users.noreply.github.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+
+	if err := checkNoreplyIdentity(root); err == nil {
+		t.Fatal("expected error for non-noreply author email, got nil")
+	}
+}
+
+func TestCheckNoreplyIdentity_RejectsNonNoreplyCommitterEmail(t *testing.T) {
+	root := initBareGitRepo(t)
+
+	t.Setenv("GIT_AUTHOR_EMAIL", "1+test@users.noreply.github.com")
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "personal@gmail.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+
+	if err := checkNoreplyIdentity(root); err == nil {
+		t.Fatal("expected error for non-noreply committer email, got nil")
+	}
+}
+
+func TestCheckNoreplyIdentity_AllowsNoreplyEmails(t *testing.T) {
+	root := initBareGitRepo(t)
+
+	t.Setenv("GIT_AUTHOR_EMAIL", "1+test@users.noreply.github.com")
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "1+test@users.noreply.github.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+
+	if err := checkNoreplyIdentity(root); err != nil {
+		t.Fatalf("expected no error for noreply emails, got: %v", err)
+	}
+}
+
+func TestIdentEmail(t *testing.T) {
+	cases := []struct {
+		ident string
+		want  string
+	}{
+		{"Test User <1+test@users.noreply.github.com> 1700000000 +0000", "1+test@users.noreply.github.com"},
+		{"Test User <> 1700000000 +0000", ""},
+		{"no angle brackets here", ""},
+	}
+	for _, c := range cases {
+		if got := identEmail(c.ident); got != c.want {
+			t.Errorf("identEmail(%q) = %q, want %q", c.ident, got, c.want)
+		}
+	}
 }
 
 func TestRunPreCommit_RejectsLogFile(t *testing.T) {

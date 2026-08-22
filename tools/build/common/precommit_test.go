@@ -1,7 +1,9 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +92,271 @@ func initGitRepoWithStagedFile(t *testing.T, relPath string) string {
 	git("add", relPath)
 
 	return root
+}
+
+// initGitRepoWithStager creates a temp git repo with one seed commit and a
+// noreply identity, and returns the repo root plus a stage function that writes
+// arbitrary bytes at a repo-relative path and `git add`s it. Used by the T1620
+// binary/size gate tests, which need to stage exact byte content (including
+// NUL) at arbitrary paths.
+func initGitRepoWithStager(t *testing.T) (string, func(rel string, content []byte)) {
+	t.Helper()
+	root := t.TempDir()
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	git("init")
+	git("config", "user.name", "test")
+	git("config", "user.email", "1+test@users.noreply.github.com")
+
+	os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o644)
+	git("add", "seed.txt")
+	git("commit", "-m", "seed")
+
+	stage := func(rel string, content []byte) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git("add", rel)
+	}
+
+	return root, stage
+}
+
+// TestRunPreCommit_RejectsBinaryAtUndeclaredPath: a blob with a NUL byte in its
+// first 8 KB, at a path not declared binary in .gitattributes, is rejected.
+func TestRunPreCommit_RejectsBinaryAtUndeclaredPath(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("assets/blob.dat", []byte{'a', 0x00, 'b'})
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error for binary content at undeclared path, got nil")
+	}
+}
+
+// TestRunPreCommit_AllowsBinaryAtDeclaredPath: a binary blob is admitted when
+// .gitattributes declares its path binary — via either `binary` (attribute set)
+// or `-text` (text unset). Both are the repo's real escape hatches.
+func TestRunPreCommit_AllowsBinaryAtDeclaredPath(t *testing.T) {
+	for _, decl := range []string{"assets/*.dat binary", "assets/*.dat -text"} {
+		t.Run(decl, func(t *testing.T) {
+			root, stage := initGitRepoWithStager(t)
+			stage(".gitattributes", []byte(decl+"\n"))
+			stage("assets/blob.dat", []byte{'a', 0x00, 'b'})
+			if err := RunPreCommit(root); err != nil {
+				t.Fatalf("expected no error for binary at declared path (%q), got: %v", decl, err)
+			}
+		})
+	}
+}
+
+// TestRunPreCommit_RejectsOversizedTextFile: the size gate is independent of the
+// binary gate — a large all-text (no NUL) blob is still rejected.
+func TestRunPreCommit_RejectsOversizedTextFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("data/big.json", bytes.Repeat([]byte{'a'}, maxCommittedFileSize+1))
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error for oversized text file, got nil")
+	}
+}
+
+// TestRunPreCommit_AllowsOneMegabyteTextFile: a blob of exactly the limit
+// passes — the boundary is inclusive.
+func TestRunPreCommit_AllowsOneMegabyteTextFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("data/exact.json", bytes.Repeat([]byte{'a'}, maxCommittedFileSize))
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("expected no error at exactly the size limit, got: %v", err)
+	}
+}
+
+// TestRunPreCommit_RejectsOversizedDeclaredBinary: the size gate is independent
+// of .gitattributes. A blob declared binary (so the content gate would admit it)
+// that is over the limit is still rejected — the acceptance criterion "a >1 MB
+// file fails ... independently of .gitattributes". Guards against the size check
+// being folded into the same escape hatch as the binary-content check.
+func TestRunPreCommit_RejectsOversizedDeclaredBinary(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage(".gitattributes", []byte("assets/*.dat binary\n"))
+	// Over the limit AND full of NUL — the content gate would admit it via the
+	// declaration, so the only thing that can reject it is the size gate.
+	stage("assets/blob.dat", bytes.Repeat([]byte{0x00}, maxCommittedFileSize+1))
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error — an oversized blob must fail the size gate even when declared binary")
+	}
+}
+
+// TestRunPreCommit_AllowsKnownBinariesViaRealGitattributes stages the repo's
+// actual .gitattributes escape-hatch lines and a binary blob at each of the
+// three real committed-binary paths, asserting all pass. Unlike
+// TestRunPreCommit_AllowsBinaryAtDeclaredPath (which uses a synthetic
+// assets/*.dat pattern to test the mechanism), this pins the real glob patterns
+// to the real filenames — a typo like '*.obj' or the wrong directory in either
+// the .gitattributes lines or the paths would be caught here.
+func TestRunPreCommit_AllowsKnownBinariesViaRealGitattributes(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	// The exact lines this item added / relies on in the repo's .gitattributes.
+	stage(".gitattributes", []byte(
+		"tests/embed/*.bin -text\n"+
+			"compiler/cmd/promise/crt/wasm32/*.o binary\n"))
+	nul := []byte{'a', 0x00, 'b'}
+	stage("compiler/cmd/promise/crt/wasm32/wasm_alloc.o", nul)
+	stage("compiler/cmd/promise/crt/wasm32/wasm_math.o", nul)
+	stage("tests/embed/data.bin", nul)
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("expected the three known binaries to pass via their .gitattributes declarations, got: %v", err)
+	}
+}
+
+// TestRunPreCommit_AllowsNulAfterScanWindow: the content gate mirrors git's
+// buffer_is_binary heuristic, which scans only the first 8 KB. A blob whose
+// first binaryScanLimit bytes are all text but that has a NUL past the window
+// passes — even at an undeclared path. Exercises the head[:binaryScanLimit]
+// truncation branch that the 3-byte blobs in the other tests never reach.
+func TestRunPreCommit_AllowsNulAfterScanWindow(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	blob := append(bytes.Repeat([]byte{'a'}, binaryScanLimit), 0x00, 'a', 'b')
+	stage("assets/late.dat", blob)
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("expected no error — the NUL is past the %d-byte scan window: %v", binaryScanLimit, err)
+	}
+}
+
+// TestRunPreCommit_RejectsNulAtScanWindowBoundary: the inverse boundary — a NUL
+// at the last scanned byte (index binaryScanLimit-1) is inside the window and is
+// rejected at an undeclared path. Together with the test above this pins the
+// exact 8 KB cutoff to git's semantics (scan indices 0..binaryScanLimit-1).
+func TestRunPreCommit_RejectsNulAtScanWindowBoundary(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	blob := append(bytes.Repeat([]byte{'a'}, binaryScanLimit-1), 0x00)
+	stage("assets/edge.dat", blob)
+	if err := RunPreCommit(root); err == nil {
+		t.Fatalf("expected error — a NUL at the last byte of the %d-byte window is inside it", binaryScanLimit)
+	}
+}
+
+// TestRunPreCommit_ReadsStagedBlobNotWorktree: the gate inspects the staged
+// (index) blob, not the worktree copy. Staging binary then overwriting the
+// worktree with text must still be rejected.
+func TestRunPreCommit_ReadsStagedBlobNotWorktree(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("assets/blob.dat", []byte{'a', 0x00, 'b'})
+	// Overwrite the worktree copy with plain text — do NOT re-stage.
+	if err := os.WriteFile(filepath.Join(root, "assets", "blob.dat"), []byte("now plain text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error — the gate must read the staged blob, not the worktree copy")
+	}
+}
+
+// TestRunPreCommit_IgnoresBinaryWorktreeWhenStagedIsText: the inverse — a text
+// blob is staged, then the worktree copy is overwritten with binary content
+// that is never staged. The commit passes.
+func TestRunPreCommit_IgnoresBinaryWorktreeWhenStagedIsText(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("assets/blob.dat", []byte("plain text\n"))
+	if err := os.WriteFile(filepath.Join(root, "assets", "blob.dat"), []byte{'a', 0x00, 'b'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("expected no error — staged blob is text; the worktree binary is not staged: %v", err)
+	}
+}
+
+// TestPathDeclaredBinary asserts the .gitattributes query: `binary` set and
+// `-text` (text unset) both qualify; an undeclared path does not.
+func TestPathDeclaredBinary(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage(".gitattributes", []byte("a/*.bin binary\nb/*.dat -text\n"))
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"a/x.bin", true},  // binary attribute set
+		{"b/x.dat", true},  // text unset (-text)
+		{"c/x.txt", false}, // undeclared
+	}
+	for _, c := range cases {
+		got, err := pathDeclaredBinary(root, c.path)
+		if err != nil {
+			t.Fatalf("pathDeclaredBinary(%q): %v", c.path, err)
+		}
+		if got != c.want {
+			t.Errorf("pathDeclaredBinary(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+// TestRunPreCommit_StagedDeletionIsQuiet stages a file deletion and asserts the
+// commit passes AND does not leak git's `fatal:` diagnostic to stderr. The size
+// probe (`cat-file -s :path`) necessarily fails for a deleted path — that
+// failure is expected and handled by skipping the file — so it must stay quiet.
+// Guards the RunOutputQuietIn choice against a regression to a stderr-connected
+// probe, which would print `fatal:` on every commit that removes a file.
+func TestRunPreCommit_StagedDeletionIsQuiet(t *testing.T) {
+	root, _ := initGitRepoWithStager(t)
+
+	// Stage the deletion of the seed file the helper committed.
+	rm := exec.Command("git", "rm", "-q", "seed.txt")
+	rm.Dir = root
+	if out, err := rm.CombinedOutput(); err != nil {
+		t.Fatalf("git rm seed.txt: %v\n%s", err, out)
+	}
+
+	// Capture os.Stderr around the check — RunOutputIn wires child stderr to the
+	// current os.Stderr, so a regression would land in the pipe.
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	runErr := RunPreCommit(root)
+	os.Stderr = orig
+	w.Close()
+	captured, _ := io.ReadAll(r)
+	r.Close()
+
+	if runErr != nil {
+		t.Fatalf("staged deletion must pass the binary/size gate, got: %v", runErr)
+	}
+	if bytes.Contains(captured, []byte("fatal")) {
+		t.Fatalf("staged deletion leaked a git diagnostic to stderr:\n%s", captured)
+	}
+}
+
+// TestRunBytesIn_PreservesRawBytes locks RunBytesIn's contract: it returns the
+// child's stdout byte-for-byte, untrimmed. This is why the binary-content gate
+// uses it instead of RunOutputIn (whose TrimSpace would corrupt a blob). The
+// seed file is committed as "seed\n"; RunOutputIn would strip the trailing
+// newline, RunBytesIn must not. Guards against a "simplification" that reroutes
+// RunBytesIn through the trimming helper.
+func TestRunBytesIn_PreservesRawBytes(t *testing.T) {
+	root, _ := initGitRepoWithStager(t)
+	raw, err := RunBytesIn(root, "git", "cat-file", "blob", ":seed.txt")
+	if err != nil {
+		t.Fatalf("RunBytesIn: %v", err)
+	}
+	if string(raw) != "seed\n" {
+		t.Fatalf("RunBytesIn returned %q, want %q (trailing newline must be preserved)", raw, "seed\n")
+	}
 }
 
 // initBareGitRepo creates an empty temp git repo (no commits) for tests that

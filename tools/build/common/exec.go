@@ -63,6 +63,37 @@ func RunOutputIn(dir string, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// RunOutputQuietIn executes a command in the given directory returning stdout,
+// with stderr discarded. Use for probes whose failure is expected and handled
+// by the caller (e.g. `git cat-file -s :path` on a staged deletion, which fails
+// with a `fatal:` diagnostic) so git's message does not leak to the terminal
+// during an otherwise-clean commit.
+func RunOutputQuietIn(dir string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stderr = nil
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// RunBytesIn executes a command in the given directory and returns its raw
+// stdout bytes, untrimmed. Use for binary output such as `git cat-file blob`,
+// where RunOutputIn's TrimSpace would corrupt the content. Stderr is connected
+// to the terminal.
+func RunBytesIn(dir string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return out, nil
+}
+
 // RunTee executes a command in the given directory, streaming stdout to
 // os.Stdout in real-time while also capturing and returning it as a string.
 // Stderr remains connected to os.Stderr.

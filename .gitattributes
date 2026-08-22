@@ -4,6 +4,11 @@ tests/embed/*.sql -text
 tests/embed/*.md -text
 tests/embed/glob_fixtures/** -text
 
+# WASM CRT objects are prebuilt and //go:embed'd into the compiler (rebuilding
+# them needs a WASM-capable clang, which conflicts with the zero-dependency
+# mandate). Declared binary so the pre-commit no-binary gate admits them (T1620).
+compiler/cmd/promise/crt/wasm32/*.o binary
+
 # Shell scripts must stay LF — they are published verbatim (bin/release
 # publish-install reads the working tree) and run by POSIX sh. A CRLF copy
 # breaks `set -eu` etc. on the dist bucket (T0820).

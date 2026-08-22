@@ -20,6 +20,8 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Always run `bin/verify --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). Build tools default to a local cache directory (`.promise-home/`); use `--shared` to opt into the shared `~/.promise` cache. Do not commit if verify fails.
 
+**No binary files in history.** Pre-commit rejects any staged file whose first 8 KB contain a NUL byte, and any file over 1 MB — a binary can't be reviewed, so it must not enter history silently (T1620). The only exception is a path explicitly declared binary in `.gitattributes` (`binary`, or `-text`); adding one is a visible, reviewed diff. Generate binary artifacts at build time from tracked sources where possible — the Windows `def/*.def` → `.lib` generation (T0772) is the worked example of generating rather than committing; the `//go:embed`'d WASM CRT objects (`compiler/cmd/promise/crt/wasm32/*.o`) are the worked example of a justified exception (rebuilding them needs a WASM clang, which conflicts with the zero-dependency mandate).
+
 **Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/` and enables git hooks. See `docs/build-tools.md` for the full architecture.
 
 ```bash

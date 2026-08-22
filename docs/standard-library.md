@@ -1008,16 +1008,27 @@ type Match {
 
 ```promise
 type TcpListener {
-    bind!(string addr, int port) Self `factory;   // addr must be an IPv4 literal
-    accept!() TcpStream ;
+    bind!(string host, int port) Self `factory;   // host must be an IPv4 literal
+    accept!(~this) TcpStream;
+    set_accept_deadline(~this, Instant? deadline);
+    get accept_deadline Instant?;
+    create_cancel_handle(this) CancelHandle;
+    get local_port int;
     close!(~this);
     get local_port int;
 }
 
 type TcpStream {
-    connect!(string host, int port) Self `factory; // host: name, IPv4 or IPv6 literal
-    read!(~this, u8[] ~buf) int ;
-    write!(~this, u8[] &buf) int ;
+    connect!(string host, int port, Instant? deadline) Self `factory; // host: name, IPv4 or IPv6 literal
+    read!(~this, u8[] ~buf) int;
+    write!(~this, u8[] ~data) int;
+    set_read_deadline(~this, Instant? deadline);
+    set_write_deadline(~this, Instant? deadline);
+    set_deadline(~this, Instant? deadline);
+    get read_deadline Instant?;
+    get write_deadline Instant?;
+    create_cancel_handle(this) CancelHandle;
+    shutdown!(~this, bool read, bool write);
     close!(~this);
     shutdown!(~this, bool read = false, bool write = false);
 }
@@ -1027,6 +1038,11 @@ resolve!(string host) string[];   // A + AAAA, in the resolver's preferred order
 
 enum ResolveErrorKind { not_found, try_again, failed, unsupported }
 type ResolveError is NetError { string host; ResolveErrorKind kind; }
+
+// Deadlines and cancellation (T1563)
+type CancelHandle {
+    cancel(this);
+}
 ```
 
 **Name resolution (T1518).** `resolve` returns every address the platform
@@ -1058,8 +1074,9 @@ on the reactor would lose all of that. The scheduler stays unblocked via the
 same P-handoff every other thread-blocking call uses (T1685) — the calling M is
 released along with its P, so no other goroutine is delayed. The consequence is
 that a dead nameserver stalls the *calling goroutine* for as long as the
-resolver takes (~10s on musl); a caller-visible resolve timeout belongs to
-T1563 (socket deadlines).
+resolver takes (~10s on musl); `connect`'s deadline (T1563) bounds the
+connection wait, not the resolution that precedes it (a caller-visible resolve
+timeout is tracked as T1736).
 
 `ResolveError` inherits `NetError`, so code that already catches `NetError`
 keeps catching resolution failures unchanged, while callers that need to tell
@@ -1076,6 +1093,26 @@ Discriminating the error currently requires the type in scope unqualified
 `e as net.ResolveError` panics codegen (T1538). Both are pre-existing
 cross-module RTTI gaps, not specific to this module.
 
+
+
+- **Deadlines** (T1563): every blocking operation can be bounded in time by an
+  absolute `Instant` deadline — `Instant.now() + Duration.from_secs(5)` for a
+  relative timeout, `none` to clear. `connect` takes its deadline as an optional
+  argument; `accept`, `read` and `write` read it from the listener/stream. On
+  expiry the operation raises a `NetError` with `is_timeout`, so callers can tell
+  "timed out" from "connection refused"/"reset". Expiry is detected by the IO
+  reactor on its regular poll pass, so it can overshoot by a millisecond or two —
+  the right granularity for socket deadlines, and no platform timer is needed.
+- **Cancellation** (T1563): `create_cancel_handle` returns a `CancelHandle` that
+  can be moved into another goroutine and used to unblock whatever is parked on
+  the socket. Cancellation is sticky — once cancelled, later operations on that
+  socket raise a `NetError` with `is_cancelled` rather than parking. The handle
+  reference-counts the underlying poll descriptor, so it stays valid (and
+  harmlessly inert) after the socket it came from is closed or dropped.
+- **WASM**: no deadline machinery is emitted at all. WASM has no IO reactor and
+  the PAL socket calls it would bound already fail with `ENOSYS`, so there is
+  nothing to time out — the deadline setters are inert rather than a separate
+  error surface.
 - **Dependencies**: PAL socket extensions, IO reactor (epoll/kqueue), PAL
   `getaddrinfo`/`inet_ntop`
 

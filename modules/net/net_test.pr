@@ -856,3 +856,996 @@ test_connect_ipv6_literal() `test(exclude: wasm, timeout: "10s") {
     assert(code != 0, "a connect failure must carry the socket errno");
   }
 }
+
+// --- Deadlines, timeouts and cancellation (T1563) ---
+
+// _serve binds a raw blocking listening socket and returns its fd. These tests
+// drive a raw server so the Promise side under test is the only reactor user.
+_serve() int {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  return sfd;
+}
+
+// _error_reason classifies a caught error the same way _park_ready reports a
+// wake: _wake_timeout(), _wake_cancelled(), or -1 for anything else.
+_error_reason(error e) int {
+  if e is NetError {
+    NetError ne = e as! NetError;
+    if ne.is_timeout {
+      return _wake_timeout();
+    }
+    if ne.is_cancelled {
+      return _wake_cancelled();
+    }
+  }
+  return -1;
+}
+
+// The three outcome helpers below keep the failable call out of the assertions,
+// so the stream/listener borrow is released before the test inspects it.
+_read_outcome(TcpStream ~s, u8[] ~buf) int {
+  int _n = s.read(buf)? e {
+    return _error_reason(e);
+  };
+  return _wake_ready();
+}
+
+_write_outcome(TcpStream ~s, u8[] ~data) int {
+  int _n = s.write(data)? e {
+    return _error_reason(e);
+  };
+  return _wake_ready();
+}
+
+_accept_outcome(TcpListener ~l) int {
+  TcpStream _s = l.accept()? e {
+    return _error_reason(e);
+  };
+  return _wake_ready();
+}
+
+test_deadline_accessors_roundtrip() `test(exclude: wasm) {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  if _dl := client.read_deadline {
+    assert(false, "a fresh stream has no read deadline");
+  }
+  if _dl2 := client.write_deadline {
+    assert(false, "a fresh stream has no write deadline");
+  }
+
+  Instant at = Instant.from_nanos(123456789);
+  client.set_read_deadline(at);
+  if got := client.read_deadline {
+    assert(got.as_nanos == 123456789, "read deadline roundtrip");
+  } else {
+    assert(false, "read deadline should be set");
+  }
+  if _dl3 := client.write_deadline {
+    assert(false, "set_read_deadline must not touch the write deadline");
+  }
+
+  client.set_deadline(at);
+  if got2 := client.write_deadline {
+    assert(got2.as_nanos == 123456789, "set_deadline sets the write side too");
+  } else {
+    assert(false, "write deadline should be set");
+  }
+
+  client.set_deadline(none);
+  if _dl4 := client.read_deadline {
+    assert(false, "set_deadline(none) clears the read deadline");
+  }
+  if _dl5 := client.write_deadline {
+    assert(false, "set_deadline(none) clears the write deadline");
+  }
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_net_error_flags() `test(exclude: wasm) {
+  NetError timeout = _timeout_error();
+  assert(timeout.is_timeout, "timeout error is_timeout");
+  assert(!timeout.is_cancelled, "timeout error is not cancelled");
+
+  NetError cancelled = _cancelled_error();
+  assert(cancelled.is_cancelled, "cancelled error is_cancelled");
+  assert(!cancelled.is_timeout, "cancelled error is not a timeout");
+
+  NetError refused = _make_net_error(-111);
+  assert(!refused.is_timeout, "an errno failure is not a timeout");
+  assert(!refused.is_cancelled, "an errno failure is not a cancellation");
+  assert(refused.code == 111, "errno preserved");
+}
+
+test_read_deadline_expires() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // The peer never sends, so only the deadline can end this read.
+  client.set_read_deadline(Instant.now() + Duration.from_millis(100));
+  u8[] buf = u8[].filled(0, 64);
+  Instant start = Instant.now();
+  int reason = _read_outcome(client, buf);
+  int waited = start.elapsed().as_millis;
+
+  assert(reason == _wake_timeout(), "deadline expiry reports is_timeout");
+  assert(waited >= 90, "waited for the deadline, not returned early");
+  assert(waited < 5000, "woke shortly after the deadline");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_read_deadline_not_hit() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.set_read_deadline(Instant.now() + Duration.from_secs(10));
+  u8[] first = "Ok".bytes();
+  assert(_net_socket_send(afd, first) == 2, "server sent");
+  u8[] buf = u8[].filled(0, 64);
+  int n = client.read(buf)?!;
+  assert(n == 2, "read within the deadline succeeds");
+
+  // A deadline that has not expired must not poison the next read either.
+  u8[] second = "Hi".bytes();
+  assert(_net_socket_send(afd, second) == 2, "server sent again");
+  int n2 = client.read(buf)?!;
+  assert(n2 == 2, "second read under the same deadline succeeds");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_read_after_deadline_cleared() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Let a short deadline expire, then clear it and read normally.
+  client.set_read_deadline(Instant.now() + Duration.from_millis(50));
+  u8[] buf = u8[].filled(0, 64);
+  assert(_read_outcome(client, buf) == _wake_timeout(), "first read times out");
+
+  client.set_read_deadline(none);
+  u8[] payload = "Ok".bytes();
+  assert(_net_socket_send(afd, payload) == 2, "server sent");
+  int n = client.read(buf)?!;
+  assert(n == 2, "read blocks normally once the deadline is cleared");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_write_deadline_expires() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Fill both socket buffers. The peer never reads, so once they are full only
+  // the deadline can end the write.
+  client.set_write_deadline(Instant.now() + Duration.from_millis(200));
+  u8[] chunk = u8[].filled(65u8, 65536);
+  int reason = _wake_ready();
+  int guard = 0;
+  while guard < 8192 && reason == _wake_ready() {
+    reason = _write_outcome(client, chunk);
+    guard = guard + 1;
+  }
+  assert(reason == _wake_timeout(), "a blocked write reports is_timeout");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_connect_deadline() `test(exclude: wasm, timeout: "20s") {
+  // 192.0.2.1 is TEST-NET-1 (RFC 5737) — routed nowhere, so connect either
+  // hangs (and must hit the deadline) or fails immediately as unreachable.
+  // Both outcomes are legitimate and platform-dependent, but they are not
+  // interchangeable: only the deadline can hold connect for its full 500ms, so
+  // a failure that took that long and is NOT a timeout means the deadline never
+  // armed. The 450ms threshold sits just under the deadline, so the reachable
+  // false-positive window is only the 50ms in which a genuine ICMP unreachable
+  // could land — the timeout branch always measures at least the full 500ms.
+  Instant start = Instant.now();
+  TcpStream _s = TcpStream.connect("192.0.2.1", 9, Instant.now() + Duration.from_millis(500))? e {
+    assert(e is NetError, "raises a NetError");
+    int waited = start.elapsed().as_millis;
+    assert(waited < 5000, "connect did not hang");
+    assert(waited < 450 || _error_reason(e) == _wake_timeout(),
+    "a connect that ran to its deadline must report is_timeout");
+    return;
+  };
+  assert(false, "connect to a blackhole address must fail");
+}
+
+test_connect_without_deadline_still_works() `test(exclude: wasm) {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  // The deadline parameter is optional — existing call sites keep working.
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_cancel_before_read() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  handle.cancel();
+  handle.cancel(); // sticky and idempotent
+
+  u8[] buf = u8[].filled(0, 64);
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "read on a cancelled stream raises");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// _cancel_after sleeps briefly so the main goroutine is genuinely parked before
+// the cancellation lands, then consumes the handle.
+_cancel_after(CancelHandle move handle) int {
+  sleep(Duration.from_millis(50));
+  handle.cancel();
+  return 1;
+}
+
+test_cancel_unblocks_parked_read() `test(exclude: wasm, timeout: "30s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  t := go _cancel_after(move handle);
+
+  u8[] buf = u8[].filled(0, 64);
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "a parked read is unblocked as cancelled");
+  int done = <-t;
+  assert(done == 1, "canceller finished");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_cancel_handle_outlives_stream() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  client.close()?!;
+  // The PollDesc is kept alive by the handle, so cancelling a closed socket is
+  // a harmless no-op. Dropping the handle releases the last reference — leak
+  // enforcement asserts it is freed exactly once.
+  handle.cancel();
+
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// Returns a handle whose stream is dropped, not explicitly closed, on return.
+_handle_from_dropped_stream!(int port) CancelHandle {
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?^;
+  return client.create_cancel_handle();
+}
+
+test_cancel_handle_after_stream_drop() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  CancelHandle handle = _handle_from_dropped_stream(port)?!;
+  handle.cancel();
+  int afd = _net_socket_accept_addr(sfd);
+  if afd >= 0 {
+    _net_socket_close(afd);
+  }
+  _net_socket_close(sfd);
+}
+
+test_deadline_registry_churn() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Repeatedly arm and expire a deadline on the same socket. The registry holds
+  // at most one entry per PollDesc, and each round must time out on its own
+  // deadline rather than inherit a stale one.
+  u8[] buf = u8[].filled(0, 64);
+  int i = 0;
+  while i < 20 {
+    client.set_read_deadline(Instant.now() + Duration.from_millis(10));
+    assert(_read_outcome(client, buf) == _wake_timeout(), "deadline {i} expired");
+    i = i + 1;
+  }
+
+  // With the deadline cleared the socket must block normally again.
+  client.set_read_deadline(none);
+  u8[] payload = "Ok".bytes();
+  assert(_net_socket_send(afd, payload) == 2, "server sent");
+  int n = client.read(buf)?!;
+  assert(n == 2, "read after deadline churn succeeds");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_accept_deadline_expires() `test(exclude: wasm, timeout: "20s") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  if _dl := listener.accept_deadline {
+    assert(false, "a fresh listener has no accept deadline");
+  }
+  listener.set_accept_deadline(Instant.now() + Duration.from_millis(100));
+  if got := listener.accept_deadline {
+    assert(got.as_nanos != 0, "accept deadline is set");
+  } else {
+    assert(false, "accept deadline should be set");
+  }
+
+  Instant start = Instant.now();
+  int reason = _accept_outcome(listener);
+  int waited = start.elapsed().as_millis;
+  assert(reason == _wake_timeout(), "accept past its deadline reports is_timeout");
+  assert(waited >= 90, "waited for the accept deadline");
+  assert(waited < 5000, "woke shortly after the accept deadline");
+
+  listener.set_accept_deadline(none);
+  if _dl2 := listener.accept_deadline {
+    assert(false, "set_accept_deadline(none) clears it");
+  }
+  listener.close()?!;
+}
+
+test_accept_cancelled() `test(exclude: wasm, timeout: "30s") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  CancelHandle handle = listener.create_cancel_handle();
+  t := go _cancel_after(move handle);
+
+  assert(_accept_outcome(listener) == _wake_cancelled(), "a parked accept is unblocked as cancelled");
+  int done = <-t;
+  assert(done == 1, "canceller finished");
+  listener.close()?!;
+}
+
+// --- T1563 coverage: sentinel encoding, the already-expired fast path,
+// cancellation precedence and a shared deadline registry ---
+//
+// Every test here also doubles as a resource test: the harness fails a test
+// that leaks, so a CancelHandle that forgot to unref its PollDesc — or a
+// PollDesc freed while still on the deadline registry — shows up as a leak
+// rather than as silently wrong bookkeeping.
+
+// The constants the reactor and modules/net agree on by hand. The Go side
+// asserts the same numbers (TestT1563_PollDescFieldIndicesMatchTheStruct in
+// compiler/internal/codegen/netpoll_deadline_test.go), so drifting either half
+// of the mirror breaks a test instead of silently swapping read for write.
+test_wake_and_direction_constants_match_codegen() `test(exclude: wasm) {
+  assert(_dir_read() == 0, "read direction is slot 0");
+  assert(_dir_write() == 1, "write direction is slot 1");
+  assert(_wake_ready() == 0, "ready reason");
+  assert(_wake_timeout() == 1, "timeout reason");
+  assert(_wake_cancelled() == 2, "cancelled reason");
+
+  // Real errno values are always positive, so the sentinels must be negative
+  // and distinct or a timeout could be mistaken for a socket error.
+  assert(_timeout_code() < 0, "the timeout sentinel is negative");
+  assert(_cancelled_code() < 0, "the cancelled sentinel is negative");
+  assert(_timeout_code() != _cancelled_code(), "the two sentinels differ");
+
+  assert(_wake_error(_wake_timeout()).is_timeout, "the timeout reason maps to a timeout error");
+  assert(_wake_error(_wake_cancelled()).is_cancelled, "the cancelled reason maps to a cancelled error");
+}
+
+// 0 is the reactor's "no deadline" sentinel, so a genuine monotonic reading of 0
+// has to be nudged off it — otherwise the first nanosecond of the monotonic
+// epoch would silently disarm every deadline set in it.
+test_deadline_encoding_reserves_zero() `test(exclude: wasm) {
+  assert(_deadline_nanos(none) == 0, "none encodes as the no-deadline sentinel");
+  assert(_deadline_nanos(Instant.from_nanos(0)) == 1, "a zero reading is nudged off the sentinel");
+  assert(_deadline_nanos(Instant.from_nanos(42)) == 42, "an ordinary reading passes through");
+
+  if _at := _deadline_instant(0) {
+    assert(false, "the sentinel decodes back to none");
+  }
+  if at := _deadline_instant(42) {
+    assert(at.as_nanos == 42, "an ordinary reading roundtrips");
+  } else {
+    assert(false, "42 must decode to an Instant");
+  }
+}
+
+// The same reservation seen from the public API: a deadline built from a zero
+// reading must read back as *set*, not as none.
+test_zero_reading_deadline_reads_back_as_set() `test(exclude: wasm) {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  listener.set_accept_deadline(Instant.from_nanos(0));
+  if got := listener.accept_deadline {
+    assert(got.as_nanos == 1, "a zero-reading deadline is stored as the nudged value");
+  } else {
+    assert(false, "a zero-reading deadline must not read back as none");
+  }
+  listener.close()?!;
+}
+
+// A deadline that has already passed is caught before the reactor is armed at
+// all. Without that check the goroutine parks and only the next scan pass frees
+// it — a millisecond of latency on a call that should not block once.
+test_read_deadline_already_past() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.set_read_deadline(Instant.now() - Duration.from_secs(1));
+  u8[] buf = u8[].filled(0, 64);
+  Instant start = Instant.now();
+  assert(_read_outcome(client, buf) == _wake_timeout(), "an already-past deadline times out");
+  assert(start.elapsed().as_millis < 500, "and returns without parking on the reactor");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_accept_deadline_already_past() `test(exclude: wasm, timeout: "20s") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  listener.set_accept_deadline(Instant.now() - Duration.from_secs(1));
+  Instant start = Instant.now();
+  assert(_accept_outcome(listener) == _wake_timeout(), "an already-past accept deadline times out");
+  assert(start.elapsed().as_millis < 500, "and returns without parking on the reactor");
+  listener.close()?!;
+}
+
+// _connect_outcome mirrors _read_outcome for the connect path, where the stream
+// is only produced on success and drops again straight away.
+_connect_outcome(int port, Instant? deadline) int {
+  TcpStream _s = TcpStream.connect("127.0.0.1", port, deadline)? e {
+    return _error_reason(e);
+  };
+  return _wake_ready();
+}
+
+test_connect_deadline_already_past() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+
+  Instant start = Instant.now();
+  int reason = _connect_outcome(port, Instant.now() - Duration.from_secs(1));
+  assert(start.elapsed().as_millis < 500, "an already-past connect deadline never parks");
+  // A loopback connect can complete synchronously, in which case the deadline
+  // is never consulted. Those are the only two acceptable outcomes: a
+  // connection refused or reset here would mean the deadline path tore down a
+  // socket it should not have.
+  assert(reason == _wake_timeout() || reason == _wake_ready(),
+  "connect either completes at once or reports is_timeout");
+
+  int afd = _net_socket_accept_addr(sfd);
+  if afd >= 0 {
+    _net_socket_close(afd);
+  }
+  _net_socket_close(sfd);
+}
+
+// A deadline belongs to one direction. Expiring the read side must not disarm,
+// arm, or poison the write side.
+test_read_deadline_does_not_affect_the_write_side() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.set_read_deadline(Instant.now() + Duration.from_millis(50));
+  u8[] buf = u8[].filled(0, 64);
+  assert(_read_outcome(client, buf) == _wake_timeout(), "the read side times out");
+
+  if _dl := client.write_deadline {
+    assert(false, "a read timeout must leave the write deadline unset");
+  }
+  u8[] payload = "Ok".bytes();
+  assert(client.write(payload)?! == 2, "the write side still works");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// Cancellation and expiry can both be pending; cancellation is processed first,
+// so the caller sees is_cancelled and does not wait out the deadline.
+test_cancel_beats_a_pending_deadline() `test(exclude: wasm, timeout: "30s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Far enough out that only the cancellation can end this read quickly.
+  client.set_read_deadline(Instant.now() + Duration.from_secs(10));
+  CancelHandle handle = client.create_cancel_handle();
+  t := go _cancel_after(move handle);
+
+  u8[] buf = u8[].filled(0, 64);
+  Instant start = Instant.now();
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "cancellation wins over a pending deadline");
+  assert(start.elapsed().as_millis < 5000, "and does not wait for the deadline");
+  int done = <-t;
+  assert(done == 1, "canceller finished");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// Cancellation is sticky: nothing short of a new socket clears it, and in
+// particular changing the deadlines afterwards must not.
+test_cancel_survives_a_deadline_change() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  handle.cancel();
+
+  u8[] buf = u8[].filled(0, 64);
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "the first read is cancelled");
+
+  client.set_read_deadline(Instant.now() + Duration.from_secs(10));
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "arming a deadline does not clear the cancellation");
+  client.set_deadline(none);
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "nor does clearing one");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// _release_handle consumes a CancelHandle without cancelling, dropping the extra
+// PollDesc reference it holds.
+_release_handle(CancelHandle move _handle) {
+}
+
+// Dropping a handle releases its reference but not the socket's own, so the
+// stream keeps working. Getting this wrong frees the PollDesc under a live
+// socket — the failure mode the reference count exists to prevent.
+test_cancel_handle_dropped_without_cancelling() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  _release_handle(move handle);
+
+  u8[] payload = "Ok".bytes();
+  assert(_net_socket_send(afd, payload) == 2, "server sent");
+  u8[] buf = u8[].filled(0, 64);
+  assert(client.read(buf)?! == 2, "the stream still reads after its handle is dropped");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// Several handles can refer to the same socket at once. Releasing one must not
+// disturb the others, and cancelling through any of them reaches the socket.
+test_multiple_cancel_handles_share_one_socket() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle first = client.create_cancel_handle();
+  CancelHandle second = client.create_cancel_handle();
+  _release_handle(move first);
+
+  second.cancel();
+  u8[] buf = u8[].filled(0, 64);
+  assert(_read_outcome(client, buf) == _wake_cancelled(), "the surviving handle still cancels");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// _deadline_reader owns its stream so it can run in its own goroutine, and
+// reports how the read ended. The stream closes when it drops on return.
+_deadline_reader(TcpStream move s, int millis) int {
+  s.set_read_deadline(Instant.now() + Duration.from_millis(millis));
+  u8[] buf = u8[].filled(0, 64);
+  return _read_outcome(s, buf);
+}
+
+// The deadline registry is one global list, and every test above puts a single
+// PollDesc on it. Three at once is what exercises walking past the head: the
+// scan has to expire a node in the middle and unlink it without losing the rest
+// of the list, and the staggered deadlines force it to do so across passes.
+test_concurrent_deadlines_across_sockets() `test(exclude: wasm, timeout: "30s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream first = TcpStream.connect("127.0.0.1", port)?!;
+  int afd_first = _net_socket_accept_addr(sfd);
+  TcpStream second = TcpStream.connect("127.0.0.1", port)?!;
+  int afd_second = _net_socket_accept_addr(sfd);
+  TcpStream third = TcpStream.connect("127.0.0.1", port)?!;
+  int afd_third = _net_socket_accept_addr(sfd);
+  assert(afd_first >= 0 && afd_second >= 0 && afd_third >= 0, "accepted three connections");
+
+  t_first := go _deadline_reader(move first, 80);
+  t_second := go _deadline_reader(move second, 140);
+  t_third := go _deadline_reader(move third, 200);
+
+  int r_first = <-t_first;
+  int r_second = <-t_second;
+  int r_third = <-t_third;
+  assert(r_first == _wake_timeout(), "the first socket timed out");
+  assert(r_second == _wake_timeout(), "the second socket timed out");
+  assert(r_third == _wake_timeout(), "the third socket timed out");
+
+  _net_socket_close(afd_first);
+  _net_socket_close(afd_second);
+  _net_socket_close(afd_third);
+  _net_socket_close(sfd);
+}
+
+// _cancel_after_millis is _cancel_after with a caller-chosen delay, so a stress
+// loop can walk the canceller across the arm/park window.
+_cancel_after_millis(CancelHandle move handle, int millis) int {
+  sleep(Duration.from_millis(millis));
+  handle.cancel();
+  return 1;
+}
+
+// The window between arm() and the park is the race the whole design is built
+// around: a cancellation that lands inside it finds no waiter yet, and only the
+// sticky flag plus the retrying scan get the reader unblocked. Repeating with a
+// shifting delay lands the canceller before, inside and after that window. The
+// generous read deadline is a tripwire, not the mechanism under test — if the
+// wake is ever lost this fails as a wrong reason rather than as a hang.
+test_cancel_park_race_stress() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  u8[] buf = u8[].filled(0, 64);
+
+  int i = 0;
+  while i < 25 {
+    TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+    int afd = _net_socket_accept_addr(sfd);
+    assert(afd >= 0, "round {i} accept");
+
+    client.set_read_deadline(Instant.now() + Duration.from_secs(10));
+    CancelHandle handle = client.create_cancel_handle();
+    t := go _cancel_after_millis(move handle, i % 3);
+
+    assert(_read_outcome(client, buf) == _wake_cancelled(), "round {i} cancelled");
+    int done = <-t;
+    assert(done == 1, "round {i} canceller finished");
+
+    client.close()?!;
+    _net_socket_close(afd);
+    i = i + 1;
+  }
+  _net_socket_close(sfd);
+}
+
+// close() now releases a PollDesc reference instead of freeing outright, which
+// makes a second close on the same socket a use-after-free risk rather than a
+// harmless error return. It has to be rejected on the fd check, before the
+// unref — and the CancelHandle that is still holding a reference has to survive
+// it.
+test_double_close_does_not_release_twice() `test(exclude: wasm, timeout: "20s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  client.close()?!;
+
+  bool raised = false;
+  client.close()? e {
+    assert(e is NetError, "a second close raises a NetError");
+    NetError ne = e as! NetError;
+    assert(ne.code == 9, "and reports a bad file descriptor");
+    assert(!ne.is_timeout && !ne.is_cancelled, "which is neither a timeout nor a cancellation");
+    raised = true;
+  };
+  assert(raised, "closing an already-closed stream must raise");
+
+  // The handle's reference outlived both closes, so this is still a live
+  // PollDesc and dropping the handle here is what finally frees it.
+  handle.cancel();
+
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_listener_double_close_does_not_release_twice() `test(exclude: wasm) {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  CancelHandle handle = listener.create_cancel_handle();
+  listener.close()?!;
+
+  bool raised = false;
+  listener.close()? e {
+    NetError ne = e as! NetError;
+    assert(ne.code == 9, "a second close reports a bad file descriptor");
+    raised = true;
+  };
+  assert(raised, "closing an already-closed listener must raise");
+
+  handle.cancel();
+}
+
+// connect() now computes a deadline before it creates the socket. A connect
+// that fails synchronously — an unparseable host never reaches EINPROGRESS —
+// must unwind that early path cleanly: no PollDesc is opened, so nothing may be
+// unref'd, and the error is the socket's, not a spurious timeout.
+test_connect_fails_before_the_deadline_path() `test(exclude: wasm, timeout: "20s") {
+  int reason = _connect_outcome_host("not_an_ip", 80, Instant.now() + Duration.from_secs(10));
+  assert(reason == -1, "a synchronous connect failure is neither a timeout nor a cancellation");
+
+  // Same failure with a deadline already in the past: the socket-level error
+  // still wins, because connect never gets far enough to consult the deadline.
+  int past = _connect_outcome_host("not_an_ip", 80, Instant.now() - Duration.from_secs(1));
+  assert(past == -1, "an unusable host is reported as a socket error, not a timeout");
+}
+
+// _connect_outcome_host is _connect_outcome with a caller-chosen host, so a test
+// can drive the synchronous-failure path.
+_connect_outcome_host(string host, int port, Instant? deadline) int {
+  TcpStream _s = TcpStream.connect(host, port, deadline)? e {
+    return _error_reason(e);
+  };
+  return _wake_ready();
+}
+
+// --- T1563 coverage: the write direction and an accept deadline that holds ---
+//
+// Everything above drives deadlines and cancellation through the read side (and
+// through accept, which is also slot 0). The write slot is a separate deadline,
+// a separate reason and a separate waiter, all selected by a runtime index — a
+// direction mix-up would be invisible to every read-side test. These drive the
+// write slot through the same three states: an already-past deadline, a sticky
+// cancellation, and a re-arm that must not inherit the expired one.
+
+// _fill_until_blocked writes chunks until the socket stops accepting them and
+// reports how that ended. The peer never reads, so both buffers fill and the
+// write genuinely parks — which is the only way to reach the write-side
+// deadline and cancellation checks at all.
+_fill_until_blocked(TcpStream ~s, u8[] ~chunk) int {
+  int reason = _wake_ready();
+  int guard = 0;
+  while guard < 8192 && reason == _wake_ready() {
+    reason = _write_outcome(s, chunk);
+    guard = guard + 1;
+  }
+  return reason;
+}
+
+// _drain_all empties everything the peer has buffered and returns the byte
+// count. It switches the raw peer fd to non-blocking first so the loop can stop
+// on EAGAIN instead of blocking once the buffers are empty. A single recv is
+// not enough to unblock the writer: loopback holds megabytes, and the sender
+// only becomes writable again once the window actually reopens.
+_drain_all(int afd) int {
+  _net_socket_set_nonblock(afd);
+  u8[] sink = u8[].filled(0, 65536);
+  int total = 0;
+  int guard = 0;
+  while guard < 4096 {
+    int n = _net_socket_recv(afd, sink);
+    if n <= 0 {
+      return total;
+    }
+    total = total + n;
+    guard = guard + 1;
+  }
+  return total;
+}
+
+// The read side has test_read_deadline_already_past; this is its write-slot
+// twin, plus the re-arm that a stale expired deadline would break.
+test_write_deadline_already_past() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.set_write_deadline(Instant.now() - Duration.from_secs(1));
+  u8[] chunk = u8[].filled(65u8, 65536);
+  assert(_fill_until_blocked(client, chunk) == _wake_timeout(),
+  "a write that blocks with a past deadline times out");
+
+  // The buffers are still full, so this attempt goes straight to the park —
+  // and straight back out of it, without ever reaching the reactor.
+  Instant start = Instant.now();
+  assert(_write_outcome(client, chunk) == _wake_timeout(), "and keeps timing out while it would block");
+  assert(start.elapsed().as_millis < 500, "an already-past write deadline never parks");
+
+  // Re-arm with a deadline that will not fire and drain the peer. An expired
+  // deadline is deliberately left armed in the PollDesc until the next park
+  // overwrites it, so this is where a stale one would surface as an instant
+  // bogus timeout.
+  client.set_write_deadline(Instant.now() + Duration.from_secs(30));
+  assert(_drain_all(afd) > 0, "peer drained buffered data");
+  u8[] small = "Ok".bytes();
+  assert(client.write(small)?! == 2, "the write slot works again once space frees up");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// test_cancel_before_read's write-slot twin. An unblocked write returns before
+// it ever consults the sticky flag, so the buffers have to be full first.
+test_cancel_before_write() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  CancelHandle handle = client.create_cancel_handle();
+  handle.cancel();
+
+  // A far-future deadline is a tripwire: if cancellation were not checked on
+  // the write side this would hang until the test timeout instead of failing.
+  client.set_write_deadline(Instant.now() + Duration.from_secs(30));
+  u8[] chunk = u8[].filled(65u8, 65536);
+  assert(_fill_until_blocked(client, chunk) == _wake_cancelled(),
+  "a blocked write on a cancelled stream raises as cancelled");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// set_read_deadline's independence is asserted in test_deadline_accessors_
+// roundtrip; the write setter needs the same guarantee in the other direction,
+// since both slots are addressed by index.
+test_set_write_deadline_only_touches_the_write_side() `test(exclude: wasm) {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.set_write_deadline(Instant.from_nanos(987654321));
+  if got := client.write_deadline {
+    assert(got.as_nanos == 987654321, "write deadline roundtrip");
+  } else {
+    assert(false, "write deadline should be set");
+  }
+  if _dl := client.read_deadline {
+    assert(false, "set_write_deadline must not touch the read deadline");
+  }
+
+  client.set_write_deadline(none);
+  if _dl2 := client.write_deadline {
+    assert(false, "set_write_deadline(none) clears it");
+  }
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// An accept deadline that does not fire has to be invisible. The listener slot
+// is armed on every accept that blocks, so a deadline left half-consumed would
+// show up as the *second* accept failing, not the first.
+test_accept_succeeds_under_an_unexpired_deadline() `test(exclude: wasm, timeout: "20s") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  listener.set_accept_deadline(Instant.now() + Duration.from_secs(30));
+
+  int first_fd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(_net_socket_connect_addr(first_fd, "127.0.0.1", port) == 0, "first connect");
+  TcpStream first = listener.accept()?!;
+
+  int second_fd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(_net_socket_connect_addr(second_fd, "127.0.0.1", port) == 0, "second connect");
+  TcpStream second = listener.accept()?!;
+
+  // The deadline is still the one that was set, and still has not fired.
+  if got := listener.accept_deadline {
+    assert(got.as_nanos > Instant.now().as_nanos, "the accept deadline is still pending");
+  } else {
+    assert(false, "a successful accept must not clear the deadline");
+  }
+
+  first.close()?!;
+  second.close()?!;
+  _net_socket_close(first_fd);
+  _net_socket_close(second_fd);
+  listener.close()?!;
+}
+
+// _drain_after gives the writer time to actually park before the peer frees up
+// space, so the wake under test comes from the reactor rather than from the
+// write never having blocked at all.
+_drain_after(int afd, int millis) int {
+  sleep(Duration.from_millis(millis));
+  return _drain_all(afd);
+}
+
+// test_read_deadline_not_hit's write-slot twin, and the only test that drives a
+// reactor write-readiness wake with a deadline armed: the PollDesc is on the
+// deadline registry for the whole park, so the scan walks it on every pass and
+// must leave the waiter alone until the reactor gets to it.
+test_write_deadline_not_hit() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Fill the buffers with an already-past deadline — that is just the cheap way
+  // to reach "the next write will block" without waiting on anything.
+  client.set_write_deadline(Instant.now() - Duration.from_secs(1));
+  u8[] chunk = u8[].filled(65u8, 65536);
+  assert(_fill_until_blocked(client, chunk) == _wake_timeout(), "buffers are full");
+
+  // Now a deadline far beyond the drain delay. The write parks, the peer drains,
+  // and the reactor — not the deadline — is what has to wake it.
+  client.set_write_deadline(Instant.now() + Duration.from_secs(30));
+  t := go _drain_after(afd, 100);
+
+  Instant start = Instant.now();
+  u8[] small = "Ok".bytes();
+  int reason = _write_outcome(client, small);
+  int waited = start.elapsed().as_millis;
+  int drained = <-t;
+
+  assert(reason == _wake_ready(), "a write under an unexpired deadline completes normally");
+  assert(drained > 0, "the peer drained the buffered data");
+  assert(waited < 20000, "and was woken by the reactor, not by the deadline");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}

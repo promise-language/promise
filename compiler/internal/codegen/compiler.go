@@ -625,6 +625,8 @@ type Compiler struct {
 	needsNetpoll          bool       // true if net module imported — netpoll_init needed at startup (T0071)
 	needsTLS              bool       // true if tls module bridged — OpenSSL archives linked on Linux (T0077)
 	netpollBatchLock      *ir.Global // @__netpoll_batch_lock — held by reactor during event processing; close waits on it (B0324)
+	netpollRegistryLock   *ir.Global // @__netpoll_registry_lock — guards the deadline registry (T1563)
+	netpollDeadlineHead   *ir.Global // @__netpoll_deadline_head — head of the intrusive deadline registry (T1563)
 	nextDebugID           int        // counter for emitDebugPrint global names
 
 	// Global constants for print/panic functions
@@ -1984,6 +1986,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Shut down the scheduler (join worker Ms) before exiting
 	if !c.isWasm {
 		doneBlock.NewCall(c.funcs["promise_sched_shutdown"])
+		c.emitNetpollShutdown(doneBlock)
 	}
 
 	// Emit coverage data if coverage is enabled (T0030)

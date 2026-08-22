@@ -2462,23 +2462,13 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	cleanupBody := fn.NewBlock("cleanup_body")
 	freeBlk := fn.NewBlock("free_ps")
 
-	if c.netpollBatchLock != nil {
-		// Destroy batch lock if initialized — null when reactor init failed (B0324)
-		batchLockVal := afterReactorBlk.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
-		hasBatchLock := afterReactorBlk.NewICmp(enum.IPredNE, batchLockVal, constant.NewNull(irtypes.I8Ptr))
-		destroyBatchBlk := fn.NewBlock("destroy_batch_lock")
-		afterBatchBlk := fn.NewBlock("after_batch_lock")
-		afterReactorBlk.NewCondBr(hasBatchLock, destroyBatchBlk, afterBatchBlk)
-
-		destroyBatchBlk.NewCall(c.palMutexDestroy, batchLockVal)
-		destroyBatchBlk.NewBr(afterBatchBlk)
-
-		afterBatchBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
-		afterBatchBlk.NewBr(cleanupLoop)
-	} else {
-		afterReactorBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
-		afterReactorBlk.NewBr(cleanupLoop)
-	}
+	// The reactor's process-wide locks (batch lock, deadline registry lock) are
+	// destroyed by @promise_netpoll_shutdown, which the entry point calls right
+	// after this function returns. They cannot be destroyed here: this function
+	// is emitted before compileModules/defineNetPALBodies have run, so the net
+	// module is not yet known to be imported and those globals do not exist yet.
+	afterReactorBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+	afterReactorBlk.NewBr(cleanupLoop)
 
 	// cleanup_loop: destroy each P's lock (Ps still live in the P array). M
 	// resources are destroyed separately via the all-M list below, because after
@@ -2857,6 +2847,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	} else {
 		entry.NewCall(c.funcs["promise_sched_run_until_main"], g0)
 		entry.NewCall(c.funcs["promise_sched_shutdown"])
+		c.emitNetpollShutdown(entry)
 	}
 
 	// On Windows, call ExitProcess(0) to avoid CRT cleanup crashes during

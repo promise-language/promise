@@ -15,7 +15,14 @@ import (
 // goroutines to the global run queue and wakes idle Ms.
 //
 // PollDesc struct (per-FD state):
-//   { i32 fd, i32 _pad, i8* read_g, i8* write_g, i8* lock, i8* cond }
+//   { i32 fd, i32 _pad, i8* read_g, i8* write_g, i8* lock, i8* cond,
+//     [2 x i64] deadline, [2 x i32] reason, i8* dl_next, i32 linked,
+//     i32 refcount, i32 cancelled }
+//
+// Deadlines and cancellation (T1563) live in netpoll_deadline.go. Lock order is
+// BATCH LOCK -> REGISTRY LOCK -> pd.lock; every function that takes more than
+// one of them must follow that order or the reactor deadlocks against a
+// goroutine arming a deadline.
 //
 // PollEvent struct (filled by pal_reactor_poll):
 //   { i8* userdata, i32 events, i32 _pad }
@@ -32,6 +39,16 @@ const (
 	pdFieldWriteG = 3 // i8* — G waiting for write readiness
 	pdFieldLock   = 4 // i8* — per-PollDesc mutex
 	pdFieldCond   = 5 // i8* — condition variable (for thread-blocking fallback)
+
+	// Deadline / cancellation state (T1563). The two-element arrays are indexed
+	// by direction (netpollDirRead / netpollDirWrite) so the bridge helpers can
+	// select a slot with a runtime index instead of branching on it.
+	pdFieldDeadline  = 6  // [2 x i64] — absolute monotonic nanos, 0 = no deadline
+	pdFieldReason    = 7  // [2 x i32] — why the last park ended (netpollReason*)
+	pdFieldDlNext    = 8  // i8* — intrusive next pointer, deadline registry
+	pdFieldLinked    = 9  // i32 — 1 while this PollDesc is on the registry
+	pdFieldRefcount  = 10 // i32 — 1 at netpoll_open, +1 per live CancelHandle
+	pdFieldCancelled = 11 // i32 — sticky cancellation flag
 
 	// PollEvent field indices (output from pal_reactor_poll)
 	peFieldUserdata = 0 // i8* — opaque pointer (PollDesc*)
@@ -51,17 +68,33 @@ const (
 	// Real G pointer → enqueue on run queue. Value 1 is safe because no valid
 	// heap pointer is at address 0x1.
 	netpollCondWaiterSentinel = 1
+
+	// Park directions — index into pd.deadline / pd.reason.
+	netpollDirRead  = 0
+	netpollDirWrite = 1
+
+	// Why a parked waiter was woken. Mirrored by _wake_ready/_wake_timeout/
+	// _wake_cancelled in modules/net/net.pr.
+	netpollReasonReady     = 0
+	netpollReasonTimeout   = 1
+	netpollReasonCancelled = 2
 )
 
 // pollDescStructType returns the LLVM struct type for PollDesc.
 func pollDescStructType() *irtypes.StructType {
 	return irtypes.NewStruct(
-		irtypes.I32,   // fd
-		irtypes.I32,   // _pad
-		irtypes.I8Ptr, // read_g
-		irtypes.I8Ptr, // write_g
-		irtypes.I8Ptr, // lock
-		irtypes.I8Ptr, // cond (for thread-blocking fallback, T0232)
+		irtypes.I32,                      // fd
+		irtypes.I32,                      // _pad
+		irtypes.I8Ptr,                    // read_g
+		irtypes.I8Ptr,                    // write_g
+		irtypes.I8Ptr,                    // lock
+		irtypes.I8Ptr,                    // cond (for thread-blocking fallback, T0232)
+		irtypes.NewArray(2, irtypes.I64), // deadline[read|write] (T1563)
+		irtypes.NewArray(2, irtypes.I32), // reason[read|write]   (T1563)
+		irtypes.I8Ptr,                    // dl_next
+		irtypes.I32,                      // linked
+		irtypes.I32,                      // refcount
+		irtypes.I32,                      // cancelled
 	)
 }
 
@@ -87,11 +120,64 @@ func (c *Compiler) defineNetpollFuncs() {
 	// on stale event buffer pointers.
 	c.netpollBatchLock = c.module.NewGlobalDef("__netpoll_batch_lock", constant.NewNull(irtypes.I8Ptr))
 
+	// Deadline registry (T1563) — the scan the reactor loop calls lives here,
+	// so it must exist before defineNetpollLoopFunc references it.
+	c.defineNetpollDeadlineFuncs()
+
 	// Define loop first (init references it)
 	c.defineNetpollLoopFunc()
 	c.defineNetpollInitFunc()
 	c.defineNetpollOpenFunc()
 	c.defineNetpollCloseFunc()
+	c.defineNetpollShutdownFunc()
+}
+
+// defineNetpollShutdownFunc emits @promise_netpoll_shutdown() → void, releasing
+// the reactor's two process-wide mutexes (both pal_mutex_init allocations).
+//
+// This cannot live in promise_sched_shutdown, which is emitted before the
+// compiler knows whether the net module is imported and therefore before these
+// globals exist. The entry point calls it immediately after
+// promise_sched_shutdown has joined the reactor thread, so nothing can still be
+// holding either lock.
+func (c *Compiler) defineNetpollShutdownFunc() {
+	fn := c.module.NewFunc("promise_netpoll_shutdown", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	blk := fn.NewBlock(".entry")
+	// Both are null when reactor init failed (B0324, T1563).
+	for _, lock := range []struct {
+		global *ir.Global
+		name   string
+	}{
+		{c.netpollBatchLock, "batch"},
+		{c.netpollRegistryLock, "registry"},
+	} {
+		val := blk.NewLoad(irtypes.I8Ptr, lock.global)
+		nonNull := blk.NewICmp(enum.IPredNE, val, constant.NewNull(irtypes.I8Ptr))
+		destroyBlk := fn.NewBlock(".destroy_" + lock.name)
+		nextBlk := fn.NewBlock(".after_" + lock.name)
+		blk.NewCondBr(nonNull, destroyBlk, nextBlk)
+
+		destroyBlk.NewCall(c.palMutexDestroy, val)
+		destroyBlk.NewStore(constant.NewNull(irtypes.I8Ptr), lock.global)
+		destroyBlk.NewBr(nextBlk)
+		blk = nextBlk
+	}
+	blk.NewRet(nil)
+
+	c.funcs["promise_netpoll_shutdown"] = fn
+}
+
+// emitNetpollShutdown appends the reactor lock teardown call to blk. No-op when
+// the net module is not imported (the function is then never emitted).
+func (c *Compiler) emitNetpollShutdown(blk *ir.Block) {
+	if !c.needsNetpoll {
+		return
+	}
+	if fn, ok := c.funcs["promise_netpoll_shutdown"]; ok {
+		blk.NewCall(fn)
+	}
 }
 
 // defineNetpollInitFunc emits @promise_netpoll_init() → void
@@ -128,6 +214,11 @@ func (c *Compiler) defineNetpollInitFunc() {
 	// Initialize batch lock — held by reactor during event processing (B0324)
 	batchLock := okBlk.NewCall(c.palMutexInit)
 	okBlk.NewStore(batchLock, c.netpollBatchLock)
+
+	// Initialize deadline registry lock — same okBlk path as the batch lock, so
+	// it is never left null while the poller thread is running (T1563).
+	registryLock := okBlk.NewCall(c.palMutexInit)
+	okBlk.NewStore(registryLock, c.netpollRegistryLock)
 
 	// Pre-allocate event buffer on the main thread so the allocation is
 	// counted before the alloc-count reset — avoids a race where the reactor
@@ -199,6 +290,30 @@ func (c *Compiler) defineNetpollOpenFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
 	entry.NewStore(pdCond, condField)
 
+	// Deadline / cancellation state starts cleared; the socket itself holds the
+	// first PollDesc reference, every live CancelHandle adds one more (T1563).
+	for _, dir := range []int{netpollDirRead, netpollDirWrite} {
+		dlField := entry.NewGetElementPtr(pdTy, pdPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldDeadline)),
+			constant.NewInt(irtypes.I32, int64(dir)))
+		entry.NewStore(constant.NewInt(irtypes.I64, 0), dlField)
+		reasonField := entry.NewGetElementPtr(pdTy, pdPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldReason)),
+			constant.NewInt(irtypes.I32, int64(dir)))
+		entry.NewStore(constant.NewInt(irtypes.I32, netpollReasonReady), reasonField)
+	}
+	dlNextField := entry.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldDlNext)))
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), dlNextField)
+	for _, f := range []struct {
+		idx int
+		val int64
+	}{{pdFieldLinked, 0}, {pdFieldRefcount, 1}, {pdFieldCancelled, 0}} {
+		field := entry.NewGetElementPtr(pdTy, pdPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(f.idx)))
+		entry.NewStore(constant.NewInt(irtypes.I32, f.val), field)
+	}
+
 	// Register with reactor: pal_reactor_add(reactor_fd, fd, pd_ptr)
 	rfdField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorFd)))
@@ -210,8 +325,71 @@ func (c *Compiler) defineNetpollOpenFunc() {
 	c.funcs["promise_netpoll_open"] = fn
 }
 
+// emitNetpollWakeSlot emits the shared "wake a parked waiter" sequence for one
+// PollDesc direction: clear the waiter slot, record why it was woken, then
+// either enqueue the goroutine on the run queue (real G) or signal the
+// PollDesc condition variable (thread-blocking sentinel waiter, B0324).
+//
+// Precondition: pd.lock is held by the caller.
+//
+// gFieldIdx is pdFieldReadG or pdFieldWriteG, dir the matching netpollDir*, and
+// reason the netpollReason* code to store (netpollReasonReady stores nothing —
+// arm() already reset the slot). extraCond, when non-nil, is ANDed with the
+// "a waiter is present" test. wokenAlloca, when non-nil, is an i32 alloca that
+// is incremented on every actual wake. Returns the continuation block, which the
+// caller must keep building into.
+func (c *Compiler) emitNetpollWakeSlot(fn *ir.Func, blk *ir.Block, pdPtr value.Value,
+	gFieldIdx, dir, reason int, extraCond, wokenAlloca value.Value, prefix string) *ir.Block {
+
+	pdTy := pollDescStructType()
+
+	gField := blk.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldIdx)))
+	g := blk.NewLoad(irtypes.I8Ptr, gField)
+	var cond value.Value = blk.NewICmp(enum.IPredNE, g, constant.NewNull(irtypes.I8Ptr))
+	if extraCond != nil {
+		cond = blk.NewAnd(extraCond, cond)
+	}
+
+	wakeBlk := fn.NewBlock(prefix + ".wake")
+	contBlk := fn.NewBlock(prefix + ".cont")
+	blk.NewCondBr(cond, wakeBlk, contBlk)
+
+	wakeBlk.NewStore(constant.NewNull(irtypes.I8Ptr), gField)
+	if reason != netpollReasonReady {
+		reasonField := wakeBlk.NewGetElementPtr(pdTy, pdPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldReason)),
+			constant.NewInt(irtypes.I32, int64(dir)))
+		wakeBlk.NewStore(constant.NewInt(irtypes.I32, int64(reason)), reasonField)
+	}
+	if wokenAlloca != nil {
+		w := wakeBlk.NewLoad(irtypes.I32, wokenAlloca)
+		wakeBlk.NewStore(wakeBlk.NewAdd(w, constant.NewInt(irtypes.I32, 1)), wokenAlloca)
+	}
+	sentinel := wakeBlk.NewIntToPtr(
+		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
+	isSentinel := wakeBlk.NewICmp(enum.IPredEQ, g, sentinel)
+	enqueueBlk := fn.NewBlock(prefix + ".enqueue")
+	signalBlk := fn.NewBlock(prefix + ".signal")
+	wakeBlk.NewCondBr(isSentinel, signalBlk, enqueueBlk)
+
+	// Real G: enqueue on run queue.
+	enqueueBlk.NewCall(c.funcs["promise_sched_enqueue"], g)
+	enqueueBlk.NewBr(signalBlk)
+
+	// Signal cond var (wakes thread-blocking waiters; no-op if none waiting).
+	pdCondField := signalBlk.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
+	pdCond := signalBlk.NewLoad(irtypes.I8Ptr, pdCondField)
+	signalBlk.NewCall(c.palCondSignal, pdCond)
+	signalBlk.NewBr(contBlk)
+
+	return contBlk
+}
+
 // defineNetpollCloseFunc emits @promise_netpoll_close(i8* pd) → void
-// Unregisters fd from reactor, wakes any waiting Gs, frees PollDesc.
+// Unregisters fd from reactor, wakes any waiting Gs, then drops the socket
+// reference on the PollDesc (freeing it once no CancelHandle holds one either).
 func (c *Compiler) defineNetpollCloseFunc() {
 	pdParam := ir.NewParam("pd", irtypes.I8Ptr)
 	fn := c.module.NewFunc("promise_netpoll_close", irtypes.Void, pdParam)
@@ -238,79 +416,39 @@ func (c *Compiler) defineNetpollCloseFunc() {
 	fd := entry.NewLoad(irtypes.I32, fdField)
 	entry.NewCall(c.palReactorRemove, rfd, fd)
 
-	// Wake read_g if waiting
-	readGField := entry.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldReadG)))
-	readG := entry.NewLoad(irtypes.I8Ptr, readGField)
-	hasReadG := entry.NewICmp(enum.IPredNE, readG, constant.NewNull(irtypes.I8Ptr))
-	wakeReadBlk := fn.NewBlock(".wake_read")
-	checkWriteBlk := fn.NewBlock(".check_write")
-	entry.NewCondBr(hasReadG, wakeReadBlk, checkWriteBlk)
-
-	// Check sentinel vs real G (B0324)
-	wakeReadBlk.NewStore(constant.NewNull(irtypes.I8Ptr), readGField)
-	closeSentinelR := wakeReadBlk.NewIntToPtr(
-		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	closeIsSentinelR := wakeReadBlk.NewICmp(enum.IPredEQ, readG, closeSentinelR)
-	closeEnqueueR := fn.NewBlock(".wake_read.enqueue")
-	closeCondR := fn.NewBlock(".wake_read.cond")
-	wakeReadBlk.NewCondBr(closeIsSentinelR, closeCondR, closeEnqueueR)
-
-	closeEnqueueR.NewCall(c.funcs["promise_sched_enqueue"], readG)
-	closeEnqueueR.NewBr(closeCondR)
-
-	condFieldR := closeCondR.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	condR := closeCondR.NewLoad(irtypes.I8Ptr, condFieldR)
-	closeCondR.NewCall(c.palCondSignal, condR)
-	closeCondR.NewBr(checkWriteBlk)
-
-	// Wake write_g if waiting
-	writeGField := checkWriteBlk.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldWriteG)))
-	writeG := checkWriteBlk.NewLoad(irtypes.I8Ptr, writeGField)
-	hasWriteG := checkWriteBlk.NewICmp(enum.IPredNE, writeG, constant.NewNull(irtypes.I8Ptr))
-	wakeWriteBlk := fn.NewBlock(".wake_write")
-	cleanupBlk := fn.NewBlock(".cleanup")
-	checkWriteBlk.NewCondBr(hasWriteG, wakeWriteBlk, cleanupBlk)
-
-	// Check sentinel vs real G (B0324)
-	wakeWriteBlk.NewStore(constant.NewNull(irtypes.I8Ptr), writeGField)
-	closeSentinelW := wakeWriteBlk.NewIntToPtr(
-		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	closeIsSentinelW := wakeWriteBlk.NewICmp(enum.IPredEQ, writeG, closeSentinelW)
-	closeEnqueueW := fn.NewBlock(".wake_write.enqueue")
-	closeCondW := fn.NewBlock(".wake_write.cond")
-	wakeWriteBlk.NewCondBr(closeIsSentinelW, closeCondW, closeEnqueueW)
-
-	closeEnqueueW.NewCall(c.funcs["promise_sched_enqueue"], writeG)
-	closeEnqueueW.NewBr(closeCondW)
-
-	condFieldW := closeCondW.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	condW := closeCondW.NewLoad(irtypes.I8Ptr, condFieldW)
-	closeCondW.NewCall(c.palCondSignal, condW)
-	closeCondW.NewBr(cleanupBlk)
+	// Wake both waiter slots. A goroutine parked on a socket that is closed
+	// underneath it reports a distinct "cancelled" error rather than looping on
+	// a bogus readiness wake (T1563).
+	blk := c.emitNetpollWakeSlot(fn, entry, pdPtr, pdFieldReadG, netpollDirRead,
+		netpollReasonCancelled, nil, nil, ".close_read")
+	blk = c.emitNetpollWakeSlot(fn, blk, pdPtr, pdFieldWriteG, netpollDirWrite,
+		netpollReasonCancelled, nil, nil, ".close_write")
 
 	// Mark closed (fd = -1) so reactor skips stale events (B0324)
-	cleanupBlk.NewStore(constant.NewInt(irtypes.I32, -1), fdField)
-	cleanupBlk.NewCall(c.palMutexUnlock, lock)
+	blk.NewStore(constant.NewInt(irtypes.I32, -1), fdField)
+
+	// Clear both deadlines. Nothing can arm this PollDesc again, so the next
+	// deadline scan unlinks it from the registry instead of walking it forever
+	// while a CancelHandle keeps it alive past the close (T1563).
+	for _, dir := range []int{netpollDirRead, netpollDirWrite} {
+		dlField := blk.NewGetElementPtr(pdTy, pdPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldDeadline)),
+			constant.NewInt(irtypes.I32, int64(dir)))
+		blk.NewStore(constant.NewInt(irtypes.I64, 0), dlField)
+	}
+	blk.NewCall(c.palMutexUnlock, lock)
 
 	// Synchronize with reactor: acquire batch lock to ensure the current event
 	// batch is fully processed. After this, no stale references to this PD
 	// remain (pal_reactor_del prevents future batches; fd==-1 skips current).
-	batchLockVal := cleanupBlk.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
-	cleanupBlk.NewCall(c.palMutexLock, batchLockVal)
-	cleanupBlk.NewCall(c.palMutexUnlock, batchLockVal)
+	batchLockVal := blk.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
+	blk.NewCall(c.palMutexLock, batchLockVal)
+	blk.NewCall(c.palMutexUnlock, batchLockVal)
 
-	// Now safe to destroy and free — no concurrent access possible
-	cleanupBlk.NewCall(c.palMutexDestroy, lock)
-	condField := cleanupBlk.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	condVal := cleanupBlk.NewLoad(irtypes.I8Ptr, condField)
-	cleanupBlk.NewCall(c.palCondDestroy, condVal)
-	cleanupBlk.NewCall(c.palFree, pdParam)
-	cleanupBlk.NewRet(nil)
+	// Drop the socket reference. unref unlinks from the deadline registry and
+	// destroys + frees the PollDesc once the last reference is gone (T1563).
+	blk.NewCall(c.funcs["promise_netpoll_unref"], pdParam)
+	blk.NewRet(nil)
 
 	c.funcs["promise_netpoll_close"] = fn
 }
@@ -326,6 +464,7 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	pdTy := pollDescStructType()
 	peTy := pollEventStructType()
 	schedTy := schedStructType()
+	scanFn := c.funcs["promise_netpoll_scan_deadlines"]
 
 	entry := fn.NewBlock(".entry")
 	loop := fn.NewBlock("loop")
@@ -334,9 +473,6 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	eventLoop := fn.NewBlock("event_loop")
 	eventBody := fn.NewBlock("event_body")
 	checkRead := fn.NewBlock("check_read")
-	wakeRead := fn.NewBlock("wake_read")
-	checkWrite := fn.NewBlock("check_write")
-	wakeWrite := fn.NewBlock("wake_write")
 	eventNext := fn.NewBlock("event_next")
 	eventDone := fn.NewBlock("event_done")
 	exitBlk := fn.NewBlock("exit")
@@ -346,7 +482,7 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	iAlloca := entry.NewAlloca(irtypes.I32)
 	// Track whether any goroutines were woken during event processing.
 	// Prevents spinning when WSAPoll returns spurious events (e.g., POLLWRNORM
-	// on listening sockets on Windows) that don't correspond to waiting goroutines.
+	// on listening sockets on Windows) that do not correspond to waiting goroutines.
 	wokenAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewBr(loop)
 
@@ -372,8 +508,11 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	hasEvents := processEvents.NewICmp(enum.IPredSGT, count, constant.NewInt(irtypes.I32, 0))
 	processEvents.NewCondBr(hasEvents, eventLoop, noEvents)
 
-	// noEvents: unlock batch lock, yield briefly to prevent starving
-	// netpoll_close waiters (reactor would otherwise re-lock immediately), then loop
+	// noEvents: expire due deadlines first — a silent socket produces no events
+	// at all, so this is the only path on which its deadline can fire (T1563).
+	// Then unlock the batch lock and yield briefly to avoid starving
+	// netpoll_close waiters (the reactor would otherwise re-lock immediately).
+	noEvents.NewCall(scanFn)
 	noEvents.NewCall(c.palMutexUnlock, batchLock)
 	noEvents.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100)) // 100μs
 	noEvents.NewBr(loop)
@@ -426,69 +565,15 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	// Check if readable (events & 1) or error (events & 4)
 	readOrErr := processRead.NewAnd(events, constant.NewInt(irtypes.I32, pollEventRead|pollEventError))
 	hasRead := processRead.NewICmp(enum.IPredNE, readOrErr, constant.NewInt(irtypes.I32, 0))
+	afterRead := c.emitNetpollWakeSlot(fn, processRead, pdPtr, pdFieldReadG, netpollDirRead,
+		netpollReasonReady, hasRead, wokenAlloca, "wake_read")
 
-	// Load read_g
-	readGField := processRead.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldReadG)))
-	readG := processRead.NewLoad(irtypes.I8Ptr, readGField)
-	readGNonNull := processRead.NewICmp(enum.IPredNE, readG, constant.NewNull(irtypes.I8Ptr))
-	shouldWakeRead := processRead.NewAnd(hasRead, readGNonNull)
-	processRead.NewCondBr(shouldWakeRead, wakeRead, checkWrite)
-
-	// wakeRead: clear read_g, check sentinel vs real G (B0324)
-	wokenVal := wakeRead.NewLoad(irtypes.I32, wokenAlloca)
-	wakeRead.NewStore(wakeRead.NewAdd(wokenVal, constant.NewInt(irtypes.I32, 1)), wokenAlloca)
-	wakeRead.NewStore(constant.NewNull(irtypes.I8Ptr), readGField)
-	sentinelR := wakeRead.NewIntToPtr(
-		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	isSentinelR := wakeRead.NewICmp(enum.IPredEQ, readG, sentinelR)
-	wakeReadEnqueue := fn.NewBlock("wake_read.enqueue")
-	wakeReadCond := fn.NewBlock("wake_read.cond")
-	wakeRead.NewCondBr(isSentinelR, wakeReadCond, wakeReadEnqueue)
-
-	// Real G: enqueue on run queue
-	wakeReadEnqueue.NewCall(c.funcs["promise_sched_enqueue"], readG)
-	wakeReadEnqueue.NewBr(wakeReadCond)
-
-	// Signal cond var (wakes thread-blocking waiters; no-op if none waiting)
-	pdCondFieldR := wakeReadCond.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	pdCondR := wakeReadCond.NewLoad(irtypes.I8Ptr, pdCondFieldR)
-	wakeReadCond.NewCall(c.palCondSignal, pdCondR)
-	wakeReadCond.NewBr(checkWrite)
-
-	// checkWrite: check if writable (events & 2) or error
-	writeOrErr := checkWrite.NewAnd(events, constant.NewInt(irtypes.I32, pollEventWrite|pollEventError))
-	hasWrite := checkWrite.NewICmp(enum.IPredNE, writeOrErr, constant.NewInt(irtypes.I32, 0))
-
-	writeGField := checkWrite.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldWriteG)))
-	writeG := checkWrite.NewLoad(irtypes.I8Ptr, writeGField)
-	writeGNonNull := checkWrite.NewICmp(enum.IPredNE, writeG, constant.NewNull(irtypes.I8Ptr))
-	shouldWakeWrite := checkWrite.NewAnd(hasWrite, writeGNonNull)
-	checkWrite.NewCondBr(shouldWakeWrite, wakeWrite, eventNext)
-
-	// wakeWrite: clear write_g, check sentinel vs real G (B0324)
-	wokenValW := wakeWrite.NewLoad(irtypes.I32, wokenAlloca)
-	wakeWrite.NewStore(wakeWrite.NewAdd(wokenValW, constant.NewInt(irtypes.I32, 1)), wokenAlloca)
-	wakeWrite.NewStore(constant.NewNull(irtypes.I8Ptr), writeGField)
-	sentinelW := wakeWrite.NewIntToPtr(
-		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	isSentinelW := wakeWrite.NewICmp(enum.IPredEQ, writeG, sentinelW)
-	wakeWriteEnqueue := fn.NewBlock("wake_write.enqueue")
-	wakeWriteCond := fn.NewBlock("wake_write.cond")
-	wakeWrite.NewCondBr(isSentinelW, wakeWriteCond, wakeWriteEnqueue)
-
-	// Real G: enqueue on run queue
-	wakeWriteEnqueue.NewCall(c.funcs["promise_sched_enqueue"], writeG)
-	wakeWriteEnqueue.NewBr(wakeWriteCond)
-
-	// Signal cond var (wakes thread-blocking waiters; no-op if none waiting)
-	pdCondFieldW := wakeWriteCond.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	pdCondW := wakeWriteCond.NewLoad(irtypes.I8Ptr, pdCondFieldW)
-	wakeWriteCond.NewCall(c.palCondSignal, pdCondW)
-	wakeWriteCond.NewBr(eventNext)
+	// Check if writable (events & 2) or error
+	writeOrErr := afterRead.NewAnd(events, constant.NewInt(irtypes.I32, pollEventWrite|pollEventError))
+	hasWrite := afterRead.NewICmp(enum.IPredNE, writeOrErr, constant.NewInt(irtypes.I32, 0))
+	afterWrite := c.emitNetpollWakeSlot(fn, afterRead, pdPtr, pdFieldWriteG, netpollDirWrite,
+		netpollReasonReady, hasWrite, wokenAlloca, "wake_write")
+	afterWrite.NewBr(eventNext)
 
 	// eventNext: unlock PollDesc, increment i
 	eventNext.NewCall(c.palMutexUnlock, pdLock)
@@ -496,10 +581,12 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	eventNext.NewStore(iNext, iAlloca)
 	eventNext.NewBr(eventBody)
 
-	// eventDone: unlock batch lock (B0324), check if any goroutines were woken.
+	// eventDone: expire due deadlines while the batch lock is still held (T1563),
+	// then unlock the batch lock (B0324) and check if any goroutines were woken.
 	// If no goroutines were woken, sleep 1ms to prevent spinning on spurious
 	// poll events (e.g., WSAPoll returning POLLWRNORM for listening sockets
 	// on Windows with no waiting goroutines).
+	eventDone.NewCall(scanFn)
 	eventDone.NewCall(c.palMutexUnlock, batchLock)
 	wokenFinal := eventDone.NewLoad(irtypes.I32, wokenAlloca)
 	noneWoken := eventDone.NewICmp(enum.IPredEQ, wokenFinal, constant.NewInt(irtypes.I32, 0))

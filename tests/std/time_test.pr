@@ -200,3 +200,64 @@ test_sleep() `test(exclude: wasm) {
   Duration elapsed = start.elapsed();
   assert(elapsed.as_millis >= 10, "sleep at least 10ms");
 }
+
+// --- Instant raw readings and Duration arithmetic (T1563) ---
+
+test_instant_from_nanos_roundtrip() `test {
+  Instant t = Instant.from_nanos(1234567890);
+  assert(t.as_nanos == 1234567890, "from_nanos roundtrips through as_nanos");
+  assert(Instant.from_nanos(0).as_nanos == 0, "zero reading");
+}
+
+test_instant_as_nanos_matches_duration_since() `test {
+  Instant a = Instant.from_nanos(1000);
+  Instant b = Instant.from_nanos(3500);
+  assert(b.as_nanos - a.as_nanos == 2500, "raw readings differ by the elapsed nanos");
+  assert(b.duration_since(a).as_nanos == 2500, "duration_since agrees with the raw readings");
+}
+
+test_instant_plus_duration() `test {
+  Instant base = Instant.from_nanos(1000);
+  Instant later = base + Duration.from_nanos(500);
+  assert(later.as_nanos == 1500, "adding a Duration moves forward");
+  assert(later > base, "the result is ordered after the base");
+  assert((base + Duration.zero()) == base, "adding zero is identity");
+  assert((base + Duration.from_millis(2)).as_nanos == 2001000, "millisecond offset");
+}
+
+test_instant_minus_duration() `test {
+  Instant base = Instant.from_nanos(1000);
+  Instant earlier = base - Duration.from_nanos(400);
+  assert(earlier.as_nanos == 600, "subtracting a Duration moves backward");
+  assert(earlier < base, "the result is ordered before the base");
+  assert(((base + Duration.from_secs(1)) - Duration.from_secs(1)) == base, "add then subtract roundtrips");
+}
+
+test_instant_deadline_pattern() `test {
+  // The shape modules/net uses to express a relative timeout.
+  Instant deadline = Instant.now() + Duration.from_secs(60);
+  assert(deadline > Instant.now(), "a one-minute deadline is in the future");
+  assert(deadline.duration_since(Instant.now()).as_secs >= 59, "roughly a minute out");
+}
+
+test_instant_handles_large_monotonic_readings() `test {
+  // Deadlines reach the IO reactor as raw i64 nanos. A machine up for a day is
+  // already past 2^31 ns, so anything that truncated to 32 bits on the way
+  // would make every deadline fire the moment it was set.
+  int day = 86400000000000;
+  Instant t = Instant.from_nanos(day);
+  assert(t.as_nanos == day, "a day of monotonic nanos survives the roundtrip");
+  assert((t + Duration.from_secs(1)).as_nanos == day + 1000000000, "arithmetic stays 64-bit");
+  assert((t + Duration.from_secs(1)).duration_since(t).as_secs == 1, "and the difference is exact");
+}
+
+test_instant_minus_more_than_it_holds() `test {
+  // Instants are raw readings, not clamped: subtracting past the epoch goes
+  // negative and stays ordered rather than wrapping. That is what lets a caller
+  // write `Instant.now() - d` for an already-expired deadline with no special
+  // case, however early in the monotonic epoch the process started.
+  Instant early = Instant.from_nanos(5) - Duration.from_nanos(10);
+  assert(early.as_nanos == -5, "the reading goes negative rather than wrapping");
+  assert(early < Instant.from_nanos(0), "and stays ordered below zero");
+  assert(Instant.from_nanos(0).duration_since(early).as_nanos == 5, "the difference is still exact");
+}

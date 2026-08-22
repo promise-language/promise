@@ -43,6 +43,12 @@ func (c *Compiler) defineNetPALBodies() {
 		"promise_net_netpoll_open",
 		"promise_net_netpoll_close",
 		"promise_net_resolve",
+		"promise_net_netpoll_arm",
+		"promise_net_netpoll_wake_reason",
+		"promise_net_netpoll_cancelled",
+		"promise_net_netpoll_cancel",
+		"promise_net_netpoll_ref",
+		"promise_net_netpoll_unref",
 	}
 
 	hasNetExterns := false
@@ -167,6 +173,28 @@ func (c *Compiler) defineNetPALBodies() {
 		}
 		if fn, ok := irFuncByName["promise_net_netpoll_close"]; ok {
 			c.defineNetNetpollCloseBody(fn)
+		}
+		// Deadlines and cancellation (T1563)
+		if fn, ok := irFuncByName["promise_net_netpoll_arm"]; ok {
+			c.defineNetNetpollArmBody(fn)
+		}
+		if fn, ok := irFuncByName["promise_net_netpoll_wake_reason"]; ok {
+			c.defineNetNetpollWakeReasonBody(fn)
+		}
+		if fn, ok := irFuncByName["promise_net_netpoll_cancelled"]; ok {
+			c.defineNetNetpollCancelledBody(fn)
+		}
+		// Ordered slice, not a map: the emitted module IR text is hashed into
+		// the build cache key, so anything that drives emission order has to be
+		// deterministic.
+		for _, bridge := range []struct{ extern, target string }{
+			{"promise_net_netpoll_cancel", "promise_netpoll_cancel"},
+			{"promise_net_netpoll_ref", "promise_netpoll_ref"},
+			{"promise_net_netpoll_unref", "promise_netpoll_unref"},
+		} {
+			if fn, ok := irFuncByName[bridge.extern]; ok {
+				c.defineNetPollDescVoidBody(fn, bridge.target)
+			}
 		}
 	}
 	// promise_netpoll_wait_read/write are intercepted at codegen dispatch (T0232) —
@@ -540,5 +568,64 @@ func (c *Compiler) defineNetSocketConnectResolvedBody(fn *ir.Func) {
 	rc := entry.NewCall(c.palSocketConnectResolved, fdI32, nodePtr)
 	c.emitExitSyscall(entry)
 	c.storeIntResult(entry, sret, entry.NewSExt(rc, irtypes.I64))
+	entry.NewRet(nil)
+}
+
+// defineNetNetpollArmBody: void @promise_net_netpoll_arm(i8* pd, i8* dir, i8* deadline)
+// Publishes an absolute monotonic deadline (0 = none) for one park direction
+// before the caller parks on the reactor (T1563).
+func (c *Compiler) defineNetNetpollArmBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+
+	pdRaw := c.extractRawInt(entry, fn.Params[0])
+	pdPtr := entry.NewIntToPtr(pdRaw, irtypes.I8Ptr)
+	dirRaw := c.extractRawInt(entry, fn.Params[1])
+	dirI32 := entry.NewTrunc(dirRaw, irtypes.I32)
+	deadline := c.extractRawInt(entry, fn.Params[2])
+
+	entry.NewCall(c.funcs["promise_netpoll_arm"], pdPtr, dirI32, deadline)
+	entry.NewRet(nil)
+}
+
+// defineNetNetpollWakeReasonBody: void @promise_net_netpoll_wake_reason(i8* sret, i8* pd, i8* dir)
+// Reports why the last park on that direction ended: 0 ready, 1 timed out,
+// 2 cancelled/closed (T1563).
+func (c *Compiler) defineNetNetpollWakeReasonBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	pdRaw := c.extractRawInt(entry, fn.Params[1])
+	pdPtr := entry.NewIntToPtr(pdRaw, irtypes.I8Ptr)
+	dirRaw := c.extractRawInt(entry, fn.Params[2])
+	dirI32 := entry.NewTrunc(dirRaw, irtypes.I32)
+
+	reason := entry.NewCall(c.funcs["promise_netpoll_wake_reason"], pdPtr, dirI32)
+	c.storeIntResult(entry, sret, entry.NewSExt(reason, irtypes.I64))
+	entry.NewRet(nil)
+}
+
+// defineNetNetpollCancelledBody: void @promise_net_netpoll_cancelled(i8* sret, i8* pd)
+// Reads the sticky cancellation flag (T1563).
+func (c *Compiler) defineNetNetpollCancelledBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	pdRaw := c.extractRawInt(entry, fn.Params[1])
+	pdPtr := entry.NewIntToPtr(pdRaw, irtypes.I8Ptr)
+
+	flag := entry.NewCall(c.funcs["promise_netpoll_cancelled"], pdPtr)
+	c.storeIntResult(entry, sret, entry.NewSExt(flag, irtypes.I64))
+	entry.NewRet(nil)
+}
+
+// defineNetPollDescVoidBody bridges the void PollDesc entry points that take a
+// single PollDesc pointer stored as a Promise int: cancel, ref and unref (T1563).
+func (c *Compiler) defineNetPollDescVoidBody(fn *ir.Func, target string) {
+	entry := fn.NewBlock(".entry")
+
+	pdRaw := c.extractRawInt(entry, fn.Params[0])
+	pdPtr := entry.NewIntToPtr(pdRaw, irtypes.I8Ptr)
+
+	entry.NewCall(c.funcs[target], pdPtr)
 	entry.NewRet(nil)
 }

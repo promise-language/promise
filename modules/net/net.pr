@@ -13,7 +13,8 @@
 // getaddrinfo behind the scheduler's syscall handoff (T1685): the calling M is
 // released along with its P, so no other goroutine is delayed while the resolver
 // works. A dead nameserver can therefore stall the *calling goroutine* for
-// several seconds; a caller-visible resolve timeout is tracked as T1563.
+// several seconds; `connect`'s deadline (T1563) bounds the connection wait, not
+// the resolution that precedes it — a caller-visible resolve timeout is T1736.
 _net_socket_create(int domain, int typ, int protocol) int `extern("promise_net_socket_create");
 _net_socket_bind_addr(int fd, string host, int port) int `extern("promise_net_socket_bind_addr");
 _net_socket_listen(int fd, int backlog) int `extern("promise_net_socket_listen");
@@ -48,6 +49,17 @@ _net_resolve_address(int node) string `extern("promise_net_resolve_address");
 _net_resolve_free(int list) `extern("promise_net_resolve_free");
 _net_socket_connect_resolved(int fd, int node) int `extern("promise_net_socket_connect_resolved");
 
+// Deadlines and cancellation (T1563). arm publishes an absolute monotonic
+// deadline for one park direction, wake_reason reports why the park ended, and
+// cancel/cancelled drive the sticky cancellation flag. ref/unref keep the
+// PollDesc alive while a CancelHandle refers to it.
+_net_netpoll_arm(int pd, int dir, int deadline) `extern("promise_net_netpoll_arm");
+_net_netpoll_wake_reason(int pd, int dir) int `extern("promise_net_netpoll_wake_reason");
+_net_netpoll_cancelled(int pd) int `extern("promise_net_netpoll_cancelled");
+_net_netpoll_cancel(int pd) `extern("promise_net_netpoll_cancel");
+_net_netpoll_ref(int pd) `extern("promise_net_netpoll_ref");
+_net_netpoll_unref(int pd) `extern("promise_net_netpoll_unref");
+
 _eagain() int `target(macos) {
   return 35;
 }
@@ -73,13 +85,112 @@ _einprogress() int `target(windows) {
   return 10035; // WSAEWOULDBLOCK (Windows uses this for non-blocking connect in progress)
 }
 
-type NetError is error `public `doc("A network I/O error with an errno code.") {
+// Park directions — must match netpollDirRead/netpollDirWrite in codegen.
+_dir_read() int {
+  return 0;
+}
+_dir_write() int {
+  return 1;
+}
+
+// Park wake reasons — must match netpollReason* in codegen.
+_wake_ready() int {
+  return 0;
+}
+_wake_timeout() int {
+  return 1;
+}
+_wake_cancelled() int {
+  return 2;
+}
+
+// Sentinel NetError codes. Real errno values are always positive, so negative
+// codes cannot collide with one.
+_timeout_code() int {
+  return -1;
+}
+_cancelled_code() int {
+  return -2;
+}
+
+type NetError is error `public `doc("A network I/O error with an errno code. Deadline expiry and cancellation use the dedicated is_timeout / is_cancelled flags instead of a platform errno.") {
   int code;
+
+  get is_timeout bool `public `doc("True when the operation exceeded its deadline rather than failing at the socket level.") {
+    return this.code == _timeout_code();
+  }
+
+  get is_cancelled bool `public `doc("True when the operation was cancelled through a CancelHandle, or the socket was closed underneath it.") {
+    return this.code == _cancelled_code();
+  }
 }
 
 _make_net_error(int rc) NetError {
   int c = 0 - rc;
   return NetError(code: c, message: _net_strerror(c));
+}
+
+_timeout_error() NetError {
+  return NetError(code: _timeout_code(), message: "operation timed out");
+}
+
+_cancelled_error() NetError {
+  return NetError(code: _cancelled_code(), message: "operation cancelled");
+}
+
+// _wake_error maps a non-ready park wake reason to the error it raises.
+_wake_error(int reason) NetError {
+  if reason == _wake_timeout() {
+    return _timeout_error();
+  }
+  return _cancelled_error();
+}
+
+// _deadline_nanos flattens an optional deadline to the raw monotonic reading
+// the reactor stores, using 0 for "no deadline". A genuine reading of 0 (only
+// reachable in the first nanosecond of the monotonic epoch) is nudged to 1 so
+// it cannot be mistaken for "none".
+_deadline_nanos(Instant? deadline) int {
+  if at := deadline {
+    int ns = at.as_nanos;
+    if ns == 0 {
+      return 1;
+    }
+    return ns;
+  }
+  return 0;
+}
+
+// _deadline_instant is the inverse of _deadline_nanos.
+_deadline_instant(int nanos) Instant? {
+  if nanos == 0 {
+    return none;
+  }
+  return Instant.from_nanos(nanos);
+}
+
+// _park_ready parks the caller until pd is ready in the given direction. It is
+// the single place any socket operation blocks, so deadline expiry and
+// cancellation are handled once for accept, connect, read and write.
+//
+// Returns _wake_ready() when the socket became ready, _wake_timeout() when the
+// deadline passed, or _wake_cancelled() when the socket was cancelled or closed.
+_park_ready(int pd, int dir, int deadline) int {
+  if _net_netpoll_cancelled(pd) != 0 {
+    return _wake_cancelled();
+  }
+  if deadline != 0 && Instant.now().as_nanos >= deadline {
+    return _wake_timeout();
+  }
+  // Arm before parking. The reactor scan tolerates the window between arming
+  // and parking: it leaves an expired deadline armed until a waiter shows up.
+  _net_netpoll_arm(pd, dir, deadline);
+  if dir == _dir_read() {
+    _net_netpoll_wait_read(pd);
+  } else {
+    _net_netpoll_wait_write(pd);
+  }
+  return _net_netpoll_wake_reason(pd, dir);
 }
 
 _net_strerror(int code) string {
@@ -190,9 +301,35 @@ _sock_stream() int {
   return 1;
 }
 
+type CancelHandle `public `doc("Cancels in-flight I/O on a socket from another goroutine. Create one with create_cancel_handle, then move it into a `go` block. Cancellation is sticky: once cancelled, later reads and writes on that socket raise a cancelled NetError. Safe to keep after the socket is closed.") {
+  int _pd;
+
+  cancel(this) `public `doc("Unblocks any goroutine parked on the socket and marks it cancelled. Idempotent, and a no-op once the socket has been closed.") {
+    if this._pd != 0 {
+      _net_netpoll_cancel(this._pd);
+    }
+  }
+
+  drop(~this) {
+    if this._pd != 0 {
+      _net_netpoll_unref(this._pd);
+    }
+  }
+}
+
+// _make_cancel_handle takes an extra PollDesc reference so the handle stays
+// valid even if the socket it came from is closed or dropped first.
+_make_cancel_handle(int pd) CancelHandle {
+  if pd != 0 {
+    _net_netpoll_ref(pd);
+  }
+  return CancelHandle(_pd: pd);
+}
+
 type TcpListener `public `doc("A TCP listener socket. Binds to an address and accepts incoming connections. Auto-closes on drop.") {
   int _fd;
   int _pd; // PollDesc pointer (as int) for reactor integration
+  int _accept_deadline; // absolute monotonic nanos, 0 = no deadline
 
   bind!(string host, int port) Self `factory `public `doc("Creates a TCP listener bound to the given host and port. Host must be an IPv4 address (e.g. \"0.0.0.0\" or \"127.0.0.1\").") {
     // Create socket
@@ -217,26 +354,41 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
     // initial state when the fd is added to epoll (B0322).
     _net_socket_set_nonblock(fd);
     int pd = _net_netpoll_open(fd);
-    return TcpListener(_fd: fd, _pd: pd);
+    return TcpListener(_fd: fd, _pd: pd, _accept_deadline: 0);
   }
 
-  accept!(~this) TcpStream `public `doc("Accepts a new TCP connection. Blocks the goroutine (via reactor) until a connection arrives.") {
+  accept!(~this) TcpStream `public `doc("Accepts a new TCP connection. Blocks the goroutine (via reactor) until a connection arrives, the accept deadline passes, or the listener is cancelled.") {
     while true {
       int fd = _net_socket_accept_addr(this._fd);
       if fd >= 0 {
         _net_socket_set_nonblock(fd);
         int pd = _net_netpoll_open(fd);
-        return TcpStream(_fd: fd, _pd: pd);
+        return TcpStream(_fd: fd, _pd: pd, _read_deadline: 0, _write_deadline: 0);
       }
       int err = 0 - fd;
       if err == _eagain() {
-        _net_netpoll_wait_read(this._pd);
+        int reason = _park_ready(this._pd, _dir_read(), this._accept_deadline);
+        if reason != _wake_ready() {
+          raise _wake_error(reason);
+        }
         continue;
       }
       raise _make_net_error(fd);
     }
     // Unreachable — loop always returns or raises.
     raise NetError(code: 0, message: "unreachable");
+  }
+
+  set_accept_deadline(~this, Instant? deadline) `public `doc("Bounds how long accept() may block. Pass none to clear it. Expiry is checked by the IO reactor, so it can overshoot by a millisecond or two.") {
+    this._accept_deadline = _deadline_nanos(deadline);
+  }
+
+  get accept_deadline Instant? `public `doc("The current accept deadline, or none when accept() may block indefinitely.") {
+    return _deadline_instant(this._accept_deadline);
+  }
+
+  create_cancel_handle(this) CancelHandle `public `doc("Creates a handle that can unblock a goroutine parked in accept() from another goroutine. The handle stays valid after this listener is closed.") {
+    return _make_cancel_handle(this._pd);
   }
 
   get local_port int `public `doc("Returns the port number this listener is bound to. Useful after binding to port 0 (dynamic allocation).") {
@@ -264,11 +416,14 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
   }
 }
 
-type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read/write with reactor-based goroutine parking. Auto-closes on drop.") {
+type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read/write with reactor-based goroutine parking, per-direction deadlines and cancellation. Auto-closes on drop.") {
   int _fd;
   int _pd; // PollDesc pointer (as int) for reactor integration
+  int _read_deadline; // absolute monotonic nanos, 0 = no deadline
+  int _write_deadline; // absolute monotonic nanos, 0 = no deadline
 
-  connect!(string host, int port) Self `factory `public `doc("Connects to a TCP server at the given host and port. The host may be a name (\"example.com\", \"localhost\") or an IPv4/IPv6 literal; names are resolved via the platform resolver and the resolved addresses are tried in the order it prefers. Blocks the goroutine until the connection is established. Raises ResolveError if the name cannot be resolved, NetError if no resolved address accepted the connection. An empty host raises ResolveError(kind: not_found) on every target, rather than connecting to this machine.") {
+  connect!(string host, int port, Instant? deadline) Self `factory `public `doc("Connects to a TCP server at the given host and port. The host may be a name (\"example.com\", \"localhost\") or an IPv4/IPv6 literal; names are resolved via the platform resolver and the resolved addresses are tried in the order it prefers. Blocks the goroutine until the connection is established; pass a deadline to bound that wait, after which a NetError with is_timeout is raised. Raises ResolveError if the name cannot be resolved, NetError if no resolved address accepted the connection. An empty host raises ResolveError(kind: not_found) on every target, rather than connecting to this machine.") {
+    int dl = _deadline_nanos(deadline);
     int head = _net_resolve(host, "{port}");
     if head < 0 {
       raise _make_resolve_error(host, head);
@@ -302,7 +457,7 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
       if rc >= 0 {
         // Immediate connect (non-blocking socket connected synchronously — rare).
         int pd = _net_netpoll_open(fd);
-        return TcpStream(_fd: fd, _pd: pd);
+        return TcpStream(_fd: fd, _pd: pd, _read_deadline: 0, _write_deadline: 0);
       }
       int err = 0 - rc;
       if err == _einprogress() {
@@ -310,10 +465,18 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
         // then check SO_ERROR. Reactor registered here (after connect) so EPOLLET sees
         // the "connecting → connected" transition.
         int pd = _net_netpoll_open(fd);
-        _net_netpoll_wait_write(pd);
+        int reason = _park_ready(pd, _dir_write(), dl);
+        if reason != _wake_ready() {
+          // The deadline bounds the connect as a whole, not each candidate
+          // address: once it has expired every remaining address would park and
+          // time out at once, so report it instead of walking the rest of the list.
+          _net_netpoll_close(pd);
+          _net_socket_close(fd);
+          raise _wake_error(reason);
+        }
         int sock_err = _net_socket_get_error(fd);
         if sock_err == 0 {
-          return TcpStream(_fd: fd, _pd: pd);
+          return TcpStream(_fd: fd, _pd: pd, _read_deadline: 0, _write_deadline: 0);
         }
         _net_netpoll_close(pd);
         _net_socket_close(fd);
@@ -330,7 +493,7 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
     raise _make_net_error(last_err);
   }
 
-  read!(~this, u8[] ~buf) int `public `doc("Reads bytes into buf. Returns the number of bytes read (0 at EOF). Blocks the goroutine until data is available.") {
+  read!(~this, u8[] ~buf) int `public `doc("Reads bytes into buf. Returns the number of bytes read (0 at EOF). Blocks the goroutine until data is available, the read deadline passes, or the stream is cancelled.") {
     while true {
       int n = _net_socket_recv(this._fd, buf);
       if n >= 0 {
@@ -338,7 +501,10 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
       }
       int err = 0 - n;
       if err == _eagain() {
-        _net_netpoll_wait_read(this._pd);
+        int reason = _park_ready(this._pd, _dir_read(), this._read_deadline);
+        if reason != _wake_ready() {
+          raise _wake_error(reason);
+        }
         continue;
       }
       raise _make_net_error(n);
@@ -346,7 +512,7 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
     raise NetError(code: 0, message: "unreachable");
   }
 
-  write!(~this, u8[] ~data) int `public `doc("Writes bytes from data. Returns the number of bytes written. Blocks the goroutine until the socket is writable.") {
+  write!(~this, u8[] ~data) int `public `doc("Writes bytes from data. Returns the number of bytes written. Blocks the goroutine until the socket is writable, the write deadline passes, or the stream is cancelled.") {
     while true {
       int n = _net_socket_send(this._fd, data);
       if n >= 0 {
@@ -354,12 +520,40 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
       }
       int err = 0 - n;
       if err == _eagain() {
-        _net_netpoll_wait_write(this._pd);
+        int reason = _park_ready(this._pd, _dir_write(), this._write_deadline);
+        if reason != _wake_ready() {
+          raise _wake_error(reason);
+        }
         continue;
       }
       raise _make_net_error(n);
     }
     raise NetError(code: 0, message: "unreachable");
+  }
+
+  set_read_deadline(~this, Instant? deadline) `public `doc("Bounds how long read() may block. Pass none to clear it. Expiry is checked by the IO reactor, so it can overshoot by a millisecond or two.") {
+    this._read_deadline = _deadline_nanos(deadline);
+  }
+
+  set_write_deadline(~this, Instant? deadline) `public `doc("Bounds how long write() may block. Pass none to clear it. Expiry is checked by the IO reactor, so it can overshoot by a millisecond or two.") {
+    this._write_deadline = _deadline_nanos(deadline);
+  }
+
+  set_deadline(~this, Instant? deadline) `public `doc("Sets the read and write deadlines together. Pass none to clear both.") {
+    this._read_deadline = _deadline_nanos(deadline);
+    this._write_deadline = this._read_deadline;
+  }
+
+  get read_deadline Instant? `public `doc("The current read deadline, or none when read() may block indefinitely.") {
+    return _deadline_instant(this._read_deadline);
+  }
+
+  get write_deadline Instant? `public `doc("The current write deadline, or none when write() may block indefinitely.") {
+    return _deadline_instant(this._write_deadline);
+  }
+
+  create_cancel_handle(this) CancelHandle `public `doc("Creates a handle that can unblock a goroutine parked in read() or write() from another goroutine. The handle stays valid after this stream is closed.") {
+    return _make_cancel_handle(this._pd);
   }
 
   close!(~this) `public `doc("Closes the stream. Raises NetError on failure.") {

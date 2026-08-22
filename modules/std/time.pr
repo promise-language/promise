@@ -82,6 +82,17 @@ type Instant `public `doc("A point in monotonic time. Use `now()` to capture the
   // duration_since returns the Duration between this instant and an earlier one.
   duration_since(Instant earlier) Duration => Duration(nanos: this.nanos - earlier.nanos);
 
+  // from_nanos rebuilds an Instant from a raw monotonic nanosecond reading.
+  from_nanos(int ns) Instant `factory `public `doc("Rebuilds an Instant from a raw monotonic nanosecond reading previously obtained from as_nanos.") => Instant(nanos: ns);
+
+  // as_nanos exposes the raw monotonic reading. The epoch is unspecified —
+  // only differences between Instants are meaningful.
+  get as_nanos int `public `doc("The raw monotonic nanosecond reading. The epoch is unspecified; only differences between Instants are meaningful.") => this.nanos;
+
+  // Arithmetic with Duration
+  +(Duration d) Instant `public `doc("The Instant d after this one.") => Instant(nanos: this.nanos + d.nanos);
+  -(Duration d) Instant `public `doc("The Instant d before this one.") => Instant(nanos: this.nanos - d.nanos);
+
   // Comparison
   == (Instant other) bool => this.nanos == other.nanos;
   != (Instant other) bool => this.nanos != other.nanos;

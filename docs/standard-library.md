@@ -54,7 +54,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `json` | `modules/json/json.pr` | ~900 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 157 tests. |
 | `os` | `modules/os/os.pr` | 4 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal |
 | `time` | `modules/time/time.pr` | ~370 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 25 tests. |
-| `http` | `modules/http/http.pr` | ~950 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, graceful shutdown. https/TLS is T0079. 74 tests. |
+| `http` | `modules/http/http.pr` | ~950 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
 | `tls` | `modules/tls/tls.pr` | 403 | **Done** (client + server) — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. |
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | **Done** (hex) — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
 
@@ -1047,8 +1047,25 @@ Response r = client.get("http://host/path")?;   // also post!, send!, close
   keep-alive connections are pooled per `host:port` (LIFO, stale-connection
   retry). Sends `Accept-Encoding: gzip` and decodes `Content-Encoding: gzip`
   responses when `auto_gzip`.
-- **`Server`**: `bind` + `serve` with a `Handler`, `ServerRequest`/
-  `ServerResponse`, and graceful shutdown via `ServerShutdownHandle`.
+- **`Server`** (T1519): `bind` + `serve` with a `Handler`, `ServerRequest`/
+  `ServerResponse`, and graceful shutdown via `ServerShutdownHandle`. Each
+  accepted connection is handled on its own goroutine, so one slow handler
+  cannot stall the others. `bind`'s `max_connections` (default 128) bounds how
+  many connections are in flight — beyond it the server stops accepting and
+  further connections wait in the listen backlog — and
+  `max_keep_alive_requests` (default 100) bounds how many requests one
+  persistent connection may serve. Both must be at least 1 — `bind` raises
+  rather than accept a bound that would leave the server unable to serve
+  anything. HTTP/1.1 connections are kept alive by default (HTTP/1.0 only on an
+  explicit `Connection: keep-alive`); the server owns response framing, so a
+  handler-set `Connection`, `Content-Length` or `Transfer-Encoding` header is
+  replaced, a request the server cannot frame (`Transfer-Encoding`, since only
+  `Content-Length` framing is implemented) gets `411 Length Required` and loses
+  the connection, and a `HEAD` reply keeps its `Content-Length` but carries no
+  body. Because one handler is shared across all connection goroutines,
+  `Handler.handle` takes a shared `this` receiver: handler state must be
+  immutable or guarded by `Mutex[T]`. `serve` returns only after every in-flight
+  connection has finished.
 
 - **Dependencies**: `modules/net/net.pr`, `modules/json/json.pr`, `modules/gzip/gzip.pr`
 

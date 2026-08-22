@@ -1,7 +1,7 @@
 type _OkHandler {
   string response_body;
 
-  handle!(~this, ServerRequest request) ServerResponse {
+  handle!(this, ServerRequest request) ServerResponse {
     return ServerResponse.ok(this.response_body);
   }
 }
@@ -9,7 +9,7 @@ type _OkHandler {
 type _EchoHandler {
   string prefix;
 
-  handle!(~this, ServerRequest request) ServerResponse {
+  handle!(this, ServerRequest request) ServerResponse {
     return ServerResponse.ok(this.prefix + request.body);
   }
 }
@@ -17,7 +17,7 @@ type _EchoHandler {
 type _ErrorHandler {
   string error_message;
 
-  handle!(~this, ServerRequest request) ServerResponse {
+  handle!(this, ServerRequest request) ServerResponse {
     raise HttpError(code: 0, message: this.error_message);
   }
 }
@@ -25,7 +25,7 @@ type _ErrorHandler {
 type _HeaderEchoHandler {
   string echo_header;
 
-  handle!(~this, ServerRequest request) ServerResponse {
+  handle!(this, ServerRequest request) ServerResponse {
     ServerResponse resp = ServerResponse.ok(move request.path);
     if h := request.header(this.echo_header) {
       resp.set_header("X-Echo", move h);
@@ -37,7 +37,7 @@ type _HeaderEchoHandler {
 type _NotFoundHandler {
   string message;
 
-  handle!(~this, ServerRequest request) ServerResponse {
+  handle!(this, ServerRequest request) ServerResponse {
     return ServerResponse.not_found();
   }
 }
@@ -71,6 +71,7 @@ test_server_status_text() `test(exclude: wasm) {
   assert(_status_text(403) == "Forbidden", "403");
   assert(_status_text(404) == "Not Found", "404");
   assert(_status_text(405) == "Method Not Allowed", "405");
+  assert(_status_text(411) == "Length Required", "411");
   assert(_status_text(500) == "Internal Server Error", "500");
   assert(_status_text(502) == "Bad Gateway", "502");
   assert(_status_text(503) == "Service Unavailable", "503");
@@ -108,7 +109,7 @@ test_server_request_parse_post() `test(exclude: wasm) {
 
 test_server_response_serialize() `test(exclude: wasm) {
   ServerResponse resp = ServerResponse.ok("hello");
-  string s = _serialize_response(resp);
+  string s = _serialize_response(resp, false, false);
   assert(s.contains("HTTP/1.1 200 OK"), "status line");
   assert(s.contains("Content-Length: 5"), "content length");
   assert(s.contains("Connection: close"), "connection close");
@@ -136,43 +137,47 @@ test_server_response_factories() `test(exclude: wasm) {
 test_server_set_header() `test(exclude: wasm) {
   ServerResponse resp = ServerResponse.ok("test");
   resp.set_header("X-Custom", "value");
-  string s = _serialize_response(resp);
+  string s = _serialize_response(resp, false, false);
   assert(s.contains("X-Custom: value"), "custom header in serialized response");
 }
 
 test_server_basic() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "hello server", "body");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   _OkHandler handler = _OkHandler(response_body: "hello server");
-  _handle_one(conn, handler)?!;
+  _serve_connection[_OkHandler](conn, Ref[_OkHandler](move handler), 1);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_server_post() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "request body");
     Response resp = req.send()?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "request body", "echoed body");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   _EchoHandler handler = _EchoHandler(prefix: "");
-  _handle_one(conn, handler)?!;
+  _serve_connection[_EchoHandler](conn, Ref[_EchoHandler](move handler), 1);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // B0347: partially fixed — the Bag[K,string].[] return site now dups the
@@ -183,6 +188,7 @@ test_server_post() `test(exclude: wasm, timeout: "10s") {
 test_server_headers() `test(exclude: wasm || macos, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Request req = Request.new_get("http://127.0.0.1:" + port.to_string() + "/path");
@@ -197,47 +203,52 @@ test_server_headers() `test(exclude: wasm || macos, timeout: "10s") {
       }
     }
     assert(found, "x-echo header");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   _HeaderEchoHandler handler = _HeaderEchoHandler(echo_header: "x-test");
-  _handle_one(conn, handler)?!;
+  _serve_connection[_HeaderEchoHandler](conn, Ref[_HeaderEchoHandler](move handler), 1);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_server_error_handling() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 500, "status 500");
     assert(resp.body == "handler error", "error message in body");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   _ErrorHandler handler = _ErrorHandler(error_message: "handler error");
-  _handle_one(conn, handler)?!;
+  _serve_connection[_ErrorHandler](conn, Ref[_ErrorHandler](move handler), 1);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_server_not_found() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/missing")?!;
     assert(resp.status == 404, "status 404");
     assert(resp.body == "Not Found", "not found body");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   _NotFoundHandler handler = _NotFoundHandler(message: "");
-  _handle_one(conn, handler)?!;
+  _serve_connection[_NotFoundHandler](conn, Ref[_NotFoundHandler](move handler), 1);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_server_bind_and_port() `test(exclude: wasm, timeout: "10s") {
@@ -273,7 +284,8 @@ test_read_request_early_close() `test(exclude: wasm, timeout: "10s") {
   };
 
   net.TcpStream conn = listener.accept()?!;
-  ServerRequest req = _read_request(conn)? e {
+  u8[] pending = u8[]();
+  ServerRequest req = _read_request(conn, pending)? e {
     assert(e.message.contains("connection closed"), "early close error");
     listener.close()?!;
     return;
@@ -284,6 +296,7 @@ test_read_request_early_close() `test(exclude: wasm, timeout: "10s") {
 test_server_large_body() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     string large_body = "X".repeat(8000);
@@ -291,13 +304,14 @@ test_server_large_body() `test(exclude: wasm, timeout: "10s") {
     Response resp = req.send()?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body.len == 8000, "echoed large body length");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   _EchoHandler handler = _EchoHandler(prefix: "");
-  _handle_one(conn, handler)?!;
+  _serve_connection[_EchoHandler](conn, Ref[_EchoHandler](move handler), 1);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // T1347: Wake a serve() loop out of its blocking accept() and signal shutdown.
@@ -317,9 +331,14 @@ _wake_serve(channel[bool] stop, int port) {
   };
 }
 
+// The serve tests synchronize deterministically (T1632): receiving the port
+// over port_ch is already a happens-before edge past bind+listen, and the serve
+// goroutine signals `done` after serve returns — which, thanks to the drain
+// barrier, is after every connection goroutine has finished.
 test_server_serve() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[channel[bool]] stop_ch = channel[channel[bool]](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Server server = Server.bind("127.0.0.1", 0)?!;
@@ -327,13 +346,12 @@ test_server_serve() `test(exclude: wasm, timeout: "10s") {
     channel[bool] stop_ref = server._stop;
     stop_ch.send(move stop_ref);
     _OkHandler handler = _OkHandler(response_body: "served");
-    server.serve(handler)?!;
+    server.serve(move handler)?!;
+    done.send(true);
   };
 
   if port := <-port_ch {
     if stop := <-stop_ch {
-      sleep(Duration.from_millis(100));
-
       // Send a real request through serve
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
       assert(resp.status == 200, "status 200");
@@ -341,7 +359,7 @@ test_server_serve() `test(exclude: wasm, timeout: "10s") {
 
       // Shut down: signal + wake accept (tolerant of the shutdown race).
       _wake_serve(stop, port);
-      sleep(Duration.from_millis(200));
+      _ := <-done;
     }
   }
 }
@@ -349,6 +367,7 @@ test_server_serve() `test(exclude: wasm, timeout: "10s") {
 test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[channel[bool]] stop_ch = channel[channel[bool]](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Server server = Server.bind("127.0.0.1", 0)?!;
@@ -356,13 +375,12 @@ test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
     channel[bool] stop_ref = server._stop;
     stop_ch.send(move stop_ref);
     _ErrorHandler handler = _ErrorHandler(error_message: "serve error");
-    server.serve(handler)?!;
+    server.serve(move handler)?!;
+    done.send(true);
   };
 
   if port := <-port_ch {
     if stop := <-stop_ch {
-      sleep(Duration.from_millis(100));
-
       // Handler raises — serve should return 500 and continue
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
       assert(resp.status == 500, "status 500");
@@ -370,7 +388,7 @@ test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
 
       // Shut down: signal + wake accept (tolerant of the shutdown race).
       _wake_serve(stop, port);
-      sleep(Duration.from_millis(200));
+      _ := <-done;
     }
   }
 }
@@ -378,6 +396,7 @@ test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
 test_server_shutdown_handle() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Server server = Server.bind("127.0.0.1", 0)?!;
@@ -385,17 +404,17 @@ test_server_shutdown_handle() `test(exclude: wasm, timeout: "10s") {
     ServerShutdownHandle handle = server.create_shutdown_handle();
     handle_ch.send(move handle);
     _OkHandler h = _OkHandler(response_body: "served");
-    server.serve(h)?!;
+    server.serve(move h)?!;
+    done.send(true);
   };
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      sleep(Duration.from_millis(100));
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
       assert(resp.status == 200, "status 200");
       assert(resp.body == "served", "body");
       handle.shutdown()?!;
-      sleep(Duration.from_millis(200));
+      _ := <-done;
     }
   }
 }
@@ -403,6 +422,7 @@ test_server_shutdown_handle() `test(exclude: wasm, timeout: "10s") {
 test_server_shutdown_handle_error_handler() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Server server = Server.bind("127.0.0.1", 0)?!;
@@ -410,17 +430,1037 @@ test_server_shutdown_handle_error_handler() `test(exclude: wasm, timeout: "10s")
     ServerShutdownHandle handle = server.create_shutdown_handle();
     handle_ch.send(move handle);
     _ErrorHandler h = _ErrorHandler(error_message: "serve error");
-    server.serve(h)?!;
+    server.serve(move h)?!;
+    done.send(true);
   };
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      sleep(Duration.from_millis(100));
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
       assert(resp.status == 500, "status 500");
       assert(resp.body == "serve error", "error body");
       handle.shutdown()?!;
-      sleep(Duration.from_millis(200));
+      _ := <-done;
     }
   }
+}
+
+// --- T1519: per-connection goroutine + keep-alive + bounded concurrency ---
+
+// The handlers below take the shared `this` receiver the concurrent server
+// uses. Channel fields work through it because Channel is `interior; counters
+// live in Ref[Mutex[...]] so the test goroutine can read them afterwards.
+//
+// Each test builds its handler first and then reads the handles it needs off
+// the handler's fields: storing a channel into a field consumes it, but reading
+// a channel field yields a fresh handle (the same trick Server uses for _stop).
+
+// _GateHandler blocks "/slow" inside the handler until released, so a second
+// request can be proven to complete while the first is still in flight.
+type _GateHandler {
+  channel[bool] entered;
+  channel[bool] release;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    if request.path == "/slow" {
+      channel[bool] entered_ref = this.entered;
+      channel[bool] release_ref = this.release;
+      entered_ref.send(true);
+      if r := <-release_ref {
+      }
+      return ServerResponse.ok("slow");
+    }
+    return ServerResponse.ok("fast");
+  }
+}
+
+// Live/peak in-handler counts, kept in one value so both are updated under a
+// single lock and the peak can never miss a concurrent increment.
+type _Counts {
+  int live `value;
+  int peak `value;
+}
+
+type _ConcurrencyHandler {
+  Ref[Mutex[_Counts]] counts;
+  channel[bool] entered;
+  channel[bool] release;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    {
+      use guard := this.counts.borrow.lock();
+      _Counts before = guard.borrow;
+      int live = before.live + 1;
+      int peak = before.peak;
+      if live > peak {
+        peak = live;
+      }
+      guard.borrow = _Counts(live: live, peak: peak);
+    }
+    channel[bool] entered_ref = this.entered;
+    channel[bool] release_ref = this.release;
+    entered_ref.send(true);
+    if r := <-release_ref {
+    }
+    {
+      use guard := this.counts.borrow.lock();
+      _Counts after = guard.borrow;
+      guard.borrow = _Counts(live: after.live - 1, peak: after.peak);
+    }
+    return ServerResponse.ok("done");
+  }
+}
+
+// _OrderingHandler records "handler finished" on a shared ordering channel, so
+// a test can prove serve() only returned after the in-flight handler completed.
+type _OrderingHandler {
+  channel[bool] entered;
+  channel[bool] release;
+  channel[int] order;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    channel[bool] entered_ref = this.entered;
+    channel[bool] release_ref = this.release;
+    channel[int] order_ref = this.order;
+    entered_ref.send(true);
+    if r := <-release_ref {
+    }
+    order_ref.send(1);
+    return ServerResponse.ok("drained");
+  }
+}
+
+type _CountingHandler {
+  Ref[Mutex[int]] hits;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    use guard := this.hits.borrow.lock();
+    guard.borrow += 1;
+    return ServerResponse.ok("counted");
+  }
+}
+
+// _response_header reads a response header (the parser lowercases keys) and
+// lowercases the value, so tests can compare tokens case-insensitively.
+_response_header(_RawResponse rr, string key) string {
+  if v := rr.headers[key] {
+    return v.to_lower();
+  }
+  return "";
+}
+
+// The P4 regression test: a second client must complete while the first is
+// still blocked inside the handler. Against the old serial server the /fast
+// request is never even accepted, so this times out.
+test_server_concurrent_slow_handler() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[bool] slow_done = channel[bool](capacity: 1);
+
+  _GateHandler handler = _GateHandler(entered: channel[bool](capacity: 1), release: channel[bool](capacity: 1));
+  channel[bool] entered = handler.entered;
+  channel[bool] release = handler.release;
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string base = "http://127.0.0.1:" + port.to_string();
+
+      go {
+        Request slow_req = Request.new_get(base + "/slow");
+        Response slow_resp = slow_req.send()?!;
+        assert(slow_resp.status == 200, "slow status");
+        assert(slow_resp.body == "slow", "slow body");
+        slow_done.send(true);
+      };
+
+      // The slow handler is now inside handle() and will not return until we
+      // release it — yet a second request must still be served.
+      if e := <-entered {
+      }
+      Request fast_req = Request.new_get(base + "/fast");
+      Response fast_resp = fast_req.send()?!;
+      assert(fast_resp.status == 200, "fast status while slow is blocked");
+      assert(fast_resp.body == "fast", "fast body while slow is blocked");
+
+      release.send(true);
+      if d := <-slow_done {
+      }
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_keep_alive_reuse() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "kept");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+
+      u8[] first = "GET /one HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse r1 = _exchange(conn, first, false)?!;
+      assert(r1.status == 200, "first status");
+      assert(string.from_bytes(r1.body) == "kept", "first body");
+      assert(_response_header(r1, "connection") == "keep-alive", "first Connection: keep-alive");
+      assert(r1.keep_alive, "first response is reusable");
+
+      // Second request on the same socket — impossible without keep-alive.
+      u8[] second = "GET /two HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse r2 = _exchange(conn, second, false)?!;
+      assert(r2.status == 200, "second status");
+      assert(string.from_bytes(r2.body) == "kept", "second body");
+      assert(_response_header(r2, "connection") == "keep-alive", "second Connection: keep-alive");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_keep_alive_connection_close() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "bye");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, req, false)?!;
+      assert(rr.status == 200, "status");
+      assert(_response_header(rr, "connection") == "close", "Connection: close honoured");
+      assert(!rr.keep_alive, "not reusable");
+
+      // The server closed its write half, so the socket reaches EOF.
+      u8[] tail = u8[].filled(0, 64);
+      int n = conn.read(tail)?!;
+      assert(n == 0, "EOF after Connection: close");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_http10_defaults_close() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "ten");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      // HTTP/1.0 without Connection: keep-alive defaults to close.
+      net.TcpStream plain = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] req10 = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse r10 = _exchange(plain, req10, false)?!;
+      assert(r10.status == 200, "http/1.0 status");
+      assert(_response_header(r10, "connection") == "close", "http/1.0 defaults to close");
+      u8[] tail = u8[].filled(0, 64);
+      int n = plain.read(tail)?!;
+      assert(n == 0, "http/1.0 socket reaches EOF");
+      plain.close()?!;
+
+      // HTTP/1.0 with an explicit Connection: keep-alive persists.
+      net.TcpStream persistent = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] req10ka = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n".bytes();
+      _RawResponse ka1 = _exchange(persistent, req10ka, false)?!;
+      assert(_response_header(ka1, "connection") == "keep-alive", "http/1.0 keep-alive honoured");
+      u8[] req10ka2 = "GET /again HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n".bytes();
+      _RawResponse ka2 = _exchange(persistent, req10ka2, false)?!;
+      assert(ka2.status == 200, "second http/1.0 keep-alive request served");
+      persistent.close()?!;
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_max_keep_alive_requests() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0, max_keep_alive_requests: 2)?!;
+    assert(server.max_keep_alive_requests == 2, "max_keep_alive_requests getter");
+    assert(server.max_connections == 128, "max_connections default");
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "two");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] first = "GET /1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse r1 = _exchange(conn, first, false)?!;
+      assert(_response_header(r1, "connection") == "keep-alive", "request 1 keeps the connection");
+
+      u8[] second = "GET /2 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse r2 = _exchange(conn, second, false)?!;
+      assert(r2.status == 200, "request 2 served");
+      assert(_response_header(r2, "connection") == "close", "request 2 hits the keep-alive limit");
+
+      u8[] tail = u8[].filled(0, 64);
+      int n = conn.read(tail)?!;
+      assert(n == 0, "EOF after the keep-alive limit");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_bounded_concurrency() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[bool] client_done = channel[bool](capacity: 3);
+
+  _ConcurrencyHandler handler = _ConcurrencyHandler(counts: Ref[Mutex[_Counts]](Mutex[_Counts](_Counts(live: 0, peak: 0))),
+  entered: channel[bool](capacity: 3),
+  release: channel[bool](capacity: 3));
+  Ref[Mutex[_Counts]] counts = handler.counts.clone();
+  channel[bool] entered = handler.entered;
+  channel[bool] release = handler.release;
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0, max_connections: 2)?!;
+    assert(server.max_connections == 2, "max_connections getter");
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string url = "http://127.0.0.1:" + port.to_string() + "/";
+      int spawned = 0;
+      while spawned < 3 {
+        string client_url = url[0:];
+        go {
+          Request req = Request.new_get(move client_url);
+          Response resp = req.send()?!;
+          assert(resp.status == 200, "bounded status");
+          client_done.send(true);
+        };
+        spawned = spawned + 1;
+      }
+
+      // With max_connections: 2 exactly two handlers can be in flight; the
+      // third connection waits in the listen backlog until a slot frees.
+      if a := <-entered {
+      }
+      if b := <-entered {
+      }
+      release.send(true);
+      release.send(true);
+      if c := <-entered {
+      }
+      release.send(true);
+
+      int finished = 0;
+      while finished < 3 {
+        if d := <-client_done {
+        }
+        finished = finished + 1;
+      }
+
+      use guard := counts.borrow.lock();
+      _Counts totals = guard.borrow;
+      assert(totals.live == 0, "all handlers left");
+      assert(totals.peak == 2, "peak concurrency bounded to 2, got " + totals.peak.to_string());
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_graceful_shutdown_drains() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  _OrderingHandler handler = _OrderingHandler(entered: channel[bool](capacity: 1),
+  release: channel[bool](capacity: 1),
+  order: channel[int](capacity: 2));
+  channel[bool] entered = handler.entered;
+  channel[bool] release = handler.release;
+  channel[int] order = handler.order;
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    order.send(2);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string url = "http://127.0.0.1:" + port.to_string() + "/";
+      go {
+        Request req = Request.new_get(move url);
+        Response resp = req.send()?!;
+        assert(resp.body == "drained", "in-flight body");
+        client_done.send(true);
+      };
+
+      // A request is in flight inside the handler when shutdown is signalled.
+      if e := <-entered {
+      }
+      handle.shutdown()?!;
+      release.send(true);
+
+      // The drain barrier means serve cannot return before the in-flight
+      // handler finished, so the handler token (1) must arrive before the
+      // serve token (2).
+      if first := <-order {
+        assert(first == 1, "handler completed before serve returned");
+      } else {
+        assert(false, "no first ordering token");
+      }
+      if second := <-order {
+        assert(second == 2, "serve returned second");
+      } else {
+        assert(false, "no second ordering token");
+      }
+      if d := <-client_done {
+      }
+    }
+  }
+}
+
+test_server_head_request() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "hello");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] head_req = "HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse hr = _exchange(conn, head_req, true)?!;
+      assert(hr.status == 200, "HEAD status");
+      assert(hr.body.len == 0, "HEAD carries no body");
+      assert(_response_header(hr, "content-length") == "5", "HEAD keeps Content-Length");
+
+      // Suppressing the body keeps the persistent connection framed correctly.
+      u8[] get_req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse gr = _exchange(conn, get_req, false)?!;
+      assert(gr.status == 200, "GET after HEAD status");
+      assert(string.from_bytes(gr.body) == "hello", "GET after HEAD body");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_server_mutex_handler_counter() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[bool] client_done = channel[bool](capacity: 6);
+
+  _CountingHandler handler = _CountingHandler(hits: Ref[Mutex[int]](Mutex[int](0)));
+  Ref[Mutex[int]] hits = handler.hits.clone();
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string url = "http://127.0.0.1:" + port.to_string() + "/";
+      int spawned = 0;
+      while spawned < 6 {
+        string client_url = url[0:];
+        go {
+          Request req = Request.new_get(move client_url);
+          Response resp = req.send()?!;
+          assert(resp.body == "counted", "counted body");
+          client_done.send(true);
+        };
+        spawned = spawned + 1;
+      }
+      int finished = 0;
+      while finished < 6 {
+        if d := <-client_done {
+        }
+        finished = finished + 1;
+      }
+
+      use guard := hits.borrow.lock();
+      assert(guard.borrow == 6, "every concurrent request counted exactly once");
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_serialize_response_flags() `test(exclude: wasm) {
+  // The server owns framing: handler-set Connection / Content-Length headers
+  // are dropped so a persistent connection cannot desynchronize.
+  ServerResponse resp = ServerResponse.ok("hello");
+  resp.set_header("Content-Length", "999");
+  resp.set_header("Connection", "upgrade");
+  resp.set_header("Transfer-Encoding", "chunked");
+  resp.set_header("X-Keep", "yes");
+  string kept = _serialize_response(resp, true, false);
+  assert(kept.contains("Connection: keep-alive"), "keep-alive header");
+  assert(!kept.contains("Connection: upgrade"), "handler Connection dropped");
+  assert(kept.contains("Content-Length: 5"), "computed Content-Length");
+  assert(!kept.contains("999"), "handler Content-Length dropped");
+  assert(!kept.contains("chunked"), "handler Transfer-Encoding dropped");
+  assert(kept.contains("X-Keep: yes"), "other handler headers preserved");
+  assert(kept.ends_with("\r\n\r\nhello"), "body present");
+
+  ServerResponse head_resp = ServerResponse.ok("hello");
+  string head_str = _serialize_response(head_resp, false, true);
+  assert(head_str.contains("Content-Length: 5"), "HEAD keeps Content-Length");
+  assert(head_str.contains("Connection: close"), "close header");
+  assert(head_str.ends_with("\r\n\r\n"), "HEAD suppresses the body");
+}
+
+test_request_keep_alive_rules() `test(exclude: wasm) {
+  ServerRequest http11 = _parse_request("GET / HTTP/1.1\r\nHost: h", "")?!;
+  assert(_request_keep_alive(http11), "HTTP/1.1 defaults to persistent");
+
+  ServerRequest http11_close = _parse_request("GET / HTTP/1.1\r\nHost: h\r\nConnection: close", "")?!;
+  assert(!_request_keep_alive(http11_close), "HTTP/1.1 Connection: close");
+
+  ServerRequest http10 = _parse_request("GET / HTTP/1.0\r\nHost: h", "")?!;
+  assert(!_request_keep_alive(http10), "HTTP/1.0 defaults to close");
+
+  ServerRequest http10_ka = _parse_request("GET / HTTP/1.0\r\nHost: h\r\nConnection: keep-alive", "")?!;
+  assert(_request_keep_alive(http10_ka), "HTTP/1.0 explicit keep-alive");
+
+  ServerRequest chunked = _parse_request("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked", "")?!;
+  assert(_has_transfer_encoding(chunked), "transfer-encoding detected");
+  assert(!_request_keep_alive(chunked), "unframable body cannot persist");
+
+  // An empty Transfer-Encoding value announces no alternate framing, so it
+  // does not disqualify the connection — only a non-blank one does.
+  ServerRequest blank_te = _parse_request("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding:   ", "")?!;
+  assert(!_has_transfer_encoding(blank_te), "blank transfer-encoding is not framing");
+  assert(_request_keep_alive(blank_te), "blank transfer-encoding still persists");
+
+  // Only "HTTP/1.1" opts into persistent-by-default. Anything else (including
+  // a version the server does not speak) falls back to the 1.0 rule.
+  ServerRequest odd_version = _parse_request("GET / HTTP/2.0\r\nHost: h", "")?!;
+  assert(!_request_keep_alive(odd_version), "unknown version defaults to close");
+  ServerRequest odd_version_ka = _parse_request("GET / HTTP/2.0\r\nHost: h\r\nConnection: keep-alive", "")?!;
+  assert(_request_keep_alive(odd_version_ka), "unknown version honours explicit keep-alive");
+
+  // A trailing-whitespace request line still identifies as HTTP/1.1.
+  ServerRequest padded = _parse_request("GET / HTTP/1.1 \r\nHost: h", "")?!;
+  assert(_request_keep_alive(padded), "padded version string still HTTP/1.1");
+}
+
+// A pipelined second request already sitting in the read buffer must be framed
+// from the carry-over buffer without another socket read.
+test_read_request_pipelined_carry_over() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] both = ("POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nfoo" + "GET /b?x=1 HTTP/1.1\r\nHost: h\r\n\r\n").bytes();
+    _write_all(client, both)?!;
+    if d := <-done {
+    }
+    client.close()?!;
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] pending = u8[]();
+  ServerRequest first = _read_request(conn, pending)?!;
+  assert(first.path == "/a", "first path");
+  assert(first.body == "foo", "first body");
+  assert(pending.len > 0, "second request carried over");
+
+  ServerRequest second = _read_request(conn, pending)?!;
+  assert(second.path == "/b", "second path");
+  assert(second.query == "x=1", "second query");
+  assert(second.body == "", "second body");
+  assert(pending.len == 0, "nothing left over");
+
+  done.send(true);
+  listener.close()?!;
+}
+
+// A request whose body the server cannot frame (Transfer-Encoding, which only
+// Content-Length framing is implemented for) must get 411 and lose the
+// connection — reusing a socket whose body boundary is unknown would let the
+// next "request" be read out of the previous body (request smuggling).
+test_server_transfer_encoding_rejected() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "never");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] chunked = "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, chunked, false)?!;
+      assert(rr.status == 411, "unframable body gets 411");
+      assert(_response_header(rr, "connection") == "close", "411 closes the connection");
+      assert(!rr.keep_alive, "411 response is not reusable");
+
+      u8[] tail = u8[].filled(0, 64);
+      int n = conn.read(tail)?!;
+      assert(n == 0, "EOF after 411");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// bind rejects bounds that would produce a server unable to serve anything: a
+// 0-slot accept semaphore never admits a connection, and a 0-request keep-alive
+// budget closes every connection without replying.
+test_server_bind_rejects_invalid_bounds() `test(exclude: wasm, timeout: "10s") {
+  bool rejected_connections = false;
+  Server bad_conn = Server.bind("127.0.0.1", 0, max_connections: 0)? e {
+    assert(e.message.contains("max_connections must be at least 1"), "max_connections message: " + e.message);
+    rejected_connections = true;
+    Server.bind("127.0.0.1", 0)?!;
+  };
+  assert(rejected_connections, "max_connections: 0 rejected");
+  bad_conn.close()?!;
+
+  bool rejected_keep_alive = false;
+  Server bad_keep = Server.bind("127.0.0.1", 0, max_keep_alive_requests: 0)? e {
+    assert(e.message.contains("max_keep_alive_requests must be at least 1"), "max_keep_alive_requests message: " + e.message);
+    rejected_keep_alive = true;
+    Server.bind("127.0.0.1", 0)?!;
+  };
+  assert(rejected_keep_alive, "max_keep_alive_requests: 0 rejected");
+  bad_keep.close()?!;
+
+  // The boundary values are accepted.
+  Server ok = Server.bind("127.0.0.1", 0, max_connections: 1, max_keep_alive_requests: 1)?!;
+  assert(ok.max_connections == 1, "max_connections: 1 accepted");
+  assert(ok.max_keep_alive_requests == 1, "max_keep_alive_requests: 1 accepted");
+  ok.close()?!;
+}
+
+// _read_until_eof drains a socket to EOF. Pipelined responses arrive
+// back-to-back on one socket, and _exchange discards whatever it reads past a
+// single response, so a pipelining test has to frame the stream itself.
+_read_until_eof!(net.TcpStream ~conn) string {
+  u8[] acc = u8[]();
+  u8[] buf = u8[].filled(0, 4096);
+  bool reading = true;
+  while reading {
+    int n = conn.read(buf)?^;
+    if n == 0 {
+      reading = false;
+    } else {
+      int i = 0;
+      while i < n {
+        acc.push(buf[i]);
+        i = i + 1;
+      }
+    }
+  }
+  return string.from_bytes(acc);
+}
+
+// A request body that arrives in a later TCP segment than its headers must be
+// reassembled before the request is dispatched — otherwise the handler sees a
+// truncated body AND the unread tail is mis-framed as the next keep-alive
+// request. The headers are drained into `pending` while the body is provably
+// still unwritten, so _read_request is guaranteed to take its body-read loop.
+test_read_request_body_split_across_reads() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] header_sent = channel[bool](capacity: 1);
+  channel[bool] want_body = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] head = "POST /split HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n".bytes();
+    _write_all(client, head)?!;
+    header_sent.send(true);
+    if w := <-want_body {
+    }
+    // T1509: a local named `body` collides with the coroutine `body` block label.
+    u8[] payload = "hello".bytes();
+    _write_all(client, payload)?!;
+    if d := <-done {
+    }
+    client.close()?!;
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  if h := <-header_sent {
+  }
+
+  // Drain exactly the headers. The body has not been written yet, so this
+  // cannot over-read into it.
+  u8[] pending = u8[]();
+  u8[] buf = u8[].filled(0, 4096);
+  bool have_header = false;
+  while !have_header {
+    int n = conn.read(buf)?!;
+    assert(n > 0, "header bytes expected before EOF");
+    int i = 0;
+    while i < n {
+      pending.push(buf[i]);
+      i = i + 1;
+    }
+    int scan = 0;
+    while scan + 3 < pending.len {
+      if pending[scan] == 13 && pending[scan + 1] == 10 && pending[scan + 2] == 13 && pending[scan + 3] == 10 {
+        have_header = true;
+        break;
+      }
+      scan = scan + 1;
+    }
+  }
+
+  want_body.send(true);
+  ServerRequest req = _read_request(conn, pending)?!;
+  assert(req.path == "/split", "split path");
+  assert(req.body == "hello", "body reassembled across reads, got '" + req.body + "'");
+  assert(pending.len == 0, "no carry-over past a body that ended the buffer");
+
+  done.send(true);
+  listener.close()?!;
+}
+
+// Pipelining end to end: two requests written in a single send must both be
+// answered, with the second framed out of the carry-over buffer rather than
+// off the socket. The second asks for Connection: close so the stream reaches
+// a deterministic EOF.
+test_server_pipelined_requests() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _EchoHandler handler = _EchoHandler(prefix: "echo:");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] both = ("POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nfoo" + "POST /b HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbar").bytes();
+      _write_all(conn, both)?!;
+
+      string text = _read_until_eof(conn)?!;
+      assert(text.count("HTTP/1.1 200 OK") == 2, "both pipelined requests answered");
+      assert(text.contains("echo:foo"), "first pipelined body echoed");
+      assert(text.contains("echo:bar"), "second pipelined body echoed");
+      assert(text.count("Connection: keep-alive") == 1, "first response keeps the connection");
+      assert(text.count("Connection: close") == 1, "second response closes it");
+      // The responses must come back in request order.
+      if first := text.index_of("echo:foo") {
+        if second := text.index_of("echo:bar") {
+          assert(first < second, "responses are in request order");
+        } else {
+          assert(false, "second body missing");
+        }
+      } else {
+        assert(false, "first body missing");
+      }
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// Shutdown must be observed even when every connection slot is occupied: with
+// max_connections: 1 and the only handler blocked, serve is parked in the
+// semaphore acquire rather than in accept, so the stop signal has to be
+// selectable from there. The in-flight request still completes, and serve only
+// returns after it does.
+test_server_shutdown_while_saturated() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  _GateHandler handler = _GateHandler(entered: channel[bool](capacity: 1), release: channel[bool](capacity: 1));
+  channel[bool] entered = handler.entered;
+  channel[bool] release = handler.release;
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0, max_connections: 1)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string url = "http://127.0.0.1:" + port.to_string() + "/slow";
+      go {
+        Request req = Request.new_get(move url);
+        Response resp = req.send()?!;
+        assert(resp.status == 200, "saturated in-flight status");
+        assert(resp.body == "slow", "saturated in-flight body");
+        client_done.send(true);
+      };
+
+      // The only slot is held by a handler that cannot return yet.
+      if e := <-entered {
+      }
+      handle.shutdown()?!;
+      release.send(true);
+
+      if d := <-client_done {
+      }
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// A handler that raises gets a 500, and the connection is not reused — the
+// server does not know what the handler had already produced, so the byte
+// stream after it is not trustworthy. Only a raw socket can prove the close.
+test_server_error_response_closes_connection() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _ErrorHandler handler = _ErrorHandler(error_message: "boom");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, req, false)?!;
+      assert(rr.status == 500, "handler error status");
+      assert(string.from_bytes(rr.body) == "boom", "handler error body");
+      assert(_response_header(rr, "connection") == "close", "500 refuses keep-alive");
+      assert(!rr.keep_alive, "500 response is not reusable");
+
+      u8[] tail = u8[].filled(0, 64);
+      int n = conn.read(tail)?!;
+      assert(n == 0, "EOF after a handler error");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// Keep-alive and bounded concurrency together under load: four persistent
+// connections each serve three requests through a server that admits only two
+// connections at a time, so slots are recycled while the other clients wait in
+// the listen backlog. Every request must be counted exactly once.
+test_server_keep_alive_concurrent_load() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[bool] client_done = channel[bool](capacity: 4);
+
+  _CountingHandler handler = _CountingHandler(hits: Ref[Mutex[int]](Mutex[int](0)));
+  Ref[Mutex[int]] hits = handler.hits.clone();
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0, max_connections: 2)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      int spawned = 0;
+      while spawned < 4 {
+        go {
+          net.TcpStream c = net.TcpStream.connect("127.0.0.1", port)?!;
+          int sent = 0;
+          while sent < 3 {
+            string closing = "";
+            if sent == 2 {
+              closing = "Connection: close\r\n";
+            }
+            u8[] req = ("GET /load HTTP/1.1\r\nHost: 127.0.0.1\r\n" + closing + "\r\n").bytes();
+            _RawResponse rr = _exchange(c, req, false)?!;
+            assert(rr.status == 200, "load status");
+            assert(string.from_bytes(rr.body) == "counted", "load body");
+            if sent < 2 {
+              assert(rr.keep_alive, "persistent connection reusable mid-run");
+            } else {
+              assert(!rr.keep_alive, "final request closes the connection");
+            }
+            sent = sent + 1;
+          }
+          c.close()?!;
+          client_done.send(true);
+        };
+        spawned = spawned + 1;
+      }
+
+      int finished = 0;
+      while finished < 4 {
+        if d := <-client_done {
+        }
+        finished = finished + 1;
+      }
+
+      use guard := hits.borrow.lock();
+      assert(guard.borrow == 12, "4 connections x 3 keep-alive requests counted, got " + guard.borrow.to_string());
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// A client that announces a Content-Length and then disconnects before sending
+// it all leaves the body-read loop on EOF, and the body slice is clamped to
+// what actually arrived.
+//
+// T1671: the truncated request is then handed to the handler as if it were
+// complete — it should raise instead, the way an EOF during the header phase
+// already does. This test pins the branch (and proves the server does not hang
+// or over-read on a vanished peer); update the two marked assertions to expect
+// a raise when T1671 lands.
+test_read_request_truncated_body() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    // 3 of the 10 announced body bytes, then EOF.
+    u8[] partial = "POST /truncated HTTP/1.1\r\nHost: h\r\nContent-Length: 10\r\n\r\nabc".bytes();
+    _write_all(client, partial)?!;
+    client.close()?!;
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] pending = u8[]();
+  ServerRequest req = _read_request(conn, pending)?!;
+  assert(req.path == "/truncated", "truncated request still framed");
+  // T1671: should be a raise, not a short body.
+  assert(req.body == "abc", "body clamped to the bytes that arrived, got '" + req.body + "'");
+  // T1671: whatever the disposition, nothing may be carried into a next request.
+  assert(pending.len == 0, "no carry-over from a truncated body");
+
+  listener.close()?!;
 }

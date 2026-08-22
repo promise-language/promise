@@ -17,12 +17,14 @@ test_graceful_close_drains_pending() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
     // Send bytes the server will never read, then close so the drain reaches EOF.
     u8[] extra = "leftover unread request bytes that the server must drain".bytes();
     client.write(extra)?!;
     client.close()?!;
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
@@ -30,7 +32,7 @@ test_graceful_close_drains_pending() `test(exclude: wasm, timeout: "10s") {
   // (n>0 branch) and reach EOF (n==0) without leaking or panicking.
   _graceful_close(conn);
   listener.close()?!;
-  sleep(Duration.from_millis(50));
+  _ := <-done;
 }
 
 test_url_basic() `test(exclude: wasm) {
@@ -73,35 +75,39 @@ test_http_get() `test(exclude: wasm, timeout: "10s") {
   int port = listener.local_port;
 
   // Client goroutine (captures only port — int is Copy)
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "hello", "body");
     assert(resp.is_success, "is_success");
+    done.send(true);
   };
 
   // Server in main goroutine
   _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_post() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "test body");
     Response resp = req.send()?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body ok");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
   assert(request.contains("POST /submit"), "method POST");
   assert(request.contains("test body"), "body sent");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_post_convenience() `test(exclude: wasm, timeout: "10s") {
@@ -110,11 +116,13 @@ test_http_post_convenience() `test(exclude: wasm, timeout: "10s") {
 
   // Use Request.new_post + set_header directly (equivalent to http_post! but avoids
   // passing map parameter into goroutine function call)
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/api", "data");
     req.set_header("X-Token", "secret");
     Response resp = req.send()?!;
     assert(resp.status == 200, "status 200");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -122,71 +130,79 @@ test_http_post_convenience() `test(exclude: wasm, timeout: "10s") {
   assert(request.contains("X-Token: secret"), "custom header via http_post");
   assert(request.contains("data"), "body sent");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_headers() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Request req = Request.new_get("http://127.0.0.1:" + port.to_string() + "/");
     req.set_header("X-Custom", "test-value");
     Response resp = req.send()?!;
     assert(resp.status == 200, "status 200");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?!;
   assert(request.contains("X-Custom: test-value"), "custom header sent");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_404() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/missing")?!;
     assert(resp.status == 404, "status 404");
     assert(!resp.is_success, "not success");
     assert(resp.body == "not found", "body");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_500() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 500, "status 500");
     assert(!resp.is_success, "not success");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_chunked() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "HelloWorld", "chunked body");
+    done.send(true);
   };
 
   string chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nHello\r\n5\r\nWorld\r\n0\r\n\r\n";
   _serve_once(listener, chunked)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // The live chunked decoder (_read_chunked_body) must strip ;-extensions from the
@@ -195,16 +211,18 @@ test_http_chunked_with_extension() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "HelloWorld", "chunked body with extension");
+    done.send(true);
   };
 
   string chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5;ext=val\r\nHello\r\n5\r\nWorld\r\n0\r\n\r\n";
   _serve_once(listener, chunked)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_connection_error() `test(exclude: wasm, timeout: "10s") {
@@ -230,6 +248,7 @@ test_response_headers() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     // Headers are lowercase.
@@ -240,26 +259,29 @@ test_response_headers() `test(exclude: wasm, timeout: "10s") {
       }
     }
     assert(found, "x-custom header found");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nX-Custom: hello\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_response_headers_getter() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     // T0494: getter result used as method-chain receiver.
     assert(resp.headers.contains("x-custom"), "headers contains x-custom");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nX-Custom: hello\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_method_to_string() `test(exclude: wasm) {
@@ -292,6 +314,7 @@ test_body_bytes() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     u8[] bytes = resp.body_bytes;
@@ -299,135 +322,153 @@ test_body_bytes() `test(exclude: wasm, timeout: "10s") {
     assert(bytes[0] == 65, "A");
     assert(bytes[1] == 66, "B");
     assert(bytes[2] == 67, "C");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nABC")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_put() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Request req = Request(method: move Method.Put, url: "http://127.0.0.1:" + port.to_string() + "/res", headers: map[string, string](), body: "update");
     Response resp = req.send()?!;
     assert(resp.status == 200, "status");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
   assert(request.contains("PUT /res"), "PUT method");
   assert(request.contains("update"), "body");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_status_no_reason() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status parsed without reason phrase");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_malformed_response() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
-    net.TcpStream conn = listener.accept()?!;
-    u8[] buf = u8[].filled(0, 8192);
-    conn.read(buf)?!;
-    // Send data without \r\n\r\n header terminator, then close
-    u8[] rd = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n".bytes();
-    conn.write(rd)?!;
-    conn.close()?!;
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")? e {
+      done.send(true); // expected error path still signals completion
+      return; // expected: malformed HTTP response
+    };
+    assert(false, "should have raised an error");
+    done.send(true);
   };
 
-  Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")? e {
-    return; // expected: malformed HTTP response
-  };
-  assert(false, "should have raised an error");
+  net.TcpStream conn = listener.accept()?!;
+  u8[] buf = u8[].filled(0, 8192);
+  conn.read(buf)?!;
+  // Send data without \r\n\r\n header terminator, then close
+  u8[] rd = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n".bytes();
+  conn.write(rd)?!;
+  conn.close()?!;
   listener.close()?!;
+  _ := <-done;
 }
 
 test_http_post_function() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     map[string, string] h = map[string, string]();
     Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", move h)?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
   assert(request.contains("POST /api"), "POST method");
   assert(request.contains("payload"), "body sent");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_response_json_int() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status");
     int val = resp.json[int]()?!;
     assert(val == 42, "json int");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n42")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_response_json_string() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status");
     string val = resp.json[string]()?!;
     assert(val == "hello", "json string");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n\"hello\"")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_response_json_bool() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status");
     bool val = resp.json[bool]()?!;
     assert(val, "json bool");
+    done.send(true);
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntrue")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_post_with_headers() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     map[string, string] h = map[string, string]();
     h["X-Token"] = "abc";
@@ -435,6 +476,7 @@ test_http_post_with_headers() `test(exclude: wasm, timeout: "10s") {
     Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", move h)?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body ok");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -443,16 +485,18 @@ test_http_post_with_headers() `test(exclude: wasm, timeout: "10s") {
   assert(request.contains("X-User: alice"), "X-User header sent");
   assert(request.contains("payload"), "body sent");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_post_json_int() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_post_json[int]("http://127.0.0.1:" + port.to_string() + "/api", 42)?!;
     assert(resp.status == 200, "status 200");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -460,16 +504,18 @@ test_http_post_json_int() `test(exclude: wasm, timeout: "10s") {
   assert(request.contains("Content-Type: application/json"), "JSON content type");
   assert(request.contains("42"), "int body");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_post_json_string() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_post_json[string]("http://127.0.0.1:" + port.to_string() + "/api", "hello")?!;
     assert(resp.status == 200, "status 200");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -477,16 +523,18 @@ test_http_post_json_string() `test(exclude: wasm, timeout: "10s") {
   assert(request.contains("Content-Type: application/json"), "JSON content type");
   assert(request.contains("\"hello\""), "JSON-quoted string body");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_http_post_json_bool() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_post_json[bool]("http://127.0.0.1:" + port.to_string() + "/api", true)?!;
     assert(resp.status == 200, "status 200");
+    done.send(true);
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -494,7 +542,7 @@ test_http_post_json_bool() `test(exclude: wasm, timeout: "10s") {
   assert(request.contains("Content-Type: application/json"), "JSON content type");
   assert(request.contains("true"), "bool body");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_parse_status_code_no_space() `test(exclude: wasm) {
@@ -513,24 +561,27 @@ test_client_stops_at_content_length() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "hello", "body is exactly Content-Length bytes");
     assert(resp.body.len == 5, "trailing bytes excluded from body");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
   u8[] buf = u8[].filled(0, 8192);
   conn.read(buf)?!;
-  // Valid 5-byte body, then extra trailing bytes the client must ignore. Keep
-  // the socket open briefly to prove the client returns without waiting for EOF.
+  // Valid 5-byte body, then extra trailing bytes the client must ignore.
   u8[] resp_data = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhelloTRAILING-JUNK".bytes();
   _write_all(conn, resp_data)?!;
-  sleep(Duration.from_millis(50));
+  // The claim under test: the client returns from a Content-Length-framed read
+  // WITHOUT waiting for EOF. Joining before close proves it — the socket is
+  // still open at the moment the client finishes.
+  _ := <-done;
   conn.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(50));
 }
 
 // ============================================================
@@ -571,12 +622,15 @@ _serve_keepalive!(net.TcpListener ~listener, string resp1, string resp2) {
 // _serve_stale serves the first request keep-alive then closes the socket
 // (making the pooled connection stale), then accepts a fresh connection for the
 // client's stale-connection retry.
-_serve_stale!(net.TcpListener ~listener, string resp1, string resp2) {
+_serve_stale!(net.TcpListener ~listener, string resp1, string resp2, channel[bool] closed_first) {
   net.TcpStream conn1 = listener.accept()?^;
   u8[] buf = u8[].filled(0, 8192);
   conn1.read(buf)?^;
   _write_all(conn1, resp1.bytes())?^;
   conn1.close()?^;
+  // Happens-before edge for the client: the pooled socket is now closed, so the
+  // next request must detect the stale connection and retry on a fresh one.
+  closed_first.send(true);
   net.TcpStream conn2 = listener.accept()?^;
   u8[] buf2 = u8[].filled(0, 8192);
   conn2.read(buf2)?^;
@@ -652,11 +706,13 @@ test_client_gzip_decode() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_get("http://127.0.0.1:" + port.to_string() + "/"))?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "hello gzip world", "gzip body decoded");
+    done.send(true);
   };
 
   net.TcpStream conn = listener.accept()?!;
@@ -679,7 +735,7 @@ test_client_gzip_decode() `test(exclude: wasm, timeout: "10s") {
   _write_all(conn, resp_data)?!;
   _graceful_close(conn);
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // --- redirect following ---
@@ -688,11 +744,13 @@ test_client_redirect_302_relative() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_get("http://127.0.0.1:" + port.to_string() + "/old"))?!;
     assert(resp.status == 200, "final status 200");
     assert(resp.body == "arrived", "final body");
+    done.send(true);
   };
 
   string[] responses = string[]();
@@ -703,18 +761,20 @@ test_client_redirect_302_relative() `test(exclude: wasm, timeout: "10s") {
   assert(requests[0].contains("GET /old"), "first request GET /old");
   assert(requests[1].contains("GET /new"), "followed request GET /new");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_redirect_301_post_becomes_get() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "payload"))?!;
     assert(resp.status == 200, "final status 200");
     assert(resp.body == "done", "final body");
+    done.send(true);
   };
 
   string[] responses = string[]();
@@ -726,17 +786,19 @@ test_client_redirect_301_post_becomes_get() `test(exclude: wasm, timeout: "10s")
   assert(requests[1].contains("GET /elsewhere"), "301 rewrites POST to GET");
   assert(!requests[1].contains("payload"), "body dropped on rewrite");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_redirect_307_preserves_method_body() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_post("http://127.0.0.1:" + port.to_string() + "/a", "keepbody"))?!;
     assert(resp.status == 200, "final status 200");
+    done.send(true);
   };
 
   string[] responses = string[]();
@@ -746,17 +808,19 @@ test_client_redirect_307_preserves_method_body() `test(exclude: wasm, timeout: "
   assert(requests[1].contains("POST /b"), "307 preserves POST");
   assert(requests[1].contains("keepbody"), "307 preserves body");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_redirect_303_becomes_get() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_post("http://127.0.0.1:" + port.to_string() + "/form", "data"))?!;
     assert(resp.status == 200, "final status 200");
+    done.send(true);
   };
 
   string[] responses = string[]();
@@ -766,7 +830,7 @@ test_client_redirect_303_becomes_get() `test(exclude: wasm, timeout: "10s") {
   assert(requests[1].contains("GET /result"), "303 rewrites to GET");
   assert(!requests[1].contains("data"), "303 drops body");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_redirect_cross_host_strips_auth() `test(exclude: wasm, timeout: "10s") {
@@ -775,12 +839,14 @@ test_client_redirect_cross_host_strips_auth() `test(exclude: wasm, timeout: "10s
   net.TcpListener listener_b = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port_b = listener_b.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Request req = Request.new_get("http://127.0.0.1:" + port_a.to_string() + "/");
     req.set_header("Authorization", "Bearer secret");
     Response resp = c.send(move req)?!;
     assert(resp.status == 200, "final status 200");
+    done.send(true);
   };
 
   // Server A redirects cross-host to B.
@@ -797,19 +863,22 @@ test_client_redirect_cross_host_strips_auth() `test(exclude: wasm, timeout: "10s
 
   listener_a.close()?!;
   listener_b.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_max_redirects_exceeded() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create(max_redirects: 2);
     Response resp = c.send(Request.new_get("http://127.0.0.1:" + port.to_string() + "/loop"))? e {
+      done.send(true); // expected error path still signals completion
       return; // expected: too many redirects
     };
     assert(false, "should raise too many redirects");
+    done.send(true);
   };
 
   // max_redirects=2 → the client sends 3 requests (hops 0,1,2) before raising.
@@ -820,7 +889,7 @@ test_client_max_redirects_exceeded() `test(exclude: wasm, timeout: "10s") {
   string[] requests = _serve_n(listener, responses)?!;
   assert(requests.len == 3, "three requests before raising");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // --- keep-alive connection reuse ---
@@ -829,12 +898,14 @@ test_client_keepalive_reuse() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response r1 = c.get("http://127.0.0.1:" + port.to_string() + "/a")?!;
     assert(r1.body == "first", "first body");
     Response r2 = c.get("http://127.0.0.1:" + port.to_string() + "/b")?!;
     assert(r2.body == "second", "second body reused connection");
+    done.send(true);
   };
 
   // Both responses served on ONE accepted connection — a second connection is
@@ -843,7 +914,32 @@ test_client_keepalive_reuse() `test(exclude: wasm, timeout: "10s") {
   "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nfirst",
   "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: keep-alive\r\n\r\nsecond")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
+}
+
+// --- Client.post: the POST sibling of Client.get, previously uncovered ---
+// Both are one-line delegates to Client.send, but only the `get` path had a
+// test, so nothing pinned that `post` forwards the method and the body (rather
+// than, say, delegating to new_get and silently dropping the payload).
+
+test_client_post() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  channel[bool] done = channel[bool](capacity: 1);
+  go {
+    Client c = Client.create();
+    Response resp = c.post("http://127.0.0.1:" + port.to_string() + "/submit", "post payload")?!;
+    assert(resp.status == 201, "status 201");
+    assert(resp.body == "created", "body");
+    done.send(true);
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\n\r\ncreated")?!;
+  assert(request.contains("POST /submit"), "Client.post sends a POST");
+  assert(request.contains("post payload"), "Client.post forwards the body");
+  listener.close()?!;
+  _ := <-done;
 }
 
 // --- stale pooled connection retry ---
@@ -851,21 +947,24 @@ test_client_keepalive_reuse() `test(exclude: wasm, timeout: "10s") {
 test_client_stale_connection_retry() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
+  channel[bool] closed_first = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
 
   go {
     Client c = Client.create();
     Response r1 = c.get("http://127.0.0.1:" + port.to_string() + "/a")?!;
     assert(r1.body == "first", "first body");
-    sleep(Duration.from_millis(80)); // let the server close the pooled socket
+    _ := <-closed_first; // the server has closed the pooled socket
     Response r2 = c.get("http://127.0.0.1:" + port.to_string() + "/b")?!;
     assert(r2.body == "second", "second body after fresh retry");
+    done.send(true);
   };
 
   _serve_stale(listener,
   "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nfirst",
-  "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecond")?!;
+  "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecond", closed_first)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // ============================================================
@@ -996,12 +1095,14 @@ test_head_request_no_body() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     // Build a HEAD request directly (no dedicated factory) and send it.
     Request req = Request(method: move Method.Head, url: "http://127.0.0.1:" + port.to_string() + "/", headers: map[string, string](), body: "");
     Response resp = req.send()?!;
     assert(resp.status == 200, "HEAD status 200");
     assert(resp.body == "", "HEAD response carries no body even with Content-Length");
+    done.send(true);
   };
 
   // HEAD reply: headers only, Content-Length advertised but no body bytes sent.
@@ -1009,45 +1110,50 @@ test_head_request_no_body() `test(exclude: wasm, timeout: "10s") {
   string request = _serve_once(listener, reply)?!;
   assert(request.starts_with("HEAD / HTTP/1.1"), "server saw a HEAD request");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_eof_framed_body() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_get("http://127.0.0.1:" + port.to_string() + "/"))?!;
     assert(resp.status == 200, "status 200");
     assert(resp.body == "eof body", "body framed by read-to-EOF");
+    done.send(true);
   };
 
   // No Content-Length and not chunked → body is framed by connection close (EOF).
   string reply = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\neof body";
   _serve_once(listener, reply)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 test_client_gzip_decode_failure() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_get("http://127.0.0.1:" + port.to_string() + "/"))? e {
       assert(e.message.contains("gzip decode failed"), "gzip failure surfaced as HttpError");
+      done.send(true); // expected error path still signals completion
       return;
     };
     assert(false, "should raise on invalid gzip body");
+    done.send(true);
   };
 
   // Content-Encoding: gzip but the body is not a valid gzip stream.
   string reply = "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 6\r\nConnection: close\r\n\r\nnotgz!";
   _serve_once(listener, reply)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // --- HTTP/1.0 keep-alive: explicit Connection: keep-alive keeps the socket
@@ -1057,12 +1163,14 @@ test_client_http10_keepalive_reuse() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response r1 = c.get("http://127.0.0.1:" + port.to_string() + "/a")?!;
     assert(r1.body == "first", "first body");
     Response r2 = c.get("http://127.0.0.1:" + port.to_string() + "/b")?!;
     assert(r2.body == "second", "second body reused HTTP/1.0 keep-alive socket");
+    done.send(true);
   };
 
   // Both served on ONE accepted connection: a second accept never happens, so
@@ -1071,7 +1179,7 @@ test_client_http10_keepalive_reuse() `test(exclude: wasm, timeout: "10s") {
   "HTTP/1.0 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nfirst",
   "HTTP/1.0 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecond")?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // --- Client.close() drains the pool, forcing a reconnect on the next request ---
@@ -1080,6 +1188,7 @@ test_client_close_drains_pool() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response r1 = c.get("http://127.0.0.1:" + port.to_string() + "/a")?!;
@@ -1087,6 +1196,7 @@ test_client_close_drains_pool() `test(exclude: wasm, timeout: "10s") {
     c.close(); // drop the pooled keep-alive connection
     Response r2 = c.get("http://127.0.0.1:" + port.to_string() + "/b")?!;
     assert(r2.body == "second", "second body after forced reconnect");
+    done.send(true);
   };
 
   // Because close() drained the pool, the client must open a SECOND connection
@@ -1097,7 +1207,7 @@ test_client_close_drains_pool() `test(exclude: wasm, timeout: "10s") {
   string[] requests = _serve_n(listener, responses)?!;
   assert(requests.len == 2, "two connections served after close()");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // --- 3xx without a Location header is returned as-is (nothing to follow) ---
@@ -1106,11 +1216,13 @@ test_client_redirect_no_location() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Client c = Client.create();
     Response resp = c.send(Request.new_get("http://127.0.0.1:" + port.to_string() + "/"))?!;
     assert(resp.status == 302, "302 without Location returned unfollowed");
     assert(resp.body == "body", "original 3xx body preserved");
+    done.send(true);
   };
 
   string[] responses = string[]();
@@ -1118,7 +1230,7 @@ test_client_redirect_no_location() `test(exclude: wasm, timeout: "10s") {
   string[] requests = _serve_n(listener, responses)?!;
   assert(requests.len == 1, "only one request — redirect not followed");
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // --- chunked framing error paths (_read_chunked_body EOF raises) ---
@@ -1129,12 +1241,15 @@ test_chunked_eof_in_chunk_size() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")? e {
       assert(e.message.contains("chunk size"), "EOF in chunk size surfaced");
+      done.send(true); // expected error path still signals completion
       return;
     };
     assert(false, "should raise on truncated chunk-size line");
+    done.send(true);
   };
 
   // Header terminator present, but the chunk-size line ("5") never gets its CRLF
@@ -1142,7 +1257,7 @@ test_chunked_eof_in_chunk_size() `test(exclude: wasm, timeout: "10s") {
   string reply = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5";
   _serve_once(listener, reply)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // Server declares a 5-byte chunk but sends only 3 bytes before closing: the
@@ -1151,16 +1266,282 @@ test_chunked_eof_in_chunk_data() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")? e {
       assert(e.message.contains("chunk data"), "EOF in chunk data surfaced");
+      done.send(true); // expected error path still signals completion
       return;
     };
     assert(false, "should raise on truncated chunk data");
+    done.send(true);
   };
 
   string reply = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nHel";
   _serve_once(listener, reply)?!;
   listener.close()?!;
-  sleep(Duration.from_millis(100));
+  _ := <-done;
+}
+
+// ============================================================
+// Multi-read framing paths
+// ============================================================
+//
+// Every framing loop in `_exchange` and `_read_chunked_body` has a "need more
+// bytes" branch that only runs when a message does NOT arrive in a single
+// read. The existing tests all write their reply in one `_write_all`, which on
+// loopback lands in one read, so those branches were never exercised.
+//
+// Reaching them without a `sleep()` (T1632) needs the split to be forced by
+// something other than timing. Two constructions do that deterministically:
+//
+//   1. Seed the pre-read buffer. `_read_chunked_body` takes the bytes already
+//      consumed as a parameter, so handing it a deliberately truncated prefix
+//      forces the read-more branch on the very first pass, whatever the peer
+//      does afterwards.
+//   2. Exceed the 4096-byte `read_buf`. A single read can never return more
+//      than 4096 bytes, so a header block longer than that provably cannot be
+//      satisfied in one read.
+//
+// Neither depends on scheduling, so they behave identically on an idle laptop
+// and a saturated CI runner.
+
+test_read_chunked_body_size_line_split() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  // `close_now` holds the peer socket open until the decode is finished;
+  // `done` joins the peer, so the test never returns with it still running.
+  channel[bool] close_now = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] rest = "\r\nHello\r\n0\r\n\r\n".bytes();
+    _write_all(peer, rest)?!;
+    _ := <-close_now;
+    peer.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  // The chunk-size line is cut mid-token: "5" with its CRLF still on the wire.
+  u8[] raw = "5".bytes();
+  u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
+  assert(string.from_bytes(decoded) == "Hello", "chunk-size line completed by a second read");
+  close_now.send(true);
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_read_chunked_body_data_split() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  // `close_now` holds the peer socket open until the decode is finished;
+  // `done` joins the peer, so the test never returns with it still running.
+  channel[bool] close_now = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] rest = "lo\r\n0\r\n\r\n".bytes();
+    _write_all(peer, rest)?!;
+    _ := <-close_now;
+    peer.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  // A complete 5-byte chunk header but only 3 of its 5 data bytes.
+  u8[] raw = "5\r\nHel".bytes();
+  u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
+  assert(string.from_bytes(decoded) == "Hello", "chunk data completed by a second read");
+  close_now.send(true);
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_read_chunked_body_trailer_split() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  // `close_now` holds the peer socket open until the decode is finished;
+  // `done` joins the peer, so the test never returns with it still running.
+  channel[bool] close_now = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    // The blank line closing the trailer section, arriving separately.
+    u8[] rest = "\r\n".bytes();
+    _write_all(peer, rest)?!;
+    _ := <-close_now;
+    peer.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  // Terminating chunk present, trailer terminator still on the wire.
+  u8[] raw = "0\r\n".bytes();
+  u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
+  assert(decoded.len == 0, "terminating chunk yields an empty body");
+  close_now.send(true);
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// The trailer section is allowed to end at EOF rather than at a blank line —
+// the decoder tolerates it instead of raising, so a peer that closes right
+// after "0\r\n" still produces a well-formed empty body.
+test_read_chunked_body_trailer_eof() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    peer.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] raw = "0\r\n".bytes();
+  u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
+  assert(decoded.len == 0, "missing trailer terminator at EOF is tolerated");
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// A peer that declares more body than it delivers and then closes: the
+// Content-Length fill loop must stop at EOF instead of spinning, and the body
+// slice must be clamped to what actually arrived.
+test_exchange_short_content_length_body() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
+    _RawResponse raw = _exchange(client, request, false)?!;
+    assert(raw.status == 200, "status parsed despite the short body");
+    assert(string.from_bytes(raw.body) == "abcd", "body clamped to the bytes that arrived");
+    client.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] buf = u8[].filled(0, 8192);
+  conn.read(buf)?!;
+  // Content-Length promises 10 bytes; only 4 are sent before the close.
+  u8[] reply = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabcd".bytes();
+  _write_all(conn, reply)?!;
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// A header block larger than the 4096-byte read buffer provably cannot arrive
+// in one read, so the header scan must resume from where it left off rather
+// than rescanning from zero.
+test_exchange_headers_span_multiple_reads() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
+    _RawResponse raw = _exchange(client, request, false)?!;
+    assert(raw.status == 200, "status parsed from a multi-read header block");
+    assert(string.from_bytes(raw.body) == "ok", "body found after a 5 KB header block");
+    if pad_value := raw.headers["x-pad"] {
+      assert(pad_value.len == 5000, "oversized header value survived the split reads");
+    } else {
+      assert(false, "x-pad header missing");
+    }
+    client.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] buf = u8[].filled(0, 8192);
+  conn.read(buf)?!;
+  string pad = "x".repeat(5000);
+  string reply = "HTTP/1.1 200 OK\r\nX-Pad: " + pad + "\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+  u8[] reply_bytes = reply.bytes();
+  _write_all(conn, reply_bytes)?!;
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// EOF-framed body (no Content-Length, not chunked) that cannot fit in the reads
+// the header scan performed: the read-to-EOF loop must append across several
+// reads, not just detect the close.
+test_exchange_eof_framed_body_multiple_reads() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
+    _RawResponse raw = _exchange(client, request, false)?!;
+    assert(raw.status == 200, "status parsed");
+    assert(raw.body.len == 8000, "EOF-framed body reassembled across reads");
+    assert(raw.body[0] == 98, "body starts with 'b'");
+    assert(raw.body[7999] == 98, "body ends with 'b'");
+    client.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] buf = u8[].filled(0, 8192);
+  conn.read(buf)?!;
+  // Headers alone exceed one read; the body then exceeds what the header scan
+  // could possibly have consumed, so bytes are guaranteed to remain.
+  string pad = "x".repeat(5000);
+  string payload = "b".repeat(8000);
+  string reply = "HTTP/1.1 200 OK\r\nX-Pad: " + pad + "\r\nConnection: close\r\n\r\n" + payload;
+  u8[] reply_bytes = reply.bytes();
+  _write_all(conn, reply_bytes)?!;
+  conn.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// A write far larger than any socket send buffer cannot complete in one
+// syscall, so _write_all must loop on the remainder. The assertion is on the
+// bytes the peer actually receives — a dropped remainder would truncate it.
+test_write_all_resumes_after_partial_write() `test(exclude: wasm, timeout: "20s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[int] received = channel[int](capacity: 1);
+
+  go {
+    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] buf = u8[].filled(0, 65536);
+    int total = 0;
+    bool reading = true;
+    while reading {
+      int n = peer.read(buf)?!;
+      if n == 0 {
+        reading = false;
+      } else {
+        total = total + n;
+      }
+    }
+    peer.close()?!;
+    received.send(total);
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  u8[] payload = "z".repeat(4000000).bytes();
+  _write_all(conn, payload)?!;
+  conn.close()?!;
+  assert((<-received)! == 4000000, "every byte of a 4 MB write reached the peer");
+  listener.close()?!;
 }

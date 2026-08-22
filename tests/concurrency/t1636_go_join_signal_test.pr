@@ -1,0 +1,184 @@
+// T1636: the "join over a completion channel" template that replaced 42
+// `sleep()`-as-synchronization sites in `modules/http/http_test.pr`.
+//
+// The bug this template fixes: a `go` block that the test body never joined was
+// abandoned when the body returned. The batch runner's post-test drain then
+// waits, unbounded, for `sched.gs_created == sched.gs_completed`, so one parked
+// goroutine turned into a 10-minute stall mislabelled "(compilation timeout)"
+// with no test named. Worse, assertions inside those unjoined blocks were
+// silently discarded — ~193 of them across that one file.
+//
+// Joining moves the wait *inside* the test body, where the per-test watchdog is
+// already armed, so the same failure becomes a bounded `TIMEOUT` naming the
+// test. These tests pin the invariants every one of those 41 conversion sites
+// depends on. They deliberately use `t := go {…}; <-t;` (a full goroutine join)
+// rather than only the completion channel, so "the send happened" and "the
+// goroutine finished" are checked separately — a completion channel alone
+// cannot distinguish them.
+//
+// The language-level codegen for `return` inside a `go`-block error handler is
+// B0353 (`go_block_error_return.pr`); what is new here is the *exactly-once*
+// property across the two paths, which is what the four converted error-path
+// tests in `http_test.pr` rely on.
+t1636_fail_always!() int {
+  raise error(message: "expected failure");
+}
+
+t1636_ok_always!() int {
+  return 7;
+}
+
+// Receive one value from an already-drained, closed channel and report whether
+// anything was there. Deterministic only because every caller joins the
+// goroutine first.
+t1636_drained(channel[int] ch) bool {
+  r := <-ch;
+  if v := r {
+    return false;
+  }
+  return true;
+}
+
+// --- Error path taken: the handler signals, the trailing send must NOT run ---
+// This is the `test_client_max_redirects_exceeded` / `test_chunked_eof_*` shape.
+// A double send here would not be caught by the join (the first value satisfies
+// it) but would leave the goroutine blocked on a full channel forever — i.e. it
+// would reproduce T1636 exactly. Capacity 2 lets a broken implementation write
+// the second value instead of wedging, so the test *reports* rather than hangs.
+t1636_error_path_signals_exactly_once() `test(timeout: "10s") {
+  channel[int] done = channel[int](capacity: 2);
+  t := go {
+    int v = t1636_fail_always()? e {
+      done.send(1); // expected error path still signals completion
+      return;
+    };
+    done.send(2);
+  };
+  <-t; // the goroutine has fully completed, not merely signalled
+  assert((<-done)! == 1, "error path signalled completion");
+  done.close();
+  assert(t1636_drained(done), "trailing success-path send did not also run");
+}
+
+// --- Error path NOT taken: the trailing send signals, the handler must not ---
+t1636_success_path_signals_exactly_once() `test(timeout: "10s") {
+  channel[int] done = channel[int](capacity: 2);
+  t := go {
+    int v = t1636_ok_always()? e {
+      done.send(1);
+      return;
+    };
+    assert(v == 7, "handler not entered on the success path");
+    done.send(2);
+  };
+  <-t;
+  assert((<-done)! == 2, "success path signalled completion");
+  done.close();
+  assert(t1636_drained(done), "error-path send did not also run");
+}
+
+// --- The join is a real happens-before edge for heap effects ---
+// Every converted site reads goroutine-produced state after `_ := <-done`. A
+// `sleep()` only made that *likely*; the receive makes it ordered. Heap values
+// on both sides keep this leak-checked (T0067).
+t1636_join_observes_goroutine_heap_effects() `test(timeout: "10s") {
+  channel[bool] done = channel[bool](capacity: 1);
+  channel[string] out = channel[string](capacity: 2);
+  string prefix = "pre" + "fix";
+  t := go {
+    out.send(prefix + "-one");
+    out.send(prefix + "-two");
+    done.send(true);
+  };
+  _ := <-done;
+  <-t;
+  assert((<-out)! == "prefix-one", "first heap value visible after the join");
+  assert((<-out)! == "prefix-two", "second heap value visible after the join");
+}
+
+// --- Joining BEFORE releasing a resource, not after ---
+// `test_client_stops_at_content_length` joins while the socket is still open,
+// because that ordering is what proves the client returned without waiting for
+// EOF. The generalised invariant: the goroutine observably completes while a
+// heap resource the main body owns is still live, and the resource is still
+// released exactly once afterwards (leak-checked).
+t1636_join_before_resource_release() `test(timeout: "10s") {
+  channel[bool] done = channel[bool](capacity: 1);
+  channel[int] out = channel[int](capacity: 2);
+  string[] live = string[]();
+  live.push("still" + "-open");
+  t := go {
+    out.send(1);
+    done.send(true);
+  };
+  _ := <-done;
+  // The goroutine is finished and `live` has not been touched yet.
+  assert(live.len == 1, "resource still live at the moment the goroutine finished");
+  <-t;
+  live.pop();
+  assert(live.len == 0, "resource released after the join, exactly once");
+  assert((<-out)! == 1, "goroutine effect survived the release");
+}
+
+// --- Signalling from a failable helper that takes the channel as a parameter ---
+// The `_serve_stale` shape: the main body calls a `!` helper which publishes a
+// happens-before edge mid-body, between two phases that both propagate with
+// `?^`. The goroutine blocks on that edge, so the second phase cannot be
+// observed before the first was.
+t1636_phase!(channel[int] out, int n) int {
+  if n < 0 {
+    raise error(message: "bad phase");
+  }
+  out.send(n);
+  return n;
+}
+
+t1636_serve_two_phases!(channel[int] out, channel[bool] first_done) {
+  t1636_phase(out, 1)?^;
+  // Happens-before edge for the peer: phase one is complete.
+  first_done.send(true);
+  t1636_phase(out, 2)?^;
+}
+
+t1636_signal_from_failable_helper_parameter() `test(timeout: "10s") {
+  // `out` is capacity 1 on purpose: it makes the ordering *load-bearing*. Phase
+  // two's send can only complete once the peer has drained phase one, so the
+  // edge must be published between the phases. Publishing it after both (the
+  // mistake this test exists to catch) wedges the helper on a full `out` while
+  // the peer waits on an edge that never arrives — a deterministic TIMEOUT
+  // rather than a silent pass.
+  channel[int] out = channel[int](capacity: 1);
+  channel[bool] first_done = channel[bool](capacity: 1);
+  channel[int] seen = channel[int](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  t := go {
+    // Blocks until the helper publishes the edge — no sleep, no polling.
+    _ := <-first_done;
+    seen.send((<-out)!);
+    done.send(true);
+  };
+
+  t1636_serve_two_phases(out, first_done)?!;
+  _ := <-done;
+  <-t;
+  assert((<-seen)! == 1, "peer observed phase one after the edge was published");
+  assert((<-out)! == 2, "phase two ran only after the peer consumed phase one");
+}
+
+// --- A capacity-1 completion channel is never a blocking send ---
+// Every converted site uses `capacity: 1`, so `done.send(true)` cannot park even
+// if the main body is slow to reach its join. If it could, the signal itself
+// would become the stall.
+t1636_completion_send_never_parks() `test(timeout: "10s") {
+  channel[bool] done = channel[bool](capacity: 1);
+  channel[bool] sent = channel[bool](capacity: 1);
+  t := go {
+    done.send(true);
+    // Reached only because the send above returned without parking.
+    sent.send(true);
+  };
+  assert((<-sent)!, "completion send returned before anyone received it");
+  _ := <-done;
+  <-t;
+}

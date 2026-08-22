@@ -14,9 +14,53 @@ var blockedFiles = []string{
 	"bin/promise.exe",
 }
 
+// noreplyDomain is the only email domain permitted for commit identities. Using
+// a GitHub noreply address keeps a personal email out of the public history.
+const noreplyDomain = "@users.noreply.github.com"
+
+// checkNoreplyIdentity refuses the commit unless both the author and committer
+// emails are GitHub noreply addresses. It reads the identities via 'git var',
+// which resolves them exactly as the impending commit will — honoring
+// 'git commit --author=...', GIT_AUTHOR_EMAIL / GIT_COMMITTER_EMAIL env vars,
+// and user.email config alike — so the check matches what would actually be
+// recorded.
+func checkNoreplyIdentity(root string) error {
+	roles := []struct{ label, gitVar string }{
+		{"author", "GIT_AUTHOR_IDENT"},
+		{"committer", "GIT_COMMITTER_IDENT"},
+	}
+	for _, r := range roles {
+		ident, err := RunOutputIn(root, "git", "var", r.gitVar)
+		if err != nil {
+			return fmt.Errorf("reading %s identity: %w", r.label, err)
+		}
+		email := identEmail(ident)
+		if !strings.HasSuffix(strings.ToLower(email), noreplyDomain) {
+			return fmt.Errorf("%s email %q is not a %s address — set one with:\n  git config user.email \"<id>+<user>%s\"",
+				r.label, email, noreplyDomain, noreplyDomain)
+		}
+	}
+	return nil
+}
+
+// identEmail extracts the address from a git ident string of the form
+// "Name <email> <timestamp> <tz>". It returns "" if no <…> field is present.
+func identEmail(ident string) string {
+	open := strings.IndexByte(ident, '<')
+	closeIdx := strings.IndexByte(ident, '>')
+	if open < 0 || closeIdx < open {
+		return ""
+	}
+	return ident[open+1 : closeIdx]
+}
+
 // RunPreCommit implements the git pre-commit hook. It rejects commits that
 // include compiled binaries and validates baselines.json ratchet direction.
 func RunPreCommit(root string) error {
+	if err := checkNoreplyIdentity(root); err != nil {
+		return err
+	}
+
 	// core.quotePath=false keeps non-ASCII bytes raw in the output (the
 	// default would octal-escape them into an all-ASCII quoted string,
 	// defeating the non-ASCII filename check below).

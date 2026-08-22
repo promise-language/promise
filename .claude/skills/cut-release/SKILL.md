@@ -1,20 +1,35 @@
 ---
 name: cut-release
-description: Cut a stable Promise epoch release end-to-end — drive pinned all-platform CI, cut next, wait for the epoch-next release build, author synthesized "what changed" notes, cut stable, verify publish, and write a narrative summary for the user.
+description: Cut a stable Promise epoch release end-to-end — drive pinned per-platform CI cheapest-first, cut next, wait for the epoch-next release build, author synthesized "what changed" notes, cut stable, verify publish, and write a narrative summary for the user.
 ---
 
 Cut a stable `epoch-<year>.<n>` release from a chosen commit. `bin/release` enforces the gates; this skill is the orchestration playbook around it, including the human-facing parts the tooling does NOT do (synthesized notes + a narrative write-up).
 
 **Pick the release commit first.** Default to the current `origin/main` tip. It must be reachable from `origin/main` and must pass CI on ALL required platforms — `linux-amd64`, `linux-arm64`, `darwin-arm64`, `windows-amd64`. A commit that is only "green on the platform you happened to run" is NOT a release candidate: a test can pass on Linux allocators yet fail deterministically on macOS. Pin every step below to that commit with `--commit <sha>` so nothing drifts as `main` advances.
 
+**Actions minutes are metered and this repo is private — spend them in cheapest-first order and stop at the first red.** macOS bills 10x and Windows 2x, so a parallel all-platform run turns one Linux-detectable regression into four paid runs. Step 2 spells out the order; do not shortcut it.
+
 ## Steps
 
 1. **Sync tooling.** `git fetch origin main`, then `./make` so `bin/release` reflects latest main. Confirm `<sha>` is an ancestor of `origin/main` (`git merge-base --is-ancestor <sha> origin/main`).
 
-2. **Drive all-platform CI.**
-   - `bin/release ci all --commit <sha>` — a single `platform=all` run (one concurrency group, no self-cancellation), pinned to an immutable `ci-pin-<sha>` ref.
-   - Poll to completion; all 4 platform jobs must be green. If any is red, STOP and diagnose — do not cut.
-   - ci.yml uses `cancel-in-progress` per `github.ref`, so never dispatch overlapping runs on the same ref; the `--cancel-running` guard blocks an accidental overlap.
+2. **Drive CI ONE PLATFORM AT A TIME, cheapest first — never `platform=all`.**
+
+   All four platforms must be green before you cut, but they must be proven **sequentially**, stopping at the first red. `platform=all` spins up all four runners at once, so a failure that a 1x Linux runner would have caught in minutes has already burned a full 10x macOS run and a 2x Windows run in parallel. Money already spent cannot be recovered by cancelling — the fix-and-re-run cycle then pays for all four *again*.
+
+   Dispatch in this order, each pinned to the release SHA, waiting for each to conclude before dispatching the next:
+
+   | Order | `bin/release ci <target> --commit <sha> --watch` | Runner | Billing |
+   |---|---|---|---|
+   | 1 | `linux-amd64` | `ubuntu-24.04` | 1x |
+   | 2 | `linux-arm64` | `ubuntu-24.04-arm` | 1x (metered on private repos) |
+   | 3 | `windows-amd64` | `windows-latest` | 2x |
+   | 4 | `darwin-arm64` | `macos-latest` | 10x |
+
+   - **Stop at the first red.** Do not dispatch the next platform. Diagnose, file a tracker bug, get the fix landed, then restart step 2 from `linux-amd64` at the new commit — a fix invalidates the green results you already have.
+   - **Sequential dispatch is what makes this safe.** ci.yml's `concurrency: cancel-in-progress` is keyed on `github.ref`, and every pinned dispatch shares the same `ci-pin-<sha>` ref — so two *overlapping* dispatches would cancel each other. Waiting for each run to conclude before dispatching the next avoids that entirely. Use `--watch` (it polls to completion and exits non-zero on red) and never background two dispatches at once. `--cancel-running` exists as a guard against accidental overlap; do not use it to force a second concurrent run.
+   - **If a run is already doomed, cancel it.** A red job in a multi-job run leaves its siblings burning for nothing (and `gh run view --log-failed` refuses to serve logs until the run concludes, so cancelling also unblocks diagnosis). `gh run cancel <run-id>`.
+   - Cheapest-first is also fastest-feedback-first: most regressions are platform-independent and die on `linux-amd64`. The expensive platforms exist to catch what Linux cannot — allocator, ABI, path, and line-ending differences — so they are worth running only once Linux is green.
 
 3. **Cut next.** `bin/release cut next --commit <sha>` — force-moves the `epoch-next` tag and pushes, triggering release.yml to build the pre-release.
 

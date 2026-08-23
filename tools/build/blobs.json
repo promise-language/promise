@@ -2,6 +2,22 @@
   "schema": 1,
   "blobs": [
     {
+      "dependency": "compiler-rt",
+      "version": "21.1.2-r0",
+      "target": "linux-arm64",
+      "name": "libclang_rt.builtins.a",
+      "sha256": "2c8932cc610fcfb5ac3d95cd86ec8d58f0edd9db19c79a1243bd6ff0e10fdf8b",
+      "size": 1343400,
+      "compression": "brotli",
+      "compressed_size": 124474,
+      "compressed_sha256": "4802502044ce51cf6d89d47876cccb586f2ad30362088b64cd1d79ce57de6adc",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/compiler-rt-21.1.2-r0.apk",
+        "archive_sha256": "c8dc9a9e98a23a30f4b5c89f44b7978e1d45db637742824304e0031aca12b200",
+        "member": "usr/lib/llvm21/lib/clang/21/lib/aarch64-alpine-linux-musl/libclang_rt.builtins-aarch64.a"
+      }
+    },
+    {
       "dependency": "llvm",
       "version": "22.1.0",
       "target": "darwin-arm64",

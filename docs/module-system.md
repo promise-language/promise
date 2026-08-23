@@ -198,7 +198,8 @@ This is radically simpler than semver, where a breaking change in one package ca
 
 ### 5.1 `use` Declarations (Module Imports)
 
-The `use` keyword at file scope imports a module by its catalog name:
+The `use` keyword at file scope imports a module by its catalog name. A `use` declaration
+binds its alias **in the file that declares it, and nowhere else** — see §5.2.
 
 **Note on keyword reuse:** Promise also uses `use` inside function bodies for scoped resource bindings (`use x = File.open("path")`). There is no ambiguity — module imports (`useDecl`) appear at file scope before declarations, while resource bindings (`useBinding`) appear inside statement blocks. The grammar separates them structurally.
 
@@ -222,7 +223,82 @@ main() {
 }
 ```
 
-### 5.2 Aliasing
+### 5.2 Import Scope
+
+**Imports are file-scoped.** A `use` declaration binds its alias in the file that declares it,
+and in no other file. Every file that references a module must declare its own `use` for it —
+including the module's own `*_test.pr` files.
+
+This is the **one exception** to a module's shared namespace. Types, enums, and functions
+declared anywhere in a module are visible throughout it (§6.5, §10.3). Import aliases are not.
+
+```promise
+// easing.pr
+use math;
+
+midpoint(f64 a, f64 b) f64 `public {
+    return math.lerp(a, b, 0.5);     // `math` is bound here
+}
+```
+
+```promise
+// angles.pr — same module
+use math;                            // required: easing.pr's import does not carry over
+
+quarter_turn() f64 `public {
+    return math.deg_to_rad(90.0);
+}
+```
+
+Omitting the second `use` is an error:
+
+```
+angles.pr:4:11: undefined module 'math'
+  hint: add `use math;` — imports are per-file, not per-module
+```
+
+**Why file scope.** A reader — human or AI agent — must be able to open one `.pr` file and
+resolve every name in it. If one file's import supplied the alias for its siblings, the
+`math.deg_to_rad` call in `angles.pr` would be unresolvable without first hunting down
+whichever sibling happened to declare `use math;`. That is precisely the hidden configuration
+the self-contained readability principle rules out (§2). It also means a file can be read in
+isolation by a tool, or moved between modules, without its meaning changing.
+
+**Rules:**
+
+1. **Aliases are unique within a file, and unconstrained across files.** Two files in one
+   module may bind different aliases to the same module, and may bind the same alias to
+   different modules. Each file's bindings are its own, and each file reads correctly on its
+   own terms.
+
+2. **Declaring the same import in several files is normal, not a redeclaration.** `use json;`
+   in both `a.pr` and `b.pr` is correct and expected — each file is declaring what *it* uses.
+
+3. **An import alias may not collide with a module-level declaration.** Declarations are
+   module-wide while imports are file-local, so `use wire;` in one file and `type wire` in
+   another would leave the import shadowing the type inside its own file. That is an error,
+   not silent shadowing:
+
+   ```
+   parser.pr:1:0: import alias 'wire' conflicts with type 'wire' declared at types.pr:12:0
+     hint: alias the import — `use wire as w;`
+   ```
+
+4. **An unused import is a warning.** File scope makes this decidable for the first time — an
+   import its own file never references is dead weight:
+
+   ```
+   warning: unused import 'json' — no reference to `json.` in this file
+   ```
+
+   A named import is unused when the file contains no `alias.` reference. An anonymous import
+   (§5.3) is unused when the file references none of the names it injects. The implicit
+   `use std as _;` every file is compiled with never warns.
+
+   A warning rather than an error: a stray import is a tidiness problem, not a correctness
+   one, and failing a build over it is a poor trade for one-shot code generation.
+
+### 5.3 Aliasing
 
 If a module name is inconvenient, alias it with `as`:
 
@@ -234,14 +310,49 @@ main() {
 }
 ```
 
-### 5.3 No Unqualified Imports
+**Anonymous imports (`as _`)** inject a module's public names directly, with no prefix:
 
-There is no `from json use parse` or `use json { parse }`. Every reference is qualified with the module name (or alias). This serves two purposes:
+```promise
+use path as _;
 
-1. **Self-contained readability.** When you see `json.parse(...)` anywhere in the file, you know exactly where `parse` comes from without scanning import lists.
-2. **One obvious way.** There's no choice between qualified and unqualified imports. No style debates, no inconsistency across codebases.
+main() {
+    print_line(join("/usr", "bin"));     // no `path.` prefix
+}
+```
 
-### 5.4 Sourced Module Imports (Local and Remote)
+The sourced form (§5.5) spells the same thing with `_` in the alias position:
+
+```promise
+use _ "./libs/models";
+```
+
+An anonymous import is **file-scoped like any other** (§5.2): the injected names are visible
+only in the declaring file, so that file's own import list still accounts for every bare name
+in it. This is exactly how `std` is provided — every file is compiled with an implicit
+`use std as _;`, which is why `print_line`, `Vector`, `Map`, and `assert` need no prefix.
+
+Where an injected name collides with a name already in scope, the module prefix stays
+available and must be used to disambiguate. Anonymously importing two modules that export the
+same name is an error.
+
+Use anonymous imports sparingly. A named import tells the reader where `path.join` comes from
+*at the call site*; an anonymous one tells them only at the top of the file. Prefer named
+imports unless the module is meant to read as an extension of the language itself.
+
+### 5.4 No Selective Unqualified Imports
+
+There is no `from json use parse` or `use json { parse }`. A module is imported **whole** —
+either qualified under a name (§5.1), or injected entire under `as _` (§5.3). Individual
+symbols cannot be cherry-picked out of a module. This serves two purposes:
+
+1. **Self-contained readability.** Under a named import, `json.parse(...)` tells you where
+   `parse` comes from at the call site. Under an anonymous import, the file's own import list
+   — never a sibling file's (§5.2) — accounts for it. A selective import would give the worst
+   of both: an unprefixed name whose origin is one entry buried in a list.
+2. **One obvious way.** There's no choice between importing `parse` and importing `json` and
+   calling `json.parse`. No style debates, no inconsistency across codebases.
+
+### 5.5 Sourced Module Imports (Local and Remote)
 
 For modules **not in the catalog** — project-local modules, private libraries, experimental packages, pre-catalog prototypes — use a sourced import with an explicit alias and a location string:
 
@@ -295,7 +406,7 @@ error: remote module "github.com/someone/parser" has no pin in promise.toml
   hint: run `promise package pin "github.com/someone/parser"` to add one
 ```
 
-### 5.5 Standard Library — Just Part of the Catalog
+### 5.6 Standard Library — Just Part of the Catalog
 
 From the user's perspective, `use io` and `use json` look and work identically — both are catalog modules resolved by the epoch. The difference is purely operational:
 
@@ -327,15 +438,20 @@ time        — clocks, durations, formatting
 
 The boundary between embedded and external is a packaging decision, not a language one. Modules can move between tiers across epochs — an embedded module graduates to external by moving its source to a separate repo and adding `url` + `commit` to its catalog entry.
 
-### 5.6 Import Summary
+### 5.7 Import Summary
 
 The import syntax has two grammar forms, covering three semantic tiers:
 
 | Form | Tier | Example | Resolution |
 |------|------|---------|------------|
 | `use name` | Catalog | `use json` | Looked up in catalog at project's epoch |
+| `use name as alias` | Catalog | `use json as j` | As above; bound under `alias` in this file |
+| `use name as _` | Catalog | `use path as _` | As above; names injected unprefixed into this file (§5.3) |
 | `use alias "location"` | Local | `use models "./libs/models"` | Directory relative to `promise.toml` |
 | `use alias "location"` | Remote | `use parser "github.com/someone/parser"` | Git repo, pinned by commit hash in `promise.toml` |
+| `use _ "location"` | Local / Remote | `use _ "./libs/models"` | As above; names injected unprefixed into this file (§5.3) |
+
+Every form binds **only in the file that declares it** (§5.2).
 
 Local and remote imports share the same grammar rule — the compiler disambiguates based on the location string prefix (starts with `./`, `../`, `/`, or a drive letter like `C:` → local; everything else → remote).
 
@@ -352,18 +468,31 @@ Local and remote imports share the same grammar rule — the compiler disambigua
 2. **Explicit alias forces readability.** `use parser "github.com/someone/promise-parser"` makes it immediately clear this is a sourced dependency — the string literal is a visual signal.
 3. **Self-contained.** Each source file declares exactly where its sourced dependencies come from. No external configuration needed to understand the import.
 
-**Alias rules:** All import aliases (whether from catalog or sourced imports) must be unique within a file. If a catalog module name collides with a needed alias, use `as` on one of them to resolve the conflict.
+**Alias rules:** All import aliases (whether from catalog or sourced imports) must be unique
+within a file. If a catalog module name collides with a needed alias, use `as` on one of them
+to resolve the conflict. Across files there is no constraint — aliases are file-local, so two
+files in a module may name the same module differently, and the same import may (and normally
+does) appear in every file that uses it. See §5.2 for the full scope rules.
 
 **Grammar:** The grammar has two import forms — bare identifier for catalog, identifier with string literal for sourced:
 
 ```antlr
 useDecl
-    : USE IDENT (AS IDENT)? SEMI          // catalog:  use json; / use json as j;
-    | USE IDENT stringLiteral SEMI         // sourced:  use parser "github.com/...";
+    : USE IDENT (AS bindingName)? SEMI     // catalog:  use json; / use json as j; / use json as _;
+    | USE bindingName stringLiteral SEMI   // sourced:  use parser "github.com/...";
     ;                                      //           use models "./libs/models";
+                                           //           use _ "./libs/models";
+
+bindingName
+    : IDENT
+    | UNDERSCORE                           // `_` — anonymous import (§5.3)
+    ;
 ```
 
-The existing grammar rule `USE IDENT stringLiteral SEMI` already covers sourced imports. The only addition is the bare `USE IDENT (AS IDENT)? SEMI` form for catalog imports. The two alternatives disambiguate cleanly on the third token: `stringLiteral` → sourced, `AS`/`SEMI` → catalog.
+The two alternatives disambiguate cleanly on the third token: `stringLiteral` → sourced,
+`AS`/`SEMI` → catalog. The alias position in both forms is a `bindingName`, so `_` is
+accepted wherever an alias is: `use json as _;` and `use _ "./libs/models";` are the catalog
+and sourced spellings of the same anonymous import.
 
 ---
 
@@ -446,7 +575,7 @@ Rules:
 
 - **`subdir` is repo-relative and must stay inside the repo.** Absolute paths, `..` components, and empty components are rejected when the manifest is parsed. `./a/b/`, `a/b/` and `a\b` all normalize to `a/b`.
 - **Named-only.** `subdir` has no meaning on the flat `[require]` table, whose key is the repo URL — a repo could then only ever contribute one module. `promise package pin` writes flat entries and takes no `subdir`.
-- **One checkout per (url, commit).** Every module addressed in a repo shares a single fetch and a single checkout; only the module's own directory is compiled (the containment rule in §5.4 already stops a module from absorbing a subdirectory that carries its own `promise.toml`).
+- **One checkout per (url, commit).** Every module addressed in a repo shares a single fetch and a single checkout; only the module's own directory is compiled (the containment rule in §5.5 already stops a module from absorbing a subdirectory that carries its own `promise.toml`).
 - **Distinct identities.** A subdir module's global identity is `<normalized-url>//<subdir>`, so two modules from one repo get different IR prefixes and different cache entries. A module addressed at the repo root keeps the bare URL as its identity, exactly as before.
 - **Independent verification.** The §9.9 compatibility gate compiles and tests the addressed module alone, and caches its verdict per identity — a failing sibling in the same repo cannot poison it. Tags remain repo-scoped (§9.8), so two modules in one repo may settle on different commits.
 
@@ -543,7 +672,7 @@ _next_id() int {            // private function — not exported
 - **Module level**: top-level declarations (types, enums, functions) need `` `public `` to be exported. This makes a module's API surface immediately obvious.
 - **Member level**: members of a public type are public by default. The `_` prefix convention marks members as private. This avoids the verbosity of annotating every method/field while keeping the convention lightweight and visible.
 
-**Test files are part of the module.** Files matching `*_test.pr` within a module directory (or its subdirectories, excluding nested modules) are compiled as part of the module's compilation unit during `promise test`. They can access all declarations — public and private — without needing `use <self>`. This is the same approach Go uses (`_test.go` files are in the same package).
+**Test files are part of the module.** Files matching `*_test.pr` within a module directory (or its subdirectories, excluding nested modules) are compiled as part of the module's compilation unit during `promise test`. They can access all declarations — public and private — without needing `use <self>`. They do, however, declare their **own** imports: a test file that references `net.` needs its own `use net;` even when the implementation file beside it already has one (§5.2). This is the same approach Go uses (`_test.go` files are in the same package).
 
 All `*_test.pr` files in a module compile together into a single test binary (not one binary per file). Test functions use the `` `test `` annotation. Compiled test binaries are cached in the build cache — re-running unchanged tests skips compilation entirely. Non-module test files (standalone `.pr` files with `` `test `` or `` `test(expected=...) `` annotations) are also cached, keyed on source content + compiler + std library + target + local module dependencies.
 
@@ -557,7 +686,10 @@ lerp_test() `test {
 
 Self-importing (`use <own-module-name>;` inside a test file) is a compile error with a helpful message directing the user to remove the import.
 
-**Import alias collisions.** All import aliases must be unique within a file. If a catalog module name collides with a sourced import alias, the compiler reports an error:
+**Import alias collisions.** Import aliases are file-scoped (§5.2), so this rule is about one
+file's own import list: all aliases must be unique **within a file**. Declaring the same import
+in two files of a module is not a collision — it is the norm. If a catalog module name collides
+with a sourced import alias in the same file, the compiler reports an error:
 
 ```
 error: duplicate import alias 'json'
@@ -1000,7 +1132,7 @@ Unlike the embedded first-party catalog (frozen in the binary, one per epoch), t
 **Name resolution order** for `promise package add name` / `use name`:
 
 1. `[replace]` (local override, §9.7)
-2. `[require.NAME]` (project alias, §5.2)
+2. `[require.NAME]` (project alias, §6.2)
 3. embedded first-party catalog (§3.2) — no pin needed
 4. community catalog (`github.com/promise-community/catalog`) — `add` resolves + pins
 5. otherwise: not name-addressable — must be an explicit `promise package add <url> [ref]`
@@ -1099,7 +1231,7 @@ Modules without dependencies on each other can compile **in parallel** (they're 
 
 ### 10.3 Separate Compilation Considerations
 
-Currently, all `.pr` files in a compilation unit share a single namespace. With modules, each module has its own namespace. This means:
+Currently, all `.pr` files in a compilation unit share a single namespace for **declarations** — types, enums, and functions are visible across the files of a module regardless of which file declares them. **Import aliases are the exception**: they bind per file (§5.2), so a `use` in one file never supplies the alias for another. With modules, each module has its own namespace. This means:
 
 - **Name mangling** must include the module name. A top-level function `parse` in module `json` becomes `json.parse` in LLVM IR, following the existing `Owner.method` mangling convention. Types become `json.JsonObject`, etc.
 - **Generic monomorphization** crosses module boundaries. If your code uses `Vector[MyType]` from the standard library, the monomorphized version is emitted in YOUR module's IR, not the standard library's. This is already how it works (codegen generates specialized instances at use sites). Monomorphized symbols use `linkonce_odr` linkage so the linker deduplicates identical instantiations across modules.

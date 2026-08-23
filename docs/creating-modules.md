@@ -517,11 +517,39 @@ Small modules typically use a single `.pr` file. Larger modules may split across
 files — all `.pr` files in the module directory (and subdirectories) are merged into a
 **single compilation unit**. This means:
 
-- All declarations across files share the same scope (no need to import between files)
+- All **declarations** across files share the same scope (no need to import between files)
 - Name collisions between files are compile errors
 - File order does not matter — the compiler resolves all names after merging
 - Subdirectories are recursively discovered, but a subdirectory with its own `promise.toml`
   is treated as a separate module (not merged)
+
+**Imports are the exception — they are per-file.** A `use` declaration binds its alias only in
+the file that declares it. Every file that references a module needs its own `use`, including
+the module's `*_test.pr` files:
+
+```promise
+// http.pr
+use net;
+
+serve!(int port) `public {
+    net.TcpListener listener = net.TcpListener.bind("0.0.0.0", port);
+    // ...accept loop...
+}
+```
+
+```promise
+// http_test.pr — needs its own `use net;`; http.pr's does not carry over
+use net;
+
+bind_test() `test {
+    net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+    assert(listener.local_port > 0, "expected a bound port");
+}
+```
+
+Declaring the same import in several files is normal, not a redeclaration. This is what keeps
+a single file readable on its own: every name it uses is accounted for by its own header. See
+`docs/module-system.md` §5.2.
 
 ### 4.9 Rebuild after changes
 

@@ -782,6 +782,8 @@ s := Ref[LocalState](LocalState(count: 0));   // non-atomic counter
 - **Named** (`use io;`) — **both types and functions** are accessed through the module prefix (`io.File`, `io.read_line()`). There is no special unprefixed-function path; naked `File`/`read_line()` is an error.
 - **Anonymous** (`use path as _;`) — injects the module's names at the top level, usable with no prefix (exactly how `std` is imported). Name conflicts fall back to the prefix.
 
+**Imports are per-file.** A `use` binds its alias only in the file that declares it — never in the other files of the same module. Each file declares what it uses, so the same `use json;` normally appears in every file that references `json.`, and reading one file tells you where all of its names come from. Declaring an import a file never uses is a warning.
+
 ```promise
 // Import a catalog module
 use io;
@@ -1114,7 +1116,7 @@ Cross-compile to a non-host OS (e.g. Linux → Windows binary) is not yet wired 
 4. **Moving strings twice** — strings are not `Copy`. Use a plain `string s` parameter (the unmarked default) to borrow, or `.clone()` for an independent owned copy.
 5. **Getter parens** — `vec.len` not `vec.len()`. Getters use property syntax.
 6. **Mutable methods** — use `~this` for methods that modify state; bare `this` is read-only.
-7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use`.
+7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use` — **in every file that uses them**. Imports are per-file: a sibling file's `use json;` does not carry over, and repeating it is correct, not a redeclaration.
 8. **`?` handler spacing is insignificant** — Whitespace around the `?` handler is optional: `expr?{...}`, `expr ?{...}`, `expr? {...}`, and `expr ? {...}` all parse identically (same for the binding forms `expr?e{...}` / `expr? e {...}`). This applies to both the error handler (on failable `!` values) and the optional handler (on `T?` values). Note the companion operators `?^` and `?!` are single tokens — no space is allowed between `?` and `^`/`!`.
 9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them. The repeat literal `[x; n]` is **sized-array-only** (yields `T[n]`, never a vector); to fill a vector use `u8[].filled(x, n)`. Note `u32[64].filled(...)` does **not** parse (a type in expression position reads as indexing) — use `[0u32; 64]` for a sized array.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.

@@ -1202,7 +1202,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			totalNs += ns
 		}
 		processTimeout := time.Duration(totalNs) + 30*time.Second
-		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions, roster)
+		runTestBinaryWithCoverage(binaryPath, processTimeout, cfg, start, targetTriple, regions, roster)
 		return
 	}
 
@@ -1235,7 +1235,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			// T1415: an unusable meta yields no roster, which would silently
 			// disable the completeness check — recompile instead of running blind.
 			if roster, ok := cachedBatchRoster(meta, target); ok {
-				runTestBinary(cachedBin, timeout, start, targetTriple, roster)
+				runTestBinary(cachedBin, timeout, cfg, start, targetTriple, roster)
 				return
 			}
 		}
@@ -1316,7 +1316,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		})
 	}
 
-	runTestBinary(binaryPath, processTimeout, start, targetTriple, roster)
+	runTestBinary(binaryPath, processTimeout, cfg, start, targetTriple, roster)
 }
 
 // runModuleTestFile compiles and runs a module's test suite. All module source
@@ -1347,7 +1347,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			totalNs += ns
 		}
 		processTimeout := time.Duration(totalNs) + 30*time.Second
-		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions, roster)
+		runTestBinaryWithCoverage(binaryPath, processTimeout, cfg, start, targetTriple, regions, roster)
 		return
 	}
 
@@ -1395,7 +1395,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			// T1415: an unusable meta yields no roster, which would silently
 			// disable the completeness check — recompile instead of running blind.
 			if roster, ok := cachedBatchRoster(meta, target); ok {
-				runTestBinary(cachedBin, timeout, start, targetTriple, roster)
+				runTestBinary(cachedBin, timeout, cfg, start, targetTriple, roster)
 				return
 			}
 		}
@@ -1466,7 +1466,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		})
 	}
 
-	runTestBinary(binaryPath, processTimeout, start, targetTriple, roster)
+	runTestBinary(binaryPath, processTimeout, cfg, start, targetTriple, roster)
 }
 
 // exitOnCompileError is the single top-level funnel for a backend compile/link
@@ -1526,6 +1526,12 @@ var childSummaryRe = regexp.MustCompile(childSummaryPattern)
 // (T0689) and incomplete (T1415) buckets, which only the parent aggregates.
 var parentSummaryRe = regexp.MustCompile(childSummaryPattern + `(?:, (\d+) memlimit)?(?:, (\d+) incomplete)?`)
 
+// timeoutOutcomeLineRe matches a per-test TIMEOUT line in a child's output.
+// The elapsed field is `[^)]+` rather than a number so it also matches the
+// runner-synthesized `TIMEOUT (-) <name>` line for a batch-budget kill (T1639),
+// the same way memlimitLineRe and incompleteLineRe accept their synthetic form.
+var timeoutOutcomeLineRe = regexp.MustCompile(`^TIMEOUT \([^)]+\)(?: (.+))?$`)
+
 // childOutcomeCounts tallies the per-test result lines a test binary printed.
 type childOutcomeCounts struct {
 	passed   int
@@ -1534,18 +1540,27 @@ type childOutcomeCounts struct {
 	timedOut int
 }
 
+// childOutputOpts selects which of a child's own lines printChildTestOutput
+// suppresses, for the cases where the caller synthesizes a replacement.
+type childOutputOpts struct {
+	// dropMemlimitFatal suppresses the raw PAL `fatal: memory limit exceeded`
+	// line so the caller can emit a synthetic MEMLIMIT block instead (T0689).
+	dropMemlimitFatal bool
+	// dropSummary suppresses the child's own summary line, which a truncated
+	// run supersedes with one that counts the tests it never reported (T1639).
+	dropSummary bool
+}
+
 // printChildTestOutput prints a test binary's output with the summary line
 // rewritten to the real elapsed time, and reports which tests produced a result
-// line plus the per-outcome counts. dropMemlimitFatal suppresses the raw PAL
-// `fatal: memory limit exceeded` line so the caller can emit a synthetic
-// MEMLIMIT block instead (T0689).
-func printChildTestOutput(output string, elapsed time.Duration, targetSuffix string, dropMemlimitFatal bool) (c childOutcomeCounts, reported map[string]bool, sawSummary bool) {
+// line plus the per-outcome counts.
+func printChildTestOutput(output string, elapsed time.Duration, targetSuffix string, opts childOutputOpts) (c childOutcomeCounts, reported map[string]bool, sawSummary bool) {
 	reported = map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		if line == "" {
 			continue
 		}
-		if dropMemlimitFatal && strings.HasPrefix(line, "fatal: memory limit exceeded") {
+		if opts.dropMemlimitFatal && strings.HasPrefix(line, "fatal: memory limit exceeded") {
 			continue
 		}
 		if m := jsonPassRe.FindStringSubmatch(line); m != nil {
@@ -1563,6 +1578,9 @@ func printChildTestOutput(output string, elapsed time.Duration, targetSuffix str
 		}
 		if m := childSummaryRe.FindStringSubmatch(line); m != nil {
 			sawSummary = true
+			if opts.dropSummary {
+				continue
+			}
 			fmt.Println() // empty line before summary
 			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
 			for _, part := range []struct {
@@ -1614,18 +1632,7 @@ func reportIncompleteRun(missing []string, roster []rosterEntry, c childOutcomeC
 	fmt.Printf("  incomplete: process exited (%s) without reporting a result - %d of %d tests did not run: %s\n",
 		exitStatusDescription(runErr), len(missing), eligible, joinCapped(missing, 8))
 	fmt.Println()
-	summary := fmt.Sprintf("%d passed, %d failed", c.passed, c.failed)
-	if skipped > 0 {
-		summary += fmt.Sprintf(", %d skipped", skipped)
-	}
-	if c.leaked > 0 {
-		summary += fmt.Sprintf(", %d leaked", c.leaked)
-	}
-	if c.timedOut > 0 {
-		summary += fmt.Sprintf(", %d timed out", c.timedOut)
-	}
-	summary += fmt.Sprintf(", %d incomplete", len(missing))
-	fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
+	fmt.Printf("%s (%.3fs)%s\n", truncatedBatchSummary(c, skipped, 0, len(missing)), elapsed.Seconds(), targetSuffix)
 	os.Exit(incompleteExitCode(runErr))
 }
 
@@ -1665,15 +1672,131 @@ func joinCapped(names []string, max int) string {
 	return fmt.Sprintf("%s, ... and %d more", strings.Join(names[:max], ", "), len(names)-max)
 }
 
+// testPhaseRunMarker is printed by a `promise test` child on stdout the moment
+// it stops compiling and starts executing the test binary. The multi-file
+// parent uses it to attribute a backstop kill to the right phase (T1639) —
+// without it, a hung *test binary* is reported as a "compilation timeout" and
+// sends the reader to the wrong subsystem entirely.
+const testPhaseRunMarker = "##promise-phase: run"
+
+// testChildEnv is set by the multi-file parent on every child it spawns. It is
+// the single signal for "you are running under a process backstop": the child
+// announces its compile→run handoff so a backstop kill can be attributed to the
+// phase it actually reached, and clamps its own batch budget to expire before
+// that backstop (T1639).
+const testChildEnv = "PROMISE_TEST_CHILD"
+
+// runningUnderTestParent reports whether this process was spawned by the
+// multi-file test runner.
+func runningUnderTestParent() bool { return os.Getenv(testChildEnv) == "1" }
+
+// emitPhaseMarker announces the compile→run handoff. Gated on the parent's env
+// var so the marker never appears in interactive single-file output.
+func emitPhaseMarker() {
+	if runningUnderTestParent() {
+		fmt.Println(testPhaseRunMarker)
+	}
+}
+
+// clampRunTimeout keeps the in-child batch budget strictly under the process
+// backstop applied to this child, so the child times out first and can name the
+// tests that never reported (T1639). Sum-of-per-test-timeouts can otherwise
+// exceed the 10-minute backstop (a 43-test file at 10s each plus buffer is
+// ~920s); the parent then kills the child mid-run with no output at all, which
+// is exactly the "compilation timeout" mislabel. start already includes compile
+// time, so the remaining budget is exact. Raise both with -compile-timeout.
+//
+// Only a child of the multi-file runner has a backstop to stay under. A
+// standalone run has none, so clamping there would silently override an
+// explicit `timeout:` annotation longer than the (irrelevant) backstop.
+func clampRunTimeout(timeout time.Duration, cfg testTimeoutConfig, target string, start time.Time) time.Duration {
+	if !runningUnderTestParent() {
+		return timeout
+	}
+	const (
+		slack = 15 * time.Second
+		floor = 5 * time.Second
+	)
+	budget := computeParentTimeout(cfg, target) - time.Since(start) - slack
+	if budget < floor {
+		budget = floor
+	}
+	if timeout <= budget {
+		return timeout
+	}
+	return budget
+}
+
+// reportTimedOutRun prints the synthetic TIMEOUT outcome for a test process the
+// runner killed at its batch budget, naming the tests that never reported, then
+// exits non-zero. Tests run in declaration order, so the first unreported test
+// is the one that wedged the process — it names the TIMEOUT line, exactly as
+// the INCOMPLETE path does for a process that died (T1639).
+//
+// missing is empty when every test reported and the process still would not
+// exit: the wedge is in teardown (scheduler shutdown), not in a test body, so
+// the line says that rather than blaming a test — or, without this outcome
+// line, letting the parent render the kill as "crashed after N tests".
+func reportTimedOutRun(missing []string, roster []rosterEntry, c childOutcomeCounts,
+	budget, elapsed time.Duration, targetSuffix string) {
+	fmt.Print(timedOutRunReport(missing, roster, c, budget, elapsed, targetSuffix))
+	os.Exit(1)
+}
+
+// timedOutRunReport renders reportTimedOutRun's output. Split out so the
+// rendering — which the multi-file parent re-parses with its own regexes — is
+// testable without exiting the process.
+func timedOutRunReport(missing []string, roster []rosterEntry, c childOutcomeCounts,
+	budget, elapsed time.Duration, targetSuffix string) string {
+	eligible, skipped := rosterCounts(roster)
+	var b strings.Builder
+	timedOut := len(missing)
+	if timedOut > 0 {
+		fmt.Fprintf(&b, "TIMEOUT (-) %s%s\n", missing[0], targetSuffix)
+		fmt.Fprintf(&b, "  timeout: test process exceeded the %s batch budget - %d of %d tests did not report: %s\n",
+			budget, timedOut, eligible, joinCapped(missing, 8))
+	} else {
+		timedOut = 1
+		fmt.Fprintf(&b, "TIMEOUT (-) <teardown>%s\n", targetSuffix)
+		fmt.Fprintf(&b, "  timeout: every test reported but the process did not exit within the %s batch budget\n", budget)
+	}
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "%s (%.3fs)%s\n", truncatedBatchSummary(c, skipped, timedOut, 0), elapsed.Seconds(), targetSuffix)
+	return b.String()
+}
+
+// truncatedBatchSummary renders the summary line for a batch the harness cut
+// short, in the exact field order parentSummaryRe expects. extraTimedOut and
+// incomplete carry the buckets the harness synthesized for tests the child
+// never reported (T1639 / T1415).
+func truncatedBatchSummary(c childOutcomeCounts, skipped, extraTimedOut, incomplete int) string {
+	summary := fmt.Sprintf("%d passed, %d failed", c.passed, c.failed)
+	if skipped > 0 {
+		summary += fmt.Sprintf(", %d skipped", skipped)
+	}
+	if c.leaked > 0 {
+		summary += fmt.Sprintf(", %d leaked", c.leaked)
+	}
+	if timedOut := c.timedOut + extraTimedOut; timedOut > 0 {
+		summary += fmt.Sprintf(", %d timed out", timedOut)
+	}
+	if incomplete > 0 {
+		summary += fmt.Sprintf(", %d incomplete", incomplete)
+	}
+	return summary
+}
+
 // runTestBinary executes a compiled test binary and prints formatted results.
 // roster (nil when unknown) is the set of tests the binary must report a result
 // for; any that don't are reported as INCOMPLETE (T1415).
-func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, targetTriple string, roster []rosterEntry) {
+func runTestBinary(binaryPath string, timeout time.Duration, cfg testTimeoutConfig, start time.Time, targetTriple string, roster []rosterEntry) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
 
+	emitPhaseMarker()
+	timeout = clampRunTimeout(timeout, cfg, target, start)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
@@ -1689,10 +1812,19 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	output, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	}
+
 	if ctx.Err() == context.DeadlineExceeded {
-		printTestOutput(string(output))
-		fmt.Fprintf(os.Stderr, "TIMEOUT: tests exceeded %s timeout\n", timeout)
-		os.Exit(1)
+		// T1639: the batch budget expired with the binary still running. Print
+		// whatever it did report, then name the tests that never did — the
+		// roster is already in hand, and a bare "tests exceeded Ns timeout"
+		// tells the reader nothing about which test wedged.
+		counts, reported, _ := printChildTestOutput(string(output), elapsed, targetSuffix,
+			childOutputOpts{dropSummary: true})
+		reportTimedOutRun(unreportedTests(roster, reported), roster, counts, timeout, elapsed, targetSuffix)
 	}
 
 	// T0689: detect the structured `fatal: memory limit exceeded` stderr line
@@ -1702,11 +1834,8 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	memlimitTripped := strings.Contains(string(output), "fatal: memory limit exceeded")
 
 	// Print output: format raw "PASS <ns> <name>" lines and replace summary with timed version
-	targetSuffix := ""
-	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
-		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
-	}
-	counts, reported, sawSummary := printChildTestOutput(string(output), elapsed, targetSuffix, memlimitTripped)
+	counts, reported, sawSummary := printChildTestOutput(string(output), elapsed, targetSuffix,
+		childOutputOpts{dropMemlimitFatal: memlimitTripped})
 
 	if memlimitTripped {
 		// Synthesize a MEMLIMIT line + summary if the child aborted before
@@ -1766,12 +1895,14 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 
 // runTestBinaryWithCoverage executes an instrumented test binary, prints test
 // results, extracts coverage counter data, and formats a coverage report.
-func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start time.Time, targetTriple string, regions []codegen.CoverageRegion, roster []rosterEntry) {
+func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, cfg testTimeoutConfig, start time.Time, targetTriple string, regions []codegen.CoverageRegion, roster []rosterEntry) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
 
+	emitPhaseMarker()
+	timeout = clampRunTimeout(timeout, cfg, target, start)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
@@ -1787,10 +1918,9 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	output, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
-	if ctx.Err() == context.DeadlineExceeded {
-		printTestOutput(string(output))
-		fmt.Fprintf(os.Stderr, "TIMEOUT: tests exceeded %s timeout\n", timeout)
-		os.Exit(1)
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
 
 	// Split output into test output and coverage data
@@ -1798,11 +1928,16 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	testOutput, counters := extractCoverageData(fullOutput)
 
 	// Print test output (same formatting as runTestBinary)
-	targetSuffix := ""
-	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
-		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	timedOut := ctx.Err() == context.DeadlineExceeded
+	counts, reported, _ := printChildTestOutput(testOutput, elapsed, targetSuffix,
+		childOutputOpts{dropSummary: timedOut})
+
+	if timedOut {
+		// T1639: name the tests that never reported instead of a bare
+		// "tests exceeded Ns timeout". Coverage from a truncated run is
+		// meaningless, so it is not printed.
+		reportTimedOutRun(unreportedTests(roster, reported), roster, counts, timeout, elapsed, targetSuffix)
 	}
-	counts, reported, _ := printChildTestOutput(testOutput, elapsed, targetSuffix, false)
 
 	// T1415: the process died mid-batch — some registered tests never reported.
 	// Checked before the coverage report so the INCOMPLETE line and its summary
@@ -1972,6 +2107,12 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 		fmt.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
 		return
 	}
+
+	// T1639: compilation is done; a backstop kill from here on is the binary's
+	// fault, not the compiler's. No clamp here — an e2e file is a single test,
+	// so the parent already names it in the FAIL line even when the backstop
+	// (rather than this timeout) is what kills it.
+	emitPhaseMarker()
 
 	// Execute with timeout, capturing combined stdout+stderr
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -2304,6 +2445,11 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			testArgs := buildChildTestArgs(cfg, targetTriple, coverageMode, timePhases)
 			testArgs = append(testArgs, r.file)
 			cmd := exec.CommandContext(ctx, selfExe, testArgs...)
+			// T1639: tell the child it is running under this backstop, so it
+			// announces its compile→run handoff (letting a backstop kill be
+			// attributed to the phase it actually reached) and keeps its own
+			// batch budget under the backstop.
+			cmd.Env = append(os.Environ(), testChildEnv+"=1")
 			setupProcessGroupKill(cmd)
 			output, cmdErr := cmd.CombinedOutput()
 
@@ -2339,7 +2485,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	summaryRe := parentSummaryRe
 	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
 	leakLineRe := regexp.MustCompile(`^LEAK \([\d.]+s\)(?: (.+))?$`)
-	timeoutLineRe := regexp.MustCompile(`^TIMEOUT \([\d.]+s\)(?: (.+))?$`)
+	timeoutLineRe := timeoutOutcomeLineRe
 	memlimitLineRe := regexp.MustCompile(`^MEMLIMIT \([^)]+\)(?: (.+))?$`)     // T0689
 	incompleteLineRe := regexp.MustCompile(`^INCOMPLETE \([^)]+\)(?: (.+))?$`) // T1415
 	passLineRe := regexp.MustCompile(`^pass \([\d.]+s\)`)
@@ -2420,10 +2566,17 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		}
 
 		if r.timedOut {
-			fmt.Printf("FAIL (%.3fs) %s (compilation timeout)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+			// T1639: the backstop wraps compile *and* run. The child's phase
+			// marker says which one it was still in — blaming compilation for a
+			// hung test binary sends the reader to the wrong subsystem.
+			reason := "compilation timeout"
+			if strings.Contains(r.output, testPhaseRunMarker) {
+				reason = "test binary hung (compiled, then never finished)"
+			}
+			fmt.Printf("FAIL (%.3fs) %s (%s)%s\n", r.elapsed.Seconds(), relPath, reason, targetSuffix)
 			failedFiles++
 			totalFailed++
-			failures = append(failures, failureInfo{name: relPath + " (compilation timeout)"})
+			failures = append(failures, failureInfo{name: fmt.Sprintf("%s (%s)", relPath, reason)})
 			continue
 		}
 
@@ -2931,15 +3084,6 @@ func discoverTestFiles(dir string, recursive bool) []string {
 
 	sort.Strings(files)
 	return files
-}
-
-// printTestOutput prints a test output string, skipping empty lines.
-func printTestOutput(s string) {
-	for _, line := range strings.Split(s, "\n") {
-		if line != "" {
-			fmt.Println(line)
-		}
-	}
 }
 
 // lastLine returns the last non-empty line of a string.

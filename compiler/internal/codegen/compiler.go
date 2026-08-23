@@ -1112,6 +1112,22 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	}
 }
 
+// emitGsOutstanding loads (gs_created - gs_completed) — the number of
+// goroutines that have been created but have not finished tearing down — into
+// blk. Acquire ordering pairs with the Release on the gs_completed increment in
+// goroutine_exit, so a reader that observes the drain complete also observes
+// that goroutine's alloc_count decrements (B0320).
+func (c *Compiler) emitGsOutstanding(blk *ir.Block) value.Value {
+	schedTy := schedStructType()
+	createdField := blk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
+	completedField := blk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
+	created := blk.NewAtomicRMW(enum.AtomicOpAdd, createdField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
+	completed := blk.NewAtomicRMW(enum.AtomicOpAdd, completedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
+	return blk.NewSub(created, completed)
+}
+
 // GenerateTestMain replaces the user's main() with a test runner that calls
 // each test function via a codegen-emitted thread-based runner.
 // On non-WASM targets, per-test panic recovery allows subsequent tests to run
@@ -1312,6 +1328,24 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	timeoutSuffixGlobal.Immutable = true
 	timeoutSuffixGlobal.Linkage = enum.LinkagePrivate
 
+	// T1639: distinct TIMEOUT context for a test whose body returned but whose
+	// goroutines never exited — "  timeout: test body returned but <N>
+	// goroutine(s) did not exit within <dur>\n". The "  timeout: " prefix is
+	// deliberate: the multi-file parent's context regex already attaches a
+	// "  timeout:" line to the preceding outcome line.
+	stuckPrefixGlobal := c.module.NewGlobalDef(".str.stuck_prefix",
+		constant.NewCharArrayFromString("  timeout: test body returned but "))
+	stuckPrefixGlobal.Immutable = true
+	stuckPrefixGlobal.Linkage = enum.LinkagePrivate
+	stuckNounGlobal := c.module.NewGlobalDef(".str.stuck_noun",
+		constant.NewCharArrayFromString(" goroutine did not exit within "))
+	stuckNounGlobal.Immutable = true
+	stuckNounGlobal.Linkage = enum.LinkagePrivate
+	stuckNounPluralGlobal := c.module.NewGlobalDef(".str.stuck_noun_plural",
+		constant.NewCharArrayFromString(" goroutines did not exit within "))
+	stuckNounPluralGlobal.Immutable = true
+	stuckNounPluralGlobal.Linkage = enum.LinkagePrivate
+
 	for _, test := range tests {
 		// Skip tests excluded for this target
 		if excludes, ok := c.info.TestExcludes[test.Name()]; ok {
@@ -1392,6 +1426,19 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			} else {
 				allocSnapshot = entry.NewAtomicRMW(enum.AtomicOpAdd, allocCountGlobal, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 			}
+		}
+
+		// T1639: snapshot how many goroutines are outstanding *before* this test
+		// runs. Goroutines abandoned by an earlier test (a body that returned
+		// while a goroutine stayed parked forever, or a test that timed out with
+		// its thread still live) permanently skew gs_created/gs_completed, which
+		// are process-global. Draining down to this snapshot rather than to zero
+		// means each test only ever waits for the goroutines it created itself,
+		// and — unlike a baseline carried forward from the test that abandoned
+		// them — it self-corrects if those goroutines do eventually exit.
+		var gsOutstandingBefore value.Value
+		if allocCountGlobal != nil && !c.isWasm && c.schedGlobal != nil {
+			gsOutstandingBefore = c.emitGsOutstanding(entry)
 		}
 
 		// Time the test: t0 = nanotime()
@@ -1476,6 +1523,15 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		var effectiveResult value.Value
 		var hasLeakPhi value.Value // i1: whether this test leaked (for printing detail)
 		var deltaPhi value.Value   // i64: allocation delta (for printing detail)
+		// T1639: drain-deadline path — set only when the post-test goroutine
+		// drain is bounded (native target with a non-zero per-test timeout).
+		var drainTimeout *ir.Block
+		var drainStuckCount value.Value // i64: goroutines still outstanding
+		var drainElapsed value.Value    // i64: ns from test start to giving up
+		// stuckCountPhi is 0 on every path except the drain-deadline one; it
+		// selects the TIMEOUT context wording.
+		var stuckCountPhi value.Value
+		var elapsedPhi value.Value = elapsed
 
 		if allocCountGlobal != nil {
 			leakCheckBlk := mainFn.NewBlock(fmt.Sprintf("leak_check_%s", nameStr))
@@ -1488,22 +1544,14 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 
 			// Wait for all goroutines to complete cleanup before reading alloc
 			// count. goroutine_exit increments gs_completed after all frees
-			// (coro.destroy + pal_free(G)); the drain spin-wait loop checks
-			// gs_created == gs_completed.
+			// (coro.destroy + pal_free(G)); the drain spin-wait loop waits for
+			// the outstanding count to fall back to this test's pre-test
+			// snapshot (T1639).
 			if !c.isWasm && c.schedGlobal != nil {
-				schedTy := schedStructType()
-				gsCreatedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
-				gsCompletedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
-
 				drainDone := mainFn.NewBlock(fmt.Sprintf("drain_done_%s", nameStr))
-				// B0320: Acquire ordering pairs with Release on gs_completed
-				// increment in goroutine_exit, ensuring alloc_count decrements
-				// are visible when the fast path observes drain complete.
-				created0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
-				completed0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
-				fastDone := leakCheckBlk.NewICmp(enum.IPredEQ, created0, completed0)
+				baseline := gsOutstandingBefore
+				outstanding0 := c.emitGsOutstanding(leakCheckBlk)
+				fastDone := leakCheckBlk.NewICmp(enum.IPredSLE, outstanding0, baseline)
 
 				// B0315: Spin-wait with usleep instead of condvar wait. The
 				// condvar-based approach had a lost-wakeup race on ARM64 where
@@ -1518,11 +1566,18 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				// a newly enqueued goroutine's wake_m call finds idle Ms.
 				counterAlloca := drainSlow.NewAlloca(irtypes.I32)
 				drainSlow.NewStore(constant.NewInt(irtypes.I32, 0), counterAlloca)
+				// T1639: bound the drain by this test's own per-test timeout, so
+				// a goroutine that never exits produces a named TIMEOUT instead
+				// of an unguarded stall that only the process backstop can end.
+				// timeoutNs == 0 (explicit opt-out) keeps the unbounded wait.
+				var drainDeadline value.Value
+				if timeoutNs > 0 {
+					drainDeadline = drainSlow.NewAdd(drainSlow.NewCall(nanotimeFn), constant.NewInt(irtypes.I64, timeoutNs))
+				}
 				drainSlow.NewBr(drainLoop)
 
-				created := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
-				completed := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
-				allDone := drainLoop.NewICmp(enum.IPredEQ, created, completed)
+				outstanding := c.emitGsOutstanding(drainLoop)
+				allDone := drainLoop.NewICmp(enum.IPredSLE, outstanding, baseline)
 
 				drainWait := mainFn.NewBlock(fmt.Sprintf("drain_wait_%s", nameStr))
 				drainLoop.NewCondBr(allDone, drainDone, drainWait)
@@ -1542,8 +1597,23 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				drainNudge.NewCall(c.funcs["promise_sched_wake_m"])
 				drainNudge.NewBr(drainSleep)
 
-				drainSleep.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100)) // 100μs
-				drainSleep.NewBr(drainLoop)
+				if drainDeadline != nil {
+					// T1639: deadline check runs after the nudge bookkeeping so a
+					// wedged drain still gets its wake_m nudges before giving up.
+					drainTimeout = mainFn.NewBlock(fmt.Sprintf("drain_timeout_%s", nameStr))
+					drainCheck := mainFn.NewBlock(fmt.Sprintf("drain_check_%s", nameStr))
+					drainSleep.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100)) // 100μs
+					drainSleep.NewBr(drainCheck)
+					expired := drainCheck.NewICmp(enum.IPredSGT, drainCheck.NewCall(nanotimeFn), drainDeadline)
+					drainCheck.NewCondBr(expired, drainTimeout, drainLoop)
+
+					// How many of this test's own goroutines are being abandoned.
+					drainStuckCount = drainTimeout.NewSub(c.emitGsOutstanding(drainTimeout), baseline)
+					drainElapsed = drainTimeout.NewSub(drainTimeout.NewCall(nanotimeFn), t0)
+				} else {
+					drainSleep.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100)) // 100μs
+					drainSleep.NewBr(drainLoop)
+				}
 
 				leakCheckBlk = drainDone
 			}
@@ -1576,22 +1646,53 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			}
 			leakCheckBlk.NewBr(afterLeakDetectBlk)
 
-			// Skip path: timeout → no leak check, effectiveResult = result
+			// Skip path: timeout → no leak check, effectiveResult = result. The
+			// timed-out test's thread is still live, so the goroutines it
+			// created will never be accounted for; the next test's own
+			// pre-test snapshot (T1639) absorbs that deficit.
 			skipLeakCheckBlk.NewBr(afterLeakDetectBlk)
 
 			// Merge: phi nodes for effectiveResult, hasLeak, delta
-			effectiveResult = afterLeakDetectBlk.NewPhi(
+			resultIncomings := []*ir.Incoming{
 				ir.NewIncoming(effectiveInLeakPath, leakCheckBlk),
 				ir.NewIncoming(result, skipLeakCheckBlk),
-			)
-			hasLeakPhi = afterLeakDetectBlk.NewPhi(
+			}
+			hasLeakIncomings := []*ir.Incoming{
 				ir.NewIncoming(hasLeak, leakCheckBlk),
 				ir.NewIncoming(constant.NewBool(false), skipLeakCheckBlk),
-			)
-			deltaPhi = afterLeakDetectBlk.NewPhi(
+			}
+			deltaIncomings := []*ir.Incoming{
 				ir.NewIncoming(delta, leakCheckBlk),
 				ir.NewIncoming(constant.NewInt(irtypes.I64, 0), skipLeakCheckBlk),
-			)
+			}
+			if drainTimeout != nil {
+				// T1639: the drain deadline expired. Report TIMEOUT and skip the
+				// leak read entirely — a still-running goroutine makes the alloc
+				// count racy, the same reasoning as the skip path above. A test
+				// that already failed keeps its FAIL: the assertion message is
+				// the more actionable diagnostic, and the FAIL path is what
+				// frees the heap-allocated panic message.
+				drainTimeout.NewBr(afterLeakDetectBlk)
+				drainFailed := drainTimeout.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 1))
+				drainResult := drainTimeout.NewSelect(drainFailed,
+					constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 2))
+				resultIncomings = append(resultIncomings, ir.NewIncoming(drainResult, drainTimeout))
+				hasLeakIncomings = append(hasLeakIncomings, ir.NewIncoming(constant.NewBool(false), drainTimeout))
+				deltaIncomings = append(deltaIncomings, ir.NewIncoming(constant.NewInt(irtypes.I64, 0), drainTimeout))
+				stuckCountPhi = afterLeakDetectBlk.NewPhi(
+					ir.NewIncoming(constant.NewInt(irtypes.I64, 0), leakCheckBlk),
+					ir.NewIncoming(constant.NewInt(irtypes.I64, 0), skipLeakCheckBlk),
+					ir.NewIncoming(drainStuckCount, drainTimeout),
+				)
+				elapsedPhi = afterLeakDetectBlk.NewPhi(
+					ir.NewIncoming(elapsed, leakCheckBlk),
+					ir.NewIncoming(elapsed, skipLeakCheckBlk),
+					ir.NewIncoming(drainElapsed, drainTimeout),
+				)
+			}
+			effectiveResult = afterLeakDetectBlk.NewPhi(resultIncomings...)
+			hasLeakPhi = afterLeakDetectBlk.NewPhi(hasLeakIncomings...)
+			deltaPhi = afterLeakDetectBlk.NewPhi(deltaIncomings...)
 
 			entry = afterLeakDetectBlk
 		} else {
@@ -1600,12 +1701,14 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		}
 
 		// === Print result with effective result code ===
-		entry.NewCall(testPrintFn, namePtr, effectiveResult, elapsed)
+		// T1639: elapsedPhi is the wall time to the drain deadline on the
+		// drain-timeout path, and `elapsed` (test body only) everywhere else.
+		entry.NewCall(testPrintFn, namePtr, effectiveResult, elapsedPhi)
 
 		// === Print context for FAIL (panic message) ===
 		{
 			afterPanicBlk := mainFn.NewBlock(fmt.Sprintf("after_panic_%s", nameStr))
-			isOrigFail := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 1))
+			isOrigFail := entry.NewICmp(enum.IPredEQ, effectiveResult, constant.NewInt(irtypes.I32, 1))
 			checkPanicBlk := mainFn.NewBlock(fmt.Sprintf("check_panic_%s", nameStr))
 			entry.NewCondBr(isOrigFail, checkPanicBlk, afterPanicBlk)
 
@@ -1617,7 +1720,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			stdout := constant.NewInt(irtypes.I32, 1)
 			indentPtr := printPanicBlk.NewGetElementPtr(panicIndentGlobal.ContentType, panicIndentGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			printPanicBlk.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, 9))
+			printPanicBlk.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, globalStrLen(panicIndentGlobal)))
 			msgLen := printPanicBlk.NewCall(c.funcs["strlen"], panicMsg)
 			printPanicBlk.NewCall(c.palWrite, stdout, panicMsg, msgLen)
 			nlPtr := printPanicBlk.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
@@ -1645,21 +1748,37 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		// === Print context for TIMEOUT ===
 		{
 			afterTimeoutCtxBlk := mainFn.NewBlock(fmt.Sprintf("after_timeout_ctx_%s", nameStr))
-			isOrigTimeout := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 2))
+			// effectiveResult (not result): the drain-deadline path (T1639) leaves
+			// result==0 while classifying the test as a TIMEOUT. For every other
+			// path effectiveResult==2 exactly when result==2.
+			isOrigTimeout := entry.NewICmp(enum.IPredEQ, effectiveResult, constant.NewInt(irtypes.I32, 2))
 			printTimeoutCtxBlk := mainFn.NewBlock(fmt.Sprintf("print_timeout_ctx_%s", nameStr))
-			entry.NewCondBr(isOrigTimeout, printTimeoutCtxBlk, afterTimeoutCtxBlk)
+			if stuckCountPhi != nil {
+				// T1639: a drain-deadline timeout gets its own wording — the
+				// body finished, the goroutines did not.
+				classifyBlk := mainFn.NewBlock(fmt.Sprintf("timeout_ctx_kind_%s", nameStr))
+				stuckCtxBlk := mainFn.NewBlock(fmt.Sprintf("print_stuck_ctx_%s", nameStr))
+				entry.NewCondBr(isOrigTimeout, classifyBlk, afterTimeoutCtxBlk)
+				isStuck := classifyBlk.NewICmp(enum.IPredSGT, stuckCountPhi, constant.NewInt(irtypes.I64, 0))
+				classifyBlk.NewCondBr(isStuck, stuckCtxBlk, printTimeoutCtxBlk)
+				c.emitStuckGoroutineMessage(stuckCtxBlk, stuckCountPhi,
+					stuckPrefixGlobal, stuckNounGlobal, stuckNounPluralGlobal, timeoutDurGlobal)
+				stuckCtxBlk.NewBr(afterTimeoutCtxBlk)
+			} else {
+				entry.NewCondBr(isOrigTimeout, printTimeoutCtxBlk, afterTimeoutCtxBlk)
+			}
 
 			// Print "  timeout: exceeded <dur> limit\n" using compile-time-formatted duration (T1199)
 			stdout := constant.NewInt(irtypes.I32, 1)
 			toIndentPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutIndentGlobal.ContentType, timeoutIndentGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toIndentPtr, constant.NewInt(irtypes.I64, 20))
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toIndentPtr, constant.NewInt(irtypes.I64, globalStrLen(timeoutIndentGlobal)))
 			toDurPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutDurGlobal.ContentType, timeoutDurGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toDurPtr, constant.NewInt(irtypes.I64, int64(len(timeoutDurStr))))
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toDurPtr, constant.NewInt(irtypes.I64, globalStrLen(timeoutDurGlobal)))
 			toSuffixPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutSuffixGlobal.ContentType, timeoutSuffixGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toSuffixPtr, constant.NewInt(irtypes.I64, 7))
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toSuffixPtr, constant.NewInt(irtypes.I64, globalStrLen(timeoutSuffixGlobal)))
 			printTimeoutCtxBlk.NewBr(afterTimeoutCtxBlk)
 
 			entry = afterTimeoutCtxBlk
@@ -1782,7 +1901,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Print "FAILED:\n" header
 	headerPtr := printFailBlock.NewGetElementPtr(failedHeaderGlobal.ContentType, failedHeaderGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	printFailBlock.NewCall(c.palWrite, stdout, headerPtr, constant.NewInt(irtypes.I64, 8))
+	printFailBlock.NewCall(c.palWrite, stdout, headerPtr, constant.NewInt(irtypes.I64, globalStrLen(failedHeaderGlobal)))
 
 	// Loop through failed names
 	loopBlock := mainFn.NewBlock("fail_loop")
@@ -1800,7 +1919,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Print "  " + name + "\n"
 	indentPtr := loopBlock.NewGetElementPtr(failedIndentGlobal.ContentType, failedIndentGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	loopBlock.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, 2))
+	loopBlock.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, globalStrLen(failedIndentGlobal)))
 	failedNameLen := loopBlock.NewCall(c.funcs["strlen"], failedNamePtr)
 	loopBlock.NewCall(c.palWrite, stdout, failedNamePtr, failedNameLen)
 	nlPtr := loopBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
@@ -1824,7 +1943,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Print "STALE ALLOW_LEAKS:\n" header
 	staleHdrPtr := printStaleBlock.NewGetElementPtr(staleHeaderGlobal.ContentType, staleHeaderGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	printStaleBlock.NewCall(c.palWrite, stdout, staleHdrPtr, constant.NewInt(irtypes.I64, 19))
+	printStaleBlock.NewCall(c.palWrite, stdout, staleHdrPtr, constant.NewInt(irtypes.I64, globalStrLen(staleHeaderGlobal)))
 
 	// Loop through stale names
 	staleLoopBlock := mainFn.NewBlock("stale_loop")
@@ -1839,7 +1958,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 
 	staleIndentPtr := staleLoopBlock.NewGetElementPtr(failedIndentGlobal.ContentType, failedIndentGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	staleLoopBlock.NewCall(c.palWrite, stdout, staleIndentPtr, constant.NewInt(irtypes.I64, 2))
+	staleLoopBlock.NewCall(c.palWrite, stdout, staleIndentPtr, constant.NewInt(irtypes.I64, globalStrLen(failedIndentGlobal)))
 	staleNameLen := staleLoopBlock.NewCall(c.funcs["strlen"], staleNamePtr)
 	staleLoopBlock.NewCall(c.palWrite, stdout, staleNamePtr, staleNameLen)
 	staleNlPtr := staleLoopBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,

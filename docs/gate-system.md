@@ -326,15 +326,16 @@ For **`go-test`**, `file` is the Go package as a repo-relative directory (the mo
 |------------|---------|
 | `pass`     | the test ran and passed |
 | `fail`     | the test ran and failed (assertion/panic); `context` carries (bounded) detail |
-| `timeout`  | the test exceeded its per-test timeout |
+| `timeout`  | the test exceeded its per-test timeout, or was the first test to not report before the batch budget expired (T1639) |
 | `leak`     | the test leaked memory (alloc count delta > 0) |
 | `memory`   | the test tripped the per-test memory limit (process aborted) |
 | `excluded` | a `test(exclude: <this target>)` test, compiled but not run for this target |
 | `not-run`  | the test never ran because an earlier test aborted the process |
 
-**Abort attribution.** A `memory` abort and a process death mid-batch terminate the whole test process without the runner naming the offending test by line. The runner attributes these from the file's roster (the ordered list of test functions, known at compile time):
+**Abort attribution.** A `memory` abort, a process death mid-batch, and a batch-budget kill all terminate the whole test process without the runner naming the offending test by line. The runner attributes these from the file's roster (the ordered list of test functions, known at compile time):
 
 - **MEMLIMIT abort** → the first roster test with no result is marked `memory`; every later roster test is `not-run`.
+- **Batch-budget kill** (the test process outlived Σ per-test timeouts + 30s) → the runner prints a synthetic `TIMEOUT (-)` line naming the first unreported roster test, which is marked `timeout`; every later roster test is `not-run` (T1639). If every roster test *did* report and only the process teardown wedged, the line reads `TIMEOUT (-) <teardown>` and no test is blamed — the run still exits non-zero on the human path, but the gate sees each test's own real result.
 - **Process exits with _any_ status (including 0) without reporting a result for a roster test** → the first unseen roster test is marked `fail` (with a crash / "process exited before reporting a result" `context`); every later roster test is `not-run`. The runner also prints a synthetic `INCOMPLETE` line naming that first unreported test, lists every unreported test in its context line, and exits non-zero — so the human path (`bin/verify`, interactive runs) sees the truncation too, not just the gate (T1415).
 
 Tests that completed before the abort keep their real result.

@@ -444,7 +444,7 @@ func TestPrintChildTestOutputRewritesSummaryAndReports(t *testing.T) {
 	var reported map[string]bool
 	var sawSummary bool
 	out := captureStdout(t, func() {
-		counts, reported, sawSummary = printChildTestOutput(child, 1500*time.Millisecond, " [wasm32-wasi]", false)
+		counts, reported, sawSummary = printChildTestOutput(child, 1500*time.Millisecond, " [wasm32-wasi]", childOutputOpts{})
 	})
 
 	if !sawSummary {
@@ -489,7 +489,7 @@ func TestPrintChildTestOutputNoSummary(t *testing.T) {
 	var reported map[string]bool
 	var sawSummary bool
 	out := captureStdout(t, func() {
-		counts, reported, sawSummary = printChildTestOutput("pass (0.001s) a\n", time.Second, "", false)
+		counts, reported, sawSummary = printChildTestOutput("pass (0.001s) a\n", time.Second, "", childOutputOpts{})
 	})
 	if sawSummary {
 		t.Error("sawSummary = true for a truncated run")
@@ -507,11 +507,11 @@ func TestPrintChildTestOutputNoSummary(t *testing.T) {
 func TestPrintChildTestOutputDropsMemlimitFatal(t *testing.T) {
 	child := "pass (0.001s) a\nfatal: memory limit exceeded (2 GiB)\n"
 
-	out := captureStdout(t, func() { printChildTestOutput(child, time.Second, "", true) })
+	out := captureStdout(t, func() { printChildTestOutput(child, time.Second, "", childOutputOpts{dropMemlimitFatal: true}) })
 	if strings.Contains(out, "memory limit exceeded") {
 		t.Errorf("fatal line should be dropped.\nOutput:\n%s", out)
 	}
-	out = captureStdout(t, func() { printChildTestOutput(child, time.Second, "", false) })
+	out = captureStdout(t, func() { printChildTestOutput(child, time.Second, "", childOutputOpts{}) })
 	if !strings.Contains(out, "fatal: memory limit exceeded") {
 		t.Errorf("fatal line should be kept when not synthesizing MEMLIMIT.\nOutput:\n%s", out)
 	}

@@ -121,6 +121,10 @@ FAIL (0.003s) test_broken
   panic: assertion failed: expected 3, got 4   # panic context shown under FAIL
 TIMEOUT (0.100s) test_stuck                    # per-test timeout exceeded (T0023)
   timeout: exceeded 60s limit                  # timeout context
+TIMEOUT (2.005s) test_abandons_goroutine       # body returned, goroutines did not (T1639)
+  timeout: test body returned but 1 goroutine did not exit within 2s
+TIMEOUT (-) test_wedged                        # batch budget exceeded (T1639)
+  timeout: test process exceeded the 32s batch budget - 1 of 9 tests did not report: test_wedged
 MEMLIMIT (-) <aborted>                         # memory limit exceeded (T0689)
   memory limit: exceeded (test process aborted; subsequent tests not run)
 INCOMPLETE (-) test_killer                     # process died mid-batch (T1415)
@@ -133,7 +137,7 @@ FAILED:
   test_broken
   test_stuck
 ```
-Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT`/`MEMLIMIT`/`INCOMPLETE` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed. **MEMLIMIT** aborts the whole test process (the PAL emits `fatal: memory limit exceeded` and calls `exit(134)`), so any tests that hadn't started yet in the same batch do not run; this is the intentional safety trade-off versus letting a runaway test exhaust machine RAM. **INCOMPLETE** is synthesized by the harness when the test process exits — with *any* status, including 0 — before every registered test reported a result: tests run in declaration order, so the first unreported test is the one that killed the process and names the line, while the context line lists every test that never ran. An incomplete run always exits non-zero, so a truncated batch can never be mistaken for a pass.
+Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT`/`MEMLIMIT`/`INCOMPLETE` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed. **MEMLIMIT** aborts the whole test process (the PAL emits `fatal: memory limit exceeded` and calls `exit(134)`), so any tests that hadn't started yet in the same batch do not run; this is the intentional safety trade-off versus letting a runaway test exhaust machine RAM. **INCOMPLETE** is synthesized by the harness when the test process exits — with *any* status, including 0 — before every registered test reported a result: tests run in declaration order, so the first unreported test is the one that killed the process and names the line, while the context line lists every test that never ran. An incomplete run always exits non-zero, so a truncated batch can never be mistaken for a pass. **TIMEOUT** has three forms (T1639): the plain per-test deadline (`timeout: exceeded <dur> limit`); a test whose *body* returned while goroutines it spawned never exited, where the post-test drain is bounded by the same per-test budget and the context names how many are still outstanding — later tests are not charged for those abandoned goroutines; and a synthetic `TIMEOUT (-)` when the whole test process outlives its batch budget, which names the first test that never reported and lists the rest, exactly as `INCOMPLETE` does (or `TIMEOUT (-) <teardown>` when every test *did* report and only the process teardown wedged — no test is blamed for a scheduler-shutdown hang). When `promise test` runs as a child of the multi-file runner, its batch budget (Σ per-test timeouts + 30s) is clamped to stay under the parent's process backstop so the child always times out first and can name the offending test — otherwise the parent kills it mid-run with no output and the failure gets attributed to the wrong phase. A standalone run has no backstop above it and is never clamped, so an explicit long `timeout:` annotation is honoured. `-compile-timeout` raises the backstop and, with it, that clamp.
 
 Multi-file output (compact — one line per file):
 ```
@@ -144,6 +148,7 @@ FAIL (0.005s) e2e/strings.pr (1/3 failed)     # failing file with ratio
     panic: assertion failed                    # panic context
 FAIL (0.000s) broken.pr (compilation error)    # compilation failure
   broken.pr:5:3: type Foo has no field 'bar'   # error context
+FAIL (600.0s) wedged.pr (test binary hung (compiled, then never finished))
 
 568 passed, 2 failed, 3 leaked (117 files, 30.810s)
 FAILED:                                        # summary with failure context
@@ -152,7 +157,7 @@ FAILED:                                        # summary with failure context
   broken.pr (compilation error)
     broken.pr:5:3: type Foo has no field 'bar'
 ```
-An agent can read the last ~20 lines of output to identify all failures without re-running or grepping.
+An agent can read the last ~20 lines of output to identify all failures without re-running or grepping. The process backstop wraps compile *and* run, so the child announces its compile→run handoff and the parent labels a backstop kill `(compilation timeout)` or `(test binary hung …)` accordingly — blaming compilation for a hung binary sends the reader to the wrong subsystem (T1639).
 
 **Stress test output** — reports flaky tests, timing variance, and adaptive scheduling. Crash context (signal, stderr) is captured for diagnosis:
 ```

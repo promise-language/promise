@@ -1362,7 +1362,7 @@ func (c *Compiler) emitLeakMessage(blk *ir.Block, delta value.Value, leakPrefixG
 	// Write "  leak: "
 	prefixPtr := blk.NewGetElementPtr(leakPrefixGlobal.ContentType, leakPrefixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	blk.NewCall(c.palWrite, stdout, prefixPtr, constant.NewInt(irtypes.I64, 8))
+	blk.NewCall(c.palWrite, stdout, prefixPtr, constant.NewInt(irtypes.I64, globalStrLen(leakPrefixGlobal)))
 
 	// Write delta as string
 	deltaStr := blk.NewCall(c.funcs["promise_int_to_string"], delta)
@@ -1370,10 +1370,10 @@ func (c *Compiler) emitLeakMessage(blk *ir.Block, delta value.Value, leakPrefixG
 	blk.NewCall(c.palWrite, stdout, deltaDataPtr, deltaDataLen)
 	blk.NewCall(c.palFree, deltaStr)
 
-	// Write " allocations not freed\n" (23 bytes)
+	// Write " allocations not freed\n"
 	suffixPtr := blk.NewGetElementPtr(leakSuffixGlobal.ContentType, leakSuffixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	blk.NewCall(c.palWrite, stdout, suffixPtr, constant.NewInt(irtypes.I64, 23))
+	blk.NewCall(c.palWrite, stdout, suffixPtr, constant.NewInt(irtypes.I64, globalStrLen(leakSuffixGlobal)))
 }
 
 // emitStaleAllowLeaksWarning writes "  allow_leaks: no leaks detected (tag can be removed)\n"
@@ -1389,5 +1389,54 @@ func (c *Compiler) emitStaleAllowLeaksWarning(blk *ir.Block, testName string) {
 	stdout := constant.NewInt(irtypes.I32, 1)
 	msgPtr := blk.NewGetElementPtr(msgGlobal.ContentType, msgGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	blk.NewCall(c.palWrite, stdout, msgPtr, constant.NewInt(irtypes.I64, int64(len(msg))))
+	blk.NewCall(c.palWrite, stdout, msgPtr, constant.NewInt(irtypes.I64, globalStrLen(msgGlobal)))
+}
+
+// globalStrLen returns the byte length of a char-array string global, so
+// emitters never carry a hand-maintained second copy of the literal's length.
+func globalStrLen(g *ir.Global) int64 {
+	if arr, ok := g.ContentType.(*irtypes.ArrayType); ok {
+		return int64(arr.Len)
+	}
+	return 0
+}
+
+// emitStuckGoroutineMessage writes
+// "  timeout: test body returned but <N> goroutine(s) did not exit within <dur>\n"
+// to stdout — the TIMEOUT context for a test whose body completed but whose
+// goroutines never exited within the per-test budget (T1639). The block is NOT
+// terminated; the caller adds the terminator.
+func (c *Compiler) emitStuckGoroutineMessage(blk *ir.Block, count value.Value,
+	prefixGlobal, nounGlobal, nounPluralGlobal, durGlobal *ir.Global) {
+	stdout := constant.NewInt(irtypes.I32, 1)
+
+	prefixPtr := blk.NewGetElementPtr(prefixGlobal.ContentType, prefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewCall(c.palWrite, stdout, prefixPtr, constant.NewInt(irtypes.I64, globalStrLen(prefixGlobal)))
+
+	countStr := blk.NewCall(c.funcs["promise_int_to_string"], count)
+	countDataPtr, countDataLen := c.extractStringDataLenFromInstance(blk, countStr)
+	blk.NewCall(c.palWrite, stdout, countDataPtr, countDataLen)
+	blk.NewCall(c.palFree, countStr)
+
+	// Singular/plural noun chosen at runtime — the count is not known until the
+	// drain deadline expires.
+	isOne := blk.NewICmp(enum.IPredEQ, count, constant.NewInt(irtypes.I64, 1))
+	singularPtr := blk.NewGetElementPtr(nounGlobal.ContentType, nounGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	pluralPtr := blk.NewGetElementPtr(nounPluralGlobal.ContentType, nounPluralGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	nounPtr := blk.NewSelect(isOne, singularPtr, pluralPtr)
+	nounLen := blk.NewSelect(isOne,
+		constant.NewInt(irtypes.I64, globalStrLen(nounGlobal)),
+		constant.NewInt(irtypes.I64, globalStrLen(nounPluralGlobal)))
+	blk.NewCall(c.palWrite, stdout, nounPtr, nounLen)
+
+	durPtr := blk.NewGetElementPtr(durGlobal.ContentType, durGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewCall(c.palWrite, stdout, durPtr, constant.NewInt(irtypes.I64, globalStrLen(durGlobal)))
+
+	nlPtr := blk.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
 }

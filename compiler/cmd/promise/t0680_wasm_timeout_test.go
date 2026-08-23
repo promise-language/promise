@@ -78,9 +78,10 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
 	}
 
-	// The in-binary path (not the backstop) must have fired: a real TIMEOUT line
-	// for the test, plus the "1 timed out" summary. The backstop instead prints
-	// "TIMEOUT: tests exceeded <N>s timeout" with no per-test TIMEOUT line.
+	// The in-binary path (not the batch budget) must have fired: a real TIMEOUT
+	// line for the test, plus the "1 timed out" summary. The batch-budget kill
+	// instead prints a synthetic "TIMEOUT (-) <name>" line whose context names
+	// the budget rather than the test's own deadline (T1639).
 	tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_livelock`)
 	if !tre.MatchString(combined) {
 		t.Errorf("expected in-binary per-test TIMEOUT line for test_livelock; got:\n%s", combined)
@@ -88,8 +89,8 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 	if !strings.Contains(combined, "1 timed out") {
 		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
 	}
-	if strings.Contains(combined, "tests exceeded") {
-		t.Errorf("run hit the process-level backstop instead of the in-binary "+
+	if strings.Contains(combined, "batch budget") {
+		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
 			"deadline — Part 2 enforcement regressed; got:\n%s", combined)
 	}
 
@@ -198,8 +199,8 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 			if !strings.Contains(combined, "1 timed out") {
 				t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
 			}
-			if strings.Contains(combined, "tests exceeded") {
-				t.Errorf("run hit the process-level backstop instead of the in-binary "+
+			if strings.Contains(combined, "batch budget") {
+				t.Errorf("run hit the process-level batch budget instead of the in-binary "+
 					"deadline — T1200 channel-livelock enforcement regressed; got:\n%s", combined)
 			}
 			if elapsed > 20*time.Second {
@@ -276,8 +277,8 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 	if !strings.Contains(combined, "1 timed out") {
 		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
 	}
-	if strings.Contains(combined, "tests exceeded") {
-		t.Errorf("run hit the process-level backstop instead of the in-binary "+
+	if strings.Contains(combined, "batch budget") {
+		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
 			"deadline — T1218 mutex-livelock enforcement regressed; got:\n%s", combined)
 	}
 	if elapsed > 20*time.Second {
@@ -353,8 +354,8 @@ func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
 	if !strings.Contains(combined, "1 timed out") {
 		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
 	}
-	if strings.Contains(combined, "tests exceeded") {
-		t.Errorf("run hit the process-level backstop instead of the in-binary "+
+	if strings.Contains(combined, "batch budget") {
+		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
 			"deadline — T1220 select-livelock enforcement regressed; got:\n%s", combined)
 	}
 	if elapsed > 20*time.Second {

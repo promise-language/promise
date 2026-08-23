@@ -161,6 +161,10 @@ var (
 	jsonLeakRe     = regexp.MustCompile(`^LEAK \(([\d.]+)s\) (\S+)`)
 	jsonTimeoutRe  = regexp.MustCompile(`^TIMEOUT \(([\d.]+)s\) (\S+)`)
 	jsonMemlimitRe = regexp.MustCompile(`^MEMLIMIT \(`)
+	// T1639: synthetic TIMEOUT line — the runner killed the test process at its
+	// batch budget and named the first test that never reported. It carries "-"
+	// instead of an elapsed time, so jsonTimeoutRe cannot match it.
+	jsonTimeoutSyntheticRe = regexp.MustCompile(`^TIMEOUT \(-\) (\S+)`)
 	// T1415: synthetic INCOMPLETE line — the child exited (with any status)
 	// without reporting a result for every roster test.
 	jsonIncompleteRe = regexp.MustCompile(`^INCOMPLETE \(`)
@@ -325,6 +329,10 @@ func parseChildOutput(output string) (marker *rosterMarker, seen map[string]seen
 		}
 		if jsonIncompleteRe.MatchString(line) {
 			incomplete = true
+			continue
+		}
+		if m := jsonTimeoutSyntheticRe.FindStringSubmatch(line); m != nil && !strings.Contains(m[1], ".pr") {
+			seen[m[1]] = seenResult{status: "timeout", context: collectContext(lines, i+1)}
 			continue
 		}
 		if m := jsonPassRe.FindStringSubmatch(line); m != nil && !strings.Contains(m[2], ".pr") {

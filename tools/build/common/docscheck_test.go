@@ -615,3 +615,38 @@ func TestCatalogCoverageUnreadableSourceFileErrors(t *testing.T) {
 		t.Fatalf("error should name the unreadable file, got: %v", err)
 	}
 }
+
+// --- readDirIfExists ---
+
+func TestReadDirIfExistsDistinguishesAbsentFromNotADirectory(t *testing.T) {
+	// The whole reason this helper exists: os.ReadDir of a regular file on
+	// Windows fails with ERROR_PATH_NOT_FOUND, which os.IsNotExist reports
+	// as "absent". Callers must still be able to tell the two apart, or a
+	// malformed tree silently scopes the check out.
+	root := t.TempDir()
+
+	entries, exists, err := readDirIfExists(filepath.Join(root, "missing"))
+	if err != nil || exists || entries != nil {
+		t.Fatalf("absent path: got (%v, %v, %v), want (nil, false, nil)", entries, exists, err)
+	}
+
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := readDirIfExists(file); err == nil || !exists {
+		t.Fatalf("regular file: got (exists=%v, err=%v), want (true, non-nil)", exists, err)
+	}
+
+	dir := filepath.Join(root, "dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, exists, err = readDirIfExists(dir)
+	if err != nil || !exists || len(entries) != 1 {
+		t.Fatalf("directory: got (%d entries, exists=%v, err=%v), want (1, true, nil)", len(entries), exists, err)
+	}
+}

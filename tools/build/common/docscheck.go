@@ -215,9 +215,10 @@ func checkCatalogCoverage(root string) error {
 	}
 
 	// A tree with no modules/ directory at all has nothing to reconcile;
-	// that is not a finding.
-	dirs, err := os.ReadDir(filepath.Join(root, "modules"))
-	if err != nil && !os.IsNotExist(err) {
+	// that is not a finding. A modules/ that exists but is not a directory
+	// is one — see readDirIfExists.
+	dirs, _, err := readDirIfExists(filepath.Join(root, "modules"))
+	if err != nil {
 		return fmt.Errorf("read modules/: %w", err)
 	}
 
@@ -325,13 +326,33 @@ func parseCatalogModules(path string) (map[string]catalogEntry, error) {
 // source — at least one non-test .pr file with a line that is neither blank nor
 // a comment. Planned modules keep a comment-only stub .pr as a design
 // placeholder; those are not expected in the inventory docs yet.
+// readDirIfExists reads dir, reporting separately whether it exists at all.
+//
+// The separate flag is the point: os.IsNotExist cannot distinguish "absent"
+// from "present but not a directory" on Windows, where os.ReadDir of a regular
+// file fails with ERROR_PATH_NOT_FOUND — which satisfies both os.IsNotExist and
+// errors.Is(err, syscall.ENOTDIR). Callers that scope themselves out on an
+// absent path would therefore silently scope themselves out on a *malformed*
+// one too, disabling the very check they exist to run. An explicit Lstat tells
+// the two apart on every platform.
+func readDirIfExists(dir string) ([]os.DirEntry, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		return entries, true, nil
+	}
+	if _, statErr := os.Lstat(dir); statErr != nil && os.IsNotExist(statErr) {
+		return nil, false, nil
+	}
+	return nil, true, err
+}
+
 func moduleShipsSource(dir string) (bool, error) {
-	files, err := os.ReadDir(dir)
+	files, exists, err := readDirIfExists(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read %s: %w", dir, err)
+		return false, fmt.Errorf("read %s: %w", filepath.ToSlash(dir), err)
+	}
+	if !exists {
+		return false, nil
 	}
 	for _, f := range files {
 		name := f.Name()

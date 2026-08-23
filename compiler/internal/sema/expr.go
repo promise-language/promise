@@ -1813,8 +1813,15 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	if ident, ok := e.Target.(*ast.IdentExpr); ok {
 		if obj := c.lookup(ident.Name); obj != nil {
 			if mod, ok := obj.(*types.Module); ok {
+				c.usedModules[mod] = true
 				return c.resolveModuleMember(e, mod)
 			}
+		} else if c.moduleImportedInOtherFile(ident.Name, ident.Pos().File) {
+			// A sibling file imports this module, but this file does not. Imports
+			// are per-file (T1686, §5.2), so this reference is unresolvable here.
+			c.errorf(ident.Pos(), "undefined module '%s'", ident.Name)
+			c.hintf(ident.Pos(), "add `use %s;` — imports are per-file, not per-module", ident.Name)
+			return nil
 		}
 	}
 
@@ -4746,6 +4753,23 @@ func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {
 
 // resolveModuleMember resolves a qualified access like mod.symbol against
 // the module's exported scope.
+// moduleImportedInOtherFile reports whether some file OTHER than the given one
+// declares a named import with this alias (T1686). Used to turn a bare
+// "undefined: X" into the file-scoped-import diagnostic when X names a module a
+// sibling file imports but the current file does not.
+func (c *Checker) moduleImportedInOtherFile(name, file string) bool {
+	for _, mod := range c.modules {
+		if mod.IsGlob() {
+			continue
+		}
+		mp := mod.Pos().File
+		if mod.Name() == name && mp != "" && mp != file {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Checker) resolveModuleMember(e *ast.MemberExpr, mod *types.Module) types.Type {
 	scope := mod.Scope()
 	if scope == nil {
@@ -4765,6 +4789,7 @@ func (c *Checker) resolveModuleMember(e *ast.MemberExpr, mod *types.Module) type
 	}
 
 	// Record the resolved object for codegen
+	c.usedModules[mod] = true
 	if ident, ok := e.Target.(*ast.IdentExpr); ok {
 		c.recordObject(ident, mod)
 	}

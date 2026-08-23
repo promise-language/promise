@@ -270,7 +270,13 @@ make() {
 		"./othermod": sema.ExportedScope(otherInfo, otherFile),
 	}
 	info, semaErrs := sema.CheckWithModules(userFile, scopes)
-	if len(semaErrs) > 0 {
+	// othermod is deliberately imported but unused (its generic stays
+	// uninstantiated), so a T1686 unused-import warning is expected — tolerate
+	// warnings, fail only on fatal diagnostics.
+	for _, e := range semaErrs {
+		if se, ok := e.(*sema.Error); ok && se.Warning {
+			continue
+		}
 		t.Fatalf("user sema errors: %v", semaErrs)
 	}
 	info.ModuleInfos = map[string]*sema.ModuleInfo{

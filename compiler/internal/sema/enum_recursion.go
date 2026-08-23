@@ -81,7 +81,7 @@ func (c *Checker) validateEnumNoSelfRefRecursion(file *ast.File) {
 		if !ok {
 			continue
 		}
-		obj := c.scope.Lookup(ed.Name)
+		obj := c.declScope.Lookup(ed.Name)
 		if obj == nil {
 			continue
 		}

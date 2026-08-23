@@ -1,3 +1,5 @@
+use gzip;
+use net;
 _serve_once!(net.TcpListener ~listener, string response) string {
   net.TcpStream conn = listener.accept()?^;
   u8[] buf = u8[].filled(0, 8192);

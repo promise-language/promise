@@ -1,0 +1,8 @@
+use path;
+
+// lib_path lives in a sibling file of the same module and declares its OWN
+// `use path;` — imports are file-scoped, so roots.pr's import does not carry
+// over (T1686).
+lib_path() string `public `doc("Returns /opt/lib joined via path.join.") {
+  return path.join("/opt", "lib");
+}

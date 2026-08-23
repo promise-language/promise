@@ -435,9 +435,12 @@ func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
 	}
 }
 
-// Binding two different modules to one alias is a sema error, which is what keeps
-// the import-name → IR prefix mapping unambiguous (T1611).
-func TestSameAliasTwoModulesRejected(t *testing.T) {
+// Imports are file-scoped (T1686): two files may bind the same alias to different
+// modules, each resolving to its own module within its own file. Codegen resolves
+// each qualified call site through the sema-recorded module object, so the
+// import-name → IR prefix mapping stays unambiguous per file (supersedes T1611,
+// which rejected this while imports were still module-scoped).
+func TestSameAliasTwoModulesAllowed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -449,22 +452,22 @@ func TestSameAliasTwoModulesRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "main.pr"),
-		[]byte("use path as m;\n\nmain!() {\n  print_line(m.file_name(\"/a/b.txt\"));\n}\n"), 0644); err != nil {
+		[]byte("use path as m;\n\nmain!() {\n  print_line(m.file_name(\"/a/b.txt\"));\n  print_line(other().to_string());\n}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "other.pr"),
-		[]byte("use math as m;\n\nother() int {\n  return m.gcd(12, 18);\n}\n"), 0644); err != nil {
+		[]byte("use math as m;\n\nother() int `public {\n  return m.gcd(12, 18);\n}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	build := exec.Command(bin, "build", ".")
-	build.Dir = dir
-	out, err := build.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected a redeclaration error, build succeeded:\n%s", out)
+	run := exec.Command(bin, "run", ".")
+	run.Dir = dir
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected both aliased modules to resolve, run failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "redeclared in this scope") {
-		t.Fatalf("expected a redeclaration error, got:\n%s", out)
+	if !strings.Contains(string(out), "b.txt") || !strings.Contains(string(out), "6") {
+		t.Fatalf("expected path.file_name and math.gcd to both resolve, got:\n%s", out)
 	}
 }
 

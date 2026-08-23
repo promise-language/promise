@@ -160,7 +160,7 @@ func (c *Checker) checkNoStrayValueFields(file *ast.File) {
 
 // lookupNamedDecl resolves a TypeDecl to its Named type, or nil.
 func (c *Checker) lookupNamedDecl(d *ast.TypeDecl) *types.Named {
-	obj := c.scope.Lookup(d.Name)
+	obj := c.declScope.Lookup(d.Name)
 	if obj == nil {
 		return nil
 	}

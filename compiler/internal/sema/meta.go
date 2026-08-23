@@ -760,7 +760,7 @@ func (c *Checker) validateConstructors(file *ast.File) {
 		if !ok {
 			continue
 		}
-		obj := c.fileScope.Lookup(td.Name)
+		obj := c.declScope.Lookup(td.Name)
 		if obj == nil {
 			continue
 		}

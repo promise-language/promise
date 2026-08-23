@@ -1,0 +1,6 @@
+use path;
+
+// bin_path is one module file's public API; it declares its own `use path;`.
+bin_path() string `public `doc("Returns /usr/bin joined via path.join.") {
+  return path.join("/usr", "bin");
+}

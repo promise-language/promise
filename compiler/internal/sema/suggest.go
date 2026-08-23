@@ -94,7 +94,13 @@ func (c *Checker) suggestForUndefinedType(pos ast.Pos, name string) {
 }
 
 // suggestForUndefinedModule emits hints after an "undefined module: X" error.
-func (c *Checker) suggestForUndefinedModule(pos ast.Pos, name string) {
+func (c *Checker) suggestForUndefinedModule(pos ast.Pos, name, file string) {
+	// A sibling file imports this module, but this one does not — imports are
+	// per-file (T1686, §5.2). Point at the missing per-file `use`.
+	if c.moduleImportedInOtherFile(name, file) {
+		c.hintf(pos, "add `use %s;` — imports are per-file, not per-module", name)
+		return
+	}
 	// Check if it's a known catalog module name
 	for _, mod := range knownCatalogModules {
 		if name == mod {

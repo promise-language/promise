@@ -198,6 +198,7 @@ func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 			c.errorf(r.Pos(), "%s is not a module", r.Module)
 			return nil
 		}
+		c.usedModules[mod] = true
 		scope = mod.Scope()
 		if scope == nil {
 			c.errorf(r.Pos(), "module '%s' has no loaded scope", r.Module)
@@ -205,7 +206,7 @@ func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 		}
 	} else {
 		c.errorf(r.Pos(), "undefined module: %s", r.Module)
-		c.suggestForUndefinedModule(r.Pos(), r.Module)
+		c.suggestForUndefinedModule(r.Pos(), r.Module, r.Pos().File)
 		return nil
 	}
 

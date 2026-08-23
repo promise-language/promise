@@ -6017,11 +6017,12 @@ func TestStreamHasIterMethod(t *testing.T) {
 // --- Use Declaration Tests ---
 
 func TestUseDeclReservesName(t *testing.T) {
+	// T1686: an import alias may not collide with a module-wide declaration.
 	errs := checkErrs(t, `
 		use io "std/io"
 		type io { }
 	`)
-	expectError(t, errs, "redeclared")
+	expectError(t, errs, "import alias 'io' conflicts with type 'io'")
 }
 
 func TestUseDeclModuleNotLoaded(t *testing.T) {
@@ -11609,13 +11610,18 @@ func TestUseStdGlobNoop(t *testing.T) {
 }
 
 func TestUseStdUnqualifiedStillWorks(t *testing.T) {
-	// Even with use std;, unqualified access via parent scope chain still works
-	checkOK(t, `
+	// Even with use std;, unqualified access via parent scope chain still works.
+	// A bare `use std;` referenced only unqualifiedly is an unused import (T1686),
+	// which is advisory (a warning), not a fatal error.
+	errs := checkErrs(t, `
 		use std;
 		main() {
 			int x = min(1, 2);
 		}
 	`)
+	if semaHasFatalErr(errs) {
+		t.Fatalf("unexpected fatal errors: %v", errs)
+	}
 }
 
 func TestUseStdNoSuchMember(t *testing.T) {

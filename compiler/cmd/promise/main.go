@@ -6165,7 +6165,9 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	if len(errs) > 0 {
 		timePhase("sema", time.Since(tSema), "")
 		printFileErrors(projectDir, errs)
-		os.Exit(1)
+		if semaFatal(errs) {
+			os.Exit(1)
+		}
 	}
 
 	absProjectDir, _ := filepath.Abs(projectDir)
@@ -6261,7 +6263,9 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	if len(errs) > 0 {
 		timePhase("sema", time.Since(tSema), "")
 		printFileErrors(filename, errs)
-		os.Exit(1)
+		if semaFatal(errs) {
+			os.Exit(1)
+		}
 	}
 
 	// Resolve embed annotations: read files, validate contents
@@ -6870,7 +6874,9 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	}
 	if len(errs) > 0 {
 		printFileErrors(modDir, errs)
-		os.Exit(1)
+		if semaFatal(errs) {
+			os.Exit(1)
+		}
 	}
 
 	// Resolve embed annotations for module test files
@@ -7250,7 +7256,22 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	ml.modTimings.Check += semaInfo.Timings.Check
 	ml.modTimings.Verify += semaInfo.Timings.Verify
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
+		// Warnings (e.g. unused imports) are printed here but never fail module
+		// loading; fatal diagnostics are surfaced to the caller, which prints them.
+		var warnings, fatal []error
+		for _, e := range errs {
+			if se, ok := e.(*sema.Error); ok && se.Warning {
+				warnings = append(warnings, e)
+			} else {
+				fatal = append(fatal, e)
+			}
+		}
+		if len(warnings) > 0 {
+			printFileErrors(absDir, warnings)
+		}
+		if len(fatal) > 0 {
+			return nil, fmt.Errorf("errors in module '%s': %v", modPath, fatal[0])
+		}
 	}
 
 	// Resolve embed annotations for module implementation files (B0145)
@@ -8096,7 +8117,9 @@ func runExec(args []string) {
 	}
 	if len(errs) > 0 {
 		printInlineErrors(source, errs, wrapOffset)
-		os.Exit(1)
+		if semaFatal(errs) {
+			os.Exit(1)
+		}
 	}
 
 	// Ownership analysis
@@ -8343,6 +8366,20 @@ func readFileLines(filename string) []string {
 	lines := strings.Split(string(data), "\n")
 	fileLineCache[filename] = lines
 	return lines
+}
+
+// semaFatal reports whether errs contains any diagnostic that must fail the
+// build. Sema warnings (Error.Warning) are advisory — they are printed but never
+// fail compilation (T1686 unused-import, deprecations, redundant `clone). Every
+// other diagnostic is fatal.
+func semaFatal(errs []error) bool {
+	for _, e := range errs {
+		if se, ok := e.(*sema.Error); ok && se.Warning {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // printFileErrors formats errors with source context for file-based compilation.

@@ -13,7 +13,7 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 		if c.info.FilteredDecls[decl] {
 			continue
 		}
-		c.scope = c.fileScope
+		c.scope = c.importScopeFor(decl.Pos().File)
 
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
@@ -126,7 +126,7 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 			}
 		}
 	}
-	c.scope = c.fileScope
+	c.scope = c.declScope
 }
 
 // blockReturns reports whether a block definitely returns on all paths.

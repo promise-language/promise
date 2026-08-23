@@ -1,3 +1,5 @@
+use io;
+use os;
 _writer_to_bytes_roundtrip(string s, string label) {
   GzipWriter w = GzipWriter();
   u8[] bytes = s.bytes();

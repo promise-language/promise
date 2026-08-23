@@ -578,7 +578,7 @@ func (c *Checker) validateSendableTypes(file *ast.File) {
 }
 
 func (c *Checker) validateSendableTypeDecl(d *ast.TypeDecl) {
-	obj := c.scope.Lookup(d.Name)
+	obj := c.declScope.Lookup(d.Name)
 	if obj == nil {
 		return
 	}
@@ -633,7 +633,7 @@ func (c *Checker) validateSendableTypeDecl(d *ast.TypeDecl) {
 }
 
 func (c *Checker) validateSendableEnumDecl(d *ast.EnumDecl) {
-	obj := c.scope.Lookup(d.Name)
+	obj := c.declScope.Lookup(d.Name)
 	if obj == nil {
 		return
 	}

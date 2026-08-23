@@ -12,8 +12,13 @@ import (
 )
 
 // declare performs Pass 1: walk top-level declarations and insert names.
+//
+// Imports are file-scoped: a `use` binds its alias only in the file that declares
+// it (T1686). Declarations are module-wide: a type/enum/func declared in any file
+// is visible throughout the unit. So imports go into per-file import scopes while
+// declarations go into the shared declScope.
 func (c *Checker) declare(file *ast.File) {
-	// Process use declarations — create module objects and resolve scopes
+	// Process use declarations — create module objects and resolve scopes.
 	for _, u := range file.Uses {
 		alias := u.Alias
 		isGlob := alias == "_"
@@ -27,18 +32,35 @@ func (c *Checker) declare(file *ast.File) {
 		// Resolve module scope from pre-loaded scopes
 		c.resolveModuleScope(u, mod)
 
-		// Glob imports (as _) merge their exports into fileScope eagerly.
-		// Non-glob imports are inserted as named module objects.
+		// Imports injected after file merge (`use std as _`, `use gzip as _gzip`)
+		// carry an empty Pos().File. They are module-wide by construction — std
+		// symbols belong to every file, and the codegen-emitted `_gzip.` call is
+		// not tied to any user import — so route them to the module-wide scopes.
+		// Real imports bind into their own file's import scope.
+		injected := u.Pos().File == ""
 		if isGlob {
-			c.mergeGlobImport(u, mod)
+			// Glob (`as _`) merges the module's exports as bare names. Injected std
+			// goes into the module-wide globScope; a user glob is file-local.
+			if injected {
+				c.mergeGlobImport(u, mod, c.globScope, false)
+			} else {
+				c.mergeGlobImport(u, mod, c.importScopeFor(u.Pos().File), true)
+			}
+			c.modules = append(c.modules, mod)
 		} else {
-			c.insert(mod)
+			target := c.declScope
+			if !injected {
+				target = c.importScopeFor(u.Pos().File)
+			}
+			// A rejected duplicate alias is not tracked: it already errored, and
+			// treating it as a distinct import would spuriously flag it unused.
+			if c.insertNamedImport(u, mod, target) {
+				c.modules = append(c.modules, mod)
+			}
 		}
-
-		c.modules = append(c.modules, mod)
 	}
 
-	c.scope = c.fileScope
+	c.scope = c.declScope
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
@@ -50,8 +72,73 @@ func (c *Checker) declare(file *ast.File) {
 		}
 	}
 
-	// Restore scope to fileScope
-	c.scope = c.fileScope
+	// Restore scope to declScope
+	c.scope = c.declScope
+
+	// A module-wide declaration and a file-local import may not share a name: the
+	// import would silently shadow the declaration inside its own file (T1686,
+	// §5.2 rule 3).
+	c.checkImportDeclCollisions()
+}
+
+// insertNamedImport binds a named module alias into the given scope, reporting a
+// duplicate-import-alias error (§6.5) if the file already binds that alias.
+// Returns true when the alias was bound (false on a rejected duplicate).
+func (c *Checker) insertNamedImport(u *ast.UseDecl, mod *types.Module, target *types.Scope) bool {
+	if existing := target.Insert(mod); existing != nil {
+		c.errorf(u.Pos(), "duplicate import alias '%s'", mod.Name())
+		c.hintf(u.Pos(), "use `as` to rename one: `%s as %s2;`", useSpec(mod), mod.Name())
+		return false
+	}
+	return true
+}
+
+// useSpec renders the `use` prefix that introduces a module, for diagnostics:
+// `use json` for a catalog import, `use alias "./path"` for a sourced import.
+func useSpec(mod *types.Module) string {
+	if mod.CatalogName() != "" {
+		return "use " + mod.CatalogName()
+	}
+	return "use " + mod.Name() + " \"" + mod.Path() + "\""
+}
+
+// checkImportDeclCollisions reports a named file-local import whose alias collides
+// with a module-wide declaration (T1686, §5.2 rule 3). Declarations are visible in
+// every file, so such an import would shadow the declaration inside its own file —
+// an error rather than silent shadowing.
+func (c *Checker) checkImportDeclCollisions() {
+	for _, mod := range c.modules {
+		if mod.IsGlob() || mod.Pos().File == "" {
+			continue // glob imports have no alias; injected imports are internal
+		}
+		decl := c.declScope.Lookup(mod.Name())
+		if decl == nil {
+			continue
+		}
+		p := mod.Pos()
+		c.errorf(ast.Pos{File: p.File, Line: p.Line, Column: p.Column},
+			"import alias '%s' conflicts with %s declared at %s",
+			mod.Name(), describeObjectKind(decl), decl.Pos())
+		c.hintf(ast.Pos{File: p.File, Line: p.Line, Column: p.Column},
+			"alias the import — `%s as %s2;`", useSpec(mod), mod.Name())
+	}
+}
+
+// describeObjectKind renders a scope object as "type X", "enum X", or
+// "function X" for collision diagnostics.
+func describeObjectKind(obj types.Object) string {
+	switch o := obj.(type) {
+	case *types.TypeName:
+		switch o.Type().(type) {
+		case *types.Enum:
+			return "enum '" + o.Name() + "'"
+		default:
+			return "type '" + o.Name() + "'"
+		}
+	case *types.Func:
+		return "function '" + o.Name() + "'"
+	}
+	return "declaration '" + obj.Name() + "'"
 }
 
 // resolveModuleScope looks up the module's scope from pre-loaded moduleScopes.
@@ -74,10 +161,18 @@ func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
 	}
 }
 
-// mergeGlobImport dumps all exports from a module's scope into globScope.
-// Glob-imported symbols go into globScope (parent of fileScope) so that
-// user declarations in fileScope can shadow them without conflict.
-func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module) {
+// mergeGlobImport dumps all `public exports from a module's scope into target as
+// bare (unqualified) names (T1686).
+//
+// The injected `use std as _` targets the module-wide globScope (fileLocal=false):
+// its symbols are the baseline every file starts from. A user `use X as _;`
+// targets that file's own import scope (fileLocal=true), so the injected names are
+// visible only in the declaring file. For a file-local glob, a name already
+// resolvable through the parent chain — a module-wide declaration, the injected
+// std glob, or a Universe type — wins; the injected name is skipped so the
+// pre-existing binding stays in force (§5.3). Two anonymous imports in one file
+// that export the same name are a conflict.
+func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module, target *types.Scope, fileLocal bool) {
 	scope := mod.Scope()
 	if scope == nil {
 		return // module has no scope (not loaded)
@@ -92,16 +187,23 @@ func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module) {
 		if !isObjectExported(obj) {
 			continue
 		}
-		if existing := c.globScope.Lookup(name); existing != nil {
+		// A file-local glob never overrides a name already in scope via the parent
+		// chain (declaration / injected std / Universe): pre-existing wins (§5.3).
+		if fileLocal {
+			if existing, _ := target.Parent().LookupParent(name); existing != nil {
+				continue
+			}
+		}
+		if existing := target.Lookup(name); existing != nil {
 			if existing == obj {
 				continue // already imported (idempotent glob import)
 			}
 			// Two different glob imports export the same name — that's a conflict.
 			c.errorf(u.Pos(), "importing module '%s' as _ conflicts with existing symbol '%s'", modName, name)
-			c.errorf(u.Pos(), "hint: use `use %s` or `use %s as <alias>` to avoid conflict", modName, modName)
+			c.hintf(u.Pos(), "use `use %s` or `use %s as <alias>` to avoid conflict", modName, modName)
 			continue
 		}
-		c.globScope.Insert(obj)
+		target.Insert(obj)
 	}
 }
 
@@ -204,7 +306,7 @@ func (c *Checker) declareTypeParams(astParams []*ast.TypeParam) []*types.TypePar
 
 // define performs Pass 2: resolve type structures, populate fields/methods/variants.
 func (c *Checker) define(file *ast.File) {
-	c.scope = c.fileScope
+	c.scope = c.declScope
 	for _, decl := range file.Decls {
 		// Skip declarations that were rejected in the declare pass (redeclaration
 		// errors) or filtered by `target(cond) — processing them would corrupt
@@ -212,6 +314,9 @@ func (c *Checker) define(file *ast.File) {
 		if c.info.FilteredDecls[decl] {
 			continue
 		}
+		// Resolve field/signature/inheritance types against the declaration's own
+		// file import scope so module-qualified type refs bind file-locally (T1686).
+		c.scope = c.importScopeFor(decl.Pos().File)
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
 			c.defineType(d)
@@ -221,11 +326,11 @@ func (c *Checker) define(file *ast.File) {
 			c.defineFunc(d)
 		}
 	}
-	c.scope = c.fileScope
+	c.scope = c.declScope
 }
 
 func (c *Checker) defineType(d *ast.TypeDecl) {
-	obj := c.scope.Lookup(d.Name)
+	obj := c.declScope.Lookup(d.Name)
 	if obj == nil {
 		return // error in declare
 	}
@@ -465,7 +570,7 @@ func (c *Checker) propagateDrops(file *ast.File) {
 			}
 			switch d := decl.(type) {
 			case *ast.TypeDecl:
-				obj := c.scope.Lookup(d.Name)
+				obj := c.declScope.Lookup(d.Name)
 				if obj == nil {
 					continue
 				}
@@ -491,7 +596,7 @@ func (c *Checker) propagateDrops(file *ast.File) {
 					}
 				}
 			case *ast.EnumDecl:
-				obj := c.scope.Lookup(d.Name)
+				obj := c.declScope.Lookup(d.Name)
 				if obj == nil {
 					continue
 				}
@@ -954,7 +1059,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 }
 
 func (c *Checker) defineEnum(d *ast.EnumDecl) {
-	obj := c.scope.Lookup(d.Name)
+	obj := c.declScope.Lookup(d.Name)
 	if obj == nil {
 		return
 	}
@@ -1231,7 +1336,7 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 	if d.IsSetter {
 		scopeName = d.Name + "$set"
 	}
-	obj := c.scope.Lookup(scopeName)
+	obj := c.declScope.Lookup(scopeName)
 	if obj == nil {
 		return
 	}
@@ -1566,6 +1671,64 @@ func (c *Checker) resolvePlacement(annotations []*ast.MetaAnnotation) types.Plac
 		}
 	}
 	return types.PlaceInstance
+}
+
+// checkUnusedImports warns for a file-local import that its own file never
+// references (T1686, §5.2 rule 4). File scope makes this decidable: a named
+// import is unused when no `alias.` reference resolved against it; an anonymous
+// import is unused when none of its injected names were referenced in the file.
+// The injected `use std as _;` / `use gzip as _gzip;` (empty Pos().File) never
+// warn. A warning, not an error — a stray import is a tidiness issue, not a
+// correctness one.
+func (c *Checker) checkUnusedImports() {
+	// Build per-file sets of referenced objects from recorded identifier uses,
+	// so an anonymous import's injected names can be checked for use.
+	refsByFile := make(map[string]map[types.Object]bool)
+	for ident, obj := range c.info.Objects {
+		f := ident.Pos().File
+		m := refsByFile[f]
+		if m == nil {
+			m = make(map[types.Object]bool)
+			refsByFile[f] = m
+		}
+		m[obj] = true
+	}
+
+	for _, mod := range c.modules {
+		p := mod.Pos()
+		if p.File == "" {
+			continue // injected std/gzip imports are internal — never warn
+		}
+		pos := ast.Pos{File: p.File, Line: p.Line, Column: p.Column}
+		if mod.IsGlob() {
+			if !c.globImportUsed(mod, refsByFile[p.File]) {
+				c.warnf(pos, "unused import — no name injected by this anonymous import is referenced in this file")
+			}
+			continue
+		}
+		if !c.usedModules[mod] {
+			c.warnf(pos, "unused import '%s' — no reference to `%s.` in this file", mod.Name(), mod.Name())
+		}
+	}
+}
+
+// globImportUsed reports whether any public name injected by an anonymous import
+// appears among the file's referenced objects.
+func (c *Checker) globImportUsed(mod *types.Module, refs map[types.Object]bool) bool {
+	scope := mod.Scope()
+	if scope == nil || refs == nil {
+		return false
+	}
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		if !isObjectExported(obj) {
+			continue
+		}
+		if refs[obj] {
+			return true
+		}
+	}
+	return false
 }
 
 // hasAnnotation checks if a specific annotation is present.

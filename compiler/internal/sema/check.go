@@ -13,9 +13,11 @@ type Checker struct {
 	info                *Info
 	errors              []error
 	isUniverseProvider  bool                             // auto-detected: true when this file provides universe type implementations (std module)
-	globScope           *types.Scope                     // glob-import scope (child of Universe, parent of fileScope)
-	fileScope           *types.Scope                     // file-level scope (child of globScope, holds user declarations)
+	globScope           *types.Scope                     // module-wide glob scope (child of Universe): injected `use std as _` symbols only (T1686)
+	declScope           *types.Scope                     // module-wide declaration scope (child of globScope): all types/enums/funcs from every file of the unit (T1686)
+	importScopes        map[string]*types.Scope          // per-file import scope keyed by source file path (child of declScope): that file's named module aliases + its user glob-imported symbols (T1686)
 	scope               *types.Scope                     // current scope during traversal
+	usedModules         map[*types.Module]bool           // T1686: modules referenced via a qualified access, for unused-import warnings
 	curFunc             *types.Signature                 // current function being checked (for return/raise)
 	curFuncObj          *types.Func                      // current function object (for clone-requirement recording, T0616)
 	curMethodObj        *types.Method                    // current method object (for clone-requirement recording, T0616)
@@ -95,7 +97,7 @@ func (c *Checker) recordParamDefault(param *types.Param, expr ast.Expr) {
 // unreported entirely when no call site ever omits the argument.
 func (c *Checker) checkParamDefaults() {
 	savedScope, savedFunc := c.scope, c.curFunc
-	c.scope, c.curFunc = c.fileScope, nil
+	c.curFunc = nil
 	defer func() { c.scope, c.curFunc = savedScope, savedFunc }()
 
 	for _, pd := range c.paramDefaults {
@@ -105,6 +107,10 @@ func (c *Checker) checkParamDefaults() {
 		if paramType == nil || types.ContainsTypeParam(paramType) {
 			continue
 		}
+		// A default is evaluated in the caller's context but may name a
+		// module-qualified value; resolve it against the declaring file's import
+		// scope so a `math.pi` default sees that file's `use math;` (T1686).
+		c.scope = c.importScopeFor(pd.expr.Pos().File)
 		errCount := len(c.errors)
 		argType := c.checkExprWithHint(pd.expr, paramType)
 		c.errors = c.errors[:errCount]
@@ -272,18 +278,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 		},
 	}
 
-	c.globScope = types.NewScope(
-		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
-	)
-	c.fileScope = types.NewScope(
-		c.globScope, tpos(file.Pos()), tpos(file.End()), "file",
-	)
-	c.scope = c.fileScope
-	c.info.Scopes[file] = c.fileScope
-	// fileScope before globScope: user declarations (fileScope) take priority over
-	// glob-imported symbols (globScope) in codegen's ScopeOrder-based lookups.
-	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
-	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
+	c.initScopes(file)
 
 	tPass := time.Now()
 	c.declare(file) // Pass 1: collect all declarations
@@ -312,6 +307,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	tPass = time.Now()
 	c.checkMissingReturn(file) // Pass 4: verify non-void functions return
 	c.info.Timings.Verify = time.Since(tPass)
+
+	c.checkUnusedImports() // T1686: warn on file-local imports that are never used
 
 	return c.info, c.errors
 }
@@ -368,16 +365,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 		},
 	}
 
-	c.globScope = types.NewScope(
-		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
-	)
-	c.fileScope = types.NewScope(
-		c.globScope, tpos(file.Pos()), tpos(file.End()), "file",
-	)
-	c.scope = c.fileScope
-	c.info.Scopes[file] = c.fileScope
-	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
-	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
+	c.initScopes(file)
 
 	c.declare(file)                        // Pass 1: collect all declarations
 	c.populateUniverseTypes()              // Populate non-native universe type pointers (TypError, TypMap, etc.)
@@ -396,6 +384,51 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 // tpos converts an ast.Pos to a types.Pos.
 func tpos(p ast.Pos) types.Pos {
 	return types.Pos{File: p.File, Line: p.Line, Column: p.Column}
+}
+
+// initScopes builds the compilation unit's scope skeleton (T1686).
+//
+// A compilation unit is one merged ast.File, but imports are file-scoped while
+// declarations are module-wide. Three layers realize that:
+//
+//	globScope  (child of Universe) — injected `use std as _` symbols only.
+//	declScope  (child of globScope) — every type/enum/func from every file.
+//	importScope(f) (child of declScope) — file f's named aliases + user globs.
+//
+// A decl processed with c.scope == importScope(f) resolves imports file-locally
+// (importScope(f)) and declarations module-wide (declScope), while a bare name
+// still falls through to the injected std glob (globScope) and Universe. Per-file
+// import scopes are created lazily by importScopeFor as `use` declarations are
+// seen. ScopeOrder lists declScope and globScope first so codegen's first-match
+// lookups let module-wide declarations win over file-local glob imports.
+func (c *Checker) initScopes(file *ast.File) {
+	c.globScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
+	)
+	c.declScope = types.NewScope(
+		c.globScope, tpos(file.Pos()), tpos(file.End()), "decl",
+	)
+	c.importScopes = make(map[string]*types.Scope)
+	c.usedModules = make(map[*types.Module]bool)
+	c.scope = c.declScope
+	c.info.Scopes[file] = c.declScope
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.declScope)
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
+}
+
+// importScopeFor returns the per-file import scope for the given source file,
+// creating it (as a child of declScope) on first use (T1686). Declarations
+// injected after file merge (`use std as _`, `use gzip as _gzip`) carry an empty
+// Pos().File; they are module-wide, so callers route them to globScope/declScope
+// directly and never reach here with file == "".
+func (c *Checker) importScopeFor(file string) *types.Scope {
+	if s, ok := c.importScopes[file]; ok {
+		return s
+	}
+	s := types.NewScope(c.declScope, c.declScope.Pos(), c.declScope.End(), "import:"+file)
+	c.importScopes[file] = s
+	c.info.ScopeOrder = append(c.info.ScopeOrder, s)
+	return s
 }
 
 // openScope creates a new child scope and makes it the current scope.
@@ -452,7 +485,9 @@ func (c *Checker) check(file *ast.File) {
 		if c.info.FilteredDecls[decl] {
 			continue
 		}
-		c.scope = c.fileScope
+		// Type-check each declaration against its own file's import scope so
+		// module-qualified references resolve file-locally (T1686).
+		c.scope = c.importScopeFor(decl.Pos().File)
 
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
@@ -463,7 +498,7 @@ func (c *Checker) check(file *ast.File) {
 			c.checkEnumDecl(d)
 		}
 	}
-	c.scope = c.fileScope
+	c.scope = c.declScope
 }
 
 // checkFuncDecl type-checks a function body.
@@ -875,7 +910,7 @@ func (c *Checker) populateUniverseTypes() {
 	// Check if this file declares the non-native universe types (i.e., this is
 	// the std module). We look in the file scope specifically — if found there,
 	// the type was declared in THIS file, not inherited from a parent scope.
-	isStd := c.fileScope.Lookup("error") != nil
+	isStd := c.declScope.Lookup("error") != nil
 
 	populate := func(name string, target **types.Named) {
 		var obj types.Object
@@ -883,7 +918,7 @@ func (c *Checker) populateUniverseTypes() {
 			// Std module: use the freshly-declared type from this file.
 			// Must update even if *target is already set (B0101: second sema
 			// run creates new Named objects that replace stale ones).
-			obj = c.fileScope.Lookup(name)
+			obj = c.declScope.Lookup(name)
 		} else if *target != nil {
 			return // already populated from a prior std compilation
 		} else {

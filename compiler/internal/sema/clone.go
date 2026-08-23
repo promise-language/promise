@@ -84,7 +84,7 @@ func (c *Checker) validateCloneTypes(file *ast.File) {
 		}
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
-			obj := c.scope.Lookup(d.Name)
+			obj := c.declScope.Lookup(d.Name)
 			if obj == nil {
 				continue
 			}
@@ -100,7 +100,7 @@ func (c *Checker) validateCloneTypes(file *ast.File) {
 				c.validateCloneType(named, d)
 			}
 		case *ast.EnumDecl:
-			obj := c.scope.Lookup(d.Name)
+			obj := c.declScope.Lookup(d.Name)
 			if obj == nil {
 				continue
 			}

@@ -832,6 +832,7 @@ func (c *Checker) checkSetterAvailable(me *ast.MemberExpr) {
 	if ident, ok := me.Target.(*ast.IdentExpr); ok {
 		if obj := c.lookup(ident.Name); obj != nil {
 			if mod, ok := obj.(*types.Module); ok {
+				c.usedModules[mod] = true
 				scope := mod.Scope()
 				if scope == nil {
 					return
@@ -957,6 +958,7 @@ func (c *Checker) assignmentSetterCanError(s *ast.AssignStmt) bool {
 		if ident, ok := tgt.Target.(*ast.IdentExpr); ok {
 			if obj := c.lookup(ident.Name); obj != nil {
 				if mod, ok := obj.(*types.Module); ok {
+					c.usedModules[mod] = true
 					if scope := mod.Scope(); scope != nil {
 						if setterObj := scope.Lookup(tgt.Field + "$set"); setterObj != nil {
 							if fn, ok := setterObj.(*types.Func); ok {
@@ -1061,6 +1063,7 @@ func (c *Checker) assignmentGetterCanError(s *ast.AssignStmt) bool {
 		if ident, ok := tgt.Target.(*ast.IdentExpr); ok {
 			if obj := c.lookup(ident.Name); obj != nil {
 				if mod, ok := obj.(*types.Module); ok {
+					c.usedModules[mod] = true
 					if scope := mod.Scope(); scope != nil {
 						if getterObj := scope.Lookup(tgt.Field); getterObj != nil {
 							if fn, ok := getterObj.(*types.Func); ok && fn.IsGetter() {

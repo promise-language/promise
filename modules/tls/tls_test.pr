@@ -1,3 +1,4 @@
+use net;
 // tls module tests — loopback TLS handshake over the reactor (T0077, T1598, T1599).
 // A self-signed cert/key (generated once, committed) drives a TlsListener
 // server and a TlsStream client on 127.0.0.1, exercising the full handshake,

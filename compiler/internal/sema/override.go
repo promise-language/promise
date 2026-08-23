@@ -31,7 +31,7 @@ func (c *Checker) validateAbstractOverrides(file *ast.File) {
 		if !ok {
 			continue
 		}
-		obj := c.fileScope.Lookup(td.Name)
+		obj := c.declScope.Lookup(td.Name)
 		if obj == nil {
 			continue
 		}

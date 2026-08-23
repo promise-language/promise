@@ -749,3 +749,80 @@ func TestFetchRemovedPrintsNotice(t *testing.T) {
 		}
 	}
 }
+
+// TestUnusedImportWarnsButBuildsOK verifies the T1686 diagnostic-severity split
+// at the CLI boundary: an unused file-scoped import is a WARNING — it is printed
+// but must not fail the build (semaFatal treats sema warnings as advisory). A
+// regression that made warnings fatal would break every program with a stray
+// `use`.
+func TestUnusedImportWarnsButBuildsOK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.pr")
+	// `use path;` is never referenced — an unused import.
+	if err := os.WriteFile(src,
+		[]byte("use path;\n\nmain() {\n  print_line(\"hi\");\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "run", src)
+	cmd.Dir = dir
+	// Isolate the build cache so this compile is a guaranteed miss — sema (where
+	// the warning is emitted) is skipped on a cache hit, so a shared cache would
+	// make the warning assertion flaky.
+	cmd.Env = append(os.Environ(), "PROMISE_HOME="+filepath.Join(dir, "home"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run failed despite only a warning: %v\n%s", err, out)
+	}
+	combined := string(out)
+	if !strings.Contains(combined, "warning: unused import 'path'") {
+		t.Errorf("missing unused-import warning\noutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "hi") {
+		t.Errorf("program did not run to completion\noutput:\n%s", combined)
+	}
+}
+
+// TestMissingPerFileImportFailsBuild is the counterpart: referencing a module a
+// sibling file imports but this file does not is a hard error (imports are
+// per-file, T1686) and must fail the build with the per-file hint.
+func TestMissingPerFileImportFailsBuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"twofile\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// a.pr imports path; main.pr references path.join without importing it.
+	if err := os.WriteFile(filepath.Join(dir, "a.pr"),
+		[]byte("use path;\nhelper() string `public { return path.join(\"/a\", \"b\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+		[]byte("main() { print_line(path.join(\"/c\", \"d\")); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "build", ".")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected build failure for a per-file missing import, got success\noutput:\n%s", out)
+	}
+	combined := string(out)
+	if !strings.Contains(combined, "undefined module 'path'") {
+		t.Errorf("missing undefined-module error\noutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "imports are per-file") {
+		t.Errorf("missing per-file import hint\noutput:\n%s", combined)
+	}
+}

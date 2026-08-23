@@ -16,7 +16,7 @@ import (
 //
 //  1. Phase A (bootstrap): build the compiler with the manifest embedded (and
 //     embed_llvm for full) but NO embedded stub.
-//  2. Phase B (stub): run that bootstrap compiler to compile tools/stub/main.pr
+//  2. Phase B (stub): run that bootstrap compiler to compile the tools/stub project
 //     for the host into resources/stub/<target>/, the source the embed_stub build
 //     tag pulls in.
 //  3. Phase C (final): rebuild with -tags=embed_stub (+embed_llvm for full) so the
@@ -143,7 +143,10 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host, tag s
 		return err
 	}
 	stubOut := filepath.Join(stubDir, BinaryName())
-	stubSrc := filepath.Join("tools", "stub", "main.pr")
+	// The stub is a project (tools/stub/promise.toml names main = "main.pr"), so it
+	// must be addressed as a directory: the unified resolver (T1603) refuses a source
+	// file that belongs to a project. Passing main.pr here broke every release build (T1700).
+	stubSrc := filepath.Join("tools", "stub")
 	fmt.Println("Compiling Promise stub with the bootstrap compiler (phase B)...")
 	if err := RunIn(root, bootstrap, "build", "-release", stubSrc, "-o", stubOut); err != nil {
 		return fmt.Errorf("phase B stub build: %w", err)

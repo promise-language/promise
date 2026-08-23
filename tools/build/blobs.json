@@ -4,6 +4,22 @@
     {
       "dependency": "compiler-rt",
       "version": "21.1.2-r0",
+      "target": "linux-amd64",
+      "name": "libclang_rt.builtins.a",
+      "sha256": "a49414e77fcca2faa60ea8decea7346e01c06bf6fbfad8f7dd4053b6da2d24de",
+      "size": 1027996,
+      "compression": "brotli",
+      "compressed_size": 134521,
+      "compressed_sha256": "5c8c14e47000dfeadd505f9e542d95aa310c9d7b09c1ba977b0503ec689e5074",
+      "source": {
+        "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/compiler-rt-21.1.2-r0.apk",
+        "archive_sha256": "1c2f55bf9d4c6d1dc3a95d67be09114a08f4befcaee06444b563ef0e3571285b",
+        "member": "usr/lib/llvm21/lib/clang/21/lib/x86_64-alpine-linux-musl/libclang_rt.builtins-x86_64.a"
+      }
+    },
+    {
+      "dependency": "compiler-rt",
+      "version": "21.1.2-r0",
       "target": "linux-arm64",
       "name": "libclang_rt.builtins.a",
       "sha256": "2c8932cc610fcfb5ac3d95cd86ec8d58f0edd9db19c79a1243bd6ff0e10fdf8b",

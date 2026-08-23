@@ -97,6 +97,20 @@ func (c *Compiler) emitExitSyscall(block *ir.Block) {
 	block.NewCall(c.funcs["promise_sched_exit_syscall"])
 }
 
+// emitBlockingCondWait wraps a thread-blocking pal_cond_wait in the syscall
+// handoff (T1685). Every library blocking wait compiled outside a coroutine
+// (channel send/recv, Mutex.lock, netpoll, for-in over a channel) parks the OS
+// thread; without handing off this M's P first, num_cpus concurrent such waits
+// would consume every M and deadlock the scheduler. enter_syscall detaches the
+// P and hands it to another M; cond_wait blocks (atomically releasing/reacquiring
+// the caller's own mutex, which the handoff never touches); exit_syscall runs on
+// return. Emitted on the current block; the block is unchanged on return.
+func (c *Compiler) emitBlockingCondWait(cond, mutex value.Value) {
+	c.emitEnterSyscall(c.block)
+	c.block.NewCall(c.palCondWait, cond, mutex)
+	c.emitExitSyscall(c.block)
+}
+
 // Helpers
 
 // extractRawInt extracts the raw i64 value from a Promise int value struct pointer.

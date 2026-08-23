@@ -132,6 +132,98 @@ func TestSchedStructHasReadyCount(t *testing.T) {
 	assertContains(t, ir, "define i8* @promise_sched_loop(")
 }
 
+// T1685: the scheduler grows its M pool on demand so a library blocking wait
+// (which blocks the OS thread) never starves runnable goroutines. Assert the
+// two new primitives exist and are wired into the handoff/park paths.
+func TestSchedOnDemandMFunctions(t *testing.T) {
+	ir := generateIR(t, `main() { }`)
+	// startm (create-or-reuse-spare) and park_spare (park a P-less M) are defined.
+	assertContains(t, ir, "define void @promise_sched_startm(i8*")
+	assertContains(t, ir, "define void @promise_sched_park_spare(i8*")
+	// enter_syscall hands the detached P to another M via startm.
+	assertContainsMatch(t, ir, `(?s)define void @promise_sched_enter_syscall\(\).*?call void @promise_sched_startm\(`)
+	// sched_loop parks a P-less M as a spare (loop-top null-P path).
+	assertContainsMatch(t, ir, `(?s)define i8\* @promise_sched_loop\(.*?call void @promise_sched_park_spare\(`)
+}
+
+// T1685: every library blocking wait compiled outside a coroutine wraps its
+// pal_cond_wait in the enter/exit syscall handoff, so the M's P is handed off
+// for the duration of the block. Exercises the channel-recv site; all six sites
+// share the emitBlockingCondWait helper.
+func TestBlockingChannelRecvHandsOffP(t *testing.T) {
+	ir := generateIR(t, `
+		worker(channel[int] ch) { if v := <-ch { } }
+		main() {
+			ch := channel[int]();
+			go { worker(ch); };
+			ch.send(1);
+		}
+	`)
+	// The non-coroutine recv wait emits enter_syscall → pal_cond_wait → exit_syscall
+	// in order (worker() is an ordinary function, so inCoroutine is false).
+	assertContainsMatch(t, ir,
+		`(?s)call void @promise_sched_enter_syscall\(\)\s*call void @pal_cond_wait\([^\n]*\n\s*call void @promise_sched_exit_syscall\(\)`)
+}
+
+// T1685: emitBlockingCondWait is wired into every library blocking wait compiled
+// outside a coroutine, not just channel recv. A regression that dropped the
+// handoff from any single site would deadlock only that operation's callers, so
+// assert each site's ordinary function emits enter_syscall → pal_cond_wait →
+// exit_syscall in its own body. (netpoll is the sixth site; it needs the net
+// module's socket path, so it is covered by the net/http runtime suite — the
+// original T1636 symptom — rather than here.)
+func TestBlockingWaitsHandOffPPerSite(t *testing.T) {
+	ir := generateIR(t, `
+		locker(Mutex[int] move m) { use g := m.lock(); g.borrow += 1; }
+		sender(channel[int] ch) { ch.send(1); }
+		forin(channel[int] ch) { for v in ch { } }
+		main() {
+			m := Mutex[int](0);   go { locker(move m); };
+			ch := channel[int]();  go { sender(ch); };
+			ch2 := channel[int](); go { forin(ch2); };
+		}
+	`)
+	// Each blocking wait wraps pal_cond_wait between enter_syscall and
+	// exit_syscall on the same block (emitBlockingCondWait emits them
+	// consecutively). Match within each function body so a site missing the
+	// wrapper is caught even though the others still have it.
+	handoff := regexp.MustCompile(
+		`(?s)call void @promise_sched_enter_syscall\(\)\s*call void @pal_cond_wait\([^\n]*\n\s*call void @promise_sched_exit_syscall\(\)`)
+	countCondWait := regexp.MustCompile(`call void @pal_cond_wait\(`)
+	// Mutex.lock: one blocking wait. Channel send: two (buffered-full + unbuffered
+	// rendezvous). for-in channel: one. Each cond_wait must be handed off.
+	for _, tc := range []struct {
+		fn         string
+		condWaits  int
+		wantSuffix string
+	}{
+		{"__user.locker", 1, "Mutex.lock"},
+		{"__user.sender", 2, "channel send (full + rendezvous)"},
+		{"__user.forin", 1, "for-in channel recv"},
+	} {
+		body := extractFunction(ir, tc.fn)
+		if body == "" {
+			t.Fatalf("%s: could not find function %s in IR", tc.wantSuffix, tc.fn)
+		}
+		if !handoff.MatchString(body) {
+			t.Errorf("%s (%s): blocking wait not wrapped in enter/exit syscall handoff\nbody:\n%s",
+				tc.wantSuffix, tc.fn, body)
+		}
+		// Every pal_cond_wait in the body must be a handed-off one — assert the
+		// count of cond_waits equals the count of enter_syscall calls preceding
+		// them, so a site with a mix of wrapped and bare waits is caught.
+		if got := len(countCondWait.FindAllString(body, -1)); got != tc.condWaits {
+			t.Errorf("%s (%s): expected %d pal_cond_wait, got %d",
+				tc.wantSuffix, tc.fn, tc.condWaits, got)
+		}
+		enters := len(regexp.MustCompile(`call void @promise_sched_enter_syscall\(\)`).FindAllString(body, -1))
+		if enters != tc.condWaits {
+			t.Errorf("%s (%s): %d pal_cond_wait but %d enter_syscall — a wait is not handed off",
+				tc.wantSuffix, tc.fn, tc.condWaits, enters)
+		}
+	}
+}
+
 func TestChannelFieldInUserType(t *testing.T) {
 	// B0096: channel[T] fields in user types must use i8* layout,
 	// not {i8*, i8*} (value struct). These are native container types like Vector.

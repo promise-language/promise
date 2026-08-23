@@ -1,0 +1,230 @@
+// T1685: a library blocking wait (channel recv / Mutex.lock / netpoll) is
+// compiled outside a coroutine, so it blocks the OS thread rather than
+// suspending the goroutine. Before the fix, num_cpus such waits consumed every
+// M and the scheduler deadlocked — runnable goroutines starved with no thread
+// to run them. The fix hands off the blocking M's P to another M (growing the M
+// pool on demand), so a probe goroutine still runs even when far more workers
+// than there are CPUs are simultaneously parked in a library wait.
+//
+// Excluded on wasm32: single-threaded cooperative scheduler, no OS-thread
+// blocking and no M pool to grow.
+// A library (non-coroutine) function whose channel recv blocks the OS thread —
+// exactly the shape that consumed an M in T1685. Called from `go` workers.
+_startm_worker(channel[bool] ready, channel[bool] release, channel[bool] finished) {
+  ready.send(true); // announce arrival at the blocking wait
+  if r := <-release {
+  }
+  // block the OS thread here (non-coroutine cond_wait)
+  finished.send(true); // announce completion
+}
+
+// N (>> num_cpus on any realistic CI/dev machine) workers block simultaneously
+// in a library channel recv. A probe goroutine can only run if the scheduler
+// grew the M pool instead of deadlocking. Everything completes, so the test
+// drains cleanly and leaks nothing (the on-demand Ms are leak-neutral infra).
+test_startm_blocking_recv_does_not_starve() `test(exclude: wasm) {
+  int n = 64;
+  ready := channel[bool](capacity: 128);
+  release := channel[bool](capacity: 128);
+  finished := channel[bool](capacity: 128);
+  probe := channel[bool](capacity: 1);
+
+  int i = 0;
+  while i < n {
+    go {
+      _startm_worker(ready, release, finished);
+    };
+    i = i + 1;
+  }
+
+  // Wait until every worker is parked in the recv (deterministic handshake —
+  // no sleep). At this point every M is consumed by a blocked worker.
+  int arrived = 0;
+  while arrived < n {
+    if a := <-ready {
+      arrived = arrived + 1;
+    }
+  }
+
+  // Liveness proof: this probe can only run if a fresh M was started to service
+  // its P while all the original Ms are blocked.
+  go {
+    probe.send(true);
+  };
+  ran := false;
+  if p := <-probe {
+    ran = p;
+  }
+  assert(ran, "probe goroutine ran despite all Ms blocked in library recv");
+
+  // Release the workers and drain their completions so no goroutine is left
+  // pending (drain-clean + leak-clean).
+  int j = 0;
+  while j < n {
+    release.send(true);
+    j = j + 1;
+  }
+  int done = 0;
+  while done < n {
+    if f := <-finished {
+      done = done + 1;
+    }
+  }
+  assert(done == n, "all workers completed after release");
+}
+
+// Smaller companion: exercises the same handoff path repeatedly to shake out
+// spare-M reuse (each round reuses parked spares rather than creating threads).
+test_startm_spare_reuse() `test(exclude: wasm) {
+  int rounds = 4;
+  int n = 8;
+  int r = 0;
+  while r < rounds {
+    ready := channel[bool](capacity: 16);
+    release := channel[bool](capacity: 16);
+    finished := channel[bool](capacity: 16);
+    int i = 0;
+    while i < n {
+      go {
+        _startm_worker(ready, release, finished);
+      };
+      i = i + 1;
+    }
+    int arrived = 0;
+    while arrived < n {
+      if a := <-ready {
+        arrived = arrived + 1;
+      }
+    }
+    int j = 0;
+    while j < n {
+      release.send(true);
+      j = j + 1;
+    }
+    int done = 0;
+    while done < n {
+      if f := <-finished {
+        done = done + 1;
+      }
+    }
+    assert(done == n, "round completed");
+    r = r + 1;
+  }
+}
+
+// A library (non-coroutine) function whose channel SEND blocks the OS thread on
+// an unbuffered channel with no receiver yet — the genChannelSend rendezvous
+// wait, a distinct emitBlockingCondWait site from the recv path above.
+_startm_send_worker(channel[int] full, channel[bool] ready, channel[bool] finished) {
+  ready.send(true); // announce arrival before the blocking send
+  full.send(1); // blocks the OS thread until main receives (rendezvous)
+  finished.send(true);
+}
+
+// N (>> num_cpus) workers block simultaneously in a library channel send. The
+// probe can only run if the scheduler grew the M pool. Draining `full` releases
+// each blocked sender, so the test is drain-clean and leak-clean.
+test_startm_blocking_send_does_not_starve() `test(exclude: wasm) {
+  int n = 64;
+  full := channel[int](capacity: 0); // unbuffered => every send blocks until a recv
+  ready := channel[bool](capacity: 128);
+  finished := channel[bool](capacity: 128);
+  probe := channel[bool](capacity: 1);
+
+  int i = 0;
+  while i < n {
+    go {
+      _startm_send_worker(full, ready, finished);
+    };
+    i = i + 1;
+  }
+
+  int arrived = 0;
+  while arrived < n {
+    if a := <-ready {
+      arrived = arrived + 1;
+    }
+  }
+
+  go {
+    probe.send(true);
+  };
+  ran := false;
+  if p := <-probe {
+    ran = p;
+  }
+  assert(ran, "probe goroutine ran despite all Ms blocked in library send");
+
+  // Each recv unblocks one sender (rendezvous completes), then it signals done.
+  int got = 0;
+  while got < n {
+    if v := <-full {
+      got = got + 1;
+    }
+  }
+  int done = 0;
+  while done < n {
+    if f := <-finished {
+      done = done + 1;
+    }
+  }
+  assert(done == n, "all senders completed after drain");
+}
+
+// A library (non-coroutine) function whose for-in over a channel blocks the OS
+// thread in the recv — the genForInChannel emitBlockingCondWait site. Each
+// worker blocks waiting for the first element; closing the channel broadcasts a
+// wake to every waiter, so all loops terminate deterministically (no sleep).
+_startm_forin_worker(channel[int] ch, channel[bool] ready, channel[bool] finished) {
+  ready.send(true); // announce arrival before entering the blocking for-in
+  int sum = 0;
+  for v in ch {
+    // blocks the OS thread in recv until the channel is closed
+    sum = sum + v;
+  }
+  finished.send(true);
+}
+
+// N (>> num_cpus) workers block simultaneously in a library for-in channel recv.
+// close() broadcasts to every waiter, so all loops end and the test drains
+// clean (no element is ever sent — every loop exits on the closed+empty check).
+test_startm_forin_channel_does_not_starve() `test(exclude: wasm) {
+  int n = 64;
+  ch := channel[int](capacity: 0);
+  ready := channel[bool](capacity: 128);
+  finished := channel[bool](capacity: 128);
+  probe := channel[bool](capacity: 1);
+
+  int i = 0;
+  while i < n {
+    go {
+      _startm_forin_worker(ch, ready, finished);
+    };
+    i = i + 1;
+  }
+
+  int arrived = 0;
+  while arrived < n {
+    if a := <-ready {
+      arrived = arrived + 1;
+    }
+  }
+
+  go {
+    probe.send(true);
+  };
+  ran := false;
+  if p := <-probe {
+    ran = p;
+  }
+  assert(ran, "probe goroutine ran despite all Ms blocked in library for-in recv");
+
+  ch.close(); // broadcast wake — every for-in loop sees closed+empty and exits
+  int done = 0;
+  while done < n {
+    if f := <-finished {
+      done = done + 1;
+    }
+  }
+  assert(done == n, "all for-in workers completed after close");
+}

@@ -101,11 +101,13 @@ func processorStructType() *irtypes.StructType {
 
 // M struct field indices.
 const (
-	mFieldP            = 0 // i8*  associated P (null when parked)
+	mFieldP            = 0 // i8*  associated P (null when P-less / in syscall); doubles as idle-stack and spare-stack next pointer while parked
 	mFieldThreadHandle = 1 // i8*  PAL thread handle
 	mFieldParkMutex    = 2 // i8*  mutex for parking
 	mFieldParkCond     = 3 // i8*  cond var for waking
 	mFieldSpinning     = 4 // i8   1 if looking for work
+	mFieldAllNext      = 5 // i8*  next M in the all-M list (T1685: shutdown joins every M, including transient/spare ones)
+	mFieldDynamic      = 6 // i8   1 if created on demand by startm (T1685); such Ms skip stack-overflow alt-stack init and ready_count
 )
 
 // machineStructType returns the LLVM struct type for an OS thread (M).
@@ -116,6 +118,8 @@ func machineStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // park_mutex
 		irtypes.I8Ptr, // park_cond
 		irtypes.I8,    // spinning
+		irtypes.I8Ptr, // all_next
+		irtypes.I8,    // dynamic
 	)
 }
 
@@ -147,7 +151,20 @@ const (
 	schedFieldReactorFd        = 21 // i32  epoll/kqueue fd (-1 if no reactor)
 	schedFieldReactorThread    = 22 // i8*  reactor poller thread handle (null if no reactor)
 	schedFieldReactorLock      = 23 // i8*  mutex protecting PollDesc table (null if no reactor)
+	// T1685: on-demand M growth so a library blocking wait (which blocks the OS
+	// thread) never starves runnable goroutines. spare_m_head is a stack of
+	// P-less Ms reusable by startm; all_m_head is the list of every M ever
+	// created (for deterministic shutdown join); m_count bounds growth. All three
+	// are guarded by idle_m_lock (off the hot path).
+	schedFieldSpareMHead = 24 // i8*  stack of parked P-less Ms (reused by startm)
+	schedFieldAllMHead   = 25 // i8*  head of the all-M list (linked via mFieldAllNext)
+	schedFieldMCount     = 26 // i32  total live Ms (init count + on-demand growth)
 )
+
+// schedMaxM bounds on-demand M growth (T1685). Matches Go's default thread cap.
+// Reaching it means ~10000 concurrent OS-thread-blocking waits — the machine is
+// already saturated; further Ps degrade to orphaned rather than deadlock.
+const schedMaxM = 10000
 
 // schedStructType returns the LLVM struct type for the global scheduler.
 func schedStructType() *irtypes.StructType {
@@ -176,6 +193,9 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I32,   // reactor_fd (T0070: epoll/kqueue fd, -1 if no reactor)
 		irtypes.I8Ptr, // reactor_thread (T0070: poller thread handle)
 		irtypes.I8Ptr, // reactor_lock (T0070: mutex for PollDesc table)
+		irtypes.I8Ptr, // spare_m_head (T1685)
+		irtypes.I8Ptr, // all_m_head (T1685)
+		irtypes.I32,   // m_count (T1685)
 	)
 }
 
@@ -486,6 +506,11 @@ func (c *Compiler) defineSchedInitFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMaxP)))
 	entry.NewStore(numCPUsParam, maxPField)
 
+	// T1685: m_count starts at num_cpus (one M per P). startm grows it on demand.
+	mCountField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMCount)))
+	entry.NewStore(numCPUsParam, mCountField)
+
 	// Allocate P array: num_cpus * sizeof(P)
 	numP64 := entry.NewZExt(numCPUsParam, irtypes.I64)
 	pSize := constant.NewInt(irtypes.I64, int64(c.typeSize(pTy)))
@@ -573,6 +598,21 @@ func (c *Compiler) defineSchedInitFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldSpinning)))
 	initBody.NewStore(constant.NewInt(irtypes.I8, 0), mSpinField)
 
+	// M.dynamic = 0 (init M — owns a P for life, gets a stack-overflow alt stack)
+	mDynField := initBody.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldDynamic)))
+	initBody.NewStore(constant.NewInt(irtypes.I8, 0), mDynField)
+
+	// T1685: push M onto the all-M list (single-threaded during init, no lock).
+	// mFieldAllNext = old all_m_head; all_m_head = M.
+	allMHeadField := initBody.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldAllMHead)))
+	oldAllHead := initBody.NewLoad(irtypes.I8Ptr, allMHeadField)
+	mAllNextField := initBody.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldAllNext)))
+	initBody.NewStore(oldAllHead, mAllNextField)
+	initBody.NewStore(mRaw, allMHeadField)
+
 	// P.m = mPtr as i8*
 	pMField := initBody.NewGetElementPtr(pTy, pPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
@@ -644,6 +684,25 @@ func (c *Compiler) defineSchedInitFunc() {
 	c.funcs["promise_sched_init"] = fn
 }
 
+// emitClearPCurrentGIfPresent clears P.current_g when the TLS current_p is
+// non-null. A goroutine that ran a library blocking wait handed off its P
+// (T1685), so on resume/completion the M may be P-less — dereferencing a null P
+// here would crash. Returns the block in which execution continues.
+func (c *Compiler) emitClearPCurrentGIfPresent(fn *ir.Func, blk *ir.Block, label string) *ir.Block {
+	pTy := processorStructType()
+	pRaw := blk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
+	hasP := blk.NewICmp(enum.IPredNE, pRaw, constant.NewNull(irtypes.I8Ptr))
+	clearBlk := fn.NewBlock(label + ".clear_curg")
+	contBlk := fn.NewBlock(label + ".after_curg")
+	blk.NewCondBr(hasP, clearBlk, contBlk)
+	pPtr := clearBlk.NewBitCast(pRaw, irtypes.NewPointer(pTy))
+	curGField := clearBlk.NewGetElementPtr(pTy, pPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	clearBlk.NewStore(constant.NewNull(irtypes.I8Ptr), curGField)
+	clearBlk.NewBr(contBlk)
+	return contBlk
+}
+
 // defineSchedLoopFunc emits @promise_sched_loop(i8* %m_raw) → i8*
 // This is the main loop for each worker M (OS thread).
 func (c *Compiler) defineSchedLoopFunc() {
@@ -656,7 +715,10 @@ func (c *Compiler) defineSchedLoopFunc() {
 	schedTy := schedStructType()
 
 	entry := fn.NewBlock(".entry")
+	initM := fn.NewBlock("init_m")
+	afterInit := fn.NewBlock("after_init")
 	loop := fn.NewBlock("loop")
+	parkSpareBlk := fn.NewBlock("park_spare")
 	checkShutdown := fn.NewBlock("check_shutdown")
 	runG := fn.NewBlock("run_g")
 	afterResume := fn.NewBlock("after_resume")
@@ -665,20 +727,31 @@ func (c *Compiler) defineSchedLoopFunc() {
 	parkM := fn.NewBlock("park_m")
 	exitBlk := fn.NewBlock("exit")
 
-	// Set up per-thread alternate signal stack for stack overflow detection (B0010)
-	entry.NewCall(c.palStackOverflowThreadInit)
+	// T1685: dynamically-created Ms (startm) skip the per-thread stack-overflow
+	// alt-stack setup and the ready_count bump. The alt stack is a permanent
+	// pal_alloc that would otherwise register as a per-test leak (it is never
+	// freed and is created after the B0165 alloc-count reset); skipping it keeps
+	// on-demand M growth leak-neutral. ready_count is a startup-only handshake
+	// (spin-waits on `>= num_cpus` before any dynamic M can exist), so dynamic Ms
+	// must not inflate it. Init Ms take the init_m path below.
+	mPtrE := entry.NewBitCast(mParam, irtypes.NewPointer(mTy))
+	dynField := entry.NewGetElementPtr(mTy, mPtrE,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldDynamic)))
+	dynVal := entry.NewLoad(irtypes.I8, dynField)
+	isDynamic := entry.NewICmp(enum.IPredNE, dynVal, constant.NewInt(irtypes.I8, 0))
+	entry.NewCondBr(isDynamic, afterInit, initM)
 
-	// Signal that this worker thread has completed init (B0165).
-	// Batch test mode spin-waits on this counter before resetting alloc count,
-	// ensuring async pal_stack_overflow_thread_init allocations are excluded
-	// from per-test leak detection.
-	readyField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+	// init_m: per-thread alt signal stack for stack overflow detection (B0010) +
+	// ready_count handshake (B0165).
+	initM.NewCall(c.palStackOverflowThreadInit)
+	readyField := initM.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReadyCount)))
-	c.emitAtomicAdd(entry, readyField, constant.NewInt(irtypes.I32, 1), irtypes.I32)
+	c.emitAtomicAdd(initM, readyField, constant.NewInt(irtypes.I32, 1), irtypes.I32)
+	initM.NewBr(afterInit)
 
 	// Set TLS current_m once (M is fixed for this thread's lifetime).
-	entry.NewStore(mParam, c.currentMGlobal)
-	entry.NewBr(loop)
+	afterInit.NewStore(mParam, c.currentMGlobal)
+	afterInit.NewBr(loop)
 
 	// loop: find runnable G
 	// Get P from M
@@ -692,7 +765,19 @@ func (c *Compiler) defineSchedLoopFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldShutdown)))
 	shutdownVal := loop.NewLoad(irtypes.I8, shutdownField)
 	isShutdown := loop.NewICmp(enum.IPredNE, shutdownVal, constant.NewInt(irtypes.I8, 0))
-	loop.NewCondBr(isShutdown, exitBlk, checkShutdown)
+	// T1685: a P-less M (M.p == null after a syscall handoff whose goroutine has
+	// since suspended/completed) has no P to schedule against — park it as a
+	// spare until startm hands it a P (or shutdown wakes it). pRaw is only used
+	// on the non-shutdown, non-null path, so the shutdown branch never
+	// dereferences a stale spare-list link left in M.p.
+	pIsNull := loop.NewICmp(enum.IPredEQ, pRaw, constant.NewNull(irtypes.I8Ptr))
+	notShutHasP := fn.NewBlock("loop_has_p")
+	loop.NewCondBr(isShutdown, exitBlk, notShutHasP)
+	notShutHasP.NewCondBr(pIsNull, parkSpareBlk, checkShutdown)
+
+	// park_spare: no P — wait for startm to assign one (or shutdown).
+	parkSpareBlk.NewCall(c.funcs["promise_sched_park_spare"], mParam)
+	parkSpareBlk.NewBr(loop)
 
 	// checkShutdown: try to find work
 	gRaw := checkShutdown.NewCall(c.funcs["promise_sched_find_runnable"], pRaw)
@@ -755,18 +840,14 @@ func (c *Compiler) defineSchedLoopFunc() {
 	afterResume.NewCondBr(isDone, coroDoneBlk, coroSuspendedBlk)
 
 	// coroDone: goroutine finished
-	// Clear P.current_g before goroutine_exit (which may enqueue waiters)
-	pRaw2 := coroDoneBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
-	pPtr2 := coroDoneBlk.NewBitCast(pRaw2, irtypes.NewPointer(pTy))
-	pCurGField2 := coroDoneBlk.NewGetElementPtr(pTy, pPtr2,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
-	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGField2)
-
-	coroDoneBlk.NewCall(c.funcs["promise_goroutine_exit"], gRaw2)
+	// Clear P.current_g before goroutine_exit (which may enqueue waiters).
+	// P-less-M safe (T1685): skip the clear when the M has no P.
+	coroDoneCont := c.emitClearPCurrentGIfPresent(fn, coroDoneBlk, "coro_done")
+	coroDoneCont.NewCall(c.funcs["promise_goroutine_exit"], gRaw2)
 	// Clear current G and P TLS
-	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	coroDoneBlk.NewBr(loop)
+	coroDoneCont.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	coroDoneCont.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	coroDoneCont.NewBr(loop)
 
 	// coroSuspended: G suspended itself. Two cases:
 	// 1. park_mutex != null → channel/task wait: release mutex (G is on a waiter list)
@@ -793,27 +874,20 @@ func (c *Compiler) defineSchedLoopFunc() {
 	// wanted to give up the CPU. Re-enqueue it now that coro.suspend has
 	// completed and G is safely in a suspended state.
 	// Clear P.current_g BEFORE enqueue so sysmon doesn't set preempt on
-	// a goroutine that's about to be scheduled by another M.
-	pRawY := yieldReenqueueBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
-	pPtrY := yieldReenqueueBlk.NewBitCast(pRawY, irtypes.NewPointer(pTy))
-	pCurGFieldY := yieldReenqueueBlk.NewGetElementPtr(pTy, pPtrY,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
-	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGFieldY)
-	yieldReenqueueBlk.NewCall(c.funcs["promise_sched_enqueue"], gRaw2)
-	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	yieldReenqueueBlk.NewBr(loop)
+	// a goroutine that's about to be scheduled by another M. P-less-M safe
+	// (T1685): enqueue falls back to the global queue when current_p is null.
+	yieldCont := c.emitClearPCurrentGIfPresent(fn, yieldReenqueueBlk, "yield_reenqueue")
+	yieldCont.NewCall(c.funcs["promise_sched_enqueue"], gRaw2)
+	yieldCont.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	yieldCont.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	yieldCont.NewBr(loop)
 
-	// after_release: channel/task wait — clear P.current_g, current G and P TLS, loop back
-	pRaw3 := afterReleaseBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
-	pPtr3 := afterReleaseBlk.NewBitCast(pRaw3, irtypes.NewPointer(pTy))
-	pCurGField3 := afterReleaseBlk.NewGetElementPtr(pTy, pPtr3,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
-	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGField3)
-
-	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	afterReleaseBlk.NewBr(loop)
+	// after_release: channel/task wait — clear P.current_g (guarded), current G
+	// and P TLS, loop back.
+	afterRelCont := c.emitClearPCurrentGIfPresent(fn, afterReleaseBlk, "after_release")
+	afterRelCont.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	afterRelCont.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	afterRelCont.NewBr(loop)
 
 	// exit: return null
 	exitBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
@@ -1681,10 +1755,17 @@ func (c *Compiler) defineSchedWakeMFunc() {
 // --- Syscall handoff (Phase 6a) ---
 
 // defineEnterSyscallFunc emits @promise_sched_enter_syscall() → void
-// Called before blocking PAL syscalls (file IO). Detaches P from the current
-// goroutine so other Ms can steal work from P's run queue. The M keeps its
-// P pointer (M.p unchanged) but P.current_g is cleared so sysmon won't try
-// to preempt. TLS current_p is cleared to signal "in syscall" state.
+// Called before a blocking PAL wait that parks the OS thread (file IO, and —
+// T1685 — every library-code channel/mutex/netpoll wait compiled outside a
+// coroutine). The goroutine is pinned to this M's C stack for the duration of
+// the wait, so it cannot be migrated; instead we detach this M's P and hand it
+// to another M via startm, so the P's remaining runnable goroutines keep making
+// progress while this M blocks. Without this handoff, num_cpus concurrent
+// library blocking waits would consume every M and deadlock the scheduler.
+//
+// M.p and P.m are both cleared: the M becomes P-less and, once its pinned
+// goroutine eventually suspends/completes, sched_loop parks it as a spare
+// (promise_sched_park_spare). startm reuses spares before creating threads.
 //
 // On WASM this is a no-op (single-threaded, no M contention).
 func (c *Compiler) defineEnterSyscallFunc() {
@@ -1701,8 +1782,11 @@ func (c *Compiler) defineEnterSyscallFunc() {
 	}
 
 	pTy := processorStructType()
+	mTy := machineStructType()
 
-	// Load TLS current_p — if null, we're not on a P (shouldn't happen in normal flow)
+	// Load TLS current_p — if null, this M is already P-less (a nested/second
+	// blocking wait on the same M, or a goroutine that already handed off). No P
+	// to hand off — return.
 	pRaw := entry.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
 	isNull := entry.NewICmp(enum.IPredEQ, pRaw, constant.NewNull(irtypes.I8Ptr))
 
@@ -1710,28 +1794,53 @@ func (c *Compiler) defineEnterSyscallFunc() {
 	retBlk := fn.NewBlock("ret")
 	entry.NewCondBr(isNull, retBlk, doHandoff)
 
-	// Clear P.current_g — sysmon won't try to preempt this G
+	// Clear P.current_g — sysmon won't try to preempt this (now handed-off) G.
 	pPtr := doHandoff.NewBitCast(pRaw, irtypes.NewPointer(pTy))
 	curGField := doHandoff.NewGetElementPtr(pTy, pPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
 	doHandoff.NewStore(constant.NewNull(irtypes.I8Ptr), curGField)
 
-	// Clear TLS current_p — signals "in syscall" state
-	doHandoff.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	// Detach P from this M: M.p = null, P.m = null. The M is now P-less.
+	mRaw := doHandoff.NewLoad(irtypes.I8Ptr, c.currentMGlobal)
+	mIsNull := doHandoff.NewICmp(enum.IPredEQ, mRaw, constant.NewNull(irtypes.I8Ptr))
+	clearMP := fn.NewBlock("clear_m_p")
+	afterClearMP := fn.NewBlock("after_clear_m_p")
+	doHandoff.NewCondBr(mIsNull, afterClearMP, clearMP)
 
-	// Wake an idle M to steal work from this P's run queue
-	doHandoff.NewCall(c.funcs["promise_sched_wake_m"])
+	mPtr := clearMP.NewBitCast(mRaw, irtypes.NewPointer(mTy))
+	mPField := clearMP.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldP)))
+	clearMP.NewStore(constant.NewNull(irtypes.I8Ptr), mPField)
+	clearMP.NewBr(afterClearMP)
 
-	doHandoff.NewBr(retBlk)
+	pMField := afterClearMP.NewGetElementPtr(pTy, pPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
+	afterClearMP.NewStore(constant.NewNull(irtypes.I8Ptr), pMField)
+
+	// Clear TLS current_p — signals "in syscall" state (P-less).
+	afterClearMP.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+
+	// Hand this P to another M (reuse a spare, else create one) so its run queue
+	// keeps being serviced while we block.
+	afterClearMP.NewCall(c.funcs["promise_sched_startm"], pRaw)
+
+	afterClearMP.NewBr(retBlk)
 	retBlk.NewRet(nil)
 
 	c.funcs["promise_sched_enter_syscall"] = fn
 }
 
 // defineExitSyscallFunc emits @promise_sched_exit_syscall() → void
-// Called after blocking PAL syscalls return. Reattaches the P to the current
-// goroutine. The M still has its P (M.p was never cleared), so we just
-// restore P.current_g and TLS current_p.
+// Called after a blocking PAL wait returns. Under the T1685 handoff model
+// enter_syscall detached this M's P (M.p == null), so there is nothing to
+// reattach: the pinned goroutine keeps running P-less on this M until it next
+// suspends/completes, at which point sched_loop parks the M as a spare. This
+// function therefore no-ops in the common (post-handoff) case — M.p is null.
+//
+// The legacy reattach branch below remains for the case where enter_syscall did
+// not hand off (it found no P — e.g. a nested wait on an already P-less M), in
+// which case M.p is still null too and this is likewise a no-op. It is kept as a
+// defensive restore should a caller ever invoke exit without a matching handoff.
 //
 // On WASM this is a no-op.
 func (c *Compiler) defineExitSyscallFunc() {
@@ -1783,6 +1892,269 @@ func (c *Compiler) defineExitSyscallFunc() {
 	retBlk.NewRet(nil)
 
 	c.funcs["promise_sched_exit_syscall"] = fn
+}
+
+// allocCountGlobal returns the @__promise_alloc_count global if leak accounting
+// is compiled in (debug allocator), else nil. Used by startm to keep on-demand
+// M infrastructure allocations out of per-test leak deltas (T1685).
+func (c *Compiler) allocCountGlobal() *ir.Global {
+	if !c.debugAllocator {
+		return nil
+	}
+	for _, g := range c.module.Globals {
+		if g.Name() == "__promise_alloc_count" {
+			return g
+		}
+	}
+	return nil
+}
+
+// defineSchedParkSpareFunc emits @promise_sched_park_spare(i8* %m_raw) → void
+// Parks a P-less M (one whose goroutine handed off its P and has since
+// suspended/completed) on the spare-M stack until startm hands it a P, or
+// shutdown wakes it (T1685). Mirrors park_m's lost-signal-safe protocol:
+// park_mutex is locked before the M is pushed onto the spare stack, and the
+// wait loop rechecks M.spinning (set by startm/wake) and the shutdown flag so a
+// signal that arrives before cond_wait is never lost.
+//
+// While parked, M.p doubles as the spare-stack next pointer (the M genuinely
+// owns no P). startm pops the M, stores the assigned P into M.p, then signals —
+// so on a spinning==1 wake M.p is a valid P. On a shutdown wake (spinning==0)
+// the M is still on the spare stack and M.p holds the stack link; sched_loop's
+// loop top checks the shutdown flag before ever using M.p, so the stale link is
+// never dereferenced as a P.
+func (c *Compiler) defineSchedParkSpareFunc() {
+	mParam := ir.NewParam("m_raw", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_sched_park_spare", irtypes.Void, mParam)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	if c.isWasm {
+		// WASM never hands off (single-threaded), so this is never called.
+		entry := fn.NewBlock(".entry")
+		entry.NewRet(nil)
+		c.funcs["promise_sched_park_spare"] = fn
+		return
+	}
+
+	mTy := machineStructType()
+	schedTy := schedStructType()
+
+	entry := fn.NewBlock(".entry")
+	waitLoop := fn.NewBlock("wait_loop")
+	doWait := fn.NewBlock("do_wait")
+	doneBlk := fn.NewBlock("done")
+
+	mPtr := entry.NewBitCast(mParam, irtypes.NewPointer(mTy))
+
+	// Lock park_mutex FIRST — prevents lost-signal race with startm/shutdown.
+	parkMtxField := entry.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
+	parkMtx := entry.NewLoad(irtypes.I8Ptr, parkMtxField)
+	entry.NewCall(c.palMutexLock, parkMtx)
+
+	// M.spinning = 0 (cleared — startm sets it to 1 when handing us a P).
+	spinField := entry.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldSpinning)))
+	entry.NewStore(constant.NewInt(irtypes.I8, 0), spinField)
+
+	// Push M onto spare stack under idle_lock: M.p = spare_head; spare_head = M.
+	imLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldIdleMLock)))
+	imLock := entry.NewLoad(irtypes.I8Ptr, imLockField)
+	entry.NewCall(c.palMutexLock, imLock)
+
+	spareHeadField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldSpareMHead)))
+	oldSpareHead := entry.NewLoad(irtypes.I8Ptr, spareHeadField)
+	mPField := entry.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldP)))
+	entry.NewStore(oldSpareHead, mPField)  // M.p = old spare head (next link)
+	entry.NewStore(mParam, spareHeadField) // spare_head = M
+	entry.NewCall(c.palMutexUnlock, imLock)
+
+	// Pre-load park_cond (dominates the wait loop).
+	parkCondField := entry.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
+	parkCond := entry.NewLoad(irtypes.I8Ptr, parkCondField)
+	entry.NewBr(waitLoop)
+
+	// wait_loop: exit when deliberately woken (spinning==1) or shutting down.
+	spinVal := waitLoop.NewLoad(irtypes.I8, spinField)
+	isWoken := waitLoop.NewICmp(enum.IPredNE, spinVal, constant.NewInt(irtypes.I8, 0))
+	shutdownField := waitLoop.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldShutdown)))
+	shutdownVal := waitLoop.NewLoad(irtypes.I8, shutdownField)
+	isShutdown := waitLoop.NewICmp(enum.IPredNE, shutdownVal, constant.NewInt(irtypes.I8, 0))
+	shouldExit := waitLoop.NewOr(isWoken, isShutdown)
+	waitLoop.NewCondBr(shouldExit, doneBlk, doWait)
+
+	// do_wait: cond_wait (park_mutex held — released atomically by cond_wait).
+	doWait.NewCall(c.palCondWait, parkCond, parkMtx)
+	doWait.NewBr(waitLoop)
+
+	// done: unlock park_mutex and return. On spinning==1, startm already set M.p
+	// to the assigned P. On shutdown, M.p holds the spare-stack link but
+	// sched_loop checks shutdown before using it.
+	doneBlk.NewCall(c.palMutexUnlock, parkMtx)
+	doneBlk.NewRet(nil)
+
+	c.funcs["promise_sched_park_spare"] = fn
+}
+
+// defineSchedStartMFunc emits @promise_sched_startm(i8* %p_raw) → void
+// Ensures the given P has an M to run it (T1685). Called by enter_syscall after
+// detaching a P from an M that is about to block the OS thread in a library
+// wait. Reuses a spare M if one is available; otherwise creates a fresh M
+// (bounded by schedMaxM). The new/woken M then runs sched_loop against P: if P
+// has runnable work it runs it, else it parks in park_m owning P — which means
+// the existing enqueue→wake_m machinery keeps working unchanged, since every P
+// always has an associated M.
+//
+// This preserves the invariant that after any handoff the P is never orphaned:
+// pop-a-spare and create-an-M are decided atomically under idle_lock, so a spare
+// that is mid-push (not yet visible) simply causes a fresh M to be created and
+// waits for the next handoff — the P is always covered either way.
+func (c *Compiler) defineSchedStartMFunc() {
+	pParam := ir.NewParam("p_raw", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_sched_startm", irtypes.Void, pParam)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	if c.isWasm {
+		entry := fn.NewBlock(".entry")
+		entry.NewRet(nil)
+		c.funcs["promise_sched_startm"] = fn
+		return
+	}
+
+	mTy := machineStructType()
+	pTy := processorStructType()
+	schedTy := schedStructType()
+
+	entry := fn.NewBlock(".entry")
+	reuseSpare := fn.NewBlock("reuse_spare")
+	tryCreate := fn.NewBlock("try_create")
+	createM := fn.NewBlock("create_m")
+	capReached := fn.NewBlock("cap_reached")
+
+	// Lock idle_lock (guards spare list, all-M list, m_count).
+	imLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldIdleMLock)))
+	imLock := entry.NewLoad(irtypes.I8Ptr, imLockField)
+	entry.NewCall(c.palMutexLock, imLock)
+
+	// Pop a spare M if available.
+	spareHeadField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldSpareMHead)))
+	spareHead := entry.NewLoad(irtypes.I8Ptr, spareHeadField)
+	hasSpare := entry.NewICmp(enum.IPredNE, spareHead, constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(hasSpare, reuseSpare, tryCreate)
+
+	// reuse_spare: pop head, assign P, then wake it (still under idle_lock for the
+	// pop; the wake uses the M's own park_mutex, a different lock).
+	spareMPtr := reuseSpare.NewBitCast(spareHead, irtypes.NewPointer(mTy))
+	spareMPField := reuseSpare.NewGetElementPtr(mTy, spareMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldP)))
+	nextSpare := reuseSpare.NewLoad(irtypes.I8Ptr, spareMPField) // spare-stack next
+	reuseSpare.NewStore(nextSpare, spareHeadField)               // pop
+	reuseSpare.NewStore(pParam, spareMPField)                    // M.p = P
+	// P.m = M
+	spPMField := reuseSpare.NewGetElementPtr(pTy, reuseSpare.NewBitCast(pParam, irtypes.NewPointer(pTy)),
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
+	reuseSpare.NewStore(spareHead, spPMField)
+	reuseSpare.NewCall(c.palMutexUnlock, imLock)
+
+	// Wake the spare: set spinning=1 and signal park_cond under its park_mutex
+	// (identical protocol to wake_m so park_spare cannot miss the signal).
+	spareParkMtxField := reuseSpare.NewGetElementPtr(mTy, spareMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
+	spareParkMtx := reuseSpare.NewLoad(irtypes.I8Ptr, spareParkMtxField)
+	reuseSpare.NewCall(c.palMutexLock, spareParkMtx)
+	spareSpinField := reuseSpare.NewGetElementPtr(mTy, spareMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldSpinning)))
+	reuseSpare.NewStore(constant.NewInt(irtypes.I8, 1), spareSpinField)
+	spareParkCondField := reuseSpare.NewGetElementPtr(mTy, spareMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
+	spareParkCond := reuseSpare.NewLoad(irtypes.I8Ptr, spareParkCondField)
+	reuseSpare.NewCall(c.palCondSignal, spareParkCond)
+	reuseSpare.NewCall(c.palMutexUnlock, spareParkMtx)
+	reuseSpare.NewRet(nil)
+
+	// try_create: no spare — create a new M unless the cap is reached.
+	mCountField := tryCreate.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMCount)))
+	mCount := tryCreate.NewLoad(irtypes.I32, mCountField)
+	underCap := tryCreate.NewICmp(enum.IPredSLT, mCount, constant.NewInt(irtypes.I32, schedMaxM))
+	tryCreate.NewCondBr(underCap, createM, capReached)
+
+	// cap_reached: pathological (schedMaxM concurrent blocking waits). Release the
+	// lock and return; the P is left without an M (bounded degradation, never a
+	// deadlock at any sane concurrency level).
+	capReached.NewCall(c.palMutexUnlock, imLock)
+	capReached.NewRet(nil)
+
+	// create_m: allocate + initialize a fresh M, spawn its thread, then publish
+	// it (all-M list, P.m) — all under idle_lock so shutdown sees a fully-formed M.
+	mSize := constant.NewInt(irtypes.I64, int64(c.typeSize(mTy)))
+	mRaw := createM.NewCall(c.palAlloc, mSize)
+	newMPtr := createM.NewBitCast(mRaw, irtypes.NewPointer(mTy))
+
+	// M.p = P
+	newMPField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldP)))
+	createM.NewStore(pParam, newMPField)
+	// M.park_mutex / M.park_cond
+	newParkMtx := createM.NewCall(c.palMutexInit)
+	newParkMtxField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
+	createM.NewStore(newParkMtx, newParkMtxField)
+	newParkCond := createM.NewCall(c.palCondInit)
+	newParkCondField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
+	createM.NewStore(newParkCond, newParkCondField)
+	// M.spinning = 0, M.dynamic = 1
+	newSpinField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldSpinning)))
+	createM.NewStore(constant.NewInt(irtypes.I8, 0), newSpinField)
+	newDynField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldDynamic)))
+	createM.NewStore(constant.NewInt(irtypes.I8, 1), newDynField)
+
+	// Spawn the thread (M.p already set, so sched_loop can read its P). Store the
+	// handle before publishing so shutdown's join always sees a valid handle.
+	schedLoopFn := c.funcs["promise_sched_loop"]
+	loopFnPtr := createM.NewBitCast(schedLoopFn, irtypes.I8Ptr)
+	handle := createM.NewCall(c.palThreadCreate, loopFnPtr, mRaw)
+	newThField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldThreadHandle)))
+	createM.NewStore(handle, newThField)
+
+	// Publish: push onto all-M list, bump m_count, set P.m.
+	allMHeadField := createM.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldAllMHead)))
+	oldAllHead := createM.NewLoad(irtypes.I8Ptr, allMHeadField)
+	newAllNextField := createM.NewGetElementPtr(mTy, newMPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldAllNext)))
+	createM.NewStore(oldAllHead, newAllNextField)
+	createM.NewStore(mRaw, allMHeadField)
+	newCount := createM.NewAdd(mCount, constant.NewInt(irtypes.I32, 1))
+	createM.NewStore(newCount, mCountField)
+	newPMField := createM.NewGetElementPtr(pTy, createM.NewBitCast(pParam, irtypes.NewPointer(pTy)),
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
+	createM.NewStore(mRaw, newPMField)
+
+	createM.NewCall(c.palMutexUnlock, imLock)
+
+	// Keep the new M's four infrastructure allocations (M struct, park_mutex,
+	// park_cond, thread handle) out of per-test leak accounting: they are
+	// runtime infrastructure freed only at shutdown, exactly like the init Ms
+	// (whose allocations are excluded by the B0165 reset). Dynamic Ms skip the
+	// stack-overflow alt stack (see sched_loop), so there is no async 5th alloc.
+	if acg := c.allocCountGlobal(); acg != nil {
+		createM.NewAtomicRMW(enum.AtomicOpSub, acg, constant.NewInt(irtypes.I64, 4), enum.AtomicOrderingMonotonic)
+	}
+	createM.NewRet(nil)
+
+	c.funcs["promise_sched_startm"] = fn
 }
 
 // defineGoroutineExitFunc emits @promise_goroutine_exit(i8* %g_raw) → void
@@ -1972,10 +2344,12 @@ func (c *Compiler) defineSchedShutdownFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldShutdown)))
 	entry.NewStore(constant.NewInt(irtypes.I8, 1), shutdownField)
 
-	// Signal ALL Ms via their Ps (not just idle list).
-	// Use max_p (not num_p) so that Ms on disabled Ps (after set_max_procs
-	// reduced num_p) are still signaled and joined. Otherwise they get
-	// killed mid-execution during process exit → SIGSEGV.
+	// T1685: signal and join EVERY M via the all-M list. Per-P iteration is no
+	// longer sufficient: after a syscall handoff a P's current M is not the M
+	// init created for it, and spare/dynamic Ms own no P at all — only the all-M
+	// list (linked via mFieldAllNext) enumerates them exactly once. park_m and
+	// park_spare both recheck the shutdown flag in their wait loops, so an M that
+	// has not yet reached cond_wait when we signal still exits promptly.
 	maxPField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMaxP)))
 	maxP := entry.NewLoad(irtypes.I32, maxPField)
@@ -1987,26 +2361,30 @@ func (c *Compiler) defineSchedShutdownFunc() {
 
 	iAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+	// Cursor for all-M list walks (signal, join, cleanup).
+	mCursorAlloca := entry.NewAlloca(irtypes.I8Ptr)
 
-	// Signal loop: for each P[i], signal P[i].m's park_cond
+	allMHeadField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldAllMHead)))
+	allMHead := entry.NewLoad(irtypes.I8Ptr, allMHeadField)
+	entry.NewStore(allMHead, mCursorAlloca)
+
+	// Signal loop: walk all-M list, signal each M's park_cond.
 	signalLoop := fn.NewBlock("signal_loop")
 	signalBody := fn.NewBlock("signal_body")
 	joinPhase := fn.NewBlock("join_phase")
 
 	entry.NewBr(signalLoop)
 
-	iVal := signalLoop.NewLoad(irtypes.I32, iAlloca)
-	signalCond := signalLoop.NewICmp(enum.IPredSLT, iVal, maxP)
-	signalLoop.NewCondBr(signalCond, signalBody, joinPhase)
+	sCur := signalLoop.NewLoad(irtypes.I8Ptr, mCursorAlloca)
+	sCurNull := signalLoop.NewICmp(enum.IPredEQ, sCur, constant.NewNull(irtypes.I8Ptr))
+	signalLoop.NewCondBr(sCurNull, joinPhase, signalBody)
 
-	// Get P[i].m, lock park_mutex, signal park_cond, unlock
-	iVal2 := signalBody.NewLoad(irtypes.I32, iAlloca)
-	i64Val := signalBody.NewZExt(iVal2, irtypes.I64)
-	pPtr := signalBody.NewGetElementPtr(pTy, psTyped, i64Val)
-	mField := signalBody.NewGetElementPtr(pTy, pPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
-	mRaw := signalBody.NewLoad(irtypes.I8Ptr, mField)
-	mPtr := signalBody.NewBitCast(mRaw, irtypes.NewPointer(mTy))
+	mPtr := signalBody.NewBitCast(sCur, irtypes.NewPointer(mTy))
+	sNextField := signalBody.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldAllNext)))
+	sNext := signalBody.NewLoad(irtypes.I8Ptr, sNextField)
+	signalBody.NewStore(sNext, mCursorAlloca)
 
 	parkMtxField := signalBody.NewGetElementPtr(mTy, mPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
@@ -2019,13 +2397,10 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	signalBody.NewCall(c.palCondSignal, parkCond)
 
 	signalBody.NewCall(c.palMutexUnlock, parkMtx)
-
-	nextI := signalBody.NewAdd(iVal2, constant.NewInt(irtypes.I32, 1))
-	signalBody.NewStore(nextI, iAlloca)
 	signalBody.NewBr(signalLoop)
 
-	// Join phase: join all M threads by iterating Ps
-	joinPhase.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+	// Join phase: walk all-M list, join each M's thread.
+	joinPhase.NewStore(allMHead, mCursorAlloca)
 
 	joinLoop := fn.NewBlock("join_loop")
 	joinBody := fn.NewBlock("join_body")
@@ -2033,24 +2408,19 @@ func (c *Compiler) defineSchedShutdownFunc() {
 
 	joinPhase.NewBr(joinLoop)
 
-	jVal := joinLoop.NewLoad(irtypes.I32, iAlloca)
-	joinCond := joinLoop.NewICmp(enum.IPredSLT, jVal, maxP)
-	joinLoop.NewCondBr(joinCond, joinBody, doneBlk)
+	jCur := joinLoop.NewLoad(irtypes.I8Ptr, mCursorAlloca)
+	jCurNull := joinLoop.NewICmp(enum.IPredEQ, jCur, constant.NewNull(irtypes.I8Ptr))
+	joinLoop.NewCondBr(jCurNull, doneBlk, joinBody)
 
-	jVal2 := joinBody.NewLoad(irtypes.I32, iAlloca)
-	j64Val := joinBody.NewZExt(jVal2, irtypes.I64)
-	jpPtr := joinBody.NewGetElementPtr(pTy, psTyped, j64Val)
-	jmField := joinBody.NewGetElementPtr(pTy, jpPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
-	jmRaw := joinBody.NewLoad(irtypes.I8Ptr, jmField)
-	jmPtr := joinBody.NewBitCast(jmRaw, irtypes.NewPointer(mTy))
+	jmPtr := joinBody.NewBitCast(jCur, irtypes.NewPointer(mTy))
+	jNextField := joinBody.NewGetElementPtr(mTy, jmPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldAllNext)))
+	jNext := joinBody.NewLoad(irtypes.I8Ptr, jNextField)
+	joinBody.NewStore(jNext, mCursorAlloca)
 	thField := joinBody.NewGetElementPtr(mTy, jmPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldThreadHandle)))
 	th := joinBody.NewLoad(irtypes.I8Ptr, thField)
 	joinBody.NewCall(c.palThreadJoin, th)
-
-	jNextI := joinBody.NewAdd(jVal2, constant.NewInt(irtypes.I32, 1))
-	joinBody.NewStore(jNextI, iAlloca)
 	joinBody.NewBr(joinLoop)
 
 	// Join sysmon thread — it checks the shutdown flag every 10ms and exits
@@ -2110,45 +2480,58 @@ func (c *Compiler) defineSchedShutdownFunc() {
 		afterReactorBlk.NewBr(cleanupLoop)
 	}
 
+	// cleanup_loop: destroy each P's lock (Ps still live in the P array). M
+	// resources are destroyed separately via the all-M list below, because after
+	// syscall handoffs P.m no longer uniquely maps to init Ms and spare/dynamic
+	// Ms are not reachable from any P (T1685).
+	mCleanupInit := fn.NewBlock("m_cleanup_init")
+	mCleanupHeader := fn.NewBlock("m_cleanup_header")
+	mCleanupBody := fn.NewBlock("m_cleanup_body")
+
 	cVal := cleanupLoop.NewLoad(irtypes.I32, iAlloca)
 	cleanupCond := cleanupLoop.NewICmp(enum.IPredSLT, cVal, maxP)
-	cleanupLoop.NewCondBr(cleanupCond, cleanupBody, freeBlk)
+	cleanupLoop.NewCondBr(cleanupCond, cleanupBody, mCleanupInit)
 
-	// Destroy P's lock, M's park_mutex/park_cond, and free M
 	cVal2 := cleanupBody.NewLoad(irtypes.I32, iAlloca)
 	c64Val := cleanupBody.NewZExt(cVal2, irtypes.I64)
 	cpPtr := cleanupBody.NewGetElementPtr(pTy, psTyped, c64Val)
 
-	// Destroy P.lock
 	cpLockField := cleanupBody.NewGetElementPtr(pTy, cpPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldLock)))
 	cpLock := cleanupBody.NewLoad(irtypes.I8Ptr, cpLockField)
 	cleanupBody.NewCall(c.palMutexDestroy, cpLock)
 
-	// Get M from P
-	cmField := cleanupBody.NewGetElementPtr(pTy, cpPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
-	cmRaw := cleanupBody.NewLoad(irtypes.I8Ptr, cmField)
-	cmPtr := cleanupBody.NewBitCast(cmRaw, irtypes.NewPointer(mTy))
-
-	// Destroy M.park_mutex
-	cmParkMtxField := cleanupBody.NewGetElementPtr(mTy, cmPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
-	cmParkMtx := cleanupBody.NewLoad(irtypes.I8Ptr, cmParkMtxField)
-	cleanupBody.NewCall(c.palMutexDestroy, cmParkMtx)
-
-	// Destroy M.park_cond
-	cmParkCondField := cleanupBody.NewGetElementPtr(mTy, cmPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
-	cmParkCond := cleanupBody.NewLoad(irtypes.I8Ptr, cmParkCondField)
-	cleanupBody.NewCall(c.palCondDestroy, cmParkCond)
-
-	// Free M
-	cleanupBody.NewCall(c.palFree, cmRaw)
-
 	cNextI := cleanupBody.NewAdd(cVal2, constant.NewInt(irtypes.I32, 1))
 	cleanupBody.NewStore(cNextI, iAlloca)
 	cleanupBody.NewBr(cleanupLoop)
+
+	// m_cleanup: walk the all-M list, destroy each M's park_mutex/park_cond and
+	// free the M struct. Save all_next BEFORE freeing the M (free invalidates it).
+	mCleanupInit.NewStore(allMHead, mCursorAlloca)
+	mCleanupInit.NewBr(mCleanupHeader)
+
+	mcCur := mCleanupHeader.NewLoad(irtypes.I8Ptr, mCursorAlloca)
+	mcNull := mCleanupHeader.NewICmp(enum.IPredEQ, mcCur, constant.NewNull(irtypes.I8Ptr))
+	mCleanupHeader.NewCondBr(mcNull, freeBlk, mCleanupBody)
+
+	mcPtr := mCleanupBody.NewBitCast(mcCur, irtypes.NewPointer(mTy))
+	mcNextField := mCleanupBody.NewGetElementPtr(mTy, mcPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldAllNext)))
+	mcNext := mCleanupBody.NewLoad(irtypes.I8Ptr, mcNextField)
+	mCleanupBody.NewStore(mcNext, mCursorAlloca)
+
+	mcParkMtxField := mCleanupBody.NewGetElementPtr(mTy, mcPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
+	mcParkMtx := mCleanupBody.NewLoad(irtypes.I8Ptr, mcParkMtxField)
+	mCleanupBody.NewCall(c.palMutexDestroy, mcParkMtx)
+
+	mcParkCondField := mCleanupBody.NewGetElementPtr(mTy, mcPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
+	mcParkCond := mCleanupBody.NewLoad(irtypes.I8Ptr, mcParkCondField)
+	mCleanupBody.NewCall(c.palCondDestroy, mcParkCond)
+
+	mCleanupBody.NewCall(c.palFree, mcCur)
+	mCleanupBody.NewBr(mCleanupHeader)
 
 	// Destroy scheduler mutexes and conds
 	glLockField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,

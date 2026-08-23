@@ -3027,9 +3027,9 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 		c.block = waitBodyBlock
 		c.emitWasmCoopWaitPump(waitBlock)
 	} else {
-		// Thread-blocking mode: cond_wait, loop
+		// Thread-blocking mode: cond_wait (with syscall handoff, T1685), loop
 		c.block = waitBodyBlock
-		c.block.NewCall(c.palCondWait, notEmpty, mtx)
+		c.emitBlockingCondWait(notEmpty, mtx)
 		c.block.NewBr(waitBlock)
 	}
 

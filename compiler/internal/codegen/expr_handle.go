@@ -592,11 +592,12 @@ func (c *Compiler) genMutexLock(mutexRaw value.Value, elemType types.Type) value
 			// `held`. Sibling of the T1200 channel fix.
 			c.emitWasmCoopWaitPump(waitLoopBlk)
 		} else {
-			// Thread-blocking mode: cond_wait, then re-check held.
+			// Thread-blocking mode: cond_wait (with syscall handoff, T1685), then
+			// re-check held.
 			condField := c.block.NewGetElementPtr(metaTy, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldCond)))
 			cond := c.block.NewLoad(irtypes.I8Ptr, condField)
-			c.block.NewCall(c.palCondWait, cond, handle)
+			c.emitBlockingCondWait(cond, handle)
 			c.block.NewBr(waitLoopBlk)
 		}
 
@@ -848,9 +849,10 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
 		c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
 	} else {
-		// Thread-blocking mode: cond_wait, then re-check closed flag
+		// Thread-blocking mode: cond_wait (with syscall handoff, T1685), then
+		// re-check closed flag
 		c.block = waitFullBodyBlock
-		c.block.NewCall(c.palCondWait, notFull, mtx)
+		c.emitBlockingCondWait(notFull, mtx)
 		closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
 		isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
 		c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
@@ -1005,9 +1007,9 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		c.block = rendezvousWaitBlock
 		c.emitWasmCoopWaitPump(rendezvousCheckBlock)
 	} else {
-		// Thread-blocking mode rendezvous: cond_wait
+		// Thread-blocking mode rendezvous: cond_wait (with syscall handoff, T1685)
 		c.block = rendezvousWaitBlock
-		c.block.NewCall(c.palCondWait, notFull, mtx)
+		c.emitBlockingCondWait(notFull, mtx)
 		c.block.NewBr(rendezvousCheckBlock)
 	}
 

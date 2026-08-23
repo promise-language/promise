@@ -1135,9 +1135,9 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 		c.block = recvWaitBodyBlock
 		c.emitWasmCoopWaitPump(recvWaitBlock)
 	} else {
-		// Thread-blocking mode: cond_wait, loop
+		// Thread-blocking mode: cond_wait (with syscall handoff, T1685), loop
 		c.block = recvWaitBodyBlock
-		c.block.NewCall(c.palCondWait, notEmpty, mtx)
+		c.emitBlockingCondWait(notEmpty, mtx)
 		c.block.NewBr(recvWaitBlock)
 	}
 

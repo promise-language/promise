@@ -596,11 +596,12 @@ func (c *Compiler) genNetpollWait(pdArg value.Value, gField int, prefix string) 
 			constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
 		c.block.NewStore(sentinel, waitGField)
 
-		// cond_wait on PollDesc's cond var
+		// cond_wait on PollDesc's cond var, with syscall handoff (T1685) so this
+		// M's P keeps running while we block on the fd becoming ready.
 		condField := c.block.NewGetElementPtr(pdTy, pdPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
 		cond := c.block.NewLoad(irtypes.I8Ptr, condField)
-		c.block.NewCall(c.palCondWait, cond, lock)
+		c.emitBlockingCondWait(cond, lock)
 
 		// Clear sentinel after wake and unlock
 		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), waitGField)

@@ -188,13 +188,18 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineLocalDequeueFunc()
 	c.defineStealWorkFunc()
 	c.defineSchedWakeMFunc()
-	c.defineEnterSyscallFunc()
 	c.defineExitSyscallFunc()
 	c.defineSchedFindRunnableFunc()
 	c.defineSchedEnqueueFunc()
 	c.defineGoroutineExitFunc()
 	c.defineSchedParkMFunc()
+	// T1685: park_spare must precede sched_loop (referenced from its loop top);
+	// startm must precede enter_syscall (which hands off P via startm) and follow
+	// sched_loop (whose function pointer startm passes to pal_thread_create).
+	c.defineSchedParkSpareFunc()
 	c.defineSchedLoopFunc()
+	c.defineSchedStartMFunc()
+	c.defineEnterSyscallFunc()
 	c.defineSysmonFunc()
 	c.defineSchedInitFunc()
 	c.defineSchedRunUntilMainFunc()

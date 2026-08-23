@@ -1,4 +1,7 @@
 file_scoped_imports_compose() `test {
-  assert(bin_path() == "/usr/bin", "roots.pr resolved its own use path");
-  assert(lib_path() == "/opt/lib", "leaves.pr resolved its own use path");
+  // path.join uses the platform separator, so build the expectations the same
+  // way rather than hardcoding POSIX separators.
+  string s = Platform.path_separator;
+  assert(bin_path() == "/usr" + s + "bin", "roots.pr resolved its own use path");
+  assert(lib_path() == "/opt" + s + "lib", "leaves.pr resolved its own use path");
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,14 +65,203 @@ func TestStripWrappers(t *testing.T) {
 		{"sudo", []string{"sudo", "rm", "-rf", "/"}, "rm", 3},
 		{"var", []string{"VAR=1", "FOO=bar", "git", "push"}, "git", 2},
 		{"combined", []string{"env", "VAR=1", "sudo", "git", "push"}, "git", 2},
+
+		// timeout: bare, with kill-after/signal flags, attached forms.
+		{"timeout bare", []string{"timeout", "5", "git", "push"}, "git", 2},
+		{"timeout -k", []string{"timeout", "-k", "10", "5", "git", "push"}, "git", 2},
+		{"timeout --kill-after=", []string{"timeout", "--kill-after=10", "5", "git", "push"}, "git", 2},
+		{"timeout --signal", []string{"timeout", "--signal", "KILL", "5", "rm", "-rf", "/"}, "rm", 3},
+		{"timeout --preserve-status", []string{"timeout", "--preserve-status", "5", "rm", "-rf", "/"}, "rm", 3},
+
+		// nice: -n form and legacy -N form.
+		{"nice -n", []string{"nice", "-n", "10", "rm", "-rf", "/"}, "rm", 3},
+		{"nice legacy", []string{"nice", "-10", "rm", "-rf", "/"}, "rm", 3},
+
+		// ionice: attached short flags.
+		{"ionice attached", []string{"ionice", "-c2", "-n7", "rm", "-rf", "/"}, "rm", 3},
+
+		// stdbuf: attached mode.
+		{"stdbuf -oL", []string{"stdbuf", "-oL", "rm", "-rf", "/"}, "rm", 3},
+
+		// flock: mandatory lock file positional.
+		{"flock", []string{"flock", "/tmp/lock", "rm", "-rf", "/"}, "rm", 3},
+
+		// xargs: arg-taking flag.
+		{"xargs -n", []string{"xargs", "-n", "1", "rm", "-rf"}, "rm", 2},
+
+		// nohup/setsid: zero-arg / flag-only wrappers.
+		{"nohup", []string{"nohup", "rm", "-rf", "/"}, "rm", 3},
+		{"setsid", []string{"setsid", "rm", "-rf", "/"}, "rm", 3},
+
+		// chained wrappers.
+		{"chained", []string{"env", "FOO=1", "timeout", "5", "nice", "rm", "-rf", "/"}, "rm", 3},
+
+		// sudo/command: flag-taking forms must still reach the wrapped program.
+		{"sudo -u", []string{"sudo", "-u", "root", "rm", "-rf", "/"}, "rm", 3},
+		{"sudo --user=", []string{"sudo", "--user=root", "rm", "-rf", "/"}, "rm", 3},
+		{"sudo -n", []string{"sudo", "-n", "git", "push"}, "git", 2},
+		{"command -p", []string{"command", "-p", "rm", "-rf", "/"}, "rm", 3},
+
+		// env: remaining flag/prefix branches not covered above.
+		{"env -i", []string{"env", "-i", "git", "push"}, "git", 2},
+		{"env --unset", []string{"env", "--unset", "FOO", "git", "push"}, "git", 2},
+		{"env --chdir=", []string{"env", "--chdir=/tmp", "git", "push"}, "git", 2},
+
+		// nice: separate --adjustment form and its = variant.
+		{"nice --adjustment", []string{"nice", "--adjustment", "10", "rm", "-rf", "/"}, "rm", 3},
+		{"nice --adjustment=", []string{"nice", "--adjustment=10", "rm", "-rf", "/"}, "rm", 3},
+
+		// ionice: no-value flag, separate-value flag, and its = variant.
+		{"ionice -t", []string{"ionice", "-t", "rm", "-rf", "/"}, "rm", 3},
+		{"ionice -c separate", []string{"ionice", "-c", "2", "rm", "-rf", "/"}, "rm", 3},
+		{"ionice --class=", []string{"ionice", "--class=2", "rm", "-rf", "/"}, "rm", 3},
+
+		// stdbuf: separate-value flag and its = variant (attached already covered).
+		{"stdbuf -i separate", []string{"stdbuf", "-i", "0", "rm", "-rf", "/"}, "rm", 3},
+		{"stdbuf --input=", []string{"stdbuf", "--input=0", "rm", "-rf", "/"}, "rm", 3},
+
+		// time: currently untested entirely — bare, no-value flag, separate-value
+		// flag, and its = variant.
+		{"time bare", []string{"time", "rm", "-rf", "/"}, "rm", 3},
+		{"time -p", []string{"time", "-p", "rm", "-rf", "/"}, "rm", 3},
+		{"time -o separate", []string{"time", "-o", "/tmp/out", "rm", "-rf", "/"}, "rm", 3},
+		{"time --output=", []string{"time", "--output=/tmp/out", "rm", "-rf", "/"}, "rm", 3},
+
+		// setsid: no-value flags — bare setsid above never exercises the switch.
+		{"setsid -c", []string{"setsid", "-c", "rm", "-rf", "/"}, "rm", 3},
+
+		// xargs: no-value flag and its long-flag = variant.
+		{"xargs -0", []string{"xargs", "-0", "rm", "-rf"}, "rm", 2},
+		{"xargs --max-args=", []string{"xargs", "--max-args=1", "rm", "-rf"}, "rm", 2},
+
+		// flock: no-value flag and separate-value flag plus its = variant.
+		{"flock -n", []string{"flock", "-n", "/tmp/lock", "rm", "-rf", "/"}, "rm", 3},
+		{"flock -w separate", []string{"flock", "-w", "10", "/tmp/lock", "rm", "-rf", "/"}, "rm", 3},
+		{"flock --timeout=", []string{"flock", "--timeout=10", "/tmp/lock", "rm", "-rf", "/"}, "rm", 3},
+
+		// Wrapper consumes every token (only its own flags, no wrapped
+		// program) — the loop exits via i>=len(args) rather than hitting a
+		// non-dash token. Nothing to dispatch on, so this is allowed (empty
+		// remainder), not denied.
+		{"command flags only, no program", []string{"command", "-p"}, "", 0},
+		{"sudo flags only, no program", []string{"sudo", "-v"}, "", 0},
+		{"env flags only, no program", []string{"env", "-i"}, "", 0},
+		{"nice flags only, no program", []string{"nice", "-n", "5"}, "", 0},
+		{"ionice flags only, no program", []string{"ionice", "-t"}, "", 0},
+		{"stdbuf flags only, no program", []string{"stdbuf", "-oL"}, "", 0},
+		{"time flags only, no program", []string{"time", "-p"}, "", 0},
+		{"setsid flags only, no program", []string{"setsid", "-w"}, "", 0},
+		{"xargs flags only, no program", []string{"xargs", "-0"}, "", 0},
 	}
 	for _, tt := range tests {
-		got := stripWrappers(tt.tokens)
+		got, denyReason := stripWrappers(tt.tokens)
+		if denyReason != "" {
+			t.Errorf("%s: unexpected deny: %s", tt.name, denyReason)
+			continue
+		}
 		if len(got) != tt.wantN {
-			t.Errorf("%s: len=%d, want %d", tt.name, len(got), tt.wantN)
+			t.Errorf("%s: len=%d (%v), want %d", tt.name, len(got), got, tt.wantN)
 		}
 		if len(got) > 0 && got[0] != tt.want0 {
 			t.Errorf("%s: [0]=%q, want %q", tt.name, got[0], tt.want0)
+		}
+	}
+}
+
+// TestStripWrappersFailClosed covers known wrappers used with a flag shape
+// stripWrappers doesn't model — these must deny, not silently pass the
+// wrapper name through unstripped (T1624).
+func TestStripWrappersFailClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		tokens []string
+	}{
+		{"timeout unrecognized flag", []string{"timeout", "--made-up-flag", "5", "rm", "-rf", "/"}},
+		{"timeout no duration", []string{"timeout", "rm", "-rf", "/"}},
+		{"flock -c opaque command", []string{"flock", "-c", "rm -rf /", "/tmp/lock"}},
+		{"flock no lockfile", []string{"flock"}},
+		{"env unrecognized flag", []string{"env", "--bogus", "git", "push"}},
+		{"nice unrecognized flag", []string{"nice", "--bogus", "rm", "-rf", "/"}},
+		{"sudo -e sudoedit", []string{"sudo", "-e", "/etc/passwd"}},
+		{"sudo -l list", []string{"sudo", "-l", "rm", "-rf", "/"}},
+		{"sudo -h ambiguous", []string{"sudo", "-h", "rm", "-rf", "/"}},
+		{"sudo -u no value", []string{"sudo", "-u"}},
+		{"command unrecognized flag", []string{"command", "--bogus", "rm", "-rf", "/"}},
+		{"env -u no value", []string{"env", "-u"}},
+		{"nice -n no value", []string{"nice", "-n"}},
+		{"ionice -c no value", []string{"ionice", "-c"}},
+		{"ionice unrecognized flag", []string{"ionice", "--bogus", "rm", "-rf", "/"}},
+		{"stdbuf -i no value", []string{"stdbuf", "-i"}},
+		{"stdbuf unrecognized flag", []string{"stdbuf", "--bogus", "rm", "-rf", "/"}},
+		{"time -o no value", []string{"time", "-o"}},
+		{"time unrecognized flag", []string{"time", "--bogus", "rm", "-rf", "/"}},
+		{"setsid unrecognized flag", []string{"setsid", "--bogus", "rm", "-rf", "/"}},
+		{"xargs -n no value", []string{"xargs", "-n"}},
+		{"xargs unrecognized flag", []string{"xargs", "--bogus", "rm", "-rf"}},
+		{"flock -w no value", []string{"flock", "-w"}},
+		{"flock unrecognized flag", []string{"flock", "--bogus", "/tmp/lock"}},
+		{"timeout -k no value", []string{"timeout", "-k"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, denyReason := stripWrappers(tt.tokens)
+			if denyReason == "" {
+				t.Errorf("expected a deny reason for %v", tt.tokens)
+			}
+		})
+	}
+}
+
+// TestCheckSingleWrapperDenyPropagates covers the checkSingle integration
+// point (main.go:499-501): a malformed known-wrapper invocation must be
+// blocked by checkSingle itself, with stripWrappers's deny reason surfaced,
+// not just by stripWrappers in isolation (T1624).
+func TestCheckSingleWrapperDenyPropagates(t *testing.T) {
+	reason := checkSingle("timeout --made-up-flag 5 rm -rf /", "")
+	if reason == "" {
+		t.Fatal("expected checkSingle to block a malformed timeout invocation")
+	}
+	if !strings.Contains(reason, "unrecognized option for wrapper") {
+		t.Errorf("reason = %q, want it to mention the unrecognized wrapper option", reason)
+	}
+
+	// A wrapper invocation that consumes every token (only its own flags,
+	// no wrapped program) leaves stripWrappers's remainder empty — nothing
+	// to dispatch on, so checkSingle must allow it (main.go:503-505).
+	if reason := checkSingle("command -p", ""); reason != "" {
+		t.Errorf("expected wrapper-only invocation with no program to be allowed, got %q", reason)
+	}
+}
+
+// TestWrapperBypassCoverage pairs every existing deny rule with a wrapped
+// variant, so a future rule cannot be added without wrapper coverage (T1624).
+func TestWrapperBypassCoverage(t *testing.T) {
+	blocked := []string{
+		"git push",
+		"git reset --hard HEAD",
+		"rm -rf /tmp/x",
+		"curl http://x",
+		"go build ./cmd/promise/",
+		"npm install foo",
+	}
+	wrappers := []string{
+		"timeout 5 %s",
+		"nice %s",
+		"env FOO=1 timeout 5 %s",
+		"nohup %s",
+		"setsid %s",
+		"stdbuf -oL %s",
+		"sudo -u root %s",
+		"command -p %s",
+	}
+	for _, cmd := range blocked {
+		for _, wrapper := range wrappers {
+			wrapped := fmt.Sprintf(wrapper, cmd)
+			t.Run(wrapped, func(t *testing.T) {
+				if checkSingle(wrapped, "") == "" {
+					t.Errorf("expected wrapped command %q to be blocked", wrapped)
+				}
+			})
 		}
 	}
 }
@@ -151,6 +341,9 @@ func TestCheckSingle(t *testing.T) {
 		"npm install foo",
 		"go install github.com/x",
 		"apt install vim",
+		"timeout 5 rm -rf /tmp/x",
+		"timeout 300 go build ./cmd/promise/",
+		"nice -n 10 git push",
 	}
 	for _, cmd := range blocked {
 		if checkSingle(cmd, "") == "" {
@@ -163,6 +356,7 @@ func TestCheckSingle(t *testing.T) {
 		"ls -la",
 		"go test ./...",
 		"rm file.txt",
+		"timeout 5 git status",
 	}
 	for _, cmd := range allowed {
 		if reason := checkSingle(cmd, ""); reason != "" {

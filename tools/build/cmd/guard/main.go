@@ -496,7 +496,10 @@ func checkSingle(cmd, cwd string) string {
 		return ""
 	}
 
-	args := stripWrappers(tokens)
+	args, denyReason := stripWrappers(tokens)
+	if denyReason != "" {
+		return denyReason
+	}
 	if len(args) == 0 {
 		return ""
 	}
@@ -1073,19 +1076,400 @@ func tokenize(cmd string) []string {
 	return result
 }
 
-func stripWrappers(tokens []string) []string {
+// wrapperArgModel skips a wrapper's own flags/positionals so stripWrappers
+// can reach the program it wraps. args is the token slice *after* the
+// wrapper name. Returns how many of those tokens belong to the wrapper
+// (>=0), or ok=false if a flag isn't recognized — the caller fails closed
+// rather than risk silently passing an unparsed wrapper through.
+type wrapperArgModel func(args []string) (skip int, ok bool)
+
+// knownWrappers is the exhaustive set of command wrappers stripWrappers
+// understands. A wrapper not in this table is left as the program token,
+// which means it's dispatched on directly (and typically matches no rule,
+// i.e. allowed) rather than silently unwrapped — see T1624.
+var knownWrappers = map[string]wrapperArgModel{
+	"env":     skipEnvArgs,
+	"sudo":    skipSudoArgs,
+	"command": skipCommandArgs,
+	"nohup":   skipZeroArgs,
+	"timeout": skipTimeoutArgs,
+	"nice":    skipNiceArgs,
+	"ionice":  skipIoniceArgs,
+	"stdbuf":  skipStdbufArgs,
+	"time":    skipTimeArgs,
+	"setsid":  skipSetsidArgs,
+	"xargs":   skipXargsArgs,
+	"flock":   skipFlockArgs,
+}
+
+// stripWrappers removes leading `VAR=value` assignments and known command
+// wrappers (env, timeout, nice, ...) so the guard can dispatch on the actual
+// program being run. Returns a non-empty denyReason if a known wrapper is
+// used with a flag shape stripWrappers doesn't recognize — failing closed
+// there instead of guessing, since a wrong guess would silently re-open the
+// bypass this function exists to close.
+func stripWrappers(tokens []string) (args []string, denyReason string) {
 	i := 0
 	for i < len(tokens) {
 		t := tokens[i]
 		if strings.Contains(t, "=") && !strings.HasPrefix(t, "-") {
 			i++
-		} else if t == "env" || t == "sudo" || t == "command" {
-			i++
-		} else {
-			break
+			continue
 		}
+		if model, known := knownWrappers[t]; known {
+			skip, ok := model(tokens[i+1:])
+			if !ok {
+				return nil, fmt.Sprintf(
+					"blocked: unrecognized option for wrapper %q; run the wrapped command directly so it can be checked",
+					t)
+			}
+			i += 1 + skip
+			continue
+		}
+		break
 	}
-	return tokens[i:]
+	return tokens[i:], ""
+}
+
+// skipZeroArgs is the arg model for wrappers whose own flags aren't parsed —
+// the wrapper name itself is stripped and nothing else. Only safe for
+// wrappers that take no flags at all (e.g. nohup, whose real grammar rejects
+// any option other than --help/--version and refuses to run the wrapped
+// command if given one) — a wrapper with real flags needs its own model, or
+// an unrecognized flag falls through the outer loop unconsumed and becomes
+// the dispatched-on "program", reopening the bypass (T1624).
+func skipZeroArgs(args []string) (int, bool) {
+	return 0, true
+}
+
+// skipCommandArgs models the `command` builtin's POSIX flags: -p (use the
+// default PATH), -v, -V — all no-arg.
+func skipCommandArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-p", "-v", "-V":
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+// skipSudoArgs models sudo(8)'s common flags. Only unambiguous flags are
+// recognized; -e/--edit (sudoedit — the trailing args are files, not a
+// command), -l/--list (optionally takes a trailing command with different
+// semantics), and -h/--host (ambiguous with bare -h meaning --help) are
+// deliberately left unmodeled so a use of them fails closed rather than
+// mis-skip into the wrong token as the wrapped program.
+func skipSudoArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-A", "--askpass", "-b", "--background", "-B", "--bell",
+			"-E", "--preserve-env", "-H", "--set-home", "-i", "--login",
+			"-K", "--remove-timestamp", "-k", "--reset-timestamp",
+			"-n", "--non-interactive", "-S", "--stdin", "-s", "--shell",
+			"-v", "--validate", "-V", "--version":
+			i++
+			continue
+		case "-C", "--close-from", "-D", "--chdir", "-g", "--group",
+			"-p", "--prompt", "-T", "--command-timeout", "-u", "--user":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--preserve-env=") ||
+			strings.HasPrefix(t, "--close-from=") || strings.HasPrefix(t, "--chdir=") ||
+			strings.HasPrefix(t, "--group=") || strings.HasPrefix(t, "--prompt=") ||
+			strings.HasPrefix(t, "--command-timeout=") || strings.HasPrefix(t, "--user=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+var niceLegacyAdjustmentRe = regexp.MustCompile(`^-\d+$`)
+
+// timeoutDurationRe matches GNU coreutils' DURATION grammar: a non-negative
+// number (optionally fractional) with an optional single-letter suffix
+// (s/m/h/d). Used to distinguish the mandatory DURATION positional from the
+// wrapped command in a malformed `timeout <cmd>` invocation missing it.
+var timeoutDurationRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?[smhd]?$`)
+
+func skipEnvArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true // VAR=val or the wrapped command
+		}
+		switch t {
+		case "-i", "--ignore-environment", "-0", "--null", "-v", "--debug", "--":
+			i++
+			continue
+		case "-u", "--unset", "-C", "--chdir":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--unset=") || strings.HasPrefix(t, "--chdir=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipTimeoutArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			break // the mandatory DURATION positional
+		}
+		switch t {
+		case "--preserve-status", "--foreground", "-v", "--verbose":
+			i++
+			continue
+		case "-k", "--kill-after", "-s", "--signal":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--kill-after=") || strings.HasPrefix(t, "--signal=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	if i >= len(args) || !timeoutDurationRe.MatchString(args[i]) {
+		// No DURATION, or the next token doesn't look like one (e.g. the
+		// wrapped program itself in a malformed `timeout <cmd>` invocation
+		// missing its duration) — fail closed rather than mis-skip it.
+		return 0, false
+	}
+	i++ // DURATION
+	return i, true
+}
+
+func skipNiceArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		if niceLegacyAdjustmentRe.MatchString(t) {
+			i++
+			continue
+		}
+		switch t {
+		case "-n", "--adjustment":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--adjustment=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipIoniceArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-t", "--ignore":
+			i++
+			continue
+		case "-c", "--class", "-n", "--classdata", "-p", "--pid":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--class=") || strings.HasPrefix(t, "--classdata=") || strings.HasPrefix(t, "--pid=") {
+			i++
+			continue
+		}
+		// Attached short forms: -cN, -nN.
+		if strings.HasPrefix(t, "-c") || strings.HasPrefix(t, "-n") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipStdbufArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-i", "--input", "-o", "--output", "-e", "--error":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--input=") || strings.HasPrefix(t, "--output=") || strings.HasPrefix(t, "--error=") {
+			i++
+			continue
+		}
+		// Attached short forms: -iMODE, -oMODE, -eMODE (e.g. -oL).
+		if strings.HasPrefix(t, "-i") || strings.HasPrefix(t, "-o") || strings.HasPrefix(t, "-e") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipTimeArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-p", "--portability", "-v", "--verbose", "-a", "--append":
+			i++
+			continue
+		case "-o", "--output", "-f", "--format":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--output=") || strings.HasPrefix(t, "--format=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipSetsidArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-c", "--ctty", "-w", "--wait", "-f", "--fork":
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipXargsArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			return i, true
+		}
+		switch t {
+		case "-0", "-t", "-p", "-r", "--no-run-if-empty", "-x":
+			i++
+			continue
+		case "-n", "--max-args", "-P", "--max-procs", "-I", "--replace",
+			"-L", "--max-lines", "-s", "--max-chars", "-a", "--arg-file",
+			"-d", "--delimiter", "-E":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--max-args=") || strings.HasPrefix(t, "--max-procs=") ||
+			strings.HasPrefix(t, "--replace=") || strings.HasPrefix(t, "--max-lines=") ||
+			strings.HasPrefix(t, "--max-chars=") || strings.HasPrefix(t, "--arg-file=") ||
+			strings.HasPrefix(t, "--delimiter=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func skipFlockArgs(args []string) (int, bool) {
+	i := 0
+	for i < len(args) {
+		t := args[i]
+		if !strings.HasPrefix(t, "-") {
+			break // the mandatory lock file/dir positional
+		}
+		switch t {
+		case "-c", "--command":
+			// Opaque command-string form, structurally like `bash -c`.
+			// Out of scope for this fix — fail closed rather than allow.
+			return 0, false
+		case "-n", "--nonblock", "-x", "--exclusive", "-s", "--shared",
+			"-o", "--close", "-F", "--no-fork", "-v", "--verbose":
+			i++
+			continue
+		case "-w", "--timeout", "-E", "--conflict-exit-code":
+			if i+1 >= len(args) {
+				return 0, false
+			}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "--timeout=") || strings.HasPrefix(t, "--conflict-exit-code=") {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	if i >= len(args) {
+		return 0, false // no lock file/dir — malformed flock invocation
+	}
+	i++ // lock file/dir
+	return i, true
 }
 
 func hasSubcommand(tokens []string, sub string) bool {

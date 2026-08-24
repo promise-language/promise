@@ -1318,6 +1318,17 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 		case *ast.MatchExpr:
 			walkExpr(e.Subject)
 			for _, arm := range e.Arms {
+				// T1698: the `match true { <expr> => … }` dispatch form puts an
+				// arbitrary expression in the PATTERN. Without this the outer local
+				// it names never entered the arg pack, and generating the pattern
+				// inside the coroutine panicked `undefined variable`. Every other
+				// pattern shape binds names rather than referencing them.
+				switch p := arm.Pattern.(type) {
+				case *ast.ExpressionMatchPattern:
+					walkExpr(p.Expr)
+				case *ast.LiteralMatchPattern:
+					walkExpr(p.Value)
+				}
 				walkExpr(arm.Body)
 				if arm.Guard != nil {
 					walkExpr(arm.Guard)

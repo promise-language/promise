@@ -182,23 +182,18 @@ func TestT1640GoBlockCaptureWalkArms(t *testing.T) {
 	}
 }
 
-// --- T1658: arms codegen walks but the sema walk does NOT ---
+// --- T1658: arms codegen walks that the sema walk used to miss ---
 //
-// Each of these three shapes is visited by codegen's `collectBlockIdents` (so
-// the heap env IS moved into the coroutine frame and the outer drop flag IS
-// cleared) but missed by `checkGoBlockCaptures` (so ownership never learns of
-// the capture and R4 never marks it Moved). The program compiles clean and the
-// post-spawn call reads a freed env: `f(2)` evaluates to 2 instead of 12,
-// because `base` reads as 0.
-//
-// They are skipped rather than deleted because the assertion is exactly right —
-// it is the compiler that is wrong. Remove the `t.Skip` line when T1658 lands;
-// no other edit should be needed.
+// Each of these three shapes is visited by codegen's `collectBlockIdents` — the
+// heap env IS moved into the coroutine frame and the outer drop flag IS cleared
+// — but `checkGoBlockCaptures` did not visit them, so ownership never learned of
+// the capture and R4 never marked it Moved. The program compiled clean and the
+// post-spawn call read a freed env (`f(2)` evaluated to garbage rather than 12,
+// because `base` came from the freed env). T1658 added the three mirroring arms.
 
-// T1658 — `walkStmt` has no `*ast.Block` arm, so a bare nested block inside a
-// `go { … }` block hides every capture in it.
-func TestT1640GoBlockCaptureWalkBareBlockNotWalked(t *testing.T) {
-	t.Skip("T1658: checkGoBlockCaptures' walkStmt has no *ast.Block arm — capture is never recorded")
+// T1658 — `walkStmt`'s `*ast.Block` arm: a bare nested block inside a
+// `go { … }` block must not hide the captures in it.
+func TestT1640GoBlockCaptureWalkBareBlock(t *testing.T) {
 	errs := ownerErrs(t, buildGoCaptureWalkSrc(goCaptureWalkCase{
 		body: `
 			{
@@ -209,11 +204,10 @@ func TestT1640GoBlockCaptureWalkBareBlockNotWalked(t *testing.T) {
 	expectOwnerError(t, errs, "use of moved variable 'f'")
 }
 
-// T1658 — the `*ast.MatchExpr` arm walks `arm.Body` and `arm.Block` but not
-// `arm.Guard`. The closure appears ONLY in the guard here; referencing it from
-// an arm body as well would mask the bug.
-func TestT1640GoBlockCaptureWalkMatchArmGuardNotWalked(t *testing.T) {
-	t.Skip("T1658: checkGoBlockCaptures does not walk ast.MatchArm.Guard — capture is never recorded")
+// T1658 — the `*ast.MatchExpr` arm must walk `arm.Guard` as well as `arm.Body`
+// and `arm.Block`. The closure appears ONLY in the guard here; referencing it
+// from an arm body as well would mask a regression.
+func TestT1640GoBlockCaptureWalkMatchArmGuard(t *testing.T) {
 	errs := ownerErrs(t, buildGoCaptureWalkSrc(goCaptureWalkCase{
 		body: `
 			int r = match 1 {
@@ -226,10 +220,9 @@ func TestT1640GoBlockCaptureWalkMatchArmGuardNotWalked(t *testing.T) {
 	expectOwnerError(t, errs, "use of moved variable 'f'")
 }
 
-// T1658 — `walkExpr` has no `*ast.UnsafeExpr` arm, so an `unsafe { … }` body
-// inside a `go { … }` block hides every capture in it.
-func TestT1640GoBlockCaptureWalkUnsafeBlockNotWalked(t *testing.T) {
-	t.Skip("T1658: checkGoBlockCaptures' walkExpr has no *ast.UnsafeExpr arm — capture is never recorded")
+// T1658 — `walkExpr`'s `*ast.UnsafeExpr` arm: an `unsafe { … }` body inside a
+// `go { … }` block must not hide the captures in it.
+func TestT1640GoBlockCaptureWalkUnsafeBlock(t *testing.T) {
 	errs := ownerErrs(t, buildGoCaptureWalkSrc(goCaptureWalkCase{
 		body: `
 			unsafe {
@@ -238,4 +231,196 @@ func TestT1640GoBlockCaptureWalkUnsafeBlockNotWalked(t *testing.T) {
 		`,
 	}))
 	expectOwnerError(t, errs, "use of moved variable 'f'")
+}
+
+// --- T1698: the arm PATTERN, missed by BOTH walkers ---
+
+// `match true { <expr> => … }` puts an arbitrary expression in pattern position.
+// Neither walker visited it, so codegen left the name out of the coroutine arg
+// pack and panicked `undefined variable` instead of transferring the env; this
+// pins the ownership half — with the pattern walked, R4 marks the capture Moved
+// exactly as it does for the guard.
+func TestT1698GoBlockCaptureWalkMatchArmPattern(t *testing.T) {
+	cases := []goCaptureWalkCase{
+		{
+			// *ast.ExpressionMatchPattern — the multi-way dispatch form.
+			name: "expression_pattern",
+			body: `
+				int r = match true {
+					f(1) > 1 => 100,
+					_ => 0,
+				};
+				done.send(r);
+			`,
+		},
+		{
+			// *ast.LiteralMatchPattern — a string literal pattern carries
+			// interpolation parts, so it too can reach an outer binding. The
+			// subject `s` is block-local, so `f` is reached ONLY through the
+			// pattern.
+			name: "literal_pattern_interpolation",
+			body: `
+				string s = "11";
+				int r = match s {
+					"{f(1)}" => 100,
+					_ => 0,
+				};
+				done.send(r);
+			`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ownerErrs(t, buildGoCaptureWalkSrc(tc))
+			expectOwnerError(t, errs, "use of moved variable 'f'")
+		})
+	}
+}
+
+// --- T1658: the `else` chain, which the same fix re-routed ---
+//
+// T1658 deleted the `walkElse` helper that used to dispatch `IfStmt.Else`. An
+// `else { … }` block now reaches the walk ONLY through the newly added
+// `walkStmt` `*ast.Block` arm, and an `else if` chain only through `walkStmt`
+// recursing on itself. Nothing else pins that: the pre-existing `is_expression`
+// case has an `else` block but reaches the closure through the `if` SUBJECT, so
+// dropping the `*ast.Block` arm again would silently un-walk every `else` body
+// as well as every bare block. These reach the closure through the `else` side
+// and nowhere else.
+func TestT1658GoBlockCaptureWalkElseArms(t *testing.T) {
+	cases := []goCaptureWalkCase{
+		{
+			// `else { … }` — an *ast.Block reached via IfStmt.Else.
+			name: "else_block",
+			body: `
+				if 1 > 2 {
+					done.send(0);
+				} else {
+					done.send(f(1));
+				}
+			`,
+		},
+		{
+			// `else if <cond>` — IfStmt.Else is an *ast.IfStmt, so walkStmt must
+			// recurse into itself and evaluate the chained condition.
+			name: "else_if_condition",
+			body: `
+				if 1 > 2 {
+					done.send(0);
+				} else if f(1) > 0 {
+					done.send(1);
+				} else {
+					done.send(2);
+				}
+			`,
+		},
+		{
+			// The tail `else` of an `else if` chain — two levels down, so both the
+			// self-recursion and the *ast.Block arm have to hold at once.
+			name: "else_if_tail_else",
+			body: `
+				if 1 > 2 {
+					done.send(0);
+				} else if 2 > 3 {
+					done.send(1);
+				} else {
+					done.send(f(1));
+				}
+			`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ownerErrs(t, buildGoCaptureWalkSrc(tc))
+			expectOwnerError(t, errs, "use of moved variable 'f'")
+		})
+	}
+}
+
+// A bare block nested inside another bare block, and a bare block inside a loop
+// body. The `*ast.Block` arm is recursive, and a single flat case would still
+// pass if it were written non-recursively (`walkBlock` on the immediate stmts
+// only); these fail in that case.
+func TestT1658GoBlockCaptureWalkNestedBareBlocks(t *testing.T) {
+	cases := []goCaptureWalkCase{
+		{
+			name: "block_in_block",
+			body: `
+				{
+					{
+						done.send(f(1));
+					}
+				}
+			`,
+		},
+		{
+			name: "block_in_loop_body",
+			body: `
+				for int i = 0; i < 1; i = i + 1 {
+					{
+						done.send(f(1));
+					}
+				}
+			`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ownerErrs(t, buildGoCaptureWalkSrc(tc))
+			expectOwnerError(t, errs, "use of moved variable 'f'")
+		})
+	}
+}
+
+// The arms added by T1658/T1698 feed R5 as well as R4 — the two rules read the
+// same `Info.GoCaptures` entry, so an unwalked arm silently disabled BOTH. The
+// tests above pin R4 (the capture is Moved); these pin R5 (a BORROWED closure
+// reaching the goroutine only through one of the new shapes is rejected rather
+// than handed to a coroutine that will outlive the caller's env).
+func TestT1658GoBlockCaptureWalkNewArmsFeedR5(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"bare_block", `
+			{
+				done.send(f(1));
+			}
+		`},
+		{"match_arm_guard", `
+			int r = match 1 {
+				1 if f(1) > 0 => 7,
+				_ => 0,
+			};
+			done.send(r);
+		`},
+		{"unsafe_block", `
+			unsafe {
+				done.send(f(1));
+			}
+		`},
+		{"else_block", `
+			if 1 > 2 {
+				done.send(0);
+			} else {
+				done.send(f(1));
+			}
+		`},
+		{"match_arm_pattern", `
+			int r = match true {
+				f(1) > 0 => 7,
+				_ => 0,
+			};
+			done.send(r);
+		`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ownerErrs(t, `
+				spawn((int) -> int f, channel[int] done) {
+					go {
+`+tc.body+`
+					};
+				}
+			`)
+			expectOwnerError(t, errs, "it is a borrowed parameter, not an owned value")
+		})
+	}
 }

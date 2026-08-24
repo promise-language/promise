@@ -672,6 +672,217 @@ split_pair(int n)(int, int) {
   return (n, n + 1);
 }
 
+// --- T1658: three arms codegen walked that the sema walk did not ---
+//
+// A capture reached ONLY through one of these shapes was invisible to
+// `checkGoBlockCaptures`, so nothing gated it and ownership never learned of
+// it, while codegen still moved the heap env into the coroutine frame and
+// cleared the outer drop flag. The goroutine then read `base` out of an env the
+// defining scope believed it still owned. Each test asserts the goroutine
+// computed with the TRANSFERRED env, so a regression that stops transferring
+// (or frees early) shows up as a wrong value rather than a coin flip. The
+// harness's leak check covers the env free on the coroutine side.
+
+// Captured only through a BARE NESTED BLOCK.
+capture_through_bare_nested_block() `test {
+  done := channel[int](1);
+  int base = 130;
+  f := |int x| -> x + base;
+  go {
+    {
+      done.send(f(1));
+    }
+  };
+  assert((<-done)! == 131, "bare-block capture keeps its env");
+}
+
+// Captured only through a MATCH-ARM GUARD. `f` must not appear in any arm body
+// — a body reference is walked by the pre-existing arm and would mask this one.
+capture_through_match_arm_guard() `test {
+  done := channel[int](1);
+  int base = 140;
+  f := |int x| -> x + base;
+  go {
+    int r = match 1 {
+      1 if f(1) == 141 => 7,
+      _ => 0,
+    };
+    done.send(r);
+  };
+  assert((<-done)! == 7, "match-guard capture keeps its env");
+}
+
+// Captured only through an `unsafe { … }` body. `unsafe` relaxes safety checks
+// on the operations inside it; it does not change what the block captures.
+capture_through_unsafe_block() `test {
+  done := channel[int](1);
+  int base = 150;
+  f := |int x| -> x + base;
+  go {
+    unsafe {
+      done.send(f(1));
+    }
+  };
+  assert((<-done)! == 151, "unsafe-block capture keeps its env");
+}
+
+// --- T1698: the arm PATTERN, a shape NEITHER walker visited ---
+//
+// `match true { <expr> => … }` puts an arbitrary expression in pattern position.
+// Because neither walker visited it, the capture never entered the coroutine arg
+// pack and codegen panicked `undefined variable` — the loud sibling of the three
+// T1658 shapes above. Both walkers now visit it, so the goroutine computes with
+// the transferred env like every other arm.
+capture_through_match_arm_pattern() `test {
+  done := channel[int](1);
+  int base = 160;
+  f := |int x| -> x + base;
+  go {
+    int r = match true {
+      f(1) == 161 => 7,
+      _ => 0,
+    };
+    done.send(r);
+  };
+  assert((<-done)! == 7, "match-pattern capture keeps its env");
+}
+
+// The other expression-carrying pattern shape: a STRING literal pattern, whose
+// interpolation parts are ordinary expressions. The subject `s` is block-local,
+// so `f` is reached ONLY through the pattern — with the arm removed from either
+// walker this file stops compiling (`undefined variable "f"`).
+capture_through_match_arm_literal_pattern() `test {
+  done := channel[int](1);
+  int base = 170;
+  f := |int x| -> x + base;
+  go {
+    string s = "171";
+    int r = match s {
+      "{f(1)}" => 7,
+      _ => 0,
+    };
+    done.send(r);
+  };
+  assert((<-done)! == 7, "literal-pattern capture keeps its env");
+}
+
+// A pattern that BINDS a name is not a capture: `v` belongs to the arm, so
+// walking patterns must not record it. Pins that the T1698 widening stayed on
+// the two expression-carrying pattern shapes.
+match_arm_binding_pattern_is_not_a_capture() `test {
+  done := channel[int](1);
+  int n = 3;
+  go {
+    int r = match n {
+      v => v + 1,
+    };
+    done.send(r);
+  };
+  assert((<-done)! == 4, "arm-bound name is not a capture");
+}
+
+// --- T1658: the `else` chain, re-routed by the same fix ---
+//
+// Deleting the `walkElse` helper made every `else { … }` body depend on the new
+// bare-block arm and every `else if` on walkStmt recursing into itself. These
+// run the transferred env through both.
+
+// Captured only through an `else { … }` body.
+capture_through_else_block() `test {
+  done := channel[int](1);
+  int base = 180;
+  f := |int x| -> x + base;
+  go {
+    if 1 > 2 {
+      done.send(0);
+    } else {
+      done.send(f(1));
+    }
+  };
+  assert((<-done)! == 181, "else-block capture keeps its env");
+}
+
+// Captured only through an `else if` CONDITION — `IfStmt.Else` is itself an
+// `*ast.IfStmt`, so the walk has to recurse into its own statement arm.
+capture_through_else_if_condition() `test {
+  done := channel[int](1);
+  int base = 190;
+  f := |int x| -> x + base;
+  go {
+    if 1 > 2 {
+      done.send(0);
+    } else if f(1) == 191 {
+      done.send(7);
+    } else {
+      done.send(0);
+    }
+  };
+  assert((<-done)! == 7, "else-if condition capture keeps its env");
+}
+
+// Captured only through the TAIL `else` of an `else if` chain — two levels down,
+// so the self-recursion and the bare-block arm both have to hold at once.
+capture_through_else_if_tail_else() `test {
+  done := channel[int](1);
+  int base = 200;
+  f := |int x| -> x + base;
+  go {
+    if 1 > 2 {
+      done.send(0);
+    } else if 2 > 3 {
+      done.send(1);
+    } else {
+      done.send(f(1));
+    }
+  };
+  assert((<-done)! == 201, "else-if tail-else capture keeps its env");
+}
+
+// The bare-block arm is recursive, and it composes with the `unsafe` arm in both
+// orders. A single flat bare block would still pass against a walk that only
+// looked one level deep.
+capture_through_nested_bare_blocks() `test {
+  done := channel[int](1);
+  int base = 210;
+  f := |int x| -> x + base;
+  go {
+    {
+      {
+        done.send(f(1));
+      }
+    }
+  };
+  assert((<-done)! == 211, "doubly nested bare-block capture keeps its env");
+}
+
+capture_through_unsafe_inside_bare_block() `test {
+  done := channel[int](1);
+  int base = 220;
+  f := |int x| -> x + base;
+  go {
+    {
+      unsafe {
+        done.send(f(1));
+      }
+    }
+  };
+  assert((<-done)! == 221, "unsafe-in-block capture keeps its env");
+}
+
+capture_through_bare_block_inside_unsafe() `test {
+  done := channel[int](1);
+  int base = 230;
+  f := |int x| -> x + base;
+  go {
+    unsafe {
+      {
+        done.send(f(1));
+      }
+    }
+  };
+  assert((<-done)! == 231, "block-in-unsafe capture keeps its env");
+}
+
 // --- Sendable aggregates that HOLD a closure ---
 
 // A `sendable`-annotated type with a closure field: R1 makes the field sendable,

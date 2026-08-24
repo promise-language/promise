@@ -273,7 +273,6 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 	var walkExpr func(expr ast.Expr)
 	var walkBlock func(block *ast.Block)
 	var walkStmt func(s ast.Stmt)
-	var walkElse func(s ast.Stmt)
 
 	walkBlock = func(block *ast.Block) {
 		if block == nil {
@@ -284,23 +283,20 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 		}
 	}
 
-	walkElse = func(s ast.Stmt) {
-		if s == nil {
-			return
-		}
-		switch st := s.(type) {
-		case *ast.IfStmt:
-			walkStmt(st)
-		case *ast.Block:
-			walkBlock(st)
-		}
-	}
-
 	walkStmt = func(s ast.Stmt) {
 		if s == nil {
 			return
 		}
 		switch st := s.(type) {
+		case *ast.Block:
+			// T1658: a bare nested block in statement position. Codegen's
+			// collectBlockIdents has this arm (expr_concurrency.go), so it transfers
+			// the heap env of a closure captured inside one into the coroutine frame
+			// and clears the outer drop flag; without the mirror here the capture was
+			// never recorded, so ownership's R4/R5 never ran and the defining scope
+			// kept using the freed env. This arm also subsumes the old walkElse
+			// helper — an `else { … }` block now routes through walkStmt.
+			walkBlock(st)
 		case *ast.ExprStmt:
 			walkExpr(st.Expr)
 		case *ast.TypedVarDecl:
@@ -320,9 +316,9 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 			walkExpr(st.Cond)
 			walkExpr(st.Init)
 			walkBlock(st.Body)
-			if st.Else != nil {
-				walkElse(st.Else)
-			}
+			// `else` is either an *ast.IfStmt (else-if chain) or an *ast.Block, and
+			// walkStmt now handles both directly (T1658). It nil-guards its argument.
+			walkStmt(st.Else)
 		case *ast.ForInStmt:
 			walkExpr(st.Iterable)
 			walkBlock(st.Body)
@@ -435,6 +431,23 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 		case *ast.MatchExpr:
 			walkExpr(ex.Subject)
 			for _, arm := range ex.Arms {
+				// T1698: an arm PATTERN can carry an arbitrary expression — the
+				// `match true { <expr> => … }` multi-way dispatch form — and neither
+				// walker used to visit it, so codegen left the name out of the
+				// coroutine arg pack and panicked `undefined variable` while this
+				// gate never ran. Only these two shapes hold an expression; the rest
+				// BIND names (`Foo f`, `Ok(v)`) rather than reference them, so
+				// walking them would misread a binding as a capture.
+				switch p := arm.Pattern.(type) {
+				case *ast.ExpressionMatchPattern:
+					walkExpr(p.Expr)
+				case *ast.LiteralMatchPattern:
+					walkExpr(p.Value)
+				}
+				// T1658: codegen's collectBlockIdents walks the guard, so a closure
+				// referenced ONLY from a guard has its env transferred; mirror it here
+				// so the capture is gated and recorded. walkExpr nil-guards.
+				walkExpr(arm.Guard)
 				walkExpr(arm.Body)
 				walkBlock(arm.Block)
 			}
@@ -454,6 +467,11 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 			}
 		case *ast.ParenExpr:
 			walkExpr(ex.Expr)
+		case *ast.UnsafeExpr:
+			// T1658: mirrors collectBlockIdents' *ast.UnsafeExpr arm. `unsafe` only
+			// relaxes safety checks on the operations inside it — it does not change
+			// what the enclosing `go { … }` block captures.
+			walkBlock(ex.Body)
 		case *ast.ErrorPropagateExpr:
 			walkExpr(ex.Expr)
 		case *ast.ErrorPanicExpr:

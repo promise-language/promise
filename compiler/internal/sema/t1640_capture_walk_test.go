@@ -129,15 +129,12 @@ func TestT1640GoBlockWalkArmsRejectNonSendable(t *testing.T) {
 	}
 }
 
-// T1658 — three shapes codegen's `collectBlockIdents` walks but this walk does
-// NOT, so a capture inside one of them is invisible to both the sendability gate
-// and ownership's env rules while codegen still transfers the env. Skipped
-// because the assertion is correct and the compiler is not; drop the `t.Skip`
-// when T1658 lands. Full repros and the fix sketch are on T1658; the
-// use-after-free consequence is pinned in
+// T1658 — three shapes codegen's `collectBlockIdents` walks that this walk used
+// to miss, leaving a capture inside one of them invisible to both the
+// sendability gate and ownership's env rules while codegen still transferred the
+// env. Full repros are on T1658; the use-after-free consequence is pinned in
 // compiler/internal/ownership/t1640_capture_walk_test.go.
-func TestT1640GoBlockWalkT1658MissingArms(t *testing.T) {
-	t.Skip("T1658: bare block / match-arm guard / unsafe block are not walked by checkGoBlockCaptures")
+func TestT1640GoBlockWalkT1658Arms(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"bare_nested_block", `{ done.send(h.fd); }`},
 		{"match_arm_guard", "int r = match 1 { 1 if h.fd > 0 => 7, _ => 0, }; done.send(r);"},
@@ -148,6 +145,53 @@ func TestT1640GoBlockWalkT1658MissingArms(t *testing.T) {
 			expectError(t, errs, "cannot send non-sendable variable 'h'")
 		})
 	}
+}
+
+// T1698 — the arm PATTERN, a shape NEITHER walker visited. `match true { <expr>
+// => … }` puts an arbitrary expression in pattern position, so a capture reached
+// only through one was invisible to this gate AND absent from codegen's arg pack
+// (which panicked `undefined variable` rather than miscompiling silently — the
+// one mercy that distinguishes it from T1658). The parity guard in
+// internal/codegen/gowalk_parity_test.go could not have caught this: both
+// walkers had the `*ast.MatchExpr` arm and both were wrong inside it.
+func TestT1698GoBlockWalkMatchArmPattern(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		// *ast.ExpressionMatchPattern — the multi-way dispatch form.
+		{"expression_pattern", "int r = match true { h.fd > 0 => 7, _ => 0, }; done.send(r);"},
+		// *ast.LiteralMatchPattern — a STRING literal pattern carries interpolation
+		// parts, so the pattern itself can reference an outer local. This is the
+		// only load-bearing coverage of that arm: remove it from the walk and this
+		// source passes the gate silently (and then panics codegen with
+		// `undefined variable "h"`).
+		{"literal_pattern_interpolation", `string s = "3"; int r = match s { "{h.fd}" => 7, _ => 0, }; done.send(r);`},
+		// The SUBJECT side of a literal-pattern arm — not what the pattern walk
+		// visits, pinned here so widening the walk is shown not to disturb it.
+		{"literal_pattern_subject", "int r = match h.fd { 3 => 7, _ => 0, }; done.send(r);"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := checkErrs(t, goWalkArmSrc("", tc.body))
+			expectError(t, errs, "cannot send non-sendable variable 'h'")
+		})
+	}
+}
+
+// T1698 — a pattern that BINDS a name must not be misread as a capture. `v` here
+// is bound by the arm, not referenced from the enclosing scope, so widening the
+// walk to patterns must leave it alone; recording it would report a bogus
+// sendability error on a name the go block owns.
+func TestT1698GoBlockWalkBindingPatternIsNotACapture(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		main() {
+			done := channel[int](1);
+			int n = 3;
+			go {
+				int r = match n {
+					v => v + 1,
+				};
+				done.send(r);
+			};
+		}
+	`))
 }
 
 // A `sharable`-annotated type may NOT hold a closure field: R1 made a Signature
@@ -275,3 +319,147 @@ func TestT1640EmptyGoBlockRecordsNoCaptures(t *testing.T) {
 		}
 	`))
 }
+
+// T1658 — the `else` chain. The fix deleted the `walkElse` helper, so an
+// `else { … }` block now reaches the walk only through walkStmt's new
+// `*ast.Block` arm and an `else if` only through walkStmt recursing on itself.
+// The pre-existing `is_expression_operand` case has an `else` block but reaches
+// `h` through the `if` subject, so without these the `else` side has no
+// load-bearing coverage of its own: re-deleting the `*ast.Block` arm would
+// silently un-walk every `else` body along with every bare block.
+func TestT1658GoBlockWalkElseArms(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"else_block", "if 1 > 2 { done.send(0); } else { done.send(h.fd); }"},
+		{"else_if_condition", "if 1 > 2 { done.send(0); } else if h.fd > 0 { done.send(1); } else { done.send(2); }"},
+		{"else_if_tail_else", "if 1 > 2 { done.send(0); } else if 2 > 3 { done.send(1); } else { done.send(h.fd); }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := checkErrs(t, goWalkArmSrc("", tc.body))
+			expectError(t, errs, "cannot send non-sendable variable 'h'")
+		})
+	}
+}
+
+// T1658 — the `*ast.Block` arm is recursive. A single flat bare-block case would
+// still pass against a non-recursive implementation that only looked at the
+// immediate statements of the go block; these do not.
+func TestT1658GoBlockWalkNestedBareBlocks(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"block_in_block", "{ { done.send(h.fd); } }"},
+		{"block_in_loop_body", "for int i = 0; i < 1; i = i + 1 { { done.send(h.fd); } }"},
+		{"block_in_unsafe", "unsafe { { done.send(h.fd); } }"},
+		{"unsafe_in_block", "{ unsafe { done.send(h.fd); } }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := checkErrs(t, goWalkArmSrc("", tc.body))
+			expectError(t, errs, "cannot send non-sendable variable 'h'")
+		})
+	}
+}
+
+// `record` has three rejection paths and the sendability one above is only the
+// first. T1589's mutable-borrow rejection is the sharpest of the three — a `~`
+// parameter escaping into a coroutine made codegen emit IR referencing the
+// enclosing function's parameter — so pin that it is reached through the arms
+// T1658/T1698 added, not just through a top-level statement.
+func TestT1658GoBlockWalkNewArmsRejectMutBorrow(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"bare_block", "{ done.send(n); }"},
+		{"match_arm_guard", "int r = match 1 { 1 if n > 0 => 7, _ => 0, }; done.send(r);"},
+		{"unsafe_block", "unsafe { done.send(n); }"},
+		{"else_block", "if 1 > 2 { done.send(0); } else { done.send(n); }"},
+		{"match_arm_pattern", "int r = match true { n > 0 => 7, _ => 0, }; done.send(r);"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := checkErrs(t, `
+				bump(int ~n, channel[int] done) {
+					go {
+`+tc.body+`
+					};
+				}
+			`)
+			expectError(t, errs, "cannot capture mutable borrow 'n'")
+		})
+	}
+}
+
+// A `go { … }` block whose ONLY reference through a new arm is to a block-local
+// must record nothing: `scopeContains` excludes it, so widening the walk must not
+// turn an in-block binding into a cross-boundary capture. Written with a
+// `not_sendable` local, the shape that would report loudest if it regressed.
+func TestT1658GoBlockWalkNewArmsIgnoreBlockLocals(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"bare_block", "{ local := Handle(fd: 3); done.send(local.fd); }"},
+		{"unsafe_block", "unsafe { local := Handle(fd: 3); done.send(local.fd); }"},
+		{"match_arm_guard", "local := Handle(fd: 3); int r = match 1 { 1 if local.fd > 0 => 7, _ => 0, }; done.send(r);"},
+		{"else_block", "if 1 > 2 { done.send(0); } else { local := Handle(fd: 3); done.send(local.fd); }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expectNoErrors(t, checkErrs(t, "type Handle `not_sendable"+` {
+					int fd;
+				}
+				main() {
+					done := channel[int](1);
+					go {
+`+tc.body+`
+					};
+				}
+			`))
+		})
+	}
+}
+
+// The last two statement arms of the walk with no coverage. Both are reachable
+// from user source today: a `go { … }` block lexically nested in a generator body
+// keeps the enclosing generator context, so `yield` inside it parses and passes
+// the "yield outside of generator function" guard. The gate below is the only
+// thing standing between that shape and a `not_sendable` value crossing the
+// boundary.
+//
+// NOTE — T1428: the same shape then emits invalid IR (`use of undefined value
+// '%yield_slot.addr'`), because codegen keeps the generator's yield slot while
+// compiling the go block into a separate coroutine. Its fix is a sema REJECTION
+// of `yield` inside a `go` block, at which point these arms become dead and
+// these two cases should be deleted along with them. They are sema-only (no
+// codegen) precisely so T1428's backend crash does not block them.
+func TestT1640GoBlockWalkYieldArms(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"yield_stmt", "type Handle `not_sendable" + ` {
+				int fd;
+			}
+			gen() stream[int] {
+				h := Handle(fd: 3);
+				go {
+					yield h.fd;
+				};
+				yield 1;
+			}
+		`},
+		{"yield_delegate_stmt", "type Handle `not_sendable" + ` {
+				int fd;
+			}
+			inner(int n) stream[int] {
+				yield n;
+			}
+			gen() stream[int] {
+				h := Handle(fd: 3);
+				go {
+					yield * inner(h.fd);
+				};
+				yield 1;
+			}
+		`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := checkErrs(t, tc.src)
+			expectError(t, errs, "cannot send non-sendable variable 'h'")
+		})
+	}
+}
+
+// `*ast.AutoCloneExpr` is the one walkExpr arm with no test, and deliberately so:
+// the intrinsic is synth-only (internal/sema/clone.go builds it into generated
+// `clone()` bodies for generic fields, T0605), so it can never appear inside a
+// user-written `go { … }` block. The arm is defensive. Recorded here so a future
+// coverage sweep does not spend time hunting a source spelling that does not
+// exist.

@@ -5,6 +5,15 @@
 // would block (EAGAIN), the goroutine suspends via coro.suspend and is woken
 // by the reactor poller thread when the fd becomes ready.
 // Socket operations return -errno on failure.
+//
+// Host name resolution (T1518) deliberately does NOT go through that reactor.
+// The reactor only knows how to wait on an fd, whereas the platform resolver
+// owns /etc/hosts, search domains, resolv.conf options and mDNS — reimplementing
+// DNS on the reactor would lose all of that. Instead `_net_resolve` blocks in
+// getaddrinfo behind the scheduler's syscall handoff (T1685): the calling M is
+// released along with its P, so no other goroutine is delayed while the resolver
+// works. A dead nameserver can therefore stall the *calling goroutine* for
+// several seconds; a caller-visible resolve timeout is tracked as T1563.
 _net_socket_create(int domain, int typ, int protocol) int `extern("promise_net_socket_create");
 _net_socket_bind_addr(int fd, string host, int port) int `extern("promise_net_socket_bind_addr");
 _net_socket_listen(int fd, int backlog) int `extern("promise_net_socket_listen");
@@ -25,6 +34,17 @@ _net_netpoll_open(int fd) int `extern("promise_net_netpoll_open");
 _net_netpoll_close(int pd) `extern("promise_net_netpoll_close");
 _net_netpoll_wait_read(int pd) `extern("promise_netpoll_wait_read");
 _net_netpoll_wait_write(int pd) `extern("promise_netpoll_wait_write");
+
+// Name resolution (T1518). Pointers are carried as int, matching the _pd
+// PollDesc convention above. _net_resolve returns the addrinfo list head as an
+// int, or a negative normalized code: -1 not found, -2 try again, -3 failed,
+// -4 unsupported on this target.
+_net_resolve(string host, string service) int `extern("promise_net_resolve");
+_net_resolve_next(int node) int `extern("promise_net_resolve_next");
+_net_resolve_family(int node) int `extern("promise_net_resolve_family");
+_net_resolve_address(int node) string `extern("promise_net_resolve_address");
+_net_resolve_free(int list) `extern("promise_net_resolve_free");
+_net_socket_connect_resolved(int fd, int node) int `extern("promise_net_socket_connect_resolved");
 
 _eagain() int `target(macos) {
   return 35;
@@ -86,6 +106,78 @@ _net_strerror(int code) string {
     10061 => "connection refused", // WSAECONNREFUSED
     _ => "network error (errno {code})",
   };
+}
+
+enum ResolveErrorKind `public `doc("Why host name resolution failed.") {
+  not_found `doc("The host name does not exist."),
+  try_again `doc("A temporary resolver failure; retrying may succeed."),
+  failed `doc("A permanent resolver failure."),
+  unsupported `doc("Name resolution is not available on this target."),
+}
+
+type ResolveError is NetError `public `doc("Raised when a host name cannot be resolved to an IP address. `host` is the name that failed; `kind` says whether the failure is permanent or worth retrying. Inherits NetError, so an existing `? e is NetError` catch also catches it. Naming either type in a typed catch needs it in scope unqualified (`use net as _;`) — `? e is net.ResolveError` does not parse yet (T1701), and `e as net.ResolveError` panics codegen (T1538).") {
+  string host;
+  ResolveErrorKind kind;
+}
+
+// Maps a normalized resolver code from _net_resolve onto a ResolveError. `kind`
+// is the single source of truth for why resolution failed; the inherited
+// NetError.code stays 0 because the normalized resolver codes are not errnos and
+// _net_strerror would mistranslate them.
+_make_resolve_error(string host, int code) ResolveError {
+  ResolveErrorKind kind = ResolveErrorKind.failed;
+  string reason = "resolver failure";
+  if code == -1 {
+    kind = ResolveErrorKind.not_found;
+    reason = "not found";
+  } else if code == -2 {
+    kind = ResolveErrorKind.try_again;
+    reason = "temporary resolver failure, retry may succeed";
+  } else if code == -4 {
+    kind = ResolveErrorKind.unsupported;
+    reason = "name resolution is not supported on this target";
+  }
+  return ResolveError(code: 0, host: host.clone(), kind: move kind,
+  message: "cannot resolve host '{host}': {reason}");
+}
+
+// Owns an addrinfo list returned by _net_resolve so it is released on every exit
+// path — including `raise` and an early `return` from the middle of a connect
+// loop — via the scope cleanup stack. The list is allocated by the platform
+// resolver (libc malloc), so it is invisible to the leak detector; drop is the
+// only thing standing between a failed connect and a permanent leak.
+type _AddrList {
+  int _handle;
+
+  drop(~this) {
+    if this._handle != 0 {
+      _net_resolve_free(this._handle);
+    }
+  }
+}
+
+resolve!(string host) string[] `public `doc("Resolves a host name to its IP addresses (both A and AAAA records), in the order the platform resolver prefers. Numeric literals such as \"127.0.0.1\" or \"::1\" are accepted and returned unchanged. Results are in presentation form. Raises ResolveError if the name cannot be resolved.") {
+  int head = _net_resolve(host, "0");
+  if head < 0 {
+    raise _make_resolve_error(host, head);
+  }
+  _AddrList owned = _AddrList(_handle: head);
+  string[] addresses = [];
+  int node = head;
+  while node != 0 {
+    string text = _net_resolve_address(node);
+    if text.len > 0 {
+      addresses.push(move text);
+    }
+    node = _net_resolve_next(node);
+  }
+  // A successful lookup that yielded nothing usable would otherwise hand back an
+  // empty vector, which the doc comment promises never happens and which a caller
+  // would only discover by indexing out of bounds.
+  if addresses.len == 0 {
+    raise _make_resolve_error(host, -1);
+  }
+  return addresses;
 }
 
 _af_inet() int {
@@ -174,21 +266,42 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
   int _fd;
   int _pd; // PollDesc pointer (as int) for reactor integration
 
-  connect!(string host, int port) Self `factory `public `doc("Connects to a TCP server at the given host and port. Host must be an IPv4 address. Blocks the goroutine until the connection is established.") {
-    int fd = _net_socket_create(_af_inet(), _sock_stream(), 0);
-    if fd < 0 {
-      raise _make_net_error(fd);
+  connect!(string host, int port) Self `factory `public `doc("Connects to a TCP server at the given host and port. The host may be a name (\"example.com\", \"localhost\") or an IPv4/IPv6 literal; names are resolved via the platform resolver and the resolved addresses are tried in the order it prefers. Blocks the goroutine until the connection is established. Raises ResolveError if the name cannot be resolved, NetError if no resolved address accepted the connection.") {
+    int head = _net_resolve(host, "{port}");
+    if head < 0 {
+      raise _make_resolve_error(host, head);
     }
-    // Set non-blocking BEFORE connect so connect() returns EINPROGRESS.
-    // Register with epoll AFTER connect so the fd is in "connecting" (not writable)
-    // state at registration time — EPOLLET then fires correctly when the connection
-    // completes. Registering before connect would cause a spurious initial EPOLLOUT
-    // (fresh socket is writable) that EPOLLET consumes, and fast loopback connections
-    // may never produce a second edge transition, leaving the goroutine parked forever
-    // (B0322).
-    _net_socket_set_nonblock(fd);
-    int rc = _net_socket_connect_addr(fd, host, port);
-    if rc < 0 {
+    // Frees the addrinfo list on every exit below, including the returns inside
+    // the loop and the raises after it.
+    _AddrList owned = _AddrList(_handle: head);
+
+    // getaddrinfo applies RFC 6724 destination-address ordering, so trying the
+    // addresses in list order is the correct policy: on a v4-only network a
+    // v6-first list fails fast with ENETUNREACH and falls through to the v4
+    // address. (Racing v4 and v6 in parallel — Happy Eyeballs — is out of scope.)
+    int node = head;
+    int last_err = 0;
+    while node != 0 {
+      int fd = _net_socket_create(_net_resolve_family(node), _sock_stream(), 0);
+      if fd < 0 {
+        last_err = fd;
+        node = _net_resolve_next(node);
+        continue;
+      }
+      // Set non-blocking BEFORE connect so connect() returns EINPROGRESS.
+      // Register with epoll AFTER connect so the fd is in "connecting" (not writable)
+      // state at registration time — EPOLLET then fires correctly when the connection
+      // completes. Registering before connect would cause a spurious initial EPOLLOUT
+      // (fresh socket is writable) that EPOLLET consumes, and fast loopback connections
+      // may never produce a second edge transition, leaving the goroutine parked forever
+      // (B0322).
+      _net_socket_set_nonblock(fd);
+      int rc = _net_socket_connect_resolved(fd, node);
+      if rc >= 0 {
+        // Immediate connect (non-blocking socket connected synchronously — rare).
+        int pd = _net_netpoll_open(fd);
+        return TcpStream(_fd: fd, _pd: pd);
+      }
       int err = 0 - rc;
       if err == _einprogress() {
         // Non-blocking connect in progress — register with reactor, wait for writable,
@@ -197,20 +310,22 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
         int pd = _net_netpoll_open(fd);
         _net_netpoll_wait_write(pd);
         int sock_err = _net_socket_get_error(fd);
-        if sock_err != 0 {
-          _net_netpoll_close(pd);
-          _net_socket_close(fd);
-          raise NetError(code: sock_err, message: _net_strerror(sock_err));
+        if sock_err == 0 {
+          return TcpStream(_fd: fd, _pd: pd);
         }
-        return TcpStream(_fd: fd, _pd: pd);
+        _net_netpoll_close(pd);
+        _net_socket_close(fd);
+        last_err = 0 - sock_err;
       } else {
         _net_socket_close(fd);
-        raise _make_net_error(rc);
+        last_err = rc;
       }
+      node = _net_resolve_next(node);
     }
-    // Immediate connect (non-blocking socket connected synchronously — rare).
-    int pd = _net_netpoll_open(fd);
-    return TcpStream(_fd: fd, _pd: pd);
+    if last_err == 0 {
+      raise NetError(code: 0, message: "cannot connect to '{host}': resolver returned no usable addresses");
+    }
+    raise _make_net_error(last_err);
   }
 
   read!(~this, u8[] ~buf) int `public `doc("Reads bytes into buf. Returns the number of bytes read (0 at EOF). Blocks the goroutine until data is available.") {

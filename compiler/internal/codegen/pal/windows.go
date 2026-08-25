@@ -4106,6 +4106,77 @@ func (p *WindowsPAL) EmitSocketBindAddr(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// --- Windows name resolution (T1518) ---
+
+// windowsAddrinfoLayout returns the Winsock ADDRINFOA layout. Like BSD, Windows
+// places ai_canonname before ai_addr, and ai_addrlen is a size_t rather than the
+// POSIX socklen_t.
+func windowsAddrinfoLayout() addrinfoLayout {
+	return addrinfoLayout{
+		familyOffset:  4,
+		addrLenOffset: 16,
+		addrLenIs64:   true,
+		addrOffset:    32,
+		nextOffset:    40,
+		afInet6:       23, // Windows AF_INET6
+	}
+}
+
+// EmitResolveHost defines @pal_resolve_host(i8* host, i8* service, i8** out) → i32.
+// Winsock startup is handled inside @pal_getaddrinfo, which this delegates to.
+func (p *WindowsPAL) EmitResolveHost(module *ir.Module) *ir.Func {
+	// WSAHOST_NOT_FOUND / WSANO_DATA / WSATRY_AGAIN.
+	return emitResolveHostShared(module, resolverCodes{noName: 11001, noData: 11004, tryAgain: 11002})
+}
+
+// EmitResolveNext defines @pal_resolve_next(i8* node) → i8*.
+func (p *WindowsPAL) EmitResolveNext(module *ir.Module) *ir.Func {
+	return emitResolveNextShared(module, windowsAddrinfoLayout())
+}
+
+// EmitResolveFamily defines @pal_resolve_family(i8* node) → i32.
+func (p *WindowsPAL) EmitResolveFamily(module *ir.Module) *ir.Func {
+	return emitResolveFamilyShared(module, windowsAddrinfoLayout())
+}
+
+// EmitResolveAddressText defines @pal_resolve_address_text(i8* node, i8* buf, i32 len) → i32.
+// Winsock's inet_ntop takes a size_t buffer length, not socklen_t.
+func (p *WindowsPAL) EmitResolveAddressText(module *ir.Module) *ir.Func {
+	return emitResolveAddressTextShared(module, windowsAddrinfoLayout(), true)
+}
+
+// EmitResolveFree defines @pal_resolve_free(i8* list) → void.
+func (p *WindowsPAL) EmitResolveFree(module *ir.Module) *ir.Func {
+	return emitResolveFreeShared(module)
+}
+
+// EmitSocketConnectResolved defines @pal_socket_connect_resolved(i32 fd, i8* node) → i32.
+// Uses the resolver's own sockaddr verbatim, so AF_INET and AF_INET6 both work.
+func (p *WindowsPAL) EmitSocketConnectResolved(module *ir.Module) *ir.Func {
+	connectFn := getOrDeclareFunc(module, "connect", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("namelen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_connect_resolved", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	addr, addrLen := loadResolvedAddr(entry, fn.Params[1], windowsAddrinfoLayout())
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	connRet := entry.NewCall(connectFn, sock, addr, addrLen)
+	isErr := entry.NewICmp(enum.IPredEQ, connRet, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
 // EmitSocketConnectAddr defines @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32.
 // Parses host via inet_pton, constructs sockaddr_in, calls connect.
 // Returns 0 on success, -WSAError on error.

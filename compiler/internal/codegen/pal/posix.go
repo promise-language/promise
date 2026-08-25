@@ -3007,6 +3007,85 @@ func (p *PosixPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// --- POSIX name resolution (T1518) ---
+
+// posixAddrinfoLayout returns the `struct addrinfo` layout for this target.
+// Linux orders the trailing pointers ai_addr, ai_canonname, ai_next; BSD/macOS
+// swaps the first two — reading ai_addr at the wrong offset would hand connect()
+// a pointer to the canonical-name string, so this offset matters a great deal.
+func (p *PosixPAL) posixAddrinfoLayout() addrinfoLayout {
+	layout := addrinfoLayout{
+		familyOffset:  4,
+		addrLenOffset: 16,
+		addrOffset:    24,
+		nextOffset:    40,
+		afInet6:       10, // Linux AF_INET6
+	}
+	if p.isMacOS() {
+		layout.addrOffset = 32 // ai_canonname precedes ai_addr on BSD
+		layout.afInet6 = 30
+	}
+	return layout
+}
+
+// EmitResolveHost defines @pal_resolve_host(i8* host, i8* service, i8** out) → i32.
+func (p *PosixPAL) EmitResolveHost(module *ir.Module) *ir.Func {
+	// EAI_* values are negative on Linux and positive on macOS, with no overlap
+	// in meaning — hence separate tables rather than one shared set of constants.
+	codes := resolverCodes{noName: -2, noData: -5, tryAgain: -3} // EAI_NONAME/NODATA/AGAIN
+	if p.isMacOS() {
+		codes = resolverCodes{noName: 8, noData: 7, tryAgain: 2}
+	}
+	return emitResolveHostShared(module, codes)
+}
+
+// EmitResolveNext defines @pal_resolve_next(i8* node) → i8*.
+func (p *PosixPAL) EmitResolveNext(module *ir.Module) *ir.Func {
+	return emitResolveNextShared(module, p.posixAddrinfoLayout())
+}
+
+// EmitResolveFamily defines @pal_resolve_family(i8* node) → i32.
+func (p *PosixPAL) EmitResolveFamily(module *ir.Module) *ir.Func {
+	return emitResolveFamilyShared(module, p.posixAddrinfoLayout())
+}
+
+// EmitResolveAddressText defines @pal_resolve_address_text(i8* node, i8* buf, i32 len) → i32.
+func (p *PosixPAL) EmitResolveAddressText(module *ir.Module) *ir.Func {
+	return emitResolveAddressTextShared(module, p.posixAddrinfoLayout(), false)
+}
+
+// EmitResolveFree defines @pal_resolve_free(i8* list) → void.
+func (p *PosixPAL) EmitResolveFree(module *ir.Module) *ir.Func {
+	return emitResolveFreeShared(module)
+}
+
+// EmitSocketConnectResolved defines @pal_socket_connect_resolved(i32 fd, i8* node) → i32.
+// Uses the resolver's own sockaddr verbatim, so AF_INET and AF_INET6 both work
+// without constructing a family-specific address here.
+func (p *PosixPAL) EmitSocketConnectResolved(module *ir.Module) *ir.Func {
+	connectFn := getOrDeclareFunc(module, "connect", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_connect_resolved", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	addr, addrLen := loadResolvedAddr(entry, fn.Params[1], p.posixAddrinfoLayout())
+	connRet := entry.NewCall(connectFn, fn.Params[0], addr, addrLen)
+	isErr := entry.NewICmp(enum.IPredSLT, connRet, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
 // --- POSIX high-level socket address operations (T0071) ---
 //
 // These functions construct sockaddr_in internally via inet_pton, avoiding complex

@@ -467,6 +467,14 @@ type Compiler struct {
 	palSocketAcceptAddr   *ir.Func // @pal_socket_accept_addr(i32 listen_fd) → i32
 	palSocketGetLocalPort *ir.Func // @pal_socket_get_local_port(i32 fd) → i32
 
+	// PAL name resolution (T1518)
+	palResolveHost           *ir.Func // @pal_resolve_host(i8* host, i8* service, i8** out) → i32
+	palResolveNext           *ir.Func // @pal_resolve_next(i8* node) → i8*
+	palResolveFamily         *ir.Func // @pal_resolve_family(i8* node) → i32
+	palResolveAddressText    *ir.Func // @pal_resolve_address_text(i8* node, i8* buf, i32 len) → i32
+	palResolveFree           *ir.Func // @pal_resolve_free(i8* list) → void
+	palSocketConnectResolved *ir.Func // @pal_socket_connect_resolved(i32 fd, i8* node) → i32
+
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
 

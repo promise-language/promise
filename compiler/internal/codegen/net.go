@@ -3,6 +3,7 @@ package codegen
 import (
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/promise-language/promise/compiler/internal/codegen/pal"
@@ -41,6 +42,7 @@ func (c *Compiler) defineNetPALBodies() {
 		"promise_net_socket_set_nonblock",
 		"promise_net_netpoll_open",
 		"promise_net_netpoll_close",
+		"promise_net_resolve",
 	}
 
 	hasNetExterns := false
@@ -71,6 +73,15 @@ func (c *Compiler) defineNetPALBodies() {
 	c.palSocketGetLocalPort = p.EmitSocketGetLocalPort(c.module)
 	c.palGetAddrInfo = p.EmitGetAddrInfo(c.module)
 	c.palFreeAddrInfo = p.EmitFreeAddrInfo(c.module)
+
+	// Name resolution (T1518) — must follow EmitGetAddrInfo/EmitFreeAddrInfo,
+	// which these delegate to.
+	c.palResolveHost = p.EmitResolveHost(c.module)
+	c.palResolveNext = p.EmitResolveNext(c.module)
+	c.palResolveFamily = p.EmitResolveFamily(c.module)
+	c.palResolveAddressText = p.EmitResolveAddressText(c.module)
+	c.palResolveFree = p.EmitResolveFree(c.module)
+	c.palSocketConnectResolved = p.EmitSocketConnectResolved(c.module)
 
 	// Lazily emit high-level socket address PAL functions (T0071)
 	c.palSocketBindAddr = p.EmitSocketBindAddr(c.module)
@@ -128,6 +139,24 @@ func (c *Compiler) defineNetPALBodies() {
 	}
 	if fn, ok := irFuncByName["promise_net_socket_set_nonblock"]; ok {
 		c.defineNetSocketSetNonBlockBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_resolve"]; ok {
+		c.defineNetResolveBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_resolve_next"]; ok {
+		c.defineNetResolveNextBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_resolve_family"]; ok {
+		c.defineNetResolveFamilyBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_resolve_address"]; ok {
+		c.defineNetResolveAddressBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_resolve_free"]; ok {
+		c.defineNetResolveFreeBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_socket_connect_resolved"]; ok {
+		c.defineNetSocketConnectResolvedBody(fn)
 	}
 	// Netpoll bridge functions require reactor support — skip on WASM.
 	// On WASM, these externs remain bodyless declarations (linker DCEs them
@@ -387,5 +416,129 @@ func (c *Compiler) defineNetNetpollCloseBody(fn *ir.Func) {
 	pdPtr := entry.NewIntToPtr(pdRaw, irtypes.I8Ptr)
 
 	entry.NewCall(c.funcs["promise_netpoll_close"], pdPtr)
+	entry.NewRet(nil)
+}
+
+// Name resolution bridge functions (T1518)
+//
+// Resolution runs on the platform resolver (getaddrinfo), not on the netpoll
+// reactor: the reactor only knows how to wait on an fd, while getaddrinfo owns
+// /etc/hosts, search domains, resolv.conf options and mDNS. The scheduler is
+// kept unblocked with the same P-handoff every other thread-blocking call uses
+// (T1685) — enter_syscall detaches this M's P so other goroutines keep running
+// while the resolver blocks, which can be seconds on a dead nameserver.
+
+// defineNetResolveBody: void @promise_net_resolve(i8* sret, i8* host, i8* service)
+// Returns the addrinfo list head as an int on success, or a negative normalized
+// resolver code (-1 not found, -2 try again, -3 failed, -4 unsupported).
+func (c *Compiler) defineNetResolveBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	hostCStr := c.stringToCStr(entry, fn.Params[1])
+	serviceCStr := c.stringToCStr(entry, fn.Params[2])
+	outAlloca := entry.NewAlloca(irtypes.I8Ptr)
+
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palResolveHost, hostCStr, serviceCStr, outAlloca)
+	c.emitExitSyscall(entry)
+
+	entry.NewCall(c.palFree, hostCStr)
+	entry.NewCall(c.palFree, serviceCStr)
+
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(
+		entry.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0)),
+		okBlk, errBlk)
+
+	listPtr := okBlk.NewLoad(irtypes.I8Ptr, outAlloca)
+	c.storeIntResult(okBlk, sret, okBlk.NewPtrToInt(listPtr, irtypes.I64))
+	okBlk.NewRet(nil)
+
+	c.storeIntResult(errBlk, sret, errBlk.NewSExt(rc, irtypes.I64))
+	errBlk.NewRet(nil)
+}
+
+// defineNetResolveNextBody: void @promise_net_resolve_next(i8* sret, i8* node)
+func (c *Compiler) defineNetResolveNextBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	nodeRaw := c.extractRawInt(entry, fn.Params[1])
+	nodePtr := entry.NewIntToPtr(nodeRaw, irtypes.I8Ptr)
+	next := entry.NewCall(c.palResolveNext, nodePtr)
+	c.storeIntResult(entry, sret, entry.NewPtrToInt(next, irtypes.I64))
+	entry.NewRet(nil)
+}
+
+// defineNetResolveFamilyBody: void @promise_net_resolve_family(i8* sret, i8* node)
+func (c *Compiler) defineNetResolveFamilyBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	nodeRaw := c.extractRawInt(entry, fn.Params[1])
+	nodePtr := entry.NewIntToPtr(nodeRaw, irtypes.I8Ptr)
+	family := entry.NewCall(c.palResolveFamily, nodePtr)
+	c.storeIntResult(entry, sret, entry.NewSExt(family, irtypes.I64))
+	entry.NewRet(nil)
+}
+
+// defineNetResolveAddressBody: void @promise_net_resolve_address(i8* sret, i8* node)
+// Renders the node's address in presentation form, or "" if it cannot be rendered.
+func (c *Compiler) defineNetResolveAddressBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	nodeRaw := c.extractRawInt(entry, fn.Params[1])
+	nodePtr := entry.NewIntToPtr(nodeRaw, irtypes.I8Ptr)
+
+	// INET6_ADDRSTRLEN is 46; 64 leaves room without another constant to track.
+	const addrTextBufSize = 64
+	buf := entry.NewAlloca(irtypes.NewArray(addrTextBufSize, irtypes.I8))
+	bufPtr := entry.NewBitCast(buf, irtypes.I8Ptr)
+	n := entry.NewCall(c.palResolveAddressText, nodePtr, bufPtr,
+		constant.NewInt(irtypes.I32, addrTextBufSize))
+
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(
+		entry.NewICmp(enum.IPredSLT, n, constant.NewInt(irtypes.I32, 0)),
+		errBlk, okBlk)
+
+	str := okBlk.NewCall(c.funcs["promise_string_new"], bufPtr, okBlk.NewSExt(n, irtypes.I64))
+	c.storeStringResult(okBlk, sret, str)
+	okBlk.NewRet(nil)
+
+	emptyStr := errBlk.NewCall(c.funcs["promise_string_new"],
+		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
+	c.storeStringResult(errBlk, sret, emptyStr)
+	errBlk.NewRet(nil)
+}
+
+// defineNetResolveFreeBody: void @promise_net_resolve_free(i8* list)
+func (c *Compiler) defineNetResolveFreeBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+
+	listRaw := c.extractRawInt(entry, fn.Params[0])
+	listPtr := entry.NewIntToPtr(listRaw, irtypes.I8Ptr)
+	entry.NewCall(c.palResolveFree, listPtr)
+	entry.NewRet(nil)
+}
+
+// defineNetSocketConnectResolvedBody: void @promise_net_socket_connect_resolved(i8* sret, i8* fd, i8* node)
+func (c *Compiler) defineNetSocketConnectResolvedBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+	nodeRaw := c.extractRawInt(entry, fn.Params[2])
+	nodePtr := entry.NewIntToPtr(nodeRaw, irtypes.I8Ptr)
+
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palSocketConnectResolved, fdI32, nodePtr)
+	c.emitExitSyscall(entry)
+	c.storeIntResult(entry, sret, entry.NewSExt(rc, irtypes.I64))
 	entry.NewRet(nil)
 }

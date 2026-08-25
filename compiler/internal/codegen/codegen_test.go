@@ -291,7 +291,12 @@ func parseModuleSource(t *testing.T, moduleName, src string) (*sema.ModuleInfo, 
 	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
 	modFile.Uses = append([]*ast.UseDecl{stdUse}, modFile.Uses...)
 
-	modInfo, semaErrs := sema.CheckWithModules(modFile, map[string]*types.Scope{"std": stdScope})
+	// Check against the host target, like getCodegenStdModInfo does: a real
+	// catalog module may carry `target(...) overloads (modules/net's _eagain has
+	// one per platform), and without target filtering they all get declared and
+	// collide as redeclarations.
+	modInfo, semaErrs := sema.CheckWithTarget(modFile,
+		map[string]*types.Scope{"std": stdScope}, sema.HostTargetInfo())
 	if len(semaErrs) > 0 {
 		t.Fatalf("module sema errors: %v", semaErrs)
 	}

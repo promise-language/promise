@@ -213,6 +213,26 @@ func (p *WasmWebPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
 	return emitStubFreeAddrInfo(module)
 }
 
+// WasmWeb name resolution stubs — no platform resolver (T1518).
+func (p *WasmWebPAL) EmitResolveHost(module *ir.Module) *ir.Func {
+	return emitStubResolveHost(module)
+}
+func (p *WasmWebPAL) EmitResolveNext(module *ir.Module) *ir.Func {
+	return emitStubResolveNext(module)
+}
+func (p *WasmWebPAL) EmitResolveFamily(module *ir.Module) *ir.Func {
+	return emitStubResolveFamily(module)
+}
+func (p *WasmWebPAL) EmitResolveAddressText(module *ir.Module) *ir.Func {
+	return emitStubResolveAddressText(module)
+}
+func (p *WasmWebPAL) EmitResolveFree(module *ir.Module) *ir.Func {
+	return emitStubResolveFree(module)
+}
+func (p *WasmWebPAL) EmitSocketConnectResolved(module *ir.Module) *ir.Func {
+	return emitStubSocketConnectResolved(module)
+}
+
 // WasmWeb reactor stubs — no reactor support (T0070).
 func (p *WasmWebPAL) EmitReactorCreate(module *ir.Module) *ir.Func {
 	return emitStubReactorCreate(module)

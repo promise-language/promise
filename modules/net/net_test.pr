@@ -335,3 +335,397 @@ test_stream_write_after_shutdown_raises_not_sigpipe() `test(exclude: wasm, timeo
   client.close()? e {
   };
 }
+
+// --- Name resolution (T1518) ---
+//
+// Every test here is hermetic: it resolves either a numeric literal or a name
+// that /etc/hosts (or the platform equivalent) answers locally. Nothing depends
+// on a working nameserver, so these cannot hang or flake in a sandboxed runner.
+
+test_resolve_ipv4_literal() `test(exclude: wasm) {
+  string[] addresses = resolve("127.0.0.1")?!;
+  assert(addresses.len == 1, "an IPv4 literal resolves to exactly itself");
+  assert(addresses[0] == "127.0.0.1", "IPv4 literal round-trips through inet_ntop");
+}
+
+test_resolve_ipv6_literal() `test(exclude: wasm) {
+  string[] addresses = resolve("::1")?!;
+  assert(addresses.len == 1, "an IPv6 literal resolves to exactly itself");
+  assert(addresses[0] == "::1", "IPv6 literal round-trips through inet_ntop");
+}
+
+// Exercises the AF_UNSPEC path: localhost may answer with 127.0.0.1, ::1, or
+// both depending on the host's /etc/hosts, and every answer must be a loopback
+// address in presentation form.
+test_resolve_localhost() `test(exclude: wasm) {
+  string[] addresses = resolve("localhost")?!;
+  assert(addresses.len >= 1, "localhost resolves to at least one address");
+  for address in addresses {
+    assert(address == "127.0.0.1" || address == "::1",
+    "localhost must resolve to a loopback address, got '{address}'");
+  }
+}
+
+// A host name longer than 255 characters is rejected locally by every platform
+// resolver (musl, glibc, macOS, Winsock) with EAI_NONAME — no packet is sent, so
+// this exercises the failure path without a network round trip or an NXDOMAIN
+// lookup that could hang for seconds or normalize to try_again instead.
+_over_long_host() string {
+  return "a".repeat(300);
+}
+
+test_resolve_invalid_name_raises() `test(exclude: wasm) {
+  bool raised = false;
+  resolve(_over_long_host())? e is ResolveError {
+    raised = true;
+    assert(e.host == _over_long_host(), "ResolveError carries the name that failed");
+    match e.kind {
+      ResolveErrorKind.not_found => {
+      },
+      _ => {
+        assert(false, "an over-long host name must normalize to not_found");
+      },
+    }
+  }!;
+  assert(raised, "resolving an over-long host name must raise ResolveError");
+}
+
+// ResolveError inherits NetError, so code that already catches NetError — the
+// http and tls modules, and any user code written before T1518 — keeps catching
+// resolution failures unchanged. This is a compile-time proof of that relation:
+// sema type-checks the conversion and the function is never called.
+//
+// The natural runtime form of this test, `resolve(bad)? e is NetError { }`,
+// cannot be written yet: T1702 makes a typed catch at a *supertype* drop only
+// the declared type's fields, so it leaks ResolveError.host. Restore the runtime
+// version when T1702 is fixed.
+_resolve_error_is_a_net_error(ResolveError move e) NetError {
+  return e;
+}
+
+// Connect by name. The raw server socket is bound to 127.0.0.1 and the client
+// connects to "localhost"; on a dual-stack host that resolves to ::1 first, so
+// this also covers the fall-through path where the first address is refused and
+// the next one succeeds. Sequential — the kernel backlog holds the connection
+// until accept, so no goroutine and no sleep are involved (T1632).
+test_connect_by_hostname() `test(exclude: wasm) {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("localhost", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  int written = client.write("hi".bytes())?!;
+  assert(written == 2, "wrote 2 bytes over a connection made by name");
+
+  u8[] buf = u8[].filled(0, 64);
+  int n = _net_socket_recv(afd, buf);
+  assert(n == 2, "server read 2 bytes");
+  assert(buf[0] == 104, "byte h");
+  assert(buf[1] == 105, "byte i");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_connect_invalid_name_raises() `test(exclude: wasm) {
+  bool raised = false;
+  TcpStream.connect(_over_long_host(), 80)? e is ResolveError {
+    raised = true;
+    assert(e.host == _over_long_host(), "ResolveError carries the name that failed");
+  }!;
+  assert(raised, "connecting to an unresolvable name must raise ResolveError");
+}
+
+// Repeated resolution must not accumulate Promise-side allocations: every
+// `string[]` result and every string inside it is owned by the caller and freed
+// at scope exit, which the allocation-count leak detector enforces here.
+//
+// Note what this does NOT cover. The addrinfo list itself is allocated by the
+// platform resolver with libc malloc, so it passes through neither pal_alloc nor
+// the `memory_limit` accounting (which counts only Promise allocations) — a
+// missing `_net_resolve_free` in `_AddrList.drop` leaks ~110 bytes per lookup
+// and every runtime check here stays green. That path is guarded structurally
+// instead, by TestNetAddrListDropFreesResolveList in the codegen Go tests, which
+// asserts the drop actually calls @promise_net_resolve_free.
+test_resolve_repeated_no_leak() `test(exclude: wasm, timeout: "30s") {
+  int i = 0;
+  while i < 2000 {
+    string[] addresses = resolve("localhost")?!;
+    assert(addresses.len >= 1, "localhost resolves");
+    i = i + 1;
+  }
+}
+
+// The three normalized resolver codes that no host runner can produce at
+// runtime. `unsupported` (-4) is only ever returned by the WASM stub, and
+// `try_again` (-2) / `failed` (-3) need a nameserver that is reachable but
+// broken — neither is reproducible hermetically, so the mapping is exercised
+// through _make_resolve_error directly. Without this, three of the four
+// ResolveErrorKind variants are constructed by no test at all, and a swapped
+// arm (say -2 reported as `failed`) would ship: `try_again` is the one kind a
+// caller is supposed to retry on, so mislabelling it turns a recoverable
+// hiccup into a permanent failure.
+test_resolve_error_kind_mapping() `test(exclude: wasm) {
+  ResolveError again = _make_resolve_error("host.example", 0 - 2);
+  match again.kind {
+    ResolveErrorKind.try_again => {
+    },
+    _ => {
+      assert(false, "-2 must map to try_again");
+    },
+  };
+  assert(again.message.contains("retry may succeed"), "try_again explains it is worth retrying");
+
+  ResolveError failed = _make_resolve_error("host.example", 0 - 3);
+  match failed.kind {
+    ResolveErrorKind.failed => {
+    },
+    _ => {
+      assert(false, "-3 must map to failed");
+    },
+  };
+  assert(failed.message.contains("resolver failure"), "failed names the resolver");
+
+  // The WASM path: a target with no resolver at all must say so, rather than
+  // claiming the name does not exist.
+  ResolveError unsupported = _make_resolve_error("host.example", 0 - 4);
+  match unsupported.kind {
+    ResolveErrorKind.unsupported => {
+    },
+    _ => {
+      assert(false, "-4 must map to unsupported");
+    },
+  };
+  assert(unsupported.message.contains("not supported"), "unsupported says the target has no resolver");
+
+  // An out-of-vocabulary code must not silently become not_found — anything
+  // unrecognized is a permanent failure.
+  ResolveError other = _make_resolve_error("host.example", 0 - 99);
+  match other.kind {
+    ResolveErrorKind.failed => {
+    },
+    _ => {
+      assert(false, "an unknown normalized code must fall back to failed");
+    },
+  };
+}
+
+// Every kind carries the failing name and leaves the inherited NetError.code at
+// 0: the normalized codes are not errnos, so _net_strerror would mistranslate
+// them (-2 is EAGAIN's neighbour, not "try again" in errno terms). A caller
+// reading .code must never see a resolver code leak through.
+test_resolve_error_fields() `test(exclude: wasm) {
+  for code in 1..5 {
+    ResolveError e = _make_resolve_error("host.example", 0 - code);
+    assert(e.host == "host.example", "ResolveError carries the failing name");
+    assert(e.code == 0, "a normalized resolver code must not be reported as an errno");
+    assert(e.message.contains("cannot resolve host 'host.example'"), "message names the host");
+  }
+}
+
+// An empty host name is the degenerate input a caller reaches by passing an
+// unvalidated string through. It must raise rather than resolve to something —
+// getaddrinfo(NULL-equivalent) would otherwise return the loopback or wildcard
+// address, so "" silently connecting to localhost is a real hazard.
+test_resolve_empty_host_raises() `test(exclude: wasm) {
+  bool raised = false;
+  resolve("")? e is ResolveError {
+    raised = true;
+    assert(e.host == "", "ResolveError echoes the empty name back");
+  }!;
+  assert(raised, "an empty host name must raise, never resolve");
+}
+
+// The per-address fall-through, run to exhaustion. "localhost" resolves to ::1
+// and/or 127.0.0.1; port 1 is reserved and has no listener, so *every* resolved
+// address is refused and connect walks the whole list before raising.
+//
+// The discrimination is the point: resolution succeeded, so the failure must
+// surface as a plain NetError carrying the connect errno — not as a
+// ResolveError. Reporting "cannot resolve host" for a refused connection sends
+// the reader to the wrong subsystem entirely.
+test_connect_by_name_all_addresses_refused() `test(exclude: wasm, timeout: "10s") {
+  bool raised = false;
+  bool was_resolve_error = false;
+  string message = "";
+  TcpStream.connect("localhost", 1)? e {
+    raised = true;
+    was_resolve_error = e is ResolveError;
+    message = e.message.clone();
+  };
+  // Port 1 is reserved, but a runner that somehow has a listener there would
+  // connect successfully; only assert when the connection actually failed.
+  if raised {
+    assert(!was_resolve_error,
+    "a refused connection to a name that resolved must not be reported as a resolution failure");
+    assert(!message.contains("cannot resolve host"),
+    "the message must describe the connect failure, not resolution: '{message}'");
+  }
+}
+
+// The raise path's allocation accounting. test_resolve_repeated_no_leak covers
+// the success path; this covers the other one — every failed lookup clones the
+// host name into ResolveError.host and interpolates a message, and the bridge
+// allocates a C string for both the host and the service on the way in. All of
+// those are pal_alloc'd, so the leak detector sees them; a missing free on the
+// failure path shows up here and nowhere else.
+test_resolve_repeated_failure_no_leak() `test(exclude: wasm, timeout: "30s") {
+  int raised = 0;
+  int i = 0;
+  while i < 500 {
+    resolve(_over_long_host())? e is ResolveError {
+      raised = raised + 1;
+    }!;
+    i = i + 1;
+  }
+  assert(raised == 500, "every lookup of an over-long name raised");
+}
+
+// Same accounting for the connect path, where a successful resolution is
+// followed by a failing connect: the _AddrList is live when the raise unwinds,
+// so this is the one runtime test that exercises the drop of a *non-empty*
+// resolver list on a raise rather than on a normal return.
+test_connect_failure_repeated_no_leak() `test(exclude: wasm, timeout: "30s") {
+  int i = 0;
+  while i < 200 {
+    TcpStream.connect("localhost", 1)? e {
+    };
+    i = i + 1;
+  }
+}
+
+// A zero handle must not reach the platform free. resolve() and connect() only
+// build an _AddrList after a successful lookup, so this branch is unreachable
+// from the module's own callers today — but it is the guard that makes
+// _AddrList safe to construct anywhere, and free(0) on a resolver list is
+// undefined rather than a no-op on every platform.
+test_addr_list_zero_handle_drop() `test(exclude: wasm) {
+  int i = 0;
+  while i < 100 {
+    _AddrList empty = _AddrList(_handle: 0);
+    i = i + 1;
+  }
+}
+
+_resolve_count_or_negative() int {
+  string[] addresses = resolve("localhost")? e {
+    return 0 - 1;
+  };
+  return addresses.len;
+}
+
+// Concurrent resolution is the whole reason T1518 runs getaddrinfo behind the
+// scheduler's syscall handoff instead of on the reactor: enter_syscall detaches
+// the calling M's P so the remaining goroutines keep running while the resolver
+// blocks. Nothing else in the suite drives that handoff concurrently, and a
+// regression that dropped it would not fail any sequential test — it would just
+// serialize every lookup behind one P, or corrupt the idle-M stack under load.
+//
+// Deterministic: each goroutine reports over a channel and the test collects
+// exactly as many results as it spawned, so there is no sleep and no timing
+// assumption (T1632).
+test_resolve_concurrent() `test(exclude: wasm, timeout: "30s") {
+  ch := channel[int](capacity: 16);
+  for i in 0..16 {
+    go {
+      ch.send(_resolve_count_or_negative());
+    };
+  }
+  int reported = 0;
+  for k in 0..16 {
+    result := <-ch;
+    if v := result {
+      assert(v >= 1, "every goroutine resolved localhost to at least one address");
+      reported = reported + 1;
+    }
+  }
+  assert(reported == 16, "all 16 goroutines reported");
+}
+
+_connect_ok(int port) bool {
+  TcpStream s = TcpStream.connect("localhost", port)? e {
+    return false;
+  };
+  s.close()? e {
+  };
+  return true;
+}
+
+// Connect-by-name concurrently against one listener. This drives resolution and
+// the reactor's non-blocking connect from several goroutines at once — the
+// combination T1518 introduced, where a goroutine hands its P away in
+// getaddrinfo and then parks on the reactor for the handshake. The listener
+// accepts sequentially from the test goroutine; the kernel backlog holds the
+// pending connections, so no sleep is needed.
+test_connect_by_name_concurrent() `test(exclude: wasm, timeout: "30s") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  ch := channel[bool](capacity: 8);
+  for i in 0..8 {
+    go {
+      ch.send(_connect_ok(port));
+    };
+  }
+
+  int accepted = 0;
+  for k in 0..8 {
+    TcpStream server = listener.accept()?!;
+    server.close()?!;
+    accepted = accepted + 1;
+  }
+  assert(accepted == 8, "accepted every connection made by name");
+
+  int connected = 0;
+  for k in 0..8 {
+    result := <-ch;
+    if v := result {
+      if v {
+        connected = connected + 1;
+      }
+    }
+  }
+  assert(connected == 8, "all 8 goroutines connected by name");
+
+  listener.close()?!;
+}
+
+// The AF_INET6 half of the connect path. Before T1518, connect built a
+// sockaddr_in from an IPv4 literal and could not reach a v6 address at all;
+// now the socket family comes from _net_resolve_family and the sockaddr comes
+// from the resolver verbatim. Port 1 is reserved, so the connection is refused
+// — the point is *how* it is refused: a NetError from connect(), which can only
+// happen if an AF_INET6 socket was created and handed a well-formed
+// sockaddr_in6. A wrong family or a malformed address surfaces as EAFNOSUPPORT
+// or EINVAL instead, and a v6 literal mistakenly pushed through the v4 path
+// would fail before connect() was ever reached.
+//
+// Written to hold on runners with IPv6 disabled too: resolution of a v6 literal
+// always succeeds locally, so the one thing asserted unconditionally is that
+// the failure is never reported as a resolution failure.
+test_connect_ipv6_literal() `test(exclude: wasm, timeout: "10s") {
+  string[] addresses = resolve("::1")?!;
+  assert(addresses[0] == "::1", "the v6 literal resolves to itself");
+
+  bool raised = false;
+  bool was_resolve_error = false;
+  int code = 0;
+  TcpStream.connect("::1", 1)? e is NetError {
+    raised = true;
+    was_resolve_error = e is ResolveError;
+    code = e.code;
+  } else e {
+    raised = true;
+    assert(false, "connecting to a v6 literal must fail as a NetError, not '{e.message}'");
+  };
+  if raised {
+    assert(!was_resolve_error, "a v6 literal always resolves; the failure must come from connect()");
+    assert(code != 0, "a connect failure must carry the socket errno");
+  }
+}

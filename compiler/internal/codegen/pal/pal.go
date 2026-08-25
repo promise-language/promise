@@ -208,6 +208,30 @@ type PAL interface {
 	// EmitFreeAddrInfo defines @pal_freeaddrinfo(i8* result) → void
 	EmitFreeAddrInfo(module *ir.Module) *ir.Func
 
+	// Name resolution (T1518)
+	// These build on EmitGetAddrInfo/EmitFreeAddrInfo and must be emitted after them.
+	// EmitResolveHost defines @pal_resolve_host(i8* host, i8* service, i8** out) → i32.
+	// Fills out with the head of a getaddrinfo addrinfo list (SOCK_STREAM, AF_UNSPEC)
+	// and returns 0, or leaves out null and returns a normalized negative code:
+	//   -1 host not found, -2 temporary failure, -3 permanent failure, -4 no resolver.
+	// The EAI_* numbering differs per platform, so normalization happens here rather
+	// than forcing every caller to learn three vocabularies.
+	EmitResolveHost(module *ir.Module) *ir.Func
+	// EmitResolveNext defines @pal_resolve_next(i8* node) → i8* (ai_next, null at end)
+	EmitResolveNext(module *ir.Module) *ir.Func
+	// EmitResolveFamily defines @pal_resolve_family(i8* node) → i32 (ai_family)
+	EmitResolveFamily(module *ir.Module) *ir.Func
+	// EmitResolveAddressText defines @pal_resolve_address_text(i8* node, i8* buf, i32 len) → i32
+	// Writes the presentation form of the node's address into buf, returns its length
+	// (excluding the terminator) or -1 if the family is unsupported / buf is too small.
+	EmitResolveAddressText(module *ir.Module) *ir.Func
+	// EmitResolveFree defines @pal_resolve_free(i8* list) → void (frees a resolve list)
+	EmitResolveFree(module *ir.Module) *ir.Func
+	// EmitSocketConnectResolved defines @pal_socket_connect_resolved(i32 fd, i8* node) → i32
+	// Connects using the node's ai_addr/ai_addrlen verbatim, so AF_INET and AF_INET6
+	// need no family-specific sockaddr construction. Returns 0, -errno or -EINPROGRESS.
+	EmitSocketConnectResolved(module *ir.Module) *ir.Func
+
 	// IO reactor primitives (T0070)
 	// EmitReactorCreate defines @pal_reactor_create() → i32 (fd or -errno)
 	EmitReactorCreate(module *ir.Module) *ir.Func
@@ -1821,6 +1845,310 @@ func emitStubFreeAddrInfo(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
+	return fn
+}
+
+// --- Shared name resolution emitters (T1518) ---
+//
+// getaddrinfo's result list has the same 48-byte shape everywhere, but two
+// fields move: BSD/macOS and Windows swap ai_canonname and ai_addr relative to
+// Linux, and Windows widens ai_addrlen to size_t. AF_INET6 also has a different
+// value on each platform. Everything else about walking the list is identical,
+// so the walkers live here once and each PAL only supplies its layout.
+
+// addrinfoLayout captures the per-platform `struct addrinfo` details.
+type addrinfoLayout struct {
+	familyOffset  int64 // ai_family (i32)
+	addrLenOffset int64 // ai_addrlen
+	addrLenIs64   bool  // ai_addrlen is size_t (Windows) rather than socklen_t
+	addrOffset    int64 // ai_addr (i8*)
+	nextOffset    int64 // ai_next (i8*)
+	afInet6       int64 // AF_INET6 for this platform
+}
+
+// resolverCodes maps a platform's getaddrinfo failure codes onto the normalized
+// pal_resolve_host vocabulary. Every platform has exactly these three
+// interesting codes; anything else normalizes to "permanent failure".
+type resolverCodes struct {
+	noName   int64 // EAI_NONAME / WSAHOST_NOT_FOUND
+	noData   int64 // EAI_NODATA / WSANO_DATA
+	tryAgain int64 // EAI_AGAIN / WSATRY_AGAIN
+}
+
+// Normalized pal_resolve_host result codes.
+const (
+	resolveNotFound    = -1
+	resolveTryAgain    = -2
+	resolveFailed      = -3
+	resolveUnsupported = -4
+)
+
+// sizeofAddrinfo is the size of `struct addrinfo` on every supported platform:
+// four i32 fields, a padded length field, and three pointers.
+const sizeofAddrinfo = 48
+
+// getOrDeclarePalGetAddrInfo returns the already-emitted @pal_getaddrinfo.
+// EmitResolveHost must run after EmitGetAddrInfo so this resolves to the
+// definition rather than declaring a bodyless stub.
+func getOrDeclarePalGetAddrInfo(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "pal_getaddrinfo", irtypes.I32,
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I8Ptr),
+		ir.NewParam("hints", irtypes.I8Ptr),
+		ir.NewParam("result", irtypes.NewPointer(irtypes.I8Ptr)))
+}
+
+// emitResolveHostShared defines @pal_resolve_host by delegating to
+// @pal_getaddrinfo with SOCK_STREAM/AF_UNSPEC hints and normalizing the result.
+func emitResolveHostShared(module *ir.Module, codes resolverCodes) *ir.Func {
+	getAddrInfoFn := getOrDeclarePalGetAddrInfo(module)
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	fn := module.NewFunc("pal_resolve_host", irtypes.I32,
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("service", irtypes.I8Ptr),
+		ir.NewParam("out", irtypes.NewPointer(irtypes.I8Ptr)))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// struct addrinfo hints = {0}; hints.ai_socktype = SOCK_STREAM.
+	// ai_family stays AF_UNSPEC (0) so both A and AAAA records come back.
+	hints := entry.NewAlloca(irtypes.NewArray(sizeofAddrinfo, irtypes.I8))
+	hintsPtr := entry.NewBitCast(hints, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, hintsPtr, constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I64, sizeofAddrinfo))
+	sockTypePtr := entry.NewBitCast(
+		entry.NewGetElementPtr(irtypes.I8, hintsPtr, constant.NewInt(irtypes.I64, 8)),
+		irtypes.NewPointer(irtypes.I32))
+	entry.NewStore(constant.NewInt(irtypes.I32, 1), sockTypePtr) // SOCK_STREAM
+
+	// Leave *out null on every failure path so callers never see a stale pointer.
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[2])
+
+	rc := entry.NewCall(getAddrInfoFn, fn.Params[0], fn.Params[1], hintsPtr, fn.Params[2])
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(entry.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0)), okBlk, errBlk)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	notFoundBlk := fn.NewBlock(".not_found")
+	againBlk := fn.NewBlock(".try_again")
+	failedBlk := fn.NewBlock(".failed")
+	noDataBlk := fn.NewBlock(".chk_nodata")
+	againChkBlk := fn.NewBlock(".chk_again")
+
+	errBlk.NewCondBr(errBlk.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, codes.noName)),
+		notFoundBlk, noDataBlk)
+	noDataBlk.NewCondBr(noDataBlk.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, codes.noData)),
+		notFoundBlk, againChkBlk)
+	againChkBlk.NewCondBr(againChkBlk.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, codes.tryAgain)),
+		againBlk, failedBlk)
+
+	notFoundBlk.NewRet(constant.NewInt(irtypes.I32, resolveNotFound))
+	againBlk.NewRet(constant.NewInt(irtypes.I32, resolveTryAgain))
+	failedBlk.NewRet(constant.NewInt(irtypes.I32, resolveFailed))
+	return fn
+}
+
+// emitResolveNextShared defines @pal_resolve_next(i8* node) → i8* (ai_next).
+func emitResolveNextShared(module *ir.Module, layout addrinfoLayout) *ir.Func {
+	fn := module.NewFunc("pal_resolve_next", irtypes.I8Ptr,
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(entry.NewLoad(irtypes.I8Ptr,
+		entry.NewBitCast(
+			entry.NewGetElementPtr(irtypes.I8, fn.Params[0], constant.NewInt(irtypes.I64, layout.nextOffset)),
+			irtypes.NewPointer(irtypes.I8Ptr))))
+	return fn
+}
+
+// emitResolveFamilyShared defines @pal_resolve_family(i8* node) → i32 (ai_family).
+func emitResolveFamilyShared(module *ir.Module, layout addrinfoLayout) *ir.Func {
+	fn := module.NewFunc("pal_resolve_family", irtypes.I32,
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(entry.NewLoad(irtypes.I32,
+		entry.NewBitCast(
+			entry.NewGetElementPtr(irtypes.I8, fn.Params[0], constant.NewInt(irtypes.I64, layout.familyOffset)),
+			irtypes.NewPointer(irtypes.I32))))
+	return fn
+}
+
+// emitResolveFreeShared defines @pal_resolve_free(i8* list), delegating to
+// @pal_freeaddrinfo so the list is released by whatever allocated it.
+func emitResolveFreeShared(module *ir.Module) *ir.Func {
+	freeAddrInfoFn := getOrDeclareFunc(module, "pal_freeaddrinfo", irtypes.Void,
+		ir.NewParam("result", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_resolve_free", irtypes.Void,
+		ir.NewParam("list", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	nonNull := fn.NewBlock(".free")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(
+		entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewNull(irtypes.I8Ptr)),
+		doneBlk, nonNull)
+	nonNull.NewCall(freeAddrInfoFn, fn.Params[0])
+	nonNull.NewBr(doneBlk)
+	doneBlk.NewRet(nil)
+	return fn
+}
+
+// emitResolveAddressTextShared defines
+// @pal_resolve_address_text(i8* node, i8* buf, i32 len) → i32 via inet_ntop.
+// sizeIs64 selects inet_ntop's final parameter width (size_t on Windows,
+// socklen_t on POSIX).
+func emitResolveAddressTextShared(module *ir.Module, layout addrinfoLayout, sizeIs64 bool) *ir.Func {
+	sizeType := irtypes.Type(irtypes.I32)
+	if sizeIs64 {
+		sizeType = irtypes.I64
+	}
+	inetNtopFn := getOrDeclareFunc(module, "inet_ntop", irtypes.I8Ptr,
+		ir.NewParam("af", irtypes.I32),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("dst", irtypes.I8Ptr),
+		ir.NewParam("size", sizeType))
+	strlenFn := getOrDeclareFunc(module, "strlen", irtypes.I64,
+		ir.NewParam("s", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_resolve_address_text", irtypes.I32,
+		ir.NewParam("node", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	var size value.Value = fn.Params[2]
+	if sizeIs64 {
+		size = entry.NewZExt(fn.Params[2], irtypes.I64)
+	}
+
+	family := entry.NewLoad(irtypes.I32,
+		entry.NewBitCast(
+			entry.NewGetElementPtr(irtypes.I8, fn.Params[0], constant.NewInt(irtypes.I64, layout.familyOffset)),
+			irtypes.NewPointer(irtypes.I32)))
+	addr := entry.NewLoad(irtypes.I8Ptr,
+		entry.NewBitCast(
+			entry.NewGetElementPtr(irtypes.I8, fn.Params[0], constant.NewInt(irtypes.I64, layout.addrOffset)),
+			irtypes.NewPointer(irtypes.I8Ptr)))
+
+	v4Blk := fn.NewBlock(".v4")
+	chk6Blk := fn.NewBlock(".chk_v6")
+	v6Blk := fn.NewBlock(".v6")
+	checkBlk := fn.NewBlock(".check")
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+
+	entry.NewCondBr(entry.NewICmp(enum.IPredEQ, family, constant.NewInt(irtypes.I32, 2)), v4Blk, chk6Blk)
+
+	// sockaddr_in: sin_addr sits at offset 4 (family 2 + port 2).
+	src4 := v4Blk.NewGetElementPtr(irtypes.I8, addr, constant.NewInt(irtypes.I64, 4))
+	r4 := v4Blk.NewCall(inetNtopFn, constant.NewInt(irtypes.I32, 2), src4, fn.Params[1], size)
+	v4Blk.NewBr(checkBlk)
+
+	chk6Blk.NewCondBr(
+		chk6Blk.NewICmp(enum.IPredEQ, family, constant.NewInt(irtypes.I32, layout.afInet6)),
+		v6Blk, errBlk)
+
+	// sockaddr_in6: sin6_addr sits at offset 8 (family 2 + port 2 + flowinfo 4).
+	src6 := v6Blk.NewGetElementPtr(irtypes.I8, addr, constant.NewInt(irtypes.I64, 8))
+	r6 := v6Blk.NewCall(inetNtopFn, constant.NewInt(irtypes.I32, layout.afInet6), src6, fn.Params[1], size)
+	v6Blk.NewBr(checkBlk)
+
+	res := checkBlk.NewPhi(ir.NewIncoming(r4, v4Blk), ir.NewIncoming(r6, v6Blk))
+	checkBlk.NewCondBr(
+		checkBlk.NewICmp(enum.IPredEQ, res, constant.NewNull(irtypes.I8Ptr)),
+		errBlk, okBlk)
+
+	okBlk.NewRet(okBlk.NewTrunc(okBlk.NewCall(strlenFn, fn.Params[1]), irtypes.I32))
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// loadResolvedAddr loads ai_addr and ai_addrlen (widened/narrowed to i32) from node.
+func loadResolvedAddr(block *ir.Block, node value.Value, layout addrinfoLayout) (addr value.Value, addrLen value.Value) {
+	addr = block.NewLoad(irtypes.I8Ptr,
+		block.NewBitCast(
+			block.NewGetElementPtr(irtypes.I8, node, constant.NewInt(irtypes.I64, layout.addrOffset)),
+			irtypes.NewPointer(irtypes.I8Ptr)))
+	if layout.addrLenIs64 {
+		raw := block.NewLoad(irtypes.I64,
+			block.NewBitCast(
+				block.NewGetElementPtr(irtypes.I8, node, constant.NewInt(irtypes.I64, layout.addrLenOffset)),
+				irtypes.NewPointer(irtypes.I64)))
+		return addr, block.NewTrunc(raw, irtypes.I32)
+	}
+	return addr, block.NewLoad(irtypes.I32,
+		block.NewBitCast(
+			block.NewGetElementPtr(irtypes.I8, node, constant.NewInt(irtypes.I64, layout.addrLenOffset)),
+			irtypes.NewPointer(irtypes.I32)))
+}
+
+// --- Stub name resolution implementations (used by the WASM PALs, T1518) ---
+
+func emitStubResolveHost(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_resolve_host", irtypes.I32,
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("service", irtypes.I8Ptr),
+		ir.NewParam("out", irtypes.NewPointer(irtypes.I8Ptr)))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[2])
+	entry.NewRet(constant.NewInt(irtypes.I32, resolveUnsupported))
+	return fn
+}
+
+func emitStubResolveNext(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_resolve_next", irtypes.I8Ptr,
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+func emitStubResolveFamily(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_resolve_family", irtypes.I32,
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+func emitStubResolveAddressText(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_resolve_address_text", irtypes.I32,
+		ir.NewParam("node", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+func emitStubResolveFree(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_resolve_free", irtypes.Void,
+		ir.NewParam("list", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(nil)
+	return fn
+}
+
+func emitStubSocketConnectResolved(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_connect_resolved", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("node", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
 	return fn
 }
 

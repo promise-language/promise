@@ -1,0 +1,80 @@
+// T1518 — name resolution and connect-by-name as a *consumer* of the net module
+// sees them. modules/net/net_test.pr covers the same paths from inside the
+// module, where the names are unqualified and the private extern helpers are in
+// scope; this file is the only runtime check of the public surface reached
+// through an ordinary `use net;`.
+//
+// Both import forms are present on purpose. `use net;` is how the module is
+// normally consumed, but a typed catch cannot name a qualified type yet — `? e
+// is net.ResolveError` does not parse (T1701) and `e as net.ResolveError`
+// panics codegen (T1538) — so discriminating a ResolveError from a plain
+// NetError needs the alias form. Retire the `use net as _;` line once T1701
+// lands.
+use net;
+use net as _;
+
+// Scope: only what module-internal tests cannot reach — the qualified `net.`
+// surface and the typed catch. The behaviour of resolution itself (both address
+// families, the per-address connect fall-through, repeated-lookup leak
+// accounting) is covered once, in modules/net/net_test.pr.
+//
+// Every test here is hermetic: it resolves a numeric literal, a name answered
+// locally by /etc/hosts, or a name every platform resolver rejects without
+// sending a packet. Nothing depends on a working nameserver.
+
+test_resolve_literal_round_trips() `test(exclude: wasm) {
+  string[] addresses = net.resolve("127.0.0.1")?!;
+  assert(addresses.len == 1, "an IPv4 literal resolves to exactly itself");
+  assert(addresses[0] == "127.0.0.1", "presentation form round-trips");
+}
+
+// A single label longer than 63 characters is invalid on the DNS wire, so every
+// platform resolver rejects it locally rather than querying a nameserver.
+_unresolvable_host() string {
+  return "a".repeat(300);
+}
+
+// The discrimination the public API exists for: telling "no such host" apart
+// from "connection refused" without matching on message text.
+test_resolve_failure_is_a_typed_resolve_error() `test(exclude: wasm) {
+  bool raised = false;
+  resolve(_unresolvable_host())? e is ResolveError {
+    raised = true;
+    assert(e.host == _unresolvable_host(), "ResolveError carries the failing name");
+    assert(e.code == 0, "the normalized resolver code is not an errno, so code stays 0");
+    match e.kind {
+      ResolveErrorKind.not_found => {
+      },
+      _ => {
+        assert(false, "an invalid host name must normalize to not_found");
+      },
+    }
+  }!;
+  assert(raised, "a failed lookup must raise ResolveError");
+}
+
+// Connect by name through the public API. The listener is bound to the 127.0.0.1
+// literal while the client connects to "localhost", so on a dual-stack host that
+// resolves ::1 first this also covers the fall-through to the next address.
+// Sequential — the kernel backlog holds the connection until accept, so no
+// goroutine and no sleep are involved (T1632).
+test_connect_by_name() `test(exclude: wasm) {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  net.TcpStream client = net.TcpStream.connect("localhost", port)?!;
+  net.TcpStream server = listener.accept()?!;
+
+  int written = client.write("hi".bytes())?!;
+  assert(written == 2, "wrote 2 bytes over a connection made by name");
+
+  u8[] buf = u8[].filled(0, 64);
+  int n = server.read(buf)?!;
+  assert(n == 2, "server read 2 bytes");
+  assert(buf[0] == 104, "byte h");
+  assert(buf[1] == 105, "byte i");
+
+  client.close()?!;
+  server.close()?!;
+  listener.close()?!;
+}

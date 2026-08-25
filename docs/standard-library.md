@@ -57,7 +57,7 @@ The stdlib today provides:
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 8 tests. |
 | `json` | `modules/json/json.pr` | 1003 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 164 tests. |
 | `os` | `modules/os/os.pr` | 511 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 147 tests. |
-| `net` | `modules/net/net.pr` | 281 | **Done** — `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `NetError`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. 21 tests. |
+| `net` | `modules/net/net.pr` | 396 | **Done** — `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `resolve!`, `NetError`, `ResolveError`/`ResolveErrorKind`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. `TcpStream.connect` takes a host name or an IPv4/IPv6 literal (T1518); resolution uses the platform resolver behind the scheduler's syscall handoff, not the reactor. 28 tests. |
 | `time` | `modules/time/time.pr` | 392 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 53 tests. |
 | `http` | `modules/http/http.pr` | 1414 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
 | `tls` | `modules/tls/tls.pr` | 421 | **Done** (client + server) — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 16 tests. |
@@ -1011,21 +1011,65 @@ type Match {
 
 ```promise
 type TcpListener {
-    bind!(string addr, int port) Self `factory;
+    bind!(string addr, int port) Self `factory;   // addr must be an IPv4 literal
     accept!() TcpStream ;
     close!(~this);
+    get local_port int;
 }
 
 type TcpStream {
-    connect!(string addr, int port) Self `factory;
+    connect!(string host, int port) Self `factory; // host: name, IPv4 or IPv6 literal
     read!(~this, u8[] ~buf) int ;
     write!(~this, u8[] &buf) int ;
     close!(~this);
+    shutdown!(~this, bool read = false, bool write = false);
 }
+
+// Name resolution (T1518)
+resolve!(string host) string[];   // A + AAAA, in the resolver's preferred order
+
+enum ResolveErrorKind { not_found, try_again, failed, unsupported }
+type ResolveError is NetError { string host; ResolveErrorKind kind; }
 ```
 
-- **Dependencies**: PAL socket extensions, IO reactor (epoll/kqueue)
-- **Note**: Requires significant PAL work and potentially goroutine-aware I/O integration
+**Name resolution (T1518).** `resolve` returns every address the platform
+resolver reports for a host, in the order it prefers (RFC 6724 destination
+ordering), in presentation form — `"127.0.0.1"`, `"::1"`. Numeric literals are
+accepted and returned unchanged. `TcpStream.connect` resolves its `host` and
+tries the resulting addresses in order, closing each socket and moving to the
+next on failure, so a v6-first list on a v4-only network fails fast with
+`ENETUNREACH` and falls through to the v4 address. Racing the families in
+parallel (Happy Eyeballs) is deliberately out of scope, as is
+`TcpListener.bind` by name — binding a name that resolves to several addresses
+has no single obvious meaning.
+
+Resolution runs on the platform resolver (`getaddrinfo`), **not** on the netpoll
+reactor. The reactor can only wait on an fd, whereas the resolver owns
+`/etc/hosts`, search domains, `resolv.conf` options and mDNS; reimplementing DNS
+on the reactor would lose all of that. The scheduler stays unblocked via the
+same P-handoff every other thread-blocking call uses (T1685) — the calling M is
+released along with its P, so no other goroutine is delayed. The consequence is
+that a dead nameserver stalls the *calling goroutine* for as long as the
+resolver takes (~10s on musl); a caller-visible resolve timeout belongs to
+T1563 (socket deadlines).
+
+`ResolveError` inherits `NetError`, so code that already catches `NetError`
+keeps catching resolution failures unchanged, while callers that need to tell
+"no such host" from "connection refused" can catch `ResolveError` and read its
+`kind`. `kind` is the only place that reason is recorded — the inherited
+`NetError.code` stays `0`, because the normalized resolver codes are not errnos
+and `_net_strerror` would mistranslate them. The `EAI_*` numbering is mutually
+incompatible across Linux, macOS and Windows, so the PAL normalizes it to one
+vocabulary rather than exposing three. On WASM there is no resolver and
+`resolve` raises `ResolveErrorKind.unsupported`.
+
+Discriminating the error currently requires the type in scope unqualified
+(`use net as _;`): `? e is net.ResolveError` does not parse (T1701) and
+`e as net.ResolveError` panics codegen (T1538). Both are pre-existing
+cross-module RTTI gaps, not specific to this module.
+
+- **Dependencies**: PAL socket extensions, IO reactor (epoll/kqueue), PAL
+  `getaddrinfo`/`inet_ntop`
 
 #### 5d. `modules/http/http.pr` — HTTP Client & Server
 

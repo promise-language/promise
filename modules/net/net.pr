@@ -38,7 +38,9 @@ _net_netpoll_wait_write(int pd) `extern("promise_netpoll_wait_write");
 // Name resolution (T1518). Pointers are carried as int, matching the _pd
 // PollDesc convention above. _net_resolve returns the addrinfo list head as an
 // int, or a negative normalized code: -1 not found, -2 try again, -3 failed,
-// -4 unsupported on this target.
+// -4 unsupported on this target. An empty host always comes back as -1 (not
+// found): the rejection lives in pal_resolve_host, so every caller of this
+// bridge inherits it and no platform resolver gets to decide (T1726).
 _net_resolve(string host, string service) int `extern("promise_net_resolve");
 _net_resolve_next(int node) int `extern("promise_net_resolve_next");
 _net_resolve_family(int node) int `extern("promise_net_resolve_family");
@@ -156,7 +158,7 @@ type _AddrList {
   }
 }
 
-resolve!(string host) string[] `public `doc("Resolves a host name to its IP addresses (both A and AAAA records), in the order the platform resolver prefers. Numeric literals such as \"127.0.0.1\" or \"::1\" are accepted and returned unchanged. Results are in presentation form. Raises ResolveError if the name cannot be resolved.") {
+resolve!(string host) string[] `public `doc("Resolves a host name to its IP addresses (both A and AAAA records), in the order the platform resolver prefers. Numeric literals such as \"127.0.0.1\" or \"::1\" are accepted and returned unchanged. Results are in presentation form. Raises ResolveError if the name cannot be resolved. An empty host name always raises ResolveError(kind: not_found), on every target — it never resolves to this machine.") {
   int head = _net_resolve(host, "0");
   if head < 0 {
     raise _make_resolve_error(host, head);
@@ -266,7 +268,7 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
   int _fd;
   int _pd; // PollDesc pointer (as int) for reactor integration
 
-  connect!(string host, int port) Self `factory `public `doc("Connects to a TCP server at the given host and port. The host may be a name (\"example.com\", \"localhost\") or an IPv4/IPv6 literal; names are resolved via the platform resolver and the resolved addresses are tried in the order it prefers. Blocks the goroutine until the connection is established. Raises ResolveError if the name cannot be resolved, NetError if no resolved address accepted the connection.") {
+  connect!(string host, int port) Self `factory `public `doc("Connects to a TCP server at the given host and port. The host may be a name (\"example.com\", \"localhost\") or an IPv4/IPv6 literal; names are resolved via the platform resolver and the resolved addresses are tried in the order it prefers. Blocks the goroutine until the connection is established. Raises ResolveError if the name cannot be resolved, NetError if no resolved address accepted the connection. An empty host raises ResolveError(kind: not_found) on every target, rather than connecting to this machine.") {
     int head = _net_resolve(host, "{port}");
     if head < 0 {
       raise _make_resolve_error(host, head);

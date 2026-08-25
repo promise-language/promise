@@ -297,11 +297,10 @@ func TestResolveStubsWasm(t *testing.T) {
 	}
 }
 
-// palBlock returns the body of a single labeled basic block inside fn's
-// definition. The sub-offsets pal_resolve_address_text applies live *inside*
-// the .v4 / .v6 blocks, so a module-wide substring search cannot tell them
-// apart from the many other small constants in the same module.
-func palBlock(t *testing.T, moduleText, fnDef, label string) string {
+// palFuncBody returns the text of a single function definition, so an assertion
+// about one function cannot be satisfied by an identical-looking instruction
+// somewhere else in the module.
+func palFuncBody(t *testing.T, moduleText, fnDef string) string {
 	t.Helper()
 	start := strings.Index(moduleText, fnDef)
 	if start < 0 {
@@ -311,6 +310,16 @@ func palBlock(t *testing.T, moduleText, fnDef, label string) string {
 	if end := strings.Index(body, "\n}\n"); end >= 0 {
 		body = body[:end]
 	}
+	return body
+}
+
+// palBlock returns the body of a single labeled basic block inside fn's
+// definition. The sub-offsets pal_resolve_address_text applies live *inside*
+// the .v4 / .v6 blocks, so a module-wide substring search cannot tell them
+// apart from the many other small constants in the same module.
+func palBlock(t *testing.T, moduleText, fnDef, label string) string {
+	t.Helper()
+	body := palFuncBody(t, moduleText, fnDef)
 	blkStart := strings.Index(body, "\n"+label+":\n")
 	if blkStart < 0 {
 		t.Fatalf("block %s not found in %s", label, fnDef)
@@ -408,37 +417,135 @@ func TestSocketConnectResolvedReadsAddrLen(t *testing.T) {
 	})
 }
 
+// palEmitter names one platform's emission of a PAL function.
+type palEmitter struct {
+	name string
+	emit func(*ir.Module) *ir.Func
+}
+
+// resolveHostDef is the signature every platform's pal_resolve_host shares.
+const resolveHostDef = "define i32 @pal_resolve_host(i8* %host, i8* %service, i8** %out)"
+
+// resolverHostEmitters covers the platforms whose pal_resolve_host actually
+// consults a system resolver — the WASM stubs answer "unsupported" without one.
+// EmitGetAddrInfo runs first so pal_getaddrinfo resolves to its definition.
+func resolverHostEmitters() []palEmitter {
+	return []palEmitter{
+		{"Linux", func(m *ir.Module) *ir.Func { p := linuxPAL(); p.EmitGetAddrInfo(m); return p.EmitResolveHost(m) }},
+		{"Darwin", func(m *ir.Module) *ir.Func { p := darwinPAL(); p.EmitGetAddrInfo(m); return p.EmitResolveHost(m) }},
+		{"Windows", func(m *ir.Module) *ir.Func { p := &WindowsPAL{}; p.EmitGetAddrInfo(m); return p.EmitResolveHost(m) }},
+	}
+}
+
+// TestResolveHostRejectsEmptyHost: an empty host must be answered with the
+// normalized not-found code *without* calling the platform resolver. Leaving
+// that decision to getaddrinfo diverges — Windows succeeds and returns every
+// local interface address, BSD/macOS succeeds and returns loopback, only glibc
+// reports EAI_NONAME — so `TcpStream.connect("", port)` silently connected to
+// this machine instead of raising (T1726).
+//
+// "does not call the resolver" is the load-bearing assertion: TestResolveHostPosix
+// already asserts `ret i32 -1` appears, and the .not_found block satisfies that
+// on its own, so only checking the return value would pass against the old IR.
+func TestResolveHostRejectsEmptyHost(t *testing.T) {
+	for _, tt := range resolverHostEmitters() {
+		t.Run(tt.name, func(t *testing.T) {
+			module := ir.NewModule()
+			tt.emit(module)
+			out := module.String()
+			body := palFuncBody(t, out, resolveHostDef)
+
+			// The guard is decided in .entry, which must not reach the resolver.
+			entry := palBlock(t, out, resolveHostDef, ".entry")
+			assertContains(t, entry, "icmp eq i8* %host, null", "null host rejected")
+			if strings.Contains(entry, "@pal_getaddrinfo(") {
+				t.Errorf(".entry must branch on the host before calling the resolver:\n%s", entry)
+			}
+
+			// A zero first byte is the empty string, and it short-circuits to
+			// the same normalized not-found code glibc's EAI_NONAME produces.
+			chk := palBlock(t, out, resolveHostDef, ".chk_empty_host")
+			assertContains(t, chk, "load i8, i8* %host", "first byte of the host inspected")
+			assertContains(t, chk, "icmp eq i8 %", "compared against NUL")
+			assertContains(t, palBlock(t, out, resolveHostDef, ".empty_host"), "ret i32 -1",
+				"empty host reports normalized not-found")
+
+			// Whole-function ordering: the byte test happens before the lookup,
+			// so no resolver on any platform ever sees the empty name.
+			load := strings.Index(body, "load i8, i8* %host")
+			call := strings.Index(body, "@pal_getaddrinfo(")
+			if load < 0 || call < 0 || load > call {
+				t.Errorf("the empty-host test must precede pal_getaddrinfo:\n%s", body)
+			}
+		})
+	}
+}
+
+// TestResolveHostGuardBranchTargets pins the guard's *edges*, which its shape
+// does not. Every assertion in TestResolveHostRejectsEmptyHost still holds if
+// the two branch targets are swapped — the comparisons are still there, the
+// .empty_host block still returns -1, and the byte load still precedes the
+// call — yet a swapped guard is the worst reachable outcome: every real host
+// name short-circuits to "not found", so nothing resolves at all, while the
+// empty name becomes the one input handed to the resolver, bringing T1726 back
+// at the same time. Nothing else in the Go tests would notice, because only a
+// runtime lookup tells the two wirings apart.
+func TestResolveHostGuardBranchTargets(t *testing.T) {
+	// A null host takes the early exit; anything else is tested byte-wise. A
+	// NUL first byte takes that same early exit; anything else is resolved.
+	entryBr := regexp.MustCompile(`br i1 %\d+, label %\.empty_host, label %\.chk_empty_host`)
+	chkBr := regexp.MustCompile(`br i1 %\d+, label %\.empty_host, label %\.lookup`)
+	for _, tt := range resolverHostEmitters() {
+		t.Run(tt.name, func(t *testing.T) {
+			module := ir.NewModule()
+			tt.emit(module)
+			out := module.String()
+
+			entry := palBlock(t, out, resolveHostDef, ".entry")
+			if !entryBr.MatchString(entry) {
+				t.Errorf("a null host must branch to .empty_host and anything else to the byte test:\n%s", entry)
+			}
+			chk := palBlock(t, out, resolveHostDef, ".chk_empty_host")
+			if !chkBr.MatchString(chk) {
+				t.Errorf("a NUL first byte must branch to .empty_host and anything else to .lookup:\n%s", chk)
+			}
+
+			// The positive half of the guard, and the reason the swap above is
+			// not merely cosmetic: a host that survives both tests is passed to
+			// the platform resolver unchanged, host and service in that order.
+			assertContains(t, palBlock(t, out, resolveHostDef, ".lookup"),
+				"@pal_getaddrinfo(i8* %host, i8* %service", "a surviving host still reaches the resolver")
+		})
+	}
+}
+
 // TestResolveHostLeavesOutNullOnFailure: pal_resolve_host must null *out before
 // calling the resolver, on every platform. Callers turn *out into a Promise-side
 // _AddrList handle; a stale non-null pointer left behind by a failed lookup
 // would be freed by _AddrList.drop, which is a free of uninitialized stack.
 func TestResolveHostLeavesOutNullOnFailure(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		emit func(*ir.Module) *ir.Func
-	}{
-		{"Linux", func(m *ir.Module) *ir.Func { linuxPAL().EmitGetAddrInfo(m); return linuxPAL().EmitResolveHost(m) }},
-		{"Darwin", func(m *ir.Module) *ir.Func { darwinPAL().EmitGetAddrInfo(m); return darwinPAL().EmitResolveHost(m) }},
-		{"Windows", func(m *ir.Module) *ir.Func {
-			p := &WindowsPAL{}
-			p.EmitGetAddrInfo(m)
-			return p.EmitResolveHost(m)
-		}},
-		{"Wasm", func(m *ir.Module) *ir.Func { return (&WasmPAL{}).EmitResolveHost(m) }},
-		{"WasmWeb", func(m *ir.Module) *ir.Func { return (&WasmWebPAL{}).EmitResolveHost(m) }},
-	} {
+	emitters := append(resolverHostEmitters(),
+		palEmitter{"Wasm", func(m *ir.Module) *ir.Func { return (&WasmPAL{}).EmitResolveHost(m) }},
+		palEmitter{"WasmWeb", func(m *ir.Module) *ir.Func { return (&WasmWebPAL{}).EmitResolveHost(m) }},
+	)
+	for _, tt := range emitters {
 		t.Run(tt.name, func(t *testing.T) {
 			module := ir.NewModule()
 			tt.emit(module)
-			entry := palBlock(t, module.String(), "define i32 @pal_resolve_host(i8* %host, i8* %service, i8** %out)", ".entry")
-			null := strings.Index(entry, "store i8* null, i8** %out")
-			if null < 0 {
-				t.Fatalf("out must be nulled before the resolver call:\n%s", entry)
+			out := module.String()
+			// *out is nulled in .entry, but the resolver call now lives in
+			// .lookup — so the ordering check has to span the whole function or
+			// it silently stops testing anything.
+			body := palFuncBody(t, out, resolveHostDef)
+			entry := palBlock(t, out, resolveHostDef, ".entry")
+			if !strings.Contains(entry, "store i8* null, i8** %out") {
+				t.Fatalf("out must be nulled in .entry, before any early return:\n%s", entry)
 			}
 			// Ordering matters: nulling *after* the call would clobber a
 			// successful lookup's result and hand callers an empty list.
-			if call := strings.Index(entry, "@pal_getaddrinfo("); call >= 0 && null > call {
-				t.Errorf("out must be nulled BEFORE pal_getaddrinfo, not after:\n%s", entry)
+			null := strings.Index(body, "store i8* null, i8** %out")
+			if call := strings.Index(body, "@pal_getaddrinfo("); call >= 0 && null > call {
+				t.Errorf("out must be nulled BEFORE pal_getaddrinfo, not after:\n%s", body)
 			}
 		})
 	}

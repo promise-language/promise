@@ -530,16 +530,86 @@ test_resolve_error_fields() `test(exclude: wasm) {
 }
 
 // An empty host name is the degenerate input a caller reaches by passing an
-// unvalidated string through. It must raise rather than resolve to something —
-// getaddrinfo(NULL-equivalent) would otherwise return the loopback or wildcard
-// address, so "" silently connecting to localhost is a real hazard.
+// unvalidated string through. It must raise rather than resolve to something,
+// and the platform resolvers cannot be trusted to decide that: Windows'
+// getaddrinfo("") succeeds and hands back every local interface address,
+// BSD/macOS succeeds and hands back loopback, and only glibc reports
+// EAI_NONAME. pal_resolve_host rejects the empty name before the lookup so all
+// three report it the same way (T1726).
 test_resolve_empty_host_raises() `test(exclude: wasm) {
   bool raised = false;
   resolve("")? e is ResolveError {
     raised = true;
     assert(e.host == "", "ResolveError echoes the empty name back");
+    // not_found specifically, and on every target: the rejection replaces
+    // glibc's EAI_NONAME rather than inventing a fourth answer, so Linux's
+    // reported kind is unchanged and the other two now match it.
+    match e.kind {
+      ResolveErrorKind.not_found => {
+      },
+      _ => {
+        assert(false, "an empty host is reported as not_found");
+      },
+    };
   }!;
   assert(raised, "an empty host name must raise, never resolve");
+}
+
+// The same degenerate input on the path that actually matters. `connect` does
+// its own `_net_resolve` call, so a guard placed only in `resolve` would leave
+// TcpStream.connect("", port) connecting to one of this machine's own interface
+// addresses — an unset config field or a mis-parsed URL turning into a silent
+// self-connection instead of a diagnosable error (T1726).
+test_connect_empty_host_raises() `test(exclude: wasm) {
+  bool raised = false;
+  TcpStream.connect("", 80)? e is ResolveError {
+    raised = true;
+    assert(e.host == "", "ResolveError echoes the empty name back");
+    match e.kind {
+      ResolveErrorKind.not_found => {
+      },
+      _ => {
+        assert(false, "an empty host is reported as not_found");
+      },
+    };
+  }!;
+  assert(raised, "connecting to an empty host must raise, never connect to this machine");
+}
+
+// The same rejection, reached without the caller ever writing "". The extern
+// bridge hands the resolver a NUL-terminated copy of the host, so a name whose
+// first byte is NUL — "\0example.com" here, twelve bytes on the Promise side —
+// arrives at getaddrinfo as the empty string and lands on exactly the platform
+// divergence T1726 is about.
+//
+// This is what pins the guard to the C-string view rather than to the Promise
+// length. A guard written in net.pr as `if host.len == 0` satisfies both tests
+// above and still hands this name to a Windows resolver that answers it with
+// every local interface address — the truncation would turn a bogus name into a
+// connection to this machine, which is the failure mode, not a lesser one.
+// Hermetic: nothing here reaches the network.
+test_resolve_nul_truncated_host_raises() `test(exclude: wasm) {
+  bool raised = false;
+  resolve("\0example.com")? e is ResolveError {
+    raised = true;
+    match e.kind {
+      ResolveErrorKind.not_found => {
+      },
+      _ => {
+        assert(false, "a host that is empty at the C boundary is reported as not_found");
+      },
+    };
+  }!;
+  assert(raised, "a NUL-truncated host must raise, never resolve");
+
+  // And on the path where it bites: connect must not read it as a request to
+  // connect to this machine either.
+  bool connect_raised = false;
+  TcpStream.connect("\0example.com", 80)? e is ResolveError {
+    connect_raised = true;
+  }!;
+  assert(connect_raised,
+  "connecting to a NUL-truncated host must raise, never connect to this machine");
 }
 
 // The per-address fall-through, run to exhaustion. "localhost" resolves to ::1
@@ -591,10 +661,26 @@ test_resolve_repeated_failure_no_leak() `test(exclude: wasm, timeout: "30s") {
 // followed by a failing connect: the _AddrList is live when the raise unwinds,
 // so this is the one runtime test that exercises the drop of a *non-empty*
 // resolver list on a raise rather than on a normal return.
+//
+// The iteration count is deliberately small, and the host is deliberately an
+// IPv4 literal (T1727). Refusing a loopback connection is not free on every
+// platform: Windows charges ~2s per address before the RST surfaces — measured
+// with a non-Promise client too, so it is the OS TCP stack and not our reactor
+// — and those waits do not overlap, so N failing connects cost N × 2s however
+// they are scheduled. "localhost" resolves to both ::1 and 127.0.0.1 and
+// connect walks the whole list, doubling it again; a literal pins the list at
+// exactly one address, so the cost cannot vary with how the runner resolves
+// names.
+//
+// Looping less costs no signal. The leak detector compares allocation counts
+// across the whole test, so a connect that leaks is caught on the first
+// iteration; repetition only ever guarded against a leak that appears
+// intermittently. The multi-address walk this test covered incidentally is
+// owned outright by test_connect_by_name_all_addresses_refused above.
 test_connect_failure_repeated_no_leak() `test(exclude: wasm, timeout: "30s") {
   int i = 0;
-  while i < 200 {
-    TcpStream.connect("localhost", 1)? e {
+  while i < 5 {
+    TcpStream.connect("127.0.0.1", 1)? e {
     };
     i = i + 1;
   }
@@ -646,6 +732,47 @@ test_resolve_concurrent() `test(exclude: wasm, timeout: "30s") {
     }
   }
   assert(reported == 16, "all 16 goroutines reported");
+}
+
+_empty_host_raise_count(int rounds) int {
+  int raised = 0;
+  int i = 0;
+  while i < rounds {
+    resolve("")? e is ResolveError {
+      raised = raised + 1;
+    }!;
+    i = i + 1;
+  }
+  return raised;
+}
+
+// The guard answers without a syscall, which makes the empty host the fastest
+// possible trip through the resolver bridge: enter_syscall hands this M's P
+// away and exit_syscall takes one back with nothing in between. Every other
+// resolve test holds that pair open for at least a real getaddrinfo, so this is
+// the only place the handoff is driven at full rate and from several goroutines
+// at once. Each iteration also raises, so the per-raise clone of the host and
+// the interpolated message are accounted across goroutine stacks rather than on
+// the test's own (T1726).
+//
+// Deterministic: each goroutine reports its own count over a channel and the
+// test collects exactly as many results as it spawned — no sleep (T1632).
+test_resolve_empty_host_concurrent() `test(exclude: wasm, timeout: "30s") {
+  ch := channel[int](capacity: 8);
+  for i in 0..8 {
+    go {
+      ch.send(_empty_host_raise_count(50));
+    };
+  }
+  int reported = 0;
+  for k in 0..8 {
+    result := <-ch;
+    if v := result {
+      assert(v == 50, "every empty-host lookup in the goroutine raised");
+      reported = reported + 1;
+    }
+  }
+  assert(reported == 8, "all 8 goroutines reported");
 }
 
 _connect_ok(int port) bool {

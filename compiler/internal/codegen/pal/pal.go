@@ -1900,6 +1900,15 @@ func getOrDeclarePalGetAddrInfo(module *ir.Module) *ir.Func {
 
 // emitResolveHostShared defines @pal_resolve_host by delegating to
 // @pal_getaddrinfo with SOCK_STREAM/AF_UNSPEC hints and normalizing the result.
+//
+// An empty (or null) host is rejected here, before the resolver sees it, because
+// the platforms do not agree on what it means: Windows' getaddrinfo succeeds and
+// returns every local interface address, BSD/macOS succeeds and returns
+// loopback, and glibc reports EAI_NONAME. An empty host is exactly what falls
+// out of a mis-parsed URL or an unset config field, so the two succeeding
+// platforms turn a diagnosable error into a silent connection to this machine.
+// The PAL decides instead, returning the same normalized not-found code glibc
+// already produced, so every platform now reports it identically (T1726).
 func emitResolveHostShared(module *ir.Module, codes resolverCodes) *ir.Func {
 	getAddrInfoFn := getOrDeclarePalGetAddrInfo(module)
 	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
@@ -1928,10 +1937,27 @@ func emitResolveHostShared(module *ir.Module, codes resolverCodes) *ir.Func {
 	// Leave *out null on every failure path so callers never see a stale pointer.
 	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[2])
 
-	rc := entry.NewCall(getAddrInfoFn, fn.Params[0], fn.Params[1], hintsPtr, fn.Params[2])
+	// Reject an empty or null host without consulting the resolver; see the note
+	// above the function. getaddrinfo(NULL, ...) means "the local machine" on
+	// every platform — the same defect — and the null check is also what makes
+	// the byte load below safe.
+	chkEmptyBlk := fn.NewBlock(".chk_empty_host")
+	emptyBlk := fn.NewBlock(".empty_host")
+	lookupBlk := fn.NewBlock(".lookup")
+	entry.NewCondBr(
+		entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewNull(irtypes.I8Ptr)),
+		emptyBlk, chkEmptyBlk)
+	chkEmptyBlk.NewCondBr(
+		chkEmptyBlk.NewICmp(enum.IPredEQ,
+			chkEmptyBlk.NewLoad(irtypes.I8, fn.Params[0]),
+			constant.NewInt(irtypes.I8, 0)),
+		emptyBlk, lookupBlk)
+	emptyBlk.NewRet(constant.NewInt(irtypes.I32, resolveNotFound))
+
+	rc := lookupBlk.NewCall(getAddrInfoFn, fn.Params[0], fn.Params[1], hintsPtr, fn.Params[2])
 	okBlk := fn.NewBlock(".ok")
 	errBlk := fn.NewBlock(".err")
-	entry.NewCondBr(entry.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0)), okBlk, errBlk)
+	lookupBlk.NewCondBr(lookupBlk.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0)), okBlk, errBlk)
 	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 
 	notFoundBlk := fn.NewBlock(".not_found")

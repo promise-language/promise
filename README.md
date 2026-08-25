@@ -198,6 +198,15 @@ promise/
 - [Standard Library](docs/standard-library.md) — module inventory and API reference
 - [Build Tools](docs/build-tools.md) — build system architecture
 
+## Watching
+
+Promise ships as versioned epochs — nine so far, each a GitHub release with notes
+on what changed.
+
+To hear when the next one lands: **Watch → Custom → Releases**. That's the setting
+that actually notifies you — the plain "Watch" is all-activity and too noisy to
+keep, and starring is a bookmark that notifies you of nothing.
+
 ## Sponsoring
 
 Promise is built by AI agents directed by one maintainer, on a ~$200/month

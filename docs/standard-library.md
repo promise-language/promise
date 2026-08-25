@@ -66,6 +66,15 @@ The stdlib provides:
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
 | `gzip` | `modules/gzip/` | 956 | RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
 | `crypto` | `modules/crypto/` | 239 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`. HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) remain to be built. 26 tests. |
+### Protocol Conformance Is Declared, Not Inferred
+
+The structural interfaces the platform publishes — `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, `Iterator` — carry `` `structural(protocol: true) ``, which reserves their requirement names (see §5.4 of `docs/language-design.md`). Two rules follow for every type in `modules/std/` and the catalog:
+
+1. **Every implementation declares `is` explicitly.** `type Duration is Format, Parse { ... }`, never a silent structural match. The `is` clause costs nothing at runtime — for a value type it does not even change the layout — and it converts a signature that drifts from a type that quietly stops satisfying anything into an error naming the exact method.
+2. **A method that borrows a reserved name without implementing the protocol says so.** `` `structural(protocol: false) `` on that method, with a comment explaining why the name means something else here. `Channel.close()` is the worked example: channels are refcounted, so closing one is not a consuming operation and `Channel` is deliberately not a `Closer`.
+
+Relying on structural satisfaction is still correct for user code composing with an interface it did not know about. It is not correct for a published platform type, where the conformance is part of the contract and should be checked at the declaration.
+
 ### Naming Conventions
 
 Promise uses a two-tier naming scheme. Casing tells the reader whether a type is woven into the language itself or lives in library space.

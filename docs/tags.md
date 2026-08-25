@@ -29,7 +29,7 @@ This doc governs the **tags/labels** field only — not titles, bodies, or statu
 Pick tags from these facets. Lists are the established vocabulary — extend only when nothing fits, and when you do, follow §5.
 
 ### 2.1 Component / subsystem (compiler internals)
-`codegen` · `sema` · `parser` · `grammar` · `ownership` · `types` · `formatter` · `scheduler` · `runtime` · `pal` · `reactor` · `linker` · `monomorphization` · `rtti`
+`codegen` · `sema` · `parser` · `grammar` · `ownership` · `types` · `formatter` · `scheduler` · `runtime` · `pal` · `reactor` · `linker` · `monomorphization` · `rtti` · `bindgen` (the WIT/WebIDL binding generator behind `promise bind`)
 
 Feature subsystems (singular nouns): `vector` · `map` · `set` · `string` · `optional` · `enum` · `tuple` · `array` · `slice` · `match` · `closure` · `lambda` · `iterator` · `generator` · `channel` · `task` · `goroutine` · `coroutine` · `arc` · `mutex` · `mutexguard` · `weak` · `operator` · `constructor` · `getter` · `indexing` · `structural` · `for-in`
 

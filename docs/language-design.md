@@ -767,7 +767,7 @@ main() {
 **Rules**:
 - Automatically `` `copy `` — no explicit annotation needed
 - All fields must themselves be copy types (primitives, other value types, bool, char)
-- The only permitted `is` parent is another pure value type (see *Value-type inheritance* below)
+- The only permitted **state-bearing** `is` parent is another pure value type (see *Value-type inheritance* below). A `` `structural `` interface parent is always permitted and never counts against this rule: an interface declares no fields, so it cannot affect the value struct's layout. `type Duration is Format, Parse` is a conformance claim the compiler checks, not an inheritance of state (see §5.4, *Protocol Interfaces*)
 - Cannot have `drop()` methods (nothing to clean up)
 - Cannot have failable `new()` methods
 - Cannot have `` `abstract `` methods — dispatch is always static, so nothing could
@@ -779,7 +779,7 @@ main() {
 - It **cannot be satisfied structurally.** Structural satisfaction requires the target to declare at least one `` `abstract `` method, and a value type may not declare one — so no unrelated type can ever "duck-type" into it.
 - The only types assignable to it are its own **layout-sharing value newtypes** (a fieldless child that inherits the parent's value struct verbatim — see *Value-Type Inheritance* below), for which the crossing is a plain register copy — never a heap box.
 
-This restricts what such a type can be a *target* of; it does not restrict what it can *satisfy*. A `` `structural `` value type is an ordinary concrete value type in the other direction — it can satisfy a real (abstract-method-bearing) interface and, assigned to one, is heap-boxed behind that interface's view exactly like any other value type. `` `structural `` on a type is therefore never on its own a reason to treat it as an interface.
+This restricts what such a type can be a *target* of; it does not restrict what it can *satisfy*. A `` `structural `` value type is an ordinary concrete value type in the other direction — it can satisfy a real (abstract-method-bearing) interface and, assigned to one, is heap-boxed behind that interface's view exactly like any other value type. It may also **declare** that conformance with `is`, which changes nothing about its representation and only asks the compiler to verify the claim (see §5.4, *Protocol Interfaces*). `` `structural `` on a type is therefore never on its own a reason to treat it as an interface.
 
 ```promise
 type Metric `structural {
@@ -1075,6 +1075,82 @@ Json j = load[Json]("...");
 Abstract factory methods declared without a return type get an **implicit `Self` return**. Failable abstract factories (`tryParse!(string data) \`abstract \`factory;`) get implicit `Self` return. Factory methods must match factory-to-factory: an instance method does not satisfy a factory requirement and vice versa.
 
 When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement). For methods with relaxed signature differences, the vtable slot points to an adapter thunk rather than the method directly.
+
+#### Protocol Interfaces (`` `structural(protocol: true) ``)
+
+Structural satisfaction is permissive by design: a type satisfies an interface by accident of signature, which is exactly what lets two sides compose when neither knew about the other. That permissiveness has a failure mode. An author who half-remembers an interface writes a method with the right *name* and the wrong *shape* — the type then satisfies nothing, silently, and the mistake surfaces much later at the first call site that actually needed the interface, if it ever surfaces at all.
+
+A structural interface may therefore **reserve its requirement names**:
+
+```promise
+type Parse `structural(protocol: true) `public {
+  parse!(Reader ~r) Self `factory `abstract;
+}
+```
+
+`protocol: true` is a claim on the name: *`parse` means this in Promise, and a `parse` that means something else is a mistake.* The compiler reports the near-miss at the declaration that made it, instead of at the use site that needed it.
+
+**The rule.** A method is a **protocol near-miss** — a compilation error — when all three hold:
+
+1. its name is a requirement of a protocol interface in scope (see *Scope* below), **and**
+2. its owning type does not satisfy that protocol, **and**
+3. its owning type satisfies **no** interface in scope that requires a method of that name.
+
+Clause 3 is what keeps the rule off ordinary code. A type whose `format(int width = 80) string` satisfies its own `Formatter` interface has an **explained** name — some protocol accounts for it, and `Format` has no claim. A type whose `parse!(string s)` satisfies nothing named `parse` anywhere has an **unexplained** one, and that is the mistake worth reporting.
+
+The check applies to types and enums alike, and uses the same relaxed matching as structural satisfaction — extra defaulted parameters, non-failable-for-failable, and `T`-for-`T?` all satisfy, and none of them is a near-miss.
+
+```promise
+// Error: `parse` is reserved by std.Parse, this signature does not satisfy it,
+// and DateTime satisfies no other interface requiring `parse`.
+type DateTime `public {
+  parse!(string s) DateTime `factory `public { ... }
+}
+
+// Fine: extra parameter has a default, so this satisfies Parse via an adapter thunk.
+type i128 `public {
+  parse!(Reader ~r, int base = 16) i128 `factory `public { ... }
+}
+
+// Fine: `format` is explained — Report satisfies Formatter, which requires it.
+type Formatter `structural { format(int width) string `abstract; }
+type Report is Formatter { format(int width) string { ... } }
+```
+
+**Scope.** The protocols visible to a compilation are those declared in
+
+- every **embedded** catalog module — the modules whose source ships inside the compiler binary — whether or not the program imports them, and
+- every module the project resolves as a dependency.
+
+`std` is not special here; it is simply an embedded module that every file imports implicitly. Protocols in external catalog modules that the project does *not* depend on are invisible, because consulting them would require fetching the catalog at compile time.
+
+A protocol name from a module the program never imports is still checked. The compiler keeps a name-to-module table of every reserved requirement name, consults it on each method declaration, and loads the owning module's declarations only when a name hits clauses 1 and 3 — so a program that names none of them pays a single map lookup per method.
+
+**Opting out.** A method that legitimately owns a reserved name and is not an implementation of the protocol says so with the same annotation, negated:
+
+```promise
+type Channel[T] `public {
+  close() `native `structural(protocol: false);   // refcounted; closing is not consuming
+}
+```
+
+`` `structural(protocol: false) `` is also valid on a type or enum, where it exempts every method that type declares. That form exists for machine-generated bindings (see *Generated bindings* below); prefer the method form in hand-written code, where the exemption should be as narrow as the exception it documents.
+
+Resolve a near-miss in this order, and reach for the annotation last. Match the signature; or declare `is Parse` and let the compiler verify the claim; or rename the method, which is usually the honest fix when the name meant something else all along; or, when the name is genuinely the right one for a different meaning, opt out.
+
+**Declaring conformance explicitly.** Because a protocol interface reserves its names, every implementation of one inside the standard library and the catalog declares `is` explicitly rather than relying on structural satisfaction:
+
+```promise
+type Duration is Format, Parse `public { ... }
+```
+
+An explicit `is` turns a silent structural match into a checked claim: the compiler verifies each requirement at the declaration, and a signature that drifts is an error naming the exact method, not a type that quietly stops satisfying anything. Structural satisfaction remains available and unchanged for code that composes with an interface it did not know about — the explicit form is a discipline for published interfaces, not a new requirement of the type system.
+
+**Generated bindings.** `promise bind` generates Promise types from external interface definitions (WIT, WebIDL) whose names are chosen by the source IDL and routinely collide with reserved names — `close`, `read`, `write`, `next`. Renaming them would break fidelity with the IDL, so the generator emits `` `structural(protocol: false) `` on each generated type. The exemption is type-level rather than method-level on purpose: generated bindings are checked into module repositories, and a per-method exemption would silently break them the next time the protocol set grew.
+
+**Which interfaces carry the tag.** Reserving a name is a strong claim, and it is worth making only for a name whose meaning the language is prepared to own. `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, and `Iterator` carry it. `Stream[T]` deliberately does not: returning a concrete iterator from `iter()` is idiomatic and is accepted by `for`-`in`, so `iter` is a name the language does not own.
+
+**Adding the tag is a breaking change.** Because protocols are visible without being imported, tagging an interface that already exists can break code that predates the tag — a program with its own `handle` method stops compiling the day `http.Handler` reserves that name. Adding `protocol: true` to an existing interface is therefore an **epoch-boundary change**, called out in release notes. A newly introduced interface may ship tagged at any time, since no code can have been written against it yet.
 
 #### Generic Inheritance
 
@@ -1846,7 +1922,7 @@ type Connection {
 }
 ```
 
-- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*). Carrying `` `structural `` does not make one an interface view — it stays register-resident and can only be satisfied by its own value newtypes (§5.2, T1550).
+- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted state-bearing `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*); `` `structural `` interface parents are always permitted and add no state. Carrying `` `structural `` does not make one an interface view — it stays register-resident and can only be satisfied by its own value newtypes (§5.2, T1550).
 - `` `copy ``: Bitwise copy on assignment (primitives, small value types). The compiler verifies all fields are themselves `` `copy ``. No method generated — the copy is a direct memory copy.
 - `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
 - Types that are `` `copy `` are implicitly copied on assignment. Others are moved.
@@ -2164,6 +2240,7 @@ Each annotation declares a fixed parameter contract. Unknown named parameters, p
 | `` `embed `` | `path` (string, required) | `compress` (bool) |
 | `` `key `` | `name` (string, required) | — |
 | `` `serializable `` | — | `tag` (string) |
+| `` `structural `` | — | `protocol` (bool) |
 | `` `lifetime `` | `name` (identifier, required) | — |
 | `` `wasm_import `` | `module name`, `import name` (strings, required) | — |
 | `` `target `` | `condition` (target condition, required) | — |
@@ -2218,6 +2295,7 @@ testAddition() `test {
 | `` `extern ``, `` `extern("c_symbol")``| functions | Foreign function interface; the optional string is the C symbol name (default `promise_<name>`) |
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
 | `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
+| `` `structural `` | types, methods, enums | On a type: interface may be satisfied without `is` (see Section 5.4). `` `structural(protocol: true) `` additionally reserves the interface's requirement names, making a same-name method with an incompatible signature an error. `` `structural(protocol: false) `` on a method, type, or enum exempts it from that check |
 | `` `open ``  | types           | Type may be used as an `is` parent; concrete types are otherwise sealed. Redundant (rejected) on abstract/`` `structural `` types, which are implicitly open (see Section 5.4) |
 | `` `sealed ``| types (`` `abstract ``/`` `structural ``) | Hierarchy closed outside the declaring `promise.toml` module — extensible only within it; transitive (no `` `open `` subtype). Rejected on concrete types (nothing to scope) (see Section 5.4) |
 | `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |

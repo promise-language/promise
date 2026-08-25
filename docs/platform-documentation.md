@@ -1,4 +1,6 @@
-# Documentation System Proposal
+# Platform Documentation (`promise doc`)
+
+> **Tag:** `platform-documentation` — remaining work to complete this document: `mcp__tracker__list --tag platform-documentation`
 
 ## Motivation
 
@@ -253,6 +255,8 @@ The output of `promise doc -public server.pr`:
 18. **Structural interfaces** — type heading shows `` `structural ``. Summary block includes a note: "Structural interface — types satisfy this by implementing the required methods, without an explicit `is` declaration." This tells an agent it doesn't need to write `type Foo is Parseable` — just implement the methods.
 19. **Multi-line doc strings** — rendered as-is (line breaks preserved). Triple-quoted strings (`"""..."""`) in source become multi-line text in output.
 20. **Abstract methods** — marked with `` `abstract `` in signatures. Indicates the method has no body and must be implemented by subtypes.
+21. **Inherited `drop` shown on child types** — a child of a droppable parent lists the inherited `drop` even though it does not declare one. Droppability is what an agent reasons about ownership with, and it is not visible from the child's own declaration.
+22. **Structural interface methods ignore the `public` filter** — the methods a structural interface requires are always shown, in `-public` mode too, because they *are* the contract a type must satisfy. Hiding them would leave an agent unable to tell what implementing the interface requires.
 
 ### Directory/Module Output
 
@@ -283,9 +287,9 @@ When documenting a directory, each file becomes a top-level section. Files are s
 | `-signatures` | off | Signatures only, no doc text (compact mode) |
 | `-no-index` | off | Skip index section for directories |
 
-## Compiler Changes (all done in Phase 1)
+## Compiler Support
 
-### 1. Parameter Documentation — Done
+### 1. Parameter Documentation
 
 The grammar already allows `doc()` on parameters in the AST. The semantic layer needs to propagate this.
 
@@ -308,11 +312,11 @@ func (p *Param) SetDoc(s string)   { p.doc = s }
 
 This is a small change — `ast.Param` already supports annotations and `extractDoc()` already exists.
 
-### 2. Default Value Expressions — Done (Option A)
+### 2. Default Value Expressions
 
 The doc tool reads defaults from `sema.Info.ParamDefaults` and `sema.Info.FieldDefaults`, formatting the `ast.Expr` via an `exprToString()` helper that covers literals, identifiers, and unary expressions.
 
-### 3. Enum Variant Documentation — Done
+### 3. Enum Variant Documentation
 
 Previously `enumVariant` in the grammar did not support meta annotations:
 
@@ -341,7 +345,7 @@ func (v *Variant) SetDoc(s string) { v.doc = s }
 
 **Propagate in sema** (`sema/decl.go`): during `defineEnum`, extract `doc()` from variant annotations.
 
-### 4. The `doc` Subcommand — Done
+### 4. The `doc` Subcommand
 
 Implemented in `cmd/promise/doc.go`. Also added `sema.DeclareAndDefine()` / `sema.DeclareAndDefineWithModules()` in `sema/check.go` — runs passes 1+2 only (Declare + Define + validateConstructors), skipping Check/Verify/Ownership.
 
@@ -505,40 +509,6 @@ This helps maintain documentation quality. Output is one-line-per-issue, grep-fr
 
     server.pr:12: HttpClient.post: public method missing `doc()
     server.pr:45: retryWithBackoff: doc mentions "timeout" but no such parameter exists
-
-## Implementation Plan
-
-### Phase 1: Core `promise doc` (MVP) — Done
-
-1. ~~Add `doc` field to `types.Param` + accessors, propagate from AST in sema~~ — Done (`types/signature.go`, `sema/decl.go`)
-2. ~~Add `doc` field to `types.Variant` + accessors, add `metaAnnotation*` to `enumVariant` grammar rule~~ — Done (`types/enum.go`, `grammar/PromiseParser.g4`, `ast/decl.go`, `ast/visit_decl.go`)
-3. ~~Implement `cmd/promise/doc.go`~~ — Done (single-file documentation with full output format)
-   - ~~Parse source, run sema Declare + Define (reuse `compileFrontend` with early exit)~~ — `sema.DeclareAndDefineWithModules()` in `sema/check.go`
-   - ~~Walk scope: emit types (with inheritance, fields, methods, getters, operators, new/drop), enums (with payload variants), functions~~ — walks `ast.File.Decls` in source order
-   - ~~Handle `-public` / `-all` filtering~~ — `-public` default, `-all` shows everything
-   - ~~Handle `-o` file output~~ — Done
-   - ~~Handle `-signatures` compact mode~~ — Done
-4. ~~Add `doc` subcommand to `cmd/promise/main.go` command dispatch~~ — Done
-5. Document `std/*.pr` with `doc()` — prioritize string, vector, map, error — **Not yet started**
-
-Additional Phase 1 work done:
-- Added `TargetParam` and `TargetVariant` meta targets in `sema/meta.go`
-- Fixed `extractDoc()` to use `evalStringLit()` instead of `stringLitValue()` — triple-quoted `doc()` strings were silently ignored
-- Inherited `drop` methods shown on child types (agents need this for ownership reasoning)
-- Structural interface methods shown regardless of `public` filter (they define the contract)
-
-### Phase 2: Multi-File and Std
-
-1. Directory and recursive documentation (`promise doc dir/...`)
-2. Index generation for multi-file output
-3. `promise doc -std` for embedded standard library reference
-4. `-expand Type.method` inline type expansion
-
-### Phase 3: Query and Lint
-
-1. `-query` with structured predicates (`has:drop`, `failable`, `implements:X`)
-2. `-lint` for documentation quality checks
-3. IDE integration (hover docs from `doc()`)
 
 ## Non-Goals
 

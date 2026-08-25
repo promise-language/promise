@@ -1,8 +1,18 @@
-# WASM Binary Size: Regression Prevention & Optimization
+# Binary Size: Regression Prevention & Optimization
+
+> **Tag:** `size-optimization` — remaining work to complete this document: `mcp__tracker__list --tag size-optimization`
+
+This document owns **binary size across every target**. What is written below is
+the WASM half — the target where size is most acutely felt, and the one with
+canaries and a gate today. The native half (Linux/macOS/Windows) belongs here too
+and is not written yet; that gap is T1729, not a reason to start a second
+document.
 
 ## Motivation
 
-Promise targets browser WebAssembly where download size directly impacts load time. This document defines a phased plan: prevent regressions first, then optimize. Per-canary size baselines are tracked by the `wasm_size_*` gates (see `tools/gates/baselines.json`), not duplicated here.
+Promise targets browser WebAssembly where download size directly impacts load time. This document defines the size-tracking and optimization surface: regression prevention first, then optimization. Per-canary size baselines are tracked by the `wasm_size_*` gates (see `tools/gates/baselines.json`), not duplicated here.
+
+**Regression prevention comes before optimization, and that ordering is a constraint rather than a preference.** Without canaries and a size gate in place, an optimization can be silently undone by a later change and nobody finds out — the win is unmeasurable and unprotected. Phase 1 is therefore a prerequisite for the optimization work in Phases 2–4, not merely the first thing on a list.
 
 ## Phase 1: Regression Prevention
 
@@ -198,17 +208,3 @@ For web deployment, WASM files are typically served with gzip/brotli compression
 - Consider `wasm-opt --converge -Oz` which iterates until stable
 
 ---
-
-## Implementation Order
-
-| Priority | Steps | Effort | Value |
-|----------|-------|--------|-------|
-| **P0** | 1-3 (canaries + size gate in verify) | 1-2 days | Prevents all future regressions |
-| **P1** | 5 (size command) | 1 day | Enables informed optimization |
-| **P1** | 7 (strip names) | Half day | ~5-15% size reduction, trivial |
-| **P2** | 8 (DCE audit) | 1 day | Identifies biggest optimization opportunities |
-| **P2** | 9-10 (wasm-opt, opt -Oz) | 1 day | ~10-30% size reduction |
-| **P3** | 4, 6 (test stats, compare) | 1 day | Developer experience |
-| **P3** | 11-13 (structural) | Multi-day | Only if earlier steps show need |
-
-**Rule: Steps 1-3 must be done before any optimization work.** Without regression prevention, optimizations can be silently undone by subsequent changes.

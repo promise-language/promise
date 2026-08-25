@@ -1,5 +1,7 @@
 # Windows Support
 
+> **Tag:** `windows-support` — remaining work to complete this document: `mcp__tracker__list --tag windows-support`
+
 > Native Windows support for the Promise compiler. No MinGW — full MSVC-compatible toolchain targeting the Windows SDK and UCRT, with a self-generated link surface that needs no Visual Studio Build Tools.
 
 ---
@@ -12,11 +14,11 @@ Promise targets Windows natively via the MSVC ABI (`x86_64-pc-windows-msvc`). Th
 
 ---
 
-## 2. Current State
+## 2. Support Matrix
 
 Windows is a first-class, fully-supported target. Core language, standard library, M:N scheduler, file I/O, process execution, signals, stack-overflow detection, and release builds all work. `windows-amd64` is a full CI matrix member (built + tested on every PR and `main`/`next` push, see T0774), and the full test suite passes on Windows.
 
-### Working
+### Supported
 
 - **Build & toolchain:** compiler builds on Windows; release builds (`bin/build --release`) embed LLVM tools (T0056); **zero-dependency link surface** — no Visual Studio Build Tools, no Windows SDK, no Microsoft `.lib` redistribution (T0772)
 - **Core language:** variables, types, enums, generics, match, lambdas, closures
@@ -113,7 +115,7 @@ points `/libpath:` at the extracted import-lib dir and `/entry:__promise_start`.
 
 The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API functions. All Win32 functions are declared as LLVM externals — the linker resolves them from the self-generated import libs (kernel32, advapi32, ws2_32, ucrtbase). All PAL methods are implemented; there are no stubs.
 
-### 4.1 Implemented
+### 4.1 PAL surface
 
 | Category | PAL Functions | Win32 API |
 |----------|--------------|-----------|
@@ -188,19 +190,7 @@ re-run `.\make.cmd` after changing `tools/` sources.
 
 ---
 
-## 6. Remaining Work
-
-Windows has reached full parity for the language, standard library, runtime, and
-test suite. The one outstanding item is a performance optimization:
-
-- **T0049** — Windows LTO. Current link pipeline is `opt -O1 → llc -filetype=obj → lld-link`
-  (no LTO). Linux/macOS use bitcode → linker with `--lto-O1` for cross-module
-  inlining and DCE. Investigate `lld-link` LTO support for COFF targets. Affects
-  binary size and performance, not correctness. Deferred, low priority.
-
----
-
-## 7. Key Design Decisions
+## 6. Key Design Decisions
 
 - **MSVC ABI, not MinGW**: native Windows experience. MSVC ABI is what Windows developers and tools expect.
 - **No Visual Studio Build Tools / Windows SDK (T0772)**: the link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See §3.3.

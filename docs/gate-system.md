@@ -1,5 +1,7 @@
 # Regression Prevention Gate System
 
+> **Tag:** `gate-system` — remaining work to complete this document: `mcp__tracker__list --tag gate-system`
+
 ## Overview
 
 The Promise compiler uses a four-class gate system to prevent quality regressions across multiple dimensions (tests, memory leaks, stability, binary size, performance) and multiple platforms (Linux, macOS, Windows, WASM). The **tracker MCP server** is the central coordinator for scheduling, exceptions, and cross-platform dispatch.

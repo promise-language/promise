@@ -1,5 +1,7 @@
 # Promise Programming Language — Design
 
+> **Tag:** `language-design` — remaining work to complete this document: `mcp__tracker__list --tag language-design`
+
 ## 1. Overview
 
 **Promise** is a systems-aware, statically-typed programming language with Dart-inspired syntax, Rust-inspired ownership semantics, and a rich type system featuring inheritance, generics, and algebraic error handling. The toolchain (compiler + package manager) is a single Go binary called `promise`, uses ANTLR4 for parsing, and targets LLVM IR for code generation.
@@ -841,7 +843,7 @@ type EntityId is Hash128 {   // newtype: same bits, distinct name
 - **Not generic (yet)**: neither the child nor the value parent may have type
   parameters. `type Id is Box[int] {}` is rejected with a clear diagnostic.
 
-**Hybrid types** — a type that mixes `` `value `` fields with regular instance (heap) fields — fit the same four-struct model: the value struct embeds the `` `value `` fields directly *and* carries the instance pointer for the heap fields, so a method reaches every field uniformly (`` `value `` fields in the value struct, instance fields through the pointer). This is the natural consequence of treating all types through one layout rather than forking pure-value and pure-instance into separate models. Hybrid types are **not yet implemented**, however: for now a type's fields must be either **all** `` `value `` (a pure value type) or **none** (a regular instance type); mixing the two is rejected at compile time with a clean source-located diagnostic (`type T mixes \`value\` and instance fields; … not yet supported`). Support may be added in the future.
+**Hybrid types** — a type that mixes `` `value `` fields with regular instance (heap) fields — fit the same four-struct model: the value struct embeds the `` `value `` fields directly *and* carries the instance pointer for the heap fields, so a method reaches every field uniformly (`` `value `` fields in the value struct, instance fields through the pointer). This is the natural consequence of treating all types through one layout rather than forking pure-value and pure-instance into separate models. Hybrid types are **not yet implemented** (tracked as T1723): for now a type's fields must be either **all** `` `value `` (a pure value type) or **none** (a regular instance type); mixing the two is rejected at compile time with a clean source-located diagnostic (`type T mixes \`value\` and instance fields; … not yet supported`).
 
 #### Primitives in the Four-Struct Model
 
@@ -939,7 +941,7 @@ type Circle is Shape, Drawable {
 
 #### Sealed by Default (`` `open ``)
 
-> **Status:** design-approved, **not yet implemented** (tracked as T1537). Today every concrete type is implicitly extensible; the rules below describe the intended semantics.
+> **Not yet implemented** (tracked as T1537). The rules below describe the intended semantics; today every concrete type is implicitly extensible.
 
 Concrete types are **sealed**: by default, no other type may declare `is` on them. To permit a concrete type to be used as an `is` parent, mark it `` `open ``.
 
@@ -3091,7 +3093,7 @@ type Stream[T] `structural {
 
 `Stream[T]` is the reusable factory: a single abstract `iter()` that hands out a fresh `Iterator[T]` cursor. Combinators live on `Iterator[T]`, so transform a stream by chaining off `stream.iter()`.
 
-> **Status**: The core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) and all ~20 combinator default methods on `Iterator[T]` are implemented and usable on any type that satisfies them. Combinators not in the list above (`scan`, `chunk`, `distinct`, `contains`, `min`, `max`, `join`) are design targets, not yet implemented.
+> **Partly implemented** (tracked as T1724). The core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) and the ~20 combinator default methods on `Iterator[T]` work on any type that satisfies them. The combinators not in the list above — `scan`, `chunk`, `distinct`, `contains`, `min`, `max`, `join` — are specified here but not yet built.
 
 **Key design properties:**
 

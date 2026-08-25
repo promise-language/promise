@@ -1,8 +1,8 @@
 # WASM Runtime Binding Architecture
 
-> **Status: Design proposal.** No implementation yet. This document describes how Promise will ingest IDL definitions (WIT, WebIDL) and generate safe, ergonomic bindings to WASM host environments.
->
-> This document covers the guest→host direction. For host→guest calls — WebIDL `callback` types, `addEventListener`, timers, and the `wasm32-web` reactor execution model they require — see [wasm-web-callbacks.md](wasm-web-callbacks.md).
+> **Tag:** `wasm-bindings` — remaining work to complete this document: `mcp__tracker__list --tag wasm-bindings`
+
+> This document covers the guest→host direction. For host→guest calls — WebIDL `callback` types, `addEventListener`, timers, and the `wasm32-web` reactor execution model they require — see [web-apps.md](web-apps.md).
 
 ## Problem
 
@@ -64,21 +64,10 @@ Promise compiles to `wasm32-wasi` but only imports two WASI functions (`fd_write
 
 ## WASM Sub-Targets
 
-### Current State
-
-One WASM target: `wasm32-wasi`. The `TargetInfo` struct has `OS` and `Arch` fields:
+A WASM sub-target is selected by an `Env` field on `TargetInfo`, alongside `OS` and `Arch`:
 
 ```go
 // compiler/internal/sema/target.go
-type TargetInfo struct {
-    OS   string // "linux", "macos", "windows", "wasm"
-    Arch string // "x86_64", "aarch64", "wasm32"
-}
-```
-
-### Proposed: Add `Env` Field
-
-```go
 type TargetInfo struct {
     OS   string // "linux", "macos", "windows", "wasm"
     Arch string // "x86_64", "aarch64", "wasm32"

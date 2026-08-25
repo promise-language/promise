@@ -1,5 +1,7 @@
 # Standard Library
 
+> **Tag:** `standard-library` — remaining work to complete this document: `mcp__tracker__list --tag standard-library`
+
 Promise's standard library design: module inventory, implementation phases, PAL extensions needed, and testing strategy.
 
 **Design principles** (from CLAUDE.md):
@@ -11,8 +13,8 @@ Promise's standard library design: module inventory, implementation phases, PAL 
 
 ## Table of Contents
 
-1. [Current State](#1-current-state)
-2. [Prerequisites — Language Features to Complete](#2-prerequisites--language-features-to-complete)
+1. [Module Inventory](#1-module-inventory)
+2. [Language Features the Stdlib Depends On](#2-language-features-the-stdlib-depends-on)
 3. [PAL Extensions](#3-pal-extensions)
 4. [Module Design by Phase](#4-module-design-by-phase)
 5. [Implementation Details](#5-implementation-details)
@@ -20,9 +22,9 @@ Promise's standard library design: module inventory, implementation phases, PAL 
 
 ---
 
-## 1. Current State
+## 1. Module Inventory
 
-The stdlib today provides:
+The stdlib provides:
 
 | Category | Files | What it covers |
 |----------|-------|---------------|
@@ -49,23 +51,21 @@ The stdlib today provides:
 
 **Catalog modules** (separate `promise.toml`, imported via `use <name>;`):
 
-| Module | File | Lines | Status |
-|--------|------|-------|--------|
-| `io` | `modules/io/io.pr` | 548 | **Done** — `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()`. 88 tests. |
-| `path` | `modules/path/path.pr` | 192 | **Done** — `join`, `file_name`, `parent`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize`. 9 tests. |
-| `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 15 tests. |
-| `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 8 tests. |
-| `json` | `modules/json/json.pr` | 1003 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 164 tests. |
-| `os` | `modules/os/os.pr` | 511 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 147 tests. |
-| `net` | `modules/net/net.pr` | 396 | **Done** — `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `resolve!`, `NetError`, `ResolveError`/`ResolveErrorKind`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. `TcpStream.connect` takes a host name or an IPv4/IPv6 literal (T1518); resolution uses the platform resolver behind the scheduler's syscall handoff, not the reactor. 28 tests. |
-| `time` | `modules/time/time.pr` | 392 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 53 tests. |
-| `http` | `modules/http/http.pr` | 1414 | **Done** (client + server, no TLS) — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
-| `tls` | `modules/tls/tls.pr` | 421 | **Done** (client + server) — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 16 tests. |
-| `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | **Done** (hex) — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
-| `gzip` | `modules/gzip/` | 956 | **Done** — RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
-| `crypto` | `modules/crypto/` | 239 | **Done** (SHA-256) — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`. HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) remain to be built. 26 tests. |
-
-**What's missing**: https — wiring `tls` into the HTTP client/server (T0079). Networking (TCP), the TLS transport (Linux + macOS + Windows), and HTTP client/server are done. OS access (args, env, cwd, execute, set env, set cwd, streaming process, env listing, user/group info, hostname, pid, signal handling) is done.
+| Module | File | Lines | What it covers |
+|--------|------|-------|----------------|
+| `io` | `modules/io/io.pr` | 548 | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()`. 88 tests. |
+| `path` | `modules/path/path.pr` | 192 | `join`, `file_name`, `parent`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize`. 9 tests. |
+| `strings` | `modules/strings/strings.pr` | 65 | `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 15 tests. |
+| `math` | `modules/math/math.pr` | 67 | `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 8 tests. |
+| `json` | `modules/json/json.pr` | 1003 | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 164 tests. |
+| `os` | `modules/os/os.pr` | 511 | get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 147 tests. |
+| `net` | `modules/net/net.pr` | 396 | `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `resolve!`, `NetError`, `ResolveError`/`ResolveErrorKind`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. `TcpStream.connect` takes a host name or an IPv4/IPv6 literal (T1518); resolution uses the platform resolver behind the scheduler's syscall handoff, not the reactor. 28 tests. |
+| `time` | `modules/time/time.pr` | 392 | wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 53 tests. |
+| `http` | `modules/http/http.pr` | 1414 | client + server, no TLS — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
+| `tls` | `modules/tls/tls.pr` | 421 | client + server — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 16 tests. |
+| `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
+| `gzip` | `modules/gzip/` | 956 | RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
+| `crypto` | `modules/crypto/` | 239 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`. HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) remain to be built. 26 tests. |
 ### Naming Conventions
 
 Promise uses a two-tier naming scheme. Casing tells the reader whether a type is woven into the language itself or lives in library space.
@@ -105,11 +105,9 @@ Types without sugar are always PascalCase: `Iterator[T]`, `Stream[T]`, `Writer`,
 
 ---
 
-## 2. Prerequisites — Language Features to Complete
+## 2. Language Features the Stdlib Depends On
 
-These features are incomplete or deferred and must be finished before the stdlib modules that depend on them.
-
-### 2.1 Error Type System — DONE
+### 2.1 Error Type System
 
 Fully implemented with inheritance-based error types, typed handlers, and exhaustiveness checking.
 
@@ -145,7 +143,7 @@ type TimeoutError is DbError is AppError is error { }
 - Error types cannot have `drop` methods (enforced in decl.go)
 - 22+ Go unit tests in `sema_test.go`, 5 e2e test files covering construction, inheritance chains, typed handlers, nested handlers, and generic errors
 
-### 2.2 Stream/Iterator Combinators — DONE
+### 2.2 Stream/Iterator Combinators
 
 Fully implemented with structural interfaces, duck-typed for-in, all combinators (lazy intermediate + eager terminal), and generic combinators (map[R], fold[R], zip[U], enumerate, flat_map[R]).
 
@@ -160,32 +158,32 @@ Fully implemented with structural interfaces, duck-typed for-in, all combinators
 - All combinators: `filter`, `take`, `skip`, `take_while`, `skip_while`, `chain`, `map[R]`, `zip[U]`, `enumerate`, `flat_map[R]` (lazy), `collect`, `count`, `fold[R]`, `reduce`, `any`, `every`, `first`, `last`, `find`, `for_each` (eager)
 - Tests: 104 e2e tests in `tests/std/iter_test.pr`, 9 sema tests, 6 codegen tests
 
-### 2.3 Numeric Type Conversions — DONE
+### 2.3 Numeric Type Conversions
 
-| Aspect | Status |
+| Aspect | Detail |
 |--------|--------|
-| `as`/`as!` scalar casts | **Done** — all scalar types (int, i8-i64, uint, u8-u64, f32, f64, char, bool) castable via `as`/`as!` |
-| char ↔ integer | **Done** — `'A' as int` → 65, `65 as char` → 'A' (zext/trunc) |
-| bool ↔ integer/float | **Done** — `true as int` → 1, `42 as bool` → true (icmp ne 0), `0 as bool` → false |
-| float → bool | **Done** — `0.0 as bool` → false, any non-zero → true including NaN (fcmp une 0.0) |
-| Int↔String | **Done** — `to_string()`, `format(Writer ~w)!`, `int.parse(Reader ~r) int!` |
-| Float↔String | **Done** — `to_string()`, `format(Writer ~w)!`, `f64.parse(Reader ~r) f64!` |
+| `as`/`as!` scalar casts | all scalar types (int, i8-i64, uint, u8-u64, f32, f64, char, bool) castable via `as`/`as!` |
+| char ↔ integer | `'A' as int` → 65, `65 as char` → 'A' (zext/trunc) |
+| bool ↔ integer/float | `true as int` → 1, `42 as bool` → true (icmp ne 0), `0 as bool` → false |
+| float → bool | `0.0 as bool` → false, any non-zero → true including NaN (fcmp une 0.0) |
+| Int↔String | `to_string()`, `format(Writer ~w)!`, `int.parse(Reader ~r) int!` |
+| Float↔String | `to_string()`, `format(Writer ~w)!`, `f64.parse(Reader ~r) f64!` |
 
 **Implemented approach**: `as`/`as!` work identically for scalar types (both return target type directly, no optional). For polymorphic casts (inheritance), `as` returns optional, `as!` panics on mismatch. All primitives have `to_string()` via `"{this}"` and `format!(Writer ~w) `. `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` are pure Promise. No snprintf/strtol needed.
 
 **Key codegen detail**: `int → bool` uses `icmp ne val, 0` (not `trunc`, which would give wrong result for even numbers like 2). `float → bool` uses `fcmp one val, 0.0`. Tests: 32 e2e tests in `tests/e2e/scalar_casts_test.pr`, 9 sema tests, 6 codegen tests.
 
-### 2.4 Format & Writer for String Interpolation — DONE
+### 2.4 Format & Writer for String Interpolation
 
-| Aspect | Current State | Remaining |
-|--------|--------------|-----------|
-| String interpolation | Works for all primitives (`string`, `int`, `f64`, `bool`, `char`, etc.) and **user-defined types** implementing `format(Writer ~w)!` | — |
-| `Writer` interface | **Defined** in `modules/std/format.pr` | — |
-| `Format` interface | **Defined** in `modules/std/format.pr` — `format(Writer ~w)!` (failable) | — |
-| `to_string()` | **Available** on all primitives via `"{this}"` | — |
-| `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` | — |
-| `Builder` | **Implemented** in `modules/std/builder.pr` (pure Promise) | — |
-| User type interpolation | **Implemented** — `"{x}"` desugars to Builder + `x.format(builder)!` + `builder.to_string()` for types implementing `Format` | — |
+| Aspect | Detail |
+|--------|--------|
+| String interpolation | Works for all primitives (`string`, `int`, `f64`, `bool`, `char`, etc.) and **user-defined types** implementing `format(Writer ~w)!` |
+| `Writer` interface | **Defined** in `modules/std/format.pr` |
+| `Format` interface | **Defined** in `modules/std/format.pr` — `format(Writer ~w)!` (failable) |
+| `to_string()` | **Available** on all primitives via `"{this}"` |
+| `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` |
+| `Builder` | **Implemented** in `modules/std/builder.pr` (pure Promise) |
+| User type interpolation | **Implemented** — `"{x}"` desugars to Builder + `x.format(builder)!` + `builder.to_string()` for types implementing `Format` |
 
 **Types** (in `modules/std/format.pr`):
 
@@ -246,14 +244,14 @@ p := Point(x: 3, y: 4);
 print_line("point: {p}");   // point: (3, 4)
 ```
 
-### 2.5 Parse & Reader — Structural Interface on Factory Methods — DONE
+### 2.5 Parse & Reader — Structural Interface on Factory Methods
 
-| Aspect | Status | Details |
-|--------|--------|---------|
-| Parsing | **Done** | `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` — all pure Promise |
-| Byte input | **Done** | `Reader` structural interface in `modules/std/parse.pr` with `read_byte` default method |
-| `Scanner` | **Done** | Wraps string, satisfies Reader, tracks position. In `modules/std/parse.pr` |
-| `scan[T]()` | **Done** | Generic convenience: `scan[int]("42")!` — wraps string in Scanner, calls `T.parse` |
+| Aspect | Details |
+|--------|---------|
+| Parsing | `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` — all pure Promise |
+| Byte input | `Reader` structural interface in `modules/std/parse.pr` with `read_byte` default method |
+| `Scanner` | Wraps string, satisfies Reader, tracks position. In `modules/std/parse.pr` |
+| `scan[T]()` | Generic convenience: `scan[int]("42")!` — wraps string in Scanner, calls `T.parse` |
 
 **The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
 
@@ -406,23 +404,13 @@ x := s.next![int]();
 | Convenience | string interpolation | `scan[T](string)` |
 | Works with files | File satisfies Writer | File satisfies Reader |
 
-### 2.6 Feature Summary
-
-| Feature | Blocks | Status |
-|---------|--------|--------|
-| Error type system (2.1) | All failable stdlib APIs | **DONE** — inheritance-based errors, typed handlers, exhaustiveness |
-| Stream combinators (2.2) | Sorting, functional patterns | **DONE** — Iterator[T] structural interface with 20 default combinators, _FnIter[T], duck-typed for-in, Vector.iter(), 104 e2e tests |
-| Numeric conversions (2.3) | String formatting, parsing, math display | **DONE** — all scalar as/as! casts (numeric, char, bool), `to_string()` + `format()` on all primitives, `int/bool/uint/f64.parse` |
-| Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented, `format(Writer ~w)!` on all primitives. User-defined type interpolation via Format now implemented |
-| Parse & Reader (2.5) | Generic parsing, Scanner | **DONE** — Reader/Parse interfaces, Scanner, `scan[T]()`, `int/bool/uint/f64.parse` |
-
 ---
 
 ## 3. PAL Extensions
 
 The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 47 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (5: spawn, read_pipe, wait_pid, spawn_streaming, kill), OS info (3: get_environ, get_user_info, get_hostname), signal handling (2: signal_init, signal_register), and directory listing (3). New methods needed:
 
-### 3.1 File I/O — Done
+### 3.1 File I/O
 
 12 PAL methods implemented in `codegen/pal/` across POSIX, Windows, and WASM:
 
@@ -443,7 +431,7 @@ EmitErrno(module *ir.Module) *ir.Func         // → i32 (thread-local errno)
 
 `EmitFileOpen` takes a mode enum (0=rw, 1=ro, 2=create-trunc, 3=append) mapped to platform O_* flags internally. `EmitFileStatSize` uses open+lseek(SEEK_END)+close to avoid `struct stat` layout portability issues. POSIX uses libc wrappers; Windows uses UCRT (`_open`, `_read`, etc.) with `_O_BINARY`; WASM stubs return error.
 
-### 3.2 OS / Environment — Done
+### 3.2 OS / Environment
 
 5 PAL methods:
 
@@ -467,7 +455,7 @@ EmitSleep(module *ir.Module) *ir.Func       // i64 nanoseconds → void
 
 Note: `promise_nanotime` already exists as a hardcoded function in `io.go:defineNanotimeFunc()` using `clock_gettime(CLOCK_MONOTONIC)`. This should be migrated to a proper PAL method for portability. `EmitWallClock` uses `CLOCK_REALTIME`. `EmitSleep` uses `nanosleep(2)`.
 
-### 3.4 Process Execution — DONE
+### 3.4 Process Execution
 
 5 PAL methods (3 original for one-shot execute, 2 new for streaming):
 
@@ -521,16 +509,16 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 
 | Category | New Methods | POSIX Backing |
 |----------|-------------|---------------|
-| File I/O | 12 (done) | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
-| OS / Env | 5 (done) | `getenv`, `getcwd`, `setenv`, `unsetenv`, `chdir` |
-| Process | 5 (done) | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`), `spawn_streaming` (stdin+stdout+stderr pipes), `kill` (`kill(2)`) |
-| OS Info | 3 (done) | `get_environ` (environ global), `get_user_info` (`getpwuid`+`getuid`), `get_hostname` (`gethostname`) |
-| Dir Listing | 3 (done) | `dir_open` (`opendir`), `dir_next_name` (`readdir`), `dir_close` (`closedir`) |
-| Signal | 2 (done) | `signal_init` (pipe + handler), `signal_register` (`signal(2)`) |
+| File I/O | 12 | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
+| OS / Env | 5 | `getenv`, `getcwd`, `setenv`, `unsetenv`, `chdir` |
+| Process | 5 | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`), `spawn_streaming` (stdin+stdout+stderr pipes), `kill` (`kill(2)`) |
+| OS Info | 3 | `get_environ` (environ global), `get_user_info` (`getpwuid`+`getuid`), `get_hostname` (`gethostname`) |
+| Dir Listing | 3 | `dir_open` (`opendir`), `dir_next_name` (`readdir`), `dir_close` (`closedir`) |
+| Signal | 2 | `signal_init` (pipe + handler), `signal_register` (`signal(2)`) |
 | Time | 3 | `clock_gettime` (×2), `nanosleep` |
 | Math | 0 | LLVM intrinsics |
 | String | 1 | `memcpy` |
-| **Total** | **32** (28 done) | |
+| **Total** | **32** | |
 
 ---
 
@@ -540,33 +528,33 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 
 Complete the features from Section 2 before building stdlib modules.
 
-**0a. Error type system — DONE**
+**0a. Error type system**
 - File: `modules/std/error.pr` — defines `error` with `string message` field
 - Sema: `checkRaiseStmt` validates inheritance, `checkErrorHandlerExpr` supports typed handlers with exhaustiveness
 - Tests: 22+ sema tests, 5 e2e test files
 
-**0b. Stream combinators — DONE**
+**0b. Stream combinators**
 - File: `modules/std/iter.pr` — `Iterator[T]` structural interface with `next() T?` + 20 default combinator methods, `_FnIter[T]` closure-based iterator, `Stream[T]` structural interface, `Generator[T]` coroutine-based iterator
 - Duck-typed for-in: `ForInKind` enum (ForInNext/ForInIter) in sema, `genForInCustomIter` in codegen
 - `Vector[T].iter()` returns `Iterator[T]`
 - All combinators: filter, take, skip, take_while, skip_while, chain, map[R], zip[U], enumerate, flat_map[R] (lazy), collect, count, fold[R], reduce, any, every, first, last, find, for_each (eager)
 - Tests: 104 e2e tests in `tests/std/iter_test.pr`
 
-**0c. Numeric conversions — DONE**
+**0c. Numeric conversions**
 - Sema: `isScalarCastType()` extends `isNumericType()` with char and bool for `as`/`as!` casts
 - Codegen: `emitScalarCast()` replaces `emitNumericCast()` with `int → bool` (icmp ne 0), `float → bool` (fcmp une 0.0 — NaN is truthy), char ↔ int (zext/trunc)
 - All scalar types (int, i8-i64, uint, u8-u64, f32, f64, char, bool) are castable to each other via `as`/`as!`
 - Int↔String, Float↔String: `to_string()`, `format!(Writer ~w) `, `int/bool/uint/f64.parse` — all pure Promise
 - Tests: 32 e2e tests in `tests/e2e/scalar_casts_test.pr`, 9 sema tests, 6 codegen tests
 
-**0d. Format & Writer — DONE**
+**0d. Format & Writer**
 - File: `modules/std/format.pr` — `Writer` and `Format` structural interfaces with default `write_string` method
 - File: `modules/std/builder.pr` — `Builder` type (pure Promise, wraps `Vector[u8]`, satisfies `Writer`)
 - Primitives have `to_string()` via string interpolation (`"{this}"`)
 - All primitives (`int`, `i8`-`i64`, `uint`, `u8`-`u64`, `f32`, `f64`, `bool`, `char`, `string`) implement `format!(Writer ~w) `
-- String interpolation desugaring to Format — **DONE**. User-defined types implementing `format!(Writer ~w) ` are now supported in `{}` interpolation. A Builder is created internally, the type's format method writes to it, and the result is converted to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) are supported. Value types are also supported.
+- String interpolation desugaring to Format. User-defined types implementing `format!(Writer ~w) ` are now supported in `{}` interpolation. A Builder is created internally, the type's format method writes to it, and the result is converted to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) are supported. Value types are also supported.
 
-**0e. Parse & Reader — DONE**
+**0e. Parse & Reader**
 - File: `modules/std/parse.pr` — `Reader` structural interface (with `read_byte` default), `Parse` structural interface with factory method, `Scanner` type, `scan[T]()` convenience function
 - `int.parse(Reader ~r) int!`, `bool.parse(Reader ~r) bool!`, `uint.parse(Reader ~r) uint!`, `f64.parse(Reader ~r) f64!` — all pure Promise
 - `string.from_bytes(u8[]) string` native factory, `string.bytes() u8[]` and `string.byte_at(int) u8` native methods
@@ -637,7 +625,7 @@ binary_search[T: Ordered](T[] &vec, T target) int?;
 - **Implementation**: Introsort (quicksort + heapsort fallback + insertion sort for small partitions). Pure Promise.
 - **Test**: `tests/std/sort_test.pr` (10 tests)
 
-#### 1c. String Utilities — DONE (split across `std/string.pr` + `modules/strings/`)
+#### 1c. String Utilities (split across `std/string.pr` + `modules/strings/`)
 
 String methods (`to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars`) were added directly to `modules/std/string.pr` rather than creating a separate `string_util.pr` file. Free functions (`join`, `spaces`, `reverse`, `is_blank`, `repeat_join`) live in the `strings` catalog module (`modules/strings/strings.pr`).
 
@@ -656,7 +644,7 @@ No `modules/std/result.pr` is needed.
 
 ### Phase 2: Conversion & Formatting
 
-#### 2a. Numeric Formatting & Parsing — DONE
+#### 2a. Numeric Formatting & Parsing
 
 - `to_string()` on all primitives (int, i8-i64, uint, u8-u64, f32, f64, bool, char, string) — uses `"{this}"` string interpolation, zero native codegen needed
 - `format!(Writer ~w) ` on all primitives — delegates to `w.write_string(this.to_string())` (string uses `w.write_string(this)`)
@@ -666,14 +654,14 @@ No `modules/std/result.pr` is needed.
 - `f64.parse(Reader ~r) f64!` — pure Promise, handles sign, integer/fractional parts, scientific notation (e/E)
 - Tests: `tests/std/to_string_test.pr` (21 tests), `tests/std/parse_test.pr` (38 tests), `tests/std/format_test.pr` (20 tests)
 
-**String interpolation desugaring to `format()` — DONE.** User-defined types implementing `format!(Writer ~w) ` are now supported in `{}` interpolation via Builder. Both direct and vtable (polymorphic) dispatch supported.
+**String interpolation desugaring to `format()`.** User-defined types implementing `format!(Writer ~w) ` are now supported in `{}` interpolation via Builder. Both direct and vtable (polymorphic) dispatch supported.
 
 **Design change from original plan**: `to_string()` uses string interpolation (`"{this}"`) directly instead of wrapping `format()` through a Builder. This is simpler, has zero native codegen, and works today. `format!(Writer ~w) ` is separately implemented for composable output to arbitrary Writers.
 
 - **Files**: `modules/std/int.pr`, `modules/std/uint.pr`, `modules/std/float.pr`, `modules/std/bool.pr`, `modules/std/char.pr`, `modules/std/string.pr`
 - **Test**: `tests/std/to_string_test.pr`, `tests/std/parse_test.pr`, `tests/std/format_test.pr`
 
-#### 2b. `modules/std/builder.pr` — Builder — DONE
+#### 2b. `modules/std/builder.pr` — Builder
 
 ```promise
 type Builder `public {
@@ -700,7 +688,7 @@ Runtime template formatting (`fmt1`-`fmt6`) is deferred. String interpolation (`
 
 ### Phase 3: Math & Time
 
-#### 3a. `modules/std/math.pr` — Extended Math (LLVM Intrinsics) — DONE
+#### 3a. `modules/std/math.pr` — Extended Math (LLVM Intrinsics)
 
 ```promise
 // Extend existing std/math.pr which has: min, max, abs, clamp (int only)
@@ -755,7 +743,7 @@ is_finite(f64 x) bool;
 
 Additionally, the `math` catalog module (`modules/math/math.pr`, 67 lines) provides higher-level pure-Promise helpers: `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. Tests: `modules/math/math_test.pr` (26 tests).
 
-#### 3b. `modules/std/random.pr` — Pseudorandom Numbers — DONE
+#### 3b. `modules/std/random.pr` — Pseudorandom Numbers
 
 ```promise
 type Random {
@@ -783,7 +771,7 @@ type Random {
 - **Implementation**: Pure Promise. xoshiro256** state is 4 `uint` fields. Seed expansion via splitmix64. Float conversion: mask top bits, OR into exponent, subtract 1.0.
 - **Test**: `tests/std/random_test.pr` (7 tests)
 
-#### 3c. `modules/std/time.pr` — Duration & Instant — DONE
+#### 3c. `modules/std/time.pr` — Duration & Instant
 
 - `Duration` — pure value type (`int nanos `value`). Factory constructors: `from_nanos`, `from_micros`, `from_millis`, `from_secs`, `zero`. Getters: `as_nanos`, `as_micros`, `as_millis`, `as_secs`. Arithmetic: `+`, `-`, `*`. Full comparison operators. `to_string()` with adaptive units (ns/us/ms/s). `format!(Writer ~w) `.
 - `Instant` — pure value type. `now()` factory (calls `_nanotime` extern). `elapsed()`, `duration_since()`. Comparison operators.
@@ -796,7 +784,7 @@ type Random {
 
 ### Phase 4: System I/O
 
-#### 4a. `modules/std/io.pr` — Extended I/O (Closer Interface, Utilities) — DONE
+#### 4a. `modules/std/io.pr` — Extended I/O (Closer Interface, Utilities)
 
 - `Closer` — structural interface with `close!(~this) ` abstract method. Any type with a matching `close` method satisfies it.
 - `write_line!(Writer ~w, string s) ` — convenience function, writes string + newline.
@@ -804,7 +792,7 @@ type Random {
 - **File**: `modules/std/io.pr` (extended)
 - **Test**: `tests/std/test_io.pr` (4 tests)
 
-#### 4b. `modules/io/io.pr` — File System Access — DONE
+#### 4b. `modules/io/io.pr` — File System Access
 
 ```promise
 type File {
@@ -870,7 +858,7 @@ type BufferedWriter {
 - **Implementation**: Thin wrapper around PAL calls. `File.read(~this, u8[] ~buf) int!` and `File.write(~this, u8[] ~buf) int!` satisfy the `Reader`/`Writer` structural interfaces. `read_line` is a File instance method (not a free function). `BufferedReader`/`BufferedWriter` are pure Promise wrappers around `File` that reduce syscalls by chunked I/O; both also satisfy `Reader`/`Writer` via their `read`/`write` methods.
 - **Test**: `modules/io/io_test.pr` (69 tests)
 
-#### 4c. `modules/path/path.pr` — Path Manipulation — DONE
+#### 4c. `modules/path/path.pr` — Path Manipulation
 
 ```promise
 // Pure string-based path operations (no filesystem access)
@@ -888,7 +876,7 @@ normalize(string path) string;
 - **Implementation**: Pure Promise string manipulation. Uses `/` as separator (POSIX-first; Windows support deferred).
 - **Test**: `modules/path/path_test.pr` (13 tests), `tests/catalog/path_test.pr`
 
-#### 4d. `modules/os/os.pr` — OS Interaction — DONE
+#### 4d. `modules/os/os.pr` — OS Interaction
 
 ```promise
 type OsError is error `public { int code; }
@@ -943,7 +931,7 @@ receive_signal!() Signal ; // block until signal arrives
 - **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `env` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
 - **Test**: `modules/os/os_test.pr` (103 tests, excluded on WASM)
 
-#### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
+#### 4e. Standard Input (merged into `modules/io/io.pr`)
 
 ```promise
 // Read a line from stdin (blocking) — free function in io module
@@ -1120,7 +1108,7 @@ Response r = client.get("http://host/path")?;   // also post!, send!, close
 
 - **Dependencies**: `modules/net/net.pr`, `modules/json/json.pr`, `modules/gzip/gzip.pr`
 
-#### 5e. `modules/crypto/` — Cryptographic Primitives — DONE
+#### 5e. `modules/crypto/` — Cryptographic Primitives
 
 Shipped as two files: `sha256.pr` and `constant_time.pr`.
 
@@ -1342,34 +1330,34 @@ bin/test.sh                            # rebuild + all tests pass (including new
 
 ## Appendix: Complete Module Inventory
 
-| Phase | File | Type | New PAL | Lines | Status |
-|-------|------|------|---------|-------|--------|
-| 0a | `modules/std/error.pr` | Promise | No | 3 | **DONE** |
-| 0b | `modules/std/iter.pr` | Promise | No | 257 | **DONE** |
-| 0c | `modules/std/int.pr` etc. | Native | No | 909 | **DONE** |
-| 0d | `modules/std/format.pr` | Promise | No | 495 | **DONE** |
-| 0e | `modules/std/parse.pr` | Promise | No | 43 | **DONE** |
-| 1a | `modules/std/set.pr` | Promise | No | 107 | **DONE** |
-| 1b | `modules/std/sort.pr` | Promise | No | 91 | **DONE** |
-| 1c | `modules/std/string.pr` + `modules/strings/` | Promise | No | 199+65 | **DONE** |
-| 1d | `modules/std/result.pr` | ~~Promise~~ | No | — | DEFERRED |
-| 2a | (merged into 0c) | — | — | — | **DONE** |
-| 2b | `modules/std/builder.pr` | Promise | No | 38 | **DONE** |
-| 2c | `modules/std/fmt.pr` | ~~Promise~~ | No | — | DEFERRED |
-| 3a | `modules/std/math.pr` + `modules/math/` | Native + Promise | No | 111+67 | **DONE** |
-| 3b | `modules/std/random.pr` | Promise | No | 165 | **DONE** |
-| 3c | `modules/std/time.pr` | Promise + Native | 3 | 96 | **DONE** |
-| 4a | `modules/std/io.pr` | Promise | No | 97 | **DONE** |
-| 4b | `modules/io/io.pr` | Promise + Native | 12 | 548 | **DONE** |
-| 4c | `modules/path/path.pr` | Promise | No | 192 | **DONE** |
-| 4d | `modules/os/os.pr` | Promise + Native | 13 | 511 | **DONE** |
-| 4e | (merged into 4b) | — | — | — | **DONE** |
-| — | `modules/std/platform.pr` | Promise | No | 33 | **DONE** |
-| 5a | `modules/json/json.pr` | Promise | No | 1,003 | **DONE** |
-| 5b | `modules/regex/regex.pr` | Promise | No | ~400 | Future |
-| 5c | `modules/net/net.pr` | Promise + Native | 6+ | 281 | **DONE** |
-| 5d | `modules/http/http.pr` | Promise | No | 1,414 | **DONE** (client+server, no TLS) |
-| 5e | `modules/crypto/` | Promise | No | 239 | **DONE** (SHA-256; HMAC/PBKDF2/CSPRNG remain — T1567/T1568/T1571) |
-| 5f | `modules/std/embed.pr` | Promise | No | 54 | **DONE** |
-| | **Phases 0-4 (actual)** | | **28** | **4,027** | **18/20 done** (`result`, `fmt` deferred) |
-| | **Total (implemented)** | | **34+** | **7,018** | **Phase 5: 5/6 done** (`regex` remains) |
+| Phase | File | Type | New PAL | Lines | Notes |
+|-------|------|------|---------|-------|-------|
+| 0a | `modules/std/error.pr` | Promise | No | 3 | |
+| 0b | `modules/std/iter.pr` | Promise | No | 257 | |
+| 0c | `modules/std/int.pr` etc. | Native | No | 909 | |
+| 0d | `modules/std/format.pr` | Promise | No | 495 | |
+| 0e | `modules/std/parse.pr` | Promise | No | 43 | |
+| 1a | `modules/std/set.pr` | Promise | No | 107 | |
+| 1b | `modules/std/sort.pr` | Promise | No | 91 | |
+| 1c | `modules/std/string.pr` + `modules/strings/` | Promise | No | 199+65 | |
+| 1d | `modules/std/result.pr` | ~~Promise~~ | No | — | Not planned — `T!` is function-level, so the helpers are inexpressible (§4) |
+| 2a | (merged into 0c) | — | — | — | |
+| 2b | `modules/std/builder.pr` | Promise | No | 38 | |
+| 2c | `modules/std/fmt.pr` | ~~Promise~~ | No | — | Not planned — interpolation covers it; belongs in a catalog module (§4) |
+| 3a | `modules/std/math.pr` + `modules/math/` | Native + Promise | No | 111+67 | |
+| 3b | `modules/std/random.pr` | Promise | No | 165 | |
+| 3c | `modules/std/time.pr` | Promise + Native | 3 | 96 | |
+| 4a | `modules/std/io.pr` | Promise | No | 97 | |
+| 4b | `modules/io/io.pr` | Promise + Native | 12 | 548 | |
+| 4c | `modules/path/path.pr` | Promise | No | 192 | |
+| 4d | `modules/os/os.pr` | Promise + Native | 13 | 511 | |
+| 4e | (merged into 4b) | — | — | — | |
+| — | `modules/std/platform.pr` | Promise | No | 33 | |
+| 5a | `modules/json/json.pr` | Promise | No | 1,003 | |
+| 5b | `modules/regex/regex.pr` | Promise | No | ~400 | Design only |
+| 5c | `modules/net/net.pr` | Promise + Native | 6+ | 281 | |
+| 5d | `modules/http/http.pr` | Promise | No | 1,414 | |
+| 5e | `modules/crypto/` | Promise | No | 239 | |
+| 5f | `modules/std/embed.pr` | Promise | No | 54 | |
+| | **Phases 0-4** | | **28** | **4,027** | `result` and `fmt` not planned |
+| | **Total** | | **34+** | **7,018** | |

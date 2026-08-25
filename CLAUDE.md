@@ -345,11 +345,53 @@ Tests are organized by category:
 | `modules/*/` | Catalog module internal tests (`*_test.pr`) |
 | `examples/` | Runnable examples: basics, types, errors, ownership, collections, lambdas, concurrency, modules, patterns |
 
+## Documentation
+
+**The folder a doc sits in says whether it binds.** There is no config file and no per-doc
+marker — location is the whole rule:
+
+| Location | What a file there is | Binding? |
+|----------|----------------------|----------|
+| `docs/` root | A **specification**: what the project *should* be — the intended end state. Never records current state, progress, or phasing. | **Yes** |
+| `docs/proposals/` | An end state that is **not ratified** — a draft or RFC. Ratifying it is a `git mv` into the root. | No |
+| `docs/archive/` | Superseded or delivered. | No |
+| `docs/research/` | Background analysis feeding a decision — an assessment, not a design. | No |
+
+**A `docs/` root doc is normative — treat it as binding.** If a task contradicts one, stop and
+ask the user rather than shipping the deviation: the resolution is to amend the doc, adjust the
+task, or reject it. This matters most for tasks imported from GitHub issues, which are written
+by people who may not know the project's direction.
+
+**Never add a status section to a root doc.** Status is not a property of a specification. Each
+root doc declares a tag on the line under its title, and the gap between the end state and today
+is the set of open tracker items carrying it:
+
+> **Tag:** `large-integers` — remaining work to complete this document: `mcp__tracker__list --tag large-integers`
+
+So progress lives in the tracker, and `mcp__tracker__list --tag <doc>` **is** the doc's status
+section. When you finish work described by a root doc, close the tracker item — do not write
+"implemented" into the doc. When you find work a root doc implies but nobody has filed, file it
+with that doc's tag.
+
+The tag is always the file's basename (`docs/module-system.md` → `module-system`); the
+vocabulary is the directory listing, so `docs/tags.md` deliberately does not duplicate it.
+`docs/index.md` is the map — the one non-spec file in the root — and must list every doc,
+wherever it lives (enforced by `checkDocIndex` in `tools/build/common/docscheck.go`).
+
+The one exception to "no status prose": a **language-semantics** marker where the gap changes
+what compiles today (`docs/language-design.md` says hybrid types fit the four-struct model *and*
+that mixing `` `value `` and instance fields is currently a compile error). Such a marker must
+name its tracker item so it stays a pointer. It is never for how far along an internal migration is.
+
+**When you close an item that a marker names, delete the marker in the same change.** A marker
+outliving its item tells the reader the compiler rejects something it now accepts — strictly worse
+than no marker. `grep -rn 'tracked as T[0-9]' docs/*.md` lists them all.
+
 ## Important Files
 
 - `compiler/grammar/PromiseParser.g4` — grammar is the language spec
 - `docs/language-design.md` — full language design (types, ownership, errors, generics, modules)
-- `docs/standard-library.md` — stdlib design: module inventory, PAL extensions, implementation phases, testing strategy
+- `docs/standard-library.md` — stdlib design: module inventory, PAL extensions, testing strategy
 - `compiler/internal/codegen/compiler.go` — codegen entry, type layouts, scope cleanup
 - `compiler/internal/codegen/sched.go` — M:N scheduler: GMP structs, sched_loop, park/wake, steal, shutdown
 - `compiler/internal/codegen/stmt.go` — statement codegen, drop/close emission, select
@@ -366,6 +408,8 @@ Tests are organized by category:
 - `compiler/cmd/promise/fmt.go` — `promise format` CLI wiring
 - `examples/` — runnable examples (basics → concurrency → patterns), also verified as tests
 - `docs/language-guide.md` — concise language reference
+- `docs/index.md` — the documentation map: every doc, and which folder makes it binding
+- `docs/tags.md` — canonical tag vocabulary and tagging rules (consult before tagging)
 
 ## Implementation Philosophy
 

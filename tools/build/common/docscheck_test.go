@@ -157,17 +157,39 @@ func TestDocIndexUnlinkedDocFails(t *testing.T) {
 	}
 }
 
-func TestDocIndexIgnoresArchiveSubdirectory(t *testing.T) {
-	// docs/archive/ holds superseded material that is intentionally not
-	// indexed; the `docs/*.md` pathspec still returns it, so the top-level
-	// filter is what keeps it out.
+func TestDocIndexCoversSubdirectories(t *testing.T) {
+	// Which folder a doc sits in is what says whether it binds — root is
+	// normative, proposals/ is unratified, archive/ is superseded — and the
+	// index is where that is written down. So a doc in a subdirectory that
+	// nothing links to has no stated status at all, and must be flagged.
 	root := docsRepo(t, map[string]string{
-		"docs/index.md":          "- [tags](tags.md)\n",
+		"docs/index.md":            "- [tags](tags.md)\n",
+		"docs/tags.md":             "# Tags\n",
+		"docs/archive/stages.md":   "# Stages\n",
+		"docs/proposals/ui.md":     "# UI\n",
+		"docs/research/refined.md": "# Refinement types\n",
+	})
+	err := checkDocIndex(root)
+	if err == nil {
+		t.Fatal("unindexed docs in subdirectories must be flagged")
+	}
+	for _, want := range []string{"docs/archive/stages.md", "docs/proposals/ui.md", "docs/research/refined.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected %s to be flagged, got: %v", want, err)
+		}
+	}
+}
+
+func TestDocIndexAcceptsLinkedSubdirectoryDocs(t *testing.T) {
+	// The counterpart: once the index links them, subdirectory docs pass.
+	root := docsRepo(t, map[string]string{
+		"docs/index.md":          "- [tags](tags.md)\n- [stages](archive/stages.md)\n- [ui](proposals/ui.md)\n",
 		"docs/tags.md":           "# Tags\n",
 		"docs/archive/stages.md": "# Stages\n",
+		"docs/proposals/ui.md":   "# UI\n",
 	})
 	if err := checkDocIndex(root); err != nil {
-		t.Fatalf("nested docs must be out of scope, got: %v", err)
+		t.Fatalf("linked subdirectory docs must pass, got: %v", err)
 	}
 }
 

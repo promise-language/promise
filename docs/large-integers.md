@@ -1,6 +1,6 @@
-# Large Integer Types — Design Plan
+# Large Integer Types
 
-> **Status**: Implemented (T0587). Adds `i128`/`u128`, `i256`/`u256`, and `i512`/`u512` as first-class native primitive types. Phases 1–3 (all six widths, with arithmetic/comparison/bitwise/range/format/parse/encode/decode/hash, casts, and JSON as decimal strings) are done and tested. Phase 4 remainder: collapsing the three per-width `_wide_int_format_*` helpers into one generic helper is deferred until numeric generics are expressive enough. `scan[wide](s)` through the generic `Parse` interface now works (the default-argument bug T1395 is fixed); `wide.parse(reader)` also works directly. This document captures motivation, scope, the language/codegen/stdlib changes, and the implementation phasing.
+> **Tag:** `large-integers` — remaining work to complete this document: `mcp__tracker__list --tag large-integers`
 
 ---
 
@@ -162,11 +162,11 @@ For-in loops over wide-integer ranges work but should carry a warning in the lan
 
 ### 4.1 Universe registration
 
-[compiler/internal/types/universe.go](compiler/internal/types/universe.go) adds six new globals (`TypI128`, `TypU128`, `TypI256`, `TypU256`, `TypI512`, `TypU512`), each registered in the universe scope with `defNamed`.
+[compiler/internal/types/universe.go](../compiler/internal/types/universe.go) adds six new globals (`TypI128`, `TypU128`, `TypI256`, `TypU256`, `TypI512`, `TypU512`), each registered in the universe scope with `defNamed`.
 
 ### 4.2 Type classification
 
-[compiler/internal/codegen/types.go](compiler/internal/codegen/types.go) extends `classify()` to map the new types into `CatSignedInt`/`CatUnsignedInt`. `llvmNamedType()` maps:
+[compiler/internal/codegen/types.go](../compiler/internal/codegen/types.go) extends `classify()` to map the new types into `CatSignedInt`/`CatUnsignedInt`. `llvmNamedType()` maps:
 
 ```go
 case types.TypI128, types.TypU128:
@@ -231,7 +231,7 @@ Each of the six types gets the standard four-struct layout (Type, Variant, Insta
 
 ### 5.1 File layout
 
-All six wide-integer types ship in one file: **[modules/std/wide_int.pr](modules/std/wide_int.pr)**. This mirrors how the existing `int.pr` declares `int`/`i8`/`i16`/`i32`/`i64` in a single source file and `uint.pr` declares `uint`/`u8`/`u16`/`u32`/`u64` — the type declarations are mostly `` `native `` operator stubs (no Promise bodies), so per-type files would add cache and compile cost without adding readability. One file for all six covers `i128`, `u128`, `i256`, `u256`, `i512`, `u512`.
+All six wide-integer types ship in one file: **[modules/std/wide_int.pr](../modules/std/wide_int.pr)**. This mirrors how the existing `int.pr` declares `int`/`i8`/`i16`/`i32`/`i64` in a single source file and `uint.pr` declares `uint`/`u8`/`u16`/`u32`/`u64` — the type declarations are mostly `` `native `` operator stubs (no Promise bodies), so per-type files would add cache and compile cost without adding readability. One file for all six covers `i128`, `u128`, `i256`, `u256`, `i512`, `u512`.
 
 Each declaration contains the same surface as the entries in `i64.pr`: arithmetic/comparison/bitwise/range operators (all `\`native`), `get min`/`get max` constants, `to_string`, `format`, `parse`, `encode`, `decode`, `hash`. Implementation strategy follows CLAUDE.md's "Prefer Promise over IR" rule:
 
@@ -269,7 +269,7 @@ Each new type implements `is Hashable`, `is Ordered`, `is Equal` via the standar
 
 ### 5.4 Random
 
-[modules/std/random.pr](modules/std/random.pr) gains `next_u128`, `next_u256`, `next_u512` returning uniformly distributed wide integers via repeated 64-bit draws. (Optional — can be deferred; users can compose from existing `next_u64` calls.)
+[modules/std/random.pr](../modules/std/random.pr) gains `next_u128`, `next_u256`, `next_u512` returning uniformly distributed wide integers via repeated 64-bit draws.
 
 ### 5.5 Math
 
@@ -311,47 +311,7 @@ Verification step before committing: a single test program performing `i128`, `i
 
 ---
 
-## 9. Implementation Phasing
-
-Each phase is independently shippable and testable.
-
-### Phase 1 — `i128` / `u128` only
-
-- Universe registration for `TypI128`, `TypU128`.
-- `llvmNamedType` mapping.
-- Native operator dispatch for the two new types.
-- Numeric-literal suffix `i128`/`u128`; switch literal magnitude representation in the AST to `*big.Int`.
-- Create [modules/std/wide_int.pr](modules/std/wide_int.pr) with `i128` and `u128` declarations (default base 16 for `to_string` and `parse`).
-- `_wide_int_format_128` helper for hex (fast path) and base-N (slow path) printing.
-- Cast rules (`as!`) covering all combinations with existing integer/float types.
-- Range/iteration tests.
-- JSON encoder/decoder using string representation.
-- Test suite: `tests/std/wide_int_test.pr` covering arithmetic, comparison, conversion, parse/format (both base 16 default and explicit base 10), range, hash, encode/decode round-trips, overflow at `max`/`min`, structural-interface usage (`scan[u128](...)` via the `Parse` interface with default-base param).
-- **Done when**: `bin/verify --wasm --wasm-web` passes with the new tests, no regressions.
-
-### Phase 2 — `i256` / `u256`
-
-- Same shape as Phase 1 for the 256-bit pair.
-- Append `i256` and `u256` declarations to the same [modules/std/wide_int.pr](modules/std/wide_int.pr) — no new file.
-- Add `_wide_int_format_256` helper.
-- Verify division libcalls resolve on all targets; file bugs against PAL/compiler-rt linkage if missing.
-- Test suite: extend `tests/std/wide_int_test.pr`; add a `tests/std/sha256_smoke_test.pr` demonstrating SHA-256-style word arithmetic for confidence.
-
-### Phase 3 — `i512` / `u512`
-
-- Same shape; append to [modules/std/wide_int.pr](modules/std/wide_int.pr).
-- Add `_wide_int_format_512` helper.
-- Test suite extension; smoke test against a known SHA-512 test vector represented as `u512`.
-
-### Phase 4 — Cleanup
-
-- Migrate the three per-width `_wide_int_format_*` helpers to a single Promise generic helper (depends on numeric generics being expressive enough; if not, file a tracker task and defer).
-- Documentation: extend [docs/language-guide.md](language-guide.md) with the wide-type ladder and performance notes; cross-link from this plan.
-- Examples: add a `examples/wide_int.pr` showing UUID-as-`u128` and a small SHA-256-style use of `u256`.
-
----
-
-## 10. Open Questions
+## 9. Open Questions
 
 1. **Should `parse` on wide types support a leading `+` sign?** Existing `int.parse` does not. Keep consistent (no leading `+`).
 2. **Should we expose `wrapping_add` / `checked_add` / `overflowing_add` (Rust-style)?** Out of scope for this plan. The current Promise position is "arithmetic wraps silently for unsigned, traps for signed in debug" (matching Rust `Wrapping` / debug-overflow conventions); wide types follow the same rule. A future tracker task can introduce a checked-arithmetic family across all integer widths uniformly.
@@ -362,7 +322,7 @@ Each phase is independently shippable and testable.
 
 ---
 
-## 11. Non-Goals
+## 10. Non-Goals
 
 Explicitly **not** part of this plan:
 

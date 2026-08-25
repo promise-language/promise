@@ -1,5 +1,7 @@
 # Promise Code Style
 
+> **Tag:** `code-style` — remaining work to complete this document: `mcp__tracker__list --tag code-style`
+
 Conventions for Promise source code (`.pr` files). These rules apply to standard library, catalog modules, examples, and tests.
 
 ## Field and getter naming

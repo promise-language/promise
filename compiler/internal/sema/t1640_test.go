@@ -212,7 +212,7 @@ func TestT1640OptionalClosureNestedLambdaCaptureGated(t *testing.T) {
 // A Vector of closures is sendable, because Vector derives sendability from its
 // element type and a Signature element is now sendable. This is the shape a
 // subscription API actually needs — a list of registered callbacks handed to a
-// goroutine (docs/wasm-web-callbacks.md Phase 3).
+// goroutine (docs/web-apps.md §14, the Promise-side delivery surface).
 func TestT1640VectorOfClosuresIsSendable(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
 		main() {

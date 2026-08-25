@@ -1,5 +1,7 @@
 # Creating New Modules for Promise
 
+> **Tag:** `creating-modules` — remaining work to complete this document: `mcp__tracker__list --tag creating-modules`
+
 A step-by-step guide to proposing, implementing, and shipping new catalog modules.
 
 ---

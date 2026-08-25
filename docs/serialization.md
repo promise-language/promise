@@ -1,4 +1,6 @@
-# Serialization Architecture — Design Plan
+# Serialization Architecture
+
+> **Tag:** `serialization` — remaining work to complete this document: `mcp__tracker__list --tag serialization`
 
 Promise needs a serialization system that lets AI agents produce correct serialization code in one shot without memorizing framework-specific APIs. This document proposes an architecture, surveys how other languages handle serialization, and identifies the compiler features needed.
 
@@ -692,78 +694,9 @@ type DecodeError is error `public {
 
 ---
 
-## 6. Implementation Phases
+## 6. Design Decisions & Rationale
 
-### Phase 1: Foundation (Encoder/Decoder interfaces + primitives)
-
-**Scope:** Standard library only, no compiler changes.
-
-1. Create `modules/std/encode.pr` with `Encoder`, `Decoder`, `Encodable`, `Decodable` structural interfaces
-2. Add `encode`/`decode` methods to all primitive types (`int`, `f64`, `bool`, `string`, etc.)
-3. Add `encode`/`decode` to `Vector[T]` and `Map[K,V]`
-4. Add `encode`/`decode` to `Optional[T]` (encode as value or null)
-5. Create `DecodeError` type
-6. Tests: unit tests for each primitive's encode/decode
-
-### Phase 2: JSON Module (hand-written, no codegen)
-
-**Scope:** New catalog module `modules/json/`, no compiler changes.
-
-1. Implement `JsonEncoder` (satisfies `Encoder`) — writes JSON text to a Builder
-2. Implement `JsonDecoder` (satisfies `Decoder`) — reads JSON text from a Scanner
-3. Implement `JsonValue` enum with `parse`/`format`
-4. Implement convenience functions: `encode_string`, `decode_string`, `encode_string_pretty`
-5. Tests: JSON parsing/formatting for all JSON types, round-trip tests, edge cases (escapes, unicode, numbers)
-
-**At this point, users can manually implement `encode`/`decode` on their types and use the JSON module.** This validates the Encoder/Decoder interface design before investing in compiler codegen.
-
-### Phase 3: `` `serializable `` Compiler Feature — DONE (primitive fields)
-
-**Scope:** Compiler changes. Implementation: AST synthesis in `sema/serialize.go`.
-
-1. ~~Store `isSerializable` flag on `Named`~~ — **Done** (`types/named.go`)
-2. ~~Extract flag during sema define pass~~ — **Done** (`sema/decl.go`)
-3. ~~Register new meta annotations (`key`, `skip`, `include_none`, `required`, `flatten`)~~ — **Done** (`sema/meta.go`)
-4. ~~Validate field annotations (`include_none` only on `T?` fields)~~ — **Done** (`sema/serialize.go`)
-5. ~~Synthesize `encode` method AST if not user-defined~~ — **Done** — handles `key` renaming, `skip` exclusion, optional omission (if-unwrap), `include_none` null encoding
-6. ~~Synthesize `decode` factory method AST if not user-defined~~ — **Done** for primitive fields — handles key matching loop, optional null checking, error propagation, `skip` zero-fill, `key` renaming
-7. ~~Generic type param constraints~~ — **Done** in Phase 4 with explicit constraints (not implicit)
-8. ~~Tests~~ — **Done**: 50 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), nested types (3 levels, key annotation, multiple nested fields), array fields (`T[]` — string/int/f64/bool/user-type arrays, empty, single element), map fields (`map[K,V]` — string keys, int keys, encode/decode/empty), mixed array+map, field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
-
-**Known limitations (Phase 3+4):**
-- ~~**Nested user-type decode**~~ — **Fixed.** Now uses `T?` local with `!` unwrap in constructor args. Panics if a required nested field is missing from the JSON.
-- ~~**Structural interface coercion for user types**~~ — **Fixed.** Synthesized methods use `MutRefTypeRef`. Variable assignment and value type boxing also fixed.
-- ~~**Container fields**~~ — **Fixed.** `T[]` encodes as JSON array with inline for-in loop; decodes with `has_next_element` + push loop. `map[K, V]` supports any key type — string keys use directly, non-string keys use `to_string()` for encode and `scan[K]()` for decode (reversible via Format/Parse).
-- ~~**Generic serializable types**~~ — **Fixed.** Requires explicit constraints: `Wrapper[T: Encodable + Decodable]`. Unconstrained type params in non-skip fields produce a clear error. Skip fields with TypeParam type are exempt (encode-only, no decode synthesis if constructor can't be satisfied).
-
-### Phase 4: Nested Types, Enums, and Advanced Features
-
-**Scope:** Compiler + standard library.
-
-1. ~~Nested user-type decode~~ — **Done.** Uses `T?` local + `!` unwrap. 3 tests (encode, decode, round-trip).
-2. ~~Container field serialization (`T[]`, `map[K, V]`)~~ — **Done.** Inline codegen. Non-string map keys use `to_string()`/`scan[K]()`. Added `has_next_element` to Decoder interface. 9 tests.
-3. ~~Enum `` `serializable `` codegen~~ — **Done.** Tag-based for data enums, string for simple enums. 52 tests.
-4. ~~`` `flatten `` support~~ — **Done.** Inlines nested type fields into parent during encode/decode. Validates type, annotation conflicts, and wire name collisions. 9 e2e tests + 8 sema tests.
-5. ~~`` `serializable(tag: "kind") `` parameter~~ — **Done.** Custom discriminator field name (default `"type"`). 7 tests.
-6. Nested generic serialization (`Wrapper[User]`, `map[string, User[]]`)
-7. ~~Generic type parameter validation~~ — **Done.** Explicit constraints required (`T: Encodable + Decodable`). Clear error for unconstrained params. Skip fields exempt. 7 tests (int, string, bool, f64, user type, round-trip, skip).
-8. Tests: nested round-trip, container round-trip, enum round-trip, flatten, custom tags
-
-### Phase 5: Additional Format Modules (future)
-
-Not part of this plan, but the architecture supports:
-
-- `modules/toml/` — TOML encoder/decoder (can reuse existing `promise.toml` parsing)
-- `modules/yaml/` — YAML encoder/decoder
-- `modules/msgpack/` — MessagePack binary encoder/decoder
-
-Each module only needs to implement `Encoder`/`Decoder`. All `` `serializable `` types work automatically.
-
----
-
-## 7. Design Decisions & Rationale
-
-### 7.1 Why Compiler Codegen Instead of Runtime Reflection?
+### 6.1 Why Compiler Codegen Instead of Runtime Reflection?
 
 Promise has no runtime reflection system and shouldn't need one. The four-struct model stores RTTI for inheritance checks, but not for field enumeration. Adding runtime reflection would:
 
@@ -776,7 +709,7 @@ Compiler-generated methods are:
 - Validated at compile time (wrong field types caught early)
 - Inspectable (the generated code is just Promise methods)
 
-### 7.2 Why Streaming Encoder/Decoder Instead of Tree-Based?
+### 6.2 Why Streaming Encoder/Decoder Instead of Tree-Based?
 
 A tree-based approach (build a `JsonValue`, then serialize the tree) requires an intermediate allocation for every serialization. The streaming approach writes directly to the output:
 
@@ -796,7 +729,7 @@ The streaming model also naturally extends to binary formats (MessagePack, Proto
 
 Users who need tree manipulation can always use `JsonValue` directly — the streaming encoder/decoder and the tree-based `JsonValue` are complementary, not competing.
 
-### 7.3 Why Non-Structural for Encoder/Decoder, Structural for Encodable/Decodable?
+### 6.3 Why Non-Structural for Encoder/Decoder, Structural for Encodable/Decodable?
 
 `Encoder` and `Decoder` have ~12 abstract methods each. They are **not** structural:
 
@@ -809,7 +742,7 @@ Users who need tree manipulation can always use `JsonValue` directly — the str
 - **Widely satisfied** — every serializable type, every primitive, every container. Requiring `is Encodable` on `int`, `string`, `Vector[T]`, etc. would be noisy.
 - **Accidental satisfaction is harmless** — if a type happens to have `encode!(Encoder ~e) `, it *should* be encodable.
 
-### 7.4 Why AST Synthesis Instead of IR Generation?
+### 6.4 Why AST Synthesis Instead of IR Generation?
 
 Generating the encode/decode methods as AST nodes (rather than generating LLVM IR directly) means:
 
@@ -820,7 +753,7 @@ Generating the encode/decode methods as AST nodes (rather than generating LLVM I
 
 The downside is that AST synthesis is a new pattern in the compiler (current codegen for structural default methods operates on existing AST nodes from the source code). But this is a bounded addition — the generated AST is formulaic and doesn't require new AST node types.
 
-### 7.5 Comparison with the Format/Parse Pair
+### 6.5 Comparison with the Format/Parse Pair
 
 The serialization system parallels the existing Format/Parse design:
 
@@ -837,46 +770,24 @@ Format/Parse is for **human-readable text** (stdout, logs, debug display). Encod
 
 ---
 
-## 8. Open Questions
+## 7. Open Questions
 
-### 8.1 Should `Encodable`/`Decodable` be two interfaces or one `Serializable`?
+### 7.1 Should `Encodable`/`Decodable` be two interfaces or one `Serializable`?
 
 **Current proposal: two.** Rationale: some types are encode-only (you never deserialize them) or decode-only (you never serialize them). Separate interfaces give fine-grained control. The `` `serializable `` annotation generates both, but a user can implement just one.
 
-### 8.2 How should `map[K, V]` serialize when K is not string?
+### 7.2 How should `map[K, V]` serialize when K is not string?
 
 **Resolved: convert via Format/Parse.** Non-string keys are converted to string via `to_string()` for encoding and parsed back via `scan[K]()` for decoding. This leverages the existing `Format`/`Parse` structural interfaces — any type that can format to string and parse from string can be a map key. String keys are used directly (no conversion overhead). The `Encoder` interface has `encode_key(string)`, so all keys must ultimately become strings at the wire level.
 
-### 8.3 Should unknown keys during decode be an error or silently skipped?
+### 7.3 Should unknown keys during decode be an error or silently skipped?
 
 **Current proposal: silently skipped.** This matches JSON API convention (forward-compatible). A future `` `serializable(strict: true) `` parameter could change this to error on unknown keys.
 
-### 8.4 AST synthesis vs a dedicated codegen path?
+### 7.4 AST synthesis vs a dedicated codegen path?
 
 **Resolved: AST synthesis.** The Phase 3 implementation (`sema/serialize.go`) synthesizes `MethodDecl` AST nodes during sema pass 2. These flow through normal type-checking (pass 3), return analysis (pass 4), and codegen — no special codegen path needed. The approach works well for primitive and optional fields. The synthesized AST is formulaic (if-unwrap for optionals, call-member for encode/decode, for-loop for key matching) and uses existing AST node types.
 
-### 8.5 Naming: `encode`/`decode` vs `serialize`/`deserialize`?
+### 7.5 Naming: `encode`/`decode` vs `serialize`/`deserialize`?
 
 `encode`/`decode` is shorter and follows Promise's full-word convention better than `ser`/`de`. It also avoids confusion with `Format`/`Parse` (which could be called "serialization" colloquially). The interfaces are `Encodable`/`Decodable`, not `Serializable`/`Deserializable`, because the meta annotation `` `serializable `` already uses "serializable" — using the same word for both the annotation and the interface would be confusing.
-
----
-
-## 9. Summary
-
-| Component | Location | Phase | Status |
-|-----------|---------|-------|--------|
-| `Encoder`/`Decoder` interfaces | `modules/std/encode.pr` | 1 | **Done** |
-| `Encodable`/`Decodable` interfaces | `modules/std/encode.pr` | 1 | **Done** |
-| Primitive encode/decode | `modules/std/int.pr`, etc. | 1 | **Done** — all 17 types with range checking |
-| Container encode/decode | `sema/serialize.go` (inline codegen) | 4 | **Done** — `T[]` and `map[K,V]` via inline loops |
-| `DecodeError` | `modules/std/encode.pr` | 1 | **Done** |
-| `JsonEncoder`/`JsonDecoder` | `modules/json/json.pr` | 2 | **Done** — 61 tests |
-| `JsonValue` enum | `modules/json/json.pr` | 2 | **Done** — parse_value, format_value, encode_value, 27 tests |
-| `json.encode_string`/`json.decode_string` | `modules/json/json.pr` | 2 | **Done** |
-| `` `serializable `` flag in types | `types/named.go` | 3 | **Done** |
-| Field annotations (`key`, `skip`, `include_none`, `required`, `flatten`) | `sema/meta.go`, `sema/decl.go` | 3 | **Done** |
-| AST synthesis for encode/decode | `sema/serialize.go` | 3 | **Done** — primitives, optionals, nested, containers |
-| Nested user-type decode | `sema/serialize.go` | 4 | **Done** — `T?` local + `!` unwrap |
-| Enum serialization | `sema/serialize.go` | 4 | Planned |
-| `` `flatten `` support | `sema/serialize.go` | 4 | **Done** |
-| TOML/YAML/MsgPack modules | `modules/toml/`, etc. | 5 | Planned |

@@ -1,5 +1,7 @@
 # Platform Modules Layout
 
+> **Tag:** `platform-modules` — remaining work to complete this document: `mcp__tracker__list --tag platform-modules`
+
 Design document for Promise's platform-facing standard library: the boundary between `modules/std/`
 and other `modules/`, what each platform module contains, and why the layout is what it is. This
 supersedes the Phase 4 plan in `standard-library.md` (sections 4b–4e), which was written before
@@ -18,7 +20,7 @@ auto-imported via an injected `use std as _;`.
 The difference is **purely ergonomic** — not architectural. Both live under `modules/` and are
 compiled the same way. This is the key insight that determines what belongs where.
 
-### The architecture: `std` as a regular catalog module (Done)
+### The architecture: `std` as a regular catalog module
 
 `std` is a regular catalog module, identical in treatment to `modules/path` or `modules/io`.
 The only special behavior is that every source file automatically receives an injected
@@ -103,7 +105,7 @@ documentation.
 
 ---
 
-## 2. `\`target(cond)` — Compile-Time Platform Filtering (Done)
+## 2. `\`target(cond)` — Compile-Time Platform Filtering
 
 Implemented in Stage 8q. See `docs/archive/stages.md` for implementation details.
 
@@ -162,7 +164,7 @@ Target identifiers:
 
 Operators: `!` (not), `\|\|` (or), `&&` (and), `()` grouping.
 
-### Implementation (Done — Stage 8q)
+### Implementation
 
 Entirely in sema (`sema/target.go`):
 
@@ -261,7 +263,7 @@ annotation as the default (no annotation = always compiled).
 
 ---
 
-## 3. Platform Constants: `Platform` Type (Done)
+## 3. Platform Constants: `Platform` Type
 
 Platform constants live in `modules/std/platform.pr` as global getters and methods on a `Platform`
 namespace type. All `` `target `` annotations are confined to `std/` — external modules like
@@ -321,9 +323,9 @@ heavier.
 
 ## 5. `modules/path` — Path Manipulation
 
-**Status**: Implemented. Pure string operations, platform-aware via `Platform.is_path_separator`.
+Pure string operations, platform-aware via `Platform.is_path_separator`.
 
-### Current API (Done)
+### Current API
 
 ```promise
 join(string base, string child, ...string rest) string  // join two or more path components
@@ -402,7 +404,7 @@ Failable getters like `working_dir` use `!` unwrap at the call site (`os.working
 
 ## 7. `modules/io` — File I/O and Standard Input
 
-**Status**: Implemented. `modules/io/io.pr` ships `File`, `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, and the `read_line()`/`read_stdin()` free functions.
+`modules/io/io.pr` holds `File`, `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, and the `read_line()` / `read_stdin()` free functions.
 
 ### I/O Architecture: Reactor + Async/Sync Backends
 
@@ -696,10 +698,6 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-**Status**: Full OS interface implemented (`get_env_var`, `working_dir`, `exit_process`,
-`args`, `executable_path`, `execute`, `set_env_var`, `set_working_dir`).
-Remaining: signal handling.
-
 Applying §6 principles: `args`, `executable_path`, and `working_dir` are module-level
 getters (accessed as `os.args`, `os.executable_path`, `os.working_dir!`). `exit_process`
 and `execute` stay as functions (they perform actions). `get_env_var` stays as a function
@@ -838,9 +836,7 @@ pal_wait_pid(i32 pid) i32              // waitpid with EINTR retry; returns exit
 
 ## 9. `modules/time` — Higher-Level Time Operations
 
-**Status**: Implemented. `modules/std/time.pr` provides `Duration`, `Instant`, and `sleep`; the
-`modules/time` catalog module builds higher-level wall-clock utilities on top of those — `DateTime.now()`,
-`Date`, `Time`, `from_unix_secs`, UTC offsets, and ISO-8601 (RFC 3339) format/parse all work today:
+`modules/std/time.pr` owns the monotonic primitives — `Duration`, `Instant`, and `sleep`. The `modules/time` catalog module builds wall-clock utilities on top of those: `DateTime.now()`, `Date`, `Time`, `from_unix_secs`, UTC offsets, and ISO-8601 (RFC 3339) format/parse.
 
 ```promise
 use time;
@@ -910,19 +906,19 @@ modules/
     iter.pr       — Iterator[T], combinators
     ...
 
-  path/           — join, file_name, parent, extension, stem, split, normalize  (DONE)
-  math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
-  strings/        — join, spaces, reverse, ...                        (DONE)
-  io/             — File, Dir, IoError, read_line, read_stdin          (DONE)
-  os/             — args, get_env_var, working_dir, execute, Process   (DONE)
-  time/           — DateTime, Date, Time; now, from_unix_*, parse       (DONE)
-  json/           — JsonEncoder, JsonDecoder, JsonValue                (DONE)
-  net/            — TcpListener, TcpStream, NetError                   (DONE)
-  http/           — HTTP/1.1 client and server                         (DONE)
-  tls/            — TlsConfig, TlsStream, TlsListener, TlsError        (DONE)
-  gzip/           — gzip_encode, gunzip, deflate, inflate, crc32       (DONE)
-  crypto/         — Sha256, Digest256, constant_time_equal             (DONE)
-  encoding/       — hex_encode, hex_decode, EncodingError              (DONE)
+  path/           — join, file_name, parent, extension, stem, split, normalize
+  math/           — lerp, map_range, deg_to_rad, sign_f64
+  strings/        — join, spaces, reverse, ...
+  io/             — File, Dir, IoError, read_line, read_stdin
+  os/             — args, get_env_var, working_dir, execute, Process
+  time/           — DateTime, Date, Time; now, from_unix_*, parse
+  json/           — JsonEncoder, JsonDecoder, JsonValue
+  net/            — TcpListener, TcpStream, NetError
+  http/           — HTTP/1.1 client and server
+  tls/            — TlsConfig, TlsStream, TlsListener, TlsError
+  gzip/           — gzip_encode, gunzip, deflate, inflate, crc32
+  crypto/         — Sha256, Digest256, constant_time_equal
+  encoding/       — hex_encode, hex_decode, EncodingError
 ```
 
 **The invariant**: the `std` module is auto-imported everywhere (convenience), but compiled and
@@ -965,117 +961,7 @@ This is the universal expectation and handles files created on Windows read on P
 
 ---
 
-## 13. Corrections to `standard-library.md`
-
-The Phase 4 sections should be updated:
-
-| Section | Change |
-|---|---|
-| 4b `std/file.pr` | Rename to `modules/io` — same API, different location |
-| 4c `std/path.pr` | Remove — `modules/path` is the right home; no std/path.pr needed |
-| 4d `std/os.pr` | Rename to `modules/os` — same API, different location |
-| 4e `std/stdin.pr` | Remove as separate section — `read_line`/`read_stdin` live in `modules/io` |
-
-Add a new Phase 4 header: "Platform Modules — see `docs/platform-modules.md`."
-
----
-
-## 14. Implementation Order
-
-### ~~Phase A — std-as-module refactor~~ (Done)
-
-1. ~~Add `modules/std/promise.toml` (`[module] name = "std"`)~~ — done
-2. ~~In `main.go`: auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every file~~ — done
-3. ~~In `sema/decl.go`: std resolved like any catalog module via `loadCatalog("std")`~~ — done
-4. ~~Remove `IsStd` flag from AST nodes and `isDeclStd` from sema~~ — done
-5. ~~Update test infrastructure: compile std as a module~~ — done
-6. ~~DCE: superseded by LTO pipeline (`opt → .bc → linker --lto-O1`)~~ — done
-
-Also done since this doc was written:
-- ~~`\`target(cond)` compile-time platform filtering~~ — done (Stage 8q, `sema/target.go`)
-- ~~Std moved from `std/` to `modules/std/`~~ — done (all modules under `modules/`)
-- ~~Build cache with FNV-128a hashing, compiler stamp, persistent module cache~~ — done
-- ~~`promise format` code formatter~~ — done
-
-### ~~Phase B — platform constants~~ (Done)
-
-First real use of `` `target `` in production code. Platform constants consolidated into
-`Platform` namespace type in `modules/std/platform.pr` with `` `global `` getters and methods.
-
-7. ~~**`Platform.line_separator`** global getter in `modules/std/platform.pr`~~ — done
-8. ~~**Update `write_line`** to use `Platform.line_separator`~~ — done
-9. ~~**`Platform.path_separator`** global getter in `modules/std/platform.pr`~~ — done
-10. ~~**`Platform.is_path_separator(char)`** global method in `modules/std/platform.pr`~~ — done
-11. ~~**Windows-aware `join`/`is_absolute`/`file_name`/`parent`**~~ — done (use `Platform.is_path_separator`)
-12. ~~**Rename `basename` → `file_name`, `dirname` → `parent`**~~ — done (Rust-style naming)
-13. ~~**Enable `` `global `` getters in sema**~~ — done (removed restriction in `decl.go`)
-14. ~~**Global getter codegen**~~ — done (handle no-receiver dispatch in `expr.go`)
-15. ~~**`HostTargetInfo()` for Go test helpers**~~ — done (`target.go`, all test helpers updated)
-
-### ~~Phase C — path module completion~~ (Done)
-
-16. ~~**`normalize` and `split`** in `modules/path`~~ — done (pure Promise, no new PAL)
-    (`join_all` superseded by variadic `join(base, child, ...rest)`)
-
-### Phase D — file I/O (biggest phase — needs PAL + reactor)
-
-12. ~~**Reactor infrastructure**~~ — **Done.** Global reactor in `codegen/netpoll.go` (T0070): epoll (Linux),
-    kqueue (macOS), WSAPoll (Windows), integrated with sysmon (`reactor_poll(0)`) and idle Ms
-    (`reactor_poll(block)`). `net`, `http`, and `tls` all park on it.
-13. ~~**PAL file functions**~~ — **Done.** 15 PAL functions in `codegen/pal/` (open, read, write, close, seek, stat_size, remove, exists, mkdir, dir_remove, dir_exists, errno, dir_open, dir_next_name, dir_close) across POSIX/Windows/WASM.
-14. ~~**`modules/io`**~~ — **Done.** `IoError`, `File` (4 factory constructors + handle methods + one-shot helpers),
-    `Dir` (make/make_all/list/remove/exists), `read_line`, `read_stdin`. 54 tests covering edge cases.
-15. ~~**BufReader**~~ — **Done.** Shipped as `BufferedReader` / `BufferedWriter` in `modules/io/io.pr`.
-
-### Phase E — OS and process
-
-14. ~~**Args capture in `main` prologue**~~ — **Done.** `main(argc, argv)` stores to `@__promise_argc`/`@__promise_argv` globals. WASM `_start` passes 0/null.
-15. ~~**`modules/os` core**~~ — **Done.** `get_env_var` (string?), `get_working_dir` (string!), `exit_process`, `args` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
-16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution with variadic arguments (`...string`). Returns `ProcessResult!` with exit code + captured stdout/stderr. Decomposed PAL: `pal_spawn` (fork+exec+pipe, returns pid), `pal_read_pipe` (read fd to EOF), `pal_wait_pid` (EINTR retry). TLS caching for spawn fds. WASM stub returns -1; Windows is implemented via `CreateProcessA` + pipes (T0053). `ProcessResult` wrapper constructed in pure Promise. Concurrent pipe reads via goroutines eliminate the 64KB deadlock. Accepts inline args (`execute("ls", "-la")`) or pre-built `string[]` (`execute("sh", args)`). 50 tests (excluded on WASM).
-17. ~~**`set_env_var(name, value?)`**~~ — **Done.** `string?` value: present sets, absent unsets. Two-extern pattern: `_os_set_env(name, value)` and `_os_unset_env(name)`, dispatched in pure Promise via optional unwrap. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/empty-string unset; WASM stub. 5 tests (excluded on WASM).
-18. ~~**`set_working_dir`**~~ — **Done.** PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error. Failable `int!` extern bridge (`_os_set_working_dir`), auto-propagation in void failable Promise wrapper. 3 tests (excluded on WASM).
-19. ~~**Concurrent stdout/stderr read in `execute`**~~ — **Done.** Decomposed monolithic `pal_execute` into fine-grained PAL primitives (`pal_spawn`, `pal_read_pipe`, `pal_wait_pid`). Concurrent reads use Promise goroutines — stderr is read in a background goroutine while stdout is read in the current goroutine.
-
-    **Architecture — PAL decomposition + goroutine concurrency:**
-
-    *PAL layer* (posix.go): 3 functions replacing `pal_execute`:
-    - `pal_spawn(program, argv, out_stdout_fd, out_stderr_fd) → i32` — fork+exec+pipe, return pid (or -1)
-    - `pal_read_pipe(fd, out_buf, out_len)` — read pipe to EOF into malloc'd buffer, close fd
-    - `pal_wait_pid(pid) → i32` — waitpid with EINTR retry, return exit code (or -1)
-
-    *Bridge layer* (os_bridges.go): 5 bridges:
-    - `promise_os_spawn(sret, program, args)` — argv construction, call pal_spawn, cache fds in TLS, return int! (pid)
-    - `promise_os_spawn_stdout_fd()` / `promise_os_spawn_stderr_fd()` — return cached TLS fd as int
-    - `promise_os_read_pipe(sret, fd)` — extract int, pal_read_pipe with enter/exit_syscall, return string
-    - `promise_os_wait_pid(sret, pid)` — extract int, pal_wait_pid with enter/exit_syscall, return int!
-
-    *Promise layer* (os.pr): `execute()` uses goroutines for concurrent pipe reads:
-    ```
-    int pid = _os_spawn!(program, args);
-    int stdout_fd = _os_spawn_stdout_fd();
-    int stderr_fd = _os_spawn_stderr_fd();
-    task[string] stderr_task = go _os_read_pipe(stderr_fd);
-    string stdout = _os_read_pipe(stdout_fd);
-    string stderr = <-stderr_task;
-    int exit_code = _os_wait_pid!(pid);
-    ```
-    Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
-20. ~~**Signal handling**~~ — **Done**, but not as the callback sketched here. The shipped surface is a
-    blocking receive: a `Signal` enum (`Interrupt`/`Terminate`/`Hangup`), `setup_signal_handling!(...Signal)`,
-    and `receive_signal!() Signal`. Signals arrive over a self-pipe and are consumed by an ordinary
-    blocking read, so the receiving goroutine parks like any other reader and no handler ever runs in
-    async-signal context. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
-21. ~~**Streaming subprocess**~~ — **Done**, inside `modules/os` rather than a separate `modules/process`:
-    `Process` / `ProcessInput` / `ProcessOutput` (spawn/wait/kill with piped stdin/stdout/stderr), next to
-    the one-shot `execute`, because they share the same PAL fork/exec bridge.
-
-### Phase F — calendar time
-
-16. **`modules/time`** — `DateTime`, wall clock PAL, format/parse utilities
-
----
-
-## 15. `modules/tls` — Transport Security Backends
+## 13. `modules/tls` — Transport Security Backends
 
 `modules/tls` layers TLS over an owned `net.TcpStream`. The design point that makes
 it portable is that **no backend ever sees a socket, an fd, or the scheduler**: the

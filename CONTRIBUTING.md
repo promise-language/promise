@@ -186,6 +186,6 @@ a fine way to report a bug or propose a change.
 - [docs/build-tools.md](docs/build-tools.md) — build system architecture and tool inventory
 - [docs/gate-system.md](docs/gate-system.md) — regression-prevention gates
 - [docs/runtime-architecture.md](docs/runtime-architecture.md) — pipeline, PAL, M:N scheduler
-- [docs/debugging.md](docs/debugging.md) — debugging the compiler and generated code
+- [docs/proposals/debugging.md](docs/proposals/debugging.md) — proposal for source-level debugging (DWARF metadata; not implemented yet)
 - [docs/creating-modules.md](docs/creating-modules.md) — proposing and shipping a catalog module
 - [docs/language-design.md](docs/language-design.md) — full language specification

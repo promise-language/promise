@@ -1,8 +1,6 @@
 # Distribution & Installation
 
-> **Status.** This document describes the **target** distribution architecture. Some of it is implemented today, some is planned; each section is marked. The headline change from the original model is twofold: (1) heavy dependencies (LLVM tools, wasm runner, CRTs, target sysroots) move from *embedded-in-the-binary* to a *content-addressed cache fetched on demand*, so the compiler ships in **thin** and **full** variants that behave identically; and (2) the on-`PATH` entry point becomes a **tiny stub** (written in Promise, extracted at install) instead of a full copy of the compiler. See §1 for the model, §7 / [release-automation.md](release-automation.md) for how releases are built and published.
->
-> **Implemented:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS arm64 (Intel/amd64 builds exist but are **deferred** — unverifiable without working Xcode CLT); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise update`/`promise use` to fetch and activate epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); `promise install <epoch>` fetch-without-activate + corrected missing-epoch recovery hint (§2.5 step 4, §2.6 — T0977); Windows end-user install flow (§5.2). Windows compiler support is complete, including the zero-dependency link surface — no VS Build Tools / Windows SDK required (see [windows-support.md](windows-support.md)).
+> **Tag:** `distribution` — remaining work to complete this document: `mcp__tracker__list --tag distribution`
 
 ---
 
@@ -46,13 +44,13 @@ A variant differs only in **which blobs ship pre-staged into the cache**. The em
 
 ### 1.3 Why content-addressing (not per-epoch copies)
 
-A content-addressed store **deduplicates across epochs and targets**. Two installed epochs built on the same LLVM 22 share **one** cached copy keyed by hash, instead of each epoch carrying its own `bin/llvm/`. Epoch directories shrink to *references* (which blob hashes they need); `promise remove <epoch>` becomes "drop this epoch's references, then GC blobs referenced by *no* installed epoch." That "no installed epoch" qualifier is load-bearing: because blobs are shared, GC must be rooted at the union of **all** installed epochs' manifests so removing one never deletes a blob another still uses — see §4's GC mechanism. This supersedes the per-epoch `bin/llvm/` layout in [epoch-versioned-installs.md](epoch-versioned-installs.md).
+A content-addressed store **deduplicates across epochs and targets**. Two installed epochs built on the same LLVM 22 share **one** cached copy keyed by hash, instead of each epoch carrying its own `bin/llvm/`. Epoch directories shrink to *references* (which blob hashes they need); `promise remove <epoch>` becomes "drop this epoch's references, then GC blobs referenced by *no* installed epoch." That "no installed epoch" qualifier is load-bearing: because blobs are shared, GC must be rooted at the union of **all** installed epochs' manifests so removing one never deletes a blob another still uses — see §4's GC mechanism. This supersedes the per-epoch `bin/llvm/` layout in [epoch-versioned-installs.md](archive/epoch-versioned-installs.md).
 
 ---
 
 ## 2. Installation
 
-### 2.1 Linux & macOS — install script *(implemented; download semantics unchanged)*
+### 2.1 Linux & macOS — install script
 
 ```sh
 curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
@@ -82,7 +80,7 @@ PROMISE_BASE_URL=https://<your-mirror>/dist sh install.sh --full
 users — GitHub releases are the only install source. `install.cmd` does **not** honor it
 (it always fetches `install.ps1` from GitHub).
 
-### 2.2 Windows — install script *(scripts committed; anonymous fetch gated on private→public)*
+### 2.2 Windows — install script
 
 > The committed [`scripts/install.ps1`](../scripts/install.ps1) (real implementation) and [`scripts/install.cmd`](../scripts/install.cmd) (thin shim) are attached to every release by the pipeline ([release-automation.md](release-automation.md) §5). As with §2.1, the `irm … | iex` one-liner only works for outside users once the repo (or a releases-only mirror) is public — the scripts and the binaries they fetch are release assets that currently require auth.
 
@@ -109,7 +107,7 @@ installing on a fresh Windows machine "just works" with no "install Visual Studi
 Build Tools ≥ version X first" and no Microsoft `.lib` redistribution. macOS will
 embed its SDK stubs the analogous way (§5). See §5.2.
 
-### 2.3 Direct download *(implemented)*
+### 2.3 Direct download
 
 Published assets are **gzip-compressed** (T0796) — the `.gz` suffix follows the variant and any `.exe`. The decompressed binary name is the same `promise-<os>-<arch>[-<variant>][.exe]` shape (the **bare** name is the **thin** variant; the variant suffix goes *after* the target triple and before any `.exe`):
 
@@ -139,7 +137,7 @@ chmod +x promise-linux-amd64-full
 
 `promise install` handles everything from here, regardless of variant.
 
-### 2.4 What `promise install` does *(install flow updated for the stub + blob model)*
+### 2.4 What `promise install` does
 
 `promise install` (`runInstall()` in [cmd/promise/main.go](../compiler/cmd/promise/main.go)) installs into the Promise home directory (default `~/.promise/`, overridable via `PROMISE_HOME`):
 
@@ -165,7 +163,7 @@ Resulting layout:
     build/               ← compile cache
 ```
 
-### 2.5 The stub (launcher) *(implemented — replaced shim-in-binary, T0770)*
+### 2.5 The stub (launcher)
 
 The on-`PATH` `~/.promise/bin/promise` is the **stub**: the thing the user runs, which does *not* compile anything itself — it locates the correct epoch's real compiler and hands off to it. (Synonyms seen elsewhere: *shim*, *launcher*, *trampoline*; they all mean this one object.)
 
@@ -191,7 +189,7 @@ The stub knows only the *epoch-resolution contract* (the `active` file format an
 
 > **Windows `exec` caveat.** Windows has no true `execve`; the stub there does `CreateProcess` + wait + propagate the child's exit code. The same-PID guarantee holds only on Unix. Documented so the PID/signal reasoning above is not assumed on Windows.
 
-### 2.6 Updating *(implemented: `update` is self-update, T0770; channel model, T0825)*
+### 2.6 Updating
 
 The update channel (which release stream `update` follows) is **orthogonal** to the
 active epoch (which compiler runs builds). The channel is persisted in
@@ -228,7 +226,7 @@ Re-running install with a newer binary replaces the installation in place and fo
 
 ---
 
-## 3. Release Artifacts *(thin/full + prebuilt blobs)*
+## 3. Release Artifacts
 
 Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`. See [release-automation.md](release-automation.md) for the full pipeline. Asset names follow `promise-<os>-<arch>[-<variant>][.exe].gz` — bare prefix = **thin**, `-full`, `-all` (variant suffix after the target; see §2.3). Binaries are **gzip-compressed only** (no raw asset is published — T0796).
 
@@ -245,7 +243,7 @@ The install script downloads only the top-level binary (and `SHA256SUMS`); every
 
 ---
 
-## 4. The dependency store *(content-addressed cache — planned)*
+## 4. The dependency store
 
 ```
 ~/.promise/cache/

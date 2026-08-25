@@ -127,14 +127,20 @@ func isRelativeMarkdownLink(target string) bool {
 // docIndex is the table of contents every top-level doc must be reachable from.
 const docIndex = "docs/index.md"
 
-// checkDocIndex reports every tracked docs/*.md that docs/index.md does not link
-// to. The index is the entry point a reader (or an agent) is pointed at, so a
-// doc missing from it is effectively unpublished — the second half of the T1675
-// drift, alongside the dangling link checkDocLinks catches.
+// checkDocIndex reports every tracked doc under docs/ that docs/index.md does
+// not link to. The index is the entry point a reader (or an agent) is pointed
+// at, so a doc missing from it is effectively unpublished — the second half of
+// the T1675 drift, alongside the dangling link checkDocLinks catches.
 //
-// Scope is deliberately the top level of docs/ only: docs/archive/ holds
-// superseded material that is intentionally not indexed, and nested module
-// plan.md files belong to their module, not to the index.
+// Scope is all of docs/, subdirectories included. Which folder a doc sits in is
+// what says whether it binds — docs/ root is normative, docs/proposals/ is not
+// yet ratified, docs/archive/ is superseded, docs/research/ is background — and
+// the index is where that distinction is written down. A doc that is not indexed
+// therefore has no stated status at all, which is worse for an archived or
+// proposed doc than for a root one, not better. Nested module plan.md files stay
+// out of scope: they belong to their module, not to the index — the `docs/*.md`
+// pathspec matches nested paths recursively, so it already covers them and they
+// are excluded by living outside docs/ rather than by a filter here.
 func checkDocIndex(root string) error {
 	out, err := RunOutputIn(root, "git", "ls-files", "-z", "docs/*.md")
 	if err != nil {
@@ -167,11 +173,6 @@ func checkDocIndex(root string) error {
 	var missing []string
 	for _, rel := range strings.Split(out, "\x00") {
 		if rel == "" || rel == docIndex {
-			continue
-		}
-		// git ls-files with a `docs/*.md` pathspec also returns nested
-		// matches (docs/archive/stages.md); keep only the top level.
-		if path.Dir(rel) != "docs" {
 			continue
 		}
 		if !linked[rel] {

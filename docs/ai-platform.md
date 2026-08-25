@@ -1,4 +1,6 @@
-# AI Platform Support — Design Proposal
+# AI Platform Support
+
+> **Tag:** `ai-platform` — remaining work to complete this document: `mcp__tracker__list --tag ai-platform`
 
 Promise is designed for AI agents. This document defines the modules, types, and conventions
 that make Promise a complete AI-centric platform — not just a language that AI can generate,
@@ -1632,7 +1634,7 @@ implemented in `compiler/internal/sema/meta.go`) as a function-and-method annota
 - All the type information needed already exists — `` `tool `` does not introduce a
   new reflection facility, only a new label on top of facilities the compiler has.
 - The schema synthesis hook is the same one that powers `schema.of[T]()` (see `docs/schema.md` §7) and
-  `` `serializable `` (`docs/serialization-plan.md`); it does not need to be invented.
+  `` `serializable `` (`docs/serialization.md`); it does not need to be invented.
 - Free-function manifest enumeration is already a well-defined operation — every Go
   unit-test discovery, every embedded-resource registry uses the same shape.
 
@@ -2009,7 +2011,7 @@ future readers can see *why* the platform looks the way it does, not only *what*
 *Decision: compile-time, via monomorphization.* `schema.of[T]()` is a `` `mono `` free
 function whose body is synthesized in the same sema pass that generates encode/decode
 for `` `serializable `` types (see `docs/schema.md` §7). There is no runtime reflection facility to add
-or maintain. `serialization-plan.md` §7.1 already rules out runtime reflection on cost
+or maintain. `serialization.md` §7.1 already rules out runtime reflection on cost
 and philosophy grounds, and the schema mechanism reuses the hook the serializer already
 needs.
 

@@ -1,5 +1,7 @@
 # Build Tools
 
+> **Tag:** `build-tools` — remaining work to complete this document: `mcp__tracker__list --tag build-tools`
+
 This document describes the Promise compiler's build tooling system. All build tools live under `tools/` as a single Go module, compiled to `bin/` via a meta-builder.
 
 ## Bootstrap

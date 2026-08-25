@@ -1,5 +1,7 @@
 # Schema — Type-Driven Schema Generation
 
+> **Tag:** `schema` — remaining work to complete this document: `mcp__tracker__list --tag schema`
+
 `modules/schema` provides a compile-time descriptor for any Promise declaration:
 its fields, methods, generic arguments, optionality, defaults, and a stable 128-bit
 content-addressed identity. The descriptor is the shared substrate for several
@@ -13,7 +15,7 @@ unrelated consumers:
 
 Schema lives in its own doc because none of those consumers should own it. It is
 built on top of the same sema pass that synthesizes encode/decode for
-`` `serializable `` types (`docs/serialization-plan.md`) — there is no separate
+`` `serializable `` types (`docs/serialization.md`) — there is no separate
 reflection mechanism.
 
 ---
@@ -669,7 +671,7 @@ main!() {
 
 ## 10. Related Docs
 
-- `docs/serialization-plan.md` — `` `serializable `` annotation, encode/decode
+- `docs/serialization.md` — `` `serializable `` annotation, encode/decode
   synthesis, the field metas (`` `key ``, `` `skip ``, `` `flatten ``,
   `` `include_none ``, `` `required ``) the schema honors.
 - `docs/ai-platform.md` — consumes `schema.Type` for tool definitions, structured

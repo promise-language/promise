@@ -1,14 +1,19 @@
 # Runtime Architecture
 
+> **Tag:** `runtime-architecture` — remaining work to complete this document: `mcp__tracker__list --tag runtime-architecture`
+
 Promise's runtime infrastructure: PAL (platform abstraction), build pipeline (opt/llc/lld/musl), M:N scheduler (GMP model, LLVM coroutines), and multi-platform support.
 
-> On `wasm32-web` the scheduler's top level is proposed to change from a run-to-completion loop to a browser-driven reactor — see [wasm-web-callbacks.md](wasm-web-callbacks.md).
+> On `wasm32-web` the scheduler's top level is proposed to change from a run-to-completion loop to a browser-driven reactor — see [web-apps.md](web-apps.md).
 
-## Current State
+> **On the phase numbers below.** Sections further down still label parts of the runtime by the
+> implementation phase that introduced them ("Phase 5c — M:N Scheduler"). Those numbers are
+> historical ordering, not structure, and carry no meaning for the architecture being described —
+> reshaping the body around what the runtime *is* rather than how it was built is tracked as T1721.
 
-No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or pure Promise (including `promise_test_run`, `promise_test_print_result`, `promise_test_summary`).
+## Composition
 
-**Deleted C files**: `runtime.c`, `runtime_string.c`, `runtime_hash.c`, `runtime_vector.c`, `runtime_test.c`.
+There is no C runtime. Every runtime function is codegen-emitted LLVM IR or pure Promise (including `promise_test_run`, `promise_test_print_result`, `promise_test_summary`).
 
 **PAL (Platform Abstraction Layer)** — codegen-emitted LLVM IR (`codegen/pal/`):
 - `pal_write(fd, buf, len)` — wraps libc `@write` (PosixPAL)
@@ -41,37 +46,7 @@ No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or 
 
 ---
 
-## Phased Roadmap
-
-| Phase | Work | Status |
-|-------|------|--------|
-| **1** | Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) | Done |
-| **2** | Migrate all computation from C to codegen LLVM IR / pure Promise | Done |
-| **3** | PAL abstraction — define interface, implement macOS + Linux | Done |
-| **3b** | PAL Windows | **Done** |
-| **3c** | PAL WASM (WASI imports + JS FFI) | **Done** |
-| **4** | Centralize allocator behind PAL | **Done** |
-| **4b** | WASM linear memory allocator (bump on `memory.grow`, no libc) | **Done** |
-| **5a** | 1:1 threading MVP (`go`/`<-` with OS threads via PAL) | **Done** |
-| **5b** | Channels (`channel[T]`, buffered send/receive) | **Done** |
-| **5c** | M:N scheduler (GMP model, LLVM coroutines, work stealing) | **Done** |
-| **5d** | Cooperative scheduler for WASM (LLVM coroutines, single-threaded) | **Done** |
-| **6** | IO reactor: kqueue (macOS) + epoll (Linux) + WSAPoll (Windows) | **Done** |
-| **6b** | JS event loop integration for WASM IO | Planned |
-| **7a** | WASM: `opt` + `llc` + `wasm-ld` (no CRT) + `--target wasm32-wasi` | **Done** |
-| **7b** | Linux: `opt` + `llc` + `ld.lld` (system glibc CRT) | **Done** |
-| **7b'** | Linux: bundled musl CRT (fully static binaries) | **Done** |
-| **7c** | macOS: `llc` + system `ld` (SDK sysroot) | **Done** |
-| **7d** | Windows: `llc` + `lld-link` (MSVC paths) | **Done** |
-| **7e** | `--target` flag + cross-compilation | Planned |
-| **7f** | Self-contained binary: embed compressed LLVM tools via `go:embed` | **Done** |
-| **8** | Rewrite scheduler in Promise | Planned |
-
-Phases 1-5d, 4b, 6, 7a, 7b, 7b', 7c, 7d, and 7f are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 4b added a WASM bump allocator (later replaced by a free-list allocator). Phase 5d added a cooperative scheduler for WASM (single-threaded, no atomics). Phase 7a added the WASM build pipeline (`opt` + `llc` + `wasm-ld`). Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phase 7c added macOS opt+llc+system ld pipeline. Phase 7f embeds compressed LLVM tools (opt, llc, lld) in the Go binary for release builds (`go build -tags embed_llvm`), making the promise binary fully self-contained on Linux (~61MB). The embedded codec is self-describing via the file extension: the dist-CAS publish path (`bin/release publish-install`) embeds the brotli `<sha>.br` directly — byte-identical to the CAS asset, no gzip recompress, smaller binary (T0807) — while the dev/slim `bin/build --release` and Homebrew bundle paths embed `.gz`. The runtime dispatches on the extension when staging into the CAS (`decompressEmbeddedLLVM`). Phase 6 added the IO reactor (`compiler/internal/codegen/netpoll.go`, T0070): a dedicated poller thread waits on kqueue (macOS), epoll (Linux), or WSAPoll (Windows) and wakes goroutines on FD readiness, so a blocked socket parks a G rather than an M — `net`, `http`, and `tls` all park on it. Phase 6b (JS event loop integration for WASM IO) and Phase 7e (`--target` cross-compilation) remain planned. Phase 8 is polish.
-
----
-
-## Phase 2 — C-to-Codegen Migration (Done)
+## C-to-Codegen Migration
 
 Completed in 10 steps. All computation-only C functions replaced with codegen-emitted LLVM IR or pure Promise. Only IO/process functions remain in C.
 
@@ -94,7 +69,7 @@ Also done: LLVM intrinsics for all `memcpy`/`memmove`, libc `memcmp` for equalit
 
 ---
 
-## Phase 3 — Platform Abstraction Layer (Done)
+## Platform Abstraction Layer
 
 The remaining C runtime functions all depend on IO or process control. Phase 3 replaces them with a Platform Abstraction Layer (PAL) — codegen-emitted LLVM IR with per-target implementations, eliminating all C runtime files.
 
@@ -544,7 +519,7 @@ Everything built on top of Layers 0-3: map (already done), iterators, streams, c
 
 ---
 
-## Phase 7 — Replace Clang with `opt` + `llc` + `lld`
+## The `opt` + `llc` + `lld` Pipeline
 
 ### Why
 
@@ -688,12 +663,12 @@ Both paths support x86_64 and aarch64 (different emulation mode and dynamic link
 
 | Target | Pipeline | LTO |
 |--------|---------|-----|
-| Linux (musl) | `opt → .bc → ld.lld --lto-O1` | **Done** |
-| Linux (glibc) | `opt → .bc → ld.lld --lto-O1` | **Done** |
-| macOS (ld64.lld) | `opt → .bc → ld64.lld --lto-O1` | **Done** |
-| macOS (system ld) | `opt → .bc → llc → .o → system ld` | No LTO (system ld can't process bitcode) |
-| WASM | `opt → .bc → wasm-ld --lto-O2` | **Done** (O2 needed for math intrinsic folding) |
-| Windows | `opt → llc → .o → lld-link` | **Done** — no LTO yet (MSVC COFF, T0049) |
+| Linux (musl) | `opt → .bc → ld.lld --lto-O1` | yes |
+| Linux (glibc) | `opt → .bc → ld.lld --lto-O1` | yes |
+| macOS (ld64.lld) | `opt → .bc → ld64.lld --lto-O1` | yes |
+| macOS (system ld) | `opt → .bc → llc → .o → system ld` | no — system `ld` cannot process bitcode |
+| WASM | `opt → .bc → wasm-ld --lto-O2` | yes — O2 needed for math intrinsic folding |
+| Windows | `opt → llc → .o → lld-link` | no — MSVC COFF, T0049 |
 
 `lld` supports all four output formats (Mach-O, ELF, PE/COFF, WASM) via different driver modes.
 
@@ -819,19 +794,6 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 The CRT objects themselves are a pinned prebuilt (`[binaries.musl]` in `tools/build/prebuilts.toml`, sliced from the upstream Alpine `musl-dev` apk), fetched by `bin/build` and hosted content-addressed by `bin/release publish-blobs --dependency musl` — never taken from the build host's `/usr/lib` (T0530).
 
 The **compiler-rt builtins archive** (`libclang_rt.builtins.a`) rides the exact same machinery one level over: `compiler_rt_linux_{amd64,arm64}.go` / `compiler_rt_other.go` embed FS files, a `findCompilerRT` discovery ladder identical to the five steps above (`compiler-rt/<arch>/` instead of `crt/<arch>/`, `resolveCompilerRTView` instead of `resolveMuslCRTView`), and `[binaries.compiler-rt]` in `prebuilts.toml`. It is spliced onto the link line immediately **after** `libc.a` — musl's own `libc.a` references the aarch64 soft-float binary128 helpers from its float `printf`/`scanf` path, so it has to come later; lld's lazy archive resolution still satisfies the builtins' own libc references back into the earlier `libc.a`, so no `--start-group` is needed (T1676).
-
-**Phased rollout**:
-
-| Step | Work | Status |
-|------|------|--------|
-| 7b | Linux: `opt` + `llc` + `ld.lld` + system glibc CRT | **Done** |
-| 7b' | Linux: bundled musl CRT (fully static binaries) | **Done** |
-| 7a | WASM target via `llc` + `wasm-ld` | **Done** |
-| 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | **Done** |
-| 7d | Windows target via `llc` + `lld-link` | **Done** |
-| 7e | `--target` flag + cross-compilation | Planned (low — plumbing) |
-| 7f | Bundle `llc` + `lld` + musl CRT into release tarball | Planned (medium — CI) |
-| 7g | Remove clang fallback (optional) | Planned (low — cleanup) |
 
 **Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native linker support continue working.
 

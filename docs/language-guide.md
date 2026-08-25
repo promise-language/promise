@@ -1,5 +1,7 @@
 # Promise Language Guide
 
+> **Tag:** `language-guide` — remaining work to complete this document: `mcp__tracker__list --tag language-guide`
+
 Concise reference for writing correct Promise code.
 
 ---

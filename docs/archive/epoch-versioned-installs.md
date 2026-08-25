@@ -1,6 +1,6 @@
 # D0007: Epoch-Versioned Side-by-Side Installs
 
-> **Updated by the distribution model.** Two parts of this plan are superseded by [distribution.md](distribution.md): (1) per-epoch `bin/llvm/` copies are replaced by a **shared content-addressed blob store** (`~/.promise/cache/blobs/`) that dedups dependencies across epochs and targets — epoch dirs reference blobs by hash rather than copying them ([distribution.md](distribution.md) §1.3, §4); (2) the Phase 2 *shim-in-binary* is the **current** implementation, but the **target** is a dedicated tiny **stub** (written in Promise, extracted at install, forward-only) — see [distribution.md](distribution.md) §2.5. The per-epoch dispatch *semantics* below remain correct; only the mechanism (shim-in-binary → extracted stub) and the dependency layout (per-epoch copy → shared blob store) change. Inline notes below mark the affected sections.
+> **Updated by the distribution model.** Two parts of this plan are superseded by [distribution.md](../distribution.md): (1) per-epoch `bin/llvm/` copies are replaced by a **shared content-addressed blob store** (`~/.promise/cache/blobs/`) that dedups dependencies across epochs and targets — epoch dirs reference blobs by hash rather than copying them ([distribution.md](../distribution.md) §1.3, §4); (2) the Phase 2 *shim-in-binary* is the **current** implementation, but the **target** is a dedicated tiny **stub** (written in Promise, extracted at install, forward-only) — see [distribution.md](../distribution.md) §2.5. The per-epoch dispatch *semantics* below remain correct; only the mechanism (shim-in-binary → extracted stub) and the dependency layout (per-epoch copy → shared blob store) change. Inline notes below mark the affected sections.
 
 ## Context
 
@@ -20,7 +20,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
 
 ### Directory layout
 
-> **Layout note (superseded).** The per-epoch `bin/llvm/` and `lib/crt/` copies shown below are replaced by the shared content-addressed blob store (`~/.promise/cache/blobs/sha256/<hash>`) — each epoch *references* the LLVM/CRT blobs it needs by hash instead of holding its own copy. The target layout is in [distribution.md](distribution.md) §2.4 / §4. The original per-epoch layout is retained here for historical context:
+> **Layout note (superseded).** The per-epoch `bin/llvm/` and `lib/crt/` copies shown below are replaced by the shared content-addressed blob store (`~/.promise/cache/blobs/sha256/<hash>`) — each epoch *references* the LLVM/CRT blobs it needs by hash instead of holding its own copy. The target layout is in [distribution.md](../distribution.md) §2.4 / §4. The original per-epoch layout is retained here for historical context:
 
 ```
 ~/.promise/
@@ -53,7 +53,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
 
 **All builds use the epoch layout** — dev, next, and stable all install into `epochs/<name>/` with identical structure. This eliminates the need for a separate shared cache codepath. The compiler always runs from an epoch directory and finds its cache, modules, and tools relative to its own epoch root.
 
-**Per-epoch cache rationale**: Since cache keys include `compilerHash`, entries from different epochs never match. Keeping build cache inside the epoch directory means `promise remove <epoch>` is a single `rm -rf epochs/<epoch>/` with no orphaned entries. *(Holds for the per-epoch **build** cache, which stays in the epoch dir. The shared content-addressed **blob** store is separate and shared: removing an epoch additionally requires dropping its refs and GC'ing blobs referenced by no remaining epoch — see [distribution.md](distribution.md) §4 GC. `rm -rf` reclaims the epoch dir but not its now-unreferenced shared blobs.)*
+**Per-epoch cache rationale**: Since cache keys include `compilerHash`, entries from different epochs never match. Keeping build cache inside the epoch directory means `promise remove <epoch>` is a single `rm -rf epochs/<epoch>/` with no orphaned entries. *(Holds for the per-epoch **build** cache, which stays in the epoch dir. The shared content-addressed **blob** store is separate and shared: removing an epoch additionally requires dropping its refs and GC'ing blobs referenced by no remaining epoch — see [distribution.md](../distribution.md) §4 GC. `rm -rf` reclaims the epoch dir but not its now-unreferenced shared blobs.)*
 
 ### New file: `compiler/internal/module/epoch.go`
 
@@ -103,7 +103,7 @@ No changes needed — the existing "sibling of binary" search (`filepath.Dir(os.
 
 **Goal**: Replace the stub at `~/.promise/bin/promise` with dispatch logic that reads the project epoch and delegates to the correct epoch's compiler.
 
-> **Implemented as the dedicated stub (T0770).** The shim-in-binary design described below has been **removed**; `~/.promise/bin/promise` is now a tiny Promise-written stub ([tools/stub/main.pr](../tools/stub/main.pr)) that `exec`-replaces itself with the epoch compiler (same PID on Unix) and is forward-only updated at install via a `.promise-stub-version` sidecar. All trampoline logic (`shimDispatch`/`PROMISE_NO_SHIM`/`.promise.shim`) is gone from the compiler — invoking the compiler directly always runs the compiler, with an epoch mismatch surfaced as a *warning* (not a silent hand-off). See [distribution.md](distribution.md) §2.5/§2.6. The dispatch *semantics* in this section (epoch resolution order, single-file fallback) carry over to the stub; the historical shim-in-binary description below is retained only for context.
+> **Implemented as the dedicated stub (T0770).** The shim-in-binary design described below has been **removed**; `~/.promise/bin/promise` is now a tiny Promise-written stub ([tools/stub/main.pr](../../tools/stub/main.pr)) that `exec`-replaces itself with the epoch compiler (same PID on Unix) and is forward-only updated at install via a `.promise-stub-version` sidecar. All trampoline logic (`shimDispatch`/`PROMISE_NO_SHIM`/`.promise.shim`) is gone from the compiler — invoking the compiler directly always runs the compiler, with an epoch mismatch surfaced as a *warning* (not a silent hand-off). See [distribution.md](../distribution.md) §2.5/§2.6. The dispatch *semantics* in this section (epoch resolution order, single-file fallback) carry over to the stub; the historical shim-in-binary description below is retained only for context.
 
 ### Design: shim-in-binary (current)
 
@@ -387,7 +387,7 @@ For repo-local `bin/promise` (quick iteration without install), the compiler fal
 ### Per-epoch build cache
 
 Each epoch's build cache lives at `epochs/<name>/cache/build/`. This means:
-- `promise remove <epoch>` is a clean `rm -rf epochs/<name>/` for the epoch's own dir (build cache included) — but the shared **blob** store needs the union-rooted GC step (drop refs, then sweep blobs no remaining epoch references; [distribution.md](distribution.md) §4 GC), not just `rm -rf`
+- `promise remove <epoch>` is a clean `rm -rf epochs/<name>/` for the epoch's own dir (build cache included) — but the shared **blob** store needs the union-rooted GC step (drop refs, then sweep blobs no remaining epoch references; [distribution.md](../distribution.md) §4 GC), not just `rm -rf`
 - No need to scan/filter shared cache when cleaning up an epoch
 - Repo-local `bin/promise` (quick iteration) uses `~/.promise/cache/build/` as fallback
 

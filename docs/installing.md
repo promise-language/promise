@@ -1,5 +1,7 @@
 # Installing Promise
 
+> **Tag:** `installing` — remaining work to complete this document: `mcp__tracker__list --tag installing`
+
 Promise installs as a single self-contained binary (compiler + standard library +
 catalog modules + runtime). The install script detects your platform, downloads
 the matching release binary, verifies its checksum, and sets up `~/.promise/`.

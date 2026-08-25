@@ -1,9 +1,13 @@
-# Host Callbacks and the `wasm32-web` Reactor Execution Model
+# Web Applications
 
-> **Status: Design proposal.** No implementation yet. This document decides how a
-> browser (or any host that drives the module) calls *into* Promise code on
-> `wasm32-web`, and what that requires of the top-level execution model. It is a
-> prerequisite for WebIDL `callback` support — see
+> **Tag:** `web-apps` — remaining work to complete this document: `mcp__tracker__list --tag web-apps`
+
+> This document owns **Promise on the web**: what it takes to build a browser
+> application in Promise, compiled to `wasm32-web`. Today that is the execution
+> model — the reactor top level the browser drives, how the host calls *into*
+> Promise code, and the re-entrancy, preemption, lifetime, and delivery rules
+> that follow from a host owning the thread — which is the part everything else
+> rests on. It is also a prerequisite for WebIDL `callback` support — see
 > [promise-language/promise#25](https://github.com/promise-language/promise/issues/25)
 > — but nothing here is WebIDL-specific or bindgen-specific.
 >
@@ -648,24 +652,13 @@ tracked separately and this work neither carries it nor waits on it.
   regular interface and discarded. Separate concern.
 - **Threads.** `wasm32-web` remains single-threaded. No SharedArrayBuffer, no
   cross-origin isolation requirement.
-- **A full `web` catalog API.** Layer 1 needs only enough public surface to prove
-  it is usable outside bindgen (§14.2); the rest belongs to
-  [#17](https://github.com/promise-language/promise/issues/17).
+- **Software preemption on `wasm32-web`.** See §6 for why the browser's ownership
+  of the thread makes this a separate problem; nothing here forecloses it.
+- **Out-of-repo CI plumbing.** §17 covers testing the primitive in this repo; the
+  browser-integration pipeline itself lives elsewhere.
 
-## 19. Implementation phases
-
-1. **Reactor top level.** Liveness rule, `_initialize` exit-or-return, bounded
-   pump, `schedule_pump` import, idle-vs-deadlock. No callbacks yet — verifiable
-   on its own, and every existing test must stay green by construction (§4.1).
-2. **Delivery.** `promise_web_enqueue`, the subscription table, queue policies,
-   the `in_pump` re-entrancy guard, handle marshalling.
-3. **Promise surface.** `web.events` / subscription type / `web.on` sugar, plus
-   the hand-written no-bindgen acceptance program from §14.2.
-4. **WebIDL lowering.** IR function-type case, `webidl_to_ir` callbacks,
-   `codegen.go`/`jsglue.go` branches on the shared names.
-5. **Bind-time self-check** (§16) — independent of 1–4 and landable in any order.
-6. **Browser integration tests**, in this repo for the primitive and in `web`
-   for the real surface.
-
-Deferred, recorded so v1 does not foreclose them: software preemption (§6),
-richer callback signatures, and out-of-repo CI plumbing (§17).
+Not a non-goal, but out of scope *for this section*: the rest of the web
+application story — what `promise build --target wasm32-web` emits and how a page
+loads it, the shape of the `web` catalog module whose `web.events` / `web.on`
+surface §14 assumes, and how an application reaches the DOM. This document owns
+those; they are simply not written yet. Tracked as T1728.

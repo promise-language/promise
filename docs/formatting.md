@@ -1,5 +1,7 @@
 # Promise Formatter (`promise format`)
 
+> **Tag:** `formatting` — remaining work to complete this document: `mcp__tracker__list --tag formatting`
+
 > Canonical formatter for Promise source code. No configuration. No options. One input produces one output. An AI agent can match `promise format` output without running the tool because the rules are simple and deterministic.
 
 ---
@@ -108,20 +110,6 @@ promise format [options] [files/dirs...]
 
 No args = stdin → stdout. Directory args recurse for *.pr files.
 ```
-
-### 3.4 Status
-
-**Implemented:**
-- Full token-based formatter with all spacing rules
-- CLI with `-w`, `--check`, `--diff` modes
-- All 27 `std/*.pr` files formatted and verified idempotent
-- All 184+ test files verified idempotent
-- ~130 unit tests covering all language constructs
-
-**Not yet implemented:**
-- Import sorting (Phase 2)
-- Trailing comma normalization in match/enum (Phase 2)
-- Integration into `bin/verify.sh` via `--check` (Phase 3)
 
 ---
 

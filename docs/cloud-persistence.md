@@ -1,4 +1,6 @@
-# Cloud Persistence — Design Proposal
+# Cloud Persistence
+
+> **Tag:** `cloud-persistence` — remaining work to complete this document: `mcp__tracker__list --tag cloud-persistence`
 
 `modules/cloud` (working name — see §12) provides durable, schema-driven, multi-process
 shared state for Promise programs. A client defines `` `serializable `` types and

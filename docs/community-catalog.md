@@ -1,5 +1,7 @@
 # The Community Catalog
 
+> **Tag:** `community-catalog` — remaining work to complete this document: `mcp__tracker__list --tag community-catalog`
+
 This document specifies the **community module tier** (`docs/module-system.md` §9.9–§9.10): a single, decentralized git registry — `github.com/promise-community/catalog` — that makes community modules *name-addressable* and records their *per-epoch compatibility*, plus the CI that keeps that record accurate and the module-owner workflow for getting listed.
 
 It builds directly on the epoch-aware resolution + verification engine (epoch-tag walk-back, the empirical "compiles + 100% of `` `test `` functions pass" gate, and the §9.10 no-compatible-version error) — that engine is the single source of truth for "compatible"; the community tier only adds a registry, its CI, and the name-tier integration.

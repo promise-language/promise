@@ -58,6 +58,6 @@ identity in `promise.toml`, the compiler extension contract, and worked examples
   output, and MCP server registration.
 - `docs/cloud-persistence.md` — consumes `schema.Type` and `Hash128` as the wire
   identity of types, fields, and references in durable storage.
-- `docs/serialization-plan.md` — the `` `serializable `` annotation and the field
+- `docs/serialization.md` — the `` `serializable `` annotation and the field
   metas (`` `key ``, `` `skip ``, `` `flatten ``, `` `include_none ``,
   `` `required ``) that the schema descriptor honors.

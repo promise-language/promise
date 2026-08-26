@@ -237,6 +237,39 @@ test_stream_shutdown_both() `test(exclude: wasm) {
   _net_socket_close(sfd);
 }
 
+// The three tests above only ever shut a live connection down, which is the one
+// shape of shutdown(2) that cannot fail. The failure path has to reach the
+// caller as an ordinary NetError like every other socket error, and doing it
+// after close() is the deterministic way there (T1632): close() parks the fd at
+// -1, so the call fails with EBADF whatever the connection state was.
+test_shutdown_reports_socket_failure() `test(exclude: wasm, timeout: "10s") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.close()?!;
+
+  bool raised = false;
+  client.shutdown(read: true, write: true)? e {
+    assert(e is NetError, "a failed shutdown raises a NetError");
+    NetError ne = e as! NetError;
+    // EBADF everywhere POSIX; Winsock reports the same mistake as WSAENOTSOCK.
+    assert(ne.code == 9 || ne.code == 10038, "and reports the socket errno, got {ne.code}");
+    assert(!ne.is_timeout && !ne.is_cancelled, "which is neither a timeout nor a cancellation");
+    raised = true;
+  };
+  assert(raised, "shutting down a closed stream must raise");
+
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
 test_listener_accept() `test(exclude: wasm) {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
@@ -1358,11 +1391,76 @@ test_connect_deadline_already_past() `test(exclude: wasm, timeout: "20s") {
   assert(reason == _wake_timeout() || reason == _wake_ready(),
   "connect either completes at once or reports is_timeout");
 
-  int afd = _net_socket_accept_addr(sfd);
-  if afd >= 0 {
-    _net_socket_close(afd);
-  }
+  // No accept here: whether a connection reached the listener's backlog depends
+  // on which of the two outcomes above won the race, and _net_socket_accept_addr
+  // is a blocking accept(2) with no deadline — on the timeout branch nothing was
+  // ever queued, so it would block until the test times out (T1743). Closing the
+  // listener discards anything the connect did queue.
   _net_socket_close(sfd);
+}
+
+// The teardown on the timeout branch above — close the PollDesc, close the
+// socket, raise — runs exactly once in the whole suite, and on macOS it is the
+// only branch a loopback connect ever takes (connect(2) there always returns
+// EINPROGRESS, so the synchronous-success branch is unreachable on that host).
+// Repeating it is what turns a per-connect leak in that teardown into a reported
+// failure rather than a slow drain: the harness's allocation counter catches a
+// PollDesc that outlives its socket, and a socket that outlives its connect
+// eventually makes _net_socket_create fail, which surfaces here as a socket
+// errno instead of one of the two permitted outcomes.
+//
+// No accept, for the same reason as the test above (T1743): which outcome won
+// decides whether anything was ever queued on the listener.
+test_connect_deadline_already_past_repeated() `test(exclude: wasm, timeout: "30s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+
+  // Under the 128 backlog _serve() asks for, so a round that does connect is
+  // held by the kernel rather than dropped and retried.
+  int i = 0;
+  while i < 100 {
+    int reason = _connect_outcome(port, Instant.now() - Duration.from_secs(1));
+    assert(reason == _wake_timeout() || reason == _wake_ready(),
+    "round {i}: connect either completes at once or reports is_timeout");
+    i = i + 1;
+  }
+
+  _net_socket_close(sfd);
+}
+
+// test_connect_fails_before_the_deadline_path drives an unresolvable name, so it
+// stops at the resolver and never reaches connect(2) at all. This is the other
+// pre-reactor failure: the name resolves, the socket is created, and the kernel
+// rejects the connect on the call itself rather than returning EINPROGRESS.
+// That is the one branch of the connect loop that closes a socket it never
+// opened a PollDesc for, and the errno has to survive to the caller instead of
+// being flattened into a timeout.
+//
+// Port 0 is the portable way there — it is not a connectable port on any target
+// (EADDRNOTAVAIL on macOS, ECONNREFUSED on Linux, WSAEADDRNOTAVAIL on Windows),
+// so the assertion is on the *shape* of the error, not on a particular errno.
+test_connect_rejected_before_the_reactor() `test(exclude: wasm, timeout: "20s") {
+  bool raised = false;
+  bool was_resolve_error = false;
+  bool timeout_or_cancelled = false;
+  int code = 0;
+  TcpStream.connect("127.0.0.1", 0)? e is NetError {
+    raised = true;
+    was_resolve_error = e is ResolveError;
+    timeout_or_cancelled = e.is_timeout || e.is_cancelled;
+    code = e.code;
+  } else e {
+    assert(false, "a rejected connect must fail as a NetError, not '{e.message}'");
+  };
+  assert(raised, "connecting to port 0 must fail");
+  assert(!was_resolve_error, "an IPv4 literal always resolves; the failure comes from connect()");
+  assert(!timeout_or_cancelled, "a synchronous rejection is neither a timeout nor a cancellation");
+  assert(code > 0, "and carries the socket errno");
+
+  // The same call with a deadline already in the past: the socket-level error
+  // still wins, because connect(2) fails before anything can be parked.
+  assert(_connect_outcome_host("127.0.0.1", 0, Instant.now() - Duration.from_secs(1)) == -1,
+  "a rejected connect is reported as a socket error, not as a timeout");
 }
 
 // A deadline belongs to one direction. Expiring the read side must not disarm,
@@ -1701,10 +1799,15 @@ test_write_deadline_already_past() `test(exclude: wasm, timeout: "60s") {
   assert(_fill_until_blocked(client, chunk) == _wake_timeout(),
   "a write that blocks with a past deadline times out");
 
-  // The buffers are still full, so this attempt goes straight to the park —
-  // and straight back out of it, without ever reaching the reactor.
+  // The buffers are full, but loopback keeps moving the sender's queued bytes
+  // into the peer's receive buffer in the background, so a single write here can
+  // still be accepted — write() returns on any short send — before the socket
+  // blocks again (T1743). Refilling is what deterministically reaches the
+  // would-block path again; the elapsed bound is the assertion, since an
+  // already-past deadline is caught before the park and every blocked write in
+  // this loop therefore returns without reaching the reactor.
   Instant start = Instant.now();
-  assert(_write_outcome(client, chunk) == _wake_timeout(), "and keeps timing out while it would block");
+  assert(_fill_until_blocked(client, chunk) == _wake_timeout(), "and keeps timing out while it would block");
   assert(start.elapsed().as_millis < 500, "an already-past write deadline never parks");
 
   // Re-arm with a deadline that will not fire and drain the peer. An expired
@@ -1715,6 +1818,37 @@ test_write_deadline_already_past() `test(exclude: wasm, timeout: "60s") {
   assert(_drain_all(afd) > 0, "peer drained buffered data");
   u8[] small = "Ok".bytes();
   assert(client.write(small)?! == 2, "the write slot works again once space frees up");
+
+  client.close()?!;
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+// test_read_deadline_does_not_affect_the_write_side in the other direction. The
+// two slots are addressed by a runtime index, so an expired write deadline that
+// bled into the read slot would show up as a read reporting a timeout it was
+// never given — invisible to every test that only ever expires the read side.
+test_write_deadline_expiry_does_not_affect_the_read_side() `test(exclude: wasm, timeout: "60s") {
+  int sfd = _serve();
+  int port = _net_socket_getsockname(sfd);
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  client.set_write_deadline(Instant.now() - Duration.from_secs(1));
+  u8[] chunk = u8[].filled(65u8, 65536);
+  assert(_fill_until_blocked(client, chunk) == _wake_timeout(), "the write side times out");
+
+  if _dl := client.read_deadline {
+    assert(false, "a write timeout must leave the read deadline unset");
+  }
+
+  // Only the client-to-server direction is full; the peer's send buffer is
+  // untouched, so neither this send nor the read that follows it can block.
+  u8[] payload = "Ok".bytes();
+  assert(_net_socket_send(afd, payload) == 2, "server sent");
+  u8[] buf = u8[].filled(0, 64);
+  assert(client.read(buf)?! == 2, "the read side still works");
 
   client.close()?!;
   _net_socket_close(afd);

@@ -460,14 +460,14 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 - Contains resolved generic type info and a **pointer to the Type struct**.
 - Shared across all instances of `T[ConcreteG1, ConcreteG2]`.
 - Generated once per unique set of type arguments at compile time.
-- Fields annotated with `` `variant `` live here.
+- Holds the RTTI chain only. User fields are never placed here.
 
 #### 4. **Type Struct** (`T#t`)
 - Matches the source-code type **declaration** 1:1.
 - Contains the unresolved/generic metadata: name, generic parameter descriptors, inheritance chain, field layout info, meta annotations.
 - Used for reflection and compile-time meta-programming.
 - One per `type` declaration in the source code.
-- Fields annotated with `` `type `` live here.
+- Holds per-declaration RTTI only. User fields are never placed here.
 
 #### The Pointer Chain
 
@@ -491,13 +491,13 @@ A **view** is the perspective through which a value is accessed via a particular
 │  - fields: [...]                                                 │
 │  - meta: [...]                                                   │
 │  - parent_type: nullable                                         │
-│  - `type fields live here                                        │
+│  - per-declaration RTTI only — no user fields                    │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │ T#m[int]  (1 per monomorphization, compile-time gen)       │  │
 │  │ - resolved_params: {E: int}                                │  │
 │  │ - type_ptr: → T#t ◀───────────────────────────────────── │  │
-│  │ - `variant fields live here                                │  │
+│  │ - RTTI chain only — no user fields                        │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
 
@@ -723,18 +723,15 @@ type Player {
   f64 x `value;
   f64 y `value;
 
-  // Variant field — shared across all instances of this monomorphization
-  string spritePath `variant;
-
-  // Type field — shared across all instances of this type declaration
-  string typeName `type;
 }
 ```
 
 - **Instance fields** (default): per-object, heap-allocated. Each instance has its own copy.
 - **`` `value `` fields**: live in the value struct. Copied every time the value is passed or assigned. Best for small, frequently-accessed data (coordinates, flags).
-- **`` `variant `` fields**: shared across all instances of the same generic monomorphization. Useful for per-specialization metadata (e.g., a sprite path shared by all `Player[Warrior]` instances). Mutable only at initialization.
-- **`` `type `` fields**: shared across all instances of the type declaration regardless of generic parameters. Useful for reflection metadata. Mutable only at initialization.
+
+**There are no per-type or per-monomorphization fields.** A field is either per-object (instance) or carried in the value struct (`` `value ``) — never shared across instances. Such a field would be global mutable state: reachable from anywhere that can name the type, absent from every function signature, and unsynchronized across goroutines. Section 9.2 → *No Module-Level Variables* rules that out for the language as a whole, and a field placement must not reintroduce it through a side door.
+
+Per-monomorphization *data* — a sprite path shared by every `Player[Warrior]`, say — is expressed as a `` `mono `` **method** returning the value (`sprite_path() string `mono`). That needs no storage, cannot be mutated, and is visible at every call site.
 
 #### Pure Value Types
 
@@ -843,7 +840,9 @@ type EntityId is Hash128 {   // newtype: same bits, distinct name
 - **Not generic (yet)**: neither the child nor the value parent may have type
   parameters. `type Id is Box[int] {}` is rejected with a clear diagnostic.
 
-**Hybrid types** — a type that mixes `` `value `` fields with regular instance (heap) fields — fit the same four-struct model: the value struct embeds the `` `value `` fields directly *and* carries the instance pointer for the heap fields, so a method reaches every field uniformly (`` `value `` fields in the value struct, instance fields through the pointer). This is the natural consequence of treating all types through one layout rather than forking pure-value and pure-instance into separate models. Hybrid types are **not yet implemented** (tracked as T1723): for now a type's fields must be either **all** `` `value `` (a pure value type) or **none** (a regular instance type); mixing the two is rejected at compile time with a clean source-located diagnostic (`type T mixes \`value\` and instance fields; … not yet supported`).
+**Hybrid types** — a type that mixes `` `value `` fields with regular instance (heap) fields — fit the same four-struct model: the value struct embeds the `` `value `` fields directly *and* carries the instance pointer for the heap fields, so a method reaches every field uniformly (`` `value `` fields in the value struct, instance fields through the pointer). This is the natural consequence of treating all types through one layout rather than forking pure-value and pure-instance into separate models.
+
+> Tracked: T1723
 
 #### Primitives in the Four-Struct Model
 
@@ -941,7 +940,7 @@ type Circle is Shape, Drawable {
 
 #### Sealed by Default (`` `open ``)
 
-> **Not yet implemented** (tracked as T1537). The rules below describe the intended semantics; today every concrete type is implicitly extensible.
+> Tracked: T1537
 
 Concrete types are **sealed**: by default, no other type may declare `is` on them. To permit a concrete type to be used as an `is` parent, mark it `` `open ``.
 
@@ -1020,7 +1019,7 @@ When a type inherits from a parent, the child's vtable **extends** the parent's 
 - **Multiple inheritance**: the compiler generates a **per-view vtable** for each parent. When a Circle is passed where `Shape` is expected, the value carries a Shape-view vtable. When passed where `Drawable` is expected, it carries a Drawable-view vtable. Each call site sees the slot layout it expects.
 - **Field inheritance**: parent fields become getter/setter slots in the vtable. A child can inherit them as stored fields, override them with computed getters/setters, or provide them from a completely different source — the parent's call sites are unaffected.
 - **Default method implementations**: a parent type can provide method bodies. These become concrete function pointers in the child's vtable. The child can override them by providing its own implementation, which replaces the function pointer in the vtable slot. `` `abstract `` and a method body are **mutually exclusive**: `` `abstract `` means no body and the child must override; a body means a default implementation that the child may optionally override.
-- **Field placement inheritance**: when a child inherits from a parent, field placement annotations (`` `value ``, `` `variant ``, `` `type ``) are inherited as declared. If the parent declares `f64 x `value`, the child's value struct also contains `x`.
+- **Field placement inheritance**: when a child inherits from a parent, the `` `value `` field placement annotation is inherited as declared. If the parent declares `f64 x `value`, the child's value struct also contains `x`.
 
 #### Structural Interface Satisfaction
 
@@ -1193,8 +1192,8 @@ Generics use **square brackets** `[]`. Constraints are expressed inline in the t
 type map[K: Hashable + Equal, V] {
   Bucket[K, V][] buckets;
 
-  get(K key) V&? `instance { ... }
-  set(K key, V value) `instance { ... }
+  get(K key) V&? { ... }
+  set(K key, V value) { ... }
 }
 
 sort[T: Ordered](T[]~ list) {
@@ -1452,7 +1451,7 @@ Additional rules:
 - `` `final `` + `T?` is valid: `string? tag \`final;` (defaults to `none`, frozen after)
 - Defining a custom setter on a `` `final `` field name is a compile error
 - Defining a custom getter on a `` `final `` field name is allowed (overrides the generated getter)
-- `` `final `` is orthogonal to placement — `` `final \`value ``, `` `final \`variant ``, `` `final \`type `` are all valid
+- `` `final `` is orthogonal to placement — `` `final \`value `` is valid, as is `` `final `` on an ordinary field
 - `` `copy `` types can have `` `final `` fields — bitwise copies get the same frozen values
 
 #### Explicit `new` Constructor
@@ -1539,12 +1538,25 @@ When `new` raises, the instance is never returned — no `drop()` runs on the in
 
 A factory is a method annotated `` `factory ``. It provides named alternative construction paths with special privileges:
 
-- Can modify `` `final `` fields on locally-created instances
+- Can modify `` `final `` fields **declared on its own type**, on locally-created instances
 - Can return child types (return type is `Self` or a type that `is Self`)
 - Can be failable (`!`)
 - Can be declared `` `abstract `` on `` `structural `` interfaces (see §5.4) to enable generic factory patterns
 
-`` `factory `` implies `` `variant `` placement — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**. Abstract factories on structural interfaces get an **implicit `Self` return type** when none is specified.
+`` `factory `` implies `` `mono `` placement (see §9.2) — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**. Abstract factories on structural interfaces get an **implicit `Self` return type** when none is specified.
+
+**Why a factory, and not just `` `mono ``.** A `` `final `` field is never reassigned once its instance exists, so a value that was correct at construction stays correct perpetually. Two distinct sets of code bear on it:
+
+- **Which code can *establish* the value** — every construction path: field-init, `new`, and the factories. Field-init sets `` `final `` fields in any code, so when a type declares no `new`, that set is "anywhere the type can be named". Declaring `new` suppresses field-init and narrows it to `new` plus the factories; declaring `` _validate! `` (see *Validation*) constrains it differently, by requiring every path to satisfy the invariant regardless of where it is written.
+- **Which code can *reassign* the value after construction** — only a `` `factory ``, and only under the scope rule below. Nothing else in the language may, `` `mono `` methods included.
+
+`` `factory `` is the annotation that marks membership in that second set. A reader asking "what can change `Circle.radius` after a `Circle` exists?" reads `Circle`'s `` `factory `` methods and nothing else. That is the mechanical difference between the two placements, not a stylistic one — but note it is a claim about *reassignment*, not about which values can be constructed in the first place.
+
+**The privilege is scoped to the declaring type.** A factory on `T` may reassign a `` `final `` field of a locally-created instance only when that field is **declared on `T` itself** — not when it is declared on a subtype `T` happens to construct, and not when it is inherited from a parent. Setting such a field through the construction expression remains legal, as it is everywhere: field-init sets `` `final `` fields in any code. Only *post-construction reassignment* is restricted.
+
+The scope rule is what makes the guarantee hold. If a parent's factory could reassign a child's `` `final `` field, answering "is `Circle.radius` immutable?" would require auditing `Shape` and every type between — and the audit surface would grow with each level of the hierarchy, exactly defeating the property `` `final `` exists to provide.
+
+> Tracked: T1751
 
 ```promise
 type Color {
@@ -1684,6 +1696,26 @@ Compile errors for `super()`:
 
 Abstract types can define `new` to enforce initialization contracts — children call `super(...)` to satisfy them. Abstract types themselves still cannot be instantiated directly.
 
+**Factories and `` `mono `` members are not inherited.** They may only be called on the type
+that declares them. A receiver-less member whose body can name `Self` — a `` `factory `` or a
+`` `mono `` method — binds `Self` to its *declaring* type, so calling it through a subtype
+would name the subtype while producing the parent: `Kid.make(…)` on a factory declared by
+`Base` yields a `Base`, leaving every field `Kid` adds uninitialized. Calling one through a
+subtype is rejected:
+
+```
+factory 'make' is declared on 'Base' — call 'Base.make(...)'. Factories are not
+inherited: a factory takes no `this` receiver and its `Self` binds to the declaring
+type, so 'Base.make' can only ever build a 'Base'. Calling it as 'Kid.make' would
+name Kid but return a Base, leaving the fields Kid adds uninitialized. To get a Kid,
+declare a factory on Kid, or construct it directly.
+```
+
+`` `global `` members **are** inherited: the type is purely a namespace, no `Self` is
+available, and there is nothing for a subtype to misresolve.
+
+> Tracked: T1753
+
 #### Construction Lifecycle
 
 ```
@@ -1692,11 +1724,65 @@ allocate + zero-init + RTTI
   → new() body [if has new]
   → `final fields frozen
   → instance returned
+  → _validate!() at the receiving site [if declared; parent's first]
   → ... use ...
   → drop() [if has drop, at scope exit]
   → field drops [compiler-inserted, reverse order]
   → free
 ```
+
+#### Validation
+
+A type may declare one `` _validate! `` method. It is the type's invariant: if it raises, the
+instance does not come into existence.
+
+```promise
+type Port {
+  int value `final;
+
+  _validate!(this) `doc("Raises if this instance violates the type's invariant.") {
+    if this.value < 1 || this.value > 65535 {
+      raise error("port out of range: " + this.value.to_string());
+    }
+  }
+}
+```
+
+The receiver is a **shared** borrow, so validation reads every field and mutates none. A
+`` _validate! `` is therefore never part of the `` `final `` audit surface described above.
+
+**It runs once, at the receiving site** — the first point the value is received by code
+outside the type's own construction paths. Every path is covered: field-init, `new`, a
+`` `factory ``, and the `` `serializable ``-synthesized `decode`. A factory that obtains a
+`Self` from another factory does not re-validate it; only the outermost result is validated.
+
+**It runs after construction is complete**, over a fully-initialized instance. A factory may
+therefore construct with placeholder values and fix `` `final `` fields afterwards (see
+above) without validation ever observing the intermediate state. Where a parent also declares
+`` _validate! ``, the parent's runs first, and both see the complete instance.
+
+**A `Self` constructed inside its own factory must leave by `return`.** Stashing it, or
+letting it escape by any other route, is rejected — the receiving-site rule has no point at
+which to fire.
+
+**Every construction path on a validated type is failable.** `new` must be declared `new!`,
+every `` `factory `` must be declared `!`, and field-init at a call site is a failable
+expression requiring `?`, `^`, or `?!`. This holds even when the constructor or factory body
+cannot itself fail: the value it yields may still be rejected, and a signature that hid that
+would be lying to its caller. It is also what keeps validation from being a hidden effect —
+unlike an exception, the failable marker is forced through every call site by the ordinary
+error-handling rules.
+
+Failability here comes from the **invariant**, never from allocation. Promise does not model
+allocation failure as a raisable error, so a heap-allocating type and a pure value type are
+alike in this: neither needs `!` for storage, and both need it once they declare
+`` _validate! ``. There is no value-type exemption.
+
+`clone()` does not validate: a clone is an identical copy of an instance that was already
+valid. Enums whose variants carry payloads follow the same rules as any other instance; plain
+enumerated values have no state to validate.
+
+> Tracked: T1752
 
 #### Definite-Assignment Analysis
 
@@ -2281,10 +2367,7 @@ testAddition() `test {
 | Meta          | Applies To     | Description                                      |
 |---------------|----------------|--------------------------------------------------|
 | `` `raw ``    | fields         | Field uses an LLVM type identifier directly      |
-| `` `value ``  | fields, methods| Place field in Value struct; method receives value as `this` (default for methods) |
-| `` `instance ``| methods       | Method receives pointer to Instance struct as `this` |
-| `` `variant ``| fields, methods| Place field in Variant struct; method receives variant as `this` |
-| `` `type ``   | fields, methods| Place field in Type struct; method is a namespaced function (no `this`) |
+| `` `value ``  | fields         | Place field in the Value struct — copied with the value |
 | `` `public `` | types, enums, functions | Export from module (see Section 4.4) |
 | `` `inline `` | functions      | Hint to inline the function                      |
 | `` `deprecated`` | any         | Mark as deprecated with optional message         |
@@ -2303,7 +2386,9 @@ testAddition() `test {
 | `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |
 | `` `required ``| fields         | Field must be present during deserialization; validation error otherwise |
 | `` `final `` | fields          | Immutable after construction; can only be set in `new` or `` `factory `` body (see Section 5.7) |
-| `` `factory ``| methods        | Factory constructor with `` `variant `` placement; no `this`, returns `Self` or child (see Section 5.7) |
+| `` `factory ``| methods        | Factory constructor with `` `mono `` placement; no `this`, returns `Self` or child (see Section 5.7) |
+| `` `global `` | methods        | Namespaced function — no `this`, no `Self`; rejected on generic types (see Section 9.2) |
+| `` `mono ``  | methods        | Per-monomorphization namespaced function — no `this`, `Self` available (see Section 9.2) |
 | `` `doc ``   | any, parameters | AST-attached documentation (see Section 8.4)      |
 | `` `target(cond) ``| types, enums, functions | Compile-time platform filtering (see Section 8.5) |
 | `` `embed(path) ``| module-level getters | Compile-time resource embedding (see Section 8.6) |
@@ -2321,7 +2406,7 @@ type HttpClient `doc("HTTP client with connection pooling and automatic retry.")
   Duration timeout `doc("Per-request timeout.");
 
   get!(~this, string url `doc("The URL to fetch.")) Response
-      `doc("Perform a GET request. Returns the response or an error.") `instance {
+      `doc("Perform a GET request. Returns the response or an error.") {
     ...
   }
 }
@@ -2457,11 +2542,9 @@ greet(string name) string {
 
 ### 9.2 Methods
 
-Methods are defined inside the type body and correspond to the four struct levels. The method's level determines what `this` refers to and which fields are accessible.
+Methods are defined inside the type body. A method either takes a **receiver** or it does not. A method with a receiver needs no placement annotation — there is only one kind. A receiver-less method declares which of two placements it has: `` `global `` or `` `mono ``, with `` `factory `` as the construction-path form of the latter.
 
-#### Value Methods (default)
-
-By default, `this` is the **value struct**, passed by value. Every method receives the value struct as `this` (see the note under Instance Methods); for a pure value type the value struct embeds the `` `value `` fields directly.
+#### Receivers and Field Access
 
 ```promise
 type Point {
@@ -2476,19 +2559,17 @@ type Point {
 }
 ```
 
-#### Instance Methods (`` `instance ``)
-
-**Every method — value or instance — receives `this` as the value struct.** The value struct carries the vtable pointer plus: for an instance type, a pointer to the heap instance; for a pure value type, the `` `value `` fields embedded directly (with the instance pointer null or a shared singleton); for a hybrid type with both kinds of field, both. A method accesses **all** of the type's fields uniformly — `` `value `` fields directly in the value struct, instance fields through the instance pointer — so there is **no fundamental difference between pure-value and pure-instance types**; they work the same way. The `` `instance `` annotation marks methods on a type with heap instance state. Use `this` for shared borrow, `~this` for mutable borrow.
+**Every method receives `this` as the value struct.** The value struct carries the vtable pointer plus: for an instance type, a pointer to the heap instance; for a pure value type, the `` `value `` fields embedded directly (with the instance pointer null or a shared singleton); for a hybrid type with both kinds of field, both. A method accesses **all** of the type's fields uniformly — `` `value `` fields directly in the value struct, instance fields through the instance pointer — so there is **no fundamental difference between pure-value and pure-instance types**; they work the same way. There is correspondingly no annotation for it: a method with a receiver needs no placement. Use `this` for shared borrow, `~this` for mutable borrow.
 
 ```promise
 type Counter {
   int value;
 
-  increment(~this) `instance {
+  increment(~this) {
     this.value += 1;
   }
 
-  current(this) int `instance {
+  current(this) int {
     return this.value;
   }
 }
@@ -2536,7 +2617,7 @@ m := Wrapper[string].defaultCount();
 
 **Note:** The name `new` is reserved for explicit constructors (see Section 5.7). Global/mono methods that create instances should use descriptive names like `create`, `from`, or `empty`. Factory constructors (`` `factory ``) use `` `mono `` (variant) placement instead of `` `global `` — see Section 5.7.
 
-**Future: Data Placement** — `` `global `` and `` `mono `` can also apply to fields, enabling type-scoped or monomorphization-scoped shared data (e.g., `int instanceCount `global` or `string typeName `mono`). This is deferred pending mixed-placement codegen support.
+**Data Placement** — `` `global `` and `` `mono `` are **method** placements only; there are no per-type or per-monomorphization fields. A per-type or per-monomorphization *field* would be global mutable state — reachable from anywhere that can name the type, absent from every function signature, and unsynchronized across goroutines — which Section 9.2 → *No Module-Level Variables* rules out for the whole language. Per-monomorphization *data* is expressed as a `` `mono `` method returning it (`sprite_path() string `mono`), which needs no storage and cannot be mutated.
 
 ### 9.3 Module-Level Getters and Setters
 
@@ -3172,7 +3253,7 @@ type Stream[T] `structural {
 
 `Stream[T]` is the reusable factory: a single abstract `iter()` that hands out a fresh `Iterator[T]` cursor. Combinators live on `Iterator[T]`, so transform a stream by chaining off `stream.iter()`.
 
-> **Partly implemented** (tracked as T1724). The core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) and the ~20 combinator default methods on `Iterator[T]` work on any type that satisfies them. The combinators not in the list above — `scan`, `chunk`, `distinct`, `contains`, `min`, `max`, `join` — are specified here but not yet built.
+> Tracked: T1724
 
 **Key design properties:**
 
@@ -3728,19 +3809,19 @@ The standard library defines a set of structural interfaces for I/O, following t
 
 ```promise
 type Reader `structural {
-  read!(~this, u8[]~ buf) int `abstract `instance;
+  read!(~this, u8[]~ buf) int `abstract;
 }
 
 type Writer `structural {
-  write!(~this, u8[] buf) int `abstract `instance;
+  write!(~this, u8[] buf) int `abstract;
 }
 
 type Closer `structural {
-  close!(~this) `abstract `instance;
+  close!(~this) `abstract;
 }
 
 type Seeker `structural {
-  seek!(~this, int offset, int whence) int `abstract `instance;
+  seek!(~this, int offset, int whence) int `abstract;
 }
 ```
 
@@ -3763,10 +3844,10 @@ type File is ReadWriteCloser {
   open_write!(string path) Self `factory `native; // O_WRONLY
   open!(string path) Self `factory `native;       // O_RDWR
 
-  read!(~this, u8[]~ buf) int `instance `native;
-  write!(~this, u8[] buf) int `instance `native;
-  close!(~this) `instance `native;
-  seek!(~this, int offset, int whence) int `instance `native;
+  read!(~this, u8[]~ buf) int `native;
+  write!(~this, u8[] buf) int `native;
+  close!(~this) `native;
+  seek!(~this, int offset, int whence) int `native;
 }
 ```
 
@@ -3777,7 +3858,7 @@ type BufferedWriter is Writer {
   Writer inner;
   u8[] buf;
 
-  write!(~this, u8[] data) int `instance {
+  write!(~this, u8[] data) int {
     for b in data { this.buf.push(b); }
     if this.buf.len >= 4096 {
       return this.flush()?^;
@@ -3785,7 +3866,7 @@ type BufferedWriter is Writer {
     return data.len;
   }
 
-  flush!(~this) int `instance {
+  flush!(~this) int {
     n := this.inner.write(this.buf)?^;
     this.buf = [];
     return n;
@@ -3857,7 +3938,7 @@ type TempFile {
   string path;
   File file;
 
-  drop(~this) `instance {
+  drop(~this) {
     this.file.close();
     fs.remove(this.path);
   }
@@ -3901,11 +3982,11 @@ For variables **not** declared with `use`, normal `drop()` semantics apply — t
 type Connection {
   int socket_fd;
 
-  close!(~this) `instance {
+  close!(~this) {
     syscall.close(this.socket_fd)?^;
   }
 
-  drop(~this) `instance {
+  drop(~this) {
     // Best-effort close — errors suppressed in drop
     syscall.close(this.socket_fd);
   }
@@ -4413,11 +4494,11 @@ type Todo `serializable {
   string title `json(name: "title");
   bool done = false;                     // field default — constructor can skip
 
-  toggle(~this) `instance {
+  toggle(~this) {
     this.done = !this.done;
   }
 
-  new(int id, string move title) Todo `type {
+  create(int id, string move title) Todo `global {
     return Todo(id: id, title: move title);   // done defaults to false
   }
 }
@@ -4425,12 +4506,12 @@ type Todo `serializable {
 type TodoList {
   Todo[] items;
 
-  add(~this, string move title, int priority = 0) `instance {
+  add(~this, string move title, int priority = 0) {
     int id = this.items.len + 1;
     this.items.push(Todo.new(id, move title));
   }
 
-  pending(this) Todo[] `instance {
+  pending(this) Todo[] {
     return this.items.iter().filter(|Todo t| -> !t.done).collect();
   }
 }

@@ -58,6 +58,7 @@ grep -rn 'tracked as T[0-9]' docs/*.md      # then check each item's status
 - [platform-modules.md](platform-modules.md) — Platform-facing stdlib boundary and module layout under `modules/`.
 - [creating-modules.md](creating-modules.md) — Step-by-step guide for proposing, implementing, and shipping new catalog modules.
 - [community-catalog.md](community-catalog.md) — The community module tier: a decentralized git registry, its CI, and per-epoch compatibility records.
+- [io.md](io.md) — File I/O contract: atomic replace, forcing data to stable storage, advisory locking.
 - [serialization.md](serialization.md) — Encode/Decode architecture for agent-friendly serialization.
 - [schema.md](schema.md) — Type-driven schema generation: compile-time descriptors with stable content-addressed identity.
 

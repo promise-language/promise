@@ -2663,6 +2663,7 @@ The following abbreviations are **universally preferred exceptions** to the full
 | `stderr` | `standard error` |
 | `stdin` | `standard input` |
 | `stdout` | `standard output` |
+| `sync` | `synchronize` |
 | `var` | `variable` |
 
 These abbreviations are so universally recognized that the abbreviated form is more readable than the full word. When a mapping is defined here, the abbreviation is the canonical form — code review should flag uses of the full word.

@@ -1,0 +1,33 @@
+use crypto;
+
+test_crypto_random_bytes_qualified() `test {
+  u8[] bytes = crypto.random_bytes(32)?!;
+  assert(bytes.len == 32, "random_bytes via catalog import returns correct length");
+}
+
+test_crypto_random_bytes_zero_qualified() `test {
+  u8[] bytes = crypto.random_bytes(0)?!;
+  assert(bytes.len == 0, "zero-length request returns empty vector");
+}
+
+test_crypto_random_bytes_error_qualified() `test {
+  (_, err) := crypto.random_bytes(-1);
+  if err is present {
+    assert(err.message == "random_bytes: count must not be negative", "error message");
+  } else {
+    assert(false, "expected error for negative count");
+  }
+}
+
+test_crypto_random_bytes_nonzero_qualified() `test {
+  u8[] bytes = crypto.random_bytes(32)?!;
+  bool has_nonzero = false;
+  int i = 0;
+  while i < bytes.len {
+    if bytes[i] != 0u8 {
+      has_nonzero = true;
+    }
+    i = i + 1;
+  }
+  assert(has_nonzero, "CSPRNG output should not be all zeros");
+}

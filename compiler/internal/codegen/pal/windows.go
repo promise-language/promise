@@ -4325,3 +4325,41 @@ func (p *WindowsPAL) EmitSocketGetLocalPort(module *ir.Module) *ir.Func {
 	okBlk.NewRet(result)
 	return fn
 }
+
+// EmitCryptoRandomBytes defines @pal_crypto_random_bytes(i8* buf, i64 len) → i32
+// Uses BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG (0x2) — no algorithm
+// handle needed. bcrypt.dll ships with every Windows version since Vista.
+// Returns 0 on success, -1 on error.
+func (p *WindowsPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
+	// NTSTATUS BCryptGenRandom(BCRYPT_ALG_HANDLE hAlgorithm, PUCHAR pbBuffer,
+	//                          ULONG cbBuffer, ULONG dwFlags)
+	// hAlgorithm = NULL when BCRYPT_USE_SYSTEM_PREFERRED_RNG is set.
+	// cbBuffer is ULONG (i32 on Windows).
+	bcryptGenRandom := getOrDeclareFunc(module, "BCryptGenRandom", irtypes.I32,
+		ir.NewParam("hAlgorithm", irtypes.I8Ptr),
+		ir.NewParam("pbBuffer", irtypes.I8Ptr),
+		ir.NewParam("cbBuffer", irtypes.I32),
+		ir.NewParam("dwFlags", irtypes.I32))
+
+	fn := module.NewFunc("pal_crypto_random_bytes", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Truncate len from i64 to i32 (ULONG) — safe: Promise validates count.
+	len32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
+	// BCRYPT_USE_SYSTEM_PREFERRED_RNG = 2
+	rc := entry.NewCall(bcryptGenRandom,
+		constant.NewNull(irtypes.I8Ptr), fn.Params[0], len32,
+		constant.NewInt(irtypes.I32, 2))
+	// BCryptGenRandom returns NTSTATUS: 0 = STATUS_SUCCESS
+	isOk := entry.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isOk, okBlk, errBlk)
+
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}

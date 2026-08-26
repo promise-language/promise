@@ -65,7 +65,7 @@ The stdlib provides:
 | `tls` | `modules/tls/tls.pr` | 421 | client + server — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 16 tests. |
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
 | `gzip` | `modules/gzip/` | 956 | RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
-| `crypto` | `modules/crypto/` | 239 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`. HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) remain to be built. 26 tests. |
+| `crypto` | `modules/crypto/` | 258 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`; `random.pr`: `random_bytes!(int) u8[]` (CSPRNG via OS syscall — T1571), `CryptoError`. HMAC-SHA-256 (T1567) and PBKDF2 (T1568) remain to be built. 32 tests. |
 ### Protocol Conformance Is Declared, Not Inferred
 
 The structural interfaces the platform publishes — `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, `Iterator` — carry `` `structural(protocol: true) ``, which reserves their requirement names (see §5.4 of `docs/language-design.md`). Two rules follow for every type in `modules/std/` and the catalog:
@@ -1174,7 +1174,7 @@ Response r = client.get("http://host/path")?;   // also post!, send!, close
 
 #### 5e. `modules/crypto/` — Cryptographic Primitives
 
-Shipped as two files: `sha256.pr` and `constant_time.pr`.
+Shipped as three files: `sha256.pr`, `constant_time.pr`, and `random.pr`.
 
 ```promise
 type Digest256 `doc("A SHA-256 digest: 32 bytes as a big-endian u256, H0 in the most significant 32 bits.") {
@@ -1195,10 +1195,13 @@ type Sha256 `doc("Streaming SHA-256 context: update() repeatedly, then finalize(
 
 sha256(u8[] data) Digest256 `doc("One-shot digest; prefer this when the whole input is in hand.");
 constant_time_equal(u8[] a, u8[] b) bool `doc("Data-independent comparison for MACs, signatures, and secret tokens.");
+
+type CryptoError is error `doc("Error raised when the operating system cannot provide random bytes.");
+random_bytes!(int count) u8[] `doc("Returns count cryptographically-secure random bytes. Raises on negative count or OS failure.");
 ```
 
-- **Implementation**: Pure Promise, built on the `u256` wide integer in `modules/std/wide_int.pr`.
-- **Remaining**: HMAC-SHA-256 (T1567), PBKDF2 (T1568), and a CSPRNG `random_bytes` (T1571) are not yet built.
+- **Implementation**: SHA-256 and constant-time comparison are pure Promise, built on the `u256` wide integer in `modules/std/wide_int.pr`. `random_bytes` is the one sanctioned PAL fallback — a syscall (`getentropy` on POSIX, `BCryptGenRandom` on Windows, `random_get` on WASI), not an external library.
+- **Remaining**: HMAC-SHA-256 (T1567) and PBKDF2 (T1568) are not yet built.
 
 #### 5f. `modules/std/embed.pr` — Resource Embedding Types
 

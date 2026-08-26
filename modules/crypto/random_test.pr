@@ -1,0 +1,81 @@
+test_random_bytes_returns_correct_length() `test {
+  u8[] bytes = random_bytes(32)?!;
+  assert(bytes.len == 32, "expected 32 bytes");
+}
+
+test_random_bytes_zero_length() `test {
+  u8[] bytes = random_bytes(0)?!;
+  assert(bytes.len == 0, "expected 0 bytes");
+}
+
+test_random_bytes_large() `test {
+  u8[] bytes = random_bytes(1024)?!;
+  assert(bytes.len == 1024, "expected 1024 bytes");
+}
+
+test_random_bytes_successive_calls_differ() `test {
+  u8[] a = random_bytes(32)?!;
+  u8[] b = random_bytes(32)?!;
+  // Extremely unlikely (1 in 2^256) that two 32-byte CSPRNG outputs are equal
+  assert(!constant_time_equal(a, b), "two CSPRNG outputs should differ");
+}
+
+test_random_bytes_not_all_zero() `test {
+  u8[] bytes = random_bytes(32)?!;
+  bool has_nonzero = false;
+  int i = 0;
+  while i < bytes.len {
+    if bytes[i] != 0u8 {
+      has_nonzero = true;
+    }
+    i = i + 1;
+  }
+  assert(has_nonzero, "CSPRNG output should not be all zeros");
+}
+
+test_random_bytes_negative_count_raises() `test {
+  (_, err) := random_bytes(-1);
+  if err is present {
+    assert(err.message == "random_bytes: count must not be negative", "error message");
+  } else {
+    assert(false, "expected error for negative count");
+  }
+}
+
+test_random_bytes_single_byte() `test {
+  u8[] bytes = random_bytes(1)?!;
+  assert(bytes.len == 1, "expected 1 byte");
+}
+
+test_random_bytes_boundary_256() `test {
+  // Exactly the getentropy per-call limit — single iteration, no loop continuation.
+  u8[] bytes = random_bytes(256)?!;
+  assert(bytes.len == 256, "expected 256 bytes");
+}
+
+test_random_bytes_boundary_257() `test {
+  // One byte past the getentropy limit — forces exactly two loop iterations.
+  u8[] bytes = random_bytes(257)?!;
+  assert(bytes.len == 257, "expected 257 bytes");
+}
+
+test_random_bytes_negative_error_is_crypto_error() `test {
+  (_, err) := random_bytes(-1);
+  assert(err is present, "expected error");
+  assert(err is CryptoError, "expected CryptoError");
+}
+
+test_random_bytes_large_negative_raises() `test {
+  (_, err) := random_bytes(-100);
+  assert(err is present, "expected error for large negative count");
+}
+
+test_random_bytes_multiple_calls_independent() `test {
+  // Verify multiple sequential calls all succeed and produce valid output.
+  int i = 0;
+  while i < 10 {
+    u8[] bytes = random_bytes(16)?!;
+    assert(bytes.len == 16, "expected 16 bytes");
+    i = i + 1;
+  }
+}

@@ -475,6 +475,9 @@ type Compiler struct {
 	palResolveFree           *ir.Func // @pal_resolve_free(i8* list) → void
 	palSocketConnectResolved *ir.Func // @pal_socket_connect_resolved(i32 fd, i8* node) → i32
 
+	// PAL crypto primitives (T1571)
+	palCryptoRandomBytes *ir.Func // @pal_crypto_random_bytes(i8* buf, i64 len) → i32
+
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
 
@@ -1085,6 +1088,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineNetPALBodies()      // bridge net module externs → PAL socket functions (T0069)
 	c.defineTLSPALBodies()      // bridge tls module externs → PAL OpenSSL functions (T0077)
 	c.defineTimeBodies()        // bridge time module wall-clock extern → realtime clock (T0962)
+	c.defineCryptoPALBodies()   // bridge crypto module externs → PAL CSPRNG (T1571)
 
 	c.defineTypeMethods(file)
 	c.defineEnumMethods(file)

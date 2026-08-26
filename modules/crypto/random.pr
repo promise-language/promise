@@ -1,0 +1,19 @@
+_crypto_random_fill(u8[] ~buf) int `extern("promise_crypto_random_fill");
+
+type CryptoError is error `public `doc("Error raised when the operating system cannot provide random bytes.") {
+}
+
+random_bytes!(int count) u8[] `public `doc("Returns count cryptographically-secure random bytes. Raises on negative count or OS failure.") {
+  if count < 0 {
+    raise CryptoError("random_bytes: count must not be negative");
+  }
+  if count == 0 {
+    return[];
+  }
+  u8[] buf = u8[].filled(0u8, count);
+  int rc = _crypto_random_fill(buf);
+  if rc < 0 {
+    raise CryptoError("random_bytes: OS entropy source failed");
+  }
+  return buf;
+}

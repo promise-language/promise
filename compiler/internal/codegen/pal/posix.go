@@ -3886,3 +3886,53 @@ func (p *PosixPAL) EmitReactorClose(module *ir.Module) *ir.Func {
 	okBlk.NewRet(ret)
 	return fn
 }
+
+// EmitCryptoRandomBytes defines @pal_crypto_random_bytes(i8* buf, i64 len) → i32
+// Uses getentropy(2) which is available on macOS 10.12+ and Linux (glibc 2.25+,
+// musl 1.1.20+). getentropy is limited to 256 bytes per call, so this loops for
+// larger requests. Returns 0 on success, -1 on error.
+func (p *PosixPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
+	// declare i32 @getentropy(i8*, i64)
+	getentropyFn := getOrDeclareFunc(module, "getentropy", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+
+	fn := module.NewFunc("pal_crypto_random_bytes", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	loopHead := fn.NewBlock(".loop")
+	loopBody := fn.NewBlock(".loop.body")
+	done := fn.NewBlock(".done")
+	fail := fn.NewBlock(".fail")
+
+	entry.NewBr(loopHead)
+
+	// PHI: remaining bytes and current pointer
+	remaining := loopHead.NewPhi(ir.NewIncoming(fn.Params[1], entry))
+	ptr := loopHead.NewPhi(ir.NewIncoming(fn.Params[0], entry))
+	hasMore := loopHead.NewICmp(enum.IPredSGT, remaining, constant.NewInt(irtypes.I64, 0))
+	loopHead.NewCondBr(hasMore, loopBody, done)
+
+	// chunk = min(remaining, 256)
+	isSmall := loopBody.NewICmp(enum.IPredSLE, remaining, constant.NewInt(irtypes.I64, 256))
+	chunk := loopBody.NewSelect(isSmall, remaining, constant.NewInt(irtypes.I64, 256))
+
+	rc := loopBody.NewCall(getentropyFn, ptr, chunk)
+	isFail := loopBody.NewICmp(enum.IPredNE, rc, constant.NewInt(irtypes.I32, 0))
+	loopCont := fn.NewBlock(".loop.cont")
+	loopBody.NewCondBr(isFail, fail, loopCont)
+
+	// Advance pointer and decrement remaining
+	nextPtr := loopCont.NewGetElementPtr(irtypes.I8, ptr, chunk)
+	nextRemaining := loopCont.NewSub(remaining, chunk)
+	remaining.Incs = append(remaining.Incs, ir.NewIncoming(nextRemaining, loopCont))
+	ptr.Incs = append(ptr.Incs, ir.NewIncoming(nextPtr, loopCont))
+	loopCont.NewBr(loopHead)
+
+	done.NewRet(constant.NewInt(irtypes.I32, 0))
+	fail.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}

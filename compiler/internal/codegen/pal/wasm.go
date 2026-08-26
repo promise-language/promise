@@ -829,3 +829,33 @@ func (p *WasmPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
 func (p *WasmPAL) EmitSocketGetLocalPort(module *ir.Module) *ir.Func {
 	return emitStubSocketGetLocalPort(module)
 }
+
+// EmitCryptoRandomBytes defines @pal_crypto_random_bytes(i8* buf, i64 len) → i32
+// Uses WASI random_get from wasi_snapshot_preview1. WASI guarantees CSPRNG-quality
+// randomness. Returns 0 on success, -1 on error.
+func (p *WasmPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
+	// declare i32 @random_get(i8*, i32) — WASI preview1
+	randomGet := getOrDeclareFunc(module, "random_get", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("buf_len", irtypes.I32))
+	randomGet.FuncAttrs = append(randomGet.FuncAttrs,
+		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
+		ir.AttrPair{Key: "wasm-import-name", Value: "random_get"})
+
+	fn := module.NewFunc("pal_crypto_random_bytes", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	entry := fn.NewBlock(".entry")
+
+	len32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
+	errno := entry.NewCall(randomGet, fn.Params[0], len32)
+	// WASI errno: 0 = success
+	isOk := entry.NewICmp(enum.IPredEQ, errno, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isOk, okBlk, errBlk)
+
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}

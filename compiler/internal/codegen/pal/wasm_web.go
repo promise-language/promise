@@ -259,3 +259,25 @@ func (p *WasmWebPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
 func (p *WasmWebPAL) EmitSocketGetLocalPort(module *ir.Module) *ir.Func {
 	return emitStubSocketGetLocalPort(module)
 }
+
+// EmitCryptoRandomBytes defines @pal_crypto_random_bytes(i8* buf, i64 len) → i32
+// Imports promise_env.random_bytes from the JS host environment, which uses
+// crypto.getRandomValues(). Returns 0 on success, non-zero on error.
+func (p *WasmWebPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
+	envRandom := getOrDeclareFunc(module, "promise_env_random_bytes", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32))
+	envRandom.FuncAttrs = append(envRandom.FuncAttrs,
+		ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+		ir.AttrPair{Key: "wasm-import-name", Value: "random_bytes"})
+
+	fn := module.NewFunc("pal_crypto_random_bytes", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	entry := fn.NewBlock(".entry")
+
+	len32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
+	rc := entry.NewCall(envRandom, fn.Params[0], len32)
+	entry.NewRet(rc)
+	return fn
+}

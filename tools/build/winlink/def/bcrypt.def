@@ -1,0 +1,8 @@
+; bcrypt.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). BCryptGenRandom is the only symbol needed — provides
+; CSPRNG random bytes (T1571). bcrypt.dll ships with every Windows version
+; since Vista. Regenerate import libs with:
+;   bin/release winlink
+LIBRARY bcrypt.dll
+EXPORTS
+BCryptGenRandom

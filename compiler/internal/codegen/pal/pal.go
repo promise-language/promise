@@ -269,6 +269,12 @@ type PAL interface {
 	//   out[0]=size, out[1]=mode&07777, out[2]=uid, out[3]=gid,
 	//   out[4]=mtime_ns, out[5]=atime_ns, out[6]=ctime_ns, out[7]=file_type(1/2/3/4)
 	EmitFileStat(module *ir.Module) *ir.Func
+
+	// Cryptographic random bytes (T1571)
+	// EmitCryptoRandomBytes defines @pal_crypto_random_bytes(i8* buf, i64 len) → i32
+	// Fills buf with len bytes of cryptographically-secure random data from the OS.
+	// Returns 0 on success, -1 on error.
+	EmitCryptoRandomBytes(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.

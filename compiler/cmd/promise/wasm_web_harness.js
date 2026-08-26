@@ -105,6 +105,22 @@ const _promiseEnvImpl = {
   // counter. Without this the IR import would fall through the Proxy stub to
   // () => 0, freezing all WASM time at 0.
   monotonic_nanos: () => process.hrtime.bigint(),
+  // T1571: CSPRNG random bytes for the crypto module. Fills buf with len bytes
+  // of cryptographically-secure randomness using Node's crypto.getRandomValues.
+  // getRandomValues throws QuotaExceededError above 65536 bytes, so loop in
+  // chunks (same pattern as the POSIX PAL's 256-byte getentropy loop).
+  // Returns 0 on success.
+  random_bytes: (buf, len) => {
+    const crypto = require("crypto");
+    let offset = 0;
+    while (offset < len) {
+      const chunk = Math.min(len - offset, 65536);
+      const view = new Uint8Array(instance.exports.memory.buffer, buf + offset, chunk);
+      crypto.getRandomValues(view);
+      offset += chunk;
+    }
+    return 0;
+  },
 };
 
 const importObject = {

@@ -465,6 +465,16 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 
 			mangledName := mangleModuleMethodDeclName(moduleName, td.Name, md)
 
+			// T1740: Skip if already forward-declared (e.g. by forwardDeclareModuleMethod).
+			if fn, exists := c.funcs[mangledName]; exists {
+				c.moduleOwnedFuncs[mangledName] = moduleName
+				plainName := mangleMethodDeclName(td.Name, md)
+				if _, exists := c.funcs[plainName]; !exists {
+					c.funcs[plainName] = fn
+				}
+				continue
+			}
+
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
 				receiverType := irtypes.Type(irtypes.I8Ptr)
@@ -680,4 +690,86 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.currentNamed = nil
 		}
 	}
+}
+
+// forwardDeclareModuleMethod searches module infos for the type's owning module
+// and forward-declares the method with the correct module-prefixed name.
+// Returns the declared function, or nil if not found. T1740: fixes cross-module
+// compilation order where a monomorphized generic function in an earlier-compiled
+// module calls a method on a type from a later-compiled module.
+func (c *Compiler) forwardDeclareModuleMethod(named *types.Named, method *types.Method, plainMangledName string) *ir.Func {
+	if c.moduleInfos == nil {
+		return nil
+	}
+	typeName := named.Obj().Name()
+	savedInfo := c.info
+	defer func() { c.info = savedInfo }()
+
+	for _, modInfo := range c.moduleInfos {
+		c.info = modInfo.SemaInfo
+		irName := modInfo.EffectiveIRPrefix()
+		for _, decl := range modInfo.File.Decls {
+			td, ok := decl.(*ast.TypeDecl)
+			if !ok || td.Name != typeName {
+				continue
+			}
+			if modInfo.SemaInfo.FilteredDecls[decl] {
+				continue
+			}
+			foundNamed := c.lookupNamedType(td.Name)
+			if foundNamed != named {
+				continue
+			}
+			// Find the method declaration
+			for _, md := range td.Methods {
+				if md.Body == nil || len(md.TypeParams) > 0 {
+					continue
+				}
+				m := c.lookupMethodForDecl(foundNamed, md)
+				if m != method {
+					continue
+				}
+				// Check if already declared with module prefix
+				moduleMangledName := mangleModuleMethodDeclName(irName, td.Name, md)
+				if fn, ok := c.funcs[moduleMangledName]; ok {
+					c.funcs[plainMangledName] = fn
+					return fn
+				}
+				// Forward-declare: build params + return type, create stub
+				var params []*ir.Param
+				if m.Sig().Recv() != nil {
+					receiverType := irtypes.Type(irtypes.I8Ptr)
+					if isPrimitiveScalar(foundNamed) {
+						receiverType = llvmNamedType(foundNamed)
+					}
+					params = append(params, ir.NewParam("this", receiverType))
+				}
+				for _, p := range m.Sig().Params() {
+					params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
+				}
+
+				retType := irtypes.Type(irtypes.Void)
+				genInfo := c.info.GeneratorFuncs[md]
+				if genInfo != nil {
+					if genInfo.CanError {
+						retType = computeResultType(failableGeneratorValueType())
+					} else {
+						retType = generatorValueType()
+					}
+				} else if m.Sig().Result() != nil {
+					retType = c.resolveType(m.Sig().Result())
+				}
+				if m.Sig().CanError() && genInfo == nil {
+					retType = computeResultType(retType)
+				}
+
+				fn := c.module.NewFunc(moduleMangledName, retType, params...)
+				c.funcs[moduleMangledName] = fn
+				c.funcs[plainMangledName] = fn
+				c.moduleOwnedFuncs[moduleMangledName] = irName
+				return fn
+			}
+		}
+	}
+	return nil
 }

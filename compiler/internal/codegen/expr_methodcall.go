@@ -74,7 +74,13 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {
-		panic(fmt.Sprintf("codegen: undeclared method %s", mangledName))
+		// T1740: The method may belong to a module that hasn't been compiled yet
+		// (e.g. scan[T: Parse] in std calling T.parse when T is from a user module).
+		// Forward-declare it from moduleInfos.
+		fn = c.forwardDeclareModuleMethod(named, method, mangledName)
+		if fn == nil {
+			panic(fmt.Sprintf("codegen: undeclared method %s", mangledName))
+		}
 	}
 
 	// T1395: When a generic function dispatches a structural-interface method

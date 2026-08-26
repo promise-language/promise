@@ -1,0 +1,68 @@
+// T1740: Cross-module scan[T: Parse] — a monomorphised generic function in std
+// dispatches a factory method on a type from a later-compiled module.
+use parsemod "./parsemod";
+
+test_cross_module_scan() `test {
+  parsemod.Wrapper w = scan[parsemod.Wrapper]("hello")?!;
+  assert(w.value == "hello", msg: "scan[Wrapper] round-tripped");
+}
+
+test_cross_module_direct_parse() `test {
+  Scanner r = Scanner(s: "world");
+  parsemod.Wrapper w = parsemod.Wrapper.parse(r)?!;
+  assert(w.value == "world", msg: "direct cross-module parse");
+}
+
+test_cross_module_format() `test {
+  parsemod.Wrapper w = scan[parsemod.Wrapper]("test")?!;
+  assert("{w}" == "test", msg: "cross-module format");
+}
+
+// --- Multiple types from the same module, both conforming to Parse ---
+
+test_cross_module_scan_second_type() `test {
+  parsemod.Tag t = scan[parsemod.Tag]("color=red")?!;
+  assert(t.key == "color", msg: "Tag.key");
+  assert(t.val == "red", msg: "Tag.val");
+}
+
+test_cross_module_direct_parse_second_type() `test {
+  Scanner r = Scanner(s: "size=42");
+  parsemod.Tag t = parsemod.Tag.parse(r)?!;
+  assert(t.key == "size", msg: "direct Tag.key");
+  assert(t.val == "42", msg: "direct Tag.val");
+}
+
+test_cross_module_format_second_type() `test {
+  parsemod.Tag t = scan[parsemod.Tag]("k=v")?!;
+  assert("{t}" == "k=v", msg: "Tag round-trip format");
+}
+
+// --- Consumer-defined generic function dispatching Parse on a module type ---
+// Ensures the forward-declaration path works for generics defined outside std.
+
+parse_and_check![T: Parse](string input) T {
+  return scan[T](input)?^;
+}
+
+test_consumer_generic_dispatches_module_parse() `test {
+  parsemod.Wrapper w = parse_and_check[parsemod.Wrapper]("via-consumer")?!;
+  assert(w.value == "via-consumer", msg: "consumer generic → module Parse");
+}
+
+test_consumer_generic_dispatches_second_module_type() `test {
+  parsemod.Tag t = parse_and_check[parsemod.Tag]("x=y")?!;
+  assert(t.key == "x", msg: "consumer generic → Tag.key");
+  assert(t.val == "y", msg: "consumer generic → Tag.val");
+}
+
+// --- Parse error propagation across module boundary ---
+
+test_cross_module_parse_error() `test {
+  // Tag.parse raises when input has no '='
+  parsemod.Tag t = scan[parsemod.Tag]("no-equals")? {
+    assert(true, msg: "missing '=' should raise error");
+    return;
+  };
+  assert(false, msg: "should not reach here");
+}

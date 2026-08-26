@@ -1,0 +1,52 @@
+// parsemod: a type conforming to Parse declared in a module — regression fixture
+// for T1740 (cross-module scan[T: Parse] panicked because the module's method
+// was not yet declared when the std generic function was monomorphised).
+type Wrapper `public `doc("A string wrapper that satisfies the Parse structural interface.") {
+  string value `public `final;
+
+  parse!(Reader ~r) Self `factory `public `doc("Reads remaining bytes as the wrapper value.") {
+    u8[] buf = Vector[u8].filled(0u8, 4096);
+    string s = "";
+    while true {
+      int n = r.read(buf)?^;
+      if n == 0 {
+        break;
+      }
+      s = s + string.from_bytes(buf[:n]);
+    }
+    return Wrapper(value: s);
+  }
+
+  format!(this, Writer ~w) `public `doc("Writes the wrapper value.") {
+    w.write(this.value.bytes())?^;
+  }
+}
+
+// Second type conforming to Parse — exercises multiple forward declarations
+// from the same module during a single compilation.
+type Tag `public `doc("A key=value tag that satisfies Parse and Format.") {
+  string key `public `final;
+  string val `public `final;
+
+  parse!(Reader ~r) Self `factory `public `doc("Parses 'key=value' from the reader.") {
+    u8[] buf = Vector[u8].filled(0u8, 4096);
+    string s = "";
+    while true {
+      int n = r.read(buf)?^;
+      if n == 0 {
+        break;
+      }
+      s = s + string.from_bytes(buf[:n]);
+    }
+    if eq := s.index_of("=") {
+      return Tag(key: s[:eq], val: s[eq + 1:]);
+    }
+    raise error("missing '=' in tag");
+  }
+
+  format!(this, Writer ~w) `public `doc("Writes 'key=value'.") {
+    w.write(this.key.bytes())?^;
+    w.write("=".bytes())?^;
+    w.write(this.val.bytes())?^;
+  }
+}

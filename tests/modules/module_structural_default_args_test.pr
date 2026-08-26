@@ -4,11 +4,10 @@
 // a dispatch site emitted with a DIFFERENT unit's Info active — the cross-unit
 // lookup that codegen's paramDefaultInfos / useDeclaringInfo exist for.
 //
-// NOTE: the std `scan[T: Parse]` route cannot be exercised over a module type at
-// all — `scan[module.T]` panics ("codegen: undeclared method T.parse") whether
-// or not the concrete parse carries extra defaults. Pre-existing and unrelated
-// to defaults; tracked as T1458. The same-unit scan coverage lives in
-// tests/e2e/generic_structural_default_args_test.pr.
+// NOTE: the std `scan[T: Parse]` route was previously broken for module types
+// (T1458/T1740, fixed by forward-declaring cross-module methods). Cross-module
+// scan coverage lives in module_cross_module_parse_test.pr; the same-unit scan
+// coverage lives in tests/e2e/generic_structural_default_args_test.pr.
 use defaultsmod "./defaultsmod";
 
 // --- Through a generic function declared in the CONSUMER ---

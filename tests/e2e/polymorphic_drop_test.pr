@@ -1,0 +1,232 @@
+// T1706: Polymorphic drop through RTTI — struct field, Ref[T], Mutex[T].
+// Each container holds a base-typed value whose runtime type is a subtype
+// with extra droppable fields. Without RTTI dispatch the subtype's fields
+// leak. All tests must pass with zero leaks.
+type Payload {
+  string s;
+
+  create(string move s) Self `factory {
+    return Payload(s: move s);
+  }
+
+  drop(~this) {
+  }
+}
+
+type Iface {
+  go_(this) int `abstract;
+}
+
+type Impl is Iface {
+  Payload p;
+
+  create() Self `factory {
+    return Impl(p: Payload.create("x"));
+  }
+
+  go_(this) int {
+    return this.p.s.len;
+  }
+}
+
+make_iface() Iface {
+  return Impl.create();
+}
+
+type Box {
+  Iface v;
+
+  create(Iface move v) Self `factory {
+    return Box(v: move v);
+  }
+}
+
+// --- Struct field ---
+
+test_field() `test {
+  Box b = Box.create(make_iface());
+  assert(b.v.go_() == 1, "field");
+}
+
+// --- Ref[T] ---
+
+test_ref() `test {
+  Ref[Iface] r = Ref[Iface](make_iface());
+  assert(r.borrow.go_() == 1, "ref");
+}
+
+// --- Mutex[T] ---
+
+test_mutex() `test {
+  Mutex[Iface] m = Mutex[Iface](make_iface());
+}
+
+// --- Non-abstract base with children ---
+
+type ConcreteBase {
+  go_(this) int {
+    return 0;
+  }
+}
+
+type ConcreteChild is ConcreteBase {
+  Payload p;
+
+  create() Self `factory {
+    return ConcreteChild(p: Payload.create("y"));
+  }
+
+  go_(this) int {
+    return this.p.s.len;
+  }
+}
+
+make_concrete() ConcreteBase {
+  return ConcreteChild.create();
+}
+
+test_concrete_field() `test {
+  Box2 b = Box2.create(make_concrete());
+  assert(b.v.go_() == 1, "concrete_field");
+}
+
+type Box2 {
+  ConcreteBase v;
+
+  create(ConcreteBase move v) Self `factory {
+    return Box2(v: move v);
+  }
+}
+
+test_concrete_ref() `test {
+  Ref[ConcreteBase] r = Ref[ConcreteBase](make_concrete());
+  assert(r.borrow.go_() == 1, "concrete_ref");
+}
+
+test_concrete_mutex() `test {
+  Mutex[ConcreteBase] m = Mutex[ConcreteBase](make_concrete());
+}
+
+// --- Base with own drop, child adds extra droppable fields (partial leak) ---
+
+type DroppableBase {
+  string tag;
+
+  go_(this) int {
+    return this.tag.len;
+  }
+
+  drop(~this) {
+  }
+}
+
+type DroppableChild is DroppableBase {
+  Payload extra;
+
+  create() Self `factory {
+    return DroppableChild(tag: "ab", extra: Payload.create("cd"));
+  }
+
+  go_(this) int {
+    return this.tag.len + this.extra.s.len;
+  }
+}
+
+make_droppable() DroppableBase {
+  return DroppableChild.create();
+}
+
+test_partial_field() `test {
+  Box3 b = Box3.create(make_droppable());
+  assert(b.v.go_() == 4, "partial_field");
+}
+
+type Box3 {
+  DroppableBase v;
+
+  create(DroppableBase move v) Self `factory {
+    return Box3(v: move v);
+  }
+}
+
+test_partial_ref() `test {
+  Ref[DroppableBase] r = Ref[DroppableBase](make_droppable());
+  assert(r.borrow.go_() == 4, "partial_ref");
+}
+
+test_partial_mutex() `test {
+  Mutex[DroppableBase] m = Mutex[DroppableBase](make_droppable());
+}
+
+// --- Structural interface in Ref[T] and Mutex[T] ---
+// Before T1706, emitInnerDrop had no RTTI branch for structural types,
+// so the concrete instance was pal_free'd without dropping its fields.
+
+type Showable `structural {
+  show(this) string `abstract;
+}
+
+type Widget is Showable {
+  Payload label;
+
+  create(string move s) Self `factory {
+    return Widget(label: Payload.create(move s));
+  }
+
+  show(this) string {
+    return this.label.s;
+  }
+}
+
+test_structural_ref() `test {
+  Ref[Showable] r = Ref[Showable](Widget.create("w"));
+  assert(r.borrow.show() == "w", "structural_ref");
+}
+
+test_structural_mutex() `test {
+  Mutex[Showable] m = Mutex[Showable](Widget.create("m"));
+}
+
+// --- Base with no drop at all, child adds all droppable fields (total leak) ---
+
+type Bare {
+  act(this) int `abstract;
+}
+
+type Rich is Bare {
+  Payload data;
+
+  create() Self `factory {
+    return Rich(data: Payload.create("total"));
+  }
+
+  act(this) int {
+    return this.data.s.len;
+  }
+}
+
+make_bare() Bare {
+  return Rich.create();
+}
+
+test_nodrop_base_field() `test {
+  Box4 b = Box4.create(make_bare());
+  assert(b.v.act() == 5, "nodrop_field");
+}
+
+type Box4 {
+  Bare v;
+
+  create(Bare move v) Self `factory {
+    return Box4(v: move v);
+  }
+}
+
+test_nodrop_base_ref() `test {
+  Ref[Bare] r = Ref[Bare](make_bare());
+  assert(r.borrow.act() == 5, "nodrop_ref");
+}
+
+test_nodrop_base_mutex() `test {
+  Mutex[Bare] m = Mutex[Bare](make_bare());
+}

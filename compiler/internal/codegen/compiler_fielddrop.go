@@ -136,13 +136,15 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 			continue
 		}
 
-		// T0460: Structural interface field (non-value-type). The LLVM slot
-		// holds the value struct {i8* vtable, i8* instance}; load it, extract
-		// the instance pointer, and dispatch through __promise_structural_drop
-		// which reads typeinfo.drop_fn_ptr via RTTI and calls it (or pal_free
-		// if no drop is defined). The concrete drop type is unknown at compile
-		// time, so RTTI dispatch is required.
-		if fieldNamed.IsStructural() && !fieldNamed.IsValueType() {
+		// T0460/T1706: Structural interface or polymorphic heap type field
+		// (non-value-type). The LLVM slot holds the value struct {i8* vtable,
+		// i8* instance}; load it, extract the instance pointer, and dispatch
+		// through __promise_structural_drop which reads typeinfo.drop_fn_ptr
+		// via RTTI and calls it (or pal_free if no drop is defined). The
+		// concrete drop type is unknown at compile time, so RTTI dispatch is
+		// required — both for structural interfaces and for concrete bases
+		// with children (the runtime type may be a subtype with extra fields).
+		if c.needsRttiDrop(fieldNamed) {
 			fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
 			if !ok {
 				continue

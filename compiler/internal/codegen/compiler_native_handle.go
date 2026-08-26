@@ -518,6 +518,30 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 			blk = c.block
 			c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
 		}
+	case named != nil && c.needsRttiDrop(named):
+		// T1706: Polymorphic type (structural interface or concrete base with
+		// children) — dispatch drop through RTTI so subtype fields are reached.
+		// Same pattern as scope-exit drops and enum variant field drops.
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
+		valStruct := blk.NewLoad(userValueType(), valField)
+		instancePtr := blk.NewExtractValue(valStruct, 1)
+		// Null guard: a moved-out slot is zero-initialized.
+		nullCheck := blk.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+		// Save/restore c.fn BEFORE c.newBlock — newBlock appends to c.fn,
+		// and c.fn may point at the caller's function (e.g. test_ref) while
+		// blk belongs to the Ref/Mutex drop function being defined.
+		savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+		c.fn = blk.Parent
+		c.entryBlock = blk.Parent.Blocks[0]
+		rttiDropBlk := c.newBlock("inner.rtti.drop")
+		contBlk := c.newBlock("inner.rtti.cont")
+		blk.NewCondBr(nullCheck, contBlk, rttiDropBlk)
+		c.block = rttiDropBlk
+		c.emitStructuralInstanceDrop(instancePtr)
+		c.block.NewBr(contBlk)
+		blk = contBlk
+		c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
 	case named != nil && (named.HasDrop() || named.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		valField := blk.NewGetElementPtr(structTy, typedPtr,

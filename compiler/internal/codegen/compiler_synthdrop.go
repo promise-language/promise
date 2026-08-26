@@ -1249,7 +1249,7 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		// Container is Shape) are reached. The static-type drop walk would only
 		// see Shape's fields (or none), missing Container's string. Symmetric
 		// with the polymorphic clone dispatch in dupHeapValue.
-		if c.needsVtable(named) && !named.IsStructural() && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) {
+		if c.needsRttiDrop(named) && !named.IsStructural() {
 			instance := c.extractInstancePtr(fieldVal)
 			// T0633: a moved-out polymorphic wrapper slot is zero-init'd;
 			// emitStructuralInstanceDrop dereferences instance via

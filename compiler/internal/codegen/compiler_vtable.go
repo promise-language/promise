@@ -54,6 +54,18 @@ func (c *Compiler) needsVtable(named *types.Named) bool {
 	return (c.hasChildren[named] || named.IsAbstract()) && !named.IsValueType()
 }
 
+// needsRttiDrop reports whether dropping a value of this static type must
+// dispatch through RTTI (typeinfo.drop_fn_ptr) because the runtime type
+// may differ. True for structural interfaces and polymorphic heap types
+// (types with children or abstract). Excludes value types, copy types,
+// and primitive scalars (none of which have runtime type identity).
+func (c *Compiler) needsRttiDrop(named *types.Named) bool {
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) {
+		return false
+	}
+	return named.IsStructural() || c.needsVtable(named)
+}
+
 // isNativeTypeDecl checks if a type declaration has the `native annotation.
 func isNativeTypeDecl(td *ast.TypeDecl) bool {
 	for _, ann := range td.Annotations {

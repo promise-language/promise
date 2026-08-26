@@ -351,11 +351,16 @@ func methodSlotKey(m *Method) string {
 	return m.name
 }
 
-// AllVirtualMethods returns an ordered, deduplicated list of all non-native methods
-// across the inheritance hierarchy. Parent methods come first (depth-first, left-to-right),
-// then own methods. Each method slot key appears exactly once at its first-introduced position.
-// A getter and setter with the same name occupy separate slots.
-// Used for vtable slot assignment.
+// AllVirtualMethods returns an ordered, deduplicated list of all virtually
+// dispatchable methods across the inheritance hierarchy. Parent methods come first
+// (depth-first, left-to-right), then own methods. Each method slot key appears
+// exactly once at its first-introduced position. A getter and setter with the same
+// name occupy separate slots. Used for vtable slot assignment.
+//
+// Excluded, because nothing can dispatch through their slot: native methods,
+// generic methods, and receiver-less members (`factory / `global / `mono), which
+// are static calls on the type name with no instance to load a vtable from
+// (T1749).
 func (n *Named) AllVirtualMethods() []*Method {
 	seen := make(map[string]bool)
 	var result []*Method
@@ -374,6 +379,9 @@ func (n *Named) AllVirtualMethods() []*Method {
 		}
 		if len(m.Sig().TypeParams()) > 0 {
 			continue // generic methods cannot be virtual — direct dispatch only
+		}
+		if m.Sig().Recv() == nil {
+			continue // T1749: `factory / `global members have no receiver — static dispatch only
 		}
 		key := methodSlotKey(m)
 		if !seen[key] {

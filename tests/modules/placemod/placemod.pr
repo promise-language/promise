@@ -1,0 +1,42 @@
+// T1749: receiver-less members (`factory / `global) on a MODULE-owned parent
+// type. The motivating shape is a read-only base plus a privileged subtype whose
+// entry point is a factory on the base (the `os.ProcessInfo` / `os.Process` split
+// decided for T1529), which is a catalog module — so the module-owned declare and
+// define path needs its own coverage, not just the single-file one.
+//
+// Module compilation splits functions into a per-module .bc by moduleOwnedFuncs
+// and emits each type's vtable global twice (once before compileModules, again
+// inside it). A receiver-less member holds no vtable slot, so this pins that the
+// module path agrees with the main path about the slot layout.
+type Sensor `public `doc("A read-only base. Has a subtype, so it needs a vtable.") {
+  int id;
+
+  open(int id) Self `factory `public `doc("Receiver-less constructor on a type that has a subtype.") {
+    return Sensor(id: id);
+  }
+
+  find(int id) Self? `factory `public `doc("Receiver-less constructor with an optional result.") {
+    if id < 0 {
+      return none;
+    }
+    return Sensor(id: id);
+  }
+
+  origin() string `global `public `doc("Receiver-less method — inherited by the subtype.") {
+    return "place" + "mod";
+  }
+
+  get vendor string `global `public `doc("Receiver-less getter handing back an owned heap string.") => "ven" + "dor";
+
+  describe(this) string `public `doc("A virtual instance method, overridden by the subtype.") {
+    return "sensor";
+  }
+}
+
+type Probe is Sensor `public `doc("The privileged subtype. Its existence is what makes Sensor need a vtable.") {
+  int depth;
+
+  describe(this) string `public `doc("Overrides the parent's virtual method.") {
+    return "probe";
+  }
+}

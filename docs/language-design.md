@@ -406,6 +406,8 @@ type Vec2 {
 
 Supported operator method names: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`. Unary operators use the same symbol with no parameters (e.g. `-() int` for negation). Both unary and binary forms can coexist on the same type — the compiler disambiguates by argument count.
 
+An operator is always an **instance** method: the left operand is its receiver, and no call-site syntax omits it. The receiver-less placements — `` `factory ``, `` `global ``, `` `mono `` (see Sections 5.7 and 9.2) — are therefore rejected on an operator method, since `a + b` would silently discard `a`. Operands are also borrowed read-only: a value-result operator may not take a `move` or a `Type~` mutable-borrow parameter, because `a + b` has no syntax for either, so consuming or mutating an operand would be a hidden effect. (The index/slice setters `[]=` and `[:]=` are the one exception on `move`: they are dispatched from `lhs[i] = rhs`, an assignment that genuinely moves the right-hand side.)
+
 #### Operator Precedence
 
 Operator precedence is fixed by the language and cannot be overridden by user-defined types. From highest to lowest:
@@ -529,7 +531,9 @@ A **view** is the perspective through which a value is accessed via a particular
 
 #### 5.2.1 Vtable Dispatch Model
 
-The vtable pointer in the value struct is the **sole mechanism** for field access and method dispatch. Every field produces a getter and setter slot in the vtable. Every method produces a method slot. The call site accesses fields and calls methods exclusively through the vtable — it never directly reads memory from the instance or value struct.
+The vtable pointer in the value struct is the **sole mechanism** for field access and method dispatch. Every field produces a getter and setter slot in the vtable. Every **instance** method — one that takes a receiver — produces a method slot. The call site accesses fields and calls instance methods exclusively through the vtable — it never directly reads memory from the instance or value struct.
+
+A receiver-less member (`` `factory ``, `` `global ``, `` `mono `` — see Sections 5.7 and 9.2) has **no** slot. It is a static call on the type name, so there is no value at the call site to read a vtable pointer from; it resolves at compile time to the type that declares it.
 
 **Vtable structure for a type:**
 

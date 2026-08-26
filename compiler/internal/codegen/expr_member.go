@@ -429,18 +429,10 @@ func (c *Compiler) memberReceiver(fallback func() value.Value) value.Value {
 }
 
 func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named *types.Named, getter *types.Method) value.Value {
-	// Global getter: no receiver, just call the function directly.
-	if getter.Sig().Recv() == nil {
-		mangledName := mangleMethodName(c.resolveTypeName(targetType), e.Field, false)
-		fn, ok := c.funcs[mangledName]
-		if !ok {
-			panic(fmt.Sprintf("codegen: undeclared global getter %s", mangledName))
-		}
-		return c.block.NewCall(fn)
-	}
-
-	// Virtual dispatch for getter when static type needs vtable
-	if c.needsVtable(named) && !getter.IsNative() {
+	// Virtual dispatch for getter when static type needs vtable. A `global getter
+	// has no receiver — it is a static call on the type name, with no instance to
+	// load a vtable pointer from — so it always dispatches directly (T1749).
+	if c.needsVtable(named) && !getter.IsNative() && getter.Sig().Recv() != nil {
 		return c.genVirtualGetterCall(e, named, getter, targetType)
 	}
 
@@ -466,6 +458,13 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	fn, ok := c.funcs[mangledName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))
+	}
+
+	if getter.Sig().Recv() == nil {
+		// `global getter: no receiver argument (T1749).
+		result := c.block.NewCall(fn)
+		c.trackGetterResult(e, getter, targetType, result)
+		return result
 	}
 
 	var args []value.Value

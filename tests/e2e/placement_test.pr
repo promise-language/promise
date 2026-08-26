@@ -113,6 +113,12 @@ type Knob {
   set value(int v) `global {
     assert(v == 42, "global setter received correct value");
   }
+
+  // T1749: an owned heap result from a receiver-less getter. Knob has no
+  // subtype, so this is the direct path — the call site did not track the
+  // result as a temp there either, which leaked it independently of any
+  // vtable question.
+  get name string `global => "kn" + "ob";
 }
 
 test_global_getter() `test {
@@ -122,4 +128,346 @@ test_global_getter() `test {
 
 test_global_setter() `test {
   Knob.value = 42;
+}
+
+test_global_getter_heap_result() `test {
+  assert(Knob.name == "knob", "global getter returning an owned heap string");
+}
+
+// --- T1749: receiver-less members on a type that HAS SUBTYPES ---
+//
+// `needsVtable(named)` is true as soon as a type has children (or is abstract),
+// which used to route every non-native member call down the virtual-dispatch
+// path. A `factory / `global / `mono member has no receiver — it is a static
+// call on the type name, with no instance to load a vtable pointer from — so
+// virtual dispatch is impossible there and codegen panicked with
+// `undefined variable "Base"` while trying to evaluate the type name as a
+// receiver variable. Receiver-less members are now excluded from the vtable
+// (AllVirtualMethods) and always dispatch directly.
+//
+// Everything below therefore declares a subtype: without one, the calls take
+// the direct path anyway and prove nothing.
+//
+// Note what is deliberately NOT asserted: calling a `factory or `mono member
+// THROUGH the subtype (`Kid.make(...)`). §5.7 of docs/language-design.md says
+// those are not inherited — `Self` binds to the declaring type, so `Kid.make`
+// would name Kid while producing a Base — and rejecting it is T1753. Only the
+// `global members, which the same section says ARE inherited, are exercised
+// through `Kid` below.
+
+// A droppable heap type, so a `global getter handing one back has a cleanup
+// obligation the leak gate can see.
+type Cell {
+  int id;
+
+  drop(~this) {
+  }
+}
+
+type Base {
+  int x;
+
+  make(int v) Self `factory {
+    return Base(x: v);
+  }
+
+  maybe(int v) Self? `factory {
+    if v < 0 {
+      return none;
+    }
+    return Base(x: v);
+  }
+
+  checked!(int v) Self `factory {
+    if v < 0 {
+      raise error(message: "negative");
+    }
+    return Base(x: v);
+  }
+
+  named() string `global {
+    return "base" + "-global";
+  }
+
+  get tag string `global => "tag" + "-value";
+
+  set tag(string v) `global {
+    assert(v.len == 3, "global setter on a parent received the value");
+  }
+
+  // A `global getter whose result is an owned heap VECTOR, not a string — a
+  // separate arm of trackGetterResultByType.
+  get items int[] `global => [1, 2, 3].clone();
+
+  // ...an owned heap INSTANCE with a drop, and an owned closure whose captured
+  // env must be freed. Together with `tag` (string) and `items` (vector) these
+  // are the four result kinds a receiver-less getter can hand back that the
+  // call site owns, and each is a separate arm of trackGetterResult.
+  get slot Cell `global => Cell(id: 1);
+
+  get adder(int) -> int `global {
+    n := 5;
+    return move |int a| -> a + n;
+  }
+
+  // A failable `global setter, so the receiver-less path is exercised together
+  // with propagateIfFailable (T0708) on a type that needs a vtable.
+  get gate int `global {
+    return 0;
+  }
+
+  set gate!(int v) `global {
+    if v < 0 {
+      raise error(message: "negative");
+    }
+  }
+
+  // A virtual instance member sharing the type with the receiver-less ones, so
+  // the vtable slot indices are exercised after the receiver-less members were
+  // removed from AllVirtualMethods.
+  greet(this) string {
+    return "base";
+  }
+
+  get width int => 1;
+}
+
+type Kid is Base {
+  int y;
+
+  greet(this) string {
+    return "kid";
+  }
+
+  get width int => 2;
+}
+
+test_t1749_factory_on_parent() `test {
+  b := Base.make(7);
+  assert(b.x == 7, "factory on a type that has a subtype");
+  // Discarded rather than bound: the factory allocates a heap instance nobody
+  // names, so the leak gate is what checks the call site cleans it up.
+  assert(Base.make(9).x == 9, "discarded factory result is freed, not leaked");
+}
+
+test_t1749_optional_factory_on_parent() `test {
+  some := Base.maybe(3);
+  assert(some is present, "optional factory on a parent, present");
+  no := Base.maybe(-1);
+  assert(no is absent, "optional factory on a parent, absent");
+}
+
+test_t1749_failable_factory_on_parent() `test {
+  b := Base.checked(3)?!;
+  assert(b.x == 3, "failable factory on a parent");
+  raised := false;
+  Base.checked(-1)? {
+    raised = true;
+  };
+  assert(raised, "failable factory on a parent raises");
+}
+
+test_t1749_global_method_on_parent() `test {
+  assert(Base.named() == "base-global", "global method on a parent");
+  assert(Kid.named() == "base-global", "global method through the child type name");
+}
+
+test_t1749_global_getter_on_parent() `test {
+  // Heap (non-literal) string so the leak gate is live: the result is an owned
+  // value the call site must free.
+  assert(Base.tag == "tag-value", "global getter on a parent");
+  assert(Base.tag.len == 9, "global getter result in chain position");
+  assert(Kid.tag == "tag-value", "global getter through the child type name");
+}
+
+test_t1749_global_setter_on_parent() `test {
+  Base.tag = "abc";
+}
+
+test_t1749_global_setter_through_child() `test {
+  // The setter's mangled name must resolve to the OWNER (Base), not to the type
+  // name written at the call site: `global members ARE inherited (§5.7), so
+  // writing through the child used to look up an undeclared `Kid.tag$set`.
+  Kid.tag = "abc";
+}
+
+test_t1749_global_getter_returning_vector() `test {
+  // An owned heap vector handed back by a receiver-less getter — the call site
+  // must free it, so the leak gate is what this asserts.
+  assert(Base.items.len == 3, "global getter returning a vector");
+  assert(Base.items[1] == 2, "global vector getter element");
+  assert(Kid.items.len == 3, "global vector getter through the child type name");
+}
+
+test_t1749_global_getter_returning_droppable() `test {
+  // Bound, then discarded — the discarded form is the one that leaked, since
+  // binding registers a drop for the variable either way.
+  held := Base.slot;
+  assert(held.id == 1, "global getter returning a droppable instance");
+  assert(Base.slot.id == 1, "discarded droppable result is dropped, not leaked");
+}
+
+test_t1749_global_getter_returning_closure() `test {
+  f := Base.adder;
+  assert(f(1) == 6, "global getter returning a capturing closure");
+  assert(Base.adder(1) == 6, "discarded closure env is freed, not leaked");
+}
+
+test_t1749_failable_global_setter_on_parent() `test {
+  assert(try_gate(5)?!, "failable global setter on a parent");
+  raised := false;
+  try_gate(-1)? {
+    raised = true;
+  };
+  assert(raised, "failable global setter propagates the raise");
+}
+
+try_gate!(int v) bool {
+  Base.gate = v;
+  return true;
+}
+
+test_t1749_virtual_dispatch_still_correct() `test {
+  // Guards the vtable-slot renumbering: `greet` and `width` must still resolve
+  // to the child's overrides now that the receiver-less members hold no slots.
+  Base b = Kid(x: 1, y: 2);
+  assert(b.greet() == "kid", "virtual method dispatch after slot renumbering");
+  assert(b.width == 2, "virtual getter dispatch after slot renumbering");
+}
+
+// --- T1749: receiver-less members on an ABSTRACT parent ---
+// `needsVtable` is also true for an abstract type, independent of children.
+
+type AbstractBase {
+  int x;
+
+  build(int v) Self `factory {
+    return Leaf(x: v);
+  }
+
+  describe(this) string `abstract;
+}
+
+type Leaf is AbstractBase {
+  describe(this) string {
+    return "leaf";
+  }
+}
+
+test_t1749_factory_on_abstract_parent() `test {
+  a := AbstractBase.build(4);
+  assert(a.x == 4, "factory on an abstract parent");
+  assert(a.describe() == "leaf", "virtual dispatch on the factory result");
+}
+
+// --- T1749: receiver-less members on a GENERIC parent ---
+
+type Gen[T] {
+  T value;
+
+  wrap(T move v) Self `factory {
+    return Gen[T](value: move v);
+  }
+
+  fresh(T move v) Self `mono {
+    return Gen[T](value: move v);
+  }
+
+  label(this) string {
+    return "gen";
+  }
+}
+
+type GenKid is Gen[int] {
+  int extra;
+
+  label(this) string {
+    return "gen-kid";
+  }
+}
+
+test_t1749_generic_factory_with_child() `test {
+  g := Gen[int].wrap(5);
+  assert(g.value == 5, "factory on a generic type that has a subtype");
+}
+
+test_t1749_mono_with_child() `test {
+  m := Gen[int].fresh(6);
+  assert(m.value == 6, "mono method on a generic type that has a subtype");
+}
+
+test_t1749_generic_virtual_dispatch_still_correct() `test {
+  Gen[int] g = GenKid(value: 1, extra: 2);
+  assert(g.label() == "gen-kid", "generic virtual dispatch after slot renumbering");
+}
+
+// --- T1749: `global on a structural interface with implementors ---
+
+type Marker `structural {
+  helper() string `global {
+    return "marker" + "-helper";
+  }
+
+  get sig string `global => "marker" + "-sig";
+
+  poke(this) string `abstract;
+}
+
+type Marked is Marker {
+  int n;
+
+  poke(this) string {
+    return "marked";
+  }
+}
+
+test_t1749_global_on_structural_interface() `test {
+  assert(Marker.helper() == "marker-helper", "global method on a structural interface");
+  assert(Marked.helper() == "marker-helper", "global method through an implementor");
+  assert(Marker.sig == "marker-sig", "global getter on a structural interface");
+  assert(Marked.sig == "marker-sig", "global getter through an implementor");
+}
+
+// --- T1749: abstract `factory on a structural interface, concrete has a subtype ---
+// The generic-factory pattern of §5.4: `T.parse(data)` is monomorphized to a
+// direct call, and the interface's abstract factory no longer holds a view-vtable
+// slot ahead of the real virtual methods.
+
+type Parseable `structural {
+  parse(string data) `abstract `factory;
+  render(this) string `abstract;
+}
+
+type Json {
+  string raw;
+
+  parse(string data) Json `factory {
+    return Json(raw: data + "");
+  }
+
+  render(this) string {
+    return "json:" + this.raw;
+  }
+}
+
+type PrettyJson is Json {
+  int indent;
+
+  render(this) string {
+    return "pretty:" + this.raw;
+  }
+}
+
+load[T: Parseable](string data) T {
+  return T.parse(data);
+}
+
+test_t1749_abstract_factory_with_subtype() `test {
+  Json j = load[Json]("hi");
+  assert(j.raw == "hi", "generic abstract factory on a type that has a subtype");
+  assert(j.render() == "json:hi", "virtual dispatch on the factory result");
+  Json p = PrettyJson(raw: "yo", indent: 2);
+  assert(p.render() == "pretty:yo", "child override dispatches through the parent slot");
+  Parseable v = PrettyJson(raw: "vw", indent: 1);
+  assert(v.render() == "pretty:vw", "view-vtable dispatch past the interface's abstract factory");
 }

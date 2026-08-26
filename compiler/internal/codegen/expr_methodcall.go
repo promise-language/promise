@@ -62,7 +62,10 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 
 	// Virtual dispatch: if the static type needs vtable and the method is not native,
 	// emit an indirect call through the vtable so the correct override is called.
-	if c.needsVtable(named) && !method.IsNative() {
+	// A receiver-less method (`factory`/`global`) is a static call on the type name:
+	// there is no instance to load a vtable pointer from, so it can never dispatch
+	// virtually. Mirrors the `global getter path in genGetterCall (T1749).
+	if c.needsVtable(named) && !method.IsNative() && method.Sig().Recv() != nil {
 		return c.genVirtualMethodCall(e, member, named, method, targetType)
 	}
 

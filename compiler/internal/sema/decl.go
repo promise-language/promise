@@ -854,6 +854,18 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	if isGlobal && isMono {
 		c.errorf(md.Pos(), "`global and `mono are mutually exclusive on %s.%s", typeName, md.Name)
 	}
+	// T1749: an operator's left operand is its receiver, so no receiver-less
+	// placement can carry one.
+	metaName := ""
+	switch {
+	case isMono:
+		metaName = "mono"
+	case isFactory:
+		metaName = "factory"
+	case isGlobal:
+		metaName = "global"
+	}
+	c.validateOperatorPlacement(md, typeName, metaName)
 
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, abstract, native)
 	m.SetGetter(md.IsGetter)
@@ -900,6 +912,25 @@ func isOperatorMethodName(name string) bool {
 // these symbol-named bracket operators.)
 func isSetterOperatorName(name string) bool {
 	return name == "[]=" || name == "[:]="
+}
+
+// validateOperatorPlacement rejects a receiver-less placement (`factory, `global,
+// `mono) on an operator method (T1749). metaName is the placement's annotation
+// name, or "" for an ordinary instance method (nothing to reject).
+//
+// An operator is dispatched from `a OP b` (or `-a`, or `lhs[i] = rhs`),
+// where the LEFT operand IS the receiver — no call-site syntax omits it — so a
+// receiver-less operator would silently discard that operand. Same class of hidden
+// effect validateOperatorParams rejects for consuming/mut-ref operands. It is also
+// undispatchable: a receiver-less member holds no vtable slot (Named.
+// AllVirtualMethods), so once the type gains a subtype the virtual-dispatch path
+// has nothing to dispatch through.
+func (c *Checker) validateOperatorPlacement(md *ast.MethodDecl, typeName, metaName string) {
+	if metaName == "" || !isOperatorMethodName(md.Name) {
+		return
+	}
+	c.errorf(md.Pos(), "operator method %s.%s cannot be `%s; an operator's left operand is its receiver, and `%s methods take no receiver — 'a %s b' would silently discard 'a'. Drop the `%s (use an instance operator), or expose the operation as a named `%s method.",
+		typeName, md.Name, metaName, metaName, md.Name, metaName, metaName)
 }
 
 // validateOperatorParams rejects operand-borrow modes on operator methods that
@@ -1229,6 +1260,10 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 	isFactory := c.hasAnnotation(md.Annotations, "factory")
 	if isFactory {
 		placement = types.PlaceType
+		// T1749: parity with the Named path. `global / `mono are already rejected
+		// on every enum method above, so `factory is the only receiver-less
+		// placement an enum operator can carry.
+		c.validateOperatorPlacement(md, enumName, "factory")
 	}
 
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, false, false)

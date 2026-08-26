@@ -1,0 +1,46 @@
+// T1749: calling a receiver-less member (`factory / `global) on a MODULE-owned
+// type that has a subtype. Codegen used to route the call through the vtable —
+// `needsVtable` is true as soon as a type has children — and then panicked
+// trying to evaluate the type name as a receiver variable.
+//
+// The single-file coverage is tests/e2e/placement_test.pr. This file covers the
+// module path specifically, because that is the shape the feature is wanted for:
+// a read-only base plus a privileged subtype, in a catalog module (the
+// `os.ProcessInfo` / `os.Process` split decided for T1529). Module compilation
+// declares and defines these members under `compilingModule`, splits them into a
+// per-module .bc, and emits the vtable globals on a different schedule than the
+// main path — so agreement about which members hold slots has to hold there too.
+use placemod "./placemod";
+
+test_module_factory_on_parent() `test {
+  s := placemod.Sensor.open(7);
+  assert(s.id == 7, "factory on a module type that has a subtype");
+  // Discarded rather than bound — the leak gate checks the call site frees the
+  // instance the factory allocated.
+  assert(placemod.Sensor.open(9).id == 9, "discarded module factory result is freed");
+}
+
+test_module_optional_factory_on_parent() `test {
+  found := placemod.Sensor.find(3);
+  assert(found is present, "optional factory on a module parent, present");
+  missing := placemod.Sensor.find(-1);
+  assert(missing is absent, "optional factory on a module parent, absent");
+}
+
+test_module_global_method_on_parent() `test {
+  assert(placemod.Sensor.origin() == "placemod", "global method on a module parent");
+  assert(placemod.Probe.origin() == "placemod", "global method through the module child");
+}
+
+test_module_global_getter_on_parent() `test {
+  // Heap result, so the leak gate is live on the module-owned getter too.
+  assert(placemod.Sensor.vendor == "vendor", "global getter on a module parent");
+  assert(placemod.Probe.vendor == "vendor", "global getter through the module child");
+}
+
+test_module_virtual_dispatch_still_correct() `test {
+  // Receiver-less members hold no vtable slot, so `describe` must still resolve
+  // to the child's override through the parent's static type.
+  placemod.Sensor s = placemod.Probe(id: 1, depth: 2);
+  assert(s.describe() == "probe", "module virtual dispatch after slot renumbering");
+}

@@ -1683,21 +1683,10 @@ func (c *Compiler) emitFieldCompoundReadModifyWrite(target *ast.MemberExpr, targ
 // genSetterCall emits a call to a setter method.
 // Uses virtual dispatch through the vtable when the static type needs it.
 func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, named *types.Named, setter *types.Method, val value.Value) {
-	// Global setter (T0703): no receiver, just call the function directly with the value.
-	// Mirrors the `global getter path in genGetterCall.
-	if setter.Sig().Recv() == nil {
-		mangledName := mangleMethodName(c.resolveTypeName(targetType), target.Field, true)
-		fn, ok := c.funcs[mangledName]
-		if !ok {
-			panic(fmt.Sprintf("codegen: undeclared global setter %s", mangledName))
-		}
-		call := c.block.NewCall(fn, val)
-		c.propagateIfFailable(call) // T0708
-		return
-	}
-
-	// Virtual dispatch for setter when static type needs vtable
-	if c.needsVtable(named) && !setter.IsNative() {
+	// Virtual dispatch for setter when static type needs vtable. A `global setter
+	// (T0703) has no receiver — a static call on the type name — so it always
+	// dispatches directly (T1749).
+	if c.needsVtable(named) && !setter.IsNative() && setter.Sig().Recv() != nil {
 		c.genVirtualSetterCall(target, named, setter, val)
 		return
 	}
@@ -1725,6 +1714,13 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	fn, ok := c.funcs[mangledName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared setter %s", mangledName))
+	}
+
+	if setter.Sig().Recv() == nil {
+		// `global setter: no receiver argument (T0703/T1749).
+		call := c.block.NewCall(fn, val)
+		c.propagateIfFailable(call) // T0708
+		return
 	}
 
 	var args []value.Value

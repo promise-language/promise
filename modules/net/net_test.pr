@@ -1436,15 +1436,35 @@ test_connect_deadline_already_past_repeated() `test(exclude: wasm, timeout: "30s
 // opened a PollDesc for, and the errno has to survive to the caller instead of
 // being flattened into a timeout.
 //
-// Port 0 is the portable way there — it is not a connectable port on any target
-// (EADDRNOTAVAIL on macOS, ECONNREFUSED on Linux, WSAEADDRNOTAVAIL on Windows),
-// so the assertion is on the *shape* of the error, not on a particular errno.
+// Which destination a kernel refuses on the call itself is per-platform policy,
+// not an invariant, so this test probes for one instead of assuming (T1745):
+// macOS and Windows reject 127.0.0.1:0 outright, while Linux accepts it into
+// EINPROGRESS and only surfaces the refusal through SO_ERROR. Both shapes are
+// correct, and each has its own invariant: a rejection connect(2) itself
+// reports must never be flattened into a timeout, while a rejection that only
+// reaches the caller through the reactor legitimately loses to a deadline that
+// expired before readiness was ever consulted. The reactor shape's own
+// no-timeout invariant — a refusal arriving through SO_ERROR while a deadline
+// is armed but unexpired — is test_connect_refusal_under_an_unexpired_deadline
+// below, since this test cannot reach that branch on a kernel that rejects
+// synchronously.
 test_connect_rejected_before_the_reactor() `test(exclude: wasm, timeout: "20s") {
+  string host = "127.0.0.1";
+  int port = 0;
+  bool synchronous = false;
+  int probed = 0;
+  if target := _synchronous_reject_target() {
+    host = target.host;
+    port = target.port;
+    probed = 0 - target.rc;
+    synchronous = true;
+  }
+
   bool raised = false;
   bool was_resolve_error = false;
   bool timeout_or_cancelled = false;
   int code = 0;
-  TcpStream.connect("127.0.0.1", 0)? e is NetError {
+  TcpStream.connect(host, port)? e is NetError {
     raised = true;
     was_resolve_error = e is ResolveError;
     timeout_or_cancelled = e.is_timeout || e.is_cancelled;
@@ -1452,15 +1472,185 @@ test_connect_rejected_before_the_reactor() `test(exclude: wasm, timeout: "20s") 
   } else e {
     assert(false, "a rejected connect must fail as a NetError, not '{e.message}'");
   };
-  assert(raised, "connecting to port 0 must fail");
+  assert(raised, "connecting to {host}:{port} must fail");
   assert(!was_resolve_error, "an IPv4 literal always resolves; the failure comes from connect()");
-  assert(!timeout_or_cancelled, "a synchronous rejection is neither a timeout nor a cancellation");
+  assert(!timeout_or_cancelled, "a rejection with no deadline is neither a timeout nor a cancellation");
   assert(code > 0, "and carries the socket errno");
+  if synchronous {
+    // The probe reaches connect(2) through inet_pton and this call reaches it
+    // through getaddrinfo; asserting the *same* errno rather than merely "an
+    // errno" is what checks that claim, and it is what makes the branch
+    // selection above trustworthy — a probe that silently disagreed with
+    // connect() would pick the wrong shape and assert the wrong invariant.
+    assert(code == probed, "the errno connect() reports is the one the probe saw ({probed})");
+  }
 
-  // The same call with a deadline already in the past: the socket-level error
-  // still wins, because connect(2) fails before anything can be parked.
-  assert(_connect_outcome_host("127.0.0.1", 0, Instant.now() - Duration.from_secs(1)) == -1,
-  "a rejected connect is reported as a socket error, not as a timeout");
+  // The same call with a deadline already in the past. Where connect(2) rejects
+  // it outright the socket-level error still wins, because the failure happens
+  // before anything can be parked; where the refusal only arrives through the
+  // reactor, the expired deadline is what ends the park and a timeout is right.
+  int past = _connect_outcome_host(host, port, Instant.now() - Duration.from_secs(1));
+  if synchronous {
+    assert(past == -1, "a rejected connect is reported as a socket error, not as a timeout");
+  } else {
+    assert(past == _wake_timeout(),
+    "a connect that only fails via the reactor reports the expired deadline");
+  }
+}
+
+// The synchronous-rejection branch is the only place in connect() that closes a
+// socket it never opened a PollDesc for, and — reached once — a missing close
+// there is invisible. Reached in a loop it is not: the leak detector accounts
+// for the _AddrList that is live when the raise unwinds and for the error the
+// raise allocates, and a leaked fd eventually makes _net_socket_create fail,
+// which surfaces as a different errno rather than as a slow drain. Asserting
+// the errno every round rather than only at the end is what distinguishes the
+// two: a branch that starts reporting something else partway through names the
+// round it changed on.
+//
+// 100 rounds is affordable here where test_connect_failure_repeated_no_leak
+// deliberately loops only 5 times (T1727): that test refuses a *loopback*
+// connection, which costs Windows ~2s per address, while every destination this
+// one can select is refused by the call itself with no packet sent.
+test_connect_rejected_before_the_reactor_repeated() `test(exclude: wasm, timeout: "30s") {
+  if target := _synchronous_reject_target() {
+    int expected = 0 - target.rc;
+    int i = 0;
+    while i < 100 {
+      bool raised = false;
+      int code = 0;
+      TcpStream.connect(target.host, target.port)? e is NetError {
+        raised = true;
+        code = e.code;
+      } else e {
+        assert(false, "round {i}: a rejected connect must fail as a NetError, not '{e.message}'");
+      };
+      assert(raised, "round {i}: connecting to {target.host}:{target.port} must fail");
+      assert(code == expected, "round {i}: the socket errno is stable, got {code} not {expected}");
+      i = i + 1;
+    }
+  }
+}
+
+// The reactor shape's half of the no-flattening invariant, which the test above
+// cannot reach on a kernel that rejects synchronously. Here connect(2) returns
+// EINPROGRESS, the goroutine parks, the refusal arrives as readiness, and the
+// errno is read back out of SO_ERROR — so the error crosses the one place in
+// connect() that turns a park wake reason into a raise, with a deadline armed
+// the whole time. A deadline consulted after the park regardless of why the
+// park ended, or a _wake_error reached on the readiness path, would report
+// is_timeout for a connection that was refused. The deadline is 30s out and the
+// refusal is immediate, so it can never legitimately expire.
+//
+// Port 1 is reserved, but a runner that somehow has a listener there would
+// connect successfully; only assert when the connection actually failed, the
+// same guard test_stream_connect_refused and
+// test_connect_by_name_all_addresses_refused use.
+test_connect_refusal_under_an_unexpired_deadline() `test(exclude: wasm, timeout: "20s") {
+  bool raised = false;
+  bool was_resolve_error = false;
+  bool timeout_or_cancelled = false;
+  int code = 0;
+  TcpStream.connect("127.0.0.1", 1, Instant.now() + Duration.from_secs(30))? e is NetError {
+    raised = true;
+    was_resolve_error = e is ResolveError;
+    timeout_or_cancelled = e.is_timeout || e.is_cancelled;
+    code = e.code;
+  } else e {
+    assert(false, "a refused connect must fail as a NetError, not '{e.message}'");
+  };
+  if raised {
+    assert(!was_resolve_error, "an IPv4 literal always resolves; the failure comes from connect()");
+    assert(!timeout_or_cancelled,
+    "a refusal under a deadline that has not expired is neither a timeout nor a cancellation");
+    assert(code > 0, "and carries the socket errno");
+  }
+}
+
+// The other half of the deadline comparison, and the branch
+// test_connect_rejected_before_the_reactor's else arm encodes — which never
+// runs on a kernel that has a synchronous target to select, so the shape would
+// otherwise be asserted nowhere (T1745). A destination the kernel accepts into
+// EINPROGRESS and only refuses later cannot report that refusal once the
+// deadline has already passed: _park_ready sees the expiry before it arms the
+// reactor, readiness is never consulted, and a timeout is the right answer.
+// Reporting the refusal here would mean the deadline was checked after the park
+// rather than before it — the inverse of the flattening that
+// test_connect_refusal_under_an_unexpired_deadline rules out.
+//
+// Guarded by the probe rather than assumed: a kernel that refuses 127.0.0.1:1
+// on the call itself takes the synchronous branch instead, which the test above
+// already owns. A runner that somehow has a listener on the reserved port 1
+// could also connect outright, so a completed connection is treated as
+// no-signal the same way test_stream_connect_refused treats it.
+test_connect_expired_deadline_beats_a_pending_refusal() `test(exclude: wasm, timeout: "20s") {
+  if _refused_synchronously(_probe_connect_rc("127.0.0.1", 1)) {
+    return;
+  }
+  Instant start = Instant.now();
+  int reason = _connect_outcome_host("127.0.0.1", 1, Instant.now() - Duration.from_secs(1));
+  assert(start.elapsed().as_millis < 500, "an already-past connect deadline never parks");
+  if reason != _wake_ready() {
+    assert(reason == _wake_timeout(),
+    "a refusal that only arrives through the reactor loses to a deadline already past");
+  }
+}
+// _RejectTarget is a destination together with the connect(2) return this kernel
+// gave it, a negative errno. Carrying the errno rather than just a boolean lets
+// a caller assert that the error TcpStream.connect reports is the one the probe
+// saw, not merely that it reported something.
+type _RejectTarget {
+  string host;
+  int port;
+  int rc;
+}
+
+// _probe_connect_rc asks this kernel what connect(2) does with a destination.
+// It builds its address with _net_socket_connect_addr's inet_pton rather than
+// TcpStream.connect's getaddrinfo, but for an IPv4 literal the two produce the
+// same sockaddr_in, and the socket is made non-blocking first the same way, so
+// connect(2) sees identical arguments and the -errno it returns is read back
+// under the same convention.
+_probe_connect_rc(string host, int port) int {
+  int fd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(fd >= 0, "probe socket");
+  _net_socket_set_nonblock(fd);
+  int rc = _net_socket_connect_addr(fd, host, port);
+  _net_socket_close(fd);
+  return rc;
+}
+
+// _synchronous_reject_target picks a destination this kernel refuses on the
+// connect(2) call itself instead of accepting it into EINPROGRESS, or none when
+// neither candidate reaches that branch here.
+//
+// Port 0 is not a connectable port anywhere, so it always fails and always
+// fails fast — on the kernels that refuse it on the call itself it also reaches
+// the synchronous branch. Where it does not, the limited broadcast address is
+// what Linux refuses outright (ENETUNREACH), so that is tried next.
+//
+// A candidate is only adopted once the probe agrees it is refused synchronously
+// here: a destination that goes to EINPROGRESS instead has to be one the kernel
+// then *fails*, and 255.255.255.255:80 would sit in the TCP handshake until the
+// caller's test timeout rather than refusing. Port 0 is the safe destination
+// for the reactor shape; the broadcast address is only safe for the
+// synchronous one.
+_synchronous_reject_target() _RejectTarget? {
+  int loopback = _probe_connect_rc("127.0.0.1", 0);
+  if _refused_synchronously(loopback) {
+    return _RejectTarget(host: "127.0.0.1", port: 0, rc: loopback);
+  }
+  int broadcast = _probe_connect_rc("255.255.255.255", 80);
+  if _refused_synchronously(broadcast) {
+    return _RejectTarget(host: "255.255.255.255", port: 80, rc: broadcast);
+  }
+  return none;
+}
+
+// A connect(2) that failed on the call itself, as opposed to one the kernel
+// accepted into EINPROGRESS to finish through the reactor.
+_refused_synchronously(int rc) bool {
+  return rc < 0 && (0 - rc) != _einprogress();
 }
 
 // A deadline belongs to one direction. Expiring the read side must not disarm,

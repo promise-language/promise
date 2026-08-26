@@ -1105,6 +1105,11 @@ cross-module RTTI gaps, not specific to this module.
   "timed out" from "connection refused"/"reset". Expiry is detected by the IO
   reactor on its regular poll pass, so it can overshoot by a millisecond or two —
   the right granularity for socket deadlines, and no platform timer is needed.
+  A deadline only ever bounds a wait, so it can only win against an operation
+  that waited: an error the syscall itself returns is never rewritten into a
+  timeout, and a `connect(2)` the kernel refuses on the call reaches the caller
+  as that socket errno even when the deadline had already passed. `is_timeout`
+  answers "did this run out of time", not "was the peer reachable".
 - **Cancellation** (T1563): `create_cancel_handle` returns a `CancelHandle` that
   can be moved into another goroutine and used to unblock whatever is parked on
   the socket. Cancellation is sticky — once cancelled, later operations on that

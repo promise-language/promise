@@ -33,6 +33,9 @@ tools/build/winlink/lib/
 .claude/settings.local.json
 CLAUDE.local.md
 .mcp.json
+# Post-build hook `workspace setup` installs so ./make re-syncs this checkout's
+# flow binaries. Per-clone: it holds an absolute path to that host's workspace.
+/make.local
 
 # Wrangler (Cloudflare CLI) local state — created by `npx wrangler` during blob publishing
 .wrangler/

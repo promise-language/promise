@@ -1,0 +1,241 @@
+// T1730: a pure value type may declare a `structural interface parent. An
+// interface declares no fields, so the parent cannot affect the value struct —
+// the `is` clause is a conformance claim the compiler checks, not inherited
+// state (docs/language-design.md §5.2). These tests pin the runtime behaviour on
+// both paths: the direct call, which stays a static call on the flat value
+// struct, and the boxed call through an interface-typed variable, which was
+// already how such a type reached a view before it could say `is`.
+//
+// The layout and static-dispatch claims are pinned in IR by
+// compiler/internal/codegen/t1730_test.go.
+//
+// Three boxing shapes are deliberately absent here because codegen cannot lower
+// them yet — each predates this change and none is specific to value types,
+// so they are tracked rather than restricted in sema: boxing into a *generic*
+// interface whose requirement mentions the type parameter (T1759), and boxing
+// into one whose requirement returns Self, e.g. Cloneable (T1760). Downcasting a
+// box back to the value type (`f as! Nanos`) is absent for the same reason —
+// it panics codegen today, with or without the `is` clause (T1546).
+type Nanos is Format {
+  int raw `value;
+  format!(Writer ~w) {
+    w.write_string("{this.raw}ns");
+  }
+}
+
+format_of(Format f) string {
+  Builder b = Builder();
+  f.format(b)?!;
+  return b.to_string();
+}
+
+// 1. The direct path — a plain static call on the value struct.
+structural_parent_direct() `test {
+  Nanos n = Nanos(raw: 5);
+  Builder b = Builder();
+  n.format(b)?!;
+  assert(b.to_string() == "5ns", "direct format on a value type declaring `is Format`");
+}
+
+// 2. Interpolation goes through the same conformance.
+structural_parent_interpolation() `test {
+  Nanos n = Nanos(raw: 12);
+  assert("{n}" == "12ns", "interpolation of a value type declaring `is Format`");
+}
+
+// 3. The boxed path — assigned to an interface-typed variable, and passed as an
+// interface-typed parameter.
+structural_parent_boxed() `test {
+  Nanos n = Nanos(raw: 7);
+  Format f = n;
+  assert(format_of(f) == "7ns", "boxed into a Format variable");
+  assert(format_of(Nanos(raw: 9)) == "9ns", "boxed at a Format parameter");
+}
+
+// 4. Copy semantics are untouched: the value is copied at the box, so mutating
+// the original afterwards does not change what was boxed.
+structural_parent_boxing_copies() `test {
+  Nanos n = Nanos(raw: 1);
+  Format f = n;
+  n.raw = 2;
+  assert(format_of(f) == "1ns", "the box holds a copy, not a reference");
+  assert("{n}" == "2ns", "the original is still mutable and independent");
+}
+
+// 5. A generic value type may declare the parent too, and each instantiation
+// conforms on its own.
+type Cell[T: Format] is Format {
+  T item `value;
+  format!(Writer ~w) {
+    w.write_string("[");
+    this.item.format(w)?^;
+    w.write_string("]");
+  }
+}
+
+structural_parent_generic() `test {
+  Cell[int] c = Cell[int](item: 4);
+  assert("{c}" == "[4]", "generic value type formats directly");
+  assert(format_of(c) == "[4]", "generic value type boxed into Format");
+
+  Cell[bool] d = Cell[bool](item: true);
+  assert(format_of(d) == "[true]", "a second instantiation conforms on its own");
+}
+
+// 6. A value newtype over a value parent may list a structural interface
+// alongside it — the interface contributes no value struct, so the newtype
+// still shares exactly one with its parent. It supplies the requirement itself:
+// redeclaring one the value parent already has would be an illegal value-child
+// override (T1527).
+type Tagged `structural {
+  get tag string `abstract;
+}
+
+type Millis {
+  int raw `value;
+  get scaled int => this.raw * 1000;
+}
+
+type Seconds is Millis, Tagged {
+  get tag string => "s";
+}
+
+tag_of(Tagged t) string {
+  return t.tag;
+}
+
+structural_parent_on_value_newtype() `test {
+  Seconds s = Seconds(raw: 3);
+  assert(s.scaled == 3000, "the newtype still shares its value parent's field");
+  assert(s.tag == "s", "and satisfies the structural interface directly");
+  assert(tag_of(s) == "s", "and when boxed into it");
+
+  Millis m = s;
+  assert(m.scaled == 3000, "the upcast to the value parent is still a plain copy");
+}
+
+// 7. Two structural interface parents at once — neither contributes state.
+type Ratio is Format, Equal {
+  int num `value;
+  int den `value;
+  format!(Writer ~w) {
+    w.write_string("{this.num}/{this.den}");
+  }
+  == (Ratio other) bool => this.num * other.den == other.num * this.den;
+}
+
+structural_parent_two_interfaces() `test {
+  Ratio a = Ratio(num: 1, den: 2);
+  assert(format_of(a) == "1/2", "the Format conformance holds");
+  assert(a == Ratio(num: 2, den: 4), "the Equal conformance holds");
+  assert(a != Ratio(num: 1, den: 3), "and its synthesized default");
+}
+
+// 8. The `is` clause is what puts the interface's type ID in the value type's
+// typeinfo parent list, so a runtime `is` check on a box answers correctly —
+// and still discriminates between two value types that both declare it.
+structural_parent_runtime_is_check() `test {
+  Format f = Nanos(raw: 4);
+  assert(f is Nanos, "a boxed value type is recognised as its concrete type");
+  assert(!(f is Ratio), "and not as a different value type declaring the same interface");
+
+  Format g = Ratio(num: 3, den: 4);
+  assert(g is Ratio, "the discrimination holds in both directions");
+  assert(!(g is Nanos), "and rejects the other concrete type");
+}
+
+// 9. A structural interface's *default* method — a body the interface supplies,
+// which calls the requirement the value type implements. It must be reachable
+// on the value type directly (statically, on the flat struct) and through a box
+// (from the view vtable), and both must reach the same concrete requirement.
+type Labelled `structural {
+  get label string `abstract;
+  get shout string => this.label.to_upper() + "!";
+}
+
+type Marker is Labelled {
+  int raw `value;
+  get label string => "m{this.raw}";
+}
+
+shout_of(Labelled l) string {
+  return l.shout;
+}
+
+structural_parent_inherited_default() `test {
+  Marker m = Marker(raw: 3);
+  assert(m.label == "m3", "the requirement resolves directly");
+  assert(m.shout == "M3!", "the interface's default body is reachable on the value type");
+  assert(shout_of(m) == "M3!", "and through a box, reaching the same requirement");
+}
+
+// 10. A requirement inherited transitively — declared by a grandparent
+// interface, listed through an intermediate one. The value type owes the body,
+// and a box into either interface reaches it.
+type Counted `structural {
+  get count int `abstract;
+}
+
+type Sized is Counted `structural {
+}
+
+type Pair is Sized {
+  int left `value;
+  int right `value;
+  get count int => 2;
+}
+
+count_of(Counted c) int {
+  return c.count;
+}
+
+structural_parent_transitive() `test {
+  Pair p = Pair(left: 1, right: 2);
+  assert(p.count == 2, "the transitively inherited requirement resolves directly");
+  assert(count_of(p) == 2, "and when boxed into the interface that declared it");
+
+  Sized s = p;
+  assert(s.count == 2, "and when boxed into the intermediate interface");
+}
+
+// 11. Boxed value types stored in a container. Every box is a heap allocation,
+// so this also pins the drop path: the test's own leak accounting fails if the
+// vector's elements are not released.
+structural_parent_vector_of_boxes() `test {
+  Format[] boxes = [];
+  boxes.push(Nanos(raw: 1));
+  boxes.push(Ratio(num: 1, den: 2));
+  boxes.push(Nanos(raw: 3));
+
+  assert(boxes.len == 3, "the container holds all three boxes");
+
+  Builder b = Builder();
+  for x in boxes {
+    x.format(b)?!;
+    b.write_string(",");
+  }
+  assert(b.to_string() == "1ns,1/2,3ns,", "each boxed value formats through its own conformance");
+}
+
+// 12. A generic function constrained by the interface takes the value type
+// unboxed — the constraint is satisfied by the declared conformance and the
+// call stays a static dispatch on the flat struct.
+join_formats[T: Format](T[] items) string {
+  Builder b = Builder();
+  for it in items {
+    it.format(b)?!;
+    b.write_string("|");
+  }
+  return b.to_string();
+}
+
+structural_parent_generic_constraint() `test {
+  Nanos[] ns = [];
+  ns.push(Nanos(raw: 6));
+  ns.push(Nanos(raw: 7));
+  assert(join_formats[Nanos](ns) == "6ns|7ns|", "a value type satisfies a T: Format constraint unboxed");
+
+  Ratio[] rs = [];
+  rs.push(Ratio(num: 5, den: 8));
+  assert(join_formats[Ratio](rs) == "5/8|", "a second value type instantiates the same generic");
+}

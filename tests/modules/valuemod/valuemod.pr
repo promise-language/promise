@@ -101,3 +101,48 @@ type Reading `structural `public `doc("A `structural value type with a generic m
 type Sample is Reading `public `doc("A value newtype of Reading — same struct, extra method.") {
   get tag int `public `doc("A constant tag distinguishing Sample from Reading.") => 5;
 }
+
+// T1730: a pure value type may declare a `structural interface parent — an
+// interface declares no fields, so it cannot affect the value struct. Exported so
+// a consumer boxes it across a module boundary: the (concrete, view) vtable and the
+// interface's synthesized default bodies (Equal's `!=`) are emitted on the module
+// compile path, a different declare/define entry than the single-file tests in
+// tests/value_types/structural_parent_test.pr reach.
+type Nanos is Format, Equal `public `doc("A duration in nanoseconds that declares its Format and Equal conformance.") {
+  int raw `value;
+
+  format!(Writer ~w) `public `doc("Writes the nanosecond count followed by \"ns\".") {
+    w.write_string("{this.raw}ns");
+  }
+
+  == (Nanos other) bool `public `doc("Two Nanos are equal when their counts match.") => this.raw == other.raw;
+}
+
+format_of(Format f) string `public `doc("Formats any Format into a string.") {
+  Builder b = Builder();
+  f.format(b)?!;
+  return b.to_string();
+}
+
+make_nanos(int raw) Nanos `public `doc("Builds a Nanos with the given count.") {
+  return Nanos(raw: raw);
+}
+
+// T1730, the other direction: a `structural interface declared in a module, with
+// an abstract requirement and a default body, so a value type declared in *user*
+// code can name it as a parent. The concrete type is then user-owned while the
+// view and its default body are module-owned — the (concrete, view) vtable pair
+// and the default's synthesized body straddle the boundary the opposite way to
+// Nanos above.
+type Ticker `structural `public `doc("A source of tick counts.") {
+  get ticks int `abstract `doc("The number of ticks.");
+  get doubled int `doc("Twice the tick count — a default body over the requirement.") => this.ticks * 2;
+}
+
+ticks_of(Ticker t) int `public `doc("Reads the requirement through the interface.") {
+  return t.ticks;
+}
+
+doubled_of(Ticker t) int `public `doc("Reads the interface's default body.") {
+  return t.doubled;
+}

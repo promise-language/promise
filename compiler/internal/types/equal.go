@@ -499,16 +499,8 @@ func Implements(x Type, iface *Named) bool {
 	switch xt := x.(type) {
 	case *Named:
 		for _, am := range abstractMethods {
-			// Use appropriate lookup based on method kind (getter vs setter vs regular)
-			var m *Method
-			if am.method.IsGetter() {
-				m = xt.LookupGetter(am.method.name)
-			} else if am.method.IsSetter() {
-				m = xt.LookupSetter(am.method.name)
-			} else {
-				m = xt.LookupMethod(am.method.name)
-			}
-			if m == nil || m.abstract {
+			m := xt.LookupAbstractImpl(am.method)
+			if m == nil {
 				return false
 			}
 			// Factory methods must match: factory satisfies factory, instance satisfies instance

@@ -62,12 +62,19 @@ func (c *Checker) classifyDeferredValueType(named *types.Named, d *ast.TypeDecl,
 		return false // ordinary heap type — deferred only because it has parents
 	}
 
-	if len(named.Parents()) == 0 {
-		// Deferred only because a `value field's type was not classified yet.
+	// A `structural interface parent declares no fields, so it cannot affect the
+	// value struct's layout — it is a conformance claim, always permitted and
+	// never counted by the rules below (T1730). Only state-bearing parents are.
+	stateParents := stateBearingParents(named)
+
+	if len(stateParents) == 0 {
+		// Deferred only because a `value field's type was not classified yet, or
+		// because every parent is a `structural interface.
 		return c.markValueType(named, d, report)
 	}
 
-	// From here on the type inherits (or declares) `value fields and has parents.
+	// From here on the type inherits (or declares) `value fields and has
+	// state-bearing parents.
 	if named.NumFields() > 0 {
 		if report {
 			if vp := valueTypeParent(named); vp != nil {
@@ -77,7 +84,12 @@ func (c *Checker) classifyDeferredValueType(named *types.Named, d *ast.TypeDecl,
 					"type %s inherits `value fields from %s and cannot declare fields of its own; a value-type child may add methods only (use a %s field instead)",
 					d.Name, vp.Obj().Name(), vp.Obj().Name())
 			} else {
-				c.errorf(d.Pos(), "value type %s cannot have parent types (all fields are `value)", d.Name)
+				// Name the offending parent: since T1730 a value type may have
+				// parents — just not state-bearing ones — so "cannot have parent
+				// types" would send the reader looking for the wrong mistake.
+				c.errorf(d.Pos(),
+					"value type %s cannot inherit from %s: the only state-bearing parent a pure value type may have is another pure value type (a `structural interface parent is always allowed — it declares no fields)",
+					d.Name, stateParents[0].Named.Obj().Name())
 			}
 		}
 		return false
@@ -85,8 +97,9 @@ func (c *Checker) classifyDeferredValueType(named *types.Named, d *ast.TypeDecl,
 
 	// Fieldless child of a type that contributes `value fields — the newtype
 	// form, provided the parent really is a value type and neither side is
-	// generic.
-	parents := named.Parents()
+	// generic. `structural interface parents are filtered out above, so listing
+	// one alongside the value parent is not the multiple-parent case (T1730).
+	parents := stateParents
 	if len(parents) != 1 {
 		if report {
 			name := "a value type"
@@ -200,4 +213,34 @@ func ownFieldPos(named *types.Named, d *ast.TypeDecl) ast.Pos {
 	}
 	p := named.Fields()[0].Pos()
 	return ast.Pos{File: p.File, Line: p.Line, Column: p.Column}
+}
+
+// isStructuralInterfaceParent reports whether a parent reference names a
+// `structural interface: a `structural type that declares no fields at all.
+// Such a parent is a conformance claim, not inherited state — it cannot affect
+// the value struct's layout, so a pure value type may always declare it
+// (T1730, docs/language-design.md §5.2).
+//
+// Fieldlessness, not the `structural flag alone, is the test. A `structural
+// *value* type carries `value fields and is state-bearing — satisfying it is
+// the value-newtype form (T1550), which must stay on the newtype path. Testing
+// fields rather than IsValueType() also makes this independent of the
+// classification fixpoint's iteration order, which may not have marked such a
+// parent as a value type yet on the first pass.
+func isStructuralInterfaceParent(p *types.ParentRef) bool {
+	return p.Named.IsStructural() && len(p.Named.AllFields()) == 0
+}
+
+// stateBearingParents returns the parents that are not `structural interfaces —
+// the ones that can contribute fields, and so the only ones the value-type
+// layout rules have anything to say about (T1730).
+func stateBearingParents(named *types.Named) []*types.ParentRef {
+	var out []*types.ParentRef
+	for _, p := range named.Parents() {
+		if isStructuralInterfaceParent(p) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

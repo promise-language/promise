@@ -771,8 +771,9 @@ main() {
 - The only permitted **state-bearing** `is` parent is another pure value type (see *Value-type inheritance* below). A `` `structural `` interface parent is always permitted and never counts against this rule: an interface declares no fields, so it cannot affect the value struct's layout. `type Duration is Format, Parse` is a conformance claim the compiler checks, not an inheritance of state (see §5.4, *Protocol Interfaces*)
 - Cannot have `drop()` methods (nothing to clean up)
 - Cannot have failable `new()` methods
-- Cannot have `` `abstract `` methods — dispatch is always static, so nothing could
-  ever resolve them
+- Cannot have `` `abstract `` methods, and must implement every abstract requirement
+  of a `` `structural `` interface parent it declares — dispatch is always static, so
+  nothing could ever resolve one that has no body
 - Methods work normally — `this`/`~this` receive a pointer to the value struct alloca
 
 **A `` `structural `` type whose fields are all `` `value `` is a value type, not an interface view.** The `` `structural `` annotation does not change the representation: such a type is still register-resident as the flat value struct `{ i8* _vtable, field1, ... }`, *not* the `{ vtable_ptr, instance_ptr }` fat pointer that a structural interface normally lowers to. Two consequences follow, and together they make the shape closed and unambiguous (T1550):

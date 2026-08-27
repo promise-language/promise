@@ -56,19 +56,10 @@ func (c *Checker) validateAbstractOverrides(file *ast.File) {
 			if len(am.Method.Sig().TypeParams()) > 0 {
 				continue
 			}
-			// Look up the satisfying concrete method by kind, mirroring
-			// types.Implements. A missing or still-abstract method means the type
-			// legitimately stays abstract — instantiation is rejected elsewhere.
-			var override *types.Method
-			switch {
-			case am.Method.IsGetter():
-				override = named.LookupGetter(am.Method.Name())
-			case am.Method.IsSetter():
-				override = named.LookupSetter(am.Method.Name())
-			default:
-				override = named.LookupMethod(am.Method.Name())
-			}
-			if override == nil || override.IsAbstract() {
+			// A missing or still-abstract method means the type legitimately stays
+			// abstract — instantiation is rejected elsewhere.
+			override := named.LookupAbstractImpl(am.Method)
+			if override == nil {
 				continue
 			}
 			if !types.SatisfiesAbstract(override.Sig(), am.Method.Sig(), subst, am.Declarer, named) {

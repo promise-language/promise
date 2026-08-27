@@ -960,6 +960,21 @@ func (c *Checker) markValueType(named *types.Named, d *ast.TypeDecl, report bool
 		return false
 	}
 
+	// Validate: a value type must also implement every abstract requirement it
+	// inherits from a `structural interface parent (T1730) — the same rule as
+	// above, one level up. A value type never dispatches virtually, so an
+	// unimplemented requirement leaves a null slot in the view vtable
+	// (@promise_vtable_T_as_I = [i8* null]) that a box would call straight
+	// through. Reported at the declaration; without it the only diagnostic is
+	// "cannot instantiate abstract type" at whatever use site happens to exist.
+	if am, ok := unimplementedParentAbstract(named); ok {
+		if report {
+			c.errorf(d.Pos(), "value type %s does not implement '%s' required by %s: value types dispatch statically, so every inherited requirement must have a body",
+				d.Name, am.Method.Name(), am.Declarer.Obj().Name())
+		}
+		return false
+	}
+
 	// Validate: a value child adds methods, it never overrides them (T1527).
 	// Dispatch is static, so a redeclaration with the parent's exact signature
 	// would apply only where the child is the static type — the same call through
@@ -991,15 +1006,36 @@ func (c *Checker) markValueType(named *types.Named, d *ast.TypeDecl, report bool
 	return true
 }
 
+// unimplementedParentAbstract returns the first abstract requirement inherited
+// from a parent that named leaves without a body, and whether there was one.
+// The slot lookup is types.Named.LookupAbstractImpl — the same one
+// types.Implements and validateAbstractOverrides use, so all three agree on
+// what satisfies a requirement. A value parent can never carry abstract methods
+// (markValueType forbids them), so on a value type this reports only
+// requirements from a `structural interface parent — the relationship T1730
+// newly admits.
+func unimplementedParentAbstract(named *types.Named) (types.AbstractMethodInfo, bool) {
+	for _, am := range named.ParentAbstractMethods() {
+		if named.LookupAbstractImpl(am.Method) == nil {
+			return am, true
+		}
+	}
+	return types.AbstractMethodInfo{}, false
+}
+
 // valueTypeOverride returns the first method a value type declares that
 // redeclares an inherited method with an identical signature, together with the
 // parent it comes through, or (nil, nil) when there is none. Overloads (same
 // name, different signature) are not overrides — they resolve statically to
 // exactly the declaration the argument types select — so only an identical
 // signature counts. new() is exempt: constructors are per-type and their
-// inheritance rules live in validateConstructors. T1527.
+// inheritance rules live in validateConstructors. Only state-bearing parents
+// count (T1730): implementing a `structural interface's requirement is
+// conformance, not shadowing — there is no parent body a parent-typed variable
+// could dispatch to instead, and a boxed view's vtable is built from the
+// concrete type's own methods. T1527.
 func valueTypeOverride(named *types.Named) (*types.Method, *types.Named) {
-	for _, p := range named.Parents() {
+	for _, p := range stateBearingParents(named) {
 		for _, m := range named.Methods() {
 			if m.Name() == "new" || m.Sig() == nil {
 				continue

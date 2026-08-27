@@ -1,0 +1,60 @@
+// T1730: a pure value type declaring a `structural interface parent, across a
+// module boundary. The single-file coverage is tests/value_types/structural_parent_test.pr;
+// this file exercises the module compile path, where monomorphization declares and
+// defines the type's methods into the module's own IR (registering them in
+// moduleOwnedFuncs so the module IR is split and cached) and the view vtable for the
+// (concrete, view) pair is emitted while compiling a different unit than the one that
+// boxes the value.
+use valuemod "./valuemod";
+
+module_value_structural_parent_direct() `test {
+  n := valuemod.Nanos(raw: 5);
+  assert("{n}" == "5ns", "the module's format! reached by interpolation");
+  assert(valuemod.make_nanos(raw: 6) == valuemod.Nanos(raw: 6), "the module's == reached directly");
+  assert(valuemod.make_nanos(raw: 6) != valuemod.Nanos(raw: 7), "and Equal's synthesized !=");
+}
+
+// The box is created here and consumed inside the module — the view vtable has to
+// agree across the two compilation units.
+module_value_structural_parent_boxed() `test {
+  Format f = valuemod.Nanos(raw: 7);
+  assert(valuemod.format_of(f: f) == "7ns", "boxed into a Format variable, formatted in the module");
+  assert(valuemod.format_of(f: valuemod.Nanos(raw: 9)) == "9ns", "boxed straight at the parameter");
+}
+
+// The box holds a copy: the value type is still `copy, and the `is` clause did not
+// turn the crossing into a reference.
+module_value_structural_parent_boxing_copies() `test {
+  n := valuemod.Nanos(raw: 1);
+  Format f = n;
+  n.raw = 2;
+  assert(valuemod.format_of(f: f) == "1ns", "the box kept its own copy");
+  assert("{n}" == "2ns", "the original is independent");
+}
+
+// The reverse crossing: the value type is declared here, the `structural
+// interface it names as parent is declared in the module. The requirement's body
+// is user-owned, the interface's default body is module-owned, and both must be
+// reachable directly and through a box.
+type Beat is valuemod.Ticker {
+  int raw `value;
+  get ticks int => this.raw;
+}
+
+module_user_value_type_with_module_structural_parent() `test {
+  Beat b = Beat(raw: 5);
+  assert(b.ticks == 5, "the user-declared requirement resolves directly");
+  assert(b.doubled == 10, "the module's default body is reachable on the user value type");
+
+  assert(valuemod.ticks_of(t: b) == 5, "boxed into the module's interface, the requirement dispatches back");
+  assert(valuemod.doubled_of(t: b) == 10, "and the module's default reaches the user body through the box");
+}
+
+// The `is` clause records the view's type ID in the value type's typeinfo, so a
+// runtime check on a box works when the view is module-declared and the concrete
+// type is declared here. The mirror — naming a module-qualified type on the right
+// of `is` — does not work yet and is not specific to value types (T1538).
+module_value_structural_parent_runtime_is_check() `test {
+  valuemod.Ticker t = Beat(raw: 4);
+  assert(t is Beat, "a boxed user value type is recognised through a module-declared view");
+}

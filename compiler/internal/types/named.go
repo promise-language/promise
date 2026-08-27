@@ -476,6 +476,29 @@ func (n *Named) ParentAbstractMethods() []AbstractMethodInfo {
 	return out
 }
 
+// LookupAbstractImpl returns the method on n that occupies the slot an abstract
+// requirement declares, or nil when the slot is empty or still abstract. The
+// kind (getter / setter / plain) selects the lookup, and each lookup walks
+// parents — so a body inherited from any parent counts. This is the one
+// definition of "what satisfies a requirement"; Implements, sema's
+// validateAbstractOverrides and sema's value-type check all call it, so they
+// cannot drift apart on which method a requirement resolves to.
+func (n *Named) LookupAbstractImpl(abstract *Method) *Method {
+	var m *Method
+	switch {
+	case abstract.IsGetter():
+		m = n.LookupGetter(abstract.name)
+	case abstract.IsSetter():
+		m = n.LookupSetter(abstract.name)
+	default:
+		m = n.LookupMethod(abstract.name)
+	}
+	if m == nil || m.abstract {
+		return nil
+	}
+	return m
+}
+
 // allAbstractMethodsWithDeclarer returns all abstract methods from this type
 // and its parents, paired with their declaring interface.
 func (n *Named) allAbstractMethodsWithDeclarer() []abstractMethodInfo {

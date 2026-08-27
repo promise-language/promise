@@ -11756,7 +11756,7 @@ func TestValueTypeNoInheritance(t *testing.T) {
 			int y `+"`value"+`;
 		}
 	`)
-	expectError(t, errs, "value type Child cannot have parent types")
+	expectError(t, errs, "value type Child cannot inherit from Base")
 }
 
 func TestValueTypeNonCopyField(t *testing.T) {

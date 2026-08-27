@@ -172,7 +172,7 @@ func TestT1527ValueFieldsWithHeapParent(t *testing.T) {
 		type Child is Base { int x `+vt+`; }
 		main() {}
 	`)
-	expectError(t, errs, "value type Child cannot have parent types")
+	expectError(t, errs, "value type Child cannot inherit from Base")
 }
 
 func TestT1527ValueNewtypeMultipleParents(t *testing.T) {
@@ -185,18 +185,18 @@ func TestT1527ValueNewtypeMultipleParents(t *testing.T) {
 	expectError(t, errs, "type EntityId cannot inherit from value type Hash128 together with other parent types")
 }
 
-// Listing a structural interface alongside the value parent is the same
-// multiple-parent case: the newtype shares exactly one struct. Satisfying a
-// structural interface does not need the explicit `is` — see
-// TestT1527ValueTypeIsStructuralStillAllowed and the runtime counterpart.
-func TestT1527ValueNewtypeWithStructuralParentRejected(t *testing.T) {
-	errs := checkErrs(t, `
+// The one-parent limit is about the value struct: a newtype shares exactly one,
+// and a `structural interface contributes none. So listing one alongside the
+// value parent is not the multiple-parent case — it is a conformance claim the
+// compiler checks, permitted since T1730 (docs/language-design.md §5.2). The
+// interface's requirement here is satisfied by the inherited getter.
+func TestT1527ValueNewtypeWithStructuralParentAllowed(t *testing.T) {
+	checkOK(t, `
 		type Tagged `+"`structural"+` { get tag int `+"`abstract"+`; }
 		type Hash128 { u128 value `+vt+`; get tag int => 7; }
 		type EntityId is Hash128, Tagged {}
 		main() {}
 	`)
-	expectError(t, errs, "type EntityId cannot inherit from value type Hash128 together with other parent types")
 }
 
 func TestT1527ValueNewtypeGenericChildRejected(t *testing.T) {

@@ -1221,7 +1221,21 @@ func (c *Compiler) genArrayBasePtr(target ast.Expr, arr *types.Array) value.Valu
 
 // genArrayIndex handles arr[i] for fixed-size arrays with bounds checking.
 func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value {
+	// T1711: Save and suppress dup-on-read flags before evaluating the target
+	// to prevent nested index expressions from consuming them prematurely.
+	savedDupString := c.dupStringFieldAccess
+	savedDupTuple := c.dupTupleFieldAccess
+	savedDupHeapUser := c.dupHeapUserFieldAccess
+	savedDupContainer := c.dupContainerFieldAccess
+	c.dupStringFieldAccess = false
+	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
+	c.dupContainerFieldAccess = false
 	basePtr := c.genArrayBasePtr(e.Target, arr)
+	c.dupStringFieldAccess = savedDupString
+	c.dupTupleFieldAccess = savedDupTuple
+	c.dupHeapUserFieldAccess = savedDupHeapUser
+	c.dupContainerFieldAccess = savedDupContainer
 	idx := c.genExpr(e.Index)
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
@@ -1602,9 +1616,21 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 	// (panic / SIGSEGV). Suppress the whole-field dup for the target eval so
 	// the element-level dup (the dupContainerFieldAccess branch below, T0383)
 	// makes the owned copy instead. Mirrors the T0500 save/restore pattern.
+	// T1711: Save and suppress ALL dup-on-read flags before evaluating the target.
+	// The target may contain nested index expressions (e.g. v[i].split(x)[j])
+	// that would consume the flag meant for THIS index's element read.
+	savedDupString := c.dupStringFieldAccess
+	savedDupTuple := c.dupTupleFieldAccess
+	savedDupHeapUser := c.dupHeapUserFieldAccess
 	savedDupContainer := c.dupContainerFieldAccess
+	c.dupStringFieldAccess = false
+	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
 	c.dupContainerFieldAccess = false
 	slicePtr := c.genExprAutoPropagate(e.Target) // B0323
+	c.dupStringFieldAccess = savedDupString
+	c.dupTupleFieldAccess = savedDupTuple
+	c.dupHeapUserFieldAccess = savedDupHeapUser
 	c.dupContainerFieldAccess = savedDupContainer
 	idx := c.genExpr(e.Index)
 	elemLLVM := c.resolveType(elemType)

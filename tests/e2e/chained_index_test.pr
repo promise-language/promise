@@ -1,0 +1,60 @@
+chained_split_index() `test {
+  string url = "https://example.org/a";
+  string authority = url.split("://")[1].split("/")[0];
+  assert(authority == "example.org", msg: "chained split");
+}
+
+single_split_index() `test {
+  string url = "https://example.org/a";
+  string first = url.split("://")[0];
+  assert(first == "https", msg: "single split index");
+}
+
+split_index_then_method() `test {
+  string url = "https://example.org/a";
+  string upper = url.split("://")[1].to_upper();
+  assert(upper == "EXAMPLE.ORG/A", msg: "index then method");
+}
+
+triple_chained_index() `test {
+  string s = "a.b.c-d.e-f.g";
+  string result = s.split(".")[2].split("-")[1];
+  assert(result == "d", msg: "triple chain");
+}
+
+nested_vector_of_vectors() `test {
+  string[][] v = [["a", "b"], ["c", "d"]];
+  string s = v[1][0];
+  assert(s == "c", msg: "nested vector index");
+}
+
+chained_index_with_len() `test {
+  string url = "https://example.org/long/path";
+  int n = url.split("://")[1].split("/")[0].len;
+  assert(n == 11, msg: "chained index len");
+}
+
+chained_index_in_condition() `test {
+  string csv = "name,age,city";
+  bool ok = csv.split(",")[1].split("g")[0] == "a";
+  assert(ok, msg: "chained index in condition");
+}
+
+chained_index_multiple_uses() `test {
+  string data = "key=val1;key2=val2";
+  string[] pairs = data.split(";");
+  string k1 = pairs[0].split("=")[0];
+  string v1 = pairs[0].split("=")[1];
+  string k2 = pairs[1].split("=")[0];
+  string v2 = pairs[1].split("=")[1];
+  assert(k1 == "key", msg: "k1");
+  assert(v1 == "val1", msg: "v1");
+  assert(k2 == "key2", msg: "k2");
+  assert(v2 == "val2", msg: "v2");
+}
+
+chained_index_result_concatenation() `test {
+  string path = "/usr/local/bin";
+  string result = path.split("/")[1] + "/" + path.split("/")[2];
+  assert(result == "usr/local", msg: "concatenation of chained indexes");
+}

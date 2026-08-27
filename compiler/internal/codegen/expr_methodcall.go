@@ -861,7 +861,21 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 		panic(fmt.Sprintf("codegen: undeclared [] method %s", mangledName))
 	}
 
+	// T1711: Save and suppress dup-on-read flags before evaluating the target
+	// to prevent nested index expressions from consuming them prematurely.
+	savedDupString := c.dupStringFieldAccess
+	savedDupTuple := c.dupTupleFieldAccess
+	savedDupHeapUser := c.dupHeapUserFieldAccess
+	savedDupContainer := c.dupContainerFieldAccess
+	c.dupStringFieldAccess = false
+	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
+	c.dupContainerFieldAccess = false
 	target := c.genExprAutoPropagate(e.Target) // B0323
+	c.dupStringFieldAccess = savedDupString
+	c.dupTupleFieldAccess = savedDupTuple
+	c.dupHeapUserFieldAccess = savedDupHeapUser
+	c.dupContainerFieldAccess = savedDupContainer
 	keyVal := c.genExpr(e.Index)
 
 	// Extract instance pointer: container types (Vector, Map) are already i8*,

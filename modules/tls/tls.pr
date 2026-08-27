@@ -170,6 +170,7 @@ type TlsServerConfig `public `doc("Server-side TLS credentials: a certificate ch
 type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connection. Satisfies Reader and Writer. Auto-frees the TLS session and closes the socket on drop.") {
   int _ssl; // backend session handle as int (0 = never established)
   net.TcpStream _tcp;
+  bool _checked_first_record = false; // see _fill_in
 
   connect!(net.TcpStream move tcp, string hostname, TlsConfig config) Self `factory `public `doc("Performs a TLS client handshake over an already-connected TCP stream. `hostname` sets SNI and, for verifying configs, the certificate host to check.") {
     if config._ctx == 0 {
@@ -402,6 +403,27 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
         raise _tls_err(TlsErrorKind.handshake, "connection closed by peer during the TLS handshake");
       }
       raise _tls_err(TlsErrorKind.io, "connection closed by peer during TLS exchange");
+    }
+    // The first byte a peer sends must be a TLS record content type (20 change
+    // cipher spec, 21 alert, 22 handshake, 23 application data). Anything else
+    // is not TLS at all — a plaintext HTTP request to a TLS port is the usual
+    // case, where 'G' (0x47) is read as the content type and the next bytes as
+    // a length, leaving the backend waiting for thousands of bytes that will
+    // never arrive while the peer waits for a reply. Neither side closes and the
+    // handshake never returns.
+    //
+    // OpenSSL and SChannel reject this on sight; Secure Transport does not, so
+    // without this check macOS hangs where Linux and Windows fail fast (T1769).
+    // Checking here makes every backend agree, and costs the two that already
+    // reject nothing. Only the FIRST inbound read is checked — a later read can
+    // land mid-record, where byte 0 is payload rather than a content type.
+    if !this._checked_first_record {
+      this._checked_first_record = true;
+      u8 kind = buf[0];
+      if kind < 20u8 || kind > 23u8 {
+        raise _tls_err(TlsErrorKind.handshake,
+        "peer did not send TLS: first byte " + kind.to_string() + " is not a TLS record type");
+      }
     }
     _tls_bio_write_in(this._ssl, buf, n);
   }

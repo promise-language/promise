@@ -31,6 +31,26 @@ file_create_exists_remove() `test(exclude: wasm) {
   assert(!File.exists(os.temp_dir + "/pr_iot_cer"), "file gone after remove");
 }
 
+// T1742: a file that is open must still be removable — on Windows that needs
+// FILE_SHARE_DELETE on every handle, which no CRT open grants. Passes trivially
+// on POSIX (unlink); failed with EACCES on Windows before pal_file_open moved to
+// CreateFileA. `!File.exists` is asserted only after both handles close, because
+// Windows deletes are delete-pending: the name stays visible until the last
+// handle goes away (docs/io.md 6.2 states that difference rather than hiding it).
+file_remove_while_open() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rwo";
+  if File.exists(p) {
+    File.remove(p)?!;
+  }
+  File w = File.create(p)?!;
+  w.write_string("hello")?!;
+  File r = File.open_read(p)?!; // second handle on the same path
+  File.remove(p)?!; // must succeed while both handles are open
+  r.close()?!;
+  w.close()?!;
+  assert(!File.exists(p), "file gone after both handles close");
+}
+
 file_write_read() `test(exclude: wasm) {
   File fw = File.create(os.temp_dir + "/pr_iot_wr")?!;
   fw.write_string("hello world")?!;
@@ -493,6 +513,168 @@ file_append_creates_missing() `test(exclude: wasm) {
   string d = File.read_content(os.temp_dir + "/pr_iot_acm")?!;
   assert(d == "fresh", "append creates a missing file");
   File.remove(os.temp_dir + "/pr_iot_acm")?!;
+}
+
+// T1742: an append handle must write at the end regardless of the file position.
+// Windows has no CreateFile access right that means O_APPEND — the PAL gets the
+// behaviour from _open_osfhandle(handle, _O_APPEND), which sets the CRT
+// descriptor's FAPPEND bit so _write seeks to end before every write. This test
+// is the reason FILE_APPEND_DATA was rejected as an alternative: seeking on an
+// append handle stays legal, and the seek must simply not affect where the bytes
+// land. Without FAPPEND the write below would overwrite from offset 0.
+file_append_ignores_seek() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_apsk";
+  File.write_content(p, "AAAA")?!;
+  File f = File.append(p)?!;
+  f.seek(0)?!; // legal on an append handle, and deliberately ignored by the write
+  f.write_string("BB")?!;
+  f.close()?!;
+  assert(File.read_content(p)?! == "AAAABB", "append writes at end after seek(0)");
+  File.remove(p)?!;
+}
+
+// T1742: repeated writes through one append handle each land at the end — the
+// FAPPEND seek happens per write, not once at open.
+file_append_repeated_writes() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_aprw";
+  File.write_content(p, "0")?!;
+  File f = File.append(p)?!;
+  f.write_string("1")?!;
+  f.write_string("2")?!;
+  f.write_string("3")?!;
+  f.close()?!;
+  assert(File.read_content(p)?! == "0123", "each append write lands at the end");
+  File.remove(p)?!;
+}
+
+// T1742: a second append handle opened while the first is still open must also
+// start at the end. Two write handles on one path is only possible at all
+// because the share mode allows it.
+file_append_two_handles() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_apth";
+  File.write_content(p, "x")?!;
+  File a = File.append(p)?!;
+  a.write_string("y")?!;
+  File b = File.append(p)?!; // opened after "y" is on disk
+  b.write_string("z")?!;
+  b.close()?!;
+  a.close()?!;
+  assert(File.read_content(p)?! == "xyz", "a second append handle starts at the end");
+  File.remove(p)?!;
+}
+
+// T1742: File.size now routes through pal_file_open (read-only) instead of a raw
+// CRT open, so it must still work while another handle holds the file. A
+// deny-delete/deny-share open here would fail with a sharing violation.
+file_size_while_open() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_szwo";
+  File w = File.create(p)?!;
+  w.write_string("12345")?!;
+  assert(File.size(p)?! == 5, "size readable while a write handle is open");
+  w.write_string("67")?!;
+  assert(File.size(p)?! == 7, "size reflects later writes on the open handle");
+  w.close()?!;
+  assert(File.size(p)?! == 7, "size unchanged after close");
+  File.remove(p)?!;
+}
+
+// T1742: File.size's failure path returns pal_file_open's -errno sign-extended
+// to 64 bits rather than re-reading errno. Asserting the code (not just that it
+// raised) is what catches a bad widening — a zero-extend turns -2 into
+// 4294967294, which surfaces as a nonsense IoError code instead of ENOENT.
+file_size_nonexistent_code() `test(exclude: wasm) {
+  bool caught = false;
+  File.size(os.temp_dir + "/pr_iot_szne_code")? e is IoError {
+    caught = true;
+    assert(e.code == 2, "File.size on a missing path reports ENOENT(2)");
+    assert(e.message == "no such file or directory", "ENOENT message");
+  }!;
+  assert(caught, "size of nonexistent raises");
+}
+
+// T1742: a path whose *parent directory* does not exist. Windows reports this as
+// ERROR_PATH_NOT_FOUND(3) rather than ERROR_FILE_NOT_FOUND(2), so it exercises a
+// distinct arm of the Win32 → errno table; POSIX reports ENOENT directly. Both
+// must reach Promise as the same code.
+file_open_missing_parent_directory() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_no_such_dir_xyz/inner.txt";
+  bool caught = false;
+  File.open_read(p)? e is IoError {
+    caught = true;
+    assert(e.code == 2, "missing parent directory reports ENOENT(2)");
+  }!;
+  assert(caught, "opening under a missing directory raises");
+
+  // Same path through create (mode 5): CREATE_ALWAYS still cannot invent the
+  // parent, so it must fail the same way rather than succeed.
+  bool caught_create = false;
+  File.create(p)? e is IoError {
+    caught_create = true;
+    assert(e.code == 2, "create under a missing directory reports ENOENT(2)");
+  }!;
+  assert(caught_create, "create under a missing directory raises");
+}
+
+// T1742: a write handle and a read handle on one path coexist, and bytes written
+// through the first are visible to the second. FILE_SHARE_READ|WRITE is what
+// makes the second open legal at all; the PAL passes it on every mode.
+file_two_handles_share_reads_and_writes() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_shrw";
+  File.write_content(p, "")?!;
+  File w = File.open_write(p)?!;
+  w.write_string("shared")?!;
+  File r = File.open_read(p)?!;
+  string seen = r.read_all()?!;
+  r.close()?!;
+  w.close()?!;
+  assert(seen == "shared", "a concurrent reader sees the writer's bytes");
+  File.remove(p)?!;
+}
+
+// T1742 (windows-only): ERROR_ACCESS_DENIED(5) → EACCES(13) is the one arm of
+// the Win32 → errno table other than ENOENT that Promise code can actually
+// reach. CreateFileA refuses a directory unless FILE_FLAG_BACKUP_SEMANTICS is
+// set, so every open mode lands on that arm here. Drop the arm and the code
+// falls through to the EINVAL(22) default — "invalid argument" for a perfectly
+// valid path, which sends the reader looking for a bug in their own code.
+//
+// Windows-only because POSIX reaches these paths differently: Linux lets you
+// open a directory read-only and fails later, so the codes genuinely differ.
+// file_open_directory and file_create_on_directory_path cover the
+// cross-platform "it raises at all" half.
+file_open_directory_errno_windows() `test(exclude: wasm) `target(windows) {
+  string d = os.temp_dir;
+
+  bool caught_read = false;
+  File.open_read(d)? e is IoError {
+    caught_read = true;
+    assert(e.code == 13, "open_read on a directory reports EACCES(13), got {e.code}");
+    assert(e.message == "permission denied", "EACCES message");
+  }!;
+  assert(caught_read, "open_read on a directory raises");
+
+  bool caught_rw = false;
+  File.open(d)? e is IoError {
+    caught_rw = true;
+    assert(e.code == 13, "open on a directory reports EACCES(13), got {e.code}");
+  }!;
+  assert(caught_rw, "open on a directory raises");
+
+  bool caught_create = false;
+  File.create(d)? e is IoError {
+    caught_create = true;
+    assert(e.code == 13, "create on a directory reports EACCES(13), got {e.code}");
+  }!;
+  assert(caught_create, "create on a directory raises");
+
+  // File.size routes through pal_file_open and widens its -errno, so a failure
+  // that is not ENOENT must survive the widening intact too.
+  bool caught_size = false;
+  File.size(d)? e is IoError {
+    caught_size = true;
+    assert(e.code == 13, "File.size on a directory reports EACCES(13), got {e.code}");
+  }!;
+  assert(caught_size, "File.size on a directory raises");
 }
 
 file_read_after_close() `test(exclude: wasm) {

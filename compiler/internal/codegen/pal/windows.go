@@ -419,43 +419,118 @@ func (p *WindowsPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoFn *ir.Func) {
 	errBlk.NewRet(negErrno)
 }
 
-// EmitFileOpen declares UCRT @_open and defines @pal_file_open.
-// Maps mode to _O_* flags:
+// emitWinErrToErrno maps a Win32 error code (as returned by GetLastError) to the
+// closest POSIX errno, emitting a select chain into blk and returning the i32
+// result. Win32 APIs report failure via GetLastError, NOT the CRT errno — unlike
+// the UCRT-based calls (_read/_write/_close) which set errno natively. The
+// promise_io_* bridges fold errno into the return value, so any PAL entry point
+// built on a Win32 API must translate here or the caller sees -0 (= success).
+// (_dosmaperr would do this, but it's an internal CRT symbol absent from the
+// import lib, so the common cases are mapped inline.)
 //
-//	0 = _O_RDWR                     (open)
-//	1 = _O_RDONLY                   (open_read)
-//	2 = _O_RDWR|_O_CREAT|_O_TRUNC   (reserved for create_readable, T1447 — kept but unemitted)
-//	3 = _O_RDWR|_O_CREAT|_O_APPEND  (reserved for append_readable, T1447 — kept but unemitted)
-//	4 = _O_WRONLY                   (open_write)
-//	5 = _O_WRONLY|_O_CREAT|_O_TRUNC (create)
-//	6 = _O_WRONLY|_O_CREAT|_O_APPEND (append)
+//	ERROR_FILE_NOT_FOUND=2, ERROR_PATH_NOT_FOUND=3     → ENOENT(2)
+//	ERROR_ACCESS_DENIED=5, ERROR_SHARING_VIOLATION=32  → EACCES(13)
+//	ERROR_FILE_EXISTS=80, ERROR_ALREADY_EXISTS=183     → EEXIST(17)
+//	ERROR_DIRECTORY=267                                → ENOTDIR(20)
+//	anything else                                      → EINVAL(22)
+//
+// Every produced code is rendered by _io_strerror in modules/io/io.pr.
+func (p *WindowsPAL) emitWinErrToErrno(blk *ir.Block, winErr value.Value) value.Value {
+	eq := func(code int64) value.Value {
+		return blk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, code))
+	}
+	isNotFound := blk.NewOr(eq(2), eq(3))
+	isDenied := blk.NewOr(eq(5), eq(32))
+	isExists := blk.NewOr(eq(80), eq(183))
+	isNotDir := eq(267)
+
+	mapped := blk.NewSelect(isNotDir, constant.NewInt(irtypes.I32, 20), constant.NewInt(irtypes.I32, 22))
+	mapped = blk.NewSelect(isExists, constant.NewInt(irtypes.I32, 17), mapped)
+	mapped = blk.NewSelect(isDenied, constant.NewInt(irtypes.I32, 13), mapped)
+	return blk.NewSelect(isNotFound, constant.NewInt(irtypes.I32, 2), mapped)
+}
+
+// emitWinErrReturnI32 stores the errno equivalent of a Win32 error code into
+// *_errno() and returns -errno (i32) — the Win32 counterpart of
+// emitNegErrnoReturnI32. errno is stored as well as returned so @pal_errno stays
+// consistent for callers that read it separately.
+func (p *WindowsPAL) emitWinErrReturnI32(blk *ir.Block, winErr value.Value, errnoFn *ir.Func) {
+	errnoPtr := blk.NewCall(errnoFn)
+	mapped := p.emitWinErrToErrno(blk, winErr)
+	blk.NewStore(mapped, errnoPtr)
+	blk.NewRet(blk.NewSub(constant.NewInt(irtypes.I32, 0), mapped))
+}
+
+// EmitFileOpen declares Win32 @CreateFileA + UCRT @_open_osfhandle and defines
+// @pal_file_open.
+//
+// T1742: files are opened through CreateFileA rather than UCRT _open so the share
+// mode can include FILE_SHARE_DELETE — no CRT open grants it (none of the _SH_DENY*
+// modes control delete sharing), and without it an open file cannot be renamed over
+// or removed by anyone, including the same process. The resulting HANDLE is wrapped
+// in a CRT file descriptor via _open_osfhandle so _read/_write/_lseeki64/_close keep
+// working unchanged, and _get_osfhandle can recover the HANDLE where a Win32 call
+// needs one (FlushFileBuffers, LockFileEx — T1520).
+//
+// Mode maps to dwDesiredAccess / dwCreationDisposition / CRT descriptor flags:
+//
+//	0 = RDWR                 GENERIC_READ|GENERIC_WRITE, OPEN_EXISTING              (open)
+//	1 = RDONLY               GENERIC_READ,               OPEN_EXISTING              (open_read)
+//	2 = RDWR create/trunc    GENERIC_READ|GENERIC_WRITE, CREATE_ALWAYS              (reserved, T1447)
+//	3 = RDWR create/append   GENERIC_READ|GENERIC_WRITE, OPEN_ALWAYS  + _O_APPEND   (reserved, T1447)
+//	4 = WRONLY               GENERIC_WRITE,              OPEN_EXISTING              (open_write)
+//	5 = WRONLY create/trunc  GENERIC_WRITE,              CREATE_ALWAYS              (create)
+//	6 = WRONLY create/append GENERIC_WRITE,              OPEN_ALWAYS  + _O_APPEND   (append)
+//
+// Append is not emulated by hand: _open_osfhandle(h, _O_APPEND) sets the descriptor's
+// FAPPEND bit and UCRT _write seeks to end before each write — byte-identical to what
+// _open(_O_APPEND) did. FILE_APPEND_DATA access was rejected because it would break
+// pal_file_seek on append handles.
+//
+// Binary mode needs no flag: _open_osfhandle sets FTEXT only when _O_TEXT is passed,
+// so binary is the default (the old explicit _O_BINARY becomes unnecessary, not lost).
 //
 // Modes 2 and 3 are intentionally retained but currently unemitted from Promise —
 // reserved for create_readable/append_readable (T1447). See the POSIX comment.
 func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
-	// declare i32 @_open(i8*, i32, i32) nounwind
-	ucrtOpen := getOrDeclareFunc(module, "_open", irtypes.I32,
-		ir.NewParam("filename", irtypes.I8Ptr),
-		ir.NewParam("oflag", irtypes.I32),
-		ir.NewParam("pmode", irtypes.I32))
+	// declare i8* @CreateFileA(i8*, i32, i32, i8*, i32, i32, i8*) nounwind
+	createFileA := getOrDeclareFunc(module, "CreateFileA", irtypes.I8Ptr,
+		ir.NewParam("lpFileName", irtypes.I8Ptr),
+		ir.NewParam("dwDesiredAccess", irtypes.I32),
+		ir.NewParam("dwShareMode", irtypes.I32),
+		ir.NewParam("lpSecurityAttributes", irtypes.I8Ptr),
+		ir.NewParam("dwCreationDisposition", irtypes.I32),
+		ir.NewParam("dwFlagsAndAttributes", irtypes.I32),
+		ir.NewParam("hTemplateFile", irtypes.I8Ptr))
+	// declare i32 @_open_osfhandle(i64, i32) nounwind
+	openOsfHandle := getOrDeclareFunc(module, "_open_osfhandle", irtypes.I32,
+		ir.NewParam("osfhandle", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	closeHandle := winDeclareCloseHandle(module)
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	errnoFn := p.getOrDeclareErrnoFn(module)
 
-	// Windows UCRT flags: _O_RDONLY=0, _O_WRONLY=1, _O_RDWR=2, _O_CREAT=0x100,
-	// _O_TRUNC=0x200, _O_APPEND=0x8, _O_BINARY=0x8000
 	const (
-		oBinary         = 0x8000
-		oRDWR           = 2 | oBinary
-		oRDONLY         = 0 | oBinary
-		oCreateTrunc    = 2 | 0x100 | 0x200 | oBinary
-		oCreateAppend   = 2 | 0x100 | 0x8 | oBinary
-		oWROnly         = 1 | oBinary
-		oWrCreateTrunc  = 1 | 0x100 | 0x200 | oBinary
-		oWrCreateAppend = 1 | 0x100 | 0x8 | oBinary
+		genericRead  = 0x80000000
+		genericWrite = 0x40000000
+		genericRW    = genericRead | genericWrite
+		// FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE — the point of T1742.
+		shareAll     = 0x1 | 0x2 | 0x4
+		createAlways = 2
+		openExisting = 3
+		openAlways   = 4
+		attrNormal   = 0x80 // FILE_ATTRIBUTE_NORMAL
+		oAppend      = 0x8  // _O_APPEND (CRT descriptor flag)
 	)
 
-	fn := module.NewFunc("pal_file_open", irtypes.I32,
+	// getOrDeclareFunc, not NewFunc: EmitFileStatSize forward-declares
+	// @pal_file_open, and emitting a second same-named function would produce a
+	// duplicate-symbol module. Adopting the declaration keeps the emitters
+	// order-independent in both directions (B0027).
+	fn := getOrDeclareFunc(module, "pal_file_open", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr),
 		ir.NewParam("mode", irtypes.I32))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	addFuncAttr(fn, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 
 	isRead := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 1))
@@ -465,22 +540,59 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	isWrCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 5))
 	isWrAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 6))
 
-	f1 := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, oRDONLY), constant.NewInt(irtypes.I32, oRDWR))
-	f2 := entry.NewSelect(isCreate, constant.NewInt(irtypes.I32, oCreateTrunc), f1)
-	f3 := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
-	f4 := entry.NewSelect(isWrite, constant.NewInt(irtypes.I32, oWROnly), f3)
-	f5 := entry.NewSelect(isWrCreate, constant.NewInt(irtypes.I32, oWrCreateTrunc), f4)
-	flags := entry.NewSelect(isWrAppend, constant.NewInt(irtypes.I32, oWrCreateAppend), f5)
+	// dwDesiredAccess: modes 4/5/6 are write-only, mode 1 is read-only, rest are RDWR.
+	isWriteOnly := entry.NewOr(entry.NewOr(isWrite, isWrCreate), isWrAppend)
+	accessRest := entry.NewSelect(isWriteOnly,
+		constant.NewInt(irtypes.I32, genericWrite), constant.NewInt(irtypes.I32, genericRW))
+	access := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, genericRead), accessRest)
 
-	// _open(path, flags, _S_IREAD|_S_IWRITE=0x180)
-	fd := entry.NewCall(ucrtOpen, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0x180))
+	// dwCreationDisposition: modes 2/5 truncate-or-create, modes 3/6 open-or-create,
+	// everything else requires an existing file.
+	isTruncating := entry.NewOr(isCreate, isWrCreate)
+	isAppending := entry.NewOr(isAppend, isWrAppend)
+	dispRest := entry.NewSelect(isAppending,
+		constant.NewInt(irtypes.I32, openAlways), constant.NewInt(irtypes.I32, openExisting))
+	disposition := entry.NewSelect(isTruncating, constant.NewInt(irtypes.I32, createAlways), dispRest)
 
-	isErr := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	// CRT descriptor flags: only _O_APPEND matters (binary is the default).
+	crtFlags := entry.NewSelect(isAppending,
+		constant.NewInt(irtypes.I32, oAppend), constant.NewInt(irtypes.I32, 0))
+
+	handle := entry.NewCall(createFileA, fn.Params[0], access,
+		constant.NewInt(irtypes.I32, shareAll), constant.NewNull(irtypes.I8Ptr),
+		disposition, constant.NewInt(irtypes.I32, attrNormal), constant.NewNull(irtypes.I8Ptr))
+	// Capture the Win32 error immediately — any intervening call could clobber it.
+	winErr := entry.NewCall(getLastError)
+
+	handleInt := entry.NewPtrToInt(handle, irtypes.I64)
+	// INVALID_HANDLE_VALUE is (HANDLE)-1, not null.
+	isInvalid := entry.NewICmp(enum.IPredEQ, handleInt, constant.NewInt(irtypes.I64, -1))
+	createFailBlk := fn.NewBlock(".createfail")
+	gotHandleBlk := fn.NewBlock(".got_handle")
+	entry.NewCondBr(isInvalid, createFailBlk, gotHandleBlk)
+
+	p.emitWinErrReturnI32(createFailBlk, winErr, errnoFn)
+
+	// _open_osfhandle takes ownership of the HANDLE on success — _close then frees
+	// it, so EmitFileClose/Read/Write/Seek stay unchanged.
+	fd := gotHandleBlk.NewCall(openOsfHandle, handleInt, crtFlags)
+	isFdErr := gotHandleBlk.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	osfFailBlk := fn.NewBlock(".osf_fail")
 	okBlk := fn.NewBlock(".ok")
-	errBlk := fn.NewBlock(".err")
-	entry.NewCondBr(isErr, errBlk, okBlk)
+	gotHandleBlk.NewCondBr(isFdErr, osfFailBlk, okBlk)
 
-	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+	// Ownership did NOT transfer — close the HANDLE ourselves or it leaks.
+	// _open_osfhandle sets errno itself (EMFILE/EINVAL); no Win32 translation needed.
+	// Read errno before CloseHandle so nothing can clobber it in between. The CRT
+	// never *clears* errno on success, so substitute EINVAL if it reads back 0 —
+	// returning -0 would hand the caller fd 0 (stdin) for a HANDLE we just closed.
+	osfErrnoPtr := osfFailBlk.NewCall(errnoFn)
+	osfErrnoRaw := osfFailBlk.NewLoad(irtypes.I32, osfErrnoPtr)
+	osfErrnoZero := osfFailBlk.NewICmp(enum.IPredEQ, osfErrnoRaw, constant.NewInt(irtypes.I32, 0))
+	osfErrno := osfFailBlk.NewSelect(osfErrnoZero, constant.NewInt(irtypes.I32, 22), osfErrnoRaw)
+	osfFailBlk.NewCall(closeHandle, handle)
+	osfFailBlk.NewRet(osfFailBlk.NewSub(constant.NewInt(irtypes.I32, 0), osfErrno))
+
 	okBlk.NewRet(fd)
 	return fn
 }
@@ -549,9 +661,10 @@ func (p *WindowsPAL) EmitFileClose(module *ir.Module) *ir.Func {
 	ucrtClose := getOrDeclareFunc(module, "_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
 
-	fn := module.NewFunc("pal_file_close", irtypes.I32,
+	// getOrDeclareFunc: EmitFileStatSize may have forward-declared this (B0027).
+	fn := getOrDeclareFunc(module, "pal_file_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	addFuncAttr(fn, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtClose, fn.Params[0])
 
@@ -572,11 +685,12 @@ func (p *WindowsPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 		ir.NewParam("offset", irtypes.I64),
 		ir.NewParam("origin", irtypes.I32))
 
-	fn := module.NewFunc("pal_file_seek", irtypes.I64,
+	// getOrDeclareFunc: EmitFileStatSize may have forward-declared this (B0027).
+	fn := getOrDeclareFunc(module, "pal_file_seek", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("offset", irtypes.I64),
 		ir.NewParam("whence", irtypes.I32))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	addFuncAttr(fn, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtLseek, fn.Params[0], fn.Params[1], fn.Params[2])
 
@@ -590,17 +704,22 @@ func (p *WindowsPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitFileStatSize defines @pal_file_stat_size using _open+_lseeki64+_close.
+// EmitFileStatSize defines @pal_file_stat_size by opening the file read-only and
+// seeking to its end. It routes through @pal_file_open / @pal_file_seek /
+// @pal_file_close rather than calling the CRT directly so the FILE_SHARE_DELETE
+// open path (T1742) covers it as well — a raw _open here would leave a
+// deny-delete window open on every File.size call.
+//
+// pal_file_open already returns -errno on failure, so the error path just widens it.
 func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
-	ucrtOpen := getOrDeclareFunc(module, "_open", irtypes.I32,
-		ir.NewParam("filename", irtypes.I8Ptr),
-		ir.NewParam("oflag", irtypes.I32),
-		ir.NewParam("pmode", irtypes.I32))
-	ucrtLseek := getOrDeclareFunc(module, "_lseeki64", irtypes.I64,
+	palOpen := getOrDeclareFunc(module, "pal_file_open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("mode", irtypes.I32))
+	palSeek := getOrDeclareFunc(module, "pal_file_seek", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("offset", irtypes.I64),
-		ir.NewParam("origin", irtypes.I32))
-	ucrtClose := getOrDeclareFunc(module, "_close", irtypes.I32,
+		ir.NewParam("whence", irtypes.I32))
+	palClose := getOrDeclareFunc(module, "pal_file_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
 
 	fn := module.NewFunc("pal_file_stat_size", irtypes.I64,
@@ -611,16 +730,18 @@ func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	failBlk := fn.NewBlock(".fail")
 	gotFdBlk := fn.NewBlock(".got_fd")
 
-	// _open(path, _O_RDONLY|_O_BINARY=0x8000, 0)
-	fd := entry.NewCall(ucrtOpen, fn.Params[0], constant.NewInt(irtypes.I32, 0x8000), constant.NewInt(irtypes.I32, 0))
+	// pal_file_open(path, mode 1 = read-only)
+	fd := entry.NewCall(palOpen, fn.Params[0], constant.NewInt(irtypes.I32, 1))
 	isNeg := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
 	entry.NewCondBr(isNeg, failBlk, gotFdBlk)
 
-	size := gotFdBlk.NewCall(ucrtLseek, fd, constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I32, 2))
-	gotFdBlk.NewCall(ucrtClose, fd)
+	// pal_file_seek(fd, 0, SEEK_END=2)
+	size := gotFdBlk.NewCall(palSeek, fd, constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I32, 2))
+	gotFdBlk.NewCall(palClose, fd)
 	gotFdBlk.NewRet(size)
 
-	p.emitNegErrnoReturnI64(failBlk, p.getOrDeclareErrnoFn(module))
+	// fd is already -errno; widen to the i64 return.
+	failBlk.NewRet(failBlk.NewSExt(fd, irtypes.I64))
 	return fn
 }
 
@@ -881,12 +1002,12 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	strlenFn := getOrDeclareFunc(module, "strlen", irtypes.I64,
 		ir.NewParam("s", irtypes.I8Ptr))
 	// T0808: FindFirstFileA reports failure via GetLastError, NOT the CRT errno — unlike
-	// the UCRT-based file ops (_open etc.) which set errno natively. The bridge
+	// the UCRT-based file ops (_read/_write etc.) which set errno natively. The bridge
 	// (promise_io_dir_open) returns -errno on a null handle, so we must translate
 	// the Win32 error into errno here. Without this, errno stays 0, the bridge
 	// returns 0, and the caller mistakes 0 for a valid handle → null-pointer deref
-	// in pal_dir_next_name. (_dosmaperr would do this, but it's an internal CRT
-	// symbol absent from the import lib, so we map the common cases inline.)
+	// in pal_dir_next_name. The translation itself lives in emitWinErrToErrno,
+	// shared with pal_file_open (T1742).
 	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
 	errnoFn := p.getOrDeclareErrnoFn(module)
 
@@ -938,21 +1059,9 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	entry.NewCondBr(isInvalid, failBlk, okBlk)
 
 	// Failure: translate the Win32 error to errno (so the bridge returns -errno
-	// rather than -0), free state, return null. Map the cases that matter for a
-	// directory open: not-found → ENOENT(2), access-denied → EACCES(13),
-	// path-is-a-file → ENOTDIR(20); anything else → EINVAL(22).
-	//   ERROR_FILE_NOT_FOUND=2, ERROR_PATH_NOT_FOUND=3, ERROR_ACCESS_DENIED=5,
-	//   ERROR_DIRECTORY=267.
+	// rather than -0), free state, return null. See emitWinErrToErrno for the map.
 	errnoPtr := failBlk.NewCall(errnoFn)
-	isErr2 := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 2))
-	isErr3 := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 3))
-	isNotFound := failBlk.NewOr(isErr2, isErr3)
-	isDenied := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 5))
-	isNotDir := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 267))
-	mapped := failBlk.NewSelect(isNotDir, constant.NewInt(irtypes.I32, 20), constant.NewInt(irtypes.I32, 22))
-	mapped = failBlk.NewSelect(isDenied, constant.NewInt(irtypes.I32, 13), mapped)
-	mapped = failBlk.NewSelect(isNotFound, constant.NewInt(irtypes.I32, 2), mapped)
-	failBlk.NewStore(mapped, errnoPtr)
+	failBlk.NewStore(p.emitWinErrToErrno(failBlk, winErr), errnoPtr)
 	failBlk.NewCall(palFree, state)
 	failBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 

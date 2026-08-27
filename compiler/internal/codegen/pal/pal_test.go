@@ -5,6 +5,10 @@ import (
 	"testing"
 
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
+	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 func TestPosixPALEmitWrite(t *testing.T) {
@@ -1628,6 +1632,15 @@ func assertContains(t *testing.T, out, substr, msg string) {
 	}
 }
 
+// assertNotContains is the negative counterpart — used to guard against a
+// partially-migrated emitter still referencing the replaced symbol.
+func assertNotContains(t *testing.T, out, substr, msg string) {
+	t.Helper()
+	if strings.Contains(out, substr) {
+		t.Errorf("%s: unexpected %q", msg, substr)
+	}
+}
+
 func TestFileOpenPosix(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1688,23 +1701,82 @@ func TestFileOpenWindows(t *testing.T) {
 	if fn.Name() != "pal_file_open" {
 		t.Errorf("expected pal_file_open, got %s", fn.Name())
 	}
-	assertContains(t, out, "@_open(i8*", "_open declaration")
 	assertContains(t, out, "define i32 @pal_file_open(", "pal_file_open definition")
-	// _O_BINARY=0x8000 flag must be included (llir renders as u0x8000)
-	assertContains(t, out, "0x8000", "_O_BINARY flag in mode mapping")
-	// Mode-to-flags select chain (modes 2/3 reserved for T1447; 4/5/6 new)
+	// T1742: opens go through CreateFileA + _open_osfhandle, never UCRT _open.
+	assertContains(t, out, "@CreateFileA(i8*", "CreateFileA declaration")
+	assertContains(t, out, "@_open_osfhandle(i64", "_open_osfhandle declaration")
+	assertNotContains(t, out, "@_open(", "UCRT _open must be gone (partial migration guard)")
+	// dwShareMode = FILE_SHARE_READ|WRITE|DELETE = 7 — the point of T1742.
+	assertContains(t, out, "i32 7, i8* null", "FILE_SHARE_DELETE in dwShareMode")
+	// Mode-to-flags select chain (modes 2/3 reserved for T1447).
+	assertContains(t, out, "icmp eq i32 %mode, 1", "read mode check")
+	assertContains(t, out, "icmp eq i32 %mode, 2", "create (read/write) mode check")
+	assertContains(t, out, "icmp eq i32 %mode, 3", "append (read/write) mode check")
 	assertContains(t, out, "icmp eq i32 %mode, 4", "write mode check")
 	assertContains(t, out, "icmp eq i32 %mode, 5", "create (write-only) mode check")
 	assertContains(t, out, "icmp eq i32 %mode, 6", "append (write-only) mode check")
-	// Write-only flag values (all carry _O_BINARY=0x8000):
-	//   mode 4 _O_WRONLY                     = 1|0x8000                  = 32769
-	//   mode 5 _O_WRONLY|_O_CREAT|_O_TRUNC   = 1|0x100|0x200|0x8000      = 33537
-	//   mode 6 _O_WRONLY|_O_CREAT|_O_APPEND  = 1|0x100|0x8|0x8000        = 33033
-	assertContains(t, out, "i32 32769", "O_WRONLY flag value")
-	assertContains(t, out, "i32 33537", "WRONLY create flag value")
-	assertContains(t, out, "i32 33033", "WRONLY append flag value")
-	// _open called with permission mode argument
-	assertContains(t, out, "call i32 @_open(", "_open called")
+	// dwDesiredAccess values: GENERIC_READ|GENERIC_WRITE / GENERIC_READ / GENERIC_WRITE.
+	assertContains(t, out, "i32 u0xC0000000", "GENERIC_READ|GENERIC_WRITE")
+	assertContains(t, out, "i32 u0x80000000", "GENERIC_READ")
+	assertContains(t, out, "i32 u0x40000000", "GENERIC_WRITE")
+	// dwCreationDisposition: CREATE_ALWAYS=2 / OPEN_EXISTING=3 / OPEN_ALWAYS=4.
+	assertContains(t, out, "i32 4, i32 3", "OPEN_ALWAYS / OPEN_EXISTING disposition select")
+	assertContains(t, out, "i32 2, i32 %", "CREATE_ALWAYS disposition select")
+	// _O_APPEND=8 on the CRT descriptor flags (modes 3 and 6).
+	assertContains(t, out, "i32 8, i32 0", "_O_APPEND CRT descriptor flag")
+	// INVALID_HANDLE_VALUE is (HANDLE)-1, compared after ptrtoint.
+	assertContains(t, out, "ptrtoint i8* %", "handle widened for the INVALID_HANDLE_VALUE check")
+	assertContains(t, out, "icmp eq i64 %", "INVALID_HANDLE_VALUE comparison")
+	assertContains(t, out, "@CloseHandle(", "CloseHandle on the _open_osfhandle failure edge")
+	// Win32 → errno translation (CreateFileA reports via GetLastError, not errno).
+	assertContains(t, out, "@GetLastError()", "GetLastError captured for the failure path")
+	assertContains(t, out, "i32 20, i32 22", "ENOTDIR / EINVAL tail of the errno select chain")
+	assertContains(t, out, "i32 13, i32 %", "EACCES in the errno select chain")
+}
+
+// TestWinErrToErrnoMapping pins the Win32 → errno table shared by pal_file_open
+// and pal_dir_open (T1742). Every produced errno must be one _io_strerror renders.
+func TestWinErrToErrnoMapping(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := module.NewFunc("probe", irtypes.I32, ir.NewParam("winerr", irtypes.I32))
+	blk := fn.NewBlock(".entry")
+	blk.NewRet(p.emitWinErrToErrno(blk, fn.Params[0]))
+	out := module.String()
+
+	for _, tc := range []struct {
+		code string
+		what string
+	}{
+		{"2", "ERROR_FILE_NOT_FOUND"},
+		{"3", "ERROR_PATH_NOT_FOUND"},
+		{"5", "ERROR_ACCESS_DENIED"},
+		{"32", "ERROR_SHARING_VIOLATION"},
+		{"80", "ERROR_FILE_EXISTS"},
+		{"183", "ERROR_ALREADY_EXISTS"},
+		{"267", "ERROR_DIRECTORY"},
+	} {
+		assertContains(t, out, "icmp eq i32 %winerr, "+tc.code+"\n", tc.what+" tested")
+	}
+	// errno results: ENOENT(2), EACCES(13), EEXIST(17), ENOTDIR(20), EINVAL(22).
+	assertContains(t, out, "i32 20, i32 22", "ENOTDIR / EINVAL default")
+	assertContains(t, out, "i32 17, i32 %", "EEXIST")
+	assertContains(t, out, "i32 13, i32 %", "EACCES")
+	assertContains(t, out, "i32 2, i32 %", "ENOENT")
+}
+
+// TestEmitDirOpenWindowsErrno guards the T0808 behavior after the T1742 refactor
+// moved the mapping into the shared emitWinErrToErrno helper.
+func TestEmitDirOpenWindowsErrno(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	p := &WindowsPAL{}
+	p.EmitDirOpen(module)
+	out := module.String()
+
+	assertContains(t, out, "@GetLastError()", "captures the Win32 error")
+	assertContains(t, out, "@_errno()", "stores into the CRT errno")
+	assertContains(t, out, ", 267\n", "ERROR_DIRECTORY still tested")
+	assertContains(t, out, "i32 20, i32 22", "ENOTDIR / EINVAL still mapped")
 }
 
 func TestFileOpenWasm(t *testing.T) {
@@ -2016,9 +2088,12 @@ func TestFileStatSizeWindows(t *testing.T) {
 	if fn.Name() != "pal_file_stat_size" {
 		t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
 	}
-	assertContains(t, out, "call i32 @_open(", "calls _open")
-	assertContains(t, out, "call i64 @_lseeki64(", "calls _lseeki64")
-	assertContains(t, out, "call i32 @_close(", "calls _close")
+	// T1742: stat_size routes through the PAL open path so it inherits
+	// FILE_SHARE_DELETE instead of opening a raw deny-delete descriptor.
+	assertContains(t, out, "call i32 @pal_file_open(i8* %path, i32 1)", "opens read-only via pal_file_open")
+	assertContains(t, out, "call i64 @pal_file_seek(", "seeks to end via pal_file_seek")
+	assertContains(t, out, "call i32 @pal_file_close(", "closes via pal_file_close")
+	assertNotContains(t, out, "call i32 @_open(", "must not open the file directly")
 }
 
 // B0027: EmitFileStatSize must work without prior EmitFileOpen/Close/Seek.
@@ -2048,9 +2123,36 @@ func TestFileStatSizeOrderIndependent(t *testing.T) {
 		if fn.Name() != "pal_file_stat_size" {
 			t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
 		}
-		assertContains(t, out, "@_open(", "declares _open via getOrDeclareFunc")
-		assertContains(t, out, "@_lseeki64(", "declares _lseeki64 via getOrDeclareFunc")
-		assertContains(t, out, "@_close(", "declares _close via getOrDeclareFunc")
+		assertContains(t, out, "@pal_file_open(", "declares pal_file_open via getOrDeclareFunc")
+		assertContains(t, out, "@pal_file_seek(", "declares pal_file_seek via getOrDeclareFunc")
+		assertContains(t, out, "@pal_file_close(", "declares pal_file_close via getOrDeclareFunc")
+	})
+	// T1742: the Windows stat_size now calls the PAL file ops instead of the CRT,
+	// so emitting it FIRST forward-declares them. The definers must adopt that
+	// declaration rather than emit a second same-named function — two @pal_file_open
+	// entries is a duplicate-symbol module that only fails at opt/llc time.
+	t.Run("WindowsStatSizeBeforeDefiners", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WindowsPAL{}
+		p.EmitErrno(module)
+		p.EmitFileStatSize(module)
+		p.EmitFileOpen(module)
+		p.EmitFileSeek(module)
+		p.EmitFileClose(module)
+		out := module.String()
+
+		for _, tc := range []struct{ name, ret string }{
+			{"pal_file_open", "i32"},
+			{"pal_file_seek", "i64"},
+			{"pal_file_close", "i32"},
+		} {
+			if n := strings.Count(out, "define "+tc.ret+" @"+tc.name+"("); n != 1 {
+				t.Errorf("expected exactly 1 definition of @%s, got %d (duplicate symbol)", tc.name, n)
+			}
+			if strings.Contains(out, "declare "+tc.ret+" @"+tc.name+"(") {
+				t.Errorf("@%s left as a bodiless declaration alongside its definition", tc.name)
+			}
+		}
 	})
 }
 
@@ -4875,5 +4977,443 @@ func TestPosixPALEmitPipeOpsUseLibcSyscalls(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in POSIX pipe ops IR", want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T1742: pal_file_open on Windows — behavioural coverage of the CreateFileA path
+// ---------------------------------------------------------------------------
+
+// winOpenArgs is the CreateFileA / _open_osfhandle argument set that
+// @pal_file_open computes for one `mode` value.
+type winOpenArgs struct {
+	access      int64 // dwDesiredAccess
+	share       int64 // dwShareMode
+	disposition int64 // dwCreationDisposition
+	attributes  int64 // dwFlagsAndAttributes
+	crtFlags    int64 // _open_osfhandle flags
+}
+
+// evalWinFileOpenMode constant-folds @pal_file_open's mode dispatch for a single
+// `mode` value and reports the arguments it would pass to CreateFileA and
+// _open_osfhandle.
+//
+// String assertions cannot do this: the emitter builds one select chain shared by
+// all seven modes, so every constant in the table appears in the IR regardless of
+// which mode selects it. Swapping the truncate and append predicates — CREATE_ALWAYS
+// for append, OPEN_ALWAYS for create — leaves the module text byte-comparable at the
+// level of "contains i32 2" and "contains i32 4", yet silently truncates on
+// File.append. Folding the chain is the only way to pin mode → flags.
+func evalWinFileOpenMode(t *testing.T, fn *ir.Func, mode int64) winOpenArgs {
+	t.Helper()
+
+	ints := map[value.Value]int64{}
+	bools := map[value.Value]bool{}
+	modeParam := fn.Params[1]
+
+	// resolveInt / resolveBool report ok=false for anything not derived from the
+	// mode parameter (the HANDLE ptrtoint, the GetLastError result). Instructions
+	// with an unresolvable operand are skipped rather than fatal — only the mode
+	// dispatch is being folded.
+	resolveInt := func(v value.Value) (int64, bool) {
+		if c, ok := v.(*constant.Int); ok {
+			return c.X.Int64(), true
+		}
+		if v == value.Value(modeParam) {
+			return mode, true
+		}
+		n, ok := ints[v]
+		return n, ok
+	}
+	resolveBool := func(v value.Value) (bool, bool) {
+		if c, ok := v.(*constant.Int); ok {
+			return c.X.Sign() != 0, true
+		}
+		b, ok := bools[v]
+		return b, ok
+	}
+
+	fold := func(blk *ir.Block) {
+		for _, inst := range blk.Insts {
+			switch in := inst.(type) {
+			case *ir.InstICmp:
+				x, okX := resolveInt(in.X)
+				y, okY := resolveInt(in.Y)
+				if okX && okY {
+					if in.Pred != enum.IPredEQ {
+						t.Fatalf("mode dispatch uses %v; the folder only models eq", in.Pred)
+					}
+					bools[in] = x == y
+				}
+			case *ir.InstOr:
+				x, okX := resolveBool(in.X)
+				y, okY := resolveBool(in.Y)
+				if okX && okY {
+					bools[in] = x || y
+				}
+			case *ir.InstSelect:
+				cond, okC := resolveBool(in.Cond)
+				tv, okT := resolveInt(in.ValueTrue)
+				fv, okF := resolveInt(in.ValueFalse)
+				if okC && okT && okF {
+					if cond {
+						ints[in] = tv
+					} else {
+						ints[in] = fv
+					}
+				}
+			}
+		}
+	}
+
+	// The mode dispatch lives entirely in .entry; crtFlags is consumed by the
+	// _open_osfhandle call in .got_handle.
+	var got winOpenArgs
+	seenCreate, seenOsf := false, false
+	for _, blk := range fn.Blocks {
+		fold(blk)
+		for _, inst := range blk.Insts {
+			call, ok := inst.(*ir.InstCall)
+			if !ok {
+				continue
+			}
+			callee, ok := call.Callee.(*ir.Func)
+			if !ok {
+				continue
+			}
+			switch callee.Name() {
+			case "CreateFileA":
+				seenCreate = true
+				if len(call.Args) != 7 {
+					t.Fatalf("CreateFileA takes 7 arguments, call has %d", len(call.Args))
+				}
+				if call.Args[0] != value.Value(fn.Params[0]) {
+					t.Errorf("CreateFileA lpFileName is %v, want the path parameter", call.Args[0])
+				}
+				for _, f := range []struct {
+					name string
+					idx  int
+					dst  *int64
+				}{
+					{"dwDesiredAccess", 1, &got.access},
+					{"dwShareMode", 2, &got.share},
+					{"dwCreationDisposition", 4, &got.disposition},
+					{"dwFlagsAndAttributes", 5, &got.attributes},
+				} {
+					v, ok := resolveInt(call.Args[f.idx])
+					if !ok {
+						t.Fatalf("mode %d: CreateFileA %s did not fold to a constant", mode, f.name)
+					}
+					*f.dst = v
+				}
+			case "_open_osfhandle":
+				seenOsf = true
+				if len(call.Args) != 2 {
+					t.Fatalf("_open_osfhandle takes 2 arguments, call has %d", len(call.Args))
+				}
+				v, ok := resolveInt(call.Args[1])
+				if !ok {
+					t.Fatalf("mode %d: _open_osfhandle flags did not fold to a constant", mode)
+				}
+				got.crtFlags = v
+			}
+		}
+	}
+	if !seenCreate {
+		t.Fatal("pal_file_open never calls CreateFileA")
+	}
+	if !seenOsf {
+		t.Fatal("pal_file_open never calls _open_osfhandle")
+	}
+	return got
+}
+
+// TestFileOpenWindowsModeMapping pins each Promise open mode to the exact Win32
+// access rights, share mode and creation disposition it must produce (T1742).
+// The mode numbers are the PAL contract shared with the POSIX and WASM backends;
+// modes 2 and 3 are reserved for create_readable/append_readable (T1447).
+func TestFileOpenWindowsModeMapping(t *testing.T) {
+	const (
+		genericRead  = 0x80000000
+		genericWrite = 0x40000000
+		genericRW    = genericRead | genericWrite
+
+		// FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE. Delete sharing is
+		// the entire point of T1742 — no CRT open can grant it.
+		shareAll = 0x7
+
+		createAlways = 2
+		openExisting = 3
+		openAlways   = 4
+
+		attrNormal = 0x80
+		oAppend    = 0x8
+	)
+
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileOpen(module)
+
+	for _, tc := range []struct {
+		mode int64
+		what string
+		want winOpenArgs
+	}{
+		{0, "open (read/write, must exist)",
+			winOpenArgs{genericRW, shareAll, openExisting, attrNormal, 0}},
+		{1, "open_read (read-only, must exist)",
+			winOpenArgs{genericRead, shareAll, openExisting, attrNormal, 0}},
+		{2, "reserved create_readable (read/write, truncate-or-create)",
+			winOpenArgs{genericRW, shareAll, createAlways, attrNormal, 0}},
+		{3, "reserved append_readable (read/write, open-or-create, append)",
+			winOpenArgs{genericRW, shareAll, openAlways, attrNormal, oAppend}},
+		{4, "open_write (write-only, must exist, no truncate)",
+			winOpenArgs{genericWrite, shareAll, openExisting, attrNormal, 0}},
+		{5, "create (write-only, truncate-or-create)",
+			winOpenArgs{genericWrite, shareAll, createAlways, attrNormal, 0}},
+		{6, "append (write-only, open-or-create, append)",
+			winOpenArgs{genericWrite, shareAll, openAlways, attrNormal, oAppend}},
+	} {
+		got := evalWinFileOpenMode(t, fn, tc.mode)
+		if got != tc.want {
+			t.Errorf("mode %d — %s:\n got  %+v\n want %+v", tc.mode, tc.what, got, tc.want)
+		}
+	}
+
+	// An out-of-range mode must still be a well-defined open, not a wild flag
+	// combination: it falls through to the read/write, must-exist default.
+	if got := evalWinFileOpenMode(t, fn, 99); got !=
+		(winOpenArgs{genericRW, shareAll, openExisting, attrNormal, 0}) {
+		t.Errorf("unknown mode 99 must fall back to RDWR/OPEN_EXISTING, got %+v", got)
+	}
+}
+
+// TestFileOpenWindowsShareDeleteOnEveryMode is the one-line statement of T1742:
+// no mode may ever drop FILE_SHARE_DELETE. Kept separate from the table above so
+// a future mode added without a table row still trips this.
+func TestFileOpenWindowsShareDeleteOnEveryMode(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileOpen(module)
+
+	const fileShareDelete = 0x4
+	for mode := int64(0); mode <= 6; mode++ {
+		if got := evalWinFileOpenMode(t, fn, mode); got.share&fileShareDelete == 0 {
+			t.Errorf("mode %d: dwShareMode=0x%x lacks FILE_SHARE_DELETE — "+
+				"an open file could not be renamed over or removed", mode, got.share)
+		}
+	}
+}
+
+// mustBlock is blockByName (tls_schannel_test.go) with a fatal on a missing label.
+func mustBlock(t *testing.T, fn *ir.Func, name string) *ir.Block {
+	t.Helper()
+	blk := blockByName(fn, name)
+	if blk == nil {
+		t.Fatalf("@%s has no block %q (blocks: %v)", fn.Name(), name, blockNames(fn))
+	}
+	return blk
+}
+
+func blockNames(fn *ir.Func) []string {
+	names := make([]string, 0, len(fn.Blocks))
+	for _, blk := range fn.Blocks {
+		names = append(names, blk.LocalName)
+	}
+	return names
+}
+
+// calleeNames lists the names of the functions a block calls, in order.
+func calleeNames(blk *ir.Block) []string {
+	var names []string
+	for _, inst := range blk.Insts {
+		if call, ok := inst.(*ir.InstCall); ok {
+			if callee, ok := call.Callee.(*ir.Func); ok {
+				names = append(names, callee.Name())
+			}
+		}
+	}
+	return names
+}
+
+// TestFileOpenWindowsCreateFailPath pins the CreateFileA failure edge (T1742).
+// CreateFileA reports via GetLastError, not errno, so this block must translate
+// and BOTH store the errno (for @pal_errno) and return it negated — the io bridge
+// reads only the return value, and returning a raw Win32 code there would surface
+// e.g. ERROR_SHARING_VIOLATION(32) to Promise as EPIPE.
+func TestFileOpenWindowsCreateFailPath(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileOpen(module)
+
+	entry := mustBlock(t, fn, ".entry")
+	// GetLastError must be called in .entry, immediately after CreateFileA —
+	// deferring it into the failure block lets any intervening call clobber it.
+	got := calleeNames(entry)
+	createAt, lastErrAt := -1, -1
+	for i, name := range got {
+		switch name {
+		case "CreateFileA":
+			createAt = i
+		case "GetLastError":
+			lastErrAt = i
+		}
+	}
+	if createAt < 0 || lastErrAt < 0 {
+		t.Fatalf(".entry calls %v, want both CreateFileA and GetLastError", got)
+	}
+	if lastErrAt != createAt+1 {
+		t.Errorf(".entry calls %v — GetLastError must come immediately after CreateFileA", got)
+	}
+
+	fail := mustBlock(t, fn, ".createfail")
+	if names := calleeNames(fail); len(names) != 1 || names[0] != "_errno" {
+		t.Errorf(".createfail calls %v, want exactly [_errno]", names)
+	}
+	var stored bool
+	for _, inst := range fail.Insts {
+		if _, ok := inst.(*ir.InstStore); ok {
+			stored = true
+		}
+	}
+	if !stored {
+		t.Error(".createfail never stores the translated errno — @pal_errno would read stale")
+	}
+	ret, ok := fail.Term.(*ir.TermRet)
+	if !ok {
+		t.Fatalf(".createfail terminator is %T, want ret", fail.Term)
+	}
+	sub, ok := ret.X.(*ir.InstSub)
+	if !ok {
+		t.Fatalf(".createfail returns %T, want a sub (negated errno)", ret.X)
+	}
+	if c, ok := sub.X.(*constant.Int); !ok || c.X.Sign() != 0 {
+		t.Errorf(".createfail returns %v - x, want 0 - errno", sub.X)
+	}
+	// The negated value must be the mapping result, not the raw Win32 code.
+	if _, ok := sub.Y.(*ir.InstSelect); !ok {
+		t.Errorf(".createfail negates %T, want the emitWinErrToErrno select chain "+
+			"(a raw GetLastError value here would leak Win32 codes into IoError.code)", sub.Y)
+	}
+}
+
+// TestFileOpenWindowsOsfHandleFailPath pins the _open_osfhandle failure edge.
+// Ownership of the HANDLE only transfers on success, so this block must close it
+// (otherwise every failure leaks a kernel handle), must read errno BEFORE the
+// CloseHandle call can clobber it, and must never return -0 — that is fd 0
+// (stdin) to a caller that folds -errno into its result.
+func TestFileOpenWindowsOsfHandleFailPath(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileOpen(module)
+
+	fail := mustBlock(t, fn, ".osf_fail")
+	names := calleeNames(fail)
+	errnoAt, closeAt := -1, -1
+	for i, name := range names {
+		switch name {
+		case "_errno":
+			errnoAt = i
+		case "CloseHandle":
+			closeAt = i
+		}
+	}
+	if closeAt < 0 {
+		t.Fatalf(".osf_fail calls %v — the HANDLE is never closed, so a failed "+
+			"_open_osfhandle leaks it", names)
+	}
+	if errnoAt < 0 {
+		t.Fatalf(".osf_fail calls %v, want an _errno read", names)
+	}
+	if errnoAt > closeAt {
+		t.Errorf(".osf_fail calls %v — errno must be read before CloseHandle", names)
+	}
+
+	// CloseHandle must receive the CreateFileA result, not the (negative) fd.
+	var closeArg value.Value
+	for _, inst := range fail.Insts {
+		call, ok := inst.(*ir.InstCall)
+		if !ok {
+			continue
+		}
+		if callee, ok := call.Callee.(*ir.Func); ok && callee.Name() == "CloseHandle" {
+			closeArg = call.Args[0]
+		}
+	}
+	createCall, ok := closeArg.(*ir.InstCall)
+	if !ok {
+		t.Fatalf("CloseHandle argument is %T, want the CreateFileA result", closeArg)
+	}
+	if callee, ok := createCall.Callee.(*ir.Func); !ok || callee.Name() != "CreateFileA" {
+		t.Errorf("CloseHandle closes the result of %v, want CreateFileA", createCall.Callee)
+	}
+
+	// The returned errno must go through a zero → EINVAL(22) substitution.
+	var sel *ir.InstSelect
+	for _, inst := range fail.Insts {
+		if s, ok := inst.(*ir.InstSelect); ok {
+			sel = s
+		}
+	}
+	if sel == nil {
+		t.Fatal(".osf_fail has no select — a zero errno would be returned as -0 (= fd 0, stdin)")
+	}
+	if c, ok := sel.ValueTrue.(*constant.Int); !ok || c.X.Int64() != 22 {
+		t.Errorf(".osf_fail substitutes %v for a zero errno, want EINVAL(22)", sel.ValueTrue)
+	}
+	cmp, ok := sel.Cond.(*ir.InstICmp)
+	if !ok || cmp.Pred != enum.IPredEQ {
+		t.Fatalf(".osf_fail select condition is %T, want an eq compare against 0", sel.Cond)
+	}
+	if c, ok := cmp.Y.(*constant.Int); !ok || c.X.Sign() != 0 {
+		t.Errorf(".osf_fail compares errno against %v, want 0", cmp.Y)
+	}
+
+	ret, ok := fail.Term.(*ir.TermRet)
+	if !ok {
+		t.Fatalf(".osf_fail terminator is %T, want ret", fail.Term)
+	}
+	sub, ok := ret.X.(*ir.InstSub)
+	if !ok {
+		t.Fatalf(".osf_fail returns %T, want a sub (negated errno)", ret.X)
+	}
+	if sub.Y != value.Value(sel) {
+		t.Errorf(".osf_fail negates %v, want the zero-substituted errno", sub.Y)
+	}
+}
+
+// TestFileStatSizeWindowsFailWidensPalError guards the error path of the
+// rerouted stat_size (T1742): pal_file_open already returns -errno, so the fail
+// block must sign-extend that value. Re-reading errno there would be wrong —
+// pal_file_open's own errno store is the only writer, and a zero-extend would
+// turn -2 into 4294967294 (a plausible-looking file size).
+func TestFileStatSizeWindowsFailWidensPalError(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileStatSize(module)
+
+	fail := mustBlock(t, fn, ".fail")
+	if names := calleeNames(fail); len(names) != 0 {
+		t.Errorf(".fail calls %v — it must simply widen pal_file_open's -errno", names)
+	}
+	ret, ok := fail.Term.(*ir.TermRet)
+	if !ok {
+		t.Fatalf(".fail terminator is %T, want ret", fail.Term)
+	}
+	sext, ok := ret.X.(*ir.InstSExt)
+	if !ok {
+		t.Fatalf(".fail returns %T, want sext (zext would turn -2 into 4294967294)", ret.X)
+	}
+	openCall, ok := sext.From.(*ir.InstCall)
+	if !ok {
+		t.Fatalf(".fail widens %T, want the pal_file_open result", sext.From)
+	}
+	if callee, ok := openCall.Callee.(*ir.Func); !ok || callee.Name() != "pal_file_open" {
+		t.Errorf(".fail widens the result of %v, want pal_file_open", openCall.Callee)
 	}
 }

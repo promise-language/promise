@@ -187,3 +187,67 @@ func winlinkExportedSymbols(t *testing.T) map[string]bool {
 	}
 	return exported
 }
+
+// TestWindowsFileOpenLinkSurface pins the import-lib side of T1742 — the half
+// TestWindowsExternalSymbolsAreExported cannot see.
+//
+// That test walks declarations → .def, so it catches an extern nobody exports.
+// It says nothing about a .def entry with no declaration, and _get_osfhandle is
+// exactly that: exported deliberately ahead of T1520 (FlushFileBuffers and
+// LockFileEx both need the HANDLE behind a CRT descriptor, and neither can be
+// reached without it). A tidy-up pass that drops "unused" symbol-list entries
+// would silently take the file-locking primitive with it, and nothing else in
+// the tree would notice until T1520 failed to link.
+func TestWindowsFileOpenLinkSurface(t *testing.T) {
+	exported := winlinkExportedSymbols(t)
+
+	for _, tc := range []struct{ sym, why string }{
+		{"CreateFileA", "opens files with FILE_SHARE_DELETE (T1742)"},
+		{"CloseHandle", "releases the HANDLE when _open_osfhandle refuses it"},
+		{"GetLastError", "CreateFileA reports failure here, not via errno"},
+		{"_open_osfhandle", "wraps the HANDLE in the CRT fd that _read/_write use"},
+		{"_get_osfhandle", "recovers the HANDLE for FlushFileBuffers / LockFileEx (T1520)"},
+	} {
+		if !exported[tc.sym] {
+			t.Errorf("%s is not exported by any .def in %s — %s",
+				tc.sym, winlinkDefDirForTest, tc.why)
+		}
+	}
+
+	// The migration is complete, not partial: UCRT _open grants no delete
+	// sharing, so leaving it on the link surface invites a caller straight back
+	// into the behaviour T1742 removed.
+	if exported["_open"] {
+		t.Error("_open is still exported from the UCRT symbol list — pal_file_open " +
+			"no longer uses it, and no CRT open can grant FILE_SHARE_DELETE")
+	}
+}
+
+// TestWindowsProgramOpensViaCreateFile checks the whole-program IR, not just the
+// PAL emitter in isolation: a plain Windows build must reach files through
+// CreateFileA and must not smuggle in a second, share-mode-less open path.
+func TestWindowsProgramOpensViaCreateFile(t *testing.T) {
+	out := generateIRForTarget(t, `main() { print_line("hi"); }`, winTarget)
+
+	for _, want := range []string{
+		"declare i8* @CreateFileA(",
+		"declare i32 @_open_osfhandle(",
+		"define i32 @pal_file_open(",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Windows program IR is missing %q", want)
+		}
+	}
+	// i32 7 = FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, passed as the
+	// dwShareMode literal of the single CreateFileA call in pal_file_open.
+	if !strings.Contains(out, "@CreateFileA(i8* %path,") {
+		t.Error("pal_file_open does not pass its path parameter to CreateFileA")
+	}
+	if !strings.Contains(out, ", i32 7, i8* null,") {
+		t.Error("CreateFileA is called without FILE_SHARE_DELETE in dwShareMode")
+	}
+	if strings.Contains(out, "@_open(") {
+		t.Error("Windows program still references UCRT @_open — pal_file_open was " +
+			"migrated to CreateFileA, so any remaining caller opens without delete sharing")
+	}
+}

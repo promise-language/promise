@@ -7,6 +7,7 @@ LIBRARY kernel32.dll
 EXPORTS
 AddVectoredExceptionHandler
 CloseHandle
+CreateFileA
 CreatePipe
 CreateProcessA
 CreateThread

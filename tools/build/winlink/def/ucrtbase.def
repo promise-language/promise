@@ -16,10 +16,13 @@ _access
 _chdir
 _close
 _errno
+; _get_osfhandle is not referenced by the PAL yet — it is the link-surface half of
+; T1520 (FlushFileBuffers / LockFileEx need the HANDLE behind a CRT descriptor).
+_get_osfhandle
 _getcwd
 _lseeki64
 _mkdir
-_open
+_open_osfhandle
 _pipe
 _putenv_s
 _read

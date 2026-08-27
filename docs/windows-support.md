@@ -24,7 +24,7 @@ Windows is a first-class, fully-supported target. Core language, standard librar
 - **Core language:** variables, types, enums, generics, match, lambdas, closures
 - **Standard library:** int/float/bool/char/string, Vector, Map, Set, iterators, sorting
 - **M:N scheduler:** goroutines, channels, select, tasks (full GMP model)
-- **File I/O:** open, read, write, close, seek, stat, mkdir, rmdir, dir listing
+- **File I/O:** open, read, write, close, seek, stat, mkdir, rmdir, dir listing — opened with `FILE_SHARE_DELETE` so an open file can be renamed over or removed (T1742)
 - **Process execution:** spawn, streaming spawn, wait_pid, kill, pipe redirection (T0053)
 - **Signals:** Ctrl+C → SIGINT, Ctrl+Break → SIGTERM via `SetConsoleCtrlHandler`; self-signaling via `GenerateConsoleCtrlEvent` (T0054)
 - **Stack overflow detection:** Vectored Exception Handler catches `STATUS_STACK_OVERFLOW`, prints `fatal: stack overflow`, exits (T0051)
@@ -73,10 +73,10 @@ self-suppliable:
 
 | Component | Source | Purpose |
 |-----------|--------|---------|
-| `kernel32.lib` | self-generated import lib (always-present DLL) | Win32 API: CreateThread, GetStdHandle, CRITICAL_SECTION, etc. |
+| `kernel32.lib` | self-generated import lib (always-present DLL) | Win32 API: CreateThread, CreateFileA, GetStdHandle, CRITICAL_SECTION, etc. |
 | `advapi32.lib` | self-generated import lib (always-present DLL) | GetUserNameA |
 | `ws2_32.lib` | self-generated import lib (always-present DLL) | sockets (net module) |
-| `ucrtbase.lib` | self-generated import lib (ships with Windows 10+) | C runtime: malloc/free, _open/_read, math libcalls, app-init |
+| `ucrtbase.lib` | self-generated import lib (ships with Windows 10+) | C runtime: malloc/free, _read/_write, `_open_osfhandle`/`_get_osfhandle` (CRT descriptor ↔ Win32 `HANDLE`), math libcalls, app-init |
 | `@__promise_start` | codegen-emitted IR | program entry (replaces `mainCRTStartup`) |
 | `_tls_used` / `_tls_index` | codegen-emitted IR | TLS directory for `__declspec(thread)` globals (tlssup replacement) |
 | `__chkstk` | codegen-emitted IR (naked asm) | stack-probe helper (compiler-rt's Windows lib lacks it; no DLL exports it) |
@@ -127,7 +127,7 @@ The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API fu
 | Mutexes | `pal_mutex_init/lock/unlock/destroy` | CRITICAL_SECTION (40 bytes) |
 | Condvars | `pal_cond_init/wait/signal/broadcast/destroy` | CONDITION_VARIABLE (8 bytes) |
 | System | `pal_num_cpus` | GetSystemInfo |
-| File I/O | `pal_file_open/read/write/close/seek/stat_size/remove/exists` | UCRT _open/_read/_write etc. |
+| File I/O | `pal_file_open/read/write/close/seek/stat_size/remove/exists` | CreateFileA + _open_osfhandle (FILE_SHARE_DELETE); UCRT _read/_write/_close/_lseeki64 |
 | Dirs | `pal_file_mkdir`, `pal_dir_remove/exists/open/next_name/close` | FindFirstFileW/FindNextFileW |
 | Env | `pal_getenv/setenv/unsetenv/getcwd/chdir/get_environ` | UCRT getenv/_putenv_s etc. |
 | User | `pal_get_user_info`, `pal_get_hostname` | GetUserNameEx, GetComputerNameEx |
@@ -196,6 +196,7 @@ re-run `.\make.cmd` after changing `tools/` sources.
 - **No Visual Studio Build Tools / Windows SDK (T0772)**: the link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See §3.3.
 - **lld-link, not link.exe**: LLD ships with LLVM, is open-source, and works identically across platforms.
 - **CRITICAL_SECTION, not SRWLock**: safer match for `pthread_mutex_t` semantics (recursive, owning).
+- **`CreateFileA` + `_open_osfhandle`, not UCRT `_open` (T1742)**: no CRT open grants `FILE_SHARE_DELETE` (none of `_SH_DENY*` control delete sharing), so an `_open`-ed file could not be renamed over or removed — the exact workload [io.md](io.md) §3 builds on. Opening through `CreateFileA` and wrapping the `HANDLE` in a CRT descriptor keeps `_read`/`_write`/`_lseeki64`/`_close` working unchanged while giving explicit control of the access rights and share mode, and makes `_get_osfhandle` yield a handle that `FlushFileBuffers`/`LockFileEx` accept. It is unconditional: an opt-in flag would give Windows two file-open semantics and force every library helper to choose one. It does **not** close the gap — delete-pending remains, stated in [io.md](io.md) §6.2. Two consequences worth knowing: `CreateFileA` reports failure via `GetLastError` rather than `errno`, so the PAL translates Win32 codes to errno in `emitWinErrToErrno` (shared with `pal_dir_open`); and `lpSecurityAttributes = NULL` yields a **non-inheritable** handle, so open `File`s no longer leak into spawned processes (`pal_spawn` sets pipe-handle inheritability explicitly, and Promise exposes no descriptor passing).
 - **CreateThread, not _beginthreadex (T0772)**: keeps the worker-thread surface on an always-present DLL. Safe because panic recovery uses TLS-flag propagation, not `setjmp`/`longjmp` (T0146–T0148), so no CRT per-thread state is required; ucrtbase's `DLL_THREAD_ATTACH` still initializes per-thread errno on bare `CreateThread` threads.
 - **No `setjmp`/`longjmp`**: panic recovery uses TLS-flag propagation on every target. This is what makes the `CreateThread` choice safe.
 - **`Platform.line_separator`**: `\r\n` on Windows, `\n` elsewhere. Correct for console output; the test harness normalizes `\r\n` before comparing snapshot output (T0046).

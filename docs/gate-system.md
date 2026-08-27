@@ -198,9 +198,9 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 
 | Gate | Schedule | Filter | Command | Needs AI? |
 |------|----------|--------|---------|-----------|
-| `stress-mac` | Every 4h | os: darwin | `bin/stress.sh 1000` | No |
-| `stress-linux` | Every 4h | os: linux | `bin/stress.sh 1000` | No |
-| `stress-windows` | Every 4h | os: windows | `bin\stress.ps1 1000` | No |
+| `stress-mac` | Daily | os: darwin | `bin/gate stress` | No |
+| `stress-linux` | Daily | os: linux | `bin/gate stress` | No |
+| `stress-windows` | Daily | os: windows | `bin/gate stress` | No |
 | `stress-wasm` | Every 8h | any | `bin/promise test -target wasm32-wasi -stress 500 tests/...` | No |
 | `size-wasm` | After every commit | any | `bin/size-report.sh --check` | No |
 | `coverage-full` | Daily | any | `bin/coverage.sh` | Yes (analyze gaps) |

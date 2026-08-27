@@ -61,8 +61,8 @@ The stdlib provides:
 | `os` | `modules/os/os.pr` | 511 | get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 147 tests. |
 | `net` | `modules/net/net.pr` | 398 | `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `resolve!`, `NetError`, `ResolveError`/`ResolveErrorKind`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. `TcpStream.connect` takes a host name or an IPv4/IPv6 literal (T1518); resolution uses the platform resolver behind the scheduler's syscall handoff, not the reactor; an empty host is rejected below the bridge so it fails identically on every target with a resolver (T1726). 41 tests. |
 | `time` | `modules/time/time.pr` | 392 | wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 53 tests. |
-| `http` | `modules/http/http.pr` | 1414 | client + server, no TLS — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-host credential stripping); `Server` with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https/TLS is T0079. 109 tests. |
-| `tls` | `modules/tls/tls.pr` | 421 | client + server — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`, `version`/`cipher_suite`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 16 tests. |
+| `http` | `modules/http/http.pr` | 1644 | client + server, http and https — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-origin credential stripping, `set_tls_config` for custom CAs / mutual TLS); `Server.bind` (HTTP) and `Server.bind_tls` (HTTPS) with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https support (T0079) is a private `_Transport` interface with a plaintext and a TLS implementation, so client framing and the server's keep-alive loop have exactly one implementation; each connection's TLS handshake runs on that connection's own goroutine. Importing `http` links a TLS backend (the vendored static OpenSSL on Linux) even for a program that only speaks http://. 147 tests. |
+| `tls` | `modules/tls/tls.pr` | 465 | client + server — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`), `TlsServerConfig` (`create` from a PEM certificate chain + key, shared across connections), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`/`close_gracefully`, `version`/`cipher_suite`, plus the `accept` factory that upgrades an already-accepted `net.TcpStream`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. `TlsListener.accept` handshakes inline; a server that must not let one slow peer stall its accept loop binds a plain `net.TcpListener` and calls `TlsStream.accept` on each connection's own goroutine (what `http.Server.bind_tls` does). Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 22 tests. |
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
 | `gzip` | `modules/gzip/` | 956 | RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
 | `crypto` | `modules/crypto/` | 258 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`; `random.pr`: `random_bytes!(int) u8[]` (CSPRNG via OS syscall — T1571), `CryptoError`. HMAC-SHA-256 (T1567) and PBKDF2 (T1568) remain to be built. 32 tests. |
@@ -1125,8 +1125,8 @@ cross-module RTTI gaps, not specific to this module.
 
 #### 5d. `modules/http/http.pr` — HTTP Client & Server
 
-HTTP/1.1 over the `net` module (no TLS yet — see T0079). Convenience functions
-plus a reusable `Client` and a serial `Server`:
+HTTP/1.1 over the `net` module, with https:// carried over the `tls` module
+(T0079). Convenience functions plus a reusable `Client` and a `Server`:
 
 ```promise
 // One-shot helpers (redirect-following + gzip via a transient Client).
@@ -1137,7 +1137,59 @@ http_post_json![T: Encodable](string url, T data) Response;
 // Reusable client with redirects, keep-alive pooling, and gzip.
 Client client = Client.create(max_redirects: 10, auto_gzip: true);
 Response r = client.get("http://host/path")?;   // also post!, send!, close
+Response s = client.get("https://host/path")?;  // same client, same call
+
+// A custom TLS configuration — custom CA, mutual TLS, or (testing only)
+// verification off. Closes every pooled connection first, so the replacement
+// is total: no later request can be answered over a connection negotiated
+// under the configuration that was just replaced, and no TLS session outlives
+// the backend context it was created from.
+client.set_tls_config(tls.TlsConfig.insecure());
+
+// An HTTPS server is a Server like any other; only the bind differs.
+Server server = Server.bind_tls("0.0.0.0", 8443, cert_pem, key_pem)?;
+server.serve(move handler)?;
 ```
+
+**Scheme handling.** `_parse_url` accepts `http://` (default port 80) and
+`https://` (default port 443) and nothing else. A `_Url` carries a `secure`
+flag, which decides the transport, the port omitted from the `Host` header, and
+the connection pool's key — pool keys are `scheme://host:port`, so a plaintext
+and a TLS connection to the same host:port can never be handed to each other's
+requests. A redirect that changes the scheme is a cross-origin hop, so
+`Authorization` and `Cookie` are stripped, exactly as for a host or port change.
+
+**Transport.** A private `_Transport` interface (`read`, `write`, `close`,
+`graceful_close`) has two implementations: `_PlainTransport` over
+`net.TcpStream` and `_TlsTransport` over `tls.TlsStream`. Response framing,
+chunked decoding, the server's request loop and the connection pool are written
+once against it, so http and https cannot drift apart. A TLS failure surfaces as
+`tls.TlsError` rather than `HttpError`, so a caller can still tell a certificate
+problem from a network one.
+
+**Server-side handshake placement.** `Server.bind_tls` binds a *plain*
+`net.TcpListener` and upgrades each accepted connection inside that connection's
+own goroutine. Handshaking in the accept loop would let one slow or non-TLS peer
+stall every other connection, and would turn each failed handshake into a
+listener error that ends `serve()`. As written, a failed handshake costs exactly
+one connection.
+
+**Cost.** Importing `http` links a TLS backend even for a program that only ever
+speaks `http://` — on Linux that is the vendored static OpenSSL. Measured on
+linux-amd64 for `use http; main() { print_line("hi"); }`:
+
+| program | debug | release |
+|---|---|---|
+| `use net;` | 0.63 MB | 0.63 MB |
+| `use http;` | 13.4 MB | 19.0 MB |
+
+Release exceeding debug is T1707: the LTO link path passes `--lto-O1` but not
+`--gc-sections`, so OpenSSL's pre-compiled archive members — invisible to LTO's
+own DCE — are never section-stripped.
+
+The alternative (an injectable transport provider, or a separate `https` module)
+was rejected: it reintroduces the hidden configuration and "https is not
+supported here" action-at-a-distance the language design forbids.
 
 - **`Request`/`Response`**: build requests (`new_get`/`new_post`, `set_header`),
   read responses (`status`, `headers`, `body`, `body_bytes`, `json[T]`,
@@ -1423,8 +1475,8 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 5a | `modules/json/json.pr` | Promise | No | 1,003 | |
 | 5b | `modules/regex/regex.pr` | Promise | No | ~400 | Design only |
 | 5c | `modules/net/net.pr` | Promise + Native | 6+ | 281 | |
-| 5d | `modules/http/http.pr` | Promise | No | 1,414 | |
+| 5d | `modules/http/http.pr` | Promise | No | 1,644 | |
 | 5e | `modules/crypto/` | Promise | No | 239 | |
 | 5f | `modules/std/embed.pr` | Promise | No | 54 | |
 | | **Phases 0-4** | | **28** | **4,027** | `result` and `fmt` not planned |
-| | **Total** | | **34+** | **7,018** | |
+| | **Total** | | **34+** | **7,248** | |

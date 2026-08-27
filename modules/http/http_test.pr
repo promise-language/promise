@@ -1,20 +1,21 @@
 use gzip;
 use net;
 _serve_once!(net.TcpListener ~listener, string response) string {
-  net.TcpStream conn = listener.accept()?^;
+  _Transport conn = _PlainTransport.create(listener.accept()?^);
   u8[] buf = u8[].filled(0, 8192);
   int n = conn.read(buf)?^;
   string request = string.from_bytes(buf[0:n]);
   u8[] resp_data = response.bytes();
   _write_all(conn, resp_data)?^;
-  _graceful_close(conn);
+  conn.graceful_close();
   return request;
 }
 
-// T1322: exercise _graceful_close's drain loop when the peer still has unread
-// bytes buffered on the server socket. Existing tests only hit the n==0-immediately
-// path (peer has nothing pending), so the n>0 drain branch was uncovered. This
-// also confirms the lingering close does not leak or panic on pending data.
+// T1322: exercise the plaintext transport's graceful_close drain loop when the
+// peer still has unread bytes buffered on the server socket. Existing tests only
+// hit the n==0-immediately path (peer has nothing pending), so the n>0 drain
+// branch was uncovered. This also confirms the lingering close does not leak or
+// panic on pending data.
 test_graceful_close_drains_pending() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
@@ -29,10 +30,10 @@ test_graceful_close_drains_pending() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
-  // Deliberately do NOT read the pending bytes: _graceful_close must drain them
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  // Deliberately do NOT read the pending bytes: graceful_close must drain them
   // (n>0 branch) and reach EOF (n==0) without leaking or panicking.
-  _graceful_close(conn);
+  conn.graceful_close();
   listener.close()?!;
   _ := <-done;
 }
@@ -58,11 +59,33 @@ test_url_no_path() `test(exclude: wasm) {
   assert(u.path == "/", "default path");
 }
 
-test_url_error_https() `test(exclude: wasm) {
-  _Url u = _parse_url("https://example.com/")? e {
+test_url_https() `test(exclude: wasm) {
+  _Url u = _parse_url("https://example.com/")?!;
+  assert(u.host == "example.com", "https host");
+  assert(u.port == 443, "https default port");
+  assert(u.path == "/", "https path /");
+  assert(u.secure, "https marked secure");
+}
+
+test_url_https_with_explicit_port() `test(exclude: wasm) {
+  _Url u = _parse_url("https://localhost:8443/api?k=v")?!;
+  assert(u.host == "localhost", "host");
+  assert(u.port == 8443, "explicit port overrides the scheme default");
+  assert(u.path == "/api?k=v", "path with query");
+  assert(u.secure, "still secure");
+}
+
+test_url_http_is_not_secure() `test(exclude: wasm) {
+  _Url u = _parse_url("http://example.com/")?!;
+  assert(!u.secure, "http is not secure");
+  assert(u.port == 80, "http default port");
+}
+
+test_url_error_unknown_scheme() `test(exclude: wasm) {
+  _Url u = _parse_url("ftp://example.com/")? e {
     return;
   };
-  assert(false, "https should fail");
+  assert(false, "a non-http(s) scheme should fail");
 }
 
 test_url_error_empty_host() `test(exclude: wasm) {
@@ -240,7 +263,7 @@ test_http_connection_error() `test(exclude: wasm, timeout: "10s") {
 }
 
 test_http_bad_scheme() `test(exclude: wasm) {
-  Response resp = http_get("https://example.com/")? e {
+  Response resp = http_get("ftp://example.com/")? e {
     return; // expected: unsupported scheme
   };
   assert(false, "should have raised an error");
@@ -572,7 +595,7 @@ test_client_stops_at_content_length() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] buf = u8[].filled(0, 8192);
   conn.read(buf)?!;
   // Valid 5-byte body, then extra trailing bytes the client must ignore.
@@ -596,13 +619,13 @@ _serve_n!(net.TcpListener ~listener, string[] responses) string[] {
   string[] requests = string[]();
   int i = 0;
   while i < responses.len {
-    net.TcpStream conn = listener.accept()?^;
+    _Transport conn = _PlainTransport.create(listener.accept()?^);
     u8[] buf = u8[].filled(0, 8192);
     int n = conn.read(buf)?^;
     requests.push(string.from_bytes(buf[0:n]));
     u8[] resp_data = responses[i].bytes();
     _write_all(conn, resp_data)?^;
-    _graceful_close(conn);
+    conn.graceful_close();
     i = i + 1;
   }
   return requests;
@@ -611,21 +634,21 @@ _serve_n!(net.TcpListener ~listener, string[] responses) string[] {
 // _serve_keepalive accepts ONE connection and serves two requests on it, proving
 // the client reused the socket (a second accept is never issued).
 _serve_keepalive!(net.TcpListener ~listener, string resp1, string resp2) {
-  net.TcpStream conn = listener.accept()?^;
+  _Transport conn = _PlainTransport.create(listener.accept()?^);
   u8[] buf = u8[].filled(0, 8192);
   conn.read(buf)?^;
   _write_all(conn, resp1.bytes())?^;
   u8[] buf2 = u8[].filled(0, 8192);
   conn.read(buf2)?^;
   _write_all(conn, resp2.bytes())?^;
-  _graceful_close(conn);
+  conn.graceful_close();
 }
 
 // _serve_stale serves the first request keep-alive then closes the socket
 // (making the pooled connection stale), then accepts a fresh connection for the
 // client's stale-connection retry.
 _serve_stale!(net.TcpListener ~listener, string resp1, string resp2, channel[bool] closed_first) {
-  net.TcpStream conn1 = listener.accept()?^;
+  _Transport conn1 = _PlainTransport.create(listener.accept()?^);
   u8[] buf = u8[].filled(0, 8192);
   conn1.read(buf)?^;
   _write_all(conn1, resp1.bytes())?^;
@@ -633,11 +656,11 @@ _serve_stale!(net.TcpListener ~listener, string resp1, string resp2, channel[boo
   // Happens-before edge for the client: the pooled socket is now closed, so the
   // next request must detect the stale connection and retry on a fresh one.
   closed_first.send(true);
-  net.TcpStream conn2 = listener.accept()?^;
+  _Transport conn2 = _PlainTransport.create(listener.accept()?^);
   u8[] buf2 = u8[].filled(0, 8192);
   conn2.read(buf2)?^;
   _write_all(conn2, resp2.bytes())?^;
-  _graceful_close(conn2);
+  conn2.graceful_close();
 }
 
 // --- Unit tests (no network) ---
@@ -672,12 +695,54 @@ test_resolve_url_relative_strips_query() `test(exclude: wasm) {
   assert(r == "http://example.com/a/d", "relative join uses base dir, drops query");
 }
 
-test_resolve_url_https_error() `test(exclude: wasm) {
+test_resolve_url_absolute_https() `test(exclude: wasm) {
   _Url base = _parse_url("http://example.com/")?!;
-  string r = _resolve_url(base, "https://secure.example.com/")? e {
-    return; // expected: https not supported yet
-  };
-  assert(false, "https redirect target should raise");
+  string r = _resolve_url(base, "https://secure.example.com/")?!;
+  assert(r == "https://secure.example.com/", "an absolute https target is used directly");
+}
+
+test_resolve_url_from_https_base() `test(exclude: wasm) {
+  _Url base = _parse_url("https://example.com/a/b")?!;
+  assert(_resolve_url(base, "/new")?! == "https://example.com/new", "absolute path keeps the https scheme");
+  assert(_resolve_url(base, "d")?! == "https://example.com/a/d", "relative path keeps the https scheme");
+  assert(_resolve_url(base, "//cdn.example.com/x")?! == "https://cdn.example.com/x", "scheme-relative inherits https");
+  assert(_resolve_url(base, "http://plain.example.com/x")?! == "http://plain.example.com/x", "an absolute http target downgrades");
+}
+
+test_resolve_url_default_ports_are_omitted() `test(exclude: wasm) {
+  _Url https_default = _parse_url("https://example.com/a/b")?!;
+  assert(_resolve_url(https_default, "/x")?! == "https://example.com/x", "port 443 omitted for https");
+  _Url https_explicit = _parse_url("https://example.com:8443/a/b")?!;
+  assert(_resolve_url(https_explicit, "/x")?! == "https://example.com:8443/x", "non-default https port kept");
+  _Url http_on_443 = _parse_url("http://example.com:443/a/b")?!;
+  assert(_resolve_url(http_on_443, "/x")?! == "http://example.com:443/x", "443 is not the http default, so it is kept");
+}
+
+test_pool_key_is_scheme_qualified() `test(exclude: wasm) {
+  _Url plain = _parse_url("http://example.com/")?!;
+  _Url secure = _parse_url("https://example.com/")?!;
+  assert(_pool_key(plain) == "http://example.com:80", "http pool key");
+  assert(_pool_key(secure) == "https://example.com:443", "https pool key");
+  _Url plain_8443 = _parse_url("http://example.com:8443/")?!;
+  _Url secure_8443 = _parse_url("https://example.com:8443/")?!;
+  assert(_pool_key(plain_8443) != _pool_key(secure_8443), "same host:port on different schemes never share a pooled connection");
+}
+
+test_build_request_host_header_omits_scheme_default_port() `test(exclude: wasm) {
+  _Url secure = _parse_url("https://example.com/p")?!;
+  map[string, string] h = map[string, string]();
+  string req = string.from_bytes(_build_request(Method.Get, secure, h, "", false, false));
+  assert(req.contains("Host: example.com\r\n"), "port 443 omitted from the Host header on https");
+
+  _Url secure_alt = _parse_url("https://example.com:8443/p")?!;
+  map[string, string] h2 = map[string, string]();
+  string req2 = string.from_bytes(_build_request(Method.Get, secure_alt, h2, "", false, false));
+  assert(req2.contains("Host: example.com:8443\r\n"), "non-default https port kept in the Host header");
+
+  _Url plain_443 = _parse_url("http://example.com:443/p")?!;
+  map[string, string] h3 = map[string, string]();
+  string req3 = string.from_bytes(_build_request(Method.Get, plain_443, h3, "", false, false));
+  assert(req3.contains("Host: example.com:443\r\n"), "443 is not the http default, so it stays in the Host header");
 }
 
 test_is_redirect_classifier() `test(exclude: wasm) {
@@ -717,7 +782,7 @@ test_client_gzip_decode() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] buf = u8[].filled(0, 8192);
   int n = conn.read(buf)?!;
   string request = string.from_bytes(buf[0:n]);
@@ -735,7 +800,7 @@ test_client_gzip_decode() `test(exclude: wasm, timeout: "10s") {
     j = j + 1;
   }
   _write_all(conn, resp_data)?!;
-  _graceful_close(conn);
+  conn.graceful_close();
   listener.close()?!;
   _ := <-done;
 }
@@ -1065,8 +1130,8 @@ test_pool_eviction_and_take() `test(exclude: wasm, timeout: "10s") {
   // keep the server-side fds alive (T1615/T1632: synchronize by scope, never by a
   // clock). The accepted streams a and b live as locals across the pool checks
   // and drop deterministically at function end, before the leak snapshot.
-  net.TcpStream s1 = net.TcpStream.connect("127.0.0.1", port)?!;
-  net.TcpStream s2 = net.TcpStream.connect("127.0.0.1", port)?!;
+  _Transport s1 = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+  _Transport s2 = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
   net.TcpStream a = listener.accept()?!;
   net.TcpStream b = listener.accept()?!;
 
@@ -1317,7 +1382,7 @@ test_read_chunked_body_size_line_split() `test(exclude: wasm, timeout: "10s") {
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport peer = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] rest = "\r\nHello\r\n0\r\n\r\n".bytes();
     _write_all(peer, rest)?!;
     _ := <-close_now;
@@ -1325,7 +1390,7 @@ test_read_chunked_body_size_line_split() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   // The chunk-size line is cut mid-token: "5" with its CRLF still on the wire.
   u8[] raw = "5".bytes();
   u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
@@ -1345,7 +1410,7 @@ test_read_chunked_body_data_split() `test(exclude: wasm, timeout: "10s") {
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport peer = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] rest = "lo\r\n0\r\n\r\n".bytes();
     _write_all(peer, rest)?!;
     _ := <-close_now;
@@ -1353,7 +1418,7 @@ test_read_chunked_body_data_split() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   // A complete 5-byte chunk header but only 3 of its 5 data bytes.
   u8[] raw = "5\r\nHel".bytes();
   u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
@@ -1373,7 +1438,7 @@ test_read_chunked_body_trailer_split() `test(exclude: wasm, timeout: "10s") {
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream peer = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport peer = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     // The blank line closing the trailer section, arriving separately.
     u8[] rest = "\r\n".bytes();
     _write_all(peer, rest)?!;
@@ -1382,7 +1447,7 @@ test_read_chunked_body_trailer_split() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   // Terminating chunk present, trailer terminator still on the wire.
   u8[] raw = "0\r\n".bytes();
   u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
@@ -1407,7 +1472,7 @@ test_read_chunked_body_trailer_eof() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] raw = "0\r\n".bytes();
   u8[] decoded = _read_chunked_body(conn, raw, 0)?!;
   assert(decoded.len == 0, "missing trailer terminator at EOF is tolerated");
@@ -1425,7 +1490,7 @@ test_exchange_short_content_length_body() `test(exclude: wasm, timeout: "10s") {
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport client = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
     _RawResponse raw = _exchange(client, request, false)?!;
     assert(raw.status == 200, "status parsed despite the short body");
@@ -1434,7 +1499,7 @@ test_exchange_short_content_length_body() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] buf = u8[].filled(0, 8192);
   conn.read(buf)?!;
   // Content-Length promises 10 bytes; only 4 are sent before the close.
@@ -1454,7 +1519,7 @@ test_exchange_headers_span_multiple_reads() `test(exclude: wasm, timeout: "10s")
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport client = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
     _RawResponse raw = _exchange(client, request, false)?!;
     assert(raw.status == 200, "status parsed from a multi-read header block");
@@ -1468,7 +1533,7 @@ test_exchange_headers_span_multiple_reads() `test(exclude: wasm, timeout: "10s")
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] buf = u8[].filled(0, 8192);
   conn.read(buf)?!;
   string pad = "x".repeat(5000);
@@ -1489,7 +1554,7 @@ test_exchange_eof_framed_body_multiple_reads() `test(exclude: wasm, timeout: "10
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport client = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
     _RawResponse raw = _exchange(client, request, false)?!;
     assert(raw.status == 200, "status parsed");
@@ -1500,7 +1565,7 @@ test_exchange_eof_framed_body_multiple_reads() `test(exclude: wasm, timeout: "10
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] buf = u8[].filled(0, 8192);
   conn.read(buf)?!;
   // Headers alone exceed one read; the body then exceeds what the header scan
@@ -1540,7 +1605,7 @@ test_write_all_resumes_after_partial_write() `test(exclude: wasm, timeout: "20s"
     received.send(total);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] payload = "z".repeat(4000000).bytes();
   _write_all(conn, payload)?!;
   conn.close()?!;

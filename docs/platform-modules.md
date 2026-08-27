@@ -914,8 +914,8 @@ modules/
   time/           — DateTime, Date, Time; now, from_unix_*, parse
   json/           — JsonEncoder, JsonDecoder, JsonValue
   net/            — TcpListener, TcpStream, NetError
-  http/           — HTTP/1.1 client and server
-  tls/            — TlsConfig, TlsStream, TlsListener, TlsError
+  http/           — HTTP/1.1 client and server, http:// and https://
+  tls/            — TlsConfig, TlsServerConfig, TlsStream, TlsListener, TlsError
   gzip/           — gzip_encode, gunzip, deflate, inflate, crc32
   crypto/         — Sha256, Digest256, constant_time_equal
   encoding/       — hex_encode, hex_decode, EncodingError
@@ -982,7 +982,7 @@ performs I/O.
 |---|---|---|---|
 | Linux | OpenSSL 3.x memory BIOs, vendored musl-static (T1596) | TLS 1.2 + 1.3 | static `libssl.a` / `libcrypto.a` |
 | macOS | Secure Transport with buffer queues (T1599) | **TLS 1.2 only** | `Security.framework`, `CoreFoundation.framework` |
-| Windows | none yet (T1598) | — | — |
+| Windows | SChannel with its own buffer queues (T1598) | TLS 1.2 + 1.3 | `secur32` / `crypt32` / `ncrypt` import libraries |
 | wasm | none (no sockets) | — | — |
 
 Targets without a backend still compile and link: the `promise_tls_*` bridges become
@@ -991,20 +991,21 @@ inert stubs returning a 0 handle, and the constructors raise
 
 ### The shared PAL surface
 
-Both backends implement the same 25 `pal_tls_*` entry points and the same
+Every backend implements the same 25 `pal_tls_*` entry points and the same
 backend-neutral status enum — `0 ok, 1 want_read, 2 want_write, <0 fatal` for the
 handshake, `>0 bytes / 0 EOF / -1 want_read / -2 want_write / -3 fatal` for read and
 write. **No platform-specific status code may cross the PAL boundary**
-(`errSSLWouldBlock`, `SSL_ERROR_WANT_READ`, … are all mapped inside the backend), so
-every bridge helper in `codegen/tls.go` and all of `tls.pr` is shared verbatim.
+(`errSSLWouldBlock`, `SSL_ERROR_WANT_READ`, `SEC_E_INCOMPLETE_MESSAGE`, … are all
+mapped inside the backend), so every bridge helper in `codegen/tls.go` and all of
+`tls.pr` is shared verbatim.
 
 The `bio_read_out` / `bio_write_in` / `bio_pending_out` names are OpenSSL heritage;
-on macOS they operate on the session's own byte queues.
+on macOS and Windows they operate on the session's own byte queues.
 
 PEM inputs must also behave identically. A multi-block PEM — the ordinary
-`fullchain.pem` shape (leaf plus its issuers), or a CA bundle — is accepted by both
-backends, and both use the leaf and ignore the rest. On macOS that means the import
-helper picks the first item of the wanted kind out of `SecItemImport`'s result by
+`fullchain.pem` shape (leaf plus its issuers), or a CA bundle — is accepted by every
+backend, and all of them use the leaf and ignore the rest. On macOS that means the
+import helper picks the first item of the wanted kind out of `SecItemImport`'s result by
 `CFTypeID`: the reported `SecExternalItemType` for a multi-block PEM is
 `kSecItemTypeAggregate`, so gating on it would reject every real-world certificate
 bundle that Linux accepts.

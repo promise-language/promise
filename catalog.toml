@@ -20,7 +20,7 @@ description = "File and directory I/O: File (open/create/append/read/write/close
 description = "JSON encoding and decoding: JsonEncoder, JsonDecoder, encode_string, decode_string"
 
 [modules.http]
-description = "HTTP/1.1 client and server over the net module: Request/Response, methods, headers; Client with redirect following, keep-alive connection pooling, and gzip; http_get/http_post/http_post_json; Server with Handler, ServerRequest, and graceful shutdown"
+description = "HTTP/1.1 client and server over the net and tls modules, speaking http:// and https://: Request/Response, methods, headers; Client with redirect following, keep-alive connection pooling, gzip, and set_tls_config for custom CAs or mutual TLS; http_get/http_post/http_post_json; Server.bind and Server.bind_tls with Handler, ServerRequest, and graceful shutdown"
 
 [modules.os]
 description = "Operating system interface: args, env vars, one-shot execute, streaming Process (spawn/wait/kill) with stdin/stdout/stderr pipes, OS info (user/hostname/pid), and signal handling"
@@ -32,7 +32,7 @@ description = "Wall-clock date and time: DateTime, Date, Time; Unix-epoch conver
 description = "TCP networking: TcpListener, TcpStream with reactor-based non-blocking I/O"
 
 [modules.tls]
-description = "TLS 1.2/1.3 transport security over TCP (OpenSSL on Linux, Secure Transport on macOS, SChannel on Windows; unsupported on WASM): TlsConfig, TlsStream (Reader/Writer), TlsListener, TlsError with handshake/certificate/io/no_trust_store/unsupported kinds"
+description = "TLS 1.2/1.3 transport security over TCP (OpenSSL on Linux, Secure Transport on macOS, SChannel on Windows; unsupported on WASM): TlsConfig, TlsServerConfig, TlsStream (Reader/Writer, client connect and server accept, graceful close), TlsListener, TlsError with handshake/certificate/io/no_trust_store/unsupported kinds"
 
 [modules.gzip]
 description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) compression and decompression in pure Promise: gzip_encode, gunzip, deflate, inflate, crc32, GzipWriter, GunzipReader, gunzip_from, DecompressError"

@@ -1,0 +1,1381 @@
+use gzip;
+use net;
+use tls as _;
+// HTTPS integration tests (T0079) — the http module's client and server over
+// TLS, end to end on loopback.
+//
+// Everything here is deliberately the *same* code path the plaintext tests
+// exercise: Server.bind_tls and Server.bind differ only in how an accepted
+// connection is upgraded, and the client differs only in which transport
+// _connect_transport opens. These tests therefore concentrate on what is
+// genuinely new — scheme handling, the TLS upgrade running per connection
+// rather than in the accept loop, credential stripping across a scheme change,
+// and pooling keyed by scheme.
+//
+// Excluded on wasm: no TLS backend and no sockets there.
+//
+// Synchronization is by channel handshake only — a port is published after the
+// listener exists, and a server is shut down only after its clients have
+// finished. No test sleeps to order two concurrent operations (T1632).
+//
+// The certificate below is the same inert self-signed localhost fixture the tls
+// module tests use; see modules/tls/tls_test.pr for what it contains and the
+// exact recipe for regenerating it.
+
+_test_cert() u8[] {
+  return "-----BEGIN CERTIFICATE-----\nMIIDKjCCAhKgAwIBAgIBATANBgkqhkiG9w0BAQsFADAUMRIwEAYDVQQDEwlsb2Nh\nbGhvc3QwHhcNMTkwMTAxMDAwMDAwWhcNMzkwMTAxMDAwMDAwWjAUMRIwEAYDVQQD\nEwlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC+UCkb\nxfweDOAya9SRhQxkt9hUXr9D1xEnJVZUfTQJC1Tgk2U/kdAXT7z4bXTzXuRiKBik\nwp9MR12MW9qwYoc2ul/D8nJeyUJIeDU6JxzlZVkgl7Z124Eyk3gxMuAV09DCabdr\n5rayTuwOYNxSWsYH4c7HtSRstN+W44Oi2conYNtzepHQyzvkZoadWakgxQnAr/IV\nIMaawdWW7QaVg4WQEm00JsID3X6wNbfzp9P6MZhvHvLR4IBuE9el9C1144u+s/vh\nY/l0IS+U8y+tGq/JPywLD3sUQEG4djQc/q2uuz/SpGUF5QCRyOzxyQT9g3sphE0I\nvPj3AcRsxgvFc5bVAgMBAAGjgYYwgYMwDgYDVR0PAQH/BAQDAgKkMBMGA1UdJQQM\nMAoGCCsGAQUFBwMBMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFOL3x9cyb4/r\nHpNfCu0XbcCEUL1uMCwGA1UdEQQlMCOCCWxvY2FsaG9zdIcEfwAAAYcQAAAAAAAA\nAAAAAAAAAAAAATANBgkqhkiG9w0BAQsFAAOCAQEAqc1RvKkjwgI+NBwa3fW09yQJ\nnFbjsDfpJKVEvrPbgCjXcl9DFYaS2AxLXKHVCWiFM8vKkMMNVG4fFjfdOuUZ6apG\niuZEuOwyNG3SzD+jQdZvcXrWtmRls15oxpk4QPLlHv6frLXRpXAzS1TByx7tlobQ\nYDKpg37s9jX1pfq/9B+5+s8yuHXeBvLwxO8LU6Zvf9t0H3ElO16ezW5NEVYYrS95\niznJVTOmsigPsfRSjjoOXmm2rF9EWuj9SYMHaCkVc772brxkNAZIYVAE6s/BlFnu\nFDrQTYkI1LBtpuD4a3mfhYFM8BHyXvXu/FMDh2ps7ndIoZCX9v3c8Ir2KeYxSA==\n-----END CERTIFICATE-----\n".bytes();
+}
+
+_test_key() u8[] {
+  return "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC+UCkbxfweDOAy\na9SRhQxkt9hUXr9D1xEnJVZUfTQJC1Tgk2U/kdAXT7z4bXTzXuRiKBikwp9MR12M\nW9qwYoc2ul/D8nJeyUJIeDU6JxzlZVkgl7Z124Eyk3gxMuAV09DCabdr5rayTuwO\nYNxSWsYH4c7HtSRstN+W44Oi2conYNtzepHQyzvkZoadWakgxQnAr/IVIMaawdWW\n7QaVg4WQEm00JsID3X6wNbfzp9P6MZhvHvLR4IBuE9el9C1144u+s/vhY/l0IS+U\n8y+tGq/JPywLD3sUQEG4djQc/q2uuz/SpGUF5QCRyOzxyQT9g3sphE0IvPj3AcRs\nxgvFc5bVAgMBAAECggEAQWLAJPMqUlbBJoGmuFJ6dhY2BJLC6vd2xLjOxtt3Z84V\nXM03YZZi5Md4GPBeWIlXNSQqh1z4pxfz25fpdGV9qD9zTJq9UbSbCdQHEZJDmsrt\nysVlImwGoQ5KorikhctO86SnqLJNPcjg0HXV7JOUazvZNAMX3yNrmGdVoDtseYd0\nhh8t5UGPoUZUBFVGK1b0ZvJtdxm16wgpdlE8LqiC8cXLyXwWe+E1YISI8T40sLco\nR+N4SkggdIuZqGqmWIxbk3aQj0Wrtbfjjzovv26YXVEKi5c9aaIdURxim1DkbRIQ\n5g7VTR6Z8fr786CqMLnRsqvxpP5gsr2Cek/orkomZwKBgQDGb4UKErkoQNUoRGPG\n4jvf0nNNTq7I/trWkFa63m0OpdbqZv2BVXhMUGSnpvcC/QoOPPuaIFnDmPe0xL7U\n5aV4Lwls40DGqdIlDKlLiCEq2ISS2Xh76ISbRZH9ceHjIoXKswttUQbx20TiA61C\nY2Jt8bcbBLImUfJiJiAgu/bsGwKBgQD1hXAKnHOgt+/J1onPwCbVGrXcJN9GBKjR\nGV9zGC45uK6EkPBKyImCAkrqhX2gT7/eHPiUCgEWUE2HSercnI8X+Ak+NYJ911kv\nadx407JDfkBGs4Q8tZk5Ximk7Uy3YRWpyQcpbPTxg+q6AExYBrOTfzG/sOuILeUG\nSbDTwYDXzwKBgQCqO/vXQ27DALOdIuayNV2GS4YNOUYrOrBEyHkPQUgv+8ffOdGb\nRda5KXLgfRWF48zfoCN8+unnKnC/DNZl0ElfTIL6fg8RH5kfnbgTC0rg9fTuAlEh\ng71Xc5yl4DAYaoJ6/ZT9CDk7/Y8fkmXuAVLs3SPnsuSeiUi2ONzxGC/iJwKBgQCm\npYq1+RlWlmKQqijiNTdmX/neUbymptT7EHDECz6c+SijXEltSQ5kiy/UXQU3Acpm\ndV2YBe5U+e6VjGt4kF9j0nxbmDBZQAkN8Jmv/Wi6/P+dvY1dM5mr4aj8hAEVWzU8\nB/HvgUAEihiRZVBsUygiTiwzQ1+rEBOqn+wA3w+X6wKBgAMYLEv0Fo5pmXCbId7G\nOvu9rWPk+pu1rmLD/XFj61uYD6BDmPiIIOyHosqJTrZeIz165MUOQP7a9hcOfEoM\nsBxmdvJBnhYdvXHAnNXlpd2CHKID/ylRykijfOYVF+xKNpVtoOPMIMfkvbrcK3A6\n8+PmV+ctiDfQytn+exVyAp0K\n-----END PRIVATE KEY-----\n".bytes();
+}
+
+// --- handlers ---------------------------------------------------------------
+
+type _SecureEchoHandler {
+  string tag;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    return ServerResponse.ok(this.tag + ":" + _method_to_string(request.method) + ":" + request.path);
+  }
+}
+
+type _SecureBulkHandler {
+  int size;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    return ServerResponse.ok("b".repeat(this.size));
+  }
+}
+
+type _SecureFailingHandler {
+  string reason;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    raise HttpError(code: 0, message: this.reason);
+  }
+}
+
+// _CredentialProbeHandler reports whether the credentials a redirect is supposed
+// to strip actually arrived.
+type _CredentialProbeHandler {
+  string tag;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    string auth = "no";
+    if a := request.header("authorization") {
+      auth = "yes";
+    }
+    string cookie = "no";
+    if c := request.header("cookie") {
+      cookie = "yes";
+    }
+    return ServerResponse.ok(this.tag + " auth=" + auth + " cookie=" + cookie);
+  }
+}
+
+// _RedirectHandler answers every request with a 302 to a fixed absolute URL.
+type _RedirectHandler {
+  string location;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    ServerResponse resp = ServerResponse.with_status(302, "");
+    resp.set_header("Location", this.location[0:]);
+    return resp;
+  }
+}
+
+// _insecure_client is the client these tests use against the self-signed
+// fixture: verification off, because the fixture is not in any trust store.
+// The verified path is covered separately by
+// test_https_client_verifies_a_trusted_certificate.
+_insecure_client() Client {
+  Client c = Client.create();
+  c.set_tls_config(TlsConfig.insecure());
+  return c;
+}
+
+// --- round trip -------------------------------------------------------------
+
+test_https_client_server_roundtrip() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "tls");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/hello")?!;
+      assert(resp.status == 200, "https GET status 200");
+      assert(resp.body == "tls:GET:/hello", "handler saw the request over TLS");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    } else {
+      assert(false, "no shutdown handle");
+    }
+  } else {
+    assert(false, "no port");
+  }
+}
+
+test_https_client_verifies_a_trusted_certificate() `test(exclude: wasm, timeout: "20s") {
+  // The default client path: verification ON, with the fixture added as a trust
+  // anchor. The URL host must be "localhost" because that is what the
+  // certificate's SAN names.
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "verified");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      TlsConfig cfg = TlsConfig.create();
+      cfg.add_root_certificate(_test_cert())?!;
+      Client client = Client.create();
+      client.set_tls_config(move cfg);
+      Response resp = client.get("https://localhost:" + port.to_string() + "/v")?!;
+      assert(resp.status == 200, "verified https GET status 200");
+      assert(resp.body == "verified:GET:/v", "verified round trip");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_https_client_rejects_an_untrusted_certificate() `test(exclude: wasm, timeout: "20s") {
+  // A default Client (system trust store only) must refuse the self-signed
+  // fixture, and must say so as a TlsError rather than an HttpError so the
+  // caller can tell a certificate problem from a network one.
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "unreachable");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = Client.create();
+      bool rejected = false;
+      bool as_tls_error = false;
+      client.get("https://localhost:" + port.to_string() + "/")? e is TlsError {
+        rejected = true;
+        as_tls_error = true;
+      } else {
+        rejected = true;
+      };
+      assert(rejected, "an untrusted certificate fails the request");
+      assert(as_tls_error, "the failure surfaces as TlsError, not HttpError");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- pooling ----------------------------------------------------------------
+
+test_https_keep_alive_pools_one_tls_connection() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "ka");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string base = "https://127.0.0.1:" + port.to_string();
+      Client client = _insecure_client();
+
+      Response first = client.get(base + "/one")?!;
+      assert(first.body == "ka:GET:/one", "first response");
+      assert(client._pool._streams.len == 1, "the TLS connection went into the pool");
+      assert(client._pool._keys[0] == "https://127.0.0.1:" + port.to_string(), "pool key is scheme-qualified");
+
+      Response second = client.get(base + "/two")?!;
+      assert(second.body == "ka:GET:/two", "second response over the reused connection");
+      assert(client._pool._streams.len == 1, "still exactly one pooled connection — it was reused, not replaced");
+
+      client.close();
+      assert(client._pool._streams.len == 0, "close drains the pool");
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_https_and_http_never_share_a_pooled_connection() `test(exclude: wasm, timeout: "20s") {
+  channel[int] plain_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] plain_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] plain_done = channel[bool](capacity: 1);
+  channel[int] tls_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] tls_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] tls_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    plain_port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    plain_handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "plain");
+    server.serve(move handler)?!;
+    plain_done.send(true);
+    return;
+  };
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    tls_port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    tls_handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "secure");
+    server.serve(move handler)?!;
+    tls_done.send(true);
+    return;
+  };
+
+  if plain_port := <-plain_port_ch {
+    if tls_port := <-tls_port_ch {
+      if plain_handle := <-plain_handle_ch {
+        if tls_handle := <-tls_handle_ch {
+          Client client = _insecure_client();
+          Response a = client.get("http://127.0.0.1:" + plain_port.to_string() + "/")?!;
+          assert(a.body == "plain:GET:/", "plaintext hop");
+          Response b = client.get("https://127.0.0.1:" + tls_port.to_string() + "/")?!;
+          assert(b.body == "secure:GET:/", "TLS hop");
+          assert(client._pool._streams.len == 2, "one pooled connection per origin");
+          assert(client._pool._keys[0].starts_with("http://"), "plaintext key keeps its scheme");
+          assert(client._pool._keys[1].starts_with("https://"), "TLS key keeps its scheme");
+
+          client.close();
+          plain_handle.shutdown()?!;
+          tls_handle.shutdown()?!;
+          if p := <-plain_done {
+          }
+          if t := <-tls_done {
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- server behaviour over TLS ----------------------------------------------
+
+test_https_handler_error_returns_500() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureFailingHandler handler = _SecureFailingHandler(reason: "handler exploded");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/boom")?!;
+      assert(resp.status == 500, "a raising handler answers 500 over TLS too");
+      assert(resp.body == "handler exploded", "the error message reaches the client");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_https_head_request_carries_no_body() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "h");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Request head = Request(method: move Method.Head, url: "https://127.0.0.1:" + port.to_string() + "/x", headers: map[string, string](), body: "");
+      Response resp = client.send(move head)?!;
+      assert(resp.status == 200, "HEAD status over TLS");
+      assert(resp.body == "", "HEAD carries no body over TLS");
+
+      // The suppressed body must leave the persistent TLS connection framed, so
+      // a following GET on the same pooled connection still parses.
+      Response after = client.get("https://127.0.0.1:" + port.to_string() + "/y")?!;
+      assert(after.body == "h:GET:/y", "GET after HEAD reuses the TLS connection correctly");
+
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_https_large_body_spans_many_tls_records() `test(exclude: wasm, timeout: "30s") {
+  // A body far larger than one TLS record (16 KB) and larger than the client's
+  // 4096-byte read buffer: the framing loops must reassemble it across many
+  // reads with the decryption in between.
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureBulkHandler handler = _SecureBulkHandler(size: 200000);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/bulk")?!;
+      assert(resp.status == 200, "bulk status");
+      assert(resp.body.len == 200000, "every byte of a 200 KB body survived the TLS round trip");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_https_post_body_reaches_the_handler() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _EchoHandler handler = _EchoHandler(prefix: "got:");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Response resp = client.post("https://127.0.0.1:" + port.to_string() + "/p", "payload over tls")?!;
+      assert(resp.status == 200, "POST status");
+      assert(resp.body == "got:payload over tls", "request body decrypted server-side");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// The regression test for running the TLS handshake in the connection's own
+// goroutine: a peer that speaks plaintext to the TLS port must lose only its own
+// connection. If the handshake ran inside the accept loop, this failure would
+// end serve() and the following request would never be answered.
+test_https_plaintext_peer_does_not_stop_the_server() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "survivor");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      // A bare HTTP request to the HTTPS port: the server's handshake rejects it.
+      net.TcpStream raw = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] plain_request = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      raw.write(plain_request)? e {
+        0;
+      };
+      // Drain to EOF rather than asserting on the first read: depending on the
+      // backend the peer either closes outright or emits a TLS alert record
+      // first. Neither is an HTTP response, which is the actual claim.
+      u8[] sink = u8[].filled(0, 1024);
+      u8[] received = u8[]();
+      bool reading = true;
+      while reading {
+        int n = raw.read(sink)? e {
+          0;
+        };
+        if n == 0 {
+          reading = false;
+        } else {
+          int i = 0;
+          while i < n {
+            received.push(sink[i]);
+            i = i + 1;
+          }
+        }
+      }
+      assert(!string.from_bytes(received).starts_with("HTTP/"), "a plaintext request to the TLS port never gets an HTTP response");
+      raw.close()? e {
+      };
+
+      // The server is still serving.
+      Client client = _insecure_client();
+      Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/after")?!;
+      assert(resp.body == "survivor:GET:/after", "the server kept serving after a failed handshake");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+test_https_graceful_shutdown() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "bye");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/")?!;
+      assert(resp.status == 200, "served before shutdown");
+      client.close();
+
+      // The wake connection the handle opens is plaintext even here; it only has
+      // to unblock accept.
+      handle.shutdown()?!;
+      if s := <-serve_done {
+        assert(s, "serve returned after shutdown");
+      } else {
+        assert(false, "serve never returned");
+      }
+    }
+  }
+}
+
+test_bind_tls_rejects_invalid_credentials() `test(exclude: wasm) {
+  u8[] garbage = "not a certificate".bytes();
+  bool bad_cert = false;
+  Server.bind_tls("127.0.0.1", 0, garbage, _test_key())? e is TlsError {
+    bad_cert = match e.kind {
+      TlsErrorKind.certificate => true,
+      _ => false,
+    };
+  }!;
+  assert(bad_cert, "an invalid certificate is reported as TlsErrorKind.certificate");
+
+  u8[] badkey = "-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n".bytes();
+  bool bad_key = false;
+  Server.bind_tls("127.0.0.1", 0, _test_cert(), badkey)? e is TlsError {
+    bad_key = match e.kind {
+      TlsErrorKind.certificate => true,
+      _ => false,
+    };
+  }!;
+  assert(bad_key, "an invalid private key is reported as TlsErrorKind.certificate");
+}
+
+// _bind_tls_bounds_error returns the rejection message for the given bounds, or
+// "" when bind_tls accepted them (closing the listener it opened).
+_bind_tls_bounds_error!(int max_connections, int max_keep_alive_requests) string {
+  Server s = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key(), max_connections, max_keep_alive_requests)? e {
+    return e.message;
+  };
+  s.close()?^;
+  return "";
+}
+
+test_bind_tls_rejects_invalid_bounds() `test(exclude: wasm) {
+  assert(_bind_tls_bounds_error(0, 100)?!.contains("max_connections must be at least 1"), "bind_tls enforces the same max_connections bound as bind");
+  assert(_bind_tls_bounds_error(128, 0)?!.contains("max_keep_alive_requests must be at least 1"), "bind_tls enforces the same max_keep_alive_requests bound as bind");
+  assert(_bind_tls_bounds_error(1, 1)?! == "", "the boundary values are accepted");
+}
+
+// --- Request.send -----------------------------------------------------------
+
+// Request.send has no way to supply a TLS configuration, so it always verifies
+// against the system trust store. Against the self-signed fixture that must
+// fail — and fail as a certificate error, which is the observable half of "the
+// https path in Request.send works". The verified success path needs a
+// system-trusted certificate and is covered for Client above, where a trust
+// anchor can be supplied without touching process-wide state.
+test_request_send_https_verifies_against_the_system_trust_store() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "unreachable");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Request req = Request.new_get("https://localhost:" + port.to_string() + "/");
+      bool as_tls_error = false;
+      req.send()? e is TlsError {
+        as_tls_error = true;
+      } else {
+      };
+      assert(as_tls_error, "Request.send rejects an untrusted certificate as TlsError");
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- redirects across schemes ----------------------------------------------
+
+test_redirect_http_to_https_strips_credentials() `test(exclude: wasm, timeout: "30s") {
+  channel[int] tls_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] tls_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] tls_done = channel[bool](capacity: 1);
+  channel[int] plain_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] plain_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] plain_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    tls_port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    tls_handle_ch.send(move sh);
+    _CredentialProbeHandler handler = _CredentialProbeHandler(tag: "target");
+    server.serve(move handler)?!;
+    tls_done.send(true);
+    return;
+  };
+
+  if tls_port := <-tls_port_ch {
+    string location = "https://127.0.0.1:" + tls_port.to_string() + "/target";
+    go {
+      Server server = Server.bind("127.0.0.1", 0)?!;
+      plain_port_ch.send(server.port);
+      ServerShutdownHandle sh = server.create_shutdown_handle();
+      plain_handle_ch.send(move sh);
+      _RedirectHandler handler = _RedirectHandler(location: move location);
+      server.serve(move handler)?!;
+      plain_done.send(true);
+      return;
+    };
+
+    if plain_port := <-plain_port_ch {
+      if plain_handle := <-plain_handle_ch {
+        if tls_handle := <-tls_handle_ch {
+          Client client = _insecure_client();
+          Request req = Request.new_get("http://127.0.0.1:" + plain_port.to_string() + "/start");
+          req.set_header("Authorization", "Bearer secret");
+          req.set_header("Cookie", "sid=1");
+          Response resp = client.send(move req)?!;
+          assert(resp.status == 200, "followed the http -> https redirect");
+          assert(resp.body == "target auth=no cookie=no", "credentials stripped when the scheme changes");
+
+          client.close();
+          plain_handle.shutdown()?!;
+          tls_handle.shutdown()?!;
+          if p := <-plain_done {
+          }
+          if t := <-tls_done {
+          }
+        }
+      }
+    }
+  }
+}
+
+test_redirect_https_to_http_strips_credentials() `test(exclude: wasm, timeout: "30s") {
+  channel[int] plain_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] plain_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] plain_done = channel[bool](capacity: 1);
+  channel[int] tls_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] tls_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] tls_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    plain_port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    plain_handle_ch.send(move sh);
+    _CredentialProbeHandler handler = _CredentialProbeHandler(tag: "downgraded");
+    server.serve(move handler)?!;
+    plain_done.send(true);
+    return;
+  };
+
+  if plain_port := <-plain_port_ch {
+    string location = "http://127.0.0.1:" + plain_port.to_string() + "/target";
+    go {
+      Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+      tls_port_ch.send(server.port);
+      ServerShutdownHandle sh = server.create_shutdown_handle();
+      tls_handle_ch.send(move sh);
+      _RedirectHandler handler = _RedirectHandler(location: move location);
+      server.serve(move handler)?!;
+      tls_done.send(true);
+      return;
+    };
+
+    if tls_port := <-tls_port_ch {
+      if tls_handle := <-tls_handle_ch {
+        if plain_handle := <-plain_handle_ch {
+          Client client = _insecure_client();
+          Request req = Request.new_get("https://127.0.0.1:" + tls_port.to_string() + "/start");
+          req.set_header("Authorization", "Bearer secret");
+          req.set_header("Cookie", "sid=1");
+          Response resp = client.send(move req)?!;
+          assert(resp.status == 200, "followed the https -> http redirect");
+          assert(resp.body == "downgraded auth=no cookie=no", "credentials never travel onto a plaintext hop");
+
+          client.close();
+          plain_handle.shutdown()?!;
+          tls_handle.shutdown()?!;
+          if p := <-plain_done {
+          }
+          if t := <-tls_done {
+          }
+        }
+      }
+    }
+  }
+}
+
+// A same-origin https redirect must KEEP the credentials — the strip is about
+// crossing an origin, not about TLS.
+test_redirect_within_https_keeps_credentials() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _RelativeRedirectOnceHandler handler = _RelativeRedirectOnceHandler(tag: "same-origin");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      Client client = _insecure_client();
+      Request req = Request.new_get("https://127.0.0.1:" + port.to_string() + "/start");
+      req.set_header("Authorization", "Bearer secret");
+      req.set_header("Cookie", "sid=1");
+      Response resp = client.send(move req)?!;
+      assert(resp.status == 200, "followed the same-origin redirect");
+      assert(resp.body == "same-origin auth=yes cookie=yes", "credentials survive a same-origin https redirect");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// Redirects /start to /target with a relative Location (so the resolved URL
+// inherits the https scheme), then probes the credentials on /target.
+type _RelativeRedirectOnceHandler {
+  string tag;
+
+  handle!(this, ServerRequest request) ServerResponse {
+    if request.path == "/start" {
+      ServerResponse resp = ServerResponse.with_status(302, "");
+      resp.set_header("Location", "/target");
+      return resp;
+    }
+    string auth = "no";
+    if a := request.header("authorization") {
+      auth = "yes";
+    }
+    string cookie = "no";
+    if c := request.header("cookie") {
+      cookie = "yes";
+    }
+    return ServerResponse.ok(this.tag + " auth=" + auth + " cookie=" + cookie);
+  }
+}
+
+// _serve_unframed_then_drop answers one request with a body framed only by the
+// connection close, then returns — which drops the TlsStream, tearing down the
+// TCP connection WITHOUT sending a close_notify. Many real servers behave
+// exactly this way.
+_serve_unframed_then_drop!(TlsListener ~listener, string body) {
+  TlsStream server = listener.accept()?^;
+  u8[] request = u8[].filled(0u8, 4096);
+  server.read(request)?^;
+  server.write_string("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body)?^;
+}
+
+test_https_unframed_body_survives_a_missing_close_notify() `test(exclude: wasm, timeout: "20s") {
+  // The read-to-EOF branch of _exchange has no delimiter but the close itself,
+  // so a transport read error there must end the body rather than fail the
+  // exchange. Over TLS that is the difference between working and not: a peer
+  // that closes the TCP connection without close_notify surfaces as
+  // TlsErrorKind.io, not as a clean end-of-stream.
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    Client client = _insecure_client();
+    Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status == 200, "status parsed from the truncated exchange");
+    assert(resp.body == "unframed body", "an unframed body ends at the close, close_notify or not");
+    client.close();
+    done.send(true);
+    return;
+  };
+
+  _serve_unframed_then_drop(listener, "unframed body")?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// _serve_canned_over_tls answers one request with a fixed byte sequence, then
+// closes cleanly. It is a raw TLS server rather than an http.Server so a test
+// can put an arbitrary response — chunked, gzip-encoded — on the wire, which
+// http.Server never emits itself.
+_serve_canned_over_tls!(TlsListener ~listener, u8[] reply) {
+  TlsStream server = listener.accept()?^;
+  u8[] request = u8[].filled(0u8, 4096);
+  server.read(request)?^;
+  int off = 0;
+  while off < reply.len {
+    int w = server.write(reply[off: reply.len])?^;
+    off = off + w;
+  }
+  server.close_gracefully();
+}
+
+test_https_chunked_response_is_decoded() `test(exclude: wasm, timeout: "20s") {
+  // _read_chunked_body is the trickiest framing path and now runs over a
+  // different transport; decoding must be identical over TLS.
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    Client client = _insecure_client();
+    Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status == 200, "chunked status");
+    assert(resp.body == "Hello chunked world", "chunked body reassembled over TLS");
+    client.close();
+    done.send(true);
+    return;
+  };
+
+  string reply = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n6\r\nHello \r\n8\r\nchunked \r\n5\r\nworld\r\n0\r\n\r\n";
+  _serve_canned_over_tls(listener, reply.bytes())?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_https_gzip_response_is_decoded() `test(exclude: wasm, timeout: "20s") {
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    Client client = _insecure_client();
+    Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status == 200, "gzip status");
+    assert(resp.body == "hello gzip over tls", "gzip body decoded over TLS");
+    client.close();
+    done.send(true);
+    return;
+  };
+
+  u8[] gz = gzip.gzip_encode("hello gzip over tls".bytes());
+  Builder header = Builder();
+  header.write_string("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ");
+  header.write_string(gz.len.to_string());
+  header.write_string("\r\nConnection: close\r\n\r\n");
+  u8[] reply = header.to_string().bytes();
+  int j = 0;
+  while j < gz.len {
+    reply.push(gz[j]);
+    j = j + 1;
+  }
+  _serve_canned_over_tls(listener, reply)?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+// --- connection-slot accounting on a failed handshake -----------------------
+
+// The upgrade runs inside the connection goroutine, which means the accept
+// semaphore slot that goroutine holds must be released on the FAILING path too.
+// With max_connections: 1 a leaked slot is fatal and unmistakable: the accept
+// loop never gets a slot again, so the following request is never accepted and
+// the test times out. Ordering is by TCP, not by a clock — the raw peer's
+// connect completes before the client's connect is issued, and the kernel's
+// accept queue is FIFO, so the server upgrades the doomed connection first.
+test_https_failed_handshake_releases_its_connection_slot() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key(), 1)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "slots");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      // A peer that connects and leaves without speaking TLS: the server-side
+      // handshake reads EOF and raises, taking the failing branch of upgrade.
+      net.TcpStream raw = net.TcpStream.connect("127.0.0.1", port)?!;
+      raw.close()?!;
+
+      Client client = _insecure_client();
+      Response resp = client.get("https://127.0.0.1:" + port.to_string() + "/after")?!;
+      assert(resp.body == "slots:GET:/after", "the only connection slot was released by the failed handshake");
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- set_tls_config and the connection pool ---------------------------------
+
+// Replacing the configuration must not leave connections behind that were
+// negotiated under the old one: they would keep serving requests under a
+// configuration the caller has replaced, and — because a TLS session is created
+// from its config's backend context and may not outlive it — they would still
+// be live when that context is freed.
+test_set_tls_config_drains_the_pool() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "cfg");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string base = "https://127.0.0.1:" + port.to_string();
+      Client client = _insecure_client();
+
+      Response first = client.get(base + "/one")?!;
+      assert(first.body == "cfg:GET:/one", "first response");
+      assert(client._pool._streams.len == 1, "the TLS connection was pooled");
+
+      client.set_tls_config(TlsConfig.insecure());
+      assert(client._pool._streams.len == 0, "replacing the configuration closed the pooled connection");
+      assert(client._pool._keys.len == 0, "and dropped its pool key with it");
+
+      Response second = client.get(base + "/two")?!;
+      assert(second.body == "cfg:GET:/two", "the next request reconnects under the new configuration");
+
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- teardown of a client that is never closed ------------------------------
+
+// _one_https_request_then_drop makes one request and lets the Client go out of
+// scope with its TLS connection still pooled — deliberately no close().
+_one_https_request_then_drop!(string move url) int {
+  Client client = _insecure_client();
+  Response resp = client.get(move url)?^;
+  assert(client._pool._streams.len == 1, "the TLS connection is still pooled when the client goes out of scope");
+  return resp.status;
+}
+
+// Client declares _tls_config before _pool so that, on drop, the pooled TLS
+// sessions tear down before the backend context they were created from (fields
+// drop in reverse declaration order). close() makes that ordering moot by
+// emptying the pool first; a client that is simply let go is the path where the
+// declaration order is the only thing keeping a session from outliving its
+// context. The per-test leak detector is what proves the release happened.
+test_https_client_dropped_without_close_tears_down_its_pool() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "orphan");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      int status = _one_https_request_then_drop("https://127.0.0.1:" + port.to_string() + "/drop")?!;
+      assert(status == 200, "the request the dropped client made succeeded");
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    } else {
+      assert(false, "no shutdown handle");
+    }
+  } else {
+    assert(false, "no port");
+  }
+}
+
+// --- lazy trust-store loading ----------------------------------------------
+
+// TlsConfig.create parses the whole system CA bundle, so _connect_transport
+// materialises the default configuration on the first https:// connection and
+// never before. A client that only speaks http:// must not pay for it.
+test_https_tls_config_is_materialised_lazily() `test(exclude: wasm, timeout: "20s") {
+  channel[int] plain_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] plain_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] plain_done = channel[bool](capacity: 1);
+  channel[int] tls_port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] tls_handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] tls_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    plain_port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    plain_handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "lazy");
+    server.serve(move handler)?!;
+    plain_done.send(true);
+    return;
+  };
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    tls_port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    tls_handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "lazy-tls");
+    server.serve(move handler)?!;
+    tls_done.send(true);
+    return;
+  };
+
+  if plain_port := <-plain_port_ch {
+    if tls_port := <-tls_port_ch {
+      if plain_handle := <-plain_handle_ch {
+        if tls_handle := <-tls_handle_ch {
+          Client client = Client.create();
+          assert(client._tls_config.len == 0, "a fresh client holds no TLS configuration");
+
+          Response plain = client.get("http://127.0.0.1:" + plain_port.to_string() + "/")?!;
+          assert(plain.body == "lazy:GET:/", "the plaintext request succeeded");
+          assert(client._tls_config.len == 0, "an http:// request never loads a trust store");
+
+          // The handshake against the self-signed fixture fails, but the
+          // configuration is materialised before the connection is opened, so
+          // the slot is filled either way — which is precisely the claim.
+          bool failed = false;
+          client.get("https://localhost:" + tls_port.to_string() + "/")? e {
+            failed = true;
+          };
+          assert(failed, "the default client rejects the self-signed fixture");
+          assert(client._tls_config.len == 1, "the first https:// connection materialises the default configuration");
+
+          client.close();
+          plain_handle.shutdown()?!;
+          tls_handle.shutdown()?!;
+          if p := <-plain_done {
+          }
+          if t := <-tls_done {
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- pool eviction of a TLS transport ---------------------------------------
+
+// Eviction under pressure drops the transport rather than closing it, so a
+// pooled TLS session goes away behind a bare FIN. The point of the test is that
+// the drop still releases the session and the socket — the leak detector is the
+// assertion that matters here, alongside the LIFO bookkeeping.
+// _tls_pool_eviction_summary opens two TLS connections, drives them through a
+// one-slot pool, and reports "<pooled>,<take-a>,<take-b>". It is a function
+// rather than inline goroutine code so that everything it owns — both
+// transports and the pool — drops before it returns: the caller then asserts on
+// a value, on the test's own goroutine, with the cleanup the leak detector
+// watches already complete.
+_tls_pool_eviction_summary!(int port) string {
+  TlsConfig cfg = TlsConfig.insecure();
+  _Transport s1 = _TlsTransport.create(TlsStream.connect(net.TcpStream.connect("127.0.0.1", port)?^, "127.0.0.1", cfg)?^);
+  _Transport s2 = _TlsTransport.create(TlsStream.connect(net.TcpStream.connect("127.0.0.1", port)?^, "127.0.0.1", cfg)?^);
+
+  Pool p = Pool.create(1);
+  p.put("https://a", move s1); // pooled: [a]
+  p.put("https://b", move s2); // at capacity → evict "a"; pooled: [b]
+
+  Builder summary = Builder();
+  summary.write_string(p._streams.len.to_string());
+  if a := p.take("https://a") {
+    summary.write_string(",hit");
+  } else {
+    summary.write_string(",miss");
+  }
+  if b := p.take("https://b") {
+    summary.write_string(",hit");
+  } else {
+    summary.write_string(",miss");
+  }
+  return summary.to_string();
+}
+
+test_pool_evicts_a_tls_transport() `test(exclude: wasm, timeout: "20s") {
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  channel[string] summary_ch = channel[string](capacity: 1);
+
+  go {
+    summary_ch.send(_tls_pool_eviction_summary(port)?!);
+    return;
+  };
+
+  // Accept both handshakes on this side. The client goroutine handshakes them
+  // one after the other, so a sequential accept here cannot deadlock.
+  TlsStream a = listener.accept()?!;
+  TlsStream b = listener.accept()?!;
+  if summary := <-summary_ch {
+    assert(summary == "1,miss,hit", "eviction leaves only the newest TLS connection pooled, got " + summary);
+  } else {
+    assert(false, "the pool goroutine never reported");
+  }
+  listener.close()?!;
+}
+
+// --- framed bodies still fail loudly ----------------------------------------
+
+// _serve_short_framed_then_drop announces more body than it sends and then lets
+// the stream drop, closing the TCP connection without a close_notify.
+_serve_short_framed_then_drop!(TlsListener ~listener, int announced) {
+  TlsStream server = listener.accept()?^;
+  u8[] request = u8[].filled(0u8, 4096);
+  server.read(request)?^;
+  server.write_string("HTTP/1.1 200 OK\r\nContent-Length: " + announced.to_string() + "\r\nConnection: close\r\n\r\nshort")?^;
+}
+
+// _https_request_raises reports whether one request failed, with the Client
+// already closed and dropped by the time it returns — so the caller's assertion
+// runs against a settled value rather than inside the goroutine.
+_https_request_raises!(string move url) bool {
+  Client client = _insecure_client();
+  bool raised = false;
+  client.get(move url)? e {
+    raised = true;
+  };
+  client.close();
+  return raised;
+}
+
+// The read-to-EOF branch of _exchange swallows a transport read error because
+// it has no delimiter but the close itself. A Content-Length body does have a
+// delimiter, so the same truncation there must surface as an error rather than
+// as a silently short body — this test is the counterpart that pins the
+// distinction from test_https_unframed_body_survives_a_missing_close_notify.
+test_https_framed_body_error_is_not_swallowed() `test(exclude: wasm, timeout: "20s") {
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  channel[bool] raised_ch = channel[bool](capacity: 1);
+
+  go {
+    raised_ch.send(_https_request_raises("https://127.0.0.1:" + port.to_string() + "/")?!);
+    return;
+  };
+
+  _serve_short_framed_then_drop(listener, 100)?!;
+  listener.close()?!;
+  if raised := <-raised_ch {
+    assert(raised, "a truncated Content-Length body over TLS fails the exchange");
+  } else {
+    assert(false, "the client goroutine never reported");
+  }
+}
+
+// --- concurrency ------------------------------------------------------------
+
+// One TlsServerConfig is shared by every connection, and every handshake runs
+// on its own goroutine. Four clients × three keep-alive requests against a
+// server that admits two connections at a time exercises both: concurrent
+// handshakes off the same credentials, and the accept semaphore recycling
+// slots as TLS connections finish.
+test_https_concurrent_clients_share_one_server_config() `test(exclude: wasm, timeout: "30s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[bool] client_done = channel[bool](capacity: 4);
+
+  _CountingHandler handler = _CountingHandler(hits: Ref[Mutex[int]](Mutex[int](0)));
+  Ref[Mutex[int]] hits = handler.hits.clone();
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key(), 2)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      int spawned = 0;
+      while spawned < 4 {
+        go {
+          Client client = _insecure_client();
+          string base = "https://127.0.0.1:" + port.to_string();
+          int sent = 0;
+          while sent < 3 {
+            Response resp = client.get(base + "/load")?!;
+            assert(resp.status == 200, "concurrent https status");
+            assert(resp.body == "counted", "concurrent https body");
+            sent = sent + 1;
+          }
+          assert(client._pool._streams.len == 1, "each client reused a single pooled TLS connection");
+          client.close();
+          client_done.send(true);
+          return;
+        };
+        spawned = spawned + 1;
+      }
+
+      int finished = 0;
+      while finished < 4 {
+        if d := <-client_done {
+        }
+        finished = finished + 1;
+      }
+
+      use guard := hits.borrow.lock();
+      assert(guard.borrow == 12, "4 clients x 3 keep-alive requests over TLS, got " + guard.borrow.to_string());
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- server-forced connection close -----------------------------------------
+
+// max_keep_alive_requests is enforced identically over TLS: the last permitted
+// response says Connection: close, the client must not pool that connection,
+// and the following request must transparently open a fresh TLS session.
+test_https_max_keep_alive_requests_forces_a_reconnect() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key(), 128, 2)?!;
+    assert(server.max_keep_alive_requests == 2, "bind_tls carries the keep-alive bound through");
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "bounded");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string base = "https://127.0.0.1:" + port.to_string();
+      Client client = _insecure_client();
+
+      Response first = client.get(base + "/1")?!;
+      assert(first.body == "bounded:GET:/1", "first response");
+      assert(client._pool._streams.len == 1, "the connection is reusable after the first request");
+
+      Response second = client.get(base + "/2")?!;
+      assert(second.body == "bounded:GET:/2", "second response over the reused TLS connection");
+      assert(client._pool._streams.len == 0, "the server closed the connection at its keep-alive bound");
+
+      Response third = client.get(base + "/3")?!;
+      assert(third.body == "bounded:GET:/3", "the third request opened a fresh TLS session");
+      assert(client._pool._streams.len == 1, "and pooled it");
+
+      client.close();
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- convenience functions over https ---------------------------------------
+
+// http_get builds a transient Client, so the https:// path through it is its
+// own code path. Against the self-signed fixture the observable result is the
+// certificate rejection, which is enough to show the scheme reached TLS.
+test_http_get_convenience_rejects_an_untrusted_https_certificate() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "unreachable");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      string url = "https://localhost:" + port.to_string() + "/";
+      bool get_as_tls_error = false;
+      http_get(url[0:])? e is TlsError {
+        get_as_tls_error = true;
+      } else {
+      };
+      assert(get_as_tls_error, "http_get on an https:// URL verifies the certificate and reports TlsError");
+
+      bool post_as_tls_error = false;
+      http_post(url[0:], "body", map[string, string]())? e is TlsError {
+        post_as_tls_error = true;
+      } else {
+      };
+      assert(post_as_tls_error, "http_post on an https:// URL verifies the certificate and reports TlsError");
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- credential release when bind_tls cannot open its socket ----------------
+
+// bind_tls builds the TlsServerConfig (and the Ref[_ConnectionUpgrader] holding
+// it) before _bind_with opens the listener, so a failing socket bind must
+// release the backend context by dropping the upgrader. "example" is not an
+// IPv4 literal, which net.TcpListener.bind requires, so the failure is
+// deterministic on every platform. The leak detector proves the release.
+// _bind_tls_failure_message returns the rejection message for an address
+// bind_tls cannot bind, or "" when it unexpectedly succeeded.
+_bind_tls_failure_message!(string move address) string {
+  Server s = Server.bind_tls(move address, 0, _test_cert(), _test_key())? e {
+    return e.message;
+  };
+  s.close()?^;
+  return "";
+}
+
+test_bind_tls_releases_credentials_when_the_socket_bind_fails() `test(exclude: wasm) {
+  assert(_bind_tls_failure_message("example")?!.len > 0, "bind_tls fails when the socket cannot be bound");
+}

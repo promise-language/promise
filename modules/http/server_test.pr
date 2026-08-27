@@ -154,7 +154,7 @@ test_server_basic() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   _OkHandler handler = _OkHandler(response_body: "hello server");
   _serve_connection[_OkHandler](conn, Ref[_OkHandler](move handler), 1);
   listener.close()?!;
@@ -174,7 +174,7 @@ test_server_post() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   _EchoHandler handler = _EchoHandler(prefix: "");
   _serve_connection[_EchoHandler](conn, Ref[_EchoHandler](move handler), 1);
   listener.close()?!;
@@ -207,7 +207,7 @@ test_server_headers() `test(exclude: wasm || macos, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   _HeaderEchoHandler handler = _HeaderEchoHandler(echo_header: "x-test");
   _serve_connection[_HeaderEchoHandler](conn, Ref[_HeaderEchoHandler](move handler), 1);
   listener.close()?!;
@@ -226,7 +226,7 @@ test_server_error_handling() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   _ErrorHandler handler = _ErrorHandler(error_message: "handler error");
   _serve_connection[_ErrorHandler](conn, Ref[_ErrorHandler](move handler), 1);
   listener.close()?!;
@@ -245,7 +245,7 @@ test_server_not_found() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   _NotFoundHandler handler = _NotFoundHandler(message: "");
   _serve_connection[_NotFoundHandler](conn, Ref[_NotFoundHandler](move handler), 1);
   listener.close()?!;
@@ -280,11 +280,11 @@ test_read_request_early_close() `test(exclude: wasm, timeout: "10s") {
   int port = listener.local_port;
 
   go {
-    net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     conn.close()?!;
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] pending = u8[]();
   ServerRequest req = _read_request(conn, pending)? e {
     assert(e.message.contains("connection closed"), "early close error");
@@ -308,7 +308,7 @@ test_server_large_body() `test(exclude: wasm, timeout: "10s") {
     done.send(true);
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   _EchoHandler handler = _EchoHandler(prefix: "");
   _serve_connection[_EchoHandler](conn, Ref[_EchoHandler](move handler), 1);
   listener.close()?!;
@@ -620,7 +620,7 @@ test_server_keep_alive_reuse() `test(exclude: wasm, timeout: "10s") {
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
 
       u8[] first = "GET /one HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
       _RawResponse r1 = _exchange(conn, first, false)?!;
@@ -661,7 +661,7 @@ test_server_keep_alive_connection_close() `test(exclude: wasm, timeout: "10s") {
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
       _RawResponse rr = _exchange(conn, req, false)?!;
       assert(rr.status == 200, "status");
@@ -699,7 +699,7 @@ test_server_http10_defaults_close() `test(exclude: wasm, timeout: "10s") {
   if port := <-port_ch {
     if handle := <-handle_ch {
       // HTTP/1.0 without Connection: keep-alive defaults to close.
-      net.TcpStream plain = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport plain = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] req10 = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".bytes();
       _RawResponse r10 = _exchange(plain, req10, false)?!;
       assert(r10.status == 200, "http/1.0 status");
@@ -710,7 +710,7 @@ test_server_http10_defaults_close() `test(exclude: wasm, timeout: "10s") {
       plain.close()?!;
 
       // HTTP/1.0 with an explicit Connection: keep-alive persists.
-      net.TcpStream persistent = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport persistent = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] req10ka = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n".bytes();
       _RawResponse ka1 = _exchange(persistent, req10ka, false)?!;
       assert(_response_header(ka1, "connection") == "keep-alive", "http/1.0 keep-alive honoured");
@@ -745,7 +745,7 @@ test_server_max_keep_alive_requests() `test(exclude: wasm, timeout: "10s") {
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] first = "GET /1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
       _RawResponse r1 = _exchange(conn, first, false)?!;
       assert(_response_header(r1, "connection") == "keep-alive", "request 1 keeps the connection");
@@ -909,7 +909,7 @@ test_server_head_request() `test(exclude: wasm, timeout: "10s") {
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] head_req = "HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
       _RawResponse hr = _exchange(conn, head_req, true)?!;
       assert(hr.status == 200, "HEAD status");
@@ -1046,7 +1046,7 @@ test_read_request_pipelined_carry_over() `test(exclude: wasm, timeout: "10s") {
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport client = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] both = ("POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nfoo" + "GET /b?x=1 HTTP/1.1\r\nHost: h\r\n\r\n").bytes();
     _write_all(client, both)?!;
     if d := <-done {
@@ -1054,7 +1054,7 @@ test_read_request_pipelined_carry_over() `test(exclude: wasm, timeout: "10s") {
     client.close()?!;
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] pending = u8[]();
   ServerRequest first = _read_request(conn, pending)?!;
   assert(first.path == "/a", "first path");
@@ -1092,7 +1092,7 @@ test_server_transfer_encoding_rejected() `test(exclude: wasm, timeout: "10s") {
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] chunked = "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n".bytes();
       _RawResponse rr = _exchange(conn, chunked, false)?!;
       assert(rr.status == 411, "unframable body gets 411");
@@ -1143,7 +1143,7 @@ test_server_bind_rejects_invalid_bounds() `test(exclude: wasm, timeout: "10s") {
 // _read_until_eof drains a socket to EOF. Pipelined responses arrive
 // back-to-back on one socket, and _exchange discards whatever it reads past a
 // single response, so a pipelining test has to frame the stream itself.
-_read_until_eof!(net.TcpStream ~conn) string {
+_read_until_eof!(_Transport ~conn) string {
   u8[] acc = u8[]();
   u8[] buf = u8[].filled(0, 4096);
   bool reading = true;
@@ -1175,7 +1175,7 @@ test_read_request_body_split_across_reads() `test(exclude: wasm, timeout: "10s")
   channel[bool] done = channel[bool](capacity: 1);
 
   go {
-    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport client = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     u8[] head = "POST /split HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n".bytes();
     _write_all(client, head)?!;
     header_sent.send(true);
@@ -1189,7 +1189,7 @@ test_read_request_body_split_across_reads() `test(exclude: wasm, timeout: "10s")
     client.close()?!;
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   if h := <-header_sent {
   }
 
@@ -1247,7 +1247,7 @@ test_server_pipelined_requests() `test(exclude: wasm, timeout: "10s") {
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] both = ("POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nfoo" + "POST /b HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbar").bytes();
       _write_all(conn, both)?!;
 
@@ -1345,7 +1345,7 @@ test_server_error_response_closes_connection() `test(exclude: wasm, timeout: "10
 
   if port := <-port_ch {
     if handle := <-handle_ch {
-      net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
       u8[] req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
       _RawResponse rr = _exchange(conn, req, false)?!;
       assert(rr.status == 500, "handler error status");
@@ -1392,7 +1392,7 @@ test_server_keep_alive_concurrent_load() `test(exclude: wasm, timeout: "20s") {
       int spawned = 0;
       while spawned < 4 {
         go {
-          net.TcpStream c = net.TcpStream.connect("127.0.0.1", port)?!;
+          _Transport c = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
           int sent = 0;
           while sent < 3 {
             string closing = "";
@@ -1447,14 +1447,14 @@ test_read_request_truncated_body() `test(exclude: wasm, timeout: "10s") {
   int port = listener.local_port;
 
   go {
-    net.TcpStream client = net.TcpStream.connect("127.0.0.1", port)?!;
+    _Transport client = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
     // 3 of the 10 announced body bytes, then EOF.
     u8[] partial = "POST /truncated HTTP/1.1\r\nHost: h\r\nContent-Length: 10\r\n\r\nabc".bytes();
     _write_all(client, partial)?!;
     client.close()?!;
   };
 
-  net.TcpStream conn = listener.accept()?!;
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
   u8[] pending = u8[]();
   ServerRequest req = _read_request(conn, pending)?!;
   assert(req.path == "/truncated", "truncated request still framed");

@@ -841,3 +841,211 @@ test_tls_config_replaces_client_certificate() `test(exclude: wasm, timeout: "20s
   listener.close()?!;
   sleep(Duration.from_millis(150));
 }
+
+// --- server-side building blocks: TlsServerConfig, TlsStream.accept,
+// --- TlsStream.close_gracefully (T0079).
+//
+// These are what let a server keep its accept loop plaintext and run each TLS
+// handshake on the connection's own goroutine — the shape modules/http's
+// Server.bind_tls is built on. Synchronization here is by channel handshake
+// only (T1632).
+
+test_tls_server_config_create_and_errors() `test(exclude: wasm) {
+  // A well-formed cert/key pair loads.
+  TlsServerConfig good = TlsServerConfig.create(_test_cert(), _test_key())?!;
+
+  // A certificate that is not PEM at all is rejected as a certificate error.
+  u8[] garbage = "not a certificate".bytes();
+  bool cert_rejected = false;
+  TlsServerConfig.create(garbage, _test_key())? e is TlsError {
+    cert_rejected = match e.kind {
+      TlsErrorKind.certificate => true,
+      _ => false,
+    };
+  }!;
+  assert(cert_rejected, "an invalid certificate PEM raises TlsErrorKind.certificate");
+
+  // A key that does not match the certificate is rejected too.
+  u8[] badkey = "-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n".bytes();
+  bool key_rejected = false;
+  TlsServerConfig.create(_test_cert(), badkey)? e is TlsError {
+    key_rejected = match e.kind {
+      TlsErrorKind.certificate => true,
+      _ => false,
+    };
+  }!;
+  assert(key_rejected, "an invalid private key PEM raises TlsErrorKind.certificate");
+}
+
+test_tls_stream_accept_on_plain_listener() `test(exclude: wasm, timeout: "20s") {
+  // The server binds a bare TCP listener and upgrades the accepted stream
+  // itself, rather than letting TlsListener handshake inside accept.
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.insecure();
+    TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+    client.write_string("upgraded\n")?!;
+    if reply := client.read_line()?! {
+      assert(reply == "echo:upgraded", "client received the echo over the upgraded connection");
+    } else {
+      assert(false, "client expected an echo line");
+    }
+    client.close()?!;
+    done.send(true);
+    return;
+  };
+
+  net.TcpStream raw = listener.accept()?!;
+  TlsServerConfig server_config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  TlsStream server = TlsStream.accept(move raw, server_config)?!;
+  assert(server.cipher_suite.len > 0, "server negotiated a cipher suite after upgrading");
+  if line := server.read_line()?! {
+    assert(line == "upgraded", "server framed plaintext off the upgraded stream");
+    server.write_string("echo:" + line + "\n")?!;
+  } else {
+    assert(false, "server expected a request line");
+  }
+  server.close()?!;
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_tls_stream_accept_reuses_one_server_config() `test(exclude: wasm, timeout: "30s") {
+  // One TlsServerConfig serves several sequential handshakes — the shape a
+  // server needs, where the credentials outlive every individual connection.
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  TlsServerConfig server_config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    int i = 0;
+    while i < 3 {
+      net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+      TlsConfig cfg = TlsConfig.insecure();
+      TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+      client.write_string("ping " + i.to_string() + "\n")?!;
+      if reply := client.read_line()?! {
+        assert(reply == "pong " + i.to_string(), "client saw the matching reply");
+      } else {
+        assert(false, "client expected a reply line");
+      }
+      client.close()?!;
+      i = i + 1;
+    }
+    done.send(true);
+    return;
+  };
+
+  int served = 0;
+  while served < 3 {
+    net.TcpStream raw = listener.accept()?!;
+    TlsStream server = TlsStream.accept(move raw, server_config)?!;
+    if line := server.read_line()?! {
+      assert(line == "ping " + served.to_string(), "server read the request");
+      server.write_string("pong " + served.to_string() + "\n")?!;
+    } else {
+      assert(false, "server expected a request line");
+    }
+    server.close()?!;
+    served = served + 1;
+  }
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_tls_stream_accept_fails_on_plain_tcp_peer() `test(exclude: wasm, timeout: "15s") {
+  // A peer that speaks no TLS makes the server-side handshake fail with a
+  // handshake error — and only that connection is lost.
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] junk = "GET / HTTP/1.1\r\nHost: x\r\n\r\n".bytes();
+    tcp.write(junk)? e {
+      // the server may already have torn the connection down
+      0;
+    };
+    u8[] sink = u8[].filled(0u8, 256);
+    tcp.read(sink)? e {
+      0;
+    };
+    tcp.close()? e {
+    };
+    done.send(true);
+    return;
+  };
+
+  net.TcpStream raw = listener.accept()?!;
+  TlsServerConfig server_config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  bool failed = false;
+  TlsStream.accept(move raw, server_config)? e is TlsError {
+    failed = match e.kind {
+      TlsErrorKind.handshake => true,
+      _ => false,
+    };
+  }!;
+  assert(failed, "a plaintext peer raises TlsErrorKind.handshake on the server side");
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_tls_close_gracefully_delivers_the_last_write() `test(exclude: wasm, timeout: "20s") {
+  // The server writes a reply and closes while the client's request bytes are
+  // still unread. close_gracefully must FIN-and-drain rather than reset, so the
+  // reply is intact at the client (the TLS counterpart of T1322).
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  channel[bool] wrote = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.insecure();
+    TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+    // The server never reads this: it is exactly the unread inbound data that
+    // close_gracefully has to drain.
+    client.write_string("a request the server will never read\n")?!;
+    wrote.send(true);
+    u8[] all = client.read_all()?!;
+    assert(string.from_bytes(all) == "server reply\n", "the reply survived the server's close");
+    client.close()?!;
+    done.send(true);
+    return;
+  };
+
+  TlsStream server = listener.accept()?!;
+  _ := <-wrote;
+  server.write_string("server reply\n")?!;
+  server.close_gracefully();
+  listener.close()?!;
+  _ := <-done;
+}
+
+test_tls_listener_bind_releases_credentials_when_the_socket_bind_fails() `test(exclude: wasm) {
+  // TlsListener.bind builds its TlsServerConfig before it opens the socket, so
+  // a failing socket bind must still release the backend context. That release
+  // is now drop-on-raise rather than an explicit free (T0079 moved the context
+  // into TlsServerConfig), which makes the per-test leak detector the thing
+  // that actually proves it — this test exists to put that path under it.
+  //
+  // "example" is not an IPv4 literal, which is what net.TcpListener.bind
+  // requires, so the bind fails the same way on every platform with a backend.
+  bool caught_io = false;
+  TlsListener.bind("example", 0, _test_cert(), _test_key())? e is TlsError {
+    match e.kind {
+      TlsErrorKind.io => {
+        caught_io = true;
+      },
+      _ => {
+      },
+    }
+  }!;
+  assert(caught_io, "a failed socket bind is reported as TlsErrorKind.io");
+}

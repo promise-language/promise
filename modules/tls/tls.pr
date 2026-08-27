@@ -141,6 +141,32 @@ type TlsConfig `public `doc("TLS configuration for a connection. Controls certif
   }
 }
 
+type TlsServerConfig `public `doc("Server-side TLS credentials: a certificate chain and its matching private key. One config is shared across every accepted connection, so a server can hand it to each connection goroutine and run the handshake there. Auto-frees its backend context on drop.") {
+  int _ctx; // backend context handle (server) as int (0 = no backend / unsupported)
+
+  create!(u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Creates server credentials from a PEM-encoded certificate chain and its matching PEM-encoded private key. Raises TlsError(kind: unsupported) with no backend, or TlsError(kind: certificate) when either PEM fails to load.") {
+    int ctx = _tls_ctx_new_server();
+    if ctx == 0 {
+      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
+    }
+    if _tls_ctx_use_cert(ctx, cert_pem) != 1 {
+      _tls_ctx_free(ctx);
+      raise _tls_err(TlsErrorKind.certificate, "failed to load server certificate (invalid PEM?)");
+    }
+    if _tls_ctx_use_key(ctx, key_pem) != 1 {
+      _tls_ctx_free(ctx);
+      raise _tls_err(TlsErrorKind.certificate, "failed to load server private key (invalid PEM or mismatched key?)");
+    }
+    return TlsServerConfig(_ctx: ctx);
+  }
+
+  drop(~this) {
+    if this._ctx != 0 {
+      _tls_ctx_free(this._ctx);
+    }
+  }
+}
+
 type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connection. Satisfies Reader and Writer. Auto-frees the TLS session and closes the socket on drop.") {
   int _ssl; // backend session handle as int (0 = never established)
   net.TcpStream _tcp;
@@ -161,6 +187,20 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
     if config._verify {
       _tls_set_verify_host(ssl, hostname);
     }
+    TlsStream s = TlsStream(_ssl: ssl, _tcp: move tcp);
+    s._handshake()?^; // on failure s drops here: frees ssl + closes tcp
+    return s;
+  }
+
+  accept!(net.TcpStream move tcp, TlsServerConfig config) Self `factory `public `doc("Performs a TLS server handshake over an already-accepted TCP stream, using config's certificate and key. Separating this from TlsListener.accept lets a server run each handshake on that connection's own goroutine, so a slow or non-TLS peer stalls only itself and a failed handshake costs one connection rather than the listener.") {
+    if config._ctx == 0 {
+      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
+    }
+    int ssl = _tls_new(config._ctx);
+    if ssl == 0 {
+      raise _tls_err(TlsErrorKind.handshake, "failed to allocate TLS session");
+    }
+    _tls_set_accept_state(ssl);
     TlsStream s = TlsStream(_ssl: ssl, _tcp: move tcp);
     s._handshake()?^; // on failure s drops here: frees ssl + closes tcp
     return s;
@@ -269,6 +309,33 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
     };
   }
 
+  close_gracefully(~this) `public `doc("Closes the stream without racing the peer's last read: sends close_notify, half-closes the write side so the peer sees an orderly FIN, drains whatever the peer is still sending, then closes. Use this on the side that wrote last — an abortive close can otherwise arrive ahead of the bytes the peer has not read yet and surface there as \"connection reset by peer\". Best-effort: network errors during shutdown are ignored.") {
+    if this._ssl != 0 {
+      _tls_shutdown(this._ssl); // queues close_notify into the outbound buffer
+      this._flush_out()? e {
+      };
+    }
+    this._tcp.shutdown(write: true)? e {
+      // Peer may have already gone; still attempt to drain + close.
+    };
+    // Drain raw inbound ciphertext to EOF and discard it — nothing after
+    // close_notify is worth decrypting, only consuming so the peer's writes
+    // complete instead of resetting.
+    u8[] drain = u8[].filled(0u8, 1024);
+    bool draining = true;
+    while draining {
+      int n = this._tcp.read(drain)? e {
+        // reset/error while draining is harmless; recover with 0 to end the loop
+        0;
+      };
+      if n == 0 {
+        draining = false;
+      }
+    }
+    this._tcp.close()? e {
+    };
+  }
+
   get version TlsVersion `public `doc("The negotiated TLS protocol version.") {
     if _tls_get_version(this._ssl) == "TLSv1.3" {
       return TlsVersion.tls_1_3;
@@ -364,42 +431,23 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
   }
 }
 
-type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections. Auto-frees its backend context on drop and closes the socket.") {
+type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections, handshaking each one inline. A server that must not let one slow peer stall its accept loop should instead bind a net.TcpListener and hand each accepted stream to TlsStream.accept on its own goroutine. Auto-frees its credentials on drop and closes the socket.") {
   net.TcpListener _listener;
-  int _ctx; // backend context handle (server) as int
+  TlsServerConfig _config;
 
   bind!(string host, int port, u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Binds a TLS listener to host:port using the given PEM-encoded certificate chain and private key.") {
-    int ctx = _tls_ctx_new_server();
-    if ctx == 0 {
-      raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
-    }
-    if _tls_ctx_use_cert(ctx, cert_pem) != 1 {
-      _tls_ctx_free(ctx);
-      raise _tls_err(TlsErrorKind.certificate, "failed to load server certificate (invalid PEM?)");
-    }
-    if _tls_ctx_use_key(ctx, key_pem) != 1 {
-      _tls_ctx_free(ctx);
-      raise _tls_err(TlsErrorKind.certificate, "failed to load server private key (invalid PEM or mismatched key?)");
-    }
+    TlsServerConfig config = TlsServerConfig.create(cert_pem, key_pem)?^;
     net.TcpListener listener = net.TcpListener.bind(host, port)? e {
-      _tls_ctx_free(ctx);
       raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
     };
-    return TlsListener(_listener: move listener, _ctx: ctx);
+    return TlsListener(_listener: move listener, _config: move config);
   }
 
   accept!(~this) TlsStream `public `doc("Accepts a new TLS connection and completes its handshake. Suspends the goroutine until a connection arrives.") {
     net.TcpStream tcp = this._listener.accept()? e {
       raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);
     };
-    int ssl = _tls_new(this._ctx);
-    if ssl == 0 {
-      raise _tls_err(TlsErrorKind.handshake, "failed to allocate TLS session");
-    }
-    _tls_set_accept_state(ssl);
-    TlsStream s = TlsStream(_ssl: ssl, _tcp: move tcp);
-    s._handshake()?^;
-    return s;
+    return TlsStream.accept(move tcp, this._config)?^;
   }
 
   get local_port int `public `doc("The port this listener is bound to. Useful after binding to port 0 (dynamic allocation).") {
@@ -412,10 +460,6 @@ type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a ce
     };
   }
 
-  drop(~this) {
-    if this._ctx != 0 {
-      _tls_ctx_free(this._ctx);
-    }
-    // this._listener drops automatically, closing the socket.
-  }
+  // No explicit drop: _config frees the backend context and _listener closes
+  // the socket, both automatically.
 }

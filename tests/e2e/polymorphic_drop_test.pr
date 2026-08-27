@@ -230,3 +230,33 @@ test_nodrop_base_ref() `test {
 test_nodrop_base_mutex() `test {
   Mutex[Bare] m = Mutex[Bare](make_bare());
 }
+
+// --- Optional, vector, and Ref clone over a polymorphic base ---
+// The same RTTI dispatch has to reach the subtype through the other
+// containers that own a base-typed value, not just a field/Ref/Mutex.
+// `Bare` is the worst case: it declares no drop, so a static walk frees
+// the instance and leaks every field the concrete `Rich` owns.
+
+test_nodrop_base_optional() `test {
+  Bare? o = make_bare();
+  if b := o {
+    assert(b.act() == 5, "nodrop_optional");
+  } else {
+    assert(false, "expected a value");
+  }
+}
+
+test_nodrop_base_vector() `test {
+  Bare[] v = Bare[]();
+  v.push(make_bare());
+  v.push(make_bare());
+  assert(v[0].act() == 5, "nodrop_vector");
+}
+
+// A cloned Ref must drop its payload exactly once across both handles:
+// zero drops leaks the subtype's fields, two drops is a double free.
+test_ref_clone() `test {
+  Ref[Bare] r = Ref[Bare](make_bare());
+  Ref[Bare] c = r.clone();
+  assert(c.borrow.act() == 5, "ref_clone");
+}

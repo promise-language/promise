@@ -1,11 +1,23 @@
-// http module — HTTP/1.1 client (T0072).
-// Built on top of modules/net/ (TcpStream), modules/json/ (encode/decode),
-// and modules/gzip/ (response decoding).
-// HTTP only (no TLS). Request.send uses one Connection: close exchange; Client
-// (T0447) adds redirect following, keep-alive connection reuse, and gzip.
+// http module — HTTP/1.1 client and server (T0072, T0447, T0079).
+// Built on top of modules/net/ (TcpStream), modules/tls/ (TlsStream),
+// modules/json/ (encode/decode), and modules/gzip/ (response decoding).
+// http:// and https:// are both supported: every framing, keep-alive and
+// request-building path is written once against the private _Transport
+// interface, and the scheme only decides which implementation a connection is
+// opened with. Request.send uses one Connection: close exchange; Client (T0447)
+// adds redirect following, keep-alive connection reuse, and gzip; Server
+// accepts plaintext, Server.bind_tls accepts HTTPS.
+//
+// Cost of the TLS dependency: importing http links a TLS backend, which on
+// Linux is the vendored static OpenSSL. A program that only ever speaks
+// http:// still pays for it. Measured on linux-amd64 for a four-line program:
+// 13.4 MB debug / 19.0 MB release, against 0.63 MB for the same program using
+// net alone. (Release exceeding debug is T1707 — the LTO link never passes
+// --gc-sections, so OpenSSL's native archive members are not stripped.)
 use gzip;
 use json;
 use net;
+use tls;
 
 type HttpError is error `public `doc("HTTP error with an optional status code.") {
   int code;
@@ -41,11 +53,15 @@ type Request `public `doc("An HTTP request.") {
     this.headers[key] = value;
   }
 
-  send!(~this) Response `public `doc("Send the request over a single fresh connection (Connection: close) and return the response. gzip responses are decoded, but no redirect following or connection reuse is performed — for those, construct a Client.") {
+  send!(~this) Response `public `doc("Send the request over a single fresh connection (Connection: close) and return the response. Both http:// and https:// URLs are accepted; an https:// request verifies the server certificate against the system trust store and raises tls.TlsError (whose kind separates a certificate failure from a handshake or I/O failure) if it cannot. gzip responses are decoded, but no redirect following or connection reuse is performed, and no custom TLS configuration is possible — for those, construct a Client.") {
     _Url parsed = _parse_url(this.url)?^;
-    net.TcpStream stream = net.TcpStream.connect(parsed.host, parsed.port)?^;
-    // keep_alive=false, want_gzip=false: preserve the historical single-exchange,
-    // plaintext-request semantics of Request.send.
+    // A one-shot request carries no client state, so its TLS configuration
+    // lives and dies with this call. The slot starts empty and stays empty for
+    // http:// — see _connect_transport.
+    tls.TlsConfig[] one_shot_config = tls.TlsConfig[]();
+    _Transport stream = _connect_transport(parsed, one_shot_config)?^;
+    // keep_alive=false, want_gzip=false: preserve the historical single-exchange
+    // semantics of Request.send.
     u8[] req_bytes = _build_request(this.method, parsed, this.headers, this.body, false, false);
     bool is_head = _is_head(this.method);
     _RawResponse rr = _exchange(stream, req_bytes, is_head)?^;
@@ -84,23 +100,130 @@ type _RawResponse {
   bool keep_alive;
 }
 
+// _Transport is the byte transport for one HTTP connection: a plaintext TCP
+// connection, or the same connection wrapped in TLS. Response framing, the
+// keep-alive loops and request serialization are written once against this
+// interface, so http:// and https:// differ only in which implementation a
+// connection was opened with — there is no second copy of the protocol code to
+// keep in sync.
+type _Transport `doc("A byte transport for one HTTP connection: plaintext TCP, or TLS over TCP.") {
+  read!(~this, u8[] ~buf) int `abstract `doc("Read bytes into buf. Returns the number of bytes read, or 0 at end-of-stream.");
+  write!(~this, u8[] ~data) int `abstract `doc("Write bytes from data. Returns the number of bytes written.");
+  close!(~this) `abstract `doc("Close the connection now, without waiting for the peer. Prefer graceful_close on a connection this side wrote last.");
+  graceful_close(~this) `abstract `doc("Close in a way that cannot race the peer's last read: half-close the write side, drain whatever the peer is still sending, then close.");
+}
+
+type _PlainTransport is _Transport `doc("An HTTP connection carried directly over TCP.") {
+  net.TcpStream _tcp;
+
+  create(net.TcpStream move tcp) Self `factory `doc("Wrap an owned TCP connection as a transport.") {
+    return _PlainTransport(_tcp: move tcp);
+  }
+
+  read!(~this, u8[] ~buf) int `doc("Read plaintext bytes from the socket.") {
+    return this._tcp.read(buf)?^;
+  }
+
+  write!(~this, u8[] ~data) int `doc("Write plaintext bytes to the socket.") {
+    return this._tcp.write(data)?^;
+  }
+
+  close!(~this) `doc("Close the socket now.") {
+    this._tcp.close()?^;
+  }
+
+  // A lingering close: send FIN on the write half, drain any remaining inbound
+  // bytes, then close. This forces the kernel to do an orderly close (FIN)
+  // instead of an abortive close (RST) that would race ahead of the response
+  // the client is still reading — preventing intermittent "connection reset by
+  // peer" on loopback under load (T1322).
+  graceful_close(~this) `doc("Half-close, drain, then close the socket.") {
+    this._tcp.shutdown(write: true)? e {
+      // Peer may have already gone; still attempt to drain + close.
+    };
+    u8[] drain = u8[].filled(0, 1024);
+    bool draining = true;
+    while draining {
+      int n = this._tcp.read(drain)? e {
+        // reset/error while draining is harmless; recover with 0 to end the loop
+        0;
+      };
+      if n == 0 {
+        draining = false;
+      }
+    }
+    this._tcp.close()? e {
+    };
+  }
+}
+
+type _TlsTransport is _Transport `doc("An HTTP connection carried over TLS.") {
+  tls.TlsStream _tls;
+
+  create(tls.TlsStream move stream) Self `factory `doc("Wrap an owned TLS stream as a transport.") {
+    return _TlsTransport(_tls: move stream);
+  }
+
+  read!(~this, u8[] ~buf) int `doc("Read decrypted bytes from the TLS session.") {
+    return this._tls.read(buf)?^;
+  }
+
+  write!(~this, u8[] ~data) int `doc("Encrypt and write bytes to the TLS session.") {
+    return this._tls.write(data)?^;
+  }
+
+  close!(~this) `doc("Send close_notify and close the socket now.") {
+    this._tls.close()?^;
+  }
+
+  graceful_close(~this) `doc("Send close_notify, half-close, drain, then close.") {
+    this._tls.close_gracefully();
+  }
+}
+
+// _connect_transport opens the byte transport for one hop: the TCP connection
+// itself for http://, or that connection wrapped in TLS for https://. The URL
+// host is used both as the SNI name and as the name the server certificate must
+// match.
+//
+// `tls_config` is a zero-or-one element slot holding the caller's TLS
+// configuration. It is a vector rather than an Optional because an Optional of
+// a non-copy type can only be consumed, never borrowed, and this config has to
+// outlive the many connections a Client makes. An empty slot means "no
+// configuration supplied": a default verifying against the system trust store
+// is materialised into it here, on first https use. Materialising lazily is the
+// point — TlsConfig.create parses the entire system CA bundle (measured at ~8ms
+// on Linux), which a caller that only ever speaks http:// must not pay for.
+_connect_transport!(_Url base, tls.TlsConfig[] ~tls_config) _Transport {
+  net.TcpStream tcp = net.TcpStream.connect(base.host, base.port)?^;
+  if !base.secure {
+    return _PlainTransport.create(move tcp);
+  }
+  if tls_config.len == 0 {
+    tls_config.push(tls.TlsConfig.create());
+  }
+  return _TlsTransport.create(tls.TlsStream.connect(move tcp, base.host, tls_config[0])?^);
+}
+
 // Pool is a small LIFO cache of idle keep-alive connections, keyed by
-// "host:port". Parallel arrays keep a stream beside its key. LIFO reuse is
-// optimal for the single-host request bursts this client targets (e.g. the
-// GitHub API). Eviction and drain close fds via TcpStream.drop — no explicit
-// close needed, so the pool is leak-free by construction.
+// "scheme://host:port". Parallel arrays keep a transport beside its key. LIFO
+// reuse is optimal for the single-host request bursts this client targets (e.g.
+// the GitHub API). Eviction and drain close fds via the transport's drop — no
+// explicit close needed, so the pool is leak-free by construction. The key is
+// scheme-qualified so a plaintext and a TLS connection to the same host:port can
+// never be handed to each other's requests.
 type Pool {
   string[] _keys;
-  net.TcpStream[] _streams;
+  _Transport[] _streams;
   int _limit;
 
   create(int limit) Self `factory {
-    return Pool(_keys: string[](), _streams: net.TcpStream[](), _limit: limit);
+    return Pool(_keys: string[](), _streams: _Transport[](), _limit: limit);
   }
 
   // take returns an idle connection for `key` when the most-recently-returned
   // connection matches (LIFO), else none.
-  take(~this, string key) net.TcpStream? {
+  take(~this, string key) _Transport? {
     int n = this._keys.len;
     if n > 0 && this._keys[n - 1] == key {
       this._keys.remove(n - 1);
@@ -110,8 +233,12 @@ type Pool {
   }
 
   // put returns a connection to the pool, evicting the oldest (index 0) when at
-  // capacity. The evicted stream's drop closes its fd.
-  put(~this, string move key, net.TcpStream move s) {
+  // capacity. The evicted transport's drop closes its fd. Unlike drain it does
+  // not send a TLS close_notify first, because Vector.remove drops the element
+  // rather than handing it back — the peer sees a bare FIN. That is acceptable
+  // for an implicit eviction under pressure; the explicit Client.close path
+  // (drain, below) does close cleanly.
+  put(~this, string move key, _Transport move s) {
     if this._keys.len >= this._limit {
       this._keys.remove(0);
       this._streams.remove(0);
@@ -120,10 +247,16 @@ type Pool {
     this._streams.push(move s);
   }
 
-  // drain closes every pooled connection now (rather than at drop time).
+  // drain closes every pooled connection now (rather than at drop time). Each
+  // is closed rather than just dropped so a pooled TLS connection sends its
+  // close_notify instead of vanishing behind a bare FIN.
   drain(~this) {
     while this._streams.len > 0 {
-      this._streams.remove(this._streams.len - 1);
+      if s := this._streams.pop() {
+        s.close()? e {
+          // Best effort: the connection is going away either way.
+        };
+      }
     }
     while this._keys.len > 0 {
       this._keys.remove(this._keys.len - 1);
@@ -131,16 +264,40 @@ type Pool {
   }
 }
 
-type Client `public `doc("A reusable HTTP/1.1 client with redirect following, keep-alive connection reuse, and automatic gzip response decoding. Create once and reuse for many requests to the same host. Not safe for concurrent use — the connection pool is mutated per request, so use one Client per goroutine.") {
+type Client `public `doc("A reusable HTTP/1.1 client with redirect following, keep-alive connection reuse, and automatic gzip response decoding. Speaks both http:// and https://; by default an https:// request verifies the server certificate against the system trust store, which set_tls_config can override. Create once and reuse for many requests to the same host. Not safe for concurrent use — the connection pool is mutated per request, so use one Client per goroutine.") {
+  // The TLS configuration slot: empty until set_tls_config is called or the
+  // first https:// request materialises the system-trust-store default into it.
+  // See _connect_transport for why this is a zero-or-one vector and why it is
+  // filled lazily.
+  //
+  // Declared BEFORE _pool on purpose. Fields drop in reverse declaration order
+  // (docs/language-design.md §16.3, drop rule 3), so this makes the pooled TLS
+  // sessions — which were created from this config's backend context and must
+  // not outlive it — tear down first. The other direction frees the context
+  // (an SSL_CTX, a Secure Transport identity, an SChannel credential) while
+  // sessions derived from it are still live.
+  tls.TlsConfig[] _tls_config;
   Pool _pool;
   int _max_redirects;
   bool _auto_gzip;
 
-  create(int max_redirects = 10, bool auto_gzip = true) Self `factory `public `doc("Create a client. max_redirects bounds redirect hops (default 10); auto_gzip sends Accept-Encoding: gzip and decodes gzip responses (default true).") {
-    return Client(_pool: Pool.create(8), _max_redirects: max_redirects, _auto_gzip: auto_gzip);
+  create(int max_redirects = 10, bool auto_gzip = true) Self `factory `public `doc("Create a client. max_redirects bounds redirect hops (default 10); auto_gzip sends Accept-Encoding: gzip and decodes gzip responses (default true). No TLS work is done here: a client that only ever requests http:// URLs never loads a trust store.") {
+    return Client(_pool: Pool.create(8), _max_redirects: max_redirects, _auto_gzip: auto_gzip, _tls_config: tls.TlsConfig[]());
   }
 
-  send!(~this, Request move req) Response `public `doc("Send a request, following up to max_redirects redirects and reusing pooled connections. Redirect policy: 303 becomes GET (body dropped); 307/308 preserve method and body; 301/302 preserve GET/HEAD but rewrite other methods to GET (body dropped). Authorization and Cookie headers are stripped when a redirect crosses to a different host:port. A redirect to https:// raises HttpError until TLS support lands (T0079).") {
+  set_tls_config(~this, tls.TlsConfig move config) `public `doc("Replace the TLS configuration used for https:// requests — for a custom CA (tls.TlsConfig.add_root_certificate), a client certificate (set_client_certificate, for mutual TLS), a minimum protocol version, or tls.TlsConfig.insecure() to skip verification entirely when testing against a self-signed server. Closes every pooled connection first, so the next request on any origin reconnects under the new configuration; a request already in flight is unaffected because a Client is single-goroutine.") {
+    // Drain BEFORE dropping the old config: a pooled TLS session was created
+    // from that config's backend context and must not outlive it. Draining also
+    // makes the replacement total — no later request can be answered over a
+    // connection negotiated under the configuration that was just replaced.
+    this._pool.drain();
+    while this._tls_config.len > 0 {
+      this._tls_config.remove(this._tls_config.len - 1);
+    }
+    this._tls_config.push(move config);
+  }
+
+  send!(~this, Request move req) Response `public `doc("Send a request, following up to max_redirects redirects and reusing pooled connections. http:// and https:// URLs are both accepted, and a redirect may cross between them. Redirect policy: 303 becomes GET (body dropped); 307/308 preserve method and body; 301/302 preserve GET/HEAD but rewrite other methods to GET (body dropped). Authorization and Cookie headers are stripped when a redirect crosses to a different origin — a different host, port, or scheme. An https:// hop raises tls.TlsError (not HttpError) when the handshake or certificate check fails, so callers can tell a certificate problem from a network one.") {
     Method method = _method_clone(req.method);
     string url = req.url[0:];
     map[string, string] headers = req.headers.clone();
@@ -172,8 +329,10 @@ type Client `public `doc("A reusable HTTP/1.1 client with redirect following, ke
 
       string new_url = _resolve_url(parsed, location)?^;
       _Url new_parsed = _parse_url(new_url)?^;
-      if new_parsed.host != parsed.host || new_parsed.port != parsed.port {
-        // Cross-host redirect: drop credentials so they are not leaked.
+      if new_parsed.host != parsed.host || new_parsed.port != parsed.port || new_parsed.secure != parsed.secure {
+        // Cross-origin redirect: drop credentials so they are not leaked. A
+        // scheme change is a different origin too — an https→http hop would
+        // otherwise put the credentials on the wire in the clear.
         _strip_header_ci(headers, "authorization");
         _strip_header_ci(headers, "cookie");
       }
@@ -230,7 +389,7 @@ type Client `public `doc("A reusable HTTP/1.1 client with redirect following, ke
   }
 
   _send_fresh!(~this, _Url base, string move key, Method method, map[string, string] headers, string body, bool is_head) _RawResponse {
-    net.TcpStream stream = net.TcpStream.connect(base.host, base.port)?^;
+    _Transport stream = _connect_transport(base, this._tls_config)?^;
     u8[] req_bytes = _build_request(method, base, headers, body, true, this._auto_gzip);
     _RawResponse rr = _exchange(stream, req_bytes, is_head)?^;
     if rr.keep_alive {
@@ -245,7 +404,7 @@ type ServerShutdownHandle `public `doc("A handle to shut down a running Server. 
   int _port;
   channel[bool] _stop;
 
-  shutdown!(~this) `public `doc("Shut down the server. Signals the serve loop to stop and connects to wake the accept call.") {
+  shutdown!(~this) `public `doc("Shut down the server. Signals the serve loop to stop and connects to wake the accept call. The wake connection is a bare TCP connect even for an HTTPS server: it only has to unblock accept, and is discarded (failing to handshake, harmlessly) if the serve loop happens to hand it to a goroutine first.") {
     this._stop.send(true);
     net.TcpStream conn = net.TcpStream.connect(this._address, this._port)? e {
       return;
@@ -311,15 +470,62 @@ type ServerResponse `public `doc("An HTTP response to send to the client.") {
   }
 }
 
-type Server `public `doc("An HTTP/1.1 server that handles each connection on its own goroutine, with keep-alive and a bounded number of concurrent connections.") {
+// _ConnectionUpgrader turns a freshly accepted TCP connection into the
+// transport its requests will be served over. It exists so the TLS handshake
+// runs on the connection's own goroutine rather than inside the accept loop:
+// handshaking in the accept loop would let one slow or non-TLS peer stall every
+// other connection, and would turn each failed handshake into a listener error
+// that ends serve(). One upgrader is shared by every connection, so upgrade
+// takes a shared receiver.
+type _ConnectionUpgrader `doc("Turns an accepted TCP connection into the transport for its requests.") {
+  upgrade!(this, net.TcpStream move tcp) _Transport `abstract `doc("Take ownership of an accepted TCP connection and return the transport to serve it over. Raising closes the connection and costs only that connection.");
+}
+
+type _PlainUpgrader is _ConnectionUpgrader `doc("Serves accepted connections as plaintext HTTP.") {
+  create() Self `factory `doc("Create the plaintext upgrader.") {
+    return _PlainUpgrader();
+  }
+
+  upgrade!(this, net.TcpStream move tcp) _Transport `doc("Serve the connection as-is.") {
+    return _PlainTransport.create(move tcp);
+  }
+}
+
+type _TlsUpgrader is _ConnectionUpgrader `doc("Completes a TLS handshake on each accepted connection before serving HTTP over it.") {
+  tls.TlsServerConfig _config;
+
+  create(tls.TlsServerConfig move config) Self `factory `doc("Create a TLS upgrader from server credentials shared by every connection.") {
+    return _TlsUpgrader(_config: move config);
+  }
+
+  upgrade!(this, net.TcpStream move tcp) _Transport `doc("Complete the server-side TLS handshake, then serve HTTP over the encrypted stream.") {
+    return _TlsTransport.create(tls.TlsStream.accept(move tcp, this._config)?^);
+  }
+}
+
+type Server `public `doc("An HTTP/1.1 server that handles each connection on its own goroutine, with keep-alive and a bounded number of concurrent connections. bind serves plaintext HTTP; bind_tls serves HTTPS over the same code path, so the two differ only in how each accepted connection is upgraded.") {
   net.TcpListener _listener;
   string _address;
   int _port;
   channel[bool] _stop;
   int _max_connections;
   int _max_keep_alive_requests;
+  // How each accepted connection becomes a transport. Shared with every
+  // connection goroutine, which is where the upgrade actually runs.
+  Ref[_ConnectionUpgrader] _upgrader;
 
-  bind!(string move address, int port, int max_connections = 128, int max_keep_alive_requests = 100) Self `factory `public `doc("Create a server bound to the given address and port. max_connections bounds how many connections are handled at once; max_keep_alive_requests bounds how many requests one connection may serve before the server closes it. Both must be at least 1.") {
+  bind!(string move address, int port, int max_connections = 128, int max_keep_alive_requests = 100) Self `factory `public `doc("Create a plaintext HTTP server bound to the given address and port. max_connections bounds how many connections are handled at once; max_keep_alive_requests bounds how many requests one connection may serve before the server closes it. Both must be at least 1.") {
+    return Server._bind_with(move address, port, max_connections, max_keep_alive_requests, Ref[_ConnectionUpgrader](_PlainUpgrader.create()))?^;
+  }
+
+  bind_tls!(string move address, int port, u8[] cert_pem, u8[] key_pem, int max_connections = 128, int max_keep_alive_requests = 100) Self `factory `public `doc("Create an HTTPS server bound to the given address and port, presenting the given PEM-encoded certificate chain and matching private key. Identical to bind in every other respect — same bounds, same keep-alive framing, same shutdown handle — because both serve over the same transport interface. Raises tls.TlsError(kind: certificate) if the certificate or key cannot be loaded, or tls.TlsError(kind: unsupported) where no TLS backend exists. Each connection's handshake runs on that connection's own goroutine, so a peer that fails to handshake costs only itself and never the listener.") {
+    tls.TlsServerConfig config = tls.TlsServerConfig.create(cert_pem, key_pem)?^;
+    return Server._bind_with(move address, port, max_connections, max_keep_alive_requests, Ref[_ConnectionUpgrader](_TlsUpgrader.create(move config)))?^;
+  }
+
+  // The one bind implementation: validation, listener, and dynamic-port
+  // resolution live here so bind and bind_tls cannot drift apart.
+  _bind_with!(string move address, int port, int max_connections, int max_keep_alive_requests, Ref[_ConnectionUpgrader] move upgrader) Self `factory {
     // Both bounds are rejected rather than clamped: max_connections becomes the
     // capacity of the accept semaphore, so 0 would leave serve unable to admit
     // a single connection, and max_keep_alive_requests below 1 would accept a
@@ -334,7 +540,7 @@ type Server `public `doc("An HTTP/1.1 server that handles each connection on its
     string addr = address[0:];
     net.TcpListener listener = net.TcpListener.bind(addr, port)?^;
     int actual_port = listener.local_port;
-    return Server(_listener: move listener, _address: move address, _port: actual_port, _stop: channel[bool](capacity: 1), _max_connections: max_connections, _max_keep_alive_requests: max_keep_alive_requests);
+    return Server(_listener: move listener, _address: move address, _port: actual_port, _stop: channel[bool](capacity: 1), _max_connections: max_connections, _max_keep_alive_requests: max_keep_alive_requests, _upgrader: move upgrader);
   }
 
   create_shutdown_handle(this) ServerShutdownHandle `public `doc("Create a shutdown handle. Must be called before serve. The handle can be sent to another goroutine to stop the server.") {
@@ -344,7 +550,7 @@ type Server `public `doc("An HTTP/1.1 server that handles each connection on its
     _stop: move stop_ref);
   }
 
-  serve![H: Handler](~this, H move handler) `public `doc("Accept connections and handle each one on its own goroutine until shutdown or a listener error. At most max_connections connections are handled at once; beyond that the server stops accepting and further connections wait in the listen backlog. Returns only after every in-flight connection has finished. Blocks.") {
+  serve![H: Handler](~this, H move handler) `public `doc("Accept connections and handle each one on its own goroutine until shutdown or a listener error. At most max_connections connections are handled at once; beyond that the server stops accepting and further connections wait in the listen backlog. On a bind_tls server each connection's TLS handshake also runs on its own goroutine, and a connection that fails to handshake is dropped without disturbing the others. Returns only after every in-flight connection has finished. Blocks.") {
     // The handler is shared, not moved per connection: Ref[H] is `sendable, so
     // one clone can travel into each connection goroutine, and handle takes a
     // shared receiver.
@@ -353,6 +559,7 @@ type Server `public `doc("An HTTP/1.1 server that handles each connection on its
     // everything the goroutines need is hoisted into owned locals first.
     int limit = this._max_connections;
     int keep_limit = this._max_keep_alive_requests;
+    Ref[_ConnectionUpgrader] shared_upgrader = this._upgrader.clone();
     // Semaphore: a send acquires a slot, a receive releases it. Acquiring
     // before accept is what bounds concurrency — at capacity the loop simply
     // stops accepting, so backpressure lands in the listen backlog instead of
@@ -398,8 +605,18 @@ type Server `public `doc("An HTTP/1.1 server that handles each connection on its
       }
 
       Ref[H] connection_handler = shared.clone();
+      Ref[_ConnectionUpgrader] connection_upgrader = shared_upgrader.clone();
       go {
-        _serve_connection[H](conn, connection_handler, keep_limit);
+        // The upgrade runs here, not in the accept loop: a TLS handshake with a
+        // slow peer must not hold up other connections, and a peer that fails
+        // to handshake — including the shutdown handle's plaintext wake
+        // connection — must cost only itself. `conn` drops inside the failing
+        // upgrade, closing the socket.
+        _Transport transport = connection_upgrader.borrow.upgrade(move conn)? e {
+          _ := <-sem;
+          return;
+        };
+        _serve_connection[H](transport, connection_handler, keep_limit);
         _ := <-sem;
         return;
       };
@@ -418,12 +635,12 @@ type Server `public `doc("An HTTP/1.1 server that handles each connection on its
   get max_keep_alive_requests int `public `doc("The maximum number of requests one keep-alive connection may serve before the server closes it.") => this._max_keep_alive_requests;
 }
 
-http_get!(string move url) Response `public `doc("Perform an HTTP GET request. Follows redirects and decodes gzip responses via a transient Client.") {
+http_get!(string move url) Response `public `doc("Perform an HTTP GET request. Follows redirects and decodes gzip responses via a transient Client. http:// and https:// are both accepted; an https:// URL is verified against the system trust store, which the transient Client loads on every call, so repeated https:// requests should go through one reusable Client instead.") {
   Client client = Client.create();
   return client.send(Request.new_get(move url))?^;
 }
 
-http_post!(string move url, string move body, map[string, string] move headers) Response `public `doc("Perform an HTTP POST request with a string body. Follows redirects and decodes gzip responses via a transient Client.") {
+http_post!(string move url, string move body, map[string, string] move headers) Response `public `doc("Perform an HTTP POST request with a string body. Follows redirects and decodes gzip responses via a transient Client. http:// and https:// are both accepted; an https:// URL is verified against the system trust store, which the transient Client loads on every call, so repeated https:// requests should go through one reusable Client instead.") {
   Request req = Request.new_post(move url, move body);
   for key, value in headers {
     req.set_header(move key, move value);
@@ -443,6 +660,29 @@ type _Url {
   string host;
   int port;
   string path;
+  // True for https://. Decides the default port, the transport a connection is
+  // opened with, the Host header's port suffix, and the pool key's scheme.
+  bool secure;
+}
+
+// _scheme_name is the single source of truth for how a scheme is spelled; both
+// the "scheme://" authority prefix and the scheme-relative "scheme:" prefix are
+// built from it.
+_scheme_name(bool secure) string {
+  if secure {
+    return "https";
+  }
+  return "http";
+}
+
+// _default_port is the single source of truth for a scheme's implied port. A
+// port equal to it is omitted from the Host header and from a resolved URL's
+// authority, exactly as it is absent from the original URL.
+_default_port(bool secure) int {
+  if secure {
+    return 443;
+  }
+  return 80;
 }
 
 type _ParsedResponse {
@@ -451,10 +691,16 @@ type _ParsedResponse {
 }
 
 _parse_url!(string url) _Url {
-  if !url.starts_with("http://") {
-    raise HttpError(code: 0, message: "unsupported URL scheme (only http:// supported)");
+  bool secure = false;
+  string rest = "";
+  if url.starts_with("http://") {
+    rest = url[7:];
+  } else if url.starts_with("https://") {
+    secure = true;
+    rest = url[8:];
+  } else {
+    raise HttpError(code: 0, message: "unsupported URL scheme (only http:// and https:// supported)");
   }
-  string rest = url[7:];
 
   // Split host+port from path at first '/'
   string host_part = "";
@@ -468,7 +714,7 @@ _parse_url!(string url) _Url {
 
   // Split host from port at ':'
   string host_val = "";
-  int port_val = 80;
+  int port_val = _default_port(secure);
   if colon := host_part.index_of(":") {
     host_val = host_part[0:colon];
     port_val = _parse_decimal(host_part[colon + 1:]);
@@ -480,7 +726,7 @@ _parse_url!(string url) _Url {
     raise HttpError(code: 0, message: "empty host in URL");
   }
 
-  return _Url(host: move host_val, port: port_val, path: move path_val);
+  return _Url(host: move host_val, port: port_val, path: move path_val, secure: secure);
 }
 
 _method_to_string(Method m) string {
@@ -534,6 +780,8 @@ _is_redirect(int status) bool {
 
 _pool_key(_Url base) string {
   Builder b = Builder();
+  b.write_string(_scheme_name(base.secure));
+  b.write_string("://");
   b.write_string(base.host);
   b.write_string(":");
   b.write_string(base.port.to_string());
@@ -558,25 +806,23 @@ _strip_header_ci(map[string, string] ~headers, string name) {
 }
 
 // _resolve_url resolves a redirect Location against the current request URL.
-// Handles absolute http:// URLs, scheme-relative //host/path, absolute-path
-// /path (same host:port), and basic relative-path joins. https:// targets raise
-// until TLS support lands (T0079).
+// Handles absolute http:// and https:// URLs, scheme-relative //host/path,
+// absolute-path /path (same scheme and host:port), and basic relative-path
+// joins.
 _resolve_url!(_Url base, string location) string {
-  if location.starts_with("http://") {
+  if location.starts_with("http://") || location.starts_with("https://") {
     return location[0:];
   }
-  if location.starts_with("https://") {
-    raise HttpError(code: 0, message: "redirect to https:// is not supported yet (T0079)");
-  }
   if location.starts_with("//") {
-    // Scheme-relative: inherit http.
-    return "http:" + location;
+    // Scheme-relative: inherit the current request's scheme.
+    return _scheme_name(base.secure) + ":" + location;
   }
 
   Builder auth = Builder();
-  auth.write_string("http://");
+  auth.write_string(_scheme_name(base.secure));
+  auth.write_string("://");
   auth.write_string(base.host);
-  if base.port != 80 {
+  if base.port != _default_port(base.secure) {
     auth.write_string(":");
     auth.write_string(base.port.to_string());
   }
@@ -620,7 +866,7 @@ _build_request(Method method, _Url parsed, map[string, string] headers, string b
   buf.write_string(" HTTP/1.1\r\n");
   buf.write_string("Host: ");
   buf.write_string(parsed.host);
-  if parsed.port != 80 {
+  if parsed.port != _default_port(parsed.secure) {
     buf.write_string(":");
     buf.write_string(parsed.port.to_string());
   }
@@ -668,7 +914,7 @@ _build_request(Method method, _Url parsed, map[string, string] headers, string b
 // The body is framed by Content-Length or chunked encoding (both stop exactly at
 // the message boundary, leaving the socket reusable); a response with neither
 // falls back to read-to-EOF and is never reusable. HEAD responses carry no body.
-_exchange!(net.TcpStream ~stream, u8[] request_bytes, bool head_request) _RawResponse {
+_exchange!(_Transport ~stream, u8[] request_bytes, bool head_request) _RawResponse {
   _write_all(stream, request_bytes)?^;
 
   u8[] raw = u8[]();
@@ -769,7 +1015,15 @@ _exchange!(net.TcpStream ~stream, u8[] request_bytes, bool head_request) _RawRes
     // stream, so the socket is not reusable afterward.
     bool reading = true;
     while reading {
-      int n = stream.read(read_buf)?^;
+      // A read error here ends the body rather than failing the exchange: this
+      // branch has no delimiter other than the close itself, so a truncation is
+      // by definition indistinguishable from completion. It matters over TLS,
+      // where a peer that drops the TCP connection without sending close_notify
+      // — which many servers do — surfaces as an I/O error rather than a clean
+      // end-of-stream. The framed paths above still propagate their errors.
+      int n = stream.read(read_buf)? e {
+        0;
+      };
       if n == 0 {
         reading = false;
       } else {
@@ -817,7 +1071,7 @@ _exchange!(net.TcpStream ~stream, u8[] request_bytes, bool head_request) _RawRes
 // read past the header terminator; body_start indexes the first body byte.
 // Stopping at the message boundary (rather than reading to EOF) is what makes a
 // keep-alive connection reusable.
-_read_chunked_body!(net.TcpStream ~stream, u8[] ~raw, int body_start) u8[] {
+_read_chunked_body!(_Transport ~stream, u8[] ~raw, int body_start) u8[] {
   u8[] result = u8[]();
   u8[] read_buf = u8[].filled(0, 4096);
   int pos = body_start;
@@ -925,7 +1179,7 @@ _raw_to_response(_RawResponse rr) Response {
   return Response(_status: rr.status, _headers: rr.headers.clone(), _body: move body_str);
 }
 
-_write_all!(net.TcpStream ~stream, u8[] ~data) {
+_write_all!(_Transport ~stream, u8[] ~data) {
   int n = stream.write(data)?^;
   int offset = n;
   while offset < data.len {
@@ -939,30 +1193,6 @@ _write_all!(net.TcpStream ~stream, u8[] ~data) {
     n = stream.write(remaining)?^;
     offset = offset + n;
   }
-}
-
-// _graceful_close performs a lingering close: send FIN on the write half, drain
-// any remaining inbound bytes, then close. This forces the kernel to do an
-// orderly close (FIN) instead of an abortive close (RST) that would race ahead
-// of the response the client is still reading — preventing intermittent
-// "connection reset by peer" on loopback under load (T1322).
-_graceful_close(net.TcpStream ~conn) {
-  conn.shutdown(write: true)? e {
-    // Peer may have already gone; still attempt to drain + close.
-  };
-  u8[] drain = u8[].filled(0, 1024);
-  bool draining = true;
-  while draining {
-    int n = conn.read(drain)? e {
-      // reset/error while draining is harmless; recover with 0 to end the loop
-      0;
-    };
-    if n == 0 {
-      draining = false;
-    }
-  }
-  conn.close()? e {
-  };
 }
 
 _parse_response!(string header_text) _ParsedResponse {
@@ -1130,7 +1360,7 @@ _find_content_length(string ~header_text) int {
 // request's body. Without it a second request on a persistent connection could
 // not be framed, because a single read can straddle the boundary between two
 // pipelined requests.
-_read_request!(net.TcpStream ~conn, u8[] ~pending) ServerRequest {
+_read_request!(_Transport ~conn, u8[] ~pending) ServerRequest {
   u8[] raw = u8[]();
   int carried = 0;
   while carried < pending.len {
@@ -1354,16 +1584,16 @@ _drain_slots(channel[bool] sem, int limit) {
 // the socket open between requests for as long as keep-alive semantics and
 // max_requests allow, then closes it exactly once. It runs on its own goroutine
 // (one per connection), so a slow handler never blocks the accept loop.
-_serve_connection[H: Handler](net.TcpStream ~conn, Ref[H] handler, int max_requests) {
+_serve_connection[H: Handler](_Transport ~conn, Ref[H] handler, int max_requests) {
   _serve_requests[H](conn, handler, max_requests);
-  _graceful_close(conn);
+  conn.graceful_close();
 }
 
 // _serve_requests is the keep-alive request loop. It is split out of
 // _serve_connection so its exit paths can `return` — an error handler feeding
 // an assignment must diverge — while the connection is still closed once, by
 // the caller.
-_serve_requests[H: Handler](net.TcpStream ~conn, Ref[H] handler, int max_requests) {
+_serve_requests[H: Handler](_Transport ~conn, Ref[H] handler, int max_requests) {
   u8[] pending = u8[]();
   int served = 0;
   while served < max_requests {

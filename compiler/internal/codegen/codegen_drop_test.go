@@ -2551,7 +2551,7 @@ func TestStringTempFlagResetInLoop(t *testing.T) {
 func TestStringTempTrackingInMethodBody(t *testing.T) {
 	ir := generateIR(t, `
 		type Fmt {
-			format(this) string { return this.to_string(); }
+			format(this) string `+"`structural(protocol: false)"+` { return this.to_string(); }
 			to_string(this) string { return "fmt"; }
 		}
 		main() {}

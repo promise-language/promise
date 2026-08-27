@@ -7,7 +7,7 @@
 enum ECmp {
   some(int x),
 
-  < (ECmp other) bool {
+  < (ECmp other) bool `structural(protocol: false) {
     return this.unwrap_x() < other.unwrap_x();
   }
 
@@ -50,7 +50,7 @@ enum_this_as_right_operand() `test {
 enum GCmp[T: Ordered] {
   one(T v),
 
-  < (GCmp[T] other) bool {
+  < (GCmp[T] other) bool `structural(protocol: false) {
     return this.unwrap() < other.unwrap();
   }
 

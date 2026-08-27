@@ -700,7 +700,7 @@ func TestValueTypeThisAsRightOperand(t *testing.T) {
 	ir := generateIR(t, `
 		type Cmp {
 			int x `+"`value"+`;
-			<(Cmp other) bool { return this.x < other.x; }
+			<(Cmp other) bool `+"`structural(protocol: false)"+` { return this.x < other.x; }
 			gt_via(this, Cmp other) bool { return other < this; }
 		}
 		main() {
@@ -886,7 +886,7 @@ func TestParenThisOperatorArgNoExtractFromPtr(t *testing.T) {
 	ir := generateIR(t, `
 		type T0613CmpBox {
 			int x;
-			<(T0613CmpBox other) bool { return this.x < other.x; }
+			<(T0613CmpBox other) bool `+"`structural(protocol: false)"+` { return this.x < other.x; }
 			gt_via(this, T0613CmpBox other) bool { return other < (this); }
 		}
 		main() {

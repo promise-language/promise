@@ -3215,7 +3215,7 @@ func TestFactoryFinalFieldModification(t *testing.T) {
 		type Token {
 			string raw `+"`"+`final;
 			int kind `+"`"+`final;
-			parse(string input) Self `+"`"+`factory {
+			parse(string input) Self `+"`"+`structural(protocol: false) `+"`"+`factory {
 				Token t = Token(raw: input, kind: 0);
 				t.kind = 42;
 				return t;
@@ -3738,7 +3738,7 @@ func TestSelfFailableFactoryGeneric(t *testing.T) {
 		type Validated[T] {
 			T value;
 			new(~this, T v) { this.value = v; }
-			parse!(T v) Self `+"`"+`factory {
+			parse!(T v) Self `+"`"+`structural(protocol: false) `+"`"+`factory {
 				return Self(v: v);
 			}
 		}
@@ -3851,7 +3851,7 @@ func TestFactoryFinalFieldOnLocalOK(t *testing.T) {
 		type Token {
 			string raw `+"`final;"+`
 			int kind `+"`final;"+`
-			parse(string input) Self `+"`factory"+` {
+			parse(string input) Self `+"`structural(protocol: false) `factory"+` {
 				Token t = Token(raw: input, kind: 0);
 				t.kind = 42;
 				return t;
@@ -5349,7 +5349,7 @@ func TestGenericThisAsRightOperand(t *testing.T) {
 	checkOK(t, `
 		type GCmp[T: Ordered] {
 			T x;
-			<(GCmp[T] other) bool => this.x < other.x;
+			<(GCmp[T] other) bool `+"`"+`structural(protocol: false) => this.x < other.x;
 			gt_via(this, GCmp[T] other) bool => other < this;
 		}
 	`)
@@ -5362,7 +5362,7 @@ func TestEnumBinaryOperator(t *testing.T) {
 	checkOK(t, `
 		enum ECmp {
 			some(int x),
-			<(ECmp other) bool => this.unwrap() < other.unwrap();
+			<(ECmp other) bool `+"`"+`structural(protocol: false) => this.unwrap() < other.unwrap();
 			unwrap(this) int { match this { some(x) => { return x; } } }
 		}
 		test() {
@@ -5380,7 +5380,7 @@ func TestEnumGenericThisAsRightOperand(t *testing.T) {
 	checkOK(t, `
 		enum GCmp[T: Ordered] {
 			one(T v),
-			<(GCmp[T] other) bool => this.unwrap() < other.unwrap();
+			<(GCmp[T] other) bool `+"`"+`structural(protocol: false) => this.unwrap() < other.unwrap();
 			gt_via(this, GCmp[T] other) bool => other < this;
 			unwrap(this) T { match this { one(v) => { return v; } } }
 		}
@@ -15000,7 +15000,7 @@ func TestEnumGetterTypeMismatch(t *testing.T) {
 func TestEnumMethodWithDefaultParam(t *testing.T) {
 	checkOK(t, `
 		enum Color { Red, Green,
-			format(this, string prefix = "Color") string {
+			format(this, string prefix = "Color") string `+"`"+`structural(protocol: false) {
 				return prefix;
 			}
 		}

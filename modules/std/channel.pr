@@ -5,5 +5,5 @@
 type Channel[T] `native `public `sendable `sharable `interior {
   new(int? capacity) `native;
   send(T move value) `native;
-  close() `native;
+  close() `structural(protocol: false) `native;
 }

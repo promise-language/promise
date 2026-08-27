@@ -826,7 +826,7 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  format!(this) string `public `doc("Formats this JsonValue tree as a compact JSON string.") {
+  format!(this) string `structural(protocol: false) `public `doc("Formats this JsonValue tree as a compact JSON string.") {
     JsonEncoder enc = JsonEncoder();
     this.encode(enc);
     return enc.to_string();

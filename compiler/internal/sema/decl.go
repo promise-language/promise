@@ -488,6 +488,9 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	}
 	if c.hasAnnotation(d.Annotations, "structural") {
 		named.SetStructural(true)
+		if v, ok := extractProtocolParam(d.Annotations); ok && v {
+			named.SetProtocol(true)
+		}
 	}
 	if c.hasAnnotation(d.Annotations, "public") {
 		named.SetExported(true)

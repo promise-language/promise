@@ -1048,7 +1048,7 @@ func TestMethodSharedReceiverCallScoped(t *testing.T) {
 	ownerOK(t, `
 		type T {
 			int x;
-			read(this) int { return this.x; }
+			read(this) int `+"`structural(protocol: false)"+` { return this.x; }
 		}
 		consume(T t) {}
 		test() {
@@ -2030,7 +2030,7 @@ func TestWhileCondBodyCanReBorrow(t *testing.T) {
 		type Stream {
 			int pos;
 			has_more(this) bool { return false; }
-			read(this) int { return 0; }
+			read(this) int `+"`structural(protocol: false)"+` { return 0; }
 		}
 		test() {
 			Stream s = Stream(pos: 0);
@@ -2081,7 +2081,7 @@ func TestClassicForCondBodyCanReBorrow(t *testing.T) {
 		type Cursor {
 			int pos;
 			has_next(this) bool { return this.pos < 10; }
-			read(this) int { return this.pos; }
+			read(this) int `+"`structural(protocol: false)"+` { return this.pos; }
 		}
 		test() {
 			Cursor cur = Cursor(pos: 0);
@@ -5429,7 +5429,7 @@ func TestT0576_TypedVarDeclPlainThisRejected(t *testing.T) {
 		type Box { int x; }
 		type Counter {
 			Box b;
-			read(this) {
+			read(this) `+"`structural(protocol: false)"+` {
 				Counter c = this;
 			}
 		}
@@ -5444,7 +5444,7 @@ func TestT0576_InferredVarDeclPlainThisRejected(t *testing.T) {
 		type Box { int x; }
 		type Counter {
 			Box b;
-			read(this) {
+			read(this) `+"`structural(protocol: false)"+` {
 				c := this;
 			}
 		}
@@ -5593,7 +5593,7 @@ func TestT0593_UseVarDeclPlainThisRejected(t *testing.T) {
 		type Res {
 			int id;
 			close(~this) {}
-			read(this) {
+			read(this) `+"`structural(protocol: false)"+` {
 				use x := this;
 			}
 		}

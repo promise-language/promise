@@ -166,7 +166,7 @@ type Validated[T] {
     this.value = v;
   }
 
-  parse!(T move v) Self `factory {
+  parse!(T move v) Self `structural(protocol: false) `factory {
     return Self(v: move v);
   }
 }

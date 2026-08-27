@@ -110,7 +110,7 @@ test_direct_factory_call() `test {
 
 type Other {
   string data;
-  parse(string data) Other `factory {
+  parse(string data) Other `structural(protocol: false) `factory {
     return Other(data: "other:{data}");
   }
 }

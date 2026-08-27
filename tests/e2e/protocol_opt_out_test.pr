@@ -1,0 +1,64 @@
+// T1731: structural(protocol: false) opt-out test.
+// Verifies that method-level and type-level opt-outs suppress the
+// protocol near-miss check, and that conforming methods pass cleanly.
+// --- Method-level opt-out: format name matches Format but is deliberately different ---
+type Renderer {
+  string prefix;
+  format(this, string sep = ": ") string `structural(protocol: false) {
+    return this.prefix + sep + "done";
+  }
+}
+
+test_method_opt_out() `test {
+  r := Renderer(prefix: "task");
+  assert(r.format() == "task: done", "default sep");
+  assert(r.format(sep: " - ") == "task - done", "custom sep");
+}
+
+// --- Type-level opt-out: all methods on this type are exempt ---
+type DummyReader `structural(protocol: false) {
+  read(this) string {
+    return "dummy";
+  }
+  close(this) {
+  }
+}
+
+test_type_opt_out() `test {
+  dr := DummyReader();
+  assert(dr.read() == "dummy", "read from dummy");
+}
+
+// --- Enum opt-out ---
+enum Action {
+  Start, Stop,
+  format(this) string `structural(protocol: false) {
+    match this {
+      Action.Start => {
+        return "start";
+      },
+      Action.Stop => {
+        return "stop";
+      },
+    }
+  }
+}
+
+test_enum_method_opt_out() `test {
+  a := Action.Start;
+  assert(a.format() == "start", "enum format opt-out");
+}
+
+// --- Conforming type (no opt-out needed) ---
+type Logger {
+  format!(Writer ~w) {
+    w.write_string("log")?^;
+  }
+}
+
+test_conforming_format() `test {
+  l := Logger();
+  b := Builder();
+  l.format(b)?!;
+  assert(b.to_string() == "log", "conforming format");
+}

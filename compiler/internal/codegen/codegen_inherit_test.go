@@ -231,7 +231,7 @@ func TestRTTIMultipleParents(t *testing.T) {
 			show() string { return "printable"; }
 		}
 		type Serializable {
-			encode() string { return "serializable"; }
+			encode() string `+"`structural(protocol: false)"+` { return "serializable"; }
 		}
 		type Doc is Printable, Serializable {
 			string name;

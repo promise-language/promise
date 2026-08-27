@@ -1142,7 +1142,7 @@ func TestParenThisFieldReadNoExtractFromPtr(t *testing.T) {
 	irHeap := generateIR(t, `
 		type T0613FHeap {
 			string s;
-			read(this) string { return (this).s; }
+			read(this) string `+"`structural(protocol: false)"+` { return (this).s; }
 		}
 		main() { b := T0613FHeap(s: "x"); v := b.read(); }
 	`)

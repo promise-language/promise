@@ -226,7 +226,7 @@ type _HuffTable {
   }
 
   // Decode one symbol from the bit stream (puff.c §decode).
-  decode!(this, _BitReader ~br) int {
+  decode!(this, _BitReader ~br) int `structural(protocol: false) {
     int code = 0;
     int first = 0;
     int index = 0;

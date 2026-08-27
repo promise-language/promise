@@ -244,7 +244,7 @@ type VInt {
   ++ () VInt {
     return VInt(v: this.v + 1);
   }
-  < (VInt other) bool {
+  < (VInt other) bool `structural(protocol: false) {
     return this.v < other.v;
   }
 }

@@ -176,7 +176,7 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
     return DateTime(_epoch_nanos: secs * 1000000000, _offset_secs: 0);
   }
 
-  parse!(string s) DateTime `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\", \"2026-04-11T14:30:00.5Z\", or \"2026-04-11T14:30:00.250+05:30\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
+  parse!(string s) DateTime `structural(protocol: false) `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\", \"2026-04-11T14:30:00.5Z\", or \"2026-04-11T14:30:00.250+05:30\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
     int year = _read_digits(s, 0, 4);
     _expect(s, 4, '-');
     int month = _read_digits(s, 5, 2);
@@ -297,7 +297,7 @@ type Date `public `doc("A calendar date (year, month, day) without time-of-day. 
   today() Date `factory `doc("The current UTC date.") => Date(_days: _floor_div(_wallclock(), 86400000000000));
   create(int year, int month, int day) Date `factory `doc("A Date from calendar components.") => Date(_days: _days_from_civil(year, month, day));
 
-  parse!(string s) Date `factory `doc("Parses a date such as \"2026-04-11\".") {
+  parse!(string s) Date `structural(protocol: false) `factory `doc("Parses a date such as \"2026-04-11\".") {
     int year = _read_digits(s, 0, 4);
     _expect(s, 4, '-');
     int month = _read_digits(s, 5, 2);
@@ -358,7 +358,7 @@ type Time `public `doc("A time of day (hour, minute, second, nanosecond) without
   midnight() Time `factory `doc("00:00:00.") => Time(_nanos: 0);
   noon() Time `factory `doc("12:00:00.") => Time(_nanos: 43200000000000);
 
-  parse!(string s) Time `factory `doc("Parses a time such as \"14:30:00\" or \"14:30:00.5\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
+  parse!(string s) Time `structural(protocol: false) `factory `doc("Parses a time such as \"14:30:00\" or \"14:30:00.5\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
     int hour = _read_digits(s, 0, 2);
     _expect(s, 2, ':');
     int minute = _read_digits(s, 3, 2);

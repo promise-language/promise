@@ -46,10 +46,10 @@ type Decoder `public `doc("Format-agnostic decoding interface. Implementations m
   has_next_element!(~this) bool `abstract `doc("Returns true if there are more elements in the current array. Handles comma skipping.");
 }
 
-type Encodable `structural `public `doc("Types that can serialize themselves to an Encoder.") {
+type Encodable `structural(protocol: true) `public `doc("Types that can serialize themselves to an Encoder.") {
   encode!(Encoder ~e) `abstract;
 }
 
-type Decodable `structural `public `doc("Types that can deserialize themselves from a Decoder.") {
+type Decodable `structural(protocol: true) `public `doc("Types that can deserialize themselves from a Decoder.") {
   decode!(Decoder ~d) Self `factory `abstract;
 }

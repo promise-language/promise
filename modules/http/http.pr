@@ -255,7 +255,7 @@ type ServerShutdownHandle `public `doc("A handle to shut down a running Server. 
   }
 }
 
-type Handler `structural `public `doc("Interface for handling HTTP requests. Implement handle! to process requests. The server shares one handler across every connection goroutine, so handle takes a shared receiver: handler state must either be immutable or guarded by Mutex[T].") {
+type Handler `structural(protocol: true) `public `doc("Interface for handling HTTP requests. Implement handle! to process requests. The server shares one handler across every connection goroutine, so handle takes a shared receiver: handler state must either be immutable or guarded by Mutex[T].") {
   handle!(this, ServerRequest request) ServerResponse `abstract `doc("Handle an incoming request and return a response. Called concurrently from many connection goroutines through a shared reference — guard any mutable state with Mutex[T].");
 }
 

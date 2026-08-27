@@ -22,6 +22,7 @@ type Named struct {
 	needsSynthDrop bool   // compiler should synthesize a drop method (no explicit drop)
 	hasNew         bool   // type has a validated new() constructor method
 	structural     bool   // `structural meta — allows structural interface satisfaction
+	protocol       bool   // `structural(protocol: true) — names reserved, near-miss checking enabled
 	exported       bool   // `public meta — visible to other modules
 	isValueType    bool   // all fields are `value placement — pass by value, no heap alloc
 	isSerializable bool   // `serializable meta — auto-generate encode/decode methods
@@ -60,6 +61,8 @@ func (n *Named) HasNew() bool             { return n.hasNew }
 func (n *Named) SetHasNew(v bool)         { n.hasNew = v }
 func (n *Named) IsStructural() bool       { return n.structural }
 func (n *Named) SetStructural(v bool)     { n.structural = v }
+func (n *Named) IsProtocol() bool         { return n.protocol }
+func (n *Named) SetProtocol(v bool)       { n.protocol = v }
 func (n *Named) IsValueType() bool        { return n.isValueType }
 func (n *Named) SetIsValueType(v bool)    { n.isValueType = v }
 func (n *Named) IsSerializable() bool     { return n.isSerializable }

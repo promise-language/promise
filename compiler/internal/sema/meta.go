@@ -56,7 +56,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"native":       {TargetMethod, TargetType},
 	"copy":         {TargetType, TargetEnum},
 	"clone":        {TargetType, TargetEnum},
-	"structural":   {TargetType},
+	"structural":   {TargetType, TargetMethod, TargetEnum},
 	"doc":          {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum, TargetParam, TargetVariant},
 	"deprecated":   {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum, TargetParam, TargetVariant},
 	"test":         {TargetFunc},
@@ -529,6 +529,31 @@ func extractEmbedPath(annotations []*ast.MetaAnnotation) (string, bool) {
 		return "", true // `embed with no path — already reported as an error
 	}
 	return "", false
+}
+
+// extractProtocolParam extracts the protocol boolean parameter from a `structural
+// annotation. Returns (value, found) — found is true if the `structural annotation
+// has a protocol parameter.
+func extractProtocolParam(annotations []*ast.MetaAnnotation) (bool, bool) {
+	for _, ann := range annotations {
+		if ann.Name != "structural" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "protocol" {
+				if bl, ok := p.Value.(*ast.BoolLit); ok {
+					return bl.Value, true
+				}
+			}
+		}
+	}
+	return false, false
+}
+
+// hasProtocolOptOut returns true if the annotations include `structural(protocol: false).
+func hasProtocolOptOut(annotations []*ast.MetaAnnotation) bool {
+	v, ok := extractProtocolParam(annotations)
+	return ok && !v
 }
 
 // extractEmbedCompress returns true if the `embed annotation has compress: true.

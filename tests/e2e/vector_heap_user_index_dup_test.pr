@@ -281,7 +281,7 @@ type _T0403Reader {
   drop(~this) {
   }
 
-  read(this, _T0398Box move b) string {
+  read(this, _T0398Box move b) string `structural(protocol: false) {
     return this.prefix + b.label;
   }
 }

@@ -289,7 +289,7 @@ func TestFailableMethod(t *testing.T) {
 	ir := generateIR(t, `
 		type Parser {
 			string input;
-			parse!(this) int {
+			parse!(this) int `+"`structural(protocol: false)"+` {
 				return 42;
 			}
 		}
@@ -1178,7 +1178,7 @@ func TestReturnThisFailable(t *testing.T) {
 	ir := generateIR(t, `
 		type Widget {
 			int id;
-			clone!() Widget { return this; }
+			clone!() Widget `+"`structural(protocol: false)"+` { return this; }
 		}
 		main() {
 			w := Widget(id: 1);

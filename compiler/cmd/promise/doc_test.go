@@ -471,7 +471,7 @@ func TestDocOperators(t *testing.T) {
 			+(Vec2 a, Vec2 b) Vec2 `+"`public"+` {
 				return Vec2(x: a.x + b.x, y: a.y + b.y);
 			}
-			==(Vec2 a, Vec2 b) bool `+"`public"+` {
+			==(Vec2 a, Vec2 b) bool `+"`structural(protocol: false) `public"+` {
 				return a.x == b.x && a.y == b.y;
 			}
 		}

@@ -117,7 +117,7 @@ var metaParamSpecs = map[string]metaParamSpec{
 	"native":       noParams,
 	"copy":         noParams,
 	"clone":        noParams,
-	"structural":   noParams,
+	"structural":   {named: map[string]metaValueKind{"protocol": valBool}},
 	"inline":       noParams,
 	"packed":       noParams,
 	"skip":         noParams,

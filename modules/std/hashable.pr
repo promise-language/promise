@@ -1,4 +1,4 @@
 // std/hashable.pr — Structural hashable interface
-type Hashable `structural `public `doc("Types that produce an int hash of their value, for use as Map/Set keys. Equal values must hash equal. Hashes are not guaranteed stable across program runs, so do not persist them or use them for content addressing.") {
+type Hashable `structural(protocol: true) `public `doc("Types that produce an int hash of their value, for use as Map/Set keys. Equal values must hash equal. Hashes are not guaranteed stable across program runs, so do not persist them or use them for content addressing.") {
   get hash int `abstract;
 }

@@ -52,7 +52,7 @@ test_paren_this_self_chain() `test {
 // ---------------- field read (heap + value type) ----------------
 type FBoxHeap {
   string s;
-  read(this) string {
+  read(this) string `structural(protocol: false) {
     return (this).s;
   }
   read_nested(this) string {
@@ -360,7 +360,7 @@ test_paren_this_force_unwrap() `test {
 // Heap type (the value-type form of this gate is broken bare-or-paren — T0748).
 type CmpBox {
   int x;
-  < (CmpBox other) bool {
+  < (CmpBox other) bool `structural(protocol: false) {
     return this.x < other.x;
   }
   // `other < (this)` -> left=other, right=(this) -> e.Right gate peels paren.
@@ -384,7 +384,7 @@ test_paren_this_operator_arg() `test {
 // struct (which stored the i8* into the embedded `int x` data field and panicked).
 type VCmpBox {
   int x `value;
-  < (VCmpBox other) bool {
+  < (VCmpBox other) bool `structural(protocol: false) {
     return this.x < other.x;
   }
   // bare `this` as the right-hand argument.

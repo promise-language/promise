@@ -6,7 +6,7 @@
 type GCmp[T: Ordered] {
   T x;
 
-  < (GCmp[T] other) bool {
+  < (GCmp[T] other) bool `structural(protocol: false) {
     return this.x < other.x;
   }
 
@@ -20,7 +20,7 @@ type GCmp[T: Ordered] {
 type VCmp[T: Ordered] {
   T x `value;
 
-  < (VCmp[T] other) bool {
+  < (VCmp[T] other) bool `structural(protocol: false) {
     return this.x < other.x;
   }
 

@@ -35,7 +35,7 @@ test_accumulator() `test {
 type Greeting {
   string template;
 
-  format(this, string name) string {
+  format(this, string name) string `structural(protocol: false) {
     return this.template + ", " + name + "!";
   }
 

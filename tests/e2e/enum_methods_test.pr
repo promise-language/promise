@@ -376,7 +376,7 @@ test_void_enum_method() `test {
 enum Severity {
   Low, High,
 
-  format(this, string prefix = "severity") string {
+  format(this, string prefix = "severity") string `structural(protocol: false) {
     match this {
       Severity.Low => {
         return "{prefix}: low";

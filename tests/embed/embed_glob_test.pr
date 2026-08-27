@@ -16,10 +16,10 @@ test_embed_glob_contains() `test {
 
 test_embed_glob_read() `test {
   EmbeddedFiles fs = text_files;
-  string alpha = fs.read("glob_fixtures/alpha.txt")?!;
+  string alpha = fs.read_string("glob_fixtures/alpha.txt")?!;
   assert(alpha == "alpha content", "read alpha.txt: got " + alpha);
 
-  string beta = fs.read("glob_fixtures/beta.txt")?!;
+  string beta = fs.read_string("glob_fixtures/beta.txt")?!;
   assert(beta == "beta content", "read beta.txt: got " + beta);
 }
 
@@ -41,6 +41,6 @@ test_embed_glob_files() `test {
 
 test_embed_glob_read_not_found() `test {
   EmbeddedFiles fs = text_files;
-  (content, err) := fs.read("nonexistent.txt");
+  (content, err) := fs.read_string("nonexistent.txt");
   assert(err is present, "should raise error for missing file");
 }

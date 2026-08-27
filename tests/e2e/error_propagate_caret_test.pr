@@ -112,7 +112,7 @@ type _Rd {
   new(~this) {
     this.x = 0;
   }
-  read!(~this) u32 {
+  read!(~this) u32 `structural(protocol: false) {
     return 1u32;
   }
 }

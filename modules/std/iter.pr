@@ -1,6 +1,6 @@
 // std/iter.pr — Structural iterator protocol with lazy combinators.
 // --- Structural interfaces ---
-type Iterator[T] `structural `public `doc("Structural iterator protocol. Any type with next(~this) T? satisfies this. All combinators are default methods.") {
+type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator protocol. Any type with next(~this) T? satisfies this. All combinators are default methods.") {
   next(~this) T? `abstract;
 
   // --- Intermediate (lazy) ---

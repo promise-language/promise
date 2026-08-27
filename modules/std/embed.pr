@@ -30,7 +30,7 @@ type EmbeddedFiles `public `doc("A collection of compile-time embedded files fro
     return false;
   }
 
-  read!(this, string path) string `public `doc("Read the contents of an embedded file as a UTF-8 string. Raises an error if the path is not found.") {
+  read_string!(this, string path) string `public `doc("Read the contents of an embedded file as a UTF-8 string. Raises an error if the path is not found.") {
     int i = 0;
     for entry in this._entries {
       if entry.path == path {

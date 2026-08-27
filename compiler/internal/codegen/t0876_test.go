@@ -14,7 +14,7 @@ func TestT0876_EnumBinaryOperatorDispatch(t *testing.T) {
 	ir := generateIR(t, `
 		enum ECmp {
 			some(int x),
-			< (ECmp other) bool {
+			< (ECmp other) bool `+"`structural(protocol: false)"+` {
 				return this.unwrap() < other.unwrap();
 			}
 			unwrap(this) int { match this { some(x) => { return x; } } }
@@ -43,7 +43,7 @@ func TestT0876_GenericEnumBinaryOperatorDispatch(t *testing.T) {
 	ir := generateIR(t, `
 		enum GCmp[T: Ordered] {
 			one(T v),
-			< (GCmp[T] other) bool {
+			< (GCmp[T] other) bool `+"`structural(protocol: false)"+` {
 				return this.unwrap() < other.unwrap();
 			}
 			unwrap(this) T { match this { one(v) => { return v; } } }

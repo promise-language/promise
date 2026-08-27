@@ -295,6 +295,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
 	c.validateConstructors(file)           // Validate: constructor inheritance (after all types defined)
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
+	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
+	c.checkProtocolNearMisses(file)        // T1731: reject protocol near-miss signatures
 	c.validateBuiltins()                   // Validate: .pr files declare all required operators/methods/fields
 	c.info.Timings.Define = time.Since(tPass)
 
@@ -377,6 +379,8 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
 	c.validateConstructors(file)           // Validate: constructor inheritance
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
+	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
+	c.checkProtocolNearMisses(file)        // T1731: reject protocol near-miss signatures
 
 	return c.info, c.errors
 }

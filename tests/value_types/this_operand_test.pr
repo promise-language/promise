@@ -4,7 +4,7 @@
 type Cmp {
   int x `value;
 
-  < (Cmp other) bool {
+  < (Cmp other) bool `structural(protocol: false) {
     return this.x < other.x;
   }
 

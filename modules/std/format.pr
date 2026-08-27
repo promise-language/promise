@@ -1,6 +1,6 @@
 // std/format.pr — Format interface and value-to-string formatting
 // (Writer moved to io.pr — the core I/O interfaces file)
-type Format `structural `public `doc("Structural interface for types that can format themselves to a Writer.") {
+type Format `structural(protocol: true) `public `doc("Structural interface for types that can format themselves to a Writer.") {
   format!(Writer ~w) `abstract `doc("Writes a human-readable representation of this value to the writer.");
 }
 

@@ -18,13 +18,13 @@ test_embed_dir_contains() `test {
 
 test_embed_dir_read() `test {
   EmbeddedFiles fs = assets;
-  string content = fs.read("hello.txt")?!;
+  string content = fs.read_string("hello.txt")?!;
   assert(content == "Hello, embedded world!", "read hello.txt");
 }
 
 test_embed_dir_read_nested() `test {
   EmbeddedFiles fs = assets;
-  string css = fs.read("css/style.css")?!;
+  string css = fs.read_string("css/style.css")?!;
   assert(css.len == 19, "css length: got " + css.len.to_string());
   assert(css.starts_with("body"), "css starts with body");
 }
@@ -37,7 +37,7 @@ test_embed_dir_read_bytes() `test {
 
 test_embed_dir_read_not_found() `test {
   EmbeddedFiles fs = assets;
-  (content, err) := fs.read("nonexistent.txt");
+  (content, err) := fs.read_string("nonexistent.txt");
   assert(err is present, "should raise error for missing file");
 }
 

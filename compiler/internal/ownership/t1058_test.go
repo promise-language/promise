@@ -51,7 +51,7 @@ func TestT1058_SharedThisPlusSameFieldArgOK(t *testing.T) {
 		type Field { string s; }
 		type Obj {
 			Field field;
-			read(this, Field f) string { return f.s; }
+			read(this, Field f) string `+"`"+`structural(protocol: false) { return f.s; }
 		}
 		test() {
 			Obj o = Obj(field: Field(s: "x"));

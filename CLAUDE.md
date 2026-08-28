@@ -263,13 +263,24 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 
 Tests use helper functions that build a mini standard library (`stdAll`) with all primitive type declarations, then parse + sema + codegen user code:
 
+Codegen tests live in per-area packages under `compiler/internal/codegen/tests/`
+(`drop1`, `generic2`, `regress7`, …) and reach the shared helpers through
+`codegentest`. They are split because 3041 tests in one package ran serially for
+eight minutes here and twenty on a slower machine, and cannot be parallelised
+in-process: every test compiles the std module again and codegen writes into the
+shared std `sema.Info` while doing so (T1776). Separate packages are separate
+processes, so they run concurrently and cache per area. Add a new test to the
+area package it belongs to; only a test that needs codegen's *unexported*
+internals goes in `package codegen` itself, where private helper copies live in
+`codegen_helpers_test.go`.
+
 ```go
-// codegen tests
-ir := generateIR(t, `
+// codegen tests (compiler/internal/codegen/tests/<area>/)
+ir := codegentest.GenerateIR(t, `
     type Foo { int x; }
     main() { f := Foo(x: 1); }
 `)
-assertContains(t, ir, "call void @Foo.drop")
+codegentest.AssertContains(t, ir, "call void @Foo.drop")
 
 // sema tests
 errs := checkErrs(t, `type Bad { drop(this) {} } main() {}`)

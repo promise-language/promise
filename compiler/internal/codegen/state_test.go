@@ -7,7 +7,6 @@ import (
 	"unsafe"
 
 	"github.com/llir/llvm/ir"
-
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/types"
 )

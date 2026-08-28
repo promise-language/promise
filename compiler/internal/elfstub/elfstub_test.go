@@ -129,6 +129,14 @@ func TestPlanIgnoresNonELF(t *testing.T) {
 // pinned lld imports libxml2, and the plan built from the binary covers exactly
 // what it imports.
 func TestPlanDerivesLLDSurface(t *testing.T) {
+	// The premise below — "the pinned lld imports libxml2" — is only true of the
+	// Linux lld. On any other host the staged lld is that host's own binary (a
+	// Mach-O on macOS), Plan's elf.Open declines it, and the assertion below
+	// fails on a file it was never meant to read. Same guard as
+	// TestStubLetsLLDRun, which has always had it.
+	if runtime.GOOS != "linux" {
+		t.Skip("deriving an ELF import surface is a Linux concern")
+	}
 	lld := findHostLLD(t)
 	stubs, err := Plan(lld)
 	if err != nil {

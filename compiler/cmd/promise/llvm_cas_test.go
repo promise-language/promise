@@ -269,6 +269,17 @@ func TestViewComplete(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Where the toolchain needs generated stub libraries, a view built before
+	// they existed carries the tools but not the stubs, and must be rebuilt
+	// rather than served from the fast path forever (T1774).
+	if needsToolchainStubs() {
+		if viewComplete(dir, entries) {
+			t.Fatal("view without the stub marker should be incomplete")
+		}
+		if err := os.WriteFile(filepath.Join(dir, stubMarkerName), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if !viewComplete(dir, entries) {
 		t.Fatal("view with all blobs + aliases should be complete")
 	}
@@ -310,6 +321,9 @@ func viewFileNames(entries []*blobstore.ManifestEntry) []string {
 				n = link + ".exe"
 			}
 			names = append(names, n)
+		}
+		if needsToolchainStubs() {
+			names = append(names, stubMarkerName)
 		}
 	}
 	return names

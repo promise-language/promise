@@ -246,7 +246,10 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 				return err
 			}
 		}
-		return makeLLDAliases(tmpDir)
+		if aerr := makeLLDAliases(tmpDir); aerr != nil {
+			return aerr
+		}
+		return writeToolchainStubs(tmpDir)
 	}); err != nil {
 		return "", err
 	}
@@ -478,6 +481,14 @@ func viewComplete(viewDir string, entries []*blobstore.ManifestEntry) bool {
 		}
 		if name == "lld" || name == "lld.exe" {
 			hasLLD = true
+		}
+	}
+	if hasLLD && needsToolchainStubs() {
+		// A view materialized by a compiler that predates the compatibility
+		// stubs (T1774) has the tools but not the stub libraries, and would
+		// otherwise be served from the fast path forever.
+		if _, err := os.Stat(filepath.Join(viewDir, stubMarkerName)); err != nil {
+			return false
 		}
 	}
 	if hasLLD {

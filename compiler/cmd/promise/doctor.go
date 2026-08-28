@@ -252,7 +252,18 @@ func doctorCheckLLVM() doctorCheck {
 			missing = append(missing, tool.name)
 			continue
 		}
-		v := llvmToolVersion(path)
+		v, perr := llvmToolProbe(path)
+		if perr != nil {
+			// Found but unrunnable — a missing host library, a truncated cache
+			// entry, a wrong-architecture binary. Say so instead of reporting
+			// the tool as present: this is exactly the state in which every
+			// build fails while doctor claims the toolchain is fine.
+			c.Status = doctorErr.String()
+			c.Summary = fmt.Sprintf("%s cannot run: %v", tool.name, perr)
+			c.Fix = "Run `promise doctor --repair` to restage the toolchain; if it persists, report it — a shipped tool needs something this host does not have"
+			c.Details = append(c.Details, fmt.Sprintf("%s: %s — cannot run: %v", tool.label, path, perr))
+			continue
+		}
 		if v > 0 {
 			c.Details = append(c.Details, fmt.Sprintf("%s: %s (LLVM %d)", tool.label, path, v))
 			if v < minLLVMMajor {

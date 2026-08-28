@@ -37,9 +37,14 @@ bundle_dir = "compiler/cmd/promise/resources/llvm"
 [binaries.llvm.targets.linux-amd64]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz"
 sha256 = "8d662e425e46c48b45f5f970770b5e37f323607c8c2cbc371593fc9c4ba1e7b3"
-# The upstream LLVM-22.1.0-Linux-X64.tar.xz ships statically-linked binaries
-# (bin/lld is 199 MB, depends only on system libs). No libLLVM.so / liblld* /
-# libz3 / libzstd shared libraries needed at runtime.
+# The upstream LLVM-22.1.0-Linux-X64.tar.xz links LLVM itself statically (bin/lld
+# is 199 MB — no libLLVM.so / liblld* / libz3 / libzstd needed at runtime), but
+# the binaries are not fully static: they need libstdc++/libgcc_s/libz/libm/libc,
+# and lld additionally carries a DT_NEEDED on libxml2.so.2 for LLVM's COFF
+# manifest merger. libxml2 is absent from a base Linux install, and lld is
+# BIND_NOW, so the compiler generates its own stub libxml2 into the toolchain
+# view dir rather than requiring one to be installed (T1774 —
+# compiler/internal/elfstub).
 files = [
   { src = "bin/opt", out = "opt" },
   { src = "bin/llc", out = "llc" },

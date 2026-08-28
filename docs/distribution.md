@@ -100,7 +100,7 @@ curl -fsSL https://github.com/promise-language/promise/releases/latest/download/
 
 `install.ps1` is the real implementation (platform/arch detection, download, checksum, `promise install`, **User `PATH` via `[Environment]::SetEnvironmentVariable(..., 'User')`**). `install.cmd` is a **thin shim** that re-invokes PowerShell (`powershell -ExecutionPolicy Bypass -Command "irm … | iex"`) so there is a single real implementation. Direct download (§2.3) is the no-script fallback for locked-down environments.
 
-**Zero local dependencies is the bar — met on Windows (T0772).** The Windows
+**Zero local dependencies is the bar — met on Windows (T0772) and Linux (T1774).** The Windows
 compiler embeds its own self-generated link surface (own import libs from
 license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`), so
 installing on a fresh Windows machine "just works" with no "install Visual Studio
@@ -360,6 +360,10 @@ fetched. (x86_64 first; arm64 is a follow-up.)
 ### 5.3 Linux
 
 Fully static via musl. The musl CRT objects are a fetched blob (full builds pre-stage them). No system dependencies beyond the kernel.
+
+That bar applies to the **toolchain** as well as to the binaries it produces, and the upstream LLVM release binaries do not meet it on their own: `lld` declares a dependency on `libxml2.so.2` — used only by LLVM's COFF manifest merger, which Promise never invokes — and is linked `BIND_NOW`, so on a machine without libxml2 (a base Linux install has none) the linker cannot start and every build fails at the link step. Promise therefore **supplies that library itself**: when the per-target toolchain view is materialized, the compiler emits a stub `libxml2.so.2` beside the tools, in the directory it already puts on `LD_LIBRARY_PATH`. This is the ELF counterpart of the Windows import libs generated from `.def` symbol lists (§5.2) — we own the link surface instead of asking the user to install one.
+
+The stub's symbol and version surface is **read out of the shipped `lld`**, not hardcoded, so bumping the pinned LLVM cannot silently desync it. Only libraries on an explicit allowlist are stubbed, and only ones whose code genuinely never runs: `libstdc++`, `libgcc_s`, `libz`, `libm` and `libc` are real dependencies with real behavior and are never faked. Every stub symbol resolves to a trap instruction, so an unexpected call fails loudly rather than silently misbehaving. The stub is generated unconditionally rather than only when the host lacks the real library, so the toolchain behaves identically on every machine instead of depending on what happens to be installed.
 
 Every Linux binary also links a **musl-built compiler-rt builtins archive** (`libclang_rt.builtins.a`), pinned in `tools/build/prebuilts.toml` (`[binaries.compiler-rt]`, from Alpine's `compiler-rt` on the same v3.23 baseline as musl and OpenSSL) and delivered through the identical blob/embed path as the CRT (T1676). It is spliced onto the link line immediately after `libc.a`, unconditionally — not gated on any language feature.
 

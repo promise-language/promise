@@ -4121,24 +4121,42 @@ func runResilient(build func() *exec.Cmd) error {
 //   - opt/llc: "LLVM version 22.1.2"
 //   - ld.lld:  "LLD 22.1.2" (no "LLVM version" prefix)
 func llvmToolVersion(toolPath string) int {
+	v, _ := llvmToolProbe(toolPath)
+	return v
+}
+
+// llvmToolProbe runs a tool's --version and reports both its major version and
+// why the tool could not run at all. The second answer is the one that matters
+// to `promise doctor`: a tool can be present and still be unrunnable — a shipped
+// binary whose host dependencies are missing exits 127 with the loader's own
+// "error while loading shared libraries" on stderr (T1774). Reporting that as
+// "no version" would let doctor pass a host on which every build fails.
+func llvmToolProbe(toolPath string) (int, error) {
 	cmd := runLLVMCmd(toolPath, "--version")
 	out, err := cmd.Output()
 	if err != nil {
-		return 0
+		reason := err.Error()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if msg := strings.TrimSpace(string(ee.Stderr)); msg != "" {
+				reason = strings.SplitN(msg, "\n", 2)[0]
+			}
+		}
+		return 0, fmt.Errorf("%s", reason)
 	}
 	// Try "LLVM version X" first (opt, llc)
 	re := regexp.MustCompile(`LLVM version (\d+)`)
 	if m := re.FindSubmatch(out); m != nil {
 		v, _ := strconv.Atoi(string(m[1]))
-		return v
+		return v, nil
 	}
 	// Try "LLD X.Y.Z" (ld.lld)
 	re2 := regexp.MustCompile(`LLD (\d+)`)
 	if m := re2.FindSubmatch(out); m != nil {
 		v, _ := strconv.Atoi(string(m[1]))
-		return v
+		return v, nil
 	}
-	return 0
+	return 0, nil
 }
 
 var (

@@ -1345,8 +1345,16 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	// representation (no value struct). Box them like primitives/string when
 	// targeting a structural interface they actually implement.
 	if isOpaqueContainerType(fromType) && toNamed.IsStructural() &&
-		fromNamed != toNamed && types.Implements(fromNamed, toNamed) {
-		return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
+		fromNamed != toNamed {
+		ok := types.Implements(fromNamed, toNamed)
+		if !ok {
+			if toInst, isInst := toType.(*types.Instance); isInst {
+				ok = types.ImplementsInst(fromType, toInst)
+			}
+		}
+		if ok {
+			return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
+		}
 	}
 
 	if !c.isUserValueType(fromType) || !c.isUserValueType(toType) {

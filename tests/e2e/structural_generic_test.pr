@@ -1,0 +1,22 @@
+// T1772: generic Instance types satisfy generic structural interface instances.
+// Assignment of Vector[int] to Stream[int] is now accepted by the type system.
+// NOTE: for-in iteration over a Stream[T] view is blocked by T1773 (codegen
+// treats views as raw generators). These tests verify the sema/type-check fix
+// without iterating over the view.
+assign_vector_to_stream() `test {
+  Stream[int] s = [1, 2, 3];
+  // Assignment succeeds — the type system accepts Vector[int] as Stream[int].
+  // Iteration blocked by T1773; just verify assignment doesn't crash.
+  assert(true, "Vector[int] assigned to Stream[int]");
+}
+
+assign_to_stream_string() `test {
+  Stream[string] s = ["a", "b", "c"];
+  assert(true, "Vector[string] assigned to Stream[string]");
+}
+
+// Assign a Vector[bool] to Stream[bool] — a different element type.
+assign_to_stream_bool() `test {
+  Stream[bool] s = [true, false];
+  assert(true, "Vector[bool] assigned to Stream[bool]");
+}

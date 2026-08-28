@@ -278,6 +278,16 @@ func subtypeWidens(x, y Type) bool {
 		}
 	}
 
+	// Rule 9b (Instance interface): structural satisfaction against a generic
+	// interface instance, e.g. Vector[int] → Stream[int]. (T1772)
+	if yi, ok := y.(*Instance); ok {
+		if yn, ok := yi.Origin().(*Named); ok && yn.IsAbstract() && yn.IsStructural() {
+			if ImplementsInst(x, yi) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -520,6 +530,81 @@ func Implements(x Type, iface *Named) bool {
 	default:
 		return false
 	}
+}
+
+// ImplementsInst reports whether type x implements the generic structural
+// interface instantiation ifaceInst (e.g., Stream[int]). It substitutes
+// the interface's TypeParams with the Instance's TypeArgs in each abstract
+// method signature, and when x is itself an Instance, substitutes the
+// concrete type's TypeParams with its TypeArgs, before comparing. (T1772)
+func ImplementsInst(x Type, ifaceInst *Instance) bool {
+	iface, ok := ifaceInst.Origin().(*Named)
+	if !ok || !iface.IsAbstract() {
+		return false
+	}
+	ifaceParams := iface.TypeParams()
+	ifaceArgs := ifaceInst.TypeArgs()
+	if len(ifaceParams) != len(ifaceArgs) {
+		return false
+	}
+	// Build interface substitution: e.g. Stream.T → int
+	ifaceSubst := make(map[*TypeParam]Type, len(ifaceParams))
+	for i, p := range ifaceParams {
+		ifaceSubst[p] = ifaceArgs[i]
+	}
+
+	abstractMethods := iface.allAbstractMethodsWithDeclarer()
+
+	// Resolve concrete Named and optional concrete substitution
+	var concreteNamed *Named
+	var concreteSubst map[*TypeParam]Type
+	switch xt := x.(type) {
+	case *Named:
+		concreteNamed = xt
+	case *Instance:
+		n, ok := xt.Origin().(*Named)
+		if !ok {
+			return false
+		}
+		concreteNamed = n
+		cParams := n.TypeParams()
+		cArgs := xt.TypeArgs()
+		if len(cParams) > 0 && len(cParams) == len(cArgs) {
+			concreteSubst = make(map[*TypeParam]Type, len(cParams))
+			for i, p := range cParams {
+				concreteSubst[p] = cArgs[i]
+			}
+		}
+	default:
+		return false
+	}
+
+	for _, am := range abstractMethods {
+		var m *Method
+		if am.method.IsGetter() {
+			m = concreteNamed.LookupGetter(am.method.name)
+		} else if am.method.IsSetter() {
+			m = concreteNamed.LookupSetter(am.method.name)
+		} else {
+			m = concreteNamed.LookupMethod(am.method.name)
+		}
+		if m == nil || m.abstract {
+			return false
+		}
+		if am.method.IsFactory() != m.IsFactory() {
+			return false
+		}
+		// Substitute both signatures before comparing
+		concreteSig := m.sig
+		if len(concreteSubst) > 0 {
+			concreteSig = Substitute(concreteSig, concreteSubst).(*Signature)
+		}
+		abstractSig := Substitute(am.method.sig, ifaceSubst).(*Signature)
+		if !identicalSignaturesWithSelf(concreteSig, abstractSig, am.declarer, concreteNamed) {
+			return false
+		}
+	}
+	return true
 }
 
 // SatisfiesAbstract reports whether the concrete method signature satisfies the

@@ -1410,6 +1410,179 @@ func TestImplementsGenericSelfParam(t *testing.T) {
 	})
 }
 
+// TestImplementsInst covers T1772: ImplementsInst checks structural satisfaction
+// when both the interface and the concrete type are generic instances.
+func TestImplementsInst(t *testing.T) {
+	// Build a structural interface Stream[T] with abstract `iter() Iterator[T]`.
+	// We use a fresh Iterator[T] stand-in (just a Named with a type param).
+	sT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	stream := NewNamed(NewTypeName(Pos{}, "Stream", nil), []*TypeParam{sT})
+	stream.SetStructural(true)
+	// Iterator[T] as a generic type
+	iT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	iterType := NewNamed(NewTypeName(Pos{}, "Iterator", nil), []*TypeParam{iT})
+
+	// Stream[T].iter() → Iterator[Stream.T]
+	iterRetStream := NewInstance(iterType, []Type{sT})
+	streamIterSig := NewSignature(nil, nil, iterRetStream, false)
+	stream.AddMethod(NewMethod(Pos{}, "iter", streamIterSig, PlaceInstance, true, false))
+
+	// Build generic Vector[T] with concrete `iter() Iterator[Vector.T]`.
+	vT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	vector := NewNamed(NewTypeName(Pos{}, "Vector", nil), []*TypeParam{vT})
+	iterRetVec := NewInstance(iterType, []Type{vT})
+	vecIterSig := NewSignature(nil, nil, iterRetVec, false)
+	vector.AddMethod(NewMethod(Pos{}, "iter", vecIterSig, PlaceInstance, false, false))
+
+	t.Run("vector_int_satisfies_stream_int", func(t *testing.T) {
+		assertTrue(t, ImplementsInst(
+			NewInstance(vector, []Type{TypInt}),
+			NewInstance(stream, []Type{TypInt})),
+			"Vector[int] should satisfy Stream[int]")
+	})
+
+	t.Run("vector_string_satisfies_stream_string", func(t *testing.T) {
+		assertTrue(t, ImplementsInst(
+			NewInstance(vector, []Type{TypString}),
+			NewInstance(stream, []Type{TypString})),
+			"Vector[string] should satisfy Stream[string]")
+	})
+
+	t.Run("mismatched_type_args_fails", func(t *testing.T) {
+		assertFalse(t, ImplementsInst(
+			NewInstance(vector, []Type{TypInt}),
+			NewInstance(stream, []Type{TypString})),
+			"Vector[int] should NOT satisfy Stream[string]")
+	})
+
+	t.Run("named_concrete_satisfies_generic_iface", func(t *testing.T) {
+		// Non-generic concrete with iter() → Iterator[int]
+		plain := makeNamed("PlainList")
+		plainIterSig := NewSignature(nil, nil, NewInstance(iterType, []Type{TypInt}), false)
+		plain.AddMethod(NewMethod(Pos{}, "iter", plainIterSig, PlaceInstance, false, false))
+		assertTrue(t, ImplementsInst(plain, NewInstance(stream, []Type{TypInt})),
+			"non-generic PlainList with iter()->Iterator[int] should satisfy Stream[int]")
+	})
+
+	t.Run("non_implementing_type_fails", func(t *testing.T) {
+		empty := makeNamed("Empty")
+		assertFalse(t, ImplementsInst(empty, NewInstance(stream, []Type{TypInt})),
+			"Empty (no iter method) should NOT satisfy Stream[int]")
+	})
+
+	t.Run("multi_type_param_interface", func(t *testing.T) {
+		// Mapper[K,V] with abstract map(K) V
+		mK := NewTypeParam(NewTypeName(Pos{}, "K", nil), nil, 0)
+		mV := NewTypeParam(NewTypeName(Pos{}, "V", nil), nil, 1)
+		mapper := NewNamed(NewTypeName(Pos{}, "Mapper", nil), []*TypeParam{mK, mV})
+		mapper.SetStructural(true)
+		mapSig := NewSignature(nil, []*Param{NewParam("key", mK, RefNone)}, mV, false)
+		mapper.AddMethod(NewMethod(Pos{}, "map", mapSig, PlaceInstance, true, false))
+
+		// Dict[K,V] with concrete map(K) V
+		dK := NewTypeParam(NewTypeName(Pos{}, "K", nil), nil, 0)
+		dV := NewTypeParam(NewTypeName(Pos{}, "V", nil), nil, 1)
+		dict := NewNamed(NewTypeName(Pos{}, "Dict", nil), []*TypeParam{dK, dV})
+		dictMapSig := NewSignature(nil, []*Param{NewParam("key", dK, RefNone)}, dV, false)
+		dict.AddMethod(NewMethod(Pos{}, "map", dictMapSig, PlaceInstance, false, false))
+
+		assertTrue(t, ImplementsInst(
+			NewInstance(dict, []Type{TypInt, TypString}),
+			NewInstance(mapper, []Type{TypInt, TypString})),
+			"Dict[int,string] should satisfy Mapper[int,string]")
+
+		assertFalse(t, ImplementsInst(
+			NewInstance(dict, []Type{TypInt, TypString}),
+			NewInstance(mapper, []Type{TypString, TypInt})),
+			"Dict[int,string] should NOT satisfy Mapper[string,int]")
+	})
+
+	t.Run("non_named_x_returns_false", func(t *testing.T) {
+		// Passing a primitive (not *Named or *Instance) should hit the default branch.
+		assertFalse(t, ImplementsInst(TypInt, NewInstance(stream, []Type{TypInt})),
+			"primitive type should NOT satisfy Stream[int]")
+	})
+
+	t.Run("non_abstract_iface_returns_false", func(t *testing.T) {
+		// A concrete (non-abstract) Named used as ifaceInst origin should return false.
+		concrete := makeNamed("Concrete")
+		assertFalse(t, ImplementsInst(
+			NewInstance(vector, []Type{TypInt}),
+			NewInstance(concrete, []Type{TypInt})),
+			"non-abstract interface origin should return false")
+	})
+
+	t.Run("getter_abstract_method", func(t *testing.T) {
+		// Structural interface with a getter method.
+		gT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		hasLen := NewNamed(NewTypeName(Pos{}, "HasLen", nil), []*TypeParam{gT})
+		hasLen.SetStructural(true)
+		lenSig := NewSignature(nil, nil, TypInt, false)
+		lenMethod := NewMethod(Pos{}, "len", lenSig, PlaceInstance, true, false)
+		lenMethod.SetGetter(true)
+		hasLen.AddMethod(lenMethod)
+
+		// Concrete with matching getter
+		cT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		myList := NewNamed(NewTypeName(Pos{}, "MyList", nil), []*TypeParam{cT})
+		cLenSig := NewSignature(nil, nil, TypInt, false)
+		cLenMethod := NewMethod(Pos{}, "len", cLenSig, PlaceInstance, false, false)
+		cLenMethod.SetGetter(true)
+		myList.AddMethod(cLenMethod)
+
+		assertTrue(t, ImplementsInst(
+			NewInstance(myList, []Type{TypInt}),
+			NewInstance(hasLen, []Type{TypInt})),
+			"MyList[int] with getter len should satisfy HasLen[int]")
+	})
+
+	t.Run("setter_abstract_method", func(t *testing.T) {
+		// Structural interface with a setter method.
+		sT2 := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		hasSetter := NewNamed(NewTypeName(Pos{}, "HasSetter", nil), []*TypeParam{sT2})
+		hasSetter.SetStructural(true)
+		setSig := NewSignature(nil, []*Param{NewParam("v", sT2, RefNone)}, nil, false)
+		setMethod := NewMethod(Pos{}, "value", setSig, PlaceInstance, true, false)
+		setMethod.SetSetter(true)
+		hasSetter.AddMethod(setMethod)
+
+		// Concrete with matching setter
+		cT2 := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		myBox := NewNamed(NewTypeName(Pos{}, "MyBox", nil), []*TypeParam{cT2})
+		cSetSig := NewSignature(nil, []*Param{NewParam("v", cT2, RefNone)}, nil, false)
+		cSetMethod := NewMethod(Pos{}, "value", cSetSig, PlaceInstance, false, false)
+		cSetMethod.SetSetter(true)
+		myBox.AddMethod(cSetMethod)
+
+		assertTrue(t, ImplementsInst(
+			NewInstance(myBox, []Type{TypInt}),
+			NewInstance(hasSetter, []Type{TypInt})),
+			"MyBox[int] with setter value should satisfy HasSetter[int]")
+	})
+
+	t.Run("factory_mismatch_returns_false", func(t *testing.T) {
+		// Abstract method is factory, concrete is not → should fail.
+		fT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		iface2 := NewNamed(NewTypeName(Pos{}, "Buildable", nil), []*TypeParam{fT})
+		iface2.SetStructural(true)
+		buildSig := NewSignature(nil, nil, fT, false)
+		buildMethod := NewMethod(Pos{}, "build", buildSig, PlaceInstance, true, false)
+		buildMethod.SetFactory(true)
+		iface2.AddMethod(buildMethod)
+
+		cT3 := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+		impl := NewNamed(NewTypeName(Pos{}, "Builder", nil), []*TypeParam{cT3})
+		implBuildSig := NewSignature(nil, nil, cT3, false)
+		// concrete is NOT factory
+		impl.AddMethod(NewMethod(Pos{}, "build", implBuildSig, PlaceInstance, false, false))
+
+		assertFalse(t, ImplementsInst(
+			NewInstance(impl, []Type{TypInt}),
+			NewInstance(iface2, []Type{TypInt})),
+			"factory mismatch should fail")
+	})
+}
+
 // Format
 
 func TestFormat(t *testing.T) {

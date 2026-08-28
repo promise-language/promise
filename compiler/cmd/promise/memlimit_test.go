@@ -16,6 +16,7 @@ import (
 // T0689: parseMemoryLimitArg unit tests — size grammar, opt-out, error cases.
 
 func TestParseMemoryLimitArg(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in      string
 		want    int64
@@ -65,6 +66,7 @@ func TestParseMemoryLimitArg(t *testing.T) {
 // TestParseMemoryLimitArg_RejectsBareNumbers confirms that bare numeric strings
 // (other than "0") are rejected with a unit-required message.
 func TestParseMemoryLimitArg_RejectsBareNumbers(t *testing.T) {
+	t.Parallel()
 	_, err := parseMemoryLimitArg("100")
 	if err == nil {
 		t.Fatal("expected error for bare number")
@@ -80,6 +82,7 @@ func TestParseMemoryLimitArg_RejectsBareNumbers(t *testing.T) {
 // produced by `bin/build` (PROMISE_TEST_BIN env override) and skips if not set
 // — keeps the unit-test path fast while still allowing CI to opt in.
 func TestMemoryLimitHarnessReportsMemlimit(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	tmp, err := os.CreateTemp("", "memlimit_runaway_*.pr")
@@ -134,6 +137,7 @@ func hasConsecutive(args []string, a, b string) bool {
 }
 
 func TestBuildChildTestArgs_ForwardsMemoryLimit(t *testing.T) {
+	t.Parallel()
 	cfg := testTimeoutConfig{
 		defaultTimeout:      60 * time.Second,
 		scale:               1.0,
@@ -148,6 +152,7 @@ func TestBuildChildTestArgs_ForwardsMemoryLimit(t *testing.T) {
 }
 
 func TestBuildChildTestArgs_OmitsMemoryLimitWhenNotExplicit(t *testing.T) {
+	t.Parallel()
 	cfg := testTimeoutConfig{
 		defaultTimeout:      60 * time.Second,
 		scale:               1.0,
@@ -164,6 +169,7 @@ func TestBuildChildTestArgs_OmitsMemoryLimitWhenNotExplicit(t *testing.T) {
 }
 
 func TestBuildChildTestArgs_ForwardsOptOut(t *testing.T) {
+	t.Parallel()
 	// `-memory-limit 0` (opt-out) must round-trip as "0B" so the child also
 	// disables the per-test limit instead of applying its own 2 GiB default.
 	cfg := testTimeoutConfig{
@@ -189,6 +195,7 @@ func TestBuildChildTestArgs_ForwardsOptOut(t *testing.T) {
 // refactor of buildChildTestArgs can't silently drop one (e.g. -target or
 // -coverage). Asserts the exact slice when all branches are taken.
 func TestBuildChildTestArgs_ForwardsAllFlags(t *testing.T) {
+	t.Parallel()
 	cfg := testTimeoutConfig{
 		defaultTimeout:      30 * time.Second,
 		scale:               2.0,
@@ -219,6 +226,7 @@ func TestBuildChildTestArgs_ForwardsAllFlags(t *testing.T) {
 // compile timeout is NOT forwarded (only non-default values are), so children
 // fall back to their own identical default.
 func TestBuildChildTestArgs_DefaultCompileTimeoutOmitted(t *testing.T) {
+	t.Parallel()
 	cfg := testTimeoutConfig{
 		defaultTimeout: 60 * time.Second,
 		scale:          1.0,
@@ -239,6 +247,7 @@ func TestBuildChildTestArgs_DefaultCompileTimeoutOmitted(t *testing.T) {
 // children, the runaway trips MEMLIMIT. Pre-fix this passed (children ran at
 // the 2 GiB default), so the test guards the forwarding specifically.
 func TestMemoryLimitForwardedToMultiFileRun(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir, err := os.MkdirTemp("", "memlimit_multifile_")
@@ -343,6 +352,7 @@ func TestComputeTestMemoryLimits(t *testing.T) {
 // TestParseMemoryLimitArg_Overflow confirms the overflow guard in
 // parseMemoryLimitArg rejects values that would exceed int64.
 func TestParseMemoryLimitArg_Overflow(t *testing.T) {
+	t.Parallel()
 	// 16 EiB is 2^64 bytes; expressing it in GiB (1<<30) overflows int64.
 	_, err := parseMemoryLimitArg("99999999999GB")
 	if err == nil {
@@ -355,6 +365,7 @@ func TestParseMemoryLimitArg_Overflow(t *testing.T) {
 // values. Per T0689 the per-binary memory limit is baked into the test binary's
 // generated main at codegen time.
 func TestTestTimeoutConfigCacheStringIncludesMemLimit(t *testing.T) {
+	t.Parallel()
 	c1 := testTimeoutConfig{defaultMemoryBytes: 0}
 	c2 := testTimeoutConfig{defaultMemoryBytes: 1 << 20}
 	c3 := testTimeoutConfig{defaultMemoryBytes: 2 << 30}

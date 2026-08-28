@@ -15,6 +15,7 @@ import (
 // TestResourcesFresh detects stale embedded resources. If this test fails,
 // run `make resources` from the compiler/ directory to refresh copies.
 func TestResourcesFresh(t *testing.T) {
+	t.Parallel()
 	// Find the repo root: this file is at compiler/cmd/promise/resources_test.go,
 	// so the repo root is three levels up.
 	_, thisFile, _, ok := runtime.Caller(0)

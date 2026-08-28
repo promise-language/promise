@@ -11,6 +11,7 @@ import (
 )
 
 func TestDirSize(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	// Write two 100-byte files.
 	os.WriteFile(filepath.Join(tmp, "a.txt"), make([]byte, 100), 0644)
@@ -192,6 +193,7 @@ func TestPrintVersionFallback(t *testing.T) {
 }
 
 func TestPrintVersionUsage(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	printVersionUsage(&buf)
 	out := buf.String()
@@ -203,6 +205,7 @@ func TestPrintVersionUsage(t *testing.T) {
 }
 
 func TestFormatSize(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		bytes int64
 		want  string

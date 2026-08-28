@@ -14,6 +14,7 @@ import (
 // drift here makes every OpenSSL blob unresolvable, and the failure mode is a
 // fall-through rather than a loud error, so pin it (mirrors TestMuslManifestName).
 func TestOpenSSLManifestName(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		arch, file, want string
 	}{
@@ -31,6 +32,7 @@ func TestOpenSSLManifestName(t *testing.T) {
 }
 
 func TestOpenSSLArchDir(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target string
 		want   string
@@ -48,12 +50,14 @@ func TestOpenSSLArchDir(t *testing.T) {
 }
 
 func TestOpenSSLCompleteEmpty(t *testing.T) {
+	t.Parallel()
 	if openSSLComplete(t.TempDir()) {
 		t.Error("empty dir: expected false")
 	}
 }
 
 func TestOpenSSLCompletePartial(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Only libssl.a, not libcrypto.a.
 	if err := os.WriteFile(filepath.Join(dir, "libssl.a"), []byte("x"), 0644); err != nil {
@@ -65,6 +69,7 @@ func TestOpenSSLCompletePartial(t *testing.T) {
 }
 
 func TestOpenSSLCompleteAll(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range opensslFiles {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
@@ -80,6 +85,7 @@ func TestOpenSSLCompleteAll(t *testing.T) {
 // PLACEHOLDER sentinel reads as "not available" — the property that keeps an
 // offline / not-yet-pinned build from claiming OpenSSL is present.
 func TestOpenSSLCompleteRejectsPlaceholder(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "PLACEHOLDER"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
@@ -93,6 +99,7 @@ func TestOpenSSLCompleteRejectsPlaceholder(t *testing.T) {
 // embedded archives. Skips when this build embedded only a placeholder (the
 // common case until OpenSSL is pinned/hosted — see EmbedOpenSSL).
 func TestOpenSSLValidWithEmbedded(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedOpenSSL {
 		t.Skip("no embedded OpenSSL on this platform")
 	}
@@ -132,6 +139,7 @@ func TestOpenSSLValidWithEmbedded(t *testing.T) {
 }
 
 func TestOpenSSLValidWrongArch(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedOpenSSL {
 		t.Skip("no embedded OpenSSL on this platform")
 	}
@@ -355,6 +363,7 @@ func indexOfSuffix(args []string, suffix string) int {
 // the link line contains NEITHER archive — the gate default that must hold for
 // every existing program.
 func TestBuildMuslLinkArgsNoTLS(t *testing.T) {
+	t.Parallel()
 	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"}, "/tmp/out", "/crt", false, "", "/builtins")
 	if indexOfSuffix(args, "libssl.a") != -1 {
 		t.Errorf("needsTLS=false: libssl.a must be absent, args=%v", args)
@@ -372,6 +381,7 @@ func TestBuildMuslLinkArgsNoTLS(t *testing.T) {
 // libssl.a + libcrypto.a appear AFTER the object files and BEFORE libc.a, in the
 // order ssl-then-crypto (static-archive resolution is order-sensitive, T1596 / #28).
 func TestBuildMuslLinkArgsWithTLS(t *testing.T) {
+	t.Parallel()
 	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"}, "/tmp/out", "/crt", false, "/openssl", "/builtins")
 
 	iObj := indexOfSuffix(args, "main.o")
@@ -396,6 +406,7 @@ func TestBuildMuslLinkArgsWithTLS(t *testing.T) {
 // shares buildMuslLinkArgs): all objects precede the OpenSSL archives, which
 // precede libc.a.
 func TestBuildMuslLinkArgsMultiWithTLS(t *testing.T) {
+	t.Parallel()
 	objs := []string{"/tmp/main.o", "/tmp/mod.o", "/tmp/inst.o"}
 	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", objs, "/tmp/out", "/crt", true, "/openssl", "/builtins")
 

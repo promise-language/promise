@@ -12,6 +12,7 @@ import (
 // otherwise discards.
 
 func TestExtractPassingTestNames_Batch(t *testing.T) {
+	t.Parallel()
 	out := `pass (0.009s) test_and
 pass (0.001s) test_or
 pass (0.002s) test_not
@@ -33,6 +34,7 @@ pass (0.002s) test_not
 }
 
 func TestExtractPassingTestNames_WasmSuffix(t *testing.T) {
+	t.Parallel()
 	// Cross-target child output appends " [wasm32-wasi]" to each result line;
 	// the single-token name capture must drop it.
 	out := `pass (0.009s) test_and [wasm32-wasi]
@@ -44,6 +46,7 @@ pass (0.001s) test_or [wasm32-wasi]`
 }
 
 func TestExtractPassingTestNames_Snapshot(t *testing.T) {
+	t.Parallel()
 	// Snapshot/E2E single-file output uses uppercase PASS with no test name and
 	// must yield nothing (file-only identity is preserved upstream).
 	out := `PASS (0.230s)
@@ -55,6 +58,7 @@ func TestExtractPassingTestNames_Snapshot(t *testing.T) {
 }
 
 func TestExtractPassingTestNames_IgnoresNonPass(t *testing.T) {
+	t.Parallel()
 	out := `pass (0.001s) test_ok
 FAIL (0.003s) test_broken
   panic: assertion failed
@@ -69,6 +73,7 @@ LEAK (0.001s) test_leaky
 }
 
 func TestExtractPassingTestNames_IgnoresAggregatedFileLine(t *testing.T) {
+	t.Parallel()
 	// Defensive: a compact multi-file pass line (`pass (Xs) e2e/basics.pr (3
 	// tests)`) names a .pr file, not a test function, and must never become a
 	// per-test record — that would re-introduce file-as-test-name identity.

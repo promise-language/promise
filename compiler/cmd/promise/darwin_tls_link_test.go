@@ -72,6 +72,7 @@ func TestBundledFrameworkTBDsCoverBackendSymbols(t *testing.T) {
 // document with the framework's real install-name, covering both Promise macOS
 // arches. A wrong install-name links but produces a binary dyld cannot resolve.
 func TestBundledFrameworkTBDsWellFormed(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct{ name, tbd, installName string }{
 		{"Security", bundledSecurityTBD,
 			"/System/Library/Frameworks/Security.framework/Versions/A/Security"},

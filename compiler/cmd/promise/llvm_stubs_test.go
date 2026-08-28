@@ -12,6 +12,7 @@ import (
 // contract: the marker distinguishes "a compiler that checked" from "a view
 // staged before stubs existed", so it is written even when no tool needs one.
 func TestWriteToolchainStubsMarksEvenWithNothingToStub(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "opt"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -33,6 +34,7 @@ func TestWriteToolchainStubsMarksEvenWithNothingToStub(t *testing.T) {
 // this checkout has staged, the view dir ends up with the stub library it needs
 // to load, named in the marker.
 func TestWriteToolchainStubsCoversLLD(t *testing.T) {
+	t.Parallel()
 	if !needsToolchainStubs() {
 		t.Skip("toolchain stubs are a Linux concern")
 	}
@@ -60,6 +62,7 @@ func TestWriteToolchainStubsCoversLLD(t *testing.T) {
 // a tool that is present but cannot execute — the shape of a missing host
 // library — must be reported as such, not silently as "no version".
 func TestLLVMToolProbeReportsUnrunnableTool(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script stand-in is POSIX-only")
 	}

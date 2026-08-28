@@ -20,6 +20,7 @@ import (
 // This drives the real binary against a shared (temp) PROMISE_HOME so both
 // programs share one build cache, proving the collision is gone.
 func TestInstanceCacheCollisionAcrossPrograms(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 	absBin, err := filepath.Abs(promiseBin)
 	if err != nil {

@@ -117,6 +117,7 @@ func TestDetectWasmDataLayoutProbeFailureFallsBack(t *testing.T) {
 // when the module has no explicit datalayout line (the parse-failure branch that
 // yields "").
 func TestWasmDataLayoutRegex(t *testing.T) {
+	t.Parallel()
 	const want = "e-m:e-p:32:32-i64:64-n32:64-S128"
 	withLine := "; ModuleID = '<stdin>'\n" +
 		"source_filename = \"<stdin>\"\n" +

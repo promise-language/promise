@@ -407,6 +407,7 @@ func TestComputeProjectBinaryCacheInputsMissingDir(t *testing.T) {
 }
 
 func TestParseRunArgs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name            string
 		args            []string

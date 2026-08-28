@@ -201,6 +201,7 @@ func TestDoctorCheckPromiseHome(t *testing.T) {
 }
 
 func TestDoctorCheckJava(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckJava()
 	if c.Name != "Java (optional — compiler development only)" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -211,6 +212,7 @@ func TestDoctorCheckJava(t *testing.T) {
 }
 
 func TestDoctorCheckWasmtime(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckWasmtime()
 	if c.Name != "wasmtime (optional — wasm32-wasi target)" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -229,6 +231,7 @@ func TestDoctorCheckWasmtime(t *testing.T) {
 }
 
 func TestDoctorCheckNode(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckNode()
 	if c.Name != "node (optional — wasm32-web target tests)" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -310,6 +313,7 @@ func TestDoctorCheckEpochsInstalled(t *testing.T) {
 }
 
 func TestDoctorCheckPath(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckPath()
 	if c.Name != "PATH" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -320,6 +324,7 @@ func TestDoctorCheckPath(t *testing.T) {
 }
 
 func TestDoctorStatusString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		s    doctorStatus
 		want string

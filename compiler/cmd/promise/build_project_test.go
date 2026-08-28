@@ -42,6 +42,7 @@ func findPromiseBinary(t *testing.T) string {
 // with a promise.toml and multiple .pr files compiles them all together and
 // names the binary after the [module].name field.
 func TestBuildProjectMultiFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -91,6 +92,7 @@ func TestBuildProjectMultiFile(t *testing.T) {
 // TestBuildProjectOutputOverride verifies that -o overrides the project
 // name as the binary name.
 func TestBuildProjectOutputOverride(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -134,6 +136,7 @@ func TestBuildProjectOutputOverride(t *testing.T) {
 // TestBuildProjectExcludesTestFiles verifies that *_test.pr files are not
 // merged into the program when running `promise build .`.
 func TestBuildProjectExcludesTestFiles(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -167,6 +170,7 @@ func TestBuildProjectExcludesTestFiles(t *testing.T) {
 // directory compiles all .pr files together and runs the resulting binary.
 // This exercises the runRun project-mode branch (cache key + label resolve).
 func TestRunProjectMultiFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
@@ -208,6 +212,7 @@ func TestRunProjectMultiFile(t *testing.T) {
 // project directory emits IR covering all .pr files, exercising the
 // runEmitIR project-mode branch.
 func TestEmitIRProjectMultiFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping emit-ir integration test in short mode")
 	}
@@ -249,6 +254,7 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 // what the user typed, so the shared resolver now rejects it and points the user
 // at the project. No project binary is produced.
 func TestBuildFileInsideProject(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -299,6 +305,7 @@ func TestBuildFileInsideProject(t *testing.T) {
 // shared resolver means the same command can no longer produce different output
 // depending on cache state.
 func TestRunFileInsideProject(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
@@ -346,6 +353,7 @@ func TestRunFileInsideProject(t *testing.T) {
 // standalone .pr file with no promise.toml anywhere up the tree still
 // single-file-compiles and produces a binary named after the file (T0927).
 func TestBuildFileNoProjectStillSingleFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -380,6 +388,7 @@ func TestBuildFileNoProjectStillSingleFile(t *testing.T) {
 // file does not exist: the build must fail with a clear file-not-found error
 // rather than silently building the enclosing project for a bogus name (T0927).
 func TestBuildNonexistentFileInsideProject(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -425,6 +434,7 @@ func TestBuildNonexistentFileInsideProject(t *testing.T) {
 // project and rejects the build. Every other test places promise.toml in the
 // same directory as the file, leaving the walk-up loop body uncovered.
 func TestBuildFileInProjectSubdir(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -475,6 +485,7 @@ func TestBuildFileInProjectSubdir(t *testing.T) {
 // promise.toml anywhere up the tree must still single-file-compile and execute,
 // without the project note (T0927).
 func TestRunFileNoProjectStillSingleFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
@@ -505,6 +516,7 @@ func TestRunFileNoProjectStillSingleFile(t *testing.T) {
 // source target. The old T0115 single-file auto-discovery for non-project
 // directories is gone — a directory has exactly one meaning now (a project).
 func TestTargetDirWithoutProjectIsError(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -542,6 +554,7 @@ func TestTargetDirWithoutProjectIsError(t *testing.T) {
 // which must be a project. In a non-project directory this is the same
 // "not a Promise project" error as an explicit `.` argument.
 func TestNoArgInNonProjectDirIsError(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -572,6 +585,7 @@ func TestNoArgInNonProjectDirIsError(t *testing.T) {
 // previously ignored project membership and compiled the file standalone: a file
 // inside a project is now rejected here too.
 func TestEmitIRFileInsideProjectIsError(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping emit-ir integration test in short mode")
 	}
@@ -613,6 +627,7 @@ func TestEmitIRFileInsideProjectIsError(t *testing.T) {
 // since T0723 landed the JsValue FFI lowering. Kept as the focused parse-diagnostic
 // guard so a future regression in the `doc form is attributed here, not to codegen.
 func TestBindWebIdlJsValueDocParses(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping bind+emit-ir integration test in short mode")
 	}
@@ -658,6 +673,7 @@ interface Element {
 // `value._handle`), producing two sema errors. This is the compile-clean
 // counterpart to TestBindWebIdlJsValueDocParses (which only guards the parse layer).
 func TestBindWebIdlUnionAttrCompilesClean(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping bind+emit-ir integration test in short mode")
 	}
@@ -701,6 +717,7 @@ interface Element {
 // replaced it (T1009): `remove` for exclusive-blob reclamation and
 // `doctor --repair` for the full orphan sweep.
 func TestGCRemovedPrintsNotice(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping gc removal-notice integration test in short mode")
 	}
@@ -727,6 +744,7 @@ func TestGCRemovedPrintsNotice(t *testing.T) {
 // non-zero with a redirect to `promise install`, which now folds in toolchain
 // pre-staging (T1008).
 func TestFetchRemovedPrintsNotice(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping fetch removal-notice integration test in short mode")
 	}
@@ -756,6 +774,7 @@ func TestFetchRemovedPrintsNotice(t *testing.T) {
 // regression that made warnings fatal would break every program with a stray
 // `use`.
 func TestUnusedImportWarnsButBuildsOK(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -792,6 +811,7 @@ func TestUnusedImportWarnsButBuildsOK(t *testing.T) {
 // sibling file imports but this file does not is a hard error (imports are
 // per-file, T1686) and must fail the build with the per-file hint.
 func TestMissingPerFileImportFailsBuild(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}

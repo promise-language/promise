@@ -8,6 +8,7 @@ import (
 )
 
 func TestIsWasmWebTarget(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		target string
 		want   bool
@@ -30,6 +31,7 @@ func TestIsWasmWebTarget(t *testing.T) {
 }
 
 func TestEmbeddedWasmWebHarnessNonEmpty(t *testing.T) {
+	t.Parallel()
 	if len(embeddedWasmWebHarness) == 0 {
 		t.Fatal("embeddedWasmWebHarness is empty — go:embed failed?")
 	}

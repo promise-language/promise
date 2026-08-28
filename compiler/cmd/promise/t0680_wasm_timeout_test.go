@@ -38,6 +38,7 @@ func requireWasmtime(t *testing.T) {
 // far below the process backstop (1s + 30s = 31s): if enforcement regressed to
 // backstop-only, this would take ≥31s.
 func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 	requireWasmtime(t)
 
@@ -117,6 +118,7 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 // check fires. This test asserts the in-binary per-test TIMEOUT (not the backstop)
 // for two variants: a pure channel rendezvous and a mixed channel+task loop.
 func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 	requireWasmtime(t)
 
@@ -234,6 +236,7 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 // process backstop. With the fix, `grab` pumps coop_step, everything keeps
 // progressing, and the deadline fires in-binary.
 func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 	requireWasmtime(t)
 
@@ -305,6 +308,7 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 // `worker` parks in the coop pump, everything keeps progressing, and the deadline
 // fires in-binary.
 func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 	requireWasmtime(t)
 

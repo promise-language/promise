@@ -112,6 +112,7 @@ var indexHiddenCommands = map[string]bool{
 // explicitly hidden set. Prevents future commands from being silently omitted
 // (T0691, retargeted from usage() to printIndex in T1006).
 func TestIndexCoversAllCommands(t *testing.T) {
+	t.Parallel()
 	cmds := dispatchedCommands(t)
 
 	var buf strings.Builder
@@ -141,6 +142,7 @@ func TestIndexCoversAllCommands(t *testing.T) {
 // TestIndexOmitsRemovedVerbs guards §5: the command index must never advertise
 // fetch/warm/gc. Also a tripwire so the T1008/T1009 removals don't regress.
 func TestIndexOmitsRemovedVerbs(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	printIndex(&buf)
 	out := buf.String()
@@ -158,6 +160,7 @@ func TestIndexOmitsRemovedVerbs(t *testing.T) {
 // non-hidden node and subcommand resolves via findNode and renders non-empty
 // help (T1006).
 func TestHelpTreeReachable(t *testing.T) {
+	t.Parallel()
 	check := func(path []string) {
 		node, matched, ok := findNode(path)
 		if !ok || len(matched) != len(path) {

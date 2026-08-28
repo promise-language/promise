@@ -22,6 +22,7 @@ import (
 // stable regardless of entry order but changes when any blob hash changes (so an
 // LLVM version bump yields a fresh view dir rather than serving stale tools).
 func TestBlobSetKeyOrderIndependentAndContentSensitive(t *testing.T) {
+	t.Parallel()
 	a := &blobstore.ManifestEntry{Name: "llvm-opt", SHA256: "AA"}
 	b := &blobstore.ManifestEntry{Name: "llvm-llc", SHA256: "bb"}
 	k1 := blobSetKey([]*blobstore.ManifestEntry{a, b})
@@ -47,6 +48,7 @@ func TestBlobSetKeyOrderIndependentAndContentSensitive(t *testing.T) {
 // TestUnbrotliBytesRoundTrip verifies unbrotliBytes decompresses what brotli
 // produces and rejects non-brotli input.
 func TestUnbrotliBytesRoundTrip(t *testing.T) {
+	t.Parallel()
 	want := []byte("the raw opt binary bytes")
 	var buf bytes.Buffer
 	bw := brotli.NewWriterLevel(&buf, brotli.BestCompression)
@@ -68,6 +70,7 @@ func TestUnbrotliBytesRoundTrip(t *testing.T) {
 // TestGunzipBytesRoundTrip verifies gunzipBytes decompresses what gzip produces
 // and rejects non-gzip input.
 func TestGunzipBytesRoundTrip(t *testing.T) {
+	t.Parallel()
 	want := []byte("the raw opt binary bytes")
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -90,6 +93,7 @@ func TestGunzipBytesRoundTrip(t *testing.T) {
 // dispatches on the file extension: .br → brotli (publish path), .gz → gzip
 // (dev/slim path), and rejects an unknown codec.
 func TestDecompressEmbeddedLLVMDispatch(t *testing.T) {
+	t.Parallel()
 	want := []byte("the raw opt binary bytes")
 
 	var brBuf bytes.Buffer
@@ -219,6 +223,7 @@ func TestPrebuiltToolPathPrefersNewestVersion(t *testing.T) {
 }
 
 func TestCompareLLVMVersion(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		a, b string
 		want int
@@ -241,6 +246,7 @@ func TestCompareLLVMVersion(t *testing.T) {
 // TestViewComplete verifies the view-dir completeness check: it requires every
 // LLVM blob file and, when lld is present, the lld-mode aliases.
 func TestViewComplete(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	entries := []*blobstore.ManifestEntry{
 		{Name: "llvm-opt", SHA256: "aa"},
@@ -288,6 +294,7 @@ func TestViewComplete(t *testing.T) {
 // TestViewCompleteNoLLD verifies a view without an lld entry is complete once its
 // (non-lld) blobs exist — no aliases required.
 func TestViewCompleteNoLLD(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	entries := []*blobstore.ManifestEntry{{Name: "llvm-opt", SHA256: "aa"}}
 	if viewComplete(dir, entries) {
@@ -333,6 +340,7 @@ func viewFileNames(entries []*blobstore.ManifestEntry) []string {
 // viewDir contains exactly the populated files and no .tmp-* sibling lingers; on a
 // populate error the viewDir is never created and the temp dir is cleaned up.
 func TestViewPublishAtomic(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	viewDir := filepath.Join(parent, "view")
 
@@ -390,6 +398,7 @@ func TestViewPublishAtomic(t *testing.T) {
 // staging dirs older than maxAge, leaving fresh temp dirs, published views, and
 // unrelated entries untouched (T1077).
 func TestSweepStaleViewStaging(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 
 	// An old orphan .tmp-* dir — backdated well past the age gate.
@@ -433,6 +442,7 @@ func TestSweepStaleViewStaging(t *testing.T) {
 // nonexistent parent (ReadDir error), a stale `.tmp-`-prefixed regular file
 // (not a dir, so skipped), and multiple stale orphans counted together (T1077).
 func TestSweepStaleViewStagingEdges(t *testing.T) {
+	t.Parallel()
 	// Nonexistent parent: ReadDir fails, sweep returns 0 without panicking.
 	if got := sweepStaleViewStaging(filepath.Join(t.TempDir(), "does-not-exist"), staleViewStagingAge); got != 0 {
 		t.Errorf("sweep of missing parent removed = %d, want 0", got)
@@ -474,6 +484,7 @@ func TestSweepStaleViewStagingEdges(t *testing.T) {
 // exist), publishViewDir returns a wrapped "publish view" error AND still removes
 // the staged temp dir — a failed publish must never leak a half-built sibling.
 func TestViewPublishRenameFailure(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	// viewDir lives under a missing intermediate dir, so rename(tmp, viewDir)
 	// fails with ENOENT after the temp dir was staged in parent.
@@ -515,6 +526,7 @@ func assertNoTmpResidue(t *testing.T, parent, viewDir string) {
 // sees the view already complete after taking the lock, and no reader ever
 // observes a missing/partial file once viewComplete reports true.
 func TestViewMaterializeConcurrent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	viewDir := filepath.Join(root, "llvm-view", "host-abc123")
 	lockPath := filepath.Join(root, "llvm-view.lock")

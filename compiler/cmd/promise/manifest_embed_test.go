@@ -10,6 +10,7 @@ import (
 // (resources/manifest.json) is valid and parseable (T0769). Debug builds carry
 // the empty-entries placeholder; release builds carry real LLVM entries.
 func TestEmbeddedManifestParses(t *testing.T) {
+	t.Parallel()
 	m, err := loadEmbeddedManifest()
 	if err != nil {
 		t.Fatalf("embedded manifest must parse: %v", err)

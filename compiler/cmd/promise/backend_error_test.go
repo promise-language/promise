@@ -196,6 +196,7 @@ func TestCompileLLToBCSuccessReturnsBCAndCleansIntermediates(t *testing.T) {
 // Without this test, the sweep is only ever exercised on an empty glob (the
 // common case), so a broken prefix or a no-op body would go unnoticed.
 func TestClearStrandedTempsRemovesPreexistingLeftovers(t *testing.T) {
+	t.Parallel()
 	const prefix = "t1499clearpreexisting"
 	stray := filepath.Join(os.TempDir(), prefix+"-stray.bc")
 	if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
@@ -217,6 +218,7 @@ func TestClearStrandedTempsRemovesPreexistingLeftovers(t *testing.T) {
 // pruneLeftovers (the removal step reportLeftovers builds on) both names it
 // and removes it, so the glob is clean again for the next run.
 func TestPruneLeftoversRemovesWhatItReports(t *testing.T) {
+	t.Parallel()
 	const prefix = "t1499pruneleftover"
 	clearStrandedTemps(t, prefix)
 	stray := filepath.Join(os.TempDir(), prefix+"-stray.ll")

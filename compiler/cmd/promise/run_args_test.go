@@ -14,6 +14,7 @@ import (
 // (which handleHelp must NOT hijack into printing help). This exercises the whole
 // path — normalize → parseRunArgs → exec — not just the parser.
 func TestRunForwardsProgramArgs(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
@@ -83,6 +84,7 @@ func TestRunForwardsProgramArgs(t *testing.T) {
 // filename-shaped tail token (`ghost.pr`, which does not exist) proves the tail
 // is forwarded as argv rather than opened as source.
 func TestRunForwardsFilenameLikeArgOnCacheMiss(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}

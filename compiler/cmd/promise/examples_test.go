@@ -73,6 +73,7 @@ func TestRunExamplesHelp(t *testing.T) {
 }
 
 func TestLoadExamples(t *testing.T) {
+	t.Parallel()
 	entries := loadExamples()
 	if len(entries) == 0 {
 		t.Fatal("no examples found in embedded FS")
@@ -96,6 +97,7 @@ func TestLoadExamples(t *testing.T) {
 }
 
 func TestCategoryDisplayName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input, want string
 	}{
@@ -113,6 +115,7 @@ func TestCategoryDisplayName(t *testing.T) {
 }
 
 func TestExampleSlug(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input, want string
 	}{
@@ -132,6 +135,7 @@ func TestExampleSlug(t *testing.T) {
 }
 
 func TestFindEmbeddedExample(t *testing.T) {
+	t.Parallel()
 	// By stem name.
 	e := findEmbeddedExample("hello")
 	if e == nil {
@@ -266,6 +270,7 @@ func TestListExampleNames(t *testing.T) {
 }
 
 func TestReadFirstComment(t *testing.T) {
+	t.Parallel()
 	desc := readFirstComment("resources/examples/01_basics/hello.pr")
 	if desc == "" {
 		t.Error("expected non-empty description for hello.pr")

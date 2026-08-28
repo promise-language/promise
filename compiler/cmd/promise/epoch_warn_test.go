@@ -125,6 +125,7 @@ func TestWarnEpochMismatchSuppressedByOptOut(t *testing.T) {
 }
 
 func TestWarnEpochCommandsSet(t *testing.T) {
+	t.Parallel()
 	for _, cmd := range []string{"build", "run", "test", "check", "emit-ir", "exec", "doc"} {
 		if !warnEpochCommands[cmd] {
 			t.Errorf("expected %q to be a warn-eligible command", cmd)

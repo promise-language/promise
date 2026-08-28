@@ -56,6 +56,7 @@ func TestUnreportedTests(t *testing.T) {
 }
 
 func TestJoinCapped(t *testing.T) {
+	t.Parallel()
 	names := []string{"a", "b", "c"}
 	if got := joinCapped(names, 8); got != "a, b, c" {
 		t.Errorf("joinCapped = %q", got)
@@ -69,6 +70,7 @@ func TestJoinCapped(t *testing.T) {
 // --json reconciliation must key off the INCOMPLETE line (not the absence of a
 // summary) to attribute the abort to the first unreported test.
 func TestBuildTestRecordsIncomplete(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("a", false, "b", false, "c", false),
 		"pass (0.001s) a",
@@ -102,6 +104,7 @@ func TestBuildTestRecordsIncomplete(t *testing.T) {
 // The child's synthesized summary must parse with the multi-file parent's
 // summary regex, including the trailing incomplete bucket.
 func TestParentSummaryParsesIncomplete(t *testing.T) {
+	t.Parallel()
 	m := parentSummaryRe.FindStringSubmatch("1 passed, 0 failed, 2 incomplete (0.021s)")
 	if m == nil {
 		t.Fatal("parent summary regex did not match an incomplete summary")
@@ -149,6 +152,7 @@ c_after() ` + "`test" + ` {
 // End-to-end: the single-file runner must report INCOMPLETE, name every test
 // that never reported, print a summary, and exit non-zero.
 func TestIncompleteHarnessReportsFailure(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -183,6 +187,7 @@ func TestIncompleteHarnessReportsFailure(t *testing.T) {
 // End-to-end: the multi-file parent must classify the file as FAIL with the
 // incomplete count, name it in the FAILED: section, and exit non-zero.
 func TestIncompleteMultiFileReportsFailure(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -346,6 +351,7 @@ func TestEmitRosterRoundTrip(t *testing.T) {
 // --- exit status reporting -----------------------------------------------
 
 func TestExitStatusDescription(t *testing.T) {
+	t.Parallel()
 	if got := exitStatusDescription(nil); got != "status 0" {
 		t.Errorf("nil error = %q, want %q", got, "status 0")
 	}
@@ -369,6 +375,7 @@ func TestExitStatusDescription(t *testing.T) {
 }
 
 func TestIncompleteExitCode(t *testing.T) {
+	t.Parallel()
 	// A deceptive exit 0 becomes a failure.
 	if got := incompleteExitCode(nil); got != 1 {
 		t.Errorf("nil error = %d, want 1", got)
@@ -518,6 +525,7 @@ func TestPrintChildTestOutputDropsMemlimitFatal(t *testing.T) {
 }
 
 func TestIsTestOutcomeLine(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{
 		"pass (0.001s) a", "FAIL (0.001s) a", "LEAK (0.001s) a",
 		"TIMEOUT (0.001s) a", "MEMLIMIT (-) <aborted>", "INCOMPLETE (-) a",
@@ -541,6 +549,7 @@ func TestIsTestOutcomeLine(t *testing.T) {
 // but deliberately never run, so it must not be reported as unreported. A
 // regression here would fail every target-excluded test file in the suite.
 func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -573,6 +582,7 @@ func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 // second (cache-hit) run must reach the same verdict — the cached-binary path
 // builds its roster from the cache meta rather than from a fresh frontend.
 func TestIncompleteFromCachedBinaryPreservesExitCode(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -609,6 +619,7 @@ func TestIncompleteFromCachedBinaryPreservesExitCode(t *testing.T) {
 // output path — it must reach the same verdict, and must not print a coverage
 // report for a run whose tests never finished.
 func TestIncompleteCoverageModeReportsFailure(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -638,6 +649,7 @@ func TestIncompleteCoverageModeReportsFailure(t *testing.T) {
 // own roster (fs.testOrder). A child that exits 0 mid-batch must be attributed
 // to the test that was running, not silently counted as a clean iteration.
 func TestIncompleteStressAttribution(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()

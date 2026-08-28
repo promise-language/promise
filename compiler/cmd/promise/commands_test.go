@@ -10,6 +10,7 @@ import (
 // TestPrintIndexGroupedOrder verifies the index renders the documented groups in
 // order, each with a header, to the provided writer (T1006).
 func TestPrintIndexGroupedOrder(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	printIndex(&buf)
 	out := buf.String()
@@ -36,6 +37,7 @@ func TestPrintIndexGroupedOrder(t *testing.T) {
 // TestFindNode covers resolution of top-level commands, nested subcommands,
 // unknown first tokens, and extra (unmatched) trailing tokens.
 func TestFindNode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path        []string
 		wantOK      bool
@@ -139,6 +141,7 @@ func TestRouteHelpEmptyPrintsOverview(t *testing.T) {
 // after `--` goes to the program. This is the discoverability half of the task
 // — the CLI is useless if agents can't find the convention from --help.
 func TestRunHelpDocumentsSeparator(t *testing.T) {
+	t.Parallel()
 	node, matched, ok := findNode([]string{"run"})
 	if !ok {
 		t.Fatal("run node not found")
@@ -163,6 +166,7 @@ func TestRunHelpDocumentsSeparator(t *testing.T) {
 // TestPrintNodeHelpSynthesizedLeaf verifies a leaf without a rich renderer gets a
 // synthesized usage synopsis plus its summary.
 func TestPrintNodeHelpSynthesizedLeaf(t *testing.T) {
+	t.Parallel()
 	// Use "format" — a leaf without a rich renderer — to test the synthesized path.
 	node, matched, ok := findNode([]string{"format"})
 	if !ok {
@@ -183,6 +187,7 @@ func TestPrintNodeHelpSynthesizedLeaf(t *testing.T) {
 // renders a usage line, every subcommand on its own line, and the
 // `<subcommand> --help` pointer footer (T1006 §3).
 func TestPrintNodeHelpSynthesizedGroup(t *testing.T) {
+	t.Parallel()
 	node, matched, ok := findNode([]string{"package"})
 	if !ok {
 		t.Fatal("package node not found")
@@ -211,6 +216,7 @@ func TestPrintNodeHelpSynthesizedGroup(t *testing.T) {
 // command and the per-command help flag (T1006 §1 — short pointer, not a full
 // reference dump).
 func TestHelpHint(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	helpHint(&buf)
 	out := buf.String()
@@ -222,6 +228,7 @@ func TestHelpHint(t *testing.T) {
 // TestIsHelpFlag pins the post-normalization help-flag contract: only `-h` and
 // `-help` count (normalizeArgs has already collapsed `--help` → `-help`).
 func TestIsHelpFlag(t *testing.T) {
+	t.Parallel()
 	for _, a := range []string{"-h", "-help"} {
 		if !isHelpFlag(a) {
 			t.Errorf("isHelpFlag(%q) = false, want true", a)
@@ -255,6 +262,7 @@ func TestHelpFlagsCollapseViaNormalize(t *testing.T) {
 // canonicalization so a run target's argv (T1426) is forwarded verbatim — no
 // `--flag → -flag` rewrite and no `=`/`:` value splitting past the separator.
 func TestNormalizeArgsStopsAtSeparator(t *testing.T) {
+	t.Parallel()
 	got := normalizeArgs([]string{"run", "app.pr", "--", "--verbose", "-o=x"})
 	want := []string{"run", "app.pr", "--", "--verbose", "-o=x"}
 	if !slicesEqual(got, want) {

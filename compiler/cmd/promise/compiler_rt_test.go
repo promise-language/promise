@@ -20,6 +20,7 @@ import (
 // compiler-rt blob unresolvable, and the failure mode is a fall-through rather
 // than a loud error, so pin it (mirrors TestMuslManifestName). T1676.
 func TestCompilerRTManifestName(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		arch, file, want string
 	}{
@@ -40,6 +41,7 @@ func TestCompilerRTManifestName(t *testing.T) {
 }
 
 func TestCompilerRTArchDir(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target string
 		want   string
@@ -57,6 +59,7 @@ func TestCompilerRTArchDir(t *testing.T) {
 }
 
 func TestCompilerRTCompleteEmpty(t *testing.T) {
+	t.Parallel()
 	if compilerRTComplete(t.TempDir()) {
 		t.Error("empty dir: expected false")
 	}
@@ -65,6 +68,7 @@ func TestCompilerRTCompleteEmpty(t *testing.T) {
 // TestCompilerRTCompletePartial covers a dir holding an unrelated file — the
 // archive itself must be present by name, not merely "some file".
 func TestCompilerRTCompletePartial(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "libclang_rt.profile.a"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
@@ -75,6 +79,7 @@ func TestCompilerRTCompletePartial(t *testing.T) {
 }
 
 func TestCompilerRTCompleteFull(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range compilerRTFiles {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
@@ -89,6 +94,7 @@ func TestCompilerRTCompleteFull(t *testing.T) {
 // TestCompilerRTValidWithEmbedded validates the size-check path against the real
 // embedded archive.
 func TestCompilerRTValidWithEmbedded(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedCompilerRT {
 		t.Skip("no embedded compiler-rt on this platform")
 	}
@@ -132,6 +138,7 @@ func TestCompilerRTValidWithEmbedded(t *testing.T) {
 // unresolved) and BEFORE crtn.o. Checked across all four combinations of
 // useLTO × opensslDir set/empty, since both knobs feed the same arg builder.
 func TestBuildMuslLinkArgsIncludesBuiltins(t *testing.T) {
+	t.Parallel()
 	for _, useLTO := range []bool{false, true} {
 		for _, opensslDir := range []string{"", "/openssl"} {
 			args := buildMuslLinkArgs("aarch64-unknown-linux-musl", []string{"/tmp/main.o"},
@@ -166,6 +173,7 @@ func TestBuildMuslLinkArgsIncludesBuiltins(t *testing.T) {
 // TestBuildMuslLinkArgsWithoutBuiltins pins that an empty builtinsDir splices
 // nothing — the arg builder must not fabricate a path from crtDir.
 func TestBuildMuslLinkArgsWithoutBuiltins(t *testing.T) {
+	t.Parallel()
 	args := buildMuslLinkArgs("x86_64-unknown-linux-musl", []string{"/tmp/main.o"},
 		"/tmp/out", "/crt", false, "", "")
 	if indexOfSuffix(args, "libclang_rt.builtins.a") != -1 {
@@ -259,6 +267,7 @@ func embeddedBuiltinsSymbols(t *testing.T) map[string]bool {
 // wrong apk member, fails here at `go test` time on any host — instead of at
 // link time on arm64 CI only, which is how this cost a release cut.
 func TestEmbeddedCompilerRTDefinesOutlineAtomics(t *testing.T) {
+	t.Parallel()
 	if runtime.GOARCH != "arm64" {
 		t.Skip("outline atomics are an aarch64 concept")
 	}
@@ -292,6 +301,7 @@ func TestEmbeddedCompilerRTDefinesOutlineAtomics(t *testing.T) {
 // libc.a. If the archive stopped defining them, the ordering comment would be
 // describing a constraint that no longer exists and the link would break.
 func TestEmbeddedCompilerRTDefinesSoftFloatHelpers(t *testing.T) {
+	t.Parallel()
 	if runtime.GOARCH != "arm64" {
 		t.Skip("musl's binary128 libc.a references are an aarch64 concern")
 	}
@@ -308,6 +318,7 @@ func TestEmbeddedCompilerRTDefinesSoftFloatHelpers(t *testing.T) {
 // place of the real archive. EmbedCompilerRT is fatal on failure precisely so
 // this cannot happen — assert the postcondition rather than trusting it.
 func TestEmbeddedCompilerRTIsRealArchive(t *testing.T) {
+	t.Parallel()
 	syms := embeddedBuiltinsSymbols(t)
 	if len(syms) < 100 {
 		t.Errorf("builtins archive indexes only %d symbols — looks like a placeholder, not compiler-rt", len(syms))
@@ -487,6 +498,7 @@ func TestFindCompilerRTEmbeddedExtraction(t *testing.T) {
 // here would stage one arch's archive under another's name — link failures far
 // from the cause. Mirrors the openSSLValid unknown-arch case.
 func TestCompilerRTValidCrossArch(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedCompilerRT {
 		t.Skip("no embedded compiler-rt on this platform")
 	}
@@ -550,6 +562,7 @@ func TestDoctorCheckCompilerRTAvailable(t *testing.T) {
 // dependencies: every name must be present, an empty list is vacuously true,
 // and a directory bearing a required name is NOT a file.
 func TestDepFilesPresent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if !depFilesPresent(dir, nil) {
 		t.Error("empty file list: want true (vacuous)")
@@ -579,6 +592,7 @@ func TestDepFilesPresent(t *testing.T) {
 // unknown prefix reads as "cannot validate" (false) so the caller falls through
 // to its next probe rather than trusting an unvalidatable dir.
 func TestDepFilesMatchEmbedded(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedCompilerRT {
 		t.Skip("no embedded compiler-rt on this platform")
 	}

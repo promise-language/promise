@@ -68,6 +68,7 @@ func TestInvalidTargetMessage(t *testing.T) {
 // formatted error before any module loading runs (no "redeclared in this
 // scope" leakage from std/platform.pr).
 func TestInvalidTargetRejectedByBuild(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping CLI integration test in short mode")
 	}
@@ -102,6 +103,7 @@ func TestInvalidTargetRejectedByBuild(t *testing.T) {
 // TestInvalidTargetRejectedByExec covers `promise exec` separately because
 // it accepts inline source rather than a file path.
 func TestInvalidTargetRejectedByExec(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping CLI integration test in short mode")
 	}

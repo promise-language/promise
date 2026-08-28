@@ -9,6 +9,7 @@ import (
 )
 
 func TestBundledLibSystemTBDContent(t *testing.T) {
+	t.Parallel()
 	// Verify the TBD constant is well-formed and contains essential symbols.
 	if !strings.Contains(bundledLibSystemTBD, "tbd-version:     4") {
 		t.Error("TBD should be version 4")

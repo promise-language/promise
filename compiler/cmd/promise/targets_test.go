@@ -94,6 +94,7 @@ func TestSupportedTargetsRegistry(t *testing.T) {
 }
 
 func TestHostShortName(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		triple string
 		want   string

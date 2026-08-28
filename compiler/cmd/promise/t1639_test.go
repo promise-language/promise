@@ -37,6 +37,7 @@ const stuckGoroutineSource = "" +
 // explains that the body returned but a goroutine did not exit, and — via each
 // test's own pre-test outstanding snapshot — lets the next test run normally.
 func TestStuckGoroutineReportsNamedTimeout(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -93,6 +94,7 @@ const e2eHangSource = "" +
 // already started running its binary, the label must say so — not
 // "compilation timeout".
 func TestBackstopKillAttributedToRunPhase(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("spends the full backstop budget by construction")
 	}
@@ -189,6 +191,7 @@ func TestClampRunTimeout(t *testing.T) {
 // --- unit: parsing the synthetic TIMEOUT (-) line -------------------------
 
 func TestTimeoutLineMatchesSyntheticOutcome(t *testing.T) {
+	t.Parallel()
 	// The parent's per-test TIMEOUT regex must accept "(-)" the same way the
 	// MEMLIMIT and INCOMPLETE ones do, or a batch-budget kill would go
 	// uncounted.
@@ -290,6 +293,7 @@ func TestBatchBudgetKillDropsStaleChildSummary(t *testing.T) {
 }
 
 func TestBuildTestRecordsSyntheticTimeout(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("a", false, "b", false, "c", false),
 		"pass (0.001s) a",
@@ -337,6 +341,7 @@ func TestPhaseMarkerGatedOnEnv(t *testing.T) {
 // --- unit: the summary line a truncated batch re-renders -------------------
 
 func TestTruncatedBatchSummary(t *testing.T) {
+	t.Parallel()
 	// Field order is not cosmetic: parentSummaryRe reads the buckets
 	// positionally, so a summary the parent cannot parse silently drops a
 	// whole file's counts out of the run total.
@@ -390,6 +395,7 @@ const optedOutHangSource = "" +
 	"}\n"
 
 func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -533,6 +539,7 @@ const stuckVariantsSource = "" +
 	"}\n"
 
 func TestStuckGoroutineWordingAndFailPrecedence(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()
@@ -634,6 +641,7 @@ func TestTimedOutRunReportCapsTheMissingList(t *testing.T) {
 // result and no phantom record for the "<teardown>" placeholder. The runner's
 // human-facing exit code carries the failure instead (docs/gate-system.md).
 func TestBuildTestRecordsTeardownTimeoutBlamesNoTest(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("a", false, "b", false),
 		"pass (0.001s) a",
@@ -665,6 +673,7 @@ func TestBuildTestRecordsTeardownTimeoutBlamesNoTest(t *testing.T) {
 // and must never become a test record — the same guard every other outcome
 // regex carries.
 func TestSyntheticTimeoutIgnoresFileLevelLines(t *testing.T) {
+	t.Parallel()
 	_, seen, _, _, _ := parseChildOutput(strings.Join([]string{
 		"TIMEOUT (-) modules/http/http_test.pr",
 		"TIMEOUT (-) a_real_test",
@@ -706,6 +715,7 @@ const timedOutBaselineSource = "" +
 	"}\n"
 
 func TestTimedOutTestDoesNotStallLaterDrains(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir := t.TempDir()

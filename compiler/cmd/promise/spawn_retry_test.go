@@ -15,6 +15,7 @@ import (
 // misclassifies POSIX errno collisions (errno 8 == ENOEXEC) or genuine
 // tool errors (T1249).
 func TestIsTransientSpawnError(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -71,6 +72,7 @@ func TestIsTransientSpawnError(t *testing.T) {
 // points at a non-existent tool fails to spawn, and on non-Windows hosts that
 // error is never classified as transient, so the call returns promptly.
 func TestRunResilientNonTransient(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	err := runResilient(func() *exec.Cmd {
 		calls++

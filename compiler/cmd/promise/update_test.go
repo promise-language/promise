@@ -56,6 +56,7 @@ func TestResolveSyncConfigURLTrailingSlash(t *testing.T) {
 }
 
 func TestPlatformBinaryName(t *testing.T) {
+	t.Parallel()
 	name := platformBinaryName()
 	expected := fmt.Sprintf("promise-%s-%s", runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "windows" {
@@ -69,6 +70,7 @@ func TestPlatformBinaryName(t *testing.T) {
 // T0796: published assets are gzip-compressed. platformAssetName must append
 // .gz to the runtime binary name so findAssets matches the published name.
 func TestPlatformAssetName(t *testing.T) {
+	t.Parallel()
 	asset := platformAssetName()
 	expected := platformBinaryName() + ".gz"
 	if asset != expected {
@@ -82,6 +84,7 @@ func TestPlatformAssetName(t *testing.T) {
 // T0796: downloadAndInstall pipes the download through gunzipFile to recover
 // the runtime binary — verify it round-trips arbitrary bytes correctly.
 func TestGunzipFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	gzPath := filepath.Join(tmpDir, "input.gz")
 	binPath := filepath.Join(tmpDir, "output")
@@ -113,6 +116,7 @@ func TestGunzipFile(t *testing.T) {
 }
 
 func TestGunzipFileCorrupt(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	gzPath := filepath.Join(tmpDir, "bad.gz")
 	binPath := filepath.Join(tmpDir, "out")
@@ -128,6 +132,7 @@ func TestGunzipFileCorrupt(t *testing.T) {
 // T0796: gunzipFile must surface a clear error when the source can't be opened
 // (a downloaded asset was deleted/quarantined between download and decompress).
 func TestGunzipFileMissingSource(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	err := gunzipFile(filepath.Join(tmpDir, "does-not-exist.gz"), filepath.Join(tmpDir, "out"))
 	if err == nil {
@@ -141,6 +146,7 @@ func TestGunzipFileMissingSource(t *testing.T) {
 // T0796: gunzipFile must surface a clear error when the destination can't be
 // created (e.g. read-only tmp dir or path through a missing parent).
 func TestGunzipFileBadDest(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	gzPath := filepath.Join(tmpDir, "input.gz")
 
@@ -167,6 +173,7 @@ func TestGunzipFileBadDest(t *testing.T) {
 // mid-body (an interrupted/partial download that nevertheless has a valid
 // header). Distinct from TestGunzipFileCorrupt: header is OK, body is short.
 func TestGunzipFileTruncated(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	gzPath := filepath.Join(tmpDir, "trunc.gz")
 	binPath := filepath.Join(tmpDir, "out")
@@ -311,6 +318,7 @@ func TestDownloadVerifyRejectsDecompressedHash(t *testing.T) {
 }
 
 func TestFindAssets(t *testing.T) {
+	t.Parallel()
 	release := &ghRelease{
 		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
@@ -333,6 +341,7 @@ func TestFindAssets(t *testing.T) {
 }
 
 func TestFindAssetsMissing(t *testing.T) {
+	t.Parallel()
 	release := &ghRelease{
 		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
@@ -347,6 +356,7 @@ func TestFindAssetsMissing(t *testing.T) {
 }
 
 func TestFindAssetsNoSHA(t *testing.T) {
+	t.Parallel()
 	release := &ghRelease{
 		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
@@ -367,6 +377,7 @@ func TestFindAssetsNoSHA(t *testing.T) {
 }
 
 func TestVerifySHA256(t *testing.T) {
+	t.Parallel()
 	// Create a temp binary file.
 	tmpDir := t.TempDir()
 	binaryPath := filepath.Join(tmpDir, "promise-test")
@@ -392,6 +403,7 @@ func TestVerifySHA256(t *testing.T) {
 }
 
 func TestVerifySHA256Mismatch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	binaryPath := filepath.Join(tmpDir, "promise-test")
 	if err := os.WriteFile(binaryPath, []byte("actual content"), 0644); err != nil {
@@ -413,6 +425,7 @@ func TestVerifySHA256Mismatch(t *testing.T) {
 }
 
 func TestVerifySHA256MissingEntry(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	binaryPath := filepath.Join(tmpDir, "promise-test")
 	if err := os.WriteFile(binaryPath, []byte("content"), 0644); err != nil {
@@ -501,6 +514,7 @@ func TestFetchReleasesIntegration(t *testing.T) {
 }
 
 func TestFindSpecificRelease(t *testing.T) {
+	t.Parallel()
 	release := ghRelease{
 		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
@@ -542,6 +556,7 @@ func TestFindSpecificRelease(t *testing.T) {
 }
 
 func TestFindNextReleaseNotFound(t *testing.T) {
+	t.Parallel()
 	releases := []ghRelease{
 		{TagName: "epoch-2026.0", Prerelease: false, Draft: false},
 	}
@@ -590,6 +605,7 @@ func TestDownloadFile(t *testing.T) {
 // authenticated (private-repo) asset downloads. ---
 
 func TestDescribe(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ apiBase, want string }{
 		// github.com API base renders as a friendly owner/repo.
 		{"https://api.github.com/repos/promise-language/promise", "github.com/promise-language/promise"},
@@ -663,6 +679,7 @@ func TestGithubErrorRateLimit(t *testing.T) {
 }
 
 func TestGithubErrorForbiddenNonRateLimit(t *testing.T) {
+	t.Parallel()
 	err := githubError("https://api.github.com/x", fakeResp(http.StatusForbidden, `{"message":"Resource not accessible"}`, nil))
 	if !strings.Contains(err.Error(), "Access forbidden") {
 		t.Fatalf("expected forbidden hint, got:\n%s", err.Error())
@@ -670,6 +687,7 @@ func TestGithubErrorForbiddenNonRateLimit(t *testing.T) {
 }
 
 func TestGithubErrorUnauthorized(t *testing.T) {
+	t.Parallel()
 	err := githubError("https://api.github.com/x", fakeResp(http.StatusUnauthorized, `{"message":"Bad credentials"}`, nil))
 	if !strings.Contains(err.Error(), "Authentication failed") {
 		t.Fatalf("expected auth hint, got:\n%s", err.Error())
@@ -763,6 +781,7 @@ func TestFindAssetsPrefersAPIURLWithToken(t *testing.T) {
 // update check, and use download-on-demand. ---
 
 func TestAssetSHAFromSums(t *testing.T) {
+	t.Parallel()
 	const assetName = "promise-linux-amd64.gz"
 	want := "1111111111111111111111111111111111111111111111111111111111111111"
 	sums := want + "  " + assetName + "\n" +
@@ -782,6 +801,7 @@ func TestAssetSHAFromSums(t *testing.T) {
 }
 
 func TestAssetSHAFromSumsMissing(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("abc  promise-other.gz\n"))
 	}))
@@ -797,6 +817,7 @@ func TestAssetSHAFromSumsMissing(t *testing.T) {
 }
 
 func TestShortBuildID(t *testing.T) {
+	t.Parallel()
 	if got := shortBuildID(""); got != "(none)" {
 		t.Errorf("empty: got %q, want (none)", got)
 	}
@@ -2028,6 +2049,7 @@ func TestCheckUpdateAvailableNextSHAFetchError(t *testing.T) {
 // TestFetchReleasesNon200: fetchReleases must wrap the HTTP error for non-200
 // responses and not silently return an empty list.
 func TestFetchReleasesNon200(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"message":"server error"}`))
@@ -2046,6 +2068,7 @@ func TestFetchReleasesNon200(t *testing.T) {
 // TestFindSpecificReleaseServerError: findSpecificRelease must wrap non-404,
 // non-200 responses (e.g. 500 Internal Server Error) via githubError.
 func TestFindSpecificReleaseServerError(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"message":"unexpected error"}`))
@@ -2104,6 +2127,7 @@ func TestHttpGetJSONWithToken(t *testing.T) {
 // TestFileSHA256MissingFile: fileSHA256 must return an error when the file does
 // not exist (e.g. a downloaded asset was deleted before checksum verification).
 func TestFileSHA256MissingFile(t *testing.T) {
+	t.Parallel()
 	_, err := fileSHA256(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Fatal("expected error for missing file")
@@ -2232,6 +2256,7 @@ func TestRunUseRejectsNext(t *testing.T) {
 // TestFindNextReleaseFetchError: findNextRelease must propagate the fetchReleases
 // error when the server is unreachable or returns non-200.
 func TestFindNextReleaseFetchError(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte(`{"message":"service unavailable"}`))
@@ -2250,6 +2275,7 @@ func TestFindNextReleaseFetchError(t *testing.T) {
 // TestFetchReleasesBadJSON: fetchReleases must return an error when the server
 // returns 200 with a non-JSON body.
 func TestFetchReleasesBadJSON(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("not json at all"))
@@ -2268,6 +2294,7 @@ func TestFetchReleasesBadJSON(t *testing.T) {
 // TestHttpGetJSONInvalidURL: httpGetJSON must return an error for an
 // unparseable URL (covers the http.NewRequest error branch).
 func TestHttpGetJSONInvalidURL(t *testing.T) {
+	t.Parallel()
 	_, err := httpGetJSON("://invalid-url")
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
@@ -2277,6 +2304,7 @@ func TestHttpGetJSONInvalidURL(t *testing.T) {
 // TestHttpGetRawInvalidURL: httpGetRaw must return an error for an
 // unparseable URL (covers the http.NewRequest error branch).
 func TestHttpGetRawInvalidURL(t *testing.T) {
+	t.Parallel()
 	_, err := httpGetRaw("://invalid-url")
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
@@ -2286,6 +2314,7 @@ func TestHttpGetRawInvalidURL(t *testing.T) {
 // TestVerifySHA256FileMissing: verifySHA256 must return a clear error when the
 // local file to be checksummed does not exist (e.g. a quarantined download).
 func TestVerifySHA256FileMissing(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("abc123  promise-test\n"))
 	}))
@@ -2323,6 +2352,7 @@ func TestFindLatestStableReleaseFetchError(t *testing.T) {
 // error (unreachable server / invalid URL) in a user-friendly "cannot reach"
 // message, covering the httpGetJSON error branch in that function.
 func TestFindSpecificReleaseFetchError(t *testing.T) {
+	t.Parallel()
 	// "://invalid" triggers http.NewRequest failure inside httpGetJSON.
 	_, err := findSpecificRelease(syncConfig{apiBase: "://invalid"}, "2026.0")
 	if err == nil {
@@ -2336,6 +2366,7 @@ func TestFindSpecificReleaseFetchError(t *testing.T) {
 // TestFetchReleasesConnectionError: fetchReleases must wrap the transport error
 // with a "cannot reach" message when the server is unreachable.
 func TestFetchReleasesConnectionError(t *testing.T) {
+	t.Parallel()
 	_, err := fetchReleases(syncConfig{apiBase: "://invalid"})
 	if err == nil {
 		t.Fatal("expected error for unreachable server")

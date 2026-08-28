@@ -15,6 +15,7 @@ import (
 // these run on every platform.
 
 func TestWinLinkArchDir(t *testing.T) {
+	t.Parallel()
 	// Only x86_64 is generated today; every supported triple maps to the same
 	// arch subdir (arm64 is rejected earlier, in findWindowsLinkSurface).
 	for _, target := range []string{
@@ -28,6 +29,7 @@ func TestWinLinkArchDir(t *testing.T) {
 }
 
 func TestWinLinkCompleteEmpty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if winLinkComplete(dir) {
 		t.Error("empty dir: expected false")
@@ -35,6 +37,7 @@ func TestWinLinkCompleteEmpty(t *testing.T) {
 }
 
 func TestWinLinkCompletePartial(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Create only some of the required import libs.
 	for _, name := range []string{"kernel32.lib", "advapi32.lib"} {
@@ -48,6 +51,7 @@ func TestWinLinkCompletePartial(t *testing.T) {
 }
 
 func TestWinLinkCompleteAll(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range winLinkFiles {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
@@ -60,6 +64,7 @@ func TestWinLinkCompleteAll(t *testing.T) {
 }
 
 func TestWinLinkValidMissingFiles(t *testing.T) {
+	t.Parallel()
 	// An empty directory should never be valid.
 	dir := t.TempDir()
 	if winLinkValid(dir, "windows-amd64") {
@@ -83,6 +88,7 @@ func extractEmbeddedWinLink(t *testing.T, dir, arch string) {
 }
 
 func TestWinLinkValidWithEmbedded(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedWinLink {
 		t.Skip("no embedded Windows link surface in this binary")
 	}
@@ -105,6 +111,7 @@ func TestWinLinkValidWithEmbedded(t *testing.T) {
 }
 
 func TestWinLinkValidCorrectArchMissingFiles(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedWinLink {
 		t.Skip("no embedded Windows link surface in this binary")
 	}
@@ -116,6 +123,7 @@ func TestWinLinkValidCorrectArchMissingFiles(t *testing.T) {
 }
 
 func TestWinLinkValidWrongArch(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedWinLink {
 		t.Skip("no embedded Windows link surface in this binary")
 	}

@@ -37,6 +37,7 @@ func statusOf(records []testRecord, test string) string {
 }
 
 func TestBuildRecordsBatchAllStatuses(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("ok", false, "broke", false, "skipped", true),
 		"pass (0.001s) ok",
@@ -72,6 +73,7 @@ func TestBuildRecordsBatchAllStatuses(t *testing.T) {
 // A hard crash mid-batch: the first unseen test is attributed "fail", the rest
 // "not-run". Identity (one record per roster test) is preserved.
 func TestBuildRecordsCrashNotRun(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("a", false, "b", false, "c", false),
 		"pass (0.001s) a",
@@ -96,6 +98,7 @@ func TestBuildRecordsCrashNotRun(t *testing.T) {
 // MEMLIMIT aborts without naming the offending test: first unseen -> memory,
 // rest -> not-run.
 func TestBuildRecordsMemoryNotRun(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("a", false, "b", false, "c", false),
 		"pass (0.001s) a",
@@ -116,6 +119,7 @@ func TestBuildRecordsMemoryNotRun(t *testing.T) {
 }
 
 func TestBuildRecordsLeakAndTimeout(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		batchRoster("leaky", false, "slow", false),
 		"LEAK (0.001s) leaky",
@@ -136,6 +140,7 @@ func TestBuildRecordsLeakAndTimeout(t *testing.T) {
 }
 
 func TestBuildRecordsE2EPass(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		rosterMarkerPrefix + `{"kind":"e2e","tests":[{"name":"main","excluded":false}]}`,
 		"PASS (0.020s)",
@@ -149,6 +154,7 @@ func TestBuildRecordsE2EPass(t *testing.T) {
 }
 
 func TestBuildRecordsE2EFail(t *testing.T) {
+	t.Parallel()
 	output := strings.Join([]string{
 		rosterMarkerPrefix + `{"kind":"e2e","tests":[{"name":"main","excluded":false}]}`,
 		"FAIL (0.020s)",
@@ -167,6 +173,7 @@ func TestBuildRecordsE2EFail(t *testing.T) {
 }
 
 func TestBuildRecordsE2EExcluded(t *testing.T) {
+	t.Parallel()
 	output := rosterMarkerPrefix + `{"kind":"e2e","tests":[{"name":"main","excluded":true}]}` +
 		"\nSKIP (excluded) hello"
 	recs := buildTestRecords("tests/e2e/hello.pr", output, false)
@@ -177,6 +184,7 @@ func TestBuildRecordsE2EExcluded(t *testing.T) {
 
 // No roster and no results (e.g. "no tests found") -> no records at all.
 func TestBuildRecordsNoTests(t *testing.T) {
+	t.Parallel()
 	if recs := buildTestRecords("tests/empty_test.pr", "no tests found", false); recs != nil {
 		t.Fatalf("want no records, got %+v", recs)
 	}
@@ -185,6 +193,7 @@ func TestBuildRecordsNoTests(t *testing.T) {
 // Missing roster but result lines present (degraded cache-meta path): recover
 // per-test records from the result lines.
 func TestBuildRecordsMissingRosterRecovers(t *testing.T) {
+	t.Parallel()
 	output := "pass (0.001s) a\nFAIL (0.002s) b\n  panic: x\n\n1 passed, 1 failed (0.003s)"
 	recs := buildTestRecords("tests/r_test.pr", output, false)
 	if len(recs) != 2 {

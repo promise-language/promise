@@ -801,6 +801,7 @@ func TestCheckUpgradeNoDeps(t *testing.T) {
 // TestLastLines covers the lastLines helper: the truncation path (more lines than
 // n) and the empty-lines filtering behavior. This is a pure unit test — no I/O.
 func TestLastLines(t *testing.T) {
+	t.Parallel()
 	// More lines than the limit — only the last n are returned.
 	in := "a\nb\nc\nd\ne"
 	got := lastLines(in, 3)

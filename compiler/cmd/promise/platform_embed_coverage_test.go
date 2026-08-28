@@ -25,6 +25,7 @@ var requiredReleasePlatforms = []string{
 // `bin/release build` as "undefined: embeddedStub / embeddedLLVM / ...". This
 // filesystem check is GOOS-independent so it runs everywhere bin/verify does.
 func TestReleaseEmbedFilesCoverRequiredPlatforms(t *testing.T) {
+	t.Parallel()
 	for _, p := range requiredReleasePlatforms {
 		suffix := strings.ReplaceAll(p, "-", "_")
 		for _, name := range []string{"stub_embed_" + suffix + ".go", "llvm_" + suffix + ".go"} {

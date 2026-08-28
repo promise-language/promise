@@ -266,6 +266,7 @@ func TestBuildNamedRequireRootModule(t *testing.T) {
 // T1611: an aliased catalog import (`use json as j;`) must still resolve to the
 // catalog module's IR prefix, not the alias.
 func TestBuildAliasedCatalogImport(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -293,6 +294,7 @@ func TestBuildAliasedCatalogImport(t *testing.T) {
 }
 
 func TestParseAddFlags(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		args       []string
 		wantPos    []string
@@ -405,6 +407,7 @@ func TestAddWithSubdir(t *testing.T) {
 // their own IR prefix, not to their alias. (Sema makes aliases project-unique, so
 // the ambiguous same-alias case cannot arise — see TestSameAliasTwoModulesRejected.)
 func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -441,6 +444,7 @@ func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
 // import-name → IR prefix mapping stays unambiguous per file (supersedes T1611,
 // which rejected this while imports were still module-scoped).
 func TestSameAliasTwoModulesAllowed(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}

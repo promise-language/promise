@@ -6,6 +6,7 @@ import "testing"
 // (T0863): idempotent, case-insensitive, trailing-separator-insensitive, and
 // correct on an empty starting value.
 func TestComputeUpdatedPath(t *testing.T) {
+	t.Parallel()
 	const dir = `C:\Users\Me\.promise\bin`
 	cases := []struct {
 		name     string

@@ -11,6 +11,7 @@ import (
 )
 
 func TestReadInstalledStubVersionMissing(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// No sidecar present → version 0 (so a fresh install always forward-updates).
 	if v := readInstalledStubVersion(dir); v != 0 {
@@ -19,6 +20,7 @@ func TestReadInstalledStubVersionMissing(t *testing.T) {
 }
 
 func TestReadInstalledStubVersionValid(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, stubVersionSidecar), []byte("7\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -29,6 +31,7 @@ func TestReadInstalledStubVersionValid(t *testing.T) {
 }
 
 func TestReadInstalledStubVersionGarbage(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, stubVersionSidecar), []byte("not-a-number"), 0644); err != nil {
 		t.Fatal(err)
@@ -43,6 +46,7 @@ func TestReadInstalledStubVersionGarbage(t *testing.T) {
 // update: the installer replaces the stub only when its embedded version is
 // strictly newer than the installed sidecar value (never downgrades).
 func TestForwardOnlyDecision(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cases := []struct {
 		installed string // sidecar contents ("" = absent)
@@ -74,6 +78,7 @@ func TestForwardOnlyDecision(t *testing.T) {
 // so readEmbeddedStub reports a clear error rather than panicking or returning
 // empty bytes. Release builds (T0773) supply the per-target binary.
 func TestReadEmbeddedStubDevBuild(t *testing.T) {
+	t.Parallel()
 	if hasEmbeddedStub {
 		t.Skip("build has an embedded stub; this guards the dev-build path")
 	}
@@ -90,6 +95,7 @@ func TestReadEmbeddedStubDevBuild(t *testing.T) {
 // fails (because readEmbeddedStub fails) and must NOT leave a stub binary or a
 // sidecar behind — a half-written launcher would be worse than none.
 func TestWriteStubAndSidecarDevBuild(t *testing.T) {
+	t.Parallel()
 	if hasEmbeddedStub {
 		t.Skip("build has an embedded stub; this guards the dev-build path")
 	}
@@ -106,6 +112,7 @@ func TestWriteStubAndSidecarDevBuild(t *testing.T) {
 }
 
 func TestWriteFileAtomic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "thing")
 	if err := writeFileAtomic(path, []byte("hello"), 0755); err != nil {
@@ -146,6 +153,7 @@ func TestWriteFileAtomic(t *testing.T) {
 // panicking or silently succeeding) and writes nothing. writeStubAndSidecar
 // relies on this error being propagated so a failed stub install aborts cleanly.
 func TestWriteFileAtomicBadDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "does-not-exist", "thing")
 	if err := writeFileAtomic(missing, []byte("data"), 0644); err == nil {
@@ -161,6 +169,7 @@ func TestWriteFileAtomicBadDir(t *testing.T) {
 // immediately rather than spin through the full backoff budget (~0.55s). This
 // proves the retry loop only burns wall-clock on transient Windows lock errors.
 func TestRenameWithRetryNonRetryableFailsFast(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "does-not-exist")
 	dst := filepath.Join(dir, "dst")
@@ -186,6 +195,7 @@ func noBackoff(int) time.Duration       { return 0 }
 // rename returns a retryable error and succeeds once the (simulated) lock clears.
 // This is the Windows happy path that the T0793 fix targets, exercised on any OS.
 func TestRenameRetryingSucceedsAfterTransient(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	rename := func(src, dst string) error {
 		calls++
@@ -206,6 +216,7 @@ func TestRenameRetryingSucceedsAfterTransient(t *testing.T) {
 // loop gives up after exactly renameAttempts tries and returns the last error —
 // it never spins forever and never swallows the failure.
 func TestRenameRetryingExhausts(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	rename := func(src, dst string) error {
 		calls++
@@ -223,6 +234,7 @@ func TestRenameRetryingExhausts(t *testing.T) {
 // TestRenameRetryingNonRetryable: a non-retryable error short-circuits after a
 // single attempt — no retries, the error propagates verbatim.
 func TestRenameRetryingNonRetryable(t *testing.T) {
+	t.Parallel()
 	fatal := errors.New("no such file")
 	calls := 0
 	rename := func(src, dst string) error {
@@ -241,6 +253,7 @@ func TestRenameRetryingNonRetryable(t *testing.T) {
 // TestRenameRetryingFirstTry: the common case — rename succeeds immediately, so
 // the loop returns nil without consulting the retryable predicate or backoff.
 func TestRenameRetryingFirstTry(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	rename := func(src, dst string) error { calls++; return nil }
 	if err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d"); err != nil {

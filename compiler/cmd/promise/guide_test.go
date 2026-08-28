@@ -98,6 +98,7 @@ func TestRunGuideHelp(t *testing.T) {
 }
 
 func TestExtractSection(t *testing.T) {
+	t.Parallel()
 	guide := "# Title\n\n## Foo\nfoo content\n\n## Bar\nbar content\n"
 
 	foo := extractSection(guide, "foo")
@@ -126,6 +127,7 @@ func TestExtractSection(t *testing.T) {
 }
 
 func TestSectionSlug(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input, want string
 	}{
@@ -144,6 +146,7 @@ func TestSectionSlug(t *testing.T) {
 }
 
 func TestListSections(t *testing.T) {
+	t.Parallel()
 	sections := listSections()
 	if len(sections) == 0 {
 		t.Fatal("no sections found in embedded guide")

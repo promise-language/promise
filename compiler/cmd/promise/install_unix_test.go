@@ -62,6 +62,7 @@ func TestCopyFileFreshInode(t *testing.T) {
 // function, so the safe-replace guarantee — a rename onto a brand new inode,
 // never an in-place rewrite of the existing one — must hold here too (T0722).
 func TestWriteFileAtomicFreshInode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stub")
 	if err := os.WriteFile(path, []byte("old"), 0755); err != nil {

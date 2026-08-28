@@ -8,6 +8,7 @@ import (
 )
 
 func TestMuslArchDir(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target string
 		want   string
@@ -33,6 +34,7 @@ func TestMuslArchDir(t *testing.T) {
 // here makes every musl blob unresolvable, and the failure mode is a fall-
 // through to the embedded CRT rather than a loud error, so pin it.
 func TestMuslManifestName(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		arch, file, want string
 	}{
@@ -50,6 +52,7 @@ func TestMuslManifestName(t *testing.T) {
 }
 
 func TestMuslCRTCompleteEmpty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if muslCRTComplete(dir) {
 		t.Error("empty dir: expected false")
@@ -57,6 +60,7 @@ func TestMuslCRTCompleteEmpty(t *testing.T) {
 }
 
 func TestMuslCRTCompletePartial(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Create only some of the required files.
 	for _, name := range []string{"crt1.o", "crti.o"} {
@@ -70,6 +74,7 @@ func TestMuslCRTCompletePartial(t *testing.T) {
 }
 
 func TestMuslCRTCompleteAll(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range muslCRTFiles {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
@@ -82,6 +87,7 @@ func TestMuslCRTCompleteAll(t *testing.T) {
 }
 
 func TestMuslCRTValidMissingFiles(t *testing.T) {
+	t.Parallel()
 	// An empty directory should never be valid.
 	dir := t.TempDir()
 	if muslCRTValid(dir) {
@@ -90,6 +96,7 @@ func TestMuslCRTValidMissingFiles(t *testing.T) {
 }
 
 func TestMuslCRTValidWithEmbedded(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedMuslCRT {
 		t.Skip("no embedded CRT on this platform")
 	}
@@ -131,6 +138,7 @@ func TestMuslCRTValidWithEmbedded(t *testing.T) {
 }
 
 func TestMuslCRTValidCorrectArchMissingFiles(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedMuslCRT {
 		t.Skip("no embedded CRT on this platform")
 	}
@@ -148,6 +156,7 @@ func TestMuslCRTValidCorrectArchMissingFiles(t *testing.T) {
 }
 
 func TestMuslCRTValidWrongArch(t *testing.T) {
+	t.Parallel()
 	if !hasEmbeddedMuslCRT {
 		t.Skip("no embedded CRT on this platform")
 	}

@@ -7,6 +7,7 @@ import (
 
 // TestParseCLIArgs exercises the shared strict parser directly (T1604).
 func TestParseCLIArgs(t *testing.T) {
+	t.Parallel()
 	t.Run("value and bool flags with a single positional", func(t *testing.T) {
 		var target string
 		var release bool

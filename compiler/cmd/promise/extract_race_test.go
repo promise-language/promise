@@ -126,6 +126,7 @@ func TestExtractEmbeddedModuleStaleEmptyCacheDir(t *testing.T) {
 // content untouched — a module is only ever made visible by an atomic rename,
 // so any non-empty destination is complete.
 func TestPublishExtractedModulePeerWins(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	cacheDir := filepath.Join(parent, "net")
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -160,6 +161,7 @@ func TestPublishExtractedModulePeerWins(t *testing.T) {
 // destination never appears) must return the underlying error after a bounded
 // number of attempts rather than spinning forever.
 func TestPublishExtractedModuleGivesUp(t *testing.T) {
+	t.Parallel()
 	defer func(a int, b, m time.Duration) {
 		extractPublishAttempts, extractPublishBackoff, extractPublishMaxSleep = a, b, m
 	}(extractPublishAttempts, extractPublishBackoff, extractPublishMaxSleep)

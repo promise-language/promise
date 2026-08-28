@@ -753,6 +753,7 @@ func TestExecWrapCode(t *testing.T) {
 }
 
 func TestExtractUseDecls(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		source   string

@@ -3,6 +3,7 @@ package main
 import "testing"
 
 func TestSanitizeTempPrefix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, want string
 	}{

@@ -215,6 +215,7 @@ func TestComputeExecBinaryCacheInputs(t *testing.T) {
 // save/lookup + executeExecBinary end-to-end. A per-run nonce in a leading comment
 // guarantees the first run is a genuine miss regardless of prior cache state.
 func TestExecCacheHitEndToEnd(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	nonce := time.Now().UnixNano()

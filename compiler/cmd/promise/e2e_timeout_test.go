@@ -73,6 +73,7 @@ func writeInfLoopE2E(t *testing.T, dir, name, timeoutAnnot, unique string) strin
 // "FAIL (timeout) ..." line (which would propagate into the gate's Test
 // identity field as a phantom ledger entry).
 func TestE2ETimeoutEmitsCanonicalTimeoutLine(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir, err := os.MkdirTemp("", "e2e_timeout_")
@@ -125,6 +126,7 @@ func TestE2ETimeoutEmitsCanonicalTimeoutLine(t *testing.T) {
 // (tools/build/common/health_report.go) then maps to outcome=TIMEOUT with
 // stable file-level identity. The trivial sibling must still pass.
 func TestE2ETimeoutParentClassifiesAsTimedOut(t *testing.T) {
+	t.Parallel()
 	promiseBin := locatePromiseBin(t)
 
 	dir, err := os.MkdirTemp("", "e2e_timeout_parent_")

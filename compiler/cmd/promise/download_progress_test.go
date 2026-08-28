@@ -7,6 +7,7 @@ import (
 )
 
 func TestPrettyLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in, want string
 	}{
@@ -24,6 +25,7 @@ func TestPrettyLabel(t *testing.T) {
 }
 
 func TestMBProgress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		bytes int64
 		want  string
@@ -42,6 +44,7 @@ func TestMBProgress(t *testing.T) {
 // TestTTYProgressRender drives the sink the way blobstore would and asserts the
 // final line carries the label, a percentage, and ends with a newline (Done).
 func TestTTYProgressRender(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	p := newTTYProgress(&buf)
 	p.Start("llvm-opt", 1000)
@@ -67,6 +70,7 @@ func TestTTYProgressRender(t *testing.T) {
 
 // TestTTYProgressUnknownTotal exercises the total<=0 branch (no percentage).
 func TestTTYProgressUnknownTotal(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	p := newTTYProgress(&buf)
 	p.Start("archive foo.tar.xz", -1)
@@ -85,6 +89,7 @@ func TestTTYProgressUnknownTotal(t *testing.T) {
 // TestIsCharDevice confirms a pipe (the read end) is not treated as a terminal,
 // so download prompts/progress stay off in scripts and pipelines.
 func TestIsCharDevice(t *testing.T) {
+	t.Parallel()
 	rd, wr, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)

@@ -8,6 +8,7 @@ import (
 )
 
 func TestTimeoutConfigCacheString(t *testing.T) {
+	t.Parallel()
 	cfg1 := testTimeoutConfig{
 		defaultTimeout: 60 * time.Second,
 		scale:          1.0,
@@ -95,6 +96,7 @@ func TestComputeTestFileCacheKeyIncludesTimeout(t *testing.T) {
 }
 
 func TestComputeParentTimeout(t *testing.T) {
+	t.Parallel()
 	// Default compile timeout: 10 minutes for native, 15 minutes for WASM.
 	defaultCfg := testTimeoutConfig{defaultTimeout: 60 * time.Second, compileTimeout: 10 * time.Minute}
 

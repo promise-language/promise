@@ -13,6 +13,7 @@ import (
 // extractCrashReason
 
 func TestExtractCrashReason_PanicOnStderr(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("", "panic: assertion failed: expected 3, got 4\ngoroutine 1:\n", nil)
 	if reason != "panic: assertion failed: expected 3, got 4" {
 		t.Errorf("got %q", reason)
@@ -20,6 +21,7 @@ func TestExtractCrashReason_PanicOnStderr(t *testing.T) {
 }
 
 func TestExtractCrashReason_PanicOnStdout(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("PASS (0.001s) test_foo\npanic: bad thing\n", "", nil)
 	if reason != "panic: bad thing" {
 		t.Errorf("got %q", reason)
@@ -27,6 +29,7 @@ func TestExtractCrashReason_PanicOnStdout(t *testing.T) {
 }
 
 func TestExtractCrashReason_PreferStderr(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("panic: stdout msg\n", "panic: stderr msg\n", nil)
 	if reason != "panic: stderr msg" {
 		t.Errorf("expected stderr panic to be preferred, got %q", reason)
@@ -34,6 +37,7 @@ func TestExtractCrashReason_PreferStderr(t *testing.T) {
 }
 
 func TestExtractCrashReason_LongPanicTruncated(t *testing.T) {
+	t.Parallel()
 	longMsg := "panic: " + strings.Repeat("x", 200)
 	reason := extractCrashReason("", longMsg+"\n", nil)
 	if len(reason) > 120 {
@@ -45,6 +49,7 @@ func TestExtractCrashReason_LongPanicTruncated(t *testing.T) {
 }
 
 func TestExtractCrashReason_FatalError(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("", "fatal error: runtime panic\n", nil)
 	if reason != "fatal error: runtime panic" {
 		t.Errorf("got %q", reason)
@@ -52,6 +57,7 @@ func TestExtractCrashReason_FatalError(t *testing.T) {
 }
 
 func TestExtractCrashReason_NoContext(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("", "", nil)
 	if reason != "crash" {
 		t.Errorf("got %q", reason)
@@ -59,6 +65,7 @@ func TestExtractCrashReason_NoContext(t *testing.T) {
 }
 
 func TestExtractCrashReason_NoPanicWithOutput(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("some output\n", "some stderr\n", nil)
 	if reason != "crash" {
 		t.Errorf("got %q", reason)
@@ -66,6 +73,7 @@ func TestExtractCrashReason_NoPanicWithOutput(t *testing.T) {
 }
 
 func TestExtractCrashReason_ExitCodeFallback(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -79,6 +87,7 @@ func TestExtractCrashReason_ExitCodeFallback(t *testing.T) {
 }
 
 func TestExtractCrashReason_SignalOnly(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -92,6 +101,7 @@ func TestExtractCrashReason_SignalOnly(t *testing.T) {
 }
 
 func TestExtractCrashReason_PanicPlusSignal(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -111,6 +121,7 @@ func TestExtractCrashReason_PanicPlusSignal(t *testing.T) {
 // structurally instead of falling through to a bare "exit code 134".
 
 func TestExtractCrashReason_MemoryLimitStderr(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("", "fatal: memory limit exceeded\n", nil)
 	if reason != "memory limit exceeded" {
 		t.Errorf("got %q", reason)
@@ -118,6 +129,7 @@ func TestExtractCrashReason_MemoryLimitStderr(t *testing.T) {
 }
 
 func TestExtractCrashReason_MemoryLimitStdout(t *testing.T) {
+	t.Parallel()
 	reason := extractCrashReason("pass (0.001s) test_a\nfatal: memory limit exceeded\n", "", nil)
 	if reason != "memory limit exceeded" {
 		t.Errorf("got %q", reason)
@@ -125,6 +137,7 @@ func TestExtractCrashReason_MemoryLimitStdout(t *testing.T) {
 }
 
 func TestExtractCrashReason_MemoryLimitPreferredOverExitCode(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("exit-code tests require Unix")
 	}
@@ -141,18 +154,21 @@ func TestExtractCrashReason_MemoryLimitPreferredOverExitCode(t *testing.T) {
 // extractSignal
 
 func TestExtractSignal_NilError(t *testing.T) {
+	t.Parallel()
 	if sig := extractSignal(nil); sig != "" {
 		t.Errorf("got %q", sig)
 	}
 }
 
 func TestExtractSignal_NonExitError(t *testing.T) {
+	t.Parallel()
 	if sig := extractSignal(fmt.Errorf("random")); sig != "" {
 		t.Errorf("got %q", sig)
 	}
 }
 
 func TestExtractSignal_NormalExit(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -164,6 +180,7 @@ func TestExtractSignal_NormalExit(t *testing.T) {
 }
 
 func TestExtractSignal_RealSignal(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -177,6 +194,7 @@ func TestExtractSignal_RealSignal(t *testing.T) {
 // signalName
 
 func TestSignalName_Known(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		sig  syscall.Signal
 		want string
@@ -197,6 +215,7 @@ func TestSignalName_Known(t *testing.T) {
 }
 
 func TestSignalName_Unknown(t *testing.T) {
+	t.Parallel()
 	// Signal 63 is not in the known list on any platform
 	got := signalName(syscall.Signal(63))
 	if !strings.Contains(got, "63") {
@@ -210,18 +229,21 @@ func TestSignalName_Unknown(t *testing.T) {
 // extractExitCode
 
 func TestExtractExitCode_NilError(t *testing.T) {
+	t.Parallel()
 	if code := extractExitCode(nil); code != -1 {
 		t.Errorf("got %d", code)
 	}
 }
 
 func TestExtractExitCode_NonExitError(t *testing.T) {
+	t.Parallel()
 	if code := extractExitCode(fmt.Errorf("random")); code != -1 {
 		t.Errorf("got %d", code)
 	}
 }
 
 func TestExtractExitCode_RealExitError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("exit code 42 test requires Unix sh")
 	}
@@ -233,6 +255,7 @@ func TestExtractExitCode_RealExitError(t *testing.T) {
 }
 
 func TestExtractExitCode_SignalKill(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -247,6 +270,7 @@ func TestExtractExitCode_SignalKill(t *testing.T) {
 // buildCrashContext
 
 func TestBuildCrashContext_EmptyStderr(t *testing.T) {
+	t.Parallel()
 	ctx := buildCrashContext("", nil)
 	if ctx != "crash (no context available)" {
 		t.Errorf("got %q", ctx)
@@ -254,6 +278,7 @@ func TestBuildCrashContext_EmptyStderr(t *testing.T) {
 }
 
 func TestBuildCrashContext_WithStderr(t *testing.T) {
+	t.Parallel()
 	ctx := buildCrashContext("panic: bad thing\ngoroutine 1 [running]:\nmain.foo()\n", nil)
 	if !strings.Contains(ctx, "stderr:") {
 		t.Errorf("expected stderr section, got %q", ctx)
@@ -267,6 +292,7 @@ func TestBuildCrashContext_WithStderr(t *testing.T) {
 }
 
 func TestBuildCrashContext_WithExitCode(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("exit code test requires Unix sh")
 	}
@@ -282,6 +308,7 @@ func TestBuildCrashContext_WithExitCode(t *testing.T) {
 }
 
 func TestBuildCrashContext_WithSignal(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("signal tests require Unix")
 	}
@@ -303,6 +330,7 @@ func TestBuildCrashContext_WithSignal(t *testing.T) {
 // lastNLines
 
 func TestLastNLines_Basic(t *testing.T) {
+	t.Parallel()
 	result := lastNLines("line1\nline2\nline3\nline4\nline5\n", 3)
 	if result != "line3\nline4\nline5" {
 		t.Errorf("got %q", result)
@@ -310,6 +338,7 @@ func TestLastNLines_Basic(t *testing.T) {
 }
 
 func TestLastNLines_FewLines(t *testing.T) {
+	t.Parallel()
 	result := lastNLines("line1\nline2\n", 10)
 	if result != "line1\nline2" {
 		t.Errorf("got %q", result)
@@ -317,6 +346,7 @@ func TestLastNLines_FewLines(t *testing.T) {
 }
 
 func TestLastNLines_Empty(t *testing.T) {
+	t.Parallel()
 	if r := lastNLines("", 5); r != "" {
 		t.Errorf("got %q", r)
 	}
@@ -326,6 +356,7 @@ func TestLastNLines_Empty(t *testing.T) {
 }
 
 func TestLastNLines_SkipsEmptyLines(t *testing.T) {
+	t.Parallel()
 	result := lastNLines("line1\n\n\nline2\n\nline3\n", 2)
 	if result != "line2\nline3" {
 		t.Errorf("got %q", result)
@@ -333,6 +364,7 @@ func TestLastNLines_SkipsEmptyLines(t *testing.T) {
 }
 
 func TestLastNLines_ExactCount(t *testing.T) {
+	t.Parallel()
 	result := lastNLines("a\nb\nc\n", 3)
 	if result != "a\nb\nc" {
 		t.Errorf("got %q", result)
@@ -340,6 +372,7 @@ func TestLastNLines_ExactCount(t *testing.T) {
 }
 
 func TestLastNLines_SingleLine(t *testing.T) {
+	t.Parallel()
 	result := lastNLines("only\n", 5)
 	if result != "only" {
 		t.Errorf("got %q", result)
@@ -349,6 +382,7 @@ func TestLastNLines_SingleLine(t *testing.T) {
 // indent
 
 func TestIndent_Basic(t *testing.T) {
+	t.Parallel()
 	result := indent("line1\nline2\nline3", "  ")
 	if result != "  line1\n  line2\n  line3" {
 		t.Errorf("got %q", result)
@@ -356,6 +390,7 @@ func TestIndent_Basic(t *testing.T) {
 }
 
 func TestIndent_SingleLine(t *testing.T) {
+	t.Parallel()
 	result := indent("hello", ">>> ")
 	if result != ">>> hello" {
 		t.Errorf("got %q", result)
@@ -365,6 +400,7 @@ func TestIndent_SingleLine(t *testing.T) {
 // testStats methods
 
 func TestTestStats_Total(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 3, fails: 2}
 	if st.total() != 5 {
 		t.Errorf("got %d", st.total())
@@ -372,6 +408,7 @@ func TestTestStats_Total(t *testing.T) {
 }
 
 func TestTestStats_PassRate(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 3, fails: 1}
 	if got := st.passRate(); got != 0.75 {
 		t.Errorf("got %f", got)
@@ -379,6 +416,7 @@ func TestTestStats_PassRate(t *testing.T) {
 }
 
 func TestTestStats_PassRate_ZeroTotal(t *testing.T) {
+	t.Parallel()
 	st := &testStats{}
 	if got := st.passRate(); got != 1.0 {
 		t.Errorf("zero total should return 1.0, got %f", got)
@@ -386,6 +424,7 @@ func TestTestStats_PassRate_ZeroTotal(t *testing.T) {
 }
 
 func TestTestStats_Mean(t *testing.T) {
+	t.Parallel()
 	st := &testStats{timings: []float64{1.0, 2.0, 3.0}}
 	if got := st.mean(); got != 2.0 {
 		t.Errorf("got %f", got)
@@ -393,6 +432,7 @@ func TestTestStats_Mean(t *testing.T) {
 }
 
 func TestTestStats_Mean_Empty(t *testing.T) {
+	t.Parallel()
 	st := &testStats{}
 	if got := st.mean(); got != 0 {
 		t.Errorf("got %f", got)
@@ -400,6 +440,7 @@ func TestTestStats_Mean_Empty(t *testing.T) {
 }
 
 func TestTestStats_Stddev(t *testing.T) {
+	t.Parallel()
 	// Values: 2, 4, 4, 4, 5, 5, 7, 9 → mean=5, stddev=2
 	st := &testStats{timings: []float64{2, 4, 4, 4, 5, 5, 7, 9}}
 	got := st.stddev()
@@ -409,6 +450,7 @@ func TestTestStats_Stddev(t *testing.T) {
 }
 
 func TestTestStats_Stddev_SingleTiming(t *testing.T) {
+	t.Parallel()
 	st := &testStats{timings: []float64{5.0}}
 	if got := st.stddev(); got != 0 {
 		t.Errorf("single timing should have stddev 0, got %f", got)
@@ -416,6 +458,7 @@ func TestTestStats_Stddev_SingleTiming(t *testing.T) {
 }
 
 func TestTestStats_Stddev_Empty(t *testing.T) {
+	t.Parallel()
 	st := &testStats{}
 	if got := st.stddev(); got != 0 {
 		t.Errorf("got %f", got)
@@ -423,6 +466,7 @@ func TestTestStats_Stddev_Empty(t *testing.T) {
 }
 
 func TestTestStats_Cov(t *testing.T) {
+	t.Parallel()
 	// mean=1.0, stddev=0.5 → cov=0.5
 	st := &testStats{timings: []float64{0.5, 1.5}}
 	got := st.cov()
@@ -432,6 +476,7 @@ func TestTestStats_Cov(t *testing.T) {
 }
 
 func TestTestStats_Cov_ZeroMean(t *testing.T) {
+	t.Parallel()
 	st := &testStats{}
 	if got := st.cov(); got != 0 {
 		t.Errorf("got %f", got)
@@ -439,6 +484,7 @@ func TestTestStats_Cov_ZeroMean(t *testing.T) {
 }
 
 func TestTestStats_MinTime(t *testing.T) {
+	t.Parallel()
 	st := &testStats{timings: []float64{3.0, 1.0, 2.0}}
 	if got := st.minTime(); got != 1.0 {
 		t.Errorf("got %f", got)
@@ -446,6 +492,7 @@ func TestTestStats_MinTime(t *testing.T) {
 }
 
 func TestTestStats_MinTime_Empty(t *testing.T) {
+	t.Parallel()
 	st := &testStats{}
 	if got := st.minTime(); got != 0 {
 		t.Errorf("got %f", got)
@@ -453,6 +500,7 @@ func TestTestStats_MinTime_Empty(t *testing.T) {
 }
 
 func TestTestStats_MaxTime(t *testing.T) {
+	t.Parallel()
 	st := &testStats{timings: []float64{1.0, 3.0, 2.0}}
 	if got := st.maxTime(); got != 3.0 {
 		t.Errorf("got %f", got)
@@ -460,6 +508,7 @@ func TestTestStats_MaxTime(t *testing.T) {
 }
 
 func TestTestStats_MaxTime_Empty(t *testing.T) {
+	t.Parallel()
 	st := &testStats{}
 	if got := st.maxTime(); got != 0 {
 		t.Errorf("got %f", got)
@@ -467,6 +516,7 @@ func TestTestStats_MaxTime_Empty(t *testing.T) {
 }
 
 func TestTestStats_IsHighVariance(t *testing.T) {
+	t.Parallel()
 	// Needs: total >= 5, mean > 0.005, cov > 1.0
 	st := &testStats{
 		passes:  5,
@@ -478,6 +528,7 @@ func TestTestStats_IsHighVariance(t *testing.T) {
 }
 
 func TestTestStats_IsHighVariance_TooFewRuns(t *testing.T) {
+	t.Parallel()
 	st := &testStats{
 		passes:  3,
 		timings: []float64{0.001, 0.001, 0.1},
@@ -488,6 +539,7 @@ func TestTestStats_IsHighVariance_TooFewRuns(t *testing.T) {
 }
 
 func TestTestStats_IsHighVariance_LowMean(t *testing.T) {
+	t.Parallel()
 	// Sub-millisecond tests should not flag as high variance
 	st := &testStats{
 		passes:  5,
@@ -499,6 +551,7 @@ func TestTestStats_IsHighVariance_LowMean(t *testing.T) {
 }
 
 func TestTestStats_IsHighVariance_LowCoV(t *testing.T) {
+	t.Parallel()
 	// Consistent timings → CoV < 1.0
 	st := &testStats{
 		passes:  5,
@@ -522,6 +575,7 @@ func makeFileStats(tests ...testStats) *fileStats {
 }
 
 func TestFileStats_HasFailures(t *testing.T) {
+	t.Parallel()
 	fs := makeFileStats(
 		testStats{name: "a", passes: 5},
 		testStats{name: "b", passes: 3, fails: 1},
@@ -532,6 +586,7 @@ func TestFileStats_HasFailures(t *testing.T) {
 }
 
 func TestFileStats_HasFailures_AllPass(t *testing.T) {
+	t.Parallel()
 	fs := makeFileStats(
 		testStats{name: "a", passes: 5},
 		testStats{name: "b", passes: 3},
@@ -542,6 +597,7 @@ func TestFileStats_HasFailures_AllPass(t *testing.T) {
 }
 
 func TestFileStats_HasHighVariance(t *testing.T) {
+	t.Parallel()
 	fs := makeFileStats(
 		testStats{name: "a", passes: 5, timings: []float64{0.001, 0.001, 0.001, 0.001, 0.1}},
 	)
@@ -551,6 +607,7 @@ func TestFileStats_HasHighVariance(t *testing.T) {
 }
 
 func TestFileStats_RecalcInterval(t *testing.T) {
+	t.Parallel()
 	// With failures: always 1
 	fs := makeFileStats(testStats{name: "a", passes: 5, fails: 1})
 	fs.runs = 100
@@ -592,6 +649,7 @@ func TestFileStats_RecalcInterval(t *testing.T) {
 // collectTestsByCategory
 
 func TestCollectTestsByCategory(t *testing.T) {
+	t.Parallel()
 	files := []*fileStats{
 		makeFileStats(
 			testStats{name: "flaky1", passes: 5, fails: 2},
@@ -615,6 +673,7 @@ func TestCollectTestsByCategory(t *testing.T) {
 }
 
 func TestCollectTestsByCategory_HighVarSort(t *testing.T) {
+	t.Parallel()
 	// Two high-variance tests: sorted by highest CoV first.
 	// isHighVariance requires: total >= 5, mean > 0.005, cov > 1.0
 	files := []*fileStats{
@@ -638,6 +697,7 @@ func TestCollectTestsByCategory_HighVarSort(t *testing.T) {
 }
 
 func TestCollectTestsByCategory_SortOrder(t *testing.T) {
+	t.Parallel()
 	files := []*fileStats{
 		makeFileStats(
 			testStats{name: "better", passes: 8, fails: 2},   // 80% pass
@@ -661,6 +721,7 @@ func TestCollectTestsByCategory_SortOrder(t *testing.T) {
 // failSummary
 
 func TestFailSummary_NoFails(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 5}
 	if got := st.failSummary(); got != "" {
 		t.Errorf("got %q", got)
@@ -668,6 +729,7 @@ func TestFailSummary_NoFails(t *testing.T) {
 }
 
 func TestFailSummary_TimeoutOnly(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 3, fails: 2, timeouts: 2, lastErr: "timeout"}
 	summary := st.failSummary()
 	if !strings.Contains(summary, "2 timeout") {
@@ -682,6 +744,7 @@ func TestFailSummary_TimeoutOnly(t *testing.T) {
 }
 
 func TestFailSummary_MixedTimeoutAndFail(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 5, fails: 3, timeouts: 1, lastErr: "SIGSEGV"}
 	summary := st.failSummary()
 	if !strings.Contains(summary, "1 timeout") {
@@ -696,6 +759,7 @@ func TestFailSummary_MixedTimeoutAndFail(t *testing.T) {
 }
 
 func TestFailSummary_TestFailed(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 8, fails: 1, lastErr: "test failed"}
 	summary := st.failSummary()
 	if !strings.Contains(summary, "(test failed)") {
@@ -704,6 +768,7 @@ func TestFailSummary_TestFailed(t *testing.T) {
 }
 
 func TestFailSummary_CrashReason(t *testing.T) {
+	t.Parallel()
 	st := &testStats{passes: 8, fails: 2, lastErr: "panic: null pointer (SIGSEGV)"}
 	summary := st.failSummary()
 	if !strings.Contains(summary, "last: panic: null pointer") {
@@ -714,12 +779,14 @@ func TestFailSummary_CrashReason(t *testing.T) {
 // failReason
 
 func TestFailReason_EmptyOutput(t *testing.T) {
+	t.Parallel()
 	if got := failReason("expected stuff", ""); got != "no output" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestFailReason_LineDiff(t *testing.T) {
+	t.Parallel()
 	got := failReason("hello\nworld", "hello\nearth")
 	if !strings.Contains(got, "line 2") {
 		t.Errorf("expected line 2, got %q", got)
@@ -730,6 +797,7 @@ func TestFailReason_LineDiff(t *testing.T) {
 }
 
 func TestFailReason_LineDiff_LongLine(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("x", 100)
 	got := failReason("short", long)
 	if !strings.Contains(got, "...") {
@@ -738,6 +806,7 @@ func TestFailReason_LineDiff_LongLine(t *testing.T) {
 }
 
 func TestFailReason_DifferentLineCount(t *testing.T) {
+	t.Parallel()
 	got := failReason("a\nb\nc", "a\nb")
 	if !strings.Contains(got, "expected 3 lines, got 2") {
 		t.Errorf("got %q", got)
@@ -745,6 +814,7 @@ func TestFailReason_DifferentLineCount(t *testing.T) {
 }
 
 func TestFailReason_IdenticalContent(t *testing.T) {
+	t.Parallel()
 	// Lines match but something is different (shouldn't happen, but edge case)
 	got := failReason("same", "same")
 	if got != "output mismatch" {
@@ -755,6 +825,7 @@ func TestFailReason_IdenticalContent(t *testing.T) {
 // fmtDuration
 
 func TestFmtDuration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input float64
 		want  string
@@ -780,18 +851,21 @@ func TestFmtDuration(t *testing.T) {
 // commonDir
 
 func TestCommonDir_SingleFile(t *testing.T) {
+	t.Parallel()
 	if got := commonDir([]string{"/a/b/c.pr"}); got != "" {
 		t.Errorf("single file should return empty, got %q", got)
 	}
 }
 
 func TestCommonDir_Empty(t *testing.T) {
+	t.Parallel()
 	if got := commonDir(nil); got != "" {
 		t.Errorf("nil should return empty, got %q", got)
 	}
 }
 
 func TestCommonDir_SameDir(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		got := commonDir([]string{`C:\tmp\tests\a.pr`, `C:\tmp\tests\b.pr`})
 		if got != `C:\tmp\tests` {
@@ -806,6 +880,7 @@ func TestCommonDir_SameDir(t *testing.T) {
 }
 
 func TestCommonDir_DifferentDirs(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		got := commonDir([]string{`C:\tmp\tests\e2e\a.pr`, `C:\tmp\tests\std\b.pr`})
 		if got != `C:\tmp\tests` {
@@ -820,6 +895,7 @@ func TestCommonDir_DifferentDirs(t *testing.T) {
 }
 
 func TestCommonDir_NoCommonPrefix(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		got := commonDir([]string{`C:\home\user\a.pr`, `C:\opt\tests\b.pr`})
 		if got != `C:\` {

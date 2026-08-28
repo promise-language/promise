@@ -7445,6 +7445,188 @@ func TestStructuralCovariantReturnMissingMethodFails(t *testing.T) {
 	expectError(t, errs, "cannot assign")
 }
 
+// --- Covariant return with generic Instance (T1735) ---
+
+func TestStructuralCovariantReturnGenericInstance(t *testing.T) {
+	checkOK(t, `
+		type Iter[T] `+"`structural"+` {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			iter() Iter[T] `+"`abstract;"+`
+		}
+		type IntIter {
+			int _n;
+			next(~this) int? { if this._n >= 3 { return none; } this._n = this._n + 1; return this._n; }
+		}
+		type Nums {
+			iter() IntIter { return IntIter(_n: 0); }
+		}
+		main() {
+			Streamable[int] s = Nums();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnGenericInstanceFailable(t *testing.T) {
+	checkOK(t, `
+		type Iter[T] `+"`structural"+` {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			open!() Iter[T] `+"`abstract;"+`
+		}
+		type IntIter {
+			int _n;
+			next(~this) int? { if this._n >= 3 { return none; } this._n = this._n + 1; return this._n; }
+		}
+		type Source {
+			open!() IntIter { return IntIter(_n: 0); }
+		}
+		main() {
+			Streamable[int] s = Source();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnGenericInstanceOptional(t *testing.T) {
+	checkOK(t, `
+		type Iter[T] `+"`structural"+` {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			find() Iter[T]? `+"`abstract;"+`
+		}
+		type IntIter {
+			int _n;
+			next(~this) int? { if this._n >= 3 { return none; } this._n = this._n + 1; return this._n; }
+		}
+		type Source {
+			find() IntIter { return IntIter(_n: 0); }
+		}
+		main() {
+			Streamable[int] s = Source();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnGenericInstanceMissingMethodFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Iter[T] `+"`structural"+` {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			iter() Iter[T] `+"`abstract;"+`
+		}
+		type BadIter {
+			step(~this) int? { return none; }
+		}
+		type Nums {
+			iter() BadIter { return BadIter(); }
+		}
+		main() {
+			Streamable[int] s = Nums();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+// --- Covariant return with generic Instance: concrete returning Optional (T1735) ---
+
+func TestStructuralCovariantReturnGenericInstanceOptionalBoth(t *testing.T) {
+	// Both concrete and interface return Optional of a generic instance
+	checkOK(t, `
+		type Iter[T] `+"`structural"+` {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			find() Iter[T]? `+"`abstract;"+`
+		}
+		type IntIter {
+			int _n;
+			next(~this) int? { if this._n >= 3 { return none; } this._n = this._n + 1; return this._n; }
+		}
+		type Source {
+			find() IntIter? { return IntIter(_n: 0); }
+		}
+		main() {
+			Streamable[int] s = Source();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnGenericInstanceNonStructuralFails(t *testing.T) {
+	// Covariant return fails when the generic interface's origin is not structural
+	errs := checkErrs(t, `
+		type Iter[T] {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			iter() Iter[T] `+"`abstract;"+`
+		}
+		type IntIter is Iter[int] {
+			int _n;
+			next(~this) int? { if this._n >= 3 { return none; } this._n = this._n + 1; return this._n; }
+		}
+		type Nums {
+			iter() IntIter { return IntIter(_n: 0); }
+		}
+		main() {
+			Streamable[int] s = Nums();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralCovariantReturnGenericInstanceWrongElementType(t *testing.T) {
+	// Concrete iterator satisfies Iterator[string], but we assign to Stream[int]
+	errs := checkErrs(t, `
+		type Iter[T] `+"`structural"+` {
+			next(~this) T? `+"`abstract;"+`
+		}
+		type Streamable[T] `+"`structural"+` {
+			iter() Iter[T] `+"`abstract;"+`
+		}
+		type StrIter {
+			next(~this) string? { return none; }
+		}
+		type Strs {
+			iter() StrIter { return StrIter(); }
+		}
+		main() {
+			Streamable[int] s = Strs();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralCovariantReturnGenericInstanceConcreteIsInstance(t *testing.T) {
+	// Concrete type returning a generic instance (Box[int]) as covariant return
+	// for a non-generic interface method returning Wrapper[int]. ImplementsInst
+	// (T1772) substitutes the CONCRETE type's own params as well as the
+	// interface's, so Box[int].value resolves to int and matches Wrapper[int] —
+	// the assignment is accepted.
+	errs := checkErrs(t, `
+		type Wrapper[T] `+"`structural"+` {
+			get value T `+"`abstract;"+`
+		}
+		type Provider `+"`structural"+` {
+			provide() Wrapper[int] `+"`abstract;"+`
+		}
+		type Box[T] {
+			T _val;
+			get value T { return this._val; }
+		}
+		type IntProvider {
+			provide() Box[int] { return Box[int](_val: 42); }
+		}
+		main() {
+			Provider p = IntProvider();
+		}
+	`)
+	expectNoErrors(t, errs)
+}
+
 // --- Stage 9: Reserved std name tests ---
 
 func TestReservedStdNameFunc(t *testing.T) {

@@ -110,16 +110,16 @@ func TestT1350AcceptVectorIterZip(t *testing.T) {
 
 func TestT1350AcceptUserTypeIterMethod(t *testing.T) {
 	// Guard against over-rejection: the reject keys off AsStream (only stream[T]
-	// Instances), NOT the method name. A user type with its own `iter()` method
-	// must stay accepted even though the callee field is literally `iter`.
+	// Instances), NOT the method name. A user type with its own method returning
+	// a collection must stay accepted.
 	checkOK(t, `
 		type Box {
 			int v;
-			iter() int[] { return [this.v]; }
+			items() int[] { return [this.v]; }
 		}
 		main() {
 			b := Box(v: 7);
-			int[] r = b.iter();
+			int[] r = b.items();
 		}
 	`)
 }

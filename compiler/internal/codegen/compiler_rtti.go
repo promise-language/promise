@@ -105,7 +105,14 @@ func (c *Compiler) computeEnumLayouts(file *ast.File) {
 // lookupTypeLayout finds the layout for a user type, handling Instance and monoCtx.
 func (c *Compiler) lookupTypeLayout(typ types.Type) *TypeDeclLayout {
 	if inst, ok := typ.(*types.Instance); ok {
-		return c.monoLayouts[monoName(inst)]
+		name := monoName(inst)
+		if layout, ok := c.monoLayouts[name]; ok {
+			return layout
+		}
+		// T1735: Lazy mono layout computation for instances discovered during
+		// view adapter synthesis (covariant return to generic structural interface).
+		// The mono collection phase may not have seen these.
+		return c.ensureMonoLayout(inst)
 	}
 	if n := extractNamed(typ); n != nil {
 		// Inside a mono method body, the origin Named maps to the mono layout
@@ -117,6 +124,29 @@ func (c *Compiler) lookupTypeLayout(typ types.Type) *TypeDeclLayout {
 		return c.layouts[n]
 	}
 	return nil
+}
+
+// ensureMonoLayout lazily computes the mono layout for a generic type instance
+// that wasn't discovered during the normal mono collection phase. This happens
+// when a covariant return to a generic structural interface (T1735) triggers
+// default method synthesis that references internal types like _FnIter[int].
+func (c *Compiler) ensureMonoLayout(inst *types.Instance) *TypeDeclLayout {
+	named, ok := inst.Origin().(*types.Named)
+	if !ok {
+		return nil
+	}
+	if len(named.TypeParams()) == 0 {
+		return nil
+	}
+	name := monoName(inst)
+	subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	if subst == nil {
+		return nil
+	}
+	layout := computeMonoUserTypeLayout(c.module, named, name, subst,
+		c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+	c.monoLayouts[name] = layout
+	return layout
 }
 
 // lookupEnumLayout finds the layout for an enum, handling Instance and monoCtx.

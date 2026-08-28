@@ -825,18 +825,38 @@ func (c *Compiler) defineTypeIsFunc() {
 // is viewed through a non-first-parent interface (where slot layout differs).
 // fromType is the full concrete type (may be *types.Instance for generic types),
 // needed to resolve monomorphized parent method names.
-func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType types.Type) *ir.Global {
+// viewType (optional) is the full view type — when it is an *types.Instance, its
+// type args are used for type substitution during default method synthesis.
+func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType types.Type, viewTypes ...types.Type) *ir.Global {
 	// Build cache key that distinguishes mono instances (Entity[int] vs Entity[string]).
 	concreteCacheKey := concrete.Obj().Name()
 	if inst, ok := fromType.(*types.Instance); ok {
 		concreteCacheKey = monoName(inst)
 	}
-	key := viewVtableKey{concreteCacheKey, view}
+	viewCacheKey := view.Obj().Name()
+	var viewInst *types.Instance
+	if len(viewTypes) > 0 {
+		if inst, ok := viewTypes[0].(*types.Instance); ok {
+			viewInst = inst
+			viewCacheKey = monoName(inst)
+		}
+	}
+	key := viewVtableKey{concreteCacheKey, viewCacheKey}
 	if vt, ok := c.viewVtables[key]; ok {
 		return vt
 	}
 
-	// Synthesize default methods for this (concrete, view) pair
+	// T1735: When the view is a generic instance, set up typeSubst for the
+	// entire vtable generation so default method bodies, adapter thunks, and
+	// covariant return coercions all resolve type parameters correctly.
+	var savedSubst map[*types.TypeParam]types.Type
+	if viewInst != nil && len(view.TypeParams()) > 0 {
+		savedSubst = c.typeSubst
+		c.typeSubst = types.BuildSubstMap(view.TypeParams(), viewInst.TypeArgs())
+		defer func() { c.typeSubst = savedSubst }()
+	}
+
+	// Synthesize default methods for this (concrete, view) pair.
 	if view.IsStructural() {
 		c.synthesizeDefaultMethods(concrete, view)
 	}
@@ -890,7 +910,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 	}
 	arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
 	init := constant.NewArray(arrayType, entries...)
-	name := fmt.Sprintf("promise_vtable_%s_as_%s", concreteCacheKey, view.Obj().Name())
+	name := fmt.Sprintf("promise_vtable_%s_as_%s", concreteCacheKey, viewCacheKey)
 	global := c.module.NewGlobalDef(name, init)
 	global.Immutable = true
 	c.recordNullVtableSlots(global, nulls)
@@ -1144,6 +1164,10 @@ func (c *Compiler) emitViewMethodAdapter(
 	ifaceCanError := ifaceSig.CanError()
 	concreteResult := concreteSig.Result()
 	ifaceResult := ifaceSig.Result()
+	// T1735: Substitute TypeParams in the interface result for generic views.
+	if c.typeSubst != nil && ifaceResult != nil {
+		ifaceResult = types.Substitute(ifaceResult, c.typeSubst)
+	}
 
 	// Check if we need optional wrapping (T → T?)
 	needsOptWrap := false
@@ -1168,6 +1192,18 @@ func (c *Compiler) emitViewMethodAdapter(
 			}
 			if !types.Identical(concreteRetUnwrapped, ifaceResultUnwrapped) {
 				needsCovariantCoerce = true
+			}
+		}
+		// Covariant return for generic instance (e.g. Iterator[int] → Iterator[int])
+		if ifaceRetInst, ok := ifaceResultUnwrapped.(*types.Instance); ok {
+			if origin, ok := ifaceRetInst.Origin().(*types.Named); ok && origin.IsAbstract() && origin.IsStructural() {
+				concreteRetUnwrapped := concreteResult
+				if concreteOpt, ok := concreteRetUnwrapped.(*types.Optional); ok {
+					concreteRetUnwrapped = concreteOpt.Elem()
+				}
+				if !types.Identical(concreteRetUnwrapped, ifaceResultUnwrapped) {
+					needsCovariantCoerce = true
+				}
 			}
 		}
 	}
@@ -1463,7 +1499,7 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	}
 
 	// Need view-specific vtable (second+ parent or structural satisfaction)
-	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType, toType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 	return c.block.NewInsertValue(val, vtablePtr, 0)
 }

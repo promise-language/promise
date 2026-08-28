@@ -742,9 +742,9 @@ func TestReturnThisRootedClearsBindingDropFlag(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Inner {
 			int n;
-			iter() Inner { return this; }
+			self_ref() Inner { return this; }
 			use_self() int {
-				r := this.iter();
+				r := this.self_ref();
 				return r.n;
 			}
 		}
@@ -755,15 +755,15 @@ func TestReturnThisRootedClearsBindingDropFlag(t *testing.T) {
 	codegentest.AssertContains(t, ir, "this.alias.skip")
 }
 
-// T0347: Chained `r := this.iter().iter()` inside a method also emits the
+// T0347: Chained `r := this.self_ref().self_ref()` inside a method also emits the
 // this-alias clear path (chainOriginExpr walks the chain to ThisExpr root).
 func TestReturnThisRootedChainedClearsBindingDropFlag(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Inner {
 			int n;
-			iter() Inner { return this; }
+			self_ref() Inner { return this; }
 			use_self() int {
-				r := this.iter().iter();
+				r := this.self_ref().self_ref();
 				return r.n;
 			}
 		}

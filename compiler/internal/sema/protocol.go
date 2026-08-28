@@ -418,8 +418,54 @@ func sigMatchesWithWildcards(concrete, abstract *types.Signature, self, replacem
 		if typeMatchesWithWildcard(cResult, aOpt.Elem(), self, replacement) {
 			return true
 		}
+		// Covariant: U satisfies T? where T is structural and U satisfies T (wildcards)
+		if covariantReturnMatchesWithWildcards(cResult, aOpt.Elem()) {
+			return true
+		}
+	}
+	// Covariant return: U satisfies T where T is structural and U satisfies T (wildcards)
+	if covariantReturnMatchesWithWildcards(cResult, aResult) {
+		return true
 	}
 	return false
+}
+
+// covariantReturnMatchesWithWildcards checks whether the concrete return type
+// could satisfy the abstract return type via covariant return, where the abstract
+// return is a structural interface (Named or Instance with structural origin) and
+// the concrete return type satisfies it (with TypeParams as wildcards).
+func covariantReturnMatchesWithWildcards(concreteRet, abstractRet types.Type) bool {
+	// Unwrap optional from concrete side
+	if cOpt, ok := concreteRet.(*types.Optional); ok {
+		concreteRet = cOpt.Elem()
+	}
+	concreteNamed := extractNamedForProtocol(concreteRet)
+	if concreteNamed == nil {
+		return false
+	}
+	switch ar := abstractRet.(type) {
+	case *types.Named:
+		if ar.IsAbstract() && ar.IsStructural() {
+			return couldSatisfyGenericProtocol(concreteNamed, ar)
+		}
+	case *types.Instance:
+		if origin, ok := ar.Origin().(*types.Named); ok && origin.IsAbstract() && origin.IsStructural() {
+			return couldSatisfyGenericProtocol(concreteNamed, origin)
+		}
+	}
+	return false
+}
+
+// extractNamedForProtocol extracts the *Named type from a Type for protocol checking.
+func extractNamedForProtocol(t types.Type) *types.Named {
+	switch x := t.(type) {
+	case *types.Named:
+		return x
+	case *types.Instance:
+		n, _ := x.Origin().(*types.Named)
+		return n
+	}
+	return nil
 }
 
 // typeMatchesWithWildcard reports whether concrete matches abstract, where
@@ -446,6 +492,22 @@ func typeMatchesWithWildcard(concrete, abstract types.Type, self, replacement *t
 				return true
 			}
 		}
+	}
+	// Recurse into Instance: same origin + all type args match (with wildcards).
+	if aInst, ok := abstract.(*types.Instance); ok {
+		if cInst, ok := concrete.(*types.Instance); ok {
+			aOrigin := aInst.Origin()
+			cOrigin := cInst.Origin()
+			if aOrigin == cOrigin && len(aInst.TypeArgs()) == len(cInst.TypeArgs()) {
+				for i, aArg := range aInst.TypeArgs() {
+					if !typeMatchesWithWildcard(cInst.TypeArgs()[i], aArg, self, replacement) {
+						return false
+					}
+				}
+				return true
+			}
+		}
+		return false
 	}
 	// Recurse into Optional.
 	if aOpt, ok := abstract.(*types.Optional); ok {

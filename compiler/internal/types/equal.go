@@ -277,7 +277,6 @@ func subtypeWidens(x, y Type) bool {
 			return true
 		}
 	}
-
 	// Rule 9b (Instance interface): structural satisfaction against a generic
 	// interface instance, e.g. Vector[int] → Stream[int]. (T1772)
 	if yi, ok := y.(*Instance); ok {
@@ -767,12 +766,33 @@ func identicalSignaturesWithSelf(concrete, iface *Signature, self, replacement *
 				return true
 			}
 		}
+		// Covariant for generic instance: concrete U satisfies interface T[...]?
+		if ifaceInst, ok := ifaceOpt.Elem().(*Instance); ok {
+			if origin, ok := ifaceInst.Origin().(*Named); ok && origin.IsAbstract() && origin.IsStructural() {
+				concreteRet := concrete.result
+				if concreteOpt, ok := concreteRet.(*Optional); ok {
+					concreteRet = concreteOpt.Elem()
+				}
+				if ImplementsInst(concreteRet, ifaceInst) {
+					return true
+				}
+			}
+		}
 	}
 	// Covariant return: concrete returning U satisfies interface returning T
 	// where T is a structural interface and U implements T
 	if ifaceNamed, ok := iface.result.(*Named); ok && ifaceNamed.IsAbstract() && ifaceNamed.IsStructural() {
 		if Implements(concrete.result, ifaceNamed) {
 			return true
+		}
+	}
+	// Covariant return for generic instance: concrete returning U satisfies
+	// interface returning T[...] where T is structural and U implements T[...]
+	if ifaceInst, ok := iface.result.(*Instance); ok {
+		if origin, ok := ifaceInst.Origin().(*Named); ok && origin.IsAbstract() && origin.IsStructural() {
+			if ImplementsInst(concrete.result, ifaceInst) {
+				return true
+			}
 		}
 	}
 	return false

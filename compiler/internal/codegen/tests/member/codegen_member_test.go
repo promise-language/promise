@@ -465,12 +465,12 @@ func TestReturnThisWrapsValueStruct(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Counter {
 			int count;
-			iter() Counter { return this; }
+			self_ref() Counter { return this; }
 		}
-		main() { c := Counter(count: 0).iter(); }
+		main() { c := Counter(count: 0).self_ref(); }
 	`)
-	// Counter.iter should return { i8*, i8* } (value struct), not i8*
-	codegentest.AssertContains(t, ir, "define { i8*, i8* } @Counter.iter(i8* %this)")
+	// Counter.self_ref should return { i8*, i8* } (value struct), not i8*
+	codegentest.AssertContains(t, ir, "define { i8*, i8* } @Counter.self_ref(i8* %this)")
 	// The body should insertvalue to build the value struct
 	codegentest.AssertContains(t, ir, "insertvalue { i8*, i8* }")
 }

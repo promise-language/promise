@@ -76,3 +76,130 @@ test_nonfailable_failable_covariant_compiles() `test {
   FailableDataSource s = SafeMemDataSource();
   assert(true, "non-failable satisfies failable with covariant return compiles");
 }
+
+// --- T1735: Covariant return with generic structural instances ---
+
+// A concrete iterator whose next() returns int?
+type NumIter {
+  int _n;
+  next(~this) int? {
+    if this._n >= 3 {
+      return none;
+    }
+    this._n = this._n + 1;
+    return this._n;
+  }
+}
+
+// A type whose iter() returns the concrete NumIter, not Iterator[int]
+type Nums {
+  int _start;
+  iter() NumIter {
+    return NumIter(_n: this._start);
+  }
+}
+
+// T1735: assign to Stream[int] — covariant return through generic instance
+test_covariant_generic_stream_assignment() `test {
+  Stream[int] s = Nums(_start: 0);
+  int sum = 0;
+  for v in s {
+    sum = sum + v;
+  }
+  assert(sum == 6, "covariant generic stream assignment: 1+2+3 = {sum}");
+}
+
+// T1735: iterate through Stream[int] variable with concrete iter() return
+test_covariant_generic_stream_iterate() `test {
+  Nums ns = Nums(_start: 0);
+  // for-in works directly (duck-typed) — this already worked before T1735
+  int sum = 0;
+  for v in ns {
+    sum = sum + v;
+  }
+  assert(sum == 6, "direct for-in on concrete iter() still works");
+
+  // Now assign to Stream[int] and iterate through the interface
+  Stream[int] s = Nums(_start: 0);
+  int sum2 = 0;
+  for v in s {
+    sum2 = sum2 + v;
+  }
+  assert(sum2 == 6, "for-in through Stream[int] with covariant iter()");
+}
+
+// T1735: Stream[string] with concrete string iterator
+type StrIter {
+  string[] _items;
+  int _idx;
+  next(~this) string? {
+    if this._idx >= this._items.len {
+      return none;
+    }
+    string item = this._items[this._idx];
+    this._idx = this._idx + 1;
+    return item;
+  }
+}
+
+type Words {
+  string[] items;
+  iter() StrIter {
+    return StrIter(_items: this.items, _idx: 0);
+  }
+}
+
+test_covariant_generic_stream_string() `test {
+  Stream[string] s = Words(items: ["hello", "world"]);
+  string result = "";
+  for w in s {
+    if result.len > 0 {
+      result = result + " ";
+    }
+    result = result + w;
+  }
+  assert(result == "hello world", "Stream[string] with concrete StrIter: {result}");
+}
+
+// T1735: Multiple iterations on different Stream[T] instances
+test_covariant_generic_stream_multiple() `test {
+  Stream[int] ints = Nums(_start: 0);
+  Stream[string] strs = Words(items: ["a", "b", "c"]);
+
+  int count = 0;
+  for _ in ints {
+    count = count + 1;
+  }
+  for _ in strs {
+    count = count + 1;
+  }
+  assert(count == 6, "multiple stream iterations: 3 ints + 3 strings = {count}");
+}
+
+// T1735: Covariant return preserves data through nested structural interfaces
+type NestedReadable `structural {
+  read_data(int n) string `abstract;
+}
+
+type NestedSource `structural {
+  open_source(string move name) NestedReadable `abstract;
+}
+
+type NestedMemReadable {
+  string data;
+  read_data(int n) string {
+    return this.data;
+  }
+}
+
+type NestedMemSource {
+  open_source(string move name) NestedMemReadable {
+    return NestedMemReadable(data: move name);
+  }
+}
+
+test_covariant_return_preserves_heap_data() `test {
+  NestedSource src = NestedMemSource();
+  NestedReadable r = src.open_source("heap-data-test");
+  assert(r.read_data(0) == "heap-data-test", "covariant return preserves heap field data");
+}

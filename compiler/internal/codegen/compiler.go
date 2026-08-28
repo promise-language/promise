@@ -777,7 +777,7 @@ type closeErrCapture struct {
 // For generic types, concreteName includes type args (e.g., "Entity__int").
 type viewVtableKey struct {
 	concreteName string
-	view         *types.Named
+	viewName     string // view type name, including mono args for instances
 }
 
 // lambdaWriteback tracks a move-captured variable that needs its local value

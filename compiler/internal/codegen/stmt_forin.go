@@ -118,19 +118,26 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		}
 		c.genForInChannel(s, chPtr, elem)
 	} else if elem, ok := types.AsStream(iterableType); ok {
-		genVal := c.genExpr(s.Iterable)
-		// T0284: Failable generator factory called without explicit error handling.
-		// Unwrap the result struct before passing to genForInGenerator.
-		if c.info.FailableExprs[s.Iterable] {
-			genVal = c.unwrapFailableGeneratorResult(genVal, s.Pos())
+		// T1735: When sema recorded ForInIter, the value is a structural Stream[T]
+		// view (not a generator). Use the duck-typed iterable path (iter() + next()).
+		if kind, ok := c.info.ForInKinds[s]; ok && kind == sema.ForInIter {
+			iterVal := c.genExpr(s.Iterable)
+			c.genForInCustomStream(s, iterVal, iterableType)
+		} else {
+			genVal := c.genExpr(s.Iterable)
+			// T0284: Failable generator factory called without explicit error handling.
+			// Unwrap the result struct before passing to genForInGenerator.
+			if c.info.FailableExprs[s.Iterable] {
+				genVal = c.unwrapFailableGeneratorResult(genVal, s.Pos())
+			}
+			// T0088: Generators have their own cleanup (bindingGenerator). Clear all
+			// pending heap temps to prevent __promise_iter_cleanup from running on
+			// generator instances (which have a different layout than _FnIter).
+			for i := range c.heapTemps {
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[i].dropFlag)
+			}
+			c.genForInGenerator(s, genVal, elem)
 		}
-		// T0088: Generators have their own cleanup (bindingGenerator). Clear all
-		// pending heap temps to prevent __promise_iter_cleanup from running on
-		// generator instances (which have a different layout than _FnIter).
-		for i := range c.heapTemps {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[i].dropFlag)
-		}
-		c.genForInGenerator(s, genVal, elem)
 	} else if elem, ok := types.AsRange(iterableType); ok {
 		c.genForInRange(s, elem)
 	} else {

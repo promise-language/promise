@@ -81,33 +81,33 @@ test_chained_self_three_deep() `test {
 type Inner {
   int n;
 
-  iter() Inner {
+  self_ref() Inner {
     return this;
   }
 
   use_self_field() int {
-    r := this.iter();
+    r := this.self_ref();
     return r.n;
   }
 
   use_self_chain() int {
-    r := this.iter().iter();
+    r := this.self_ref().self_ref();
     return r.n;
   }
 }
 
-// T0347: `r := this.iter()` inside a method, then field access on r
+// T0347: `r := this.self_ref()` inside a method, then field access on r
 test_method_internal_iter_then_field() `test {
   i := Inner(n: 11);
   v := i.use_self_field();
-  assert(v == 11, "this.iter() then field access should work");
+  assert(v == 11, "this.self_ref() then field access should work");
 }
 
-// T0347: `r := this.iter().iter()` inside a method
+// T0347: `r := this.self_ref().self_ref()` inside a method
 test_method_internal_chained_iter() `test {
   i := Inner(n: 13);
   v := i.use_self_chain();
-  assert(v == 13, "chained this.iter() inside a method should work");
+  assert(v == 13, "chained this.self_ref() inside a method should work");
 }
 
 // T0347: alias clear must not double-free heap fields.
@@ -140,33 +140,33 @@ test_chained_self_with_vector_field() `test {
 type InnerHeap {
   string name;
 
-  iter() InnerHeap {
+  self_ref() InnerHeap {
     return this;
   }
 
   use_self_string() string {
-    r := this.iter();
+    r := this.self_ref();
     return r.name;
   }
 
   use_chain_string() string {
-    r := this.iter().iter();
+    r := this.self_ref().self_ref();
     return r.name;
   }
 }
 
-// T0347: `r := this.iter()` inside a method with heap field — must not double-free.
+// T0347: `r := this.self_ref()` inside a method with heap field — must not double-free.
 test_method_internal_this_iter_heap() `test {
   i := InnerHeap(name: "promise");
   v := i.use_self_string();
-  assert(v == "promise", "this.iter() preserves heap field");
+  assert(v == "promise", "this.self_ref() preserves heap field");
 }
 
-// T0347: chained `r := this.iter().iter()` inside a method with heap field.
+// T0347: chained `r := this.self_ref().self_ref()` inside a method with heap field.
 test_method_internal_chained_this_iter_heap() `test {
   i := InnerHeap(name: "world");
   v := i.use_chain_string();
-  assert(v == "world", "chained this.iter() preserves heap field");
+  assert(v == "world", "chained this.self_ref() preserves heap field");
 }
 
 // T0582: `return (this);` (paren-wrapped) from a `~this` method must wrap

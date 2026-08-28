@@ -228,7 +228,7 @@ type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator p
   }
 }
 
-type Stream[T] `structural `public `doc("Structural stream interface. Any type with iter() Iterator[T] satisfies this.") {
+type Stream[T] `structural(protocol: true) `public `doc("Structural stream interface. Any type with iter() Iterator[T] satisfies this.") {
   iter() Iterator[T] `abstract;
 }
 

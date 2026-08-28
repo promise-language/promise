@@ -1054,6 +1054,7 @@ Structural satisfaction uses **relaxed signature matching**: the concrete type's
 - **Extra parameters**: the concrete method may have additional parameters beyond those declared in the interface, as long as all extras have default values or are optional types. The compiler generates an **adapter thunk** that supplies defaults/nones for the omitted parameters.
 - **Failable**: a non-failable concrete method satisfies a failable interface method (but not vice versa). The adapter wraps the result in a success failable struct.
 - **Optional return**: a concrete method returning `T` satisfies an interface requiring `T?`. The adapter wraps the result as `some`.
+- **Covariant return**: a concrete method returning `U` satisfies an interface requiring `T` (or `T?`) when `T` is a structural interface and `U` satisfies `T`. The adapter thunk coerces the return value's vtable to the target interface's view. This applies to both non-generic (`Writer`) and generic (`Iterator[int]`) structural return types.
 
 Structural interfaces can also declare **abstract factory methods** — static constructors that enable generic factory patterns:
 
@@ -1102,7 +1103,7 @@ type Parse `structural(protocol: true) `public {
 
 Clause 3 is what keeps the rule off ordinary code. A type whose `format(int width = 80) string` satisfies its own `Formatter` interface has an **explained** name — some protocol accounts for it, and `Format` has no claim. A type whose `parse!(string s)` satisfies nothing named `parse` anywhere has an **unexplained** one, and that is the mistake worth reporting.
 
-The check applies to types and enums alike, and uses the same relaxed matching as structural satisfaction — extra defaulted parameters, non-failable-for-failable, and `T`-for-`T?` all satisfy, and none of them is a near-miss.
+The check applies to types and enums alike, and uses the same relaxed matching as structural satisfaction — extra defaulted parameters, non-failable-for-failable, `T`-for-`T?`, and covariant return all satisfy, and none of them is a near-miss.
 
 ```promise
 // Error: `parse` is reserved by std.Parse, this signature does not satisfy it,
@@ -1152,7 +1153,7 @@ An explicit `is` turns a silent structural match into a checked claim: the compi
 
 **Generated bindings.** `promise bind` generates Promise types from external interface definitions (WIT, WebIDL) whose names are chosen by the source IDL and routinely collide with reserved names — `close`, `read`, `write`, `next`. Renaming them would break fidelity with the IDL, so the generator emits `` `structural(protocol: false) `` on each generated type. The exemption is type-level rather than method-level on purpose: generated bindings are checked into module repositories, and a per-method exemption would silently break them the next time the protocol set grew.
 
-**Which interfaces carry the tag.** Reserving a name is a strong claim, and it is worth making only for a name whose meaning the language is prepared to own. `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, and `Iterator` carry it. `Stream[T]` deliberately does not: returning a concrete iterator from `iter()` is idiomatic and is accepted by `for`-`in`, so `iter` is a name the language does not own.
+**Which interfaces carry the tag.** Reserving a name is a strong claim, and it is worth making only for a name whose meaning the language is prepared to own. `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, `Iterator`, and `Stream` carry it. Returning a concrete iterator from `iter()` is idiomatic — the covariant return relaxation ensures that `iter() ConcreteIter` satisfies `Stream[T]` when `ConcreteIter` satisfies `Iterator[T]`, so `iter` methods are never rejected for using concrete return types.
 
 **Adding the tag is a breaking change.** Because protocols are visible without being imported, tagging an interface that already exists can break code that predates the tag — a program with its own `handle` method stops compiling the day `http.Handler` reserves that name. Adding `protocol: true` to an existing interface is therefore an **epoch-boundary change**, called out in release notes. A newly introduced interface may ship tagged at any time, since no code can have been written against it yet.
 

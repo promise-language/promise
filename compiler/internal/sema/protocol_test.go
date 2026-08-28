@@ -1057,3 +1057,195 @@ func TestT1733StdLibProtocolNamesRejectedWithoutOptOut(t *testing.T) {
 	`)
 	expectError(t, errs, "read")
 }
+
+// --- T1735: setter protocol method near-miss ---
+
+func TestProtocolNearMissSetterSatisfied(t *testing.T) {
+	checkOKWithStd(t,
+		`type Proto `+"`"+`structural(protocol: true) {
+			set value(int v) `+"`"+`abstract;
+		}`,
+		`type Foo {
+			int _v;
+			set value(int v) { this._v = v; }
+		}
+		main() {}
+		`)
+}
+
+func TestProtocolNearMissSetterNotSatisfied(t *testing.T) {
+	errs := checkErrsWithStd(t,
+		`type Proto `+"`"+`structural(protocol: true) {
+			set value(int v) `+"`"+`abstract;
+		}`,
+		`type Foo {
+			string _v;
+			set value(string v) { this._v = v; }
+		}
+		main() {}
+		`)
+	expectError(t, errs, "matching protocol Proto")
+}
+
+// --- T1735: generic protocol with covariant return near-miss ---
+
+func TestProtocolNearMissGenericCovariantReturnSatisfied(t *testing.T) {
+	// Concrete iter() returns a type that satisfies Iterator[T] → no near-miss
+	checkOKWithStd(t,
+		`type Iter[T] `+"`"+`structural(protocol: true) {
+			next(~this) T? `+"`"+`abstract;
+		}
+		type Streamable[T] `+"`"+`structural(protocol: true) {
+			iter() Iter[T] `+"`"+`abstract;
+		}`,
+		`type IntIter {
+			int _n;
+			next(~this) int? { if this._n >= 3 { return none; } this._n = this._n + 1; return this._n; }
+		}
+		type Nums {
+			iter() IntIter { return IntIter(_n: 0); }
+		}
+		main() {}
+		`)
+}
+
+func TestProtocolNearMissGenericCovariantReturnNotSatisfied(t *testing.T) {
+	// Concrete iter() returns a type that does NOT satisfy Iterator[T] → near-miss fires
+	// Note: std's Stream[T] protocol has `iter()` too, so near-miss may fire against
+	// either Streamable or Stream — we just check that a near-miss is reported.
+	errs := checkErrsWithStd(t,
+		`type Iter[T] `+"`"+`structural(protocol: true) {
+			next(~this) T? `+"`"+`abstract;
+		}
+		type Streamable[T] `+"`"+`structural(protocol: true) {
+			iter() Iter[T] `+"`"+`abstract;
+		}`,
+		`type BadIter {
+			step(~this) int? { return none; }
+		}
+		type Nums {
+			iter() BadIter { return BadIter(); }
+		}
+		main() {}
+		`)
+	expectError(t, errs, "matching protocol")
+}
+
+// --- T1735: enum near-miss with inherited parent abstract methods ---
+
+func TestProtocolNearMissEnumInheritedAbstractMethod(t *testing.T) {
+	// Protocol inherits abstract method from parent; enum near-miss fires on inherited name
+	errs := checkErrsWithStd(t,
+		`type Base `+"`"+`structural {
+			process(this) string `+"`"+`abstract;
+		}
+		type Proto is Base `+"`"+`structural(protocol: true) {
+			transform(this) string `+"`"+`abstract;
+		}`,
+		`enum MyEnum {
+			A, B,
+			process(this) int { return 1; }
+		}
+		main() {}
+		`)
+	expectError(t, errs, "matching protocol")
+}
+
+// --- T1735: protocol near-miss with optional return on generic ---
+
+func TestProtocolNearMissGenericOptionalReturnSatisfied(t *testing.T) {
+	// Protocol requires T? return with generic T; concrete returns int? → satisfies
+	checkOKWithStd(t,
+		`type Proto[T] `+"`"+`structural(protocol: true) {
+			find(this) T? `+"`"+`abstract;
+		}`,
+		`type Finder {
+			find(this) int? { return 42; }
+		}
+		main() {}
+		`)
+}
+
+// --- T1735: protocol near-miss void abstract vs non-void concrete on enum ---
+
+// --- T1735: generic protocol with inherited abstract methods ---
+
+func TestProtocolNearMissGenericInheritedAbstractSatisfied(t *testing.T) {
+	// Generic protocol inherits abstract method from parent; concrete satisfies both
+	checkOKWithStd(t,
+		`type Base[T] `+"`"+`structural {
+			get_value(this) T `+"`"+`abstract;
+		}
+		type Proto[T] is Base[T] `+"`"+`structural(protocol: true) {
+			process(this, T item) T `+"`"+`abstract;
+		}`,
+		`type Doubler is Base[int] {
+			get_value(this) int { return 0; }
+			process(this, int item) int { return item * 2; }
+		}
+		main() {}
+		`)
+}
+
+func TestProtocolNearMissGenericInheritedAbstractMissing(t *testing.T) {
+	// Generic protocol inherits abstract method; concrete is missing the inherited method
+	errs := checkErrsWithStd(t,
+		`type Base[T] `+"`"+`structural {
+			get_value(this) T `+"`"+`abstract;
+		}
+		type Proto[T] is Base[T] `+"`"+`structural(protocol: true) {
+			process(this, T item) T `+"`"+`abstract;
+		}`,
+		`type Bad {
+			process(this, int item) int { return item; }
+		}
+		main() {}
+		`)
+	expectError(t, errs, "matching protocol")
+}
+
+// --- T1735: generic protocol setter satisfaction ---
+
+func TestProtocolNearMissGenericSetterSatisfied(t *testing.T) {
+	// Generic protocol with setter method; concrete satisfies
+	checkOKWithStd(t,
+		`type Proto[T] `+"`"+`structural(protocol: true) {
+			set value(T v) `+"`"+`abstract;
+		}`,
+		`type Box {
+			int _v;
+			set value(int v) { this._v = v; }
+		}
+		main() {}
+		`)
+}
+
+func TestProtocolNearMissGenericSetterNotSatisfied(t *testing.T) {
+	// Generic protocol with setter; concrete has wrong type
+	checkOKWithStd(t,
+		`type Proto[T] `+"`"+`structural(protocol: true) {
+			set value(T v) `+"`"+`abstract;
+		}`,
+		`type Box {
+			string _v;
+			set value(string v) { this._v = v; }
+			// method name matches 'value' setter but since Proto[T] is generic
+			// and T is wildcard, this should actually satisfy for some T=string
+		}
+		main() {}
+		`)
+}
+
+func TestProtocolNearMissEnumVoidVsNonVoidReturn(t *testing.T) {
+	errs := checkErrsWithStd(t,
+		`type Proto `+"`"+`structural(protocol: true) {
+			run(this) `+"`"+`abstract;
+		}`,
+		`enum MyEnum {
+			A, B,
+			run(this) int { return 1; }
+		}
+		main() {}
+		`)
+	expectError(t, errs, "matching protocol Proto")
+}

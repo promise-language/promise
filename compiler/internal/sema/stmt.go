@@ -1905,6 +1905,28 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 // *factory* call's error — genForInGenerator still routes mid-stream errors to
 // the enclosing sink — so peel it before asking whether the generator itself is
 // failable.
+// isStructuralStreamView reports whether iterating over a Stream[T] value
+// should use the structural iter()+next() path. T1735: now that Stream[T]
+// is tagged `structural(protocol: true)`, variables of type Stream[T] may
+// hold structural views (not generators). A CallExpr returning stream[T] is
+// always a generator factory (sema enforces yield in stream-returning
+// functions), so it must use the coroutine path. Any other expression of
+// type Stream[T] (variable, field access) holds a structural view, since
+// rejectStoredGenerator prevents storing raw coroutine handles.
+func (c *Checker) isStructuralStreamView(expr ast.Expr, _ types.Type) bool {
+	if types.TypStream == nil || !types.TypStream.IsStructural() {
+		return false
+	}
+	// Unwrap error operators: `for x in gen!(3)?!` wraps the CallExpr.
+	inner := unwrapErrorOperator(expr)
+	// A call expression returning Stream[T] is a generator factory — use the
+	// coroutine path, not the structural iter()+next() path.
+	if _, ok := inner.(*ast.CallExpr); ok {
+		return false
+	}
+	return true
+}
+
 func (c *Checker) recordFailableGeneratorForIn(s *ast.ForInStmt) {
 	if c.info.FailableExprs[unwrapErrorOperator(s.Iterable)] {
 		c.recordFailableEscape()
@@ -1960,8 +1982,16 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				} else {
 					elemType = dispatchType
 				}
-				// Stream still uses genForInGenerator (raw coroutine path)
-				c.recordFailableGeneratorForIn(s)
+				// T1735: If the iterable is a structural Stream[T] view (not an
+				// actual generator), record ForInIter so codegen uses the
+				// iter()+next() path. Detect by checking if the concrete type
+				// differs from Stream[T] (a true generator IS Stream[T]).
+				if c.isStructuralStreamView(s.Iterable, dispatchType) {
+					c.info.ForInKinds[s] = ForInIter
+				} else {
+					// Raw generator/coroutine path
+					c.recordFailableGeneratorForIn(s)
+				}
 			} else if origin == types.TypChannel {
 				// Channel[T] yields T via channel receive
 				if len(inst.TypeArgs()) > 0 {

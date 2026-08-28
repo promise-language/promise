@@ -199,11 +199,27 @@ func (c *Checker) checkStreamViewBox(pos ast.Pos, from, to types.Type) {
 		to = opt.Elem()
 	}
 	view, ok := to.(*types.Named)
+	var viewInst *types.Instance
+	if !ok {
+		if inst, iok := to.(*types.Instance); iok {
+			if origin, nok := inst.Origin().(*types.Named); nok {
+				view = origin
+				viewInst = inst
+				ok = true
+			}
+		}
+	}
 	if !ok || !view.IsAbstract() || !view.IsStructural() {
 		return
 	}
-	if types.Identical(from, view) || !types.Implements(from, view) {
-		return
+	if viewInst != nil {
+		if types.Identical(from, to) || !types.ImplementsInst(from, viewInst) {
+			return
+		}
+	} else {
+		if types.Identical(from, view) || !types.Implements(from, view) {
+			return
+		}
 	}
 	if types.IsExplicitChild(from, view) {
 		return // reported at the declaration by validateAbstractOverrides

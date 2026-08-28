@@ -1185,6 +1185,179 @@ test_tls_stream_accept_fails_on_plain_tcp_peer() `test(exclude: wasm, timeout: "
   _ := <-done;
 }
 
+test_tls_handshake_timeout_on_stalling_peer() `test(exclude: wasm, timeout: "10s") {
+  // A peer that sends a valid TLS record first byte and then stalls without
+  // closing. Without the handshake timeout, this hangs the server goroutine
+  // forever and prevents process exit (T1769).
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    // Send byte 22 (0x16 = TLS handshake content type) followed by a partial
+    // record header — enough to pass the first-byte check but not enough to
+    // complete a record. Then wait, simulating a peer that stalls mid-handshake.
+    u8[] partial = [22u8, 3u8, 3u8]; // content_type=22, version=0x0303 (TLS 1.2)
+    tcp.write(partial)? e {
+      0;
+    };
+    // Wait for the server to time out, then clean up.
+    _ := <-done;
+    tcp.close()? e {
+    };
+    return;
+  };
+
+  net.TcpStream raw = listener.accept()?!;
+  TlsServerConfig config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  config.set_handshake_timeout(Duration.from_secs(1)); // short for testing
+  bool failed = false;
+  TlsStream.accept(move raw, config)? e is TlsError {
+    failed = match e.kind {
+      TlsErrorKind.handshake => true,
+      _ => false,
+    };
+  }!;
+  assert(failed, "a stalling peer triggers a handshake timeout");
+  done.send(true);
+  listener.close()?!;
+}
+
+test_tls_server_config_handshake_timeout_default_and_setter() `test(exclude: wasm) {
+  // The default handshake timeout is 10 seconds; set_handshake_timeout changes it;
+  // the getter reflects both.
+  TlsServerConfig config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  assert(config.handshake_timeout == Duration.from_secs(10), "default handshake timeout is 10s");
+  config.set_handshake_timeout(Duration.from_secs(5));
+  assert(config.handshake_timeout == Duration.from_secs(5), "handshake timeout updated to 5s");
+  config.set_handshake_timeout(Duration.from_millis(500));
+  assert(config.handshake_timeout == Duration.from_millis(500), "handshake timeout updated to 500ms");
+}
+
+test_tls_handshake_timeout_on_silent_peer() `test(exclude: wasm, timeout: "10s") {
+  // A peer that connects and sends nothing at all — the handshake timeout must
+  // still fire and free the server goroutine (T1769).
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    // Send nothing — just hold the connection open until the server times out.
+    _ := <-done;
+    tcp.close()? e {
+    };
+    return;
+  };
+
+  net.TcpStream raw = listener.accept()?!;
+  TlsServerConfig config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  config.set_handshake_timeout(Duration.from_secs(1));
+  bool failed = false;
+  TlsStream.accept(move raw, config)? e is TlsError {
+    failed = match e.kind {
+      TlsErrorKind.handshake => true,
+      _ => false,
+    };
+  }!;
+  assert(failed, "a silent peer triggers a handshake timeout");
+  done.send(true);
+  listener.close()?!;
+}
+
+test_tls_client_handshake_timeout_on_stalling_server() `test(exclude: wasm, timeout: "10s") {
+  // The mirror of the server-side stall: a "server" that accepts the TCP
+  // connection and then never sends a ServerHello. TlsStream.connect must be
+  // bounded by config.handshake_timeout rather than parking forever (T1769). The
+  // client runs in the goroutine and reports its verdict over a channel, so the
+  // stalling accept can be held open by the test body.
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] result = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.insecure();
+    cfg.set_handshake_timeout(Duration.from_secs(1)); // short for testing
+    bool failed = false;
+    TlsStream.connect(move tcp, "localhost", cfg)? e is TlsError {
+      failed = match e.kind {
+        TlsErrorKind.handshake => true,
+        _ => false,
+      };
+    }!;
+    result.send(failed);
+    return;
+  };
+
+  // Accept, then stall: the ClientHello is never answered.
+  net.TcpStream peer = listener.accept()?!;
+  if failed := <-result {
+    assert(failed, "a stalling server triggers a client handshake timeout");
+  } else {
+    assert(false, "the client goroutine never reported a verdict");
+  }
+  peer.close()?!;
+  listener.close()?!;
+}
+
+test_tls_config_handshake_timeout_default_and_setter() `test(exclude: wasm) {
+  // Both client constructors carry the 10s default, and the setter round-trips.
+  TlsConfig verifying = TlsConfig.create();
+  assert(verifying.handshake_timeout == Duration.from_secs(10), "create defaults to a 10s handshake timeout");
+  TlsConfig config = TlsConfig.insecure();
+  assert(config.handshake_timeout == Duration.from_secs(10), "insecure defaults to a 10s handshake timeout");
+  config.set_handshake_timeout(Duration.from_secs(3));
+  assert(config.handshake_timeout == Duration.from_secs(3), "handshake timeout updated to 3s");
+  config.set_handshake_timeout(Duration.from_millis(250));
+  assert(config.handshake_timeout == Duration.from_millis(250), "handshake timeout updated to 250ms");
+}
+
+test_tls_accept_restores_the_callers_deadline() `test(exclude: wasm, timeout: "20s") {
+  // accept bounds the handshake with a deadline of its own. A deadline the caller
+  // had already set on the stream governs the traffic that follows and must
+  // survive the handshake, and a direction the caller left alone must stay
+  // unbounded — clearing both outright would silently drop it (T1769).
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.insecure();
+    TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+    client.write_string("hello\n")?!;
+    _ := <-done;
+    client.close()?!;
+    return;
+  };
+
+  net.TcpStream raw = listener.accept()?!;
+  // Far enough out that it cannot fire during the handshake; the write side is
+  // deliberately left unbounded.
+  Instant at = Instant.now() + Duration.from_secs(300);
+  raw.set_read_deadline(at);
+  TlsServerConfig server_config = TlsServerConfig.create(_test_cert(), _test_key())?!;
+  TlsStream server = TlsStream.accept(move raw, server_config)?!;
+  if got := server._tcp.read_deadline {
+    assert(got.as_nanos == at.as_nanos, "the caller's read deadline survived the handshake unchanged");
+  } else {
+    assert(false, "accept must not discard the caller's read deadline");
+  }
+  if _dl := server._tcp.write_deadline {
+    assert(false, "a direction the caller left unbounded stays unbounded");
+  }
+  if line := server.read_line()?! {
+    assert(line == "hello", "the restored deadline still allows ordinary reads");
+  } else {
+    assert(false, "server expected a request line");
+  }
+  server.close()?!;
+  done.send(true);
+  listener.close()?!;
+}
+
 test_tls_close_gracefully_delivers_the_last_write() `test(exclude: wasm, timeout: "20s") {
   // The server writes a reply and closes while the client's request bytes are
   // still unread. close_gracefully must FIN-and-drain rather than reset, so the

@@ -109,6 +109,12 @@ func EmbedResources(root string) error {
 		return fmt.Errorf("write manifest.json: %w", err)
 	}
 
+	// protocol_triggers.json — T1732: protocol name → owning module table for
+	// on-demand declaration load of unimported embedded modules.
+	if err := GenerateProtocolTriggers(root); err != nil {
+		return fmt.Errorf("generate protocol triggers: %w", err)
+	}
+
 	return nil
 }
 

@@ -7,6 +7,19 @@ import (
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
+// ProtocolTriggerEntry identifies a protocol method name reserved by an
+// embedded catalog module the program may not import (T1732).
+type ProtocolTriggerEntry struct {
+	Module   string
+	IsGetter bool
+	IsSetter bool
+}
+
+// ProtocolModuleLoader loads a catalog module's declarations on demand,
+// returning its exported scope. Called at most once per module name;
+// the caller is responsible for caching.
+type ProtocolModuleLoader func(moduleName string) (*types.Scope, error)
+
 // Checker performs semantic analysis on a parsed AST file.
 type Checker struct {
 	file                *ast.File
@@ -49,6 +62,11 @@ type Checker struct {
 	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (§17.2 explicit-return style)
 	paramDefaults       []paramDefault                   // T1395: every parameter default declared in this file, in declaration order — type-checked once by checkParamDefaults
 	deferredValueTypes  []deferredValueType              // T1527: types whose value-type classification could not be decided during Define (see deferValueType), in declaration order
+
+	// T1732: protocol trigger table for unimported embedded modules.
+	protocolTriggers     map[string][]ProtocolTriggerEntry // method name → unimported module entries (nil = disabled)
+	protocolModuleLoader ProtocolModuleLoader              // on-demand loader callback (nil = disabled)
+	loadedProtocolScopes map[string]*types.Scope           // cache of on-demand loaded module scopes
 }
 
 // paramDefault pairs a parameter that declares a default with its AST default
@@ -242,6 +260,13 @@ func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*In
 // condition does not match target are skipped entirely (not declared, not type-checked).
 // Use ParseTargetInfo to derive a TargetInfo from an LLVM target triple.
 func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo) (*Info, []error) {
+	return CheckWithProtocols(file, moduleScopes, target, nil, nil)
+}
+
+// CheckWithProtocols performs semantic analysis with protocol trigger support (T1732).
+// triggers maps method names to unimported embedded module entries; loader loads a module's
+// declarations on demand. Both may be nil to disable unimported-module protocol checking.
+func CheckWithProtocols(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo, triggers map[string][]ProtocolTriggerEntry, loader ProtocolModuleLoader) (*Info, []error) {
 	c := &Checker{
 		moduleScopes: moduleScopes,
 		target:       target,
@@ -276,6 +301,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 
 			StructuralReturnAliasParams: make(map[*types.Func][]bool),
 		},
+		protocolTriggers:     triggers,
+		protocolModuleLoader: loader,
 	}
 
 	c.initScopes(file)
@@ -296,7 +323,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.validateConstructors(file)           // Validate: constructor inheritance (after all types defined)
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
 	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
-	c.checkProtocolNearMisses(file)        // T1731: reject protocol near-miss signatures
+	c.checkProtocolNearMisses(file)        // T1731+T1732: reject protocol near-miss signatures (in-scope + unimported)
 	c.validateBuiltins()                   // Validate: .pr files declare all required operators/methods/fields
 	c.info.Timings.Define = time.Since(tPass)
 
@@ -331,6 +358,11 @@ func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.
 // DeclareAndDefineWithTarget runs Declare + Define with pre-loaded module scopes
 // and target filtering for `target(cond)` annotations.
 func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo) (*Info, []error) {
+	return DeclareAndDefineWithProtocols(file, moduleScopes, target, nil, nil)
+}
+
+// DeclareAndDefineWithProtocols runs Declare + Define with protocol trigger support (T1732).
+func DeclareAndDefineWithProtocols(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo, triggers map[string][]ProtocolTriggerEntry, loader ProtocolModuleLoader) (*Info, []error) {
 	c := &Checker{
 		moduleScopes: moduleScopes,
 		target:       target,
@@ -365,6 +397,8 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 
 			StructuralReturnAliasParams: make(map[*types.Func][]bool),
 		},
+		protocolTriggers:     triggers,
+		protocolModuleLoader: loader,
 	}
 
 	c.initScopes(file)
@@ -380,7 +414,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 	c.validateConstructors(file)           // Validate: constructor inheritance
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
 	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
-	c.checkProtocolNearMisses(file)        // T1731: reject protocol near-miss signatures
+	c.checkProtocolNearMisses(file)        // T1731+T1732: reject protocol near-miss signatures (in-scope + unimported)
 
 	return c.info, c.errors
 }

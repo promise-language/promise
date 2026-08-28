@@ -68,15 +68,16 @@ func (c *Checker) validateProtocolAnnotations(file *ast.File) {
 	}
 }
 
-// checkProtocolNearMisses implements the protocol near-miss check (T1731).
+// checkProtocolNearMisses implements the protocol near-miss check (T1731 + T1732).
 // Runs after validateAbstractOverrides — all types, methods, and parent
 // relationships are fully resolved.
+//
+// T1731: checks against protocol interfaces already in scope (std + imported modules).
+// T1732: checks against protocol interfaces in unimported embedded catalog modules,
+// using the trigger table to avoid unnecessary module loads.
 func (c *Checker) checkProtocolNearMisses(file *ast.File) {
 	// Collect all protocol interfaces in scope.
 	protocols := c.collectProtocols()
-	if len(protocols) == 0 {
-		return
-	}
 
 	// Build method key -> protocols requiring that method (clause 1).
 	protocolsByMethod := make(map[protocolMethodKey][]*types.Named)
@@ -163,6 +164,9 @@ func (c *Checker) checkTypeProtocolNearMisses(td *ast.TypeDecl, protocolsByMetho
 		key := protocolMethodKey{name: md.Name, isGetter: md.IsGetter, isSetter: md.IsSetter}
 		protos, hit := protocolsByMethod[key]
 		if !hit {
+			// T1732: no in-scope protocol requires this method name — check
+			// the trigger table for unimported embedded modules.
+			c.checkUnimportedTypeProtocolNearMiss(td, md, key, structuralByMethod, named)
 			continue
 		}
 
@@ -223,6 +227,9 @@ func (c *Checker) checkEnumProtocolNearMisses(ed *ast.EnumDecl, protocolsByMetho
 		key := protocolMethodKey{name: md.Name, isGetter: md.IsGetter, isSetter: md.IsSetter}
 		protos, hit := protocolsByMethod[key]
 		if !hit {
+			// T1732: no in-scope protocol requires this method name — check
+			// the trigger table for unimported embedded modules.
+			c.checkUnimportedEnumProtocolNearMiss(ed, md, key, structuralByMethod, enum)
 			continue
 		}
 
@@ -601,6 +608,252 @@ func (c *Checker) reportEnumProtocolNearMiss(typeName string, pos ast.Pos, enum 
 
 	c.errorf(pos, "type %s has method '%s' matching protocol %s but does not satisfy it: incompatible signature (expected %s%s, found %s%s)",
 		typeName, md.Name, declarer,
+		md.Name, abstract.Sig(), md.Name, concrete.Sig())
+}
+
+// --- T1732: unimported embedded module protocol near-miss ---
+
+// checkUnimportedTypeProtocolNearMiss checks a single type method against the
+// trigger table for unimported embedded modules (T1732).
+func (c *Checker) checkUnimportedTypeProtocolNearMiss(td *ast.TypeDecl, md *ast.MethodDecl, key protocolMethodKey, structuralByMethod map[protocolMethodKey][]*types.Named, named *types.Named) {
+	if c.protocolTriggers == nil || c.protocolModuleLoader == nil {
+		return
+	}
+	triggers, ok := c.protocolTriggers[key.name]
+	if !ok {
+		return
+	}
+
+	// Filter to triggers matching the getter/setter kind.
+	var matching []ProtocolTriggerEntry
+	for _, t := range triggers {
+		if t.IsGetter == key.isGetter && t.IsSetter == key.isSetter {
+			matching = append(matching, t)
+		}
+	}
+	if len(matching) == 0 {
+		return
+	}
+
+	// Filter out modules already loaded (handled by the in-scope T1731 path).
+	var unloaded []ProtocolTriggerEntry
+	for _, t := range matching {
+		if _, loaded := c.moduleScopes[t.Module]; !loaded {
+			unloaded = append(unloaded, t)
+		}
+	}
+	if len(unloaded) == 0 {
+		return
+	}
+
+	// Clause 3 gate: is this method name explained by ANY in-scope abstract
+	// interface? If so, the name is spoken for — don't fire.
+	for _, si := range structuralByMethod[key] {
+		if satisfiesProtocol(named, si) {
+			return
+		}
+	}
+
+	// On-demand load each trigger module and check against its protocols.
+	for _, t := range unloaded {
+		scope := c.loadProtocolScope(t.Module)
+		if scope == nil {
+			continue
+		}
+		protocol := c.findProtocolInScope(scope, key)
+		if protocol == nil {
+			continue
+		}
+		if satisfiesProtocol(named, protocol) {
+			continue
+		}
+		c.reportProtocolNearMissQualified(td.Name, md.Pos(), named, md, protocol, t.Module)
+		return
+	}
+}
+
+// checkUnimportedEnumProtocolNearMiss checks a single enum method against the
+// trigger table for unimported embedded modules (T1732).
+func (c *Checker) checkUnimportedEnumProtocolNearMiss(ed *ast.EnumDecl, md *ast.MethodDecl, key protocolMethodKey, structuralByMethod map[protocolMethodKey][]*types.Named, enum *types.Enum) {
+	if c.protocolTriggers == nil || c.protocolModuleLoader == nil {
+		return
+	}
+	triggers, ok := c.protocolTriggers[key.name]
+	if !ok {
+		return
+	}
+
+	var matching []ProtocolTriggerEntry
+	for _, t := range triggers {
+		if t.IsGetter == key.isGetter && t.IsSetter == key.isSetter {
+			matching = append(matching, t)
+		}
+	}
+	if len(matching) == 0 {
+		return
+	}
+
+	var unloaded []ProtocolTriggerEntry
+	for _, t := range matching {
+		if _, loaded := c.moduleScopes[t.Module]; !loaded {
+			unloaded = append(unloaded, t)
+		}
+	}
+	if len(unloaded) == 0 {
+		return
+	}
+
+	// Clause 3 gate.
+	for _, si := range structuralByMethod[key] {
+		if enumCouldSatisfyProtocol(enum, si) {
+			return
+		}
+	}
+
+	for _, t := range unloaded {
+		scope := c.loadProtocolScope(t.Module)
+		if scope == nil {
+			continue
+		}
+		protocol := c.findProtocolInScope(scope, key)
+		if protocol == nil {
+			continue
+		}
+		if enumCouldSatisfyProtocol(enum, protocol) {
+			continue
+		}
+		c.reportEnumProtocolNearMissQualified(ed.Name, md.Pos(), enum, md, protocol, t.Module)
+		return
+	}
+}
+
+// loadProtocolScope loads a module's declarations on demand and caches the result.
+// Both successes and failures are cached to avoid retrying failed loads.
+func (c *Checker) loadProtocolScope(moduleName string) *types.Scope {
+	if c.loadedProtocolScopes == nil {
+		c.loadedProtocolScopes = make(map[string]*types.Scope)
+	}
+	if scope, ok := c.loadedProtocolScopes[moduleName]; ok {
+		return scope // may be nil (cached failure)
+	}
+	scope, err := c.protocolModuleLoader(moduleName)
+	if err != nil || scope == nil {
+		c.loadedProtocolScopes[moduleName] = nil // cache the failure
+		return nil
+	}
+	c.loadedProtocolScopes[moduleName] = scope
+	return scope
+}
+
+// findProtocolInScope searches a module scope for a protocol interface that
+// declares an abstract method matching the given key.
+func (c *Checker) findProtocolInScope(scope *types.Scope, key protocolMethodKey) *types.Named {
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		tn, ok := obj.(*types.TypeName)
+		if !ok {
+			continue
+		}
+		named, ok := tn.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		if !named.IsProtocol() {
+			continue
+		}
+		// Check if this protocol declares an abstract method matching the key.
+		for _, m := range named.Methods() {
+			if m.IsAbstract() && m.Name() == key.name && m.IsGetter() == key.isGetter && m.IsSetter() == key.isSetter {
+				return named
+			}
+		}
+		for _, am := range named.ParentAbstractMethods() {
+			if am.Method.Name() == key.name && am.Method.IsGetter() == key.isGetter && am.Method.IsSetter() == key.isSetter {
+				return named
+			}
+		}
+	}
+	return nil
+}
+
+// reportProtocolNearMissQualified emits a near-miss diagnostic for a type method
+// against a protocol from an unimported module, qualifying the protocol name
+// with the module name (e.g., "http.Handler").
+func (c *Checker) reportProtocolNearMissQualified(typeName string, pos ast.Pos, named *types.Named, md *ast.MethodDecl, protocol *types.Named, moduleName string) {
+	var abstract *types.Method
+	for _, m := range protocol.Methods() {
+		if m.IsAbstract() && m.Name() == md.Name && m.IsGetter() == md.IsGetter && m.IsSetter() == md.IsSetter {
+			abstract = m
+			break
+		}
+	}
+	if abstract == nil {
+		for _, am := range protocol.ParentAbstractMethods() {
+			if am.Method.Name() == md.Name && am.Method.IsGetter() == md.IsGetter && am.Method.IsSetter() == md.IsSetter {
+				abstract = am.Method
+				break
+			}
+		}
+	}
+	if abstract == nil {
+		return
+	}
+
+	var concrete *types.Method
+	switch {
+	case md.IsGetter:
+		concrete = named.LookupGetter(md.Name)
+	case md.IsSetter:
+		concrete = named.LookupSetter(md.Name)
+	default:
+		concrete = named.LookupMethod(md.Name)
+	}
+	if concrete == nil {
+		return
+	}
+
+	qualifiedName := moduleName + "." + protocol.Obj().Name()
+	c.errorf(pos, "type %s has method '%s' matching protocol %s but does not satisfy it: incompatible signature (expected %s%s, found %s%s)",
+		typeName, md.Name, qualifiedName,
+		md.Name, abstract.Sig(), md.Name, concrete.Sig())
+}
+
+// reportEnumProtocolNearMissQualified emits a near-miss diagnostic for an enum
+// method against a protocol from an unimported module.
+func (c *Checker) reportEnumProtocolNearMissQualified(typeName string, pos ast.Pos, enum *types.Enum, md *ast.MethodDecl, protocol *types.Named, moduleName string) {
+	var abstract *types.Method
+	for _, m := range protocol.Methods() {
+		if m.IsAbstract() && m.Name() == md.Name && m.IsGetter() == md.IsGetter && m.IsSetter() == md.IsSetter {
+			abstract = m
+			break
+		}
+	}
+	if abstract == nil {
+		for _, am := range protocol.ParentAbstractMethods() {
+			if am.Method.Name() == md.Name && am.Method.IsGetter() == md.IsGetter && am.Method.IsSetter() == md.IsSetter {
+				abstract = am.Method
+				break
+			}
+		}
+	}
+	if abstract == nil {
+		return
+	}
+
+	var concrete *types.Method
+	switch {
+	case md.IsGetter:
+		concrete = enum.LookupGetter(md.Name)
+	default:
+		concrete = enum.LookupMethod(md.Name)
+	}
+	if concrete == nil {
+		return
+	}
+
+	qualifiedName := moduleName + "." + protocol.Obj().Name()
+	c.errorf(pos, "type %s has method '%s' matching protocol %s but does not satisfy it: incompatible signature (expected %s%s, found %s%s)",
+		typeName, md.Name, qualifiedName,
 		md.Name, abstract.Sig(), md.Name, concrete.Sig())
 }
 

@@ -1,7 +1,13 @@
 package sema
 
 import (
+	"fmt"
 	"testing"
+
+	antlr "github.com/antlr4-go/antlr/v4"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/parser"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // --- T1731: structural(protocol: true) annotation tests ---
@@ -498,4 +504,511 @@ func TestProtocolNearMissMultipleProtocols(t *testing.T) {
 		`)
 	expectError(t, errs, "matching protocol ProtoB")
 	expectNoErrorContaining(t, errs, "matching protocol ProtoA")
+}
+
+// --- T1732: unimported embedded module protocol near-miss tests ---
+
+// parseModuleScope parses source as a standalone module (with std), returning
+// its exported scope for use as a mock protocol module loader response.
+func parseModuleScope(t *testing.T, src string) *types.Scope {
+	t.Helper()
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, buildErrs := ast.Build("module.pr", tree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("AST build errors: %v", buildErrs)
+	}
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+	info, errs := CheckWithModules(file, map[string]*types.Scope{"std": getSemaStdScope()})
+	if len(errs) > 0 {
+		t.Fatalf("module sema errors: %v", errs)
+	}
+	return ExportedScope(info, file)
+}
+
+// checkWithTriggers parses user source and runs sema with a protocol trigger
+// table and a mock module loader.
+func checkWithTriggers(t *testing.T, stdSrc, userSrc string, triggers map[string][]ProtocolTriggerEntry, loader ProtocolModuleLoader) (*Info, []error) {
+	t.Helper()
+	combined := stdSrc
+	if combined != "" {
+		combined += "\n"
+	}
+	combined += userSrc
+	input := antlr.NewInputStream(combined)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, buildErrs := ast.Build("test.pr", tree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("AST build errors: %v", buildErrs)
+	}
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+	return CheckWithProtocols(file, map[string]*types.Scope{"std": getSemaStdScope()}, TargetInfo{}, triggers, loader)
+}
+
+func TestProtocolTriggerTableNearMiss(t *testing.T) {
+	// Mock module with a protocol interface.
+	modScope := parseModuleScope(t, `
+		type ServerRequest `+"`public"+` { string _path; }
+		type ServerResponse `+"`public"+` { int _status; }
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle!(this, ServerRequest request) ServerResponse `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// User type has 'handle' with wrong signature → near-miss error.
+	_, errs := checkWithTriggers(t, "", `
+		type MyHandler {
+			handle(this) int { return 0; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectError(t, errs, "matching protocol http.Handler")
+}
+
+func TestProtocolTriggerTableSatisfied(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// User type satisfies the protocol → no error.
+	_, errs := checkWithTriggers(t, "", `
+		type MyHandler {
+			handle(this) string { return "ok"; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableExplainedByLocalInterface(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle!(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// User type satisfies a local interface requiring 'handle' → no error (clause 3).
+	_, errs := checkWithTriggers(t,
+		`type LocalIface {
+			handle(this) int `+"`abstract"+`;
+		}`,
+		`type MyHandler is LocalIface {
+			handle(this) int { return 42; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableModuleAlreadyLoaded(t *testing.T) {
+	// When the module is already loaded (in moduleScopes), the trigger should be
+	// handled by the existing T1731 in-scope path, not the T1732 path.
+	// We verify this by checking that the loader is never called.
+	loaderCalled := false
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "std", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		loaderCalled = true
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	// std is always in moduleScopes, so "handle" trigger for "std" should be skipped.
+	_, _ = checkWithTriggers(t, "", `
+		type MyHandler {
+			handle(this) int { return 0; }
+		}
+		main() {}
+	`, triggers, loader)
+	if loaderCalled {
+		t.Error("loader was called for a module already in moduleScopes")
+	}
+}
+
+func TestProtocolTriggerTableOptOut(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle!(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Method with structural(protocol: false) → no error.
+	_, errs := checkWithTriggers(t, "", `
+		type MyHandler {
+			handle(this) int `+"`structural(protocol: false)"+` { return 0; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableNoLoadForNonReservedName(t *testing.T) {
+	loaderCalled := false
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		loaderCalled = true
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	// Method named 'process' is not in trigger table → loader never called.
+	_, _ = checkWithTriggers(t, "", `
+		type MyType {
+			process(this) int { return 0; }
+		}
+		main() {}
+	`, triggers, loader)
+	if loaderCalled {
+		t.Error("loader was called for a non-reserved method name")
+	}
+}
+
+func TestProtocolTriggerTableEnumNearMiss(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Enum with 'handle' method, wrong signature → near-miss error.
+	_, errs := checkWithTriggers(t, "", `
+		enum MyEnum {
+			A, B,
+			handle(this) int { return 0; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectError(t, errs, "matching protocol http.Handler")
+}
+
+func TestProtocolTriggerTableEnumSatisfied(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Enum satisfies the protocol → no error.
+	_, errs := checkWithTriggers(t, "", `
+		enum MyEnum {
+			A, B,
+			handle(this) string { return "ok"; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableEnumExplainedByLocal(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle!(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Enum with 'handle' that satisfies a local interface → no error (clause 3).
+	_, errs := checkWithTriggers(t,
+		`type LocalIface {
+			handle(this) int `+"`abstract"+`;
+		}`,
+		`enum MyEnum {
+			A, B,
+			handle(this) int { return 42; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableEnumOptOut(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Enum method opted out with structural(protocol: false) → no error.
+	_, errs := checkWithTriggers(t, "", `
+		enum MyEnum {
+			A, B,
+			handle(this) int `+"`structural(protocol: false)"+` { return 0; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableLoaderFailureCached(t *testing.T) {
+	loadCount := 0
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "broken", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		loadCount++
+		return nil, fmt.Errorf("module %s not found", moduleName)
+	}
+
+	// Two types with 'handle' — loader should be called only once (cached failure).
+	_, _ = checkWithTriggers(t, "", `
+		type Foo {
+			handle(this) int { return 0; }
+		}
+		type Bar {
+			handle(this) int { return 1; }
+		}
+		main() {}
+	`, triggers, loader)
+	if loadCount != 1 {
+		t.Errorf("expected loader called once (cached failure), got %d", loadCount)
+	}
+}
+
+func TestProtocolTriggerTableLoaderSuccessCached(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Handler `+"`structural(protocol: true) `public"+` {
+			handle(this) string `+"`abstract"+`;
+		}
+	`)
+
+	loadCount := 0
+	triggers := map[string][]ProtocolTriggerEntry{
+		"handle": {{Module: "http", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		loadCount++
+		if moduleName == "http" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Two types with 'handle' — loader should be called only once (cached success).
+	_, _ = checkWithTriggers(t, "", `
+		type Foo {
+			handle(this) int { return 0; }
+		}
+		type Bar {
+			handle(this) int { return 1; }
+		}
+		main() {}
+	`, triggers, loader)
+	if loadCount != 1 {
+		t.Errorf("expected loader called once (cached success), got %d", loadCount)
+	}
+}
+
+func TestProtocolTriggerTableGetterNearMiss(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Named `+"`structural(protocol: true) `public"+` {
+			get name string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"name": {{Module: "mymod", IsGetter: true, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "mymod" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Type has getter 'name' returning int, protocol expects string → near-miss.
+	_, errs := checkWithTriggers(t, "", `
+		type Foo {
+			get name int { return 42; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectError(t, errs, "matching protocol mymod.Named")
+}
+
+func TestProtocolTriggerTableGetterSatisfied(t *testing.T) {
+	modScope := parseModuleScope(t, `
+		type Named `+"`structural(protocol: true) `public"+` {
+			get name string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"name": {{Module: "mymod", IsGetter: true, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "mymod" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Type has getter 'name' returning string → satisfies, no error.
+	_, errs := checkWithTriggers(t, "", `
+		type Foo {
+			get name string { return "hi"; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableGetterKindMismatch(t *testing.T) {
+	// Trigger is for getter, but method is a regular method → no load needed.
+	loaderCalled := false
+	triggers := map[string][]ProtocolTriggerEntry{
+		"name": {{Module: "mymod", IsGetter: true, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		loaderCalled = true
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	// Regular method 'name', not a getter — trigger is for getter only.
+	_, _ = checkWithTriggers(t, "", `
+		type Foo {
+			name(this) string { return "hi"; }
+		}
+		main() {}
+	`, triggers, loader)
+	if loaderCalled {
+		t.Error("loader was called when getter/method kind didn't match trigger")
+	}
+}
+
+func TestProtocolTriggerTableNilTriggersAndLoader(t *testing.T) {
+	// When triggers and loader are nil, T1732 path is completely disabled.
+	_, errs := checkWithTriggers(t, "", `
+		type Foo {
+			handle(this) int { return 0; }
+		}
+		main() {}
+	`, nil, nil)
+	expectNoErrors(t, errs)
+}
+
+func TestProtocolTriggerTableInheritedAbstractMethod(t *testing.T) {
+	// Protocol inherits abstract method from parent. The trigger table fires
+	// on the inherited method name.
+	modScope := parseModuleScope(t, `
+		type Base `+"`structural `public"+` {
+			process(this) string `+"`abstract"+`;
+		}
+		type Proto is Base `+"`structural(protocol: true) `public"+` {
+			transform(this) string `+"`abstract"+`;
+		}
+	`)
+
+	triggers := map[string][]ProtocolTriggerEntry{
+		"process":   {{Module: "mymod", IsGetter: false, IsSetter: false}},
+		"transform": {{Module: "mymod", IsGetter: false, IsSetter: false}},
+	}
+	loader := func(moduleName string) (*types.Scope, error) {
+		if moduleName == "mymod" {
+			return modScope, nil
+		}
+		return nil, fmt.Errorf("unknown module %s", moduleName)
+	}
+
+	// Type has 'process' with wrong return type → near-miss against inherited method.
+	_, errs := checkWithTriggers(t, "", `
+		type Foo {
+			process(this) int { return 1; }
+		}
+		main() {}
+	`, triggers, loader)
+	expectError(t, errs, "matching protocol mymod.Proto")
 }

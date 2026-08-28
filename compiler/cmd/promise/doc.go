@@ -196,7 +196,7 @@ func docModuleFrontend(modName, modDir string, sourceFiles []string) (*ast.File,
 	target := sema.HostTargetInfo()
 	var moduleScopes map[string]*types.Scope
 	if len(merged.Uses) > 0 {
-		moduleScopes, _, _, _ = loadModuleScopes(filepath.Join(modDir, "_.pr"), merged, target)
+		moduleScopes, _, _, _, _ = loadModuleScopes(filepath.Join(modDir, "_.pr"), merged, target)
 	}
 
 	info, errs := sema.DeclareAndDefineWithTarget(merged, moduleScopes, target)
@@ -216,7 +216,7 @@ func docFrontend(filename string) (*ast.File, *sema.Info) {
 	// Use host target so target-filtered functions (e.g., platform.pr) are
 	// properly filtered instead of causing redeclaration errors.
 	target := sema.HostTargetInfo()
-	moduleScopes, _, _, _ := loadModuleScopes(filename, file, target)
+	moduleScopes, _, _, _, _ := loadModuleScopes(filename, file, target)
 	info, errs := sema.DeclareAndDefineWithTarget(file, moduleScopes, target)
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)

@@ -1,0 +1,25 @@
+// T1732: Protocol near-miss check for unimported embedded modules.
+// Tests that protocol checking works correctly without explicitly importing http.
+// A type that opts out of the protocol check on a reserved name should compile.
+type OptedOut {
+  handle(this) int `structural(protocol: false) {
+    return 42;
+  }
+}
+
+// A type that never uses a reserved name should compile without triggering any load.
+type Unrelated {
+  process(this) int {
+    return 1;
+  }
+}
+
+test_opt_out() `test {
+  o := OptedOut();
+  assert(o.handle() == 42, "opt-out handle should work");
+}
+
+test_unrelated() `test {
+  u := Unrelated();
+  assert(u.process() == 1, "unrelated method should work");
+}

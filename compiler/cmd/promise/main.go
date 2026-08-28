@@ -144,6 +144,9 @@ var embeddedGuide []byte
 //go:embed all:resources/examples
 var embeddedExamples embed.FS
 
+//go:embed resources/protocol_triggers.json
+var embeddedProtocolTriggers []byte
+
 // Runtime is fully codegen-emitted LLVM IR — no embedded C files needed.
 //
 // The CLI's command index, hierarchical help tree, and stream-routing rules
@@ -6154,10 +6157,17 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	tSema := time.Now()
 
 	tomlPath := filepath.Join(projectDir, "promise.toml")
-	moduleScopes, modInfos, depOrder, modTiming := loadModuleScopes(tomlPath, merged, target)
+	moduleScopes, modInfos, depOrder, modTiming, ml := loadModuleScopes(tomlPath, merged, target)
+
+	// T1732: protocol trigger table + on-demand loader for unimported modules.
+	triggers := parseProtocolTriggers()
+	var protoLoader sema.ProtocolModuleLoader
+	if ml != nil && triggers != nil {
+		protoLoader = makeProtocolModuleLoader(ml)
+	}
 
 	tUserSema := time.Now()
-	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
+	info, errs := sema.CheckWithProtocols(merged, moduleScopes, target, triggers, protoLoader)
 	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
@@ -6252,10 +6262,17 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	tSema := time.Now()
 
 	// Load local modules from use declarations
-	moduleScopes, modInfos, depOrder, modTiming := loadModuleScopes(filename, file, target)
+	moduleScopes, modInfos, depOrder, modTiming, ml := loadModuleScopes(filename, file, target)
+
+	// T1732: protocol trigger table + on-demand loader for unimported modules.
+	triggers := parseProtocolTriggers()
+	var protoLoader sema.ProtocolModuleLoader
+	if ml != nil && triggers != nil {
+		protoLoader = makeProtocolModuleLoader(ml)
+	}
 
 	tUserSema := time.Now()
-	info, errs := sema.CheckWithTarget(file, moduleScopes, target)
+	info, errs := sema.CheckWithProtocols(file, moduleScopes, target, triggers, protoLoader)
 	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
@@ -6866,7 +6883,7 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	merged = injectGzipImportIfNeeded(merged)
 
 	// Load module dependencies (the module's own `use` declarations)
-	moduleScopes, modInfos, depOrder, _ := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
+	moduleScopes, modInfos, depOrder, _, _ := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
 
 	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
 	if modInfos != nil {
@@ -6895,6 +6912,67 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	}
 
 	return merged, info
+}
+
+// --- T1732: protocol trigger table for unimported embedded modules ---
+
+// protocolTriggerJSON mirrors the JSON structure of protocol_triggers.json.
+type protocolTriggerJSON struct {
+	Triggers map[string][]struct {
+		Module string `json:"module"`
+		Getter bool   `json:"getter"`
+		Setter bool   `json:"setter"`
+	} `json:"triggers"`
+}
+
+// parsedProtocolTriggers is the parsed trigger table, lazily initialized.
+var parsedProtocolTriggers map[string][]sema.ProtocolTriggerEntry
+
+// parseProtocolTriggers parses the embedded protocol_triggers.json into the
+// sema trigger table format. Returns nil (no triggers) on any parse error.
+func parseProtocolTriggers() map[string][]sema.ProtocolTriggerEntry {
+	if parsedProtocolTriggers != nil {
+		return parsedProtocolTriggers
+	}
+	if len(embeddedProtocolTriggers) == 0 {
+		return nil
+	}
+	var raw protocolTriggerJSON
+	if err := json.Unmarshal(embeddedProtocolTriggers, &raw); err != nil {
+		return nil
+	}
+	if len(raw.Triggers) == 0 {
+		return nil
+	}
+	result := make(map[string][]sema.ProtocolTriggerEntry, len(raw.Triggers))
+	for name, entries := range raw.Triggers {
+		for _, e := range entries {
+			result[name] = append(result[name], sema.ProtocolTriggerEntry{
+				Module:   e.Module,
+				IsGetter: e.Getter,
+				IsSetter: e.Setter,
+			})
+		}
+	}
+	parsedProtocolTriggers = result
+	return result
+}
+
+// makeProtocolModuleLoader creates a ProtocolModuleLoader callback that uses
+// the given moduleLoader to load catalog modules on demand (T1732).
+// The loaded module goes through the full sema pipeline (via loadCatalog),
+// and the exported scope is extracted for protocol checking.
+func makeProtocolModuleLoader(ml *moduleLoader) sema.ProtocolModuleLoader {
+	return func(moduleName string) (*types.Scope, error) {
+		mi, err := ml.loadCatalog(moduleName)
+		if err != nil {
+			return nil, err
+		}
+		if mi == nil || mi.SemaInfo == nil {
+			return nil, fmt.Errorf("could not load module %s", moduleName)
+		}
+		return sema.ExportedScope(mi.SemaInfo, mi.File), nil
+	}
 }
 
 // moduleLoader manages recursive module loading with cycle detection and caching.
@@ -6953,9 +7031,11 @@ type moduleLoader struct {
 // loadModuleScopes scans use declarations for local module paths, loads each
 // module (parse + sema), and returns scopes for sema + ModuleInfos for codegen.
 // Modules are loaded recursively: if module A imports module B, B is loaded first.
-func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string, *moduleTimings) {
+// The returned *moduleLoader can be used to create a ProtocolModuleLoader for
+// on-demand loading of unimported embedded modules (T1732).
+func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string, *moduleTimings, *moduleLoader) {
 	if len(file.Uses) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	// Find project root (directory containing promise.toml).
@@ -7077,7 +7157,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	}
 
 	if len(scopes) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, loader
 	}
 	mt := &moduleTimings{
 		parseTime:   loader.modParseTime,
@@ -7086,7 +7166,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		timings:     loader.modTimings,
 		parseCached: loader.modParseCached,
 	}
-	return scopes, loader.allModInfos, loader.depOrder, mt
+	return scopes, loader.allModInfos, loader.depOrder, mt, loader
 }
 
 // load recursively loads a local module and all its dependencies.
@@ -8086,11 +8166,18 @@ func runExec(args []string) {
 		filterTriple = codegen.HostTargetTriple()
 	}
 	targetInfo := sema.ParseTargetInfo(filterTriple)
-	moduleScopes, modInfos, depOrder, modTiming := loadModuleScopes("<exec>", file, targetInfo)
+	moduleScopes, modInfos, depOrder, modTiming, ml := loadModuleScopes("<exec>", file, targetInfo)
+
+	// T1732: protocol trigger table + on-demand loader for unimported modules.
+	triggers := parseProtocolTriggers()
+	var protoLoader sema.ProtocolModuleLoader
+	if ml != nil && triggers != nil {
+		protoLoader = makeProtocolModuleLoader(ml)
+	}
 
 	// Semantic analysis
 	tUserSema := time.Now()
-	info, errs := sema.CheckWithTarget(file, moduleScopes, targetInfo)
+	info, errs := sema.CheckWithProtocols(file, moduleScopes, targetInfo, triggers, protoLoader)
 	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos

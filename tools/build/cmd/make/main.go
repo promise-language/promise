@@ -11,6 +11,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,6 +34,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error computing source hash: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Deferred, not called at the end of main: this function has a success path
+	// that returns early (no tools found), and any future one would silently skip
+	// a tail call — the hook would be wired up, make.local would be written, and
+	// the tooling would never sync. A defer runs on every path that returns, and
+	// is skipped by os.Exit, which every failure path here uses. That is exactly
+	// the rule: run on success, never on failure.
+	defer runLocalHook(root, os.Args[1:])
 
 	binDir := filepath.Join(root, "bin")
 
@@ -94,6 +103,42 @@ func main() {
 	}
 
 	fmt.Printf("done (%s)\n", time.Since(start).Round(time.Millisecond))
+}
+
+// runLocalHook runs <root>/make.local if this clone has one, so that building
+// promise's own tools also refreshes the workspace-provided tooling installed
+// alongside them. `workspace setup` writes that file (it is gitignored, never
+// authored here) and only writes it to projects whose ./make calls it.
+//
+// Three properties are deliberate:
+//
+//   - It runs only when the file exists and is executable, so a clone that was
+//     never provisioned is unaffected — this is not a new dependency.
+//   - A hook failure never fails the build. The build above already succeeded,
+//     and failing here would attribute someone else's problem to it.
+//   - The original arguments are passed through, so `./make -force` forces the
+//     workspace build too: someone who distrusts this build output has no reason
+//     to trust the tooling's, and the tooling is where a wrong up-to-date answer
+//     does the most damage, since every project's binaries come from it.
+//
+// It is skipped when stderr is not a terminal, keeping CI and scripted builds to
+// exactly the work they asked for.
+func runLocalHook(root string, args []string) {
+	hook := filepath.Join(root, "make.local")
+	info, err := os.Stat(hook)
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return
+	}
+	if stat, err := os.Stderr.Stat(); err != nil || stat.Mode()&os.ModeCharDevice == 0 {
+		return
+	}
+	cmd := exec.Command(hook, args...)
+	cmd.Dir = root
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\n./make: local hook failed (the build itself succeeded)\n")
+		fmt.Fprintf(os.Stderr, "        re-run it alone with: %s\n\n", hook)
+	}
 }
 
 // buildTools compiles every discovered build tool into bin/. It returns an error

@@ -395,6 +395,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		if e.ElseBody != nil {
 			// else clause: bind error and run else body (T0091: register for drop)
 			savedElseScope := len(c.scopeBindings)
+			prevElseLocal, hadPrevElseLocal := c.locals[e.ElseBinding]
 			if e.ElseBinding != "" && e.ElseBinding != "_" {
 				elseValStruct := c.reconstructErrorValue(errVal)
 				alloca := c.createEntryAlloca(userValueType())
@@ -428,6 +429,15 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 				c.block.NewBr(mergeBlock)
 			}
 			c.scopeBindings = c.scopeBindings[:savedElseScope]
+			// T1605: remove the else binding from c.locals so it doesn't leak
+			// into subsequent code (e.g., a go block that reuses the name).
+			if e.ElseBinding != "" && e.ElseBinding != "_" {
+				if hadPrevElseLocal {
+					c.locals[e.ElseBinding] = prevElseLocal
+				} else {
+					delete(c.locals, e.ElseBinding)
+				}
+			}
 		} else if e.PanicOnNomatch {
 			// Explicit ! suffix: panic on non-matching error (T0142: include source location)
 			c.emitErrorPanic(errVal, e.Pos().File, e.Pos().Line)
@@ -477,6 +487,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		}
 	}
 
+	prevHandlerLocal, hadPrevHandlerLocal := c.locals[e.Binding]
 	if e.Binding != "" && e.Binding != "_" {
 		valStruct := c.reconstructErrorValue(errVal)
 		alloca := c.createEntryAlloca(userValueType())
@@ -506,6 +517,15 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.emitScopeCleanup(savedHandlerScope, false)
 	}
 	c.scopeBindings = c.scopeBindings[:savedHandlerScope]
+	// T1605: remove the handler binding from c.locals so it doesn't leak
+	// into subsequent code (e.g., a go block that reuses the name).
+	if e.Binding != "" && e.Binding != "_" {
+		if hadPrevHandlerLocal {
+			c.locals[e.Binding] = prevHandlerLocal
+		} else {
+			delete(c.locals, e.Binding)
+		}
+	}
 	handlerEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)

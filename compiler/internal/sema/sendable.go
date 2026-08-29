@@ -483,6 +483,7 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 		case *ast.ErrorHandlerExpr:
 			walkExpr(ex.Expr)
 			walkBlock(ex.Body)
+			walkBlock(ex.ElseBody) // T1605: walk else body for parity with collectBlockIdents
 		case *ast.IsExpr:
 			walkExpr(ex.Expr)
 		case *ast.StringLit:

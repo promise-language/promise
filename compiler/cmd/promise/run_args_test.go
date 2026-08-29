@@ -62,13 +62,16 @@ func TestRunForwardsProgramArgs(t *testing.T) {
 				argv = append(argv, "--")
 				argv = append(argv, tc.tail...)
 			}
-			out, err := exec.Command(bin, argv...).CombinedOutput()
-			if err != nil {
-				t.Fatalf("promise run failed: %v\n%s", err, out)
+			cmd := exec.Command(bin, argv...)
+			var stdout, stderr strings.Builder
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("promise run failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 			}
-			got := splitOutputLines(out)
+			got := splitOutputLines([]byte(stdout.String()))
 			if !slicesEqual(got, tc.want) {
-				t.Errorf("forwarded argv = %#v, want %#v (raw output %q)", got, tc.want, out)
+				t.Errorf("forwarded argv = %#v, want %#v (raw stdout %q)", got, tc.want, stdout.String())
 			}
 		})
 	}
@@ -109,14 +112,17 @@ func TestRunForwardsFilenameLikeArgOnCacheMiss(t *testing.T) {
 
 	// `ghost.pr` looks like a source file but does not exist: pre-fix it would be
 	// opened and fail; post-fix it is forwarded verbatim into os.args.
-	out, err := exec.Command(bin, "run", probe, "--", "ghost.pr", "extra").CombinedOutput()
-	if err != nil {
-		t.Fatalf("promise run failed (buildToFile likely misread the tail as source): %v\n%s", err, out)
+	cmd := exec.Command(bin, "run", probe, "--", "ghost.pr", "extra")
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("promise run failed (buildToFile likely misread the tail as source): %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
-	got := splitOutputLines(out)
+	got := splitOutputLines([]byte(stdout.String()))
 	want := []string{"ghost.pr", "extra"}
 	if !slicesEqual(got, want) {
-		t.Errorf("forwarded argv = %#v, want %#v (raw output %q)", got, want, out)
+		t.Errorf("forwarded argv = %#v, want %#v (raw stdout %q)", got, want, stdout.String())
 	}
 }
 

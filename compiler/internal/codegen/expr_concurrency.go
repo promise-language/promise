@@ -1299,8 +1299,35 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 		case *ast.ErrorHandlerExpr:
 			walkExpr(e.Expr)
 			if e.Body != nil {
+				// T1605: temporarily remove the handler binding from outerLocals
+				// so references to the handler-scoped variable inside the body
+				// are not misidentified as captures of an outer local.
+				var savedBinding *ir.InstAlloca
+				var hadBinding bool
+				if e.Binding != "" && e.Binding != "_" {
+					savedBinding, hadBinding = outerLocals[e.Binding]
+					delete(outerLocals, e.Binding)
+				}
 				for _, s := range e.Body.Stmts {
 					walkStmt(s)
+				}
+				if e.Binding != "" && e.Binding != "_" && hadBinding {
+					outerLocals[e.Binding] = savedBinding
+				}
+			}
+			if e.ElseBody != nil {
+				// T1605: same suppression for the else binding.
+				var savedElse *ir.InstAlloca
+				var hadElse bool
+				if e.ElseBinding != "" && e.ElseBinding != "_" {
+					savedElse, hadElse = outerLocals[e.ElseBinding]
+					delete(outerLocals, e.ElseBinding)
+				}
+				for _, s := range e.ElseBody.Stmts {
+					walkStmt(s)
+				}
+				if e.ElseBinding != "" && e.ElseBinding != "_" && hadElse {
+					outerLocals[e.ElseBinding] = savedElse
 				}
 			}
 		case *ast.IfExpr:

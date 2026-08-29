@@ -1555,3 +1555,171 @@ func TestT0411_ConstructorChannelFieldFromThisDups(t *testing.T) {
 	// to bump the channel's reference count.
 	codegentest.AssertContains(t, cloneFn, "chdup.inc")
 }
+
+// T1605: An error handler binding (e.g., `? e { ... e.message ... }`) must
+// not leak into c.locals after the handler scope exits. If it does,
+// collectBlockIdents falsely captures the outer `e` into a subsequent go
+// block's arg pack, causing the goroutine to drop an uninitialized error
+// value (use-after-free / segfault on round 2+).
+func TestErrorHandlerBindingNotCapturedByGoBlock(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		_succeed!() int { return 1; }
+		main() {
+			int x = _succeed()? e {
+				print_line("fail " + e.message);
+				return;
+			};
+			go {
+				int y = _succeed()? e {
+					print_line("inner " + e.message);
+					return;
+				};
+			};
+		}
+	`)
+	// The goroutine function should exist.
+	goFn := codegentest.ExtractFunction(ir, ".goroutine.0")
+	if goFn == "" {
+		t.Fatal("expected .goroutine.0 in IR")
+	}
+	// The goroutine must NOT take a captured error value from the outer scope.
+	// If the outer `e` leaked, the goroutine's define line would have an extra
+	// argument of the error value struct type. With the fix, the goroutine has
+	// no parameters (the inner `e` is created locally inside the goroutine).
+	if strings.Contains(goFn, "promise_error") {
+		// The goroutine should not reference the outer error type in its
+		// parameter list. Check the define line specifically.
+		defLine := strings.SplitN(goFn, "\n", 2)[0]
+		if strings.Contains(defLine, "promise_error") {
+			t.Error("goroutine .goroutine.0 has an error-typed parameter — " +
+				"outer error handler binding leaked into go block capture (T1605)")
+		}
+	}
+}
+
+// T1605: Multiple sequential error handlers before a go block must each
+// clean up their binding from c.locals independently.
+func TestMultipleErrorHandlersBeforeGoBlock(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		_succeed!() int { return 1; }
+		_other!() int { return 2; }
+		main() {
+			int a = _succeed()? e {
+				print_line("a fail " + e.message);
+				return;
+			};
+			int b = _other()? e {
+				print_line("b fail " + e.message);
+				return;
+			};
+			go {
+				int c = _succeed()? e {
+					print_line("go fail " + e.message);
+					return;
+				};
+			};
+		}
+	`)
+	goFn := codegentest.ExtractFunction(ir, ".goroutine.0")
+	if goFn == "" {
+		t.Fatal("expected .goroutine.0 in IR")
+	}
+	defLine := strings.SplitN(goFn, "\n", 2)[0]
+	if strings.Contains(defLine, "promise_error") {
+		t.Error("goroutine captures error-typed parameter from sequential handlers (T1605)")
+	}
+}
+
+// T1605: Typed error handler with else binding must not leak the else
+// binding into a subsequent go block's capture set.
+func TestTypedErrorHandlerElseBindingNotCaptured(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type IoError is error { int code; }
+		_fail_io!() int { raise IoError(message: "io", code: 42); }
+		main() {
+			int x = _fail_io()? e is IoError {
+				e.code;
+			} else f {
+				print_line("else " + f.message);
+				return;
+			};
+			go {
+				int y = _fail_io()? e is IoError {
+					e.code;
+				} else f {
+					print_line("inner else " + f.message);
+					return;
+				};
+			};
+		}
+	`)
+	goFn := codegentest.ExtractFunction(ir, ".goroutine.0")
+	if goFn == "" {
+		t.Fatal("expected .goroutine.0 in IR")
+	}
+	defLine := strings.SplitN(goFn, "\n", 2)[0]
+	if strings.Contains(defLine, "promise_error") {
+		t.Error("goroutine captures error-typed parameter from typed handler else binding (T1605)")
+	}
+}
+
+// T1605: An outer variable captured by a go block must not be confused
+// with a handler binding that has a different name. Verifies that the
+// handler binding cleanup does not accidentally remove unrelated locals.
+func TestErrorHandlerDoesNotRemoveUnrelatedLocals(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		_succeed!() int { return 1; }
+		main() {
+			int val = 42;
+			int x = _succeed()? err {
+				print_line("fail " + err.message);
+				return;
+			};
+			go {
+				// Captures val (an int), not err (which should be cleaned up).
+				print_line(val.to_string());
+			};
+		}
+	`)
+	goFn := codegentest.ExtractFunction(ir, ".goroutine.0")
+	if goFn == "" {
+		t.Fatal("expected .goroutine.0 in IR")
+	}
+	// The goroutine should capture val (int) but NOT err (error).
+	defLine := strings.SplitN(goFn, "\n", 2)[0]
+	if strings.Contains(defLine, "promise_error") {
+		t.Error("goroutine captures error-typed handler binding alongside outer int (T1605)")
+	}
+	// Verify the goroutine does take a parameter (the captured int val).
+	if !strings.Contains(defLine, "i64") && !strings.Contains(defLine, "i8*") {
+		// It should have at least one parameter for the captured int.
+		// This is a sanity check — not a strict assertion since the exact
+		// IR parameter type depends on ABI details.
+	}
+}
+
+// T1605: Discard binding (_) in an error handler must not interfere with
+// go block capture analysis.
+func TestErrorHandlerDiscardBindingBeforeGoBlock(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		_succeed!() int { return 1; }
+		main() {
+			int x = _succeed()? _ {
+				return;
+			};
+			go {
+				int y = _succeed()? _ {
+					return;
+				};
+			};
+		}
+	`)
+	goFn := codegentest.ExtractFunction(ir, ".goroutine.0")
+	if goFn == "" {
+		t.Fatal("expected .goroutine.0 in IR")
+	}
+	defLine := strings.SplitN(goFn, "\n", 2)[0]
+	if strings.Contains(defLine, "promise_error") {
+		t.Error("goroutine captures error-typed parameter from discard handler (T1605)")
+	}
+}

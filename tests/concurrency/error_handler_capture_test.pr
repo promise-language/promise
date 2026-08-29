@@ -1,0 +1,149 @@
+// T1605: error handler binding must not leak into go block capture analysis.
+// When a failable expression `? e { ... e.message ... }` is followed by a
+// `go { ... ? e { ... e.message ... } }`, the outer handler's `e` must not
+// be captured by the goroutine. Previously the outer `e` remained in
+// c.locals after the handler scope exited, causing collectBlockIdents to
+// false-capture it — the goroutine then dropped poisoned memory on exit.
+_succeed!() int {
+  return 1;
+}
+
+_cycle(int idx, channel[string] done) {
+  // Outer error handler with e.message — binding must be cleaned up after.
+  int x = _succeed()? e {
+    print_line("outer fail " + e.message);
+    return;
+  };
+  go {
+    // Inner error handler reuses the name `e` — must NOT capture the outer `e`.
+    int y = _succeed()? e {
+      print_line("inner fail " + e.message);
+      return;
+    };
+    done.send("round " + idx.to_string() + ": OK");
+  };
+}
+
+test_error_handler_binding_no_false_capture() `test(exclude: wasm) {
+  channel[string] done = channel[string](capacity: 1);
+  // Multiple rounds — the bug manifested on the second round when the
+  // first goroutine's drop ran against freed memory.
+  _cycle(1, done);
+  if v := <-done {
+    assert(v == "round 1: OK", "round 1");
+  }
+  _cycle(2, done);
+  if v := <-done {
+    assert(v == "round 2: OK", "round 2");
+  }
+  _cycle(3, done);
+  if v := <-done {
+    assert(v == "round 3: OK", "round 3");
+  }
+}
+
+// T1605: Multiple sequential error handlers before a go block.
+_multi_handler_cycle(int idx, channel[string] done) {
+  int a = _succeed()? e {
+    print_line("a fail " + e.message);
+    return;
+  };
+  int b = _succeed()? e {
+    print_line("b fail " + e.message);
+    return;
+  };
+  go {
+    int c = _succeed()? e {
+      print_line("go fail " + e.message);
+      return;
+    };
+    done.send("multi " + idx.to_string() + ": OK");
+  };
+}
+
+test_multiple_handlers_before_go_block() `test(exclude: wasm) {
+  channel[string] done = channel[string](capacity: 1);
+  _multi_handler_cycle(1, done);
+  if v := <-done {
+    assert(v == "multi 1: OK", "multi round 1");
+  }
+  _multi_handler_cycle(2, done);
+  if v := <-done {
+    assert(v == "multi 2: OK", "multi round 2");
+  }
+  _multi_handler_cycle(3, done);
+  if v := <-done {
+    assert(v == "multi 3: OK", "multi round 3");
+  }
+}
+
+// T1605: Typed error handler with else binding followed by a go block.
+type TestIoError is error {
+  int code;
+}
+_fail_typed!() int {
+  raise TestIoError(message: "io err", code: 99);
+}
+
+_typed_cycle(int idx, channel[string] done) {
+  // Typed handler catches TestIoError; else catches other errors.
+  // Neither handler is taken since _succeed() never raises.
+  int x = _succeed()? e is TestIoError {
+    print_line("typed " + e.code.to_string());
+    return;
+  } else f {
+    print_line("else " + f.message);
+    return;
+  };
+  go {
+    int y = _succeed()? e is TestIoError {
+      print_line("go typed " + e.code.to_string());
+      return;
+    } else f {
+      print_line("go else " + f.message);
+      return;
+    };
+    done.send("typed " + idx.to_string() + ": OK");
+  };
+}
+
+test_typed_handler_else_binding_before_go_block() `test(exclude: wasm) {
+  channel[string] done = channel[string](capacity: 1);
+  _typed_cycle(1, done);
+  if v := <-done {
+    assert(v == "typed 1: OK", "typed round 1");
+  }
+  _typed_cycle(2, done);
+  if v := <-done {
+    assert(v == "typed 2: OK", "typed round 2");
+  }
+  _typed_cycle(3, done);
+  if v := <-done {
+    assert(v == "typed 3: OK", "typed round 3");
+  }
+}
+
+// T1605: Discard handler binding (_) before a go block.
+_discard_cycle(int idx, channel[string] done) {
+  int x = _succeed()? _ {
+    return;
+  };
+  go {
+    int y = _succeed()? _ {
+      return;
+    };
+    done.send("discard " + idx.to_string() + ": OK");
+  };
+}
+
+test_discard_handler_before_go_block() `test(exclude: wasm) {
+  channel[string] done = channel[string](capacity: 1);
+  _discard_cycle(1, done);
+  if v := <-done {
+    assert(v == "discard 1: OK", "discard round 1");
+  }
+  _discard_cycle(2, done);
+  if v := <-done {
+    assert(v == "discard 2: OK", "discard round 2");
+  }
+}

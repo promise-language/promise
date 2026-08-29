@@ -141,6 +141,7 @@ func TestWinLinkValidWrongArch(t *testing.T) {
 }
 
 func TestFindWindowsLinkSurfaceRejectsArm64(t *testing.T) {
+	t.Parallel()
 	for _, target := range []string{
 		"aarch64-pc-windows-msvc",
 		"arm64-pc-windows-msvc",

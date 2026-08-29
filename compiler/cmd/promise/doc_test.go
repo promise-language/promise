@@ -1514,6 +1514,7 @@ func TestDocMemberOrderingMultipleFactoriesAndDropClose(t *testing.T) {
 }
 
 func TestDocUsageContainsModules(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	printDocUsage(&buf)
 	out := buf.String()
@@ -1553,6 +1554,7 @@ func TestDocUsageContainsModules(t *testing.T) {
 // === T0699: module-name resolution for local directories ===
 
 func TestResolveLocalModuleNameFromToml(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"my_module\"\nepoch = \"2026.0\"\n"), 0o644); err != nil {
@@ -1565,6 +1567,7 @@ func TestResolveLocalModuleNameFromToml(t *testing.T) {
 }
 
 func TestResolveLocalModuleNameFromBasename(t *testing.T) {
+	t.Parallel()
 	// Directory without promise.toml — falls back to absolute-path basename.
 	dir := t.TempDir() // e.g. /tmp/TestResolveLocal.../001
 	base := filepath.Base(dir)

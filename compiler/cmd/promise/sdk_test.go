@@ -163,6 +163,7 @@ func TestEnsureBundledSDKSkipsWriteWhenCurrent(t *testing.T) {
 }
 
 func TestFindMacOSSDKSucceeds(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS-only test")
 	}

@@ -61,8 +61,12 @@ func TestWriteToolchainStubsCoversLLD(t *testing.T) {
 // TestLLVMToolProbeReportsUnrunnableTool covers the doctor gap this bug exposed:
 // a tool that is present but cannot execute — the shape of a missing host
 // library — must be reported as such, not silently as "no version".
+// Deliberately not parallel. It asserts on the exact stderr of a stand-in tool,
+// and the parallel phase of this package spawns hundreds of processes at once;
+// a fork that fails under that load would surface as a different message and
+// fail the test for a reason it is not about. It costs 0.00s, so running it in
+// the sequential phase is free (T1778).
 func TestLLVMToolProbeReportsUnrunnableTool(t *testing.T) {
-	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script stand-in is POSIX-only")
 	}

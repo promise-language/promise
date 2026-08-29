@@ -59,6 +59,7 @@ func makeSubdirRepo(t *testing.T, mods map[string]string) (bareRepo, commit stri
 // two modules that live in subdirectories of one repo (which has no root
 // manifest), both link into one binary, and each gets its own IR prefix.
 func TestBuildSubdirRemoteModules(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -68,7 +69,7 @@ func TestBuildSubdirRemoteModules(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	repo, commit := makeSubdirRepo(t, map[string]string{
 		"wire":  "proto/wire",
@@ -89,9 +90,8 @@ func TestBuildSubdirRemoteModules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, out)
 	}
@@ -101,9 +101,8 @@ func TestBuildSubdirRemoteModules(t *testing.T) {
 
 	// Each module must carry its own IR prefix — without the subdir in the module
 	// identity both would sanitize to the same prefix and collide.
-	emit := exec.Command(bin, "emit-ir", ".")
-	emit.Dir = dir
-	ir, err := emit.CombinedOutput()
+	irStr, err := cli.promise(t, dir, "emit-ir", ".")
+	ir := []byte(irStr)
 	if err != nil {
 		t.Fatalf("emit-ir failed: %v\n%s", err, ir)
 	}
@@ -123,6 +122,7 @@ func TestBuildSubdirRemoteModules(t *testing.T) {
 // A [require.NAME] entry whose subdir names a directory with no promise.toml must
 // fail with a message that points at the subdir.
 func TestBuildSubdirRemoteModuleMissingManifest(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -132,7 +132,7 @@ func TestBuildSubdirRemoteModuleMissingManifest(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	repo, commit := makeSubdirRepo(t, map[string]string{"wire": "proto/wire"})
 
@@ -147,9 +147,8 @@ func TestBuildSubdirRemoteModuleMissingManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	build := exec.Command(bin, "build", ".")
-	build.Dir = dir
-	out, _ := build.CombinedOutput()
+	outStr, _ := cli.promise(t, dir, "build", ".")
+	out := []byte(outStr)
 	if !strings.Contains(string(out), "no promise.toml at") || !strings.Contains(string(out), "proto/nope") {
 		t.Fatalf("expected an error naming the missing subdir, got:\n%s", out)
 	}
@@ -159,13 +158,14 @@ func TestBuildSubdirRemoteModuleMissingManifest(t *testing.T) {
 // in that repo to a local checkout — and a replaced module keeps the remote
 // identity (same IR prefix), so the build cache does not split.
 func TestSubdirRemoteModuleReplace(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	// A local checkout of the same repo layout — no git needed, [replace] wins
 	// before any fetch.
@@ -199,9 +199,8 @@ func TestSubdirRemoteModuleReplace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, out)
 	}
@@ -209,9 +208,8 @@ func TestSubdirRemoteModuleReplace(t *testing.T) {
 		t.Fatalf("expected both replaced subdir modules to link in, got:\n%s", out)
 	}
 
-	emit := exec.Command(bin, "emit-ir", ".")
-	emit.Dir = dir
-	ir, err := emit.CombinedOutput()
+	irStr, err := cli.promise(t, dir, "emit-ir", ".")
+	ir := []byte(irStr)
 	if err != nil {
 		t.Fatalf("emit-ir failed: %v\n%s", err, ir)
 	}
@@ -227,6 +225,7 @@ func TestSubdirRemoteModuleReplace(t *testing.T) {
 // module's URL-derived IR prefix, so resolving `wire.greet` by assuming
 // prefix == import name panicked in codegen.
 func TestBuildNamedRequireRootModule(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -236,7 +235,7 @@ func TestBuildNamedRequireRootModule(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	// Empty subdir → the module's promise.toml lands at the repo root.
 	repo, commit := makeSubdirRepo(t, map[string]string{"wire": ""})
@@ -252,9 +251,8 @@ func TestBuildNamedRequireRootModule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, out)
 	}
@@ -270,7 +268,7 @@ func TestBuildAliasedCatalogImport(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -282,9 +280,8 @@ func TestBuildAliasedCatalogImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, out)
 	}
@@ -332,26 +329,15 @@ func TestAddWithSubdir(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping verify integration test in short mode")
 	}
-	setupGitTestEnv(t)
-	testVerifyCompilerBin = findPromiseBinary(t)
-	defer func() { testVerifyCompilerBin = "" }()
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Parallel()
+	cli := newCLIEnv(t)
 	epoch := compilerEpochForTest(t)
 
 	bareDir := filepath.ToSlash(shortRepoDir(t))
 	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
-	run := func(dir, name string, args ...string) {
-		t.Helper()
-		cmd := exec.Command(name, args...)
-		cmd.Dir = dir
-		cmd.Env = os.Environ()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
-		}
-	}
+	run := func(dir, name string, args ...string) { cli.run(t, dir, name, args...) }
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
@@ -371,15 +357,7 @@ func TestAddWithSubdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig, _ := os.Getwd()
-	defer os.Chdir(orig)
-	os.Chdir(projDir)
-
-	out := captureStdout(t, func() {
-		captureStderr(func() {
-			runAdd([]string{"--subdir", "proto/wire", bareDir, "v1.0"})
-		})
-	})
+	out := cli.promiseOK(t, projDir, "package", "add", "--subdir", "proto/wire", bareDir, "v1.0")
 	if !strings.Contains(out, "use wire;") {
 		t.Errorf("expected the import hint in output, got: %s", out)
 	}
@@ -411,7 +389,7 @@ func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -427,9 +405,8 @@ func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, out)
 	}
@@ -448,7 +425,7 @@ func TestSameAliasTwoModulesAllowed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	cli := newCLIEnv(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -464,9 +441,8 @@ func TestSameAliasTwoModulesAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("expected both aliased modules to resolve, run failed: %v\n%s", err, out)
 	}
@@ -714,6 +690,7 @@ func TestPinRejectsDoubleSlashURL(t *testing.T) {
 // (url, commit), so both must resolve — and each must see the source from *its*
 // commit, not from whichever one was fetched first (T1524).
 func TestBuildSubdirModulesAtDifferentCommits(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
@@ -723,8 +700,7 @@ func TestBuildSubdirModulesAtDifferentCommits(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	cli := newCLIEnv(t)
 
 	work := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(work, 0755); err != nil {
@@ -778,9 +754,8 @@ func TestBuildSubdirModulesAtDifferentCommits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := exec.Command(bin, "run", ".")
-	run.Dir = dir
-	out, err := run.CombinedOutput()
+	outStr, err := cli.promise(t, dir, "run", ".")
+	out := []byte(outStr)
 	if err != nil {
 		t.Fatalf("run failed: %v\n%s", err, out)
 	}
@@ -800,36 +775,16 @@ func TestUpdateNamedSubdirEntry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
 	}
-	setupGitTestEnv(t)
-	testVerifyCompilerBin = findPromiseBinary(t)
-	defer func() { testVerifyCompilerBin = "" }()
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Parallel()
+	cli := newCLIEnv(t)
 	epoch := compilerEpochForTest(t)
 
 	bareDir := filepath.ToSlash(shortRepoDir(t))
 	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
-	run := func(dir, name string, args ...string) {
-		t.Helper()
-		cmd := exec.Command(name, args...)
-		cmd.Dir = dir
-		cmd.Env = os.Environ()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
-		}
-	}
-	headOf := func(dir string) string {
-		t.Helper()
-		cmd := exec.Command("git", "rev-parse", "HEAD")
-		cmd.Dir = dir
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.TrimSpace(string(out))
-	}
+	run := func(dir, name string, args ...string) { cli.run(t, dir, name, args...) }
+	headOf := func(dir string) string { return cli.git(t, dir, "rev-parse", "HEAD") }
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
@@ -861,13 +816,7 @@ func TestUpdateNamedSubdirEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig, _ := os.Getwd()
-	defer os.Chdir(orig)
-	os.Chdir(projDir)
-
-	out := captureStdout(t, func() {
-		captureStderr(func() { runPkgUpdate(nil) })
-	})
+	out := cli.promiseOK(t, projDir, "package", "update")
 	if !strings.Contains(out, "Updated 1 of 1") {
 		t.Fatalf("expected 'Updated 1 of 1', got: %s", out)
 	}
@@ -898,26 +847,15 @@ func TestAddNamedWithoutSubdir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
 	}
-	setupGitTestEnv(t)
-	testVerifyCompilerBin = findPromiseBinary(t)
-	defer func() { testVerifyCompilerBin = "" }()
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Parallel()
+	cli := newCLIEnv(t)
 	epoch := compilerEpochForTest(t)
 
 	bareDir := filepath.ToSlash(shortRepoDir(t))
 	workDir := shortRepoDir(t)
 	projDir := t.TempDir()
 
-	run := func(dir, name string, args ...string) {
-		t.Helper()
-		cmd := exec.Command(name, args...)
-		cmd.Dir = dir
-		cmd.Env = os.Environ()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
-		}
-	}
+	run := func(dir, name string, args ...string) { cli.run(t, dir, name, args...) }
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
@@ -932,13 +870,7 @@ func TestAddNamedWithoutSubdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig, _ := os.Getwd()
-	defer os.Chdir(orig)
-	os.Chdir(projDir)
-
-	out := captureStdout(t, func() {
-		captureStderr(func() { runAdd([]string{"--name", "helper", bareDir, "v1.0"}) })
-	})
+	out := cli.promiseOK(t, projDir, "package", "add", "--name", "helper", bareDir, "v1.0")
 	if !strings.Contains(out, "use helper;") {
 		t.Errorf("expected the import hint to use the --name value, got: %s", out)
 	}
@@ -977,7 +909,6 @@ func TestLoadCatalogSubdirEntry(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	repo, commit := makeSubdirRepo(t, map[string]string{"wire": "proto/wire"})
 

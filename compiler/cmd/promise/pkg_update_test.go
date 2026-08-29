@@ -435,6 +435,7 @@ func TestRunUpdateRejectsEpochArg(t *testing.T) {
 // module), so a URL target must take all of them, not whichever one map iteration
 // happened to reach first.
 func TestSelectUpdateEntries(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "promise.toml")
 	toml := `[module]

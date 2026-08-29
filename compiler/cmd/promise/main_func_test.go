@@ -72,6 +72,7 @@ func TestHasMainFunc(t *testing.T) {
 }
 
 func TestDiscoverProject(t *testing.T) {
+	t.Parallel()
 	writeFile := func(t *testing.T, dir, name, content string) {
 		t.Helper()
 		path := filepath.Join(dir, name)

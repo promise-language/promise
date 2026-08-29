@@ -139,6 +139,7 @@ func TestDoctorDevGatingJSON(t *testing.T) {
 }
 
 func TestDoctorCheckInstallation(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckInstallation()
 	if c.Status != "ok" {
 		t.Errorf("expected ok, got %s: %s", c.Status, c.Summary)
@@ -180,6 +181,7 @@ func TestDoctorCheckMuslCRT(t *testing.T) {
 }
 
 func TestDoctorCheckBuildCache(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckBuildCache()
 	if c.Name != "Build cache" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -191,6 +193,7 @@ func TestDoctorCheckBuildCache(t *testing.T) {
 }
 
 func TestDoctorCheckPromiseHome(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckPromiseHome()
 	if c.Name != "PROMISE_HOME" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -250,6 +253,7 @@ func TestDoctorCheckNode(t *testing.T) {
 }
 
 func TestDoctorCheckEpochs(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckEpochs()
 	if c.Name != "Epochs" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -422,6 +426,7 @@ func TestDoctorPrintReportWithIssues(t *testing.T) {
 }
 
 func TestDoctorCheckModuleCacheDefault(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckModuleCache(false)
 	if c.Name != "Module cache" {
 		t.Errorf("unexpected name: %s", c.Name)
@@ -435,6 +440,7 @@ func TestDoctorCheckModuleCacheDefault(t *testing.T) {
 }
 
 func TestDoctorCheckInstallationDetails(t *testing.T) {
+	t.Parallel()
 	c := doctorCheckInstallation()
 	hasHome := false
 	hasBinary := false

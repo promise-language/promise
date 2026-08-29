@@ -27,6 +27,7 @@ import (
 // Rather than duplicate the symbol list, this derives it from the backend itself:
 // emit the module and collect every bodyless framework declaration.
 func TestBundledFrameworkTBDsCoverBackendSymbols(t *testing.T) {
+	t.Parallel()
 	module := ir.NewModule()
 	p, ok := pal.ForTarget("arm64-apple-darwin").(*pal.PosixPAL)
 	if !ok {
@@ -330,6 +331,7 @@ func TestDarwinTLSIRVerifies(t *testing.T) {
 // would write its terminator into the following struct member and nothing here
 // would fail. The width is therefore checked structurally instead.
 func TestTLSCipherFallbackBufferFits(t *testing.T) {
+	t.Parallel()
 	module := ir.NewModule()
 	p, ok := pal.ForTarget("arm64-apple-macosx26.0.0").(*pal.PosixPAL)
 	if !ok {

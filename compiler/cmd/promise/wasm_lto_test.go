@@ -11,6 +11,7 @@ import (
 // late LTO pass. Keeping this test ensures we don't accidentally regress to
 // --lto-O2 (which restores the original miscompile).
 func TestWasmLinkUsesLtoO1(t *testing.T) {
+	t.Parallel()
 	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true /* useLTO */)
 	if err != nil {
 		t.Fatalf("buildWasmLinkArgs: %v", err)
@@ -28,6 +29,7 @@ func TestWasmLinkUsesLtoO1(t *testing.T) {
 // embedded math runtime (wasm_math.o). T0333: --lto-O1 doesn't constant-fold
 // sin/cos/etc., so unresolved libcall imports would appear without this object.
 func TestWasmLinkIncludesMathRuntime(t *testing.T) {
+	t.Parallel()
 	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true)
 	if err != nil {
 		t.Fatalf("buildWasmLinkArgs: %v", err)
@@ -44,6 +46,7 @@ func TestWasmLinkIncludesMathRuntime(t *testing.T) {
 // TestWasmLinkNonLTOUsesGcSections verifies the non-LTO path uses --gc-sections
 // for DCE on object files. Sanity check on the alternative branch.
 func TestWasmLinkNonLTOUsesGcSections(t *testing.T) {
+	t.Parallel()
 	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", false /* useLTO */)
 	if err != nil {
 		t.Fatalf("buildWasmLinkArgs: %v", err)
@@ -60,6 +63,7 @@ func TestWasmLinkNonLTOUsesGcSections(t *testing.T) {
 // TestWasmLinkWebTargetExportsInitialize verifies that the wasm32-web target
 // exports _initialize and memory (instead of _start) for browser bootstrapping.
 func TestWasmLinkWebTargetExportsInitialize(t *testing.T) {
+	t.Parallel()
 	args, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-web", "out.wasm", true)
 	if err != nil {
 		t.Fatalf("buildWasmLinkArgs: %v", err)

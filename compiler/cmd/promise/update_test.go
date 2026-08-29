@@ -470,6 +470,7 @@ func TestIsEpochInstalled(t *testing.T) {
 }
 
 func TestFetchReleasesIntegration(t *testing.T) {
+	t.Parallel()
 	// Mock GitHub API server.
 	releases := []ghRelease{
 		{TagName: "epoch-2026.0", Prerelease: false, Draft: false, Assets: []ghAsset{
@@ -2008,6 +2009,7 @@ func TestRunUpdateChannelSetFollows(t *testing.T) {
 // binary but no SHA256SUMS asset, checkUpdateAvailable must return an error
 // (cannot determine build identity).
 func TestCheckUpdateAvailableNextNoSHAURL(t *testing.T) {
+	t.Parallel()
 	asset := platformAssetName()
 	release := &ghRelease{
 		TagName: "epoch-next",
@@ -2028,6 +2030,7 @@ func TestCheckUpdateAvailableNextNoSHAURL(t *testing.T) {
 // TestCheckUpdateAvailableNextSHAFetchError: when SHA256SUMS is present but the
 // server returns an error, checkUpdateAvailable propagates it.
 func TestCheckUpdateAvailableNextSHAFetchError(t *testing.T) {
+	t.Parallel()
 	asset := platformAssetName()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -2333,6 +2336,7 @@ func TestVerifySHA256FileMissing(t *testing.T) {
 // TestFindLatestStableReleaseFetchError: findLatestStableRelease must propagate
 // the fetchReleases error when the server returns a non-200 response.
 func TestFindLatestStableReleaseFetchError(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		w.Write([]byte(`{"message":"bad gateway"}`))

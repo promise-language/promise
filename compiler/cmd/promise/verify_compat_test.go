@@ -456,6 +456,7 @@ func TestResolveEpochAwareHeadFallback(t *testing.T) {
 // project whose only dep has a verified E-compatible version reports all-clear; a
 // project whose dep is broken hits the §9.10 gate and exits non-zero.
 func TestCheckUpgradeWithDeps(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}

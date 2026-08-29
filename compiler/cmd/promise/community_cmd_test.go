@@ -61,18 +61,11 @@ func makeCommunityCatalogRepo(t *testing.T, modulesTOML string, indexFiles map[s
 // makeTaggedModuleRepo creates a bare git "remote" carrying a verifiable module
 // (good=true → compiles + tests pass) tagged epoch-<epoch>. Returns (bareDir,
 // headCommit).
-func makeTaggedModuleRepo(t *testing.T, name, epoch string, good bool) (string, string) {
+func makeTaggedModuleRepo(t *testing.T, cli *cliEnv, name, epoch string, good bool) (string, string) {
 	t.Helper()
 	bareDir := filepath.ToSlash(shortRepoDir(t))
 	workDir := shortRepoDir(t)
-	run := func(dir string, args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = os.Environ()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
+	run := func(dir string, args ...string) { cli.git(t, dir, args...) }
 	run(bareDir, "init", "--bare", ".")
 	run(workDir, "clone", bareDir, ".")
 	writeMod(t, workDir, name, good)
@@ -286,23 +279,13 @@ func TestRunPackageCheckEpoch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping verify integration test in short mode")
 	}
-	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
-	testVerifyCompilerBin = findPromiseBinary(t)
-	defer func() { testVerifyCompilerBin = "" }()
+	t.Parallel()
+	cli := newCLIEnv(t)
 	epoch := compilerEpochForTest(t)
 
 	modDir := t.TempDir()
 	writeMod(t, modDir, "lib", true)
-	orig, _ := os.Getwd()
-	defer os.Chdir(orig)
-	os.Chdir(modDir)
-
-	out := captureStdout(t, func() {
-		captureStderr(func() {
-			runPackageCheckEpoch([]string{epoch})
-		})
-	})
+	out := cli.promiseOK(t, modDir, "package", "check-epoch", epoch)
 	if !strings.Contains(out, "✓ compatible") || !strings.Contains(out, "git tag epoch-"+epoch) {
 		t.Errorf("expected pass + tag hint, got: %s", out)
 	}
@@ -314,23 +297,17 @@ func TestRunPackageBuildIndex(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping verify integration test in short mode")
 	}
-	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
-	testVerifyCompilerBin = findPromiseBinary(t)
-	defer func() { testVerifyCompilerBin = "" }()
+	t.Parallel()
+	cli := newCLIEnv(t)
 	epoch := compilerEpochForTest(t)
 
-	bareDir, headCommit := makeTaggedModuleRepo(t, "mymod", epoch, true)
+	bareDir, headCommit := makeTaggedModuleRepo(t, cli, "mymod", epoch, true)
 
 	catalogDir := t.TempDir()
 	os.WriteFile(filepath.Join(catalogDir, "modules.toml"),
 		[]byte("[modules.mymod]\nurl = \""+bareDir+"\"\n"), 0644)
 
-	out := captureStdout(t, func() {
-		captureStderr(func() {
-			runPackageBuildIndex([]string{catalogDir, epoch})
-		})
-	})
+	out := cli.promiseOK(t, t.TempDir(), "package", "build-index", catalogDir, epoch)
 	if !strings.Contains(out, "✓ mymod") {
 		t.Errorf("expected '✓ mymod', got: %s", out)
 	}
@@ -555,23 +532,17 @@ func TestRunPackageBuildIndexReport(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping verify integration test in short mode")
 	}
-	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
-	testVerifyCompilerBin = findPromiseBinary(t)
-	defer func() { testVerifyCompilerBin = "" }()
+	t.Parallel()
+	cli := newCLIEnv(t)
 	epoch := compilerEpochForTest(t)
 
-	bareDir, _ := makeTaggedModuleRepo(t, "brokenmod", epoch, false) // fails to compile
+	bareDir, _ := makeTaggedModuleRepo(t, cli, "brokenmod", epoch, false) // fails to compile
 
 	catalogDir := t.TempDir()
 	os.WriteFile(filepath.Join(catalogDir, "modules.toml"),
 		[]byte("[modules.brokenmod]\nurl = \""+bareDir+"\"\n"), 0644)
 
-	out := captureStdout(t, func() {
-		captureStderr(func() {
-			runPackageBuildIndex([]string{catalogDir, epoch, "-report"})
-		})
-	})
+	out := cli.promiseOK(t, t.TempDir(), "package", "build-index", catalogDir, epoch, "-report")
 	if !strings.Contains(out, "✗ brokenmod") || !strings.Contains(out, "pre-release report") {
 		t.Errorf("expected ✗ + report note, got: %s", out)
 	}

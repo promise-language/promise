@@ -15,6 +15,7 @@ import (
 // compiler's epoch rather than a stale hardcoded literal (T0972). Both bind
 // writers use bindEpoch(), so asserting the helper covers both call sites.
 func TestBindEpochMatchesCompiler(t *testing.T) {
+	t.Parallel()
 	want, err := module.CompilerEpoch(embeddedCatalog)
 	if err != nil || want == "" {
 		want = "2026.1" // mirror bindEpoch's fallback

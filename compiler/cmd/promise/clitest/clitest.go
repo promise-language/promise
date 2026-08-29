@@ -157,11 +157,44 @@ func (e *Env) CompilerEpoch(t *testing.T) string {
 	if err != nil {
 		t.Skipf("cannot determine compiler epoch: %v\n%s", err, out)
 	}
+	return parseCatalogEpoch(t, out)
+}
+
+// CompilerEpoch is the Env-free form, for a test that drives the binary itself
+// rather than through an Env.
+func CompilerEpoch(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command(Bin(t), "catalog", "list")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "PROMISE_HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Skipf("cannot determine compiler epoch: %v\n%s", err, out)
+	}
+	return parseCatalogEpoch(t, string(out))
+}
+
+func parseCatalogEpoch(t *testing.T, out string) string {
+	t.Helper()
 	m := catalogEpochRe.FindStringSubmatch(out)
 	if m == nil {
 		t.Skipf("cannot determine compiler epoch from catalog listing:\n%s", out)
 	}
 	return m[1]
+}
+
+// MakeWorkRepo creates an initialised git working repo with a committer
+// identity, rooted at a short path (see ShortRepoDir).
+func MakeWorkRepo(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(ShortRepoDir(t), "repo")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	GitRun(t, dir, "init", "--initial-branch=main")
+	GitRun(t, dir, "config", "user.email", "t@t.com")
+	GitRun(t, dir, "config", "user.name", "T")
+	return dir
 }
 
 // WriteModule writes a minimal module (promise.toml + impl + a `test` file) into

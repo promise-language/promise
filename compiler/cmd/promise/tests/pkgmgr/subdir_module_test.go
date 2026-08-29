@@ -247,6 +247,9 @@ func TestBuildAliasedCatalogImport(t *testing.T) {
 	}
 }
 
+// T1611: two aliased catalog imports in different files must each resolve to
+// their own IR prefix, not to their alias. (Sema makes aliases project-unique, so
+// the ambiguous same-alias case cannot arise — see TestSameAliasTwoModulesRejected.)
 func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

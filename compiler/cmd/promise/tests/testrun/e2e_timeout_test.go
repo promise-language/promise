@@ -35,6 +35,13 @@ func writeInfLoopE2E(t *testing.T, dir, name, timeoutAnnot, unique string) strin
 	}
 	return path
 }
+
+// TestE2ETimeoutEmitsCanonicalTimeoutLine is the child-side guard: running an
+// e2e file alone (single file → executeE2EBinary path) on timeout must emit
+// the TIMEOUT (Xs) line with the bare test name, plus the indented
+// "timeout: exceeded Xs limit" context. It must NOT emit the legacy
+// "FAIL (timeout) ..." line (which would propagate into the gate's Test
+// identity field as a phantom ledger entry).
 func TestE2ETimeoutEmitsCanonicalTimeoutLine(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)

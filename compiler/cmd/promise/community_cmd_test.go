@@ -275,60 +275,7 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 	}
 }
 
-func TestRunPackageCheckEpoch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping verify integration test in short mode")
-	}
-	t.Parallel()
-	cli := newCLIEnv(t)
-	epoch := compilerEpochForTest(t)
-
-	modDir := t.TempDir()
-	writeMod(t, modDir, "lib", true)
-	out := cli.promiseOK(t, modDir, "package", "check-epoch", epoch)
-	if !strings.Contains(out, "✓ compatible") || !strings.Contains(out, "git tag epoch-"+epoch) {
-		t.Errorf("expected pass + tag hint, got: %s", out)
-	}
-}
-
 // --- build-index (CI matrix builder) ---
-
-func TestRunPackageBuildIndex(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping verify integration test in short mode")
-	}
-	t.Parallel()
-	cli := newCLIEnv(t)
-	epoch := compilerEpochForTest(t)
-
-	bareDir, headCommit := makeTaggedModuleRepo(t, cli, "mymod", epoch, true)
-
-	catalogDir := t.TempDir()
-	os.WriteFile(filepath.Join(catalogDir, "modules.toml"),
-		[]byte("[modules.mymod]\nurl = \""+bareDir+"\"\n"), 0644)
-
-	out := cli.promiseOK(t, t.TempDir(), "package", "build-index", catalogDir, epoch)
-	if !strings.Contains(out, "✓ mymod") {
-		t.Errorf("expected '✓ mymod', got: %s", out)
-	}
-
-	idx, err := module.LoadCompatIndex(catalogDir, epoch)
-	if err != nil || idx == nil {
-		t.Fatalf("index: %v", err)
-	}
-	e, ok := idx.Verified("mymod")
-	if !ok || e.Commit != headCommit {
-		t.Errorf("indexed commit = %+v (want %s)", e, headCommit)
-	}
-	if e.Tag != "epoch-"+epoch {
-		t.Errorf("indexed tag = %q", e.Tag)
-	}
-
-	matrix, _ := os.ReadFile(filepath.Join(catalogDir, "matrix.md"))
-	if !strings.Contains(string(matrix), "mymod") || !strings.Contains(string(matrix), "✓") {
-		t.Errorf("matrix.md missing module/✓: %s", matrix)
-	}
-}
 
 // TestResolveCommunityNoModulesToml: a community catalog repo that has no
 // modules.toml yet must resolve to not-found (an empty catalog) so resolution
@@ -522,35 +469,5 @@ func TestBuildIndexMissingModulesToml(t *testing.T) {
 	}
 	if !strings.Contains(out, "cannot read") || !strings.Contains(out, "modules.toml") {
 		t.Errorf("expected modules.toml read error, got: %s", out)
-	}
-}
-
-// TestRunPackageBuildIndexReport: a module that fails verification is absent from
-// the index and listed as unsupported; with -report the run does not exit-fail
-// (the §9.10 pre-release nudge).
-func TestRunPackageBuildIndexReport(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping verify integration test in short mode")
-	}
-	t.Parallel()
-	cli := newCLIEnv(t)
-	epoch := compilerEpochForTest(t)
-
-	bareDir, _ := makeTaggedModuleRepo(t, cli, "brokenmod", epoch, false) // fails to compile
-
-	catalogDir := t.TempDir()
-	os.WriteFile(filepath.Join(catalogDir, "modules.toml"),
-		[]byte("[modules.brokenmod]\nurl = \""+bareDir+"\"\n"), 0644)
-
-	out := cli.promiseOK(t, t.TempDir(), "package", "build-index", catalogDir, epoch, "-report")
-	if !strings.Contains(out, "✗ brokenmod") || !strings.Contains(out, "pre-release report") {
-		t.Errorf("expected ✗ + report note, got: %s", out)
-	}
-	idx, err := module.LoadCompatIndex(catalogDir, epoch)
-	if err != nil || idx == nil {
-		t.Fatalf("index: %v", err)
-	}
-	if _, ok := idx.Verified("brokenmod"); ok {
-		t.Error("failed module should be absent from the index")
 	}
 }

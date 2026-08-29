@@ -104,6 +104,9 @@ func TestIncompleteMultiFileReportsFailure(t *testing.T) {
 // un-excluded entry turns every target-excluded test in the suite into a false
 // INCOMPLETE. These lock the exclusion semantics per roster kind.
 
+// The false-positive guard: a test excluded for the current target is compiled
+// but deliberately never run, so it must not be reported as unreported. A
+// regression here would fail every target-excluded test file in the suite.
 func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)

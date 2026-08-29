@@ -10,6 +10,11 @@ import (
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
+// TestMemoryLimitHarnessReportsMemlimit is an end-to-end test: compile and run
+// a Promise test program that deliberately overruns a low memory limit; assert
+// the harness reports a MEMLIMIT outcome and exits non-zero. Uses the binary
+// produced by `bin/build` (PROMISE_TEST_BIN env override) and skips if not set
+// — keeps the unit-test path fast while still allowing CI to opt in.
 func TestMemoryLimitHarnessReportsMemlimit(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)

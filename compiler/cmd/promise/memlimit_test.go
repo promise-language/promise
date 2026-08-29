@@ -73,11 +73,6 @@ func TestParseMemoryLimitArg_RejectsBareNumbers(t *testing.T) {
 	}
 }
 
-// TestMemoryLimitHarnessReportsMemlimit is an end-to-end test: compile and run
-// a Promise test program that deliberately overruns a low memory limit; assert
-// the harness reports a MEMLIMIT outcome and exits non-zero. Uses the binary
-// produced by `bin/build` (PROMISE_TEST_BIN env override) and skips if not set
-// — keeps the unit-test path fast while still allowing CI to opt in.
 func hasConsecutive(args []string, a, b string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == a && args[i+1] == b {
@@ -191,12 +186,6 @@ func TestBuildChildTestArgs_DefaultCompileTimeoutOmitted(t *testing.T) {
 	}
 }
 
-// TestMemoryLimitForwardedToMultiFileRun is an end-to-end test locking the
-// T0738 fix: a runaway test (no memory_limit: annotation, so it depends on the
-// CLI flag) plus a trivial test are run together via the multi-file
-// runTestFiles path (two file paths). With -memory-limit 8MB forwarded to the
-// children, the runaway trips MEMLIMIT. Pre-fix this passed (children ran at
-// the 2 GiB default), so the test guards the forwarding specifically.
 func TestComputeTestMemoryLimits(t *testing.T) {
 	mkFunc := func(name string) *types.Func {
 		return types.NewFunc(types.Pos{}, name, nil)

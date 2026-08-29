@@ -11,6 +11,12 @@ import (
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
+// TestExecCacheHitEndToEnd drives the real `promise exec` binary twice over the
+// same source (T0857): the first invocation must compile and report a cache MISS,
+// the second must skip compilation and report a cache HIT. Both must produce the
+// program's stdout. This is the only path that exercises runExec + the cache
+// save/lookup + executeExecBinary end-to-end. A per-run nonce in a leading comment
+// guarantees the first run is a genuine miss regardless of prior cache state.
 func TestExecCacheHitEndToEnd(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)

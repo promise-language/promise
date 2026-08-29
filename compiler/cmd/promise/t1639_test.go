@@ -174,8 +174,8 @@ func TestClampRunTimeout(t *testing.T) {
 
 	// Never below the floor, even when the backstop is already blown.
 	blown := now.Add(-30 * time.Minute)
-	if got := clampRunTimeout(920*time.Second, cfg, "", blown); got != 10*time.Second {
-		t.Errorf("blown-backstop budget = %s, want the 10s floor", got)
+	if got := clampRunTimeout(920*time.Second, cfg, "", blown); got != 5*time.Second {
+		t.Errorf("blown-backstop budget = %s, want the 5s floor", got)
 	}
 
 	// WASM gets the longer backstop, so its clamp is correspondingly looser.

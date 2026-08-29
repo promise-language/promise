@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/hex"
@@ -1205,6 +1206,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			totalNs += ns
 		}
 		processTimeout := time.Duration(totalNs) + 30*time.Second
+		warmTestBinary(binaryPath, targetTriple, cfg, start)
 		runTestBinaryWithCoverage(binaryPath, processTimeout, cfg, start, targetTriple, regions, roster)
 		return
 	}
@@ -1319,6 +1321,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		})
 	}
 
+	warmTestBinary(binaryPath, targetTriple, cfg, start)
 	runTestBinary(binaryPath, processTimeout, cfg, start, targetTriple, roster)
 }
 
@@ -1350,6 +1353,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			totalNs += ns
 		}
 		processTimeout := time.Duration(totalNs) + 30*time.Second
+		warmTestBinary(binaryPath, targetTriple, cfg, start)
 		runTestBinaryWithCoverage(binaryPath, processTimeout, cfg, start, targetTriple, regions, roster)
 		return
 	}
@@ -1469,6 +1473,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		})
 	}
 
+	warmTestBinary(binaryPath, targetTriple, cfg, start)
 	runTestBinary(binaryPath, processTimeout, cfg, start, targetTriple, roster)
 }
 
@@ -1718,12 +1723,15 @@ func clampRunTimeout(timeout time.Duration, cfg testTimeoutConfig, target string
 	}
 	const (
 		slack = 15 * time.Second
-		// floor must be large enough for the test binary to start, initialize
-		// the M:N scheduler (spin-wait for all worker threads), and run at least
-		// one test — even on a heavily-loaded machine running many parallel tests.
-		// 5s was too tight: under parallel verify load the scheduler spin-wait
-		// alone could consume the whole budget before any test reported (T1639).
-		floor = 10 * time.Second
+		// The floor only engages once compile has all but exhausted the
+		// backstop, so whatever it returns is time the child spends past the
+		// point the parent's backstop is due to fire. A bigger floor is
+		// therefore strictly worse at this clamp's one job — expiring before
+		// the parent, so the child can name the test that wedged. Keep it
+		// small. It was briefly raised to 10s to chase a flake that turned out
+		// to be pre-main OS time charged to the budget (T1815); no floor value
+		// could have fixed that, since the tax scales with concurrency.
+		floor = 5 * time.Second
 	)
 	budget := computeParentTimeout(cfg, target) - time.Since(start) - slack
 	if budget < floor {
@@ -1792,6 +1800,92 @@ func truncatedBatchSummary(c childOutcomeCounts, skipped, extraTimedOut, incompl
 		summary += fmt.Sprintf(", %d incomplete", incomplete)
 	}
 	return summary
+}
+
+// testWarmupFlag makes a freshly built batch test binary exit immediately,
+// before it starts the scheduler or runs a test. Must match the constant the
+// generated main checks (codegen.GenerateTestMain).
+//
+// An argument rather than an environment variable: an env var is inherited by
+// every subprocess a test spawns, and can be set once in a shell and forgotten,
+// either of which would make every test in the batch silently report
+// INCOMPLETE. An argv flag reaches exactly the process the runner invoked.
+const testWarmupFlag = "--warmup"
+
+// warmTestBinary pays macOS's first-exec code-signature scan on a binary we
+// just linked, before any test budget is armed.
+//
+// macOS checks a never-before-seen executable synchronously inside exec(),
+// before main, and caches the result per cdhash. Since the batch budget is
+// armed at spawn, the first exec charges that OS time to the tests: measured
+// here, 64 freshly linked test binaries exec'd concurrently took a median of
+// 25.8s to reach main, while a second exec of the same binaries took 0.02s.
+// The budget was then reported as "N of M tests did not report", naming a test
+// that had never run. When bin/verify has to rebuild the compiler, the compiler
+// hash changes and every cached test binary is invalidated, so that run is
+// entirely first execs.
+//
+// Running it here moves that cost into the compile phase, where build cost
+// belongs and where the process backstop already applies. This is a mitigation,
+// not an accounting fix — the budget still starts at spawn (T1815).
+//
+// Only on macOS: no other platform scans on first exec, so elsewhere this would
+// be a pure extra spawn per test binary. Only for a binary we just built: a
+// cache hit was already warmed when it was built, and its cdhash has not
+// changed, so re-warming would buy nothing.
+func warmTestBinary(binaryPath, targetTriple string, cfg testTimeoutConfig, start time.Time) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+	// WASM runs under wasmtime/node, which re-prepares the module every run;
+	// there is no per-binary scan to pre-pay.
+	if isWasmTarget(target) || isWasmWebTarget(target) {
+		return
+	}
+	// Bounded by the backstop that already covers this phase — not a new limit.
+	budget := computeParentTimeout(cfg, target) - time.Since(start)
+	if budget <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binaryPath, testWarmupFlag)
+	isolateProcessGroup(cmd)
+	out, err := cmd.CombinedOutput()
+
+	// The contract is narrow and total: a warm-up run exits 0, promptly, having
+	// printed nothing, because the generated batch main checks the variable
+	// before it starts the scheduler or runs a test. Every other outcome means
+	// the binary did not honour it — and the silent one is the dangerous one. A
+	// binary that ignores the variable runs the whole suite here and exits 0,
+	// so without checking the output this would degrade to "warm-up does
+	// nothing, tests run twice" with no signal at all, and the timeouts it was
+	// meant to prevent would come back looking like a fresh mystery.
+	//
+	// So warn on all three, naming the variable: whoever changes
+	// GenerateTestMain and breaks the contract finds out immediately instead of
+	// tracing intermittent budget timeouts. The run itself continues — this is
+	// a mitigation, and refusing to run tests over it would be worse than the
+	// mis-attribution it prevents (T1815).
+	const contract = "test binary warm-up broken"
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		fmt.Fprintf(os.Stderr, "warning: %s: %s did not exit within the remaining backstop "+
+			"when passed %s; it no longer honours the warm-up flag\n",
+			contract, filepath.Base(binaryPath), testWarmupFlag)
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "warning: %s: %s failed when passed %s: %v\n",
+			contract, filepath.Base(binaryPath), testWarmupFlag, err)
+	case len(bytes.TrimSpace(out)) > 0:
+		fmt.Fprintf(os.Stderr, "warning: %s: %s produced output when passed %s, so it ran instead "+
+			"of exiting early; the first-exec scan is still being charged to the test budget "+
+			"and the tests just ran twice (see codegen.GenerateTestMain)\n",
+			contract, filepath.Base(binaryPath), testWarmupFlag)
+	}
 }
 
 // runTestBinary executes a compiled test binary and prints formatted results.

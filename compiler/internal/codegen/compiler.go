@@ -622,6 +622,7 @@ type Compiler struct {
 	isWasm                bool       // true if targeting wasm32
 	isWasmWeb             bool       // true if targeting wasm32-web (browser/Node host, no WASI)
 	isWindows             bool       // true if targeting windows-msvc
+	isMacOS               bool       // true if targeting apple/macosx
 	windowsRuntimeEmitted bool       // T0772: guards one-time emission of the Windows crt0 + TLS/chkstk/_fltused support
 	debugAllocator        bool       // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
 	memoryLimitAccounting bool       // T0689: emit memory-limit counter + helpers (test binaries with -memory-limit > 0)
@@ -937,6 +938,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		isWasm:    strings.Contains(target, "wasm"),
 		isWasmWeb: strings.Contains(target, "wasm") && strings.Contains(target, "web"),
 		isWindows: strings.Contains(target, "windows"),
+		isMacOS:   strings.Contains(target, "apple"),
 		funcs:     make(map[string]*ir.Func),
 
 		monoLayouts:         make(map[string]*TypeDeclLayout),
@@ -1142,6 +1144,18 @@ func (c *Compiler) emitGsOutstanding(blk *ir.Block) value.Value {
 	return blk.NewSub(created, completed)
 }
 
+// testAliveFD is the descriptor the generated test main signals liveness on.
+// The runner passes the write end of a pipe there via cmd.ExtraFiles, which
+// makes it fd 3 in the child (0/1/2 being stdin/stdout/stderr). See T1815.
+const testAliveFD = 3
+
+// testWarmupFlag is the sole argument that makes a test binary exit
+// immediately, before it starts the scheduler or runs a test. The runner passes
+// it to pay macOS's first-exec code-signature scan before the batch budget is
+// armed; see GenerateTestMain. Only batch test binaries honour it — snapshot
+// tests keep a normal main and are never warmed.
+const testWarmupFlag = "--warmup"
+
 // GenerateTestMain replaces the user's main() with a test runner that calls
 // each test function via a codegen-emitted thread-based runner.
 // On non-WASM targets, per-test panic recovery allows subsequent tests to run
@@ -1192,6 +1206,72 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Store argc/argv into globals for os.args() / os.executable()
 	entry.NewStore(mainFn.Params[0], c.argcGlobal)
 	entry.NewStore(mainFn.Params[1], c.argvGlobal)
+
+	// Pre-warm exit. macOS runs a code-signature/malware check on the first
+	// exec of a never-before-seen binary, synchronously inside exec() and
+	// before main. It is cached per cdhash, so it is paid exactly once — but
+	// the first payer is the timed test run, and the batch budget is armed at
+	// spawn, so that OS time is charged to the tests. Measured on this repo's
+	// own test binaries: 64 freshly linked binaries exec'd concurrently took a
+	// median of 25.8s to reach main; a second exec of the same binaries took
+	// 0.02s. When bin/verify has to rebuild the compiler, the compiler hash
+	// changes and every cached test binary is invalidated, so that run is
+	// entirely first execs.
+	//
+	// The runner execs the binary once with the warm-up flag before it arms the
+	// budget, so the scan is paid in the compile phase where build cost belongs.
+	// This must come before sched_init: a warm-up run then starts no threads and
+	// allocates nothing, so it cannot perturb the B0165 alloc-count reset or
+	// per-test leak accounting.
+	//
+	// The flag is an argument, not an environment variable, on purpose. An env
+	// var is inherited by every subprocess a test spawns and can be set once in
+	// a shell and forgotten, and either way every test in the batch would
+	// silently report INCOMPLETE. An argv flag reaches exactly the process the
+	// runner invoked.
+	//
+	// macOS only, and gated positively: it is the only platform that scans on
+	// first exec, so everywhere else this would be dead argv parsing in every
+	// test binary. A negative check would opt each new platform in silently.
+	if c.isMacOS {
+		flagStr := testWarmupFlag + "\x00"
+		warmupFlagGlobal := c.module.NewGlobalDef(".str.test_warmup_flag",
+			constant.NewCharArrayFromString(flagStr))
+		warmupFlagGlobal.Immutable = true
+		warmupFlagGlobal.Linkage = enum.LinkagePrivate
+		warmupFlagPtr := entry.NewGetElementPtr(
+			constant.NewCharArrayFromString(flagStr).Typ,
+			warmupFlagGlobal,
+			constant.NewInt(irtypes.I64, 0),
+			constant.NewInt(irtypes.I64, 0),
+		)
+
+		warmupCheckLen := mainFn.NewBlock("warmup_check_len")
+		warmupCompare := mainFn.NewBlock("warmup_compare")
+		warmupExit := mainFn.NewBlock("warmup_exit")
+		afterWarmup := mainFn.NewBlock("after_warmup")
+
+		// argc >= 2 — a normal test run passes no arguments at all.
+		hasArg := entry.NewICmp(enum.IPredSGE, mainFn.Params[0], constant.NewInt(irtypes.I32, 2))
+		entry.NewCondBr(hasArg, warmupCheckLen, afterWarmup)
+
+		// Length first, so the memcmp below cannot read past a shorter argument.
+		argvOne := warmupCheckLen.NewGetElementPtr(irtypes.I8Ptr, mainFn.Params[1],
+			constant.NewInt(irtypes.I64, 1))
+		arg1 := warmupCheckLen.NewLoad(irtypes.I8Ptr, argvOne)
+		arg1Len := warmupCheckLen.NewCall(c.funcs["strlen"], arg1)
+		lenMatches := warmupCheckLen.NewICmp(enum.IPredEQ, arg1Len,
+			constant.NewInt(irtypes.I64, int64(len(testWarmupFlag))))
+		warmupCheckLen.NewCondBr(lenMatches, warmupCompare, afterWarmup)
+
+		cmp := warmupCompare.NewCall(c.funcs["memcmp"], arg1, warmupFlagPtr,
+			constant.NewInt(irtypes.I64, int64(len(testWarmupFlag))))
+		isWarmup := warmupCompare.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0))
+		warmupCompare.NewCondBr(isWarmup, warmupExit, afterWarmup)
+
+		warmupExit.NewRet(constant.NewInt(irtypes.I32, 0))
+		entry = afterWarmup
+	}
 
 	// Register VEH handler for stack overflow detection (B0010) and crash
 	// handling on Windows (B0148). Must be before sched_init which creates threads.

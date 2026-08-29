@@ -1743,6 +1743,35 @@ func clampRunTimeout(timeout time.Duration, cfg testTimeoutConfig, target string
 	return budget
 }
 
+// reportNeverAliveRun prints the outcome for a test process killed before it
+// ever reached main, then exits non-zero.
+//
+// No test is named. Every test on the roster had exactly zero time, so blaming
+// the first one — as the batch-budget path does, correctly, for a process that
+// did start — would point the reader at a test that never ran (T1815). It
+// follows the "<teardown>" convention already used for a process that wedges
+// after every test reported: the bracketed word names the phase, not a test.
+func reportNeverAliveRun(missing []string, roster []rosterEntry, c childOutcomeCounts,
+	backstop, elapsed time.Duration, targetSuffix string) {
+	fmt.Print(neverAliveRunReport(missing, roster, c, backstop, elapsed, targetSuffix))
+	os.Exit(1)
+}
+
+// neverAliveRunReport renders reportNeverAliveRun's output. Split out so the
+// rendering the multi-file parent re-parses is testable without exiting.
+func neverAliveRunReport(missing []string, roster []rosterEntry, c childOutcomeCounts,
+	backstop, elapsed time.Duration, targetSuffix string) string {
+	eligible, skipped := rosterCounts(roster)
+	var b strings.Builder
+	fmt.Fprintf(&b, "TIMEOUT (-) <startup>%s\n", targetSuffix)
+	fmt.Fprintf(&b, "  timeout: test binary never reached main within the %s backstop - "+
+		"none of its %d tests ran\n", backstop, eligible)
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "%s (%.3fs)%s\n",
+		truncatedBatchSummary(c, skipped, len(missing), 0), elapsed.Seconds(), targetSuffix)
+	return b.String()
+}
+
 // reportTimedOutRun prints the synthetic TIMEOUT outcome for a test process the
 // runner killed at its batch budget, naming the tests that never reported, then
 // exits non-zero. Tests run in declaration order, so the first unreported test
@@ -1888,6 +1917,142 @@ func warmTestBinary(binaryPath, targetTriple string, cfg testTimeoutConfig, star
 	}
 }
 
+// testAliveFD mirrors codegen's constant: the descriptor a batch test binary
+// signals liveness on. cmd.ExtraFiles[0] becomes fd 3 in the child, 0/1/2 being
+// stdin/stdout/stderr.
+const testAliveFD = 3
+
+// usesLivenessProtocol reports whether the generated main for this target emits
+// the liveness signal, and so whether we should arm the batch budget from it.
+//
+// Positive check, matching codegen.GenerateTestMain's own gate: any other
+// target — including a future one — keeps arming at spawn rather than silently
+// waiting for a byte that its binary never sends.
+func usesLivenessProtocol(target string) bool {
+	if isWasmTarget(target) || isWasmWebTarget(target) {
+		return false
+	}
+	return strings.Contains(target, "apple")
+}
+
+// testProcessResult is what a test binary run reports back to its caller.
+type testProcessResult struct {
+	output     []byte
+	err        error
+	timedOut   bool // the batch budget expired while tests were running
+	neverAlive bool // killed before it ever reached main; no test got any time
+}
+
+// runTestProcess runs a compiled test binary and returns its combined output.
+//
+// On targets that emit the liveness signal the batch budget is armed when the
+// binary reaches main, not when it is spawned (T1815). Everything the OS does
+// first — image activation, the macOS first-exec code-signature scan, dyld — is
+// then bounded by the process backstop that already covers compile and spawn,
+// instead of being charged to the tests and reported as "N of M tests did not
+// report", naming a test that never ran.
+//
+// A binary that exits without ever signalling closes its end of the pipe, so
+// the read returns EOF and this cannot wedge waiting for a byte that will never
+// come. A binary that neither signals nor exits is killed at the backstop and
+// reported as neverAlive, which is a statement about the process rather than a
+// guess about a test.
+func runTestProcess(binaryPath, target string, budget time.Duration,
+	cfg testTimeoutConfig, start time.Time) testProcessResult {
+
+	spawnArmed := func() testProcessResult {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		var cmd *exec.Cmd
+		switch {
+		case isWasmWebTarget(target):
+			cmd = runWasmWeb(ctx, binaryPath)
+		case isWasmTarget(target):
+			cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
+		default:
+			cmd = exec.CommandContext(ctx, binaryPath)
+		}
+		isolateProcessGroup(cmd)
+		out, err := cmd.CombinedOutput()
+		return testProcessResult{output: out, err: err,
+			timedOut: ctx.Err() == context.DeadlineExceeded}
+	}
+
+	if !usesLivenessProtocol(target) {
+		return spawnArmed()
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		// Without the pipe there is no liveness signal to arm from. Say so and
+		// fall back, rather than proceeding as if the budget meant what it says.
+		fmt.Fprintf(os.Stderr, "warning: could not create the liveness pipe (%v); "+
+			"arming the test budget at spawn, so process start-up counts against it\n", err)
+		return spawnArmed()
+	}
+	defer r.Close()
+
+	cmd := exec.Command(binaryPath)
+	cmd.ExtraFiles = []*os.File{w}
+	// One writer for both streams: os/exec notices they are the same and uses a
+	// single pipe, so the interleaving matches CombinedOutput's.
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	isolateProcessGroup(cmd)
+
+	if startErr := cmd.Start(); startErr != nil {
+		w.Close()
+		return testProcessResult{output: buf.Bytes(), err: startErr}
+	}
+	// The parent must drop its copy or the read below never sees EOF.
+	w.Close()
+
+	alive := make(chan bool, 1)
+	go func() {
+		b := make([]byte, 1)
+		n, readErr := r.Read(b)
+		alive <- n == 1 && readErr == nil
+	}()
+
+	// Before liveness the only bound is the backstop that already covers
+	// compile and spawn — no new limit is introduced here.
+	backstop := computeParentTimeout(cfg, target) - time.Since(start)
+	if backstop <= 0 {
+		backstop = time.Second
+	}
+
+	var res testProcessResult
+	var expired atomic.Bool
+	select {
+	case signalled := <-alive:
+		if signalled {
+			// Tests are running: now the budget means what it says.
+			t := time.AfterFunc(budget, func() {
+				expired.Store(true)
+				if killErr := cmd.Process.Kill(); killErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not kill the test process "+
+						"after its %s batch budget expired: %v\n", budget, killErr)
+				}
+			})
+			defer t.Stop()
+		}
+		// Not signalled means EOF: the process already exited without reaching
+		// main. Wait below collects its status and the existing INCOMPLETE path
+		// reports it.
+	case <-time.After(backstop):
+		res.neverAlive = true
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not kill a test process that never "+
+				"reached main: %v\n", killErr)
+		}
+	}
+
+	res.err = cmd.Wait()
+	res.output = buf.Bytes()
+	res.timedOut = expired.Load()
+	return res
+}
+
 // runTestBinary executes a compiled test binary and prints formatted results.
 // roster (nil when unknown) is the set of tests the binary must report a result
 // for; any that don't are reported as INCOMPLETE (T1415).
@@ -1899,19 +2064,8 @@ func runTestBinary(binaryPath string, timeout time.Duration, cfg testTimeoutConf
 
 	emitPhaseMarker()
 	timeout = clampRunTimeout(timeout, cfg, target, start)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	var cmd *exec.Cmd
-	switch {
-	case isWasmWebTarget(target):
-		cmd = runWasmWeb(ctx, binaryPath)
-	case isWasmTarget(target):
-		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-	default:
-		cmd = exec.CommandContext(ctx, binaryPath)
-	}
-	isolateProcessGroup(cmd)
-	output, runErr := cmd.CombinedOutput()
+	run := runTestProcess(binaryPath, target, timeout, cfg, start)
+	output, runErr := run.output, run.err
 	elapsed := time.Since(start)
 
 	targetSuffix := ""
@@ -1919,7 +2073,16 @@ func runTestBinary(binaryPath string, timeout time.Duration, cfg testTimeoutConf
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
 
-	if ctx.Err() == context.DeadlineExceeded {
+	if run.neverAlive {
+		// The process never reached main, so no test had any time. Report that,
+		// rather than blaming the first test on the roster (T1815).
+		counts, reported, _ := printChildTestOutput(string(output), elapsed, targetSuffix,
+			childOutputOpts{dropSummary: true})
+		reportNeverAliveRun(unreportedTests(roster, reported), roster, counts,
+			computeParentTimeout(cfg, target), elapsed, targetSuffix)
+	}
+
+	if run.timedOut {
 		// T1639: the batch budget expired with the binary still running. Print
 		// whatever it did report, then name the tests that never did — the
 		// roster is already in hand, and a bare "tests exceeded Ns timeout"
@@ -2005,19 +2168,8 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, cfg tes
 
 	emitPhaseMarker()
 	timeout = clampRunTimeout(timeout, cfg, target, start)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	var cmd *exec.Cmd
-	switch {
-	case isWasmWebTarget(target):
-		cmd = runWasmWeb(ctx, binaryPath)
-	case isWasmTarget(target):
-		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-	default:
-		cmd = exec.CommandContext(ctx, binaryPath)
-	}
-	isolateProcessGroup(cmd)
-	output, runErr := cmd.CombinedOutput()
+	run := runTestProcess(binaryPath, target, timeout, cfg, start)
+	output, runErr := run.output, run.err
 	elapsed := time.Since(start)
 
 	targetSuffix := ""
@@ -2030,7 +2182,7 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, cfg tes
 	testOutput, counters := extractCoverageData(fullOutput)
 
 	// Print test output (same formatting as runTestBinary)
-	timedOut := ctx.Err() == context.DeadlineExceeded
+	timedOut := run.timedOut
 	counts, reported, _ := printChildTestOutput(testOutput, elapsed, targetSuffix,
 		childOutputOpts{dropSummary: timedOut})
 
@@ -3943,7 +4095,11 @@ func ensureCacheValid() {
 		// Errors are non-fatal: worst case we re-extract on top of stale files.
 		module.CleanLLVMCache()
 		module.CleanCRTCache()
-		module.CleanEmbeddedModuleCache()
+		// Embedded modules are deliberately NOT cleared here. Their cache is
+		// keyed by compiler hash, so a changed binary already reads and writes a
+		// different subtree and cannot see the old one's files. Wiping was what
+		// made this racy: RemoveAll walked a tree that peer processes were
+		// extracting into, deleting their staging dirs mid-write (T1616).
 		// Write the new stamp so the next invocation skips cleanup.
 		if stamp != nil {
 			module.WriteCompilerStamp(stamp)
@@ -7673,9 +7829,10 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 var tmpExtractSeq atomic.Uint64
 
 // extractEmbeddedModule extracts an embedded catalog module from go:embed to a
-// persistent cache directory (~/.promise/cache/embedded_modules/<name>/).
-// The compiler stamp mechanism (ensureCacheValid) clears these when the binary
-// changes, so within a binary version the cache is always valid.
+// persistent cache directory
+// (~/.promise/cache/embedded_modules/<compilerKey>/<name>/).
+// The cache is keyed by compiler hash, so a different binary reads and writes a
+// different subtree and never needs to invalidate this one (T1616).
 func extractEmbeddedModule(name string) (string, error) {
 	// Ensure stale caches from a different compiler binary are cleared first.
 	ensureCacheValid()

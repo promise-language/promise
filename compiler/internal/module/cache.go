@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/promise-language/promise/compiler/internal/types"
@@ -687,24 +688,78 @@ func CompilerChanged() (changed bool, stamp *compilerStamp) {
 }
 
 // EmbeddedModuleCacheDir returns a persistent cache directory for an embedded
-// catalog module: ~/.promise/cache/embedded_modules/<name>/
+// catalog module: ~/.promise/cache/embedded_modules/<compilerKey>/<name>/
+//
+// The compiler hash in the path is what makes the cache safe across concurrent
+// processes (T1616). Previously the path was .../embedded_modules/<name>/ and a
+// binary whose stamp had changed wiped the whole embedded_modules tree on
+// startup — including the staging dirs peers were extracting into, which
+// surfaced as "open .../embedded_modules/.std.tmp.<pid>.<n>/bool.pr: no such
+// file or directory" in an unrelated test. Two differently-hashed binaries now
+// simply use different subtrees, so neither has any reason to touch the other's
+// and the wipe is gone rather than merely made safer.
+//
+// CompilerHash is memoized and reads a sidecar written by the build, so this
+// costs nothing per call.
 func EmbeddedModuleCacheDir(name string) (string, error) {
 	home, err := PromiseHome()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, "cache", "embedded_modules", name)
-	return dir, nil
+	return filepath.Join(home, "cache", "embedded_modules", compilerCacheKey(), name), nil
 }
 
-// CleanEmbeddedModuleCache removes all cached embedded catalog modules.
+// compilerCacheKey is the compiler identity as a path component: the first 16
+// hex characters of CompilerHash.
+//
+// The full hash is 64 characters from the build's sidecar but 32 from the
+// self-hashing fallback, so using it whole would make the path length depend on
+// how the binary was produced. 16 hex characters is 64 bits — far more than
+// cache namespacing needs — and matches what the rest of the tree already does
+// (llvm-view's "<arch>-<16 hex>" dirs, and the [:16] in the cache-debug output).
+// It also keeps the path short enough not to spend Windows' MAX_PATH budget on
+// one component.
+//
+// Slicing is guarded: CompilerHash returns "unknown" when the executable cannot
+// be read, and a blind [:16] on that would panic.
+func compilerCacheKey() string {
+	h := CompilerHash()
+	if len(h) > 16 {
+		return h[:16]
+	}
+	return h
+}
+
+// CleanEmbeddedModuleCache removes all cached embedded catalog modules, for
+// every compiler hash. This is the explicit `promise clean` path, not something
+// a normal run does.
+//
+// It renames the tree aside before deleting it. os.RemoveAll walks and unlinks
+// entry by entry, so a concurrent reader can observe a module directory that
+// exists but is half-empty; after an atomic rename the tree either is at that
+// path or is not (T1616).
 func CleanEmbeddedModuleCache() error {
 	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Join(home, "cache", "embedded_modules"))
+	dir := filepath.Join(home, "cache", "embedded_modules")
+	trash := filepath.Join(home, "cache", fmt.Sprintf(".embedded_modules.trash.%d.%d",
+		os.Getpid(), tmpTrashSeq.Add(1)))
+	if err := os.Rename(dir, trash); err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing cached yet
+		}
+		// Rename can fail across filesystems or on a locked tree; deleting in
+		// place is still better than leaving a stale cache behind.
+		return os.RemoveAll(dir)
+	}
+	return os.RemoveAll(trash)
 }
+
+// tmpTrashSeq makes rename-aside targets unique within a process, complementing
+// the PID which makes them unique across processes.
+var tmpTrashSeq atomic.Uint64
 
 // CleanLLVMCache removes all cached LLVM tool extractions, including the
 // content-addressed view dirs (T0769). The CAS blobs themselves are

@@ -1273,6 +1273,42 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		entry = afterWarmup
 	}
 
+	// Liveness signal (T1815). The runner arms the batch budget when this byte
+	// arrives, not at spawn, so time the OS spends before main — the macOS
+	// first-exec code-signature scan, dyld, image activation — is no longer
+	// charged to the tests. Without it the budget could expire before the
+	// process existed, and the harness reported that as "N of M tests did not
+	// report", naming a test that had never run.
+	//
+	// fd 3 is the read end of a pipe the runner passes via cmd.ExtraFiles. A
+	// dedicated fd rather than a stdout marker keeps the output protocol
+	// untouched: snapshot tests comparing exact stdout, the memory-limit stderr
+	// scan, coverage parsing and the multi-file parent's regexes all see
+	// nothing new, and the signal cannot be forged by test output.
+	//
+	// Gated positively on the one target whose runner passes that pipe. A
+	// negative check (!wasm && !windows) would opt every future platform in
+	// silently, and writing there would put a byte into whatever fd 3 happens
+	// to be; a positive one leaves a new platform on the arm-at-spawn fallback
+	// until someone deliberately adds it. This is a compile-time decision
+	// because the runner makes the same one from the same target triple.
+	//
+	// It follows the warm-up check on purpose: a warm-up run is not passed a
+	// pipe, and it returns above before reaching this point.
+	if c.isMacOS {
+		aliveByte := c.module.NewGlobalDef(".str.test_alive", constant.NewCharArrayFromString("A"))
+		aliveByte.Immutable = true
+		aliveByte.Linkage = enum.LinkagePrivate
+		alivePtr := entry.NewGetElementPtr(
+			constant.NewCharArrayFromString("A").Typ,
+			aliveByte,
+			constant.NewInt(irtypes.I64, 0),
+			constant.NewInt(irtypes.I64, 0),
+		)
+		entry.NewCall(c.palWrite,
+			constant.NewInt(irtypes.I32, testAliveFD), alivePtr, constant.NewInt(irtypes.I64, 1))
+	}
+
 	// Register VEH handler for stack overflow detection (B0010) and crash
 	// handling on Windows (B0148). Must be before sched_init which creates threads.
 	entry.NewCall(c.palStackOverflowInit)

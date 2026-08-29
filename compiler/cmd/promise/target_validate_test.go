@@ -72,7 +72,7 @@ func TestInvalidTargetRejectedByBuild(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping CLI integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.pr")
@@ -107,7 +107,7 @@ func TestInvalidTargetRejectedByExec(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping CLI integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 
 	cmd := exec.Command(bin, "exec", "-target", "totallybogus", "print_line(\"hi\")")
 	out, err := cmd.CombinedOutput()

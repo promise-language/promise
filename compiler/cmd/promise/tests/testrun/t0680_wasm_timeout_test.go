@@ -1,4 +1,4 @@
-package main
+package testrun
 
 import (
 	"fmt"
@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"time"
 )
 
@@ -86,7 +88,7 @@ func assertInBinaryTimeout(t *testing.T, combined, testName, regressed string) {
 // backstop-only enforcement prints a synthetic "TIMEOUT (-)" line instead.
 func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 	requireWasmtime(t)
 
 	dir, err := os.MkdirTemp("", "t0680_wasm_timeout_")
@@ -144,7 +146,7 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 // for two variants: a pure channel rendezvous and a mixed channel+task loop.
 func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 	requireWasmtime(t)
 
 	cases := []struct {
@@ -246,7 +248,7 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 // progressing, and the deadline fires in-binary.
 func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 	requireWasmtime(t)
 
 	dir, err := os.MkdirTemp("", "t1218_wasm_timeout_")
@@ -302,7 +304,7 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 // fires in-binary.
 func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 	requireWasmtime(t)
 
 	dir, err := os.MkdirTemp("", "t1220_wasm_timeout_")

@@ -31,7 +31,7 @@ type cliEnv struct {
 
 func newCLIEnv(t *testing.T) *cliEnv {
 	t.Helper()
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	home := t.TempDir()
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(gitconfig,

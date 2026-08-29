@@ -1,11 +1,14 @@
-package main
+package buildrun
 
 import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 // TestRunForwardsProgramArgs is the end-to-end guard for T1426: everything after
@@ -18,7 +21,7 @@ func TestRunForwardsProgramArgs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
-	bin := locatePromiseBin(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	// A program that prints each os.args entry on its own line, so stdout is an
@@ -70,7 +73,7 @@ func TestRunForwardsProgramArgs(t *testing.T) {
 				t.Fatalf("promise run failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 			}
 			got := splitOutputLines([]byte(stdout.String()))
-			if !slicesEqual(got, tc.want) {
+			if !slices.Equal(got, tc.want) {
 				t.Errorf("forwarded argv = %#v, want %#v (raw stdout %q)", got, tc.want, stdout.String())
 			}
 		})
@@ -91,7 +94,7 @@ func TestRunForwardsFilenameLikeArgOnCacheMiss(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
-	bin := locatePromiseBin(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	src := "use os;\n" +
@@ -121,7 +124,7 @@ func TestRunForwardsFilenameLikeArgOnCacheMiss(t *testing.T) {
 	}
 	got := splitOutputLines([]byte(stdout.String()))
 	want := []string{"ghost.pr", "extra"}
-	if !slicesEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("forwarded argv = %#v, want %#v (raw stdout %q)", got, want, stdout.String())
 	}
 }

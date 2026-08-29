@@ -1,4 +1,4 @@
-package main
+package testrun
 
 import (
 	"fmt"
@@ -6,42 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
-
-// T0742: an E2E snapshot test that times out must emit the canonical TIMEOUT
-// subprocess line ("TIMEOUT (Xs) name [target]" + "  timeout: exceeded Xs limit"),
-// NOT the legacy "FAIL (timeout) name [target]" shape that the parent then
-// lifts into the gate test identity as a phantom ledger. These tests lock the
-// child-side wire format and the parent's classification of it.
-
-// locatePromiseBin is the single locator for the compiler binary used by the
-// end-to-end runner tests in this package. It returns an absolute path so a
-// test that runs the binary from a temp working directory still finds it, and
-// skips when no binary is available.
-func locatePromiseBin(t *testing.T) string {
-	t.Helper()
-	if bin := os.Getenv("PROMISE_TEST_BIN"); bin != "" {
-		return bin
-	}
-	// go test cwd = compiler/cmd/promise → repo root is three levels up.
-	name := "promise"
-	if runtime.GOOS == "windows" {
-		name = "promise.exe"
-	}
-	candidate := filepath.Join("..", "..", "..", "bin", name)
-	if _, err := os.Stat(candidate); err == nil {
-		if abs, err := filepath.Abs(candidate); err == nil {
-			return abs
-		}
-		return candidate
-	}
-	t.Skip("set PROMISE_TEST_BIN or build via bin/build to run this end-to-end test")
-	return ""
-}
 
 // writeInfLoopE2E writes a Promise E2E test that loops forever, with the given
 // per-test timeout annotation (e.g. "1s"). The expected output is irrelevant —
@@ -65,16 +35,9 @@ func writeInfLoopE2E(t *testing.T, dir, name, timeoutAnnot, unique string) strin
 	}
 	return path
 }
-
-// TestE2ETimeoutEmitsCanonicalTimeoutLine is the child-side guard: running an
-// e2e file alone (single file → executeE2EBinary path) on timeout must emit
-// the TIMEOUT (Xs) line with the bare test name, plus the indented
-// "timeout: exceeded Xs limit" context. It must NOT emit the legacy
-// "FAIL (timeout) ..." line (which would propagate into the gate's Test
-// identity field as a phantom ledger entry).
 func TestE2ETimeoutEmitsCanonicalTimeoutLine(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 
 	dir, err := os.MkdirTemp("", "e2e_timeout_")
 	if err != nil {
@@ -127,7 +90,7 @@ func TestE2ETimeoutEmitsCanonicalTimeoutLine(t *testing.T) {
 // stable file-level identity. The trivial sibling must still pass.
 func TestE2ETimeoutParentClassifiesAsTimedOut(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 
 	dir, err := os.MkdirTemp("", "e2e_timeout_parent_")
 	if err != nil {

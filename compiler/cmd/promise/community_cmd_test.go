@@ -250,7 +250,7 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 	}
 	setupGitTestEnv(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	epoch := compilerEpochForTest(t)
 
 	good := t.TempDir()

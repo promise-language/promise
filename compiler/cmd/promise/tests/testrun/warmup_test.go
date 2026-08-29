@@ -1,4 +1,4 @@
-package main
+package testrun
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"time"
 )
 
@@ -29,7 +31,7 @@ import (
 // returns immediately and the assertions hold trivially.
 func TestTestBinaryWarmupContractHolds(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	unique := fmt.Sprintf("warmup-contract-%d-%d", os.Getpid(), time.Now().UnixNano())

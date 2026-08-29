@@ -274,6 +274,22 @@ area package it belongs to; only a test that needs codegen's *unexported*
 internals goes in `package codegen` itself, where private helper copies live in
 `codegen_helpers_test.go`.
 
+`cmd/promise`'s tests are split the same way, on a different axis. The dividing
+line there is not subject but reachability: Go will not let anything import
+`package main`, so a test can only leave it if it is *black-box* — if it asserts
+on what the built `bin/promise` does rather than on an unexported function.
+Two thirds of that package's work turned out to be exactly that, so those tests
+now live in per-area packages under `compiler/cmd/promise/tests/` (`pkgmgr`,
+`testrun`, `buildrun`) and reach the compiler through `clitest`, the analogue of
+`codegentest`. A test that calls `runAdd`, reads `embeddedCatalog` or parses a
+child's output with `parseChildOutput` stays in `package main`.
+
+Each of those packages takes its own `PROMISE_HOME` via `clitest.IsolateHome`
+in a one-line `TestMain`. That is not optional tidiness: a `go test` binary is
+a second "compiler" as far as `module.CompilerChanged` is concerned, so without
+it `ensureCacheValid` wipes `cache/llvm-view` out from under whichever peer
+package is compiling right then.
+
 ```go
 // codegen tests (compiler/internal/codegen/tests/<area>/)
 ir := codegentest.GenerateIR(t, `

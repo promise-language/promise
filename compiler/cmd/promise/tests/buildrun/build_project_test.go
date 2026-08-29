@@ -1,4 +1,4 @@
-package main
+package buildrun
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 // findPromiseBinary locates the bin/promise binary built by bin/build.
@@ -46,7 +48,7 @@ func TestBuildProjectMultiFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -96,7 +98,7 @@ func TestBuildProjectOutputOverride(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -140,7 +142,7 @@ func TestBuildProjectExcludesTestFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -174,7 +176,7 @@ func TestRunProjectMultiFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -216,7 +218,7 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping emit-ir integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -258,7 +260,7 @@ func TestBuildFileInsideProject(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -309,7 +311,7 @@ func TestRunFileInsideProject(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -357,7 +359,7 @@ func TestBuildFileNoProjectStillSingleFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "solo.pr"),
@@ -392,7 +394,7 @@ func TestBuildNonexistentFileInsideProject(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -438,7 +440,7 @@ func TestBuildFileInProjectSubdir(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -489,7 +491,7 @@ func TestRunFileNoProjectStillSingleFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping run integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "solo.pr"),
@@ -520,7 +522,7 @@ func TestTargetDirWithoutProjectIsError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	for _, cmdName := range []string{"build", "run", "emit-ir"} {
 		t.Run(cmdName, func(t *testing.T) {
@@ -558,7 +560,7 @@ func TestNoArgInNonProjectDirIsError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	for _, cmdName := range []string{"build", "run"} {
 		t.Run(cmdName, func(t *testing.T) {
@@ -589,7 +591,7 @@ func TestEmitIRFileInsideProjectIsError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping emit-ir integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
@@ -631,7 +633,7 @@ func TestBindWebIdlJsValueDocParses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping bind+emit-ir integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	idlPath := filepath.Join(dir, "element.idl")
@@ -677,7 +679,7 @@ func TestBindWebIdlUnionAttrCompilesClean(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping bind+emit-ir integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	idlPath := filepath.Join(dir, "element.idl")
@@ -721,7 +723,7 @@ func TestGCRemovedPrintsNotice(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping gc removal-notice integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	cmd := exec.Command(bin, "gc")
 	out, err := cmd.CombinedOutput()
@@ -748,7 +750,7 @@ func TestFetchRemovedPrintsNotice(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping fetch removal-notice integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	for _, verb := range []string{"fetch", "warm"} {
 		cmd := exec.Command(bin, verb)
@@ -778,7 +780,7 @@ func TestUnusedImportWarnsButBuildsOK(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.pr")
@@ -815,7 +817,7 @@ func TestMissingPerFileImportFailsBuild(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build integration test in short mode")
 	}
-	bin := findPromiseBinary(t)
+	bin := clitest.Bin(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),

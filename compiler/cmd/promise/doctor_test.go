@@ -54,6 +54,14 @@ func TestDoctorJSON(t *testing.T) {
 }
 
 func TestDoctorFixFlag(t *testing.T) {
+	// -fix reclaims cache space, and its LLVM/CRT view cleanup is an
+	// os.RemoveAll of cache/llvm-view. Against the developer's real
+	// PROMISE_HOME that deletes the staging dirs of any peer process
+	// materializing a view right then — the T1616 failure shape, which the
+	// per-area test packages made reachable by compiling concurrently with this
+	// one. Give the wipe its own home so it can only ever clear its own cache.
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
 	// Java is a dev-only check, reachable only via -dev.
 	output := captureStdout(t, func() {
 		runDoctor([]string{"-dev", "-fix"})

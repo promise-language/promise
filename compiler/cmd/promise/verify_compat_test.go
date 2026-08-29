@@ -116,7 +116,7 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	repo := makeWorkRepo(t)
@@ -166,7 +166,7 @@ func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	repo := makeWorkRepo(t)
@@ -367,7 +367,7 @@ func TestResolveEpochAwareExplicitRefIncompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := makeWorkRepo(t)
@@ -397,7 +397,7 @@ func TestResolveEpochAwareStableFallback(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := makeWorkRepo(t)
@@ -429,7 +429,7 @@ func TestResolveEpochAwareHeadFallback(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := makeWorkRepo(t)
@@ -463,7 +463,7 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	epoch := compilerEpochForTest(t)
 	home := t.TempDir()
 
@@ -557,7 +557,7 @@ func TestResolveEpochAwareWalkBack(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := filepath.Join(shortRepoDir(t), "walkback")
@@ -614,7 +614,7 @@ func TestResolveEpochAwareNoCompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := filepath.Join(shortRepoDir(t), "nocompat")
@@ -652,7 +652,7 @@ func TestResolveEpochAwareOnlyNewerEpochs(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := filepath.Join(shortRepoDir(t), "onlynewer")
@@ -703,7 +703,7 @@ func TestResolveEpochAwareCompatibleHappyPath(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := filepath.Join(shortRepoDir(t), "happy")
@@ -921,7 +921,7 @@ func TestResolveEpochAwareWalksBackPastMissingManifest(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	bin := findPromiseBinary(t)
+	bin := locatePromiseBin(t)
 	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	work := filepath.Join(shortRepoDir(t), "nomanifest")

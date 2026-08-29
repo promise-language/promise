@@ -1,4 +1,4 @@
-package main
+package testrun
 
 import (
 	"os"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 // T1115: the per-instance build cache must fold in the DeclHashes of the user
@@ -21,7 +23,7 @@ import (
 // programs share one build cache, proving the collision is gone.
 func TestInstanceCacheCollisionAcrossPrograms(t *testing.T) {
 	t.Parallel()
-	promiseBin := locatePromiseBin(t)
+	promiseBin := clitest.Bin(t)
 	absBin, err := filepath.Abs(promiseBin)
 	if err != nil {
 		t.Fatalf("abs path: %v", err)

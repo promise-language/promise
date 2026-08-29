@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 )
 
@@ -192,6 +194,7 @@ func TestWindowsPALTLSReleasesAcquiredHandles(t *testing.T) {
 				"CertCloseStore",             // the extra-roots store
 				"NCryptDeleteKey",            // the imported key, removed from the CNG store
 				"NCryptFreeObject",           // the storage provider
+				"DeleteCriticalSection",      // the credential-acquisition lock
 				"pal_free",                   // the context struct and the key name
 			},
 		},
@@ -224,6 +227,433 @@ func TestWindowsPALTLSReleasesAcquiredHandles(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestWindowsPALTLSCredentialAcquisitionIsSerialized pins the fix for T1766.
+//
+// One TlsConfig / TlsServerConfig context is shared by every connection
+// goroutine (http.Server.bind_tls hands the same config to each), so the lazy
+// AcquireCredentialsHandle in __pal_tls_ensure_cred is a shared check-then-act.
+// Unsynchronized, two goroutines both see cred_valid clear, both acquire into
+// the same &ctx->cred, and the loser's credential leaks while an in-flight
+// handshake is handed a CredHandle its security context was not created from.
+func TestWindowsPALTLSCredentialAcquisitionIsSerialized(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitTLS(module)
+	fns := funcsByName(module)
+
+	ensure := fns["__pal_tls_ensure_cred"]
+	if ensure == nil {
+		t.Fatal("__pal_tls_ensure_cred is not defined")
+	}
+	if callTargets(ensure)["EnterCriticalSection"] == 0 {
+		t.Fatal("__pal_tls_ensure_cred does not lock — concurrent pal_tls_new on one " +
+			"shared config both acquire into &ctx->cred (T1766)")
+	}
+
+	// Lock-then-check, not check-then-lock. The entry block reads cred_valid and
+	// branches on it, so the lock must be taken in that block *and* ahead of the
+	// read — a double-checked fast path would put the read back outside the
+	// section and reopen the race it is there to close.
+	entry := ensure.Blocks[0]
+	entered, readEarly := false, false
+	for _, inst := range entry.Insts {
+		if _, ok := inst.(*ir.InstLoad); ok && !entered {
+			readEarly = true
+			break
+		}
+		call, ok := inst.(*ir.InstCall)
+		if !ok {
+			continue
+		}
+		if callee, ok := call.Callee.(*ir.Func); ok && callee.Name() == "EnterCriticalSection" {
+			entered = true
+		}
+	}
+	switch {
+	case readEarly:
+		t.Error("__pal_tls_ensure_cred reads cred_valid before entering the critical " +
+			"section — the check is unsynchronized and the race is still open")
+	case !entered:
+		t.Error("__pal_tls_ensure_cred enters the critical section outside its entry " +
+			"block — the cred_valid check must already be under the lock")
+	}
+
+	// Every returning block must leave the section: an early bail-out added
+	// later that skips the unlock deadlocks every subsequent handshake.
+	for _, blk := range ensure.Blocks {
+		if _, ok := blk.Term.(*ir.TermRet); !ok {
+			continue
+		}
+		if blockCallTargets(blk)["LeaveCriticalSection"] == 0 {
+			t.Errorf("__pal_tls_ensure_cred block %%%s returns without calling "+
+				"@LeaveCriticalSection — the context stays locked and every later "+
+				"handshake on this config deadlocks", blk.LocalName)
+		}
+	}
+
+	// The lock has to exist and be destroyed with the context it lives in.
+	for _, name := range []string{"pal_tls_ctx_new_client", "pal_tls_ctx_new_server"} {
+		fn := fns[name]
+		if fn == nil {
+			t.Errorf("%s is not defined", name)
+			continue
+		}
+		if callTargets(fn)["InitializeCriticalSection"] == 0 {
+			t.Errorf("@%s never calls @InitializeCriticalSection — __pal_tls_ensure_cred "+
+				"would enter an uninitialized CRITICAL_SECTION", name)
+		}
+	}
+
+	// The lock lives *inside* the context allocation, so it has to be deleted
+	// before that allocation goes back to the allocator.
+	free := fns["pal_tls_ctx_free"]
+	if free == nil {
+		t.Fatal("pal_tls_ctx_free is not defined")
+	}
+	deleted := false
+	for _, blk := range free.Blocks {
+		if blockCallTargets(blk)["DeleteCriticalSection"] == 0 {
+			continue
+		}
+		deleted = true
+		seenDelete := false
+		for _, inst := range blk.Insts {
+			call, ok := inst.(*ir.InstCall)
+			if !ok {
+				continue
+			}
+			callee, ok := call.Callee.(*ir.Func)
+			if !ok {
+				continue
+			}
+			switch callee.Name() {
+			case "DeleteCriticalSection":
+				seenDelete = true
+			case "pal_free":
+				if !seenDelete {
+					t.Errorf("pal_tls_ctx_free block %%%s frees the context before "+
+						"@DeleteCriticalSection — the lock lives inside that allocation",
+						blk.LocalName)
+				}
+			}
+		}
+	}
+	if !deleted {
+		t.Error("pal_tls_ctx_free never deletes the credential lock")
+	}
+}
+
+// TestWindowsPALTLSCredLockMatchesTheCriticalSectionABI pins the shape of the
+// lock T1766 added, which is the half the call-graph tests cannot see: the
+// CRITICAL_SECTION is not a separate allocation, it is a field carved out of the
+// context struct. That is only sound if the field is as wide as the OS object
+// the kernel writes into and if the context allocation actually covers it — a
+// too-small field makes InitializeCriticalSection scribble past the end of the
+// heap block, and a size taken from anything but the struct type would leave the
+// lock outside it entirely.
+func TestWindowsPALTLSCredLockMatchesTheCriticalSectionABI(t *testing.T) {
+	// The authoritative size is the one pal_mutex_init hands to pal_alloc for a
+	// standalone mutex; read it back out of that emitter rather than repeating
+	// the literal here, so the two cannot drift apart.
+	mutexModule := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitMutexInit(mutexModule)
+	want := palAllocConstSize(t, funcsByName(mutexModule)["pal_mutex_init"])
+
+	ctx := newTLSWinTypes().ctx
+	if got := len(ctx.Fields); got != winCtxFCredLock+1 {
+		t.Fatalf("the context struct has %d fields but the credential lock is index %d — "+
+			"the lock must stay the last field so every index above it keeps its meaning",
+			got, winCtxFCredLock)
+	}
+	lock, ok := ctx.Fields[winCtxFCredLock].(*irtypes.ArrayType)
+	if !ok {
+		t.Fatalf("the credential-lock field is %v, not an i64 array — CRITICAL_SECTION "+
+			"needs pointer alignment and a fixed byte width", ctx.Fields[winCtxFCredLock])
+	}
+	if !lock.ElemType.Equal(irtypes.I64) {
+		t.Errorf("the credential lock is an array of %v; i64 elements are what give it "+
+			"the 8-byte alignment InitializeCriticalSection requires", lock.ElemType)
+	}
+	if got := int64(lock.Len) * 8; got < want {
+		t.Errorf("the credential-lock field is %d bytes but a CRITICAL_SECTION is %d "+
+			"(pal_mutex_init allocates that much) — InitializeCriticalSection would "+
+			"write past the end of the context allocation", got, want)
+	}
+
+	// And the allocation has to be sized from that very struct, not from a
+	// hand-written constant that predates the field.
+	sizeOfCtx := tlsWinSizeOf(ctx).String()
+	for _, name := range []string{"pal_tls_ctx_new_client", "pal_tls_ctx_new_server"} {
+		fn := funcsByName(mustEmitTLSModule())[name]
+		if fn == nil {
+			t.Errorf("%s is not defined", name)
+			continue
+		}
+		if got := palAllocArg(t, fn); got != sizeOfCtx {
+			t.Errorf("@%s allocates %s, not sizeof(the context struct) — the credential "+
+				"lock lives inside that block and must be covered by it", name, got)
+		}
+	}
+}
+
+// TestWindowsPALTLSCredLockIsInitializedAfterZeroing pins the one ordering
+// constraint in pal_tls_ctx_new_*: the zero-fill of the fresh context must
+// happen *before* InitializeCriticalSection, never after. A CRITICAL_SECTION is
+// live OS state once initialized (owner thread, recursion count, debug-info
+// pointer), so a memset that follows quietly reverts it to an uninitialized
+// object — and an uninitialized section neither serializes anything nor faults,
+// so the T1766 race would come back with the lock still visibly in place.
+func TestWindowsPALTLSCredLockIsInitializedAfterZeroing(t *testing.T) {
+	fns := funcsByName(mustEmitTLSModule())
+	for _, name := range []string{"pal_tls_ctx_new_client", "pal_tls_ctx_new_server"} {
+		fn := fns[name]
+		if fn == nil {
+			t.Errorf("%s is not defined", name)
+			continue
+		}
+		var order []string
+		for _, blk := range fn.Blocks {
+			for _, inst := range blk.Insts {
+				call, ok := inst.(*ir.InstCall)
+				if !ok {
+					continue
+				}
+				callee, ok := call.Callee.(*ir.Func)
+				if !ok {
+					continue
+				}
+				switch callee.Name() {
+				case "memset", "InitializeCriticalSection":
+					order = append(order, callee.Name())
+				}
+			}
+		}
+		zeroed := false
+		initialized := false
+		for _, step := range order {
+			switch step {
+			case "memset":
+				if initialized {
+					t.Errorf("@%s zero-fills the context after @InitializeCriticalSection — "+
+						"that wipes the initialized CRITICAL_SECTION back to raw zeroes and "+
+						"silently un-serializes __pal_tls_ensure_cred", name)
+				}
+				zeroed = true
+			case "InitializeCriticalSection":
+				if !zeroed {
+					t.Errorf("@%s initializes the credential lock before zeroing the "+
+						"context", name)
+				}
+				initialized = true
+			}
+		}
+		if !initialized {
+			t.Errorf("@%s never initializes the credential lock", name)
+		}
+	}
+}
+
+// TestWindowsPALTLSCredLockIsTheOnlySchannelLock keeps the lock T1766 introduced
+// to one site and off the per-record path.
+//
+// Two properties matter and neither is local to __pal_tls_ensure_cred. First,
+// one lock cannot deadlock against itself, but a second SChannel lock acquired
+// in a different order could — so the credential lock stays the only one this
+// backend takes. Second, the lock is affordable precisely because it is reached
+// once per handshake (and once per renegotiation, which is a handshake): if
+// pal_tls_read or pal_tls_write ever took it directly, every 16 KB record on
+// every connection would serialize on the one config the whole server shares.
+func TestWindowsPALTLSCredLockIsTheOnlySchannelLock(t *testing.T) {
+	fns := funcsByName(mustEmitTLSModule())
+
+	for name, fn := range fns {
+		if name == "__pal_tls_ensure_cred" {
+			continue
+		}
+		calls := callTargets(fn)
+		if calls["EnterCriticalSection"] > 0 || calls["LeaveCriticalSection"] > 0 {
+			t.Errorf("@%s takes a CRITICAL_SECTION directly — the credential lock is the "+
+				"only lock this backend holds, and a second one invites a lock-order "+
+				"deadlock against it", name)
+		}
+	}
+
+	// The direct callers are the whole reason the lock is cheap. Renegotiation
+	// reaches it through __pal_tls_hs_step, which is a handshake round; the
+	// steady-state EncryptMessage/DecryptMessage path must not.
+	var callers []string
+	for name, fn := range fns {
+		if callTargets(fn)["__pal_tls_ensure_cred"] > 0 {
+			callers = append(callers, name)
+		}
+	}
+	slices.Sort(callers)
+	want := []string{"__pal_tls_hs_step", "pal_tls_new"}
+	if !slices.Equal(callers, want) {
+		t.Errorf("__pal_tls_ensure_cred is called from %v, want %v — a new caller on the "+
+			"record path would put an EnterCriticalSection on every read and write of "+
+			"the config every connection shares", callers, want)
+	}
+}
+
+// TestWindowsPALTLSEnsureCredCallsNothingBlockingUnderTheLock guards the rule the
+// backend header states and nothing else can enforce: a CRITICAL_SECTION is
+// owned by the OS *thread* that entered it, while the caller is a Promise
+// goroutine that may resume on a different M. Anything that suspends the
+// goroutine between Enter and Leave therefore returns to a thread that does not
+// own the section, so the release is undefined and every later handshake on that
+// config blocks forever. The section is short and straight-line today; this
+// allowlist makes adding a call to it a deliberate act.
+func TestWindowsPALTLSEnsureCredCallsNothingBlockingUnderTheLock(t *testing.T) {
+	fn := funcsByName(mustEmitTLSModule())["__pal_tls_ensure_cred"]
+	if fn == nil {
+		t.Fatal("__pal_tls_ensure_cred is not defined")
+	}
+
+	// Every one of these returns on the calling thread without parking it:
+	// memset is libc, AcquireCredentialsHandleA is a synchronous SSPI call.
+	allowed := map[string]bool{
+		"EnterCriticalSection":      true,
+		"LeaveCriticalSection":      true,
+		"AcquireCredentialsHandleA": true,
+		"memset":                    true,
+	}
+	for callee := range callTargets(fn) {
+		if !allowed[callee] {
+			t.Errorf("__pal_tls_ensure_cred calls @%s while holding the credential lock — "+
+				"if that can suspend the goroutine it may resume on another M, which then "+
+				"cannot release a CRITICAL_SECTION it does not own (T1766). Add it to the "+
+				"allowlist only once it is known not to block", callee)
+		}
+	}
+
+	// One acquisition, one release per exit: a second Enter would need a second
+	// Leave to balance, and a Leave on a path that keeps running releases the
+	// section while the acquisition it guards is still in flight.
+	if got := callTargets(fn)["EnterCriticalSection"]; got != 1 {
+		t.Errorf("__pal_tls_ensure_cred enters the credential lock %d times, want exactly 1", got)
+	}
+	for _, blk := range fn.Blocks {
+		leaves := blockCallTargets(blk)["LeaveCriticalSection"]
+		_, returns := blk.Term.(*ir.TermRet)
+		switch {
+		case returns && leaves != 1:
+			t.Errorf("block %%%s returns with %d @LeaveCriticalSection calls, want exactly 1 "+
+				"— 0 wedges every later handshake, 2 releases a section this thread no "+
+				"longer owns", blk.LocalName, leaves)
+		case !returns && leaves != 0:
+			t.Errorf("block %%%s releases the credential lock but falls through to more "+
+				"work — the acquisition it guards would run unsynchronized", blk.LocalName)
+		}
+	}
+}
+
+// TestWindowsPALTLSSharesCriticalSectionDeclarationsWithPalMutex covers the
+// assumption the T1766 comment records but no single emitter can check: the TLS
+// backend and the mutex PAL both declare the same four kernel32 entry points,
+// and whichever emitter runs first wins. Two declarations of one symbol with
+// different signatures is a malformed module, so the sharing has to hold in
+// either emission order.
+func TestWindowsPALTLSSharesCriticalSectionDeclarationsWithPalMutex(t *testing.T) {
+	p := &WindowsPAL{}
+	emitMutexes := func(m *ir.Module) {
+		p.EmitMutexInit(m)
+		p.EmitMutexLock(m)
+		p.EmitMutexUnlock(m)
+		p.EmitMutexDestroy(m)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		build func() *ir.Module
+	}{
+		{"mutex first", func() *ir.Module {
+			m := newModuleWithAlloc(p)
+			emitMutexes(m)
+			p.EmitTLS(m)
+			return m
+		}},
+		{"TLS first", func() *ir.Module {
+			m := newModuleWithAlloc(p)
+			p.EmitTLS(m)
+			emitMutexes(m)
+			return m
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := tc.build().String()
+			for _, sym := range []string{
+				"InitializeCriticalSection", "EnterCriticalSection",
+				"LeaveCriticalSection", "DeleteCriticalSection",
+			} {
+				decl := "declare void @" + sym + "(i8* %lpCriticalSection)"
+				if got := strings.Count(out, "declare void @"+sym+"("); got != 1 {
+					t.Errorf("@%s is declared %d times, want 1 — the TLS backend and the "+
+						"mutex PAL must share one declaration or the module is malformed", sym, got)
+				}
+				if !strings.Contains(out, decl) {
+					t.Errorf("no %q in the module — the two declaration sites disagree on "+
+						"the signature", decl)
+				}
+			}
+		})
+	}
+}
+
+// mustEmitTLSModule emits the SChannel backend into a fresh module and returns
+// the module, for tests that need the internal __pal_tls_* helpers EmitTLS does
+// not return.
+func mustEmitTLSModule() *ir.Module {
+	m := ir.NewModule()
+	(&WindowsPAL{}).EmitTLS(m)
+	return m
+}
+
+// palAllocArg returns the textual size argument of the first @pal_alloc call in
+// fn, which for the context constructors is a sizeof-the-struct expression.
+func palAllocArg(t *testing.T, fn *ir.Func) string {
+	t.Helper()
+	for _, blk := range fn.Blocks {
+		for _, inst := range blk.Insts {
+			call, ok := inst.(*ir.InstCall)
+			if !ok {
+				continue
+			}
+			if callee, ok := call.Callee.(*ir.Func); ok && callee.Name() == "pal_alloc" {
+				return call.Args[0].String()
+			}
+		}
+	}
+	t.Fatalf("@%s never calls @pal_alloc", fn.Name())
+	return ""
+}
+
+// palAllocConstSize returns the constant byte count fn passes to @pal_alloc.
+func palAllocConstSize(t *testing.T, fn *ir.Func) int64 {
+	t.Helper()
+	if fn == nil {
+		t.Fatal("function not defined")
+	}
+	for _, blk := range fn.Blocks {
+		for _, inst := range blk.Insts {
+			call, ok := inst.(*ir.InstCall)
+			if !ok {
+				continue
+			}
+			callee, ok := call.Callee.(*ir.Func)
+			if !ok || callee.Name() != "pal_alloc" {
+				continue
+			}
+			n, ok := call.Args[0].(*constant.Int)
+			if !ok {
+				t.Fatalf("@%s allocates a non-constant size %v", fn.Name(), call.Args[0])
+			}
+			return n.X.Int64()
+		}
+	}
+	t.Fatalf("@%s never calls @pal_alloc", fn.Name())
+	return 0
 }
 
 // TestWindowsPALTLSUseKeyFailurePathsClean covers the path with the most to
@@ -385,6 +815,55 @@ func TestWindowsPALTLSVersionStringsMatchModule(t *testing.T) {
 			t.Errorf("tls.pr matches version %q but the SChannel backend never emits that "+
 				"exact string - the negotiated version would be misreported", m[1])
 		}
+	}
+}
+
+// TestWindowsPALTLSCredentialOutlivesThePooledSessions pins the lifetime half of
+// the SChannel context contract — the part T1766 left open under "teardown
+// ordering", and the hazard TlsConfig's own `doc now warns about (T1780).
+//
+// SChannel requires a credential to outlive every security context derived from
+// it. pal_tls_ctx_free calls FreeCredentialsHandle, so a session still holding a
+// CtxtHandle built from that credential is afterwards driving freed OS state.
+// http.Client is the one type that owns both ends — a tls.TlsConfig and a pool
+// of TLS sessions created from it — and for a client that is simply let go
+// rather than closed, the only thing ordering their teardown is that
+// _tls_config is declared *before* _pool: fields drop in reverse declaration
+// order (docs/language-design.md §16.3), so the sessions go first.
+//
+// No test on a CI platform can catch the wrong order. OpenSSL reference-counts
+// the SSL_CTX and Secure Transport retains its identity, so on Linux and macOS
+// both orders work and the leak detector still reads zero; only Windows faults.
+// Reading the source is therefore the only guard, exactly as the version-string
+// contract above is.
+func TestWindowsPALTLSCredentialOutlivesThePooledSessions(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "modules", "http", "http.pr"))
+	if err != nil {
+		t.Fatalf("read modules/http/http.pr: %v", err)
+	}
+	body := regexp.MustCompile(`(?s)\ntype Client [^\n]*\{(.*?)\n\}\n`).FindStringSubmatch(string(src))
+	if body == nil {
+		t.Fatal("modules/http/http.pr no longer declares `type Client` — the client that " +
+			"owns both a TlsConfig and the sessions made from it moved, and this " +
+			"ordering contract needs to move with it")
+	}
+
+	cfg := regexp.MustCompile(`(?m)^\s*tls\.TlsConfig\[\]\s+_tls_config\s*;`).FindStringIndex(body[1])
+	pool := regexp.MustCompile(`(?m)^\s*Pool\s+_pool\s*;`).FindStringIndex(body[1])
+	switch {
+	case cfg == nil:
+		t.Fatal("http.Client no longer declares a `tls.TlsConfig[] _tls_config` field — " +
+			"if the TLS configuration is held some other way, re-derive which end of " +
+			"the pair drops first")
+	case pool == nil:
+		t.Fatal("http.Client no longer declares a `Pool _pool` field — if the pooled TLS " +
+			"sessions are held some other way, re-derive which end of the pair drops first")
+	case cfg[0] > pool[0]:
+		t.Error("http.Client declares _pool before _tls_config, so on drop the TLS " +
+			"configuration is torn down first and the pooled sessions created from it " +
+			"outlive their credential — on Windows that is a use-after-free inside " +
+			"SChannel (T1766/T1780). Fields drop in reverse declaration order, so " +
+			"_tls_config must come first")
 	}
 }
 

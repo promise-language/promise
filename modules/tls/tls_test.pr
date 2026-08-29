@@ -958,6 +958,160 @@ test_tls_stream_accept_reuses_one_server_config() `test(exclude: wasm, timeout: 
   _ := <-done;
 }
 
+test_tls_stream_accept_handshakes_concurrently_on_one_server_config() `test(exclude: wasm, timeout: "30s") {
+  // The shape http.Server.bind_tls uses: one TlsServerConfig, shared by
+  // reference, with every connection's handshake running on that connection's
+  // own goroutine — so several handshakes read the same config at once (T1766).
+  // The credential is acquired on first use, which makes the burst of first
+  // connections the window where an unsynchronized acquisition raced.
+  //
+  // Accepting is serial, so a server goroutine could otherwise finish its whole
+  // handshake before the next one is even spawned and never overlap at all.
+  // `gate` removes that: no server goroutine gets past it until every one of
+  // them has been spawned, so they all reach _tls_new at once with the
+  // credential still unacquired. That is a happens-before edge, not a sleep —
+  // nothing here waits on a clock.
+  int connections = 8;
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  Ref[TlsServerConfig] shared = Ref[TlsServerConfig](TlsServerConfig.create(_test_cert(), _test_key())?!);
+  channel[bool] clients_done = channel[bool](capacity: connections);
+  channel[bool] servers_done = channel[bool](capacity: connections);
+  channel[bool] gate = channel[bool](capacity: connections);
+
+  int started = 0;
+  while started < connections {
+    int id = started;
+    go {
+      net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+      TlsConfig cfg = TlsConfig.insecure();
+      TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+      client.write_string(id.to_string() + "\n")?!;
+      if reply := client.read_line()?! {
+        assert(reply == "pong " + id.to_string(), "each client saw the reply for its own session");
+      } else {
+        assert(false, "client expected a reply line");
+      }
+      client.close()?!;
+      clients_done.send(true);
+      return;
+    };
+    started = started + 1;
+  }
+
+  int accepted = 0;
+  while accepted < connections {
+    net.TcpStream raw = listener.accept()?!;
+    Ref[TlsServerConfig] mine = shared.clone();
+    go {
+      _ := <-gate;
+      TlsStream server = TlsStream.accept(move raw, mine.borrow)?!;
+      if line := server.read_line()?! {
+        server.write_string("pong " + line + "\n")?!;
+      } else {
+        assert(false, "server expected a request line");
+      }
+      server.close()?!;
+      servers_done.send(true);
+      return;
+    };
+    accepted = accepted + 1;
+  }
+
+  // Every server goroutine now exists and is blocked at the gate; release them
+  // all so their handshakes overlap.
+  int released = 0;
+  while released < connections {
+    gate.send(true);
+    released = released + 1;
+  }
+
+  int finished = 0;
+  while finished < connections {
+    _ := <-servers_done;
+    _ := <-clients_done;
+    finished = finished + 1;
+  }
+  listener.close()?!;
+}
+
+test_tls_connect_handshakes_concurrently_on_one_client_config() `test(exclude: wasm, timeout: "30s") {
+  // The client half of T1766. TlsStream.connect takes its TlsConfig by shared
+  // borrow, and the type's `doc now promises that one config serves concurrent
+  // connections; pal_tls_ctx_new_client acquires its credential lazily exactly
+  // like the server context, so the same first-N-handshakes window exists here.
+  // test_tls_sequential_sessions_reuse_context reuses one config but only ever
+  // one session at a time, which never opens that window.
+  //
+  // `ready` and `gate` are what make the handshakes actually overlap: every
+  // client announces itself once its TCP connection is up but before it has
+  // touched the config, and none proceeds until all of them have. So the first
+  // call into the shared config is made by N goroutines at once, with the
+  // credential still unacquired. Both edges are channel handshakes; nothing
+  // here waits on a clock.
+  int connections = 8;
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
+  int port = listener.local_port;
+  Ref[TlsConfig] shared = Ref[TlsConfig](TlsConfig.insecure());
+  channel[bool] ready = channel[bool](capacity: connections);
+  channel[bool] gate = channel[bool](capacity: connections);
+  channel[bool] clients_done = channel[bool](capacity: connections);
+
+  int started = 0;
+  while started < connections {
+    int id = started;
+    Ref[TlsConfig] mine = shared.clone();
+    go {
+      net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+      ready.send(true);
+      _ := <-gate;
+      TlsStream client = TlsStream.connect(move tcp, "localhost", mine.borrow)?!;
+      client.write_string(id.to_string() + "\n")?!;
+      if reply := client.read_line()?! {
+        assert(reply == "ack-" + id.to_string(), "each client saw the reply for its own session");
+      } else {
+        assert(false, "client expected a reply line");
+      }
+      client.close()?!;
+      clients_done.send(true);
+      return;
+    };
+    started = started + 1;
+  }
+
+  int connected = 0;
+  while connected < connections {
+    _ := <-ready;
+    connected = connected + 1;
+  }
+  int released = 0;
+  while released < connections {
+    gate.send(true);
+    released = released + 1;
+  }
+
+  // Serving is serial; the point is that all N client handshakes are already in
+  // flight against the one shared config by the time the first is served.
+  int served = 0;
+  while served < connections {
+    TlsStream server = listener.accept()?!;
+    if line := server.read_line()?! {
+      server.write_string("ack-" + line + "\n")?!;
+    } else {
+      assert(false, "server expected a request line");
+    }
+    server.close()?!;
+    served = served + 1;
+  }
+
+  int finished = 0;
+  while finished < connections {
+    _ := <-clients_done;
+    finished = finished + 1;
+  }
+  listener.close()?!;
+}
+
 test_tls_stream_accept_fails_on_plain_tcp_peer() `test(exclude: wasm, timeout: "15s") {
   // A peer that speaks no TLS makes the server-side handshake fail with a
   // handshake error — and only that connection is lost.

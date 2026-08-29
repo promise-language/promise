@@ -81,7 +81,7 @@ _tls_err(TlsErrorKind move kind, string move message) TlsError {
   return TlsError(code: 0, kind: move kind, message: move message);
 }
 
-type TlsConfig `public `doc("TLS configuration for a connection. Controls certificate verification, trust anchors, client certificates, and the minimum protocol version. Auto-frees its backend context on drop.") {
+type TlsConfig `public `doc("TLS configuration for a connection. Controls certificate verification, trust anchors, client certificates, and the minimum protocol version. One config can serve any number of connections, including concurrent ones — every setter takes ~this, so configuring it can never overlap a handshake that borrows it. The config must outlive every TlsStream connected with it: nothing in the type system enforces that yet, and dropping it early is a use-after-free on Windows (T1780). Auto-frees its backend context on drop.") {
   int _ctx; // backend context handle as int (0 = no backend / unsupported)
   bool _verify; // whether server certificates are validated
   bool _has_trust_store; // whether a trust store was successfully loaded
@@ -141,7 +141,7 @@ type TlsConfig `public `doc("TLS configuration for a connection. Controls certif
   }
 }
 
-type TlsServerConfig `public `doc("Server-side TLS credentials: a certificate chain and its matching private key. One config is shared across every accepted connection, so a server can hand it to each connection goroutine and run the handshake there. Auto-frees its backend context on drop.") {
+type TlsServerConfig `public `doc("Server-side TLS credentials: a certificate chain and its matching private key. One config is shared across every accepted connection, so a server can hand it to each connection goroutine and run the handshake there — several goroutines may handshake against the same config at once. create sets everything, and nothing can change a config afterwards, so a shared config is immutable and concurrent handshakes never race it. The config must outlive every TlsStream accepted from it: nothing in the type system enforces that yet, and dropping it early is a use-after-free on Windows (T1780). Auto-frees its backend context on drop.") {
   int _ctx; // backend context handle (server) as int (0 = no backend / unsupported)
 
   create!(u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Creates server credentials from a PEM-encoded certificate chain and its matching PEM-encoded private key. Raises TlsError(kind: unsupported) with no backend, or TlsError(kind: certificate) when either PEM fails to load.") {
@@ -172,7 +172,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
   net.TcpStream _tcp;
   bool _checked_first_record = false; // see _fill_in
 
-  connect!(net.TcpStream move tcp, string hostname, TlsConfig config) Self `factory `public `doc("Performs a TLS client handshake over an already-connected TCP stream. `hostname` sets SNI and, for verifying configs, the certificate host to check.") {
+  connect!(net.TcpStream move tcp, string hostname, TlsConfig config) Self `factory `public `doc("Performs a TLS client handshake over an already-connected TCP stream. `hostname` sets SNI and, for verifying configs, the certificate host to check. config is borrowed, not consumed, so any number of goroutines can call this on the same config concurrently; it must stay alive for as long as the returned stream does.") {
     if config._ctx == 0 {
       raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
     }
@@ -193,7 +193,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
     return s;
   }
 
-  accept!(net.TcpStream move tcp, TlsServerConfig config) Self `factory `public `doc("Performs a TLS server handshake over an already-accepted TCP stream, using config's certificate and key. Separating this from TlsListener.accept lets a server run each handshake on that connection's own goroutine, so a slow or non-TLS peer stalls only itself and a failed handshake costs one connection rather than the listener.") {
+  accept!(net.TcpStream move tcp, TlsServerConfig config) Self `factory `public `doc("Performs a TLS server handshake over an already-accepted TCP stream, using config's certificate and key. Separating this from TlsListener.accept lets a server run each handshake on that connection's own goroutine, so a slow or non-TLS peer stalls only itself and a failed handshake costs one connection rather than the listener. config is borrowed, not consumed, so every connection goroutine can call this on the same config concurrently; it must stay alive for as long as the returned stream does.") {
     if config._ctx == 0 {
       raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
     }

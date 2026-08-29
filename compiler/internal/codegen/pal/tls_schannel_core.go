@@ -264,15 +264,34 @@ func (e *tlsWinEmitter) emitWiden() {
 // context created from it, so it cannot be rebuilt while sessions are live.
 // Trust anchors are unaffected — add_root_certificate feeds __pal_tls_verify,
 // which reads the store at handshake time.
+//
+// One context serves every connection goroutine (see the Concurrency note in
+// tls_schannel.go), so this check-then-acquire is serialized on the context's
+// CRITICAL_SECTION: unsynchronized, two goroutines could both find cred_valid
+// clear and both AcquireCredentialsHandle into the same &ctx->cred, leaking the
+// loser's credential and handing an in-flight handshake a CredHandle its
+// security context was not created from (T1766). The lock is taken *before* the
+// check rather than guarding a double-checked fast path, because the
+// acquire/release pair is also what orders the ctx->cred writes against a
+// goroutine that reads them after migrating to another M; an uncontended
+// EnterCriticalSection is one interlocked op against an SSPI round costing
+// microseconds — and only the handshake reaches here at all, never the
+// encrypt/decrypt data path. Two rules follow for anything edited in between:
+// every block that returns must leave the section, and nothing may suspend the
+// goroutine while it is held, because a CRITICAL_SECTION is owned by the OS
+// thread that entered it and a resumed goroutine can be running on another M.
 func (e *tlsWinEmitter) emitEnsureCred() {
 	fn := e.newFn("__pal_tls_ensure_cred", irtypes.I32, ir.NewParam("ctx", irtypes.I64))
 	b := fn.NewBlock(".entry")
 	c := b.NewIntToPtr(fn.Params[0], e.t.ctxP)
+	lock := e.credLock(b, c)
+	b.NewCall(e.csEnter, lock)
 	validP := e.field(b, e.t.ctx, c, winCtxFCredValid)
 	already := b.NewICmp(enum.IPredNE, b.NewLoad(irtypes.I32, validP), i32c(0))
 	okBlk := fn.NewBlock(".already")
 	buildBlk := fn.NewBlock(".build")
 	b.NewCondBr(already, okBlk, buildBlk)
+	okBlk.NewCall(e.csLeave, lock)
 	okBlk.NewRet(i32c(1))
 
 	sc := e.zeroed(buildBlk, winSchCredentialsSize)
@@ -316,7 +335,9 @@ func (e *tlsWinEmitter) emitEnsureCred() {
 	acquireBlk.NewCondBr(acquireBlk.NewICmp(enum.IPredEQ, st, i32c(winSecEOK)), setBlk, failBlk)
 
 	setBlk.NewStore(i32c(1), validP)
+	setBlk.NewCall(e.csLeave, lock)
 	setBlk.NewRet(i32c(1))
+	failBlk.NewCall(e.csLeave, lock)
 	failBlk.NewRet(i32c(0))
 	e.ensureCred = fn
 }

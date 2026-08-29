@@ -65,13 +65,15 @@ func (p *WindowsPAL) EmitTLS(module *ir.Module) map[string]*ir.Func {
 // emitCtxNew defines i64 @pal_tls_ctx_new_client/_server() — allocates the
 // backend context. The SChannel credential itself is acquired lazily on the
 // first session (see __pal_tls_ensure_cred), because tls.pr configures the
-// context after creating it.
+// context after creating it; the lock that serializes that acquisition across
+// the connection goroutines sharing this context is initialized here (T1766).
 func (e *tlsWinEmitter) emitCtxNew(name string, server bool) *ir.Func {
 	fn := e.newFn(name, irtypes.I64)
 	b := fn.NewBlock(".entry")
 	raw := b.NewCall(e.alloc, tlsWinSizeOf(e.t.ctx))
 	b.NewCall(e.memset, raw, i32c(0), tlsWinSizeOf(e.t.ctx))
 	c := b.NewBitCast(raw, e.t.ctxP)
+	b.NewCall(e.csInit, e.credLock(b, c))
 	if server {
 		b.NewStore(i32c(1), e.field(b, e.t.ctx, c, winCtxFIsServer))
 	}
@@ -82,9 +84,10 @@ func (e *tlsWinEmitter) emitCtxNew(name string, server bool) *ir.Func {
 }
 
 // emitCtxFree defines void @pal_tls_ctx_free(i64 ctx) — releases the credential,
-// the certificate, the extra-roots store and the imported CNG key, then the
-// context allocation itself. Every path that can create one of these frees it
-// here, which is what keeps the leak detector at zero.
+// the certificate, the extra-roots store, the imported CNG key and the
+// credential lock, then the context allocation itself. Every path that can
+// create one of these frees it here, which is what keeps the leak detector at
+// zero.
 func (e *tlsWinEmitter) emitCtxFree() *ir.Func {
 	i8p := irtypes.I8Ptr
 	fn := e.newFn("pal_tls_ctx_free", irtypes.Void, ir.NewParam("ctx", irtypes.I64))
@@ -143,6 +146,7 @@ func (e *tlsWinEmitter) emitCtxFree() *ir.Func {
 	freeNameBlk.NewCall(e.free, keyName)
 	freeNameBlk.NewBr(doneBlk)
 
+	doneBlk.NewCall(e.csFree, e.credLock(doneBlk, c))
 	doneBlk.NewCall(e.free, e.i8ptr(doneBlk, c))
 	doneBlk.NewRet(nil)
 	return fn

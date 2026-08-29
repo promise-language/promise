@@ -999,6 +999,21 @@ write. **No platform-specific status code may cross the PAL boundary**
 mapped inside the backend), so every bridge helper in `codegen/tls.go` and all of
 `tls.pr` is shared verbatim.
 
+**A context is shared; a session is not.** One `pal_tls_ctx_*` handle backs a
+`TlsConfig` or `TlsServerConfig`, and `TlsStream.connect`/`accept` take that config by
+**shared** borrow precisely so one set of server credentials can serve every connection
+goroutine. So `pal_tls_new`, and everything it reaches, must be safe against concurrent
+calls on a single context. A session handle is the opposite: ownership gives `TlsStream`
+an exclusive borrow for the duration of every method that touches it, so no backend
+needs to lock a session. Configuration is exclusive too: `tls.pr` writes a context only
+from a factory (before the config is a value anything could share) or from a `~this`
+method (which excludes every other borrow), so `_use_cert`, `_use_key`, `_add_ca`,
+`_set_min_version` and `_set_verify` can never run beside a session. That leaves a
+backend responsible for exactly one thing: its own lazy per-context state. OpenSSL and
+Secure Transport have none — `SSL_new` is thread-safe, and the Secure Transport context
+is read-only once configured. SChannel acquires its credential on first use and so
+serializes that acquisition on a per-context lock (T1766).
+
 The `bio_read_out` / `bio_write_in` / `bio_pending_out` names are OpenSSL heritage;
 on macOS and Windows they operate on the session's own byte queues.
 

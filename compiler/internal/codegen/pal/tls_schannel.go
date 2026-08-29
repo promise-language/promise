@@ -33,10 +33,21 @@ import (
 // the teardown paths. OS-side objects (credential handle, security context, cert
 // context, cert store, CNG key) are released explicitly in ctx_free / free.
 //
-// Concurrency: a session is driven by exactly one goroutine (Promise's ownership
-// rules give TlsStream/TlsListener an exclusive borrow for the duration of every
-// method that touches the handle), so no lock is needed around the lazy
-// credential acquisition in pal_tls_new.
+// Concurrency: a *session* is driven by exactly one goroutine (Promise's
+// ownership rules give TlsStream/TlsListener an exclusive borrow for the
+// duration of every method that touches the handle), so nothing here locks a
+// session. A *context* is the opposite: TlsStream.connect/accept take the
+// TlsConfig / TlsServerConfig by shared borrow precisely so one set of
+// credentials can serve every connection goroutine (http.Server.bind_tls hands
+// the same config to each per-connection goroutine), so pal_tls_new can run
+// concurrently on one context. Its only shared mutation is the lazy credential
+// acquisition, which is therefore serialized on a per-context CRITICAL_SECTION
+// (winCtxFCredLock, T1766). Everything else a session reaches on the context —
+// the cert, the extra-roots store, the verify flag, the protocol floor — is
+// read-only by then, because tls.pr only ever writes those from a `factory`
+// (before the config exists as a value anyone could share) or from a ~this
+// method (which no goroutine can hold while another borrows the same config),
+// so the configuration entry points need no lock.
 
 // --- SSPI / SChannel pinned ABI constants ---------------------------------
 // Values from the Windows SDK headers (sspi.h, schannel.h, wincrypt.h,
@@ -250,12 +261,13 @@ const (
 	winCtxFCredValid = 1
 	winCtxFIsServer  = 2
 	winCtxFVerify    = 3
-	winCtxFDisabled  = 4 // grbitDisabledProtocols
-	winCtxFCert      = 5 // PCCERT_CONTEXT
-	winCtxFRoots     = 6 // HCERTSTORE of extra trust anchors
-	winCtxFKey       = 7 // NCRYPT_KEY_HANDLE
-	winCtxFKeyProv   = 8 // NCRYPT_PROV_HANDLE
-	winCtxFKeyName   = 9 // UTF-16 CNG key name (pal_alloc'd)
+	winCtxFDisabled  = 4  // grbitDisabledProtocols
+	winCtxFCert      = 5  // PCCERT_CONTEXT
+	winCtxFRoots     = 6  // HCERTSTORE of extra trust anchors
+	winCtxFKey       = 7  // NCRYPT_KEY_HANDLE
+	winCtxFKeyProv   = 8  // NCRYPT_PROV_HANDLE
+	winCtxFKeyName   = 9  // UTF-16 CNG key name (pal_alloc'd)
+	winCtxFCredLock  = 10 // CRITICAL_SECTION serializing __pal_tls_ensure_cred
 )
 
 // Field indices into the session struct (tlsWinTypes.sess).
@@ -296,6 +308,10 @@ func newTLSWinTypes() *tlsWinTypes {
 		irtypes.I64, // key
 		irtypes.I64, // key provider
 		i8p,         // key name (UTF-16)
+		// CRITICAL_SECTION (40 bytes, 8-aligned on x64 — the size
+		// pal_mutex_init allocates). Appended last so every field index above
+		// stays put; tlsWinSizeOf derives the allocation size from this type.
+		irtypes.NewArray(5, irtypes.I64), // cred lock
 	)
 	t.ctxP = irtypes.NewPointer(t.ctx)
 	t.sess = irtypes.NewStruct(
@@ -342,8 +358,12 @@ type tlsWinEmitter struct {
 	strlen  *ir.Func
 
 	// kernel32
-	mb2wc *ir.Func
-	wc2mb *ir.Func
+	mb2wc   *ir.Func
+	wc2mb   *ir.Func
+	csInit  *ir.Func
+	csEnter *ir.Func
+	csLeave *ir.Func
+	csFree  *ir.Func
 
 	// secur32 (SSPI)
 	acquireCred  *ir.Func
@@ -409,6 +429,12 @@ var tlsWinNull = constant.NewNull(irtypes.I8Ptr)
 // have type *typ).
 func (e *tlsWinEmitter) field(b *ir.Block, typ irtypes.Type, p value.Value, idx int) value.Value {
 	return b.NewGetElementPtr(typ, p, i32c(0), i32c(int64(idx)))
+}
+
+// credLock returns the context's credential-acquisition CRITICAL_SECTION as an
+// i8*, which is what the kernel32 entry points take (T1766).
+func (e *tlsWinEmitter) credLock(b *ir.Block, c value.Value) value.Value {
+	return e.i8ptr(b, e.field(b, e.t.ctx, c, winCtxFCredLock))
 }
 
 // byteAt returns p + off as an i8*.
@@ -494,6 +520,17 @@ func (e *tlsWinEmitter) declareExterns() {
 		ir.NewParam("src", i8p), ir.NewParam("srcLen", irtypes.I32),
 		ir.NewParam("dst", i8p), ir.NewParam("dstLen", irtypes.I32),
 		ir.NewParam("defChar", i8p), ir.NewParam("usedDef", i8p))
+
+	// Shared with WindowsPAL.EmitMutex* — getOrDeclareFunc reuses whichever
+	// declaration lands in the module first.
+	e.csInit = getOrDeclareFunc(m, "InitializeCriticalSection", irtypes.Void,
+		ir.NewParam("lpCriticalSection", i8p))
+	e.csEnter = getOrDeclareFunc(m, "EnterCriticalSection", irtypes.Void,
+		ir.NewParam("lpCriticalSection", i8p))
+	e.csLeave = getOrDeclareFunc(m, "LeaveCriticalSection", irtypes.Void,
+		ir.NewParam("lpCriticalSection", i8p))
+	e.csFree = getOrDeclareFunc(m, "DeleteCriticalSection", irtypes.Void,
+		ir.NewParam("lpCriticalSection", i8p))
 
 	e.acquireCred = getOrDeclareFunc(m, "AcquireCredentialsHandleA", irtypes.I32,
 		ir.NewParam("principal", i8p), ir.NewParam("pkg", i8p),

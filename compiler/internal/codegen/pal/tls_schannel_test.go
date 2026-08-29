@@ -799,13 +799,14 @@ func TestWindowsPALTLSVersionStringsMatchModule(t *testing.T) {
 	(&WindowsPAL{}).EmitTLS(module)
 	out := module.String()
 
-	src, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "modules", "tls", "tls.pr"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "modules", "tls", "tls.pr"))
 	if err != nil {
 		t.Fatalf("read modules/tls/tls.pr: %v", err)
 	}
+	src := normalizeEOL(raw)
 	// Every literal tls.pr compares the backend's version string against.
 	lits := regexp.MustCompile(`_tls_get_version\([^)]*\)\s*==\s*"([^"]*)"`).
-		FindAllStringSubmatch(string(src), -1)
+		FindAllStringSubmatch(src, -1)
 	if len(lits) == 0 {
 		t.Fatal("tls.pr no longer compares _tls_get_version() to a literal - " +
 			"the version contract moved and this test needs updating")
@@ -816,6 +817,16 @@ func TestWindowsPALTLSVersionStringsMatchModule(t *testing.T) {
 				"exact string - the negotiated version would be misreported", m[1])
 		}
 	}
+}
+
+// normalizeEOL reads a repo source file as text with LF line endings. The repo
+// stores .pr sources with LF, but a Windows checkout with core.autocrlf=true —
+// Git for Windows' default, and what this machine uses — materializes them as
+// CRLF. The contracts below are pinned with patterns that anchor on \n, so
+// without this a perfectly correct source reads as a missing declaration and
+// the test fails for the checkout style rather than for the thing it guards.
+func normalizeEOL(b []byte) string {
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
 // TestWindowsPALTLSCredentialOutlivesThePooledSessions pins the lifetime half of
@@ -837,11 +848,12 @@ func TestWindowsPALTLSVersionStringsMatchModule(t *testing.T) {
 // Reading the source is therefore the only guard, exactly as the version-string
 // contract above is.
 func TestWindowsPALTLSCredentialOutlivesThePooledSessions(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "modules", "http", "http.pr"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "modules", "http", "http.pr"))
 	if err != nil {
 		t.Fatalf("read modules/http/http.pr: %v", err)
 	}
-	body := regexp.MustCompile(`(?s)\ntype Client [^\n]*\{(.*?)\n\}\n`).FindStringSubmatch(string(src))
+	src := normalizeEOL(raw)
+	body := regexp.MustCompile(`(?s)\ntype Client [^\n]*\{(.*?)\n\}\n`).FindStringSubmatch(src)
 	if body == nil {
 		t.Fatal("modules/http/http.pr no longer declares `type Client` — the client that " +
 			"owns both a TlsConfig and the sessions made from it moved, and this " +

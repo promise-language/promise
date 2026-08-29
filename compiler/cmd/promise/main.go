@@ -2703,7 +2703,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			// announces its compile→run handoff (letting a backstop kill be
 			// attributed to the phase it actually reached) and keeps its own
 			// batch budget under the backstop.
-			cmd.Env = append(os.Environ(), testChildEnv+"=1")
+			cmd.Env = append(os.Environ(), testChildEnv+"=1",
+				// T1817: split this process's backend budget across the children
+				// we run concurrently. Without it each of the `parallel` children
+				// independently fans out to NumCPU opt/llc processes, so the host
+				// sees parallel×NumCPU of them rather than NumCPU.
+				fmt.Sprintf("%s=%d", backendJobsEnv, childBackendJobs(parallel)))
 			setupProcessGroupKill(cmd)
 			output, cmdErr := cmd.CombinedOutput()
 
@@ -3574,7 +3579,9 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 				}
 			}
 
-			// Cache miss — compile
+			// Cache miss — compile. The backend slot is taken only here, so a
+			// cache hit above never queues behind a running opt/llc (T1817).
+			defer acquireBackendJob()()
 			obj, cerr := compileModule(irText, "promise-mod-"+name)
 			if cerr != nil {
 				mu.Lock()
@@ -3678,7 +3685,9 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 				}
 			}
 
-			// Cache miss — compile
+			// Cache miss — compile. As above, the slot is taken only on a miss,
+			// so cache hits never wait behind a running opt/llc (T1817).
+			defer acquireBackendJob()()
 			obj, cerr := compileModule(irText, "promise-inst-"+name)
 			if cerr != nil {
 				instMu.Lock()

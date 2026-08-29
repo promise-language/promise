@@ -39,7 +39,7 @@ func runIn(dir string, name string, args []string, describe func() string) error
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runTracked(cmd); err != nil {
 		return fmt.Errorf("%s: %w", describe(), err)
 	}
 	return nil
@@ -103,7 +103,7 @@ func RunTee(dir, name string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Stdout = io.MultiWriter(os.Stdout, &buf)
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runTracked(cmd); err != nil {
 		return strings.TrimSpace(buf.String()), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(buf.String()), nil
@@ -119,7 +119,7 @@ func RunTeeStderr(dir, name string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Stdout = io.MultiWriter(os.Stderr, &buf)
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runTracked(cmd); err != nil {
 		return strings.TrimSpace(buf.String()), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(buf.String()), nil
@@ -137,7 +137,7 @@ func RunCaptureStdout(dir, name string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Stdout = &buf
 	cmd.Stderr = os.Stderr
-	err := cmd.Run()
+	err := runTracked(cmd)
 	return buf.String(), err
 }
 
@@ -195,7 +195,7 @@ func runTeeFilteredTo(fwd io.Writer, dir, name string, keep func(string) bool, a
 	cmd.Dir = dir
 	cmd.Stdout = w
 	cmd.Stderr = os.Stderr
-	runErr := cmd.Run()
+	runErr := runTracked(cmd)
 	flushErr := w.flush()
 	if runErr != nil {
 		return strings.TrimSpace(capture.String()), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), runErr)

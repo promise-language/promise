@@ -3,6 +3,7 @@
 package common
 
 import (
+	"os"
 	"sync/atomic"
 	"syscall"
 )
@@ -19,7 +20,13 @@ var interrupted atomic.Int32
 
 func toolCtrlHandler(ctrlType uint) uintptr {
 	if ctrlType <= 1 { // CTRL_C_EVENT or CTRL_BREAK_EVENT
-		interrupted.Store(1)
+		if interrupted.Swap(1) != 0 {
+			// Second Ctrl+C: the user has asked twice. Stop arguing.
+			// Children share this console and got the event themselves, but any
+			// that ignored it are taken down here.
+			KillChildren()
+			os.Exit(130)
+		}
 		return 1
 	}
 	return 0

@@ -11,6 +11,8 @@ var sourceHash = "dev"
 
 func main() {
 	common.CheckStale(sourceHash)
+	// Stop rather than run on as an orphan if our launcher is killed (T1450).
+	common.WatchForOrphan()
 	root, err := common.FindRoot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

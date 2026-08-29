@@ -2,9 +2,12 @@ package common
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -119,18 +122,51 @@ func RunTest(root string, args []string) error {
 	return nil
 }
 
+// goTestConcurrency returns the -p and -parallel values for a suite whose tests
+// spawn compilers.
+//
+// Go's defaults are both GOMAXPROCS, and they multiply: up to NumCPU package
+// binaries, each running up to NumCPU t.Parallel() tests. That is right for
+// tests that are just goroutines, and wrong here — most of these tests shell out
+// to `bin/promise`, a ~250 MB multi-threaded process that fans out to opt/llc of
+// its own. At the defaults a 12-core host ran 156 concurrent processes and 9.4 GB
+// for the compiler suite, deep into swap (T1817).
+//
+// So pick factors whose product is about NumCPU — the machine's actual capacity —
+// rather than NumCPU each. Keeping -p ≥ 2 preserves cross-package overlap, which
+// is what T1776's split was for. Measured on that host, cold test cache: 247s at
+// the defaults (156 procs, 9.4 GB) versus 210s at -p 4 -parallel 4 (40 procs,
+// 5.6 GB). Oversubscription was costing wall time, not buying it.
+func goTestConcurrency() (p, parallel int) {
+	n := runtime.NumCPU()
+	p = int(math.Ceil(math.Sqrt(float64(n))))
+	p = max(p, 2)
+	parallel = max((n+p-1)/p, 2)
+	return p, parallel
+}
+
+// goTestConcurrencyArgs renders goTestConcurrency as `go test` flags.
+func goTestConcurrencyArgs() []string {
+	p, parallel := goTestConcurrency()
+	return []string{"-p", strconv.Itoa(p), "-parallel", strconv.Itoa(parallel)}
+}
+
 // RunGoTests runs only compiler Go unit tests. Used by verify.
 func RunGoTests(root string) error {
 	compilerDir := filepath.Join(root, "compiler")
 	// -timeout 30m: see RunTests — the codegen package exceeds Go's default
 	// 10m per-package limit on slow runners (GitHub windows-amd64).
-	return RunIn(compilerDir, "go", "test", "-timeout", "30m", "./...")
+	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
+	return RunIn(compilerDir, "go", append(args, "./...")...)
 }
 
 // RunToolsGoTests runs Go unit tests for the tools/build module.
 func RunToolsGoTests(root string) error {
 	toolsDir := filepath.Join(root, "tools", "build")
-	return RunIn(toolsDir, "go", "test", "-timeout", "30m", "./...")
+	// Same concurrency reasoning as RunGoTests: these tests drive the build
+	// tools, which drive the compiler.
+	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
+	return RunIn(toolsDir, "go", append(args, "./...")...)
 }
 
 // RunFlowsGoTests runs Go unit tests for the flows module.

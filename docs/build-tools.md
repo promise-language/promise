@@ -52,6 +52,46 @@ tools/build/
     └── ...
 ```
 
+## Process Lifetime
+
+A build tool is a supervisor: nearly all of its wall time is spent inside `go test`,
+`go build` or `bin/promise test`, each of which spawns a tree of its own. Two rules
+tie those trees to the tool that started them.
+
+**A tool takes its subprocesses with it.** Every long-running subprocess is started
+in its own process group and recorded in a registry (`common/childproc.go`). On the
+second Ctrl+C, and whenever the tool exits early, the registry is used to kill each
+tree. Because the children no longer share the tool's process group, the terminal's
+Ctrl+C reaches the tool alone — so the tool forwards it, which makes the interrupt
+path the same whether the signal came from a terminal or from anywhere else.
+
+**A tool does not outlive its launcher.** Each long-running tool arms a watchdog
+(`common/orphan.go`) that exits with code 3 once the process that launched it is
+gone. Without it, killing a harness step leaves the tool running a full suite that
+nobody is reading — and for verify, holding the host-global lock while it does, so
+orphans accumulate and every later run starves waiting for it. A tool launched
+already-detached (ppid 1) is not armed: there is no launcher whose death could mean
+anything.
+
+## Test Concurrency
+
+Go's `-p` and `-parallel` both default to GOMAXPROCS, and they multiply: up to
+NumCPU package binaries, each running up to NumCPU `t.Parallel()` tests. That is
+right for tests that are only goroutines and wrong for this repo's, most of which
+shell out to `bin/promise` — a several-hundred-megabyte, multi-threaded process
+that fans out to `opt`/`llc` of its own.
+
+So `RunGoTests` picks factors whose **product** is about NumCPU rather than NumCPU
+each, keeping `-p` at 2 or more so packages still overlap (which is what the
+per-area split was for). The compiler applies the matching rule below it: a bound
+on concurrent backend processes, which a parent divides among the children it
+spawns (`PROMISE_BACKEND_JOBS`) so a nested fan-out costs the host one budget
+rather than one per level.
+
+Oversubscription here was never buying wall time — it was spending it. On a
+12-core host with a cold test cache, the compiler suite ran 247s at the defaults
+(156 concurrent processes, 9.4 GB) and 210s bounded (40 processes, 5.6 GB).
+
 ## Which Repository a Tool Acts On
 
 A tool acts on exactly one repository: the one it was built for. `./make` stamps

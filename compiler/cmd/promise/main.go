@@ -2750,6 +2750,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		fmt.Fprintf(os.Stderr, "json: %d pass, %d fail, %d timeout, %d leak, %d memory, %d excluded, %d not-run (%d files, %.3fs)\n",
 			counts["pass"], counts["fail"], counts["timeout"], counts["leak"], counts["memory"],
 			counts["excluded"], counts["not-run"], len(results), time.Since(totalStart).Seconds())
+		if counts["fail"]+counts["timeout"]+counts["leak"]+counts["memory"]+counts["not-run"] > 0 {
+			os.Exit(1)
+		}
 		return
 	}
 

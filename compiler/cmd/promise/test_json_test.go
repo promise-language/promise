@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -201,5 +204,53 @@ func TestBuildRecordsMissingRosterRecovers(t *testing.T) {
 	}
 	if statusOf(recs, "a") != "pass" || statusOf(recs, "b") != "fail" {
 		t.Errorf("recovered statuses wrong: %+v", recs)
+	}
+}
+
+// T1595: promise test --json must exit non-zero when tests fail.
+// Before the fix the jsonMode branch always did a bare return, so the process
+// always exited 0 regardless of failures.
+func TestJSONModeExitCodeOnFailure(t *testing.T) {
+	promiseBin := locatePromiseBin(t) // skips if bin/promise is not built
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "fail_test.pr")
+	if err := os.WriteFile(src, []byte("always_fails() `test { assert(false, \"intentional\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(promiseBin, "test", "--json", src)
+	stdout, err := cmd.Output() // Output() captures stdout; err is non-nil on non-zero exit
+	if err == nil {
+		t.Fatal("promise test --json on a failing test must exit non-zero, but exited 0")
+	}
+
+	// JSONL stdout must contain the fail record.
+	if !strings.Contains(string(stdout), `"status":"fail"`) {
+		t.Errorf("stdout JSONL missing fail record; got:\n%s", stdout)
+	}
+}
+
+// T1595: promise test --json must exit zero when all tests pass.
+// Regression guard: the fix that added os.Exit(1) for failures must not break
+// the success path.
+func TestJSONModeExitCodeOnSuccess(t *testing.T) {
+	promiseBin := locatePromiseBin(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "pass_test.pr")
+	if err := os.WriteFile(src, []byte("always_passes() `test { assert(true, \"should pass\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(promiseBin, "test", "--json", src)
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("promise test --json on a passing test must exit 0, got: %v", err)
+	}
+
+	// JSONL stdout must contain the pass record.
+	if !strings.Contains(string(stdout), `"status":"pass"`) {
+		t.Errorf("stdout JSONL missing pass record; got:\n%s", stdout)
 	}
 }

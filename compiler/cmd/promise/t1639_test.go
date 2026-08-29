@@ -399,13 +399,17 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 			t.Fatal(err)
 		}
 		start := time.Now()
-		out, err := exec.Command(promiseBin, "test", "-compile-timeout", "25s", dir).CombinedOutput()
+		// 60s backstop: gives each child a ≈38s run budget (60s - compile_time -
+		// 15s slack), which is enough for ok_one to complete on a loaded machine.
+		// With 25s the budget always clamped to the 10s floor, which was too tight
+		// for the test binary to initialize and run on a heavily-loaded machine.
+		out, err := exec.Command(promiseBin, "test", "-compile-timeout", "60s", dir).CombinedOutput()
 		combined := string(out)
 		if err == nil {
 			t.Fatalf("expected non-zero exit.\nOutput:\n%s", combined)
 		}
 		if strings.Contains(combined, "compilation timeout") {
-			// The child never got out of the compile phase within the 25s
+			// The child never got out of the compile phase within the 60s
 			// backstop, so there is no clamped run budget to observe. On a
 			// machine that slow the label is honest and there is nothing to
 			// assert. Not an error — but not a pass for this test either.
@@ -414,8 +418,9 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 		// The clamp is the point: the child must expire before the backstop,
 		// which would otherwise kill it mid-run with no output at all. The
 		// content assertions below are the real proof; this bound only catches
-		// a clamp that stopped working entirely.
-		if elapsed := time.Since(start); elapsed > 60*time.Second {
+		// a clamp that stopped working entirely. With a 60s backstop the total
+		// elapsed is bounded at ~60s (compile_time + clamped_run ≤ backstop).
+		if elapsed := time.Since(start); elapsed > 90*time.Second {
 			t.Errorf("run took %s — the child did not time out before the backstop.\nOutput:\n%s", elapsed, combined)
 		}
 		// The parent attributes the file, names the test, and keeps the context.

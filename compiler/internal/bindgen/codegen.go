@@ -158,7 +158,7 @@ func (g *generator) emitType(t Type, importModule string) {
 // value/instance type is unsupported by codegen. A plain heap type is the only
 // representation that compiles for arbitrary dictionary field types (T0724).
 func (g *generator) emitRecord(t Type) {
-	g.line("type %s `public%s {", t.Name, docAnnot(t.Doc))
+	g.line("type %s `structural(protocol: false) `public%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	for _, f := range t.Fields {
 		g.line("%s %s;", promiseType(f.Type), f.Name)
@@ -196,7 +196,7 @@ func (g *generator) emitVariant(t Type) {
 // A flags type has a single copy `int _bits field, so it is a valid value type
 // (T0724).
 func (g *generator) emitFlags(t Type) {
-	g.line("type %s `public%s {", t.Name, docAnnot(t.Doc))
+	g.line("type %s `structural(protocol: false) `public%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	g.line("int _bits `value;")
 	g.blank()
@@ -227,7 +227,7 @@ func (g *generator) emitFlags(t Type) {
 }
 
 func (g *generator) emitResource(r Resource, importModule string) {
-	g.line("type %s `public `target(%s)%s {", r.Name, g.target, docAnnot(r.Doc))
+	g.line("type %s `structural(protocol: false) `public `target(%s)%s {", r.Name, g.target, docAnnot(r.Doc))
 	g.indent++
 	g.line("i32 _handle;")
 	g.blank()

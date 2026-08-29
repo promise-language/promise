@@ -1718,7 +1718,12 @@ func clampRunTimeout(timeout time.Duration, cfg testTimeoutConfig, target string
 	}
 	const (
 		slack = 15 * time.Second
-		floor = 5 * time.Second
+		// floor must be large enough for the test binary to start, initialize
+		// the M:N scheduler (spin-wait for all worker threads), and run at least
+		// one test — even on a heavily-loaded machine running many parallel tests.
+		// 5s was too tight: under parallel verify load the scheduler spin-wait
+		// alone could consume the whole budget before any test reported (T1639).
+		floor = 10 * time.Second
 	)
 	budget := computeParentTimeout(cfg, target) - time.Since(start) - slack
 	if budget < floor {

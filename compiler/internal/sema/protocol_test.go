@@ -1012,3 +1012,48 @@ func TestProtocolTriggerTableInheritedAbstractMethod(t *testing.T) {
 	`, triggers, loader)
 	expectError(t, errs, "matching protocol mymod.Proto")
 }
+
+// --- T1733: structural(protocol: false) on bindgen-generated types ---
+
+// TestT1733StdLibProtocolNamesAllowed verifies that a type with
+// `structural(protocol: false) can have methods named close, read, write, next,
+// and clone — names reserved by std protocol interfaces (Closer, Reader, Writer,
+// Iterator, Cloneable) — without triggering protocol near-miss errors.
+//
+// This is the end-to-end compilation check for T1733: `promise bind` emits
+// `structural(protocol: false) on every generated type so that WIT resources
+// whose operations use these names compile unmodified.
+func TestT1733StdLibProtocolNamesAllowed(t *testing.T) {
+	checkOK(t, `
+		type Descriptor `+"`"+`structural(protocol: false) {
+			i32 _handle;
+			close(this) {}
+			read(this, int length) u8[] { return []; }
+			write(this, u8[] bytes) {}
+			next(this) u8? { return none; }
+			clone(this) Descriptor { return Descriptor(_handle: this._handle); }
+		}
+		main() {}
+	`)
+}
+
+// TestT1733StdLibProtocolNamesRejectedWithoutOptOut is the negative twin of
+// TestT1733StdLibProtocolNamesAllowed: a type without `structural(protocol: false)
+// that has a method signature that does NOT satisfy the corresponding protocol
+// must produce a protocol near-miss error.
+//
+// `read(this, u64 length) u8[]` does not satisfy `Reader.read!(~this, u8[] ~buf) int`:
+// the parameter types differ (u64 ≠ u8[]) and the return types differ (u8[] ≠ int),
+// so the near-miss fires. By contrast, `close(this)` DOES satisfy
+// `Closer.close!(~this)` under relaxed matching (non-failable satisfies failable,
+// same empty explicit-param list), so close alone would not be a near-miss.
+func TestT1733StdLibProtocolNamesRejectedWithoutOptOut(t *testing.T) {
+	errs := checkErrs(t, `
+		type Descriptor {
+			i32 _handle;
+			read(this, u64 length) u8[] { return []; }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "read")
+}

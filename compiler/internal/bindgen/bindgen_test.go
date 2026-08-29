@@ -289,7 +289,7 @@ func TestCodegenRecord(t *testing.T) {
 	out := GeneratePromise(modules, "wasi")
 	// Records are plain types — `value is never valid on a type declaration, and
 	// records can hold non-copy fields (T0724).
-	assertContains(t, out, "type Point `public {")
+	assertContains(t, out, "type Point `structural(protocol: false) `public {")
 	assertContains(t, out, "f64 x;")
 	assertContains(t, out, "f64 y;")
 	assertNotContains(t, out, "`value")
@@ -351,7 +351,7 @@ func TestCodegenFlags(t *testing.T) {
 	}}
 	out := GeneratePromise(modules, "wasi")
 	// Flags are pure value types: `value on the _bits field, not the type (T0724).
-	assertContains(t, out, "type OpenFlags `public {")
+	assertContains(t, out, "type OpenFlags `structural(protocol: false) `public {")
 	assertContains(t, out, "int _bits `value;")
 	assertContains(t, out, "get read OpenFlags `public `global `doc(\"Flag: read\") {")
 	assertContains(t, out, "return OpenFlags(_bits: 1);")
@@ -377,7 +377,7 @@ func TestCodegenResource(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Descriptor `public `target(wasi) {")
+	assertContains(t, out, "type Descriptor `structural(protocol: false) `public `target(wasi) {")
 	assertContains(t, out, "i32 _handle;")
 	assertContains(t, out, "read!(this, u64 length) u8[] `public {")
 	assertContains(t, out, "return _descriptor_read(this._handle, length)^;")
@@ -906,7 +906,7 @@ func TestCodegenRecordDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Point `public `doc(\"A 2D point.\") {")
+	assertContains(t, out, "type Point `structural(protocol: false) `public `doc(\"A 2D point.\") {")
 }
 
 func TestCodegenEnumDoc(t *testing.T) {
@@ -1060,10 +1060,10 @@ interface types {
 	// Verify key constructs are present. Records are plain types; flags are value
 	// types via `value on the single _bits field, not the type decl (T0724).
 	assertContains(t, out, "enum DescriptorType `public {")
-	assertContains(t, out, "type DescriptorStat `public {")
-	assertContains(t, out, "type OpenFlags `public {")
+	assertContains(t, out, "type DescriptorStat `structural(protocol: false) `public {")
+	assertContains(t, out, "type OpenFlags `structural(protocol: false) `public {")
 	assertContains(t, out, "int _bits `value;")
-	assertContains(t, out, "type Descriptor `public `target(wasi) {")
+	assertContains(t, out, "type Descriptor `structural(protocol: false) `public `target(wasi) {")
 	assertContains(t, out, "drop(~this) {")
 	assertContains(t, out, "open_at!(string path, OpenFlags flags) Descriptor `public `target(wasi) {")
 	assertContains(t, out, "`wasm_import(\"wasi:filesystem/types\"")
@@ -1960,7 +1960,7 @@ func TestCodegenFlagsDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Perms `public `doc(\"Permission flags.\") {")
+	assertContains(t, out, "type Perms `structural(protocol: false) `public `doc(\"Permission flags.\") {")
 }
 
 func TestCodegenTypeAliasDoc(t *testing.T) {
@@ -1989,7 +1989,7 @@ func TestCodegenResourceDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type File `public `target(wasi) `doc(\"A file handle.\") {")
+	assertContains(t, out, "type File `structural(protocol: false) `public `target(wasi) `doc(\"A file handle.\") {")
 }
 
 // TestCodegenJsValueEnumDocForm verifies the unconditionally-emitted JsValue
@@ -2051,7 +2051,7 @@ func TestCodegenResourceNoDrop(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Handle `public `target(wasi) {")
+	assertContains(t, out, "type Handle `structural(protocol: false) `public `target(wasi) {")
 	assertNotContains(t, out, "drop(~this)")
 	assertNotContains(t, out, "[resource-drop]")
 }
@@ -3143,7 +3143,7 @@ func TestWebIdlBindElementConstructs(t *testing.T) {
 	prCode := GeneratePromise(modules, "web")
 
 	// Dictionary → plain type with Option-wrapped optional fields (T0724).
-	if !strings.Contains(prCode, "type CheckVisibilityOptions `public {") {
+	if !strings.Contains(prCode, "type CheckVisibilityOptions `structural(protocol: false) `public {") {
 		t.Errorf("expected CheckVisibilityOptions plain type, got:\n%s", prCode)
 	}
 	if !strings.Contains(prCode, "bool? check_opacity;") {

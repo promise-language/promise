@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +19,8 @@ import (
 //
 // The IR shape is locked by internal/codegen/t0680_test.go; this test drives an
 // actual wasm32-wasi binary under wasmtime and asserts an *infinite-progress
-// livelock* — one that keeps completing goroutines forever — reports TIMEOUT and
-// the runner exits promptly (well under the process-level backstop, which is
+// livelock* — one that keeps completing goroutines forever — reports TIMEOUT at
+// its own per-test deadline rather than at the process-level backstop (which is
 // per-test-timeout + 30s).
 
 // requireWasmtime skips the test when wasmtime is not installed (the wasm32-wasi
@@ -31,12 +32,58 @@ func requireWasmtime(t *testing.T) {
 	}
 }
 
+// inBinaryTimeoutRe captures the per-test duration the binary itself reported on
+// a TIMEOUT outcome, e.g. "TIMEOUT (1.003s) test_livelock [wasm32-wasi]". The
+// batch-budget kill prints "TIMEOUT (-)" instead, so a match is already proof
+// that the in-binary deadline — not the backstop — is what fired.
+var inBinaryTimeoutRe = regexp.MustCompile(`TIMEOUT \((\d+\.\d+)s\) (\w+)`)
+
+// assertInBinaryTimeout asserts that testName timed out through the in-binary
+// per-test deadline (promise_sched_coop_step observing nanotime() >= deadline)
+// rather than falling through to the process-level backstop. regressed names the
+// enforcement path the caller is guarding.
+//
+// Promptness is measured from the duration the BINARY reports, not from the wall
+// clock of the whole `promise test` invocation. That invocation also does a
+// wasm32-wasi cross-compile, which on a loaded machine routinely takes longer
+// than the deadline itself by an order of magnitude — timing it proves nothing
+// about enforcement and fails the test merely for being run alongside others.
+func assertInBinaryTimeout(t *testing.T, combined, testName, regressed string) {
+	t.Helper()
+
+	m := inBinaryTimeoutRe.FindStringSubmatch(combined)
+	if m == nil || m[2] != testName {
+		t.Errorf("expected in-binary per-test TIMEOUT line for %s; got:\n%s", testName, combined)
+		return
+	}
+	if !strings.Contains(combined, "1 timed out") {
+		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
+	}
+	if strings.Contains(combined, "batch budget") {
+		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
+			"deadline — %s; got:\n%s", regressed, combined)
+	}
+
+	// The deadline is annotated at 1s. Enforcement granularity is one resumed G,
+	// so the reported duration overshoots a little; 20s is a wide margin that
+	// still catches a deadline that only fires once the backstop is in sight.
+	held, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatalf("unparseable TIMEOUT duration %q", m[1])
+	}
+	if held > 20 {
+		t.Errorf("%s ran %ss before the in-binary deadline fired — expected it "+
+			"promptly (<20s); enforcement likely regressed to the process backstop",
+			testName, m[1])
+	}
+}
+
 // TestT0680_WasmLivelockReportsTimeoutInBinary — a batch test that spawns and
 // awaits a fresh goroutine forever (infinite progress: every iteration unwinds
 // to the cooperative scheduler loop) must be interrupted by the in-binary
-// deadline at ~1s and reported as TIMEOUT. Critically, the whole run must finish
-// far below the process backstop (1s + 30s = 31s): if enforcement regressed to
-// backstop-only, this would take ≥31s.
+// deadline at ~1s and reported as TIMEOUT. Critically, the deadline the binary
+// reports must be its own ~1s one, not the process backstop (1s + 30s = 31s):
+// backstop-only enforcement prints a synthetic "TIMEOUT (-)" line instead.
 func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
 	promiseBin := locatePromiseBin(t)
@@ -66,13 +113,8 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wall-clock bound: generous enough for compile + wasmtime startup, but far
-	// below the 31s process backstop. If the in-binary deadline fires we finish
-	// in a few seconds; if it regressed we'd blow past this bound.
-	start := time.Now()
 	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 	output, runErr := cmd.CombinedOutput()
-	elapsed := time.Since(start)
 	combined := string(output)
 
 	if runErr == nil {
@@ -83,24 +125,7 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 	// line for the test, plus the "1 timed out" summary. The batch-budget kill
 	// instead prints a synthetic "TIMEOUT (-) <name>" line whose context names
 	// the budget rather than the test's own deadline (T1639).
-	tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_livelock`)
-	if !tre.MatchString(combined) {
-		t.Errorf("expected in-binary per-test TIMEOUT line for test_livelock; got:\n%s", combined)
-	}
-	if !strings.Contains(combined, "1 timed out") {
-		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
-	}
-	if strings.Contains(combined, "batch budget") {
-		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
-			"deadline — Part 2 enforcement regressed; got:\n%s", combined)
-	}
-
-	// Promptness: must be well under the 31s backstop. 20s is a wide margin that
-	// still catches a regression to backstop-only.
-	if elapsed > 20*time.Second {
-		t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
-			"enforcement likely regressed to the process backstop", elapsed)
-	}
+	assertInBinaryTimeout(t, combined, "test_livelock", "Part 2 enforcement regressed")
 }
 
 // TestT1200_WasmChannelLivelockReportsTimeoutInBinary — the T0680 spawn-loop case
@@ -184,31 +209,15 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			start := time.Now()
 			cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 			output, runErr := cmd.CombinedOutput()
-			elapsed := time.Since(start)
 			combined := string(output)
 
 			if runErr == nil {
 				t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
 			}
 
-			tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_livelock`)
-			if !tre.MatchString(combined) {
-				t.Errorf("expected in-binary per-test TIMEOUT line for test_livelock; got:\n%s", combined)
-			}
-			if !strings.Contains(combined, "1 timed out") {
-				t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
-			}
-			if strings.Contains(combined, "batch budget") {
-				t.Errorf("run hit the process-level batch budget instead of the in-binary "+
-					"deadline — T1200 channel-livelock enforcement regressed; got:\n%s", combined)
-			}
-			if elapsed > 20*time.Second {
-				t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
-					"enforcement likely regressed to the process backstop", elapsed)
-			}
+			assertInBinaryTimeout(t, combined, "test_livelock", "T1200 channel-livelock enforcement regressed")
 		})
 	}
 }
@@ -263,31 +272,15 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := time.Now()
 	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 	output, runErr := cmd.CombinedOutput()
-	elapsed := time.Since(start)
 	combined := string(output)
 
 	if runErr == nil {
 		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
 	}
 
-	tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_mtx`)
-	if !tre.MatchString(combined) {
-		t.Errorf("expected in-binary per-test TIMEOUT line for test_mtx; got:\n%s", combined)
-	}
-	if !strings.Contains(combined, "1 timed out") {
-		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
-	}
-	if strings.Contains(combined, "batch budget") {
-		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
-			"deadline — T1218 mutex-livelock enforcement regressed; got:\n%s", combined)
-	}
-	if elapsed > 20*time.Second {
-		t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
-			"enforcement likely regressed to the process backstop", elapsed)
-	}
+	assertInBinaryTimeout(t, combined, "test_mtx", "T1218 mutex-livelock enforcement regressed")
 }
 
 // TestT1220_WasmSelectLivelockReportsTimeoutInBinary — sibling of T1200/T1218,
@@ -341,29 +334,13 @@ func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := time.Now()
 	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 	output, runErr := cmd.CombinedOutput()
-	elapsed := time.Since(start)
 	combined := string(output)
 
 	if runErr == nil {
 		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
 	}
 
-	tre := regexp.MustCompile(`TIMEOUT \(\d+\.\d+s\) test_sel`)
-	if !tre.MatchString(combined) {
-		t.Errorf("expected in-binary per-test TIMEOUT line for test_sel; got:\n%s", combined)
-	}
-	if !strings.Contains(combined, "1 timed out") {
-		t.Errorf("expected '1 timed out' summary from in-binary enforcement; got:\n%s", combined)
-	}
-	if strings.Contains(combined, "batch budget") {
-		t.Errorf("run hit the process-level batch budget instead of the in-binary "+
-			"deadline — T1220 select-livelock enforcement regressed; got:\n%s", combined)
-	}
-	if elapsed > 20*time.Second {
-		t.Errorf("run took %s — expected prompt in-binary timeout (<20s); "+
-			"enforcement likely regressed to the process backstop", elapsed)
-	}
+	assertInBinaryTimeout(t, combined, "test_sel", "T1220 select-livelock enforcement regressed")
 }

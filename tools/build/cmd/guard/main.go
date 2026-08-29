@@ -358,49 +358,15 @@ func loadEditGates() ([]editGate, error) {
 	return config.Gates, nil
 }
 
-// findRepoRoot locates the repo root by walking up from the guard binary's
-// own location (not cwd), so Edit/Write gate loading keeps working even when
-// the agent's shell cwd has drifted outside the git worktree (B0349).
+// findRepoRoot returns the repository this guard was built for.
 //
-// The guard binary lives at <root>/bin/guard, so we start from its resolved
-// path and walk up until we find a .git entry. Falls back to walking up from
-// cwd if os.Executable() isn't available (shouldn't happen on any supported
-// platform, but stay defensive).
+// It is the baked-in root (common.FindRoot), never the caller's cwd. The guard
+// decides what may be edited and where writes are allowed, so the tree it
+// judges must be fixed at build time: a guard that infers its repo from cwd
+// takes that decision from whoever cd'd last, and a scratch directory can then
+// be treated as the repository (T1813, T1814).
 func findRepoRoot() (string, error) {
-	exe, err := os.Executable()
-	if err == nil {
-		// Resolve symlinks so `go run` or a symlinked bin/ still works.
-		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
-			exe = resolved
-		}
-		dir := filepath.Dir(exe)
-		for {
-			if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
-				return dir, nil
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
-
-	// Fallback: walk up from cwd.
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("not inside a git repository")
-		}
-		dir = parent
-	}
+	return common.FindRoot()
 }
 
 // checkEditGates checks file content against all edit gates.
@@ -1022,9 +988,53 @@ func checkCopy(program string, tokens []string) string {
 // isWithin reports whether target equals base or is a descendant of it,
 // using OS-correct path separators.
 func isWithin(base, target string) bool {
-	base = filepath.Clean(base)
-	target = filepath.Clean(target)
+	base = normalizeForCompare(base)
+	target = normalizeForCompare(target)
 	return target == base || strings.HasPrefix(target, base+string(filepath.Separator))
+}
+
+// normalizeForCompare puts a path in a form two independently-obtained paths can
+// be compared in.
+//
+// This matters more than it used to. The base used to come from os.Getwd(), so
+// both sides of a comparison came from the same source and agreed by accident;
+// now the base is stamped in at build time and the target comes from the
+// caller's command, so the two can legitimately spell the same location
+// differently:
+//
+//   - macOS resolves symlinks in os.Getwd() but a stamped path keeps whatever
+//     form it was built with, so a checkout reached through a symlink compares
+//     unresolved-against-resolved and misses;
+//   - Windows paths are case-insensitive, so C:\Users\x and c:\users\x are one
+//     location that a byte comparison calls two.
+//
+// Missing here means the guard denies a legitimate write inside its own repo,
+// so both are folded out. Symlinks are resolved on the longest existing prefix,
+// since a copy destination usually does not exist yet.
+func normalizeForCompare(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	} else {
+		// Resolve the deepest ancestor that exists, keeping the rest as written.
+		dir, rest := path, ""
+		for {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			rest = filepath.Join(filepath.Base(dir), rest)
+			dir = parent
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				path = filepath.Join(resolved, rest)
+				break
+			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+	}
+	return path
 }
 
 // isAllowedCopyDest checks if a destination path is within the repo, the
@@ -1056,8 +1066,10 @@ func isAllowedCopyDest(dest string) bool {
 		return true
 	}
 
-	// Allow repo directory (cwd).
-	if cwd, err := os.Getwd(); err == nil && isWithin(cwd, abs) {
+	// Allow this guard's own repository — the one it was built for, not the one
+	// the caller happens to be standing in. Deriving it from cwd meant a stray
+	// cd widened what the guard would authorise (T1814).
+	if root, err := findRepoRoot(); err == nil && isWithin(root, abs) {
 		return true
 	}
 

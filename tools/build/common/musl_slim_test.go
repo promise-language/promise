@@ -113,7 +113,7 @@ var testCRTContents = map[string]string{
 // linuxTargetArchDirs and forgetting prebuilts.toml would only surface as a build
 // failure on that architecture's host.
 func TestPrebuiltsManifest_MuslReal(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}

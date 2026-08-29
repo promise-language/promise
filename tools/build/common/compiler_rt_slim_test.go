@@ -132,7 +132,7 @@ func TestCompilerRTManifestName(t *testing.T) {
 // sha256 is actually pinned: the archive is required by every Linux link, so an
 // unpinned entry is a hard error rather than a pending state.
 func TestPrebuiltsManifest_CompilerRTReal(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}

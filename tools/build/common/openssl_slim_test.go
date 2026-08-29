@@ -133,7 +133,7 @@ func TestOpenSSLManifestName(t *testing.T) {
 // from a connected host (T1596 / #28). This logs that pending state rather than
 // failing, so the structural pin is enforced now without a red build.
 func TestPrebuiltsManifest_OpenSSLReal(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}

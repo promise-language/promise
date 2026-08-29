@@ -43,7 +43,7 @@ func TestRunFlowsVet_NoSDK(t *testing.T) {
 // TestRunToolsVet_RealRepo verifies that RunToolsVet succeeds against the real
 // tools/build module (which always exists in this repository).
 func TestRunToolsVet_RealRepo(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skip("not inside the promise repo:", err)
 	}

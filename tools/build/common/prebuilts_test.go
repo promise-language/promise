@@ -22,7 +22,7 @@ import (
 // from the repo and verifies its structure matches expectations. This guards
 // against schema drift when the manifest is edited.
 func TestLoadPrebuiltsManifest_Real(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestLoadPrebuiltsManifest_Real(t *testing.T) {
 // cache on a prebuilt-only host, but it must never be embedded into the client
 // binary.
 func TestPrebuiltsManifest_DlltoolBuildOnly(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}

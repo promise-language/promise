@@ -132,7 +132,7 @@ func captureStderr(t *testing.T, fn func()) string {
 // catches workflow/CLI drift that otherwise stays latent until a release is cut
 // (the workflow is not run end-to-end in CI).
 func TestReleaseWorkflowInvocationsMatchCLI(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -275,7 +275,7 @@ func awkExactField2(sums, name string) string {
 // reverted to the buggy substring grep. Pairs with TestInstallChecksumExactMatch
 // (which proves WHY exact match is required).
 func TestInstallScriptsUseExactMatch(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -342,7 +342,7 @@ func shEpochFilter(tag string) string {
 // committed installers must reject a non-epoch `latest` tag (T1493). Pairs with
 // TestInstallResolveLatestRejectsNonEpoch (which proves the runtime behavior).
 func TestInstallScriptsEnforceEpochInvariant(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -377,7 +377,7 @@ func readScript(t *testing.T, root, name string) string {
 // silently re-introduce the 10-min brotli-11 and 700 MB LLVM download per
 // release that the task description called out.
 func TestReleaseWorkflowT0797Shape(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestReleaseWorkflowT0797Shape(t *testing.T) {
 // and a regression in any one would silently break either reproducibility,
 // the install scripts, or `promise update`.
 func TestReleaseWorkflowCompressesAssets(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestReleaseWorkflowCompressesAssets(t *testing.T) {
 // (b) silently shadow the catalog-driven build with a system LLVM that may be
 // at a different version (the exact drift T0790 originated from).
 func TestWorkflowsDropLLVMInstall(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestWorkflowsDropLLVMInstall(t *testing.T) {
 // SHA256SUMS lookup; this test validates the decompress step that the
 // "compression-only" publishing requires every consumer to handle.
 func TestInstallScriptsDecompressGzip(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}

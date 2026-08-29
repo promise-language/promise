@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ import (
 func main() {
 	start := time.Now()
 
-	root, err := common.FindRoot()
+	root, err := bootstrapRoot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -124,6 +125,14 @@ func main() {
 // It is skipped when stderr is not a terminal, keeping CI and scripted builds to
 // exactly the work they asked for.
 func runLocalHook(root string, args []string) {
+	// POSIX only, and deliberately so rather than by accident: `workspace setup`
+	// writes make.local as a shell script, which Windows cannot execute, and Go
+	// reports no execute bits for any file there — so the check below would skip
+	// it silently and look like a bug. Saying it here means a Windows hook, if
+	// one is ever written, gets added on purpose with its own extension.
+	if runtime.GOOS == "windows" {
+		return
+	}
 	hook := filepath.Join(root, "make.local")
 	info, err := os.Stat(hook)
 	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
@@ -141,12 +150,44 @@ func runLocalHook(root string, args []string) {
 	}
 }
 
+// commonPkg is the import path of the package holding the baked-in root, named
+// here for the -X linker flag that stamps it.
+const commonPkg = "github.com/promise-language/promise/tools/build/common"
+
+// bootstrapRoot returns the repository this bootstrap belongs to, from its own
+// source location at compile time.
+//
+// The tools it builds get their root stamped in with -ldflags, but the
+// bootstrap itself cannot: it runs via `go run`, so it has no stamp and no home
+// in <root>/bin. runtime.Caller is the remaining build-time fact — `go run`
+// compiles this file from the checkout it lives in, so the path is that
+// checkout. The alternative would be cwd, which is whatever directory the
+// caller last happened to be in (T1814).
+func bootstrapRoot() (string, error) {
+	_, file, _, ok := runtime.Caller(0) // <root>/tools/build/cmd/make/main.go
+	if !ok {
+		return "", fmt.Errorf("cannot locate this checkout from the bootstrap's own path")
+	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(file)))))
+	if _, err := os.Stat(filepath.Join(root, "catalog.toml")); err != nil {
+		return "", fmt.Errorf("derived repo root %s has no catalog.toml (was this built with -trimpath?): %w", root, err)
+	}
+	return root, nil
+}
+
 // buildTools compiles every discovered build tool into bin/. It returns an error
 // (naming the failed count) if any tool fails to build.
 func buildTools(root, binDir string, tools []string, hash string) error {
 	fmt.Printf("Building %d tools (hash: %s..)\n", len(tools), hash[:12])
 
-	ldflags := fmt.Sprintf("-s -w -X main.sourceHash=%s", hash)
+	// Every tool is built for exactly one repository and carries which one, so
+	// it never has to work that out from the environment it runs in.
+	// The root is base64-encoded: -ldflags is split on whitespace, so a repo path
+	// with a space in it would otherwise break the link, and a path with a quote
+	// would break any quoting used to fix that. Both are ordinary paths on
+	// Windows and macOS.
+	ldflags := fmt.Sprintf("-s -w -X main.sourceHash=%s -X %s.bakedRoot=%s",
+		hash, commonPkg, common.EncodeRoot(root))
 	failed := 0
 	for _, name := range tools {
 		pkg := "./cmd/" + name

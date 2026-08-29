@@ -13,7 +13,7 @@ import (
 // that runtimeManifestSchema matches. Update the fixture whenever schema or
 // validation rules change — failing to do so breaks this test.
 func TestManifestGoldenFixtureProducer(t *testing.T) {
-	root, err := FindRoot()
+	root, err := RootForTests()
 	if err != nil {
 		t.Skipf("find root: %v", err)
 	}

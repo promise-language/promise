@@ -3,56 +3,133 @@ package common
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestFindCatalogRoot_Found(t *testing.T) {
-	// Create a temp directory tree with catalog.toml at the root.
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "catalog.toml"), []byte(""), 0o644); err != nil {
-		t.Fatal(err)
+// withBakedRoot sets the build-time root for one test, restoring it after.
+// The stamp is stored encoded, so it is written the same way ./make writes it;
+// an empty root means "this binary carries no stamp".
+func withBakedRoot(t *testing.T, root string) {
+	t.Helper()
+	saved := bakedRoot
+	if root == "" {
+		bakedRoot = ""
+	} else {
+		bakedRoot = EncodeRoot(root)
 	}
-	sub := filepath.Join(root, "a", "b", "c")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { bakedRoot = saved })
+}
 
-	// Walking up from a deeply nested subdirectory should find the root.
-	got, ok := findCatalogRoot(sub)
-	if !ok {
-		t.Fatal("findCatalogRoot returned false, expected true")
-	}
-	if got != root {
-		t.Errorf("findCatalogRoot = %q, want %q", got, root)
+// TestRootStampSurvivesAwkwardPaths pins the reason the stamp is encoded rather
+// than written literally into -ldflags: a repo path with a space in it breaks
+// the link outright, and one with a quote breaks any quoting used to fix that.
+// Both are ordinary paths — C:\Users\John Doe\promise, /Users/o'brien/promise.
+func TestRootStampSurvivesAwkwardPaths(t *testing.T) {
+	for _, path := range []string{
+		`/Users/John Doe/promise`,
+		`/Users/o'brien/promise`,
+		`/srv/say "hi"/promise`,
+		`C:\Users\John Doe\promise`,
+		`/tmp/tab	and space/promise`,
+	} {
+		encoded := EncodeRoot(path)
+		if strings.ContainsAny(encoded, " \t\n'\"\\") {
+			t.Errorf("EncodeRoot(%q) = %q, which -ldflags would mis-split", path, encoded)
+		}
+		saved := bakedRoot
+		bakedRoot = encoded
+		got := BakedRootValue()
+		bakedRoot = saved
+		if got != filepath.Clean(path) {
+			t.Errorf("round trip of %q gave %q", path, got)
+		}
 	}
 }
 
-func TestFindCatalogRoot_ExactDir(t *testing.T) {
-	// catalog.toml is in the starting directory itself.
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "catalog.toml"), []byte(""), 0o644); err != nil {
+// TestFindRootUsesBakedRoot is the contract: a tool acts on the repository it
+// was built for.
+func TestFindRootUsesBakedRoot(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "catalog.toml"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	withBakedRoot(t, repo)
 
-	got, ok := findCatalogRoot(root)
-	if !ok {
-		t.Fatal("findCatalogRoot returned false, expected true")
+	got, err := FindRoot()
+	if err != nil {
+		t.Fatalf("FindRoot: %v", err)
 	}
-	if got != root {
-		t.Errorf("findCatalogRoot = %q, want %q", got, root)
+	if got != repo {
+		t.Errorf("FindRoot = %q, want the baked root %q", got, repo)
 	}
 }
 
-func TestFindCatalogRoot_NotFound(t *testing.T) {
-	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
-	// When bin/verify sets TMPDIR to the repo-internal .promise-home/tmp,
-	// t.TempDir() lands inside the repo and findCatalogRoot would walk up
-	// and find the real catalog.toml.
-	t.Setenv("TMPDIR", "")
-	dir := t.TempDir()
+// TestFindRootIgnoresCwd is the regression this design exists for (T1813): a
+// directory that merely looks like a repository must not become one. Standing
+// inside another tree — even one holding a catalog.toml — changes nothing.
+func TestFindRootIgnoresCwd(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "catalog.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withBakedRoot(t, repo)
 
-	_, ok := findCatalogRoot(dir)
-	if ok {
-		t.Fatal("findCatalogRoot returned true, expected false")
+	impostor := t.TempDir()
+	if err := os.WriteFile(filepath.Join(impostor, "catalog.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(impostor)
+
+	got, err := FindRoot()
+	if err != nil {
+		t.Fatalf("FindRoot: %v", err)
+	}
+	if got == impostor {
+		t.Fatal("FindRoot followed the working directory into another tree")
+	}
+	if got != repo {
+		t.Errorf("FindRoot = %q, want the baked root %q", got, repo)
+	}
+}
+
+// TestFindRootRejectsMovedRoot: a baked root that is no longer a repo is an
+// error naming the rebuild, not a silent fallback to something nearby.
+func TestFindRootRejectsMovedRoot(t *testing.T) {
+	withBakedRoot(t, filepath.Join(t.TempDir(), "gone"))
+
+	if _, err := FindRoot(); err == nil {
+		t.Fatal("expected an error for a baked root with no catalog.toml")
+	}
+}
+
+// TestFindRootUnstampedIgnoresCwd covers `go run` / `go test` binaries: the
+// fallback is the tool's own place on disk, never the caller's.
+func TestFindRootUnstampedIgnoresCwd(t *testing.T) {
+	withBakedRoot(t, "")
+
+	impostor := t.TempDir()
+	if err := os.WriteFile(filepath.Join(impostor, "catalog.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(impostor)
+
+	// The test binary does not live in <root>/bin, so this must fail rather than
+	// answer with the directory it happens to be standing in.
+	got, err := FindRoot()
+	if err == nil && got == impostor {
+		t.Fatalf("unstamped FindRoot resolved the working directory %q", impostor)
+	}
+}
+
+// TestRootForTestsFindsRepo: the test-only helper resolves this checkout from
+// its own compile-time source path.
+func TestRootForTestsFindsRepo(t *testing.T) {
+	root, err := RootForTests()
+	if err != nil {
+		t.Fatalf("RootForTests: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "catalog.toml")); err != nil {
+		t.Errorf("RootForTests = %q, which has no catalog.toml: %v", root, err)
 	}
 }

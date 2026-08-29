@@ -37,7 +37,7 @@ All tools share a common library (`tools/build/common/`) and are thin `main.go` 
 tools/build/
 ├── go.mod              # single module
 ├── common/             # shared implementation
-│   ├── root.go         # repo root detection
+│   ├── root.go         # build-time repo root (stamped by ./make)
 │   ├── hash.go         # source hash computation
 │   ├── stale.go        # staleness check
 │   ├── platform.go     # OS/arch, LLVM tool discovery
@@ -51,6 +51,31 @@ tools/build/
     ├── verify/main.go
     └── ...
 ```
+
+## Which Repository a Tool Acts On
+
+A tool acts on exactly one repository: the one it was built for. `./make` stamps
+that root into every binary at compile time via
+`-X ...common.bakedRoot=<base64>`, alongside the source hash, and `common.FindRoot`
+returns it without ever consulting the working directory.
+
+This is deliberate rather than incidental. A tool manages its own worktree and
+nothing else, so which tree it acts on is a property of the binary, not a choice
+the caller's environment gets to make. Deriving it from cwd means accepting
+whatever directory the caller last happened to be in — a stray `cd`, or any
+directory that merely contains a `catalog.toml`, silently redirects the tool at a
+tree its author never meant, after which it reports true verdicts about the wrong
+repository.
+
+The root is base64-encoded because `go build -ldflags` splits its argument on
+whitespace and interprets quotes: a repo path containing a space (`/Users/John
+Doe/promise`) would otherwise break the link outright, and one containing a quote
+would break whichever quoting style was chosen to fix that.
+
+Two cases carry no stamp and fall back to another build-time fact, never to cwd:
+`./make` itself runs under `go run`, so it derives its checkout from its own
+source path (`runtime.Caller`); test binaries do the same via
+`common.RootForTests`, or set an explicit root with `common.SetRootForTest`.
 
 ## Build Pipeline (`bin/build`)
 

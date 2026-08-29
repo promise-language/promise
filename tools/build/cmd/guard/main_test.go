@@ -12,6 +12,28 @@ import (
 	"github.com/promise-language/promise/tools/build/common"
 )
 
+// TestMain gives the test binary the build-time root that ./make stamps into
+// the shipped guard. Without it the guard cannot scope itself to a project, and
+// the checks that ask "is this inside my repository?" would have no repository
+// — which is the state a real guard is never in.
+func TestMain(m *testing.M) {
+	root, err := common.RootForTests()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "guard tests: %v\n", err)
+		os.Exit(1)
+	}
+	restore := func() {}
+	common.SetRootForTest(cleanupFunc(func(f func()) { restore = f }), root)
+	defer restore()
+	os.Exit(m.Run())
+}
+
+// cleanupFunc adapts a plain function to the Cleanup interface SetRootForTest
+// takes, since *testing.M has no Cleanup of its own.
+type cleanupFunc func(func())
+
+func (c cleanupFunc) Cleanup(f func()) { c(f) }
+
 func TestTokenize(t *testing.T) {
 	tests := []struct {
 		input string
@@ -413,7 +435,7 @@ func TestCheckStaleAllowsMake(t *testing.T) {
 	sourceHash = "stale-hash-for-test"
 	defer func() { sourceHash = old }()
 
-	root, err := common.FindRoot()
+	root, err := common.RootForTests()
 	if err != nil {
 		t.Fatalf("find repo root: %v", err)
 	}
@@ -898,7 +920,7 @@ func TestInManagedRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	root, err := common.FindRoot()
+	root, err := common.RootForTests()
 	if err != nil {
 		t.Fatalf("find root: %v", err)
 	}
@@ -1003,5 +1025,45 @@ func TestCheckGitCheckoutAncestry(t *testing.T) {
 				t.Errorf("expected allowed, got: %s", reason)
 			}
 		})
+	}
+}
+
+// TestIsWithinResolvesSymlinks covers the macOS shape: the stamped root and a
+// path the caller supplies can spell one location two ways, because macOS
+// resolves symlinks in cwd-derived paths and a build-time stamp keeps whatever
+// form it was built with. /tmp -> /private/tmp is the everyday case there; this
+// builds the same situation with an explicit symlink so it runs anywhere.
+func TestIsWithinResolvesSymlinks(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Base as the real path, target reached through the symlink.
+	if !isWithin(real, filepath.Join(link, "sub", "file.txt")) {
+		t.Error("a target reached through a symlink was judged outside its own base")
+	}
+	// And the reverse: base as the symlink, target as the real path.
+	if !isWithin(link, filepath.Join(real, "sub", "file.txt")) {
+		t.Error("a real target was judged outside a symlinked base")
+	}
+	// A genuinely unrelated path is still outside.
+	if isWithin(real, filepath.Join(t.TempDir(), "elsewhere.txt")) {
+		t.Error("an unrelated path was judged inside")
+	}
+}
+
+// TestIsWithinIsCaseInsensitiveOnWindows covers the Windows shape: paths there
+// are case-insensitive, so a stamped C:\Users\x and a caller's c:\users\x are
+// one location. Byte comparison would call them two and deny a legitimate write
+// inside the guard's own repo.
+func TestIsWithinIsCaseInsensitiveOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-insensitive path comparison is a Windows concern")
+	}
+	base := t.TempDir()
+	if !isWithin(strings.ToUpper(base), filepath.Join(base, "file.txt")) {
+		t.Error("differently-cased spellings of one directory were judged different")
 	}
 }

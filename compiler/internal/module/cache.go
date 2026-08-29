@@ -1,15 +1,17 @@
 package module
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -364,46 +366,101 @@ func InstanceCacheKey(irPrefix, monoName, typeDeclHash string, argDeclHashes []s
 // compilerHashOnce memoizes CompilerHash — the sidecar read is cheap but
 // no reason to repeat it within a single process.
 var (
-	compilerHashOnce sync.Once
-	compilerHashVal  string
+	compilerIdentityOnce sync.Once
+	compilerIdentityVal  string
 )
 
-// CompilerHash returns a fingerprint of the compiler binary for cache
-// invalidation. Reads a pre-computed hash from a sidecar file (.promise.hash)
-// next to the binary — written by the build script after `go build`.
-// Falls back to hashing the binary if the sidecar is missing (e.g. manual
-// `go build` or installed via `go install`).
-func CompilerHash() string {
-	compilerHashOnce.Do(func() {
-		exe, err := os.Executable()
+// compilerIdentityBytes is how much of the binary CompilerIdentity hashes. It
+// matches the window cmd/internal/buildid reads for the same purpose.
+const compilerIdentityBytes = 32 * 1024
+
+// goBuildIDMarker precedes the Go build ID inside the binary. Every Go link
+// emits one, and its presence in the hashed window is the precondition that
+// makes hashing a prefix sound — see CompilerIdentity.
+var goBuildIDMarker = []byte("\xff Go build ID: \"")
+
+// CompilerIdentity returns a stable 128-bit fingerprint of the running compiler
+// binary, as 32 hex characters: the SHA-256 of its first 32 KB, truncated. It is
+// THE identity of this compiler. Every cache keyed on "which compiler produced
+// this" uses it, and nothing else fingerprints the binary.
+//
+// It is derived from the binary's own bytes, so it travels with the binary. That
+// is what a sidecar file could not do: `promise install` copies the executable
+// alone, so a hash written beside it was lost on install, and the same bytes
+// then reported a different identity depending on how they had been obtained.
+//
+// Hashing a prefix identifies the whole binary because that window carries
+// values derived from all of it:
+//
+//   - the Go build ID, whose trailing component is contentID — the toolchain's
+//     own hash of the finished binary, stored precisely so readers can identify
+//     it "with minimal I/O, instead of reading and hashing the entire file".
+//   - on Mach-O, LC_UUID, which the linker derives from the output.
+//
+// Measured: two binaries differing only in a same-size payload 660 KB deep —
+// identical file size, so no header offsets shift — differ in 91 bytes within
+// the first 32 KB (75 in the build ID, 16 in LC_UUID). A cold-cache rebuild of
+// an unchanged tree reproduces the binary byte for byte, so identity is stable
+// across rebuilds and caches survive them.
+//
+// A missing marker is treated as a fatal bug, NOT as a reason to fall back to
+// hashing the whole file. Falling back would be a second code path taken only
+// when the first silently stopped being valid — the failure mode nobody
+// notices. If this ever fires, the assumption above has broken and the fix is to
+// widen the window or change the scheme deliberately, not to paper over it at
+// runtime. A full build reaches 200 MB, so hashing everything on every
+// invocation is not the cheap safe default it looks like.
+func CompilerIdentity() string {
+	compilerIdentityOnce.Do(func() {
+		id, err := computeCompilerIdentity()
 		if err != nil {
-			compilerHashVal = "unknown"
-			return
+			// Every compiler-keyed cache hangs on this value. Continuing with a
+			// placeholder would make unrelated binaries share one namespace and
+			// serve each other's artifacts, so there is nothing safe to go on
+			// with.
+			fmt.Fprintf(os.Stderr, "fatal: cannot determine this compiler's identity: %v\n", err)
+			os.Exit(1)
 		}
-		exe, err = filepath.EvalSymlinks(exe)
-		if err != nil {
-			compilerHashVal = "unknown"
-			return
-		}
-		// Fast path: read sidecar hash written by ./build
-		sidecar := filepath.Join(filepath.Dir(exe), ".promise.hash")
-		if data, err := os.ReadFile(sidecar); err == nil {
-			if h := strings.TrimSpace(string(data)); h != "" {
-				compilerHashVal = h
-				return
-			}
-		}
-		// Fallback: hash the binary (slow but correct)
-		data, err := os.ReadFile(exe)
-		if err != nil {
-			compilerHashVal = "unknown"
-			return
-		}
-		h := fnv.New128a()
-		h.Write(data)
-		compilerHashVal = hex.EncodeToString(h.Sum(nil))
+		compilerIdentityVal = id
 	})
-	return compilerHashVal
+	return compilerIdentityVal
+}
+
+func computeCompilerIdentity() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return compilerIdentityOf(exe)
+}
+
+// compilerIdentityOf computes the identity of the binary at path. Split from
+// CompilerIdentity so it is testable without being the running executable.
+func compilerIdentityOf(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	buf := make([]byte, compilerIdentityBytes)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return "", err
+	}
+	buf = buf[:n]
+
+	if !bytes.Contains(buf, goBuildIDMarker) {
+		return "", fmt.Errorf("no Go build ID in the first %d bytes of %s: the "+
+			"identity would then describe only headers, and two different "+
+			"compilers could share it", compilerIdentityBytes, path)
+	}
+
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:])[:32], nil
 }
 
 // BuildCacheDir returns the build cache directory (~/.promise/cache/build/ by default).
@@ -556,10 +613,10 @@ func ReadBuildCacheMeta(cacheDir, cacheKey string) *CacheMeta {
 // --- Compiler stamp: tracks which binary populated the extraction caches ---
 
 // compilerStampFile is the filename within ~/.promise/cache/ that records which
-// compiler binary last extracted embedded resources (LLVM tools, CRT, catalog modules).
+// compiler binary last extracted embedded resources (LLVM tools, CRT).
 const compilerStampFile = ".compiler_hash"
 
-// CompilerStampPath returns the path to the compiler hash stamp file.
+// CompilerStampPath returns the path to the compiler stamp file.
 func CompilerStampPath() (string, error) {
 	home, err := PromiseHome()
 	if err != nil {
@@ -568,48 +625,10 @@ func CompilerStampPath() (string, error) {
 	return filepath.Join(home, "cache", compilerStampFile), nil
 }
 
-// compilerStamp stores size, mtime, and content hash of the compiler binary
-// that last populated the extraction caches.
-type compilerStamp struct {
-	Size  int64
-	Mtime int64 // UnixNano
-	Hash  string
-}
-
-// parseCompilerStamp parses "size mtime hash\n" from the stamp file.
-func parseCompilerStamp(data string) *compilerStamp {
-	parts := strings.Fields(strings.TrimSpace(data))
-	if len(parts) != 3 {
-		return nil
-	}
-	size, err1 := strconv.ParseInt(parts[0], 10, 64)
-	mtime, err2 := strconv.ParseInt(parts[1], 10, 64)
-	if err1 != nil || err2 != nil {
-		return nil
-	}
-	return &compilerStamp{Size: size, Mtime: mtime, Hash: parts[2]}
-}
-
-func (s *compilerStamp) String() string {
-	return fmt.Sprintf("%d %d %s", s.Size, s.Mtime, s.Hash)
-}
-
-// ReadCompilerStamp reads the stored compiler stamp from the stamp file.
-func ReadCompilerStamp() *compilerStamp {
-	path, err := CompilerStampPath()
-	if err != nil {
-		return nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	return parseCompilerStamp(string(data))
-}
-
-// WriteCompilerStamp writes the compiler stamp to disk.
-// Creates parent directories if needed. Uses atomic write.
-func WriteCompilerStamp(stamp *compilerStamp) error {
+// WriteCompilerStamp records the current compiler identity as the one that
+// populated the extraction caches. Atomic, so a concurrent reader sees either
+// the old identity or the new one.
+func WriteCompilerStamp(identity string) error {
 	path, err := CompilerStampPath()
 	if err != nil {
 		return err
@@ -622,7 +641,7 @@ func WriteCompilerStamp(stamp *compilerStamp) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	if _, err := tmp.WriteString(stamp.String() + "\n"); err != nil {
+	if _, err := tmp.WriteString(identity + "\n"); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return err
@@ -634,61 +653,27 @@ func WriteCompilerStamp(stamp *compilerStamp) error {
 	return os.Rename(tmpPath, path)
 }
 
-// CompilerChanged checks whether the running compiler binary differs from the
-// one that last populated the extraction caches. Uses a two-level check:
-//  1. Fast path: compare file size + mtime (one stat, no reads). If both match
-//     the stamp, the binary hasn't changed.
-//  2. Slow path: size or mtime changed — read the content hash (from sidecar or
-//     by hashing the binary). If the hash matches, the binary is the same
-//     (just touched/rebuilt identically) — update the stamp's mtime.
-//     If the hash differs, the binary truly changed — caller must clear caches.
+// CompilerChanged reports whether the running compiler differs from the one that
+// last populated the extraction caches, and returns the current identity.
 //
-// Returns (changed, currentStamp). On first run (no stamp), changed is true.
-func CompilerChanged() (changed bool, stamp *compilerStamp) {
-	exe, err := os.Executable()
+// A plain string comparison against the stamp. This used to be a size+mtime fast
+// path guarding a content hash, to avoid hashing the binary; CompilerIdentity is
+// computed once per process anyway, so the two-level scheme bought nothing.
+func CompilerChanged() (changed bool, identity string) {
+	identity = CompilerIdentity()
+	path, err := CompilerStampPath()
 	if err != nil {
-		return true, nil
+		return true, identity
 	}
-	exe, err = filepath.EvalSymlinks(exe)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return true, nil
+		return true, identity
 	}
-	fi, err := os.Stat(exe)
-	if err != nil {
-		return true, nil
-	}
-
-	curSize := fi.Size()
-	curMtime := fi.ModTime().UnixNano()
-
-	stored := ReadCompilerStamp()
-
-	// Fast path: size + mtime match → binary unchanged.
-	if stored != nil && stored.Size == curSize && stored.Mtime == curMtime {
-		return false, stored
-	}
-
-	// Slow path: metadata changed — check content hash.
-	curHash := CompilerHash()
-	if curHash == "unknown" {
-		return true, nil
-	}
-
-	stamp = &compilerStamp{Size: curSize, Mtime: curMtime, Hash: curHash}
-
-	if stored != nil && stored.Hash == curHash {
-		// Same content, different mtime (e.g. identical rebuild).
-		// Update stamp with new mtime so next check hits fast path.
-		WriteCompilerStamp(stamp)
-		return false, stamp
-	}
-
-	// Truly changed (or first run).
-	return true, stamp
+	return strings.TrimSpace(string(data)) != identity, identity
 }
 
 // EmbeddedModuleCacheDir returns a persistent cache directory for an embedded
-// catalog module: ~/.promise/cache/embedded_modules/<compilerKey>/<name>/
+// catalog module: ~/.promise/cache/embedded_modules/<compilerIdentity>/<name>/
 //
 // The compiler hash in the path is what makes the cache safe across concurrent
 // processes (T1616). Previously the path was .../embedded_modules/<name>/ and a
@@ -706,28 +691,7 @@ func EmbeddedModuleCacheDir(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "cache", "embedded_modules", compilerCacheKey(), name), nil
-}
-
-// compilerCacheKey is the compiler identity as a path component: the first 16
-// hex characters of CompilerHash.
-//
-// The full hash is 64 characters from the build's sidecar but 32 from the
-// self-hashing fallback, so using it whole would make the path length depend on
-// how the binary was produced. 16 hex characters is 64 bits — far more than
-// cache namespacing needs — and matches what the rest of the tree already does
-// (llvm-view's "<arch>-<16 hex>" dirs, and the [:16] in the cache-debug output).
-// It also keeps the path short enough not to spend Windows' MAX_PATH budget on
-// one component.
-//
-// Slicing is guarded: CompilerHash returns "unknown" when the executable cannot
-// be read, and a blind [:16] on that would panic.
-func compilerCacheKey() string {
-	h := CompilerHash()
-	if len(h) > 16 {
-		return h[:16]
-	}
-	return h
+	return filepath.Join(home, "cache", "embedded_modules", CompilerIdentity(), name), nil
 }
 
 // CleanEmbeddedModuleCache removes all cached embedded catalog modules, for

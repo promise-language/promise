@@ -2592,6 +2592,14 @@ func (c *Compiler) wrapMainWithScheduler() {
 	entry.NewStore(mainFn.Params[0], c.argcGlobal)
 	entry.NewStore(mainFn.Params[1], c.argvGlobal)
 
+	// A `test(expected: ...)` file keeps its own main but is run by the harness
+	// under a time budget, so it signals liveness like a generated test main
+	// does (T1815). Gated on testBinary: a `promise build` binary is a user
+	// program and must carry nothing of the sort.
+	if c.testBinary {
+		c.emitLivenessSignal(entry)
+	}
+
 	// Register stack overflow signal handler before any threads are created (B0010)
 	entry.NewCall(c.palStackOverflowInit)
 

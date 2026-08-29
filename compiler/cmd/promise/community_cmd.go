@@ -159,7 +159,7 @@ func runPackageBuildIndex(args []string) {
 			Commit:       commit,
 			Tag:          tagForCommit(url, commit),
 			VerifiedAt:   stamp,
-			CompilerHash: module.CompilerHash(),
+			CompilerHash: module.CompilerIdentity(),
 		}
 		fmt.Printf("  ✓ %s → %s\n", name, shortCommit(commit))
 	}

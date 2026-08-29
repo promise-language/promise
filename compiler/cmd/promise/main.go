@@ -162,6 +162,11 @@ type versionInfo struct {
 	Channel string `json:"channel"`
 	Commit  string `json:"commit,omitempty"`
 	Build   string `json:"build,omitempty"`
+	// Identity fingerprints THIS BINARY. Version names the epoch (semantic) and
+	// Commit names the source, but neither distinguishes two binaries built from
+	// the same commit — which is exactly what every compiler-keyed cache is
+	// keyed on, so it is the value to quote when a cache behaves unexpectedly.
+	Identity string `json:"identity,omitempty"`
 }
 
 // gatherVersionInfo collects the version, update channel, git commit, and
@@ -182,7 +187,8 @@ func gatherVersionInfo() versionInfo {
 	if err != nil {
 		channel = module.ChannelStable
 	}
-	info := versionInfo{Version: v, Channel: channel, Commit: commit}
+	info := versionInfo{Version: v, Channel: channel, Commit: commit,
+		Identity: module.CompilerIdentity()}
 	// Mirror `update check`: the build identity is meaningful only on the
 	// rolling next channel, where it is ReadEpochBuildID("next") — the exact
 	// call update check compares localBuild against (T1101).
@@ -815,7 +821,7 @@ func runRun(args []string) {
 	if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
 		if cacheable {
 			fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s std=%s target=%s\n",
-				filepath.Base(cacheLabel), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+				filepath.Base(cacheLabel), cacheKey[:16], module.CompilerIdentity()[:16], cachedStdHash()[:16], target)
 			if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
 				var inputs []module.CacheKeyInput
 				if projectDir != "" {
@@ -1234,7 +1240,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			if meta != nil && meta.E2E {
 				emitRoster(buildRoster("e2e", []string{"main"}, nil, meta.ExcludeTargets, target), "e2e")
 				executeE2EBinary(cachedBin, meta.ExpectedOutput, meta.ExcludeTargets,
-					filename, timeout, start, targetTriple)
+					filename, timeout, cfg, start, targetTriple)
 				return
 			}
 			// T1415: an unusable meta yields no roster, which would silently
@@ -1250,7 +1256,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 	if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
 		if cacheable {
 			fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s std=%s target=%s\n",
-				filepath.Base(filename), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+				filepath.Base(filename), cacheKey[:16], module.CompilerIdentity()[:16], cachedStdHash()[:16], target)
 			if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
 				inputs := computeTestFileCacheInputs(filename, target, cfg)
 				fmt.Fprintln(os.Stderr, module.FormatCacheKeyInputs(
@@ -1270,7 +1276,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 	if info.HasExpectOutput {
 		emitRoster(buildRoster("e2e", []string{"main"}, nil, info.ExcludeTargets, target), "e2e")
 		e2eTimeout := computeE2ETimeout(info, cfg)
-		runE2ETest(file, info, filename, e2eTimeout, start, targetTriple, cacheDir, cacheKey, compileStart)
+		runE2ETest(file, info, filename, e2eTimeout, cfg, start, targetTriple, cacheDir, cacheKey, compileStart)
 		return
 	}
 
@@ -1371,7 +1377,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		fmt.Fprintf(eh, "%s\n%s", implHash, embedHash)
 		implHash = hex.EncodeToString(eh.Sum(nil))
 	}
-	compilerHash := module.CompilerHash()
+	compilerHash := module.CompilerIdentity()
 	// Include timeout config in the cache key since per-test timeouts are
 	// baked into the test binary at compile time (B0132).
 	th := fnv.New128a()
@@ -2343,7 +2349,8 @@ func printCoverageReport(regions []codegen.CoverageRegion, counters []int64) {
 // runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.
 // executeE2EBinary runs a compiled E2E binary and compares its output.
 func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
-	filename string, timeout time.Duration, start time.Time, targetTriple string) {
+	filename string, timeout time.Duration, cfg testTimeoutConfig, start time.Time,
+	targetTriple string) {
 
 	name := strings.TrimSuffix(filepath.Base(filename), ".pr")
 
@@ -2368,23 +2375,28 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	// (rather than this timeout) is what kills it.
 	emitPhaseMarker()
 
-	// Execute with timeout, capturing combined stdout+stderr
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	var cmd *exec.Cmd
-	switch {
-	case isWasmWebTarget(target):
-		cmd = runWasmWeb(ctx, binaryPath)
-	case isWasmTarget(target):
-		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-	default:
-		cmd = exec.CommandContext(ctx, binaryPath)
-	}
-	isolateProcessGroup(cmd)
-	output, err := cmd.CombinedOutput()
+	// Execute, capturing combined stdout+stderr. The budget is armed when the
+	// binary reaches main, not when it is spawned, so the macOS first-exec
+	// code-signature scan is not charged to the test (T1815). Without this a
+	// hello-world e2e binary could "exceed its 10s limit" having run for
+	// microseconds, because 42 freshly linked binaries were being scanned at
+	// once — which is exactly what these tests were doing.
+	run := runTestProcess(binaryPath, target, timeout, cfg, start)
+	output, err := run.output, run.err
 	elapsed := time.Since(start)
 
-	if ctx.Err() == context.DeadlineExceeded {
+	if run.neverAlive {
+		// The process never reached main, so the test never ran. Report that
+		// rather than blaming the test for exceeding its own limit (T1815).
+		fmt.Printf("TIMEOUT (%.3fs) %s%s\n", elapsed.Seconds(), name, targetSuffix)
+		fmt.Printf("  timeout: test binary never reached main within the %s backstop\n",
+			computeParentTimeout(cfg, target))
+		fmt.Printf("\n0 passed, 0 failed, 1 timed out (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		fmt.Printf("\nFAILED:\n  %s (never started)\n", name)
+		os.Exit(1)
+	}
+
+	if run.timedOut {
 		// T0742: emit TIMEOUT so the multi-file parent classifies as fileTimedOut.
 		fmt.Printf("TIMEOUT (%.3fs) %s%s\n", timeout.Seconds(), name, targetSuffix)
 		fmt.Printf("  timeout: exceeded %s limit\n", timeout)
@@ -2417,7 +2429,7 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 
 // runE2ETest compiles an E2E test binary, saves it to the cache, and runs it.
 func runE2ETest(file *ast.File, info *sema.Info, filename string,
-	timeout time.Duration, start time.Time, targetTriple string,
+	timeout time.Duration, cfg testTimeoutConfig, start time.Time, targetTriple string,
 	cacheDir, cacheKey string, compileStart time.Time) {
 
 	target := targetTriple
@@ -2440,6 +2452,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		DebugAllocator: true, // tests always use debug mode
+		TestBinary:     true, // harness-run: emits the liveness signal (T1815)
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 
@@ -2478,7 +2491,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	}
 
 	executeE2EBinary(tmpOutput.Name(), info.ExpectOutput, info.ExcludeTargets,
-		filename, timeout, start, targetTriple)
+		filename, timeout, cfg, start, targetTriple)
 }
 
 // firstLines returns the first n lines of s, joined by " | ".
@@ -3516,7 +3529,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	// Build cache (~/.promise/cache/build/, overridable via PROMISE_HOME)
 	cacheDir, _ := module.BuildCacheDir()
 
-	compilerHash := module.CompilerHash()
+	compilerHash := module.CompilerIdentity()
 	modInfos := result.ModuleInfos()
 
 	// compileModule compiles one IR text to bitcode (LTO) or object (debug/Windows).
@@ -3851,7 +3864,7 @@ func lookupCachedInstances(info *sema.Info, target, buildMode string) map[string
 	if cacheDir == "" {
 		return nil
 	}
-	metas := buildInstCacheMetas(info, module.CompilerHash(), target, buildMode)
+	metas := buildInstCacheMetas(info, module.CompilerIdentity(), target, buildMode)
 	if len(metas) == 0 {
 		return nil
 	}
@@ -4096,7 +4109,7 @@ var ensureCacheValidOnce sync.Once
 // of the same binary skip this entirely.
 func ensureCacheValid() {
 	ensureCacheValidOnce.Do(func() {
-		changed, stamp := module.CompilerChanged()
+		changed, identity := module.CompilerChanged()
 		if !changed {
 			return
 		}
@@ -4109,9 +4122,12 @@ func ensureCacheValid() {
 		// different subtree and cannot see the old one's files. Wiping was what
 		// made this racy: RemoveAll walked a tree that peer processes were
 		// extracting into, deleting their staging dirs mid-write (T1616).
-		// Write the new stamp so the next invocation skips cleanup.
-		if stamp != nil {
-			module.WriteCompilerStamp(stamp)
+		// Record this compiler so the next invocation skips cleanup. An error
+		// here only costs a redundant clean next time, but it must not pass
+		// silently — a stamp that never lands means every run re-cleans.
+		if err := module.WriteCompilerStamp(identity); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record the compiler stamp (%v); "+
+				"extraction caches will be cleared again on the next run\n", err)
 		}
 	})
 }
@@ -6407,7 +6423,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
 		}
 		contentHash := astcache.ContentHash(files, fileContents)
-		key := astcache.Key(module.CompilerHash(), contentHash)
+		key := astcache.Key(module.CompilerIdentity(), contentHash)
 		if cached, _ := astcache.Load(cacheDir, key); cached != nil {
 			merged = cached
 		} else {
@@ -6516,7 +6532,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	if home, homeErr := module.PromiseHome(); homeErr == nil {
 		cacheDir := filepath.Join(home, "cache", "astcache")
 		contentHash := astcache.ContentHash([]string{filename}, [][]byte{[]byte(source)})
-		key := astcache.Key(module.CompilerHash(), contentHash)
+		key := astcache.Key(module.CompilerIdentity(), contentHash)
 		if cached, _ := astcache.Load(cacheDir, key); cached != nil {
 			file = cached
 		} else {
@@ -6638,7 +6654,7 @@ func computeTestFileCacheKey(filename, target string, cfg testTimeoutConfig) (st
 	fh := fnv.New128a()
 	fh.Write(content)
 	fileHash := hex.EncodeToString(fh.Sum(nil))
-	compilerHash := module.CompilerHash()
+	compilerHash := module.CompilerIdentity()
 	sHash := cachedStdHash()
 	if sHash == "" {
 		return "", false
@@ -6710,7 +6726,7 @@ func computeTestFileCacheInputs(filename, target string, cfg testTimeoutConfig) 
 
 	inputs := []module.CacheKeyInput{
 		{Label: "file", Value: fileHash},
-		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "compiler", Value: module.CompilerIdentity()},
 		{Label: "std", Value: cachedStdHash()},
 		{Label: "target", Value: target},
 		{Label: "timeout", Value: cfg.cacheString()},
@@ -6751,7 +6767,7 @@ func computeRunBinaryCacheKey(filename, target string, releaseMode bool) (string
 	fh := fnv.New128a()
 	fh.Write(content)
 	fileHash := hex.EncodeToString(fh.Sum(nil))
-	compilerHash := module.CompilerHash()
+	compilerHash := module.CompilerIdentity()
 	sHash := cachedStdHash()
 	if sHash == "" {
 		return "", false
@@ -6822,7 +6838,7 @@ func computeRunBinaryCacheInputs(filename, target string, releaseMode bool) []mo
 
 	inputs := []module.CacheKeyInput{
 		{Label: "file", Value: fileHash},
-		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "compiler", Value: module.CompilerIdentity()},
 		{Label: "std", Value: cachedStdHash()},
 		{Label: "target", Value: target},
 		{Label: "mode", Value: buildModeStr(releaseMode)},
@@ -6867,7 +6883,7 @@ func computeExecBinaryCacheKey(source, target string) (string, bool) {
 	fh := fnv.New128a()
 	fh.Write(content)
 	fileHash := hex.EncodeToString(fh.Sum(nil))
-	compilerHash := module.CompilerHash()
+	compilerHash := module.CompilerIdentity()
 	sHash := cachedStdHash()
 	if sHash == "" {
 		return "", false
@@ -6935,7 +6951,7 @@ func computeExecBinaryCacheInputs(source, target string) []module.CacheKeyInput 
 
 	inputs := []module.CacheKeyInput{
 		{Label: "file", Value: fileHash},
-		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "compiler", Value: module.CompilerIdentity()},
 		{Label: "std", Value: cachedStdHash()},
 		{Label: "target", Value: target},
 		{Label: "mode", Value: buildModeStr(false)},
@@ -6975,7 +6991,7 @@ func computeProjectBinaryCacheKey(projectDir, target string, releaseMode bool) (
 		return "", false
 	}
 
-	compilerHash := module.CompilerHash()
+	compilerHash := module.CompilerIdentity()
 	sHash := cachedStdHash()
 	if sHash == "" {
 		return "", false
@@ -7008,7 +7024,7 @@ func computeProjectBinaryCacheInputs(projectDir, target string, releaseMode bool
 	}
 	inputs := []module.CacheKeyInput{
 		{Label: "impl", Value: implHash},
-		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "compiler", Value: module.CompilerIdentity()},
 		{Label: "std", Value: cachedStdHash()},
 		{Label: "target", Value: target},
 		{Label: "mode", Value: buildModeStr(releaseMode)},
@@ -7549,7 +7565,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
 		}
 		contentHash := astcache.ContentHash(srcFiles, fileContents)
-		astCacheKey = astcache.Key(module.CompilerHash(), contentHash)
+		astCacheKey = astcache.Key(module.CompilerIdentity(), contentHash)
 		tParse := time.Now()
 		cached, _ := astcache.Load(astCacheDir, astCacheKey)
 		if cached != nil {
@@ -8398,7 +8414,7 @@ func runExec(args []string) {
 	if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
 		if cacheable {
 			fmt.Fprintf(os.Stderr, "[cache MISS] <exec> key=%s compiler=%s std=%s target=%s\n",
-				cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+				cacheKey[:16], module.CompilerIdentity()[:16], cachedStdHash()[:16], target)
 			if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
 				fmt.Fprintln(os.Stderr, module.FormatCacheKeyInputs(
 					"exec-binary <exec>", cacheKey, computeExecBinaryCacheInputs(source, target)))

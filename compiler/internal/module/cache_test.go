@@ -546,12 +546,12 @@ func TestSaveBuildCacheBadObjFile(t *testing.T) {
 }
 
 func TestCompilerHash(t *testing.T) {
-	h1 := CompilerHash()
+	h1 := CompilerIdentity()
 	if h1 == "" {
 		t.Fatal("expected non-empty compiler hash")
 	}
 	// Should be stable
-	h2 := CompilerHash()
+	h2 := CompilerIdentity()
 	if h1 != h2 {
 		t.Error("compiler hash should be stable across calls")
 	}

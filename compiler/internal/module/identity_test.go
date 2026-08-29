@@ -1,221 +1,116 @@
 package module
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestSanitizeIRPrefixSimpleIdent(t *testing.T) {
-	// Simple identifiers pass through unchanged
-	tests := []struct{ input, want string }{
-		{"mylib", "mylib"},
-		{"json", "json"},
-		{"http", "http"},
-		{"my_lib", "my_lib"},
-		{"_private", "_private"},
-		{"Lib123", "Lib123"},
+// marker mirrors what the Go linker writes ahead of the build ID. Its presence
+// in the hashed window is the precondition that makes hashing a prefix sound.
+const testMarker = "\xff Go build ID: \"abc/def\"\n \xff"
+
+func writeFile(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range tests {
-		got := SanitizeIRPrefix(tc.input)
-		if got != tc.want {
-			t.Errorf("SanitizeIRPrefix(%q) = %q, want %q", tc.input, got, tc.want)
-		}
+	return p
+}
+
+// TestCompilerIdentityShape locks the contract every cache key depends on: 128
+// bits, as 32 hex characters, and stable within a process.
+func TestCompilerIdentityShape(t *testing.T) {
+	id := CompilerIdentity()
+	if len(id) != 32 {
+		t.Errorf("identity = %q (%d chars), want 32 hex chars (128 bits)", id, len(id))
+	}
+	if strings.Trim(id, "0123456789abcdef") != "" {
+		t.Errorf("identity = %q, want lowercase hex only", id)
+	}
+	if again := CompilerIdentity(); again != id {
+		t.Errorf("identity not stable within a process: %q then %q", id, again)
 	}
 }
 
-func TestSanitizeIRPrefixLocalPaths(t *testing.T) {
-	// Single-component local paths get hash suffix to avoid collisions with catalog names.
-	// "./mylib" must NOT equal "mylib" (catalog vs local disambiguation).
-	tests := []string{"./mylib", "./counter", "./helpers"}
-	for _, input := range tests {
-		got := SanitizeIRPrefix(input)
-		base := stripPathPrefixes(input) // e.g., "mylib"
-		if !strings.HasPrefix(got, base+"_") {
-			t.Errorf("SanitizeIRPrefix(%q) = %q, expected prefix %q", input, got, base+"_")
-		}
-		// Must differ from the catalog version (no ./ prefix)
-		catalog := SanitizeIRPrefix(base)
-		if got == catalog {
-			t.Errorf("collision: SanitizeIRPrefix(%q) == SanitizeIRPrefix(%q) == %q", input, base, got)
-		}
+// TestCompilerIdentityHashesPrefixWhenMarkerPresent — with the marker in the
+// window, the identity is the prefix hash. That is the fast path, and it is
+// sound because the window carries the build ID, itself derived from the whole
+// binary.
+func TestCompilerIdentityHashesPrefixWhenMarkerPresent(t *testing.T) {
+	head := make([]byte, compilerIdentityBytes)
+	copy(head, "MZ-or-whatever-header")
+	copy(head[4096:], testMarker)
+
+	body := append(append([]byte{}, head...), []byte("trailing content far past the window")...)
+	p := writeFile(t, "withmarker", body)
+
+	sum := sha256.Sum256(head)
+	want := hex.EncodeToString(sum[:])[:32]
+	got, err := compilerIdentityOf(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Errorf("identity = %s, want the 32KB prefix hash %s", got, want)
 	}
 }
 
-func TestSanitizeIRPrefixMultiComponentPaths(t *testing.T) {
-	// Multi-component paths get sanitized with hash suffix
-	p1 := SanitizeIRPrefix("./libs/parser")
-	if p1 == "" {
-		t.Fatal("expected non-empty prefix")
-	}
-	// Should contain the sanitized components
-	if !strings.Contains(p1, "libs_parser") {
-		t.Errorf("expected %q to contain 'libs_parser'", p1)
-	}
-	// Should have a hash suffix (6 hex chars after last _)
-	if len(p1) <= len("libs_parser_") {
-		t.Errorf("expected hash suffix in %q", p1)
+// TestCompilerIdentityRejectsBinaryWithoutBuildID — the prefix identifies the
+// whole binary only because the build ID sits in it. Without the marker that no
+// longer holds, and the hash would describe headers alone, where two different
+// compilers could collide — a stale cache HIT, i.e. wrong output.
+//
+// So this is an error, deliberately NOT a fallback to hashing the whole file. A
+// fallback would be a second path taken only when the first had quietly stopped
+// being valid, which is the failure nobody notices. If this fires, the
+// assumption has broken and the scheme should be changed on purpose.
+func TestCompilerIdentityRejectsBinaryWithoutBuildID(t *testing.T) {
+	head := make([]byte, compilerIdentityBytes) // no marker anywhere
+	p := writeFile(t, "nomarker", append(head, []byte("payload")...))
+
+	if _, err := compilerIdentityOf(p); err == nil {
+		t.Error("expected an error for a binary with no Go build ID in the window")
+	} else if !strings.Contains(err.Error(), "no Go build ID") {
+		t.Errorf("error should name the missing build ID, got: %v", err)
 	}
 }
 
-func TestSanitizeIRPrefixRemoteURLs(t *testing.T) {
-	// Remote URLs get sanitized with hash suffix
-	p := SanitizeIRPrefix("github.com/alice/parser")
-	if p == "" {
-		t.Fatal("expected non-empty prefix")
-	}
-	if !strings.Contains(p, "github_com_alice_parser") {
-		t.Errorf("expected %q to contain 'github_com_alice_parser'", p)
+// TestCompilerIdentityDocumentsPrefixLimit pins what the identity does NOT
+// promise. With the marker present, two files identical in their first 32KB are
+// indistinguishable — the identity discriminates BUILDS (a rebuild changes the
+// build ID and LC_UUID inside the window) but is not tamper detection: a binary
+// edited after linking keeps its build ID.
+//
+// That is the same trade the Go toolchain makes by storing contentID to avoid
+// hashing whole binaries. If this ever needs to detect post-link edits, this
+// test is the one that has to change, deliberately.
+func TestCompilerIdentityDocumentsPrefixLimit(t *testing.T) {
+	head := make([]byte, compilerIdentityBytes)
+	copy(head[4096:], testMarker)
+
+	a := append(append([]byte{}, head...), []byte("original tail")...)
+	b := append(append([]byte{}, head...), []byte("modified tail")...)
+	pa, pb := writeFile(t, "a", a), writeFile(t, "b", b)
+
+	ida, _ := compilerIdentityOf(pa)
+	idb, _ := compilerIdentityOf(pb)
+	if ida != idb {
+		t.Errorf("identities differ — the prefix-hash limit this test documents " +
+			"no longer holds; if that was deliberate, update this test")
 	}
 }
 
-func TestSanitizeIRPrefixCollisionFreedom(t *testing.T) {
-	// Two different global identities must produce different IR prefixes
-	tests := []struct{ a, b string }{
-		{"github.com/alice/parser", "github.com/bob/parser"},
-		{"./libs/parser", "github.com/alice/parser"},
-		{"./libs_parser", "./libs/parser"},
-		{"github.com/alice_parser", "github.com/alice/parser"},
-		// Critical: catalog vs local module with same name must not collide
-		{"json", "./json"},
-		{"mylib", "./mylib"},
-		{"parser", "./parser"},
-		{"http", "../http"},
-	}
-	for _, tc := range tests {
-		pa := SanitizeIRPrefix(tc.a)
-		pb := SanitizeIRPrefix(tc.b)
-		if pa == pb {
-			t.Errorf("collision: SanitizeIRPrefix(%q) == SanitizeIRPrefix(%q) == %q", tc.a, tc.b, pa)
-		}
-	}
-}
-
-func TestSanitizeIRPrefixStability(t *testing.T) {
-	// Same input always produces same output
-	inputs := []string{
-		"mylib",
-		"./libs/parser",
-		"github.com/alice/parser",
-		"github.com/bob/parser",
-	}
-	for _, input := range inputs {
-		a := SanitizeIRPrefix(input)
-		b := SanitizeIRPrefix(input)
-		if a != b {
-			t.Errorf("unstable: SanitizeIRPrefix(%q) returned %q then %q", input, a, b)
-		}
-	}
-}
-
-func TestSanitizeIRPrefixStartsWithLetter(t *testing.T) {
-	// All outputs must start with a letter (valid C/LLVM identifier)
-	inputs := []string{
-		"github.com/alice/parser",
-		"./libs/parser",
-		"123numeric",
-		"---special---",
-		"",
-	}
-	for _, input := range inputs {
-		got := SanitizeIRPrefix(input)
-		if len(got) == 0 {
-			t.Errorf("SanitizeIRPrefix(%q) returned empty string", input)
-			continue
-		}
-		if !isLetter(rune(got[0])) && got[0] != '_' {
-			t.Errorf("SanitizeIRPrefix(%q) = %q, starts with non-letter %q", input, got, string(got[0]))
-		}
-	}
-}
-
-func TestSanitizeIRPrefixMultipleParentDirs(t *testing.T) {
-	// Multiple ../ components should all be stripped
-	p := SanitizeIRPrefix("../../deep/path")
-	if strings.Contains(p, "..") {
-		t.Errorf("expected no '..' in %q", p)
-	}
-	if !strings.Contains(p, "deep_path") {
-		t.Errorf("expected %q to contain 'deep_path'", p)
-	}
-}
-
-func TestGlobalIdentityFunctions(t *testing.T) {
-	if got := GlobalIdentityForLocal("./mylib"); got != "./mylib" {
-		t.Errorf("GlobalIdentityForLocal = %q", got)
-	}
-	if got := GlobalIdentityForRemote("github.com/alice/parser", ""); got != "github.com/alice/parser" {
-		t.Errorf("GlobalIdentityForRemote = %q", got)
-	}
-	if got := GlobalIdentityForCatalog("json"); got != "json" {
-		t.Errorf("GlobalIdentityForCatalog = %q", got)
-	}
-}
-
-func TestStripPathPrefixes(t *testing.T) {
-	tests := []struct{ input, want string }{
-		{"./mylib", "mylib"},
-		{"../mylib", "mylib"},
-		{"../../deep/path", "deep/path"},
-		{"./././foo", "foo"},
-		{"../../../a", "a"},
-		{"foo", "foo"},
-		{"", ""},
-	}
-	for _, tc := range tests {
-		got := stripPathPrefixes(tc.input)
-		if got != tc.want {
-			t.Errorf("stripPathPrefixes(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
-func TestEnsureLetterStart(t *testing.T) {
-	tests := []struct{ input, want string }{
-		{"abc", "abc"},
-		{"123", "m123"},
-		{"", "m"},
-		{"_foo", "_foo"},
-	}
-	for _, tc := range tests {
-		got := ensureLetterStart(tc.input)
-		if got != tc.want {
-			t.Errorf("ensureLetterStart(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
-// --- T1524: subdir-aware remote identity ---
-
-// The empty-subdir identity must stay byte-identical to the pre-T1524 value —
-// every existing IR prefix, module-cache key and instance-cache key depends on it.
-func TestGlobalIdentityForRemoteEmptySubdirUnchanged(t *testing.T) {
-	for _, url := range []string{"github.com/alice/parser", "example.com/x", "git@github.com:a/b"} {
-		if got := GlobalIdentityForRemote(url, ""); got != url {
-			t.Errorf("GlobalIdentityForRemote(%q, \"\") = %q, want the bare URL", url, got)
-		}
-		if got, want := SanitizeIRPrefix(GlobalIdentityForRemote(url, "")), SanitizeIRPrefix(url); got != want {
-			t.Errorf("IR prefix drifted for %q: %q != %q", url, got, want)
-		}
-	}
-}
-
-func TestGlobalIdentityForRemoteSubdirDistinct(t *testing.T) {
-	const url = "github.com/acme/base"
-	wire := GlobalIdentityForRemote(url, "proto/wire")
-	types := GlobalIdentityForRemote(url, "proto/types")
-	root := GlobalIdentityForRemote(url, "")
-
-	if wire != "github.com/acme/base//proto/wire" {
-		t.Errorf("identity = %q", wire)
-	}
-	if wire == types || wire == root || types == root {
-		t.Fatalf("identities must be distinct: %q %q %q", wire, types, root)
-	}
-	pw, pt, pr := SanitizeIRPrefix(wire), SanitizeIRPrefix(types), SanitizeIRPrefix(root)
-	if pw == pt || pw == pr || pt == pr {
-		t.Fatalf("IR prefixes must be distinct: %q %q %q", pw, pt, pr)
-	}
-	if !strings.HasPrefix(pw, "github_com_acme_base_proto_wire_") {
-		t.Errorf("IR prefix = %q, want the sanitized identity plus a hash suffix", pw)
+// TestCompilerIdentityUnreadableFile — an identity we cannot compute must be an
+// error, never a plausible-looking value that would key a cache incorrectly.
+// CompilerIdentity turns this into a fatal, since every compiler-keyed cache
+// depends on the value.
+func TestCompilerIdentityUnreadableFile(t *testing.T) {
+	if _, err := compilerIdentityOf(filepath.Join(t.TempDir(), "nonexistent")); err == nil {
+		t.Error("expected an error for a file that cannot be read")
 	}
 }

@@ -13,6 +13,26 @@ import (
 	"time"
 )
 
+// binarySHA256 is the SHA-256 of a file, hex-encoded. Used by the release path
+// to publish artifact checksums.
+//
+// It is deliberately NOT how the compiler identifies itself: that is
+// module.CompilerIdentity, which the binary derives from its own bytes and so
+// travels with it. A hash written to a file beside the binary is lost the moment
+// the binary is copied — which `promise install` does.
+func binarySHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
 // RunBuild executes the full compiler build pipeline.
 // This is the main implementation — called by bin/build and internally
 // by other tools (e.g., verify, test) without spawning a subprocess.
@@ -190,21 +210,11 @@ func RunBuild(root string, args []string) error {
 		return fmt.Errorf("go build: %w", err)
 	}
 
-	// 10. Write hash sidecar
-	hash, err := binarySHA256(binaryPath)
-	if err != nil {
-		return fmt.Errorf("hash binary: %w", err)
-	}
-	hashFile := filepath.Join(binDir, ".promise.hash")
-	if err := os.WriteFile(hashFile, []byte(hash+"\n"), 0o644); err != nil {
-		return fmt.Errorf("write hash: %w", err)
-	}
-
-	// 11. Write buildinfo for up-to-date check
+	// 10. Write buildinfo for up-to-date check
 	infoFile := filepath.Join(binDir, ".promise.buildinfo")
 	os.WriteFile(infoFile, []byte(version+"\n"), 0o644)
 
-	// 12. Invalidate gate values — compiler changed, prior verify results are stale
+	// 11. Invalidate gate values — compiler changed, prior verify results are stale
 	InvalidateGateValues(root)
 
 	elapsed := time.Since(start).Round(time.Millisecond)
@@ -298,17 +308,4 @@ func anySourceNewer(dir string, skipDirs map[string]bool, than time.Time) bool {
 		return nil
 	})
 	return found
-}
-
-func binarySHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }

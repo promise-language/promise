@@ -132,7 +132,7 @@ func TestCompatVerdictBackwardCompatOldJSON(t *testing.T) {
   "commit": "f00df00d",
   "epoch": "2026.1",
   "compatible": true,
-  "compiler_hash": "` + CompilerHash() + `"
+  "compiler_hash": "` + CompilerIdentity() + `"
 }`
 	path := filepath.Join(dir, compatKey(url, "", commit, epoch)+".json")
 	if err := os.WriteFile(path, []byte(oldJSON), 0644); err != nil {

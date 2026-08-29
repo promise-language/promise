@@ -62,7 +62,7 @@ func LookupCompat(url, subdir, commit, epoch string) (*CompatVerdict, bool) {
 	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, false
 	}
-	if v.CompilerHash != CompilerHash() {
+	if v.CompilerHash != CompilerIdentity() {
 		return nil, false
 	}
 	return &v, true
@@ -75,7 +75,7 @@ func SaveCompat(v *CompatVerdict) error {
 	if err != nil {
 		return err
 	}
-	v.CompilerHash = CompilerHash()
+	v.CompilerHash = CompilerIdentity()
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err

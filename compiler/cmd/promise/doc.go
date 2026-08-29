@@ -165,7 +165,7 @@ func docModuleFrontend(modName, modDir string, sourceFiles []string) (*ast.File,
 			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
 		}
 		contentHash := astcache.ContentHash(sourceFiles, fileContents)
-		astCacheKey := astcache.Key(module.CompilerHash(), contentHash)
+		astCacheKey := astcache.Key(module.CompilerIdentity(), contentHash)
 		if cached, _ := astcache.Load(astCacheDir, astCacheKey); cached != nil {
 			merged = cached
 		} else {

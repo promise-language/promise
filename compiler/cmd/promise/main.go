@@ -8711,17 +8711,22 @@ func printAddUsage(w io.Writer) {
 func parseAddFlags(args []string) (positional []string, subdir, name string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		// Both spellings, because both occur: the usage text documents --subdir
+		// and that is what users type, but normalizeArgs rewrites --flag to -flag
+		// before dispatch, so -subdir is what actually arrives from the CLI.
+		// Matching only the double-dash form made the flag work in-process and
+		// fail for every real invocation (T1779).
 		var target *string
 		switch {
-		case a == "--subdir":
+		case a == "--subdir" || a == "-subdir":
 			target = &subdir
-		case a == "--name":
+		case a == "--name" || a == "-name":
 			target = &name
-		case strings.HasPrefix(a, "--subdir="):
-			subdir = strings.TrimPrefix(a, "--subdir=")
+		case strings.HasPrefix(a, "--subdir=") || strings.HasPrefix(a, "-subdir="):
+			subdir = a[strings.Index(a, "=")+1:]
 			continue
-		case strings.HasPrefix(a, "--name="):
-			name = strings.TrimPrefix(a, "--name=")
+		case strings.HasPrefix(a, "--name=") || strings.HasPrefix(a, "-name="):
+			name = a[strings.Index(a, "=")+1:]
 			continue
 		default:
 			positional = append(positional, a)

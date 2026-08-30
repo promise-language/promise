@@ -1,12 +1,15 @@
 package common
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -76,7 +79,8 @@ func RunBuild(root string, args []string) error {
 				binaryPath := filepath.Join(binDir, BinaryName())
 				if info, err := os.Stat(binaryPath); err == nil {
 					size := float64(info.Size()) / (1024 * 1024)
-					fmt.Printf("%s up to date (%.1f MB, version: %s)\n", BinaryName(), size, version)
+					fmt.Printf("%s up to date (%.1f MB, version: %s%s)\n",
+						BinaryName(), size, version, compilerIDField(binaryPath))
 				}
 				return nil
 			}
@@ -220,12 +224,52 @@ func RunBuild(root string, args []string) error {
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if info, err := os.Stat(binaryPath); err == nil {
 		size := float64(info.Size()) / (1024 * 1024)
-		fmt.Printf("Built %s (%.1f MB) in %s\n", BinaryName(), size, elapsed)
+		fmt.Printf("Built %s (%.1f MB%s) in %s\n",
+			BinaryName(), size, compilerIDField(binaryPath), elapsed)
 	} else {
 		fmt.Printf("Built %s in %s\n", BinaryName(), elapsed)
 	}
 
 	return nil
+}
+
+// compilerIDField renders the compiler's identity as a trailing ", id:<6 hex>"
+// field for a build line, or "" when the binary cannot name itself. The field
+// carries its own separator precisely so that absence leaves no dangling comma
+// behind — callers interpolate it with no separator of their own.
+func compilerIDField(binaryPath string) string {
+	if short := compilerIdentityShort(binaryPath); short != "" {
+		return ", id:" + short
+	}
+	return ""
+}
+
+// compilerIdentityShort returns the first 6 hex characters of the compiler's
+// self-derived identity — the value that keys every compiler-sensitive cache
+// (module.CompilerIdentity). Two binaries built from the same commit can carry
+// different identities, so printing it beside the version says which compiler
+// the caches on this machine are keyed to, which the version alone does not.
+//
+// It asks the binary (`promise version --json`) instead of recomputing the hash
+// here: the identity is derived from the binary's own bytes, so a second
+// implementation in the build tool would be a fork that could silently disagree
+// with the value the compiler actually uses. An unreadable or unrunnable binary
+// yields "" and the caller omits the field rather than printing a guess.
+func compilerIdentityShort(binaryPath string) string {
+	out, err := exec.Command(binaryPath, "version", "--json").Output()
+	if err != nil {
+		return ""
+	}
+	var v struct {
+		Identity string `json:"identity"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &v); err != nil {
+		return ""
+	}
+	if len(v.Identity) < 6 {
+		return ""
+	}
+	return v.Identity[:6]
 }
 
 // isBinaryUpToDate returns true if the compiler binary exists, was built with

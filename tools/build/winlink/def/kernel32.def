@@ -6,8 +6,10 @@
 LIBRARY kernel32.dll
 EXPORTS
 AddVectoredExceptionHandler
+AssignProcessToJobObject
 CloseHandle
 CreateFileA
+CreateJobObjectA
 CreatePipe
 CreateProcessA
 CreateThread
@@ -24,6 +26,7 @@ GetEnvironmentVariableA
 GetExitCodeProcess
 GetFileAttributesA
 GetLastError
+GetProcessTimes
 GetStdHandle
 GetSystemInfo
 GetSystemTimePreciseAsFileTime
@@ -31,6 +34,7 @@ InitializeConditionVariable
 InitializeCriticalSection
 LeaveCriticalSection
 MultiByteToWideChar
+OpenProcess
 QueryPerformanceCounter
 QueryPerformanceFrequency
 ReadFile
@@ -38,6 +42,7 @@ SetConsoleCtrlHandler
 SetHandleInformation
 Sleep
 SleepConditionVariableCS
+TerminateJobObject
 TerminateProcess
 WaitForSingleObject
 WakeAllConditionVariable

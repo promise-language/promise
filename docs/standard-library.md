@@ -520,7 +520,7 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 |----------|-------------|---------------|
 | File I/O | 12 | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
 | OS / Env | 5 | `getenv`, `getcwd`, `setenv`, `unsetenv`, `chdir` |
-| Process | 5 | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`), `spawn_streaming` (stdin+stdout+stderr pipes), `kill` (`kill(2)`) |
+| Process | 9 | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`), `spawn_streaming` (stdin+stdout+stderr pipes), `kill` (`kill(2)`), `process_alive` (`kill(0)`), `process_start_time` (`proc_pidinfo`/`/proc/stat`), `kill_group` (`kill(-pgid)`), `spawn_job_handle` |
 | OS Info | 3 | `get_environ` (environ global), `get_user_info` (`getpwuid`+`getuid`), `get_hostname` (`gethostname`) |
 | Dir Listing | 3 | `dir_open` (`opendir`), `dir_next_name` (`readdir`), `dir_close` (`closedir`) |
 | Signal | 2 | `signal_init` (pipe + handler), `signal_register` (`signal(2)`) |
@@ -909,14 +909,26 @@ set_working_dir(string path) !;
 // Streaming process execution
 type ProcessInput `public { ... }   // satisfies Writer: write, write_string, write_line, close, drop
 type ProcessOutput `public { ... }  // satisfies Reader: read, read_all, close, drop
-type Process `public {
-    spawn!(string program, ...string arguments) Self `factory;
+
+// Process supervision (T1529): split by provenance — attached vs started
+type ProcessRef `public {
+    attach!(int pid) Self `factory; // non-invasive: no ptrace/stop/notification
+    get id int;
+    get start_time int;            // comparable, platform-specific
+    get is_alive bool;             // guards against pid reuse via start_time
+    signal!(~this, Signal sig);    // graceful signal (SIGTERM/SIGINT/SIGHUP)
+}
+type Process is ProcessRef `public {
+    spawn!(string program, ...string arguments,
+           map[string, string]? environment,
+           string? working_directory,
+           bool new_process_group) Self `factory;
     take_stdin!(~this) ProcessInput ;
     take_stdout!(~this) ProcessOutput ;
     take_stderr!(~this) ProcessOutput ;
     wait!(~this) int ; // closes stdin, returns exit code (cached)
     kill!(~this); // SIGKILL
-    get id int;                    // pid
+    signal_group!(~this, Signal sig); // signal child + all descendants (requires new_process_group)
     drop(~this);                   // close fds + reap zombie
 }
 
@@ -936,9 +948,9 @@ receive_signal!() Signal ; // block until signal arrives
 ```
 
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
-- **Dependencies**: PAL OS (getenv, getcwd, exit, setenv, unsetenv, chdir, spawn, spawn_streaming, kill, get_environ, get_user_info, get_hostname, signal_init, signal_register), argc/argv globals from main prologue
-- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `env` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
-- **Test**: `modules/os/os_test.pr` (103 tests, excluded on WASM)
+- **Dependencies**: PAL OS (getenv, getcwd, exit, setenv, unsetenv, chdir, spawn, spawn_streaming, kill, process_alive, process_start_time, kill_group, spawn_job_handle, get_environ, get_user_info, get_hostname, signal_init, signal_register), argc/argv globals from main prologue
+- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. Process supervision uses four externs (T1529). OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `env` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
+- **Test**: `modules/os/os_test.pr` (135 tests, excluded on WASM)
 
 #### 4e. Standard Input (merged into `modules/io/io.pr`)
 

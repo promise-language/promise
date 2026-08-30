@@ -742,7 +742,19 @@ func (p *WasmPAL) EmitSpawnEnv(module *ir.Module) *ir.Func {
 func (p *WasmPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreamingEnv(module)
 }
-func (p *WasmPAL) EmitKill(module *ir.Module) *ir.Func        { return emitStubKill(module) }
+func (p *WasmPAL) EmitKill(module *ir.Module) *ir.Func { return emitStubKill(module) }
+func (p *WasmPAL) EmitProcessAlive(module *ir.Module) *ir.Func {
+	return emitStubProcessAlive(module)
+}
+func (p *WasmPAL) EmitProcessStartTime(module *ir.Module) *ir.Func {
+	return emitStubProcessStartTime(module)
+}
+func (p *WasmPAL) EmitKillGroup(module *ir.Module) *ir.Func {
+	return emitStubKillGroup(module)
+}
+func (p *WasmPAL) EmitSpawnJobHandle(module *ir.Module) *ir.Func {
+	return emitStubSpawnJobHandle(module)
+}
 func (p *WasmPAL) EmitExecReplace(module *ir.Module) *ir.Func { return emitStubExecReplace(module) }
 func (p *WasmPAL) EmitGetEnviron(module *ir.Module) *ir.Func  { return emitStubGetEnviron(module) }
 func (p *WasmPAL) EmitGetUserInfo(module *ir.Module) *ir.Func { return emitStubGetUserInfo(module) }

@@ -1661,6 +1661,11 @@ func (p *PosixPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 		ir.NewParam("path", irtypes.I8Ptr))
 	environGlobal := getOrCreateEnvironGlobal(module)
 
+	setpgidFn := getOrDeclareFunc(module, "setpgid", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("pgid", irtypes.I32))
+	pgidGlobal := getOrCreatePgidGlobal(module)
+
 	fn := module.NewFunc("pal_spawn_streaming_env", irtypes.I32,
 		ir.NewParam("program", irtypes.I8Ptr),
 		ir.NewParam("argv", i8PtrPtrType),
@@ -1668,7 +1673,8 @@ func (p *PosixPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 		ir.NewParam("cwd", irtypes.I8Ptr),
 		ir.NewParam("out_stdin_fd", i32PtrType),
 		ir.NewParam("out_stdout_fd", i32PtrType),
-		ir.NewParam("out_stderr_fd", i32PtrType))
+		ir.NewParam("out_stderr_fd", i32PtrType),
+		ir.NewParam("flags", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	zero32 := constant.NewInt(irtypes.I32, 0)
@@ -1768,11 +1774,21 @@ func (p *PosixPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	childBlk.NewCall(closeFn, stdoutWriteFd)
 	childBlk.NewCall(closeFn, stderrWriteFd)
 
+	// If flags & 1, create new process group: setpgid(0, 0)
+	hasGroup := childBlk.NewAnd(fn.Params[7], one32)
+	needGroup := childBlk.NewICmp(enum.IPredNE, hasGroup, zero32)
+	childSetPgidBlk := fn.NewBlock(".child_setpgid")
+	childAfterPgidBlk := fn.NewBlock(".child_after_pgid")
+	childBlk.NewCondBr(needGroup, childSetPgidBlk, childAfterPgidBlk)
+
+	childSetPgidBlk.NewCall(setpgidFn, zero32, zero32)
+	childSetPgidBlk.NewBr(childAfterPgidBlk)
+
 	// If cwd != NULL, chdir
-	cwdIsNull := childBlk.NewICmp(enum.IPredEQ, fn.Params[3], constant.NewNull(irtypes.I8Ptr))
+	cwdIsNull := childAfterPgidBlk.NewICmp(enum.IPredEQ, fn.Params[3], constant.NewNull(irtypes.I8Ptr))
 	childChdirBlk := fn.NewBlock(".child_chdir")
 	childEnvBlk := fn.NewBlock(".child_env")
-	childBlk.NewCondBr(cwdIsNull, childEnvBlk, childChdirBlk)
+	childAfterPgidBlk.NewCondBr(cwdIsNull, childEnvBlk, childChdirBlk)
 
 	chdirRet := childChdirBlk.NewCall(chdirFn, fn.Params[3])
 	chdirFailed := childChdirBlk.NewICmp(enum.IPredSLT, chdirRet, zero32)
@@ -1811,7 +1827,18 @@ func (p *PosixPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	parentBlk.NewStore(stdinWriteFd, fn.Params[4])
 	parentBlk.NewStore(stdoutReadFd, fn.Params[5])
 	parentBlk.NewStore(stderrReadFd, fn.Params[6])
-	parentBlk.NewRet(pid)
+
+	// If flags & 1, store child pid as pgid in global (pgid == pid after setpgid(0,0))
+	parentHasGroup := parentBlk.NewAnd(fn.Params[7], one32)
+	parentNeedGroup := parentBlk.NewICmp(enum.IPredNE, parentHasGroup, zero32)
+	storePgidBlk := fn.NewBlock(".store_pgid")
+	parentDoneBlk := fn.NewBlock(".parent_done")
+	parentBlk.NewCondBr(parentNeedGroup, storePgidBlk, parentDoneBlk)
+
+	storePgidBlk.NewStore(pid, pgidGlobal)
+	storePgidBlk.NewBr(parentDoneBlk)
+
+	parentDoneBlk.NewRet(pid)
 
 	return fn
 }
@@ -3934,5 +3961,322 @@ func (p *PosixPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
 
 	done.NewRet(constant.NewInt(irtypes.I32, 0))
 	fail.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// --- Process supervision (T1529) ---
+
+// EmitProcessAlive defines @pal_process_alive(i32 pid) → i32
+// Uses kill(pid, 0) to probe liveness without sending a signal.
+// Returns: 1 = alive, 0 = no such process (ESRCH), -1 = exists but not permitted (EPERM), -2 = other error.
+func (p *PosixPAL) EmitProcessAlive(module *ir.Module) *ir.Func {
+	killFn := getOrDeclareFunc(module, "kill", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("sig", irtypes.I32))
+	errnoFn := lookupFunc(module, "pal_errno")
+	if errnoFn == nil {
+		errnoFn = p.EmitErrno(module)
+	}
+
+	fn := module.NewFunc("pal_process_alive", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+
+	entry := fn.NewBlock(".entry")
+	rc := entry.NewCall(killFn, fn.Params[0], zero32)
+	isOk := entry.NewICmp(enum.IPredEQ, rc, zero32)
+	aliveBlk := fn.NewBlock(".alive")
+	checkErrBlk := fn.NewBlock(".check_err")
+	entry.NewCondBr(isOk, aliveBlk, checkErrBlk)
+
+	aliveBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+
+	errVal := checkErrBlk.NewCall(errnoFn)
+	isEsrch := checkErrBlk.NewICmp(enum.IPredEQ, errVal, constant.NewInt(irtypes.I32, 3)) // ESRCH
+	noSuchBlk := fn.NewBlock(".no_such")
+	checkEperm := fn.NewBlock(".check_eperm")
+	checkErrBlk.NewCondBr(isEsrch, noSuchBlk, checkEperm)
+
+	noSuchBlk.NewRet(zero32) // 0 = no such process
+
+	isEperm := checkEperm.NewICmp(enum.IPredEQ, errVal, constant.NewInt(irtypes.I32, 1)) // EPERM
+	notPermBlk := fn.NewBlock(".not_perm")
+	otherBlk := fn.NewBlock(".other")
+	checkEperm.NewCondBr(isEperm, notPermBlk, otherBlk)
+
+	notPermBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	otherBlk.NewRet(constant.NewInt(irtypes.I32, -2))
+
+	return fn
+}
+
+// EmitProcessStartTime defines @pal_process_start_time(i32 pid) → i64
+// macOS: proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) → pbi_start_tvsec.
+// Linux: reads /proc/<pid>/stat and parses field 22 (starttime).
+func (p *PosixPAL) EmitProcessStartTime(module *ir.Module) *ir.Func {
+	isDarwin := strings.Contains(p.target, "darwin") || strings.Contains(p.target, "macos") || strings.Contains(p.target, "apple")
+	if isDarwin {
+		return p.emitProcessStartTimeDarwin(module)
+	}
+	return p.emitProcessStartTimeLinux(module)
+}
+
+// emitProcessStartTimeDarwin uses proc_pidinfo to get process start time.
+func (p *PosixPAL) emitProcessStartTimeDarwin(module *ir.Module) *ir.Func {
+	// int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize)
+	procPidInfoFn := getOrDeclareFunc(module, "proc_pidinfo", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("flavor", irtypes.I32),
+		ir.NewParam("arg", irtypes.I64),
+		ir.NewParam("buffer", irtypes.I8Ptr),
+		ir.NewParam("buffersize", irtypes.I32))
+
+	const procBsdInfoSize = 136 // sizeof(struct proc_bsdinfo) on arm64/x86_64 macOS
+	const pbiStartTvsecOffset = 120
+	const procPidTbsdInfo = 3
+
+	fn := module.NewFunc("pal_process_start_time", irtypes.I64,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	negOne64 := constant.NewInt(irtypes.I64, -1)
+
+	entry := fn.NewBlock(".entry")
+	// Allocate struct proc_bsdinfo on stack
+	buf := entry.NewAlloca(irtypes.NewArray(procBsdInfoSize, irtypes.I8))
+	bufPtr := entry.NewBitCast(buf, irtypes.I8Ptr)
+
+	// Call proc_pidinfo
+	rc := entry.NewCall(procPidInfoFn,
+		fn.Params[0],
+		constant.NewInt(irtypes.I32, procPidTbsdInfo),
+		constant.NewInt(irtypes.I64, 0),
+		bufPtr,
+		constant.NewInt(irtypes.I32, procBsdInfoSize))
+
+	// rc <= 0 means failure
+	isFail := entry.NewICmp(enum.IPredSLE, rc, constant.NewInt(irtypes.I32, 0))
+	failBlk := fn.NewBlock(".fail")
+	okBlk := fn.NewBlock(".ok")
+	entry.NewCondBr(isFail, failBlk, okBlk)
+
+	failBlk.NewRet(negOne64)
+
+	// Load pbi_start_tvsec at offset 120 (u64)
+	secPtr := okBlk.NewGetElementPtr(irtypes.NewArray(procBsdInfoSize, irtypes.I8), buf,
+		constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, pbiStartTvsecOffset))
+	secPtrTyped := okBlk.NewBitCast(secPtr, irtypes.NewPointer(irtypes.I64))
+	sec := okBlk.NewLoad(irtypes.I64, secPtrTyped)
+	okBlk.NewRet(sec)
+
+	return fn
+}
+
+// emitProcessStartTimeLinux reads /proc/<pid>/stat and parses field 22 (starttime).
+func (p *PosixPAL) emitProcessStartTimeLinux(module *ir.Module) *ir.Func {
+	palAlloc := lookupFunc(module, "pal_alloc")
+	palFree := lookupFunc(module, "pal_free")
+
+	openFn := getOrDeclareFunc(module, "open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("flags", irtypes.I32))
+	readFn := getOrDeclareFunc(module, "read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("count", irtypes.I64))
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	snprintfFn := getOrDeclareFunc(module, "snprintf", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I64),
+		ir.NewParam("fmt", irtypes.I8Ptr),
+		ir.NewParam("arg", irtypes.I32))
+
+	fn := module.NewFunc("pal_process_start_time", irtypes.I64,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	negOne64 := constant.NewInt(irtypes.I64, -1)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+
+	// Format string: "/proc/%d/stat\0"
+	fmtStr := module.NewGlobalDef("__pal_proc_stat_fmt",
+		constant.NewCharArrayFromString("/proc/%d/stat\x00"))
+	fmtStr.Immutable = true
+	fmtStr.Linkage = enum.LinkagePrivate
+
+	entry := fn.NewBlock(".entry")
+
+	// Build path: snprintf(pathBuf, 32, "/proc/%d/stat", pid)
+	pathBuf := entry.NewAlloca(irtypes.NewArray(32, irtypes.I8))
+	pathPtr := entry.NewBitCast(pathBuf, irtypes.I8Ptr)
+	fmtPtr := entry.NewBitCast(fmtStr, irtypes.I8Ptr)
+	entry.NewCall(snprintfFn, pathPtr, constant.NewInt(irtypes.I64, 32), fmtPtr, fn.Params[0])
+
+	// Open the file (O_RDONLY = 0)
+	fd := entry.NewCall(openFn, pathPtr, zero32)
+	isOpenFail := entry.NewICmp(enum.IPredSLT, fd, zero32)
+	failBlk := fn.NewBlock(".fail")
+	readBlk := fn.NewBlock(".read")
+	entry.NewCondBr(isOpenFail, failBlk, readBlk)
+
+	failBlk.NewRet(negOne64)
+
+	// Read up to 512 bytes (enough for /proc/pid/stat)
+	const bufSize = 512
+	dataBuf := readBlk.NewCall(palAlloc, constant.NewInt(irtypes.I64, bufSize))
+	nRead := readBlk.NewCall(readFn, fd, dataBuf, constant.NewInt(irtypes.I64, bufSize-1))
+	readBlk.NewCall(closeFn, fd)
+
+	isReadFail := readBlk.NewICmp(enum.IPredSLE, nRead, zero64)
+	readFailBlk := fn.NewBlock(".read_fail")
+	parseBlk := fn.NewBlock(".parse")
+	readBlk.NewCondBr(isReadFail, readFailBlk, parseBlk)
+
+	readFailBlk.NewCall(palFree, dataBuf)
+	readFailBlk.NewRet(negOne64)
+
+	// Null-terminate the buffer
+	nReadI64 := parseBlk.NewAnd(nRead, constant.NewInt(irtypes.I64, 0x7FFFFFFFFFFFFFFF))
+	termPtr := parseBlk.NewGetElementPtr(irtypes.I8, dataBuf, nReadI64)
+	parseBlk.NewStore(constant.NewInt(irtypes.I8, 0), termPtr)
+
+	// Find the closing ')' of field 2 (comm). Scan backwards from the end
+	// to handle process names containing ')'.
+	scanHdr := fn.NewBlock(".scan_hdr")
+	parseBlk.NewBr(scanHdr)
+
+	scanIdx := scanHdr.NewPhi(ir.NewIncoming(nReadI64, parseBlk))
+	isZeroIdx := scanHdr.NewICmp(enum.IPredEQ, scanIdx, zero64)
+	scanFailBlk := fn.NewBlock(".scan_fail")
+	scanCheckBlk := fn.NewBlock(".scan_check")
+	scanHdr.NewCondBr(isZeroIdx, scanFailBlk, scanCheckBlk)
+
+	scanFailBlk.NewCall(palFree, dataBuf)
+	scanFailBlk.NewRet(negOne64)
+
+	prevIdx := scanCheckBlk.NewSub(scanIdx, constant.NewInt(irtypes.I64, 1))
+	charPtr := scanCheckBlk.NewGetElementPtr(irtypes.I8, dataBuf, prevIdx)
+	ch := scanCheckBlk.NewLoad(irtypes.I8, charPtr)
+	isParen := scanCheckBlk.NewICmp(enum.IPredEQ, ch, constant.NewInt(irtypes.I8, ')'))
+	foundParen := fn.NewBlock(".found_paren")
+	scanCheckBlk.NewCondBr(isParen, foundParen, scanHdr)
+	scanIdx.Incs = append(scanIdx.Incs, ir.NewIncoming(prevIdx, scanCheckBlk))
+
+	// After ')' we need to skip 20 spaces to reach field 22 (starttime).
+	// Fields: 1=pid, 2=(comm), 3=state, ..., 22=starttime.
+	// After ')' there's a space, then field 3. We count 20 spaces total.
+	skipHdr := fn.NewBlock(".skip_hdr")
+	foundParen.NewBr(skipHdr)
+
+	skipPos := skipHdr.NewPhi(ir.NewIncoming(prevIdx, foundParen))
+	spaceCount := skipHdr.NewPhi(ir.NewIncoming(zero64, foundParen))
+	// Need 20 spaces (fields 3 through 22: to reach field 22 we pass fields 3-21 = 20 separators)
+	doneSkipping := skipHdr.NewICmp(enum.IPredEQ, spaceCount, constant.NewInt(irtypes.I64, 20))
+	parseNumBlk := fn.NewBlock(".parse_num")
+	skipBodyBlk := fn.NewBlock(".skip_body")
+	skipHdr.NewCondBr(doneSkipping, parseNumBlk, skipBodyBlk)
+
+	// Check bounds
+	nextSkipPos := skipBodyBlk.NewAdd(skipPos, constant.NewInt(irtypes.I64, 1))
+	isOob := skipBodyBlk.NewICmp(enum.IPredSGE, nextSkipPos, nReadI64)
+	skipOobBlk := fn.NewBlock(".skip_oob")
+	skipReadBlk := fn.NewBlock(".skip_read")
+	skipBodyBlk.NewCondBr(isOob, skipOobBlk, skipReadBlk)
+
+	skipOobBlk.NewCall(palFree, dataBuf)
+	skipOobBlk.NewRet(negOne64)
+
+	skipChar := skipReadBlk.NewGetElementPtr(irtypes.I8, dataBuf, nextSkipPos)
+	skipChVal := skipReadBlk.NewLoad(irtypes.I8, skipChar)
+	isSpace := skipReadBlk.NewICmp(enum.IPredEQ, skipChVal, constant.NewInt(irtypes.I8, ' '))
+	newCount := skipReadBlk.NewSelect(isSpace,
+		skipReadBlk.NewAdd(spaceCount, constant.NewInt(irtypes.I64, 1)),
+		spaceCount)
+	skipPos.Incs = append(skipPos.Incs, ir.NewIncoming(nextSkipPos, skipReadBlk))
+	spaceCount.Incs = append(spaceCount.Incs, ir.NewIncoming(newCount, skipReadBlk))
+	skipReadBlk.NewBr(skipHdr)
+
+	// Parse the number at the current position
+	numHdr := fn.NewBlock(".num_hdr")
+	parseNumBlk.NewBr(numHdr)
+
+	numPos := numHdr.NewPhi(ir.NewIncoming(skipPos, parseNumBlk))
+	numVal := numHdr.NewPhi(ir.NewIncoming(zero64, parseNumBlk))
+	isNumOob := numHdr.NewICmp(enum.IPredSGE, numPos, nReadI64)
+	numDoneBlk := fn.NewBlock(".num_done")
+	numReadBlk := fn.NewBlock(".num_read")
+	numHdr.NewCondBr(isNumOob, numDoneBlk, numReadBlk)
+
+	numCharPtr := numReadBlk.NewGetElementPtr(irtypes.I8, dataBuf, numPos)
+	numCh := numReadBlk.NewLoad(irtypes.I8, numCharPtr)
+	// Check if digit: ch >= '0' && ch <= '9'
+	isGe0 := numReadBlk.NewICmp(enum.IPredUGE, numCh, constant.NewInt(irtypes.I8, '0'))
+	isLe9 := numReadBlk.NewICmp(enum.IPredULE, numCh, constant.NewInt(irtypes.I8, '9'))
+	isDigit := numReadBlk.NewAnd(isGe0, isLe9)
+	numAccumBlk := fn.NewBlock(".num_accum")
+	numReadBlk.NewCondBr(isDigit, numAccumBlk, numDoneBlk)
+
+	digit := numAccumBlk.NewZExt(numCh, irtypes.I64)
+	digitVal := numAccumBlk.NewSub(digit, constant.NewInt(irtypes.I64, '0'))
+	newNum := numAccumBlk.NewMul(numVal, constant.NewInt(irtypes.I64, 10))
+	newNum2 := numAccumBlk.NewAdd(newNum, digitVal)
+	nextNumPos := numAccumBlk.NewAdd(numPos, constant.NewInt(irtypes.I64, 1))
+	numPos.Incs = append(numPos.Incs, ir.NewIncoming(nextNumPos, numAccumBlk))
+	numVal.Incs = append(numVal.Incs, ir.NewIncoming(newNum2, numAccumBlk))
+	numAccumBlk.NewBr(numHdr)
+
+	numDoneBlk.NewCall(palFree, dataBuf)
+	finalNum := numDoneBlk.NewPhi(ir.NewIncoming(numVal, numHdr), ir.NewIncoming(numVal, numReadBlk))
+	numDoneBlk.NewRet(finalNum)
+
+	return fn
+}
+
+// EmitKillGroup defines @pal_kill_group(i32 pgid, i32 signal) → i32
+// Sends a signal to a process group via kill(-pgid, signal).
+func (p *PosixPAL) EmitKillGroup(module *ir.Module) *ir.Func {
+	killFn := getOrDeclareFunc(module, "kill", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("sig", irtypes.I32))
+
+	fn := module.NewFunc("pal_kill_group", irtypes.I32,
+		ir.NewParam("pgid", irtypes.I32),
+		ir.NewParam("signal", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	// Negate pgid: kill(-pgid, signal) sends to the process group
+	negPgid := entry.NewSub(constant.NewInt(irtypes.I32, 0), fn.Params[0])
+	rc := entry.NewCall(killFn, negPgid, fn.Params[1])
+	entry.NewRet(rc)
+
+	return fn
+}
+
+// getOrCreatePgidGlobal returns the @__pal_spawn_pgid global, creating it if needed.
+func getOrCreatePgidGlobal(module *ir.Module) *ir.Global {
+	for _, g := range module.Globals {
+		if g.Name() == "__pal_spawn_pgid" {
+			return g
+		}
+	}
+	g := module.NewGlobalDef("__pal_spawn_pgid", constant.NewInt(irtypes.I32, 0))
+	return g
+}
+
+// EmitSpawnJobHandle defines @pal_spawn_job_handle() → i32
+// Returns the pgid (== child pid) stored by the most recent spawn with flags & 1.
+func (p *PosixPAL) EmitSpawnJobHandle(module *ir.Module) *ir.Func {
+	pgidGlobal := getOrCreatePgidGlobal(module)
+
+	fn := module.NewFunc("pal_spawn_job_handle", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	val := entry.NewLoad(irtypes.I32, pgidGlobal)
+	entry.NewRet(val)
 	return fn
 }

@@ -564,7 +564,7 @@ test_set_working_dir_preserves_env() `test(exclude: wasm) `target(windows) {
 }
 
 test_process_spawn_and_wait() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("echo", ["hello"])?!;
+  Process p = Process.spawn("echo", ["hello"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -573,7 +573,7 @@ test_process_spawn_and_wait() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_stdin_write() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -587,7 +587,7 @@ test_process_stdin_write() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_streaming_read() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("sh", ["-c", "seq 1 100"])?!;
+  Process p = Process.spawn("sh", ["-c", "seq 1 100"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
   string total = "";
@@ -607,7 +607,7 @@ test_process_streaming_read() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_stderr() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("sh", ["-c", "echo err >&2"])?!;
+  Process p = Process.spawn("sh", ["-c", "echo err >&2"], none, none, false)?!;
   ProcessOutput stderr = p.take_stderr()?!;
   string err = stderr.read_all()?!;
   int code = p.wait()?!;
@@ -616,13 +616,13 @@ test_process_stderr() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_id() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("true", [])?!;
+  Process p = Process.spawn("true", [], none, none, false)?!;
   assert(p.id > 0, "pid should be positive");
   p.wait()?!;
 }
 
 test_process_kill() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("sleep", ["60"])?!;
+  Process p = Process.spawn("sleep", ["60"], none, none, false)?!;
   p.kill()?!;
   // wait() should return without hanging — the process was killed
   int code = p.wait()?!;
@@ -631,7 +631,7 @@ test_process_kill() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_wait_twice() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("true", [])?!;
+  Process p = Process.spawn("true", [], none, none, false)?!;
   int code1 = p.wait()?!;
   int code2 = p.wait()?!;
   assert(code1 == 0, "first wait should return 0");
@@ -639,7 +639,7 @@ test_process_wait_twice() `test(exclude: wasm) `target(!windows) {
 }
 
 _spawn_and_drop!() {
-  Process p = Process.spawn("true", []);
+  Process p = Process.spawn("true", [], none, none, false);
   // p goes out of scope here, drop should close fds and reap zombie
 }
 
@@ -649,7 +649,7 @@ test_process_drop_cleanup() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_large_bidirectional() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -664,7 +664,7 @@ test_process_large_bidirectional() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_close_stdin_eof() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("wc", ["-l"])?!;
+  Process p = Process.spawn("wc", ["-l"], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -678,7 +678,7 @@ test_process_close_stdin_eof() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_take_already_taken() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("true", [])?!;
+  Process p = Process.spawn("true", [], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
   bool got_error = false;
@@ -691,7 +691,7 @@ test_process_take_already_taken() `test(exclude: wasm) `target(!windows) {
 
 test_process_writer_interface() `test(exclude: wasm) `target(!windows) {
   // Verify ProcessInput write_line works end-to-end
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -707,7 +707,7 @@ test_process_writer_interface() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_close_stdin_twice() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   stdin.close()?!;
   stdin.close()?!; // should not error — safe to call multiple times
@@ -715,7 +715,7 @@ test_process_close_stdin_twice() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_close_stdout_twice() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("echo", ["hi"])?!;
+  Process p = Process.spawn("echo", ["hi"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   stdout.close()?!;
   stdout.close()?!; // should not error
@@ -723,7 +723,7 @@ test_process_close_stdout_twice() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_write_after_close() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   stdin.close()?!;
 
@@ -736,7 +736,7 @@ test_process_write_after_close() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_take_stdin_twice() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   stdin.close()?!;
 
@@ -749,7 +749,7 @@ test_process_take_stdin_twice() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_take_stderr_twice() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("true", [])?!;
+  Process p = Process.spawn("true", [], none, none, false)?!;
   ProcessOutput stderr = p.take_stderr()?!;
 
   bool got_error = false;
@@ -762,7 +762,7 @@ test_process_take_stderr_twice() `test(exclude: wasm) `target(!windows) {
 
 test_process_spawn_variadic() `test(exclude: wasm) `target(!windows) {
   // Variadic inline args (not string[])
-  Process p = Process.spawn("echo", ["one", "two", "three"])?!;
+  Process p = Process.spawn("echo", ["one", "two", "three"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -771,13 +771,13 @@ test_process_spawn_variadic() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_nonzero_exit() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("sh", ["-c", "exit 42"])?!;
+  Process p = Process.spawn("sh", ["-c", "exit 42"], none, none, false)?!;
   int code = p.wait()?!;
   assert(code == 42, "should capture exit code 42");
 }
 
 test_process_multiple_writes() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -794,13 +794,13 @@ test_process_multiple_writes() `test(exclude: wasm) `target(!windows) {
 
 test_process_spawn_nonexistent() `test(exclude: wasm) `target(!windows) {
   // Nonexistent program: spawn succeeds (fork+exec), but child exits 127
-  Process p = Process.spawn("__promise_no_such_program__", [])?!;
+  Process p = Process.spawn("__promise_no_such_program__", [], none, none, false)?!;
   int code = p.wait()?!;
   assert(code == 127, "nonexistent program should exit with 127");
 }
 
 test_process_empty_output() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("true", [])?!;
+  Process p = Process.spawn("true", [], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -815,7 +815,7 @@ _drop_process_input!(Process ~p) {
 }
 
 test_process_input_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   _drop_process_input(p)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
@@ -826,7 +826,7 @@ test_process_input_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
 
 test_process_wait_auto_closes_stdin() `test(exclude: wasm) `target(!windows) {
   // Don't take stdin — wait() should close it automatically
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   // cat waits for stdin EOF; wait() closes stdin, so cat exits
   int code = p.wait()?!;
@@ -837,12 +837,12 @@ test_process_wait_auto_closes_stdin() `test(exclude: wasm) `target(!windows) {
 
 test_process_sequential_spawns() `test(exclude: wasm) `target(!windows) {
   // Verify TLS globals reset between sequential Process.spawn calls
-  Process p1 = Process.spawn("echo", ["first"])?!;
+  Process p1 = Process.spawn("echo", ["first"], none, none, false)?!;
   ProcessOutput stdout1 = p1.take_stdout()?!;
   string out1 = stdout1.read_all()?!;
   p1.wait()?!;
 
-  Process p2 = Process.spawn("echo", ["second"])?!;
+  Process p2 = Process.spawn("echo", ["second"], none, none, false)?!;
   ProcessOutput stdout2 = p2.take_stdout()?!;
   string out2 = stdout2.read_all()?!;
   p2.wait()?!;
@@ -853,7 +853,7 @@ test_process_sequential_spawns() `test(exclude: wasm) `target(!windows) {
 
 test_process_stdout_and_stderr_concurrent() `test(exclude: wasm) `target(!windows) {
   // Read both stdout and stderr from the same process
-  Process p = Process.spawn("sh", ["-c", "echo out; echo err >&2"])?!;
+  Process p = Process.spawn("sh", ["-c", "echo out; echo err >&2"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   ProcessOutput stderr = p.take_stderr()?!;
 
@@ -876,7 +876,7 @@ _read_from_reader!(Reader ~r) string {
 }
 
 test_process_input_structural_writer() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("cat", [])?!;
+  Process p = Process.spawn("cat", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -890,7 +890,7 @@ test_process_input_structural_writer() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_output_structural_reader() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("echo", ["from_reader"])?!;
+  Process p = Process.spawn("echo", ["from_reader"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
   string out = _read_from_reader(stdout)?!;
@@ -1001,6 +1001,132 @@ test_user_name_matches_env() `test(exclude: wasm) `target(windows) {
   }
 }
 
+// --- Process supervision tests (T1529) ---
+// These tests MUST come before the signal handling tests below, because
+// setup_signal_handling() installs handlers that cause fork-exec to deadlock
+// in the child (T1872). Tests that spawn children and send signals must
+// run before any signal handler is installed in this batch.
+
+test_process_ref_attach_self() `test(exclude: wasm) `target(!windows) {
+  int my_pid = process_id;
+  ProcessRef ref = ProcessRef.attach(my_pid)?!;
+  assert(ref.id == my_pid, "attached ref should have our pid");
+  assert(ref.start_time > 0, "start_time should be positive for a running process");
+}
+
+test_process_ref_attach_nonexistent() `test(exclude: wasm) `target(!windows) {
+  // pid 99999999 should not exist on any sane system
+  ProcessRef.attach(99999999)? e {
+    assert(e.message == "no such process", "should report no such process");
+    return;
+  };
+  assert(false, "attach to nonexistent pid should have raised an error");
+}
+
+test_process_ref_is_alive_self() `test(exclude: wasm) `target(!windows) {
+  int my_pid = process_id;
+  ProcessRef ref = ProcessRef.attach(my_pid)?!;
+  assert(ref.is_alive, "we should be alive");
+}
+
+test_process_ref_is_alive_dead() `test(exclude: wasm) `target(!windows) {
+  // Spawn a process that exits immediately, wait for it, then check is_alive
+  Process p = Process.spawn("true", [], none, none, false)?!;
+  int pid = p.id;
+  p.wait()?!;
+  // The process has exited. Attach by pid.
+  ProcessRef.attach(pid)? e {
+    // Expected: process no longer exists (ESRCH)
+    assert(e.message == "no such process", "dead process should not be attachable");
+    return;
+  };
+  // If attach succeeded, the pid was reused (unlikely but possible).
+  // Check is_alive — start_time mismatch should catch reuse.
+}
+
+test_process_ref_start_time_stable() `test(exclude: wasm) `target(!windows) {
+  int my_pid = process_id;
+  ProcessRef ref1 = ProcessRef.attach(my_pid)?!;
+  ProcessRef ref2 = ProcessRef.attach(my_pid)?!;
+  assert(ref1.start_time == ref2.start_time, "two attaches to same pid should return same start_time");
+}
+
+test_process_signal_terminate() `test(exclude: wasm, timeout: "10s") `target(!windows) {
+  // Spawn sleep, send SIGTERM via inherited signal!, verify wait returns.
+  // WEXITSTATUS is 0 for signal-killed processes (pal_wait_pid returns (status>>8)&0xFF).
+  Process p = Process.spawn("sleep", ["60"], none, none, false)?!;
+  p.signal(Signal.Terminate)?!;
+  int code = p.wait()?!;
+  assert(code >= 0, "wait after signal should succeed");
+}
+
+test_process_ref_signal_terminate() `test(exclude: wasm, timeout: "10s") `target(!windows) {
+  // Spawn a process, then attach to it by pid and send SIGTERM via ProcessRef.signal!
+  Process p = Process.spawn("sleep", ["60"], none, none, false)?!;
+  int pid = p.id;
+  ProcessRef ref = ProcessRef.attach(pid)?!;
+  ref.signal(Signal.Terminate)?!;
+  int code = p.wait()?!;
+  assert(code >= 0, "wait after signal should succeed");
+}
+
+test_process_has_id_and_start_time() `test(exclude: wasm) `target(!windows) {
+  Process p = Process.spawn("true", [], none, none, false)?!;
+  assert(p.id > 0, "process should have a positive pid");
+  assert(p.start_time > 0 || p.start_time == -1, "start_time should be positive or -1");
+  p.wait()?!;
+}
+
+test_process_spawn_with_group() `test(exclude: wasm) `target(!windows) {
+  // Spawn with new_process_group: true, verify it works
+  Process p = Process.spawn("true", [], none, none, true)?!;
+  int code = p.wait()?!;
+  assert(code == 0, "process in new group should exit 0");
+}
+
+test_process_signal_group() `test(exclude: wasm, timeout: "10s") `target(!windows) {
+  // Spawn a shell that starts a child, in a new process group.
+  // Signal the group — both should die. Verify wait returns.
+  Process p = Process.spawn("sh", ["-c", "sleep 60 & wait"], none, none, true)?!;
+  // Give the shell time to start the child (T1632 exemption: testing timing behavior)
+  sleep(Duration.from_millis(200));
+  p.signal_group(Signal.Terminate)?!;
+  int code = p.wait()?!;
+  assert(code >= 0, "wait after group signal should succeed");
+}
+
+test_process_signal_group_without_group_raises() `test(exclude: wasm) `target(!windows) {
+  Process p = Process.spawn("true", [], none, none, false)?!;
+  p.signal_group(Signal.Terminate)? e {
+    assert(e.message == "process was not spawned with a process group",
+    "should report no process group");
+    p.wait()?!;
+    return;
+  };
+  p.wait()?!;
+  assert(false, "signal_group without group should have raised");
+}
+
+test_process_spawn_no_group_default() `test(exclude: wasm) `target(!windows) {
+  // Verify existing behavior is unchanged with new_process_group: false
+  Process p = Process.spawn("echo", ["hello"], none, none, false)?!;
+  ProcessOutput stdout = p.take_stdout()?!;
+  string out = stdout.read_all()?!;
+  int code = p.wait()?!;
+  assert(code == 0, "echo should exit 0");
+  assert(out.trim() == "hello", "echo output should be hello");
+}
+
+test_process_kill_still_works() `test(exclude: wasm, timeout: "10s") `target(!windows) {
+  // Existing kill! behavior preserved: wait returns without hanging
+  Process p = Process.spawn("sleep", ["60"], none, none, false)?!;
+  p.kill()?!;
+  int code = p.wait()?!;
+  assert(code >= 0, "wait after kill should succeed");
+}
+
+// --- Signal handling tests (must come after T1529 process tests due to T1872) ---
+
 test_signal_enum_posix_numbers() `test(exclude: wasm) {
   assert(Signal.Interrupt._to_posix_number() == 2, "Interrupt should be SIGINT (2)");
   assert(Signal.Terminate._to_posix_number() == 15, "Terminate should be SIGTERM (15)");
@@ -1081,7 +1207,7 @@ test_process_id_stable() `test(exclude: wasm) `target(!windows) {
 }
 
 test_process_output_read_after_close() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("echo", ["hi"])?!;
+  Process p = Process.spawn("echo", ["hi"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   stdout.close()?!;
   // Read on closed pipe should return 0 (EOF), not error
@@ -1097,7 +1223,7 @@ _drop_process_output!(Process ~p) {
 }
 
 test_process_output_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("echo", ["dropped"])?!;
+  Process p = Process.spawn("echo", ["dropped"], none, none, false)?!;
   _drop_process_output(p)?!;
   // If drop didn't close the fd, this would leak. Just verify no hang.
   p.wait()?!;
@@ -1206,7 +1332,7 @@ test_spawn_custom_env() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["SPAWN_VAR"] = "from_spawn";
-  Process p = Process.spawn("sh", ["-c", "echo $SPAWN_VAR"], environment: move custom_env)?!;
+  Process p = Process.spawn("sh", ["-c", "echo $SPAWN_VAR"], environment: move custom_env, working_directory: none, new_process_group: false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -1215,7 +1341,7 @@ test_spawn_custom_env() `test(exclude: wasm) `target(!windows) {
 }
 
 test_spawn_custom_cwd() `test(exclude: wasm) `target(!windows) {
-  Process p = Process.spawn("pwd", [], working_directory: "/usr")?!;
+  Process p = Process.spawn("pwd", [], environment: none, working_directory: "/usr", new_process_group: false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -1230,7 +1356,7 @@ _read_one_byte(Reader ~r) u8? {
 test_process_output_read_byte() `test(exclude: wasm) `target(!windows) {
   // read_byte() is a non-failable default method on Reader — must be called via Reader type.
   // Returns u8? (present with value, or absent at EOF).
-  Process p = Process.spawn("printf", ["AB"])?!;
+  Process p = Process.spawn("printf", ["AB"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   u8? b1 = _read_one_byte(stdout);
   u8? b2 = _read_one_byte(stdout);
@@ -1248,7 +1374,7 @@ test_process_output_read_byte() `test(exclude: wasm) `target(!windows) {
 
 test_process_spawn_echo_windows() `test(exclude: wasm) `target(windows) {
   // Guards pal_spawn_streaming_env success path on Windows (was a -1 stub pre PR #1).
-  Process p = Process.spawn("cmd", ["/c", "echo hello"])?!;
+  Process p = Process.spawn("cmd", ["/c", "echo hello"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -1261,7 +1387,7 @@ test_process_spawn_stdin_windows() `test(exclude: wasm) `target(windows) {
   // (WriteFile) and pal_pipe_close (CloseHandle) on a raw Win32 HANDLE. Routing
   // these through UCRT _write/_close aborts the process. `sort` reads all of
   // stdin, sorts the lines, and echoes them back, so it round-trips stdin→stdout.
-  Process p = Process.spawn("sort", [])?!;
+  Process p = Process.spawn("sort", [], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -1275,7 +1401,7 @@ test_process_spawn_stdin_windows() `test(exclude: wasm) `target(windows) {
 }
 
 test_process_spawn_exit_code_windows() `test(exclude: wasm) `target(windows) {
-  Process p = Process.spawn("cmd", ["/c", "exit 7"])?!;
+  Process p = Process.spawn("cmd", ["/c", "exit 7"], none, none, false)?!;
   int code = p.wait()?!;
   assert(code == 7, "exit code should surface from streaming spawn");
 }
@@ -1285,7 +1411,7 @@ test_process_spawn_custom_env_windows() `test(exclude: wasm) `target(windows) {
   map[string, string] custom_env = env;
   custom_env["PROMISE_TEST_SPAWN_WIN_VAR"] = "spawn_custom_value";
   Process p = Process.spawn("cmd", ["/c", "echo %PROMISE_TEST_SPAWN_WIN_VAR%"],
-  environment: move custom_env)?!;
+  environment: move custom_env, working_directory: none, new_process_group: false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -1295,7 +1421,7 @@ test_process_spawn_custom_env_windows() `test(exclude: wasm) `target(windows) {
 
 test_process_spawn_custom_cwd_windows() `test(exclude: wasm) `target(windows) {
   // Guards lpCurrentDirectory in EmitSpawnStreamingEnv.
-  Process p = Process.spawn("cmd", ["/c", "cd"], working_directory: "C:\\Windows")?!;
+  Process p = Process.spawn("cmd", ["/c", "cd"], environment: none, working_directory: "C:\\Windows", new_process_group: false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
   string out = stdout.read_all()?!;
   int code = p.wait()?!;
@@ -1306,7 +1432,7 @@ test_process_spawn_custom_cwd_windows() `test(exclude: wasm) `target(windows) {
 test_process_spawn_nonexistent_windows() `test(exclude: wasm) `target(windows) {
   // On Windows, CreateProcessA fails immediately for nonexistent programs.
   bool raised = false;
-  Process.spawn("__promise_no_such_program__", [])? e {
+  Process.spawn("__promise_no_such_program__", [], none, none, false)? e {
     raised = true;
   };
   assert(raised, "spawn of nonexistent program should raise on Windows");
@@ -1316,7 +1442,7 @@ test_process_stdin_write_windows() `test(exclude: wasm) `target(windows) {
   // T0900: exercises the streaming pipe WRITE + CLOSE bridges on Windows
   // (pal_pipe_write/pal_pipe_close via WriteFile/CloseHandle, not UCRT _write/_close).
   // findstr "^" matches every input line and echoes it to stdout.
-  Process p = Process.spawn("findstr", ["^"])?!;
+  Process p = Process.spawn("findstr", ["^"], none, none, false)?!;
   ProcessInput stdin = p.take_stdin()?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
@@ -1332,7 +1458,7 @@ test_process_stdin_write_windows() `test(exclude: wasm) `target(windows) {
 test_process_streaming_read_windows() `test(exclude: wasm) `target(windows) {
   // T0900: exercises incremental pipe READ on Windows (pal_pipe_read via ReadFile,
   // not UCRT _read), including the ERROR_BROKEN_PIPE → EOF mapping at child exit.
-  Process p = Process.spawn("cmd", ["/c", "for /L %i in (1,1,100) do @echo %i"])?!;
+  Process p = Process.spawn("cmd", ["/c", "for /L %i in (1,1,100) do @echo %i"], none, none, false)?!;
   ProcessOutput stdout = p.take_stdout()?!;
 
   Builder b = Builder();

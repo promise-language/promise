@@ -429,6 +429,10 @@ type Compiler struct {
 	palSpawnEnv                *ir.Func // @pal_spawn_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palSpawnStreamingEnv       *ir.Func // @pal_spawn_streaming_env(..., i8** envp, i8* cwd, ...) → i32
 	palKill                    *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
+	palProcessAlive            *ir.Func // @pal_process_alive(i32 pid) → i32 (T1529)
+	palProcessStartTime        *ir.Func // @pal_process_start_time(i32 pid) → i64 (T1529)
+	palKillGroup               *ir.Func // @pal_kill_group(i32 pgid, i32 signal) → i32 (T1529)
+	palSpawnJobHandle          *ir.Func // @pal_spawn_job_handle() → i32 (T1529)
 	palExecReplace             *ir.Func // @pal_exec_replace(i8* path, i8** argv) → i32 (T0770)
 	palGetEnviron              *ir.Func // @pal_get_environ() → i8**
 	palGetUserInfo             *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32

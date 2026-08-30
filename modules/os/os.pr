@@ -50,7 +50,8 @@ _os_spawn_streaming!(string program, string[] args) int `extern("promise_os_spaw
 _os_spawn_env!(string program, string[] args, string[] env_entries, int has_env, string cwd, int has_cwd) int `extern("promise_os_spawn_env");
 
 // Like _os_spawn_streaming but with optional envp and cwd.
-_os_spawn_streaming_env!(string program, string[] args, string[] env_entries, int has_env, string cwd, int has_cwd) int `extern("promise_os_spawn_streaming_env");
+// flags bit 0: create new process group.
+_os_spawn_streaming_env!(string program, string[] args, string[] env_entries, int has_env, string cwd, int has_cwd, int flags) int `extern("promise_os_spawn_streaming_env");
 
 // Returns cached stdin pipe write fd from the last _os_spawn_streaming call.
 _os_spawn_stdin_fd() int `extern("promise_os_spawn_stdin_fd");
@@ -103,6 +104,20 @@ _os_send_signal(int pid, int signum) int `extern("promise_os_send_signal");
 
 // Returns the current process ID.
 _os_get_pid() int `extern("promise_os_get_pid");
+
+// Process supervision (T1529)
+
+// Checks whether a process exists. Returns 1=alive, 0=no such, -1=not permitted, -2=error.
+_os_process_alive(int pid) int `extern("promise_os_process_alive");
+
+// Returns a comparable integer for when the process started. -1 on failure.
+_os_process_start_time(int pid) int `extern("promise_os_process_start_time");
+
+// Sends a signal to a process group. Returns 0 on success, -1 on error.
+_os_kill_group(int pgid_or_handle, int signum) int `extern("promise_os_kill_group");
+
+// Returns the process group handle from the most recent spawn with flags & 1.
+_os_spawn_job_handle() int `extern("promise_os_spawn_job_handle");
 
 type OsError is error `public `doc("An operating system error.") {
   int code;
@@ -203,15 +218,60 @@ type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe.
   }
 }
 
-type Process `public `doc("A running subprocess with piped stdin, stdout, and stderr. Created via Process.spawn(). Pipe handles are obtained via take_stdin(), take_stdout(), and take_stderr(), which transfer ownership of the pipe out of the Process. The Process must be waited on (or dropped) to avoid zombie processes.") {
+type ProcessRef `public `doc("A reference to a running process, obtained by its process ID. Use ProcessRef.attach() to create a reference to an existing process you did not start. This attach is non-invasive — it does not ptrace, stop, or notify the target process. ProcessRef exposes observation (id, start_time, is_alive) and signalling (signal!). It does not support waiting for exit or accessing the process's pipes — those require Process, which is returned by spawn().") {
   int _pid;
+  int _start_time;
+
+  attach!(int pid) Self `factory `public `doc("Attaches to an existing process by its operating system process ID. Verifies the process exists and is accessible. Raises an OsError if the process does not exist (ESRCH) or if the caller lacks permission to query it (EPERM). This attach is non-invasive: it does not send any signal, stop, or otherwise notify the target process.") {
+    int rc = _os_process_alive(pid);
+    if rc == 0 {
+      raise OsError(code: 3, message: "no such process");
+    }
+    if rc < 0 {
+      raise OsError(code: 1, message: "operation not permitted");
+    }
+    int start = _os_process_start_time(pid);
+    return ProcessRef(_pid: pid, _start_time: start);
+  }
+
+  get id int `public `doc("Returns the operating system process ID.") => this._pid;
+
+  get start_time int `public `doc("Returns a comparable integer representing when the process started. The value is platform-specific (clock ticks on Linux, seconds since epoch on macOS, FILETIME on Windows) and meaningful only for comparison with other start_time values from the same host and boot session. Returns -1 if the start time could not be determined.") => this._start_time;
+
+  get is_alive bool `public `doc("Returns true if the process is still running and is the same process that was originally attached to (guards against pid reuse by comparing start times). Returns false if the process has exited, the pid has been reused, or the process cannot be queried.") {
+    int rc = _os_process_alive(this._pid);
+    if rc <= 0 {
+      return false;
+    }
+    // Guard against pid reuse by comparing start times
+    if this._start_time > 0 {
+      int current = _os_process_start_time(this._pid);
+      if current != this._start_time {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  signal!(~this, Signal sig) `public `doc("Sends a signal to the process. Use Signal.Terminate for a graceful shutdown request, Signal.Interrupt for Ctrl+C equivalent, or Signal.Hangup. For forceful termination, use Process.kill() on a Process you spawned. Raises an error if the signal cannot be sent (e.g., the process has exited or the caller lacks permission). On Windows, graceful signals to foreign processes are not supported — the process is terminated.") {
+    int signum = sig._to_posix_number();
+    int rc = _os_send_signal(this._pid, signum);
+    if rc < 0 {
+      raise OsError(code: 1, message: "failed to send signal to process");
+    }
+  }
+}
+
+type Process is ProcessRef `public `doc("A running subprocess with piped stdin, stdout, and stderr. Created via Process.spawn(). Pipe handles are obtained via take_stdin(), take_stdout(), and take_stderr(), which transfer ownership of the pipe out of the Process. The Process must be waited on (or dropped) to avoid zombie processes.") {
   int _stdin_fd;
   int _stdout_fd;
   int _stderr_fd;
   int _exit_code;
   bool _waited;
+  bool _has_process_group;
+  int _group_handle;
 
-  spawn!(string program, string[] args, map[string, string]? move environment, string? move working_directory) Self `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. By default the child inherits the parent environment and working directory. Pass environment to override the child environment (the map replaces the inherited environment entirely). Pass working_directory to run the child in a specific directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
+  spawn!(string program, string[] args, map[string, string]? move environment, string? move working_directory, bool new_process_group) Self `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. By default the child inherits the parent environment and working directory. Pass environment to override the child environment (the map replaces the inherited environment entirely). Pass working_directory to run the child in a specific directory. When new_process_group is true, the child is placed in its own process group (POSIX) or job object (Windows), so that signal_group() can signal the child and all its descendants together. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
     string[] env_entries = [];
     int has_env = 0;
     if env_map := environment {
@@ -228,11 +288,20 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
       has_cwd = 1;
       cwd = dir;
     }
-    int pid = _os_spawn_streaming_env(program, args, env_entries, has_env, cwd, has_cwd);
+    int flags = 0;
+    if new_process_group {
+      flags = 1;
+    }
+    int pid = _os_spawn_streaming_env(program, args, env_entries, has_env, cwd, has_cwd, flags);
     int stdin_fd = _os_spawn_stdin_fd();
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
-    return Process(_pid: pid, _stdin_fd: stdin_fd, _stdout_fd: stdout_fd, _stderr_fd: stderr_fd, _exit_code: 0, _waited: false);
+    int group_handle = 0;
+    if new_process_group {
+      group_handle = _os_spawn_job_handle();
+    }
+    int start = _os_process_start_time(pid);
+    return Process(_pid: pid, _start_time: start, _stdin_fd: stdin_fd, _stdout_fd: stdout_fd, _stderr_fd: stderr_fd, _exit_code: 0, _waited: false, _has_process_group: new_process_group, _group_handle: group_handle);
   }
 
   take_stdin!(~this) ProcessInput `public `doc("Transfers ownership of the stdin pipe out of the Process. Returns a ProcessInput handle that satisfies the Writer structural interface. Raises an error if the stdin pipe has already been taken or closed.") {
@@ -284,7 +353,15 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
     }
   }
 
-  get id int `public `doc("Returns the operating system process ID of the child process.") => this._pid;
+  signal_group!(~this, Signal sig) `public `doc("Sends a signal to the child process and all of its descendants. Requires the process to have been spawned with new_process_group: true. On POSIX, sends the signal to the process group via kill(-pgid, sig). On Windows, terminates the job object. Raises an error if the process was not spawned with a process group or if the signal cannot be sent.") {
+    if !this._has_process_group {
+      raise OsError(code: 22, message: "process was not spawned with a process group");
+    }
+    int rc = _os_kill_group(this._group_handle, sig._to_posix_number());
+    if rc < 0 {
+      raise OsError(code: 1, message: "failed to send signal to process group");
+    }
+  }
 
   drop(~this) {
     // Close any remaining pipe fds

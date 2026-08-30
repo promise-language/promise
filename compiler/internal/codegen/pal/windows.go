@@ -2583,6 +2583,14 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	i32PtrType := irtypes.NewPointer(irtypes.I32)
 	negOne32 := constant.NewInt(irtypes.I32, -1)
 
+	createJobObject := getOrDeclareFunc(module, "CreateJobObjectA", irtypes.I8Ptr,
+		ir.NewParam("lpJobAttributes", irtypes.I8Ptr),
+		ir.NewParam("lpName", irtypes.I8Ptr))
+	assignProcessToJob := getOrDeclareFunc(module, "AssignProcessToJobObject", irtypes.I32,
+		ir.NewParam("hJob", irtypes.I8Ptr),
+		ir.NewParam("hProcess", irtypes.I8Ptr))
+	jobHandleGlobal := getOrCreateJobHandleGlobal(module)
+
 	fn := module.NewFunc("pal_spawn_streaming_env", irtypes.I32,
 		ir.NewParam("program", irtypes.I8Ptr),
 		ir.NewParam("argv", i8PtrPtrType),
@@ -2590,7 +2598,8 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 		ir.NewParam("cwd", irtypes.I8Ptr),
 		ir.NewParam("out_stdin_fd", i32PtrType),
 		ir.NewParam("out_stdout_fd", i32PtrType),
-		ir.NewParam("out_stderr_fd", i32PtrType))
+		ir.NewParam("out_stderr_fd", i32PtrType),
+		ir.NewParam("flags", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	envpParam := fn.Params[2]
@@ -2598,6 +2607,7 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	outStdin := fn.Params[4]
 	outStdout := fn.Params[5]
 	outStderr := fn.Params[6]
+	flagsParam := fn.Params[7]
 
 	storeErrorFds := func(blk *ir.Block) {
 		blk.NewStore(negOne32, outStdin)
@@ -2678,13 +2688,22 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 
 	siPtr := stderrPipeOk.NewBitCast(siAlloca, irtypes.I8Ptr)
 	piPtr := stderrPipeOk.NewBitCast(piAlloca, irtypes.I8Ptr)
+
+	// If flags & 1, add CREATE_NEW_PROCESS_GROUP (0x200) to dwCreationFlags
+	hasGroup := stderrPipeOk.NewAnd(flagsParam, constant.NewInt(irtypes.I32, 1))
+	needGroup := stderrPipeOk.NewICmp(enum.IPredNE, hasGroup, constant.NewInt(irtypes.I32, 0))
+	// CREATE_NEW_PROCESS_GROUP = 0x200
+	creationFlags := stderrPipeOk.NewSelect(needGroup,
+		constant.NewInt(irtypes.I32, 0x200),
+		constant.NewInt(irtypes.I32, 0))
+
 	cpRet := stderrPipeOk.NewCall(createProcessA,
 		constant.NewNull(irtypes.I8Ptr),
 		cmdline,
 		constant.NewNull(irtypes.I8Ptr),
 		constant.NewNull(irtypes.I8Ptr),
 		constant.NewInt(irtypes.I32, 1),
-		constant.NewInt(irtypes.I32, 0),
+		creationFlags,
 		envBlock, // lpEnvironment (NULL → inherit)
 		cwdParam, // lpCurrentDirectory (NULL → inherit)
 		siPtr, piPtr)
@@ -2712,21 +2731,35 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	cpOkBlk.NewCall(closeHandle, hThread)
 	freeTemps(cpOkBlk)
 
-	// Pack HANDLEs into i32: parent writes to stdin, reads from stdout/stderr
-	stdinWriteI64 := cpOkBlk.NewPtrToInt(stdinWrite, irtypes.I64)
-	stdinWriteI32 := cpOkBlk.NewTrunc(stdinWriteI64, irtypes.I32)
-	cpOkBlk.NewStore(stdinWriteI32, outStdin)
-	stdoutReadI64 := cpOkBlk.NewPtrToInt(stdoutRead, irtypes.I64)
-	stdoutReadI32 := cpOkBlk.NewTrunc(stdoutReadI64, irtypes.I32)
-	cpOkBlk.NewStore(stdoutReadI32, outStdout)
-	stderrReadI64 := cpOkBlk.NewPtrToInt(stderrRead, irtypes.I64)
-	stderrReadI32 := cpOkBlk.NewTrunc(stderrReadI64, irtypes.I32)
-	cpOkBlk.NewStore(stderrReadI32, outStderr)
-
+	// If flags & 1, create a job object and assign the child to it
 	hProcess := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 0)
-	hProcessI64 := cpOkBlk.NewPtrToInt(hProcess, irtypes.I64)
-	hProcessI32 := cpOkBlk.NewTrunc(hProcessI64, irtypes.I32)
-	cpOkBlk.NewRet(hProcessI32)
+	cpNeedJob := cpOkBlk.NewICmp(enum.IPredNE, hasGroup, constant.NewInt(irtypes.I32, 0))
+	jobBlk := fn.NewBlock(".create_job")
+	noJobBlk := fn.NewBlock(".no_job")
+	cpOkBlk.NewCondBr(cpNeedJob, jobBlk, noJobBlk)
+
+	// Create job object, assign process, store handle
+	jobHandle := jobBlk.NewCall(createJobObject, constant.NewNull(irtypes.I8Ptr), constant.NewNull(irtypes.I8Ptr))
+	jobBlk.NewCall(assignProcessToJob, jobHandle, hProcess)
+	jobHandleI64 := jobBlk.NewPtrToInt(jobHandle, irtypes.I64)
+	jobHandleI32 := jobBlk.NewTrunc(jobHandleI64, irtypes.I32)
+	jobBlk.NewStore(jobHandleI32, jobHandleGlobal)
+	jobBlk.NewBr(noJobBlk)
+
+	// Pack HANDLEs into i32: parent writes to stdin, reads from stdout/stderr
+	stdinWriteI64 := noJobBlk.NewPtrToInt(stdinWrite, irtypes.I64)
+	stdinWriteI32 := noJobBlk.NewTrunc(stdinWriteI64, irtypes.I32)
+	noJobBlk.NewStore(stdinWriteI32, outStdin)
+	stdoutReadI64 := noJobBlk.NewPtrToInt(stdoutRead, irtypes.I64)
+	stdoutReadI32 := noJobBlk.NewTrunc(stdoutReadI64, irtypes.I32)
+	noJobBlk.NewStore(stdoutReadI32, outStdout)
+	stderrReadI64 := noJobBlk.NewPtrToInt(stderrRead, irtypes.I64)
+	stderrReadI32 := noJobBlk.NewTrunc(stderrReadI64, irtypes.I32)
+	noJobBlk.NewStore(stderrReadI32, outStderr)
+
+	hProcessI64 := noJobBlk.NewPtrToInt(hProcess, irtypes.I64)
+	hProcessI32 := noJobBlk.NewTrunc(hProcessI64, irtypes.I32)
+	noJobBlk.NewRet(hProcessI32)
 
 	return fn
 }
@@ -4470,5 +4503,189 @@ func (p *WindowsPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
 
 	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// --- Process supervision (T1529) ---
+
+// EmitProcessAlive defines @pal_process_alive(i32 pid) → i32
+// Uses OpenProcess + GetExitCodeProcess to check liveness.
+// Returns: 1 = alive, 0 = no such process, -1 = not permitted, -2 = other error.
+func (p *WindowsPAL) EmitProcessAlive(module *ir.Module) *ir.Func {
+	openProcess := getOrDeclareFunc(module, "OpenProcess", irtypes.I8Ptr,
+		ir.NewParam("dwDesiredAccess", irtypes.I32),
+		ir.NewParam("bInheritHandle", irtypes.I32),
+		ir.NewParam("dwProcessId", irtypes.I32))
+	getExitCode := getOrDeclareFunc(module, "GetExitCodeProcess", irtypes.I32,
+		ir.NewParam("hProcess", irtypes.I8Ptr),
+		ir.NewParam("lpExitCode", irtypes.NewPointer(irtypes.I32)))
+	closeHandle := winDeclareCloseHandle(module)
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+
+	fn := module.NewFunc("pal_process_alive", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+
+	entry := fn.NewBlock(".entry")
+	// PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+	handle := entry.NewCall(openProcess, constant.NewInt(irtypes.I32, 0x1000), zero32, fn.Params[0])
+	isNull := entry.NewICmp(enum.IPredEQ, handle, constant.NewNull(irtypes.I8Ptr))
+	openFailBlk := fn.NewBlock(".open_fail")
+	openOkBlk := fn.NewBlock(".open_ok")
+	entry.NewCondBr(isNull, openFailBlk, openOkBlk)
+
+	// OpenProcess failed — check GetLastError
+	errCode := openFailBlk.NewCall(getLastError)
+	// ERROR_INVALID_PARAMETER (87) = no such process; ERROR_ACCESS_DENIED (5) = not permitted
+	isInvalid := openFailBlk.NewICmp(enum.IPredEQ, errCode, constant.NewInt(irtypes.I32, 87))
+	noSuchBlk := fn.NewBlock(".no_such")
+	checkDenied := fn.NewBlock(".check_denied")
+	openFailBlk.NewCondBr(isInvalid, noSuchBlk, checkDenied)
+
+	noSuchBlk.NewRet(zero32)
+
+	isDenied := checkDenied.NewICmp(enum.IPredEQ, errCode, constant.NewInt(irtypes.I32, 5))
+	notPermBlk := fn.NewBlock(".not_perm")
+	otherBlk := fn.NewBlock(".other")
+	checkDenied.NewCondBr(isDenied, notPermBlk, otherBlk)
+
+	notPermBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	otherBlk.NewRet(constant.NewInt(irtypes.I32, -2))
+
+	// Handle opened — check exit code
+	exitCodePtr := openOkBlk.NewAlloca(irtypes.I32)
+	openOkBlk.NewStore(zero32, exitCodePtr)
+	openOkBlk.NewCall(getExitCode, handle, exitCodePtr)
+	openOkBlk.NewCall(closeHandle, handle)
+	exitCode := openOkBlk.NewLoad(irtypes.I32, exitCodePtr)
+	// STILL_ACTIVE = 259
+	isActive := openOkBlk.NewICmp(enum.IPredEQ, exitCode, constant.NewInt(irtypes.I32, 259))
+	activeBlk := fn.NewBlock(".active")
+	deadBlk := fn.NewBlock(".dead")
+	openOkBlk.NewCondBr(isActive, activeBlk, deadBlk)
+
+	activeBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+	deadBlk.NewRet(zero32)
+
+	return fn
+}
+
+// EmitProcessStartTime defines @pal_process_start_time(i32 pid) → i64
+// Uses OpenProcess + GetProcessTimes → lpCreationTime (FILETIME as i64).
+func (p *WindowsPAL) EmitProcessStartTime(module *ir.Module) *ir.Func {
+	openProcess := getOrDeclareFunc(module, "OpenProcess", irtypes.I8Ptr,
+		ir.NewParam("dwDesiredAccess", irtypes.I32),
+		ir.NewParam("bInheritHandle", irtypes.I32),
+		ir.NewParam("dwProcessId", irtypes.I32))
+	// BOOL GetProcessTimes(HANDLE, LPFILETIME creation, LPFILETIME exit, LPFILETIME kernel, LPFILETIME user)
+	getProcessTimes := getOrDeclareFunc(module, "GetProcessTimes", irtypes.I32,
+		ir.NewParam("hProcess", irtypes.I8Ptr),
+		ir.NewParam("lpCreationTime", irtypes.I8Ptr),
+		ir.NewParam("lpExitTime", irtypes.I8Ptr),
+		ir.NewParam("lpKernelTime", irtypes.I8Ptr),
+		ir.NewParam("lpUserTime", irtypes.I8Ptr))
+	closeHandle := winDeclareCloseHandle(module)
+
+	fn := module.NewFunc("pal_process_start_time", irtypes.I64,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	negOne64 := constant.NewInt(irtypes.I64, -1)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+
+	entry := fn.NewBlock(".entry")
+	// PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+	handle := entry.NewCall(openProcess, constant.NewInt(irtypes.I32, 0x1000), zero32, fn.Params[0])
+	isNull := entry.NewICmp(enum.IPredEQ, handle, constant.NewNull(irtypes.I8Ptr))
+	failBlk := fn.NewBlock(".fail")
+	okBlk := fn.NewBlock(".ok")
+	entry.NewCondBr(isNull, failBlk, okBlk)
+
+	failBlk.NewRet(negOne64)
+
+	// Allocate 4 FILETIMEs (8 bytes each = 32 bytes total)
+	ftBuf := okBlk.NewAlloca(irtypes.NewArray(32, irtypes.I8))
+	ftPtr := okBlk.NewBitCast(ftBuf, irtypes.I8Ptr)
+	// creation at offset 0, exit at offset 8, kernel at offset 16, user at offset 24
+	exitPtr := okBlk.NewGetElementPtr(irtypes.NewArray(32, irtypes.I8), ftBuf,
+		constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, 8))
+	exitPtrI8 := okBlk.NewBitCast(exitPtr, irtypes.I8Ptr)
+	kernelPtr := okBlk.NewGetElementPtr(irtypes.NewArray(32, irtypes.I8), ftBuf,
+		constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, 16))
+	kernelPtrI8 := okBlk.NewBitCast(kernelPtr, irtypes.I8Ptr)
+	userPtr := okBlk.NewGetElementPtr(irtypes.NewArray(32, irtypes.I8), ftBuf,
+		constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, 24))
+	userPtrI8 := okBlk.NewBitCast(userPtr, irtypes.I8Ptr)
+
+	rc := okBlk.NewCall(getProcessTimes, handle, ftPtr, exitPtrI8, kernelPtrI8, userPtrI8)
+	okBlk.NewCall(closeHandle, handle)
+
+	isFail := okBlk.NewICmp(enum.IPredEQ, rc, zero32)
+	failBlk2 := fn.NewBlock(".fail2")
+	readBlk := fn.NewBlock(".read")
+	okBlk.NewCondBr(isFail, failBlk2, readBlk)
+
+	failBlk2.NewRet(negOne64)
+
+	// Read creation time as i64 (FILETIME is two i32: low, high)
+	creationI64Ptr := readBlk.NewBitCast(ftPtr, irtypes.NewPointer(irtypes.I64))
+	creation := readBlk.NewLoad(irtypes.I64, creationI64Ptr)
+	readBlk.NewRet(creation)
+
+	return fn
+}
+
+// EmitKillGroup defines @pal_kill_group(i32 handle, i32 signal) → i32
+// Windows: TerminateJobObject(handle, 1).
+func (p *WindowsPAL) EmitKillGroup(module *ir.Module) *ir.Func {
+	terminateJobObject := getOrDeclareFunc(module, "TerminateJobObject", irtypes.I32,
+		ir.NewParam("hJob", irtypes.I8Ptr),
+		ir.NewParam("uExitCode", irtypes.I32))
+	closeHandle := winDeclareCloseHandle(module)
+	_ = closeHandle
+
+	fn := module.NewFunc("pal_kill_group", irtypes.I32,
+		ir.NewParam("handle", irtypes.I32),
+		ir.NewParam("signal", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	// Unpack i32 handle to i8*
+	handlePtr := winI32ToHandle(entry, fn.Params[0])
+	rc := entry.NewCall(terminateJobObject, handlePtr, constant.NewInt(irtypes.I32, 1))
+	isFail := entry.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isFail, errBlk, okBlk)
+
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	return fn
+}
+
+// getOrCreateJobHandleGlobal returns the @__pal_spawn_job_handle global, creating it if needed.
+func getOrCreateJobHandleGlobal(module *ir.Module) *ir.Global {
+	for _, g := range module.Globals {
+		if g.Name() == "__pal_spawn_job_handle" {
+			return g
+		}
+	}
+	g := module.NewGlobalDef("__pal_spawn_job_handle", constant.NewInt(irtypes.I32, 0))
+	return g
+}
+
+// EmitSpawnJobHandle defines @pal_spawn_job_handle() → i32
+// Returns the job object handle stored by the most recent spawn with flags & 1.
+func (p *WindowsPAL) EmitSpawnJobHandle(module *ir.Module) *ir.Func {
+	jobGlobal := getOrCreateJobHandleGlobal(module)
+
+	fn := module.NewFunc("pal_spawn_job_handle", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	val := entry.NewLoad(irtypes.I32, jobGlobal)
+	entry.NewRet(val)
 	return fn
 }

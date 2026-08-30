@@ -275,6 +275,32 @@ type PAL interface {
 	// Fills buf with len bytes of cryptographically-secure random data from the OS.
 	// Returns 0 on success, -1 on error.
 	EmitCryptoRandomBytes(module *ir.Module) *ir.Func
+
+	// Process supervision (T1529)
+	// EmitProcessAlive defines @pal_process_alive(i32 pid) → i32
+	// Checks whether a process exists without sending it a signal.
+	// Returns: 1 = alive and accessible, 0 = no such process (ESRCH),
+	// -1 = exists but not permitted (EPERM), -2 = other error.
+	// POSIX: kill(pid, 0). Windows: OpenProcess + GetExitCodeProcess.
+	EmitProcessAlive(module *ir.Module) *ir.Func
+	// EmitProcessStartTime defines @pal_process_start_time(i32 pid) → i64
+	// Returns a comparable integer representing when the process started.
+	// Linux: /proc/<pid>/stat field 22 (starttime in clock ticks).
+	// macOS: proc_pidinfo PROC_PIDTBSDINFO → pbi_start_tvsec.
+	// Windows: GetProcessTimes → lpCreationTime (FILETIME as i64).
+	// Returns -1 if the process does not exist or cannot be queried.
+	EmitProcessStartTime(module *ir.Module) *ir.Func
+	// EmitKillGroup defines @pal_kill_group(i32 pgid_or_handle, i32 signal) → i32
+	// Sends a signal to a process group (POSIX) or terminates a job object (Windows).
+	// POSIX: kill(-pgid, signal). Windows: TerminateJobObject(handle, 1).
+	// Returns 0 on success, -1 on error.
+	EmitKillGroup(module *ir.Module) *ir.Func
+	// EmitSpawnJobHandle defines @pal_spawn_job_handle() → i32
+	// Returns the process group handle from the most recent spawn with flags & 1.
+	// POSIX: returns the child pid (pgid == pid after setpgid(0,0)).
+	// Windows: returns the packed job object HANDLE.
+	// Returns 0 if no process group was created.
+	EmitSpawnJobHandle(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -1539,7 +1565,8 @@ func emitStubSpawnStreamingEnv(module *ir.Module) *ir.Func {
 		ir.NewParam("cwd", irtypes.I8Ptr),
 		ir.NewParam("out_stdin_fd", i32PtrType),
 		ir.NewParam("out_stdout_fd", i32PtrType),
-		ir.NewParam("out_stderr_fd", i32PtrType))
+		ir.NewParam("out_stderr_fd", i32PtrType),
+		ir.NewParam("flags", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[4])
@@ -1557,6 +1584,48 @@ func emitStubKill(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// --- Stub process supervision implementations (T1529) ---
+
+// emitStubProcessAlive returns -2 (unsupported).
+func emitStubProcessAlive(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_process_alive", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -2))
+	return fn
+}
+
+// emitStubProcessStartTime returns -1 (unsupported).
+func emitStubProcessStartTime(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_process_start_time", irtypes.I64,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubKillGroup returns -1 (unsupported).
+func emitStubKillGroup(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_kill_group", irtypes.I32,
+		ir.NewParam("pgid", irtypes.I32),
+		ir.NewParam("signal", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubSpawnJobHandle returns 0 (no process group support).
+func emitStubSpawnJobHandle(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_spawn_job_handle", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }
 

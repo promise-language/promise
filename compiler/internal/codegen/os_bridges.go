@@ -122,6 +122,19 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_get_pid"]; ok {
 		c.defineGetPidBody(fn)
 	}
+	// Process supervision (T1529)
+	if fn, ok := irFuncByName["promise_os_process_alive"]; ok {
+		c.defineProcessAliveBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_process_start_time"]; ok {
+		c.defineProcessStartTimeBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_kill_group"]; ok {
+		c.defineKillGroupBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_spawn_job_handle"]; ok {
+		c.defineSpawnJobHandleBody(fn)
+	}
 }
 
 // defineGetEnvBody: void @promise_os_get_env(i8* sret, i8* name)
@@ -1546,10 +1559,11 @@ func (c *Compiler) defineSpawnEnvBody(fn *ir.Func) {
 	errorBlk.NewRet(nil)
 }
 
-// defineSpawnStreamingEnvBody: void @promise_os_spawn_streaming_env(i8* sret, i8* program, i8* args_vec, i8* env_entries_vec, i8* has_env_int, i8* cwd_str, i8* has_cwd_int)
+// defineSpawnStreamingEnvBody: void @promise_os_spawn_streaming_env(i8* sret, i8* program, i8* args_vec, i8* env_entries_vec, i8* has_env_int, i8* cwd_str, i8* has_cwd_int, i8* flags_int)
 // Like defineSpawnStreamingBody but with optional envp and cwd parameters.
 // env_entries_vec is a string[] of "KEY=VALUE" entries. has_env is int (0=inherit, 1=use env_entries).
 // cwd_str is a string path. has_cwd is int (0=inherit, 1=use cwd).
+// flags is int (bit 0: create new process group).
 // Calls pal_spawn_streaming_env, caches all 3 pipe fds in TLS globals, returns int! (pid).
 func (c *Compiler) defineSpawnStreamingEnvBody(fn *ir.Func) {
 	zero32 := constant.NewInt(irtypes.I32, 0)
@@ -1568,6 +1582,7 @@ func (c *Compiler) defineSpawnStreamingEnvBody(fn *ir.Func) {
 	hasEnvParam := fn.Params[4]     // int value (0=inherit, 1=use env_entries)
 	cwdParam := fn.Params[5]        // string value pointer (i8*)
 	hasCwdParam := fn.Params[6]     // int value (0=inherit, 1=use cwd)
+	flagsParam := fn.Params[7]      // int value (bit 0: create new process group)
 
 	// Compute failable result type: {i1, intValueType, i8*} for int!
 	innerType := c.resolveType(types.TypInt)
@@ -1697,7 +1712,10 @@ func (c *Compiler) defineSpawnStreamingEnvBody(fn *ir.Func) {
 	finalCwd := spawnBlk.NewLoad(irtypes.I8Ptr, cwdCStrAlloca)
 
 	c.emitEnterSyscall(spawnBlk)
-	spawnPid := spawnBlk.NewCall(c.palSpawnStreamingEnv, programCStr, argv, finalEnvp, finalCwd, outStdinFd, outStdoutFd, outStderrFd)
+	// Extract flags as i32 for the PAL call
+	flagsRaw := c.extractRawInt(spawnBlk, flagsParam)
+	flagsI32 := spawnBlk.NewTrunc(flagsRaw, irtypes.I32)
+	spawnPid := spawnBlk.NewCall(c.palSpawnStreamingEnv, programCStr, argv, finalEnvp, finalCwd, outStdinFd, outStdoutFd, outStderrFd, flagsI32)
 	c.emitExitSyscall(spawnBlk)
 
 	// Cache all 3 fds in TLS globals
@@ -1787,4 +1805,65 @@ func (c *Compiler) defineSpawnStreamingEnvBody(fn *ir.Func) {
 	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to spawn process")
 	c.storeFailableError(errorBlk, sret, errInst, resultType)
 	errorBlk.NewRet(nil)
+}
+
+// --- Process supervision bridges (T1529) ---
+
+// defineProcessAliveBody: void @promise_os_process_alive(i8* sret, i8* pid)
+// Checks whether a process exists. Returns int: 1=alive, 0=no such, -1=not permitted, -2=error.
+func (c *Compiler) defineProcessAliveBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	pidRaw := c.extractRawInt(entry, fn.Params[1])
+	pidI32 := entry.NewTrunc(pidRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palProcessAlive, pidI32)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
+}
+
+// defineProcessStartTimeBody: void @promise_os_process_start_time(i8* sret, i8* pid)
+// Returns a comparable integer for when the process started. -1 on failure.
+func (c *Compiler) defineProcessStartTimeBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	pidRaw := c.extractRawInt(entry, fn.Params[1])
+	pidI32 := entry.NewTrunc(pidRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palProcessStartTime, pidI32)
+	c.storeIntResult(entry, sret, rc)
+	entry.NewRet(nil)
+}
+
+// defineKillGroupBody: void @promise_os_kill_group(i8* sret, i8* pgid, i8* signum)
+// Sends a signal to a process group. Returns 0 on success, -1 on error.
+func (c *Compiler) defineKillGroupBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	pgidRaw := c.extractRawInt(entry, fn.Params[1])
+	pgidI32 := entry.NewTrunc(pgidRaw, irtypes.I32)
+
+	sigRaw := c.extractRawInt(entry, fn.Params[2])
+	sigI32 := entry.NewTrunc(sigRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palKillGroup, pgidI32, sigI32)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
+}
+
+// defineSpawnJobHandleBody: void @promise_os_spawn_job_handle(i8* sret)
+// Returns the process group handle from the most recent spawn with flags & 1.
+func (c *Compiler) defineSpawnJobHandleBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	rc := entry.NewCall(c.palSpawnJobHandle)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
 }

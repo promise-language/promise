@@ -3,6 +3,7 @@ package module
 import (
 	"bytes"
 	"crypto/sha256"
+	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -374,10 +375,48 @@ var (
 // matches the window cmd/internal/buildid reads for the same purpose.
 const compilerIdentityBytes = 32 * 1024
 
-// goBuildIDMarker precedes the Go build ID inside the binary. Every Go link
-// emits one, and its presence in the hashed window is the precondition that
-// makes hashing a prefix sound — see CompilerIdentity.
-var goBuildIDMarker = []byte("\xff Go build ID: \"")
+// goBuildIDRawMarker precedes the Go build ID when the linker has to store it
+// as data: the portable fallback it uses for formats with no note mechanism of
+// its own (Mach-O, PE), where the ID goes in as non-instruction bytes at the
+// start of the text segment. ELF gets a real note section instead and never
+// carries this marker — see buildIDInWindow.
+var goBuildIDRawMarker = []byte("\xff Go build ID: \"")
+
+// elfGoBuildIDSection is the SHT_NOTE section the Go linker emits on ELF
+// targets to hold the build ID.
+const elfGoBuildIDSection = ".note.go.buildid"
+
+// buildIDInWindow reports whether this binary's Go build ID lies inside the
+// hashed prefix — the precondition that makes hashing a prefix sound, since the
+// ID's trailing contentID is the toolchain's own hash of the whole binary (see
+// CompilerIdentity).
+//
+// Where the linker puts the ID depends on the object format, so looking for one
+// shape finds nothing on the others (T1870):
+//
+//   - ELF (Linux, BSD): a real SHT_NOTE section, ".note.go.buildid", holding the
+//     ID as raw note data with no marker around it. It sits among the leading
+//     headers, a few kB in.
+//   - Mach-O, PE: no note mechanism the linker can use, so the ID is written as
+//     data at the start of the text segment, wrapped in goBuildIDRawMarker.
+//
+// buf is the window that will be hashed, already read from f.
+func buildIDInWindow(f *os.File, buf []byte) bool {
+	if bytes.HasPrefix(buf, []byte("\x7fELF")) {
+		ef, err := elf.NewFile(f)
+		if err != nil {
+			return false
+		}
+		sec := ef.Section(elfGoBuildIDSection)
+		if sec == nil || sec.Type != elf.SHT_NOTE || sec.Size == 0 {
+			return false
+		}
+		// Inside the window means those bytes are part of what we hash; a note
+		// past it would leave the hash describing headers alone.
+		return sec.Offset+sec.Size <= uint64(len(buf))
+	}
+	return bytes.Contains(buf, goBuildIDRawMarker)
+}
 
 // CompilerIdentity returns a stable 128-bit fingerprint of the running compiler
 // binary, as 32 hex characters: the SHA-256 of its first 32 KB, truncated. It is
@@ -394,14 +433,21 @@ var goBuildIDMarker = []byte("\xff Go build ID: \"")
 //
 //   - the Go build ID, whose trailing component is contentID — the toolchain's
 //     own hash of the finished binary, stored precisely so readers can identify
-//     it "with minimal I/O, instead of reading and hashing the entire file".
+//     it "with minimal I/O, instead of reading and hashing the entire file". It
+//     lands in the leading headers either way, though in a shape that differs
+//     per object format — see buildIDInWindow.
 //   - on Mach-O, LC_UUID, which the linker derives from the output.
 //
-// Measured: two binaries differing only in a same-size payload 660 KB deep —
-// identical file size, so no header offsets shift — differ in 91 bytes within
-// the first 32 KB (75 in the build ID, 16 in LC_UUID). A cold-cache rebuild of
-// an unchanged tree reproduces the binary byte for byte, so identity is stable
-// across rebuilds and caches survive them.
+// Measured, on binaries differing only in a same-size payload deep inside them
+// — identical file size, so no header offsets shift:
+//
+//   - Mach-O, payload 660 KB deep: 91 bytes differ within the first 32 KB (75 in
+//     the build ID, 16 in LC_UUID).
+//   - ELF, payload 700 KB deep: 97 bytes differ within the first 32 KB (77 in
+//     .note.go.buildid, 20 in .note.gnu.build-id), and nowhere else in it.
+//
+// A cold-cache rebuild of an unchanged tree reproduces the binary byte for byte,
+// so identity is stable across rebuilds and caches survive them.
 //
 // A missing marker is treated as a fatal bug, NOT as a reason to fall back to
 // hashing the whole file. Falling back would be a second code path taken only
@@ -453,10 +499,8 @@ func compilerIdentityOf(path string) (string, error) {
 	}
 	buf = buf[:n]
 
-	if !bytes.Contains(buf, goBuildIDMarker) {
-		return "", fmt.Errorf("no Go build ID in the first %d bytes of %s: the "+
-			"identity would then describe only headers, and two different "+
-			"compilers could share it", compilerIdentityBytes, path)
+	if !buildIDInWindow(f, buf) {
+		return "", fmt.Errorf("no Go build ID in the first %d bytes of %s", compilerIdentityBytes, path)
 	}
 
 	sum := sha256.Sum256(buf)

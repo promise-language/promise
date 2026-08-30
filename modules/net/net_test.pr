@@ -425,15 +425,13 @@ test_resolve_invalid_name_raises() `test(exclude: wasm) {
 
 // ResolveError inherits NetError, so code that already catches NetError — the
 // http and tls modules, and any user code written before T1518 — keeps catching
-// resolution failures unchanged. This is a compile-time proof of that relation:
-// sema type-checks the conversion and the function is never called.
-//
-// The natural runtime form of this test, `resolve(bad)? e is NetError { }`,
-// cannot be written yet: T1702 makes a typed catch at a *supertype* drop only
-// the declared type's fields, so it leaks ResolveError.host. Restore the runtime
-// version when T1702 is fixed.
-_resolve_error_is_a_net_error(ResolveError move e) NetError {
-  return e;
+// resolution failures unchanged.
+test_resolve_error_is_net_error() `test(exclude: wasm) {
+  bool raised = false;
+  resolve(_over_long_host())? e is NetError {
+    raised = true;
+  }!;
+  assert(raised, "ResolveError must be catchable as NetError");
 }
 
 // Connect by name. The raw server socket is bound to 127.0.0.1 and the client

@@ -1126,10 +1126,11 @@ func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca, conc
 		concreteNamed = types.TypError
 	}
 
-	// B0226: For untyped catches where the concrete type is the base error type,
-	// use RTTI-based dispatch to call the actual error subtype's drop at runtime.
-	// This handles cases like GenericError[Point] caught via untyped `? e { ... }`.
-	if concreteNamed == types.TypError {
+	// B0226/T1702: Use RTTI-based dispatch when the catch type may not match the
+	// runtime type — either the base `error` type (untyped catches) or any
+	// polymorphic supertype that subtypes can match via promise_type_is.
+	// This ensures the actual subtype's drop runs, freeing subtype-specific fields.
+	if concreteNamed == types.TypError || c.needsRttiDrop(concreteNamed) {
 		binding := scopeBinding{
 			kind:     bindingDrop,
 			alloca:   alloca,

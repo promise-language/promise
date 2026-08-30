@@ -1125,6 +1125,70 @@ func TestUntypedErrorRttiDrop(t *testing.T) {
 	codegentest.AssertContains(t, ir, "rtti.drop")
 }
 
+// T1702: Typed error catch at a supertype must use RTTI-based drop dispatch,
+// because the runtime type may be a subtype with additional droppable fields.
+func TestSupertypeErrorCatchRttiDrop(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Base is error { int code; }
+		type Derived is Base { string host; }
+		fail_derived!() void { raise Derived(code: 1, host: "h", message: "x"); }
+		main() {
+			fail_derived()? e is Base {
+			} else e2 { };
+		}
+	`)
+	// T1702: Catching at Base when Derived may be raised must use rtti.drop,
+	// not static Base.drop — ensures Derived.host is freed.
+	codegentest.AssertContains(t, ir, "rtti.drop")
+}
+
+// T1702: Leaf error type catch (no children) should still use the static drop
+// path — the RTTI dispatch is only needed for polymorphic types.
+// T1702: Leaf error type catch (no children) should still use the static drop
+// path for the match arm. The is-handler match block calls LeafErr.drop directly.
+func TestLeafErrorCatchStaticDrop(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type LeafErr is error { string detail; }
+		fail_leaf!() void { raise LeafErr(detail: "d", message: "x"); }
+		main() {
+			fail_leaf()? e is LeafErr {
+			} else e2 { };
+		}
+	`)
+	// The match arm drops via static LeafErr.drop (leaf type, no children).
+	codegentest.AssertContains(t, ir, "call void @LeafErr.drop")
+}
+
+// T1702: Three-level hierarchy — catching at the grandparent uses rtti.drop.
+func TestDeepHierarchyErrorCatchRttiDrop(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type NetErr is error { int code; }
+		type DnsErr is NetErr { string domain; }
+		type DnsTimeoutErr is DnsErr { string resolver; }
+		fail_deep!() void { raise DnsTimeoutErr(code: 1, domain: "x", resolver: "r", message: "t"); }
+		main() {
+			fail_deep()? e is NetErr {
+			} else e2 { };
+		}
+	`)
+	// Catching at NetErr (grandparent of DnsTimeoutErr) must use rtti.drop.
+	codegentest.AssertContains(t, ir, "rtti.drop")
+}
+
+// T1702: Supertype catch without a binding name still uses rtti.drop.
+func TestSupertypeErrorCatchNoBindingRttiDrop(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Base is error { int code; }
+		type Derived is Base { string host; }
+		fail_derived!() void { raise Derived(code: 1, host: "h", message: "x"); }
+		main() {
+			fail_derived()? is Base {
+			} else e2 { };
+		}
+	`)
+	codegentest.AssertContains(t, ir, "rtti.drop")
+}
+
 // B0325: Field access on a ?! unwrap result must track the intermediate heap instance.
 func TestFieldAccessOnErrorPanicResultTracked(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `

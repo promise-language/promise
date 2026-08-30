@@ -1,0 +1,138 @@
+// T1702: Typed error catch at a supertype must drop the actual runtime subtype's
+// fields, not just the declared catch type's fields.
+type Base is error {
+  int code;
+}
+type Derived is Base {
+  string host;
+}
+
+type Mid is error {
+  string tag;
+}
+type Leaf is Mid {
+  string detail;
+}
+
+_boom!() int {
+  raise Derived(code: 1, host: "abcdefghijklmnop".repeat(4), message: "x");
+}
+
+_boom_leaf!() int {
+  raise Leaf(tag: "net".repeat(10), detail: "timeout".repeat(10), message: "y");
+}
+
+t_exact() `test {
+  bool r = false;
+  _boom()? e is Derived {
+    r = true;
+  }!;
+  assert(r, "raised");
+}
+
+t_super() `test {
+  bool r = false;
+  _boom()? e is Base {
+    r = true;
+  }!;
+  assert(r, "raised");
+}
+
+t_root() `test {
+  bool r = false;
+  _boom()? e is error {
+    r = true;
+  }!;
+  assert(r, "raised");
+}
+
+t_super_no_binding() `test {
+  bool r = false;
+  _boom()? is Base {
+    r = true;
+  }!;
+  assert(r, "raised");
+}
+
+t_super_else() `test {
+  bool r1 = false;
+  bool r2 = false;
+  _boom()? e is Base {
+    r1 = true;
+  } else e2 {
+    r2 = true;
+  };
+  assert(r1, "caught at Base");
+  assert(!r2, "else not reached");
+}
+
+t_multi_level() `test {
+  bool r = false;
+  _boom_leaf()? e is error {
+    r = true;
+  }!;
+  assert(r, "caught at error");
+}
+
+t_multi_level_mid() `test {
+  bool r = false;
+  _boom_leaf()? e is Mid {
+    r = true;
+  }!;
+  assert(r, "caught at Mid");
+}
+
+// Three-level: GrandChild caught at grandparent Base.
+type GrandChild is Derived {
+  string extra;
+}
+
+_boom_grand!() int {
+  raise GrandChild(code: 2, host: "host".repeat(8), extra: "extra".repeat(8), message: "z");
+}
+
+t_grandparent_catch() `test {
+  bool r = false;
+  _boom_grand()? e is Base {
+    r = true;
+  }!;
+  assert(r, "GrandChild caught at Base");
+}
+
+t_grandparent_catch_root() `test {
+  bool r = false;
+  _boom_grand()? e is error {
+    r = true;
+  }!;
+  assert(r, "GrandChild caught at error");
+}
+
+// Field access inside supertype handler — reading e.code should work and
+// not interfere with drop of subtype fields.
+t_super_field_access() `test {
+  int c = _boom()? e is Base {
+    e.code;
+  }!;
+  assert(c == 1, "field access");
+}
+
+// Repeated supertype catches in a loop — ensures no accumulating leaks.
+t_super_in_loop() `test {
+  int i = 0;
+  while i < 10 {
+    _boom()? e is Base {
+    }!;
+    i += 1;
+  }
+  assert(i == 10, "loop completed");
+}
+
+// Leaf catch of Leaf via Mid (Mid has children) — Mid should use rtti.drop.
+t_mid_catch_leaf() `test {
+  bool r = false;
+  _boom_leaf()? e is Mid {
+    r = true;
+    assert(e.tag == "net".repeat(10), "field preserved");
+  }!;
+  assert(r, "Leaf caught at Mid");
+}

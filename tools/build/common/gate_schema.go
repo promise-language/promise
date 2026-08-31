@@ -21,7 +21,7 @@ machine-readable JSON. Run ` + "`bin/gate schema`" + ` to print this contract.
 | ` + "`wasm-web-test`" + ` | ` + "`wasm32-web`" + `  | yes (Promise tests) | ` + "`wasm_web_*`" + ` |
 | ` + "`go-test`" + `   | host           | yes (Go tests, grouped by package) | ` + "`go_test_*`" + ` |
 | ` + "`stress`" + `    | host           | no                 | ` + "`stress_*`" + ` |
-| ` + "`coverage`" + `  | host           | no                 | ` + "`*_coverage_pct`" + ` |
+| ` + "`coverage`" + `  | host           | no                 | ` + "`*_coverage_pct`" + `, ` + "`go_test_*`" + `, ` + "`promise_test_*`" + ` |
 | ` + "`wasm-size`" + ` | host           | no                 | ` + "`wasm_size_*`" + ` |
 
 Metric-only gates (` + "`stress`" + `, ` + "`coverage`" + `, ` + "`wasm-size`" + `) omit ` + "`files`" + `. Test gates
@@ -145,6 +145,13 @@ termination, since only a trailing partial line can be lost. Each line carries a
 **absolute** ` + "`file`" + `, plus ` + "`test`" + `, ` + "`status`" + `, ` + "`elapsed`" + `, and optional ` + "`context`" + `.
 The gate parses these, relativizes the paths, groups by file, and derives the
 metrics above.
+
+Under ` + "`-coverage`" + ` the same stream also carries one **coverage record** per
+file — ` + "`{\"kind\":\"coverage\",\"file\":…,\"covered\":N,\"total\":M}`" + ` — counting
+executed and total instrumented blocks. A coverage record has a ` + "`kind`" + ` and no
+test identity, so a reader keying on (` + "`file`" + `, ` + "`test`" + `) skips it and the two
+record kinds coexist on one stream. Only ` + "`bin/gate coverage`" + ` runs the runner
+this way; the test gates never pass ` + "`-coverage`" + `.
 
 A record's ` + "`context`" + ` is bounded (≈50 lines / 4 KB, with a ` + "`… (truncated)`" + `
 marker) before it enters the envelope. A failure that dumps a large body (e.g. a

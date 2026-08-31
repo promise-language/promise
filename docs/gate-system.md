@@ -268,7 +268,7 @@ Every `bin/gate` subcommand emits a single JSON envelope (`GateOutput`) on stdou
 | `wasm-web-test` | `wasm32-web`  | yes (Promise tests) | `wasm_web_*` |
 | `go-test`   | host           | yes (Go tests, grouped by package) | `go_test_*` |
 | `stress`    | host           | no                 | `stress_*` |
-| `coverage`  | host           | no                 | `*_coverage_pct` |
+| `coverage`  | host           | no                 | `*_coverage_pct`, `go_test_*`, `promise_test_*` |
 | `wasm-size` | host           | no                 | `wasm_size_*` |
 
 Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates populate it. The envelope shape is identical so the tracker ingests one schema.
@@ -359,6 +359,8 @@ Metrics are **derived by counting records**, so they always agree with the `file
 ### Runner stream (`promise test --json`)
 
 The gate is built on `promise test --json`, which streams one JSON record per line (newline-delimited JSON) as each test completes — robust to abrupt termination, since only a trailing partial line can be lost. Each line carries an **absolute** `file`, plus `test`, `status`, `elapsed`, and optional `context`. The gate parses these, relativizes the paths, groups by file, and derives the metrics above.
+
+Under `-coverage` the same stream also carries one **coverage record** per file — `{"kind":"coverage","file":…,"covered":N,"total":M}` — counting executed and total instrumented blocks. A coverage record has a `kind` and no test identity, so a reader keying on (`file`, `test`) skips it and the two record kinds coexist on one stream. Only `bin/gate coverage` runs the runner this way; the test gates never pass `-coverage`.
 
 A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)` marker) before it enters the envelope. A failure that dumps a large body (e.g. a Go test printing the full generated IR) would otherwise JSON-encode onto a single multi-MB line, which the runner's line-oriented drain cannot consume — deadlocking the gate to its wall-clock timeout (T0777). The full, untruncated output still reaches the gate's stderr/console log.
 

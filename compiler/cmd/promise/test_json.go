@@ -39,6 +39,18 @@ type testRecord struct {
 	Context string  `json:"context,omitempty"`
 }
 
+// coverageRecord is one file's block-coverage totals, emitted on the same
+// -json stream as the test records when -coverage is active. It carries a
+// "kind" and no test identity, so a consumer that keys records on (file, test)
+// skips it untouched and one stream serves both readers — the alternative, a
+// second output channel, would have to be correlated back to this run.
+type coverageRecord struct {
+	Kind    string `json:"kind"` // always "coverage"
+	File    string `json:"file"`
+	Covered int    `json:"covered"`
+	Total   int    `json:"total"`
+}
+
 // rosterMarkerPrefix tags the single roster line a child emits in --json mode.
 // It is parsed (and never echoed) by the parent; plain `promise test` runs do
 // not emit it, so humans never see it.
@@ -384,6 +396,12 @@ func writeTestRecords(w io.Writer, records []testRecord) {
 	for _, r := range records {
 		_ = enc.Encode(r) // Encode appends '\n'
 	}
+}
+
+// writeCoverageRecord serializes one coverage record as a JSON line on w,
+// alongside the test records written by writeTestRecords.
+func writeCoverageRecord(w io.Writer, rec coverageRecord) {
+	_ = json.NewEncoder(w).Encode(rec) // Encode appends '\n'
 }
 
 // absPath returns the absolute, forward-slash path for a test file. The runner

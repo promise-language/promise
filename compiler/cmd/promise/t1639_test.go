@@ -343,9 +343,16 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 	// Under the parent's env var the child clamps its own batch budget to stay
 	// below the backstop, so it — not the parent — is what kills the run, and
 	// it still has the roster in hand to name the tests that never reported.
-	run := func(t *testing.T, extra ...string) string {
+	//
+	// compileBudget is the process backstop for one run: it covers compile,
+	// spawn, and the wait for the binary's liveness signal. It has to outlast
+	// the slowest compile this subtest can produce. A compile that consumes the
+	// whole backstop leaves runTestProcess a 1s floor to see liveness, the
+	// binary is killed before it reaches main, and the run reports INCOMPLETE —
+	// "nothing ever ran" rather than the batch-budget TIMEOUT under test.
+	run := func(t *testing.T, compileBudget time.Duration, extra ...string) string {
 		t.Helper()
-		args := append([]string{"test", "-compile-timeout", "25s"}, extra...)
+		args := append([]string{"test", "-compile-timeout", compileBudget.String()}, extra...)
 		cmd := exec.Command(promiseBin, append(args, src)...)
 		cmd.Env = append(os.Environ(), testChildEnv+"=1")
 		start := time.Now()
@@ -354,7 +361,10 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected non-zero exit for a wedged batch.\nOutput:\n%s", combined)
 		}
-		if elapsed := time.Since(start); elapsed > 90*time.Second {
+		// The wedge itself must be bounded by the batch budget, which sits under
+		// the backstop — so the whole run cannot outlast the backstop by more
+		// than the slack the clamp leaves.
+		if elapsed := time.Since(start); elapsed > compileBudget+65*time.Second {
 			t.Errorf("run took %s — the batch budget did not bound the wedge.\nOutput:\n%s", elapsed, combined)
 		}
 		return combined
@@ -385,7 +395,7 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 		}
 	}
 
-	t.Run("plain", func(t *testing.T) { check(t, run(t)) })
+	t.Run("plain", func(t *testing.T) { check(t, run(t, 25*time.Second)) })
 
 	// The whole chain: the multi-file parent spawns the child with the env var,
 	// the child clamps its budget under the parent's backstop and reports the
@@ -448,7 +458,21 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 	})
 
 	t.Run("coverage", func(t *testing.T) {
-		combined := run(t, "-coverage")
+		// Coverage mode skips the instance cache and compiles instrumented IR,
+		// making it much the slowest compile here — on a machine running the
+		// whole Go suite under -coverpkg it has been measured at ~71s, against
+		// the 25s that is ample for the plain subtest. Give it a backstop that
+		// still leaves a real liveness window after a compile that slow.
+		combined := run(t, 120*time.Second, "-coverage")
+		if strings.Contains(combined, "tests did not run") {
+			// The binary was killed before it reached main, so no test got any
+			// time and there is no batch-budget behaviour to observe. That is a
+			// statement about how loaded the machine is, not about the runner —
+			// the same reason the multi-file subtest above skips. Not an error,
+			// but not a pass for this subtest either. The misleading rendering
+			// of that case is T1878.
+			t.Skip("test binary did not reach main within the backstop")
+		}
 		check(t, combined)
 		// Coverage from a truncated run is meaningless and is not printed —
 		// publishing a percentage computed from a batch that never finished

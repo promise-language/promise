@@ -2504,6 +2504,40 @@ func firstLines(s string, n int) string {
 	return strings.Join(lines, " | ")
 }
 
+// fileCoverage is one test file's block-coverage totals, parsed from the
+// "=== Coverage ===" trailer its child process prints under -coverage.
+type fileCoverage struct {
+	file    string
+	covered int
+	total   int
+}
+
+var covTotalRe = regexp.MustCompile(`^total: [\d.]+% \((\d+)/(\d+) blocks\)`)
+
+// splitCoverageSection removes the "=== Coverage ===" trailer from one child's
+// output and returns that file's block totals. ok is false when the child
+// printed no coverage section at all — it crashed, or failed to compile. That
+// is not a 0-of-0 measurement: a file that reported nothing must be left out of
+// the aggregate rather than counted as fully uncovered.
+func splitCoverageSection(output string) (clean string, covered, total int, ok bool) {
+	var cleanLines []string
+	inCovSection := false
+	for _, line := range strings.Split(output, "\n") {
+		if line == "=== Coverage ===" {
+			inCovSection = true
+			continue
+		}
+		if inCovSection {
+			if m := covTotalRe.FindStringSubmatch(line); m != nil {
+				covered, total, ok = atoi(m[1]), atoi(m[2]), true
+			}
+			continue // skip all coverage lines
+		}
+		cleanLines = append(cleanLines, line)
+	}
+	return strings.Join(cleanLines, "\n"), covered, total, ok
+}
+
 // buildChildTestArgs constructs the argument list (excluding the trailing test
 // file path) for a child `promise test` process spawned by runTestFiles. It is
 // extracted from the inline construction so the flag-forwarding logic — notably
@@ -2738,9 +2772,23 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	// below. A brief summary still goes to stderr.
 	if jsonMode {
 		counts := map[string]int{}
+		covCovered, covTotal := 0, 0
 		for i := range results {
 			<-results[i].done
 			r := &results[i]
+			// Under -coverage the child appends a coverage trailer; strip it
+			// before the records are built (it is not test output) and emit it
+			// as its own record on the same stream.
+			if coverageMode {
+				clean, covered, total, ok := splitCoverageSection(r.output)
+				r.output = clean
+				if ok {
+					covCovered, covTotal = covCovered+covered, covTotal+total
+					writeCoverageRecord(os.Stdout, coverageRecord{
+						Kind: "coverage", File: absPath(r.file), Covered: covered, Total: total,
+					})
+				}
+			}
 			recs := buildTestRecords(absPath(r.file), r.output, r.cmdErr != nil || r.timedOut)
 			writeTestRecords(os.Stdout, recs)
 			for _, rec := range recs {
@@ -2750,6 +2798,10 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		fmt.Fprintf(os.Stderr, "json: %d pass, %d fail, %d timeout, %d leak, %d memory, %d excluded, %d not-run (%d files, %.3fs)\n",
 			counts["pass"], counts["fail"], counts["timeout"], counts["leak"], counts["memory"],
 			counts["excluded"], counts["not-run"], len(results), time.Since(totalStart).Seconds())
+		if coverageMode && covTotal > 0 {
+			fmt.Fprintf(os.Stderr, "json: coverage %.1f%% (%d/%d blocks)\n",
+				float64(covCovered)/float64(covTotal)*100, covCovered, covTotal)
+		}
 		if counts["fail"]+counts["timeout"]+counts["leak"]+counts["memory"]+counts["not-run"] > 0 {
 			os.Exit(1)
 		}
@@ -2786,15 +2838,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	var staleTests []string
 	var reportRecords []reportTestRecord // T0749: passing batch tests for -report-json
 
-	// Coverage aggregation: collect per-file stats from subprocess formatted output.
-	// Each subprocess prints "total: X% (Y/Z blocks)" which we parse.
-	type fileCoverage struct {
-		file    string
-		covered int
-		total   int
-	}
+	// Coverage aggregation: collect per-file stats from subprocess formatted
+	// output (see splitCoverageSection).
 	var covFiles []fileCoverage
-	covTotalRe := regexp.MustCompile(`^total: [\d.]+% \((\d+)/(\d+) blocks\)`)
 
 	for i := range results {
 		<-results[i].done
@@ -2802,26 +2848,11 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 		// Extract coverage summary from subprocess output and strip coverage lines
 		if coverageMode {
-			var cleanLines []string
-			inCovSection := false
-			for _, line := range strings.Split(r.output, "\n") {
-				if line == "=== Coverage ===" {
-					inCovSection = true
-					continue
-				}
-				if inCovSection {
-					if m := covTotalRe.FindStringSubmatch(line); m != nil {
-						covFiles = append(covFiles, fileCoverage{
-							file:    r.file,
-							covered: atoi(m[1]),
-							total:   atoi(m[2]),
-						})
-					}
-					continue // skip all coverage lines
-				}
-				cleanLines = append(cleanLines, line)
+			clean, covered, total, ok := splitCoverageSection(r.output)
+			r.output = clean
+			if ok {
+				covFiles = append(covFiles, fileCoverage{file: r.file, covered: covered, total: total})
 			}
-			r.output = strings.Join(cleanLines, "\n")
 		}
 
 		// Skip files with no tests or excluded for this target

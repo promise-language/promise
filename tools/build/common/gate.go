@@ -424,24 +424,52 @@ func runGateCoverage(root string, args []string) error {
 	compilerDir := filepath.Join(root, "compiler")
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 
-	// Go coverage
-	fmt.Fprintf(os.Stderr, "Running Go coverage...\n")
+	// Go coverage. -coverpkg is what makes the number mean anything here: by
+	// default `go test` instruments only the package under test, so a suite
+	// living in a sibling package is credited to nothing. T1776 split codegen's
+	// and cmd/promise's suites into per-area packages for parallelism, and the
+	// measured total fell 71% -> 57.7% with no change in what the tests
+	// actually exercise (internal/codegen alone reads 54.6% self-measured
+	// against 86.7% with -coverpkg). Naming every package restores the
+	// attribution.
+	//
+	// This stays confined to the coverage gate. -coverpkg instruments every
+	// package into every test binary, which is exactly the cost that keeps
+	// coverage a periodic gate rather than part of the integration path — so
+	// bin/test, bin/verify and bin/gate go-test must keep running without it.
+	covPkgs, err := goCoveragePackages(compilerDir)
+	if err != nil {
+		return fmt.Errorf("list coverage packages: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Running Go coverage over %d packages...\n", len(covPkgs))
 	covFile := filepath.Join(os.TempDir(), "promise_gate_cov.out")
 	defer os.Remove(covFile)
 
 	var goCovPct float64
-	_, goTestErr := RunTeeStderr(compilerDir, "go", "test", "-coverprofile="+covFile, "-count=1", "./...")
-	if goTestErr == nil && Exists(covFile) {
+	goOutput, _ := RunTeeStderr(compilerDir, "go", "test", "-v", "-count=1",
+		"-coverpkg="+strings.Join(covPkgs, ","), "-coverprofile="+covFile, "./...")
+	// Read the profile whatever the tests returned. A failing test still
+	// produces a complete profile, and reporting 0 for a run that measured fine
+	// is a false collapse indistinguishable from a real one — the failure is
+	// already reported as go_test_failures.
+	if Exists(covFile) {
 		coverOutput, coverErr := RunOutputIn(compilerDir, "go", "tool", "cover", "-func="+covFile)
 		if coverErr == nil {
 			goCovPct = ParseCoverageTotal(coverOutput)
 		}
 	}
+	goPassed, goFailed := ParseGoTestOutput(goOutput)
 
-	// Promise coverage
+	// Promise coverage, read from the runner's --json stream rather than
+	// scraped from human output: the same stream carries one record per test
+	// (so this gate can report what it actually measured over) and one coverage
+	// record per file. Target set is unchanged, so promise_coverage_pct stays
+	// comparable across this change.
 	fmt.Fprintf(os.Stderr, "Running Promise coverage...\n")
-	promiseOutput, _ := RunTeeStderr(root, promiseBin, "test", "-coverage", "-timeout", "30", "tests/...", "modules/...")
-	promiseCovPct := ParseCoverageTotal(promiseOutput)
+	promiseJSONL, _ := RunCaptureStdout(root, promiseBin, "test", "-json", "-coverage",
+		"-timeout", "30", "tests/...", "modules/...")
+	promiseCovPct, promisePassed, promiseFailed := ParsePromiseCoverageJSONL(promiseJSONL)
 
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -449,7 +477,11 @@ func runGateCoverage(root string, args []string) error {
 		Values:    make(map[string]float64),
 	}
 	gv.Values["go_coverage_pct"] = goCovPct
+	gv.Values["go_test_count"] = float64(goPassed)
+	gv.Values["go_test_failures"] = float64(goFailed)
 	gv.Values["promise_coverage_pct"] = promiseCovPct
+	gv.Values["promise_test_count"] = float64(promisePassed)
+	gv.Values["promise_test_failures"] = float64(promiseFailed)
 
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
@@ -464,6 +496,38 @@ func runGateCoverage(root string, args []string) error {
 	fmt.Println(string(data))
 
 	return nil
+}
+
+// goCoveragePackages lists the compiler packages whose statements the coverage
+// gate measures: every package except the ANTLR-generated parser, which is
+// machine output rather than authored source (bin/vet excludes it for the same
+// reason) and whose 30k generated lines would swamp the signal. The per-area
+// test packages under .../tests/ carry no non-test statements, so naming them
+// costs nothing and keeps the rule to a single exception.
+func goCoveragePackages(compilerDir string) ([]string, error) {
+	out, err := RunOutputIn(compilerDir, "go", "list", "./...")
+	if err != nil {
+		return nil, fmt.Errorf("go list: %w", err)
+	}
+
+	pkgs := filterCoveragePackages(out)
+	if len(pkgs) == 0 {
+		return nil, fmt.Errorf("no packages found to measure")
+	}
+	return pkgs, nil
+}
+
+// filterCoveragePackages drops the generated parser from `go list ./...`
+// output, preserving order.
+func filterCoveragePackages(goList string) []string {
+	var pkgs []string
+	for _, pkg := range strings.Split(goList, "\n") {
+		pkg = strings.TrimSpace(pkg)
+		if pkg != "" && !strings.HasSuffix(pkg, "/internal/parser") {
+			pkgs = append(pkgs, pkg)
+		}
+	}
+	return pkgs
 }
 
 // --- Parser helpers ---

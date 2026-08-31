@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 )
@@ -81,6 +82,57 @@ func ParseTestJSONL(jsonl string) []jsonlRecord {
 		out = append(out, r)
 	}
 	return out
+}
+
+// coverageJSONLRecord mirrors one coverage line of `promise test -json
+// -coverage`. Coverage records carry a kind and no test identity, so
+// ParseTestJSONL skips them and both kinds share one stream.
+type coverageJSONLRecord struct {
+	Kind    string `json:"kind"`
+	Covered int    `json:"covered"`
+	Total   int    `json:"total"`
+}
+
+// coverageFailStatuses are the record statuses ParsePromiseCoverageJSONL counts
+// as failures. `excluded` is omitted deliberately: a test skipped for this
+// target did not fail, and folding it in would make the failure count vary with
+// the target rather than with the code.
+var coverageFailStatuses = map[string]bool{
+	"fail": true, "timeout": true, "leak": true, "memory": true, "not-run": true,
+}
+
+// ParsePromiseCoverageJSONL reads a `promise test -json -coverage` stream and
+// returns the block-coverage percentage over every file that reported one, plus
+// the passing and failing test counts. The percentage is rounded to one decimal
+// to match the runner's own report, so the metric is continuous across the move
+// from scraping human output to reading this stream.
+func ParsePromiseCoverageJSONL(jsonl string) (pct float64, passed, failed int) {
+	for _, r := range ParseTestJSONL(jsonl) {
+		switch {
+		case r.Status == "pass":
+			passed++
+		case coverageFailStatuses[r.Status]:
+			failed++
+		}
+	}
+
+	covered, total := 0, 0
+	for _, line := range strings.Split(jsonl, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var c coverageJSONLRecord
+		if err := json.Unmarshal([]byte(line), &c); err != nil || c.Kind != "coverage" {
+			continue
+		}
+		covered += c.Covered
+		total += c.Total
+	}
+	if total > 0 {
+		pct = math.Round(float64(covered)/float64(total)*1000) / 10
+	}
+	return pct, passed, failed
 }
 
 // Context bounds for a single test record (T0777). A failure's context is

@@ -70,13 +70,20 @@ func RunCoverage(root string, args []string) error {
 }
 
 func runGoCoverage(compilerDir, pkg string) error {
-	fmt.Printf("=== Go Coverage: %s ===\n\n", pkg)
+	coverPkgs, testPkgs, err := goCoverageScope(compilerDir, pkg)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("=== Go Coverage: %s (tests: %s) ===\n\n", pkg, testPkgs)
 
 	covFile := filepath.Join(os.TempDir(), "promise_cov.out")
 	defer os.Remove(covFile)
 
-	// Run tests with coverage
-	err := RunIn(compilerDir, "go", "test", pkg, "-coverprofile="+covFile, "-count=1")
+	// Run tests with coverage. -coverpkg is what makes the number agree with
+	// bin/gate coverage: without it `go test` instruments only the package under
+	// test, so a suite living in a sibling package is credited to nothing.
+	err = RunIn(compilerDir, "go", "test", testPkgs,
+		"-coverpkg="+coverPkgs, "-coverprofile="+covFile, "-count=1")
 	if err != nil {
 		return err
 	}
@@ -89,6 +96,31 @@ func runGoCoverage(compilerDir, pkg string) error {
 	// Show function coverage
 	fmt.Println()
 	return RunIn(compilerDir, "go", "tool", "cover", "-func="+covFile)
+}
+
+// goCoverageScope resolves a requested package into the -coverpkg list (whose
+// statements are measured) and the test-package pattern (whose tests are run).
+//
+// The two differ because T1776 moved codegen's and cmd/promise's suites into
+// per-area packages under .../tests/. Asking for internal/codegen's coverage
+// has to run those sibling packages to exercise it, and has to name
+// internal/codegen in -coverpkg for their execution to be attributed anywhere:
+// `go test ./internal/codegen/` alone reports 54.6% where the package actually
+// stands at 86.7%.
+//
+// For the whole tree, this matches bin/gate coverage exactly — every package
+// but the generated parser. For a named package, the measurement stays scoped
+// to what the caller asked about while the tests come from its whole subtree.
+func goCoverageScope(compilerDir, pkg string) (coverPkgs, testPkgs string, err error) {
+	if pkg == "./..." {
+		pkgs, err := goCoveragePackages(compilerDir)
+		if err != nil {
+			return "", "", err
+		}
+		return strings.Join(pkgs, ","), pkg, nil
+	}
+	named := strings.TrimSuffix(strings.TrimSuffix(pkg, "/..."), "/")
+	return named, named + "/...", nil
 }
 
 func runPromiseCoverage(root, promiseBin, target string) error {

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -510,6 +512,9 @@ func TestDetectTool(t *testing.T) {
 		{"edit by name", hookInput{ToolName: "Edit"}, "edit"},
 		{"write by name", hookInput{ToolName: "Write"}, "write"},
 		{"skill by name", hookInput{ToolName: "Skill"}, "skill"},
+		{"task by name", hookInput{ToolName: "Task"}, "task"},
+		{"agent by name", hookInput{ToolName: "Agent"}, "agent"},
+		{"mcp by name", hookInput{ToolName: "mcp__tracker__gate_run"}, "mcp"},
 
 		// Field-based fallback paths.
 		{"bash by field", func() hookInput {
@@ -546,6 +551,176 @@ func TestDetectTool(t *testing.T) {
 				t.Errorf("detectTool() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCheckGateContext(t *testing.T) {
+	skillInput := hookInput{ToolName: "Skill"}
+	taskInput := hookInput{ToolName: "Task"}
+	agentInput := hookInput{ToolName: "Agent"}
+	mcpInput := hookInput{ToolName: "mcp__tracker__gate_run"}
+	bashInput := func(cmd string) hookInput {
+		h := hookInput{ToolName: "Bash"}
+		h.ToolInput.Command = cmd
+		return h
+	}
+
+	tests := []struct {
+		name     string
+		tool     string
+		input    hookInput
+		wantDeny bool
+	}{
+		{"skill denied", "skill", skillInput, true},
+		{"task denied", "task", taskInput, true},
+		{"agent denied", "agent", agentInput, true},
+		{"mcp denied", "mcp", mcpInput, true},
+		{"bash claude -p denied", "bash", bashInput("claude -p 'do something'"), true},
+		{"bash bin/do denied", "bash", bashInput("bin/do resolve T1"), true},
+		{"bash ./bin/flow denied", "bash", bashInput("./bin/flow status"), true},
+		{"bash wrapped claude denied", "bash", bashInput("timeout 5s claude -p hi"), true},
+		{"bash chained claude denied", "bash", bashInput("echo hi && claude -p hi"), true},
+		{"bash unrelated allowed", "bash", bashInput("go test ./..."), false},
+		{"bash -c wrapping claude denied", "bash", bashInput(`bash -c "claude -p hi"`), true},
+		{"sh -c wrapping bin/do denied", "bash", bashInput(`sh -c "bin/do resolve T1"`), true},
+		{"bash -c unrelated allowed", "bash", bashInput(`bash -c "go test ./..."`), false},
+		{"bash wrapper deny reason propagates", "bash", bashInput("sudo -e claude -p hi"), true},
+		{"bash empty segment then claude denied", "bash", bashInput("true &&  && claude -p hi"), true},
+		{"bash wrapper with no trailing program allowed", "bash", bashInput("nohup"), false},
+		{"bash empty command allowed", "bash", bashInput(""), false},
+		{"edit not blocked by gate context", "edit", hookInput{ToolName: "Edit"}, false},
+		{"write not blocked by gate context", "write", hookInput{ToolName: "Write"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checkGateContext(tt.tool, tt.input)
+			if (got != "") != tt.wantDeny {
+				t.Errorf("checkGateContext(%q, ...) = %q, wantDeny=%v", tt.tool, got, tt.wantDeny)
+			}
+		})
+	}
+}
+
+func TestIsAgentEntryPointProgram(t *testing.T) {
+	tests := []struct {
+		program string
+		want    bool
+	}{
+		{"claude", true},
+		{"/usr/local/bin/claude", true},
+		{"bin/do", true},
+		{"./bin/do", true},
+		{"bin/flow", true},
+		{"./bin/flow", true},
+		{"do", false},
+		{"flow", false},
+		{"sudo", false},
+		{"go", false},
+		{"claudex", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.program, func(t *testing.T) {
+			if got := isAgentEntryPointProgram(tt.program); got != tt.want {
+				t.Errorf("isAgentEntryPointProgram(%q) = %v, want %v", tt.program, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGateContextOnlyAppliesWhenMarkerSet is the regression test proving the
+// PROMISE_GATE dispatch in main() only fires when the marker is actually set
+// — main() calls checkGateContext only inside `if gateContextActive() {...}`,
+// so a Skill/Task/Agent/mcp call outside a gate run must reach its ordinary
+// (allowing) path, not the gate-context deny.
+func TestGateContextEnvGating(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("PROMISE_GATE", "")
+		os.Unsetenv("PROMISE_GATE")
+		if gateContextActive() {
+			t.Fatal("gateContextActive() = true with PROMISE_GATE unset")
+		}
+	})
+	t.Run("set", func(t *testing.T) {
+		t.Setenv("PROMISE_GATE", "1")
+		if !gateContextActive() {
+			t.Fatal("gateContextActive() = false with PROMISE_GATE=1")
+		}
+	})
+}
+
+// TestGateContextPrecedesSkillShortcut is a regression test for the dispatch
+// order in main(): the gate-context check must run before the "skill"
+// shortcut that would otherwise allow every Skill call unconditionally. This
+// exercises checkGateContext directly rather than main() (which reads
+// os.Stdin), asserting the same property main() relies on: a Skill tool is
+// denied by checkGateContext, so main()'s ordering (checkGateContext before
+// the skill shortcut) is what makes gate-context enforcement effective.
+func TestGateContextPrecedesSkillShortcut(t *testing.T) {
+	reason := checkGateContext("skill", hookInput{ToolName: "Skill"})
+	if reason == "" {
+		t.Fatal("checkGateContext(\"skill\", ...) allowed a Skill call — the skill shortcut in main() would let this through unconditionally if this check didn't run first")
+	}
+}
+
+// TestSettingsJSONRoutesPromptToolsThroughGuard is the regression test for a
+// gap that let checkGateContext's Task/Agent handling ship as dead code:
+// checkGateContext only ever runs when Claude Code invokes bin/guard as a
+// PreToolUse hook in the first place, and that only happens for a tool name
+// matched by some PreToolUse entry's "matcher" regex in .claude/settings.json.
+// Adding the "agent"/"task" cases to detectTool/checkGateContext (T1877) did
+// nothing by itself, because the matcher shipped as "Skill|Task|mcp__.*" —
+// missing "Agent", the name this environment's subagent-dispatch tool
+// actually carries per detectTool's own comment. This parses the committed
+// settings.json and asserts every prompt-invoking tool name bin/guard knows
+// about is covered by at least one fail-closed ("|| exit 2") PreToolUse entry.
+func TestSettingsJSONRoutesPromptToolsThroughGuard(t *testing.T) {
+	root, err := common.FindRoot()
+	if err != nil {
+		t.Fatalf("FindRoot: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+
+	var parsed struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Matcher string `json:"matcher"`
+				Hooks   []struct {
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"PreToolUse"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+
+	// Every tool name checkGateContext can deny must be matched by some
+	// fail-closed ("|| exit 2") PreToolUse entry — otherwise the guard binary
+	// is never invoked for that tool and checkGateContext's handling of it is
+	// unreachable.
+	promptTools := []string{"Skill", "Task", "Agent", "mcp__tracker__gate_run"}
+	for _, name := range promptTools {
+		matched := false
+		for _, entry := range parsed.Hooks.PreToolUse {
+			re, err := regexp.Compile(entry.Matcher)
+			if err != nil {
+				t.Fatalf("PreToolUse matcher %q: %v", entry.Matcher, err)
+			}
+			if !re.MatchString(name) {
+				continue
+			}
+			for _, h := range entry.Hooks {
+				if strings.Contains(h.Command, "bin/guard") && strings.Contains(h.Command, "exit 2") {
+					matched = true
+				}
+			}
+		}
+		if !matched {
+			t.Errorf("no fail-closed PreToolUse entry in .claude/settings.json matches tool %q — bin/guard is never invoked for it, so gate-context enforcement (T1877) can't reach it", name)
+		}
 	}
 }
 

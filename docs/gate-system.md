@@ -382,6 +382,15 @@ Edit gate and commit gate binaries query the tracker for active exceptions. If t
 
 ---
 
+## Model Invocation
+
+A gate run must never be able to invoke a model. Gates are unattended CI: they run on every host, hourly, forever, with nobody reading the launch — so a gate that can reach a model burns account quota on a schedule with no human in the loop and no cost ceiling. This is a property of gate execution, enforced rather than incidental:
+
+- **Statically**: `bin/gate`'s sources (`tools/build/common`, `tools/build/cmd/gate`) are scanned for any agent entry point — `claude`, `bin/do`, `bin/flow`, an Anthropic SDK import, or an MCP client. A future edit that adds one fails this test rather than shipping quietly.
+- **At runtime**: `bin/gate` sets `PROMISE_GATE=1` at the start of every run, inherited by its entire subprocess tree. `bin/guard` (the PreToolUse hook) denies every prompt-invoking tool — `Task`/`Agent`, `Skill`, any `mcp__*` tool, and bash invocations of `claude`, `bin/do`, or `bin/flow` — whenever that marker is present. Consistent with the guard's general fail-closed contract: if the guard cannot tell whether a tool dispatches a model, it denies.
+
+---
+
 ## Multi-Agent Safety
 
 **Edit gates:** Each agent runs independently. Gates loaded from same `edit_gates.json` in repo.

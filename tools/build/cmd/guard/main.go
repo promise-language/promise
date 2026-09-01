@@ -99,6 +99,18 @@ func main() {
 		return
 	}
 
+	// A gate run must never be able to invoke a model (T1877): PROMISE_GATE is
+	// set by bin/gate at the top of RunGate and inherited by its whole
+	// subprocess tree. This check runs before the Skill shortcut and the
+	// stale-binary bypass below, so neither can become a loophole for
+	// gate-context agent dispatch.
+	if gateContextActive() {
+		if reason := checkGateContext(tool, input); reason != "" {
+			printDeny(reason)
+			return
+		}
+	}
+
 	// Skill PreToolUse: skip the stale check (heartbeats / context updates
 	// are best-effort and the settings.json entry uses `|| true` anyway).
 	if tool == "skill" {
@@ -299,7 +311,11 @@ func isRepoMakeChain(command, cwd, root string) bool {
 // detectTool determines the tool type from the input fields.
 func detectTool(input hookInput) string {
 	// Prefer explicit tool_name if present.
-	switch strings.ToLower(input.ToolName) {
+	lowerName := strings.ToLower(input.ToolName)
+	if strings.HasPrefix(lowerName, "mcp__") {
+		return "mcp"
+	}
+	switch lowerName {
 	case "bash":
 		return "bash"
 	case "edit":
@@ -308,6 +324,14 @@ func detectTool(input hookInput) string {
 		return "write"
 	case "skill":
 		return "skill"
+	case "task":
+		return "task"
+	case "agent":
+		// Both names are checked: the .claude/settings.json hook matcher
+		// names "Task", but the tool this environment actually dispatches
+		// prompt-running work through is named "Agent" — either naming
+		// must be denied identically in gate context.
+		return "agent"
 	}
 
 	// Fall back to field-based detection.
@@ -324,6 +348,97 @@ func detectTool(input hookInput) string {
 		return "write"
 	}
 	return "unknown"
+}
+
+// gateContextActive reports whether this hook invocation is running somewhere
+// inside a bin/gate subprocess tree. bin/gate sets PROMISE_GATE=1 at the top
+// of RunGate; every subprocess it spawns inherits it since none of the
+// subprocess helpers in tools/build/common override cmd.Env.
+func gateContextActive() bool {
+	return os.Getenv("PROMISE_GATE") != ""
+}
+
+// checkGateContext denies every prompt-invoking tool while a gate run is in
+// progress (T1877): a gate is unattended CI — it runs on every host, hourly,
+// forever, with no human in the loop and no cost ceiling — so it must never
+// be able to reach a model. This is the runtime backstop behind the static
+// assertion in tools/build/common/gate_no_model_test.go: it catches a gate
+// command reaching a model through some path the static scan can't see (e.g.
+// a wrapper binary dropped in from outside this repo). Per "if the guard
+// cannot tell, it denies," an MCP tool is denied unconditionally in gate
+// context — there is no way to statically tell which MCP tools dispatch an
+// agent turn.
+func checkGateContext(tool string, input hookInput) string {
+	switch tool {
+	case "skill":
+		return "gate context: Skill invocation blocked — a gate run must never invoke a model (T1877)"
+	case "task", "agent":
+		return "gate context: " + input.ToolName + " invocation blocked — a gate run must never invoke a model (T1877)"
+	case "mcp":
+		return "gate context: " + input.ToolName + " blocked — MCP tools are denied during a gate run because the guard cannot tell which ones dispatch an agent (T1877)"
+	case "bash":
+		if reason := checkGateContextBash(input.ToolInput.Command); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// checkGateContextBash denies bash invocations of agent entry points
+// (claude, bin/do, bin/flow) while a gate run is in progress. It reuses the
+// same tokenize/stripWrappers pipeline the rest of the guard uses to resolve
+// the actual program being run through wrappers like env/timeout/sudo.
+func checkGateContextBash(command string) string {
+	if command == "" {
+		return ""
+	}
+	for _, part := range splitCommands(command) {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		tokens := tokenize(trimmed)
+		if len(tokens) == 0 {
+			continue
+		}
+		args, denyReason := stripWrappers(tokens)
+		if denyReason != "" {
+			return denyReason
+		}
+		if len(args) == 0 {
+			continue
+		}
+		program := args[0]
+		if (program == "bash" || program == "sh") && len(args) >= 3 && args[1] == "-c" {
+			inner := stripQuotes(strings.Join(args[2:], " "))
+			if reason := checkGateContextBash(inner); reason != "" {
+				return reason
+			}
+			continue
+		}
+		if isAgentEntryPointProgram(program) {
+			return fmt.Sprintf("gate context: %q blocked — a gate run must never invoke a model (T1877)", program)
+		}
+	}
+	return ""
+}
+
+// isAgentEntryPointProgram reports whether program names an agent entry
+// point, matched either as a bare command (resolved via PATH) or by a
+// relative/absolute path ending in that name.
+func isAgentEntryPointProgram(program string) bool {
+	base := filepath.Base(program)
+	switch base {
+	case "claude", "do", "flow":
+		// "do"/"flow" are only agent entry points as bin/do, bin/flow —
+		// require the path to actually name that, not any program
+		// coincidentally called "do" or "flow".
+		if base == "claude" {
+			return true
+		}
+		return strings.HasSuffix(program, "bin/"+base) || strings.HasSuffix(program, "bin\\"+base)
+	}
+	return false
 }
 
 func printDeny(reason string) {

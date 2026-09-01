@@ -16,6 +16,12 @@ import (
 // RunGate dispatches bin/gate subcommands. Subcommands output structured JSON
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
+	// A gate run is unattended CI — it must never be able to reach a model.
+	// PROMISE_GATE propagates to every subprocess a gate subcommand spawns
+	// (RunBuild, promise test, go test, ...) since none of the subprocess
+	// helpers in exec.go set cmd.Env, so they all inherit os.Environ(). bin/guard
+	// checks this marker and denies every prompt-invoking tool while it's set.
+	os.Setenv("PROMISE_GATE", "1")
 	if len(args) == 0 {
 		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-web-test  run only wasm32-web target tests (via Node) and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
 	}

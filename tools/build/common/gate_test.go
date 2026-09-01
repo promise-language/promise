@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,31 @@ func TestRunGate_NoArgs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "usage") {
 		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
+// TestRunGate_SetsPromiseGateEnv is the regression test for the T1877 runtime
+// half of gate-context enforcement: bin/guard's PROMISE_GATE check is only
+// effective if RunGate actually sets the marker, and it must do so
+// unconditionally — before the subcommand dispatch — so every subcommand
+// (including the no-args usage error and an unknown subcommand) inherits it.
+// bin/guard trusts this marker to deny prompt-invoking tools, so a call path
+// that skipped setting it would silently reopen the gap this task closes.
+func TestRunGate_SetsPromiseGateEnv(t *testing.T) {
+	t.Setenv("PROMISE_GATE", "")
+	os.Unsetenv("PROMISE_GATE")
+
+	// Even the earliest-return call paths (no args, unknown subcommand) must
+	// still set the marker, since RunGate sets it before looking at args[0].
+	RunGate("", nil)
+	if got := os.Getenv("PROMISE_GATE"); got != "1" {
+		t.Fatalf("after RunGate(nil): PROMISE_GATE = %q, want %q", got, "1")
+	}
+
+	os.Unsetenv("PROMISE_GATE")
+	RunGate("", []string{"bogus"})
+	if got := os.Getenv("PROMISE_GATE"); got != "1" {
+		t.Fatalf("after RunGate([\"bogus\"]): PROMISE_GATE = %q, want %q", got, "1")
 	}
 }
 

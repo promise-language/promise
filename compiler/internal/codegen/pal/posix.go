@@ -4200,11 +4200,13 @@ func (p *PosixPAL) emitProcessStartTimeLinux(module *ir.Module) *ir.Func {
 	spaceCount.Incs = append(spaceCount.Incs, ir.NewIncoming(newCount, skipReadBlk))
 	skipReadBlk.NewBr(skipHdr)
 
-	// Parse the number at the current position
+	// Parse the number at the current position. The skip loop stops on the 20th
+	// space itself, so the digits of field 22 start one byte past skipPos.
 	numHdr := fn.NewBlock(".num_hdr")
+	numStart := parseNumBlk.NewAdd(skipPos, constant.NewInt(irtypes.I64, 1))
 	parseNumBlk.NewBr(numHdr)
 
-	numPos := numHdr.NewPhi(ir.NewIncoming(skipPos, parseNumBlk))
+	numPos := numHdr.NewPhi(ir.NewIncoming(numStart, parseNumBlk))
 	numVal := numHdr.NewPhi(ir.NewIncoming(zero64, parseNumBlk))
 	isNumOob := numHdr.NewICmp(enum.IPredSGE, numPos, nReadI64)
 	numDoneBlk := fn.NewBlock(".num_done")
@@ -4229,8 +4231,10 @@ func (p *PosixPAL) emitProcessStartTimeLinux(module *ir.Module) *ir.Func {
 	numVal.Incs = append(numVal.Incs, ir.NewIncoming(newNum2, numAccumBlk))
 	numAccumBlk.NewBr(numHdr)
 
-	numDoneBlk.NewCall(palFree, dataBuf)
+	// The phi must precede every other instruction in the block - LLVM rejects a
+	// module whose phi nodes are not grouped at the top of their basic block.
 	finalNum := numDoneBlk.NewPhi(ir.NewIncoming(numVal, numHdr), ir.NewIncoming(numVal, numReadBlk))
+	numDoneBlk.NewCall(palFree, dataBuf)
 	numDoneBlk.NewRet(finalNum)
 
 	return fn

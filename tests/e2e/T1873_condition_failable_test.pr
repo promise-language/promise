@@ -1,0 +1,291 @@
+// T1873: bare failable call as a whole if/while/for condition must
+// auto-propagate. Previously emitted malformed IR (branch on failable struct).
+always_true!() bool {
+  return true;
+}
+fail_bool!() bool {
+  raise error(message: "boom");
+}
+
+// --- if statement: success path ---
+
+if_true!() int {
+  if always_true() {
+    return 1;
+  }
+  return 0;
+}
+
+test_if_bare_failable_true() `test {
+  int result = if_true()?!;
+  assert(result == 1, "if on bare failable true");
+}
+
+// --- if statement: propagation path ---
+
+if_propagate!() int {
+  if fail_bool() {
+    return 1;
+  }
+  return 0;
+}
+
+test_if_bare_failable_propagate() `test {
+  bool caught = false;
+  if_propagate()? {
+    caught = true;
+  };
+  assert(caught, "if on bare failable should propagate error");
+}
+
+// --- while statement ---
+
+while_count!() int {
+  int n = 0;
+  while always_true() {
+    n++;
+    if n >= 3 {
+      break;
+    }
+  }
+  return n;
+}
+
+test_while_bare_failable() `test {
+  int result = while_count()?!;
+  assert(result == 3, "while on bare failable");
+}
+
+// --- for statement ---
+
+for_failable!() int {
+  int n = 0;
+  for int i = 0; always_true(); i++ {
+    n++;
+    if n >= 3 {
+      break;
+    }
+  }
+  return n;
+}
+
+test_for_bare_failable() `test {
+  int result = for_failable()?!;
+  assert(result == 3, "for on bare failable condition");
+}
+
+// --- if expression (block form): success path ---
+
+if_expr_ok!() int {
+  v := if always_true() {
+    1
+  } else {
+    0
+  };
+  return v;
+}
+
+test_if_expr_bare_failable() `test {
+  int result = if_expr_ok()?!;
+  assert(result == 1, "if-expr on bare failable true");
+}
+
+// --- if expression: propagation path ---
+
+if_expr_propagate!() int {
+  v := if fail_bool() {
+    1
+  } else {
+    0
+  };
+  return v;
+}
+
+test_if_expr_bare_failable_propagate() `test {
+  bool caught = false;
+  if_expr_propagate()? {
+    caught = true;
+  };
+  assert(caught, "if-expr on bare failable should propagate");
+}
+
+// --- if/else in value position (statement form) ---
+
+if_value_ok!() int {
+  int x = if always_true() {
+    1
+  } else {
+    0
+  };
+  return x;
+}
+
+test_if_value_bare_failable() `test {
+  int result = if_value_ok()?!;
+  assert(result == 1, "if-value on bare failable true");
+}
+
+// --- while statement: propagation path ---
+
+while_propagate!() int {
+  int n = 0;
+  while fail_bool() {
+    n++;
+  }
+  return n;
+}
+
+test_while_bare_failable_propagate() `test {
+  bool caught = false;
+  while_propagate()? {
+    caught = true;
+  };
+  assert(caught, "while on bare failable should propagate error");
+}
+
+// --- for statement: propagation path ---
+
+for_propagate!() int {
+  int n = 0;
+  for int i = 0; fail_bool(); i++ {
+    n++;
+  }
+  return n;
+}
+
+test_for_bare_failable_propagate() `test {
+  bool caught = false;
+  for_propagate()? {
+    caught = true;
+  };
+  assert(caught, "for on bare failable should propagate error");
+}
+
+// --- if/else in value position: propagation path ---
+
+if_value_propagate!() int {
+  int x = if fail_bool() {
+    1
+  } else {
+    0
+  };
+  return x;
+}
+
+test_if_value_bare_failable_propagate() `test {
+  bool caught = false;
+  if_value_propagate()? {
+    caught = true;
+  };
+  assert(caught, "if-value on bare failable should propagate error");
+}
+
+// --- edge: failable method call as condition ---
+
+type Checker {
+  check!(this) bool {
+    return true;
+  }
+  fail_check!(this) bool {
+    raise error(message: "method boom");
+  }
+}
+
+method_condition_ok!() int {
+  c := Checker();
+  if c.check() {
+    return 1;
+  }
+  return 0;
+}
+
+test_method_call_condition_ok() `test {
+  int result = method_condition_ok()?!;
+  assert(result == 1, "method call as if condition");
+}
+
+method_condition_propagate!() int {
+  c := Checker();
+  if c.fail_check() {
+    return 1;
+  }
+  return 0;
+}
+
+test_method_call_condition_propagate() `test {
+  bool caught = false;
+  method_condition_propagate()? {
+    caught = true;
+  };
+  assert(caught, "method call as if condition should propagate");
+}
+
+// --- edge: nested failable conditions ---
+
+nested_failable!() int {
+  if always_true() {
+    if always_true() {
+      return 2;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+test_nested_failable_conditions() `test {
+  int result = nested_failable()?!;
+  assert(result == 2, "nested failable conditions");
+}
+
+// --- edge: if/else with failable condition (else branch taken) ---
+
+always_false!() bool {
+  return false;
+}
+
+if_else_failable!() int {
+  if always_false() {
+    return 1;
+  } else {
+    return 2;
+  }
+}
+
+test_if_else_failable_takes_else() `test {
+  int result = if_else_failable()?!;
+  assert(result == 2, "if/else with failable condition takes else");
+}
+
+// --- edge: while with failable condition that returns false ---
+
+cond_returns_false!() bool {
+  return false;
+}
+
+while_false_failable!() int {
+  int n = 0;
+  while cond_returns_false() {
+    n++;
+  }
+  return n;
+}
+
+test_while_false_failable_exits_immediately() `test {
+  int result = while_false_failable()?!;
+  assert(result == 0, "while with failable false exits immediately");
+}
+
+// --- edge: for with failable condition that returns false ---
+
+for_false_failable!() int {
+  int n = 0;
+  for int i = 0; cond_returns_false(); i++ {
+    n++;
+  }
+  return n;
+}
+
+test_for_false_failable_exits_immediately() `test {
+  int result = for_false_failable()?!;
+  assert(result == 0, "for with failable false exits immediately");
+}

@@ -16,7 +16,7 @@ import (
 // --- If expressions ---
 
 func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
-	cond := c.genExpr(e.Cond)
+	cond := c.genExprAutoPropagate(e.Cond) // T1873
 
 	thenBlock := c.newBlock("if.then")
 	elseBlock := c.newBlock("if.else")

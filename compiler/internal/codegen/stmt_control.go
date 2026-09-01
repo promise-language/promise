@@ -1308,7 +1308,7 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		return
 	}
 
-	cond := c.genExpr(s.Cond)
+	cond := c.genExprAutoPropagate(s.Cond) // T1873
 
 	thenBlock := c.newBlock("if.then")
 	mergeBlock := c.newBlock("if.end")
@@ -1413,7 +1413,7 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 		return nil
 	}
 
-	cond := c.genExpr(s.Cond)
+	cond := c.genExprAutoPropagate(s.Cond) // T1873
 
 	thenBlock := c.newBlock("if.then")
 	elseBlock := c.newBlock("if.else")

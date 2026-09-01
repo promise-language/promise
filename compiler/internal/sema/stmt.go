@@ -1364,6 +1364,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			if isNarrow == nil {
 				// Normal: type-check condition, then detect simple narrowing
 				cond = c.checkExpr(s.Cond)
+				c.checkSubExprFailable(s.Cond) // T1873
 				narrow = c.detectOptionalNarrowing(s.Cond, cond)
 			}
 		}
@@ -1852,6 +1853,7 @@ func (c *Checker) detectNarrowableExpr(expr ast.Expr) []NarrowedVar {
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	cond := c.checkExpr(s.Cond)
+	c.checkSubExprFailable(s.Cond) // T1873
 	if cond != nil && !types.Identical(cond, types.TypBool) {
 		c.errorf(s.Cond.Pos(), "while condition must be bool, got %s", cond)
 	}
@@ -2113,6 +2115,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	// Condition
 	if s.Cond != nil {
 		cond := c.checkExpr(s.Cond)
+		c.checkSubExprFailable(s.Cond) // T1873
 		if cond != nil && !types.Identical(cond, types.TypBool) {
 			c.errorf(s.Cond.Pos(), "for condition must be bool, got %s", cond)
 		}

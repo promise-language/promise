@@ -22,7 +22,7 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 
 	// Header: evaluate condition
 	c.block = headerBlock
-	cond := c.genExpr(s.Cond)
+	cond := c.genExprAutoPropagate(s.Cond) // T1873
 	c.block.NewCondBr(cond, bodyBlock, exitBlock)
 
 	// Body
@@ -277,7 +277,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 
 	// Header: evaluate condition
 	c.block = headerBlock
-	cond := c.genExpr(s.Cond)
+	cond := c.genExprAutoPropagate(s.Cond) // T1873
 	c.block.NewCondBr(cond, bodyBlock, exitBlock)
 
 	// Body

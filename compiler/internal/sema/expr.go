@@ -3527,6 +3527,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	errsBefore := len(c.errors)
 	cond := c.checkExpr(e.Cond)
+	c.checkSubExprFailable(e.Cond) // T1873
 	if cond != nil && !types.Identical(cond, types.TypBool) {
 		c.errorf(e.Cond.Pos(), "if condition must be bool, got %s", cond)
 	}

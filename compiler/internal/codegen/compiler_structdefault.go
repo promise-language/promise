@@ -8,29 +8,32 @@ import (
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
-// declareGenericStructuralDefaults declares (without bodies) the default methods
-// that a non-generic concrete type inherits from a *generic* structural interface
-// instance (e.g. `type Counter is Box[int]` inheriting Box[T]'s default
-// `put_two`). The bodies are generated later by defineGenericStructuralDefaults.
+// declareStructuralDefaults declares (without bodies) the default methods that a
+// non-generic concrete type inherits from a structural interface — including
+// through a non-structural parent (`Fee is Amount is Ordered`) and from a
+// non-generic interface (`type Sink is Writer`).
 //
-// A non-generic structural interface compiles its own default methods (e.g.
-// IBox.put_two), which concrete implementors reference directly in their vtable.
-// A *generic* interface instance does not: the mono pipeline skips structural
-// instances (declareMonoMethods / declareMonoSynthesizedDefaults), so no
-// Box__int.put_two is ever emitted. Without this, the concrete implementor's
-// vtable slot for the inherited default is left null, and dispatching it through
-// the interface view jumps to address 0 (T0862).
+// Every such default must be synthesized *per concrete type*: an interface's own
+// default body (e.g. Greeter.greet) dispatches its abstract requirements by
+// interface-relative slot index, which only lines up when that interface happens
+// to be the concrete type's first parent. So the concrete type's own vtable slot
+// must hold its own synthesized copy (Sink.write_string, Fee.>), never the
+// interface's shared body and never null (T0862, T1880).
+//
+// The view-vtable path (getOrEmitViewVtable → synthesizeDefaultMethods) and the
+// mono path (declare/defineMonoSynthesizedDefaults) already do this; non-generic
+// concrete types have no other pass that runs before their vtable is built.
 //
 // Declaration must happen before emitVtableGlobals so the concrete vtable can
-// reference the stub; body generation is deferred (see
-// defineGenericStructuralDefaults) until after compileModules, because some
-// default bodies (e.g. Iterator combinators) reference mono instances/layouts
-// that are only available then. This mirrors the declare/define split the mono
-// pipeline uses for generic concrete types (declare/defineMonoSynthesizedDefaults).
-func (c *Compiler) declareGenericStructuralDefaults(file *ast.File) {
-	c.forEachConcreteGenericStructuralParent(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+// reference the stub; body generation is deferred (see defineStructuralDefaults)
+// until after compileModules, because some default bodies (e.g. Iterator
+// combinators) reference mono instances/layouts that are only available then.
+// This mirrors the declare/define split the mono pipeline uses for generic
+// concrete types (declare/defineMonoSynthesizedDefaults).
+func (c *Compiler) declareStructuralDefaults(file *ast.File) {
+	c.forEachConcreteStructuralAncestor(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
 		// The interface may live in a catalog/std module (e.g. std.Iterator[T]).
-		// declareStructuralDefaultStubs now self-resolves the interface's declaring
+		// declareStructuralDefaultStubs self-resolves the interface's declaring
 		// file and swaps c.info per recursion level (T1377), so the direct interface
 		// as well as any transitively-inherited grandparent interface that crosses
 		// files/modules resolve correctly. Its name uses the concrete type's plain
@@ -43,20 +46,25 @@ func (c *Compiler) declareGenericStructuralDefaults(file *ast.File) {
 	})
 }
 
-// defineGenericStructuralDefaults generates the bodies for the stubs declared by
-// declareGenericStructuralDefaults. Runs after compileModules so default bodies
-// that depend on mono layouts resolve correctly.
-func (c *Compiler) defineGenericStructuralDefaults(file *ast.File) {
-	c.forEachConcreteGenericStructuralParent(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+// defineStructuralDefaults generates the bodies for the stubs declared by
+// declareStructuralDefaults. Runs after compileModules so default bodies that
+// depend on mono layouts resolve correctly.
+func (c *Compiler) defineStructuralDefaults(file *ast.File) {
+	c.forEachConcreteStructuralAncestor(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
 		c.defineConcreteStructuralDefaultBodies(file, named, iface, subst)
 	})
 }
 
-// forEachConcreteGenericStructuralParent invokes fn for every (concrete, iface)
-// pair where concrete is a non-generic user type in file that inherits default
-// methods from the generic structural interface instance iface, passing the
-// type-arg substitution derived from the parent reference.
-func (c *Compiler) forEachConcreteGenericStructuralParent(file *ast.File, fn func(named, iface *types.Named, subst map[*types.TypeParam]types.Type)) {
+// forEachConcreteStructuralAncestor invokes fn once for every (concrete, iface)
+// pair where concrete is a non-generic user type in file and iface is a *nearest*
+// structural ancestor — the walk descends through non-structural parents and stops
+// at each structural interface (declareStructuralDefaultStubs and
+// defineConcreteStructuralDefaultBodies recurse into an interface's own parent
+// interfaces themselves). subst is the type-arg substitution derived from the
+// parent chain, or nil when the interface is non-generic — nil, not an empty map,
+// because c.typeSubst != nil is used throughout expression codegen as a "we are
+// inside a substitution context" gate.
+func (c *Compiler) forEachConcreteStructuralAncestor(file *ast.File, fn func(named, iface *types.Named, subst map[*types.TypeParam]types.Type)) {
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
@@ -66,21 +74,59 @@ func (c *Compiler) forEachConcreteGenericStructuralParent(file *ast.File, fn fun
 		if named == nil || len(named.TypeParams()) > 0 || named.IsStructural() {
 			continue
 		}
-		for _, pr := range named.Parents() {
-			// Only generic structural parents need this — non-generic interfaces
-			// compile their own default methods, which the vtable references.
-			if pr.Named.IsStructural() && len(pr.TypeArgs) > 0 {
-				subst := types.BuildSubstMap(pr.Named.TypeParams(), pr.TypeArgs)
+		forEachNearestStructuralAncestor(named, func(iface *types.Named) {
+			// Derive the substitution from the concrete type down to the
+			// interface. Same source the lazy path uses
+			// (ensureDefaultMethodsSynthesized), so the eager stub and the
+			// lazily synthesized body agree.
+			subst := c.buildTransitiveParentSubst(named, iface)
+			if subst != nil {
 				// Augment with the parent interface chain's own type params (e.g.
 				// `Derived[int] is Base[T]` adds Base.T → int) so default bodies
 				// inherited transitively through grandparent interfaces resolve
 				// their type params instead of leaving them as fat-pointer
 				// placeholders (which crashes wrapOk / method ABI).
-				mergeParentSubst(pr.Named, subst)
-				fn(named, pr.Named, subst)
+				mergeParentSubst(iface, subst)
 			}
+			fn(named, iface, subst)
+		})
+	}
+}
+
+// forEachNearestStructuralAncestor invokes fn once for every *nearest* structural
+// ancestor of named: the walk descends through non-structural parents and stops at
+// each structural interface, because the declare/define passes recurse into an
+// interface's own parent interfaces themselves (Ordered → Equal). Descending
+// through non-structural parents is what reaches `Fee is Amount is Ordered`, where
+// nothing in Fee's own parent list is structural yet every one of Ordered's
+// defaults still lands in Fee's vtable.
+//
+// Shared by the non-generic pass (forEachConcreteStructuralAncestor) and the mono
+// pass (declare/defineMonoSynthesizedDefaults) so both agree on which interfaces
+// owe a concrete type a per-concrete synthesis — a disagreement leaves a null
+// vtable slot, which is what verifyNoNullVtableSlots now rejects (T1880).
+func forEachNearestStructuralAncestor(named *types.Named, fn func(iface *types.Named)) {
+	seenIface := map[*types.Named]bool{}
+	visited := map[*types.Named]bool{}
+	var walk func(n *types.Named)
+	walk = func(n *types.Named) {
+		if visited[n] {
+			return
+		}
+		visited[n] = true
+		for _, pr := range n.Parents() {
+			if !pr.Named.IsStructural() {
+				walk(pr.Named)
+				continue
+			}
+			if seenIface[pr.Named] {
+				continue
+			}
+			seenIface[pr.Named] = true
+			fn(pr.Named)
 		}
 	}
+	walk(named)
 }
 
 // defineConcreteStructuralDefaultBodies generates method bodies for the default
@@ -119,7 +165,9 @@ func (c *Compiler) defineConcreteStructuralDefaultBodies(file *ast.File, concret
 		}
 		saved := c.saveState()
 		c.selfSubst = &selfSubstInfo{iface: iface, concrete: concrete}
-		c.typeSubst = subst
+		if len(subst) > 0 {
+			c.typeSubst = subst
+		}
 		c.defineMethodFunc(md, m, fn, concrete)
 		c.restoreState(saved)
 	}
@@ -300,6 +348,15 @@ func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
 		// LookupMethod traverses parents, so we check own methods directly.
 		if hasOwnMethod(concrete, md.Name) {
 			continue // concrete type overrides the default
+		}
+		if c.concreteAncestorOwnsMember(concrete, ifaceMethod) {
+			// A non-structural ancestor concretely declares the method, so its
+			// implementation wins (T1551). Synthesizing here would shadow it:
+			// getOrEmitViewVtable prefers <Concrete>.<method> whenever it exists, so
+			// boxing through a non-first structural parent used to answer with the
+			// interface's default while every other dispatch path answered with the
+			// ancestor's body (T1880).
+			continue
 		}
 
 		// Method-level generic methods (e.g. map[R], zip[U]) require explicit type args.

@@ -2396,9 +2396,14 @@ func (c *Compiler) defineSynthesizedMonoEnumClones(file *ast.File, instances []*
 }
 
 // declareMonoSynthesizedDefaults declares stubs for default methods from structural
-// parents that need to be synthesized for mono instances of concrete types.
+// ancestors that need to be synthesized for mono instances of concrete types.
 // E.g., _FnIter[int] inherits filter/take/skip from Iterator[T] — these become
 // _FnIter__int.filter, _FnIter__int.take, etc. Must run BEFORE vtable emission.
+//
+// The ancestor walk descends through non-structural parents (T1880): a generic
+// `Fee[T] is Amount[T]` where `Amount[T] is Ordered` has no structural parent of
+// its own, yet Ordered's `>`/`<=`/`>=` and Equal's `!=` still occupy slots in
+// Fee[int]'s vtable and must be filled with Fee[int]'s own synthesis.
 func (c *Compiler) declareMonoSynthesizedDefaults(instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
@@ -2409,11 +2414,9 @@ func (c *Compiler) declareMonoSynthesizedDefaults(instances []*types.Instance) {
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 		mergeParentSubst(named, subst)
 
-		for _, pr := range named.Parents() {
-			if pr.Named.IsStructural() {
-				c.declareStructuralDefaultStubs(name, named, pr.Named, subst)
-			}
-		}
+		forEachNearestStructuralAncestor(named, func(iface *types.Named) {
+			c.declareStructuralDefaultStubs(name, named, iface, subst)
+		})
 	}
 }
 
@@ -2447,6 +2450,14 @@ func (c *Compiler) declareStructuralDefaultStubs(mName string, concrete, iface *
 		if hasOwnMethod(concrete, md.Name) {
 			continue
 		}
+		if c.concreteAncestorOwnsMember(concrete, m) {
+			// A non-structural ancestor concretely declares the method, so its
+			// implementation wins and dispatch targets <Parent>.<method> — emitting
+			// a per-concrete synthesis here would silently shadow it (T1551). The
+			// lazy synthesis applies the identical gate; the two must agree or the
+			// vtable slot and the direct-dispatch target diverge.
+			continue
+		}
 		if len(md.TypeParams) > 0 {
 			continue // generic methods are not virtual
 		}
@@ -2460,6 +2471,15 @@ func (c *Compiler) declareStructuralDefaultStubs(mName string, concrete, iface *
 		if sig.Recv() != nil {
 			params = append(params, ir.NewParam("this", irtypes.I8Ptr))
 		}
+		// The stub's signature must be resolved in the same substitution context
+		// its body will be — defineStructuralDefaultBodies and
+		// defineConcreteStructuralDefaultBodies both set selfSubst, and
+		// resolveType applies it. Without it a `Self`-typed parameter (Equal's
+		// `!= (Self other)`, Ordered's `> (Self other)`) resolves to the generic
+		// fat pointer in the stub and to the concrete type in the body, so the
+		// body's parameter alloca cannot hold the incoming argument (T1880).
+		savedSelf, savedSubst := c.selfSubst, c.typeSubst
+		c.selfSubst = &selfSubstInfo{iface: iface, concrete: concrete}
 		c.typeSubst = subst
 		for _, p := range sig.Params() {
 			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
@@ -2468,7 +2488,7 @@ func (c *Compiler) declareStructuralDefaultStubs(mName string, concrete, iface *
 		if sig.Result() != nil {
 			retType = c.resolveType(sig.Result())
 		}
-		c.typeSubst = nil
+		c.selfSubst, c.typeSubst = savedSelf, savedSubst
 		if sig.CanError() {
 			retType = computeResultType(retType)
 		}
@@ -2485,8 +2505,9 @@ func (c *Compiler) declareStructuralDefaultStubs(mName string, concrete, iface *
 	}
 }
 
-// defineMonoSynthesizedDefaults generates bodies for synthesized default methods
-// on mono instances of concrete types with structural parents.
+// defineMonoSynthesizedDefaults generates bodies for the stubs declared by
+// declareMonoSynthesizedDefaults, walking the same nearest-structural-ancestor
+// set so every stub it declared gets a body.
 func (c *Compiler) defineMonoSynthesizedDefaults(instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
@@ -2497,11 +2518,9 @@ func (c *Compiler) defineMonoSynthesizedDefaults(instances []*types.Instance) {
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 		mergeParentSubst(named, subst)
 
-		for _, pr := range named.Parents() {
-			if pr.Named.IsStructural() {
-				c.defineStructuralDefaultBodies(name, named, pr.Named, subst, inst)
-			}
-		}
+		forEachNearestStructuralAncestor(named, func(iface *types.Named) {
+			c.defineStructuralDefaultBodies(name, named, iface, subst, inst)
+		})
 	}
 }
 

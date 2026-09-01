@@ -1,0 +1,541 @@
+// E2E regression tests for T1880: a non-generic type that declares
+// `is <structural interface>` explicitly must behave exactly like the same type
+// without the clause. The explicit `is` makes the type a nominal child, so the
+// interface's slots are laid into the type's OWN vtable as a prefix and boxing
+// takes the prefix-compatible path instead of building a `_as_<Interface>` view
+// vtable. Codegen used to leave those inherited-default slots null (calling one
+// jumped to address 0), or — when the interface's own body happened to be
+// available — fill them with that single shared body, which resolves its
+// abstract requirements by INTERFACE-relative slot index and therefore calls the
+// wrong method whenever the interface is not the type's first parent.
+//
+// docs/language-design.md §5.4 is explicit that the clause is a checked claim,
+// not a semantic change: "Structural satisfaction remains available and
+// unchanged... the explicit form is a discipline for published interfaces, not a
+// new requirement of the type system." These tests pin exactly that.
+//
+// The IR shape is pinned in
+// compiler/internal/codegen/tests/regress11/t1880_test.go; the module-declared
+// half in tests/modules/module_structural_explicit_is_test.pr.
+// --- 1. `is Writer`: the item's own repro -----------------------------------
+// Writer's defaults are write_string / write_line, neither of which Sink
+// declares. Boxing into Writer and calling one used to segfault.
+type Sink is Writer `public `doc("Writer implementation that declares its conformance explicitly.") {
+  Ref[Mutex[int]] total `doc("Shared byte counter, observable after the value is moved into the view.");
+  write!(~this, u8[] ~b) int `doc("Records b.len into the shared counter and returns it.") {
+    MutexGuard[int] g = this.total.borrow.lock();
+    g.borrow = g.borrow + b.len;
+    g.close();
+    return b.len;
+  }
+}
+
+// The identical type WITHOUT the clause, satisfying Writer structurally. Every
+// assertion below is made against both so the clause is proven inert.
+type StructuralSink `public `doc("Byte-for-byte twin of Sink that omits the `is Writer` clause.") {
+  Ref[Mutex[int]] total `doc("Shared byte counter, observable after the value is moved into the view.");
+  write!(~this, u8[] ~b) int `doc("Records b.len into the shared counter and returns it.") {
+    MutexGuard[int] g = this.total.borrow.lock();
+    g.borrow = g.borrow + b.len;
+    g.close();
+    return b.len;
+  }
+}
+
+explicit_is_writer_boxed_default() `test {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  Sink s = Sink(total: counter.clone());
+  Writer w = s;
+  int n = w.write_string("hi")?!;
+  assert(n == 2, "write_string default returns the byte count through an explicit `is`");
+  assert(counter.borrow.lock().borrow == 2, "the default reached the concrete write()");
+}
+
+explicit_is_writer_boxed_default_chain() `test {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  Sink s = Sink(total: counter.clone());
+  Writer w = s;
+  w.write_line("hi")?!;
+  int expected = 2 + Platform.line_separator.bytes().len;
+  assert(counter.borrow.lock().borrow == expected, "the two-level default chain reached write()");
+}
+
+explicit_is_writer_direct_default() `test {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  Sink s = Sink(total: counter.clone());
+  int n = s.write_string("abc")?!;
+  assert(n == 3, "the same default is reachable without boxing");
+  assert(counter.borrow.lock().borrow == 3, "direct dispatch reached the concrete write()");
+}
+
+// The clause changes nothing: the declared and the structural twin agree.
+explicit_is_matches_structural_satisfaction() `test {
+  Ref[Mutex[int]] declared_counter = Ref[Mutex[int]](Mutex[int](0));
+  Sink declared = Sink(total: declared_counter.clone());
+  Writer dw = declared;
+  int declared_n = dw.write_string("promise")?!;
+
+  Ref[Mutex[int]] structural_counter = Ref[Mutex[int]](Mutex[int](0));
+  StructuralSink structural = StructuralSink(total: structural_counter.clone());
+  Writer sw = structural;
+  int structural_n = sw.write_string("promise")?!;
+
+  assert(declared_n == structural_n, "`is Writer` returns what structural satisfaction returns");
+  assert(declared_counter.borrow.lock().borrow == structural_counter.borrow.lock().borrow,
+  "`is Writer` writes what structural satisfaction writes");
+}
+
+// --- 2. `is Ordered`: inherited operator defaults ---------------------------
+// `<` is the abstract requirement (it always worked); `>`, `<=` and `>=` are
+// Ordered's defaults, and `!=` is inherited transitively from Equal.
+type Money is Ordered `public `doc("Ordered implementation that declares its conformance explicitly.") {
+  int c `public `doc("Amount in cents.");
+  == (Money other) bool `doc("Compares cents.") => this.c == other.c;
+  < (Money other) bool `doc("Orders by cents.") => this.c < other.c;
+}
+
+explicit_is_ordered_boxed_defaults() `test {
+  Ordered o = Money(c: 3);
+  assert(o < Money(c: 4), "the abstract requirement dispatches through the box");
+  assert(!(o >= Money(c: 4)), "the >= default dispatches through the box");
+  assert(o <= Money(c: 3), "the <= default dispatches through the box");
+  assert(o != Money(c: 4), "the != default inherited from Equal dispatches through the box");
+  Ordered bigger = Money(c: 9);
+  assert(bigger > Money(c: 4), "the > default dispatches through the box");
+}
+
+explicit_is_ordered_direct_defaults() `test {
+  Money m = Money(c: 3);
+  assert(m > Money(c: 1), "the > default is reachable without boxing");
+  assert(m <= Money(c: 3), "the <= default is reachable without boxing");
+  assert(m >= Money(c: 3), "the >= default is reachable without boxing");
+  assert(m != Money(c: 4), "the != default is reachable without boxing");
+}
+
+// --- 3. Two structural parents: the silent-wrong-method case ----------------
+// An interface's own default body resolves its abstract requirement by that
+// interface's slot index. Greeter's `name` is Greeter slot 0, but Bob's slot 0
+// is `word` — so filling Bob's greet slot with Greeter's shared body ran word()
+// and answered "hello hi". No crash, no diagnostic, wrong answer.
+type Speaker `structural `public `doc("Interface whose shout() default calls the abstract word().") {
+  word(this) string `abstract `doc("The word to shout.");
+  shout(this) string `doc("Default: word() with an exclamation mark.") => this.word() + "!";
+}
+
+type Greeter `structural `public `doc("Interface whose greet() default calls the abstract name().") {
+  name(this) string `abstract `doc("The name to greet.");
+  greet(this) string `doc("Default: a greeting addressed to name().") => "hello " + this.name();
+}
+
+type Bob is Speaker, Greeter `public `doc("Implements both interfaces; Greeter is deliberately the SECOND parent.") {
+  new(~this) `doc("Creates a Bob.") {
+  }
+  word(this) string `doc("Satisfies Speaker.") => "hi";
+  name(this) string `doc("Satisfies Greeter.") => "bob";
+}
+
+type Rob is Bob `public `doc("Child of Bob — its existence forces virtual dispatch on a Bob-typed value.") {
+  new(~this) `doc("Creates a Rob.") {
+  }
+}
+
+second_structural_parent_default_reaches_its_own_requirement() `test {
+  Bob b = Rob();
+  assert(b.greet() == "hello bob", "the second parent's default calls name(), not word()");
+  assert(b.shout() == "hi!", "the first parent's default still calls word()");
+  Greeter g = Rob();
+  assert(g.greet() == "hello bob", "and the boxed view agrees");
+}
+
+// --- 4. Transitive: a structural ancestor behind a nominal parent -----------
+// Fee reaches Ordered through Amount, which is NOT structural, and nothing here
+// boxes into an interface — this is ordinary nominal polymorphism through a heap
+// type that happens to have a structural ancestor. A pass looking only at direct
+// structural parents would leave Fee's slots null.
+type Amount is Ordered `public `doc("Ordered implementation used as a nominal base class.") {
+  int cents `public `doc("Amount in cents.");
+  == (Self other) bool `doc("Compares cents.") => this.cents == other.cents;
+  < (Self other) bool `doc("Orders by cents.") => this.cents < other.cents;
+}
+
+type Fee is Amount `public `doc("Adds nothing; inherits Ordered's defaults transitively through Amount.") {
+}
+
+transitive_structural_ancestor_defaults() `test {
+  Amount a = Fee(cents: 5);
+  Amount b = Fee(cents: 2);
+  assert(a > b, "the > default dispatches virtually on a child of a child");
+  assert(b < a, "the abstract requirement still reaches Amount's body");
+  assert(a != b, "the != default inherited from Equal through Amount");
+  assert(b <= a, "the <= default");
+  assert(a >= b, "the >= default");
+}
+
+// The parent's own dispatch must be unaffected by the child's synthesis.
+transitive_structural_ancestor_parent_defaults() `test {
+  Amount a = Amount(cents: 5);
+  Amount b = Amount(cents: 2);
+  assert(a > b, "the > default on the type that declares `is Ordered` itself");
+  assert(a != b, "and its transitively inherited !=");
+}
+
+// --- 5. The counter-case the fix must not break (T1551) --------------------
+// When a NON-structural ancestor concretely declares the method, its
+// implementation wins over the interface default — no per-concrete synthesis may
+// shadow it, on either dispatch path.
+type Named `structural `public `doc("Interface supplying a label() default.") {
+  label(this) string `doc("Default label.") => "default";
+}
+
+type Titled is Named `public `doc("Overrides the interface default with its own body.") {
+  int n `public `doc("Unused payload; gives the type a field.");
+  label(this) string `doc("Overrides Named.label.") => "titled";
+}
+
+type Subtitled is Titled `public `doc("Inherits Titled's override rather than the interface default.") {
+}
+
+parent_override_wins_over_interface_default() `test {
+  Titled t = Subtitled(n: 1);
+  assert(t.label() == "titled", "the parent's own implementation wins over the interface default");
+  Named n = Subtitled(n: 2);
+  assert(n.label() == "titled", "and the boxed view agrees");
+}
+
+// --- 6. The generic form of case 4 ------------------------------------------
+// GenericAmount[T] declares `is Ordered`; GenericFee[T] reaches Ordered only
+// through it. The mono declare/define passes used to look at an instance
+// origin's DIRECT structural parents only, so GenericFee[int]'s inherited-default
+// slots were left null and dispatching one jumped to address 0.
+type GenericAmount[T] is Ordered `public `doc("Generic Ordered implementation used as a base class.") {
+  int cents `public `doc("Amount in cents.");
+  T tag `public `doc("Payload proving the type parameter is carried through.");
+  == (Self other) bool `doc("Compares cents.") => this.cents == other.cents;
+  < (Self other) bool `doc("Orders by cents.") => this.cents < other.cents;
+}
+
+type GenericFee[T] is GenericAmount[T] `public `doc("Adds nothing; inherits Ordered's defaults transitively.") {
+}
+
+generic_transitive_structural_ancestor_defaults() `test {
+  GenericAmount[int] a = GenericFee[int](cents: 5, tag: 1);
+  GenericAmount[int] b = GenericFee[int](cents: 2, tag: 2);
+  assert(a > b, "the > default dispatches virtually on a generic child of a generic child");
+  assert(b < a, "the abstract requirement still reaches GenericAmount's body");
+  assert(a != b, "the != default inherited from Equal through GenericAmount");
+  assert(b <= a, "the <= default");
+  assert(a >= b, "the >= default");
+}
+
+// --- 7. The same counter-case reached through a VIEW vtable -----------------
+// When the interface is not the concrete type's first parent, boxing builds a
+// `_as_<Interface>` view vtable rather than reusing the type's own. That path
+// synthesizes defaults lazily, and it used to do so without asking whether a
+// non-structural ancestor already declared the method — so the view answered with
+// the interface's default while every other dispatch path answered with the
+// ancestor's body. No crash, no diagnostic, two different answers.
+type Counted `structural `public `doc("First parent, so Labelled is deliberately the second.") {
+  count(this) int `abstract `doc("Abstract requirement.");
+}
+
+type Labelled `structural `public `doc("Second parent interface, supplying a label() default.") {
+  label(this) string `doc("Default label.") => "default";
+}
+
+type Tagged is Counted, Labelled `public `doc("Overrides the interface default with its own body.") {
+  int n `public `doc("Payload.");
+  count(this) int `doc("Satisfies Counted.") => this.n;
+  label(this) string `doc("Overrides Labelled.label.") => "tagged";
+}
+
+type Retagged is Tagged `public `doc("Inherits Tagged's override rather than the interface default.") {
+}
+
+parent_override_wins_through_a_view_vtable() `test {
+  Retagged r = Retagged(n: 1);
+  assert(r.label() == "tagged", "direct dispatch reaches the ancestor's override");
+  Tagged t = Retagged(n: 2);
+  assert(t.label() == "tagged", "virtual dispatch through the ancestor agrees");
+  Labelled l = Retagged(n: 3);
+  assert(l.label() == "tagged", "and so does the second-parent view vtable");
+}
+
+// --- 8. Inherited default GETTER and SETTER ---------------------------------
+// The pre-T1880 eager pass only ran for *generic* structural interfaces, so a
+// non-generic one supplying a default property (rather than a default method)
+// reached the new per-concrete declare path for the first time. Getters and
+// setters are invisible to LookupMethod, so every ancestry walk driven by a
+// method value has to select the lookup by member kind — picking the wrong one
+// silently answers "no structural owner" and leaves the slot null.
+type Gauge `structural `public `doc("Interface supplying a default scaled property over an abstract raw one.") {
+  get raw int `abstract `doc("The underlying reading.");
+  set raw(int v) `abstract `doc("Sets the underlying reading.");
+  get scaled int `doc("Default: twice the raw reading.") => this.raw * 2;
+  set scaled(int v) `doc("Default: stores half of v as the raw reading.") {
+    this.raw = v / 2;
+  }
+}
+
+type Dial is Gauge `public `doc("Implements Gauge's abstract property and inherits its default one.") {
+  int stored `public `doc("Backing storage for raw.");
+  get raw int `doc("Satisfies Gauge.raw.") => this.stored;
+  set raw(int v) `doc("Satisfies Gauge.raw.") {
+    this.stored = v;
+  }
+}
+
+explicit_is_default_property_direct() `test {
+  Dial d = Dial(stored: 3);
+  assert(d.scaled == 6, "the inherited default getter reads through raw");
+  d.scaled = 10;
+  assert(d.raw == 5, "the inherited default setter writes through raw");
+}
+
+explicit_is_default_property_boxed() `test {
+  Gauge g = Dial(stored: 4);
+  assert(g.scaled == 8, "the inherited default getter dispatches through the box");
+  g.scaled = 20;
+  assert(g.raw == 10, "the inherited default setter dispatches through the box");
+}
+
+// --- 9. One interface reached by two nominal paths --------------------------
+// The ancestor walk descends through non-structural parents, so a type with two
+// fieldless nominal parents can reach the same interface twice. Both the
+// per-interface and the per-type visit have to be deduplicated: without the
+// first, the declare pass runs twice for the same (concrete, interface) pair;
+// without the second, a shared grandparent is walked once per path. Neither may
+// produce a second, conflicting definition of the same synthesized body.
+type Stamped `structural `public `doc("Interface supplying a stamp() default over an abstract mark().") {
+  mark(this) int `abstract `doc("The number to stamp.");
+  stamp(this) string `doc("Default: the mark, rendered.") => "mark={this.mark()}";
+}
+
+type LeftStamp is Stamped `public `doc("First nominal path to Stamped; fieldless so it can be co-inherited.") {
+  mark(this) int `doc("Satisfies Stamped.") => 1;
+}
+
+type RightStamp is Stamped `public `doc("Second nominal path to Stamped; fieldless so it can be co-inherited.") {
+  mark(this) int `doc("Satisfies Stamped.") => 2;
+}
+
+type BothStamps is LeftStamp, RightStamp `public `doc("Reaches Stamped through two distinct nominal parents.") {
+  mark(this) int `doc("Resolves the ambiguity with its own mark.") => 7;
+}
+
+two_nominal_paths_to_one_interface() `test {
+  BothStamps b = BothStamps();
+  assert(b.stamp() == "mark=7", "the default is synthesized once and calls the concrete mark()");
+  Stamped s = BothStamps();
+  assert(s.stamp() == "mark=7", "and the boxed view agrees");
+  LeftStamp l = BothStamps();
+  assert(l.stamp() == "mark=7", "as does dispatch through the first nominal parent");
+}
+
+// The same shape with a SHARED grandparent, so the walk reaches one type by two
+// routes rather than one interface by two routes.
+type SharedStampBase is Stamped `public `doc("Common ancestor of both nominal paths.") {
+  mark(this) int `doc("Satisfies Stamped.") => 3;
+}
+
+type LeftKin is SharedStampBase `public `doc("First route to SharedStampBase.") {
+}
+
+type RightKin is SharedStampBase `public `doc("Second route to SharedStampBase.") {
+}
+
+type BothKin is LeftKin, RightKin `public `doc("Reaches SharedStampBase — and thus Stamped — by two routes.") {
+}
+
+two_nominal_paths_to_one_ancestor() `test {
+  BothKin b = BothKin();
+  assert(b.stamp() == "mark=3", "the default is synthesized once for the shared-grandparent diamond");
+  Stamped s = BothKin();
+  assert(s.stamp() == "mark=3", "and the boxed view agrees");
+}
+
+// --- 10. Pure value types --------------------------------------------------
+// A value type's `this` is a pointer to the value struct rather than an instance
+// pointer, so a default whose body passes `this` as an ARGUMENT (Ordered's
+// `> (Self other) => other < this`) has to be marshalled differently from a heap
+// type's. Both dispatch paths must marshal it the same way.
+type Cents is Ordered `public `doc("Pure value type declaring its Ordered conformance explicitly.") {
+  int v `value `public `doc("Amount in cents.");
+  == (Self other) bool `doc("Compares cents.") => this.v == other.v;
+  < (Self other) bool `doc("Orders by cents.") => this.v < other.v;
+}
+
+type Price is Cents `public `doc("Layout-preserving value newtype over Cents (T1527).") {
+}
+
+value_type_explicit_is_defaults() `test {
+  Cents a = Cents(v: 3);
+  assert(a > Cents(v: 1), "the > default on a pure value type");
+  assert(a >= Cents(v: 3), "the >= default on a pure value type");
+  assert(a <= Cents(v: 3), "the <= default on a pure value type");
+  assert(a != Cents(v: 1), "the != default inherited from Equal");
+}
+
+value_type_explicit_is_defaults_boxed() `test {
+  Ordered o = Cents(v: 3);
+  assert(o > Cents(v: 1), "the > default dispatches through the box");
+  assert(o <= Cents(v: 3), "the <= default dispatches through the box");
+  assert(o != Cents(v: 1), "the != default dispatches through the box");
+}
+
+value_newtype_child_inherits_defaults() `test {
+  assert(Price(v: 3) > Price(v: 1), "the > default on a value newtype child");
+  assert(Price(v: 1) != Price(v: 3), "the != default on a value newtype child");
+  Ordered o = Price(v: 3);
+  assert(o >= Price(v: 3), "and through the child's own view vtable");
+}
+
+// --- 11. Cleanup through the interface view ---------------------------------
+// The synthesized defaults are ordinary methods on the concrete type, so boxing
+// must not disturb its drop wiring: the view has to carry the concrete type's
+// own typeinfo (and its drop_fn), or the boxed value is either leaked or dropped
+// as the interface. Batch tests already fail on a leaked allocation; this pins
+// the count so a double drop is caught too.
+type Recorder is Writer `public `doc("Writer that counts its own drops through a shared counter.") {
+  Ref[Mutex[int]] drops `doc("Incremented once per drop.");
+  drop(~this) `doc("Records the drop.") {
+    MutexGuard[int] g = this.drops.borrow.lock();
+    g.borrow = g.borrow + 1;
+    g.close();
+  }
+  write!(~this, u8[] ~b) int `doc("Discards the bytes and reports the count.") => b.len;
+}
+
+explicit_is_drop_through_view() `test {
+  Ref[Mutex[int]] drops = Ref[Mutex[int]](Mutex[int](0));
+  {
+    Writer w = Recorder(drops: drops.clone());
+    int n = w.write_string("hi")?!;
+    assert(n == 2, "the inherited default reached write()");
+  }
+  assert(drops.borrow.lock().borrow == 1, "the boxed value is dropped exactly once through the view");
+}
+
+// --- 12. An abstract class between the interface and the implementation ------
+// The null-vtable assertion T1880 added must not fire on a slot that is
+// LEGITIMATELY null: Shape re-declares Drawable's requirement as abstract, so
+// slot 0 of @promise_vtable_Shape is null by design and no per-concrete
+// synthesis could ever fill it. Only the *default* it also inherits (render) is
+// the assertion's business. An over-eager guard here would refuse to compile
+// every abstract class that sits under a structural interface.
+type Drawable `structural `public `doc("Interface with an abstract draw() and a render() default over it.") {
+  draw(this) string `abstract `doc("The shape's glyph.");
+  render(this) string `doc("Default: the glyph in angle brackets.") => "<{this.draw()}>";
+}
+
+type Shape is Drawable `public `doc("Abstract class that leaves draw() to its children but inherits render().") {
+  int id `public `doc("Identifier, so the class has state of its own.");
+  draw(this) string `abstract `doc("Still abstract at this level.");
+}
+
+type Circle is Shape `public `doc("Concrete Shape.") {
+  draw(this) string `doc("Satisfies the requirement.") => "o";
+}
+
+abstract_class_between_interface_and_implementation() `test {
+  Shape s = Circle(id: 1);
+  assert(s.render() == "<o>", "the default reaches the concrete draw() through the abstract class");
+  Drawable d = Circle(id: 2);
+  assert(d.render() == "<o>", "and through the interface view");
+  Circle c = Circle(id: 3);
+  assert(c.render() == "<o>", "and without any boxing");
+}
+
+// --- 13. Declaring an interface and its own parent interface ----------------
+// `Ordered is Equal`, so listing both names one interface twice over: the walk
+// stops at Ordered and recurses into Equal for `!=`, then visits Equal directly
+// and would declare `Rank.!=` a second time. The re-declaration guard is what
+// keeps that from appending a second body to the same function.
+type Rank is Ordered, Equal `public `doc("Declares both Ordered and the Equal it already inherits.") {
+  int n `public `doc("The value ordered on.");
+  == (Self other) bool `doc("Compares n.") => this.n == other.n;
+  < (Self other) bool `doc("Orders by n.") => this.n < other.n;
+}
+
+interface_and_its_own_parent_interface() `test {
+  assert(Rank(n: 2) > Rank(n: 1), "the > default from Ordered");
+  assert(Rank(n: 1) != Rank(n: 2), "the != default, reachable through either parent");
+  Ordered o = Rank(n: 2);
+  assert(o != Rank(n: 1), "the != default through the Ordered view");
+  Equal e = Rank(n: 2);
+  assert(e != Rank(n: 1), "the != default through the Equal view");
+}
+
+// --- 14. A synthesized default called from inside a goroutine ---------------
+// Structural defaults can also be synthesized lazily, at the call site, and a
+// call site inside a `go {}` block sits in the middle of a coroutine body — the
+// synthesis has to save and restore the enclosing function's codegen state or
+// it emits branches into the coroutine's blocks (the T1588 shape). Excluded on
+// wasm32, whose cooperative scheduler cannot run goroutines from a batch test
+// function.
+type GoSink is Writer `public `doc("Writer used from inside a goroutine.") {
+  Ref[Mutex[int]] total `doc("Shared byte counter, read back after the goroutine reports.");
+  write!(~this, u8[] ~b) int `doc("Records b.len into the shared counter and returns it.") {
+    MutexGuard[int] g = this.total.borrow.lock();
+    g.borrow = g.borrow + b.len;
+    g.close();
+    return b.len;
+  }
+}
+
+explicit_is_default_inside_goroutine() `test(exclude: wasm) {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  channel[int] done = channel[int](1);
+  Ref[Mutex[int]] moved = counter.clone();
+  go {
+    Writer w = GoSink(total: move moved);
+    int written = w.write_string("hi")?!;
+    done.send(written);
+  };
+  int n = (<-done)!;
+  done.close();
+  assert(n == 2, "the inherited default ran inside a goroutine");
+  assert(counter.borrow.lock().borrow == 2, "and reached the concrete write()");
+}
+
+// --- 15. The error path through a synthesized default -----------------------
+// Writer's defaults are failable, so the synthesized copy has to marshal the
+// {ok, value, err} result the same way the interface's own body does — on both
+// dispatch paths, and through the two-level write_line -> write_string -> write
+// chain. Every case above exercises only the success path; a synthesis that got
+// the failable ABI wrong would still pass all of them.
+type WriteFailed is error `public `doc("Raised by the deliberately failing writer.") {
+}
+
+type FailingSink is Writer `public `doc("Writer whose write() always raises, to exercise the failable default.") {
+  int calls `public `doc("Payload, so the type has a field of its own.");
+  write!(~this, u8[] ~b) int `doc("Always raises.") {
+    raise WriteFailed(message: "sink is closed");
+  }
+}
+
+error_propagates_out_of_boxed_default() `test {
+  Writer w = FailingSink(calls: 0);
+  string got = "";
+  w.write_string("hi")? e {
+    got = e.message;
+  };
+  assert(got == "sink is closed", "write()'s error travels out of the synthesized default intact");
+}
+
+error_propagates_out_of_direct_default() `test {
+  FailingSink s = FailingSink(calls: 0);
+  string got = "";
+  s.write_string("hi")? e {
+    got = e.message;
+  };
+  assert(got == "sink is closed", "same on the direct-dispatch path");
+}
+
+error_propagates_through_the_default_chain() `test {
+  Writer w = FailingSink(calls: 0);
+  string got = "";
+  w.write_line("hi")? e {
+    got = e.message;
+  };
+  assert(got == "sink is closed", "and out of the two-level write_line chain");
+}

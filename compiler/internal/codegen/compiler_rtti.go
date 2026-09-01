@@ -448,6 +448,23 @@ func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *t
 // must pass LookupGetter/LookupSetter to locate the structural parent that owns
 // an inherited default getter/setter (T1559).
 func (c *Compiler) findStructuralOwnerBy(named *types.Named, methodName string, lookup func(*types.Named, string) *types.Method) *types.Named {
+	owner, _ := c.resolveStructuralOwnerBy(named, methodName, lookup)
+	return owner
+}
+
+// resolveStructuralOwnerBy walks named's ancestry for methodName and reports both
+// halves of the answer: `owner` is the structural interface that supplies the
+// member as a concrete default (nil if none), and `blocked` reports whether a
+// non-structural ancestor concretely declares it, whose implementation wins.
+//
+// The two are not complements, and only `blocked` may suppress a per-concrete
+// synthesis. A type that satisfies an interface *structurally* has no nominal
+// ancestors at all, so it comes back (nil, false) — no owner, yet its defaults
+// must still be synthesized under its own name for the view vtable. Reading a nil
+// owner as "do not synthesize" silently drops those (T1880).
+func (c *Compiler) resolveStructuralOwnerBy(named *types.Named, methodName string,
+	lookup func(*types.Named, string) *types.Method) (owner *types.Named, blocked bool) {
+
 	for _, pr := range named.Parents() {
 		m := lookup(pr.Named, methodName)
 		if m == nil {
@@ -460,7 +477,7 @@ func (c *Compiler) findStructuralOwnerBy(named *types.Named, methodName string, 
 			// dispatched normally — treating it as a synthesized default would look
 			// up a function that was never emitted (T1559 regression).
 			if !m.IsAbstract() {
-				return pr.Named
+				return pr.Named, false
 			}
 			continue
 		}
@@ -470,13 +487,47 @@ func (c *Compiler) findStructuralOwnerBy(named *types.Named, methodName string, 
 		// declaration is not an implementation, so keep recursing through abstract
 		// classes. Only recurse when the parent merely inherits the member.
 		if ownsConcreteMember(pr.Named, m) {
+			blocked = true
 			continue
 		}
-		if found := c.findStructuralOwnerBy(pr.Named, methodName, lookup); found != nil {
-			return found
+		if found, b := c.resolveStructuralOwnerBy(pr.Named, methodName, lookup); found != nil {
+			return found, false
+		} else if b {
+			blocked = true
 		}
 	}
-	return nil
+	return nil, blocked
+}
+
+// concreteAncestorOwnsMember reports whether a non-structural ancestor of `named`
+// declares its own concrete implementation of m, so that dispatch targets
+// <Ancestor>.<member> and no per-concrete synthesis may be emitted under `named`'s
+// own name (T1551).
+//
+// This is the single gate every synthesis path consults — the eager declare pass
+// (declareStructuralDefaultStubs) and the lazy one (synthesizeDefaultMethods,
+// reached from resolveDirectDispatchOwner and getOrEmitViewVtable). A path that
+// synthesized without asking would shadow the ancestor's body wherever the
+// dispatch prefers the concrete name, which is how boxing through a non-first
+// structural parent used to answer with the interface's default while every other
+// path answered with the ancestor's (T1880).
+func (c *Compiler) concreteAncestorOwnsMember(named *types.Named, m *types.Method) bool {
+	_, blocked := c.resolveStructuralOwnerBy(named, m.Name(), lookupForMemberKind(m))
+	return blocked
+}
+
+// lookupForMemberKind returns the Named lookup that finds members of m's kind.
+// getters/setters are skipped by LookupMethod (T0637/T1559), so every ancestry
+// walk driven by a *types.Method rather than a bare name must select by kind.
+func lookupForMemberKind(m *types.Method) func(*types.Named, string) *types.Method {
+	switch {
+	case m.IsGetter():
+		return (*types.Named).LookupGetter
+	case m.IsSetter():
+		return (*types.Named).LookupSetter
+	default:
+		return (*types.Named).LookupMethod
+	}
 }
 
 // ownsConcreteMember reports whether `named` declares its own concrete (non-abstract)

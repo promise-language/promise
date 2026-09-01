@@ -41,3 +41,33 @@ type Child is Parent `public `doc("Subtype of Parent — its existence forces vt
 }
 
 render_in_module[T: Shower](T x) string `public `doc("Calls show() through the Shower bound, from inside the module.") => x.show();
+
+// T1880: a MODULE type that declares `is <structural interface>` explicitly.
+// The clause makes the type a nominal child of std's Writer, so the interface's
+// slots land in ModSink's own vtable and boxing reuses it rather than building a
+// view vtable — codegen must therefore fill those inherited-default slots with
+// ModSink's own synthesis while compiling THIS module, not leave them null.
+// Exercised from tests/modules/module_structural_explicit_is_test.pr.
+type ModSink is Writer `public `doc("Writer implementation declared in a module, with an explicit `is Writer` clause.") {
+  Ref[Mutex[int]] total `public `doc("Shared byte counter, observable after the value is moved into a Writer view.");
+  write!(~this, u8[] ~b) int `public `doc("Records b.len into the shared counter and returns it.") {
+    MutexGuard[int] g = this.total.borrow.lock();
+    g.borrow = g.borrow + b.len;
+    g.close();
+    return b.len;
+  }
+}
+
+type ModOrdered is Ordered `public `doc("Ordered implementation declared in a module, with an explicit `is Ordered` clause.") {
+  int rank `public `doc("The value ordered on.");
+  == (ModOrdered other) bool `public `doc("Compares rank.") => this.rank == other.rank;
+  < (ModOrdered other) bool `public `doc("Orders by rank.") => this.rank < other.rank;
+}
+
+// T1880 (transitive, in-module): ModFee's own parent list holds nothing
+// structural — it reaches Ordered only through ModOrdered — yet every one of
+// Ordered's defaults still occupies a slot in ModFee's vtable. The module's
+// declare/define pass has to descend through the non-structural parent, exactly
+// as the main file's does.
+type ModFee is ModOrdered `public `doc("Adds nothing; inherits Ordered's defaults transitively through ModOrdered.") {
+}

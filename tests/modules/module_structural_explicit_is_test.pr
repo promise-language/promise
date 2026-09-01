@@ -1,0 +1,97 @@
+// T1880 (module half): a type declared in a MODULE that says
+// `is <structural interface>` explicitly. The clause makes it a nominal child, so
+// the interface's slots are laid into the type's own vtable as a prefix and
+// boxing reuses that vtable instead of building a `_as_<Interface>` view — which
+// means the inherited defaults must be synthesized per concrete type and written
+// into those slots while the MODULE is compiled (compileModule's own
+// declare/define pass), not only for main-file types. Before the fix the slots
+// were null and calling any inherited default jumped to address 0.
+//
+// This is the shape T1734 needs, since every non-generic heap I/O type that will
+// declare `is Reader` / `is Writer` (io.File, net.TcpStream, gzip.GunzipReader,
+// os.ProcessInput, ...) lives in a catalog module.
+//
+// The main-file half lives in tests/e2e/structural_explicit_is_default_test.pr;
+// the IR shape in compiler/internal/codegen/tests/regress11/t1880_test.go.
+use defaultsmod "./defaultsmod";
+
+// --- Writer: write_string / write_line are the interface's defaults ---------
+test_module_explicit_is_writer_boxed_default() `test {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  defaultsmod.ModSink s = defaultsmod.ModSink(total: counter.clone());
+  Writer w = s;
+  int n = w.write_string("hi")?!;
+  assert(n == 2, "the module type's inherited write_string default returns the byte count");
+  assert(counter.borrow.lock().borrow == 2, "and reached the module type's own write()");
+}
+
+test_module_explicit_is_writer_boxed_default_chain() `test {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  defaultsmod.ModSink s = defaultsmod.ModSink(total: counter.clone());
+  Writer w = s;
+  w.write_line("hi")?!;
+  int expected = 2 + Platform.line_separator.bytes().len;
+  assert(counter.borrow.lock().borrow == expected, "the two-level default chain reached write()");
+}
+
+test_module_explicit_is_writer_direct_default() `test {
+  Ref[Mutex[int]] counter = Ref[Mutex[int]](Mutex[int](0));
+  defaultsmod.ModSink s = defaultsmod.ModSink(total: counter.clone());
+  int n = s.write_string("abc")?!;
+  assert(n == 3, "the same default is reachable without boxing");
+  assert(counter.borrow.lock().borrow == 3, "direct dispatch reached the module type's write()");
+}
+
+// --- Ordered: >, <=, >= are defaults, != comes transitively from Equal ------
+test_module_explicit_is_ordered_boxed_defaults() `test {
+  Ordered o = defaultsmod.ModOrdered(rank: 3);
+  assert(o < defaultsmod.ModOrdered(rank: 4), "the abstract requirement dispatches through the box");
+  assert(!(o >= defaultsmod.ModOrdered(rank: 4)), "the >= default dispatches through the box");
+  assert(o != defaultsmod.ModOrdered(rank: 4), "the != default inherited from Equal dispatches through the box");
+  Ordered bigger = defaultsmod.ModOrdered(rank: 9);
+  assert(bigger > defaultsmod.ModOrdered(rank: 4), "the > default dispatches through the box");
+}
+
+test_module_explicit_is_ordered_direct_defaults() `test {
+  defaultsmod.ModOrdered m = defaultsmod.ModOrdered(rank: 3);
+  assert(m > defaultsmod.ModOrdered(rank: 1), "the > default is reachable without boxing");
+  assert(m <= defaultsmod.ModOrdered(rank: 3), "the <= default is reachable without boxing");
+  assert(m >= defaultsmod.ModOrdered(rank: 3), "the >= default is reachable without boxing");
+  assert(m != defaultsmod.ModOrdered(rank: 4), "the != default is reachable without boxing");
+}
+
+// --- Transitive: the structural ancestor sits behind a nominal module parent -
+// ModFee's own parent list holds nothing structural — it reaches Ordered only
+// through ModOrdered. The module's declare/define pass has to descend through
+// that non-structural parent, or every inherited-default slot in ModFee's
+// vtable is left null.
+test_module_transitive_structural_ancestor_defaults() `test {
+  defaultsmod.ModFee a = defaultsmod.ModFee(rank: 5);
+  defaultsmod.ModFee b = defaultsmod.ModFee(rank: 2);
+  assert(a > b, "the > default two levels down inside the module");
+  assert(b < a, "the abstract requirement still reaches ModOrdered's body");
+  assert(a != b, "the != default inherited from Equal through ModOrdered");
+  assert(b <= a, "the <= default");
+  assert(a >= b, "the >= default");
+  Ordered o = defaultsmod.ModFee(rank: 5);
+  assert(o >= defaultsmod.ModFee(rank: 2), "and the boxed view agrees");
+}
+
+// --- The T1734 shape: a MAIN-FILE child of a module type that declares `is` ---
+// The concrete type is compiled by the main file's pass, but the interface it
+// inherits its defaults from is reached through a parent that lives in another
+// module — so the declare pass has to resolve the interface's declaring file
+// across the module boundary before it can synthesize anything.
+type MainFee is defaultsmod.ModOrdered `public `doc("Main-file child of a module type that declares `is Ordered`.") {
+}
+
+test_mainfile_child_of_module_type_inherits_defaults() `test {
+  MainFee a = MainFee(rank: 5);
+  MainFee b = MainFee(rank: 2);
+  assert(a > b, "the > default on a main-file child of a module type");
+  assert(b < a, "the abstract requirement still reaches the module parent's body");
+  assert(a != b, "the != default inherited from Equal across the module boundary");
+  assert(b <= a, "the <= default");
+  Ordered o = MainFee(rank: 5);
+  assert(o >= MainFee(rank: 2), "and the boxed view agrees");
+}

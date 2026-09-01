@@ -228,10 +228,15 @@ main() {
   print_line(w[0].raw_doubled.to_string());
 }
 `)
-	// The box is built for the CHILD, and its one slot resolves to the parent's body
-	// (a value child adds methods, it never overrides them — T1527).
+	// The box is built for the CHILD, and its one slot resolves to the child's own
+	// synthesis of the parent's body — a value child adds methods, it never
+	// overrides them (T1527), so Latency.raw_doubled is Metric's body compiled
+	// against Latency. It is the same function a direct `l.raw_doubled` call has
+	// always targeted; the view vtable used to name Metric.raw_doubled instead, and
+	// that disagreement between the vtable slot and direct dispatch is what T1880
+	// removed.
 	assertContains(t, ir,
-		"@promise_vtable_Latency_as_Doubler = constant [1 x i8*] [i8* bitcast (i64 (i8*)* @Metric.raw_doubled to i8*)]")
+		"@promise_vtable_Latency_as_Doubler = constant [1 x i8*] [i8* bitcast (i64 (i8*)* @Latency.raw_doubled to i8*)]")
 	// The child's own typeinfo travels in the box and needs its own clone_fn, or
 	// __promise_structural_clone aliases the box and both copies free it.
 	assertContainsMatch(t, ir,

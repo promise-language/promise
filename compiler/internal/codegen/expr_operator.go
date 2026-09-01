@@ -115,46 +115,13 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 			args = append(args, c.extractInstancePtr(left))
 		}
 	}
-	// If right came from genThisExpr() (returns i8* receiver ptr) but the method expects a
-	// value struct, wrap it as {null_vtable, instance_ptr}. This happens in synthesized default
-	// method bodies like Priority.> containing "other < this", where 'this' appears as an
-	// argument rather than the receiver.
 	if isThisReceiver(e.Right) {
-		var paramIdx int
+		paramIdx := 0
 		if method.Sig().Recv() != nil {
 			paramIdx = 1
 		}
 		if paramIdx < len(fn.Params) {
-			if st, ok := fn.Params[paramIdx].Typ.(*irtypes.StructType); ok {
-				if _, rightIsPtr := right.Type().(*irtypes.PointerType); rightIsPtr {
-					rightType := c.info.Types[e.Right]
-					if c.typeSubst != nil {
-						rightType = types.Substitute(rightType, c.typeSubst)
-					}
-					if c.selfSubst != nil {
-						rightType = types.SubstituteSelf(rightType, c.selfSubst.iface, c.selfSubst.concrete)
-					}
-					rightNamed := extractNamed(rightType)
-					if rightNamed != nil && rightNamed.IsValueType() {
-						// Value-type `this`: the receiver i8* points at the value
-						// struct itself (see valueTypeReceiverPtr), so load the
-						// param directly rather than synthesizing {vtable, instance}.
-						valPtr := c.block.NewBitCast(right, irtypes.NewPointer(st))
-						right = c.block.NewLoad(st, valPtr)
-					} else {
-						// Heap type: `this` i8* IS the instance pointer; wrap it
-						// as {null_vtable, instance_ptr}.
-						alloca := c.createEntryAlloca(st)
-						vtableField := c.block.NewGetElementPtr(st, alloca,
-							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-						c.block.NewStore(constant.NewNull(irtypes.I8Ptr), vtableField)
-						instField := c.block.NewGetElementPtr(st, alloca,
-							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-						c.block.NewStore(right, instField)
-						right = c.block.NewLoad(st, alloca)
-					}
-				}
-			}
+			right = c.coerceThisOperand(right, e.Right, fn.Params[paramIdx].Typ)
 		}
 	}
 	args = append(args, right)
@@ -166,6 +133,43 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 	// T0918: track the heap user-type result for inline (unbound) use.
 	return c.trackOperatorResult(e, result)
+}
+
+// coerceThisOperand adapts a `this` *argument* (as opposed to the receiver) to a
+// value-struct parameter. Inside a synthesized structural default — e.g.
+// Ordered's `> (Self other) => other < this` — `this` is the raw i8* receiver
+// pointer that genThisExpr returns, but the operator's parameter is the operand
+// type's value struct. A value type's receiver points at that struct, so load it;
+// a heap type's receiver IS the instance pointer, so wrap it as
+// {null_vtable, instance_ptr}. Shared by the direct and virtual dispatch paths so
+// both marshal `this` the same way (T1880).
+func (c *Compiler) coerceThisOperand(right value.Value, rightExpr ast.Expr, paramType irtypes.Type) value.Value {
+	st, ok := paramType.(*irtypes.StructType)
+	if !ok {
+		return right
+	}
+	if _, rightIsPtr := right.Type().(*irtypes.PointerType); !rightIsPtr {
+		return right
+	}
+	rightType := c.info.Types[rightExpr]
+	if c.typeSubst != nil {
+		rightType = types.Substitute(rightType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		rightType = types.SubstituteSelf(rightType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if rightNamed := extractNamed(rightType); rightNamed != nil && rightNamed.IsValueType() {
+		valPtr := c.block.NewBitCast(right, irtypes.NewPointer(st))
+		return c.block.NewLoad(st, valPtr)
+	}
+	alloca := c.createEntryAlloca(st)
+	vtableField := c.block.NewGetElementPtr(st, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), vtableField)
+	instField := c.block.NewGetElementPtr(st, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(right, instField)
+	return c.block.NewLoad(st, alloca)
 }
 
 // genEnumBinaryOp dispatches a user-defined binary operator declared on an enum
@@ -292,7 +296,7 @@ func (c *Compiler) genNonNativeEnumCompoundOp(en *types.Enum, operandType types.
 // Mirrors genVirtualMethodCall but uses pre-evaluated left/right operands.
 func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 	method *types.Method, left, right value.Value) value.Value {
-	result := c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, isThisReceiver(e.Left))
+	result := c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, isThisReceiver(e.Left), e.Right)
 	if method.Sig().CanError() {
 		// T0984: unwrap the failable {ok, value, err} result and propagate the
 		// error. Done here (not in genVirtualBinaryOpValues, which is shared with
@@ -305,11 +309,12 @@ func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 // genVirtualBinaryOpValues is the value-based core of genVirtualBinaryOp: it
 // dispatches a non-native binary operator through the vtable given pre-evaluated
 // operands. leftIsThis reports whether the left operand is the method receiver
-// (`this`). Shared by genBinaryExpr (plain `a + b`) and genNonNativeCompoundOp
-// (compound `a += b`, where neither operand is `this`), so the vtable dispatch
-// logic lives in one place (T0715).
+// (`this`). rightExpr is the right operand's AST node, or nil when there is none
+// to name (the compound path). Shared by genBinaryExpr (plain `a + b`) and
+// genNonNativeCompoundOp (compound `a += b`, where neither operand is `this`), so
+// the vtable dispatch logic lives in one place (T0715).
 func (c *Compiler) genVirtualBinaryOpValues(named *types.Named, op string,
-	method *types.Method, left, right value.Value, leftIsThis bool) value.Value {
+	method *types.Method, left, right value.Value, leftIsThis bool, rightExpr ast.Expr) value.Value {
 
 	// Extract vtable and instance from left operand
 	var vtableRaw, instance value.Value
@@ -349,10 +354,15 @@ func (c *Compiler) genVirtualBinaryOpValues(named *types.Named, op string,
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
-	// Call with instance ptr + right operand
+	// Call with instance ptr + right operand. A `this` argument arrives as the raw
+	// i8* receiver pointer and must be marshalled into the parameter's value
+	// struct, exactly as the direct-dispatch path does (T1880).
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		args = append(args, instance)
+	}
+	if rightExpr != nil && isThisReceiver(rightExpr) && len(paramTypes) > 0 {
+		right = c.coerceThisOperand(right, rightExpr, paramTypes[len(paramTypes)-1])
 	}
 	args = append(args, right)
 	return c.block.NewCall(fnTyped, args...)
@@ -375,7 +385,7 @@ func (c *Compiler) genNonNativeCompoundOp(named *types.Named, operandType types.
 	if c.needsVtable(named) {
 		// Virtual dispatch when the operand type is abstract / structural / has
 		// children. Neither operand is `this`.
-		result = c.genVirtualBinaryOpValues(named, op, method, current, val, false)
+		result = c.genVirtualBinaryOpValues(named, op, method, current, val, false, nil)
 	} else {
 		// Direct dispatch: resolve the mangled name exactly as genBinaryExpr does
 		// (mono name for generic instances, structural-default synthesis under the

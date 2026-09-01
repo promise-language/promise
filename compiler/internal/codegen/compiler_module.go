@@ -189,6 +189,10 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareInheritedModuleDrops(modFile, irName)             // T0507
 
 	// 6. Compute vtable info and emit for module types
+	// T1880: module types inheriting structural-interface defaults (e.g.
+	// `io.File is Reader`) need their per-concrete defaults declared before the
+	// module's vtables are emitted, exactly as the main file does.
+	c.declareStructuralDefaults(modFile)
 	c.computeVtableInfo(modFile)
 	c.computeMonoVtableInfo(monoInstances)
 	c.emitVtableGlobals(modFile)
@@ -207,6 +211,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineMonoMethods(modFile, monoInstances)
 	c.defineMonoEnumMethods(modFile, monoInstances)
 	c.defineMonoSynthesizedDefaults(monoInstances)
+	c.defineStructuralDefaults(modFile)                       // T1880
 	c.defineSynthesizedModuleDrops(modFile, irName)           // B0158
 	c.defineSynthesizedModuleEnumDrops(modFile, irName)       // T0102
 	c.defineSynthesizedMonoDrops(modFile, monoInstances)      // B0158

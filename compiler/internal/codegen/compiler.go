@@ -201,6 +201,7 @@ type Compiler struct {
 	viewVtables               map[viewVtableKey]*ir.Global    // (concrete, view) → view-specific vtable
 	valueTypeRTTI             map[*types.Named]*ir.Global     // value type → global RTTI instance (field 1 of value struct)
 	interpBuilderWriterVtable *ir.Global                      // lazy: Builder→Writer vtable for string interpolation
+	nullVtableSlots           []nullVtableSlot                // T1880: slots emitted as null, checked by verifyNoNullVtableSlots
 
 	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
 	scopeBindings  []scopeBinding
@@ -1062,12 +1063,14 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareMonoInheritedDrops(monoInstances)              // T0468: drops inherited from generic parents
 	c.declareInheritedDrops(file)                           // T0507: drops inherited from non-generic parents
 
-	// T0862: non-generic types implementing a generic structural interface
-	// (e.g. `is Box[int]`) need their inherited default methods declared before
-	// the vtable is built — otherwise the vtable slot is left null and dispatch
-	// through the interface view segfaults. Bodies are generated later (after
-	// compileModules) by defineGenericStructuralDefaults.
-	c.declareGenericStructuralDefaults(file)
+	// T0862/T1880: non-generic types inheriting default methods from a structural
+	// interface (`is Box[int]`, `is Writer`, or transitively via a non-structural
+	// parent) need those defaults declared per-concrete before the vtable is built
+	// — otherwise the slot is left null (segfault) or filled with the interface's
+	// shared body, which dispatches by interface-relative slot index and so calls
+	// the wrong method whenever the interface is not the first parent. Bodies are
+	// generated later (after compileModules) by defineStructuralDefaults.
+	c.declareStructuralDefaults(file)
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
@@ -1107,7 +1110,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoEnumMethods(file, monoInstances)
 	c.defineMonoSynthesizedDefaults(monoInstances)         // structural parent defaults
-	c.defineGenericStructuralDefaults(file)                // T0862: non-generic impls of generic structural interfaces
+	c.defineStructuralDefaults(file)                       // T0862/T1880: non-generic impls of structural interfaces
 	c.defineSynthesizedDrops(file)                         // B0158: auto-synthesized drops (non-generic)
 	c.defineSynthesizedEnumDrops(file)                     // T0102: auto-synthesized enum drops (non-generic)
 	c.defineSynthesizedMonoDrops(file, monoInstances)      // B0158: auto-synthesized drops (generic)
@@ -1127,6 +1130,10 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	// __runtime module so SplitModuleIRs caches them like __mod_std. Must run
 	// after all runtime bodies (including wrapMainWithScheduler) are emitted.
 	c.tagRuntimeFuncs()
+
+	// T1880: a null vtable slot for a non-abstract method is always a codegen
+	// bug — it turns a virtual call into a jump to address 0.
+	c.verifyNoNullVtableSlots()
 
 	return &CompileResult{
 		Module:          c.module,

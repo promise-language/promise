@@ -396,6 +396,7 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 		return nil
 	}
 	var entries []constant.Constant
+	var nulls []nullVtableSlot
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(named, m.Name())
 		mangledName := mangleMethodNameForMethod(ownerName, m)
@@ -417,6 +418,8 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 			entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 		} else {
 			// Abstract method with no body — store null
+			nulls = append(nulls, nullVtableSlot{slot: len(entries), typeName: named.Obj().Name(), method: m,
+				structuralDefault: c.structuralDefaultOwner(named, m) != nil})
 			entries = append(entries, constant.NewNull(irtypes.I8Ptr))
 		}
 	}
@@ -424,6 +427,7 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 	init := constant.NewArray(arrayType, entries...)
 	global := c.module.NewGlobalDef("promise_vtable_"+c.typeGlobalName(named), init)
 	global.Immutable = true
+	c.recordNullVtableSlots(global, nulls)
 	return global
 }
 
@@ -543,6 +547,7 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 			continue
 		}
 		var entries []constant.Constant
+		var nulls []nullVtableSlot
 		for _, m := range methods {
 			ownerName := c.resolveMethodOwner(named, m.Name())
 			// Resolve to mono method name: Owner__typeargs.method
@@ -572,6 +577,8 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 			if fn, ok := c.funcs[mangledName]; ok {
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 			} else {
+				nulls = append(nulls, nullVtableSlot{slot: len(entries), typeName: name, method: m,
+					structuralDefault: c.structuralDefaultOwner(named, m) != nil})
 				entries = append(entries, constant.NewNull(irtypes.I8Ptr))
 			}
 		}
@@ -582,10 +589,12 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 			// This handles module-owned generic types (e.g. Map[K,V]) whose
 			// methods weren't declared when the vtable was first created.
 			existing.Init = init
+			c.recordNullVtableSlots(existing, nulls)
 			continue
 		}
 		global := c.module.NewGlobalDef("promise_vtable_"+name, init)
 		global.Immutable = true
+		c.recordNullVtableSlots(global, nulls)
 		c.monoVtableGlobals[name] = global
 	}
 }
@@ -834,6 +843,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 
 	methods := view.AllVirtualMethods()
 	var entries []constant.Constant
+	var nulls []nullVtableSlot
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
 		mangledName := mangleMethodNameForMethod(ownerName, m)
@@ -873,6 +883,8 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 			}
 		} else {
+			nulls = append(nulls, nullVtableSlot{slot: len(entries), typeName: concreteCacheKey, method: m,
+				structuralDefault: c.structuralDefaultOwner(concrete, m) != nil})
 			entries = append(entries, constant.NewNull(irtypes.I8Ptr))
 		}
 	}
@@ -881,8 +893,78 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 	name := fmt.Sprintf("promise_vtable_%s_as_%s", concreteCacheKey, view.Obj().Name())
 	global := c.module.NewGlobalDef(name, init)
 	global.Immutable = true
+	c.recordNullVtableSlots(global, nulls)
 	c.viewVtables[key] = global
 	return global
+}
+
+// nullVtableSlot records a vtable slot that was emitted as a null function
+// pointer, so verifyNoNullVtableSlots can re-check it once every body exists. The
+// record keeps the global itself rather than its initializer, because a mono
+// vtable is emitted twice and the second emission patches in the functions the
+// first one could not see.
+type nullVtableSlot struct {
+	global            *ir.Global
+	slot              int
+	typeName          string
+	method            *types.Method
+	structuralDefault bool
+}
+
+// recordNullVtableSlots attaches the just-emitted global to the slot records
+// gathered while building its initializer.
+func (c *Compiler) recordNullVtableSlots(global *ir.Global, slots []nullVtableSlot) {
+	for _, s := range slots {
+		s.global = global
+		c.nullVtableSlots = append(c.nullVtableSlots, s)
+	}
+}
+
+// structuralDefaultOwner returns the structural interface that supplies m to
+// `named` as an inherited default body — the slots the null-vtable assertion is
+// responsible for, because such a slot can only be filled by a per-concrete
+// synthesis and a missing one leaves a jump to address 0 (T1880).
+//
+// A structural interface's own vtable is never the vtable of a live value — an
+// implementor either carries its own (with the defaults synthesized into it) or is
+// boxed through a view vtable — so its slots are not that invariant's business.
+func (c *Compiler) structuralDefaultOwner(named *types.Named, m *types.Method) *types.Named {
+	if named.IsStructural() {
+		return nil
+	}
+	return c.findStructuralOwnerBy(named, m.Name(), lookupForMemberKind(m))
+}
+
+// verifyNoNullVtableSlots asserts that no vtable slot for an inherited structural
+// default was left null once every function body has been emitted — a null there
+// turns a virtual call into a jump to address 0, which is what T1880 was. Slots
+// are re-read from the global's current initializer, so a mono vtable whose first
+// emission was incomplete is judged by its final contents.
+//
+// The check is deliberately scoped to structural defaults. Two other kinds of
+// null slot are emitted today and are not this invariant's business: an
+// interface's own vtable has a null for every method it does not itself
+// implement (nothing ever dispatches through it — an implementor carries its own
+// vtable or a view vtable), and a main-file type inheriting from a *module*
+// parent gets nulls because emitVtableGlobals runs before compileModules
+// declares the parent's functions (T1893).
+func (c *Compiler) verifyNoNullVtableSlots() {
+	for _, s := range c.nullVtableSlots {
+		if !s.structuralDefault {
+			continue
+		}
+		arr, ok := s.global.Init.(*constant.Array)
+		if !ok || s.slot >= len(arr.Elems) {
+			continue
+		}
+		if _, isNull := arr.Elems[s.slot].(*constant.Null); !isNull {
+			continue
+		}
+		panic(fmt.Sprintf("codegen: vtable slot %d of @%s is null for %s.%s, "+
+			"a default inherited from a structural interface — virtual dispatch "+
+			"would jump to address 0 (T1880)",
+			s.slot, s.global.Name(), s.typeName, s.method.Name()))
+	}
 }
 
 // needsViewAdapter reports whether the concrete method's signature differs from

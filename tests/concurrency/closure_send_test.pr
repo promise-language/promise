@@ -477,19 +477,99 @@ many_move_arguments_under_contention() `test {
 
 // --- Known-blocked shapes: enable these with their tracker items ---
 //
-// T1655 — `Channel.send` of a TEMPORARY closure corrupts the env. The sending
-// scope frees the temp env at end of statement, so the receiver reads zeroed
-// captures and the eventual free aborts with "invalid free (bad header magic)".
-// Binding the closure to a local first and sending it with `move` is correct and
-// is covered above by `closure_over_channel`.
-//
-// temporary_closure_over_channel() `test {
-//   ch := channel[(int) -> int](1);
-//   int base = 4;
-//   ch.send(move |int x| -> x + base);
-//   g := (<-ch)!;
-//   assert(g(1) == 5, "temporary closure survives the send");
-// }
+// T1655 — `Channel.send` of a TEMPORARY closure: the env ownership transfers
+// to the channel buffer, so the receiver reads valid captures and frees once.
+temporary_closure_over_channel() `test {
+  ch := channel[(int) -> int](1);
+  int base = 4;
+  ch.send(move |int x| -> x + base);
+  g := (<-ch)!;
+  assert(g(1) == 5, "temporary closure survives the send");
+}
+
+// T1655: a call-result temporary — make_adder returns a fresh closure whose env
+// is a statement-scoped temp. Without claimEnvTemp the send scope frees it.
+call_result_temporary_closure_over_channel() `test {
+  ch := channel[(int) -> int](1);
+  ch.send(make_adder(100));
+  g := (<-ch)!;
+  assert(g(1) == 101, "call-result temporary closure survives the send");
+}
+
+// T1655: a temporary closure buffered in a channel that is NEVER received must
+// be freed by Channel.drop — no leak, no double free.
+temporary_closure_dropped_with_channel() `test {
+  ch := channel[(int) -> int](1);
+  int base = 9;
+  ch.send(move |int x| -> x + base);
+}
+
+// T1655: multiple temporary closures sent in sequence — each env transfer is
+// independent; none is freed by the sending scope.
+multiple_temporary_closures_over_channel() `test {
+  ch := channel[(int) -> int](3);
+  int a = 1;
+  int b = 2;
+  int d = 3;
+  ch.send(move |int x| -> x + a);
+  ch.send(move |int x| -> x + b);
+  ch.send(move |int x| -> x + d);
+  g1 := (<-ch)!;
+  g2 := (<-ch)!;
+  g3 := (<-ch)!;
+  assert(g1(10) == 11, "first temporary");
+  assert(g2(10) == 12, "second temporary");
+  assert(g3(10) == 13, "third temporary");
+}
+
+// T1655: a capture-free temporary closure (null env) sent into a channel —
+// claimEnvTemp must not crash when the env pointer is null.
+temporary_capture_free_closure_over_channel() `test {
+  ch := channel[(int) -> int](1);
+  ch.send(move |int x| -> x + 1);
+  g := (<-ch)!;
+  assert(g(10) == 11, "capture-free temporary closure over channel");
+}
+
+// T1655: unbuffered channel — the sender blocks until the receiver takes
+// the value, exercising the synchronous hand-off path for env ownership.
+temporary_closure_over_unbuffered_channel() `test {
+  ch := channel[(int) -> int]();
+  int base = 7;
+  done := channel[int](1);
+  go {
+    g := (<-ch)!;
+    done.send(g(3));
+  };
+  ch.send(move |int x| -> x + base);
+  assert((<-done)! == 10, "temporary closure over unbuffered channel");
+}
+
+// T1655: temporary closure capturing a string — heap-allocated capture must
+// survive the send and be freed exactly once by the receiver, no leak.
+temporary_closure_capturing_string_over_channel() `test {
+  ch := channel[(int) -> string](1);
+  string prefix = "val:";
+  ch.send(move |int x| -> prefix + "{x}");
+  g := (<-ch)!;
+  assert(g(42) == "val:42", "string-capturing temp closure over channel");
+}
+
+// T1655: cross-goroutine — sender goroutine creates a temp closure and sends
+// it; receiver goroutine reads and invokes it.
+temporary_closure_cross_goroutine() `test {
+  ch := channel[(int) -> int](1);
+  done := channel[int](1);
+  go {
+    int base = 50;
+    ch.send(move |int x| -> x + base);
+  };
+  go {
+    g := (<-ch)!;
+    done.send(g(5));
+  };
+  assert((<-done)! == 55, "cross-goroutine temp closure");
+}
 //
 // T1656 — a closure received through a `select` case or a `for-in` over a
 // channel never registers an env-free, so each received closure leaks its env.

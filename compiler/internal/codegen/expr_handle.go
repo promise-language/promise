@@ -896,6 +896,8 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.claimStringTemp(argVal)
 	// B0233: claim heap temp — ownership transfers to channel buffer
 	c.claimHeapTemp(argVal)
+	// T1655: claim env temp — ownership of closure env transfers to channel buffer
+	c.claimEnvTemp(argVal)
 	// T1221: when the arg is an Optional[string]/Optional[container] field dup
 	// (out.send(this.maybe_label)), the inner dup pointer is tracked separately —
 	// claim it so the caller's statement cleanup doesn't double-free the value the

@@ -33,7 +33,7 @@ The stdlib provides:
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice/`filled`/`clone`/`format`/`to_string`), `Map[K,V]` / `map[K,V]` (open-addressing, rehash, `clone`/`format`/`to_string`), `Set[T]` (`clone`/`format`/`to_string`) |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Format` structural interface, `Builder` (string building, satisfies `Writer`), `Parse` structural interface, `Scanner` (string parsing, satisfies `Reader`), `scan[T]()` |
 | I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `print(Format)`, `print_line(Format)`, `stdin` (Reader) / `stdout` / `stderr` (Writer) standard-stream getters |
-| I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()` |
+| I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek, `sync`, `rename`, `replace_content`/`replace_bytes`, `lock`/`lock_shared`/`try_lock`/`try_lock_for`/`unlock`), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists/`sync`), `IoError`, `read_line()`, `read_stdin()` — durability and locking contract in [io.md](io.md) |
 | Path (module) | `modules/path/path.pr` | `join`, `parent`, `file_name`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize` |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG (xoshiro256**) |
 | Sorting | `sort.pr` | `sort(T[] move)` for `Ordered` types (consumes and returns; iterative quicksort) |
@@ -53,7 +53,7 @@ The stdlib provides:
 
 | Module | File | Lines | What it covers |
 |--------|------|-------|----------------|
-| `io` | `modules/io/io.pr` | 548 | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()`. 88 tests. |
+| `io` | `modules/io/io.pr` | 809 | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek, `sync`, `rename`, `replace_content`/`replace_bytes`, `lock`/`lock_shared`/`try_lock`/`try_lock_for`/`unlock`), `BufferedReader`, `BufferedWriter`, `Dir` (make/make_all/list/remove/exists/`sync`), `IoError`, `read_line()`, `read_stdin()`. Atomic replace, `sync`, and advisory locking are specified by [io.md](io.md). 128 tests. |
 | `path` | `modules/path/path.pr` | 192 | `join`, `file_name`, `parent`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize`. 9 tests. |
 | `strings` | `modules/strings/strings.pr` | 65 | `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 15 tests. |
 | `math` | `modules/math/math.pr` | 67 | `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 8 tests. |

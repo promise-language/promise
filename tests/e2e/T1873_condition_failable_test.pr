@@ -289,3 +289,48 @@ test_for_false_failable_exits_immediately() `test {
   int result = for_false_failable()?!;
   assert(result == 0, "for with failable false exits immediately");
 }
+
+// --- edge: the loop header raises on a later trip, not the first ---
+//
+// The propagate block lives inside the loop header, which is a back-edge
+// target. A condition that succeeds several times and only then raises reaches
+// that edge; one that raises on its first evaluation never does.
+
+ok_until!(int i, int limit) bool {
+  if i >= limit {
+    raise error(message: "limit reached");
+  }
+  return true;
+}
+
+while_raises_midway!() int {
+  int i = 0;
+  while ok_until(i, 3) {
+    i++;
+  }
+  return i;
+}
+
+test_while_bare_failable_propagates_from_later_trip() `test {
+  bool caught = false;
+  while_raises_midway()? {
+    caught = true;
+  };
+  assert(caught, "while header should propagate on the fourth evaluation");
+}
+
+for_raises_midway!() int {
+  int n = 0;
+  for int i = 0; ok_until(i, 3); i++ {
+    n++;
+  }
+  return n;
+}
+
+test_for_bare_failable_propagates_from_later_trip() `test {
+  bool caught = false;
+  for_raises_midway()? {
+    caught = true;
+  };
+  assert(caught, "for header should propagate on the fourth evaluation");
+}

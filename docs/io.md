@@ -67,7 +67,7 @@ believe they had built a durable write and be wrong (§3.2).
 ### 3.1 What `replace_content` does
 
 1. Create a temporary file **in the destination's own directory** (§3.3).
-2. Take an exclusive lock on it (§5) and write the content.
+2. Take an exclusive lock on it (§5), truncate it, and write the content.
 3. `sync` the temporary file — the *contents* are now durable.
 4. `rename` the temporary over the destination — the swap is atomic.
 5. `sync` the destination's directory — the *swap* is now durable.
@@ -103,13 +103,18 @@ primitive that slowly fills a directory with debris is not acceptable.
 The temporary name is therefore **deterministic**, not random — `<name>.promise-sync<N>` beside the
 destination — and liveness is decided by the lock:
 
-1. `O_CREAT|O_EXCL` on `<name>.promise-sync0`. Success means it is ours.
-2. `EEXIST` means someone else created it. Open it and `try_lock`.
-   **If the lock is acquired, the previous owner is dead** — the kernel releases locks on process
-   death (§5.4) — so the file is stale: truncate and reuse it.
-3. If `try_lock` fails, a live writer owns it. Try `<name>.promise-sync1`, `2`, … to a bound of 8,
+1. Open `<name>.promise-sync0` with `O_RDWR|O_CREAT` — **not** `O_EXCL` — and `try_lock` it.
+   **The lock alone decides ownership.** Acquired means the slot is ours and whatever it holds is
+   stale, because the kernel releases locks on process death (§5.4), so truncate it to zero.
+2. If `try_lock` fails, a live writer owns it. Try `<name>.promise-sync1`, `2`, … to a bound of 8,
    then raise.
-4. Hold the lock for the whole write. The rename removes the name; closing releases the lock.
+3. Hold the lock for the whole write. The rename removes the name; closing releases the lock.
+
+Creation is deliberately *not* the ownership test. `open(O_CREAT|O_EXCL)` and the lock are two
+syscalls, and between them the temporary exists and is unlocked — indistinguishable from a crash
+orphan. A second writer arriving in that window would classify a live writer's slot as stale,
+truncate it, and rename it into place mid-write, violating §3.1 and §3.5. Deciding on the lock alone
+collapses the two states into one observation that no window can separate.
 
 This needs no random source, no process identifier, no clock, and no liveness probe. Process
 identifier reuse cannot fool it, concurrent writers to one destination never collide, and every
@@ -259,5 +264,5 @@ All operations raise `IoError`, carrying the platform error code as `code`. Beyo
 | Code | Meaning here |
 |---|---|
 | `EXDEV` (18) | `rename` across filesystems — the temporary was not a sibling of the destination (§3.3) |
-| `EAGAIN` / `EWOULDBLOCK` (11 Linux, 35 macOS) | reported by `try_lock!` as `false`, never raised |
+| `EAGAIN` / `EWOULDBLOCK` (11 Linux, 35 macOS) | contention. `try_lock!` reports it as `false` and never raises it; `replace_content` raises it when every temporary slot beside the destination is held by a live writer (§3.4) |
 | `ENOSYS` | the operation is unsupported on this target (WASM) |

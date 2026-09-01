@@ -81,6 +81,25 @@ func (c *Compiler) defineFileIOBodies() {
 	if fn, ok := irFuncByName["promise_io_file_stat_field"]; ok {
 		c.defineFileStatFieldBody(fn)
 	}
+	// T1520 durability primitives
+	if fn, ok := irFuncByName["promise_io_file_rename"]; ok {
+		c.defineFileRenameBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_io_file_sync"]; ok {
+		c.defineFileSyncBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_io_dir_sync"]; ok {
+		c.defineDirSyncBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_io_file_lock"]; ok {
+		c.defineFileLockBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_io_file_unlock"]; ok {
+		c.defineFileUnlockBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_io_file_truncate"]; ok {
+		c.defineFileTruncateBody(fn)
+	}
 }
 
 // Syscall handoff helpers
@@ -457,6 +476,94 @@ func (c *Compiler) defineDirExistsBody(fn *ir.Func) {
 	rc := entry.NewCall(c.palDirExists, cstr)
 	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
+
+// Durability primitives (T1520 — docs/io.md)
+//
+// Every one of these goes through emitEnterSyscall/emitExitSyscall. That is
+// mandatory rather than stylistic here: a blocking pal_file_lock parks the OS
+// thread inside flock/LockFileEx, and without handing the P off first it would
+// wedge the P for as long as the other holder runs — which for a declared
+// exclusion is measured in minutes.
+
+// defineFileRenameBody: void @promise_io_file_rename(i8* sret, i8* from, i8* to)
+func (c *Compiler) defineFileRenameBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	fromStr := c.stringToCStr(entry, fn.Params[1])
+	toStr := c.stringToCStr(entry, fn.Params[2])
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileRename, fromStr, toStr)
+	c.emitExitSyscall(entry)
+	entry.NewCall(c.palFree, fromStr)
+	entry.NewCall(c.palFree, toStr)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
+
+// defineFileSyncBody: void @promise_io_file_sync(i8* sret, i8* fd)
+func (c *Compiler) defineFileSyncBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileSync, fdI32)
+	c.emitExitSyscall(entry)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
+
+// defineDirSyncBody: void @promise_io_dir_sync(i8* sret, i8* path)
+func (c *Compiler) defineDirSyncBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palDirSync, cstr)
+	c.emitExitSyscall(entry)
+	entry.NewCall(c.palFree, cstr)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
+
+// defineFileLockBody: void @promise_io_file_lock(i8* sret, i8* fd, i8* exclusive, i8* nonblocking)
+func (c *Compiler) defineFileLockBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	fdI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[1]), irtypes.I32)
+	exclI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[2]), irtypes.I32)
+	nbI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[3]), irtypes.I32)
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileLock, fdI32, exclI32, nbI32)
+	c.emitExitSyscall(entry)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
+
+// defineFileUnlockBody: void @promise_io_file_unlock(i8* sret, i8* fd)
+func (c *Compiler) defineFileUnlockBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	fdI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[1]), irtypes.I32)
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileUnlock, fdI32)
+	c.emitExitSyscall(entry)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
+
+// defineFileTruncateBody: void @promise_io_file_truncate(i8* sret, i8* fd, i8* length)
+func (c *Compiler) defineFileTruncateBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	fdI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[1]), irtypes.I32)
+	lenI64 := c.extractRawInt(entry, fn.Params[2])
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileTruncate, fdI32, lenI64)
+	c.emitExitSyscall(entry)
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, fn.Params[0], rcI64)
 	entry.NewRet(nil)

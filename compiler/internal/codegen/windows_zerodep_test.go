@@ -192,12 +192,11 @@ func winlinkExportedSymbols(t *testing.T) map[string]bool {
 // TestWindowsExternalSymbolsAreExported cannot see.
 //
 // That test walks declarations → .def, so it catches an extern nobody exports.
-// It says nothing about a .def entry with no declaration, and _get_osfhandle is
-// exactly that: exported deliberately ahead of T1520 (FlushFileBuffers and
-// LockFileEx both need the HANDLE behind a CRT descriptor, and neither can be
-// reached without it). A tidy-up pass that drops "unused" symbol-list entries
-// would silently take the file-locking primitive with it, and nothing else in
-// the tree would notice until T1520 failed to link.
+// It says nothing about a .def entry with no declaration, and a tidy-up pass that
+// drops "unused" symbol-list entries would silently take a whole primitive with
+// it — nothing else in the tree would notice until a Windows build failed to
+// link, on a host this repo cannot reach from macOS or Linux. Each entry below
+// therefore names the consumer that would break.
 func TestWindowsFileOpenLinkSurface(t *testing.T) {
 	exported := winlinkExportedSymbols(t)
 
@@ -207,6 +206,11 @@ func TestWindowsFileOpenLinkSurface(t *testing.T) {
 		{"GetLastError", "CreateFileA reports failure here, not via errno"},
 		{"_open_osfhandle", "wraps the HANDLE in the CRT fd that _read/_write use"},
 		{"_get_osfhandle", "recovers the HANDLE for FlushFileBuffers / LockFileEx (T1520)"},
+		{"FlushFileBuffers", "pal_file_sync forces contents to stable storage (T1520)"},
+		{"LockFileEx", "pal_file_lock takes the whole-file advisory lock (T1520)"},
+		{"UnlockFileEx", "pal_file_unlock releases it (T1520)"},
+		{"MoveFileExA", "pal_file_rename replaces atomically and write-through (T1520)"},
+		{"_chsize_s", "pal_file_truncate empties a reclaimed temporary slot (T1520)"},
 	} {
 		if !exported[tc.sym] {
 			t.Errorf("%s is not exported by any .def in %s — %s",

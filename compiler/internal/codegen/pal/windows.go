@@ -481,6 +481,11 @@ func (p *WindowsPAL) emitWinErrReturnI32(blk *ir.Block, winErr value.Value, errn
 //	4 = WRONLY               GENERIC_WRITE,              OPEN_EXISTING              (open_write)
 //	5 = WRONLY create/trunc  GENERIC_WRITE,              CREATE_ALWAYS              (create)
 //	6 = WRONLY create/append GENERIC_WRITE,              OPEN_ALWAYS  + _O_APPEND   (append)
+//	7 = RDWR create          GENERIC_READ|GENERIC_WRITE, OPEN_ALWAYS                (no trunc/append)
+//
+// Mode 7 backs the temporary-slot protocol in docs/io.md §3.4 — the slot is opened
+// before the lock decides whether it is stale, so it must neither truncate nor
+// append. OPEN_ALWAYS without _O_APPEND is exactly O_RDWR|O_CREAT.
 //
 // Append is not emulated by hand: _open_osfhandle(h, _O_APPEND) sets the descriptor's
 // FAPPEND bit and UCRT _write seeks to end before each write — byte-identical to what
@@ -539,6 +544,7 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	isWrite := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 4))
 	isWrCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 5))
 	isWrAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 6))
+	isRwCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 7))
 
 	// dwDesiredAccess: modes 4/5/6 are write-only, mode 1 is read-only, rest are RDWR.
 	isWriteOnly := entry.NewOr(entry.NewOr(isWrite, isWrCreate), isWrAppend)
@@ -550,7 +556,9 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	// everything else requires an existing file.
 	isTruncating := entry.NewOr(isCreate, isWrCreate)
 	isAppending := entry.NewOr(isAppend, isWrAppend)
-	dispRest := entry.NewSelect(isAppending,
+	// Modes 3, 6 and 7 all create-if-absent; only 3 and 6 also append.
+	isOpenAlways := entry.NewOr(isAppending, isRwCreate)
+	dispRest := entry.NewSelect(isOpenAlways,
 		constant.NewInt(irtypes.I32, openAlways), constant.NewInt(irtypes.I32, openExisting))
 	disposition := entry.NewSelect(isTruncating, constant.NewInt(irtypes.I32, createAlways), dispRest)
 
@@ -840,6 +848,275 @@ func (p *WindowsPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 
 	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
 	okBlk.NewRet(ret)
+	return fn
+}
+
+// winDeclareGetOsfHandle returns (or declares) UCRT @_get_osfhandle(i32) → i64.
+// Recovers the Win32 HANDLE behind a CRT file descriptor. Every T1520 primitive
+// except the rename needs one, because FlushFileBuffers, LockFileEx and
+// UnlockFileEx are Win32 APIs with no CRT equivalent. Returns INVALID_HANDLE_VALUE
+// (-1) or -2 for a bad descriptor.
+func winDeclareGetOsfHandle(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "_get_osfhandle", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32))
+}
+
+// winOverlappedSize is sizeof(OVERLAPPED) on x64:
+//
+//	offset  0: Internal     (ULONG_PTR, 8 bytes)
+//	offset  8: InternalHigh (ULONG_PTR, 8 bytes)
+//	offset 16: Offset/OffsetHigh union with Pointer (8 bytes)
+//	offset 24: hEvent       (HANDLE, 8 bytes)
+//	total: 32 bytes
+//
+// LockFileEx requires it fully zeroed: the Offset pair is the lock's starting
+// byte and hEvent must be null for a synchronous handle. A garbage Offset would
+// lock a range somewhere else in the file and silently not conflict with anyone.
+const winOverlappedSize = 32
+
+// winEmitOsfHandleGuard emits the "recover the HANDLE, bail out on a bad fd"
+// prologue shared by pal_file_sync, pal_file_lock and pal_file_unlock. It returns
+// the HANDLE and the block execution continues in; the failure path returns
+// -EBADF(9) directly, since _get_osfhandle sets errno only for some failures.
+func (p *WindowsPAL) winEmitOsfHandleGuard(module *ir.Module, fn *ir.Func, entry *ir.Block, fd value.Value) (value.Value, *ir.Block) {
+	getOsfHandle := winDeclareGetOsfHandle(module)
+
+	handleInt := entry.NewCall(getOsfHandle, fd)
+	// INVALID_HANDLE_VALUE is -1; -2 means the descriptor is not open.
+	isInvalid := entry.NewICmp(enum.IPredSLT, handleInt, constant.NewInt(irtypes.I64, 0))
+	badFdBlk := fn.NewBlock(".bad_fd")
+	gotBlk := fn.NewBlock(".got_handle")
+	entry.NewCondBr(isInvalid, badFdBlk, gotBlk)
+
+	errnoPtr := badFdBlk.NewCall(p.getOrDeclareErrnoFn(module))
+	badFdBlk.NewStore(constant.NewInt(irtypes.I32, 9), errnoPtr)
+	badFdBlk.NewRet(constant.NewInt(irtypes.I32, -9))
+
+	handle := gotBlk.NewIntToPtr(handleInt, irtypes.I8Ptr)
+	return handle, gotBlk
+}
+
+// EmitFileRename declares Win32 @MoveFileExA and defines @pal_file_rename.
+//
+// MOVEFILE_REPLACE_EXISTING (0x1) matches POSIX rename(2), which silently
+// replaces the destination; plain MoveFile fails instead. MOVEFILE_WRITE_THROUGH
+// (0x8) makes the rename durable before returning, and is what lets pal_dir_sync
+// be a no-op on Windows — a directory handle cannot be flushed there, so the
+// guarantee docs/io.md §3.2 needs has to ride on the rename itself.
+func (p *WindowsPAL) EmitFileRename(module *ir.Module) *ir.Func {
+	moveFileExA := getOrDeclareFunc(module, "MoveFileExA", irtypes.I32,
+		ir.NewParam("lpExistingFileName", irtypes.I8Ptr),
+		ir.NewParam("lpNewFileName", irtypes.I8Ptr),
+		ir.NewParam("dwFlags", irtypes.I32))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	errnoFn := p.getOrDeclareErrnoFn(module)
+
+	// MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+	const moveFlags = 0x1 | 0x8
+
+	fn := module.NewFunc("pal_file_rename", irtypes.I32,
+		ir.NewParam("from", irtypes.I8Ptr),
+		ir.NewParam("to", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ok := entry.NewCall(moveFileExA, fn.Params[0], fn.Params[1],
+		constant.NewInt(irtypes.I32, moveFlags))
+	// Capture the Win32 error immediately — any intervening call could clobber it.
+	winErr := entry.NewCall(getLastError)
+
+	failed := entry.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	okBlk := fn.NewBlock(".ok")
+	entry.NewCondBr(failed, errBlk, okBlk)
+
+	p.emitWinErrReturnI32(errBlk, winErr, errnoFn)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileSync declares Win32 @FlushFileBuffers and defines @pal_file_sync.
+func (p *WindowsPAL) EmitFileSync(module *ir.Module) *ir.Func {
+	flushFileBuffers := getOrDeclareFunc(module, "FlushFileBuffers", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	errnoFn := p.getOrDeclareErrnoFn(module)
+
+	fn := module.NewFunc("pal_file_sync", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	handle, blk := p.winEmitOsfHandleGuard(module, fn, entry, fn.Params[0])
+
+	ok := blk.NewCall(flushFileBuffers, handle)
+	winErr := blk.NewCall(getLastError)
+	failed := blk.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	okBlk := fn.NewBlock(".ok")
+	blk.NewCondBr(failed, errBlk, okBlk)
+
+	p.emitWinErrReturnI32(errBlk, winErr, errnoFn)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitDirSync defines @pal_dir_sync as a no-op returning 0.
+//
+// A directory handle cannot be flushed on Windows; MOVEFILE_WRITE_THROUGH in
+// pal_file_rename carries the same guarantee instead (docs/io.md §3.2). The entry
+// point still exists so a caller assembling the durable-write sequence by hand
+// writes one portable sequence rather than branching on the platform.
+func (p *WindowsPAL) EmitDirSync(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_sync", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileLock declares Win32 @LockFileEx and defines @pal_file_lock.
+//
+// LockFileEx locks a byte range, so the whole file is 0xFFFFFFFF:0xFFFFFFFF bytes
+// from offset 0 — the documented idiom for a whole-file lock. Ownership is per
+// HANDLE, which is what makes it match flock's per-open-file-description model
+// (docs/io.md §5.2). Unlike flock it is mandatory rather than advisory; §5.3
+// states that difference instead of smoothing it over.
+//
+// LOCKFILE_FAIL_IMMEDIATELY = 0x1, LOCKFILE_EXCLUSIVE_LOCK = 0x2.
+func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
+	lockFileEx := getOrDeclareFunc(module, "LockFileEx", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("dwFlags", irtypes.I32),
+		ir.NewParam("dwReserved", irtypes.I32),
+		ir.NewParam("nNumberOfBytesToLockLow", irtypes.I32),
+		ir.NewParam("nNumberOfBytesToLockHigh", irtypes.I32),
+		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	errnoFn := p.getOrDeclareErrnoFn(module)
+
+	fn := module.NewFunc("pal_file_lock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("exclusive", irtypes.I32),
+		ir.NewParam("nonblocking", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// The OVERLAPPED alloca must precede the guard's branch so it stays in the
+	// function's entry block.
+	ov := entry.NewAlloca(irtypes.NewArray(winOverlappedSize, irtypes.I8))
+
+	handle, blk := p.winEmitOsfHandleGuard(module, fn, entry, fn.Params[0])
+
+	winEmitMemset(module, blk, ov, winOverlappedSize)
+	ovPtr := blk.NewBitCast(ov, irtypes.I8Ptr)
+
+	isExcl := blk.NewICmp(enum.IPredNE, fn.Params[1], constant.NewInt(irtypes.I32, 0))
+	exclBit := blk.NewSelect(isExcl, constant.NewInt(irtypes.I32, 0x2), constant.NewInt(irtypes.I32, 0))
+	isNB := blk.NewICmp(enum.IPredNE, fn.Params[2], constant.NewInt(irtypes.I32, 0))
+	nbBit := blk.NewSelect(isNB, constant.NewInt(irtypes.I32, 0x1), constant.NewInt(irtypes.I32, 0))
+	flags := blk.NewOr(exclBit, nbBit)
+
+	ok := blk.NewCall(lockFileEx, handle, flags, constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0xFFFFFFFF), constant.NewInt(irtypes.I32, 0xFFFFFFFF), ovPtr)
+	winErr := blk.NewCall(getLastError)
+
+	failed := blk.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	okBlk := fn.NewBlock(".ok")
+	blk.NewCondBr(failed, errBlk, okBlk)
+
+	// Contention must reach the Promise layer as the one code docs/io.md §7 names
+	// for "held elsewhere", or try_lock would raise where it should return false.
+	// ERROR_LOCK_VIOLATION (33) is translated here rather than in
+	// emitWinErrToErrno, which maps it to EINVAL for its other callers — there it
+	// means a conflicting read/write, not a refused acquire, and widening the
+	// shared mapper would mislabel those.
+	isContended := errBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 33))
+	contendedBlk := fn.NewBlock(".contended")
+	otherErrBlk := fn.NewBlock(".other_err")
+	errBlk.NewCondBr(isContended, contendedBlk, otherErrBlk)
+
+	// EWOULDBLOCK is 140 in the Windows CRT, but modules/io speaks POSIX errno
+	// throughout, so the value the Promise layer already recognises (11, EAGAIN on
+	// Linux) is used on all three platforms.
+	contendedErrnoPtr := contendedBlk.NewCall(errnoFn)
+	contendedBlk.NewStore(constant.NewInt(irtypes.I32, 11), contendedErrnoPtr)
+	contendedBlk.NewRet(constant.NewInt(irtypes.I32, -11))
+
+	p.emitWinErrReturnI32(otherErrBlk, winErr, errnoFn)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileUnlock declares Win32 @UnlockFileEx and defines @pal_file_unlock.
+// Releases the same whole-file range EmitFileLock takes.
+func (p *WindowsPAL) EmitFileUnlock(module *ir.Module) *ir.Func {
+	unlockFileEx := getOrDeclareFunc(module, "UnlockFileEx", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("dwReserved", irtypes.I32),
+		ir.NewParam("nNumberOfBytesToUnlockLow", irtypes.I32),
+		ir.NewParam("nNumberOfBytesToUnlockHigh", irtypes.I32),
+		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	errnoFn := p.getOrDeclareErrnoFn(module)
+
+	fn := module.NewFunc("pal_file_unlock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ov := entry.NewAlloca(irtypes.NewArray(winOverlappedSize, irtypes.I8))
+
+	handle, blk := p.winEmitOsfHandleGuard(module, fn, entry, fn.Params[0])
+
+	winEmitMemset(module, blk, ov, winOverlappedSize)
+	ovPtr := blk.NewBitCast(ov, irtypes.I8Ptr)
+
+	ok := blk.NewCall(unlockFileEx, handle, constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0xFFFFFFFF), constant.NewInt(irtypes.I32, 0xFFFFFFFF), ovPtr)
+	winErr := blk.NewCall(getLastError)
+
+	failed := blk.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	okBlk := fn.NewBlock(".ok")
+	blk.NewCondBr(failed, errBlk, okBlk)
+
+	p.emitWinErrReturnI32(errBlk, winErr, errnoFn)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileTruncate declares UCRT @_chsize_s and defines @pal_file_truncate.
+//
+// _chsize_s returns errno_t directly — 0 on success, the error code itself on
+// failure — rather than -1 plus errno, so the result is negated as-is and must
+// not go through emitWinErrToErrno (it is not a Win32 error code).
+func (p *WindowsPAL) EmitFileTruncate(module *ir.Module) *ir.Func {
+	chsize := getOrDeclareFunc(module, "_chsize_s", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("size", irtypes.I64))
+	errnoFn := p.getOrDeclareErrnoFn(module)
+
+	fn := module.NewFunc("pal_file_truncate", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("length", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	rc := entry.NewCall(chsize, fn.Params[0], fn.Params[1])
+	failed := entry.NewICmp(enum.IPredNE, rc, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	okBlk := fn.NewBlock(".ok")
+	entry.NewCondBr(failed, errBlk, okBlk)
+
+	// Keep @pal_errno consistent with the returned code, as the Win32 paths do.
+	errnoPtr := errBlk.NewCall(errnoFn)
+	errBlk.NewStore(rc, errnoPtr)
+	errBlk.NewRet(errBlk.NewSub(constant.NewInt(irtypes.I32, 0), rc))
+
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }
 

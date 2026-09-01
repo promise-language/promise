@@ -55,8 +55,10 @@ type PAL interface {
 	EmitNumCPUs(module *ir.Module) *ir.Func
 
 	// File I/O primitives (Phase D)
-	// EmitFileOpen defines @pal_file_open(i8* path, i32 mode) → i32 (fd or -1)
-	// mode: 0=open(rw), 1=read(ro), 2=create(rw,trunc), 3=append(rw,create)
+	// EmitFileOpen defines @pal_file_open(i8* path, i32 mode) → i32 (fd or -errno)
+	// mode: 0=rw, 1=ro, 2=rw+create+trunc, 3=rw+create+append, 4=wo,
+	// 5=wo+create+trunc, 6=wo+create+append, 7=rw+create (no trunc, no append).
+	// See the per-backend doc comments for the exact flag mapping.
 	EmitFileOpen(module *ir.Module) *ir.Func
 	// EmitFileRead defines @pal_file_read(i32 fd, i8* buf, i64 len) → i64
 	EmitFileRead(module *ir.Module) *ir.Func
@@ -76,6 +78,28 @@ type PAL interface {
 	EmitPipeClose(module *ir.Module) *ir.Func
 	// EmitFileSeek defines @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
 	EmitFileSeek(module *ir.Module) *ir.Func
+	// EmitFileRename defines @pal_file_rename(i8* from, i8* to) → i32 (0=ok, -errno)
+	// Atomic within one filesystem; -EXDEV across filesystems. See docs/io.md §3.
+	EmitFileRename(module *ir.Module) *ir.Func
+	// EmitFileSync defines @pal_file_sync(i32 fd) → i32 (0=ok, -errno)
+	// Forces file contents to stable storage: fsync on Linux, F_FULLFSYNC on
+	// macOS (fsync there does not cross the drive's volatile cache — docs/io.md §4),
+	// FlushFileBuffers on Windows.
+	EmitFileSync(module *ir.Module) *ir.Func
+	// EmitDirSync defines @pal_dir_sync(i8* path) → i32 (0=ok, -errno)
+	// Forces a directory entry to stable storage, making a rename durable.
+	// A no-op returning 0 on Windows, where MOVEFILE_WRITE_THROUGH carries it
+	// instead (docs/io.md §3.2).
+	EmitDirSync(module *ir.Module) *ir.Func
+	// EmitFileLock defines @pal_file_lock(i32 fd, i32 exclusive, i32 nonblocking) → i32
+	// Whole-file advisory lock owned by the open file description: flock(2) on
+	// POSIX, LockFileEx on Windows. Returns 0, or -errno; -EWOULDBLOCK when
+	// nonblocking and the lock is held elsewhere (docs/io.md §5).
+	EmitFileLock(module *ir.Module) *ir.Func
+	// EmitFileUnlock defines @pal_file_unlock(i32 fd) → i32 (0=ok, -errno)
+	EmitFileUnlock(module *ir.Module) *ir.Func
+	// EmitFileTruncate defines @pal_file_truncate(i32 fd, i64 length) → i32 (0=ok, -errno)
+	EmitFileTruncate(module *ir.Module) *ir.Func
 	// EmitFileStatSize defines @pal_file_stat_size(i8* path) → i64 (-1=error)
 	EmitFileStatSize(module *ir.Module) *ir.Func
 	// EmitFileRemove defines @pal_file_remove(i8* path) → i32 (0=ok, -1=error)
@@ -1375,6 +1399,78 @@ func emitStubFileRemove(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// The T1520 durability primitives are unsupported on WASM: WASI has no advisory
+// locking and the target has no durability story to offer. They return -ENOSYS
+// (-38) rather than -1 so the Promise layer raises the code docs/io.md §7 names
+// for "unsupported on this target", instead of an errno that means nothing.
+// pal_dir_sync is included: the Windows 0 return is a statement that the rename
+// already carried durability, which is not true here.
+const stubENOSYS = -38
+
+// emitStubFileRename returns -ENOSYS.
+func emitStubFileRename(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_rename", irtypes.I32,
+		ir.NewParam("from", irtypes.I8Ptr),
+		ir.NewParam("to", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
+	return fn
+}
+
+// emitStubFileSync returns -ENOSYS.
+func emitStubFileSync(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_sync", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
+	return fn
+}
+
+// emitStubDirSync returns -ENOSYS.
+func emitStubDirSync(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_sync", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
+	return fn
+}
+
+// emitStubFileLock returns -ENOSYS.
+func emitStubFileLock(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_lock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("exclusive", irtypes.I32),
+		ir.NewParam("nonblocking", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
+	return fn
+}
+
+// emitStubFileUnlock returns -ENOSYS.
+func emitStubFileUnlock(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_unlock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
+	return fn
+}
+
+// emitStubFileTruncate returns -ENOSYS.
+func emitStubFileTruncate(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_truncate", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("length", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
 	return fn
 }
 

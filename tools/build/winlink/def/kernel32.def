@@ -19,6 +19,7 @@ ExitProcess
 FindClose
 FindFirstFileA
 FindNextFileA
+FlushFileBuffers
 GenerateConsoleCtrlEvent
 GetComputerNameA
 GetCurrentProcessId
@@ -33,6 +34,8 @@ GetSystemTimePreciseAsFileTime
 InitializeConditionVariable
 InitializeCriticalSection
 LeaveCriticalSection
+LockFileEx
+MoveFileExA
 MultiByteToWideChar
 OpenProcess
 QueryPerformanceCounter
@@ -44,6 +47,7 @@ Sleep
 SleepConditionVariableCS
 TerminateJobObject
 TerminateProcess
+UnlockFileEx
 WaitForSingleObject
 WakeAllConditionVariable
 WakeConditionVariable

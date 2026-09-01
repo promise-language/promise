@@ -25,6 +25,15 @@ _io_dir_next_name(int handle) string `extern("promise_io_dir_next_name");
 _io_dir_close_handle(int handle) int `extern("promise_io_dir_close_handle");
 // file stat bridge: fills [8 x i64] via stat/lstat, returns one field by index (D0012)
 _io_file_stat_field(string path, int field_index, int follow) int `extern("promise_io_file_stat_field");
+// durability primitives (T1520 — see docs/io.md): atomic rename, fsync/F_FULLFSYNC,
+// directory sync, whole-file advisory locking, and the ftruncate the temporary-slot
+// protocol needs.
+_io_file_rename(string from, string to) int `extern("promise_io_file_rename");
+_io_file_sync(int fd) int `extern("promise_io_file_sync");
+_io_dir_sync(string path) int `extern("promise_io_dir_sync");
+_io_file_lock(int fd, int exclusive, int nonblocking) int `extern("promise_io_file_lock");
+_io_file_unlock(int fd) int `extern("promise_io_file_unlock");
+_io_file_truncate(int fd, int length) int `extern("promise_io_file_truncate");
 
 // EOF sentinel value used by the read_line bridge to signal end-of-file.
 // Set in errno by the codegen bridge. Value 0x7FFF0001 — above all real POSIX errno values.
@@ -50,21 +59,123 @@ _io_strerror(int code) string {
     2 => "no such file or directory",
     5 => "input/output error",
     9 => "bad file descriptor",
+    11 => "resource temporarily unavailable", // Linux/Windows EAGAIN (also EWOULDBLOCK)
     12 => "out of memory",
     13 => "permission denied",
     17 => "file exists",
+    18 => "cross-device link",
     20 => "not a directory",
     21 => "is a directory",
     22 => "invalid argument",
     24 => "too many open files",
     28 => "no space left on device",
     30 => "read-only file system",
+    35 => "resource temporarily unavailable", // macOS EAGAIN (also EWOULDBLOCK)
     36 => "file name too long", // Linux ENAMETOOLONG
+    38 => "function not implemented", // Linux/WASM ENOSYS
     39 => "directory not empty", // Linux ENOTEMPTY
     63 => "file name too long", // macOS ENAMETOOLONG
     66 => "directory not empty", // macOS ENOTEMPTY
+    78 => "function not implemented", // macOS ENOSYS
     _ => "I/O error (errno {code})",
   };
+}
+
+// Returns the directory containing path: everything before the last separator,
+// "." when there is none, and the root itself when the last separator is the
+// first character. Path handling is inline here rather than via modules/path,
+// matching what Dir.make_all already does and keeping modules/io dependency-free.
+_parent_dir(string path) string {
+  int i = path.len - 1;
+  while i >= 0 && !Platform.is_path_separator(path[i]) {
+    i -= 1;
+  }
+  if i < 0 {
+    return ".";
+  }
+  if i == 0 {
+    return path[0:1];
+  }
+  return path[0:i];
+}
+
+// A temporary file that has been opened, locked, and emptied — the exclusive
+// right to write <path>.promise-sync<N> and rename it over the destination.
+// Private: it is the mechanism behind File.replace_bytes, not a surface a caller
+// assembles by hand (docs/io.md §2 offers the primitives for that).
+type _Slot {
+  File file;
+  string name;
+  // Set once the rename has consumed the temporary name. Until then the slot
+  // owns a file on disk that must not outlive it — see drop.
+  bool committed;
+
+  // Writes content into the temporary and forces its bytes to stable storage.
+  // Everything here happens before the rename, so a failure leaves the temporary
+  // on disk — which drop removes.
+  fill!(~this, u8[] ~content) {
+    // The first write hands the payload straight to the descriptor. Slicing it
+    // would copy every byte on the way in, for the sake of a case — a short write
+    // on a regular file — that is rare but real; only the tail after one is
+    // copied, and a durability primitive may not lose it.
+    int total = this.file.write(content);
+    while total < content.len {
+      u8[] chunk = content[total: content.len];
+      int n = this.file.write(chunk);
+      // Zero bytes written with bytes still outstanding is not progress, and the
+      // loop has no other way out of it — a durability primitive must report that
+      // rather than spin forever. write(2) does not do this for a regular file,
+      // so reaching here means the descriptor is not one.
+      if n == 0 {
+        raise IoError(code: 5, message: "write made no progress with {content.len - total} bytes outstanding");
+      }
+      total += n;
+    }
+    this.file.sync();
+  }
+
+  // Cleanup is a drop rather than an explicit call on each error path, so it
+  // covers every way out of replace_bytes — including ones nobody enumerated.
+  //
+  // Before the rename the slot owns a file on disk, and an uncommitted slot going
+  // out of scope means the write failed, so the temporary is unlinked. After the
+  // rename that name no longer exists and unlinking it would delete the
+  // destination — hence the committed flag. Best-effort by design: a drop runs on
+  // a path that already has a failure to report, and a temporary left behind is
+  // not a correctness bug, only debris the next writer reclaims (docs/io.md §3.4).
+  //
+  // The File field's own drop closes the descriptor, which releases the lock.
+  drop(~this) {
+    if !this.committed {
+      _io_file_remove(this.name[0:this.name.len]);
+    }
+  }
+}
+
+// Acquires the first free temporary slot beside path, starting at index.
+//
+// The lock alone decides ownership (docs/io.md §3.4): the slot is opened without
+// O_TRUNC and without O_EXCL, and only a successful try_lock proves it stale —
+// the kernel releases locks on process death, so a lock nobody holds means
+// whatever wrote it is gone. Creation is deliberately not the test, because
+// creating and locking are two syscalls and a second writer arriving between
+// them would mistake a live writer's slot for an orphan.
+_acquire_slot!(string path, int index) _Slot {
+  // Bounded at 8 so a pathological directory cannot make one write scan forever;
+  // eight concurrent live writers to a single path is already far past the
+  // design point (docs/io.md §3.4).
+  if index >= 8 {
+    raise IoError(code: 11, message: "every temporary slot beside '{path}' is held by a live writer");
+  }
+  string name = path + ".promise-sync" + index.to_string();
+  File f = File._open_or_create(name[0:name.len]);
+  if f.try_lock() {
+    f._truncate(0);
+    return _Slot(file: move f, name: move name, committed: false);
+  }
+  // A live writer owns this slot — try the next one.
+  f.close();
+  return _acquire_slot(path, index + 1);
 }
 
 read_line!() string? `public `doc("Reads one line from stdin. Returns absent at EOF, raises IoError on error. Strips trailing newline.") {
@@ -278,6 +389,149 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return Metadata(size: s, mode: m, uid: u, gid: g, modified: mt, accessed: at, created: ct, _file_type: ft);
   }
 
+  // --- Durability primitives (T1520 — docs/io.md §3, §4) ---
+
+  sync!(~this) `public `doc("Returns only once this file's contents are on stable storage. On macOS this is F_FULLFSYNC, not fsync, and is significantly slower — see docs/io.md section 4. Unsupported on WASM.") {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int rc = _io_file_sync(this._fd);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+  }
+
+  rename!(string from, string to) `global `public `doc("Atomically renames a file, replacing 'to' if it exists. Atomic only within one filesystem — across filesystems it raises IoError with code 18 (EXDEV). Making the rename itself durable also needs Dir.sync on the destination's directory; see docs/io.md section 3.2.") {
+    int rc = _io_file_rename(from, to);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+  }
+
+  // --- Advisory locking (T1520 — docs/io.md §5) ---
+
+  lock!(~this) `public `doc("Takes an exclusive whole-file lock, waiting indefinitely. The lock is owned by this open file, is released by unlock() or by closing, and is released by the kernel if the process dies. There is no upgrade or downgrade: converting between shared and exclusive is not supported, because the conversion is not atomic — see docs/io.md section 5.6. Advisory on POSIX, mandatory on Windows; not supported over NFS. Unsupported on WASM.") {
+    this._lock(1);
+  }
+
+  lock_shared!(~this) `public `doc("Takes a shared whole-file lock, waiting indefinitely. Several holders may share it; an exclusive lock excludes them all. There is no upgrade or downgrade: converting a shared lock to exclusive is not supported, because the conversion is not atomic — see docs/io.md section 5.6. Advisory on POSIX, mandatory on Windows; not supported over NFS. Unsupported on WASM.") {
+    this._lock(0);
+  }
+
+  try_lock!(~this) bool `public `doc("Tries to take an exclusive whole-file lock without ever waiting. Returns false if it is held elsewhere; raises IoError for any other failure. See docs/io.md section 5.") {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int rc = _io_file_lock(this._fd, 1, 1);
+    if rc == 0 {
+      return true;
+    }
+    // EWOULDBLOCK is 11 on Linux, 35 on macOS, and normalized to 11 by the
+    // Windows PAL. It means "held elsewhere", which is an answer, not an error.
+    int code = 0 - rc;
+    if code == 11 || code == 35 {
+      return false;
+    }
+    raise _make_io_error(rc);
+  }
+
+  try_lock_for!(~this, Duration timeout) bool `public `doc("Tries to take an exclusive whole-file lock, waiting up to timeout. Returns false if it did not get it in time. Implemented by retrying try_lock with capped exponential backoff, so it promises no wakeup latency — a caller that succeeds may have waited up to one backoff interval longer than it needed to. See docs/io.md section 5.7.") {
+    Instant deadline = Instant.now() + timeout;
+    // 200us initial nap, doubling to a 50ms cap: short enough that an
+    // uncontended hand-off is not visibly delayed, capped so a long wait costs
+    // a bounded number of syscalls.
+    int backoff = 200000;
+    int max_backoff = 50000000;
+    while true {
+      // Attempted before the deadline check, so a zero timeout still makes
+      // exactly one attempt.
+      if this.try_lock() {
+        return true;
+      }
+      Instant now = Instant.now();
+      if now >= deadline {
+        return false;
+      }
+      // Clamp the nap to what is left so it never overshoots the deadline.
+      int nap = backoff;
+      int remaining = deadline.duration_since(now).as_nanos;
+      if nap > remaining {
+        nap = remaining;
+      }
+      sleep(Duration.from_nanos(nap));
+      backoff = min(backoff * 2, max_backoff);
+    }
+    // Unreachable — the loop only exits by returning. Return-path analysis is
+    // conservative about `while true`, so the statement has to be written.
+    return false;
+  }
+
+  unlock!(~this) `public `doc("Releases the lock held on this file. Call only while holding one — releasing an unheld file is not specified by docs/io.md and the platform result is surfaced unchanged (silent on POSIX, an error on Windows). Closing the file also releases the lock.") {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int rc = _io_file_unlock(this._fd);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+  }
+
+  // --- Atomic replace (T1520 — docs/io.md §3) ---
+
+  replace_bytes!(string path, u8[] content) `global `public `doc("Durably replaces a file's contents with content. Writes a sibling temporary, forces it to stable storage, atomically renames it over path, then syncs the directory — so a concurrent reader sees either the complete old file or the complete new one, and no crash point leaves a truncated destination. Does not lock the destination: the last writer wins and a read-modify-write cycle must hold its own lock across the whole cycle. See docs/io.md section 3. Unsupported on WASM.") {
+    _Slot slot = _acquire_slot(path[0:path.len], 0);
+    // Every failure from here to the rename leaves the temporary on disk;
+    // _Slot.drop removes it on the way out, so no error path needs to say so.
+    slot.fill(content);
+    File.rename(slot.name[0:slot.name.len], path[0:path.len]);
+    // The rename consumed the temporary name. Nothing can fail between the two
+    // statements, and past this point unlinking it would delete the destination.
+    slot.committed = true;
+    // A Dir.sync failure therefore propagates with no cleanup: the contents are
+    // durable, only the directory entry is not.
+    Dir.sync(_parent_dir(path));
+    slot.file.close();
+  }
+
+  replace_content!(string path, string content) `global `public `doc("Durably replaces a file's contents with content. The one obvious way to write a file that must survive a crash — see File.replace_bytes and docs/io.md section 3. Unsupported on WASM.") {
+    File.replace_bytes(path, content.bytes());
+  }
+
+  // Shared body of lock/lock_shared — always blocking. try_lock does not route
+  // through it: it passes nonblocking=1 and has to tell contention apart from
+  // failure, which is the whole difference between them.
+  _lock!(~this, int exclusive) {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int rc = _io_file_lock(this._fd, exclusive, 0);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+  }
+
+  // Opens or creates for reading and writing, truncating nothing (mode 7).
+  // Deliberately not public: it exists only for the temporary-slot protocol in
+  // docs/io.md §3.4, which must open a slot before the lock has decided whether
+  // its contents are stale.
+  _open_or_create!(string path) Self `factory {
+    int fd = _io_file_open(path, 7);
+    if fd < 0 {
+      raise _make_io_error(fd);
+    }
+    return File(_fd: fd);
+  }
+
+  _truncate!(~this, int length) {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int rc = _io_file_truncate(this._fd, length);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+  }
+
   drop(~this) {
     if this._fd >= 0 {
       _io_file_close(this._fd);
@@ -361,6 +615,13 @@ type Dir `public `doc("Directory operations. All methods are global.") {
   }
 
   exists(string path) bool `global `public `doc("Returns true if the path is a directory.") => _io_dir_exists(path) == 1;
+
+  sync!(string path) `global `public `doc("Forces a directory's entries to stable storage, making a completed rename durable. Public because File.rename is: syncing the renamed file says nothing about whether its new directory entry survived a power loss. A no-op on Windows, where MOVEFILE_WRITE_THROUGH carries the same guarantee. See docs/io.md section 3.2. Unsupported on WASM.") {
+    int rc = _io_dir_sync(path);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+  }
 }
 
 type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by reading in chunks. Satisfies Reader.") {

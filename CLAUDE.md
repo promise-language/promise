@@ -340,7 +340,7 @@ The standard library (`modules/std/`) is auto-imported via `use std as _` into e
 
 | Module | File | What it covers |
 |--------|------|---------------|
-| `io` | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, `read_line()`, `read_stdin()` |
+| `io` | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), durable writes (`replace_content`/`replace_bytes`, `rename`, `sync`, `Dir.sync`) and whole-file advisory locking (`lock`/`lock_shared`/`try_lock`/`try_lock_for`/`unlock`) per `docs/io.md`, `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, `read_line()`, `read_stdin()` |
 | `json` | `modules/json/json.pr` | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string[T]`, `decode_string[T]`, `encode_string_pretty[T]`, `JsonValue` enum (with `is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value` |
 | `path` | `modules/path/path.pr` | `join`, `parent`, `file_name`, `extension`, `stem`, `split`, `is_absolute`, `is_relative`, `normalize` |
 | `math` | `modules/math/math.pr` | Extended math functions |

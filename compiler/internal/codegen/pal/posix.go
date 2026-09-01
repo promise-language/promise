@@ -392,6 +392,12 @@ func (p *PosixPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoLocFn *ir.Func) 
 //	4 = O_WRONLY                  (open_write)
 //	5 = O_WRONLY|O_CREAT|O_TRUNC  (create)
 //	6 = O_WRONLY|O_CREAT|O_APPEND (append)
+//	7 = O_RDWR|O_CREAT            (open-or-create, no truncate, no append)
+//
+// Mode 7 exists for the temporary-slot protocol in docs/io.md §3.4: the slot must
+// be opened before the lock has decided whether it is stale, so it must not be
+// truncated at open time, and O_APPEND would defeat the write offsets that follow
+// the explicit truncate.
 //
 // Modes 2 and 3 are intentionally retained in the select chain even though no
 // Promise factory currently emits them: their flag constants are exactly what
@@ -408,7 +414,7 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 
 	// Platform-specific O_* flag constants
 	var oRDWR, oRDONLY, oCreateTrunc, oCreateAppend int64
-	var oWRONLY, oWrCreateTrunc, oWrCreateAppend int64
+	var oWRONLY, oWrCreateTrunc, oWrCreateAppend, oCreate int64
 	if p.isMacOS() {
 		// macOS: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x8
 		oRDONLY = 0
@@ -418,6 +424,7 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 		oCreateAppend = 2 | 0x200 | 0x8    // O_RDWR|O_CREAT|O_APPEND
 		oWrCreateTrunc = 1 | 0x200 | 0x400 // O_WRONLY|O_CREAT|O_TRUNC
 		oWrCreateAppend = 1 | 0x200 | 0x8  // O_WRONLY|O_CREAT|O_APPEND
+		oCreate = 2 | 0x200                // O_RDWR|O_CREAT
 	} else {
 		// Linux: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
 		oRDONLY = 0
@@ -427,6 +434,7 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 		oCreateAppend = 2 | 0x40 | 0x400   // O_RDWR|O_CREAT|O_APPEND
 		oWrCreateTrunc = 1 | 0x40 | 0x200  // O_WRONLY|O_CREAT|O_TRUNC
 		oWrCreateAppend = 1 | 0x40 | 0x400 // O_WRONLY|O_CREAT|O_APPEND
+		oCreate = 2 | 0x40                 // O_RDWR|O_CREAT
 	}
 
 	fn := module.NewFunc("pal_file_open", irtypes.I32,
@@ -442,13 +450,15 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	isWrite := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 4))
 	isWrCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 5))
 	isWrAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 6))
+	isRwCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 7))
 
 	f1 := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, oRDONLY), constant.NewInt(irtypes.I32, oRDWR))
 	f2 := entry.NewSelect(isCreate, constant.NewInt(irtypes.I32, oCreateTrunc), f1)
 	f3 := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
 	f4 := entry.NewSelect(isWrite, constant.NewInt(irtypes.I32, oWRONLY), f3)
 	f5 := entry.NewSelect(isWrCreate, constant.NewInt(irtypes.I32, oWrCreateTrunc), f4)
-	flags := entry.NewSelect(isWrAppend, constant.NewInt(irtypes.I32, oWrCreateAppend), f5)
+	f6 := entry.NewSelect(isWrAppend, constant.NewInt(irtypes.I32, oWrCreateAppend), f5)
+	flags := entry.NewSelect(isRwCreate, constant.NewInt(irtypes.I32, oCreate), f6)
 
 	// open(path, flags, 0644)
 	fd := entry.NewCall(openFn, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0644))
@@ -849,6 +859,210 @@ func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 
 	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
 	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitFileRename declares libc @rename and defines @pal_file_rename.
+// rename(2) is atomic within one filesystem and fails with EXDEV across two —
+// which is why the temporary in docs/io.md §3.3 is always a sibling.
+func (p *PosixPAL) EmitFileRename(module *ir.Module) *ir.Func {
+	renameFn := getOrDeclareFunc(module, "rename", irtypes.I32,
+		ir.NewParam("old", irtypes.I8Ptr),
+		ir.NewParam("new", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_file_rename", irtypes.I32,
+		ir.NewParam("from", irtypes.I8Ptr),
+		ir.NewParam("to", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(renameFn, fn.Params[0], fn.Params[1])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitFileSync defines @pal_file_sync — fsync(2) on Linux, fcntl(fd, F_FULLFSYNC)
+// on macOS.
+//
+// The macOS divergence is the whole point (docs/io.md §4): fsync there returns
+// once the data has been handed to the drive, which may keep it in a volatile
+// write cache, so only F_FULLFSYNC actually makes it durable. It is significantly
+// slower and there is deliberately no knob to trade it back — a durability
+// primitive that is not durable is worse than none, because callers build on the
+// guarantee it advertises. F_FULLFSYNC can return ENOTSUP on exotic filesystems;
+// that propagates rather than silently falling back to fsync.
+func (p *PosixPAL) EmitFileSync(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_sync", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	var ret value.Value
+	if p.isMacOS() {
+		// fcntl is variadic: int fcntl(int fd, int cmd, ...)
+		fcntlFn := getOrDeclareFunc(module, "fcntl", irtypes.I32,
+			ir.NewParam("fd", irtypes.I32),
+			ir.NewParam("cmd", irtypes.I32))
+		fcntlFn.Sig.Variadic = true
+		// F_FULLFSYNC = 51; the third argument is ignored but must be passed.
+		ret = entry.NewCall(fcntlFn, fn.Params[0],
+			constant.NewInt(irtypes.I32, 51), constant.NewInt(irtypes.I32, 0))
+	} else {
+		fsyncFn := getOrDeclareFunc(module, "fsync", irtypes.I32,
+			ir.NewParam("fd", irtypes.I32))
+		ret = entry.NewCall(fsyncFn, fn.Params[0])
+	}
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitDirSync defines @pal_dir_sync — open(path, O_RDONLY) → fsync → close.
+//
+// Plain fsync on both platforms, not F_FULLFSYNC: docs/io.md §3.2 specifies
+// fsync for the directory entry, and §4's F_FULLFSYNC rule is about file
+// contents. Syncing a directory this way is how a completed rename is made
+// durable; without it the contents survive a power loss and the swap does not.
+func (p *PosixPAL) EmitDirSync(module *ir.Module) *ir.Func {
+	openFn := getOrDeclareFunc(module, "open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("oflag", irtypes.I32))
+	openFn.Sig.Variadic = true
+	fsyncFn := getOrDeclareFunc(module, "fsync", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	errnoLocFn := p.getOrDeclareErrnoLocFn(module)
+
+	fn := module.NewFunc("pal_dir_sync", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// O_RDONLY = 0 on both platforms.
+	fd := entry.NewCall(openFn, fn.Params[0], constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0))
+	isOpenErr := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	openErrBlk := fn.NewBlock(".open_err")
+	syncBlk := fn.NewBlock(".sync")
+	entry.NewCondBr(isOpenErr, openErrBlk, syncBlk)
+
+	p.emitNegErrnoReturnI32(openErrBlk, errnoLocFn)
+
+	ret := syncBlk.NewCall(fsyncFn, fd)
+	isSyncErr := syncBlk.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	syncErrBlk := fn.NewBlock(".sync_err")
+	okBlk := fn.NewBlock(".ok")
+	syncBlk.NewCondBr(isSyncErr, syncErrBlk, okBlk)
+
+	// Read errno before close(2) — closing can overwrite it.
+	syncErrnoPtr := syncErrBlk.NewCall(errnoLocFn)
+	syncErrno := syncErrBlk.NewLoad(irtypes.I32, syncErrnoPtr)
+	syncErrBlk.NewCall(closeFn, fd)
+	syncErrBlk.NewRet(syncErrBlk.NewSub(constant.NewInt(irtypes.I32, 0), syncErrno))
+
+	okBlk.NewCall(closeFn, fd)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileLock defines @pal_file_lock using flock(2).
+//
+// flock is chosen over fcntl record locks and F_OFD_SETLK for the reasons set out
+// in docs/io.md §5.2: its lock is owned by the open file description, matching
+// what Windows LockFileEx gives per HANDLE, so there is one ownership model to
+// document rather than two. fcntl record locks are silently dropped by an
+// unrelated close() anywhere in the process; F_OFD_SETLK does not exist on macOS.
+//
+// LOCK_SH=1, LOCK_EX=2, LOCK_NB=4 — identical on Linux and macOS.
+func (p *PosixPAL) EmitFileLock(module *ir.Module) *ir.Func {
+	flockFn := getOrDeclareFunc(module, "flock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("operation", irtypes.I32))
+
+	fn := module.NewFunc("pal_file_lock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("exclusive", irtypes.I32),
+		ir.NewParam("nonblocking", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	isExcl := entry.NewICmp(enum.IPredNE, fn.Params[1], constant.NewInt(irtypes.I32, 0))
+	mode := entry.NewSelect(isExcl, constant.NewInt(irtypes.I32, 2), constant.NewInt(irtypes.I32, 1))
+	isNB := entry.NewICmp(enum.IPredNE, fn.Params[2], constant.NewInt(irtypes.I32, 0))
+	nbBit := entry.NewSelect(isNB, constant.NewInt(irtypes.I32, 4), constant.NewInt(irtypes.I32, 0))
+	op := entry.NewOr(mode, nbBit)
+
+	ret := entry.NewCall(flockFn, fn.Params[0], op)
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	// EWOULDBLOCK reaches the caller as -errno like any other failure; the
+	// Promise layer turns it into try_lock's false (docs/io.md §7).
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileUnlock defines @pal_file_unlock using flock(fd, LOCK_UN=8).
+func (p *PosixPAL) EmitFileUnlock(module *ir.Module) *ir.Func {
+	flockFn := getOrDeclareFunc(module, "flock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("operation", irtypes.I32))
+
+	fn := module.NewFunc("pal_file_unlock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ret := entry.NewCall(flockFn, fn.Params[0], constant.NewInt(irtypes.I32, 8))
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitFileTruncate defines @pal_file_truncate using ftruncate(2).
+// Needed by the orphan-reclamation protocol (docs/io.md §3.4): a reclaimed
+// temporary slot is opened without O_TRUNC, so it must be emptied once the lock
+// has proved it stale.
+func (p *PosixPAL) EmitFileTruncate(module *ir.Module) *ir.Func {
+	ftruncateFn := getOrDeclareFunc(module, "ftruncate", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("length", irtypes.I64))
+
+	fn := module.NewFunc("pal_file_truncate", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("length", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ret := entry.NewCall(ftruncateFn, fn.Params[0], fn.Params[1])
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }
 

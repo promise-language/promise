@@ -721,6 +721,16 @@ func (p *WasmPAL) EmitDirRemove(module *ir.Module) *ir.Func    { return emitStub
 func (p *WasmPAL) EmitDirExists(module *ir.Module) *ir.Func    { return emitStubDirExists(module) }
 func (p *WasmPAL) EmitErrno(module *ir.Module) *ir.Func        { return emitStubErrno(module) }
 
+// T1520 durability primitives — unsupported here, so -ENOSYS rather than -1
+// (docs/io.md §6.4). pal_dir_sync is a stub too: the Windows 0 return asserts the
+// rename already carried durability, which WASM cannot claim.
+func (p *WasmPAL) EmitFileRename(module *ir.Module) *ir.Func   { return emitStubFileRename(module) }
+func (p *WasmPAL) EmitFileSync(module *ir.Module) *ir.Func     { return emitStubFileSync(module) }
+func (p *WasmPAL) EmitDirSync(module *ir.Module) *ir.Func      { return emitStubDirSync(module) }
+func (p *WasmPAL) EmitFileLock(module *ir.Module) *ir.Func     { return emitStubFileLock(module) }
+func (p *WasmPAL) EmitFileUnlock(module *ir.Module) *ir.Func   { return emitStubFileUnlock(module) }
+func (p *WasmPAL) EmitFileTruncate(module *ir.Module) *ir.Func { return emitStubFileTruncate(module) }
+
 // WASM directory listing stubs — no filesystem access.
 func (p *WasmPAL) EmitDirOpen(module *ir.Module) *ir.Func     { return emitStubDirOpen(module) }
 func (p *WasmPAL) EmitDirNextName(module *ir.Module) *ir.Func { return emitStubDirNextName(module) }

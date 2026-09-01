@@ -510,6 +510,11 @@ type File `public `doc("A file handle. Satisfies Reader, Writer, and Closer.") {
 }
 ```
 
+`File` also carries the durable-write and advisory-locking surface — `replace_content`,
+`replace_bytes`, `rename`, `sync`, `Dir.sync`, and `lock`/`lock_shared`/`try_lock`/`try_lock_for`/
+`unlock`. Those are not restated here: their contract depends on platform guarantees a caller
+cannot see from the call site, and [io.md](io.md) is normative for it.
+
 Usage:
 
 ```promise
@@ -620,7 +625,9 @@ compile-time error. This can be relaxed later when WASI support is designed prop
 ### PAL additions (implemented)
 
 ```
-pal_file_open(i8* path, i32 mode) i32                 // fd or -1; mode: 0=rw, 1=ro, 2=create-trunc, 3=append
+pal_file_open(i8* path, i32 mode) i32                 // fd or -errno; mode: 0=rw, 1=ro, 2=create-trunc,
+                                                      //   3=append, 4=wo, 5=wo-create-trunc,
+                                                      //   6=wo-create-append, 7=rw-create (no trunc/append)
 pal_file_read(i32 fd, i8* buf, i64 len) i64           // bytes read, 0=EOF, -1=error
 pal_file_write(i32 fd, i8* buf, i64 len) i64          // bytes written or -1
 pal_file_close(i32 fd) i32                            // 0 or -1
@@ -632,6 +639,12 @@ pal_file_mkdir(i8* path) i32                          // 0 or -1
 pal_dir_remove(i8* path) i32                          // 0 or -1
 pal_dir_exists(i8* path) i32                          // 1 = is directory, 0 = not
 pal_errno() i32                                       // current thread-local errno value
+pal_file_rename(i8* from, i8* to) i32                 // 0 or -errno; rename / MoveFileEx
+pal_file_sync(i32 fd) i32                             // 0 or -errno; fsync / F_FULLFSYNC / FlushFileBuffers
+pal_dir_sync(i8* path) i32                            // 0 or -errno; open+fsync+close; 0 (no-op) on Windows
+pal_file_lock(i32 fd, i32 exclusive, i32 nonblocking) i32  // 0 or -errno; flock / LockFileEx
+pal_file_unlock(i32 fd) i32                           // 0 or -errno; flock(LOCK_UN) / UnlockFileEx
+pal_file_truncate(i32 fd, i64 length) i32             // 0 or -errno; ftruncate / _chsize_s
 ```
 
 **Design decisions:**
@@ -639,8 +652,9 @@ pal_errno() i32                                       // current thread-local er
 - `pal_file_stat_size` uses open+lseek(SEEK_END)+close instead of `stat()` — avoids `struct stat` layout differences between macOS and Linux.
 - `pal_file_stat` (D0012) cannot dodge that and GEPs into `struct stat` by byte offset, so it carries a table per platform **and per architecture**: Linux/aarch64 declares a 32-bit `st_mode` before `st_nlink`, where Linux/x86_64 has a 64-bit `st_nlink` first, moving `st_mode`/`st_uid`/`st_gid`. Darwin shares one layout across arches. A wrong table reads zeros rather than failing, so the offsets are pinned by `TestFileStatPosixOffsets`.
 - POSIX `pal_dir_exists` uses opendir/closedir instead of `stat()` for the same reason.
-- Windows uses UCRT POSIX wrappers (`_open`, `_read`, etc.) with `_O_BINARY` always set. `pal_dir_exists` uses `GetFileAttributesA` since UCRT has no `opendir`.
-- WASM stubs return -1 (error) or 0 (not found) for all file ops — no filesystem access yet.
+- Windows opens files with `CreateFileA` + `FILE_SHARE_DELETE` and wraps the HANDLE in a CRT descriptor via `_open_osfhandle`, so `_read`/`_write`/`_lseeki64`/`_close` keep working while an open file stays renamable (T1742). `_get_osfhandle` recovers the HANDLE where a Win32 call needs one. `pal_dir_exists` uses `GetFileAttributesA` since UCRT has no `opendir`.
+- The durability primitives (T1520, `docs/io.md`) are the one place a platform difference is *stated* rather than hidden: macOS `pal_file_sync` uses `fcntl(F_FULLFSYNC)` because `fsync(2)` there does not cross the drive's volatile write cache, and `pal_dir_sync` is a no-op on Windows because a directory handle cannot be flushed — `MOVEFILE_WRITE_THROUGH` on the rename carries that guarantee instead. `pal_file_lock` normalizes `ERROR_LOCK_VIOLATION` to `EWOULDBLOCK` locally so contention reads the same on all three platforms.
+- WASM stubs return -1 (error) or 0 (not found) for the original file ops, and `-ENOSYS` for the durability primitives — the code `docs/io.md` §7 names for "unsupported on this target" — since no filesystem access exists yet.
 - `pal_errno` uses `__errno_location()` (Linux), `__error()` (macOS), `_errno()` (Windows).
 
 **Dir listing PAL (implemented):**

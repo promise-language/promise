@@ -409,6 +409,12 @@ type Compiler struct {
 	palFileSeek                *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
 	palFileStatSize            *ir.Func // @pal_file_stat_size(i8* path) → i64
 	palFileRemove              *ir.Func // @pal_file_remove(i8* path) → i32
+	palFileRename              *ir.Func // @pal_file_rename(i8* from, i8* to) → i32 (T1520)
+	palFileSync                *ir.Func // @pal_file_sync(i32 fd) → i32 (T1520)
+	palDirSync                 *ir.Func // @pal_dir_sync(i8* path) → i32 (T1520)
+	palFileLock                *ir.Func // @pal_file_lock(i32 fd, i32 exclusive, i32 nonblocking) → i32 (T1520)
+	palFileUnlock              *ir.Func // @pal_file_unlock(i32 fd) → i32 (T1520)
+	palFileTruncate            *ir.Func // @pal_file_truncate(i32 fd, i64 length) → i32 (T1520)
 	palFileExists              *ir.Func // @pal_file_exists(i8* path) → i32
 	palFileMkdir               *ir.Func // @pal_file_mkdir(i8* path) → i32
 	palDirRemove               *ir.Func // @pal_dir_remove(i8* path) → i32

@@ -14,10 +14,11 @@ _configure_narrow_argv
 _initialize_narrow_environment
 _access
 _chdir
+_chsize_s
 _close
 _errno
-; _get_osfhandle is not referenced by the PAL yet — it is the link-surface half of
-; T1520 (FlushFileBuffers / LockFileEx need the HANDLE behind a CRT descriptor).
+; _get_osfhandle recovers the HANDLE behind a CRT descriptor for the Win32 half of
+; the durability primitives — FlushFileBuffers, LockFileEx and UnlockFileEx (T1520).
 _get_osfhandle
 _getcwd
 _lseeki64

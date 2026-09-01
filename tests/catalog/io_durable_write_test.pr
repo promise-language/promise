@@ -1,0 +1,44 @@
+// T1520: the durable-write recipe assembled by hand from the public primitives.
+//
+// docs/io.md §2 claims a caller streaming data too large to buffer into a string
+// can build the same sequence File.replace_content builds internally, using only
+// rename/sync/Dir.sync/lock. Nothing else exercises that claim: the module's own
+// tests cover each primitive alone, and replace_content covers the composite via
+// its private helpers. This test is the claim itself, through qualified imports.
+use io;
+use os;
+
+// The sequence from docs/io.md §3.1, written the way a streaming caller would:
+// sibling temporary, exclusive lock, write, sync, rename, sync the directory.
+_durable_write!(string path, string temp, string content) {
+  io.File f = io.File.create(temp[0:temp.len])?!;
+  f.lock()?!;
+  f.write_string(content)?!;
+  f.sync()?!; // contents are durable
+  f.close()?!; // releases the lock
+  io.File.rename(temp[0:temp.len], path[0:path.len])?!; // the swap is atomic
+  io.Dir.sync(os.temp_dir)?!; // the swap is durable
+}
+
+test_durable_write_by_hand() `test(exclude: wasm) {
+  string path = os.temp_dir + "/pr_cat_durable";
+  string temp = os.temp_dir + "/pr_cat_durable.tmp";
+
+  _durable_write(path[0:path.len], temp[0:temp.len], "first")?!;
+  assert(io.File.read_content(path[0:path.len])?! == "first", "created by the hand-built sequence");
+
+  _durable_write(path[0:path.len], temp[0:temp.len], "second")?!;
+  assert(io.File.read_content(path[0:path.len])?! == "second", "replaced by the hand-built sequence");
+  assert(!io.File.exists(temp[0:temp.len]), "the rename consumed the temporary");
+
+  io.File.remove(path)?!;
+}
+
+// The composite must be reachable under a qualified import too — it is the one
+// obvious way, and a caller who never touches the primitives still gets it.
+test_replace_content_qualified() `test(exclude: wasm) {
+  string path = os.temp_dir + "/pr_cat_replace";
+  io.File.replace_content(path[0:path.len], "durable")?!;
+  assert(io.File.read_content(path[0:path.len])?! == "durable", "replace_content via catalog import");
+  io.File.remove(path)?!;
+}

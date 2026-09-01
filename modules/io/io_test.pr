@@ -1263,3 +1263,547 @@ metadata_no_follow_symlinks() `test(exclude: wasm) {
   assert(!m2.is_symlink, "regular file is not a symlink");
   File.remove(os.temp_dir + "/pr_iot_mdnf")?!;
 }
+
+// --- T1520: durability primitives and advisory locking (docs/io.md) ---
+
+parent_dir_cases() `test {
+  assert(_parent_dir("/tmp/foo") == "/tmp", "parent of a nested path");
+  assert(_parent_dir("/foo") == "/", "parent at the root is the root");
+  assert(_parent_dir("foo") == ".", "no separator means the current directory");
+  assert(_parent_dir("") == ".", "empty path means the current directory");
+}
+
+strerror_durability_codes() `test {
+  assert(_io_strerror(11) == "resource temporarily unavailable", "EAGAIN (Linux/Windows)");
+  assert(_io_strerror(18) == "cross-device link", "EXDEV");
+  assert(_io_strerror(35) == "resource temporarily unavailable", "EAGAIN (macOS)");
+  assert(_io_strerror(38) == "function not implemented", "ENOSYS (Linux/WASM)");
+  assert(_io_strerror(78) == "function not implemented", "ENOSYS (macOS)");
+}
+
+file_sync_test() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_sync";
+  File f = File.create(p[0:p.len])?!;
+  f.write_string("durable")?!;
+  f.sync()?!;
+  f.close()?!;
+  assert(File.read_content(p[0:p.len])?! == "durable", "content survives a sync");
+  File.remove(p)?!;
+}
+
+dir_sync_test() `test(exclude: wasm) {
+  // A no-op on Windows, a real fsync elsewhere — either way it must not raise.
+  Dir.sync(os.temp_dir)?!;
+}
+
+file_rename_test() `test(exclude: wasm) {
+  string src = os.temp_dir + "/pr_iot_rn_src";
+  string dst = os.temp_dir + "/pr_iot_rn_dst";
+  File.write_content(src[0:src.len], "moved")?!;
+  if File.exists(dst[0:dst.len]) {
+    File.remove(dst[0:dst.len])?!;
+  }
+  File.rename(src[0:src.len], dst[0:dst.len])?!;
+  assert(!File.exists(src[0:src.len]), "source name is gone after rename");
+  assert(File.read_content(dst[0:dst.len])?! == "moved", "destination has the content");
+  File.remove(dst)?!;
+}
+
+// Renaming *onto* an open file. On POSIX this is unremarkable; on Windows it needs
+// FILE_SHARE_DELETE on every handle, which is why T1742 had to land before this
+// item. The reader keeps its own handle open across the rename, and the assertion
+// is that the rename succeeds and the path then holds the new bytes.
+file_rename_over_open_file() `test(exclude: wasm) {
+  string src = os.temp_dir + "/pr_iot_rnoo_src";
+  string dst = os.temp_dir + "/pr_iot_rnoo_dst";
+  File.write_content(dst[0:dst.len], "old")?!;
+  File.write_content(src[0:src.len], "new")?!;
+  File reader = File.open_read(dst[0:dst.len])?!; // handle held across the rename
+  File.rename(src[0:src.len], dst[0:dst.len])?!;
+  reader.close()?!;
+  assert(File.read_content(dst[0:dst.len])?! == "new", "destination holds the new bytes");
+  File.remove(dst)?!;
+}
+
+// rename(2) is atomic only within one filesystem. Renaming into a directory that
+// does not exist is the reachable, deterministic error; a genuine cross-device
+// rename would need a second mounted filesystem, which a test cannot assume.
+file_rename_missing_parent_raises() `test(exclude: wasm) {
+  string src = os.temp_dir + "/pr_iot_rnmp";
+  File.write_content(src[0:src.len], "x")?!;
+  bool raised = false;
+  File.rename(src[0:src.len], os.temp_dir + "/pr_iot_no_such_dir/x")? e {
+    raised = true;
+  };
+  assert(raised, "rename into a missing directory raises");
+  assert(File.exists(src[0:src.len]), "source is untouched when the rename fails");
+  File.remove(src)?!;
+}
+
+// flock ownership is per open file description, not per process, so two fds on
+// one path contend inside a single process. Every lock test below is therefore
+// single-process and deterministic — no sleeps, no cross-process coordination.
+try_lock_contends_between_two_handles() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk1";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  File b = File.open(p[0:p.len])?!;
+  assert(a.try_lock()?!, "uncontended try_lock succeeds");
+  assert(!b.try_lock()?!, "a second handle is refused while the first holds it");
+  a.unlock()?!;
+  assert(b.try_lock()?!, "the second handle succeeds once the first releases");
+  b.unlock()?!;
+  a.close()?!;
+  b.close()?!;
+  File.remove(p)?!;
+}
+
+lock_shared_allows_two_holders() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk2";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  File b = File.open(p[0:p.len])?!;
+  a.lock_shared()?!;
+  b.lock_shared()?!; // shared locks are compatible with each other
+  // An exclusive acquire must still be refused while either shared lock is held.
+  File c = File.open(p[0:p.len])?!;
+  assert(!c.try_lock()?!, "exclusive is refused while shared locks are held");
+  c.close()?!;
+  a.unlock()?!;
+  b.unlock()?!;
+  a.close()?!;
+  b.close()?!;
+  File.remove(p)?!;
+}
+
+// Closing releases the lock even when unlock() was never called — one of the
+// three release guarantees docs/io.md 5.1 names.
+lock_released_by_close() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk3";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  assert(a.try_lock()?!, "first handle takes the lock");
+  a.close()?!; // no unlock
+  File b = File.open(p[0:p.len])?!;
+  assert(b.try_lock()?!, "closing released the lock");
+  b.close()?!;
+  File.remove(p)?!;
+}
+
+try_lock_for_uncontended_returns_immediately() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk4";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  assert(a.try_lock_for(Duration.from_secs(5))?!, "uncontended acquire succeeds");
+  a.close()?!;
+  File.remove(p)?!;
+}
+
+// Measures a timeout feature rather than ordering two concurrent operations, so
+// it does not fall under the "never synchronize with sleep" rule — the elapsed
+// assertion is the behaviour under test.
+try_lock_for_contended_times_out() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk5";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  File b = File.open(p[0:p.len])?!;
+  assert(a.try_lock()?!, "holder takes the lock");
+  Instant started = Instant.now();
+  assert(!b.try_lock_for(Duration.from_millis(50))?!, "contended acquire times out");
+  assert(started.elapsed() >= Duration.from_millis(50), "it waited for the whole timeout");
+  a.unlock()?!;
+  a.close()?!;
+  b.close()?!;
+  File.remove(p)?!;
+}
+
+// A zero timeout must still make exactly one attempt, so it behaves like
+// try_lock rather than failing unconditionally.
+try_lock_for_zero_timeout_still_attempts() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk6";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  assert(a.try_lock_for(Duration.zero())?!, "zero timeout still acquires an uncontended lock");
+  a.close()?!;
+  File.remove(p)?!;
+}
+
+// Helper for try_lock_for_acquires_on_release — a goroutine body that waits for
+// the lock and reports whether it got it.
+_lock_waiter(string path) bool {
+  File b = File.open(path)?!;
+  bool got = b.try_lock_for(Duration.from_secs(10))?!;
+  b.close()?!;
+  return got;
+}
+
+// Acquire-on-release with no sleep anywhere: the task handle is the completion
+// signal, and the result is correct whichever order the two are scheduled in.
+try_lock_for_acquires_on_release() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk7";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  assert(a.try_lock()?!, "main takes the lock first");
+
+  // Spawn first, then release: whichever order the two are scheduled in, the
+  // waiter either finds the lock free or is woken by the release.
+  waiter := go _lock_waiter(os.temp_dir + "/pr_iot_lk7");
+  a.unlock()?!;
+  bool got = <-waiter;
+  assert(got, "the waiter acquired the lock once main released it");
+  a.close()?!;
+  File.remove(p)?!;
+}
+
+replace_content_round_trip() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc1";
+  if File.exists(p[0:p.len]) {
+    File.remove(p[0:p.len])?!;
+  }
+  File.replace_content(p[0:p.len], "first")?!;
+  assert(File.read_content(p[0:p.len])?! == "first", "creates the file");
+  File.replace_content(p[0:p.len], "second")?!;
+  assert(File.read_content(p[0:p.len])?! == "second", "replaces the file");
+  assert(!File.exists(p + ".promise-sync0"), "no temporary survives a successful write");
+  File.remove(p)?!;
+}
+
+replace_bytes_round_trip() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc2";
+  u8[] payload = [1u8, 2u8, 3u8, 0u8, 255u8];
+  File.replace_bytes(p[0:p.len], payload)?!;
+  File f = File.open_read(p[0:p.len])?!;
+  u8[] buf = Vector[u8].filled(0u8, 5);
+  int n = f.read(buf)?!;
+  f.close()?!;
+  assert(n == 5, "all five bytes read back");
+  assert(buf[0] == 1u8 && buf[3] == 0u8 && buf[4] == 255u8, "bytes round-trip exactly");
+  File.remove(p)?!;
+}
+
+// POSIX inode semantics: the rename swaps the directory entry, so a reader that
+// opened the old file before the replace keeps reading the old bytes. Asserted
+// only off Windows, where an open file has no equivalent guarantee.
+replace_content_preserves_open_reader() `test(exclude: wasm) `target(!windows) {
+  string p = os.temp_dir + "/pr_iot_rc3";
+  File.write_content(p[0:p.len], "before")?!;
+  File reader = File.open_read(p[0:p.len])?!;
+  File.replace_content(p[0:p.len], "after")?!;
+  string old = reader.read_all()?!;
+  reader.close()?!;
+  assert(old == "before", "the pre-existing reader still sees the old file");
+  assert(File.read_content(p[0:p.len])?! == "after", "a fresh open sees the new file");
+  File.remove(p)?!;
+}
+
+// The whole reason section 3.4 exists: a temporary left behind by a hard kill is
+// unlocked, so the next writer to that path proves it stale and reuses the slot.
+replace_content_reclaims_orphan_temp() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc4";
+  string orphan = p + ".promise-sync0";
+  File.write_content(p[0:p.len], "old")?!;
+  File.write_content(orphan[0:orphan.len], "junk left by a crashed writer")?!;
+  File.replace_content(p[0:p.len], "new")?!;
+  assert(File.read_content(p[0:p.len])?! == "new", "the write succeeded");
+  assert(!File.exists(orphan[0:orphan.len]), "the orphan was reclaimed, not left behind");
+  File.remove(p)?!;
+}
+
+// A slot held by a *live* writer must be skipped, not truncated. Slot 0 is locked
+// from a handle this test keeps open, so the write has to land in slot 1 and slot
+// 0's contents must survive untouched.
+replace_content_skips_live_slot() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc5";
+  string slot0 = p + ".promise-sync0";
+  File.write_content(p[0:p.len], "old")?!;
+  File.write_content(slot0[0:slot0.len], "live writer data")?!;
+  File holder = File.open(slot0[0:slot0.len])?!;
+  assert(holder.try_lock()?!, "the test holds slot 0");
+
+  File.replace_content(p[0:p.len], "new")?!;
+  assert(File.read_content(p[0:p.len])?! == "new", "the write used a later slot");
+  assert(!File.exists(p + ".promise-sync1"), "slot 1 was consumed by the rename");
+
+  // Slot 0's contents are checked only after the lock is released: docs/io.md §5.3
+  // says Windows locking is mandatory, so reading a locked range through another
+  // handle actually fails there. Releasing first keeps the assertion about what
+  // replace_content did, rather than about which platform is running it.
+  holder.unlock()?!;
+  holder.close()?!;
+  assert(File.read_content(slot0[0:slot0.len])?! == "live writer data",
+  "the live writer's slot was not truncated");
+  File.remove(slot0)?!;
+  File.remove(p)?!;
+}
+
+// Every error path before the rename unlinks its temporary, so a failed write
+// leaves no debris. The destination's directory does not exist, so the very first
+// open fails and nothing is created at all.
+replace_content_failure_leaves_no_temp() `test(exclude: wasm) {
+  string dir = os.temp_dir + "/pr_iot_no_such_dir";
+  string p = dir + "/target";
+  bool raised = false;
+  File.replace_content(p[0:p.len], "x")? e {
+    raised = true;
+  };
+  assert(raised, "replacing into a missing directory raises");
+  assert(!File.exists(p + ".promise-sync0"), "no temporary was left behind");
+  assert(!Dir.exists(dir[0:dir.len]), "the missing directory was not created");
+}
+
+// The case above never reaches _acquire_slot — the very first open fails, so no
+// temporary is ever created and nothing has to be cleaned up. This one does: the
+// slot is opened, locked, filled and synced, and only the *rename* fails, because
+// POSIX refuses to rename a regular file onto an existing directory (EISDIR).
+// That is the path _Slot.drop exists for, and it is the one a crash-durability
+// primitive cannot get wrong — a failed replace that leaves a locked temporary
+// behind would make every later write to that path skip a slot forever.
+replace_content_failure_after_acquire_removes_temp() `test(exclude: wasm) {
+  string dir = os.temp_dir + "/pr_iot_rc6_dir";
+  if !Dir.exists(dir[0:dir.len]) {
+    Dir.make(dir[0:dir.len])?!;
+  }
+  string temp = dir + ".promise-sync0";
+  bool raised = false;
+  File.replace_content(dir[0:dir.len], "x")? e {
+    raised = true;
+  };
+  assert(raised, "renaming a file over a directory raises");
+  assert(!File.exists(temp[0:temp.len]), "the temporary was unlinked on the way out");
+  assert(Dir.exists(dir[0:dir.len]), "the directory is untouched");
+  Dir.remove(dir)?!;
+}
+
+// --- T1520: gaps around the durability surface ---
+
+// _parent_dir is what tells Dir.sync which directory the rename happened in.
+// Getting it wrong syncs the wrong directory and the write silently stops being
+// durable, so the nested and root cases are pinned alongside the simple ones.
+parent_dir_nested_cases() `test {
+  assert(_parent_dir("/a/b/c") == "/a/b", "nested absolute path");
+  assert(_parent_dir("a/b") == "a", "nested relative path");
+  assert(_parent_dir("/") == "/", "the root's parent is the root");
+  assert(_parent_dir("/a") == "/", "a child of the root");
+}
+
+// Every durability method guards a closed descriptor and reports EBADF(9) rather
+// than handing -1 to flock/fsync, where a recycled fd number could belong to
+// something else entirely. close() sets _fd to -1, so one closed handle exercises
+// all six guards.
+durability_methods_on_closed_file_raise() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_bad_fd";
+  File.write_content(p[0:p.len], "x")?!;
+  File f = File.open(p[0:p.len])?!;
+  f.close()?!;
+
+  int sync_code = 0;
+  f.sync()? e is IoError {
+    sync_code = e.code;
+  }!;
+  assert(sync_code == 9, "sync on a closed file reports EBADF(9), got {sync_code}");
+
+  int lock_code = 0;
+  f.lock()? e is IoError {
+    lock_code = e.code;
+  }!;
+  assert(lock_code == 9, "lock on a closed file reports EBADF(9), got {lock_code}");
+
+  int shared_code = 0;
+  f.lock_shared()? e is IoError {
+    shared_code = e.code;
+  }!;
+  assert(shared_code == 9, "lock_shared on a closed file reports EBADF(9), got {shared_code}");
+
+  int try_code = 0;
+  f.try_lock()? e is IoError {
+    try_code = e.code;
+  }!;
+  assert(try_code == 9, "try_lock on a closed file raises rather than returning false, got {try_code}");
+
+  int timed_code = 0;
+  f.try_lock_for(Duration.from_secs(1))? e is IoError {
+    timed_code = e.code;
+  }!;
+  assert(timed_code == 9, "try_lock_for propagates the guard instead of retrying, got {timed_code}");
+
+  int unlock_code = 0;
+  f.unlock()? e is IoError {
+    unlock_code = e.code;
+  }!;
+  assert(unlock_code == 9, "unlock on a closed file reports EBADF(9), got {unlock_code}");
+
+  File.remove(p)?!;
+}
+
+// The blocking exclusive acquire. lock_shared has its own test; this one is the
+// only thing that reaches _lock with exclusive=1, which is the LOCK_EX arm on
+// POSIX and LOCKFILE_EXCLUSIVE_LOCK without LOCKFILE_FAIL_IMMEDIATELY on Windows.
+// Uncontended so it cannot block: a second handle only observes the exclusion.
+lock_blocking_exclusive_excludes_others() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lk9";
+  File.write_content(p[0:p.len], "x")?!;
+  File a = File.open(p[0:p.len])?!;
+  File b = File.open(p[0:p.len])?!;
+  a.lock()?!;
+  assert(!b.try_lock()?!, "blocking lock() really excludes a second handle");
+  a.unlock()?!;
+  assert(b.try_lock()?!, "the exclusion ends at unlock");
+  b.unlock()?!;
+  a.close()?!;
+  b.close()?!;
+  File.remove(p)?!;
+}
+
+// Dir.sync is public because File.rename is, so its failure has to be reportable
+// rather than swallowed — a caller told the directory entry is durable when the
+// open failed would believe it had built a durable write.
+dir_sync_missing_path_raises() `test(exclude: wasm) `target(!windows) {
+  int code = 0;
+  Dir.sync(os.temp_dir + "/pr_iot_no_such_dir_sync")? e is IoError {
+    code = e.code;
+  }!;
+  assert(code == 2, "syncing a missing directory reports ENOENT(2), got {code}");
+}
+
+file_rename_missing_source_raises() `test(exclude: wasm) {
+  string dst = os.temp_dir + "/pr_iot_rnms_dst";
+  int code = 0;
+  File.rename(os.temp_dir + "/pr_iot_rnms_missing", dst[0:dst.len])? e is IoError {
+    code = e.code;
+  }!;
+  assert(code == 2, "renaming a missing source reports ENOENT(2), got {code}");
+  assert(!File.exists(dst[0:dst.len]), "a failed rename creates nothing");
+}
+
+// Zero bytes is the degenerate case of the fill loop: the first write returns 0
+// with nothing outstanding, which must not be mistaken for the no-progress error
+// the loop raises when bytes remain.
+replace_content_empty_content() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc8";
+  File.write_content(p[0:p.len], "not empty")?!;
+  File.replace_content(p[0:p.len], "")?!;
+  assert(File.read_content(p[0:p.len])?! == "", "an empty replacement empties the file");
+  assert(File.size(p[0:p.len])?! == 0, "and the file really is zero bytes");
+  File.remove(p)?!;
+}
+
+// A payload far larger than any single buffer, so the whole write goes through
+// the loop rather than the one-shot path in the common case.
+replace_bytes_large_payload() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc9";
+  u8[] payload = Vector[u8].filled(7u8, 200000);
+  File.replace_bytes(p[0:p.len], payload)?!;
+  assert(File.size(p[0:p.len])?! == 200000, "every byte reached the destination");
+  File f = File.open_read(p[0:p.len])?!;
+  u8[] buf = Vector[u8].filled(0u8, 200000);
+  int n = f.read(buf)?!;
+  f.close()?!;
+  assert(n == 200000, "and reads back at full length");
+  assert(buf[0] == 7u8 && buf[199999] == 7u8, "first and last bytes survive");
+  File.remove(p)?!;
+}
+
+// Opens and locks one slot, the way a live writer holds it.
+_hold_slot!(string path, int index) File {
+  string name = path + ".promise-sync" + index.to_string();
+  File h = File.create(name[0:name.len])?!;
+  assert(h.try_lock()?!, "the test holds slot {index}");
+  return h;
+}
+
+// docs/io.md §3.4 bounds the slot scan at 8 so a pathological directory cannot
+// make one write scan forever. With all eight held by live writers the write has
+// to give up and say so — not spin, and not overwrite somebody's slot.
+replace_content_slot_exhaustion_raises() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc10";
+  File.write_content(p[0:p.len], "old")?!;
+  File[] holders = [];
+  for int i = 0; i < 8; i += 1 {
+    holders.push(_hold_slot(p[0:p.len], i)?!);
+  }
+
+  int code = 0;
+  string message = "";
+  File.replace_content(p[0:p.len], "new")? e is IoError {
+    code = e.code;
+    message = e.message;
+  }!;
+  assert(code == 11, "all eight slots held reports EAGAIN(11), got {code}");
+  // The message pins which raise fired: try_lock turns a real EWOULDBLOCK into
+  // false rather than raising, so the bound is the only thing that can report 11.
+  assert(message.contains("temporary slot"), "the bound is what refused, got '{message}'");
+  assert(File.read_content(p[0:p.len])?! == "old", "the destination is untouched");
+
+  // Dropping the vector closes every handle, which releases every lock.
+  for int i = 0; i < 8; i += 1 {
+    string name = p + ".promise-sync" + i.to_string();
+    File.remove(name[0:name.len])?!;
+  }
+  File.remove(p)?!;
+}
+
+// Goroutine body for replace_content_concurrent_writers_never_interleave.
+_replace_worker(string path, string content) bool {
+  File.replace_content(path, content)?!;
+  return true;
+}
+
+// Concurrent writers to one destination: docs/io.md §3 promises the last rename
+// wins and no writer ever sees a partial file. Each writer's payload is a
+// distinct byte repeated, so a destination that mixed two writers — or one that
+// had two writers sharing a temporary slot — would be neither payload.
+replace_content_concurrent_writers_never_interleave() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc11";
+  File.write_content(p[0:p.len], "seed")?!;
+
+  w1 := go _replace_worker(os.temp_dir + "/pr_iot_rc11", "A".repeat(4096));
+  w2 := go _replace_worker(os.temp_dir + "/pr_iot_rc11", "B".repeat(4096));
+  w3 := go _replace_worker(os.temp_dir + "/pr_iot_rc11", "C".repeat(4096));
+  assert(<-w1, "first writer finished");
+  assert(<-w2, "second writer finished");
+  assert(<-w3, "third writer finished");
+
+  string final = File.read_content(p[0:p.len])?!;
+  assert(final.len == 4096, "the destination is exactly one full payload, got {final.len} bytes");
+  assert(final == "A".repeat(4096) || final == "B".repeat(4096) || final == "C".repeat(4096),
+  "the destination is one writer's payload, not a mix");
+  assert(!File.exists(p + ".promise-sync0"), "slot 0 was consumed or cleaned up");
+  assert(!File.exists(p + ".promise-sync1"), "slot 1 was consumed or cleaned up");
+  assert(!File.exists(p + ".promise-sync2"), "slot 2 was consumed or cleaned up");
+  File.remove(p)?!;
+}
+
+// Goroutine bodies for replace_content_reader_never_sees_partial.
+_replace_alternating(string path, int rounds) bool {
+  for int i = 0; i < rounds; i += 1 {
+    if i % 2 == 0 {
+      File.replace_content(path[0:path.len], "A".repeat(2048))?!;
+    } else {
+      File.replace_content(path[0:path.len], "B".repeat(2048))?!;
+    }
+  }
+  return true;
+}
+
+_read_full_length(string path, int rounds) bool {
+  for int i = 0; i < rounds; i += 1 {
+    string s = File.read_content(path[0:path.len])?!;
+    // Every read must land on a whole file: the rename swaps a complete
+    // destination in, so a short read would mean a reader saw a write in
+    // progress — exactly what docs/io.md §3 says cannot happen.
+    if s.len != 2048 {
+      return false;
+    }
+  }
+  return true;
+}
+
+replace_content_reader_never_sees_partial() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_rc12";
+  File.replace_content(p[0:p.len], "A".repeat(2048))?!;
+  writer := go _replace_alternating(os.temp_dir + "/pr_iot_rc12", 16);
+  reader := go _read_full_length(os.temp_dir + "/pr_iot_rc12", 16);
+  assert(<-writer, "the writer completed every round");
+  assert(<-reader, "every read saw a complete file, never a partial one");
+  File.remove(p)?!;
+}

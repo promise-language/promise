@@ -2454,6 +2454,434 @@ func TestErrnoWasm(t *testing.T) {
 	assertContains(t, out, "ret i32 0", "WASM stub returns 0")
 }
 
+// --- T1520: durability primitives (docs/io.md) ---
+
+func TestFileRenameAllPlatforms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@rename("},
+		{"Windows", &WindowsPAL{}, "@MoveFileExA("},
+		{"WASM", &WasmPAL{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileRename(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_rename" {
+				t.Errorf("expected pal_file_rename, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_file_rename(i8* %from, i8* %to)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+// MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH = 0x1|0x8 = 9. REPLACE_EXISTING
+// is what makes the rename match POSIX semantics; WRITE_THROUGH is what lets
+// pal_dir_sync be a no-op on Windows (docs/io.md §3.2). Dropping either silently
+// breaks a different half of the contract, so the literal is pinned.
+func TestFileRenameWindowsFlags(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileRename(module)
+	out := module.String()
+	assertContains(t, out, "@MoveFileExA(i8* %from, i8* %to, i32 9)", "REPLACE_EXISTING|WRITE_THROUGH")
+}
+
+func TestFileSyncAllPlatforms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"Linux", &PosixPAL{target: "x86_64-unknown-linux-gnu"}, "@fsync("},
+		{"macOS", &PosixPAL{target: "arm64-apple-darwin23.0.0"}, "@fcntl("},
+		{"Windows", &WindowsPAL{}, "@FlushFileBuffers("},
+		{"WASM", &WasmPAL{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileSync(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_sync" {
+				t.Errorf("expected pal_file_sync, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_file_sync(i32 %fd)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+// docs/io.md §4 makes the macOS divergence the whole point of File.sync: fsync
+// there returns while the data may still sit in the drive's volatile cache, so
+// only F_FULLFSYNC (51) is actually durable. A wrong constant would still compile
+// and still return 0 — it would just quietly stop being a durability primitive —
+// so the value is pinned, along with the fact that Linux does NOT use fcntl.
+func TestFileSyncMacOSUsesFullFsync(t *testing.T) {
+	module := ir.NewModule()
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitFileSync(module)
+	out := module.String()
+	assertContains(t, out, "@fcntl(i32 %fd, i32 51, i32 0)", "F_FULLFSYNC = 51")
+	if strings.Contains(out, "@fsync(") {
+		t.Error("macOS pal_file_sync calls fsync — F_FULLFSYNC is required (docs/io.md §4)")
+	}
+}
+
+func TestFileSyncLinuxUsesFsync(t *testing.T) {
+	module := ir.NewModule()
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitFileSync(module)
+	out := module.String()
+	assertContains(t, out, "call i32 @fsync(i32 %fd)", "plain fsync on Linux")
+	if strings.Contains(out, "@fcntl(") {
+		t.Error("Linux pal_file_sync calls fcntl — F_FULLFSYNC is macOS-only")
+	}
+}
+
+func TestDirSyncAllPlatforms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"POSIX", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"WASM", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitDirSync(module)
+			out := module.String()
+
+			if fn.Name() != "pal_dir_sync" {
+				t.Errorf("expected pal_dir_sync, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_dir_sync(i8* %path)", "definition")
+		})
+	}
+}
+
+// POSIX syncs a directory by opening it read-only and fsync'ing the descriptor.
+// Plain fsync on both platforms, including macOS: §3.2 specifies fsync for the
+// directory entry, and §4's F_FULLFSYNC rule is about file *contents*.
+func TestDirSyncPosixOpensAndFsyncs(t *testing.T) {
+	for _, target := range []string{"x86_64-unknown-linux-gnu", "arm64-apple-darwin23.0.0"} {
+		t.Run(target, func(t *testing.T) {
+			module := ir.NewModule()
+			(&PosixPAL{target: target}).EmitDirSync(module)
+			out := module.String()
+			// O_RDONLY = 0 on both platforms.
+			assertContains(t, out, "@open(i8* %path, i32 0, i32 0)", "opens the directory read-only")
+			assertContains(t, out, "@fsync(", "fsyncs the directory descriptor")
+			assertContains(t, out, "@close(", "closes the descriptor")
+			if strings.Contains(out, "i32 51") {
+				t.Error("pal_dir_sync uses F_FULLFSYNC — §3.2 specifies plain fsync for directories")
+			}
+		})
+	}
+}
+
+// Windows cannot flush a directory handle, so pal_dir_sync is a no-op there and
+// MOVEFILE_WRITE_THROUGH carries the guarantee instead (docs/io.md §6.3).
+func TestDirSyncWindowsIsNoOp(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitDirSync(module)
+	out := module.String()
+	assertContains(t, out, "ret i32 0", "returns success without syscalls")
+}
+
+func TestFileLockAllPlatforms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@flock("},
+		{"Windows", &WindowsPAL{}, "@LockFileEx("},
+		{"WASM", &WasmPAL{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileLock(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_lock" {
+				t.Errorf("expected pal_file_lock, got %s", fn.Name())
+			}
+			assertContains(t, out,
+				"define i32 @pal_file_lock(i32 %fd, i32 %exclusive, i32 %nonblocking)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+// LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8 — identical on Linux and macOS, and
+// wrong values would produce a lock of the wrong mode rather than an error.
+func TestFileLockPosixOperationConstants(t *testing.T) {
+	module := ir.NewModule()
+	(&PosixPAL{}).EmitFileLock(module)
+	out := module.String()
+	assertContains(t, out, "select i1 %0, i32 2, i32 1", "LOCK_EX=2 when exclusive, else LOCK_SH=1")
+	assertContains(t, out, "select i1 %2, i32 4, i32 0", "LOCK_NB=4 when nonblocking")
+	assertContains(t, out, "@flock(i32 %fd,", "passes the composed operation to flock")
+}
+
+func TestFileUnlockPosixUsesLockUn(t *testing.T) {
+	module := ir.NewModule()
+	(&PosixPAL{}).EmitFileUnlock(module)
+	out := module.String()
+	assertContains(t, out, "@flock(i32 %fd, i32 8)", "LOCK_UN = 8")
+}
+
+// LockFileEx locks a byte *range*, so a whole-file lock is 0xFFFFFFFF:0xFFFFFFFF
+// bytes from a zeroed OVERLAPPED. Both halves matter and both fail silently if
+// wrong: short extents or a garbage Offset would lock a range that does not
+// conflict with anyone, so the lock would appear to succeed and exclude nothing.
+func TestFileLockWindowsLocksWholeFile(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileLock(module)
+	out := module.String()
+	assertContains(t, out, "@_get_osfhandle(", "recovers the HANDLE behind the CRT fd")
+	assertContains(t, out, "alloca [32 x i8]", "32-byte OVERLAPPED")
+	assertContains(t, out, "@memset(", "zeroes the OVERLAPPED")
+	assertContains(t, out, "i32 u0xFFFFFFFF, i32 u0xFFFFFFFF, i8*", "0xFFFFFFFF:0xFFFFFFFF whole-file extents")
+	// LOCKFILE_EXCLUSIVE_LOCK = 0x2, LOCKFILE_FAIL_IMMEDIATELY = 0x1
+	assertContains(t, out, "i32 2, i32 0", "LOCKFILE_EXCLUSIVE_LOCK = 2")
+	assertContains(t, out, "i32 1, i32 0", "LOCKFILE_FAIL_IMMEDIATELY = 1")
+}
+
+func TestFileUnlockWindowsUnlocksWholeFile(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileUnlock(module)
+	out := module.String()
+	assertContains(t, out, "@UnlockFileEx(", "UnlockFileEx declaration")
+	assertContains(t, out, "alloca [32 x i8]", "32-byte OVERLAPPED")
+	assertContains(t, out, "@memset(", "zeroes the OVERLAPPED")
+	assertContains(t, out, "i32 u0xFFFFFFFF, i32 u0xFFFFFFFF, i8*", "matches the range EmitFileLock takes")
+}
+
+// ERROR_LOCK_VIOLATION (33) must reach the Promise layer as EWOULDBLOCK, not as
+// the EINVAL that the shared emitWinErrToErrno maps it to — otherwise try_lock
+// raises where docs/io.md §7 says it returns false. 11 is used on all three
+// platforms because modules/io speaks POSIX errno throughout.
+func TestFileLockWindowsNormalizesContentionErrno(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileLock(module)
+	out := module.String()
+	assertContains(t, out, ", 33\n", "detects ERROR_LOCK_VIOLATION")
+	assertContains(t, out, "ret i32 -11", "reports it as -EWOULDBLOCK")
+}
+
+func TestFileTruncateAllPlatforms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@ftruncate("},
+		{"Windows", &WindowsPAL{}, "@_chsize_s("},
+		{"WASM", &WasmPAL{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileTruncate(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_truncate" {
+				t.Errorf("expected pal_file_truncate, got %s", fn.Name())
+			}
+			assertContains(t, out,
+				"define i32 @pal_file_truncate(i32 %fd, i64 %length)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+// _chsize_s returns errno_t directly rather than -1 plus errno, so it is negated
+// as-is. Routing it through emitWinErrToErrno would translate a CRT errno as if
+// it were a Win32 error code and hand back a nonsense value.
+func TestFileTruncateWindowsNegatesErrnoDirectly(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileTruncate(module)
+	out := module.String()
+	assertContains(t, out, "icmp ne i32", "nonzero return means failure")
+	assertContains(t, out, "sub i32 0,", "negates the errno_t as-is")
+	if strings.Contains(out, "@GetLastError(") {
+		t.Error("pal_file_truncate reads GetLastError — _chsize_s reports via errno_t")
+	}
+}
+
+// docs/io.md §6.4: WASM supports none of this, and §7 names ENOSYS as the code
+// for "unsupported on this target". -1 would surface as EPERM, which is a lie.
+// pal_dir_sync is included deliberately: the Windows 0 return is a statement that
+// the rename already carried durability, which WASM cannot make.
+func TestT1520WasmStubsReturnENOSYS(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		emit func(*ir.Module) *ir.Func
+	}{
+		{"pal_file_rename", (&WasmPAL{}).EmitFileRename},
+		{"pal_file_sync", (&WasmPAL{}).EmitFileSync},
+		{"pal_dir_sync", (&WasmPAL{}).EmitDirSync},
+		{"pal_file_lock", (&WasmPAL{}).EmitFileLock},
+		{"pal_file_unlock", (&WasmPAL{}).EmitFileUnlock},
+		{"pal_file_truncate", (&WasmPAL{}).EmitFileTruncate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.emit(module)
+			if fn.Name() != tc.name {
+				t.Errorf("expected %s, got %s", tc.name, fn.Name())
+			}
+			assertContains(t, module.String(), "ret i32 -38", "ENOSYS")
+		})
+	}
+}
+
+// Mode 7 (O_RDWR|O_CREAT, no truncate, no append) backs the temporary-slot
+// protocol in docs/io.md §3.4: the slot is opened before the lock has decided
+// whether its contents are stale. O_TRUNC would destroy a live writer's data
+// before the lock could refuse; O_APPEND would defeat the write offsets that
+// follow the explicit truncate.
+func TestFileOpenMode7Posix(t *testing.T) {
+	for _, tc := range []struct {
+		target string
+		flags  string
+	}{
+		// macOS O_CREAT = 0x200 → O_RDWR|O_CREAT = 514
+		{"arm64-apple-darwin23.0.0", "i32 514"},
+		// Linux O_CREAT = 0x40 → O_RDWR|O_CREAT = 66
+		{"x86_64-unknown-linux-gnu", "i32 66"},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			module := ir.NewModule()
+			(&PosixPAL{target: tc.target}).EmitFileOpen(module)
+			out := module.String()
+			assertContains(t, out, "icmp eq i32 %mode, 7", "recognises mode 7")
+			assertContains(t, out, tc.flags, "O_RDWR|O_CREAT without O_TRUNC or O_APPEND")
+		})
+	}
+}
+
+func TestFileOpenMode7Windows(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileOpen(module)
+	out := module.String()
+	assertContains(t, out, "icmp eq i32 %mode, 7", "recognises mode 7")
+	// Mode 7 joins the OPEN_ALWAYS group without joining the _O_APPEND group.
+	assertContains(t, out, "select i1 %13, i32 4, i32 3", "OPEN_ALWAYS for create-if-absent modes")
+	assertContains(t, out, "select i1 %12, i32 8, i32 0", "_O_APPEND only for the appending modes")
+}
+
+// The wasm32-web PAL wires the same six stubs, and nothing else reached them:
+// a mis-wired entry (EmitFileUnlock returning emitStubFileLock, say) would give
+// the module a function of the wrong name and arity, and the first thing to
+// notice would be a link failure in a browser build. Asserting the emitted name
+// is what catches that; the shared -ENOSYS assertion catches a copy-paste of a
+// -1-returning stub.
+func TestT1520WasmWebStubsReturnENOSYS(t *testing.T) {
+	p := &WasmWebPAL{}
+	for _, tc := range []struct {
+		name string
+		emit func(*ir.Module) *ir.Func
+	}{
+		{"pal_file_rename", p.EmitFileRename},
+		{"pal_file_sync", p.EmitFileSync},
+		{"pal_dir_sync", p.EmitDirSync},
+		{"pal_file_lock", p.EmitFileLock},
+		{"pal_file_unlock", p.EmitFileUnlock},
+		{"pal_file_truncate", p.EmitFileTruncate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.emit(module)
+			if fn.Name() != tc.name {
+				t.Errorf("expected %s, got %s", tc.name, fn.Name())
+			}
+			assertContains(t, module.String(), "ret i32 -38", "ENOSYS")
+		})
+	}
+}
+
+// _get_osfhandle returns INVALID_HANDLE_VALUE(-1) or -2 for a descriptor that is
+// not open. Neither may reach FlushFileBuffers/LockFileEx/UnlockFileEx: passing
+// -1 as a HANDLE is not a no-op on Windows, it is a pseudo-handle, so the call
+// would act on something other than the file the caller asked about. The guard
+// therefore has to branch *before* the Win32 call and report EBADF itself —
+// _get_osfhandle does not reliably set errno.
+func TestT1520WindowsBadDescriptorGuard(t *testing.T) {
+	p := &WindowsPAL{}
+	for _, tc := range []struct {
+		name string
+		emit func(*ir.Module) *ir.Func
+		win  string
+	}{
+		{"pal_file_sync", p.EmitFileSync, "@FlushFileBuffers("},
+		{"pal_file_lock", p.EmitFileLock, "@LockFileEx("},
+		{"pal_file_unlock", p.EmitFileUnlock, "@UnlockFileEx("},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			tc.emit(module)
+			out := module.String()
+			assertContains(t, out, ".bad_fd:", "guard block")
+			assertContains(t, out, "store i32 9,", "sets errno to EBADF")
+			assertContains(t, out, "ret i32 -9", "returns -EBADF")
+
+			// The guard must dominate the Win32 call, not follow it. Compared
+			// inside the definition, since the declaration of the Win32 function
+			// sits above it in the module.
+			body := out[strings.Index(out, "define i32 @"+tc.name+"("):]
+			guard := strings.Index(body, ".bad_fd:")
+			call := strings.Index(body, "call i32 "+tc.win)
+			if guard < 0 || call < 0 || guard > call {
+				t.Errorf("%s: bad-fd guard at %d does not precede %s at %d", tc.name, guard, tc.win, call)
+			}
+		})
+	}
+}
+
+// pal_dir_sync must read errno before close(2), because close can overwrite it —
+// the sync failure would then be reported as whatever close last did, or as
+// success. The ordering is invisible in any single-line assertion, so the
+// failure block is extracted and the two calls compared by position.
+func TestDirSyncPosixReadsErrnoBeforeClose(t *testing.T) {
+	for _, target := range []string{"x86_64-unknown-linux-gnu", "arm64-apple-darwin23.0.0"} {
+		t.Run(target, func(t *testing.T) {
+			module := ir.NewModule()
+			(&PosixPAL{target: target}).EmitDirSync(module)
+			out := module.String()
+
+			start := strings.Index(out, ".sync_err:")
+			if start < 0 {
+				t.Fatal("pal_dir_sync has no .sync_err block")
+			}
+			blk := out[start:]
+			if end := strings.Index(blk, "\n\n"); end >= 0 {
+				blk = blk[:end]
+			}
+			errno := strings.Index(blk, "load i32,")
+			closed := strings.Index(blk, "@close(")
+			if errno < 0 || closed < 0 {
+				t.Fatalf(".sync_err must both read errno and close the fd, got:\n%s", blk)
+			}
+			if errno > closed {
+				t.Errorf("pal_dir_sync closes the fd before reading errno — close(2) can overwrite it:\n%s", blk)
+			}
+		})
+	}
+}
+
 func TestForTargetFileIOInterface(t *testing.T) {
 	// Verify that all PAL implementations satisfy the interface with file I/O methods
 	triples := []string{
@@ -2482,6 +2910,12 @@ func TestForTargetFileIOInterface(t *testing.T) {
 			p.EmitDirRemove(module)
 			p.EmitDirExists(module)
 			p.EmitErrno(module)
+			p.EmitFileRename(module)
+			p.EmitFileSync(module)
+			p.EmitDirSync(module)
+			p.EmitFileLock(module)
+			p.EmitFileUnlock(module)
+			p.EmitFileTruncate(module)
 		})
 	}
 }

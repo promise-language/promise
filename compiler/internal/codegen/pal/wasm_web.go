@@ -118,13 +118,21 @@ func (p *WasmWebPAL) EmitFileSeek(module *ir.Module) *ir.Func  { return emitStub
 func (p *WasmWebPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	return emitStubFileStatSize(module)
 }
-func (p *WasmWebPAL) EmitFileStat(module *ir.Module) *ir.Func    { return emitStubFileStat(module) }
-func (p *WasmWebPAL) EmitFileRemove(module *ir.Module) *ir.Func  { return emitStubFileRemove(module) }
-func (p *WasmWebPAL) EmitFileExists(module *ir.Module) *ir.Func  { return emitStubFileExists(module) }
-func (p *WasmWebPAL) EmitFileMkdir(module *ir.Module) *ir.Func   { return emitStubFileMkdir(module) }
-func (p *WasmWebPAL) EmitDirRemove(module *ir.Module) *ir.Func   { return emitStubDirRemove(module) }
-func (p *WasmWebPAL) EmitDirExists(module *ir.Module) *ir.Func   { return emitStubDirExists(module) }
-func (p *WasmWebPAL) EmitErrno(module *ir.Module) *ir.Func       { return emitStubErrno(module) }
+func (p *WasmWebPAL) EmitFileStat(module *ir.Module) *ir.Func   { return emitStubFileStat(module) }
+func (p *WasmWebPAL) EmitFileRemove(module *ir.Module) *ir.Func { return emitStubFileRemove(module) }
+func (p *WasmWebPAL) EmitFileExists(module *ir.Module) *ir.Func { return emitStubFileExists(module) }
+func (p *WasmWebPAL) EmitFileMkdir(module *ir.Module) *ir.Func  { return emitStubFileMkdir(module) }
+func (p *WasmWebPAL) EmitDirRemove(module *ir.Module) *ir.Func  { return emitStubDirRemove(module) }
+func (p *WasmWebPAL) EmitDirExists(module *ir.Module) *ir.Func  { return emitStubDirExists(module) }
+func (p *WasmWebPAL) EmitErrno(module *ir.Module) *ir.Func      { return emitStubErrno(module) }
+func (p *WasmWebPAL) EmitFileRename(module *ir.Module) *ir.Func { return emitStubFileRename(module) }
+func (p *WasmWebPAL) EmitFileSync(module *ir.Module) *ir.Func   { return emitStubFileSync(module) }
+func (p *WasmWebPAL) EmitDirSync(module *ir.Module) *ir.Func    { return emitStubDirSync(module) }
+func (p *WasmWebPAL) EmitFileLock(module *ir.Module) *ir.Func   { return emitStubFileLock(module) }
+func (p *WasmWebPAL) EmitFileUnlock(module *ir.Module) *ir.Func { return emitStubFileUnlock(module) }
+func (p *WasmWebPAL) EmitFileTruncate(module *ir.Module) *ir.Func {
+	return emitStubFileTruncate(module)
+}
 func (p *WasmWebPAL) EmitDirOpen(module *ir.Module) *ir.Func     { return emitStubDirOpen(module) }
 func (p *WasmWebPAL) EmitDirNextName(module *ir.Module) *ir.Func { return emitStubDirNextName(module) }
 func (p *WasmWebPAL) EmitDirClose(module *ir.Module) *ir.Func    { return emitStubDirClose(module) }

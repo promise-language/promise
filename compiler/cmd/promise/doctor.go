@@ -672,9 +672,11 @@ func doctorCheckCAS(flags doctorFlags) doctorCheck {
 		}
 		// Stale LLVM/CRT view dirs live outside the CAS namespace and are invisible
 		// to the sweep; drop them so they re-materialize from the (kept) CAS blobs
-		// on the next build.
-		_ = module.CleanLLVMCache()
-		_ = module.CleanCRTCache()
+		// on the next build. Hold the view locks so a concurrent build's
+		// publishViewDir doesn't lose its staging dir mid-write (T1684).
+		if home, err := module.PromiseHome(); err == nil {
+			cleanViewsUnderLock(home)
+		}
 	}
 
 	c.Details = append(c.Details, fmt.Sprintf("Verified %d blobs, %d archives", res.BlobsChecked, res.ArchivesChecked))

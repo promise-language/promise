@@ -4147,21 +4147,20 @@ func ensureCacheValid() {
 		if !changed {
 			return
 		}
-		// Compiler binary changed — clear all extraction caches.
-		// Errors are non-fatal: worst case we re-extract on top of stale files.
-		module.CleanLLVMCache()
-		module.CleanCRTCache()
-		// Embedded modules are deliberately NOT cleared here. Their cache is
-		// keyed by compiler hash, so a changed binary already reads and writes a
-		// different subtree and cannot see the old one's files. Wiping was what
-		// made this racy: RemoveAll walked a tree that peer processes were
-		// extracting into, deleting their staging dirs mid-write (T1616).
-		// Record this compiler so the next invocation skips cleanup. An error
-		// here only costs a redundant clean next time, but it must not pass
-		// silently — a stamp that never lands means every run re-cleans.
+		// Extraction caches (LLVM views, CRT views, embedded modules) are
+		// deliberately NOT cleared here. All are content-keyed (different
+		// compiler → different blob hashes → different view dir), so a changed
+		// binary reads and writes a different subtree and cannot see stale files.
+		// Wiping was what made this racy: RemoveAll walked a tree that peer
+		// processes were extracting into, deleting their staging dirs mid-write
+		// (T1616 for embedded modules, T1684/T1431 for LLVM/CRT views).
+		// Reclaiming orphaned old view dirs is `promise doctor --repair`'s job
+		// and `promise clean --global`.
+		// Record this compiler so the next invocation skips the stamp check.
+		// An error here only costs a redundant stamp write next time.
 		if err := module.WriteCompilerStamp(identity); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not record the compiler stamp (%v); "+
-				"extraction caches will be cleared again on the next run\n", err)
+				"the stamp check will run again on the next invocation\n", err)
 		}
 	})
 }
@@ -8895,6 +8894,32 @@ func runCatalogList() {
 // runInstall installs the Promise compiler to PROMISE_HOME (default: ~/.promise/).
 // runInit creates a promise.toml in the current directory.
 // runClean removes the build cache and optionally the global module cache.
+
+// cleanViewsUnderLock removes stale LLVM/CRT/compiler-rt view dirs while
+// holding their cross-process materialization locks, so a concurrent build's
+// publishViewDir doesn't lose its staging dir mid-write (T1684).
+func cleanViewsUnderLock(home string) {
+	// Acquire all view locks before removing any trees. CleanCRTCache removes
+	// both crt-view and compiler-rt-view, so both locks must be held.
+	lockNames := []string{"llvm-view.lock", "crt-view.lock", "compiler-rt-view.lock"}
+	var unlocks []func()
+	for _, name := range lockNames {
+		unlock, err := blobstore.Lock(
+			filepath.Join(home, "cache", name),
+			"promise (cleaning view caches)",
+			"Waiting for a concurrent build to finish staging tools...")
+		if err != nil {
+			continue
+		}
+		unlocks = append(unlocks, unlock)
+	}
+	_ = module.CleanLLVMCache()
+	_ = module.CleanCRTCache()
+	for _, unlock := range unlocks {
+		unlock()
+	}
+}
+
 func runClean(args []string) {
 	global := false
 	epochs := false
@@ -8933,8 +8958,9 @@ func runClean(args []string) {
 		}
 		// Also clean extraction caches and stamp so next build re-extracts
 		module.CleanEmbeddedModuleCache()
-		module.CleanLLVMCache()
-		module.CleanCRTCache()
+		if home, err := module.PromiseHome(); err == nil {
+			cleanViewsUnderLock(home)
+		}
 		// Remove the compiler stamp so the next run re-populates
 		if path, err := module.CompilerStampPath(); err == nil {
 			os.Remove(path)

@@ -117,10 +117,10 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	// version bump changes the entry sha256s, yielding a fresh view dir so stale
 	// tools from a previous epoch are never served from a name-only match. The CAS
 	// itself is content-addressed and never stale; the view is a derived working
-	// copy with content-based invalidation. (Old view dirs are wiped by
-	// CleanLLVMCache on a compiler-stamp change; orphan `.tmp-*` staging dirs left
-	// by a crashed populator are reaped opportunistically by publishViewDir at the
-	// next materialization, and wholesale by `promise doctor --repair`.)
+	// copy with content-based invalidation. (Old view dirs are reclaimed by
+	// `promise doctor --repair` and `promise clean --global`; orphan `.tmp-*`
+	// staging dirs left by a crashed populator are reaped opportunistically by
+	// publishViewDir at the next materialization.)
 	viewDir := filepath.Join(home, "cache", "llvm-view", runtime.GOOS+"-"+runtime.GOARCH+"-"+blobSetKey(entries))
 
 	store, err := blobstore.NewStore()
@@ -138,8 +138,8 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	// partially-built view is never observable: the first builder populates while
 	// others block until publish. The fast path above (viewComplete) is reached
 	// without the lock, so builds against an already-published view pay nothing.
-	// The lock lives OUTSIDE the llvm-view tree (a sibling file) so CleanLLVMCache
-	// (os.RemoveAll of cache/llvm-view) can't delete it mid-hold.
+	// The lock lives OUTSIDE the llvm-view tree (a sibling file) so
+	// cleanViewsUnderLock's RemoveAll of cache/llvm-view can't delete it mid-hold.
 	lockPath := filepath.Join(home, "cache", "llvm-view.lock")
 	unlock, err := blobstore.Lock(lockPath, "promise (materializing LLVM toolchain)",
 		"Waiting for another process to finish staging the LLVM toolchain...")
@@ -637,8 +637,8 @@ func compilerRTManifestName(arch, file string) string {
 //
 // The view dir is content-keyed on the blob set (see resolveLLVMView) so a
 // version bump never serves stale files from a name-only match. The lock file
-// lives OUTSIDE the view tree so cache cleanup (CleanCRTCache) can't delete it
-// mid-hold.
+// lives OUTSIDE the view tree so cleanViewsUnderLock's RemoveAll can't delete
+// it mid-hold.
 func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, waiting string) (string, error) {
 	m, err := loadEmbeddedManifest()
 	if err != nil || m == nil {

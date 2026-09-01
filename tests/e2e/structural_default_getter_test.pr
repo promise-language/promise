@@ -1,0 +1,214 @@
+// T1600: A synthesized default METHOD cannot read a default GETTER through
+// `this` — codegen panics "member X is not a field" for a structurally-
+// satisfying implementor (declared `is` works).
+type Scored `structural {
+  get raw_doubled int `abstract;
+  get quadrupled int => this.raw_doubled * 2;
+  describe(this) string {
+    return "q=" + this.quadrupled.to_string();
+  }
+}
+
+// --- Case 1: structural satisfier (no `is`) — the repro case ---
+
+type HeapM {
+  int raw;
+  get raw_doubled int => this.raw * 2;
+}
+
+structural_heap() `test {
+  Scored s = HeapM(raw: 3);
+  assert(s.describe() == "q=12", "heap structural describe");
+  assert(s.quadrupled == 12, "heap structural quadrupled");
+}
+
+// --- Case 2: declared `is` control (regression guard) ---
+
+type HeapDeclared is Scored {
+  int raw;
+  get raw_doubled int => this.raw * 2;
+}
+
+declared_is() `test {
+  Scored s = HeapDeclared(raw: 3);
+  assert(s.describe() == "q=12", "declared describe");
+  assert(s.quadrupled == 12, "declared quadrupled");
+}
+
+// --- Case 3: value type structural satisfier ---
+
+type ValueM {
+  int raw `value;
+  get raw_doubled int => this.raw * 2;
+}
+
+structural_value() `test {
+  Scored s = ValueM(raw: 5);
+  assert(s.describe() == "q=20", "value structural describe");
+  assert(s.quadrupled == 20, "value structural quadrupled");
+}
+
+// --- Case 4: default getter calling another default getter ---
+
+type Chained `structural {
+  get base int `abstract;
+  get doubled int => this.base * 2;
+  get quadrupled_chain int => this.doubled * 2;
+  summary(this) string {
+    return this.quadrupled_chain.to_string();
+  }
+}
+
+type ChainImpl {
+  int val;
+  get base int => this.val;
+}
+
+chained_getters() `test {
+  Chained c = ChainImpl(val: 4);
+  assert(c.summary() == "16", "chained summary");
+  assert(c.quadrupled_chain == 16, "chained quadrupled");
+  assert(c.doubled == 8, "chained doubled");
+}
+
+// --- Case 5: failable default getter read through `this` in default method ---
+// Exercises the T1600 fallback with a failable getter: the synthesized default
+// method body must auto-propagate the getter's error through the failable method.
+
+type Validated `structural {
+  get raw int `abstract;
+  get checked! int {
+    if this.raw < 0 {
+      raise error(message: "negative");
+    }
+    return this.raw;
+  }
+  safe_value!(this) int {
+    return this.checked;
+  }
+}
+
+type ValidImpl {
+  int val;
+  get raw int => this.val;
+}
+
+failable_getter_ok_path() `test {
+  Validated v = ValidImpl(val: 5);
+  int r = v.safe_value()? e {
+    -1
+  };
+  assert(r == 5, "failable structural default getter succeeds");
+}
+
+failable_getter_error_path() `test {
+  Validated v = ValidImpl(val: -1);
+  int r = v.safe_value()? e {
+    -99
+  };
+  assert(r == -99, "failable structural default getter propagates error");
+}
+
+// --- Case 6: default getter result used as ~param inside default method body ---
+// Exercises the isMemberGetter fallback (the second half of T1600): when the
+// default getter result is passed to a `~` parameter inside the synthesized body,
+// isMemberGetter must recognize it as a getter so genMutRefArg materializes
+// the temp instead of trying genFieldPtr (which would panic).
+
+type Accum `structural {
+  get raw_val int `abstract;
+  get doubled int => this.raw_val * 2;
+  push_doubled(this, int[] ~out) {
+    out.push(this.doubled);
+  }
+}
+
+type AccumImpl {
+  int x;
+  get raw_val int => this.x;
+}
+
+mutref_getter_in_default_method() `test {
+  Accum a = AccumImpl(x: 5);
+  int[] arr = [];
+  a.push_doubled(arr);
+  assert(arr.len == 1, "push_doubled added one element");
+  assert(arr[0] == 10, "push_doubled pushed the doubled value");
+}
+
+// --- Case 7: default getter returning a heap type (string) ---
+// Ensures the T1600 fallback handles heap-allocated return types correctly:
+// the string returned by the default getter must be properly managed (no leak).
+
+type Labeled `structural {
+  get name string `abstract;
+  get label string => "label:" + this.name;
+  full_label(this) string {
+    return "[" + this.label + "]";
+  }
+}
+
+type Widget {
+  string n;
+  get name string => this.n;
+}
+
+heap_return_getter_in_default_method() `test {
+  Labeled l = Widget(n: "foo");
+  assert(l.full_label() == "[label:foo]", "string getter in default method");
+  assert(l.label == "label:foo", "string getter direct access");
+}
+
+// --- Case 8: structural interface chain — getter on parent, method on child ---
+// Default getter lives on a structural grandparent; the child structural adds
+// a default method that reads it. The concrete type satisfies structurally.
+
+type ChainBase `structural {
+  get raw int `abstract;
+  get doubled int => this.raw * 2;
+}
+
+type ChainExt is ChainBase `structural {
+  summary(this) string {
+    return "d=" + this.doubled.to_string();
+  }
+}
+
+type ChainImpl2 {
+  int x;
+  get raw int => this.x;
+}
+
+structural_chain_getter_in_child_method() `test {
+  ChainExt e = ChainImpl2(x: 4);
+  assert(e.summary() == "d=8", "getter from grandparent read in child structural method");
+  assert(e.doubled == 8, "getter from grandparent direct access");
+}
+
+// --- Case 9: multiple default getters read in one default method ---
+// Ensures the T1600 fallback + ensureDefaultMethodsSynthesized handles
+// multiple sibling default getters in the same synthesized body.
+
+type Stats `structural {
+  get a int `abstract;
+  get b int `abstract;
+  get sum int => this.a + this.b;
+  get product int => this.a * this.b;
+  report(this) string {
+    return this.sum.to_string() + "," + this.product.to_string();
+  }
+}
+
+type Pair2 {
+  int x;
+  int y;
+  get a int => this.x;
+  get b int => this.y;
+}
+
+multiple_getters_in_one_method() `test {
+  Stats s = Pair2(x: 3, y: 4);
+  assert(s.report() == "7,12", "multiple default getters in one default method");
+  assert(s.sum == 7, "sum getter direct");
+  assert(s.product == 12, "product getter direct");
+}

@@ -175,7 +175,19 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	}
 
 	// Getter property: emit a method call with no args beyond receiver
-	if g := named.LookupGetter(e.Field); g != nil {
+	g := named.LookupGetter(e.Field)
+	if g == nil && c.selfSubst != nil {
+		// T1600: Inside a synthesized structural default-method body, `this`
+		// (Self → concrete) may read a *sibling* default getter that is declared
+		// on the interface, not on the concrete type's own method table. Resolve
+		// it through the interface and ensure the per-concrete synthesized
+		// function exists. Mirrors the T0766 method-call fallback in genMethodCall.
+		if ig := c.selfSubst.iface.LookupGetter(e.Field); ig != nil {
+			c.ensureDefaultMethodsSynthesized(c.selfSubst.concrete, c.selfSubst.iface)
+			g = ig
+		}
+	}
+	if g != nil {
 		return c.genGetterCall(e, targetType, named, g)
 	}
 
@@ -748,6 +760,13 @@ func (c *Compiler) isMemberGetter(e *ast.MemberExpr) bool {
 	}
 	if named := extractNamed(ownerType); named != nil {
 		if named.LookupGetter(e.Field) != nil {
+			return true
+		}
+		// T1600: Inside a synthesized structural default body, `this` has the
+		// concrete type which may lack the sibling default getter. Fall back to
+		// the interface's getter table so genMutRefArg routes through the
+		// materialize path instead of genFieldPtr (which would panic).
+		if c.selfSubst != nil && c.selfSubst.iface.LookupGetter(e.Field) != nil {
 			return true
 		}
 	} else if en := extractEnum(ownerType); en != nil {

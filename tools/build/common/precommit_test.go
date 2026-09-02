@@ -805,3 +805,169 @@ func TestRunPreCommit_DocChecksRunBeforeStagedFileScan(t *testing.T) {
 		t.Fatal("expected the doc checks to run even with an empty staging area")
 	}
 }
+
+// --- sleep() guard tests (T1615/T1632) ---
+
+func TestIsTestPrFile_MatchesTestsDir(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"tests/foo/bar.pr", true},
+		{"tests/e2e/basics.pr", true},
+		{"tests/concurrency/goroutine_fire_and_forget.pr", true},
+	}
+	for _, c := range cases {
+		if got := isTestPrFile(c.path); got != c.want {
+			t.Errorf("isTestPrFile(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+func TestIsTestPrFile_MatchesModuleTestFile(t *testing.T) {
+	cases := []string{
+		"modules/http/http_test.pr",
+		"modules/net/net_test.pr",
+		"modules/x/x_test.pr",
+	}
+	for _, p := range cases {
+		if !isTestPrFile(p) {
+			t.Errorf("isTestPrFile(%q) = false, want true", p)
+		}
+	}
+}
+
+func TestIsTestPrFile_IgnoresNonTestPr(t *testing.T) {
+	cases := []string{
+		"modules/x/x.pr",
+		"modules/http/http.pr",
+		"compiler/x.go",
+		"modules/std/string.pr",
+	}
+	for _, p := range cases {
+		if isTestPrFile(p) {
+			t.Errorf("isTestPrFile(%q) = true, want false", p)
+		}
+	}
+}
+
+func TestHasSleepCall_DetectsCall(t *testing.T) {
+	data := []byte("  sleep(Duration.from_millis(50));\n")
+	if !hasSleepCall(data) {
+		t.Error("hasSleepCall: expected true for sleep() call, got false")
+	}
+}
+
+func TestHasSleepCall_IgnoresLineComment(t *testing.T) {
+	data := []byte("// sleep() only made that *likely*; the receive makes it ordered.\n")
+	if hasSleepCall(data) {
+		t.Error("hasSleepCall: expected false for sleep() in comment, got true")
+	}
+}
+
+func TestHasSleepCall_DetectsCallAfterCode(t *testing.T) {
+	// sleep() after a // comment on the same line → not a real call.
+	commentOnly := []byte("x := 1; // not sleep(\n")
+	if hasSleepCall(commentOnly) {
+		t.Error("hasSleepCall: expected false when sleep( appears only after //, got true")
+	}
+	// sleep() before any comment → real call.
+	realCall := []byte("x := 1; sleep(ms);\n")
+	if !hasSleepCall(realCall) {
+		t.Error("hasSleepCall: expected true for sleep() before comment, got false")
+	}
+}
+
+// TestCheckTestSleeps_RejectsViolation creates a git repo with a test .pr file
+// that calls sleep() and asserts CheckTestSleeps returns an error naming the path.
+func TestCheckTestSleeps_RejectsViolation(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/foo/bad_test.pr", []byte("test_x() `test { sleep(Duration.from_millis(10)); }\n"))
+	err := CheckTestSleeps(root)
+	if err == nil {
+		t.Fatal("expected error for sleep() in test file, got nil")
+	}
+	if !strings.Contains(err.Error(), "tests/foo/bad_test.pr") {
+		t.Errorf("error should name the violating path, got: %v", err)
+	}
+}
+
+// TestCheckTestSleeps_AllowsAllowlisted verifies that a path in sleepAllowlist
+// is not reported even when its source calls sleep().
+func TestCheckTestSleeps_AllowsAllowlisted(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	// Use a path that is actually in the allowlist.
+	stage("tests/std/time_test.pr", []byte("test_t() `test { sleep(Duration.from_millis(15)); }\n"))
+	if err := CheckTestSleeps(root); err != nil {
+		t.Fatalf("expected no error for allowlisted path, got: %v", err)
+	}
+}
+
+// TestCheckTestSleeps_AllowsCommentOnly verifies that sleep() appearing only
+// inside a line comment is not flagged.
+func TestCheckTestSleeps_AllowsCommentOnly(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/foo/doc_test.pr",
+		[]byte("// sleep() is not needed here — use a channel instead.\ntest_x() `test { assert(1 == 1); }\n"))
+	if err := CheckTestSleeps(root); err != nil {
+		t.Fatalf("expected no error for comment-only sleep reference, got: %v", err)
+	}
+}
+
+// TestCheckTestSleeps_IgnoresNonTestFile verifies that a non-test .pr file (no
+// _test suffix, not under tests/) with a sleep() call is not flagged.
+func TestCheckTestSleeps_IgnoresNonTestFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("modules/http/http.pr", []byte("  sleep(Duration.from_millis(10));\n"))
+	if err := CheckTestSleeps(root); err != nil {
+		t.Fatalf("expected no error for sleep() in non-test file, got: %v", err)
+	}
+}
+
+// TestCheckTestSleeps_SkipsTrackedButAbsent verifies that a test .pr file
+// tracked in the git index but absent from the worktree (deleted without
+// staging) is skipped gracefully — no error is returned. This covers the
+// os.ReadFile error path inside CheckTestSleeps, which is documented as the
+// staged-deletion case.
+func TestCheckTestSleeps_SkipsTrackedButAbsent(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+
+	// Stage a test file with sleep() so it's in the index.
+	stage("tests/foo/absent_test.pr", []byte("test_x() `test { sleep(Duration.from_millis(10)); }\n"))
+
+	// Commit it so it appears in git ls-files even after worktree deletion.
+	git := exec.Command("git", "commit", "-m", "add test")
+	git.Dir = root
+	git.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
+	)
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	// Delete from worktree without staging — file stays in git ls-files output.
+	if err := os.Remove(filepath.Join(root, "tests", "foo", "absent_test.pr")); err != nil {
+		t.Fatal(err)
+	}
+
+	// CheckTestSleeps must not return an error — the absent file is skipped.
+	if err := CheckTestSleeps(root); err != nil {
+		t.Fatalf("expected no error for tracked-but-absent test file, got: %v", err)
+	}
+}
+
+// TestRunPreCommit_RejectsSleepInTestFile is the full integration path: a
+// staged test .pr file that calls sleep() causes RunPreCommit to return an
+// error naming the file, proving the guard is wired into the hook.
+func TestRunPreCommit_RejectsSleepInTestFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/new/sync_test.pr", []byte("test_x() `test { sleep(Duration.from_millis(10)); }\n"))
+	err := RunPreCommit(root)
+	if err == nil {
+		t.Fatal("expected RunPreCommit to reject sleep() in a test file, got nil")
+	}
+	if !strings.Contains(err.Error(), "tests/new/sync_test.pr") {
+		t.Errorf("error should name the violating file, got: %v", err)
+	}
+}

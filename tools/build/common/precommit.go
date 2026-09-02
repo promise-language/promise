@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -67,6 +70,96 @@ func identEmail(ident string) string {
 	return ident[open+1 : closeIdx]
 }
 
+// sleepAllowlist is the set of repo-relative (forward-slash) paths that are
+// permitted to call sleep() in their test source. Every entry here is either
+// a genuine timing-behaviour test (testing sleep/Duration/Instant directly)
+// or a pre-existing T1632 violation that has not yet been de-slept.
+//
+// Genuine timing tests stay in this list indefinitely; T1632 violations are
+// removed in the same commit that replaces their sleep() with deterministic
+// synchronization — the shrinking list is the T1632 progress tracker.
+var sleepAllowlist = map[string]bool{
+	// Genuine timing test — exercises sleep()/Duration/Instant directly.
+	"tests/std/time_test.pr": true,
+
+	// T1632 pre-existing violations — remove each entry when the file is de-slept.
+	"modules/net/net_test.pr":                              true,
+	"modules/os/os_test.pr":                                true,
+	"modules/tls/tls_test.pr":                              true,
+	"tests/catalog/net_echo_test.pr":                       true,
+	"tests/concurrency/go_method_call.pr":                  true,
+	"tests/concurrency/goroutine_fire_and_forget.pr":       true,
+	"tests/concurrency/select_send_recheck_test.pr":        true,
+	"tests/concurrency/t1392_go_block_bare_return_test.pr": true,
+}
+
+// isTestPrFile reports whether a repo-relative path is a Promise test file —
+// either any .pr file under tests/ or any file whose name ends in _test.pr
+// (module tests under modules/).
+func isTestPrFile(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	if strings.HasSuffix(rel, ".pr") && strings.HasPrefix(rel, "tests/") {
+		return true
+	}
+	return strings.HasSuffix(rel, "_test.pr")
+}
+
+// hasSleepCall reports whether any non-comment source line in data contains a
+// call to sleep(). Each line is stripped of its trailing // comment before the
+// check, so a sleep() that appears only in a comment does not trigger it.
+func hasSleepCall(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		// Strip trailing line comment.
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		if strings.Contains(line, "sleep(") {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckTestSleeps scans all tracked Promise test files and returns an error
+// naming any that call sleep() outside the allowlist. It uses git ls-files so
+// it covers the full index, not just staged files — a violation committed on a
+// previous turn is caught on the next pre-commit invocation.
+func CheckTestSleeps(root string) error {
+	out, err := RunOutputIn(root, "git", "ls-files", "-z", "*.pr")
+	if err != nil {
+		return fmt.Errorf("list tracked Promise files: %w", err)
+	}
+
+	var violations []string
+	for _, rel := range strings.Split(out, "\x00") {
+		if rel == "" {
+			continue
+		}
+		slashRel := filepath.ToSlash(rel)
+		if !isTestPrFile(slashRel) {
+			continue
+		}
+		if sleepAllowlist[slashRel] {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			// Tracked but absent from the worktree (staged deletion). Skip.
+			continue
+		}
+		if hasSleepCall(data) {
+			violations = append(violations, "  "+slashRel)
+		}
+	}
+	if len(violations) > 0 {
+		sort.Strings(violations)
+		return fmt.Errorf("test files call sleep() for synchronization (T1615/T1632 — use channels instead):\n%s\n"+
+			"If this is a genuine timing test, add the path to sleepAllowlist in tools/build/common/precommit.go.",
+			strings.Join(violations, "\n"))
+	}
+	return nil
+}
+
 // RunPreCommit implements the git pre-commit hook. It rejects commits that
 // include compiled binaries and validates baselines.json ratchet direction.
 func RunPreCommit(root string) error {
@@ -80,6 +173,13 @@ func RunPreCommit(root string) error {
 	// found by a manual sweep (T1675). Deliberately ahead of the staged-file
 	// scan, which returns early when nothing is staged.
 	if err := CheckDocs(root); err != nil {
+		return err
+	}
+
+	// Structural anti-regression guard: reject sleep()-as-synchronization in
+	// test .pr files (T1615/T1632). Runs unconditionally on the full index,
+	// same as CheckDocs, so a violation committed on a prior turn is caught.
+	if err := CheckTestSleeps(root); err != nil {
 		return err
 	}
 

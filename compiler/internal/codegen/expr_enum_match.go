@@ -633,10 +633,7 @@ func (c *Compiler) genMatchArmValue(arm *ast.MatchArm, resultType types.Type) va
 		tailEnumSnap := len(c.enumCtorTemps)
 		if c.info.AutoPropagateExprs[arm.Body] {
 			result := c.genExpr(arm.Body)
-			unwrapped := c.genAutoPropagateValue(result)
-			if unwrapped != nil {
-				c.trackUnwrappedFailableTemp(arm.Body, unwrapped)
-			}
+			unwrapped := c.genAutoPropagateTracked(arm.Body, result)
 			c.drainNestedArmEnumCtorTemps(arm.Body, tailEnumSnap)
 			return unwrapped
 		}

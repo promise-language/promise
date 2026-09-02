@@ -1230,9 +1230,23 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 // failable call as a statement-end temp so it is freed if not claimed by a
 // variable. `expr` is the node whose c.info.Types entry holds the success
 // type; `result` is the already-unwrapped value. Used by the explicit `?^`
-// (ErrorPropagateExpr) and `?!` (ErrorPanicExpr) paths and by the bare
-// auto-propagate form inside string interpolation (T0966). Borrow returns
-// (`T&`/`T~`) are never owned temps and are skipped.
+// (ErrorPropagateExpr) and `?!` (ErrorPanicExpr) paths in genExpr, and by every
+// bare auto-propagate site through genAutoPropagateTracked (T0966, T1883). §7.2
+// of docs/language-design.md gives the bare form in "all expression positions",
+// so all three spellings must register the same temp. Borrow returns (`T&`/`T~`)
+// are never owned temps and are skipped.
+//
+// It deliberately does NOT consult `optionalFieldString`. That flag is a signal
+// from genFieldAccess to the *immediately following* genOptionalForceUnwrap
+// (B0190: `owner.opt_name!` aliases a field the owner's drop already frees).
+// B0190 landed when one genExpr branch served both the optional unwrap and the
+// failable unwrap, so the guard came along when the failable half was extracted
+// here — but a failable call's success value is a fresh return, never an alias
+// of a field on the receiver (a borrow return is `T&`/`T~` and returns above).
+// Consulting the flag here only swallowed it: `f(owner.opt_name, mk()?^)` set the
+// flag on the field read, and the unrelated `mk()` temp then skipped tracking and
+// leaked. The Vector branch below never consulted the flag — this is the string
+// branch catching up (T1883).
 func (c *Compiler) trackUnwrappedFailableTemp(expr ast.Expr, result value.Value) {
 	exprType := c.resolvedExprType(expr)
 	if exprType != nil && isRefType(exprType) {
@@ -1241,11 +1255,7 @@ func (c *Compiler) trackUnwrappedFailableTemp(expr ast.Expr, result value.Value)
 	if result != nil && result.Type() == irtypes.I8Ptr {
 		named := extractNamed(exprType)
 		if named == types.TypString {
-			if c.optionalFieldString {
-				c.optionalFieldString = false
-			} else {
-				c.trackStringTemp(result)
-			}
+			c.trackStringTemp(result)
 		} else if named == types.TypVector {
 			if elemType, ok := types.AsVector(exprType); ok {
 				c.trackVectorTempWithElemType(result, elemType)
@@ -1258,13 +1268,14 @@ func (c *Compiler) trackUnwrappedFailableTemp(expr ast.Expr, result value.Value)
 	}
 }
 
-// genReceiverExpr generates an expression used as a method receiver or member access target.
-// If the expression is a failable call registered for auto-propagation (B0322),
-// it extracts the success value (propagating the error on failure).
-func (c *Compiler) genReceiverExpr(expr ast.Expr) value.Value {
-	val := c.genExpr(expr)
-	if c.info.AutoPropagateExprs[expr] {
-		val = c.genAutoPropagateValue(val)
+// genAutoPropagateTracked unwraps a bare failable call registered for implicit
+// propagation and registers the unwrapped heap success value as a statement-end
+// temp, so the implicit path emits exactly what the explicit `?^` path emits
+// (T1883). Without the tracking the temp is never claimed nor dropped and leaks.
+func (c *Compiler) genAutoPropagateTracked(expr ast.Expr, result value.Value) value.Value {
+	val := c.genAutoPropagateValue(result)
+	if val != nil {
+		c.trackUnwrappedFailableTemp(expr, val)
 	}
 	return val
 }
@@ -1289,7 +1300,7 @@ func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
 	}
 	val := c.genExpr(expr)
 	if c.info.AutoPropagateExprs[expr] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(expr, val)
 	}
 	return val
 }
@@ -1298,11 +1309,12 @@ func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
 // call registered for auto-propagation, unwraps the result (propagating
 // the error on failure). Used for sub-expression targets (field access,
 // method receivers, index targets) where the failable tuple must be
-// unwrapped before use. B0323.
+// unwrapped before use. B0323, and the sole receiver path since B0322's
+// genReceiverExpr — a byte-identical twin — was retired.
 func (c *Compiler) genExprAutoPropagate(expr ast.Expr) value.Value {
 	val := c.genExpr(expr)
 	if c.info.AutoPropagateExprs[expr] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(expr, val)
 	}
 	return val
 }

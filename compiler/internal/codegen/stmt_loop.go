@@ -91,7 +91,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// T0770: auto-propagate a failable scrutinee so optVal is the unwrapped `T?`
 	// optional, not the raw failable result struct (mirrors genIfUnwrapStmt).
 	if c.info.AutoPropagateExprs[s.Value] {
-		optVal = c.genAutoPropagateValue(optVal)
+		optVal = c.genAutoPropagateTracked(s.Value, optVal)
 	}
 	flag := c.block.NewExtractValue(optVal, 0)
 	c.block.NewCondBr(flag, bodyBlock, exitBlock)

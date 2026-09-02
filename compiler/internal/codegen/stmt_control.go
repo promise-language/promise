@@ -220,7 +220,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// runs its own error-path cleanup and routes to the go-block sink via
 		// emitFailableGoBlockError.
 		if goRet && c.inFailableGoBlock && c.info.AutoPropagateExprs[s.Value] {
-			val = c.genAutoPropagateValue(val)
+			val = c.genAutoPropagateTracked(s.Value, val)
 		}
 		c.returningBorrowedUnwrap = prevReturningBorrowedUnwrap
 		c.elvisResultReturned = prevElvisReturned
@@ -2128,7 +2128,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	// Without this the if-let reads the failable result's error flag as the
 	// optional's present flag and binds the whole optional as the inner value.
 	if c.info.AutoPropagateExprs[s.Init] {
-		optVal = c.genAutoPropagateValue(optVal)
+		optVal = c.genAutoPropagateTracked(s.Init, optVal)
 	}
 
 	// Guard: if the expression is not an optional struct (e.g., post-narrowing

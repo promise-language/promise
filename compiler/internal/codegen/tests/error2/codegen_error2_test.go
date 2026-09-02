@@ -1295,3 +1295,253 @@ func TestT1634_NonFailableFunctionTypeIndirectCallResultShape(t *testing.T) {
 	codegentest.AssertContains(t, ir, "i64 (i8*, i64)*")
 	codegentest.AssertNotContains(t, ir, "{ i1, i64, i8* } (i8*, i64)*")
 }
+
+// T1883: implicit error propagation (a bare failable call, no `?^`) must
+// register the callee's heap return value as a statement-end temp, exactly as
+// the explicit `?^` path does. Before the fix the implicit path unwrapped the
+// result but never tracked it, so no drop was emitted and the value leaked.
+//
+// The assertion is the item's own discriminator: the bare form and the `?^`
+// form must generate the same function body. The only legitimate difference is
+// the block-label prefix genAutoPropagateValue uses (`auto.*`) versus the one
+// genErrorPropagateExpr uses (`error.*`), so that prefix is normalised away.
+func TestAutoPropagateTempMatchesExplicitPropagate(t *testing.T) {
+	cases := []struct {
+		name   string
+		helper string
+		call   string
+		dropFn string
+	}{
+		{
+			name:   "string",
+			helper: `mk!(string a) string { return "x" + a; }`,
+			call:   `mk("y")`,
+			dropFn: "call void @promise_string_drop",
+		},
+		{
+			name: "vector",
+			helper: `mk!(int n) u8[] {
+				u8[] bytes = Vector[u8](capacity: 4);
+				bytes.push(97u8);
+				return bytes;
+			}`,
+			call:   `mk(1)`,
+			dropFn: "call void @Vector.drop",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := func(call string) string {
+				return tc.helper + "\nwork!() int { return " + call + ".len; }\nmain() { }"
+			}
+			bare := codegentest.FuncBody(t, codegentest.GenerateIR(t, src(tc.call)), "work")
+			caret := codegentest.FuncBody(t, codegentest.GenerateIR(t, src(tc.call+"?^")), "work")
+
+			// The bare form must drop the unwrapped temp at statement end.
+			codegentest.AssertContains(t, bare, tc.dropFn)
+
+			normalize := func(body string) string {
+				return strings.ReplaceAll(body, "auto.", "error.")
+			}
+			if normalize(bare) != normalize(caret) {
+				t.Errorf("bare failable call and `?^` generate different bodies\n--- bare ---\n%s\n--- ?^ ---\n%s", bare, caret)
+			}
+		})
+	}
+}
+
+// T1883: the temp must also be tracked when the bare call's value is consumed
+// as a call argument rather than as a receiver — the shape that made `time`
+// tests report LEAK.
+func TestAutoPropagateTempAsCallArgument(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mk!(string a) string { return "x" + a; }
+		take(string s) int { return s.len; }
+		work!() int { return take(mk("y")); }
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "work")
+	codegentest.AssertContains(t, body, "call void @promise_string_drop")
+}
+
+// T1883: reading a `string?` field off a droppable owner sets B0190's
+// `optionalFieldString` — a signal meant for the *immediately following*
+// `owner.opt!`, which aliases a field the owner's drop already frees.
+// trackUnwrappedFailableTemp used to consume that flag too, so an unrelated
+// failable string temp evaluated after such a field read in the same statement
+// skipped tracking and leaked. All three spellings share the helper, so the
+// drop must appear for each of them.
+func TestFailableTempSurvivesOptionalFieldSignal(t *testing.T) {
+	for _, spelling := range []string{"mk(\"y\")", "mk(\"y\")?^", "mk(\"y\")?!"} {
+		t.Run(spelling, func(t *testing.T) {
+			ir := codegentest.GenerateIR(t, `
+				type OptOwner {
+					string? opt_name;
+					int id;
+					drop(~this) { }
+				}
+				mk!(string a) string { return "x" + a; }
+				take(string? a, string b) int { return b.len; }
+				work!() int {
+					o := OptOwner(opt_name: "z", id: 1);
+					return take(o.opt_name, `+spelling+`);
+				}
+				main() { }
+			`)
+			body := codegentest.FuncBody(t, ir, "work")
+			codegentest.AssertContains(t, body, "call void @promise_string_drop")
+		})
+	}
+}
+
+// t1883Prelude supplies the heap-returning failable helpers and the receiver
+// types the shape table below needs. Every helper returns a *heap* value on
+// purpose: a `.rodata` string literal carries the T0060 bit-63 literal flag and
+// is never allocated, so a literal-returning helper cannot expose a missing
+// drop.
+const t1883Prelude = `
+	hs!(int n) string { string s = ""; for i in 0..n { s += "a"; } return s; }
+	hb!(int n) u8[] { u8[] b = Vector[u8](capacity: 4); for i in 0..n { b.push(97u8); } return b; }
+	hopt!(int n) string? { if n < 1 { return none; } string s = hs(n); return s; }
+	type Res { string label; close(~this) { } }
+	mkres!(int n) Res { return Res(label: hs(n)); }
+	take(string s) int => s.len;
+	type Holder { string name; }
+	type Prop { string _v; get text string => this._v; set text(string s) { this._v = s; } drop(~this) {} }
+	type Label { string s; [:](int? low, int? high) string => this.s; [:]=(int? low, int? high, string move v) { this.s = v; } }
+`
+
+// t1883Shapes enumerates every codegen site that unwraps an implicitly
+// propagated failable call, one shape per site. `%s` is the propagation
+// spelling: empty for the bare form, `?^` for the explicit one.
+//
+// The mapping to the sites, so a future edit can tell whether this table still
+// covers all of them (`grep -n genAutoPropagateTracked internal/codegen/`):
+//
+//	match_arm       expr_enum_match.go  genMatchArmValue
+//	interp          expr_literal.go     genInterpolatedString
+//	call_arg        stmt.go             genCallArgExpr
+//	receiver        stmt.go             genExprAutoPropagate (member target)
+//	binop           stmt.go             genExprAutoPropagate (operand)
+//	index_target    stmt.go             genExprAutoPropagate (index target)
+//	assign_rhs      stmt_assign.go      genAssignStmt
+//	field_assign    stmt_assign.go      genAssignStmt (member target)
+//	field_compound  stmt_assign.go      genMemberCompoundAssign, plain-field branch
+//	setter_compound stmt_assign.go      genMemberCompoundAssign, setter-property branch
+//	guard_compound  stmt_assign.go      genMemberCompoundAssign, fallback branch
+//	typed_decl      stmt_decl.go        genTypedVarDecl
+//	inferred_decl   stmt_decl.go        genInferredVarDecl
+//	use_decl        stmt_decl.go        genUseVarDecl
+//	iflet           stmt_control.go     genIfUnwrapStmt
+//	whilelet        stmt_loop.go        genWhileUnwrapStmt
+//	goblock_return  stmt_control.go     genReturnStmt, failable go-block branch
+//	array_compound  stmt_index_assign.go genCompoundIndexAssign, array branch
+//	vector_compound stmt_index_assign.go genCompoundIndexAssign, vector branch
+//	map_compound    stmt_index_assign.go genMethodCompoundAssign
+//	slice_compound  stmt_index_assign.go genSliceCompoundAssign
+//
+// The only site not represented is genMemberCompoundAssign's T1356
+// value-type-through-subscript branch: it fires only for a value-type receiver,
+// whose fields are all `value`, so no shape reaching it can carry a heap RHS.
+var t1883Shapes = []struct {
+	name   string
+	params string
+	ret    string
+	body   string
+}{
+	{"match_arm", "int n", "string", `return match n { 1 => hs(3)%s, _ => "z", };`},
+	{"interp", "", "string", `return "[{hs(3)%s}]";`},
+	{"call_arg", "", "int", `return take(hs(3)%s);`},
+	{"receiver", "", "int", `return hs(3)%s.len;`},
+	{"binop", "", "string", `return hs(3)%s + "x";`},
+	{"index_target", "", "u8", `return hb(3)%s[0];`},
+	{"assign_rhs", "", "int", `string s = "z"; s = hs(3)%s; return s.len;`},
+	{"field_assign", "", "int", `h := Holder(name: "z"); h.name = hs(3)%s; return h.name.len;`},
+	{"field_compound", "", "int", `h := Holder(name: "z"); h.name += hs(3)%s; return h.name.len;`},
+	{"setter_compound", "", "int", `p := Prop(_v: "z"); p.text += hs(3)%s; return p.text.len;`},
+	{"guard_compound", "", "int", `m := Mutex[string]("z"); use g := m.lock(); g.borrow += hs(3)%s; return g.borrow.len;`},
+	{"typed_decl", "", "int", `string s = hs(3)%s; return s.len;`},
+	{"inferred_decl", "", "int", `s := hs(3)%s; return s.len;`},
+	{"use_decl", "", "int", `use r := mkres(3)%s; return r.label.len;`},
+	{"iflet", "", "int", `if s := hopt(3)%s { return s.len; } return 0;`},
+	{"whilelet", "", "int", `int t = 0; int n = 1; while s := hopt(n)%s { t += s.len; n = n - 1; } return t;`},
+	{"goblock_return", "", "string", `t := go! { return hs(3)%s; }; return (<-t)?^;`},
+	{"array_compound", "", "int", `string[2] a = ["z", "y"]; a[0] += hs(3)%s; return a[0].len;`},
+	{"vector_compound", "", "int", `string[] v = string[](); v.push("z"); v[0] += hs(3)%s; return v[0].len;`},
+	{"map_compound", "", "int", `map[string, string] m = map[string, string](); m["k"] = "z"; m["k"] += hs(3)%s; return m["k"]!.len;`},
+	{"slice_compound", "", "int", `l := Label(s: "z"); l[0:1] += hs(3)%s; return l.s.len;`},
+}
+
+// T1883: the bare form of implicit error propagation must generate *exactly*
+// what the explicit `?^` form generates, at every site that unwraps one.
+// §7.2 of docs/language-design.md gives the bare form in "all expression
+// positions" and §11 calls `?^` "equivalent to a bare failable call", so
+// byte-identical function bodies are the language's own claim, not a proxy for
+// it — and unlike a `AssertContains(drop)` spot-check it cannot pass by
+// emitting the drop in the wrong place.
+//
+// This is the item's discriminator turned into a table. At df412b12 (before the
+// fix) 16 of these 21 shapes produced *shorter* bare bodies — the missing
+// alloca/store/drop-flag/drop of the unwrapped heap temp. The five that already
+// matched are the ones fixed earlier (match_arm: T1267, interp: T0966) or that
+// unwrap an optional/aggregate with no heap temp to track (iflet, whilelet,
+// goblock_return); they are kept so a regression at those sites is caught too.
+//
+// The two spellings are compiled as separate modules on purpose: sharing one
+// module makes the private string-constant counter (@.str.N) differ between the
+// two functions, which is not a semantic difference. Within its own module each
+// function gets the same numbering. The only legitimate remaining difference is
+// the block-label prefix — genAutoPropagateValue uses `auto.*` where
+// genErrorPropagateExpr uses `error.*` — so that prefix is normalised away.
+func TestT1883AutoPropagateMatchesExplicitAtEverySite(t *testing.T) {
+	for _, tc := range t1883Shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			gen := func(spelling string) string {
+				src := t1883Prelude + "\nwork!(" + tc.params + ") " + tc.ret + " {\n" +
+					strings.ReplaceAll(tc.body, "%s", spelling) + "\n}\nmain() { }\n"
+				body := codegentest.FuncBody(t, codegentest.GenerateIR(t, src), "work")
+				return strings.ReplaceAll(body, "auto.", "error.")
+			}
+			bare, caret := gen(""), gen("?^")
+			if bare != caret {
+				t.Errorf("bare failable call and `?^` generate different bodies\n--- bare (%d lines) ---\n%s\n--- ?^ (%d lines) ---\n%s",
+					strings.Count(bare, "\n")+1, bare, strings.Count(caret, "\n")+1, caret)
+			}
+		})
+	}
+}
+
+// T1883: the heap temp must actually be dropped, not merely emitted
+// consistently with `?^`. TestT1883AutoPropagateMatchesExplicitAtEverySite
+// pins bare ≡ `?^`; this pins that what both of them emit contains the drop —
+// otherwise the equivalence test would still pass if `?^` regressed too.
+//
+// Only the shapes whose statement genuinely leaves the temp unclaimed are
+// listed. A shape that binds the value (typed_decl, use_decl, …) claims the
+// temp and correctly emits no statement-end drop for it, and the compound
+// shapes route the string through a setter/`[]=` whose own drop accounting is
+// a separate concern (setter_compound in particular still leaks at run time —
+// that is T1901, a pre-existing string-setter bug independent of this item).
+func TestT1883AutoPropagateEmitsDropForUnclaimedTemp(t *testing.T) {
+	cases := []struct {
+		name   string
+		ret    string
+		body   string
+		dropFn string
+	}{
+		{"receiver_string", "int", `return hs(3).len;`, "call void @promise_string_drop"},
+		{"receiver_vector", "int", `return hb(3).len;`, "call void @Vector.drop"},
+		{"call_argument", "int", `return take(hs(3));`, "call void @promise_string_drop"},
+		{"binary_operand", "string", `return hs(3) + "x";`, "call void @promise_string_drop"},
+		{"index_target", "u8", `return hb(3)[0];`, "call void @Vector.drop"},
+		{"discarded", "int", `hs(3); return 0;`, "call void @promise_string_drop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t1883Prelude + "\nwork!() " + tc.ret + " {\n" + tc.body + "\n}\nmain() { }\n"
+			body := codegentest.FuncBody(t, codegentest.GenerateIR(t, src), "work")
+			codegentest.AssertContains(t, body, tc.dropFn)
+		})
+	}
+}

@@ -193,15 +193,11 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 			}
 			// Evaluate expression and convert to string. Use the
 			// auto-propagate path so bare failable calls (`name!`) unwrap
-			// their result inside interpolation slots (T0966).
+			// their result inside interpolation slots (T0966). That path also
+			// registers the unwrapped heap temp (string/vector/user type) for
+			// statement-end cleanup (T1883) — convertToString only copies it,
+			// so without the registration the original would leak.
 			val := c.genExprAutoPropagate(p.Expr)
-			// T0966: a bare auto-propagated failable call leaves an unowned
-			// heap temp (string/vector/user type). convertToString copies it,
-			// so the original would leak. Track it for statement-end cleanup,
-			// mirroring the explicit `?^`/`?!` paths in genExpr.
-			if c.info.AutoPropagateExprs[p.Expr] {
-				c.trackUnwrappedFailableTemp(p.Expr, val)
-			}
 			strVal := c.convertToString(val, c.info.Types[p.Expr])
 			// B0168: Track convertToString results as temps (all types now allocate,
 			// including strings after B0248 copy fix).

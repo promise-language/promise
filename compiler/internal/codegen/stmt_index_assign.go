@@ -348,7 +348,7 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 	if arr, ok := targetType.(*types.Array); ok {
 		val := c.genExpr(valueExpr)
 		if c.info.AutoPropagateExprs[valueExpr] {
-			val = c.genAutoPropagateValue(val)
+			val = c.genAutoPropagateTracked(valueExpr, val)
 		}
 		c.genArrayIndexAssign(target, arr, op, val)
 		return
@@ -369,7 +369,7 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 					idx := c.genExpr(target.Index)
 					val := c.genExpr(valueExpr)
 					if c.info.AutoPropagateExprs[valueExpr] {
-						val = c.genAutoPropagateValue(val)
+						val = c.genAutoPropagateTracked(valueExpr, val)
 					}
 					// COW: if static (.rodata), copy to heap first (T0062)
 					elemLLVM := c.resolveType(elem)
@@ -412,7 +412,7 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	keyVal := c.genExpr(target.Index)
 	val := c.genExpr(valueExpr)
 	if c.info.AutoPropagateExprs[valueExpr] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(valueExpr, val)
 	}
 
 	var instancePtr value.Value
@@ -685,7 +685,7 @@ func (c *Compiler) genSliceCompoundAssign(target *ast.SliceExpr, op ast.AssignOp
 	// target, in which case the read combines the post-RHS value.
 	val := c.genExpr(valueExpr)
 	if c.info.AutoPropagateExprs[valueExpr] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(valueExpr, val)
 	}
 
 	// Read the current value via [:].

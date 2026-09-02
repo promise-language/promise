@@ -1,0 +1,897 @@
+// T1883: a bare failable call whose error propagates implicitly must register
+// the callee's heap return value for statement-end cleanup, exactly as the
+// explicit `?^` path does. Before the fix the implicit path unwrapped the
+// result but never tracked the temp, so it was neither claimed nor dropped and
+// leaked silently in every non-binding context.
+//
+// This file is the bare-call mirror of error_unwrap_string_temp_test.pr
+// (T0125, which covers `?^`/`?!`). Leak enforcement is the assertion: every
+// test here must report 0 outstanding allocations.
+//
+// Every helper returns a *heap* value on purpose. A `.rodata` string literal
+// carries the T0060 bit-63 literal flag and is never allocated, so a
+// literal-returning helper cannot expose this leak — which is exactly why
+// error_auto_propagate_args_test.pr already covered the call-argument shape
+// yet missed the bug.
+type Box {
+  string label;
+}
+
+type Tracked {
+  int id;
+  drop(~this) {
+  }
+}
+
+type Holder {
+  string name;
+}
+
+// Heap string: repeated concatenation always allocates.
+heap_string!(int n) string {
+  string s = "";
+  for i in 0..n {
+    s += "a";
+  }
+  return s;
+}
+
+// Same, but raises for a negative count — drives the error paths below.
+heap_string_or_raise!(int n) string {
+  if n < 0 {
+    raise error(message: "neg");
+  }
+  return heap_string(n);
+}
+
+// The bare call goes through a local rather than being returned directly:
+// `return heap_string(n);` from a `T?`-returning failable function crashes
+// codegen (T1897 — a missing unwrap on the return-coercion path, filed
+// separately). The call site below is still the bare-call scrutinee this
+// section is about.
+heap_opt_string!(int n) string? {
+  if n < 0 {
+    return none;
+  }
+  string s = heap_string(n);
+  return s;
+}
+
+heap_bytes!(int n) u8[] {
+  u8[] bytes = Vector[u8](capacity: 4);
+  for i in 0..n {
+    bytes.push(97u8);
+  }
+  return bytes;
+}
+
+heap_box!() Box {
+  return Box(label: heap_string(3));
+}
+
+take_string(string s) int => s.len;
+take_bytes(u8[] b) int => b.len;
+take_box(Box b) int => b.label.len;
+
+// ============================================================
+// Section 1: receiver / member access — `heap_string(3).len`
+// ============================================================
+
+recv_string!() int {
+  return heap_string(3).len;
+}
+
+recv_bytes!() int {
+  return heap_bytes(3).len;
+}
+
+recv_box!() int {
+  return heap_box().label.len;
+}
+
+// A method call on the temp receiver, not just a getter.
+recv_method!() string {
+  return heap_string(3).to_upper();
+}
+
+test_receiver_string() `test {
+  assert(recv_string()?! == 3, "bare call as string receiver");
+}
+
+test_receiver_bytes() `test {
+  assert(recv_bytes()?! == 3, "bare call as vector receiver");
+}
+
+test_receiver_heap_user_type() `test {
+  assert(recv_box()?! == 3, "bare call as heap user type receiver");
+}
+
+test_receiver_method_chain() `test {
+  assert(recv_method()?! == "AAA", "bare call receiver with method chain");
+}
+
+// ============================================================
+// Section 2: call argument — `take_string(heap_string(3))`
+// ============================================================
+
+arg_string!() int {
+  return take_string(heap_string(3));
+}
+
+arg_bytes!() int {
+  return take_bytes(heap_bytes(3));
+}
+
+arg_box!() int {
+  return take_box(heap_box());
+}
+
+test_call_arg_string() `test {
+  assert(arg_string()?! == 3, "bare call as string argument");
+}
+
+test_call_arg_bytes() `test {
+  assert(arg_bytes()?! == 3, "bare call as vector argument");
+}
+
+test_call_arg_heap_user_type() `test {
+  assert(arg_box()?! == 3, "bare call as heap user type argument");
+}
+
+// ============================================================
+// Section 3: binary and comparison operands
+// ============================================================
+
+binop_left!() string {
+  return heap_string(3) + "x";
+}
+
+binop_right!() string {
+  return "x" + heap_string(3);
+}
+
+binop_both!() string {
+  return heap_string(2) + heap_string(3);
+}
+
+cmp_equal!() bool {
+  return heap_string(3) == "aaa";
+}
+
+cmp_ordered!() bool {
+  return heap_string(3) < "b";
+}
+
+test_binary_left_operand() `test {
+  assert(binop_left()?! == "aaax", "bare call as left operand");
+}
+
+test_binary_right_operand() `test {
+  assert(binop_right()?! == "xaaa", "bare call as right operand");
+}
+
+test_binary_both_operands() `test {
+  assert(binop_both()?! == "aaaaa", "bare call as both operands");
+}
+
+test_comparison_operand() `test {
+  assert(cmp_equal()?!, "bare call as equality operand");
+}
+
+test_ordered_operand() `test {
+  assert(cmp_ordered()?!, "bare call as ordering operand");
+}
+
+// ============================================================
+// Section 4: index and slice targets
+// ============================================================
+
+index_bytes!() u8 {
+  return heap_bytes(3)[0];
+}
+
+slice_string!() string {
+  return heap_string(3)[0:2];
+}
+
+test_index_target() `test {
+  assert(index_bytes()?! == 97u8, "bare call as index target");
+}
+
+test_slice_target() `test {
+  assert(slice_string()?! == "aa", "bare call as slice target");
+}
+
+// ============================================================
+// Section 5: container stores (ownership transfers to the container)
+// ============================================================
+
+push_string!() int {
+  string[] v = string[]();
+  v.push(heap_string(3));
+  return v[0].len;
+}
+
+push_bytes!() int {
+  Vector[u8[]] v = Vector[u8[]]();
+  v.push(heap_bytes(3));
+  return v[0].len;
+}
+
+map_store!() int {
+  map[string, string] m = map[string, string]();
+  m["k"] = heap_string(3);
+  return m["k"]!.len;
+}
+
+test_container_push_string() `test {
+  assert(push_string()?! == 3, "bare call pushed into a vector");
+}
+
+test_container_push_vector() `test {
+  assert(push_bytes()?! == 3, "bare call pushed into a nested vector");
+}
+
+test_container_map_store() `test {
+  assert(map_store()?! == 3, "bare call stored into a map");
+}
+
+// ============================================================
+// Section 6: index assign and compound assign
+// ============================================================
+
+index_assign!() int {
+  string[] v = string[]();
+  v.push("z");
+  v[0] = heap_string(3);
+  return v[0].len;
+}
+
+slice_assign!() int {
+  u8[] v = heap_bytes(4);
+  v[0:2] = heap_bytes(2);
+  return v.len;
+}
+
+compound_assign!() int {
+  string s = "";
+  s += heap_string(3);
+  return s.len;
+}
+
+field_assign!() int {
+  h := Holder(name: "z");
+  h.name = heap_string(3);
+  return h.name.len;
+}
+
+field_compound_assign!() int {
+  h := Holder(name: "z");
+  h.name += heap_string(3);
+  return h.name.len;
+}
+
+test_index_assign() `test {
+  assert(index_assign()?! == 3, "bare call as index-assign RHS");
+}
+
+test_slice_assign() `test {
+  assert(slice_assign()?! == 4, "bare call as slice-assign RHS");
+}
+
+test_compound_assign() `test {
+  assert(compound_assign()?! == 3, "bare call as compound-assign RHS");
+}
+
+test_field_assign() `test {
+  assert(field_assign()?! == 3, "bare call as field-assign RHS");
+}
+
+test_field_compound_assign() `test {
+  assert(field_compound_assign()?! == 4, "bare call as field compound-assign RHS");
+}
+
+// ============================================================
+// Section 7: binding contexts — must stay single-owner, never double-freed
+// ============================================================
+
+bind_decl!() int {
+  string s = heap_string(3);
+  return s.len;
+}
+
+bind_inferred!() int {
+  s := heap_string(3);
+  return s.len;
+}
+
+bind_assign!() int {
+  string s = "z";
+  s = heap_string(3);
+  return s.len;
+}
+
+bind_return!() string {
+  return heap_string(3);
+}
+
+bind_ctor_arg!() int {
+  h := Holder(name: heap_string(3));
+  return h.name.len;
+}
+
+bind_interpolation!() string {
+  return "[{heap_string(3)}]";
+}
+
+bind_discard!() int {
+  heap_string(3);
+  return 0;
+}
+
+test_bound_to_typed_decl() `test {
+  assert(bind_decl()?! == 3, "bare call bound to a typed declaration");
+}
+
+test_bound_to_inferred_decl() `test {
+  assert(bind_inferred()?! == 3, "bare call bound to an inferred declaration");
+}
+
+test_bound_to_assignment() `test {
+  assert(bind_assign()?! == 3, "bare call bound to an assignment");
+}
+
+test_returned_directly() `test {
+  assert(bind_return()?! == "aaa", "bare call returned directly");
+}
+
+test_constructor_argument() `test {
+  assert(bind_ctor_arg()?! == 3, "bare call as a constructor argument");
+}
+
+test_string_interpolation() `test {
+  assert(bind_interpolation()?! == "[aaa]", "bare call inside interpolation");
+}
+
+test_discarded_statement() `test {
+  assert(bind_discard()?! == 0, "bare call discarded as a statement");
+}
+
+// ============================================================
+// Section 8: scrutinee positions (if-let, while-let, go-block return)
+// ============================================================
+
+iflet_scrutinee!() int {
+  if s := heap_opt_string(3) {
+    return s.len;
+  }
+  return 0;
+}
+
+whilelet_scrutinee!() int {
+  int total = 0;
+  int n = 3;
+  while s := heap_opt_string(n) {
+    total += s.len;
+    n = n - 1;
+    if n < 0 {
+      break;
+    }
+  }
+  return total;
+}
+
+go_block_return!() string {
+  t := go! {
+    return heap_string(3);
+  };
+  return (<-t)?^;
+}
+
+test_if_let_scrutinee() `test {
+  assert(iflet_scrutinee()?! == 3, "bare call as an if-let scrutinee");
+}
+
+test_while_let_scrutinee() `test {
+  assert(whilelet_scrutinee()?! == 6, "bare call as a while-let scrutinee");
+}
+
+test_go_block_return() `test {
+  assert(go_block_return()?! == "aaa", "bare call returned from a go! block");
+}
+
+// ============================================================
+// Section 9: repeated temps — a loop must not accumulate leaks
+// ============================================================
+
+loop_temps!() int {
+  int total = 0;
+  for i in 0..5 {
+    total += heap_string(3).len;
+  }
+  return total;
+}
+
+test_loop_temps() `test {
+  assert(loop_temps()?! == 15, "bare call temp freed on every iteration");
+}
+
+// ============================================================
+// Section 10: error paths — the temp cleanup must not disturb propagation
+// ============================================================
+
+err_receiver!() int {
+  return heap_string_or_raise(-1).len;
+}
+
+err_argument!() int {
+  return take_string(heap_string_or_raise(-1));
+}
+
+// A live heap local and a droppable must both be cleaned up when the error
+// escapes past them.
+err_with_live_locals!() int {
+  string live = heap_string(2);
+  Tracked t = Tracked(id: 1);
+  return take_string(heap_string_or_raise(-1));
+}
+
+// An earlier bare call succeeds (its temp must be freed) before a later one
+// raises (its cleanup runs on the error path).
+err_after_successful_temp!() int {
+  int a = take_string(heap_string_or_raise(2));
+  return a + take_string(heap_string_or_raise(-1));
+}
+
+try_error(int which) bool {
+  if which == 0 {
+    err_receiver()? e {
+      return e.message == "neg";
+    };
+  }
+  if which == 1 {
+    err_argument()? e {
+      return e.message == "neg";
+    };
+  }
+  if which == 2 {
+    err_with_live_locals()? e {
+      return e.message == "neg";
+    };
+  }
+  if which == 3 {
+    err_after_successful_temp()? e {
+      return e.message == "neg";
+    };
+  }
+  return false;
+}
+
+test_error_from_receiver() `test {
+  assert(try_error(0), "error propagates from a bare-call receiver");
+}
+
+test_error_from_argument() `test {
+  assert(try_error(1), "error propagates from a bare-call argument");
+}
+
+test_error_with_live_locals() `test {
+  assert(try_error(2), "live locals cleaned up when a bare call raises");
+}
+
+test_error_after_successful_temp() `test {
+  assert(try_error(3), "earlier bare-call temp freed before a later one raises");
+}
+
+// ============================================================
+// Section 11: the B0190 optional-field signal must not swallow
+// an unrelated failable temp in the same statement
+// ============================================================
+//
+// genFieldAccess sets `optionalFieldString` when it loads a `string?` field
+// from a droppable owner, so the *immediately following* `owner.opt!` is not
+// tracked as a temp (the owner's drop already frees it). Reading that flag in
+// trackUnwrappedFailableTemp was vestigial — a failable call's success value is
+// a fresh return, never an alias of the receiver's field — and it swallowed the
+// flag, so the failable temp evaluated after such a field read skipped tracking
+// and leaked. All three spellings share the helper, so all three are pinned.
+
+type OptOwner {
+  string? opt_name;
+  int id;
+  drop(~this) {
+  }
+}
+
+take_pair(string? a, string b) int => b.len;
+
+flag_before_bare!() int {
+  o := OptOwner(opt_name: "z", id: 1);
+  return take_pair(o.opt_name, heap_string(3));
+}
+
+flag_before_caret!() int {
+  o := OptOwner(opt_name: "z", id: 1);
+  return take_pair(o.opt_name, heap_string(3)?^);
+}
+
+flag_before_panic!() int {
+  o := OptOwner(opt_name: "z", id: 1);
+  return take_pair(o.opt_name, heap_string(3)?!);
+}
+
+// The signal itself must still work: `owner.opt!` inline stays owner-governed.
+flag_still_suppresses!() int {
+  o := OptOwner(opt_name: "zz", id: 1);
+  return o.opt_name!.len + heap_string(3).len;
+}
+
+test_optional_field_signal_bare() `test {
+  assert(flag_before_bare()?! == 3, "field signal does not swallow a bare-call temp");
+}
+
+test_optional_field_signal_caret() `test {
+  assert(flag_before_caret()?! == 3, "field signal does not swallow a `?^` temp");
+}
+
+test_optional_field_signal_panic() `test {
+  assert(flag_before_panic()?! == 3, "field signal does not swallow a `?!` temp");
+}
+
+test_optional_field_signal_still_suppresses() `test {
+  assert(flag_still_suppresses()?! == 5, "owner-governed optional field stays owner-governed");
+}
+
+// ============================================================
+// Section 12: the remaining implicit-propagation codegen sites
+// ============================================================
+//
+// Sections 1–11 cover the shapes the item reported plus the B0190 interaction.
+// The sites below are the rest of the ones the fix converted to
+// genAutoPropagateTracked (`grep -n genAutoPropagateTracked
+// compiler/internal/codegen/`), each exercised at run time so leak enforcement
+// applies. Their IR-level counterpart — bare ≡ `?^` at every site — is
+// TestT1883AutoPropagateMatchesExplicitAtEverySite in
+// compiler/internal/codegen/tests/error2/.
+//
+// One converted site has no runtime test here: genMemberCompoundAssign's
+// setter-property branch. `p.text += heap()` leaks one allocation for reasons
+// independent of this item (T1901 — writing *any* heap string through a
+// user-defined property setter leaks, failable or not, `?^` or not). Its bare
+// and `?^` forms already generate byte-identical IR, so the Go table covers it;
+// a runtime test belongs with T1901's fix.
+
+// --- match arm value (genMatchArmValue) ---
+
+match_arm_value!(int n) string {
+  return match n {
+    1 => heap_string(3),
+    _ => "z",
+  };
+}
+
+test_match_arm_value() `test {
+  assert(match_arm_value(1)?! == "aaa", "bare call as a match arm value");
+  assert(match_arm_value(2)?! == "z", "non-matching arm still returns the literal");
+}
+
+// --- compound index assign: array / vector / map / slice ---
+
+array_compound!() int {
+  string[2] a = ["z", "y"];
+  a[0] += heap_string(3);
+  return a[0].len;
+}
+
+vector_compound!() int {
+  string[] v = string[]();
+  v.push("z");
+  v[0] += heap_string(3);
+  return v[0].len;
+}
+
+map_compound!() int {
+  map[string, string] m = map[string, string]();
+  m["k"] = "z";
+  m["k"] += heap_string(3);
+  return m["k"]!.len;
+}
+
+// A user `[:]`/`[:]=` pair — the only shape that reaches
+// genSliceCompoundAssign with a heap RHS.
+type Label {
+  string s;
+  [:](int? low, int? high) string => this.s;
+  [:]=(int? low, int? high, string move v) {
+    this.s = v;
+  }
+}
+
+slice_compound!() int {
+  l := Label(s: "z");
+  l[0:1] += heap_string(3);
+  return l.s.len;
+}
+
+test_array_compound_assign() `test {
+  assert(array_compound()?! == 4, "bare call as array compound-assign RHS");
+}
+
+test_vector_compound_assign() `test {
+  assert(vector_compound()?! == 4, "bare call as vector compound-assign RHS");
+}
+
+test_map_compound_assign() `test {
+  assert(map_compound()?! == 4, "bare call as map compound-assign RHS");
+}
+
+test_slice_compound_assign() `test {
+  assert(slice_compound()?! == 4, "bare call as slice compound-assign RHS");
+}
+
+// --- `use` binding (genUseVarDecl) ---
+//
+// The temp is registered and then claimed by the use binding, so close() runs
+// exactly once. A missing claim would double-free rather than leak.
+
+type Res {
+  string label;
+  close(~this) {
+  }
+}
+
+mk_res!(int n) Res {
+  return Res(label: heap_string(n));
+}
+
+use_binding!() int {
+  use r := mk_res(3);
+  return r.label.len;
+}
+
+test_use_binding() `test {
+  assert(use_binding()?! == 3, "bare call bound by a `use` declaration");
+}
+
+// --- MutexGuard.borrow compound assign (genMemberCompoundAssign fallback) ---
+
+guard_compound!() int {
+  m := Mutex[string]("z");
+  use g := m.lock();
+  g.borrow += heap_string(3);
+  return g.borrow.len;
+}
+
+test_guard_compound_assign() `test {
+  assert(guard_compound()?! == 4, "bare call as a MutexGuard.borrow compound-assign RHS");
+}
+
+// ============================================================
+// Section 13: callee shapes other than a free function
+// ============================================================
+//
+// The tracking keys off the *call site*, not the callee kind, so a failable
+// method, getter and factory must each be registered the same way.
+
+type Maker {
+  int n;
+  make!() string {
+    return heap_string(this.n);
+  }
+  get named! string {
+    return heap_string(this.n);
+  }
+}
+
+type Made {
+  string label;
+  create!(int n) Made `factory {
+    return Made(label: heap_string(n));
+  }
+}
+
+method_temp!() int {
+  m := Maker(n: 3);
+  return m.make().len;
+}
+
+getter_temp!() int {
+  m := Maker(n: 3);
+  return m.named.len;
+}
+
+factory_temp!() int {
+  return Made.create(3).label.len;
+}
+
+test_failable_method_temp() `test {
+  assert(method_temp()?! == 3, "bare failable method call as a temp");
+}
+
+test_failable_getter_temp() `test {
+  assert(getter_temp()?! == 3, "bare failable getter as a temp");
+}
+
+test_failable_factory_temp() `test {
+  assert(factory_temp()?! == 3, "bare failable factory call as a temp");
+}
+
+// ============================================================
+// Section 14: short-circuit, elvis, and other operand positions
+// ============================================================
+//
+// A short-circuited operand is the interesting case: the temp registered on the
+// taken path must not be dropped on a path where it was never created. The
+// entry-block zero-init of every temp's drop flag is what makes that safe.
+
+sc_and!() bool {
+  return heap_string(3).len == 3 && heap_string(2).len == 2;
+}
+
+sc_or_short!() bool {
+  return heap_string(3).len == 3 || heap_string(9).len == 9;
+}
+
+sc_or_long!() bool {
+  return heap_string(3).len == 9 || heap_string(2).len == 2;
+}
+
+elvis_operand!() int {
+  return (heap_opt_string(3) ?: "zz").len;
+}
+
+elvis_none!() int {
+  return (heap_opt_string(-1) ?: "zz").len;
+}
+
+index_position!() u8 {
+  u8[] v = heap_bytes(4);
+  return v[heap_string(2).len];
+}
+
+raise_argument!() int {
+  raise error(message: heap_string(3));
+}
+
+try_raise_argument() bool {
+  raise_argument()? e {
+    return e.message == "aaa";
+  };
+  return false;
+}
+
+multi_temps!() int {
+  return take_string(heap_string(3)) + take_string(heap_string(2)) + heap_string(4).len;
+}
+
+nested_temps!() int {
+  return take_string(heap_string(take_string(heap_string(3))));
+}
+
+test_short_circuit_and() `test {
+  assert(sc_and()?!, "bare calls as && operands");
+}
+
+test_short_circuit_or_taken() `test {
+  assert(sc_or_short()?!, "|| short-circuits before the second temp exists");
+}
+
+test_short_circuit_or_both() `test {
+  assert(sc_or_long()?!, "|| evaluates both operands, both temps freed");
+}
+
+test_elvis_present() `test {
+  assert(elvis_operand()?! == 3, "bare call as an elvis left operand");
+}
+
+test_elvis_absent() `test {
+  assert(elvis_none()?! == 2, "elvis falls back, no temp left over");
+}
+
+test_index_position() `test {
+  assert(index_position()?! == 97u8, "bare call in index position");
+}
+
+test_raise_argument() `test {
+  assert(try_raise_argument(), "bare call as a raise argument");
+}
+
+test_multiple_temps_one_statement() `test {
+  assert(multi_temps()?! == 9, "three bare-call temps in one statement");
+}
+
+test_nested_temps() `test {
+  assert(nested_temps()?! == 3, "a bare call nested inside another's argument");
+}
+
+// ============================================================
+// Section 15: container stores beyond vector/map, and generics
+// ============================================================
+//
+// Generic contexts matter because monomorphization regenerates the body: the
+// tracking has to survive into each specialization, not just the generic form.
+
+set_store!() int {
+  s := Set[string]();
+  s.add(heap_string(3));
+  return s.len;
+}
+
+channel_send!() int {
+  ch := channel[string](capacity: 1);
+  ch.send(heap_string(3));
+  r := <-ch;
+  return r!.len;
+}
+
+enum Payload {
+  Text(string s),
+  Empty,
+  len_of() int {
+    return match this {
+      Text(s) => s.len,
+      Empty => 0,
+    };
+  }
+}
+
+enum_payload!() int {
+  p := Payload.Text(heap_string(3));
+  return p.len_of();
+}
+
+type Wrap[T] {
+  T v;
+  get value T => this.v;
+}
+
+generic_ctor_arg!() int {
+  w := Wrap[string](v: heap_string(3));
+  return w.value.len;
+}
+
+// The bare call lives inside a *generic* body, so the temp registration has to
+// be re-emitted for each instantiation.
+in_generic_body![T](T seed) int => take_string(heap_string(3));
+
+generic_body!() int {
+  return in_generic_body[int](1)?^ +in_generic_body[string]("x")?^;
+}
+
+test_set_store() `test {
+  assert(set_store()?! == 1, "bare call added to a set");
+}
+
+test_channel_send() `test {
+  assert(channel_send()?! == 3, "bare call sent over a channel");
+}
+
+test_enum_payload() `test {
+  assert(enum_payload()?! == 3, "bare call as an enum variant payload");
+}
+
+test_generic_constructor_argument() `test {
+  assert(generic_ctor_arg()?! == 3, "bare call as a generic constructor argument");
+}
+
+test_bare_call_inside_generic_body() `test {
+  assert(generic_body()?! == 6, "bare call inside two instantiations of a generic body");
+}
+
+// --- interpolation of non-string heap values ---
+
+interp_vector!() int {
+  return "{heap_bytes(2)}".len;
+}
+
+interp_multiple!() string {
+  return "{heap_string(1)}-{heap_string(2)}-{heap_string(3)}";
+}
+
+test_interpolation_vector() `test {
+  assert(interp_vector()?! > 0, "vector temp inside interpolation");
+}
+
+test_interpolation_multiple_slots() `test {
+  assert(interp_multiple()?! == "a-aa-aaa", "three temps across interpolation slots");
+}

@@ -212,7 +212,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(s.Value, val)
 	}
 
 	// T1179: deep-clone a whole match-borrowed Array/Optional heap-user payload
@@ -731,7 +731,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(s.Value, val)
 	}
 
 	// T1179: deep-clone a whole match-borrowed Array/Optional heap-user payload
@@ -1280,7 +1280,7 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 	// before the store, exactly like the typed/inferred var-decl paths. Without
 	// this the aggregate is stored into the unwrapped slot → llir type panic.
 	if c.info.AutoPropagateExprs[s.Value] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(s.Value, val)
 	}
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca

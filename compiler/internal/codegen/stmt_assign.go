@@ -375,7 +375,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(s.Value, val)
 	}
 
 	switch target := s.Target.(type) {
@@ -1288,7 +1288,7 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 					recvVal := c.block.NewLoad(layout.Value.LLVMType, typedAddr) // value copy for the read
 					val := c.genExpr(valueExpr)                                  // RHS — after target
 					if c.info.AutoPropagateExprs[valueExpr] {
-						val = c.genAutoPropagateValue(val)
+						val = c.genAutoPropagateTracked(valueExpr, val)
 					}
 					c.stagedMemberReceiver = recvVal
 					current := c.genGetterCall(target, targetType, named, getter)         // read
@@ -1304,7 +1304,7 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 			recv := c.genExprAutoPropagate(target.Target) // target — evaluated ONCE
 			val := c.genExpr(valueExpr)                   // RHS — after target
 			if c.info.AutoPropagateExprs[valueExpr] {
-				val = c.genAutoPropagateValue(val)
+				val = c.genAutoPropagateTracked(valueExpr, val)
 			}
 			c.stagedMemberReceiver = recv
 			current := c.genGetterCall(target, targetType, named, getter)         // read
@@ -1323,7 +1323,7 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 		fieldPtr := c.genFieldPtr(target) // target — evaluated ONCE
 		val := c.genExpr(valueExpr)       // RHS — after target
 		if c.info.AutoPropagateExprs[valueExpr] {
-			val = c.genAutoPropagateValue(val)
+			val = c.genAutoPropagateTracked(valueExpr, val)
 		}
 		c.emitFieldCompoundReadModifyWrite(target, targetType, named, fieldPtr, op, val)
 		return
@@ -1333,7 +1333,7 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 	// behavior. Not in scope for the single-eval/ordering fix.
 	val := c.genExpr(valueExpr)
 	if c.info.AutoPropagateExprs[valueExpr] {
-		val = c.genAutoPropagateValue(val)
+		val = c.genAutoPropagateTracked(valueExpr, val)
 	}
 	c.genMemberAssign(target, op, val, valueExpr)
 }

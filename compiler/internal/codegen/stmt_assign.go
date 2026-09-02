@@ -859,6 +859,19 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			ownerNamed := extractNamed(ownerType)
 			if extractNamed(memberType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+				// T1901: user-defined setter properties borrow the value — the
+				// setter body dups the string when storing to its own field.
+				// The caller's copy is freed by normal cleanup (drop binding
+				// for named vars, stmtTemp for expression results), so skip
+				// the ownership-transfer logic (dup / claim / clearDropFlag).
+				// Exclude MutexGuard.borrow: its native setter takes ownership,
+				// so the existing claim/clearDropFlag path is correct for it.
+				_, isMutexGuard := types.AsMutexGuard(ownerType)
+				isMutexGuardBorrow := target.Field == "borrow" && (ownerNamed == types.TypMutexGuard || isMutexGuard)
+				if !isMutexGuardBorrow && ownerNamed.LookupSetter(target.Field) != nil {
+					c.genMemberAssign(target, s.Op, val, s.Value)
+					break
+				}
 				if ident, ok := s.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 						// Has drop flag: move ownership
@@ -1294,8 +1307,13 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 					current := c.genGetterCall(target, targetType, named, getter)         // read
 					current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 					result := c.genCompoundOp(op, c.info.Types[target], current, val)     // op
-					c.stagedMemberReceiverAddr = addr                                     // reuse the single address
-					c.genSetterCall(target, targetType, named, setter, result)            // write
+					// T1901: the setter borrows result; track the concat buffer
+					// so cleanupStmtTemps drops it after the setter returns.
+					if extractNamed(c.info.Types[target]) == types.TypString {
+						c.trackStringTemp(result)
+					}
+					c.stagedMemberReceiverAddr = addr                          // reuse the single address
+					c.genSetterCall(target, targetType, named, setter, result) // write
 					c.stagedMemberReceiver = nil
 					c.stagedMemberReceiverAddr = nil
 					return
@@ -1310,6 +1328,11 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 			current := c.genGetterCall(target, targetType, named, getter)         // read
 			current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 			result := c.genCompoundOp(op, c.info.Types[target], current, val)     // op
+			// T1901: the setter borrows result; track the concat buffer
+			// so cleanupStmtTemps drops it after the setter returns.
+			if extractNamed(c.info.Types[target]) == types.TypString {
+				c.trackStringTemp(result)
+			}
 			c.stagedMemberReceiver = recv
 			c.genSetterCall(target, targetType, named, setter, result) // write
 			c.stagedMemberReceiver = nil

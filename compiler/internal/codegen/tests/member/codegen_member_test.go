@@ -1267,3 +1267,66 @@ func TestParenThisValueFieldPtrLvalueNoExtractFromPtr(t *testing.T) {
 		t.Fatal("expected T0613VTField.bump in IR")
 	}
 }
+
+// T1901: Assigning a heap string through a user-defined setter must NOT dup
+// at the call site — the setter body borrows the value and dups internally.
+// The caller's copy is freed by normal cleanup (stmtTemp or drop binding).
+func TestSetterStringAssignNoDupAtCallSite(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type T1901Box {
+			string _v;
+			get text string => this._v;
+			set text(string s) { this._v = s; }
+			drop(~this) {}
+		}
+		make_string() string { return "abc"; }
+		main() {
+			b := T1901Box(_v: "z");
+			b.text = make_string();
+		}
+	`)
+	// The setter must be called.
+	codegentest.AssertContains(t, ir, "call void @T1901Box.text$set(")
+	// The caller must NOT dup the string before passing to the setter —
+	// the setter borrows and dups internally. A dup at the call site would leak.
+	// Check that promise_string_dup does not appear near the setter call in the IR.
+	// The setter body itself will dup, but the caller site should not.
+	setterCallIdx := strings.Index(ir, "call void @T1901Box.text$set(")
+	if setterCallIdx < 0 {
+		t.Fatal("expected setter call in IR")
+	}
+	// Look at the 500 chars before the setter call for a dup — this covers
+	// the RHS evaluation in the same basic block.
+	start := setterCallIdx - 500
+	if start < 0 {
+		start = 0
+	}
+	callSiteRegion := ir[start:setterCallIdx]
+	if strings.Contains(callSiteRegion, "promise_string_dup") {
+		t.Errorf("T1901: caller should not dup string before setter call;\n%s", callSiteRegion)
+	}
+}
+
+// T1901: Compound assignment (+=) through a string setter must track the
+// concat result as a string temp so it is freed after the setter returns.
+func TestSetterStringCompoundTrackTemp(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type T1901Counter {
+			string _v;
+			get text string => this._v;
+			set text(string s) { this._v = s; }
+			drop(~this) {}
+		}
+		main() {
+			c := T1901Counter(_v: "x");
+			c.text += "y";
+		}
+	`)
+	// Both getter and setter must be called for compound assignment.
+	codegentest.AssertContains(t, ir, "call i8* @T1901Counter.text(")
+	codegentest.AssertContains(t, ir, "call void @T1901Counter.text$set(")
+	// The concat result must be tracked as a temp and dropped.
+	// The string_drop call appears in the IR (either in the goroutine body
+	// or cleanup blocks) to free the temporary concat buffer.
+	codegentest.AssertContains(t, ir, "promise_string_drop")
+}

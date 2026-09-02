@@ -1,0 +1,120 @@
+// T1901: Assigning a heap string through a user-defined property setter must
+// not leak.  The setter borrows the incoming value and dups it internally when
+// storing to its field — the caller's copy must be freed by normal cleanup.
+heap_string(int n) string {
+  string s = "";
+  for i in 0..n {
+    s += "a";
+  }
+  return s;
+}
+
+type PD {
+  string _v;
+  get text string => this._v;
+  set text(string s) {
+    this._v = s;
+  }
+  drop(~this) {
+  }
+}
+
+assign_expr() `test {
+  p := PD(_v: "z");
+  p.text = heap_string(3);
+  assert(p._v.len == 3, "assign_expr");
+}
+
+compound_assign() `test {
+  p := PD(_v: "z");
+  p.text += heap_string(3);
+  assert(p._v.len == 4, "compound_assign");
+}
+
+assign_local() `test {
+  p := PD(_v: "z");
+  string h = heap_string(3);
+  p.text = h;
+  assert(p._v.len == 3, "assign_local");
+}
+
+assign_literal() `test {
+  p := PD(_v: "z");
+  p.text = "q";
+  assert(p._v.len == 1, "assign_literal");
+}
+
+assign_field() `test {
+  p := PD(_v: "z");
+  p._v = heap_string(3);
+  assert(p._v.len == 3, "assign_field");
+}
+
+// T1901: multiple setter assignments in sequence — each must clean up.
+assign_multiple() `test {
+  p := PD(_v: "z");
+  p.text = heap_string(2);
+  p.text = heap_string(3);
+  p.text = heap_string(4);
+  assert(p._v.len == 4, "assign_multiple");
+}
+
+// T1901: setter assign in a loop — each iteration's temp must be freed.
+assign_loop() `test {
+  p := PD(_v: "");
+  for i in 0..5 {
+    p.text = heap_string(i);
+  }
+  assert(p._v.len == 4, "assign_loop");
+}
+
+// T1901: compound assign in a loop through setter.
+compound_loop() `test {
+  p := PD(_v: "x");
+  for i in 0..3 {
+    p.text += heap_string(1);
+  }
+  assert(p._v.len == 4, "compound_loop");
+}
+
+// T1901: setter on a type with a generic string field.
+type GS[T] {
+  T _v;
+  get val T => this._v;
+  set val(T s) {
+    this._v = s;
+  }
+  drop(~this) {
+  }
+}
+
+assign_generic_string() `test {
+  g := GS[string](_v: "z");
+  g.val = heap_string(3);
+  assert(g._v.len == 3, "assign_generic_string");
+}
+
+compound_generic_string() `test {
+  g := GS[string](_v: "z");
+  g.val += heap_string(3);
+  assert(g._v.len == 4, "compound_generic_string");
+}
+
+// T1901: setter assign where the owner is nested (chain access).
+type Outer {
+  PD inner;
+  drop(~this) {
+  }
+}
+
+assign_nested() `test {
+  o := Outer(inner: PD(_v: "z"));
+  o.inner.text = heap_string(3);
+  assert(o.inner._v.len == 3, "assign_nested");
+}
+
+compound_nested() `test {
+  o := Outer(inner: PD(_v: "z"));
+  o.inner.text += heap_string(3);
+  assert(o.inner._v.len == 4, "compound_nested");
+}

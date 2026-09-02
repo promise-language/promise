@@ -488,11 +488,11 @@ add_one(int[]~ v) { v.push(1); }   // OK: mutable borrow
 //   o.mutate(o.field);  // error: cannot borrow 'o' as mutable — already borrowed
 // The method could reassign/drop o.field while the borrow is live. Pass a distinct
 // value or a clone (o.field.clone()) instead. Borrow tracking keys on the root
-// variable (`o`), not the field: passing ANY field of a non-Copy receiver triggers
-// this — including a Copy-typed field (a conservative over-approximation, since a
-// Copy field is actually passed by value with no aliasing hazard). The rule lifts
-// only when the whole receiver is a Copy/value type, so the call copies rather than
-// borrows.
+// variable (`o`), not the field — but a Copy-typed field (e.g. `int`, `bool`, pure
+// value type) is exempted: the value is passed by-value with no aliasing hazard, so
+// no shared borrow is registered. The rule rejects only when the field's own type is
+// non-Copy (string, collections, heap types), where the method could reassign/drop
+// the field while a live shared reference exists.
 
 // Reference TYPES (locals and return types; default is owned):
 // (borrows can't be stored in fields — use Ref[T] to hold a reference in a struct)

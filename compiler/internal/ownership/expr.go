@@ -1434,6 +1434,13 @@ func (c *Checker) createBorrowWithKind(expr ast.Expr, kind BorrowKind, pos ast.P
 		}
 	}
 
+	// Also skip borrow tracking when the EXPRESSION's own resolved type is Copy,
+	// even if the root variable is non-Copy. A Copy-typed field (e.g. o.n where
+	// n is int) is passed by value — no aliasing hazard. (T1378)
+	if exprType := c.info.Types[expr]; exprType != nil && isCopyType(exprType) {
+		return
+	}
+
 	label := borrowTargetLabel(name, path)
 
 	// Check against existing borrows using path-aware overlap

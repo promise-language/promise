@@ -464,7 +464,10 @@ func runEmitIR(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
 		os.Exit(1)
 	}
-	checkTargetFlag(target)
+	// emit-ir only generates IR, which needs no sysroot, CRT or linker, so it
+	// accepts every triple the compiler knows — not just the ones this release
+	// can link (T0533 Part 2).
+	checkEmitTargetFlag(target)
 	cfg, files, resolvedFile, err := resolveTarget(filename, "emit-ir")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -813,7 +816,7 @@ func runRun(args []string) {
 			if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
 				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(cacheLabel), cacheKey[:16])
 			}
-			execRunBinary(cachedBin, progArgs)
+			execRunBinary(target, cachedBin, progArgs)
 			return
 		}
 	}
@@ -873,14 +876,19 @@ func runRun(args []string) {
 		}
 	}
 
-	execRunBinary(tmpOutput.Name(), progArgs)
+	execRunBinary(target, tmpOutput.Name(), progArgs)
 }
 
 // execRunBinary runs the given binary with the current process's stdio wired
 // through, forwarding progArgs as the program's argv (T1426), and exits with the
-// child's exit code on failure.
-func execRunBinary(path string, progArgs []string) {
-	cmd := exec.Command(path, progArgs...)
+// child's exit code on failure. For cross-native targets, execution is delegated
+// to Wine or QEMU (T0533).
+func execRunBinary(target, path string, progArgs []string) {
+	cmd, cerr := crossExecCommand(context.Background(), target, path, progArgs...)
+	if cerr != nil {
+		fmt.Fprintln(os.Stderr, cerr)
+		os.Exit(1)
+	}
 	isolateProcessGroup(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -1991,14 +1999,9 @@ func runTestProcess(binaryPath, target string, budget time.Duration,
 	spawnArmed := func() testProcessResult {
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
-		var cmd *exec.Cmd
-		switch {
-		case isWasmWebTarget(target):
-			cmd = runWasmWeb(ctx, binaryPath)
-		case isWasmTarget(target):
-			cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-		default:
-			cmd = exec.CommandContext(ctx, binaryPath)
+		cmd, cerr := crossExecCommand(ctx, target, binaryPath)
+		if cerr != nil {
+			return testProcessResult{output: []byte(cerr.Error()), err: cerr}
 		}
 		isolateProcessGroup(cmd)
 		out, err := cmd.CombinedOutput()
@@ -8629,14 +8632,10 @@ func runExec(args []string) {
 func executeExecBinary(target, binPath string, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	var cmd *exec.Cmd
-	switch {
-	case isWasmWebTarget(target):
-		cmd = runWasmWeb(ctx, binPath)
-	case isWasmTarget(target):
-		cmd = exec.CommandContext(ctx, "wasmtime", binPath)
-	default:
-		cmd = exec.CommandContext(ctx, binPath)
+	cmd, cerr := crossExecCommand(ctx, target, binPath)
+	if cerr != nil {
+		fmt.Fprintln(os.Stderr, cerr)
+		os.Exit(1)
 	}
 	isolateProcessGroup(cmd)
 	cmd.Stdin = os.Stdin

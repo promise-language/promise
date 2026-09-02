@@ -392,6 +392,13 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 
 	// Compile all targets (exits on compile error)
 	fmt.Fprintf(os.Stderr, "Compiling %d file(s)...\n", len(files))
+	// Whether this host can run the target's binaries is loop-invariant, so
+	// settle it before compiling anything rather than discovering it mid-run.
+	if err := canExecuteTarget(targetTriple); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
 	targets, cleanup := compileTargets(files, baseDir, targetTriple, cfg)
 	defer cleanup()
 
@@ -464,14 +471,14 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 			// Test PASS/FAIL lines go to stdout; panic/crash output goes to stderr.
 			runStart := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), cfg.defaultTimeout)
-			var cmd *exec.Cmd
-			switch {
-			case isWasmWebTarget(targetTriple):
-				cmd = runWasmWeb(ctx, t.binary)
-			case isWasmTarget(targetTriple):
-				cmd = exec.CommandContext(ctx, "wasmtime", t.binary)
-			default:
-				cmd = exec.CommandContext(ctx, t.binary)
+			cmd, cerr := crossExecCommand(ctx, targetTriple, t.binary)
+			if cerr != nil {
+				// Unreachable: the pre-flight above already settled this. Run
+				// cleanup explicitly anyway, since os.Exit skips defers.
+				cancel()
+				fmt.Fprintf(os.Stderr, "error: %v\n", cerr)
+				cleanup()
+				os.Exit(1)
 			}
 			var stdoutBuf, stderrBuf bytes.Buffer
 			cmd.Stdout = &stdoutBuf

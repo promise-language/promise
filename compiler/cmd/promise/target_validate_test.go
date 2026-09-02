@@ -40,7 +40,7 @@ func TestInvalidTargetMessage(t *testing.T) {
 
 	for _, want := range []string{
 		"error: invalid target 'foo'",
-		"supported targets:",
+		"targets this release can build:",
 		codegen.HostTargetTriple(),
 		"(native)",
 		"wasm32-wasi",

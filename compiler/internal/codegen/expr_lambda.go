@@ -33,7 +33,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 
 	params := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
 	for _, p := range sig.Params() {
-		params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+		params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 	}
 
 	// Create anonymous function. T1254: qualify the name with the enclosing
@@ -146,6 +146,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedCoroSuspend := c.coroSuspendBlk                // T0285: save coroutine blocks
 	savedDiscardedExpr := c.discardedExpr               // T1029: lambda body is not the discarded statement
 	savedDiscardAliasArgPtrs := c.discardAliasArgPtrs   // T1029
+	savedMutRefPtrs := c.mutRefPtrs                     // T1661: prevent outer ~ params leaking into lambda
+	savedMutRefTypes := c.mutRefTypes                   // T1661
 	savedBlockTempFloors := c.resetBlockTempFloors()    // T1329: fresh function → floors from 0
 	c.goExprFireAndForget = false                       // reset for inner statements (B0109)
 	c.panicExitBlock = nil                              // T0262: lambda is a separate function
@@ -155,6 +157,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.coroSuspendBlk = nil                              // T0285: no coroutine infrastructure
 	c.discardedExpr = nil                               // T1029: inner ExprStmts set their own
 	c.discardAliasArgPtrs = nil                         // T1029
+	c.mutRefPtrs = nil                                  // T1661: lambda has its own ~ params
+	c.mutRefTypes = nil                                 // T1661
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -229,15 +233,41 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		}
 	}
 
-	// Allocate user parameters (offset by 1 due to env param)
+	// Allocate user parameters (offset by 1 due to env param).
+	// T1661: handle MutRef (~) params the same way as declared functions
+	// (compiler_funcdecl.go): the caller passes a pointer to its alloca,
+	// and reads/writes go through that pointer so mutations are visible.
 	for i, p := range sig.Params() {
 		if p.Name() == "" || p.Name() == "_" {
 			continue
 		}
-		alloca := entry.NewAlloca(c.resolveType(p.Type()))
-		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
-		entry.NewStore(fn.Params[i+1], alloca) // +1 for env param
-		c.locals[p.Name()] = alloca
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			// MutRef param: caller passes a pointer to its alloca.
+			innerType := c.resolveType(p.Type())
+			if c.mutRefPtrs == nil {
+				c.mutRefPtrs = make(map[string]value.Value)
+				c.mutRefTypes = make(map[string]irtypes.Type)
+			}
+			c.mutRefPtrs[p.Name()] = fn.Params[i+1] // +1 for env param
+			c.mutRefTypes[p.Name()] = innerType
+		} else {
+			alloca := entry.NewAlloca(c.resolveType(p.Type()))
+			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
+			entry.NewStore(fn.Params[i+1], alloca) // +1 for env param
+			c.locals[p.Name()] = alloca
+			// T1661: Register drop bindings for ~ (move) params, mirroring
+			// compiler_funcdecl.go. The callee takes ownership and must drop
+			// at scope exit.
+			if p.Ref() == types.RefMut {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+				c.maybeRegisterStructuralParamFree(p.Name(), alloca, paramType)
+				c.maybeRegisterEnvFree(p.Name(), alloca, paramType, nil)
+			}
+		}
 	}
 
 	// Generate body
@@ -332,6 +362,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.coroSuspendBlk = savedCoroSuspend                // T0285
 	c.discardedExpr = savedDiscardedExpr               // T1029
 	c.discardAliasArgPtrs = savedDiscardAliasArgPtrs   // T1029
+	c.mutRefPtrs = savedMutRefPtrs                     // T1661
+	c.mutRefTypes = savedMutRefTypes                   // T1661
 
 	// T0100: Track env temp for non-variable lambdas. If this lambda is
 	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the

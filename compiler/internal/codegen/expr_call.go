@@ -32,13 +32,12 @@ func (c *Compiler) genFunctionMemberIndirectCall(e *ast.CallExpr, sig *types.Sig
 		}
 	}
 	closure := c.genExpr(e.Callee) // field load, or getter call
-	var argVals []value.Value
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-	}
+	// T1661: use genCallArgsWithMutRef so ~ params pass the caller's alloca pointer
+	argVals, _, variadicPTs := c.genCallArgsWithMutRef(e.Args, resolvedSig.Params(), resolvedSig.Result())
 	origArgVals := argVals // T0331: pre-coercion for alias check
 	argVals = c.coerceIndirectCallArgs(resolvedSig, e.Args, argVals)
 	result := c.genIndirectCall(closure, resolvedSig, argVals)
+	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheck(result, resolvedSig, e.Args, origArgVals, e) // T0331
 	return result
 }
@@ -69,13 +68,12 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					}
 					if sig, ok := calleeType.(*types.Signature); ok {
 						closure := c.genExpr(e.Callee)
-						var argVals []value.Value
-						for _, arg := range e.Args {
-							argVals = append(argVals, c.genCallArgExpr(arg.Value))
-						}
+						// T1661: use genCallArgsWithMutRef so ~ params pass the caller's alloca pointer
+						argVals, _, variadicPTs := c.genCallArgsWithMutRef(e.Args, sig.Params(), sig.Result())
 						origArgVals := argVals // T0331: pre-coercion for alias check
 						argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 						result := c.genIndirectCall(closure, sig, argVals)
+						c.clearVariadicStaticFlags(variadicPTs)
 						result = c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
 						return result
 					}
@@ -317,13 +315,12 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		}
 		if sig, ok := calleeType.(*types.Signature); ok {
 			closure := c.genExpr(e.Callee)
-			var argVals []value.Value
-			for _, arg := range e.Args {
-				argVals = append(argVals, c.genCallArgExpr(arg.Value))
-			}
+			// T1661: use genCallArgsWithMutRef so ~ params pass the caller's alloca pointer
+			argVals, _, variadicPTs := c.genCallArgsWithMutRef(e.Args, sig.Params(), sig.Result())
 			origArgVals := argVals // T0331: pre-coercion for alias check
 			argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 			result := c.genIndirectCall(closure, sig, argVals)
+			c.clearVariadicStaticFlags(variadicPTs)
 			result = c.emitReturnAliasCheck(result, sig, e.Args, origArgVals, e) // T0331
 			return result
 		}
@@ -345,6 +342,14 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	if !isExtern {
 		if callee := c.lookupFunc(ident.Name); callee != nil {
 			calleeSig, _ = callee.Type().(*types.Signature)
+		}
+		// T1661: lambda variables are *types.Var, not *types.Func, so lookupFunc
+		// returns nil. Fall back to the sema type map so genCallArgsWithMutRef
+		// runs for lambda calls with ~ params.
+		if calleeSig == nil {
+			if ct := c.info.Types[e.Callee]; ct != nil {
+				calleeSig, _ = ct.(*types.Signature)
+			}
 		}
 	}
 
@@ -1701,10 +1706,12 @@ func (c *Compiler) genIndirectCall(closure value.Value, sig *types.Signature, ar
 		retType = computeResultType(retType)
 	}
 
-	// Function type includes env (i8*) as first parameter
+	// Function type includes env (i8*) as first parameter.
+	// T1661: use resolveParamType so MutRef params are typed as pointers,
+	// matching the lambda's LLVM function signature.
 	paramTypes := []irtypes.Type{irtypes.I8Ptr}
 	for _, p := range sig.Params() {
-		paramTypes = append(paramTypes, c.resolveType(p.Type()))
+		paramTypes = append(paramTypes, c.resolveParamType(p))
 	}
 
 	funcType := irtypes.NewFunc(retType, paramTypes...)

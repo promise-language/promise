@@ -1746,6 +1746,13 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 	for i := 0; i < n; i++ {
 		v := argVals[i]
 
+		// T1661: MutRef params are already handled by genCallArgsWithMutRef —
+		// the arg is a pointer to the caller's alloca. Skip coercion so we
+		// don't try to wrap/view-coerce a raw pointer as a value struct.
+		if _, isMutRef := params[i].Type().(*types.MutRef); isMutRef {
+			continue
+		}
+
 		// Optional wrapping: param is T? but arg is not optional
 		paramType := params[i].Type()
 		if callSubst != nil {

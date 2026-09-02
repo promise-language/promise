@@ -1,0 +1,208 @@
+// T1661: Closures and ~ (mut-ref) parameters.
+// A. Lambda ~ params must pass mutations back to the caller.
+// B. Forwarding a ~-borrowed value through a callback must not segfault.
+// --- Bug A: Lambda ~ param mutation visible to caller ---
+lambda_mutref_vector_push() `test {
+  int[] log = [];
+  (int[] ~) -> void fn = |int[] ~v| {
+    v.push(5);
+  };
+  fn(log);
+  assert(log.len == 1, "lambda ~ push visible to caller: len");
+  assert(log[0] == 5, "lambda ~ push visible to caller: value");
+}
+
+lambda_mutref_vector_multiple_pushes() `test {
+  int[] log = [];
+  (int[] ~) -> void fn = |int[] ~v| {
+    v.push(1);
+    v.push(2);
+    v.push(3);
+  };
+  fn(log);
+  assert(log.len == 3, "multiple pushes: len");
+  assert(log[0] == 1, "multiple pushes: [0]");
+  assert(log[1] == 2, "multiple pushes: [1]");
+  assert(log[2] == 3, "multiple pushes: [2]");
+}
+
+// --- Bug B: Forwarding ~ value through callback ---
+
+forward_call(int[] ~v, (int[]) -> void fn) {
+  fn(v);
+}
+
+lambda_mutref_forward_read() `test {
+  // Forwarding a ~-borrowed vector to a non-~ callback must not segfault.
+  // The callback receives the vector by value and reads its length.
+  int[] log = [1, 2, 3];
+  forward_call(log, |int[] v| {
+    assert(v.len == 3, "forward ~ vec through callback: read len");
+  });
+}
+
+forward_call_mutref(int[] ~v, (int[] ~) -> void fn) {
+  fn(v);
+}
+
+lambda_mutref_forward_mutate() `test {
+  int[] log = [];
+  forward_call_mutref(log, |int[] ~v| {
+    v.push(42);
+  });
+  assert(log.len == 1, "forward ~ vec through ~ callback: len");
+  assert(log[0] == 42, "forward ~ vec through ~ callback: value");
+}
+
+// --- Heap user type (control): already worked before the fix ---
+
+type Counter {
+  int n;
+  bump(~this) {
+    this.n = this.n + 1;
+  }
+}
+
+lambda_mutref_heap_user_type() `test {
+  c := Counter(n: 0);
+  (Counter ~) -> void fn = |Counter ~x| {
+    x.bump();
+  };
+  fn(c);
+  assert(c.n == 1, "heap user type ~ lambda");
+}
+
+forward_heap(Counter ~c, (Counter ~) -> void fn) {
+  fn(c);
+}
+
+lambda_mutref_forward_heap_user_type() `test {
+  c := Counter(n: 0);
+  forward_heap(c, |Counter ~x| {
+    x.bump();
+  });
+  assert(c.n == 1, "forward heap user type through ~ callback");
+}
+
+// --- Combined: captures + ~ params (no interference) ---
+
+lambda_mutref_with_capture() `test {
+  int multiplier = 10;
+  int[] log = [];
+  (int[] ~) -> void fn = move |int[] ~v| {
+    v.push(multiplier);
+  };
+  fn(log);
+  assert(log.len == 1, "capture + ~ param: len");
+  assert(log[0] == 10, "capture + ~ param: value");
+}
+
+// --- Map ~ param in lambda (value-struct mutation) ---
+
+lambda_mutref_map_insert() `test {
+  map[string, int] m = {:};
+  (map[string, int] ~) -> void fn = |map[string, int] ~x| {
+    x["a"] = 1;
+    x["b"] = 2;
+  };
+  fn(m);
+  assert(m.len == 2, "map ~ lambda: len");
+}
+
+// --- Struct field holding a closure with ~ param ---
+
+type Callback {
+  (int[] ~) -> void fn;
+}
+
+lambda_mutref_field_indirect_call() `test {
+  int[] log = [];
+  cb := Callback(fn: |int[] ~v| {
+    v.push(7);
+  });
+  cb.fn(log);
+  assert(log.len == 1, "field indirect ~ call: len");
+  assert(log[0] == 7, "field indirect ~ call: value");
+}
+
+// --- Nested lambdas each with ~ params ---
+
+lambda_mutref_nested() `test {
+  int[] outer = [];
+  (int[] ~) -> void outer_fn = |int[] ~a| {
+    a.push(1);
+    int[] inner = [];
+    (int[] ~) -> void inner_fn = |int[] ~b| {
+      b.push(2);
+    };
+    inner_fn(inner);
+    assert(inner.len == 1, "nested inner: len");
+    assert(inner[0] == 2, "nested inner: value");
+  };
+  outer_fn(outer);
+  assert(outer.len == 1, "nested outer: len");
+  assert(outer[0] == 1, "nested outer: value");
+}
+
+// --- Lambda ~ param called multiple times ---
+
+lambda_mutref_called_twice() `test {
+  int[] log = [];
+  (int[] ~) -> void fn = |int[] ~v| {
+    v.push(99);
+  };
+  fn(log);
+  fn(log);
+  assert(log.len == 2, "called twice: len");
+  assert(log[0] == 99, "called twice: [0]");
+  assert(log[1] == 99, "called twice: [1]");
+}
+
+// --- Lambda ~ param with return value ---
+
+lambda_mutref_with_return() `test {
+  int[] log = [];
+  (int[] ~) -> int fn = |int[] ~v| -> int {
+    v.push(10);
+    return v.len;
+  };
+  int result = fn(log);
+  assert(result == 1, "~ param with return: result");
+  assert(log[0] == 10, "~ param with return: value");
+}
+
+// --- Forwarding ~ through two levels of callbacks ---
+
+inner_apply(int[] ~v, (int[] ~) -> void fn) {
+  fn(v);
+}
+
+outer_apply(int[] ~v, (int[] ~) -> void fn) {
+  inner_apply(v, fn);
+}
+
+lambda_mutref_double_forward() `test {
+  int[] log = [];
+  outer_apply(log, |int[] ~v| {
+    v.push(77);
+  });
+  assert(log.len == 1, "double forward: len");
+  assert(log[0] == 77, "double forward: value");
+}
+
+// --- Lambda ~ param: named function ref with ~ param forwarded ---
+
+apply_fn(int[] ~v, (int[] ~) -> void fn) {
+  fn(v);
+}
+
+do_push(int[] ~v) {
+  v.push(55);
+}
+
+lambda_mutref_named_fn_ref() `test {
+  int[] log = [];
+  apply_fn(log, do_push);
+  assert(log.len == 1, "named fn ref ~ forward: len");
+  assert(log[0] == 55, "named fn ref ~ forward: value");
+}

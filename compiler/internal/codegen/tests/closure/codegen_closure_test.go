@@ -1414,6 +1414,108 @@ func TestLambdaVoidExprBodyNoParams(t *testing.T) {
 	codegentest.AssertNotContains(t, ir, "ret void %")
 }
 
+// T1661: A lambda with a ~ (MutRef) parameter must use pointer-typed LLVM
+// params so mutations through the pointer are visible to the caller.
+func TestLambdaMutRefParamUsesPointerType(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		main() {
+			int[] log = [];
+			(int[]~) -> void fn = |int[]~ v| { v.push(5); };
+			fn(log);
+		}
+	`)
+	// The lambda function type should have a pointer param (i8**) for the ~ vector,
+	// not a bare i8* (which would be a by-value copy).
+	codegentest.AssertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i8\*\* %v\)`)
+}
+
+// T1661: When a lambda is defined inside a function with a ~ param of the same
+// name, the lambda must NOT reference the outer function's MutRef parameter.
+// The lambda's own param setup must shadow the outer's mutRefPtrs entry.
+func TestLambdaMutRefPtrsSaveRestore(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		call(int[] ~ v, (int[]) -> void fn) { fn(v); }
+		main() {
+			int[] log = [1, 2];
+			call(log, |int[] v| { print_line("{v.len}"); });
+		}
+	`)
+	// The lambda should have a value param (i8*), not a pointer param (i8**)
+	codegentest.AssertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i8\* %v\)`)
+	// The `call` function should have a pointer param for the ~ vector
+	codegentest.AssertContains(t, ir, "define void @__user.call(i8** %v,")
+}
+
+// T1661: An indirect call via a struct field holding a closure with a ~ param
+// must use the MutRef calling convention (pointer param in the LLVM call type).
+func TestLambdaMutRefFieldIndirectCall(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Callback { (int[]~) -> void fn; }
+		main() {
+			int[] log = [];
+			cb := Callback(fn: |int[]~ v| { v.push(7); });
+			cb.fn(log);
+		}
+	`)
+	// The lambda function should have a pointer param for the ~ vector
+	codegentest.AssertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i8\*\* %v\)`)
+}
+
+// T1661: A string ~ param in a lambda must use pointer passing so mutations
+// (e.g. concatenation that rewrites the value struct) are visible to the caller.
+func TestLambdaMutRefStringParam(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		main() {
+			string s = "hello";
+			(string~) -> void fn = |string~ v| { v = v + " world"; };
+			fn(s);
+		}
+	`)
+	codegentest.AssertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, .+\* %v\)`)
+}
+
+// T1661: Nested lambdas each with their own ~ params must not interfere with
+// each other's mutRefPtrs — the inner lambda saves and restores correctly.
+func TestLambdaMutRefNestedLambdas(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		main() {
+			int[] outer = [];
+			(int[]~) -> void outer_fn = |int[]~ a| {
+				a.push(1);
+				int[] inner = [];
+				(int[]~) -> void inner_fn = |int[]~ b| {
+					b.push(2);
+				};
+				inner_fn(inner);
+			};
+			outer_fn(outer);
+		}
+	`)
+	// Both lambdas should have pointer params for their ~ vectors
+	// (regex matches two distinct lambda definitions with i8** params)
+	matches := regexp.MustCompile(`define void @\.lambda\.\d+\(i8\* %env, i8\*\*`).FindAllString(ir, -1)
+	if len(matches) < 2 {
+		t.Fatalf("expected at least 2 lambda defs with i8** params, got %d", len(matches))
+	}
+}
+
+// T1661: The rtti.go coercion skip — when a ~ param is passed at an indirect
+// call site where coercion would normally apply, it must be skipped.
+func TestLambdaMutRefCoercionSkip(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Base { int x; }
+		type Child is Base { int y; }
+		apply(Base ~ b, (Base~) -> void fn) { fn(b); }
+		main() {
+			c := Child(x: 1, y: 2);
+			apply(c, |Base~ b| { b.x = 10; });
+		}
+	`)
+	// Should compile without error — coercion must not attempt to wrap
+	// a pointer value as an interface value struct
+	codegentest.AssertContains(t, ir, "define")
+}
+
 // extractDefineMatch returns the body of the first `define ... @<pat>(...)`
 // whose signature matches pat, which is a regexp over the text starting at the
 // `@`. Generated lambda names carry an unpredictable counter, so they cannot be

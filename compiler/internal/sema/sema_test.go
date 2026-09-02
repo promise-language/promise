@@ -17084,6 +17084,44 @@ func TestGoBangFireAndForgetRejected(t *testing.T) {
 	expectError(t, errs, "fire-and-forget goroutine must be non-failable")
 }
 
+func TestGoBangNonFailableCalleeNoFireAndForget(t *testing.T) {
+	// T1403: `go! score(5);` where `score` is NOT failable should emit only the
+	// "cannot fail" diagnostic, not the redundant "fire-and-forget" one.
+	errs := checkErrs(t, `
+		score(int x) int { return x; }
+		test() {
+			go! score(5);
+		}
+	`)
+	expectError(t, errs, "cannot fail; spawn it with plain `go`")
+	expectNoErrorContaining(t, errs, "fire-and-forget")
+}
+
+func TestGoBangNonFailableVoidCalleeNoFireAndForget(t *testing.T) {
+	// T1403: `go! void_fn();` where void_fn is NOT failable should emit only the
+	// "cannot fail" diagnostic. Void non-failable is the simplest case.
+	errs := checkErrs(t, `
+		noop() { }
+		test() {
+			go! noop();
+		}
+	`)
+	expectError(t, errs, "cannot fail; spawn it with plain `go`")
+	expectNoErrorContaining(t, errs, "fire-and-forget")
+}
+
+func TestGoBangBlockFireAndForgetStillRejected(t *testing.T) {
+	// T1403: the diagnostic dedup only applies to the CALL form (`goExpr.Expr != nil`).
+	// A block form that CAN fail but is discarded must still emit "fire-and-forget".
+	errs := checkErrs(t, `
+		produce!(int x) int { return x; }
+		test() {
+			go! { produce(5) };
+		}
+	`)
+	expectError(t, errs, "fire-and-forget goroutine must be non-failable")
+}
+
 func TestGoBangBlockFormAccepted(t *testing.T) {
 	// T1384: the `go! { }` block form is now implemented end-to-end — a body that
 	// can fail (a bare failable call auto-propagates in the failable scope) is

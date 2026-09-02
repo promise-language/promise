@@ -1285,6 +1285,12 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 	// task — its error would be silently swallowed. Fire-and-forget must be
 	// non-failable (T1379).
 	if goExpr, ok := s.Expr.(*ast.GoExpr); ok && goExpr.Failable {
+		// Call form: skip when the callee isn't actually failable — checkGoExpr
+		// already emits "cannot fail; spawn it with plain `go`", and adding the
+		// fire-and-forget diagnostic is redundant noise (T1403).
+		if goExpr.Expr != nil && !c.info.FailableExprs[unwrapGoExprCall(goExpr)] {
+			return
+		}
 		if types.IsFailableTask(c.info.Types[s.Expr]) {
 			c.errorf(s.Expr.Pos(), "a fire-and-forget goroutine must be non-failable")
 			c.hintf(s.Expr.Pos(), "handle the error inside it — `go { %s(...)?!; }` — or keep the task and receive it with `<-`", goCalleeName(unwrapGoExprCall(goExpr)))

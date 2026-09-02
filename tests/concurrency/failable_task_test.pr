@@ -926,3 +926,52 @@ failable_go_block_typed_handler_dropped_error_leak_free() `test {
   };
   assert(r == -1, "dropped typed-handler error path did not leak");
 }
+
+// ---------------------------------------------------------------------------
+// T1403 / T1434: for-in over a VECTOR of failable_task handles. The T0617
+// consumed-slot-null mechanism must use IsAnyTask (not IsTask) so that `<-h`
+// inside the loop body nulls the vector slot — otherwise Task[T].drop at scope
+// exit reloads the freed G and double-frees → segfault.
+// ---------------------------------------------------------------------------
+
+// For-in over Vector[failable_task[int]], receiving each handle — all succeed.
+failable_task_forin_vector_all_ok() `test {
+  handles := [go! produce(1), go! produce(2), go! produce(3)];
+  int total = 0;
+  for h in handles {
+    total = total + (<-h)?!;
+  }
+  assert(total == 12, "for-in vector failable_task all ok: 2+4+6");
+}
+
+// For-in over Vector[failable_task[string]], heap element — leak-free.
+failable_task_forin_vector_heap_ok() `test {
+  handles := [go! make_str(1), go! make_str(2)];
+  string[] results = [];
+  for h in handles {
+    results.push((<-h)?!);
+  }
+  assert(results.len == 2, "for-in vector failable_task heap len");
+  assert(results[0] == "value=1", "for-in vector failable_task heap[0]");
+  assert(results[1] == "value=2", "for-in vector failable_task heap[1]");
+}
+
+// For-in over Vector[failable_task[int]], one handle errors — inline handler.
+forin_vector_err_impl!() int {
+  handles := [go! produce(1), go! produce(-2), go! produce(3)];
+  int total = 0;
+  for h in handles {
+    total = total + (<-h)?^;
+  }
+  return total;
+}
+
+failable_task_forin_vector_err() `test {
+  msg := "";
+  r := forin_vector_err_impl()? e {
+    msg = e.message;
+    -1
+  };
+  assert(r == -1, "for-in vector failable_task error path taken");
+  assert(msg == "negative:-2", "for-in vector failable_task error message");
+}

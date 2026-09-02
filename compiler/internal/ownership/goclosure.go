@@ -69,6 +69,61 @@ func (c *Checker) checkGoClosureCaptures(e *ast.GoExpr) {
 	}
 }
 
+// checkGoDroppableCaptures marks non-closure, non-Copy, non-channel droppable
+// captures of a `go { … }` block as Moved in the enclosing scope.
+//
+// Codegen's B0354 already transfers ownership of these captures (clears the
+// outer drop flag after the spawn), but the ownership pass was never taught the
+// matching rule — so a post-spawn use silently read freed memory. This function
+// closes that gap (T1641).
+//
+// Closures are handled by checkGoClosureCaptures (R4/R5); channels are refcounted
+// (B0163), not moved; Copy types are captured by copy. Everything else that is
+// droppable is moved here.
+func (c *Checker) checkGoDroppableCaptures(e *ast.GoExpr) {
+	for _, cv := range c.info.GoCaptures[e] {
+		v, ok := cv.Obj.(*types.Var)
+		if !ok {
+			continue
+		}
+		name := v.Name()
+		if name == "" || name == "_" || name == "this" {
+			continue
+		}
+		typ := v.Type()
+		// Closures already handled by checkGoClosureCaptures.
+		if isClosureType(typ) {
+			continue
+		}
+		// Copy types are captured by copy — no move needed.
+		if isCopyType(typ) {
+			continue
+		}
+		// Channels are refcounted — shared via refcount bump, not moved.
+		if types.IsChannel(typ) {
+			continue
+		}
+		// Only droppable types have the B0354 ownership transfer in codegen.
+		if !isDroppableType(typ) {
+			continue
+		}
+		// Already moved — skip.
+		if c.state[name] == Moved {
+			continue
+		}
+		if c.state[name] == Borrowed {
+			// A borrowed droppable captured into a go block is unsound
+			// (the owner drops it while the goroutine uses it), but that
+			// is T1397's full borrow-rejection rule. For now, skip —
+			// marking a borrow as Moved would produce a confusing diagnostic.
+			continue
+		}
+		// Mark moved: the goroutine takes ownership (B0354).
+		c.noteLoopMoveSite(name, e.Pos(), typ)
+		c.state[name] = Moved
+	}
+}
+
 // rejectGoCallClosureBorrow applies R5 to the *call* form, `go f(handler)`. The
 // only sound spelling is `move <ident>` into a consuming slot: that is the one
 // shape where the caller surrenders the env (its drop flag is cleared at the call

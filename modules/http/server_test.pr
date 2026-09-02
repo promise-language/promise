@@ -576,8 +576,13 @@ test_server_concurrent_slow_handler() `test(exclude: wasm, timeout: "10s") {
     if handle := <-handle_ch {
       string base = "http://127.0.0.1:" + port.to_string();
 
+      // T1641: base is droppable, so capturing it in a go block moves it.
+      // Compute both URLs before the spawn so both scopes own their own string.
+      string slow_url = base + "/slow";
+      string fast_url = base + "/fast";
+
       go {
-        Request slow_req = Request.new_get(base + "/slow");
+        Request slow_req = Request.new_get(move slow_url);
         Response slow_resp = slow_req.send()?!;
         assert(slow_resp.status == 200, "slow status");
         assert(slow_resp.body == "slow", "slow body");
@@ -588,7 +593,7 @@ test_server_concurrent_slow_handler() `test(exclude: wasm, timeout: "10s") {
       // release it — yet a second request must still be served.
       if e := <-entered {
       }
-      Request fast_req = Request.new_get(base + "/fast");
+      Request fast_req = Request.new_get(move fast_url);
       Response fast_resp = fast_req.send()?!;
       assert(fast_resp.status == 200, "fast status while slow is blocked");
       assert(fast_resp.body == "fast", "fast body while slow is blocked");

@@ -210,6 +210,7 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			// valid), apply the closure env-ownership rules to the captures — reject
 			// a borrowed env, and mark an accepted one Moved in the enclosing scope.
 			c.checkGoClosureCaptures(e)
+			c.checkGoDroppableCaptures(e) // T1641: mark non-closure droppable captures as moved
 		}
 
 	case *ast.UnsafeExpr:

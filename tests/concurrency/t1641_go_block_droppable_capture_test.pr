@@ -1,0 +1,94 @@
+// T1641: Go block droppable capture ownership transfer.
+// Positive tests — programs that should compile and run correctly after the fix.
+// Negative tests (use-after-move errors) are covered by the Go ownership unit tests.
+// Copy types captured in a go block remain usable after the spawn.
+test_copy_type_capture_ok() `test(exclude: wasm) {
+  int n = 42;
+  bool b = true;
+  t := go {
+    assert(n == 42, "n");
+    assert(b, "b");
+    1
+  };
+  v := <-t;
+  assert(n == 42, "int still usable after go block");
+  assert(b, "bool still usable after go block");
+}
+
+// Channel captured in a go block remains usable (refcounted, not moved).
+test_channel_capture_ok() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  t := go {
+    done.send(99);
+    1
+  };
+  v := <-t;
+  r := <-done;
+  if x := r {
+    assert(x == 99, "channel still works after go block");
+  }
+}
+
+// Droppable capture used only inside the go block (no post-spawn use) is OK.
+test_droppable_capture_no_post_spawn_use() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  s := "hello " + "world";
+  go {
+    assert(s.len == 11, "string accessible in goroutine");
+    done.send(1);
+  };
+  r := <-done;
+  if x := r {
+    assert(x == 1, "goroutine completed");
+  }
+}
+
+// Vector capture used only inside the go block is OK.
+test_vector_capture_no_post_spawn_use() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  v := [10, 20, 30];
+  go {
+    assert(v.len == 3, "vec len");
+    assert(v[0] == 10, "vec elem");
+    done.send(1);
+  };
+  r := <-done;
+  if x := r {
+    assert(x == 1, "goroutine completed");
+  }
+}
+
+// User-defined droppable type captured in a go block (goroutine-side drop, no leak).
+type Resource {
+  int id;
+  drop(~this) {
+  }
+}
+
+test_user_type_capture_no_post_spawn_use() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  r := Resource(id: 42);
+  go {
+    assert(r.id == 42, "resource accessible in goroutine");
+    done.send(1);
+  };
+  result := <-done;
+  if x := result {
+    assert(x == 1, "goroutine completed");
+  }
+}
+
+// Multiple captures: copy types remain usable, droppable is consumed.
+test_mixed_captures() `test(exclude: wasm) {
+  done := channel[int](capacity: 1);
+  int n = 7;
+  s := "hello";
+  go {
+    assert(n == 7, "n in goroutine");
+    assert(s.len == 5, "s in goroutine");
+    done.send(1);
+  };
+  r := <-done;
+  // n (copy type) is still usable; s (droppable) is moved — not used here.
+  assert(n == 7, "copy type still usable after go block");
+}

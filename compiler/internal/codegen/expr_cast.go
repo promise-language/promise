@@ -696,13 +696,15 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	case *ast.MutRefTypeRef:
 		targetTypeRef, targetIsBorrow = ref.Inner, true
 	}
-	targetRef, ok := targetTypeRef.(*ast.NamedTypeRef)
-	if !ok {
-		panic(fmt.Sprintf("codegen: unsupported cast target type %T", e.Type))
+	// T1884: resolve target type via resolveTypeRefToType so all TypeRef kinds
+	// (SliceTypeRef, QualifiedTypeRef, etc.) work, not just NamedTypeRef.
+	targetType := c.resolveTypeRefToType(targetTypeRef)
+	if targetType == nil {
+		panic(fmt.Sprintf("codegen: cannot resolve cast target type %T", targetTypeRef))
 	}
-	targetNamed := c.lookupNamedType(targetRef.Name)
+	targetNamed := extractNamed(targetType)
 	if targetNamed == nil {
-		panic(fmt.Sprintf("codegen: undefined type %s in cast", targetRef.Name))
+		panic(fmt.Sprintf("codegen: cast target type %s has no Named type", targetType))
 	}
 
 	// T0761: RTTI cast whose subject is itself an Optional (`opt as! Subtype` /
@@ -746,13 +748,24 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		return c.emitScalarCast(subject, srcNamed, targetNamed)
 	}
 
+	// T1884: Structural interface downcast — extract concrete value from structural box.
+	// Use vtable pointer comparison: each (concrete, structural) pair has a unique view
+	// vtable, so comparing field 0 of the fat value against the expected view vtable for
+	// (target, source_structural) correctly identifies the concrete type for all boxed
+	// kinds (primitives, strings, value types, heap user types). RTTI would fail for
+	// primitive/string boxes whose flat-box typeinfo carries a per-size ID rather than
+	// the concrete type's ID.
+	if c.typeSubst != nil {
+		srcType = types.Substitute(srcType, c.typeSubst)
+	}
+	if srcNamed != nil && isStructuralView(srcNamed) {
+		return c.genStructuralDowncast(e, subject, srcNamed, targetNamed, targetType, targetIsBorrow)
+	}
+
 	targetID := c.assignTypeID(targetNamed)
 
 	// Extract instance pointer for RTTI query.
 	// For value types, use the compile-time-known RTTI global (no field in value struct).
-	if c.typeSubst != nil {
-		srcType = types.Substitute(srcType, c.typeSubst)
-	}
 	var instance value.Value
 	if isThisReceiver(e.Expr) {
 		instance = c.extractInstancePtrForThis(subject)
@@ -1212,4 +1225,142 @@ func (c *Compiler) emitScalarCast(val value.Value, src, dst *types.Named) value.
 	default:
 		panic(fmt.Sprintf("codegen: unsupported scalar cast %s → %s", src, dst))
 	}
+}
+
+// genStructuralDowncast generates code for `expr as! Target` / `expr as Target`
+// where expr is a structural interface value. T1884.
+//
+// Uses vtable pointer comparison instead of RTTI: each (concrete, structural)
+// pair has a unique view vtable emitted during boxing, so comparing field 0 of
+// the fat value against the expected view vtable for (target, srcStructural)
+// identifies the concrete type for all boxed kinds — primitives, strings, value
+// types, heap user types, and opaque containers. After the match, the concrete
+// value is extracted from the box via unboxStructuralCast.
+func (c *Compiler) genStructuralDowncast(e *ast.CastExpr, subject value.Value, srcNamed, targetNamed *types.Named, targetType types.Type, _ bool) value.Value {
+	// Get or emit the view vtable for (target, srcStructural).
+	viewVtable := c.getOrEmitViewVtable(targetNamed, srcNamed, targetType)
+	expectedVtable := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
+
+	// Compare vtable pointers (field 0 of the fat value) for exact type match.
+	actualVtable := c.extractVtablePtr(subject)
+	isMatch := c.block.NewICmp(enum.IPredEQ, actualVtable, expectedVtable)
+
+	if e.Force {
+		// as! — panic on mismatch, then unbox.
+		okBlock := c.newBlock("cast.ok")
+		panicBlock := c.newBlock("cast.panic")
+		c.block.NewCondBr(isMatch, okBlock, panicBlock)
+
+		c.block = panicBlock
+		panicMsg := c.makeGlobalString("cast failed: as! type mismatch")
+		c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+		c.emitPanicReturn()
+
+		c.block = okBlock
+		return c.unboxStructuralCast(subject, targetNamed, targetType)
+	}
+
+	// as — wrap in Optional with the correct inner LLVM type.
+	someBlock := c.newBlock("cast.some")
+	noneBlock := c.newBlock("cast.none")
+	mergeBlock := c.newBlock("cast.merge")
+	c.block.NewCondBr(isMatch, someBlock, noneBlock)
+
+	c.block = someBlock
+	castResult := c.unboxStructuralCast(subject, targetNamed, targetType)
+	innerLLVM := c.structuralDowncastLLVMType(targetNamed, targetType)
+	optType := irtypes.NewStruct(irtypes.I1, innerLLVM)
+	someResult := c.wrapOptional(castResult, optType)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	c.block = noneBlock
+	noneResult := constant.NewZeroInitializer(optType)
+	c.block.NewBr(mergeBlock)
+	noneEnd := c.block
+
+	c.block = mergeBlock
+	phi := c.block.NewPhi(
+		&ir.Incoming{X: someResult, Pred: someEnd},
+		&ir.Incoming{X: noneResult, Pred: noneEnd},
+	)
+	return phi
+}
+
+// unboxStructuralCast extracts the concrete value from a structural interface
+// fat value ({view_vtable, instance_ptr}). The extraction depends on how the
+// concrete type was boxed — see boxForStructuralView / boxValueTypeForStructuralView.
+func (c *Compiler) unboxStructuralCast(subject value.Value, targetNamed *types.Named, targetType types.Type) value.Value {
+	instancePtr := c.extractInstancePtr(subject) // field 1 of fat value
+
+	if isPrimitiveScalar(targetNamed) {
+		// Box layout: {i8* typeinfo, scalarT}. Extract the scalar from field 1.
+		scalarType := llvmNamedType(targetNamed)
+		boxType := irtypes.NewStruct(irtypes.I8Ptr, scalarType)
+		typedBox := c.block.NewBitCast(instancePtr, irtypes.NewPointer(boxType))
+		scalarField := c.block.NewGetElementPtr(boxType, typedBox,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		return c.block.NewLoad(scalarType, scalarField)
+	}
+
+	if targetNamed == types.TypString {
+		// Box layout: {i8* typeinfo, i8* string_ptr}. Extract and dup the string
+		// for ownership — the box still owns its original copy and will be freed
+		// by the structural interface's drop.
+		boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+		typedBox := c.block.NewBitCast(instancePtr, irtypes.NewPointer(boxType))
+		strField := c.block.NewGetElementPtr(boxType, typedBox,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		strPtr := c.block.NewLoad(irtypes.I8Ptr, strField)
+		return c.dupString(strPtr)
+	}
+
+	if isOpaqueContainerType(targetType) {
+		// Opaque containers (Vector, Channel, Task, etc.) are boxed as raw i8*.
+		// The instance pointer IS the container pointer.
+		return instancePtr
+	}
+
+	if targetNamed.IsValueType() {
+		// Value type box: heap-allocated copy of the value struct with field 0
+		// overwritten with typeinfo. Load the full struct, restore the vtable.
+		layout := c.lookupTypeLayout(targetType)
+		if layout != nil && layout.Value != nil {
+			valType := layout.Value.LLVMType
+			typedBox := c.block.NewBitCast(instancePtr, irtypes.NewPointer(valType))
+			loaded := c.block.NewLoad(valType, typedBox)
+			// Restore field 0: load the concrete vtable from the typeinfo chain.
+			vtablePtr := c.loadVtablePtrFromInstance(instancePtr)
+			return c.block.NewInsertValue(loaded, vtablePtr, 0)
+		}
+	}
+
+	// Heap user type: instance ptr IS the real instance (no separate box).
+	// Reconstruct the concrete {vtable, instance} value struct.
+	vtablePtr := c.loadVtablePtrFromInstance(instancePtr)
+	var vs value.Value = constant.NewUndef(userValueType())
+	vs = c.block.NewInsertValue(vs, vtablePtr, 0)
+	vs = c.block.NewInsertValue(vs, instancePtr, 1)
+	return vs
+}
+
+// structuralDowncastLLVMType returns the LLVM type of the unboxed result for a
+// structural interface downcast. Used to construct the correct Optional type for
+// the `as` (non-force) path. T1884.
+func (c *Compiler) structuralDowncastLLVMType(targetNamed *types.Named, targetType types.Type) irtypes.Type {
+	if isPrimitiveScalar(targetNamed) {
+		return llvmNamedType(targetNamed)
+	}
+	if targetNamed == types.TypString {
+		return irtypes.I8Ptr
+	}
+	if isOpaqueContainerType(targetType) {
+		return irtypes.I8Ptr
+	}
+	if targetNamed.IsValueType() {
+		if layout := c.lookupTypeLayout(targetType); layout != nil && layout.Value != nil {
+			return layout.Value.LLVMType
+		}
+	}
+	return userValueType()
 }

@@ -21,7 +21,7 @@ func makeTaggedModuleRepo(t *testing.T, cli *clitest.Env, name, epoch string, go
 	run := func(dir string, args ...string) { cli.Git(t, dir, args...) }
 	run(bareDir, "init", "--bare", ".")
 	run(workDir, "clone", bareDir, ".")
-	clitest.WriteModule(t, workDir, name, "2026.0", good)
+	clitest.WriteModule(t, workDir, name, epoch, good)
 	run(workDir, "add", ".")
 	run(workDir, "commit", "-m", "init")
 	run(workDir, "tag", "epoch-"+epoch)
@@ -44,7 +44,7 @@ func TestRunPackageCheckEpoch(t *testing.T) {
 	epoch := cli.CompilerEpoch(t)
 
 	modDir := t.TempDir()
-	clitest.WriteModule(t, modDir, "lib", "2026.0", true)
+	clitest.WriteModule(t, modDir, "lib", epoch, true)
 	out := cli.PromiseOK(t, modDir, "package", "check-epoch", epoch)
 	if !strings.Contains(out, "✓ compatible") || !strings.Contains(out, "git tag epoch-"+epoch) {
 		t.Errorf("expected pass + tag hint, got: %s", out)

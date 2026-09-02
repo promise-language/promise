@@ -310,6 +310,20 @@ func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 	if srcNamed := extractNamed(srcType); srcNamed != nil && isPrimitiveScalar(srcNamed) {
 		return false // scalar conversion — fresh value, not an alias
 	}
+	// T1884: a structural interface downcast to a primitive, string, or value type
+	// extracts an independent copy (scalar load / dupString / value-struct load) —
+	// the result is owned, not an alias of the source. Downcasts to a heap user type
+	// or opaque container (Vector, Channel, etc.) share the instance pointer — the
+	// result is a borrow/alias and must NOT get its own drop binding.
+	if srcNamed := extractNamed(srcType); srcNamed != nil && isStructuralView(srcNamed) {
+		targetType := c.resolveTypeRefToType(cast.Type)
+		if targetNamed := extractNamed(targetType); targetNamed != nil {
+			if isPrimitiveScalar(targetNamed) || targetNamed == types.TypString ||
+				targetNamed.IsValueType() {
+				return false
+			}
+		}
+	}
 	return true
 }
 

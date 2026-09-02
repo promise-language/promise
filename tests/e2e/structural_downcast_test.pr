@@ -1,0 +1,185 @@
+// T1884: as!/as downcast from structural interface values.
+// --- Force downcast (as!) ---
+test_downcast_int() `test {
+  Format f = 3;
+  int x = f as! int;
+  assert(x == 3, "downcast Format to int");
+}
+
+test_downcast_bool() `test {
+  Format f = true;
+  bool x = f as! bool;
+  assert(x == true, "downcast Format to bool");
+}
+
+test_downcast_f64() `test {
+  Format f = 3.14;
+  f64 x = f as! f64;
+  assert(x == 3.14, "downcast Format to f64");
+}
+
+test_downcast_string() `test {
+  Format f = "hello";
+  string x = f as! string;
+  assert(x == "hello", "downcast Format to string");
+}
+
+test_downcast_string_value() `test {
+  Format f = "world";
+  string x = f as! string;
+  assert(x.len == 5, "string length preserved");
+  assert(x.starts_with("wor"), "string content preserved");
+}
+
+// --- Optional downcast (as) ---
+
+test_optional_downcast_match() `test {
+  Format f = 42;
+  int? x = f as int;
+  assert(x is present, "int matches");
+  assert(x! == 42, "value preserved");
+}
+
+test_optional_downcast_mismatch() `test {
+  Format f = 42;
+  string? x = f as string;
+  assert(x is absent, "int is not string");
+}
+
+test_optional_downcast_string_match() `test {
+  Format f = "abc";
+  string? x = f as string;
+  assert(x is present, "string matches");
+  assert(x! == "abc", "value preserved");
+}
+
+test_optional_downcast_string_mismatch() `test {
+  Format f = "abc";
+  int? x = f as int;
+  assert(x is absent, "string is not int");
+}
+
+// --- Slice target (SliceTypeRef resolution) ---
+
+test_downcast_slice() `test {
+  Cloneable c = [1, 2, 3];
+  int[] w = c as! int[];
+  assert(w.len == 3, "slice length");
+  assert(w[0] == 1, "element 0");
+  assert(w[1] == 2, "element 1");
+  assert(w[2] == 3, "element 2");
+}
+
+test_downcast_dynamic_vector() `test {
+  int[] v = [1, 2, 3];
+  v.push(4);
+  Cloneable c = v;
+  int[] w = c as! int[];
+  assert(w.len == 4, "dynamic vector length");
+  assert(w[3] == 4, "pushed element preserved");
+}
+
+// --- Heap user type ---
+
+type Counter {
+  int n;
+  == (this, Counter other) bool {
+    return this.n == other.n;
+  }
+}
+
+test_downcast_user_type() `test {
+  Equal e = Counter(n: 7);
+  Counter c = e as! Counter;
+  assert(c.n == 7, "user type field preserved");
+}
+
+test_optional_downcast_user_type_match() `test {
+  Equal e = Counter(n: 10);
+  Counter? c = e as Counter;
+  assert(c is present, "Counter matches");
+  assert(c!.n == 10, "field preserved");
+}
+
+test_optional_downcast_user_type_mismatch() `test {
+  Equal e = 5;
+  Counter? c = e as Counter;
+  assert(c is absent, "int is not Counter");
+}
+
+// --- Value type downcast ---
+
+type Point {
+  int x `value;
+  int y `value;
+
+  format!(Writer ~w) {
+    w.write_string(this.x.to_string())?^;
+  }
+}
+
+test_downcast_value_type_force() `test {
+  Format f = Point(x: 10, y: 20);
+  Point p = f as! Point;
+  assert(p.x == 10, "value type x preserved");
+  assert(p.y == 20, "value type y preserved");
+}
+
+test_downcast_value_type_optional_match() `test {
+  Format f = Point(x: 3, y: 7);
+  Point? p = f as Point;
+  assert(p is present, "Point matches");
+  assert(p!.x == 3, "value type x preserved");
+  assert(p!.y == 7, "value type y preserved");
+}
+
+test_downcast_value_type_optional_mismatch() `test {
+  Format f = 42;
+  Point? p = f as Point;
+  assert(p is absent, "int is not Point");
+}
+
+// --- Char scalar downcast ---
+
+test_downcast_char() `test {
+  Format f = 'A';
+  char x = f as! char;
+  assert(x == 'A', "downcast Format to char");
+}
+
+test_optional_downcast_char_match() `test {
+  Format f = 'Z';
+  char? x = f as char;
+  assert(x is present, "char matches");
+  assert(x! == 'Z', "char value preserved");
+}
+
+test_optional_downcast_char_mismatch() `test {
+  Format f = 42;
+  char? x = f as char;
+  assert(x is absent, "int is not char");
+}
+
+// --- Multiple downcasts from same source ---
+
+test_multiple_downcasts() `test {
+  Format f = 99;
+  int? as_int = f as int;
+  string? as_str = f as string;
+  bool? as_bool = f as bool;
+  assert(as_int is present, "int matches");
+  assert(as_int! == 99, "int value");
+  assert(as_str is absent, "not a string");
+  assert(as_bool is absent, "not a bool");
+}
+
+// --- Downcast preserves independence (copy semantics) ---
+
+test_downcast_string_independence() `test {
+  string s = "original";
+  Format f = s;
+  string x = f as! string;
+  // x should be an independent copy
+  assert(x == "original", "downcast string matches");
+  assert(x.len == 8, "length correct");
+}

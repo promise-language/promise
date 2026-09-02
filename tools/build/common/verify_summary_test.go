@@ -382,3 +382,71 @@ func GateOutputOmitEmpty(t *testing.T) {
 		t.Errorf("expected 'complete' to be omitted, got: %s", s)
 	}
 }
+
+// The two forms of the same failing run: what verify captured before T1888 and
+// what it captures now that a piped `promise test` drops its passing lines. The
+// summary and the FAILED: block are byte-identical between them by design.
+const (
+	capturedFullForm = `pass (0.004s) e2e/basics.pr (3 tests)
+FAIL (0.005s) e2e/strings.pr (1/3 failed)
+  test_split
+    panic: assertion failed
+pass (0.001s) e2e/hello.pr
+LEAK (0.002s) e2e/leaky.pr (1 leaked)
+
+568 passed, 2 failed, 3 leaked, 1 timed out (117 files, 30.810s)
+FAILED:
+  e2e/strings.pr: test_split
+    panic: assertion failed
+`
+	capturedPlainForm = `FAIL (0.005s) e2e/strings.pr (1/3 failed)
+  test_split
+    panic: assertion failed
+LEAK (0.002s) e2e/leaky.pr (1 leaked)
+
+568 passed, 2 failed, 3 leaked, 1 timed out (117 files, 30.810s)
+FAILED:
+  e2e/strings.pr: test_split
+    panic: assertion failed
+`
+)
+
+// TestVerifyReparsers_AgreeAcrossRenderModes is the T1888 constraint on the
+// consumers: verify re-parses the captured Promise output for its counts and
+// its "Failed Tests" block, and dropping the passing progress lines must not
+// change either answer.
+func TestVerifyReparsers_AgreeAcrossRenderModes(t *testing.T) {
+	full := ParseTestSummaryLine(capturedFullForm)
+	plain := ParseTestSummaryLine(capturedPlainForm)
+	if full == nil || plain == nil {
+		t.Fatalf("summary not found: full=%v plain=%v", full, plain)
+	}
+	if *full != *plain {
+		t.Errorf("counts differ between render modes: full %+v, plain %+v", *full, *plain)
+	}
+	if full.Passed != 568 || full.Failed != 2 || full.Leaked != 3 || full.TimedOut != 1 {
+		t.Errorf("counts = %+v, want 568/2/3/1", *full)
+	}
+	if a, b := ExtractFailedSection(capturedFullForm), ExtractFailedSection(capturedPlainForm); a != b {
+		t.Errorf("Failed Tests section differs between render modes:\n full: %q\nplain: %q", a, b)
+	} else if !strings.Contains(a, "e2e/strings.pr: test_split") {
+		t.Errorf("section lost its content: %q", a)
+	}
+}
+
+// TestVerifyReparsers_RejectTransientArtifacts is the negative of the same
+// constraint: the in-place rewriting goes to stderr precisely so a carriage
+// return can never reach this text. If one ever did, the summary line would no
+// longer start at a line boundary and the counts would silently vanish.
+func TestVerifyReparsers_RejectTransientArtifacts(t *testing.T) {
+	polluted := strings.Replace(capturedPlainForm,
+		"\n568 passed", "\rpass (0.001s) e2e/hello.pr\r568 passed", 1)
+	if s := ParseTestSummaryLine(polluted); s != nil {
+		t.Errorf("a carriage-return-polluted stream parsed as %+v; the test guards that "+
+			"the transient line must never reach stdout", *s)
+	}
+	// The clean stream still parses, so the assertion above is not vacuous.
+	if s := ParseTestSummaryLine(capturedPlainForm); s == nil {
+		t.Error("the clean plain-form stream must still parse")
+	}
+}

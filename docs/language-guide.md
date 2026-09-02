@@ -858,6 +858,13 @@ promise test -timeout-min 500ms -timeout-max 10s -timeout-scale 1.5 tests/...
 
 Resolution: `final_timeout = clamp((annotation ?: default) × scale, min, max)`
 
+**Output control:** passing tests are not printed. On a terminal the most recent
+one is rewritten in place on a single line, so the scrollback holds exactly the
+failures followed by the summary; through a pipe or into a file nothing is
+printed for them at all. `-progress full` restores a line per test,
+`-progress plain`/`tty` force either rendering, and `PROMISE_PROGRESS` sets the
+same values from the environment. The summary is identical in every mode.
+
 ## Generators
 
 ```promise

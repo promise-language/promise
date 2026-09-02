@@ -116,7 +116,7 @@ func TestE2ETimeoutParentClassifiesAsTimedOut(t *testing.T) {
 
 	// -timeout 5 caps the parent's per-file wait so the test finishes quickly;
 	// the test's own `timeout: "1s"` annotation still drives the actual trip.
-	cmd := exec.Command(promiseBin, "test", "-timeout", "5", infloop, trivial)
+	cmd := exec.Command(promiseBin, "test", "-progress", "full", "-timeout", "5", infloop, trivial)
 	output, runErr := cmd.CombinedOutput()
 	combined := string(output)
 

@@ -105,11 +105,25 @@ bin/coverage                                             # Go + Promise coverage
 bin/coverage go ./internal/codegen/                      # Go coverage for a specific package
 bin/coverage promise tests/std/                          # Promise coverage for a directory
 
+# Progress rendering (T1888) — passing tests are not printed by default
+bin/promise test -progress full tests/...                # print every pass line (machine-readable stream)
+bin/promise test -progress plain tests/...               # never print pass lines (the pipe/CI form)
+bin/promise test -progress tty tests/...                 # rewrite one pass line in place, on stderr
+bin/promise test -progress auto tests/...                # the default: tty if stdout is a terminal, else plain
+PROMISE_PROGRESS=plain bin/promise test tests/...        # env override, same spellings
+
 # Cache diagnostics
 PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/SKIP on stderr
 ```
 
-**Test output format** — designed for AI-agent tail-friendliness:
+**Test output format** — designed for AI-agent tail-friendliness. The transcripts
+below are the `full` form. By default (`-progress auto`) the **`pass` lines are
+not printed at all** when stdout is a pipe, and are rewritten in place on a
+single stderr line when stdout is a terminal — so a tail read or a scrollback
+contains exactly the failures, followed by the summary. Every summary block is
+byte-identical in all three modes; only the per-test/per-file progress lines
+differ. A multi-file run always spawns its children with `-progress full`,
+because the parent re-parses their result lines.
 
 Single-file output (verbose — shows every test with timing):
 ```

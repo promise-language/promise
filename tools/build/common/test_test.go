@@ -2,8 +2,10 @@ package common
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -81,4 +83,108 @@ func TestRunToolsGoTests_TrivialModule(t *testing.T) {
 	if err := RunToolsGoTests(root); err != nil {
 		t.Fatalf("RunToolsGoTests: %v", err)
 	}
+}
+
+// argsStubSource is a stand-in for bin/promise that prints the argument list it
+// was given, one per line, so a test can assert on the child command line the
+// Promise test phases assemble.
+const argsStubSource = `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	for _, a := range os.Args[1:] {
+		fmt.Println(a)
+	}
+}
+`
+
+// promiseArgsStubRoot builds a fake repo root whose bin/<promise> prints its
+// arguments, and returns the root.
+func promiseArgsStubRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	src := filepath.Join(root, "main.go")
+	if err := os.WriteFile(src, []byte(argsStubSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(root, "bin", BinaryName()), src)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build args stub: %v", err)
+	}
+	return root
+}
+
+// TestRunPromiseTests_ForwardsProgressMode is the T1888 wire: the outermost
+// process is the only one that can see the user's terminal, so every child
+// `promise test` must be told the mode explicitly rather than sniffing a pipe.
+// Asserted on the real command line, not on promiseTestProgressArgs alone.
+func TestRunPromiseTests_ForwardsProgressMode(t *testing.T) {
+	root := promiseArgsStubRoot(t)
+	want := Progress().Mode().String()
+
+	for _, tc := range []struct {
+		name string
+		run  func(string, string) (string, error)
+	}{
+		{"RunPromiseTests", RunPromiseTests},
+		{"RunPromiseTestsCapture", RunPromiseTestsCapture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []string{"", "wasm32-wasi"} {
+				out, err := tc.run(root, target)
+				if err != nil {
+					t.Fatalf("target %q: %v\n%s", target, err, out)
+				}
+				args := strings.Split(out, "\n")
+				if i := indexOfArg(args, "-progress"); i < 0 || i+1 >= len(args) {
+					t.Fatalf("target %q: no -progress in child args %v", target, args)
+				} else if args[i+1] != want {
+					t.Errorf("target %q: forwarded -progress %q, want %q", target, args[i+1], want)
+				}
+				// The rest of the command line is unchanged by T1888.
+				if args[0] != "test" {
+					t.Errorf("target %q: first arg = %q, want \"test\"", target, args[0])
+				}
+				if (target != "") != (indexOfArg(args, "-target") >= 0) {
+					t.Errorf("target %q: -target presence = %v", target, indexOfArg(args, "-target") >= 0)
+				}
+			}
+		})
+	}
+}
+
+// TestRunPromiseTestsJSON_HasNoProgressFlag pins the item's "--json mode is
+// unaffected" constraint: the JSONL path must not gain a -progress flag, whose
+// suppression would be meaningless there and whose presence would be a
+// behaviour change on a gate path.
+func TestRunPromiseTestsJSON_HasNoProgressFlag(t *testing.T) {
+	root := promiseArgsStubRoot(t)
+	out, err := RunPromiseTestsJSON(root, "")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	args := strings.Split(out, "\n")
+	if i := indexOfArg(args, "-progress"); i >= 0 {
+		t.Errorf("--json path gained a -progress flag: %v", args)
+	}
+	if indexOfArg(args, "--json") < 0 {
+		t.Errorf("--json missing from %v", args)
+	}
+}
+
+func indexOfArg(args []string, want string) int {
+	for i, a := range args {
+		if strings.TrimSpace(a) == want {
+			return i
+		}
+	}
+	return -1
 }

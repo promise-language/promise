@@ -352,7 +352,9 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 	// "nothing ever ran" rather than the batch-budget TIMEOUT under test.
 	run := func(t *testing.T, compileBudget time.Duration, extra ...string) string {
 		t.Helper()
-		args := append([]string{"test", "-compile-timeout", compileBudget.String()}, extra...)
+		// -progress full: this test asserts on the child's `pass` lines, which
+		// are suppressed by default when stdout is a pipe (T1888).
+		args := append([]string{"test", "-progress", "full", "-compile-timeout", compileBudget.String()}, extra...)
 		cmd := exec.Command(promiseBin, append(args, src)...)
 		cmd.Env = append(os.Environ(), testChildEnv+"=1")
 		start := time.Now()
@@ -413,7 +415,7 @@ func TestBatchBudgetKillNamesUnreportedTests(t *testing.T) {
 		// 15s slack), which is enough for ok_one to complete on a loaded machine.
 		// With 25s the budget always clamped to the 10s floor, which was too tight
 		// for the test binary to initialize and run on a heavily-loaded machine.
-		out, err := exec.Command(promiseBin, "test", "-compile-timeout", "60s", dir).CombinedOutput()
+		out, err := exec.Command(promiseBin, "test", "-progress", "full", "-compile-timeout", "60s", dir).CombinedOutput()
 		combined := string(out)
 		if err == nil {
 			t.Fatalf("expected non-zero exit.\nOutput:\n%s", combined)

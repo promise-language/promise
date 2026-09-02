@@ -64,14 +64,14 @@ func RunTest(root string, args []string) error {
 	}
 
 	// Build first
-	fmt.Println("Building...")
+	Progress().Println("Building...")
 	if err := RunBuild(root, nil); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
 
 	// Compiler Go tests — the CI set.
 	if runCompiler {
-		fmt.Println("\nRunning go tests (compiler)...")
+		Progress().Println("\nRunning go tests (compiler)...")
 		if err := RunGoTests(root); err != nil {
 			return fmt.Errorf("go tests (compiler): %w", err)
 		}
@@ -80,7 +80,7 @@ func RunTest(root string, args []string) error {
 	// Tools/build Go tests — opt-in only (`bin/test tools` / `bin/test all`), not
 	// part of the default CI set. See the RunTest doc comment for why.
 	if runTools {
-		fmt.Println("\nRunning go tests (tools)...")
+		Progress().Println("\nRunning go tests (tools)...")
 		if err := RunToolsGoTests(root); err != nil {
 			return fmt.Errorf("go tests (tools): %w", err)
 		}
@@ -88,7 +88,7 @@ func RunTest(root string, args []string) error {
 
 	// Promise tests
 	if runPromise {
-		fmt.Println("\nRunning promise tests (host)...")
+		Progress().Println("\nRunning promise tests (host)...")
 		_, err := RunPromiseTests(root, "")
 		if err != nil {
 			return fmt.Errorf("promise tests (host): %w", err)
@@ -98,7 +98,7 @@ func RunTest(root string, args []string) error {
 			if Which("wasmtime") == "" {
 				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 			}
-			fmt.Println("\nRunning promise tests (wasm32-wasi)...")
+			Progress().Println("\nRunning promise tests (wasm32-wasi)...")
 			_, err = RunPromiseTests(root, "wasm32-wasi")
 			if err != nil {
 				return fmt.Errorf("promise tests (wasm32-wasi): %w", err)
@@ -109,7 +109,7 @@ func RunTest(root string, args []string) error {
 			if Which("node") == "" {
 				return fmt.Errorf("node not found — install Node.js 20+ (see bin/prereqs)")
 			}
-			fmt.Println("\nRunning promise tests (wasm32-web)...")
+			Progress().Println("\nRunning promise tests (wasm32-web)...")
 			_, err = RunPromiseTests(root, "wasm32-web")
 			if err != nil {
 				return fmt.Errorf("promise tests (wasm32-web): %w", err)
@@ -118,7 +118,7 @@ func RunTest(root string, args []string) error {
 	}
 
 	elapsed := time.Since(start).Round(time.Millisecond)
-	fmt.Printf("\nAll tests passed (%s)\n", elapsed)
+	Progress().Printf("\nAll tests passed (%s)\n", elapsed)
 	return nil
 }
 
@@ -157,7 +157,7 @@ func RunGoTests(root string) error {
 	// -timeout 30m: see RunTests — the codegen package exceeds Go's default
 	// 10m per-package limit on slow runners (GitHub windows-amd64).
 	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
-	return RunIn(compilerDir, "go", append(args, "./...")...)
+	return runInRendered(compilerDir, Progress(), isGoTestPassLine, "go", append(args, "./...")...)
 }
 
 // RunToolsGoTests runs Go unit tests for the tools/build module.
@@ -166,7 +166,7 @@ func RunToolsGoTests(root string) error {
 	// Same concurrency reasoning as RunGoTests: these tests drive the build
 	// tools, which drive the compiler.
 	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
-	return RunIn(toolsDir, "go", append(args, "./...")...)
+	return runInRendered(toolsDir, Progress(), isGoTestPassLine, "go", append(args, "./...")...)
 }
 
 // RunFlowsGoTests runs Go unit tests for the flows module.
@@ -180,7 +180,7 @@ func RunFlowsGoTests(root string) (skipped bool, err error) {
 		return true, nil
 	}
 	flowsDir := filepath.Join(root, "flows")
-	return false, RunIn(flowsDir, "go", "test", "-timeout", "30m", "./...")
+	return false, runInRendered(flowsDir, Progress(), isGoTestPassLine, "go", "test", "-timeout", "30m", "./...")
 }
 
 // promiseTestTimeoutArgs returns the per-test timeout flags for the given target
@@ -199,15 +199,27 @@ func promiseTestTimeoutArgs(target string) []string {
 	return args
 }
 
+// promiseTestProgressArgs forwards this process's resolved render mode to a
+// child `promise test`. The child's stdout is a pipe (RunTee captures it), so it
+// can never detect the user's terminal itself — the outermost process is the
+// only one that can, and it says so explicitly (T1888).
+func promiseTestProgressArgs() []string {
+	return []string{"-progress", Progress().Mode().String()}
+}
+
 // RunPromiseTests runs Promise tests for the given target (empty = host).
 // Returns captured stdout (even on failure) and any error.
 func RunPromiseTests(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
+	args = append(args, promiseTestProgressArgs()...)
 	if target != "" {
 		args = append(args, "-target", target)
 	}
 	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+	// The child owns the transient line for the duration of the run; drop ours
+	// first so the two never fight over the same screen row.
+	Progress().Clear()
 	return RunTee(root, promiseBin, args...)
 }
 
@@ -216,10 +228,12 @@ func RunPromiseTests(root, target string) (string, error) {
 func RunPromiseTestsCapture(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
+	args = append(args, promiseTestProgressArgs()...)
 	if target != "" {
 		args = append(args, "-target", target)
 	}
 	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+	Progress().Clear()
 	return RunTeeStderr(root, promiseBin, args...)
 }
 

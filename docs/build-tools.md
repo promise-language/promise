@@ -229,9 +229,18 @@ The verify tool orchestrates the full pre-commit check:
 1. **Format** — `gofmt -w .` in compiler/, then `promise format` on all `.pr` files
 2. **Build** — full build pipeline (see above)
 3. **Vet** — `go vet ./...` excluding `internal/parser` (auto-generated)
-4. **Go tests** — `go test ./...` in compiler/
+4. **Go tests** — `go test ./...` in compiler/, then tools/build, then flows/
 5. **Promise tests (host)** — `promise test tests/... modules/... examples/...`
 6. **Promise tests (WASM)** — if `--wasm` flag, same with `-target wasm32-wasi`
+
+**A Go-suite failure ends the run.** All three Go suites in step 4 run — their
+failures are cheap and belong on screen together — but if any of them failed,
+verify prints its summary and stops. Step 5 and step 6 do not run: when the
+compiler's own unit tests are broken, the tens of thousands of Promise tests
+have nothing to add, and every Promise row of the summary says
+`not run (go tests failed)` rather than reporting a `0s` failure for a phase
+that never happened. The closing `FAILED:` line names the suite that stopped
+the run.
 
 ### Flags
 
@@ -239,6 +248,44 @@ The verify tool orchestrates the full pre-commit check:
 - `--shared` — use `~/.promise` shared cache instead of the local `.promise-home/`
 - `--wasm` — include wasm32-wasi target tests (requires `wasmtime`)
 - `--clean` — clear Go and Promise test caches before running
+
+### Progress rendering
+
+Passing tests carry no information the summary does not already hold, so they
+are not printed by default. Three render modes govern the *per-test / per-file
+progress lines only*:
+
+| Mode | When | Passing tests | Failures |
+|------|------|---------------|----------|
+| `tty` | stdout is a terminal | one line rewritten in place (carriage return + spaces, never ANSI), on **stderr** | printed and left in the scrollback |
+| `plain` | stdout is a pipe or file — CI, a `bin/do` step, `\| tee` | not printed at all | printed |
+| `full` | asked for explicitly | every line printed | printed |
+
+Every summary block — the per-suite count line, the `FAILED:` section with its
+per-test context, and the `Verify Summary` block — is printed **verbatim and
+byte-identical in all three modes**. A change that makes a summary differ
+between modes is a bug.
+
+Two rules make this work end to end:
+
+- **Only the outermost process detects the terminal, and it says so
+  explicitly.** `bin/verify` captures the compiler's stdout, so a `promise test`
+  child can never see the user's terminal itself. Verify tests its own stdout
+  and passes `-progress <mode>` down. The multi-file `promise test` parent does
+  the same in reverse: it always spawns children with `-progress full`, because
+  it re-parses their `pass`/`FAIL`/`LEAK`/… lines to build the per-file counts.
+  Quiet and in-place rendering are properties of the display layer of the
+  outermost process, never of what a child writes on the wire.
+- **The in-place line goes to stderr, never stdout.** Verify captures stdout, so
+  a carriage return written there would land in the text the failure extractor
+  parses, or in a redirected log. `bin/verify > log 2>&1` therefore contains no
+  carriage returns at all.
+
+Override with `promise test -progress auto|full|plain|tty`, or with the
+`PROMISE_PROGRESS` environment variable (same spellings), which forces a mode
+for both the compiler and the build tools — the `NO_COLOR`-style escape hatch
+for making a terminal run render like a pipe. `promise test --json` is
+unaffected: JSONL on stdout, human progress on stderr, exactly as before.
 
 ### Global lock
 

@@ -40,7 +40,9 @@ func TestIncompleteHarnessReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", src).CombinedOutput()
+	// -progress full: this test asserts the completed test's `pass` line is
+	// still reported, and pass lines are suppressed by default on a pipe (T1888).
+	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", src).CombinedOutput()
 	combined := string(out)
 
 	if runErr == nil {
@@ -78,7 +80,7 @@ func TestIncompleteMultiFileReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", dir).CombinedOutput()
+	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", dir).CombinedOutput()
 	combined := string(out)
 
 	if runErr == nil {

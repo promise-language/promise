@@ -1015,6 +1015,7 @@ func runTest(args []string) {
 	var coverageMode bool                       // T0030: coverage instrumentation
 	var reportJSON string                       // T0749: passing-test report path (parent-only)
 	compileTimeout := 10 * time.Minute          // -compile-timeout (backstop for hung compilation)
+	var progressFlag string                     // T1888: -progress auto|full|plain|tty
 	memoryLimitBytes := defaultMemoryLimitBytes // T0689: default 2 GiB ceiling per test process
 	memoryLimitExplicit := false                // whether -memory-limit was passed
 	var remaining []string
@@ -1105,6 +1106,13 @@ func runTest(args []string) {
 			timePhases = true
 		} else if args[i] == "--json" || args[i] == "-json" {
 			jsonMode = true
+		} else if args[i] == "-progress" && i+1 < len(args) {
+			if !validProgressMode(args[i+1]) {
+				fmt.Fprintln(os.Stderr, "error: -progress requires one of: auto, full, plain, tty")
+				os.Exit(1)
+			}
+			progressFlag = args[i+1]
+			i++
 		} else if args[i] == "-child-roster" {
 			childRoster = true
 		} else {
@@ -1112,8 +1120,13 @@ func runTest(args []string) {
 		}
 	}
 
+	// T1888: resolve how progress is rendered before anything prints. The
+	// outermost process is the only one that can see the user's terminal, so it
+	// decides and forwards the answer to every child (see buildChildTestArgs).
+	progress = newRenderer(resolveProgressMode(progressFlag), stdoutWriter{}, stderrWriter{})
+
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [-report-json file] [-time-phases] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [-report-json file] [-progress auto|full|plain|tty] [-time-phases] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -1169,6 +1182,11 @@ func runTest(args []string) {
 	} else {
 		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode, reportJSON)
 	}
+	// Every path that exits non-zero clears on its way out (a failure line or a
+	// summary always precedes it). A clean run that printed no summary — a file
+	// with no tests, say — would otherwise leave the last transient line on the
+	// terminal after the shell prompt returns.
+	progress.Clear()
 }
 
 // runTestFile runs test functions from a single .pr file.
@@ -1595,7 +1613,7 @@ func printChildTestOutput(output string, elapsed time.Duration, targetSuffix str
 			if opts.dropSummary {
 				continue
 			}
-			fmt.Println() // empty line before summary
+			progress.Println() // empty line before summary
 			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
 			for _, part := range []struct {
 				value string
@@ -1611,13 +1629,17 @@ func printChildTestOutput(output string, elapsed time.Duration, targetSuffix str
 					summary += fmt.Sprintf(", %s %s", part.value, part.label)
 				}
 			}
-			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
+			progress.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
 			continue
 		}
+		text := line
 		if targetSuffix != "" && isTestOutcomeLine(line) {
-			fmt.Printf("%s%s\n", line, targetSuffix)
+			text = line + targetSuffix
+		}
+		if isPassOutcomeLine(line) {
+			progress.Pass("%s\n", text)
 		} else {
-			fmt.Println(line)
+			progress.Println(text)
 		}
 	}
 	return
@@ -1642,11 +1664,11 @@ func isTestOutcomeLine(line string) bool {
 func reportIncompleteRun(missing []string, roster []rosterEntry, c childOutcomeCounts,
 	elapsed time.Duration, targetSuffix string, runErr error) {
 	eligible, skipped := rosterCounts(roster)
-	fmt.Printf("INCOMPLETE (-) %s%s\n", missing[0], targetSuffix)
-	fmt.Printf("  incomplete: process exited (%s) without reporting a result - %d of %d tests did not run: %s\n",
+	progress.Printf("INCOMPLETE (-) %s%s\n", missing[0], targetSuffix)
+	progress.Printf("  incomplete: process exited (%s) without reporting a result - %d of %d tests did not run: %s\n",
 		exitStatusDescription(runErr), len(missing), eligible, joinCapped(missing, 8))
-	fmt.Println()
-	fmt.Printf("%s (%.3fs)%s\n", truncatedBatchSummary(c, skipped, 0, len(missing)), elapsed.Seconds(), targetSuffix)
+	progress.Println()
+	progress.Printf("%s (%.3fs)%s\n", truncatedBatchSummary(c, skipped, 0, len(missing)), elapsed.Seconds(), targetSuffix)
 	os.Exit(incompleteExitCode(runErr))
 }
 
@@ -1759,7 +1781,7 @@ func clampRunTimeout(timeout time.Duration, cfg testTimeoutConfig, target string
 // after every test reported: the bracketed word names the phase, not a test.
 func reportNeverAliveRun(missing []string, roster []rosterEntry, c childOutcomeCounts,
 	backstop, elapsed time.Duration, targetSuffix string) {
-	fmt.Print(neverAliveRunReport(missing, roster, c, backstop, elapsed, targetSuffix))
+	progress.Print(neverAliveRunReport(missing, roster, c, backstop, elapsed, targetSuffix))
 	os.Exit(1)
 }
 
@@ -1790,7 +1812,7 @@ func neverAliveRunReport(missing []string, roster []rosterEntry, c childOutcomeC
 // line, letting the parent render the kill as "crashed after N tests".
 func reportTimedOutRun(missing []string, roster []rosterEntry, c childOutcomeCounts,
 	budget, elapsed time.Duration, targetSuffix string) {
-	fmt.Print(timedOutRunReport(missing, roster, c, budget, elapsed, targetSuffix))
+	progress.Print(timedOutRunReport(missing, roster, c, budget, elapsed, targetSuffix))
 	os.Exit(1)
 }
 
@@ -2111,11 +2133,11 @@ func runTestBinary(binaryPath string, timeout time.Duration, cfg testTimeoutConf
 	if memlimitTripped {
 		// Synthesize a MEMLIMIT line + summary if the child aborted before
 		// emitting its own summary line.
-		fmt.Printf("MEMLIMIT (-) <aborted>%s\n", targetSuffix)
-		fmt.Println("  memory limit: exceeded (test process aborted; subsequent tests not run)")
+		progress.Printf("MEMLIMIT (-) <aborted>%s\n", targetSuffix)
+		progress.Println("  memory limit: exceeded (test process aborted; subsequent tests not run)")
 		if !sawSummary {
-			fmt.Println()
-			fmt.Printf("%d passed, %d failed, 1 memlimit (%.3fs)%s\n",
+			progress.Println()
+			progress.Printf("%d passed, %d failed, 1 memlimit (%.3fs)%s\n",
 				counts.passed, counts.failed, elapsed.Seconds(), targetSuffix)
 		}
 		os.Exit(1)
@@ -2129,8 +2151,10 @@ func runTestBinary(binaryPath string, timeout time.Duration, cfg testTimeoutConf
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			progress.Clear()
 			os.Exit(sanitizeExitCode(exitErr.ExitCode()))
 		}
+		progress.Clear()
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
 		os.Exit(1)
 	}
@@ -2215,8 +2239,10 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, cfg tes
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			progress.Clear()
 			os.Exit(sanitizeExitCode(exitErr.ExitCode()))
 		}
+		progress.Clear()
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
 		os.Exit(1)
 	}
@@ -2258,8 +2284,8 @@ func extractCoverageData(output string) (testOutput string, counters []int64) {
 
 // printCoverageReport formats and prints a coverage summary from regions and counters.
 func printCoverageReport(regions []codegen.CoverageRegion, counters []int64) {
-	fmt.Println()
-	fmt.Println("=== Coverage ===")
+	progress.Println()
+	progress.Println("=== Coverage ===")
 
 	// Group regions by file
 	type fileStats struct {
@@ -2322,19 +2348,19 @@ func printCoverageReport(regions []codegen.CoverageRegion, counters []int64) {
 		if fs.total > 0 {
 			pct = float64(fs.covered) / float64(fs.total) * 100
 		}
-		fmt.Printf("  %-40s %.1f%%\t(%d/%d blocks)\n", file, pct, fs.covered, fs.total)
+		progress.Printf("  %-40s %.1f%%\t(%d/%d blocks)\n", file, pct, fs.covered, fs.total)
 	}
 
 	// Print per-function detail
 	if len(funcOrder) > 0 {
-		fmt.Println()
+		progress.Println()
 		for _, name := range funcOrder {
 			fns := funcMap[name]
 			hit := "covered"
 			if fns.covered == 0 {
 				hit = "not covered"
 			}
-			fmt.Printf("  %-40s %s\n", name, hit)
+			progress.Printf("  %-40s %s\n", name, hit)
 		}
 	}
 
@@ -2343,7 +2369,7 @@ func printCoverageReport(regions []codegen.CoverageRegion, counters []int64) {
 	if totalRegions > 0 {
 		totalPct = float64(coveredRegions) / float64(totalRegions) * 100
 	}
-	fmt.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, coveredRegions, totalRegions)
+	progress.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, coveredRegions, totalRegions)
 }
 
 // runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.
@@ -2365,7 +2391,7 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	}
 
 	if isTestExcluded(target, excludeTargets) {
-		fmt.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
+		progress.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
 		return
 	}
 
@@ -2388,20 +2414,20 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	if run.neverAlive {
 		// The process never reached main, so the test never ran. Report that
 		// rather than blaming the test for exceeding its own limit (T1815).
-		fmt.Printf("TIMEOUT (%.3fs) %s%s\n", elapsed.Seconds(), name, targetSuffix)
-		fmt.Printf("  timeout: test binary never reached main within the %s backstop\n",
+		progress.Printf("TIMEOUT (%.3fs) %s%s\n", elapsed.Seconds(), name, targetSuffix)
+		progress.Printf("  timeout: test binary never reached main within the %s backstop\n",
 			computeParentTimeout(cfg, target))
-		fmt.Printf("\n0 passed, 0 failed, 1 timed out (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("\nFAILED:\n  %s (never started)\n", name)
+		progress.Printf("\n0 passed, 0 failed, 1 timed out (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		progress.Printf("\nFAILED:\n  %s (never started)\n", name)
 		os.Exit(1)
 	}
 
 	if run.timedOut {
 		// T0742: emit TIMEOUT so the multi-file parent classifies as fileTimedOut.
-		fmt.Printf("TIMEOUT (%.3fs) %s%s\n", timeout.Seconds(), name, targetSuffix)
-		fmt.Printf("  timeout: exceeded %s limit\n", timeout)
-		fmt.Printf("\n0 passed, 0 failed, 1 timed out (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("\nFAILED:\n  %s (timed out after %s)\n", name, timeout)
+		progress.Printf("TIMEOUT (%.3fs) %s%s\n", timeout.Seconds(), name, targetSuffix)
+		progress.Printf("  timeout: exceeded %s limit\n", timeout)
+		progress.Printf("\n0 passed, 0 failed, 1 timed out (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		progress.Printf("\nFAILED:\n  %s (timed out after %s)\n", name, timeout)
 		os.Exit(1)
 	}
 
@@ -2412,17 +2438,17 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	expectedTrimmed := strings.TrimRight(strings.ReplaceAll(expected, "\r", ""), "\n")
 
 	if actual == expectedTrimmed {
-		fmt.Printf("PASS (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("\n1 passed, 0 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		progress.Pass("PASS (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		progress.Printf("\n1 passed, 0 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
 	} else {
-		fmt.Printf("FAIL (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("  expected: %s\n", firstLines(expectedTrimmed, 3))
-		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
+		progress.Printf("FAIL (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		progress.Printf("  expected: %s\n", firstLines(expectedTrimmed, 3))
+		progress.Printf("  actual:   %s\n", firstLines(actual, 3))
 		if err != nil {
-			fmt.Printf("  exit:     %v\n", err)
+			progress.Printf("  exit:     %v\n", err)
 		}
-		fmt.Printf("\n0 passed, 1 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("\nFAILED:\n  %s\n", name)
+		progress.Printf("\n0 passed, 1 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		progress.Printf("\nFAILED:\n  %s\n", name)
 		os.Exit(1)
 	}
 }
@@ -2444,7 +2470,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 		if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 			targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 		}
-		fmt.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
+		progress.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
 		return
 	}
 
@@ -2562,6 +2588,12 @@ func buildChildTestArgs(cfg testTimeoutConfig, targetTriple string, coverageMode
 	if timePhases {
 		testArgs = append(testArgs, "-time-phases")
 	}
+	// T1888: a child's stdout is a pipe into CombinedOutput and is re-parsed
+	// line by line (passLineRe and friends). It must therefore print the full
+	// stream unconditionally — left to auto-detect it would see "not a
+	// terminal", drop its `pass` lines, and zero out the parent's per-file
+	// counts. Quiet/TTY rendering is a property of the outermost process only.
+	testArgs = append(testArgs, "-progress", progressFull.String())
 	if jsonMode {
 		// Children emit a roster marker but run the single-file path — they must
 		// NOT receive --json, which would make them re-enter the fan-out (a fork
@@ -2682,7 +2714,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalStart := time.Now()
 
 	if len(files) == 0 {
-		fmt.Println("no test files found")
+		progress.Println("no test files found")
 		return
 	}
 
@@ -2879,7 +2911,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if strings.Contains(r.output, testPhaseRunMarker) {
 				reason = "test binary hung (compiled, then never finished)"
 			}
-			fmt.Printf("FAIL (%.3fs) %s (%s)%s\n", r.elapsed.Seconds(), relPath, reason, targetSuffix)
+			progress.Printf("FAIL (%.3fs) %s (%s)%s\n", r.elapsed.Seconds(), relPath, reason, targetSuffix)
 			failedFiles++
 			totalFailed++
 			failures = append(failures, failureInfo{name: fmt.Sprintf("%s (%s)", relPath, reason)})
@@ -3034,7 +3066,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if filePassed > 1 {
 					testCount = fmt.Sprintf(" (%d tests)", filePassed)
 				}
-				fmt.Printf("pass (%.3fs) %s%s%s\n", r.elapsed.Seconds(), relPath, testCount, targetSuffix)
+				progress.Pass("pass (%.3fs) %s%s%s\n", r.elapsed.Seconds(), relPath, testCount, targetSuffix)
 				continue
 			}
 			failedFiles++
@@ -3044,8 +3076,8 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				totalPassed += filePassed
 				totalFailed++
 				errCtx := r.cmdErr.Error()
-				fmt.Printf("FAIL (%.3fs) %s (crashed after %d tests)%s\n", r.elapsed.Seconds(), relPath, filePassed, targetSuffix)
-				fmt.Printf("  process crashed: %s\n", errCtx)
+				progress.Printf("FAIL (%.3fs) %s (crashed after %d tests)%s\n", r.elapsed.Seconds(), relPath, filePassed, targetSuffix)
+				progress.Printf("  process crashed: %s\n", errCtx)
 				failures = append(failures, failureInfo{name: relPath + " (crashed)", context: errCtx})
 				continue
 			}
@@ -3085,12 +3117,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				totalFailed += fileFailed
 			} else {
 				totalFailed++
-				fmt.Printf("FAIL (%.3fs) %s (compilation error)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s (compilation error)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 				var errCtx string
 				for _, line := range lines {
 					if line != "" && !summaryRe.MatchString(line) {
 						errCtx = line
-						fmt.Printf("  %s\n", line)
+						progress.Printf("  %s\n", line)
 						break
 					}
 				}
@@ -3100,27 +3132,27 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 			totalTests := filePassed + fileFailed + fileLeaked + fileTimedOut + fileMemlimited + fileIncomplete
 			if fileFailed == 0 && fileLeaked > 0 && fileTimedOut == 0 && fileMemlimited == 0 && fileIncomplete == 0 {
-				fmt.Printf("FAIL (%.3fs) %s (%d leaked)%s\n", r.elapsed.Seconds(), relPath, fileLeaked, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s (%d leaked)%s\n", r.elapsed.Seconds(), relPath, fileLeaked, targetSuffix)
 			} else if fileFailed == 0 && fileTimedOut > 0 && fileLeaked == 0 && fileMemlimited == 0 && fileIncomplete == 0 {
-				fmt.Printf("FAIL (%.3fs) %s (%d timed out)%s\n", r.elapsed.Seconds(), relPath, fileTimedOut, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s (%d timed out)%s\n", r.elapsed.Seconds(), relPath, fileTimedOut, targetSuffix)
 			} else if fileFailed == 0 && fileMemlimited > 0 && fileLeaked == 0 && fileTimedOut == 0 && fileIncomplete == 0 {
 				// T0689: pure memlimit abort — process didn't run all tests.
-				fmt.Printf("FAIL (%.3fs) %s (memory limit exceeded)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s (memory limit exceeded)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			} else if fileFailed == 0 && fileIncomplete > 0 && fileLeaked == 0 && fileTimedOut == 0 && fileMemlimited == 0 {
 				// T1415: the process died mid-batch — some tests never reported.
-				fmt.Printf("FAIL (%.3fs) %s (%d incomplete)%s\n", r.elapsed.Seconds(), relPath, fileIncomplete, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s (%d incomplete)%s\n", r.elapsed.Seconds(), relPath, fileIncomplete, targetSuffix)
 			} else if totalTests > 0 {
 				failCount := fileFailed + fileLeaked + fileTimedOut + fileMemlimited + fileIncomplete
-				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, failCount, totalTests, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, failCount, totalTests, targetSuffix)
 			} else {
-				fmt.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+				progress.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			}
 			for _, detail := range failDetails {
 				parts := strings.SplitN(detail, "\n", 2)
 				testName := parts[0]
 				var panicCtx string
 				for _, dl := range strings.Split(detail, "\n") {
-					fmt.Printf("  %s\n", dl)
+					progress.Printf("  %s\n", dl)
 				}
 				if len(parts) > 1 {
 					panicCtx = strings.TrimPrefix(parts[1], "  ")
@@ -3137,7 +3169,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 						continue
 					}
 					errCtx = trimmed
-					fmt.Printf("  %s\n", trimmed)
+					progress.Printf("  %s\n", trimmed)
 					break
 				}
 				if errCtx == "" && r.cmdErr != nil {
@@ -3187,9 +3219,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 		totalTests := filePassed + fileFailed
 		if totalTests > 1 {
-			fmt.Printf("pass (%.3fs) %s (%d tests)%s\n", r.elapsed.Seconds(), relPath, totalTests, targetSuffix)
+			progress.Pass("pass (%.3fs) %s (%d tests)%s\n", r.elapsed.Seconds(), relPath, totalTests, targetSuffix)
 		} else {
-			fmt.Printf("pass (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+			progress.Pass("pass (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 		}
 	}
 
@@ -3200,12 +3232,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	if totalFiles == 0 {
-		fmt.Println("no test files found")
+		progress.Println("no test files found")
 		return
 	}
 
 	// Print grand summary
-	fmt.Println()
+	progress.Println()
 	totalElapsed := time.Since(totalStart)
 	summary := fmt.Sprintf("%d passed, %d failed", totalPassed, totalFailed)
 	if totalSkipped > 0 {
@@ -3229,31 +3261,31 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	if totalStale > 0 {
 		summary += fmt.Sprintf(", %d stale allow_leaks", totalStale)
 	}
-	fmt.Printf("%s (%d files, %.3fs)%s\n", summary, totalFiles, totalElapsed.Seconds(), targetSuffix)
+	progress.Printf("%s (%d files, %.3fs)%s\n", summary, totalFiles, totalElapsed.Seconds(), targetSuffix)
 
 	if len(failures) > 0 {
-		fmt.Printf("\nFAILED:\n")
+		progress.Printf("\nFAILED:\n")
 		for _, f := range failures {
-			fmt.Printf("  %s\n", f.name)
+			progress.Printf("  %s\n", f.name)
 			if f.context != "" {
 				for _, cl := range strings.Split(f.context, "\n") {
-					fmt.Printf("    %s\n", cl)
+					progress.Printf("    %s\n", cl)
 				}
 			}
 		}
 	}
 
 	if len(staleTests) > 0 {
-		fmt.Printf("\nSTALE ALLOW_LEAKS:\n")
+		progress.Printf("\nSTALE ALLOW_LEAKS:\n")
 		for _, s := range staleTests {
-			fmt.Printf("  %s\n", s)
+			progress.Printf("  %s\n", s)
 		}
 	}
 
 	// Print aggregated coverage report for multi-file coverage mode
 	if coverageMode && len(covFiles) > 0 {
-		fmt.Println()
-		fmt.Println("=== Coverage ===")
+		progress.Println()
+		progress.Println("=== Coverage ===")
 		totalCovered := 0
 		totalBlocks := 0
 		for _, cf := range covFiles {
@@ -3267,13 +3299,13 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if relErr != nil {
 				relPath = cf.file
 			}
-			fmt.Printf("  %-50s %.1f%%\t(%d/%d blocks)\n", relPath, pct, cf.covered, cf.total)
+			progress.Printf("  %-50s %.1f%%\t(%d/%d blocks)\n", relPath, pct, cf.covered, cf.total)
 		}
 		totalPct := 0.0
 		if totalBlocks > 0 {
 			totalPct = float64(totalCovered) / float64(totalBlocks) * 100
 		}
-		fmt.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, totalCovered, totalBlocks)
+		progress.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, totalCovered, totalBlocks)
 	}
 
 	// T0109: Leak-only failures must also produce non-zero exit code.

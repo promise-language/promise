@@ -104,7 +104,7 @@ func RunVerify(root string, args []string) error {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 
 	// 1. Format Go
-	fmt.Println("Formatting go...")
+	Progress().Println("Formatting go...")
 	if err := FormatGo(root); err != nil {
 		return fmt.Errorf("format go: %w", err)
 	}
@@ -114,7 +114,7 @@ func RunVerify(root string, args []string) error {
 
 	// 2. Format Promise (if binary exists from a prior build)
 	if Exists(promiseBin) {
-		fmt.Println("Formatting promise...")
+		Progress().Println("Formatting promise...")
 		if err := FormatPromiseFiles(root, promiseBin); err != nil {
 			return fmt.Errorf("format promise: %w", err)
 		}
@@ -125,7 +125,7 @@ func RunVerify(root string, args []string) error {
 	}
 
 	// 3. Build
-	fmt.Println("Building compiler...")
+	Progress().Println("Building compiler...")
 	if err := RunBuild(root, nil); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
@@ -134,7 +134,7 @@ func RunVerify(root string, args []string) error {
 	}
 
 	// 4. Vet
-	fmt.Println("Vetting go...")
+	Progress().Println("Vetting go...")
 	if err := RunVet(root); err != nil {
 		return fmt.Errorf("vet: %w", err)
 	}
@@ -144,125 +144,72 @@ func RunVerify(root string, args []string) error {
 
 	// 5. (Cache clearing now happens up front via Clean.)
 
-	// 6. Go tests (compiler)
-	var failures []string
-	fmt.Println("Running go tests...")
-	if err := RunGoTests(root); err != nil {
-		failures = append(failures, "go tests")
+	// 6-8b. Go suites, then (only if they all passed) the Promise suites.
+	res, err := runVerifyTestPhases(root, wasm, wasmWeb, verifySuites{
+		goTests:      RunGoTests,
+		toolsTests:   RunToolsGoTests,
+		flowsTests:   RunFlowsGoTests,
+		promiseTests: RunPromiseTests,
+	})
+	if err != nil {
+		return err
 	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 6b. Tools Go tests
-	fmt.Println("Running tools go tests...")
-	if err := RunToolsGoTests(root); err != nil {
-		failures = append(failures, "tools go tests")
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 6c. Flows Go tests (skipped when flows/go.mod or flow-sdk/go.mod absent)
-	flowsModPresent := Exists(filepath.Join(root, "flows", "go.mod"))
-	if flowsModPresent {
-		fmt.Println("Running flows go tests...")
-	}
-	flowsSkipped, flowsGoErr := RunFlowsGoTests(root)
-	if !flowsSkipped && flowsGoErr != nil {
-		failures = append(failures, "flows go tests")
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 7. Promise tests (host)
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-	fmt.Println("\nRunning promise tests (host)...")
-	hostStart := time.Now()
-	hostOutput, hostErr := RunPromiseTests(root, "")
-	if hostErr != nil {
-		failures = append(failures, "promise tests (host)")
-	}
-	hostElapsed := time.Since(hostStart)
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 8. Promise tests (wasm)
-	var wasmOutput string
-	var wasmElapsed time.Duration
-	if wasm {
-		if Which("wasmtime") == "" {
-			return fmt.Errorf("wasmtime not found — install from https://wasmtime.dev/ or: winget install BytecodeAlliance.Wasmtime")
-		}
-		fmt.Println("\nRunning promise tests (wasm32-wasi)...")
-		wasmStart := time.Now()
-		var wasmErr error
-		wasmOutput, wasmErr = RunPromiseTests(root, "wasm32-wasi")
-		if wasmErr != nil {
-			failures = append(failures, "promise tests (wasm32-wasi)")
-		}
-		wasmElapsed = time.Since(wasmStart)
-	}
-
-	// 8b. Promise tests (wasm32-web via Node)
-	var wasmWebOutput string
-	var wasmWebElapsed time.Duration
-	if wasmWeb {
-		if Which("node") == "" {
-			return fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
-		}
-		fmt.Println("\nRunning promise tests (wasm32-web)...")
-		wasmWebStart := time.Now()
-		var wasmWebErr error
-		wasmWebOutput, wasmWebErr = RunPromiseTests(root, "wasm32-web")
-		if wasmWebErr != nil {
-			failures = append(failures, "promise tests (wasm32-web)")
-		}
-		wasmWebElapsed = time.Since(wasmWebStart)
-	}
+	failures := res.failures
+	hostOutput, wasmOutput, wasmWebOutput := res.hostOutput, res.wasmOutput, res.wasmWebOutput
+	hostElapsed, wasmElapsed, wasmWebElapsed := res.hostElapsed, res.wasmElapsed, res.wasmWebElapsed
+	flowsSkipped, flowsModPresent := res.flowsSkipped, res.flowsModPresent
 
 	// 9. Summary — always printed, even on failure.
+	hostTarget := hostTargetName()
 	elapsed := time.Since(start)
 	mins := int(elapsed.Minutes())
 	secs := int(elapsed.Seconds()) % 60
 
-	fmt.Println()
-	fmt.Println("====================================================")
-	fmt.Println("  Verify Summary")
-	fmt.Println("----------------------------------------------------")
-	fmt.Printf("  Host target:  %s\n", hostTarget)
-	if slices.Contains(failures, "promise tests (host)") || slices.Contains(failures, "go tests") || slices.Contains(failures, "tools go tests") {
-		fmt.Printf("  Host tests:   FAILED (%s)\n", hostElapsed.Round(time.Millisecond))
+	Progress().Println()
+	Progress().Println("====================================================")
+	Progress().Println("  Verify Summary")
+	Progress().Println("----------------------------------------------------")
+	Progress().Printf("  Host target:  %s\n", hostTarget)
+	if res.promiseSkipped {
+		// A Go suite failed, so the Promise phases never ran and hostElapsed is
+		// genuinely 0 — say that, rather than printing a misleading "FAILED (0s)"
+		// for a phase that never happened. The FAILED: line below names which
+		// suite stopped the run, and the same wording covers the WASM rows.
+		Progress().Printf("  Host tests:   not run (go tests failed)\n")
+	} else if slices.Contains(failures, "promise tests (host)") {
+		Progress().Printf("  Host tests:   FAILED (%s)\n", hostElapsed.Round(time.Millisecond))
 	} else {
-		fmt.Printf("  Host tests:   passed (%s)\n", hostElapsed.Round(time.Millisecond))
+		Progress().Printf("  Host tests:   passed (%s)\n", hostElapsed.Round(time.Millisecond))
 	}
 	if flowsSkipped && !flowsModPresent {
-		fmt.Printf("  Flows tests:  skipped (flows/ absent)\n")
+		Progress().Printf("  Flows tests:  skipped (flows/ absent)\n")
 	} else if flowsSkipped {
-		fmt.Printf("  Flows tests:  skipped (SDK absent)\n")
+		Progress().Printf("  Flows tests:  skipped (SDK absent)\n")
 	} else if slices.Contains(failures, "flows go tests") {
-		fmt.Printf("  Flows tests:  FAILED\n")
+		Progress().Printf("  Flows tests:  FAILED\n")
 	} else {
-		fmt.Printf("  Flows tests:  passed\n")
+		Progress().Printf("  Flows tests:  passed\n")
 	}
 	if wasm {
-		if slices.Contains(failures, "promise tests (wasm32-wasi)") {
-			fmt.Printf("  WASM tests:   FAILED (%s)\n", wasmElapsed.Round(time.Millisecond))
+		if res.promiseSkipped {
+			Progress().Printf("  WASM tests:   not run (go tests failed)\n")
+		} else if slices.Contains(failures, "promise tests (wasm32-wasi)") {
+			Progress().Printf("  WASM tests:   FAILED (%s)\n", wasmElapsed.Round(time.Millisecond))
 		} else {
-			fmt.Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
+			Progress().Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
 		}
 	}
 	if wasmWeb {
-		if slices.Contains(failures, "promise tests (wasm32-web)") {
-			fmt.Printf("  WASM-web:     FAILED (%s)\n", wasmWebElapsed.Round(time.Millisecond))
+		if res.promiseSkipped {
+			Progress().Printf("  WASM-web:     not run (go tests failed)\n")
+		} else if slices.Contains(failures, "promise tests (wasm32-web)") {
+			Progress().Printf("  WASM-web:     FAILED (%s)\n", wasmWebElapsed.Round(time.Millisecond))
 		} else {
-			fmt.Printf("  WASM-web:     passed (%s)\n", wasmWebElapsed.Round(time.Millisecond))
+			Progress().Printf("  WASM-web:     passed (%s)\n", wasmWebElapsed.Round(time.Millisecond))
 		}
 	}
-	fmt.Printf("  Total time:   %dm%02ds\n", mins, secs)
-	fmt.Println("====================================================")
+	Progress().Printf("  Total time:   %dm%02ds\n", mins, secs)
+	Progress().Println("====================================================")
 
 	if len(failures) > 0 {
 		// Consolidated per-test failure detail — host first, WASM second.
@@ -285,16 +232,16 @@ func RunVerify(root string, args []string) error {
 			}
 		}
 		if len(sections) > 0 {
-			fmt.Println("----------------------------------------------------")
-			fmt.Println("  Failed Tests")
+			Progress().Println("----------------------------------------------------")
+			Progress().Println("  Failed Tests")
 			for _, fs := range sections {
-				fmt.Println("----------------------------------------------------")
-				fmt.Printf("[%s]\n", fs.label)
-				fmt.Println(fs.section)
+				Progress().Println("----------------------------------------------------")
+				Progress().Printf("[%s]\n", fs.label)
+				Progress().Println(fs.section)
 			}
 		}
 
-		fmt.Printf("FAILED: %s\n", strings.Join(failures, ", "))
+		Progress().Printf("FAILED: %s\n", strings.Join(failures, ", "))
 		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
 	}
 
@@ -328,14 +275,145 @@ func RunVerify(root string, args []string) error {
 	}
 
 	if push {
-		fmt.Println("Pushing to remote...")
+		Progress().Println("Pushing to remote...")
 		if err := RunIn(root, "git", "push"); err != nil {
 			return err
 		}
 	}
 
-	fmt.Println("✅ OK to commit")
+	Progress().Println("✅ OK to commit")
 	return nil
+}
+
+// hostTargetName is the target triple label the verify summary reports.
+func hostTargetName() string {
+	return strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+}
+
+// verifySuites are the test suites runVerifyTestPhases drives, injected so the
+// phase ordering (notably the Go-failure abort) is unit-testable — RunVerify
+// itself takes a global lock and rebuilds the compiler, so it cannot be.
+type verifySuites struct {
+	goTests      func(root string) error
+	toolsTests   func(root string) error
+	flowsTests   func(root string) (skipped bool, err error)
+	promiseTests func(root, target string) (output string, err error)
+}
+
+// verifyTestResults is everything the summary block needs from the test phases.
+type verifyTestResults struct {
+	failures        []string
+	hostOutput      string
+	wasmOutput      string
+	wasmWebOutput   string
+	hostElapsed     time.Duration
+	wasmElapsed     time.Duration
+	wasmWebElapsed  time.Duration
+	flowsSkipped    bool
+	flowsModPresent bool
+	// promiseSkipped records that the Promise phases never ran because a Go
+	// suite failed — the summary must say that rather than report a 0s failure.
+	promiseSkipped bool
+}
+
+// runVerifyTestPhases runs verify's phases 6/6b/6c (Go) and 7/8/8b (Promise).
+//
+// All three Go suites run first, so their failures are visible together — they
+// are the cheap ones. If any of them failed, the Promise suites do NOT run:
+// when the compiler's own unit tests are broken there is nothing to learn from
+// spending the remaining minutes on ~20k Promise tests (T1888).
+//
+// A returned error is an abort (Ctrl+C, missing wasmtime/node), not a test
+// failure; test failures are named in the result's failures slice.
+func runVerifyTestPhases(root string, wasm, wasmWeb bool, s verifySuites) (verifyTestResults, error) {
+	var res verifyTestResults
+
+	// 6. Go tests (compiler)
+	Progress().Println("Running go tests...")
+	if err := s.goTests(root); err != nil {
+		res.failures = append(res.failures, "go tests")
+	}
+	if Interrupted() {
+		Progress().Clear()
+		return res, errInterrupted
+	}
+
+	// 6b. Tools Go tests
+	Progress().Println("Running tools go tests...")
+	if err := s.toolsTests(root); err != nil {
+		res.failures = append(res.failures, "tools go tests")
+	}
+	if Interrupted() {
+		Progress().Clear()
+		return res, errInterrupted
+	}
+
+	// 6c. Flows Go tests (skipped when flows/go.mod or flow-sdk/go.mod absent)
+	res.flowsModPresent = Exists(filepath.Join(root, "flows", "go.mod"))
+	if res.flowsModPresent {
+		Progress().Println("Running flows go tests...")
+	}
+	flowsSkipped, flowsGoErr := s.flowsTests(root)
+	res.flowsSkipped = flowsSkipped
+	if !flowsSkipped && flowsGoErr != nil {
+		res.failures = append(res.failures, "flows go tests")
+	}
+	if Interrupted() {
+		Progress().Clear()
+		return res, errInterrupted
+	}
+
+	// A broken compiler makes the Promise suites uninformative — stop here.
+	if len(res.failures) > 0 {
+		res.promiseSkipped = true
+		return res, nil
+	}
+
+	// 7. Promise tests (host)
+	Progress().Println("\nRunning promise tests (host)...")
+	hostStart := time.Now()
+	hostOutput, hostErr := s.promiseTests(root, "")
+	res.hostOutput = hostOutput
+	if hostErr != nil {
+		res.failures = append(res.failures, "promise tests (host)")
+	}
+	res.hostElapsed = time.Since(hostStart)
+	if Interrupted() {
+		Progress().Clear()
+		return res, errInterrupted
+	}
+
+	// 8. Promise tests (wasm)
+	if wasm {
+		if Which("wasmtime") == "" {
+			return res, fmt.Errorf("wasmtime not found — install from https://wasmtime.dev/ or: winget install BytecodeAlliance.Wasmtime")
+		}
+		Progress().Println("\nRunning promise tests (wasm32-wasi)...")
+		wasmStart := time.Now()
+		wasmOutput, wasmErr := s.promiseTests(root, "wasm32-wasi")
+		res.wasmOutput = wasmOutput
+		if wasmErr != nil {
+			res.failures = append(res.failures, "promise tests (wasm32-wasi)")
+		}
+		res.wasmElapsed = time.Since(wasmStart)
+	}
+
+	// 8b. Promise tests (wasm32-web via Node)
+	if wasmWeb {
+		if Which("node") == "" {
+			return res, fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
+		}
+		Progress().Println("\nRunning promise tests (wasm32-web)...")
+		wasmWebStart := time.Now()
+		wasmWebOutput, wasmWebErr := s.promiseTests(root, "wasm32-web")
+		res.wasmWebOutput = wasmWebOutput
+		if wasmWebErr != nil {
+			res.failures = append(res.failures, "promise tests (wasm32-web)")
+		}
+		res.wasmWebElapsed = time.Since(wasmWebStart)
+	}
+
+	return res, nil
 }
 
 // acquireVerifyLock acquires an OS-level file lock to serialize concurrent

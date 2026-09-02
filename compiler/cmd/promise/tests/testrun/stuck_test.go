@@ -48,7 +48,9 @@ func TestStuckGoroutineReportsNamedTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	out, runErr := exec.Command(promiseBin, "test", "-timeout", "2s", src).CombinedOutput()
+	// -progress full: the follow-on test's `pass` line is asserted below, and
+	// pass lines are suppressed by default when stdout is a pipe (T1888).
+	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", "-timeout", "2s", src).CombinedOutput()
 	elapsed := time.Since(start)
 	combined := string(out)
 
@@ -185,7 +187,9 @@ func TestTimedOutTestDoesNotStallLaterDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", src).CombinedOutput()
+	// -progress full: the later tests' `pass` lines are asserted below, and
+	// pass lines are suppressed by default when stdout is a pipe (T1888).
+	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", src).CombinedOutput()
 	combined := string(out)
 	if runErr == nil {
 		t.Fatalf("expected non-zero exit for the timed-out test.\nOutput:\n%s", combined)

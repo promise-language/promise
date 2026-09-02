@@ -160,6 +160,7 @@ func TestBuildChildTestArgs_ForwardsAllFlags(t *testing.T) {
 		"-target", "wasm32-wasi",
 		"-coverage",
 		"-time-phases",
+		"-progress", "full",
 		"-compile-timeout", "5m0s",
 		"-memory-limit", "1048576B",
 	}

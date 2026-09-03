@@ -506,6 +506,18 @@ The symbol is required rather than defaulted. A default linkage name is invisibl
 declaration and silently follows a rename, which is the kind of action-at-a-distance the language
 exists to avoid — every `` `extern `` states the symbol it binds.
 
+**The set of bindable symbols is closed, and the symbol is validated against it at the
+declaration.** The compiler emits the platform layer itself, so it knows the complete set of
+symbols an `` `extern `` may name; that set is registered in one place, and naming anything outside
+it is a compile error reported at the annotation. This is the same discipline as the annotation set
+(§2) and the target-condition identifiers: a fixed vocabulary, checked where it is written.
+
+Validation belongs at the declaration rather than at link time for two reasons. A linker
+diagnostic cannot point at Promise source — it names an object file and an internal symbol, so the
+reader is told where the *call* was emitted rather than where the mistake was written. And a linker
+never sees a declaration that is never called, so an `` `extern `` naming a symbol that does not
+exist can sit in a module indefinitely and fail only for whoever first calls it.
+
 ### `` `wasm_import ``
 
 - **Targets** functions · **Parameters** `module` (string, required), `name` (string, required)

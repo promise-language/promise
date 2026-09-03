@@ -350,6 +350,27 @@ func (c *Compiler) claimStringTemp(val value.Value) {
 	c.stmtTempMap[val] = -1
 }
 
+// opaqueSrcOwned reports whether an opaque native handle being boxed into a
+// structural view is owned by the current frame — either because we are at a
+// move position (c.boxSrcOwned, set by the return/move paths) or because the
+// handle is a live tracked statement temp (a fresh `m.lock()` / `channel[int]()`
+// result). Only then may the box take over the drop obligation; a borrowed
+// source stays owned by its original binding (T1887).
+func (c *Compiler) opaqueSrcOwned(val value.Value) bool {
+	if c.boxSrcOwned {
+		return true
+	}
+	// Presence in the statement-temp map at all means this handle was produced as
+	// an owned temp by this statement. A live entry is ours to take over. An
+	// already-claimed entry (idx < 0) was claimed by the very binding we are being
+	// boxed for — the Optional pre-wrap claim at genTypedVarDecl runs before this
+	// coercion — so the drop obligation still has to land somewhere, and the box
+	// is now the only owner. A genuinely borrowed handle (a plain variable read)
+	// was never tracked, so it is absent from the map entirely.
+	_, ok := c.stmtTempMap[val]
+	return ok
+}
+
 // cleanupStmtTemps drops all unclaimed string/vector/channel temps at statement end (T0073).
 // For each temp: check flag → null-check ptr → call temp-specific drop function.
 func (c *Compiler) cleanupStmtTemps() {

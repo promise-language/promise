@@ -903,11 +903,27 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// view is now the heap box { i8* typeinfo, i8* string_ptr }, so the raw
 			// string.method (which expects the string ptr as `this`) cannot be used
 			// directly; the adapter loads field 1 from the box first.
-			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete) || concrete == types.TypString)
-			if needsAdapter {
+			// T1887: a boxed receiver ALWAYS needs an adapter, whatever its
+			// signature — the vtable hands the method field 1 of the view, which
+			// for a boxed concrete is the box, not the payload. Only the adapter
+			// unwraps it. `!isUserValueType` is exactly the set boxForStructuralView
+			// boxes (primitive scalar, string, opaque native handle), so it
+			// subsumes the two cases previously spelled out here.
+			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || c.viewBoxesConcrete(concrete))
+			switch {
+			case needsAdapter:
 				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, view, concreteMethod, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
-			} else {
+			case c.viewBoxesConcrete(concrete):
+				// T1887: the receiver is boxed but the signature needs no other
+				// adaptation — or the concrete method has no resolvable types.Method
+				// at all (a generic container's own method, e.g. Vector[int].format,
+				// which lookupMethodForMethod does not return). Either way the vtable
+				// would hand the method the box instead of the payload, so interpose
+				// a thunk that only unwraps the receiver.
+				entries = append(entries, constant.NewBitCast(
+					c.emitBoxedReceiverThunk(concreteCacheKey, view, m, fn), irtypes.I8Ptr))
+			default:
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 			}
 		} else {
@@ -1171,6 +1187,20 @@ func (c *Compiler) emitViewMethodAdapter(
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			strPtr := c.block.NewLoad(irtypes.I8Ptr, strField)
 			args = append(args, strPtr)
+		} else if c.viewBoxesConcrete(concreteType) {
+			// T1887: everything that is not a user value struct reaches a view
+			// through boxForStructuralView — primitives and strings are handled
+			// above, so what remains is an opaque native handle, boxed as
+			// { i8* typeinfo, i8* handle }. Load the handle receiver from field 1.
+			// Asking about the representation rather than listing the handle types
+			// keeps this in step with the box site and covers any future handle
+			// (annotations.md §1).
+			boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(boxType))
+			hField := c.block.NewGetElementPtr(boxType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			handle := c.block.NewLoad(irtypes.I8Ptr, hField)
+			args = append(args, handle)
 		} else {
 			args = append(args, params[paramIdx])
 		}
@@ -1487,6 +1517,16 @@ func (c *Compiler) sharesValueStruct(from, to types.Type) bool {
 // a type boundary to a non-first-parent view. For first parent chain coercion
 // (prefix-compatible), the vtable is left unchanged.
 // Also handles boxing of primitives and strings into structural interface views.
+// viewBoxesConcrete reports whether coercing a value of typ into a structural
+// view wraps it in a { i8* typeinfo, i8* payload } box rather than storing the
+// value straight into field 1. It is the exact condition coerceToView uses to
+// route into boxForStructuralView, stated once here so the box site and every
+// consumer that must unwrap — the view vtable's adapters and thunks, and the
+// downcast — cannot drift apart (T1887).
+func (c *Compiler) viewBoxesConcrete(typ types.Type) bool {
+	return !c.isUserValueType(typ) || isOpaqueContainerType(typ)
+}
+
 func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) value.Value {
 	fromNamed := extractNamed(fromType)
 	toNamed := extractNamed(toType)
@@ -1675,8 +1715,40 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		c.trackHeapTemp(raw, c.getStringBoxDrop())
 		instancePtr = raw
 	} else {
-		// Other i8* types (opaque containers): already an i8* pointer
-		instancePtr = val
+		// T1887: an opaque native handle (MutexGuard, Mutex, Channel, Task, Arc,
+		// Weak, Vector) carries no RTTI header of its own, so a view holding the
+		// bare handle cannot be dropped: __promise_structural_drop reads the
+		// typeinfo from field 0 of the instance it is handed, and an opaque
+		// handle's first word is not one. Box it as { i8* typeinfo, i8* handle }
+		// exactly as strings and primitives are, so every RTTI drop site — scope
+		// binding, struct field, container element — dispatches uniformly.
+		boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+		boxSize := int64(c.typeSize(boxType))
+		raw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, boxSize))
+		typed := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
+		tiField := c.block.NewGetElementPtr(boxType, typed,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		hField := c.block.NewGetElementPtr(boxType, typed,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		c.block.NewStore(val, hField)
+
+		// Ownership mirrors T1282's clone-vs-move reasoning for strings, minus the
+		// clone: a handle cannot be duplicated. The box owns the handle only when
+		// the source was an owned frame temp or a move position; for a borrowed
+		// source the original owner still drops it, so the box carries a null-drop
+		// header and dropping it just frees the box.
+		boxDrop := c.getContainerBoxDrop(fromNamed, fromType)
+		if boxDrop != nil && c.opaqueSrcOwned(val) {
+			if ti := c.getContainerBoxTypeInfo(fromNamed, fromType); ti != nil {
+				c.block.NewStore(constant.NewBitCast(ti, irtypes.I8Ptr), tiField)
+			}
+			c.claimStringTemp(val) // ownership moves into the box
+			c.trackHeapTemp(raw, boxDrop)
+		} else {
+			c.block.NewStore(constant.NewBitCast(c.getFlatBoxTypeInfo(boxSize), irtypes.I8Ptr), tiField)
+			c.trackHeapTemp(raw, c.palFree)
+		}
+		instancePtr = raw
 	}
 
 	// Construct the view struct: { vtable_ptr, instance_ptr }
@@ -1936,4 +2008,50 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 		}
 	}
 	return result
+}
+
+// emitBoxedReceiverThunk builds a thin forwarder for a vtable slot whose concrete
+// method expects the payload as `this` while the view carries the box. It mirrors
+// the receiver unwrapping emitViewMethodAdapter performs, but is built from the
+// LLVM signature alone, so it also covers slots whose concrete method has no
+// resolvable types.Method. Every other parameter and the result pass through
+// untouched — the signature already matched, which is why no full adapter was
+// required (T1887).
+func (c *Compiler) emitBoxedReceiverThunk(concreteCacheKey string, view *types.Named, m *types.Method, fn *ir.Func) *ir.Func {
+	name := fmt.Sprintf("%s.%s$view_unbox_as_%s", concreteCacheKey, m.Name(), view.Obj().Name())
+	if existing, ok := c.funcs[name]; ok {
+		return existing
+	}
+	if len(fn.Params) == 0 || !fn.Params[0].Type().Equal(irtypes.I8Ptr) {
+		// No i8* receiver to unwrap — nothing this thunk could correct.
+		return fn
+	}
+	params := make([]*ir.Param, len(fn.Params))
+	for i, p := range fn.Params {
+		params[i] = ir.NewParam(fmt.Sprintf("p%d", i), p.Type())
+	}
+	thunk := c.module.NewFunc(name, fn.Sig.RetType, params...)
+
+	savedBlock, savedFn, savedEntry := c.block, c.fn, c.entryBlock
+	defer func() { c.block, c.fn, c.entryBlock = savedBlock, savedFn, savedEntry }()
+	c.fn = thunk
+	c.block = thunk.NewBlock(".entry")
+	c.entryBlock = c.block
+
+	boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	typed := c.block.NewBitCast(params[0], irtypes.NewPointer(boxType))
+	hField := c.block.NewGetElementPtr(boxType, typed,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	args := []value.Value{c.block.NewLoad(irtypes.I8Ptr, hField)}
+	for _, p := range params[1:] {
+		args = append(args, p)
+	}
+	call := c.block.NewCall(fn, args...)
+	if _, isVoid := fn.Sig.RetType.(*irtypes.VoidType); isVoid {
+		c.block.NewRet(nil)
+	} else {
+		c.block.NewRet(call)
+	}
+	c.funcs[name] = thunk
+	return thunk
 }

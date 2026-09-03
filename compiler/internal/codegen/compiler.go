@@ -628,7 +628,14 @@ type Compiler struct {
 	stringBoxDrop     *ir.Func             // @__promise_string_box_drop(i8*): drops the boxed string clone then frees the box (T1280)
 	stringBoxClone    *ir.Func             // @__promise_string_box_clone(i8*)→i8*: deep-copies a boxed string for structural clone/slice (T1284)
 	flatBoxTypeInfos  map[int64]*ir.Global // per-size null-drop typeinfo carrying a flat malloc+memcpy clone_fn for primitive/value structural boxes (T1284)
-	flatBoxClones     map[int64]*ir.Func   // per-size @__promise_flat_box_clone_<size>(i8*)→i8* (T1284)
+
+	// T1887: per-concrete-type RTTI header + drop thunk for an opaque native
+	// handle (MutexGuard, Mutex, Channel, Task, Arc, Weak, Vector) boxed into a
+	// structural view. Keyed by the concrete's mono name so Channel[int] and
+	// Channel[string] get distinct thunks calling their own drop.
+	containerBoxTypeInfos map[string]*ir.Global
+	containerBoxDrops     map[string]*ir.Func
+	flatBoxClones         map[int64]*ir.Func // per-size @__promise_flat_box_clone_<size>(i8*)→i8* (T1284)
 
 	// Target triple and platform flags
 	target                string     // LLVM target triple

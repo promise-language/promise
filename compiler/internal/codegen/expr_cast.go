@@ -1319,9 +1319,15 @@ func (c *Compiler) unboxStructuralCast(subject value.Value, targetNamed *types.N
 	}
 
 	if isOpaqueContainerType(targetType) {
-		// Opaque containers (Vector, Channel, Task, etc.) are boxed as raw i8*.
-		// The instance pointer IS the container pointer.
-		return instancePtr
+		// T1887: box layout is { i8* typeinfo, i8* handle } — the same shape as the
+		// string box above. The handle moves to the downcast result; the view's own
+		// drop is suppressed on a successful cast (T0849), so the box wrapper is
+		// this path's to release.
+		boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+		typedBox := c.block.NewBitCast(instancePtr, irtypes.NewPointer(boxType))
+		hField := c.block.NewGetElementPtr(boxType, typedBox,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		return c.block.NewLoad(irtypes.I8Ptr, hField)
 	}
 
 	if targetNamed.IsValueType() {

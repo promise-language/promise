@@ -1,0 +1,123 @@
+// T1887: Boxing a MutexGuard[T] as Closer must not double-drop the guard.
+box_closer_only() `test {
+  Mutex[int] m = Mutex[int](value: 1);
+  Closer c = m.lock();
+  // Let scope exit drop the Closer — no explicit close().
+  assert(true, "box only survived");
+}
+
+box_closer_scope_exit_unlocks() `test {
+  Mutex[int] m = Mutex[int](value: 1);
+  {
+    Closer c = m.lock();
+    // c drops at scope exit, unlocking the mutex.
+  }
+  // If the mutex is truly unlocked, we can lock it again.
+  MutexGuard[int] g = m.lock();
+  assert(g.borrow == 1, "re-locked after scope-exit drop");
+}
+
+box_closer_two_mutexes() `test {
+  Mutex[int] m1 = Mutex[int](value: 10);
+  Mutex[int] m2 = Mutex[int](value: 20);
+  {
+    Closer c1 = m1.lock();
+    Closer c2 = m2.lock();
+    // both drop at scope exit
+  }
+  MutexGuard[int] g1 = m1.lock();
+  MutexGuard[int] g2 = m2.lock();
+  assert(g1.borrow == 10, "m1 re-locked");
+  assert(g2.borrow == 20, "m2 re-locked");
+}
+
+// T1887: Reassignment — reassigning a Closer variable with a guard from a
+// different mutex must drop the old guard and claim the new one without
+// double-drop. Uses two mutexes to avoid deadlock (RHS evaluated before drop).
+box_closer_reassign() `test {
+  Mutex[int] m1 = Mutex[int](value: 1);
+  Mutex[int] m2 = Mutex[int](value: 2);
+  Closer c = m1.lock();
+  // reassign — old guard (m1) must be dropped, new guard (m2) claimed
+  c = m2.lock();
+  // scope exit drops the second guard
+  assert(true, "reassign survived");
+}
+
+// T1887: Channel boxed as Closer — Channel also satisfies Closer structurally.
+channel_boxed_as_closer() `test {
+  channel[int] ch = channel[int]();
+  ch.close();
+  Closer c = ch;
+  // scope exit drops via Closer — must not crash
+  assert(true, "channel boxed as Closer survived");
+}
+
+// T1887: the forms below all reached a structural view through a different
+// codegen path than a plain local, and each used to die with a segfault at 0x8
+// (the drop reading a typeinfo header the raw handle does not have). Every test
+// re-locks the mutex afterwards: that is what proves the guard was actually
+// released rather than merely leaked, and it fails as a timeout if it was not.
+
+// A guard boxed under an Optional.
+box_closer_optional() `test(timeout: "10s") {
+  Mutex[int] m = Mutex[int](value: 7);
+  {
+    Closer? c = m.lock();
+  }
+  MutexGuard[int] g = m.lock();
+  assert(g.borrow == 7, "re-locked after Optional-boxed guard dropped");
+}
+
+// A guard pushed into a Closer vector — the element drop must release it.
+box_closer_vector_push() `test(timeout: "10s") {
+  Mutex[int] m = Mutex[int](value: 8);
+  {
+    Closer[] v = [];
+    v.push(m.lock());
+  }
+  MutexGuard[int] g = m.lock();
+  assert(g.borrow == 8, "re-locked after vector element dropped");
+}
+
+// Same, via a vector literal rather than push.
+box_closer_vector_literal() `test(timeout: "10s") {
+  Mutex[int] m = Mutex[int](value: 9);
+  {
+    Closer[] v = [m.lock()];
+  }
+  MutexGuard[int] g = m.lock();
+  assert(g.borrow == 9, "re-locked after vector-literal element dropped");
+}
+
+type GuardHolder `doc("Holds a Closer in a field, to exercise field drop.") {
+  Closer c;
+}
+
+// A guard stored in a struct field — the synthesized field drop must release it.
+box_closer_struct_field() `test(timeout: "10s") {
+  Mutex[int] m = Mutex[int](value: 11);
+  {
+    GuardHolder h = GuardHolder(c: m.lock());
+  }
+  MutexGuard[int] g = m.lock();
+  assert(g.borrow == 11, "re-locked after struct field dropped");
+}
+
+consume_closer(Closer ~c) `doc("Takes ownership of a Closer and drops it.") {
+}
+
+// A guard passed as an owned Closer parameter — the callee's drop must release it.
+box_closer_parameter() `test(timeout: "10s") {
+  Mutex[int] m = Mutex[int](value: 12);
+  consume_closer(m.lock());
+  MutexGuard[int] g = m.lock();
+  assert(g.borrow == 12, "re-locked after owned Closer parameter dropped");
+}
+
+// NOT covered here: `Closer c = m.lock(); c.close()?!;` still dies. Consuming a
+// `~this` method through a view never clears the receiving variable's drop flag
+// (only the concrete receiver is special-cased, in genMutexGuardMethodCall), so
+// the guard is released twice. That is a method-call-through-view defect, the
+// T1885 family, not this item's boxing defect — it reproduces identically on the
+// commit before this one. Tracked as T1993.

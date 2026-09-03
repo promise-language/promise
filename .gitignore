@@ -50,3 +50,6 @@ CLAUDE.local.md
 
 # Transient flow lease / worktree state written by the do flow when run locally.
 .flow/
+
+# written by `workspace setup` — per-host/per-clone, never committed
+/.workspace/

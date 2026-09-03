@@ -1888,7 +1888,7 @@ type Counter {
 
 **Mutation through a shared borrow is rejected.** A shared (read-only) borrow may not mutate the value it points at — not by a field store (`c.n = 5`), not through a property setter (`c.value = 5`), not by an index or slice write (`v[i] = x`, `v[:] = …`), and not by calling a `~this` mutating method (`v.push(x)`, `s.add(x)`, `m.remove(k)`). Every mutating operation requires a mutable (`~`) borrow or ownership; the compiler reports *"cannot mutate … through a shared (read-only) borrow; take a `~` mutable borrow instead"*. This closes a soundness hole: without it, a container passed by a shared borrow could `push` and reallocate its backing store, leaving the caller with a dangling pointer. A property setter and any method that writes `this` therefore default to a `~this` receiver — so `set_x(this) { this.x = 5; }` is an error; write `set_x(~this)`.
 
-**`interior` types are the sole exception.** A type marked `` `interior `` opts into *interior mutability* — its mutating methods and setters may be invoked through a shared `&` borrow. This is reserved for the concurrency primitives whose whole purpose is safe shared mutation: `Channel`, `Mutex`, and `MutexGuard`. It lets a captured channel be sent to from a shared reference and a `Mutex` be locked through one, while ordinary containers (`Vector`, `Map`, `Set`) and user types stay bound by the rule above. Interior mutability of these primitives is made safe by their own internal synchronization, not by the borrow checker.
+**`` `interior `` types are the sole exception.** A type marked `` `interior `` opts into *interior mutability* — its mutating methods and setters may be invoked through a shared `&` borrow. The exemption is sound only because such a type synchronizes internally: its safety comes from its own implementation, not from the borrow checker. That is a guarantee Promise source cannot make, so the annotation requires `` `native `` and is unavailable to user types; see [annotations.md](annotations.md). Ordinary containers and user types stay bound by the rule above.
 
 #### Partial moves and captures
 
@@ -2028,19 +2028,9 @@ Two further capabilities govern whether a type may cross a **goroutine boundary*
 
 **Both are derived structurally, so ordinary code never writes them.** A type is sendable when all its fields are sendable, and sharable when all its fields are sharable; an enum derives from its variants' fields, a generic from its type arguments. Primitives, `char`, `bool`, and `string` are both. A **function value is sendable** — but not sharable: a closure crosses a `go` boundary **by move**, handing its heap environment to the goroutine (which then frees it), because the environment has a single owner and no refcount. Two rules keep that sound, and both are checked where the information still exists: every value a closure *captures* must itself be sendable (checked at the capture site, since the function type erases the captures), and only a binding that provably *owns* its environment may cross (a `move` parameter, or a local bound from a lambda, a named function, or a call result — not a borrowed parameter or a closure read out of a field). A naked `&closure` stays non-sharable. Both checks have a documented residual where the capture set is genuinely invisible: a closure captured inside a *generic* body is checked with its type parameters unbound, and a closure whose environment borrows its receiver is opaque once it arrives through a `move` parameter.
 
-The annotations exist only to **override** the derivation, for types whose safety the compiler cannot see:
+The annotations that assert, deny or narrow this derivation — `` `sendable ``, `` `sharable ``, `` `not_sendable ``, `` `not_sharable ``, `` `confined `` and `` `single_owner `` — are defined in [annotations.md](annotations.md), together with the types each may be written on and how they interact. Which capability a given standard-library primitive asserts is read from its declaration in `modules/std/`, which is the only place it is written.
 
-| Annotation | Effect |
-|---|---|
-| `` `sendable `` / `` `sharable `` | assert the capability, skipping field derivation — for natively-implemented types |
-| `` `not_sendable `` / `` `not_sharable `` | deny it, even though the fields would derive it |
-| `` `confined `` | thread-confined: a `Ref`/`Weak` of this type uses a non-atomic counter and may never cross a boundary. Mutually exclusive with `` `sharable `` |
-
-Asserting a capability contradicts denying it, and a non-native type marked `` `sendable `` whose fields are not sendable is rejected — the override is for hiding *implementation* detail, not for defeating the check.
-
-The standard library's concurrency primitives are the types that assert these natively: `Ref[T]`, `Weak[T]`, and `Channel[T]` are `` `sendable `sharable ``; `Task[T]` is `` `sendable ``.
-
-The capabilities also constrain the primitives' own element types: `Channel[T]` requires `T` sendable — a channel exists to move values between goroutines — while `Ref[T]` and `Weak[T]` require `T` to be both sendable and sharable, since a shared reference makes `T` reachable from several goroutines at once. (A `` `confined `` `T` is exempt: such a `Ref` can never cross a boundary, so the question does not arise.)
+The capabilities also constrain the primitives' own element types: `Channel[T]` requires `T` sendable — a channel exists to move values between goroutines — while `Ref[T]` and `Weak[T]` require `T` to be both sendable and sharable, since a shared reference makes `T` reachable from several goroutines at once.
 
 ---
 
@@ -2324,22 +2314,7 @@ MetaParam      = Expression | Identifier ':' Expression ;
 
 Each annotation declares a fixed parameter contract. Unknown named parameters, positional parameters beyond the declared arity, missing required positional parameters, duplicate parameters, and values of the wrong form are all compilation errors — a parameter the author wrote is never silently discarded.
 
-| Annotation | Positional | Named |
-|---|---|---|
-| `` `doc `` | `text` (string, required) | — |
-| `` `deprecated `` | `message` (string, optional) | `since` (string), `message` (string) |
-| `` `test `` | — | `expected` (string), `exclude` (condition), `timeout` (string), `memory_limit` (string), `allow_leaks` (bool) |
-| `` `embed `` | `path` (string, required) | `compress` (bool) |
-| `` `key `` | `name` (string, required) | — |
-| `` `serializable `` | — | `tag` (string) |
-| `` `structural `` | — | `protocol` (bool) |
-| `` `lifetime `` | `name` (identifier, required) | — |
-| `` `wasm_import `` | `module name`, `import name` (strings, required) | — |
-| `` `target `` | `condition` (target condition, required) | — |
-| `` `align `` | `alignment` (integer, required) | — |
-| `` `extern `` | `symbol` (string, optional) | — |
-
-Every other built-in annotation takes no parameters.
+Each annotation's parameter contract is given with its definition in [annotations.md](annotations.md).
 
 A *target condition* is an identifier drawn from `windows`, `linux`, `macos`, `wasm`, `wasi`, `web`, `posix`, `x86_64`, `aarch64`, `arm64`, optionally combined with `!`, `||`, `&&`, and parentheses (see Section 8.5). `` `test(exclude:) `` accepts the narrower form of an identifier or a `||` chain of identifiers.
 
@@ -2368,39 +2343,12 @@ testAddition() `test {
 }
 ```
 
-### 8.3 Built-in Metas
+### 8.3 The annotation set
 
-| Meta          | Applies To     | Description                                      |
-|---------------|----------------|--------------------------------------------------|
-| `` `raw ``    | fields         | Field uses an LLVM type identifier directly      |
-| `` `value ``  | fields         | Place field in the Value struct — copied with the value |
-| `` `public `` | types, enums, functions | Export from module (see Section 4.4) |
-| `` `inline `` | functions      | Hint to inline the function                      |
-| `` `deprecated`` | any         | Mark as deprecated with optional message         |
-| `` `test ``   | functions      | Mark as a test function                          |
-| `` `serializable`` | types     | Auto-generate serialization code                 |
-| `` `align(N)``| types          | Memory alignment (single integer literal)        |
-| `` `packed `` | types          | Pack fields without padding                      |
-| `` `extern ``, `` `extern("c_symbol")``| functions | Foreign function interface; the optional string is the C symbol name (default `promise_<name>`) |
-| `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
-| `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
-| `` `structural `` | types, methods, enums | On a type: interface may be satisfied without `is` (see Section 5.4). `` `structural(protocol: true) `` additionally reserves the interface's requirement names, making a same-name method with an incompatible signature an error. `` `structural(protocol: false) `` on a method, type, or enum exempts it from that check |
-| `` `open ``  | types           | Type may be used as an `is` parent; concrete types are otherwise sealed. Redundant (rejected) on abstract/`` `structural `` types, which are implicitly open (see Section 5.4) |
-| `` `sealed ``| types (`` `abstract ``/`` `structural ``) | Hierarchy closed outside the declaring `promise.toml` module — extensible only within it; transitive (no `` `open `` subtype). Rejected on concrete types (nothing to scope) (see Section 5.4) |
-| `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |
-| `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are also `` `copy `` |
-| `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |
-| `` `required ``| fields         | Field must be present during deserialization; validation error otherwise |
-| `` `final `` | fields          | Immutable after construction; can only be set in `new` or `` `factory `` body (see Section 5.7) |
-| `` `factory ``| methods        | Factory constructor with `` `mono `` placement; no `this`, returns `Self` or child (see Section 5.7) |
-| `` `global `` | methods        | Namespaced function — no `this`, no `Self`; rejected on generic types (see Section 9.2) |
-| `` `mono ``  | methods        | Per-monomorphization namespaced function — no `this`, `Self` available (see Section 9.2) |
-| `` `doc ``   | any, parameters | AST-attached documentation (see Section 8.4)      |
-| `` `target(cond) ``| types, enums, functions | Compile-time platform filtering (see Section 8.5) |
-| `` `embed(path) ``| module-level getters | Compile-time resource embedding (see Section 8.6) |
-| `` `interior `` | types, enums    | Interior mutability: mutating methods/setters may be called through a shared `&` borrow (Channel/Mutex only; see Section 6.2) |
+Every annotation, what it means, its targets and its parameters: [annotations.md](annotations.md). That document is where an annotation is defined; this section defines only how one is written.
 
-User-defined metas are available through the type system at compile time for meta-programming and code generation.
+The set is **closed** — both the annotation names and each annotation's parameters. There are no user-defined annotations, and no annotation accepts a parameter it does not declare.
+
 
 ### 8.4 Documentation (`` `doc ``)
 
@@ -3786,22 +3734,6 @@ match result {
 ### 14.5 Optional Parameters
 
 When `T?` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.4). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `T?` sugar. For how `T?` interacts with stream iteration, see Section 12.
-
----
-
-## 15. Unsafe Code
-
-Promise allows unsafe blocks for low-level operations:
-
-```promise
-rawPointer() `unsafe {
-  ptr := unsafe {
-    int* raw = alloc[int]();
-    *raw = 42;
-    raw
-  };
-}
-```
 
 ---
 

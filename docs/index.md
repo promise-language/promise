@@ -5,37 +5,7 @@ everything else there is.
 
 ## How to read this tree
 
-| Location | What a file there is | Binding? |
-|----------|----------------------|----------|
-| `docs/` root | A **specification**: what the project *should* be — the intended end state. It never records current state, progress, or phasing. | **Yes.** Work that contradicts a root doc must stop and be resolved — amend the doc, adjust the item, or reject it — not shipped as a quiet deviation. |
-| `docs/proposals/` | An end state that has **not been ratified** — a draft, an RFC, a direction still under discussion. | No. Ratifying one means `git mv` into the root (and giving it a tag). |
-| `docs/archive/` | An end state that has been **superseded or delivered** — kept for history. | No. |
-| `docs/research/` | Background analysis feeding a decision — an assessment, not a design. | No. |
-
-**Where progress lives.** A root doc has no status section, because status is not a property of
-a specification. Each one instead declares a **tag** on the line under its title, and the gap
-between the end state and today is the set of open tracker items carrying that tag:
-
-> **Tag:** `large-integers` — remaining work to complete this document: `mcp__tracker__list --tag large-integers`
-
-See [tags.md](tags.md) §2.6 for the document-tag facet and how it composes with the other tags.
-
-**The one exception.** A doc may keep an inline "not yet implemented" marker where the gap
-*changes what compiles today* — [language-design.md](language-design.md) says hybrid types fit
-the four-struct model and, in the same breath, that mixing `` `value `` and instance fields is
-currently a compile error. Deleting that would make the spec describe a program the compiler
-rejects. Such a marker must name its tracker item (`tracked as T1723`) so it stays a pointer
-rather than becoming a status section again — and it is for user-visible language semantics
-only, never for how far along an internal migration is.
-
-**A marker expires with its item.** Naming the item is what makes the marker removable: when
-that item closes, the gap it described is gone and the marker must go with it, in the same
-change that closes the item. A marker whose item is already closed is worse than no marker —
-it tells a reader the compiler rejects something it now accepts. Sweep for stragglers with:
-
-```sh
-grep -rn 'tracked as T[0-9]' docs/*.md      # then check each item's status
-```
+A file's directory determines whether it binds: everything in the `docs/` root is a specification, while `proposals/`, `research/` and `archive/` are not. [normative.md](normative.md) has the rules — what makes a document binding, the header every specification carries, why none of them contains a status section, and the one-fact-one-home rule that keeps two of them from disagreeing.
 
 ---
 
@@ -43,6 +13,7 @@ grep -rn 'tracked as T[0-9]' docs/*.md      # then check each item's status
 
 - [language-design.md](language-design.md) — Full language specification: types, ownership, errors, generics, modules, concurrency. §6 is the normative ownership & memory model.
 - [language-guide.md](language-guide.md) — Concise reference for writing correct Promise code.
+- [annotations.md](annotations.md) — Normative reference for every annotation: what each one means, its targets and parameters, and the one-declaration rule that keeps a property from being declared twice.
 - [code-style.md](code-style.md) — Conventions for Promise source: field/getter naming, `` `final ``, comments.
 - [large-integers.md](large-integers.md) — Native `i128`/`u128`, `i256`/`u256`, `i512`/`u512` primitive types backed by LLVM `iN`.
 
@@ -77,6 +48,7 @@ grep -rn 'tracked as T[0-9]' docs/*.md      # then check each item's status
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — Contributor/maintainer onboarding: build the compiler, run tests, verify, and gates.
 - [build-tools.md](build-tools.md) — Build tooling architecture and the `bin/` tool inventory.
 - [gate-system.md](gate-system.md) — Four-class regression prevention gates (tests, memory, stability, size, performance).
+- [normative.md](normative.md) — How normative documents work: location as the binding rule, the tag header, why status lives in the tracker, and the ban on one fact having two homes.
 - [tags.md](tags.md) — Canonical tag vocabulary and tagging rules for the `tracker` MCP server.
 - [platform-documentation.md](platform-documentation.md) — `promise doc` system for extracting `doc()` meta tags.
 

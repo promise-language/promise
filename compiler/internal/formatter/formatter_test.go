@@ -558,11 +558,6 @@ func TestFormat(t *testing.T) {
 			expected: "go {\n  work();\n}\n",
 		},
 		{
-			name:     "unsafe block",
-			input:    "unsafe {\nptr = null;\n}",
-			expected: "unsafe {\n  ptr = null;\n}\n",
-		},
-		{
 			name:     "yield statement",
 			input:    "yield x;",
 			expected: "yield x;\n",

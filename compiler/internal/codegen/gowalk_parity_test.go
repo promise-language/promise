@@ -24,7 +24,7 @@ import (
 // construction: codegen hands the env to the goroutine while ownership, never
 // told of the capture, lets the defining scope keep using it. That has now
 // happened twice — T1651 (`scopeContains` misclassifying a one-line `go {}`) and
-// T1658 (bare block, match-arm guard, `unsafe {}`) — so this test makes the next
+// T1658 (bare block, match-arm guard) — so this test makes the next
 // divergence a test failure instead of a miscompile.
 //
 // LIMITATION: this compares the SET of `case *ast.X` arms, not what the arms do.

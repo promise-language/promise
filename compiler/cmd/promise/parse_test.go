@@ -543,10 +543,7 @@ func TestOwnership(t *testing.T) {
 		{"mut_borrow_param", `f(Int[] ~a) { a[0] = 1; }`},
 		{"shared_ref_type", `main() { Shape &s = circle; }`},
 		{"mut_ref_type", `main() { Int[] ~a = arr; }`},
-		{"pointer_type", `main() { Int* p = addr; }`},
 		{"optional_ref", `main() { Shape&? s = none; }`},
-		{"unsafe_block", `main() { unsafe { Int x = 42; } }`},
-		{"unsafe_as_expr", `main() { Int x = unsafe { return 42; }; }`},
 		{"move_lambda", `main() { f := move |x| -> x; }`},
 	}
 	for _, tc := range cases {

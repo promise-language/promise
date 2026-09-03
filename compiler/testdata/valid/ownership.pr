@@ -43,9 +43,6 @@ ownershipExamples() {
   Int[] ~mref = data;
   mref[0] = 99;
 
-  // Pointer type
-  Int* ptr = addr;
-
   // Optional borrow
   Shape&? maybeRef = none;
 

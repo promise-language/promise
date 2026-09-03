@@ -2511,6 +2511,11 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 			if subst != nil {
 				sig = types.Substitute(sig, subst).(*types.Signature)
 			}
+			// T1416: record failable [] getter read — mirrors checkMemberExpr's
+			// property getter path.
+			if sig.CanError() {
+				c.info.FailableExprs[e] = true
+			}
 			if len(sig.Params()) >= 1 {
 				paramType := sig.Params()[0].Type()
 				if index != nil && !types.AssignableTo(index, paramType) {
@@ -2680,6 +2685,10 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 			sig := m.Sig()
 			if subst != nil {
 				sig = types.Substitute(sig, subst).(*types.Signature)
+			}
+			// T1416: record failable [:] getter read — same gap as [] above.
+			if sig.CanError() {
+				c.info.FailableExprs[e] = true
 			}
 			params := sig.Params()
 

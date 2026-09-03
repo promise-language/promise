@@ -371,6 +371,37 @@ func TestT1386GoBlockNonFailableSetterAssignmentRejected(t *testing.T) {
 	expectError(t, errs, t1386CannotFail)
 }
 
+func TestT1386GoBlockFailableIndexGetterRead(t *testing.T) {
+	// T1416: a bare failable [] getter read (not compound-assign)
+	// inside a go! block is a failable escape.
+	errs := checkErrs(t, `
+		type Box {
+			int x;
+			[]!(int k) int { if this.x < 0 { raise error("neg"); } return this.x; }
+		}
+		main!() {
+			t := go! { b := Box(x: 0); int y = b[0]; y };
+			v := (<-t)?!;
+		}
+	`)
+	expectNoErrors(t, errs)
+}
+
+func TestT1386GoBlockNonFailableIndexGetterReadRejected(t *testing.T) {
+	// Reject twin: a total [] getter read cannot fail.
+	errs := checkErrs(t, `
+		type Box {
+			int x;
+			[](int k) int { return this.x; }
+		}
+		main!() {
+			t := go! { b := Box(x: 0); int y = b[0]; y };
+			v := (<-t)?!;
+		}
+	`)
+	expectError(t, errs, t1386CannotFail)
+}
+
 func TestT1386GoBlockFailableIndexGetterCompoundAssign(t *testing.T) {
 	// A compound assignment reads via the failable [] getter (T0709).
 	errs := checkErrs(t, `

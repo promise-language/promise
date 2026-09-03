@@ -1,0 +1,21 @@
+{
+  "repo": "github.com/promise-language/promise",
+  "channel": "stable",
+  "version": "v0.12.0",
+  "orchestrator": {
+    "protocol": "reactor",
+    "url": "http://192.168.1.7:9121"
+  },
+  "tools": [
+    "do",
+    "issue",
+    "precommit-guard",
+    "tool-guard",
+    "workspace"
+  ],
+  "paths": [
+    ".mcp.json",
+    ".claude/settings.local.json",
+    "CLAUDE.local.md"
+  ]
+}

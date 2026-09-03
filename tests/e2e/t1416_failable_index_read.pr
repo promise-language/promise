@@ -1,0 +1,156 @@
+// T1416: Failable [] and [:] getter reads in expression position must
+// auto-propagate in failable functions, and their errors must be catchable.
+type Box {
+  int v;
+  []!(int i) int {
+    if i < 0 {
+      raise error(message: "index out of bounds");
+    }
+    return this.v;
+  }
+}
+
+type SliceBox {
+  int v;
+  [:]!(int? low, int? high) int {
+    if this.v < 0 {
+      raise error(message: "negative value");
+    }
+    return this.v;
+  }
+}
+
+failable_index_read_succeeds() `test {
+  b := Box(v: 42);
+  int y = b[0]? e {
+    -1
+  };
+  assert(y == 42, "successful index read");
+}
+
+failable_index_read_raises_caught() `test {
+  b := Box(v: 3);
+  int y = b[-1]? e {
+    -1
+  };
+  assert(y == -1, "caught index error");
+}
+
+failable_index_read_error_handler() `test {
+  b := Box(v: 3);
+  bool caught = false;
+  int y = b[-1]? e {
+    caught = true;
+    0
+  };
+  assert(caught, "handler ran");
+  assert(y == 0, "handler value");
+}
+
+failable_slice_read_succeeds() `test {
+  sb := SliceBox(v: 10);
+  int y = sb[0:1]? e {
+    -1
+  };
+  assert(y == 10, "successful slice read");
+}
+
+failable_slice_read_raises_caught() `test {
+  sb := SliceBox(v: -5);
+  int y = sb[0:1]? e {
+    -1
+  };
+  assert(y == -1, "caught slice error");
+}
+
+// Auto-propagation in failable function via ?^
+failable_index_auto_propagate!() int {
+  b := Box(v: 99);
+  int y = b[0]?^;
+  return y;
+}
+
+failable_index_propagation_success() `test {
+  int r = failable_index_auto_propagate()? e {
+    -1
+  };
+  assert(r == 99, "propagated success");
+}
+
+failable_index_propagation_error!() int {
+  b := Box(v: 3);
+  int y = b[-1]?^;
+  return y;
+}
+
+failable_index_propagation_raises() `test {
+  int r = failable_index_propagation_error()? e {
+    -1
+  };
+  assert(r == -1, "propagated error");
+}
+
+// Failable slice auto-propagation
+failable_slice_auto_propagate!() int {
+  sb := SliceBox(v: 7);
+  int y = sb[0:1]?^;
+  return y;
+}
+
+failable_slice_propagation_success() `test {
+  int r = failable_slice_auto_propagate()? e {
+    -1
+  };
+  assert(r == 7, "slice propagated success");
+}
+
+failable_slice_propagation_error!() int {
+  sb := SliceBox(v: -3);
+  int y = sb[0:1]?^;
+  return y;
+}
+
+failable_slice_propagation_raises() `test {
+  int r = failable_slice_propagation_error()? e {
+    -1
+  };
+  assert(r == -1, "slice propagated error");
+}
+
+// Failable index read as sub-expression (in string interpolation)
+failable_index_in_interpolation() `test {
+  b := Box(v: 42);
+  string s = "{b[0] ? e { -1 }}";
+  assert(s == "42", "interpolation success");
+}
+
+// Failable index read in conditional
+failable_index_in_conditional() `test {
+  b := Box(v: 10);
+  bool big = (b[0]? e {
+    0
+  }) > 5;
+  assert(big, "conditional with failable index");
+}
+
+// Failable index read error message preserved
+failable_index_error_message() `test {
+  b := Box(v: 3);
+  string msg = "";
+  int y = b[-1]? e {
+    msg = e.message;
+    0
+  };
+  assert(msg == "index out of bounds", "error message preserved");
+}
+
+// Failable slice error message preserved
+failable_slice_error_message() `test {
+  sb := SliceBox(v: -5);
+  string msg = "";
+  int y = sb[0:1]? e {
+    msg = e.message;
+    0
+  };
+  assert(msg == "negative value", "slice error message preserved");
+}

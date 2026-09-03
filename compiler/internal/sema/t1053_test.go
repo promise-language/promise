@@ -105,7 +105,7 @@ func TestT1053_MutThisSelfMutationOK(t *testing.T) {
 	`)
 }
 
-// --- Allow: interior-mutable types through a shared borrow (the escape hatch) ---
+// --- Allow: interior-mutable native types through a shared borrow ---
 
 func TestT1053_ChannelSendThroughSharedBorrowOK(t *testing.T) {
 	// Channel is `interior: send takes a shared `this receiver (interior mutability
@@ -190,40 +190,11 @@ func TestT1053_VectorOriginNotInterior(t *testing.T) {
 	}
 }
 
-// --- User-defined `interior types: the codified escape hatch ---
+// --- `interior is `native-only: user declarations are rejected (T1921) ---
 //
 // `interior is a user-facing annotation (docs/language-design.md §6.2). These
 // pin the non-generic-Named path of recvIsInterior / the write check, which the
 // generic stdlib primitives (Channel/Mutex, all *Instance) never exercise.
-
-func TestT1053_UserInteriorTypeMutMethodThroughSharedBorrowOK(t *testing.T) {
-	// A user type marked `interior may have a mutating method invoked through a
-	// shared borrow — recvIsInterior resolves the bare *types.Named receiver
-	// (`c`, a non-generic interior type) to IsInterior() == true.
-	checkOK(t, `
-		type Cell `+"`interior"+` { int n; poke(this) { this.n = 5; } }
-		via(Cell c) { c.poke(); }
-	`)
-}
-
-func TestT1053_UserInteriorTypeFieldStoreThroughSharedBorrowOK(t *testing.T) {
-	// A direct field store through a shared borrow of an interior type is the
-	// exemption path in checkWriteThroughSharedBorrow (recvPlace is the bare
-	// *types.Named `c`).
-	checkOK(t, `
-		type Cell `+"`interior"+` { int n; }
-		via(Cell c) { c.n = 5; }
-	`)
-}
-
-func TestT1053_UserInteriorTypeSelfMutationPlainThisOK(t *testing.T) {
-	// Inside a plain-`this method of an interior type, writing `this.field is
-	// allowed — recvIsInterior(this) short-circuits the self-mutation check that
-	// otherwise forces `~this on a non-interior type.
-	checkOK(t, `
-		type Cell `+"`interior"+` { int n; set_plain(this) { this.n = 5; } }
-	`)
-}
 
 func TestT1053_NonInteriorUserTypeStillRejectedForContrast(t *testing.T) {
 	// The same type WITHOUT `interior is rejected — proving the exemption is what
@@ -236,25 +207,6 @@ func TestT1053_NonInteriorUserTypeStillRejectedForContrast(t *testing.T) {
 }
 
 // --- `interior on enums: recvIsInterior's *types.Enum branch ---
-
-func TestT1053_InteriorEnumMutMethodThroughSharedBorrowOK(t *testing.T) {
-	// A `~this method on an `interior enum is callable through a shared borrow —
-	// recvIsInterior resolves the bare *types.Enum receiver to IsInterior() == true.
-	checkOK(t, `
-		enum Flag `+"`interior"+` { On, Off, reset(~this) { this = Flag.Off; } }
-		via(Flag f) { f.reset(); }
-	`)
-}
-
-func TestT1053_GenericInteriorEnumMutMethodThroughSharedBorrowOK(t *testing.T) {
-	// A generic `interior enum: the receiver `b is a *types.Instance whose origin
-	// is the interior *types.Enum — recvIsInterior resolves through the instance
-	// origin (the Enum-origin arm), distinct from the non-generic bare-Enum arm.
-	checkOK(t, `
-		enum Box[T] `+"`interior"+` { None, Some(T v), reset(~this) { this = Box[T].None; } }
-		via(Box[int] b) { b.reset(); }
-	`)
-}
 
 func TestT1053_NonInteriorEnumMutMethodThroughSharedBorrowRejected(t *testing.T) {
 	// Without `interior, the same enum `~this method through a shared borrow is
@@ -323,34 +275,6 @@ func TestT1053_NamedIndexSetterDefaultsToMutThisReceiver(t *testing.T) {
 	}
 }
 
-func TestT1345_InteriorEnumIndexSetterKeepsSharedThisReceiver(t *testing.T) {
-	// An `interior enum's implicit setter keeps a shared `this receiver
-	// (RefNone) — resolveEnumMethodSignature's interior branch, reachable now
-	// that `interior is set before method resolution (T1345).
-	info := checkOK(t, `
-		enum Cell `+"`interior"+` {
-			Empty, Full(int n),
-			[](int i) int { return 0; }
-			[]=(int i, int v) { this = Cell.Full(v); }
-		}
-	`)
-	if ref := setterRecvRef(t, info, "Cell"); ref != types.RefNone {
-		t.Errorf("interior enum setter should keep shared `this (RefNone), got %v", ref)
-	}
-}
-
-func TestT1345_InteriorNamedIndexSetterKeepsSharedThisReceiver(t *testing.T) {
-	// A user (non-native) `interior type's `[]= setter keeps a shared `this
-	// receiver (RefNone) — resolveMethodSignature reading IsInterior() now that
-	// the flag is set before method resolution (T1345).
-	info := checkOK(t, `
-		type Bag `+"`interior"+` { int slot; [](int i) int { return this.slot; } []=(int i, int v) { this.slot = v; } }
-	`)
-	if ref := setterRecvRef(t, info, "Bag"); ref != types.RefNone {
-		t.Errorf("interior named setter should keep shared `this (RefNone), got %v", ref)
-	}
-}
-
 // propSetterRecvRef returns the receiver ref of the property `set` setter named
 // `setterName on the type/enum `typeName. Distinct from setterRecvRef, which
 // finds the `[]= operator setter — a property setter takes the md.IsSetter
@@ -381,24 +305,6 @@ func propSetterRecvRef(t *testing.T, info *Info, typeName, setterName string) ty
 	return types.RefNone
 }
 
-func TestT1345_InteriorNamedPropertySetterKeepsSharedThisReceiver(t *testing.T) {
-	// The property-setter analogue of TestT1345_InteriorNamedIndexSetter: a
-	// user `interior type's `set` setter (md.IsSetter disjunct, not the `[]=
-	// operator disjunct) also keeps a shared `this receiver (RefNone) — the
-	// same interior branch of resolveMethodSignature, now reachable for
-	// non-native types because `interior is set before method resolution (T1345).
-	info := checkOK(t, `
-		type Bag `+"`interior"+` {
-			int slot;
-			get slot int { return this.slot; }
-			set slot(int v) { this.slot = v; }
-		}
-	`)
-	if ref := propSetterRecvRef(t, info, "Bag", "slot"); ref != types.RefNone {
-		t.Errorf("interior named property setter should keep shared `this (RefNone), got %v", ref)
-	}
-}
-
 func TestT1345_NonInteriorNamedPropertySetterDefaultsToMutThisReceiver(t *testing.T) {
 	// Negative control for the property-setter path: without `interior, a `set`
 	// setter still defaults to a `~this mutable borrow (RefMut). Confirms the
@@ -415,7 +321,7 @@ func TestT1345_NonInteriorNamedPropertySetterDefaultsToMutThisReceiver(t *testin
 	}
 }
 
-// --- Meta validation: `interior only applies to types and enums ---
+// --- Meta validation: `interior applies to types only ---
 
 func TestT1053_InteriorMetaRejectedOnFunction(t *testing.T) {
 	// `interior is registered for TargetType/TargetEnum only; applying it to a
@@ -424,4 +330,51 @@ func TestT1053_InteriorMetaRejectedOnFunction(t *testing.T) {
 		foo() `+"`interior"+` {}
 	`)
 	expectError(t, errs, "meta `interior cannot be applied to function")
+}
+
+// T1921: `interior requires `native — a type written in Promise may not take the
+// shared-borrow mutation exemption, because it cannot guarantee the internal
+// synchronization that makes aliased mutation sound.
+func TestT1921_InteriorRejectedOnUserType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Note `+"`interior"+` {
+			string text;
+			set_text(this, string move v) { this.text = v; }
+		}
+	`)
+	expectError(t, errs, "`interior requires `native")
+}
+
+// T1921: the same for a type with no members — it is the declaration that is
+// rejected, not some property of the body.
+func TestT1921_InteriorRejectedOnEmptyUserType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Empty `+"`interior"+` {}
+	`)
+	expectError(t, errs, "`interior requires `native")
+}
+
+// T1921: an enum can never be `native, so `interior is not a valid enum target.
+func TestT1921_InteriorRejectedOnEnum(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color `+"`interior"+` {
+			Red,
+			Blue,
+		}
+	`)
+	expectError(t, errs, "cannot be applied to enum")
+}
+
+// T1921: the exemption survives for the native types that carry it — a shared
+// borrow of a Channel may still be mutated. `native cannot be written by user
+// code at all (a native type must be predeclared in the universe), so std's
+// Channel/Mutex/MutexGuard are the only declarations the annotation can reach.
+func TestT1921_InteriorStillExemptsNativeChannel(t *testing.T) {
+	checkOK(t, `
+		emit(Channel[int] ch) { ch.send(7); ch.close(); }
+		test() {
+			ch := channel[int](capacity: 4);
+			emit(ch);
+		}
+	`)
 }

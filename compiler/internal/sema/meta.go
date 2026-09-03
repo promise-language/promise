@@ -83,7 +83,8 @@ var builtinMetas = map[string][]MetaTarget{
 	"not_sendable": {TargetType, TargetEnum},
 	"not_sharable": {TargetType, TargetEnum},
 	"confined":     {TargetType, TargetEnum},
-	"interior":     {TargetType, TargetEnum},
+	// T1921: `interior requires `native, and an enum can never be `native.
+	"interior":     {TargetType},
 	"single_owner": {TargetType, TargetEnum},
 }
 

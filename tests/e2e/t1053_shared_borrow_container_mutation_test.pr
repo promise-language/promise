@@ -110,24 +110,9 @@ channel_send_through_shared_borrow() `test {
   assert(sum == 15, "channel send/close through shared borrow (interior)");
 }
 
-// --- interior: a user type marked `interior mutates through a shared borrow ---
-// This is the user-facing escape hatch (docs/language-design.md §6.2). The heap
-// (string) field exercises the cleanup path — a reassign through a shared borrow
-// must drop the old value and leave no leak.
-
-type Note `interior {
-  string text;
-  set_text(this, string move t) {
-    this.text = t;
-  }
-}
-
-relabel(Note n) {
-  n.set_text("updated");
-}
-
-interior_user_type_through_shared_borrow() `test {
-  Note note = Note(text: "start");
-  relabel(note);
-  assert(note.text == "updated", "interior user type mutated through shared borrow");
-}
+// --- interior is `native-only ---
+// A user type cannot be `interior (T1921): the annotation exempts a type from the
+// shared-borrow mutation rule, which is sound only when the implementation
+// synchronizes internally. Promise source cannot make that guarantee, so the
+// exemption is limited to `native declarations — the Channel case above is the
+// shape this rule exists to permit.

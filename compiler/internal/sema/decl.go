@@ -480,15 +480,18 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		named.SetStructural(true)
 	}
 
-	// T1053/T1345: set `interior BEFORE resolving method signatures — the
-	// setter-receiver default in resolveMethodSignature reads IsInterior() so
-	// an interior type's implicit setter keeps a shared `this receiver (matches
-	// the native-type path at the top of defineType). `interior marks a type
-	// whose mutating methods/setters may be invoked through a shared `&` borrow
-	// (interior mutability — the escape hatch for concurrency primitives
-	// Channel/Mutex/MutexGuard).
-	if c.hasAnnotation(d.Annotations, "interior") {
-		named.SetInterior(true)
+	// T1921: `interior requires `native. It exempts a type from the shared-borrow
+	// mutation rule, and that is only sound when the body doing the mutating
+	// synchronizes internally — which a type written in Promise cannot express or
+	// the compiler verify. A native declaration is the one place the guarantee can
+	// come from, since codegen emits the body. This branch is the non-native path,
+	// so reaching it with the annotation is always an error; the native path at the
+	// top of defineType is where it is accepted.
+	if ann := c.findAnnotation(d.Annotations, "interior"); ann != nil {
+		c.errorf(ann.Pos(), "`interior requires `native on type %s: interior mutability lets a "+
+			"mutating method run through a shared borrow, which is sound only when the "+
+			"implementation synchronizes internally — a type written in Promise cannot make "+
+			"that guarantee", d.Name)
 	}
 
 	// Resolve fields
@@ -1168,14 +1171,6 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		enum.AddVariant(variant)
 	}
 
-	// T1053/T1345: set `interior BEFORE resolving method signatures so
-	// resolveEnumMethodSignature's setter branch (interior → RefNone) is
-	// reachable. `interior marks a type with interior mutability (see the
-	// type-decl path in defineType).
-	if c.hasAnnotation(d.Annotations, "interior") {
-		enum.SetInterior(true)
-	}
-
 	// Resolve methods
 	for _, md := range d.Methods {
 		c.defineEnumMethod(enum, md, d.Name)
@@ -1801,10 +1796,17 @@ func (c *Checker) globImportUsed(mod *types.Module, refs map[types.Object]bool) 
 
 // hasAnnotation checks if a specific annotation is present.
 func (c *Checker) hasAnnotation(annotations []*ast.MetaAnnotation, name string) bool {
+	return c.findAnnotation(annotations, name) != nil
+}
+
+// findAnnotation returns the named annotation, or nil. Callers that report an
+// error against an annotation use this so the diagnostic points at the
+// annotation itself rather than at the declaration.
+func (c *Checker) findAnnotation(annotations []*ast.MetaAnnotation, name string) *ast.MetaAnnotation {
 	for _, ann := range annotations {
 		if ann.Name == name {
-			return true
+			return ann
 		}
 	}
-	return false
+	return nil
 }

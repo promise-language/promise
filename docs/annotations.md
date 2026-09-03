@@ -27,10 +27,19 @@ Three corollaries:
    annotations are not decorative. A property a native type cannot derive structurally — having no
    Promise-level fields to derive from — is carried by its explicit annotation, and that annotation
    is what every decision consults.
-2. **No decision may test a type's identity or its name** to recover a property. Neither
+2. **No decision may test a type's identity or its name to recover a property.** Neither
    `origin == types.TypTask` nor `obj.Name() == "Set"` is an acceptable stand-in for a flag.
    Identity-by-string is worse still: a rename, or a user type of the same name, silently changes
    behavior.
+
+   The compiler does legitimately know a handful of library types — it binds `{:}` to one,
+   constructs another for `..`, and depends on a third's shape for `for`-`in`. Those are
+   **declared** with `` `builtin(role) `` (§10) rather than found by name, and they are bounded by
+   what the knowledge may drive: **identity may bind syntax to a type, construct values of it, or
+   check the compiler's own assumptions about it — never recover a property that the type's own
+   structure determines.** The test is a user's own `MyMap`: writing one should cost exactly the
+   `{:}` literal and nothing else, because every capability, drop rule and safety check must
+   behave identically for a library container and a user's.
 3. **Adding an annotation to a type is sufficient** to give that type the property. If a new
    primitive needs a compiler edit to gain a documented capability, that capability is hardcoded
    somewhere, and that is a defect.
@@ -151,6 +160,7 @@ The complete set. Anything not listed here is not an annotation; see §16.
 | `` `open `` | types | — | Concrete type may be an `is` parent |
 | `` `sealed `` | abstract/structural types | — | Hierarchy closed outside the declaring module |
 | `` `native `` | types, methods | — | No Promise body; provided by the backend |
+| `` `builtin `` | types, enums | `role` (identifier, required) | Fills a role the compiler depends on |
 | `` `final `` | fields | — | Immutable after construction |
 | `` `factory `` | methods | — | Receiver-less constructor with `` `mono `` placement |
 | `` `global `` | methods | — | Namespaced function; no `this`, no `Self` |
@@ -388,6 +398,44 @@ every call site.
   check.
 - **Read by** `defineType` / `defineMethod` (`sema/decl.go`); intrinsic dispatch in
   `codegen/compiler_native_*.go`.
+
+`` `native `` and `` `builtin `` are the two annotations describing a compiler relationship, and
+they partition it: `` `native `` says *the compiler implements this*, `` `builtin `` says *the
+compiler depends on this*. A type carries at most one of them.
+
+### `` `builtin ``
+
+- **Targets** types, enums · **Parameters** `role` (identifier, required)
+- **Effect** Declares that this type fills a **role the compiler depends on**. Unlike `` `native ``
+  the compiler does not implement it — the declaration is ordinary Promise, with fields and bodies
+  — but the compiler binds syntax to it, constructs values of it, or relies on its shape.
+- **Derivation** Not derived, and deliberately not inferred from the type's name. The binding is a
+  statement the declaration makes, so renaming the type is a rename and nothing more.
+- **Interactions** The role vocabulary is closed, and the mapping between roles and declarations is
+  **one to one**. Four things are therefore compile errors: a role no type claims, a role two types
+  claim, a claim naming a role the compiler does not have, and a claim from outside a catalog
+  module. The last is the boundary that keeps user code from capturing `{:}`; catalog modules ship
+  with the compiler and are reviewed alongside it, which is what makes them eligible — not any
+  property of `std`, which is a module like any other.
+- **Read by** the role table in `sema`; the syntax-lowering and construction sites that consume
+  each role.
+
+The roles, which are the complete set:
+
+| Role | Declared by | What depends on it |
+|---|---|---|
+| `map` | `Map[K, V]` | `{:}` literals and the `map[K, V]` alias |
+| `range` | `Range[T]` | `..` and `..=` construct one |
+| `error` | `error` | the error slot of a failable result |
+| `iterator` | `Iterator[T]` | the `iter` alias, and the protocol `for`-`in` requires |
+| `stream` | `Stream[T]` | the `stream` alias, and asynchronous iteration |
+| `embedded_file` | `EmbeddedFile` | the result of `` `embed `` on one file |
+| `embedded_files` | `EmbeddedFiles` | the result of `` `embed `` on a glob |
+
+A role is claimed for what the compiler must *do* with the type, never for what it must *know
+about* it — so a type appears here only because syntax denotes it, the compiler builds one, or its
+shape is depended upon. A container is not listed because the compiler wants to know how it
+duplicates its elements; that is a property, and §1 puts it out of reach.
 
 ### `` `final ``
 

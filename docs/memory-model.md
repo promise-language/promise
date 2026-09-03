@@ -78,11 +78,18 @@ the standard library is a module like any other.
 
 Two consequences, and they are the reason this section exists:
 
-- **No type outside §2 requires the compiler to know its name.** A composed container's behaviour
-  is derivable from its fields and type arguments, because its allocation behaviour is entirely
-  inherited from the primitives it holds. A compiler decision that tests for `Map` or `Set` by
-  identity is therefore not merely inelegant — it is asserting a property that the type's own
-  fields already determine, which is what [annotations.md](annotations.md) §1 forbids.
+- **No composed container's *behaviour* depends on the compiler knowing its name.** What a
+  container does with its elements is derivable from its fields and type arguments, because its
+  allocation behaviour is inherited entirely from the primitives it holds. A compiler decision that
+  tests for `Map` or `Set` by identity is therefore not merely inelegant — it asserts a property
+  the type's own fields already determine, which [annotations.md](annotations.md) §1 forbids.
+
+  The compiler *may* know such a type for an unrelated reason: `Map` carries `` `builtin(map) ``
+  because `{:}` and the `map[K, V]` alias have to denote something. That is a syntax binding, and
+  §1 bounds what it licenses — binding syntax, constructing values, checking the compiler's own
+  assumptions, and nothing else. The distinction is exactly the one a user's own `MyMap` makes
+  visible: it cannot be written with `{:}`, and in every other respect it must behave as `Map`
+  does.
 - **A composed container that misbehaves indicates a general defect, not a missing special case.**
   If `Map` needs an exception to be handled correctly, then every user container of the same shape
   is being handled incorrectly, silently. Special-casing the standard library's containers does not

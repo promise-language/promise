@@ -14,6 +14,7 @@ A file's directory determines whether it binds: everything in the `docs/` root i
 - [language-design.md](language-design.md) — Full language specification: types, ownership, errors, generics, modules, concurrency. §6 is the normative ownership & memory model.
 - [language-guide.md](language-guide.md) — Concise reference for writing correct Promise code.
 - [annotations.md](annotations.md) — Normative reference for every annotation: what each one means, its targets and parameters, and the one-declaration rule that keeps a property from being declared twice.
+- [memory-model.md](memory-model.md) — What may allocate: the closed set of variable-size heap primitives, by-value versus behind-a-handle ownership, and why every other container is composition.
 - [code-style.md](code-style.md) — Conventions for Promise source: field/getter naming, `` `final ``, comments.
 - [large-integers.md](large-integers.md) — Native `i128`/`u128`, `i256`/`u256`, `i512`/`u512` primitive types backed by LLVM `iN`.
 

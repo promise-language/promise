@@ -21471,3 +21471,45 @@ func TestT1335_MatchThreeArmsMiddleVoidErrors(t *testing.T) {
 	`)
 	expectError(t, errs, "produces no value")
 }
+
+// T1413: `single_owner annotation accepted on a type.
+func TestT1413_SingleOwnerAnnotationAccepted(t *testing.T) {
+	checkOK(t, `
+		type Handle `+"`single_owner"+` {
+			int id;
+		}
+	`)
+}
+
+// T1413: `single_owner annotation accepted on an enum.
+func TestT1413_SingleOwnerEnumAnnotationAccepted(t *testing.T) {
+	checkOK(t, `
+		enum Token `+"`single_owner"+` {
+			A,
+			B,
+		}
+	`)
+}
+
+// T1413: Task is `sharable — Ref[Task[int]] is valid. Ref exists precisely so
+// that shared ownership can cross a goroutine boundary, and it aliases its
+// element rather than duplicating it, so wrapping a `single_owner handle is
+// sound: `single_owner denies *duplication*, not aliasing. Codegen coverage for
+// the resulting Ref[T].drop → Task[T].drop path is tests/e2e/task_field_drop_test.pr.
+func TestT1413_TaskSharableRefAccepts(t *testing.T) {
+	checkOK(t, `
+		test() {
+			Ref[Task[int]] r = Ref[Task[int]](go worker());
+		}
+		worker() int { return 1; }
+	`)
+}
+
+// T1413: Task is `sendable — Channel[Task[int]] is valid (sendable element).
+func TestT1413_TaskSendableChannelAccepts(t *testing.T) {
+	checkOK(t, `
+		test() {
+			channel[Task[int]] ch = channel[Task[int]]();
+		}
+	`)
+}

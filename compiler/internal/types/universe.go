@@ -50,6 +50,7 @@ var (
 	TypIter          *Named // Iterator[T] — synchronous iterator interface
 	TypStream        *Named // Stream[T] — asynchronous iterator interface
 	TypMap           *Named // Map[K, V] — map container type
+	TypSet           *Named // Set[T] — set container type (wrapper around Map[T, bool])
 	TypRange         *Named // Range[T] — generic range from .. and ..= operators
 	TypEmbeddedFile  *Named // EmbeddedFile — metadata for a single embedded file (T0031)
 	TypEmbeddedFiles *Named // EmbeddedFiles — collection of embedded directory files (T0031)

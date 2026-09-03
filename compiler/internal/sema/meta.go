@@ -84,6 +84,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"not_sharable": {TargetType, TargetEnum},
 	"confined":     {TargetType, TargetEnum},
 	"interior":     {TargetType, TargetEnum},
+	"single_owner": {TargetType, TargetEnum},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:

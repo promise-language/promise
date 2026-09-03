@@ -7,6 +7,34 @@ import (
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
+// isSingleOwnerInstance reports whether t is a generic instance whose origin
+// is marked `single_owner (move-only handle, no clone()). T1413: replaces
+// the hardcoded IsAnyTask || IsMutex || IsMutexGuard identity checks with
+// the annotation-driven flag on the origin Named type.
+func isSingleOwnerInstance(t *types.Instance) bool {
+	switch origin := t.Origin().(type) {
+	case *types.Named:
+		return origin.IsSingleOwner()
+	case *types.Enum:
+		return origin.IsSingleOwner()
+	}
+	return false
+}
+
+// isSingleOwnerType reports whether typ is a `single_owner type — either a
+// direct Named/Enum with the flag, or an Instance whose origin has it.
+func isSingleOwnerType(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Instance:
+		return isSingleOwnerInstance(t)
+	case *types.Named:
+		return t.IsSingleOwner()
+	case *types.Enum:
+		return t.IsSingleOwner()
+	}
+	return false
+}
+
 // cloneInstanceOpDesc is the OpDesc tag for a deferred `clone-generic
 // instantiation requirement recorded by validateCloneInstance when a field /
 // variant field's substituted type still contains a TypeParam inside a generic
@@ -243,7 +271,7 @@ func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs
 func firstSingleOwnerHandle(typ types.Type) types.Type {
 	switch t := typ.(type) {
 	case *types.Instance:
-		if types.IsAnyTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+		if isSingleOwnerInstance(t) {
 			return t
 		}
 		for _, ta := range t.TypeArgs() {
@@ -325,12 +353,9 @@ func (c *Checker) rejectStreamTypeArg(pos ast.Pos, typeArgs []types.Type) {
 // appears as a *direct* container element (Vector[Task[T]] etc.). (T0482)
 func isStdNativeContainerNamed(n *types.Named) bool {
 	switch n {
-	case types.TypVector, types.TypMap, types.TypArc, types.TypChannel,
+	case types.TypVector, types.TypMap, types.TypSet, types.TypArc, types.TypChannel,
 		types.TypWeak, types.TypTask, types.TypFailableTask, types.TypMutex, types.TypMutexGuard,
 		types.TypString:
-		return true
-	}
-	if obj := n.Obj(); obj != nil && obj.Name() == "Set" {
 		return true
 	}
 	return false
@@ -345,13 +370,7 @@ func isStdNativeContainerNamed(n *types.Named) bool {
 // struct-of-closure, because the element deep-copy would zero the closure env.
 // (T1260)
 func isValueCopyingContainerNamed(n *types.Named) bool {
-	if n == types.TypVector || n == types.TypMap {
-		return true
-	}
-	if obj := n.Obj(); obj != nil && obj.Name() == "Set" {
-		return true
-	}
-	return false
+	return n == types.TypVector || n == types.TypMap || n == types.TypSet
 }
 
 // FirstNestedSingleOwnerHandle is the exported entry point for cross-package
@@ -397,7 +416,7 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 	}
 	switch t := typ.(type) {
 	case *types.Instance:
-		if types.IsAnyTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+		if isSingleOwnerInstance(t) {
 			return t
 		}
 		// TypeArgs recursion — same as firstSingleOwnerHandle (covers a handle
@@ -509,7 +528,7 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 		// A direct Task/Mutex/MutexGuard read result IS reported (so callers can
 		// special-case it if desired), but the caller's isSingleOwnerNativeType
 		// branch handles those first in practice.
-		if types.IsAnyTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+		if isSingleOwnerInstance(t) {
 			return t
 		}
 		switch origin := t.Origin().(type) {
@@ -899,7 +918,7 @@ func (c *Checker) checkPushNestedHandleArg(e *ast.CallExpr) {
 		return
 	}
 	// Direct single-owner handle elements are out of scope (T0508/T0556).
-	if types.IsAnyTask(elem) || types.IsMutex(elem) || types.IsMutexGuard(elem) {
+	if isSingleOwnerType(elem) {
 		return
 	}
 	off := firstNestedSingleOwnerHandle(elem, nil)
@@ -1032,10 +1051,7 @@ func singleOwnerContainerElemTypes(origin types.Type, typeArgs []types.Type) []t
 	if !ok {
 		return nil
 	}
-	if n == types.TypVector || n == types.TypMap {
-		return typeArgs
-	}
-	if obj := n.Obj(); obj != nil && obj.Name() == "Set" {
+	if n == types.TypVector || n == types.TypMap || n == types.TypSet {
 		return typeArgs
 	}
 	return nil

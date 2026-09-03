@@ -134,6 +134,7 @@ var metaParamSpecs = map[string]metaParamSpec{
 	"not_sharable": noParams,
 	"confined":     noParams,
 	"interior":     noParams,
+	"single_owner": noParams,
 }
 
 // validateMetaParams enforces one annotation's parameter contract.

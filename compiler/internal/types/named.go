@@ -32,6 +32,7 @@ type Named struct {
 	notSharable    bool   // `not_sharable meta — opt-out of auto-derivation
 	isConfined     bool   // `confined meta — Ref[T]/Weak[T] is thread-confined: non-atomic counter, rejected at goroutine boundaries (T0995)
 	isInterior     bool   // `interior meta — mutating methods/setters may be called through a shared `&` borrow (interior mutability; T1053)
+	isSingleOwner  bool   // `single_owner meta — move-only handle, no clone(); a type transitively containing one is non-cloneable (T1413)
 	doc            string // `doc meta — documentation string
 	deprecated     string // `deprecated meta — empty means not deprecated
 }
@@ -79,6 +80,8 @@ func (n *Named) IsConfined() bool         { return n.isConfined }
 func (n *Named) SetConfined(v bool)       { n.isConfined = v }
 func (n *Named) IsInterior() bool         { return n.isInterior }
 func (n *Named) SetInterior(v bool)       { n.isInterior = v }
+func (n *Named) IsSingleOwner() bool      { return n.isSingleOwner }
+func (n *Named) SetSingleOwner(v bool)    { n.isSingleOwner = v }
 func (n *Named) IsExported() bool         { return n.exported }
 func (n *Named) SetExported(v bool)       { n.exported = v }
 func (n *Named) Doc() string              { return n.doc }

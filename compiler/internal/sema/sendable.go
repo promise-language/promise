@@ -64,9 +64,12 @@ func isSendableType(typ types.Type, visited map[types.Type]bool) bool {
 		if (origin == types.TypArc || origin == types.TypWeak) && len(t.TypeArgs()) > 0 && isConfinedType(t.TypeArgs()[0]) {
 			return false
 		}
-		// Channel, Arc, Weak, Task are inherently sendable (internal synchronization)
-		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak ||
-			origin == types.TypTask || origin == types.TypFailableTask {
+		// T1413: annotation-driven — a `sendable native origin (no Promise-level
+		// fields) is inherently sendable regardless of type arguments (element
+		// constraints validated separately by validateSendableInstance). Non-native
+		// origins with fields fall through to TypeArgs + field-based derivation
+		// so that Box[NonSendable] is correctly rejected.
+		if n, ok := origin.(*types.Named); ok && n.IsSendable() && len(n.Fields()) == 0 {
 			return true
 		}
 		// Containers: sendable iff element types are sendable
@@ -166,13 +169,18 @@ func isSharableType(typ types.Type, visited map[types.Type]bool) bool {
 		return true
 	case *types.Instance:
 		origin := t.Origin()
-		// Channel, Arc, Weak are inherently sharable (internal synchronization)
-		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak {
-			return true
-		}
-		// Task handles are sharable (read-only handle)
-		if origin == types.TypTask || origin == types.TypFailableTask {
-			return true
+		// T1413: annotation-driven. A `not_sharable origin is not sharable
+		// whatever its type arguments; a `sharable origin with no Promise-level
+		// fields is sharable for the same reason — the assertion is the whole
+		// answer, there being no fields to derive from. Anything else falls
+		// through to TypeArgs + field-based derivation.
+		if n, ok := origin.(*types.Named); ok {
+			if n.IsNotSharable() {
+				return false
+			}
+			if n.IsSharable() && len(n.Fields()) == 0 {
+				return true
+			}
 		}
 		for _, ta := range t.TypeArgs() {
 			if !isSharableType(ta, visited) {

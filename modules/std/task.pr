@@ -1,3 +1,6 @@
-// std/task.pr — Concurrency handle from go expressions
-type Task[T] `native `public `sendable {
+// std/task.pr — Concurrency handles from go expressions
+type Task[T] `native `public `sendable `sharable `single_owner `doc("A handle to a running goroutine spawned by `go`. Await it with `<-t`, which consumes the handle and yields the result. Move-only: a task has exactly one awaiter.") {
+}
+
+type FailableTask[T] `native `public `sendable `sharable `single_owner `doc("A handle to a running goroutine spawned by `go!`. Await it with `<-t`, which consumes the handle and yields a failable result. Move-only: a task has exactly one awaiter.") {
 }

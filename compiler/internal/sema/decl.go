@@ -403,6 +403,27 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 			c.validateDropMethod(named, dropMethod, d)
 			named.SetHasDrop(true)
 		}
+		// T1413: process capability annotations on native types so the flags
+		// are the single source of truth — no hardcoded identity lists needed.
+		if c.hasAnnotation(d.Annotations, "sendable") {
+			named.SetSendable(true)
+		}
+		if c.hasAnnotation(d.Annotations, "sharable") {
+			named.SetSharable(true)
+		}
+		if c.hasAnnotation(d.Annotations, "not_sendable") {
+			named.SetNotSendable(true)
+		}
+		if c.hasAnnotation(d.Annotations, "not_sharable") {
+			named.SetNotSharable(true)
+		}
+		if c.hasAnnotation(d.Annotations, "confined") {
+			named.SetConfined(true)
+			named.SetNotSharable(true)
+		}
+		if c.hasAnnotation(d.Annotations, "single_owner") {
+			named.SetSingleOwner(true)
+		}
 		c.validateMetas(d.Annotations, TargetType)
 		if c.hasAnnotation(d.Annotations, "public") {
 			named.SetExported(true)
@@ -539,6 +560,11 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	if c.hasAnnotation(d.Annotations, "confined") {
 		named.SetConfined(true)
 		named.SetNotSharable(true)
+	}
+	// T1413: `single_owner marks a move-only handle with no clone() semantics.
+	// A type transitively containing a single-owner handle is non-cloneable.
+	if c.hasAnnotation(d.Annotations, "single_owner") {
+		named.SetSingleOwner(true)
 	}
 	// Detect and validate value types (all fields are `value placement).
 	// Must run after field/meta processing, before drop/new validation.
@@ -1205,6 +1231,10 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 	if c.hasAnnotation(d.Annotations, "confined") {
 		enum.SetConfined(true)
 		enum.SetNotSharable(true)
+	}
+	// T1413: `single_owner marks a move-only handle with no clone() semantics.
+	if c.hasAnnotation(d.Annotations, "single_owner") {
+		enum.SetSingleOwner(true)
 	}
 }
 

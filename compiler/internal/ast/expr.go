@@ -207,14 +207,6 @@ type GoExpr struct {
 
 func (*GoExpr) exprTag() {}
 
-// UnsafeExpr represents an unsafe block: unsafe { body }.
-type UnsafeExpr struct {
-	nodeBase
-	Body *Block
-}
-
-func (*UnsafeExpr) exprTag() {}
-
 // LambdaExpr represents a lambda expression.
 type LambdaExpr struct {
 	nodeBase

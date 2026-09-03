@@ -154,19 +154,6 @@ func TestFunctionTypeReturnFunction(t *testing.T) {
 	codegentest.AssertContains(t, ir, "extractvalue { i8*, i8* }")
 }
 
-// --- Part E: Unsafe blocks ---
-
-func TestUnsafeBlock(t *testing.T) {
-	ir := codegentest.GenerateIR(t, `
-		main() {
-			unsafe {
-				int x = 42;
-			}
-		}
-	`)
-	codegentest.AssertContains(t, ir, "store i64 42")
-}
-
 // --- Coverage gap tests ---
 
 // genIfExpr: if-as-expression with phi merge

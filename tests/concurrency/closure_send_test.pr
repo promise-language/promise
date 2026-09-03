@@ -792,20 +792,6 @@ capture_through_match_arm_guard() `test {
   assert((<-done)! == 7, "match-guard capture keeps its env");
 }
 
-// Captured only through an `unsafe { … }` body. `unsafe` relaxes safety checks
-// on the operations inside it; it does not change what the block captures.
-capture_through_unsafe_block() `test {
-  done := channel[int](1);
-  int base = 150;
-  f := |int x| -> x + base;
-  go {
-    unsafe {
-      done.send(f(1));
-    }
-  };
-  assert((<-done)! == 151, "unsafe-block capture keeps its env");
-}
-
 // --- T1698: the arm PATTERN, a shape NEITHER walker visited ---
 //
 // `match true { <expr> => … }` puts an arbitrary expression in pattern position.
@@ -918,9 +904,8 @@ capture_through_else_if_tail_else() `test {
   assert((<-done)! == 201, "else-if tail-else capture keeps its env");
 }
 
-// The bare-block arm is recursive, and it composes with the `unsafe` arm in both
-// orders. A single flat bare block would still pass against a walk that only
-// looked one level deep.
+// The bare-block arm is recursive. A single flat bare block would still pass
+// against a walk that only looked one level deep.
 capture_through_nested_bare_blocks() `test {
   done := channel[int](1);
   int base = 210;
@@ -933,34 +918,6 @@ capture_through_nested_bare_blocks() `test {
     }
   };
   assert((<-done)! == 211, "doubly nested bare-block capture keeps its env");
-}
-
-capture_through_unsafe_inside_bare_block() `test {
-  done := channel[int](1);
-  int base = 220;
-  f := |int x| -> x + base;
-  go {
-    {
-      unsafe {
-        done.send(f(1));
-      }
-    }
-  };
-  assert((<-done)! == 221, "unsafe-in-block capture keeps its env");
-}
-
-capture_through_bare_block_inside_unsafe() `test {
-  done := channel[int](1);
-  int base = 230;
-  f := |int x| -> x + base;
-  go {
-    unsafe {
-      {
-        done.send(f(1));
-      }
-    }
-  };
-  assert((<-done)! == 231, "block-in-unsafe capture keeps its env");
 }
 
 // --- Sendable aggregates that HOLD a closure ---

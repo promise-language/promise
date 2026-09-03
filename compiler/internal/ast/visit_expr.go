@@ -643,17 +643,6 @@ func (b *Builder) VisitGoExpr(ctx *parser.GoExprContext) interface{} {
 	return node
 }
 
-func (b *Builder) VisitUnsafeExpression(ctx *parser.UnsafeExpressionContext) interface{} {
-	return ctx.UnsafeBlock().Accept(b)
-}
-
-func (b *Builder) VisitUnsafeBlock(ctx *parser.UnsafeBlockContext) interface{} {
-	return &UnsafeExpr{
-		nodeBase: b.baseFromContext(ctx),
-		Body:     b.visitBlock(ctx.Block()),
-	}
-}
-
 func (b *Builder) VisitTypeInstCallExpr(ctx *parser.TypeInstCallExprContext) interface{} {
 	tac := ctx.TypeArgs().(*parser.TypeArgsContext)
 	refs := tac.AllTypeRef()

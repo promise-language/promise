@@ -169,20 +169,6 @@ func TestSubstMutRef(t *testing.T) {
 	}
 }
 
-func TestSubstPointer(t *testing.T) {
-	tp := makeTP("T", 0)
-	ptr := NewPointer(tp)
-	subst := map[*TypeParam]Type{tp: TypBool}
-	result := Substitute(ptr, subst)
-	rptr, ok := result.(*Pointer)
-	if !ok {
-		t.Fatalf("expected Pointer, got %T", result)
-	}
-	if rptr.Elem() != TypBool {
-		t.Errorf("expected bool*, got %s", result)
-	}
-}
-
 func TestSubstNoOpReturnsSamePointer(t *testing.T) {
 	// Named types should be returned unchanged
 	result := Substitute(TypInt, map[*TypeParam]Type{makeTP("T", 0): TypString})

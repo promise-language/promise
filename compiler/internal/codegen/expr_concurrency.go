@@ -1416,12 +1416,6 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 			}
 		case *ast.ParenExpr:
 			walkExpr(e.Expr)
-		case *ast.UnsafeExpr:
-			if e.Body != nil {
-				for _, s := range e.Body.Stmts {
-					walkStmt(s)
-				}
-			}
 		}
 	}
 

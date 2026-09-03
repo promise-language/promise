@@ -125,7 +125,6 @@ var metaParamSpecs = map[string]metaParamSpec{
 	"required":     noParams,
 	"flatten":      noParams,
 	"public":       noParams,
-	"unsafe":       noParams,
 	"final":        noParams,
 	"factory":      noParams,
 	"sendable":     noParams,

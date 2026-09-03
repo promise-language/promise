@@ -161,8 +161,6 @@ func (ra *returnAliasWalker) walkExpr(e ast.Expr) {
 		ra.walkExpr(ex.Expr)
 		ra.walkBlock(ex.Body)
 		ra.walkBlock(ex.ElseBody)
-	case *ast.UnsafeExpr:
-		ra.walkBlock(ex.Body)
 	case *ast.BinaryExpr:
 		ra.walkExpr(ex.Left)
 		ra.walkExpr(ex.Right)

@@ -10,15 +10,14 @@ import (
 
 // Checker performs ownership analysis on a type-checked AST.
 type Checker struct {
-	file     *ast.File
-	info     *sema.Info
-	errors   []error
-	state    StateMap
-	borrows  *BorrowSet       // active borrow tracking
-	params   map[string]bool  // parameter names for current function
-	curSig   *types.Signature // current function signature (for return checks)
-	inUnsafe int
-	pinned   map[string]bool // use-bound variables that cannot be moved
+	file    *ast.File
+	info    *sema.Info
+	errors  []error
+	state   StateMap
+	borrows *BorrowSet       // active borrow tracking
+	params  map[string]bool  // parameter names for current function
+	curSig  *types.Signature // current function signature (for return checks)
+	pinned  map[string]bool  // use-bound variables that cannot be moved
 
 	// T1385: inside a `go {}` / `go! {}` block body, `return <expr>` yields the
 	// GOROUTINE's result (§17.2 explicit-return style), not the enclosing

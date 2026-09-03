@@ -66,13 +66,6 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		}
 		return types.NewMutRef(inner)
 
-	case *ast.PointerTypeRef:
-		inner := c.resolveType(r.Inner)
-		if inner == nil {
-			return nil
-		}
-		return types.NewPointer(inner)
-
 	case *ast.OptionalTypeRef:
 		inner := c.resolveType(r.Inner)
 		if inner == nil {

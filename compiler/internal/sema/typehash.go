@@ -251,9 +251,6 @@ func hTypeRef(h hash.Hash, tr ast.TypeRef) {
 	case *ast.MutRefTypeRef:
 		wb(h, 6)
 		hTypeRef(h, t.Inner)
-	case *ast.PointerTypeRef:
-		wb(h, 7)
-		hTypeRef(h, t.Inner)
 	case *ast.OptionalTypeRef:
 		wb(h, 8)
 		hTypeRef(h, t.Inner)
@@ -537,9 +534,6 @@ func hExpr(h hash.Hash, e ast.Expr) {
 			wb(h, 0)
 			hBlock(h, ex.Block)
 		}
-	case *ast.UnsafeExpr:
-		wb(h, 17)
-		hBlock(h, ex.Body)
 	case *ast.LambdaExpr:
 		wb(h, 18)
 		wbool(h, ex.Move)

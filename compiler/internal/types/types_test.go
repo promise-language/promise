@@ -633,13 +633,6 @@ func TestRefs(t *testing.T) {
 			},
 		},
 		{
-			name: "pointer",
-			check: func(t *testing.T) {
-				p := NewPointer(TypInt)
-				assertEqual(t, p.String(), "int*")
-			},
-		},
-		{
 			name: "nested_optional",
 			check: func(t *testing.T) {
 				// int&?  (SharedRef of int, then Optional of that)
@@ -937,8 +930,6 @@ func TestIdentical(t *testing.T) {
 		{"diff_shared_ref", NewSharedRef(TypInt), NewSharedRef(TypString), false},
 		{"same_mut_ref", NewMutRef(TypInt), NewMutRef(TypInt), true},
 		{"diff_mut_ref", NewMutRef(TypInt), NewMutRef(TypString), false},
-		{"same_pointer", NewPointer(TypInt), NewPointer(TypInt), true},
-		{"diff_pointer", NewPointer(TypInt), NewPointer(TypString), false},
 		{"same_tuple", NewTuple([]Type{TypInt, TypString}), NewTuple([]Type{TypInt, TypString}), true},
 		{"diff_tuple", NewTuple([]Type{TypInt, TypString}), NewTuple([]Type{TypString, TypInt}), false},
 		{"diff_tuple_len", NewTuple([]Type{TypInt}), NewTuple([]Type{TypInt, TypString}), false},
@@ -1284,8 +1275,7 @@ func TestIsCopy(t *testing.T) {
 			false,
 		},
 
-		// Pointers and signatures: not in the Copy switch → false.
-		{"raw_pointer", NewPointer(TypInt), false},
+		// Signatures: not in the Copy switch → false.
 		{"signature", NewSignature(nil, nil, nil, false), false},
 
 		// nil: false.

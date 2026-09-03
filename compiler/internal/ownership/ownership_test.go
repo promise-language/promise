@@ -341,62 +341,6 @@ func TestMultipleSharedNoBorrowConflict(t *testing.T) {
 	}
 }
 
-// === Unsafe pointer (unit tests — sema doesn't yet support pointer value construction) ===
-
-func TestIsPointerTypeRef(t *testing.T) {
-	ptr := &ast.PointerTypeRef{}
-	if !isPointerTypeRef(ptr) {
-		t.Error("expected PointerTypeRef to be detected as pointer")
-	}
-	named := &ast.NamedTypeRef{}
-	if isPointerTypeRef(named) {
-		t.Error("expected NamedTypeRef to NOT be detected as pointer")
-	}
-}
-
-func TestPointerCheckOutsideUnsafe(t *testing.T) {
-	// Directly test the pointer check in checkTypedVarDecl.
-	c := &Checker{
-		state:    make(StateMap),
-		inUnsafe: 0,
-		info:     &sema.Info{Types: make(map[ast.Expr]types.Type), Objects: make(map[*ast.IdentExpr]types.Object), Scopes: make(map[ast.Node]*types.Scope)},
-	}
-
-	decl := &ast.TypedVarDecl{
-		Type:  &ast.PointerTypeRef{},
-		Name:  "p",
-		Value: &ast.IntLit{Raw: "0"},
-	}
-	c.checkTypedVarDecl(decl)
-
-	if len(c.errors) != 1 {
-		t.Fatalf("expected 1 pointer error, got %d: %v", len(c.errors), c.errors)
-	}
-	if !strings.Contains(c.errors[0].Error(), "raw pointer") {
-		t.Errorf("expected 'raw pointer' error, got: %v", c.errors[0])
-	}
-}
-
-func TestPointerCheckInsideUnsafe(t *testing.T) {
-	// Same declaration but inside unsafe — no error.
-	c := &Checker{
-		state:    make(StateMap),
-		inUnsafe: 1,
-		info:     &sema.Info{Types: make(map[ast.Expr]types.Type), Objects: make(map[*ast.IdentExpr]types.Object), Scopes: make(map[ast.Node]*types.Scope)},
-	}
-
-	decl := &ast.TypedVarDecl{
-		Type:  &ast.PointerTypeRef{},
-		Name:  "p",
-		Value: &ast.IntLit{Raw: "0"},
-	}
-	c.checkTypedVarDecl(decl)
-
-	if len(c.errors) != 0 {
-		t.Errorf("expected no errors inside unsafe, got: %v", c.errors)
-	}
-}
-
 // === Member access after move ===
 
 func TestUseAfterMoveViaMemberAccess(t *testing.T) {
@@ -1355,17 +1299,6 @@ func TestGoExprExprMoveTracking(t *testing.T) {
 	c := newUnitChecker()
 	ident := movedIdent(c, "s")
 	c.checkExpr(&ast.GoExpr{Expr: ident})
-	expectOwnerError(t, c.errors, "use of moved variable 's'")
-}
-
-func TestUnsafeExprMoveTracking(t *testing.T) {
-	c := newUnitChecker()
-	ident := movedIdent(c, "s")
-	c.checkExpr(&ast.UnsafeExpr{
-		Body: &ast.Block{
-			Stmts: []ast.Stmt{&ast.ExprStmt{Expr: ident}},
-		},
-	})
 	expectOwnerError(t, c.errors, "use of moved variable 's'")
 }
 

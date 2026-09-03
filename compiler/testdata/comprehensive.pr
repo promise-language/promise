@@ -74,7 +74,7 @@ forceRead(String path) String {
 }
 
 // ============================================================
-// Ownership: borrows, moves, unsafe
+// Ownership: borrows, moves
 // ============================================================
 
 borrowExample(String s) Int {
@@ -88,12 +88,6 @@ mutBorrowExample(Int[] ~arr) {
 moveExample() {
   String[] data = ["hello", "world"];
   String[] moved = move |data| { return data; };
-}
-
-unsafeExample() {
-  unsafe {
-    Int x = 42;
-  }
 }
 
 // ============================================================

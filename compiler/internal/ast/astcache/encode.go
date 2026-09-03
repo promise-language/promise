@@ -178,10 +178,6 @@ func (e *encoder) expr(x ast.Expr) {
 		e.expr(n.Expr)
 		e.blockOpt(n.Block)
 		e.bool_(n.Failable)
-	case *ast.UnsafeExpr:
-		e.u8(tagUnsafeExpr)
-		e.nodePos(n)
-		e.block(n.Body)
 	case *ast.LambdaExpr:
 		e.u8(tagLambdaExpr)
 		e.nodePos(n)
@@ -449,10 +445,6 @@ func (e *encoder) typeRef(t ast.TypeRef) {
 		e.typeRef(n.Inner)
 	case *ast.MutRefTypeRef:
 		e.u8(tagMutRefTypeRef)
-		e.nodePos(n)
-		e.typeRef(n.Inner)
-	case *ast.PointerTypeRef:
-		e.u8(tagPointerTypeRef)
 		e.nodePos(n)
 		e.typeRef(n.Inner)
 	case *ast.OptionalTypeRef:

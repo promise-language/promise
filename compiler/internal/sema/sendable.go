@@ -475,11 +475,6 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 			}
 		case *ast.ParenExpr:
 			walkExpr(ex.Expr)
-		case *ast.UnsafeExpr:
-			// T1658: mirrors collectBlockIdents' *ast.UnsafeExpr arm. `unsafe` only
-			// relaxes safety checks on the operations inside it — it does not change
-			// what the enclosing `go { … }` block captures.
-			walkBlock(ex.Body)
 		case *ast.ErrorPropagateExpr:
 			walkExpr(ex.Expr)
 		case *ast.ErrorPanicExpr:

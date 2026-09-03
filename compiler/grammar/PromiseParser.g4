@@ -236,7 +236,6 @@ typeRef
     | LPAREN typeRef RPAREN                                    # parenType
     | typeRef AMP                                              # sharedRefType
     | typeRef TILDE                                            # mutRefType
-    | typeRef STAR                                             # pointerType
     | typeRef QUESTION                                         # optionalType
     | typeRef LBRACKET RBRACKET                                # sliceType
     | typeRef LBRACKET INT_LITERAL RBRACKET                    # arrayType
@@ -286,7 +285,6 @@ statement
     | whileStmt
     | selectStmt                                               // block-terminated, no ;
     | matchExpr                                                // block-terminated, no ;
-    | unsafeBlock                                              // block-terminated, no ;
     | block                                                    // block-terminated, no ;
     | incDecStmt
     | assignmentStmt
@@ -512,7 +510,6 @@ primary
     | ifExpr                                                   # ifExpression
     | matchExpr                                                # matchExpression
     | goExpr                                                   # goExpression
-    | unsafeBlock                                              # unsafeExpression
     ;
 
 // ============================================================
@@ -596,12 +593,4 @@ patternFields
 
 goExpr
     : GO BANG? (block | expression)
-    ;
-
-// ============================================================
-// Unsafe Block
-// ============================================================
-
-unsafeBlock
-    : UNSAFE block
     ;

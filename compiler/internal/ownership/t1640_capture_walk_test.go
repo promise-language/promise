@@ -220,19 +220,6 @@ func TestT1640GoBlockCaptureWalkMatchArmGuard(t *testing.T) {
 	expectOwnerError(t, errs, "use of moved variable 'f'")
 }
 
-// T1658 — `walkExpr`'s `*ast.UnsafeExpr` arm: an `unsafe { … }` body inside a
-// `go { … }` block must not hide the captures in it.
-func TestT1640GoBlockCaptureWalkUnsafeBlock(t *testing.T) {
-	errs := ownerErrs(t, buildGoCaptureWalkSrc(goCaptureWalkCase{
-		body: `
-			unsafe {
-				done.send(f(1));
-			}
-		`,
-	}))
-	expectOwnerError(t, errs, "use of moved variable 'f'")
-}
-
 // --- T1698: the arm PATTERN, missed by BOTH walkers ---
 
 // `match true { <expr> => … }` puts an arbitrary expression in pattern position.
@@ -390,11 +377,6 @@ func TestT1658GoBlockCaptureWalkNewArmsFeedR5(t *testing.T) {
 				_ => 0,
 			};
 			done.send(r);
-		`},
-		{"unsafe_block", `
-			unsafe {
-				done.send(f(1));
-			}
 		`},
 		{"else_block", `
 			if 1 > 2 {

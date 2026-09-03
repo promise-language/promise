@@ -67,13 +67,6 @@ func doSubst(typ Type, subst map[*TypeParam]Type) Type {
 		}
 		return NewMutRef(inner)
 
-	case *Pointer:
-		inner := doSubst(t.elem, subst)
-		if inner == t.elem {
-			return t
-		}
-		return NewPointer(inner)
-
 	case *Tuple:
 		newElems := substList(t.elems, subst)
 		if typeSliceEq(newElems, t.elems) {
@@ -193,8 +186,6 @@ func ContainsTypeParam(typ Type) bool {
 		return ContainsTypeParam(t.elem)
 	case *MutRef:
 		return ContainsTypeParam(t.elem)
-	case *Pointer:
-		return ContainsTypeParam(t.elem)
 	case *Tuple:
 		for _, e := range t.elems {
 			if ContainsTypeParam(e) {
@@ -272,13 +263,6 @@ func doSelfSubst(typ Type, iface, concrete *Named) Type {
 			return t
 		}
 		return NewMutRef(inner)
-
-	case *Pointer:
-		inner := doSelfSubst(t.elem, iface, concrete)
-		if inner == t.elem {
-			return t
-		}
-		return NewPointer(inner)
 
 	case *Tuple:
 		changed := false

@@ -21,7 +21,6 @@ const (
 	tagIfExpr             = 15
 	tagMatchExpr          = 16
 	tagGoExpr             = 17
-	tagUnsafeExpr         = 18
 	tagLambdaExpr         = 19
 	tagIntLit             = 20
 	tagFloatLit           = 21
@@ -70,7 +69,6 @@ const (
 	tagFunctionTypeRef  = 84
 	tagSharedRefTypeRef = 85
 	tagMutRefTypeRef    = 86
-	tagPointerTypeRef   = 87
 	tagOptionalTypeRef  = 88
 	tagSliceTypeRef     = 89
 	tagArrayTypeRef     = 90

@@ -1089,15 +1089,6 @@ func TestBuildExpressions(t *testing.T) {
 			},
 		},
 		{
-			name: "unsafe_block",
-			src:  `f() { unsafe { x(); } }`,
-			check: func(t *testing.T, file *File) {
-				fn := file.Decls[0].(*FuncDecl)
-				es := fn.Body.Stmts[0].(*ExprStmt)
-				_ = es.Expr.(*UnsafeExpr)
-			},
-		},
-		{
 			name: "nested_block",
 			src:  `f() { x := 1; { x = 2; } }`,
 			check: func(t *testing.T, file *File) {
@@ -1805,16 +1796,6 @@ func TestBuildTypeRefsExtended(t *testing.T) {
 				fn := file.Decls[0].(*FuncDecl)
 				mrt := fn.Params[0].Type.(*MutRefTypeRef)
 				nt := mrt.Inner.(*NamedTypeRef)
-				assertEqual(t, nt.Name, "Int")
-			},
-		},
-		{
-			name: "pointer",
-			src:  `f(Int* x) {}`,
-			check: func(t *testing.T, file *File) {
-				fn := file.Decls[0].(*FuncDecl)
-				pt := fn.Params[0].Type.(*PointerTypeRef)
-				nt := pt.Inner.(*NamedTypeRef)
 				assertEqual(t, nt.Name, "Int")
 			},
 		},

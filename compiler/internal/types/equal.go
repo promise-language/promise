@@ -77,13 +77,6 @@ func Identical(x, y Type) bool {
 		}
 		return Identical(xt.elem, yt.elem)
 
-	case *Pointer:
-		yt, ok := y.(*Pointer)
-		if !ok {
-			return false
-		}
-		return Identical(xt.elem, yt.elem)
-
 	case *TypeParam:
 		// TypeParam identity is by declaration (pointer)
 		return false

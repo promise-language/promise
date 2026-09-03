@@ -338,8 +338,6 @@ func exprReassignsIdent(e ast.Expr, name string) bool {
 			identReassignedInBlock(ex.ElseBody, name)
 	case *ast.GoExpr:
 		return exprReassignsIdent(ex.Expr, name) || identReassignedInBlock(ex.Block, name)
-	case *ast.UnsafeExpr:
-		return identReassignedInBlock(ex.Body, name)
 	case *ast.LambdaExpr:
 		return exprReassignsIdent(ex.ExprBody, name) || identReassignedInBlock(ex.Body, name)
 	case *ast.ParenExpr:

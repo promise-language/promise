@@ -318,8 +318,6 @@ func (p *printer) printExpr(e Expr) {
 		} else {
 			p.line("Go")
 		}
-	case *UnsafeExpr:
-		p.line("Unsafe")
 	case *IsExpr:
 		p.line("Is")
 	case *CastExpr:
@@ -469,8 +467,6 @@ func (p *printer) typeRefStr(t TypeRef) string {
 		return p.typeRefStr(n.Inner) + "&"
 	case *MutRefTypeRef:
 		return p.typeRefStr(n.Inner) + "~"
-	case *PointerTypeRef:
-		return p.typeRefStr(n.Inner) + "*"
 	case *OptionalTypeRef:
 		return p.typeRefStr(n.Inner) + "?"
 	case *SliceTypeRef:

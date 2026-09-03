@@ -54,12 +54,6 @@ func TestT1658GoBlockArgPackCoversWalkedShapes(t *testing.T) {
 			body: `int r = match 1 { 1 if base > 1 => 7, _ => 0, }; done.send(r);`,
 		},
 		{
-			// T1658 — `*ast.UnsafeExpr`. `unsafe` relaxes safety checks on the
-			// operations inside it; it does not change what the block captures.
-			name: "unsafe_block",
-			body: `unsafe { done.send(base); }`,
-		},
-		{
 			// T1698 — `*ast.ExpressionMatchPattern`, the `match true { <expr> => … }`
 			// multi-way dispatch form. This is the case the arm-set parity guard is
 			// structurally blind to.

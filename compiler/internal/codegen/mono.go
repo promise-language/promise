@@ -102,8 +102,6 @@ func typeArgStr(typ types.Type) string {
 		return typeArgStr(t.Elem()) + "&"
 	case *types.MutRef:
 		return typeArgStr(t.Elem()) + "~"
-	case *types.Pointer:
-		return typeArgStr(t.Elem()) + "*"
 	case *types.Array:
 		return fmt.Sprintf("%s[%d]", typeArgStr(t.Elem()), t.Size())
 	case *types.TypeParam:
@@ -638,8 +636,6 @@ func containsTupleWrappingTypeParams(t types.Type, tps map[*types.TypeParam]bool
 		return containsTupleWrappingTypeParams(tt.Elem(), tps)
 	case *types.MutRef:
 		return containsTupleWrappingTypeParams(tt.Elem(), tps)
-	case *types.Pointer:
-		return containsTupleWrappingTypeParams(tt.Elem(), tps)
 	case *types.Array:
 		return containsTupleWrappingTypeParams(tt.Elem(), tps)
 	case *types.Signature:
@@ -683,8 +679,6 @@ func walkTypeContainsTypeParam(t types.Type, tps map[*types.TypeParam]bool) bool
 	case *types.SharedRef:
 		return walkTypeContainsTypeParam(tt.Elem(), tps)
 	case *types.MutRef:
-		return walkTypeContainsTypeParam(tt.Elem(), tps)
-	case *types.Pointer:
 		return walkTypeContainsTypeParam(tt.Elem(), tps)
 	case *types.Array:
 		return walkTypeContainsTypeParam(tt.Elem(), tps)
@@ -746,8 +740,6 @@ func typeStrictlyContains(haystack, needle types.Type) bool {
 		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
 	case *types.MutRef:
 		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
-	case *types.Pointer:
-		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
 	}
 	return false
 }
@@ -775,8 +767,6 @@ func discoverInstances(t types.Type, result *[]*types.Instance, seen map[string]
 	case *types.SharedRef:
 		discoverInstances(tt.Elem(), result, seen)
 	case *types.MutRef:
-		discoverInstances(tt.Elem(), result, seen)
-	case *types.Pointer:
 		discoverInstances(tt.Elem(), result, seen)
 	case *types.Array:
 		discoverInstances(tt.Elem(), result, seen)
@@ -893,8 +883,6 @@ func CollectArgTypeNames(inst *types.Instance) []*types.TypeName {
 		case *types.SharedRef:
 			visit(tt.Elem())
 		case *types.MutRef:
-			visit(tt.Elem())
-		case *types.Pointer:
 			visit(tt.Elem())
 		case *types.Array:
 			visit(tt.Elem())

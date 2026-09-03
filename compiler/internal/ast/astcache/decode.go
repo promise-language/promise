@@ -228,11 +228,6 @@ func (d *decoder) expr() ast.Expr {
 		n.Block = d.blockOpt()
 		n.Failable = d.bool_()
 		return n
-	case tagUnsafeExpr:
-		n := &ast.UnsafeExpr{}
-		d.setPosEnd(n)
-		n.Body = d.block()
-		return n
 	case tagLambdaExpr:
 		n := &ast.LambdaExpr{}
 		d.setPosEnd(n)
@@ -562,11 +557,6 @@ func (d *decoder) typeRef() ast.TypeRef {
 		return n
 	case tagMutRefTypeRef:
 		n := &ast.MutRefTypeRef{}
-		d.setPosEnd(n)
-		n.Inner = d.typeRef()
-		return n
-	case tagPointerTypeRef:
-		n := &ast.PointerTypeRef{}
 		d.setPosEnd(n)
 		n.Inner = d.typeRef()
 		return n

@@ -122,7 +122,6 @@ func TestReturnedHoldsThis_ExprForms(t *testing.T) {
 		"matchArmBody": &ast.MatchExpr{Arms: []*ast.MatchArm{{Body: &ast.IfExpr{Then: inner(), Else: blockOf()}}}},
 		"errHandler":   &ast.ErrorHandlerExpr{Body: inner()},
 		"errElse":      &ast.ErrorHandlerExpr{ElseBody: inner()},
-		"unsafe":       &ast.UnsafeExpr{Body: inner()},
 		"parenNested":  &ast.ParenExpr{Expr: &ast.IfExpr{Then: inner(), Else: blockOf()}},
 	}
 	for name, val := range cases {

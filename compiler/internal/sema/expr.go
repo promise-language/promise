@@ -423,9 +423,6 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.GoExpr:
 		typ = c.checkGoExpr(e)
 
-	case *ast.UnsafeExpr:
-		typ = c.checkUnsafeExpr(e)
-
 	case *ast.TypeRefExpr:
 		typ = c.resolveType(e.Ref)
 
@@ -4758,14 +4755,6 @@ func unwrapErrorOperator(expr ast.Expr) ast.Expr {
 		return e.Expr
 	}
 	return expr
-}
-
-func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {
-	c.openScope(e.Body, "unsafe")
-	c.checkBlock(e.Body)
-	c.closeScope()
-	// Unsafe block type is the last expression's type (if any)
-	return types.TypVoid
 }
 
 // resolveModuleMember resolves a qualified access like mod.symbol against

@@ -25,7 +25,6 @@ func TestT0724IdlToSnakeKeywords(t *testing.T) {
 		"yield":       "_yield",
 		"present":     "_present",
 		"absent":      "_absent",
-		"unsafe":      "_unsafe",
 		"normal":      "normal",
 		"tagName":     "tag_name",
 		"getURL":      "get_url",

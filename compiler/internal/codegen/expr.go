@@ -484,9 +484,6 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genLambdaExpr(e)
 	case *ast.OptionalChainExpr:
 		return c.genOptionalChainExpr(e)
-	case *ast.UnsafeExpr:
-		c.genBlock(e.Body)
-		return nil
 	case *ast.IsExpr:
 		return c.genIsExpr(e)
 	case *ast.CastExpr:

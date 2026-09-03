@@ -138,7 +138,6 @@ func TestT1640GoBlockWalkT1658Arms(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"bare_nested_block", `{ done.send(h.fd); }`},
 		{"match_arm_guard", "int r = match 1 { 1 if h.fd > 0 => 7, _ => 0, }; done.send(r);"},
-		{"unsafe_block", `unsafe { done.send(h.fd); }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			errs := checkErrs(t, goWalkArmSrc("", tc.body))
@@ -347,8 +346,6 @@ func TestT1658GoBlockWalkNestedBareBlocks(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"block_in_block", "{ { done.send(h.fd); } }"},
 		{"block_in_loop_body", "for int i = 0; i < 1; i = i + 1 { { done.send(h.fd); } }"},
-		{"block_in_unsafe", "unsafe { { done.send(h.fd); } }"},
-		{"unsafe_in_block", "{ unsafe { done.send(h.fd); } }"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			errs := checkErrs(t, goWalkArmSrc("", tc.body))
@@ -366,7 +363,6 @@ func TestT1658GoBlockWalkNewArmsRejectMutBorrow(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"bare_block", "{ done.send(n); }"},
 		{"match_arm_guard", "int r = match 1 { 1 if n > 0 => 7, _ => 0, }; done.send(r);"},
-		{"unsafe_block", "unsafe { done.send(n); }"},
 		{"else_block", "if 1 > 2 { done.send(0); } else { done.send(n); }"},
 		{"match_arm_pattern", "int r = match true { n > 0 => 7, _ => 0, }; done.send(r);"},
 	} {
@@ -390,7 +386,6 @@ func TestT1658GoBlockWalkNewArmsRejectMutBorrow(t *testing.T) {
 func TestT1658GoBlockWalkNewArmsIgnoreBlockLocals(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"bare_block", "{ local := Handle(fd: 3); done.send(local.fd); }"},
-		{"unsafe_block", "unsafe { local := Handle(fd: 3); done.send(local.fd); }"},
 		{"match_arm_guard", "local := Handle(fd: 3); int r = match 1 { 1 if local.fd > 0 => 7, _ => 0, }; done.send(r);"},
 		{"else_block", "if 1 > 2 { done.send(0); } else { local := Handle(fd: 3); done.send(local.fd); }"},
 	} {

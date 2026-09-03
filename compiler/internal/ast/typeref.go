@@ -56,14 +56,6 @@ type MutRefTypeRef struct {
 
 func (*MutRefTypeRef) typeRefTag() {}
 
-// PointerTypeRef represents a pointer type: T*.
-type PointerTypeRef struct {
-	nodeBase
-	Inner TypeRef
-}
-
-func (*PointerTypeRef) typeRefTag() {}
-
 // OptionalTypeRef represents an optional type: T?.
 type OptionalTypeRef struct {
 	nodeBase

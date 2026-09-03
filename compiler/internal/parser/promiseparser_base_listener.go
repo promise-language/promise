@@ -278,12 +278,6 @@ func (s *BasePromiseParserListener) EnterMutRefType(ctx *MutRefTypeContext) {}
 // ExitMutRefType is called when production mutRefType is exited.
 func (s *BasePromiseParserListener) ExitMutRefType(ctx *MutRefTypeContext) {}
 
-// EnterPointerType is called when production pointerType is entered.
-func (s *BasePromiseParserListener) EnterPointerType(ctx *PointerTypeContext) {}
-
-// ExitPointerType is called when production pointerType is exited.
-func (s *BasePromiseParserListener) ExitPointerType(ctx *PointerTypeContext) {}
-
 // EnterOptionalType is called when production optionalType is entered.
 func (s *BasePromiseParserListener) EnterOptionalType(ctx *OptionalTypeContext) {}
 
@@ -842,12 +836,6 @@ func (s *BasePromiseParserListener) EnterGoExpression(ctx *GoExpressionContext) 
 // ExitGoExpression is called when production goExpression is exited.
 func (s *BasePromiseParserListener) ExitGoExpression(ctx *GoExpressionContext) {}
 
-// EnterUnsafeExpression is called when production unsafeExpression is entered.
-func (s *BasePromiseParserListener) EnterUnsafeExpression(ctx *UnsafeExpressionContext) {}
-
-// ExitUnsafeExpression is called when production unsafeExpression is exited.
-func (s *BasePromiseParserListener) ExitUnsafeExpression(ctx *UnsafeExpressionContext) {}
-
 // EnterMapEntry is called when production mapEntry is entered.
 func (s *BasePromiseParserListener) EnterMapEntry(ctx *MapEntryContext) {}
 
@@ -1005,9 +993,3 @@ func (s *BasePromiseParserListener) EnterGoExpr(ctx *GoExprContext) {}
 
 // ExitGoExpr is called when production goExpr is exited.
 func (s *BasePromiseParserListener) ExitGoExpr(ctx *GoExprContext) {}
-
-// EnterUnsafeBlock is called when production unsafeBlock is entered.
-func (s *BasePromiseParserListener) EnterUnsafeBlock(ctx *UnsafeBlockContext) {}
-
-// ExitUnsafeBlock is called when production unsafeBlock is exited.
-func (s *BasePromiseParserListener) ExitUnsafeBlock(ctx *UnsafeBlockContext) {}

@@ -136,9 +136,6 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#mutRefType.
 	VisitMutRefType(ctx *MutRefTypeContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#pointerType.
-	VisitPointerType(ctx *PointerTypeContext) interface{}
-
 	// Visit a parse tree produced by PromiseParser#optionalType.
 	VisitOptionalType(ctx *OptionalTypeContext) interface{}
 
@@ -418,9 +415,6 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#goExpression.
 	VisitGoExpression(ctx *GoExpressionContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#unsafeExpression.
-	VisitUnsafeExpression(ctx *UnsafeExpressionContext) interface{}
-
 	// Visit a parse tree produced by PromiseParser#mapEntry.
 	VisitMapEntry(ctx *MapEntryContext) interface{}
 
@@ -498,7 +492,4 @@ type PromiseParserVisitor interface {
 
 	// Visit a parse tree produced by PromiseParser#goExpr.
 	VisitGoExpr(ctx *GoExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#unsafeBlock.
-	VisitUnsafeBlock(ctx *UnsafeBlockContext) interface{}
 }

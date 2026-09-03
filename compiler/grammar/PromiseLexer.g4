@@ -20,7 +20,6 @@ RAISE       : 'raise';
 YIELD       : 'yield';
 BREAK       : 'break';
 CONTINUE    : 'continue';
-UNSAFE      : 'unsafe';
 MOVE        : 'move';
 SELECT      : 'select';
 

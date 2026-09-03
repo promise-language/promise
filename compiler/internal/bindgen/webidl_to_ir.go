@@ -383,7 +383,7 @@ var promiseKeywords = map[string]bool{
 	"enum": true, "false": true, "for": true, "go": true, "if": true,
 	"in": true, "is": true, "match": true, "move": true, "none": true,
 	"present": true, "raise": true, "return": true, "select": true, "this": true,
-	"true": true, "type": true, "unsafe": true, "use": true, "while": true,
+	"true": true, "type": true, "use": true, "while": true,
 	"yield": true, "get": true, "set": true,
 }
 

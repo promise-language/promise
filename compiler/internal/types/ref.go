@@ -50,20 +50,3 @@ func (r *MutRef) Underlying() Type { return r }
 func (r *MutRef) String() string {
 	return r.elem.String() + "~"
 }
-
-// Pointer represents a raw pointer: T* (unsafe only).
-type Pointer struct {
-	elem Type
-}
-
-// NewPointer creates a new pointer type.
-func NewPointer(elem Type) *Pointer {
-	return &Pointer{elem: elem}
-}
-
-func (p *Pointer) Elem() Type       { return p.elem }
-func (p *Pointer) Underlying() Type { return p }
-
-func (p *Pointer) String() string {
-	return p.elem.String() + "*"
-}

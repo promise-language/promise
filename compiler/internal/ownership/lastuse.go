@@ -328,7 +328,7 @@ func isBackRefCarrier(typ types.Type) bool {
 // `name` would leave a dangling pointer. T0557.
 //
 // Scope: only walks expression sub-trees. Block-as-expression sub-blocks of
-// IfExpr/MatchExpr/ErrorHandlerExpr/UnsafeExpr/LambdaExpr/GoExpr are NOT
+// IfExpr/MatchExpr/ErrorHandlerExpr/LambdaExpr/GoExpr are NOT
 // traversed — a call inside `if cond { m.lock() } else { ... }` is not
 // currently detected.
 func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) bool {
@@ -998,9 +998,6 @@ func (a *lastUseAnalyzer) exprReferencesVar(expr ast.Expr, name string) bool {
 			return true
 		}
 		return a.blockReferencesVar(e.Block, name)
-
-	case *ast.UnsafeExpr:
-		return a.blockReferencesVar(e.Body, name)
 
 	case *ast.LambdaExpr:
 		// For lambdas, only captures matter — the lambda body runs later,

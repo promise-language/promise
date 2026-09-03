@@ -1,4 +1,4 @@
-// Ownership: borrows, mut borrows, move, unsafe, pointer types.
+// Ownership: borrows, mut borrows, move.
 
 type Resource {
   String data;
@@ -53,15 +53,5 @@ ownershipExamples() {
   String[] items = ["a", "b", "c"];
   f := move |x| {
     return items;
-  };
-
-  // Unsafe block as statement
-  unsafe {
-    Int raw = 42;
-  }
-
-  // Unsafe block in expression context
-  Int val = unsafe {
-    return 42;
   };
 }

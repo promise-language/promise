@@ -1058,7 +1058,7 @@ func (f *formatter) emitRegular(tok token) {
 			f.pendingBraceContext = ctxEnum
 		case "select":
 			f.pendingBraceContext = ctxSelect
-		case "if", "for", "while", "else", "go", "unsafe", "type":
+		case "if", "for", "while", "else", "go", "type":
 			f.pendingBraceContext = ctxBlock
 		}
 	}
@@ -1594,7 +1594,7 @@ func isWord(tok token) bool {
 
 func isControlKeyword(text string) bool {
 	switch text {
-	case "if", "for", "while", "match", "select", "go", "else", "unsafe",
+	case "if", "for", "while", "match", "select", "go", "else",
 		"return", "raise", "yield", "in":
 		return true
 	}

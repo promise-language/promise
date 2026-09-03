@@ -75,13 +75,6 @@ func (b *Builder) VisitMutRefType(ctx *parser.MutRefTypeContext) interface{} {
 	}
 }
 
-func (b *Builder) VisitPointerType(ctx *parser.PointerTypeContext) interface{} {
-	return &PointerTypeRef{
-		nodeBase: b.baseFromContext(ctx),
-		Inner:    b.visitTypeRef(ctx.TypeRef()),
-	}
-}
-
 func (b *Builder) VisitOptionalType(ctx *parser.OptionalTypeContext) interface{} {
 	return &OptionalTypeRef{
 		nodeBase: b.baseFromContext(ctx),

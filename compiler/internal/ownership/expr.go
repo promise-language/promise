@@ -213,11 +213,6 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.checkGoDroppableCaptures(e) // T1641: mark non-closure droppable captures as moved
 		}
 
-	case *ast.UnsafeExpr:
-		c.inUnsafe++
-		c.checkBlock(e.Body)
-		c.inUnsafe--
-
 	case *ast.LambdaExpr:
 		c.checkLambdaExpr(e)
 

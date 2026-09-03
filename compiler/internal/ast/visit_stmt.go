@@ -55,12 +55,6 @@ func (b *Builder) VisitStatement(ctx *parser.StatementContext) interface{} {
 			Expr:     c.Accept(b).(Expr),
 		}
 	}
-	if c := ctx.UnsafeBlock(); c != nil {
-		return &ExprStmt{
-			nodeBase: b.baseFromContext(ctx),
-			Expr:     c.Accept(b).(Expr),
-		}
-	}
 	if c := ctx.Block(); c != nil {
 		return b.visitBlock(c)
 	}

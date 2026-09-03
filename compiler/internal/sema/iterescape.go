@@ -198,8 +198,6 @@ func (w *holdsThisWalker) walkExpr(e ast.Expr) {
 		w.walkExpr(ex.Expr)
 		w.walkBlock(ex.Body)
 		w.walkBlock(ex.ElseBody)
-	case *ast.UnsafeExpr:
-		w.walkBlock(ex.Body)
 	case *ast.ParenExpr:
 		w.walkExpr(ex.Expr)
 	}

@@ -179,10 +179,6 @@ func (v *BasePromiseParserVisitor) VisitMutRefType(ctx *MutRefTypeContext) inter
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitPointerType(ctx *PointerTypeContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BasePromiseParserVisitor) VisitOptionalType(ctx *OptionalTypeContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -555,10 +551,6 @@ func (v *BasePromiseParserVisitor) VisitGoExpression(ctx *GoExpressionContext) i
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitUnsafeExpression(ctx *UnsafeExpressionContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BasePromiseParserVisitor) VisitMapEntry(ctx *MapEntryContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -660,9 +652,5 @@ func (v *BasePromiseParserVisitor) VisitPatternFields(ctx *PatternFieldsContext)
 }
 
 func (v *BasePromiseParserVisitor) VisitGoExpr(ctx *GoExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitUnsafeBlock(ctx *UnsafeBlockContext) interface{} {
 	return v.VisitChildren(ctx)
 }

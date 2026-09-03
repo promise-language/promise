@@ -137,12 +137,6 @@ func unifyType(paramType, argType types.Type, bindings map[*types.TypeParam]type
 		}
 		return unifyType(pt.Elem(), argType, bindings)
 
-	case *types.Pointer:
-		if ap, ok := argType.(*types.Pointer); ok {
-			return unifyType(pt.Elem(), ap.Elem(), bindings)
-		}
-		return true
-
 	case *types.Signature:
 		as, ok := argType.(*types.Signature)
 		if !ok {

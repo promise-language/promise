@@ -687,11 +687,6 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 		if inner != nil {
 			return types.NewMutRef(inner)
 		}
-	case *ast.PointerTypeRef:
-		inner := c.resolveTypeRefToType(r.Inner)
-		if inner != nil {
-			return types.NewPointer(inner)
-		}
 	case *ast.TupleTypeRef:
 		elems := make([]types.Type, len(r.Elements))
 		for i, e := range r.Elements {

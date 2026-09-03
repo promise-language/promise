@@ -72,7 +72,6 @@ var builtinMetas = map[string][]MetaTarget{
 	"required":     {TargetField},
 	"flatten":      {TargetField},
 	"public":       {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},
-	"unsafe":       {TargetFunc, TargetMethod},
 	"final":        {TargetField},
 	"factory":      {TargetMethod},
 	"embed":        {TargetFunc},

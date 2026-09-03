@@ -136,9 +136,6 @@ type PromiseParserListener interface {
 	// EnterMutRefType is called when entering the mutRefType production.
 	EnterMutRefType(c *MutRefTypeContext)
 
-	// EnterPointerType is called when entering the pointerType production.
-	EnterPointerType(c *PointerTypeContext)
-
 	// EnterOptionalType is called when entering the optionalType production.
 	EnterOptionalType(c *OptionalTypeContext)
 
@@ -418,9 +415,6 @@ type PromiseParserListener interface {
 	// EnterGoExpression is called when entering the goExpression production.
 	EnterGoExpression(c *GoExpressionContext)
 
-	// EnterUnsafeExpression is called when entering the unsafeExpression production.
-	EnterUnsafeExpression(c *UnsafeExpressionContext)
-
 	// EnterMapEntry is called when entering the mapEntry production.
 	EnterMapEntry(c *MapEntryContext)
 
@@ -498,9 +492,6 @@ type PromiseParserListener interface {
 
 	// EnterGoExpr is called when entering the goExpr production.
 	EnterGoExpr(c *GoExprContext)
-
-	// EnterUnsafeBlock is called when entering the unsafeBlock production.
-	EnterUnsafeBlock(c *UnsafeBlockContext)
 
 	// ExitCompilationUnit is called when exiting the compilationUnit production.
 	ExitCompilationUnit(c *CompilationUnitContext)
@@ -630,9 +621,6 @@ type PromiseParserListener interface {
 
 	// ExitMutRefType is called when exiting the mutRefType production.
 	ExitMutRefType(c *MutRefTypeContext)
-
-	// ExitPointerType is called when exiting the pointerType production.
-	ExitPointerType(c *PointerTypeContext)
 
 	// ExitOptionalType is called when exiting the optionalType production.
 	ExitOptionalType(c *OptionalTypeContext)
@@ -913,9 +901,6 @@ type PromiseParserListener interface {
 	// ExitGoExpression is called when exiting the goExpression production.
 	ExitGoExpression(c *GoExpressionContext)
 
-	// ExitUnsafeExpression is called when exiting the unsafeExpression production.
-	ExitUnsafeExpression(c *UnsafeExpressionContext)
-
 	// ExitMapEntry is called when exiting the mapEntry production.
 	ExitMapEntry(c *MapEntryContext)
 
@@ -993,7 +978,4 @@ type PromiseParserListener interface {
 
 	// ExitGoExpr is called when exiting the goExpr production.
 	ExitGoExpr(c *GoExprContext)
-
-	// ExitUnsafeBlock is called when exiting the unsafeBlock production.
-	ExitUnsafeBlock(c *UnsafeBlockContext)
 }

@@ -165,9 +165,6 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 					c.trackDeclOrder(s.Name, typ)
 				}
 			}
-			if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
-				c.errorf(s.Pos(), "raw pointer type used outside of unsafe block")
-			}
 			return
 		}
 		// T0816: reading a closure (function value) out of an owning aggregate
@@ -254,10 +251,6 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		c.flagLoopBodyOwnedLocal(s.Name, s.Value)
 	}
 	c.recordLaunderedHandleReq(s.Value, s.Pos()) // T1214/T1216: also for `_` discard
-	// Raw pointer types are only allowed inside unsafe blocks.
-	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
-		c.errorf(s.Pos(), "raw pointer type used outside of unsafe block")
-	}
 }
 
 // rejectBorrowedIdentVarDecl errors and returns true when `value` is an
@@ -515,12 +508,6 @@ func singleOwnerHandleKind(t types.Type) string {
 // handle, so both the source local and the caller's result drop it. T1138.
 func singleOwnerHandleKindDeep(t types.Type) string {
 	return singleOwnerHandleKind(peelOptional(t))
-}
-
-// isPointerTypeRef checks whether a type reference is a raw pointer type.
-func isPointerTypeRef(tr ast.TypeRef) bool {
-	_, ok := tr.(*ast.PointerTypeRef)
-	return ok
 }
 
 func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {

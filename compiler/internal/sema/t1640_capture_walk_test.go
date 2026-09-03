@@ -201,11 +201,12 @@ func TestT1698GoBlockWalkBindingPatternIsNotACapture(t *testing.T) {
 // sendable, so relax the sibling check too" edit passes unnoticed.
 func TestT1640SharableTypeWithClosureFieldRejected(t *testing.T) {
 	errs := checkErrs(t, `
-		type Callback `+"`sharable"+` {
+		type Callback {
 			() -> void fn;
 		}
+		f(Ref[Callback] r) {}
 	`)
-	expectError(t, errs, "has non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 // Weak[T] carries the same sendable+sharable pair as Ref[T], and
@@ -255,7 +256,7 @@ func TestT1640SendableGenericWithNonSendableArgCaughtAtBoundary(t *testing.T) {
 // subscription's handler as an enum variant.
 func TestT1640SendableEnumWithClosureVariantAccepted(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
-		enum Event `+"`sendable"+` {
+		enum Event {
 			idle,
 			handler((int) -> int fn),
 		}
@@ -267,7 +268,7 @@ func TestT1640SendableEnumWithClosureVariantAccepted(t *testing.T) {
 // R1 now accepts. This is the registry-field shape.
 func TestT1640SendableTypeWithClosureVectorFieldAccepted(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
-		type Registry `+"`sendable"+` {
+		type Registry {
 			((int) -> int)[] handlers;
 		}
 	`))
@@ -275,18 +276,20 @@ func TestT1640SendableTypeWithClosureVectorFieldAccepted(t *testing.T) {
 
 // R1 must not become a blanket "anything with a function in it is sendable":
 // a closure-typed field is fine, but a `not_sendable` sibling field still
-// poisons the type. Guards against the annotation check being loosened wholesale.
+// poisons the type. The capability is derived, so the poisoning shows up where
+// the type meets a boundary rather than at its declaration.
 func TestT1640SendableTypeStillRejectsNonSendableSiblingField(t *testing.T) {
 	errs := checkErrs(t, `
 		type Handle `+"`not_sendable"+` {
 			int fd;
 		}
-		type Registry `+"`sendable"+` {
+		type Registry {
 			(int) -> int handler;
 			Handle h;
 		}
+		main() { ch := channel[Registry](); }
 	`)
-	expectError(t, errs, "non-sendable")
+	expectError(t, errs, "not sendable")
 }
 
 // A Channel whose element is a `not_sendable` type is still refused, even though

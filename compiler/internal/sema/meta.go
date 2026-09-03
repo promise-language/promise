@@ -77,8 +77,10 @@ var builtinMetas = map[string][]MetaTarget{
 	"embed":        {TargetFunc},
 	"wasm_import":  {TargetFunc},
 	"lifetime":     {TargetParam, TargetFunc, TargetMethod},
-	"sendable":     {TargetType, TargetEnum},
-	"sharable":     {TargetType, TargetEnum},
+	// An assertion of unverifiable safety is `native-only (see the assertion/denial
+	// split in docs/annotations.md), and an enum can never be `native.
+	"sendable":     {TargetType},
+	"sharable":     {TargetType},
 	"not_sendable": {TargetType, TargetEnum},
 	"not_sharable": {TargetType, TargetEnum},
 	"confined":     {TargetType, TargetEnum},

@@ -581,10 +581,11 @@ func (c *Checker) validateSendableInstance(pos ast.Pos, origin types.Type, typeA
 	}
 }
 
-// validateSendableTypes runs after all types are defined to validate explicit
-// `sendable / `sharable annotations. If a non-native type is marked `sendable
-// but has a non-sendable field, that's an error. Native types use the tag as an
-// override and skip field validation.
+// validateSendableTypes runs after all types are defined to check that a
+// declaration's capability annotations do not contradict each other. The
+// assertions are `native-only (rejected at the declaration in decl.go), and a
+// native type has no Promise-level fields, so there is nothing to validate an
+// assertion against — only the contradictions remain.
 func (c *Checker) validateSendableTypes(file *ast.File) {
 	for _, decl := range file.Decls {
 		if c.info.FilteredDecls[decl] {
@@ -604,16 +605,6 @@ func (c *Checker) validateSendableTypeDecl(d *ast.TypeDecl) {
 	if obj == nil {
 		return
 	}
-	tn, ok := obj.(*types.TypeName)
-	if !ok {
-		return
-	}
-	named, ok := tn.Type().(*types.Named)
-	if !ok {
-		return
-	}
-
-	isNative := c.hasAnnotation(d.Annotations, "native")
 	hasSendable := c.hasAnnotation(d.Annotations, "sendable")
 	hasSharable := c.hasAnnotation(d.Annotations, "sharable")
 	hasNotSendable := c.hasAnnotation(d.Annotations, "not_sendable")
@@ -632,79 +623,16 @@ func (c *Checker) validateSendableTypeDecl(d *ast.TypeDecl) {
 	if hasConfined && hasSharable {
 		c.errorf(d.Pos(), "type %s has contradictory `confined and `sharable annotations", d.Name)
 	}
-
-	// Validate explicit `sendable assertion on non-native types
-	if hasSendable && !isNative {
-		for _, f := range named.Fields() {
-			if !isSendableType(f.Type(), make(map[types.Type]bool)) {
-				c.errorf(d.Pos(), "type %s is marked `sendable but field '%s' has non-sendable type %s",
-					d.Name, f.Name(), f.Type())
-			}
-		}
-	}
-
-	// Validate explicit `sharable assertion on non-native types
-	if hasSharable && !isNative {
-		for _, f := range named.Fields() {
-			if !isSharableType(f.Type(), make(map[types.Type]bool)) {
-				c.errorf(d.Pos(), "type %s is marked `sharable but field '%s' has non-sharable type %s",
-					d.Name, f.Name(), f.Type())
-			}
-		}
-	}
 }
 
 func (c *Checker) validateSendableEnumDecl(d *ast.EnumDecl) {
-	obj := c.declScope.Lookup(d.Name)
-	if obj == nil {
-		return
-	}
-	tn, ok := obj.(*types.TypeName)
-	if !ok {
-		return
-	}
-	enum, ok := tn.Type().(*types.Enum)
-	if !ok {
-		return
-	}
-
-	hasSendable := c.hasAnnotation(d.Annotations, "sendable")
-	hasSharable := c.hasAnnotation(d.Annotations, "sharable")
-	hasNotSendable := c.hasAnnotation(d.Annotations, "not_sendable")
-	hasNotSharable := c.hasAnnotation(d.Annotations, "not_sharable")
-	hasConfined := c.hasAnnotation(d.Annotations, "confined")
-
-	if hasSendable && hasNotSendable {
+	// `sendable / `sharable are `native-only assertions and an enum can never be
+	// `native, so validateMetas has already rejected them here. Only the denials
+	// reach an enum, and the one pair that can contradict is `confined (which
+	// implies not-sharable) against an explicit `not_sharable — which agree, so
+	// nothing is left to check but the denial pair itself.
+	if c.hasAnnotation(d.Annotations, "not_sendable") && c.hasAnnotation(d.Annotations, "sendable") {
 		c.errorf(d.Pos(), "enum %s has contradictory `sendable and `not_sendable annotations", d.Name)
-	}
-	if hasSharable && hasNotSharable {
-		c.errorf(d.Pos(), "enum %s has contradictory `sharable and `not_sharable annotations", d.Name)
-	}
-	// T0995: `confined and `sharable are mutually exclusive (see type decl).
-	if hasConfined && hasSharable {
-		c.errorf(d.Pos(), "enum %s has contradictory `confined and `sharable annotations", d.Name)
-	}
-
-	if hasSendable {
-		for _, v := range enum.Variants() {
-			for _, f := range v.Fields() {
-				if !isSendableType(f.Type(), make(map[types.Type]bool)) {
-					c.errorf(d.Pos(), "enum %s is marked `sendable but variant %s field '%s' has non-sendable type %s",
-						d.Name, v.Name(), f.Name(), f.Type())
-				}
-			}
-		}
-	}
-
-	if hasSharable {
-		for _, v := range enum.Variants() {
-			for _, f := range v.Fields() {
-				if !isSharableType(f.Type(), make(map[types.Type]bool)) {
-					c.errorf(d.Pos(), "enum %s is marked `sharable but variant %s field '%s' has non-sharable type %s",
-						d.Name, v.Name(), f.Name(), f.Type())
-				}
-			}
-		}
 	}
 }
 

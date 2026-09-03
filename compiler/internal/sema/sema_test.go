@@ -14698,7 +14698,7 @@ func TestWasmImportRequiresTwoParams(t *testing.T) {
 		main() {}
 	`
 	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
-	expectError(t, errs, "`wasm_import requires 2 positional parameters (module name, import name)")
+	expectError(t, errs, "`wasm_import requires 2 positional parameters (module, name)")
 }
 
 func TestWasmImportWarnsWithoutWasmTarget(t *testing.T) {
@@ -16759,49 +16759,8 @@ func TestArcConstructorWrongType(t *testing.T) {
 	expectError(t, errs, "cannot assign string")
 }
 
-// === Sendable / Sharable annotations (T0158) ===
-
-func TestSendableAutoDerive(t *testing.T) {
-	checkOK(t, `
-		type Point `+"`sendable"+` {
-			int x;
-			int y;
-		}
-	`)
-}
-
-func TestSendableNonSendableField(t *testing.T) {
-	errs := checkErrs(t, `
-		type Holder `+"`not_sendable"+` {
-			int x;
-		}
-		type Bad `+"`sendable"+` {
-			Holder h;
-		}
-	`)
-	expectError(t, errs, "non-sendable type Holder")
-}
-
-func TestSharableAutoDerive(t *testing.T) {
-	checkOK(t, `
-		type Point `+"`sharable"+` {
-			int x;
-			int y;
-		}
-	`)
-}
-
-func TestSharableNonSharableField(t *testing.T) {
-	errs := checkErrs(t, `
-		type Holder `+"`not_sharable"+` {
-			int x;
-		}
-		type Bad `+"`sharable"+` {
-			Holder h;
-		}
-	`)
-	expectError(t, errs, "non-sharable type Holder")
-}
+// === Sendable / Sharable denials (T0158) ===
+// The assertions are `native-only; see the assertion/denial tests in t1053_test.go.
 
 func TestNotSendableOptOut(t *testing.T) {
 	checkOK(t, `
@@ -16839,7 +16798,7 @@ func TestSharableContradictory(t *testing.T) {
 
 func TestSendableEnum(t *testing.T) {
 	checkOK(t, `
-		enum Color `+"`sendable"+` { Red, Green, Blue }
+		enum Color { Red, Green, Blue }
 	`)
 }
 
@@ -16848,16 +16807,17 @@ func TestSendableEnumNonSendableField(t *testing.T) {
 		type Holder `+"`not_sendable"+` {
 			int x;
 		}
-		enum Bad `+"`sendable"+` { A(Holder), B }
+		enum Bad { A(Holder), B }
+			main() { ch := channel[Holder](); }
 	`)
-	expectError(t, errs, "non-sendable type Holder")
+	expectError(t, errs, "is not sendable")
 }
 
 // T1640 (R1): a function value is sendable, so a `sendable type may hold one.
 // Inverts the pre-T1640 expectation that a closure field poisoned sendability.
 func TestSignatureIsSendable(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
-		type Callback `+"`sendable"+` {
+		type Callback {
 			() -> void fn;
 		}
 	`))
@@ -16946,7 +16906,7 @@ func TestConfinedRefRejectedAtChannel(t *testing.T) {
 func TestDefaultRefCrossesChannel(t *testing.T) {
 	// An unmarked (atomic) Ref of a sharable element is sendable across a channel.
 	checkOK(t, `
-		type Holder `+"`sharable"+` {
+		type Holder {
 			int x;
 		}
 		test() {
@@ -16993,14 +16953,17 @@ func TestConfinedEnumRejectedAtChannel(t *testing.T) {
 	expectError(t, errs, "not sendable")
 }
 
-func TestConfinedEnumSharableContradictory(t *testing.T) {
+// `sharable asserts a capability, so it is `native-only and an enum can never be
+// `native. The pairing with `confined is therefore unreachable — the target check
+// rejects the annotation before any contradiction can form.
+func TestConfinedEnumSharableRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Bad `+"`confined `sharable"+` {
 			A,
 			B
 		}
 	`)
-	expectError(t, errs, "contradictory")
+	expectError(t, errs, "cannot be applied to enum")
 }
 
 // `confined is a type/enum-only meta — applying it elsewhere is a target error.
@@ -17460,7 +17423,7 @@ func TestGoBangReceiveInFailableMethodBody(t *testing.T) {
 func TestSendableWithOptionalField(t *testing.T) {
 	// Optional of sendable type is sendable
 	checkOK(t, `
-		type Holder `+"`sendable"+` {
+		type Holder {
 			int? value;
 		}
 	`)
@@ -17471,11 +17434,12 @@ func TestSendableWithOptionalNonSendableField(t *testing.T) {
 		type Inner `+"`not_sendable"+` {
 			int x;
 		}
-		type Holder `+"`sendable"+` {
+		type Holder {
 			Inner? value;
 		}
+			main() { ch := channel[Holder](); }
 	`)
-	expectError(t, errs, "non-sendable type")
+	expectError(t, errs, "is not sendable")
 }
 
 // --- Coverage: isSendableType / isSharableType type branches ---
@@ -17483,7 +17447,7 @@ func TestSendableWithOptionalNonSendableField(t *testing.T) {
 func TestSendableWithVectorField(t *testing.T) {
 	// Instance type branch — Vector[int] is sendable (all-sendable element type)
 	checkOK(t, `
-		type Holder `+"`sendable"+` {
+		type Holder {
 			int[] items;
 		}
 	`)
@@ -17495,17 +17459,18 @@ func TestSendableWithNonSendableVectorField(t *testing.T) {
 		type Inner `+"`not_sendable"+` {
 			int x;
 		}
-		type Holder `+"`sendable"+` {
+		type Holder {
 			Inner[] items;
 		}
+			main() { ch := channel[Holder](); }
 	`)
-	expectError(t, errs, "non-sendable type")
+	expectError(t, errs, "is not sendable")
 }
 
 func TestSendableWithTupleField(t *testing.T) {
 	// Tuple type branch
 	checkOK(t, `
-		type Holder `+"`sendable"+` {
+		type Holder {
 			(int, bool) pair;
 		}
 	`)
@@ -17517,17 +17482,18 @@ func TestSendableWithNonSendableTupleField(t *testing.T) {
 		type Inner `+"`not_sendable"+` {
 			int x;
 		}
-		type Holder `+"`sendable"+` {
+		type Holder {
 			(int, Inner) pair;
 		}
+			main() { ch := channel[Holder](); }
 	`)
-	expectError(t, errs, "non-sendable type")
+	expectError(t, errs, "is not sendable")
 }
 
 func TestSendableWithArrayField(t *testing.T) {
 	// Array type branch
 	checkOK(t, `
-		type Holder `+"`sendable"+` {
+		type Holder {
 			int[3] arr;
 		}
 	`)
@@ -17538,18 +17504,19 @@ func TestSendableWithNonSendableArrayField(t *testing.T) {
 		type Inner `+"`not_sendable"+` {
 			int x;
 		}
-		type Holder `+"`sendable"+` {
+		type Holder {
 			Inner[2] arr;
 		}
+			main() { ch := channel[Holder](); }
 	`)
-	expectError(t, errs, "non-sendable type")
+	expectError(t, errs, "is not sendable")
 }
 
 func TestSendableWithEnumField(t *testing.T) {
 	// Enum type branch — auto-derived sendable enum as field
 	checkOK(t, `
 		enum Status { Active, Inactive }
-		type Holder `+"`sendable"+` {
+		type Holder {
 			Status s;
 		}
 	`)
@@ -17558,25 +17525,26 @@ func TestSendableWithEnumField(t *testing.T) {
 func TestSendableWithNonSendableEnumField(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Status `+"`not_sendable"+` { Active, Inactive }
-		type Holder `+"`sendable"+` {
+		type Holder {
 			Status s;
 		}
+			main() { ch := channel[Holder](); }
 	`)
-	expectError(t, errs, "non-sendable type")
+	expectError(t, errs, "is not sendable")
 }
 
 func TestSendableEnumWithEnumVariantField(t *testing.T) {
 	// Enum auto-derivation with variant fields that are themselves enums
 	checkOK(t, `
 		enum Inner { A, B }
-		enum Outer `+"`sendable"+` { X(Inner), Y }
+		enum Outer { X(Inner), Y }
 	`)
 }
 
 func TestSharableWithVectorField(t *testing.T) {
 	// Instance branch of isSharableType
 	checkOK(t, `
-		type Holder `+"`sharable"+` {
+		type Holder {
 			int[] items;
 		}
 	`)
@@ -17587,16 +17555,17 @@ func TestSharableWithNonSharableVectorField(t *testing.T) {
 		type Inner `+"`not_sharable"+` {
 			int x;
 		}
-		type Holder `+"`sharable"+` {
+		type Holder {
 			Inner[] items;
 		}
+			f(Ref[Holder] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 func TestSharableWithTupleField(t *testing.T) {
 	checkOK(t, `
-		type Holder `+"`sharable"+` {
+		type Holder {
 			(int, string) pair;
 		}
 	`)
@@ -17607,16 +17576,17 @@ func TestSharableWithNonSharableTupleField(t *testing.T) {
 		type Inner `+"`not_sharable"+` {
 			int x;
 		}
-		type Holder `+"`sharable"+` {
+		type Holder {
 			(Inner, int) pair;
 		}
+			f(Ref[Holder] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 func TestSharableWithArrayField(t *testing.T) {
 	checkOK(t, `
-		type Holder `+"`sharable"+` {
+		type Holder {
 			bool[4] flags;
 		}
 	`)
@@ -17624,7 +17594,7 @@ func TestSharableWithArrayField(t *testing.T) {
 
 func TestSharableWithOptionalField(t *testing.T) {
 	checkOK(t, `
-		type Holder `+"`sharable"+` {
+		type Holder {
 			int? value;
 		}
 	`)
@@ -17635,16 +17605,17 @@ func TestSharableWithOptionalNonSharableField(t *testing.T) {
 		type Inner `+"`not_sharable"+` {
 			int x;
 		}
-		type Holder `+"`sharable"+` {
+		type Holder {
 			Inner? value;
 		}
+			f(Ref[Holder] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 func TestSharableEnumAutoDerive(t *testing.T) {
 	checkOK(t, `
-		enum Color `+"`sharable"+` { Red, Green, Blue }
+		enum Color { Red, Green, Blue }
 	`)
 }
 
@@ -17653,32 +17624,34 @@ func TestSharableEnumNonSharableField(t *testing.T) {
 		type Inner `+"`not_sharable"+` {
 			int x;
 		}
-		enum Bad `+"`sharable"+` { A(Inner), B }
+		enum Bad { A(Inner), B }
+		f(Ref[Bad] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
-func TestSharableEnumContradictory(t *testing.T) {
+func TestSharableEnumRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Bad `+"`sharable `not_sharable"+` { A, B }
 	`)
-	expectError(t, errs, "contradictory")
+	expectError(t, errs, "cannot be applied to enum")
 }
 
-func TestSendableEnumContradictory(t *testing.T) {
+func TestSendableEnumRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Bad `+"`sendable `not_sendable"+` { A, B }
 	`)
-	expectError(t, errs, "contradictory")
+	expectError(t, errs, "cannot be applied to enum")
 }
 
 func TestSignatureNotSharable(t *testing.T) {
 	errs := checkErrs(t, `
-		type Callback `+"`sharable"+` {
+		type Callback {
 			() -> void fn;
 		}
+		f(Ref[Callback] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 // --- Coverage: checkGoBlockSendable walker branches ---
@@ -17896,7 +17869,7 @@ func TestSharableWithEnumField(t *testing.T) {
 	// Exercises the *types.Enum branch of isSharableType
 	checkOK(t, `
 		enum Status { Active, Inactive }
-		type Holder `+"`sharable"+` {
+		type Holder {
 			Status s;
 		}
 	`)
@@ -17905,11 +17878,12 @@ func TestSharableWithEnumField(t *testing.T) {
 func TestSharableWithNonSharableEnumField(t *testing.T) {
 	errs := checkErrs(t, `
 		enum Status `+"`not_sharable"+` { Active, Inactive }
-		type Holder `+"`sharable"+` {
+		type Holder {
 			Status s;
 		}
+			f(Ref[Holder] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 func TestSharableWithNonSharableArrayField(t *testing.T) {
@@ -17917,11 +17891,12 @@ func TestSharableWithNonSharableArrayField(t *testing.T) {
 		type Inner `+"`not_sharable"+` {
 			int x;
 		}
-		type Holder `+"`sharable"+` {
+		type Holder {
 			Inner[2] arr;
 		}
+			f(Ref[Holder] r) {}
 	`)
-	expectError(t, errs, "non-sharable type")
+	expectError(t, errs, "is not sharable")
 }
 
 func TestGoBlockCaptureInIfElse(t *testing.T) {

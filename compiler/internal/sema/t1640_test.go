@@ -241,12 +241,12 @@ func TestT1640MapOfClosuresIsSendable(t *testing.T) {
 	`))
 }
 
-// A `sendable`-annotated generic instantiated with a function type is accepted:
-// validateSendableInstance re-runs isSendableType on the concrete argument, and
-// R1 makes a Signature pass. Before T1640 this was a hard error.
+// A generic instantiated with a function type is accepted: the derivation runs
+// isSendableType on the concrete argument, and R1 makes a Signature pass. Before
+// T1640 this was a hard error.
 func TestT1640SendableGenericInstantiatedWithClosure(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
-		type Box[T] `+"`sendable"+` {
+		type Box[T] {
 			T value;
 		}
 		main() {

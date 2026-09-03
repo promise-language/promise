@@ -543,13 +543,20 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		c.processSerializableType(named, d)
 	}
 
-	// Process `sendable / `sharable / `not_sendable / `not_sharable: set flags.
-	// Validation is deferred to validateSendableTypes() after all types are defined.
-	if c.hasAnnotation(d.Annotations, "sendable") {
-		named.SetSendable(true)
-	}
-	if c.hasAnnotation(d.Annotations, "sharable") {
-		named.SetSharable(true)
+	// `sendable / `sharable ASSERT a capability the compiler cannot verify, so
+	// they are `native-only — this is the non-native path, and the standard rule
+	// that a capability is derived from a type's fields already decides the answer
+	// here. Writing one could therefore only ever restate the derivation, never
+	// override it. `not_sendable / `not_sharable DENY, which is sound on any type
+	// and stays available below. See the assertion/denial split in
+	// docs/annotations.md.
+	for _, name := range []string{"sendable", "sharable"} {
+		if ann := c.findAnnotation(d.Annotations, name); ann != nil {
+			c.errorf(ann.Pos(), "`%s requires `native on type %s: the capability is derived "+
+				"from the type's fields, so asserting it here could only restate what is "+
+				"already true — use `not_%s to deny a capability the fields would derive",
+				name, d.Name, name)
+		}
 	}
 	if c.hasAnnotation(d.Annotations, "not_sendable") {
 		named.SetNotSendable(true)
@@ -1208,14 +1215,8 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		c.processSerializableEnum(enum, d)
 	}
 
-	// Process `sendable / `sharable / `not_sendable / `not_sharable: set flags.
-	// Validation is deferred to validateSendableTypes() after all types are defined.
-	if c.hasAnnotation(d.Annotations, "sendable") {
-		enum.SetSendable(true)
-	}
-	if c.hasAnnotation(d.Annotations, "sharable") {
-		enum.SetSharable(true)
-	}
+	// Only the denials apply to an enum: `sendable / `sharable are `native-only
+	// and an enum can never be `native, so validateMetas rejects them here.
 	if c.hasAnnotation(d.Annotations, "not_sendable") {
 		enum.SetNotSendable(true)
 	}

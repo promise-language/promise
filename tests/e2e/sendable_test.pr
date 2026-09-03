@@ -1,6 +1,10 @@
-// Tests for `sendable / `sharable meta annotations (T0158)
-// --- Basic sendable types ---
-type Point `sendable `sharable {
+// Tests for the sendable/sharable capabilities (T0158).
+// The capabilities are DERIVED from a type's fields — no annotation is written
+// here, because `sendable / `sharable are `native-only assertions and every type
+// below already derives what it needs. The `not_* denials are the annotations a
+// Promise type can carry, and they are exercised too.
+// --- Derived sendable + sharable (all-primitive fields) ---
+type Point {
   int x;
   int y;
 }
@@ -25,7 +29,7 @@ test_auto_sendable_construction() `test {
 }
 
 // --- Sendable enum ---
-enum Color `sendable {
+enum Color {
   Red,
   Green,
   Blue,
@@ -50,7 +54,7 @@ test_not_sendable_opt_out() `test {
 }
 
 // --- Sendable types compose ---
-type Wrapper `sendable {
+type Wrapper {
   Point p;
   int count;
 }
@@ -72,7 +76,7 @@ test_not_sharable_type() `test {
 }
 
 // --- Sendable with optional field ---
-type MaybeInt `sendable {
+type MaybeInt {
   int? value;
 }
 

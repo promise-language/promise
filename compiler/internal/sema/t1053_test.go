@@ -378,3 +378,54 @@ func TestT1921_InteriorStillExemptsNativeChannel(t *testing.T) {
 		}
 	`)
 }
+
+// --- Assertions are `native-only; denials are open to every type ---
+
+// `sendable / `sharable ASSERT a capability the compiler cannot verify, so only a
+// declaration whose implementation the compiler emits may make one. On a Promise
+// type the capability is derived from the fields, which already have the answer.
+func TestAssertionSendableRejectedOnUserType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Point `+"`sendable"+` { int x; }
+	`)
+	expectError(t, errs, "`sendable requires `native")
+}
+
+func TestAssertionSharableRejectedOnUserType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Point `+"`sharable"+` { int x; }
+	`)
+	expectError(t, errs, "`sharable requires `native")
+}
+
+// An enum can never be `native, so an assertion is not a valid enum target.
+func TestAssertionSendableRejectedOnEnum(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color `+"`sendable"+` { Red, Blue, }
+	`)
+	expectError(t, errs, "cannot be applied to enum")
+}
+
+// Denials stay available to any declaration: removing a capability is always
+// sound, and it is the only way to express what the fields cannot show.
+func TestDenialAllowedOnUserType(t *testing.T) {
+	checkOK(t, `
+		type Handle `+"`not_sendable"+` { int fd; }
+		type Local `+"`not_sharable"+` { int n; }
+	`)
+}
+
+func TestDenialAllowedOnEnum(t *testing.T) {
+	checkOK(t, `
+		enum Kind `+"`not_sendable"+` { A, B, }
+	`)
+}
+
+// The derivation is unchanged: a type with all-sendable fields is sendable with
+// no annotation, which is why the assertion could only have restated it.
+func TestDerivedSendableNeedsNoAnnotation(t *testing.T) {
+	checkOK(t, `
+		type Point { int x; int y; }
+		test() { ch := channel[Point](); ch.send(Point(x: 1, y: 2)); }
+	`)
+}

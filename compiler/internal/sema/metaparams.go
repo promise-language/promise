@@ -99,8 +99,8 @@ var metaParamSpecs = map[string]metaParamSpec{
 	"serializable": {named: map[string]metaValueKind{"tag": valString}},
 	"lifetime":     {positional: []metaPositional{{name: "name", kind: valIdent}}},
 	"wasm_import": {positional: []metaPositional{
-		{name: "module name", kind: valString},
-		{name: "import name", kind: valString},
+		{name: "module", kind: valString},
+		{name: "name", kind: valString},
 	}},
 	"target": {positional: []metaPositional{{name: "condition", kind: valTargetCond}}},
 	"align":  {positional: []metaPositional{{name: "alignment", kind: valInt}}},

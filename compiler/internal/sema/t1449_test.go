@@ -82,7 +82,7 @@ func TestT1449BadParams(t *testing.T) {
 		{
 			"wasm_import three positionals",
 			"f() `extern `wasm_import(\"a\", \"b\", \"c\") `target(wasm);",
-			"`wasm_import takes at most 2 positional parameters (module name, import name)",
+			"`wasm_import takes at most 2 positional parameters (module, name)",
 		},
 
 		// --- missing required positional ---

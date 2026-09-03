@@ -922,10 +922,10 @@ capture_through_nested_bare_blocks() `test {
 
 // --- Sendable aggregates that HOLD a closure ---
 
-// A `sendable`-annotated type with a closure field: R1 makes the field sendable,
-// so the whole struct crosses. The struct owns the env, so the goroutine's drop
+// A type with a closure field: R1 makes the field sendable, so the struct derives
+// sendable and the whole struct crosses. The struct owns the env, so the goroutine's drop
 // of the struct must free it exactly once.
-type Subscription `sendable {
+type Subscription {
   int id;
   (int) -> int handler;
 }
@@ -940,10 +940,10 @@ sendable_struct_with_closure_field_into_go() `test {
   assert((<-done)! == 101, "a sendable struct carries its closure field across");
 }
 
-// A `sendable` ENUM variant carrying a closure payload — the same guarantee
+// An ENUM variant carrying a closure payload — the same guarantee
 // through the enum layout, whose variant data is dropped by the synthesized enum
 // drop function rather than a plain field drop.
-enum Event `sendable {
+enum Event {
   idle,
   handler((int) -> int fn),
 }

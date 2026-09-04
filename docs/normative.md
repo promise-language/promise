@@ -15,7 +15,7 @@ determines what it is:
 |----------|----------------------|----------|
 | `docs/` root | A **specification**: what the project *should* be — the intended end state. | **Yes.** |
 | `docs/proposals/` | An end state that has **not been ratified** — a draft, an RFC, a direction still under discussion. | No. |
-| `docs/archive/` | An end state that has been **superseded or delivered** — kept for history. | No. |
+| `docs/archive/` | An end state that has been **superseded** — kept for history. | No. |
 | `docs/research/` | Background analysis feeding a decision — an assessment, not a design. | No. |
 
 **Ratifying a proposal is a `git mv` into the root**, plus the header of §2. Retiring a

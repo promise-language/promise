@@ -104,7 +104,8 @@ test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
   // A plain-TCP server that speaks no TLS: it reads the ClientHello and replies
   // with non-TLS bytes, so the client handshake must fail.
   go {
-    net.TcpStream conn = listener.accept()? e {
+    net.TcpListener l = listener;
+    net.TcpStream conn = l.accept()? e {
       return;
     };
     u8[] buf = u8[].filled(0u8, 1024);
@@ -115,7 +116,7 @@ test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
     };
     conn.close()? e {
     };
-    // listener is owned by this goroutine and drops here, closing its socket.
+    // l is owned by this goroutine and drops here, closing its socket.
   };
 
   net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
@@ -230,8 +231,9 @@ test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm, timeout: "
   int port = listener.local_port;
 
   go {
+    TlsListener l = listener;
     // Server accept fails once the client aborts on the bad hostname; swallow it.
-    listener.accept()? e {
+    l.accept()? e {
     };
   };
 
@@ -680,8 +682,9 @@ test_tls_verified_handshake_rejects_untrusted_certificate() `test(exclude: wasm,
   int port = listener.local_port;
 
   go {
+    TlsListener l = listener;
     // The server's accept fails once the client aborts the handshake; swallow it.
-    listener.accept()? e {
+    l.accept()? e {
     };
   };
 

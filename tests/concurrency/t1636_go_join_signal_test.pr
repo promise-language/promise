@@ -86,8 +86,9 @@ t1636_join_observes_goroutine_heap_effects() `test(timeout: "10s") {
   channel[string] out = channel[string](capacity: 2);
   string prefix = "pre" + "fix";
   t := go {
-    out.send(prefix + "-one");
-    out.send(prefix + "-two");
+    string p = prefix;
+    out.send(p + "-one");
+    out.send(p + "-two");
     done.send(true);
   };
   _ := <-done;

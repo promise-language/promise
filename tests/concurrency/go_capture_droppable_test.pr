@@ -5,8 +5,9 @@ test_string_capture_in_goroutine() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   s := "hello world from outer scope";
   go {
-    assert(s.len == 28, "string len");
-    assert(s.starts_with("hello"), "string prefix");
+    string w = s;
+    assert(w.len == 28, "string len");
+    assert(w.starts_with("hello"), "string prefix");
     done.send(1);
   };
   r := <-done;
@@ -19,9 +20,10 @@ test_vector_capture_in_goroutine() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   v := [1, 2, 3, 4, 5];
   go {
-    assert(v.len == 5, "vec len");
+    int[] w = v;
+    assert(w.len == 5, "vec len");
     int sum = 0;
-    for x in v {
+    for x in w {
       sum += x;
     }
     assert(sum == 15, "vec sum");
@@ -38,9 +40,11 @@ test_multiple_droppable_captures() `test(exclude: wasm) {
   s := "promise";
   v := [10, 20, 30];
   go {
-    assert(s.len == 7, "string len");
-    assert(v.len == 3, "vec len");
-    assert(v[0] == 10, "vec elem");
+    string ws = s;
+    int[] wv = v;
+    assert(ws.len == 7, "string len");
+    assert(wv.len == 3, "vec len");
+    assert(wv[0] == 10, "vec elem");
     done.send(42);
   };
   r := <-done;
@@ -64,7 +68,8 @@ test_user_type_fields_captured() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   p := Payload(name: "hello", value: 99);
   go {
-    read_payload(p.name, p.value, done);
+    Payload w = p;
+    read_payload(w.name, w.value, done);
   };
   r := <-done;
   if x := r {
@@ -85,7 +90,11 @@ test_go_method_call_via_block() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   g := Greeter(prefix: "hi ");
   nm := "world";
-  go g.greet(nm, done);
+  go {
+    Greeter w = g;
+    string n = nm;
+    w.greet(n, done)
+  };
   r := <-done;
   if x := r {
     assert(x == 8, "method call via block");

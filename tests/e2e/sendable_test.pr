@@ -106,7 +106,8 @@ test_sendable_capture_in_go() `test {
   p := Point(x: 5, y: 7);
   ch := channel[int]();
   t := go {
-    ch.send(p.x + p.y);
+    Point w = p;
+    ch.send(w.x + w.y);
   };
   result := (<-ch)!;
   assert(result == 12, "sendable capture sum");

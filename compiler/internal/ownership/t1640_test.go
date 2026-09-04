@@ -240,10 +240,10 @@ func TestT1640ClosureCapturedInLoopRejected(t *testing.T) {
 	expectOwnerError(t, errs, "'f'")
 }
 
-// A non-closure capture is unaffected: a string still transfers by B0354 without
-// R5 gating, so the pre-T1640 behaviour is preserved.
-func TestT1640NonClosureCaptureUnaffected(t *testing.T) {
-	ownerOK(t, `
+// T1397 (shape 3): a non-closure bare capture of a droppable local in a go block
+// is now rejected — the §17.4 rule forbids any borrow crossing the spawn boundary.
+func TestT1640NonClosureCaptureRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		test() {
 			done := channel[int](1);
 			s := "hello";
@@ -252,6 +252,7 @@ func TestT1640NonClosureCaptureUnaffected(t *testing.T) {
 			};
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
 // T1651 + R4 — the env-ownership rules must not depend on source layout. With the

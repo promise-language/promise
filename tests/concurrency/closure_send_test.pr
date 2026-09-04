@@ -282,7 +282,8 @@ map_of_closures_into_go() `test {
   int base = 4;
   handlers["a"] = move |int x| -> x + base;
   go {
-    done.send(handlers["a"]!(1));
+    map[string, (int) -> int] h = handlers;
+    done.send(h["a"]!(1));
   };
   assert((<-done)! == 5, "a map of closures crosses the boundary");
 }
@@ -324,7 +325,9 @@ mixed_captures_into_go() `test {
   tripler := |int x| -> x * 3;
   extra.push(move tripler);
   go {
-    done.send(f(1) + s.len + extra[0](2));
+    string ws = s;
+    ((int) -> int)[] we = extra;
+    done.send(f(1) + ws.len + we[0](2));
   };
   assert((<-done)! == 13, "closure, string and vector captures all transfer");
 }
@@ -447,7 +450,8 @@ many_closure_envs_under_contention() `test {
     s := "payload";
     f := |int x| -> x + base;
     go {
-      done.send(f(1) + s.len - 7);
+      string ws = s;
+      done.send(f(1) + ws.len - 7);
     };
   }
   int total = 0;
@@ -935,7 +939,8 @@ sendable_struct_with_closure_field_into_go() `test {
   int base = 100;
   s := Subscription(id: 1, handler: move |int x| -> x + base);
   go {
-    done.send(s.handler(1));
+    Subscription ws = s;
+    done.send(ws.handler(1));
   };
   assert((<-done)! == 101, "a sendable struct carries its closure field across");
 }
@@ -953,7 +958,8 @@ sendable_enum_with_closure_payload_into_go() `test {
   int base = 110;
   e := Event.handler(fn: move |int x| -> x + base);
   go {
-    match e {
+    Event we = e;
+    match we {
       Event.handler(fn) => done.send(fn(1)),
       _ => done.send(0),
     }
@@ -991,7 +997,11 @@ go_method_call_capturing_closure_argument() `test {
   s := Sink(bias: 100);
   int base = 10;
   f := |int x| -> x + base;
-  go s.take(done, f(1));
+  int val = f(1);
+  go {
+    Sink w = s;
+    w.take(done, val)
+  };
   assert((<-done)! == 111, "via-block go-call transfers the captured env");
 }
 

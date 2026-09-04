@@ -234,7 +234,8 @@ t0683_generic_returned_task_int() `test {
 t0683_capture_local_string() `test {
   s := "he" + "llo";
   task[string] x = go {
-    s
+    string w = s;
+    w
   };
   string r = <-x;
   assert(r == "hello", "value block returning captured heap local string");
@@ -336,7 +337,8 @@ t0688_derived_trailing_param() `test {
 t0688_ngmake_local() Task[string] {
   s := "ab" + "cd";
   return go {
-    s
+    string w = s;
+    w
   };
 }
 
@@ -732,7 +734,9 @@ t0686_vector_string_literal_result() `test {
   a := "a";
   b := "b";
   task[string[]] x = go {
-    [a + "1", b + "2"]
+    string wa = a;
+    string wb = b;
+    [wa + "1", wb + "2"]
   };
   r := <-x;
   assert(r.len == 2, "vec<string> literal len");
@@ -761,7 +765,8 @@ t0686_map_clone_result() `test {
     "k": 7
   };
   task[map[string, int]] x = go {
-    base.clone()
+    map[string, int] w = base;
+    w.clone()
   };
   r := <-x;
   assert(r.len == 1, "map clone len");

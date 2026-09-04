@@ -254,14 +254,20 @@ type Adder {
 
 failable_task_method_spawn_ok() `test(exclude: wasm) {
   a := Adder(base: 100);
-  t := go! a.compute(5);
+  t := go! {
+    Adder w = a;
+    w.compute(5)?^
+  };
   v := (<-t)?!;
   assert(v == 105, "method spawn success value");
 }
 
 failable_task_method_spawn_err_handled() `test(exclude: wasm) {
   a := Adder(base: 100);
-  t := go! a.compute(-1);
+  t := go! {
+    Adder w = a;
+    w.compute(-1)?^
+  };
   got := false;
   v := (<-t)? e {
     got = true;
@@ -273,7 +279,10 @@ failable_task_method_spawn_err_handled() `test(exclude: wasm) {
 
 drop_method!(bool fail) int {
   a := Adder(base: 100);
-  t := go! a.compute(-7); // buffered error, still owned
+  t := go! {
+    Adder w = a;
+    w.compute(-7)?^
+  }; // buffered error, still owned
   gate(fail); // fail → early-exit drops t (buffered error freed)
   return (<-t)?^;
 }

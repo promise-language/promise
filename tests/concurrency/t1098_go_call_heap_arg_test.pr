@@ -115,10 +115,10 @@ go_call_string_literal() `test {
 
 go_call_borrow_of_local() `test {
   string s = "alpha";
-  t := go borrow_string(s); // no temp created — caller keeps ownership
+  t := go borrow_string(s.clone()); // clone to transfer ownership across go boundary
   r := <-t;
-  assert(r.n == 5, "go borrow_string(s) result");
-  assert(s.len == 5, "s still usable after the borrow go-call");
+  assert(r.n == 5, "go borrow_string(s.clone()) result");
+  assert(s.len == 5, "s still usable after the clone go-call");
 }
 
 go_call_move_of_local() `test {

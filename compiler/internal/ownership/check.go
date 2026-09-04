@@ -87,26 +87,13 @@ type Checker struct {
 	// Reset to 0 inside lambda / go-block bodies (those frames own their locals).
 	loopDepth int
 
-	// T1152: handle-var name → borrowed owned-droppable-local name. A
-	// `t := go f(s)` handle borrows `s` (a function/block-scope local); the
-	// goroutine may read `s` after it drops, so the handle must not escape `s`'s
-	// scope. Entries make tryMove/tryMoveConsume reject the handle (or the inline
-	// `go` temporary) at every consume/store/return site. This is the sibling of
-	// the iteration-bounded for-in (T1147) and loop-body-local (T1151) rejections:
-	// those bindings can never be safely borrowed into a `go` call (the goroutine
-	// always outlives the iteration) and are rejected outright at the call site by
-	// rejectGoCallLoopBindingBorrowEscape; a function-level local's borrow is sound
-	// while the handle is awaited/dropped in scope and unsound only if the handle
-	// escapes, which is what this map tracks.
-	goHandleBorrowedLocal map[string]string
-
 	// T1212: locals produced by a Some-wrap coercion of a BORROWED single-owner
 	// handle (`Mutex[int]?? x = m` with m: Mutex[int]? borrowed). The outer
 	// Optional is genuinely Owned (in-scope drop is sound — codegen clears the
 	// inner alias's drop flag), but the inner handle is still borrowed, so an
 	// ESCAPE (return/store/call-arg/send) aliases the caller's live handle and
 	// double-frees (dupOptionalVectorElem has no clone). Sibling of
-	// goHandleBorrowedLocal — same escape-only rejection model. Maps local name →
+	// same escape-only rejection model. Maps local name →
 	// {source binding, handle kind} for the diagnostic.
 	wrapCoercedHandleLocal map[string]wrapCoercedHandle
 
@@ -341,7 +328,6 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedVarTypes := c.varTypes
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
-	savedGoHandleBorrowed := c.goHandleBorrowedLocal
 	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
 	savedIterBorrowOrigin := c.iterBorrowOrigin
@@ -365,7 +351,6 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.varTypes = make(map[string]types.Type)
 	c.returnOrigins = nil
 	c.loopDepth = 0
-	c.goHandleBorrowedLocal = make(map[string]string)
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.iterBorrowOrigin = make(map[string]string)                // T1349
@@ -406,7 +391,6 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.returnOrigins = savedReturnOrigins
 	c.varTypes = savedVarTypes
 	c.loopDepth = savedLoopDepth
-	c.goHandleBorrowedLocal = savedGoHandleBorrowed
 	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
 	c.iterBorrowOrigin = savedIterBorrowOrigin
@@ -494,7 +478,6 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedVarTypes := c.varTypes
 	savedReturnOrigins := c.returnOrigins
 	savedLoopDepth := c.loopDepth
-	savedGoHandleBorrowed := c.goHandleBorrowedLocal
 	savedWrapCoercedHandle := c.wrapCoercedHandleLocal
 	savedGuardMutexRoot := c.guardMutexRoot
 	savedIterBorrowOrigin := c.iterBorrowOrigin
@@ -518,7 +501,6 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.varTypes = make(map[string]types.Type)
 	c.returnOrigins = nil
 	c.loopDepth = 0
-	c.goHandleBorrowedLocal = make(map[string]string)
 	c.wrapCoercedHandleLocal = make(map[string]wrapCoercedHandle)
 	c.guardMutexRoot = make(map[string]string)
 	c.iterBorrowOrigin = make(map[string]string)                // T1349
@@ -566,7 +548,6 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.varTypes = savedVarTypes
 	c.returnOrigins = savedReturnOrigins
 	c.loopDepth = savedLoopDepth
-	c.goHandleBorrowedLocal = savedGoHandleBorrowed
 	c.wrapCoercedHandleLocal = savedWrapCoercedHandle
 	c.guardMutexRoot = savedGuardMutexRoot
 	c.iterBorrowOrigin = savedIterBorrowOrigin

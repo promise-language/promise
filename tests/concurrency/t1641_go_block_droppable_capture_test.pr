@@ -1,6 +1,9 @@
 // T1641: Go block droppable capture ownership transfer.
 // Positive tests — programs that should compile and run correctly after the fix.
 // Negative tests (use-after-move errors) are covered by the Go ownership unit tests.
+// T1397 (§17.4): a BARE capture of a droppable local is a borrow and is rejected
+// at the spawn site, so every droppable capture below is bound inside the block —
+// the binding is what transfers ownership into the goroutine.
 // Copy types captured in a go block remain usable after the spawn.
 test_copy_type_capture_ok() `test(exclude: wasm) {
   int n = 42;
@@ -34,7 +37,8 @@ test_droppable_capture_no_post_spawn_use() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   s := "hello " + "world";
   go {
-    assert(s.len == 11, "string accessible in goroutine");
+    string w = s;
+    assert(w.len == 11, "string accessible in goroutine");
     done.send(1);
   };
   r := <-done;
@@ -48,8 +52,9 @@ test_vector_capture_no_post_spawn_use() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   v := [10, 20, 30];
   go {
-    assert(v.len == 3, "vec len");
-    assert(v[0] == 10, "vec elem");
+    int[] w = v;
+    assert(w.len == 3, "vec len");
+    assert(w[0] == 10, "vec elem");
     done.send(1);
   };
   r := <-done;
@@ -69,7 +74,8 @@ test_user_type_capture_no_post_spawn_use() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   r := Resource(id: 42);
   go {
-    assert(r.id == 42, "resource accessible in goroutine");
+    Resource w = r;
+    assert(w.id == 42, "resource accessible in goroutine");
     done.send(1);
   };
   result := <-done;
@@ -84,8 +90,9 @@ test_mixed_captures() `test(exclude: wasm) {
   int n = 7;
   s := "hello";
   go {
+    string w = s;
     assert(n == 7, "n in goroutine");
-    assert(s.len == 5, "s in goroutine");
+    assert(w.len == 5, "s in goroutine");
     done.send(1);
   };
   r := <-done;

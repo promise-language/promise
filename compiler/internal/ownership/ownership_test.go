@@ -14274,11 +14274,10 @@ func TestT1147GoCallCopyBindingOK(t *testing.T) {
 	`)
 }
 
-// Accept: a heap-user-type binding aliases the container's element storage (the
-// data outlives the loop in the container) — flagged in forInAliasBindings, not
-// the owned-droppable set, so the go-call check does not fire.
-func TestT1147GoCallAliasingBindingOK(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): a heap-user-type for-in aliasing binding borrowed into `go`
+// is a spawn-boundary borrow — §17.4 rejects at spawn site.
+func TestT1147GoCallAliasingBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		type Box { string s; }
 		describe(Box b) string { return b.s.clone(); }
 		test() {
@@ -14286,13 +14285,13 @@ func TestT1147GoCallAliasingBindingOK(t *testing.T) {
 			for x in xs { _ = go describe(x); }
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Accept: a function-level local borrowed into a `go` call is sound (its scope
-// outlives the goroutine when awaited in scope) — only for-in loop bindings are
-// flagged, so a plain local must not be rejected.
-func TestT1147GoCallFunctionLocalBorrowOK(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): a function-level local borrowed into `go keep(s)` is a
+// spawn-boundary borrow — §17.4 rejects regardless of the handle being awaited.
+func TestT1147GoCallFunctionLocalBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
 		test() {
 			string s = "hello".clone();
@@ -14300,6 +14299,7 @@ func TestT1147GoCallFunctionLocalBorrowOK(t *testing.T) {
 			_ = <-t;
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
 // Accept: the loop binding as a method *receiver* (not an arg) is captured and
@@ -14340,18 +14340,17 @@ func TestT1147GoCallConstructorLoopBindingOK(t *testing.T) {
 	`)
 }
 
-// Accept: a container-store native (`Vector.push`) consumes its arg into storage
-// that outlives the goroutine frame — the `kind == BorrowNone && storeNative`
-// skip fires (continue) before identRoot is consulted, so the moved binding is
-// not flagged as a borrow escape.
-func TestT1147GoCallStoreNativeLoopBindingOK(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): `go sink.push(move x)` borrows the receiver `sink` across the
+// spawn boundary — §17.4 rejects at spawn site.
+func TestT1147GoCallStoreNativeLoopBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		test() {
 			string[] xs = ["a".clone(), "b".clone()];
 			string[] sink = [];
 			for x in xs { _ = go sink.push(move x); }
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow receiver")
 }
 
 // Accept (regression guard): an owned for-in binding borrowed into a *plain*
@@ -14545,11 +14544,10 @@ func TestT1151GoCallLoopBodyLocalCloneTempOK(t *testing.T) {
 	`)
 }
 
-// Accept: an owned droppable local declared BEFORE the loop, borrowed into a `go`
-// call inside the loop — loopDepth == 0 at its decl, so it is not flagged; its
-// function-scope lifetime is sound when awaited in scope.
-func TestT1151GoCallLocalBeforeLoopOK(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): a pre-loop local borrowed into `go keep(y)` inside the loop is
+// a spawn-boundary borrow — §17.4 rejects at spawn site.
+func TestT1151GoCallLocalBeforeLoopRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
 		test() {
 			string y = "shared".clone();
@@ -14560,13 +14558,14 @@ func TestT1151GoCallLocalBeforeLoopOK(t *testing.T) {
 			}
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Accept: an owned local declared inside a `go { }` block that is itself inside a
-// loop, borrowed into a nested `go` — the depth-reset guard in the GoExpr case
-// prevents a false positive (the local is owned by the goroutine frame).
-func TestT1151GoBlockLocalInLoopOK(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): an owned local inside a `go { }` block borrowed into a nested
+// `go` is a spawn-boundary borrow — the depth-reset guard prevents the loop-
+// binding false positive, but §17.4 rejects the borrow at the inner spawn site.
+func TestT1151GoBlockLocalInLoopRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
 		test() {
 			for i in 0..3 {
@@ -14579,12 +14578,14 @@ func TestT1151GoBlockLocalInLoopOK(t *testing.T) {
 			}
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
+	expectNoOwnerError(t, errs, "into a goroutine")
 }
 
-// Accept: an owned local declared inside a lambda body that is itself inside a
-// loop — the depth-reset guard in checkLambdaExpr prevents a false positive.
-func TestT1151LambdaLocalInLoopOK(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): an owned local inside a lambda borrowed into `go` is a
+// spawn-boundary borrow — §17.4 rejects it at the spawn site.
+func TestT1151LambdaLocalInLoopRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
 		test() {
 			for i in 0..3 {
@@ -14598,6 +14599,8 @@ func TestT1151LambdaLocalInLoopOK(t *testing.T) {
 			}
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
+	expectNoOwnerError(t, errs, "into a goroutine")
 }
 
 // Accept (regression guard): an owned loop-body local borrowed into a *plain*
@@ -14616,11 +14619,12 @@ func TestT1151PlainCallLoopBodyLocalOK(t *testing.T) {
 	`)
 }
 
-// Accept: a loop-body local must not stay flagged after the loop closes — the
-// enterLoopBody/exitLoopBody snapshot removes body locals at loop exit, so a
-// same-named local at function scope after the loop is sound to borrow into `go`.
+// Reject (T1397): post-loop local borrowed into `go keep(y)` is now rejected at
+// spawn site. The restore-guard property (loop-body flag must not leak to post-
+// loop locals) is still tested: the error is "cannot borrow", NOT "into a
+// goroutine" (which would indicate a leaked loop-body flag).
 func TestT1151LocalAfterLoopNotFlaggedOK(t *testing.T) {
-	ownerOK(t, `
+	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
 		test() {
 			string[] xs = ["a".clone(), "b".clone()];
@@ -14631,6 +14635,8 @@ func TestT1151LocalAfterLoopNotFlaggedOK(t *testing.T) {
 			print_line(r);
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
+	expectNoOwnerError(t, errs, "into a goroutine")
 }
 
 // Reject: an outer-loop-body local borrowed into a `go` call nested inside an
@@ -14814,13 +14820,13 @@ func TestT1153WhileLetBorrowedParamStillRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via while-let")
 }
 
-// Accept (restore guard): the enterLoopBody snapshot must remove the while-unwrap
-// binding from the owned-droppable set at loop exit. A same-named owned local
-// declared AFTER the loop and borrowed into a `go` call is sound (it is not a
-// loop binding) — it must NOT inherit the loop binding's flag. Regression guard
-// for the snapshot restore claimed in checkWhileUnwrapStmt.
+// Reject (T1397): post-loop local borrowed into `go keep(y)` is now rejected
+// at spawn site — §17.4 categorical rule. The restore-guard property (while-
+// unwrap binding's flag must not leak to a same-named post-loop local) is
+// still tested: the error is the §17.4 "cannot borrow", NOT the loop-binding
+// "into a goroutine" message.
 func TestT1153FlagRestoredAfterWhileUnwrapLoop(t *testing.T) {
-	ownerOK(t, `
+	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
 		next() string? { return "v".clone(); }
 		test() {
@@ -14830,6 +14836,8 @@ func TestT1153FlagRestoredAfterWhileUnwrapLoop(t *testing.T) {
 			_ = move y;
 		}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
+	expectNoOwnerError(t, errs, "into a goroutine")
 }
 
 // Reject (nested): an inner while-unwrap loop's binding is flagged AND the
@@ -14868,7 +14876,7 @@ func TestT1153NestedWhileUnwrapBothBindingsRejected(t *testing.T) {
 // rejectGoCallLoopBindingBorrowEscape at the call site — the last two tests here
 // pin that the unified check delegates to it (no gap, no double-report).
 
-// Inline `return go keep(s)` — the handle escapes via the return value.
+// Inline `return go keep(s)` — the borrow is rejected at the spawn site (T1397).
 func TestT1152_ReturnInlineGoBorrowRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -14879,10 +14887,10 @@ func TestT1152_ReturnInlineGoBorrowRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// `t := go keep(s); return t;` — the handle is bound, then escapes via return.
+// `t := go keep(s); return t;` — the borrow is rejected at the spawn site (T1397).
 func TestT1152_ReturnBoundGoHandleRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -14894,10 +14902,10 @@ func TestT1152_ReturnBoundGoHandleRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// `ts.push(go keep(s))` — the inline handle escapes into a longer-lived vector.
+// `ts.push(go keep(s))` — the borrow is rejected at the spawn site (T1397).
 func TestT1152_PushInlineGoBorrowRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -14909,10 +14917,10 @@ func TestT1152_PushInlineGoBorrowRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// `t := go keep(s); ts.push(move t);` — bound handle escapes into a vector.
+// `t := go keep(s); ts.push(move t);` — the borrow is rejected at the spawn site (T1397).
 func TestT1152_PushBoundGoHandleRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -14925,10 +14933,10 @@ func TestT1152_PushBoundGoHandleRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// `ch.send(go keep(s))` — the inline handle escapes by being sent on a channel.
+// `ch.send(go keep(s))` — the borrow is rejected at the spawn site (T1397).
 func TestT1152_ChannelSendInlineGoBorrowRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -14939,13 +14947,10 @@ func TestT1152_ChannelSendInlineGoBorrowRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Reassigning a longer-lived (outer) binding from a bound handle escapes it.
-// Plain assignment routes the RHS through tryMoveConsume, where the escape check
-// runs before the "consuming requires move" requirement, so the diagnostic is
-// the go-handle escape message.
+// Reassignment of a bound handle — the borrow is rejected at the spawn site (T1397).
 func TestT1152_ReassignOuterFromGoHandleRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		worker(string p) int { return p.len; }
@@ -14956,13 +14961,13 @@ func TestT1152_ReassignOuterFromGoHandleRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Accept: `t := go keep(s); _ = <-t;` — the handle is awaited in scope, joining
-// the goroutine while `s` is still alive. Sound.
-func TestT1152_AwaitInScopeAllowed(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): `t := go keep(s); _ = <-t;` — §17.4 categorical rule: a borrow
+// may never cross a go spawn boundary, even when the handle is awaited in scope.
+func TestT1152_AwaitInScopeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		type Box { string s; }
 		keep(string p) Box { return Box(s: p.clone()); }
 		run() {
@@ -14972,12 +14977,13 @@ func TestT1152_AwaitInScopeAllowed(t *testing.T) {
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Accept: `t := go keep(s);` with no escape — the handle drops at scope exit,
-// joining the goroutine (LIFO) before `s` drops. Sound.
-func TestT1152_DropInScopeAllowed(t *testing.T) {
-	ownerOK(t, `
+// Reject (T1397): `t := go worker(s);` — §17.4 categorical rule: a borrow may
+// never cross a go spawn boundary, even when the handle drops in scope.
+func TestT1152_DropInScopeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		worker(string p) int { return p.len; }
 		run() {
 			string s = "hello".clone();
@@ -14985,6 +14991,7 @@ func TestT1152_DropInScopeAllowed(t *testing.T) {
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
 // Accept: cloning into the goroutine — the goroutine owns its own copy, so the
@@ -15069,12 +15076,12 @@ func TestT1152_ForInBindingDeferredToLoopCheck(t *testing.T) {
 		test() {}
 	`)
 	expectOwnerError(t, errs, "into a goroutine")
-	expectNoOwnerError(t, errs, "'go' task handle escape")
+	expectNoOwnerError(t, errs, "cannot borrow")
 }
 
 // Integration guard: a loop-body local borrowed into `go f(y)` whose handle is
 // pushed to a vector outliving the iteration is rejected by the sibling call-site
-// check (T1151), NOT by the T1152 handle-escape check.
+// check (T1151), NOT by the §17.4 spawn-site check.
 func TestT1152_LoopBodyLocalDeferredToLoopCheck(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -15089,13 +15096,11 @@ func TestT1152_LoopBodyLocalDeferredToLoopCheck(t *testing.T) {
 		test() {}
 	`)
 	expectOwnerError(t, errs, "into a goroutine")
-	expectNoOwnerError(t, errs, "'go' task handle escape")
+	expectNoOwnerError(t, errs, "cannot borrow")
 }
 
-// Reject (inferred decl form): `t := go keep(s); return t;`. The inferred-var
-// path (checkInferredVarDecl) tracks the handle just like the typed-var path, so
-// the escape via return is still caught. Pins that both decl forms route through
-// trackGoHandleBinding.
+// Reject (inferred decl form): `t := go keep(s); return t;` — the borrow is
+// rejected at the spawn site (T1397), regardless of the escape.
 func TestT1152_InferredHandleBindingEscapeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -15107,14 +15112,12 @@ func TestT1152_InferredHandleBindingEscapeRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "'go' task handle escape")
+	expectOwnerError(t, errs, "cannot borrow")
 }
 
 // Accept: a PARAMETER (caller-owned, not a function-level local) borrowed into
-// `go f(p)` whose handle escapes via return is NOT flagged by T1152. A parameter
-// is owned by the caller's frame, so the goroutine-vs-local lifetime reasoning of
-// this check does not apply — goCallBorrowsOwnedLocal skips params (the separate
-// sibling gap noted in T1152). Pins the `c.params` continue branch.
+// `go f(p)` is NOT flagged by §17.4. Parameters are owned by the caller's frame
+// — goCallBorrowsOwnedLocal skips params. Pins the `c.params` continue branch.
 func TestT1152_ParamBorrowEscapeNotFlagged(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -15124,14 +15127,11 @@ func TestT1152_ParamBorrowEscapeNotFlagged(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectNoOwnerError(t, errs, "'go' task handle escape")
+	expectNoOwnerError(t, errs, "cannot borrow")
 }
 
-// Accept: the `go { block }` form (not a `go f(arg)` call) is outside the T1152
-// borrow-arg check entirely — its argument-borrow analysis only applies to the
-// CallExpr shape. A returned go-block handle is not flagged here (block captures
-// are a separate concern). Pins the not-CallExpr early-return branch of
-// goCallBorrowsOwnedLocal.
+// Accept: the `go { block }` form with no captures is outside the §17.4
+// borrow-arg check — no captures to reject. Pins the no-captures path.
 func TestT1152_GoBlockHandleNotFlagged(t *testing.T) {
 	errs := ownerErrs(t, `
 		spawn() Task[int] {
@@ -15139,7 +15139,98 @@ func TestT1152_GoBlockHandleNotFlagged(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectNoOwnerError(t, errs, "'go' task handle escape")
+	expectNoOwnerError(t, errs, "cannot borrow")
+}
+
+// --- T1397: §17.4 spawn-site rejection — new shapes ---
+
+// Shape 2: receiver borrow rejected — `go obj.method()` where obj is a heap type.
+func TestT1397_ReceiverBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Widget { int n; run(this) {} }
+		test() {
+			w := Widget(n: 1);
+			go w.run();
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow receiver")
+}
+
+// Shape 2: value-type receiver accepted (Copy, no borrow).
+func TestT1397_ValueTypeReceiverAccepted(t *testing.T) {
+	ownerOK(t, `
+		type Pt { int x `+"`value"+`; int y `+"`value"+`; sum(this) int { return this.x + this.y; } }
+		test() {
+			p := Pt(x: 1, y: 2);
+			t := go p.sum();
+		}
+	`)
+}
+
+// Shape 2: channel receiver accepted (refcounted handle).
+func TestT1397_ChannelReceiverAccepted(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			ch := channel[int](capacity: 1);
+			go ch.send(42);
+		}
+	`)
+}
+
+// Shape 3: block bare capture of owned droppable local rejected.
+func TestT1397_BlockBareCaptureRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Widget { int n; run(this) {} }
+		test() {
+			w := Widget(n: 1);
+			go { w.run() };
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow")
+}
+
+// Shape 3: block binding accepted (moves ownership).
+func TestT1397_BlockBindingAccepted(t *testing.T) {
+	ownerOK(t, `
+		type Widget { int n; run(this) {} }
+		test() {
+			w := Widget(n: 1);
+			go { Widget w2 = w; w2.run() };
+		}
+	`)
+}
+
+// Shape 3: block channel capture accepted (refcounted handle).
+func TestT1397_BlockChannelCaptureAccepted(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			ch := channel[int](capacity: 1);
+			go { ch.send(42) };
+		}
+	`)
+}
+
+// Shape 4: fire-and-forget statement `go f(s);` rejected.
+func TestT1397_FireAndForgetRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		report(string p) {}
+		test() {
+			s := "hello".clone();
+			go report(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow")
+}
+
+// Locally-declared channel accepted (refcounted, not a borrow).
+func TestT1397_LocalChannelAccepted(t *testing.T) {
+	ownerOK(t, `
+		consume(channel[int] ch) {}
+		test() {
+			ch := channel[int](capacity: 1);
+			go consume(ch);
+		}
+	`)
 }
 
 // --- T0665: MutexGuard container-store escape (ordering-aware rejection) ---

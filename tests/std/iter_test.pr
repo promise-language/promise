@@ -2595,8 +2595,9 @@ test_t1440_iter_inside_goroutine() `test {
   v.push("b{2}");
   ch := channel[int](capacity: 1);
   go {
+    string[] w = v;
     int n = 0;
-    for e in v.iter() {
+    for e in w.iter() {
       n = n + e.len;
     }
     ch.send(n);

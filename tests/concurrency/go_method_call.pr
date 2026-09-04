@@ -1,5 +1,6 @@
 // B0113: go method_call() — spawn method calls as goroutines.
-// Tests that `go obj.method()` works for both fire-and-forget and task patterns.
+// T1397: §17.4 forbids borrowing a receiver across a go spawn boundary, so all
+// `go obj.method()` patterns use a go block with a binding to move ownership.
 type Counter {
   int value;
 
@@ -19,7 +20,10 @@ type Counter {
 // Method call returning a value via task
 test_go_method_call_with_result() `test(exclude: wasm) {
   c := Counter(value: 42);
-  t := go c.get_value();
+  t := go {
+    Counter w = c;
+    return w.get_value()
+  };
   result := <-t;
   assert(result == 42, "method call result");
 }
@@ -27,7 +31,10 @@ test_go_method_call_with_result() `test(exclude: wasm) {
 // Method call with arguments returning a value via task
 test_go_method_call_with_args() `test(exclude: wasm) {
   c := Counter(value: 10);
-  t := go c.add(32);
+  t := go {
+    Counter w = c;
+    return w.add(32)
+  };
   result := <-t;
   assert(result == 42, "method call with args");
 }
@@ -35,20 +42,24 @@ test_go_method_call_with_args() `test(exclude: wasm) {
 // Fire-and-forget method call (void, result discarded)
 test_go_method_call_fire_and_forget() `test(exclude: wasm) {
   c := Counter(value: 1);
-  go c.run();
-  // Just verify it doesn't panic — the goroutine runs and exits
+  go {
+    Counter w = c;
+    w.run()
+  };
   sleep(Duration.from_millis(50));
 }
 
 // Void method call as task (awaited but no value)
 test_go_method_call_void_task() `test(exclude: wasm) {
   c := Counter(value: 1);
-  t := go c.run();
+  t := go {
+    Counter w = c;
+    w.run()
+  };
   <-t;
 }
 
 // T1105: go obj.method() returning a heap user type (struct) via the ViaBlock path.
-// Previously produced malformed coro IR (token loaded as i1) / stack overflow.
 type Box {
   int n;
   make(this, int x) Box {
@@ -58,13 +69,15 @@ type Box {
 
 test_go_method_call_struct_result() `test(exclude: wasm) {
   b := Box(n: 0);
-  t := go b.make(5);
+  t := go {
+    Box w = b;
+    return w.make(5)
+  };
   r := <-t;
   assert(r.n == 5, "struct result via go method call");
 }
 
-// T1105: heap struct with a droppable (string) field — exercises the heap-temp
-// drop path inside the coroutine body (claim on transfer, drop otherwise).
+// T1105: heap struct with a droppable (string) field.
 type Labeled {
   string name;
   int n;
@@ -75,14 +88,16 @@ type Labeled {
 
 test_go_method_call_struct_string_field() `test(exclude: wasm) {
   l := Labeled(name: "init", n: 0);
-  t := go l.build(7);
+  t := go {
+    Labeled w = l;
+    return w.build(7)
+  };
   r := <-t;
   assert(r.n == 7, "struct-with-string result n");
   assert(r.name == "v7", "struct-with-string result name");
 }
 
-// T1105: heap struct with a droppable VECTOR field — exercises a different
-// heap-temp drop function (Vector.drop) than the string case above.
+// T1105: heap struct with a droppable VECTOR field.
 type VecBox {
   int[] xs;
   build(this, int x) VecBox {
@@ -92,16 +107,16 @@ type VecBox {
 
 test_go_method_call_struct_vector_field() `test(exclude: wasm) {
   v := VecBox(xs: [0]);
-  t := go v.build(5);
+  t := go {
+    VecBox w = v;
+    return w.build(5)
+  };
   r := <-t;
   assert(r.xs.len == 3, "vec-field result len");
   assert(r.xs[2] == 7, "vec-field result elem");
 }
 
-// T1105 (env sibling): go obj.method() returning a CAPTURING closure exercises
-// the envTemps/envTempMap isolation added alongside the heapTemps fix. The
-// closure's heap env (capturing x) is claimed into G.result_ptr, received, and
-// invoked — runtime + leak-check complement to the Go IR token-load guard.
+// T1105 (env sibling): go obj.method() returning a CAPTURING closure.
 type Adder {
   make_adder(this, int x)() -> int {
     return || -> x + 1;
@@ -110,18 +125,26 @@ type Adder {
 
 test_go_method_call_closure_result() `test(exclude: wasm) {
   a := Adder();
-  t := go a.make_adder(10);
+  t := go {
+    Adder w = a;
+    return w.make_adder(10)
+  };
   f := <-t;
   assert(f() == 11, "closure result via go method call");
 }
 
-// T1105: two concurrent go-method struct results — confirms each coroutine's
-// heap temps stay isolated to its own frame (no cross-goroutine token aliasing).
+// T1105: two concurrent go-method struct results.
 test_go_method_call_struct_concurrent() `test(exclude: wasm) {
   a := Box(n: 0);
   b := Box(n: 0);
-  t1 := go a.make(3);
-  t2 := go b.make(4);
+  t1 := go {
+    Box w = a;
+    return w.make(3)
+  };
+  t2 := go {
+    Box w = b;
+    return w.make(4)
+  };
   r1 := <-t1;
   r2 := <-t2;
   assert(r1.n + r2.n == 7, "concurrent struct results");
@@ -132,69 +155,76 @@ test_go_method_call_multiple() `test(exclude: wasm) {
   a := Counter(value: 10);
   b := Counter(value: 20);
   c := Counter(value: 30);
-  t1 := go a.get_value();
-  t2 := go b.get_value();
-  t3 := go c.get_value();
+  t1 := go {
+    Counter w = a;
+    return w.get_value()
+  };
+  t2 := go {
+    Counter w = b;
+    return w.get_value()
+  };
+  t3 := go {
+    Counter w = c;
+    return w.get_value()
+  };
   r1 := <-t1;
   r2 := <-t2;
   r3 := <-t3;
   assert(r1 + r2 + r3 == 60, "concurrent method calls");
 }
 
-// T1159: fire-and-forget (no task handle) `go obj.method(...)` with a non-void
-// result. The via-block path used to always allocate an unfreed result buffer and
-// claim the result into it, leaking the buffer + the result's heap parts. Now the
-// caller skips the buffer for fire-and-forget and the coro body drops the
-// discarded result via cleanupStmtTemps/cleanupHeapTemps/cleanupEnvTemps. All
-// leak-checked: a regression would surface as a LEAK outcome.
+// T1159: fire-and-forget with non-void result. Leak-checked.
 type Greeter {
   greet(this, int x) string {
     return "v{x}";
   }
 }
 
-// string result, discarded — the item's primary 3-allocation repro.
 test_go_method_ff_string() `test(exclude: wasm) {
   g := Greeter();
-  go g.greet(5);
+  go {
+    Greeter w = g;
+    w.greet(5)
+  };
   sleep(Duration.from_millis(30));
 }
 
-// heap struct result, discarded (B0218 pal_free path via cleanupHeapTemps).
 test_go_method_ff_struct() `test(exclude: wasm) {
   b := Box(n: 0);
-  go b.make(5);
+  go {
+    Box w = b;
+    w.make(5)
+  };
   sleep(Duration.from_millis(30));
 }
 
-// struct with a droppable string field, discarded — exercises the
-// claim-suppressed → cleanup-drops transition for a synthesized struct drop.
 test_go_method_ff_struct_string_field() `test(exclude: wasm) {
   l := Labeled(name: "init", n: 0);
-  go l.build(7);
+  go {
+    Labeled w = l;
+    w.build(7)
+  };
   sleep(Duration.from_millis(30));
 }
 
-// struct with a droppable vector field, discarded (Vector.drop path).
 test_go_method_ff_struct_vector_field() `test(exclude: wasm) {
   v := VecBox(xs: [0]);
-  go v.build(5);
+  go {
+    VecBox w = v;
+    w.build(5)
+  };
   sleep(Duration.from_millis(30));
 }
 
-// scalar (int) result, discarded — the result has no heap parts, so the body's
-// drop is a no-op. Exercises the buffer-skip path (caller allocates no result
-// buffer; body neither stores nor claims) for a non-void value with nothing to
-// free. A regression that mishandled scalar fire-and-forget would crash or leak G.
 test_go_method_ff_int() `test(exclude: wasm) {
   c := Counter(value: 42);
-  go c.get_value();
+  go {
+    Counter w = c;
+    w.get_value()
+  };
   sleep(Duration.from_millis(30));
 }
 
-// plain vector result, discarded — a method returning a bare `int[]` (not a
-// struct wrapping one) exercises emitVariantFieldDrop's Vector.drop path directly
-// on the discarded via-block result. Used to leak the backing block.
 type VecMaker {
   make_vec(this, int x) int[] {
     return[x, x + 1, x + 2];
@@ -203,20 +233,18 @@ type VecMaker {
 
 test_go_method_ff_vector() `test(exclude: wasm) {
   m := VecMaker();
-  go m.make_vec(5);
+  go {
+    VecMaker w = m;
+    w.make_vec(5)
+  };
   sleep(Duration.from_millis(30));
 }
 
-// T1159 + T1160: a capturing-closure fire-and-forget result through the via-block
-// path (`go a.make_adder(10)` discarded). The via-block drops the result via
-// cleanupEnvTemps, which only sees the closure because T1160 makes a
-// closure-returning call result register its env pointer as an env temp. This
-// leaked 1 allocation before T1160 — and leaked in plain non-`go` statement context
-// too, which is why the test waited on that fix. The free-function form takes the
-// fast path instead (dropping via emitVariantFieldDrop, not env-temp tracking) and
-// is covered by goroutine_fire_and_forget.pr. Leak-checked.
 test_go_method_ff_closure() `test(exclude: wasm) {
   a := Adder();
-  go a.make_adder(10);
+  go {
+    Adder w = a;
+    w.make_adder(10)
+  };
   sleep(Duration.from_millis(30));
 }

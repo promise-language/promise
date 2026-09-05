@@ -85,8 +85,10 @@ directory entry reached stable storage. Without step 5, a power loss immediately
 neither. The file's contents are durable and the swap is not.
 
 On POSIX this is `open(dir, O_RDONLY)` followed by `fsync`. On Windows a directory handle cannot be
-flushed; the equivalent guarantee comes from `MOVEFILE_WRITE_THROUGH` on `MoveFileEx`, so
-`Dir.sync!` is a no-op there and the durability is carried by the rename itself.
+flushed; the equivalent guarantee comes from `MOVEFILE_WRITE_THROUGH` on `MoveFileEx`, or — when the
+rename falls back to the POSIX-semantics path of §6.2 — from flushing the renamed file, whose
+metadata carries its directory entry. Either way `Dir.sync!` is a no-op there and the durability is
+carried by the rename itself.
 
 ### 3.3 The temporary file must be a sibling
 
@@ -245,11 +247,14 @@ waiting is legitimate but must stay bounded, `lock!` only when the holder is kno
 Everything above is uniform across platforms except these, which are stated rather than hidden:
 
 1. **Advisory vs mandatory locking** (§5.3).
-2. **Delete-pending on Windows.** Files are opened with `FILE_SHARE_DELETE` so that an open file can
-   be renamed over — see [windows-support.md](windows-support.md). This narrows the gap but does not
-   close it: deleting an open file on Windows leaves the *name* visible until the last handle closes,
-   and a new open of that name fails with `ERROR_ACCESS_DENIED`. POSIX `unlink` removes the name
-   immediately and a fresh create succeeds.
+2. **Delete-pending on Windows.** An open file can be renamed over there, but not by
+   `MoveFileEx`: `FILE_SHARE_DELETE` on every handle is necessary and not sufficient, because
+   `MoveFileEx`'s replace step fails with `ERROR_ACCESS_DENIED` while any handle to the destination
+   lives. The rename therefore falls back to a POSIX-semantics rename for exactly that case — see
+   [windows-support.md](windows-support.md). This narrows the gap but does not close it: deleting an
+   open file on Windows leaves the *name* visible until the last handle closes, and a new open of
+   that name fails with `ERROR_ACCESS_DENIED`. POSIX `unlink` removes the name immediately and a
+   fresh create succeeds.
 3. **`Dir.sync!` is a no-op on Windows** (§3.2).
 4. **WASM supports none of this.** `sync`, the lock operations, and `replace_content` raise. WASI has
    no advisory locking, and the target has no durability story to offer.

@@ -2493,6 +2493,63 @@ func TestFileRenameWindowsFlags(t *testing.T) {
 	assertContains(t, out, "@MoveFileExA(i8* %from, i8* %to, i32 9)", "REPLACE_EXISTING|WRITE_THROUGH")
 }
 
+// T1930: MoveFileEx cannot replace a destination anyone still holds open — its
+// replace step is a classic FileRenameInformation, which returns
+// ERROR_ACCESS_DENIED while a handle to the target lives, whatever the share
+// mode. docs/io.md §3 is built on renaming over a file a reader has open, so
+// ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32) must retry through the
+// POSIX-semantics rename. Each constant below is load-bearing and invisible in
+// the failure it prevents (a link error, or a rename that silently stops
+// replacing), so they are pinned rather than left to a comment.
+func TestFileRenameWindowsPosixFallback(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileRename(module)
+	out := module.String()
+
+	// The two Win32 codes an open destination produces, and nothing wider: a
+	// blanket retry would paper over real errors with a second failing syscall.
+	assertContains(t, out, "icmp eq i32 %1, 5", "ERROR_ACCESS_DENIED triggers the fallback")
+	assertContains(t, out, "icmp eq i32 %1, 32", "ERROR_SHARING_VIOLATION triggers the fallback")
+
+	// FileRenameInfoEx (22) is the class that reads Flags rather than
+	// FileRenameInfo's BOOLEAN ReplaceIfExists; passing 3 would rename with the
+	// classic semantics that just failed.
+	if !callArgsContain(out, "@SetFileInformationByHandle(", "i32 22,") {
+		t.Errorf("SetFileInformationByHandle is not called with FileRenameInfoEx (22):\n%s", out)
+	}
+	// FILE_RENAME_FLAG_REPLACE_IF_EXISTS|FILE_RENAME_FLAG_POSIX_SEMANTICS, stored
+	// into the struct's leading Flags field.
+	assertContains(t, out, "store i32 3,", "REPLACE_IF_EXISTS|POSIX_SEMANTICS")
+	// RootDirectory = NULL is what makes FileName's fully-qualified form required,
+	// which is why the destination goes through GetFullPathNameA first.
+	assertContains(t, out, "@GetFullPathNameA(", "destination is fully qualified")
+	assertContains(t, out, "@MultiByteToWideChar(", "FileName is UTF-16")
+
+	// DELETE|GENERIC_WRITE: DELETE is what the rename needs, GENERIC_WRITE is what
+	// FlushFileBuffers needs — with DELETE alone the flush fails with
+	// ERROR_ACCESS_DENIED and §3.2's durability quietly goes missing.
+	assertContains(t, out, "@CreateFileA(i8* %from, i32 u0x40010000,", "DELETE|GENERIC_WRITE")
+	assertContains(t, out, "@FlushFileBuffers(", "renamed handle is flushed for §3.2")
+
+	// The handle must be closed on both outcomes, so the call appears twice.
+	if n := strings.Count(out, "call i32 @CloseHandle("); n != 2 {
+		t.Errorf("CloseHandle is called %d times; the fallback must close its handle on "+
+			"the failure path as well as the success path", n)
+	}
+}
+
+// callArgsContain reports whether some call to fn in ir passes want among its
+// arguments. Matching the whole call would pin llir's register numbering, which
+// shifts whenever an unrelated instruction is added before it.
+func callArgsContain(ir, fn, want string) bool {
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, fn) && strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFileSyncAllPlatforms(t *testing.T) {
 	for _, tc := range []struct {
 		name string

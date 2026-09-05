@@ -26,6 +26,7 @@ GetCurrentProcessId
 GetEnvironmentVariableA
 GetExitCodeProcess
 GetFileAttributesA
+GetFullPathNameA
 GetLastError
 GetProcessTimes
 GetStdHandle
@@ -42,6 +43,7 @@ QueryPerformanceCounter
 QueryPerformanceFrequency
 ReadFile
 SetConsoleCtrlHandler
+SetFileInformationByHandle
 SetHandleInformation
 Sleep
 SleepConditionVariableCS

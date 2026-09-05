@@ -896,13 +896,31 @@ func (p *WindowsPAL) winEmitOsfHandleGuard(module *ir.Module, fn *ir.Func, entry
 	return handle, gotBlk
 }
 
-// EmitFileRename declares Win32 @MoveFileExA and defines @pal_file_rename.
+// EmitFileRename declares Win32 @MoveFileExA plus the POSIX-semantics rename
+// fallback, and defines @pal_file_rename.
 //
 // MOVEFILE_REPLACE_EXISTING (0x1) matches POSIX rename(2), which silently
 // replaces the destination; plain MoveFile fails instead. MOVEFILE_WRITE_THROUGH
 // (0x8) makes the rename durable before returning, and is what lets pal_dir_sync
 // be a no-op on Windows — a directory handle cannot be flushed there, so the
 // guarantee docs/io.md §3.2 needs has to ride on the rename itself.
+//
+// MoveFileEx alone is not enough, though: its replace step is a classic
+// NtSetInformationFile(FileRenameInformation), which fails with
+// ERROR_ACCESS_DENIED while *any* handle to the destination is open — including
+// one opened with FILE_SHARE_DELETE, so T1742's share mode does not rescue it.
+// docs/io.md §6.2 states that an open file can be renamed over, so those two
+// error codes fall back to SetFileInformationByHandle(FileRenameInfoEx) with
+// FILE_RENAME_FLAG_POSIX_SEMANTICS — the Windows 10 1709+ primitive that behaves
+// as rename(2) does: the name is swapped immediately and the handles still open
+// on the replaced file keep reading it until they close.
+//
+// The fallback is tried second, not first, so every rename that succeeds today
+// keeps MOVEFILE_WRITE_THROUGH's durability and only the case that is a hard
+// error today takes the weaker path. When the fallback fails too, the *original*
+// MoveFileEx error is what the caller sees: it describes their actual problem,
+// whereas the fallback's own error may be no more than "FileRenameInfoEx is not
+// supported on this volume".
 func (p *WindowsPAL) EmitFileRename(module *ir.Module) *ir.Func {
 	moveFileExA := getOrDeclareFunc(module, "MoveFileExA", irtypes.I32,
 		ir.NewParam("lpExistingFileName", irtypes.I8Ptr),
@@ -925,14 +943,179 @@ func (p *WindowsPAL) EmitFileRename(module *ir.Module) *ir.Func {
 	// Capture the Win32 error immediately — any intervening call could clobber it.
 	winErr := entry.NewCall(getLastError)
 
-	failed := entry.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
 	errBlk := fn.NewBlock(".err")
 	okBlk := fn.NewBlock(".ok")
-	entry.NewCondBr(failed, errBlk, okBlk)
+	sharingBlk := fn.NewBlock(".sharing")
+
+	failed := entry.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
+	entry.NewCondBr(failed, sharingBlk, okBlk)
+
+	// ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32) are what a live
+	// handle on the destination produces. Every other code is a genuine failure
+	// the POSIX path would not fix, so it is reported without the extra work.
+	isDenied := sharingBlk.NewOr(
+		sharingBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 5)),
+		sharingBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 32)))
+	posixBlk := fn.NewBlock(".posix_rename")
+	sharingBlk.NewCondBr(isDenied, posixBlk, errBlk)
+
+	p.winEmitPosixRename(module, fn, posixBlk, fn.Params[0], fn.Params[1], okBlk, errBlk)
 
 	p.emitWinErrReturnI32(errBlk, winErr, errnoFn)
 	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
+}
+
+// winEmitPosixRename emits the FileRenameInfoEx rename of `from` onto `to`,
+// starting in blk. Control leaves through okBlk when the rename happened and
+// through failBlk when any step did not — the caller decides what a failure
+// reports, so nothing here touches errno.
+//
+// FILE_RENAME_INFO is a variable-length struct whose tail is the UTF-16 target
+// name:
+//
+//	 0  DWORD  Flags            (a union with FileRenameInfo's BOOLEAN ReplaceIfExists)
+//	 8  HANDLE RootDirectory    (NULL — FileName is then required to be fully qualified)
+//	16  DWORD  FileNameLength   (bytes, excluding the terminating NUL)
+//	20  WCHAR  FileName[]
+//
+// Hence GetFullPathNameA before the widening: a relative `to` would otherwise be
+// resolved against the *source* directory rather than the caller's working
+// directory. Both buffers are stack-allocated — the ANSI API bounds the path at
+// MAX_PATH, and an alloca keeps the fallback out of the allocation counter that
+// backs leak detection (B0326).
+func (p *WindowsPAL) winEmitPosixRename(module *ir.Module, fn *ir.Func, blk *ir.Block,
+	from, to value.Value, okBlk, failBlk *ir.Block) {
+	getFullPathNameA := getOrDeclareFunc(module, "GetFullPathNameA", irtypes.I32,
+		ir.NewParam("lpFileName", irtypes.I8Ptr),
+		ir.NewParam("nBufferLength", irtypes.I32),
+		ir.NewParam("lpBuffer", irtypes.I8Ptr),
+		ir.NewParam("lpFilePart", irtypes.I8Ptr))
+	mb2wc := getOrDeclareFunc(module, "MultiByteToWideChar", irtypes.I32,
+		ir.NewParam("cp", irtypes.I32), ir.NewParam("flags", irtypes.I32),
+		ir.NewParam("src", irtypes.I8Ptr), ir.NewParam("srcLen", irtypes.I32),
+		ir.NewParam("dst", irtypes.I8Ptr), ir.NewParam("dstLen", irtypes.I32))
+	createFileA := getOrDeclareFunc(module, "CreateFileA", irtypes.I8Ptr,
+		ir.NewParam("lpFileName", irtypes.I8Ptr),
+		ir.NewParam("dwDesiredAccess", irtypes.I32),
+		ir.NewParam("dwShareMode", irtypes.I32),
+		ir.NewParam("lpSecurityAttributes", irtypes.I8Ptr),
+		ir.NewParam("dwCreationDisposition", irtypes.I32),
+		ir.NewParam("dwFlagsAndAttributes", irtypes.I32),
+		ir.NewParam("hTemplateFile", irtypes.I8Ptr))
+	setFileInfo := getOrDeclareFunc(module, "SetFileInformationByHandle", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("FileInformationClass", irtypes.I32),
+		ir.NewParam("lpFileInformation", irtypes.I8Ptr),
+		ir.NewParam("dwBufferSize", irtypes.I32))
+	flushFileBuffers := getOrDeclareFunc(module, "FlushFileBuffers", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr))
+	closeHandle := winDeclareCloseHandle(module)
+
+	const (
+		cpACP = 0 // the code page CreateFileA and friends already use
+		// FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS
+		renameFlags = 0x1 | 0x2
+		// FileRenameInfoEx — the class that reads Flags rather than ReplaceIfExists.
+		fileRenameInfoEx = 22
+		deleteAccess     = 0x00010000 // DELETE — all the rename itself needs
+		genericWrite     = 0x40000000 // ... but FlushFileBuffers below needs this
+		shareAll         = 0x1 | 0x2 | 0x4
+		openExisting     = 3
+		// FILE_FLAG_BACKUP_SEMANTICS lets the source be a directory, which
+		// MoveFileEx renames too.
+		openFlags = 0x80 | 0x02000000
+	)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+
+	// 1. Size the fully-qualified destination (return counts the NUL).
+	need := blk.NewCall(getFullPathNameA, to, zero32, nullPtr, nullPtr)
+	sizedBlk := fn.NewBlock(".rn_fullpath")
+	blk.NewCondBr(blk.NewICmp(enum.IPredEQ, need, zero32), failBlk, sizedBlk)
+
+	// 2. Resolve it (return now counts the written chars, excluding the NUL).
+	// The NElems operand has to exist before the alloca that uses it — llir
+	// appends each instruction as it is built, so building them the other way
+	// round emits an alloca that its own size does not dominate.
+	fullElems := sizedBlk.NewZExt(need, irtypes.I64)
+	full := sizedBlk.NewAlloca(irtypes.I8)
+	full.NElems = fullElems
+	got := sizedBlk.NewCall(getFullPathNameA, to, need, full, nullPtr)
+	gotBad := sizedBlk.NewOr(
+		sizedBlk.NewICmp(enum.IPredEQ, got, zero32),
+		sizedBlk.NewICmp(enum.IPredUGE, got, need))
+	widenBlk := fn.NewBlock(".rn_widen")
+	sizedBlk.NewCondBr(gotBad, failBlk, widenBlk)
+
+	// 3. Size the UTF-16 form. cbMultiByte = -1 means "NUL-terminated", so the
+	//    count that comes back includes the terminator.
+	wideLen := widenBlk.NewCall(mb2wc, zero32, zero32, full,
+		constant.NewInt(irtypes.I32, -1), nullPtr, zero32)
+	buildBlk := fn.NewBlock(".rn_build")
+	widenBlk.NewCondBr(widenBlk.NewICmp(enum.IPredSLE, wideLen, zero32), failBlk, buildBlk)
+
+	// 4. Build FILE_RENAME_INFO. The buffer is allocated as i64 slots so the
+	//    RootDirectory field lands 8-byte aligned.
+	nameBytes := buildBlk.NewMul(wideLen, constant.NewInt(irtypes.I32, 2))
+	size := buildBlk.NewAdd(nameBytes, constant.NewInt(irtypes.I32, 20))
+	sizeI64 := buildBlk.NewZExt(size, irtypes.I64)
+	slotCount := buildBlk.NewUDiv(
+		buildBlk.NewAdd(sizeI64, constant.NewInt(irtypes.I64, 7)),
+		constant.NewInt(irtypes.I64, 8))
+	slots := buildBlk.NewAlloca(irtypes.I64)
+	slots.NElems = slotCount
+	buf := buildBlk.NewBitCast(slots, irtypes.I8Ptr)
+
+	storeAt := func(off int64, typ irtypes.Type, val value.Value) {
+		ptr := buildBlk.NewGetElementPtr(irtypes.I8, buf, constant.NewInt(irtypes.I64, off))
+		buildBlk.NewStore(val, buildBlk.NewBitCast(ptr, irtypes.NewPointer(typ)))
+	}
+	storeAt(0, irtypes.I32, constant.NewInt(irtypes.I32, renameFlags))
+	storeAt(8, irtypes.I64, constant.NewInt(irtypes.I64, 0)) // RootDirectory
+	// FileNameLength excludes the terminating NUL that nameBytes counts.
+	storeAt(16, irtypes.I32, buildBlk.NewSub(nameBytes, constant.NewInt(irtypes.I32, 2)))
+
+	namePtr := buildBlk.NewGetElementPtr(irtypes.I8, buf, constant.NewInt(irtypes.I64, 20))
+	converted := buildBlk.NewCall(mb2wc, zero32, zero32, full,
+		constant.NewInt(irtypes.I32, -1), namePtr, wideLen)
+	openBlk := fn.NewBlock(".rn_open")
+	buildBlk.NewCondBr(buildBlk.NewICmp(enum.IPredEQ, converted, zero32), failBlk, openBlk)
+
+	// 5. The rename itself needs only DELETE on the source; GENERIC_WRITE is
+	//    asked for so step 7 can flush. Requesting it cannot cost a rename that
+	//    works today — this path runs only after MoveFileEx already failed — and
+	//    replace_bytes's source is a temporary this process just wrote.
+	handle := openBlk.NewCall(createFileA, from,
+		constant.NewInt(irtypes.I32, deleteAccess|genericWrite),
+		constant.NewInt(irtypes.I32, shareAll),
+		nullPtr, constant.NewInt(irtypes.I32, openExisting),
+		constant.NewInt(irtypes.I32, openFlags), nullPtr)
+	handleInt := openBlk.NewPtrToInt(handle, irtypes.I64)
+	// INVALID_HANDLE_VALUE is (HANDLE)-1, not null.
+	badHandle := openBlk.NewICmp(enum.IPredEQ, handleInt, constant.NewInt(irtypes.I64, -1))
+	setBlk := fn.NewBlock(".rn_set")
+	openBlk.NewCondBr(badHandle, failBlk, setBlk)
+
+	// 6. Rename. The handle is closed on both outcomes — neither exit may be
+	//    reached with it still open.
+	res := setBlk.NewCall(setFileInfo, handle,
+		constant.NewInt(irtypes.I32, fileRenameInfoEx), buf, size)
+	flushBlk := fn.NewBlock(".rn_flush")
+	closeFailBlk := fn.NewBlock(".rn_close_fail")
+	setBlk.NewCondBr(setBlk.NewICmp(enum.IPredNE, res, zero32), flushBlk, closeFailBlk)
+
+	// 7. FileRenameInfoEx has no MOVEFILE_WRITE_THROUGH equivalent, so the
+	//    directory entry is made durable by flushing the renamed file — that is
+	//    what keeps docs/io.md §3.2's promise (and pal_dir_sync's no-op) true on
+	//    this path. Best-effort: the rename has already happened and cannot be
+	//    undone, so a flush failure must not turn a completed rename into an error.
+	flushBlk.NewCall(flushFileBuffers, handle)
+	flushBlk.NewCall(closeHandle, handle)
+	flushBlk.NewBr(okBlk)
+
+	closeFailBlk.NewCall(closeHandle, handle)
+	closeFailBlk.NewBr(failBlk)
 }
 
 // EmitFileSync declares Win32 @FlushFileBuffers and defines @pal_file_sync.

@@ -1,0 +1,181 @@
+// T0990: a Vector-field mutation evaluates its field owner EXACTLY ONCE.
+//
+// Codegen used to evaluate `obj` twice for `obj.field.push(x)` — once while
+// reading the buffer, and again to recompute the write-back slot via
+// genFieldPtr. For a side-effect-free owner both evaluations named the same
+// instance, so the bug was invisible; for an impure owner they named DIFFERENT
+// instances, and the grown buffer landed in the second one's field while the
+// first kept the freed pre-push pointer (double free) and the second's own
+// buffer was orphaned (leak).
+//
+// The counter below observes the evaluation count directly. All seven mutating
+// forms shared the one root cause, so each gets its own assertion.
+type Counter {
+  int n;
+}
+
+type Holder {
+  Vector[int] items;
+}
+
+// Impure owner: bumps the counter and returns a FRESH Holder on every call.
+make(Counter ~c) Holder {
+  c.n = c.n + 1;
+  return Holder(items: [1, 2, 3]);
+}
+
+push_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items.push(9);
+  assert(c.n == 1, "push: owner evaluated {c.n} times, want 1");
+}
+
+pop_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items.pop();
+  assert(c.n == 1, "pop: owner evaluated {c.n} times, want 1");
+}
+
+remove_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items.remove(0);
+  assert(c.n == 1, "remove: owner evaluated {c.n} times, want 1");
+}
+
+index_assign_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items[0] = 9;
+  assert(c.n == 1, "v[i] = x: owner evaluated {c.n} times, want 1");
+}
+
+index_compound_assign_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items[0] += 9;
+  assert(c.n == 1, "v[i] += x: owner evaluated {c.n} times, want 1");
+}
+
+index_increment_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items[0]++;
+  assert(c.n == 1, "v[i]++: owner evaluated {c.n} times, want 1");
+}
+
+slice_assign_evaluates_owner_once() `test {
+  c := Counter(n: 0);
+  make(c).items[0:1] = [9];
+  assert(c.n == 1, "v[a:b] = x: owner evaluated {c.n} times, want 1");
+}
+
+// --- The same single evaluation, for every owner shape vectorFieldSlot accepts ---
+//
+// The seven forms above all funnel through one guard (vectorFieldSlot), but the
+// guard has to resolve the owner's TYPE before it can address the field, and each
+// shape below resolves down a different arm of it: a field reached through a
+// second field (the chain evaluates the outermost owner once, not once per link),
+// an INHERITED field (the slot index comes from the parent's layout merged into
+// the child instance), and a field on a MONOMORPHIZED generic owner (the field
+// type is a TypeParam until `typeSubst` resolves it). Each arm re-derived the
+// owner independently before the fix, so each needs its own counter.
+
+type ChainOuter {
+  Holder inner;
+}
+
+type Base {
+  Vector[int] items;
+}
+
+type Derived is Base {
+  int tag;
+}
+
+type Box[T] {
+  Vector[T] items;
+}
+
+make_outer(Counter ~c) ChainOuter {
+  c.n = c.n + 1;
+  return ChainOuter(inner: Holder(items: [1, 2, 3]));
+}
+
+make_derived(Counter ~c) Derived {
+  c.n = c.n + 1;
+  return Derived(items: [1, 2, 3], tag: 7);
+}
+
+make_box(Counter ~c) Box[int] {
+  c.n = c.n + 1;
+  return Box[int](items: [1, 2, 3]);
+}
+
+chained_owner_evaluated_once() `test {
+  c := Counter(n: 0);
+  make_outer(c).inner.items.push(9);
+  assert(c.n == 1, "chain push: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_outer(c).inner.items.pop();
+  assert(c.n == 1, "chain pop: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_outer(c).inner.items.remove(0);
+  assert(c.n == 1, "chain remove: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_outer(c).inner.items[0] = 9;
+  assert(c.n == 1, "chain v[i] = x: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_outer(c).inner.items[0] += 9;
+  assert(c.n == 1, "chain v[i] += x: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_outer(c).inner.items[0]++;
+  assert(c.n == 1, "chain v[i]++: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_outer(c).inner.items[0:1] = [9];
+  assert(c.n == 1, "chain v[a:b] = x: owner evaluated {c.n} times, want 1");
+}
+
+inherited_field_owner_evaluated_once() `test {
+  c := Counter(n: 0);
+  make_derived(c).items.push(9);
+  assert(c.n == 1, "inherited push: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_derived(c).items.pop();
+  assert(c.n == 1, "inherited pop: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_derived(c).items.remove(0);
+  assert(c.n == 1, "inherited remove: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_derived(c).items[0] = 9;
+  assert(c.n == 1, "inherited v[i] = x: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_derived(c).items[0] += 9;
+  assert(c.n == 1, "inherited v[i] += x: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_derived(c).items[0]++;
+  assert(c.n == 1, "inherited v[i]++: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_derived(c).items[0:1] = [9];
+  assert(c.n == 1, "inherited v[a:b] = x: owner evaluated {c.n} times, want 1");
+}
+
+generic_owner_evaluated_once() `test {
+  c := Counter(n: 0);
+  make_box(c).items.push(9);
+  assert(c.n == 1, "generic push: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_box(c).items.pop();
+  assert(c.n == 1, "generic pop: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_box(c).items.remove(0);
+  assert(c.n == 1, "generic remove: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_box(c).items[0] = 9;
+  assert(c.n == 1, "generic v[i] = x: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_box(c).items[0] += 9;
+  assert(c.n == 1, "generic v[i] += x: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_box(c).items[0]++;
+  assert(c.n == 1, "generic v[i]++: owner evaluated {c.n} times, want 1");
+  c.n = 0;
+  make_box(c).items[0:1] = [9];
+  assert(c.n == 1, "generic v[a:b] = x: owner evaluated {c.n} times, want 1");
+}

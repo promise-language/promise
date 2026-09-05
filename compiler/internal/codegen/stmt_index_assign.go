@@ -181,7 +181,8 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 
 // genVectorIndexAssign handles vec[i] = val with bounds check.
 func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Type, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
-	slicePtr := c.genExpr(target.Target)
+	// T0990: read the place once, keeping the field slot for the COW store-back.
+	slicePtr, placeSlot := c.genVectorPlaceRead(target.Target)
 	idx := c.genExpr(target.Index)
 	elemLLVM := c.resolveType(elemType)
 	elemSize := int64(c.typeSize(elemLLVM))
@@ -189,7 +190,7 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	// COW: if static (.rodata), copy to heap first (T0062)
 	cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 		slicePtr, constant.NewInt(irtypes.I64, elemSize))
-	c.storeBackSlicePtr(target.Target, cowSlice)
+	c.storeBackVectorPlace(target.Target, placeSlot, cowSlice)
 
 	// Bounds check (masked len)
 	headerType := vectorHeaderType()
@@ -365,7 +366,8 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 					elem, ok = c.typeSubst[tp], c.typeSubst[tp] != nil
 				}
 				if ok {
-					slicePtr := c.genExpr(target.Target)
+					// T0990: read the place once, keep the slot for the store-back.
+					slicePtr, placeSlot := c.genVectorPlaceRead(target.Target)
 					idx := c.genExpr(target.Index)
 					val := c.genExpr(valueExpr)
 					if c.info.AutoPropagateExprs[valueExpr] {
@@ -376,7 +378,7 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 					elemSize := int64(c.typeSize(elemLLVM))
 					cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 						slicePtr, constant.NewInt(irtypes.I64, elemSize))
-					c.storeBackSlicePtr(target.Target, cowSlice)
+					c.storeBackVectorPlace(target.Target, placeSlot, cowSlice)
 					c.genVectorCompoundAssign(cowSlice, idx, elem, op, val)
 					return
 				}
@@ -569,7 +571,8 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 		panic(fmt.Sprintf("codegen: no [:]=  method on type %s", named))
 	}
 
-	targetVal := c.genExpr(target.Target)
+	// T0990: read the place once, keeping the field slot for the COW store-back below.
+	targetVal, placeSlot := c.genVectorPlaceRead(target.Target)
 
 	// Generate optional int arguments for low and high bounds
 	optIntType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
@@ -601,7 +604,7 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 		elemSize := int64(c.typeSize(elemLLVM))
 		instancePtr = c.block.NewCall(c.funcs["promise_vector_cow"],
 			instancePtr, constant.NewInt(irtypes.I64, elemSize))
-		c.storeBackSlicePtr(target.Target, instancePtr)
+		c.storeBackVectorPlace(target.Target, placeSlot, instancePtr)
 	}
 
 	call := c.block.NewCall(fn, instancePtr, low, high, val)

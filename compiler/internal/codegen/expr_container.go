@@ -643,6 +643,15 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 
 // storeBackSlicePtr stores the new vector pointer back into the variable that holds the vector.
 // This is needed because push may realloc.
+//
+// Every case here RECOMPUTES the place by re-evaluating it, which is sound only for
+// a side-effect-free place — so it is the fallback, not the primary path. Callers
+// that can capture the write-back slot during the read do so and store through it
+// (storeVectorReceiverBack for a method-call receiver, storeBackVectorPlace for an
+// assignment/inc-dec place). There is deliberately no *ast.OptionalUnwrapExpr case:
+// a `place!` receiver is handled by optionalPayloadReceiverSlot (T1295), and the
+// assignment sites that still reach here for one silently drop the store-back —
+// tracked, with the remaining recompute-unsound shapes, by T1947.
 func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 	switch t := target.(type) {
 	case *ast.IdentExpr:
@@ -653,6 +662,15 @@ func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 			c.block.NewStore(newPtr, alloca)
 		}
 	case *ast.MemberExpr:
+		// T0990: this recompute RE-EVALUATES t.Target, so it is sound only for a
+		// side-effect-free field owner. Every Vector mutation path now pre-captures
+		// the field slot via vectorFieldSlot / genVectorPlaceRead and stores through
+		// it, so what still arrives here is a member shape that guard rejects. In
+		// practice that is the narrowed enum-variant field (T1946), where genFieldPtr
+		// panics rather than recomputing; a getter member never gets this far (it has
+		// no field to address, and evalVectorReceiver routes it to the T1370
+		// statement-temp slot), and a Vector field cannot live on a value-type owner
+		// because a `value` field must be a copy type.
 		fieldPtr := c.genFieldPtr(t)
 		c.block.NewStore(newPtr, fieldPtr)
 	case *ast.IndexExpr:
@@ -733,7 +751,19 @@ func (c *Compiler) indexTargetIsArrayOrVector(e *ast.IndexExpr) bool {
 // index targets (`vovv[i][j]`) are likewise routed to the early-slot path: a
 // recompute would re-evaluate the inner index, so they keep their pre-T1064
 // behavior rather than risk a double-eval of an impure inner index.
+//
+// "Re-addresses purely" is a property of the WHOLE chain, not of its last link
+// (T0990): `make().rows[0].push(x)` ends in a real owned field, but recomputing it
+// calls `make()` a second time, so the grown inner buffer is stored into a
+// different instance's row while the pushed-into one keeps the freed pre-push
+// pointer (double free at drop). Such a chain is an rvalue outer and takes the
+// early-slot path — nothing external can alias a fresh temporary, so there is no
+// realloc window to defend against.
 func (c *Compiler) indexTargetIsReallocatablePlace(target ast.Expr) bool {
+	// `this` is a stable receiver pointer — re-addressing it is side-effect-free.
+	if isThisReceiver(target) {
+		return true
+	}
 	switch e := target.(type) {
 	case *ast.IdentExpr:
 		if _, ok := c.mutRefPtrs[e.Name]; ok {
@@ -744,8 +774,10 @@ func (c *Compiler) indexTargetIsReallocatablePlace(target ast.Expr) bool {
 	case *ast.MemberExpr:
 		// A real owned field re-addresses purely; a getter/module-getter or a
 		// borrow-returning member produces a fresh rvalue (mirrors the T1295
-		// addressability guards in optionalPayloadReceiverSlot).
-		return !c.isGetterCallExpr(target) && !c.isBorrowedExpr(target)
+		// addressability guards in optionalPayloadReceiverSlot). T0990: and only if
+		// its own owner re-addresses purely, all the way down to a local/`this`.
+		return !c.isGetterCallExpr(target) && !c.isBorrowedExpr(target) &&
+			c.indexTargetIsReallocatablePlace(e.Target)
 	}
 	return false
 }
@@ -839,6 +871,109 @@ func (c *Compiler) optionalPayloadReceiverSlot(target ast.Expr) (slicePtr, slot 
 	return slicePtr, payloadPtr, true
 }
 
+// vectorFieldSlot returns the instance-field slot holding a Vector-typed member
+// place plus the buffer pointer loaded from it, evaluating the field owner EXACTLY
+// ONCE (T0990). ok is false for anything that is not a plain struct-field read of a
+// Vector on a heap user type — a narrowed enum-variant field (T1946), a module
+// getter, an enum member, a property getter, a value-type owner — in which case the
+// caller keeps its existing recompute behaviour.
+//
+// A pre-captured FIELD slot is safe where a pre-captured ELEMENT slot was not
+// (T1064): a `value` field must be a copy type, so a Vector field never lives on a
+// value-type owner and the slot always sits inside a heap instance struct — which no
+// push/COW/realloc relocates. Recomputing (T1064's remedy for element slots) buys
+// nothing here and is exactly what evaluated an impure owner twice.
+func (c *Compiler) vectorFieldSlot(mem *ast.MemberExpr) (slot, ptr value.Value, ok bool) {
+	// The guard mirrors genMemberExpr's dispatch prefix so it accepts exactly the
+	// member shapes that reach genFieldAccess.
+	if c.info.NarrowedVariantField[mem] != nil { // T0993 read / T1946 mutation
+		return nil, nil, false
+	}
+	if c.info.ModuleGetters[mem] {
+		return nil, nil, false
+	}
+	if c.info.AutoPropagateExprs[mem] {
+		// The read this replaces would unwrap the propagated error; leave it alone.
+		return nil, nil, false
+	}
+	targetType := c.info.Types[mem.Target]
+	if targetType == nil {
+		return nil, nil, false
+	}
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	// T0381: the runtime representation of a borrow is the owned one.
+	if sr, isSharedRef := targetType.(*types.SharedRef); isSharedRef {
+		targetType = sr.Elem()
+	}
+	if mr, isMutRef := targetType.(*types.MutRef); isMutRef {
+		targetType = mr.Elem()
+	}
+	if c.lookupEnumLayout(targetType) != nil {
+		return nil, nil, false
+	}
+	named := extractNamed(targetType)
+	if named == nil || named.LookupField(mem.Field) == nil {
+		return nil, nil, false // getter, or an unresolvable owner
+	}
+	layout := c.lookupTypeLayout(targetType)
+	if layout == nil || layout.IsValueType {
+		return nil, nil, false
+	}
+	fieldIdx, hasField := layout.InstanceFieldIndex[mem.Field]
+	if !hasField {
+		return nil, nil, false
+	}
+	// Confine the change to the Vector places this fix is about. Optional[Vector]
+	// fields are not peeled by extractNamed and take the T1295 payload path instead.
+	memType := c.info.Types[mem]
+	if c.typeSubst != nil {
+		memType = types.Substitute(memType, c.typeSubst)
+	}
+	if _, isVec := types.AsVector(memType); !isVec && extractNamed(memType) != types.TypVector {
+		return nil, nil, false
+	}
+
+	// T0648: suppress whole-container field dup while evaluating the owner — a
+	// mutation place wants the real field slot, not a clone. Mirrors the IndexExpr
+	// branch of evalVectorReceiver.
+	savedDupContainer := c.dupContainerFieldAccess
+	c.dupContainerFieldAccess = false
+	slot = c.genInstanceFieldSlot(mem, targetType, layout, fieldIdx)
+	c.dupContainerFieldAccess = savedDupContainer
+	// Same i8* load genFieldAccess produces, so every consumer sees an identical value.
+	ptr = c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, slot)
+	return slot, ptr, true
+}
+
+// genVectorPlaceRead reads a Vector-valued place, returning the buffer pointer and
+// (for a struct-field place) the slot it came from, so the caller can write a
+// relocated buffer back without evaluating the place a second time (T0990). slot is
+// nil for every other place shape, which keeps the storeBackSlicePtr fallback.
+func (c *Compiler) genVectorPlaceRead(target ast.Expr) (ptr, slot value.Value) {
+	if mem, isMember := target.(*ast.MemberExpr); isMember {
+		if fieldSlot, fieldPtr, ok := c.vectorFieldSlot(mem); ok {
+			return fieldPtr, fieldSlot
+		}
+	}
+	return c.genExpr(target), nil
+}
+
+// storeBackVectorPlace writes a relocated Vector buffer back into the place
+// genVectorPlaceRead read it from — through the captured slot when there is one,
+// else via storeBackSlicePtr (T0990).
+func (c *Compiler) storeBackVectorPlace(target ast.Expr, slot, newPtr value.Value) {
+	if slot != nil {
+		c.block.NewStore(newPtr, slot)
+		return
+	}
+	c.storeBackSlicePtr(target, newPtr)
+}
+
 // vectorReceiver holds everything storeVectorReceiverBack needs to write a
 // grown/relocated Vector pointer back into a push/pop/remove receiver. For an
 // arr[i]/vov[i] receiver it deliberately does NOT carry an early-computed element
@@ -849,7 +984,7 @@ func (c *Compiler) optionalPayloadReceiverSlot(target ast.Expr) (slicePtr, slot 
 type vectorReceiver struct {
 	target   ast.Expr       // ident/field store-back fallback (plain v.push(x))
 	slicePtr value.Value    // loaded inner Vector pointer (read once, up front)
-	slot     value.Value    // directly-captured non-dangling slot (T1295 payload / T1370 temp alloca)
+	slot     value.Value    // directly-captured non-dangling slot (T1295 payload / T1370 temp alloca / T0990 field)
 	idxExpr  *ast.IndexExpr // set for an arr[i]/vov[i] receiver → recompute slot at store-back
 	idxVal   value.Value    // index evaluated exactly once (impure-index safety)
 }
@@ -904,6 +1039,16 @@ func (c *Compiler) evalVectorReceiver(target ast.Expr) vectorReceiver {
 		// would spawn a fresh temporary (double-free) — so keep the early slot
 		// and store through it once, exactly as before T1064.
 		return vectorReceiver{target: target, slicePtr: slicePtr, slot: slot}
+	}
+	// T0990: a plain `owner.field` receiver — capture the field slot during the
+	// read so the store-back never re-evaluates the owner. With an impure owner
+	// (`make().items.push(x)`) the recompute produced a DIFFERENT instance, so the
+	// grown buffer landed in the wrong object's field and the one that was actually
+	// pushed into kept the freed pre-push pointer (double free).
+	if mem, isMember := target.(*ast.MemberExpr); isMember {
+		if slot, ptr, ok := c.vectorFieldSlot(mem); ok {
+			return vectorReceiver{target: target, slicePtr: ptr, slot: slot}
+		}
 	}
 	val := c.genExprAutoPropagate(target) // B0323
 	// T1370: rvalue receiver (a Vector returned by a call/getter, not an

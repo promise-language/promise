@@ -119,7 +119,8 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			if !ok {
 				panic(fmt.Sprintf("codegen: inc/dec on index of non-vector native type %s", indexTargetType))
 			}
-			slicePtr := c.genExpr(t.Target)
+			// T0990: read the place once, keep the slot for the store-back.
+			slicePtr, placeSlot := c.genVectorPlaceRead(t.Target)
 			idx := c.genExpr(t.Index)
 			elemLLVM := c.resolveType(elem)
 			elemSize := int64(c.typeSize(elemLLVM))
@@ -127,7 +128,7 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			// COW: if static (.rodata), copy to heap first (T0062)
 			cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 				slicePtr, constant.NewInt(irtypes.I64, elemSize))
-			c.storeBackSlicePtr(t.Target, cowSlice)
+			c.storeBackVectorPlace(t.Target, placeSlot, cowSlice)
 
 			headerType := vectorHeaderType()
 			headerPtr := c.block.NewBitCast(cowSlice, irtypes.NewPointer(headerType))

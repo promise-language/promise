@@ -1,0 +1,633 @@
+// T0990: mutating a Vector field through an impure owner is memory-safe.
+//
+// The double evaluation fixed in t0990_field_owner_single_eval_test.pr aborted
+// the process whenever the mutated field held a HEAP buffer: push/COW relocates
+// it and the pre-fix store-back wrote the new pointer into the SECOND
+// evaluation's instance, so the first instance dropped the stale pre-realloc
+// pointer — "fatal: invalid free (bad header magic)". Every heap_field_* test
+// below aborts on the pre-fix compiler.
+//
+// The static_field_* tests cover the same forms with a `.rodata` literal buffer
+// (T0062), where every mutation goes through promise_vector_cow. That shape did
+// not crash before the fix (the COW copy travelled to the second instance, which
+// was itself a dropped temp), so they are COW-path regression cover rather than
+// a second reproducer.
+//
+// The rest of the file is regression cover for the owner shapes that already
+// worked and must keep working, including the ones vectorFieldSlot deliberately
+// rejects (a getter receiver falls back to the T1370 statement-temp path).
+type Holder {
+  Vector[int] items;
+}
+
+// seed() defeats the compile-time-constant check, so `items` is a HEAP buffer
+// rather than a `.rodata` static (T0062) — the shape that double-freed.
+seed() int {
+  return 1;
+}
+
+heap_holder() Holder {
+  int[] v = [seed(), 2, 3, 4, 5, 6, 7, 8];
+  return Holder(items: move v);
+}
+
+// All-constant elements: `items` is a `.rodata` static, so every mutation below
+// goes through promise_vector_cow — the shape that leaked the COW copy.
+static_holder() Holder {
+  return Holder(items: [1, 2, 3]);
+}
+
+heap_field_push() `test {
+  heap_holder().items.push(9);
+  assert(true, "survived push into an impure owner's heap field");
+}
+
+heap_field_pop() `test {
+  heap_holder().items.pop();
+  assert(true, "survived pop from an impure owner's heap field");
+}
+
+heap_field_remove() `test {
+  heap_holder().items.remove(0);
+  assert(true, "survived remove from an impure owner's heap field");
+}
+
+heap_field_index_assign() `test {
+  heap_holder().items[0] = 9;
+  assert(true, "survived index assign into an impure owner's heap field");
+}
+
+heap_field_index_compound_assign() `test {
+  heap_holder().items[0] += 9;
+  assert(true, "survived compound index assign into an impure owner's heap field");
+}
+
+heap_field_index_increment() `test {
+  heap_holder().items[0]++;
+  assert(true, "survived index increment into an impure owner's heap field");
+}
+
+heap_field_slice_assign() `test {
+  heap_holder().items[0:1] = [9];
+  assert(true, "survived slice assign into an impure owner's heap field");
+}
+
+static_field_push() `test {
+  static_holder().items.push(9);
+  assert(true, "survived COW push into an impure owner's static field");
+}
+
+static_field_index_assign() `test {
+  static_holder().items[0] = 9;
+  assert(true, "survived COW index assign into an impure owner's static field");
+}
+
+static_field_index_increment() `test {
+  static_holder().items[0]++;
+  assert(true, "survived COW index increment into an impure owner's static field");
+}
+
+static_field_slice_assign() `test {
+  static_holder().items[0:1] = [9];
+  assert(true, "survived COW slice assign into an impure owner's static field");
+}
+
+// --- The mutation must land in the instance the receiver read from ---
+
+local_owner_sees_every_mutation() `test {
+  h := heap_holder();
+  h.items.push(9);
+  assert(h.items.len == 9, "push: len {h.items.len}, want 9");
+  assert(h.items[8] == 9, "push: last {h.items[8]}, want 9");
+  h.items[0] = 100;
+  assert(h.items[0] == 100, "index assign lost");
+  h.items[0] += 5;
+  assert(h.items[0] == 105, "compound index assign lost");
+  h.items[0]++;
+  assert(h.items[0] == 106, "index increment lost");
+  h.items[0:1] = [7];
+  assert(h.items[0] == 7, "slice assign lost");
+  h.items.remove(0);
+  assert(h.items.len == 8, "remove: len {h.items.len}, want 8");
+  h.items.pop();
+  assert(h.items.len == 7, "pop: len {h.items.len}, want 7");
+}
+
+static_local_owner_sees_cow_mutation() `test {
+  h := static_holder();
+  h.items.push(9);
+  assert(h.items.len == 4, "COW push: len {h.items.len}, want 4");
+  assert(h.items[3] == 9, "COW push: last {h.items[3]}, want 9");
+}
+
+// --- Regression cover: owner shapes that already worked ---
+
+type SelfPusher {
+  Vector[int] items;
+
+  grow(~this) {
+    this.items.push(9);
+    this.items[0] = 5;
+  }
+
+  get view Vector[int] {
+    return this.items.clone();
+  }
+}
+
+this_owner() `test {
+  s := SelfPusher(items: [1, 2, 3]);
+  s.grow();
+  assert(s.items.len == 4, "this.field.push: len {s.items.len}, want 4");
+  assert(s.items[0] == 5, "this.field[0] = x lost");
+}
+
+// A getter receiver is NOT a plain field slot — vectorFieldSlot must reject it
+// and leave the T1370 statement-temp path in charge of the returned clone.
+getter_receiver_owner() `test {
+  s := SelfPusher(items: [1, 2, 3]);
+  s.view.push(9);
+  assert(s.items.len == 3, "getter clone must not alias the field");
+}
+
+type Base {
+  Vector[int] items;
+}
+
+type Derived is Base {
+  int tag;
+}
+
+inherited_field_owner() `test {
+  d := Derived(items: [1, 2, 3], tag: 7);
+  d.items.push(9);
+  assert(d.items.len == 4, "inherited field push: len {d.items.len}, want 4");
+  assert(d.items[3] == 9, "inherited field push lost");
+}
+
+type Box[T] {
+  Vector[T] items;
+}
+
+make_box() Box[int] {
+  int[] v = [seed(), 2, 3];
+  return Box[int](items: move v);
+}
+
+generic_owner() `test {
+  b := make_box();
+  b.items.push(9);
+  assert(b.items.len == 4, "generic field push: len {b.items.len}, want 4");
+  // An impure generic owner takes the same slot-capture path under mono.
+  make_box().items.push(9);
+  assert(true, "survived push into an impure generic owner's field");
+}
+
+grow_through_mutref(Holder ~h) {
+  h.items.push(9);
+  h.items[0] = 5;
+}
+
+read_through_borrow(Holder h) int {
+  return h.items.len;
+}
+
+borrowed_owner() `test {
+  h := heap_holder();
+  grow_through_mutref(h);
+  assert(h.items.len == 9, "mutref owner push: len {h.items.len}, want 9");
+  assert(h.items[0] == 5, "mutref owner index assign lost");
+  assert(read_through_borrow(h) == 9, "shared borrow read: want 9");
+}
+
+type Outer {
+  Holder inner;
+}
+
+chained_owner() `test {
+  o := Outer(inner: heap_holder());
+  o.inner.items.push(9);
+  assert(o.inner.items.len == 9, "chained owner push: len {o.inner.items.len}, want 9");
+  assert(o.inner.items[8] == 9, "chained owner push lost");
+}
+
+// --- Nested container: the mutated place is an ELEMENT of an impure owner's field ---
+//
+// `make().rows[i].push(x)` reaches the store-back through evalVectorReceiver's
+// IndexExpr branch, whose T1064 recompute re-addresses the outer container. That
+// recompute is sound only when the outer chain re-addresses purely — a field of a
+// call result does not, so it called the owner a second time and stored the grown
+// inner buffer into a different instance's row ("invalid free (bad header magic)").
+// Such a chain is an rvalue outer: no external alias can reach a fresh temporary,
+// so the early-captured element slot is safe, exactly as for `fresh_vov()[0].push`.
+type Nested {
+  Vector[Vector[int]] rows;
+}
+
+heap_nested() Nested {
+  int[][] v = [[seed(), 2], [3, 4]];
+  return Nested(rows: move v);
+}
+
+nested_element_push_through_impure_owner() `test {
+  heap_nested().rows[0].push(9);
+  assert(true, "survived push into an impure owner's nested element");
+}
+
+nested_element_pop_through_impure_owner() `test {
+  heap_nested().rows[0].pop();
+  assert(true, "survived pop from an impure owner's nested element");
+}
+
+nested_element_remove_through_impure_owner() `test {
+  heap_nested().rows[0].remove(0);
+  assert(true, "survived remove from an impure owner's nested element");
+}
+
+// The pure chains must keep the T1064 recompute and stay correct.
+nested_element_local_owner() `test {
+  n := heap_nested();
+  n.rows[0].push(9);
+  assert(n.rows[0].len == 3, "local nested push: len {n.rows[0].len}, want 3");
+  assert(n.rows[0][2] == 9, "local nested push lost");
+  n.rows[0].remove(0);
+  assert(n.rows[0].len == 2, "local nested remove: len {n.rows[0].len}, want 2");
+}
+
+type NestedOuter {
+  Nested inner;
+}
+
+nested_element_deep_pure_chain() `test {
+  o := NestedOuter(inner: heap_nested());
+  o.inner.rows[0].push(9);
+  assert(o.inner.rows[0].len == 3, "deep chain push: len {o.inner.rows[0].len}, want 3");
+  assert(o.inner.rows[0][2] == 9, "deep chain push lost");
+}
+
+make_nested_outer() NestedOuter {
+  return NestedOuter(inner: heap_nested());
+}
+
+nested_element_deep_impure_chain() `test {
+  make_nested_outer().inner.rows[0].push(9);
+  assert(true, "survived push through an impure deep chain");
+}
+
+// --- Every mutating form, through every owner shape the field-slot capture accepts ---
+//
+// The tests above prove each of the seven forms is memory-safe through ONE impure
+// owner shape (a call returning a Holder). The guard, though, has to resolve the
+// owner's type before it can address the field, and it resolves a chained owner, an
+// INHERITED field and a MONOMORPHIZED generic owner down different arms. Each arm
+// re-derived the owner independently before the fix, so each aborted
+// ("segmentation fault" / "invalid free (bad header magic)") on a heap buffer —
+// these run all seven forms through all three.
+
+make_heap_outer() Outer {
+  return Outer(inner: heap_holder());
+}
+
+make_heap_derived() Derived {
+  int[] v = [seed(), 2, 3, 4, 5, 6, 7, 8];
+  return Derived(items: move v, tag: 7);
+}
+
+impure_chained_owner_all_forms() `test {
+  make_heap_outer().inner.items.push(9);
+  make_heap_outer().inner.items.pop();
+  make_heap_outer().inner.items.remove(0);
+  make_heap_outer().inner.items[0] = 9;
+  make_heap_outer().inner.items[0] += 9;
+  make_heap_outer().inner.items[0]++;
+  make_heap_outer().inner.items[0:1] = [9];
+  assert(true, "survived every mutation through an impure chained owner");
+}
+
+impure_inherited_owner_all_forms() `test {
+  make_heap_derived().items.push(9);
+  make_heap_derived().items.pop();
+  make_heap_derived().items.remove(0);
+  make_heap_derived().items[0] = 9;
+  make_heap_derived().items[0] += 9;
+  make_heap_derived().items[0]++;
+  make_heap_derived().items[0:1] = [9];
+  assert(true, "survived every mutation through an impure inherited field owner");
+}
+
+impure_generic_owner_all_forms() `test {
+  make_box().items.push(9);
+  make_box().items.pop();
+  make_box().items.remove(0);
+  make_box().items[0] = 9;
+  make_box().items[0] += 9;
+  make_box().items[0]++;
+  make_box().items[0:1] = [9];
+  assert(true, "survived every mutation through an impure generic owner");
+}
+
+// The pure counterparts: the mutation must land in the one instance the receiver
+// read from, for every form and every owner shape. `heap_items` is 8 long so the
+// net effect of push+pop+remove+slice is a length of 7 with 9 at the front.
+
+heap_items() Vector[int] {
+  int[] v = [seed(), 2, 3, 4, 5, 6, 7, 8];
+  return v;
+}
+
+type SelfAllForms {
+  Vector[int] items;
+
+  mutate_every_way(~this) {
+    this.items.push(9);
+    this.items.pop();
+    this.items.remove(0);
+    this.items[0] = 1;
+    this.items[0] += 1;
+    this.items[0]++;
+    this.items[0:1] = [9];
+  }
+}
+
+this_owner_all_forms() `test {
+  s := SelfAllForms(items: heap_items());
+  s.mutate_every_way();
+  assert(s.items.len == 7, "this owner: len {s.items.len}, want 7");
+  assert(s.items[0] == 9, "this owner: items[0] {s.items[0]}, want 9");
+}
+
+mutate_every_way(Holder ~h) {
+  h.items.push(9);
+  h.items.pop();
+  h.items.remove(0);
+  h.items[0] = 1;
+  h.items[0] += 1;
+  h.items[0]++;
+  h.items[0:1] = [9];
+}
+
+mutref_owner_all_forms() `test {
+  h := Holder(items: heap_items());
+  mutate_every_way(h);
+  assert(h.items.len == 7, "mutref owner: len {h.items.len}, want 7");
+  assert(h.items[0] == 9, "mutref owner: items[0] {h.items[0]}, want 9");
+}
+
+chained_owner_all_forms() `test {
+  o := Outer(inner: Holder(items: heap_items()));
+  o.inner.items.push(9);
+  o.inner.items.pop();
+  o.inner.items.remove(0);
+  o.inner.items[0] = 1;
+  o.inner.items[0] += 1;
+  o.inner.items[0]++;
+  o.inner.items[0:1] = [9];
+  assert(o.inner.items.len == 7, "chained owner: len {o.inner.items.len}, want 7");
+  assert(o.inner.items[0] == 9, "chained owner: items[0] {o.inner.items[0]}, want 9");
+}
+
+inherited_field_owner_all_forms() `test {
+  d := Derived(items: heap_items(), tag: 7);
+  d.items.push(9);
+  d.items.pop();
+  d.items.remove(0);
+  d.items[0] = 1;
+  d.items[0] += 1;
+  d.items[0]++;
+  d.items[0:1] = [9];
+  assert(d.items.len == 7, "inherited owner: len {d.items.len}, want 7");
+  assert(d.items[0] == 9, "inherited owner: items[0] {d.items[0]}, want 9");
+}
+
+generic_owner_all_forms() `test {
+  b := Box[int](items: heap_items());
+  b.items.push(9);
+  b.items.pop();
+  b.items.remove(0);
+  b.items[0] = 1;
+  b.items[0] += 1;
+  b.items[0]++;
+  b.items[0:1] = [9];
+  assert(b.items.len == 7, "generic owner: len {b.items.len}, want 7");
+  assert(b.items[0] == 9, "generic owner: items[0] {b.items[0]}, want 9");
+}
+
+// --- Owner shapes the field-slot capture deliberately REJECTS ---
+//
+// vectorFieldSlot only addresses a plain struct-field read of a Vector on a heap
+// user type. Everything else keeps whatever path it had before the fix, and each
+// rejection below is a different arm of that guard: an ENUM owner (the member is
+// variant data, not an instance field), a FAILABLE getter (the read carries an
+// error propagation the capture would swallow), and a member whose type is NOT a
+// Vector (a user type with its own `[:]=`, reached through genSliceAssign, which
+// calls the shared place read for every sliceable type). These must keep working,
+// and must not leak.
+
+enum ShapeKind {
+  Circle(int[] xs),
+  Square,
+
+  get all Vector[int] {
+    match this {
+      ShapeKind.Circle(xs) => {
+        return xs.clone();
+      },
+      ShapeKind.Square => {
+        return[];
+      },
+    }
+  }
+}
+
+enum_getter_owner() `test {
+  ShapeKind s = ShapeKind.Circle([seed(), 2, 3]);
+  s.all.push(9);
+  s.all.pop();
+  s.all.remove(0);
+  assert(true, "enum getter owner must not crash or leak");
+  // The payload-free variant reaches the same guard with an empty vector.
+  ShapeKind empty = ShapeKind.Square;
+  empty.all.push(9);
+  assert(true, "payload-free enum variant must not crash or leak");
+}
+
+type FailableHolder {
+  Vector[int] items;
+
+  get view! Vector[int] {
+    return this.items.clone();
+  }
+}
+
+push_through_failable_getter!(FailableHolder ~h) {
+  h.view.push(9);
+}
+
+failable_getter_owner() `test {
+  h := FailableHolder(items: [seed(), 2, 3]);
+  push_through_failable_getter(h)?!;
+  assert(h.items.len == 3, "failable getter clone must not alias the field");
+}
+
+type Cell {
+  int x;
+
+  [:](int? low, int? high) int {
+    return this.x;
+  }
+
+  [:]=(int? low, int? high, int v) {
+    this.x = v;
+  }
+}
+
+type CellHolder {
+  Cell cell;
+}
+
+non_vector_member_slice_assign() `test {
+  h := CellHolder(cell: Cell(x: seed()));
+  h.cell[0:1] = 9;
+  assert(h.cell.x == 9, "user [:]= through a non-Vector field: {h.cell.x}");
+  assert(h.cell[0:1] == 9, "user [:] through a non-Vector field: {h.cell[0:1]}");
+}
+
+// --- Inside a monomorphized body, and inside a synthesized default method ---
+//
+// A generic body sees the owner and the member as TypeParams; the guard resolves
+// both before it addresses anything, so `Box[T]`'s own methods take the capture
+// path only if the substitution happens. A structural default method sees `this`
+// as the interface's Self, resolved to the concrete type — where the member turns
+// out to be a getter, so the guard declines and the clone stays a temp.
+
+grow_in_generic_body[T](Box[T] ~b, T move v) {
+  b.items.push(move v);
+  b.items.pop();
+  b.items.remove(0);
+}
+
+reslice_in_generic_body[T](Box[T] ~b, Vector[T] move src) {
+  b.items[0:1] = src;
+}
+
+generic_body_owner() `test {
+  b := Box[int](items: [seed(), 2, 3]);
+  grow_in_generic_body(b, 9);
+  assert(b.items.len == 2, "generic body: len {b.items.len}, want 2");
+  int[] src = [7];
+  reslice_in_generic_body(b, move src);
+  assert(b.items[0] == 7, "generic body slice assign: {b.items[0]}, want 7");
+}
+
+type HasItems `structural(protocol: true) {
+  get items Vector[int] `abstract;
+
+  grow_default(~this) {
+    this.items.push(9);
+  }
+}
+
+type Bag is HasItems {
+  Vector[int] data;
+
+  get items Vector[int] {
+    return this.data.clone();
+  }
+}
+
+structural_default_owner() `test {
+  b := Bag(data: [seed(), 2, 3]);
+  b.grow_default();
+  assert(b.data.len == 3, "the default method's clone must not alias Bag.data");
+}
+
+// --- Read-only methods take the same receiver evaluation ---
+//
+// Every Vector method routes its receiver through the one evaluation, so a read
+// (`contains`, `clone`, an element read) on a field now goes through the captured slot
+// too. A read borrows the field — it must see the live buffer and must not leave a
+// copy behind, which the harness's leak check enforces.
+
+type StringHolder {
+  Vector[string] labels;
+}
+
+read_labels(StringHolder h) bool {
+  return h.labels.contains("b");
+}
+
+read_only_field_methods() `test {
+  h := StringHolder(labels: ["a", "b", "c"]);
+  assert(h.labels.contains("b"), "owned read: contains");
+  assert(read_labels(h), "borrowed read: contains");
+  assert(h.labels[2] == "c", "owned read: index");
+  copy := h.labels.clone();
+  assert(copy.len == 3, "clone: len {copy.len}, want 3");
+  h.labels.push("d");
+  assert(h.labels.len == 4, "push after reads: len {h.labels.len}, want 4");
+  assert(copy.len == 3, "the clone must not have grown with the field");
+}
+
+impure_read_only_field_method() `test {
+  assert(heap_holder().items.contains(2), "read through an impure owner's field");
+}
+
+// --- Droppable ELEMENTS through an impure owner ---
+//
+// With `int` elements a wrong-slot store-back frees one buffer twice. With
+// droppable elements it also frees every element twice, because both the pushed-into
+// instance and the store-back's instance believe they own the same string/inner
+// vector. These run the whole form set over a `Vector[string]` and a
+// `Vector[Vector[int]]` field so the element drops are exercised too.
+
+heap_labels() Vector[string] {
+  string[] v = ["a{seed()}", "b", "c", "d", "e"];
+  return v;
+}
+
+make_string_holder() StringHolder {
+  return StringHolder(labels: heap_labels());
+}
+
+impure_owner_string_element_field() `test {
+  make_string_holder().labels.push("z");
+  make_string_holder().labels.pop();
+  make_string_holder().labels.remove(0);
+  make_string_holder().labels[0] = "z";
+  make_string_holder().labels[0:1] = ["z"];
+  assert(true, "survived every mutation of an impure owner's Vector[string] field");
+}
+
+local_owner_string_element_field() `test {
+  h := make_string_holder();
+  h.labels.push("z");
+  assert(h.labels.len == 6, "push: len {h.labels.len}, want 6");
+  assert(h.labels[5] == "z", "push: last {h.labels[5]}, want z");
+  h.labels[0] = "y";
+  assert(h.labels[0] == "y", "index assign lost");
+  h.labels[0:1] = ["x"];
+  assert(h.labels[0] == "x", "slice assign lost");
+  h.labels.remove(0);
+  h.labels.pop();
+  assert(h.labels.len == 4, "remove+pop: len {h.labels.len}, want 4");
+}
+
+impure_owner_nested_vector_field() `test {
+  int[] row = [seed(), 2];
+  heap_nested().rows.push(move row);
+  heap_nested().rows.pop();
+  heap_nested().rows.remove(0);
+  assert(true, "survived every mutation of an impure owner's Vector[Vector[int]] field");
+}
+
+local_owner_nested_vector_field() `test {
+  n := heap_nested();
+  int[] row = [seed(), 2];
+  n.rows.push(move row);
+  assert(n.rows.len == 3, "push: len {n.rows.len}, want 3");
+  assert(n.rows[2][0] == 1, "push: the appended row is intact");
+  n.rows.remove(0);
+  assert(n.rows.len == 2, "remove: len {n.rows.len}, want 2");
+  n.rows.pop();
+  assert(n.rows.len == 1, "pop: len {n.rows.len}, want 1");
+}

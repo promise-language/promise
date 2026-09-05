@@ -288,6 +288,32 @@ func (c *Compiler) ownerHasOrSynthDrop(typ types.Type, named *types.Named) bool 
 	return false
 }
 
+// genInstanceFieldSlot evaluates a member expression's owner EXACTLY ONCE and
+// returns a pointer to the named field's slot inside the owner's instance struct.
+// Shared by genFieldAccess (the read) and vectorFieldSlot (the T0990 write-back
+// capture) so a Vector-field mutation stores the relocated buffer into the very
+// instance it read the old buffer from — re-deriving the slot from a second
+// evaluation of an impure owner (`make().items.push(x)`) wrote the grown buffer
+// into a different object, leaving the first one holding a freed pointer.
+func (c *Compiler) genInstanceFieldSlot(e *ast.MemberExpr, typ types.Type, layout *TypeDeclLayout, fieldIdx int) value.Value {
+	targetVal := c.genExprAutoPropagate(e.Target) // B0323
+	// `this` in methods is already an i8* instance pointer, not a value struct
+	var instance value.Value
+	if isThisReceiver(e.Target) {
+		instance = targetVal
+	} else {
+		instance = c.extractInstancePtr(targetVal)
+		// B0325: Track heap instance when target is a temporary (call result,
+		// error unwrap). Without this, field access on temporaries like
+		// make_pair().x or make_pair()?!.x leaks the instance.
+		c.trackChainIntermediateReceiver(e.Target, targetVal, instance, extractNamed(typ), typ)
+	}
+	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
+
+	return c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+}
+
 // genFieldAccess loads a field value from a user type instance.
 // Uses lookupTypeLayout for layout-driven field types that work for both
 // regular and monomorphic types.
@@ -321,22 +347,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
 	}
 
-	targetVal := c.genExprAutoPropagate(e.Target) // B0323
-	// `this` in methods is already an i8* instance pointer, not a value struct
-	var instance value.Value
-	if isThisReceiver(e.Target) {
-		instance = targetVal
-	} else {
-		instance = c.extractInstancePtr(targetVal)
-		// B0325: Track heap instance when target is a temporary (call result,
-		// error unwrap). Without this, field access on temporaries like
-		// make_pair().x or make_pair()?!.x leaks the instance.
-		c.trackChainIntermediateReceiver(e.Target, targetVal, instance, extractNamed(typ), typ)
-	}
-	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
-
-	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	fieldPtr := c.genInstanceFieldSlot(e, typ, layout, fieldIdx)
 
 	// Use layout field type (not llvmType(field.Type()) which fails for TypeParams)
 	val := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)

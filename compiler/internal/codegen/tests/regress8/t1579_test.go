@@ -10,22 +10,30 @@ import (
 // T1579: the repeat array literal `[value; count]` is pure sugar over the
 // N-element fixed-array literal — same stack alloca, same per-slot stores, no
 // new allocation path.
+//
+// The per-slot store counts below are taken over the *enclosing function body*,
+// never the whole module: the emitted runtime carries unrelated stores of the
+// same constants (the Windows PAL stores `i32 9` — EBADF — into errno in
+// several file helpers), so a module-wide count is platform-dependent noise.
 
 func TestT1579RepeatLiteralShape(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `main() { u32[4] w = [9u32; 4]; }`)
 	// Stack-allocated [4 x i32], one store per slot with the single value.
 	codegentest.AssertContains(t, ir, "alloca [4 x i32]")
 	codegentest.AssertContains(t, ir, "getelementptr [4 x i32]")
-	if n := strings.Count(ir, "store i32 9,"); n != 4 {
-		t.Fatalf("expected 4 stores of the repeated value, got %d\n%s", n, ir)
+	body := codegentest.UserMainBody(t, ir)
+	if n := strings.Count(body, "store i32 9,"); n != 4 {
+		t.Fatalf("expected 4 stores of the repeated value, got %d\n%s", n, body)
 	}
 }
 
 // The repeat literal expands to exactly the same array-store IR as the
 // equivalent hand-written N-element literal (comparing the store shape).
 func TestT1579RepeatMatchesHandwritten(t *testing.T) {
-	repeat := extractArrayStores(codegentest.GenerateIR(t, `main() { u32[4] w = [9u32; 4]; }`))
-	manual := extractArrayStores(codegentest.GenerateIR(t, `main() { u32[4] w = [9u32, 9u32, 9u32, 9u32]; }`))
+	repeat := extractArrayStores(codegentest.UserMainBody(t,
+		codegentest.GenerateIR(t, `main() { u32[4] w = [9u32; 4]; }`)))
+	manual := extractArrayStores(codegentest.UserMainBody(t,
+		codegentest.GenerateIR(t, `main() { u32[4] w = [9u32, 9u32, 9u32, 9u32]; }`)))
 	if repeat != manual {
 		t.Fatalf("repeat literal IR shape differs from hand-written literal:\nrepeat:\n%s\nmanual:\n%s", repeat, manual)
 	}
@@ -61,16 +69,21 @@ func TestT1579RepeatInGenericContext(t *testing.T) {
 		main() { b := gbox[int](); }
 	`)
 	codegentest.AssertContains(t, ir, "alloca [4 x i32]")
-	if n := strings.Count(ir, "store i32 7,"); n != 4 {
-		t.Fatalf("expected 4 stores in the monomorphized body, got %d\n%s", n, ir)
+	body := codegentest.ExtractDefine(ir, "gbox[int]")
+	if body == "" {
+		t.Fatalf("monomorphized gbox[int] not found in IR:\n%s", ir)
+	}
+	if n := strings.Count(body, "store i32 7,"); n != 4 {
+		t.Fatalf("expected 4 stores in the monomorphized body, got %d\n%s", n, body)
 	}
 }
 
-// extractArrayStores returns the [N x T] GEP/store lines so two IR outputs can
-// be compared on array-construction shape alone (ignoring alloca temp numbers).
-func extractArrayStores(ir string) string {
+// extractArrayStores returns the [N x T] GEP/store lines so two function bodies
+// can be compared on array-construction shape alone (ignoring alloca temp
+// numbers).
+func extractArrayStores(body string) string {
 	var b strings.Builder
-	for _, line := range strings.Split(ir, "\n") {
+	for _, line := range strings.Split(body, "\n") {
 		l := strings.TrimSpace(line)
 		if strings.Contains(l, "[4 x i32]") || strings.HasPrefix(l, "store i32 9,") {
 			b.WriteString(l)

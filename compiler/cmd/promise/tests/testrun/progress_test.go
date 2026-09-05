@@ -384,7 +384,11 @@ func TestProgressDoesNotAffectOtherCommands(t *testing.T) {
 		if strings.TrimSpace(r.stdout) != "hello" {
 			t.Errorf("env %v: stdout = %q, want \"hello\"", env, r.stdout)
 		}
-		if strings.ContainsAny(r.stdout, "\r\x1b") {
+		// The rewriter's signature is a bare CR (return to line start) or an
+		// ANSI escape. A CR that is part of a CRLF line ending is not that —
+		// it is what the Windows PAL writes for every newline — so line
+		// endings are normalized away before looking for one.
+		if bare := strings.ReplaceAll(r.stdout, "\r\n", "\n"); strings.ContainsAny(bare, "\r\x1b") {
 			t.Errorf("env %v: program output was rewritten: %q", env, r.stdout)
 		}
 	}

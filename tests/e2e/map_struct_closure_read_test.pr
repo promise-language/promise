@@ -154,10 +154,10 @@ probe_map_struct_closure_loop_reads() `test {
 // `Vector[() -> int]` was judged dup-safe and the Map read deep-copied it via
 // dupHeapValueFields — the per-element closure clone can't deep-copy the env
 // (T0813 zeroes the slot) → null {fn,env} fat pointer → SEGV on invoke. The fix
-// recurses TypeArgs of value-copying containers (isValueCopyingContainerNamed),
-// so the struct is judged un-dup-safe → the Map read is a BORROW (env intact,
-// map sole owner, single drop) — while genuinely refcounted handles (Ref/Weak)
-// stay opaque and dup-safe.
+// recurses TypeArgs of a container that owns its elements by value — a property
+// derived from its fields since T1926, named by nothing — so the struct is judged
+// un-dup-safe → the Map read is a BORROW (env intact, map sole owner, single
+// drop) — while genuinely refcounted handles (Ref/Weak) stay opaque and dup-safe.
 type FnV {
   (() -> int)[] fns;
 }
@@ -223,8 +223,8 @@ probe_map_struct_vecclosure_loop_reads() `test {
   assert(total == 400, "100 vec-closure borrows, one owner, no leak");
 }
 
-// Regression guard for the isValueCopyingContainerNamed boundary: a struct whose
-// field is a value-copying container of a NON-closure element (`Vector[int]`)
+// Regression guard for the by-value-container boundary (ownsElementsByValue): a
+// struct whose field is such a container of a NON-closure element (`Vector[int]`)
 // must still be an OWNED deep copy on read — recursing TypeArgs reaches `int`
 // (no closure) → nil → dup-safe. Mutating the copy's vector must not affect the
 // map's stored value. (Pins that the fix's TypeArgs recursion does not
@@ -303,9 +303,10 @@ probe_map_generic_container_closure() `test {
   assert(b.items[0]() == 15, "generic container-of-closures field");
 }
 
-// Set branch of isValueCopyingContainerNamed: a struct field `Set[int]`
-// (non-closure element) must still be an OWNED deep copy on read — the recursion
-// classifies Set as value-copying and recurses to `int` (no closure) → nil →
+// Set arm of the by-value derivation: a struct field `Set[int]` (non-closure
+// element) must still be an OWNED deep copy on read — the walk reaches Set's
+// `Map[T, bool]` field and, through it, the bucket Vector, so Set derives as
+// by-value (T1926) and the TypeArgs recursion reaches `int` (no closure) → nil →
 // dup-safe. Mutating the copy's set must not affect the map's stored value.
 // (Exercises the Set arm; a Set of closures is not constructible — closures are
 // not Hashable — so the Set→closure return is unreachable from source, same as

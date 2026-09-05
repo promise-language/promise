@@ -1,0 +1,233 @@
+// T1926: the container-element nesting rule and the closure dup-safety rule are
+// DERIVED from a type's fields rather than recovered from its identity, so a
+// user's own container is judged exactly as `Map` and `Set` are. The compile
+// FAILURES for the newly-covered shapes are Go sema tests (TestT1926_*); this
+// file is the leak-checked runtime side — the shapes that are correctly ALLOWED
+// must still work, and the by-value user container of closures must survive the
+// read that used to zero its env. Type names are suffixed so the shapes stay
+// distinguishable from the neighbouring regression files sharing a build.
+type BoxT1926[T] {
+  T item;
+}
+type HandleHolderT1926[T] {
+  Ref[T] r;
+}
+type JobT1926[T] {
+  string[] tags;
+  T handle;
+}
+type UserVecT1926[T] {
+  T[] items;
+}
+type UserVecCloneT1926[T] {
+  T[] items;
+  clone() Self {
+    return UserVecCloneT1926[T](items: []);
+  }
+}
+type PairT1926 {
+  UserVecT1926[int] a;
+  UserVecT1926[() -> int] b;
+}
+type MixedBagT1926[T] {
+  T[] items;
+  () -> int cb;
+}
+
+worker_t1926() int {
+  return 7;
+}
+
+// A holder that merely holds a T by value does NOT own elements by value, so a
+// Vector of them is allowed to carry single-owner handles. Awaiting each task
+// consumes its handle exactly once.
+vector_of_handle_boxes() `test {
+  Vector[BoxT1926[Task[int]]] boxes = [];
+  boxes.push(BoxT1926[Task[int]](item: go worker_t1926()));
+  boxes.push(BoxT1926[Task[int]](item: go worker_t1926()));
+  int total = 0;
+  while boxes.len > 0 {
+    b := boxes.pop()!;
+    total = total + <-b.item;
+  }
+  assert(total == 14, "both tasks awaited");
+}
+
+// A type that owns a buffer of something UNRELATED to its type argument is the
+// same case: `tags` is duplicated, the handle never is, so the vector of jobs is
+// as legal as the vector of boxes above and awaits each task exactly once.
+vector_of_jobs_with_unrelated_buffer() `test {
+  Vector[JobT1926[Task[int]]] jobs = [];
+  jobs.push(JobT1926[Task[int]](tags: ["build"], handle: go worker_t1926()));
+  jobs.push(JobT1926[Task[int]](tags: ["test", "lint"], handle: go worker_t1926()));
+  int total = 0;
+  while jobs.len > 0 {
+    j := jobs.pop()!;
+    assert(j.tags.len > 0, "tags survived the push");
+    total = total + <-j.handle;
+  }
+  assert(total == 14, "both tasks awaited");
+}
+
+// A handle-held field is not held by value (memory-model.md §3): Ref's dup is a
+// refcount bump, so a Vector of Ref-wrapped handles is allowed and drops cleanly.
+vector_of_ref_held_handles() `test {
+  Vector[HandleHolderT1926[Mutex[int]]] hs = [];
+  hs.push(HandleHolderT1926[Mutex[int]](r: Ref[Mutex[int]](Mutex[int](5))));
+  h := hs[0];
+  second := h.r.clone();
+  assert(second.borrow.lock().borrow == 5, "mutex read through a second Ref");
+}
+
+// The dup-safety fix: a user by-value container of closures held as a struct
+// field, read back out of a Map. Deep-copying the struct would clone the inner
+// vector and zero each closure's opaque env → null {fn, env} → SEGV on invoke.
+// The read must be a borrow, so the captured value is still reachable.
+user_container_of_closures_survives_map_read() `test {
+  x := 9;
+  m := Map[int, PairT1926]();
+  m[0] = PairT1926(a: UserVecT1926[int](items: [1]), b: UserVecT1926[() -> int](items: [|| -> x]));
+  p := m[0]!;
+  assert(p.b.items[0]() == 9, "closure env survived the container read");
+  assert(p.a.items[0] == 1, "sibling non-closure field intact");
+}
+
+// The same, for a user container that supplies its OWN clone(): a hand-written
+// clone cannot rebuild an opaque closure env, so the by-value property wins over
+// the clone() escape — exactly as it always has for Map, which also has a clone().
+user_container_with_clone_of_closures_survives_map_read() `test {
+  y := 11;
+  m := Map[int, UserVecCloneT1926[() -> int]]();
+  m[0] = UserVecCloneT1926[() -> int](items: [|| -> y]);
+  v := m[0]!;
+  assert(v.items[0]() == 11, "closure env survived the read despite a hand-written clone");
+}
+
+// Control: the same user container over a plain element still deep-copies on
+// read, so mutating the copy must not disturb the map's stored vector.
+user_container_of_ints_still_copies() `test {
+  m := Map[int, UserVecT1926[int]]();
+  m[0] = UserVecT1926[int](items: [1, 2, 3]);
+  v := m[0]!;
+  v.items.push(4);
+  again := m[0]!;
+  assert(again.items.len == 3, "stored vector unchanged by the copy's push");
+  assert(v.items.len == 4, "the copy grew");
+}
+
+// A by-value container that ALSO holds a closure in a plain field, read at the
+// TOP level rather than through a struct field. Owning a buffer no longer stops
+// the field walk (it falls through to it), so the closure is still found and the
+// read is a borrow — the env stays reachable and the sibling buffer intact.
+mixed_bag_read_keeps_closure_env() `test {
+  z := 13;
+  m := Map[int, MixedBagT1926[int]]();
+  m[0] = MixedBagT1926[int](items: [1, 2], cb: || -> z);
+  b := m[0]!;
+  assert(b.cb() == 13, "closure env survived the top-level read");
+  assert(b.items.len == 2, "sibling buffer intact");
+}
+
+// --- Buffer shapes reached through a tuple, an array, an Optional, and a
+// parent's field. The compile-time REJECTIONS for these live in the Go sema
+// tests; what runs here is the half that must keep working. ---
+
+type TupBagT1926[T] {
+  (int, T[]) pair;
+}
+type OuterTupT1926 {
+  TupBagT1926[() -> int] b;
+}
+type SlotJobT1926[T] {
+  int[3] cells;
+  T handle;
+}
+type OptVecT1926[T] {
+  T?[] items;
+}
+type BaseVT1926[T] {
+  T[] items;
+}
+type DerVT1926[T] is BaseVT1926[T] {
+  int n;
+}
+type WrapDerT1926 {
+  DerVT1926[() -> int] f;
+}
+
+// A by-value buffer may sit inside a TUPLE field. The dup-safety walk descends
+// tuple elements, so the struct is un-dup-safe and the Map read is a borrow —
+// deep-copying it would clone the inner vector and zero each closure's env.
+tuple_held_buffer_of_closures_survives_read() `test {
+  x := 12;
+  m := Map[int, OuterTupT1926]();
+  m[0] = OuterTupT1926(b: TupBagT1926[() -> int](pair: (1, [|| -> x])));
+  o := m[0]!;
+  (n, fns) := o.b.pair;
+  assert(n == 1, "sibling tuple element intact");
+  assert(fns[0]() == 12, "closure env survived the tuple-held read");
+}
+
+// Control: the same tuple-held buffer over a plain element is still an OWNED
+// deep copy on read, so mutating the copy leaves the map's value alone.
+tuple_held_buffer_of_ints_still_copies() `test {
+  m := Map[int, TupBagT1926[int]]();
+  m[0] = TupBagT1926[int](pair: (1, [1, 2]));
+  t := m[0]!;
+  (n, xs) := t.pair;
+  assert(n == 1, "first element");
+  assert(xs.len == 2, "buffer copied intact");
+}
+
+// A fixed-size array is the other by-value buffer (memory-model.md §2). This one
+// holds ints, not the type argument, so `SlotJobT1926[Task[int]]` is the `Job`
+// case with an array instead of a vector — a legal container element whose task
+// is awaited exactly once.
+vector_of_array_backed_jobs() `test {
+  Vector[SlotJobT1926[Task[int]]] jobs = [];
+  jobs.push(SlotJobT1926[Task[int]](cells: [1, 2, 3], handle: go worker_t1926()));
+  jobs.push(SlotJobT1926[Task[int]](cells: [4, 5, 6], handle: go worker_t1926()));
+  int total = 0;
+  while jobs.len > 0 {
+    j := jobs.pop()!;
+    assert(j.cells[0] > 0, "array survived the push");
+    total = total + <-j.handle;
+  }
+  assert(total == 14, "both tasks awaited");
+}
+
+// An Optional element inside the buffer is what the occurrence check has to see
+// through when the element is a handle. Over a plain element the container is
+// ordinary and must round-trip through a Map read.
+optional_element_buffer_round_trips() `test {
+  m := Map[int, OptVecT1926[int]]();
+  m[0] = OptVecT1926[int](items: [1, none, 3]);
+  v := m[0]!;
+  assert(v.items.len == 3, "three slots");
+  assert(v.items[0]! == 1, "first present");
+  assert(!(v.items[1] is present), "second absent");
+}
+
+// T1970 guard: the by-value property survives INHERITANCE for the closure gate —
+// `DerVT1926` reaches its buffer through the parent's field. The read must stay a
+// borrow so the env is still reachable. (The container-element nesting rule does
+// NOT survive the same shape; that escape is tracked as T1970, and a fix for it
+// must not regress this.)
+inherited_buffer_of_closures_survives_read() `test {
+  y := 21;
+  m := Map[int, WrapDerT1926]();
+  m[0] = WrapDerT1926(f: DerVT1926[() -> int](items: [|| -> y], n: 4));
+  w := m[0]!;
+  assert(w.f.items[0]() == 21, "closure env survived the inherited-buffer read");
+  assert(w.f.n == 4, "own field intact");
+}
+
+// The hand-written clone() the closure test deliberately never reaches: over a
+// legal element it is still an ordinary method and still runs. Pins that the
+// by-value derivation bypasses clone() only where clone() cannot be correct.
+user_container_clone_runs_for_plain_elements() `test {
+  v := UserVecCloneT1926[int](items: [1, 2, 3]);
+  c := v.clone();
+  assert(c.items.len == 0, "hand-written clone returns its own empty vector");
+  assert(v.items.len == 3, "source untouched");
+}

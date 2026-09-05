@@ -53,7 +53,10 @@ keys on.
 - **By value** — `Vector[T]`. Duplicating a vector duplicates its buffer, and therefore duplicates
   every element in it. This is why a vector needs machinery that other types do not: growth
   (realloc), insertion (push), and literal lowering all move or copy element *values*, and each of
-  those is a place where an element could be duplicated.
+  those is a place where an element could be duplicated. This is the one cell of the table the
+  compiler cannot derive — `Vector` has no fields to derive it from — so it is declared, by
+  `` `duplicates_elements `` ([annotations.md](annotations.md) §7). Every other by-value container
+  reaches the property through a field and carries no annotation.
 - **Behind a handle** — `Channel[T]`, `string`, and the non-allocating handles `Ref[T]`, `Weak[T]`,
   `Task[T]`, `Mutex[T]`, `MutexGuard[T]`. Duplicating the handle does not touch the payload: it
   bumps a reference count, or is refused outright. One payload, many handles.

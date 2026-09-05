@@ -2127,13 +2127,13 @@ func (c *Checker) isMapIndexOptionalUnwrap(e ast.Expr) bool {
 func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.Instance, name string) types.Type {
 	switch origin := inst.Origin().(type) {
 	case *types.Named:
-		// T0545: clone()/filled() on a container (Vector/Map/Set) whose
+		// T0545: clone()/filled() on a container that owns its elements by value whose
 		// element/key/value type transitively contains a single-owner handle
 		// (Task/Mutex/MutexGuard) is unsound — those handles are move-only with
 		// no clone semantics, and duplicating them double-frees at drop. Reject
 		// at resolution so method-value references are caught too.
 		if name == "clone" || name == "filled" {
-			if elemTypes := singleOwnerContainerElemTypes(origin, inst.TypeArgs()); elemTypes != nil {
+			if elemTypes := duplicatingContainerElemTypes(origin, inst.TypeArgs()); elemTypes != nil {
 				opName := "cloned"
 				if name == "filled" {
 					opName = "filled"

@@ -11,30 +11,31 @@ type ParentRef struct {
 // Named represents a named type: user-defined types and built-in primitives alike.
 // int, bool, string are Named types just like Dog and Shape.
 type Named struct {
-	obj            *TypeName
-	typeParams     []*TypeParam
-	parents        []*ParentRef // inheritance via `is`
-	fields         []*Field
-	methods        []*Method
-	isCopy         bool   // `copy meta — bitwise copy on assignment
-	isClone        bool   // `clone meta — auto-generate clone() Self method
-	hasDrop        bool   // type has a validated drop(~this) method or needs synthesized drop
-	needsSynthDrop bool   // compiler should synthesize a drop method (no explicit drop)
-	hasNew         bool   // type has a validated new() constructor method
-	structural     bool   // `structural meta — allows structural interface satisfaction
-	protocol       bool   // `structural(protocol: true) — names reserved, near-miss checking enabled
-	exported       bool   // `public meta — visible to other modules
-	isValueType    bool   // all fields are `value placement — pass by value, no heap alloc
-	isSerializable bool   // `serializable meta — auto-generate encode/decode methods
-	isSendable     bool   // `sendable meta — values may be moved across goroutine boundaries
-	isSharable     bool   // `sharable meta — &T references may be shared across goroutines
-	notSendable    bool   // `not_sendable meta — opt-out of auto-derivation
-	notSharable    bool   // `not_sharable meta — opt-out of auto-derivation
-	isConfined     bool   // `confined meta — Ref[T]/Weak[T] is thread-confined: non-atomic counter, rejected at goroutine boundaries (T0995)
-	isInterior     bool   // `interior meta — mutating methods/setters may be called through a shared `&` borrow (interior mutability; T1053)
-	isSingleOwner  bool   // `single_owner meta — move-only handle, no clone(); a type transitively containing one is non-cloneable (T1413)
-	doc            string // `doc meta — documentation string
-	deprecated     string // `deprecated meta — empty means not deprecated
+	obj                *TypeName
+	typeParams         []*TypeParam
+	parents            []*ParentRef // inheritance via `is`
+	fields             []*Field
+	methods            []*Method
+	isCopy             bool   // `copy meta — bitwise copy on assignment
+	isClone            bool   // `clone meta — auto-generate clone() Self method
+	hasDrop            bool   // type has a validated drop(~this) method or needs synthesized drop
+	needsSynthDrop     bool   // compiler should synthesize a drop method (no explicit drop)
+	hasNew             bool   // type has a validated new() constructor method
+	structural         bool   // `structural meta — allows structural interface satisfaction
+	protocol           bool   // `structural(protocol: true) — names reserved, near-miss checking enabled
+	exported           bool   // `public meta — visible to other modules
+	isValueType        bool   // all fields are `value placement — pass by value, no heap alloc
+	isSerializable     bool   // `serializable meta — auto-generate encode/decode methods
+	isSendable         bool   // `sendable meta — values may be moved across goroutine boundaries
+	isSharable         bool   // `sharable meta — &T references may be shared across goroutines
+	notSendable        bool   // `not_sendable meta — opt-out of auto-derivation
+	notSharable        bool   // `not_sharable meta — opt-out of auto-derivation
+	isConfined         bool   // `confined meta — Ref[T]/Weak[T] is thread-confined: non-atomic counter, rejected at goroutine boundaries (T0995)
+	isInterior         bool   // `interior meta — mutating methods/setters may be called through a shared `&` borrow (interior mutability; T1053)
+	isSingleOwner      bool   // `single_owner meta — move-only handle, no clone(); a type transitively containing one is non-cloneable (T1413)
+	duplicatesElements bool   // `duplicates_elements meta — duplicating a value duplicates the elements it holds (buffer held by value); the base case every composed container derives from (T1926)
+	doc                string // `doc meta — documentation string
+	deprecated         string // `deprecated meta — empty means not deprecated
 }
 
 // NewNamed creates a new named type and sets the TypeName's type to it.
@@ -82,12 +83,21 @@ func (n *Named) IsInterior() bool         { return n.isInterior }
 func (n *Named) SetInterior(v bool)       { n.isInterior = v }
 func (n *Named) IsSingleOwner() bool      { return n.isSingleOwner }
 func (n *Named) SetSingleOwner(v bool)    { n.isSingleOwner = v }
-func (n *Named) IsExported() bool         { return n.exported }
-func (n *Named) SetExported(v bool)       { n.exported = v }
-func (n *Named) Doc() string              { return n.doc }
-func (n *Named) SetDoc(s string)          { n.doc = s }
-func (n *Named) Deprecated() string       { return n.deprecated }
-func (n *Named) SetDeprecated(s string)   { n.deprecated = s }
+
+// DuplicatesElements reports whether duplicating a value of this type also
+// duplicates the elements it holds — the `duplicates_elements assertion. It is
+// carried only by the `native primitive that has no fields to derive it from
+// (Vector); every composed container reaches the property through a field and
+// must NOT be annotated. (T1926)
+func (n *Named) DuplicatesElements() bool     { return n.duplicatesElements }
+func (n *Named) SetDuplicatesElements(v bool) { n.duplicatesElements = v }
+
+func (n *Named) IsExported() bool       { return n.exported }
+func (n *Named) SetExported(v bool)     { n.exported = v }
+func (n *Named) Doc() string            { return n.doc }
+func (n *Named) SetDoc(s string)        { n.doc = s }
+func (n *Named) Deprecated() string     { return n.deprecated }
+func (n *Named) SetDeprecated(s string) { n.deprecated = s }
 
 func (n *Named) String() string {
 	return n.obj.Name()

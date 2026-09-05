@@ -87,6 +87,9 @@ var builtinMetas = map[string][]MetaTarget{
 	// T1921: `interior requires `native, and an enum can never be `native.
 	"interior":     {TargetType},
 	"single_owner": {TargetType, TargetEnum},
+	// T1926: `duplicates_elements requires `native (it is the base case a type
+	// with no fields cannot derive), and an enum can never be `native.
+	"duplicates_elements": {TargetType},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:

@@ -2393,8 +2393,9 @@ func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
 	// copy out and dropping it frees memory the container still references
 	// (double-free / UAF). There is no copy semantics for the handle, so reject
 	// the read. (Refcounted nesting — Ref[Mutex], Channel[Task], enum{Ref} — is
-	// excluded by FirstFieldNestedSingleOwnerHandle treating std containers as
-	// opaque, so those sound reads still compile.)
+	// excluded because FirstFieldNestedSingleOwnerHandle never recurses TypeArgs
+	// and the handle types declare no Promise-level fields, so the walk stops at
+	// them without any type being named (T1926); those sound reads still compile.)
 	if off := sema.FirstFieldNestedSingleOwnerHandle(typ); off != nil {
 		c.errorf(idx.Pos(),
 			"cannot read %s out of indexed slot; it transitively contains %s, a single-owner native handle with no copy/clone semantics — indexing copies the element and would alias the container's handle (double-free at drop). Construct a fresh value for the slot, or call .remove()/.pop() to take ownership of an element.",

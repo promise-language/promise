@@ -424,6 +424,12 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		if c.hasAnnotation(d.Annotations, "single_owner") {
 			named.SetSingleOwner(true)
 		}
+		// T1926: `duplicates_elements is the base case of ownsElementsByValue —
+		// the by-value column of memory-model.md §3, which only a native type
+		// with no Promise-level fields has to state outright.
+		if c.hasAnnotation(d.Annotations, "duplicates_elements") {
+			named.SetDuplicatesElements(true)
+		}
 		c.validateMetas(d.Annotations, TargetType)
 		if c.hasAnnotation(d.Annotations, "public") {
 			named.SetExported(true)
@@ -492,6 +498,18 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 			"mutating method run through a shared borrow, which is sound only when the "+
 			"implementation synchronizes internally — a type written in Promise cannot make "+
 			"that guarantee", d.Name)
+	}
+
+	// T1926: `duplicates_elements requires `native for the mirror-image reason.
+	// It asserts that duplicating a value duplicates the elements it holds, and
+	// that is unverifiable for a type with no fields — while a type written in
+	// Promise derives it: one that reaches a `duplicates_elements type through a
+	// field owns its elements by value too. Reaching this non-native branch with
+	// the annotation is therefore always an error.
+	if ann := c.findAnnotation(d.Annotations, "duplicates_elements"); ann != nil {
+		c.errorf(ann.Pos(), "`duplicates_elements requires `native on type %s: a type written "+
+			"in Promise derives the property from its fields — a container that holds a Vector "+
+			"already owns its elements by value", d.Name)
 	}
 
 	// Resolve fields

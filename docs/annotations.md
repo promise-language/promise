@@ -124,7 +124,8 @@ sound only when the implementation being vouched for is the one the compiler its
 is exactly what `` `native `` means. A type written in Promise cannot make such a guarantee, and
 does not need to: its properties are derived from its fields, so the derivation already has the
 answer. Writing an assertion on it could only restate what is already true, or claim something the
-fields contradict. The assertions are `` `sendable ``, `` `sharable `` and `` `interior ``.
+fields contradict. The assertions are `` `sendable ``, `` `sharable ``, `` `interior `` and
+`` `duplicates_elements ``.
 
 **A denial is available everywhere**, because denying is always safe: it takes a capability away,
 and no unsoundness follows from a type being treated as less capable than it is. It is also the
@@ -147,6 +148,7 @@ The complete set. Anything not listed here is not an annotation; see §16.
 | `` `copy `` | types, enums | — | Bitwise copy on assignment |
 | `` `clone `` | types, enums | — | Synthesize a deep `clone() Self` |
 | `` `single_owner `` | types, enums | — | Move-only handle; nothing may duplicate it |
+| `` `duplicates_elements `` | types (`` `native `` only) | — | Assert: duplicating a value duplicates the elements it holds |
 | `` `sendable `` | types, enums | — | Assert: may move across a goroutine boundary |
 | `` `sharable `` | types, enums | — | Assert: a reference may be aliased across goroutines |
 | `` `not_sendable `` | types, enums | — | Deny sendability that fields would derive |
@@ -226,6 +228,28 @@ The complete set. Anything not listed here is not an annotation; see §16.
   goes. Contradicts `` `copy `` and `` `clone ``.
 - **Read by** `isSingleOwnerType` / `firstNestedSingleOwnerHandle` and the container-element and
   generic-instantiation checks in `sema/clone.go`; the slice check in `sema/expr.go`.
+
+### `` `duplicates_elements ``
+
+- **Targets** types (`` `native `` only) · **Parameters** — none
+- **Effect** Declares that duplicating a value of this type duplicates the elements it holds — its
+  buffer is held **by value** ([memory-model.md](memory-model.md) §3), so a deep copy reaches every
+  element. Governs the container-element nesting rule, the `clone()`/`filled()` gate, and closure
+  dup-safety.
+- **Derivation** Derived for every other type: one that reaches a `` `duplicates_elements `` type
+  through a **field** owns its elements by value too. `Map` (`Slot[K, V][] _buckets`), `Set`
+  (`Map[T, bool] _map`) and a user's own container all get the property that way and must not be
+  annotated. The annotation exists only for the primitive, which has no fields to derive from —
+  `Vector[T]`, the sole variable-size primitive whose buffer is held by value
+  ([memory-model.md](memory-model.md) §2). A fixed-size array owns its elements the same way and
+  needs no declaration at all.
+- **Interactions** `` `native ``-only, like `` `interior ``: it is an assertion (§5), unverifiable
+  for a type with no fields, and a Promise-written container derives it instead. Contradicts
+  nothing; orthogonal to `` `single_owner ``, which the elements may still be — that is precisely
+  what the nesting rule polices.
+- **Read by** `Named.DuplicatesElements()`, consulted by `collectByValueBuffers` (`sema/clone.go`)
+  — the single walk behind `ownsElementsByValue` and `duplicatingContainerElemTypes` — and the
+  container-element, `clone()`/`filled()` and closure dup-safety checks they drive.
 
 ## 8. Transfer and aliasing across goroutines
 

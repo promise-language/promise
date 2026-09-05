@@ -13658,15 +13658,31 @@ func TestT1113_MapSharedGenericEnumCycleGuardRejected(t *testing.T) {
 	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
 }
 
-// Positive guard: a std native container reached THROUGH generic instantiation
+// Positive guard: a behind-a-handle type reached THROUGH generic instantiation
 // stays opaque. `Holder[Mutex[int]]` instantiates the variant field `Ref[T]` to
-// `Ref[Mutex[int]]`; the Instance->Named recursion must treat Ref as opaque
-// (isStdNativeContainerNamed) and NOT recurse its Mutex type-arg — Ref's dup is
-// a refcount increment, so the read is sound and must compile. Guards the
-// std-container-opaque short-circuit on the substitution path.
+// `Ref[Mutex[int]]`; the Instance->Named recursion must NOT recurse Ref's Mutex
+// type-arg — Ref's dup is a refcount increment, so the read is sound and must
+// compile. The predicate recurses fields only, and Ref is `native with no
+// Promise-level fields, so the walk stops there without any type being named
+// (T1926).
 func TestT1113_MapGenericEnumRefHandleViaTypeParamAllowed(t *testing.T) {
 	ownerOK(t, `
 		enum Holder[T] { M(Ref[T] r, int n) }
+		test() {
+			m := Map[int, Holder[Mutex[int]]]();
+			h := m[1]!;
+		}
+	`)
+}
+
+// T1926: the same shape with a USER generic container in the Ref position stays
+// opaque too — for the same derived reason, since the walk reaches Ref through
+// Wrap's field and stops there. A user type is no more transparent to the read
+// gate than a std one.
+func TestT1926_MapGenericEnumUserWrappedRefHandleAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Wrap[T] { Ref[T] inner; }
+		enum Holder[T] { M(Wrap[T] w, int n) }
 		test() {
 			m := Map[int, Holder[Mutex[int]]]();
 			h := m[1]!;

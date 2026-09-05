@@ -19220,7 +19220,7 @@ func TestT0545_FixedArrayMutexCloneError(t *testing.T) {
 }
 
 // A fixed-size array of handles nested inside a Vector is rejected by the
-// nesting rule — covers the *types.Array case of isNestedSingleOwnerContainer.
+// nesting rule — covers the *types.Array case of nestedContainerSingleOwnerHandle.
 func TestT0545_NestedFixedArrayInVectorError(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
@@ -21007,10 +21007,11 @@ func TestT0482_RecursiveEnumContainerNoHandleCloneOK(t *testing.T) {
 	`)
 }
 
-// Negative: a user type whose only field is a std Set must clone cleanly —
-// isStdNativeContainerNamed must classify Set (looked up by Obj().Name(),
-// not a Typ* sentinel) as a native container so the predicate does NOT
-// recurse its internals and returns nil.
+// Negative: a user type whose only field is a std Set must clone cleanly. The
+// regression guard for the field walk over Set terminating and returning nil —
+// T1926 removed the identity stop that used to short-circuit it, so the walk now
+// really does descend Set → Map[T, bool] → Slot[T, bool][] and must come back
+// empty-handed.
 func TestT0482_VectorSetFieldCloneOK(t *testing.T) {
 	checkOK(t, `
 		type SetWrap { Set[int] s; }

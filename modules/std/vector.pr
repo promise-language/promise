@@ -1,5 +1,5 @@
 // std/vector.pr — Vector[T] type methods
-type Vector[T] `native `public {
+type Vector[T] `native `public `duplicates_elements {
   get len int `native;
 
   new(int capacity = 16) `native;

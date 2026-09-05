@@ -979,7 +979,6 @@ func (c *Checker) populateUniverseTypes() {
 
 	populate("error", &types.TypError)
 	populate("Map", &types.TypMap)
-	populate("Set", &types.TypSet)
 	populate("Range", &types.TypRange)
 	populate("Iterator", &types.TypIter)
 	populate("Stream", &types.TypStream)

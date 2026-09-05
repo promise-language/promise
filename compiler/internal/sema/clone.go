@@ -342,35 +342,33 @@ func (c *Checker) rejectStreamTypeArg(pos ast.Pos, typeArgs []types.Type) {
 	}
 }
 
-// isStdNativeContainerNamed reports whether n is one of the std native
-// container / single-owner-handle origin types (Vector, Map, Set, Arc,
-// Channel, Weak, Task, Mutex, MutexGuard, string). firstNestedSingleOwnerHandle
-// must NOT recurse into the *fields* of these origins: they are `native types
-// with no Promise-level fields, and a refcounted/duplicable container (Arc,
-// Channel, Weak, Vector, string) holding a handle is itself cloneable — the
-// handle is shared by refcount or deep-copied, not double-freed. The TypeArgs
-// recursion (mirroring firstSingleOwnerHandle) still propagates a handle that
-// appears as a *direct* container element (Vector[Task[T]] etc.). (T0482)
-func isStdNativeContainerNamed(n *types.Named) bool {
-	switch n {
-	case types.TypVector, types.TypMap, types.TypSet, types.TypArc, types.TypChannel,
-		types.TypWeak, types.TypTask, types.TypFailableTask, types.TypMutex, types.TypMutexGuard,
-		types.TypString:
-		return true
-	}
-	return false
-}
-
-// isValueCopyingContainerNamed reports whether n is a std native container whose
-// clone()/dup DEEP-copies its elements (Vector, Map, Set) — as opposed to the
-// refcounted / single-owner handles (Ref/Weak/Channel/Task/Mutex/string) that
-// dup by a refcount bump or a move. This distinction matters for the closure
-// dup-safety predicate (firstFieldNestedClosure, T1260): a value-copying
-// container of closures is just as unsound to shallow-copy as a bare
-// struct-of-closure, because the element deep-copy would zero the closure env.
-// (T1260)
-func isValueCopyingContainerNamed(n *types.Named) bool {
-	return n == types.TypVector || n == types.TypMap || n == types.TypSet
+// ownsElementsByValue reports whether duplicating a value of typ also duplicates
+// the elements it holds — the "by value" column of docs/memory-model.md §3, as
+// opposed to the behind-a-handle types (Ref/Weak/Channel/Task/Mutex/MutexGuard/
+// string) whose dup is a refcount bump or a refusal and never touches the
+// payload.
+//
+// It is DERIVED, not a list of names. The base case is the `duplicates_elements
+// annotation, which only Vector carries — the sole `native primitive that owns a
+// variable-size buffer by value (§2) and so the only one with no Promise-level
+// fields to derive the property from. A fixed-size array owns its elements the
+// same way. Every other by-value container reaches the property through a FIELD:
+// Map holds Slot[K, V][], Set holds Map[T, bool], and a user's own MyVec[T]
+// holds T[]. None of them is named here, which is the point — annotations.md §1
+// forbids recovering a property by testing a type's identity, and memory-model.md
+// §4 explains why it is unnecessary. (T1926)
+//
+// The walk follows FIELDS ONLY, never TypeArgs. That is what makes the
+// behind-a-handle cases fall out for free: the handle types are `native with zero
+// Promise-level fields, so the walk stops at them and `Holder { Ref[Vector[int]] r; }`
+// correctly does not own its elements by value.
+//
+// This is the yes/no form of the one walk collectByValueBuffers implements;
+// duplicatingContainerElemTypes asks the same walk WHICH buffers it found, so
+// the base case is stated once. Passing a nil sink makes the walk stop at the
+// first buffer.
+func ownsElementsByValue(typ types.Type) bool {
+	return collectByValueBuffersIn(typ, newByValueWalk(nil))
 }
 
 // FirstNestedSingleOwnerHandle is the exported entry point for cross-package
@@ -386,16 +384,18 @@ func FirstNestedSingleOwnerHandle(typ types.Type) types.Type {
 // single-owner-handle pointer (Task/Mutex/MutexGuard) and double-free at drop
 // when both the source and the structural copy are dropped. Unlike
 // firstSingleOwnerHandle (deliberately shallow, relied on by
-// isNestedSingleOwnerContainer / reportContainerSingleOwnerNesting), this
+// nestedContainerSingleOwnerHandle / reportContainerSingleOwnerNesting), this
 // predicate sees through user-type and enum field nesting. (T0482/T0619)
 //
 // Recursion mirrors firstSingleOwnerHandle (Instance TypeArgs, Optional, Tuple,
 // Array) PLUS: *types.Named → each AllFields() type; *types.Enum → each variant
 // field type; generic *types.Instance over a user Named/Enum origin → the
-// origin's fields/variants under the type-arg substitution. std native
-// container/handle origins are NOT field-recursed (see
-// isStdNativeContainerNamed) so a cloneable container holding a handle
-// (Arc/Channel/Weak/Vector/string) correctly yields nil. `seen` cycle-guards
+// origin's fields/variants under the type-arg substitution. The `native
+// container/handle origins (Vector, Ref, Weak, Channel, Task, Mutex,
+// MutexGuard, string) need no special case: they declare zero Promise-level
+// fields, so the field walk over them is a no-op and a cloneable container
+// holding a handle yields nil through the TypeArgs path alone (T1926 —
+// previously an identity list, isStdNativeContainerNamed). `seen` cycle-guards
 // on the Named/Enum pointer so recursive types (Node{Node? next},
 // JsonValue) terminate. Returns non-nil only for Task/Mutex/MutexGuard.
 //
@@ -426,13 +426,13 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 				return off
 			}
 		}
-		// Recurse a generic *user* type/enum origin's fields/variants under the
-		// type-arg substitution (e.g. Holder[string] whose Task[int] field is
-		// concrete, not reachable via TypeArgs). Std native containers are
-		// skipped — they have no Promise fields and are cloneable.
+		// Recurse a generic type/enum origin's fields/variants under the type-arg
+		// substitution (e.g. Holder[string] whose Task[int] field is concrete,
+		// not reachable via TypeArgs). The `native handles have no Promise-level
+		// fields, so this is a no-op for them.
 		switch origin := t.Origin().(type) {
 		case *types.Named:
-			if isStdNativeContainerNamed(origin) || seen[origin] {
+			if seen[origin] {
 				return nil
 			}
 			seen[origin] = true
@@ -457,7 +457,7 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 			}
 		}
 	case *types.Named:
-		if isStdNativeContainerNamed(t) || seen[t] {
+		if seen[t] {
 			return nil
 		}
 		seen[t] = true
@@ -496,12 +496,13 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 // purpose-built for the by-value container READ gate (T1113), where the unsound
 // surface is a single-owner handle (Task/Mutex/MutexGuard) reached ONLY through
 // a user-type field or enum variant field. It differs from
-// firstNestedSingleOwnerHandle in exactly one way: a std native container
-// origin (Ref/Weak/Channel/Vector/Map/Set/string) is treated as fully opaque —
-// its TypeArgs are NOT recursed. This is what distinguishes the unsound
-// shallow-copy surface (an enum/struct whose variant/field is a Mutex) from
-// sound refcounted nesting (Ref[Mutex], Channel[Task], enum{Ref[Mutex]}), whose
-// element dup is a refcount increment, not a shallow alias.
+// firstNestedSingleOwnerHandle in exactly one way: NO type's TypeArgs are
+// recursed, so a container origin is reached only through its fields. That is
+// what distinguishes the unsound shallow-copy surface (an enum/struct whose
+// variant/field is a Mutex) from sound refcounted nesting (Ref[Mutex],
+// Channel[Task], enum{Ref[Mutex]}), whose element dup is a refcount increment,
+// not a shallow alias: the handle types are `native with zero Promise-level
+// fields, so the walk simply stops at them.
 //
 // firstNestedSingleOwnerHandle cannot be reused for the read gate: its
 // unconditional TypeArgs recursion flags Ref[Mutex] (a false positive — Ref's
@@ -509,7 +510,7 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 // are intentionally NOT flagged here either — they are already rejected by the
 // caller via isSingleOwnerNativeType on the index RESULT type, and a nested
 // container (Vector[Vector[Task]]) is gated at declaration by
-// isNestedSingleOwnerContainer / the emitVectorElementCloneLoop runtime backstop
+// nestedContainerSingleOwnerHandle / the emitVectorElementCloneLoop runtime backstop
 // (never silent corruption). Returns nil when no field/variant-nested handle
 // is present. (T1113)
 func FirstFieldNestedSingleOwnerHandle(typ types.Type) types.Type {
@@ -533,11 +534,11 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 		}
 		switch origin := t.Origin().(type) {
 		case *types.Named:
-			// Std native container (Ref/Weak/Channel/Vector/Map/Set/string):
-			// opaque. Do NOT recurse TypeArgs — Ref[Mutex] must yield nil
-			// (refcounted dup is sound). Only USER generic types recurse their
-			// fields under the type-arg substitution.
-			if isStdNativeContainerNamed(origin) || seen[origin] {
+			// TypeArgs are never recursed here — Ref[Mutex] must yield nil
+			// (refcounted dup is sound). A generic type's fields are walked
+			// under the type-arg substitution; the `native handles have none,
+			// so the walk stops at them without naming them (T1926).
+			if seen[origin] {
 				return nil
 			}
 			seen[origin] = true
@@ -562,7 +563,7 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 			}
 		}
 	case *types.Named:
-		if isStdNativeContainerNamed(t) || seen[t] {
+		if seen[t] {
 			return nil
 		}
 		seen[t] = true
@@ -609,11 +610,12 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 // pointer into both the source and the clone → double-free / silently-empty
 // clone at drop. A type that transitively contains a closure is therefore
 // non-cloneable. The recursion shape exactly mirrors firstNestedSingleOwnerHandle
-// (Instance TypeArgs + user Named/Enum fields under the type-arg subst, Optional,
-// Tuple, Array; std native container origins are NOT field-recursed). Mirroring
-// the handle predicate means a refcounted container of a closure (e.g.
-// Ref[() -> int]) is conservatively rejected too — acceptable, since cloning a
-// closure-containing container is semantically meaningless.
+// (Instance TypeArgs + Named/Enum fields under the type-arg subst, Optional,
+// Tuple, Array; the `native handles declare no fields, so the walk stops at
+// them without naming them). Mirroring the handle predicate means a refcounted
+// container of a closure (e.g. Ref[() -> int]) is conservatively rejected too —
+// acceptable, since cloning a closure-containing container is semantically
+// meaningless.
 //
 // Unlike the single-owner-handle predicate, recursion STOPS at any user
 // type/enum that provides its own clone() method: the native dup path
@@ -642,7 +644,7 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 		}
 		switch origin := t.Origin().(type) {
 		case *types.Named:
-			if isStdNativeContainerNamed(origin) || origin.LookupMethod("clone") != nil || seen[origin] {
+			if origin.LookupMethod("clone") != nil || seen[origin] {
 				return nil
 			}
 			seen[origin] = true
@@ -667,7 +669,7 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 			}
 		}
 	case *types.Named:
-		if isStdNativeContainerNamed(t) || t.LookupMethod("clone") != nil || seen[t] {
+		if t.LookupMethod("clone") != nil || seen[t] {
 			return nil
 		}
 		seen[t] = true
@@ -706,9 +708,9 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 // READ gate (T1230). It is to firstNestedClosure what
 // FirstFieldNestedSingleOwnerHandle is to firstNestedSingleOwnerHandle: it finds
 // a closure (*types.Signature) reached ONLY through a user-type field, enum
-// variant field, Optional/Tuple/Array — treating a std native container origin
-// (Ref/Weak/Channel/Vector/Map/Set/string) as fully opaque (its TypeArgs are NOT
-// recursed). This is what distinguishes the unsound shallow-copy surface (a
+// variant field, Optional/Tuple/Array — never through a type's TypeArgs, so a
+// behind-a-handle origin (Ref/Weak/Channel/Task/Mutex/string) is fully opaque.
+// This is what distinguishes the unsound shallow-copy surface (a
 // struct/enum whose field is a closure, e.g. `Fn { () -> int f; }`) from sound
 // refcounted nesting (`Ref[() -> int]`), whose element dup is a refcount
 // increment, not a shallow alias of the fat pointer's env. Like
@@ -720,9 +722,9 @@ func FirstFieldNestedClosure(typ types.Type) *types.Signature {
 }
 
 // FirstFieldNestedClosureDeep is like FirstFieldNestedClosure but treats `typ` as
-// if it were a struct/enum FIELD (nested), so a value-copying container
-// (Vector/Map/Set) of closures at the TOP of `typ` is recursed into rather than
-// treated as opaque. heapTypeSafeToDup uses this per field: a field
+// if it were a struct/enum FIELD (nested), so a by-value container of closures at
+// the TOP of `typ` is recursed into rather than treated as opaque.
+// heapTypeSafeToDup uses this per field: a field
 // `Vector[() -> int]` must make the containing struct un-dup-safe (its deep-copy
 // would zero the closure env → SEGV, T1260), whereas a BARE top-level container
 // read (`vv[0]` → Vector[() -> int]) has its own owned null-dup path (T1045) and
@@ -751,18 +753,29 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 	case *types.Instance:
 		switch origin := t.Origin().(type) {
 		case *types.Named:
-			// Value-copying container (Vector/Map/Set): its clone()/dup DEEP-copies
-			// elements, so a closure element WOULD be unsoundly cloned (its env
-			// zeroed → null fat pointer → SEGV on invoke). When reached via a struct/
-			// enum FIELD (topLevel=false), recurse into TypeArgs so a struct holding
-			// `Vector[() -> int]` is judged un-dup-safe (read as a borrow), matching
-			// the direct `.clone()` sema rejection. At TOP LEVEL, keep it opaque: a
-			// bare container read has its own owned null-dup path (T1045) and must not
-			// be flipped to a borrow (that would leak the duped container). This is
-			// the distinction from the original blanket opacity: only genuinely
-			// refcounted/single-owner handles (Ref/Weak/Channel/Task/Mutex/string)
-			// stay opaque at every level. (T1260)
-			if isValueCopyingContainerNamed(origin) {
+			// A container that owns its elements by value: its clone()/dup
+			// DEEP-copies elements, so a closure element WOULD be unsoundly cloned
+			// (its env zeroed → null fat pointer → SEGV on invoke). When reached via
+			// a struct/enum FIELD (topLevel=false), recurse into TypeArgs so a struct
+			// holding `Vector[() -> int]` is judged un-dup-safe (read as a borrow),
+			// matching the direct `.clone()` sema rejection. At TOP LEVEL, keep it
+			// opaque: a bare container read has its own owned null-dup path (T1045)
+			// and must not be flipped to a borrow (that would leak the duped
+			// container). Only genuinely behind-a-handle types (Ref/Weak/Channel/
+			// Task/Mutex/string) stay opaque at every level — and they are opaque
+			// because they have no fields, not because they are named. (T1260/T1926)
+			//
+			// TypeArgs are recursed BEFORE `seen` is consulted or marked: the field
+			// walk below marks seen[origin], and a struct with two fields of the same
+			// container origin (`Pair { MyVec[int] a; MyVec[() -> int] b; }`) must
+			// still judge the second on its own type arguments.
+			//
+			// The question here is the yes/no one — does duplicating this deep-copy
+			// ANY buffer — not duplicatingContainerElemTypes' "which type args does a
+			// buffer hold". Erring wide costs at most a read reclassified as a borrow
+			// on a type argument the container never stores; erring narrow would zero
+			// a live closure env.
+			if ownsElementsByValue(t) {
 				if topLevel {
 					return nil
 				}
@@ -771,13 +784,15 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 						return sig
 					}
 				}
-				return nil
+				// Fall through to the field walk: a by-value container may hold a
+				// closure in a field rather than a type argument.
 			}
-			// Refcounted/single-owner-handle std native container: opaque. Do NOT
-			// recurse TypeArgs — Ref[()->int] must yield nil (refcounted dup is a
-			// count bump, not a shallow env alias). A clone()-bearing user type
-			// stops recursion (its clone rebuilds the closure).
-			if isStdNativeContainerNamed(origin) || origin.LookupMethod("clone") != nil || seen[origin] {
+			// Behind-a-handle origin: opaque, because Ref[()->int] must yield nil
+			// (refcounted dup is a count bump, not a shallow env alias) — and the
+			// handle types declare no Promise-level fields, so the walk below stops
+			// at them on its own. A clone()-bearing type also stops recursion (its
+			// clone rebuilds the closure).
+			if origin.LookupMethod("clone") != nil || seen[origin] {
 				return nil
 			}
 			seen[origin] = true
@@ -802,7 +817,7 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 			}
 		}
 	case *types.Named:
-		if isStdNativeContainerNamed(t) || t.LookupMethod("clone") != nil || seen[t] {
+		if t.LookupMethod("clone") != nil || seen[t] {
 			return nil
 		}
 		seen[t] = true
@@ -837,25 +852,38 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 	return nil
 }
 
-// isNestedSingleOwnerContainer reports whether typ is itself a *container*
-// (Vector / Map / Set instance, or a fixed-size Array) that transitively
-// contains a single-owner handle. Such a container, used as another
-// container's element/key/value, forces the outer container's
+// nestedContainerSingleOwnerHandle returns the single-owner handle that makes
+// typ an unsound container element, or nil. typ qualifies when it is itself a
+// *container* — a fixed-size Array, or an instance that holds one of its type
+// arguments in a by-value buffer (duplicatingContainerElemTypes) — and the
+// handle sits in an element the container would DUPLICATE. Such a container,
+// used as another container's element/key/value, forces the outer container's
 // literal-lowering / push-dup / clone / realloc paths to duplicate the inner
 // handle — unsound (double-free at drop). A *direct* handle element
 // (Vector[Task[T]]) is fine (T0508 move-only collection), and an
 // Optional/Tuple wrapping a handle is NOT a container and has its own drop
 // handling (T0558), so neither triggers the nesting rule. (T0545)
-func isNestedSingleOwnerContainer(typ types.Type) bool {
+//
+// The handle is returned rather than a bool so the diagnostic names the one the
+// rule actually objects to. Searching the whole instance instead would report
+// the first handle in type-argument order, which in
+// `MyVec[A, B] { B[] xs; A other; }` is the `A` the container merely holds —
+// a legal direct element, and not why the type was rejected. (T1926)
+func nestedContainerSingleOwnerHandle(typ types.Type) types.Type {
 	switch t := typ.(type) {
 	case *types.Array:
-		return firstSingleOwnerHandle(t) != nil
+		return firstSingleOwnerHandle(t)
 	case *types.Instance:
-		if singleOwnerContainerElemTypes(t.Origin(), t.TypeArgs()) != nil {
-			return firstSingleOwnerHandle(t) != nil
+		// Judge the reported elements, not the whole instance: a type argument
+		// the container does NOT hold in a buffer is not one it duplicates, so a
+		// handle there is the permitted direct-element case (T1926).
+		for _, et := range duplicatingContainerElemTypes(t.Origin(), t.TypeArgs()) {
+			if off := firstSingleOwnerHandle(et); off != nil {
+				return off
+			}
 		}
 	}
-	return false
+	return nil
 }
 
 // checkContainerNotCloneable reports an error if any of the supplied container
@@ -1030,31 +1058,349 @@ func enumDestructureSubst(subjectType types.Type, enum *types.Enum) map[*types.T
 }
 
 // reportContainerSingleOwnerNesting reports an error if elemType is itself a
-// container (Vector/Map/Set/Array) that transitively contains a single-owner
+// by-value container (or Array) that transitively contains a single-owner
 // handle. A *direct* handle element is permitted (T0508 move-only
 // collections), and Optional/Tuple wrapping a handle is handled separately
 // (T0558) — only a nested *container* forces an unsound duplicate. (T0545)
 func (c *Checker) reportContainerSingleOwnerNesting(pos ast.Pos, elemType types.Type) {
-	if elemType == nil || !isNestedSingleOwnerContainer(elemType) {
+	if elemType == nil {
 		return
 	}
-	off := firstSingleOwnerHandle(elemType)
+	off := nestedContainerSingleOwnerHandle(elemType)
+	if off == nil {
+		return
+	}
 	c.errorf(pos, "%s cannot be a container element: it transitively contains %s, a single-owner handle (single-owner handles may only appear as direct container elements, not nested inside another container)",
 		elemType, off)
 }
 
-// singleOwnerContainerElemTypes returns the element/key/value types that an
-// outer container would have to duplicate, or nil if origin is not a
-// duplicating container (Vector / Map / Set). (T0545)
-func singleOwnerContainerElemTypes(origin types.Type, typeArgs []types.Type) []types.Type {
-	n, ok := origin.(*types.Named)
-	if !ok {
+// duplicatingContainerElemTypes returns the element/key/value types an outer
+// container would have to duplicate along with a value of this origin, or nil
+// when it would duplicate none of them.
+//
+// Derived, so no container is named. A type argument is reported when it sits
+// inside a **by-value buffer** the type reaches through its fields — the same
+// base case ownsElementsByValue rests on: the `duplicates_elements annotation
+// (only Vector carries it) or a fixed-size array. Vector reports its own type
+// args because it *is* the buffer; Map reports K and V because both occur in
+// Slot[K, V][] _buckets; Set reports T through Map[T, bool] _map; and a user's
+// own MyVec[T] { T[] items; } or enum Bag[T] { Items(T[] xs) } report T through
+// exactly the same walk. That is the objective — the standard library's
+// containers are no more special than anyone else's (memory-model.md §4).
+// (T0545/T1926)
+//
+// It reports the args held in a buffer rather than *all* of them, because those
+// are different questions. `Job[T] { string[] tags; T handle; }` reaches a
+// buffer, but T is not in it: duplicating a Job duplicates the tags, not the
+// handle, so Job[Task[int]] is as legitimate a container element as
+// `Box[T] { T handle; }` — the T0508 move-only collection. Blaming every type
+// arg of any type that happens to own a vector would reject that shape with a
+// message about a nesting that never happened.
+//
+// Fields are walked UNDER the type-arg substitution, so a buffer only the
+// substitution produces is found too: in `Wrapper[T] { T inner; }` at
+// T = Vector[Task[int]] the field *is* the buffer and *is* the type arg, so the
+// arg occurs in it and is reported.
+func duplicatingContainerElemTypes(origin types.Type, typeArgs []types.Type) []types.Type {
+	if len(typeArgs) == 0 {
 		return nil
 	}
-	if n == types.TypVector || n == types.TypMap || n == types.TypSet {
+	// The origin is itself the buffer, so every type argument is an element it
+	// duplicates. This is the `duplicates_elements base case; there is no
+	// instance node below to record, and no fields to walk.
+	if n, ok := origin.(*types.Named); ok && n.DuplicatesElements() {
 		return typeArgs
 	}
-	return nil
+	var buffers []types.Type
+	collectByValueBuffers(origin, typeArgs, newByValueWalk(&buffers))
+	if len(buffers) == 0 {
+		return nil
+	}
+	var out []types.Type
+	for _, ta := range typeArgs {
+		for _, buf := range buffers {
+			if typeOccursIn(ta, buf) {
+				out = append(out, ta)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// byValueWalk is the state of one by-value buffer traversal. It carries two
+// separate guards because they answer two different questions. (T1926)
+//
+// `path` is TERMINATION: an origin is marked while it sits on the current path
+// and unmarked on the way back out. It is what stops a recursive type, including
+// one whose every level is a fresh instantiation — `Rec[T] { Rec[Vector[T]]? next; }`
+// is accepted by sema today, so an instantiation-keyed guard alone would descend
+// forever.
+//
+// `done` is COST: an (origin, type args) pair explored to completion is never
+// explored again, so a type graph in which several fields reach the same type
+// (`L0 { L1 a; L1 b; }`) is walked once per instantiation instead of once per
+// PATH that reaches it — the difference between linear and 2^depth. It is keyed
+// on the instantiation rather than the origin alone, which is what lets two
+// fields of the same generic origin at different arguments
+// (`Two[T] { MyVec[int] a; MyVec[T] b; }`) each be judged on their own
+// arguments instead of the second inheriting the first's answer.
+//
+// An answer the `path` guard truncated holds only where the same truncation
+// applies, so each memo entry records the origins that cut it (`deps`) and is
+// reused only while all of them are still on the path. That keeps a *cyclic*
+// branchy graph linear too — in `L0 { L1 a; L1 b; } … Ln { L0? back; }` every
+// level is cut by `L0` and every reuse happens under `L0`, so refusing to
+// memoize anything that was cut would put the 2^depth walk straight back.
+// An origin is dropped from its own `deps`: a cut that names the node being
+// finished is the cycle closing on itself, and its answer is complete.
+type byValueWalk struct {
+	// out collects every buffer found, or is nil for the yes/no question
+	// (ownsElementsByValue), in which case the walk stops at the first one.
+	out  *[]types.Type
+	path map[types.Type]bool
+	done map[types.Type][]byValueMemo
+	// cuts accumulates the origins truncated within the subtree currently being
+	// walked; each node saves the parent's set, starts a fresh one, and merges
+	// on the way back out.
+	cuts []types.Type
+}
+
+// byValueMemo is one completed (type args → found) answer for an origin, valid
+// while every origin in deps is on the walk's path.
+type byValueMemo struct {
+	args  []types.Type
+	found bool
+	deps  []types.Type
+}
+
+// newByValueWalk leaves both maps nil: ownsElementsByValue asks a fresh walk per
+// generic instance it meets, and the common answer — a field that IS a
+// `duplicates_elements instance — is settled before either map is touched.
+// Reading a nil map is fine; enter and record fill them in on first write.
+func newByValueWalk(out *[]types.Type) *byValueWalk {
+	return &byValueWalk{out: out}
+}
+
+// enter marks origin as being on the current path, returning false when it is
+// already there (the termination guard) and recording the truncation.
+func (w *byValueWalk) enter(origin types.Type) bool {
+	if w.path[origin] {
+		w.cuts = appendUnique(w.cuts, origin)
+		return false
+	}
+	if w.path == nil {
+		w.path = make(map[types.Type]bool)
+	}
+	w.path[origin] = true
+	return true
+}
+
+func (w *byValueWalk) leave(origin types.Type) { delete(w.path, origin) }
+
+// lookup returns a memoized answer for this exact instantiation, if one applies
+// to the current path, along with the truncations it rests on.
+func (w *byValueWalk) lookup(origin types.Type, typeArgs []types.Type) (*byValueMemo, bool) {
+	for i := range w.done[origin] {
+		m := &w.done[origin][i]
+		if !identicalTypeArgs(m.args, typeArgs) {
+			continue
+		}
+		usable := true
+		for _, d := range m.deps {
+			if !w.path[d] {
+				usable = false
+				break
+			}
+		}
+		if usable {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+func (w *byValueWalk) record(origin types.Type, typeArgs []types.Type, found bool, deps []types.Type) {
+	if w.done == nil {
+		w.done = make(map[types.Type][]byValueMemo)
+	}
+	w.done[origin] = append(w.done[origin], byValueMemo{args: typeArgs, found: found, deps: deps})
+}
+
+func appendUnique(list []types.Type, t types.Type) []types.Type {
+	for _, e := range list {
+		if e == t {
+			return list
+		}
+	}
+	return append(list, t)
+}
+
+// addBuffer records a buffer, unless the walk only wants the yes/no answer.
+func (w *byValueWalk) addBuffer(buf types.Type) {
+	if w.out != nil {
+		*w.out = append(*w.out, buf)
+	}
+}
+
+// identicalTypeArgs compares two type-argument lists element-wise.
+func identicalTypeArgs(a, b []types.Type) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !types.Identical(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// collectByValueBuffers reports whether origin reaches a by-value buffer — a
+// fixed-size array, or an instance of a `duplicates_elements type — through its
+// fields (an enum's: its variant fields), under the type-arg substitution, and
+// appends every such buffer to w.out. Descent stops AT a buffer: the recorded
+// type already spells out everything the buffer holds, so typeOccursIn can
+// answer for all of it. A memoized `found` is returned without re-appending,
+// which is why w.out accumulates across the whole traversal rather than per
+// node. (T1926)
+func collectByValueBuffers(origin types.Type, typeArgs []types.Type, w *byValueWalk) bool {
+	switch origin.(type) {
+	case *types.Named, *types.Enum:
+	default:
+		return false
+	}
+	if m, ok := w.lookup(origin, typeArgs); ok {
+		// A reused answer holds only where the truncations that produced it still
+		// apply, so the caller inherits them. Without this the caller would be
+		// recorded as if it had been walked in full, and could then be reused with
+		// the cutting origin off the path — a stale `false, which for the closure
+		// gate is the direction that zeroes a live env.
+		for _, d := range m.deps {
+			w.cuts = appendUnique(w.cuts, d)
+		}
+		return m.found
+	}
+	if !w.enter(origin) {
+		return false
+	}
+	defer w.leave(origin)
+
+	var fieldTypes []types.Type
+	switch n := origin.(type) {
+	case *types.Named:
+		subst := types.BuildSubstMap(n.TypeParams(), typeArgs)
+		for _, f := range n.AllFields() {
+			fieldTypes = append(fieldTypes, types.Substitute(f.Type(), subst))
+		}
+	case *types.Enum:
+		subst := types.BuildSubstMap(n.TypeParams(), typeArgs)
+		for _, v := range n.Variants() {
+			for _, f := range v.Fields() {
+				fieldTypes = append(fieldTypes, types.Substitute(f.Type(), subst))
+			}
+		}
+	}
+	outerCuts := w.cuts
+	w.cuts = nil
+	found := false
+	for _, ft := range fieldTypes {
+		if collectByValueBuffersIn(ft, w) {
+			found = true
+			if w.out == nil {
+				break // yes/no question — one buffer settles it
+			}
+		}
+	}
+	deps := w.cuts
+	w.cuts = outerCuts
+	for i, d := range deps {
+		if d == origin {
+			// The cycle closed on this node, so its answer is complete.
+			deps = append(deps[:i:i], deps[i+1:]...)
+			break
+		}
+	}
+	w.record(origin, typeArgs, found, deps)
+	for _, d := range deps {
+		w.cuts = appendUnique(w.cuts, d)
+	}
+	return found
+}
+
+// collectByValueBuffersIn is collectByValueBuffers for one already-substituted
+// field type. The `native handle types need no special case here for the same
+// reason they need none anywhere else: they declare no Promise-level fields, so
+// the walk stops at them. (T1926)
+func collectByValueBuffersIn(typ types.Type, w *byValueWalk) bool {
+	switch t := typ.(type) {
+	case *types.Array:
+		w.addBuffer(t)
+		return true
+	case *types.Optional:
+		return collectByValueBuffersIn(t.Elem(), w)
+	case *types.Tuple:
+		found := false
+		for _, e := range t.Elems() {
+			if collectByValueBuffersIn(e, w) {
+				found = true
+				if w.out == nil {
+					return true
+				}
+			}
+		}
+		return found
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok && n.DuplicatesElements() {
+			w.addBuffer(t)
+			return true
+		}
+		return collectByValueBuffers(t.Origin(), t.TypeArgs(), w)
+	case *types.Named:
+		if t.DuplicatesElements() {
+			w.addBuffer(t)
+			return true
+		}
+		return collectByValueBuffers(t, nil, w)
+	case *types.Enum:
+		return collectByValueBuffers(t, nil, w)
+	}
+	return false
+}
+
+// typeOccursIn reports whether needle appears in hay — as hay itself, or nested
+// anywhere inside its type arguments / element types. Used to ask which of a
+// container's type arguments a by-value buffer actually holds. (T1926)
+func typeOccursIn(needle, hay types.Type) bool {
+	if needle == nil || hay == nil {
+		return false
+	}
+	if types.Identical(needle, hay) {
+		return true
+	}
+	switch t := hay.(type) {
+	case *types.Instance:
+		for _, ta := range t.TypeArgs() {
+			if typeOccursIn(needle, ta) {
+				return true
+			}
+		}
+	case *types.Optional:
+		return typeOccursIn(needle, t.Elem())
+	case *types.Array:
+		return typeOccursIn(needle, t.Elem())
+	case *types.SharedRef:
+		return typeOccursIn(needle, t.Elem())
+	case *types.MutRef:
+		return typeOccursIn(needle, t.Elem())
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if typeOccursIn(needle, e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validateSingleOwnerContainerInstance enforces the nesting rule for an
@@ -1066,7 +1412,7 @@ func singleOwnerContainerElemTypes(origin types.Type, typeArgs []types.Type) []t
 // so generic indirection (`outer[T] { Vector[Vector[T]] v; }` instantiated with
 // T = Task[int]) doesn't slip past the direct nesting gate.
 func (c *Checker) validateSingleOwnerContainerInstance(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
-	for _, et := range singleOwnerContainerElemTypes(origin, typeArgs) {
+	for _, et := range duplicatingContainerElemTypes(origin, typeArgs) {
 		c.reportContainerSingleOwnerNesting(pos, et)
 		if (c.curFuncObj != nil || c.curMethodObj != nil) &&
 			isContainerWithTypeParam(et) {
@@ -1075,8 +1421,8 @@ func (c *Checker) validateSingleOwnerContainerInstance(pos ast.Pos, origin types
 	}
 }
 
-// isContainerWithTypeParam reports whether typ is itself a *container*
-// (Vector/Map/Set instance or Array) whose element/key/value type expression
+// isContainerWithTypeParam reports whether typ is itself a by-value *container*
+// (instance or Array) whose element/key/value type expression
 // references a TypeParam — meaning substitution at the call site could expose
 // a single-owner handle. (T0616)
 func isContainerWithTypeParam(typ types.Type) bool {
@@ -1084,11 +1430,9 @@ func isContainerWithTypeParam(typ types.Type) bool {
 	case *types.Array:
 		return types.ContainsTypeParam(t.Elem())
 	case *types.Instance:
-		if singleOwnerContainerElemTypes(t.Origin(), t.TypeArgs()) != nil {
-			for _, ta := range t.TypeArgs() {
-				if types.ContainsTypeParam(ta) {
-					return true
-				}
+		for _, et := range duplicatingContainerElemTypes(t.Origin(), t.TypeArgs()) {
+			if types.ContainsTypeParam(et) {
+				return true
 			}
 		}
 	}

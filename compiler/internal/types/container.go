@@ -234,9 +234,9 @@ func AsFailableTask(t Type) (elem Type, ok bool) {
 // (linearity enforcement in the ownership pass, expr-statement discard rejection
 // in sema).
 //
-// UNLIKE firstNestedSingleOwnerHandle (which stops at std native container
-// fields), this descends into EVERYTHING that transitively owns the handle:
-// Instance type-args (covers `failable_task[T][]`, `map[K, failable_task[T]]`,
+// Like firstNestedSingleOwnerHandle, this descends into EVERYTHING that
+// transitively owns the handle: Instance type-args (covers
+// `failable_task[T][]`, `map[K, failable_task[T]]`,
 // `Arc[failable_task[T]]`, `failable_task[T]?` as an Optional-instance), user
 // *Named fields, and Enum variant payloads — because a `Holder{ failable_task t }`
 // or a `failable_task[T][]` is itself must-use. A bare *TypeParam → false:
